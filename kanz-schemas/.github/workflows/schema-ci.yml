@@ -1,0 +1,34 @@
+# Schema CI gate. Lint + breaking-change check on every PR touching proto or
+# buf config. Make this job a required status check in branch protection so a
+# failure blocks merge.
+name: schema-ci
+
+on:
+  pull_request:
+    paths:
+      - 'proto/**'
+      - 'buf.yaml'
+      - 'buf.gen.yaml'
+      - '.github/workflows/schema-ci.yml'
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  buf:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Full history so `buf breaking` can resolve the main baseline.
+          fetch-depth: 0
+      - uses: bufbuild/buf-setup-action@v1
+        with:
+          version: 1.69.0
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Lint
+        run: buf lint
+      - name: Breaking-change check
+        run: buf breaking --against '.git#branch=main'

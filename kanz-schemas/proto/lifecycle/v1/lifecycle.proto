@@ -1,0 +1,143 @@
+syntax = "proto3";
+
+// Package lifecycle.v1 defines the payload schemas for platform lifecycle
+// FACTs — model deployments, configuration changes, and operating-mode
+// transitions — carried on platform.* subjects (CODEOWNERS:
+// @kanz-eng/platform). These are immutable, past-tense FACTs; the envelope
+// event_time is when the change took effect.
+//
+// Per the project anti-decisions ("no silent failure handling", "all state
+// changes must be event-driven"), every lifecycle change IS one of these
+// events — never an unobserved side effect.
+//
+// proto3 cannot enforce field presence; the "Required" notes are invariants
+// the bus client library enforces on publish.
+package lifecycle.v1;
+
+// ModelDeployed records that an inference model version was deployed into a
+// role. A promotion (canary -> primary) or a rollback is itself a new
+// ModelDeployed; a model's deployment timeline is reconstructed from the
+// sequence.
+message ModelDeployed {
+  // model_id is the logical model identity, stable across versions
+  // (e.g. "vol-forecast", "exposure-predictor"). It is the envelope
+  // partition_key, so a model's deployments are totally ordered. Required.
+  string model_id = 1;
+
+  // model_version is the version deployed — the artifact registry's version
+  // (PRED-09), e.g. a semver or content hash. Required.
+  string model_version = 2;
+
+  // role is how this version is deployed: primary serves live decisions,
+  // canary takes a slice of live traffic, shadow runs in parallel without
+  // affecting decisions. Required; must not be DEPLOYMENT_ROLE_UNSPECIFIED.
+  DeploymentRole role = 3;
+
+  // previous_version is the version this deployment supersedes in the same
+  // role, for audit and rollback. Empty for the first deployment into a role.
+  string previous_version = 4;
+
+  // artifact_ref points to the deployed artifact in the model registry
+  // (PRED-09), so a consumer can resolve exactly what is running. Required.
+  string artifact_ref = 5;
+
+  // deployed_by is the principal that performed the deployment, formatted
+  // "{type}:{id}" (e.g. "system:ci-pipeline", "operator:quant-ml"). Required.
+  string deployed_by = 6;
+}
+
+// ConfigChanged records that one configuration value changed. It is keyed by
+// config_key (the envelope partition_key), so the platform.config topic
+// compacts to the latest value per key while each event still carries the
+// previous value for audit and rollback.
+message ConfigChanged {
+  // config_key is the fully-qualified key that changed
+  // (e.g. "risk.var.confidence_level"). Equals the envelope partition_key.
+  // Required.
+  string config_key = 1;
+
+  // new_value is the canonical serialized representation of the value now in
+  // effect. Required.
+  string new_value = 2;
+
+  // previous_value is the canonical serialized representation of the value
+  // before this change, for audit, diff, and rollback. Empty when the key was
+  // newly created.
+  string previous_value = 3;
+
+  // changed_by is the principal that made the change, formatted "{type}:{id}".
+  // Required.
+  string changed_by = 4;
+
+  // reason is a human-readable note on why the value was changed, retained for
+  // audit. Optional.
+  string reason = 5;
+}
+
+// ModeChanged records an operating-mode transition for a component or for the
+// system as a whole. Entering DEGRADED, MAINTENANCE, or HALTED is never silent
+// — it is always this event.
+message ModeChanged {
+  // component is what changed mode — a component name (e.g. "risk-engine",
+  // "market-ingest") or "system" for a whole-system transition. It is the
+  // envelope partition_key, so a component's transitions are totally ordered.
+  // Required.
+  string component = 1;
+
+  // previous_mode is the mode in effect before this transition. It is
+  // OPERATING_MODE_UNSPECIFIED only for a component's first mode event
+  // (startup); required otherwise.
+  OperatingMode previous_mode = 2;
+
+  // new_mode is the mode now in effect. Required; must not be
+  // OPERATING_MODE_UNSPECIFIED, and must differ from previous_mode — a
+  // ModeChanged is always a real transition.
+  OperatingMode new_mode = 3;
+
+  // reason states why the mode changed — required for every transition, so a
+  // degradation or halt is never unexplained.
+  string reason = 4;
+
+  // changed_by is the principal that triggered the transition, formatted
+  // "{type}:{id}" — "system:{detector}" for automatic transitions, or an
+  // operator for manual ones. Required.
+  string changed_by = 5;
+}
+
+// DeploymentRole is the role a deployed model version serves in.
+enum DeploymentRole {
+  // Default zero value; never set explicitly on an event.
+  DEPLOYMENT_ROLE_UNSPECIFIED = 0;
+
+  // PRIMARY: serves live inference and its outputs drive decisions.
+  DEPLOYMENT_ROLE_PRIMARY = 1;
+
+  // CANARY: serves a slice of live traffic, evaluated before promotion.
+  DEPLOYMENT_ROLE_CANARY = 2;
+
+  // SHADOW: runs in parallel on live inputs; its outputs are recorded but do
+  // not affect any decision.
+  DEPLOYMENT_ROLE_SHADOW = 3;
+}
+
+// OperatingMode is the operational state of a component or of the system.
+// Additive — new modes are appended as new values, never repurposed.
+enum OperatingMode {
+  // Default zero value; never set explicitly on an event.
+  OPERATING_MODE_UNSPECIFIED = 0;
+
+  // NORMAL: fully operational, all inputs and computations available.
+  OPERATING_MODE_NORMAL = 1;
+
+  // DEGRADED: operating on partial inputs or cached/last-known state; outputs
+  // are still produced but carry reduced confidence.
+  OPERATING_MODE_DEGRADED = 2;
+
+  // MAINTENANCE: intentionally taken out of service for operational work; not
+  // producing outputs.
+  OPERATING_MODE_MAINTENANCE = 3;
+
+  // HALTED: stopped by a fault or a safety trip; not producing outputs, and
+  // requires intervention to leave.
+  OPERATING_MODE_HALTED = 4;
+}

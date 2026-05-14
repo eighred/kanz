@@ -6,6 +6,7 @@
 # merge across lines), so multi-owner paths list all owners on one line.
 
 /proto/envelope/      @kanz-eng/event-platform @kanz-eng/architecture
+/proto/common/        @kanz-eng/event-platform @kanz-eng/architecture
 /proto/market/        @kanz-eng/market-data
 /proto/domain/        @kanz-eng/risk-engine
 /proto/command/       @kanz-eng/execution

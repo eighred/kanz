@@ -1,0 +1,78 @@
+---
+# Stream/consumer provisioning script. Idempotent — re-run after taxonomy
+# changes. Stream layout follows kanz-schemas/docs/subject-taxonomy.md §4:
+# one stream per domain binding "{domain}.>", plus DLQ. Replay streams are
+# created per-run by replay tooling (EVT-20), not provisioned here.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nats-bootstrap
+  namespace: kanz-messaging
+data:
+  bootstrap.sh: |
+    #!/bin/sh
+    set -eu
+    NATS_URL="${NATS_URL:-nats://nats:4222}"
+
+    ensure_stream() {
+      name="$1"; subjects="$2"; max_age="$3"
+      if nats --server "$NATS_URL" stream info "$name" >/dev/null 2>&1; then
+        echo "stream $name — updating"
+        nats --server "$NATS_URL" stream edit "$name" --force \
+          --subjects="$subjects" --max-age="$max_age"
+      else
+        echo "stream $name — creating"
+        nats --server "$NATS_URL" stream add "$name" --defaults \
+          --subjects="$subjects" --storage=file --retention=limits \
+          --replicas=3 --discard=old --dupe-window=2m --max-age="$max_age"
+      fi
+    }
+
+    # Domain streams. NATS is the live spine with short retention; Kafka (EVT-09)
+    # is the durable log of record. platform/data keep longer (lifecycle +
+    # FACT-grade data-quality signals); observability is ephemeral.
+    ensure_stream MARKET        "market.>"        24h
+    ensure_stream RISK          "risk.>"          24h
+    ensure_stream EXECUTION     "execution.>"     24h
+    ensure_stream INFERENCE     "inference.>"     24h
+    ensure_stream PLATFORM      "platform.>"      168h
+    ensure_stream DATA          "data.>"          168h
+    ensure_stream OBSERVABILITY "observability.>" 1h
+    # Dead-letter: poison events need investigation runway.
+    ensure_stream DLQ           "dlq.>"           720h
+
+    # Representative durable pull consumer. Per-service consumers are provisioned
+    # by their owning service's deploy, following this pattern.
+    if ! nats --server "$NATS_URL" consumer info MARKET risk-engine >/dev/null 2>&1; then
+      echo "consumer MARKET/risk-engine — creating"
+      nats --server "$NATS_URL" consumer add MARKET risk-engine --defaults \
+        --pull --filter="market.>" --ack=explicit --deliver=all \
+        --max-deliver=5 --max-pending=1000 --replay=instant
+    fi
+
+    echo "bootstrap complete"
+    nats --server "$NATS_URL" stream ls
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: nats-bootstrap
+  namespace: kanz-messaging
+spec:
+  backoffLimit: 4
+  template:
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: bootstrap
+          image: natsio/nats-box:0.14.5
+          command: ["sh", "/scripts/bootstrap.sh"]
+          env:
+            - name: NATS_URL
+              value: "nats://nats:4222"
+          volumeMounts:
+            - { name: scripts, mountPath: /scripts }
+      volumes:
+        - name: scripts
+          configMap:
+            name: nats-bootstrap

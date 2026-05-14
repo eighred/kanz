@@ -1,0 +1,58 @@
+syntax = "proto3";
+
+package command.v1;
+
+import "google/protobuf/timestamp.proto";
+
+// CommandOutcome is the payload of the single outcome FACT every COMMAND must
+// produce (event-class-rules.md §2). A command with no outcome event is a
+// defect — it is unobservable. The command being reported on is identified by
+// the envelope causation_id (set to the command's event_id), so it is not
+// restated here.
+message CommandOutcome {
+  // status is the terminal disposition of the command. Required; must not be
+  // COMMAND_OUTCOME_STATUS_UNSPECIFIED.
+  CommandOutcomeStatus status = 1;
+
+  // reason is a human-readable explanation of the outcome, always populated —
+  // including on EXECUTED (e.g. "filled 100 @ 10.25"). On REJECTED/FAILED it
+  // states what went wrong. Required.
+  string reason = 2;
+
+  // error_code is a stable, machine-readable code for REJECTED and FAILED
+  // outcomes, for programmatic handling and metrics (e.g. "AUTHORITY_DENIED",
+  // "EXPIRED", "INSUFFICIENT_BUYING_POWER"). Empty on ACCEPTED/EXECUTED.
+  string error_code = 3;
+
+  // result_ref optionally points at the FACT carrying the command's effect —
+  // e.g. the event_id of the position-changed FACT an EXECUTED order command
+  // produced — letting a caller follow a command straight to its result.
+  // Empty when there is no single result event. Optional.
+  string result_ref = 4;
+
+  // completed_at is when the issuing handler reached this outcome. Required.
+  google.protobuf.Timestamp completed_at = 5;
+}
+
+// CommandOutcomeStatus is the terminal disposition reported for a command.
+// Exactly one outcome FACT is emitted per command, carrying one of these.
+enum CommandOutcomeStatus {
+  // Default zero value; never set explicitly on an event.
+  COMMAND_OUTCOME_STATUS_UNSPECIFIED = 0;
+
+  // ACCEPTED: the command passed validation and was admitted. For an
+  // asynchronously-processed command this is the terminal outcome report — the
+  // resulting effects are observed as separate, correlation-linked FACTs.
+  COMMAND_OUTCOME_STATUS_ACCEPTED = 1;
+
+  // REJECTED: the command was refused before any effect — failed validation,
+  // authority, or expiry. No state changed.
+  COMMAND_OUTCOME_STATUS_REJECTED = 2;
+
+  // EXECUTED: the command completed and its intended effect is applied.
+  COMMAND_OUTCOME_STATUS_EXECUTED = 3;
+
+  // FAILED: the command was admitted but failed during execution; effects may
+  // be partial — the reason and error_code describe what is known.
+  COMMAND_OUTCOME_STATUS_FAILED = 4;
+}

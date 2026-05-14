@@ -1,0 +1,18 @@
+syntax = "proto3";
+
+package common.v1;
+
+import "common/v1/decimal.proto";
+
+// Money is an exact monetary amount in a specific currency. It pairs a Decimal
+// amount with its currency so a value is never ambiguous about its units —
+// schemas carry Money rather than a bare Decimal wherever the number is money.
+message Money {
+  // amount is the monetary amount, exact. May be negative (e.g. a debit, a
+  // short-position value, a loss).
+  Decimal amount = 1;
+
+  // currency_code is the ISO 4217 alphabetic code (e.g. "USD", "EUR", "JPY").
+  // Required.
+  string currency_code = 2;
+}

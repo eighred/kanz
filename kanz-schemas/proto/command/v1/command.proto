@@ -1,0 +1,44 @@
+syntax = "proto3";
+
+// Package command.v1 defines the generic schemas for the COMMAND event class —
+// the universal structure shared by every command, and the universal outcome
+// FACT every command must produce (see kanz-schemas/docs/event-class-rules.md
+// §2). It is to commands what envelope/v1 is to events: the generic layer.
+//
+// A concrete command (an order command, a rebalance command, ...) is owned by
+// its domain and embeds CommandMetadata as its first field; command.v1 itself
+// stays free of any domain-specific command body, so it has no domain imports.
+//
+// proto3 cannot enforce field presence; the "Required" notes are invariants
+// the bus client library and command handlers enforce.
+package command.v1;
+
+import "google/protobuf/timestamp.proto";
+
+// CommandMetadata is the command-common metadata embedded as field 1 of every
+// concrete command payload. It carries what is generic to all commands and not
+// already on the envelope — the envelope still owns idempotency_key (caller-
+// supplied dedup), partition_key (per-target ordering), and the causality ids.
+message CommandMetadata {
+  // issuer is the principal on whose authority the command is issued — the
+  // "who", distinct from the envelope `source` (the service that emitted it).
+  // Formatted "{type}:{id}", e.g. "user:akif", "strategy:momentum-v2",
+  // "operator:risk-desk". The handler MUST validate this principal's authority
+  // for the action before acting. Required.
+  string issuer = 1;
+
+  // target_id is the aggregate the command acts on (e.g. a portfolio_id, an
+  // order_id). The envelope partition_key is derived from it, so commands on
+  // one target are totally ordered. Restated here so a command body is
+  // self-contained. Required.
+  string target_id = 2;
+
+  // valid_until is the deadline after which the command MUST NOT be acted on —
+  // a stale command is REJECTED with an expiry reason, never executed. Unset
+  // (zero) means no expiry. Optional.
+  google.protobuf.Timestamp valid_until = 3;
+
+  // reason is a human-readable note on why the command was issued, retained
+  // for audit. Optional.
+  string reason = 4;
+}

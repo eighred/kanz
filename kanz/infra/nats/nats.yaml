@@ -1,0 +1,144 @@
+---
+# JetStream-enabled NATS server config. server_name is per-pod (env expansion);
+# cluster routes are the stable headless-service DNS of the 3 replicas.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nats-config
+  namespace: kanz-messaging
+data:
+  nats.conf: |
+    server_name: $POD_NAME
+    listen: 0.0.0.0:4222
+    http: 0.0.0.0:8222
+
+    jetstream {
+      store_dir: /data/jetstream
+      max_memory_store: 256MB
+      max_file_store: 10GB
+    }
+
+    cluster {
+      name: kanz
+      listen: 0.0.0.0:6222
+      routes: [
+        nats://nats-0.nats-headless.kanz-messaging.svc:6222
+        nats://nats-1.nats-headless.kanz-messaging.svc:6222
+        nats://nats-2.nats-headless.kanz-messaging.svc:6222
+      ]
+    }
+
+    # Drain client connections gracefully on shutdown (see preStop hook).
+    lame_duck_duration: 30s
+---
+# Headless service: stable per-pod DNS for cluster routes. publishNotReadyAddresses
+# lets peers resolve each other before JetStream reports ready.
+apiVersion: v1
+kind: Service
+metadata:
+  name: nats-headless
+  namespace: kanz-messaging
+spec:
+  clusterIP: None
+  publishNotReadyAddresses: true
+  selector:
+    app: nats
+  ports:
+    - { name: client, port: 4222 }
+    - { name: cluster, port: 6222 }
+    - { name: monitor, port: 8222 }
+---
+# Client-facing service. Producers/consumers connect here (nats://nats:4222).
+apiVersion: v1
+kind: Service
+metadata:
+  name: nats
+  namespace: kanz-messaging
+spec:
+  selector:
+    app: nats
+  ports:
+    - { name: client, port: 4222, targetPort: 4222 }
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: nats
+  namespace: kanz-messaging
+spec:
+  serviceName: nats-headless
+  replicas: 3
+  podManagementPolicy: Parallel
+  selector:
+    matchLabels:
+      app: nats
+  template:
+    metadata:
+      labels:
+        app: nats
+    spec:
+      terminationGracePeriodSeconds: 45
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector:
+                  matchLabels:
+                    app: nats
+      containers:
+        - name: nats
+          image: nats:2.10-alpine
+          args: ["--config=/etc/nats/nats.conf"]
+          env:
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+          ports:
+            - { name: client, containerPort: 4222 }
+            - { name: cluster, containerPort: 6222 }
+            - { name: monitor, containerPort: 8222 }
+          volumeMounts:
+            - { name: config, mountPath: /etc/nats }
+            - { name: data, mountPath: /data }
+          livenessProbe:
+            httpGet: { path: "/healthz", port: 8222 }
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          readinessProbe:
+            httpGet: { path: "/healthz?js-enabled-only=true", port: 8222 }
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          lifecycle:
+            preStop:
+              exec:
+                command: ["nats-server", "--signal", "ldm=1"]
+          resources:
+            requests: { cpu: "250m", memory: "512Mi" }
+            limits: { memory: "1Gi" }
+      volumes:
+        - name: config
+          configMap:
+            name: nats-config
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 12Gi
+---
+# Protect JetStream quorum during voluntary disruptions (node drains, upgrades).
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: nats
+  namespace: kanz-messaging
+spec:
+  minAvailable: 2
+  selector:
+    matchLabels:
+      app: nats

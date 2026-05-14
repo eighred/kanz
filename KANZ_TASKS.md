@@ -8,10 +8,6 @@ Task IDs are module-prefixed (`EVT`, `RISK`, `PRED`, `DATA`). Each item is scope
 
 ### Event System
 
-- [ ] **EVT-10** Define market data payload schemas — `MarketDataEvent` + `MarketDataBatch` · `kanz-schemas/proto/market/v1/`
-- [ ] **EVT-11** Define domain/state payload schemas — portfolio, position, exposure events · `kanz-schemas/proto/domain/v1/`
-- [ ] **EVT-12** Define command + command-outcome payload schemas — `kanz-schemas/proto/command/v1/`
-- [ ] **EVT-13** Define lifecycle payload schemas — `ModelDeployed`, `ConfigChanged`, `ModeChanged` · `kanz-schemas/proto/lifecycle/v1/`
 - [ ] **EVT-14** Define observation + data-quality payload schemas — `kanz-schemas/proto/observation/v1/`
 - [ ] **EVT-15a** Codegen: configure `buf.gen.yaml` + Go plugin, publish Go module · `kanz-schemas/buf.gen.yaml`
 - [ ] **EVT-15b** Codegen: add Python plugin, publish Python package · `kanz-schemas/buf.gen.yaml`
@@ -90,20 +86,13 @@ Task IDs are module-prefixed (`EVT`, `RISK`, `PRED`, `DATA`). Each item is scope
 
 ## TODO
 
-### Event System
-
-- [ ] **EVT-06** Write schema evolution rules doc — field-number discipline, version-bump triggers, compatibility direction · `kanz-schemas/docs/schema-evolution.md`
-- [ ] **EVT-07** Set up CI breaking-change + lint gate (`buf lint`, `buf breaking`); block PR on failure · `kanz-schemas/.github/workflows/schema-ci.yml`
-- [ ] **EVT-08** Provision NATS JetStream — deployment manifests + stream/consumer config; pub/sub smoke test · `kanz/infra/nats/`
-- [ ] **EVT-09** Provision Kafka — deployment manifests + topics, retention, compaction; produce/consume smoke test · `kanz/infra/kafka/`
+_(none)_
 
 ---
 
 ## IN PROGRESS
 
-### Event System
-
-- [ ] **EVT-02** Define Envelope proto — files written (`envelope.proto` 19 fields + `QualityFlag`, `event_class.proto` enum, fully commented); `buf build && buf lint` verification pending (buf not installed locally) · `kanz-schemas/proto/envelope/v1/`
+_(none)_
 
 ---
 
@@ -112,6 +101,15 @@ Task IDs are module-prefixed (`EVT`, `RISK`, `PRED`, `DATA`). Each item is scope
 ### Event System
 
 - [x] **EVT-01** Initialize kanz-schemas repo — `buf.yaml`, `proto/` + `docs/` skeleton, `CODEOWNERS` per subtree · `kanz-schemas/`
+- [x] **EVT-02** Define Envelope proto — `envelope.proto` (19 fields + `QualityFlag`), `event_class.proto` enum; `buf build` + `buf lint` pass · `kanz-schemas/proto/envelope/v1/`
 - [x] **EVT-03** Write envelope versioning & field-inclusion policy doc · `kanz-schemas/docs/envelope-policy.md`
 - [x] **EVT-04** Write per-class handling rules doc · `kanz-schemas/docs/event-class-rules.md`
 - [x] **EVT-05** Write subject/topic taxonomy spec · `kanz-schemas/docs/subject-taxonomy.md`
+- [x] **EVT-06** Write schema evolution rules doc — field-number discipline, version-bump triggers, compatibility direction · `kanz-schemas/docs/schema-evolution.md`
+- [x] **EVT-07** Set up CI breaking-change + lint gate (`buf lint`, `buf breaking`); block PR on failure · `kanz-schemas/.github/workflows/schema-ci.yml`
+- [x] **EVT-08** Provision NATS JetStream — k8s manifests (3-node JetStream cluster), idempotent stream/consumer bootstrap Job, pub/sub smoke test · `kanz/infra/nats/`
+- [x] **EVT-09** Provision Kafka — k8s manifests (3-node KRaft cluster), idempotent topic/retention/compaction bootstrap Job, produce/consume smoke test · `kanz/infra/kafka/`
+- [x] **EVT-10** Define market data payload schemas — `MarketDataEvent` + `MarketDataBatch` (Trade/Quote/Bar oneof); new shared `common.v1.Decimal` · `kanz-schemas/proto/market/v1/`, `kanz-schemas/proto/common/v1/`
+- [x] **EVT-11** Define domain/state payload schemas — `PortfolioState`, `PositionState`, `PortfolioSnapshot`, `ExposureState`, `ExposureSet`; new shared `common.v1` `Money` + `LogPosition` · `kanz-schemas/proto/domain/v1/`, `kanz-schemas/proto/common/v1/`
+- [x] **EVT-12** Define command + command-outcome payload schemas — generic `CommandMetadata` (embedded by concrete commands) + universal `CommandOutcome` / `CommandOutcomeStatus` · `kanz-schemas/proto/command/v1/`
+- [x] **EVT-13** Define lifecycle payload schemas — `ModelDeployed`, `ConfigChanged`, `ModeChanged` (+ `DeploymentRole`, `OperatingMode` enums) · `kanz-schemas/proto/lifecycle/v1/`

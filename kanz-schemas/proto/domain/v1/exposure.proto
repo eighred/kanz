@@ -1,0 +1,69 @@
+syntax = "proto3";
+
+package domain.v1;
+
+import "google/protobuf/timestamp.proto";
+import "common/v1/money.proto";
+
+// ExposureState is one exposure measure for a portfolio along one dimension —
+// e.g. the portfolio's net USD exposure, or its gross EQUITY exposure. It is an
+// element of ExposureSet.
+message ExposureState {
+  // portfolio_id is the portfolio the exposure is measured for. Required.
+  string portfolio_id = 1;
+
+  // dimension is the axis the exposure is decomposed along. Required; must not
+  // be EXPOSURE_DIMENSION_UNSPECIFIED.
+  ExposureDimension dimension = 2;
+
+  // bucket is the specific value within the dimension — e.g. "EQUITY" for
+  // ASSET_CLASS, "USD" for CURRENCY, "GICS:45" for SECTOR. Required.
+  string bucket = 3;
+
+  // gross is the gross exposure for this bucket (sum of absolute position
+  // exposures); net is the signed net exposure. Both in the portfolio base
+  // currency.
+  common.v1.Money gross = 4;
+  common.v1.Money net = 5;
+
+  // as_of is the domain time the exposure is effective at. Required.
+  google.protobuf.Timestamp as_of = 6;
+}
+
+// ExposureSet is the full set of exposure measures for a portfolio, computed in
+// one pass. It is the payload of exposure-recomputed FACTs — exposures are
+// emitted as a coherent set, never piecemeal, so a consumer always sees a
+// consistent decomposition.
+message ExposureSet {
+  // portfolio_id is the portfolio these exposures were computed for. Required.
+  string portfolio_id = 1;
+
+  // exposures is the full set, across every dimension and bucket. Non-empty.
+  repeated ExposureState exposures = 2;
+
+  // as_of is the domain time the whole set is effective at — every contained
+  // ExposureState shares it. Required.
+  google.protobuf.Timestamp as_of = 3;
+}
+
+// ExposureDimension is the axis a portfolio's risk is decomposed along.
+// Additive — new dimensions are appended as new values, never repurposed.
+enum ExposureDimension {
+  // Default zero value; never set explicitly on an event.
+  EXPOSURE_DIMENSION_UNSPECIFIED = 0;
+
+  // Exposure by asset class (equity, fixed income, commodity, ...).
+  EXPOSURE_DIMENSION_ASSET_CLASS = 1;
+
+  // Exposure by industry sector (e.g. GICS).
+  EXPOSURE_DIMENSION_SECTOR = 2;
+
+  // Exposure by currency of denomination.
+  EXPOSURE_DIMENSION_CURRENCY = 3;
+
+  // Exposure by modelled risk factor.
+  EXPOSURE_DIMENSION_RISK_FACTOR = 4;
+
+  // Exposure by issuing entity (single-name concentration).
+  EXPOSURE_DIMENSION_ISSUER = 5;
+}

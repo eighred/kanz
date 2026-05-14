@@ -1,0 +1,33 @@
+syntax = "proto3";
+
+// Package common.v1 holds foundational value types shared across every Kanz
+// payload schema (market, domain, command, lifecycle, observation). Types here
+// are high-blast-radius — every domain depends on them — so they evolve under
+// the same additive-only discipline as the envelope, and changes require
+// architecture review (see CODEOWNERS).
+package common.v1;
+
+// Decimal is an exact base-10 decimal number: value = coefficient × 10^exponent.
+//
+// proto3 has no native decimal type. `double` is deliberately NOT used for
+// prices, sizes, money, or any quantity where rounding error is unacceptable —
+// which is nearly all financial data. Producers and the bus client library
+// convert to/from language-native decimal types at the edge.
+//
+// Examples:
+//   123.45  -> { coefficient: 12345, exponent: -2 }
+//   1000    -> { coefficient: 1000,  exponent:  0 }
+//   0       -> { coefficient: 0,     exponent:  0 }   (the zero value is exact 0)
+//   -0.005  -> { coefficient: -5,    exponent: -3 }
+//
+// The representation is not canonical: 1.0 and 1.00 are equal in value but
+// differ in fields. Consumers comparing values MUST compare numerically, not
+// field-wise.
+message Decimal {
+  // coefficient is the signed significant digits (the unscaled value).
+  sint64 coefficient = 1;
+
+  // exponent is the signed base-10 exponent. Negative shifts the decimal point
+  // left (fractional values); positive shifts it right.
+  sint32 exponent = 2;
+}

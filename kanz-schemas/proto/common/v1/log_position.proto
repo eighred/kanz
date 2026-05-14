@@ -1,0 +1,20 @@
+syntax = "proto3";
+
+package common.v1;
+
+// LogPosition is a coordinate in the durable log (Kafka). Its purpose is
+// bootstrap-without-gaps: a STATE_SNAPSHOT payload carries the LogPosition it
+// was taken at, so a consumer can apply the snapshot and then resume the log
+// from exactly that point — no gap, no double-application
+// (see kanz-schemas/docs/event-class-rules.md §3).
+message LogPosition {
+  // topic is the durable-log topic the position refers to. Required.
+  string topic = 1;
+
+  // partition is the partition within the topic. Required.
+  uint32 partition = 2;
+
+  // offset is the offset of the last event included up to this position; a
+  // consumer resumes reading at offset + 1. Required.
+  uint64 offset = 3;
+}

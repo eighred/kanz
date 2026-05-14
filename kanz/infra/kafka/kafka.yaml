@@ -1,0 +1,127 @@
+---
+# Headless service: per-pod DNS for the KRaft controller quorum and for each
+# broker's advertised listener. publishNotReadyAddresses lets the quorum form
+# before any single broker reports ready.
+apiVersion: v1
+kind: Service
+metadata:
+  name: kafka-headless
+  namespace: kanz-messaging
+spec:
+  clusterIP: None
+  publishNotReadyAddresses: true
+  selector:
+    app: kafka
+  ports:
+    - { name: broker, port: 9092 }
+    - { name: controller, port: 9093 }
+---
+# Client bootstrap service. Producers/consumers connect to kafka:9092 and are
+# then redirected to the per-pod advertised listeners.
+apiVersion: v1
+kind: Service
+metadata:
+  name: kafka
+  namespace: kanz-messaging
+spec:
+  selector:
+    app: kafka
+  ports:
+    - { name: broker, port: 9092, targetPort: 9092 }
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: kafka
+  namespace: kanz-messaging
+spec:
+  serviceName: kafka-headless
+  replicas: 3
+  podManagementPolicy: Parallel
+  selector:
+    matchLabels:
+      app: kafka
+  template:
+    metadata:
+      labels:
+        app: kafka
+    spec:
+      terminationGracePeriodSeconds: 120
+      # apache/kafka runs as uid 1000; fsGroup makes the fresh PVC writable.
+      securityContext:
+        fsGroup: 1000
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector:
+                  matchLabels:
+                    app: kafka
+      containers:
+        - name: kafka
+          image: apache/kafka:3.9.0
+          # node id + advertised listener are derived per-pod from the ordinal,
+          # then the image's standard entrypoint takes over.
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              set -e
+              export KAFKA_NODE_ID="${HOSTNAME##*-}"
+              export KAFKA_ADVERTISED_LISTENERS="PLAINTEXT://${HOSTNAME}.kafka-headless.kanz-messaging.svc:9092"
+              exec /etc/kafka/docker/run
+          ports:
+            - { name: broker, containerPort: 9092 }
+            - { name: controller, containerPort: 9093 }
+          env:
+            - { name: CLUSTER_ID, value: "4L6g3nShT-eMCtK--X86sw" }
+            - { name: KAFKA_PROCESS_ROLES, value: "broker,controller" }
+            - { name: KAFKA_CONTROLLER_QUORUM_VOTERS, value: "0@kafka-0.kafka-headless.kanz-messaging.svc:9093,1@kafka-1.kafka-headless.kanz-messaging.svc:9093,2@kafka-2.kafka-headless.kanz-messaging.svc:9093" }
+            - { name: KAFKA_LISTENERS, value: "PLAINTEXT://:9092,CONTROLLER://:9093" }
+            - { name: KAFKA_LISTENER_SECURITY_PROTOCOL_MAP, value: "CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT" }
+            - { name: KAFKA_CONTROLLER_LISTENER_NAMES, value: "CONTROLLER" }
+            - { name: KAFKA_INTER_BROKER_LISTENER_NAME, value: "PLAINTEXT" }
+            - { name: KAFKA_LOG_DIRS, value: "/var/lib/kafka/data" }
+            # Durability defaults — this cluster is the log of record.
+            - { name: KAFKA_DEFAULT_REPLICATION_FACTOR, value: "3" }
+            - { name: KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR, value: "3" }
+            - { name: KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR, value: "3" }
+            - { name: KAFKA_TRANSACTION_STATE_LOG_MIN_ISR, value: "2" }
+            - { name: KAFKA_MIN_INSYNC_REPLICAS, value: "2" }
+            # Topics are provisioned explicitly (subject-taxonomy.md §7).
+            - { name: KAFKA_AUTO_CREATE_TOPICS_ENABLE, value: "false" }
+            - { name: KAFKA_NUM_PARTITIONS, value: "3" }
+          volumeMounts:
+            - { name: data, mountPath: /var/lib/kafka/data }
+          readinessProbe:
+            tcpSocket: { port: 9092 }
+            initialDelaySeconds: 15
+            periodSeconds: 10
+          livenessProbe:
+            tcpSocket: { port: 9092 }
+            initialDelaySeconds: 30
+            periodSeconds: 15
+          resources:
+            requests: { cpu: "500m", memory: "1Gi" }
+            limits: { memory: "2Gi" }
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 20Gi
+---
+# Protect the KRaft quorum during voluntary disruptions (node drains, upgrades).
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: kafka
+  namespace: kanz-messaging
+spec:
+  minAvailable: 2
+  selector:
+    matchLabels:
+      app: kafka

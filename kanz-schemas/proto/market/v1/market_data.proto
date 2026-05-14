@@ -1,0 +1,136 @@
+syntax = "proto3";
+
+// Package market.v1 defines the payload schemas for the `market` domain —
+// trades, quotes, and bars carried on market.{entity}.* subjects and topics.
+// These are FACT events (see kanz-schemas/docs/event-class-rules.md §1);
+// the envelope event_time is the authoritative venue timestamp.
+package market.v1;
+
+import "google/protobuf/timestamp.proto";
+import "common/v1/decimal.proto";
+
+// MarketDataEvent is a single market data point for one instrument. It is
+// self-contained — instrument identity and event_time travel with it — so an
+// individual event can be indexed, replayed, or pulled out of a batch without
+// its surrounding context.
+//
+// proto3 cannot enforce field presence; the "Required" notes below are
+// invariants the bus client library enforces on publish (see
+// docs/envelope-policy.md §7).
+message MarketDataEvent {
+  // instrument_id is the canonical Kanz instrument identifier and the ordering
+  // domain for market data — it equals the envelope partition_key. Static
+  // contract details (option strike/expiry, etc.) are reference data keyed by
+  // this id, never inlined here. Required.
+  string instrument_id = 1;
+
+  // symbol is the human-readable ticker (e.g. "AAPL", or an OSI option
+  // symbol). Advisory for humans and tooling; instrument_id is authoritative.
+  // Required.
+  string symbol = 2;
+
+  // mic is the ISO 10383 Market Identifier Code of the venue this data came
+  // from (e.g. "XNAS"). Required.
+  string mic = 3;
+
+  // event_time is the venue/source timestamp for this specific event. In a
+  // MarketDataBatch every event carries its own. Authoritative for any
+  // windowing, model-input, or backtest logic. Required.
+  google.protobuf.Timestamp event_time = 4;
+
+  // source_sequence is the venue-provided sequence number, for source-level
+  // gap detection independent of the envelope producer_sequence. 0 when the
+  // venue provides none.
+  uint64 source_sequence = 5;
+
+  // data is the market data point itself. Exactly one variant is set, and
+  // which one agrees with the envelope event_type
+  // (market.{entity}.trade | .quote | .bar). Required.
+  oneof data {
+    Trade trade = 6;
+    Quote quote = 7;
+    Bar bar = 8;
+  }
+}
+
+// MarketDataBatch carries N MarketDataEvents under a single envelope to
+// amortize envelope overhead on the high-volume hot path.
+message MarketDataBatch {
+  // events is the batch, non-empty. Invariants enforced by the bus client
+  // library on publish:
+  //   - every event shares one instrument_id, which equals the envelope
+  //     partition_key — the batch is per-instrument, so envelope-level
+  //     per-partition ordering still holds;
+  //   - events are ordered by non-decreasing event_time.
+  repeated MarketDataEvent events = 1;
+}
+
+// Trade is an executed transaction.
+message Trade {
+  // price is the execution price. Required.
+  common.v1.Decimal price = 1;
+
+  // size is the executed quantity, in the instrument's natural units.
+  // Required.
+  common.v1.Decimal size = 2;
+
+  // trade_id is the venue-assigned trade identifier, used to dedup and to
+  // correlate with later trade corrections/cancels. Required when the venue
+  // assigns one.
+  string trade_id = 3;
+
+  // aggressor is the side that initiated the trade (the liquidity taker).
+  AggressorSide aggressor = 4;
+
+  // conditions are venue trade-condition codes (e.g. odd-lot, out-of-sequence),
+  // passed through verbatim; interpretation is venue-specific. May be empty.
+  repeated string conditions = 5;
+}
+
+// Quote is a top-of-book bid/ask update.
+message Quote {
+  // bid_price / bid_size are the best bid. Required.
+  common.v1.Decimal bid_price = 1;
+  common.v1.Decimal bid_size = 2;
+
+  // ask_price / ask_size are the best offer. Required.
+  common.v1.Decimal ask_price = 3;
+  common.v1.Decimal ask_size = 4;
+
+  // conditions are venue quote-condition codes, passed through verbatim. May be
+  // empty.
+  repeated string conditions = 5;
+}
+
+// Bar is an OHLCV aggregate over a fixed time interval.
+message Bar {
+  // open_time is the inclusive start of the bar interval; close_time is the
+  // exclusive end. The enclosing MarketDataEvent.event_time is the close_time.
+  // Both required.
+  google.protobuf.Timestamp open_time = 1;
+  google.protobuf.Timestamp close_time = 2;
+
+  // open / high / low / close are the interval prices. Required.
+  common.v1.Decimal open = 3;
+  common.v1.Decimal high = 4;
+  common.v1.Decimal low = 5;
+  common.v1.Decimal close = 6;
+
+  // volume is the total traded quantity over the interval. Required.
+  common.v1.Decimal volume = 7;
+
+  // trade_count is the number of trades aggregated into this bar.
+  uint64 trade_count = 8;
+}
+
+// AggressorSide identifies which side initiated a trade (the liquidity taker).
+enum AggressorSide {
+  // Venue did not report the aggressor, or it is unknown.
+  AGGRESSOR_SIDE_UNSPECIFIED = 0;
+
+  // The trade was initiated by the buyer (lifted the offer).
+  AGGRESSOR_SIDE_BUY = 1;
+
+  // The trade was initiated by the seller (hit the bid).
+  AGGRESSOR_SIDE_SELL = 2;
+}

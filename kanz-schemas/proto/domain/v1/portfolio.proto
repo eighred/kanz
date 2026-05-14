@@ -1,0 +1,101 @@
+syntax = "proto3";
+
+// Package domain.v1 defines the payload schemas for Kanz's core domain-state
+// aggregates — portfolios, positions, and exposures. These are the state model
+// the risk engine consumes (CODEOWNERS: @kanz-eng/risk-engine).
+//
+// "domain" here is the bounded-context state model, not a subject-taxonomy
+// domain segment; the subjects these events flow on are a client-library
+// mapping concern.
+//
+// State-change events are FACTs: per-aggregate ordering (partition by aggregate
+// id) is a correctness requirement, and corrections are new FACTs flagged
+// QUALITY_FLAG_REVISED. proto3 cannot enforce field presence; the "Required"
+// notes are invariants the bus client library enforces on publish.
+package domain.v1;
+
+import "google/protobuf/timestamp.proto";
+import "common/v1/decimal.proto";
+import "common/v1/log_position.proto";
+import "common/v1/money.proto";
+
+// PositionState is the full state of one position — a holding in one instrument
+// within one portfolio. Its aggregate identity is (portfolio_id,
+// instrument_id). It is the payload of position-changed FACTs and an element
+// of PortfolioSnapshot.
+message PositionState {
+  // portfolio_id is the owning portfolio. Required.
+  string portfolio_id = 1;
+
+  // instrument_id is the canonical Kanz instrument identifier of the held
+  // instrument. Required.
+  string instrument_id = 2;
+
+  // quantity is the signed holding size in the instrument's natural units:
+  // positive is long, negative is short, zero is a flat (closed) position
+  // retained for history. Required.
+  common.v1.Decimal quantity = 3;
+
+  // average_price is the volume-weighted average entry price per unit, in the
+  // position currency (== market_value.currency_code). Required for a non-flat
+  // position.
+  common.v1.Decimal average_price = 4;
+
+  // market_value is the current mark-to-market value of the position.
+  common.v1.Money market_value = 5;
+
+  // realized_pnl is cumulative realized profit and loss over the position's
+  // life; unrealized_pnl is the mark-to-market gain/loss on the open quantity.
+  common.v1.Money realized_pnl = 6;
+  common.v1.Money unrealized_pnl = 7;
+
+  // as_of is the domain time this state is effective at — the event_time of
+  // the change that produced it. Required.
+  google.protobuf.Timestamp as_of = 8;
+}
+
+// PortfolioState is the portfolio-level identity and aggregate state. It does
+// not embed positions — those are their own PositionState events; a full
+// materialization is a PortfolioSnapshot. It is the payload of
+// portfolio-revalued FACTs.
+message PortfolioState {
+  // portfolio_id is the aggregate identity. Required.
+  string portfolio_id = 1;
+
+  // display_name is a human-readable label. Advisory. Required.
+  string display_name = 2;
+
+  // base_currency is the ISO 4217 code the portfolio's aggregate values are
+  // reported in. Required.
+  string base_currency = 3;
+
+  // cash_balance is uninvested cash, in base_currency.
+  common.v1.Money cash_balance = 4;
+
+  // total_market_value is the mark-to-market value of all positions plus cash,
+  // in base_currency.
+  common.v1.Money total_market_value = 5;
+
+  // position_count is the number of non-flat positions in the portfolio.
+  uint32 position_count = 6;
+
+  // as_of is the domain time this state is effective at. Required.
+  google.protobuf.Timestamp as_of = 7;
+}
+
+// PortfolioSnapshot is a STATE_SNAPSHOT payload: the full materialized state of
+// one portfolio at a point in time, so a consumer or replay can bootstrap
+// without reading the log from genesis.
+message PortfolioSnapshot {
+  // portfolio is the portfolio-level state at the snapshot point. Required.
+  PortfolioState portfolio = 1;
+
+  // positions is every position in the portfolio at the snapshot point,
+  // including flat positions retained for history.
+  repeated PositionState positions = 2;
+
+  // log_position is the durable-log coordinate the snapshot was taken at. A
+  // consumer applies this snapshot, then resumes the log from log_position
+  // with no gap and no double-application. Required.
+  common.v1.LogPosition log_position = 3;
+}
