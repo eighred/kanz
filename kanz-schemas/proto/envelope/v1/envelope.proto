@@ -1,0 +1,145 @@
+syntax = "proto3";
+
+package envelope.v1;
+
+import "google/protobuf/timestamp.proto";
+import "envelope/v1/event_class.proto";
+
+// Envelope is the universal wrapper stamped on every event that crosses the
+// Kanz messaging backbone. It is a constitution: additive-only, and changed
+// only via envelope_version with architecture-level review.
+//
+// proto3 cannot enforce field presence. Presence and value invariants
+// (documented per field below) are enforced by the shared bus client library
+// on the publish path, not by the serializer.
+message Envelope {
+  // --- Identity ---
+
+  // event_id is a globally unique, time-sortable identifier (UUIDv7).
+  // Required. For FACT events it doubles as the idempotency_key.
+  string event_id = 1;
+
+  // event_type is the stable logical identity of the event, e.g.
+  // "market.equity.trade". It never carries a version suffix; payload
+  // versioning is tracked separately in schema_version. Required.
+  string event_type = 2;
+
+  // schema_version is the version of the payload schema carried alongside this
+  // envelope. Incremented on any semantically breaking payload change.
+  // Required.
+  uint32 schema_version = 3;
+
+  // envelope_version is the version of the Envelope schema itself. Changes are
+  // additive-only and exceedingly rare. Required.
+  uint32 envelope_version = 4;
+
+  // --- Classification ---
+
+  // event_class dictates how consumers are permitted to treat this event.
+  // Required; must not be EVENT_CLASS_UNSPECIFIED.
+  EventClass event_class = 5;
+
+  // domain is the owning bounded context (e.g. "market", "risk", "inference").
+  // Aligns with the subject taxonomy and CODEOWNERS subtrees. Required.
+  string domain = 6;
+
+  // --- Time (three clocks; the gaps between them are signals) ---
+
+  // event_time is when the thing happened in the world (e.g. exchange
+  // timestamp). May be supplied by an external source. Required.
+  // event_time vs ingestion_time is the latency / staleness signal.
+  google.protobuf.Timestamp event_time = 7;
+
+  // ingestion_time is when Kanz first received or created the event at the
+  // edge. Required.
+  google.protobuf.Timestamp ingestion_time = 8;
+
+  // publish_time is when the event was published to the backbone. Stamped by
+  // the client library. Required.
+  // ingestion_time vs publish_time is the internal-pipeline-health signal.
+  google.protobuf.Timestamp publish_time = 9;
+
+  // --- Causality / lineage ---
+
+  // correlation_id ties together every event stemming from one root trigger
+  // (a market tick's whole downstream cascade, or one user request). Required;
+  // a root event sets correlation_id to its own event_id.
+  string correlation_id = 10;
+
+  // causation_id is the event_id of the single event that directly caused this
+  // one. Empty for root events that originate outside Kanz (e.g. raw ingestion
+  // facts).
+  string causation_id = 11;
+
+  // trace_context is the W3C traceparent value for distributed tracing.
+  // Sampled — may be empty on the high-volume hot path.
+  string trace_context = 12;
+
+  // --- Provenance ---
+
+  // source identifies the producing service and instance, formatted
+  // "service/instance" (e.g. "market-ingest/pod-7"). Required.
+  string source = 13;
+
+  // producer_version is the code version that emitted the event (git SHA or
+  // semver). Required — it is the first thing needed to debug a bad event.
+  string producer_version = 14;
+
+  // --- Ordering / partitioning ---
+
+  // partition_key defines the ordering domain: events sharing a partition_key
+  // are totally ordered; across keys there is no ordering guarantee. Typically
+  // an instrument_id or portfolio_id. Empty when the event needs no ordering.
+  string partition_key = 15;
+
+  // producer_sequence is a per-(source, partition_key) monotonic counter,
+  // 1-based, used for consumer-side gap detection independent of the broker.
+  // 0 means not applicable (e.g. no partition_key).
+  uint64 producer_sequence = 16;
+
+  // --- Processing ---
+
+  // idempotency_key is the deduplication key. For FACT events it equals
+  // event_id; for COMMAND events it is caller-supplied so retries dedup while
+  // distinct commands do not. Required.
+  string idempotency_key = 17;
+
+  // quality_flags carry data-integrity annotations consumed by the data
+  // observability layer without parsing the payload. May be empty.
+  repeated QualityFlag quality_flags = 18;
+
+  // payload_schema_ref points to the registered payload schema in the schema
+  // registry (EVT-16), formatted "<schema-id>:<version>". Supports replay and
+  // generic tooling. Required.
+  string payload_schema_ref = 19;
+}
+
+// QualityFlag annotates an event with data-integrity conditions. Flags are
+// additive — new conditions are appended as new values, never repurposed.
+enum QualityFlag {
+  // Default zero value; never set explicitly on an event.
+  QUALITY_FLAG_UNSPECIFIED = 0;
+
+  // SYNTHETIC: the event was generated by Kanz, not observed from a source.
+  QUALITY_FLAG_SYNTHETIC = 1;
+
+  // BACKFILLED: the event was inserted after the fact to fill a known gap.
+  QUALITY_FLAG_BACKFILLED = 2;
+
+  // LATE: the event arrived after its consumer's watermark for event_time.
+  QUALITY_FLAG_LATE = 3;
+
+  // DEGRADED: the event was produced from a degraded or partial source.
+  QUALITY_FLAG_DEGRADED = 4;
+
+  // REVISED: the event corrects a previously emitted event.
+  QUALITY_FLAG_REVISED = 5;
+
+  // REPLAYED: the event was emitted by replay tooling, not live. Live sinks
+  // must hard-reject events carrying this flag.
+  QUALITY_FLAG_REPLAYED = 6;
+
+  // SHED: the event's stream was lossy at production time due to upstream
+  // backpressure shedding.
+  QUALITY_FLAG_SHED = 7;
+}

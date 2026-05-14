@@ -1,0 +1,18 @@
+# kanz-schemas ownership — every proto subtree maps to an owning team.
+# Replace placeholder @kanz-eng/* handles with real GitHub teams before
+# enabling branch protection (EVT-07).
+#
+# GitHub CODEOWNERS: the last matching pattern wins outright (owners do not
+# merge across lines), so multi-owner paths list all owners on one line.
+
+/proto/envelope/      @kanz-eng/event-platform @kanz-eng/architecture
+/proto/market/        @kanz-eng/market-data
+/proto/domain/        @kanz-eng/risk-engine
+/proto/command/       @kanz-eng/execution
+/proto/lifecycle/     @kanz-eng/platform
+/proto/observation/   @kanz-eng/observability
+/proto/inference/     @kanz-eng/quant-ml
+
+# Constitution-level files — require architecture review.
+/buf.yaml             @kanz-eng/architecture
+/CODEOWNERS           @kanz-eng/architecture

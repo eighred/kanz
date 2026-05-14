@@ -1,0 +1,34 @@
+syntax = "proto3";
+
+// Package envelope.v1 defines the Kanz event envelope — the universal,
+// additive-only wrapper carried by every event on the messaging backbone.
+package envelope.v1;
+
+// EventClass is a structural classification that dictates how a consumer is
+// permitted to treat an event. It is required on every Envelope.
+//
+// Per-class consumer obligations (ordering, idempotency, mandatory outcome
+// events, retention) are specified in docs/event-class-rules.md (EVT-04).
+enum EventClass {
+  // Default zero value. An envelope with an unspecified class is invalid and
+  // must be rejected by the client library before publish.
+  EVENT_CLASS_UNSPECIFIED = 0;
+
+  // FACT: something that happened. Immutable, past-tense. idempotency_key
+  // equals event_id. Corrections are emitted as new FACTs flagged
+  // QUALITY_FLAG_REVISED, never as mutations.
+  EVENT_CLASS_FACT = 1;
+
+  // COMMAND: a request that may be rejected. Carries a caller-supplied
+  // idempotency_key. Every COMMAND must produce a corresponding outcome FACT.
+  EVENT_CLASS_COMMAND = 2;
+
+  // STATE_SNAPSHOT: a full materialized state at a point in time. Lets
+  // consumers and replays bootstrap without reading the log from genesis.
+  EVENT_CLASS_STATE_SNAPSHOT = 3;
+
+  // OBSERVATION: metrics, model-decision logs, data-quality signals.
+  // Lossy-tolerant under load, except data-quality signals which are treated
+  // as FACTs.
+  EVENT_CLASS_OBSERVATION = 4;
+}

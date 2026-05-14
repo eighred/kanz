@@ -1,0 +1,6 @@
+# Generated code is published by the codegen pipeline (EVT-15), never committed.
+/gen/
+
+# OS / editor cruft
+.DS_Store
+*.swp
