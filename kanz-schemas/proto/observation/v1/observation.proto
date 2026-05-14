@@ -1,0 +1,75 @@
+syntax = "proto3";
+
+// Package observation.v1 defines the payload schemas for the OBSERVATION event
+// class — metrics and model-decision logs (this file), and data-quality
+// signals (data_quality.proto).
+//
+// Per kanz-schemas/docs/event-class-rules.md §4, general observations are
+// lossy-tolerant: under extreme load it is acceptable to shed them to protect
+// the live FACT/COMMAND path. Data-quality signals are the explicit exception
+// and get FACT-grade delivery — see data_quality.proto.
+//
+// proto3 cannot enforce field presence; the "Required" notes are invariants
+// the bus client library enforces on publish.
+package observation.v1;
+
+// MetricObservation is a single metric data point — a measurement of the
+// system's own behaviour (latency, throughput, queue depth, ...). Ephemeral
+// and lossy-tolerant; it is not a system of record.
+message MetricObservation {
+  // name is the dotted metric name (e.g. "risk.var.compute_latency_ms",
+  // "ingest.market.events_per_sec"). Required.
+  string name = 1;
+
+  // kind is how the value is to be interpreted. Required; must not be
+  // METRIC_KIND_UNSPECIFIED.
+  MetricKind kind = 2;
+
+  // value is the measurement. A double is used deliberately — this is a
+  // measurement, not money; the exact-Decimal rule does not apply.
+  double value = 3;
+
+  // unit is the unit of value (e.g. "ms", "count", "events/s"). Optional but
+  // strongly encouraged.
+  string unit = 4;
+
+  // labels are the metric's dimensions (e.g. {"service": "risk-engine"}).
+  // May be empty.
+  map<string, string> labels = 5;
+}
+
+// DecisionLog records a decision a model or strategy made, for explainability
+// and audit — the answer to "why did the system do that". The triggering
+// inputs are reachable via the envelope causation_id.
+message DecisionLog {
+  // decider is what made the decision, formatted "{type}:{id}" — e.g.
+  // "model:vol-forecast@1.4.2", "strategy:momentum-v2". Required.
+  string decider = 1;
+
+  // summary is a human-readable description of the decision and its outcome
+  // (e.g. "score 0.87 over 0.80 threshold -> BUY signal"). Required.
+  string summary = 2;
+
+  // result_ref optionally points at the event the decision produced (a
+  // command, a prediction), letting a reader follow the decision to its
+  // effect. Empty when there is no single resulting event.
+  string result_ref = 3;
+
+  // attributes are the structured factors behind the decision — scores,
+  // thresholds, model versions, feature values — for analysis and replay of
+  // the reasoning. May be empty.
+  map<string, string> attributes = 4;
+}
+
+// MetricKind is how a MetricObservation.value is to be interpreted.
+enum MetricKind {
+  // Default zero value; never set explicitly on an event.
+  METRIC_KIND_UNSPECIFIED = 0;
+
+  // GAUGE: an instantaneous value that can rise or fall (e.g. queue depth).
+  METRIC_KIND_GAUGE = 1;
+
+  // COUNTER: a monotonically non-decreasing cumulative total (e.g. events
+  // processed since start).
+  METRIC_KIND_COUNTER = 2;
+}

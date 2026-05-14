@@ -1,0 +1,123 @@
+syntax = "proto3";
+
+package observation.v1;
+
+import "google/protobuf/duration.proto";
+import "google/protobuf/timestamp.proto";
+
+// DataQualityEvent reports a detected data-integrity problem on some event
+// stream — a sequence gap, excessive staleness, or input-distribution drift.
+//
+// It carries EVENT_CLASS_OBSERVATION but is the explicit exception to
+// observation lossy-tolerance (event-class-rules.md §4): the data-integrity
+// layer MUST NOT shed it, and it gets FACT-grade delivery and durable
+// retention — losing a data-quality signal means operating blind.
+//
+// The common fields let the data-observability layer (dashboards, alerting)
+// triage an event without understanding the kind-specific detail.
+message DataQualityEvent {
+  // subject is the logical name of the stream the problem was detected on
+  // (e.g. "market.equity.trade") — NOT the subject this event itself flows on.
+  // Required.
+  string subject = 1;
+
+  // partition_key is the ordering key within `subject` that is affected (e.g.
+  // the instrument_id with a gap). Empty for a stream-wide problem.
+  string partition_key = 2;
+
+  // severity is the triage level, consumed by alerting (DATA-09). Required;
+  // must not be SEVERITY_UNSPECIFIED.
+  Severity severity = 3;
+
+  // summary is a human-readable one-line description, so dashboards and alerts
+  // need not parse the detail. Required.
+  string summary = 4;
+
+  // detail is the kind-specific evidence. Exactly one variant is set, and
+  // which one agrees with the envelope event_type
+  // (data.{entity}.gap_detected | .staleness_detected | .drift_detected).
+  // Required.
+  oneof detail {
+    GapDetail gap = 5;
+    StalenessDetail staleness = 6;
+    DriftDetail drift = 7;
+  }
+}
+
+// GapDetail is the evidence for a sequence gap — missing producer_sequence
+// values for a (producer_source, partition_key), detected independently of the
+// broker (DATA-01).
+message GapDetail {
+  // producer_source is the producing service/instance the gapped sequence is
+  // scoped to — the envelope producer_sequence is per-(source, partition_key).
+  // Required.
+  string producer_source = 1;
+
+  // expected_sequence is the next producer_sequence that was expected.
+  // Required.
+  uint64 expected_sequence = 2;
+
+  // received_sequence is the producer_sequence actually received, greater than
+  // expected_sequence. Required.
+  uint64 received_sequence = 3;
+
+  // missing_count is received_sequence - expected_sequence: the number of
+  // events missing in the gap.
+  uint64 missing_count = 4;
+}
+
+// StalenessDetail is the evidence for excessive staleness — the lag between an
+// event's event_time and its ingestion_time exceeding a configured threshold
+// (DATA-02).
+message StalenessDetail {
+  // observed_lag is the measured ingestion_time - event_time lag that
+  // triggered the event. Required.
+  google.protobuf.Duration observed_lag = 1;
+
+  // threshold is the configured maximum lag that was exceeded. Required.
+  google.protobuf.Duration threshold = 2;
+
+  // last_event_time is the event_time of the most recent event seen on the
+  // subject — the stale frontier. Required.
+  google.protobuf.Timestamp last_event_time = 3;
+}
+
+// DriftDetail is the evidence for input-distribution drift — a statistical
+// shift in the distribution of an input/feature versus a baseline (DATA-04).
+message DriftDetail {
+  // feature is the input or feature whose distribution drifted. Required.
+  string feature = 1;
+
+  // metric is the drift metric used (e.g. "psi", "kl_divergence",
+  // "ks_statistic"). Required.
+  string metric = 2;
+
+  // score is the measured drift score; threshold is the configured limit it
+  // exceeded. Doubles are used deliberately — these are statistical measures,
+  // not money. Both required.
+  double score = 3;
+  double threshold = 4;
+
+  // window_start and window_end bound the observation window the drift was
+  // measured over. Both required.
+  google.protobuf.Timestamp window_start = 5;
+  google.protobuf.Timestamp window_end = 6;
+
+  // baseline_ref identifies the baseline distribution the window was compared
+  // against (e.g. a registered baseline id). Optional.
+  string baseline_ref = 7;
+}
+
+// Severity is the triage level of a DataQualityEvent.
+enum Severity {
+  // Default zero value; never set explicitly on an event.
+  SEVERITY_UNSPECIFIED = 0;
+
+  // WARNING: a quality problem that degrades confidence but does not by itself
+  // make downstream output unsafe to use.
+  SEVERITY_WARNING = 1;
+
+  // CRITICAL: a quality problem severe enough that downstream consumers should
+  // treat affected output as unreliable.
+  SEVERITY_CRITICAL = 2;
+}

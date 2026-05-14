@@ -1,0 +1,16 @@
+# Package metadata for the generated Python SDK (EVT-15b). The schema-release
+# workflow copies this into the generated gen/python/ tree, injects the release
+# version from the git tag, then builds and publishes the package.
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "kanz-schemas"
+version = "0.0.0"  # replaced with the release tag by schema-release.yml
+description = "Generated Python SDK for the Kanz event schemas"
+requires-python = ">=3.10"
+dependencies = ["protobuf>=5.29"]
+
+[tool.setuptools.packages.find]
+where = ["."]

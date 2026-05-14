@@ -1,0 +1,100 @@
+# Schema release: on a version tag, generate the per-language SDKs and publish
+# each as its own module/package. Jobs: go (EVT-15a), python (EVT-15b);
+# TS (EVT-15c) adds its job here.
+#
+# Generated code is not committed to this repo. Required repo secrets:
+#   SCHEMAS_PUBLISH_TOKEN  write access to companion module repos (kanz-schemas-go)
+#   PYPI_TOKEN             API token for the Python package index
+#   PYPI_REPOSITORY_URL    optional — private index URL; unset publishes to PyPI
+name: schema-release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+jobs:
+  go:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.23'
+      - uses: bufbuild/buf-setup-action@v1
+        with:
+          version: 1.69.0
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Install Go plugin
+        run: |
+          go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.11
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+      - name: Generate
+        run: buf generate
+      - name: Assemble and verify module
+        working-directory: gen/go
+        run: |
+          go mod init github.com/kanz-eng/kanz-schemas-go || true
+          go mod tidy
+          go build ./...
+      - name: Publish to companion module repo
+        env:
+          PUBLISH_TOKEN: ${{ secrets.SCHEMAS_PUBLISH_TOKEN }}
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          git clone --depth 1 \
+            "https://x-access-token:${PUBLISH_TOKEN}@github.com/kanz-eng/kanz-schemas-go.git" out
+          rsync -a --delete --exclude .git gen/go/ out/
+          cd out
+          git config user.name kanz-schemas-ci
+          git config user.email ci@kanz-eng.invalid
+          git add -A
+          git commit -m "Generated from kanz-schemas ${tag}" || echo "no changes"
+          git tag "${tag}"
+          git push origin HEAD "${tag}"
+
+  python:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: bufbuild/buf-setup-action@v1
+        with:
+          version: 1.69.0
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Generate
+        run: buf generate
+      - name: Assemble package
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          cp packaging/python/pyproject.toml gen/python/pyproject.toml
+          sed -i "s/^version = .*/version = \"${tag#v}\"/" gen/python/pyproject.toml
+          # protoc-gen-python emits no __init__.py; add them so setuptools
+          # discovers the package tree (the gen/python root itself excluded).
+          find gen/python -mindepth 1 -type d -exec touch {}/__init__.py \;
+      - name: Build
+        working-directory: gen/python
+        run: |
+          python -m pip install --quiet build
+          python -m build
+      - name: Verify wheel
+        working-directory: gen/python
+        run: |
+          python -m pip install --quiet dist/*.whl
+          python -c "import envelope.v1.envelope_pb2; import domain.v1.portfolio_pb2; print('import OK')"
+      - name: Publish
+        working-directory: gen/python
+        env:
+          TWINE_USERNAME: __token__
+          TWINE_PASSWORD: ${{ secrets.PYPI_TOKEN }}
+          TWINE_REPOSITORY_URL: ${{ secrets.PYPI_REPOSITORY_URL }}
+        run: |
+          python -m pip install --quiet twine
+          python -m twine upload dist/*

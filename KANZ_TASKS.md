@@ -8,9 +8,6 @@ Task IDs are module-prefixed (`EVT`, `RISK`, `PRED`, `DATA`). Each item is scope
 
 ### Event System
 
-- [ ] **EVT-14** Define observation + data-quality payload schemas — `kanz-schemas/proto/observation/v1/`
-- [ ] **EVT-15a** Codegen: configure `buf.gen.yaml` + Go plugin, publish Go module · `kanz-schemas/buf.gen.yaml`
-- [ ] **EVT-15b** Codegen: add Python plugin, publish Python package · `kanz-schemas/buf.gen.yaml`
 - [ ] **EVT-15c** Codegen: add TS plugin, publish TS package · `kanz-schemas/buf.gen.yaml`
 - [ ] **EVT-16a** Schema registry: service skeleton + schema storage backend · `kanz/services/schema-registry/`
 - [ ] **EVT-16b** Schema registry: ingest schemas from kanz-schemas CI on release · `kanz/services/schema-registry/`
@@ -113,3 +110,6 @@ _(none)_
 - [x] **EVT-11** Define domain/state payload schemas — `PortfolioState`, `PositionState`, `PortfolioSnapshot`, `ExposureState`, `ExposureSet`; new shared `common.v1` `Money` + `LogPosition` · `kanz-schemas/proto/domain/v1/`, `kanz-schemas/proto/common/v1/`
 - [x] **EVT-12** Define command + command-outcome payload schemas — generic `CommandMetadata` (embedded by concrete commands) + universal `CommandOutcome` / `CommandOutcomeStatus` · `kanz-schemas/proto/command/v1/`
 - [x] **EVT-13** Define lifecycle payload schemas — `ModelDeployed`, `ConfigChanged`, `ModeChanged` (+ `DeploymentRole`, `OperatingMode` enums) · `kanz-schemas/proto/lifecycle/v1/`
+- [x] **EVT-14** Define observation + data-quality payload schemas — `MetricObservation`, `DecisionLog`; `DataQualityEvent` (gap/staleness/drift oneof) + `Severity` · `kanz-schemas/proto/observation/v1/`
+- [x] **EVT-15a** Codegen: `buf.gen.yaml` + Go plugin (managed-mode `go_package`); tag-triggered `schema-release.yml` publishes the Go module to companion repo `kanz-schemas-go` · `kanz-schemas/buf.gen.yaml`
+- [x] **EVT-15b** Codegen: Python plugins (`protocolbuffers/python` + `pyi` remote); `schema-release.yml` `python` job builds the `kanz-schemas` package from `packaging/python/pyproject.toml` and publishes to the package index · `kanz-schemas/buf.gen.yaml`

@@ -1,0 +1,27 @@
+# Code generation for the Kanz schemas.
+#
+# Generated code is never committed to this repo (see .gitignore). The
+# schema-release workflow runs `buf generate` on a version tag and publishes
+# each language's SDK as its own module/package — for Go, the companion module
+# repo github.com/kanz-eng/kanz-schemas-go (EVT-15a). Python (EVT-15b) and TS
+# (EVT-15c) add their plugins here.
+#
+# The .proto files carry no `option go_package`; managed mode supplies it,
+# appending each file's module-relative directory to the prefix below.
+version: v2
+managed:
+  enabled: true
+  override:
+    - file_option: go_package_prefix
+      value: github.com/kanz-eng/kanz-schemas-go
+plugins:
+  - local: protoc-gen-go
+    out: gen/go
+    opt: paths=source_relative
+  # Python: no clean standalone local plugin exists, so the pinned buf.build
+  # remote plugins are used — protocolbuffers/python for *_pb2.py and
+  # protocolbuffers/pyi for the *_pb2.pyi type stubs.
+  - remote: buf.build/protocolbuffers/python:v32.0
+    out: gen/python
+  - remote: buf.build/protocolbuffers/pyi:v32.0
+    out: gen/python
