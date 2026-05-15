@@ -1,0 +1,19 @@
+syntax = "proto3";
+
+package envelope.v1;
+
+import "envelope/v1/envelope.proto";
+
+// EventFrame is the wire-level container for one Kanz event: the universal
+// Envelope plus the serialized domain payload. Bus client publish/subscribe
+// (EVT-17/18/19) sets every bus message body to a serialized EventFrame.
+//
+// Envelope and payload are kept side-by-side rather than nesting the payload
+// inside the Envelope so payload-blind tooling — schema registry, data
+// observability, routing, replay — can parse the Envelope without bringing in
+// any payload schema. EventFrame is the universal envelope-platform framing,
+// so it belongs in envelope/v1 alongside Envelope itself.
+message EventFrame {
+  Envelope envelope = 1;
+  bytes payload = 2;
+}

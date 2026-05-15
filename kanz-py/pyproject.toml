@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "kanz-bus"
+version = "0.0.0"
+description = "Python bus client for the Kanz event backbone (NATS JetStream + Kafka)"
+requires-python = ">=3.10"
+dependencies = [
+    "nats-py>=2.7.0",
+    "aiokafka>=0.10.0",
+    "kanz-schemas>=0.1.0",
+    "protobuf>=5.29",
+]
+
+[project.optional-dependencies]
+test = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+]
+
+[tool.setuptools.packages.find]
+include = ["kanz_bus*"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]

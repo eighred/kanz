@@ -1,0 +1,161 @@
+package bus
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"time"
+
+	envelopepb "github.com/kanz-eng/kanz-schemas-go/envelope/v1"
+)
+
+// EventHandler processes one inbound envelope-framed event. The ctx carries
+// the inbound envelope's correlation_id, the inbound event_id stashed as the
+// *next* event's causation_id, and the inbound trace_context — so any
+// Producer.Publish inside the handler auto-propagates lineage.
+type EventHandler func(ctx context.Context, env *envelopepb.Envelope, payload []byte) error
+
+// Consumer wraps a Subscriber and turns its byte-level Handler into an
+// envelope-aware EventHandler. Pipeline per delivery:
+//
+//   Unframe → Validate → dedup-check → retry-loop(handler) → dedup-record
+//                ↘                          ↘ exhausted ↘
+//                  DLQ or surface              DLQ or surface
+//
+// DLQ (`WithDLQ`) and retry (`WithRetry`) are independent — either can be
+// configured on its own. Without DLQ, terminal failures surface to the
+// underlying Subscribe loop (broker redelivery). Without retry, the first
+// failure is terminal.
+type Consumer struct {
+	subscriber Subscriber
+	dlq        Publisher
+	dedup      *DedupWindow
+	retry      RetryConfig
+}
+
+type consumerOptions struct {
+	dedupTTL time.Duration
+	dedupMax int
+	retry    RetryConfig
+	dlq      Publisher
+}
+
+// ConsumerOption customizes Consumer construction.
+type ConsumerOption func(*consumerOptions)
+
+// WithDedupWindow sets the in-memory consumer-side dedup window. Default is
+// 2m / 10_000 entries — the TTL matches the NATS JetStream broker-side dedup
+// window (EVT-08) so the two layers reinforce. Pass ttl=0 or max=0 to
+// disable dedup entirely (tests, or consumers that rely solely on
+// handler-side idempotency).
+func WithDedupWindow(ttl time.Duration, max int) ConsumerOption {
+	return func(o *consumerOptions) {
+		o.dedupTTL = ttl
+		o.dedupMax = max
+	}
+}
+
+// WithRetry configures bounded in-handler retry. Default MaxAttempts=1 (no
+// retry). Failures during the retry loop block the partition for that
+// subject — long backoffs or large MaxAttempts trade throughput for
+// resilience.
+func WithRetry(cfg RetryConfig) ConsumerOption {
+	return func(o *consumerOptions) { o.retry = cfg }
+}
+
+// WithDLQ enables DLQ routing. Terminal failures (retries exhausted, or
+// unframe / validate failure before dispatch) republish the original
+// `bus.Message` to `dlq.<original-subject>` with failure metadata in
+// `Kanz-DLQ-*` headers, then ack the original delivery. If the DLQ publish
+// itself fails, the error surfaces and the broker redelivers.
+func WithDLQ(p Publisher) ConsumerOption {
+	return func(o *consumerOptions) { o.dlq = p }
+}
+
+func NewConsumer(s Subscriber, opts ...ConsumerOption) (*Consumer, error) {
+	if s == nil {
+		return nil, errors.New("bus: subscriber is nil")
+	}
+	o := consumerOptions{
+		dedupTTL: 2 * time.Minute,
+		dedupMax: 10_000,
+	}
+	for _, opt := range opts {
+		opt(&o)
+	}
+	return &Consumer{
+		subscriber: s,
+		dlq:        o.dlq,
+		dedup:      NewDedupWindow(o.dedupTTL, o.dedupMax),
+		retry:      o.retry.withDefaults(),
+	}, nil
+}
+
+// Subscribe binds an EventHandler to (subject, group). Blocks until ctx is
+// canceled.
+func (c *Consumer) Subscribe(ctx context.Context, subject, group string, h EventHandler) error {
+	return c.subscriber.Subscribe(ctx, subject, group, func(ctx context.Context, msg Message) error {
+		env, payload, err := Unframe(msg.Body)
+		if err != nil {
+			return c.routeToDLQ(ctx, subject, msg, 0, fmt.Errorf("unframe: %w", err))
+		}
+		if err := Validate(env); err != nil {
+			return c.routeToDLQ(ctx, subject, msg, 0, fmt.Errorf("envelope validation: %w", err))
+		}
+		if c.dedup.Seen(env.IdempotencyKey) {
+			return nil // duplicate within window — ack and skip
+		}
+		ctx = WithCorrelationID(ctx, env.CorrelationId)
+		ctx = WithCausationID(ctx, env.EventId)
+		if env.TraceContext != "" {
+			ctx = WithTraceContext(ctx, env.TraceContext)
+		}
+
+		var lastErr error
+		for attempt := 1; attempt <= c.retry.MaxAttempts; attempt++ {
+			if err := h(ctx, env, payload); err == nil {
+				c.dedup.Record(env.IdempotencyKey)
+				return nil
+			} else {
+				lastErr = err
+			}
+			if attempt < c.retry.MaxAttempts {
+				if err := sleepWithCtx(ctx, c.retry.Backoff(attempt)); err != nil {
+					return err // ctx canceled during backoff
+				}
+			}
+		}
+		// Retries exhausted.
+		if c.dlq != nil {
+			if err := c.publishDLQ(ctx, subject, msg, c.retry.MaxAttempts, lastErr); err != nil {
+				return err
+			}
+			c.dedup.Record(env.IdempotencyKey) // DLQ is terminal — dedup future duplicates
+			return nil
+		}
+		return lastErr
+	})
+}
+
+// routeToDLQ is the pre-dispatch failure path (unframe/validate). attempts
+// is 0 because the handler never ran. Falls through to publishDLQ when DLQ
+// is configured; otherwise surfaces the error.
+func (c *Consumer) routeToDLQ(ctx context.Context, origSubject string, msg Message, attempts int, dispatchErr error) error {
+	if c.dlq == nil {
+		return dispatchErr
+	}
+	return c.publishDLQ(ctx, origSubject, msg, attempts, dispatchErr)
+}
+
+func (c *Consumer) publishDLQ(ctx context.Context, origSubject string, msg Message, attempts int, dispatchErr error) error {
+	dlqMsg := Message{
+		Subject: dlqSubject(origSubject),
+		Key:     msg.Key,
+		Body:    msg.Body,
+		Headers: dlqHeaders(msg.Headers, origSubject, attempts, dispatchErr),
+	}
+	if err := c.dlq.Publish(ctx, dlqMsg); err != nil {
+		return fmt.Errorf("dlq publish: %w (original: %v)", err, dispatchErr)
+	}
+	return nil
+}

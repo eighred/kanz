@@ -1,0 +1,18 @@
+{
+  "name": "@kanz-eng/kanz-schemas",
+  "version": "0.0.0",
+  "description": "Generated TypeScript SDK for the Kanz event schemas",
+  "license": "UNLICENSED",
+  "type": "module",
+  "sideEffects": false,
+  "files": [
+    "**/*.js",
+    "**/*.d.ts"
+  ],
+  "exports": {
+    "./*": "./*"
+  },
+  "dependencies": {
+    "@bufbuild/protobuf": "^2.2.3"
+  }
+}

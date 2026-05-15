@@ -3,8 +3,9 @@
 # Generated code is never committed to this repo (see .gitignore). The
 # schema-release workflow runs `buf generate` on a version tag and publishes
 # each language's SDK as its own module/package — for Go, the companion module
-# repo github.com/kanz-eng/kanz-schemas-go (EVT-15a). Python (EVT-15b) and TS
-# (EVT-15c) add their plugins here.
+# repo github.com/kanz-eng/kanz-schemas-go (EVT-15a); for Python, the
+# `kanz-schemas` package on PyPI (EVT-15b); for TypeScript, the
+# `@kanz-eng/kanz-schemas` package on npm (EVT-15c).
 #
 # The .proto files carry no `option go_package`; managed mode supplies it,
 # appending each file's module-relative directory to the prefix below.
@@ -25,3 +26,9 @@ plugins:
     out: gen/python
   - remote: buf.build/protocolbuffers/pyi:v32.0
     out: gen/python
+  # TypeScript: Protobuf-ES, the buf-maintained TS runtime. target=js+dts emits
+  # ES modules with .d.ts declarations, so the published package needs no
+  # separate `tsc` compile step.
+  - remote: buf.build/bufbuild/es:v2.10.0
+    out: gen/ts
+    opt: target=js+dts
