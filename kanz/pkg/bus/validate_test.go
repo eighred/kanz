@@ -100,6 +100,33 @@ func TestValidateRejectsSequenceWithoutPartitionKey(t *testing.T) {
 	}
 }
 
+func TestValidateReplayRequiresFlag(t *testing.T) {
+	// Without the flag, ValidateReplay must reject — an un-flagged event on
+	// a replay subject means the publisher skipped EVT-20c stamping.
+	if err := bus.ValidateReplay(validEnvelope()); err == nil {
+		t.Error("ValidateReplay accepted envelope without REPLAYED flag")
+	}
+}
+
+func TestValidateReplayAcceptsFlaggedEnvelope(t *testing.T) {
+	env := validEnvelope()
+	env.QualityFlags = []envelopepb.QualityFlag{envelopepb.QualityFlag_QUALITY_FLAG_REPLAYED}
+	if err := bus.ValidateReplay(env); err != nil {
+		t.Errorf("ValidateReplay rejected flagged envelope: %v", err)
+	}
+}
+
+func TestValidateReplayStillEnforcesFieldRules(t *testing.T) {
+	// Replay validation is REPLAYED-aware, but the rest of the envelope
+	// contract still applies.
+	env := validEnvelope()
+	env.QualityFlags = []envelopepb.QualityFlag{envelopepb.QualityFlag_QUALITY_FLAG_REPLAYED}
+	env.EventId = ""
+	if err := bus.ValidateReplay(env); err == nil {
+		t.Error("ValidateReplay accepted flagged envelope with missing event_id")
+	}
+}
+
 func TestValidateAllowsCommandWithCallerIdempotencyKey(t *testing.T) {
 	env := validEnvelope()
 	env.EventClass = envelopepb.EventClass_EVENT_CLASS_COMMAND

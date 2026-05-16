@@ -9,10 +9,35 @@ import (
 
 // Validate enforces the publish-side envelope invariants from
 // kanz-schemas/docs/envelope-policy.md §7 plus the per-class rules from
-// docs/event-class-rules.md. Producer.Publish runs this after stamping;
-// subscribers should run it on receive too (a defensive check is cheap and
-// the envelope is the constitution).
+// docs/event-class-rules.md. Producer.Publish runs this after stamping; the
+// live-consumer path (the default for bus.Consumer) runs it on receive so a
+// replayed event that somehow leaks into a live subject is hard-rejected at
+// the bus boundary — that is the live-sink enforcement half of EVT-20c.
+//
+// Replay-scoped consumers pass bus.WithValidator(bus.ValidateReplay) so they
+// can accept REPLAYED events; that path REQUIRES the flag (a non-flagged
+// event on a replay subject is a misconfigured publisher and is rejected).
 func Validate(env *envelopepb.Envelope) error {
+	if err := validateEnvelopeFields(env); err != nil {
+		return err
+	}
+	return rejectReplayed(env)
+}
+
+// ValidateReplay validates an envelope against the same field/class rules as
+// Validate, but requires QUALITY_FLAG_REPLAYED to be present rather than
+// rejecting it. Pass this to bus.WithValidator on replay-scoped consumers.
+// An un-flagged event on a replay subject means a publisher skipped the
+// stamping step — that publisher is broken and the event must not be
+// dispatched as if it were live.
+func ValidateReplay(env *envelopepb.Envelope) error {
+	if err := validateEnvelopeFields(env); err != nil {
+		return err
+	}
+	return requireReplayed(env)
+}
+
+func validateEnvelopeFields(env *envelopepb.Envelope) error {
 	if env == nil {
 		return errors.New("envelope is nil")
 	}
@@ -62,19 +87,37 @@ func Validate(env *envelopepb.Envelope) error {
 	if env.EventClass == envelopepb.EventClass_EVENT_CLASS_FACT && env.IdempotencyKey != env.EventId {
 		return errors.New("FACT events require idempotency_key == event_id")
 	}
-	// QUALITY_FLAG_REPLAYED is set only by replay tooling (EVT-20). A live
-	// publisher must reject it before it reaches the bus.
-	for _, qf := range env.QualityFlags {
-		if qf == envelopepb.QualityFlag_QUALITY_FLAG_REPLAYED {
-			return errors.New("live publish must not set QUALITY_FLAG_REPLAYED")
-		}
-	}
 	// producer_sequence is per-(source, partition_key); 0 means N/A. Empty
 	// partition_key ⇒ sequence must be 0 (envelope.proto field comment).
 	if env.PartitionKey == "" && env.ProducerSequence != 0 {
 		return errors.New("producer_sequence must be 0 when partition_key is empty")
 	}
 	return nil
+}
+
+// rejectReplayed is the live-sink guard: QUALITY_FLAG_REPLAYED is set only
+// by replay tooling (EVT-20). A live publisher must reject it before it
+// reaches the bus; a live consumer hard-rejects on receive so a replay event
+// that leaked past namespace isolation (EVT-20b) is DLQ'd, not dispatched.
+func rejectReplayed(env *envelopepb.Envelope) error {
+	for _, qf := range env.QualityFlags {
+		if qf == envelopepb.QualityFlag_QUALITY_FLAG_REPLAYED {
+			return errors.New("QUALITY_FLAG_REPLAYED forbidden on live path (only replay-scoped consumers accept it)")
+		}
+	}
+	return nil
+}
+
+// requireReplayed is the replay-scoped consumer guard: every event on a
+// replay subject must carry the flag. An un-flagged event here means the
+// publisher skipped stamping — defect, not data.
+func requireReplayed(env *envelopepb.Envelope) error {
+	for _, qf := range env.QualityFlags {
+		if qf == envelopepb.QualityFlag_QUALITY_FLAG_REPLAYED {
+			return nil
+		}
+	}
+	return errors.New("replay-scoped consumer received event without QUALITY_FLAG_REPLAYED")
 }
 
 func requireNonEmpty(s, name string) error {

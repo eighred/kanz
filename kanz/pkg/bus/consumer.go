@@ -31,13 +31,15 @@ type Consumer struct {
 	dlq        Publisher
 	dedup      *DedupWindow
 	retry      RetryConfig
+	validate   func(*envelopepb.Envelope) error
 }
 
 type consumerOptions struct {
-	dedupTTL time.Duration
-	dedupMax int
-	retry    RetryConfig
-	dlq      Publisher
+	dedupTTL  time.Duration
+	dedupMax  int
+	retry     RetryConfig
+	dlq       Publisher
+	validator func(*envelopepb.Envelope) error
 }
 
 // ConsumerOption customizes Consumer construction.
@@ -63,6 +65,16 @@ func WithRetry(cfg RetryConfig) ConsumerOption {
 	return func(o *consumerOptions) { o.retry = cfg }
 }
 
+// WithValidator overrides the per-message envelope validator. Default is
+// Validate (live-mode: hard-rejects QUALITY_FLAG_REPLAYED so a replay event
+// that leaked past namespace isolation lands in the DLQ instead of being
+// dispatched). Replay-scoped consumers pass WithValidator(ValidateReplay)
+// so the same path accepts REPLAYED events — that is the consumer-side
+// switch for EVT-20c.
+func WithValidator(fn func(*envelopepb.Envelope) error) ConsumerOption {
+	return func(o *consumerOptions) { o.validator = fn }
+}
+
 // WithDLQ enables DLQ routing. Terminal failures (retries exhausted, or
 // unframe / validate failure before dispatch) republish the original
 // `bus.Message` to `dlq.<original-subject>` with failure metadata in
@@ -77,17 +89,22 @@ func NewConsumer(s Subscriber, opts ...ConsumerOption) (*Consumer, error) {
 		return nil, errors.New("bus: subscriber is nil")
 	}
 	o := consumerOptions{
-		dedupTTL: 2 * time.Minute,
-		dedupMax: 10_000,
+		dedupTTL:  2 * time.Minute,
+		dedupMax:  10_000,
+		validator: Validate,
 	}
 	for _, opt := range opts {
 		opt(&o)
+	}
+	if o.validator == nil {
+		o.validator = Validate
 	}
 	return &Consumer{
 		subscriber: s,
 		dlq:        o.dlq,
 		dedup:      NewDedupWindow(o.dedupTTL, o.dedupMax),
 		retry:      o.retry.withDefaults(),
+		validate:   o.validator,
 	}, nil
 }
 
@@ -99,7 +116,7 @@ func (c *Consumer) Subscribe(ctx context.Context, subject, group string, h Event
 		if err != nil {
 			return c.routeToDLQ(ctx, subject, msg, 0, fmt.Errorf("unframe: %w", err))
 		}
-		if err := Validate(env); err != nil {
+		if err := c.validate(env); err != nil {
 			return c.routeToDLQ(ctx, subject, msg, 0, fmt.Errorf("envelope validation: %w", err))
 		}
 		if c.dedup.Seen(env.IdempotencyKey) {

@@ -509,3 +509,67 @@ type errPublisher struct {
 }
 
 func (p *errPublisher) Publish(context.Context, bus.Message) error { return p.err }
+
+func TestConsumerDefaultValidatorRejectsReplayed(t *testing.T) {
+	// Default (live-mode) consumer treats a REPLAYED event as poison and
+	// hard-rejects: with DLQ wired it routes there, without DLQ it surfaces.
+	env := validEnvelope()
+	env.QualityFlags = []envelopepb.QualityFlag{envelopepb.QualityFlag_QUALITY_FLAG_REPLAYED}
+	sub := &oneShotSub{msg: bus.Message{Subject: "market.equity", Body: frame(t, env, nil)}}
+	c, _ := bus.NewConsumer(sub)
+
+	dispatched := false
+	err := c.Subscribe(context.Background(), "market.equity", "g",
+		func(context.Context, *envelopepb.Envelope, []byte) error {
+			dispatched = true
+			return nil
+		})
+	if err == nil {
+		t.Error("expected validation error for REPLAYED event on default consumer")
+	}
+	if dispatched {
+		t.Error("REPLAYED event must not reach handler on the live path")
+	}
+}
+
+func TestConsumerWithValidatorOverrideAcceptsReplayed(t *testing.T) {
+	// Replay-scoped consumer wires bus.ValidateReplay; the same REPLAYED
+	// event that the live path rejects now reaches the handler.
+	env := validEnvelope()
+	env.QualityFlags = []envelopepb.QualityFlag{envelopepb.QualityFlag_QUALITY_FLAG_REPLAYED}
+	sub := &oneShotSub{msg: bus.Message{Subject: "replay.X.market.equity.trade", Body: frame(t, env, nil)}}
+	c, _ := bus.NewConsumer(sub, bus.WithValidator(bus.ValidateReplay))
+
+	dispatched := false
+	err := c.Subscribe(context.Background(), "replay.X.market.equity.trade", "g",
+		func(context.Context, *envelopepb.Envelope, []byte) error {
+			dispatched = true
+			return nil
+		})
+	if err != nil {
+		t.Errorf("Subscribe: %v", err)
+	}
+	if !dispatched {
+		t.Error("replay-scoped consumer did not dispatch flagged event")
+	}
+}
+
+func TestConsumerWithValidatorReplayRejectsUnflagged(t *testing.T) {
+	// Replay-scoped consumer must also defend the inverse: a non-flagged
+	// event on a replay subject means a broken publisher.
+	sub := &oneShotSub{msg: bus.Message{Subject: "replay.X.foo", Body: frame(t, validEnvelope(), nil)}}
+	c, _ := bus.NewConsumer(sub, bus.WithValidator(bus.ValidateReplay))
+
+	dispatched := false
+	err := c.Subscribe(context.Background(), "replay.X.foo", "g",
+		func(context.Context, *envelopepb.Envelope, []byte) error {
+			dispatched = true
+			return nil
+		})
+	if err == nil {
+		t.Error("ValidateReplay accepted an un-flagged event")
+	}
+	if dispatched {
+		t.Error("un-flagged event must not reach a replay-scoped handler")
+	}
+}
