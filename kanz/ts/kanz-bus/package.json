@@ -1,0 +1,34 @@
+{
+  "name": "@kanz-eng/kanz-bus",
+  "version": "0.0.0",
+  "description": "TypeScript bus client for the Kanz event backbone (NATS JetStream + Kafka)",
+  "license": "UNLICENSED",
+  "type": "module",
+  "sideEffects": false,
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist/**/*.js",
+    "dist/**/*.d.ts"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "tsx --test test/*.test.ts"
+  },
+  "dependencies": {
+    "@bufbuild/protobuf": "^2.2.3",
+    "@kanz-eng/kanz-schemas": "^0.1.0",
+    "kafkajs": "^2.2.4",
+    "kafkajs-snappy": "^1.1.0",
+    "nats": "^2.28.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0"
+  }
+}
