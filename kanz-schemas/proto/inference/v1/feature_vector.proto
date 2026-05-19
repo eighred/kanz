@@ -1,0 +1,95 @@
+syntax = "proto3";
+
+// Package inference.v1 defines the payload schemas for Kanz's
+// prediction layer — feature vectors flowing into models and
+// predictions flowing out (prediction.proto).
+//
+// The prediction layer is hybrid (architecture note in KANZ_BRAIN):
+// async streaming path (default) + sync gRPC path for interactive
+// calls. Both paths transport these payloads — the streaming path
+// wraps them in the universal Envelope on the bus; the sync path
+// uses them as gRPC request/response messages (PRED-06).
+//
+// proto3 cannot enforce field presence; "Required" invariants are
+// enforced by the prediction-layer client libraries on publish/call.
+// CODEOWNERS: @kanz-eng/quant-ml owns this subtree.
+package inference.v1;
+
+import "google/protobuf/timestamp.proto";
+
+// FeatureVector is the input to one inference call: the named
+// features describing one subject (an instrument, a portfolio, a
+// counterparty) at a point in time. The model + feature set the
+// vector is built against is identified by feature_set_ref so the
+// inference path can route to the matching model version (PRED-09).
+message FeatureVector {
+  // subject_id is what the features describe — typically an
+  // instrument id, portfolio id, or counterparty id. Required.
+  // Same identifier the bus envelope partition_key carries when
+  // FeatureVector is published as inference.feature.computed.
+  string subject_id = 1;
+
+  // feature_set_ref identifies the feature catalog the values are
+  // drawn from, formatted "{feature-set-name}:{version}" (e.g.
+  // "equity-momentum:7"). The inference layer matches this to a
+  // model version that consumes the same feature set. Required.
+  string feature_set_ref = 2;
+
+  // values is the name → FeatureValue map. Names match the feature
+  // catalog's declared schema; unknown names at the model are
+  // ignored, missing required names cause the prediction to be
+  // refused or marked degraded (PRED-02). Non-empty.
+  map<string, FeatureValue> values = 3;
+
+  // as_of is the domain time these feature values are effective
+  // at — the event_time the inputs were observed, NOT the time
+  // computation happened. Required.
+  google.protobuf.Timestamp as_of = 4;
+
+  // source_event_ids are the event_ids of the inputs whose state
+  // produced these features (market events, position-state events,
+  // ...). Lineage for replay + audit; the same role
+  // domain.v1.RiskMeasure.source_event_ids carries for risk
+  // outputs. Optional.
+  repeated string source_event_ids = 5;
+}
+
+// FeatureValue is one feature's value. Tagged union so the model
+// side sees the right type without parsing strings — categorical
+// is kept distinct from scalar so a model can't accidentally
+// treat a class id as a magnitude.
+//
+// double is used deliberately for scalar and vector values: these
+// are model inputs, not money — the exact-Decimal rule (BRAIN
+// banned-double) does not apply. Categorical magnitudes go in
+// ordinal (signed integer); free-form categorical labels go in
+// categorical (string).
+message FeatureValue {
+  oneof value {
+    // scalar is a continuous numeric feature (price, ratio,
+    // volatility, ...). Default-zero is meaningful (means "the
+    // feature is present and equal to 0"); to express "feature
+    // absent" omit the entry from FeatureVector.values entirely.
+    double scalar = 1;
+
+    // ordinal is an integer-encoded categorical (e.g. day-of-week
+    // 0..6, or a hash-bucketed category id).
+    sint64 ordinal = 2;
+
+    // categorical is a free-form string label (e.g. "USD", "TECH",
+    // "buy"). The model is responsible for encoding it.
+    string categorical = 3;
+
+    // vector is a dense numeric vector (embedding, time-series
+    // window). Length is the model's concern; the protocol does
+    // not constrain it.
+    DoubleArray vector = 4;
+  }
+}
+
+// DoubleArray wraps a repeated double — proto3 doesn't allow
+// repeated fields directly inside a oneof, so a single-field
+// wrapper message is the canonical workaround.
+message DoubleArray {
+  repeated double values = 1;
+}

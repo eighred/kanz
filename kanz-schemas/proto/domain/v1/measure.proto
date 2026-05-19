@@ -1,0 +1,65 @@
+syntax = "proto3";
+
+// Risk-measure payloads. Companion to exposure.proto (the
+// portfolio-state aggregates). Lives in domain.v1 because risk
+// outputs are part of the same bounded-context state model — the
+// engine that produces ExposureSet also produces RiskMeasureSet,
+// keyed by the same portfolio_id, ordered by the same per-aggregate
+// partition rule.
+//
+// Why not observation.v1.MetricObservation: MetricObservation uses
+// `double` and is the OBSERVATION-class metric for system behaviour
+// (latency, throughput). Risk measures are FACT-class outputs whose
+// money values must use the exact-Decimal rule (banned-double per
+// docs/event-class-rules.md + common/v1/decimal.proto).
+package domain.v1;
+
+import "google/protobuf/timestamp.proto";
+import "common/v1/decimal.proto";
+
+// RiskMeasure is one named risk-measure value with propagated
+// uncertainty and lineage to the events that produced it.
+message RiskMeasure {
+  // name is the canonical measure name (e.g. "VaR99", "Delta",
+  // "GrossExposure"). Same name space as the engine's measure
+  // registry (RISK-07). Required.
+  string name = 1;
+
+  // value is the measure value, exact Decimal. Money-valued
+  // measures (Gross/Net exposure, VaR, ...) are in the portfolio's
+  // base currency at the time of computation. Required.
+  common.v1.Decimal value = 2;
+
+  // uncertainty_abs is the one-sigma absolute uncertainty band
+  // around value, propagated per RISK-08's rules. Absent (no value
+  // set) means no uncertainty was propagated — distinct from "zero
+  // uncertainty", which would be a calibrated point estimate.
+  common.v1.Decimal uncertainty_abs = 3;
+
+  // source_event_ids are the event_ids of the inputs whose state
+  // produced this measure — typically the position-state /
+  // portfolio-state events read from the engine at computation
+  // time. Optional; may be empty when lineage is implicit via the
+  // envelope causation_id (the case for measures derived from a
+  // single triggering event). When the measure is derived from many
+  // inputs (the common case), the envelope causation_id carries no
+  // single answer and this list is the auditable trail.
+  repeated string source_event_ids = 4;
+}
+
+// RiskMeasureSet is the full set of risk measures for a portfolio,
+// computed in one pass. It is the payload of risk-measures-computed
+// FACTs — measures are emitted as a coherent set so a consumer
+// always sees a consistent snapshot, same per-aggregate-consistency
+// discipline as ExposureSet.
+message RiskMeasureSet {
+  // portfolio_id is the portfolio these measures are for. Required.
+  string portfolio_id = 1;
+
+  // measures is the full set. Non-empty.
+  repeated RiskMeasure measures = 2;
+
+  // as_of is the domain time the whole set is effective at — every
+  // contained RiskMeasure shares it. Required.
+  google.protobuf.Timestamp as_of = 3;
+}

@@ -1,0 +1,104 @@
+syntax = "proto3";
+
+// Prediction outputs from the inference layer. Companion to
+// feature_vector.proto: features go in, PredictionEnvelope comes
+// out. Both the async streaming path (bus message body) and the
+// sync gRPC path (PRED-06) carry this payload.
+//
+// proto3 cannot enforce field presence; "Required" invariants are
+// enforced by the prediction-layer client libraries on publish/call.
+package inference.v1;
+
+import "google/protobuf/timestamp.proto";
+
+// PredictionEnvelope is one inference output: the predicted value
+// plus the metadata a consumer needs to decide whether to trust
+// and act on it. Carries explainability + lineage so audit and
+// model-debugging consumers don't need a side-channel.
+//
+// The name carries "Envelope" because this is more than the raw
+// value — it bundles the prediction with model identity,
+// confidence, mode (NORMAL / DEGRADED), explanation, and a back-
+// pointer to the FeatureVector that produced it.
+message PredictionEnvelope {
+  // subject_id mirrors FeatureVector.subject_id — the entity the
+  // prediction is about. Same value as the bus envelope's
+  // partition_key when this is published. Required.
+  string subject_id = 1;
+
+  // model identifies the model that produced the prediction,
+  // formatted "{model-name}@{version}" (e.g.
+  // "vol-forecast@1.4.2"). Required. Same shape as
+  // observation.v1.DecisionLog.decider.
+  string model = 2;
+
+  // value is the predicted numeric output — score, probability,
+  // regression target. double is correct here: predictions are
+  // model outputs, not money. Required.
+  double value = 3;
+
+  // confidence is the model's calibrated self-reported confidence,
+  // 0..1. 1 ⇒ fully confident; 0 ⇒ no confidence. Set to 0 and
+  // surface QUALITY_FLAG_DEGRADED at the envelope level when the
+  // model has no calibrated confidence (treating "unknown
+  // confidence" as "no confidence" forces the consumer to handle
+  // the degraded path explicitly rather than blindly trust).
+  double confidence = 4;
+
+  // class_label is set for classification models — the predicted
+  // class name. Empty for regression. The value field carries the
+  // class probability when this is set.
+  string class_label = 5;
+
+  // explanation is the per-feature contribution to the prediction
+  // (SHAP-like). Maps feature_name → signed contribution; sum
+  // does not necessarily equal value (depends on the
+  // attribution method). Optional but strongly encouraged for
+  // any model serving above-the-fold predictions.
+  map<string, double> explanation = 6;
+
+  // mode reports whether the prediction was served from the
+  // normal path (NORMAL), a degraded fallback (DEGRADED — stale
+  // cache, last-known prediction, simplified model), or unknown
+  // (UNSPECIFIED, never set explicitly). Consumers branch on this
+  // BEFORE acting; the degraded contract details live in
+  // kanz-schemas/docs/inference-degraded-contract.md (PRED-02).
+  PredictionMode mode = 7;
+
+  // degraded_reason is a short operator-readable explanation when
+  // mode == DEGRADED (e.g. "inference timeout", "feature
+  // staleness exceeds budget", "model rollback in progress").
+  // Empty when mode == NORMAL.
+  string degraded_reason = 8;
+
+  // feature_vector_event_id is the event_id of the FeatureVector
+  // event this prediction was computed from (the streaming-path
+  // lineage). For the sync gRPC path, this is the inline
+  // request's correlation_id. Optional but enables join-on-replay
+  // between features and predictions.
+  string feature_vector_event_id = 9;
+
+  // as_of is the domain time the prediction is effective at —
+  // equal to FeatureVector.as_of for the streaming path; the
+  // request time for the sync gRPC path. Required.
+  google.protobuf.Timestamp as_of = 10;
+}
+
+// PredictionMode is the trust level the inference layer attached
+// to a prediction. Consumers MUST branch on this before acting —
+// a DEGRADED prediction is still served (the engine doesn't black-
+// hole) but the caller decides whether to honor it.
+enum PredictionMode {
+  // Default zero value; never set explicitly.
+  PREDICTION_MODE_UNSPECIFIED = 0;
+
+  // NORMAL: the prediction was produced by the live model against
+  // fresh features — full-trust path.
+  PREDICTION_MODE_NORMAL = 1;
+
+  // DEGRADED: the prediction is a fallback — stale cached value,
+  // last-known result, simplified model, or low-confidence. The
+  // caller decides whether to honor it; degraded_reason explains
+  // the trigger.
+  PREDICTION_MODE_DEGRADED = 2;
+}

@@ -12,6 +12,7 @@ dependencies = [
     "aiokafka>=0.10.0",
     "kanz-schemas>=0.1.0",
     "protobuf>=5.29",
+    "grpcio>=1.62",
 ]
 
 [project.optional-dependencies]
@@ -21,7 +22,10 @@ test = [
 ]
 
 [tool.setuptools.packages.find]
-include = ["kanz_bus*"]
+# Both subtrees shipped under one distribution for now. A future task
+# (likely paired with PRED-09 model-registry packaging) will split
+# kanz-inference into its own distribution with its own pyproject.
+include = ["kanz_bus*", "kanz_inference*"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

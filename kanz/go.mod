@@ -8,6 +8,7 @@ require (
 	github.com/kanz-eng/kanz-schemas-go v0.0.0-00010101000000-000000000000
 	github.com/nats-io/nats.go v1.39.0
 	github.com/segmentio/kafka-go v0.4.47
+	google.golang.org/grpc v1.69.0
 	google.golang.org/protobuf v1.36.11
 )
 

@@ -1,0 +1,65 @@
+syntax = "proto3";
+
+// gRPC interface for the SYNC interactive inference path (PRED-06).
+// Companion to the async streaming path (PRED-04/05) — both paths
+// transport the SAME payloads (FeatureVector in, PredictionEnvelope
+// out) and follow the SAME degraded-mode contract
+// (kanz-schemas/docs/inference-degraded-contract.md §6).
+//
+// # Why same payloads as the streaming path
+//
+// A FeatureVector logged from the streaming path can be replayed
+// into this RPC without field migration; a PredictionEnvelope
+// captured from either path is consumable by the same downstream
+// code. The replay-determinism property (EVT-21d-style) extends
+// across transports.
+//
+// # Target latency
+//
+// p99 < 50ms per KANZ_BRAIN. PRED-07's circuit breaker fails over
+// to the streaming path's cache when the inference layer can't hold
+// that budget.
+package inference.v1;
+
+import "inference/v1/feature_vector.proto";
+import "inference/v1/prediction.proto";
+
+// InferenceService is the interactive inference RPC surface.
+// Implementations live in Python (kanz-py/kanz_inference,
+// PRED-08 worker pool); clients live in Go
+// (kanz/internal/prediction/sync_client.go, PRED-07).
+service InferenceService {
+  // Predict scores one FeatureVector synchronously. Response is a
+  // PredictionEnvelope — same payload as the streaming path's bus
+  // message body.
+  //
+  // # Deadline semantics
+  //
+  // Callers MUST set a gRPC deadline. Per PRED-02 §2.2, when the
+  // inference layer cannot complete within the deadline it returns
+  // a DEGRADED PredictionEnvelope with
+  // degraded_reason = "inference_timeout" — NOT a gRPC
+  // DEADLINE_EXCEEDED error. Returning an error would force callers
+  // to handle two failure paths (gRPC status + degraded envelope);
+  // unified-response keeps PRED-02 §1's "never black-hole" rule in
+  // effect on the sync path too.
+  //
+  // # gRPC status codes reserved for TRANSPORT failures only
+  //
+  // The OK/error split here is intentional:
+  //
+  //   - OK + DEGRADED envelope = inference layer reached + decided
+  //     it could not serve a fresh full-trust prediction. Caller
+  //     branches on PredictionEnvelope.mode.
+  //   - non-OK gRPC status = transport failure (UNAVAILABLE,
+  //     INTERNAL, RESOURCE_EXHAUSTED). The inference layer was
+  //     unreachable; the caller never saw the model's opinion. Client
+  //     library (PRED-07) translates this to a synthesized DEGRADED
+  //     envelope with degraded_reason = "inference_unavailable" so
+  //     the application code sees one shape regardless.
+  //
+  // This split lets the gRPC layer signal transport-vs-application
+  // failures distinctly (useful for observability + retries) while
+  // keeping the application contract uniform.
+  rpc Predict(FeatureVector) returns (PredictionEnvelope);
+}

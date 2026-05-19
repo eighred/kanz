@@ -66,4 +66,10 @@ enum ExposureDimension {
 
   // Exposure by issuing entity (single-name concentration).
   EXPOSURE_DIMENSION_ISSUER = 5;
+
+  // Exposure by individual instrument — the canonical leaf-level
+  // dimension RISK-06's engine computes from; aggregated dimensions
+  // (CURRENCY, SECTOR, ...) are derived from this. Added under the
+  // schema-evolution §4 "add enum value" non-breaking rule.
+  EXPOSURE_DIMENSION_INSTRUMENT = 6;
 }
