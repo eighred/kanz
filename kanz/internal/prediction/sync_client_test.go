@@ -103,7 +103,7 @@ func TestPredict_CachesOnlyNormalResponses(t *testing.T) {
 
 // --- Transport error fallback ----------------------------------------
 
-func TestPredict_TransportErrorReturnsDegradedUnavailable(t *testing.T) {
+func TestPredict_TransportErrorNoCacheReturnsNoCachedPrediction(t *testing.T) {
 	stub := &fakeStub{err: errors.New("connection refused")}
 	client := prediction.NewSyncClientWithStub(stub, prediction.DefaultSyncClientOptions())
 
@@ -116,10 +116,14 @@ func TestPredict_TransportErrorReturnsDegradedUnavailable(t *testing.T) {
 	if pred.Mode != inferencepb.PredictionMode_PREDICTION_MODE_DEGRADED {
 		t.Errorf("Mode=%v want DEGRADED", pred.Mode)
 	}
-	if pred.DegradedReason != prediction.ReasonInferenceUnavailable {
-		t.Errorf("DegradedReason=%q want inference_unavailable", pred.DegradedReason)
+	// Cache miss → no_cached_prediction (contract: the degraded_reason
+	// field reports the fallback outcome, not the trigger; the trigger
+	// is observable via err). The cache-hit path reports the trigger
+	// reason — see the resilience matrix tests.
+	if pred.DegradedReason != prediction.ReasonNoCachedPrediction {
+		t.Errorf("DegradedReason=%q want no_cached_prediction", pred.DegradedReason)
 	}
-	// err non-nil = observable fault; caller can log/metric.
+	// err non-nil = observable fault; caller can log/metric the trigger.
 	if err == nil {
 		t.Error("err is nil — transport failures should be observable")
 	}
@@ -149,7 +153,7 @@ func TestPredict_CacheHitOnFallbackReusesCachedValue(t *testing.T) {
 
 // --- Timeout fallback ------------------------------------------------
 
-func TestPredict_TimeoutReturnsDegradedTimeout(t *testing.T) {
+func TestPredict_TimeoutNoCacheReturnsDegraded(t *testing.T) {
 	stub := &fakeStub{
 		response: normalPrediction("AAPL", 1.0),
 		delay:    50 * time.Millisecond,
@@ -162,8 +166,14 @@ func TestPredict_TimeoutReturnsDegradedTimeout(t *testing.T) {
 	if pred.Mode != inferencepb.PredictionMode_PREDICTION_MODE_DEGRADED {
 		t.Errorf("Mode=%v want DEGRADED", pred.Mode)
 	}
-	if pred.DegradedReason != prediction.ReasonInferenceTimeout {
-		t.Errorf("DegradedReason=%q want inference_timeout, err=%v", pred.DegradedReason, err)
+	// Cache miss → no_cached_prediction; err carries the deadline so the
+	// timeout trigger is observable. The timeout→inference_timeout reason
+	// mapping is asserted on the cache-hit path (resilience matrix).
+	if pred.DegradedReason != prediction.ReasonNoCachedPrediction {
+		t.Errorf("DegradedReason=%q want no_cached_prediction, err=%v", pred.DegradedReason, err)
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("err=%v want context.DeadlineExceeded", err)
 	}
 }
 
@@ -189,8 +199,12 @@ func TestPredict_CircuitOpensAfterThresholdFailures(t *testing.T) {
 	if stub.calls != stubCallsBeforeOpen {
 		t.Errorf("stub.calls=%d want %d (open circuit must short-circuit)", stub.calls, stubCallsBeforeOpen)
 	}
-	if pred.DegradedReason != prediction.ReasonCircuitOpen {
-		t.Errorf("DegradedReason=%q want circuit_open", pred.DegradedReason)
+	// Cache was never primed (every call failed), so the open-circuit
+	// fallback misses the cache → no_cached_prediction. The circuit_open
+	// reason surfaces only when there is a cached value to serve — see
+	// the resilience matrix test.
+	if pred.DegradedReason != prediction.ReasonNoCachedPrediction {
+		t.Errorf("DegradedReason=%q want no_cached_prediction", pred.DegradedReason)
 	}
 }
 
