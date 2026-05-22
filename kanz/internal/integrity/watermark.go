@@ -154,23 +154,13 @@ func (w *WatermarkTracker) Observe(env *envelopepb.Envelope) WatermarkResult {
 // data" primitive: a consumer/ingestor that finds an event late per its
 // WatermarkTracker stamps the flag so payload-blind tooling downstream
 // (DATA-05 reconciliation, DATA-07 reporting) sees it without re-running
-// watermark logic. DATA-06 wires this into the producers.
+// watermark logic. Delegates to the consolidated DATA-06 flag emitter
+// (Mark); kept as a named helper since lateness is detected here.
 func MarkLate(env *envelopepb.Envelope) {
-	if env == nil || IsLate(env) {
-		return
-	}
-	env.QualityFlags = append(env.QualityFlags, envelopepb.QualityFlag_QUALITY_FLAG_LATE)
+	Mark(env, envelopepb.QualityFlag_QUALITY_FLAG_LATE)
 }
 
 // IsLate reports whether the envelope carries QUALITY_FLAG_LATE.
 func IsLate(env *envelopepb.Envelope) bool {
-	if env == nil {
-		return false
-	}
-	for _, qf := range env.QualityFlags {
-		if qf == envelopepb.QualityFlag_QUALITY_FLAG_LATE {
-			return true
-		}
-	}
-	return false
+	return Has(env, envelopepb.QualityFlag_QUALITY_FLAG_LATE)
 }

@@ -1,0 +1,120 @@
+{
+  "uid": "kanz-data-drift",
+  "title": "Input Drift",
+  "tags": ["kanz", "data-integrity", "drift"],
+  "timezone": "utc",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "1m",
+  "time": { "from": "now-24h", "to": "now" },
+  "templating": {
+    "list": [
+      {
+        "name": "datasource",
+        "label": "Data source",
+        "type": "datasource",
+        "query": "prometheus",
+        "current": {}
+      },
+      {
+        "name": "feature",
+        "label": "Feature",
+        "type": "textbox",
+        "query": ".*",
+        "current": { "text": ".*", "value": ".*" }
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "Features over threshold",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 6, "w": 8, "x": 0, "y": 0 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "red", "value": 1 }
+            ]
+          }
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "count(kanz_data_drift_score{feature=~\"$feature\"} > on (feature, metric) kanz_data_drift_threshold) or vector(0)"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "Max drift score",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 6, "w": 8, "x": 8, "y": 0 },
+      "fieldConfig": { "defaults": { "unit": "short", "decimals": 3 } },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max(kanz_data_drift_score{feature=~\"$feature\"})"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "Drift events / 1h",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 6, "w": 8, "x": 16, "y": 0 },
+      "fieldConfig": { "defaults": { "unit": "short" } },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(increase(kanz_data_quality_events_total{kind=\"drift\"}[1h]))"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "Drift score by feature",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 10, "w": 24, "x": 0, "y": 6 },
+      "fieldConfig": { "defaults": { "unit": "short", "decimals": 3, "custom": { "drawStyle": "line" } } },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "kanz_data_drift_score{feature=~\"$feature\"}",
+          "legendFormat": "{{feature}} ({{metric}})"
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "type": "table",
+      "title": "Current drift score vs threshold",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 9, "w": 24, "x": 0, "y": 16 },
+      "fieldConfig": { "defaults": { "unit": "short", "decimals": 4 } },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "kanz_data_drift_score{feature=~\"$feature\"}",
+          "format": "table",
+          "instant": true
+        },
+        {
+          "refId": "B",
+          "expr": "kanz_data_drift_threshold{feature=~\"$feature\"}",
+          "format": "table",
+          "instant": true
+        }
+      ]
+    }
+  ]
+}

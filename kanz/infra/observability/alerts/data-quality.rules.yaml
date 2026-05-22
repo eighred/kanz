@@ -1,0 +1,105 @@
+# Prometheus alerting rules for the data-integrity layer (DATA-09).
+#
+# Rules fire on the metric contract documented in
+# kanz/infra/observability/dashboards/README.md — the same surface the DATA-08
+# dashboards render. Thresholds mirror the detectors' own defaults so an alert
+# means "the detector would flag this": staleness 10s/60s
+# (DefaultStalenessConfig WarnAfter/CriticalAfter), PSI 0.25
+# (DefaultPSIThreshold), reconcile 30s (DefaultMatchDeadline). Per-stream
+# tuning is a deployment concern (override per source).
+#
+# severity label drives Alertmanager routing (see README): warning ⇒ ticket,
+# critical ⇒ page. layer="data-integrity" scopes routing/silences.
+groups:
+  - name: kanz-data-freshness
+    rules:
+      - alert: DataStalenessWarning
+        expr: max by (subject, partition_key) (kanz_data_staleness_lag_seconds) > 10
+        for: 2m
+        labels: { severity: warning, layer: data-integrity, dimension: freshness }
+        annotations:
+          summary: "Stream {{ $labels.subject }} is stale (> 10s)"
+          description: "ingestion lag {{ $value | humanizeDuration }} on {{ $labels.subject }}/{{ $labels.partition_key }} (warn budget 10s)."
+
+      - alert: DataStalenessCritical
+        expr: max by (subject, partition_key) (kanz_data_staleness_lag_seconds) > 60
+        for: 1m
+        labels: { severity: critical, layer: data-integrity, dimension: freshness }
+        annotations:
+          summary: "Stream {{ $labels.subject }} critically stale (> 60s)"
+          description: "ingestion lag {{ $value | humanizeDuration }} on {{ $labels.subject }}/{{ $labels.partition_key }}; downstream output likely acting on a stale view."
+
+  - name: kanz-data-completeness
+    rules:
+      - alert: DataSequenceGap
+        expr: increase(kanz_data_gap_missing_total[5m]) > 0
+        for: 0m
+        labels: { severity: critical, layer: data-integrity, dimension: completeness }
+        annotations:
+          summary: "Sequence gap on {{ $labels.subject }}"
+          description: "{{ $value }} producer_sequence values missing on {{ $labels.subject }}/{{ $labels.partition_key }} from {{ $labels.source }} in the last 5m — events were lost, not just delayed."
+
+      - alert: DataReconcileDiscrepancy
+        expr: increase(kanz_data_reconcile_discrepancies_total[10m]) > 0
+        for: 0m
+        labels: { severity: critical, layer: data-integrity, dimension: completeness }
+        annotations:
+          summary: "NATS↔Kafka divergence (seen on {{ $labels.seen_on }}, missing on {{ $labels.missing_on }})"
+          description: "{{ $value }} event(s) seen on {{ $labels.seen_on }} never confirmed on {{ $labels.missing_on }} within the match deadline — the live spine and the log of record diverged."
+
+      - alert: DataReconcileBacklogGrowing
+        expr: sum by (transport) (kanz_data_reconcile_pending) > 1000
+        for: 5m
+        labels: { severity: warning, layer: data-integrity, dimension: completeness }
+        annotations:
+          summary: "Reconciliation backlog high on {{ $labels.transport }}"
+          description: "{{ $value }} events pending cross-transport confirmation on {{ $labels.transport }} for 5m — one transport is lagging the other or the reconciler is starved."
+
+      - alert: DataReconcileMatchLatencyHigh
+        expr: histogram_quantile(0.99, sum by (le) (rate(kanz_data_reconcile_match_latency_seconds_bucket[5m]))) > 30
+        for: 5m
+        labels: { severity: warning, layer: data-integrity, dimension: completeness }
+        annotations:
+          summary: "NATS↔Kafka match latency p99 > 30s"
+          description: "p99 match latency {{ $value | humanizeDuration }} approaches the 30s match deadline; discrepancies are imminent if it keeps rising."
+
+  - name: kanz-data-drift
+    rules:
+      - alert: DataInputDriftWarning
+        expr: kanz_data_drift_score > on (feature, metric) kanz_data_drift_threshold
+        for: 10m
+        labels: { severity: warning, layer: data-integrity, dimension: drift }
+        annotations:
+          summary: "Input drift on {{ $labels.feature }} ({{ $labels.metric }})"
+          description: "drift score {{ $value }} exceeds the configured threshold for {{ $labels.feature }}; model inputs have shifted from baseline."
+
+      - alert: DataInputDriftCritical
+        expr: kanz_data_drift_score > on (feature, metric) (2 * kanz_data_drift_threshold)
+        for: 5m
+        labels: { severity: critical, layer: data-integrity, dimension: drift }
+        annotations:
+          summary: "Severe input drift on {{ $labels.feature }} ({{ $labels.metric }})"
+          description: "drift score {{ $value }} is more than 2× the threshold for {{ $labels.feature }}; predictions on this feature should be treated as unreliable."
+
+  - name: kanz-data-quality-events
+    rules:
+      # Catch-all over the DATA-07 emission stream: any critical-severity
+      # DataQualityEvent pages, independent of the per-dimension rules above
+      # (a future detector kind emitting CRITICAL is covered without a new rule).
+      - alert: DataQualityCriticalEvent
+        expr: sum by (kind, subject) (increase(kanz_data_quality_events_total{severity="critical"}[5m])) > 0
+        for: 0m
+        labels: { severity: critical, layer: data-integrity, dimension: "{{ $labels.kind }}" }
+        annotations:
+          summary: "Critical data-quality event ({{ $labels.kind }}) on {{ $labels.subject }}"
+          description: "{{ $value }} critical {{ $labels.kind }} DataQualityEvent(s) published for {{ $labels.subject }} in the last 5m."
+
+      # The data-integrity exporter stopped reporting — blind to all of the
+      # above. Guards against a silent monitoring outage.
+      - alert: DataQualityMetricsMissing
+        expr: absent(kanz_data_quality_events_total)
+        for: 10m
+        labels: { severity: warning, layer: data-integrity, dimension: meta }
+        annotations:
+          summary: "Data-integrity metrics absent"
+          description: "no kanz_data_quality_events_total series for 10m — the integrity exporter is down or unscraped; data-quality monitoring is blind."
