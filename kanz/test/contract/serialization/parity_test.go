@@ -68,8 +68,12 @@ func TestRoundTripParity(t *testing.T) {
 // the test fails with the regen command. Skips when the directory is
 // absent (dev hasn't run the generator yet).
 func TestCommittedFixturesMatchGenerator(t *testing.T) {
-	if _, err := os.Stat(fixturesDir); os.IsNotExist(err) {
-		t.Skipf("%s/ not present — run: go run ./cmd/genfixtures -out %s", fixturesDir, fixturesDir)
+	// The .bin/manifest.json are generator output (CI runs genfixtures before
+	// the test; only the README is committed). Skip when they're absent —
+	// the directory itself exists for the README, so probe the manifest, not
+	// the directory. Mirrors the Python/TS suites' skip-if-absent behavior.
+	if _, err := os.Stat(filepath.Join(fixturesDir, "manifest.json")); os.IsNotExist(err) {
+		t.Skipf("%s/ not generated — run: go run ./cmd/genfixtures -out %s", fixturesDir, fixturesDir)
 	}
 	m, err := serialization.BuildAll()
 	if err != nil {
@@ -88,10 +92,15 @@ func TestCommittedFixturesMatchGenerator(t *testing.T) {
 	}
 }
 
-func assertEnvelopeMatches(t *testing.T, want, got *envelopepb.Envelope) {
+// assertEnvelopeMatches compares the round-tripped proto envelope against the
+// manifest's language-agnostic EnvelopeFields — the same field description
+// every cross-language parity test (Python, TS) asserts against, so the
+// contract is wire-form, not Go-specific (enums as string names, timestamps
+// split into seconds/nanos).
+func assertEnvelopeMatches(t *testing.T, want serialization.EnvelopeFields, got *envelopepb.Envelope) {
 	t.Helper()
-	if got.EventId != want.EventId {
-		t.Errorf("EventId=%q want %q", got.EventId, want.EventId)
+	if got.EventId != want.EventID {
+		t.Errorf("EventId=%q want %q", got.EventId, want.EventID)
 	}
 	if got.EventType != want.EventType {
 		t.Errorf("EventType=%q want %q", got.EventType, want.EventType)
@@ -102,26 +111,26 @@ func assertEnvelopeMatches(t *testing.T, want, got *envelopepb.Envelope) {
 	if got.EnvelopeVersion != want.EnvelopeVersion {
 		t.Errorf("EnvelopeVersion=%d want %d", got.EnvelopeVersion, want.EnvelopeVersion)
 	}
-	if got.EventClass != want.EventClass {
-		t.Errorf("EventClass=%v want %v", got.EventClass, want.EventClass)
+	if got.EventClass.String() != want.EventClass {
+		t.Errorf("EventClass=%v want %v", got.EventClass.String(), want.EventClass)
 	}
 	if got.Domain != want.Domain {
 		t.Errorf("Domain=%q want %q", got.Domain, want.Domain)
 	}
-	if !tsEqual(got.EventTime, want.EventTime) {
+	if !tsMatches(got.EventTime, want.EventTime) {
 		t.Errorf("EventTime=%v want %v", got.EventTime, want.EventTime)
 	}
-	if !tsEqual(got.IngestionTime, want.IngestionTime) {
+	if !tsMatches(got.IngestionTime, want.IngestionTime) {
 		t.Errorf("IngestionTime=%v want %v", got.IngestionTime, want.IngestionTime)
 	}
-	if !tsEqual(got.PublishTime, want.PublishTime) {
+	if !tsMatches(got.PublishTime, want.PublishTime) {
 		t.Errorf("PublishTime=%v want %v", got.PublishTime, want.PublishTime)
 	}
-	if got.CorrelationId != want.CorrelationId {
-		t.Errorf("CorrelationId=%q want %q", got.CorrelationId, want.CorrelationId)
+	if got.CorrelationId != want.CorrelationID {
+		t.Errorf("CorrelationId=%q want %q", got.CorrelationId, want.CorrelationID)
 	}
-	if got.CausationId != want.CausationId {
-		t.Errorf("CausationId=%q want %q", got.CausationId, want.CausationId)
+	if got.CausationId != want.CausationID {
+		t.Errorf("CausationId=%q want %q", got.CausationId, want.CausationID)
 	}
 	if got.TraceContext != want.TraceContext {
 		t.Errorf("TraceContext=%q want %q", got.TraceContext, want.TraceContext)
@@ -149,15 +158,20 @@ func assertEnvelopeMatches(t *testing.T, want, got *envelopepb.Envelope) {
 		return
 	}
 	for i := range want.QualityFlags {
-		if got.QualityFlags[i] != want.QualityFlags[i] {
-			t.Errorf("QualityFlags[%d]=%v want %v", i, got.QualityFlags[i], want.QualityFlags[i])
+		if got.QualityFlags[i].String() != want.QualityFlags[i] {
+			t.Errorf("QualityFlags[%d]=%v want %v", i, got.QualityFlags[i].String(), want.QualityFlags[i])
 		}
 	}
 }
 
-func tsEqual(a, b *timestamppb.Timestamp) bool {
-	if a == nil || b == nil {
-		return a == nil && b == nil
+// tsMatches compares a proto Timestamp against the manifest's split
+// seconds/nanos form. A nil proto timestamp reads as the zero {0,0}, matching
+// serialization.tsFromPB's nil handling.
+func tsMatches(got *timestamppb.Timestamp, want serialization.TimeStamp) bool {
+	var s int64
+	var n int32
+	if got != nil {
+		s, n = got.Seconds, got.Nanos
 	}
-	return a.Seconds == b.Seconds && a.Nanos == b.Nanos
+	return s == want.Seconds && n == want.Nanos
 }

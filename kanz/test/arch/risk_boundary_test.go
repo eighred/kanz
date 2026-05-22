@@ -39,10 +39,21 @@ import (
 )
 
 const (
-	modulePath        = "github.com/kanz-eng/kanz"
-	riskModulePrefix  = modulePath + "/internal/risk/"
-	riskAPIPrefix     = modulePath + "/internal/risk/api/"
+	modulePath = "github.com/kanz-eng/kanz"
+	// riskRoot is the risk module's root package itself (package risk —
+	// RISK-11 degraded.go, the cross-cutting home). It has no trailing
+	// slash, so the riskModulePrefix check below misses it; it is
+	// risk-internal and must be classified as such, not as an outsider.
+	riskRoot         = modulePath + "/internal/risk"
+	riskModulePrefix = riskRoot + "/"
+	riskAPIPrefix    = riskRoot + "/api/"
 )
+
+// isRiskInternal reports whether an import path is the risk module's root
+// package or any package beneath it.
+func isRiskInternal(importPath string) bool {
+	return importPath == riskRoot || strings.HasPrefix(importPath, riskModulePrefix)
+}
 
 // pkgInfo is the subset of `go list -json` output the arch tests need.
 // Imports is direct runtime imports; TestImports / XTestImports are
@@ -125,8 +136,9 @@ func TestRiskBoundary_OutsidersUseAPIOnly(t *testing.T) {
 		if pkg.Standard {
 			continue
 		}
-		// Risk-internal packages are allowed to import each other.
-		if strings.HasPrefix(pkg.ImportPath, riskModulePrefix) {
+		// Risk-internal packages (the root package + sub-packages) are
+		// allowed to import each other.
+		if isRiskInternal(pkg.ImportPath) {
 			continue
 		}
 		for _, imp := range allImports(pkg) {

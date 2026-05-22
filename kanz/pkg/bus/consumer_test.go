@@ -53,7 +53,8 @@ func TestConsumerStashesPropagationOnContext(t *testing.T) {
 	inbound := validEnvelope()
 	inbound.EventId = "evt-A"
 	inbound.CorrelationId = "corr-1"
-	inbound.IdempotencyKey = "evt-A"
+	inbound.EventId = "evt-A"
+	inbound.IdempotencyKey = "evt-A" // FACT: idempotency_key == event_id
 	inbound.TraceContext = "00-trace-span-01"
 
 	sub := &oneShotSub{msg: bus.Message{Subject: "x", Body: frame(t, inbound, []byte("p"))}}
@@ -151,7 +152,8 @@ func TestConsumerToProducerChainsLineage(t *testing.T) {
 	inbound := validEnvelope()
 	inbound.EventId = "evt-A"
 	inbound.CorrelationId = "corr-root"
-	inbound.IdempotencyKey = "evt-A"
+	inbound.EventId = "evt-A"
+	inbound.IdempotencyKey = "evt-A" // FACT: idempotency_key == event_id
 	inbound.TraceContext = "00-trace-span-01"
 
 	sub := &oneShotSub{msg: bus.Message{Body: frame(t, inbound, []byte("a-payload"))}}
@@ -207,7 +209,8 @@ func TestNewConsumerRejectsNil(t *testing.T) {
 
 func TestConsumerDedupsRepeatedDelivery(t *testing.T) {
 	inbound := validEnvelope()
-	inbound.IdempotencyKey = "evt-A"
+	inbound.EventId = "evt-A"
+	inbound.IdempotencyKey = "evt-A" // FACT: idempotency_key == event_id
 	sub := &multiShotSub{msg: bus.Message{Body: frame(t, inbound, []byte("p"))}, times: 3}
 	c, _ := bus.NewConsumer(sub)
 
@@ -228,7 +231,8 @@ func TestConsumerDoesNotDedupOnHandlerFailure(t *testing.T) {
 	// Dedup window records only after a successful dispatch, so a failing
 	// handler must remain retry-able (broker keeps redelivering).
 	inbound := validEnvelope()
-	inbound.IdempotencyKey = "evt-A"
+	inbound.EventId = "evt-A"
+	inbound.IdempotencyKey = "evt-A" // FACT: idempotency_key == event_id
 	sub := &multiShotSub{msg: bus.Message{Body: frame(t, inbound, nil)}, times: 3}
 	c, _ := bus.NewConsumer(sub)
 
@@ -245,7 +249,8 @@ func TestConsumerDoesNotDedupOnHandlerFailure(t *testing.T) {
 
 func TestConsumerWithDedupDisabled(t *testing.T) {
 	inbound := validEnvelope()
-	inbound.IdempotencyKey = "evt-A"
+	inbound.EventId = "evt-A"
+	inbound.IdempotencyKey = "evt-A" // FACT: idempotency_key == event_id
 	sub := &multiShotSub{msg: bus.Message{Body: frame(t, inbound, nil)}, times: 3}
 	c, _ := bus.NewConsumer(sub, bus.WithDedupWindow(0, 0))
 
@@ -341,7 +346,8 @@ func fastRetry(maxAttempts int) bus.ConsumerOption {
 
 func TestConsumerRetriesUntilSuccess(t *testing.T) {
 	inbound := validEnvelope()
-	inbound.IdempotencyKey = "evt-A"
+	inbound.EventId = "evt-A"
+	inbound.IdempotencyKey = "evt-A" // FACT: idempotency_key == event_id
 	sub := &oneShotSub{msg: bus.Message{Body: frame(t, inbound, nil)}}
 	c, _ := bus.NewConsumer(sub, fastRetry(3))
 
@@ -370,7 +376,8 @@ func TestConsumerSurfacesAfterRetryWithoutDLQ(t *testing.T) {
 
 func TestConsumerRoutesToDLQAfterRetries(t *testing.T) {
 	inbound := validEnvelope()
-	inbound.IdempotencyKey = "evt-A"
+	inbound.EventId = "evt-A"
+	inbound.IdempotencyKey = "evt-A" // FACT: idempotency_key == event_id
 	sub := &oneShotSub{msg: bus.Message{Body: frame(t, inbound, nil)}}
 	dlq := &captureClient{}
 	c, _ := bus.NewConsumer(sub, fastRetry(3), bus.WithDLQ(dlq))
@@ -400,7 +407,7 @@ func TestConsumerRoutesToDLQAfterRetries(t *testing.T) {
 		t.Error("error header empty")
 	}
 	// Original wire headers (incl. Nats-Msg-Id if present) are preserved.
-	if _, err := bus.Unframe(dq.Body); err != nil {
+	if _, _, err := bus.Unframe(dq.Body); err != nil {
 		t.Errorf("DLQ body not framed: %v", err)
 	}
 }
@@ -449,7 +456,8 @@ func TestConsumerDLQRecordsDedupOnTerminal(t *testing.T) {
 	// After DLQ routing, future deliveries of the same idempotency_key
 	// dedup — the message is terminally handled.
 	inbound := validEnvelope()
-	inbound.IdempotencyKey = "evt-poison"
+	inbound.EventId = "evt-poison"
+	inbound.IdempotencyKey = "evt-poison" // FACT: idempotency_key == event_id
 	sub := &multiShotSub{msg: bus.Message{Body: frame(t, inbound, nil)}, times: 3}
 	dlq := &captureClient{}
 	c, _ := bus.NewConsumer(sub, fastRetry(1), bus.WithDLQ(dlq))
