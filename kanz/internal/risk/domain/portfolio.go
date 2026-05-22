@@ -130,6 +130,31 @@ func (p *Portfolio) AsOf() time.Time { return p.asOf }
 // (event-class-rules §3).
 func (p *Portfolio) LogPosition() *commonpb.LogPosition { return p.logPosition }
 
+// Clone returns a deep copy of the portfolio's value fields and a fresh
+// positions map. Position is a value struct whose pointer fields
+// (*Money / *Decimal / *LogPosition) reference protos the engine treats
+// as immutable (RISK-05 replaces a whole Position via SetPosition, never
+// mutates a Money in place), so copying the map by value is a true
+// snapshot. Used by state.Store.Snapshot to hand a consistent, race-free
+// portfolio to the compute layer while applies continue on the original.
+func (p *Portfolio) Clone() *Portfolio {
+	cp := &Portfolio{
+		id:               p.id,
+		displayName:      p.displayName,
+		baseCurrency:     p.baseCurrency,
+		cashBalance:      p.cashBalance,
+		totalMarketValue: p.totalMarketValue,
+		positionCount:    p.positionCount,
+		asOf:             p.asOf,
+		logPosition:      p.logPosition,
+		positions:        make(map[InstrumentID]Position, len(p.positions)),
+	}
+	for k, v := range p.positions {
+		cp.positions[k] = v
+	}
+	return cp
+}
+
 // Position returns the holding for the given instrument and true, or
 // the zero Position and false when the portfolio has no position.
 func (p *Portfolio) Position(id InstrumentID) (Position, bool) {

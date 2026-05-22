@@ -104,6 +104,29 @@ func (s *Store) Lookup(id v1.PortfolioID) (*domain.Portfolio, bool) {
 	return p, ok
 }
 
+// Snapshot returns a race-free deep clone of the portfolio, taken while
+// holding the per-aggregate lock, or nil/false when the portfolio is
+// unknown. This is the locked-read boundary the compute/query paths use
+// instead of Lookup: applies for the same portfolio are serialized by
+// the same lock, so the clone is a consistent point-in-time view that
+// the caller can compute against while subsequent applies proceed on the
+// live copy. Cheap — typical portfolios hold tens to hundreds of
+// value-copied positions.
+func (s *Store) Snapshot(id v1.PortfolioID) (*domain.Portfolio, bool) {
+	s.mu.Lock()
+	lock := s.locks[id]
+	port, ok := s.portfolios[id]
+	s.mu.Unlock()
+	if !ok {
+		return nil, false
+	}
+	if lock != nil {
+		lock.Lock()
+		defer lock.Unlock()
+	}
+	return port.Clone(), true
+}
+
 // IDs returns the set of known portfolio IDs. Used by the api/v1
 // surface's Health implementation and by tests.
 func (s *Store) IDs() []v1.PortfolioID {
