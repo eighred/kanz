@@ -15,13 +15,251 @@ Task IDs are module-prefixed (`EVT`, `RISK`, `PRED`, `DATA`). Each item is scope
 
 ### Data Integrity Layer
 
-- [ ] **DATA-05** Implement NATS-vs-Kafka reconciliation for correctness-sensitive consumers · `kanz/internal/integrity/reconcile.go`
-- [ ] **DATA-06** Wire `quality_flags` emission across ingestion + producers · `kanz/internal/integrity/flags.go`
-- [ ] **DATA-07** Emit data-quality events (gap, staleness, drift) to the bus · `kanz/internal/integrity/publish.go`
-- [ ] **DATA-08** Build data-observability dashboards (freshness, completeness, drift) · `kanz/infra/observability/dashboards/`
-- [ ] **DATA-09** Configure alerting on data-quality event thresholds · `kanz/infra/observability/alerts/`
-- [ ] **DATA-10** Tests: gap/staleness/drift detection under simulated bad data · `kanz/internal/integrity/`
-- [ ] **DATA-11** Tests: late-data path + reconciliation correctness · `kanz/internal/integrity/`
+_(none)_
+
+---
+
+## PLATFORM HARDENING ROADMAP — Phase 1 "Make It Real"
+
+> Converts the library/contract foundation (EVT/RISK/PRED/DATA epics) into a running, persistent, secured, observable system. New module prefixes: `ORCH` (runtime), `PERS` (persistence), `SEC` (security), `CICD` (delivery), `OBS` (telemetry). Sequenced by ROI ranks 1–6. Subtasks scoped 1–3 days; each epic carries its own `Tests:` subtask(s) per board convention.
+
+### Platform Runtime — risk-engine service + durable state
+
+_Objective: deploy a concrete `risk/api/v1.Engine` that ingests state, recomputes, publishes, and survives restarts. Unblocks the entire risk capability (ROI #1–2)._
+
+- [ ] **ORCH-01a** Scaffold `risk-engine` service: `main`, config loader, slog setup, `/healthz` + `/readyz` · `kanz/services/risk-engine/cmd/risk-engine/main.go`, `kanz/services/risk-engine/internal/config/`
+- [ ] **ORCH-01b** Implement concrete `EngineImpl` composing `state.Store` + `compute` + `Cache` + `Detector` behind `risk/api/v1.Engine` (lift the `computeExposureWithFlags` pattern from RISK-13 `integration_test.go` into production) · `kanz/internal/risk/engine/engine.go`
+- [ ] **ORCH-01c** Wire RISK-04 `Ingestor` → `state.Store` via `bus.Consumer` (subscribe `risk.portfolio.revalued` / `risk.position.changed` / `risk.portfolio.snapshot`); per-aggregate ordering preserved · `kanz/services/risk-engine/internal/app/ingest.go`
+- [ ] **ORCH-01d** Recompute trigger policy: debounced per-portfolio recompute on apply → `Cache.Store` on success → RISK-10 `Publisher.EmitExposure/EmitMeasures` · `kanz/internal/risk/engine/recompute.go`
+- [ ] **ORCH-01e** Graceful shutdown: stop consumers, drain in-flight applies, checkpoint, flush publisher · `kanz/services/risk-engine/internal/app/lifecycle.go`
+- [ ] **ORCH-01f** Tests: end-to-end harness over an in-memory `bus.Client` — publish state events, assert `exposure_recomputed`/`measures_computed` emitted with correct measures + p99 latency budget; degraded-on-stale path · `kanz/services/risk-engine/internal/app/app_test.go`
+- [ ] **PERS-01a** Define `StateStore` persistence interface (load/save portfolio + positions + `LogPosition`) + Postgres schema/migration (reuse schema-registry pgx pattern) · `kanz/internal/risk/state/persist/store.go`, `kanz/services/risk-engine/migrations/0001_state.sql`
+- [ ] **PERS-01b** Postgres-backed impl satisfying the `state.Store` apply/lookup contract; per-aggregate row locking; idempotency-key persistence · `kanz/internal/risk/state/persist/postgres.go`
+- [ ] **PERS-01c** Periodic `PortfolioSnapshot` emission carrying the durable `LogPosition` (EVT-11 bootstrap hook) · `kanz/internal/risk/engine/snapshot.go`
+- [ ] **PERS-01d** Bootstrap path: load latest snapshot → replay Kafka from its `LogPosition` (idempotent apply) → switch to live NATS spine · `kanz/services/risk-engine/internal/app/bootstrap.go`
+- [ ] **PERS-01e** Tests: crash-recovery (kill mid-stream → restart → state parity, RPO=0 events) + idempotent-replay (re-applied events don't double-count) · `kanz/internal/risk/state/persist/postgres_test.go`
+
+### Security & Identity
+
+_Objective: zero-trust transport + workload identity + secrets management. Gate to any institutional client or auditor (ROI #3)._
+
+- [ ] **SEC-01a** Workload identity issuance + rotation (SPIRE or cert-manager) manifests in the `kanz-messaging`/services namespaces · `kanz/infra/security/spire/`
+- [ ] **SEC-01b** Reusable mTLS transport helpers: gRPC server/client `tls.Config` from workload certs (covers PRED-06/07 inference path + future API) · `kanz/pkg/transport/tls.go`
+- [ ] **SEC-01c** Enable TLS/SASL on NATS + Kafka clients (`pkg/bus`) and update infra manifests (listeners, certs) · `kanz/pkg/bus/`, `kanz/infra/nats/`, `kanz/infra/kafka/`
+- [ ] **SEC-01d** Secrets via Vault/cloud KMS through CSI mounts; remove all plaintext config; document secret-rotation runbook · `kanz/infra/security/secrets/`
+- [ ] **SEC-01e** Tests: mTLS handshake + peer-identity assertion integration test; a plaintext/unauthenticated client is rejected · `kanz/pkg/transport/tls_test.go`
+
+### Delivery, Build & Observability
+
+_Objective: a CI/CD safety net for the `kanz` module, published schema SDKs, and the telemetry the DATA-08/09 dashboards already assume (ROI #4–6)._
+
+- [ ] **CICD-01a** GitHub Actions Go pipeline: `go build` + `go vet` + `go test -race` + `golangci-lint` + arch/contract test suites, `GOFLAGS=-mod=mod` · `.github/workflows/kanz-ci.yml`
+- [ ] **CICD-01b** Python (`pytest`) + TS (`vitest`) jobs + `buf breaking` gate on PRs touching `kanz-schemas/proto` · `.github/workflows/kanz-ci.yml`
+- [ ] **CICD-01c** Per-service distroless container builds (start with `risk-engine`, `schema-registry`) · `kanz/services/*/Dockerfile`, `.github/workflows/build.yml`
+- [ ] **CICD-01d** Supply-chain gate: SBOM (syft) + scan (trivy, fail on critical) + image signing (cosign) + admission verification · `.github/workflows/release.yml`
+- [ ] **CICD-01e** Progressive delivery (canary) + automated rollback wiring · `kanz/infra/deploy/`
+- [ ] **DEBT-01a** Run `schema-release.yml` → publish + tag the `kanz-schemas-go` companion module repo · _(kanz-schemas CI)_
+- [ ] **DEBT-01b** Publish Python (PyPI/private index) + TS (npm `@kanz-eng/kanz-schemas`) SDK artifacts · _(kanz-schemas CI)_
+- [ ] **DEBT-01c** Pin published SDK versions; remove the local `replace github.com/kanz-eng/kanz-schemas-go => ../kanz-schemas/gen/go` in `kanz/go.mod` (+ kanz-py/ts equivalents) · `kanz/go.mod`, `kanz-py/pyproject.toml`
+- [ ] **DEBT-01d** CI guard: fail the build if any `replace` directive or stale gen/ path reappears · `.github/workflows/kanz-ci.yml`
+- [ ] **OBS-01a** `pkg/observability`: OTel SDK init + Prometheus registry + slog→OTel bridge + `/metrics` handler helper · `kanz/pkg/observability/`
+- [ ] **OBS-01b** Integrity metrics exporter — wrap the DATA-01..05 detectors to emit the `kanz_data_*` gauges/counters/histogram exactly per the DATA-08 contract README · `kanz/internal/integrity/metrics.go`
+- [ ] **OBS-01c** Risk + bus RED/USE metrics + Kafka/NATS consumer-lag + pending gauges (the KEDA autoscale signal) · `kanz/pkg/bus/metrics.go`, `kanz/internal/risk/engine/metrics.go`
+- [ ] **OBS-01d** W3C `trace_context` (already on the envelope) → OTel span propagation across every bus hop (Producer/Consumer) · `kanz/pkg/bus/`, `kanz/pkg/observability/trace.go`
+- [ ] **OBS-01e** Tests: metric-emission unit tests assert the exact DATA-08 series names + label sets exist (so dashboards/alerts can't silently break) · `kanz/internal/integrity/metrics_test.go`
+
+---
+
+## PLATFORM HARDENING ROADMAP — Phase 2 "Safe For Clients"
+
+> Makes the running system multi-client: a governed external surface, identity-based access control, and tenant isolation. New prefixes: `API` (edge/BFF), `AUTH` (authn/authz), `MT` (multi-tenancy). ROI ranks 7–9. Depends on Phase 1 (notably ORCH-01 runtime, SEC-01 mTLS, PERS-01 durable state).
+
+### External API Gateway & BFF
+
+_Objective: an authenticated, rate-limited, versioned external surface over the risk `Engine` read/scenario API. The only governed entry point for clients and UIs (ROI #7)._
+
+- [ ] **API-01a** Define the Engine read surface as a gRPC service proto (`Exposure`/`Measures`/`EvaluateScenario`/`Health`) reusing `domain.v1` + risk payloads; CODEOWNERS + buf discovery · `kanz-schemas/proto/query/v1/risk_query.proto`
+- [ ] **API-01b** Implement the gRPC query server inside `risk-engine`, backed by the concrete `EngineImpl` (ORCH-01b); reads served from durable state (PERS-01) · `kanz/services/risk-engine/internal/grpcsrv/`
+- [ ] **API-01c** Build the `api-gateway` BFF: gRPC + REST transcoding (grpc-gateway/Connect), OpenAPI emit, API version negotiation, forwards to `risk-engine` over mTLS · `kanz/services/api-gateway/cmd/api-gateway/`, `internal/`
+- [ ] **API-01d** Edge controls: OIDC/JWT auth middleware (consumes AUTH-01), per-tenant rate limits + quotas, idempotency-key dedup, request signing · `kanz/services/api-gateway/internal/middleware/`
+- [ ] **API-01e** Tests: gateway contract tests — authz required (401/403), rate-limit (429), gRPC↔REST transcoding parity, query p99 budget, version-negotiation matrix · `kanz/services/api-gateway/internal/`
+
+### AuthN / AuthZ — RBAC + ABAC
+
+_Objective: identity on every request and fine-grained, deny-by-default authorization on every query/command. Compliance + client requirement (ROI #8)._
+
+- [ ] **AUTH-01a** OIDC integration + JWT validation middleware → typed `Principal` (subject, tenant, roles, claims) on ctx · `kanz/pkg/auth/principal.go`, `kanz/pkg/auth/oidc.go`
+- [ ] **AUTH-01b** Authorization layer over a policy engine (OPA/Cedar): portfolio- and tenant-scoped, deny-by-default; policy bundle in infra · `kanz/pkg/auth/authz.go`, `kanz/infra/security/policies/`
+- [ ] **AUTH-01c** Command issuer verification: bind the authenticated `Principal` to `command.v1.CommandMetadata.issuer` at publish/validate; reject mismatch (forged-issuer guard) · `kanz/pkg/bus/validate.go` (or a command-validation hook)
+- [ ] **AUTH-01d** Authorization decision logging into the observation stream (`DecisionLog` or a dedicated authz FACT) so every allow/deny is auditable (feeds AUDIT-01) · `kanz/pkg/auth/audit.go`
+- [ ] **AUTH-01e** Tests: role×resource policy matrix (allow/deny), deny-by-default on unknown action, issuer-mismatch rejection, tenant-scope enforcement · `kanz/pkg/auth/authz_test.go`
+
+### Multi-Tenancy Foundation
+
+_Objective: tenant as a first-class isolation boundary across events, state, brokers, metrics, and access. Costly to retrofit — land before onboarding real clients (ROI #9)._
+
+- [ ] **MT-01a** Add `tenant_id` to the Envelope as an additive field (envelope-policy additive-only discipline; new field number, forward-compatible per EVT-21c). **Replay nuance**: `Validate` requires `tenant_id` on live publish, but pre-tenancy events read from old Kafka logs lack it — map those to a reserved `__system__` tenant on the replay path rather than rejecting (preserves EVT-20 replay determinism) · `kanz-schemas/proto/envelope/v1/envelope.proto`, `kanz/pkg/bus/validate.go`
+- [ ] **MT-01b** Tenant propagation through the bus: Producer stamps `tenant_id` from ctx/config; Consumer stashes it onto ctx (same mechanism as lineage, EVT-17c) so derived events inherit it · `kanz/pkg/bus/producer.go`, `kanz/pkg/bus/context.go`, `kanz/pkg/bus/consumer.go`
+- [ ] **MT-01c** Broker-level isolation: NATS accounts per tenant (or `{tenant}.{domain}.>` subject prefixing) + Kafka topic-prefix strategy + per-tenant ACLs; reconcile with EVT-08/09 provisioning · `kanz/infra/nats/`, `kanz/infra/kafka/`
+- [ ] **MT-01d** State isolation: Postgres row-level security (RLS) keyed on `tenant_id` across risk state (PERS-01) + schema registry + any per-tenant store; tenant set from the authenticated session GUC · `kanz/internal/risk/state/persist/`, `kanz/services/*/migrations/`
+- [ ] **MT-01e** Per-tenant quotas, rate limits, admission control (noisy-neighbor protection at the gateway + inference admission), and a `tenant` label on all `kanz_*` metrics (extends OBS-01) · `kanz/services/api-gateway/internal/`, `kanz/pkg/observability/`
+- [ ] **MT-01f** Tenant lifecycle automation: onboard/offboard provisions account/topics/policies/RLS scope/schema in one workflow · `kanz/infra/tenancy/`
+- [ ] **MT-01g** Tests: cross-tenant isolation contract tree — an event or query scoped to tenant A is provably never visible to tenant B across bus + store + API; an RLS-escape attempt fails; replay of legacy untenanted events lands in `__system__` · `kanz/test/contract/tenancy/`
+
+---
+
+## PLATFORM HARDENING ROADMAP — Phase 3 "Value & Maturity"
+
+> Turns the placeholder risk math into real analytics, governs the models, and earns regulatory + operational trust. New prefixes: `MODEL` (quant analytics + data plane), `MLOPS` (model governance), `SRE` (reliability), `AUDIT` (auditability), `DR` (disaster recovery). Depends on Phase 1–2 (runtime, persistence, observability, tenancy).
+
+### Real Risk Analytics & Market Data Plane
+
+_Objective: replace the RISK-07 placeholder measures (VaR=1%×gross, Delta=net) with genuine VaR / factor / sensitivity analytics backed by a market & historical data plane. This is the actual product value (ROI #12). The RISK-07 `Registry` is the designed seam — quants register real `MeasureFunc`s without touching `api/v1` or callers._
+
+- [ ] **MODEL-01a** Define reference + market-history schemas: instrument reference (identifiers, asset_class, sector, currency), price/return history (builds on EVT-10 `market.v1`) · `kanz-schemas/proto/reference/v1/instrument.proto`
+- [ ] **MODEL-01b** Market-data ingestion service: consume `market.*` events → time-series store (ClickHouse/Timescale) with point-in-time-correct reads · `kanz/services/market-data/`, `kanz/internal/marketdata/store/`
+- [ ] **MODEL-01c** Historical-returns provider injected into VaR `MeasureFunc`s via closure — keeps the pure `func(*Portfolio) v1.Measure` call-site signature while the func closes over the data provider held in the Registry · `kanz/internal/risk/compute/marketdata.go`
+- [ ] **MODEL-01d** Historical-simulation VaR measure registered over the RISK-07 `Registry` (replaces the 1%×gross placeholder; the RISK-12 property test that pins `VaR99/Gross=0.01` intentionally breaks here as failure-as-documentation) · `kanz/internal/risk/compute/var/historical.go`
+- [ ] **MODEL-01e** Monte-Carlo VaR with a correlated factor-shock model · `kanz/internal/risk/compute/var/montecarlo.go`
+- [ ] **MODEL-01f** Factor model + instrument→sector lookup → completes the RISK-06 `ExposureBySector` deferral (the deferred dimension needed exactly this reference table) · `kanz/internal/risk/compute/factor/`
+- [ ] **MODEL-01g** Wire real volatility/covariance into the RISK-08 uncertainty path (populate `domain.Position.MarketValueUncertainty` from the vol model — RISK-08's propagation is already built and currently fed nil) · `kanz/internal/risk/compute/uncertainty.go`, `kanz/internal/risk/engine/`
+- [ ] **MODEL-01h** Stress/scenario library extending RISK-09: named historical scenarios (2008, COVID) + hypothetical curve shifts as new shock types in `api/v1/scenario.go` + dispatch · `kanz/internal/risk/scenario/library/`
+- [ ] **MODEL-01i** Tests: VaR backtest (exception rate within Kupiec band over historical window), independent-reference reconciliation within tolerance, point-in-time correctness (no future leakage) · `kanz/internal/risk/compute/var/`
+
+### Model Validation, Explainability & Governance (MLOps)
+
+_Objective: no model serves production without recorded validation; drift auto-triggers revalidation; every prediction is explainable. SR 11-7 / model-risk compliance (ROI #13). Scaffolding already exists — PRED-09 registry, PRED-10 shadow/canary, PRED-02 confidence/degraded, DATA-04 drift._
+
+- [ ] **MLOPS-01a** Add a validation-status gate to the PRED-09 `Registry`: a model cannot be registered `primary` without a recorded, non-expired validation record · `kanz-py/kanz_inference/registry/`
+- [ ] **MLOPS-01b** Validation suite: holdout/backtest metrics, calibration check (feeds PRED-02 §2.3 per-model `confidence_threshold` — uncalibrated ⇒ always DEGRADED), stability/bias · `kanz-py/kanz_inference/validation/`
+- [ ] **MLOPS-01c** Drift→revalidation loop: a DATA-07 `drift_detected` event for a model's feature triggers an automated revalidation/retrain signal · `kanz-py/kanz_inference/governance/drift_trigger.py`
+- [ ] **MLOPS-01d** Explainability: populate `PredictionEnvelope.explanation` (SHAP-style per-feature contributions — the field already exists in PRED-01) on the inference path · `kanz-py/kanz_inference/explain/`
+- [ ] **MLOPS-01e** Champion/challenger promotion driven by the PRED-10 `ShadowObserver` writing comparison metrics to a store; promotion gated on challenger out-performance + validation · `kanz-py/kanz_inference/governance/promotion.py`
+- [ ] **MLOPS-01f** Real point-in-time feature store behind the existing PRED-11 `FeatureStore` Protocol (Feast or equivalent) replacing the trivial in-memory impl — the boundary was designed for exactly this swap · `kanz-py/kanz_inference/featurestore/`
+- [ ] **MLOPS-01g** Model cards + approval workflow + model→feature→training-data lineage record · `kanz-py/kanz_inference/governance/`
+- [ ] **MLOPS-01h** Tests: promotion-blocked-without-validation, drift-triggers-revalidation, explanation-present-on-every-prediction, champion/challenger selection correctness · `kanz-py/tests/`
+
+### Reliability — SLOs, Error Budgets, Chaos
+
+_Objective: prove the resilience primitives (RISK-11 degraded mode, PRED-07 circuit breaker, EVT-17e DLQ/retry, PRED-08 admission control) actually hold under real faults (ROI #17)._
+
+- [ ] **SRE-01a** Define per-service SLIs/SLOs (availability, query latency, data freshness from DATA-02) + error-budget policy · `kanz/infra/observability/slo/`
+- [ ] **SRE-01b** SLO recording rules + multi-window burn-rate alerts (extends DATA-09, over the OBS-01 metrics) · `kanz/infra/observability/slo/`
+- [ ] **SRE-01c** Chaos experiments: broker kill, network partition, latency injection, pod eviction — assert degraded-mode/circuit-breaker/DLQ behave as designed · `kanz/infra/chaos/`
+- [ ] **SRE-01d** Scheduled GameDay suite + runbooks-as-code · `kanz/infra/chaos/gamedays/`, `kanz/docs/runbooks/`
+- [ ] **SRE-01e** Load/soak harness establishing baseline capacity + the LATENCY-01 p99 budget · `kanz/test/load/`
+
+### Auditability & Regulatory Reporting
+
+_Objective: tamper-evident reconstruction of every decision, command, and data-quality event. Institutional + regulatory non-negotiable (ROI #18). The lineage substrate (correlation/causation, DecisionLog, CommandOutcome, FACT-grade quality events) already exists — consolidate and make it tamper-evident._
+
+- [ ] **AUDIT-01a** Append-only audit projection: a consumer materializes decisions, commands, outcomes, quality events, and AUTH-01d authz decisions into a queryable audit store · `kanz/services/audit/`
+- [ ] **AUDIT-01b** Tamper-evidence: hash-chaining over the audit log + WORM/object-lock storage · `kanz/services/audit/internal/chain/`
+- [ ] **AUDIT-01c** Causal-chain reconstruction API: given any `event_id`, walk `correlation_id`/`causation_id` to the full upstream lineage (the chain EVT-17c builds) · `kanz/services/audit/internal/lineage/`
+- [ ] **AUDIT-01d** Regulatory report generation (configurable templates) + retention/legal-hold policy · `kanz/services/audit/internal/report/`
+- [ ] **AUDIT-01e** Tests: reconstruct a decision to its inputs in <1min, tamper attempt detected by chain verification, sample regulatory report generated end-to-end · `kanz/services/audit/`
+
+### Disaster Recovery & Backup
+
+_Objective: provable cross-region RPO/RTO for the durable log, state stores, and registry. Continuity + regulatory (ROI #11)._
+
+- [ ] **DR-01a** Kafka cross-region replication (MirrorMaker2 / cluster-linking) of the log of record to a DR region · `kanz/infra/dr/kafka/`
+- [ ] **DR-01b** Postgres PITR + cross-region replicas (PERS-01 risk state + schema registry) · `kanz/infra/dr/postgres/`
+- [ ] **DR-01c** NATS DR: automate spine reconstruction from the Kafka log (the architecture already makes NATS rebuildable) with a documented RTO · `kanz/infra/dr/nats/`
+- [ ] **DR-01d** Failover automation + runbook: traffic shift, promote replicas, re-bootstrap services (PERS-01d) · `kanz/infra/dr/`, `kanz/docs/runbooks/dr.md`
+- [ ] **DR-01e** Quarterly DR drill validating RPO ≤ 1min / RTO ≤ 15min via live failover · `kanz/docs/runbooks/dr-drill.md`
+
+---
+
+## PLATFORM HARDENING ROADMAP — Phase 4 "Scale & Strategic Bets"
+
+> Closes the remaining cross-cutting scale/hardening gaps and the long-horizon bets that compound into Aladdin-class leverage. New prefixes: `INFRA` (cloud-native), `LATENCY` (hot-path), `SEC-02` (supply-chain/runtime), `DEBT-02/03` (coordination, Python CI), `LAKE` (lakehouse/backtest), `LIN` (lineage/governance), `AUTO` (autonomous ops), `DEVX` (developer platform). Scale/hardening epics come first since the bets depend on them.
+
+### Cloud-Native Platform
+
+_Objective: production K8s topology with IaC, GitOps, autoscaling, and multi-AZ resilience. Current manifests are single-cluster bootstrap (ROI #10)._
+
+- [ ] **INFRA-01a** Cloud foundation as IaC (Terraform/Pulumi): VPC, K8s cluster, managed/self-hosted Kafka + NATS + Postgres · `kanz/infra/terraform/`
+- [ ] **INFRA-01b** GitOps delivery (Argo CD/Flux): app-of-apps + per-environment overlays · `kanz/infra/gitops/`
+- [ ] **INFRA-01c** KEDA autoscaling on Kafka consumer lag / NATS pending — the OBS-01c signal and the exact PRED-14 backpressure premise (add workers to work down lag) · `kanz/infra/deploy/`
+- [ ] **INFRA-01d** Multi-AZ topology spread + PodDisruptionBudgets + resource quotas/limits · `kanz/infra/deploy/`
+- [ ] **INFRA-01e** Tests/validation: AZ-kill leaves the system serving; autoscaler demonstrably reacts to injected lag (ties SRE-01c chaos) · `kanz/infra/chaos/`
+
+### Low-Latency Hot Path
+
+_Objective: bound and shrink ingest→risk→publish latency under load — validate the latency premise the NATS spine was chosen for (ROI #16)._
+
+- [ ] **LATENCY-01a** Latency SLOs + continuous load test gating regressions in CI · `kanz/test/load/`
+- [ ] **LATENCY-01b** Profile the compute hot paths (Decimal arithmetic, map iteration in RISK-06/07 exposure/measures) · `kanz/internal/risk/compute/`
+- [ ] **LATENCY-01c** Optimizations: object pooling, batched framing, per-partition single-writer goroutines (lock-free state, an alternative the RISK-05 design noted) · `kanz/internal/risk/`, `kanz/pkg/bus/`
+- [ ] **LATENCY-01d** Tests: p99 budget held under 10× burst; `testing.B` benchmark regression guard in CI · `kanz/internal/risk/compute/`
+
+### Supply-Chain & Runtime Hardening
+
+_Objective: extend the CICD-01d build-side gate to runtime admission + dependency hygiene (ROI #19)._
+
+- [ ] **SEC-02a** Runtime hardening: distroless, non-root, read-only rootfs, seccomp/gVisor, K8s NetworkPolicies (default-deny) · `kanz/infra/security/runtime/`
+- [ ] **SEC-02b** Admission control verifies cosign signatures (from CICD-01d) + blocks critical-CVE images at deploy · `kanz/infra/security/admission/`
+- [ ] **SEC-02c** Dependency hygiene: Renovate/Dependabot automation + scheduled scan + a vuln-remediation SLA · `.github/`
+- [ ] **SEC-02d** Secret scanning (gitleaks) in CI + pre-commit hook · `.github/workflows/`, `kanz/.githooks/`
+- [ ] **SEC-02e** Tests: an unsigned or critical-CVE image is rejected by admission; a planted secret blocks CI · `kanz/infra/security/`
+
+### Distributed Coordination (Tech Debt)
+
+_Objective: replace per-process in-memory state with shared/distributed state where horizontal scale-out needs strong guarantees (ROI #14)._
+
+- [ ] **DEBT-02a** Distributed dedup-window option (Redis/Dragonfly) behind the existing EVT-17d `DedupWindow` API · `kanz/pkg/bus/dedup.go`
+- [ ] **DEBT-02b** Coordinate the PRED-09 model registry (back on `platform.model` topic + cache) and offer a shared-state DATA-05 reconciler mode · `kanz-py/kanz_inference/registry/`, `kanz/internal/integrity/reconcile.go`
+- [ ] **DEBT-02c** Document strong-vs-best-effort guarantees per component (which rely on idempotent handlers vs shared state) · `kanz/docs/coordination.md`
+- [ ] **DEBT-02d** Tests: N-replica consumer group under chaos redelivery → no duplicate side-effects · `kanz/pkg/bus/`
+
+### Python CI Hardening (Tech Debt)
+
+_Objective: stop the `kanz-py` path rotting — documented stale tests + missing gRPC stubs (ROI #15)._
+
+- [ ] **DEBT-03a** Generate Python gRPC stubs into the SDK so the PRED-08 interactive-servicer tests run · `kanz-schemas/buf.gen.yaml`, `kanz-py/`
+- [ ] **DEBT-03b** Fix the 16 stale `test_consumer.py` tests (`Message(subject=...)` required positional arg, EVT-18d) · `kanz-py/tests/test_consumer.py`
+- [ ] **DEBT-03c** Wire `kanz-py` into the CICD-01b pytest job (suite green, gated) · `.github/workflows/kanz-ci.yml`
+
+### Lakehouse & Backtesting Plane
+
+_Objective: stream the event log into an analytical store for backtesting, research, and training. The system is backtest-ready by design (EVT-21d replay determinism + PRED-11 point-in-time store) but has no analytical store to exploit it (ROI #20)._
+
+- [ ] **LAKE-01a** CDC/sink from the Kafka log → lakehouse (Iceberg/Delta), schema-evolution-aware (consumes registry EVT-16 descriptors) · `kanz/services/lake-sink/`
+- [ ] **LAKE-01b** Point-in-time-correct dataset/feature materialization (joins MODEL-01b market history + MLOPS-01f feature store) · `kanz/services/lake-sink/internal/`
+- [ ] **LAKE-01c** Backtest harness reusing the EVT-20 replay pipeline + point-in-time store · `kanz/tools/backtest/`
+- [ ] **LAKE-01d** Research access: query engine (Trino) + notebook environment over the lakehouse · `kanz/infra/lakehouse/`
+- [ ] **LAKE-01e** Tests: a strategy backtested over historical events reproduces live decisions bit-for-bit (leverages EVT-21d determinism) · `kanz/tools/backtest/`
+
+### Data Lineage & Governance Catalog
+
+_Objective: an automated, queryable lineage graph + data catalog + PII governance. Per-event lineage exists on the wire; nothing aggregates it (ROI #21)._
+
+- [ ] **LIN-01a** Harvest envelope lineage (correlation/causation/source/schema_ref) into an OpenLineage emitter · `kanz/services/lineage/`
+- [ ] **LIN-01b** Data catalog (DataHub/OpenMetadata): datasets, schemas (from the EVT-16 registry), ownership (CODEOWNERS), classification · `kanz/infra/catalog/`
+- [ ] **LIN-01c** PII tagging + governance policy + access logging (ties AUTH-01b authz + MT-01d tenant scope) · `kanz/services/lineage/internal/governance/`
+- [ ] **LIN-01d** "Where did this number come from" lineage query/UI over the graph (complements the AUDIT-01c causal chain) · `kanz/services/lineage/internal/query/`
+- [ ] **LIN-01e** Tests: any output's full upstream lineage is queryable; PII access is governed + logged · `kanz/services/lineage/`
+
+### Autonomous Operations
+
+_Objective: closed-loop ops — the signals already exist (consumer lag, DATA-07 quality events, drift, circuit-breaker state, degraded mode); add the actuation layer (ROI #22)._
+
+- [ ] **AUTO-01a** Event-driven ops controller reacting to DATA-07 quality events / SLO burn-rate / drift / circuit-breaker state · `kanz/services/autopilot/`
+- [ ] **AUTO-01b** Auto-remediation: data quarantine on DATA-05 reconciliation divergence; model auto-rollback on drift (MLOPS-01e promotion in reverse) · `kanz/services/autopilot/internal/remediate/`
+- [ ] **AUTO-01c** Scale/failover actuation closing the loop the INFRA-01c KEDA + DR-01d failover opened · `kanz/services/autopilot/internal/actuate/`
+- [ ] **AUTO-01d** Runbook-as-code execution + human-in-the-loop escalation on novel/unrecognized conditions · `kanz/docs/runbooks/`, `kanz/services/autopilot/`
+- [ ] **AUTO-01e** Tests: simulated broker stall / model drift / data gap → auto-remediated, with escalation only on unrecognized conditions · `kanz/services/autopilot/`
+
+### Developer Productivity Platform
+
+_Objective: one-command local stack, golden-path scaffolding, docs portal — kill the hand-run buf-generate onboarding pain (ROI #23)._
+
+- [ ] **DEVX-01a** One-command local stack (Tilt/devcontainers): NATS + Kafka + Postgres + services + seeded data · `kanz/dev/`, `Tiltfile`
+- [ ] **DEVX-01b** Service scaffolding generator following the EVT-16a layout conventions (`services/<name>/cmd|internal`) · `kanz/tools/scaffold/`
+- [ ] **DEVX-01c** Internal docs/catalog portal (Backstage) surfacing services, schemas, and runbooks · `kanz/infra/backstage/`
+- [ ] **DEVX-01d** Ephemeral preview environments per PR (per-namespace) · `.github/workflows/`, `kanz/infra/gitops/`
+- [ ] **DEVX-01e** `make`/task targets + onboarding doc replacing the hand-run buf-generate flow (the memory-documented friction) · `kanz/Makefile`, `kanz/docs/onboarding.md`
 
 ---
 
@@ -40,6 +278,20 @@ _(none)_
 ## DONE
 
 ### Data Integrity Layer
+
+- [x] **DATA-11** Tests: late-data path + reconciliation correctness — new `kanz/internal/integrity/latereconcile_test.go`, 6 scenario tests; **closes the Data Integrity epic (DATA-01..11)**. Ties together the DATA-03 watermark/late primitive and the DATA-05 reconciler over simulated out-of-order + divergent streams (seeded rand, reproducible), the composition angle vs the per-call unit tests. **Late-data path (2)**: after 61 in-order events advance the frontier (watermark base+55s), a burst of 10 stragglers at event_time base+10s are all flagged Late, `MarkLate`'d, and observable via `IsLate` (the detect→route→payload-blind-tooling-sees-it path, DATA-06), and a subsequent base+61s event is still OnTime — proving the stragglers never rewound the frontier (the load-bearing DATA-03 invariant) end-to-end; a jittery feed (baseline +10s/step, ±3s jitter < 5s allowedLateness) raises zero late flags, proving normal intra-partition reordering within grace is never late. **Reconciliation correctness (3)**: a complete run with NATS-leads-then-Kafka-shuffled matches all 100 with zero discrepancies after a far-future sweep; a run where Kafka (log of record) silently drops ~10% surfaces exactly those keys as discrepancies after the deadline, each `SeenOn=nats/MissingOn=kafka`; the healthy case where the durable log lags NATS by 10s (< 30s deadline) raises NO false discrepancy on a mid-lag sweep and matches all 50 once Kafka catches up with `MatchLatency=10s` (the load-bearing "one-sided is not a discrepancy until aged" property under realistic skew). **Interplay (1)**: a LATE-flagged event still reconciles across transports (the reconciler keys on idempotency_key and is flag-blind — lateness and cross-transport completeness are orthogonal) and reconciliation never strips the LATE flag · `kanz/internal/integrity/latereconcile_test.go`
+
+- [x] **DATA-10** Tests: gap/staleness/drift detection under simulated bad data — new `kanz/internal/integrity/baddata_test.go`, 7 scenario tests. **Distinct from the per-detector unit tests** (gap_test/staleness_test/drift_test, one classification call each): these drive a detector over a *realistic event sequence with faults injected deterministically* (seeded `math/rand`, reproducible) and assert the layer surfaces exactly the injected faults — the composition angle, RISK-12's seeded-loop approach applied to the integrity detectors. **Gap (3 tests)**: across 5 seeds, drop ~15% of sequences 2..200 (keep seq 1 so FirstSeen baselines at 1 and every later miss is a true gap) and assert `Σ MissingCount == len(dropped)` exactly — every dropped sequence accounted for, none double-counted; a clean 1..500 stream raises zero gaps; two sources writing a clean 1..N on the SAME partition_key produce no phantom gaps (the (source,event_type,partition_key) keying decision from DATA-01, exercised end-to-end rather than asserted per-call). **Staleness (2 tests)**: a feed whose ingestion lag grows 0→119s drives exactly 11 Fresh / 50 Stale / 59 Critical, pinning the exclusive-above boundaries (lag≤10 fresh, 10<lag≤60 stale, lag>60 critical) over a real sweep; a flood of out-of-order older events after the frontier advanced never rewinds the reported `LastEventTime`. **Drift (2 tests)**: a window sampled ~uniformly across the 4 bins (matching the uniform baseline) scores below threshold (not drifted), then after `Reset` a window collapsed entirely into the top bin drifts with a strictly-higher score — quiet-then-alarm over the realistic "feed starts returning a stuck/scaled value" failure; and a strongly-shifted but 20-sample window is withheld (not Drifted, not Sufficient) against MinSamples=100, proving the noise gate holds under bad-but-sparse data · `kanz/internal/integrity/baddata_test.go`
+
+- [x] **DATA-09** Configure alerting on data-quality event thresholds — new `kanz/infra/observability/alerts/` (`data-quality.rules.yaml` + README), Prometheus alerting rules over the same `kanz_data_*` metric contract the DATA-08 dashboards render. **10 rules in 4 groups**: freshness (`DataStalenessWarning` lag>10s/2m, `DataStalenessCritical` >60s/1m), completeness (`DataSequenceGap` any-missing-in-5m, `DataReconcileDiscrepancy` any-in-10m, `DataReconcileBacklogGrowing` pending>1000/5m, `DataReconcileMatchLatencyHigh` p99>30s/5m), drift (`DataInputDriftWarning` score>threshold/10m, `DataInputDriftCritical` >2×threshold/5m), and quality-events (`DataQualityCriticalEvent` catch-all over the DATA-07 emission stream + `DataQualityMetricsMissing` exporter-liveness via `absent()`). **Thresholds mirror the detectors' own defaults** so a firing alert means "the detector would flag this": 10s/60s = `DefaultStalenessConfig`, 0.25 = `DefaultPSIThreshold`, 30s = `DefaultMatchDeadline` — no magic numbers invented. **Drift rules compare against the exported `kanz_data_drift_threshold` via `> on (feature, metric)`** so the alarm point tracks each detector's configured threshold automatically — the threshold is never duplicated between detector and rule (the one decision worth keeping: gaps/discrepancies have NO detector threshold to mirror because any loss/divergence is intrinsically critical, so those fire on `> 0`). `severity` (warning⇒ticket, critical⇒page) + `layer="data-integrity"` labels drive Alertmanager routing (README shows the route block + `promtool check rules` + the rule_files wiring). Same exporter dependency as DATA-08 — the rules target the metric surface a future exporter (wrapping the detectors or consuming the DataQualityEvent stream) must expose · `kanz/infra/observability/alerts/`
+
+- [x] **DATA-08** Build data-observability dashboards (freshness, completeness, drift) — new `kanz/infra/observability/dashboards/` (first tenant of `kanz/infra/observability/`): three Grafana dashboard JSON models + a README. **Freshness** (`freshness.json`, DATA-02): max/streams-stale stats + staleness-lag and stale-frontier-age timeseries by subject/partition. **Completeness** (`completeness.json`, DATA-01 + DATA-05): missing-events + reconcile-discrepancies + pending stats, gap-rate and discrepancy (seen-vs-missing) bar timeseries, NATS↔Kafka match-latency p50/p99 (histogram_quantile), pending-by-transport. **Drift** (`drift.json`, DATA-04): features-over-threshold + max-score + drift-events stats, per-feature score timeseries, and a current-score-vs-threshold table. All three query a Prometheus datasource via a `datasource` template var + a free-text `subject`/`feature` regex filter; schemaVersion 39. **The README documents the metric contract** — `kanz_data_staleness_lag_seconds`, `kanz_data_last_event_age_seconds`, `kanz_data_gap_missing_total`, `kanz_data_reconcile_pending`, `kanz_data_reconcile_discrepancies_total`, `kanz_data_reconcile_match_latency_seconds` (histogram), `kanz_data_drift_score`, `kanz_data_drift_threshold`, `kanz_data_quality_events_total{kind,severity,subject}` — with label values reusing the detector vocabulary (subject = upstream stream; kind ∈ gap/staleness/drift; transport/seen_on/missing_on ∈ nats/kafka). **Detection-lands-before-instrumentation**: the detectors are pure in-memory classifiers and DATA-07 emits events (not Prometheus metrics) today, so the dashboards (and DATA-09 alerts) define the stable metric surface a thin exporter — wrapping the detectors or consuming the DataQualityEvent stream — must expose; wiring that exporter is a separate task, the same discipline as RISK-01's interface-before-impl. Provisioned via a Grafana file-provider (README shows the provider YAML) or hand-imported. The `data.market_stream`/`data.feature` Kafka topics carrying DATA-07's events already exist (EVT-09) · `kanz/infra/observability/dashboards/`
+
+- [x] **DATA-07** Emit data-quality events (gap, staleness, drift) to the bus — new `kanz/internal/integrity/publish.go`. **`Publisher` is the emit half of the layer's detect-then-emit split** (the counterpart to the DATA-01/02/04 detectors and the DATA-06 flag emitter): `EmitGap`/`EmitStaleness`/`EmitDrift` translate a detector result into an `observation.v1.DataQualityEvent` (EVT-14's purpose-built schema) and publish via a shared `bus.Producer` (RISK-10 pattern — producer owned by the orchestrator so producer_sequence stays monotonic; DATA-07 owns translation only, not WHEN-to-emit). **Event-type = `data.{entity}.{kind}_detected`** (subject-taxonomy §1: `data.market_stream.gap_detected`, `data.feature.drift_detected`); the `{entity}` segment classifies the monitored stream and is **orthogonal to the kind** (staleness can hit a market_stream or a feature), so it's a per-emit caller parameter, not derived. **Crucial subject distinction**: the `DataQualityEvent.subject` FIELD names the upstream stream the problem was found on (e.g. `market.equity.trade`), NOT the `data.*` subject the report itself flows on. **OBSERVATION class, FACT-grade**: envelope `EVENT_CLASS_OBSERVATION` (so the producer auto-stamps idempotency_key = event_id); the must-not-shed/durable-retention property is a bus-topology policy, not the envelope class. **Result→detail mapping**: gap → `GapDetail{producer_source=Key.Source, expected=MissingFrom, received=Sequence, missing_count=MissingCount()}` with envelope partition_key = affected partition; staleness → `StalenessDetail{observed_lag, threshold, last_event_time}`; drift → `DriftDetail{feature, metric, score, threshold, window}` with **empty partition_key** (window-wide problem, so the auto-stamped producer_sequence is 0 and Validate's empty-pk⇒seq-0 rule holds) and subject = the feature name. **Each Emit guards its precondition** (StatusGap / Stale() / Drifted) and rejects with an error rather than re-detecting — the Publisher reports detected problems, it does not classify. **Severity is an explicit per-emit parameter** (rejected if UNSPECIFIED) because triage level is deployment/alerting policy (DATA-09), not a detector output. **Injectable clock** (`NewPublisherWithClock`) stamps event_time = detection time, deterministic in tests (DATA-05 convention). 9 tests cover nil-producer rejection, all three happy paths (envelope passes `bus.Validate` + correct event_type/domain/class + detail round-trip + clock-stamped event_time + the gap/drift partition_key contracts), the three precondition rejections (non-gap status, fresh staleness, not-drifted), and empty-entity + unspecified-severity rejection (nothing published) · `kanz/internal/integrity/publish.go`
+
+- [x] **DATA-06** Wire `quality_flags` emission across ingestion + producers — new `kanz/internal/integrity/flags.go`. **`Mark(env, flag) bool` + `Has(env, flag) bool`** are the consolidated flag-stamping primitive: idempotent, nil-safe, order-preserving (the package convention previously hand-rolled in DATA-03's `MarkLate` and `replay.StampReplayed`). This is the **producer/ingestion-side half of the detect-then-emit split** the whole layer is built on — the DATA-01..05 detectors classify a condition, the producer/ingestor that owns the envelope stamps the matching flag here, so payload-blind tooling (DATA-07 reporting, observability, any consumer) reads the condition off `quality_flags` without re-running detection or parsing the payload. **Two flags are deliberately not stampable**: `QUALITY_FLAG_REPLAYED` (owned exclusively by replay tooling and forbidden on the live path by `bus.Validate` — stamping it from producers would let a live event masquerade as replayed and corrupt the live/replay boundary) and `QUALITY_FLAG_UNSPECIFIED` (the zero value); both are no-op-returning-false rather than errors so a misrouted stamp never aborts an otherwise-valid publish. **Five intent-revealing wrappers** for the producer/ingestion-settable conditions — `MarkSynthetic`/`MarkBackfilled`/`MarkDegraded`/`MarkRevised`/`MarkShed` — each a thin call to `Mark` so call sites read as the condition and a rename surfaces as a compile error (same alert-stability discipline as PRED-04's named degraded-reason constants). **DATA-03's `MarkLate`/`IsLate` refactored to delegate** to `Mark`/`Has` (lateness is still detected in watermark.go, but the stamp mechanism is now centralized). **Wiring choice — flags live in the integrity layer, not baked into `bus.Producer`**: the generic transport library must not depend on the integrity layer (a layering inversion), so ingestion/producer-orchestration code calls these helpers before publish; the concrete ingestion services are still stubs, so DATA-06 ships the canonical emission API they will call. 7 tests cover add-once/idempotent, order-preserving flag preservation, REPLAYED + UNSPECIFIED rejection, nil-safety, all five named wrappers, and MarkLate-still-works-after-delegation · `kanz/internal/integrity/flags.go`
+
+- [x] **DATA-05** Implement NATS-vs-Kafka reconciliation for correctness-sensitive consumers — new `kanz/internal/integrity/reconcile.go`. **`Reconciler.Observe(transport, env) → ReconcileResult`** matches the same logical event delivered over the NATS live spine (EVT-08, hot path) against the Kafka log of record (EVT-09), so a correctness-sensitive consumer reading the fast path can be told when the durable log diverged. **Identity = `idempotency_key`, not `event_id`** — load-bearing: it's the one identifier guaranteed byte-identical across both publishes of a logical event and is already the broker dedup key (EVT-17d: rides `Nats-Msg-Id` on NATS, a user header on Kafka; == `event_id` for FACTs). **Four statuses**: `NotApplicable` (nil env / empty idempotency_key / `TransportUnspecified` — touches no state), `Pending` (first sight on this transport; awaiting the other — explicitly NOT a discrepancy yet, the two paths have independent latencies and the spine normally leads the log), `Matched` (the counterpart was already pending → confirmed on both; clears the entry, reports `FirstTransport` + `MatchLatency` = wall-clock gap between sightings, a not-lost-but-badly-lagging signal), `Duplicate` (same-side redelivery before the counterpart — keeps the original `firstSeen` so the deadline still measures from true first sight, doesn't add a second entry). **`Sweep() → []Discrepancy`** returns every pending event aged past `MatchDeadline` (default 30s, must exceed normal NATS→Kafka skew so a healthy lag never false-positives) carrying `SeenOn`/`MissingOn`/`Age`, and removes it — **report-once** (mirrors the gap detector advancing its mark); a later straggler on the missing side re-enters as Pending. **Boundary is above the deadline** (age==deadline is not yet a discrepancy — same off-by-one discipline as RISK-11 / staleness). **Match-and-forget**: on a match the key is dropped (can't remember forever), so the reconciler must be fed the POST-dedup stream on each side (each key ~once per transport); documented. **Injectable clock** via `NewReconcilerWithClock` (codebase convention, cf. PRED-07's `NewSyncClientWithStub`) so the deadline timing is testable from the external `integrity_test` package. Detection-only (DATA-06 wires flags, DATA-07 emits the DataQualityEvent), in-memory, per-process, concurrent-safe, re-baselines on restart — the fifth integrity primitive (gap/staleness/watermark/drift/reconcile). 11 tests cover NATS-first + Kafka-first match, MatchLatency-from-first-sighting, same-side duplicate (no second entry) + duplicate-keeps-original-deadline, unmatched-ages-into-discrepancy + boundary-at-deadline, report-once, matched-never-sweeps, independent-keys-isolation, three not-applicable inputs, and non-positive-deadline fallback · `kanz/internal/integrity/reconcile.go`
 
 - [x] **DATA-04** Implement input distribution drift detection — new `kanz/internal/integrity/drift.go`. **`PSIDetector`** (one per feature) bins observed feature values over the current window and scores them against a fixed baseline distribution via **PSI (Population Stability Index)** — the canonical input-drift metric. `Observe(value)` accumulates into bins (via `sort.SearchFloat64s` over the configured edges → len(edges)+1 bins); `Assess(windowStart, windowEnd) → DriftResult` computes `PSI = Σ (actual_i − expected_i)·ln(actual_i/expected_i)` and is non-destructive; `Reset()` rolls the window. **DriftResult maps onto `observation.v1.DriftDetail`** (DATA-07 emit target): feature/metric/score/threshold/window_start/window_end. **`DriftMetric` is a string label + the result shape is metric-agnostic** so KL-divergence / KS-statistic detectors can plug in later carrying their own label without changing the result contract. **Three correctness decisions**: (1) **epsilon flooring** (`1e-6`) on both actual and expected bin proportions so an empty/collapsed bin can't produce `ln(0)`/NaN/Inf — a fully-collapsed distribution scores high-but-finite and drifts; (2) **`MinSamples` sufficiency gate** — PSI on a handful of samples is noise, so a window below MinSamples is never `Drifted` regardless of score (`Sufficient` reported separately, `SampleCount` exposed so the caller/DATA-07 can gate); (3) **`Drifted = Sufficient && Score > Threshold`** with `DefaultPSIThreshold=0.25` (the conventional "significant shift" cutoff: <0.1 negligible, 0.1–0.25 moderate, >0.25 alarm). **Baseline normalized to proportions in the constructor** (caller passes counts or proportions); validation rejects feature-empty, baseline/edges length mismatch (`len(Baseline)==len(Edges)+1`), <2 bins, non-ascending edges, negative/zero-mass baseline. Caller owns window timing (the detector tracks samples, not wall clock); concurrent-safe, in-memory per-process — the fourth detector in the package (gap/staleness/watermark/drift), detect-then-emit split preserved. 11 tests cover constructor validation matrix, default threshold, identical-to-baseline ~0 PSI, a hand-computed known PSI (60/40 vs 50/50 ≈ 0.0405), significant-shift drift, empty-bin no-NaN, insufficient-samples-never-drifts, zero-samples, Reset, window/metadata propagation, and multi-bin placement · `kanz/internal/integrity/drift.go`
 
