@@ -4,3 +4,6 @@ metadata:
   name: kanz-messaging
   labels:
     app.kubernetes.io/part-of: kanz
+    # SEC-01a: opts this namespace into SPIRE workload-identity issuance — the
+    # ClusterSPIFFEID namespaceSelector matches this label.
+    kanz.internal/spiffe: enabled

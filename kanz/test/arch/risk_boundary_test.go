@@ -47,12 +47,27 @@ const (
 	riskRoot         = modulePath + "/internal/risk"
 	riskModulePrefix = riskRoot + "/"
 	riskAPIPrefix    = riskRoot + "/api/"
+	// riskComposerPrefix is the risk-engine SERVICE — the risk module's
+	// designated composition root (ORCH-01/PERS-01). Wiring the concrete
+	// EngineImpl, the ingest pipeline, durable state, and bootstrap replay
+	// inherently requires the impl packages (engine/state/compute/publish/
+	// ingest/persist) — the api/v* surface is interfaces only and cannot be
+	// constructed from itself. The boundary protects every OTHER consumer;
+	// the one service that owns the module is exempt, the standard
+	// "main/wiring layer may import internals" carve-out.
+	riskComposerPrefix = modulePath + "/services/risk-engine/"
 )
 
 // isRiskInternal reports whether an import path is the risk module's root
 // package or any package beneath it.
 func isRiskInternal(importPath string) bool {
 	return importPath == riskRoot || strings.HasPrefix(importPath, riskModulePrefix)
+}
+
+// isRiskComposer reports whether a package is part of the risk-engine service,
+// the module's composition root (see riskComposerPrefix).
+func isRiskComposer(importPath string) bool {
+	return strings.HasPrefix(importPath, riskComposerPrefix)
 }
 
 // pkgInfo is the subset of `go list -json` output the arch tests need.
@@ -139,6 +154,11 @@ func TestRiskBoundary_OutsidersUseAPIOnly(t *testing.T) {
 		// Risk-internal packages (the root package + sub-packages) are
 		// allowed to import each other.
 		if isRiskInternal(pkg.ImportPath) {
+			continue
+		}
+		// The risk-engine service is the module's composition root — it
+		// wires the impl packages into a running engine (ORCH-01/PERS-01).
+		if isRiskComposer(pkg.ImportPath) {
 			continue
 		}
 		for _, imp := range allImports(pkg) {

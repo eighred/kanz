@@ -1,0 +1,187 @@
+---
+# SPIRE server config. Trust domain `kanz.internal` is the root of every Kanz
+# workload identity: SPIFFE IDs are spiffe://kanz.internal/ns/<ns>/sa/<sa>.
+#
+# Rotation knobs (the load-bearing part of SEC-01a):
+#   ca_ttl                 24h  — intermediate CA lifetime; server rotates it,
+#                                  agents pick up the new bundle automatically.
+#   default_x509_svid_ttl  1h   — workload leaf-cert lifetime. go-spiffe in
+#                                  SEC-01b's transport helpers re-fetches at
+#                                  ~half-life (30m), so a compromised leaf is
+#                                  valid for at most an hour and no human ever
+#                                  touches a cert. Short by design.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: spire-server
+  namespace: spire-system
+  labels:
+    app.kubernetes.io/part-of: kanz
+data:
+  server.conf: |
+    server {
+      bind_address = "0.0.0.0"
+      bind_port    = "8081"
+      trust_domain = "kanz.internal"
+      data_dir     = "/run/spire/data"
+      log_level    = "INFO"
+
+      ca_ttl                = "24h"
+      default_x509_svid_ttl = "1h"
+      # JWT-SVIDs (for future token-based auth, AUTH-01) kept short too.
+      default_jwt_svid_ttl  = "5m"
+    }
+
+    plugins {
+      # Bootstrap datastore: sqlite on the server PVC. HA / multi-replica server
+      # swaps this for the "postgres" datastore plugin (reuse the PERS-01 /
+      # schema-registry pgx cluster) — a follow-up, same as the NATS bootstrap
+      # cluster is single-StatefulSet today.
+      DataStore "sql" {
+        plugin_data {
+          database_type = "sqlite3"
+          connection_string = "/run/spire/data/datastore.sqlite3"
+        }
+      }
+
+      # Node attestation: projected SA token. No node-level shared secret; the
+      # kubelet-signed token is verified via TokenReview (see rbac.yaml).
+      NodeAttestor "k8s_psat" {
+        plugin_data {
+          clusters = {
+            "kanz" = {
+              service_account_allow_list = ["spire-system:spire-agent"]
+            }
+          }
+        }
+      }
+
+      # Leaf signing key kept in-memory (bootstrap). Production moves the upstream
+      # root to a KMS-backed UpstreamAuthority (SEC-01d secrets work).
+      KeyManager "disk" {
+        plugin_data { keys_path = "/run/spire/data/keys.json" }
+      }
+
+      # Server exposes a health endpoint for the probes below.
+      Health {}
+    }
+
+    health_checks {
+      listener_enabled = true
+      bind_address     = "0.0.0.0"
+      bind_port        = "8080"
+      live_path        = "/live"
+      ready_path       = "/ready"
+    }
+---
+# Controller-manager config (sidecar). Reconciles ClusterSPIFFEID CRs into
+# registration entries and writes the trust bundle into the spire-bundle
+# ConfigMap that agents + workloads consume.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: spire-controller-manager
+  namespace: spire-system
+  labels:
+    app.kubernetes.io/part-of: kanz
+data:
+  controller-manager-config.yaml: |
+    apiVersion: spire.spiffe.io/v1alpha1
+    kind: ControllerManagerConfig
+    metadata:
+      name: spire-controller-manager
+    clusterName: kanz
+    trustDomain: kanz.internal
+    # Single-source-of-truth bundle ConfigMap, refreshed on CA rotation.
+    entryIDPrefixCleanup: ""
+    spireServerSocketPath: "/tmp/spire-server/private/api.sock"
+    metricsBindAddress: "0.0.0.0:8082"
+---
+# Empty bundle ConfigMap; the controller-manager populates `bundle.crt`.
+# Workloads in kanz-messaging/kanz-services mount or read this to verify peers.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: spire-bundle
+  namespace: spire-system
+  labels:
+    app.kubernetes.io/part-of: kanz
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: spire-server
+  namespace: spire-system
+  labels:
+    app.kubernetes.io/part-of: kanz
+spec:
+  selector:
+    app: spire-server
+  ports:
+    - name: api
+      port: 8081
+      targetPort: 8081
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: spire-server
+  namespace: spire-system
+  labels:
+    app.kubernetes.io/part-of: kanz
+spec:
+  serviceName: spire-server
+  replicas: 1
+  selector:
+    matchLabels:
+      app: spire-server
+  template:
+    metadata:
+      labels:
+        app: spire-server
+        app.kubernetes.io/part-of: kanz
+    spec:
+      serviceAccountName: spire-server
+      shareProcessNamespace: true
+      containers:
+        - name: spire-server
+          image: ghcr.io/spiffe/spire-server:1.9.6
+          args: ["-config", "/run/spire/config/server.conf"]
+          ports:
+            - containerPort: 8081
+          livenessProbe:
+            httpGet: { path: /live, port: 8080 }
+            initialDelaySeconds: 15
+            periodSeconds: 60
+          readinessProbe:
+            httpGet: { path: /ready, port: 8080 }
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          volumeMounts:
+            - { name: spire-config, mountPath: /run/spire/config, readOnly: true }
+            - { name: spire-data, mountPath: /run/spire/data }
+            - { name: spire-server-socket, mountPath: /tmp/spire-server/private }
+        # Controller-manager sidecar: declarative registration via CRDs.
+        - name: spire-controller-manager
+          image: ghcr.io/spiffe/spire-controller-manager:0.5.0
+          args: ["--config=/run/spire/controller-manager/controller-manager-config.yaml"]
+          ports:
+            - { name: metrics, containerPort: 8082 }
+          volumeMounts:
+            - { name: spire-controller-manager-config, mountPath: /run/spire/controller-manager, readOnly: true }
+            - { name: spire-server-socket, mountPath: /tmp/spire-server/private }
+      volumes:
+        - name: spire-config
+          configMap: { name: spire-server }
+        - name: spire-controller-manager-config
+          configMap: { name: spire-controller-manager }
+        - name: spire-server-socket
+          emptyDir: {}
+  volumeClaimTemplates:
+    - metadata:
+        name: spire-data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 1Gi

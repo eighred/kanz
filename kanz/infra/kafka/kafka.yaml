@@ -14,10 +14,11 @@ spec:
     app: kafka
   ports:
     - { name: broker, port: 9092 }
+    - { name: broker-tls, port: 9094 }
     - { name: controller, port: 9093 }
 ---
-# Client bootstrap service. Producers/consumers connect to kafka:9092 and are
-# then redirected to the per-pod advertised listeners.
+# Client bootstrap service. Producers/consumers connect over mTLS on 9094
+# (SEC-01c); 9092 stays for the in-cluster bootstrap-job + migration window.
 apiVersion: v1
 kind: Service
 metadata:
@@ -28,6 +29,38 @@ spec:
     app: kafka
   ports:
     - { name: broker, port: 9092, targetPort: 9092 }
+    - { name: broker-tls, port: 9094, targetPort: 9094 }
+---
+# SEC-01c: dedicated ServiceAccount → SPIRE identity
+# spiffe://kanz.internal/ns/kanz-messaging/sa/kafka (SEC-01a ClusterSPIFFEID).
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: kafka
+  namespace: kanz-messaging
+  labels:
+    app.kubernetes.io/part-of: kanz
+---
+# spiffe-helper config. Writes the SVID PEM files, then (cmd hook, run on first
+# fetch + each renewal) concatenates cert+key into the combined keystore PEM
+# Kafka's PEM keystore requires. Broker picks up a rotated keystore on restart
+# or via a kafka-configs dynamic update — documented in the README.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: kafka-spiffe-helper
+  namespace: kanz-messaging
+  labels:
+    app.kubernetes.io/part-of: kanz
+data:
+  helper.conf: |
+    agent_address         = "/run/spiffe/spire-agent.sock"
+    cert_dir              = "/etc/kafka-certs"
+    svid_file_name        = "svid.pem"
+    svid_key_file_name    = "svid_key.pem"
+    svid_bundle_file_name = "bundle.pem"
+    cmd      = "/bin/sh"
+    cmd_args = "-c 'cat /etc/kafka-certs/svid.pem /etc/kafka-certs/svid_key.pem > /etc/kafka-certs/keystore.pem'"
 ---
 apiVersion: apps/v1
 kind: StatefulSet
@@ -47,9 +80,20 @@ spec:
         app: kafka
     spec:
       terminationGracePeriodSeconds: 120
+      serviceAccountName: kafka
       # apache/kafka runs as uid 1000; fsGroup makes the fresh PVC writable.
       securityContext:
         fsGroup: 1000
+      initContainers:
+        # SEC-01c: fetch the first SVID + build the combined keystore before
+        # the broker boots so the SSL listener has certs immediately.
+        - name: spiffe-helper-init
+          image: ghcr.io/spiffe/spiffe-helper:0.9.0
+          args: ["-config", "/etc/spiffe-helper/helper.conf", "-daemon-mode=false"]
+          volumeMounts:
+            - { name: spiffe-helper-config, mountPath: /etc/spiffe-helper, readOnly: true }
+            - { name: kafka-certs, mountPath: /etc/kafka-certs }
+            - { name: spiffe, mountPath: /run/spiffe, readOnly: true }
       affinity:
         podAntiAffinity:
           preferredDuringSchedulingIgnoredDuringExecution:
@@ -69,19 +113,33 @@ spec:
             - |
               set -e
               export KAFKA_NODE_ID="${HOSTNAME##*-}"
-              export KAFKA_ADVERTISED_LISTENERS="PLAINTEXT://${HOSTNAME}.kafka-headless.kanz-messaging.svc:9092"
+              HOST="${HOSTNAME}.kafka-headless.kanz-messaging.svc"
+              export KAFKA_ADVERTISED_LISTENERS="PLAINTEXT://${HOST}:9092,SSL://${HOST}:9094"
               exec /etc/kafka/docker/run
           ports:
             - { name: broker, containerPort: 9092 }
+            - { name: broker-tls, containerPort: 9094 }
             - { name: controller, containerPort: 9093 }
           env:
             - { name: CLUSTER_ID, value: "4L6g3nShT-eMCtK--X86sw" }
             - { name: KAFKA_PROCESS_ROLES, value: "broker,controller" }
             - { name: KAFKA_CONTROLLER_QUORUM_VOTERS, value: "0@kafka-0.kafka-headless.kanz-messaging.svc:9093,1@kafka-1.kafka-headless.kanz-messaging.svc:9093,2@kafka-2.kafka-headless.kanz-messaging.svc:9093" }
-            - { name: KAFKA_LISTENERS, value: "PLAINTEXT://:9092,CONTROLLER://:9093" }
-            - { name: KAFKA_LISTENER_SECURITY_PROTOCOL_MAP, value: "CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT" }
+            # SEC-01c: add the mTLS client listener (SSL:9094). PLAINTEXT:9092
+            # stays for inter-broker + the bootstrap-job during migration.
+            - { name: KAFKA_LISTENERS, value: "PLAINTEXT://:9092,SSL://:9094,CONTROLLER://:9093" }
+            - { name: KAFKA_LISTENER_SECURITY_PROTOCOL_MAP, value: "CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,SSL:SSL" }
             - { name: KAFKA_CONTROLLER_LISTENER_NAMES, value: "CONTROLLER" }
             - { name: KAFKA_INTER_BROKER_LISTENER_NAME, value: "PLAINTEXT" }
+            # SVID-backed PEM keystore + bundle truststore (spiffe-helper).
+            # client.auth=required ⇒ mutual TLS; a plaintext/untrusted client is
+            # rejected. Empty endpoint-identification ⇒ verify the SPIFFE URI
+            # SAN, not DNS hostnames.
+            - { name: KAFKA_SSL_KEYSTORE_TYPE, value: "PEM" }
+            - { name: KAFKA_SSL_KEYSTORE_LOCATION, value: "/etc/kafka-certs/keystore.pem" }
+            - { name: KAFKA_SSL_TRUSTSTORE_TYPE, value: "PEM" }
+            - { name: KAFKA_SSL_TRUSTSTORE_LOCATION, value: "/etc/kafka-certs/bundle.pem" }
+            - { name: KAFKA_SSL_CLIENT_AUTH, value: "required" }
+            - { name: KAFKA_SSL_ENDPOINT_IDENTIFICATION_ALGORITHM, value: "" }
             - { name: KAFKA_LOG_DIRS, value: "/var/lib/kafka/data" }
             # Durability defaults — this cluster is the log of record.
             - { name: KAFKA_DEFAULT_REPLICATION_FACTOR, value: "3" }
@@ -94,6 +152,7 @@ spec:
             - { name: KAFKA_NUM_PARTITIONS, value: "3" }
           volumeMounts:
             - { name: data, mountPath: /var/lib/kafka/data }
+            - { name: kafka-certs, mountPath: /etc/kafka-certs, readOnly: true }
           readinessProbe:
             tcpSocket: { port: 9092 }
             initialDelaySeconds: 15
@@ -105,6 +164,28 @@ spec:
           resources:
             requests: { cpu: "500m", memory: "1Gi" }
             limits: { memory: "2Gi" }
+        # SEC-01c: renews the SVID + rebuilds the keystore on rotation.
+        - name: spiffe-helper
+          image: ghcr.io/spiffe/spiffe-helper:0.9.0
+          args: ["-config", "/etc/spiffe-helper/helper.conf"]
+          volumeMounts:
+            - { name: spiffe-helper-config, mountPath: /etc/spiffe-helper, readOnly: true }
+            - { name: kafka-certs, mountPath: /etc/kafka-certs }
+            - { name: spiffe, mountPath: /run/spiffe, readOnly: true }
+      volumes:
+        - name: spiffe-helper-config
+          configMap:
+            name: kafka-spiffe-helper
+        # Shared cert dir (spiffe-helper writes, kafka reads); Memory-backed so
+        # private keys never hit disk.
+        - name: kafka-certs
+          emptyDir:
+            medium: Memory
+        # SEC-01a SPIFFE CSI volume — the agent Workload API socket.
+        - name: spiffe
+          csi:
+            driver: csi.spiffe.io
+            readOnly: true
   volumeClaimTemplates:
     - metadata:
         name: data

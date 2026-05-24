@@ -8,8 +8,8 @@ short-retention live tier for low-latency fan-out.
 
 | File | Purpose |
 |---|---|
-| `namespace.yaml` | `kanz-messaging` namespace |
-| `nats.yaml` | 3-node JetStream cluster — ConfigMap, headless + client Services, StatefulSet, PodDisruptionBudget |
+| `namespace.yaml` | `kanz-messaging` namespace (SPIFFE-enabled label, SEC-01a) |
+| `nats.yaml` | 3-node JetStream cluster — ConfigMap, headless + client Services, StatefulSet, PodDisruptionBudget, SEC-01c mTLS + spiffe-helper |
 | `bootstrap-job.yaml` | ConfigMap + Job that creates the streams/consumers (idempotent) |
 | `smoke-test.sh` | pub/sub + persistence smoke test |
 
@@ -29,6 +29,20 @@ the envelope `idempotency_key`).
 
 Replay streams (`replay.{run_id}.*`) are created per-run by replay tooling
 (EVT-20), not provisioned here.
+
+## mTLS (SEC-01c)
+
+The client listener requires + verifies a client cert (`tls { verify: true }`),
+so a plaintext or untrusted client is rejected. The server presents its SPIRE
+SVID: a `spiffe-helper` sidecar fetches it from the SEC-01a agent socket (SPIFFE
+CSI volume) and writes `svid.pem`/`svid_key.pem`/`bundle.pem` to a memory-backed
+`/etc/nats-certs`; on rotation it signals `nats-server --signal reload` (shared
+PID namespace) so no restart is needed. Go clients connect with
+`bus.NATSConfig.TLSConfig` from `transport.ClientTLSConfig` (SEC-01b) — the
+client SVID is both the encryption and the auth credential.
+
+Requires SPIRE (SEC-01a) deployed; the smoke test below needs a client SVID or a
+plaintext listener.
 
 ## Deploy
 

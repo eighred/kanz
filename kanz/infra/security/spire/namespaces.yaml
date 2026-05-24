@@ -1,0 +1,25 @@
+---
+# SPIRE control plane lives in its own namespace. The server (CA + registration
+# datastore) and the agent DaemonSet + SPIFFE CSI driver run here.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: spire-system
+  labels:
+    app.kubernetes.io/part-of: kanz
+    # Pod Security: SPIRE agent needs hostPath (the workload API socket) so it
+    # runs under the privileged profile; the server stays restricted.
+    pod-security.kubernetes.io/enforce: privileged
+---
+# Workloads namespace — the Kanz services (risk-engine, schema-registry, …).
+# kanz-messaging (NATS/Kafka) already exists from infra/nats. Both namespaces
+# are selected by the ClusterSPIFFEID registration (registration.yaml) so every
+# pod in them is issued and auto-rotated an X.509-SVID.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: kanz-services
+  labels:
+    app.kubernetes.io/part-of: kanz
+    # Marker the ClusterSPIFFEID namespaceSelector matches on.
+    kanz.internal/spiffe: enabled

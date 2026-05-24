@@ -1,0 +1,122 @@
+---
+# ServiceAccounts for the three SPIRE components.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: spire-server
+  namespace: spire-system
+  labels:
+    app.kubernetes.io/part-of: kanz
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: spire-agent
+  namespace: spire-system
+  labels:
+    app.kubernetes.io/part-of: kanz
+---
+# Server: validates agent node identity via the projected-SA-token (k8s_psat)
+# node attestor, which calls TokenReview; and the controller-manager sidecar
+# reconciles ClusterSPIFFEID CRs against pods/nodes/namespaces.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: spire-server
+  labels:
+    app.kubernetes.io/part-of: kanz
+rules:
+  # k8s_psat node attestation.
+  - apiGroups: ["authentication.k8s.io"]
+    resources: ["tokenreviews"]
+    verbs: ["create"]
+  # Controller-manager workload discovery + SVID DNS-name population.
+  - apiGroups: [""]
+    resources: ["pods", "nodes", "namespaces"]
+    verbs: ["get", "list", "watch"]
+  # Controller-manager reconciles the SPIFFE CRDs and publishes the trust bundle.
+  - apiGroups: ["spire.spiffe.io"]
+    resources: ["clusterspiffeids", "clusterfederatedtrustdomains", "clusterstaticentries"]
+    verbs: ["get", "list", "watch", "update", "patch"]
+  - apiGroups: ["spire.spiffe.io"]
+    resources: ["clusterspiffeids/status", "clusterfederatedtrustdomains/status", "clusterstaticentries/status"]
+    verbs: ["get", "update", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: spire-server
+  labels:
+    app.kubernetes.io/part-of: kanz
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: spire-server
+subjects:
+  - kind: ServiceAccount
+    name: spire-server
+    namespace: spire-system
+---
+# Controller-manager publishes the trust bundle into a ConfigMap workloads read.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: spire-bundle-writer
+  namespace: spire-system
+  labels:
+    app.kubernetes.io/part-of: kanz
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    resourceNames: ["spire-bundle"]
+    verbs: ["get", "patch"]
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: spire-bundle-writer
+  namespace: spire-system
+  labels:
+    app.kubernetes.io/part-of: kanz
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: spire-bundle-writer
+subjects:
+  - kind: ServiceAccount
+    name: spire-server
+    namespace: spire-system
+---
+# Agent: workload attestation (k8s) reads pod metadata on its node to derive
+# selectors; node attestation presents a projected SA token.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: spire-agent
+  labels:
+    app.kubernetes.io/part-of: kanz
+rules:
+  - apiGroups: [""]
+    resources: ["pods", "nodes"]
+    verbs: ["get"]
+  - apiGroups: [""]
+    resources: ["nodes/proxy"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: spire-agent
+  labels:
+    app.kubernetes.io/part-of: kanz
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: spire-agent
+subjects:
+  - kind: ServiceAccount
+    name: spire-agent
+    namespace: spire-system

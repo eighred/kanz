@@ -75,6 +75,20 @@ func (w *dedupWindow) Record(key string) {
 	}
 }
 
+// Keys returns a copy of the live keys, oldest-first, after GC. This is
+// the durable dedup tail state.Store.SnapshotWithKeys persists so the
+// bootstrap path (PERS-01d) can re-seed the window and skip replayed
+// boundary events. Called under the per-portfolio lock so it observes the
+// same window the concurrent apply path mutates.
+func (w *dedupWindow) Keys() []string {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.gc()
+	out := make([]string, len(w.order))
+	copy(out, w.order)
+	return out
+}
+
 // gc drops expired entries from the front of order. Lazy — runs at
 // each Seen / Record so the worst-case behavior tracks call volume
 // rather than wall-clock time.

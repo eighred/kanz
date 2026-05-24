@@ -33,6 +33,7 @@ import (
 	"time"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
@@ -67,6 +68,12 @@ type SyncClientOptions struct {
 	// BreakerCooldown is how long the circuit stays open before
 	// admitting a probe call.
 	BreakerCooldown time.Duration
+	// Credentials are the gRPC transport credentials for the dial.
+	// nil ⇒ plaintext (insecure). Set to transport.ClientCredentials
+	// (SEC-01b) to speak mTLS to the inference servicer, asserting its
+	// SPIFFE identity. Lives here rather than as a separate constructor
+	// so the resilience options and the transport choice compose.
+	Credentials credentials.TransportCredentials
 }
 
 // DefaultSyncClientOptions returns conservative defaults. Tune per
@@ -91,13 +98,18 @@ type SyncClient struct {
 	timeout time.Duration
 }
 
-// NewSyncClient dials target via gRPC (plaintext) and returns a
-// ready SyncClient. Caller must Close when done.
+// NewSyncClient dials target via gRPC and returns a ready SyncClient.
+// Transport is mTLS when opts.Credentials is set (SEC-01b), plaintext
+// otherwise. Caller must Close when done.
 func NewSyncClient(target string, opts SyncClientOptions) (*SyncClient, error) {
 	if target == "" {
 		return nil, errors.New("prediction: target is required")
 	}
-	conn, err := grpc.NewClient(target, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	creds := opts.Credentials
+	if creds == nil {
+		creds = insecure.NewCredentials()
+	}
+	conn, err := grpc.NewClient(target, grpc.WithTransportCredentials(creds))
 	if err != nil {
 		return nil, err
 	}

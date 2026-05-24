@@ -1,0 +1,33 @@
+---
+# Declarative workload-identity issuance. The controller-manager turns this CR
+# into SPIRE registration entries for every pod whose namespace carries the
+# `kanz.internal/spiffe: enabled` label (kanz-messaging + kanz-services), and
+# keeps the SVIDs rotating per the server's default_x509_svid_ttl (1h).
+#
+# SPIFFE ID = spiffe://kanz.internal/ns/<namespace>/sa/<service-account>.
+# This is the identity SEC-01b's mTLS helpers assert peers against and AUTH-01c
+# binds to the command issuer. Keying on the ServiceAccount (not the pod name)
+# means a rolling deploy keeps a stable identity while leaf certs rotate under
+# it.
+apiVersion: spire.spiffe.io/v1alpha1
+kind: ClusterSPIFFEID
+metadata:
+  name: kanz-workloads
+  labels:
+    app.kubernetes.io/part-of: kanz
+spec:
+  spiffeIDTemplate: "spiffe://kanz.internal/ns/{{ .PodMeta.Namespace }}/sa/{{ .PodSpec.ServiceAccountName }}"
+  # Issue to any pod in a SPIFFE-enabled Kanz namespace.
+  namespaceSelector:
+    matchLabels:
+      kanz.internal/spiffe: enabled
+  # SAN DNS names so a peer can also be reached/verified by k8s service DNS
+  # (NATS/Kafka clients, SEC-01c, validate the SPIFFE ID; DNS SANs ease any
+  # library that still checks hostnames).
+  dnsNameTemplates:
+    - "{{ .PodMeta.Name }}"
+    - "{{ index .PodMeta.Labels \"app\" }}.{{ .PodMeta.Namespace }}.svc"
+  # Don't hand identities to privileged/host-network infra pods that aren't
+  # part of the workload mesh.
+  autoPopulateDNSNames: true
+  fallback: false

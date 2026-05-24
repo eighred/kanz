@@ -1,7 +1,9 @@
 // risk-engine binary entrypoint. Wires the ingestion → recompute → publish
 // pipeline (ORCH-01b/c/d) behind the readiness gate and graceful-shutdown
-// lifecycle (ORCH-01a/e). Durable state + bootstrap replay (PERS-01) layer
-// in over this; until then state is in-memory and re-baselines on restart.
+// lifecycle (ORCH-01a/e), plus durable state: a restart restores the latest
+// snapshot + replays the log (PERS-01d) and a periodic snapshotter keeps the
+// durable copy fresh (PERS-01c). With no RISK_ENGINE_DATABASE_URL, state is
+// in-memory and re-baselines from the live spine on restart.
 package main
 
 import (
@@ -15,11 +17,14 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
+
 	risk "github.com/kanz-eng/kanz/internal/risk"
 	"github.com/kanz-eng/kanz/internal/risk/compute"
 	"github.com/kanz-eng/kanz/internal/risk/engine"
 	"github.com/kanz-eng/kanz/internal/risk/publish"
 	"github.com/kanz-eng/kanz/internal/risk/state"
+	"github.com/kanz-eng/kanz/internal/risk/state/persist"
 	"github.com/kanz-eng/kanz/pkg/bus"
 	"github.com/kanz-eng/kanz/services/risk-engine/internal/app"
 	"github.com/kanz-eng/kanz/services/risk-engine/internal/config"
@@ -97,6 +102,38 @@ func runEngine(ctx context.Context, cfg config.Config, readiness *server.Readine
 	recomputer := engine.NewRecomputer(context.Background(), store, compute.DefaultRegistry(),
 		risk.NewCache(), publisher, engine.DefaultDebounceInterval, logger)
 
+	a := &app.App{
+		Readiness:  readiness,
+		Recomputer: recomputer,
+		Closers:    []io.Closer{client},
+		Logger:     logger,
+	}
+
+	// Durable state (PERS-01): restore + replay before live ingestion, and
+	// run the periodic snapshotter + final-checkpoint drain. Skipped when no
+	// database is configured — state stays in-memory.
+	if cfg.DatabaseURL != "" {
+		pool, err := pgxpool.New(ctx, cfg.DatabaseURL)
+		if err != nil {
+			return err
+		}
+		defer pool.Close()
+		sink := persist.NewPostgres(pool)
+
+		// Bootstrap applies through the BARE store (no recompute storm).
+		boot, err := app.NewBootstrap(store, sink, store, cfg.KafkaBrokers, logger)
+		if err != nil {
+			return err
+		}
+		if err := boot.Run(ctx); err != nil {
+			return err
+		}
+
+		snap := engine.NewSnapshotter(store, sink, nil, 0, logger)
+		go func() { _ = snap.Run(ctx) }()
+		a.Checkpoint = snap.Checkpoint
+	}
+
 	consumer, err := bus.NewConsumer(client)
 	if err != nil {
 		return err
@@ -105,14 +142,8 @@ func runEngine(ctx context.Context, cfg config.Config, readiness *server.Readine
 	if err != nil {
 		return err
 	}
+	a.Ingest = ingest
 
-	a := &app.App{
-		Readiness:  readiness,
-		Ingest:     ingest,
-		Recomputer: recomputer,
-		Closers:    []io.Closer{client},
-		Logger:     logger,
-	}
 	return a.Run(ctx)
 }
 

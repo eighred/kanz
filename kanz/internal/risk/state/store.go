@@ -127,6 +127,33 @@ func (s *Store) Snapshot(id v1.PortfolioID) (*domain.Portfolio, bool) {
 	return port.Clone(), true
 }
 
+// SnapshotWithKeys returns a race-free clone of the portfolio together
+// with its applied idempotency-key tail, both captured under the same
+// per-aggregate lock so the persisted (state, dedup-tail) pair is
+// consistent — an apply cannot interleave to record a key whose state
+// effect is missing from the clone, or vice versa. This is the read the
+// PERS-01c snapshotter uses to build a durable PortfolioRecord. Returns
+// nil/nil/false when the portfolio is unknown.
+func (s *Store) SnapshotWithKeys(id v1.PortfolioID) (*domain.Portfolio, []string, bool) {
+	s.mu.Lock()
+	lock := s.locks[id]
+	port, ok := s.portfolios[id]
+	dw := s.dedup[id]
+	s.mu.Unlock()
+	if !ok {
+		return nil, nil, false
+	}
+	if lock != nil {
+		lock.Lock()
+		defer lock.Unlock()
+	}
+	var keys []string
+	if dw != nil {
+		keys = dw.Keys()
+	}
+	return port.Clone(), keys, true
+}
+
 // IDs returns the set of known portfolio IDs. Used by the api/v1
 // surface's Health implementation and by tests.
 func (s *Store) IDs() []v1.PortfolioID {
@@ -137,6 +164,38 @@ func (s *Store) IDs() []v1.PortfolioID {
 		out = append(out, id)
 	}
 	return out
+}
+
+// Restore installs a rehydrated portfolio and pre-seeds its dedup window
+// from the persisted applied-key tail — the in-memory side of the PERS-01d
+// bootstrap (load durable snapshot → Restore → replay the log). Pre-seeding
+// the window is what makes the subsequent log replay idempotent: an event
+// already folded into the snapshot is recognized as Seen and skipped rather
+// than double-counted.
+//
+// Restore runs single-threaded during bootstrap, before any ingestion
+// goroutine starts, so it takes only the map lock (no per-aggregate lock)
+// and is a no-op if the portfolio is already present — bootstrap must not
+// clobber live state, and a snapshot is never newer than the running engine.
+func (s *Store) Restore(p *domain.Portfolio, appliedKeys []string) {
+	if p == nil || p.ID() == "" {
+		return
+	}
+	id := p.ID()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, exists := s.portfolios[id]; exists {
+		return
+	}
+	s.portfolios[id] = p
+	if _, ok := s.locks[id]; !ok {
+		s.locks[id] = &sync.Mutex{}
+	}
+	dw := newDedupWindow()
+	for _, k := range appliedKeys {
+		dw.Record(k)
+	}
+	s.dedup[id] = dw
 }
 
 // ApplyPortfolioRevalued satisfies ingest.Applier.

@@ -11,7 +11,7 @@ Runs in the `kanz-messaging` namespace — created by the NATS provisioning, or
 
 | File | Purpose |
 |---|---|
-| `kafka.yaml` | 3-node KRaft cluster (combined broker+controller) — headless + client Services, StatefulSet, PodDisruptionBudget |
+| `kafka.yaml` | 3-node KRaft cluster (combined broker+controller) — headless + client Services, StatefulSet, PodDisruptionBudget, SEC-01c mTLS listener + spiffe-helper |
 | `topics-job.yaml` | ConfigMap + Job that provisions topics/retention/compaction (idempotent) |
 | `smoke-test.sh` | produce/consume smoke test |
 
@@ -39,6 +39,24 @@ topics exist only if provisioned here. RF 3, `min.insync.replicas` 2.
 | `data.feature` | 3 | delete | 30d |
 | `observability.model` | 3 | delete | 7d |
 | `dlq.<name>` | 3 | delete | 30d |
+
+## mTLS (SEC-01c)
+
+The broker presents its SPIRE SVID and requires a client SVID on the **SSL
+listener (`:9094`)** — `ssl.client.auth=required`, so a plaintext or untrusted
+client is rejected. A `spiffe-helper` sidecar fetches the broker's SVID from the
+SEC-01a agent socket (SPIFFE CSI volume), writes PEM files to a memory-backed
+`/etc/kafka-certs`, and concatenates cert+key into the combined `keystore.pem`
+Kafka's PEM keystore requires. Endpoint identification is disabled (identity is
+the SPIFFE URI SAN, not DNS). Go clients dial `:9094` with
+`bus.KafkaConfig.TLSConfig` from `transport.ClientTLSConfig` (SEC-01b).
+
+`PLAINTEXT:9092` stays for inter-broker traffic and the in-cluster bootstrap
+job during migration; inter-broker SSL + cutting 9092 is a follow-up. **Cert
+rotation**: the sidecar rebuilds `keystore.pem` on renewal, but the broker
+re-reads it on restart or a `kafka-configs` dynamic update — not yet automatic.
+
+Requires SPIRE (SEC-01a) deployed and `kanz-messaging` SPIFFE-enabled.
 
 ## Deploy
 

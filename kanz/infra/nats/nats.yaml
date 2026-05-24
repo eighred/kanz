@@ -12,6 +12,19 @@ data:
     listen: 0.0.0.0:4222
     http: 0.0.0.0:8222
 
+    # SEC-01c: mutual TLS on the client listener. Certs are the broker's own
+    # SPIRE SVID, written to /etc/nats-certs by the spiffe-helper sidecar and
+    # rotated under it (SEC-01a). verify: true requires + verifies a client
+    # cert chaining to the trust bundle — so a plaintext or untrusted client is
+    # rejected at the TLS layer, and the peer's SPIFFE identity is authenticated.
+    tls {
+      cert_file: "/etc/nats-certs/svid.pem"
+      key_file:  "/etc/nats-certs/svid_key.pem"
+      ca_file:   "/etc/nats-certs/bundle.pem"
+      verify: true
+      timeout: 5
+    }
+
     jetstream {
       store_dir: /data/jetstream
       max_memory_store: 256MB
@@ -30,6 +43,39 @@ data:
 
     # Drain client connections gracefully on shutdown (see preStop hook).
     lame_duck_duration: 30s
+---
+# SEC-01c: dedicated ServiceAccount so the SPIRE ClusterSPIFFEID (SEC-01a)
+# issues NATS its own identity — spiffe://kanz.internal/ns/kanz-messaging/sa/nats.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: nats
+  namespace: kanz-messaging
+  labels:
+    app.kubernetes.io/part-of: kanz
+---
+# spiffe-helper config: fetch the SVID from the agent socket (mounted by the
+# SPIFFE CSI driver) and write PEM files NATS reads. In daemon mode it renews
+# before expiry and signals NATS (SIGHUP ⇒ config reload) so rotation needs no
+# restart; the init-container run (daemon_mode=false) blocks startup until the
+# first SVID exists.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nats-spiffe-helper
+  namespace: kanz-messaging
+  labels:
+    app.kubernetes.io/part-of: kanz
+data:
+  helper.conf: |
+    agent_address       = "/run/spiffe/spire-agent.sock"
+    cert_dir            = "/etc/nats-certs"
+    svid_file_name      = "svid.pem"
+    svid_key_file_name  = "svid_key.pem"
+    svid_bundle_file_name = "bundle.pem"
+    # On renewal, reload NATS in the shared process namespace.
+    cmd       = "nats-server"
+    cmd_args  = "--signal reload"
 ---
 # Headless service: stable per-pod DNS for cluster routes. publishNotReadyAddresses
 # lets peers resolve each other before JetStream reports ready.
@@ -78,6 +124,20 @@ spec:
         app: nats
     spec:
       terminationGracePeriodSeconds: 45
+      serviceAccountName: nats
+      # SEC-01c: shared PID namespace lets the spiffe-helper sidecar signal
+      # nats-server to reload certs on SVID rotation.
+      shareProcessNamespace: true
+      initContainers:
+        # Block startup until the first SVID is written, so the TLS listener
+        # has certs the moment nats-server boots.
+        - name: spiffe-helper-init
+          image: ghcr.io/spiffe/spiffe-helper:0.9.0
+          args: ["-config", "/etc/spiffe-helper/helper.conf", "-daemon-mode=false"]
+          volumeMounts:
+            - { name: spiffe-helper-config, mountPath: /etc/spiffe-helper, readOnly: true }
+            - { name: nats-certs, mountPath: /etc/nats-certs }
+            - { name: spiffe, mountPath: /run/spiffe, readOnly: true }
       affinity:
         podAntiAffinity:
           preferredDuringSchedulingIgnoredDuringExecution:
@@ -103,6 +163,7 @@ spec:
           volumeMounts:
             - { name: config, mountPath: /etc/nats }
             - { name: data, mountPath: /data }
+            - { name: nats-certs, mountPath: /etc/nats-certs, readOnly: true }
           livenessProbe:
             httpGet: { path: "/healthz", port: 8222 }
             initialDelaySeconds: 10
@@ -118,10 +179,31 @@ spec:
           resources:
             requests: { cpu: "250m", memory: "512Mi" }
             limits: { memory: "1Gi" }
+        # SEC-01c: keeps the SVID renewed + reloads NATS on rotation.
+        - name: spiffe-helper
+          image: ghcr.io/spiffe/spiffe-helper:0.9.0
+          args: ["-config", "/etc/spiffe-helper/helper.conf"]
+          volumeMounts:
+            - { name: spiffe-helper-config, mountPath: /etc/spiffe-helper, readOnly: true }
+            - { name: nats-certs, mountPath: /etc/nats-certs }
+            - { name: spiffe, mountPath: /run/spiffe, readOnly: true }
       volumes:
         - name: config
           configMap:
             name: nats-config
+        - name: spiffe-helper-config
+          configMap:
+            name: nats-spiffe-helper
+        # Shared cert dir written by spiffe-helper, read by nats. Memory-backed
+        # so private keys never touch disk.
+        - name: nats-certs
+          emptyDir:
+            medium: Memory
+        # SEC-01a SPIFFE CSI volume — presents the agent Workload API socket.
+        - name: spiffe
+          csi:
+            driver: csi.spiffe.io
+            readOnly: true
   volumeClaimTemplates:
     - metadata:
         name: data

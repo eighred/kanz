@@ -2,12 +2,14 @@ package bus
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"sync"
 	"time"
 
 	"github.com/segmentio/kafka-go"
+	"github.com/segmentio/kafka-go/sasl"
 )
 
 var _ Client = (*KafkaClient)(nil)
@@ -16,10 +18,22 @@ type KafkaConfig struct {
 	Brokers        []string
 	ClientID       string
 	PublishTimeout time.Duration
+
+	// TLSConfig enables TLS on the broker connection (SEC-01c). For the
+	// mesh the caller builds it from the workload SVID via
+	// transport.ClientTLSConfig (SEC-01b). nil ⇒ plaintext (local/dev).
+	// Applied to both the writer (Transport) and every reader (Dialer).
+	TLSConfig *tls.Config
+	// SASL is the optional SASL mechanism (e.g. SCRAM-SHA-512 via
+	// kafka-go/sasl/scram, or PLAIN). nil ⇒ no SASL. Independent of TLS:
+	// mTLS alone authenticates in the SPIFFE mesh, SASL is for brokers that
+	// require credential-based auth (managed Kafka, cross-trust-domain).
+	SASL sasl.Mechanism
 }
 
 type KafkaClient struct {
 	cfg     KafkaConfig
+	dialer  *kafka.Dialer // shared by readers; carries TLS + SASL
 	writer  *kafka.Writer
 	mu      sync.Mutex
 	readers []*kafka.Reader
@@ -33,7 +47,8 @@ func DialKafka(cfg KafkaConfig) (*KafkaClient, error) {
 		cfg.PublishTimeout = 5 * time.Second
 	}
 	return &KafkaClient{
-		cfg: cfg,
+		cfg:    cfg,
+		dialer: readerDialer(cfg),
 		writer: &kafka.Writer{
 			Addr:                   kafka.TCP(cfg.Brokers...),
 			Balancer:               &kafka.Hash{}, // partition by Message.Key
@@ -41,8 +56,26 @@ func DialKafka(cfg KafkaConfig) (*KafkaClient, error) {
 			Async:                  false,
 			Compression:            kafka.Snappy,
 			AllowAutoTopicCreation: false, // EVT-09: topics provisioned explicitly
+			Transport: &kafka.Transport{
+				TLS:  cfg.TLSConfig, // nil ⇒ plaintext, kafka-go's default
+				SASL: cfg.SASL,
+			},
 		},
 	}, nil
+}
+
+// readerDialer builds the dialer readers share. Returns nil when neither TLS
+// nor SASL is configured so kafka-go falls back to its DefaultDialer.
+func readerDialer(cfg KafkaConfig) *kafka.Dialer {
+	if cfg.TLSConfig == nil && cfg.SASL == nil {
+		return nil
+	}
+	return &kafka.Dialer{
+		Timeout:       10 * time.Second,
+		DualStack:     true,
+		TLS:           cfg.TLSConfig,
+		SASLMechanism: cfg.SASL,
+	}
 }
 
 func (k *KafkaClient) Publish(ctx context.Context, msg Message) error {
@@ -74,6 +107,7 @@ func (k *KafkaClient) Subscribe(ctx context.Context, topic, group string, h Hand
 		MinBytes:       1,
 		MaxBytes:       10 << 20, // 10 MiB
 		CommitInterval: 0,        // manual per-message commit; lets EVT-17e own retry
+		Dialer:         k.dialer, // nil ⇒ kafka-go DefaultDialer; carries TLS + SASL otherwise
 	})
 	k.mu.Lock()
 	k.readers = append(k.readers, r)

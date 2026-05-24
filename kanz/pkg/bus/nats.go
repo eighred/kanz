@@ -2,6 +2,7 @@ package bus
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"time"
@@ -24,6 +25,21 @@ type NATSConfig struct {
 	ReconnectWait  time.Duration // default 2s
 	MaxReconnects  int           // default -1 (forever); set finite for fail-fast
 	PublishTimeout time.Duration // default 5s
+
+	// TLSConfig enables TLS (SEC-01c). For the zero-trust mesh the caller
+	// builds it from the workload SVID via transport.ClientTLSConfig
+	// (SEC-01b) so the connection is mutually authenticated and the NATS
+	// server's SPIFFE identity is verified — the client cert is also the
+	// auth credential (NATS maps the verified cert to a user). nil ⇒
+	// plaintext, for local/dev only. bus stays decoupled from go-spiffe by
+	// taking a ready *tls.Config rather than a SPIFFE source.
+	TLSConfig *tls.Config
+	// Username/Password/Token are NATS-native auth, an alternative to
+	// mTLS-cert auth for deployments not yet on SPIFFE. Username+Password
+	// are used together; Token takes precedence when set.
+	Username string
+	Password string
+	Token    string
 }
 
 type NATSClient struct {
@@ -48,12 +64,22 @@ func DialNATS(_ context.Context, cfg NATSConfig) (*NATSClient, error) {
 	if cfg.PublishTimeout == 0 {
 		cfg.PublishTimeout = 5 * time.Second
 	}
-	conn, err := nats.Connect(cfg.URL,
+	opts := []nats.Option{
 		nats.Name(cfg.Name),
 		nats.Timeout(cfg.ConnectTimeout),
 		nats.ReconnectWait(cfg.ReconnectWait),
 		nats.MaxReconnects(cfg.MaxReconnects),
-	)
+	}
+	if cfg.TLSConfig != nil {
+		opts = append(opts, nats.Secure(cfg.TLSConfig))
+	}
+	switch {
+	case cfg.Token != "":
+		opts = append(opts, nats.Token(cfg.Token))
+	case cfg.Username != "":
+		opts = append(opts, nats.UserInfo(cfg.Username, cfg.Password))
+	}
+	conn, err := nats.Connect(cfg.URL, opts...)
 	if err != nil {
 		return nil, fmt.Errorf("nats connect: %w", err)
 	}
