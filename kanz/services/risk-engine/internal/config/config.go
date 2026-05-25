@@ -33,6 +33,14 @@ type Config struct {
 	// Empty ⇒ spans are created and trace context propagates, but are not
 	// exported — startup never blocks on a collector.
 	OTLPEndpoint string
+
+	// GRPCListen is the address the risk query gRPC server (API-01b) binds.
+	// Empty ⇒ the query server is not started (probes + ingestion only).
+	GRPCListen string
+	// SPIFFESocket is the SPIFFE Workload API socket (SEC-01a CSI mount). When
+	// set, the gRPC query server requires mTLS with an in-mesh peer SVID
+	// (SEC-01b); empty ⇒ the server listens in plaintext (local/dev).
+	SPIFFESocket string
 }
 
 func Load() (Config, error) {
@@ -44,6 +52,8 @@ func Load() (Config, error) {
 		DatabaseURL:  secret("RISK_ENGINE_DATABASE_URL"),
 		KafkaBrokers: splitList(os.Getenv("RISK_ENGINE_KAFKA_BROKERS")),
 		OTLPEndpoint: os.Getenv("RISK_ENGINE_OTLP_ENDPOINT"),
+		GRPCListen:   os.Getenv("RISK_ENGINE_GRPC_LISTEN"),
+		SPIFFESocket: os.Getenv("RISK_ENGINE_SPIFFE_SOCKET"),
 	}, nil
 }
 

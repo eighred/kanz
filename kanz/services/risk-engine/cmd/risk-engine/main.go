@@ -11,6 +11,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -18,6 +19,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"google.golang.org/grpc"
 
 	risk "github.com/kanz-eng/kanz/internal/risk"
 	"github.com/kanz-eng/kanz/internal/risk/compute"
@@ -27,8 +29,10 @@ import (
 	"github.com/kanz-eng/kanz/internal/risk/state/persist"
 	"github.com/kanz-eng/kanz/pkg/bus"
 	"github.com/kanz-eng/kanz/pkg/observability"
+	"github.com/kanz-eng/kanz/pkg/transport"
 	"github.com/kanz-eng/kanz/services/risk-engine/internal/app"
 	"github.com/kanz-eng/kanz/services/risk-engine/internal/config"
+	"github.com/kanz-eng/kanz/services/risk-engine/internal/grpcsrv"
 	"github.com/kanz-eng/kanz/services/risk-engine/internal/server"
 )
 
@@ -119,11 +123,16 @@ func runEngine(ctx context.Context, cfg config.Config, readiness *server.Readine
 	}
 
 	store := state.NewStore()
+	// Cache + registry are shared between the recompute path and the query
+	// EngineImpl below, so a query sees the live store plus the same
+	// last-known-good cache the recomputer fills (degraded fallback).
+	cache := risk.NewCache()
+	registry := compute.DefaultRegistry()
 	// Recomputer baseCtx is app-scoped (Background), not the signal ctx, so
 	// the shutdown Drain can still publish the last settled state after the
 	// signal cancels ingestion.
-	recomputer := engine.NewRecomputer(context.Background(), store, compute.DefaultRegistry(),
-		risk.NewCache(), publisher, engine.DefaultDebounceInterval, logger, engine.WithMetrics(riskMetrics))
+	recomputer := engine.NewRecomputer(context.Background(), store, registry,
+		cache, publisher, engine.DefaultDebounceInterval, logger, engine.WithMetrics(riskMetrics))
 
 	a := &app.App{
 		Readiness:  readiness,
@@ -167,7 +176,53 @@ func runEngine(ctx context.Context, cfg config.Config, readiness *server.Readine
 	}
 	a.Ingest = ingest
 
+	// Risk query gRPC server (API-01b): a read surface over the concrete
+	// EngineImpl, sharing the live store + cache + registry. Started only when
+	// an address is configured; stopped gracefully when ctx is canceled.
+	if cfg.GRPCListen != "" {
+		engineImpl := engine.New(store, registry, cache, risk.NewDetector())
+		stopGRPC, err := serveQueryGRPC(ctx, cfg, engineImpl, logger)
+		if err != nil {
+			return err
+		}
+		defer stopGRPC()
+	}
+
 	return a.Run(ctx)
+}
+
+// serveQueryGRPC starts the risk query gRPC server on cfg.GRPCListen and
+// returns a stop function that gracefully drains it. When cfg.SPIFFESocket is
+// set, the listener requires mTLS with an in-mesh peer SVID (SEC-01b);
+// otherwise it serves plaintext (local/dev). Serve runs on its own goroutine;
+// a bind failure is returned synchronously so startup fails loudly.
+func serveQueryGRPC(ctx context.Context, cfg config.Config, eng *engine.EngineImpl, logger *slog.Logger) (func(), error) {
+	var opts []grpc.ServerOption
+	if cfg.SPIFFESocket != "" {
+		src, err := transport.NewSource(ctx, cfg.SPIFFESocket)
+		if err != nil {
+			return nil, err
+		}
+		opts = append(opts, transport.ServerOption(src, transport.AuthorizeMesh()))
+		logger.Info("risk query gRPC: mTLS enabled", "socket", cfg.SPIFFESocket)
+	} else {
+		logger.Warn("risk query gRPC: serving plaintext (no RISK_ENGINE_SPIFFE_SOCKET)")
+	}
+
+	lis, err := net.Listen("tcp", cfg.GRPCListen)
+	if err != nil {
+		return nil, err
+	}
+	grpcSrv := grpc.NewServer(opts...)
+	grpcsrv.New(eng).Register(grpcSrv)
+
+	go func() {
+		logger.Info("risk query gRPC listening", "addr", cfg.GRPCListen)
+		if err := grpcSrv.Serve(lis); err != nil {
+			logger.Error("risk query gRPC server failed", "err", err)
+		}
+	}()
+	return grpcSrv.GracefulStop, nil
 }
 
 // version is the producer_version stamped on emitted events. Hardcoded

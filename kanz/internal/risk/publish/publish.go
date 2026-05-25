@@ -90,7 +90,7 @@ func (p *Publisher) EmitExposure(ctx context.Context, exposure *domain.ExposureS
 	if exposure == nil {
 		return errors.New("publish: exposure is nil")
 	}
-	payload := toProtoExposureSet(exposure)
+	payload := ToProtoExposureSet(exposure)
 	return p.producer.Publish(ctx, bus.Event{
 		Subject:          EventTypeExposureRecomputed,
 		EventType:        EventTypeExposureRecomputed,
@@ -114,7 +114,7 @@ func (p *Publisher) EmitMeasures(ctx context.Context, measures *domain.MeasureSe
 	if measures == nil {
 		return errors.New("publish: measures is nil")
 	}
-	payload := toProtoMeasureSet(measures, sourceEventIDs)
+	payload := ToProtoMeasureSet(measures, sourceEventIDs)
 	return p.producer.Publish(ctx, bus.Event{
 		Subject:          EventTypeMeasuresComputed,
 		EventType:        EventTypeMeasuresComputed,
@@ -129,8 +129,14 @@ func (p *Publisher) EmitMeasures(ctx context.Context, measures *domain.MeasureSe
 }
 
 // --- Translation: domain → proto --------------------------------------
+//
+// ToProtoExposureSet / ToProtoMeasureSet are exported so the risk query
+// gRPC server (API-01b, services/risk-engine/internal/grpcsrv) serves the
+// EXACT same wire payloads this publisher emits — one domain→proto mapping,
+// not two divergent copies. They live here (the publish layer that owns the
+// domain↔proto boundary) rather than being re-derived in grpcsrv.
 
-func toProtoExposureSet(es *domain.ExposureSet) *domainpb.ExposureSet {
+func ToProtoExposureSet(es *domain.ExposureSet) *domainpb.ExposureSet {
 	items := es.Items()
 	exposures := make([]*domainpb.ExposureState, 0, len(items))
 	asOf := timestamppb.New(es.AsOf())
@@ -152,7 +158,7 @@ func toProtoExposureSet(es *domain.ExposureSet) *domainpb.ExposureSet {
 	}
 }
 
-func toProtoMeasureSet(ms *domain.MeasureSet, sourceEventIDs []string) *domainpb.RiskMeasureSet {
+func ToProtoMeasureSet(ms *domain.MeasureSet, sourceEventIDs []string) *domainpb.RiskMeasureSet {
 	names := ms.Names()
 	measures := make([]*domainpb.RiskMeasure, 0, len(names))
 	for _, n := range names {
@@ -191,4 +197,3 @@ func toProtoDimension(d domain.ExposureDimension) domainpb.ExposureDimension {
 		return domainpb.ExposureDimension_EXPOSURE_DIMENSION_UNSPECIFIED
 	}
 }
-
