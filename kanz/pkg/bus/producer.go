@@ -12,6 +12,8 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	envelopepb "github.com/kanz-eng/kanz-schemas-go/envelope/v1"
+
+	"github.com/kanz-eng/kanz/pkg/observability"
 )
 
 // envelopeVersion is the Envelope schema version this client builds against.
@@ -47,14 +49,18 @@ type Event struct {
 type ProducerConfig struct {
 	Source          string // service/instance, e.g. "market-ingest/pod-7"
 	ProducerVersion string // git SHA or semver
+
+	// Metrics is the optional RED exporter (OBS-01c). Nil ⇒ no instrumentation.
+	Metrics *BusMetrics
 }
 
 // Producer stamps + validates envelopes and frames them onto a Client.
 // Goroutine-safe; the per-(event_type, partition_key) sequence counter is
 // guarded by a mutex.
 type Producer struct {
-	client Client
-	cfg    ProducerConfig
+	client  Client
+	cfg     ProducerConfig
+	metrics *BusMetrics
 
 	seqMu    sync.Mutex
 	sequence map[seqKey]uint64
@@ -78,13 +84,24 @@ func NewProducer(client Client, cfg ProducerConfig) (*Producer, error) {
 	return &Producer{
 		client:   client,
 		cfg:      cfg,
+		metrics:  cfg.Metrics,
 		sequence: make(map[seqKey]uint64),
 	}, nil
 }
 
-// Publish stamps the auto-fields onto the envelope, validates the result,
-// frames envelope+payload, and hands the wire bytes to the underlying Client.
+// Publish opens a producer span (so the stamped trace_context continues into
+// the next hop, OBS-01d), records RED metrics (OBS-01c), then stamps,
+// validates, frames, and hands the wire bytes to the underlying Client.
 func (p *Producer) Publish(ctx context.Context, e Event) error {
+	ctx, span := startProducerSpan(ctx, e.EventType)
+	start := time.Now()
+	err := p.publish(ctx, e)
+	endSpan(span, err)
+	p.metrics.observePublish(e.Subject, time.Since(start), err)
+	return err
+}
+
+func (p *Producer) publish(ctx context.Context, e Event) error {
 	if e.Payload == nil {
 		return errors.New("bus: Event.Payload required")
 	}
@@ -147,7 +164,13 @@ func (p *Producer) stamp(ctx context.Context, e Event) (*envelopepb.Envelope, er
 	if causation == "" {
 		causation = CausationIDFromContext(ctx)
 	}
+	// Trace precedence: explicit Event field > active OTel span (the producer
+	// span just opened, or a span the caller started) > legacy string ctx
+	// (OBS-01d; the string path stays for callers not yet span-aware).
 	trace := e.TraceContext
+	if trace == "" {
+		trace = observability.TraceparentFromContext(ctx)
+	}
 	if trace == "" {
 		trace = TraceContextFromContext(ctx)
 	}

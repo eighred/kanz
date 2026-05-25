@@ -28,6 +28,11 @@ type Config struct {
 	// restores from the latest durable snapshot and relies on the live NATS
 	// spine to cover everything since. Comma-separated in the environment.
 	KafkaBrokers []string
+
+	// OTLPEndpoint is the OTel collector (host:port) for span export (OBS-01).
+	// Empty ⇒ spans are created and trace context propagates, but are not
+	// exported — startup never blocks on a collector.
+	OTLPEndpoint string
 }
 
 func Load() (Config, error) {
@@ -38,6 +43,7 @@ func Load() (Config, error) {
 		Source:       envOr("RISK_ENGINE_SOURCE", "risk-engine"),
 		DatabaseURL:  secret("RISK_ENGINE_DATABASE_URL"),
 		KafkaBrokers: splitList(os.Getenv("RISK_ENGINE_KAFKA_BROKERS")),
+		OTLPEndpoint: os.Getenv("RISK_ENGINE_OTLP_ENDPOINT"),
 	}, nil
 }
 

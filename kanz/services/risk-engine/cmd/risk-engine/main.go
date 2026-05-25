@@ -26,6 +26,7 @@ import (
 	"github.com/kanz-eng/kanz/internal/risk/state"
 	"github.com/kanz-eng/kanz/internal/risk/state/persist"
 	"github.com/kanz-eng/kanz/pkg/bus"
+	"github.com/kanz-eng/kanz/pkg/observability"
 	"github.com/kanz-eng/kanz/services/risk-engine/internal/app"
 	"github.com/kanz-eng/kanz/services/risk-engine/internal/config"
 	"github.com/kanz-eng/kanz/services/risk-engine/internal/server"
@@ -38,16 +39,35 @@ func main() {
 		os.Exit(2)
 	}
 
-	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: cfg.LogLevel}))
-	slog.SetDefault(logger)
-
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+
+	// Telemetry foundation (OBS-01a): Prometheus registry + OTel tracer +
+	// trace-correlated logger. Spans export to RISK_ENGINE_OTLP_ENDPOINT when
+	// set; metrics are scraped from /metrics below.
+	base := slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: cfg.LogLevel})
+	obs, err := observability.New(ctx, observability.Config{
+		ServiceName:    cfg.Source,
+		ServiceVersion: version(),
+		OTLPEndpoint:   cfg.OTLPEndpoint,
+		SampleRatio:    1,
+	}, base)
+	if err != nil {
+		slog.Default().Error("observability init failed", "err", err)
+		os.Exit(2)
+	}
+	logger := obs.Logger
+	slog.SetDefault(logger)
+	defer func() {
+		shutCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = obs.Shutdown(shutCtx)
+	}()
 
 	readiness := &server.Readiness{}
 	httpSrv := &http.Server{
 		Addr:              cfg.Listen,
-		Handler:           server.New(readiness, logger),
+		Handler:           server.New(readiness, logger, server.WithMetrics(obs.MetricsHandler())),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 	go func() {
@@ -59,7 +79,7 @@ func main() {
 	}()
 
 	if cfg.NATSURL != "" {
-		if err := runEngine(ctx, cfg, readiness, logger); err != nil {
+		if err := runEngine(ctx, cfg, readiness, logger, obs); err != nil {
 			logger.Error("engine stopped with error", "err", err)
 		}
 	} else {
@@ -80,13 +100,16 @@ func main() {
 // runEngine builds the ingestion→recompute→publish pipeline over the live
 // NATS spine and runs it under the graceful-shutdown lifecycle. Returns
 // when ctx is canceled (signal) or ingestion fails.
-func runEngine(ctx context.Context, cfg config.Config, readiness *server.Readiness, logger *slog.Logger) error {
+func runEngine(ctx context.Context, cfg config.Config, readiness *server.Readiness, logger *slog.Logger, obs *observability.Provider) error {
+	busMetrics := bus.NewBusMetrics(obs.Registry)
+	riskMetrics := engine.NewMetrics(obs.Registry)
+
 	client, err := bus.DialNATS(ctx, bus.NATSConfig{URL: cfg.NATSURL, Name: cfg.Source})
 	if err != nil {
 		return err
 	}
 
-	producer, err := bus.NewProducer(client, bus.ProducerConfig{Source: cfg.Source, ProducerVersion: version()})
+	producer, err := bus.NewProducer(client, bus.ProducerConfig{Source: cfg.Source, ProducerVersion: version(), Metrics: busMetrics})
 	if err != nil {
 		return err
 	}
@@ -100,7 +123,7 @@ func runEngine(ctx context.Context, cfg config.Config, readiness *server.Readine
 	// the shutdown Drain can still publish the last settled state after the
 	// signal cancels ingestion.
 	recomputer := engine.NewRecomputer(context.Background(), store, compute.DefaultRegistry(),
-		risk.NewCache(), publisher, engine.DefaultDebounceInterval, logger)
+		risk.NewCache(), publisher, engine.DefaultDebounceInterval, logger, engine.WithMetrics(riskMetrics))
 
 	a := &app.App{
 		Readiness:  readiness,
@@ -134,7 +157,7 @@ func runEngine(ctx context.Context, cfg config.Config, readiness *server.Readine
 		a.Checkpoint = snap.Checkpoint
 	}
 
-	consumer, err := bus.NewConsumer(client)
+	consumer, err := bus.NewConsumer(client, bus.WithBusMetrics(busMetrics))
 	if err != nil {
 		return err
 	}

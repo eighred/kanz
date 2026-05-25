@@ -22,11 +22,24 @@ func (r *Readiness) Ready() bool    { return r.ready.Load() }
 type Server struct {
 	logger    *slog.Logger
 	readiness *Readiness
+	metrics   http.Handler
 	mux       *http.ServeMux
 }
 
-func New(readiness *Readiness, logger *slog.Logger) *Server {
+// Option customizes the Server.
+type Option func(*Server)
+
+// WithMetrics mounts a Prometheus /metrics handler (the OBS-01a
+// Provider.MetricsHandler). Omitted ⇒ /metrics 404s.
+func WithMetrics(h http.Handler) Option {
+	return func(s *Server) { s.metrics = h }
+}
+
+func New(readiness *Readiness, logger *slog.Logger, opts ...Option) *Server {
 	s := &Server{logger: logger, readiness: readiness, mux: http.NewServeMux()}
+	for _, opt := range opts {
+		opt(s)
+	}
 	s.routes()
 	return s
 }
@@ -38,6 +51,9 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 func (s *Server) routes() {
 	s.mux.HandleFunc("GET /healthz", s.handleHealthz)
 	s.mux.HandleFunc("GET /readyz", s.handleReadyz)
+	if s.metrics != nil {
+		s.mux.Handle("GET /metrics", s.metrics)
+	}
 }
 
 func (s *Server) handleHealthz(w http.ResponseWriter, _ *http.Request) {

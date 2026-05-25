@@ -7,6 +7,8 @@ import (
 	"time"
 
 	envelopepb "github.com/kanz-eng/kanz-schemas-go/envelope/v1"
+
+	"github.com/kanz-eng/kanz/pkg/observability"
 )
 
 // EventHandler processes one inbound envelope-framed event. The ctx carries
@@ -18,9 +20,9 @@ type EventHandler func(ctx context.Context, env *envelopepb.Envelope, payload []
 // Consumer wraps a Subscriber and turns its byte-level Handler into an
 // envelope-aware EventHandler. Pipeline per delivery:
 //
-//   Unframe → Validate → dedup-check → retry-loop(handler) → dedup-record
-//                ↘                          ↘ exhausted ↘
-//                  DLQ or surface              DLQ or surface
+//	Unframe → Validate → dedup-check → retry-loop(handler) → dedup-record
+//	             ↘                          ↘ exhausted ↘
+//	               DLQ or surface              DLQ or surface
 //
 // DLQ (`WithDLQ`) and retry (`WithRetry`) are independent — either can be
 // configured on its own. Without DLQ, terminal failures surface to the
@@ -32,6 +34,7 @@ type Consumer struct {
 	dedup      *DedupWindow
 	retry      RetryConfig
 	validate   func(*envelopepb.Envelope) error
+	metrics    *BusMetrics
 }
 
 type consumerOptions struct {
@@ -40,6 +43,7 @@ type consumerOptions struct {
 	retry     RetryConfig
 	dlq       Publisher
 	validator func(*envelopepb.Envelope) error
+	metrics   *BusMetrics
 }
 
 // ConsumerOption customizes Consumer construction.
@@ -84,6 +88,12 @@ func WithDLQ(p Publisher) ConsumerOption {
 	return func(o *consumerOptions) { o.dlq = p }
 }
 
+// WithBusMetrics wires the RED exporter (OBS-01c) so each delivery records
+// consume rate/errors/duration. Nil ⇒ no instrumentation.
+func WithBusMetrics(m *BusMetrics) ConsumerOption {
+	return func(o *consumerOptions) { o.metrics = m }
+}
+
 func NewConsumer(s Subscriber, opts ...ConsumerOption) (*Consumer, error) {
 	if s == nil {
 		return nil, errors.New("bus: subscriber is nil")
@@ -105,6 +115,7 @@ func NewConsumer(s Subscriber, opts ...ConsumerOption) (*Consumer, error) {
 		dedup:      NewDedupWindow(o.dedupTTL, o.dedupMax),
 		retry:      o.retry.withDefaults(),
 		validate:   o.validator,
+		metrics:    o.metrics,
 	}, nil
 }
 
@@ -114,35 +125,48 @@ func (c *Consumer) Subscribe(ctx context.Context, subject, group string, h Event
 	return c.subscriber.Subscribe(ctx, subject, group, func(ctx context.Context, msg Message) error {
 		env, payload, err := Unframe(msg.Body)
 		if err != nil {
+			c.metrics.observeConsume(subject, group, 0, err)
 			return c.routeToDLQ(ctx, subject, msg, 0, fmt.Errorf("unframe: %w", err))
 		}
 		if err := c.validate(env); err != nil {
+			c.metrics.observeConsume(subject, group, 0, err)
 			return c.routeToDLQ(ctx, subject, msg, 0, fmt.Errorf("envelope validation: %w", err))
 		}
 		if c.dedup.Seen(env.IdempotencyKey) {
-			return nil // duplicate within window — ack and skip
+			return nil // duplicate within window — ack and skip (not a dispatch)
 		}
 		ctx = WithCorrelationID(ctx, env.CorrelationId)
 		ctx = WithCausationID(ctx, env.EventId)
 		if env.TraceContext != "" {
 			ctx = WithTraceContext(ctx, env.TraceContext)
+			// Extract the inbound trace onto ctx so the consumer span (and any
+			// handler-side span / log) joins the producer's trace (OBS-01d).
+			ctx = observability.ContextWithTraceparent(ctx, env.TraceContext)
 		}
+		ctx, span := startConsumerSpan(ctx, env.EventType)
+		start := time.Now()
 
 		var lastErr error
 		for attempt := 1; attempt <= c.retry.MaxAttempts; attempt++ {
 			if err := h(ctx, env, payload); err == nil {
 				c.dedup.Record(env.IdempotencyKey)
+				endSpan(span, nil)
+				c.metrics.observeConsume(subject, group, time.Since(start), nil)
 				return nil
 			} else {
 				lastErr = err
 			}
 			if attempt < c.retry.MaxAttempts {
 				if err := sleepWithCtx(ctx, c.retry.Backoff(attempt)); err != nil {
+					endSpan(span, err)
+					c.metrics.observeConsume(subject, group, time.Since(start), err)
 					return err // ctx canceled during backoff
 				}
 			}
 		}
-		// Retries exhausted.
+		// Retries exhausted — the dispatch failed regardless of DLQ routing.
+		endSpan(span, lastErr)
+		c.metrics.observeConsume(subject, group, time.Since(start), lastErr)
 		if c.dlq != nil {
 			if err := c.publishDLQ(ctx, subject, msg, c.retry.MaxAttempts, lastErr); err != nil {
 				return err

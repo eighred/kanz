@@ -54,6 +54,7 @@ type Recomputer struct {
 	publisher *publish.Publisher
 	debounce  time.Duration
 	logger    *slog.Logger
+	metrics   *Metrics
 
 	// baseCtx scopes publishes + the worker; when it is canceled (hard
 	// shutdown) the worker exits and in-flight recomputes skip the publish.
@@ -63,16 +64,26 @@ type Recomputer struct {
 	dirty  map[v1.PortfolioID]time.Time // id → recompute deadline (lastTrigger+debounce)
 	closed bool
 
-	wake chan struct{}      // nudges the worker to re-scan deadlines
-	wg   sync.WaitGroup     // tracks in-flight recompute goroutines
-	done chan struct{}      // closed when the worker loop exits
+	wake chan struct{}  // nudges the worker to re-scan deadlines
+	wg   sync.WaitGroup // tracks in-flight recompute goroutines
+	done chan struct{}  // closed when the worker loop exits
+}
+
+// RecomputerOption customizes a Recomputer at construction (applied before the
+// worker starts, so it is race-free).
+type RecomputerOption func(*Recomputer)
+
+// WithMetrics wires the OBS-01c RED exporter so each fired recompute records
+// the kanz_risk_recompute_* series the CICD-01e canary gates on.
+func WithMetrics(m *Metrics) RecomputerOption {
+	return func(r *Recomputer) { r.metrics = m }
 }
 
 // NewRecomputer constructs a Recomputer and starts its worker goroutine.
 // publisher may be nil (cache-only mode — useful in tests or a
 // read-replica that doesn't re-emit FACTs); a non-positive debounce falls
 // back to DefaultDebounceInterval. baseCtx scopes the publish side and the
-// worker lifecycle.
+// worker lifecycle. opts is variadic so existing callers are unaffected.
 func NewRecomputer(
 	baseCtx context.Context,
 	store *state.Store,
@@ -81,6 +92,7 @@ func NewRecomputer(
 	publisher *publish.Publisher,
 	debounce time.Duration,
 	logger *slog.Logger,
+	opts ...RecomputerOption,
 ) *Recomputer {
 	if debounce <= 0 {
 		debounce = DefaultDebounceInterval
@@ -99,6 +111,9 @@ func NewRecomputer(
 		dirty:     make(map[v1.PortfolioID]time.Time),
 		wake:      make(chan struct{}, 1),
 		done:      make(chan struct{}),
+	}
+	for _, opt := range opts {
+		opt(r)
 	}
 	go r.loop()
 	return r
@@ -240,25 +255,31 @@ func (r *Recomputer) loop() {
 func (r *Recomputer) recompute(id v1.PortfolioID) {
 	p, ok := r.store.Snapshot(id)
 	if !ok {
-		return
+		return // portfolio retired between trigger and fire — not a recompute
 	}
+	start := time.Now()
 	es := compute.ComputeExposure(p)
 	ms := compute.ComputeMeasures(p, r.registry, nil)
 	r.cache.StoreExposure(id, es)
 	r.cache.StoreMeasures(id, ms)
 
 	if r.publisher == nil {
+		r.metrics.observeRecompute(time.Since(start), nil)
 		return
 	}
 	if err := r.baseCtx.Err(); err != nil {
-		return // shutting down — cache is updated, skip the emit
+		return // shutting down — cache is updated, skip the emit (and the metric)
 	}
+	var emitErr error
 	if err := r.publisher.EmitExposure(r.baseCtx, es); err != nil {
+		emitErr = err
 		r.logger.Error("emit exposure failed", "portfolio", id, "err", err)
 	}
 	if err := r.publisher.EmitMeasures(r.baseCtx, ms, nil); err != nil {
+		emitErr = err
 		r.logger.Error("emit measures failed", "portfolio", id, "err", err)
 	}
+	r.metrics.observeRecompute(time.Since(start), emitErr)
 }
 
 // TriggeringApplier decorates an ingest.Applier so every successful apply
