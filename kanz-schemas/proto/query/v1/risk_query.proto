@@ -1,0 +1,174 @@
+syntax = "proto3";
+
+// Risk query service — the external READ surface over the risk engine
+// (API-01a). It is the proto mirror of kanz/internal/risk/api/v1.Engine:
+// query + scenario + health ONLY, with no Apply/Mutate/Command method.
+// State changes are event-driven (the KANZ_BRAIN anti-decision "all state
+// changes must be event-driven"); callers needing risk-output notifications
+// subscribe to the bus, not this service.
+//
+// # Consumers
+//
+// The risk-engine implements the server, reading from durable state
+// (API-01b, PERS-01). The api-gateway BFF (API-01c) is the only governed
+// client: it forwards over mTLS (SEC-01b) and transcodes REST. No other
+// service should dial this directly.
+//
+// # Reuse, not redefinition
+//
+// Responses carry the SAME domain payloads the bus publishes —
+// domain.v1.ExposureSet (exposure.proto) and domain.v1.RiskMeasureSet
+// (measure.proto) — so a value read over this RPC is byte-identical to the
+// same value seen as a FACT on the bus. Only the request envelopes, the
+// scenario shock taxonomy, and the query-trust signals are new here.
+//
+// # Versioning
+//
+// query.v1, additive-only within the version under the same discipline as
+// the api/v1 Go surface and envelope-policy §1 — a removed/retyped field or
+// RPC breaks every client and requires a sibling query/v2.
+package query.v1;
+
+import "google/protobuf/duration.proto";
+import "google/protobuf/timestamp.proto";
+import "common/v1/decimal.proto";
+import "domain/v1/exposure.proto";
+import "domain/v1/measure.proto";
+
+// RiskQueryService is the gRPC read surface. RPC names match the Engine
+// interface methods (Exposure/Measures/EvaluateScenario/Health) so the
+// API-01b server is a thin adapter over the in-process engine.
+service RiskQueryService {
+  // Exposure returns the latest computed exposure aggregate for a
+  // portfolio. NOT_FOUND when the portfolio is unknown to the engine.
+  rpc Exposure(ExposureRequest) returns (ExposureResponse);
+
+  // Measures returns the latest computed risk measures. The
+  // MeasuresRequest.measures filter narrows the set; empty ⇒ all.
+  rpc Measures(MeasuresRequest) returns (MeasuresResponse);
+
+  // EvaluateScenario applies the request's shocks to a transient copy of
+  // the current state and returns the projected measures. State is never
+  // mutated — a scenario is a pure function of (state, shocks).
+  rpc EvaluateScenario(EvaluateScenarioRequest) returns (EvaluateScenarioResponse);
+
+  // Health reports the engine's mode + staleness so a caller that cannot
+  // tolerate degraded data branches before reading the query methods.
+  rpc Health(HealthRequest) returns (HealthResponse);
+}
+
+// Mode is the engine's operational mode (mirrors api/v1.Mode).
+enum Mode {
+  MODE_UNSPECIFIED = 0;
+  // NORMAL: ingestion is current; measures come from the latest state.
+  MODE_NORMAL = 1;
+  // DEGRADED: serving cached / last-known values because ingestion stalled
+  // or a dependency is unavailable. Responses still come back — callers
+  // must check the mode / quality flags before acting.
+  MODE_DEGRADED = 2;
+}
+
+// QualityFlag annotates a response with trust signals (mirrors
+// api/v1.QualityFlag). Distinct from envelope.v1.QualityFlag, which carries
+// event-stream concerns (REPLAYED/LATE); these are query-result concerns.
+enum QualityFlag {
+  QUALITY_FLAG_UNSPECIFIED = 0;
+  // DEGRADED: the engine was in MODE_DEGRADED when the response was
+  // computed; the values are cached / last-known.
+  QUALITY_FLAG_DEGRADED = 1;
+  // STALE: the data is older than the request's as_of budget, though the
+  // engine itself is not degraded.
+  QUALITY_FLAG_STALE = 2;
+}
+
+// ExposureRequest scopes an exposure query.
+message ExposureRequest {
+  // portfolio_id is the portfolio to query. Required; empty ⇒
+  // INVALID_ARGUMENT.
+  string portfolio_id = 1;
+
+  // as_of pins the query to a point in time. Unset ⇒ latest. The response
+  // as_of reports the actual state timestamp, which may be older when the
+  // engine is degraded.
+  google.protobuf.Timestamp as_of = 2;
+}
+
+// ExposureResponse is the reply to ExposureRequest.
+message ExposureResponse {
+  string portfolio_id = 1;
+  // as_of is the state timestamp the response was computed against —
+  // equal to or older than the request as_of when set.
+  google.protobuf.Timestamp as_of = 2;
+  // set is the exposure aggregate, the same payload exposure FACTs carry.
+  domain.v1.ExposureSet set = 3;
+  repeated QualityFlag quality_flags = 4;
+}
+
+// MeasuresRequest scopes a risk-measure query.
+message MeasuresRequest {
+  string portfolio_id = 1;
+  google.protobuf.Timestamp as_of = 2;
+  // measures narrows the response to a named subset (e.g. ["VaR99",
+  // "Delta"]); empty ⇒ all measures the engine computes.
+  repeated string measures = 3;
+}
+
+// MeasuresResponse is the reply to MeasuresRequest.
+message MeasuresResponse {
+  string portfolio_id = 1;
+  google.protobuf.Timestamp as_of = 2;
+  domain.v1.RiskMeasureSet set = 3;
+  repeated QualityFlag quality_flags = 4;
+}
+
+// EvaluateScenarioRequest evaluates a what-if scenario against current state.
+message EvaluateScenarioRequest {
+  string portfolio_id = 1;
+  // shocks describe the hypothetical perturbations. A shock against an
+  // instrument the portfolio does not hold is a silent no-op (so large
+  // watchlist batches succeed regardless of holdings).
+  repeated ScenarioShock shocks = 2;
+}
+
+// EvaluateScenarioResponse carries the projected measures under the shocks.
+message EvaluateScenarioResponse {
+  string portfolio_id = 1;
+  domain.v1.RiskMeasureSet projected = 2;
+  repeated QualityFlag quality_flags = 3;
+}
+
+// ScenarioShock is one perturbation. The oneof is the proto mirror of the
+// api/v1 concrete shock types; new shock kinds are added as new oneof
+// members (additive-only).
+message ScenarioShock {
+  oneof shock {
+    PriceShock price = 1;
+    ParallelShift parallel_shift = 2;
+  }
+}
+
+// PriceShock applies a fractional price change to one instrument's market
+// value (pct = -0.10 ⇒ drop 10%; coefficient -10, exponent -2).
+message PriceShock {
+  string instrument_id = 1;
+  common.v1.Decimal pct = 2;
+}
+
+// ParallelShift applies the same fractional change to every position with a
+// market value — the textbook "everything drops 5%" stress test.
+message ParallelShift {
+  common.v1.Decimal pct = 1;
+}
+
+// HealthRequest takes no arguments; the engine reports its global state.
+message HealthRequest {}
+
+// HealthResponse reports the engine's operational state.
+message HealthResponse {
+  Mode mode = 1;
+  // as_of is the latest applied state-event time across all aggregates.
+  google.protobuf.Timestamp as_of = 2;
+  // staleness is the gap between as_of and the engine's wall clock when
+  // sampled. Callers compare it against their own freshness budget.
+  google.protobuf.Duration staleness = 3;
+}

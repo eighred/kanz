@@ -58,7 +58,7 @@ _(OBS-01a..e epic complete — see DONE)_
 
 _Objective: an authenticated, rate-limited, versioned external surface over the risk `Engine` read/scenario API. The only governed entry point for clients and UIs (ROI #7)._
 
-- [ ] **API-01a** Define the Engine read surface as a gRPC service proto (`Exposure`/`Measures`/`EvaluateScenario`/`Health`) reusing `domain.v1` + risk payloads; CODEOWNERS + buf discovery · `kanz-schemas/proto/query/v1/risk_query.proto`
+- [x] **API-01a** Define the Engine read surface as a gRPC service proto (`Exposure`/`Measures`/`EvaluateScenario`/`Health`) reusing `domain.v1` + risk payloads; CODEOWNERS + buf discovery · `kanz-schemas/proto/query/v1/risk_query.proto` — _(see DONE)_
 - [ ] **API-01b** Implement the gRPC query server inside `risk-engine`, backed by the concrete `EngineImpl` (ORCH-01b); reads served from durable state (PERS-01) · `kanz/services/risk-engine/internal/grpcsrv/`
 - [ ] **API-01c** Build the `api-gateway` BFF: gRPC + REST transcoding (grpc-gateway/Connect), OpenAPI emit, API version negotiation, forwards to `risk-engine` over mTLS · `kanz/services/api-gateway/cmd/api-gateway/`, `internal/`
 - [ ] **API-01d** Edge controls: OIDC/JWT auth middleware (consumes AUTH-01), per-tenant rate limits + quotas, idempotency-key dedup, request signing · `kanz/services/api-gateway/internal/middleware/`
@@ -256,6 +256,10 @@ _(none)_
 ---
 
 ## DONE
+
+### External API Gateway & BFF
+
+- [x] **API-01a** Risk query gRPC proto — new `kanz-schemas/proto/query/v1/risk_query.proto` + CODEOWNERS entry, **begins the Phase-2 API epic**. `RiskQueryService` is the proto mirror of the `kanz/internal/risk/api/v1.Engine` Go interface: `Exposure`/`Measures`/`EvaluateScenario`/`Health` RPCs, **query + scenario + health ONLY — no Apply/Mutate/Command** (the "all state changes are event-driven" anti-decision holds at the wire surface too). **Reuse over redefinition**: responses embed the SAME `domain.v1.ExposureSet` + `domain.v1.RiskMeasureSet` the bus publishes (a value read over RPC is byte-identical to the FACT on the bus), so only the request envelopes, the scenario-shock taxonomy, and the query-trust signals are new. **Scenario shocks are a `oneof` (`PriceShock`/`ParallelShift`)** mirroring the api/v1 concrete shock types, additive via new members. **Query-local `Mode` + `QualityFlag` enums** (NORMAL/DEGRADED, DEGRADED/STALE) — deliberately NOT envelope.v1.QualityFlag, whose REPLAYED/LATE values are event-stream concerns, not query-result trust. **RPC/message naming follows buf STANDARD** (the EvaluateScenario RPC needed `EvaluateScenarioRequest/Response`, not `Scenario*`, to satisfy `RPC_REQUEST_STANDARD_NAME`). CODEOWNERS: `/proto/query/` → risk-engine + architecture. buf-discovered (under the existing `proto` module); lint clean; **Go SDK regenerated via a Go-only buf template** (both `protoc-gen-go` + `protoc-gen-go-grpc`, so `risk_query.pb.go` + `risk_query_grpc.pb.go` emit) — gen/go + the kanz module both build against it. The server impl (API-01b inside risk-engine over the concrete EngineImpl + durable state) and the gateway BFF (API-01c) are the next subtasks · `kanz-schemas/proto/query/v1/risk_query.proto`
 
 ### Observability & Telemetry
 
