@@ -1,0 +1,124 @@
+# Supply-chain release gate (CICD-01d). On a version tag, for each service:
+# build → push → scan (trivy, fail on CRITICAL) → SBOM (syft) → sign + SBOM-
+# attest (cosign, keyless) → verify. Only images that clear this gate carry a
+# signature, and the cluster admission policy
+# (kanz/infra/security/admission/cluster-image-policy.yaml) refuses to run
+# anything unsigned by THIS workflow's identity.
+#
+# Signing is KEYLESS (OIDC → Fulcio short-lived cert, logged in Rekor): no
+# private key to store or rotate, the signer's identity IS the workflow's OIDC
+# subject — the same "identity, not a stored secret" stance as SEC-01.
+name: kanz-release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write    # push to ghcr.io
+  id-token: write     # keyless cosign signing via GitHub OIDC
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        service: [risk-engine, schema-registry]
+    env:
+      IMAGE: ghcr.io/${{ github.repository_owner }}/${{ matrix.service }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # Generate the uncommitted Go SDK (EVT-15a) the image build COPYs — same
+      # as build.yml / the kanz-ci Go job.
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: kanz/go.mod
+          cache-dependency-path: kanz/go.sum
+      - uses: bufbuild/buf-setup-action@v1
+        with:
+          version: 1.69.0
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Install protoc plugins
+        run: |
+          go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.11
+          go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@v1.5.1
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+      - name: Generate kanz-schemas Go SDK
+        working-directory: kanz-schemas
+        env:
+          GOFLAGS: -mod=mod
+        run: |
+          buf generate
+          cd gen/go && go mod init github.com/kanz-eng/kanz-schemas-go || true
+          cd gen/go && go mod tidy
+
+      - uses: docker/setup-buildx-action@v3
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Image metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=sha
+
+      - name: Build and push
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: kanz/services/${{ matrix.service }}/Dockerfile
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=${{ matrix.service }}
+          cache-to: type=gha,scope=${{ matrix.service }},mode=max
+
+      # Everything below pins to the immutable digest, never a tag.
+      - name: Vulnerability scan (fail on CRITICAL)
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: ${{ env.IMAGE }}@${{ steps.build.outputs.digest }}
+          format: table
+          exit-code: '1'
+          severity: CRITICAL
+          ignore-unfixed: true
+          # A critical CVE fails the job before signing, so the image is pushed
+          # but unsigned — admission then refuses it. Bump to HIGH once the base
+          # images are clean.
+
+      - uses: sigstore/cosign-installer@v3
+      - uses: anchore/sbom-action@v0
+        with:
+          image: ${{ env.IMAGE }}@${{ steps.build.outputs.digest }}
+          format: spdx-json
+          output-file: sbom.spdx.json
+
+      - name: Sign + attest SBOM (keyless)
+        env:
+          DIGEST_REF: ${{ env.IMAGE }}@${{ steps.build.outputs.digest }}
+        run: |
+          cosign sign --yes "$DIGEST_REF"
+          cosign attest --yes --type spdxjson --predicate sbom.spdx.json "$DIGEST_REF"
+
+      # Self-check: prove the signature verifies against this workflow's identity
+      # before the release is considered good (same predicate the cluster admission
+      # policy enforces).
+      - name: Verify signature
+        env:
+          DIGEST_REF: ${{ env.IMAGE }}@${{ steps.build.outputs.digest }}
+        run: |
+          cosign verify "$DIGEST_REF" \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            --certificate-identity-regexp "^https://github.com/${{ github.repository }}/.github/workflows/release.yml@refs/tags/v.*"

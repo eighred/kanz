@@ -1,0 +1,114 @@
+---
+# Progressive delivery for risk-engine (CICD-01e). An Argo Rollouts `Rollout`
+# (drop-in for Deployment) does a canary rollout gated by metric analysis, and
+# AUTO-ROLLS-BACK (aborts → scales the canary to zero, stable untouched) the
+# moment the analysis fails. Replica-based canary — no service mesh required —
+# which fits risk-engine: it's a NATS consumer + gRPC query service, not an
+# HTTP-traffic-split workload.
+#
+# Ties the delivery epic to the security epic: the pod runs the CICD-01c/d
+# SIGNED image (admission verifies it, CICD-01d), authenticates with its SEC-01a
+# SVID (SPIFFE CSI socket + the risk-engine ServiceAccount), and reads its DB
+# DSN from the SEC-01d Vault/CSI secret file — never a plaintext env var.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: risk-engine
+  namespace: kanz-services
+  labels:
+    app.kubernetes.io/part-of: kanz
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: risk-engine
+  namespace: kanz-services
+  labels:
+    app.kubernetes.io/part-of: kanz
+spec:
+  selector:
+    app: risk-engine
+  ports:
+    - { name: http, port: 8081, targetPort: 8081 }
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Rollout
+metadata:
+  name: risk-engine
+  namespace: kanz-services
+  labels:
+    app.kubernetes.io/part-of: kanz
+spec:
+  replicas: 3
+  revisionHistoryLimit: 5
+  selector:
+    matchLabels:
+      app: risk-engine
+  strategy:
+    canary:
+      # Progressive steps: shift a slice of pods to the new revision, hold,
+      # then run analysis. A failed analysis aborts the whole rollout =
+      # automatic rollback to the stable revision.
+      steps:
+        - setWeight: 20
+        - pause: { duration: 60s }
+        - analysis:
+            templates:
+              - templateName: risk-engine-canary
+            args:
+              - name: canary-hash
+                valueFrom:
+                  podTemplateHashValue: Latest
+        - setWeight: 50
+        - pause: { duration: 120s }
+        - analysis:
+            templates:
+              - templateName: risk-engine-canary
+            args:
+              - name: canary-hash
+                valueFrom:
+                  podTemplateHashValue: Latest
+        - setWeight: 100
+  template:
+    metadata:
+      labels:
+        app: risk-engine
+        app.kubernetes.io/part-of: kanz
+    spec:
+      serviceAccountName: risk-engine
+      containers:
+        - name: risk-engine
+          # Pinned to a digest in production (set by the GitOps bump); the
+          # CICD-01d admission policy rejects it unless cosign-signed.
+          image: ghcr.io/kanz-eng/risk-engine:latest
+          ports:
+            - { containerPort: 8081, name: http }
+          env:
+            # DSN from the SEC-01d CSI secret file, not a plaintext env.
+            - { name: RISK_ENGINE_DATABASE_URL_FILE, value: /run/secrets/db/database-url }
+            - { name: RISK_ENGINE_NATS_URL, value: "nats://nats.kanz-messaging.svc:4222" }
+            - { name: RISK_ENGINE_KAFKA_BROKERS, value: "kafka.kanz-messaging.svc:9094" }
+            - { name: RISK_ENGINE_SOURCE, value: "risk-engine" }
+            - { name: SPIFFE_ENDPOINT_SOCKET, value: "unix:///run/spiffe/spire-agent.sock" }
+          livenessProbe:
+            httpGet: { path: /healthz, port: 8081 }
+            initialDelaySeconds: 5
+            periodSeconds: 15
+          readinessProbe:
+            httpGet: { path: /readyz, port: 8081 }
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          volumeMounts:
+            - { name: db, mountPath: /run/secrets/db, readOnly: true }
+            - { name: spiffe, mountPath: /run/spiffe, readOnly: true }
+      volumes:
+        - name: db
+          csi:
+            driver: secrets-store.csi.k8s.io
+            readOnly: true
+            volumeAttributes:
+              secretProviderClass: risk-engine-db
+        - name: spiffe
+          csi:
+            driver: csi.spiffe.io
+            readOnly: true

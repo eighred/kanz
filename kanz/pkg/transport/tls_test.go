@@ -1,10 +1,10 @@
 package transport
 
 // Unit tests for the pure helpers (ID construction, authorizer wiring, config
-// shape). The mTLS handshake + peer-identity-assertion + plaintext-rejection
-// integration tests are SEC-01e (they need a real SVID pair). These run on
-// every `go test` so the package — and its go-spiffe linkage — can't silently
-// rot, the discipline the PERS-01e split established.
+// shape). The mTLS handshake + peer-identity-assertion + plaintext/unauthorized
+// rejection integration tests live in mtls_test.go (SEC-01e). Both run on every
+// `go test` so the package — and its go-spiffe linkage — can't silently rot,
+// the discipline the PERS-01e split established.
 
 import (
 	"crypto/tls"

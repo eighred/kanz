@@ -1,0 +1,53 @@
+---
+# Canary analysis (CICD-01e). The Rollout runs this against the canary pods at
+# each gate; a breach makes the rollout ABORT — Argo Rollouts scales the canary
+# to zero and keeps the stable revision serving. That abort IS the automated
+# rollback. `failureLimit: 0` ⇒ a single bad measurement is enough.
+#
+# Metric source is the OBS-01 Prometheus series (kanz_* RED metrics, OBS-01c).
+# Until OBS-01 lands these series won't exist, so the queries are the contract
+# the canary analysis asserts against — the "wire the seam ahead of the
+# producer" pattern (cf. PRED-04/11, RISK-04). The `canary-hash` arg is the
+# rollouts-pod-template-hash the Rollout passes, scoping every query to the
+# canary pods only so a regression in NEW code can't hide behind stable traffic.
+apiVersion: argoproj.io/v1alpha1
+kind: AnalysisTemplate
+metadata:
+  name: risk-engine-canary
+  namespace: kanz-services
+  labels:
+    app.kubernetes.io/part-of: kanz
+spec:
+  args:
+    - name: canary-hash
+  metrics:
+    - name: recompute-success-rate
+      interval: 30s
+      count: 4
+      # >= 99% of recomputes on the canary must succeed.
+      successCondition: "result[0] >= 0.99"
+      failureLimit: 0
+      provider:
+        prometheus:
+          address: http://prometheus.observability.svc:9090
+          query: >-
+            sum(rate(kanz_risk_recompute_total{status="ok",
+              rollouts_pod_template_hash="{{args.canary-hash}}"}[2m]))
+            /
+            sum(rate(kanz_risk_recompute_total{
+              rollouts_pod_template_hash="{{args.canary-hash}}"}[2m]))
+    - name: recompute-p99-latency
+      interval: 30s
+      count: 4
+      # p99 recompute latency on the canary stays under 500ms (the ORCH-01f
+      # budget the e2e harness already asserts in-process).
+      successCondition: "result[0] <= 0.5"
+      failureLimit: 0
+      provider:
+        prometheus:
+          address: http://prometheus.observability.svc:9090
+          query: >-
+            histogram_quantile(0.99, sum(rate(
+              kanz_risk_recompute_duration_seconds_bucket{
+                rollouts_pod_template_hash="{{args.canary-hash}}"}[2m]))
+            by (le))

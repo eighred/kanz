@@ -1,0 +1,10 @@
+# Keep the docker build context lean and deterministic. NOTE: kanz-schemas/gen/go
+# is deliberately NOT ignored — the service builds depend on it (it's the
+# generated SDK the go.mod `replace` points at). Other gen/ trees aren't copied.
+.git
+**/.gotmp
+**/node_modules
+**/__pycache__
+**/.pytest_cache
+kanz-schemas/gen/python
+kanz-schemas/gen/ts

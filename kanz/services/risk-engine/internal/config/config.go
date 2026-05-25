@@ -36,7 +36,7 @@ func Load() (Config, error) {
 		LogLevel:     parseLevel(envOr("RISK_ENGINE_LOG_LEVEL", "info")),
 		NATSURL:      os.Getenv("RISK_ENGINE_NATS_URL"),
 		Source:       envOr("RISK_ENGINE_SOURCE", "risk-engine"),
-		DatabaseURL:  os.Getenv("RISK_ENGINE_DATABASE_URL"),
+		DatabaseURL:  secret("RISK_ENGINE_DATABASE_URL"),
 		KafkaBrokers: splitList(os.Getenv("RISK_ENGINE_KAFKA_BROKERS")),
 	}, nil
 }
@@ -51,6 +51,20 @@ func splitList(s string) []string {
 		}
 	}
 	return out
+}
+
+// secret resolves a sensitive value, preferring a CSI/Vault file mount
+// (SEC-01d: the path in <k>_FILE) over a plaintext <k> env var. The DSN is
+// thus never a plaintext value in the pod spec or etcd. Empty when neither is
+// set; a file path that fails to read falls through to the env var so the
+// downstream required-field check surfaces the misconfiguration.
+func secret(k string) string {
+	if p := os.Getenv(k + "_FILE"); p != "" {
+		if b, err := os.ReadFile(p); err == nil {
+			return strings.TrimSpace(string(b))
+		}
+	}
+	return os.Getenv(k)
 }
 
 func envOr(k, def string) string {

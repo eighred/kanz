@@ -1,0 +1,46 @@
+---
+# Admission verification (CICD-01d). The cluster half of the supply-chain gate:
+# the sigstore policy-controller admission webhook rejects any Kanz image that
+# is not keyless-signed by THE release workflow's identity. Pairs with
+# .github/workflows/release.yml — the workflow produces the signature, this
+# policy enforces it at deploy time.
+#
+# Keyless verification, no public key to distribute: the signature carries a
+# Fulcio cert whose identity is the signing workflow's OIDC subject, logged in
+# the Rekor transparency log. We pin BOTH the issuer (GitHub Actions OIDC) and
+# the exact workflow+tag-ref subject — so an image signed by any other workflow,
+# repo, or a non-tag run does NOT satisfy the policy.
+#
+# Requires sigstore policy-controller installed in the cluster, watching
+# namespaces labelled `policy.sigstore.dev/include: "true"` (apply that label to
+# kanz-services). Install once per cluster from the pinned chart.
+apiVersion: policy.sigstore.dev/v1beta1
+kind: ClusterImagePolicy
+metadata:
+  name: kanz-signed-images
+  labels:
+    app.kubernetes.io/part-of: kanz
+spec:
+  # Scope to Kanz images only; everything else falls to other policies / the
+  # default. Glob over both services (and any future ones under the org).
+  images:
+    - glob: "ghcr.io/kanz-eng/**"
+  authorities:
+    - name: release-workflow-keyless
+      keyless:
+        # Fulcio root (the public Sigstore instance).
+        url: https://fulcio.sigstore.dev
+        identities:
+          - issuer: https://token.actions.githubusercontent.com
+            # Only the release workflow, only on a version tag.
+            subjectRegExp: "^https://github.com/kanz-eng/kanz/.github/workflows/release.yml@refs/tags/v.*$"
+        ctlog:
+          url: https://rekor.sigstore.dev
+      # Require the SBOM attestation the workflow attaches, not just the
+      # signature — an image must ship a provenance record to run.
+      attestations:
+        - name: must-have-sbom
+          predicateType: spdxjson
+  # Fail closed: if policy-controller can't verify (e.g. Rekor unreachable),
+  # block admission rather than fall open.
+  mode: enforce

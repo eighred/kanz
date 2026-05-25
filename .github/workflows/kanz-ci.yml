@@ -1,0 +1,192 @@
+# kanz monorepo CI — the Go safety net for the `kanz` module (CICD-01a).
+#
+# The module depends on the kanz-schemas Go SDK via a local `replace` directive
+# (kanz/go.mod → ../kanz-schemas/gen/go). That SDK is generated, never
+# committed (EVT-15a), so every job must `buf generate` it first — including
+# protoc-gen-go-grpc, which emits the inference.v1 gRPC stubs (PRED-06) that
+# protoc-gen-go alone does not. GOFLAGS=-mod=mod lets the toolchain resolve and
+# checksum the freshly generated local module.
+#
+# CICD-01b adds the Python (kanz-py, pytest) + TypeScript (kanz/ts, node:test
+# via tsx — the runner the package actually uses; "vitest" in the task is loose
+# shorthand) jobs plus a `buf lint`+`buf breaking` schema gate.
+name: kanz-ci
+
+on:
+  pull_request:
+    paths:
+      - 'kanz/**'
+      - 'kanz-py/**'
+      - 'kanz-schemas/proto/**'
+      - 'kanz-schemas/buf.yaml'
+      - 'kanz-schemas/buf.gen.yaml'
+      - '.github/workflows/kanz-ci.yml'
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+env:
+  # Required: the kanz-schemas-go dependency is a local `replace`, so the build
+  # must be allowed to update go.mod/go.sum for it rather than failing readonly.
+  GOFLAGS: -mod=mod
+
+jobs:
+  go:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          # Track the toolchain pinned in go.mod so CI never drifts from local.
+          go-version-file: kanz/go.mod
+          cache-dependency-path: kanz/go.sum
+
+      - uses: bufbuild/buf-setup-action@v1
+        with:
+          version: 1.69.0
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install protoc plugins
+        run: |
+          go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.11
+          go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@v1.5.1
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+
+      - name: Generate kanz-schemas Go SDK
+        working-directory: kanz-schemas
+        run: |
+          buf generate
+          cd gen/go
+          go mod init github.com/kanz-eng/kanz-schemas-go || true
+          go mod tidy
+
+      - name: Build
+        working-directory: kanz
+        run: go build ./...
+
+      - name: Vet
+        working-directory: kanz
+        run: go vet ./...
+
+      # ./... includes the arch (test/arch) + contract (test/contract) suites —
+      # they are ordinary, untagged _test.go files. Postgres/Kafka integration
+      # tests skip without TEST_POSTGRES_URL / TEST_KAFKA_BROKERS, so the gate
+      # needs no live brokers. -race needs cgo (default-on on ubuntu runners).
+      - name: Test (race) — incl. arch + contract suites
+        working-directory: kanz
+        run: go test -race ./...
+
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v6
+        with:
+          # goinstall builds golangci-lint with this job's Go 1.26 toolchain, so
+          # its parser always understands the module's language version. Bump
+          # the pinned version as the toolchain advances.
+          install-mode: goinstall
+          version: latest
+          working-directory: kanz
+          args: --timeout=5m
+
+  python:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      # The kanz-py tests import the generated Python schema SDK, which is not
+      # committed (EVT-15a) and not yet published to an index (DEBT-01b). Rather
+      # than buf + the remote python plugins (which would also drag in the Go
+      # plugins to satisfy the full buf.gen.yaml), grpc_tools.protoc generates
+      # the whole tree — messages, .pyi, AND the *_pb2_grpc.py service stubs.
+      # That last one closes the gap where protoc-gen-python alone omits the
+      # gRPC stub inference.v1 (PRED-08) needs; wiring it into the buf release
+      # pipeline so the *published* SDK ships it stays a follow-up.
+      - name: Install Python deps
+        run: pip install grpcio-tools pytest pytest-asyncio nats-py aiokafka
+
+      - name: Generate Python schema SDK
+        run: |
+          mkdir -p kanz-schemas/gen/python
+          python -m grpc_tools.protoc \
+            -I kanz-schemas/proto \
+            --python_out=kanz-schemas/gen/python \
+            --pyi_out=kanz-schemas/gen/python \
+            --grpc_python_out=kanz-schemas/gen/python \
+            $(find kanz-schemas/proto -name '*.proto')
+
+      # pb2 modules are PEP-420 namespace packages (no __init__.py), so both the
+      # SDK root and the package root go on PYTHONPATH. Integration tests
+      # (test_*_integration.py) skip without live NATS/Kafka.
+      - name: Test
+        env:
+          PYTHONPATH: ${{ github.workspace }}/kanz-schemas/gen/python:${{ github.workspace }}/kanz-py
+        run: pytest kanz-py/tests -q
+
+  ts:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - uses: bufbuild/buf-setup-action@v1
+        with:
+          version: 1.69.0
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+
+      # TS-only generation template (Protobuf-ES) — avoids needing the Go
+      # plugins the full buf.gen.yaml lists. Mirrors the bufbuild/es version
+      # pinned there; keep them in sync.
+      - name: Generate TypeScript schema SDK
+        working-directory: kanz-schemas
+        run: |
+          cat > /tmp/buf.gen.ts.yaml <<'EOF'
+          version: v2
+          plugins:
+            - remote: buf.build/bufbuild/es:v2.10.0
+              out: gen/ts
+              opt: target=js+dts
+          EOF
+          buf generate --template /tmp/buf.gen.ts.yaml
+          # Make gen/ts an installable @kanz-eng/kanz-schemas package.
+          cp packaging/ts/package.json gen/ts/package.json
+          node -e "const fs=require('fs');const p='gen/ts/package.json';const j=JSON.parse(fs.readFileSync(p));j.version='0.1.0';fs.writeFileSync(p,JSON.stringify(j,null,2));"
+
+      # The @kanz-eng/kanz-schemas dep isn't published (DEBT-01b); repoint it at
+      # the freshly generated local package so npm resolves it from disk, not the
+      # registry. The package.json edit is ephemeral (CI only).
+      - name: Test
+        working-directory: kanz/ts/kanz-bus
+        run: |
+          npm pkg set dependencies.@kanz-eng/kanz-schemas="file:../../../kanz-schemas/gen/ts"
+          npm install
+          npm test
+
+  buf-breaking:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Full history so buf can resolve the main baseline for `breaking`.
+          fetch-depth: 0
+      - uses: bufbuild/buf-setup-action@v1
+        with:
+          version: 1.69.0
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Lint
+        working-directory: kanz-schemas
+        run: buf lint
+      # Compares kanz-schemas/proto against its state on main. A no-op (passes)
+      # when a PR touches no proto; on a proto PR it fails any wire-incompatible
+      # change, enforcing the additive-only envelope discipline (EVT-21c).
+      - name: Breaking-change check
+        working-directory: kanz-schemas
+        run: buf breaking --against '../.git#branch=main,subdir=kanz-schemas'

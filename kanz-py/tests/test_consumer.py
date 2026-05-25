@@ -81,7 +81,7 @@ def _frame(env: Envelope, payload: bytes = b"") -> bytes:
 
 async def test_consumer_stashes_propagation_on_contextvars():
     env = _envelope(event_id="evt-A", correlation_id="corr-1", trace="00-trace-01")
-    sub = OneShotSub(Message(body=_frame(env, b"p")))
+    sub = OneShotSub(Message(subject="x.y.z", body=_frame(env, b"p")))
     c = Consumer(sub)
 
     captured = {}
@@ -104,7 +104,7 @@ async def test_consumer_stashes_propagation_on_contextvars():
 
 async def test_consumer_empty_trace_not_stashed():
     env = _envelope(trace="")  # hot-path sample skip
-    sub = OneShotSub(Message(body=_frame(env)))
+    sub = OneShotSub(Message(subject="x.y.z", body=_frame(env)))
     c = Consumer(sub)
 
     captured_trace = ""
@@ -119,7 +119,7 @@ async def test_consumer_empty_trace_not_stashed():
 
 async def test_consumer_resets_contextvars_after_handler():
     env = _envelope(event_id="evt-A", correlation_id="corr-1", trace="00-trace-01")
-    sub = OneShotSub(Message(body=_frame(env)))
+    sub = OneShotSub(Message(subject="x.y.z", body=_frame(env)))
     c = Consumer(sub)
 
     async def handler(env: Envelope, payload: bytes) -> None:
@@ -133,7 +133,7 @@ async def test_consumer_resets_contextvars_after_handler():
 
 
 async def test_consumer_unframe_failure_surfaces():
-    sub = OneShotSub(Message(body=b"garbage"))
+    sub = OneShotSub(Message(subject="x.y.z", body=b"garbage"))
     c = Consumer(sub)
 
     handler_called = False
@@ -150,7 +150,7 @@ async def test_consumer_unframe_failure_surfaces():
 async def test_consumer_validation_failure_surfaces():
     env = _envelope()
     env.event_id = ""  # invalidates the envelope
-    sub = OneShotSub(Message(body=_frame(env)))
+    sub = OneShotSub(Message(subject="x.y.z", body=_frame(env)))
     c = Consumer(sub)
 
     handler_called = False
@@ -168,7 +168,7 @@ async def test_consumer_to_producer_chains_lineage():
     inbound = _envelope(
         event_id="evt-A", correlation_id="corr-root", trace="00-trace-01"
     )
-    sub = OneShotSub(Message(body=_frame(inbound, b"a-payload")))
+    sub = OneShotSub(Message(subject="x.y.z", body=_frame(inbound, b"a-payload")))
     c = Consumer(sub)
 
     cc = CaptureClient()
@@ -238,9 +238,8 @@ def _fast_retry(attempts: int) -> RetryConfig:
 
 
 async def test_consumer_retries_until_success():
-    env = _envelope()
-    env.idempotency_key = "evt-A"
-    sub = OneShotSub(Message(body=_frame(env)))
+    env = _envelope(event_id="evt-A")
+    sub = OneShotSub(Message(subject="x.y.z", body=_frame(env)))
     c = Consumer(sub, ConsumerConfig(retry=_fast_retry(3)))
 
     calls = 0
@@ -256,7 +255,7 @@ async def test_consumer_retries_until_success():
 
 
 async def test_consumer_surfaces_after_retry_without_dlq():
-    sub = OneShotSub(Message(body=_frame(_envelope())))
+    sub = OneShotSub(Message(subject="x.y.z", body=_frame(_envelope())))
     c = Consumer(sub, ConsumerConfig(retry=_fast_retry(3)))
 
     calls = 0
@@ -272,9 +271,8 @@ async def test_consumer_surfaces_after_retry_without_dlq():
 
 
 async def test_consumer_routes_to_dlq_after_retries():
-    env = _envelope()
-    env.idempotency_key = "evt-A"
-    sub = OneShotSub(Message(body=_frame(env)))
+    env = _envelope(event_id="evt-A")
+    sub = OneShotSub(Message(subject="x.y.z", body=_frame(env)))
     dlq = CaptureClient()
     c = Consumer(sub, ConsumerConfig(retry=_fast_retry(3), dlq=dlq))
 
@@ -297,7 +295,7 @@ async def test_consumer_routes_to_dlq_after_retries():
 
 
 async def test_consumer_routes_unframe_failure_to_dlq():
-    sub = OneShotSub(Message(body=b"garbage"))
+    sub = OneShotSub(Message(subject="x.y.z", body=b"garbage"))
     dlq = CaptureClient()
     c = Consumer(sub, ConsumerConfig(dlq=dlq))
 
@@ -313,7 +311,7 @@ async def test_consumer_routes_unframe_failure_to_dlq():
 async def test_consumer_routes_validation_failure_to_dlq():
     env = _envelope()
     env.event_id = ""  # invalidates
-    sub = OneShotSub(Message(body=_frame(env)))
+    sub = OneShotSub(Message(subject="x.y.z", body=_frame(env)))
     dlq = CaptureClient()
     c = Consumer(sub, ConsumerConfig(dlq=dlq))
 
@@ -325,9 +323,8 @@ async def test_consumer_routes_validation_failure_to_dlq():
 
 
 async def test_consumer_dedups_repeated_delivery():
-    env = _envelope()
-    env.idempotency_key = "evt-A"
-    sub = MultiShotSub(Message(body=_frame(env)), times=3)
+    env = _envelope(event_id="evt-A")
+    sub = MultiShotSub(Message(subject="x.y.z", body=_frame(env)), times=3)
     c = Consumer(sub)  # default config: dedup on
 
     calls = 0
@@ -341,9 +338,8 @@ async def test_consumer_dedups_repeated_delivery():
 
 
 async def test_consumer_no_record_on_handler_failure():
-    env = _envelope()
-    env.idempotency_key = "evt-A"
-    sub = MultiShotSub(Message(body=_frame(env)), times=3)
+    env = _envelope(event_id="evt-A")
+    sub = MultiShotSub(Message(subject="x.y.z", body=_frame(env)), times=3)
     c = Consumer(sub)  # default: 1 attempt, no DLQ
 
     calls = 0
@@ -359,9 +355,8 @@ async def test_consumer_no_record_on_handler_failure():
 
 
 async def test_consumer_dedup_disabled():
-    env = _envelope()
-    env.idempotency_key = "evt-A"
-    sub = MultiShotSub(Message(body=_frame(env)), times=3)
+    env = _envelope(event_id="evt-A")
+    sub = MultiShotSub(Message(subject="x.y.z", body=_frame(env)), times=3)
     c = Consumer(sub, ConsumerConfig(dedup_window=DedupWindow(ttl_seconds=0)))
 
     calls = 0
@@ -376,9 +371,8 @@ async def test_consumer_dedup_disabled():
 
 async def test_consumer_dlq_records_dedup():
     """After DLQ-routing terminal failure, subsequent duplicates dedup."""
-    env = _envelope()
-    env.idempotency_key = "evt-poison"
-    sub = MultiShotSub(Message(body=_frame(env)), times=3)
+    env = _envelope(event_id="evt-poison")
+    sub = MultiShotSub(Message(subject="x.y.z", body=_frame(env)), times=3)
     dlq = CaptureClient()
     c = Consumer(sub, ConsumerConfig(retry=_fast_retry(1), dlq=dlq))
 
@@ -395,7 +389,7 @@ async def test_consumer_dlq_records_dedup():
 
 
 async def test_consumer_dlq_publish_failure_surfaces():
-    sub = OneShotSub(Message(body=_frame(_envelope())))
+    sub = OneShotSub(Message(subject="x.y.z", body=_frame(_envelope())))
     c = Consumer(sub, ConsumerConfig(retry=_fast_retry(1), dlq=FailingPublisher()))
 
     async def handler(env: Envelope, payload: bytes) -> None:
