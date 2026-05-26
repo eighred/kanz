@@ -35,6 +35,7 @@ func newQualityPublisher(t *testing.T) (*integrity.Publisher, *captureClient) {
 	prod, err := bus.NewProducer(cc, bus.ProducerConfig{
 		Source:          "data-integrity/test",
 		ProducerVersion: "data-1.0.0",
+		Tenant:          "acme",
 	})
 	if err != nil {
 		t.Fatalf("NewProducer: %v", err)

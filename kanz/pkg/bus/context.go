@@ -15,6 +15,7 @@ const (
 	correlationCtxKey ctxKey = iota
 	causationCtxKey
 	traceCtxKey
+	tenantCtxKey
 )
 
 func WithCorrelationID(ctx context.Context, id string) context.Context {
@@ -41,5 +42,18 @@ func WithTraceContext(ctx context.Context, tc string) context.Context {
 
 func TraceContextFromContext(ctx context.Context) string {
 	s, _ := ctx.Value(traceCtxKey).(string)
+	return s
+}
+
+// WithTenantID carries the tenant boundary (MT-01b) across a handler boundary.
+// Consumer stashes the inbound envelope's tenant_id here so a Producer.Publish
+// inside the handler inherits it — the same lineage-propagation mechanism as
+// correlation/causation (EVT-17c). Caller-explicit Event.TenantID still wins.
+func WithTenantID(ctx context.Context, tenant string) context.Context {
+	return context.WithValue(ctx, tenantCtxKey, tenant)
+}
+
+func TenantIDFromContext(ctx context.Context) string {
+	s, _ := ctx.Value(tenantCtxKey).(string)
 	return s
 }

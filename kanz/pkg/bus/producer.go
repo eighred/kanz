@@ -18,8 +18,8 @@ import (
 
 // envelopeVersion is the Envelope schema version this client builds against.
 // Bumps once per additive change to envelope.proto (rare; see
-// kanz-schemas/docs/envelope-policy.md §6).
-const envelopeVersion uint32 = 1
+// kanz-schemas/docs/envelope-policy.md §6). v2 added tenant_id (MT-01a).
+const envelopeVersion uint32 = 2
 
 // Event is the producer-facing form: caller-known envelope fields plus the
 // domain payload. Auto fields (event_id, publish_time, source,
@@ -41,6 +41,7 @@ type Event struct {
 	IdempotencyKey   string // required for COMMAND; must be empty/== event_id otherwise
 	PayloadSchemaRef string
 	QualityFlags     []envelopepb.QualityFlag
+	TenantID         string // explicit tenant; empty ⇒ ctx tenant, then ProducerConfig.Tenant
 
 	Payload proto.Message
 }
@@ -50,17 +51,31 @@ type ProducerConfig struct {
 	Source          string // service/instance, e.g. "market-ingest/pod-7"
 	ProducerVersion string // git SHA or semver
 
+	// Tenant is the producer's fallback tenant_id (MT-01b), stamped on events
+	// that carry neither an explicit Event.TenantID nor a ctx tenant. A
+	// single-tenant service sets it; a multi-tenant service leaves it empty and
+	// supplies the tenant per-event (Event.TenantID) or via ctx (the consumer
+	// stashes the inbound tenant, so derived events inherit it).
+	Tenant string
+
 	// Metrics is the optional RED exporter (OBS-01c). Nil ⇒ no instrumentation.
 	Metrics *BusMetrics
+
+	// VerifyCommandIssuer, when set, runs on every COMMAND publish: the bus
+	// extracts CommandMetadata.issuer and passes it to this func to confirm the
+	// caller (ctx) may issue under it (AUTH-01c forged-issuer guard). Nil ⇒ no
+	// check (backward compatible); non-COMMAND events never invoke it.
+	VerifyCommandIssuer CommandIssuerFunc
 }
 
 // Producer stamps + validates envelopes and frames them onto a Client.
 // Goroutine-safe; the per-(event_type, partition_key) sequence counter is
 // guarded by a mutex.
 type Producer struct {
-	client  Client
-	cfg     ProducerConfig
-	metrics *BusMetrics
+	client       Client
+	cfg          ProducerConfig
+	metrics      *BusMetrics
+	verifyIssuer CommandIssuerFunc
 
 	seqMu    sync.Mutex
 	sequence map[seqKey]uint64
@@ -82,10 +97,11 @@ func NewProducer(client Client, cfg ProducerConfig) (*Producer, error) {
 		return nil, errors.New("bus: ProducerConfig.ProducerVersion required")
 	}
 	return &Producer{
-		client:   client,
-		cfg:      cfg,
-		metrics:  cfg.Metrics,
-		sequence: make(map[seqKey]uint64),
+		client:       client,
+		cfg:          cfg,
+		metrics:      cfg.Metrics,
+		verifyIssuer: cfg.VerifyCommandIssuer,
+		sequence:     make(map[seqKey]uint64),
 	}, nil
 }
 
@@ -115,6 +131,21 @@ func (p *Producer) publish(ctx context.Context, e Event) error {
 	payloadBytes, err := proto.Marshal(e.Payload)
 	if err != nil {
 		return fmt.Errorf("payload marshal: %w", err)
+	}
+	// Forged-issuer guard (AUTH-01c): a COMMAND must carry a CommandMetadata
+	// issuer the caller is authorized to act under. Runs only when a verifier
+	// is configured; extraction is generic over any concrete command type.
+	if e.EventClass == envelopepb.EventClass_EVENT_CLASS_COMMAND && p.verifyIssuer != nil {
+		issuer, err := extractCommandIssuer(payloadBytes)
+		if err != nil {
+			return err
+		}
+		if issuer == "" {
+			return ErrMissingCommandIssuer
+		}
+		if err := p.verifyIssuer(ctx, issuer); err != nil {
+			return fmt.Errorf("command issuer verification: %w", err)
+		}
 	}
 	body, err := proto.Marshal(&envelopepb.EventFrame{
 		Envelope: env,
@@ -188,6 +219,17 @@ func (p *Producer) stamp(ctx context.Context, e Event) (*envelopepb.Envelope, er
 		idem = eventID
 	}
 
+	// Tenant precedence (MT-01b): explicit Event field > ctx-derived (the
+	// consumer stashes the inbound tenant so derived events inherit it) >
+	// ProducerConfig fallback. Validate rejects an empty tenant on the live path.
+	tenant := e.TenantID
+	if tenant == "" {
+		tenant = TenantIDFromContext(ctx)
+	}
+	if tenant == "" {
+		tenant = p.cfg.Tenant
+	}
+
 	seq := p.nextSequence(e.EventType, e.PartitionKey)
 
 	return &envelopepb.Envelope{
@@ -210,6 +252,7 @@ func (p *Producer) stamp(ctx context.Context, e Event) (*envelopepb.Envelope, er
 		IdempotencyKey:   idem,
 		QualityFlags:     e.QualityFlags,
 		PayloadSchemaRef: e.PayloadSchemaRef,
+		TenantId:         tenant,
 	}, nil
 }
 

@@ -137,6 +137,15 @@ func (c *Consumer) Subscribe(ctx context.Context, subject, group string, h Event
 		}
 		ctx = WithCorrelationID(ctx, env.CorrelationId)
 		ctx = WithCausationID(ctx, env.EventId)
+		// Stash the inbound tenant so a derived publish inside the handler
+		// inherits it (MT-01b). A pre-tenancy event read on the replay path
+		// carries no tenant_id; map it to SystemTenant rather than propagating
+		// the empty string (MT-01a replay nuance).
+		tenant := env.TenantId
+		if tenant == "" {
+			tenant = SystemTenant
+		}
+		ctx = WithTenantID(ctx, tenant)
 		if env.TraceContext != "" {
 			ctx = WithTraceContext(ctx, env.TraceContext)
 			// Extract the inbound trace onto ctx so the consumer span (and any

@@ -49,7 +49,7 @@ func TestApp_FullChainThenGracefulShutdown(t *testing.T) {
 
 	// Output: the recomputer's publisher emits risk FACTs here.
 	outputCC := newCapture()
-	prod, err := bus.NewProducer(outputCC, bus.ProducerConfig{Source: "risk-engine/test", ProducerVersion: "v0"})
+	prod, err := bus.NewProducer(outputCC, bus.ProducerConfig{Source: "risk-engine/test", ProducerVersion: "v0", Tenant: "acme"})
 	if err != nil {
 		t.Fatalf("NewProducer: %v", err)
 	}

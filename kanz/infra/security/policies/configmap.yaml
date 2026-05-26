@@ -1,0 +1,42 @@
+# AUTH-01b authorization policy bundle, delivered to services as a mounted
+# ConfigMap so policy changes ship without rebuilding an image (the same
+# "config-as-data, mounted file" stance as the SEC-01d CSI secret seam). The
+# service loads it via auth.LoadPolicyFile(<mount>/risk-authz.json).
+#
+# Keep risk-authz.json and this ConfigMap's data in sync — risk-authz.json is
+# the source of truth and is what the unit tests load; this manifest is its
+# deployment wrapper. (A kustomize configMapGenerator over the file would remove
+# the duplication; left explicit here to match the rest of infra/.)
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: risk-authz-policy
+  namespace: kanz-services
+  labels:
+    app.kubernetes.io/part-of: kanz
+    app.kubernetes.io/component: authz
+data:
+  risk-authz.json: |
+    {
+      "roles": {
+        "risk.reader": ["risk.read"],
+        "risk.analyst": ["risk.read", "risk.scenario"],
+        "risk.admin": ["*"]
+      }
+    }
+---
+# Mount snippet for the consuming Deployment/Rollout (api-gateway, risk-engine):
+#
+#   volumes:
+#     - name: authz-policy
+#       configMap:
+#         name: risk-authz-policy
+#   containers:
+#     - name: <svc>
+#       volumeMounts:
+#         - name: authz-policy
+#           mountPath: /etc/kanz/authz
+#           readOnly: true
+#       env:
+#         - name: KANZ_AUTHZ_POLICY_FILE
+#           value: /etc/kanz/authz/risk-authz.json

@@ -65,7 +65,7 @@ func money(coef int64, ccy string) *commonpb.Money {
 // bus.Producer (stamp + validate + frame), partition-keyed for ordering.
 func produceState(t *testing.T, cc *captureClient) {
 	t.Helper()
-	prod, err := bus.NewProducer(cc, bus.ProducerConfig{Source: "test/ingest", ProducerVersion: "v0"})
+	prod, err := bus.NewProducer(cc, bus.ProducerConfig{Source: "test/ingest", ProducerVersion: "v0", Tenant: "acme"})
 	if err != nil {
 		t.Fatalf("NewProducer: %v", err)
 	}

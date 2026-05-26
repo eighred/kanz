@@ -17,8 +17,22 @@ import (
 // Replay-scoped consumers pass bus.WithValidator(bus.ValidateReplay) so they
 // can accept REPLAYED events; that path REQUIRES the flag (a non-flagged
 // event on a replay subject is a misconfigured publisher and is rejected).
+// SystemTenant is the reserved tenant assigned to pre-tenancy events read from
+// old durable logs on the replay path (MT-01a). Those events predate the
+// envelope tenant_id field and carry the empty string; the replay/consumer path
+// maps them to SystemTenant rather than rejecting, so EVT-20 replay determinism
+// is preserved. Live publishers must NOT use it — Validate rejects an empty
+// tenant on the live path, and a real tenant is always available there.
+const SystemTenant = "__system__"
+
 func Validate(env *envelopepb.Envelope) error {
 	if err := validateEnvelopeFields(env); err != nil {
+		return err
+	}
+	// tenant_id is required on the LIVE path only (MT-01a). It is enforced here,
+	// not in validateEnvelopeFields, so ValidateReplay stays tolerant of
+	// pre-tenancy events (which the replay path maps to SystemTenant).
+	if err := requireNonEmpty(env.TenantId, "tenant_id"); err != nil {
 		return err
 	}
 	return rejectReplayed(env)

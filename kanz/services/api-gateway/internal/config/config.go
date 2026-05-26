@@ -26,9 +26,18 @@ type Config struct {
 	// the upstream dial is plaintext (local/dev).
 	SPIFFESocket string
 
+	// OIDC* configure the real OIDC/JWKS authenticator (AUTH-01a). When
+	// OIDCIssuer is set it takes precedence over JWTSecret — production auth.
+	OIDCIssuer      string
+	OIDCAudience    string
+	OIDCJWKSURI     string // optional; discovered from the issuer when empty
+	OIDCTenantClaim string // optional; defaults to "tenant"
+	OIDCRolesClaim  string // optional; defaults to "roles"
+
 	// JWTSecret is the HS256 shared secret the bundled minimal JWT validator
-	// verifies bearer tokens against (API-01d). Empty ⇒ authentication is
-	// DISABLED (local/dev only). AUTH-01a replaces this with real OIDC/JWKS.
+	// verifies bearer tokens against (API-01d) — a dev-only stand-in used only
+	// when no OIDC issuer is configured. Empty (and no OIDC) ⇒ authentication
+	// is DISABLED (local/dev only).
 	JWTSecret string
 	// RequiredRole, when set, is the role a Principal must carry to reach any
 	// query endpoint (deny-by-default once auth is enabled).
@@ -53,6 +62,11 @@ func Load() (Config, error) {
 		OTLPEndpoint:    os.Getenv("API_GATEWAY_OTLP_ENDPOINT"),
 		RiskEngineAddr:  os.Getenv("API_GATEWAY_RISK_ENGINE_ADDR"),
 		SPIFFESocket:    os.Getenv("API_GATEWAY_SPIFFE_SOCKET"),
+		OIDCIssuer:      os.Getenv("API_GATEWAY_OIDC_ISSUER"),
+		OIDCAudience:    os.Getenv("API_GATEWAY_OIDC_AUDIENCE"),
+		OIDCJWKSURI:     os.Getenv("API_GATEWAY_OIDC_JWKS_URI"),
+		OIDCTenantClaim: os.Getenv("API_GATEWAY_OIDC_TENANT_CLAIM"),
+		OIDCRolesClaim:  os.Getenv("API_GATEWAY_OIDC_ROLES_CLAIM"),
 		JWTSecret:       secret("API_GATEWAY_JWT_SECRET"),
 		RequiredRole:    os.Getenv("API_GATEWAY_REQUIRED_ROLE"),
 		RateLimitPerSec: parseFloat(os.Getenv("API_GATEWAY_RATE_LIMIT_PER_SEC")),

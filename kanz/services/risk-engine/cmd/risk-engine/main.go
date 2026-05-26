@@ -113,7 +113,7 @@ func runEngine(ctx context.Context, cfg config.Config, readiness *server.Readine
 		return err
 	}
 
-	producer, err := bus.NewProducer(client, bus.ProducerConfig{Source: cfg.Source, ProducerVersion: version(), Metrics: busMetrics})
+	producer, err := bus.NewProducer(client, bus.ProducerConfig{Source: cfg.Source, ProducerVersion: version(), Tenant: cfg.Tenant, Metrics: busMetrics})
 	if err != nil {
 		return err
 	}

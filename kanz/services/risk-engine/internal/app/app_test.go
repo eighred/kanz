@@ -108,7 +108,7 @@ func waitSubscribed(t *testing.T, broker *memBus, subjects ...string) {
 // and the recomputer.
 func startPipeline(t *testing.T, broker *memBus, debounce time.Duration) (*state.Store, *engine.Recomputer) {
 	t.Helper()
-	prod, err := bus.NewProducer(broker, bus.ProducerConfig{Source: "risk-engine/e2e", ProducerVersion: "v0"})
+	prod, err := bus.NewProducer(broker, bus.ProducerConfig{Source: "risk-engine/e2e", ProducerVersion: "v0", Tenant: "acme"})
 	if err != nil {
 		t.Fatalf("NewProducer: %v", err)
 	}
@@ -179,7 +179,7 @@ func publishState(t *testing.T, prod *bus.Producer, pk string, asOf time.Time, m
 
 func testProducer(t *testing.T, broker *memBus) *bus.Producer {
 	t.Helper()
-	prod, err := bus.NewProducer(broker, bus.ProducerConfig{Source: "e2e/upstream", ProducerVersion: "v0"})
+	prod, err := bus.NewProducer(broker, bus.ProducerConfig{Source: "e2e/upstream", ProducerVersion: "v0", Tenant: "acme"})
 	if err != nil {
 		t.Fatalf("NewProducer: %v", err)
 	}

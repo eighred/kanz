@@ -50,7 +50,7 @@ func discard() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, ni
 
 func newPublisher(t *testing.T, cc bus.Client) *publish.Publisher {
 	t.Helper()
-	prod, err := bus.NewProducer(cc, bus.ProducerConfig{Source: "risk-engine/test", ProducerVersion: "v0"})
+	prod, err := bus.NewProducer(cc, bus.ProducerConfig{Source: "risk-engine/test", ProducerVersion: "v0", Tenant: "acme"})
 	if err != nil {
 		t.Fatalf("NewProducer: %v", err)
 	}

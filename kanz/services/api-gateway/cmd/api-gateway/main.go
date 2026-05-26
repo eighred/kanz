@@ -23,6 +23,7 @@ import (
 
 	querypb "github.com/kanz-eng/kanz-schemas-go/query/v1"
 
+	"github.com/kanz-eng/kanz/pkg/auth"
 	"github.com/kanz-eng/kanz/pkg/observability"
 	"github.com/kanz-eng/kanz/pkg/transport"
 	"github.com/kanz-eng/kanz/services/api-gateway/internal/config"
@@ -101,10 +102,26 @@ func buildRouter(cfg config.Config, h *gateway.Handler, obs *observability.Provi
 	h.Routes(gwMux)
 
 	var authn middleware.Authenticator
-	if cfg.JWTSecret != "" {
+	switch {
+	case cfg.OIDCIssuer != "":
+		oidc, err := auth.NewOIDCAuthenticator(auth.OIDCConfig{
+			Issuer:      cfg.OIDCIssuer,
+			Audience:    cfg.OIDCAudience,
+			JWKSURI:     cfg.OIDCJWKSURI,
+			TenantClaim: cfg.OIDCTenantClaim,
+			RolesClaim:  cfg.OIDCRolesClaim,
+		})
+		if err != nil {
+			logger.Error("api-gateway: OIDC config invalid", "err", err)
+			os.Exit(2)
+		}
+		authn = oidcAuthenticator{oidc}
+		logger.Info("api-gateway: OIDC authentication enabled", "issuer", cfg.OIDCIssuer)
+	case cfg.JWTSecret != "":
 		authn = middleware.NewJWTAuthenticator(cfg.JWTSecret)
-	} else {
-		logger.Warn("api-gateway: authentication DISABLED (no API_GATEWAY_JWT_SECRET)")
+		logger.Warn("api-gateway: using dev HS256 validator (set API_GATEWAY_OIDC_ISSUER for production)")
+	default:
+		logger.Warn("api-gateway: authentication DISABLED (no OIDC issuer or JWT secret)")
 	}
 	// Outermost first: negotiate version → verify signature → authenticate →
 	// per-tenant rate limit (needs the principal) → idempotency replay.
@@ -157,6 +174,24 @@ func writeJSON(w http.ResponseWriter, code int, body any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
 	_ = json.NewEncoder(w).Encode(body)
+}
+
+// oidcAuthenticator adapts the canonical ctx-aware auth.Authenticator
+// (AUTH-01a) to the gateway's ctx-less middleware.Authenticator seam, mapping
+// the shared auth.Principal onto the gateway-local one. A background context is
+// used since the middleware interface carries none — JWKS verification is
+// offline once warm, so this only matters on a cold-cache fetch. The
+// provider-unavailable vs bad-token distinction the package preserves collapses
+// to a 401 here (the middleware maps every error to unauthenticated); a 503 on
+// auth-backend outage is a noted follow-up.
+type oidcAuthenticator struct{ a *auth.OIDCAuthenticator }
+
+func (o oidcAuthenticator) Authenticate(token string) (*middleware.Principal, error) {
+	p, err := o.a.Authenticate(context.Background(), token)
+	if err != nil {
+		return nil, err
+	}
+	return &middleware.Principal{Subject: p.Subject, Tenant: p.Tenant, Roles: p.Roles}, nil
 }
 
 // version is the service version stamped on telemetry. Hardcoded until the

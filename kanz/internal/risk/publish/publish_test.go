@@ -41,6 +41,7 @@ func newPublisher(t *testing.T) (*publish.Publisher, *captureClient) {
 	prod, err := bus.NewProducer(cc, bus.ProducerConfig{
 		Source:          "risk-engine/test",
 		ProducerVersion: "risk-1.0.0",
+		Tenant:          "acme",
 	})
 	if err != nil {
 		t.Fatalf("NewProducer: %v", err)
@@ -240,4 +241,3 @@ func TestEmit_PartitionKeyIsPortfolioID(t *testing.T) {
 		t.Errorf("envelope.PartitionKey=%q want PORT-XYZ", env.PartitionKey)
 	}
 }
-

@@ -75,7 +75,7 @@ func TestPublishRecordsREDMetrics(t *testing.T) {
 	m := bus.NewBusMetrics(reg)
 	cc := &captureClient{}
 	p, err := bus.NewProducer(cc, bus.ProducerConfig{
-		Source: "test/inst", ProducerVersion: "v1", Metrics: m,
+		Source: "test/inst", ProducerVersion: "v1", Tenant: "acme", Metrics: m,
 	})
 	if err != nil {
 		t.Fatal(err)

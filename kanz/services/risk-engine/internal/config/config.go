@@ -18,6 +18,13 @@ type Config struct {
 	NATSURL string
 	// Source is the producer identity stamped on emitted FACTs (EVT-17b).
 	Source string
+	// Tenant is the tenant_id stamped on emitted FACTs (MT-01a). The recomputer
+	// publishes derived risk events from a background ctx (debounced, async), so
+	// the triggering event's tenant can't propagate via ctx here — this is the
+	// fallback. Defaults to the reserved "__system__"; a single-tenant
+	// deployment sets RISK_ENGINE_TENANT. True per-portfolio tenant stamping
+	// (the engine carrying portfolio→tenant in state) is an MT-01d follow-up.
+	Tenant string
 
 	// DatabaseURL is the Postgres DSN for durable state (PERS-01). Empty ⇒
 	// state is in-memory only: no bootstrap restore, no periodic snapshot,
@@ -49,6 +56,7 @@ func Load() (Config, error) {
 		LogLevel:     parseLevel(envOr("RISK_ENGINE_LOG_LEVEL", "info")),
 		NATSURL:      os.Getenv("RISK_ENGINE_NATS_URL"),
 		Source:       envOr("RISK_ENGINE_SOURCE", "risk-engine"),
+		Tenant:       envOr("RISK_ENGINE_TENANT", "__system__"),
 		DatabaseURL:  secret("RISK_ENGINE_DATABASE_URL"),
 		KafkaBrokers: splitList(os.Getenv("RISK_ENGINE_KAFKA_BROKERS")),
 		OTLPEndpoint: os.Getenv("RISK_ENGINE_OTLP_ENDPOINT"),

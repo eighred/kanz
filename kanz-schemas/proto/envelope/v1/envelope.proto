@@ -112,6 +112,21 @@ message Envelope {
   // registry (EVT-16), formatted "<schema-id>:<version>". Supports replay and
   // generic tooling. Required.
   string payload_schema_ref = 19;
+
+  // --- Tenancy ---
+
+  // tenant_id is the isolation boundary the event belongs to (MT-01). It passes
+  // both §2 inclusion tests: every event in a multi-tenant platform carries a
+  // tenant (universality), and the payload-blind concerns that enforce
+  // isolation — broker accounts/subjects (MT-01c), Postgres RLS (MT-01d),
+  // per-tenant metrics and quotas (MT-01e) — all key on it WITHOUT
+  // deserializing the payload. Required on live publish.
+  //
+  // Replay nuance: events read from pre-tenancy durable logs predate this field
+  // and carry the empty string. The replay path maps those to the reserved
+  // "__system__" tenant rather than rejecting them, so EVT-20 replay
+  // determinism is preserved. Added in envelope_version 2.
+  string tenant_id = 20;
 }
 
 // QualityFlag annotates an event with data-integrity conditions. Flags are

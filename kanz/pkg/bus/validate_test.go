@@ -16,7 +16,7 @@ func validEnvelope() *envelopepb.Envelope {
 		EventId:          "evt-1",
 		EventType:        "market.equity.trade",
 		SchemaVersion:    1,
-		EnvelopeVersion:  1,
+		EnvelopeVersion:  2,
 		EventClass:       envelopepb.EventClass_EVENT_CLASS_FACT,
 		Domain:           "market",
 		EventTime:        now,
@@ -29,6 +29,7 @@ func validEnvelope() *envelopepb.Envelope {
 		PayloadSchemaRef: "market.v1.MarketDataEvent:1",
 		PartitionKey:     "AAPL",
 		ProducerSequence: 1,
+		TenantId:         "acme",
 	}
 }
 
@@ -63,6 +64,7 @@ func TestValidateRejectsMissingFields(t *testing.T) {
 		{"producer_version", func(e *envelopepb.Envelope) { e.ProducerVersion = "" }},
 		{"idempotency_key", func(e *envelopepb.Envelope) { e.IdempotencyKey = "" }},
 		{"payload_schema_ref", func(e *envelopepb.Envelope) { e.PayloadSchemaRef = "" }},
+		{"tenant_id", func(e *envelopepb.Envelope) { e.TenantId = "" }},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -124,6 +126,26 @@ func TestValidateReplayStillEnforcesFieldRules(t *testing.T) {
 	env.EventId = ""
 	if err := bus.ValidateReplay(env); err == nil {
 		t.Error("ValidateReplay accepted flagged envelope with missing event_id")
+	}
+}
+
+func TestValidateRequiresTenantOnLivePath(t *testing.T) {
+	env := validEnvelope()
+	env.TenantId = ""
+	if err := bus.Validate(env); err == nil {
+		t.Error("Validate accepted a live envelope with no tenant_id")
+	}
+}
+
+func TestValidateReplayToleratesMissingTenant(t *testing.T) {
+	// MT-01a replay nuance: pre-tenancy events read from old logs carry no
+	// tenant_id; ValidateReplay must NOT reject them (the replay path maps them
+	// to SystemTenant), so replay determinism is preserved.
+	env := validEnvelope()
+	env.TenantId = ""
+	env.QualityFlags = []envelopepb.QualityFlag{envelopepb.QualityFlag_QUALITY_FLAG_REPLAYED}
+	if err := bus.ValidateReplay(env); err != nil {
+		t.Errorf("ValidateReplay rejected a pre-tenancy event: %v", err)
 	}
 }
 

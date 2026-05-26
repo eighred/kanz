@@ -38,6 +38,7 @@ func newPublisher(t *testing.T) (*prediction.Publisher, *captureClient) {
 	prod, err := bus.NewProducer(cc, bus.ProducerConfig{
 		Source:          "feature-svc/test",
 		ProducerVersion: "feature-1.0.0",
+		Tenant:          "acme",
 	})
 	if err != nil {
 		t.Fatalf("NewProducer: %v", err)

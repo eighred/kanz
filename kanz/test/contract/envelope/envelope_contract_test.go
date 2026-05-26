@@ -47,6 +47,7 @@ func newProducer(t *testing.T) (*bus.Producer, *captureClient) {
 	p, err := bus.NewProducer(cc, bus.ProducerConfig{
 		Source:          "contract-test/inst-1",
 		ProducerVersion: "contract-1.0.0",
+		Tenant:          "acme",
 	})
 	if err != nil {
 		t.Fatalf("NewProducer: %v", err)
@@ -91,6 +92,7 @@ func validEnvelope() *envelopepb.Envelope {
 		PayloadSchemaRef: "market.v1.MarketDataEvent:1",
 		PartitionKey:     "AAPL",
 		ProducerSequence: 1,
+		TenantId:         "acme",
 	}
 }
 

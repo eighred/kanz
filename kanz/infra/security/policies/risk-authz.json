@@ -1,0 +1,7 @@
+{
+  "roles": {
+    "risk.reader": ["risk.read"],
+    "risk.analyst": ["risk.read", "risk.scenario"],
+    "risk.admin": ["*"]
+  }
+}

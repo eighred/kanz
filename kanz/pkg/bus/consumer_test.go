@@ -161,7 +161,7 @@ func TestConsumerToProducerChainsLineage(t *testing.T) {
 
 	// Producer for the handler's outbound event B
 	cc := &captureClient{}
-	prod, err := bus.NewProducer(cc, bus.ProducerConfig{Source: "test/inst", ProducerVersion: "v1"})
+	prod, err := bus.NewProducer(cc, bus.ProducerConfig{Source: "test/inst", ProducerVersion: "v1", Tenant: "acme"})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -32,6 +32,7 @@ func newTestProducer(t *testing.T) (*bus.Producer, *captureClient) {
 	p, err := bus.NewProducer(cc, bus.ProducerConfig{
 		Source:          "test-svc/inst-1",
 		ProducerVersion: "test-1.0.0",
+		Tenant:          "acme",
 	})
 	if err != nil {
 		t.Fatalf("NewProducer: %v", err)
@@ -97,8 +98,11 @@ func TestProducerStampsFactEvent(t *testing.T) {
 	if env.IdempotencyKey != env.EventId {
 		t.Errorf("IdempotencyKey=%q want %q (FACT)", env.IdempotencyKey, env.EventId)
 	}
-	if env.EnvelopeVersion != 1 {
-		t.Errorf("EnvelopeVersion=%d want 1", env.EnvelopeVersion)
+	if env.EnvelopeVersion != 2 {
+		t.Errorf("EnvelopeVersion=%d want 2", env.EnvelopeVersion)
+	}
+	if env.TenantId != "acme" {
+		t.Errorf("TenantId=%q want acme (stamped from ProducerConfig.Tenant)", env.TenantId)
 	}
 	if env.Source != "test-svc/inst-1" {
 		t.Errorf("Source=%q", env.Source)

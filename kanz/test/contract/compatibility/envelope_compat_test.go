@@ -60,6 +60,7 @@ func canonicalEnvelope() *envelopepb.Envelope {
 		ProducerSequence: 1,
 		IdempotencyKey:   "evt-compat-1",
 		PayloadSchemaRef: "market.v1.MarketDataEvent:1",
+		TenantId:         "acme",
 	}
 }
 
@@ -237,12 +238,12 @@ func TestBackwardCompat_WireZeroAndUnsetProduceIdenticalBytes(t *testing.T) {
 // stack remain payload-blind.
 func TestPayloadOpacity_ArbitraryBytesRoundTripIdentically(t *testing.T) {
 	payloads := [][]byte{
-		nil,                                   // absent
-		{},                                    // empty
-		[]byte("plain-string"),                // ASCII
-		{0x00, 0xff, 0x7f, 0x80, 0x01},        // arbitrary bytes
-		bytesRepeating(0xab, 1024),            // larger blob
-		mustMarshal(t, timestamppb.Now()),     // parseable as Timestamp
+		nil,                               // absent
+		{},                                // empty
+		[]byte("plain-string"),            // ASCII
+		{0x00, 0xff, 0x7f, 0x80, 0x01},    // arbitrary bytes
+		bytesRepeating(0xab, 1024),        // larger blob
+		mustMarshal(t, timestamppb.Now()), // parseable as Timestamp
 		appendUnknownVarintField(mustMarshal(t, timestamppb.Now()), 99, 5), // Timestamp + unknown
 	}
 	for i, want := range payloads {
