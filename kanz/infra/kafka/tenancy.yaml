@@ -1,0 +1,149 @@
+---
+# MT-01c: per-tenant Kafka isolation. Kafka has no account concept, so the topic
+# NAME is the only ACL handle: tenant topics are prefixed `{tenant}.{domain}.
+# {entity}` and a PREFIXED ACL confines the tenant's SVID principal to RW on its
+# own `{tenant}.` prefix. The reserved `__system__` tenant keeps the UN-prefixed
+# legacy topics (topics-job.yaml) — matching MT-01a, where empty/SystemTenant
+# events carry no prefix — so existing logs and running consumers are untouched;
+# only NEW tenants get prefixed topics. The bus derives the topic from envelope
+# `tenant_id` (empty/__system__ → logical name, else prepend `{tenant}.`) — the
+# bus-wiring follow-up.
+#
+# Templated by TENANT + PRINCIPAL. Re-run per tenant (idempotent). Connects over
+# the SSL listener as the kafka-provisioner SVID (a super-user) so it can write
+# ACLs under the StandardAuthorizer.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: kafka-tenant
+  namespace: kanz-messaging
+  labels:
+    app.kubernetes.io/part-of: kanz
+data:
+  tenant.sh: |
+    #!/bin/bash
+    set -euo pipefail
+    BOOTSTRAP="${KAFKA_BOOTSTRAP:-kafka:9094}"
+    BIN="${KAFKA_BIN:-/opt/kafka/bin}"
+    CMDCFG="${KAFKA_CMD_CONFIG:-/etc/kafka-client/client.properties}"
+    TENANT="${TENANT:?set TENANT (e.g. acme)}"
+    PRINCIPAL="${PRINCIPAL:?set PRINCIPAL (e.g. User:spiffe://kanz.internal/ns/tenant-acme/sa/risk-engine)}"
+
+    K_TOPICS="$BIN/kafka-topics.sh --bootstrap-server $BOOTSTRAP --command-config $CMDCFG"
+    K_CONFIGS="$BIN/kafka-configs.sh --bootstrap-server $BOOTSTRAP --command-config $CMDCFG"
+    K_ACLS="$BIN/kafka-acls.sh --bootstrap-server $BOOTSTRAP --command-config $CMDCFG"
+
+    ensure_topic() {
+      name="$1"; partitions="$2"; cleanup="$3"; retention="$4"
+      $K_TOPICS --create --if-not-exists --topic "$name" \
+        --partitions "$partitions" --replication-factor 3
+      $K_CONFIGS --alter --topic "$name" \
+        --add-config "cleanup.policy=${cleanup},retention.ms=${retention},min.insync.replicas=2"
+      echo "  topic ${name}: ${partitions} parts, ${cleanup}, retention.ms=${retention}"
+    }
+
+    # Same topic layout as topics-job.yaml, prefixed with the tenant. Only the
+    # tenant-scoped domains (market/risk/execution/inference/data) are tenanted;
+    # platform + observability stay cross-cutting under __system__ (un-prefixed).
+    while read -r name partitions cleanup retention dlq; do
+      case "$name" in ''|\#*) continue ;; esac
+      ensure_topic "${TENANT}.${name}" "$partitions" "$cleanup" "$retention"
+      if [ "$dlq" = "yes" ]; then
+        ensure_topic "${TENANT}.dlq.${name}" 3 delete 2592000000
+      fi
+    done <<'EOF'
+    market.equity              12  delete   604800000   yes
+    market.option              6   delete   604800000   yes
+    risk.portfolio             6   delete   2592000000  yes
+    risk.portfolio.snapshot    6   compact  -1          no
+    execution.order            6   delete   2592000000  yes
+    execution.order.snapshot   6   compact  -1          no
+    inference.feature          6   delete   604800000   yes
+    inference.prediction       6   delete   2592000000  yes
+    data.market_stream         3   delete   2592000000  yes
+    data.feature               3   delete   2592000000  yes
+    EOF
+
+    # PREFIXED ACLs: the tenant principal may produce/consume only under its own
+    # `{tenant}.` topic prefix and consumer-group prefix. Deny-by-default does
+    # the rest — no grant anywhere else, so tenant A can never touch tenant B's
+    # or __system__'s topics.
+    $K_ACLS --add --allow-principal "$PRINCIPAL" \
+      --operation Write --operation Read --operation Describe --operation Create \
+      --topic "${TENANT}." --resource-pattern-type prefixed
+    $K_ACLS --add --allow-principal "$PRINCIPAL" \
+      --operation Read --operation Describe \
+      --group "${TENANT}." --resource-pattern-type prefixed
+
+    echo "tenant ${TENANT} provisioning complete"
+    $K_ACLS --list --principal "$PRINCIPAL"
+---
+# Client config for the SSL listener, using the kafka-provisioner SVID
+# (super-user). spiffe-helper writes the keystore; identity = the URI SAN.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: kafka-provisioner-client
+  namespace: kanz-messaging
+  labels:
+    app.kubernetes.io/part-of: kanz
+data:
+  client.properties: |
+    security.protocol=SSL
+    ssl.keystore.type=PEM
+    ssl.keystore.location=/etc/kafka-certs/keystore.pem
+    ssl.truststore.type=PEM
+    ssl.truststore.location=/etc/kafka-certs/bundle.pem
+    ssl.endpoint.identification.algorithm=
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: kafka-provisioner
+  namespace: kanz-messaging
+  labels:
+    app.kubernetes.io/part-of: kanz
+---
+# Provisions ONE tenant. Set TENANT + PRINCIPAL, then apply (rename the Job per
+# tenant). Runs as kafka-provisioner (super-user SVID) over SSL:9094.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: kafka-tenant-acme
+  namespace: kanz-messaging
+spec:
+  backoffLimit: 4
+  template:
+    spec:
+      restartPolicy: OnFailure
+      serviceAccountName: kafka-provisioner
+      initContainers:
+        - name: spiffe-helper-init
+          image: ghcr.io/spiffe/spiffe-helper:0.9.0
+          args: ["-config", "/etc/spiffe-helper/helper.conf", "-daemon-mode=false"]
+          volumeMounts:
+            - { name: spiffe-helper-config, mountPath: /etc/spiffe-helper, readOnly: true }
+            - { name: kafka-certs, mountPath: /etc/kafka-certs }
+            - { name: spiffe, mountPath: /run/spiffe, readOnly: true }
+      containers:
+        - name: tenant
+          image: apache/kafka:3.9.0
+          command: ["bash", "/scripts/tenant.sh"]
+          env:
+            - { name: KAFKA_BOOTSTRAP, value: "kafka:9094" }
+            - { name: KAFKA_CMD_CONFIG, value: "/etc/kafka-client/client.properties" }
+            - { name: TENANT, value: "acme" }
+            - { name: PRINCIPAL, value: "User:spiffe://kanz.internal/ns/tenant-acme/sa/risk-engine" }
+          volumeMounts:
+            - { name: scripts, mountPath: /scripts }
+            - { name: client, mountPath: /etc/kafka-client, readOnly: true }
+            - { name: kafka-certs, mountPath: /etc/kafka-certs, readOnly: true }
+      volumes:
+        - { name: scripts, configMap: { name: kafka-tenant } }
+        - { name: client, configMap: { name: kafka-provisioner-client } }
+        - name: kafka-certs
+          emptyDir: { medium: Memory }
+        - name: spiffe
+          csi: { driver: csi.spiffe.io, readOnly: true }
+        - name: spiffe-helper-config
+          configMap: { name: kafka-spiffe-helper }

@@ -87,6 +87,23 @@ type bucket struct {
 	last   time.Time
 }
 
+// take lazily refills the bucket by elapsed time (no background goroutine, so
+// an idle gateway holds no timers), caps it at burst, and consumes one token —
+// returning false when empty. Shared by the global RateLimit and the per-tenant
+// Quota (MT-01e). Caller holds the owning mutex.
+func (b *bucket) take(now time.Time, perSec, burst float64) bool {
+	b.tokens += now.Sub(b.last).Seconds() * perSec
+	if b.tokens > burst {
+		b.tokens = burst
+	}
+	b.last = now
+	if b.tokens < 1 {
+		return false
+	}
+	b.tokens--
+	return true
+}
+
 type tenantLimiter struct {
 	perSec  float64
 	burst   float64
@@ -95,9 +112,7 @@ type tenantLimiter struct {
 	now     func() time.Time
 }
 
-// allow refills the key's bucket by elapsed time and consumes one token,
-// returning false when the bucket is empty. Lazy refill — no background
-// goroutine, so an idle gateway holds no timers.
+// allow consumes one token from the key's bucket, returning false when empty.
 func (l *tenantLimiter) allow(key string) bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -107,16 +122,7 @@ func (l *tenantLimiter) allow(key string) bool {
 		l.buckets[key] = &bucket{tokens: l.burst - 1, last: now}
 		return true
 	}
-	b.tokens += now.Sub(b.last).Seconds() * l.perSec
-	if b.tokens > l.burst {
-		b.tokens = l.burst
-	}
-	b.last = now
-	if b.tokens < 1 {
-		return false
-	}
-	b.tokens--
-	return true
+	return b.take(now, l.perSec, l.burst)
 }
 
 // Idempotency replays the prior response for a repeated Idempotency-Key

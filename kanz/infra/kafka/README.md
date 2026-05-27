@@ -12,7 +12,8 @@ Runs in the `kanz-messaging` namespace — created by the NATS provisioning, or
 | File | Purpose |
 |---|---|
 | `kafka.yaml` | 3-node KRaft cluster (combined broker+controller) — headless + client Services, StatefulSet, PodDisruptionBudget, SEC-01c mTLS listener + spiffe-helper |
-| `topics-job.yaml` | ConfigMap + Job that provisions topics/retention/compaction (idempotent) |
+| `topics-job.yaml` | ConfigMap + Job that provisions the `__system__` (un-prefixed) topics/retention/compaction (idempotent) |
+| `tenancy.yaml` | MT-01c: per-tenant prefixed topics + PREFIXED ACLs (templated by TENANT + PRINCIPAL) |
 | `smoke-test.sh` | produce/consume smoke test |
 
 ## Topics
@@ -57,6 +58,31 @@ rotation**: the sidecar rebuilds `keystore.pem` on renewal, but the broker
 re-reads it on restart or a `kafka-configs` dynamic update — not yet automatic.
 
 Requires SPIRE (SEC-01a) deployed and `kanz-messaging` SPIFFE-enabled.
+
+## Tenant isolation (MT-01c)
+
+Kafka has no account concept, so tenants are isolated by **topic prefix**:
+`{tenant}.{domain}.{entity}`, confined by a PREFIXED ACL on `{tenant}.`. The
+KRaft `StandardAuthorizer` runs **deny-by-default**
+(`allow.everyone.if.no.acl.found=false`, matching AUTH-01b), so a principal with
+no grant gets nothing — tenant A can never touch tenant B's or `__system__`'s
+topics. The reserved `__system__` tenant keeps the **un-prefixed** legacy topics
+(`topics-job.yaml`) for platform/observability + pre-tenancy events, so existing
+logs and consumers are untouched; only new tenants get prefixed topics. The bus
+prepends `{tenant}.` from the envelope `tenant_id` (empty/`__system__` → no
+prefix) — the bus-wiring follow-up.
+
+**Add a tenant**: copy the `kafka-tenant-acme` Job in `tenancy.yaml`, set
+`TENANT` + `PRINCIPAL` (the tenant workload's SVID), and apply. It creates the
+prefixed topics + ACLs over the SSL listener as the `kafka-provisioner`
+super-user SVID.
+
+**Broker dependency**: SVID certs have an empty subject DN (identity is the URI
+SAN), so the broker needs a SPIFFE-aware `principal.builder.class` to surface
+`User:spiffe://…` as the ACL principal — `KAFKA_PRINCIPAL_BUILDER_CLASS` is set
+to `io.kanz.kafka.SpiffePrincipalBuilder`; shipping that plugin is the SEC-01
+companion. The PLAINTEXT:9092 principal (`ANONYMOUS` — inter-broker + in-cluster
+bootstrap) stays a super-user until inter-broker SSL lands and 9092 is cut.
 
 ## Deploy
 

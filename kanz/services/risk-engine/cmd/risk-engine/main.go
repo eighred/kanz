@@ -18,6 +18,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"google.golang.org/grpc"
 
@@ -145,7 +146,21 @@ func runEngine(ctx context.Context, cfg config.Config, readiness *server.Readine
 	// run the periodic snapshotter + final-checkpoint drain. Skipped when no
 	// database is configured — state stays in-memory.
 	if cfg.DatabaseURL != "" {
-		pool, err := pgxpool.New(ctx, cfg.DatabaseURL)
+		// MT-01d: every connection carries the engine's tenant as the
+		// `app.tenant_id` GUC, so Postgres RLS scopes all state reads/writes to
+		// it (the authenticated-session-GUC pattern). The engine is single-tenant
+		// per deployment (cfg.Tenant); a non-superuser DB role is required for
+		// FORCE RLS to apply.
+		poolCfg, err := pgxpool.ParseConfig(cfg.DatabaseURL)
+		if err != nil {
+			return err
+		}
+		tenant := cfg.Tenant
+		poolCfg.AfterConnect = func(ctx context.Context, conn *pgx.Conn) error {
+			_, err := conn.Exec(ctx, "SELECT set_config('app.tenant_id', $1, false)", tenant)
+			return err
+		}
+		pool, err := pgxpool.NewWithConfig(ctx, poolCfg)
 		if err != nil {
 			return err
 		}

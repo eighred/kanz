@@ -140,6 +140,19 @@ spec:
             - { name: KAFKA_SSL_TRUSTSTORE_LOCATION, value: "/etc/kafka-certs/bundle.pem" }
             - { name: KAFKA_SSL_CLIENT_AUTH, value: "required" }
             - { name: KAFKA_SSL_ENDPOINT_IDENTIFICATION_ALGORITHM, value: "" }
+            # MT-01c: tenant isolation via topic-prefix ACLs. KRaft StandardAuthorizer,
+            # deny-by-default (matches AUTH-01b posture) so an un-ACL'd principal gets
+            # nothing. SVID DNs are empty (identity is the URI SAN), so a SPIFFE-aware
+            # principal builder must surface "User:spiffe://..." as the ACL principal —
+            # the one broker-side plugin SEC-01 owns (README). Broker + provisioner
+            # SVIDs are super-users so inter-broker + topics/tenant Jobs are unrestricted.
+            - { name: KAFKA_AUTHORIZER_CLASS_NAME, value: "org.apache.kafka.metadata.authorizer.StandardAuthorizer" }
+            - { name: KAFKA_ALLOW_EVERYONE_IF_NO_ACL_FOUND, value: "false" }
+            - { name: KAFKA_PRINCIPAL_BUILDER_CLASS, value: "io.kanz.kafka.SpiffePrincipalBuilder" }
+            # ANONYMOUS = the PLAINTEXT:9092 principal (inter-broker + in-cluster
+            # bootstrap during migration). Kept super until inter-broker SSL lands
+            # and 9092 is cut (SEC-01 follow-up, already noted in README).
+            - { name: KAFKA_SUPER_USERS, value: "User:spiffe://kanz.internal/ns/kanz-messaging/sa/kafka;User:spiffe://kanz.internal/ns/kanz-messaging/sa/kafka-provisioner;User:ANONYMOUS" }
             - { name: KAFKA_LOG_DIRS, value: "/var/lib/kafka/data" }
             # Durability defaults — this cluster is the log of record.
             - { name: KAFKA_DEFAULT_REPLICATION_FACTOR, value: "3" }

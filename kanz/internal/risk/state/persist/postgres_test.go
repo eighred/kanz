@@ -10,9 +10,12 @@ package persist
 import (
 	"context"
 	"os"
+	"path/filepath"
+	"sort"
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	commonpb "github.com/kanz-eng/kanz-schemas-go/common/v1"
@@ -21,37 +24,65 @@ import (
 	"github.com/kanz-eng/kanz/internal/risk/domain"
 )
 
-const migrationPath = "../../../../services/risk-engine/migrations/0001_state.sql"
+const migrationDir = "../../../../services/risk-engine/migrations"
 
+// newPool connects, applies the schema clean, and pins the session tenant to
+// __system__ via the app.tenant_id GUC (MT-01d) — so RLS lets the existing
+// round-trip tests operate transparently within one tenant.
 func newPool(t *testing.T) *pgxpool.Pool {
+	t.Helper()
+	pool := tenantPool(t, "__system__")
+	applySchema(t, pool)
+	return pool
+}
+
+// tenantPool returns a pool whose every connection sets app.tenant_id to
+// tenant (the authenticated-session-GUC pattern main.go uses), without
+// touching the schema. RLS scopes all of its reads/writes to that tenant.
+func tenantPool(t *testing.T, tenant string) *pgxpool.Pool {
 	t.Helper()
 	url := os.Getenv("TEST_POSTGRES_URL")
 	if url == "" {
 		t.Skip("set TEST_POSTGRES_URL to run persist Postgres integration tests")
 	}
-	pool, err := pgxpool.New(context.Background(), url)
+	cfg, err := pgxpool.ParseConfig(url)
+	if err != nil {
+		t.Fatalf("parse config: %v", err)
+	}
+	cfg.AfterConnect = func(ctx context.Context, conn *pgx.Conn) error {
+		_, err := conn.Exec(ctx, "SELECT set_config('app.tenant_id', $1, false)", tenant)
+		return err
+	}
+	pool, err := pgxpool.NewWithConfig(context.Background(), cfg)
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}
 	t.Cleanup(pool.Close)
-	applySchema(t, pool)
 	return pool
 }
 
-// applySchema drops and recreates the state tables from the migration so each
-// run starts clean. The migration file is the single source of truth.
+// applySchema drops and recreates the state tables from the migrations (in
+// lexical order) so each run starts clean. The migration files are the single
+// source of truth — including the RLS policies (0002).
 func applySchema(t *testing.T, pool *pgxpool.Pool) {
 	t.Helper()
 	ctx := context.Background()
 	if _, err := pool.Exec(ctx, `DROP TABLE IF EXISTS applied_keys, positions, portfolios CASCADE`); err != nil {
 		t.Fatalf("drop: %v", err)
 	}
-	ddl, err := os.ReadFile(migrationPath)
-	if err != nil {
-		t.Fatalf("read migration %s: %v", migrationPath, err)
+	files, err := filepath.Glob(filepath.Join(migrationDir, "*.sql"))
+	if err != nil || len(files) == 0 {
+		t.Fatalf("glob migrations %s: %v (found %d)", migrationDir, err, len(files))
 	}
-	if _, err := pool.Exec(ctx, string(ddl)); err != nil {
-		t.Fatalf("apply migration: %v", err)
+	sort.Strings(files)
+	for _, f := range files {
+		ddl, err := os.ReadFile(f)
+		if err != nil {
+			t.Fatalf("read migration %s: %v", f, err)
+		}
+		if _, err := pool.Exec(ctx, string(ddl)); err != nil {
+			t.Fatalf("apply migration %s: %v", f, err)
+		}
 	}
 }
 
@@ -262,26 +293,20 @@ func TestPostgres_CrashRecoveryParity(t *testing.T) {
 	if url == "" {
 		t.Skip("set TEST_POSTGRES_URL to run persist Postgres integration tests")
 	}
+	_ = url
 	ctx := context.Background()
 
-	// First "process": apply schema + save.
-	pool1, err := pgxpool.New(ctx, url)
-	if err != nil {
-		t.Fatalf("connect 1: %v", err)
-	}
+	// First "process": apply schema + save. The GUC-pinned pool scopes the
+	// write to __system__ under RLS (MT-01d).
+	pool1 := tenantPool(t, "__system__")
 	applySchema(t, pool1)
 	want := fullRecord()
 	if err := NewPostgres(pool1).Save(ctx, want); err != nil {
 		t.Fatalf("Save: %v", err)
 	}
-	pool1.Close() // "crash"
 
-	// Second "process": fresh pool, load.
-	pool2, err := pgxpool.New(ctx, url)
-	if err != nil {
-		t.Fatalf("connect 2: %v", err)
-	}
-	t.Cleanup(pool2.Close)
+	// Second "process": fresh pool (same tenant), load.
+	pool2 := tenantPool(t, "__system__")
 	got, err := NewPostgres(pool2).Load(ctx, want.ID)
 	if err != nil {
 		t.Fatalf("Load after restart: %v", err)
@@ -291,4 +316,60 @@ func TestPostgres_CrashRecoveryParity(t *testing.T) {
 		t.Errorf("state not recovered intact: %+v", got)
 	}
 	assertMoney(t, "recovered total_market_value", got.TotalMarketValue, want.TotalMarketValue)
+}
+
+// RLS proves the tenant boundary is enforced by the database (MT-01d): state
+// written under one tenant's session GUC is invisible to another, the same
+// portfolio_id coexists per-tenant, and the row carries the writing tenant.
+// Superusers bypass RLS, so the assertions only hold under a non-superuser
+// role — skipped otherwise rather than passing falsely.
+func TestPostgres_RLSTenantIsolation(t *testing.T) {
+	ctx := context.Background()
+	base := newPool(t) // applies schema; session = __system__
+
+	var superuser bool
+	if err := base.QueryRow(ctx, "SELECT current_setting('is_superuser')::bool").Scan(&superuser); err != nil {
+		t.Fatalf("is_superuser: %v", err)
+	}
+	if superuser {
+		t.Skip("RLS is bypassed for superusers; run TEST_POSTGRES_URL as a non-superuser role")
+	}
+
+	acme := NewPostgres(tenantPool(t, "acme"))
+	globex := NewPostgres(tenantPool(t, "globex"))
+
+	rec := fullRecord() // ID = PORT-1
+	if err := acme.Save(ctx, rec); err != nil {
+		t.Fatalf("acme Save: %v", err)
+	}
+
+	// globex cannot see acme's portfolio — not by id, not in bulk.
+	if _, err := globex.Load(ctx, rec.ID); err != ErrNotFound {
+		t.Fatalf("globex Load of acme portfolio = %v want ErrNotFound", err)
+	}
+	if all, err := globex.LoadAll(ctx); err != nil || len(all) != 0 {
+		t.Fatalf("globex LoadAll = %v (err %v) want empty", all, err)
+	}
+
+	// acme sees its own, stamped with its tenant.
+	got, err := acme.Load(ctx, rec.ID)
+	if err != nil {
+		t.Fatalf("acme Load: %v", err)
+	}
+	if got.TenantID != "acme" {
+		t.Errorf("tenant_id = %q want acme", got.TenantID)
+	}
+
+	// The same portfolio_id under globex is an independent row.
+	if err := globex.Save(ctx, rec); err != nil {
+		t.Fatalf("globex Save same id: %v", err)
+	}
+	gg, err := globex.Load(ctx, rec.ID)
+	if err != nil || gg.TenantID != "globex" {
+		t.Fatalf("globex Load = %+v (err %v) want tenant globex", gg, err)
+	}
+	// acme's row is untouched by globex's write.
+	if all, err := acme.LoadAll(ctx); err != nil || len(all) != 1 {
+		t.Fatalf("acme LoadAll = %v (err %v) want exactly its own row", all, err)
+	}
 }

@@ -123,13 +123,32 @@ func buildRouter(cfg config.Config, h *gateway.Handler, obs *observability.Provi
 	default:
 		logger.Warn("api-gateway: authentication DISABLED (no OIDC issuer or JWT secret)")
 	}
+	// Per-tenant quota policy (MT-01e): default budget + optional per-tenant
+	// JSON overrides; metrics carry the tenant label.
+	overrides, err := middleware.LoadQuotaOverrides(cfg.QuotasFile)
+	if err != nil {
+		logger.Error("api-gateway: quota overrides load failed", "err", err, "path", cfg.QuotasFile)
+		os.Exit(2)
+	}
+	limits := middleware.TenantLimits{
+		Default: middleware.Limits{
+			RatePerSec:  cfg.RateLimitPerSec,
+			Burst:       cfg.RateLimitBurst,
+			MaxInFlight: cfg.MaxInFlight,
+		},
+		Overrides: overrides,
+	}
+	gwMetrics := middleware.NewGatewayMetrics(obs.Registry)
+
 	// Outermost first: negotiate version → verify signature → authenticate →
-	// per-tenant rate limit (needs the principal) → idempotency replay.
+	// per-tenant request metrics → per-tenant quota (rate + admission, needs the
+	// principal) → idempotency replay.
 	chain := middleware.Chain(
 		middleware.Version(),
 		middleware.Signing(cfg.SigningSecret),
 		middleware.Auth(authn, cfg.RequiredRole, logger),
-		middleware.RateLimit(cfg.RateLimitPerSec, cfg.RateLimitBurst),
+		gwMetrics.Measure(),
+		middleware.Quota(limits, gwMetrics),
 		middleware.Idempotency(time.Minute, 10_000),
 	)
 

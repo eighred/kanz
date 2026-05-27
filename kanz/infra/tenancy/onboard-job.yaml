@@ -1,0 +1,86 @@
+---
+# In-cluster runner for the MT-01f lifecycle workflow. tenantctl.sh orchestrates
+# resources across kanz-messaging (NATS/Kafka), kanz-services (gateway quota CM),
+# and the new tenant-<name> namespace, so it needs an account permitted to do
+# exactly that — scoped, not cluster-admin.
+#
+# Create the script ConfigMap from the repo file (keeps tenantctl.sh the single
+# reviewable source, mirroring how the kafka README runs smoke-test.sh):
+#   kubectl -n kanz-tenancy create configmap tenantctl --from-file=tenantctl.sh
+# Then onboard a tenant by applying this Job with TENANT (+ the tenant.env vars)
+# set; rename the Job per run.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: kanz-tenancy
+  labels:
+    app.kubernetes.io/part-of: kanz
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: tenant-provisioner
+  namespace: kanz-tenancy
+  labels:
+    app.kubernetes.io/part-of: kanz
+---
+# Namespace + ServiceAccount creation is cluster-scoped; the rest is namespaced.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: kanz-tenant-provisioner
+rules:
+  - apiGroups: [""]
+    resources: ["namespaces", "serviceaccounts"]
+    verbs: ["get", "create", "delete", "patch"]
+  # Provision broker resources + the gateway quota CM, and drive the
+  # per-tenant kafka-tenant Jobs.
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "create", "update", "patch"]
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["get", "create", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: kanz-tenant-provisioner
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: kanz-tenant-provisioner
+subjects:
+  - kind: ServiceAccount
+    name: tenant-provisioner
+    namespace: kanz-tenancy
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: tenant-onboard-acme
+  namespace: kanz-tenancy
+spec:
+  backoffLimit: 2
+  template:
+    spec:
+      restartPolicy: OnFailure
+      serviceAccountName: tenant-provisioner
+      containers:
+        - name: tenantctl
+          # bitnami/kubectl bundles kubectl + jq + bash, the tools tenantctl needs;
+          # psql/nsc steps no-op unless ADMIN_DATABASE_URL / NATS_OPERATOR are set.
+          image: bitnami/kubectl:1.30
+          command: ["bash", "/scripts/tenantctl.sh", "onboard"]
+          env:
+            - { name: TENANT, value: "acme" }
+            - { name: TENANT_SAS, value: "risk-engine api-gateway" }
+            - { name: RATE_PER_SEC, value: "50" }
+            - { name: BURST, value: "100" }
+            - { name: MAX_IN_FLIGHT, value: "64" }
+          volumeMounts:
+            - { name: scripts, mountPath: /scripts, readOnly: true }
+      volumes:
+        - name: scripts
+          configMap:
+            name: tenantctl

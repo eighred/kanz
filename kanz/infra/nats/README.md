@@ -11,6 +11,7 @@ short-retention live tier for low-latency fan-out.
 | `namespace.yaml` | `kanz-messaging` namespace (SPIFFE-enabled label, SEC-01a) |
 | `nats.yaml` | 3-node JetStream cluster — ConfigMap, headless + client Services, StatefulSet, PodDisruptionBudget, SEC-01c mTLS + spiffe-helper |
 | `bootstrap-job.yaml` | ConfigMap + Job that creates the streams/consumers (idempotent) |
+| `tenancy.yaml` | MT-01c: per-tenant accounts (SYS + `__system__` + tenant template), included by `nats.conf` |
 | `smoke-test.sh` | pub/sub + persistence smoke test |
 
 ## Streams
@@ -43,6 +44,27 @@ client SVID is both the encryption and the auth credential.
 
 Requires SPIRE (SEC-01a) deployed; the smoke test below needs a client SVID or a
 plaintext listener.
+
+## Tenant isolation (MT-01c)
+
+Tenants are isolated by **NATS accounts** — the broker-native boundary; one
+account's subjects are physically invisible to another. `tls.verify_and_map`
+maps the client's SVID URI SAN to a per-tenant user → account, so isolation is
+enforced by *which account a connection lands in*, not by the subject string —
+the bus keeps publishing the unchanged 3-segment logical subject
+(`subject-taxonomy.md` §6). `tenancy.yaml` ships the `SYS`, `__system__`
+(platform + pre-tenancy events), and an example `acme` tenant account; each
+tenant account carries its own JetStream quota (noisy-neighbor bound, tightened
+in MT-01e).
+
+**Add a tenant**: append an account + a user keyed on the tenant workload's
+SPIFFE URI to `tenancy.yaml`, `kubectl apply`, then `nats-server --signal
+reload`. Dynamic JWT account-resolver onboarding (no reload) is the MT-01f path.
+
+**Per-tenant streams**: streams are per-account, so run the `nats-bootstrap`
+script connected on the tenant account (a pod under the tenant ServiceAccount,
+so its SVID maps into that account). Same per-domain stream layout as the
+platform account.
 
 ## Deploy
 

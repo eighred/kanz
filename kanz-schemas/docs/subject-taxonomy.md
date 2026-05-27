@@ -120,6 +120,26 @@ Two top-level prefixes are reserved and are **not** part of the
 
 No domain may be named `replay` or `dlq`.
 
+### Tenant routing prefix (MT-01c)
+
+Tenant is an **isolation boundary, not part of the logical name** — the logical
+name stays the stable 3-segment contract above. How the tenant manifests at the
+broker is broker-specific and keys on the envelope `tenant_id`:
+
+- **NATS** — isolation is by **account** (one per tenant), not by subject. The
+  client's SVID maps to a per-tenant account (`tls.verify_and_map`), so the
+  subject string is the unchanged 3-segment name and a tenant simply cannot see
+  another's `{domain}.>`. Subject prefixing is *not* used.
+- **Kafka** — has no account concept, so the tenant is a literal **topic
+  prefix**: `{tenant}.{domain}.{entity}`, confined by a PREFIXED ACL on
+  `{tenant}.`. `{tenant}` joins `replay`/`dlq` as a reserved leading segment;
+  no domain may be named like a tenant.
+
+The reserved tenant `__system__` carries cross-cutting platform/observability
+streams and pre-tenancy (untenanted) events; in Kafka those keep the
+**un-prefixed** legacy topic names. Provisioning lives in `kanz/infra/{nats,
+kafka}/tenancy.yaml`.
+
 ## 7. Governance
 
 - Every logical name is registered in `kanz-schemas` alongside its payload

@@ -22,8 +22,15 @@ data:
       key_file:  "/etc/nats-certs/svid_key.pem"
       ca_file:   "/etc/nats-certs/bundle.pem"
       verify: true
+      # MT-01c: map the verified client cert's SPIFFE URI SAN to a NATS user, so
+      # the connection lands in that user's tenant account (tenancy.yaml).
+      verify_and_map: true
       timeout: 5
     }
+
+    # MT-01c: per-tenant accounts + SYS/__system__ (mounted from the
+    # nats-tenants ConfigMap). Path is relative to this file's dir (/etc/nats).
+    include "tenants.conf"
 
     jetstream {
       store_dir: /data/jetstream
@@ -162,6 +169,8 @@ spec:
             - { name: monitor, containerPort: 8222 }
           volumeMounts:
             - { name: config, mountPath: /etc/nats }
+            # MT-01c: tenant accounts file, included by nats.conf.
+            - { name: tenants, mountPath: /etc/nats/tenants.conf, subPath: tenants.conf, readOnly: true }
             - { name: data, mountPath: /data }
             - { name: nats-certs, mountPath: /etc/nats-certs, readOnly: true }
           livenessProbe:
@@ -191,6 +200,9 @@ spec:
         - name: config
           configMap:
             name: nats-config
+        - name: tenants
+          configMap:
+            name: nats-tenants
         - name: spiffe-helper-config
           configMap:
             name: nats-spiffe-helper

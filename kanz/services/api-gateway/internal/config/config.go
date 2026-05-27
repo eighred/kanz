@@ -43,10 +43,17 @@ type Config struct {
 	// query endpoint (deny-by-default once auth is enabled).
 	RequiredRole string
 
-	// RateLimitPerSec / RateLimitBurst configure the per-tenant token bucket
-	// (API-01d). A non-positive rate disables rate limiting.
+	// RateLimitPerSec / RateLimitBurst configure the DEFAULT per-tenant token
+	// bucket (API-01d). A non-positive rate disables rate limiting.
 	RateLimitPerSec float64
 	RateLimitBurst  int
+	// MaxInFlight is the default per-tenant in-flight (concurrency) cap for
+	// admission control (MT-01e). A non-positive value disables admission.
+	MaxInFlight int
+	// QuotasFile, when set, is a JSON map of tenant → {rate_per_sec, burst,
+	// max_in_flight} overriding the defaults per tenant (MT-01e). The
+	// ConfigMap-mounted policy-as-data shape (cf. AUTH-01b risk-authz.json).
+	QuotasFile string
 
 	// SigningSecret, when set, requires every request to carry a valid HMAC
 	// X-Signature over method+path+body (API-01d request signing). Empty ⇒
@@ -71,6 +78,8 @@ func Load() (Config, error) {
 		RequiredRole:    os.Getenv("API_GATEWAY_REQUIRED_ROLE"),
 		RateLimitPerSec: parseFloat(os.Getenv("API_GATEWAY_RATE_LIMIT_PER_SEC")),
 		RateLimitBurst:  parseInt(os.Getenv("API_GATEWAY_RATE_LIMIT_BURST")),
+		MaxInFlight:     parseInt(os.Getenv("API_GATEWAY_MAX_IN_FLIGHT")),
+		QuotasFile:      os.Getenv("API_GATEWAY_QUOTAS_FILE"),
 		SigningSecret:   secret("API_GATEWAY_SIGNING_SECRET"),
 	}, nil
 }

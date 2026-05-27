@@ -1,0 +1,56 @@
+---
+# MT-01c: NATS tenant isolation via ACCOUNTS — the broker-native isolation
+# boundary. An account's subjects are physically invisible to other accounts, so
+# isolation is enforced by WHICH account a connection lands in, not by the
+# subject string. The client's SVID maps to a per-tenant user via
+# `tls.verify_and_map` (see nats.yaml), so the bus keeps publishing the
+# unchanged 3-segment logical subject (subject-taxonomy §4/§6) and a tenant can
+# never see another tenant's `{domain}.>`. Subject prefixing inside one shared
+# account would give NO real isolation, hence accounts.
+#
+# This ConfigMap is mounted at /etc/nats/tenants.conf and `include`d by
+# nats.conf. Add a tenant by appending an account + user keyed on the tenant
+# workload's SPIFFE URI SAN, then `nats-server --signal reload`. Dynamic JWT
+# account-resolver onboarding (no reload) is the MT-01f lifecycle path.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nats-tenants
+  namespace: kanz-messaging
+  labels:
+    app.kubernetes.io/part-of: kanz
+data:
+  tenants.conf: |
+    # System account: $SYS events (monitoring, JetStream cluster RPC).
+    system_account: SYS
+
+    accounts {
+      SYS {
+        users: [ { user: "spiffe://kanz.internal/ns/kanz-messaging/sa/nats" } ]
+      }
+
+      # Reserved platform/legacy tenant (MT-01a __system__). Cross-cutting
+      # platform + observability streams AND pre-tenancy (untenanted) events —
+      # which the consumer maps to SystemTenant — live here. Platform services
+      # connect into it; per-tenant accounts cannot reach its subjects.
+      __system__ {
+        jetstream: enabled
+        users: [
+          { user: "spiffe://kanz.internal/ns/kanz-services/sa/risk-engine" }
+          { user: "spiffe://kanz.internal/ns/kanz-services/sa/api-gateway" }
+        ]
+      }
+
+      # ---- tenant template — one account per tenant ------------------------
+      # Per-account JetStream quota (noisy-neighbor bound; MT-01e tightens it).
+      # Streams are provisioned per-account by running the nats-bootstrap script
+      # connected on this account (see README "Per-tenant streams").
+      acme {
+        jetstream { max_memory: 64MB, max_file: 2GB, max_streams: 16, max_consumers: 256 }
+        users: [
+          # The tenant's workloads present this SVID; verify_and_map binds the
+          # URI SAN to this user → account, scoping all its pub/sub.
+          { user: "spiffe://kanz.internal/ns/tenant-acme/sa/risk-engine" }
+        ]
+      }
+    }

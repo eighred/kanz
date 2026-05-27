@@ -70,11 +70,11 @@ func (p *Postgres) Save(ctx context.Context, rec PortfolioRecord) error {
 
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO portfolios
-			(portfolio_id, display_name, base_currency, cash_balance,
+			(tenant_id, portfolio_id, display_name, base_currency, cash_balance,
 			 total_market_value, position_count, as_of,
 			 log_topic, log_partition, log_offset, updated_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, now())
-		ON CONFLICT (portfolio_id) DO UPDATE SET
+		VALUES (current_setting('app.tenant_id'), $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, now())
+		ON CONFLICT (tenant_id, portfolio_id) DO UPDATE SET
 			display_name       = EXCLUDED.display_name,
 			base_currency      = EXCLUDED.base_currency,
 			cash_balance       = EXCLUDED.cash_balance,
@@ -105,8 +105,8 @@ func (p *Postgres) Save(ctx context.Context, rec PortfolioRecord) error {
 	}
 	for _, key := range rec.AppliedKeys {
 		if _, err := tx.Exec(ctx, `
-			INSERT INTO applied_keys (portfolio_id, idempotency_key)
-			VALUES ($1, $2)
+			INSERT INTO applied_keys (tenant_id, portfolio_id, idempotency_key)
+			VALUES (current_setting('app.tenant_id'), $1, $2)
 			ON CONFLICT DO NOTHING
 		`, string(rec.ID), key); err != nil {
 			return fmt.Errorf("insert applied_key %s: %w", rec.ID, err)
@@ -141,9 +141,9 @@ func insertPosition(ctx context.Context, tx pgx.Tx, id v1.PortfolioID, pos domai
 	}
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO positions
-			(portfolio_id, instrument_id, quantity, average_price, market_value,
+			(tenant_id, portfolio_id, instrument_id, quantity, average_price, market_value,
 			 market_value_uncertainty, realized_pnl, unrealized_pnl, as_of)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+		VALUES (current_setting('app.tenant_id'), $1, $2, $3, $4, $5, $6, $7, $8, $9)
 	`, string(id), string(pos.InstrumentID),
 		vals[0], vals[1], vals[2], vals[3], vals[4], vals[5], nullTime(pos.AsOf)); err != nil {
 		return fmt.Errorf("insert position %s/%s: %w", id, pos.InstrumentID, err)
@@ -182,12 +182,12 @@ func (p *Postgres) scanPortfolio(ctx context.Context, id v1.PortfolioID) (Portfo
 		offset    *int64
 	)
 	err := p.pool.QueryRow(ctx, `
-		SELECT portfolio_id, display_name, base_currency, cash_balance,
+		SELECT tenant_id, portfolio_id, display_name, base_currency, cash_balance,
 		       total_market_value, position_count, as_of,
 		       log_topic, log_partition, log_offset
 		FROM portfolios WHERE portfolio_id = $1
 	`, string(id)).Scan(
-		(*string)(&rec.ID), &rec.DisplayName, &baseCur, &cash,
+		&rec.TenantID, (*string)(&rec.ID), &rec.DisplayName, &baseCur, &cash,
 		&tmv, &posCount, &asOf, &topic, &partition, &offset,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -279,7 +279,7 @@ func (p *Postgres) loadAppliedKeys(ctx context.Context, id v1.PortfolioID) ([]st
 // Three table scans grouped in memory rather than N+1 per-portfolio reads.
 func (p *Postgres) LoadAll(ctx context.Context) ([]PortfolioRecord, error) {
 	rows, err := p.pool.Query(ctx, `
-		SELECT portfolio_id, display_name, base_currency, cash_balance,
+		SELECT tenant_id, portfolio_id, display_name, base_currency, cash_balance,
 		       total_market_value, position_count, as_of,
 		       log_topic, log_partition, log_offset
 		FROM portfolios
@@ -301,7 +301,7 @@ func (p *Postgres) LoadAll(ctx context.Context) ([]PortfolioRecord, error) {
 			offset    *int64
 		)
 		if err := rows.Scan(
-			(*string)(&rec.ID), &rec.DisplayName, &baseCur, &cash,
+			&rec.TenantID, (*string)(&rec.ID), &rec.DisplayName, &baseCur, &cash,
 			&tmv, &posCount, &asOf, &topic, &partition, &offset,
 		); err != nil {
 			rows.Close()

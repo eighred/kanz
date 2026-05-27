@@ -97,7 +97,13 @@ type StateStore interface {
 // so operators can read resume coordinates without decoding — see the
 // migration.
 type PortfolioRecord struct {
-	ID               v1.PortfolioID
+	ID v1.PortfolioID
+	// TenantID is the owning tenant (MT-01d). On Save it is stamped by the
+	// store from the session GUC `app.tenant_id` and enforced by RLS, so a
+	// record is always written under the engine's authenticated tenant; on
+	// Load it is read back from the row. Empty on records built in-memory
+	// before persistence (FromPortfolio) — the DB is the authority.
+	TenantID         string
 	DisplayName      string
 	BaseCurrency     domain.CurrencyCode
 	CashBalance      *commonpb.Money
