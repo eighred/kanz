@@ -36,6 +36,7 @@ import (
 	risk "github.com/kanz-eng/kanz/internal/risk"
 	v1 "github.com/kanz-eng/kanz/internal/risk/api/v1"
 	"github.com/kanz-eng/kanz/internal/risk/compute"
+	"github.com/kanz-eng/kanz/internal/risk/compute/factor"
 	"github.com/kanz-eng/kanz/internal/risk/domain"
 	"github.com/kanz-eng/kanz/internal/risk/scenario"
 	"github.com/kanz-eng/kanz/internal/risk/state"
@@ -45,11 +46,12 @@ import (
 // Store, Cache, and Detector are each concurrency-safe, and the
 // Registry is immutable after construction.
 type EngineImpl struct {
-	store    *state.Store
-	registry *compute.Registry
-	cache    *risk.Cache
-	detector *risk.Detector
-	volModel compute.VolModel
+	store      *state.Store
+	registry   *compute.Registry
+	cache      *risk.Cache
+	detector   *risk.Detector
+	volModel   compute.VolModel
+	classifier factor.Classifier
 }
 
 // EngineOption customizes an EngineImpl at construction.
@@ -61,6 +63,13 @@ type EngineOption func(*EngineImpl)
 // pre-MODEL-01g behavior).
 func WithVolModel(vm compute.VolModel) EngineOption {
 	return func(e *EngineImpl) { e.volModel = vm }
+}
+
+// WithClassifier wires the MODEL-01f factor model so MODEL-01h SectorShocks in
+// EvaluateScenario resolve each position's sector. nil leaves SectorShocks as
+// silent no-ops.
+func WithClassifier(c factor.Classifier) EngineOption {
+	return func(e *EngineImpl) { e.classifier = c }
 }
 
 // New constructs an EngineImpl over the engine's collaborators. A nil
@@ -140,7 +149,11 @@ func (e *EngineImpl) EvaluateScenario(ctx context.Context, req v1.ScenarioReques
 		return v1.ScenarioResponse{}, v1.ErrPortfolioNotFound
 	}
 	compute.PopulateUncertainty(ctx, p, e.volModel)
-	projected := scenario.Evaluate(p, req.Shocks, e.registry)
+	var opts []scenario.Option
+	if e.classifier != nil {
+		opts = append(opts, scenario.WithClassifier(e.classifier))
+	}
+	projected := scenario.Evaluate(p, req.Shocks, e.registry, opts...)
 	// Flag against the underlying state's freshness: a scenario on stale
 	// state is itself stale, and the caller must see that signal.
 	_, flags := e.detector.Assess(p.AsOf())

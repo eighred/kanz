@@ -63,6 +63,31 @@ func (s ParallelShift) Description() string {
 	return fmt.Sprintf("parallel shift %s%%", formatDecimal(s.Pct))
 }
 
+// SectorShock applies a percentage change to every position whose
+// instrument classifies into the given sector — taxonomy + code, e.g.
+// {"GICS","40"} for financials (mirrors reference.v1.SectorClassification
+// and factor.Sector, but carried as plain strings because api/v1 is the
+// leaf package external callers import and cannot depend on the internal
+// factor package). Pct is the fractional change, same convention as
+// PriceShock.
+//
+// Sector membership is resolved at apply time against the factor model
+// the scenario engine is wired with (MODEL-01f). When no classifier is
+// wired the shock is a silent no-op — same degradation as an unknown
+// shock type. This is the building block for differentiated stress
+// scenarios (MODEL-01h): a 2008 replay shocks financials harder than
+// staples, which a ParallelShift cannot express.
+type SectorShock struct {
+	Taxonomy string
+	Code     string
+	Pct      *commonpb.Decimal
+}
+
+// Description satisfies ScenarioShock.
+func (s SectorShock) Description() string {
+	return fmt.Sprintf("sector shock %s:%s by %s%%", s.Taxonomy, s.Code, formatDecimal(s.Pct))
+}
+
 // formatDecimal is a tiny helper for Description strings — not
 // general-purpose Decimal formatting (that would belong in
 // common.v1 or a future text-format helper). Just enough to make

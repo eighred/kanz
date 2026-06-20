@@ -8,6 +8,7 @@ import (
 
 	v1 "github.com/kanz-eng/kanz/internal/risk/api/v1"
 	"github.com/kanz-eng/kanz/internal/risk/compute"
+	"github.com/kanz-eng/kanz/internal/risk/compute/factor"
 	"github.com/kanz-eng/kanz/internal/risk/domain"
 	"github.com/kanz-eng/kanz/internal/risk/scenario"
 )
@@ -186,3 +187,76 @@ func TestEvaluate_CustomRegistryUsed(t *testing.T) {
 type unknownShock struct{}
 
 func (unknownShock) Description() string { return "unknown" }
+
+// --- MODEL-01h SectorShock -------------------------------------------------
+
+// classifierFor builds a StaticClassifier mapping each instrument to a GICS
+// sector code.
+func classifierFor(m map[string]string) factor.StaticClassifier {
+	c := make(factor.StaticClassifier, len(m))
+	for inst, code := range m {
+		c[inst] = factor.Classification{Sector: factor.Sector{Taxonomy: "GICS", Code: code}}
+	}
+	return c
+}
+
+func TestEvaluate_SectorShockHitsOnlyMatchingSector(t *testing.T) {
+	// BANK in financials (40) drops 50%; TECH in IT (45) is untouched.
+	p := makePortfolio(
+		domain.Position{InstrumentID: "BANK", MarketValue: money(1000, 0, "USD"), AsOf: baseTime},
+		domain.Position{InstrumentID: "TECH", MarketValue: money(1000, 0, "USD"), AsOf: baseTime},
+	)
+	c := classifierFor(map[string]string{"BANK": "40", "TECH": "45"})
+	got := scenario.Evaluate(p, []v1.ScenarioShock{
+		v1.SectorShock{Taxonomy: "GICS", Code: "40", Pct: pct(-50, -2)},
+	}, nil, scenario.WithClassifier(c))
+
+	// Net: BANK 1000→500, TECH 1000 ⇒ 1500.
+	m, _ := got.Lookup(compute.MeasureNetExposure)
+	if v := decToFloat(m.Value); v != 1500 {
+		t.Errorf("NetExposure=%v want 1500 (only financials shocked)", v)
+	}
+}
+
+func TestEvaluate_SectorShockNoClassifierIsNoOp(t *testing.T) {
+	// Without a wired classifier the SectorShock cannot resolve membership,
+	// so it degrades to a silent no-op (same as an unknown shock).
+	p := makePortfolio(
+		domain.Position{InstrumentID: "BANK", MarketValue: money(1000, 0, "USD"), AsOf: baseTime},
+	)
+	got := scenario.Evaluate(p, []v1.ScenarioShock{
+		v1.SectorShock{Taxonomy: "GICS", Code: "40", Pct: pct(-50, -2)},
+	}, nil) // no WithClassifier
+	m, _ := got.Lookup(compute.MeasureNetExposure)
+	if v := decToFloat(m.Value); v != 1000 {
+		t.Errorf("NetExposure=%v want 1000 (no-op without classifier)", v)
+	}
+}
+
+func TestEvaluate_SectorShockSkipsUnclassifiedInstrument(t *testing.T) {
+	// MYSTERY isn't in the classifier ⇒ not a member of any shocked sector.
+	p := makePortfolio(
+		domain.Position{InstrumentID: "MYSTERY", MarketValue: money(1000, 0, "USD"), AsOf: baseTime},
+	)
+	c := classifierFor(map[string]string{"BANK": "40"})
+	got := scenario.Evaluate(p, []v1.ScenarioShock{
+		v1.SectorShock{Taxonomy: "GICS", Code: "40", Pct: pct(-50, -2)},
+	}, nil, scenario.WithClassifier(c))
+	m, _ := got.Lookup(compute.MeasureNetExposure)
+	if v := decToFloat(m.Value); v != 1000 {
+		t.Errorf("NetExposure=%v want 1000 (unclassified untouched)", v)
+	}
+}
+
+// decToFloat is a tiny numeric reader for the Decimal-representation-agnostic
+// assertions above (ShockMoney changes the exponent, see the PriceShock test).
+func decToFloat(d *commonpb.Decimal) float64 {
+	f := float64(d.Coefficient)
+	for e := d.Exponent; e < 0; e++ {
+		f /= 10
+	}
+	for e := d.Exponent; e > 0; e-- {
+		f *= 10
+	}
+	return f
+}
