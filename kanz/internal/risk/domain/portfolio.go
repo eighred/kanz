@@ -249,10 +249,9 @@ type Position struct {
 	//
 	// The wire proto (domain.v1.PositionState) does not yet carry a
 	// matching field; the engine populates this from staleness
-	// signals (RISK-11) or a future per-instrument uncertainty
-	// source. Until then, real engine output has UncertaintyAbs nil
-	// across the board and the propagation paths shipped in RISK-08
-	// are exercised by tests.
+	// signals (RISK-11) or, since MODEL-01g, from the volatility model
+	// (compute.PopulateUncertainty fills it with |MarketValue| × σ at
+	// each snapshot boundary when a vol model is wired).
 	MarketValueUncertainty *commonpb.Money
 	// RealizedPnL is cumulative realized profit and loss over the
 	// position's life; UnrealizedPnL is the mark-to-market gain/loss

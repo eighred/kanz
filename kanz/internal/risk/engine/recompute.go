@@ -55,6 +55,7 @@ type Recomputer struct {
 	debounce  time.Duration
 	logger    *slog.Logger
 	metrics   *Metrics
+	volModel  compute.VolModel
 
 	// baseCtx scopes publishes + the worker; when it is canceled (hard
 	// shutdown) the worker exits and in-flight recomputes skip the publish.
@@ -77,6 +78,15 @@ type RecomputerOption func(*Recomputer)
 // the kanz_risk_recompute_* series the CICD-01e canary gates on.
 func WithMetrics(m *Metrics) RecomputerOption {
 	return func(r *Recomputer) { r.metrics = m }
+}
+
+// WithRecomputeVolModel wires the MODEL-01g volatility model so each recompute
+// enriches the snapshot's positions with a real MarketValueUncertainty band
+// (RISK-08) before deriving + publishing exposure/measures. nil leaves every
+// band nil. (Distinct from the query path's engine.WithVolModel — same model,
+// two construction seams.)
+func WithRecomputeVolModel(vm compute.VolModel) RecomputerOption {
+	return func(r *Recomputer) { r.volModel = vm }
 }
 
 // NewRecomputer constructs a Recomputer and starts its worker goroutine.
@@ -258,6 +268,7 @@ func (r *Recomputer) recompute(id v1.PortfolioID) {
 		return // portfolio retired between trigger and fire — not a recompute
 	}
 	start := time.Now()
+	compute.PopulateUncertainty(r.baseCtx, p, r.volModel)
 	es := compute.ComputeExposure(p)
 	ms := compute.ComputeMeasures(p, r.registry, nil)
 	r.cache.StoreExposure(id, es)

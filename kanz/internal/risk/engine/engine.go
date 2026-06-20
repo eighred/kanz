@@ -49,13 +49,29 @@ type EngineImpl struct {
 	registry *compute.Registry
 	cache    *risk.Cache
 	detector *risk.Detector
+	volModel compute.VolModel
+}
+
+// EngineOption customizes an EngineImpl at construction.
+type EngineOption func(*EngineImpl)
+
+// WithVolModel wires the MODEL-01g volatility model so each snapshot's
+// positions are enriched with a real MarketValueUncertainty band before
+// compute, feeding the RISK-08 propagation. nil leaves every band nil (the
+// pre-MODEL-01g behavior).
+func WithVolModel(vm compute.VolModel) EngineOption {
+	return func(e *EngineImpl) { e.volModel = vm }
 }
 
 // New constructs an EngineImpl over the engine's collaborators. A nil
 // registry delegates to compute.DefaultRegistry (parity with
 // compute.ComputeMeasures); store, cache, and detector are required.
-func New(store *state.Store, registry *compute.Registry, cache *risk.Cache, detector *risk.Detector) *EngineImpl {
-	return &EngineImpl{store: store, registry: registry, cache: cache, detector: detector}
+func New(store *state.Store, registry *compute.Registry, cache *risk.Cache, detector *risk.Detector, opts ...EngineOption) *EngineImpl {
+	e := &EngineImpl{store: store, registry: registry, cache: cache, detector: detector}
+	for _, opt := range opts {
+		opt(e)
+	}
+	return e
 }
 
 // Exposure implements v1.Engine. Computes live from the latest applied
@@ -70,7 +86,7 @@ func (e *EngineImpl) Exposure(ctx context.Context, req v1.ExposureRequest) (v1.E
 		return v1.ExposureResponse{}, v1.ErrInvalidRequest
 	}
 
-	es, ok := e.exposureSet(req.PortfolioID)
+	es, ok := e.exposureSet(ctx, req.PortfolioID)
 	if !ok {
 		return v1.ExposureResponse{}, v1.ErrPortfolioNotFound
 	}
@@ -94,7 +110,7 @@ func (e *EngineImpl) Measures(ctx context.Context, req v1.MeasuresRequest) (v1.M
 		return v1.MeasuresResponse{}, v1.ErrInvalidRequest
 	}
 
-	full, ok := e.measureSet(req.PortfolioID)
+	full, ok := e.measureSet(ctx, req.PortfolioID)
 	if !ok {
 		return v1.MeasuresResponse{}, v1.ErrPortfolioNotFound
 	}
@@ -123,6 +139,7 @@ func (e *EngineImpl) EvaluateScenario(ctx context.Context, req v1.ScenarioReques
 	if !found {
 		return v1.ScenarioResponse{}, v1.ErrPortfolioNotFound
 	}
+	compute.PopulateUncertainty(ctx, p, e.volModel)
 	projected := scenario.Evaluate(p, req.Shocks, e.registry)
 	// Flag against the underlying state's freshness: a scenario on stale
 	// state is itself stale, and the caller must see that signal.
@@ -147,8 +164,9 @@ func (e *EngineImpl) Health(ctx context.Context) (v1.Health, error) {
 // exposureSet returns the live-computed-and-cached exposure, or the
 // last-known-good cached value on a store miss. The bool is false only
 // when neither the store nor the cache knows the portfolio.
-func (e *EngineImpl) exposureSet(id v1.PortfolioID) (*domain.ExposureSet, bool) {
+func (e *EngineImpl) exposureSet(ctx context.Context, id v1.PortfolioID) (*domain.ExposureSet, bool) {
 	if p, found := e.store.Snapshot(id); found {
+		compute.PopulateUncertainty(ctx, p, e.volModel)
 		es := compute.ComputeExposure(p)
 		e.cache.StoreExposure(id, es)
 		return es, true
@@ -157,8 +175,9 @@ func (e *EngineImpl) exposureSet(id v1.PortfolioID) (*domain.ExposureSet, bool) 
 }
 
 // measureSet mirrors exposureSet for the full measure set.
-func (e *EngineImpl) measureSet(id v1.PortfolioID) (*domain.MeasureSet, bool) {
+func (e *EngineImpl) measureSet(ctx context.Context, id v1.PortfolioID) (*domain.MeasureSet, bool) {
 	if p, found := e.store.Snapshot(id); found {
+		compute.PopulateUncertainty(ctx, p, e.volModel)
 		ms := compute.ComputeMeasures(p, e.registry, nil)
 		e.cache.StoreMeasures(id, ms)
 		return ms, true
