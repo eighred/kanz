@@ -1,0 +1,175 @@
+syntax = "proto3";
+
+// Package reference.v1 defines instrument master (reference) data and the
+// historical price/return series that the real risk-analytics plane (MODEL-01)
+// is built on. Unlike the high-volume hot path in market.v1, reference data is
+// slowly-changing and read point-in-time-correct — the VaR/factor models close
+// over a historical-returns provider (MODEL-01c) and an instrument→sector
+// lookup (MODEL-01f) sourced from here.
+//
+// reference.v1 is a payload package, not a streaming domain: it carries no new
+// {domain}.{entity}.{event_type} name of its own. How instrument reference and
+// price history are ingested and stored is MODEL-01b's concern (time-series
+// store, point-in-time reads).
+package reference.v1;
+
+import "google/protobuf/timestamp.proto";
+
+// InstrumentReference is the static master record for one tradable instrument —
+// the identifiers, classification, and denomination an analytic needs but that
+// must never be inlined into the market.v1 hot path. It is keyed by the same
+// canonical instrument_id that market data and the envelope partition_key use,
+// so a price tick joins to its reference record with no translation.
+//
+// Reference data is slowly-changing: as_of versions a snapshot so a backtest
+// can read the classification that was in effect at a past time rather than
+// today's (sector reclassifications, currency redenominations).
+message InstrumentReference {
+  // instrument_id is the canonical Kanz instrument identifier — the same id
+  // carried by market.v1.MarketDataEvent and the envelope partition_key.
+  // Required.
+  string instrument_id = 1;
+
+  // symbol is the primary human-readable ticker (e.g. "AAPL"). Advisory;
+  // instrument_id is authoritative. Required.
+  string symbol = 2;
+
+  // identifiers are the external/cross-vendor identifiers (ISIN, CUSIP, FIGI,
+  // ...) this instrument is also known by. Required.
+  InstrumentIdentifiers identifiers = 3;
+
+  // asset_class is the top-level instrument category — the ASSET_CLASS exposure
+  // dimension (domain.v1.ExposureDimension) and a primary factor-model input.
+  // Required; must not be ASSET_CLASS_UNSPECIFIED.
+  AssetClass asset_class = 4;
+
+  // sector is the industry classification (GICS/ICB/...) — the source of the
+  // SECTOR exposure dimension and the instrument→sector lookup MODEL-01f's
+  // factor model needs. Optional for instruments with no sector (FX, rates).
+  SectorClassification sector = 5;
+
+  // currency_code is the ISO 4217 alphabetic code the instrument is denominated
+  // in (e.g. "USD"). Drives the CURRENCY exposure dimension. Required.
+  string currency_code = 6;
+
+  // primary_mic is the ISO 10383 Market Identifier Code of the instrument's
+  // primary listing venue (e.g. "XNAS"). Distinct from a trade's venue MIC,
+  // which is per-event in market.v1. Required for listed instruments.
+  string primary_mic = 7;
+
+  // issuer_id is the canonical identifier of the issuing entity, for the ISSUER
+  // (single-name concentration) exposure dimension. May be empty (e.g. FX,
+  // broad-index instruments).
+  string issuer_id = 8;
+
+  // description is the human-readable instrument name (e.g. "Apple Inc. Common
+  // Stock"). Advisory.
+  string description = 9;
+
+  // status is the instrument's lifecycle state — a delisted/matured instrument
+  // is excluded from new exposure but retained for historical replay.
+  InstrumentStatus status = 10;
+
+  // as_of is the effective time of this reference snapshot. Point-in-time reads
+  // select the latest record with as_of <= the query time, so a past backtest
+  // sees the classification in effect then, not today's. Required.
+  google.protobuf.Timestamp as_of = 11;
+}
+
+// InstrumentIdentifiers holds the external identifiers an instrument is known by
+// across vendors and regulators. Each field is a distinct identifier scheme — a
+// closed, meaningful set rather than an opaque map — so consumers can resolve by
+// a specific scheme without string-keyed lookups. Any field may be empty when
+// the scheme does not apply.
+message InstrumentIdentifiers {
+  // isin is the ISO 6166 International Securities Identification Number.
+  string isin = 1;
+
+  // cusip is the North American CUSIP (9 chars).
+  string cusip = 2;
+
+  // sedol is the UK/Ireland SEDOL (7 chars).
+  string sedol = 3;
+
+  // figi is the Bloomberg/OpenFIGI Financial Instrument Global Identifier.
+  string figi = 4;
+
+  // ric is the Refinitiv Instrument Code. Advisory (vendor-proprietary).
+  string ric = 5;
+
+  // bloomberg_ticker is the Bloomberg ticker (e.g. "AAPL US Equity"). Advisory.
+  string bloomberg_ticker = 6;
+}
+
+// SectorClassification is an instrument's industry classification within a named
+// taxonomy. It is structured (taxonomy + code) rather than a bare string so the
+// SECTOR exposure bucket — which domain.v1 encodes as "GICS:45" — is built from
+// the two parts without parsing.
+message SectorClassification {
+  // taxonomy is the classification scheme (e.g. "GICS", "ICB", "NAICS").
+  // Required.
+  string taxonomy = 1;
+
+  // code is the scheme-specific code (e.g. GICS "45" for the sector level,
+  // "4510" for an industry group). Required.
+  string code = 2;
+
+  // name is the human-readable classification label (e.g. "Information
+  // Technology"). Advisory.
+  string name = 3;
+}
+
+// AssetClass is an instrument's top-level category. Additive — new classes are
+// appended as new values, never repurposed (schema-evolution §4).
+enum AssetClass {
+  // Default zero value; never set explicitly on a reference record.
+  ASSET_CLASS_UNSPECIFIED = 0;
+
+  // Listed equity (common/preferred shares, ADRs).
+  ASSET_CLASS_EQUITY = 1;
+
+  // Cash bonds and notes (govvies, corporates).
+  ASSET_CLASS_FIXED_INCOME = 2;
+
+  // Physical/commodity exposure.
+  ASSET_CLASS_COMMODITY = 3;
+
+  // Foreign-exchange spot/forward pairs.
+  ASSET_CLASS_FX = 4;
+
+  // Interest-rate products (swaps, futures, deposits).
+  ASSET_CLASS_RATE = 5;
+
+  // Credit products (CDS, credit indices).
+  ASSET_CLASS_CREDIT = 6;
+
+  // Pooled vehicles (ETFs, mutual funds).
+  ASSET_CLASS_FUND = 7;
+
+  // Exchange-traded or OTC derivatives (options, futures, swaps).
+  ASSET_CLASS_DERIVATIVE = 8;
+
+  // Digital assets.
+  ASSET_CLASS_CRYPTO = 9;
+
+  // Cash and cash equivalents.
+  ASSET_CLASS_CASH = 10;
+}
+
+// InstrumentStatus is an instrument's lifecycle state. Additive.
+enum InstrumentStatus {
+  // Default zero value; never set explicitly.
+  INSTRUMENT_STATUS_UNSPECIFIED = 0;
+
+  // Actively trading.
+  INSTRUMENT_STATUS_ACTIVE = 1;
+
+  // Temporarily not trading (halted, suspended) but not removed.
+  INSTRUMENT_STATUS_INACTIVE = 2;
+
+  // Permanently removed from its listing venue.
+  INSTRUMENT_STATUS_DELISTED = 3;
+
+  // Reached maturity/expiry (bonds, dated derivatives).
+  INSTRUMENT_STATUS_MATURED = 4;
+}

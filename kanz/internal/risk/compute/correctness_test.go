@@ -106,11 +106,16 @@ func TestProperty_GrossNonNegative(t *testing.T) {
 }
 
 // VaR99 / GrossExposure = 0.01 exactly (within precision) — the
-// RISK-07 placeholder formula. A regression that decouples them
-// (e.g. a real VaR model that doesn't match the placeholder
-// scale) should INTENTIONALLY break this test, which is the
-// failure-as-documentation signal that VaR is no longer the
-// placeholder.
+// RISK-07 placeholder formula. This pins compute.VaR99, which since
+// MODEL-01d is the no-market-data FALLBACK only: the real historical-
+// simulation model (internal/risk/compute/var, varmodel.Historical)
+// replaces it in the engine registry and intentionally does NOT satisfy
+// this property — that decoupling is pinned by
+// varmodel.TestHistorical_DecouplesFromGrossPlaceholder, the
+// failure-as-documentation that VaR is no longer the placeholder. This
+// test stays green because the placeholder still backs DefaultRegistry
+// (compute cannot import varmodel — the provider-backed model can only be
+// registered by the engine).
 func TestProperty_VaR99IsOnePercentOfGross(t *testing.T) {
 	for seed := int64(1); seed <= propertyIters; seed++ {
 		rng := rand.New(rand.NewSource(seed))

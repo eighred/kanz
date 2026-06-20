@@ -1,0 +1,147 @@
+syntax = "proto3";
+
+// Price/return history for the real risk-analytics plane (MODEL-01). These are
+// the slowly-built historical series the historical-simulation VaR (MODEL-01d),
+// Monte-Carlo factor model (MODEL-01e), and volatility/covariance path
+// (MODEL-01g) read — never the market.v1 hot path, which is per-tick and
+// self-contained. The historical-returns provider (MODEL-01c) closes over these
+// series and is injected into the VaR MeasureFuncs.
+package reference.v1;
+
+import "google/protobuf/timestamp.proto";
+import "common/v1/decimal.proto";
+
+// PriceObservation is a single marked price on an instrument's historical
+// series. It is bitemporal: observation_time is the time the price *applies to*
+// (the close it marks), knowledge_time is when that value *became known* to
+// Kanz. Point-in-time-correct reads (MODEL-01i, no future leakage) filter on
+// knowledge_time <= query_time so a backtest as of T never sees a correction
+// that arrived after T.
+message PriceObservation {
+  // instrument_id is the canonical Kanz instrument identifier — joins to
+  // reference.v1.InstrumentReference and market.v1. Required.
+  string instrument_id = 1;
+
+  // observation_time is the domain time the price applies to (e.g. the session
+  // close for an end-of-day mark). The series' ordering axis. Required.
+  google.protobuf.Timestamp observation_time = 2;
+
+  // price is the marked price, exact (the exact-Decimal rule applies — this is
+  // a price, not a statistic). Required.
+  common.v1.Decimal price = 3;
+
+  // kind disambiguates which price this is (close, adjusted close, settlement,
+  // ...). Required; must not be PRICE_KIND_UNSPECIFIED.
+  PriceKind kind = 4;
+
+  // currency_code is the ISO 4217 code the price is quoted in. Required.
+  string currency_code = 5;
+
+  // knowledge_time is when this value became known to Kanz — the bitemporal
+  // "as-recorded" axis. For an original observation it equals the ingestion
+  // time; a later restatement (corporate action, vendor correction) carries the
+  // same observation_time with a newer knowledge_time. Required for
+  // point-in-time correctness; defaults to observation_time when the source
+  // provides no separate recording time.
+  google.protobuf.Timestamp knowledge_time = 6;
+}
+
+// ReturnObservation is a single period return derived from the price series —
+// the direct input to historical-simulation VaR. The value is a dimensionless
+// ratio, so `double` is used (per EVT-14, the exact-Decimal rule covers
+// money/prices/sizes, not derived statistics); a return is a statistical
+// quantity that feeds the risk models, not a settleable amount.
+message ReturnObservation {
+  // instrument_id is the canonical Kanz instrument identifier. Required.
+  string instrument_id = 1;
+
+  // period_start / period_end bound the return period — period_start is the
+  // exclusive base, period_end the as-of. For a daily return these are
+  // consecutive session closes. Both required.
+  google.protobuf.Timestamp period_start = 2;
+  google.protobuf.Timestamp period_end = 3;
+
+  // method is how the return was computed (simple vs log) — a series must not
+  // mix the two. Required; must not be RETURN_METHOD_UNSPECIFIED.
+  ReturnMethod method = 4;
+
+  // value is the return over [period_start, period_end] as a dimensionless
+  // ratio (0.012 == +1.2%). Required.
+  double value = 5;
+
+  // knowledge_time is when this return became known — inherited from the latest
+  // knowledge_time of the prices it was derived from, so a corrected price
+  // propagates to a corrected return under the same point-in-time filter.
+  // Required.
+  google.protobuf.Timestamp knowledge_time = 6;
+}
+
+// PriceHistory carries an instrument's price series under a single envelope —
+// the reference-data analogue of market.v1.MarketDataBatch.
+message PriceHistory {
+  // instrument_id is shared by every observation and equals the envelope
+  // partition_key, so per-partition ordering holds. Required.
+  string instrument_id = 1;
+
+  // observations is the series, ordered by non-decreasing observation_time.
+  // Non-empty.
+  repeated PriceObservation observations = 2;
+
+  // currency_code is the ISO 4217 code the whole series is quoted in — advisory
+  // summary; each observation also carries its own. Required.
+  string currency_code = 3;
+}
+
+// ReturnSeries carries an instrument's derived return series under a single
+// envelope. Every return shares one method.
+message ReturnSeries {
+  // instrument_id is shared by every return and equals the envelope
+  // partition_key. Required.
+  string instrument_id = 1;
+
+  // returns is the series, ordered by non-decreasing period_end. Non-empty.
+  repeated ReturnObservation returns = 2;
+
+  // method is the return convention shared by the whole series. Required.
+  ReturnMethod method = 3;
+}
+
+// PriceKind disambiguates which price an observation marks. Additive.
+enum PriceKind {
+  // Default zero value; never set explicitly.
+  PRICE_KIND_UNSPECIFIED = 0;
+
+  // Raw session close.
+  PRICE_KIND_CLOSE = 1;
+
+  // Close adjusted for corporate actions (splits, dividends) — the series VaR
+  // returns are normally derived from.
+  PRICE_KIND_ADJUSTED_CLOSE = 2;
+
+  // Session open.
+  PRICE_KIND_OPEN = 3;
+
+  // Volume-weighted average price over the session.
+  PRICE_KIND_VWAP = 4;
+
+  // Mid of the bid/ask at the mark time.
+  PRICE_KIND_MID = 5;
+
+  // Exchange settlement price (futures/options).
+  PRICE_KIND_SETTLEMENT = 6;
+
+  // Last transacted (trade) price — the mark a single trade event carries.
+  PRICE_KIND_LAST = 7;
+}
+
+// ReturnMethod is the return-computation convention. Additive.
+enum ReturnMethod {
+  // Default zero value; never set explicitly.
+  RETURN_METHOD_UNSPECIFIED = 0;
+
+  // Simple return: (p_t - p_{t-1}) / p_{t-1}.
+  RETURN_METHOD_SIMPLE = 1;
+
+  // Log return: ln(p_t / p_{t-1}) — additive across time, the usual VaR input.
+  RETURN_METHOD_LOG = 2;
+}

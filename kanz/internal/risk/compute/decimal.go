@@ -198,3 +198,13 @@ func addMoney(a, b *commonpb.Money) *commonpb.Money {
 		CurrencyCode: a.CurrencyCode,
 	}
 }
+
+// AddMoney / AbsMoney / ZeroMoney export the canonical money arithmetic for
+// sibling packages that bucket exposures (MODEL-01f factor.SectorExposure)
+// without forking the exponent-alignment + sign rules — keeping the single
+// point of truth this package's doc insists on. Same same-currency contract as
+// addMoney: callers ensure currencies match (factor bucketing restricts to the
+// base currency, like the RISK-07 measures).
+func AddMoney(a, b *commonpb.Money) *commonpb.Money { return addMoney(a, b) }
+func AbsMoney(m *commonpb.Money) *commonpb.Money    { return absMoney(m) }
+func ZeroMoney(currency string) *commonpb.Money     { return zeroMoney(currency) }
