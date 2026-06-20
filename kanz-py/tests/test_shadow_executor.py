@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
 
 import pytest
 from google.protobuf.timestamp_pb2 import Timestamp
@@ -11,7 +12,7 @@ from google.protobuf.timestamp_pb2 import Timestamp
 from inference.v1.feature_vector_pb2 import FeatureValue, FeatureVector
 from inference.v1.prediction_pb2 import PredictionEnvelope, PredictionMode
 
-from kanz_inference.registry import ModelMetadata, Registry
+from kanz_inference.registry import ModelMetadata, Registry, ValidationRecord
 from kanz_inference.shadow import (
     LoggingShadowObserver,
     ShadowExecutor,
@@ -96,6 +97,20 @@ def _meta(model_id: str, feature_set_ref: str = "equity-momentum:7") -> ModelMet
     )
 
 
+def _register_primary(r: Registry, meta: ModelMetadata, model) -> None:
+    """Record a passing validation then register primary — required by the
+    MLOPS-01a gate. Shadows (primary=False) stay exempt and register directly."""
+    now = datetime.now(timezone.utc)
+    r.record_validation(
+        ValidationRecord(
+            model_id=meta.model_id,
+            validated_at=now,
+            expires_at=now + timedelta(days=365),
+        )
+    )
+    r.register(meta, model)
+
+
 def _fv(subject: str = "AAPL", feature_set_ref: str = "equity-momentum:7") -> FeatureVector:
     fv = FeatureVector()
     fv.subject_id = subject
@@ -120,7 +135,7 @@ async def test_predict_returns_primary_prediction():
     r = Registry()
     primary_meta = _meta("primary@1.0.0")
     primary_model = StubModel(primary_meta.model_id, value=0.73)
-    r.register(primary_meta, primary_model)
+    _register_primary(r, primary_meta, primary_model)
 
     exe = ShadowExecutor(r)
     got = await exe.predict(_fv("AAPL"))
@@ -146,7 +161,7 @@ async def test_shadows_called_with_same_feature_vector():
     primary = StubModel("primary@1.0.0", value=0.5)
     shadow_a = StubModel("shadow-a@0.1.0", value=0.6)
     shadow_b = StubModel("shadow-b@0.1.0", value=0.7)
-    r.register(_meta("primary@1.0.0"), primary)
+    _register_primary(r, _meta("primary@1.0.0"), primary)
     r.register(_meta("shadow-a@0.1.0"), shadow_a, primary=False)
     r.register(_meta("shadow-b@0.1.0"), shadow_b, primary=False)
 
@@ -167,7 +182,7 @@ async def test_shadows_called_with_same_feature_vector():
 
 async def test_observer_records_primary_shadow_pairs():
     r = Registry()
-    r.register(_meta("primary@1.0.0"), StubModel("primary@1.0.0", value=1.0))
+    _register_primary(r, _meta("primary@1.0.0"), StubModel("primary@1.0.0", value=1.0))
     r.register(_meta("shadow-a@0.1.0"), StubModel("shadow-a@0.1.0", value=1.5), primary=False)
     r.register(_meta("shadow-b@0.1.0"), StubModel("shadow-b@0.1.0", value=0.5), primary=False)
 
@@ -189,7 +204,7 @@ async def test_observer_records_primary_shadow_pairs():
 
 async def test_shadow_exception_does_not_affect_primary_response():
     r = Registry()
-    r.register(_meta("primary@1.0.0"), StubModel("primary@1.0.0", value=0.42))
+    _register_primary(r, _meta("primary@1.0.0"), StubModel("primary@1.0.0", value=0.42))
     r.register(
         _meta("broken-shadow@0.1.0"),
         StubModel("broken-shadow@0.1.0", exc=RuntimeError("shadow boom")),
@@ -212,7 +227,7 @@ async def test_shadow_exception_does_not_affect_primary_response():
 
 async def test_observer_exception_does_not_affect_primary_response():
     r = Registry()
-    r.register(_meta("primary@1.0.0"), StubModel("primary@1.0.0", value=0.42))
+    _register_primary(r, _meta("primary@1.0.0"), StubModel("primary@1.0.0", value=0.42))
     r.register(_meta("shadow@0.1.0"), StubModel("shadow@0.1.0", value=0.43), primary=False)
 
     observer = RecordingObserver(raise_on_observe=RuntimeError("observer boom"))
@@ -228,7 +243,7 @@ async def test_observer_exception_does_not_affect_primary_response():
 
 async def test_no_shadows_means_no_observer_calls():
     r = Registry()
-    r.register(_meta("primary@1.0.0"), StubModel("primary@1.0.0", value=0.5))
+    _register_primary(r, _meta("primary@1.0.0"), StubModel("primary@1.0.0", value=0.5))
 
     observer = RecordingObserver()
     exe = ShadowExecutor(r, observer=observer)
@@ -247,7 +262,7 @@ async def test_shadows_fire_after_primary_returns():
     # making shadow.predict block forever and confirming the primary
     # call returns immediately.
     r = Registry()
-    r.register(_meta("primary@1.0.0"), StubModel("primary@1.0.0", value=0.5))
+    _register_primary(r, _meta("primary@1.0.0"), StubModel("primary@1.0.0", value=0.5))
     shadow_hold = asyncio.Event()  # never set ⇒ shadow blocks forever
     r.register(
         _meta("slow-shadow@0.1.0"),
@@ -269,8 +284,8 @@ async def test_routes_by_feature_set_ref():
     # Two feature_sets, two primaries. ShadowExecutor routes per-call
     # based on the inbound feature_set_ref.
     r = Registry()
-    r.register(_meta("equity-model@1", "equity-momentum:7"), StubModel("equity-model@1", value=1.0))
-    r.register(_meta("fixed-model@1", "fixed-income:3"), StubModel("fixed-model@1", value=2.0))
+    _register_primary(r, _meta("equity-model@1", "equity-momentum:7"), StubModel("equity-model@1", value=1.0))
+    _register_primary(r, _meta("fixed-model@1", "fixed-income:3"), StubModel("fixed-model@1", value=2.0))
 
     exe = ShadowExecutor(r)
     eq = await exe.predict(_fv(feature_set_ref="equity-momentum:7"))

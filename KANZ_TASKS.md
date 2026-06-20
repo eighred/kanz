@@ -110,7 +110,7 @@ _Objective: replace the RISK-07 placeholder measures (VaR=1%×gross, Delta=net) 
 
 _Objective: no model serves production without recorded validation; drift auto-triggers revalidation; every prediction is explainable. SR 11-7 / model-risk compliance (ROI #13). Scaffolding already exists — PRED-09 registry, PRED-10 shadow/canary, PRED-02 confidence/degraded, DATA-04 drift._
 
-- [ ] **MLOPS-01a** Add a validation-status gate to the PRED-09 `Registry`: a model cannot be registered `primary` without a recorded, non-expired validation record · `kanz-py/kanz_inference/registry/`
+- [x] **MLOPS-01a** Add a validation-status gate to the PRED-09 `Registry`: a model cannot be registered `primary` without a recorded, non-expired validation record · `kanz-py/kanz_inference/registry/` — _(see DONE)_
 - [ ] **MLOPS-01b** Validation suite: holdout/backtest metrics, calibration check (feeds PRED-02 §2.3 per-model `confidence_threshold` — uncalibrated ⇒ always DEGRADED), stability/bias · `kanz-py/kanz_inference/validation/`
 - [ ] **MLOPS-01c** Drift→revalidation loop: a DATA-07 `drift_detected` event for a model's feature triggers an automated revalidation/retrain signal · `kanz-py/kanz_inference/governance/drift_trigger.py`
 - [ ] **MLOPS-01d** Explainability: populate `PredictionEnvelope.explanation` (SHAP-style per-feature contributions — the field already exists in PRED-01) on the inference path · `kanz-py/kanz_inference/explain/`
@@ -260,6 +260,10 @@ _(prior context — **AUTH-01 + MT-01 epics COMPLETE**. MT-01a–g all in DONE: 
 ---
 
 ## DONE
+
+### Model Validation, Explainability & Governance (MLOps)
+
+- [x] **MLOPS-01a** Validation-status gate on the PRED-09 `Registry` — `kanz-py/kanz_inference/registry/registry.py` (+`__init__.py` exports). **SR 11-7 / model-risk gate: no model serves production without recorded, current validation.** New `ValidationRecord(model_id, validated_at, expires_at, passed=True, report_uri="")` (frozen) with `is_valid(now) = passed and expires_at > now` — a validation is *current*, not an open-ended sign-off (the revalidation-cadence the policy mandates). `Registry.record_validation(record)` stores latest-per-model (a revalidation supersedes; failing records kept as audit evidence but never satisfy the gate); `validation_for(model_id)` reads it back for health/audit + MLOPS-01e promotion. **`register(..., primary=True)` is gated**: requires a recorded, non-expired, passing record for `metadata.model_id` else raises **`ValidationError(ValueError)`** (subclasses ValueError so existing reject-as-ValueError callers keep working, while promotion code can catch the gate specifically). **The gate runs after input validation, before any mutation** (a blocked register leaves the registry untouched) and **re-runs on every primary register** incl. hot-reload (an expired validation blocks re-registration). **Shadows are exempt** (`primary=False`): a shadow is under evaluation, not serving — and shadow eval is what *produces* the validation evidence (PRED-10), so the gate bites exactly at promotion-to-primary. Clock injected via `Registry(clock=...)` so the expiry boundary is deterministically testable; defaults to UTC now. Existing PRED-09/PRED-10 tests updated to record a passing validation before primary registration (new `_register_primary` helpers); +12 gate tests: blocked-without/expired/failed validation, valid succeeds, shadow exempt, wrong-model's-validation doesn't count, latest-wins, ValidationError isa ValueError, injected-clock boundary, hot-reload re-check after expiry. Full kanz-py suite 171 passed / 3 skipped · `kanz-py/kanz_inference/registry/`
 
 ### Real Risk Analytics & Market Data Plane
 

@@ -35,9 +35,59 @@ two simple, intent-revealing lookup methods.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Protocol
+from datetime import datetime, timezone
+from typing import Callable, Protocol
 
 from kanz_inference.streaming.worker import Model
+
+
+class ValidationError(ValueError):
+    """Raised when a model cannot be registered ``primary`` because it
+    has no recorded, non-expired, passing validation (MLOPS-01a).
+
+    Subclasses ``ValueError`` so callers that already treat a rejected
+    ``register`` as a ``ValueError`` keep working, while code that cares
+    about the model-risk gate specifically (MLOPS-01e promotion) can
+    catch ``ValidationError`` on its own."""
+
+
+@dataclass(frozen=True)
+class ValidationRecord:
+    """A recorded model-validation outcome (MLOPS-01a) — the evidence
+    the registry's primary gate requires (SR 11-7 / model-risk: no model
+    serves production without recorded, current validation).
+
+    MLOPS-01b's validation suite produces these; the registry only reads
+    them. ``frozen=True`` so it's hashable and safe to share.
+    """
+
+    model_id: str
+    """The model this record validates — matches ModelMetadata.model_id."""
+
+    validated_at: datetime
+    """When the validation ran. UTC-aware; for audit/traceability."""
+
+    expires_at: datetime
+    """When the validation lapses and a revalidation is required. UTC-
+    aware. A validation is current only while ``now < expires_at`` — the
+    revalidation cadence model-risk policy mandates, not an open-ended
+    sign-off."""
+
+    passed: bool = True
+    """The validation outcome. A failed validation is recorded (audit)
+    but never satisfies the primary gate."""
+
+    report_uri: str = ""
+    """Where the full validation report lives (e.g.
+    ``"s3://kanz-models/vol-forecast/1.4.2/validation.json"``) — for
+    traceability only, like ModelMetadata.artifact_uri; the registry
+    does not fetch it."""
+
+    def is_valid(self, now: datetime) -> bool:
+        """True when this validation both passed and has not expired as
+        of ``now`` (UTC-aware). The exact predicate the primary gate
+        applies."""
+        return self.passed and self.expires_at > now
 
 
 @dataclass(frozen=True)
@@ -97,13 +147,18 @@ class Registry:
     register calls under threads would race the inner dicts.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, *, clock: Callable[[], datetime] | None = None) -> None:
         # Single map by model_id, plus index by feature_set_ref →
         # (primary_model_id, [shadow_model_ids]). The redundancy
         # keeps both lookups O(1) without iterating.
         self._by_id: dict[str, tuple[ModelMetadata, Model]] = {}
         self._primary_for_fs: dict[str, str] = {}
         self._shadows_for_fs: dict[str, list[str]] = {}
+        # MLOPS-01a: recorded validation outcomes, latest-per-model. The
+        # primary gate reads this; record_validation writes it.
+        self._validations: dict[str, ValidationRecord] = {}
+        # Injectable so the expiry check is testable; defaults to UTC now.
+        self._clock = clock or (lambda: datetime.now(timezone.utc))
 
     def register(
         self,
@@ -120,6 +175,14 @@ class Registry:
 
         Registering the same ``model_id`` twice replaces the
         entry. Use this for hot-reload of a model artifact.
+
+        MLOPS-01a: a ``primary`` registration is gated — the model must
+        have a recorded, non-expired, passing ``ValidationRecord``
+        (record it via ``record_validation`` first) or this raises
+        ``ValidationError``. Shadows are exempt: a shadow is under
+        evaluation, not serving, and shadow evaluation is what produces
+        the validation evidence in the first place. The gate therefore
+        bites exactly at promotion-to-primary.
         """
         if not metadata.model_id:
             raise ValueError("ModelMetadata.model_id required")
@@ -136,6 +199,15 @@ class Registry:
         if model is None:
             raise ValueError("model required")
 
+        if primary:
+            record = self._validations.get(metadata.model_id)
+            if record is None or not record.is_valid(self._clock()):
+                raise ValidationError(
+                    f"cannot register {metadata.model_id!r} as primary: "
+                    "a recorded, non-expired, passing validation is required "
+                    "(record one via record_validation)"
+                )
+
         # If re-registering an existing model_id, scrub its old
         # role from the per-feature-set indexes so a "primary →
         # shadow" demotion (or vice versa) is consistent.
@@ -149,6 +221,24 @@ class Registry:
             shadows = self._shadows_for_fs.setdefault(metadata.feature_set_ref, [])
             if metadata.model_id not in shadows:
                 shadows.append(metadata.model_id)
+
+    def record_validation(self, record: ValidationRecord) -> None:
+        """Record a model-validation outcome (MLOPS-01a). The latest
+        record per ``model_id`` wins (a revalidation supersedes the
+        prior one). Both passing and failing records are kept — a
+        failing record is audit evidence and explicitly does not
+        satisfy the primary gate. Recording is independent of
+        registration: a model is typically validated as a shadow, then
+        promoted to primary against the recorded evidence.
+        """
+        if not record.model_id:
+            raise ValueError("ValidationRecord.model_id required")
+        self._validations[record.model_id] = record
+
+    def validation_for(self, model_id: str) -> ValidationRecord | None:
+        """The latest recorded validation for ``model_id``, or ``None``.
+        For health/audit surfaces and MLOPS-01e promotion checks."""
+        return self._validations.get(model_id)
 
     def get_by_id(self, model_id: str) -> tuple[ModelMetadata, Model] | None:
         """Look up by canonical id. Returns ``(metadata, model)``

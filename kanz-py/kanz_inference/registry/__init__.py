@@ -17,12 +17,24 @@ Importable names:
   the registry data structure; how artifacts become Model
   instances is a deployment concern that can plug in via this
   protocol.
+- ``ValidationRecord`` / ``ValidationError`` — MLOPS-01a model-risk
+  gate: a model cannot be registered ``primary`` without a recorded,
+  non-expired, passing validation (SR 11-7). Recorded via
+  ``Registry.record_validation``.
 """
 
 from kanz_inference.registry.registry import (
     ModelLoader,
     ModelMetadata,
     Registry,
+    ValidationError,
+    ValidationRecord,
 )
 
-__all__ = ["ModelLoader", "ModelMetadata", "Registry"]
+__all__ = [
+    "ModelLoader",
+    "ModelMetadata",
+    "Registry",
+    "ValidationError",
+    "ValidationRecord",
+]
