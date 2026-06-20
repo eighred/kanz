@@ -66,6 +66,20 @@ def _as_of_key(ts: Timestamp) -> tuple[int, int]:
     return (ts.seconds, ts.nanos)
 
 
+def _require_put_fields(fv: FeatureVector) -> None:
+    """The invariants every ``put`` must hold, shared by all
+    ``FeatureStore`` implementations so they reject malformed
+    materialisations identically. ``as_of`` is mandatory because a
+    feature vector with no effective time has no point-in-time position
+    — storing it would corrupt every later as-of read."""
+    if not fv.subject_id:
+        raise ValueError("FeatureVector.subject_id required")
+    if not fv.feature_set_ref:
+        raise ValueError("FeatureVector.feature_set_ref required")
+    if not fv.HasField("as_of"):
+        raise ValueError("FeatureVector.as_of required for point-in-time storage")
+
+
 def _clone(fv: FeatureVector) -> FeatureVector:
     """Defensive copy. The store owns its entries; returning or
     storing the caller's live message would let later mutation bleed
@@ -154,12 +168,7 @@ class InMemoryFeatureStore:
         return _clone(history[idx - 1])
 
     async def put(self, fv: FeatureVector) -> None:
-        if not fv.subject_id:
-            raise ValueError("FeatureVector.subject_id required")
-        if not fv.feature_set_ref:
-            raise ValueError("FeatureVector.feature_set_ref required")
-        if not fv.HasField("as_of"):
-            raise ValueError("FeatureVector.as_of required for point-in-time storage")
+        _require_put_fields(fv)
 
         key = (fv.subject_id, fv.feature_set_ref)
         history = self._history.setdefault(key, [])
