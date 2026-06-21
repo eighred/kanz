@@ -10,6 +10,11 @@ MLOPS-01e: champion/challenger promotion. ``ShadowComparisonStore`` (a
 PRED-10 ShadowObserver) accumulates comparison metrics; ``Promoter``
 promotes a challenger gated on soak + validation + out-performance.
 
+MLOPS-01g: model cards + approval workflow + lineage. ``ModelCard`` +
+``LineageRecord`` document a model and its model→feature→training-data
+provenance; ``ApprovalWorkflow`` is the DRAFT→PENDING→APPROVED sign-off
+gate (approval requires a passing validation).
+
 Importable names:
 
 - ``DriftTrigger`` — consumes drift events, fans out a RevalidationRequest
@@ -22,6 +27,9 @@ Importable names:
   comparison metrics (+ ``record_outcome`` for live RMSE).
 - ``ComparisonStats`` — read view of one pair's accumulated metrics.
 - ``Promoter`` / ``PromotionDecision`` — the gated promotion evaluator.
+- ``ModelCard`` / ``LineageRecord`` — model documentation + provenance.
+- ``ApprovalWorkflow`` / ``ApprovalStatus`` / ``ApprovalState`` /
+  ``ApprovalError`` — the sign-off state machine.
 """
 
 from kanz_inference.governance.drift_trigger import (
@@ -32,6 +40,14 @@ from kanz_inference.governance.drift_trigger import (
     RevalidationRequest,
     RevalidationSink,
     StaticModelResolver,
+)
+from kanz_inference.governance.model_card import (
+    ApprovalError,
+    ApprovalState,
+    ApprovalStatus,
+    ApprovalWorkflow,
+    LineageRecord,
+    ModelCard,
 )
 from kanz_inference.governance.promotion import (
     ComparisonStats,
@@ -52,4 +68,10 @@ __all__ = [
     "Promoter",
     "PromotionDecision",
     "ShadowComparisonStore",
+    "ApprovalError",
+    "ApprovalState",
+    "ApprovalStatus",
+    "ApprovalWorkflow",
+    "LineageRecord",
+    "ModelCard",
 ]
