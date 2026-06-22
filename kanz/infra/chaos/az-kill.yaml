@@ -1,0 +1,35 @@
+# INFRA-01e — AZ kill.
+#
+# Hypothesis: losing an entire availability zone leaves the system serving. The
+# INFRA-01d multi-AZ topology spread keeps replicas in the surviving zones, the
+# PodDisruptionBudget held quorum, and the KEDA floor (minReplicaCount 3,
+# INFRA-01c) plus reschedule restores capacity — no SLO breach, no data loss.
+# This is the AZ-scale companion to the single-pod SRE-01c pod-eviction.
+#
+# Steady-state to assert (verify.sh az-kill):
+#   - during: gateway 5xx ~flat, recompute throughput still advancing (survivors
+#             in other zones serve); no SLOFastBurn.
+#   - after:  evicted pods reschedule onto surviving/again-available nodes; no
+#             sequence gap (kanz_data_gap_missing_total flat).
+#
+# Targets every kanz pod on nodes in ONE zone via nodeSelectors. Set the zone to
+# a real value before applying. A fuller infra-level AZ loss uses Chaos Mesh
+# AWSChaos (ec2-stop on that zone's nodes); this pod-level kill exercises the
+# same application-resilience contract without detaching cloud resources.
+apiVersion: chaos-mesh.org/v1alpha1
+kind: PodChaos
+metadata:
+  name: az-kill
+  namespace: kanz-services
+  labels: { app.kubernetes.io/part-of: kanz, chaos.kanz.io/suite: infra-01e }
+  annotations:
+    chaos.kanz.io/hypothesis: "single-AZ loss → survivors in other zones keep serving, no SLO breach, full recovery."
+spec:
+  action: pod-kill
+  mode: all
+  selector:
+    namespaces: [kanz-services, kanz-messaging]
+    nodeSelectors:
+      # The AZ to fail. Replace with a real zone from the cluster
+      # (kubectl get nodes -L topology.kubernetes.io/zone).
+      topology.kubernetes.io/zone: "us-east-1a"

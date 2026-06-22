@@ -49,6 +49,21 @@ case "$EXP" in
     note "gateway 5xx rate (expect ~flat)" 'sum(rate(kanz_gateway_requests_total{code=~"5.."}[5m]))'
     note "recompute throughput (expect advancing)" 'sum(rate(kanz_risk_recompute_total[5m]))'
     ;;
+  az-kill)
+    # INFRA-01e: losing an AZ must leave the system serving (multi-AZ spread +
+    # PDB + KEDA floor). Throughput keeps advancing; the survivors are spread
+    # across the remaining zones.
+    note "gateway 5xx rate (expect ~flat)" 'sum(rate(kanz_gateway_requests_total{code=~"5.."}[5m]))'
+    note "recompute throughput (expect advancing)" 'sum(rate(kanz_risk_recompute_total[5m]))'
+    check "no sequence gap (no data lost to the AZ loss)" 'sum(increase(kanz_data_gap_missing_total[15m])) == bool 0'
+    ;;
+  autoscale)
+    # INFRA-01e: under injected lag the autoscaler must REACT — pending climbs,
+    # then replicas rise to work it down (the PRED-14 premise). Run during the
+    # lag injection; expect pending elevated AND the HPA above its floor.
+    note "pending backlog (expect elevated during injection)" 'sum(kanz_bus_pending_messages{group="risk-engine"})'
+    check "autoscaler scaled out (replicas > min 3)" 'max(kube_horizontalpodautoscaler_status_current_replicas{horizontalpodautoscaler=~".*risk-engine.*"}) > bool 3'
+    ;;
   *) echo "unknown experiment: $EXP" >&2; exit 2 ;;
 esac
 

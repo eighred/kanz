@@ -76,6 +76,17 @@ spec:
         app.kubernetes.io/part-of: kanz
     spec:
       serviceAccountName: risk-engine
+      # INFRA-01d: spread replicas across AZs so a single-AZ loss (INFRA-01e)
+      # leaves the survivors serving. maxSkew 1 = as even as schedulable;
+      # ScheduleAnyway (not DoNotSchedule) so a saturated AZ degrades placement
+      # rather than blocking a scale-up (INFRA-01c) or a rollout.
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app: risk-engine
       containers:
         - name: risk-engine
           # Pinned to a digest in production (set by the GitOps bump); the

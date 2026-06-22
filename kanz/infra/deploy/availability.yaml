@@ -1,0 +1,61 @@
+# INFRA-01d — availability guards for kanz-services: disruption budgets +
+# namespace resource governance. Pairs with the multi-AZ topology spread on the
+# workloads themselves (risk-engine-rollout.yaml).
+#
+# PodDisruptionBudget bounds VOLUNTARY disruption (node drain, upgrade, the
+# SRE-01c/INFRA-01e chaos) — at least 2 risk-engine replicas stay up, so a drain
+# can't take the service below quorum. Involuntary AZ loss is covered by the
+# topology spread + the KEDA floor (minReplicaCount 3).
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: risk-engine
+  namespace: kanz-services
+  labels:
+    app.kubernetes.io/part-of: kanz
+spec:
+  minAvailable: 2
+  selector:
+    matchLabels:
+      app: risk-engine
+---
+# ResourceQuota caps the namespace's total compute, so a runaway scale-out
+# (INFRA-01c) or a bad deploy can't starve the cluster / other tenants of the
+# shared node pool. Sized above the KEDA maxReplicaCount headroom.
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: kanz-services
+  namespace: kanz-services
+  labels:
+    app.kubernetes.io/part-of: kanz
+spec:
+  hard:
+    requests.cpu: "24"
+    requests.memory: 48Gi
+    limits.cpu: "48"
+    limits.memory: 96Gi
+    pods: "100"
+---
+# LimitRange gives every pod sane defaults + a ceiling, so a container with no
+# explicit resources still gets requests (schedulable, quota-counted) and can't
+# request the whole node. Defaults match the risk-engine request profile.
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: kanz-services-defaults
+  namespace: kanz-services
+  labels:
+    app.kubernetes.io/part-of: kanz
+spec:
+  limits:
+    - type: Container
+      default:
+        cpu: "1"
+        memory: 1Gi
+      defaultRequest:
+        cpu: 500m
+        memory: 512Mi
+      max:
+        cpu: "4"
+        memory: 4Gi

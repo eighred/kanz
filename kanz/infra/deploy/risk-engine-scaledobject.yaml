@@ -1,0 +1,47 @@
+# INFRA-01c — KEDA autoscaling for risk-engine on the OBS-01c backpressure
+# signal. This is the PRED-14 premise made operational: when the consumer falls
+# behind, add workers to work the backlog down; when it's caught up, scale back
+# (KEDA idles HPA at minReplicaCount).
+#
+# Scales on the OBS-01c `kanz_bus_pending_messages` gauge — risk-engine consumes
+# the NATS spine, so NATS pending (not Kafka lag) is its backpressure signal.
+# (Kafka-consuming services — market-data, audit — scale on
+# `kanz_bus_consumer_lag` with the same shape; this is the canonical first one.)
+# Reading the OBS-01c series via Prometheus rather than a native scaler keeps the
+# scale signal identical to what the dashboards/alerts show — one source of truth.
+#
+# Targets the Argo Rollout (CICD-01e), not a Deployment — KEDA drives the
+# Rollout's replica count and the canary analysis still gates new revisions.
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: risk-engine
+  namespace: kanz-services
+  labels:
+    app.kubernetes.io/part-of: kanz
+spec:
+  scaleTargetRef:
+    apiVersion: argoproj.io/v1alpha1
+    kind: Rollout
+    name: risk-engine
+  minReplicaCount: 3        # never below the INFRA-01d quorum / multi-AZ spread
+  maxReplicaCount: 12
+  cooldownPeriod: 120       # don't flap: wait 2m of calm before scaling in
+  advanced:
+    restoreToOriginalReplicaCount: true
+    horizontalPodAutoscalerConfig:
+      behavior:
+        scaleUp:
+          stabilizationWindowSeconds: 30   # react fast to a building backlog
+        scaleDown:
+          stabilizationWindowSeconds: 300  # shed slowly, avoid thrashing
+  triggers:
+    - type: prometheus
+      metadata:
+        serverAddress: http://prometheus.observability.svc:9090
+        metricName: kanz_bus_pending_messages
+        # Pending across the risk-engine consumer group; one replica targets
+        # ~500 pending, so the backlog sets the replica count.
+        query: sum(kanz_bus_pending_messages{group="risk-engine"})
+        threshold: "500"
+        activationThreshold: "50"   # below this, scale to zero-of-trigger (floor = minReplicaCount)

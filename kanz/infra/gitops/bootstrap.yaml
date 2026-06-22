@@ -1,0 +1,30 @@
+# INFRA-01b — the ONE thing you apply. This root Application syncs the gitops/
+# directory itself (the AppProject + the ApplicationSet), so Argo CD manages its
+# own config from git thereafter (app-of-apps bootstrap). After this, every
+# platform component is delivered by the ApplicationSet — nothing else is applied
+# by hand.
+#
+#   kubectl apply -f bootstrap.yaml
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: kanz-bootstrap
+  namespace: argocd
+  labels:
+    app.kubernetes.io/part-of: kanz
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default # bootstrap predates the kanz project it installs
+  source:
+    repoURL: https://github.com/kanz-eng/kanz.git
+    targetRevision: main
+    path: kanz/infra/gitops
+    directory:
+      recurse: false
+      include: "{projects.yaml,applicationset.yaml}"
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: argocd
+  syncPolicy:
+    automated: { prune: true, selfHeal: true }

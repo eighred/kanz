@@ -58,3 +58,17 @@ kubectl argo rollouts undo    risk-engine -n kanz-services   # roll back to prio
 - Pin the image by digest (GitOps) instead of `:latest`.
 - Add a bus consumer-lag analysis metric (OBS-01c) so a canary that silently
   stops consuming also aborts, not just one that errors/slows.
+
+## Autoscaling + availability (INFRA-01c/d)
+
+The same directory carries the risk-engine resilience layer (GitOps-synced):
+
+| File | Task | What |
+|---|---|---|
+| `risk-engine-scaledobject.yaml` | INFRA-01c | KEDA scales the Rollout on `kanz_bus_pending_messages` (OBS-01c) — the PRED-14 "add workers to drain the backlog" premise; floor 3, ceiling 12 |
+| `availability.yaml` | INFRA-01d | PodDisruptionBudget (minAvailable 2) + namespace ResourceQuota + LimitRange |
+| `risk-engine-rollout.yaml` (topologySpreadConstraints) | INFRA-01d | replicas spread across AZs so a zone loss (INFRA-01e) still serves |
+
+KEDA drives the Rollout's replica count while the canary analysis still gates new
+revisions — scaling and progressive delivery compose. Validated by the INFRA-01e
+`az-kill` experiment + `autoscale-validation.md` (in `infra/chaos`).

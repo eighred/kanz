@@ -1,0 +1,58 @@
+# INFRA-01b — app-of-apps via a matrix ApplicationSet: one Application per
+# (environment × component). The environment list is the per-environment overlay
+# dimension — each env carries its own destination cluster and a `valuesEnv` the
+# component path can branch on (e.g. DR Postgres = replicas, not primaries).
+# Adding a component = one list entry; adding an environment = one list entry.
+#
+# Components are the in-cluster k8s workloads (the data planes + delivery). The
+# Terraform foundation (INFRA-01a) is NOT here, and Prometheus-rule/Grafana
+# artifacts (infra/observability) ship as their own PrometheusRule/ConfigMap
+# wrapping, not raw-synced. The DR Postgres split is handled by the env branch.
+apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata:
+  name: kanz
+  namespace: argocd
+  labels:
+    app.kubernetes.io/part-of: kanz
+spec:
+  goTemplate: true
+  generators:
+    - matrix:
+        generators:
+          - list:
+              elements:
+                # Register these cluster names in Argo CD (argocd cluster add).
+                - { env: primary, server: "https://kubernetes.default.svc" }
+                - { env: dr, server: "https://kubernetes.default.svc" }
+          - list:
+              elements:
+                - { component: messaging-nats, path: kanz/infra/nats, namespace: kanz-messaging }
+                - { component: messaging-kafka, path: kanz/infra/kafka, namespace: kanz-messaging }
+                - { component: workloads, path: kanz/infra/deploy, namespace: kanz-services }
+                - { component: security, path: kanz/infra/security, namespace: kanz-services }
+  template:
+    metadata:
+      name: "kanz-{{.env}}-{{.component}}"
+      labels:
+        app.kubernetes.io/part-of: kanz
+        kanz.io/environment: "{{.env}}"
+    spec:
+      project: kanz
+      source:
+        repoURL: https://github.com/kanz-eng/kanz.git
+        targetRevision: main
+        path: "{{.path}}"
+        directory:
+          recurse: true
+          # Templated/instructional manifests are applied by their own tooling
+          # (tenantctl, smoke tests), not raw-synced.
+          exclude: "{tenancy.yaml,smoke-test.sh,*-job.yaml}"
+      destination:
+        server: "{{.server}}"
+        namespace: "{{.namespace}}"
+      syncPolicy:
+        automated: { prune: true, selfHeal: true }
+        syncOptions:
+          - CreateNamespace=true
+          - ApplyOutOfSyncOnly=true

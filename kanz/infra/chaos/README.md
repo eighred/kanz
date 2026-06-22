@@ -19,6 +19,11 @@ A mesh-based tool (Litmus, Gremlin) would add infra the platform doesn't run.
 | `network-partition.yaml` | isolate risk-engine from brokers | RISK-11 degraded mode | AsOf ages → serves last-known-good tagged stale; no crash; recovers on heal |
 | `latency-injection.yaml` | slow the inference dependency | PRED-07 circuit breaker | breaker opens → degraded fallback; caller latency stays bounded |
 | `pod-eviction.yaml` | kill / crash one service replica | replica redundancy (PRED-08 edge) | survivors serve; no SLO breach |
+| `az-kill.yaml` | kill every pod in one AZ | INFRA-01d multi-AZ spread + PDB + KEDA floor | survivors in other zones serve; no SLO breach, no data loss |
+
+INFRA-01e also validates **autoscaler reaction** (not a fault manifest) — see
+`autoscale-validation.md`: inject lag, assert KEDA scales the risk-engine Rollout
+out, then back. `verify.sh az-kill` and `verify.sh autoscale` are the gates.
 
 Each manifest embeds its hypothesis in `annotations.chaos.kanz.io/hypothesis`
 and its expected during/after signals in comments. Blast radius is deliberately
