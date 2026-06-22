@@ -1,0 +1,46 @@
+# SRE-01c — pod eviction.
+#
+# Hypothesis: losing a single service replica is a non-event for clients. The
+# surviving replicas absorb traffic, the rescheduled pod rejoins the consumer
+# group / reconnects, and no SLO breaches — the same resilience the CICD-01e
+# replica canary assumes. Distinct from broker-kill: this faults the STATELESS
+# compute tier, not the spine.
+#
+# Steady-state to assert (README verify.sh):
+#   - during: kanz_gateway_requests_total{code=~"5.."} stays ~flat (other
+#             gateway replicas serve); kanz_risk_recompute_total keeps advancing
+#             (another engine replica owns the partitions).
+#   - after:  evicted pod returns Ready; no SLOFastBurn on any SLO.
+#
+# Two faults: a graceful pod-kill (eviction/rescheduling) and a container-kill
+# (abrupt crash) — both must be survivable. mode: one ⇒ never quorum-breaking.
+apiVersion: chaos-mesh.org/v1alpha1
+kind: PodChaos
+metadata:
+  name: evict-risk-engine
+  namespace: kanz-services
+  labels: { app.kubernetes.io/part-of: kanz, chaos.kanz.io/suite: sre-01c }
+  annotations:
+    chaos.kanz.io/hypothesis: "single risk-engine replica eviction → survivors serve, recompute uninterrupted, no SLO breach."
+spec:
+  action: pod-kill
+  mode: one
+  selector:
+    namespaces: [kanz-services]
+    labelSelectors: { app: risk-engine }
+---
+apiVersion: chaos-mesh.org/v1alpha1
+kind: PodChaos
+metadata:
+  name: crash-api-gateway
+  namespace: kanz-services
+  labels: { app.kubernetes.io/part-of: kanz, chaos.kanz.io/suite: sre-01c }
+  annotations:
+    chaos.kanz.io/hypothesis: "api-gateway container crash → other replicas serve, availability SLO held."
+spec:
+  action: container-kill
+  mode: one
+  containerNames: [api-gateway]
+  selector:
+    namespaces: [kanz-services]
+    labelSelectors: { app: api-gateway }

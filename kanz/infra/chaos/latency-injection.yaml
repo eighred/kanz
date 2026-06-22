@@ -1,0 +1,40 @@
+# SRE-01c — latency injection.
+#
+# Hypothesis: when the synchronous inference dependency turns slow, the PRED-07
+# circuit breaker protects the caller instead of letting latency cascade. Each
+# call's per-call timeout trips → the breaker opens after BreakerThreshold
+# consecutive failures → subsequent calls fast-fail to the degraded fallback
+# (degraded_reason=circuit_open / no_cached_prediction, PRED-02 §2) rather than
+# blocking on the slow upstream. After BreakerCooldown the breaker half-opens
+# and closes once the injected delay is removed. The caller's own latency SLO is
+# held by SHEDDING to degraded, not by waiting.
+#
+# Steady-state to assert (README verify.sh):
+#   - during: predictions return DEGRADED with reason circuit_open; the caller's
+#             request latency stays bounded (no pile-up); SLOFastBurn on the
+#             caller's query-latency SLO does NOT fire.
+#   - after:  delay removed → breaker closes → predictions return to NORMAL.
+#
+# Targets the inference service (kanz-py, PRED-01). Adjust the labelSelector to
+# the deployed inference workload; 1500ms exceeds the sync client's per-call
+# timeout so calls deterministically trip the breaker.
+apiVersion: chaos-mesh.org/v1alpha1
+kind: NetworkChaos
+metadata:
+  name: latency-inference-path
+  namespace: kanz-services
+  labels: { app.kubernetes.io/part-of: kanz, chaos.kanz.io/suite: sre-01c }
+  annotations:
+    chaos.kanz.io/hypothesis: "slow inference → PRED-07 breaker opens → degraded fallback, caller latency bounded."
+spec:
+  action: delay
+  mode: all
+  selector:
+    namespaces: [kanz-services]
+    labelSelectors: { app: inference }
+  delay:
+    latency: "1500ms"
+    jitter: "200ms"
+    correlation: "50"
+  direction: to   # delay traffic INTO the inference pods (the slow-dependency case).
+  duration: 5m

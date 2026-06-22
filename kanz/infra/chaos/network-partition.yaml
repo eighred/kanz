@@ -1,0 +1,39 @@
+# SRE-01c — network partition.
+#
+# Hypothesis: a partition between the risk-engine and the NATS spine does NOT
+# corrupt state or crash-loop the engine. With no live events its portfolio AsOf
+# ages; RISK-11 staleness crosses DefaultFreshnessBudget (30s) → FRESH→DEGRADED,
+# then DefaultDegradedThreshold (5m) → fully degraded, serving last-known-good
+# tagged stale. On heal, the consumer reconnects, replays the backlog, AsOf
+# catches up, and mode returns to FRESH. The partition is what degraded mode
+# was designed for — staleness is the single observable, locally diagnosable.
+#
+# Steady-state to assert (README verify.sh):
+#   - during: kanz_data_staleness_lag_seconds climbs past 30s then 5m; query
+#             responses carry the stale QualityFlag; the engine stays Ready
+#             (no crash-loop).
+#   - after:  staleness returns under budget within one replay; no data gap
+#             (kanz_data_gap_missing_total flat — events delayed, not lost).
+#
+# Direction `both`: fully isolate the engine from the brokers.
+apiVersion: chaos-mesh.org/v1alpha1
+kind: NetworkChaos
+metadata:
+  name: partition-risk-engine-brokers
+  namespace: kanz-services
+  labels: { app.kubernetes.io/part-of: kanz, chaos.kanz.io/suite: sre-01c }
+  annotations:
+    chaos.kanz.io/hypothesis: "risk-engine ⇄ broker partition → degraded-mode (stale tag), no crash, full recovery on heal."
+spec:
+  action: partition
+  mode: all
+  direction: both
+  selector:
+    namespaces: [kanz-services]
+    labelSelectors: { app: risk-engine }
+  target:
+    mode: all
+    selector:
+      namespaces: [kanz-messaging]
+      labelSelectors: { app: nats }
+  duration: 8m   # past the 5m DefaultDegradedThreshold so full degraded is exercised.

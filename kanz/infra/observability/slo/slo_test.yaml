@@ -1,0 +1,49 @@
+# promtool unit tests for the SRE-01b SLO rules. Pins the burn-rate wiring:
+# the error ratio is computed right, the budget join points at the correct
+# threshold, and a healthy service stays silent.
+#
+#   promtool test rules slo_test.yaml
+rule_files:
+  - slo.recording.rules.yaml
+  - slo.alerts.rules.yaml
+
+evaluation_interval: 1m
+
+tests:
+  # 5% of gateway requests 5xx ⇒ error ratio 0.05, far past the availability
+  # fast-burn threshold (14.4 × 0.001 = 0.0144) on both 1h and 5m windows.
+  - interval: 1m
+    input_series:
+      - series: 'kanz_gateway_requests_total{code="200"}'
+        values: '0+95x80'
+      - series: 'kanz_gateway_requests_total{code="500"}'
+        values: '0+5x80'
+    promql_expr_test:
+      - expr: slo:sli_error:ratio_rate1h{service="api-gateway", slo="availability"}
+        eval_time: 75m
+        exp_samples:
+          - labels: 'slo:sli_error:ratio_rate1h{service="api-gateway", slo="availability"}'
+            value: 0.05
+    alert_rule_test:
+      - eval_time: 75m
+        alertname: SLOFastBurn
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              layer: slo
+              burn_rate: fast
+              service: api-gateway
+              slo: availability
+
+  # Healthy gateway (no 5xx) ⇒ zero error ratio, no burn-rate alert.
+  - interval: 1m
+    input_series:
+      - series: 'kanz_gateway_requests_total{code="200"}'
+        values: '0+100x80'
+    alert_rule_test:
+      - eval_time: 75m
+        alertname: SLOFastBurn
+        exp_alerts: []
+      - eval_time: 75m
+        alertname: SLOSlowBurn
+        exp_alerts: []

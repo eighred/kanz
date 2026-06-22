@@ -1,0 +1,119 @@
+# Per-service SLI/SLO catalog (SRE-01a).
+#
+# This file is the CONTRACT, not the wiring: it declares the service-level
+# indicators and objectives the platform commits to, in a machine-readable
+# shape SRE-01b consumes to GENERATE the SLO recording rules + multi-window
+# burn-rate alerts. Nothing here scrapes or alerts on its own — the same
+# "define the surface before instrumenting it" discipline the DATA-08 metric
+# contract (dashboards/README.md) and the CICD-01e canary template follow.
+#
+# Every SLI is expressed against the OBS-01 RED series that already exist
+# (kanz_gateway_* MT-01e, kanz_risk_* / kanz_bus_* OBS-01c) or the DATA-08
+# freshness contract (kanz_data_* DATA-02). Renaming any of those series breaks
+# both these SLOs and the canary gate — they share one metric vocabulary.
+#
+# SLI kinds:
+#   ratio     — good/total over counters (the standard event-based SLI).
+#   freshness — fraction of time a gauge stays within budget (gauge-based;
+#               SRE-01b realizes `good` via a `<= bool` subquery).
+#
+# Window is the error-budget accounting window (28d ≈ one 4-week ops cadence).
+# Objectives are the durable steady-state targets; per-deploy gates (the
+# CICD-01e canary's 99% / 500ms) are intentionally looser than the steady-state
+# SLO — a deploy may briefly run hotter than the long-run objective.
+version: 1
+
+defaults:
+  window: 28d
+  # Multi-window, multi-burn-rate alert pairs SRE-01b emits per SLO (Google SRE
+  # MWMBR over a 28d budget). `factor` is the burn rate vs. the 1×-spends-the-
+  # whole-budget baseline; the short window is the reset guard against a stale
+  # long window. severity drives Alertmanager routing (page ⇒ on-call, ticket).
+  burn_rates:
+    - { severity: page,   long: 1h, short: 5m,  factor: 14.4 } # ~2% budget in 1h
+    - { severity: page,   long: 6h, short: 30m, factor: 6 }    # ~5% budget in 6h
+    - { severity: ticket, long: 1d, short: 2h,  factor: 3 }
+    - { severity: ticket, long: 3d, short: 6h,  factor: 1 }
+
+services:
+  - service: api-gateway
+    layer: edge
+    slos:
+      - name: availability
+        description: >-
+          Fraction of gateway requests not failed by the server. 5xx counts as
+          bad, INCLUDING the MT-01e admission 503 (a deliberate load-shed is
+          still client-experienced unavailability — sustained 503 should burn
+          budget and force capacity, the INFRA-01c autoscaling premise).
+        objective: 0.999
+        sli:
+          kind: ratio
+          good: 'sum(rate(kanz_gateway_requests_total{code!~"5.."}[{window}]))'
+          total: 'sum(rate(kanz_gateway_requests_total[{window}]))'
+      - name: query-latency
+        description: >-
+          Fraction of gateway requests served under 500ms (the read-path
+          budget; le="0.5" is a real DefBuckets boundary).
+        objective: 0.99
+        threshold_seconds: 0.5
+        sli:
+          kind: ratio
+          good: 'sum(rate(kanz_gateway_request_duration_seconds_bucket{le="0.5"}[{window}]))'
+          total: 'sum(rate(kanz_gateway_request_duration_seconds_count[{window}]))'
+
+  - service: risk-engine
+    layer: compute
+    slos:
+      - name: recompute-success
+        description: >-
+          Fraction of portfolio recomputes that succeed (status="ok"; an emit
+          failure is the only error per OBS-01c). Steady-state target above the
+          CICD-01e canary gate (0.99), which is a per-deploy check.
+        objective: 0.995
+        sli:
+          kind: ratio
+          good: 'sum(rate(kanz_risk_recompute_total{status="ok"}[{window}]))'
+          total: 'sum(rate(kanz_risk_recompute_total[{window}]))'
+      - name: recompute-latency
+        description: >-
+          Fraction of recomputes within the ORCH-01f 500ms p99 budget (the same
+          budget the canary p99 gate and SRE-01e load harness assert).
+        objective: 0.99
+        threshold_seconds: 0.5
+        sli:
+          kind: ratio
+          good: 'sum(rate(kanz_risk_recompute_duration_seconds_bucket{le="0.5"}[{window}]))'
+          total: 'sum(rate(kanz_risk_recompute_duration_seconds_count[{window}]))'
+
+  - service: event-bus
+    layer: spine
+    slos:
+      - name: delivery-success
+        description: >-
+          Fraction of consumed messages handled without error. A DLQ-routed
+          message still counts as error (OBS-01c) — the DLQ is the safety net,
+          not a success. This is the SLO SRE-01c chaos asserts holds under a
+          broker kill / partition (degraded-mode + DLQ behave as designed).
+        objective: 0.999
+        sli:
+          kind: ratio
+          good: 'sum(rate(kanz_bus_consume_total{result="ok"}[{window}]))'
+          total: 'sum(rate(kanz_bus_consume_total[{window}]))'
+
+  - service: market-data
+    layer: ingestion
+    slos:
+      - name: freshness
+        description: >-
+          Fraction of time the ingestion frontier stays within the DATA-02
+          warn budget (10s, DefaultStalenessConfig.WarnAfter). Scope to the
+          ingestion subjects; per-subject budgets (a tick feed vs. an EOD
+          batch) are a deployment override, same stance as the DATA-09 rules.
+        objective: 0.99
+        budget_seconds: 10
+        sli:
+          kind: freshness
+          # SRE-01b realizes good/total over a 1m-step subquery of the gauge:
+          #   good  = sum_over_time((<metric> <= bool <budget>)[{window}:1m])
+          #   total = count_over_time(<metric>[{window}:1m])
+          metric: 'max(kanz_data_staleness_lag_seconds) by (subject)'

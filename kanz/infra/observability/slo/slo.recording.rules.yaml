@@ -1,0 +1,194 @@
+# SLO recording rules (SRE-01b) — compiled from slo.yaml (SRE-01a).
+#
+# Two layers:
+#   slo_meta         — per-SLO error budget (1 − objective) as a labeled series,
+#                      plus the freshness base ratio. Alerts join against these
+#                      so the burn threshold lives in ONE place per SLO.
+#   slo_sli_error    — the SLI ERROR ratio (1 − good/total) per SLO over each of
+#                      the seven burn-rate windows. One metric name,
+#                      `slo:sli_error:ratio_rate<window>`, labeled {service,slo},
+#                      so slo.alerts.rules.yaml stays generic (one alert per
+#                      burn pair covers every SLO via on(service,slo) matching).
+#
+# Series are the OBS-01 RED contract (kanz_gateway_/kanz_risk_/kanz_bus_*) +
+# the DATA-02 freshness gauge — the exact names slo.yaml binds. Windows match
+# slo.yaml defaults.burn_rates: pairs (1h,5m) (6h,30m) (1d,2h) (3d,6h).
+#
+# No-traffic note: with zero denominator rate() yields 0/0 = NaN; the error
+# ratio is NaN and burn-rate alerts (NaN > x is false) simply don't fire — a
+# silent service burns no budget, which is correct.
+#
+#   promtool check rules slo.recording.rules.yaml
+groups:
+  - name: slo_meta
+    rules:
+      # Error budget = 1 − objective, one series per SLO (labels carry the
+      # identity; vector() supplies the literal). Edit an objective here AND in
+      # slo.yaml together — slo.yaml is the source of truth, this is its compile.
+      - record: slo:error_budget:ratio
+        expr: vector(0.001)
+        labels: { service: api-gateway, slo: availability }
+      - record: slo:error_budget:ratio
+        expr: vector(0.01)
+        labels: { service: api-gateway, slo: query-latency }
+      - record: slo:error_budget:ratio
+        expr: vector(0.005)
+        labels: { service: risk-engine, slo: recompute-success }
+      - record: slo:error_budget:ratio
+        expr: vector(0.01)
+        labels: { service: risk-engine, slo: recompute-latency }
+      - record: slo:error_budget:ratio
+        expr: vector(0.001)
+        labels: { service: event-bus, slo: delivery-success }
+      - record: slo:error_budget:ratio
+        expr: vector(0.01)
+        labels: { service: market-data, slo: freshness }
+
+  - name: slo_sli_error
+    rules:
+      # Freshness base: instantaneous fraction of ingestion subjects past the
+      # DATA-02 10s warn budget. Recorded once per cycle so the windowed
+      # freshness rules below are a cheap avg_over_time, not a [w:1m] subquery.
+      - record: slo:data_unfresh:ratio
+        expr: avg(max by (subject) (kanz_data_staleness_lag_seconds) > bool 10)
+        labels: { service: market-data, slo: freshness }
+
+      # --- 5m ---
+      - record: slo:sli_error:ratio_rate5m
+        expr: 1 - (sum(rate(kanz_gateway_requests_total{code!~"5.."}[5m])) / sum(rate(kanz_gateway_requests_total[5m])))
+        labels: { service: api-gateway, slo: availability }
+      - record: slo:sli_error:ratio_rate5m
+        expr: 1 - (sum(rate(kanz_gateway_request_duration_seconds_bucket{le="0.5"}[5m])) / sum(rate(kanz_gateway_request_duration_seconds_count[5m])))
+        labels: { service: api-gateway, slo: query-latency }
+      - record: slo:sli_error:ratio_rate5m
+        expr: 1 - (sum(rate(kanz_risk_recompute_total{status="ok"}[5m])) / sum(rate(kanz_risk_recompute_total[5m])))
+        labels: { service: risk-engine, slo: recompute-success }
+      - record: slo:sli_error:ratio_rate5m
+        expr: 1 - (sum(rate(kanz_risk_recompute_duration_seconds_bucket{le="0.5"}[5m])) / sum(rate(kanz_risk_recompute_duration_seconds_count[5m])))
+        labels: { service: risk-engine, slo: recompute-latency }
+      - record: slo:sli_error:ratio_rate5m
+        expr: 1 - (sum(rate(kanz_bus_consume_total{result="ok"}[5m])) / sum(rate(kanz_bus_consume_total[5m])))
+        labels: { service: event-bus, slo: delivery-success }
+      - record: slo:sli_error:ratio_rate5m
+        expr: avg_over_time(slo:data_unfresh:ratio[5m])
+        labels: { service: market-data, slo: freshness }
+
+      # --- 30m ---
+      - record: slo:sli_error:ratio_rate30m
+        expr: 1 - (sum(rate(kanz_gateway_requests_total{code!~"5.."}[30m])) / sum(rate(kanz_gateway_requests_total[30m])))
+        labels: { service: api-gateway, slo: availability }
+      - record: slo:sli_error:ratio_rate30m
+        expr: 1 - (sum(rate(kanz_gateway_request_duration_seconds_bucket{le="0.5"}[30m])) / sum(rate(kanz_gateway_request_duration_seconds_count[30m])))
+        labels: { service: api-gateway, slo: query-latency }
+      - record: slo:sli_error:ratio_rate30m
+        expr: 1 - (sum(rate(kanz_risk_recompute_total{status="ok"}[30m])) / sum(rate(kanz_risk_recompute_total[30m])))
+        labels: { service: risk-engine, slo: recompute-success }
+      - record: slo:sli_error:ratio_rate30m
+        expr: 1 - (sum(rate(kanz_risk_recompute_duration_seconds_bucket{le="0.5"}[30m])) / sum(rate(kanz_risk_recompute_duration_seconds_count[30m])))
+        labels: { service: risk-engine, slo: recompute-latency }
+      - record: slo:sli_error:ratio_rate30m
+        expr: 1 - (sum(rate(kanz_bus_consume_total{result="ok"}[30m])) / sum(rate(kanz_bus_consume_total[30m])))
+        labels: { service: event-bus, slo: delivery-success }
+      - record: slo:sli_error:ratio_rate30m
+        expr: avg_over_time(slo:data_unfresh:ratio[30m])
+        labels: { service: market-data, slo: freshness }
+
+      # --- 1h ---
+      - record: slo:sli_error:ratio_rate1h
+        expr: 1 - (sum(rate(kanz_gateway_requests_total{code!~"5.."}[1h])) / sum(rate(kanz_gateway_requests_total[1h])))
+        labels: { service: api-gateway, slo: availability }
+      - record: slo:sli_error:ratio_rate1h
+        expr: 1 - (sum(rate(kanz_gateway_request_duration_seconds_bucket{le="0.5"}[1h])) / sum(rate(kanz_gateway_request_duration_seconds_count[1h])))
+        labels: { service: api-gateway, slo: query-latency }
+      - record: slo:sli_error:ratio_rate1h
+        expr: 1 - (sum(rate(kanz_risk_recompute_total{status="ok"}[1h])) / sum(rate(kanz_risk_recompute_total[1h])))
+        labels: { service: risk-engine, slo: recompute-success }
+      - record: slo:sli_error:ratio_rate1h
+        expr: 1 - (sum(rate(kanz_risk_recompute_duration_seconds_bucket{le="0.5"}[1h])) / sum(rate(kanz_risk_recompute_duration_seconds_count[1h])))
+        labels: { service: risk-engine, slo: recompute-latency }
+      - record: slo:sli_error:ratio_rate1h
+        expr: 1 - (sum(rate(kanz_bus_consume_total{result="ok"}[1h])) / sum(rate(kanz_bus_consume_total[1h])))
+        labels: { service: event-bus, slo: delivery-success }
+      - record: slo:sli_error:ratio_rate1h
+        expr: avg_over_time(slo:data_unfresh:ratio[1h])
+        labels: { service: market-data, slo: freshness }
+
+      # --- 2h ---
+      - record: slo:sli_error:ratio_rate2h
+        expr: 1 - (sum(rate(kanz_gateway_requests_total{code!~"5.."}[2h])) / sum(rate(kanz_gateway_requests_total[2h])))
+        labels: { service: api-gateway, slo: availability }
+      - record: slo:sli_error:ratio_rate2h
+        expr: 1 - (sum(rate(kanz_gateway_request_duration_seconds_bucket{le="0.5"}[2h])) / sum(rate(kanz_gateway_request_duration_seconds_count[2h])))
+        labels: { service: api-gateway, slo: query-latency }
+      - record: slo:sli_error:ratio_rate2h
+        expr: 1 - (sum(rate(kanz_risk_recompute_total{status="ok"}[2h])) / sum(rate(kanz_risk_recompute_total[2h])))
+        labels: { service: risk-engine, slo: recompute-success }
+      - record: slo:sli_error:ratio_rate2h
+        expr: 1 - (sum(rate(kanz_risk_recompute_duration_seconds_bucket{le="0.5"}[2h])) / sum(rate(kanz_risk_recompute_duration_seconds_count[2h])))
+        labels: { service: risk-engine, slo: recompute-latency }
+      - record: slo:sli_error:ratio_rate2h
+        expr: 1 - (sum(rate(kanz_bus_consume_total{result="ok"}[2h])) / sum(rate(kanz_bus_consume_total[2h])))
+        labels: { service: event-bus, slo: delivery-success }
+      - record: slo:sli_error:ratio_rate2h
+        expr: avg_over_time(slo:data_unfresh:ratio[2h])
+        labels: { service: market-data, slo: freshness }
+
+      # --- 6h ---
+      - record: slo:sli_error:ratio_rate6h
+        expr: 1 - (sum(rate(kanz_gateway_requests_total{code!~"5.."}[6h])) / sum(rate(kanz_gateway_requests_total[6h])))
+        labels: { service: api-gateway, slo: availability }
+      - record: slo:sli_error:ratio_rate6h
+        expr: 1 - (sum(rate(kanz_gateway_request_duration_seconds_bucket{le="0.5"}[6h])) / sum(rate(kanz_gateway_request_duration_seconds_count[6h])))
+        labels: { service: api-gateway, slo: query-latency }
+      - record: slo:sli_error:ratio_rate6h
+        expr: 1 - (sum(rate(kanz_risk_recompute_total{status="ok"}[6h])) / sum(rate(kanz_risk_recompute_total[6h])))
+        labels: { service: risk-engine, slo: recompute-success }
+      - record: slo:sli_error:ratio_rate6h
+        expr: 1 - (sum(rate(kanz_risk_recompute_duration_seconds_bucket{le="0.5"}[6h])) / sum(rate(kanz_risk_recompute_duration_seconds_count[6h])))
+        labels: { service: risk-engine, slo: recompute-latency }
+      - record: slo:sli_error:ratio_rate6h
+        expr: 1 - (sum(rate(kanz_bus_consume_total{result="ok"}[6h])) / sum(rate(kanz_bus_consume_total[6h])))
+        labels: { service: event-bus, slo: delivery-success }
+      - record: slo:sli_error:ratio_rate6h
+        expr: avg_over_time(slo:data_unfresh:ratio[6h])
+        labels: { service: market-data, slo: freshness }
+
+      # --- 1d ---
+      - record: slo:sli_error:ratio_rate1d
+        expr: 1 - (sum(rate(kanz_gateway_requests_total{code!~"5.."}[1d])) / sum(rate(kanz_gateway_requests_total[1d])))
+        labels: { service: api-gateway, slo: availability }
+      - record: slo:sli_error:ratio_rate1d
+        expr: 1 - (sum(rate(kanz_gateway_request_duration_seconds_bucket{le="0.5"}[1d])) / sum(rate(kanz_gateway_request_duration_seconds_count[1d])))
+        labels: { service: api-gateway, slo: query-latency }
+      - record: slo:sli_error:ratio_rate1d
+        expr: 1 - (sum(rate(kanz_risk_recompute_total{status="ok"}[1d])) / sum(rate(kanz_risk_recompute_total[1d])))
+        labels: { service: risk-engine, slo: recompute-success }
+      - record: slo:sli_error:ratio_rate1d
+        expr: 1 - (sum(rate(kanz_risk_recompute_duration_seconds_bucket{le="0.5"}[1d])) / sum(rate(kanz_risk_recompute_duration_seconds_count[1d])))
+        labels: { service: risk-engine, slo: recompute-latency }
+      - record: slo:sli_error:ratio_rate1d
+        expr: 1 - (sum(rate(kanz_bus_consume_total{result="ok"}[1d])) / sum(rate(kanz_bus_consume_total[1d])))
+        labels: { service: event-bus, slo: delivery-success }
+      - record: slo:sli_error:ratio_rate1d
+        expr: avg_over_time(slo:data_unfresh:ratio[1d])
+        labels: { service: market-data, slo: freshness }
+
+      # --- 3d ---
+      - record: slo:sli_error:ratio_rate3d
+        expr: 1 - (sum(rate(kanz_gateway_requests_total{code!~"5.."}[3d])) / sum(rate(kanz_gateway_requests_total[3d])))
+        labels: { service: api-gateway, slo: availability }
+      - record: slo:sli_error:ratio_rate3d
+        expr: 1 - (sum(rate(kanz_gateway_request_duration_seconds_bucket{le="0.5"}[3d])) / sum(rate(kanz_gateway_request_duration_seconds_count[3d])))
+        labels: { service: api-gateway, slo: query-latency }
+      - record: slo:sli_error:ratio_rate3d
+        expr: 1 - (sum(rate(kanz_risk_recompute_total{status="ok"}[3d])) / sum(rate(kanz_risk_recompute_total[3d])))
+        labels: { service: risk-engine, slo: recompute-success }
+      - record: slo:sli_error:ratio_rate3d
+        expr: 1 - (sum(rate(kanz_risk_recompute_duration_seconds_bucket{le="0.5"}[3d])) / sum(rate(kanz_risk_recompute_duration_seconds_count[3d])))
+        labels: { service: risk-engine, slo: recompute-latency }
+      - record: slo:sli_error:ratio_rate3d
+        expr: 1 - (sum(rate(kanz_bus_consume_total{result="ok"}[3d])) / sum(rate(kanz_bus_consume_total[3d])))
+        labels: { service: event-bus, slo: delivery-success }
+      - record: slo:sli_error:ratio_rate3d
+        expr: avg_over_time(slo:data_unfresh:ratio[3d])
+        labels: { service: market-data, slo: freshness }

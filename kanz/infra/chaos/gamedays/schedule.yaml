@@ -1,0 +1,34 @@
+# SRE-01d — scheduled GameDay.
+#
+# Runs the GameDay workflow on a cron so resilience is REGULARLY re-proven, not
+# a one-off. A Chaos Mesh Schedule of type Workflow instantiates a fresh
+# `kanz-gameday` Workflow each fire. Weekly, Wednesday 14:00 UTC — business
+# hours so the on-call is staffed and watching (a GameDay is a supervised drill,
+# the antithesis of a 3am surprise).
+#
+# concurrencyPolicy: Forbid — never overlap two drills. historyLimit keeps the
+# last few runs for audit. Pause by setting spec.paused=true (e.g. during a
+# change freeze, SRE-01a error-budget policy).
+apiVersion: chaos-mesh.org/v1alpha1
+kind: Schedule
+metadata:
+  name: kanz-gameday-weekly
+  namespace: kanz-services
+  labels: { app.kubernetes.io/part-of: kanz, chaos.kanz.io/suite: sre-01d }
+spec:
+  schedule: "0 14 * * 3"
+  startingDeadlineSeconds: 600
+  concurrencyPolicy: Forbid
+  historyLimit: 5
+  type: Workflow
+  # A Chaos Mesh Schedule embeds the WorkflowSpec inline (it can't $ref an
+  # external Workflow). To keep ONE source of truth, the `workflow` block below
+  # is FILLED from gameday-workflow.yaml at apply time — don't hand-edit it here:
+  #
+  #   yq eval-all 'select(fi==0).spec.workflow = select(fi==1).spec |
+  #     select(fi==0)' schedule.yaml gameday-workflow.yaml | kubectl apply -f -
+  #
+  # (see README.md). The placeholder keeps the file valid for linting/diffing.
+  workflow:
+    entry: gameday
+    templates: []

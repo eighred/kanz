@@ -1,0 +1,48 @@
+# SRE-01c — broker kill.
+#
+# Hypothesis: killing a broker pod does NOT lose committed events and does NOT
+# silently drop processing. Terminal handler failures route to the EVT-17e DLQ
+# (`dlq.<subject>`), consumers reconnect, and the lag drained on recovery proves
+# nothing was black-holed. The risk-engine slips to RISK-11 degraded mode (it
+# serves last-known-good tagged stale) rather than erroring, because mode is
+# driven by state staleness, not a broker health check.
+#
+# Steady-state to assert around the fault (see README verify.sh / PromQL):
+#   - during:  kanz_bus_consumer_lag rises; degraded responses tagged stale;
+#              any DLQ routing shows as kanz_bus_consume_total{result="error"}.
+#   - after:   lag drains to baseline; SLOFastBurn (delivery-success) does NOT
+#              fire — the dip is absorbed within the 28d error budget.
+#
+# Blast radius: ONE broker pod (mode: one), kanz-messaging only. Run against a
+# staging/gameday cluster, never unscheduled in prod.
+apiVersion: chaos-mesh.org/v1alpha1
+kind: PodChaos
+metadata:
+  name: broker-kill-nats
+  namespace: kanz-messaging
+  labels: { app.kubernetes.io/part-of: kanz, chaos.kanz.io/suite: sre-01c }
+  annotations:
+    chaos.kanz.io/hypothesis: "NATS pod loss → consumers reconnect, no event loss, risk-engine degrades not errors."
+spec:
+  action: pod-kill
+  mode: one
+  selector:
+    namespaces: [kanz-messaging]
+    labelSelectors: { app: nats }
+  # Manual trigger; SRE-01d schedules it as a GameDay step. Pausing the
+  # experiment (annotate experiment.chaos-mesh.org/pause=true) stops re-kills.
+---
+apiVersion: chaos-mesh.org/v1alpha1
+kind: PodChaos
+metadata:
+  name: broker-kill-kafka
+  namespace: kanz-messaging
+  labels: { app.kubernetes.io/part-of: kanz, chaos.kanz.io/suite: sre-01c }
+  annotations:
+    chaos.kanz.io/hypothesis: "Kafka broker loss → ISR/partition leadership moves, log-of-record intact, DATA-05 reconcile stays matched."
+spec:
+  action: pod-kill
+  mode: one
+  selector:
+    namespaces: [kanz-messaging]
+    labelSelectors: { app: kafka }

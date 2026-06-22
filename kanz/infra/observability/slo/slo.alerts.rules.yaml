@@ -1,0 +1,71 @@
+# SLO multi-window burn-rate alerts (SRE-01b) — over slo.recording.rules.yaml.
+#
+# One alert per burn-rate pair from slo.yaml defaults.burn_rates, GENERIC over
+# every SLO: each fires for any {service,slo} whose recorded error ratio exceeds
+# `factor × error_budget` on BOTH the long and short window. The short window is
+# the reset guard — it clears the alert quickly once the burn stops, so a long
+# window doesn't keep paging on a spike that already ended. The budget threshold
+# is joined in with on(service,slo) from slo:error_budget:ratio, so an objective
+# change in the recording rules re-points every alert with no edit here.
+#
+# severity routes exactly like the DATA-09 rules (critical ⇒ page, warning ⇒
+# ticket); layer="slo" scopes Alertmanager routing/silences. This EXTENDS the
+# data-quality alerts — same Alertmanager, distinct layer.
+#
+#   promtool check rules slo.alerts.rules.yaml
+#   promtool test rules slo_test.yaml
+groups:
+  - name: slo_burn_rate
+    rules:
+      # Fast burn: 14.4× spends ~2% of a 28d budget in 1h → page now.
+      - alert: SLOFastBurn
+        expr: |
+          (
+            slo:sli_error:ratio_rate1h > on(service, slo) (14.4 * slo:error_budget:ratio)
+            and
+            slo:sli_error:ratio_rate5m > on(service, slo) (14.4 * slo:error_budget:ratio)
+          )
+        labels: { severity: critical, layer: slo, burn_rate: fast }
+        annotations:
+          summary: "Fast error-budget burn on {{ $labels.service }}/{{ $labels.slo }}"
+          description: "{{ $labels.service }}/{{ $labels.slo }} is burning budget at >14.4× (1h+5m windows) — current 1h error ratio {{ $value | humanizePercentage }}. At this rate the 28d budget is gone in hours."
+
+      # Slow burn: 6× spends ~5% in 6h → page (slower, but still budget-fatal).
+      - alert: SLOSlowBurn
+        expr: |
+          (
+            slo:sli_error:ratio_rate6h > on(service, slo) (6 * slo:error_budget:ratio)
+            and
+            slo:sli_error:ratio_rate30m > on(service, slo) (6 * slo:error_budget:ratio)
+          )
+        labels: { severity: critical, layer: slo, burn_rate: slow }
+        annotations:
+          summary: "Sustained error-budget burn on {{ $labels.service }}/{{ $labels.slo }}"
+          description: "{{ $labels.service }}/{{ $labels.slo }} is burning at >6× (6h+30m windows) — current 6h error ratio {{ $value | humanizePercentage }}."
+
+      # Ticket: 3× over a day — not a page, but the budget is trending to breach.
+      - alert: SLOBudgetBurnTicket
+        expr: |
+          (
+            slo:sli_error:ratio_rate1d > on(service, slo) (3 * slo:error_budget:ratio)
+            and
+            slo:sli_error:ratio_rate2h > on(service, slo) (3 * slo:error_budget:ratio)
+          )
+        labels: { severity: warning, layer: slo, burn_rate: elevated }
+        annotations:
+          summary: "Elevated error-budget burn on {{ $labels.service }}/{{ $labels.slo }}"
+          description: "{{ $labels.service }}/{{ $labels.slo }} is burning at >3× (1d+2h windows) — current 1d error ratio {{ $value | humanizePercentage }}. File a reliability ticket before it pages."
+
+      # Ticket: 1× over 3 days — chronic low-grade drain; the budget won't last
+      # the window at this rate. Catches slow rot the faster pairs miss.
+      - alert: SLOBudgetBurnChronic
+        expr: |
+          (
+            slo:sli_error:ratio_rate3d > on(service, slo) (1 * slo:error_budget:ratio)
+            and
+            slo:sli_error:ratio_rate6h > on(service, slo) (1 * slo:error_budget:ratio)
+          )
+        labels: { severity: warning, layer: slo, burn_rate: chronic }
+        annotations:
+          summary: "Chronic error-budget drain on {{ $labels.service }}/{{ $labels.slo }}"
+          description: "{{ $labels.service }}/{{ $labels.slo }} has burned >1× budget over 3d (3d+6h windows) — current 3d error ratio {{ $value | humanizePercentage }}. The 28d budget will not survive the window at this rate."
