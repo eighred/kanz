@@ -1,0 +1,196 @@
+# DR-01a — Kafka cross-region replication (MirrorMaker 2).
+#
+# Replicates the log of record (the kanz-messaging Kafka cluster, the durable
+# backbone NATS is rebuilt from) from the PRIMARY region to the DR region, so a
+# region loss costs at most the in-flight replication lag (the RPO ≤ 1min target,
+# DR-01e). MM2 runs IN THE DR REGION pulling from primary (`--clusters dr`): a
+# primary-region outage must not also take down the replicator, and a remote
+# consumer surviving a flaky link is the failure mode MM2 is built for.
+#
+# Topology is ACTIVE/PASSIVE (primary->dr only) with IdentityReplicationPolicy,
+# so topics keep IDENTICAL names across regions — on failover, producers and
+# consumers repoint at the DR bootstrap with no topic renaming (DR-01d), and the
+# DR-01c NATS reconstruction reads the same topic names it does in primary.
+#
+# This is one cluster; deploy it into the DR cluster's kanz-messaging namespace.
+# The primary bootstrap is the cross-region-reachable endpoint (VPC peering /
+# private link / internal LB) — set it in the ConfigMap below.
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: kafka-mm2
+  namespace: kanz-messaging
+  labels:
+    app.kubernetes.io/part-of: kanz
+    app.kubernetes.io/component: dr
+---
+# SEC-01c: MM2 authenticates to BOTH clusters with its own SVID (one workload
+# identity; both clusters trust the kanz.internal trust domain, so the same
+# keystore/bundle serves the primary and dr client configs). spiffe-helper
+# fetches + renews it, identical to the broker's own helper.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: kafka-mm2-spiffe-helper
+  namespace: kanz-messaging
+  labels:
+    app.kubernetes.io/part-of: kanz
+data:
+  helper.conf: |
+    agent_address         = "/run/spiffe/spire-agent.sock"
+    cert_dir              = "/etc/kafka-certs"
+    svid_file_name        = "svid.pem"
+    svid_key_file_name    = "svid_key.pem"
+    svid_bundle_file_name = "bundle.pem"
+    cmd      = "/bin/sh"
+    cmd_args = "-c 'cat /etc/kafka-certs/svid.pem /etc/kafka-certs/svid_key.pem > /etc/kafka-certs/keystore.pem'"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: kafka-mm2-config
+  namespace: kanz-messaging
+  labels:
+    app.kubernetes.io/part-of: kanz
+data:
+  mm2.properties: |
+    # --- clusters ---
+    clusters = primary, dr
+    # The primary region's cross-region-reachable mTLS bootstrap (peering /
+    # private link). The DR bootstrap is local to this cluster.
+    primary.bootstrap.servers = kafka.kanz-messaging.svc.primary:9094
+    dr.bootstrap.servers      = kafka.kanz-messaging.svc:9094
+
+    # --- direction: active/passive, primary -> dr only ---
+    primary->dr.enabled = true
+    dr->primary.enabled = false
+    # Keep topic names identical across regions (failover without remapping).
+    replication.policy.class = org.apache.kafka.connect.mirror.IdentityReplicationPolicy
+
+    # --- what to replicate: the whole log of record, incl. DLQ + snapshots ---
+    primary->dr.topics  = .*
+    # Exclude MM2/Connect internals and compacted internal topics, never the
+    # domain topics. (IdentityReplicationPolicy ⇒ no source-prefixed names.)
+    primary->dr.topics.exclude = mm2.*,.*\.internal,.*\.replica,__.*,connect-.*,heartbeats,checkpoints.*
+    groups = .*
+    primary->dr.groups = .*
+    primary->dr.groups.exclude = console-consumer-.*,connect-.*,__.*
+
+    # --- RPO: poll/emit frequently so DR trails primary by seconds ---
+    refresh.topics.interval.seconds  = 30
+    refresh.groups.interval.seconds  = 30
+    sync.topic.configs.enabled       = true
+    sync.topic.acls.enabled          = false
+    # Offset translation for failover: checkpoints + group-offset sync let a
+    # failed-over consumer resume near where it left off on primary (DR-01d).
+    primary->dr.emit.checkpoints.enabled          = true
+    primary->dr.emit.checkpoints.interval.seconds = 5
+    primary->dr.sync.group.offsets.enabled        = true
+    primary->dr.sync.group.offsets.interval.seconds = 5
+    emit.heartbeats.enabled          = true
+    emit.heartbeats.interval.seconds = 5
+
+    # --- durability of MM2's own internal topics on the target (dr) ---
+    dr.config.storage.replication.factor   = 3
+    dr.offset.storage.replication.factor   = 3
+    dr.status.storage.replication.factor   = 3
+    primary->dr.offset-syncs.topic.replication.factor = 3
+    primary->dr.checkpoints.topic.replication.factor  = 3
+    primary->dr.heartbeats.topic.replication.factor   = 3
+    replication.factor = 3
+    # Preserve the source partition count so ordering/keys carry over 1:1.
+    tasks.max = 6
+
+    # --- SEC-01c mTLS to BOTH clusters (SVID keystore from spiffe-helper) ---
+    # Empty endpoint-identification ⇒ verify the SPIFFE URI SAN, not DNS (the
+    # brokers' own setting); client cert = MM2's SVID.
+    primary.security.protocol = SSL
+    primary.ssl.keystore.type = PEM
+    primary.ssl.keystore.location = /etc/kafka-certs/keystore.pem
+    primary.ssl.truststore.type = PEM
+    primary.ssl.truststore.location = /etc/kafka-certs/bundle.pem
+    primary.ssl.endpoint.identification.algorithm =
+    dr.security.protocol = SSL
+    dr.ssl.keystore.type = PEM
+    dr.ssl.keystore.location = /etc/kafka-certs/keystore.pem
+    dr.ssl.truststore.type = PEM
+    dr.ssl.truststore.location = /etc/kafka-certs/bundle.pem
+    dr.ssl.endpoint.identification.algorithm =
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kafka-mm2
+  namespace: kanz-messaging
+  labels:
+    app: kafka-mm2
+    app.kubernetes.io/part-of: kanz
+    app.kubernetes.io/component: dr
+spec:
+  # Two workers: the dedicated MM2 cluster coordinates tasks across them (HA +
+  # throughput). They rendezvous via the internal topics on the dr cluster.
+  replicas: 2
+  selector:
+    matchLabels:
+      app: kafka-mm2
+  template:
+    metadata:
+      labels:
+        app: kafka-mm2
+        app.kubernetes.io/part-of: kanz
+    spec:
+      serviceAccountName: kafka-mm2
+      securityContext:
+        fsGroup: 1000
+      initContainers:
+        - name: spiffe-helper-init
+          image: ghcr.io/spiffe/spiffe-helper:0.9.0
+          args: ["-config", "/etc/spiffe-helper/helper.conf", "-daemon-mode=false"]
+          volumeMounts:
+            - { name: spiffe-helper-config, mountPath: /etc/spiffe-helper, readOnly: true }
+            - { name: kafka-certs, mountPath: /etc/kafka-certs }
+            - { name: spiffe, mountPath: /run/spiffe, readOnly: true }
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector:
+                  matchLabels:
+                    app: kafka-mm2
+      containers:
+        - name: mirrormaker
+          image: apache/kafka:3.9.0
+          # Dedicated MM2 mode; --clusters dr ⇒ this worker drives replication
+          # INTO the dr cluster (it runs in the DR region).
+          command: ["/opt/kafka/bin/connect-mirror-maker.sh"]
+          args: ["/etc/mm2/mm2.properties", "--clusters", "dr"]
+          volumeMounts:
+            - { name: mm2-config, mountPath: /etc/mm2, readOnly: true }
+            - { name: kafka-certs, mountPath: /etc/kafka-certs, readOnly: true }
+          resources:
+            requests: { cpu: "500m", memory: "1Gi" }
+            limits: { memory: "2Gi" }
+        - name: spiffe-helper
+          image: ghcr.io/spiffe/spiffe-helper:0.9.0
+          args: ["-config", "/etc/spiffe-helper/helper.conf"]
+          volumeMounts:
+            - { name: spiffe-helper-config, mountPath: /etc/spiffe-helper, readOnly: true }
+            - { name: kafka-certs, mountPath: /etc/kafka-certs }
+            - { name: spiffe, mountPath: /run/spiffe, readOnly: true }
+      volumes:
+        - name: mm2-config
+          configMap:
+            name: kafka-mm2-config
+        - name: spiffe-helper-config
+          configMap:
+            name: kafka-mm2-spiffe-helper
+        - name: kafka-certs
+          emptyDir:
+            medium: Memory
+        - name: spiffe
+          csi:
+            driver: csi.spiffe.io
+            readOnly: true

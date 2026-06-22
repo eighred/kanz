@@ -143,7 +143,7 @@ _Objective: tamper-evident reconstruction of every decision, command, and data-q
 
 _Objective: provable cross-region RPO/RTO for the durable log, state stores, and registry. Continuity + regulatory (ROI #11)._
 
-- [ ] **DR-01a** Kafka cross-region replication (MirrorMaker2 / cluster-linking) of the log of record to a DR region · `kanz/infra/dr/kafka/`
+- [x] **DR-01a** Kafka cross-region replication (MirrorMaker2 / cluster-linking) of the log of record to a DR region · `kanz/infra/dr/kafka/` — _(see DONE)_
 - [ ] **DR-01b** Postgres PITR + cross-region replicas (PERS-01 risk state + schema registry) · `kanz/infra/dr/postgres/`
 - [ ] **DR-01c** NATS DR: automate spine reconstruction from the Kafka log (the architecture already makes NATS rebuildable) with a documented RTO · `kanz/infra/dr/nats/`
 - [ ] **DR-01d** Failover automation + runbook: traffic shift, promote replicas, re-bootstrap services (PERS-01d) · `kanz/infra/dr/`, `kanz/docs/runbooks/dr.md`
@@ -260,6 +260,10 @@ _(prior context — **AUTH-01 + MT-01 epics COMPLETE**. MT-01a–g all in DONE: 
 ---
 
 ## DONE
+
+### Disaster Recovery & Backup
+
+- [x] **DR-01a** Kafka cross-region replication (MirrorMaker 2) — new `kanz/infra/dr/kafka/` (`mirrormaker2.yaml` + README). Replicates the **log of record** (the `kanz-messaging` Kafka cluster) into a DR region so a region loss costs at most the replication lag — the foundation DR-01c (rebuild NATS from the replicated log) and DR-01d (fail consumers over) stand on. **Active/passive, primary→dr only**, with MM2 running **in the DR region pulling from primary** (`connect-mirror-maker.sh --clusters dr`): the replicator must survive a primary-region outage, and a remote consumer on a flaky cross-region link is MM2's design point. **IdentityReplicationPolicy** keeps topic names IDENTICAL across regions (`risk.portfolio` stays `risk.portfolio`, not `primary.risk.portfolio`) so failover repoints the bootstrap with no topic remapping and DR-01c reads the same names — safe because replication is one-directional (no active/active loop). Replicates every domain topic + snapshot + `dlq.*` (the DLQ is part of the record) minus MM2/Connect internals; `sync.topic.configs` on, and **consumer-group offsets translated to DR via checkpoints + `sync.group.offsets`** (5s interval) so a failed-over consumer resumes near where it left off — inside the RPO ≤ 1min target, measurable from the heartbeats topic. **SEC-01c mTLS to BOTH clusters via one SVID** (both trust `kanz.internal`; spiffe-helper init+sidecar mirrors the broker's, empty endpoint-identification ⇒ verify the SPIFFE URI SAN). 2-worker Deployment (HA, coordinates via DR-side internal topics, RF 3). **Operational deps documented**: set the primary cross-region bootstrap; grant MM2's SVID READ-all on primary + admin on DR (deny-by-default MT-01c, else it silently mirrors nothing); stand up the DR cluster first. YAML validated (4 docs) · `kanz/infra/dr/kafka/`
 
 ### Auditability & Regulatory Reporting
 
