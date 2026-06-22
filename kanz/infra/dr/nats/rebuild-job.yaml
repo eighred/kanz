@@ -1,0 +1,66 @@
+# DR-01c — NATS spine reconstruction.
+#
+# After a region failover the DR NATS cluster is empty (NATS is the short-
+# retention live tier, not a system of record). This Job rebuilds the live spine
+# from the DR-replicated Kafka log of record (DR-01a): it drains a bounded recent
+# window of each log-of-record topic back onto the LIVE subjects, then exits.
+# Re-runnable — the stream dedup window + idempotent handlers make a partial
+# rebuild safe to repeat.
+#
+# Order in the DR cutover (DR-01d): (1) NATS up + streams provisioned
+# (bootstrap-job), (2) THIS Job, (3) start consumers. Kafka is read plaintext
+# in-cluster (kafka:9092); NATS publish is SEC-01c mTLS (the rebuild's SVID).
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: nats-rebuild
+  namespace: kanz-messaging
+  labels:
+    app.kubernetes.io/part-of: kanz
+    app.kubernetes.io/component: dr
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: nats-rebuild
+  namespace: kanz-messaging
+  labels:
+    app: nats-rebuild
+    app.kubernetes.io/part-of: kanz
+    app.kubernetes.io/component: dr
+spec:
+  backoffLimit: 3
+  template:
+    metadata:
+      labels:
+        app: nats-rebuild
+        app.kubernetes.io/part-of: kanz
+    spec:
+      serviceAccountName: nats-rebuild
+      restartPolicy: Never
+      containers:
+        - name: nats-rebuild
+          # Built from kanz/tools/natsrebuild/cmd/nats-rebuild; add it to the
+          # CICD-01c image matrix + a distroless Dockerfile (follow-up).
+          image: ghcr.io/kanz-eng/nats-rebuild:latest
+          env:
+            - { name: NATS_REBUILD_KAFKA_BROKERS, value: "kafka:9092" }
+            - { name: NATS_REBUILD_NATS_URL, value: "nats://nats:4222" }
+            # The log-of-record topics (infra/kafka/README §Topics). The live
+            # spine needs the recent window, not full history — 24h matches the
+            # longest live-tier max-age (infra/nats/README §Streams).
+            - { name: NATS_REBUILD_TOPICS, value: "market.equity,market.option,risk.portfolio,risk.portfolio.snapshot,execution.order,execution.order.snapshot,inference.feature,inference.prediction,platform.model,platform.config,data.market_stream,data.feature" }
+            - { name: NATS_REBUILD_SINCE, value: "24h" }
+            # SEC-01c: SVID socket so NATS (verify:true) accepts the publisher.
+            - { name: NATS_REBUILD_SPIFFE_SOCKET, value: "/run/spiffe/spire-agent.sock" }
+          volumeMounts:
+            - { name: spiffe, mountPath: /run/spiffe, readOnly: true }
+          resources:
+            requests: { cpu: "500m", memory: "512Mi" }
+            limits: { memory: "1Gi" }
+      volumes:
+        - name: spiffe
+          csi:
+            driver: csi.spiffe.io
+            readOnly: true

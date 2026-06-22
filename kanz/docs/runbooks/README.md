@@ -33,6 +33,8 @@ so the drill is the runbook's live test.
 | `broker-partition.md` | risk-engine isolated → degraded mode | `network-partition.yaml` |
 | `inference-latency.md` | inference slow → circuit breaker open | `latency-injection.yaml` |
 | `pod-loss.md` | a service replica lost/crashed | `pod-eviction.yaml` |
+| `dr.md` | region failover (disaster recovery) | `infra/dr/failover.sh` |
+| `dr-drill.md` | quarterly live-failover DR drill | `infra/dr/failover.sh` |
 | `_template.md` | copy to author a new runbook | — |
 
 ## Keeping them honest

@@ -1,0 +1,67 @@
+# DR-01b — DR-region replica clusters (warm standby).
+#
+# Apply these IN THE DR REGION. Each is a CloudNativePG replica cluster that
+# continuously replays the primary's archived WAL from the cross-region object
+# store (cluster.yaml), staying a warm standby. On a real failover (DR-01d) it is
+# promoted to a standalone primary (`replica.enabled: false`, or
+# `kubectl cnpg promote`) and the services repoint at it.
+#
+# Bootstrap is `recovery` from the object store (no direct primary connection
+# needed — survives a primary-region partition), so the replica lag is bounded by
+# WAL archive cadence (archive_timeout 30s on the primary) — inside RPO ≤ 1min.
+# For tighter RPO, add a streaming `connectionParameters` source to the external
+# cluster so it also streams when the primary is reachable.
+---
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: kanz-risk
+  namespace: kanz-data
+  labels: { app.kubernetes.io/part-of: kanz, app.kubernetes.io/component: dr }
+spec:
+  instances: 2
+  primaryUpdateStrategy: unsupervised
+  storage:
+    size: 50Gi
+  replica:
+    enabled: true            # set false (or `cnpg promote`) to fail over
+    source: kanz-risk-origin
+  bootstrap:
+    recovery:
+      source: kanz-risk-origin
+  externalClusters:
+    - name: kanz-risk-origin
+      barmanObjectStore:
+        serverName: kanz-risk
+        destinationPath: s3://kanz-dr-backups/risk
+        s3Credentials:
+          accessKeyId: { name: kanz-dr-s3, key: ACCESS_KEY_ID }
+          secretAccessKey: { name: kanz-dr-s3, key: SECRET_ACCESS_KEY }
+        wal: { compression: gzip }
+---
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: kanz-registry
+  namespace: kanz-data
+  labels: { app.kubernetes.io/part-of: kanz, app.kubernetes.io/component: dr }
+spec:
+  instances: 2
+  primaryUpdateStrategy: unsupervised
+  storage:
+    size: 20Gi
+  replica:
+    enabled: true
+    source: kanz-registry-origin
+  bootstrap:
+    recovery:
+      source: kanz-registry-origin
+  externalClusters:
+    - name: kanz-registry-origin
+      barmanObjectStore:
+        serverName: kanz-registry
+        destinationPath: s3://kanz-dr-backups/registry
+        s3Credentials:
+          accessKeyId: { name: kanz-dr-s3, key: ACCESS_KEY_ID }
+          secretAccessKey: { name: kanz-dr-s3, key: SECRET_ACCESS_KEY }
+        wal: { compression: gzip }
