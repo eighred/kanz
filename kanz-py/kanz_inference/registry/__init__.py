@@ -23,6 +23,11 @@ Importable names:
   ``Registry.record_validation``.
 """
 
+from kanz_inference.registry.coordination import (
+    CoordinatedRegistry,
+    RegistryEvent,
+    RegistryPublisher,
+)
 from kanz_inference.registry.registry import (
     ModelLoader,
     ModelMetadata,
@@ -32,9 +37,12 @@ from kanz_inference.registry.registry import (
 )
 
 __all__ = [
+    "CoordinatedRegistry",
     "ModelLoader",
     "ModelMetadata",
     "Registry",
+    "RegistryEvent",
+    "RegistryPublisher",
     "ValidationError",
     "ValidationRecord",
 ]

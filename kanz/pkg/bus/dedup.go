@@ -5,12 +5,28 @@ import (
 	"time"
 )
 
+// Deduper is the consumer's seen-key check. Two separate calls (not one
+// check-and-set) so the Consumer records only after a *successful* dispatch — a
+// handler failure must not poison the window against retries. Implementations:
+// the in-memory per-instance DedupWindow (default) and the distributed
+// RedisDedup (DEBT-02a, opt-in via WithDeduper) for cross-pod dedup. Both treat
+// a nil receiver as a no-op so "disabled" needs no nil-checks at the call site.
+type Deduper interface {
+	// Seen reports whether key was Recorded within the dedup window.
+	Seen(key string) bool
+	// Record marks key as seen now.
+	Record(key string)
+}
+
+// Compile-time assertion the in-memory window satisfies the interface.
+var _ Deduper = (*DedupWindow)(nil)
+
 // DedupWindow is a bounded sliding window of idempotency_keys seen by a
 // consumer instance. It is in-memory and per-instance — cross-pod dedup is
-// NOT in scope; the canonical defense against cross-instance redelivery is
-// idempotent handlers (event-class-rules §1). This window is belt-and-braces
-// against in-instance redelivery and a perf optimization that lets a
-// successful handler skip redundant work.
+// NOT in scope here (use RedisDedup for that, DEBT-02a); the canonical defense
+// against cross-instance redelivery is idempotent handlers (event-class-rules
+// §1). This window is belt-and-braces against in-instance redelivery and a perf
+// optimization that lets a successful handler skip redundant work.
 //
 // Sized by TTL (correctness window — default matches NATS JetStream's
 // broker-side dedup so the layers reinforce) and max entry count (memory

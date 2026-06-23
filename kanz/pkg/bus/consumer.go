@@ -31,7 +31,7 @@ type EventHandler func(ctx context.Context, env *envelopepb.Envelope, payload []
 type Consumer struct {
 	subscriber Subscriber
 	dlq        Publisher
-	dedup      *DedupWindow
+	dedup      Deduper
 	retry      RetryConfig
 	validate   func(*envelopepb.Envelope) error
 	metrics    *BusMetrics
@@ -40,6 +40,7 @@ type Consumer struct {
 type consumerOptions struct {
 	dedupTTL  time.Duration
 	dedupMax  int
+	deduper   Deduper
 	retry     RetryConfig
 	dlq       Publisher
 	validator func(*envelopepb.Envelope) error
@@ -58,6 +59,20 @@ func WithDedupWindow(ttl time.Duration, max int) ConsumerOption {
 	return func(o *consumerOptions) {
 		o.dedupTTL = ttl
 		o.dedupMax = max
+	}
+}
+
+// WithDeduper overrides the default in-memory dedup window with a caller-
+// supplied Deduper — notably RedisDedup (DEBT-02a) for cross-pod dedup. Takes
+// precedence over WithDedupWindow's ttl/max. A nil deduper is ignored (the
+// in-memory default stands). The Consumer's pipeline is unchanged: it only ever
+// calls Seen/Record on the Deduper, so the in-memory vs distributed choice is a
+// pure wiring decision at the composition root.
+func WithDeduper(d Deduper) ConsumerOption {
+	return func(o *consumerOptions) {
+		if d != nil {
+			o.deduper = d
+		}
 	}
 }
 
@@ -109,10 +124,18 @@ func NewConsumer(s Subscriber, opts ...ConsumerOption) (*Consumer, error) {
 	if o.validator == nil {
 		o.validator = Validate
 	}
+	// A caller-supplied Deduper (WithDeduper, e.g. RedisDedup) wins; otherwise
+	// the in-memory window from ttl/max. Either may be a nil-receiver no-op
+	// ("disabled") — boxed in the Deduper interface it stays nil-safe, so the
+	// Subscribe path needs no nil-check.
+	dedup := o.deduper
+	if dedup == nil {
+		dedup = NewDedupWindow(o.dedupTTL, o.dedupMax)
+	}
 	return &Consumer{
 		subscriber: s,
 		dlq:        o.dlq,
-		dedup:      NewDedupWindow(o.dedupTTL, o.dedupMax),
+		dedup:      dedup,
 		retry:      o.retry.withDefaults(),
 		validate:   o.validator,
 		metrics:    o.metrics,

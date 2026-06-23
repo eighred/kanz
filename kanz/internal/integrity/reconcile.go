@@ -143,17 +143,41 @@ type pendingEntry struct {
 // re-enter as Pending.
 //
 // Detection only — DATA-06 wires quality_flags, DATA-07 emits the
-// DataQualityEvent. In-memory, per-process, concurrent-safe; the pending
-// set re-baselines on restart.
+// DataQualityEvent. Concurrent-safe. The pending set lives behind a
+// PendingStore: the default in-memory store is per-process (re-baselines on
+// restart); a shared store (DEBT-02b) lets N reconciler replicas coordinate so
+// a NATS sighting on one pod matches the Kafka sighting on another.
 type Reconciler struct {
 	matchDeadline time.Duration
 	now           func() time.Time
-	mu            sync.Mutex
-	pending       map[string]pendingEntry
+	store         PendingStore
 }
 
-// NewReconciler returns a reconciler using the wall clock. A non-positive
-// matchDeadline falls back to DefaultMatchDeadline.
+// PendingStore holds the cross-transport pending set. The default in-memory
+// implementation is per-process; the **shared-state reconciler mode** (DEBT-02b)
+// injects a distributed store (e.g. Redis, with ClaimOrMatch realized as an
+// atomic Lua script — the bus stays decoupled from the client the same way
+// RedisDedup does) so replicas that each see only one transport still reconcile.
+//
+// ClaimOrMatch MUST be atomic per key: the check-set-or-delete is a single
+// read-modify-write, and a non-atomic distributed impl would let two replicas
+// both record Pending and never match. SweepExpired/Count have no such
+// constraint.
+type PendingStore interface {
+	// ClaimOrMatch atomically reconciles one sighting of key on transport at
+	// now: absent ⇒ record + ReconcilePending; present same-transport ⇒
+	// ReconcileDuplicate (firstSeen kept); present other-transport ⇒ delete +
+	// ReconcileMatched with the first transport and its firstSeen. The latter
+	// two return values are meaningful only for ReconcileMatched.
+	ClaimOrMatch(key string, transport Transport, now time.Time) (ReconcileStatus, Transport, time.Time)
+	// SweepExpired removes and returns every entry older than deadline as of now.
+	SweepExpired(deadline time.Duration, now time.Time) []Discrepancy
+	// Count is the number of pending entries (a gauge).
+	Count() int
+}
+
+// NewReconciler returns a reconciler using the wall clock and a fresh in-memory
+// store. A non-positive matchDeadline falls back to DefaultMatchDeadline.
 func NewReconciler(matchDeadline time.Duration) *Reconciler {
 	return NewReconcilerWithClock(matchDeadline, time.Now)
 }
@@ -163,17 +187,24 @@ func NewReconciler(matchDeadline time.Duration) *Reconciler {
 // codebase's clock-injection convention — cf. PRED-07's
 // NewSyncClientWithStub). A nil now falls back to time.Now.
 func NewReconcilerWithClock(matchDeadline time.Duration, now func() time.Time) *Reconciler {
+	return NewReconcilerWithStore(NewInMemoryPendingStore(), matchDeadline, now)
+}
+
+// NewReconcilerWithStore builds a reconciler over a caller-supplied PendingStore
+// — the entry point for the shared-state mode (DEBT-02b): pass a distributed
+// store and several reconciler replicas coordinate through it. A nil store
+// falls back to a fresh in-memory one (parity with NewReconciler).
+func NewReconcilerWithStore(store PendingStore, matchDeadline time.Duration, now func() time.Time) *Reconciler {
+	if store == nil {
+		store = NewInMemoryPendingStore()
+	}
 	if matchDeadline <= 0 {
 		matchDeadline = DefaultMatchDeadline
 	}
 	if now == nil {
 		now = time.Now
 	}
-	return &Reconciler{
-		matchDeadline: matchDeadline,
-		now:           now,
-		pending:       make(map[string]pendingEntry),
-	}
+	return &Reconciler{matchDeadline: matchDeadline, now: now, store: store}
 }
 
 // Observe records one event seen on the given transport and reports whether
@@ -184,29 +215,14 @@ func (r *Reconciler) Observe(transport Transport, env *envelopepb.Envelope) Reco
 	if env == nil || env.IdempotencyKey == "" || transport == TransportUnspecified {
 		return ReconcileResult{Transport: transport, Status: ReconcileNotApplicable}
 	}
-	key := env.IdempotencyKey
-	res := ReconcileResult{Key: key, Transport: transport}
-
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
-	entry, ok := r.pending[key]
-	if !ok {
-		r.pending[key] = pendingEntry{transport: transport, firstSeen: r.now()}
-		res.Status = ReconcilePending
-		return res
+	now := r.now()
+	res := ReconcileResult{Key: env.IdempotencyKey, Transport: transport}
+	status, firstTransport, firstSeen := r.store.ClaimOrMatch(env.IdempotencyKey, transport, now)
+	res.Status = status
+	if status == ReconcileMatched {
+		res.FirstTransport = firstTransport
+		res.MatchLatency = now.Sub(firstSeen)
 	}
-	if entry.transport == transport {
-		// Redelivery on the same side before the counterpart arrived. Keep
-		// the original firstSeen so the deadline measures from first sight.
-		res.Status = ReconcileDuplicate
-		return res
-	}
-	// Counterpart arrived — confirmed on both transports.
-	delete(r.pending, key)
-	res.Status = ReconcileMatched
-	res.FirstTransport = entry.transport
-	res.MatchLatency = r.now().Sub(entry.firstSeen)
 	return res
 }
 
@@ -215,15 +231,54 @@ func (r *Reconciler) Observe(transport Transport, env *envelopepb.Envelope) Reco
 // (a later straggler on the missing side re-enters as Pending). A periodic
 // job calls this; the returned slice is nil when nothing has aged out.
 func (r *Reconciler) Sweep() []Discrepancy {
-	now := r.now()
+	return r.store.SweepExpired(r.matchDeadline, r.now())
+}
+
+// PendingCount is how many events are currently awaiting confirmation on the
+// other transport — a gauge for observability and tests.
+func (r *Reconciler) PendingCount() int {
+	return r.store.Count()
+}
+
+// inMemoryPendingStore is the default per-process PendingStore (the original
+// Reconciler state). Concurrent-safe via a mutex, which also makes ClaimOrMatch
+// atomic within the process.
+type inMemoryPendingStore struct {
+	mu      sync.Mutex
+	pending map[string]pendingEntry
+}
+
+// NewInMemoryPendingStore returns a fresh in-memory PendingStore. Share one
+// instance across several Reconcilers to coordinate them within a process; for
+// cross-process coordination inject a distributed store instead.
+func NewInMemoryPendingStore() PendingStore {
+	return &inMemoryPendingStore{pending: make(map[string]pendingEntry)}
+}
+
+func (s *inMemoryPendingStore) ClaimOrMatch(key string, transport Transport, now time.Time) (ReconcileStatus, Transport, time.Time) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	entry, ok := s.pending[key]
+	if !ok {
+		s.pending[key] = pendingEntry{transport: transport, firstSeen: now}
+		return ReconcilePending, TransportUnspecified, time.Time{}
+	}
+	if entry.transport == transport {
+		// Redelivery on the same side; keep the original firstSeen so the
+		// deadline still measures from first sight.
+		return ReconcileDuplicate, TransportUnspecified, time.Time{}
+	}
+	delete(s.pending, key)
+	return ReconcileMatched, entry.transport, entry.firstSeen
+}
+
+func (s *inMemoryPendingStore) SweepExpired(deadline time.Duration, now time.Time) []Discrepancy {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	var out []Discrepancy
-
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
-	for key, entry := range r.pending {
+	for key, entry := range s.pending {
 		age := now.Sub(entry.firstSeen)
-		if age > r.matchDeadline {
+		if age > deadline {
 			out = append(out, Discrepancy{
 				Key:       key,
 				SeenOn:    entry.transport,
@@ -231,16 +286,14 @@ func (r *Reconciler) Sweep() []Discrepancy {
 				FirstSeen: entry.firstSeen,
 				Age:       age,
 			})
-			delete(r.pending, key)
+			delete(s.pending, key)
 		}
 	}
 	return out
 }
 
-// PendingCount is how many events are currently awaiting confirmation on the
-// other transport — a gauge for observability and tests.
-func (r *Reconciler) PendingCount() int {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	return len(r.pending)
+func (s *inMemoryPendingStore) Count() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.pending)
 }

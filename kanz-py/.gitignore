@@ -1,0 +1,4 @@
+# Python bytecode + test caches — never committed.
+__pycache__/
+*.py[cod]
+.pytest_cache/
