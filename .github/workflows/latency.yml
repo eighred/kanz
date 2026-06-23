@@ -112,6 +112,41 @@ jobs:
         if: always()
         run: docker compose -f kanz/test/load/docker-compose.yml down -v
 
+  benchmarks:
+    # LATENCY-01d — run the compute hot-path benchmarks in CI. The deterministic
+    # allocation-regression GUARD is the `testing.AllocsPerRun` cases in
+    # compute/regression_test.go, executed by the kanz-ci `go test -race ./...`
+    # gate (no flaky timing baseline). This job additionally runs the `testing.B`
+    # benchmarks (-benchtime=10x, fast) so they stay compilable + their numbers
+    # surface per PR for trend-watching.
+    if: github.event_name != 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: kanz/go.mod
+          cache-dependency-path: kanz/go.sum
+      - uses: bufbuild/buf-setup-action@v1
+        with:
+          version: 1.69.0
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Install protoc plugins
+        run: |
+          go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.11
+          go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@v1.5.1
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+      - name: Generate kanz-schemas Go SDK
+        working-directory: kanz-schemas
+        run: |
+          buf generate
+          cd gen/go
+          go mod init github.com/kanz-eng/kanz-schemas-go || true
+          go mod tidy
+      - name: Run compute benchmarks
+        working-directory: kanz
+        run: go test -run '^$' -bench . -benchmem -benchtime=10x ./internal/risk/compute/...
+
   capacity-baseline:
     # Manual only. The multi-minute ramp to the capacity knee — against a real
     # deployed env (base_url) or, with no input, a fresh ephemeral stack.
