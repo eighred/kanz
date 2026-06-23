@@ -1,0 +1,163 @@
+---
+# Runtime network hardening (SEC-02a): default-deny + explicit allows for the
+# kanz-services namespace. Zero-trust at the network layer to complement the
+# zero-trust IDENTITY layer (SEC-01 mTLS/SPIFFE): even a compromised pod can only
+# reach the few peers its function requires, and can only be reached by them.
+#
+# Ordering: NetworkPolicy is additive — a pod selected by ANY policy is
+# default-deny for that direction except where a policy explicitly allows. The
+# first policy below selects every pod and allows nothing, making the namespace
+# deny-by-default; the rest open the minimum each flow needs. Requires a CNI that
+# enforces NetworkPolicy (Cilium/Calico) — the kind the INFRA-01a cluster runs.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+  namespace: kanz-services
+  labels:
+    app.kubernetes.io/part-of: kanz
+spec:
+  podSelector: {} # every pod
+  policyTypes: [Ingress, Egress]
+  # No ingress/egress rules ⇒ deny all in both directions until a policy allows.
+---
+# DNS is the one egress every pod needs (service discovery resolves the
+# kanz-messaging / OTLP service names below). Allow only to kube-dns, only 53.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-dns-egress
+  namespace: kanz-services
+  labels:
+    app.kubernetes.io/part-of: kanz
+spec:
+  podSelector: {}
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - { protocol: UDP, port: 53 }
+        - { protocol: TCP, port: 53 }
+---
+# Every service talks to the messaging spine (NATS 4222, Kafka 9094) in
+# kanz-messaging. Scope egress to that namespace + those ports only.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-messaging-egress
+  namespace: kanz-services
+  labels:
+    app.kubernetes.io/part-of: kanz
+spec:
+  podSelector: {}
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kanz-messaging
+      ports:
+        - { protocol: TCP, port: 4222 } # NATS
+        - { protocol: TCP, port: 9094 } # Kafka
+---
+# Telemetry: allow egress to the OTLP collector (OBS-01) on 4317. Scoped to the
+# observability namespace.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-otlp-egress
+  namespace: kanz-services
+  labels:
+    app.kubernetes.io/part-of: kanz
+spec:
+  podSelector: {}
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kanz-observability
+      ports:
+        - { protocol: TCP, port: 4317 }
+---
+# The gateway → risk-engine gRPC query call (API-01c, over mTLS). The ONLY
+# ingress risk-engine accepts on 8081, and only from the api-gateway pods.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-gateway-to-risk-engine
+  namespace: kanz-services
+  labels:
+    app.kubernetes.io/part-of: kanz
+spec:
+  podSelector:
+    matchLabels:
+      app: risk-engine
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: api-gateway
+      ports:
+        - { protocol: TCP, port: 8081 }
+    # Prometheus scrape of /metrics (OBS-01) from the observability namespace.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kanz-observability
+      ports:
+        - { protocol: TCP, port: 8081 }
+  # The gateway → risk-engine egress half (the same flow, egress side on the
+  # gateway pods).
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-risk-engine-egress-from-gateway
+  namespace: kanz-services
+  labels:
+    app.kubernetes.io/part-of: kanz
+spec:
+  podSelector:
+    matchLabels:
+      app: api-gateway
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app: risk-engine
+      ports:
+        - { protocol: TCP, port: 8081 }
+---
+# External clients reach the gateway through the ingress controller only. Allow
+# ingress to api-gateway:8080 from the ingress-nginx namespace + scrape.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-ingress-to-gateway
+  namespace: kanz-services
+  labels:
+    app.kubernetes.io/part-of: kanz
+spec:
+  podSelector:
+    matchLabels:
+      app: api-gateway
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: ingress-nginx
+      ports:
+        - { protocol: TCP, port: 8080 }
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kanz-observability
+      ports:
+        - { protocol: TCP, port: 8080 }

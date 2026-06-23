@@ -1,0 +1,85 @@
+# Security CI (SEC-02c/d/e). Three gates:
+#   gitleaks              — secret scanning on every PR + push (SEC-02d)
+#   secret-scan-selftest  — proves the gitleaks gate actually catches a secret (SEC-02e)
+#   dependency-scan       — scheduled govulncheck + trivy fs over deps (SEC-02c)
+# The remediation SLA for what these surface is SECURITY.md. Dependency UPDATE
+# PRs come from .github/dependabot.yml; this workflow is the active detector.
+name: security
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  schedule:
+    - cron: '0 6 * * 1' # Mondays 06:00 UTC — weekly dependency scan
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  gitleaks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # full history so `detect` scans every commit, not just the tip
+      - name: gitleaks (secret scan)
+        run: |
+          docker run --rm -v "$PWD:/repo" ghcr.io/gitleaks/gitleaks:latest \
+            detect --source=/repo --config=/repo/.gitleaks.toml --redact --no-banner --verbose
+
+  secret-scan-selftest:
+    # SEC-02e: a planted secret must be detected. Guards against a misconfigured
+    # gitleaks (over-broad allowlist, broken rules) silently passing everything.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: planted-secret detection self-test
+        run: sh kanz/infra/security/test/gitleaks-planted-secret.sh
+
+  dependency-scan:
+    # Heavy scans run on the weekly schedule + on demand, not on every PR.
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    env:
+      GOFLAGS: -mod=mod
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: kanz/go.mod
+          cache-dependency-path: kanz/go.sum
+      - uses: bufbuild/buf-setup-action@v1
+        with:
+          version: 1.69.0
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Install protoc plugins
+        run: |
+          go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.11
+          go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@v1.5.1
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+      - name: Generate kanz-schemas Go SDK
+        working-directory: kanz-schemas
+        run: |
+          buf generate
+          cd gen/go
+          go mod init github.com/kanz-eng/kanz-schemas-go || true
+          go mod tidy
+      # govulncheck is reachability-aware (flags a CVE only if the vulnerable
+      # symbol is actually called) — the right Go gate, low false positives.
+      - name: govulncheck (Go)
+        working-directory: kanz
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          "$(go env GOPATH)/bin/govulncheck" ./...
+      # trivy fs covers the other ecosystems' lockfiles (npm, pip, go.sum) in one
+      # pass. Fail on HIGH/CRITICAL with a fix available (the SECURITY.md SLA tiers).
+      - name: trivy filesystem (deps)
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: '1'

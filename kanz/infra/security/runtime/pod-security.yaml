@@ -1,0 +1,57 @@
+---
+# Pod Security Standards enforcement (SEC-02a). The kanz-services namespace is
+# pinned to the "restricted" PSS profile — Kubernetes' built-in admission gate
+# that rejects any pod not meeting the hardened baseline (non-root, no
+# privilege escalation, dropped capabilities, seccomp RuntimeDefault, no host
+# namespaces/hostPath). It is the cluster's safety net BEHIND the per-workload
+# securityContext (risk-engine-rollout.yaml): the context is the intent, PSS
+# enforces that nothing slips through without it.
+#
+# `enforce` blocks violations; `audit`/`warn` also surface them in the API audit
+# log + as kubectl warnings so a drift is visible, not silent. Pinned to a
+# version so a cluster upgrade can't silently tighten/loosen the bar.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: kanz-services
+  labels:
+    app.kubernetes.io/part-of: kanz
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: v1.31
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/audit-version: v1.31
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/warn-version: v1.31
+    # sigstore policy-controller scope (SEC-02b admission). Kept here so the
+    # namespace carries every admission opt-in in one place.
+    policy.sigstore.dev/include: "true"
+---
+# The canonical hardened securityContext every kanz workload sets — the literal
+# values risk-engine-rollout.yaml applies, kept here as the reusable reference a
+# new service (DEVX-01b scaffold) copies. Documented as a ConfigMap rather than a
+# CRD so it's greppable policy-as-data, not silent tribal knowledge.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: kanz-hardened-securitycontext
+  namespace: kanz-services
+  labels:
+    app.kubernetes.io/part-of: kanz
+data:
+  # pod.spec.securityContext
+  pod-securityContext.yaml: |
+    runAsNonRoot: true
+    runAsUser: 65532          # distroless :nonroot uid
+    runAsGroup: 65532
+    fsGroup: 65532
+    seccompProfile:
+      type: RuntimeDefault    # the kernel-syscall allowlist; gVisor is the
+                              # stronger RuntimeClass alternative for the most
+                              # sensitive workloads (a per-RuntimeClass override).
+  # container[].securityContext
+  container-securityContext.yaml: |
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: true   # writes go to an explicit emptyDir /tmp
+    runAsNonRoot: true
+    capabilities:
+      drop: ["ALL"]                # a static Go binary needs no Linux caps

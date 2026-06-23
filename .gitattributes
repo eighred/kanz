@@ -1,0 +1,5 @@
+# Shell scripts and git hooks MUST keep LF endings: a CRLF shebang (#!/bin/sh\r)
+# is an invalid interpreter on Linux/CI and breaks the SEC-02d pre-commit hook +
+# the SEC-02e self-test scripts. Force LF regardless of core.autocrlf.
+*.sh text eol=lf
+kanz/.githooks/* text eol=lf

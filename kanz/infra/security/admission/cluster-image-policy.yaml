@@ -36,11 +36,18 @@ spec:
             subjectRegExp: "^https://github.com/kanz-eng/kanz/.github/workflows/release.yml@refs/tags/v.*$"
         ctlog:
           url: https://rekor.sigstore.dev
-      # Require the SBOM attestation the workflow attaches, not just the
-      # signature — an image must ship a provenance record to run.
+      # Require BOTH attestations the release workflow attaches, not just the
+      # signature: an SBOM (provenance) AND a vuln scan (SEC-02b). The only path
+      # to a signed+attested image is through release.yml, whose trivy step fails
+      # on CRITICAL *before* signing — so a critical-CVE image is never signed and
+      # is rejected here by the signature requirement; the vuln attestation makes
+      # that scan auditable and gives the SEC-02c scheduled re-scan a baseline for
+      # CVEs disclosed after release.
       attestations:
         - name: must-have-sbom
           predicateType: spdxjson
+        - name: must-have-vuln-scan
+          predicateType: https://cosign.sigstore.dev/attestation/vuln/v1
   # Fail closed: if policy-controller can't verify (e.g. Rekor unreachable),
   # block admission rather than fall open.
   mode: enforce

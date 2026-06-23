@@ -1,0 +1,64 @@
+# Dependency hygiene (SEC-02c). Dependabot opens grouped update PRs across every
+# ecosystem in the monorepo on a weekly cadence; the security-scan workflow
+# (.github/workflows/security.yml) is the active vuln detector, and the
+# remediation SLA lives in SECURITY.md. Grouped so routine bumps land as one PR
+# per ecosystem (less review churn) while SECURITY updates always come alone +
+# promptly.
+version: 2
+
+updates:
+  # Go monorepo module.
+  - package-ecosystem: gomod
+    directory: /kanz
+    schedule: { interval: weekly }
+    open-pull-requests-limit: 5
+    groups:
+      go-deps:
+        patterns: ["*"]
+        update-types: [minor, patch]
+
+  # The standalone schema-ingest tool module (its own go.mod, EVT-16b).
+  - package-ecosystem: gomod
+    directory: /kanz-schemas/tools/registry-ingest
+    schedule: { interval: weekly }
+    open-pull-requests-limit: 3
+
+  # Python inference package.
+  - package-ecosystem: pip
+    directory: /kanz-py
+    schedule: { interval: weekly }
+    open-pull-requests-limit: 5
+    groups:
+      py-deps:
+        patterns: ["*"]
+        update-types: [minor, patch]
+
+  # TypeScript bus client.
+  - package-ecosystem: npm
+    directory: /kanz/ts/kanz-bus
+    schedule: { interval: weekly }
+    open-pull-requests-limit: 5
+    groups:
+      ts-deps:
+        patterns: ["*"]
+        update-types: [minor, patch]
+
+  # GitHub Actions pinned in the workflows (keep the supply chain of CI itself
+  # current — the actions are part of the build's trust base).
+  - package-ecosystem: github-actions
+    directory: /
+    schedule: { interval: weekly }
+    groups:
+      ci-actions:
+        patterns: ["*"]
+
+  # Container base images in the service Dockerfiles.
+  - package-ecosystem: docker
+    directory: /kanz/services/risk-engine
+    schedule: { interval: weekly }
+  - package-ecosystem: docker
+    directory: /kanz/services/schema-registry
+    schedule: { interval: weekly }
+  - package-ecosystem: docker
+    directory: /kanz/services/api-gateway
+    schedule: { interval: weekly }

@@ -1,0 +1,21 @@
+#!/bin/sh
+# SEC-02d pre-commit secret scan — the local complement to the CI gitleaks gate
+# (.github/workflows/security.yml). Catches a secret before it ever leaves the
+# dev machine, which CI can't (a secret in a commit is already in history by the
+# time CI runs). Enable once per clone:
+#
+#   git config core.hooksPath kanz/.githooks
+#
+# `protect --staged` scans only what's about to be committed (fast). If gitleaks
+# isn't installed we warn and pass — the CI gate is the hard backstop, so a dev
+# who hasn't installed it locally isn't blocked, just unprotected (and told so).
+set -eu
+
+if ! command -v gitleaks >/dev/null 2>&1; then
+  echo "warning: gitleaks not installed — skipping local secret scan." >&2
+  echo "         install https://github.com/gitleaks/gitleaks (CI still enforces it)." >&2
+  exit 0
+fi
+
+repo_root=$(git rev-parse --show-toplevel)
+exec gitleaks protect --staged --redact --no-banner --config "$repo_root/.gitleaks.toml"

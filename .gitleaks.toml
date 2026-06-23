@@ -1,0 +1,23 @@
+# gitleaks config (SEC-02d). Extends the upstream default ruleset; the allowlist
+# below carves out the project's NON-secrets so the gate stays actionable (a
+# noisy gate gets ignored). The pre-commit hook (kanz/.githooks/pre-commit) and
+# the CI job (.github/workflows/security.yml) both use this file.
+title = "kanz gitleaks config"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Test fixtures and dev-only stand-in secrets are not real credentials."
+# Test code carries dev-only HS256 secrets and synthetic JWTs (e.g. the AUTH-01
+# / api-gateway middleware tests) — stand-ins for real OIDC, never live creds.
+paths = [
+  '''.*_test\.go$''',
+  '''kanz/test/.*''',
+  '''.*/testdata/.*''',
+  '''.*/fixtures/.*''',
+]
+# Obvious placeholder credentials anywhere (docs, examples, READMEs).
+regexes = [
+  '''(?i)(example|dummy|sample|test|dev[-_]?only|changeme|placeholder|redacted|your[-_])[-_]?(secret|token|key|password|pat)''',
+]

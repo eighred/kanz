@@ -105,12 +105,25 @@ jobs:
           format: spdx-json
           output-file: sbom.spdx.json
 
-      - name: Sign + attest SBOM (keyless)
+      # SEC-02b: a machine-readable vuln-scan record attached to the image, so
+      # the admission policy can require every image to carry one (an image that
+      # never ran a scan can't run) and the SEC-02c scheduled re-scan has a
+      # baseline. cosign-vuln is the standard predicate format trivy emits.
+      - name: Vulnerability attestation predicate
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: ${{ env.IMAGE }}@${{ steps.build.outputs.digest }}
+          format: cosign-vuln
+          output: vuln.json
+          ignore-unfixed: true
+
+      - name: Sign + attest SBOM and vuln scan (keyless)
         env:
           DIGEST_REF: ${{ env.IMAGE }}@${{ steps.build.outputs.digest }}
         run: |
           cosign sign --yes "$DIGEST_REF"
           cosign attest --yes --type spdxjson --predicate sbom.spdx.json "$DIGEST_REF"
+          cosign attest --yes --type vuln --predicate vuln.json "$DIGEST_REF"
 
       # Self-check: prove the signature verifies against this workflow's identity
       # before the release is considered good (same predicate the cluster admission

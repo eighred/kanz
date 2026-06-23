@@ -21,12 +21,27 @@ secret" stance as SEC-01 (SPIRE SVIDs, Vault SPIFFE auth).
 `cluster-image-policy.yaml` (`ClusterImagePolicy`) requires, for every
 `ghcr.io/kanz-eng/**` image:
 
-1. a cosign signature from the release-workflow identity above, and
+1. a cosign signature from the release-workflow identity above,
 2. an SPDX SBOM **attestation** (not just a signature) — an image with no
-   provenance record is rejected.
+   provenance record is rejected, and
+3. a **vulnerability-scan attestation** (cosign-vuln predicate, SEC-02b) — an
+   image that never ran a scan is rejected.
 
 `mode: enforce` fails closed: if verification can't complete, admission is
 denied rather than allowed.
+
+## Critical-CVE blocking (SEC-02b)
+
+The "no critical CVEs at deploy" guarantee is enforced **at the choke point that
+mints the signature**: `release.yml` runs `trivy ... --severity CRITICAL
+--exit-code 1` *before* the cosign sign/attest steps, so a critical-CVE image is
+pushed but never signed — and requirement (1) above then refuses it at
+admission. The vuln attestation (3) makes the scan result auditable on the image
+and gives the **SEC-02c scheduled re-scan** a baseline to catch CVEs *disclosed
+after* a release (the case an inline admission check can't see at sign time);
+that re-scan alerts under the SECURITY.md remediation SLA rather than silently
+admitting. This is defense-in-depth: signature gate (deploy) + continuous
+re-scan (post-deploy), not a single fragile inline CVE parse.
 
 ## Deploy
 

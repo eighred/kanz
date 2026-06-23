@@ -76,6 +76,16 @@ spec:
         app.kubernetes.io/part-of: kanz
     spec:
       serviceAccountName: risk-engine
+      # SEC-02a runtime hardening (pod-level): non-root, default seccomp. The
+      # canonical values live in infra/security/runtime/pod-security.yaml; the
+      # "restricted" PSS label on the namespace rejects a pod that drops them.
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
       # INFRA-01d: spread replicas across AZs so a single-AZ loss (INFRA-01e)
       # leaves the survivors serving. maxSkew 1 = as even as schedulable;
       # ScheduleAnyway (not DoNotSchedule) so a saturated AZ degrades placement
@@ -109,10 +119,22 @@ spec:
             httpGet: { path: /readyz, port: 8081 }
             initialDelaySeconds: 5
             periodSeconds: 5
+          # SEC-02a runtime hardening (container-level): read-only rootfs, no
+          # privilege escalation, all caps dropped. The static Go binary needs
+          # none; writable scratch is the explicit /tmp emptyDir below.
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            capabilities:
+              drop: ["ALL"]
           volumeMounts:
             - { name: db, mountPath: /run/secrets/db, readOnly: true }
             - { name: spiffe, mountPath: /run/spiffe, readOnly: true }
+            - { name: tmp, mountPath: /tmp }
       volumes:
+        - name: tmp
+          emptyDir: {}
         - name: db
           csi:
             driver: secrets-store.csi.k8s.io
