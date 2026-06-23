@@ -205,16 +205,12 @@ func Delta(p *domain.Portfolio) v1.Measure {
 // equivalent currencies USD-cents) edits one function, not four.
 func sumInBaseCurrency(p *domain.Portfolio, abs bool) *commonpb.Decimal {
 	base := string(p.BaseCurrency())
-	sum := zeroDecimal()
+	var sum decAccum // O(1) allocs — see decAccum (LATENCY-01c)
 	for _, pos := range p.Positions() {
 		if pos.MarketValue == nil || pos.MarketValue.CurrencyCode != base {
 			continue
 		}
-		amt := pos.MarketValue.Amount
-		if abs {
-			amt = absDecimal(amt)
-		}
-		sum = addDecimal(sum, amt)
+		sum.add(pos.MarketValue.Amount, abs)
 	}
-	return sum
+	return sum.decimal()
 }

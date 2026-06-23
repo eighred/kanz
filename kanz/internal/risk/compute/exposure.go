@@ -37,37 +37,35 @@ import (
 // see the freshness of the underlying state.
 func ComputeExposure(p *domain.Portfolio) *domain.ExposureSet {
 	positions := p.Positions()
-	items := make([]domain.Exposure, 0, 2*len(positions))
-	byCurrency := make(map[string]*domain.Exposure)
+	// One row per marked instrument + a handful of currency buckets.
+	items := make([]domain.Exposure, 0, len(positions)+8)
+
+	// Per-currency gross/net folded with decAccum (O(1) allocs/bucket) rather
+	// than addMoney per position (LATENCY-01c). The per-instrument Money below
+	// is genuine output, not folding overhead, so it stays.
+	type ccyBucket struct{ gross, net decAccum }
+	byCurrency := make(map[string]*ccyBucket)
 
 	for _, pos := range positions {
 		mv := pos.MarketValue
 		if mv == nil {
 			continue
 		}
-		gross := absMoney(mv)
-		net := mv
-
 		items = append(items, domain.Exposure{
 			Dimension: domain.ExposureByInstrument,
 			Key:       string(pos.InstrumentID),
-			Gross:     gross,
-			Net:       net,
+			Gross:     absMoney(mv),
+			Net:       mv,
 		})
 
 		ccy := mv.CurrencyCode
 		bucket, ok := byCurrency[ccy]
 		if !ok {
-			bucket = &domain.Exposure{
-				Dimension: domain.ExposureByCurrency,
-				Key:       ccy,
-				Gross:     zeroMoney(ccy),
-				Net:       zeroMoney(ccy),
-			}
+			bucket = &ccyBucket{}
 			byCurrency[ccy] = bucket
 		}
-		bucket.Gross = addMoney(bucket.Gross, gross)
-		bucket.Net = addMoney(bucket.Net, net)
+		bucket.gross.add(mv.Amount, true /*absolute*/)
+		bucket.net.add(mv.Amount, false /*signed*/)
 	}
 
 	// Stable iteration order for tests + audit logs. ExposureSet
@@ -79,7 +77,13 @@ func ComputeExposure(p *domain.Portfolio) *domain.ExposureSet {
 	}
 	sort.Strings(keys)
 	for _, k := range keys {
-		items = append(items, *byCurrency[k])
+		bucket := byCurrency[k]
+		items = append(items, domain.Exposure{
+			Dimension: domain.ExposureByCurrency,
+			Key:       k,
+			Gross:     bucket.gross.money(k),
+			Net:       bucket.net.money(k),
+		})
 	}
 
 	return domain.NewExposureSet(p.ID(), p.AsOf(), items)

@@ -72,6 +72,17 @@ type Portfolio struct {
 	positions        map[InstrumentID]Position
 	asOf             time.Time
 	logPosition      *commonpb.LogPosition
+
+	// sortedCache memoizes the Positions() result. nil ⇒ stale: rebuilt
+	// (sorted) on the next Positions() call, invalidated to nil by every
+	// mutation. It exists because the compute layer (RISK-06/07) calls
+	// Positions() many times per query — ~8× across the DefaultRegistry
+	// measures — and re-sorting each time dominated the hot path (LATENCY-01b
+	// profile). Safe without a lock: every reader operates on a per-query
+	// Clone (state.Store.Snapshot), owned by a single goroutine; the shared
+	// live copy is only read under the per-aggregate lock via Clone, which
+	// copies the map directly and never populates this cache.
+	sortedCache []Position
 }
 
 // AggregateUpdate carries the portfolio-level fields from a
@@ -162,18 +173,26 @@ func (p *Portfolio) Position(id InstrumentID) (Position, bool) {
 	return pos, ok
 }
 
-// Positions returns a snapshot of all current positions in stable
-// lexicographic instrument-ID order. The returned slice is owned by
-// the caller — Portfolio's internal map is unchanged.
+// Positions returns all current positions in stable lexicographic
+// instrument-ID order. The result is a memoized read-only VIEW: callers
+// must not mutate or re-sort it in place, and it is valid only until the
+// next state mutation (which invalidates the cache). It is built once per
+// portfolio version and shared across repeated calls within a query — see
+// sortedCache. Position is a value type with immutable-by-contract pointer
+// fields, so the shared slice is safe to read concurrently within the
+// single goroutine that owns the snapshot.
 func (p *Portfolio) Positions() []Position {
-	out := make([]Position, 0, len(p.positions))
-	for _, pos := range p.positions {
-		out = append(out, pos)
+	if p.sortedCache == nil {
+		out := make([]Position, 0, len(p.positions))
+		for _, pos := range p.positions {
+			out = append(out, pos)
+		}
+		sort.Slice(out, func(i, j int) bool {
+			return out[i].InstrumentID < out[j].InstrumentID
+		})
+		p.sortedCache = out
 	}
-	sort.Slice(out, func(i, j int) bool {
-		return out[i].InstrumentID < out[j].InstrumentID
-	})
-	return out
+	return p.sortedCache
 }
 
 // SetPosition is the single-writer mutation hook used by RISK-05's
@@ -181,6 +200,7 @@ func (p *Portfolio) Positions() []Position {
 // lineage; explicit removal happens via Forget.
 func (p *Portfolio) SetPosition(pos Position) {
 	p.positions[pos.InstrumentID] = pos
+	p.sortedCache = nil // invalidate memoized Positions()
 	if pos.AsOf.After(p.asOf) {
 		p.asOf = pos.AsOf
 	}
@@ -190,6 +210,7 @@ func (p *Portfolio) SetPosition(pos Position) {
 // retires the instrument from the portfolio.
 func (p *Portfolio) Forget(id InstrumentID) {
 	delete(p.positions, id)
+	p.sortedCache = nil // invalidate memoized Positions()
 }
 
 // SetSnapshot records the durable-log coordinate associated with the
@@ -221,6 +242,7 @@ func (p *Portfolio) SetAggregate(u AggregateUpdate) {
 // are applied.
 func (p *Portfolio) ClearPositions() {
 	p.positions = make(map[InstrumentID]Position)
+	p.sortedCache = nil // invalidate memoized Positions()
 }
 
 // Position is one instrument holding within a portfolio. Quantity is

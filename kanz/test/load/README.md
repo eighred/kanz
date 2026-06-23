@@ -16,8 +16,11 @@ needs to gate regressions in CI; no infra to stand up (no dependency bloat).
 | File | Purpose |
 |---|---|
 | `config.js` | endpoints, request mix, and the single source of the p99/p95/error budgets |
+| `smoke.js` | short (~60s) low-rate run asserting the budgets → the LATENCY-01a CI gate |
 | `baseline.js` | ramp arrival rate until budget breaks → capacity number |
 | `soak.js` | steady sub-capacity load for hours → leaks / p99 drift |
+| `docker-compose.yml` | the ephemeral stack the smoke/seed run against (NATS + risk-engine + api-gateway) |
+| `seed/` | publishes one `PortfolioSnapshot` so the read path serves real data |
 
 ## Run
 
@@ -45,9 +48,45 @@ AUTH-01 edge requires it — pass at invocation, never commit), `RATE`/`DURATION
 - **Soak health** = `soak_req_duration p(99)` flat across the window. A rising
   trend at constant load is a leak — the whole point of the soak.
 
+## Ephemeral stack
+
+`docker-compose.yml` brings up the minimal slice the read path needs — NATS
+(JetStream spine) + `risk-engine` (in-memory state, gRPC query server) +
+`api-gateway` (auth/signing/quotas OFF, plaintext upstream). No Postgres/Kafka:
+the engine re-derives state from the seeded snapshot on the live spine.
+
+The service images COPY the **generated** kanz-schemas Go SDK
+(`kanz-schemas/gen/go`, EVT-15a generated-not-committed), so `buf generate` must
+run before `docker compose build` (the CI workflow does this; locally, generate
+per the kanz onboarding flow):
+
+```sh
+docker compose -f kanz/test/load/docker-compose.yml up -d --build
+(cd kanz && go run ./test/load/seed)          # publish PortfolioSnapshot for PF1
+k6 run -e BASE_URL=http://localhost:8080 kanz/test/load/smoke.js
+docker compose -f kanz/test/load/docker-compose.yml down -v
+```
+
+The seed exists because an unseeded portfolio returns `ErrPortfolioNotFound` →
+404, which would trip the smoke's error budget. It reuses the production
+`bus.Producer` so the envelope is stamped + validated exactly as a real
+publisher would. Override `SEED_NATS_URL` / `SEED_PORTFOLIO` / `SEED_TENANT`.
+
 ## CI gate (LATENCY-01a)
 
 The budgets live in `config.js` (`P99_BUDGET_MS` etc.) and are enforced as k6
-thresholds, so LATENCY-01a runs `baseline.js` against an ephemeral stack and
-fails the pipeline on a budget breach — no separate assertion to keep in sync.
+thresholds, so the gate has no separate assertion to keep in sync.
+`.github/workflows/latency.yml`:
+
+- **Per PR** (`load-smoke`): on a change to the hot path (`internal/risk`,
+  `pkg/bus`, the two services) or this harness, it spins up the ephemeral stack,
+  seeds, and runs `smoke.js` — failing on a p99/error breach. A short, low-rate
+  smoke (not the full ramp) keeps the per-PR gate fast and the p99 verdict
+  stable on a shared runner.
+- **Manual** (`capacity-baseline`, `workflow_dispatch`): runs the full
+  `baseline.js` ramp against a real deployed env (`base_url` input). A dispatch
+  with no `base_url` just runs the smoke against a fresh stack — the 4000-rps
+  ramp is only meaningful against a real multi-node deployment, not the
+  single-node compose stack.
+
 The matching in-process micro-benchmark guard is LATENCY-01d (`testing.B`).

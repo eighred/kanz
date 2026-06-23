@@ -1,0 +1,146 @@
+// Command seed publishes one PortfolioSnapshot to the NATS spine so the
+// LATENCY-01a load stack has queryable state. The risk-engine read path
+// (Exposure/Measures/Scenario) returns ErrPortfolioNotFound → 404 for an
+// unseeded portfolio, which would trip the smoke test's error budget; one
+// snapshot makes the portfolio queryable.
+//
+// It is intentionally tiny and self-contained: it reuses the production
+// bus.Producer (so the envelope is stamped + validated exactly as a real
+// publisher would) but hardcodes the well-known risk subject/taxonomy strings
+// rather than importing kanz/internal/risk (the RISK-02 arch boundary keeps the
+// risk impl packages private to the risk composer). Run against the ephemeral
+// compose stack:
+//
+//	go run ./test/load/seed                 # nats://localhost:4222, PF1
+//	SEED_PORTFOLIO=PF9 go run ./test/load/seed
+package main
+
+import (
+	"context"
+	"log"
+	"os"
+	"time"
+
+	"google.golang.org/protobuf/types/known/timestamppb"
+
+	commonpb "github.com/kanz-eng/kanz-schemas-go/common/v1"
+	domainpb "github.com/kanz-eng/kanz-schemas-go/domain/v1"
+	envelopepb "github.com/kanz-eng/kanz-schemas-go/envelope/v1"
+
+	"github.com/kanz-eng/kanz/pkg/bus"
+)
+
+const (
+	// snapshotEventType / snapshotSubject mirror ingest.EventTypePortfolioSnapshot
+	// and the subject-taxonomy §1 mapping ({domain}.{entity}.{event_type}). The
+	// RISK stream binds "risk.>", so this subject lands on it.
+	snapshotEventType = "risk.portfolio.snapshot"
+	snapshotSubject   = "risk.portfolio.snapshot"
+	snapshotDomain    = "risk"
+	// payloadSchemaRef is the registry ref form <schema-id>:<version> (EVT-16c).
+	// The engine does not resolve it on ingest; Validate only requires it be
+	// non-empty, so a static ref is sufficient for the load fixture.
+	payloadSchemaRef = "domain.v1.PortfolioSnapshot:1"
+)
+
+func main() {
+	url := envOr("SEED_NATS_URL", "nats://localhost:4222")
+	portfolio := envOr("SEED_PORTFOLIO", "PF1")
+	tenant := envOr("SEED_TENANT", "load-test")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	client, err := bus.DialNATS(ctx, bus.NATSConfig{URL: url, Name: "load-seed"})
+	if err != nil {
+		log.Fatalf("seed: dial nats %s: %v", url, err)
+	}
+	defer func() { _ = client.Close() }()
+
+	producer, err := bus.NewProducer(client, bus.ProducerConfig{
+		Source:          "load-seed/seed",
+		ProducerVersion: "dev",
+		Tenant:          tenant,
+	})
+	if err != nil {
+		log.Fatalf("seed: new producer: %v", err)
+	}
+
+	now := time.Now().UTC()
+	snapshot := buildSnapshot(portfolio, now)
+
+	if err := producer.Publish(ctx, bus.Event{
+		Subject:          snapshotSubject,
+		EventType:        snapshotEventType,
+		EventClass:       envelopepb.EventClass_EVENT_CLASS_STATE_SNAPSHOT,
+		SchemaVersion:    1,
+		Domain:           snapshotDomain,
+		EventTime:        now,
+		PartitionKey:     portfolio,
+		PayloadSchemaRef: payloadSchemaRef,
+		Payload:          snapshot,
+	}); err != nil {
+		log.Fatalf("seed: publish snapshot for %s: %v", portfolio, err)
+	}
+	log.Printf("seed: published PortfolioSnapshot portfolio=%s positions=%d tenant=%s",
+		portfolio, len(snapshot.GetPositions()), tenant)
+}
+
+// buildSnapshot is a small but non-degenerate portfolio: a few long/short
+// equity positions with mark-to-market values, so Exposure/Measures return
+// real (non-empty) numbers rather than a zero set.
+func buildSnapshot(portfolio string, asOf time.Time) *domainpb.PortfolioSnapshot {
+	ts := timestamp(asOf)
+	positions := []*domainpb.PositionState{
+		position(portfolio, "AAPL", 1000, dec(195_50, -2), money(195_500_00, -2), ts),
+		position(portfolio, "MSFT", 500, dec(420_10, -2), money(210_050_00, -2), ts),
+		position(portfolio, "TSLA", -300, dec(250_00, -2), money(-75_000_00, -2), ts),
+		position(portfolio, "NVDA", 200, dec(120_25, -2), money(24_050_00, -2), ts),
+	}
+	return &domainpb.PortfolioSnapshot{
+		Portfolio: &domainpb.PortfolioState{
+			PortfolioId:      portfolio,
+			DisplayName:      "Load Test Portfolio",
+			BaseCurrency:     "USD",
+			CashBalance:      money(50_000_00, -2),
+			TotalMarketValue: money(354_600_00, -2),
+			PositionCount:    uint32(len(positions)),
+			AsOf:             ts,
+		},
+		Positions: positions,
+		// LogPosition is the durable-log resume coordinate. The in-memory load
+		// stack has no Kafka log to resume from, so a synthetic position is fine —
+		// the engine only persists/uses it for PERS-01d bootstrap, which is off here.
+		LogPosition: &commonpb.LogPosition{Topic: "risk.portfolio", Partition: 0, Offset: 0},
+	}
+}
+
+func position(portfolio, instrument string, qty int64, avgPrice *commonpb.Decimal, mv *commonpb.Money, asOf *timestamppb.Timestamp) *domainpb.PositionState {
+	return &domainpb.PositionState{
+		PortfolioId:  portfolio,
+		InstrumentId: instrument,
+		Quantity:     dec(qty, 0),
+		AveragePrice: avgPrice,
+		MarketValue:  mv,
+		AsOf:         asOf,
+	}
+}
+
+// dec builds a common.v1.Decimal (value = coefficient × 10^exponent).
+func dec(coefficient int64, exponent int32) *commonpb.Decimal {
+	return &commonpb.Decimal{Coefficient: coefficient, Exponent: exponent}
+}
+
+// money builds a USD common.v1.Money from a Decimal coefficient/exponent.
+func money(coefficient int64, exponent int32) *commonpb.Money {
+	return &commonpb.Money{Amount: dec(coefficient, exponent), CurrencyCode: "USD"}
+}
+
+func timestamp(t time.Time) *timestamppb.Timestamp { return timestamppb.New(t) }
+
+func envOr(k, def string) string {
+	if v := os.Getenv(k); v != "" {
+		return v
+	}
+	return def
+}

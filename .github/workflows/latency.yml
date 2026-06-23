@@ -1,0 +1,128 @@
+# LATENCY-01a — continuous load-test gate.
+#
+# Per-PR: bring up the ephemeral load stack (kanz/test/load/docker-compose.yml —
+# NATS + risk-engine + api-gateway), seed one portfolio, and run a ~60s k6 smoke
+# (smoke.js) that fails the pipeline on a LATENCY-01 p99/error-budget breach
+# (config.js budgetThresholds). The full multi-minute capacity ramp (baseline.js)
+# is a manual workflow_dispatch run — slow + p99-noisy as a per-PR gate (see
+# kanz/test/load/README.md). The in-process micro-benchmark guard is LATENCY-01d.
+#
+# Both jobs reuse the kanz-ci buf-generate prelude: the kanz module replaces
+# github.com/kanz-eng/kanz-schemas-go => ../kanz-schemas/gen/go, which is
+# generated-not-committed (EVT-15a), so the SDK is generated before the service
+# images build (Dockerfiles COPY kanz-schemas/gen/go) and before `go run`.
+name: latency
+
+on:
+  pull_request:
+    paths:
+      - 'kanz/internal/risk/**'
+      - 'kanz/pkg/bus/**'
+      - 'kanz/services/risk-engine/**'
+      - 'kanz/services/api-gateway/**'
+      - 'kanz/test/load/**'
+      - 'kanz-schemas/proto/**'
+      - '.github/workflows/latency.yml'
+  workflow_dispatch:
+    inputs:
+      base_url:
+        description: >-
+          Target the full baseline.js capacity ramp at this gateway URL (e.g.
+          https://gw.kanz.example). Leave empty to run it against a freshly
+          spun-up ephemeral stack.
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+
+env:
+  GOFLAGS: -mod=mod
+
+jobs:
+  load-smoke:
+    # Per-PR gate; also runs the smoke on a manual dispatch with no base_url.
+    if: github.event_name != 'workflow_dispatch' || github.event.inputs.base_url == ''
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: kanz/go.mod
+          cache-dependency-path: kanz/go.sum
+
+      - uses: bufbuild/buf-setup-action@v1
+        with:
+          version: 1.69.0
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install protoc plugins
+        run: |
+          go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.11
+          go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@v1.5.1
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+
+      - name: Generate kanz-schemas Go SDK
+        working-directory: kanz-schemas
+        run: |
+          buf generate
+          cd gen/go
+          go mod init github.com/kanz-eng/kanz-schemas-go || true
+          go mod tidy
+
+      - name: Build + start load stack
+        run: docker compose -f kanz/test/load/docker-compose.yml up -d --build
+
+      - name: Wait for gateway ready
+        run: |
+          for i in $(seq 1 60); do
+            if curl -fsS http://localhost:8080/readyz >/dev/null 2>&1; then
+              echo "gateway ready"; exit 0
+            fi
+            echo "waiting for gateway ($i)..."; sleep 2
+          done
+          echo "gateway did not become ready"; exit 1
+
+      - name: Seed a portfolio
+        working-directory: kanz
+        run: go run ./test/load/seed
+
+      - name: Wait for seeded state to be queryable
+        run: |
+          for i in $(seq 1 30); do
+            code=$(curl -s -o /dev/null -w '%{http_code}' http://localhost:8080/v1/portfolios/PF1/exposure)
+            if [ "$code" = "200" ]; then echo "portfolio queryable"; exit 0; fi
+            echo "exposure http $code ($i)..."; sleep 2
+          done
+          echo "seeded portfolio never became queryable"; exit 1
+
+      - name: Run k6 smoke (p99/error budget gate)
+        run: |
+          docker run --rm --network host \
+            -e BASE_URL=http://localhost:8080 -e PORTFOLIO=PF1 \
+            -v "$PWD/kanz/test/load:/scripts" \
+            grafana/k6:latest run /scripts/smoke.js
+
+      - name: Stack logs (on failure)
+        if: failure()
+        run: docker compose -f kanz/test/load/docker-compose.yml logs
+
+      - name: Tear down
+        if: always()
+        run: docker compose -f kanz/test/load/docker-compose.yml down -v
+
+  capacity-baseline:
+    # Manual only. The multi-minute ramp to the capacity knee — against a real
+    # deployed env (base_url) or, with no input, a fresh ephemeral stack.
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.base_url != ''
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run k6 baseline against ${{ github.event.inputs.base_url }}
+        run: |
+          docker run --rm \
+            -e BASE_URL='${{ github.event.inputs.base_url }}' -e PORTFOLIO=PF1 \
+            -e TOKEN='${{ secrets.LOAD_TEST_TOKEN }}' \
+            -v "$PWD/kanz/test/load:/scripts" \
+            grafana/k6:latest run /scripts/baseline.js

@@ -144,6 +144,51 @@ func decimalSqrt(d *commonpb.Decimal) *commonpb.Decimal {
 // float64 round-trip cannot meaningfully drift the value.
 const uncertaintyExp int32 = -6
 
+// decAccum is an allocation-free running Decimal sum. Folding a slice with
+// addDecimal heap-allocates a fresh *Decimal per term (LATENCY-01b: ~75% of a
+// measures query's allocations were these per-position sums); decAccum keeps the
+// running value in plain coefficient/exponent fields and materializes a single
+// *Decimal at the end.
+//
+// Its zero value is exact 0 at exponent 0 — identical to the zeroDecimal() seed
+// the old addDecimal fold started from — so a sum built with decAccum is
+// byte-identical (coefficient AND exponent) to the same sum built with
+// addDecimal, not merely numerically equal.
+type decAccum struct {
+	coef int64
+	exp  int32
+}
+
+// add folds d into the accumulator, aligning exponents to the more precise
+// (smaller) of the two exactly as addDecimal does. nil ⇒ 0 (no-op). When abs is
+// true the term's magnitude is taken first (the gross-exposure case), matching
+// addDecimal(sum, absDecimal(d)).
+func (a *decAccum) add(d *commonpb.Decimal, abs bool) {
+	if d == nil {
+		return
+	}
+	c, e := d.Coefficient, d.Exponent
+	if abs && c < 0 {
+		c = -c
+	}
+	if e < a.exp {
+		a.coef = a.coef*pow10(a.exp-e) + c
+		a.exp = e
+	} else {
+		a.coef += c * pow10(e-a.exp)
+	}
+}
+
+// decimal materializes the accumulated value as a fresh *Decimal.
+func (a *decAccum) decimal() *commonpb.Decimal {
+	return &commonpb.Decimal{Coefficient: a.coef, Exponent: a.exp}
+}
+
+// money materializes the accumulated value as Money in the given currency.
+func (a *decAccum) money(currency string) *commonpb.Money {
+	return &commonpb.Money{Amount: a.decimal(), CurrencyCode: currency}
+}
+
 // zeroMoney returns a Money worth 0 in the given currency.
 func zeroMoney(currency string) *commonpb.Money {
 	return &commonpb.Money{Amount: zeroDecimal(), CurrencyCode: currency}
