@@ -91,8 +91,8 @@ jobs:
       - name: Verify wheel
         working-directory: gen/python
         run: |
-          python -m pip install --quiet dist/*.whl
-          python -c "import envelope.v1.envelope_pb2; import domain.v1.portfolio_pb2; print('import OK')"
+          python -m pip install --quiet dist/*.whl grpcio
+          python -c "import envelope.v1.envelope_pb2; import domain.v1.portfolio_pb2; import inference.v1.inference_service_pb2_grpc; print('import OK')"
       - name: Publish
         working-directory: gen/python
         env:

@@ -1,0 +1,157 @@
+---
+# Trino query engine over the lakehouse (LAKE-01d): a coordinator + a worker
+# pool serving research SQL over the lake-sink landing (Hive catalog) and
+# promoted Iceberg tables. Read-only by posture — the catalogs disable managed
+# writes, and the workload runs under the restricted Pod Security Standard
+# (SEC-02a), non-root + read-only rootfs, in its own kanz-lakehouse namespace
+# so a runaway analytical query is isolated from kanz-services.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: kanz-lakehouse
+  labels:
+    app.kubernetes.io/part-of: kanz
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: v1.31
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: trino-catalogs
+  namespace: kanz-lakehouse
+  labels:
+    app.kubernetes.io/part-of: kanz
+data:
+  # Mounted at /etc/trino/catalog. The property files live in this directory in
+  # git (catalog-hive.properties / catalog-iceberg.properties); GitOps
+  # (INFRA-01b) renders them into this ConfigMap.
+  hive.properties: |
+    connector.name=hive
+    hive.metastore=thrift
+    hive.metastore.uri=thrift://hive-metastore.kanz-lakehouse.svc.cluster.local:9083
+    fs.native-s3.enabled=true
+    s3.path-style-access=true
+    hive.non-managed-table-writes-enabled=false
+    hive.storage-format=JSON
+  iceberg.properties: |
+    connector.name=iceberg
+    iceberg.catalog.type=hive_metastore
+    hive.metastore.uri=thrift://hive-metastore.kanz-lakehouse.svc.cluster.local:9083
+    fs.native-s3.enabled=true
+    s3.path-style-access=true
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: trino
+  namespace: kanz-lakehouse
+  labels:
+    app.kubernetes.io/part-of: kanz
+spec:
+  selector:
+    app: trino
+    trino/role: coordinator
+  ports:
+    - { name: http, port: 8080, targetPort: 8080 }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: trino-coordinator
+  namespace: kanz-lakehouse
+  labels:
+    app.kubernetes.io/part-of: kanz
+    app: trino
+    trino/role: coordinator
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: trino
+      trino/role: coordinator
+  template:
+    metadata:
+      labels:
+        app: trino
+        trino/role: coordinator
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: trino
+          image: trinodb/trino:444
+          ports:
+            - containerPort: 8080
+          env:
+            - name: LAKE_S3_ENDPOINT
+              valueFrom: { secretKeyRef: { name: lake-s3, key: endpoint } }
+            - name: LAKE_S3_REGION
+              valueFrom: { secretKeyRef: { name: lake-s3, key: region } }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
+          volumeMounts:
+            - { name: catalogs, mountPath: /etc/trino/catalog, readOnly: true }
+            - { name: tmp, mountPath: /tmp }
+          resources:
+            requests: { cpu: "1", memory: 4Gi }
+            limits: { cpu: "2", memory: 8Gi }
+      volumes:
+        - name: catalogs
+          configMap: { name: trino-catalogs }
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: trino-worker
+  namespace: kanz-lakehouse
+  labels:
+    app.kubernetes.io/part-of: kanz
+    app: trino
+    trino/role: worker
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: trino
+      trino/role: worker
+  template:
+    metadata:
+      labels:
+        app: trino
+        trino/role: worker
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: trino
+          image: trinodb/trino:444
+          env:
+            - name: LAKE_S3_ENDPOINT
+              valueFrom: { secretKeyRef: { name: lake-s3, key: endpoint } }
+            - name: LAKE_S3_REGION
+              valueFrom: { secretKeyRef: { name: lake-s3, key: region } }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
+          volumeMounts:
+            - { name: catalogs, mountPath: /etc/trino/catalog, readOnly: true }
+            - { name: tmp, mountPath: /tmp }
+          resources:
+            requests: { cpu: "1", memory: 4Gi }
+            limits: { cpu: "2", memory: 8Gi }
+      volumes:
+        - name: catalogs
+          configMap: { name: trino-catalogs }
+        - name: tmp
+          emptyDir: {}

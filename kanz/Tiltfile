@@ -1,0 +1,27 @@
+# DEVX-01a — Tilt over the local dev stack.
+#
+#   tilt up      # build + run NATS+Kafka+Postgres+services, seed, live-update
+#   tilt down    # tear everything down
+#
+# Tilt wraps the same dev/docker-compose.yml `make up` uses, adds the seed as a
+# tracked resource, and gives a live dashboard + log multiplexing. Run from the
+# kanz/ directory.
+
+docker_compose('dev/docker-compose.yml')
+
+# Seed one portfolio onto the spine once the engine is up (reuses the load seed).
+local_resource(
+    'seed',
+    cmd='go run ./test/load/seed',
+    env={'SEED_NATS_URL': 'nats://localhost:4222', 'SEED_TENANT': 'dev'},
+    resource_deps=['risk-engine'],
+    auto_init=True,
+)
+
+# Group infra vs app in the Tilt UI.
+dc_resource('nats', labels=['infra'])
+dc_resource('kafka', labels=['infra'])
+dc_resource('postgres', labels=['infra'])
+dc_resource('nats-init', labels=['infra'])
+dc_resource('risk-engine', labels=['services'])
+dc_resource('api-gateway', labels=['services'])

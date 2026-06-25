@@ -1,0 +1,6 @@
+{
+  "roles": {
+    "data-steward": ["lineage.pii.read"],
+    "admin": ["*"]
+  }
+}

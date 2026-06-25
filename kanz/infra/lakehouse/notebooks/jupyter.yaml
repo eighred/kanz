@@ -1,0 +1,74 @@
+---
+# Research notebook environment over the lakehouse (LAKE-01d). A Jupyter pod
+# pre-wired to query Trino (the trino python client + ipython-sql) so analysts
+# and quants explore the event log, build point-in-time datasets (LAKE-01b), and
+# drive the backtest harness (LAKE-01c) interactively. Single-user reference
+# deployment; a real estate runs JupyterHub for per-user pods. Read-only posture
+# inherits from Trino's catalogs + the restricted namespace.
+apiVersion: v1
+kind: Service
+metadata:
+  name: jupyter
+  namespace: kanz-lakehouse
+  labels:
+    app.kubernetes.io/part-of: kanz
+spec:
+  selector:
+    app: jupyter
+  ports:
+    - { name: http, port: 8888, targetPort: 8888 }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: jupyter
+  namespace: kanz-lakehouse
+  labels:
+    app.kubernetes.io/part-of: kanz
+    app: jupyter
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: jupyter
+  template:
+    metadata:
+      labels:
+        app: jupyter
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        fsGroup: 100
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: jupyter
+          image: quay.io/jupyter/scipy-notebook:python-3.12
+          # trino[python] gives the DBAPI driver + sqlalchemy dialect ipython-sql
+          # uses; pinned so notebooks are reproducible.
+          command: ["bash", "-lc"]
+          args:
+            - >-
+              pip install --quiet 'trino[sqlalchemy]==0.330.0' ipython-sql &&
+              start-notebook.py --NotebookApp.token="${JUPYTER_TOKEN}"
+          env:
+            - name: TRINO_HOST
+              value: trino.kanz-lakehouse.svc.cluster.local
+            - name: TRINO_PORT
+              value: "8080"
+            - name: JUPYTER_TOKEN
+              valueFrom: { secretKeyRef: { name: jupyter, key: token } }
+          ports:
+            - containerPort: 8888
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }
+          volumeMounts:
+            - { name: work, mountPath: /home/jovyan/work }
+          resources:
+            requests: { cpu: "500m", memory: 2Gi }
+            limits: { cpu: "2", memory: 4Gi }
+      volumes:
+        - name: work
+          emptyDir: {}

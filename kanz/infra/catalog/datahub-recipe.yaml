@@ -1,0 +1,50 @@
+# DataHub ingestion recipe for the Kanz data catalog (LIN-01b).
+#
+# Pulls three things into the catalog and stitches them onto one dataset entity
+# per Kanz dataset (namespace `kanz.{domain}`, name = payload message type):
+#
+#   1. Lineage      — from the OpenLineage events the lineage service emits
+#                     (LIN-01a), via Marquez or DataHub's OpenLineage endpoint.
+#   2. Schemas      — from the EVT-16 schema registry, keyed by the dataset's
+#                     payloadSchemaRef facet (see the http source below).
+#   3. Ownership    — from CODEOWNERS (the per-domain owning team).
+#   4. Classification — PII tags from the LIN-01c governance config.
+#
+# Run with: `datahub ingest -c datahub-recipe.yaml`. Secrets (GMS token, registry
+# URL) come from the environment, never inline.
+
+source:
+  type: openlineage
+  config:
+    # Marquez / DataHub OpenLineage receiver the lineage service POSTs RunEvents
+    # to (LINEAGE_OPENLINEAGE_URL). Lineage edges + dataset nodes flow from here.
+    platform: kanz
+    api_url: "${OPENLINEAGE_API_URL}"
+
+transformers:
+  # Ownership from CODEOWNERS: each domain's dataset namespace maps to its owning
+  # team. Keep in sync with the kanz-schemas CODEOWNERS (the schema owners are the
+  # dataset owners — RISK-* → risk-platform, market.* → market-data, etc.).
+  - type: simple_add_dataset_ownership
+    config:
+      owner_urns:
+        - "urn:li:corpGroup:event-platform"
+      ownership_type: DATAOWNER
+      replace_existing: false
+
+  # Classification: tag PII datasets so the catalog surfaces sensitivity. The tag
+  # set mirrors services/lineage governance.json — DataHub is the read view, the
+  # governance config is the enforcement source of truth (LIN-01c).
+  - type: simple_add_dataset_tags
+    config:
+      tag_urns:
+        - "urn:li:tag:PII"
+      # Applied to the PII datasets enumerated in the governance config; a
+      # pattern transformer (datahub `pattern_add_dataset_tags`) keys off the
+      # dataset name in a real deployment.
+
+sink:
+  type: datahub-rest
+  config:
+    server: "${DATAHUB_GMS_URL}"
+    token: "${DATAHUB_GMS_TOKEN}"

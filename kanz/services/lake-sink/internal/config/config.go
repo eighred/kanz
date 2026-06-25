@@ -1,0 +1,108 @@
+package config
+
+import (
+	"errors"
+	"log/slog"
+	"os"
+	"strings"
+	"time"
+)
+
+// Config is the lake-sink runtime configuration, sourced from the environment so
+// it composes with the CSI/Vault secret mounts (SEC-01d). Mirrors the audit /
+// risk-engine config shape.
+type Config struct {
+	Listen   string
+	LogLevel slog.Level
+
+	// Brokers is the Kafka cluster — the durable log of record (EVT-09) the sink
+	// reads as its CDC source. Required: the sink streams the durable log, not the
+	// live NATS spine, so a replay rebuilds the lakehouse deterministically.
+	Brokers []string
+	// Topics are the `{domain}.{entity}` topics to land. Kafka has no subject
+	// wildcard, so the set is explicit per deployment. Required.
+	Topics []string
+	// Source is the consumer identity.
+	Source string
+	// ConsumerGroup is the durable consumer name — one group so the log is landed
+	// once (a second group would double-write the lake).
+	ConsumerGroup string
+
+	// RegistryURL is the schema-registry (EVT-16) base URL the decoder resolves
+	// payload descriptors against. Empty ⇒ envelope-only landing (payloads kept
+	// raw-undecoded); set it to get schema-evolution-aware decoded columns.
+	RegistryURL string
+
+	// OutputDir is the FileSink landing root (Hive-partitioned NDJSON the
+	// catalog ingest commits as a table). Required by the default sink.
+	OutputDir string
+	// FlushInterval bounds how long a buffered row waits before it is durable.
+	FlushInterval time.Duration
+
+	// OTLPEndpoint is the OTel collector for span export (OBS-01).
+	OTLPEndpoint string
+}
+
+func Load() (Config, error) {
+	cfg := Config{
+		Listen:        envOr("LAKE_SINK_LISTEN", ":8085"),
+		LogLevel:      parseLevel(envOr("LAKE_SINK_LOG_LEVEL", "info")),
+		Brokers:       splitList(os.Getenv("LAKE_SINK_BROKERS")),
+		Topics:        splitList(os.Getenv("LAKE_SINK_TOPICS")),
+		Source:        envOr("LAKE_SINK_SOURCE", "lake-sink"),
+		ConsumerGroup: envOr("LAKE_SINK_CONSUMER_GROUP", "lake-sink"),
+		RegistryURL:   strings.TrimRight(os.Getenv("LAKE_SINK_REGISTRY_URL"), "/"),
+		OutputDir:     os.Getenv("LAKE_SINK_OUTPUT_DIR"),
+		FlushInterval: durationOr("LAKE_SINK_FLUSH_INTERVAL", 5*time.Second),
+		OTLPEndpoint:  os.Getenv("LAKE_SINK_OTLP_ENDPOINT"),
+	}
+	if len(cfg.Brokers) == 0 {
+		return Config{}, errors.New("LAKE_SINK_BROKERS is required")
+	}
+	if len(cfg.Topics) == 0 {
+		return Config{}, errors.New("LAKE_SINK_TOPICS is required")
+	}
+	if cfg.OutputDir == "" {
+		return Config{}, errors.New("LAKE_SINK_OUTPUT_DIR is required")
+	}
+	return cfg, nil
+}
+
+func splitList(s string) []string {
+	var out []string
+	for _, p := range strings.Split(s, ",") {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+func envOr(k, def string) string {
+	if v, ok := os.LookupEnv(k); ok && v != "" {
+		return v
+	}
+	return def
+}
+
+func durationOr(k string, def time.Duration) time.Duration {
+	if v := os.Getenv(k); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d > 0 {
+			return d
+		}
+	}
+	return def
+}
+
+func parseLevel(s string) slog.Level {
+	switch strings.ToLower(s) {
+	case "debug":
+		return slog.LevelDebug
+	case "warn":
+		return slog.LevelWarn
+	case "error":
+		return slog.LevelError
+	default:
+		return slog.LevelInfo
+	}
+}

@@ -1,0 +1,9 @@
+{
+  "pii_datasets": [
+    "PersonProfile",
+    "kanz.customer.ContactInfo"
+  ],
+  "pii_schema_ref_substrings": [
+    "pii.v1"
+  ]
+}

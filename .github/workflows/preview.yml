@@ -1,0 +1,71 @@
+# DEVX-01d — build the per-PR images an Argo preview environment deploys.
+#
+# On a PR labeled `preview` (and each push to it), build + push the service
+# images tagged :pr-{number} to GHCR. The Argo CD PullRequest generator
+# (kanz/infra/gitops/preview-applicationset.yaml) then syncs a namespace
+# kanz-preview-{number} pinned to those images + the PR's head commit. Teardown
+# is automatic: closing the PR drops the Argo Application (prune), so this
+# workflow only builds — it never has to clean up.
+name: preview
+
+on:
+  pull_request:
+    types: [labeled, synchronize, reopened]
+
+permissions:
+  contents: read
+  packages: write
+  pull-requests: write
+
+jobs:
+  build-images:
+    # Only run for the `preview` label (the gate the ApplicationSet also filters on).
+    if: contains(github.event.pull_request.labels.*.name, 'preview')
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        service: [risk-engine, api-gateway]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: bufbuild/buf-setup-action@v1
+        with:
+          version: 1.69.0
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+      - name: Generate schema SDK
+        run: |
+          go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.11
+          go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@v1.5.1
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+          cd kanz-schemas && buf generate
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: kanz/services/${{ matrix.service }}/Dockerfile
+          push: true
+          tags: ghcr.io/kanz-eng/${{ matrix.service }}:pr-${{ github.event.pull_request.number }}
+
+  comment:
+    needs: build-images
+    if: contains(github.event.pull_request.labels.*.name, 'preview')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Comment the preview namespace
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const ns = `kanz-preview-${context.issue.number}`;
+            await github.rest.issues.createComment({
+              owner: context.repo.owner, repo: context.repo.repo, issue_number: context.issue.number,
+              body: `🚀 Preview environment building → namespace \`${ns}\` (Argo CD syncs it once the images are pushed).`,
+            });

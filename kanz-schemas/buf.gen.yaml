@@ -34,6 +34,13 @@ plugins:
     out: gen/python
   - remote: buf.build/protocolbuffers/pyi:v32.0
     out: gen/python
+  # grpc/python emits the *_pb2_grpc.py service stubs — the Python analog of
+  # protoc-gen-go-grpc. protocolbuffers/python alone omits them, so without
+  # this the published SDK can't satisfy inference.v1.InferenceService (PRED-06)
+  # that the Python servicer (PRED-08) implements (DEBT-03a). grpcio is a
+  # runtime dependency of the emitted stub.
+  - remote: buf.build/grpc/python:v1.66.0
+    out: gen/python
   # TypeScript: Protobuf-ES, the buf-maintained TS runtime. target=js+dts emits
   # ES modules with .d.ts declarations, so the published package needs no
   # separate `tsc` compile step.

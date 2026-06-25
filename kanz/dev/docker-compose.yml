@@ -1,0 +1,110 @@
+# DEVX-01a — one-command local stack.
+#
+# The full local platform a developer needs: the NATS spine + a Kafka broker
+# (durable log) + Postgres (durable state), with the risk-engine and api-gateway
+# wired on top. `make up` brings it up and seeds one portfolio; `make down`
+# tears it down. Auth/signing/quotas are OFF (local paths), upstream is plaintext
+# — this is a dev loop, not a security posture (that is infra/security in anger).
+#
+# Build context is the repo ROOT (..): the service Dockerfiles COPY the generated
+# kanz-schemas Go SDK, so `make generate` must run before first build.
+name: kanz-dev
+
+services:
+  nats:
+    image: nats:2.10-alpine
+    command: ["--jetstream", "--store_dir=/tmp/nats", "-m", "8222"]
+    ports:
+      - "4222:4222"
+      - "8222:8222"
+
+  # Single-node KRaft Kafka (no ZooKeeper) — the durable log for local CDC/replay
+  # work. RF1 / no auto-create mirrors EVT-09's posture at dev scale.
+  kafka:
+    image: bitnami/kafka:3.7
+    environment:
+      KAFKA_CFG_NODE_ID: "1"
+      KAFKA_CFG_PROCESS_ROLES: "broker,controller"
+      KAFKA_CFG_CONTROLLER_QUORUM_VOTERS: "1@kafka:9093"
+      KAFKA_CFG_LISTENERS: "PLAINTEXT://:9092,CONTROLLER://:9093"
+      KAFKA_CFG_ADVERTISED_LISTENERS: "PLAINTEXT://kafka:9092"
+      KAFKA_CFG_CONTROLLER_LISTENER_NAMES: "CONTROLLER"
+      KAFKA_CFG_AUTO_CREATE_TOPICS_ENABLE: "false"
+      KAFKA_CFG_OFFSETS_TOPIC_REPLICATION_FACTOR: "1"
+      ALLOW_PLAINTEXT_LISTENER: "yes"
+    ports:
+      - "9092:9092"
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: kanz
+      POSTGRES_PASSWORD: kanz
+      POSTGRES_DB: kanz
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U kanz"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # One-shot stream provisioning: the RISK stream the engine subscribes to and
+  # the seed publishes onto (mirrors infra/nats/bootstrap-job.yaml, replicas=1).
+  nats-init:
+    image: natsio/nats-box:0.14.5
+    depends_on:
+      nats:
+        condition: service_started
+    restart: "no"
+    entrypoint: ["sh", "-c"]
+    command:
+      - |
+        set -eu
+        for i in $$(seq 1 30); do
+          if nats --server nats://nats:4222 stream info RISK >/dev/null 2>&1; then
+            echo "stream RISK already exists"; exit 0
+          fi
+          if nats --server nats://nats:4222 stream add RISK --defaults \
+               --subjects="risk.>" --storage=file --retention=limits \
+               --replicas=1 --discard=old --dupe-window=2m --max-age=24h; then
+            echo "stream RISK created"; exit 0
+          fi
+          echo "waiting for nats ($$i)..."; sleep 2
+        done
+        echo "nats did not become ready"; exit 1
+
+  risk-engine:
+    build:
+      context: ..
+      dockerfile: kanz/services/risk-engine/Dockerfile
+    depends_on:
+      nats-init:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+    environment:
+      RISK_ENGINE_LISTEN: ":8082"
+      RISK_ENGINE_GRPC_LISTEN: ":8081"
+      RISK_ENGINE_NATS_URL: "nats://nats:4222"
+      RISK_ENGINE_DATABASE_URL: "postgres://kanz:kanz@postgres:5432/kanz?sslmode=disable"
+      RISK_ENGINE_SOURCE: "risk-engine/dev"
+      RISK_ENGINE_TENANT: "dev"
+      RISK_ENGINE_LOG_LEVEL: "info"
+    ports:
+      - "8082:8082"
+
+  api-gateway:
+    build:
+      context: ..
+      dockerfile: kanz/services/api-gateway/Dockerfile
+    depends_on:
+      risk-engine:
+        condition: service_started
+    environment:
+      API_GATEWAY_LISTEN: ":8080"
+      API_GATEWAY_RISK_ENGINE_ADDR: "risk-engine:8081"
+      API_GATEWAY_SOURCE: "api-gateway/dev"
+      API_GATEWAY_LOG_LEVEL: "info"
+    ports:
+      - "8080:8080"

@@ -1,0 +1,112 @@
+# Backstage software catalog for Kanz (DEVX-01c). Registers the platform System
+# and one Component per service, so the internal portal surfaces what runs, who
+# owns it, its runbooks (TechDocs), and its schemas (the EVT-16 registry). Point
+# a Backstage instance at this file (catalog.locations) to ingest it.
+---
+apiVersion: backstage.io/v1alpha1
+kind: System
+metadata:
+  name: kanz
+  description: Event-driven risk platform — event backbone, risk engine, prediction layer.
+  annotations:
+    backstage.io/techdocs-ref: dir:../../docs
+spec:
+  owner: event-platform
+---
+apiVersion: backstage.io/v1alpha1
+kind: Component
+metadata:
+  name: risk-engine
+  description: Ingests state, recomputes risk, serves the query.v1 gRPC read surface.
+  annotations:
+    backstage.io/techdocs-ref: dir:../../docs/runbooks
+  links:
+    - { url: https://github.com/kanz-eng/kanz/tree/main/kanz/services/risk-engine, title: source }
+spec:
+  type: service
+  lifecycle: production
+  owner: risk-platform
+  system: kanz
+  providesApis: [risk-query-v1]
+---
+apiVersion: backstage.io/v1alpha1
+kind: Component
+metadata:
+  name: api-gateway
+  description: Authenticated, rate-limited external BFF over the risk read/scenario API.
+spec:
+  type: service
+  lifecycle: production
+  owner: risk-platform
+  system: kanz
+  consumesApis: [risk-query-v1]
+---
+apiVersion: backstage.io/v1alpha1
+kind: Component
+metadata:
+  name: schema-registry
+  description: Stores + resolves payload schema descriptors (EVT-16).
+spec:
+  type: service
+  lifecycle: production
+  owner: event-platform
+  system: kanz
+---
+apiVersion: backstage.io/v1alpha1
+kind: Component
+metadata:
+  name: audit
+  description: Tamper-evident hash-chained audit log + lineage reconstruction (AUDIT-01).
+spec:
+  type: service
+  lifecycle: production
+  owner: event-platform
+  system: kanz
+---
+apiVersion: backstage.io/v1alpha1
+kind: Component
+metadata:
+  name: lineage
+  description: Dataset-level lineage graph + OpenLineage + PII governance (LIN-01).
+spec:
+  type: service
+  lifecycle: production
+  owner: event-platform
+  system: kanz
+---
+apiVersion: backstage.io/v1alpha1
+kind: Component
+metadata:
+  name: lake-sink
+  description: Schema-evolution-aware CDC sink from the Kafka log to the lakehouse (LAKE-01).
+spec:
+  type: service
+  lifecycle: production
+  owner: data-platform
+  system: kanz
+---
+apiVersion: backstage.io/v1alpha1
+kind: Component
+metadata:
+  name: autopilot
+  description: Closed-loop autonomous ops controller (AUTO-01).
+  annotations:
+    backstage.io/techdocs-ref: dir:../../docs/runbooks
+spec:
+  type: service
+  lifecycle: production
+  owner: sre
+  system: kanz
+---
+apiVersion: backstage.io/v1alpha1
+kind: API
+metadata:
+  name: risk-query-v1
+  description: Engine read surface — Exposure / Measures / EvaluateScenario / Health.
+spec:
+  type: grpc
+  lifecycle: production
+  owner: risk-platform
+  system: kanz
+  definition:
+    $text: https://github.com/kanz-eng/kanz-schemas/blob/main/proto/query/v1/risk_query.proto
