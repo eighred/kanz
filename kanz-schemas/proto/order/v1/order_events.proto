@@ -1,0 +1,197 @@
+syntax = "proto3";
+
+// Package order.v1 (events half) defines the order-aggregate lifecycle FACTs
+// and the Fill records they carry — the observable effects of the order
+// COMMANDS in order.proto.
+//
+// These are FACTs (event-class-rules.md §1): per-aggregate ordering (partition
+// by order_id) is a correctness requirement, and each is self-contained —
+// order_id and the resulting OrderState travel with it. The command that
+// produced a FACT is followed via the envelope causation_id (set to the
+// command's event_id); the order's full disposition is always carried as the
+// embedded OrderState snapshot so a consumer never has to re-derive it.
+package order.v1;
+
+import "google/protobuf/timestamp.proto";
+import "common/v1/decimal.proto";
+import "common/v1/money.proto";
+import "order/v1/order.proto";
+
+// OrderStatus is the lifecycle state of an order aggregate. It moves
+// monotonically toward a terminal state (FILLED/CANCELLED/REJECTED/EXPIRED);
+// PARTIALLY_FILLED may repeat as fills arrive.
+enum OrderStatus {
+  // Default zero value; never set explicitly.
+  ORDER_STATUS_UNSPECIFIED = 0;
+
+  // Admitted and validated, not yet working at a venue.
+  ORDER_STATUS_PENDING_NEW = 1;
+
+  // Working at an execution venue, unfilled.
+  ORDER_STATUS_ROUTED = 2;
+
+  // Working, with one or more fills but quantity remaining.
+  ORDER_STATUS_PARTIALLY_FILLED = 3;
+
+  // Terminal: fully filled.
+  ORDER_STATUS_FILLED = 4;
+
+  // Terminal: cancelled before fully filling.
+  ORDER_STATUS_CANCELLED = 5;
+
+  // Terminal: refused before any effect (validation, authority, compliance).
+  ORDER_STATUS_REJECTED = 6;
+
+  // Terminal: time-in-force elapsed before fully filling.
+  ORDER_STATUS_EXPIRED = 7;
+}
+
+// OrderState is the full materialized state of one order — the payload embedded
+// in every lifecycle FACT and the element of an order STATE_SNAPSHOT. Its
+// aggregate identity is order_id.
+message OrderState {
+  // order_id is the aggregate identity. Required.
+  string order_id = 1;
+
+  // portfolio_id is the trading account. Required.
+  string portfolio_id = 2;
+
+  // instrument_id is the traded instrument. Required.
+  string instrument_id = 3;
+
+  // side, order_type, and time_in_force restate the order's static terms so the
+  // state is self-contained. Required.
+  Side side = 4;
+  OrderType order_type = 5;
+  TimeInForce time_in_force = 6;
+
+  // ordered_quantity is the current order size (post-amend). Required.
+  common.v1.Decimal ordered_quantity = 7;
+
+  // limit_price is the working limit (post-amend), set for priced orders.
+  common.v1.Decimal limit_price = 8;
+
+  // status is the current lifecycle state. Required; must not be
+  // ORDER_STATUS_UNSPECIFIED.
+  OrderStatus status = 9;
+
+  // filled_quantity is the cumulative executed quantity; leaves_quantity is the
+  // remaining open quantity (ordered_quantity - filled_quantity). Required.
+  common.v1.Decimal filled_quantity = 10;
+  common.v1.Decimal leaves_quantity = 11;
+
+  // average_fill_price is the quantity-weighted average price of all fills so
+  // far. Unset until the first fill.
+  common.v1.Decimal average_fill_price = 12;
+
+  // as_of is the domain time this state is effective at — the event_time of the
+  // change that produced it. Required.
+  google.protobuf.Timestamp as_of = 13;
+}
+
+// Fill is one atomic execution against an order — the execution-report payload
+// (FIX ExecType=TRADE). A partial order produces several Fills, each its own
+// FACT; their quantities sum to OrderState.filled_quantity.
+message Fill {
+  // fill_id is the unique, idempotent identity of this execution (the
+  // venue/EMS execution id). Replays and dedup key on it. Required.
+  string fill_id = 1;
+
+  // order_id is the order this fill belongs to. Required.
+  string order_id = 2;
+
+  // instrument_id is the executed instrument. Required.
+  string instrument_id = 3;
+
+  // side is the fill direction (equals the order side). Required.
+  Side side = 4;
+
+  // quantity is this fill's executed size, strictly positive. Required.
+  common.v1.Decimal quantity = 5;
+
+  // price is this fill's execution price. Required.
+  common.v1.Decimal price = 6;
+
+  // fee is the commission/fees charged on this fill, in the execution currency.
+  // Drives realized P&L. Optional (zero when none).
+  common.v1.Money fee = 7;
+
+  // venue is the ISO 10383 MIC of the execution venue. Required.
+  string venue = 8;
+
+  // venue_execution_id is the venue's own execution reference, retained for
+  // reconciliation against POST-01 confirmations. Optional.
+  string venue_execution_id = 9;
+
+  // executed_at is the venue execution timestamp. Required.
+  google.protobuf.Timestamp executed_at = 10;
+}
+
+// OrderAccepted is the FACT that an order passed validation, authority, and
+// pre-trade compliance and was admitted (status PENDING_NEW).
+message OrderAccepted {
+  string order_id = 1;
+  OrderState state = 2;
+}
+
+// OrderRejected is the FACT that an order was refused before any effect. No
+// state changed; the order is terminal (status REJECTED).
+message OrderRejected {
+  string order_id = 1;
+
+  // reason is human-readable; error_code is a stable machine code mirroring the
+  // command.v1 outcome vocabulary (e.g. "COMPLIANCE_BREACH", "AUTHORITY_DENIED",
+  // "INVALID_PRICE"). Required.
+  string reason = 2;
+  string error_code = 3;
+}
+
+// OrderRouted is the FACT that an admitted order was sent to an execution
+// venue and is working (status ROUTED).
+message OrderRouted {
+  string order_id = 1;
+
+  // venue is the ISO 10383 MIC the order was routed to. Required.
+  string venue = 2;
+
+  // venue_order_id is the venue's acknowledgement id, for amend/cancel routing
+  // and reconciliation. Optional.
+  string venue_order_id = 3;
+}
+
+// OrderPartiallyFilled is the FACT of a fill that leaves quantity remaining
+// (status PARTIALLY_FILLED). It carries both the atomic fill and the resulting
+// order state.
+message OrderPartiallyFilled {
+  string order_id = 1;
+  Fill fill = 2;
+  OrderState state = 3;
+}
+
+// OrderFilled is the FACT of the fill that completes an order (status FILLED,
+// terminal). It carries the final fill and the resulting order state.
+message OrderFilled {
+  string order_id = 1;
+  Fill fill = 2;
+  OrderState state = 3;
+}
+
+// OrderCancelled is the FACT that a resting order was withdrawn before fully
+// filling (status CANCELLED, terminal).
+message OrderCancelled {
+  string order_id = 1;
+
+  // cancelled_quantity is the open quantity withdrawn (the leaves at cancel
+  // time). Required.
+  common.v1.Decimal cancelled_quantity = 2;
+}
+
+// OrderExpired is the FACT that an order's time-in-force elapsed before it
+// fully filled (status EXPIRED, terminal).
+message OrderExpired {
+  string order_id = 1;
+
+  // unfilled_quantity is the open quantity that went unfilled at expiry.
+  // Required.
+  common.v1.Decimal unfilled_quantity = 2;
+}

@@ -10,6 +10,7 @@
 /proto/market/        @kanz-eng/market-data
 /proto/domain/        @kanz-eng/risk-engine
 /proto/command/       @kanz-eng/execution
+/proto/order/         @kanz-eng/execution
 /proto/lifecycle/     @kanz-eng/platform
 /proto/observation/   @kanz-eng/observability
 /proto/inference/     @kanz-eng/quant-ml

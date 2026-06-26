@@ -1,0 +1,159 @@
+syntax = "proto3";
+
+// Package order.v1 defines the order/execution domain — the platform's first
+// first-class COMMAND flow (see kanz-schemas/docs/event-class-rules.md §2 and
+// the command.v1 generic layer). It owns two halves:
+//
+//   - this file: the concrete order COMMANDS (submit/amend/cancel), each
+//     embedding command.v1.CommandMetadata as field 1 per the command-class
+//     contract;
+//   - order_events.proto: the order-aggregate lifecycle FACTs and the Fill
+//     records they carry.
+//
+// The order aggregate identity is order_id; it is the metadata.target_id of
+// every command and the envelope partition_key, so all commands and lifecycle
+// FACTs for one order are totally ordered. CODEOWNERS: @kanz-eng/execution.
+//
+// proto3 cannot enforce field presence; the "Required" notes are invariants the
+// bus client library and the OMS command handlers enforce on publish.
+package order.v1;
+
+import "google/protobuf/timestamp.proto";
+import "common/v1/decimal.proto";
+import "command/v1/command.proto";
+
+// SubmitOrder requests a new order be admitted and worked. Its outcome is a
+// command.v1.CommandOutcome (ACCEPTED on admission; REJECTED on validation,
+// authority, or compliance failure) plus the correlation-linked lifecycle FACTs
+// the working order produces (OrderAccepted, then routing/fills).
+message SubmitOrder {
+  // metadata is the command-common envelope. metadata.target_id MUST equal
+  // order_id. Required.
+  command.v1.CommandMetadata metadata = 1;
+
+  // order_id is the client-assigned, idempotent identity of the new order — the
+  // aggregate id. A re-submission with the same order_id is the envelope
+  // idempotency-key dedup case, not a second order. Required.
+  string order_id = 2;
+
+  // portfolio_id is the portfolio the order trades for — the account whose
+  // positions a fill will move and whose mandate pre-trade compliance checks.
+  // Required.
+  string portfolio_id = 3;
+
+  // instrument_id is the canonical Kanz instrument identifier to trade.
+  // Required.
+  string instrument_id = 4;
+
+  // side is buy or sell. Required; must not be SIDE_UNSPECIFIED.
+  Side side = 5;
+
+  // quantity is the order size in the instrument's natural units, strictly
+  // positive (direction is carried by side, not the sign). Required.
+  common.v1.Decimal quantity = 6;
+
+  // order_type selects how the order is priced/triggered. Required; must not be
+  // ORDER_TYPE_UNSPECIFIED.
+  OrderType order_type = 7;
+
+  // limit_price is the worst acceptable price. Required for ORDER_TYPE_LIMIT and
+  // ORDER_TYPE_STOP_LIMIT; ignored otherwise.
+  common.v1.Decimal limit_price = 8;
+
+  // stop_price is the trigger price that activates the order. Required for
+  // ORDER_TYPE_STOP and ORDER_TYPE_STOP_LIMIT; ignored otherwise.
+  common.v1.Decimal stop_price = 9;
+
+  // time_in_force governs how long the order rests. Required; must not be
+  // TIME_IN_FORCE_UNSPECIFIED.
+  TimeInForce time_in_force = 10;
+
+  // expire_at is the expiry instant for TIME_IN_FORCE_GTD. Required when
+  // time_in_force is GTD; ignored otherwise.
+  google.protobuf.Timestamp expire_at = 11;
+}
+
+// AmendOrder requests a change to a resting order's quantity and/or limit
+// price. Only the set fields change; an amend that would reduce quantity below
+// the already-filled amount is REJECTED. An amend resets the order's working
+// priority at the venue (venue-dependent).
+message AmendOrder {
+  // metadata.target_id MUST equal order_id. Required.
+  command.v1.CommandMetadata metadata = 1;
+
+  // order_id identifies the resting order to amend. Required.
+  string order_id = 2;
+
+  // new_quantity, when set, replaces the order quantity. Must be strictly
+  // positive and not below filled_quantity. Optional.
+  common.v1.Decimal new_quantity = 3;
+
+  // new_limit_price, when set, replaces the limit price. Valid only for a
+  // priced (LIMIT/STOP_LIMIT) order. Optional.
+  common.v1.Decimal new_limit_price = 4;
+}
+
+// CancelOrder requests a resting order be withdrawn. A cancel races the venue:
+// it may land after a final fill, in which case the outcome is REJECTED
+// (too-late) and the order is already terminal.
+message CancelOrder {
+  // metadata.target_id MUST equal order_id. Required.
+  command.v1.CommandMetadata metadata = 1;
+
+  // order_id identifies the order to cancel. Required.
+  string order_id = 2;
+}
+
+// Side is the direction of an order or fill.
+enum Side {
+  // Default zero value; never set explicitly.
+  SIDE_UNSPECIFIED = 0;
+
+  // Buy / long.
+  SIDE_BUY = 1;
+
+  // Sell / short.
+  SIDE_SELL = 2;
+}
+
+// OrderType selects how an order is priced and triggered.
+enum OrderType {
+  // Default zero value; never set explicitly.
+  ORDER_TYPE_UNSPECIFIED = 0;
+
+  // Execute immediately at the best available price; no price protection.
+  ORDER_TYPE_MARKET = 1;
+
+  // Execute at limit_price or better; rests until filled, cancelled, or
+  // expired.
+  ORDER_TYPE_LIMIT = 2;
+
+  // Becomes a market order once stop_price trades.
+  ORDER_TYPE_STOP = 3;
+
+  // Becomes a limit order (at limit_price) once stop_price trades.
+  ORDER_TYPE_STOP_LIMIT = 4;
+}
+
+// TimeInForce governs how long an order rests before it is cancelled or
+// expired by the venue.
+enum TimeInForce {
+  // Default zero value; never set explicitly.
+  TIME_IN_FORCE_UNSPECIFIED = 0;
+
+  // Day: expires at the end of the trading session.
+  TIME_IN_FORCE_DAY = 1;
+
+  // Good-til-cancelled: rests until explicitly cancelled.
+  TIME_IN_FORCE_GTC = 2;
+
+  // Immediate-or-cancel: fill what is available now, cancel the remainder.
+  TIME_IN_FORCE_IOC = 3;
+
+  // Fill-or-kill: fill the entire quantity immediately or cancel the whole
+  // order.
+  TIME_IN_FORCE_FOK = 4;
+
+  // Good-til-date: rests until expire_at, then expires.
+  TIME_IN_FORCE_GTD = 5;
+}
