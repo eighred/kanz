@@ -101,6 +101,10 @@ func applyShock(p *domain.Portfolio, shock v1.ScenarioShock, cfg evalConfig) {
 		applyParallelShift(p, s)
 	case v1.SectorShock:
 		applySectorShock(p, s, cfg.classifier)
+	case v1.VolShock:
+		// A vol shock has no linear MarketValue effect — it only reprices options
+		// under full revaluation (EvaluateReval, DERIV-01e). No-op here so it is a
+		// recognized (not dropped) shock on the linear path.
 	}
 }
 

@@ -1,0 +1,174 @@
+syntax = "proto3";
+
+// Package reference.v1 (contract-terms half) defines the static derivative
+// contract specifications — option/swap/future terms — that pricing analytics
+// need but that must never be inlined into the market.v1 hot path. Like
+// InstrumentReference, contract terms are slowly-changing reference data keyed
+// by the canonical instrument_id, so a market quote for a derivative joins to
+// its terms with no translation (DERIV-01a).
+//
+// These terms turn the ASSET_CLASS_DERIVATIVE tag into analytics: the DERIV-01b
+// pricing library reads OptionTerms to price + risk an option, replacing the
+// RISK-07 placeholder Delta with real per-instrument Greeks (DERIV-01d).
+//
+// proto3 cannot enforce field presence; the "Required" notes are invariants the
+// pricing layer enforces.
+package reference.v1;
+
+import "google/protobuf/timestamp.proto";
+import "common/v1/decimal.proto";
+
+// OptionType is the right an option confers.
+enum OptionType {
+  // Default zero value; never set explicitly.
+  OPTION_TYPE_UNSPECIFIED = 0;
+
+  // CALL: the right to buy the underlying at the strike.
+  OPTION_TYPE_CALL = 1;
+
+  // PUT: the right to sell the underlying at the strike.
+  OPTION_TYPE_PUT = 2;
+}
+
+// ExerciseStyle is when an option may be exercised.
+enum ExerciseStyle {
+  // Default zero value; never set explicitly.
+  EXERCISE_STYLE_UNSPECIFIED = 0;
+
+  // EUROPEAN: exercisable only at expiry (closed-form Black-Scholes).
+  EXERCISE_STYLE_EUROPEAN = 1;
+
+  // AMERICAN: exercisable any time up to expiry (binomial/numerical).
+  EXERCISE_STYLE_AMERICAN = 2;
+}
+
+// OptionTerms is the static specification of a listed/OTC option, keyed (in
+// ContractTerms) by the option's own instrument_id.
+message OptionTerms {
+  // underlying_id is the canonical instrument_id of the underlying the option
+  // references — the id whose market price drives the option's value. Required.
+  string underlying_id = 1;
+
+  // strike is the exercise price. Required; must be positive.
+  common.v1.Decimal strike = 2;
+
+  // expiry is the expiration instant. Required.
+  google.protobuf.Timestamp expiry = 3;
+
+  // option_type is call or put. Required; must not be OPTION_TYPE_UNSPECIFIED.
+  OptionType option_type = 4;
+
+  // exercise_style is European or American. Required; must not be
+  // EXERCISE_STYLE_UNSPECIFIED.
+  ExerciseStyle exercise_style = 5;
+
+  // contract_multiplier is the number of underlying units per contract (e.g.
+  // 100 for a standard US equity option). Required; the per-position Greek
+  // aggregation scales by it.
+  common.v1.Decimal contract_multiplier = 6;
+}
+
+// SwapLegType is whether a swap leg pays a fixed or a floating rate.
+enum SwapLegType {
+  // Default zero value; never set explicitly.
+  SWAP_LEG_TYPE_UNSPECIFIED = 0;
+
+  // FIXED: pays a constant fixed_rate.
+  SWAP_LEG_TYPE_FIXED = 1;
+
+  // FLOAT: pays a floating index plus a spread.
+  SWAP_LEG_TYPE_FLOAT = 2;
+}
+
+// PaymentFrequency is how often a swap leg pays.
+enum PaymentFrequency {
+  // Default zero value; never set explicitly.
+  PAYMENT_FREQUENCY_UNSPECIFIED = 0;
+
+  PAYMENT_FREQUENCY_ANNUAL = 1;
+  PAYMENT_FREQUENCY_SEMIANNUAL = 2;
+  PAYMENT_FREQUENCY_QUARTERLY = 3;
+  PAYMENT_FREQUENCY_MONTHLY = 4;
+}
+
+// SwapLeg is one side of a swap.
+message SwapLeg {
+  // leg_type selects fixed vs float. Required.
+  SwapLegType leg_type = 1;
+
+  // notional is the leg's notional amount. Required; positive.
+  common.v1.Decimal notional = 2;
+
+  // currency_code is the ISO 4217 code the leg pays in. Required.
+  string currency_code = 3;
+
+  // fixed_rate is the annualized fixed rate (e.g. 0.035 for 3.5%). Required for
+  // a FIXED leg; ignored for FLOAT.
+  common.v1.Decimal fixed_rate = 4;
+
+  // float_index is the floating reference (e.g. "SOFR", "EURIBOR-3M").
+  // Required for a FLOAT leg; ignored for FIXED.
+  string float_index = 5;
+
+  // spread is the annualized spread over the float index. Optional; FLOAT only.
+  common.v1.Decimal spread = 6;
+
+  // frequency is the payment frequency. Required.
+  PaymentFrequency frequency = 7;
+
+  // day_count is the day-count convention (e.g. "ACT/360", "30/360").
+  // Required.
+  string day_count = 8;
+}
+
+// SwapTerms is the static specification of an interest-rate swap, keyed by the
+// swap's instrument_id. Modeled as pay/receive legs from the holder's view.
+message SwapTerms {
+  // effective_date is when the swap starts accruing; maturity_date when it
+  // ends. Both required.
+  google.protobuf.Timestamp effective_date = 1;
+  google.protobuf.Timestamp maturity_date = 2;
+
+  // pay_leg / receive_leg are the two sides. Both required.
+  SwapLeg pay_leg = 3;
+  SwapLeg receive_leg = 4;
+}
+
+// FutureTerms is the static specification of a futures contract, keyed by the
+// future's instrument_id.
+message FutureTerms {
+  // underlying_id is the canonical instrument_id of the underlying. Required.
+  string underlying_id = 1;
+
+  // expiry is the contract expiration/delivery instant. Required.
+  google.protobuf.Timestamp expiry = 2;
+
+  // contract_size is the number of underlying units per contract. Required.
+  common.v1.Decimal contract_size = 3;
+
+  // tick_size is the minimum price increment. Optional.
+  common.v1.Decimal tick_size = 4;
+
+  // settlement_type is "CASH" or "PHYSICAL". Required.
+  string settlement_type = 5;
+}
+
+// ContractTerms carries the derivative terms for one instrument — the
+// reference-data record the pricing layer joins to by instrument_id. Exactly one
+// terms variant is set, agreeing with the instrument's asset class. as_of
+// versions the record for point-in-time reads, mirroring InstrumentReference.
+message ContractTerms {
+  // instrument_id is the derivative instrument's canonical id (NOT the
+  // underlying's). Required.
+  string instrument_id = 1;
+
+  // as_of is the effective time of this terms record. Required.
+  google.protobuf.Timestamp as_of = 2;
+
+  // terms is the contract specification. Exactly one is set.
+  oneof terms {
+    OptionTerms option = 10;
+    SwapTerms swap = 11;
+    FutureTerms future = 12;
+  }
+}

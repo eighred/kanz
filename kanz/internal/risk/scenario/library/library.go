@@ -93,6 +93,23 @@ func Covid2020Crash() []v1.ScenarioShock {
 	})
 }
 
+// VolSpikeRiskOff is the canonical option-book stress (DERIV-01e): a broad
+// equity drawdown paired with an implied-vol spike — the regime where a
+// long-gamma book's convexity and a short-vol book's vega losses both bite,
+// which a price-only curve cannot express. The ParallelShift drives the spot
+// drop on the linear path; the global VolShock only takes effect under full
+// revaluation (scenario.EvaluateReval), where option positions are repriced.
+//
+// Unlike the GICS-curve scenarios it is not in the Named/Names catalog (those
+// are sector curves by construction); a caller passes it directly to
+// EvaluateReval.
+func VolSpikeRiskOff() []v1.ScenarioShock {
+	return []v1.ScenarioShock{
+		v1.ParallelShift{Pct: pct(-20)},                                        // −20% across the book
+		v1.VolShock{AbsBump: &commonpb.Decimal{Coefficient: 15, Exponent: -2}}, // +15 vol points, all underlyings
+	}
+}
+
 // SectorCurve builds the hypothetical curve-shift primitive: one SectorShock per
 // (sectorCode → pct) entry, all under taxonomy. This is what the named
 // scenarios are built from and the seam a caller uses for a custom curve (e.g.

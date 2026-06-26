@@ -88,6 +88,26 @@ func (s SectorShock) Description() string {
 	return fmt.Sprintf("sector shock %s:%s by %s%%", s.Taxonomy, s.Code, formatDecimal(s.Pct))
 }
 
+// VolShock bumps the implied volatility used to reprice option positions, by an
+// absolute amount (AbsBump = 0.05 ⇒ +5 vol points). It only has an effect under
+// a full-revaluation scenario (EvaluateReval, DERIV-01e), where option positions
+// are repriced through Black-Scholes; the linear MarketValue path cannot express
+// a vega effect and treats it as a no-op. An empty UnderlyingID applies the bump
+// to every underlying — the textbook "vol up 5 points across the book" stress.
+type VolShock struct {
+	UnderlyingID InstrumentID
+	AbsBump      *commonpb.Decimal
+}
+
+// Description satisfies ScenarioShock.
+func (s VolShock) Description() string {
+	target := "all"
+	if s.UnderlyingID != "" {
+		target = string(s.UnderlyingID)
+	}
+	return fmt.Sprintf("vol shock %s by %s (abs)", target, formatDecimal(s.AbsBump))
+}
+
 // formatDecimal is a tiny helper for Description strings — not
 // general-purpose Decimal formatting (that would belong in
 // common.v1 or a future text-format helper). Just enough to make
