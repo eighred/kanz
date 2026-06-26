@@ -24,11 +24,13 @@ import (
 	querypb "github.com/kanz-eng/kanz-schemas-go/query/v1"
 
 	"github.com/kanz-eng/kanz/pkg/auth"
+	"github.com/kanz-eng/kanz/pkg/bus"
 	"github.com/kanz-eng/kanz/pkg/observability"
 	"github.com/kanz-eng/kanz/pkg/transport"
 	"github.com/kanz-eng/kanz/services/api-gateway/internal/config"
 	"github.com/kanz-eng/kanz/services/api-gateway/internal/gateway"
 	"github.com/kanz-eng/kanz/services/api-gateway/internal/middleware"
+	"github.com/kanz-eng/kanz/services/api-gateway/internal/orders"
 )
 
 func main() {
@@ -70,10 +72,20 @@ func main() {
 
 	handler := gateway.New(querypb.NewRiskQueryServiceClient(conn))
 
+	// Order write surface (OMS-01d): publish order commands to the spine, with
+	// the AUTH-01c forged-issuer guard on the producer. Nil publisher ⇒ the
+	// write routes 503 (read-only gateway).
+	ordersHandler, closeBus, err := buildOrders(ctx, cfg, logger)
+	if err != nil {
+		logger.Error("order write surface init failed", "err", err)
+		os.Exit(1)
+	}
+	defer closeBus()
+
 	var ready atomic.Bool
 	srv := &http.Server{
 		Addr:              cfg.Listen,
-		Handler:           buildRouter(cfg, handler, obs, &ready, logger),
+		Handler:           buildRouter(cfg, handler, ordersHandler, obs, &ready, logger),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
@@ -95,11 +107,38 @@ func main() {
 	}
 }
 
+// buildOrders wires the OMS-01d write surface. With a NATS URL it dials the
+// spine and returns a producer-backed handler (forged-issuer guard on); without
+// one it returns a disabled handler whose routes 503. The returned func closes
+// the bus client on shutdown.
+func buildOrders(ctx context.Context, cfg config.Config, logger *slog.Logger) (*orders.Handler, func(), error) {
+	if cfg.NATSURL == "" {
+		logger.Warn("api-gateway: order write surface disabled (no API_GATEWAY_NATS_URL)")
+		return orders.New(nil), func() {}, nil
+	}
+	client, err := bus.DialNATS(ctx, bus.NATSConfig{URL: cfg.NATSURL, Name: cfg.Source})
+	if err != nil {
+		return nil, func() {}, err
+	}
+	producer, err := bus.NewProducer(client, bus.ProducerConfig{
+		Source:              cfg.Source,
+		ProducerVersion:     version(),
+		VerifyCommandIssuer: auth.VerifyCommandIssuer,
+	})
+	if err != nil {
+		_ = client.Close()
+		return nil, func() {}, err
+	}
+	logger.Info("api-gateway: order write surface enabled")
+	return orders.New(producer), func() { _ = client.Close() }, nil
+}
+
 // buildRouter wires the public probes/metrics/openapi (un-gated) and the /v1
-// risk routes behind the edge middleware chain.
-func buildRouter(cfg config.Config, h *gateway.Handler, obs *observability.Provider, ready *atomic.Bool, logger *slog.Logger) http.Handler {
+// risk + order routes behind the edge middleware chain.
+func buildRouter(cfg config.Config, h *gateway.Handler, o *orders.Handler, obs *observability.Provider, ready *atomic.Bool, logger *slog.Logger) http.Handler {
 	gwMux := http.NewServeMux()
 	h.Routes(gwMux)
+	o.Routes(gwMux)
 
 	var authn middleware.Authenticator
 	switch {

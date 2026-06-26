@@ -59,6 +59,10 @@ type Config struct {
 	// X-Signature over method+path+body (API-01d request signing). Empty ⇒
 	// signing is not enforced.
 	SigningSecret string
+
+	// NATSURL is the spine the order write surface (OMS-01d) publishes commands
+	// to. Empty ⇒ the gateway is read-only (POST /v1/orders 503s).
+	NATSURL string
 }
 
 func Load() (Config, error) {
@@ -81,6 +85,7 @@ func Load() (Config, error) {
 		MaxInFlight:     parseInt(os.Getenv("API_GATEWAY_MAX_IN_FLIGHT")),
 		QuotasFile:      os.Getenv("API_GATEWAY_QUOTAS_FILE"),
 		SigningSecret:   secret("API_GATEWAY_SIGNING_SECRET"),
+		NATSURL:         os.Getenv("API_GATEWAY_NATS_URL"),
 	}, nil
 }
 

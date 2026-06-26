@@ -1,0 +1,161 @@
+// Package orders is the api-gateway's governed write surface (OMS-01d): the
+// only authenticated entry point that turns a client request into an order
+// COMMAND on the bus. It binds the authenticated principal as the command
+// issuer (the client cannot forge it — the gateway overrides any body value),
+// stamps the tenant, and keys envelope dedup on the idempotency key, then
+// publishes; the bus Producer's VerifyCommandIssuer (AUTH-01c) is the second
+// layer that rejects a command whose issuer the caller may not assume.
+package orders
+
+import (
+	"context"
+	"io"
+	"net/http"
+
+	"github.com/google/uuid"
+	commandpb "github.com/kanz-eng/kanz-schemas-go/command/v1"
+	envelopepb "github.com/kanz-eng/kanz-schemas-go/envelope/v1"
+	orderpb "github.com/kanz-eng/kanz-schemas-go/order/v1"
+	"google.golang.org/protobuf/encoding/protojson"
+	"google.golang.org/protobuf/proto"
+	"time"
+
+	"github.com/kanz-eng/kanz/pkg/auth"
+	"github.com/kanz-eng/kanz/pkg/bus"
+	"github.com/kanz-eng/kanz/services/api-gateway/internal/middleware"
+)
+
+// Order command subjects (mirror services/oms/internal/order; kept local so the
+// gateway does not depend on the OMS service package).
+const (
+	subjectSubmit = "order.order.submit"
+	subjectCancel = "order.order.cancel"
+	domain        = "order"
+)
+
+const maxBodyBytes = 1 << 20 // 1 MiB
+
+// Publisher is the bus publish surface — satisfied by *bus.Producer.
+type Publisher interface {
+	Publish(ctx context.Context, e bus.Event) error
+}
+
+// Handler serves POST /v1/orders and /v1/orders/{id}/cancel. A nil publisher
+// means writes are disabled (the gateway runs read-only) — the routes 503.
+type Handler struct {
+	pub       Publisher
+	unmarshal protojson.UnmarshalOptions
+}
+
+// New returns a write handler over the publisher. A nil publisher disables the
+// write routes.
+func New(pub Publisher) *Handler {
+	return &Handler{pub: pub, unmarshal: protojson.UnmarshalOptions{DiscardUnknown: true}}
+}
+
+// Routes registers the write endpoints.
+func (h *Handler) Routes(mux *http.ServeMux) {
+	mux.HandleFunc("POST /v1/orders", h.submit)
+	mux.HandleFunc("POST /v1/orders/{id}/cancel", h.cancel)
+}
+
+func (h *Handler) submit(w http.ResponseWriter, r *http.Request) {
+	p, ok := h.principal(w, r)
+	if !ok {
+		return
+	}
+	body, err := io.ReadAll(io.LimitReader(r.Body, maxBodyBytes))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "read body failed")
+		return
+	}
+	var cmd orderpb.SubmitOrder
+	if err := h.unmarshal.Unmarshal(body, &cmd); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid order body: "+err.Error())
+		return
+	}
+	if cmd.GetOrderId() == "" {
+		cmd.OrderId = uuid.NewString()
+	}
+	// Bind identity: the gateway is the sole issuer authority — it overrides any
+	// client-supplied metadata so the issuer cannot be forged.
+	cmd.Metadata = bindMetadata(cmd.GetMetadata(), p, cmd.GetOrderId())
+
+	if err := h.publish(r.Context(), p, subjectSubmit, cmd.GetOrderId(), &cmd, idempotencyKey(r, cmd.GetOrderId())); err != nil {
+		writePublishError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusAccepted, map[string]string{"order_id": cmd.GetOrderId(), "status": "submitted"})
+}
+
+func (h *Handler) cancel(w http.ResponseWriter, r *http.Request) {
+	p, ok := h.principal(w, r)
+	if !ok {
+		return
+	}
+	orderID := r.PathValue("id")
+	cmd := &orderpb.CancelOrder{
+		OrderId:  orderID,
+		Metadata: bindMetadata(nil, p, orderID),
+	}
+	if err := h.publish(r.Context(), p, subjectCancel, orderID, cmd, idempotencyKey(r, orderID)); err != nil {
+		writePublishError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusAccepted, map[string]string{"order_id": orderID, "status": "cancel_requested"})
+}
+
+// publish stamps the command envelope and hands it to the producer, with the
+// authenticated principal on ctx so the producer's VerifyCommandIssuer (AUTH-01c)
+// can run.
+func (h *Handler) publish(ctx context.Context, p *middleware.Principal, subject, orderID string, payload proto.Message, idem string) error {
+	if h.pub == nil {
+		return errWritesDisabled
+	}
+	ctx = auth.WithPrincipal(ctx, &auth.Principal{Subject: p.Subject, Tenant: p.Tenant, Roles: p.Roles})
+	return h.pub.Publish(ctx, bus.Event{
+		Subject:        subject,
+		EventType:      subject,
+		EventClass:     envelopepb.EventClass_EVENT_CLASS_COMMAND,
+		SchemaVersion:  1,
+		Domain:         domain,
+		EventTime:      time.Now().UTC(),
+		PartitionKey:   orderID,
+		IdempotencyKey: idem,
+		TenantID:       p.Tenant,
+		Payload:        payload,
+	})
+}
+
+func (h *Handler) principal(w http.ResponseWriter, r *http.Request) (*middleware.Principal, bool) {
+	p := middleware.PrincipalFromContext(r.Context())
+	if p == nil || p.Subject == "" {
+		writeError(w, http.StatusUnauthorized, "authentication required to issue an order")
+		return nil, false
+	}
+	return p, true
+}
+
+// bindMetadata sets the command-common metadata from the authenticated
+// principal, overriding any client-supplied value (anti-forgery). The issuer is
+// "user:{subject}"; target_id is the order id.
+func bindMetadata(existing *commandpb.CommandMetadata, p *middleware.Principal, orderID string) *commandpb.CommandMetadata {
+	reason := ""
+	if existing != nil {
+		reason = existing.GetReason() // a client-supplied note is advisory; preserve it
+	}
+	return &commandpb.CommandMetadata{
+		Issuer:   "user:" + p.Subject,
+		TargetId: orderID,
+		Reason:   reason,
+	}
+}
+
+// idempotencyKey prefers the client's Idempotency-Key header (API-01d dedup);
+// absent, the order id is a stable natural key.
+func idempotencyKey(r *http.Request, orderID string) string {
+	if k := r.Header.Get("Idempotency-Key"); k != "" {
+		return k
+	}
+	return orderID
+}
