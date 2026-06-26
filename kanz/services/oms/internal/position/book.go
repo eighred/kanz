@@ -140,3 +140,42 @@ func (b *Book) fold(l *lot, signed, price *big.Rat) {
 func (b *Book) money(r *big.Rat) *commonpb.Money {
 	return &commonpb.Money{Amount: dec.ToProto(r), CurrencyCode: b.baseCcy}
 }
+
+// Snapshot returns a portfolio's current holdings as a PortfolioSnapshot — the
+// read side the COMP-01 pre-trade gate projects an order onto (its BookSource).
+// Positions are marked at average cost (no market mark is wired here); NAV is
+// the net market value of the holdings, a funded-book proxy until a cash/equity
+// source lands. Empty portfolio ⇒ a snapshot with no positions.
+func (b *Book) Snapshot(portfolioID string, asOf time.Time) *domainpb.PortfolioSnapshot {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	ts := timestamppb.New(asOf.UTC())
+	nav := new(big.Rat)
+	var positions []*domainpb.PositionState
+	for k, l := range b.lots {
+		if k.portfolio != portfolioID {
+			continue
+		}
+		mv := new(big.Rat).Mul(l.avg, l.qty)
+		nav.Add(nav, mv)
+		positions = append(positions, &domainpb.PositionState{
+			PortfolioId:  k.portfolio,
+			InstrumentId: k.instrument,
+			Quantity:     dec.ToProto(l.qty),
+			AveragePrice: dec.ToProto(l.avg),
+			MarketValue:  b.money(mv),
+			RealizedPnl:  b.money(l.realized),
+			AsOf:         ts,
+		})
+	}
+	return &domainpb.PortfolioSnapshot{
+		Portfolio: &domainpb.PortfolioState{
+			PortfolioId:      portfolioID,
+			BaseCurrency:     b.baseCcy,
+			TotalMarketValue: b.money(nav),
+			PositionCount:    uint32(len(positions)),
+			AsOf:             ts,
+		},
+		Positions: positions,
+	}
+}

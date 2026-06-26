@@ -1,0 +1,56 @@
+syntax = "proto3";
+
+// Package compliance.v1 (events half) defines the compliance FACTs — the
+// observable verdicts the COMP-01 engine emits. Pre-trade rejections ride the
+// order.v1 lifecycle (OrderRejected, OMS-01f), so the FACT that is unique to
+// compliance is the passive post-trade breach: a book that was clean when
+// traded but drifted into violation as the market moved (COMP-01d).
+//
+// ComplianceBreach is a FACT (event-class-rules §1), FACT-grade and never shed —
+// a missed breach is an unmanaged risk, the same exception data-quality signals
+// get. Partition by portfolio_id so a portfolio's breach timeline is totally
+// ordered. It is the feed AUTO-01 consumes to halt/escalate.
+package compliance.v1;
+
+import "google/protobuf/timestamp.proto";
+import "compliance/v1/compliance.proto";
+
+// BreachTrigger is what moved a clean book into breach — recorded so a
+// responder can tell a passive drift from an active position change.
+enum BreachTrigger {
+  // Default zero value; never set explicitly.
+  BREACH_TRIGGER_UNSPECIFIED = 0;
+
+  // MARKET_MOVE: prices/exposures drifted with no trade — the passive breach
+  // the post-trade monitor exists to catch.
+  BREACH_TRIGGER_MARKET_MOVE = 1;
+
+  // POSITION_CHANGE: a fill or position update moved the book into breach.
+  BREACH_TRIGGER_POSITION_CHANGE = 2;
+
+  // MANDATE_CHANGE: a tightened mandate version made an existing book breach.
+  BREACH_TRIGGER_MANDATE_CHANGE = 3;
+}
+
+// ComplianceBreach is the FACT that a portfolio's live book violates its
+// mandate. It carries the full ComplianceResult (every violated rule and its
+// evidence) so a consumer never re-evaluates, and the trigger that caused it.
+message ComplianceBreach {
+  // portfolio_id is the breached portfolio — the envelope partition_key.
+  // Required.
+  string portfolio_id = 1;
+
+  // mandate_id and mandate_version pin the mandate version breached. Required.
+  string mandate_id = 2;
+  uint64 mandate_version = 3;
+
+  // result is the full evaluation verdict (status BREACH, with violations).
+  // Required.
+  ComplianceResult result = 4;
+
+  // trigger is what moved the book into breach. Required.
+  BreachTrigger trigger = 5;
+
+  // detected_at is when the monitor detected the breach. Required.
+  google.protobuf.Timestamp detected_at = 6;
+}

@@ -1,0 +1,103 @@
+package compliance
+
+import (
+	"context"
+	"testing"
+	"time"
+
+	compliancepb "github.com/kanz-eng/kanz-schemas-go/compliance/v1"
+	lifecyclepb "github.com/kanz-eng/kanz-schemas-go/lifecycle/v1"
+	"google.golang.org/protobuf/types/known/timestamppb"
+)
+
+func versioned(version uint64, effective time.Time) *compliancepb.Mandate {
+	return &compliancepb.Mandate{
+		MandateId: "m1", TenantId: "t1", PortfolioId: "p1", Version: version,
+		EffectiveAt: timestamppb.New(effective),
+	}
+}
+
+func TestMandateRegistry_PointInTimeResolution(t *testing.T) {
+	reg := NewMandateRegistry()
+	v1Eff := t0
+	v2Eff := t0.Add(10 * 24 * time.Hour)
+	reg.Put(versioned(1, v1Eff))
+	reg.Put(versioned(2, v2Eff))
+
+	cases := []struct {
+		name    string
+		asOf    time.Time
+		wantOK  bool
+		wantVer uint64
+	}{
+		{"before any version", t0.Add(-time.Hour), false, 0},
+		{"during v1", t0.Add(5 * 24 * time.Hour), true, 1},
+		{"on v2 effective", v2Eff, true, 2},
+		{"during v2", t0.Add(15 * 24 * time.Hour), true, 2},
+		{"zero asOf ⇒ latest", time.Time{}, true, 2},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			m, ok, err := reg.Mandate(context.Background(), "p1", tc.asOf)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if ok != tc.wantOK {
+				t.Fatalf("ok: want %v got %v", tc.wantOK, ok)
+			}
+			if ok && m.GetVersion() != tc.wantVer {
+				t.Fatalf("version: want %d got %d", tc.wantVer, m.GetVersion())
+			}
+		})
+	}
+}
+
+func TestMandateRegistry_IdempotentReplay(t *testing.T) {
+	reg := NewMandateRegistry()
+	reg.Put(versioned(1, t0))
+	reg.Put(versioned(1, t0)) // replay same version
+	m, ok, _ := reg.Mandate(context.Background(), "p1", t0)
+	if !ok || m.GetVersion() != 1 {
+		t.Fatalf("idempotent replay broke resolution: ok=%v m=%v", ok, m)
+	}
+}
+
+func TestMandateCodec_RoundTripAndKey(t *testing.T) {
+	m := concentrationMandate(60)
+	s, err := MarshalMandateValue(m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := UnmarshalMandateValue(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.GetVersion() != m.GetVersion() || len(got.GetRules()) != 1 {
+		t.Fatalf("round-trip mismatch: %+v", got)
+	}
+	if want := "compliance.mandate.t1/p1"; MandateConfigKey("t1", "p1") != want {
+		t.Fatalf("config key: want %s got %s", want, MandateConfigKey("t1", "p1"))
+	}
+}
+
+func TestMandateLoader_AppliesOnlyMandateKeys(t *testing.T) {
+	reg := NewMandateRegistry()
+	loader := NewMandateLoader(reg)
+
+	// Non-mandate config is ignored.
+	m, err := loader.Apply(&lifecyclepb.ConfigChanged{ConfigKey: "risk.var.confidence", NewValue: "0.99"})
+	if err != nil || m != nil {
+		t.Fatalf("non-mandate key should be ignored, got m=%v err=%v", m, err)
+	}
+
+	val, _ := MarshalMandateValue(concentrationMandate(60))
+	applied, err := loader.Apply(&lifecyclepb.ConfigChanged{
+		ConfigKey: MandateConfigKey("t1", "p1"), NewValue: val,
+	})
+	if err != nil || applied == nil {
+		t.Fatalf("mandate key should apply: m=%v err=%v", applied, err)
+	}
+	if _, ok, _ := reg.Mandate(context.Background(), "p1", t0); !ok {
+		t.Fatalf("applied mandate not resolvable")
+	}
+}

@@ -1,9 +1,9 @@
-// oms binary entrypoint (OMS-01). Consumes the order commands
-// (submit/amend/cancel), drives the order aggregate through validation → the
-// pre-trade compliance gate → admission, works admitted orders via the EMS, and
-// emits the lifecycle FACTs + command outcomes. A position projector folds the
-// resulting fills back onto the risk engine's position-changed input. Without
-// OMS_NATS_URL it serves HTTP/probes only (no command consumption).
+// compliance binary entrypoint (COMP-01). Runs the post-trade monitor: it keeps
+// each portfolio's mandate current from the mandate ConfigChanged stream
+// (COMP-01f), re-evaluates books on every position change (COMP-01d), emits a
+// FACT-grade ComplianceBreach on a passive breach (feeding AUTO-01), and records
+// every decision to the audit stream (COMP-01e). Without COMPLIANCE_NATS_URL it
+// serves HTTP/probes only (no consumption).
 package main
 
 import (
@@ -20,12 +20,10 @@ import (
 	comp "github.com/kanz-eng/kanz/internal/compliance"
 	"github.com/kanz-eng/kanz/pkg/bus"
 	"github.com/kanz-eng/kanz/pkg/observability"
-	"github.com/kanz-eng/kanz/services/oms/internal/compliance"
-	"github.com/kanz-eng/kanz/services/oms/internal/config"
-	"github.com/kanz-eng/kanz/services/oms/internal/execution"
-	"github.com/kanz-eng/kanz/services/oms/internal/order"
-	"github.com/kanz-eng/kanz/services/oms/internal/position"
-	"github.com/kanz-eng/kanz/services/oms/internal/server"
+	"github.com/kanz-eng/kanz/services/compliance/internal/audit"
+	"github.com/kanz-eng/kanz/services/compliance/internal/config"
+	"github.com/kanz-eng/kanz/services/compliance/internal/monitor"
+	"github.com/kanz-eng/kanz/services/compliance/internal/server"
 )
 
 func main() {
@@ -64,7 +62,7 @@ func main() {
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 	go func() {
-		logger.Info("oms listening", "addr", cfg.Listen)
+		logger.Info("compliance listening", "addr", cfg.Listen)
 		if err := httpSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			logger.Error("http server failed", "err", err)
 			stop()
@@ -73,11 +71,11 @@ func main() {
 
 	if cfg.NATSURL != "" {
 		if err := runConsumers(ctx, cfg, readiness, logger, obs); err != nil {
-			logger.Error("oms consumers stopped with error", "err", err)
+			logger.Error("compliance consumers stopped with error", "err", err)
 		}
 	} else {
 		readiness.Set(true)
-		logger.Warn("no OMS_NATS_URL set — serving HTTP/probes only (no command consumption)")
+		logger.Warn("no COMPLIANCE_NATS_URL set — serving HTTP/probes only (no consumption)")
 		<-ctx.Done()
 		readiness.Set(false)
 	}
@@ -89,9 +87,9 @@ func main() {
 	}
 }
 
-// runConsumers wires the bus producer + consumers and subscribes the command
-// and fill subjects. Each subscription runs in its own goroutine; the first
-// non-cancel error fails the group.
+// runConsumers wires the bus producer + monitor and subscribes the mandate and
+// position streams. The mandate consumer feeds the registry the monitor resolves
+// against, so it is subscribed first.
 func runConsumers(ctx context.Context, cfg config.Config, readiness *server.Readiness, logger *slog.Logger, obs *observability.Provider) error {
 	busMetrics := bus.NewBusMetrics(obs.Registry)
 
@@ -110,30 +108,15 @@ func runConsumers(ctx context.Context, cfg config.Config, readiness *server.Read
 		return err
 	}
 
-	// OMS-01e: fill→position projector over a shared book.
-	book := position.NewBook(cfg.BaseCurrency)
-	projector, err := position.NewProjector(book, producer)
-	if err != nil {
-		return err
-	}
-
-	// OMS-01f + COMP-01c: the pre-trade gate is the COMP-01 engine resolving
-	// against the mandate stream (a MandateConsumer feeds the registry from the
-	// shared ConfigChanged subject) and projecting onto the live position book.
-	// An empty registry resolves to "no mandate" ⇒ admit, so the OMS runs
-	// correctly before any mandate is published.
+	// COMP-01f: mandate registry fed from the shared ConfigChanged stream, the
+	// point-in-time source the monitor resolves against.
 	mandateReg := comp.NewMandateRegistry()
 	mandateConsumer := comp.NewMandateConsumer(mandateReg, logger)
-	preTrade := comp.NewPreTradeGate(comp.NewEngine(nil), compliance.NewBookSource(book), mandateReg, nil, nil, logger)
-	gate := compliance.NewCOMP01Gate(preTrade, cfg.BaseCurrency)
 
-	// OMS-01b/c: order command handler over an in-memory store + a sim venue.
-	emitter := order.NewEmitter(producer)
-	router := execution.NewRouter(execution.NewSimVenue(cfg.SimVenueMIC))
-	svc, err := order.NewService(order.NewMemoryStore(), emitter, gate, router, logger)
-	if err != nil {
-		return err
-	}
+	// COMP-01e: decisions to the audit stream. COMP-01d: the post-trade monitor.
+	recorder := audit.NewBusRecorder(producer, logger)
+	breachEmitter := monitor.NewEmitter(producer)
+	mon := monitor.NewMonitor(comp.NewEngine(nil), mandateReg, nil /*classifier*/, breachEmitter, recorder, logger)
 
 	consumer, err := bus.NewConsumer(client, bus.WithBusMetrics(busMetrics))
 	if err != nil {
@@ -144,15 +127,10 @@ func runConsumers(ctx context.Context, cfg config.Config, readiness *server.Read
 		subject string
 		handler bus.EventHandler
 	}
-	var subs []sub
-	for _, s := range cfg.CommandSubjects() {
-		subs = append(subs, sub{s, svc.Handle})
+	subs := []sub{{cfg.MandateSubject(), mandateConsumer.Handle}}
+	for _, s := range cfg.MonitorSubjects() {
+		subs = append(subs, sub{s, mon.Handle})
 	}
-	for _, s := range cfg.FillSubjects() {
-		subs = append(subs, sub{s, projector.Handle})
-	}
-	// Feed the pre-trade gate's mandate registry from the shared mandate stream.
-	subs = append(subs, sub{comp.SubjectMandateChanged, mandateConsumer.Handle})
 
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -166,7 +144,7 @@ func runConsumers(ctx context.Context, cfg config.Config, readiness *server.Read
 		wg.Add(1)
 		go func(s sub) {
 			defer wg.Done()
-			logger.Info("oms subscribing", "subject", s.subject, "group", cfg.ConsumerGroup)
+			logger.Info("compliance subscribing", "subject", s.subject, "group", cfg.ConsumerGroup)
 			err := consumer.Subscribe(ctx, s.subject, cfg.ConsumerGroup, s.handler)
 			if err != nil && !errors.Is(err, context.Canceled) {
 				once.Do(func() {

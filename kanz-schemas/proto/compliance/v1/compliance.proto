@@ -1,0 +1,244 @@
+syntax = "proto3";
+
+// Package compliance.v1 defines the mandate/compliance domain — the rulesets a
+// portfolio is governed by and the verdicts produced by evaluating a book
+// against them. It is the schema layer behind the COMP-01 engine: the pre-trade
+// gate the OMS calls before admitting an order (OMS-01f) and the post-trade
+// monitor that re-evaluates live books (COMP-01d).
+//
+// A Mandate is tenant/portfolio-scoped and versioned; a mandate change is a new
+// version carried on a lifecycle.v1.ConfigChanged FACT (COMP-01f), so "which
+// mandate applied when" is point-in-time reconstructable. CODEOWNERS:
+// @kanz-eng/compliance.
+//
+// Deny-by-default is the engine invariant, not a schema one: an unknown
+// RuleType or an unparseable rule MUST evaluate to BREACH, never PASS. proto3
+// cannot enforce field presence; the "Required" notes are invariants the bus
+// client library and the COMP-01 engine enforce.
+package compliance.v1;
+
+import "google/protobuf/timestamp.proto";
+import "common/v1/decimal.proto";
+
+// ComplianceStatus is the verdict of a rule or of a whole evaluation. It is a
+// total order PASS < WARN < BREACH; an evaluation's status is the worst across
+// its rules. Reused as a rule's violation severity (WARN advises, BREACH
+// denies).
+enum ComplianceStatus {
+  // Default zero value; never set explicitly on a result.
+  COMPLIANCE_STATUS_UNSPECIFIED = 0;
+
+  // PASS: the rule (or evaluation) is satisfied.
+  COMPLIANCE_STATUS_PASS = 1;
+
+  // WARN: a soft limit is exceeded; advisory, does not block a trade.
+  COMPLIANCE_STATUS_WARN = 2;
+
+  // BREACH: a hard limit is violated; pre-trade this rejects the order,
+  // post-trade it emits a ComplianceBreach FACT.
+  COMPLIANCE_STATUS_BREACH = 3;
+}
+
+// RuleType selects which rule a Rule carries. Each value pairs with one params
+// variant in Rule.params. Additive — new rule types are appended, never
+// repurposed; an engine that does not recognize a value denies by default.
+enum RuleType {
+  // Default zero value; never set explicitly. Treated as an unknown rule
+  // (deny-by-default) by the engine.
+  RULE_TYPE_UNSPECIFIED = 0;
+
+  // Concentration cap: a bucket's share of gross exposure must not exceed a
+  // maximum weight. Pairs with ConcentrationLimit.
+  RULE_TYPE_CONCENTRATION = 1;
+
+  // Asset-class / sector restriction: a dimension's values are forbidden
+  // (deny) or are the only ones permitted (allow-only). Pairs with
+  // RestrictionList.
+  RULE_TYPE_RESTRICTION = 2;
+
+  // Issuer exclusion list: holdings in any listed issuer are forbidden. Pairs
+  // with IssuerExclusion.
+  RULE_TYPE_ISSUER_EXCLUSION = 3;
+
+  // Gross-leverage cap: gross exposure / NAV must not exceed a maximum. Pairs
+  // with LeverageCap.
+  RULE_TYPE_GROSS_LEVERAGE = 4;
+
+  // Currency restriction: holdings may only be denominated in an allowed set
+  // of currencies. Pairs with CurrencyRestriction.
+  RULE_TYPE_CURRENCY = 5;
+}
+
+// Dimension is the portfolio axis a concentration or restriction rule buckets
+// on. INSTRUMENT and CURRENCY resolve from the position itself; ISSUER, SECTOR,
+// and ASSET_CLASS resolve via the reference classifier the engine is given.
+enum Dimension {
+  // Default zero value; never set explicitly.
+  DIMENSION_UNSPECIFIED = 0;
+
+  DIMENSION_INSTRUMENT = 1;
+  DIMENSION_ISSUER = 2;
+  DIMENSION_SECTOR = 3;
+  DIMENSION_ASSET_CLASS = 4;
+  DIMENSION_CURRENCY = 5;
+}
+
+// RestrictionMode is how a RestrictionList's values are interpreted.
+enum RestrictionMode {
+  // Default zero value; never set explicitly. Treated as deny-by-default by
+  // the engine (an unconfigured restriction admits nothing it lists).
+  RESTRICTION_MODE_UNSPECIFIED = 0;
+
+  // DENY: the listed values are forbidden; everything else is allowed.
+  RESTRICTION_MODE_DENY = 1;
+
+  // ALLOW_ONLY: only the listed values are allowed; everything else is
+  // forbidden.
+  RESTRICTION_MODE_ALLOW_ONLY = 2;
+}
+
+// ConcentrationLimit caps a bucket's share of gross exposure. When bucket is
+// empty the limit applies to every bucket on the dimension (e.g. "no single
+// issuer over 5%"); when bucket is set it applies only to that bucket
+// (e.g. "tech sector under 30%").
+message ConcentrationLimit {
+  // dimension is the axis to bucket exposure on. Required.
+  Dimension dimension = 1;
+
+  // bucket optionally narrows the rule to one bucket key on the dimension.
+  // Empty ⇒ the cap applies to each bucket independently. Optional.
+  string bucket = 2;
+
+  // max_weight is the maximum fraction of portfolio gross exposure, e.g.
+  // 0.10 for 10%. Required; must be in (0, 1].
+  common.v1.Decimal max_weight = 3;
+}
+
+// RestrictionList forbids (or exclusively permits) a set of values on a
+// dimension — the asset-class / sector restriction rule.
+message RestrictionList {
+  // dimension is the axis the values are matched on (e.g. SECTOR,
+  // ASSET_CLASS, CURRENCY). Required.
+  Dimension dimension = 1;
+
+  // values are the bucket keys to deny or to exclusively allow, per mode.
+  // Required (a non-empty list).
+  repeated string values = 2;
+
+  // mode interprets values. Required; UNSPECIFIED denies by default.
+  RestrictionMode mode = 3;
+}
+
+// IssuerExclusion forbids any holding in a listed issuer — the issuer exclusion
+// list (sanctions, restricted counterparties).
+message IssuerExclusion {
+  // issuer_ids are the canonical issuer identifiers that may not be held.
+  // Required (a non-empty list).
+  repeated string issuer_ids = 1;
+}
+
+// LeverageCap bounds portfolio gross leverage (gross exposure / net asset
+// value).
+message LeverageCap {
+  // max_gross_leverage is the maximum gross-exposure-to-NAV ratio, e.g. 2.0
+  // for 200%. Required; must be > 0.
+  common.v1.Decimal max_gross_leverage = 1;
+}
+
+// CurrencyRestriction limits the currencies positions may be denominated in.
+message CurrencyRestriction {
+  // allowed_currencies is the ISO 4217 set permitted. Required (a non-empty
+  // list); a holding in any other currency breaches.
+  repeated string allowed_currencies = 1;
+}
+
+// Rule is one mandate constraint. type selects which params variant is set; an
+// engine matches the two and denies by default if they disagree or the type is
+// unknown.
+message Rule {
+  // rule_id is the stable identity of this rule within its mandate — the key a
+  // Violation refers back to. Required.
+  string rule_id = 1;
+
+  // type selects the params variant. Required; must not be
+  // RULE_TYPE_UNSPECIFIED.
+  RuleType type = 2;
+
+  // on_violation is the severity to record when this rule is violated. A WARN
+  // rule advises without blocking; a BREACH rule denies. UNSPECIFIED is
+  // treated as BREACH (deny-by-default). Optional.
+  ComplianceStatus on_violation = 3;
+
+  // params carries the rule's typed parameters, matched to type.
+  oneof params {
+    ConcentrationLimit concentration = 10;
+    RestrictionList restriction = 11;
+    IssuerExclusion issuer_exclusion = 12;
+    LeverageCap leverage_cap = 13;
+    CurrencyRestriction currency_restriction = 14;
+  }
+}
+
+// Mandate is the tenant/portfolio-scoped ruleset a book is governed by. It is
+// versioned: a change is a new version (COMP-01f), and the version that applied
+// at a point in time is what a decision is audited against.
+message Mandate {
+  // mandate_id is the mandate's stable identity. Required.
+  string mandate_id = 1;
+
+  // tenant_id scopes the mandate to a tenant. Required.
+  string tenant_id = 2;
+
+  // portfolio_id is the portfolio this mandate governs. Required.
+  string portfolio_id = 3;
+
+  // version is monotonic; each mandate change increments it. Required.
+  uint64 version = 4;
+
+  // rules is the constraint set evaluated against a candidate book. An empty
+  // ruleset trivially passes (no constraints declared).
+  repeated Rule rules = 5;
+
+  // effective_at is the domain time this mandate version takes effect.
+  // Required.
+  google.protobuf.Timestamp effective_at = 6;
+}
+
+// Violation is one rule that failed in an evaluation, with the evidence that
+// reconstructs why.
+message Violation {
+  // rule_id and rule_type identify the failed rule. Required.
+  string rule_id = 1;
+  RuleType rule_type = 2;
+
+  // severity is WARN or BREACH (the rule's on_violation). Required.
+  ComplianceStatus severity = 3;
+
+  // message is a human-readable explanation. Required.
+  string message = 4;
+
+  // evidence are the structured facts behind the verdict — e.g.
+  // {"observed":"0.12","limit":"0.10","bucket":"TECH"} — so an auditor sees
+  // the numbers, not just the verdict. May be empty.
+  map<string, string> evidence = 5;
+}
+
+// ComplianceResult is the verdict of evaluating one candidate book against one
+// mandate. status is the worst severity across the rules; PASS with no
+// violations is a clean book.
+message ComplianceResult {
+  // status is the overall verdict. Required.
+  ComplianceStatus status = 1;
+
+  // portfolio_id, mandate_id, and mandate_version pin what was evaluated and
+  // against which mandate version (the point-in-time anchor). Required.
+  string portfolio_id = 2;
+  string mandate_id = 3;
+  uint64 mandate_version = 4;
+
+  // violations lists every rule that did not pass. Empty when status is PASS.
+  repeated Violation violations = 5;
+
+  // evaluated_at is the domain time the evaluation ran. Required.
+  google.protobuf.Timestamp evaluated_at = 6;
+}
