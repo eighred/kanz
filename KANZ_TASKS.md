@@ -50,196 +50,222 @@ _(OBS-01a..e epic complete — see DONE)_
 
 ---
 
-## PLATFORM HARDENING ROADMAP — Phase 2 "Safe For Clients"
+## PLATFORM HARDENING ROADMAP — Phase 5 "Aladdin Parity — Front-to-Back"
 
-> Makes the running system multi-client: a governed external surface, identity-based access control, and tenant isolation. New prefixes: `API` (edge/BFF), `AUTH` (authn/authz), `MT` (multi-tenancy). ROI ranks 7–9. Depends on Phase 1 (notably ORCH-01 runtime, SEC-01 mTLS, PERS-01 durable state).
+> Turns the risk/analytics core into a whole-platform investment system: a governed trading surface, a mandate/compliance engine, real pricing depth (derivatives + fixed income), and the portfolio-manager workflow (attribution, construction, liquidity). New prefixes: `OMS` (order/execution), `COMP` (compliance/mandate), `DERIV` (derivatives pricing), `FI` (fixed-income analytics), `PERF` (performance attribution), `OPT` (portfolio construction), `LIQ` (liquidity risk). Trading introduces the platform's first first-class COMMAND flow (the `command.v1` framework was built for exactly this, EVT-19); everything stays event-driven and query-read-only per the RISK-02 boundary. Sequenced ROI #24–#30 — OMS is the spine the rest trade through, COMP gates it, and the pricing/PM epics deepen the analytics the engine already registers via the RISK-07 `MeasureFunc` seam.
 
-### External API Gateway & BFF
+### Order & Execution Management (OMS/EMS)
 
-_Objective: an authenticated, rate-limited, versioned external surface over the risk `Engine` read/scenario API. The only governed entry point for clients and UIs (ROI #7)._
+_Objective: a governed, command-driven order lifecycle — submit/amend/cancel → route → fill — feeding positions back through the event spine so risk recomputes on in-flight trades. The platform's first write path and the front-office foundation (ROI #24)._
 
-- [x] **API-01a** Define the Engine read surface as a gRPC service proto (`Exposure`/`Measures`/`EvaluateScenario`/`Health`) reusing `domain.v1` + risk payloads; CODEOWNERS + buf discovery · `kanz-schemas/proto/query/v1/risk_query.proto` — _(see DONE)_
-- [x] **API-01b** Implement the gRPC query server inside `risk-engine`, backed by the concrete `EngineImpl` (ORCH-01b); reads served from durable state (PERS-01) · `kanz/services/risk-engine/internal/grpcsrv/` — _(see DONE)_
-- [x] **API-01c** Build the `api-gateway` BFF: gRPC + REST transcoding (grpc-gateway/Connect), OpenAPI emit, API version negotiation, forwards to `risk-engine` over mTLS · `kanz/services/api-gateway/cmd/api-gateway/`, `internal/` — _(see DONE)_
-- [x] **API-01d** Edge controls: OIDC/JWT auth middleware (consumes AUTH-01), per-tenant rate limits + quotas, idempotency-key dedup, request signing · `kanz/services/api-gateway/internal/middleware/` — _(see DONE)_
-- [x] **API-01e** Tests: gateway contract tests — authz required (401/403), rate-limit (429), gRPC↔REST transcoding parity, query p99 budget, version-negotiation matrix · `kanz/services/api-gateway/internal/` — _(see DONE)_
+- [ ] **OMS-01a** Order/execution schemas: `order.v1` — `SubmitOrder`/`AmendOrder`/`CancelOrder` commands (embed `command.v1.CommandMetadata`, EVT-19) + the `Order` aggregate lifecycle FACTs (`OrderAccepted`/`Rejected`/`Routed`/`PartiallyFilled`/`Filled`/`Cancelled`/`Expired`) + `Fill`/`Execution` · `kanz-schemas/proto/order/v1/`
+- [ ] **OMS-01b** `oms` service: validate→accept→emit lifecycle FACTs over an order-state aggregate, durable + replayable via the PERS-01 snapshot/log pattern; idempotent command handling on the bus dedup (EVT-17d) · `kanz/services/oms/`
+- [ ] **OMS-01c** Execution layer (EMS): smart-order-router + a `Venue` seam (log/sim venue that matches & fills by default; a real FIX/venue adapter is composition-root, the DEBT-02 inject-the-side-effect stance) emitting `Fill` FACTs · `kanz/services/oms/internal/execution/`
+- [ ] **OMS-01d** Governed write surface at the gateway: `POST /v1/orders` → command publish, AUTH-01 `Principal` bound to `CommandMetadata.issuer` (AUTH-01c forged-issuer guard), idempotency-key dedup (API-01d), per-tenant · `kanz/services/api-gateway/internal/`
+- [ ] **OMS-01e** Position integration: `Fill` FACTs update `domain.v1.PositionState` on the event-driven path so the risk-engine recompute (ORCH-01) + exposures reflect in-flight trades; realized/unrealized PnL from fills · `kanz/internal/risk/ingest/`
+- [ ] **OMS-01f** Pre-trade gate hook: order accept calls the COMP-01 check (deny-by-default on breach) before emitting `OrderAccepted` — the OMS↔COMP seam · `kanz/services/oms/internal/`
+- [ ] **OMS-01g** Tests: order state-machine transitions, idempotent re-submit (one order per idempotency-key), fill→position propagation, issuer-mismatch rejection, compliance-gate reject path · `kanz/services/oms/internal/`
 
-### AuthN / AuthZ — RBAC + ABAC
+### Compliance & Mandate Engine
 
-_Objective: identity on every request and fine-grained, deny-by-default authorization on every query/command. Compliance + client requirement (ROI #8)._
+_Objective: pre- and post-trade enforcement of portfolio mandates — concentration, exclusion, leverage, restriction lists — deny-by-default, every decision audited. Aladdin's signature differentiator (ROI #25)._
 
-- [x] **AUTH-01a** OIDC integration + JWT validation middleware → typed `Principal` (subject, tenant, roles, claims) on ctx · `kanz/pkg/auth/principal.go`, `kanz/pkg/auth/oidc.go` — _(see DONE)_
-- [x] **AUTH-01b** Authorization layer over a policy engine (OPA/Cedar): portfolio- and tenant-scoped, deny-by-default; policy bundle in infra · `kanz/pkg/auth/authz.go`, `kanz/infra/security/policies/` — _(see DONE)_
-- [x] **AUTH-01c** Command issuer verification: bind the authenticated `Principal` to `command.v1.CommandMetadata.issuer` at publish/validate; reject mismatch (forged-issuer guard) · `kanz/pkg/bus/command.go`, `kanz/pkg/auth/issuer.go` — _(see DONE)_
-- [x] **AUTH-01d** Authorization decision logging into the observation stream (`DecisionLog` or a dedicated authz FACT) so every allow/deny is auditable (feeds AUDIT-01) · `kanz/pkg/auth/audit.go` — _(see DONE)_
-- [x] **AUTH-01e** Tests: role×resource policy matrix (allow/deny), deny-by-default on unknown action, issuer-mismatch rejection, tenant-scope enforcement · `kanz/pkg/auth/authz_test.go` — _(see DONE; **closes the AUTH-01 epic**)_
+- [ ] **COMP-01a** Mandate/rule schemas: `compliance.v1` — `Mandate` (tenant/portfolio-scoped ruleset), rule types (concentration %, asset-class/sector restriction, issuer exclusion list, gross-leverage cap, currency restriction), `ComplianceResult` (PASS/WARN/BREACH + violated rule + evidence) · `kanz-schemas/proto/compliance/v1/`
+- [ ] **COMP-01b** Rule-evaluation engine: a pure `RuleFunc` registry mirroring the RISK-07 `MeasureFunc` registry; evaluates a candidate portfolio against a mandate; deny-by-default on an unknown rule · `kanz/internal/compliance/`
+- [ ] **COMP-01c** Pre-trade gate (consumed by OMS-01f): project the post-trade book (current + order delta), reuse `compute.ComputeExposure` for the hypothetical exposures, run the rules, reject on BREACH · `kanz/internal/compliance/gate.go`
+- [ ] **COMP-01d** Post-trade monitor: consume position/exposure FACTs, continuously re-evaluate mandates, emit a `ComplianceBreach` FACT (FACT-grade, never shed) on a market-move-induced passive breach; feeds AUTO-01 for halts · `kanz/services/compliance/internal/monitor/`
+- [ ] **COMP-01e** Decision logging: every compliance decision (pass/warn/breach) into the observation stream via the AUTH-01d `Audited`-recorder pattern → AUDIT-01 hash-chain · `kanz/services/compliance/internal/audit.go`
+- [ ] **COMP-01f** Mandate lifecycle: tenant-scoped mandate changes as `lifecycle.v1.ConfigChanged` FACTs, point-in-time correct (which mandate applied when) · `kanz/services/compliance/`
+- [ ] **COMP-01g** Tests: rule matrix (concentration/exclusion/leverage allow+breach), pre-trade reject blocks the order, passive post-trade breach emits + escalates, deny-by-default unknown rule, point-in-time mandate resolution · `kanz/internal/compliance/`
 
-### Multi-Tenancy Foundation
+### Derivatives Pricing & Greeks
 
-_Objective: tenant as a first-class isolation boundary across events, state, brokers, metrics, and access. Costly to retrofit — land before onboarding real clients (ROI #9)._
+_Objective: replace the RISK-07 placeholder `Delta` with real per-instrument pricing and full Greeks, registered through the same `MeasureFunc` seam. Turns the `DERIVATIVE` asset class from a tag into analytics (ROI #26)._
 
-- [x] **MT-01a** Add `tenant_id` to the Envelope as an additive field (envelope-policy additive-only discipline; new field number, forward-compatible per EVT-21c). **Replay nuance**: `Validate` requires `tenant_id` on live publish, but pre-tenancy events read from old Kafka logs lack it — map those to a reserved `__system__` tenant on the replay path rather than rejecting (preserves EVT-20 replay determinism) · `kanz-schemas/proto/envelope/v1/envelope.proto`, `kanz/pkg/bus/validate.go` — _(see DONE)_
-- [x] **MT-01b** Tenant propagation through the bus: Producer stamps `tenant_id` from ctx/config; Consumer stashes it onto ctx (same mechanism as lineage, EVT-17c) so derived events inherit it · `kanz/pkg/bus/producer.go`, `kanz/pkg/bus/context.go`, `kanz/pkg/bus/consumer.go` — _(see DONE)_
-- [x] **MT-01c** Broker-level isolation: NATS accounts per tenant + Kafka topic-prefix + per-tenant ACLs · `kanz/infra/{nats,kafka}/tenancy.yaml` — _(see DONE)_
-- [x] **MT-01d** State isolation: Postgres RLS keyed on `tenant_id`, tenant set from the session GUC · `kanz/services/risk-engine/migrations/0002_tenant_rls.sql`, `kanz/internal/risk/state/persist/` — _(see DONE)_
-- [x] **MT-01e** Per-tenant quotas + admission control at the gateway + `tenant` metric-label convention · `kanz/services/api-gateway/internal/middleware/{quota,metrics}.go`, `kanz/pkg/observability/tenant.go` — _(see DONE)_
-- [x] **MT-01f** Tenant lifecycle automation: onboard/offboard in one workflow · `kanz/infra/tenancy/` — _(see DONE)_
-- [x] **MT-01g** Tests: cross-tenant isolation contract tree · `kanz/test/contract/tenancy/` — _(see DONE; **closes the MT-01 epic**)_
+- [ ] **DERIV-01a** Contract-terms schemas (additive to `reference.v1`): `OptionTerms` (underlying, strike, expiry, call/put, exercise style), `SwapTerms` (legs, tenor, fixed/float), `FutureTerms` · `kanz-schemas/proto/reference/v1/contract.proto`
+- [ ] **DERIV-01b** Pricing library: Black-Scholes + binomial (American) option pricers discounting off the FI-01 curve; analytic + bumped Greeks (Δ/Γ/Vega/Θ/ρ); pure, deterministic, `Decimal`-safe · `kanz/internal/risk/pricing/`
+- [ ] **DERIV-01c** Implied-vol surface (strike×expiry) built from market option quotes (`market.v1`), point-in-time via the MODEL-01b bitemporal store; interpolation · `kanz/internal/risk/pricing/volsurface/`
+- [ ] **DERIV-01d** Real Greeks measures: register per-position + aggregate portfolio Greeks via `compute.Register`, replacing the placeholder `Delta`; lands the MODEL-01 engine-registration seam · `kanz/internal/risk/compute/greeks.go`
+- [ ] **DERIV-01e** Full-revaluation scenarios: reprice options under price/vol shocks in the scenario library (extends MODEL-01h); a delta-gamma VaR variant · `kanz/internal/risk/scenario/`
+- [ ] **DERIV-01f** Tests: BS vs reference values, put-call parity, Greeks vs finite-difference, American ≥ European, vol-surface round-trip, portfolio-Greek aggregation · `kanz/internal/risk/pricing/`
 
----
+### Fixed-Income Analytics
 
-## PLATFORM HARDENING ROADMAP — Phase 3 "Value & Maturity"
+_Objective: yield-curve construction and bond risk (duration, convexity, DV01, key-rate, OAS) so the `FIXED_INCOME` asset class carries real measures and curve scenarios. Completes the MODEL-01 curve-shift deferral (ROI #27)._
 
-> Turns the placeholder risk math into real analytics, governs the models, and earns regulatory + operational trust. New prefixes: `MODEL` (quant analytics + data plane), `MLOPS` (model governance), `SRE` (reliability), `AUDIT` (auditability), `DR` (disaster recovery). Depends on Phase 1–2 (runtime, persistence, observability, tenancy).
+- [ ] **FI-01a** Bond/curve schemas (additive to `reference.v1`): `BondTerms` (coupon, frequency, maturity, day-count, face) + `YieldCurve` (tenor→rate, curve type) · `kanz-schemas/proto/reference/v1/`
+- [ ] **FI-01b** Curve construction: bootstrap a zero/discount curve from par/swap quotes, point-in-time via the store, linear/log-linear interpolation · `kanz/internal/risk/pricing/curve/`
+- [ ] **FI-01c** Bond analytics: price/yield, accrued interest (day-count conventions), Macaulay/modified duration, convexity, DV01, key-rate durations · `kanz/internal/risk/pricing/bond.go`
+- [ ] **FI-01d** FI risk measures: register duration/DV01/convexity/spread-duration as `MeasureFunc`s; portfolio interest-rate sensitivity · `kanz/internal/risk/compute/`
+- [ ] **FI-01e** Curve scenarios: parallel / steepener / butterfly yield-curve shifts in the scenario library (lands the MODEL-01 curve-shift carried-forward), repricing bonds · `kanz/internal/risk/scenario/library/`
+- [ ] **FI-01f** Tests: known-bond price/yield/duration vectors, day-count correctness, DV01 vs bump, curve-bootstrap round-trip, curve-shift repricing · `kanz/internal/risk/pricing/`
 
-### Real Risk Analytics & Market Data Plane
+### Performance Measurement & Attribution
 
-_Objective: replace the RISK-07 placeholder measures (VaR=1%×gross, Delta=net) with genuine VaR / factor / sensitivity analytics backed by a market & historical data plane. This is the actual product value (ROI #12). The RISK-07 `Registry` is the designed seam — quants register real `MeasureFunc`s without touching `api/v1` or callers._
+_Objective: time-/money-weighted returns, benchmark-relative active return, and Brinson attribution — point-in-time correct over the bitemporal history. The "how did we do and why" the LAKE-01 plane was built to support (ROI #28)._
 
-- [x] **MODEL-01a** Define reference + market-history schemas: instrument reference (identifiers, asset_class, sector, currency), price/return history (builds on EVT-10 `market.v1`) · `kanz-schemas/proto/reference/v1/instrument.proto`, `price_history.proto` — _(see DONE)_
-- [x] **MODEL-01b** Market-data ingestion service: consume `market.*` events → time-series store (ClickHouse/Timescale) with point-in-time-correct reads · `kanz/services/market-data/`, `kanz/internal/marketdata/store/` — _(see DONE)_
-- [x] **MODEL-01c** Historical-returns provider injected into VaR `MeasureFunc`s via closure — keeps the pure `func(*Portfolio) v1.Measure` call-site signature while the func closes over the data provider held in the Registry · `kanz/internal/risk/compute/marketdata.go` — _(see DONE)_
-- [x] **MODEL-01d** Historical-simulation VaR measure registered over the RISK-07 `Registry` (replaces the 1%×gross placeholder; the RISK-12 property test that pins `VaR99/Gross=0.01` intentionally breaks here as failure-as-documentation) · `kanz/internal/risk/compute/var/historical.go` — _(see DONE)_
-- [x] **MODEL-01e** Monte-Carlo VaR with a correlated factor-shock model · `kanz/internal/risk/compute/var/montecarlo.go` — _(see DONE)_
-- [x] **MODEL-01f** Factor model + instrument→sector lookup → completes the RISK-06 `ExposureBySector` deferral (the deferred dimension needed exactly this reference table) · `kanz/internal/risk/compute/factor/` — _(see DONE)_
-- [x] **MODEL-01g** Wire real volatility/covariance into the RISK-08 uncertainty path (populate `domain.Position.MarketValueUncertainty` from the vol model — RISK-08's propagation is already built and currently fed nil) · `kanz/internal/risk/compute/volatility.go`, `kanz/internal/risk/engine/` — _(see DONE)_
-- [x] **MODEL-01h** Stress/scenario library extending RISK-09: named historical scenarios (2008, COVID) + hypothetical curve shifts as new shock types in `api/v1/scenario.go` + dispatch · `kanz/internal/risk/scenario/library/` — _(see DONE)_
-- [x] **MODEL-01i** Tests: VaR backtest (exception rate within Kupiec band over historical window), independent-reference reconciliation within tolerance, point-in-time correctness (no future leakage) · `kanz/internal/risk/compute/var/` — _(see DONE; **closes the MODEL-01 epic**)_
+- [ ] **PERF-01a** Performance schemas: `performance.v1` — `ReturnPeriod` (TWR/MWR), `BenchmarkDefinition`, `AttributionResult` (allocation/selection/interaction) · `kanz-schemas/proto/performance/v1/`
+- [ ] **PERF-01b** Return calculation: time- and money-weighted returns over the bitemporal position/price history (point-in-time, reuse the store `AsOf`), flow-aware · `kanz/internal/performance/`
+- [ ] **PERF-01c** Benchmark plane: benchmark constituents + returns as reference/market data; portfolio-vs-benchmark active return · `kanz/services/performance/`
+- [ ] **PERF-01d** Brinson attribution: allocation/selection/interaction by sector (reuse `factor.Classifier` bucketing), multi-period linking (Carino) · `kanz/internal/performance/attribution.go`
+- [ ] **PERF-01e** Ex-post risk: tracking error, information ratio, Sharpe, benchmark beta from the return series · `kanz/internal/performance/`
+- [ ] **PERF-01f** Tests: TWR vs known flows, Brinson effects sum to active return, multi-period linking, point-in-time no-future-leakage · `kanz/internal/performance/`
 
-### Model Validation, Explainability & Governance (MLOps)
+### Portfolio Construction & Optimization
 
-_Objective: no model serves production without recorded validation; drift auto-triggers revalidation; every prediction is explainable. SR 11-7 / model-risk compliance (ROI #13). Scaffolding already exists — PRED-09 registry, PRED-10 shadow/canary, PRED-02 confidence/degraded, DATA-04 drift._
+_Objective: mean-variance / risk-parity construction and rebalancing under the same mandate constraints COMP-01 enforces, emitting proposed orders into OMS-01. The portfolio-manager's forward workflow (ROI #29)._
 
-- [x] **MLOPS-01a** Add a validation-status gate to the PRED-09 `Registry`: a model cannot be registered `primary` without a recorded, non-expired validation record · `kanz-py/kanz_inference/registry/` — _(see DONE)_
-- [x] **MLOPS-01b** Validation suite: holdout/backtest metrics, calibration check (feeds PRED-02 §2.3 per-model `confidence_threshold` — uncalibrated ⇒ always DEGRADED), stability/bias · `kanz-py/kanz_inference/validation/` — _(see DONE)_
-- [x] **MLOPS-01c** Drift→revalidation loop: a DATA-07 `drift_detected` event for a model's feature triggers an automated revalidation/retrain signal · `kanz-py/kanz_inference/governance/drift_trigger.py` — _(see DONE)_
-- [x] **MLOPS-01d** Explainability: populate `PredictionEnvelope.explanation` (SHAP-style per-feature contributions — the field already exists in PRED-01) on the inference path · `kanz-py/kanz_inference/explain/` — _(see DONE)_
-- [x] **MLOPS-01e** Champion/challenger promotion driven by the PRED-10 `ShadowObserver` writing comparison metrics to a store; promotion gated on challenger out-performance + validation · `kanz-py/kanz_inference/governance/promotion.py` — _(see DONE)_
-- [x] **MLOPS-01f** Real point-in-time feature store behind the existing PRED-11 `FeatureStore` Protocol (Feast or equivalent) replacing the trivial in-memory impl — the boundary was designed for exactly this swap · `kanz-py/kanz_inference/featurestore/` — _(see DONE)_
-- [x] **MLOPS-01g** Model cards + approval workflow + model→feature→training-data lineage record · `kanz-py/kanz_inference/governance/` — _(see DONE)_
-- [x] **MLOPS-01h** Tests: promotion-blocked-without-validation, drift-triggers-revalidation, explanation-present-on-every-prediction, champion/challenger selection correctness · `kanz-py/tests/` — _(see DONE; **closes the MLOPS-01 epic**)_
+- [ ] **OPT-01a** Optimization schemas: `optimization.v1` — `ObjectiveSpec` (max-return / min-variance / max-Sharpe / risk-parity), `ConstraintSet` (weight bounds, sector/asset caps, turnover, long-only), `RebalanceProposal` (target weights + trade list) · `kanz-schemas/proto/optimization/v1/`
+- [ ] **OPT-01b** Optimizer: mean-variance (QP) over the MODEL-01e covariance + expected returns, a risk-parity option, deterministic; small in-module solver behind a `Solver` seam (no heavy dep) · `kanz/internal/optimization/`
+- [ ] **OPT-01c** Constraint engine: reuse the COMP-01b mandate rules as optimization constraints (one source of truth — a book you can't hold, you can't optimize into) · `kanz/internal/optimization/constraints.go`
+- [ ] **OPT-01d** Rebalancing: diff target vs current → a minimal, turnover/cost-aware trade list; emits a `RebalanceProposal` (proposed, human-in-the-loop per the AUTO-01 conservative stance) · `kanz/internal/optimization/rebalance.go`
+- [ ] **OPT-01e** Proposal→OMS bridge: an approved proposal materializes OMS-01 `SubmitOrder` commands (issuer-bound, pre-trade compliance re-checked) · `kanz/services/optimization/`
+- [ ] **OPT-01f** Tests: known mean-variance frontier point, constraints bind (caps respected), risk-parity equal risk contribution, rebalance trade-list minimality, proposal→order mapping · `kanz/internal/optimization/`
 
-### Reliability — SLOs, Error Budgets, Chaos
+### Liquidity Risk
 
-_Objective: prove the resilience primitives (RISK-11 degraded mode, PRED-07 circuit breaker, EVT-17e DLQ/retry, PRED-08 admission control) actually hold under real faults (ROI #17)._
+_Objective: liquidation-horizon, market-impact, and liquidity-adjusted VaR — the liquidity dimension the quote feed already carries but nothing models (ROI #30)._
 
-- [x] **SRE-01a** Define per-service SLIs/SLOs (availability, query latency, data freshness from DATA-02) + error-budget policy · `kanz/infra/observability/slo/` — _(see DONE)_
-- [x] **SRE-01b** SLO recording rules + multi-window burn-rate alerts (extends DATA-09, over the OBS-01 metrics) · `kanz/infra/observability/slo/` — _(see DONE)_
-- [x] **SRE-01c** Chaos experiments: broker kill, network partition, latency injection, pod eviction — assert degraded-mode/circuit-breaker/DLQ behave as designed · `kanz/infra/chaos/` — _(see DONE)_
-- [x] **SRE-01d** Scheduled GameDay suite + runbooks-as-code · `kanz/infra/chaos/gamedays/`, `kanz/docs/runbooks/` — _(see DONE)_
-- [x] **SRE-01e** Load/soak harness establishing baseline capacity + the LATENCY-01 p99 budget · `kanz/test/load/` — _(see DONE; **closes the SRE-01 epic**)_
-
-### Auditability & Regulatory Reporting
-
-_Objective: tamper-evident reconstruction of every decision, command, and data-quality event. Institutional + regulatory non-negotiable (ROI #18). The lineage substrate (correlation/causation, DecisionLog, CommandOutcome, FACT-grade quality events) already exists — consolidate and make it tamper-evident._
-
-- [x] **AUDIT-01a** Append-only audit projection: a consumer materializes decisions, commands, outcomes, quality events, and AUTH-01d authz decisions into a queryable audit store · `kanz/services/audit/` — _(see DONE)_
-- [x] **AUDIT-01b** Tamper-evidence: hash-chaining over the audit log + WORM/object-lock storage · `kanz/services/audit/internal/chain/` — _(see DONE)_
-- [x] **AUDIT-01c** Causal-chain reconstruction API: given any `event_id`, walk `correlation_id`/`causation_id` to the full upstream lineage (the chain EVT-17c builds) · `kanz/services/audit/internal/lineage/` — _(see DONE)_
-- [x] **AUDIT-01d** Regulatory report generation (configurable templates) + retention/legal-hold policy · `kanz/services/audit/internal/report/` — _(see DONE)_
-- [x] **AUDIT-01e** Tests: reconstruct a decision to its inputs in <1min, tamper attempt detected by chain verification, sample regulatory report generated end-to-end · `kanz/services/audit/` — _(see DONE; **closes the AUDIT-01 epic**)_
-
-### Disaster Recovery & Backup
-
-_Objective: provable cross-region RPO/RTO for the durable log, state stores, and registry. Continuity + regulatory (ROI #11)._
-
-- [x] **DR-01a** Kafka cross-region replication (MirrorMaker2 / cluster-linking) of the log of record to a DR region · `kanz/infra/dr/kafka/` — _(see DONE)_
-- [x] **DR-01b** Postgres PITR + cross-region replicas (PERS-01 risk state + schema registry) · `kanz/infra/dr/postgres/` — _(see DONE)_
-- [x] **DR-01c** NATS DR: automate spine reconstruction from the Kafka log (the architecture already makes NATS rebuildable) with a documented RTO · `kanz/infra/dr/nats/` — _(see DONE)_
-- [x] **DR-01d** Failover automation + runbook: traffic shift, promote replicas, re-bootstrap services (PERS-01d) · `kanz/infra/dr/`, `kanz/docs/runbooks/dr.md` — _(see DONE)_
-- [x] **DR-01e** Quarterly DR drill validating RPO ≤ 1min / RTO ≤ 15min via live failover · `kanz/docs/runbooks/dr-drill.md` — _(see DONE; **closes the DR-01 epic**)_
+- [ ] **LIQ-01a** Liquidity-data schemas: average daily volume (ADV) + bid-ask spread / depth fields (additive to `reference.v1`/`market.v1`) · `kanz-schemas/proto/`
+- [ ] **LIQ-01b** Liquidation-horizon model: days-to-liquidate per position (size ÷ participation-rate × ADV) → portfolio liquidation profile · `kanz/internal/risk/liquidity/`
+- [ ] **LIQ-01c** Market-impact / liquidity-at-risk: Almgren-Chriss-style impact cost; liquidity-adjusted VaR (widen by liquidation-horizon spread cost) · `kanz/internal/risk/liquidity/`
+- [ ] **LIQ-01d** Liquidity measures + stress: register liquidation-horizon/LVaR as `MeasureFunc`s; a liquidity-stress scenario (spreads widen, ADV drops) in the scenario library · `kanz/internal/risk/compute/`
+- [ ] **LIQ-01e** Tests: horizon monotonic in size, LVaR ≥ VaR, stress widens the horizon, ADV-zero handling · `kanz/internal/risk/liquidity/`
 
 ---
 
-## PLATFORM HARDENING ROADMAP — Phase 4 "Scale & Strategic Bets"
+## PLATFORM HARDENING ROADMAP — Phase 6 "Institutional Risk & Capital Depth"
 
-> Closes the remaining cross-cutting scale/hardening gaps and the long-horizon bets that compound into Aladdin-class leverage. New prefixes: `INFRA` (cloud-native), `LATENCY` (hot-path), `SEC-02` (supply-chain/runtime), `DEBT-02/03` (coordination, Python CI), `LAKE` (lakehouse/backtest), `LIN` (lineage/governance), `AUTO` (autonomous ops), `DEVX` (developer platform). Scale/hardening epics come first since the bets depend on them.
+> The quant/risk/capital machinery that *is* the BlackRock product: a multi-factor risk model, counterparty/XVA, collateral & margin, structured-product cashflow models, regulatory capital & stress, an accounting book-of-record, and post-trade settlement. New prefixes: `FACTOR` (multi-factor risk model), `XVA` (counterparty/valuation adjustments), `COLL` (collateral/margin/financing), `STRUCT` (securitized & structured products), `REG` (regulatory capital & stress), `IBOR` (book-of-record accounting + corporate actions), `POST` (post-trade lifecycle). Builds on Phase 5: priced instruments (DERIV/FI) feed the factor model + XVA; OMS fills feed settlement + the book-of-record. ROI #31–#37.
 
-### Cloud-Native Platform
+### Multi-Factor Risk Model (Aladdin-class)
 
-_Objective: production K8s topology with IaC, GitOps, autoscaling, and multi-AZ resilience. Current manifests are single-cluster bootstrap (ROI #10)._
+_Objective: a fundamental + statistical multi-factor risk model — factor exposures, a factor-covariance matrix, factor returns, and specific (idiosyncratic) risk — so VaR, ex-ante tracking error, and risk attribution decompose by factor, not just by name. The analytical core BlackRock is built on (ROI #31)._
 
-- [x] **INFRA-01a** Cloud foundation as IaC (Terraform/Pulumi): VPC, K8s cluster, managed/self-hosted Kafka + NATS + Postgres · `kanz/infra/terraform/` — _(see DONE)_
-- [x] **INFRA-01b** GitOps delivery (Argo CD/Flux): app-of-apps + per-environment overlays · `kanz/infra/gitops/` — _(see DONE)_
-- [x] **INFRA-01c** KEDA autoscaling on Kafka consumer lag / NATS pending — the OBS-01c signal and the exact PRED-14 backpressure premise (add workers to work down lag) · `kanz/infra/deploy/` — _(see DONE)_
-- [x] **INFRA-01d** Multi-AZ topology spread + PodDisruptionBudgets + resource quotas/limits · `kanz/infra/deploy/` — _(see DONE)_
-- [x] **INFRA-01e** Tests/validation: AZ-kill leaves the system serving; autoscaler demonstrably reacts to injected lag (ties SRE-01c chaos) · `kanz/infra/chaos/` — _(see DONE; **closes the INFRA-01 epic**)_
+- [ ] **FACTOR-01a** Factor schemas: `factor.v1` — `FactorModel` (style/industry/country/macro factors), `FactorExposure` (instrument→loadings), `FactorReturn` series, `FactorCovariance` matrix · `kanz-schemas/proto/factor/v1/`
+- [ ] **FACTOR-01b** Fundamental factor model: estimate instrument loadings (style: value/momentum/size/quality/vol; industry; country) from reference + market data; cross-sectional regression for factor returns · `kanz/internal/risk/factormodel/`
+- [ ] **FACTOR-01c** Statistical factor model (PCA on the MODEL-01e return covariance) as the model-agnostic complement; blend/select per `FactorModel` config · `kanz/internal/risk/factormodel/statistical.go`
+- [ ] **FACTOR-01d** Factor risk decomposition: portfolio factor exposures, factor-vs-specific risk split, ex-ante tracking error vs a benchmark (reuse PERF-01c benchmarks) · `kanz/internal/risk/factormodel/decompose.go`
+- [ ] **FACTOR-01e** Factor-based measures + VaR: register factor-VaR, marginal/component risk contributions as `MeasureFunc`s; factor-shock scenarios in the library · `kanz/internal/risk/compute/`, `scenario/`
+- [ ] **FACTOR-01f** Tests: loadings reproduce known exposures, factor+specific = total risk, component contributions sum to portfolio risk, factor-VaR vs MODEL-01 historical-VaR reconciliation · `kanz/internal/risk/factormodel/`
 
-### Low-Latency Hot Path
+### Counterparty Credit Risk & XVA
 
-_Objective: bound and shrink ingest→risk→publish latency under load — validate the latency premise the NATS spine was chosen for (ROI #16)._
+_Objective: counterparty exposure (PFE/EPE), credit valuation adjustments (CVA/DVA/FVA), and SA-CCR exposure — the derivatives-book risk Phase-5 pricing makes computable (ROI #32)._
 
-- [x] **LATENCY-01a** Latency SLOs + continuous load test gating regressions in CI · `kanz/test/load/` — _(ephemeral compose stack + seed + `smoke.js` + `.github/workflows/latency.yml`; see IN PROGRESS)_
-- [x] **LATENCY-01b** Profile the compute hot paths (Decimal arithmetic, map iteration in RISK-06/07 exposure/measures) · `kanz/internal/risk/compute/` — _(benchmarks `bench_test.go`/`decimal_bench_test.go` + findings `profiling.md`; see IN PROGRESS)_
-- [x] **LATENCY-01c** Optimizations: object pooling, batched framing, per-partition single-writer goroutines (lock-free state, an alternative the RISK-05 design noted) · `kanz/internal/risk/`, `kanz/pkg/bus/` — _(implemented the 01b-measured F1/F2/F3 compute wins; see IN PROGRESS)_
-- [x] **LATENCY-01d** Tests: p99 budget held under 10× burst; `testing.B` benchmark regression guard in CI · `kanz/internal/risk/compute/` — _(see IN PROGRESS; **closes the LATENCY-01 epic**)_
+- [ ] **XVA-01a** Counterparty/netting schemas: `xva.v1` — `Counterparty`, `NettingSet`, `CSA` (collateral terms), `CreditCurve` (CDS-implied hazard rates) · `kanz-schemas/proto/xva/v1/`
+- [ ] **XVA-01b** Exposure simulation: Monte-Carlo future-exposure paths over netting sets (reuse the MODEL-01e correlated-scenario engine + DERIV/FI pricers); EPE/PFE profiles · `kanz/internal/risk/xva/`
+- [ ] **XVA-01c** Valuation adjustments: CVA/DVA/FVA from exposure profiles × credit curves × funding spreads · `kanz/internal/risk/xva/adjustments.go`
+- [ ] **XVA-01d** SA-CCR regulatory exposure (add-on by asset class, the Basel standardized approach) feeding REG-01 capital · `kanz/internal/risk/xva/saccr.go`
+- [ ] **XVA-01e** XVA measures + scenarios: register CVA/PFE as `MeasureFunc`s; counterparty-default + credit-spread-widening scenarios · `kanz/internal/risk/compute/`, `scenario/`
+- [ ] **XVA-01f** Tests: PFE monotone in horizon/vol, netting reduces exposure, CVA vs an analytic approximation, SA-CCR vs Basel worked examples · `kanz/internal/risk/xva/`
 
-### Supply-Chain & Runtime Hardening
+### Collateral, Margin & Financing
 
-_Objective: extend the CICD-01d build-side gate to runtime admission + dependency hygiene (ROI #19)._
+_Objective: initial/variation margin (incl. ISDA SIMM), collateral optimization, repo & securities-lending financing — the cash/collateral plane that turns positions into funded positions (ROI #33)._
 
-- [x] **SEC-02a** Runtime hardening: distroless, non-root, read-only rootfs, seccomp/gVisor, K8s NetworkPolicies (default-deny) · `kanz/infra/security/runtime/` — _(see IN PROGRESS)_
-- [x] **SEC-02b** Admission control verifies cosign signatures (from CICD-01d) + blocks critical-CVE images at deploy · `kanz/infra/security/admission/` — _(see IN PROGRESS)_
-- [x] **SEC-02c** Dependency hygiene: Renovate/Dependabot automation + scheduled scan + a vuln-remediation SLA · `.github/` — _(see IN PROGRESS)_
-- [x] **SEC-02d** Secret scanning (gitleaks) in CI + pre-commit hook · `.github/workflows/`, `kanz/.githooks/` — _(see IN PROGRESS)_
-- [x] **SEC-02e** Tests: an unsigned or critical-CVE image is rejected by admission; a planted secret blocks CI · `kanz/infra/security/` — _(see IN PROGRESS; **closes the SEC-02 epic**)_
+- [ ] **COLL-01a** Collateral schemas: `collateral.v1` — `MarginCall`, `CollateralAgreement`, `EligibilitySchedule` (haircuts), `FinancingTrade` (repo/sec-lending) · `kanz-schemas/proto/collateral/v1/`
+- [ ] **COLL-01b** Margin engine: variation margin from MtM; initial margin via ISDA SIMM (sensitivity-based) reusing DERIV-01 Greeks · `kanz/internal/collateral/`
+- [ ] **COLL-01c** Collateral optimization: cheapest-to-deliver allocation across agreements under eligibility/haircut constraints (an OPT-01b-style allocation) · `kanz/internal/collateral/optimize.go`
+- [ ] **COLL-01d** Financing & cash projection: repo/sec-lending economics + a forward cash-ladder (settlement-date cash, extends the Portfolio `cashBalance`) · `kanz/internal/collateral/financing.go`
+- [ ] **COLL-01e** Tests: VM tracks MtM, SIMM vs ISDA unit tests, optimization respects eligibility + minimizes cost, cash-ladder nets to balance · `kanz/internal/collateral/`
 
-### Distributed Coordination (Tech Debt)
+### Securitized & Structured Products
 
-_Objective: replace per-process in-memory state with shared/distributed state where horizontal scale-out needs strong guarantees (ROI #14)._
+_Objective: cashflow + prepayment models for MBS/ABS/CLO and amortizing structures, so structured products carry real price/risk instead of an asset-class tag (ROI #34)._
 
-- [x] **DEBT-02a** Distributed dedup-window option (Redis/Dragonfly) behind the existing EVT-17d `DedupWindow` API · `kanz/pkg/bus/dedup.go` — _(see IN PROGRESS)_
-- [x] **DEBT-02b** Coordinate the PRED-09 model registry (back on `platform.model` topic + cache) and offer a shared-state DATA-05 reconciler mode · `kanz-py/kanz_inference/registry/`, `kanz/internal/integrity/reconcile.go` — _(see IN PROGRESS)_
-- [x] **DEBT-02c** Document strong-vs-best-effort guarantees per component (which rely on idempotent handlers vs shared state) · `kanz/docs/coordination.md` — _(see IN PROGRESS)_
-- [x] **DEBT-02d** Tests: N-replica consumer group under chaos redelivery → no duplicate side-effects · `kanz/pkg/bus/` — _(see IN PROGRESS; **closes the DEBT-02 epic**)_
+- [ ] **STRUCT-01a** Structured-product schemas: `MBSTerms`/`ABSTerms`/`Tranche` (waterfall, attachment/detachment) + prepayment-assumption inputs (additive to `reference.v1`) · `kanz-schemas/proto/reference/v1/structured.proto`
+- [ ] **STRUCT-01b** Cashflow engine: deterministic waterfall projection (principal/interest, tranching, triggers) over a scheduled amortization · `kanz/internal/risk/pricing/structured/`
+- [ ] **STRUCT-01c** Prepayment/default model: CPR/CDR (SMM) + a behavioral prepay curve driven by the FI-01 rate curve · `kanz/internal/risk/pricing/structured/prepay.go`
+- [ ] **STRUCT-01d** OAS & risk: option-adjusted spread, effective duration/convexity under rate paths (reuse FI-01 curve scenarios); register as `MeasureFunc`s · `kanz/internal/risk/compute/`
+- [ ] **STRUCT-01e** Tests: waterfall conserves cash, faster prepay shortens WAL, OAS round-trips to price, effective-duration sign/monotonicity · `kanz/internal/risk/pricing/structured/`
 
-### Python CI Hardening (Tech Debt)
+### Regulatory Capital & Stress
 
-_Objective: stop the `kanz-py` path rotting — documented stale tests + missing gRPC stubs (ROI #15)._
+_Objective: regulatory capital and supervisory stress — FRTB market-risk capital, SA-CCR (XVA-01d), and CCAR/DFAST/Form-PF-style firmwide stress over the scenario engine (ROI #35)._
 
-- [x] **DEBT-03a** Generate Python gRPC stubs into the SDK so the PRED-08 interactive-servicer tests run · `kanz-schemas/buf.gen.yaml`, `kanz-py/` — _(see IN PROGRESS)_
-- [x] **DEBT-03b** Fix the 16 stale `test_consumer.py` tests (`Message(subject=...)` required positional arg, EVT-18d) · `kanz-py/tests/test_consumer.py` — _(done under CICD-01b; see IN PROGRESS)_
-- [x] **DEBT-03c** Wire `kanz-py` into the CICD-01b pytest job (suite green, gated) · `.github/workflows/kanz-ci.yml` — _(done under CICD-01b; see IN PROGRESS; **closes the DEBT-03 epic**)_
+- [ ] **REG-01a** Regulatory schemas: `regulatory.v1` — `CapitalCharge` (per framework), `RegulatoryScenario`, `RegReport` (FRTB/Form PF/AIFMD line items) · `kanz-schemas/proto/regulatory/v1/`
+- [ ] **REG-01b** FRTB market-risk capital: the sensitivities-based method (delta/vega/curvature buckets + correlations) reusing DERIV/FI sensitivities · `kanz/internal/regulatory/frtb/`
+- [ ] **REG-01c** Firmwide stress framework: CCAR/DFAST-style macro scenarios expanded to instrument shocks (extends MODEL-01h library) + reverse stress testing (find the scenario that breaches) · `kanz/internal/regulatory/stress/`
+- [ ] **REG-01d** Regulatory reporting: template-driven report generation through the AUDIT-01 reporting plane (FRTB, Form PF, AIFMD), point-in-time + signed · `kanz/services/audit/` (reuse), `kanz/internal/regulatory/report.go`
+- [ ] **REG-01e** Tests: FRTB worked-example reconciliation, reverse-stress finds a known breach scenario, report line-item completeness · `kanz/internal/regulatory/`
 
-### Lakehouse & Backtesting Plane
+### Accounting Book-of-Record & Corporate Actions (IBOR/ABOR)
 
-_Objective: stream the event log into an analytical store for backtesting, research, and training. The system is backtest-ready by design (EVT-21d replay determinism + PRED-11 point-in-time store) but has no analytical store to exploit it (ROI #20)._
+_Objective: an investment + accounting book-of-record — positions, cash, accruals, NAV — kept correct through corporate actions and reconciled to custodians. The system-of-record beneath every number (ROI #36)._
 
-- [x] **LAKE-01a** CDC/sink from the Kafka log → lakehouse (Iceberg/Delta), schema-evolution-aware (consumes registry EVT-16 descriptors) · `kanz/services/lake-sink/` — _(see IN PROGRESS)_
-- [x] **LAKE-01b** Point-in-time-correct dataset/feature materialization (joins MODEL-01b market history + MLOPS-01f feature store) · `kanz/internal/lake/dataset/` (promoted from `services/lake-sink/internal/` per EVT-16a once `tools/backtest` became a second consumer) — _(see IN PROGRESS)_
-- [x] **LAKE-01c** Backtest harness reusing the EVT-20 replay pipeline + point-in-time store · `kanz/tools/backtest/` — _(see IN PROGRESS)_
-- [x] **LAKE-01d** Research access: query engine (Trino) + notebook environment over the lakehouse · `kanz/infra/lakehouse/` — _(see IN PROGRESS)_
-- [x] **LAKE-01e** Tests: a strategy backtested over historical events reproduces live decisions bit-for-bit (leverages EVT-21d determinism) · `kanz/tools/backtest/` — _(see IN PROGRESS; **closes the LAKE-01 epic**)_
+- [ ] **IBOR-01a** Book-of-record schemas: `accounting.v1` — `LedgerEntry`, `CorporateAction` (split/dividend/merger/coupon), `NAV`, `Accrual` · `kanz-schemas/proto/accounting/v1/`
+- [ ] **IBOR-01b** Position/cash ledger: an event-sourced IBOR folding OMS-01 fills + cash movements (reuse the PERS-01 snapshot/replay pattern) into a point-in-time book · `kanz/services/accounting/`
+- [ ] **IBOR-01c** Corporate-action processing: apply splits/dividends/mergers/coupons as events that adjust positions/cash + restate history (bitemporal, knowledge-time correct) · `kanz/services/accounting/internal/corpact/`
+- [ ] **IBOR-01d** NAV + accruals: daily NAV, P&L attribution to cash/price/FX/corporate-actions, interest/dividend accruals · `kanz/services/accounting/internal/nav.go`
+- [ ] **IBOR-01e** Custodian reconciliation: reconcile the IBOR against custodian/administrator statements (reuse the DATA-05 reconciler), break detection · `kanz/internal/integrity/` (reuse), `kanz/services/accounting/`
+- [ ] **IBOR-01f** Tests: ledger replays to the same NAV, a stock split conserves market value, corporate-action restatement is knowledge-time correct, custodian-break detection · `kanz/services/accounting/`
 
-### Data Lineage & Governance Catalog
+### Post-Trade Lifecycle
 
-_Objective: an automated, queryable lineage graph + data catalog + PII governance. Per-event lineage exists on the wire; nothing aggregates it (ROI #21)._
+_Objective: the trade lifecycle after the fill — confirmation/affirmation, settlement, and custodian status — closing the loop OMS-01 opens (ROI #37)._
 
-- [x] **LIN-01a** Harvest envelope lineage (correlation/causation/source/schema_ref) into an OpenLineage emitter · `kanz/services/lineage/` — _(see IN PROGRESS)_
-- [x] **LIN-01b** Data catalog (DataHub/OpenMetadata): datasets, schemas (from the EVT-16 registry), ownership (CODEOWNERS), classification · `kanz/infra/catalog/` — _(see IN PROGRESS)_
-- [x] **LIN-01c** PII tagging + governance policy + access logging (ties AUTH-01b authz + MT-01d tenant scope) · `kanz/services/lineage/internal/governance/` — _(see IN PROGRESS)_
-- [x] **LIN-01d** "Where did this number come from" lineage query/UI over the graph (complements the AUDIT-01c causal chain) · `kanz/services/lineage/internal/query/` — _(see IN PROGRESS)_
-- [x] **LIN-01e** Tests: any output's full upstream lineage is queryable; PII access is governed + logged · `kanz/services/lineage/` — _(see IN PROGRESS; **closes the LIN-01 epic**)_
+- [ ] **POST-01a** Post-trade schemas: `settlement.v1` — `TradeConfirmation`, `SettlementInstruction`, `SettlementStatus` (matched/affirmed/settled/failed) · `kanz-schemas/proto/settlement/v1/`
+- [ ] **POST-01b** Confirm/affirm: match OMS-01 fills to counterparty confirmations, affirm or flag breaks · `kanz/services/oms/internal/posttrade/`
+- [ ] **POST-01c** Settlement: generate settlement instructions, track T+N status via a `SettlementVenue` seam (log/sim default; SWIFT/DTCC adapter is composition-root) · `kanz/services/oms/internal/posttrade/settle.go`
+- [ ] **POST-01d** Fails management: detect/age settlement fails, emit a FACT feeding AUTO-01 + the IBOR-01e reconciliation · `kanz/services/oms/internal/posttrade/`
+- [ ] **POST-01e** Tests: confirm-match break detection, settlement state machine, fail aging + escalation · `kanz/services/oms/internal/posttrade/`
 
-### Autonomous Operations
+---
 
-_Objective: closed-loop ops — the signals already exist (consumer lag, DATA-07 quality events, drift, circuit-breaker state, degraded mode); add the actuation layer (ROI #22)._
+## PLATFORM HARDENING ROADMAP — Phase 7 "Whole-Enterprise & Frontier Bets"
 
-- [x] **AUTO-01a** Event-driven ops controller reacting to DATA-07 quality events / SLO burn-rate / drift / circuit-breaker state · `kanz/services/autopilot/` — _(see IN PROGRESS)_
-- [x] **AUTO-01b** Auto-remediation: data quarantine on DATA-05 reconciliation divergence; model auto-rollback on drift (MLOPS-01e promotion in reverse) · `kanz/services/autopilot/internal/remediate/` — _(see IN PROGRESS)_
-- [x] **AUTO-01c** Scale/failover actuation closing the loop the INFRA-01c KEDA + DR-01d failover opened · `kanz/services/autopilot/internal/actuate/` — _(see IN PROGRESS)_
-- [x] **AUTO-01d** Runbook-as-code execution + human-in-the-loop escalation on novel/unrecognized conditions · `kanz/docs/runbooks/`, `kanz/services/autopilot/` — _(see IN PROGRESS)_
-- [x] **AUTO-01e** Tests: simulated broker stall / model drift / data gap → auto-remediated, with escalation only on unrecognized conditions · `kanz/services/autopilot/` — _(see IN PROGRESS; **closes the AUTO-01 epic**)_
+> Extends beyond public-markets trading to the full BlackRock enterprise surface: private markets (eFront), climate & sustainability, wealth/advisory, a golden-source data master, and a Claude-powered analytics copilot. New prefixes: `ALT` (private markets/alternatives), `CLIMATE` (sustainability analytics), `WEALTH` (advisory platform), `MASTER` (golden-source data), `COPILOT` (AI analytics layer). ROI #38–#42.
 
-### Developer Productivity Platform
+### Private Markets & Alternatives (eFront-class)
 
-_Objective: one-command local stack, golden-path scaffolding, docs portal — kill the hand-run buf-generate onboarding pain (ROI #23)._
+_Objective: private equity / credit / real-assets — capital calls, distributions, J-curve, and illiquid valuation — the alternative-assets sleeve a whole-portfolio view requires (ROI #38)._
 
-- [x] **DEVX-01a** One-command local stack (Tilt/devcontainers): NATS + Kafka + Postgres + services + seeded data · `kanz/dev/`, `Tiltfile` — _(see IN PROGRESS)_
-- [x] **DEVX-01b** Service scaffolding generator following the EVT-16a layout conventions (`services/<name>/cmd|internal`) · `kanz/tools/scaffold/` — _(see IN PROGRESS)_
-- [x] **DEVX-01c** Internal docs/catalog portal (Backstage) surfacing services, schemas, and runbooks · `kanz/infra/backstage/` — _(see IN PROGRESS)_
-- [x] **DEVX-01d** Ephemeral preview environments per PR (per-namespace) · `.github/workflows/`, `kanz/infra/gitops/` — _(see IN PROGRESS)_
-- [x] **DEVX-01e** `make`/task targets + onboarding doc replacing the hand-run buf-generate flow (the memory-documented friction) · `kanz/Makefile`, `kanz/docs/onboarding.md` — _(see IN PROGRESS; **closes the DEVX-01 epic + Phase-4**)_
+- [ ] **ALT-01a** Alternatives schemas: `alternatives.v1` — `Fund`/`Commitment`, `CapitalCall`, `Distribution`, `NAVMark` (illiquid valuation), `Vintage` · `kanz-schemas/proto/alternatives/v1/`
+- [ ] **ALT-01b** Commitment lifecycle: track called/uncalled/distributed, J-curve cashflows, an event-sourced fund position (PERS-01 pattern) · `kanz/services/alternatives/`
+- [ ] **ALT-01c** Private-asset metrics: IRR, TVPI/DPI/RVPI, PME vs a public benchmark (reuse PERF-01) · `kanz/internal/alternatives/metrics.go`
+- [ ] **ALT-01d** Whole-portfolio integration: blend illiquid NAVs into the risk/exposure view (proxy-beta mapping to public factors via FACTOR-01) · `kanz/internal/risk/`, `kanz/internal/alternatives/`
+- [ ] **ALT-01e** Tests: IRR vs known cashflows, TVPI/DPI identities, PME vs benchmark, uncalled-commitment accounting · `kanz/internal/alternatives/`
+
+### Climate & Sustainability Analytics
+
+_Objective: ESG scoring, carbon footprinting, and climate-scenario risk (transition + physical) — Aladdin Climate, increasingly a mandate requirement (ROI #39)._
+
+- [ ] **CLIMATE-01a** ESG/climate schemas: `sustainability.v1` — `ESGScore`, `CarbonMetrics` (scope 1/2/3, intensity), `ClimateScenario` (NGFS-style), `Taxonomy` alignment (additive to `reference.v1`) · `kanz-schemas/proto/sustainability/v1/`
+- [ ] **CLIMATE-01b** Portfolio ESG/carbon aggregation: weighted scores, financed-emissions (PCAF), exclusion-list screening (reuse COMP-01 rules) · `kanz/internal/sustainability/`
+- [ ] **CLIMATE-01c** Climate-VaR scenarios: transition (carbon-price) + physical-risk shocks expanded to instrument repricing via the scenario engine · `kanz/internal/risk/scenario/library/`, `kanz/internal/sustainability/`
+- [ ] **CLIMATE-01d** Net-zero alignment + reporting: temperature alignment, glide-path tracking, TCFD/SFDR line items through the AUDIT-01/REG-01 reporting plane · `kanz/internal/sustainability/report.go`
+- [ ] **CLIMATE-01e** Tests: weighted-average-carbon-intensity reconciliation, exclusion screening, climate-VaR sign/monotonicity, financed-emissions identity · `kanz/internal/sustainability/`
+
+### Wealth & Advisory Platform
+
+_Objective: goals-based wealth management — model portfolios, household aggregation, risk profiling, and proposal generation — Aladdin Wealth atop the institutional engine (ROI #40)._
+
+- [ ] **WEALTH-01a** Wealth schemas: `wealth.v1` — `Household`/`Account`, `Goal` (target/horizon/priority), `ModelPortfolio`, `Proposal` · `kanz-schemas/proto/wealth/v1/`
+- [ ] **WEALTH-01b** Householding: aggregate accounts to a household-level exposure/risk view (reuse the risk-engine over a virtual portfolio) · `kanz/services/wealth/`
+- [ ] **WEALTH-01c** Goals-based analytics: probability-of-success via Monte-Carlo projection (reuse MODEL-01e), goal-funding gaps · `kanz/internal/wealth/goals.go`
+- [ ] **WEALTH-01d** Model portfolios + proposals: map a risk profile to a model, drift-from-model detection, a rebalancing proposal (reuse OPT-01) · `kanz/internal/wealth/`
+- [ ] **WEALTH-01e** Tests: household aggregation correctness, goal probability monotonic in funding, model-drift detection, proposal respects the risk profile · `kanz/internal/wealth/`
+
+### Golden-Source Data Master
+
+_Objective: a security master + vendor-data integration + pricing/valuation oversight — the trusted-data foundation every analytic silently assumes (ROI #41)._
+
+- [ ] **MASTER-01a** Mastering schemas: `master.v1` — `SecurityMaster` (cross-vendor identifier crosswalk), `VendorRecord`, `PriceCandidate` (multi-source), `DataException` · `kanz-schemas/proto/master/v1/`
+- [ ] **MASTER-01b** Security master: golden-record resolution across vendor feeds (survivorship rules, identifier crosswalk ISIN/CUSIP/FIGI), point-in-time · `kanz/services/datamaster/`
+- [ ] **MASTER-01c** Vendor integration: pluggable feed adapters (Bloomberg/Refinitiv/ICE) behind a `VendorFeed` seam (log/sim default), normalized to `reference.v1`/`market.v1` · `kanz/services/datamaster/internal/feed/`
+- [ ] **MASTER-01d** Pricing/valuation oversight: multi-source price arbitration, tolerance/stale checks (reuse the DATA integrity detectors), an exception queue + override audit · `kanz/services/datamaster/internal/pricing/`
+- [ ] **MASTER-01e** Tests: golden-record survivorship, identifier crosswalk, price arbitration + tolerance breaks, override audit trail · `kanz/services/datamaster/`
+
+### AI Analytics Copilot
+
+_Objective: a natural-language analytics layer over the platform — ask portfolio/risk questions, generate commentary, draft what-if scenarios — powered by Claude (Opus 4.8), grounded strictly in the governed query/lineage surfaces (ROI #42)._
+
+- [ ] **COPILOT-01a** Copilot service scaffold + Claude (Opus 4.8) client; auth via AUTH-01 `Principal` so every answer is tenant- and permission-scoped (no data the caller can't already read) · `kanz/services/copilot/`
+- [ ] **COPILOT-01b** Tool/function layer: expose the read-only `query.v1` RiskQueryService, scenario evaluation, performance + lineage as Claude tool-use functions (the model touches governed APIs, never raw stores) · `kanz/services/copilot/internal/tools/`
+- [ ] **COPILOT-01c** Grounded retrieval over the LIN-01 catalog + AUDIT-01 lineage so answers cite their source events ("where did this number come from") · `kanz/services/copilot/internal/retrieval/`
+- [ ] **COPILOT-01d** Guardrails: deny-by-default tool authorization (AUTH-01b), every copilot query + tool call logged to the observation stream (AUDIT-01), prompt-injection/output review · `kanz/services/copilot/internal/`
+- [ ] **COPILOT-01e** Tests: a permission-scoped question returns only authorized data, a cross-tenant probe is denied + logged, tool-call grounding (no hallucinated measures), citation correctness · `kanz/services/copilot/`
 
 ---
 
