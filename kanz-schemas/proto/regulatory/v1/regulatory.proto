@@ -1,0 +1,97 @@
+syntax = "proto3";
+
+// Package regulatory.v1 is the regulatory-capital & supervisory-stress schema
+// (REG-01a) — the wire shape of FRTB market-risk capital, SA-CCR counterparty
+// capital (XVA-01d), and CCAR/DFAST/Form-PF-style firmwide stress (ROI #35). It
+// carries the CapitalCharge a framework produces, the RegulatoryScenario a stress
+// run is driven by, and the RegReport (the signed, point-in-time regulatory
+// filing of line items).
+//
+// # Money is Decimal, weights/correlations/shocks are double
+//
+// Capital charges and exposure amounts are money ⇒ common.v1.Decimal (EVT-14);
+// risk weights, correlations, and macro shocks are dimensionless ⇒ double.
+package regulatory.v1;
+
+import "google/protobuf/timestamp.proto";
+import "common/v1/decimal.proto";
+
+// Framework is the regulatory regime a charge / report is computed under.
+enum Framework {
+  FRAMEWORK_UNSPECIFIED = 0;
+  // FRTB: Fundamental Review of the Trading Book — market-risk capital.
+  FRAMEWORK_FRTB = 1;
+  // SA_CCR: the Basel standardized counterparty-credit exposure (XVA-01d).
+  FRAMEWORK_SA_CCR = 2;
+  // FORM_PF: the SEC private-fund report.
+  FRAMEWORK_FORM_PF = 3;
+  // AIFMD: the EU alternative-investment-fund-manager report.
+  FRAMEWORK_AIFMD = 4;
+}
+
+// CapitalCharge is a capital requirement computed under one framework, optionally
+// broken into components (FRTB delta/vega/curvature, by risk class).
+message CapitalCharge {
+  // framework is the regime. Required.
+  Framework framework = 1;
+
+  // as_of is the computation time — the point-in-time key. Required.
+  google.protobuf.Timestamp as_of = 2;
+
+  // total is the aggregate capital charge (money). Required.
+  common.v1.Decimal total = 3;
+
+  // components are the named sub-charges that aggregate into total. Optional.
+  repeated CapitalComponent components = 4;
+}
+
+// CapitalComponent is one named piece of a CapitalCharge (e.g. "GIRR_DELTA").
+message CapitalComponent {
+  string name = 1;
+  common.v1.Decimal amount = 2;
+}
+
+// RegulatoryScenario is a supervisory macro stress scenario — the macro factor
+// shocks a CCAR/DFAST-style run expands into instrument shocks.
+message RegulatoryScenario {
+  // scenario_id is the canonical id (e.g. "CCAR_SEVERELY_ADVERSE_2026"). Required.
+  string scenario_id = 1;
+
+  // macro_shocks maps a macro factor (e.g. "GDP", "UNEMPLOYMENT", "EQUITY",
+  // "RATES_10Y", "CREDIT_SPREAD") to its shock (a level change or return).
+  // Required; non-empty.
+  map<string, double> macro_shocks = 2;
+
+  // severity is a multiplier scaling the macro shocks (1.0 == as specified) —
+  // the dimension a reverse-stress search walks. Optional (defaults to 1).
+  double severity = 3;
+}
+
+// RegReport is a point-in-time, signed regulatory report — a template of line
+// items for one framework.
+message RegReport {
+  // report_id / framework / as_of identify the filing. Required.
+  string report_id = 1;
+  Framework framework = 2;
+  google.protobuf.Timestamp as_of = 3;
+
+  // line_items are the report's values, in template order. Required.
+  repeated ReportLineItem line_items = 4;
+
+  // signature is the AUDIT-01 hash-chain signature over the canonical report
+  // bytes — makes the filing tamper-evident. Required when signed.
+  string signature = 5;
+}
+
+// ReportLineItem is one row of a RegReport.
+message ReportLineItem {
+  // code is the template field code (e.g. "FRTB_TOTAL", "FORM_PF_GROSS_NAV").
+  // Required.
+  string code = 1;
+
+  // label is the human-readable description. Advisory.
+  string label = 2;
+
+  // value is the line-item amount (money or a statistic). Required.
+  common.v1.Decimal value = 3;
+}
