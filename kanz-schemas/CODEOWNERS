@@ -16,6 +16,8 @@
 /proto/inference/     @kanz-eng/quant-ml
 /proto/query/         @kanz-eng/risk-engine @kanz-eng/architecture
 /proto/reference/     @kanz-eng/market-data @kanz-eng/quant-ml @kanz-eng/architecture
+/proto/performance/   @kanz-eng/risk-engine @kanz-eng/quant-ml
+/proto/optimization/  @kanz-eng/risk-engine @kanz-eng/quant-ml @kanz-eng/execution
 
 # Constitution-level files — require architecture review.
 /buf.yaml             @kanz-eng/architecture

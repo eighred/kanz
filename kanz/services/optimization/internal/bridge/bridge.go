@@ -1,0 +1,152 @@
+// Package bridge materializes an approved RebalanceProposal into OMS-01
+// order.v1.SubmitOrder commands (OPT-01e). The proposal is human-in-the-loop
+// (AUTO-01 conservative stance): the optimizer proposes, a human approves, and
+// ONLY THEN does this bridge emit commands — each issuer-bound (the approving
+// principal on CommandMetadata.issuer, the AUTH-01c forged-issuer guard at the
+// gateway/producer) and re-checked against the COMP-01 pre-trade gate
+// (deny-by-default) so a target that was feasible at optimization time but has
+// since drifted is caught before it becomes a live order.
+package bridge
+
+import (
+	"context"
+	"fmt"
+	"math"
+
+	commandpb "github.com/kanz-eng/kanz-schemas-go/command/v1"
+	commonpb "github.com/kanz-eng/kanz-schemas-go/common/v1"
+	orderpb "github.com/kanz-eng/kanz-schemas-go/order/v1"
+
+	"github.com/kanz-eng/kanz/internal/compliance"
+	"github.com/kanz-eng/kanz/internal/optimization"
+)
+
+// Gate is the COMP-01 pre-trade check the bridge re-runs per order.
+// compliance.PreTradeGate satisfies it.
+type Gate interface {
+	Evaluate(ctx context.Context, d compliance.OrderDelta) (compliance.Decision, error)
+}
+
+// Publisher emits a SubmitOrder command onto the bus. The concrete bus producer
+// is wired at the composition root (the DEBT-02 inject-the-side-effect stance);
+// the bridge depends only on this seam.
+type Publisher interface {
+	Publish(ctx context.Context, cmd *orderpb.SubmitOrder) error
+}
+
+// MaterializeResult is the outcome of materializing a proposal.
+type MaterializeResult struct {
+	Submitted []*orderpb.SubmitOrder
+	Rejected  []RejectedOrder
+}
+
+// RejectedOrder is a command the pre-trade gate refused, with the reason.
+type RejectedOrder struct {
+	Command *orderpb.SubmitOrder
+	Reason  string
+}
+
+// qtyExp is the Decimal scale order quantities are emitted at (1e-4 units).
+const qtyExp int32 = -4
+
+// ToOrders maps a proposal's trades to SubmitOrder commands — a market order per
+// trade, issuer bound to CommandMetadata.issuer, order_id deterministic per
+// (portfolio, instrument) so a re-submit of the same proposal is idempotent on
+// the OMS bus dedup (EVT-17d). Pure: no gate, no publish (Materialize adds
+// those). A proposal flagged mandate-infeasible yields no orders.
+func ToOrders(p optimization.RebalanceProposal, issuer string) []*orderpb.SubmitOrder {
+	if !p.MandateFeasible {
+		return nil
+	}
+	out := make([]*orderpb.SubmitOrder, 0, len(p.Trades))
+	for _, tr := range p.Trades {
+		out = append(out, &orderpb.SubmitOrder{
+			Metadata: &commandpb.CommandMetadata{
+				Issuer:   issuer,
+				TargetId: orderID(p.PortfolioID, tr.InstrumentID),
+				Reason:   fmt.Sprintf("rebalance %s→%s", pct(tr.CurrentWeight), pct(tr.TargetWeight)),
+			},
+			OrderId:      orderID(p.PortfolioID, tr.InstrumentID),
+			PortfolioId:  p.PortfolioID,
+			InstrumentId: tr.InstrumentID,
+			Side:         orderSide(tr.Side),
+			Quantity:     &commonpb.Decimal{Coefficient: int64(math.Round(tr.Quantity * 1e4)), Exponent: qtyExp},
+			OrderType:    orderpb.OrderType_ORDER_TYPE_MARKET,
+			TimeInForce:  orderpb.TimeInForce_TIME_IN_FORCE_DAY,
+		})
+	}
+	return out
+}
+
+// Materialize maps the proposal to orders, re-checks each against the pre-trade
+// gate (deny-by-default — a gate error or BREACH rejects the order), and
+// publishes the admitted ones. The admitted/rejected split is returned so the
+// caller (and audit) sees exactly what went to the OMS and what the gate
+// refused. A nil gate skips the re-check (the optimizer's CheckMandate already
+// ran); a nil publisher dry-runs (mapping + gate only).
+func Materialize(ctx context.Context, p optimization.RebalanceProposal, issuer, currency string, prices map[string]float64, gate Gate, pub Publisher) (MaterializeResult, error) {
+	var res MaterializeResult
+	for _, cmd := range ToOrders(p, issuer) {
+		if gate != nil {
+			decision, err := gate.Evaluate(ctx, orderDelta(cmd, currency, prices))
+			if err != nil {
+				res.Rejected = append(res.Rejected, RejectedOrder{Command: cmd, Reason: "gate error: " + err.Error()})
+				continue
+			}
+			if !decision.Allowed {
+				res.Rejected = append(res.Rejected, RejectedOrder{Command: cmd, Reason: gateReason(decision)})
+				continue
+			}
+		}
+		if pub != nil {
+			if err := pub.Publish(ctx, cmd); err != nil {
+				return res, fmt.Errorf("publish %s: %w", cmd.GetOrderId(), err)
+			}
+		}
+		res.Submitted = append(res.Submitted, cmd)
+	}
+	return res, nil
+}
+
+// orderDelta projects a SubmitOrder into the compliance OrderDelta the gate
+// evaluates: signed quantity (negative for a sell) at the instrument's price.
+func orderDelta(cmd *orderpb.SubmitOrder, currency string, prices map[string]float64) compliance.OrderDelta {
+	q := cmd.GetQuantity()
+	signed := q
+	if cmd.GetSide() == orderpb.Side_SIDE_SELL && q != nil {
+		signed = &commonpb.Decimal{Coefficient: -q.GetCoefficient(), Exponent: q.GetExponent()}
+	}
+	var price *commonpb.Decimal
+	if p, ok := prices[cmd.GetInstrumentId()]; ok {
+		price = &commonpb.Decimal{Coefficient: int64(math.Round(p * 100)), Exponent: -2}
+	}
+	return compliance.OrderDelta{
+		PortfolioID:    cmd.GetPortfolioId(),
+		InstrumentID:   cmd.GetInstrumentId(),
+		SignedQuantity: signed,
+		Price:          price,
+		Currency:       currency,
+		OrderID:        cmd.GetOrderId(),
+		Issuer:         cmd.GetMetadata().GetIssuer(),
+	}
+}
+
+func gateReason(d compliance.Decision) string {
+	if d.Result != nil && len(d.Result.GetViolations()) > 0 {
+		return d.Result.GetViolations()[0].GetMessage()
+	}
+	return "pre-trade compliance breach"
+}
+
+func orderSide(s optimization.TradeSide) orderpb.Side {
+	if s == optimization.Sell {
+		return orderpb.Side_SIDE_SELL
+	}
+	return orderpb.Side_SIDE_BUY
+}
+
+func orderID(portfolioID, instrumentID string) string {
+	return fmt.Sprintf("%s:%s:rebal", portfolioID, instrumentID)
+}
+
+func pct(w float64) string { return fmt.Sprintf("%.2f%%", w*100) }

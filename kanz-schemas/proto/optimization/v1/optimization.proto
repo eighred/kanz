@@ -1,0 +1,165 @@
+syntax = "proto3";
+
+// Package optimization.v1 is the portfolio construction & optimization schema
+// (OPT-01a): the objective + constraints a quant/PM specifies, and the
+// RebalanceProposal the optimizer produces — target weights plus the trade list
+// to get there. The portfolio-manager's forward workflow (ROI #29): construct
+// under the SAME mandate constraints COMP-01 enforces, propose trades a human
+// approves, then materialize OMS-01 orders (OPT-01e).
+//
+// # Weights/returns are statistics
+//
+// Every weight / expected-return / risk number is a dimensionless derived
+// statistic, so it is `double` — the EVT-14 rule (double for metrics, exact
+// Decimal for money/prices/sizes). A trade's notional, when it lands as an
+// order, is Decimal in order.v1; here the proposal carries the target weight and
+// the trade direction/size as analytics.
+package optimization.v1;
+
+import "google/protobuf/timestamp.proto";
+
+// ObjectiveType is what the optimizer maximizes/minimizes.
+enum ObjectiveType {
+  // Default zero value; never set explicitly.
+  OBJECTIVE_TYPE_UNSPECIFIED = 0;
+
+  // MAX_RETURN: maximize expected return μᵀw (an LP over the constraints).
+  OBJECTIVE_TYPE_MAX_RETURN = 1;
+
+  // MIN_VARIANCE: minimize portfolio variance wᵀΣw (the min-variance portfolio).
+  OBJECTIVE_TYPE_MIN_VARIANCE = 2;
+
+  // MAX_SHARPE: maximize the Sharpe ratio (μᵀw − rf)/√(wᵀΣw) (the tangency
+  // portfolio).
+  OBJECTIVE_TYPE_MAX_SHARPE = 3;
+
+  // RISK_PARITY: equalize each asset's risk contribution (the equal-risk-
+  // contribution portfolio) — no expected returns needed.
+  OBJECTIVE_TYPE_RISK_PARITY = 4;
+}
+
+// ObjectiveSpec parameterizes the optimization objective.
+message ObjectiveSpec {
+  // objective_type selects the objective. Required.
+  ObjectiveType objective_type = 1;
+
+  // risk_aversion λ trades return against variance in a mean-variance blend
+  // (maximize μᵀw − λ·wᵀΣw); used only as a refinement, 0 ⇒ the pure objective.
+  double risk_aversion = 2;
+
+  // risk_free_rate is the per-period risk-free rate for MAX_SHARPE. Optional.
+  double risk_free_rate = 3;
+}
+
+// WeightBound is a per-instrument weight box constraint.
+message WeightBound {
+  // instrument_id the bound applies to. Required.
+  string instrument_id = 1;
+
+  // min_weight / max_weight bound this instrument's portfolio weight. A min of 0
+  // with long_only is the no-short floor.
+  double min_weight = 2;
+  double max_weight = 3;
+}
+
+// SectorCap is a maximum aggregate weight for a sector bucket (taxonomy:code).
+message SectorCap {
+  // sector is the "taxonomy:code" bucket (e.g. "GICS:40"). Required.
+  string sector = 1;
+
+  // max_weight is the cap on the bucket's summed weight.
+  double max_weight = 2;
+}
+
+// ConstraintSet is the feasible region the optimizer is restricted to — the
+// optimization mirror of a COMP-01 mandate (OPT-01c derives these from the
+// mandate so a book you can't hold, you can't optimize into).
+message ConstraintSet {
+  // long_only forbids negative weights (no shorting). The common default.
+  bool long_only = 1;
+
+  // min_weight / max_weight are the global per-instrument bounds applied when no
+  // per-instrument WeightBound overrides them.
+  double min_weight = 2;
+  double max_weight = 3;
+
+  // bounds are per-instrument overrides of the global bounds.
+  repeated WeightBound bounds = 4;
+
+  // sector_caps cap aggregate sector weights.
+  repeated SectorCap sector_caps = 5;
+
+  // max_turnover caps the one-way turnover (Σ|target − current|/2) of a
+  // rebalance. 0 ⇒ unconstrained.
+  double max_turnover = 6;
+}
+
+// TargetWeight is one instrument's optimized target weight.
+message TargetWeight {
+  string instrument_id = 1;
+  double weight = 2;
+}
+
+// TradeSide is the direction of a proposed trade.
+enum TradeSide {
+  TRADE_SIDE_UNSPECIFIED = 0;
+  TRADE_SIDE_BUY = 1;
+  TRADE_SIDE_SELL = 2;
+}
+
+// ProposedTrade is one leg of the rebalance trade list — the weight change
+// translated to a direction and size. It is materialized into an
+// order.v1.SubmitOrder by the OPT-01e bridge; kept schema-independent of
+// order.v1 (the proposal is pre-order, human-in-the-loop).
+message ProposedTrade {
+  // instrument_id the trade is in. Required.
+  string instrument_id = 1;
+
+  // side is buy or sell. Required.
+  TradeSide side = 2;
+
+  // current_weight / target_weight are the before/after portfolio weights.
+  double current_weight = 3;
+  double target_weight = 4;
+
+  // quantity is the number of units to trade (sign-free; side carries the
+  // direction). Derived from the weight change × NAV / price.
+  double quantity = 5;
+
+  // notional is the trade's approximate cash value (|target − current| × NAV).
+  double notional = 6;
+}
+
+// RebalanceProposal is the optimizer's output: the target weights and the
+// minimal trade list to reach them, PROPOSED for human approval (the AUTO-01
+// conservative stance — never auto-executed). Approval materializes OMS-01
+// orders (OPT-01e).
+message RebalanceProposal {
+  // portfolio_id the proposal is for. Required.
+  string portfolio_id = 1;
+
+  // objective is the objective that produced it.
+  ObjectiveSpec objective = 2;
+
+  // targets are the optimized target weights.
+  repeated TargetWeight targets = 3;
+
+  // trades are the minimal trade list (instruments whose weight changed beyond
+  // the rebalance threshold).
+  repeated ProposedTrade trades = 4;
+
+  // expected_return / expected_risk are the proposal's ex-ante μᵀw and
+  // √(wᵀΣw). turnover is the one-way turnover.
+  double expected_return = 5;
+  double expected_risk = 6;
+  double turnover = 7;
+
+  // as_of is the knowledge horizon the inputs (covariance, prices, holdings)
+  // were read at. Required.
+  google.protobuf.Timestamp as_of = 8;
+
+  // mandate_feasible is whether the targets pass the COMP-01 mandate check
+  // (OPT-01c); false ⇒ violations carries the breached rules.
+  bool mandate_feasible = 9;
+  repeated string violations = 10;
+}
