@@ -1,0 +1,170 @@
+syntax = "proto3";
+
+// Package performance.v1 is the performance measurement & attribution schema
+// (PERF-01a): time-/money-weighted returns, benchmark-relative active return,
+// Brinson attribution, and ex-post risk statistics. It is the "how did we do and
+// why" reporting layer the LAKE-01 backtest plane and the MODEL-01b bitemporal
+// store were built to support (ROI #28).
+//
+// # Returns are statistics, not money
+//
+// Every return / weight / attribution effect is a dimensionless derived
+// statistic, so it is `double` — the same EVT-14 rule that permits `double` for
+// metrics and drift scores but bans it for money/prices/sizes. Performance
+// numbers are reported to a few decimal places of a fraction, never summed into
+// a balance, so exact base-10 Decimal would be ceremony here.
+//
+// # Point-in-time
+//
+// A ReturnPeriod / AttributionResult carries an `as_of` knowledge horizon: the
+// computation reads the bitemporal position/price history bounded at as_of, so a
+// late restatement never leaks backward into a historical performance window
+// (PERF-01b/f, the MODEL-01i no-future-leakage contract).
+package performance.v1;
+
+import "google/protobuf/timestamp.proto";
+
+// ReturnMethod is how a period return was computed.
+enum ReturnMethod {
+  // Default zero value; never set explicitly.
+  RETURN_METHOD_UNSPECIFIED = 0;
+
+  // TIME_WEIGHTED: geometrically-linked sub-period returns, neutral to the
+  // size/timing of external cashflows — the GIPS standard for manager skill.
+  RETURN_METHOD_TIME_WEIGHTED = 1;
+
+  // MONEY_WEIGHTED: the internal rate of return (or Modified Dietz
+  // approximation), which reflects cashflow timing — the investor's actual
+  // experience.
+  RETURN_METHOD_MONEY_WEIGHTED = 2;
+}
+
+// ReturnPeriod is a portfolio's return over a window under one method.
+message ReturnPeriod {
+  // portfolio_id is the canonical portfolio id. Required.
+  string portfolio_id = 1;
+
+  // start / end bound the measurement window. Both required.
+  google.protobuf.Timestamp start = 2;
+  google.protobuf.Timestamp end = 3;
+
+  // method is how return_value was computed. Required.
+  ReturnMethod method = 4;
+
+  // return_value is the fractional return over the window (0.012 = +1.2%).
+  double return_value = 5;
+
+  // annualized is return_value geometrically annualized; 0 when the window is
+  // shorter than a year and annualization would mislead.
+  double annualized = 6;
+
+  // as_of is the bitemporal knowledge horizon the history was read at. Zero ⇒
+  // the live (latest-knowledge) read.
+  google.protobuf.Timestamp as_of = 7;
+}
+
+// BenchmarkConstituent is one weighted member of a benchmark.
+message BenchmarkConstituent {
+  // instrument_id is the constituent's canonical id. Required.
+  string instrument_id = 1;
+
+  // weight is its target weight in the benchmark (constituents sum to ~1).
+  double weight = 2;
+
+  // sector is the constituent's taxonomy:code classification bucket (e.g.
+  // "GICS:40") — the attribution grouping key. Optional; empty ⇒ unclassified.
+  string sector = 3;
+}
+
+// BenchmarkDefinition is the static specification of a benchmark — its weighted
+// constituents, point-in-time via as_of (constituents/weights are slowly-
+// changing, like reference data).
+message BenchmarkDefinition {
+  // benchmark_id is the canonical benchmark id (e.g. "SPX"). Required.
+  string benchmark_id = 1;
+
+  // name is the human label. Optional.
+  string name = 2;
+
+  // currency_code is the ISO 4217 currency the benchmark is measured in.
+  string currency_code = 3;
+
+  // constituents are the weighted members. Required for a holdings-based
+  // benchmark; a return-series benchmark may carry none.
+  repeated BenchmarkConstituent constituents = 4;
+
+  // as_of is the effective time of this definition. Required.
+  google.protobuf.Timestamp as_of = 5;
+}
+
+// SectorAttribution is the Brinson decomposition for one sector bucket.
+message SectorAttribution {
+  // sector is the taxonomy:code bucket (e.g. "GICS:40"). "UNCLASSIFIED" for the
+  // catch-all so the decomposition reconciles with the total.
+  string sector = 1;
+
+  // portfolio_weight / benchmark_weight are the sector's weights in each.
+  double portfolio_weight = 2;
+  double benchmark_weight = 3;
+
+  // portfolio_return / benchmark_return are the sector's returns in each.
+  double portfolio_return = 4;
+  double benchmark_return = 5;
+
+  // allocation / selection / interaction are the three Brinson effects:
+  //   allocation  = (wp − wb)·Rb       (over/under-weighting a sector)
+  //   selection   = wb·(Rp − Rb)       (picking within a sector)
+  //   interaction = (wp − wb)·(Rp − Rb)
+  double allocation = 6;
+  double selection = 7;
+  double interaction = 8;
+}
+
+// AttributionResult is the Brinson attribution of active return by sector,
+// over a window. The per-sector effects (multi-period-linked when the window
+// spans sub-periods) sum to active_return — the PERF-01f reconciliation.
+message AttributionResult {
+  // portfolio_id / benchmark_id identify the comparison. Both required.
+  string portfolio_id = 1;
+  string benchmark_id = 2;
+
+  // start / end bound the window. Both required.
+  google.protobuf.Timestamp start = 3;
+  google.protobuf.Timestamp end = 4;
+
+  // sectors are the per-bucket decompositions.
+  repeated SectorAttribution sectors = 5;
+
+  // total_* are the summed effects across sectors.
+  double total_allocation = 6;
+  double total_selection = 7;
+  double total_interaction = 8;
+
+  // active_return is portfolio_return − benchmark_return; it equals
+  // total_allocation + total_selection + total_interaction.
+  double active_return = 9;
+
+  // as_of is the bitemporal knowledge horizon. Zero ⇒ live read.
+  google.protobuf.Timestamp as_of = 10;
+}
+
+// RiskStatistics is the ex-post (realized) risk of a return series relative to
+// a benchmark (PERF-01e).
+message RiskStatistics {
+  // tracking_error is the annualized standard deviation of active returns.
+  double tracking_error = 1;
+
+  // information_ratio is annualized active return / tracking error.
+  double information_ratio = 2;
+
+  // sharpe_ratio is annualized excess (over risk-free) return / volatility.
+  double sharpe_ratio = 3;
+
+  // beta is the portfolio's sensitivity to the benchmark,
+  // cov(Rp, Rb) / var(Rb).
+  double beta = 4;
+
+  // periods is the number of return observations the statistics were computed
+  // over.
+  int32 periods = 5;
+}
