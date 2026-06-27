@@ -1,0 +1,159 @@
+syntax = "proto3";
+
+// Package reference.v1 (fixed-income half) defines the static bond contract
+// specifications and the yield-curve reference record that the FI-01 analytics
+// need — the rate-world mirror of the DERIV-01a contract terms. Like
+// OptionTerms, BondTerms is slowly-changing reference data keyed by the
+// canonical instrument_id, so a market quote for a bond joins to its terms with
+// no translation. A YieldCurve is the point-in-time discount basis bond pricing
+// and the DERIV-01b option pricers discount off (the DiscountCurve seam).
+//
+// These terms turn the ASSET_CLASS_FIXED_INCOME tag into analytics: the FI-01c
+// bond library reads BondTerms to compute price/yield/duration/convexity/DV01,
+// registered as portfolio measures (FI-01d).
+//
+// proto3 cannot enforce field presence; the "Required" notes are invariants the
+// pricing layer enforces. PaymentFrequency is reused from contract.proto (same
+// package), so a coupon frequency and a swap-leg frequency share one taxonomy.
+package reference.v1;
+
+import "google/protobuf/timestamp.proto";
+import "common/v1/decimal.proto";
+import "reference/v1/contract.proto"; // reuses PaymentFrequency
+
+// DayCountConvention is the accrual basis for coupon interest and year
+// fractions. Carried as an enum (not the free-text day_count string the
+// DERIV-01a SwapLeg uses) because the bond analytics dispatch on it directly.
+enum DayCountConvention {
+  // Default zero value; never set explicitly.
+  DAY_COUNT_CONVENTION_UNSPECIFIED = 0;
+
+  // ACT/365 (Fixed): actual days / 365.
+  DAY_COUNT_CONVENTION_ACT_365F = 1;
+
+  // ACT/360: actual days / 360 (money-market basis).
+  DAY_COUNT_CONVENTION_ACT_360 = 2;
+
+  // 30/360 (US/Bond basis): months treated as 30 days, year as 360.
+  DAY_COUNT_CONVENTION_THIRTY_360 = 3;
+
+  // ACT/ACT (ISDA): actual/actual, the government-bond basis.
+  DAY_COUNT_CONVENTION_ACT_ACT = 4;
+}
+
+// BondTerms is the static specification of a fixed-rate (or zero-coupon) bond,
+// keyed (in ContractTerms via a follow-up, or stood up by a reference store) by
+// the bond's own instrument_id.
+message BondTerms {
+  // face_value is the redemption / par amount. Required; positive.
+  common.v1.Decimal face_value = 1;
+
+  // coupon_rate is the annualized coupon rate (e.g. 0.05 for a 5% coupon).
+  // Required; 0 denotes a zero-coupon bond.
+  common.v1.Decimal coupon_rate = 2;
+
+  // coupon_frequency is how often a coupon pays. Required for a coupon bond;
+  // ignored (no coupons) when coupon_rate is 0.
+  PaymentFrequency coupon_frequency = 3;
+
+  // issue_date is when the bond starts accruing; maturity_date when principal
+  // is redeemed. Both required.
+  google.protobuf.Timestamp issue_date = 4;
+  google.protobuf.Timestamp maturity_date = 5;
+
+  // day_count is the accrual convention for coupons and year fractions.
+  // Required.
+  DayCountConvention day_count = 6;
+
+  // currency_code is the ISO 4217 code the bond pays in. Required.
+  string currency_code = 7;
+
+  // issuer_id is the canonical id of the issuing entity — the join key the
+  // COMP-01 issuer-exclusion rule and spread-duration attribution read.
+  // Optional.
+  string issuer_id = 8;
+}
+
+// CurveType is what the rates on a YieldCurve represent.
+enum CurveType {
+  // Default zero value; never set explicitly.
+  CURVE_TYPE_UNSPECIFIED = 0;
+
+  // ZERO: continuously- (or periodically-) compounded zero/spot rates.
+  CURVE_TYPE_ZERO = 1;
+
+  // PAR: par swap/bond yields, to be bootstrapped into zeros (FI-01b).
+  CURVE_TYPE_PAR = 2;
+
+  // DISCOUNT: discount factors directly (rate field holds DF in (0,1]).
+  CURVE_TYPE_DISCOUNT = 3;
+}
+
+// Compounding is the convention a zero rate compounds under.
+enum Compounding {
+  // Default zero value; never set explicitly.
+  COMPOUNDING_UNSPECIFIED = 0;
+
+  // CONTINUOUS: DF = exp(-r·t). The internal convention the curve math uses.
+  COMPOUNDING_CONTINUOUS = 1;
+
+  // ANNUAL: DF = (1+r)^-t.
+  COMPOUNDING_ANNUAL = 2;
+
+  // SEMIANNUAL: DF = (1+r/2)^-2t (the US-Treasury bond-yield basis).
+  COMPOUNDING_SEMIANNUAL = 3;
+}
+
+// Interpolation is how the curve is interpolated between pillar tenors.
+enum Interpolation {
+  // Default zero value; never set explicitly.
+  INTERPOLATION_UNSPECIFIED = 0;
+
+  // LINEAR_ZERO: linear in the zero rate.
+  INTERPOLATION_LINEAR_ZERO = 1;
+
+  // LOG_LINEAR_DF: linear in the log of the discount factor (== piecewise-
+  // constant forward rates).
+  INTERPOLATION_LOG_LINEAR_DF = 2;
+}
+
+// CurvePoint is one pillar of a YieldCurve: a tenor and its rate.
+message CurvePoint {
+  // tenor_years is the pillar maturity in years (e.g. 0.25, 2, 30). A time
+  // measure, not money — double is the right type here (the exact-Decimal rule
+  // is money/price/size). Required; positive; pillars strictly ascending.
+  double tenor_years = 1;
+
+  // rate is the rate at this tenor, interpreted per the curve's curve_type
+  // (zero rate, par yield, or discount factor). Required.
+  common.v1.Decimal rate = 2;
+}
+
+// YieldCurve is a point-in-time term structure of interest rates — the discount
+// basis bond pricing and option discounting read. Built/bootstrapped into the
+// internal curve.Curve (FI-01b) for analytics.
+message YieldCurve {
+  // curve_id is the canonical id of the curve (e.g. "USD-SOFR", "UST"). Required.
+  string curve_id = 1;
+
+  // as_of is the effective time of this curve snapshot — the point-in-time key,
+  // mirroring InstrumentReference / ContractTerms. Required.
+  google.protobuf.Timestamp as_of = 2;
+
+  // currency_code is the ISO 4217 currency the curve discounts. Required.
+  string currency_code = 3;
+
+  // curve_type says what the points' rates represent. Required.
+  CurveType curve_type = 4;
+
+  // compounding is the rate's compounding convention (for a ZERO curve).
+  // Required for ZERO; ignored for DISCOUNT.
+  Compounding compounding = 5;
+
+  // interpolation is how to interpolate between pillars. Required.
+  Interpolation interpolation = 6;
+
+  // points are the curve's pillars, strictly ascending by tenor_years.
+  // Required; at least one.
+  repeated CurvePoint points = 7;
+}
