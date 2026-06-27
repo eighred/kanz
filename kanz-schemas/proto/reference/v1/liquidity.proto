@@ -1,0 +1,60 @@
+syntax = "proto3";
+
+// Package reference.v1 (liquidity half) defines the per-instrument liquidity
+// reference record the LIQ-01 analytics need — the dimension the market.v1 quote
+// feed already carries (bid/ask price+size give a top-of-book spread and depth)
+// but nothing yet models (ROI #30). A LiquidityProfile is the smoothed,
+// slowly-changing liquidity reference — average daily volume plus a typical
+// bid-ask spread — keyed point-in-time by the canonical instrument_id, the same
+// join key BondTerms / OptionTerms / InstrumentReference use.
+//
+// The liquidation-horizon model (LIQ-01b) reads ADV to compute days-to-liquidate
+// (size ÷ participation-rate × ADV); the market-impact / liquidity-adjusted-VaR
+// layer (LIQ-01c) reads the spread for the cost of crossing the book, widened by
+// that horizon. A live quote's instantaneous spread/depth (market.v1.Quote) is
+// the realized observation; this is the reference input the models calibrate to.
+//
+// proto3 cannot enforce field presence; the "Required" notes are invariants the
+// analytics layer enforces.
+package reference.v1;
+
+import "google/protobuf/timestamp.proto";
+import "common/v1/decimal.proto";
+
+// LiquidityProfile is the point-in-time liquidity reference for one instrument:
+// how much trades in a day and how wide the book typically is. Slowly-changing
+// reference data (an ADV is a trailing average, a typical spread a smoothed
+// estimate), so it is keyed by instrument_id + as_of like the other reference
+// records, not a per-tick market event.
+message LiquidityProfile {
+  // instrument_id is the canonical Kanz instrument identifier — the join key the
+  // horizon/impact models resolve a position's liquidity through. Required.
+  string instrument_id = 1;
+
+  // as_of is the effective time of this liquidity snapshot — the point-in-time
+  // key, mirroring InstrumentReference / YieldCurve / ContractTerms. Required.
+  google.protobuf.Timestamp as_of = 2;
+
+  // average_daily_volume is the trailing average daily traded volume in the
+  // instrument's natural units (shares / contracts) — the denominator of the
+  // liquidation horizon. Required; positive. A zero/absent ADV marks an
+  // instrument the horizon model cannot liquidate (LIQ-01b ADV-zero handling).
+  common.v1.Decimal average_daily_volume = 3;
+
+  // average_spread is the typical bid-ask spread as a fraction of price (e.g.
+  // 0.0005 for 5 basis points) — the cost of crossing the book once, the base
+  // of the liquidation-cost / liquidity-adjusted-VaR add-on. Required;
+  // non-negative.
+  common.v1.Decimal average_spread = 4;
+
+  // participation_rate is the fraction of average_daily_volume the desk assumes
+  // it can trade per day when liquidating this name without undue impact (e.g.
+  // 0.20 for 20%). Optional per-instrument override of the model default;
+  // 0 ⇒ use the desk-level default participation rate.
+  common.v1.Decimal participation_rate = 5;
+
+  // currency_code is the ISO 4217 currency notional figures derived from this
+  // profile are denominated in. Advisory; the position MarketValue carries the
+  // authoritative currency. Optional.
+  string currency_code = 6;
+}
