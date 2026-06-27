@@ -1,0 +1,134 @@
+syntax = "proto3";
+
+// Package collateral.v1 is the collateral / margin / financing schema (COLL-01a)
+// — the cash-and-collateral plane that turns positions into FUNDED positions
+// (ROI #33). It carries the agreements that govern margining (CollateralAgreement
+// + its EligibilitySchedule of haircuts), the MarginCall a margin run produces,
+// and the FinancingTrade (repo / securities-lending) that funds the book. It is
+// the downstream of the XVA-01 CSA: the same collateral terms that REDUCE
+// counterparty exposure are what a margin call MOVES.
+//
+// # Money is Decimal, rates/haircuts are double
+//
+// Call amounts, thresholds, principals are money ⇒ common.v1.Decimal (the EVT-14
+// exact-money rule). Haircuts, repo rates, and SIMM risk weights are
+// dimensionless fractions/rates ⇒ double.
+package collateral.v1;
+
+import "google/protobuf/timestamp.proto";
+import "common/v1/decimal.proto";
+
+// MarginType distinguishes variation margin (against MtM moves) from initial
+// margin (the SIMM/grid potential-future-exposure buffer).
+enum MarginType {
+  MARGIN_TYPE_UNSPECIFIED = 0;
+  MARGIN_TYPE_VARIATION = 1;
+  MARGIN_TYPE_INITIAL = 2;
+}
+
+// EligibilityScheduleItem is one collateral asset's terms under an agreement: is
+// it eligible, and at what haircut.
+message EligibilityScheduleItem {
+  // asset_id is the canonical id of the collateral asset (cash currency, a bond,
+  // an equity). Required.
+  string asset_id = 1;
+
+  // eligible marks whether the asset may be posted under this agreement.
+  bool eligible = 2;
+
+  // haircut is the valuation haircut applied when posting (e.g. 0.02 for 2%);
+  // post-value = market-value × (1 − haircut). Required for an eligible asset.
+  double haircut = 3;
+}
+
+// CollateralAgreement is a CSA-style agreement governing margining with one
+// counterparty — the threshold/MTA economics plus the eligibility schedule.
+message CollateralAgreement {
+  // agreement_id is the canonical id. Required.
+  string agreement_id = 1;
+
+  // counterparty_id references the xva.v1.Counterparty. Required.
+  string counterparty_id = 2;
+
+  // threshold is the unsecured amount below which no collateral is posted;
+  // minimum_transfer_amount is the smallest call made; independent_amount is
+  // always-posted over-collateralization. Money. Required (IA optional).
+  common.v1.Decimal threshold = 3;
+  common.v1.Decimal minimum_transfer_amount = 4;
+  common.v1.Decimal independent_amount = 5;
+
+  // rounding is the increment calls are rounded to (money). Optional.
+  common.v1.Decimal rounding = 6;
+
+  // currency_code is the base currency of the agreement. Required.
+  string currency_code = 7;
+
+  // schedule is the per-asset eligibility/haircut schedule. Required; non-empty.
+  repeated EligibilityScheduleItem schedule = 8;
+}
+
+// MarginCall is the result of a margin run against one agreement — the amount to
+// be moved and which way.
+message MarginCall {
+  // agreement_id references the CollateralAgreement. Required.
+  string agreement_id = 1;
+
+  // as_of is the valuation time of the margin run. Required.
+  google.protobuf.Timestamp as_of = 2;
+
+  // margin_type is variation or initial. Required.
+  MarginType margin_type = 3;
+
+  // call_amount is the (signed) collateral movement: positive = the counterparty
+  // posts to us, negative = we post. Money in the agreement currency. Required.
+  common.v1.Decimal call_amount = 4;
+
+  // required_amount is the total collateral that should be held post-call;
+  // held_amount is what is already held. Money. Required.
+  common.v1.Decimal required_amount = 5;
+  common.v1.Decimal held_amount = 6;
+}
+
+// FinancingKind is the kind of financing trade.
+enum FinancingKind {
+  FINANCING_KIND_UNSPECIFIED = 0;
+  // REPO: borrow cash, pledge a security as collateral.
+  FINANCING_KIND_REPO = 1;
+  // REVERSE_REPO: lend cash, take a security as collateral.
+  FINANCING_KIND_REVERSE_REPO = 2;
+  // SEC_LENDING: lend a security for a fee.
+  FINANCING_KIND_SEC_LENDING = 3;
+  // SEC_BORROW: borrow a security against collateral.
+  FINANCING_KIND_SEC_BORROW = 4;
+}
+
+// FinancingTrade is a repo or securities-lending trade — the funding leg of a
+// position. Its cash flows extend the portfolio's forward cash ladder (COLL-01d).
+message FinancingTrade {
+  // financing_id is the canonical id. Required.
+  string financing_id = 1;
+
+  // kind is the financing kind. Required.
+  FinancingKind kind = 2;
+
+  // collateral_asset_id is the security pledged/borrowed. Required.
+  string collateral_asset_id = 3;
+
+  // principal is the cash amount (money). Required.
+  common.v1.Decimal principal = 4;
+
+  // rate is the annualized financing rate (repo rate / lending fee), decimal.
+  // Required.
+  double rate = 5;
+
+  // haircut is the collateral haircut on the trade, decimal. Optional.
+  double haircut = 6;
+
+  // start_date is when cash/securities are exchanged; end_date when the trade
+  // unwinds (principal + financing returned). Both required.
+  google.protobuf.Timestamp start_date = 7;
+  google.protobuf.Timestamp end_date = 8;
+
+  // currency_code is the ISO 4217 currency of the cash leg. Required.
+  string currency_code = 9;
+}

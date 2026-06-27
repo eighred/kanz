@@ -18,6 +18,9 @@
 /proto/reference/     @kanz-eng/market-data @kanz-eng/quant-ml @kanz-eng/architecture
 /proto/performance/   @kanz-eng/risk-engine @kanz-eng/quant-ml
 /proto/optimization/  @kanz-eng/risk-engine @kanz-eng/quant-ml @kanz-eng/execution
+/proto/factor/        @kanz-eng/risk-engine @kanz-eng/quant-ml
+/proto/xva/           @kanz-eng/risk-engine @kanz-eng/quant-ml
+/proto/collateral/    @kanz-eng/risk-engine @kanz-eng/execution
 
 # Constitution-level files — require architecture review.
 /buf.yaml             @kanz-eng/architecture
