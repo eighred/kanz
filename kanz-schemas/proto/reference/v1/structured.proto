@@ -1,0 +1,106 @@
+syntax = "proto3";
+
+// Package reference.v1 (structured-products half) defines the static terms for
+// securitized & structured products — MBS / ABS / CLO and amortizing structures
+// — so a structured product carries real cashflow/price/risk instead of just an
+// ASSET_CLASS tag (ROI #34). It is the securitized mirror of BondTerms: the deal
+// collateral (pool) and the capital structure (tranches with their waterfall and
+// attachment/detachment points), plus the prepayment/default assumption a
+// cashflow projection runs under. Additive to reference.v1, keyed by the deal's
+// instrument_id.
+//
+// proto3 cannot enforce presence; the "Required" notes are invariants the
+// cashflow engine (STRUCT-01b) enforces. Rates/fractions are double (a CPR, a
+// coupon-as-rate, an attachment point are dimensionless), balances are Decimal
+// (money) per EVT-14.
+package reference.v1;
+
+import "common/v1/decimal.proto";
+import "reference/v1/fixed_income.proto"; // reuses DayCountConvention / PaymentFrequency
+
+// CollateralPool is the amortizing asset pool backing a deal — the cashflow
+// source the waterfall distributes.
+message CollateralPool {
+  // original_balance is the pool's starting principal (money). Required.
+  common.v1.Decimal original_balance = 1;
+
+  // gross_coupon is the weighted-average annualized coupon the collateral pays
+  // (e.g. 0.055 for a 5.5% WAC). Required.
+  double gross_coupon = 2;
+
+  // servicing_fee is the annualized servicing/management fee stripped off the
+  // gross coupon before the waterfall (e.g. 0.0025). Optional.
+  double servicing_fee = 3;
+
+  // term_months is the fully-amortizing term in months (the WAM). Required.
+  uint32 term_months = 4;
+
+  // payment_frequency is how often the pool pays (monthly for MBS). Required.
+  PaymentFrequency payment_frequency = 5;
+}
+
+// Tranche is one note in the capital structure — a slice of the pool's cashflows
+// defined by where it sits in the waterfall and the loss it absorbs.
+message Tranche {
+  // name is the tranche label (e.g. "A1", "M2", "Equity"). Required.
+  string name = 1;
+
+  // original_balance is the tranche's starting principal (money). Required.
+  common.v1.Decimal original_balance = 2;
+
+  // coupon is the tranche's annualized coupon rate. Required.
+  double coupon = 3;
+
+  // seniority is the pay order (0 = most senior); principal pays sequentially by
+  // ascending seniority, losses allocate by descending. Required.
+  uint32 seniority = 4;
+
+  // attachment / detachment are the pool-loss fractions this tranche absorbs
+  // (e.g. a mezz tranche 0.03–0.07): losses below attachment are borne by more
+  // junior tranches, above detachment by more senior. Required.
+  double attachment = 5;
+  double detachment = 6;
+}
+
+// PrepaymentAssumption is the prepayment/default scenario a projection runs
+// under — the behavioral inputs the cashflow model (STRUCT-01c) consumes.
+message PrepaymentAssumption {
+  // model names the prepay model: "CONSTANT" (flat CPR), "PSA" (the ramp), or
+  // "BEHAVIORAL" (rate-driven refi). Required.
+  string model = 1;
+
+  // cpr is the annualized conditional prepayment rate (CONSTANT), or the PSA
+  // multiple's base for PSA. Decimal fraction. Required for CONSTANT.
+  double cpr = 2;
+
+  // cdr is the annualized conditional default rate. Required.
+  double cdr = 3;
+
+  // severity is the loss-given-default on defaulted collateral (1 − recovery).
+  // Required.
+  double severity = 4;
+
+  // psa_multiple is the PSA speed (1.0 == 100 PSA). Used when model == "PSA".
+  double psa_multiple = 5;
+}
+
+// StructuredTerms is the full deal definition: the pool, the tranches (senior to
+// junior), and the base prepayment assumption. Keyed in reference data by the
+// deal's instrument_id.
+message StructuredTerms {
+  // deal_id is the canonical id of the securitization. Required.
+  string deal_id = 1;
+
+  // pool is the collateral. Required.
+  CollateralPool pool = 2;
+
+  // tranches are the capital structure, ordered senior → junior. Required;
+  // non-empty; the sum of original balances should equal the pool balance.
+  repeated Tranche tranches = 3;
+
+  // base_assumption is the prepayment/default base case. Required.
+  PrepaymentAssumption base_assumption = 4;
+
+  // day_count is the accrual convention. Optional (defaults to 30/360 for MBS).
+  DayCountConvention day_count = 5;
+}
