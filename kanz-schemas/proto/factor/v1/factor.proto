@@ -1,0 +1,135 @@
+syntax = "proto3";
+
+// Package factor.v1 is the multi-factor risk model schema (FACTOR-01a) — the
+// wire shape of the analytical core an Aladdin-class platform is built on. It
+// carries the four artifacts of a factor model: the FactorModel definition (which
+// factors, of which kind), the per-instrument FactorExposure (loadings), the
+// FactorReturn series (the realized factor returns the covariance is estimated
+// from), and the FactorCovariance matrix. Together they let portfolio risk
+// decompose into a FACTOR (systematic) part and a SPECIFIC (idiosyncratic) part,
+// so VaR, ex-ante tracking error, and risk attribution decompose by factor, not
+// just by name (ROI #31).
+//
+// # Loadings/returns/covariance are statistics
+//
+// Every loading, factor return, covariance entry, and specific variance is a
+// dimensionless derived statistic, so it is `double` — the EVT-14 rule (double
+// for metrics, exact Decimal for money/prices/sizes). A factor model is an
+// estimate; it carries no money amounts.
+//
+// # Point-in-time
+//
+// A FactorModel is keyed by model_id + as_of: a model is re-estimated daily, and
+// a historical recompute/backtest reads the model that was in effect then (the
+// reference.v1 as_of SCD discipline) — the same no-future-leakage property the
+// price store and the curve carry.
+package factor.v1;
+
+import "google/protobuf/timestamp.proto";
+
+// FactorType is the category a factor belongs to — the dimension a risk report
+// groups exposures by. Mirrors factormodel.FactorType.
+enum FactorType {
+  // Default zero value; never set explicitly.
+  FACTOR_TYPE_UNSPECIFIED = 0;
+
+  // STYLE: a continuous cross-sectional characteristic (value, momentum, size,
+  // quality, low-volatility).
+  FACTOR_TYPE_STYLE = 1;
+
+  // INDUSTRY: an industry/sector membership factor (0/1 loading).
+  FACTOR_TYPE_INDUSTRY = 2;
+
+  // COUNTRY: a country/market membership factor (0/1 loading).
+  FACTOR_TYPE_COUNTRY = 3;
+
+  // MACRO: a macroeconomic factor (rates, credit, oil) — estimated sensitivity
+  // loadings.
+  FACTOR_TYPE_MACRO = 4;
+
+  // STATISTICAL: a latent principal-component factor (PCA, FACTOR-01c).
+  FACTOR_TYPE_STATISTICAL = 5;
+}
+
+// Factor identifies one factor by name and type. The order of factors in
+// FactorModel.factors is the canonical column order for loadings and the
+// covariance matrix.
+message Factor {
+  // name is the factor's stable identifier (e.g. "Momentum", "IND:Tech", "PC1").
+  // Required.
+  string name = 1;
+
+  // type is the factor's category. Required.
+  FactorType type = 2;
+}
+
+// FactorModel is the definition of a multi-factor model over an instrument
+// universe — the factors and their ordering. The loadings (FactorExposure),
+// realized returns (FactorReturn), and covariance (FactorCovariance) reference a
+// model by model_id + as_of.
+message FactorModel {
+  // model_id is the canonical id of the model (e.g. "GLOBAL-EQUITY-FUNDAMENTAL").
+  // Required.
+  string model_id = 1;
+
+  // as_of is the effective time of this model snapshot — the point-in-time key.
+  // Required.
+  google.protobuf.Timestamp as_of = 2;
+
+  // factors are the model's factors, in canonical column order. Required;
+  // non-empty.
+  repeated Factor factors = 3;
+
+  // estimation is how the model was built — fundamental, statistical, or a blend
+  // (FACTOR-01b/c). Advisory provenance.
+  string estimation = 4;
+}
+
+// FactorExposure is one instrument's loadings on a model's factors — the row of
+// the loading matrix B for that instrument.
+message FactorExposure {
+  // instrument_id is the canonical Kanz instrument identifier. Required.
+  string instrument_id = 1;
+
+  // model_id / as_of reference the FactorModel these loadings are for. Required.
+  string model_id = 2;
+  google.protobuf.Timestamp as_of = 3;
+
+  // loadings are the instrument's factor loadings, in the model's factor order
+  // (loadings[k] is the loading on factors[k]). Required; length == |factors|.
+  repeated double loadings = 4;
+
+  // specific_variance is the instrument's idiosyncratic (residual) variance —
+  // the diagonal of the specific-risk matrix, the part the factors do not
+  // explain. Required; non-negative.
+  double specific_variance = 5;
+}
+
+// FactorReturn is the realized return of every factor over one period — one
+// column of the factor-return panel the covariance is estimated from.
+message FactorReturn {
+  // model_id references the FactorModel. Required.
+  string model_id = 1;
+
+  // period_end is the end of the return period. Required.
+  google.protobuf.Timestamp period_end = 2;
+
+  // returns are the per-factor returns, in the model's factor order. Required;
+  // length == |factors|.
+  repeated double returns = 3;
+}
+
+// FactorCovariance is the K×K factor-return covariance matrix F for a model, the
+// systematic-risk core. Stored row-major in `values` (values[i*k + j] is F[i][j])
+// to keep it one flat repeated field; k == |factors|.
+message FactorCovariance {
+  // model_id / as_of reference the FactorModel. Required.
+  string model_id = 1;
+  google.protobuf.Timestamp as_of = 2;
+
+  // dimension is K, the number of factors — the matrix is K×K. Required.
+  uint32 dimension = 3;
+
+  // values is the row-major covariance matrix (length == dimension²). Required.
+  repeated double values = 4;
+}
