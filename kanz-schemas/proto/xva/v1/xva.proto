@@ -1,0 +1,109 @@
+syntax = "proto3";
+
+// Package xva.v1 is the counterparty-credit-risk / valuation-adjustment schema
+// (XVA-01a) — the wire shape of the derivatives-book risk Phase-5 pricing makes
+// computable (ROI #32). It carries the static reference data the exposure
+// simulation and the valuation adjustments need: the Counterparty, the
+// NettingSet (which trades net against each other on default) and its CSA
+// (collateral terms), and the CreditCurve (CDS-implied hazard rates) that drives
+// CVA/DVA.
+//
+// # Money is Decimal, rates/hazards are double
+//
+// Thresholds, minimum-transfer and independent amounts are money ⇒
+// common.v1.Decimal (the EVT-14 exact-money rule). Hazard rates, recovery, and
+// correlations are dimensionless statistics ⇒ double. Notionals on the trades
+// themselves live in order.v1 / reference.v1; a netting set references trade ids.
+//
+// # Point-in-time
+//
+// A CreditCurve is keyed by entity + as_of: the curve is re-marked daily and a
+// historical CVA recompute reads the curve in effect then (the as_of SCD
+// discipline shared with the YieldCurve and the LiquidityProfile).
+package xva.v1;
+
+import "google/protobuf/timestamp.proto";
+import "common/v1/decimal.proto";
+
+// Counterparty is a legal entity we face credit risk to. Its credit curve drives
+// the CVA; netting sets reference it.
+message Counterparty {
+  // counterparty_id is the canonical entity id (the join key BondTerms.issuer_id
+  // and the COMP-01 issuer-exclusion rule share). Required.
+  string counterparty_id = 1;
+
+  // display_name is the human-readable name. Advisory.
+  string display_name = 2;
+
+  // is_index marks a credit/equity index name (an index hedging set uses the
+  // higher SA-CCR correlation). Optional.
+  bool is_index = 3;
+}
+
+// CSA is the collateral support annex governing a netting set — the margin terms
+// that reduce exposure. Money fields are Decimal.
+message CSA {
+  // threshold is the unsecured amount the counterparty need not collateralize
+  // (exposure above it is margined). Required; non-negative.
+  common.v1.Decimal threshold = 1;
+
+  // minimum_transfer_amount is the smallest collateral movement; a margin call
+  // below it is not made. Required; non-negative.
+  common.v1.Decimal minimum_transfer_amount = 2;
+
+  // independent_amount is over-collateralization always held regardless of MtM.
+  // Optional.
+  common.v1.Decimal independent_amount = 3;
+
+  // currency_code is the ISO 4217 currency the collateral amounts are in.
+  // Required.
+  string currency_code = 4;
+}
+
+// NettingSet is the set of trades with one counterparty that net against each
+// other on default, under one CSA — the unit exposure is simulated over.
+message NettingSet {
+  // netting_set_id is the canonical id of the set. Required.
+  string netting_set_id = 1;
+
+  // counterparty_id references the Counterparty. Required.
+  string counterparty_id = 2;
+
+  // trade_ids are the order.v1 / position ids in the set. Required; non-empty.
+  repeated string trade_ids = 3;
+
+  // csa is the collateral agreement; absent ⇒ uncollateralized. Optional.
+  CSA csa = 4;
+}
+
+// CreditCurve is a counterparty's CDS-implied credit term structure: piecewise-
+// constant forward hazard rates and a recovery rate. Survival to t is
+// Q(t)=exp(−∫₀ᵗ h), the default model CVA/DVA integrate against.
+message CreditCurve {
+  // entity_id is the Counterparty (or our own entity, for DVA) the curve is for.
+  // Required.
+  string entity_id = 1;
+
+  // as_of is the effective time of this curve snapshot — the point-in-time key.
+  // Required.
+  google.protobuf.Timestamp as_of = 2;
+
+  // points are the curve's hazard pillars, strictly ascending by tenor. Required;
+  // at least one.
+  repeated HazardPoint points = 3;
+
+  // recovery_rate is R ∈ [0,1); LGD = 1−R. Required.
+  double recovery_rate = 4;
+}
+
+// HazardPoint is one pillar of a CreditCurve: a tenor and the forward hazard rate
+// on the segment ending at it.
+message HazardPoint {
+  // tenor_years is the pillar maturity in years. A time measure ⇒ double.
+  // Required; positive; strictly ascending across points.
+  double tenor_years = 1;
+
+  // hazard_rate is the constant forward default intensity on the segment ending
+  // at tenor_years. A rate ⇒ double. Required; non-negative.
+  double hazard_rate = 2;
+}
