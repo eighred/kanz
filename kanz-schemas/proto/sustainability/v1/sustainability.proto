@@ -1,0 +1,116 @@
+syntax = "proto3";
+
+// Package sustainability.v1 is the ESG / climate analytics schema (CLIMATE-01a) —
+// ESG scoring, carbon footprinting, climate-scenario risk (transition +
+// physical), and net-zero alignment: Aladdin Climate, increasingly a mandate
+// requirement (ROI #39). An ESGScore and CarbonMetrics attach per instrument
+// (additive reference data); a ClimateScenario (NGFS-style) drives climate-VaR;
+// TaxonomyAlignment carries EU-taxonomy revenue shares.
+//
+// # Money is Decimal, scores/emissions/intensities are double
+//
+// Market value, revenue, and enterprise value are money ⇒ common.v1.Decimal (the
+// EVT-14 exact-money rule). ESG scores, emissions (tCO2e), carbon intensity, and
+// the carbon price / physical severity of a scenario are dimensionless statistics
+// ⇒ double — the same rule that makes returns double.
+package sustainability.v1;
+
+import "common/v1/decimal.proto";
+
+// ESGScore is an instrument's (issuer's) environmental/social/governance rating —
+// the overall score plus its three pillars. Higher is better; the scale is the
+// provider's (e.g. 0–100), carried through aggregation unchanged.
+message ESGScore {
+  // instrument_id is the rated instrument/issuer. Required.
+  string instrument_id = 1;
+
+  // overall is the headline ESG score; environmental/social/governance are the
+  // pillar scores. double (a rating, not money).
+  double overall = 2;
+  double environmental = 3;
+  double social = 4;
+  double governance = 5;
+}
+
+// CarbonMetrics is an issuer's greenhouse-gas footprint across the three GHG-
+// Protocol scopes, plus the financial denominators carbon intensity and financed
+// emissions are computed against.
+message CarbonMetrics {
+  // instrument_id is the issuer. Required.
+  string instrument_id = 1;
+
+  // scope1 / scope2 / scope3 are annual emissions in tonnes CO2-equivalent:
+  // scope1 direct, scope2 purchased energy, scope3 value-chain. double.
+  double scope1 = 2;
+  double scope2 = 3;
+  double scope3 = 4;
+
+  // revenue is the issuer's annual revenue (money) — the denominator of carbon
+  // intensity (emissions / revenue). Required for intensity.
+  common.v1.Decimal revenue = 5;
+
+  // enterprise_value is EVIC (enterprise value including cash), money — the PCAF
+  // attribution denominator for financed emissions. Required for PCAF.
+  common.v1.Decimal enterprise_value = 6;
+}
+
+// TaxonomyAlignment is an issuer's EU-taxonomy alignment — the share of revenue
+// that is taxonomy-ELIGIBLE and the (smaller) share that is taxonomy-ALIGNED
+// (meets the technical screening criteria). Both are fractions of revenue.
+message TaxonomyAlignment {
+  // instrument_id is the issuer. Required.
+  string instrument_id = 1;
+
+  // eligible_share is the fraction of revenue from taxonomy-eligible activities;
+  // aligned_share the fraction meeting the screening criteria (≤ eligible).
+  // double, in [0,1].
+  double eligible_share = 2;
+  double aligned_share = 3;
+}
+
+// ClimateScenarioKind distinguishes the two climate-risk channels a scenario can
+// shock through.
+enum ClimateScenarioKind {
+  CLIMATE_SCENARIO_KIND_UNSPECIFIED = 0;
+  // Transition risk: policy/carbon-price driven repricing of carbon-intensive
+  // assets (an orderly or disorderly net-zero transition).
+  CLIMATE_SCENARIO_KIND_TRANSITION = 1;
+  // Physical risk: acute/chronic climate-hazard damage to assets (a hot-house
+  // world where little transition happens).
+  CLIMATE_SCENARIO_KIND_PHYSICAL = 2;
+}
+
+// ClimateScenario is an NGFS-style climate-stress scenario: a carbon price the
+// transition channel applies to an issuer's emissions and a physical-severity
+// factor the physical channel applies. The named NGFS scenarios (orderly,
+// disorderly, hot-house) are parameterizations of this.
+message ClimateScenario {
+  // name identifies the scenario (e.g. "NGFS_DISORDERLY"). Required.
+  string name = 1;
+
+  // kind is the dominant risk channel (informational; a scenario may carry both
+  // a carbon price and a physical severity).
+  ClimateScenarioKind kind = 2;
+
+  // carbon_price is the shock carbon price in money per tonne CO2e — the
+  // transition channel charges an issuer's emissions at this price. double
+  // (a price per physical unit used in a statistic, not a money balance).
+  double carbon_price = 3;
+
+  // physical_severity is the physical-damage factor in [0,1] applied to exposed
+  // assets in the physical channel. double.
+  double physical_severity = 4;
+}
+
+// TemperatureAlignment is a portfolio's (or issuer's) implied temperature rise —
+// the warming the world would reach if every issuer followed this emissions
+// trajectory — and whether it aligns to a net-zero pathway.
+message TemperatureAlignment {
+  // implied_rise_celsius is the implied temperature rise in °C above
+  // pre-industrial (e.g. 2.7). double.
+  double implied_rise_celsius = 1;
+
+  // aligned is true when the trajectory is on a sub-target pathway (≤ the target
+  // degrees, default 1.5°C).
+  bool aligned = 2;
+}
