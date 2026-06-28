@@ -1,0 +1,146 @@
+syntax = "proto3";
+
+// Package settlement.v1 is the post-trade lifecycle schema (POST-01a) — the trade
+// lifecycle AFTER the fill: confirmation/affirmation against the counterparty,
+// the settlement instruction, and the T+N settlement status, closing the loop
+// OMS-01 opens (ROI #37). A fill (order.v1.Fill) is matched to the counterparty's
+// TradeConfirmation; an affirmed trade produces a SettlementInstruction whose
+// SettlementStatus is tracked to SETTLED or FAILED; a FAILED instruction ages into
+// a SettlementFail FACT that feeds the AUTO-01 controller and the IBOR-01e
+// custodian reconciliation.
+//
+// # Money is Decimal
+//
+// Quantities, prices, and settlement amounts are money/quantity ⇒
+// common.v1.Decimal (the EVT-14 exact-money rule). Times are Timestamp.
+package settlement.v1;
+
+import "google/protobuf/timestamp.proto";
+import "common/v1/decimal.proto";
+
+// SettlementStatus is the lifecycle state of a trade through settlement. It moves
+// monotonically MATCHED → AFFIRMED → INSTRUCTED → SETTLED, or to the terminal
+// FAILED at any point a counterparty/custodian rejects or the settlement date
+// passes unsettled.
+enum SettlementStatus {
+  SETTLEMENT_STATUS_UNSPECIFIED = 0;
+  // The fill was matched to a counterparty confirmation (terms agree).
+  SETTLEMENT_STATUS_MATCHED = 1;
+  // The matched trade was affirmed (we accept the counterparty's terms).
+  SETTLEMENT_STATUS_AFFIRMED = 2;
+  // A settlement instruction was generated and sent to the settlement venue.
+  SETTLEMENT_STATUS_INSTRUCTED = 3;
+  // Terminal: the trade settled (cash and securities exchanged).
+  SETTLEMENT_STATUS_SETTLED = 4;
+  // Terminal: the trade failed to settle (mismatch, rejection, or aged past the
+  // settlement date).
+  SETTLEMENT_STATUS_FAILED = 5;
+}
+
+// Side restates the trade direction (mirrors order.v1.Side without importing the
+// command package — a confirmation is post-trade and self-contained).
+enum Side {
+  SIDE_UNSPECIFIED = 0;
+  SIDE_BUY = 1;
+  SIDE_SELL = 2;
+}
+
+// TradeConfirmation is the counterparty's confirmation of a trade — the
+// independent view the OMS fill is matched against (POST-01b). Its terms must
+// agree with the fill within tolerance for the trade to affirm.
+message TradeConfirmation {
+  // confirmation_id is the counterparty's confirmation reference. Required.
+  string confirmation_id = 1;
+
+  // fill_id links to the order.v1.Fill this confirms. Required.
+  string fill_id = 2;
+
+  // instrument_id, side, quantity, price restate the trade terms for matching.
+  // Required.
+  string instrument_id = 3;
+  Side side = 4;
+  common.v1.Decimal quantity = 5;
+  common.v1.Decimal price = 6;
+
+  // counterparty is the counterparty's id. Required.
+  string counterparty = 7;
+
+  // settlement_date is the agreed (T+N) settlement date. Required.
+  google.protobuf.Timestamp settlement_date = 8;
+}
+
+// SettlementInstruction is the instruction to settle an affirmed trade — the
+// movement of cash and securities on the settlement date (POST-01c). Its status
+// is tracked from INSTRUCTED to SETTLED/FAILED.
+message SettlementInstruction {
+  // instruction_id is the canonical id. Required.
+  string instruction_id = 1;
+
+  // fill_id links back to the originating order.v1.Fill. Required.
+  string fill_id = 2;
+
+  // instrument_id, side, quantity restate what moves. Required.
+  string instrument_id = 3;
+  Side side = 4;
+  common.v1.Decimal quantity = 5;
+
+  // amount is the cash leg (money): quantity × price plus fees, the cash settled
+  // against the securities. Required.
+  common.v1.Decimal amount = 6;
+
+  // currency_code is the ISO 4217 currency of the cash leg. Required.
+  string currency_code = 7;
+
+  // counterparty and custodian identify the parties/account the instruction
+  // settles between. counterparty required; custodian optional.
+  string counterparty = 8;
+  string custodian = 9;
+
+  // settlement_date is the (T+N) date the instruction settles on. Required.
+  google.protobuf.Timestamp settlement_date = 10;
+
+  // status is the current settlement state. Required.
+  SettlementStatus status = 11;
+
+  // fail_reason is set when status is FAILED. Optional.
+  string fail_reason = 12;
+}
+
+// FailSeverity grades a settlement fail by how long it has aged unsettled — the
+// escalation tier the AUTO-01 controller keys remediation on.
+enum FailSeverity {
+  FAIL_SEVERITY_UNSPECIFIED = 0;
+  // Aged past the settlement date but within the grace window.
+  FAIL_SEVERITY_WARNING = 1;
+  // Aged beyond the grace window — actionable.
+  FAIL_SEVERITY_CRITICAL = 2;
+  // Aged far beyond — escalate to operations / counterparty management.
+  FAIL_SEVERITY_ESCALATED = 3;
+}
+
+// SettlementFail is the FACT that a settlement instruction failed or aged past
+// its settlement date unsettled (POST-01d). It feeds the AUTO-01 controller (an
+// operational signal) and the IBOR-01e custodian reconciliation (an expected
+// position/cash movement that did not occur).
+message SettlementFail {
+  // instruction_id references the failed SettlementInstruction. Required.
+  string instruction_id = 1;
+
+  // instrument_id and counterparty identify what failed and with whom. Required.
+  string instrument_id = 2;
+  string counterparty = 3;
+
+  // settlement_date is the date it should have settled on; age_days is how many
+  // days it has aged past that as of the detection time. Required.
+  google.protobuf.Timestamp settlement_date = 4;
+  int32 age_days = 5;
+
+  // severity is the escalation tier (by age). Required.
+  FailSeverity severity = 6;
+
+  // reason is a human-readable description of the fail. Required.
+  string reason = 7;
+
+  // detected_at is when the fail was detected. Required.
+  google.protobuf.Timestamp detected_at = 8;
+}
