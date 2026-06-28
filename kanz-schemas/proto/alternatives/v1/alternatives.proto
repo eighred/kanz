@@ -1,0 +1,150 @@
+syntax = "proto3";
+
+// Package alternatives.v1 is the private-markets / alternatives schema (ALT-01a)
+// — private equity / credit / real assets: capital calls, distributions, the
+// J-curve, and illiquid valuation, the alternative-assets sleeve a whole-
+// portfolio view requires (ROI #38). A Commitment to a Fund is drawn down by
+// CapitalCalls and returned by Distributions; its illiquid value is carried by a
+// NAVMark; funds are grouped into Vintage cohorts for peer benchmarking.
+//
+// # Money is Decimal
+//
+// Committed/called/distributed amounts and NAVs are money ⇒ common.v1.Decimal
+// (the EVT-14 exact-money rule). Times are Timestamp; IRR/TVPI/PME are derived
+// statistics computed downstream (ALT-01c) and carry no money type here.
+package alternatives.v1;
+
+import "google/protobuf/timestamp.proto";
+import "common/v1/decimal.proto";
+
+// Strategy is the private-markets strategy a fund pursues — the dimension a
+// vintage cohort and a proxy-beta mapping (ALT-01d) key on.
+enum Strategy {
+  STRATEGY_UNSPECIFIED = 0;
+  STRATEGY_BUYOUT = 1;
+  STRATEGY_VENTURE = 2;
+  STRATEGY_GROWTH = 3;
+  STRATEGY_PRIVATE_CREDIT = 4;
+  STRATEGY_REAL_ESTATE = 5;
+  STRATEGY_INFRASTRUCTURE = 6;
+  STRATEGY_FUND_OF_FUNDS = 7;
+}
+
+// Vintage is a fund cohort — strategy plus the year the fund began investing.
+// Peer benchmarking (IRR/TVPI vs the vintage median) is done within a cohort,
+// because a fund's J-curve is only comparable to others of its vintage/strategy.
+message Vintage {
+  // year is the vintage year (the year of first capital call / fund formation).
+  int32 year = 1;
+  // strategy is the cohort's strategy. Required.
+  Strategy strategy = 2;
+}
+
+// Fund is a private-markets fund — the vehicle a Commitment is made to.
+message Fund {
+  // fund_id is the canonical id. Required.
+  string fund_id = 1;
+
+  // name is the fund's display name. Required.
+  string name = 2;
+
+  // strategy and vintage_year classify the fund into a Vintage cohort. Required.
+  Strategy strategy = 3;
+  int32 vintage_year = 4;
+
+  // fund_size is the fund's total committed capital (money). Optional.
+  common.v1.Decimal fund_size = 5;
+
+  // currency_code is the ISO 4217 fund currency. Required.
+  string currency_code = 6;
+}
+
+// Commitment is an investor's capital commitment to a Fund — the unit a position
+// is tracked at (committed / called / uncalled / distributed). Its lifecycle is
+// the event-sourced fund position (ALT-01b).
+message Commitment {
+  // commitment_id is the canonical id. Required.
+  string commitment_id = 1;
+
+  // fund_id references the Fund. Required.
+  string fund_id = 2;
+
+  // investor_id is the committing account/portfolio. Required.
+  string investor_id = 3;
+
+  // committed_amount is the total capital committed (money) — the cap on what may
+  // be called. Required.
+  common.v1.Decimal committed_amount = 4;
+
+  // currency_code is the ISO 4217 currency. Required.
+  string currency_code = 5;
+
+  // commitment_date is when the commitment was made. Required.
+  google.protobuf.Timestamp commitment_date = 6;
+}
+
+// CapitalCall is a drawdown against a Commitment — the GP calls committed capital.
+// Cumulative calls are the paid-in (called) capital; committed minus called is the
+// uncalled (dry powder) the investor must stand ready to fund.
+message CapitalCall {
+  // call_id is the canonical id. Required.
+  string call_id = 1;
+
+  // commitment_id references the Commitment drawn against. Required.
+  string commitment_id = 2;
+
+  // amount is the called amount (money). Required.
+  common.v1.Decimal amount = 3;
+
+  // call_date is when the capital is due/called. Required.
+  google.protobuf.Timestamp call_date = 4;
+
+  // purpose is a human-readable call purpose (investment, fees, expenses).
+  // Optional.
+  string purpose = 5;
+}
+
+// DistributionKind classifies what a distribution returns.
+enum DistributionKind {
+  DISTRIBUTION_KIND_UNSPECIFIED = 0;
+  // Return of the investor's contributed capital.
+  DISTRIBUTION_KIND_RETURN_OF_CAPITAL = 1;
+  // Realized capital gain above contributed capital.
+  DISTRIBUTION_KIND_CAPITAL_GAIN = 2;
+  // Income (interest, dividends, fees) distributed.
+  DISTRIBUTION_KIND_INCOME = 3;
+}
+
+// Distribution is a return of capital/gains to the investor from a Commitment.
+// Cumulative distributions feed DPI and the J-curve's recovery.
+message Distribution {
+  // distribution_id is the canonical id. Required.
+  string distribution_id = 1;
+
+  // commitment_id references the Commitment. Required.
+  string commitment_id = 2;
+
+  // amount is the distributed amount (money). Required.
+  common.v1.Decimal amount = 3;
+
+  // kind classifies the distribution. Required.
+  DistributionKind kind = 4;
+
+  // distribution_date is when it was paid. Required.
+  google.protobuf.Timestamp distribution_date = 5;
+}
+
+// NAVMark is an illiquid valuation of a Commitment's residual interest — the GP's
+// reported net asset value as of a date. Because private NAVs are reported with a
+// lag and later restated, as_of carries the valuation date (a point-in-time mark);
+// it feeds RVPI and the residual value in TVPI/IRR.
+message NAVMark {
+  // commitment_id references the Commitment. Required.
+  string commitment_id = 1;
+
+  // nav is the residual net asset value (money). Required.
+  common.v1.Decimal nav = 2;
+
+  // as_of is the valuation date. Required.
+  google.protobuf.Timestamp as_of = 3;
+}
