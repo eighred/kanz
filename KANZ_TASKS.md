@@ -58,7 +58,18 @@ _(OBS-01a..e epic complete — see DONE)_
 
 ### Sequencing — 6-month milestone map
 
-> Dependency-ordered, not strictly serial — epics overlap across squads, but the gates below hold. **M1–M2** PARITY-01 (live data) + PARITY-02 (durable state) — every downstream analytic is meaningless on Sim/Stub data, so this is the foundation; PARITY-07a/b (SDK distribution unblock) runs alongside since it's near-zero-cost. **M2–M3** PARITY-04 (real external adapters) once data + state exist to feed them. **M3–M4** PARITY-03 (calibration + independent validation) — needs live data (M1) and validated against the now-real pipeline. **M4–M5** PARITY-05 (scale/HA/latency) under production volume once correctness is locked. **M5–M6** PARITY-06 (regulatory certification + first-client onboarding) — the gate that needs everything above true and stable. Each subtask is scoped 1–3 engineer-days; an epic is a squad-quarter. "Done" for every subtask includes: tests (board convention), `go build/vet/gofmt` clean, arch test unchanged, and the carried-forward note in the relevant DONE entry retired.
+> Dependency-ordered, not strictly serial — epics overlap across squads, but the gates below hold. **M0–M1** SVCWIRE-01 (operationalize the Phase-7 services — deploy + edge auth + observability): the wealth/datamaster/copilot services ship unit-tested but undeployed and unreachable at the gateway, so they must be made runnable + callable before live data flows into them. **M1–M2** PARITY-01 (live data) + PARITY-02 (durable state) — every downstream analytic is meaningless on Sim/Stub data, so this is the foundation; PARITY-07a/b (SDK distribution unblock) runs alongside since it's near-zero-cost. **M2–M3** PARITY-04 (real external adapters) once data + state exist to feed them. **M3–M4** PARITY-03 (calibration + independent validation) — needs live data (M1) and validated against the now-real pipeline. **M4–M5** PARITY-05 (scale/HA/latency) under production volume once correctness is locked. **M5–M6** PARITY-06 (regulatory certification + first-client onboarding) — the gate that needs everything above true and stable. Each subtask is scoped 1–3 engineer-days; an epic is a squad-quarter. "Done" for every subtask includes: tests (board convention), `go build/vet/gofmt` clean, arch test unchanged, and the carried-forward note in the relevant DONE entry retired.
+
+### SVCWIRE-01 — Operationalize the Phase-7 services (M0–M1)
+
+_Objective: make the just-shipped wealth/datamaster/copilot (+ alternatives) services deployable, reachable-behind-auth, and observable — they pass unit tests but are absent from the GitOps applicationset and the api-gateway routes, so today they cannot run in-cluster or be called (copilot's `/v1/ask` is unreachable because nothing populates the `auth.Principal` without the gateway's `middleware/auth.go`). This precedes PARITY-01 for these services: live data into a service that can't run is wasted. Reuses the risk-engine deploy manifests + the existing gateway/auth/quota middleware._
+
+- [ ] **SVCWIRE-01a** GitOps deploy for the undeployed services: add Argo Application entries + per-service Deployment/Service manifests for `wealth`, `datamaster`, `copilot`, `alternatives` (absent from `applicationset.yaml` today), following `risk-engine-rollout.yaml` · `kanz/infra/gitops/applicationset.yaml`, `kanz/infra/deploy/`
+- [ ] **SVCWIRE-01b** Gateway routes + edge auth for the new read surfaces: expose `wealth /v1/households/{id}`, `datamaster /v1/securities|/v1/prices|/v1/exceptions`, `copilot /v1/ask` through the api-gateway behind `middleware/auth.go` (populates the AUTH-01 `Principal` copilot requires) + the quota middleware · `kanz/services/api-gateway/internal/gateway/`
+- [ ] **SVCWIRE-01c** Gateway backend clients: forward to the new services over mTLS (the SEC-01b stance), alongside the existing `RiskQueryServiceClient` — per-service client + REST transcoding · `kanz/services/api-gateway/internal/`
+- [ ] **SVCWIRE-01d** Observability parity: rollout + availability-SLO + scaledobject manifests for the new services (mirror `risk-engine-rollout.yaml` / `availability.yaml` / `risk-engine-scaledobject.yaml`), and dashboard/alert entries off their existing `/metrics` · `kanz/infra/deploy/`
+- [ ] **SVCWIRE-01e** End-to-end contract test through the gateway: an authenticated request → each new service → authorized/grounded response, and a cross-tenant copilot probe denied at the edge; extends `gateway/contract_test.go` · `kanz/services/api-gateway/internal/gateway/`
+- [ ] **SVCWIRE-01f** CODEOWNERS + buf coverage for the new protos: add `/proto/wealth/` + `/proto/master/` CODEOWNERS entries (absent today) and confirm the buf lint/breaking gate covers them · `kanz-schemas/CODEOWNERS`, CI
 
 ### PARITY-01 — Live market / reference / ESG data integration (M1–M2)
 
@@ -149,8 +160,11 @@ _Objective: retire the `replace` directive with published, versioned SDKs. See t
 
 ## TODO
 
-_Active tranche — the M1 foundation + the zero-cost SDK-workflow authoring. Pull the next epic's subtasks here as these close._
+_Active tranche — operationalize the new services (SVCWIRE-01) first so they can run + be called, then the M1 data/state foundation + the zero-cost SDK-workflow authoring. Pull the next epic's subtasks here as these close._
 
+- [ ] **SVCWIRE-01a** GitOps deploy (Argo Application + manifests) for wealth/datamaster/copilot/alternatives · `kanz/infra/gitops/applicationset.yaml`, `kanz/infra/deploy/`
+- [ ] **SVCWIRE-01b** Gateway routes + edge auth for `/v1/households`, `/v1/securities`, `/v1/ask` · `kanz/services/api-gateway/internal/gateway/`
+- [ ] **SVCWIRE-01f** CODEOWNERS + buf coverage for `proto/wealth/` + `proto/master/` · `kanz-schemas/CODEOWNERS`
 - [ ] **PARITY-01a** Normalized feed-adapter contract + golden-session conformance harness · `kanz/services/market-data/internal/feed/`
 - [ ] **PARITY-01b** Bloomberg market-data adapter behind the seam · `cmd/market-data`
 - [ ] **PARITY-02a** Postgres IBOR ledger store (accounting) — journal + snapshot + bitemporal read · `kanz/services/accounting/internal/ledger/`
