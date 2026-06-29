@@ -1,0 +1,179 @@
+syntax = "proto3";
+
+// Package master.v1 is the golden-source data master schema (MASTER-01a) — the
+// trusted-data foundation every analytic silently assumes (ROI #41). A
+// SecurityMaster is the GOLDEN RECORD for one instrument: the single resolved
+// truth assembled across many VendorRecords (Bloomberg/Refinitiv/ICE) by
+// survivorship rules, with a cross-vendor identifier crosswalk (ISIN/CUSIP/FIGI).
+// A PriceCandidate is one source's price feeding multi-source arbitration; a
+// DataException is a detected data-quality break (a price tolerance/staleness
+// breach or an identifier conflict) carrying its human-override audit trail.
+//
+// # Money is Decimal, everything resolves to reference.v1
+//
+// Prices are money ⇒ common.v1.Decimal (the EVT-14 exact-money rule). The golden
+// record's classification fields reuse reference.v1's vocabulary
+// (InstrumentIdentifiers / AssetClass / SectorClassification) so a resolved
+// SecurityMaster normalizes onto reference.v1.InstrumentReference with no
+// translation — master.v1 is the resolution layer in front of reference.v1, not a
+// parallel one.
+package master.v1;
+
+import "google/protobuf/timestamp.proto";
+import "common/v1/decimal.proto";
+import "reference/v1/instrument.proto";
+
+// IdentifierScheme names a cross-vendor identifier scheme — the key the crosswalk
+// resolves to a canonical instrument_id (MASTER-01b).
+enum IdentifierScheme {
+  IDENTIFIER_SCHEME_UNSPECIFIED = 0;
+  IDENTIFIER_SCHEME_ISIN = 1;
+  IDENTIFIER_SCHEME_CUSIP = 2;
+  IDENTIFIER_SCHEME_SEDOL = 3;
+  IDENTIFIER_SCHEME_FIGI = 4;
+  IDENTIFIER_SCHEME_RIC = 5;
+}
+
+// VendorRecord is one vendor's view of an instrument — a CANDIDATE for the golden
+// record. The master resolves the surviving field values across all vendors'
+// records for an instrument by trust priority (then recency).
+message VendorRecord {
+  // vendor is the source feed ("BLOOMBERG", "REFINITIV", "ICE"). Required.
+  string vendor = 1;
+
+  // instrument_id is the canonical Kanz id this record resolves to (via the
+  // crosswalk). Required.
+  string instrument_id = 2;
+
+  // identifiers are the external identifiers this vendor reports. Required.
+  reference.v1.InstrumentIdentifiers identifiers = 3;
+
+  // asset_class / sector / currency_code / description are the classification
+  // fields survivorship resolves. Any may be unset (the next vendor fills it).
+  reference.v1.AssetClass asset_class = 4;
+  reference.v1.SectorClassification sector = 5;
+  string currency_code = 6;
+  string description = 7;
+
+  // as_of is the vendor record's effective time — point-in-time reads select
+  // records with as_of ≤ the query time, and recency breaks survivorship ties.
+  // Required.
+  google.protobuf.Timestamp as_of = 8;
+
+  // priority is the vendor's trust rank for survivorship: LOWER wins (0 = most
+  // trusted). A field is taken from the highest-trust vendor that reports it.
+  int32 priority = 9;
+}
+
+// SecurityMaster is the GOLDEN RECORD — the single resolved truth for one
+// instrument, assembled across vendor records, with field-level provenance.
+message SecurityMaster {
+  // instrument_id is the canonical id. Required.
+  string instrument_id = 1;
+
+  // identifiers is the merged cross-vendor crosswalk (the union of vendor
+  // identifiers, conflicts flagged as DataExceptions). Required.
+  reference.v1.InstrumentIdentifiers identifiers = 2;
+
+  // asset_class / sector / currency_code / description are the surviving values.
+  reference.v1.AssetClass asset_class = 3;
+  reference.v1.SectorClassification sector = 4;
+  string currency_code = 5;
+  string description = 6;
+
+  // as_of is the effective time of this resolved snapshot (the latest vendor
+  // as_of that fed it). Required.
+  google.protobuf.Timestamp as_of = 7;
+
+  // provenance maps a resolved field name ("currency_code", "sector", ...) to the
+  // vendor that won it — the audit of where each value came from.
+  map<string, string> provenance = 8;
+}
+
+// PriceCandidate is one source's price for an instrument — an input to
+// multi-source price arbitration (MASTER-01d).
+message PriceCandidate {
+  // instrument_id is the canonical id. Required.
+  string instrument_id = 1;
+
+  // source is the price source ("BLOOMBERG", "ICE", "COMPOSITE"). Required.
+  string source = 2;
+
+  // price is the source's price (money). Required.
+  common.v1.Decimal price = 3;
+
+  // currency_code is the ISO 4217 price currency. Required.
+  string currency_code = 4;
+
+  // as_of is the price timestamp — stale candidates (older than the freshness
+  // budget) are excluded from arbitration and raise a STALE_PRICE exception.
+  // Required.
+  google.protobuf.Timestamp as_of = 5;
+}
+
+// ExceptionKind classifies a data-quality break.
+enum ExceptionKind {
+  EXCEPTION_KIND_UNSPECIFIED = 0;
+  // A candidate price deviates from the consensus beyond tolerance.
+  EXCEPTION_KIND_PRICE_TOLERANCE = 1;
+  // No fresh price candidate within the staleness budget.
+  EXCEPTION_KIND_STALE_PRICE = 2;
+  // Vendors disagree on a crosswalk identifier (same scheme, different values).
+  EXCEPTION_KIND_IDENTIFIER_CONFLICT = 3;
+  // No price candidate at all for the instrument.
+  EXCEPTION_KIND_MISSING_PRICE = 4;
+}
+
+// ExceptionStatus tracks an exception through the oversight queue.
+enum ExceptionStatus {
+  EXCEPTION_STATUS_UNSPECIFIED = 0;
+  // OPEN: detected, awaiting review.
+  EXCEPTION_STATUS_OPEN = 1;
+  // OVERRIDDEN: a human chose a value/disposition (carries an Override).
+  EXCEPTION_STATUS_OVERRIDDEN = 2;
+  // RESOLVED: cleared (the underlying break no longer reproduces).
+  EXCEPTION_STATUS_RESOLVED = 3;
+}
+
+// Override is the audit record of a human override of an exception — who, why,
+// when, and (for a price break) the price they chose. Appended, never mutated:
+// the full override history is the audit trail.
+message Override {
+  // actor is the AUTH-01 principal who overrode. Required.
+  string actor = 1;
+
+  // reason is the human justification. Required.
+  string reason = 2;
+
+  // chosen_price is the price the actor selected (price exceptions only).
+  common.v1.Decimal chosen_price = 3;
+
+  // at is when the override was applied. Required.
+  google.protobuf.Timestamp at = 4;
+}
+
+// DataException is a detected data-quality break plus its override audit trail —
+// the unit of the pricing/valuation oversight queue (MASTER-01d).
+message DataException {
+  // exception_id is the canonical id. Required.
+  string exception_id = 1;
+
+  // kind classifies the break. Required.
+  ExceptionKind kind = 2;
+
+  // instrument_id is the affected instrument. Required.
+  string instrument_id = 3;
+
+  // detail is a human-readable description of the break. Required.
+  string detail = 4;
+
+  // status tracks the exception through the queue. Required.
+  ExceptionStatus status = 5;
+
+  // detected_at is when the break was first detected. Required.
+  google.protobuf.Timestamp detected_at = 6;
+
+  // overrides is the append-only override history (the audit trail). Empty while
+  // OPEN.
+  repeated Override overrides = 7;
+}
