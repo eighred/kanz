@@ -1,0 +1,168 @@
+syntax = "proto3";
+
+// Package wealth.v1 is the goals-based wealth & advisory schema (WEALTH-01a) —
+// model portfolios, household aggregation, risk profiling, and proposal
+// generation: Aladdin Wealth atop the institutional engine (ROI #40). Accounts
+// roll up into a Household (the unit advice is given at); a Goal states what the
+// household is investing FOR (a target by a horizon); a ModelPortfolio is the
+// target allocation for a risk profile; a Proposal is the minimal trade list that
+// moves a household's drifted book back onto its model.
+//
+// # Money is Decimal, weights/probabilities are double
+//
+// Target amounts and account values are money ⇒ common.v1.Decimal (the EVT-14
+// exact-money rule). Model weights, drift, and a goal's probability-of-success
+// are dimensionless derived statistics ⇒ double. Times are Timestamp.
+package wealth.v1;
+
+import "google/protobuf/timestamp.proto";
+import "common/v1/decimal.proto";
+
+// RiskProfile is the household's risk tolerance band — the dimension a
+// ModelPortfolio is keyed on (a profile maps to exactly one model, WEALTH-01d).
+enum RiskProfile {
+  RISK_PROFILE_UNSPECIFIED = 0;
+  RISK_PROFILE_CONSERVATIVE = 1;
+  RISK_PROFILE_MODERATE = 2;
+  RISK_PROFILE_BALANCED = 3;
+  RISK_PROFILE_GROWTH = 4;
+  RISK_PROFILE_AGGRESSIVE = 5;
+}
+
+// AccountType classifies an account for aggregation/tax treatment (the household
+// view spans them all; tax-lot handling is downstream).
+enum AccountType {
+  ACCOUNT_TYPE_UNSPECIFIED = 0;
+  ACCOUNT_TYPE_TAXABLE = 1;
+  ACCOUNT_TYPE_RETIREMENT = 2;
+  ACCOUNT_TYPE_TRUST = 3;
+}
+
+// Account is an investment account owned within a household — the leaf the
+// household-level exposure/risk view aggregates over (WEALTH-01b).
+message Account {
+  // account_id is the canonical id. Required.
+  string account_id = 1;
+
+  // household_id references the owning Household. Required.
+  string household_id = 2;
+
+  // owner is the account holder's display name. Optional.
+  string owner = 3;
+
+  // account_type classifies the account. Optional.
+  AccountType account_type = 4;
+
+  // currency_code is the ISO 4217 account currency. Required.
+  string currency_code = 5;
+}
+
+// Household groups the accounts advice is given at — the unit goals are set for
+// and exposure/risk is aggregated to (WEALTH-01b).
+message Household {
+  // household_id is the canonical id. Required.
+  string household_id = 1;
+
+  // name is the household's display name. Optional.
+  string name = 2;
+
+  // account_ids are the accounts that roll up to this household. Required.
+  repeated string account_ids = 3;
+
+  // risk_profile is the household's agreed risk tolerance — selects the model
+  // portfolio (WEALTH-01d). Required.
+  RiskProfile risk_profile = 4;
+
+  // currency_code is the ISO 4217 reporting currency the aggregate is struck in.
+  // Required.
+  string currency_code = 5;
+}
+
+// Goal is something a household is investing for — a target amount by a horizon,
+// with a priority that orders funding when capital is scarce. Goals-based
+// analytics (WEALTH-01c) score the probability the household reaches it.
+message Goal {
+  // goal_id is the canonical id. Required.
+  string goal_id = 1;
+
+  // household_id references the owning Household. Required.
+  string household_id = 2;
+
+  // name is the goal's display name (retirement, education, home). Required.
+  string name = 3;
+
+  // target_amount is the money the household needs at the horizon. Required.
+  common.v1.Decimal target_amount = 4;
+
+  // target_date is the horizon by which the target is needed. Required.
+  google.protobuf.Timestamp target_date = 5;
+
+  // priority orders funding across goals (1 = highest). Optional.
+  int32 priority = 6;
+
+  // currency_code is the ISO 4217 currency of target_amount. Required.
+  string currency_code = 7;
+}
+
+// ModelPortfolio is the target allocation for a risk profile — the book a
+// household of that profile should hold. A Proposal moves a drifted household
+// back onto its model (WEALTH-01d).
+message ModelPortfolio {
+  // model_id is the canonical id. Required.
+  string model_id = 1;
+
+  // name is the model's display name. Optional.
+  string name = 2;
+
+  // risk_profile is the profile this model serves (one model per profile).
+  // Required.
+  RiskProfile risk_profile = 3;
+
+  // target_weights maps instrument id to its target portfolio weight; the weights
+  // sum to 1. Dimensionless ⇒ double per EVT-14. Required.
+  map<string, double> target_weights = 4;
+}
+
+// ProposedTrade is one leg of a rebalancing Proposal — the same shape as
+// optimization.v1's trade (WEALTH-01d reuses the OPT-01 rebalance engine), here
+// scoped to a household moving back onto its model.
+message ProposedTrade {
+  // instrument_id is the instrument traded. Required.
+  string instrument_id = 1;
+
+  // side is BUY (1) / SELL (2); mirrors optimization.v1.TradeSide.
+  int32 side = 2;
+
+  // current_weight / target_weight are the pre/post model weights. Dimensionless
+  // ⇒ double.
+  double current_weight = 3;
+  double target_weight = 4;
+
+  // notional is |Δweight|·NAV (money). Required.
+  common.v1.Decimal notional = 5;
+}
+
+// Proposal is a rebalancing recommendation for a household: the model it should
+// track, the per-instrument drift from that model, and the minimal trade list to
+// get there. PROPOSED for advisor approval — never auto-executed (the AUTO-01
+// conservative stance). Produced by WEALTH-01d reusing the OPT-01 rebalance.
+message Proposal {
+  // proposal_id is the canonical id. Required.
+  string proposal_id = 1;
+
+  // household_id references the Household. Required.
+  string household_id = 2;
+
+  // model_id references the ModelPortfolio targeted. Required.
+  string model_id = 3;
+
+  // trades is the minimal trade list to reach the model within tolerance.
+  repeated ProposedTrade trades = 4;
+
+  // max_drift is the largest absolute per-instrument weight deviation from the
+  // model that triggered the proposal. Dimensionless ⇒ double.
+  double max_drift = 5;
+
+  // as_of is when the proposal was struck. Required.
+  google.protobuf.Timestamp as_of = 6;
+}
