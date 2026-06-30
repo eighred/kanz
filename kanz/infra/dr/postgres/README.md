@@ -1,14 +1,21 @@
 # DR-01b — Postgres PITR + cross-region replicas
 
-Disaster recovery for the two stateful databases:
+Disaster recovery for the stateful databases:
 
 | DB | Holds | Cluster |
 |---|---|---|
 | risk state (PERS-01) | portfolio positions, risk state | `kanz-risk` |
 | schema registry (EVT-16) | registered payload schemas | `kanz-registry` |
+| book-of-record (PARITY-02) | IBOR ledger journal+snapshots, alternatives fund journal, wealth household book, datamaster golden records + exception queue | `kanz-books` |
 
 (The market-data history and the audit log are append-only/WORM stores with
-their own retention; the *transactional* state that DR must restore is these two.)
+their own retention; the *transactional* state that DR must restore is these.)
+
+The `kanz-books` cluster hosts one database per service; each service's schema is
+defined by its `services/<svc>/migrations/*.sql` (applied in lexical order at
+deploy). The stores are event-sourced (ledger, fund) or replace-on-write
+projections (book, golden records) — the journal/blob is the source of truth, so
+the continuous-WAL + daily-base-backup PITR contract below applies unchanged.
 
 | File | Where | Purpose |
 |---|---|---|

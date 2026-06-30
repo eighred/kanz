@@ -65,3 +65,32 @@ spec:
           accessKeyId: { name: kanz-dr-s3, key: ACCESS_KEY_ID }
           secretAccessKey: { name: kanz-dr-s3, key: SECRET_ACCESS_KEY }
         wal: { compression: gzip }
+---
+# PARITY-02 durable book-of-record stores (accounting / alternatives / wealth /
+# datamaster) — warm standby replaying the kanz-books WAL.
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: kanz-books
+  namespace: kanz-data
+  labels: { app.kubernetes.io/part-of: kanz, app.kubernetes.io/component: dr }
+spec:
+  instances: 2
+  primaryUpdateStrategy: unsupervised
+  storage:
+    size: 50Gi
+  replica:
+    enabled: true
+    source: kanz-books-origin
+  bootstrap:
+    recovery:
+      source: kanz-books-origin
+  externalClusters:
+    - name: kanz-books-origin
+      barmanObjectStore:
+        serverName: kanz-books
+        destinationPath: s3://kanz-dr-backups/books
+        s3Credentials:
+          accessKeyId: { name: kanz-dr-s3, key: ACCESS_KEY_ID }
+          secretAccessKey: { name: kanz-dr-s3, key: SECRET_ACCESS_KEY }
+        wal: { compression: gzip }

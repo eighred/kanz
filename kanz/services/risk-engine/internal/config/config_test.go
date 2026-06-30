@@ -4,7 +4,26 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
+
+// parseDuration is the PARITY-02f deploy-time snapshot-cadence knob: a valid Go
+// duration tunes the cadence, anything else falls back to 0 (the snapshotter's
+// DefaultSnapshotInterval) — a bad env value must never crash the boot.
+func TestParseDuration(t *testing.T) {
+	cases := map[string]time.Duration{
+		"30s":     30 * time.Second,
+		"2m":      2 * time.Minute,
+		"":        0,
+		"garbage": 0,
+		"-5s":     -5 * time.Second,
+	}
+	for in, want := range cases {
+		if got := parseDuration(in); got != want {
+			t.Fatalf("parseDuration(%q) = %v, want %v", in, got, want)
+		}
+	}
+}
 
 // secret() is the SEC-01d seam that keeps the DSN out of plaintext env: a
 // CSI-mounted file must win over a plaintext env var, with a clean fall-back.

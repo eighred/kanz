@@ -1,0 +1,181 @@
+package store
+
+import (
+	"context"
+	"os"
+	"path/filepath"
+	"sort"
+	"testing"
+	"time"
+
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/kanz-eng/kanz/services/datamaster/internal/master"
+	"github.com/kanz-eng/kanz/services/datamaster/internal/pricing"
+)
+
+func sampleGolden() master.SecurityMaster {
+	return master.SecurityMaster{
+		InstrumentID: "INST-1",
+		Identifiers:  master.Identifiers{ISIN: "US0378331005"},
+		AssetClass:   "EQUITY",
+		CurrencyCode: "USD",
+		Description:  "Apple Inc.",
+		Provenance:   map[string]string{"asset_class": "bloomberg"},
+	}
+}
+
+func sampleException() pricing.Exception {
+	return pricing.Exception{
+		ID:           "INST-1:STALE_PRICE:vendorX",
+		Kind:         pricing.KindStalePrice,
+		InstrumentID: "INST-1",
+		Detail:       "candidate older than 24h",
+		Status:       pricing.StatusOpen,
+		DetectedAt:   time.Unix(1_700_000_000, 0).UTC(),
+	}
+}
+
+// runGoldenContract exercises a GoldenStore: replace-on-write + miss.
+func runGoldenContract(t *testing.T, ctx context.Context, gs GoldenStore) {
+	t.Helper()
+	if _, ok, err := gs.Get(ctx, "missing"); err != nil || ok {
+		t.Fatalf("get missing: ok=%v err=%v, want false/nil", ok, err)
+	}
+	rec := sampleGolden()
+	if err := gs.Put(ctx, rec); err != nil {
+		t.Fatalf("put: %v", err)
+	}
+	got, ok, err := gs.Get(ctx, "INST-1")
+	if err != nil || !ok {
+		t.Fatalf("get: ok=%v err=%v", ok, err)
+	}
+	if got.Description != rec.Description || got.Identifiers.ISIN != rec.Identifiers.ISIN {
+		t.Fatalf("round-trip mismatch: %+v", got)
+	}
+	// Replace-on-write.
+	rec.Description = "Apple Inc. (updated)"
+	if err := gs.Put(ctx, rec); err != nil {
+		t.Fatalf("replace: %v", err)
+	}
+	if got, _, _ := gs.Get(ctx, "INST-1"); got.Description != rec.Description {
+		t.Fatalf("replace not applied: %q", got.Description)
+	}
+}
+
+// runExceptionContract exercises an ExceptionStore: idempotent add, append-only
+// override, open-queue filtering.
+func runExceptionContract(t *testing.T, ctx context.Context, es ExceptionStore) {
+	t.Helper()
+	ex := sampleException()
+	if err := es.Add(ctx, ex); err != nil {
+		t.Fatalf("add: %v", err)
+	}
+	// Idempotent re-add keeps the entry (no error, no duplicate, state preserved).
+	if err := es.Add(ctx, ex); err != nil {
+		t.Fatalf("re-add: %v", err)
+	}
+	open, err := es.Open(ctx)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	if len(open) != 1 || open[0].ID != ex.ID {
+		t.Fatalf("open = %d entries, want 1 (%s)", len(open), ex.ID)
+	}
+
+	at := time.Unix(1_700_001_000, 0).UTC()
+	if err := es.Override(ctx, ex.ID, "ops@kanz", "vendor confirmed", 152.40, at); err != nil {
+		t.Fatalf("override: %v", err)
+	}
+	// Override requires actor + reason.
+	if err := es.Override(ctx, ex.ID, "", "", 1, at); err == nil {
+		t.Fatal("override without actor/reason should error")
+	}
+	// Unknown id errors.
+	if err := es.Override(ctx, "nope", "a", "r", 1, at); err == nil {
+		t.Fatal("override unknown id should error")
+	}
+
+	got, ok, err := es.Get(ctx, ex.ID)
+	if err != nil || !ok {
+		t.Fatalf("get after override: ok=%v err=%v", ok, err)
+	}
+	if got.Status != pricing.StatusOverridden {
+		t.Fatalf("status = %s, want OVERRIDDEN", got.Status)
+	}
+	if len(got.Overrides) != 1 || got.Overrides[0].Actor != "ops@kanz" {
+		t.Fatalf("override trail = %+v", got.Overrides)
+	}
+	// An OVERRIDDEN entry leaves the open queue.
+	if open, _ := es.Open(ctx); len(open) != 0 {
+		t.Fatalf("open after override = %d, want 0", len(open))
+	}
+}
+
+func TestMemoryGoldenStore(t *testing.T) {
+	runGoldenContract(t, context.Background(), NewMemoryGoldenStore())
+}
+
+func TestQueueStore(t *testing.T) {
+	runExceptionContract(t, context.Background(), NewQueueStore(nil))
+}
+
+// --- Postgres (DB-gated, mirrors the risk-engine persist tests) -----------
+
+const migrationDir = "../../migrations"
+
+func newPool(t *testing.T) *pgxpool.Pool {
+	t.Helper()
+	url := os.Getenv("TEST_POSTGRES_URL")
+	if url == "" {
+		t.Skip("set TEST_POSTGRES_URL to run datamaster store Postgres integration tests")
+	}
+	cfg, err := pgxpool.ParseConfig(url)
+	if err != nil {
+		t.Fatalf("parse config: %v", err)
+	}
+	cfg.AfterConnect = func(ctx context.Context, conn *pgx.Conn) error {
+		_, err := conn.Exec(ctx, "SELECT set_config('app.tenant_id', $1, false)", "__system__")
+		return err
+	}
+	pool, err := pgxpool.NewWithConfig(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	t.Cleanup(pool.Close)
+	applySchema(t, pool)
+	return pool
+}
+
+func applySchema(t *testing.T, pool *pgxpool.Pool) {
+	t.Helper()
+	ctx := context.Background()
+	if _, err := pool.Exec(ctx, `DROP TABLE IF EXISTS exception_overrides, exceptions, golden_records CASCADE`); err != nil {
+		t.Fatalf("drop: %v", err)
+	}
+	files, err := filepath.Glob(filepath.Join(migrationDir, "*.sql"))
+	if err != nil || len(files) == 0 {
+		t.Fatalf("glob migrations %s: %v (found %d)", migrationDir, err, len(files))
+	}
+	sort.Strings(files)
+	for _, f := range files {
+		ddl, err := os.ReadFile(f)
+		if err != nil {
+			t.Fatalf("read migration %s: %v", f, err)
+		}
+		if _, err := pool.Exec(ctx, string(ddl)); err != nil {
+			t.Fatalf("apply migration %s: %v", f, err)
+		}
+	}
+}
+
+func TestPostgresGoldenStore(t *testing.T) {
+	pool := newPool(t)
+	runGoldenContract(t, context.Background(), NewPostgresGolden(pool))
+}
+
+func TestPostgresExceptionStore(t *testing.T) {
+	pool := newPool(t)
+	runExceptionContract(t, context.Background(), NewPostgresExceptions(pool))
+}

@@ -4,6 +4,7 @@ import (
 	"log/slog"
 	"os"
 	"strings"
+	"time"
 )
 
 // Config is the risk-engine runtime configuration. Sourced from the
@@ -30,6 +31,11 @@ type Config struct {
 	// state is in-memory only: no bootstrap restore, no periodic snapshot,
 	// re-baselines from the live spine on restart.
 	DatabaseURL string
+	// SnapshotInterval tunes the periodic durable-snapshot cadence (PARITY-02f):
+	// shorter shrinks restart-to-ready replay at the cost of more SQL write
+	// volume, longer suits quiet books. A deploy-time knob so cadence tuning
+	// needs no rebuild. Zero (unset/unparseable) ⇒ engine.DefaultSnapshotInterval.
+	SnapshotInterval time.Duration
 	// KafkaBrokers is the durable-log bootstrap list (EVT-09) used by the
 	// PERS-01d bootstrap replay. Empty ⇒ replay is skipped; the engine
 	// restores from the latest durable snapshot and relies on the live NATS
@@ -52,16 +58,17 @@ type Config struct {
 
 func Load() (Config, error) {
 	return Config{
-		Listen:       envOr("RISK_ENGINE_LISTEN", ":8081"),
-		LogLevel:     parseLevel(envOr("RISK_ENGINE_LOG_LEVEL", "info")),
-		NATSURL:      os.Getenv("RISK_ENGINE_NATS_URL"),
-		Source:       envOr("RISK_ENGINE_SOURCE", "risk-engine"),
-		Tenant:       envOr("RISK_ENGINE_TENANT", "__system__"),
-		DatabaseURL:  secret("RISK_ENGINE_DATABASE_URL"),
-		KafkaBrokers: splitList(os.Getenv("RISK_ENGINE_KAFKA_BROKERS")),
-		OTLPEndpoint: os.Getenv("RISK_ENGINE_OTLP_ENDPOINT"),
-		GRPCListen:   os.Getenv("RISK_ENGINE_GRPC_LISTEN"),
-		SPIFFESocket: os.Getenv("RISK_ENGINE_SPIFFE_SOCKET"),
+		Listen:           envOr("RISK_ENGINE_LISTEN", ":8081"),
+		LogLevel:         parseLevel(envOr("RISK_ENGINE_LOG_LEVEL", "info")),
+		NATSURL:          os.Getenv("RISK_ENGINE_NATS_URL"),
+		Source:           envOr("RISK_ENGINE_SOURCE", "risk-engine"),
+		Tenant:           envOr("RISK_ENGINE_TENANT", "__system__"),
+		DatabaseURL:      secret("RISK_ENGINE_DATABASE_URL"),
+		SnapshotInterval: parseDuration(os.Getenv("RISK_ENGINE_SNAPSHOT_INTERVAL")),
+		KafkaBrokers:     splitList(os.Getenv("RISK_ENGINE_KAFKA_BROKERS")),
+		OTLPEndpoint:     os.Getenv("RISK_ENGINE_OTLP_ENDPOINT"),
+		GRPCListen:       os.Getenv("RISK_ENGINE_GRPC_LISTEN"),
+		SPIFFESocket:     os.Getenv("RISK_ENGINE_SPIFFE_SOCKET"),
 	}, nil
 }
 
@@ -89,6 +96,19 @@ func secret(k string) string {
 		}
 	}
 	return os.Getenv(k)
+}
+
+// parseDuration parses a Go duration (e.g. "30s", "2m"); an empty or malformed
+// value yields 0, which the snapshotter maps to engine.DefaultSnapshotInterval.
+func parseDuration(s string) time.Duration {
+	if s == "" {
+		return 0
+	}
+	d, err := time.ParseDuration(s)
+	if err != nil {
+		return 0
+	}
+	return d
 }
 
 func envOr(k, def string) string {

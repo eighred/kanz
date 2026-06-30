@@ -176,7 +176,7 @@ func runEngine(ctx context.Context, cfg config.Config, readiness *server.Readine
 			return err
 		}
 
-		snap := engine.NewSnapshotter(store, sink, nil, 0, logger)
+		snap := engine.NewSnapshotter(store, sink, nil, cfg.SnapshotInterval, logger)
 		go func() { _ = snap.Run(ctx) }()
 		a.Checkpoint = snap.Checkpoint
 	}
