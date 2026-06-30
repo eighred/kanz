@@ -40,6 +40,18 @@
 
 ---
 
+## Command: `/continue` — Advance the active task
+
+Trigger: the user types `/continue` (aliases: "continue", "continue from current IN PROGRESS task", "keep going", or the standing directive _"Read CLAUDE.md, KANZ_TASKS.md and KANZ_BRAIN.md. Continue from current IN PROGRESS task. Update BRAIN.md if new architectural decisions are made."_). This is the default standing directive — assume it whenever the user says "continue" without further detail.
+
+1. **Ground truth.** Read `KANZ_TASKS.md` (IN PROGRESS, TODO active tranche, the `PATH TO PARITY` roadmap, carried-forward notes) and `KANZ_BRAIN.md` (Key Decisions, Assumptions/anti-decisions). These files are large — read targeted sections (the IN PROGRESS status entry, the active epic, the relevant carried-forward note), not the whole file.
+2. **Pick the next task.** Continue the in-flight subtask if one is unfinished; otherwise take the highest-leverage next subtask of the active epic (the board's recommended-first / dependency-gated pull). Inspect the **actual code** for the seam/stub/store it names before writing — close a real gap, never a guessed one.
+3. **Implement to the acceptance bar.** Smallest correct diff that reuses the cited existing pattern (no parallel re-implementation, no dependency bloat, no speculative abstraction). Tests in board convention; `go build/vet/gofmt` clean; arch boundary test unchanged; the relevant carried-forward note retired when the seam is filled.
+4. **Maintain the board + brain.** Check off the subtask in `KANZ_TASKS.md` (TODO + the epic), update the IN PROGRESS status entry, and add a one-line `KANZ_BRAIN.md` Key-Decision bullet **only when a genuine architectural decision was made** (not for routine wiring). Refill TODO from the roadmap when it drains; mark the epic complete when its last subtask lands.
+5. **Summarize concisely** what was done and recommend the single next task.
+
+---
+
 ## Command: `/forge-tasks` — Continuous Improvement Backlog
 
 Trigger: the user types `/forge-tasks` (aliases: "generate next tasks", "forge the next tranche", "what's next"). On trigger, produce the next tranche of tasks that genuinely move this system toward production / Aladdin-class parity, then update `KANZ_TASKS.md`. Run it repeatedly — each invocation extends or refills the backlog.
