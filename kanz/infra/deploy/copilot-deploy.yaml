@@ -1,0 +1,103 @@
+---
+# SVCWIRE-01a — deployable workload for the copilot (AI-analytics) service. A
+# stateless HTTP surface on :8080 (POST /v1/ask). It boots safely on its defaults:
+# the dependency-free StubModel (the real anthropic-sdk-go client wires at the
+# composition root, PARITY-04a) and — with no COPILOT_POLICY_PATH — a fail-closed
+# deny-all authorizer, so an un-provisioned copilot can never serve data. The
+# AUTH-01 Principal it requires is populated by the gateway edge-auth on the way
+# in (SVCWIRE-01b); a direct call without it is rejected. COPILOT_MODEL_ID is the
+# version knob — the seam is version-agnostic, so a deployment switches Claude
+# versions here without a rebuild (default = the MAX/most-capable claude-fable-5).
+# Same SEC-02a hardening + SEC-01a SPIFFE SVID as the other read services.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: copilot
+  namespace: kanz-services
+  labels:
+    app.kubernetes.io/part-of: kanz
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: copilot
+  namespace: kanz-services
+  labels:
+    app.kubernetes.io/part-of: kanz
+spec:
+  selector:
+    app: copilot
+  ports:
+    - { name: http, port: 8080, targetPort: 8080 }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: copilot
+  namespace: kanz-services
+  labels:
+    app.kubernetes.io/part-of: kanz
+spec:
+  replicas: 2
+  revisionHistoryLimit: 5
+  selector:
+    matchLabels:
+      app: copilot
+  template:
+    metadata:
+      labels:
+        app: copilot
+        app.kubernetes.io/part-of: kanz
+    spec:
+      serviceAccountName: copilot
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app: copilot
+      containers:
+        - name: copilot
+          image: ghcr.io/kanz-eng/copilot:latest
+          ports:
+            - { containerPort: 8080, name: http }
+          env:
+            - { name: COPILOT_LISTEN, value: ":8080" }
+            # The version knob — seam is version-agnostic, switch without a rebuild.
+            - { name: COPILOT_MODEL_ID, value: "claude-fable-5" }
+            # No COPILOT_POLICY_PATH ⇒ fail-closed deny-all until the AUTH-01b
+            # policy bundle is mounted; the Claude API key + governed mTLS client
+            # wire at the composition root (PARITY-04a/b).
+            - { name: SPIFFE_ENDPOINT_SOCKET, value: "unix:///run/spiffe/spire-agent.sock" }
+          livenessProbe:
+            httpGet: { path: /healthz, port: 8080 }
+            initialDelaySeconds: 5
+            periodSeconds: 15
+          readinessProbe:
+            httpGet: { path: /readyz, port: 8080 }
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - { name: spiffe, mountPath: /run/spiffe, readOnly: true }
+            - { name: tmp, mountPath: /tmp }
+      volumes:
+        - name: tmp
+          emptyDir: {}
+        - name: spiffe
+          csi:
+            driver: csi.spiffe.io
+            readOnly: true

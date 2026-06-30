@@ -1,0 +1,156 @@
+---
+# SVCWIRE-01d — availability + autoscaling for the Phase-7 read services
+# (wealth / datamaster / copilot / alternatives). These differ from risk-engine:
+# they are STATELESS HTTP surfaces (a plain Deployment, not a canary Rollout) and
+# they do NOT consume the bus, so the OBS-01c `kanz_bus_pending_messages`
+# backpressure signal does not apply. They scale on CPU utilization (KEDA's cpu
+# trigger over the HPA), and a PodDisruptionBudget keeps ≥1 replica up through a
+# voluntary drain (the INFRA-01d discipline, sized to the deploy replicas:2).
+# Auto-synced by the GitOps `workloads` ApplicationSet (it recurses infra/deploy).
+#
+# ResourceQuota/LimitRange + the namespace governance live in availability.yaml;
+# this file adds only the per-Phase-7-service PDB + ScaledObject pairs.
+
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: wealth
+  namespace: kanz-services
+  labels: { app.kubernetes.io/part-of: kanz }
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels: { app: wealth }
+---
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: wealth
+  namespace: kanz-services
+  labels: { app.kubernetes.io/part-of: kanz }
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: wealth
+  minReplicaCount: 2          # matches the deploy floor + the PDB
+  maxReplicaCount: 8
+  cooldownPeriod: 120
+  advanced:
+    restoreToOriginalReplicaCount: true
+    horizontalPodAutoscalerConfig:
+      behavior:
+        scaleDown:
+          stabilizationWindowSeconds: 300   # shed slowly, avoid thrashing
+  triggers:
+    - type: cpu
+      metricType: Utilization
+      metadata: { value: "70" }
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: datamaster
+  namespace: kanz-services
+  labels: { app.kubernetes.io/part-of: kanz }
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels: { app: datamaster }
+---
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: datamaster
+  namespace: kanz-services
+  labels: { app.kubernetes.io/part-of: kanz }
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: datamaster
+  minReplicaCount: 2
+  maxReplicaCount: 8
+  cooldownPeriod: 120
+  advanced:
+    restoreToOriginalReplicaCount: true
+    horizontalPodAutoscalerConfig:
+      behavior:
+        scaleDown:
+          stabilizationWindowSeconds: 300
+  triggers:
+    - type: cpu
+      metricType: Utilization
+      metadata: { value: "70" }
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: copilot
+  namespace: kanz-services
+  labels: { app.kubernetes.io/part-of: kanz }
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels: { app: copilot }
+---
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: copilot
+  namespace: kanz-services
+  labels: { app.kubernetes.io/part-of: kanz }
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: copilot
+  minReplicaCount: 2
+  maxReplicaCount: 8
+  cooldownPeriod: 180         # copilot turns are longer-running; cool down slower
+  advanced:
+    restoreToOriginalReplicaCount: true
+    horizontalPodAutoscalerConfig:
+      behavior:
+        scaleDown:
+          stabilizationWindowSeconds: 300
+  triggers:
+    - type: cpu
+      metricType: Utilization
+      metadata: { value: "70" }
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: alternatives
+  namespace: kanz-services
+  labels: { app.kubernetes.io/part-of: kanz }
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels: { app: alternatives }
+---
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: alternatives
+  namespace: kanz-services
+  labels: { app.kubernetes.io/part-of: kanz }
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: alternatives
+  minReplicaCount: 2
+  maxReplicaCount: 8
+  cooldownPeriod: 120
+  advanced:
+    restoreToOriginalReplicaCount: true
+    horizontalPodAutoscalerConfig:
+      behavior:
+        scaleDown:
+          stabilizationWindowSeconds: 300
+  triggers:
+    - type: cpu
+      metricType: Utilization
+      metadata: { value: "70" }

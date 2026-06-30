@@ -1,0 +1,99 @@
+---
+# SVCWIRE-01a — deployable workload for the wealth (advisory) service. Unlike
+# risk-engine (a NATS consumer + gRPC query service, hence a canary Rollout), the
+# Phase-7 read services are stateless HTTP surfaces on :8080 that boot on their
+# in-memory/Stub defaults (no broker, no DB) — so a plain Deployment is the right
+# shape here. The progressive-delivery Rollout + PDB + KEDA scaling come in
+# SVCWIRE-01d. The pod keeps the SEC-02a hardening + the SEC-01a SPIFFE SVID
+# (the gateway reaches it over mTLS, SVCWIRE-01c) from risk-engine-rollout.yaml,
+# dropping only the DB CSI volume + broker env this service doesn't use.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: wealth
+  namespace: kanz-services
+  labels:
+    app.kubernetes.io/part-of: kanz
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: wealth
+  namespace: kanz-services
+  labels:
+    app.kubernetes.io/part-of: kanz
+spec:
+  selector:
+    app: wealth
+  ports:
+    - { name: http, port: 8080, targetPort: 8080 }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: wealth
+  namespace: kanz-services
+  labels:
+    app.kubernetes.io/part-of: kanz
+spec:
+  replicas: 2
+  revisionHistoryLimit: 5
+  selector:
+    matchLabels:
+      app: wealth
+  template:
+    metadata:
+      labels:
+        app: wealth
+        app.kubernetes.io/part-of: kanz
+    spec:
+      serviceAccountName: wealth
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      # INFRA-01d: spread replicas across AZs so a single-AZ loss leaves the
+      # survivors serving.
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app: wealth
+      containers:
+        - name: wealth
+          # Pinned to a cosign-signed digest by the GitOps bump (CICD-01d).
+          image: ghcr.io/kanz-eng/wealth:latest
+          ports:
+            - { containerPort: 8080, name: http }
+          env:
+            - { name: WEALTH_LISTEN, value: ":8080" }
+            - { name: SPIFFE_ENDPOINT_SOCKET, value: "unix:///run/spiffe/spire-agent.sock" }
+          livenessProbe:
+            httpGet: { path: /healthz, port: 8080 }
+            initialDelaySeconds: 5
+            periodSeconds: 15
+          readinessProbe:
+            httpGet: { path: /readyz, port: 8080 }
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - { name: spiffe, mountPath: /run/spiffe, readOnly: true }
+            - { name: tmp, mountPath: /tmp }
+      volumes:
+        - name: tmp
+          emptyDir: {}
+        - name: spiffe
+          csi:
+            driver: csi.spiffe.io
+            readOnly: true

@@ -1,0 +1,93 @@
+---
+# SVCWIRE-01a — deployable workload for the datamaster (golden-source) service.
+# A stateless HTTP read surface on :8080 that boots on its SimFeed + in-memory
+# golden-record/exception stores (no broker, no DB). Same shape + SEC-02a
+# hardening + SEC-01a SPIFFE SVID as wealth-deploy.yaml; the Rollout/PDB/KEDA
+# come in SVCWIRE-01d.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: datamaster
+  namespace: kanz-services
+  labels:
+    app.kubernetes.io/part-of: kanz
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: datamaster
+  namespace: kanz-services
+  labels:
+    app.kubernetes.io/part-of: kanz
+spec:
+  selector:
+    app: datamaster
+  ports:
+    - { name: http, port: 8080, targetPort: 8080 }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: datamaster
+  namespace: kanz-services
+  labels:
+    app.kubernetes.io/part-of: kanz
+spec:
+  replicas: 2
+  revisionHistoryLimit: 5
+  selector:
+    matchLabels:
+      app: datamaster
+  template:
+    metadata:
+      labels:
+        app: datamaster
+        app.kubernetes.io/part-of: kanz
+    spec:
+      serviceAccountName: datamaster
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app: datamaster
+      containers:
+        - name: datamaster
+          image: ghcr.io/kanz-eng/datamaster:latest
+          ports:
+            - { containerPort: 8080, name: http }
+          env:
+            - { name: DATAMASTER_LISTEN, value: ":8080" }
+            - { name: SPIFFE_ENDPOINT_SOCKET, value: "unix:///run/spiffe/spire-agent.sock" }
+          livenessProbe:
+            httpGet: { path: /healthz, port: 8080 }
+            initialDelaySeconds: 5
+            periodSeconds: 15
+          readinessProbe:
+            httpGet: { path: /readyz, port: 8080 }
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - { name: spiffe, mountPath: /run/spiffe, readOnly: true }
+            - { name: tmp, mountPath: /tmp }
+      volumes:
+        - name: tmp
+          emptyDir: {}
+        - name: spiffe
+          csi:
+            driver: csi.spiffe.io
+            readOnly: true

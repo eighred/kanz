@@ -63,6 +63,14 @@ type Config struct {
 	// NATSURL is the spine the order write surface (OMS-01d) publishes commands
 	// to. Empty ⇒ the gateway is read-only (POST /v1/orders 503s).
 	NATSURL string
+
+	// WealthAddr / DataMasterAddr / CopilotAddr are the upstream base URLs of the
+	// Phase-7 read services (SVCWIRE-01c), e.g.
+	// "https://wealth.kanz-services:8080". Each empty ⇒ that surface 503s. The
+	// gateway reaches them over the same SPIFFESocket mTLS as the risk-engine.
+	WealthAddr     string
+	DataMasterAddr string
+	CopilotAddr    string
 }
 
 func Load() (Config, error) {
@@ -86,6 +94,9 @@ func Load() (Config, error) {
 		QuotasFile:      os.Getenv("API_GATEWAY_QUOTAS_FILE"),
 		SigningSecret:   secret("API_GATEWAY_SIGNING_SECRET"),
 		NATSURL:         os.Getenv("API_GATEWAY_NATS_URL"),
+		WealthAddr:      os.Getenv("API_GATEWAY_WEALTH_ADDR"),
+		DataMasterAddr:  os.Getenv("API_GATEWAY_DATAMASTER_ADDR"),
+		CopilotAddr:     os.Getenv("API_GATEWAY_COPILOT_ADDR"),
 	}, nil
 }
 

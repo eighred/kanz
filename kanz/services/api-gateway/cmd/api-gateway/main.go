@@ -31,6 +31,7 @@ import (
 	"github.com/kanz-eng/kanz/services/api-gateway/internal/gateway"
 	"github.com/kanz-eng/kanz/services/api-gateway/internal/middleware"
 	"github.com/kanz-eng/kanz/services/api-gateway/internal/orders"
+	"github.com/kanz-eng/kanz/services/api-gateway/internal/proxy"
 )
 
 func main() {
@@ -82,10 +83,15 @@ func main() {
 	}
 	defer closeBus()
 
+	// Phase-7 read surfaces (SVCWIRE-01b/c): wealth/datamaster/copilot routes
+	// behind the same edge chain, forwarded over the SEC-01b mTLS mesh. With no
+	// upstream addresses configured the backend is nil and the routes 503.
+	proxyHandler := buildProxy(ctx, cfg, logger)
+
 	var ready atomic.Bool
 	srv := &http.Server{
 		Addr:              cfg.Listen,
-		Handler:           buildRouter(cfg, handler, ordersHandler, obs, &ready, logger),
+		Handler:           buildRouter(cfg, handler, ordersHandler, proxyHandler, obs, &ready, logger),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
@@ -133,12 +139,52 @@ func buildOrders(ctx context.Context, cfg config.Config, logger *slog.Logger) (*
 	return orders.New(producer), func() { _ = client.Close() }, nil
 }
 
+// buildProxy wires the Phase-7 read surfaces (SVCWIRE-01c). It collects the
+// configured upstream base URLs and builds a mesh backend over an mTLS HTTP
+// client (SEC-01b) when a SPIFFE socket is set, plaintext for local/dev. With no
+// upstreams configured it returns a nil-backed handler whose routes 503 — the
+// same disabled-surface shape as the order write surface.
+func buildProxy(ctx context.Context, cfg config.Config, logger *slog.Logger) *proxy.Handler {
+	bases := map[proxy.Service]string{}
+	if cfg.WealthAddr != "" {
+		bases[proxy.ServiceWealth] = cfg.WealthAddr
+	}
+	if cfg.DataMasterAddr != "" {
+		bases[proxy.ServiceDataMaster] = cfg.DataMasterAddr
+	}
+	if cfg.CopilotAddr != "" {
+		bases[proxy.ServiceCopilot] = cfg.CopilotAddr
+	}
+	if len(bases) == 0 {
+		logger.Warn("api-gateway: Phase-7 read surfaces disabled (no upstream addresses)")
+		return proxy.New(nil)
+	}
+
+	client := http.DefaultClient
+	if cfg.SPIFFESocket != "" {
+		src, err := transport.NewSource(ctx, cfg.SPIFFESocket)
+		if err != nil {
+			logger.Error("api-gateway: proxy SPIFFE source failed", "err", err)
+			os.Exit(1)
+		}
+		client = &http.Client{
+			Transport: &http.Transport{TLSClientConfig: transport.ClientTLSConfig(src, transport.AuthorizeMesh())},
+			Timeout:   30 * time.Second,
+		}
+		logger.Info("api-gateway: Phase-7 upstreams mTLS enabled", "services", len(bases))
+	} else {
+		logger.Warn("api-gateway: Phase-7 upstreams plaintext (no API_GATEWAY_SPIFFE_SOCKET)")
+	}
+	return proxy.New(proxy.NewMeshBackend(bases, client))
+}
+
 // buildRouter wires the public probes/metrics/openapi (un-gated) and the /v1
-// risk + order routes behind the edge middleware chain.
-func buildRouter(cfg config.Config, h *gateway.Handler, o *orders.Handler, obs *observability.Provider, ready *atomic.Bool, logger *slog.Logger) http.Handler {
+// risk + order + Phase-7 read routes behind the edge middleware chain.
+func buildRouter(cfg config.Config, h *gateway.Handler, o *orders.Handler, p *proxy.Handler, obs *observability.Provider, ready *atomic.Bool, logger *slog.Logger) http.Handler {
 	gwMux := http.NewServeMux()
 	h.Routes(gwMux)
 	o.Routes(gwMux)
+	p.Routes(gwMux)
 
 	var authn middleware.Authenticator
 	switch {

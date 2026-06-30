@@ -59,6 +59,23 @@ kubectl argo rollouts undo    risk-engine -n kanz-services   # roll back to prio
 - Add a bus consumer-lag analysis metric (OBS-01c) so a canary that silently
   stops consuming also aborts, not just one that errors/slows.
 
+## Phase-7 read services (SVCWIRE-01a)
+
+`wealth-deploy.yaml`, `datamaster-deploy.yaml`, `alternatives-deploy.yaml`, and
+`copilot-deploy.yaml` make the Phase-7 services deployable. They are stateless
+**HTTP read surfaces on :8080** that boot on their in-memory/Stub defaults (no
+broker, no DB), so they ship as plain `Deployment`s — not the risk-engine canary
+`Rollout` — keeping the SEC-02a hardening + the SEC-01a SPIFFE SVID (the gateway
+reaches them over mTLS, SVCWIRE-01c) and dropping the DB CSI volume + broker env
+they don't use. The `workloads` ApplicationSet component recurses this directory,
+so adding the file *is* the GitOps registration — no per-service Argo Application.
+
+copilot boots safely closed: with no `COPILOT_POLICY_PATH` its authorizer denies
+all, and `COPILOT_MODEL_ID` is the version knob (default `claude-fable-5`); the
+real Claude client + governed mTLS client wire at the composition root
+(PARITY-04a/b). The progressive-delivery `Rollout` + PDB + KEDA for these
+services come in SVCWIRE-01d; edge auth + routes in SVCWIRE-01b.
+
 ## Autoscaling + availability (INFRA-01c/d)
 
 The same directory carries the risk-engine resilience layer (GitOps-synced):
