@@ -20,6 +20,8 @@ on:
       - 'kanz-schemas/proto/**'
       - 'kanz-schemas/buf.yaml'
       - 'kanz-schemas/buf.gen.yaml'
+      # sdk-guard: a committed generated tree must trigger the run that rejects it.
+      - 'kanz-schemas/gen/**'
       - '.github/workflows/kanz-ci.yml'
   push:
     branches: [main]
@@ -169,6 +171,35 @@ jobs:
           npm pkg set dependencies.@kanz-eng/kanz-schemas="file:../../../kanz-schemas/gen/ts"
           npm install
           npm test
+
+  # DEBT-01d SDK-hygiene guard (PARITY-07a). First check is always-on: the SDKs
+  # are generated and published, never committed (EVT-15a), so any tracked
+  # generated file fails CI. Second check is DORMANT until the published SDK
+  # exists (PARITY-07b/c): setting the repo variable KANZ_SDK_PUBLISHED=true
+  # (done in PARITY-07d, when the `replace` directives are deleted) arms it, and
+  # from then on any surviving local kanz-schemas replace fails CI so the module
+  # stays pinned to published releases.
+  sdk-guard:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: No committed generated SDK files
+        run: |
+          set -euo pipefail
+          tracked=$(git ls-files -- 'kanz-schemas/gen' '*.pb.go' '*_pb2.py' '*_pb2_grpc.py' '*_pb2.pyi' '*_pb.js' '*_pb.d.ts')
+          if [ -n "$tracked" ]; then
+            printf '::error::generated SDK files are committed (EVT-15a: generated code is published, never committed):\n%s\n' "$tracked"
+            exit 1
+          fi
+      - name: No local replace once the SDK is published
+        if: vars.KANZ_SDK_PUBLISHED == 'true'
+        run: |
+          set -euo pipefail
+          # Catches single-line and block-form replace directives.
+          if grep -En '=>.*kanz-schemas' kanz/go.mod; then
+            echo '::error file=kanz/go.mod::local kanz-schemas replace survives after SDK publication — pin the published kanz-schemas-go (DEBT-01c)'
+            exit 1
+          fi
 
   buf-breaking:
     runs-on: ubuntu-latest
