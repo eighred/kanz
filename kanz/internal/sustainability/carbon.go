@@ -58,6 +58,10 @@ type Holding struct {
 	MarketValue  float64
 	ESG          ESGScore
 	Carbon       CarbonMetrics
+	// Sector is the issuer's industry classification key ("TAXONOMY:CODE",
+	// the factor.Sector.Key convention) — the PARITY-03f physical-hazard-map
+	// dimension. "" ⇒ unclassified (flat baseline hazard).
+	Sector string
 }
 
 // WeightedAverageESG is the market-value-weighted ESG score across holdings —
