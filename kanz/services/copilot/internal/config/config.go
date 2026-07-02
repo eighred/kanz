@@ -29,6 +29,12 @@ type Config struct {
 	// service boots with a deny-all default authorizer.
 	PolicyPath string
 
+	// LineageAddr is the LIN-01 lineage service base URL for citation resolution
+	// (PARITY-04b). Empty ⇒ the dependency-free IdentityCatalog (node == event
+	// id); set ⇒ the LineageCatalog resolves each source event to its governed
+	// dataset node over the mesh.
+	LineageAddr string
+
 	// OTLPEndpoint is the OTel collector for span export (OBS-01). Empty ⇒ none.
 	OTLPEndpoint string
 }
@@ -41,6 +47,7 @@ func Load() (Config, error) {
 		LogLevel:     parseLevel(os.Getenv("COPILOT_LOG_LEVEL")),
 		ModelID:      envOr("COPILOT_MODEL_ID", llm.DefaultModelID),
 		PolicyPath:   os.Getenv("COPILOT_POLICY_PATH"),
+		LineageAddr:  os.Getenv("COPILOT_LINEAGE_ADDR"),
 		OTLPEndpoint: os.Getenv("COPILOT_OTLP_ENDPOINT"),
 	}, nil
 }

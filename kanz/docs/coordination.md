@@ -21,8 +21,8 @@ still the thing that makes a duplicate harmless.
 
 | Component | Default (best-effort) | Shared-state mode (strong) | Seam |
 |---|---|---|---|
-| Bus dedup | `DedupWindow` (per-instance window) | `RedisDedup` (cross-pod seen-set) | `bus.WithDeduper` (DEBT-02a) |
-| DATA-05 reconciler | in-memory `PendingStore` | shared `PendingStore` (e.g. Redis) | `integrity.NewReconcilerWithStore` (DEBT-02b) |
+| Bus dedup | `DedupWindow` (per-instance window) | `RedisDedup` (cross-pod seen-set) | `bus.WithDeduper` (DEBT-02a); go-redis binding `redisadapter.New` (PARITY-04h) |
+| DATA-05 reconciler | in-memory `PendingStore` | `integrity.RedisPendingStore` (Lua-atomic, PARITY-04h) | `integrity.NewReconcilerWithStore` + `NewRedisPendingStore` (DEBT-02b) |
 | PRED-09 model registry | process-local `Registry` | `CoordinatedRegistry` over `platform.model` | `registry.CoordinatedRegistry` (DEBT-02b) |
 | Gap / staleness / watermark / drift detectors | per-process, per-partition | — (rely on per-partition ordering) | n/a |
 
@@ -76,9 +76,20 @@ r := integrity.NewReconcilerWithStore(sharedStore, integrity.DefaultMatchDeadlin
 
 `PendingStore.ClaimOrMatch` **must be atomic per key** — it's a single
 check-set-or-delete, and a non-atomic distributed impl would let two replicas
-both record Pending and never match. A Redis-backed store realizes it as one
-atomic Lua script (read entry → set, or delete + return match). `SweepExpired` /
-`Count` have no atomicity constraint.
+both record Pending and never match. `integrity.RedisPendingStore` (PARITY-04h)
+realizes it as one atomic Lua script over a Redis hash (HGET → HSET, or HDEL +
+return match); `SweepExpired`/`Count` are separate scripts with no atomicity
+constraint. The store depends only on the one-method `integrity.RedisEval` seam —
+the go-redis binding is `redisadapter.New` (a single value also satisfies
+`bus.RedisClient`, so one connection serves dedup and reconciliation). A Redis
+outage degrades ClaimOrMatch to Pending (never a fabricated match), leaving
+idempotent handlers as the floor.
+
+```go
+r := integrity.NewReconcilerWithStore(
+    integrity.NewRedisPendingStore(redisadapter.New(rdb)),
+    integrity.DefaultMatchDeadline, time.Now)
+```
 
 ## PRED-09 model registry (DEBT-02b)
 

@@ -5,11 +5,13 @@
 // authorized deny-by-default and logged to the AUDIT-01 observation stream.
 //
 // The Claude client and the governed query client default to the dependency-free
-// in-tree seams (llm.StubModel / governed.StubClient). The real Opus 4.8
-// anthropic-sdk-go client (model "claude-opus-4-8", adaptive thinking, the
-// manual tool-use loop — see internal/llm doc) and the mTLS query.v1 client wire
-// HERE at the composition root (DEBT-02), where pulling the LLM SDK does not
-// burden the rest of the module.
+// in-tree seams (llm.StubModel / governed.StubClient). The real anthropic-sdk-go
+// client — model = COPILOT_MODEL_ID (default claude-fable-5), adaptive thinking,
+// the manual tool-use loop, the Fable-5 refusal + server-side fallback to
+// claude-opus-4-8, streaming — is selected HERE at the composition root behind
+// the `anthropic` build tag (model_anthropic.go), so only production images
+// (built with `-tags anthropic`) pull the LLM SDK; the default build stays
+// SDK-free. The mTLS query.v1 client wires here the same way (DEBT-02).
 package main
 
 import (
@@ -28,7 +30,6 @@ import (
 	"github.com/kanz-eng/kanz/services/copilot/internal/agent"
 	"github.com/kanz-eng/kanz/services/copilot/internal/config"
 	"github.com/kanz-eng/kanz/services/copilot/internal/governed"
-	"github.com/kanz-eng/kanz/services/copilot/internal/llm"
 	"github.com/kanz-eng/kanz/services/copilot/internal/retrieval"
 	"github.com/kanz-eng/kanz/services/copilot/internal/server"
 	"github.com/kanz-eng/kanz/services/copilot/internal/tools"
@@ -78,11 +79,21 @@ func main() {
 	}
 	authz := auth.NewAuditedAuthorizer(inner, auth.NewSlogRecorder(logger), "copilot", logger)
 
-	// Seams: dependency-free defaults; the real Opus 4.8 client + mTLS query
-	// client replace these at deploy time.
-	var model llm.Model = llm.NewStubModel()
+	// Seams: newModel selects the Claude client — the real anthropic-sdk-go
+	// adapter under `-tags anthropic`, the dependency-free StubModel otherwise.
+	// The mTLS query client still defaults to the Stub (PARITY-04b).
+	model := newModel(cfg, logger)
 	queryClient := governed.NewStubClient()
-	registry := tools.NewRegistry(authz, queryClient, retrieval.IdentityCatalog{})
+	// Citation catalog: the dependency-free IdentityCatalog by default; the LIN-01
+	// lineage-backed LineageCatalog when a lineage address is configured (the mTLS
+	// client wires here at deploy — the http.Client is injected so retrieval stays
+	// SPIFFE-free, the SVCWIRE-01c stance). PARITY-04b.
+	var catalog retrieval.Catalog = retrieval.IdentityCatalog{}
+	if cfg.LineageAddr != "" {
+		catalog = retrieval.NewLineageCatalog(nil, cfg.LineageAddr)
+		logger.Info("copilot citations: lineage catalog", "addr", cfg.LineageAddr)
+	}
+	registry := tools.NewRegistry(authz, queryClient, catalog)
 	cp := agent.New(model, registry)
 
 	readiness := &server.Readiness{}

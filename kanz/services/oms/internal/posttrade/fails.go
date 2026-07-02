@@ -80,15 +80,27 @@ type Fail struct {
 }
 
 // DetectFails scans settlements and returns the ones that have failed or aged
-// past their settlement date beyond the policy grace window, as of now. An
-// already-FAILED settlement is always reported (with its age); an INSTRUCTED one
-// is reported once it ages beyond the grace window. SETTLED and pre-instruction
-// settlements are never fails. The result is ordered by descending severity then
-// instruction id, so the worst fails surface first.
+// past their settlement date beyond the policy grace window, as of now, aging in
+// CALENDAR days. An already-FAILED settlement is always reported (with its age);
+// an INSTRUCTED one is reported once it ages beyond the grace window. SETTLED and
+// pre-instruction settlements are never fails. The result is ordered by
+// descending severity then instruction id, so the worst fails surface first.
+//
+// DetectFailsWithCalendar is the production form: it ages in SETTLEMENT
+// (business) days against a real calendar, the market convention — a Fri→Mon
+// gap is one settlement day, not three, so a weekend never false-escalates a
+// pending instruction. DetectFails is DetectFailsWithCalendar with a nil
+// calendar (calendar-day aging, the dependency-free default).
 func DetectFails(settlements []*Settlement, policy AgingPolicy, now time.Time) []Fail {
+	return DetectFailsWithCalendar(settlements, policy, nil, now)
+}
+
+// DetectFailsWithCalendar is DetectFails aging in business days against cal
+// (PARITY-04d). A nil cal falls back to calendar-day aging.
+func DetectFailsWithCalendar(settlements []*Settlement, policy AgingPolicy, cal *Calendar, now time.Time) []Fail {
 	var fails []Fail
 	for _, s := range settlements {
-		age := daysBetween(s.SettlementDate, now)
+		age := agePastSettlement(cal, s.SettlementDate, now)
 		switch s.Status {
 		case StatusFailed:
 			sev := policy.severity(age)
