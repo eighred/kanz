@@ -37,6 +37,8 @@ var templates = map[Framework][]field{
 		{"FRTB_DELTA", "SBM delta charge"},
 		{"FRTB_VEGA", "SBM vega charge"},
 		{"FRTB_CURVATURE", "SBM curvature charge"},
+		{"FRTB_DRC", "Default risk charge"},
+		{"FRTB_RRAO", "Residual risk add-on"},
 		{"FRTB_TOTAL", "Total FRTB capital"},
 	},
 	FormPF: {

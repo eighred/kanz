@@ -10,7 +10,9 @@ func frtbValues() map[string]float64 {
 		"FRTB_DELTA":     1_200_000,
 		"FRTB_VEGA":      300_000,
 		"FRTB_CURVATURE": 150_000,
-		"FRTB_TOTAL":     1_650_000,
+		"FRTB_DRC":       400_000,
+		"FRTB_RRAO":      50_000,
+		"FRTB_TOTAL":     2_100_000,
 	}
 }
 
@@ -20,13 +22,13 @@ func TestBuildReport_Complete(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(r.LineItems) != 4 {
-		t.Fatalf("FRTB report should have 4 line items, got %d", len(r.LineItems))
+	if len(r.LineItems) != 6 {
+		t.Fatalf("FRTB report should have 6 line items, got %d", len(r.LineItems))
 	}
 	if r.Signature == "" {
 		t.Fatal("a built report must be signed")
 	}
-	if v, ok := r.Lookup("FRTB_TOTAL"); !ok || v != 1_650_000 {
+	if v, ok := r.Lookup("FRTB_TOTAL"); !ok || v != 2_100_000 {
 		t.Fatalf("FRTB_TOTAL line item missing/wrong: %.0f ok=%v", v, ok)
 	}
 }

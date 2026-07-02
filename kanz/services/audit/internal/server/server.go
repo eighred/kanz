@@ -12,6 +12,7 @@ import (
 	"github.com/kanz-eng/kanz/services/audit/internal/audit"
 	"github.com/kanz-eng/kanz/services/audit/internal/lineage"
 	"github.com/kanz-eng/kanz/services/audit/internal/report"
+	"github.com/kanz-eng/kanz/services/audit/internal/soc2"
 )
 
 // Readiness gates traffic: starts NOT ready, flips once the store is reachable
@@ -61,6 +62,7 @@ func (s *Server) routes() {
 		s.mux.HandleFunc("GET /v1/audit/lineage/{event_id}", s.handleLineage)
 		s.mux.HandleFunc("GET /v1/audit/verify", s.handleVerify)
 		s.mux.HandleFunc("GET /v1/audit/reports/{template}", s.handleReport)
+		s.mux.HandleFunc("GET /v1/soc2/evidence", s.handleSOC2Evidence)
 	}
 }
 
@@ -177,6 +179,31 @@ func (s *Server) handleReport(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write(b)
 	}
+}
+
+// handleSOC2Evidence serves the PARITY-06d continuous-evidence bundle for an
+// audit window (?from=&to=, RFC-3339; to defaults to now). Returns 409 when a
+// mapped control has insufficient evidence — a Type II exception a monitor alerts
+// on, the same status-code-as-signal stance handleVerify uses for a broken chain.
+func (s *Server) handleSOC2Evidence(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	var from, to time.Time
+	if t, ok := parseTime(q.Get("from")); ok {
+		from = t
+	}
+	if t, ok := parseTime(q.Get("to")); ok {
+		to = t
+	}
+	rep, err := soc2.CollectFromStore(r.Context(), s.store, from, to)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	code := http.StatusOK
+	if !rep.Satisfied {
+		code = http.StatusConflict
+	}
+	writeJSON(w, code, rep)
 }
 
 func (s *Server) fail(w http.ResponseWriter, r *http.Request, err error) {
