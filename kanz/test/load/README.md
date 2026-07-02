@@ -20,7 +20,9 @@ needs to gate regressions in CI; no infra to stand up (no dependency bloat).
 | `baseline.js` | ramp arrival rate until budget breaks → capacity number |
 | `soak.js` | steady sub-capacity load for hours → leaks / p99 drift |
 | `docker-compose.yml` | the ephemeral stack the smoke/seed run against (NATS + risk-engine + api-gateway) |
-| `seed/` | publishes one `PortfolioSnapshot` so the read path serves real data |
+| `seed/` | publishes `PortfolioSnapshot`s so the read path serves real data (`SEED_PORTFOLIOS=N` for a production book) |
+| `ingest/` | drives the **write** hot path at a production tick rate (`RATE`/`DURATION`/`PORTFOLIOS`) — the write-side complement to the k6 read scripts |
+| `capacity-model.md` | derives per-replica capacity + the KEDA/HPA thresholds from the runs (PARITY-05d) |
 
 ## Run
 
@@ -35,6 +37,24 @@ k6 run -e BASE_URL=https://gw.kanz.example -e RATE=300 -e DURATION=2h soak.js
 Env: `BASE_URL` (gateway), `PORTFOLIO` (default `PF1`), `TOKEN` (bearer, if the
 AUTH-01 edge requires it — pass at invocation, never commit), `RATE`/`DURATION`
 (soak).
+
+## Production-volume runs (PARITY-05d)
+
+Drive a production-shaped book instead of the single `PF1` smoke portfolio:
+
+```sh
+# Seed an N-portfolio book, then spread reads + writes across it.
+SEED_PORTFOLIOS=2000 go run ./test/load/seed
+k6 run -e BASE_URL=$GW -e PORTFOLIO=PF1 -e PORTFOLIOS=2000 baseline.js      # read capacity
+RATE=5000 DURATION=2m PORTFOLIOS=2000 go run ./test/load/ingest             # write capacity
+```
+
+`PORTFOLIOS>1` makes `pickPortfolio()` (config.js) hit `PF1-0000..PF1-NNNN`, so
+no single aggregate is a hot key — this is what exercises the PARITY-05a shard
+fan-out and realistic state/cache spread. The write generator streams
+`PositionState` FACTs at `RATE`/sec; watch `kanz_bus_pending_messages` climb as
+the backpressure/scale signal. `capacity-model.md` turns both knees into the
+autoscaling thresholds.
 
 ## Reading the result
 

@@ -1,0 +1,45 @@
+# PARITY-05d — KEDA autoscaling for market-data on its consumer-lag signal.
+# The risk-engine ScaledObject (INFRA-01c) names this as the sibling case: a
+# Kafka-consuming service scales on `kanz_bus_consumer_lag` with the same shape
+# as risk-engine's `kanz_bus_pending_messages`, sized from the capacity model
+# (test/load/capacity-model.md). market-data folds market.v1 ticks into the
+# price-history store; when it falls behind the live tick rate, add workers.
+#
+# The per-instrument partitioning + batching (PARITY-05b) sets the per-replica
+# throughput ceiling the threshold below is derived from — lag past it means the
+# tick rate exceeds one replica's drain rate, so fan out. Auto-synced by the
+# GitOps `workloads` ApplicationSet (it recurses infra/deploy).
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: market-data
+  namespace: kanz-services
+  labels:
+    app.kubernetes.io/part-of: kanz
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: market-data
+  minReplicaCount: 2          # multi-AZ spread; one replica is never HA
+  maxReplicaCount: 16         # per-instrument lanes parallelize well beyond risk
+  cooldownPeriod: 120
+  advanced:
+    restoreToOriginalReplicaCount: true
+    horizontalPodAutoscalerConfig:
+      behavior:
+        scaleUp:
+          stabilizationWindowSeconds: 30    # a tick-rate spike must be absorbed fast
+        scaleDown:
+          stabilizationWindowSeconds: 300   # shed slowly, avoid thrashing
+  triggers:
+    - type: prometheus
+      metadata:
+        serverAddress: http://prometheus.observability.svc:9090
+        metricName: kanz_bus_consumer_lag
+        # Sum lag across the market-data consumer group; one replica drains
+        # ~1000 messages of standing lag within the p99 budget, so lag past that
+        # per replica sets the count. Derived in capacity-model.md.
+        query: sum(kanz_bus_consumer_lag{group="market-data"})
+        threshold: "1000"
+        activationThreshold: "100"

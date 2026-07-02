@@ -47,6 +47,25 @@ type Config struct {
 	// exported — startup never blocks on a collector.
 	OTLPEndpoint string
 
+	// ShardMembers is the full risk-engine fleet member set (PARITY-05a) used
+	// to build the consistent-hash ring. Every replica MUST be given the same
+	// list. Empty or single-member ⇒ unsharded: this replica owns every
+	// portfolio (the pre-05a behavior). Comma-separated in the environment.
+	ShardMembers []string
+	// ShardSelf is THIS replica's member id — its identity on the ring
+	// (typically the StatefulSet pod name / ordinal). Must appear in
+	// ShardMembers for sharding to take effect; empty ⇒ unsharded.
+	ShardSelf string
+
+	// RedisURL enables cross-pod shared-state dedup (PARITY-05c): with N
+	// replicas, the consumer switches from the per-instance in-memory dedup
+	// window to a Redis-backed bus.Deduper so a redelivery landing on a
+	// different replica than the original is still recognized. Empty ⇒
+	// per-instance dedup (the pre-05c default). Only honored in the `redis`
+	// build; the default build ignores it (the concrete go-redis client is
+	// behind the build tag, the PARITY-04a/04h stance).
+	RedisURL string
+
 	// GRPCListen is the address the risk query gRPC server (API-01b) binds.
 	// Empty ⇒ the query server is not started (probes + ingestion only).
 	GRPCListen string
@@ -66,6 +85,9 @@ func Load() (Config, error) {
 		DatabaseURL:      secret("RISK_ENGINE_DATABASE_URL"),
 		SnapshotInterval: parseDuration(os.Getenv("RISK_ENGINE_SNAPSHOT_INTERVAL")),
 		KafkaBrokers:     splitList(os.Getenv("RISK_ENGINE_KAFKA_BROKERS")),
+		ShardMembers:     splitList(os.Getenv("RISK_ENGINE_SHARD_MEMBERS")),
+		ShardSelf:        os.Getenv("RISK_ENGINE_SHARD_SELF"),
+		RedisURL:         secret("RISK_ENGINE_REDIS_URL"),
 		OTLPEndpoint:     os.Getenv("RISK_ENGINE_OTLP_ENDPOINT"),
 		GRPCListen:       os.Getenv("RISK_ENGINE_GRPC_LISTEN"),
 		SPIFFESocket:     os.Getenv("RISK_ENGINE_SPIFFE_SOCKET"),

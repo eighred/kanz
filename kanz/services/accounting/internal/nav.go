@@ -25,6 +25,13 @@ type NAV struct {
 	Accrued       *big.Rat
 	AsOf          time.Time
 	Attribution   []PnlComponent
+
+	// LocalExposure is the net book value contributed by each currency BEFORE
+	// conversion to the reporting currency (security + cash + accrued, in local
+	// terms). It is the base the FX attribution driver revalues (FXPnL) — the
+	// reporting-currency exposure is present but revalues to zero. nil for the
+	// single-currency ComputeNAV path.
+	LocalExposure map[string]*big.Rat
 }
 
 // PnlComponent is one attributed driver of a NAV change. The components sum to
@@ -64,6 +71,103 @@ func ComputeNAV(b *ledger.Book, currency string, asOf time.Time, prices map[stri
 		Accrued:       accrued,
 		AsOf:          asOf,
 	}, nil
+}
+
+// ComputeNAVInCurrency values a MULTI-CURRENCY book in a single reporting
+// currency (PARITY-05f). Each position is priced in its reference currency
+// (instrCcy, defaulting to reporting for a domestic instrument) and converted at
+// fx; cash and accrued are summed across every currency the book holds and
+// likewise converted. A missing price OR a missing FX rate for a currency the
+// book actually uses fails the whole valuation — an incomplete multi-currency
+// NAV is never produced (the regulatory-filing completeness discipline).
+//
+// The returned NAV carries LocalExposure (per-currency pre-conversion book
+// value) so FXPnL can attribute the currency-revaluation driver from real rates.
+// A single-currency book with an identity FX table yields exactly ComputeNAV's
+// numbers, so this is the general form ComputeNAV is the fast path of.
+func ComputeNAVInCurrency(b *ledger.Book, reporting string, asOf time.Time, prices map[string]*big.Rat, instrCcy InstrumentCurrency, fx FXConverter) (NAV, error) {
+	if fx == nil {
+		return NAV{}, fmt.Errorf("accounting: NAV requires an FX converter")
+	}
+	local := map[string]*big.Rat{} // currency → net local-currency book value
+
+	sec := new(big.Rat)
+	for inst, p := range b.Positions {
+		if p.Qty.Sign() == 0 {
+			continue
+		}
+		px, ok := prices[inst]
+		if !ok {
+			return NAV{}, fmt.Errorf("accounting: NAV missing price for %q", inst)
+		}
+		ccy := instrCcy.Of(inst, reporting)
+		mvLocal := new(big.Rat).Mul(p.Qty, px)
+		addLocal(local, ccy, mvLocal)
+		conv, err := convert(fx, ccy, mvLocal)
+		if err != nil {
+			return NAV{}, err
+		}
+		sec.Add(sec, conv)
+	}
+
+	cash := new(big.Rat)
+	for ccy, v := range b.Cash {
+		if v.Sign() == 0 {
+			continue
+		}
+		addLocal(local, ccy, v)
+		conv, err := convert(fx, ccy, v)
+		if err != nil {
+			return NAV{}, err
+		}
+		cash.Add(cash, conv)
+	}
+
+	accrued := new(big.Rat)
+	for ccy, v := range b.Accrued {
+		if v.Sign() == 0 {
+			continue
+		}
+		addLocal(local, ccy, v)
+		conv, err := convert(fx, ccy, v)
+		if err != nil {
+			return NAV{}, err
+		}
+		accrued.Add(accrued, conv)
+	}
+
+	total := new(big.Rat).Add(cash, sec)
+	total.Add(total, accrued)
+	return NAV{
+		PortfolioID:   b.PortfolioID,
+		Currency:      reporting,
+		Total:         total,
+		Cash:          cash,
+		SecurityValue: sec,
+		Accrued:       accrued,
+		AsOf:          asOf,
+		LocalExposure: local,
+	}, nil
+}
+
+// convert multiplies a local-currency amount by its FX rate into the reporting
+// currency, erroring loudly on a missing rate.
+func convert(fx FXConverter, ccy string, amount *big.Rat) (*big.Rat, error) {
+	rate, ok := fx.Rate(ccy)
+	if !ok {
+		return nil, fmt.Errorf("accounting: NAV missing FX rate for %q", ccy)
+	}
+	return new(big.Rat).Mul(amount, rate), nil
+}
+
+// addLocal accumulates a per-currency exposure amount.
+func addLocal(m map[string]*big.Rat, ccy string, v *big.Rat) {
+	cur := m[ccy]
+	if cur == nil {
+		cur = new(big.Rat)
+		m[ccy] = cur
+	}
+	cur.Add(cur, v)
 }
 
 // Attribute decomposes the NAV change from prior to current into its drivers and

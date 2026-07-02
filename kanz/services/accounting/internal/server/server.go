@@ -81,6 +81,15 @@ func (s *Server) handleReadyz(w http.ResponseWriter, _ *http.Request) {
 
 type navRequest struct {
 	Prices map[string]string `json:"prices"` // instrument -> price (exact decimal string)
+	// FX and InstrumentCurrency enable the multi-currency valuation (PARITY-05f):
+	// FX maps a currency to units-of-reporting-per-unit; InstrumentCurrency maps
+	// an instrument to the currency its price is quoted in (default: the reporting
+	// currency). When FX is present the NAV is valued via ComputeNAVInCurrency,
+	// converting every foreign holding + cash bucket; absent ⇒ the domestic
+	// single-currency path (unchanged). The composition root populates both from
+	// the live FX feed + the MASTER security master; a client may also supply them.
+	FX                 map[string]string `json:"fx,omitempty"`
+	InstrumentCurrency map[string]string `json:"instrument_currency,omitempty"`
 }
 
 func (s *Server) handleNAV(w http.ResponseWriter, r *http.Request) {
@@ -99,7 +108,7 @@ func (s *Server) handleNAV(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
-	nav, err := accounting.ComputeNAV(book, s.baseCcy, time.Now().UTC(), prices)
+	nav, err := s.computeNAV(book, prices, req)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
@@ -112,6 +121,21 @@ func (s *Server) handleNAV(w http.ResponseWriter, r *http.Request) {
 		"security_value": nav.SecurityValue.FloatString(2),
 		"accrued":        nav.Accrued.FloatString(2),
 	})
+}
+
+// computeNAV values the book, taking the multi-currency path (ComputeNAVInCurrency)
+// when the request carries an FX table, else the domestic single-currency path.
+func (s *Server) computeNAV(book *ledger.Book, prices map[string]*big.Rat, req navRequest) (accounting.NAV, error) {
+	if len(req.FX) == 0 {
+		return accounting.ComputeNAV(book, s.baseCcy, time.Now().UTC(), prices)
+	}
+	rates, err := toRatMap(req.FX)
+	if err != nil {
+		return accounting.NAV{}, err
+	}
+	fx := accounting.NewFXTable(s.baseCcy, rates)
+	return accounting.ComputeNAVInCurrency(book, s.baseCcy, time.Now().UTC(), prices,
+		accounting.InstrumentCurrency(req.InstrumentCurrency), fx)
 }
 
 // --- reconcile ---------------------------------------------------------------

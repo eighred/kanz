@@ -25,6 +25,7 @@ import (
 	risk "github.com/kanz-eng/kanz/internal/risk"
 	"github.com/kanz-eng/kanz/internal/risk/compute"
 	"github.com/kanz-eng/kanz/internal/risk/engine"
+	"github.com/kanz-eng/kanz/internal/risk/ingest"
 	"github.com/kanz-eng/kanz/internal/risk/publish"
 	"github.com/kanz-eng/kanz/internal/risk/state"
 	"github.com/kanz-eng/kanz/internal/risk/state/persist"
@@ -35,6 +36,7 @@ import (
 	"github.com/kanz-eng/kanz/services/risk-engine/internal/config"
 	"github.com/kanz-eng/kanz/services/risk-engine/internal/grpcsrv"
 	"github.com/kanz-eng/kanz/services/risk-engine/internal/server"
+	"github.com/kanz-eng/kanz/services/risk-engine/internal/shard"
 )
 
 func main() {
@@ -181,11 +183,33 @@ func runEngine(ctx context.Context, cfg config.Config, readiness *server.Readine
 		a.Checkpoint = snap.Checkpoint
 	}
 
-	consumer, err := bus.NewConsumer(client, bus.WithBusMetrics(busMetrics))
+	// PARITY-05c: under N replicas, switch cross-pod dedup to the shared Redis
+	// store when configured (redis build + RISK_ENGINE_REDIS_URL); otherwise the
+	// per-instance in-memory window stands. nil Deduper is ignored by WithDeduper.
+	deduper, dedupCloser := newDeduper(cfg, logger)
+	if dedupCloser != nil {
+		a.Closers = append(a.Closers, dedupCloser)
+	}
+	consumer, err := bus.NewConsumer(client, bus.WithBusMetrics(busMetrics), bus.WithDeduper(deduper))
 	if err != nil {
 		return err
 	}
-	ingest, err := app.NewIngest(consumer, engine.NewTriggeringApplier(store, recomputer), "", logger)
+	// PARITY-05a: shard the recompute fan-out. Each replica owns a
+	// consistent-hash slice of portfolios; the ShardFilter drops events for
+	// portfolios it does not own so their RISK-05 state + recompute stay pinned
+	// to one replica. Sharded replicas must each SEE every event, so they
+	// subscribe under a per-replica (broadcast) consumer group rather than the
+	// shared partition-balanced one. Unsharded (no members / no self) ⇒ owns
+	// everything on the shared group, exactly the pre-05a path.
+	var applier ingest.Applier = engine.NewTriggeringApplier(store, recomputer)
+	group := ""
+	assign := shard.NewAssignment(shard.NewRing(cfg.ShardMembers, 0), cfg.ShardSelf)
+	if assign.Sharded() && cfg.ShardSelf != "" {
+		applier = app.NewShardFilter(applier, assign)
+		group = app.DefaultConsumerGroup + "-" + cfg.ShardSelf
+		logger.Info("risk-engine sharding enabled", "self", cfg.ShardSelf, "members", cfg.ShardMembers)
+	}
+	ingest, err := app.NewIngest(consumer, applier, group, logger)
 	if err != nil {
 		return err
 	}

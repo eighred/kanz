@@ -15,6 +15,21 @@ export const MAX_ERROR_RATE = 0.001;
 
 export const BASE_URL = __ENV.BASE_URL || "http://localhost:8080";
 export const PORTFOLIO = __ENV.PORTFOLIO || "PF1";
+// PORTFOLIOS spreads the read mix across a production-shaped book (PARITY-05d):
+// when >1 each iteration hits a random portfolio in <PORTFOLIO>-0000..NNNN,
+// matching the seed run `SEED_PORTFOLIOS=<N> go run ./test/load/seed`. Default 1
+// keeps every request on the single well-known PORTFOLIO (the smoke behavior).
+export const PORTFOLIOS = parseInt(__ENV.PORTFOLIOS || "1", 10);
+
+// pickPortfolio returns the portfolio id for one iteration — the single
+// PORTFOLIO when unsharded, else a uniformly random one across the seeded
+// range so no single aggregate is a hot key (exercises the PARITY-05a shard
+// fan-out and realistic cache/state spread).
+export function pickPortfolio() {
+  if (PORTFOLIOS <= 1) return PORTFOLIO;
+  const n = Math.floor(Math.random() * PORTFOLIOS);
+  return `${PORTFOLIO}-${String(n).padStart(4, "0")}`;
+}
 
 // Optional auth: the gateway edge chain (API-01d signing + AUTH-01) may require
 // a bearer token / signed headers. Supply via env; absent in a plaintext dev
@@ -32,16 +47,17 @@ export function headers() {
 // so callers can check them.
 export function readMix() {
   const asOf = new Date().toISOString();
+  const pf = pickPortfolio();
   const reqs = [
-    ["GET", `${BASE_URL}/v1/portfolios/${PORTFOLIO}/exposure`, null],
-    ["GET", `${BASE_URL}/v1/portfolios/${PORTFOLIO}/measures?as_of=${asOf}&measure=VaR99&measure=Delta`, null],
+    ["GET", `${BASE_URL}/v1/portfolios/${pf}/exposure`, null],
+    ["GET", `${BASE_URL}/v1/portfolios/${pf}/measures?as_of=${asOf}&measure=VaR99&measure=Delta`, null],
   ];
   // ~1 in 5 iterations also runs a scenario (the expensive POST).
   if (Math.random() < 0.2) {
     const body = JSON.stringify({
       shocks: [{ parallelShift: { pct: { coefficient: "-5", exponent: -2 } } }],
     });
-    reqs.push(["POST", `${BASE_URL}/v1/portfolios/${PORTFOLIO}/scenario`, body]);
+    reqs.push(["POST", `${BASE_URL}/v1/portfolios/${pf}/scenario`, body]);
   }
   const params = { headers: headers() };
   return reqs.map(([method, url, body]) =>

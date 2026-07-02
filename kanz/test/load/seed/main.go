@@ -17,8 +17,10 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"os"
+	"strconv"
 	"time"
 
 	"google.golang.org/protobuf/types/known/timestamppb"
@@ -45,10 +47,19 @@ const (
 
 func main() {
 	url := envOr("SEED_NATS_URL", "nats://localhost:4222")
-	portfolio := envOr("SEED_PORTFOLIO", "PF1")
+	prefix := envOr("SEED_PORTFOLIO", "PF1")
 	tenant := envOr("SEED_TENANT", "load-test")
+	// SEED_PORTFOLIOS scales the seed to a production-shaped book count
+	// (PARITY-05d): >1 publishes <prefix>-0000..<prefix>-NNNN so the read mix
+	// and the sharded recompute (PARITY-05a) spread across many portfolios, not
+	// one hot key. Default 1 keeps the single-portfolio smoke behavior (the
+	// well-known PF1). At count 1 the id is exactly the prefix (back-compat).
+	count := envInt("SEED_PORTFOLIOS", 1)
+	if count < 1 {
+		count = 1
+	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 
 	client, err := bus.DialNATS(ctx, bus.NATSConfig{URL: url, Name: "load-seed"})
@@ -67,23 +78,28 @@ func main() {
 	}
 
 	now := time.Now().UTC()
-	snapshot := buildSnapshot(portfolio, now)
-
-	if err := producer.Publish(ctx, bus.Event{
-		Subject:          snapshotSubject,
-		EventType:        snapshotEventType,
-		EventClass:       envelopepb.EventClass_EVENT_CLASS_STATE_SNAPSHOT,
-		SchemaVersion:    1,
-		Domain:           snapshotDomain,
-		EventTime:        now,
-		PartitionKey:     portfolio,
-		PayloadSchemaRef: payloadSchemaRef,
-		Payload:          snapshot,
-	}); err != nil {
-		log.Fatalf("seed: publish snapshot for %s: %v", portfolio, err)
+	for i := 0; i < count; i++ {
+		portfolio := prefix
+		if count > 1 {
+			portfolio = fmt.Sprintf("%s-%04d", prefix, i)
+		}
+		snapshot := buildSnapshot(portfolio, now)
+		if err := producer.Publish(ctx, bus.Event{
+			Subject:          snapshotSubject,
+			EventType:        snapshotEventType,
+			EventClass:       envelopepb.EventClass_EVENT_CLASS_STATE_SNAPSHOT,
+			SchemaVersion:    1,
+			Domain:           snapshotDomain,
+			EventTime:        now,
+			PartitionKey:     portfolio,
+			PayloadSchemaRef: payloadSchemaRef,
+			Payload:          snapshot,
+		}); err != nil {
+			log.Fatalf("seed: publish snapshot for %s: %v", portfolio, err)
+		}
 	}
-	log.Printf("seed: published PortfolioSnapshot portfolio=%s positions=%d tenant=%s",
-		portfolio, len(snapshot.GetPositions()), tenant)
+	log.Printf("seed: published %d PortfolioSnapshot(s) prefix=%s positions=%d tenant=%s",
+		count, prefix, len(buildSnapshot(prefix, now).GetPositions()), tenant)
 }
 
 // buildSnapshot is a small but non-degenerate portfolio: a few long/short
@@ -141,6 +157,16 @@ func timestamp(t time.Time) *timestamppb.Timestamp { return timestamppb.New(t) }
 func envOr(k, def string) string {
 	if v := os.Getenv(k); v != "" {
 		return v
+	}
+	return def
+}
+
+// envInt reads an int env var, returning def when unset or unparseable.
+func envInt(k string, def int) int {
+	if v := os.Getenv(k); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			return n
+		}
 	}
 	return def
 }

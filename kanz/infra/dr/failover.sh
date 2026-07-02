@@ -29,9 +29,13 @@ echo "== DR failover → $DR_CTX (step=$STEP) =="
 
 # 1) Promote the Postgres warm standbys to standalone primaries (DR-01b). PITR
 #    replicas become writable; services will repoint their DSN here.
+#    kanz-books carries every PARITY-02 book-of-record store (accounting IBOR
+#    ledger, alternatives fund book, wealth household book, datamaster golden
+#    records + exception queue), so a DR cutover that omits it leaves those
+#    services read-only — it MUST be promoted alongside risk + registry (PARITY-05e).
 if step postgres; then
   echo "-- [1/5] promote Postgres replicas"
-  for c in kanz-risk kanz-registry; do
+  for c in kanz-risk kanz-registry kanz-books; do
     k cnpg promote "$c" -n "$DATA_NS" || true   # no-op if already promoted
     k cnpg status   "$c" -n "$DATA_NS" | head -3
   done
@@ -62,8 +66,13 @@ fi
 if step services; then
   echo "-- [4/5] start services"
   k -n "$SVC_NS" scale deploy --all --replicas=2
-  k -n "$SVC_NS" rollout status deploy/risk-engine --timeout=300s
-  k -n "$SVC_NS" rollout status deploy/api-gateway --timeout=300s
+  # Wait on every service the DR drill exercises a synthetic transaction against
+  # (PARITY-05e), not just risk + gateway — an unready book-of-record service is a
+  # store that promoted but does not serve. A missing deploy is tolerated (|| true)
+  # so a partial topology doesn't wedge the failover.
+  for d in risk-engine api-gateway accounting wealth datamaster market-data; do
+    k -n "$SVC_NS" rollout status deploy/"$d" --timeout=300s || true
+  done
 fi
 
 # 5) Shift traffic to the DR region. The global LB / DNS weight is the actual
