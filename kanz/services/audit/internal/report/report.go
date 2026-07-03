@@ -15,7 +15,7 @@ import (
 	"time"
 
 	"github.com/kanz-eng/kanz/services/audit/internal/audit"
-	"github.com/kanz-eng/kanz/services/audit/internal/chain"
+	"github.com/kanz-eng/kanz/internal/audit/chain"
 )
 
 // Format is a report rendering.

@@ -4,7 +4,7 @@ import (
 	"context"
 	"sync"
 
-	"github.com/kanz-eng/kanz/services/audit/internal/chain"
+	"github.com/kanz-eng/kanz/internal/audit/chain"
 )
 
 // Memory is an in-memory append-only audit store. It is the reference Store

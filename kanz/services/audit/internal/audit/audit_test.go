@@ -12,7 +12,7 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"github.com/kanz-eng/kanz/pkg/auth"
-	"github.com/kanz-eng/kanz/services/audit/internal/chain"
+	"github.com/kanz-eng/kanz/internal/audit/chain"
 )
 
 func env(id, etype, domain string, class envelopepb.EventClass) *envelopepb.Envelope {

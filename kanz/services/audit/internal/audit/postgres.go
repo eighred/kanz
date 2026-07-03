@@ -10,7 +10,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/kanz-eng/kanz/services/audit/internal/chain"
+	"github.com/kanz-eng/kanz/internal/audit/chain"
 )
 
 // Postgres is the durable Store backed by 0001_audit_log.sql. It mirrors the

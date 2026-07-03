@@ -17,7 +17,7 @@ package signer
 import (
 	"sync"
 
-	"github.com/kanz-eng/kanz/services/audit/internal/chain"
+	"github.com/kanz-eng/kanz/internal/audit/chain"
 )
 
 // Link is one signed report's view as the audit chain sees it: the predecessor

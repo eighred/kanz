@@ -54,6 +54,7 @@ _These are the recurring disciplines the whole codebase is built on — the most
 
 - **Calibration is deny-on-arbitrage / fail-loud.** SVI fits gate on Gatheral butterfly + cross-expiry calendar monotonicity; curve/CDS bootstraps solve every quote to par; alternatives OLS excludes alpha from the mapping; a failed calibration leaves the prior point-in-time version serving. **Regulatory parameters are data** — the licensed ISDA/BCBS/NGFS tables load at the composition root, not baked into code.
 - **Independent validation gate (SR 11-7) is deny-by-default:** missing / failed / expired ⇒ denied. The validation package imports no analytic code — benchmark cases are data, each analytic computes its own worked example, and reports are signed (failures signed as audit evidence).
+- **The audit hash-chain primitives are shared, not audit-service-private.** `chain` (payload-agnostic tamper-evidence: `H(prev‖canonical)`) and `signer.ChainSigner` (the one-method `Sign` seam realizing `regulatory.Signer`/`sustainability.Signer` as a chain position) live at `internal/audit/`, not `services/audit/internal/` — promoted when the `regulatory` filing service became the second consumer (the "second consumer ⇒ promote to top-level internal" rule). Any service's composition root can now inject the ChainSigner into report building; the durable link append stays a `LinkSink` wired per-composition-root.
 
 ## Anti-decisions
 
