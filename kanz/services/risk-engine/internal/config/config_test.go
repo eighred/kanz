@@ -58,3 +58,52 @@ func TestSecret(t *testing.T) {
 		}
 	})
 }
+
+// The WIRE-01c calibration knobs default safely (scheduler off, nightly 24h,
+// market subjects = MARKET wildcard) and parse their overrides.
+func TestLoadCalibration(t *testing.T) {
+	t.Run("defaults: scheduler off", func(t *testing.T) {
+		for _, k := range []string{
+			"RISK_ENGINE_CALIBRATION_INTERVAL", "RISK_ENGINE_CALIBRATION_NIGHTLY_INTERVAL",
+			"RISK_ENGINE_CALIBRATION_RATES", "RISK_ENGINE_MARKET_SUBJECTS",
+		} {
+			t.Setenv(k, "")
+		}
+		cfg, err := Load()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if cfg.CalibrationInterval != 0 {
+			t.Fatalf("intraday cadence = %v, want 0 (disabled)", cfg.CalibrationInterval)
+		}
+		if cfg.CalibrationNightly != DefaultCalibrationNightly {
+			t.Fatalf("nightly cadence = %v, want default %v", cfg.CalibrationNightly, DefaultCalibrationNightly)
+		}
+		if cfg.CalibrationRates != "" {
+			t.Fatalf("rates = %q, want empty", cfg.CalibrationRates)
+		}
+		if len(cfg.MarketSubjects) != 1 || cfg.MarketSubjects[0] != "market.>" {
+			t.Fatalf("market subjects = %v, want [market.>]", cfg.MarketSubjects)
+		}
+	})
+
+	t.Run("overrides parse", func(t *testing.T) {
+		t.Setenv("RISK_ENGINE_CALIBRATION_INTERVAL", "5m")
+		t.Setenv("RISK_ENGINE_CALIBRATION_NIGHTLY_INTERVAL", "12h")
+		t.Setenv("RISK_ENGINE_CALIBRATION_RATES", "USD-DEP-3M:USD:deposit:0.25")
+		t.Setenv("RISK_ENGINE_MARKET_SUBJECTS", "market.rate.quote, market.rate.swap")
+		cfg, err := Load()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if cfg.CalibrationInterval != 5*time.Minute {
+			t.Fatalf("intraday cadence = %v, want 5m", cfg.CalibrationInterval)
+		}
+		if cfg.CalibrationNightly != 12*time.Hour {
+			t.Fatalf("nightly cadence = %v, want 12h", cfg.CalibrationNightly)
+		}
+		if len(cfg.MarketSubjects) != 2 {
+			t.Fatalf("market subjects = %v, want two", cfg.MarketSubjects)
+		}
+	})
+}

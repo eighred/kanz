@@ -66,6 +66,28 @@ type Config struct {
 	// behind the build tag, the PARITY-04a/04h stance).
 	RedisURL string
 
+	// Calibration (WIRE-01c): the in-process curve-calibration scheduler. The
+	// risk-engine is the risk module's composition root, so it — not the
+	// market-data service — wires the PARITY-03a curve.Calibrator, subscribing
+	// the market quote spine into a latest-quote cache and driving Refresh on a
+	// nightly + intraday cadence. Off unless CalibrationInterval is set AND
+	// CalibrationRates names a rate universe.
+	//
+	// CalibrationInterval is the intraday refresh cadence
+	// (RISK_ENGINE_CALIBRATION_INTERVAL, e.g. "5m"). Zero ⇒ scheduler disabled.
+	CalibrationInterval time.Duration
+	// CalibrationNightly is the nightly-close cadence
+	// (RISK_ENGINE_CALIBRATION_NIGHTLY_INTERVAL); default 24h when the scheduler
+	// is enabled.
+	CalibrationNightly time.Duration
+	// CalibrationRates is the raw rate-instrument reference spec
+	// (RISK_ENGINE_CALIBRATION_RATES), parsed by livequote.ParseRateInstruments.
+	CalibrationRates string
+	// MarketSubjects are the market.v1 quote subjects the calibration cache
+	// subscribes (RISK_ENGINE_MARKET_SUBJECTS); default the MARKET wildcard.
+	// Comma-separated. Only used when the scheduler is enabled.
+	MarketSubjects []string
+
 	// GRPCListen is the address the risk query gRPC server (API-01b) binds.
 	// Empty ⇒ the query server is not started (probes + ingestion only).
 	GRPCListen string
@@ -75,7 +97,22 @@ type Config struct {
 	SPIFFESocket string
 }
 
+// DefaultCalibrationNightly is the nightly-close cadence when the scheduler is
+// enabled but RISK_ENGINE_CALIBRATION_NIGHTLY_INTERVAL is unset.
+const DefaultCalibrationNightly = 24 * time.Hour
+
+// DefaultMarketSubjects is the calibration cache subscription when none is set.
+var DefaultMarketSubjects = []string{"market.>"}
+
 func Load() (Config, error) {
+	nightly := parseDuration(os.Getenv("RISK_ENGINE_CALIBRATION_NIGHTLY_INTERVAL"))
+	if nightly <= 0 {
+		nightly = DefaultCalibrationNightly
+	}
+	marketSubjects := splitList(os.Getenv("RISK_ENGINE_MARKET_SUBJECTS"))
+	if len(marketSubjects) == 0 {
+		marketSubjects = DefaultMarketSubjects
+	}
 	return Config{
 		Listen:           envOr("RISK_ENGINE_LISTEN", ":8081"),
 		LogLevel:         parseLevel(envOr("RISK_ENGINE_LOG_LEVEL", "info")),
@@ -91,6 +128,11 @@ func Load() (Config, error) {
 		OTLPEndpoint:     os.Getenv("RISK_ENGINE_OTLP_ENDPOINT"),
 		GRPCListen:       os.Getenv("RISK_ENGINE_GRPC_LISTEN"),
 		SPIFFESocket:     os.Getenv("RISK_ENGINE_SPIFFE_SOCKET"),
+
+		CalibrationInterval: parseDuration(os.Getenv("RISK_ENGINE_CALIBRATION_INTERVAL")),
+		CalibrationNightly:  nightly,
+		CalibrationRates:    os.Getenv("RISK_ENGINE_CALIBRATION_RATES"),
+		MarketSubjects:      marketSubjects,
 	}, nil
 }
 

@@ -26,6 +26,9 @@ import (
 	"github.com/kanz-eng/kanz/internal/risk/compute"
 	"github.com/kanz-eng/kanz/internal/risk/engine"
 	"github.com/kanz-eng/kanz/internal/risk/ingest"
+	"github.com/kanz-eng/kanz/internal/risk/pricing/curve"
+	"github.com/kanz-eng/kanz/internal/risk/pricing/livequote"
+	"github.com/kanz-eng/kanz/internal/risk/pricing/schedule"
 	"github.com/kanz-eng/kanz/internal/risk/publish"
 	"github.com/kanz-eng/kanz/internal/risk/state"
 	"github.com/kanz-eng/kanz/internal/risk/state/persist"
@@ -215,6 +218,18 @@ func runEngine(ctx context.Context, cfg config.Config, readiness *server.Readine
 	}
 	a.Ingest = ingest
 
+	// Calibration scheduler (WIRE-01c): the risk module's composition root owns
+	// the live curve calibration loop. Subscribe the market quote spine into a
+	// latest-quote cache and drive curve.Calibrator.Refresh on a nightly +
+	// intraday cadence; a failed calibration deny-on-garbages (prior curve keeps
+	// serving). Auxiliary to core risk ingest — a market-subscription failure
+	// degrades calibration (no fresh curve), it does not bring the engine down.
+	if cfg.CalibrationInterval > 0 && cfg.CalibrationRates != "" {
+		if err := startCalibration(ctx, cfg, client, busMetrics, logger); err != nil {
+			logger.Error("calibration scheduler disabled", "err", err)
+		}
+	}
+
 	// Risk query gRPC server (API-01b): a read surface over the concrete
 	// EngineImpl, sharing the live store + cache + registry. Started only when
 	// an address is configured; stopped gracefully when ctx is canceled.
@@ -228,6 +243,64 @@ func runEngine(ctx context.Context, cfg config.Config, readiness *server.Readine
 	}
 
 	return a.Run(ctx)
+}
+
+// startCalibration wires the WIRE-01c curve-calibration loop and launches it on
+// background goroutines under ctx: a latest-quote cache fed by the market quote
+// spine, a curve.Calibrator over a Snapshot-backed QuoteSource, and a
+// schedule.Scheduler driving Refresh per currency on the intraday + nightly
+// cadence. It returns an error only on a setup failure (bad reference spec /
+// consumer) — the caller logs it and continues, since calibration is auxiliary
+// to core risk ingestion.
+func startCalibration(ctx context.Context, cfg config.Config, client *bus.NATSClient, busMetrics *bus.BusMetrics, logger *slog.Logger) error {
+	instruments, err := livequote.ParseRateInstruments(cfg.CalibrationRates)
+	if err != nil {
+		return err
+	}
+	if len(instruments) == 0 {
+		return errors.New("calibration enabled but RISK_ENGINE_CALIBRATION_RATES is empty")
+	}
+
+	// A dedicated consumer + broadcast group: the cache must SEE every market
+	// event (it is a last-value cache, not a work queue), so it subscribes under
+	// a per-source group distinct from any load-balanced market-data consumer.
+	consumer, err := bus.NewConsumer(client, bus.WithBusMetrics(busMetrics))
+	if err != nil {
+		return err
+	}
+	cache := livequote.New()
+	group := cfg.Source + "-calibration"
+	for _, subject := range cfg.MarketSubjects {
+		go func(subject string) {
+			logger.Info("calibration subscribing market quotes", "subject", subject, "group", group)
+			if err := consumer.Subscribe(ctx, subject, group, cache.Handler); err != nil && !errors.Is(err, context.Canceled) {
+				// Degrade, don't crash: without fresh quotes the calibrator
+				// deny-on-garbages and the prior curve keeps serving.
+				logger.Error("calibration market subscription failed", "subject", subject, "err", err)
+			}
+		}(subject)
+	}
+
+	src := livequote.NewSnapshotRateSource(cache, instruments)
+	cal := &curve.Calibrator{Source: src, Store: curve.NewStore(), Interp: curve.LinearZero}
+	var jobs []schedule.Job
+	for _, ccy := range src.Currencies() {
+		ccy := ccy
+		refresh := func(ctx context.Context, asOf time.Time) error {
+			_, err := cal.Refresh(ctx, ccy, asOf)
+			return err
+		}
+		jobs = append(jobs,
+			schedule.Job{Name: "curve/" + ccy + "/intraday", Interval: cfg.CalibrationInterval, Refresh: refresh},
+			schedule.Job{Name: "curve/" + ccy + "/nightly", Interval: cfg.CalibrationNightly, Refresh: refresh},
+		)
+	}
+	sched := schedule.New(jobs, schedule.WithLogger(logger))
+	logger.Info("calibration scheduler enabled",
+		"jobs", sched.Jobs(), "currencies", src.Currencies(),
+		"intraday", cfg.CalibrationInterval, "nightly", cfg.CalibrationNightly)
+	go func() { _ = sched.Run(ctx) }()
+	return nil
 }
 
 // serveQueryGRPC starts the risk query gRPC server on cfg.GRPCListen and
