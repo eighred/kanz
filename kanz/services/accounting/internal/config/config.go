@@ -34,9 +34,30 @@ type Config struct {
 	// restart (local/dev).
 	DatabaseURL string
 
+	// Live FX for multi-currency NAV (WIRE-01d): a latest-rate cache folded from
+	// the market.v1 FX spine, so the NAV endpoint values a multi-currency book
+	// with no `fx` in the request. Off unless FXPairs is configured AND a broker
+	// is set. A per-request `fx` still overrides the live rates (client-supplied).
+	//
+	// FXPairs is the raw FX-pair reference spec (ACCOUNTING_FX_PAIRS):
+	// comma-separated `<instrument_id>:<foreign_currency>` entries the cache
+	// records rates for, parsed by fxfeed.ParsePairs.
+	FXPairs string
+	// FXSubjects are the market.v1 FX subjects the cache subscribes
+	// (ACCOUNTING_FX_SUBJECTS); default the MARKET FX wildcard. Comma-separated.
+	FXSubjects []string
+	// InstrumentCurrency is the raw instrument→reference-currency spec
+	// (ACCOUNTING_INSTRUMENT_CURRENCY): comma-separated `<instrument>:<currency>`
+	// entries — the security-master join the multi-currency valuation needs. A
+	// per-request map overrides it. The datamaster-backed source plugs in here.
+	InstrumentCurrency string
+
 	// OTLPEndpoint is the OTel collector for span export (OBS-01). Empty ⇒ none.
 	OTLPEndpoint string
 }
+
+// DefaultFXSubjects is the FX-cache subscription when none is configured.
+var DefaultFXSubjects = []string{"market.fx.>"}
 
 // DefaultFillSubjects are the order.v1 fill FACT subjects the consumer folds
 // (mirrors the consume package's wire subjects — the same "mirror, don't import
@@ -50,6 +71,10 @@ func Load() (Config, error) {
 	if len(subjects) == 0 {
 		subjects = DefaultFillSubjects
 	}
+	fxSubjects := splitList(os.Getenv("ACCOUNTING_FX_SUBJECTS"))
+	if len(fxSubjects) == 0 {
+		fxSubjects = DefaultFXSubjects
+	}
 	return Config{
 		Listen:        envOr("ACCOUNTING_LISTEN", ":8080"),
 		LogLevel:      parseLevel(os.Getenv("ACCOUNTING_LOG_LEVEL")),
@@ -60,6 +85,10 @@ func Load() (Config, error) {
 		FillSubjects:  subjects,
 		DatabaseURL:   secret("ACCOUNTING_DATABASE_URL"),
 		OTLPEndpoint:  os.Getenv("ACCOUNTING_OTLP_ENDPOINT"),
+
+		FXPairs:            os.Getenv("ACCOUNTING_FX_PAIRS"),
+		FXSubjects:         fxSubjects,
+		InstrumentCurrency: os.Getenv("ACCOUNTING_INSTRUMENT_CURRENCY"),
 	}, nil
 }
 

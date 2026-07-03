@@ -29,12 +29,14 @@ func (r *Readiness) Ready() bool    { return r.ready.Load() }
 
 // Server is the HTTP handler.
 type Server struct {
-	logger    *slog.Logger
-	readiness *Readiness
-	store     ledger.Store
-	baseCcy   string
-	metrics   http.Handler
-	mux       *http.ServeMux
+	logger        *slog.Logger
+	readiness     *Readiness
+	store         ledger.Store
+	baseCcy       string
+	metrics       http.Handler
+	fxProvider    func() accounting.FXConverter
+	instrumentCcy accounting.InstrumentCurrency
+	mux           *http.ServeMux
 }
 
 // Option customizes the server.
@@ -42,6 +44,20 @@ type Option func(*Server)
 
 // WithMetrics mounts a Prometheus /metrics handler (OBS-01a).
 func WithMetrics(h http.Handler) Option { return func(s *Server) { s.metrics = h } }
+
+// WithLiveFX supplies a live FX provider (WIRE-01d): when a NAV request omits
+// `fx`, the endpoint values the multi-currency book using the point-in-time
+// converter this mints, instead of falling back to the domestic path. nil ⇒ no
+// live FX (the pre-01d behavior).
+func WithLiveFX(provider func() accounting.FXConverter) Option {
+	return func(s *Server) { s.fxProvider = provider }
+}
+
+// WithInstrumentCurrency sets the default instrument→reference-currency map (the
+// security-master join) used whenever a NAV request omits `instrument_currency`.
+func WithInstrumentCurrency(m accounting.InstrumentCurrency) Option {
+	return func(s *Server) { s.instrumentCcy = m }
+}
 
 // New builds the server over a journal store and base currency.
 func New(readiness *Readiness, logger *slog.Logger, store ledger.Store, baseCcy string, opts ...Option) *Server {
@@ -123,19 +139,41 @@ func (s *Server) handleNAV(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// computeNAV values the book, taking the multi-currency path (ComputeNAVInCurrency)
-// when the request carries an FX table, else the domestic single-currency path.
+// computeNAV values the book, choosing the FX source in precedence order: a
+// request-supplied `fx` table (explicit client override) wins; else the live FX
+// provider (WIRE-01d) values the multi-currency book with no `fx` in the
+// request; else the domestic single-currency path. The instrument→currency join
+// likewise prefers the request map, then the server default (the security
+// master). ComputeNAVInCurrency stays completeness-gated — a foreign holding
+// whose currency has no live rate yet fails the valuation loudly rather than
+// mis-valuing.
 func (s *Server) computeNAV(book *ledger.Book, prices map[string]*big.Rat, req navRequest) (accounting.NAV, error) {
-	if len(req.FX) == 0 {
-		return accounting.ComputeNAV(book, s.baseCcy, time.Now().UTC(), prices)
+	now := time.Now().UTC()
+
+	var fx accounting.FXConverter
+	switch {
+	case len(req.FX) > 0:
+		rates, err := toRatMap(req.FX)
+		if err != nil {
+			return accounting.NAV{}, err
+		}
+		fx = accounting.NewFXTable(s.baseCcy, rates)
+	case s.fxProvider != nil:
+		fx = s.fxProvider()
+	default:
+		return accounting.ComputeNAV(book, s.baseCcy, now, prices)
 	}
-	rates, err := toRatMap(req.FX)
-	if err != nil {
-		return accounting.NAV{}, err
+
+	return accounting.ComputeNAVInCurrency(book, s.baseCcy, now, prices, s.instrumentCurrencyFor(req), fx)
+}
+
+// instrumentCurrencyFor picks the instrument→currency join for a request: the
+// request-supplied map when present, else the server default.
+func (s *Server) instrumentCurrencyFor(req navRequest) accounting.InstrumentCurrency {
+	if len(req.InstrumentCurrency) > 0 {
+		return accounting.InstrumentCurrency(req.InstrumentCurrency)
 	}
-	fx := accounting.NewFXTable(s.baseCcy, rates)
-	return accounting.ComputeNAVInCurrency(book, s.baseCcy, time.Now().UTC(), prices,
-		accounting.InstrumentCurrency(req.InstrumentCurrency), fx)
+	return s.instrumentCcy
 }
 
 // --- reconcile ---------------------------------------------------------------

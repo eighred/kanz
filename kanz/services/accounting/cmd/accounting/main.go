@@ -23,8 +23,10 @@ import (
 
 	"github.com/kanz-eng/kanz/pkg/bus"
 	"github.com/kanz-eng/kanz/pkg/observability"
+	accounting "github.com/kanz-eng/kanz/services/accounting/internal"
 	"github.com/kanz-eng/kanz/services/accounting/internal/config"
 	"github.com/kanz-eng/kanz/services/accounting/internal/consume"
+	"github.com/kanz-eng/kanz/services/accounting/internal/fxfeed"
 	"github.com/kanz-eng/kanz/services/accounting/internal/ledger"
 	"github.com/kanz-eng/kanz/services/accounting/internal/server"
 )
@@ -65,10 +67,21 @@ func main() {
 	}
 	defer closeStore()
 
+	// Live FX for multi-currency NAV (WIRE-01d): build the latest-rate cache and
+	// the default instrument→currency join from config, and hand the server a
+	// live FX provider so NAV values a multi-currency book with no `fx` in the
+	// request. A bad reference spec fails loud at startup. Off when unconfigured.
+	opts := []server.Option{server.WithMetrics(obs.MetricsHandler())}
+	liveFX, err := buildLiveFX(cfg, &opts)
+	if err != nil {
+		logger.Error("FX config invalid", "err", err)
+		os.Exit(2)
+	}
+
 	readiness := &server.Readiness{}
 	httpSrv := &http.Server{
 		Addr:              cfg.Listen,
-		Handler:           server.New(readiness, logger, store, cfg.BaseCurrency, server.WithMetrics(obs.MetricsHandler())),
+		Handler:           server.New(readiness, logger, store, cfg.BaseCurrency, opts...),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 	go func() {
@@ -90,6 +103,17 @@ func main() {
 				stop()
 			}
 		}()
+		// Live FX feed (WIRE-01d): fold market.v1 FX quotes into the rate cache.
+		// Auxiliary to fill folding — a subscription failure degrades multi-
+		// currency NAV (a stale/missing rate fails that valuation loudly) rather
+		// than bringing the service down, so it does not stop() on error.
+		if liveFX != nil {
+			go func() {
+				if err := runFXFeed(ctx, cfg, liveFX, logger, obs); err != nil && !errors.Is(err, context.Canceled) {
+					logger.Error("FX feed stopped with error", "err", err)
+				}
+			}()
+		}
 	} else {
 		logger.Info("no ACCOUNTING_NATS_URL set — serving read/reconcile only (no fill folding)")
 	}
@@ -159,6 +183,81 @@ func runConsumer(ctx context.Context, cfg config.Config, store ledger.Store, log
 			defer wg.Done()
 			logger.Info("accounting subscribing", "subject", subject, "group", cfg.ConsumerGroup)
 			err := consumer.Subscribe(ctx, subject, cfg.ConsumerGroup, folder.Handle)
+			if err != nil && !errors.Is(err, context.Canceled) {
+				once.Do(func() {
+					firstErr = err
+					cancel()
+				})
+			}
+		}(subject)
+	}
+	wg.Wait()
+	return firstErr
+}
+
+// buildLiveFX parses the WIRE-01d FX configuration and, when configured, builds
+// the live FX cache and appends the server options that make NAV value a
+// multi-currency book without `fx` in the request: WithLiveFX (the point-in-time
+// converter) + WithInstrumentCurrency (the security-master join). It returns the
+// cache (nil when FX is unconfigured) for the composition root to subscribe. A
+// malformed reference spec is an error — a mistyped FX/currency map must fail
+// loud at startup, not silently mis-value.
+func buildLiveFX(cfg config.Config, opts *[]server.Option) (*fxfeed.LiveFX, error) {
+	instrCcy, err := fxfeed.ParsePairs(cfg.InstrumentCurrency)
+	if err != nil {
+		return nil, err
+	}
+	if len(instrCcy) > 0 {
+		*opts = append(*opts, server.WithInstrumentCurrency(accounting.InstrumentCurrency(instrCcy)))
+	}
+
+	pairs, err := fxfeed.ParsePairs(cfg.FXPairs)
+	if err != nil {
+		return nil, err
+	}
+	if len(pairs) == 0 {
+		return nil, nil // live FX disabled
+	}
+	liveFX := fxfeed.New(cfg.BaseCurrency, pairs)
+	*opts = append(*opts, server.WithLiveFX(liveFX.Converter))
+	return liveFX, nil
+}
+
+// runFXFeed subscribes the market.v1 FX subjects and folds each quote into the
+// live rate cache until ctx is canceled. It mirrors the fill consumer but is
+// non-fatal: the cache is a last-value store the multi-currency NAV path reads,
+// so a subscription failure degrades that path (a missing rate fails the
+// valuation, completeness-gated) rather than stopping the service. The cache
+// must SEE every FX event, so it subscribes under a per-source broadcast group
+// distinct from the fill consumer's load-balanced group.
+func runFXFeed(ctx context.Context, cfg config.Config, liveFX *fxfeed.LiveFX, logger *slog.Logger, obs *observability.Provider) error {
+	busMetrics := bus.NewBusMetrics(obs.Registry)
+	client, err := bus.DialNATS(ctx, bus.NATSConfig{URL: cfg.NATSURL, Name: cfg.Source + "-fx"})
+	if err != nil {
+		return err
+	}
+	defer func() { _ = client.Close() }()
+
+	consumer, err := bus.NewConsumer(client, bus.WithBusMetrics(busMetrics))
+	if err != nil {
+		return err
+	}
+
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	group := cfg.Source + "-fx"
+	var (
+		wg       sync.WaitGroup
+		once     sync.Once
+		firstErr error
+	)
+	for _, subject := range cfg.FXSubjects {
+		wg.Add(1)
+		go func(subject string) {
+			defer wg.Done()
+			logger.Info("accounting subscribing FX", "subject", subject, "group", group)
+			err := consumer.Subscribe(ctx, subject, group, liveFX.Handler)
 			if err != nil && !errors.Is(err, context.Canceled) {
 				once.Do(func() {
 					firstErr = err
