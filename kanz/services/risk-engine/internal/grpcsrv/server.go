@@ -48,11 +48,20 @@ import (
 type Server struct {
 	querypb.UnimplementedRiskQueryServiceServer
 	engine v1.Engine
+	// ownerTenant is the tenant that owns every portfolio this engine serves.
+	// The risk-engine is single-tenant per deployment (MT-01d: one cfg.Tenant,
+	// Postgres RLS scoped to it), so a portfolio visible here is owned by exactly
+	// this tenant. It is stamped on the WIRE-02a owner_tenant response field — the
+	// deny-by-default authz-gate input a governed client checks the caller against.
+	ownerTenant string
 }
 
-// New returns a Server over the given Engine.
-func New(engine v1.Engine) *Server {
-	return &Server{engine: engine}
+// New returns a Server over the given Engine, stamping ownerTenant as the owning
+// tenant of every served portfolio (WIRE-02a). Empty ownerTenant leaves the
+// owner_tenant response field blank, which a deny-by-default gate treats as a
+// denial — so an unconfigured tenant fails closed, never open.
+func New(engine v1.Engine, ownerTenant string) *Server {
+	return &Server{engine: engine, ownerTenant: ownerTenant}
 }
 
 // Register binds the server onto a grpc.ServiceRegistrar (the *grpc.Server
@@ -78,6 +87,11 @@ func (s *Server) Exposure(ctx context.Context, req *querypb.ExposureRequest) (*q
 		AsOf:         nonZeroTimestamp(resp.AsOf),
 		Set:          es,
 		QualityFlags: protoFlags(resp.QualityFlags),
+		OwnerTenant:  s.ownerTenant,
+		// SourcePosition is left unset: the api/v1.Engine surface does not yet
+		// expose the durable-log position its served state was folded to, so the
+		// citation seed is absent (documented as "not log-anchored"). It is
+		// populated when the engine surfaces its fold position.
 	}, nil
 }
 
@@ -99,6 +113,8 @@ func (s *Server) Measures(ctx context.Context, req *querypb.MeasuresRequest) (*q
 		AsOf:         nonZeroTimestamp(resp.AsOf),
 		Set:          ms,
 		QualityFlags: protoFlags(resp.QualityFlags),
+		OwnerTenant:  s.ownerTenant,
+		// SourcePosition unset (see Exposure).
 	}, nil
 }
 

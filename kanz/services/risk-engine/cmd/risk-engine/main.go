@@ -326,7 +326,9 @@ func serveQueryGRPC(ctx context.Context, cfg config.Config, eng *engine.EngineIm
 		return nil, err
 	}
 	grpcSrv := grpc.NewServer(opts...)
-	grpcsrv.New(eng).Register(grpcSrv)
+	// The engine is single-tenant per deployment (cfg.Tenant); grpcsrv stamps it
+	// as the owning tenant of every served portfolio (WIRE-02a owner_tenant).
+	grpcsrv.New(eng, cfg.Tenant).Register(grpcSrv)
 
 	go func() {
 		logger.Info("risk query gRPC listening", "addr", cfg.GRPCListen)

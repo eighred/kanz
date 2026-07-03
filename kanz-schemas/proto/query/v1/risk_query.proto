@@ -32,6 +32,7 @@ package query.v1;
 import "google/protobuf/duration.proto";
 import "google/protobuf/timestamp.proto";
 import "common/v1/decimal.proto";
+import "common/v1/log_position.proto";
 import "domain/v1/exposure.proto";
 import "domain/v1/measure.proto";
 
@@ -102,6 +103,21 @@ message ExposureResponse {
   // set is the exposure aggregate, the same payload exposure FACTs carry.
   domain.v1.ExposureSet set = 3;
   repeated QualityFlag quality_flags = 4;
+
+  // owner_tenant is the tenant that owns the queried portfolio (WIRE-02a).
+  // It is the deny-by-default authz-gate input a governed client checks the
+  // caller against before returning risk state — without it a query.v1-only
+  // client cannot enforce cross-tenant isolation and the gate always passes.
+  // Empty ⇒ the engine has no ownership record for the portfolio, which a
+  // deny-by-default gate must treat as a denial, not an allow.
+  string owner_tenant = 5;
+
+  // source_position is the durable-log coordinate the served state was folded
+  // up to (WIRE-02a) — the citation seed: it lets a consumer cite the exact
+  // point in the log the risk figure was derived from, and reproduce it by
+  // replaying to that position. Unset ⇒ the state is not log-anchored (e.g. an
+  // in-memory engine with no durable log).
+  common.v1.LogPosition source_position = 6;
 }
 
 // MeasuresRequest scopes a risk-measure query.
@@ -119,6 +135,14 @@ message MeasuresResponse {
   google.protobuf.Timestamp as_of = 2;
   domain.v1.RiskMeasureSet set = 3;
   repeated QualityFlag quality_flags = 4;
+
+  // owner_tenant is the tenant that owns the queried portfolio (WIRE-02a) —
+  // the authz-gate input; see ExposureResponse.owner_tenant.
+  string owner_tenant = 5;
+
+  // source_position is the durable-log coordinate the served state was folded
+  // up to (WIRE-02a) — the citation seed; see ExposureResponse.source_position.
+  common.v1.LogPosition source_position = 6;
 }
 
 // EvaluateScenarioRequest evaluates a what-if scenario against current state.

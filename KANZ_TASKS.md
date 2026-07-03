@@ -8,7 +8,7 @@ Execution board — not history. Task IDs are module-prefixed and scoped to 1–
 
 _Active tranche: **WIRE-02 (query.v1 ownership extension)**. WIRE-01 (a–f, live wiring) is complete: the delivered feed/consumer/calibrator/filing seams now run in composition roots (see DONE). PARITY-01…06 is complete to its in-repo ceiling. WIRE-02 closes the last carried-forward PARITY-04b half — the `query.v1` risk-state responses surface neither the owning tenant nor a source-log-position, so a query.v1-only governed client would make the cross-tenant authz gate always pass. Buildable on this box (schema change + buf regen), no credentials._
 
-**Recommended next: WIRE-02a** (extend the `query.v1` risk-state schema with an owning-tenant field + a source-log-position, then regenerate the SDK). This is the dependency root: WIRE-02b's `governed.Client` needs the extended surface before it can feed the copilot authz gate + citation seed and retire `StubClient`.
+**Recommended next: WIRE-02b** (`governed.Client` over the extended `query.v1`). WIRE-02a landed: `query.v1` `ExposureResponse`/`MeasuresResponse` now carry `owner_tenant` (the deny-by-default authz-gate input) + `source_position` (the citation seed); the risk-engine gRPC server stamps `owner_tenant` from its single-tenant `cfg.Tenant`. Next, implement `governed.Client` over that surface and retire `StubClient` at `cmd/copilot`, feeding the deny-by-default authz gate + citation seed.
 
 ---
 
@@ -31,8 +31,9 @@ _Dependency-ordered. The buildable tranches (M0–M2) need no credentials and co
 
 _Closes the last carried-forward PARITY-04b half. Verified gap: `query.v1` RiskQueryService responses surface neither the portfolio's owning tenant (the `OwnerTenant` authz-gate input) nor a source-event-id (the citation seed), so a query.v1-only governed client would make the cross-tenant authz gate always pass. Buildable on this box (schema change + buf regen), no credentials._
 
-- [ ] **WIRE-02a** Extend the `query.v1` risk-state schema with an owning-tenant field + a source-log-position (the LogPosition the state was folded from); regenerate the SDK · `kanz-schemas/proto/query/`, `kanz/gen`
 - [ ] **WIRE-02b** Implement `governed.Client` over the extended `query.v1`, feeding the copilot deny-by-default authz gate (`OwnerTenant`) + the citation seed; retire `StubClient` at `cmd/copilot` behind the existing seam · `kanz/services/copilot/`
+
+_WIRE-02a landed: `query.v1` `ExposureResponse`/`MeasuresResponse` carry `owner_tenant` + `source_position` (`common.v1.LogPosition`); the risk-engine gRPC server stamps `owner_tenant` from `cfg.Tenant` (single-tenant per deployment). `source_position` is left unset until the `api/v1.Engine` surfaces the durable-log fold position — an empty `owner_tenant` fails a deny-by-default gate CLOSED, so the missing citation seed never weakens the authz decision._
 
 ### PARITY-07 — SDK distribution (credential-gated)
 

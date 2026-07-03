@@ -56,7 +56,7 @@ func TestExposureMapsSetAndFlags(t *testing.T) {
 			PortfolioID: "PF1", AsOf: asOf, Set: es,
 			QualityFlags: []v1.QualityFlag{v1.QualityFlagDegraded},
 		}, nil
-	}})
+	}}, "acme")
 
 	resp, err := srv.Exposure(context.Background(), &querypb.ExposureRequest{PortfolioId: "PF1"})
 	if err != nil {
@@ -72,6 +72,10 @@ func TestExposureMapsSetAndFlags(t *testing.T) {
 	if fl := resp.GetQualityFlags(); len(fl) != 1 || fl[0] != querypb.QualityFlag_QUALITY_FLAG_DEGRADED {
 		t.Errorf("flags = %v", fl)
 	}
+	// WIRE-02a: the owning tenant is stamped as the authz-gate input.
+	if resp.GetOwnerTenant() != "acme" {
+		t.Errorf("owner_tenant = %q, want acme", resp.GetOwnerTenant())
+	}
 }
 
 func TestMeasuresPassesFilterAndConverts(t *testing.T) {
@@ -83,7 +87,7 @@ func TestMeasuresPassesFilterAndConverts(t *testing.T) {
 			t.Errorf("measure filter not forwarded: %v", r.Measures)
 		}
 		return v1.MeasuresResponse{PortfolioID: "PF1", AsOf: asOf, Set: ms}, nil
-	}})
+	}}, "acme")
 
 	resp, err := srv.Measures(context.Background(), &querypb.MeasuresRequest{
 		PortfolioId: "PF1", Measures: []string{"VaR99"},
@@ -102,7 +106,7 @@ func TestEvaluateScenarioDecodesShocks(t *testing.T) {
 	srv := grpcsrv.New(fakeEngine{scenario: func(r v1.ScenarioRequest) (v1.ScenarioResponse, error) {
 		gotShocks = r.Shocks
 		return v1.ScenarioResponse{PortfolioID: "PF1", Projected: ms}, nil
-	}})
+	}}, "acme")
 
 	_, err := srv.EvaluateScenario(context.Background(), &querypb.EvaluateScenarioRequest{
 		PortfolioId: "PF1",
@@ -128,7 +132,7 @@ func TestEvaluateScenarioDecodesShocks(t *testing.T) {
 }
 
 func TestScenarioShockWithNoKindIsInvalidArgument(t *testing.T) {
-	srv := grpcsrv.New(fakeEngine{})
+	srv := grpcsrv.New(fakeEngine{}, "acme")
 	_, err := srv.EvaluateScenario(context.Background(), &querypb.EvaluateScenarioRequest{
 		PortfolioId: "PF1",
 		Shocks:      []*querypb.ScenarioShock{{}}, // empty oneof
@@ -141,7 +145,7 @@ func TestScenarioShockWithNoKindIsInvalidArgument(t *testing.T) {
 func TestHealthMapsMode(t *testing.T) {
 	srv := grpcsrv.New(fakeEngine{health: func() (v1.Health, error) {
 		return v1.Health{Mode: v1.ModeDegraded, AsOf: asOf, Staleness: 90 * time.Second}, nil
-	}})
+	}}, "acme")
 	resp, err := srv.Health(context.Background(), &querypb.HealthRequest{})
 	if err != nil {
 		t.Fatal(err)
@@ -168,7 +172,7 @@ func TestErrorMapping(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			srv := grpcsrv.New(fakeEngine{exposure: func(v1.ExposureRequest) (v1.ExposureResponse, error) {
 				return v1.ExposureResponse{}, tc.err
-			}})
+			}}, "acme")
 			_, err := srv.Exposure(context.Background(), &querypb.ExposureRequest{PortfolioId: "PF1"})
 			if status.Code(err) != tc.want {
 				t.Errorf("err %v mapped to %v, want %v", tc.err, status.Code(err), tc.want)
@@ -185,7 +189,7 @@ func TestExposureAsOfDecodeAndZeroElision(t *testing.T) {
 	srv := grpcsrv.New(fakeEngine{exposure: func(r v1.ExposureRequest) (v1.ExposureResponse, error) {
 		gotAsOf = r.AsOf
 		return v1.ExposureResponse{PortfolioID: "PF1", Set: es}, nil // zero AsOf
-	}})
+	}}, "acme")
 	req := &querypb.ExposureRequest{PortfolioId: "PF1", AsOf: timestamppb.New(asOf)}
 	resp, err := srv.Exposure(context.Background(), req)
 	if err != nil {
