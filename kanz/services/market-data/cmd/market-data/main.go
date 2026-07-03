@@ -7,6 +7,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -22,6 +23,7 @@ import (
 	"github.com/kanz-eng/kanz/pkg/bus"
 	"github.com/kanz-eng/kanz/pkg/observability"
 	"github.com/kanz-eng/kanz/services/market-data/internal/config"
+	"github.com/kanz-eng/kanz/services/market-data/internal/feed"
 	"github.com/kanz-eng/kanz/services/market-data/internal/server"
 )
 
@@ -67,6 +69,19 @@ func main() {
 			stop()
 		}
 	}()
+
+	// Optional publisher (WIRE-01a): stream normalized market events ONTO the
+	// spine. Runs concurrently with the consumer below; both share ctx so SIGTERM
+	// stops them together. Empty MARKET_DATA_FEED ⇒ consumer-only (default).
+	if cfg.Feed != "" && cfg.NATSURL != "" {
+		go func() {
+			if err := runFeed(ctx, cfg, logger, obs); err != nil && !errors.Is(err, context.Canceled) {
+				logger.Error("feed publisher stopped with error", "err", err)
+			}
+		}()
+	} else if cfg.Feed != "" {
+		logger.Warn("MARKET_DATA_FEED set but no MARKET_DATA_NATS_URL — publisher disabled")
+	}
 
 	if cfg.NATSURL != "" {
 		if err := runIngest(ctx, cfg, readiness, logger, obs); err != nil {
@@ -146,6 +161,60 @@ func runIngest(ctx context.Context, cfg config.Config, readiness *server.Readine
 	wg.Wait()
 	readiness.Set(false)
 	return firstErr
+}
+
+// runFeed builds the market-data PUBLISHER (WIRE-01a) and streams normalized
+// events onto the spine until ctx is canceled. The pipeline is
+// adapter → Gate (DQ, PARITY-01g) → BusSink (PARITY-01a) → bus.Producer, the
+// same seam a live vendor adapter binds — only the Adapter differs. Today the
+// dependency-free SimAdapter replays a synthetic session (offline/local feed);
+// a real Bloomberg/Refinitiv/ICE Source plugs in here where its SDK exists.
+func runFeed(ctx context.Context, cfg config.Config, logger *slog.Logger, obs *observability.Provider) error {
+	if cfg.Feed != "sim" {
+		return fmt.Errorf("market-data: unknown MARKET_DATA_FEED %q (want \"sim\" or empty)", cfg.Feed)
+	}
+	instruments := cfg.FeedInstruments
+	if len(instruments) == 0 {
+		instruments = []string{"AAPL", "MSFT", "GOOG"}
+	}
+
+	busMetrics := bus.NewBusMetrics(obs.Registry)
+	client, err := bus.DialNATS(ctx, bus.NATSConfig{URL: cfg.NATSURL, Name: cfg.Source + "-feed"})
+	if err != nil {
+		return err
+	}
+	defer func() { _ = client.Close() }()
+
+	producer, err := bus.NewProducer(client, bus.ProducerConfig{
+		Source: cfg.Source + "-feed", ProducerVersion: version(), Metrics: busMetrics,
+	})
+	if err != nil {
+		return err
+	}
+	sink, err := feed.NewBusSink(producer, cfg.FeedAssetClass)
+	if err != nil {
+		return err
+	}
+	// Staleness disabled (budget 0): the synthetic session carries fixed
+	// timestamps, so wall-clock staleness would false-drop it. The Gate stays in
+	// the path to prove the composition and still enforce ordering/gap; a single
+	// monotonic pass trips neither. A live vendor feed sets a real budget + loops.
+	gated := feed.NewGate(sink, 0, func(b feed.Breach) {
+		logger.Warn("feed dq breach", "kind", b.Kind, "instrument", b.InstrumentID, "detail", b.Detail)
+	})
+
+	// The SimAdapter dumps its session at full speed (no rate limit) — so this is
+	// a bounded synthetic BURST that smoke-tests the publish path end-to-end, then
+	// the service continues serving/consuming. A real adapter streams continuously
+	// via Reconnect; only the Adapter differs, the Gate→BusSink→Producer tail is
+	// identical.
+	adapter := &feed.SimAdapter{
+		Name:    "SIM",
+		Session: feed.SyntheticSession(time.Now(), time.Second, instruments, 100),
+	}
+	logger.Info("market-data feed publisher starting",
+		"adapter", adapter.Vendor(), "instruments", instruments, "asset_class", cfg.FeedAssetClass)
+	return adapter.Run(ctx, instruments, gated)
 }
 
 // openStore selects the durable Postgres/Timescale store when a DSN is set,

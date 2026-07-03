@@ -31,6 +31,19 @@ type Config struct {
 	// history on restart (local/dev).
 	DatabaseURL string
 
+	// Feed selects the market-data PUBLISHER (WIRE-01a) — the adapter that
+	// streams normalized events ONTO the spine, distinct from the consumer above
+	// that folds them into history. Empty ⇒ no publisher (the default; the
+	// service only consumes). "sim" runs the dependency-free SimAdapter over a
+	// synthetic session — the offline/local feed. A real vendor Source binds here
+	// at the composition root where its SDK/creds exist (Bloomberg/Refinitiv/ICE).
+	Feed string
+	// FeedInstruments are the instrument_ids the publisher streams. Comma-separated.
+	FeedInstruments []string
+	// FeedAssetClass is the middle segment of the emitted event_type
+	// (market.<assetClass>.<variant>); default "equity".
+	FeedAssetClass string
+
 	// OTLPEndpoint is the OTel collector (host:port) for span export (OBS-01).
 	OTLPEndpoint string
 }
@@ -52,6 +65,10 @@ func Load() (Config, error) {
 		Subjects:      subjects,
 		DatabaseURL:   secret("MARKET_DATA_DATABASE_URL"),
 		OTLPEndpoint:  os.Getenv("MARKET_DATA_OTLP_ENDPOINT"),
+
+		Feed:            os.Getenv("MARKET_DATA_FEED"),
+		FeedInstruments: splitList(os.Getenv("MARKET_DATA_FEED_INSTRUMENTS")),
+		FeedAssetClass:  envOr("MARKET_DATA_FEED_ASSET_CLASS", "equity"),
 	}, nil
 }
 
