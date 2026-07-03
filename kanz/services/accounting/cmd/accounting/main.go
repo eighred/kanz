@@ -24,6 +24,7 @@ import (
 	"github.com/kanz-eng/kanz/pkg/bus"
 	"github.com/kanz-eng/kanz/pkg/observability"
 	accounting "github.com/kanz-eng/kanz/services/accounting/internal"
+	"github.com/kanz-eng/kanz/services/accounting/internal/cashmove"
 	"github.com/kanz-eng/kanz/services/accounting/internal/config"
 	"github.com/kanz-eng/kanz/services/accounting/internal/consume"
 	"github.com/kanz-eng/kanz/services/accounting/internal/fxfeed"
@@ -76,6 +77,21 @@ func main() {
 	if err != nil {
 		logger.Error("FX config invalid", "err", err)
 		os.Exit(2)
+	}
+
+	// Cash-movement producer (WIRE-01f): with a broker configured, mount the
+	// cash-movement endpoint whose posts are EMITTED as accounting.v1 FACTs and
+	// folded back by the consumer below — the event-sourced path, so booking a
+	// subscription/redemption/fee is replayable. A dial failure is fatal (a
+	// configured broker that won't connect is a misconfiguration).
+	if cfg.NATSURL != "" {
+		pub, closePub, err := buildCashPublisher(ctx, cfg)
+		if err != nil {
+			logger.Error("cash publisher init failed", "err", err)
+			os.Exit(2)
+		}
+		defer closePub()
+		opts = append(opts, server.WithCashPublisher(pub))
 	}
 
 	readiness := &server.Readiness{}
@@ -177,22 +193,50 @@ func runConsumer(ctx context.Context, cfg config.Config, store ledger.Store, log
 		once     sync.Once
 		firstErr error
 	)
-	for _, subject := range cfg.FillSubjects {
+	// Two folded FACT streams into the one journal: order.v1 fills → EntryTrade
+	// (WIRE-01b) and accounting.v1 cash movements → EntryCash/Fee (WIRE-01f).
+	subscribe := func(subject string, handler bus.EventHandler) {
 		wg.Add(1)
-		go func(subject string) {
+		go func() {
 			defer wg.Done()
 			logger.Info("accounting subscribing", "subject", subject, "group", cfg.ConsumerGroup)
-			err := consumer.Subscribe(ctx, subject, cfg.ConsumerGroup, folder.Handle)
+			err := consumer.Subscribe(ctx, subject, cfg.ConsumerGroup, handler)
 			if err != nil && !errors.Is(err, context.Canceled) {
 				once.Do(func() {
 					firstErr = err
 					cancel()
 				})
 			}
-		}(subject)
+		}()
+	}
+	for _, subject := range cfg.FillSubjects {
+		subscribe(subject, folder.Handle)
+	}
+	for _, subject := range cfg.CashSubjects {
+		subscribe(subject, folder.HandleCash)
 	}
 	wg.Wait()
 	return firstErr
+}
+
+// buildCashPublisher dials a producer connection and builds the WIRE-01f
+// cash-movement publisher. It returns a close func for the producer client.
+func buildCashPublisher(ctx context.Context, cfg config.Config) (*cashmove.Publisher, func(), error) {
+	client, err := bus.DialNATS(ctx, bus.NATSConfig{URL: cfg.NATSURL, Name: cfg.Source + "-producer"})
+	if err != nil {
+		return nil, nil, err
+	}
+	producer, err := bus.NewProducer(client, bus.ProducerConfig{Source: cfg.Source, ProducerVersion: version()})
+	if err != nil {
+		_ = client.Close()
+		return nil, nil, err
+	}
+	pub, err := cashmove.NewPublisher(producer, nil)
+	if err != nil {
+		_ = client.Close()
+		return nil, nil, err
+	}
+	return pub, func() { _ = client.Close() }, nil
 }
 
 // buildLiveFX parses the WIRE-01d FX configuration and, when configured, builds

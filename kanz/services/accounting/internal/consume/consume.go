@@ -16,10 +16,12 @@ import (
 	"fmt"
 	"time"
 
+	accountingpb "github.com/kanz-eng/kanz-schemas-go/accounting/v1"
 	envelopepb "github.com/kanz-eng/kanz-schemas-go/envelope/v1"
 	orderpb "github.com/kanz-eng/kanz-schemas-go/order/v1"
 	"google.golang.org/protobuf/proto"
 
+	"github.com/kanz-eng/kanz/services/accounting/internal/dec"
 	"github.com/kanz-eng/kanz/services/accounting/internal/ledger"
 )
 
@@ -29,6 +31,16 @@ import (
 const (
 	orderEventFilled          = "order.order.filled"
 	orderEventPartiallyFilled = "order.order.partially_filled"
+)
+
+// Cash-movement FACT event types (WIRE-01f): the accounting.v1.LedgerEntry
+// FACTs the cashmove.Publisher emits for non-trade cash legs. The Folder folds
+// them into the same journal the fills land in, so subscriptions/redemptions/
+// fees reach NAV.
+const (
+	cashEventSubscription = "accounting.cash.subscription"
+	cashEventRedemption   = "accounting.cash.redemption"
+	cashEventFee          = "accounting.cash.fee"
 )
 
 // Folder is the bus.EventHandler that folds fill FACTs into the ledger journal.
@@ -67,6 +79,67 @@ func (f *Folder) Handle(ctx context.Context, env *envelopepb.Envelope, payload [
 	}
 	entry := ledger.FromFill(portfolioID, fill, f.cashCurrency, knowledgeTime(env))
 	return f.store.Append(ctx, entry)
+}
+
+// HandleCash is the bus.EventHandler for the cash-movement FACT subjects
+// (WIRE-01f). It decodes an accounting.v1.LedgerEntry cash/fee FACT into a
+// ledger cash Event and appends it — the non-trade counterpart of Handle. A
+// non-cash event type is acked (not this handler's concern); a malformed or
+// unappendable cash FACT is returned (nack/DLQ) so cash-of-record loss is loud.
+// Idempotency rides the entry id (the producer's "cash:"+MovementID), so a
+// redelivery is a no-op via Store.Append.
+func (f *Folder) HandleCash(ctx context.Context, env *envelopepb.Envelope, payload []byte) error {
+	entry, err := decodeCash(env.GetEventType(), payload, knowledgeTime(env))
+	if err != nil {
+		return fmt.Errorf("consume: %s decode: %w", env.GetEventType(), err)
+	}
+	if entry == nil {
+		return nil // not a cash-movement event; ack
+	}
+	return f.store.Append(ctx, entry)
+}
+
+// decodeCash maps a cash-movement FACT to a ledger cash Event. It returns a nil
+// event (no error) for a non-cash event type. The knowledge time falls back to
+// the envelope's when the entry omits it.
+func decodeCash(eventType string, payload []byte, envKnowledge time.Time) (*ledger.Event, error) {
+	var entryType ledger.EntryType
+	switch eventType {
+	case cashEventSubscription, cashEventRedemption:
+		entryType = ledger.EntryCash
+	case cashEventFee:
+		entryType = ledger.EntryFee
+	default:
+		return nil, nil
+	}
+	var le accountingpb.LedgerEntry
+	if err := proto.Unmarshal(payload, &le); err != nil {
+		return nil, err
+	}
+	if le.GetEntryId() == "" || le.GetPortfolioId() == "" {
+		return nil, fmt.Errorf("cash entry missing id or portfolio")
+	}
+	if le.GetCash() == nil || le.GetCashCurrency() == "" {
+		return nil, fmt.Errorf("cash entry %q missing cash leg or currency", le.GetEntryId())
+	}
+	knowledge := le.GetKnowledgeTime().AsTime()
+	if knowledge.IsZero() {
+		knowledge = envKnowledge
+	}
+	effective := le.GetEffectiveTime().AsTime()
+	if effective.IsZero() {
+		effective = knowledge
+	}
+	return &ledger.Event{
+		EntryID:      le.GetEntryId(),
+		PortfolioID:  le.GetPortfolioId(),
+		Type:         entryType,
+		Cash:         dec.FromProto(le.GetCash()),
+		CashCurrency: le.GetCashCurrency(),
+		Effective:    effective,
+		Knowledge:    knowledge,
+		SourceRef:    le.GetSourceRef(),
+	}, nil
 }
 
 // knowledgeTime is when the book learned of the fill: the envelope ingestion

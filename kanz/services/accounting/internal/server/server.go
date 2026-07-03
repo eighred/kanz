@@ -8,7 +8,9 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"math/big"
 	"net/http"
@@ -16,6 +18,7 @@ import (
 	"time"
 
 	accounting "github.com/kanz-eng/kanz/services/accounting/internal"
+	"github.com/kanz-eng/kanz/services/accounting/internal/cashmove"
 	"github.com/kanz-eng/kanz/services/accounting/internal/ledger"
 	"github.com/kanz-eng/kanz/services/accounting/internal/recon"
 )
@@ -27,6 +30,13 @@ type Readiness struct{ ready atomic.Bool }
 func (r *Readiness) Set(ready bool) { r.ready.Store(ready) }
 func (r *Readiness) Ready() bool    { return r.ready.Load() }
 
+// CashPublisher emits a cash movement as an accounting.v1 FACT (WIRE-01f). The
+// composition root injects the bus-backed cashmove.Publisher when a broker is
+// configured; without it the cash-movement endpoint is not mounted.
+type CashPublisher interface {
+	Publish(ctx context.Context, m cashmove.CashMovement) error
+}
+
 // Server is the HTTP handler.
 type Server struct {
 	logger        *slog.Logger
@@ -36,6 +46,7 @@ type Server struct {
 	metrics       http.Handler
 	fxProvider    func() accounting.FXConverter
 	instrumentCcy accounting.InstrumentCurrency
+	cashPublisher CashPublisher
 	mux           *http.ServeMux
 }
 
@@ -59,6 +70,13 @@ func WithInstrumentCurrency(m accounting.InstrumentCurrency) Option {
 	return func(s *Server) { s.instrumentCcy = m }
 }
 
+// WithCashPublisher wires the cash-movement FACT producer (WIRE-01f) and mounts
+// the POST /v1/portfolios/{id}/cash-movements endpoint. Absent ⇒ the endpoint is
+// not mounted (no broker configured).
+func WithCashPublisher(p CashPublisher) Option {
+	return func(s *Server) { s.cashPublisher = p }
+}
+
 // New builds the server over a journal store and base currency.
 func New(readiness *Readiness, logger *slog.Logger, store ledger.Store, baseCcy string, opts ...Option) *Server {
 	s := &Server{logger: logger, readiness: readiness, store: store, baseCcy: baseCcy, mux: http.NewServeMux()}
@@ -79,6 +97,9 @@ func (s *Server) routes() {
 	}
 	s.mux.HandleFunc("POST /v1/portfolios/{id}/nav", s.handleNAV)
 	s.mux.HandleFunc("POST /v1/portfolios/{id}/reconcile", s.handleReconcile)
+	if s.cashPublisher != nil {
+		s.mux.HandleFunc("POST /v1/portfolios/{id}/cash-movements", s.handleCashMovement)
+	}
 }
 
 func (s *Server) handleHealthz(w http.ResponseWriter, _ *http.Request) {
@@ -224,6 +245,79 @@ func (s *Server) handleReconcile(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"breaks": out, "count": len(out)})
+}
+
+// --- cash movements (WIRE-01f) -----------------------------------------------
+
+type cashMovementRequest struct {
+	MovementID string `json:"movement_id"`
+	Kind       string `json:"kind"`      // subscription | redemption | fee
+	Amount     string `json:"amount"`    // positive decimal magnitude
+	Currency   string `json:"currency"`  // ISO 4217; default base currency
+	Effective  string `json:"effective"` // optional RFC-3339
+	SourceRef  string `json:"source_ref"`
+}
+
+// handleCashMovement books a non-trade cash movement by EMITTING it as a FACT
+// (not writing the store directly) — the event-sourced path: the FACT lands on
+// the bus and the WIRE-01f consumer folds it into the journal, so a replay
+// reproduces the book. Returns 202 Accepted (the fold is asynchronous).
+func (s *Server) handleCashMovement(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	var req cashMovementRequest
+	if !decode(w, r, &req) {
+		return
+	}
+	kind, err := parseKind(req.Kind)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	amount, err := parseRat(req.Amount)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	ccy := req.Currency
+	if ccy == "" {
+		ccy = s.baseCcy
+	}
+	var eff time.Time
+	if req.Effective != "" {
+		if eff, err = time.Parse(time.RFC3339, req.Effective); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid effective time"})
+			return
+		}
+	}
+	mv := cashmove.CashMovement{
+		MovementID:  req.MovementID,
+		PortfolioID: id,
+		Kind:        kind,
+		Amount:      amount,
+		Currency:    ccy,
+		Effective:   eff,
+		SourceRef:   req.SourceRef,
+	}
+	if err := s.cashPublisher.Publish(r.Context(), mv); err != nil {
+		// A validation error is the client's (bad movement); anything else is a
+		// publish failure (broker) — surface both, but a bad request is 400.
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusAccepted, map[string]string{"status": "accepted", "movement_id": req.MovementID})
+}
+
+func parseKind(s string) (cashmove.Kind, error) {
+	switch s {
+	case "subscription":
+		return cashmove.Subscription, nil
+	case "redemption":
+		return cashmove.Redemption, nil
+	case "fee":
+		return cashmove.Fee, nil
+	default:
+		return 0, fmt.Errorf("accounting: unknown cash movement kind %q (want subscription|redemption|fee)", s)
+	}
 }
 
 // --- helpers -----------------------------------------------------------------

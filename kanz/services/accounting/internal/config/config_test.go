@@ -10,7 +10,7 @@ func TestLoadDefaults(t *testing.T) {
 	// fill-folding consumer wiring (WIRE-01b).
 	for _, k := range []string{
 		"ACCOUNTING_NATS_URL", "ACCOUNTING_SOURCE", "ACCOUNTING_CONSUMER_GROUP",
-		"ACCOUNTING_FILL_SUBJECTS", "ACCOUNTING_DATABASE_URL", "ACCOUNTING_BASE_CURRENCY",
+		"ACCOUNTING_FILL_SUBJECTS", "ACCOUNTING_CASH_SUBJECTS", "ACCOUNTING_DATABASE_URL", "ACCOUNTING_BASE_CURRENCY",
 	} {
 		t.Setenv(k, "")
 	}
@@ -30,6 +30,9 @@ func TestLoadDefaults(t *testing.T) {
 	}
 	if !reflect.DeepEqual(cfg.FillSubjects, DefaultFillSubjects) {
 		t.Errorf("FillSubjects=%v want %v", cfg.FillSubjects, DefaultFillSubjects)
+	}
+	if !reflect.DeepEqual(cfg.CashSubjects, DefaultCashSubjects) {
+		t.Errorf("CashSubjects=%v want %v", cfg.CashSubjects, DefaultCashSubjects)
 	}
 	if cfg.BaseCurrency != "USD" {
 		t.Errorf("BaseCurrency=%q want USD", cfg.BaseCurrency)

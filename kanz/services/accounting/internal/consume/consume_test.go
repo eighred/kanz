@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	accountingpb "github.com/kanz-eng/kanz-schemas-go/accounting/v1"
 	commonpb "github.com/kanz-eng/kanz-schemas-go/common/v1"
 	envelopepb "github.com/kanz-eng/kanz-schemas-go/envelope/v1"
 	orderpb "github.com/kanz-eng/kanz-schemas-go/order/v1"
@@ -15,7 +16,7 @@ import (
 	"github.com/kanz-eng/kanz/services/accounting/internal/ledger"
 )
 
-func dec(coef int64, exp int32) *commonpb.Decimal {
+func decv(coef int64, exp int32) *commonpb.Decimal {
 	return &commonpb.Decimal{Coefficient: coef, Exponent: exp}
 }
 
@@ -53,7 +54,7 @@ func TestFolderFoldsFillIntoLedger(t *testing.T) {
 	}
 
 	// BUY 100 @ 150 → +100 position, -15000 cash.
-	payload := filledPayload(t, "PORT-1", "F1", "AAPL", orderpb.Side_SIDE_BUY, dec(100, 0), dec(150, 0), t0)
+	payload := filledPayload(t, "PORT-1", "F1", "AAPL", orderpb.Side_SIDE_BUY, decv(100, 0), decv(150, 0), t0)
 	if err := f.Handle(ctx, env, payload); err != nil {
 		t.Fatalf("handle buy: %v", err)
 	}
@@ -71,6 +72,83 @@ func TestFolderFoldsFillIntoLedger(t *testing.T) {
 	}
 	if got := book.CashBalance("USD"); got.Cmp(big.NewRat(-15000, 1)) != 0 {
 		t.Fatalf("cash = %v, want -15000", got)
+	}
+}
+
+func cashPayload(t *testing.T, entryID, portfolioID string, entryType accountingpb.EntryType, cash *commonpb.Decimal, ccy string, eff time.Time) []byte {
+	t.Helper()
+	le := &accountingpb.LedgerEntry{
+		EntryId:       entryID,
+		PortfolioId:   portfolioID,
+		EntryType:     entryType,
+		Cash:          cash,
+		CashCurrency:  ccy,
+		EffectiveTime: timestamppb.New(eff),
+		KnowledgeTime: timestamppb.New(eff),
+	}
+	b, err := proto.Marshal(le)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	return b
+}
+
+// WIRE-01f: cash-movement FACTs fold into the same journal — a subscription adds
+// cash, a fee removes it — and the fold is idempotent on the entry id.
+func TestFolderFoldsCashMovements(t *testing.T) {
+	st := ledger.NewMemoryStore()
+	f, _ := NewFolder(st, "USD")
+	ctx := context.Background()
+	t0 := time.Unix(1_700_000_000, 0).UTC()
+
+	sub := cashPayload(t, "cash:S1", "PORT-1", accountingpb.EntryType_ENTRY_TYPE_CASH, decv(100000, 0), "USD", t0)
+	subEnv := &envelopepb.Envelope{EventType: cashEventSubscription, IngestionTime: timestamppb.New(t0)}
+	if err := f.HandleCash(ctx, subEnv, sub); err != nil {
+		t.Fatalf("handle subscription: %v", err)
+	}
+	// Idempotent redelivery.
+	if err := f.HandleCash(ctx, subEnv, sub); err != nil {
+		t.Fatalf("handle redelivery: %v", err)
+	}
+
+	fee := cashPayload(t, "cash:F1", "PORT-1", accountingpb.EntryType_ENTRY_TYPE_FEE, decv(-250, 0), "USD", t0)
+	feeEnv := &envelopepb.Envelope{EventType: cashEventFee, IngestionTime: timestamppb.New(t0)}
+	if err := f.HandleCash(ctx, feeEnv, fee); err != nil {
+		t.Fatalf("handle fee: %v", err)
+	}
+
+	book, err := ledger.MaterializeCurrent(ctx, st, "PORT-1")
+	if err != nil {
+		t.Fatalf("materialize: %v", err)
+	}
+	// 100000 subscription (idempotent) − 250 fee = 99750.
+	if got := book.CashBalance("USD"); got.Cmp(big.NewRat(99750, 1)) != 0 {
+		t.Fatalf("cash = %v, want 99750", got)
+	}
+}
+
+// A non-cash event is acked and ignored by the cash handler.
+func TestHandleCashIgnoresNonCashEvent(t *testing.T) {
+	st := ledger.NewMemoryStore()
+	f, _ := NewFolder(st, "USD")
+	env := &envelopepb.Envelope{EventType: orderEventFilled}
+	if err := f.HandleCash(context.Background(), env, []byte("ignored")); err != nil {
+		t.Fatalf("want ack (nil) for non-cash event, got %v", err)
+	}
+}
+
+// A malformed cash payload (or one missing the cash leg) is returned (nack/DLQ).
+func TestHandleCashRejectsMalformed(t *testing.T) {
+	st := ledger.NewMemoryStore()
+	f, _ := NewFolder(st, "USD")
+	env := &envelopepb.Envelope{EventType: cashEventSubscription}
+	if err := f.HandleCash(context.Background(), env, []byte("not a proto")); err == nil {
+		t.Fatal("expected decode error for a malformed cash payload")
+	}
+	// Valid proto but no cash leg → rejected.
+	noCash := cashPayload(t, "cash:X", "PORT", accountingpb.EntryType_ENTRY_TYPE_CASH, nil, "", time.Unix(1, 0))
+	if err := f.HandleCash(context.Background(), env, noCash); err == nil {
+		t.Fatal("expected rejection of a cash entry with no cash leg")
 	}
 }
 

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	accounting "github.com/kanz-eng/kanz/services/accounting/internal"
+	"github.com/kanz-eng/kanz/services/accounting/internal/cashmove"
 	"github.com/kanz-eng/kanz/services/accounting/internal/ledger"
 )
 
@@ -178,6 +179,67 @@ func TestNAVLiveFXMissingRateFails(t *testing.T) {
 	s.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/portfolios/PF/nav", strings.NewReader(`{"prices":{"SAP":"130"}}`)))
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("missing FX rate: want 400 got %d (%s)", rec.Code, rec.Body.String())
+	}
+}
+
+type fakeCashPublisher struct {
+	got cashmove.CashMovement
+	err error
+}
+
+func (f *fakeCashPublisher) Publish(_ context.Context, m cashmove.CashMovement) error {
+	f.got = m
+	return f.err
+}
+
+// WIRE-01f: a POST to the cash-movement endpoint emits the movement (202) rather
+// than writing the store — the event-sourced path — carrying the parsed kind,
+// amount, currency, and the portfolio from the path.
+func TestCashMovementEndpointEmits(t *testing.T) {
+	pub := &fakeCashPublisher{}
+	r := &Readiness{}
+	r.Set(true)
+	s := New(r, nil, ledger.NewMemoryStore(), "USD", WithCashPublisher(pub))
+
+	body := `{"movement_id":"S1","kind":"subscription","amount":"100000","source_ref":"wealth-42"}`
+	rec := httptest.NewRecorder()
+	s.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/portfolios/PF/cash-movements", strings.NewReader(body)))
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("want 202 got %d (%s)", rec.Code, rec.Body.String())
+	}
+	if pub.got.MovementID != "S1" || pub.got.PortfolioID != "PF" || pub.got.Kind != cashmove.Subscription {
+		t.Fatalf("published movement wrong: %+v", pub.got)
+	}
+	if pub.got.Currency != "USD" { // defaulted to base currency
+		t.Fatalf("currency = %q, want USD default", pub.got.Currency)
+	}
+	if pub.got.Amount == nil || pub.got.Amount.Sign() <= 0 {
+		t.Fatalf("amount not parsed: %v", pub.got.Amount)
+	}
+}
+
+// An unknown kind is a 400 before any emit.
+func TestCashMovementRejectsUnknownKind(t *testing.T) {
+	pub := &fakeCashPublisher{}
+	r := &Readiness{}
+	r.Set(true)
+	s := New(r, nil, ledger.NewMemoryStore(), "USD", WithCashPublisher(pub))
+	rec := httptest.NewRecorder()
+	s.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/portfolios/PF/cash-movements",
+		strings.NewReader(`{"movement_id":"X","kind":"bonus","amount":"1"}`)))
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("want 400 got %d", rec.Code)
+	}
+}
+
+// Without a publisher wired, the endpoint is not mounted (404).
+func TestCashMovementNotMountedWithoutPublisher(t *testing.T) {
+	s, _ := newServer(t)
+	rec := httptest.NewRecorder()
+	s.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/portfolios/PF/cash-movements",
+		strings.NewReader(`{"movement_id":"X","kind":"subscription","amount":"1"}`)))
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("want 404 (endpoint not mounted) got %d", rec.Code)
 	}
 }
 

@@ -28,6 +28,10 @@ type Config struct {
 	ConsumerGroup string
 	// FillSubjects are the order.v1 fill FACT subjects folded into the journal.
 	FillSubjects []string
+	// CashSubjects are the accounting.v1 cash-movement FACT subjects folded into
+	// the journal (WIRE-01f: subscription/redemption/fee). Default the
+	// accounting.cash wildcard. Comma-separated.
+	CashSubjects []string
 
 	// DatabaseURL is the Postgres DSN for the durable IBOR journal (PARITY-02a).
 	// Empty ⇒ the in-memory store: folding works but loses the journal on
@@ -64,6 +68,10 @@ var DefaultFXSubjects = []string{"market.fx.>"}
 // the OMS internal package" stance).
 var DefaultFillSubjects = []string{"order.order.filled", "order.order.partially_filled"}
 
+// DefaultCashSubjects are the accounting.v1 cash-movement FACT subjects the
+// consumer folds (WIRE-01f) — the wildcard over the cashmove.Publisher subjects.
+var DefaultCashSubjects = []string{"accounting.cash.>"}
+
 // Load reads the configuration from the environment with production-safe
 // defaults.
 func Load() (Config, error) {
@@ -75,6 +83,10 @@ func Load() (Config, error) {
 	if len(fxSubjects) == 0 {
 		fxSubjects = DefaultFXSubjects
 	}
+	cashSubjects := splitList(os.Getenv("ACCOUNTING_CASH_SUBJECTS"))
+	if len(cashSubjects) == 0 {
+		cashSubjects = DefaultCashSubjects
+	}
 	return Config{
 		Listen:        envOr("ACCOUNTING_LISTEN", ":8080"),
 		LogLevel:      parseLevel(os.Getenv("ACCOUNTING_LOG_LEVEL")),
@@ -83,6 +95,7 @@ func Load() (Config, error) {
 		Source:        envOr("ACCOUNTING_SOURCE", "accounting"),
 		ConsumerGroup: envOr("ACCOUNTING_CONSUMER_GROUP", "accounting"),
 		FillSubjects:  subjects,
+		CashSubjects:  cashSubjects,
 		DatabaseURL:   secret("ACCOUNTING_DATABASE_URL"),
 		OTLPEndpoint:  os.Getenv("ACCOUNTING_OTLP_ENDPOINT"),
 
