@@ -25,8 +25,14 @@ import (
 	"syscall"
 	"time"
 
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
+
+	querypb "github.com/kanz-eng/kanz-schemas-go/query/v1"
+
 	"github.com/kanz-eng/kanz/pkg/auth"
 	"github.com/kanz-eng/kanz/pkg/observability"
+	"github.com/kanz-eng/kanz/pkg/transport"
 	"github.com/kanz-eng/kanz/services/copilot/internal/agent"
 	"github.com/kanz-eng/kanz/services/copilot/internal/config"
 	"github.com/kanz-eng/kanz/services/copilot/internal/governed"
@@ -81,9 +87,25 @@ func main() {
 
 	// Seams: newModel selects the Claude client — the real anthropic-sdk-go
 	// adapter under `-tags anthropic`, the dependency-free StubModel otherwise.
-	// The mTLS query client still defaults to the Stub (PARITY-04b).
 	model := newModel(cfg, logger)
-	queryClient := governed.NewStubClient()
+
+	// Governed query client (WIRE-02b): the real query.v1 gRPC client when a
+	// risk-engine address is configured, else the dependency-free StubClient
+	// (tests / local boot). The gRPC client reads the WIRE-02a owner_tenant +
+	// source_position, feeding the deny-by-default authz gate + the citation seed.
+	var queryClient governed.Client = governed.NewStubClient()
+	if cfg.RiskQueryAddr != "" {
+		conn, derr := dialRiskQuery(ctx, cfg, logger)
+		if derr != nil {
+			logger.Error("risk query dial failed", "err", derr)
+			os.Exit(2)
+		}
+		defer func() { _ = conn.Close() }()
+		queryClient = governed.NewGRPCClient(querypb.NewRiskQueryServiceClient(conn))
+		logger.Info("copilot governed reads: query.v1 gRPC", "addr", cfg.RiskQueryAddr)
+	} else {
+		logger.Warn("no COPILOT_RISK_QUERY_ADDR — governed reads use the in-memory stub")
+	}
 	// Citation catalog: the dependency-free IdentityCatalog by default; the LIN-01
 	// lineage-backed LineageCatalog when a lineage address is configured (the mTLS
 	// client wires here at deploy — the http.Client is injected so retrieval stays
@@ -119,6 +141,26 @@ func main() {
 	if err := httpSrv.Shutdown(shutdownCtx); err != nil {
 		logger.Error("http shutdown error", "err", err)
 	}
+}
+
+// dialRiskQuery creates the gRPC client connection to the risk-engine query.v1
+// server (WIRE-02b). mTLS (SEC-01b) when a SPIFFE socket is configured, else
+// plaintext for local/dev. grpc.NewClient is lazy — the connection forms on the
+// first RPC, so a momentarily-unreachable engine doesn't fail copilot startup.
+func dialRiskQuery(ctx context.Context, cfg config.Config, logger *slog.Logger) (*grpc.ClientConn, error) {
+	var opt grpc.DialOption
+	if cfg.SPIFFESocket != "" {
+		src, err := transport.NewSource(ctx, cfg.SPIFFESocket)
+		if err != nil {
+			return nil, err
+		}
+		opt = transport.ClientDialOption(src, transport.AuthorizeMesh())
+		logger.Info("copilot: query.v1 mTLS enabled", "socket", cfg.SPIFFESocket)
+	} else {
+		opt = grpc.WithTransportCredentials(insecure.NewCredentials())
+		logger.Warn("copilot: query.v1 plaintext (no COPILOT_SPIFFE_SOCKET)")
+	}
+	return grpc.NewClient(cfg.RiskQueryAddr, opt)
 }
 
 // denyAll is the boot-time authorizer when no policy is configured: it refuses

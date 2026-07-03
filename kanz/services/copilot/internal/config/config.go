@@ -35,6 +35,16 @@ type Config struct {
 	// dataset node over the mesh.
 	LineageAddr string
 
+	// RiskQueryAddr is the risk-engine query.v1 gRPC address (WIRE-02b). Empty ⇒
+	// the dependency-free governed.StubClient (tests / local boot); set ⇒ the real
+	// governed.GRPCClient reads risk state over query.v1 and feeds the deny-by-
+	// default authz gate the owning tenant + the citation seed.
+	RiskQueryAddr string
+	// SPIFFESocket is the SPIFFE Workload API socket (SEC-01a CSI mount). When set,
+	// the query.v1 client dials over mTLS with an in-mesh peer SVID (SEC-01b);
+	// empty ⇒ plaintext (local/dev).
+	SPIFFESocket string
+
 	// OTLPEndpoint is the OTel collector for span export (OBS-01). Empty ⇒ none.
 	OTLPEndpoint string
 }
@@ -43,12 +53,14 @@ type Config struct {
 // defaults.
 func Load() (Config, error) {
 	return Config{
-		Listen:       envOr("COPILOT_LISTEN", ":8080"),
-		LogLevel:     parseLevel(os.Getenv("COPILOT_LOG_LEVEL")),
-		ModelID:      envOr("COPILOT_MODEL_ID", llm.DefaultModelID),
-		PolicyPath:   os.Getenv("COPILOT_POLICY_PATH"),
-		LineageAddr:  os.Getenv("COPILOT_LINEAGE_ADDR"),
-		OTLPEndpoint: os.Getenv("COPILOT_OTLP_ENDPOINT"),
+		Listen:        envOr("COPILOT_LISTEN", ":8080"),
+		LogLevel:      parseLevel(os.Getenv("COPILOT_LOG_LEVEL")),
+		ModelID:       envOr("COPILOT_MODEL_ID", llm.DefaultModelID),
+		PolicyPath:    os.Getenv("COPILOT_POLICY_PATH"),
+		LineageAddr:   os.Getenv("COPILOT_LINEAGE_ADDR"),
+		RiskQueryAddr: os.Getenv("COPILOT_RISK_QUERY_ADDR"),
+		SPIFFESocket:  os.Getenv("COPILOT_SPIFFE_SOCKET"),
+		OTLPEndpoint:  os.Getenv("COPILOT_OTLP_ENDPOINT"),
 	}, nil
 }
 
