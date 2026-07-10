@@ -6,9 +6,16 @@ Execution board — not history. Task IDs are module-prefixed and scoped to 1–
 
 ## TODO
 
-_The credential-/infra-/human-gated half of PATH TO PARITY still waits on an external boundary landing. The buildable backend backlog is clear (CLI vertical, WIRE-03, REG-02, DEBT-ARCH-01), and **PS-02a — the web BFF — has landed**: the browser now has an auth-code+PKCE session layer over the delivered `/v1` edge. The next buildable slice is **PS-02b** (the dark terminal UI over the BFF). The 3-year horizon lives in `KANZ_ROADMAP.md`._
+_**Active direction (2026-07): the Automated Fund-Management & Multi-Exchange Execution System.** The loop — proprietary TradingView Pine strategies → HMAC webhook → `signal.v1.StrategySignal` → venue-allocated `order.v1.SubmitOrder` fan-out → simultaneous Binance/OKX execution → bitemporal projection → TradingView Broker-API feedback — is delivered end to end (EXEC-M1…M5a; see DONE). The web/CLI product surface (PS-02b et al.) is **parked** behind this direction. The buildable next slice is **EXEC-M5b** (the native Order-Book-Imbalance engine over the delivered in-memory book). The 3-year horizon lives in `KANZ_ROADMAP.md`._
 
-### Buildable now — the web workspace vertical
+### Buildable now — the native-alpha vertical
+
+- [ ] **EXEC-M5b** Native Order-Book-Imbalance (OBI) engine. A `market-ingest` internal engine that reads the delivered in-memory `book.Book` (best bid/ask + top-N depth), computes the imbalance ratio on each fold, and on a configurable threshold + cooldown emits a `signal.v1.StrategySignal` with `source = SIGNAL_SOURCE_NATIVE_ENGINE` onto `strategy.signal.received` — the same subject webhook-ingest produces, so the delivered OMS command path executes it unchanged. Exact `big.Rat` math (no float on the alpha path); deny-by-default (no signal below threshold / within cooldown). Certifiable against the delivered deterministic sim source; binds to live depth when EXEC-M5c lands. Depends on EXEC-M5a. · buildable
+- [ ] **EXEC-M5c** Live venue depth `DepthSource`s. Binance (`//go:build binance`) and OKX (`//go:build okx`) L2-depth websocket sources implementing `depth.DepthSource`, behind the same per-venue build tags as the OMS connectors, keeping the default binary vendor-free. Replaces the sim on the live path; the fold/snapshot/OBI pipeline is unchanged. · buildable
+
+**Recommended next: EXEC-M5b** — the native OBI engine is the payoff of the M5a foundation: it turns the in-memory book into native alpha that flows through the *already-delivered* OMS execution path, completing the "hybrid brain" (external webhooks + native alpha) the direction calls for. It is fully testable now against the delivered deterministic sim source, so it needs no credentials and no live-depth boundary (EXEC-M5c) to land first — that binding is a clean follow-on. The web-workspace vertical (PS-02b) stays parked.
+
+### Parked — the web workspace vertical (behind the active execution direction)
 
 - [ ] **PS-02b** Build the dark terminal web UI over the PS-02a BFF. The Bloomberg/Linear-style shell (left nav + workspace + AI panel + market widgets) served by the BFF, driving turns through `POST /api/v1/ask` and the structured `/api/v1/portfolios/{id}/…` proxy routes the BFF exposes — session via the httpOnly cookie the BFF sets, no token in browser JS. Frontend deliverable (its stack + repo placement is the first decomposition question); no new backend. Depends on PS-02a. · buildable
 
@@ -70,6 +77,11 @@ _Nothing in flight._
 ## DONE
 
 _Historical record — one line per completed epic. Full implementation detail is in git history; durable decisions are in `KANZ_BRAIN.md`._
+
+### Phase 11 — Automated fund-management & multi-exchange execution system (opened 2026-07)
+
+- **EXEC-M5a** — the native-alpha edge foundation (`services/market-ingest`, additive `market.v1.OrderBookSnapshot`/`OrderBookDelta`/`PriceLevel` + `signal.v1.SignalSource`/`StrategySignal.source`). Process-isolated edge that folds exchange L2 depth into a concurrent in-memory `book.Book` off the bus (the hot path — raw full-rate depth never republished) and publishes only bounded periodic `market.book.snapshot` FACTs for replay/audit; strict sequence-chain gap detection re-snapshots rather than folding out of order; exact `big.Rat` prices. `depth.DepthSource` transport seam with a deterministic vendor-free sim (mic "SIM") as default; live venue sources bind behind build tags (EXEC-M5c). Signal provenance is now first-class (TRADINGVIEW_WEBHOOK vs NATIVE_ENGINE); webhook-ingest stamps the former. Default binary vendor-free; book/sim/engine hermetically tested. Foundation for the OBI/arbitrage engines (EXEC-M5b).
+- **EXEC-M4b** — OKX operational parity (`services/oms`, `//go:build okx`): OKX v5 private user-data websocket → `OrderFilled`/`PartiallyFilled` FACTs (fill_id `instId-tradeId`, dedups the sync path), background REST reconciliation → correcting `StateHealed`/`BalanceReconciled` FACTs, ticker feed → tv-sync MarkSource, all bundled in `OKXConnector` and wired at the composition root behind the OKX tag. Shared connector seams (sleep/backoff, correcting-FACT subjects) promoted to `binance || okx`. Real `coder/websocket` transport certified over httptest; `TEST_OKX_TESTNET`-gated live round-trip. Brings the OKX leg to full parity with Binance so the multi-venue allocation matrix routes to two live venues; default binary stays vendor-free.
 
 ### Phase 10 — Product surface (end-user client)
 
