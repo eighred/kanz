@@ -201,3 +201,31 @@ message NAV {
   // components sum to (this.total − prior.total).
   repeated PnlComponent attribution = 8;
 }
+
+// BalanceReconciled is the FACT emitted by the exchange reconciliation loop
+// (M3.4) when a periodic REST poll finds the venue's actual balance for an
+// asset differs from Kanz's internal ledger — an unrecorded fee, a fill missed
+// by the websocket. The exchange is the source of truth; the reconciler emits
+// this correcting FACT (never edits the ledger directly), and the journal folds
+// the delta to restore parity bitemporally. Ride the envelope with
+// QUALITY_FLAG_REVISED.
+message BalanceReconciled {
+  // portfolio_id is the account whose balance was reconciled. Required.
+  string portfolio_id = 1;
+
+  // venue is the ISO 10383 MIC / venue code the balance was read from. Required.
+  string venue = 2;
+
+  // asset is the currency/asset code the balance is denominated in (e.g. "USDT",
+  // "BTC"). Required.
+  string asset = 3;
+
+  // expected is Kanz's internal balance; actual is the venue's reported balance;
+  // delta = actual − expected is the correction the journal folds. Decimal.
+  common.v1.Decimal expected = 4;
+  common.v1.Decimal actual = 5;
+  common.v1.Decimal delta = 6;
+
+  // detected_at is when reconciliation observed the divergence. Required.
+  google.protobuf.Timestamp detected_at = 7;
+}

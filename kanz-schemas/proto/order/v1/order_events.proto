@@ -195,3 +195,29 @@ message OrderExpired {
   // Required.
   common.v1.Decimal unfilled_quantity = 2;
 }
+
+// StateHealed is the FACT emitted by the exchange reconciliation loop (M3.4)
+// when it detects that Kanz's internal order state has drifted from the venue's
+// truth — a missed websocket frame, a fill seen only on the periodic REST poll.
+// The exchange is the source of truth: the reconciler NEVER edits state
+// directly, it emits this correcting FACT carrying the venue-truth OrderState,
+// and the journal/projection fold it to restore parity. It should ride the
+// envelope with QUALITY_FLAG_REVISED and a causation_id back to the order.
+message StateHealed {
+  // order_id is the order whose state was healed. Required.
+  string order_id = 1;
+
+  // venue is the ISO 10383 MIC / venue code the truth came from. Required.
+  string venue = 2;
+
+  // state is the reconciled, venue-truth OrderState the reader should adopt
+  // (it supersedes the drifted internal state). Required.
+  OrderState state = 3;
+
+  // reason is a human-readable description of the drift that was healed (e.g.
+  // "REST poll found filled_quantity 2 vs internal 1"). Required.
+  string reason = 4;
+
+  // detected_at is when reconciliation observed the divergence. Required.
+  google.protobuf.Timestamp detected_at = 5;
+}

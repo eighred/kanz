@@ -101,6 +101,99 @@ type orderFill struct {
 	TradeID         int64  `json:"tradeId"`
 }
 
+// openOrder is one element of GET /api/v3/openOrders (the reconciliation read).
+type openOrder struct {
+	Symbol        string `json:"symbol"`
+	OrderID       int64  `json:"orderId"`
+	ClientOrderID string `json:"clientOrderId"`
+	Status        string `json:"status"`
+	OrigQty       string `json:"origQty"`
+	ExecutedQty   string `json:"executedQty"`
+	Price         string `json:"price"`
+	Side          string `json:"side"`
+}
+
+// accountInfo is GET /api/v3/account (balances for reconciliation).
+type accountInfo struct {
+	Balances []balanceEntry `json:"balances"`
+	Code     int            `json:"code"`
+	Msg      string         `json:"msg"`
+}
+
+type balanceEntry struct {
+	Asset  string `json:"asset"`
+	Free   string `json:"free"`
+	Locked string `json:"locked"`
+}
+
+// account fetches balances (GET /api/v3/account, weight 10).
+func (c *binanceREST) account(ctx context.Context) (*accountInfo, error) {
+	if !c.bucket.allow(10) {
+		c.onThrottle()
+		return nil, ErrRateLimited
+	}
+	body, err := c.signedGet(ctx, "/api/v3/account", url.Values{})
+	if err != nil {
+		return nil, err
+	}
+	var out accountInfo
+	if err := json.Unmarshal(body, &out); err != nil {
+		return nil, fmt.Errorf("binance: decode account: %w", err)
+	}
+	if out.Code != 0 {
+		return nil, &APIError{Code: out.Code, Msg: out.Msg}
+	}
+	return &out, nil
+}
+
+// openOrders fetches working orders (GET /api/v3/openOrders, weight 3 per
+// symbol). An empty symbol lists all (weight 40).
+func (c *binanceREST) openOrders(ctx context.Context, symbol string) ([]openOrder, error) {
+	weight := 3
+	params := url.Values{}
+	if symbol != "" {
+		params.Set("symbol", symbol)
+	} else {
+		weight = 40
+	}
+	if !c.bucket.allow(weight) {
+		c.onThrottle()
+		return nil, ErrRateLimited
+	}
+	body, err := c.signedGet(ctx, "/api/v3/openOrders", params)
+	if err != nil {
+		return nil, err
+	}
+	// The success body is a JSON array; an error body is a {code,msg} object.
+	var apiErr struct {
+		Code int    `json:"code"`
+		Msg  string `json:"msg"`
+	}
+	if json.Unmarshal(body, &apiErr) == nil && apiErr.Code != 0 {
+		return nil, &APIError{Code: apiErr.Code, Msg: apiErr.Msg}
+	}
+	var out []openOrder
+	if err := json.Unmarshal(body, &out); err != nil {
+		return nil, fmt.Errorf("binance: decode openOrders: %w", err)
+	}
+	return out, nil
+}
+
+// signedGet performs a signed GET and returns the raw body (weight already
+// consumed by the caller).
+func (c *binanceREST) signedGet(ctx context.Context, path string, params url.Values) ([]byte, error) {
+	params.Set("timestamp", strconv.FormatInt(c.now().UnixMilli(), 10))
+	params.Set("recvWindow", strconv.Itoa(c.recvWindow))
+	query := params.Encode()
+	full := c.baseURL + path + "?" + query + "&signature=" + c.sign(query)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, full, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("X-MBX-APIKEY", c.apiKey)
+	return c.do(req)
+}
+
 // newOrder places a signed order (POST /api/v3/order, weight 1) with
 // newOrderRespType=FULL so the immediate fills come back inline.
 func (c *binanceREST) newOrder(ctx context.Context, params url.Values) (*orderResponse, error) {

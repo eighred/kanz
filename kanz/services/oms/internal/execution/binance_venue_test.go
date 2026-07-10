@@ -30,6 +30,7 @@ type fakeBinance struct {
 	newOrderStatus int    // HTTP status for POST /api/v3/order
 	newOrderBody   string // body for POST
 	queryBody      string // body for GET /api/v3/order
+	accountBody    string // body for GET /api/v3/account
 }
 
 func newFakeBinance(t *testing.T) *fakeBinance {
@@ -48,6 +49,9 @@ func newFakeBinance(t *testing.T) *fakeBinance {
 			return
 		}
 		_, _ = w.Write([]byte(f.queryBody)) // GET: query-order
+	})
+	mux.HandleFunc("/api/v3/account", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(f.accountBody))
 	})
 	f.srv = httptest.NewServer(mux)
 	t.Cleanup(f.srv.Close)
