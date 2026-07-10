@@ -129,7 +129,9 @@ func runConsumers(ctx context.Context, cfg config.Config, readiness *server.Read
 
 	// OMS-01b/c: order command handler over an in-memory store + a sim venue.
 	emitter := order.NewEmitter(producer)
-	router := execution.NewRouter(execution.NewSimVenue(cfg.SimVenueMIC))
+	// Venue set is composition-root-selected: SimVenue by default; Binance Spot
+	// under -tags binance (configuredVenues is build-tag split).
+	router := execution.NewRouter(configuredVenues(cfg, logger)...)
 	svc, err := order.NewService(order.NewMemoryStore(), emitter, gate, router, logger)
 	if err != nil {
 		return err
