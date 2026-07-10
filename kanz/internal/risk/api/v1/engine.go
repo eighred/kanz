@@ -112,6 +112,18 @@ type ExposureResponse struct {
 	Set ExposureSet
 	// QualityFlags annotate freshness and trust (see QualityFlag).
 	QualityFlags []QualityFlag
+	// SourcePosition is the durable-log coordinate the served state was
+	// folded to — the citation seed a governed reader stamps onto an
+	// answer so it is verifiable against the log (query.v1 source_position,
+	// WIRE-03). It is the LogPosition of the last durable PortfolioSnapshot
+	// applied for this portfolio (RISK-05); nil when no snapshot with a
+	// position has been applied, or when the response was served from the
+	// degraded cache rather than live state (a cached value has no
+	// log anchor). Incremental live applies off the NATS spine after that
+	// snapshot are not individually log-anchored — the durable Kafka offset
+	// is not on the live envelope — so this is the honest last-anchored
+	// coordinate, not necessarily the latest applied event.
+	SourcePosition *commonpb.LogPosition
 }
 
 // ExposureSet is the engine's exposure-aggregate response. RISK-03
@@ -139,6 +151,11 @@ type MeasuresResponse struct {
 	AsOf         time.Time
 	Set          MeasureSet
 	QualityFlags []QualityFlag
+	// SourcePosition is the durable-log coordinate the served state was
+	// folded to — see ExposureResponse.SourcePosition for the full contract
+	// (WIRE-03). nil on a degraded cache read or when no positioned snapshot
+	// has been applied.
+	SourcePosition *commonpb.LogPosition
 }
 
 // MeasureSet exposes the named measure values for a query.

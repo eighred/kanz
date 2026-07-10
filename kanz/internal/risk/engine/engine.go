@@ -33,6 +33,8 @@ import (
 	"context"
 	"time"
 
+	commonpb "github.com/kanz-eng/kanz-schemas-go/common/v1"
+
 	risk "github.com/kanz-eng/kanz/internal/risk"
 	v1 "github.com/kanz-eng/kanz/internal/risk/api/v1"
 	"github.com/kanz-eng/kanz/internal/risk/compute"
@@ -95,16 +97,17 @@ func (e *EngineImpl) Exposure(ctx context.Context, req v1.ExposureRequest) (v1.E
 		return v1.ExposureResponse{}, v1.ErrInvalidRequest
 	}
 
-	es, ok := e.exposureSet(ctx, req.PortfolioID)
+	es, pos, ok := e.exposureSet(ctx, req.PortfolioID)
 	if !ok {
 		return v1.ExposureResponse{}, v1.ErrPortfolioNotFound
 	}
 	_, flags := e.detector.Assess(es.AsOf())
 	return v1.ExposureResponse{
-		PortfolioID:  req.PortfolioID,
-		AsOf:         es.AsOf(),
-		Set:          es,
-		QualityFlags: flags,
+		PortfolioID:    req.PortfolioID,
+		AsOf:           es.AsOf(),
+		Set:            es,
+		QualityFlags:   flags,
+		SourcePosition: pos,
 	}, nil
 }
 
@@ -119,16 +122,17 @@ func (e *EngineImpl) Measures(ctx context.Context, req v1.MeasuresRequest) (v1.M
 		return v1.MeasuresResponse{}, v1.ErrInvalidRequest
 	}
 
-	full, ok := e.measureSet(ctx, req.PortfolioID)
+	full, pos, ok := e.measureSet(ctx, req.PortfolioID)
 	if !ok {
 		return v1.MeasuresResponse{}, v1.ErrPortfolioNotFound
 	}
 	_, flags := e.detector.Assess(full.AsOf())
 	return v1.MeasuresResponse{
-		PortfolioID:  req.PortfolioID,
-		AsOf:         full.AsOf(),
-		Set:          filterMeasures(full, req.Measures),
-		QualityFlags: flags,
+		PortfolioID:    req.PortfolioID,
+		AsOf:           full.AsOf(),
+		Set:            filterMeasures(full, req.Measures),
+		QualityFlags:   flags,
+		SourcePosition: pos,
 	}, nil
 }
 
@@ -174,28 +178,34 @@ func (e *EngineImpl) Health(ctx context.Context) (v1.Health, error) {
 	return e.detector.Health(e.latestAsOf()), nil
 }
 
-// exposureSet returns the live-computed-and-cached exposure, or the
-// last-known-good cached value on a store miss. The bool is false only
-// when neither the store nor the cache knows the portfolio.
-func (e *EngineImpl) exposureSet(ctx context.Context, id v1.PortfolioID) (*domain.ExposureSet, bool) {
+// exposureSet returns the live-computed-and-cached exposure plus the
+// durable-log coordinate the live state was folded to (the portfolio's
+// applied snapshot LogPosition, WIRE-03), or the last-known-good cached
+// value on a store miss. The position is nil on the cache-fallback path: a
+// cached value has no live portfolio in hand, so no log anchor. The bool is
+// false only when neither the store nor the cache knows the portfolio.
+func (e *EngineImpl) exposureSet(ctx context.Context, id v1.PortfolioID) (*domain.ExposureSet, *commonpb.LogPosition, bool) {
 	if p, found := e.store.Snapshot(id); found {
 		compute.PopulateUncertainty(ctx, p, e.volModel)
 		es := compute.ComputeExposure(p)
 		e.cache.StoreExposure(id, es)
-		return es, true
+		return es, p.LogPosition(), true
 	}
-	return e.cache.LookupExposure(id)
+	es, ok := e.cache.LookupExposure(id)
+	return es, nil, ok
 }
 
-// measureSet mirrors exposureSet for the full measure set.
-func (e *EngineImpl) measureSet(ctx context.Context, id v1.PortfolioID) (*domain.MeasureSet, bool) {
+// measureSet mirrors exposureSet for the full measure set, returning the
+// same live snapshot LogPosition (nil on the cache-fallback path).
+func (e *EngineImpl) measureSet(ctx context.Context, id v1.PortfolioID) (*domain.MeasureSet, *commonpb.LogPosition, bool) {
 	if p, found := e.store.Snapshot(id); found {
 		compute.PopulateUncertainty(ctx, p, e.volModel)
 		ms := compute.ComputeMeasures(p, e.registry, nil)
 		e.cache.StoreMeasures(id, ms)
-		return ms, true
+		return ms, p.LogPosition(), true
 	}
-	return e.cache.LookupMeasures(id)
+	ms, ok := e.cache.LookupMeasures(id)
+	return ms, nil, ok
 }
 
 // latestAsOf is the max AsOf across all known portfolios, or the zero

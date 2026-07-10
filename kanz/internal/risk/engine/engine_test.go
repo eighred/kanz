@@ -239,3 +239,73 @@ func TestCancelledContextRejected(t *testing.T) {
 		t.Fatalf("err=%v want context.Canceled", err)
 	}
 }
+
+// applySnapshot applies a PortfolioSnapshot carrying a durable-log
+// LogPosition — the only apply path that sets the portfolio's fold
+// coordinate (RISK-05), which WIRE-03 surfaces as SourcePosition.
+func applySnapshot(t *testing.T, s *state.Store, id, instrument string, value int64, asOf time.Time, lp *commonpb.LogPosition) {
+	t.Helper()
+	err := s.ApplyPortfolioSnapshot(context.Background(),
+		&envelopepb.Envelope{EventId: "snap-" + id, IdempotencyKey: "snap-" + id},
+		&domainpb.PortfolioSnapshot{
+			Portfolio: &domainpb.PortfolioState{PortfolioId: id, BaseCurrency: "USD", AsOf: timestamppb.New(asOf)},
+			Positions: []*domainpb.PositionState{{
+				PortfolioId:  id,
+				InstrumentId: instrument,
+				MarketValue:  money(value, "USD"),
+				AsOf:         timestamppb.New(asOf),
+			}},
+			LogPosition: lp,
+		})
+	if err != nil {
+		t.Fatalf("ApplyPortfolioSnapshot: %v", err)
+	}
+}
+
+// WIRE-03: a query served from live state carries the portfolio's applied
+// snapshot LogPosition as SourcePosition — the citation seed.
+func TestExposure_SourcePositionFromSnapshot(t *testing.T) {
+	e, s := newEngine()
+	lp := &commonpb.LogPosition{Topic: "risk.state", Partition: 3, Offset: 4242}
+	applySnapshot(t, s, "PORT-1", "AAPL", 1000, time.Now().Add(-1*time.Second), lp)
+
+	resp, err := e.Exposure(context.Background(), v1.ExposureRequest{PortfolioID: "PORT-1"})
+	if err != nil {
+		t.Fatalf("Exposure: %v", err)
+	}
+	if resp.SourcePosition == nil {
+		t.Fatal("SourcePosition nil, want the applied snapshot position")
+	}
+	if got := resp.SourcePosition; got.Topic != "risk.state" || got.Partition != 3 || got.Offset != 4242 {
+		t.Fatalf("SourcePosition = %+v, want risk.state/3/4242", got)
+	}
+}
+
+func TestMeasures_SourcePositionFromSnapshot(t *testing.T) {
+	e, s := newEngine()
+	lp := &commonpb.LogPosition{Topic: "risk.state", Partition: 1, Offset: 99}
+	applySnapshot(t, s, "PORT-1", "AAPL", 1000, time.Now().Add(-1*time.Second), lp)
+
+	resp, err := e.Measures(context.Background(), v1.MeasuresRequest{PortfolioID: "PORT-1"})
+	if err != nil {
+		t.Fatalf("Measures: %v", err)
+	}
+	if resp.SourcePosition == nil || resp.SourcePosition.Offset != 99 {
+		t.Fatalf("SourcePosition = %+v, want offset 99", resp.SourcePosition)
+	}
+}
+
+// A portfolio built only from incremental applies (no positioned snapshot)
+// has no log anchor: SourcePosition is nil, not a zero coordinate.
+func TestExposure_SourcePositionNilWithoutSnapshot(t *testing.T) {
+	e, s := newEngine()
+	applyPosition(t, s, "PORT-1", "AAPL", 1000, time.Now().Add(-1*time.Second))
+
+	resp, err := e.Exposure(context.Background(), v1.ExposureRequest{PortfolioID: "PORT-1"})
+	if err != nil {
+		t.Fatalf("Exposure: %v", err)
+	}
+	if resp.SourcePosition != nil {
+		t.Fatalf("SourcePosition = %+v, want nil (no snapshot applied)", resp.SourcePosition)
+	}
+}

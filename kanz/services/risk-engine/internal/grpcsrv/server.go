@@ -88,10 +88,11 @@ func (s *Server) Exposure(ctx context.Context, req *querypb.ExposureRequest) (*q
 		Set:          es,
 		QualityFlags: protoFlags(resp.QualityFlags),
 		OwnerTenant:  s.ownerTenant,
-		// SourcePosition is left unset: the api/v1.Engine surface does not yet
-		// expose the durable-log position its served state was folded to, so the
-		// citation seed is absent (documented as "not log-anchored"). It is
-		// populated when the engine surfaces its fold position.
+		// SourcePosition carries the durable-log coordinate the served state was
+		// folded to (WIRE-03), the citation seed a governed reader anchors an
+		// answer on. The engine leaves it nil on a degraded cache read or before
+		// any positioned snapshot is applied — an absent, not a zero, coordinate.
+		SourcePosition: resp.SourcePosition,
 	}, nil
 }
 
@@ -109,12 +110,12 @@ func (s *Server) Measures(ctx context.Context, req *querypb.MeasuresRequest) (*q
 		return nil, err
 	}
 	return &querypb.MeasuresResponse{
-		PortfolioId:  string(resp.PortfolioID),
-		AsOf:         nonZeroTimestamp(resp.AsOf),
-		Set:          ms,
-		QualityFlags: protoFlags(resp.QualityFlags),
-		OwnerTenant:  s.ownerTenant,
-		// SourcePosition unset (see Exposure).
+		PortfolioId:    string(resp.PortfolioID),
+		AsOf:           nonZeroTimestamp(resp.AsOf),
+		Set:            ms,
+		QualityFlags:   protoFlags(resp.QualityFlags),
+		OwnerTenant:    s.ownerTenant,
+		SourcePosition: resp.SourcePosition, // see Exposure
 	}, nil
 }
 

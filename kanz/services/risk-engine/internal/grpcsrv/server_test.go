@@ -78,6 +78,57 @@ func TestExposureMapsSetAndFlags(t *testing.T) {
 	}
 }
 
+// WIRE-03: the engine's SourcePosition is stamped onto the proto
+// source_position — the verifiable citation seed — and a nil position stays
+// absent rather than becoming a zero coordinate.
+func TestExposureStampsSourcePosition(t *testing.T) {
+	es := domain.NewExposureSet("PF1", asOf, nil)
+	lp := &commonpb.LogPosition{Topic: "risk.state", Partition: 2, Offset: 777}
+	srv := grpcsrv.New(fakeEngine{exposure: func(v1.ExposureRequest) (v1.ExposureResponse, error) {
+		return v1.ExposureResponse{PortfolioID: "PF1", AsOf: asOf, Set: es, SourcePosition: lp}, nil
+	}}, "acme")
+
+	resp, err := srv.Exposure(context.Background(), &querypb.ExposureRequest{PortfolioId: "PF1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := resp.GetSourcePosition()
+	if got == nil || got.GetTopic() != "risk.state" || got.GetPartition() != 2 || got.GetOffset() != 777 {
+		t.Fatalf("source_position = %+v, want risk.state/2/777", got)
+	}
+}
+
+func TestExposureNilSourcePositionStaysAbsent(t *testing.T) {
+	es := domain.NewExposureSet("PF1", asOf, nil)
+	srv := grpcsrv.New(fakeEngine{exposure: func(v1.ExposureRequest) (v1.ExposureResponse, error) {
+		return v1.ExposureResponse{PortfolioID: "PF1", AsOf: asOf, Set: es}, nil // no position
+	}}, "acme")
+
+	resp, err := srv.Exposure(context.Background(), &querypb.ExposureRequest{PortfolioId: "PF1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.GetSourcePosition() != nil {
+		t.Fatalf("source_position = %+v, want nil", resp.GetSourcePosition())
+	}
+}
+
+func TestMeasuresStampsSourcePosition(t *testing.T) {
+	ms := domain.NewMeasureSet("PF1", asOf, map[v1.MeasureName]v1.Measure{})
+	lp := &commonpb.LogPosition{Topic: "risk.state", Partition: 0, Offset: 12}
+	srv := grpcsrv.New(fakeEngine{measures: func(v1.MeasuresRequest) (v1.MeasuresResponse, error) {
+		return v1.MeasuresResponse{PortfolioID: "PF1", AsOf: asOf, Set: ms, SourcePosition: lp}, nil
+	}}, "acme")
+
+	resp, err := srv.Measures(context.Background(), &querypb.MeasuresRequest{PortfolioId: "PF1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := resp.GetSourcePosition(); got == nil || got.GetOffset() != 12 {
+		t.Fatalf("source_position = %+v, want offset 12", got)
+	}
+}
+
 func TestMeasuresPassesFilterAndConverts(t *testing.T) {
 	ms := domain.NewMeasureSet("PF1", asOf, map[v1.MeasureName]v1.Measure{
 		"VaR99": {Name: "VaR99", Value: &commonpb.Decimal{Coefficient: 42, Exponent: 0}},
