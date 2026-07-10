@@ -10,17 +10,16 @@ _The credential-/infra-/human-gated half of PATH TO PARITY still waits on an ext
 
 ### Buildable now — the `kanz` CLI vertical (wired to the real backend)
 
-_Verified: no end-user client exists in the repo. The full data path is delivered — the gateway serves `POST /v1/ask` (copilot; returns answer + citations + confidence), `GET /v1/portfolios/{id}/exposure|measures`, `POST /v1/portfolios/{id}/scenario` (risk-engine, mTLS), all behind the OIDC/JWKS `Authenticator`. Two gaps block a real-backend CLI._
+_Verified: no end-user terminal binary exists yet. The full data path is delivered — the gateway serves `POST /v1/ask` (copilot; returns answer + citations + confidence), `GET /v1/portfolios/{id}/exposure|measures`, `POST /v1/portfolios/{id}/scenario` (risk-engine, mTLS), all behind the OIDC/JWKS `Authenticator`. CLI-01 (the device-flow RP) has landed; CLI-02 (the terminal binary) completes the vertical._
 
-- [ ] **CLI-01** Make the kanz CLI an Eighred SSO relying party for the device flow. Identity is owned by the standalone **Eighred SSO** project (`../eighred-SSO`), not kanz — so the CLI performs the RFC 8628 device-authorization flow directly against Eighred SSO's authorization server, and the gateway validates the issued JWT via the already-delivered AUTH-01a JWKS/OIDC path (`kanz/pkg/auth` `OIDCAuthenticator`). **No auth endpoints are added to the gateway.** **The external dependency is now satisfied:** Eighred SSO AS-01d-2 delivers a live device flow (`POST /device_authorization` + the `device_code` grant at `/token`, RS256/ES256 JWTs over a published JWKS) — verified end-to-end. So CLI-01 is now a straight RP integration against the real IdP: the CLI polls Eighred SSO's device endpoints; the gateway is deployed with `API_GATEWAY_OIDC_ISSUER`/`_AUDIENCE` pointed at Eighred SSO (SSO_BRAIN D-002). · buildable
-- [ ] **CLI-02** Build the `kanz` terminal client (Go binary, `kanz/cmd/kanz`). A Claude-Code-style REPL: completes the CLI-01 device flow, persists the token, renders the KANZ TERMINAL header, and drives natural-language turns through `POST /v1/ask` (streaming the answer with its citations/confidence/risk warnings) and structured `/v1/portfolios/{id}/…` calls for slash commands. No new mocks — talks to the running gateway. Depends on CLI-01. · buildable
+- [ ] **CLI-02** Build the `kanz` terminal client (Go binary, `kanz/cmd/kanz`). A Claude-Code-style REPL: completes the CLI-01 device flow (`pkg/deviceauth`), persists the token, renders the KANZ TERMINAL header, and drives natural-language turns through `POST /v1/ask` (streaming the answer with its citations/confidence/risk warnings) and structured `/v1/portfolios/{id}/…` calls for slash commands. No new mocks — talks to the running gateway. **CLI-01 is delivered**, so the device-flow blocker is retired. · buildable
 
 ### Buildable now — carried-over backend gaps
 
 - [ ] **REG-02** Wire a durable `LinkSink` for the regulatory `ChainSigner`. `cmd/regulatory` `buildSigner` keeps hash-chain links in-memory only, so filings are not tamper-evident across restarts. Persist the link append behind the in-memory-default/Postgres `Store` seam (the PARITY-02 pattern). · buildable
 - [ ] **WIRE-03** Surface the risk-engine durable-log fold position and stamp `query.v1` `source_position`. WIRE-02 added the `common.v1.LogPosition` field but leaves it empty; populating it closes the copilot citation-seed half so answers carry a real, verifiable log position. · buildable
 
-**Recommended next: CLI-01** — the user has directed the pivot to the CLI, wired to the real backend, client-first. CLI-01 is the single blocker: without a device-authorization flow the terminal cannot authenticate against the real edge, so it gates CLI-02 and the whole product surface. It grounds entirely on the delivered `Authenticator`/OIDC seam — no new auth system — and is buildable today on the bundled-authenticator fallback. (REG-02 and WIRE-03 remain valid buildable backend gaps behind it.)
+**Recommended next: CLI-02** — CLI-01 has landed (`pkg/deviceauth`, the RFC 8628 RP against Eighred SSO), retiring the device-flow blocker. CLI-02 is now the vertical's completion: the `kanz` terminal binary that turns the delivered edge + auth into a usable client. It consumes `pkg/deviceauth` for login and the `/v1` edge for turns — no new backend, no mocks. (REG-02 and WIRE-03 remain valid buildable backend gaps behind it.)
 
 ---
 
@@ -78,6 +77,10 @@ _Nothing in flight._
 ## DONE
 
 _Historical record — one line per completed epic. Full implementation detail is in git history; durable decisions are in `KANZ_BRAIN.md`._
+
+### Phase 10 — Product surface (end-user client)
+
+- **CLI-01** — the kanz CLI is now an Eighred SSO relying party for the RFC 8628 device-authorization grant: new `pkg/deviceauth` (client-side counterpart to `pkg/auth`'s server-side JWKS validator) resolves the device + token endpoints from the issuer's OIDC discovery document, begins authorization, shows the user_code/verification URI via a caller callback, and polls the token endpoint honoring the server interval + `slow_down` back-off and the `device_code` expiry — returning the issued token for a caller to bearer against the gateway. Adds NO auth endpoints and holds NO keys; identity stays owned by Eighred SSO. Injectable clock/wait keep the poll-cadence + expiry tests deterministic and fast. Unblocks CLI-02.
 
 ### Phase 9 — Live wiring
 
