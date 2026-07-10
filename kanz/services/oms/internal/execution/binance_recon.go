@@ -26,11 +26,6 @@ const (
 	subjectBalanceRecon = "accounting.balance.reconciled"
 )
 
-// Publisher is the bus publish surface — satisfied by *bus.Producer.
-type Publisher interface {
-	Publish(ctx context.Context, e bus.Event) error
-}
-
 // ExpectedOrders is Kanz's internal view of the orders it believes are open —
 // bound to the OMS order store in production. The reconciler queries each on the
 // exchange and heals any that have drifted.

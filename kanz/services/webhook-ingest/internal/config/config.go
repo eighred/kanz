@@ -32,6 +32,11 @@ type Config struct {
 
 	ReplayWindow time.Duration
 	Allowlist    []*net.IPNet
+	// CloudflareOnly locks the webhook to the Cloudflare Signing Relay edge: the
+	// peer (Allowlist, set to Cloudflare's CIDR ranges) must be a Cloudflare IP,
+	// and every request must carry CF-Connecting-IP — public traffic bypassing
+	// the relay is rejected before any processing (M3.8).
+	CloudflareOnly bool
 
 	// Trading configuration from the bootstrap file.
 	Secrets ingest.StaticSecrets
@@ -64,12 +69,13 @@ type venueWeight struct {
 // Load reads env + the bootstrap file (WEBHOOK_INGEST_CONFIG) and validates it.
 func Load() (Config, error) {
 	cfg := Config{
-		Listen:       envOr("WEBHOOK_INGEST_LISTEN", ":8090"),
-		LogLevel:     parseLevel(os.Getenv("WEBHOOK_INGEST_LOG_LEVEL")),
-		OTLPEndpoint: os.Getenv("WEBHOOK_INGEST_OTLP_ENDPOINT"),
-		NATSURL:      envOr("WEBHOOK_INGEST_NATS_URL", "nats://localhost:4222"),
-		Source:       envOr("WEBHOOK_INGEST_SOURCE", "webhook-ingest"),
-		ReplayWindow: parseDuration(os.Getenv("WEBHOOK_INGEST_REPLAY_WINDOW"), 5*time.Minute),
+		Listen:         envOr("WEBHOOK_INGEST_LISTEN", ":8090"),
+		LogLevel:       parseLevel(os.Getenv("WEBHOOK_INGEST_LOG_LEVEL")),
+		OTLPEndpoint:   os.Getenv("WEBHOOK_INGEST_OTLP_ENDPOINT"),
+		NATSURL:        envOr("WEBHOOK_INGEST_NATS_URL", "nats://localhost:4222"),
+		Source:         envOr("WEBHOOK_INGEST_SOURCE", "webhook-ingest"),
+		ReplayWindow:   parseDuration(os.Getenv("WEBHOOK_INGEST_REPLAY_WINDOW"), 5*time.Minute),
+		CloudflareOnly: os.Getenv("WEBHOOK_INGEST_CLOUDFLARE_ONLY") == "1",
 	}
 	allow, err := parseAllowlist(os.Getenv("WEBHOOK_INGEST_IP_ALLOWLIST"))
 	if err != nil {

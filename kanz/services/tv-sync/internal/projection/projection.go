@@ -186,6 +186,15 @@ func (p *Projection) appendFill(tenant, accountID string, f *orderpb.Fill, know 
 		return nil
 	}
 	a := p.acct(tenant, accountID, true)
+	// Idempotent fold: a fill arrives twice — once from the synchronous venue
+	// placement path, once as the async user-data websocket echo — under the same
+	// deterministic fill_id. Fold it once, never double-ledger (M3.7).
+	if fid := f.GetFillId(); fid != "" {
+		if a.seenFills[fid] {
+			return nil
+		}
+		a.seenFills[fid] = true
+	}
 	ex := execution{
 		fillID: f.GetFillId(), orderID: f.GetOrderId(), instrument: f.GetInstrumentId(),
 		venue: f.GetVenue(), side: f.GetSide(),

@@ -22,6 +22,7 @@ import (
 	"github.com/kanz-eng/kanz/pkg/observability"
 	"github.com/kanz-eng/kanz/services/tv-sync/internal/brokerapi"
 	"github.com/kanz-eng/kanz/services/tv-sync/internal/config"
+	"github.com/kanz-eng/kanz/services/tv-sync/internal/markfeed"
 	"github.com/kanz-eng/kanz/services/tv-sync/internal/projection"
 	"github.com/kanz-eng/kanz/services/tv-sync/internal/server"
 )
@@ -55,7 +56,10 @@ func main() {
 		_ = obs.Shutdown(shutCtx)
 	}()
 
-	proj := projection.New(time.Now, nil) // nil marks: unrealized P&L omitted until a mark source is bound
+	// M3.5: fold the market price spine into a live mark source so the
+	// projection computes floating unrealized P&L dynamically.
+	mark := markfeed.New()
+	proj := projection.New(time.Now, mark)
 
 	client, err := bus.DialNATS(ctx, bus.NATSConfig{URL: cfg.NATSURL, Name: cfg.Source})
 	if err != nil {
@@ -85,10 +89,17 @@ func main() {
 		}
 	}()
 
-	// Fold the OMS FACT stream. Each subject is subscribed on its own goroutine
-	// (Subscribe blocks); the first non-cancellation error cancels the siblings.
+	// Fold the OMS order/fill FACT stream into the projection, and the market
+	// price spine into the mark source. Each subject is subscribed on its own
+	// goroutine (Subscribe blocks); the first non-cancellation error cancels the
+	// siblings.
+	subs := map[string]bus.EventHandler{}
+	for _, s := range projection.Subjects() {
+		subs[s] = proj.Handle
+	}
+	subs[cfg.PriceSubject] = mark.Handle
 	go func() {
-		if err := runConsumers(ctx, consumer, proj, cfg.ConsumerGroup); err != nil && ctx.Err() == nil {
+		if err := runConsumers(ctx, consumer, subs, cfg.ConsumerGroup); err != nil && ctx.Err() == nil {
 			logger.Error("fact consumer failed", "err", err)
 			stop()
 		}
@@ -105,23 +116,23 @@ func main() {
 	}
 }
 
-func runConsumers(ctx context.Context, consumer *bus.Consumer, proj *projection.Projection, group string) error {
+func runConsumers(ctx context.Context, consumer *bus.Consumer, subs map[string]bus.EventHandler, group string) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	var wg sync.WaitGroup
 	errCh := make(chan error, 1)
-	for _, subject := range projection.Subjects() {
+	for subject, handler := range subs {
 		wg.Add(1)
-		go func(subject string) {
+		go func(subject string, handler bus.EventHandler) {
 			defer wg.Done()
-			if err := consumer.Subscribe(ctx, subject, group, proj.Handle); err != nil && ctx.Err() == nil {
+			if err := consumer.Subscribe(ctx, subject, group, handler); err != nil && ctx.Err() == nil {
 				select {
 				case errCh <- err:
 					cancel()
 				default:
 				}
 			}
-		}(subject)
+		}(subject, handler)
 	}
 	wg.Wait()
 	select {

@@ -136,6 +136,32 @@ func TestWebhook_DuplicateAcknowledged(t *testing.T) {
 	}
 }
 
+func TestWebhook_CloudflareOnlyRequiresHeader(t *testing.T) {
+	// Rebuild the server with Cloudflare-only enforcement.
+	base, pub := newServer(t)
+	_ = base
+	_ = pub
+	pipeline := base.pipeline
+	readiness := &Readiness{}
+	readiness.Set(true)
+	srv := New(readiness, nil, pipeline, WithCloudflareOnly(true))
+
+	// No CF-Connecting-IP → rejected as public noise, before auth.
+	if rec := post(t, srv, okBody, sign(okBody)); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("without CF-Connecting-IP = %d, want 401", rec.Code)
+	}
+	// With the header (transited the Cloudflare edge) → proceeds normally.
+	req := httptest.NewRequest(http.MethodPost, "/webhook/tradingview", strings.NewReader(okBody))
+	req.RemoteAddr = "10.0.0.1:5555"
+	req.Header.Set("X-Signature", sign(okBody))
+	req.Header.Set("CF-Connecting-IP", "203.0.113.9")
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("with CF-Connecting-IP = %d, want 202 (%s)", rec.Code, rec.Body)
+	}
+}
+
 func TestHealthAndReady(t *testing.T) {
 	srv, _ := newServer(t) // newServer marks the server ready
 	for _, path := range []string{"/healthz", "/readyz"} {

@@ -94,7 +94,7 @@ func main() {
 	readiness := &server.Readiness{}
 	httpSrv := &http.Server{
 		Addr:              cfg.Listen,
-		Handler:           server.New(readiness, logger, pipeline, server.WithMetrics(obs.MetricsHandler())),
+		Handler:           server.New(readiness, logger, pipeline, server.WithMetrics(obs.MetricsHandler()), server.WithCloudflareOnly(cfg.CloudflareOnly)),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 	go func() {

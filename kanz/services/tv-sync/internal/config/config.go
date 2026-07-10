@@ -17,6 +17,10 @@ type Config struct {
 	NATSURL       string
 	Source        string
 	ConsumerGroup string
+	// PriceSubject is the market price spine tv-sync folds into its MarkSource
+	// for live unrealized P&L (M3.5). Default "market.>" catches every market
+	// variant, incl. the Binance ticker feed's market.crypto.trade.
+	PriceSubject string
 }
 
 // Load reads TV_SYNC_* environment variables with production-safe defaults.
@@ -28,6 +32,7 @@ func Load() (Config, error) {
 		NATSURL:       envOr("TV_SYNC_NATS_URL", "nats://localhost:4222"),
 		Source:        envOr("TV_SYNC_SOURCE", "tv-sync"),
 		ConsumerGroup: envOr("TV_SYNC_CONSUMER_GROUP", "tv-sync"),
+		PriceSubject:  envOr("TV_SYNC_PRICE_SUBJECT", "market.>"),
 	}, nil
 }
 

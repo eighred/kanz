@@ -158,6 +158,23 @@ func TestHandle_StreamDelta(t *testing.T) {
 	}
 }
 
+func TestHandle_FillDedupByFillID(t *testing.T) {
+	p := New(time.Now, nil)
+	ev := filledOrder("o1", "f", "BTC", orderpb.Side_SIDE_BUY, 2, 100) // fill_id = fill-o1
+	// The same fill arrives twice (sync venue path + async ws echo).
+	_ = p.Handle(context.Background(), env("acme", evtFilled), mustMarshal(t, ev))
+	_ = p.Handle(context.Background(), env("acme", evtFilled), mustMarshal(t, ev))
+
+	pos, _ := p.Positions("acme", "f", time.Time{})
+	if len(pos) != 1 || pos[0].Qty != "2" {
+		t.Fatalf("positions = %+v, want net 2 (fill folded once, not doubled)", pos)
+	}
+	execs, _ := p.Executions("acme", "f", "", time.Time{})
+	if len(execs) != 1 {
+		t.Fatalf("executions = %d, want 1 (deduped by fill_id)", len(execs))
+	}
+}
+
 func TestHandle_UntenantedSkipped(t *testing.T) {
 	p := New(time.Now, nil)
 	if err := p.Handle(context.Background(), env("", evtFilled), mustMarshal(t, filledOrder("o1", "f", "BTC", orderpb.Side_SIDE_BUY, 1, 100))); err != nil {

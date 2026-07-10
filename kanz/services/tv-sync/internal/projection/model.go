@@ -44,14 +44,15 @@ type orderRev struct {
 
 // account holds one trading account's append-only folded history under a tenant.
 type account struct {
-	tenant string
-	id     string
-	execs  []execution
-	orders map[string][]orderRev // order_id -> revisions in fold order
+	tenant    string
+	id        string
+	execs     []execution
+	orders    map[string][]orderRev // order_id -> revisions in fold order
+	seenFills map[string]bool       // fill_id dedup (sync venue path + async ws echo)
 }
 
 func newAccount(tenant, id string) *account {
-	return &account{tenant: tenant, id: id, orders: make(map[string][]orderRev)}
+	return &account{tenant: tenant, id: id, orders: make(map[string][]orderRev), seenFills: make(map[string]bool)}
 }
 
 // --- output DTOs (the TradingView Broker-API JSON shapes) ---

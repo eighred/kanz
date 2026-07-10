@@ -26,11 +26,12 @@ func (r *Readiness) Ready() bool    { return r.ready.Load() }
 
 // Server serves the webhook endpoint over an ingest pipeline.
 type Server struct {
-	readiness *Readiness
-	pipeline  *ingest.Pipeline
-	logger    *slog.Logger
-	metrics   http.Handler
-	mux       *http.ServeMux
+	readiness      *Readiness
+	pipeline       *ingest.Pipeline
+	logger         *slog.Logger
+	metrics        http.Handler
+	cloudflareOnly bool
+	mux            *http.ServeMux
 }
 
 // Option customizes the server.
@@ -38,6 +39,11 @@ type Option func(*Server)
 
 // WithMetrics mounts a Prometheus /metrics handler.
 func WithMetrics(h http.Handler) Option { return func(s *Server) { s.metrics = h } }
+
+// WithCloudflareOnly requires every webhook to carry CF-Connecting-IP (the
+// inbound path is fronted by the Cloudflare Signing Relay; combined with the
+// Cloudflare-CIDR IP allowlist it locks out public traffic).
+func WithCloudflareOnly(on bool) Option { return func(s *Server) { s.cloudflareOnly = on } }
 
 // New builds the server over an ingest pipeline.
 func New(readiness *Readiness, logger *slog.Logger, pipeline *ingest.Pipeline, opts ...Option) *Server {
@@ -72,6 +78,13 @@ func (s *Server) routes() {
 }
 
 func (s *Server) handleWebhook(w http.ResponseWriter, r *http.Request) {
+	// M3.8: in Cloudflare-only mode, a request that did not transit the
+	// Cloudflare edge (no CF-Connecting-IP) is public noise — reject before any
+	// work. The peer-IP-in-Cloudflare-CIDR check is the pipeline's IP allowlist.
+	if s.cloudflareOnly && r.Header.Get("CF-Connecting-IP") == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+		return
+	}
 	body, err := io.ReadAll(io.LimitReader(r.Body, maxBodyBytes))
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "read body failed"})
