@@ -87,6 +87,12 @@ message OrderState {
   // as_of is the domain time this state is effective at — the event_time of the
   // change that produced it. Required.
   google.protobuf.Timestamp as_of = 13;
+
+  // venue is the target execution venue MIC carried from the SubmitOrder — the
+  // multi-venue allocation matrix's routing key (M4). The router sends the order
+  // to the venue whose MIC matches; empty ⇒ smart-order-routing default. Once
+  // routed, OrderRouted.venue records the acknowledged venue. Optional.
+  string venue = 14;
 }
 
 // Fill is one atomic execution against an order — the execution-report payload

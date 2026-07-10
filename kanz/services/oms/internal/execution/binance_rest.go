@@ -8,7 +8,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -16,19 +15,6 @@ import (
 	"strconv"
 	"time"
 )
-
-// ErrRateLimited is returned when the local weight budget is exhausted before a
-// REST call — the caller backs off and raises a structural alert rather than
-// firing the request and risking an exchange ban. It is never a fabricated fill.
-var ErrRateLimited = errors.New("binance: local rate-limit budget exhausted")
-
-// APIError is a typed Binance error body ({code, msg}).
-type APIError struct {
-	Code int
-	Msg  string
-}
-
-func (e *APIError) Error() string { return fmt.Sprintf("binance error %d: %s", e.Code, e.Msg) }
 
 // binanceREST is a minimal, dependency-free Binance Spot REST client. It signs
 // requests with HMAC-SHA256 over the query string (RFC-standard Binance auth),

@@ -34,7 +34,7 @@ func TestTestnet_SignedRoundTrip(t *testing.T) {
 	rest := newBinanceREST(restConfig{
 		BaseURL: base, APIKey: key, APISecret: secret,
 		Bucket:     newWeightBucket(1200, time.Minute, nil),
-		HTTPClient: newBinanceHTTPClient(0),
+		HTTPClient: newExchangeHTTPClient(0),
 	})
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()

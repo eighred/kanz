@@ -1,8 +1,8 @@
-//go:build binance
+//go:build binance || okx
 
-// The Binance connector is compiled only under -tags binance, so the default
-// OMS binary carries no exchange-vendor code or third-party client — the
-// house build-tag composition-root split (like -tags anthropic / -tags redis).
+// Shared exchange-connector infra (weight-metered rate limiting), compiled under
+// either exchange tag so Binance and OKX reuse one implementation while the
+// default OMS binary still carries no exchange-vendor code.
 
 package execution
 

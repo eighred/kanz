@@ -116,6 +116,21 @@ func TestFanOut_AbsoluteQty(t *testing.T) {
 	assertSplit(t, cmds, big.NewRat(6, 10), big.NewRat(4, 10))
 }
 
+func TestFanOut_StampsAllocatedVenue(t *testing.T) {
+	p, cap := harness(t)
+	if _, err := process(t, p, body("buy", "1", "absolute_qty", "venue-1")); err != nil {
+		t.Fatalf("Process: %v", err)
+	}
+	venues := map[string]bool{}
+	for _, c := range cap.commands() {
+		venues[c.GetVenue()] = true
+	}
+	// Each leg carries its allocated venue so the OMS router sends it there (M4).
+	if !venues["BINANCE"] || !venues["OKX"] || len(venues) != 2 {
+		t.Fatalf("fanned venues = %v, want {BINANCE, OKX}", venues)
+	}
+}
+
 func TestFanOut_QuoteNotional(t *testing.T) {
 	p, cap := harness(t)
 	// 5000 USDT notional / 50000 price = 0.1 base → 0.06 / 0.04.

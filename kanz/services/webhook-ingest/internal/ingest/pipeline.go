@@ -232,6 +232,7 @@ func (p *Pipeline) fanOut(ctx context.Context, wh *Webhook, signalID, instrument
 			OrderType:    orderType,
 			LimitPrice:   limitPrice,
 			TimeInForce:  orderpb.TimeInForce_TIME_IN_FORCE_DAY,
+			Venue:        v.Venue, // M4: route this leg to its allocated venue
 		}
 		if err := p.publishCommand(ctx, cmd, orderID, tenant); err != nil {
 			return nil, fmt.Errorf("publish order %s: %w", orderID, err)

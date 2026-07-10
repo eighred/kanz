@@ -1,4 +1,4 @@
-//go:build binance
+//go:build binance || okx
 
 package execution
 
@@ -94,10 +94,10 @@ func (d *cachedDialer) cachedIP(ctx context.Context, host string) (string, error
 	return ips[0], nil
 }
 
-// newBinanceHTTPClient builds an http.Client whose transport dials via the
+// newExchangeHTTPClient builds an http.Client whose transport dials via the
 // cached resolver — the client both the REST connector and the websocket
 // listenKey calls use.
-func newBinanceHTTPClient(dnsTTL time.Duration) *http.Client {
+func newExchangeHTTPClient(dnsTTL time.Duration) *http.Client {
 	d := newCachedDialer(dnsTTL)
 	return &http.Client{
 		Timeout: 10 * time.Second,

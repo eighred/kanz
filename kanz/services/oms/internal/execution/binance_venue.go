@@ -6,7 +6,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"math/big"
 	"net/url"
 	"strconv"
 	"time"
@@ -17,17 +16,6 @@ import (
 
 	"github.com/kanz-eng/kanz/services/oms/internal/dec"
 )
-
-// SymbolMapper maps a canonical Kanz instrument_id to the exchange's symbol
-// (e.g. "BTC-USD" -> "BTCUSDT"). An unmapped instrument cannot be traded here.
-type SymbolMapper interface {
-	Symbol(instrumentID string) (string, bool)
-}
-
-// StaticSymbolMap is a fixed instrument→symbol map.
-type StaticSymbolMap map[string]string
-
-func (m StaticSymbolMap) Symbol(id string) (string, bool) { s, ok := m[id]; return s, ok }
 
 // BinanceVenue implements the execution.Venue seam against Binance Spot (compiled
 // only under -tags binance). It maps a SubmitOrder-derived OrderState onto a
@@ -62,19 +50,6 @@ func NewBinanceVenue(cfg BinanceConfig) *BinanceVenue {
 	return &BinanceVenue{mic: cfg.MIC, rest: cfg.REST, symbols: cfg.Symbols, now: cfg.Now}
 }
 
-// VenueSettings is the public configuration the composition root supplies to
-// build a BinanceVenue without touching the internal REST client / rate bucket.
-type VenueSettings struct {
-	MIC          string
-	BaseURL      string // e.g. https://testnet.binance.vision
-	APIKey       string
-	APISecret    string
-	Symbols      map[string]string // instrument_id -> exchange symbol
-	WeightBudget int               // per-minute REST weight budget (default 1200)
-	OnThrottle   func()            // structural-alert hook on budget exhaustion
-	DNSTTL       time.Duration     // DNS cache TTL for the bypass dialer (default 5m)
-}
-
 // NewBinanceVenueFromSettings assembles the rate bucket + signed REST client +
 // venue from public settings — the composition-root entry point.
 func NewBinanceVenueFromSettings(s VenueSettings) *BinanceVenue {
@@ -86,7 +61,7 @@ func NewBinanceVenueFromSettings(s VenueSettings) *BinanceVenue {
 	rest := newBinanceREST(restConfig{
 		BaseURL: s.BaseURL, APIKey: s.APIKey, APISecret: s.APISecret,
 		Bucket: bucket, OnThrottle: s.OnThrottle,
-		HTTPClient: newBinanceHTTPClient(s.DNSTTL), // DNS-bypass dialer on the hot path
+		HTTPClient: newExchangeHTTPClient(s.DNSTTL), // DNS-bypass dialer on the hot path
 	})
 	return NewBinanceVenue(BinanceConfig{MIC: s.MIC, Symbols: StaticSymbolMap(s.Symbols), REST: rest})
 }
@@ -198,33 +173,4 @@ func binanceSide(s orderpb.Side) (string, error) {
 	default:
 		return "", fmt.Errorf("binance: invalid side %v", s)
 	}
-}
-
-// formatDec renders a common.v1.Decimal as a plain string for the Binance API.
-// NOTE: exchange LOT_SIZE/PRICE_FILTER precision rounding (from exchangeInfo) is
-// a hardening item — testnet tolerates unrounded values; production binds the
-// symbol filters before send.
-func formatDec(d *commonpb.Decimal) string {
-	r := dec.FromProto(d)
-	s := r.FloatString(8)
-	// trim trailing zeros / dangling point
-	for len(s) > 0 && s[len(s)-1] == '0' {
-		s = s[:len(s)-1]
-	}
-	if len(s) > 0 && s[len(s)-1] == '.' {
-		s = s[:len(s)-1]
-	}
-	if s == "" {
-		s = "0"
-	}
-	return s
-}
-
-// parseDec parses a Binance decimal string into an exact common.v1.Decimal.
-func parseDec(s string) *commonpb.Decimal {
-	r, ok := new(big.Rat).SetString(s)
-	if !ok {
-		return &commonpb.Decimal{}
-	}
-	return dec.ToProto(r)
 }

@@ -71,6 +71,13 @@ message SubmitOrder {
   // expire_at is the expiry instant for TIME_IN_FORCE_GTD. Required when
   // time_in_force is GTD; ignored otherwise.
   google.protobuf.Timestamp expire_at = 11;
+
+  // venue is the target execution venue's ISO 10383 MIC (e.g. "BINANCE",
+  // "OKX"). The multi-venue allocation matrix stamps it on each fanned-out
+  // order so the router sends it to that specific venue implementation. Empty ⇒
+  // the router falls back to its smart-order-routing default (best single
+  // venue). Optional.
+  string venue = 12;
 }
 
 // AmendOrder requests a change to a resting order's quantity and/or limit

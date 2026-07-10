@@ -86,6 +86,7 @@ func Accept(cmd *orderpb.SubmitOrder, now time.Time) (*orderpb.OrderState, error
 		Status:          orderpb.OrderStatus_ORDER_STATUS_PENDING_NEW,
 		FilledQuantity:  zero,
 		LeavesQuantity:  cmd.GetQuantity(),
+		Venue:           cmd.GetVenue(), // M4: the allocation-matrix routing target
 		AsOf:            timestamppb.New(now.UTC()),
 	}, nil
 }
@@ -216,6 +217,7 @@ func cloneState(st *orderpb.OrderState) *orderpb.OrderState {
 		FilledQuantity:   st.GetFilledQuantity(),
 		LeavesQuantity:   st.GetLeavesQuantity(),
 		AverageFillPrice: st.GetAverageFillPrice(),
+		Venue:            st.GetVenue(),
 		AsOf:             st.GetAsOf(),
 	}
 }
