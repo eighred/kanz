@@ -3,6 +3,7 @@
 package execution
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"math/big"
@@ -11,6 +12,33 @@ import (
 	commonpb "github.com/kanz-eng/kanz-schemas-go/common/v1"
 
 	"github.com/kanz-eng/kanz/services/oms/internal/dec"
+)
+
+// sleep waits d or until ctx is cancelled — the connectors' reconnect backoff.
+func sleep(ctx context.Context, d time.Duration) {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+	case <-t.C:
+	}
+}
+
+// capDur clamps d to max.
+func capDur(d, max time.Duration) time.Duration {
+	if d > max {
+		return max
+	}
+	return d
+}
+
+// Correcting-FACT subjects (M3.4). StateHealed/BalanceReconciled ride the
+// envelope with QUALITY_FLAG_REVISED; downstream folders (the journal, tv-sync)
+// apply them to restore parity — the reconciler never edits state directly.
+// Shared so both exchange reconcilers publish on one subject.
+const (
+	subjectStateHealed  = "order.order.healed"
+	subjectBalanceRecon = "accounting.balance.reconciled"
 )
 
 // ErrRateLimited is returned when the local weight budget is exhausted before a
@@ -79,4 +107,9 @@ func parseDec(s string) *commonpb.Decimal {
 		return &commonpb.Decimal{}
 	}
 	return dec.ToProto(r)
+}
+
+// subDec returns a − b as an exact common.v1.Decimal.
+func subDec(a, b *commonpb.Decimal) *commonpb.Decimal {
+	return dec.ToProto(new(big.Rat).Sub(dec.FromProto(a), dec.FromProto(b)))
 }

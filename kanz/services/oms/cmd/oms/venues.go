@@ -23,7 +23,7 @@ func configuredVenues(ctx context.Context, cfg config.Config, store order.Store,
 	adapter := storeAdapter{store: store}
 	var venues []execution.Venue
 	venues = append(venues, binanceVenues(ctx, cfg, adapter, producer, logger)...)
-	venues = append(venues, okxVenues(cfg, logger)...)
+	venues = append(venues, okxVenues(ctx, cfg, adapter, producer, logger)...)
 	if len(venues) == 0 {
 		logger.Info("no exchange venues configured — routing to SimVenue")
 		return []execution.Venue{execution.NewSimVenue(cfg.SimVenueMIC)}

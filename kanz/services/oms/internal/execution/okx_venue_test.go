@@ -17,13 +17,15 @@ import (
 )
 
 type fakeOKX struct {
-	srv       *httptest.Server
-	sawSign   bool
-	sawKey    bool
-	sawPass   bool
-	sawClOrd  string
-	placeBody string
-	queryBody string
+	srv         *httptest.Server
+	sawSign     bool
+	sawKey      bool
+	sawPass     bool
+	sawClOrd    string
+	placeBody   string
+	queryBody   string
+	balanceBody string
+	tickerBody  string
 }
 
 func newFakeOKX(t *testing.T) *fakeOKX {
@@ -40,6 +42,12 @@ func newFakeOKX(t *testing.T) *fakeOKX {
 		}
 		f.sawClOrd = r.URL.Query().Get("clOrdId")
 		_, _ = w.Write([]byte(f.queryBody))
+	})
+	mux.HandleFunc("/api/v5/account/balance", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(f.balanceBody))
+	})
+	mux.HandleFunc("/api/v5/market/ticker", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(f.tickerBody))
 	})
 	f.srv = httptest.NewServer(mux)
 	t.Cleanup(f.srv.Close)

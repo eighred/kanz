@@ -18,27 +18,6 @@ import (
 	"github.com/kanz-eng/kanz/services/oms/internal/dec"
 )
 
-// Correcting-FACT subjects. StateHealed/BalanceReconciled ride the envelope with
-// QUALITY_FLAG_REVISED; downstream folders (the journal, tv-sync) apply them to
-// restore parity — the reconciler never edits state directly.
-const (
-	subjectStateHealed  = "order.order.healed"
-	subjectBalanceRecon = "accounting.balance.reconciled"
-)
-
-// ExpectedOrders is Kanz's internal view of the orders it believes are open —
-// bound to the OMS order store in production. The reconciler queries each on the
-// exchange and heals any that have drifted.
-type ExpectedOrders interface {
-	OpenOrders() []*orderpb.OrderState
-}
-
-// ExpectedBalances is Kanz's internal per-asset balance for the venue account —
-// bound to the accounting projection in production. A nil result ⇒ zero.
-type ExpectedBalances interface {
-	Balance(asset string) *big.Rat
-}
-
 // Reconciler is the secondary audit layer (M3.3/3.4): it periodically polls
 // Binance for the venue truth and, where Kanz's state has drifted (a fill the
 // websocket missed, an unrecorded fee), emits a correcting FACT. The exchange is

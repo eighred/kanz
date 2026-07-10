@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"math/big"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -22,16 +21,7 @@ import (
 	"github.com/coder/websocket"
 
 	"github.com/kanz-eng/kanz/pkg/bus"
-	"github.com/kanz-eng/kanz/services/oms/internal/dec"
 )
-
-// OrderLookup enriches an exchange execution report (which carries only the
-// clientOrderId = our order_id, and the symbol) with Kanz's order context —
-// portfolio_id, instrument_id, static terms — so the ingester can emit a proper
-// order.v1 FACT. Bound to the OMS order store in production.
-type OrderLookup interface {
-	Lookup(orderID string) (*orderpb.OrderState, bool)
-}
 
 // executionReport is the Binance user-data "executionReport" event (the fields
 // the ingester reads). Fills are the x=TRADE reports.
@@ -64,13 +54,6 @@ type UserDataIngester struct {
 	pub    Publisher
 	venue  string
 	tenant string
-}
-
-// UserDataStream is the transport seam: it yields raw user-data frames. The
-// concrete Binance websocket implementation is binanceUserDataWS; tests inject a
-// fake, so the conversion is certified without a network.
-type UserDataStream interface {
-	Recv(ctx context.Context) ([]byte, error)
 }
 
 // UserDataConfig configures the ingester.
@@ -157,11 +140,6 @@ func applyFillToState(st *orderpb.OrderState, rep executionReport) *orderpb.Orde
 		FilledQuantity: cum, LeavesQuantity: subDec(ordered, cum),
 		AsOf: timestamppb.New(time.UnixMilli(rep.TransactTime).UTC()),
 	}
-}
-
-// subDec returns a − b as an exact common.v1.Decimal.
-func subDec(a, b *commonpb.Decimal) *commonpb.Decimal {
-	return dec.ToProto(new(big.Rat).Sub(dec.FromProto(a), dec.FromProto(b)))
 }
 
 func reportFee(rep executionReport) *commonpb.Money {

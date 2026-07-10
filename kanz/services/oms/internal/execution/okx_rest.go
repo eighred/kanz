@@ -140,6 +140,91 @@ func (c *okxREST) queryOrder(ctx context.Context, instID, clOrdID string) (*okxO
 	return &out.Data[0], nil
 }
 
+// okxBalances is GET /api/v5/account/balance — cash balances for reconciliation.
+type okxBalances struct {
+	Code string `json:"code"`
+	Msg  string `json:"msg"`
+	Data []struct {
+		Details []struct {
+			Ccy     string `json:"ccy"`
+			CashBal string `json:"cashBal"`
+		} `json:"details"`
+	} `json:"data"`
+}
+
+// balances fetches the account cash balances per currency (signed, weight 1).
+func (c *okxREST) balances(ctx context.Context) (map[string]string, error) {
+	if !c.bucket.allow(1) {
+		c.onThrottle()
+		return nil, ErrRateLimited
+	}
+	raw, err := c.signedRequest(ctx, http.MethodGet, "/api/v5/account/balance", nil)
+	if err != nil {
+		return nil, err
+	}
+	var out okxBalances
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return nil, fmt.Errorf("okx: decode balance: %w", err)
+	}
+	if out.Code != "0" {
+		return nil, &APIError{Code: atoiSafe(out.Code), Msg: out.Msg}
+	}
+	m := map[string]string{}
+	for _, d := range out.Data {
+		for _, b := range d.Details {
+			m[b.Ccy] = b.CashBal
+		}
+	}
+	return m, nil
+}
+
+// tickerPrice returns the last price for an instrument (public GET
+// /api/v5/market/ticker, unsigned) — feeds the MarkSource seam.
+func (c *okxREST) tickerPrice(ctx context.Context, instID string) (string, error) {
+	if !c.bucket.allow(1) {
+		c.onThrottle()
+		return "", ErrRateLimited
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/api/v5/market/ticker?instId="+instID, nil)
+	if err != nil {
+		return "", err
+	}
+	raw, err := c.do(req)
+	if err != nil {
+		return "", err
+	}
+	var out struct {
+		Code string `json:"code"`
+		Data []struct {
+			Last string `json:"last"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return "", err
+	}
+	if out.Code != "0" || len(out.Data) == 0 {
+		return "", &APIError{Code: atoiSafe(out.Code), Msg: "ticker unavailable"}
+	}
+	return out.Data[0].Last, nil
+}
+
+// do executes a request and returns the body for any <500 status.
+func (c *okxREST) do(req *http.Request) ([]byte, error) {
+	resp, err := c.httpc.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode >= 500 {
+		return nil, fmt.Errorf("okx: %s: status %d", req.URL.Path, resp.StatusCode)
+	}
+	return raw, nil
+}
+
 // signedRequest signs and sends. requestPath includes any query string; body is
 // the JSON payload (empty for GET). OK-ACCESS-SIGN =
 // base64(HMAC-SHA256(timestamp + method + requestPath + body)).

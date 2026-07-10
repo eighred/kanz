@@ -35,18 +35,6 @@ func NewBinanceConnector(settings VenueSettings, wsBase string) *BinanceConnecto
 // Venue returns the execution venue for the router.
 func (c *BinanceConnector) Venue() Venue { return c.venue }
 
-// WorkerDeps are the composition-root-supplied collaborators the workers need.
-type WorkerDeps struct {
-	Publisher         Publisher
-	Lookup            OrderLookup
-	Expected          ExpectedOrders
-	Balances          ExpectedBalances
-	Tenant            string
-	ReconcileInterval time.Duration
-	TickerInterval    time.Duration
-	Logger            *slog.Logger
-}
-
 // Start launches the reconciler, the user-data ingester (with reconnect), and
 // the ticker feed as background goroutines until ctx is cancelled.
 func (c *BinanceConnector) Start(ctx context.Context, deps WorkerDeps) {
@@ -145,19 +133,3 @@ func (f *binanceTickerFeed) pollOnce(ctx context.Context) {
 
 // NewReconciler builds a reconciliation worker (exported wrapper).
 func NewReconciler(cfg ReconcilerConfig) *Reconciler { return newReconciler(cfg) }
-
-func sleep(ctx context.Context, d time.Duration) {
-	t := time.NewTimer(d)
-	defer t.Stop()
-	select {
-	case <-ctx.Done():
-	case <-t.C:
-	}
-}
-
-func capDur(d, max time.Duration) time.Duration {
-	if d > max {
-		return max
-	}
-	return d
-}
