@@ -1,0 +1,131 @@
+syntax = "proto3";
+
+// Package signal.v1 defines the automated-strategy signal domain — the entry
+// point of the automated fund-management loop. A StrategySignal is the FACT that
+// a proprietary quantitative strategy (running on TradingView via Pine Script)
+// fired an actionable alert for a fund. It is the immutable audit root every
+// downstream order, fill, and capital effect chains its causation_id to, so the
+// durable log tells the whole story: signal -> orders -> fills -> capital -> P&L.
+//
+// A signal is ADVISORY intent, not a command. services/webhook-ingest validates
+// it (HMAC over the raw body, IP allowlist, nonce replay window), records this
+// FACT, then — per the fund's venue-allocation policy — emits the concrete
+// order.v1.SubmitOrder COMMANDS the OMS executes. The signal itself mutates no
+// state and is never executed directly; treating it as a command would skip the
+// pre-trade gates the OMS owns.
+//
+// The signal aggregate identity is signal_id; it is the envelope partition_key,
+// and the envelope idempotency_key is derived from (strategy_id, nonce) so a
+// re-delivered TradingView webhook dedups to the same signal rather than firing
+// a second set of orders.
+//
+// proto3 cannot enforce field presence; the "Required" notes are invariants the
+// ingest service and the bus client library enforce on publish. Sizes and
+// leverage are exact common.v1.Decimal — double is banned for anything that
+// moves capital. CODEOWNERS: @kanz-eng/execution.
+package signal.v1;
+
+import "google/protobuf/timestamp.proto";
+import "common/v1/decimal.proto";
+
+// SignalAction is the directional intent a strategy expresses. Direction is
+// carried here, not by the sign of size (which is strictly positive).
+enum SignalAction {
+  SIGNAL_ACTION_UNSPECIFIED = 0;
+  // BUY opens or increases a long (or reduces/closes a short).
+  SIGNAL_ACTION_BUY = 1;
+  // SELL opens or increases a short (or reduces/closes a long).
+  SIGNAL_ACTION_SELL = 2;
+  // CLOSE flattens the fund's entire position in the instrument.
+  SIGNAL_ACTION_CLOSE = 3;
+}
+
+// SizeType tells the translator how to interpret StrategySignal.size, so
+// webhook-ingest can resolve it to an absolute order quantity against live fund
+// state. Institutional strategies rarely signal in absolute units; percent-of-
+// NAV and quote-notional are the common cases.
+enum SizeType {
+  SIZE_TYPE_UNSPECIFIED = 0;
+  // ABSOLUTE_QTY: size is already the quantity in the instrument's natural
+  // units (e.g. 0.1 BTC). No resolution needed.
+  SIZE_TYPE_ABSOLUTE_QTY = 1;
+  // PCT_OF_EQUITY: size is a fraction of the fund's net asset value (e.g. 5 =
+  // 5% of NAV). Resolved as (size/100 × NAV) / price, from the live accounting
+  // NAV projection and the latest mark.
+  SIZE_TYPE_PCT_OF_EQUITY = 2;
+  // QUOTE_NOTIONAL: size is a nominal amount in the quote currency (e.g. 5000
+  // USDT). Resolved as size / price, from the latest mark.
+  SIZE_TYPE_QUOTE_NOTIONAL = 3;
+}
+
+// MarginMode carries the leverage regime for a derivatives signal. Present from
+// day 1 so the schema is leverage-ready (the leverage-ready / spot-first
+// decision); Phase 1 executes spot-only (MARGIN_MODE_UNSPECIFIED, leverage 1),
+// so liquidation logic is isolated from execution bugs during bring-up.
+enum MarginMode {
+  MARGIN_MODE_UNSPECIFIED = 0; // spot / no leverage
+  MARGIN_MODE_CROSS = 1;       // cross-margin (shared collateral)
+  MARGIN_MODE_ISOLATED = 2;    // isolated-margin (per-position collateral)
+}
+
+// StrategySignal is the FACT that a strategy fired an actionable alert for a
+// fund. Emitted by services/webhook-ingest on the subject
+// `strategy.signal.received` after validation. It is advisory intent; the OMS's
+// pre-trade compliance/risk gates still apply to the orders it produces.
+message StrategySignal {
+  // signal_id is this signal's unique, idempotent identity — deterministic from
+  // (strategy_id, nonce) so a re-delivered webhook dedups to the same signal
+  // rather than firing a second set of orders. Required.
+  string signal_id = 1;
+
+  // strategy_id identifies the proprietary strategy that fired (the Pine
+  // script / alert source). It is also the command issuer principal on the
+  // orders this signal produces, formatted "strategy:{strategy_id}". Required.
+  string strategy_id = 2;
+
+  // fund_id is the fund whose capital this signal trades. It scopes ownership
+  // and maps (via the venue-allocation policy) to the exchange accounts that
+  // execute. The envelope tenant_id is derived from it. Required.
+  string fund_id = 3;
+
+  // instrument_id is the canonical Kanz instrument the signal targets, resolved
+  // by ingest from source_symbol. It is what the SubmitOrder commands trade.
+  // Required.
+  string instrument_id = 4;
+
+  // source_symbol is the raw ticker as it arrived from TradingView (e.g.
+  // "BINANCE:BTCUSDT"), retained for audit and exchange reconciliation.
+  // Optional.
+  string source_symbol = 5;
+
+  // action is the directional intent. Required; must not be UNSPECIFIED.
+  SignalAction action = 6;
+
+  // size is the intended order size BEFORE venue allocation, interpreted per
+  // size_type, strictly positive. The translator resolves it to an absolute
+  // quantity (against live NAV/price for PCT_OF_EQUITY/QUOTE_NOTIONAL); the
+  // allocation policy then scales it per venue weight into the per-venue
+  // SubmitOrder quantities. Required.
+  common.v1.Decimal size = 7;
+
+  // leverage is the requested leverage multiple (1 = spot / unlevered). Present
+  // from day 1 for leverage-readiness; Phase 1 runs leverage = 1. Required.
+  common.v1.Decimal leverage = 8;
+
+  // margin_mode is the leverage regime for a derivatives signal; UNSPECIFIED for
+  // spot. Optional.
+  MarginMode margin_mode = 9;
+
+  // source_ts is the alert time as reported by TradingView (from the webhook
+  // body). Advisory only — never trusted for ordering or replay defense.
+  // Optional.
+  google.protobuf.Timestamp source_ts = 10;
+
+  // received_ts is when webhook-ingest received and validated the signal — the
+  // authoritative receipt time. Required.
+  google.protobuf.Timestamp received_ts = 11;
+
+  // size_type tells the translator how to interpret size. Required; must not be
+  // UNSPECIFIED.
+  SizeType size_type = 12;
+}
