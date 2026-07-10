@@ -58,6 +58,23 @@ enum SizeType {
   SIZE_TYPE_QUOTE_NOTIONAL = 3;
 }
 
+// SignalSource records the provenance of a signal — which brain produced it.
+// Kanz is a hybrid brain: signals arrive both from external proprietary
+// strategies (TradingView webhooks) and from Kanz's own native alpha engines
+// (order-book imbalance, cross-venue arbitrage) running in services/market-
+// ingest. Provenance is first-class so risk, audit, and venue-allocation policy
+// can treat a native low-latency signal differently from an external advisory
+// one — never inferred from the subject or the strategy_id string.
+enum SignalSource {
+  SIGNAL_SOURCE_UNSPECIFIED = 0;
+  // TRADINGVIEW_WEBHOOK: an external Pine strategy fired via services/webhook-
+  // ingest (HMAC-authenticated webhook).
+  SIGNAL_SOURCE_TRADINGVIEW_WEBHOOK = 1;
+  // NATIVE_ENGINE: a Kanz-internal alpha engine emitted the signal from the
+  // off-bus L2 book (services/market-ingest). No external webhook is involved.
+  SIGNAL_SOURCE_NATIVE_ENGINE = 2;
+}
+
 // MarginMode carries the leverage regime for a derivatives signal. Present from
 // day 1 so the schema is leverage-ready (the leverage-ready / spot-first
 // decision); Phase 1 executes spot-only (MARGIN_MODE_UNSPECIFIED, leverage 1),
@@ -128,4 +145,9 @@ message StrategySignal {
   // size_type tells the translator how to interpret size. Required; must not be
   // UNSPECIFIED.
   SizeType size_type = 12;
+
+  // source is the signal's provenance (which brain produced it). Required going
+  // forward; a zero value (UNSPECIFIED) is read as TRADINGVIEW_WEBHOOK for
+  // backward compatibility with signals recorded before this field existed.
+  SignalSource source = 13;
 }

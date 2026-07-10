@@ -1,0 +1,100 @@
+syntax = "proto3";
+
+// Package market.v1 also defines L2 order-book depth for the native-alpha edge.
+// The raw, full-rate depth feed is NEVER carried on the bus: services/market-
+// ingest keeps the live book in memory (the off-bus hot path) and the native
+// engines (order-book imbalance, cross-venue arbitrage) read it there. Only two
+// things reach the bus — bounded periodic OrderBookSnapshots (for durable
+// replay, cross-node bootstrap, and audit) and the signal.v1.StrategySignals the
+// native engines emit. OrderBookDelta is the incremental transport the ingester
+// folds internally; it is schema'd here so a durable-log / replay consumer can
+// reconstruct the book deterministically, but it is not published on the live
+// spine at full rate.
+package market.v1;
+
+import "google/protobuf/timestamp.proto";
+import "common/v1/decimal.proto";
+
+// PriceLevel is one aggregated level of L2 depth: the total resting size at a
+// price. Sizes are exact common.v1.Decimal — double is banned for anything a
+// pricing or execution decision reads. In an OrderBookDelta a size of 0 means
+// "this level is now empty; remove it".
+message PriceLevel {
+  // price is the level price. Required.
+  common.v1.Decimal price = 1;
+
+  // size is the aggregate resting quantity at price, in the instrument's natural
+  // units. 0 in a delta removes the level. Required.
+  common.v1.Decimal size = 2;
+}
+
+// OrderBookSnapshot is a full, bounded-depth L2 view of one instrument on one
+// venue at a point in time. It is self-contained — a consumer can rebuild the
+// book from a snapshot alone and then apply deltas whose prev_update_sequence
+// chains off last_update_sequence.
+message OrderBookSnapshot {
+  // instrument_id is the canonical Kanz instrument identifier and the ordering
+  // domain — it equals the envelope partition_key. Required.
+  string instrument_id = 1;
+
+  // symbol is the human-readable ticker; advisory. instrument_id is
+  // authoritative. Optional.
+  string symbol = 2;
+
+  // mic is the ISO 10383 (or venue) code of the source book (e.g. "BINANCE",
+  // "OKX"). Depth is per-venue; cross-venue books are never merged here.
+  // Required.
+  string mic = 3;
+
+  // event_time is the venue/source timestamp of the last update folded into this
+  // snapshot. Authoritative for any windowing or model-input logic. Required.
+  google.protobuf.Timestamp event_time = 4;
+
+  // last_update_sequence is the venue sequence number of the last update
+  // reflected here. A delta applies iff its prev_update_sequence equals this;
+  // otherwise the consumer has a gap and must re-snapshot. 0 when the venue
+  // provides no sequence.
+  uint64 last_update_sequence = 5;
+
+  // bids are resting buy levels, ordered by strictly decreasing price (best bid
+  // first), truncated to the configured depth. May be empty.
+  repeated PriceLevel bids = 6;
+
+  // asks are resting sell levels, ordered by strictly increasing price (best ask
+  // first), truncated to the configured depth. May be empty.
+  repeated PriceLevel asks = 7;
+}
+
+// OrderBookDelta is an incremental L2 update: the levels that changed since the
+// preceding delta. It carries a sequence chain so a consumer detects a gap and
+// re-snapshots rather than folding out of order — the ingester never guesses a
+// missing update.
+message OrderBookDelta {
+  // instrument_id is the canonical identifier and partition_key. Required.
+  string instrument_id = 1;
+
+  // symbol is advisory. Optional.
+  string symbol = 2;
+
+  // mic is the source venue code. Required.
+  string mic = 3;
+
+  // event_time is the venue timestamp of this update. Required.
+  google.protobuf.Timestamp event_time = 4;
+
+  // first_update_sequence / last_update_sequence bound the venue sequence range
+  // this delta covers (inclusive). 0/0 when the venue provides no sequence.
+  uint64 first_update_sequence = 5;
+  uint64 last_update_sequence = 6;
+
+  // prev_update_sequence is the last_update_sequence of the immediately
+  // preceding delta. A consumer applies this delta iff prev_update_sequence
+  // equals its current book sequence; any other value is a gap ⇒ re-snapshot.
+  uint64 prev_update_sequence = 7;
+
+  // bids / asks are the changed levels. A level with size 0 is removed; any other
+  // size replaces the level's aggregate size. Absent levels are unchanged. May
+  // each be empty.
+  repeated PriceLevel bids = 8;
+  repeated PriceLevel asks = 9;
+}

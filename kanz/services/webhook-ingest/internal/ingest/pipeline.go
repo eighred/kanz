@@ -175,6 +175,7 @@ func (p *Pipeline) publishSignal(ctx context.Context, wh *Webhook, signalID, ins
 		Leverage:     dec.ToProto(leverage),
 		MarginMode:   marginMode,
 		SizeType:     sizeType,
+		Source:       signalpb.SignalSource_SIGNAL_SOURCE_TRADINGVIEW_WEBHOOK,
 		ReceivedTs:   timestamppb.New(p.now().UTC()),
 		SourceTs:     parseTS(wh.TS),
 	}
