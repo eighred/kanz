@@ -6,20 +6,14 @@ Execution board — not history. Task IDs are module-prefixed and scoped to 1–
 
 ## TODO
 
-_The credential-/infra-/human-gated half of PATH TO PARITY still waits on an external boundary landing. A ground-truth re-scan (2026-07-04) found three buildable, non-gated in-repo gaps behind delivered seams; **RISK-12 (the placeholder-VaR flagship) has landed**. Two backend gaps remain (REG-02, WIRE-03). **New direction (2026-07-08): the end-user product surface opens** — the delivered backend now needs a client. The `kanz` CLI terminal is first, wired to the real api-gateway edge; the rest of the product surface is dependency-ordered in PATH TO PARITY. The 3-year horizon lives in `KANZ_ROADMAP.md`._
-
-### Buildable now — the `kanz` CLI vertical (wired to the real backend)
-
-_Verified: no end-user terminal binary exists yet. The full data path is delivered — the gateway serves `POST /v1/ask` (copilot; returns answer + citations + confidence), `GET /v1/portfolios/{id}/exposure|measures`, `POST /v1/portfolios/{id}/scenario` (risk-engine, mTLS), all behind the OIDC/JWKS `Authenticator`. CLI-01 (the device-flow RP) has landed; CLI-02 (the terminal binary) completes the vertical._
-
-- [ ] **CLI-02** Build the `kanz` terminal client (Go binary, `kanz/cmd/kanz`). A Claude-Code-style REPL: completes the CLI-01 device flow (`pkg/deviceauth`), persists the token, renders the KANZ TERMINAL header, and drives natural-language turns through `POST /v1/ask` (streaming the answer with its citations/confidence/risk warnings) and structured `/v1/portfolios/{id}/…` calls for slash commands. No new mocks — talks to the running gateway. **CLI-01 is delivered**, so the device-flow blocker is retired. · buildable
+_The credential-/infra-/human-gated half of PATH TO PARITY still waits on an external boundary landing. **The `kanz` CLI vertical is complete** (CLI-01 device-flow RP + CLI-02 terminal binary): the delivered backend now has a real, usable client wired to the live api-gateway edge. Two buildable, non-gated backend gaps remain (REG-02, WIRE-03); the rest of the product surface is dependency-ordered in PATH TO PARITY. The 3-year horizon lives in `KANZ_ROADMAP.md`._
 
 ### Buildable now — carried-over backend gaps
 
 - [ ] **REG-02** Wire a durable `LinkSink` for the regulatory `ChainSigner`. `cmd/regulatory` `buildSigner` keeps hash-chain links in-memory only, so filings are not tamper-evident across restarts. Persist the link append behind the in-memory-default/Postgres `Store` seam (the PARITY-02 pattern). · buildable
 - [ ] **WIRE-03** Surface the risk-engine durable-log fold position and stamp `query.v1` `source_position`. WIRE-02 added the `common.v1.LogPosition` field but leaves it empty; populating it closes the copilot citation-seed half so answers carry a real, verifiable log position. · buildable
 
-**Recommended next: CLI-02** — CLI-01 has landed (`pkg/deviceauth`, the RFC 8628 RP against Eighred SSO), retiring the device-flow blocker. CLI-02 is now the vertical's completion: the `kanz` terminal binary that turns the delivered edge + auth into a usable client. It consumes `pkg/deviceauth` for login and the `/v1` edge for turns — no new backend, no mocks. (REG-02 and WIRE-03 remain valid buildable backend gaps behind it.)
+**Recommended next: WIRE-03** — the CLI now renders copilot citations to the user (`/v1/ask` "Sources:"), so making those citations carry a real, verifiable durable-log position is the highest-value follow-through: it turns a displayed source into an auditable one. It grounds on the delivered WIRE-02 `source_position` seam (the field exists, just unset) — no new surface. REG-02 (filing tamper-evidence across restarts) is the other valid buildable backend gap; PS-02 (web workspace over the now-proven edge) is the next product-surface step in PATH TO PARITY.
 
 ---
 
@@ -40,7 +34,7 @@ _Dependency-ordered. The buildable tranches (M0–M2) need no credentials and co
 
 ### Product surface — end-user client & marketplace (opened 2026-07-08)
 
-_New direction: the delivered backend needs a front-of-house. Each item wires to an existing edge seam — **no parallel backend, no new analytics.** Dependency-ordered; the CLI vertical (CLI-01/02) is in TODO. Every line below promotes to a 1–3 day TODO task only after a ground-truth verification when its turn comes — listed here as committed direction, not decomposed work._
+_New direction: the delivered backend needs a front-of-house. Each item wires to an existing edge seam — **no parallel backend, no new analytics.** Dependency-ordered; the CLI vertical (CLI-01/02) is **delivered** (see DONE). Every line below promotes to a 1–3 day TODO task only after a ground-truth verification when its turn comes — listed here as committed direction, not decomposed work._
 
 - **PS-01 · Consumer SSO portal → moved out to the standalone Eighred SSO project (2026-07-08).** Identity, `login.eighred.com`, SAML, MFA, and the device authorization server are owned by **Eighred SSO** (`../eighred-SSO`), not kanz. kanz integrates only as an OIDC **relying party**: the delivered AUTH-01a authenticator validates Eighred-SSO-issued JWTs via JWKS — nothing to build here beyond CLI-01's RP integration. No portal, SAML, or MFA work happens in this repo.
 - **PS-02 · Web workspace (BFF + dark terminal UI).** The Bloomberg/Linear-style shell: left nav + workspace + AI panel + market widgets, over the same `/v1` edge the CLI uses. Needs a BFF/session layer in front of the gateway; reuses `/v1/ask` + risk endpoints. Follows the CLI so the edge contract is proven by two clients before the UI surface grows.
@@ -80,6 +74,7 @@ _Historical record — one line per completed epic. Full implementation detail i
 
 ### Phase 10 — Product surface (end-user client)
 
+- **CLI-02** — the `kanz` terminal binary (`cmd/kanz`): a Claude-Code-style REPL that completes the CLI-01 device flow, persists the token (0600, atomic, under `os.UserConfigDir`), renders the KANZ TERMINAL header, and drives turns over the delivered `/v1` edge — natural-language questions through `POST /v1/ask` (answer + citations + refusal/injection/ungrounded warnings) and slash commands (`/exposure`, `/measures`, `/scenario`) through the risk endpoints, plus `/login`/`/logout`/`/whoami`. Auto-runs the device flow on the first turn when no valid token is cached; the bearer is read through a closure so a mid-session `/login` is picked up live. Pure client — talks only to the running gateway (which validates the SSO token via the delivered OIDCAuthenticator); no backend, no mocks. Split into testable `config`/`tokenstore`/`gateway`/`repl` packages; the copilot `/v1/ask` is a single-JSON response (not a stream — the board's "streaming" phrasing was aspirational; ground truth won). Completes the CLI vertical.
 - **CLI-01** — the kanz CLI is now an Eighred SSO relying party for the RFC 8628 device-authorization grant: new `pkg/deviceauth` (client-side counterpart to `pkg/auth`'s server-side JWKS validator) resolves the device + token endpoints from the issuer's OIDC discovery document, begins authorization, shows the user_code/verification URI via a caller callback, and polls the token endpoint honoring the server interval + `slow_down` back-off and the `device_code` expiry — returning the issued token for a caller to bearer against the gateway. Adds NO auth endpoints and holds NO keys; identity stays owned by Eighred SSO. Injectable clock/wait keep the poll-cadence + expiry tests deterministic and fast. Unblocks CLI-02.
 
 ### Phase 9 — Live wiring
