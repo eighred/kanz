@@ -47,6 +47,15 @@ const (
 // Shared across exchange connectors.
 var ErrRateLimited = errors.New("exchange: local rate-limit budget exhausted")
 
+// ErrEgressDenied is returned when the venue rejects the request at the
+// authentication/authorization boundary (HTTP 401/403) — the signature is
+// well-formed but refused, the signature that a production API key locked to our
+// dedicated Tokyo/London egress IPs is being used from an unauthorized
+// environment (IP allowlist miss). It is a hard, non-retryable structural fault:
+// the caller must alert and stop, never retry into a ban. Distinct from a
+// transient 5xx (retryable) and from ErrRateLimited (local backpressure).
+var ErrEgressDenied = errors.New("exchange: request denied at auth boundary (egress IP not authorized?)")
+
 // APIError is a typed exchange error body (code + message).
 type APIError struct {
 	Code int

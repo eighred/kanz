@@ -32,6 +32,21 @@ generate: ## Regenerate the kanz-schemas SDKs (buf generate)
 build: ## Build every package
 	go build ./...
 
+# Production release build (IP-security mandate). -ldflags="-s -w" strips the
+# symbol table (-s) and DWARF debug info (-w) so the shipped binary resists
+# decompilation of the proprietary execution logic; -trimpath removes local
+# filesystem paths from the binary. Exchange connectors are linked in via TAGS
+# (e.g. `make release TAGS="binance okx"`); the default binary stays vendor-free.
+# Secrets never enter the binary — keys are fetched at runtime into RAM via the
+# env / mock-Vault (`*_FILE`) boundary, never hardcoded or committed.
+GO_RELEASE_LDFLAGS := -s -w
+TAGS ?=
+
+.PHONY: release
+release: ## Build stripped, trimpath production binaries into bin/ (TAGS="binance okx" to link venues)
+	@mkdir -p bin
+	go build -trimpath -ldflags="$(GO_RELEASE_LDFLAGS)" -tags "$(TAGS)" -o bin/ ./services/...
+
 .PHONY: test
 test: ## Run the test suite (race detector)
 	go test -race ./...

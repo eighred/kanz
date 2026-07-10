@@ -11,6 +11,13 @@ import (
 	"github.com/kanz-eng/kanz/services/oms/internal/execution"
 )
 
+// okxCloseRegistry is the shared in-flight-close registry the OKX healing
+// watchdog drains (the In-Flight Certainty seam). The OMS venue-close dispatch
+// path Tracks a close here when a cancel / IOC market close is sent to OKX;
+// until that dispatch path lands it stays empty and the watchdog is a no-op —
+// infrastructure ready, never fabricating a close.
+var okxCloseRegistry = execution.NewCloseRegistry()
+
 // okxVenues (okx build) builds the OKX Spot venue and starts its background
 // workers (user-data stream, REST reconciliation, ticker feed) wired to the
 // order store adapter + producer, when credentials are present. OKX needs an API
@@ -40,8 +47,9 @@ func okxVenues(ctx context.Context, cfg config.Config, adapter storeAdapter, pro
 	}, wsURL)
 	conn.Start(ctx, execution.WorkerDeps{
 		Publisher: producer, Lookup: adapter, Expected: adapter,
-		Tenant: os.Getenv("OKX_TENANT"), Logger: logger,
+		Closes: okxCloseRegistry, Tenant: os.Getenv("OKX_TENANT"), Logger: logger,
 	})
-	logger.Info("okx venue wired", "base_url", baseURL, "ws_url", wsURL)
+	logger.Info("okx venue wired", "base_url", baseURL, "ws_url", wsURL,
+		"heal_timeout", "1500ms")
 	return []execution.Venue{conn.Venue()}
 }

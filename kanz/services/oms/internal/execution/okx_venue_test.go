@@ -4,6 +4,7 @@ package execution
 
 import (
 	"context"
+	"encoding/json"
 	"math/big"
 	"net/http"
 	"net/http/httptest"
@@ -22,6 +23,8 @@ type fakeOKX struct {
 	sawKey      bool
 	sawPass     bool
 	sawClOrd    string
+	sawPostCl   string
+	posts       int
 	placeBody   string
 	queryBody   string
 	balanceBody string
@@ -37,6 +40,12 @@ func newFakeOKX(t *testing.T) *fakeOKX {
 		f.sawKey = r.Header.Get("OK-ACCESS-KEY") != ""
 		f.sawPass = r.Header.Get("OK-ACCESS-PASSPHRASE") != ""
 		if r.Method == http.MethodPost {
+			f.posts++
+			var body struct {
+				ClOrdID string `json:"clOrdId"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			f.sawPostCl = body.ClOrdID
 			_, _ = w.Write([]byte(f.placeBody))
 			return
 		}

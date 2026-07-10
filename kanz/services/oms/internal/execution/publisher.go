@@ -58,5 +58,12 @@ type WorkerDeps struct {
 	Tenant            string
 	ReconcileInterval time.Duration
 	TickerInterval    time.Duration
-	Logger            *slog.Logger
+	// Closes is the in-flight-close registry the healing watchdog drains. Nil ⇒
+	// the healing seam is disabled.
+	Closes PendingCloses
+	// CloseTimeout is the in-flight-close force-clear trigger. <=0 ⇒ 1500ms.
+	CloseTimeout time.Duration
+	// HealInterval is the healing watchdog tick. <=0 ⇒ 500ms.
+	HealInterval time.Duration
+	Logger       *slog.Logger
 }

@@ -40,13 +40,20 @@ func (c *OKXConnector) Start(ctx context.Context, deps WorkerDeps) {
 	if deps.Logger == nil {
 		deps.Logger = slog.Default()
 	}
-	if deps.Expected != nil {
+	if deps.Expected != nil || deps.Closes != nil {
 		rec := newOKXReconciler(OKXReconcilerConfig{
 			REST: c.rest, Symbols: StaticSymbolMap(c.settings.Symbols),
 			Expected: deps.Expected, Balances: deps.Balances, Pub: deps.Publisher,
+			Closes: deps.Closes, CloseTimeout: deps.CloseTimeout,
 			Venue: c.settings.MIC, Tenant: deps.Tenant,
 		})
-		go rec.Run(ctx, deps.ReconcileInterval)
+		if deps.Expected != nil {
+			go rec.Run(ctx, deps.ReconcileInterval)
+		}
+		if deps.Closes != nil {
+			// In-Flight Certainty watchdog — force-clears stuck closes fast.
+			go rec.RunHealing(ctx, deps.HealInterval)
+		}
 	}
 	if deps.Lookup != nil {
 		go c.runUserData(ctx, deps)
