@@ -21,6 +21,13 @@ type Config struct {
 	// (tamper-evidence without ordering). Both satisfy the delivered Signer seam.
 	Signer string
 
+	// DatabaseURL is the Postgres DSN for the durable audit hash-chain link store
+	// (REG-02). When set (and Signer is "chain"), each filing's chain link is
+	// persisted and the chain head is recovered on startup, so the tamper-evident
+	// chain survives a restart. Empty ⇒ links chain in memory only (verifiable
+	// within the process, lost on restart) — the honest single-replica default.
+	DatabaseURL string
+
 	// OTLPEndpoint is the OTel collector for span export (OBS-01). Empty ⇒ none.
 	OTLPEndpoint string
 }
@@ -31,8 +38,20 @@ func Load() (Config, error) {
 		Listen:       envOr("REGULATORY_LISTEN", ":8083"),
 		LogLevel:     parseLevel(os.Getenv("REGULATORY_LOG_LEVEL")),
 		Signer:       strings.ToLower(envOr("REGULATORY_SIGNER", "chain")),
+		DatabaseURL:  secret("REGULATORY_DATABASE_URL"),
 		OTLPEndpoint: os.Getenv("REGULATORY_OTLP_ENDPOINT"),
 	}, nil
+}
+
+// secret resolves a sensitive value, preferring a CSI/Vault file mount
+// (SEC-01d: the path in <k>_FILE) over a plaintext <k> env var.
+func secret(k string) string {
+	if p := os.Getenv(k + "_FILE"); p != "" {
+		if b, err := os.ReadFile(p); err == nil {
+			return strings.TrimSpace(string(b))
+		}
+	}
+	return os.Getenv(k)
 }
 
 func envOr(key, def string) string {

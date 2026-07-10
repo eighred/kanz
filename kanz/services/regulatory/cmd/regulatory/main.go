@@ -8,6 +8,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -16,6 +17,9 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/kanz-eng/kanz/internal/audit/linkstore"
 	"github.com/kanz-eng/kanz/internal/audit/signer"
 	"github.com/kanz-eng/kanz/internal/regulatory"
 	"github.com/kanz-eng/kanz/pkg/observability"
@@ -52,10 +56,17 @@ func main() {
 		_ = obs.Shutdown(shutCtx)
 	}()
 
+	sgnr, closeSigner, err := buildSigner(ctx, cfg, logger)
+	if err != nil {
+		logger.Error("signer init failed", "err", err)
+		os.Exit(2)
+	}
+	defer closeSigner()
+
 	readiness := &server.Readiness{}
 	httpSrv := &http.Server{
 		Addr:              cfg.Listen,
-		Handler:           server.New(readiness, logger, buildSigner(cfg, logger), server.WithMetrics(obs.MetricsHandler())),
+		Handler:           server.New(readiness, logger, sgnr, server.WithMetrics(obs.MetricsHandler())),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 	go func() {
@@ -77,23 +88,62 @@ func main() {
 	}
 }
 
-// buildSigner selects the filing signature backend. "chain" (default) links
-// every filing into the AUDIT-01 hash chain via signer.ChainSigner — a signature
-// is then a verifiable chain position, not just a standalone digest. The durable
-// append of each chain link (to the AUDIT-01 store / a platform.audit FACT) is a
-// LinkSink wired here once that producer is composed; until then links chain in
-// memory (still verifiable within the process). "hash" is the bare content-hash
-// signer. Both satisfy the delivered one-method Signer seam.
-func buildSigner(cfg config.Config, logger *slog.Logger) server.Signer {
+// buildSigner selects the filing signature backend and owns the durable link
+// store's lifecycle. "chain" (default) links every filing into the AUDIT-01
+// hash chain via signer.ChainSigner — a signature is then a verifiable chain
+// position, not just a standalone digest. Each link is appended to the REG-02
+// linkstore.Store (Postgres when REGULATORY_DATABASE_URL is set, else in-memory),
+// and the chain head is recovered from the store on startup so the chain
+// continues across a restart instead of resetting to Genesis. "hash" is the bare
+// content-hash signer (no store). Both satisfy the delivered one-method Signer
+// seam. The returned close func tears down the store's pool.
+func buildSigner(ctx context.Context, cfg config.Config, logger *slog.Logger) (server.Signer, func(), error) {
 	if cfg.Signer == "hash" {
-		return regulatory.HashSigner{}
+		return regulatory.HashSigner{}, func() {}, nil
 	}
-	// Start the chain at Genesis; a deployment continuing an existing audit chain
-	// passes the current head. WithSink is added when the audit link producer is
-	// wired at this composition root.
-	return signer.New("", signer.WithErrorHandler(func(err error) {
-		logger.Error("filing chain-link sink failed", "err", err)
-	}))
+	store, closeStore, err := openLinkStore(ctx, cfg)
+	if err != nil {
+		return nil, nil, err
+	}
+	head, err := store.Head(ctx)
+	if err != nil {
+		closeStore()
+		return nil, nil, fmt.Errorf("recover audit chain head: %w", err)
+	}
+	sgnr := signer.New(head,
+		signer.WithSink(func(link signer.Link) error {
+			// The sink runs synchronously under the signer lock during a request,
+			// but the append is an audit record that must not be dropped if the
+			// request is cancelled — bound it to its own short deadline instead.
+			appendCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			return store.Append(appendCtx, link)
+		}),
+		signer.WithErrorHandler(func(err error) {
+			logger.Error("filing chain-link sink failed", "err", err)
+		}),
+	)
+	logger.Info("filing signer ready", "backend", "chain", "durable", cfg.DatabaseURL != "", "resumed", head != "")
+	return sgnr, closeStore, nil
+}
+
+// openLinkStore selects the durable Postgres link store when a DSN is set
+// (REG-02), otherwise the in-memory store. Returns a close func that tears down
+// the pool (a no-op for the in-memory store). Both satisfy linkstore.Store.
+func openLinkStore(ctx context.Context, cfg config.Config) (linkstore.Store, func(), error) {
+	if cfg.DatabaseURL == "" {
+		return linkstore.NewMemoryStore(), func() {}, nil
+	}
+	pool, err := pgxpool.New(ctx, cfg.DatabaseURL)
+	if err != nil {
+		return nil, nil, err
+	}
+	store := linkstore.NewPostgres(pool)
+	if err := store.Ping(ctx); err != nil {
+		pool.Close()
+		return nil, nil, err
+	}
+	return store, pool.Close, nil
 }
 
 // version reads the build's VCS revision for the service-version label.
