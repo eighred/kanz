@@ -1,6 +1,39 @@
 # KANZ BRAIN
 
-> Architectural memory — durable decisions future engineers must know, and the "why" behind them. NOT a changelog: no feature-completion notes, implementation minutiae, routine wiring, or bug fixes (those live in git + `KANZ_TASKS.md`). The codebase is always the ground truth. Last reconciled 2026-07-03.
+> Architectural memory — durable decisions future engineers must know, and the "why" behind them. NOT a changelog: no feature-completion notes, implementation minutiae, routine wiring, or bug fixes (those live in git + `KANZ_TASKS.md`). The codebase is always the ground truth. Last reconciled 2026-07-11.
+
+## Strategic direction — automated execution system (repositioned 2026-07)
+
+> This is the current identity of the system and reframes everything below it. The sections after this one (System shape, Event platform, Persistence, Security, Analytics…) describe the **underlying platform substrate** — the event spine, bitemporal journals, multi-tenancy, and the risk/accounting/regulatory analytics. That substrate is retained and load-bearing, but it is no longer the client surface.
+
+- **Kanz is an Automated Fund-Management & Multi-Exchange Execution System.** The analytics/Aladdin-class platform became the valuation/risk substrate underneath a trading loop; the client surface is the automated loop, not the analytics API. The CLI/web product surface (PS-0x) is **parked** behind this direction.
+- **The loop:** proprietary TradingView Pine strategies → HMAC-authenticated webhook → `signal.v1.StrategySignal` FACT (advisory) → venue-allocated `order.v1.SubmitOrder` COMMANDS → simultaneous multi-venue (Binance/OKX) execution → bitemporal FACT-folding projection (`tv-sync`) → TradingView Broker-API feedback. Every hop is on the delivered event spine; nothing bypasses it.
+- **A signal is advisory intent, never a command.** `services/webhook-ingest` validates it (HMAC over the raw body = the perimeter boundary, IP allowlist, nonce-replay window), records the immutable `StrategySignal` FACT (the audit root everything chains causation to), then fans out the concrete order COMMANDS the OMS's pre-trade compliance/risk gates still apply to. Treating the signal as a command would skip those gates. Command issuer = `strategy:{id}`; that path runs no `VerifyCommandIssuer` because HMAC is its authority boundary. **Reuse-first:** webhook-ingest is a command producer like the gateway; the OMS is the unchanged execution engine — no parallel execution path.
+- **`SizeType` enum day 1** (ABSOLUTE_QTY / PCT_OF_EQUITY / QUOTE_NOTIONAL): institutional strategies rarely signal absolute units, so the translator resolves size against live NAV/mark from the accounting + position projections. Leverage + `MarginMode` are present day 1 (leverage-ready) but Phase 1 executes **spot-only**, isolating liquidation logic from bring-up bugs. Signal provenance is first-class (`SignalSource`: TRADINGVIEW_WEBHOOK vs NATIVE_ENGINE) — Kanz is a **hybrid brain** (external strategies + native alpha); provenance is never inferred from the subject or `strategy_id`.
+
+### Multi-venue execution seam
+
+- **`execution.Venue` seam** (`MIC()`, `Execute`) + a **venue-aware Router** (the allocation matrix) + a `venue` field on `SubmitOrder`/`OrderState` = the multi-venue allocation matrix. The Router sends each fanned-out order to the venue whose MIC matches; empty ⇒ smart-order-routing default. This is the same seam-the-vendor discipline as the analytics vendor SDKs.
+- **Per-venue build-tag connectors** (`//go:build binance`, `//go:build okx`, shared infra under `binance || okx`; interfaces untagged). The **default binary is vendor-free** — it links no `coder/websocket` (verified via `go list -deps`); the authorized websocket transport links only under an exchange tag. Same build-tag-composition-root split as `-tags anthropic`/`-tags redis`.
+- **Deterministic exchange-side idempotency:** our `order_id` *is* the venue `clOrdId` / `newClientOrderId`, so a duplicate or ambiguous-timeout submit recovers by querying that id rather than double-executing. `fill_id` is deterministic (`{venueSymbol}-{tradeId}`) so the synchronous `Execute` path and the asynchronous user-data-websocket echo of the same fill dedup to one.
+- **The exchange is the source of truth; reconcilers never edit state.** Two audit layers — the user-data websocket (primary) and a periodic REST reconciliation loop (secondary) — emit **correcting FACTs** (`order.v1.StateHealed`, `accounting.v1.BalanceReconciled`) carrying venue truth with `QUALITY_FLAG_REVISED`; the journal/projection fold them to restore parity. **Never fabricate a fill:** a rate-limited or failed poll degrades (skips the tick), it does not invent an execution. A **DNS-bypass dialer** keeps the live path off blocking DNS.
+- **In-Flight Certainty (the healing seam).** A close (cancel / IOC market flatten) races the venue and its ack can hang. A close unconfirmed past a hard **1500 ms** timeout is force-resolved by a fast reconciler watchdog: query by `clOrdId` → adopt venue truth if terminal, else **force-clear** (`StateHealed`→CANCELLED) and **sweep** the residual exposure with an aggressive market order (idempotent `heal-`+id `clOrdId`, never double-flattens), then re-anchor balances from real venue truth. **The ledger must never freeze**; the sweep's real fills arrive via the stream, never fabricated. The `CloseIntent`/`PendingCloses` seam is untagged (shared across venues); the in-memory `CloseRegistry` is the default. A retry preserves the original timeout clock so back-off never resets it.
+
+### Off-bus hot path & native alpha
+
+- **Raw L2 depth never rides the bus at full rate.** `services/market-ingest` (a process-isolated edge) folds the full-rate exchange depth feed into an in-memory `book.Book` and publishes **only bounded periodic `market.v1.OrderBookSnapshot`s** (for durable replay, cross-node bootstrap, audit) — plus, later, the native engines' signals. Depth carries a strict sequence chain (`prev_update_sequence`); a gap **re-snapshots** rather than folding out of order. This is the "market ingestion stays process-isolated" anti-decision made concrete for crypto L2.
+- **Proprietary alpha math is isolated in a separate, restricted composition-root layer** (house rule). The OBI / cross-venue-arbitrage quantitative strategy files do **not** live in the open micro-service repos (`oms`, `tv-sync`, `webhook-ingest`, `market-ingest`). market-ingest owns only the book **read-seam** + a native-signal **emit port**; the math is consumed from the restricted layer.
+- **Sequencing decision:** OKX + the allocation matrix (M4) land **before** native alpha engines — never build HFT/alpha on un-reconciled execution paths. K8s node affinity Tokyo/London for exchange latency.
+
+### State feedback (`tv-sync`)
+
+- `tv-sync` is a **bitemporal FACT-folding projection + TradingView Broker-API** (REST + streaming), **zero-truth** (it derives everything from folded FACTs, holds no independent state), multi-tenant isolated, with average-cost realized/unrealized P&L. Live unrealized P&L folds a **MarkSource** bound to the venues' ticker feeds — universal market fact, not tenant-scoped.
+
+### Production IP / perimeter security
+
+- **Production binary stripping** (`-trimpath -ldflags="-s -w"`, the Makefile `release` target) resists decompilation of the proprietary execution logic (verified: `go tool nm` → no symbols). The default binary stays vendor-free.
+- **Memory-only secrets:** exchange API keys / passphrases are fetched at runtime into RAM via env or mock-Vault `*_FILE` (CSI) mounts — never on disk, in Git, or in the stripped binary.
+- **Egress-IP binding:** production keys are locked to dedicated Tokyo/London egress IPs. A 401/403 at the venue auth boundary is typed `ErrEgressDenied` — a **non-retryable structural fault** distinct from a transient 5xx or local rate-limit — so a deployment from an unauthorized environment fails loud instead of retrying into an exchange ban.
 
 ## System shape
 
