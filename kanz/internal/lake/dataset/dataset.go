@@ -7,7 +7,7 @@
 // point in time (MODEL-01i bitemporal store + the PRED-11 point-in-time stance).
 //
 // Features are derived by the SAME compute code the live risk engine uses
-// (compute.StoreReturnsProvider / ReturnsVolModel over the MODEL-01b store), so
+// (returns.StoreReturnsProvider / ReturnsVolModel over the MODEL-01b store), so
 // a feature value materialized here is bit-for-bit the value the engine computed
 // live — the property LAKE-01e's backtest-reproduces-live test leans on.
 package dataset
@@ -19,8 +19,8 @@ import (
 
 	commonpb "github.com/kanz-eng/kanz-schemas-go/common/v1"
 
+	"github.com/kanz-eng/kanz/internal/marketdata/returns"
 	"github.com/kanz-eng/kanz/internal/marketdata/store"
-	"github.com/kanz-eng/kanz/internal/risk/compute"
 )
 
 // FeatureSource is the MLOPS-01f point-in-time feature-store seam: features
@@ -61,8 +61,8 @@ type Config struct {
 // optionally joined with an MLOPS-01f FeatureSource.
 type Materializer struct {
 	store    store.Store
-	returns  *compute.StoreReturnsProvider
-	vol      *compute.ReturnsVolModel
+	returns  *returns.StoreReturnsProvider
+	vol      *returns.ReturnsVolModel
 	features FeatureSource
 	kind     store.PriceKind
 	window   int
@@ -76,11 +76,11 @@ func NewMaterializer(s store.Store, features FeatureSource, cfg Config) *Materia
 	if kind == store.PriceKindUnspecified {
 		kind = store.PriceKindClose
 	}
-	rp := compute.NewStoreReturnsProvider(s, compute.ReturnsConfig{Window: cfg.Window, Kind: kind})
+	rp := returns.NewStoreReturnsProvider(s, returns.ReturnsConfig{Window: cfg.Window, Kind: kind})
 	return &Materializer{
 		store:    s,
 		returns:  rp,
-		vol:      compute.NewReturnsVolModel(rp, cfg.Window),
+		vol:      returns.NewReturnsVolModel(rp, cfg.Window),
 		features: features,
 		kind:     kind,
 		window:   cfg.Window,

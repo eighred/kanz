@@ -22,6 +22,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"google.golang.org/grpc"
 
+	"github.com/kanz-eng/kanz/internal/marketdata/returns"
 	mdstore "github.com/kanz-eng/kanz/internal/marketdata/store"
 	risk "github.com/kanz-eng/kanz/internal/risk"
 	"github.com/kanz-eng/kanz/internal/risk/compute"
@@ -155,7 +156,7 @@ func runEngine(ctx context.Context, cfg config.Config, readiness *server.Readine
 		if err := priceStore.Ping(ctx); err != nil {
 			return err
 		}
-		provider := compute.NewStoreReturnsProvider(priceStore, compute.ReturnsConfig{})
+		provider := returns.NewStoreReturnsProvider(priceStore, returns.ReturnsConfig{})
 		varmodel.Register(context.Background(), registry, provider, varmodel.Config{})
 		logger.Info("RISK-12: historical-simulation VaR99 registered off market-data price store")
 	} else {

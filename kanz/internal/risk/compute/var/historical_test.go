@@ -8,6 +8,7 @@ import (
 
 	commonpb "github.com/kanz-eng/kanz-schemas-go/common/v1"
 
+	"github.com/kanz-eng/kanz/internal/marketdata/returns"
 	"github.com/kanz-eng/kanz/internal/marketdata/store"
 	v1 "github.com/kanz-eng/kanz/internal/risk/api/v1"
 	"github.com/kanz-eng/kanz/internal/risk/compute"
@@ -121,7 +122,7 @@ func TestRegister_OverridesPlaceholderEndToEnd(t *testing.T) {
 	if err := s.Put(context.Background(), obs); err != nil {
 		t.Fatal(err)
 	}
-	provider := compute.NewStoreReturnsProvider(s, compute.ReturnsConfig{Method: compute.ReturnSimple})
+	provider := returns.NewStoreReturnsProvider(s, returns.ReturnsConfig{Method: returns.ReturnSimple})
 
 	r := compute.DefaultRegistry()
 	varmodel.Register(context.Background(), r, provider, varmodel.Config{})

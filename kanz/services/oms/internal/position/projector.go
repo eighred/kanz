@@ -9,7 +9,6 @@ import (
 	orderpb "github.com/kanz-eng/kanz-schemas-go/order/v1"
 	"google.golang.org/protobuf/proto"
 
-	"github.com/kanz-eng/kanz/internal/risk/ingest"
 	"github.com/kanz-eng/kanz/pkg/bus"
 )
 
@@ -21,7 +20,7 @@ type Bus interface {
 // Projector is the bus consumer that turns order fill FACTs into position
 // FACTs. Subscribe Handle to the OrderFilled + OrderPartiallyFilled subjects;
 // it folds each fill into the Book and publishes the resulting PositionState on
-// ingest.EventTypePositionChanged (the risk engine's existing input).
+// positionEventChanged (the risk engine's existing input subject).
 type Projector struct {
 	book *Book
 	bus  Bus
@@ -50,8 +49,8 @@ func (p *Projector) Handle(ctx context.Context, env *envelopepb.Envelope, payloa
 
 func (p *Projector) publish(ctx context.Context, st *domainpb.PositionState) error {
 	return p.bus.Publish(ctx, bus.Event{
-		Subject:          ingest.EventTypePositionChanged,
-		EventType:        ingest.EventTypePositionChanged,
+		Subject:          positionEventChanged,
+		EventType:        positionEventChanged,
 		EventClass:       envelopepb.EventClass_EVENT_CLASS_FACT,
 		SchemaVersion:    1,
 		Domain:           "risk",
@@ -82,9 +81,16 @@ func decodeFill(eventType string, payload []byte) (*orderpb.Fill, string, error)
 	}
 }
 
-// Event types this projector consumes (mirror order.EventType* without importing
-// the order package, keeping the projector dependency-light).
+// Subjects the projector consumes and produces, inlined as literals rather than
+// imported from the order and risk/ingest packages — the projector stays
+// dependency-light, and the RISK-02 boundary forbids reaching into risk
+// internals for a constant (the same stance services/compliance takes for this
+// subject). These are stable wire contracts; a change is a breaking bus change
+// caught by the schema/contract tests, not a silent drift.
 const (
 	orderEventFilled          = "order.order.filled"
 	orderEventPartiallyFilled = "order.order.partially_filled"
+	// positionEventChanged mirrors risk's ingest.EventTypePositionChanged — the
+	// subject the risk engine ingests PositionState FACTs on.
+	positionEventChanged = "risk.position.changed"
 )

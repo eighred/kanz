@@ -9,8 +9,9 @@
 // broker isolation MT-01c, RLS MT-01d, gateway authz AUTH-01b); this tree is the
 // integration contract that pins their COMPOSITION — a regression in any single
 // layer that opened a cross-tenant path surfaces here. Sits in an external
-// `_test` package so it consumes only the public bus/auth/persist surface, like
-// the other contract trees (envelope, replay, serialization).
+// `_test` package and consumes only public surfaces (bus, auth) plus raw SQL for
+// the store layer — the risk RLS impl (persist) stays private behind the RISK-02
+// boundary, and its own TestPostgres_RLSTenantIsolation exercises the Go wrapper.
 //
 // The store layer needs a real database and is gated on TEST_POSTGRES_URL (it
 // skips otherwise, mirroring the persist + bus/Kafka integration tests); the
@@ -33,8 +34,6 @@ import (
 
 	envelopepb "github.com/kanz-eng/kanz-schemas-go/envelope/v1"
 
-	"github.com/kanz-eng/kanz/internal/risk/api/v1"
-	"github.com/kanz-eng/kanz/internal/risk/state/persist"
 	"github.com/kanz-eng/kanz/pkg/auth"
 	"github.com/kanz-eng/kanz/pkg/bus"
 )
@@ -197,20 +196,36 @@ func TestStore_RLSCrossTenantIsolation(t *testing.T) {
 		t.Skip("RLS is bypassed for superusers; run TEST_POSTGRES_URL as a non-superuser role")
 	}
 
-	storeA := persist.NewPostgres(pool(t, url, tenantA))
+	// The store-layer isolation is a database-level property (RLS on the shared
+	// portfolios table), so this capstone proves it directly in SQL rather than
+	// through risk's persist store — the RISK-02 boundary keeps that impl package
+	// private, and persist's own TestPostgres_RLSTenantIsolation already exercises
+	// the Go wrapper. Each connection carries its tenant in the app.tenant_id GUC
+	// (pool AfterConnect); the row is tagged from that GUC, matching persist.Save.
+	poolA := pool(t, url, tenantA)
 	poolB := pool(t, url, tenantB)
-	storeB := persist.NewPostgres(poolB)
 
-	if err := storeA.Save(ctx, persist.PortfolioRecord{ID: v1.PortfolioID("PORT-A")}); err != nil {
-		t.Fatalf("tenant A Save: %v", err)
+	if _, err := poolA.Exec(ctx,
+		`INSERT INTO portfolios (tenant_id, portfolio_id, position_count)
+		 VALUES (current_setting('app.tenant_id'), 'PORT-A', 0)`); err != nil {
+		t.Fatalf("tenant A insert: %v", err)
 	}
 
-	// B cannot see A's portfolio — not by id, not in bulk.
-	if _, err := storeB.Load(ctx, v1.PortfolioID("PORT-A")); err != persist.ErrNotFound {
-		t.Errorf("tenant B Load of A's portfolio = %v want ErrNotFound", err)
+	// B cannot see A's portfolio — not by id, not in bulk. RLS scopes every read
+	// to B's tenant, so A's row is invisible.
+	var count int
+	if err := poolB.QueryRow(ctx,
+		`SELECT count(*) FROM portfolios WHERE portfolio_id = 'PORT-A'`).Scan(&count); err != nil {
+		t.Fatalf("tenant B select by id: %v", err)
 	}
-	if all, err := storeB.LoadAll(ctx); err != nil || len(all) != 0 {
-		t.Errorf("tenant B LoadAll = %v (err %v) want empty", all, err)
+	if count != 0 {
+		t.Errorf("tenant B saw %d of tenant A's portfolios by id, want 0", count)
+	}
+	if err := poolB.QueryRow(ctx, `SELECT count(*) FROM portfolios`).Scan(&count); err != nil {
+		t.Fatalf("tenant B bulk count: %v", err)
+	}
+	if count != 0 {
+		t.Errorf("tenant B bulk-read %d rows in its own scope, want 0", count)
 	}
 
 	// RLS-escape: B forges a row tagged as A. WITH CHECK (tenant_id = the session
@@ -226,7 +241,10 @@ func TestStore_RLSCrossTenantIsolation(t *testing.T) {
 
 type captureClient struct{ sent []bus.Message }
 
-func (c *captureClient) Publish(_ context.Context, m bus.Message) error { c.sent = append(c.sent, m); return nil }
+func (c *captureClient) Publish(_ context.Context, m bus.Message) error {
+	c.sent = append(c.sent, m)
+	return nil
+}
 func (c *captureClient) Subscribe(context.Context, string, string, bus.Handler) error { return nil }
 func (c *captureClient) Close() error                                                 { return nil }
 

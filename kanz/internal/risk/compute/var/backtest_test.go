@@ -9,8 +9,8 @@ import (
 
 	commonpb "github.com/kanz-eng/kanz-schemas-go/common/v1"
 
+	"github.com/kanz-eng/kanz/internal/marketdata/returns"
 	"github.com/kanz-eng/kanz/internal/marketdata/store"
-	"github.com/kanz-eng/kanz/internal/risk/compute"
 	varmodel "github.com/kanz-eng/kanz/internal/risk/compute/var"
 	"github.com/kanz-eng/kanz/internal/risk/domain"
 )
@@ -182,7 +182,7 @@ func TestHistorical_PointInTimeNoFutureLeakage(t *testing.T) {
 	p := portfolio("USD", domain.Position{InstrumentID: inst, MarketValue: money(1_000_000, "USD")})
 	model := varmodel.Historical(varmodel.Config{})
 	varAsOf := func(s store.Store, at time.Time) float64 {
-		prov := compute.NewStoreReturnsProvider(s, compute.ReturnsConfig{Method: compute.ReturnSimple})
+		prov := returns.NewStoreReturnsProvider(s, returns.ReturnsConfig{Method: returns.ReturnSimple})
 		pAt := portfolioAsOf(p, at)
 		return dval(model(context.Background(), pAt, prov).Value)
 	}

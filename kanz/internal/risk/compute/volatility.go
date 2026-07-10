@@ -39,12 +39,6 @@ import (
 // horizon there — a recompute or backtest sees only the returns observable and
 // known then (the MODEL-01i no-future-leakage property).
 
-// DefaultVolMinObs is the minimum number of returns required to estimate a
-// volatility. Below it the model reports ok=false and the caller leaves that
-// position's uncertainty nil rather than publishing a band off a handful of
-// points (which the sample stddev would estimate far too noisily to trust).
-const DefaultVolMinObs = 20
-
 // VolModel supplies an instrument's one-sigma periodic return volatility as of a
 // knowledge horizon — the fractional (not money) standard deviation of its
 // returns. Point-in-time via asOf, the reference mirror of the MODEL-01c
@@ -59,59 +53,12 @@ type VolModel interface {
 	Volatility(ctx context.Context, instrumentID string, asOf time.Time) (sigma float64, ok bool, err error)
 }
 
-// ReturnsVolModel estimates volatility as the sample standard deviation of an
-// instrument's historical return series, read from a ReturnsProvider (the
-// MODEL-01b/c market-data plane). It is the concrete VolModel the engine wires;
-// because it shares the returns that drive VaR, the uncertainty band and the
-// VaR estimate stay consistent.
-type ReturnsVolModel struct {
-	rp     ReturnsProvider
-	window int
-	minObs int
-}
-
-// NewReturnsVolModel builds a model over rp. A non-positive window takes the
-// historical-returns default (DefaultReturnWindow); minObs takes
-// DefaultVolMinObs.
-func NewReturnsVolModel(rp ReturnsProvider, window int) *ReturnsVolModel {
-	if window <= 0 {
-		window = DefaultReturnWindow
-	}
-	return &ReturnsVolModel{rp: rp, window: window, minObs: DefaultVolMinObs}
-}
-
-// Volatility implements VolModel via the sample standard deviation of the
-// instrument's returns.
-func (m *ReturnsVolModel) Volatility(ctx context.Context, instrumentID string, asOf time.Time) (float64, bool, error) {
-	rets, err := m.rp.Returns(ctx, instrumentID, asOf, m.window)
-	if err != nil {
-		return 0, false, err
-	}
-	if len(rets) < m.minObs {
-		return 0, false, nil
-	}
-	return sampleStdDev(rets), true, nil
-}
-
-// sampleStdDev returns the unbiased (n-1) sample standard deviation of xs, or 0
-// for fewer than two points.
-func sampleStdDev(xs []float64) float64 {
-	n := len(xs)
-	if n < 2 {
-		return 0
-	}
-	var mean float64
-	for _, x := range xs {
-		mean += x
-	}
-	mean /= float64(n)
-	var ss float64
-	for _, x := range xs {
-		d := x - mean
-		ss += d * d
-	}
-	return math.Sqrt(ss / float64(n-1))
-}
+// The concrete VolModel the engine wires — returns.ReturnsVolModel, the sample
+// standard deviation of an instrument's historical return series — lives in
+// internal/marketdata/returns (pure market-data analytics, shared with the
+// lakehouse, DEBT-ARCH-01). It satisfies this interface structurally; the
+// composition root injects it. Because it shares the returns that drive VaR, the
+// uncertainty band and the VaR estimate stay estimated off one consistent source.
 
 // PopulateUncertainty fills each position's MarketValueUncertainty from the vol
 // model: the one-sigma money band is |MarketValue| × σ_return, the delta-normal
@@ -153,6 +100,3 @@ func scaleMoneyByVol(m *commonpb.Money, sigma float64) *commonpb.Money {
 		CurrencyCode: m.CurrencyCode,
 	}
 }
-
-// Compile-time assertion that ReturnsVolModel satisfies VolModel.
-var _ VolModel = (*ReturnsVolModel)(nil)

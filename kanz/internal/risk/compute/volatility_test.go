@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/kanz-eng/kanz/internal/marketdata/returns"
 	"github.com/kanz-eng/kanz/internal/risk/compute"
 	"github.com/kanz-eng/kanz/internal/risk/domain"
 )
@@ -48,32 +49,16 @@ func ramp(n int) []float64 {
 	return out
 }
 
-func TestReturnsVolModel_VolatilityIsSampleStdDev(t *testing.T) {
-	series := ramp(30)
-	vm := compute.NewReturnsVolModel(&volStubProvider{series: series}, 0)
-
-	sigma, ok, err := vm.Volatility(context.Background(), "AAPL", baseTime)
-	if err != nil || !ok {
-		t.Fatalf("Volatility ok=%v err=%v", ok, err)
-	}
-	if want := expectedStdDev(series); math.Abs(sigma-want) > 1e-12 {
-		t.Errorf("sigma = %v want %v", sigma, want)
-	}
-}
-
-func TestReturnsVolModel_InsufficientHistory(t *testing.T) {
-	// Fewer than DefaultVolMinObs returns ⇒ ok=false (no fabricated band).
-	vm := compute.NewReturnsVolModel(&volStubProvider{series: ramp(5)}, 0)
-	if _, ok, err := vm.Volatility(context.Background(), "AAPL", baseTime); ok || err != nil {
-		t.Fatalf("short history: ok=%v err=%v want false,nil", ok, err)
-	}
-}
+// TestReturnsVolModel_* moved with the model to internal/marketdata/returns
+// (DEBT-ARCH-01). The tests below keep the risk-side contract: that a
+// returns.ReturnsVolModel (satisfying compute.VolModel structurally) drives
+// PopulateUncertainty's per-position band and RISK-08 propagation.
 
 func TestPopulateUncertainty_DeltaNormalBand(t *testing.T) {
 	series := ramp(40)
 	sigma := expectedStdDev(series)
 	prov := &volStubProvider{series: series}
-	vm := compute.NewReturnsVolModel(prov, 0)
+	vm := returns.NewReturnsVolModel(prov, 0)
 
 	p := makePortfolio("PORT-1", "USD",
 		domain.Position{InstrumentID: "A", MarketValue: mkMoneyUnc(-200, 0, "USD"), AsOf: baseTime},
@@ -101,7 +86,7 @@ func TestPopulateUncertainty_FlowsToMeasurePropagation(t *testing.T) {
 	// End-to-end: the populated band feeds GrossExposure's RISK-08 propagation.
 	series := ramp(40)
 	sigma := expectedStdDev(series)
-	vm := compute.NewReturnsVolModel(&volStubProvider{series: series}, 0)
+	vm := returns.NewReturnsVolModel(&volStubProvider{series: series}, 0)
 
 	p := makePortfolio("PORT-1", "USD",
 		domain.Position{InstrumentID: "A", MarketValue: mkMoneyUnc(100, 0, "USD"), AsOf: baseTime},
@@ -128,7 +113,7 @@ func TestPopulateUncertainty_NilModelIsNoOp(t *testing.T) {
 }
 
 func TestPopulateUncertainty_InsufficientHistoryLeavesNil(t *testing.T) {
-	vm := compute.NewReturnsVolModel(&volStubProvider{series: ramp(3)}, 0)
+	vm := returns.NewReturnsVolModel(&volStubProvider{series: ramp(3)}, 0)
 	p := makePortfolio("PORT-1", "USD",
 		domain.Position{InstrumentID: "A", MarketValue: mkMoneyUnc(100, 0, "USD"), AsOf: baseTime},
 	)
