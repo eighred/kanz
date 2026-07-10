@@ -22,8 +22,10 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"google.golang.org/grpc"
 
+	mdstore "github.com/kanz-eng/kanz/internal/marketdata/store"
 	risk "github.com/kanz-eng/kanz/internal/risk"
 	"github.com/kanz-eng/kanz/internal/risk/compute"
+	varmodel "github.com/kanz-eng/kanz/internal/risk/compute/var"
 	"github.com/kanz-eng/kanz/internal/risk/engine"
 	"github.com/kanz-eng/kanz/internal/risk/ingest"
 	"github.com/kanz-eng/kanz/internal/risk/pricing/curve"
@@ -134,6 +136,31 @@ func runEngine(ctx context.Context, cfg config.Config, readiness *server.Readine
 	// last-known-good cache the recomputer fills (degraded fallback).
 	cache := risk.NewCache()
 	registry := compute.DefaultRegistry()
+	// RISK-12: with a market-data price store configured, override the RISK-07
+	// 1%×gross VaR99 placeholder with the real historical-simulation model, read
+	// point-in-time-correct off the shared price history (MODEL-01b) the
+	// market-data service writes. The registry is shared by the recomputer below
+	// and the query EngineImpl, so both serve the same data-driven VaR once
+	// registered. Bound over an app-scoped ctx (Background), matching the
+	// recomputer's baseCtx, so the debounced/async recompute + shutdown drain can
+	// still read the store. Without a DSN the placeholder stands — the honest
+	// no-market-data fallback (varmodel keeps compute.VaR99).
+	if cfg.MarketDataURL != "" {
+		pricePool, err := pgxpool.New(ctx, cfg.MarketDataURL)
+		if err != nil {
+			return err
+		}
+		defer pricePool.Close()
+		priceStore := mdstore.NewPostgres(pricePool)
+		if err := priceStore.Ping(ctx); err != nil {
+			return err
+		}
+		provider := compute.NewStoreReturnsProvider(priceStore, compute.ReturnsConfig{})
+		varmodel.Register(context.Background(), registry, provider, varmodel.Config{})
+		logger.Info("RISK-12: historical-simulation VaR99 registered off market-data price store")
+	} else {
+		logger.Warn("no RISK_ENGINE_MARKETDATA_DATABASE_URL — VaR99 serves the RISK-07 1%×gross placeholder")
+	}
 	// Recomputer baseCtx is app-scoped (Background), not the signal ctx, so
 	// the shutdown Drain can still publish the last settled state after the
 	// signal cancels ingestion.

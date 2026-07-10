@@ -42,6 +42,15 @@ type Config struct {
 	// spine to cover everything since. Comma-separated in the environment.
 	KafkaBrokers []string
 
+	// MarketDataURL is the Postgres/Timescale DSN of the shared market-data
+	// price-history store (MODEL-01b) that the market-data service writes. When
+	// set, the risk-engine reads it point-in-time-correct to drive the real
+	// historical-simulation VaR99 (RISK-12), overriding the RISK-07 1%×gross
+	// placeholder. Read-only from here; price history is universal market fact,
+	// not tenant-owned, so the connection carries no tenant GUC. Empty ⇒ no price
+	// store: VaR99 stays the placeholder (the honest no-market-data fallback).
+	MarketDataURL string
+
 	// OTLPEndpoint is the OTel collector (host:port) for span export (OBS-01).
 	// Empty ⇒ spans are created and trace context propagates, but are not
 	// exported — startup never blocks on a collector.
@@ -122,6 +131,7 @@ func Load() (Config, error) {
 		DatabaseURL:      secret("RISK_ENGINE_DATABASE_URL"),
 		SnapshotInterval: parseDuration(os.Getenv("RISK_ENGINE_SNAPSHOT_INTERVAL")),
 		KafkaBrokers:     splitList(os.Getenv("RISK_ENGINE_KAFKA_BROKERS")),
+		MarketDataURL:    secret("RISK_ENGINE_MARKETDATA_DATABASE_URL"),
 		ShardMembers:     splitList(os.Getenv("RISK_ENGINE_SHARD_MEMBERS")),
 		ShardSelf:        os.Getenv("RISK_ENGINE_SHARD_SELF"),
 		RedisURL:         secret("RISK_ENGINE_REDIS_URL"),
