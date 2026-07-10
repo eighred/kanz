@@ -72,6 +72,7 @@ type VenueSettings struct {
 	Symbols      map[string]string // instrument_id -> exchange symbol
 	WeightBudget int               // per-minute REST weight budget (default 1200)
 	OnThrottle   func()            // structural-alert hook on budget exhaustion
+	DNSTTL       time.Duration     // DNS cache TTL for the bypass dialer (default 5m)
 }
 
 // NewBinanceVenueFromSettings assembles the rate bucket + signed REST client +
@@ -85,6 +86,7 @@ func NewBinanceVenueFromSettings(s VenueSettings) *BinanceVenue {
 	rest := newBinanceREST(restConfig{
 		BaseURL: s.BaseURL, APIKey: s.APIKey, APISecret: s.APISecret,
 		Bucket: bucket, OnThrottle: s.OnThrottle,
+		HTTPClient: newBinanceHTTPClient(s.DNSTTL), // DNS-bypass dialer on the hot path
 	})
 	return NewBinanceVenue(BinanceConfig{MIC: s.MIC, Symbols: StaticSymbolMap(s.Symbols), REST: rest})
 }
