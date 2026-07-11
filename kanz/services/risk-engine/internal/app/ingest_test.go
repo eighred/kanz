@@ -114,8 +114,16 @@ func TestIngest_RoutesEventsIntoStore(t *testing.T) {
 	go func() { done <- ing.Run(ctx) }()
 
 	// Poll until both the portfolio aggregate and its position landed.
+	//
+	// Snapshot, not Lookup: Lookup hands back the engine's LIVE portfolio, and its
+	// doc comment requires the caller to hold the per-aggregate lock or clone before
+	// reading. This poll runs while the ingest goroutine is applying, so reading the
+	// live copy races the applier's SetPosition (domain.Portfolio is a plain map,
+	// single-writer by design). Snapshot is the locked-read boundary — a deep clone
+	// taken under the same per-aggregate lock the applier holds — and is what every
+	// production reader (engine.go, recompute.go) already uses.
 	waitFor(t, func() bool {
-		p, ok := store.Lookup("PORT-1")
+		p, ok := store.Snapshot("PORT-1")
 		if !ok {
 			return false
 		}
