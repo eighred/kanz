@@ -25,7 +25,6 @@ import (
 	"github.com/kanz-eng/kanz/pkg/observability"
 	"github.com/kanz-eng/kanz/services/market-ingest/internal/book"
 	"github.com/kanz-eng/kanz/services/market-ingest/internal/config"
-	"github.com/kanz-eng/kanz/services/market-ingest/internal/depth"
 	"github.com/kanz-eng/kanz/services/market-ingest/internal/ingest"
 )
 
@@ -86,23 +85,26 @@ func main() {
 		logger.Warn("no instruments configured — idling (set MARKET_INGEST_INSTRUMENTS)")
 	}
 
-	// One book + engine per instrument, each fed by its depth source (the
-	// vendor-free simulator in the default build).
+	// One book + engine per instrument PER VENUE. Depth is per-venue and books are
+	// never merged across venues, so a build carrying both exchange tags folds two
+	// independent books for the same instrument — the shape the cross-venue engines
+	// read. The default (vendor-free) build gets the deterministic simulator.
 	var wg sync.WaitGroup
 	for _, instrument := range cfg.Instruments {
-		b := book.New(instrument, instrument, "SIM")
-		src := newDepthSource(instrument)
-		eng := ingest.New(ingest.Config{
-			Book: b, Source: src, Publisher: producer, Logger: logger,
-			SnapshotInterval: cfg.SnapshotInterval, SnapshotDepth: cfg.SnapshotDepth,
-		})
-		wg.Add(1)
-		go func(inst string) {
-			defer wg.Done()
-			if err := eng.Run(ctx); err != nil {
-				logger.Error("depth engine stopped", "instrument", inst, "err", err)
-			}
-		}(instrument)
+		for _, vs := range depthSources(cfg, instrument, logger) {
+			b := book.New(instrument, instrument, vs.mic)
+			eng := ingest.New(ingest.Config{
+				Book: b, Source: vs.src, Publisher: producer, Logger: logger,
+				SnapshotInterval: cfg.SnapshotInterval, SnapshotDepth: cfg.SnapshotDepth,
+			})
+			wg.Add(1)
+			go func(inst, mic string) {
+				defer wg.Done()
+				if err := eng.Run(ctx); err != nil {
+					logger.Error("depth engine stopped", "instrument", inst, "venue", mic, "err", err)
+				}
+			}(instrument, vs.mic)
+		}
 	}
 	ready.set(true)
 
@@ -115,14 +117,6 @@ func main() {
 		logger.Error("http shutdown error", "err", err)
 	}
 	wg.Wait()
-}
-
-// newDepthSource returns the depth feed for an instrument. The default
-// (vendor-free) build returns the deterministic simulator; per-venue build tags
-// will override this seam with the live Binance/OKX depth websockets, keeping
-// the vendor SDKs out of the default binary.
-func newDepthSource(instrument string) depth.DepthSource {
-	return depth.NewSimSource(depth.SimConfig{InstrumentID: instrument, Symbol: instrument})
 }
 
 type readiness struct {

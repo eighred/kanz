@@ -23,12 +23,32 @@ type Config struct {
 	Source  string
 
 	// Instruments is the set of canonical instrument_ids to track (one book +
-	// engine each). Empty ⇒ the service logs and idles (deny-by-default: it never
-	// invents instruments).
+	// engine per instrument PER VENUE). Empty ⇒ the service logs and idles
+	// (deny-by-default: it never invents instruments).
 	Instruments []string
 
 	SnapshotInterval time.Duration
 	SnapshotDepth    int
+
+	// --- live venue depth feeds (bound behind per-venue build tags) ---
+	//
+	// Exchange depth is PUBLIC market data, so unlike the OMS connectors these
+	// carry no API key or secret. An instrument absent from a venue's symbol map is
+	// simply not tracked on that venue — the edge never invents a symbol.
+
+	BinanceMIC      string
+	BinanceWSBase   string            // websocket origin
+	BinanceRESTBase string            // REST origin (the depth-snapshot anchor)
+	BinanceSymbols  map[string]string // instrument_id -> venue symbol (BTC-USD=BTCUSDT)
+
+	OKXMIC     string
+	OKXWSURL   string            // public v5 websocket
+	OKXSymbols map[string]string // instrument_id -> venue instId (BTC-USD=BTC-USDT)
+
+	// DepthLimit is the REST snapshot depth Binance anchors on (<=0 ⇒ 1000).
+	DepthLimit int
+	// DNSTTL is the DNS-bypass cache TTL on the live exchange path.
+	DNSTTL time.Duration
 }
 
 // Load reads and validates the environment.
@@ -42,7 +62,34 @@ func Load() Config {
 		Instruments:      parseList(os.Getenv("MARKET_INGEST_INSTRUMENTS")),
 		SnapshotInterval: parseDuration(os.Getenv("MARKET_INGEST_SNAPSHOT_INTERVAL"), time.Second),
 		SnapshotDepth:    parseInt(os.Getenv("MARKET_INGEST_SNAPSHOT_DEPTH"), 20),
+
+		BinanceMIC:      envOr("MARKET_INGEST_BINANCE_MIC", "BINANCE"),
+		BinanceWSBase:   envOr("MARKET_INGEST_BINANCE_WS_BASE", "wss://stream.binance.com:9443"),
+		BinanceRESTBase: envOr("MARKET_INGEST_BINANCE_REST_BASE", "https://api.binance.com"),
+		BinanceSymbols:  parseSymbolMap(os.Getenv("MARKET_INGEST_BINANCE_SYMBOLS")),
+
+		OKXMIC:     envOr("MARKET_INGEST_OKX_MIC", "OKX"),
+		OKXWSURL:   envOr("MARKET_INGEST_OKX_WS_URL", "wss://ws.okx.com:8443/ws/v5/public"),
+		OKXSymbols: parseSymbolMap(os.Getenv("MARKET_INGEST_OKX_SYMBOLS")),
+
+		DepthLimit: parseInt(os.Getenv("MARKET_INGEST_DEPTH_LIMIT"), 1000),
+		DNSTTL:     parseDuration(os.Getenv("MARKET_INGEST_DNS_TTL"), 5*time.Minute),
 	}
+}
+
+// parseSymbolMap parses "BTC-USD=BTCUSDT,ETH-USD=ETHUSDT" into a map.
+func parseSymbolMap(s string) map[string]string {
+	out := map[string]string{}
+	for _, pair := range strings.Split(s, ",") {
+		pair = strings.TrimSpace(pair)
+		if pair == "" {
+			continue
+		}
+		if k, v, ok := strings.Cut(pair, "="); ok {
+			out[strings.TrimSpace(k)] = strings.TrimSpace(v)
+		}
+	}
+	return out
 }
 
 func parseList(s string) []string {
