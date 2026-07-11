@@ -9,19 +9,23 @@ import (
 	envelopepb "github.com/kanz-eng/kanz-schemas-go/envelope/v1"
 	lifecyclepb "github.com/kanz-eng/kanz-schemas-go/lifecycle/v1"
 	"google.golang.org/protobuf/proto"
+
+	"github.com/kanz-eng/kanz/internal/platform/mode"
 )
 
 // SubjectModeChanged carries the lifecycle.v1.ModeChanged FACT — the halt signal.
-// It is the operator's brake and the system's, and it is the ONLY thing that can
-// reopen a latched gate.
-const SubjectModeChanged = "platform.mode.changed"
+// It is the operator's brake, and it is the ONLY thing that can reopen a latched
+// gate. Defined in internal/platform/mode so the publisher (cmd/kanz-halt) and
+// this consumer share ONE definition without the break-glass tool having to
+// depend on the trading pipeline.
+const SubjectModeChanged = mode.Subject
 
 // ComponentSystem is the ModeChanged.component value for a whole-system
 // transition. The gate reacts to this and nothing else: a single DEGRADED
 // component is a page, not a reason to stop trading the whole fund. Escalating a
 // component fault into a system halt is the caller's decision, published as a
 // system-level ModeChanged.
-const ComponentSystem = "system"
+const ComponentSystem = mode.ComponentSystem
 
 // Gate is the kill-switch. It is the ONE brake both brains pass through: the
 // TradingView webhook perimeter checks it before an alert becomes an intent, and
