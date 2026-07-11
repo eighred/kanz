@@ -16,11 +16,6 @@ import (
 	"github.com/kanz-eng/kanz/internal/signal/translate"
 )
 
-// Halted reports whether trading is halted (the kill-switch). M1 wires a
-// constant false; Milestone 5 binds it to the Halt FACT. Deny-by-default: a
-// true result rejects the signal before any order is produced.
-type Halted func(fundID string) bool
-
 // Options configures a Pipeline. The seams default to deny-by-default / error
 // when a required one is nil.
 type Options struct {
@@ -34,8 +29,11 @@ type Options struct {
 
 	// TenantOf maps a fund to its tenant_id; nil ⇒ the fund_id is the tenant.
 	TenantOf func(fundID string) string
-	// Halted is the kill-switch; nil ⇒ never halted.
-	Halted Halted
+	// Gate is the kill-switch — the SAME *translate.Gate the native alpha runner
+	// holds, so one trip paralyzes both channels. Required: the local
+	// `func(fundID) bool` seam this replaced defaulted to constant false and was
+	// never wired in cmd/, which left the brake disconnected in production.
+	Gate *translate.Gate
 	// MaxSize / MaxLeverage bound the sanity gate; nil ⇒ no bound.
 	MaxSize     *big.Rat
 	MaxLeverage *big.Rat
@@ -71,14 +69,11 @@ func NewPipeline(opt Options) (*Pipeline, error) {
 	}
 	tr, err := translate.New(translate.Options{
 		Prices: opt.Prices, Equity: opt.Equity, Positions: opt.Positions,
-		Alloc: opt.Alloc, Publisher: opt.Publisher,
+		Alloc: opt.Alloc, Publisher: opt.Publisher, Gate: opt.Gate,
 		TenantOf: opt.TenantOf, Now: opt.Now,
 	})
 	if err != nil {
 		return nil, err
-	}
-	if opt.Halted == nil {
-		opt.Halted = func(string) bool { return false }
 	}
 	w := opt.ReplayWindow
 	if w <= 0 {
@@ -102,8 +97,13 @@ func (p *Pipeline) Process(ctx context.Context, rawBody []byte, remoteIP net.IP,
 	if err := p.opt.Auth.Authenticate(rawBody, remoteIP, sigHeader, wh.StrategyID, wh.Nonce, p.window); err != nil {
 		return nil, err // ErrUnauthorized / ErrReplayed
 	}
-	if p.opt.Halted(wh.FundID) {
-		return nil, ErrHalted
+	// The brake, at the perimeter: reject before parsing, before any work. The
+	// translator checks the same gate again on Emit — that is not redundant, it is
+	// the point. The gate can trip in the microseconds between here and there, and
+	// the check that matters is the one closest to the venue.
+	if p.opt.Gate.Halted() {
+		_, reason, _ := p.opt.Gate.State()
+		return nil, fmt.Errorf("%w: %s", ErrHalted, reason)
 	}
 
 	action, err := parseAction(wh.Action)
@@ -212,7 +212,10 @@ func parseTS(s string) *timestamppb.Timestamp {
 
 // Pipeline error sentinels, mapped to HTTP status by the server.
 var (
-	ErrBadRequest   = errors.New("ingest: bad request")
-	ErrHalted       = errors.New("ingest: trading halted")
+	ErrBadRequest = errors.New("ingest: bad request")
+	// ErrHalted aliases the translator's sentinel rather than declaring a second
+	// one: the gate trips at the perimeter AND inside Emit, and the server's
+	// errors.Is must answer 423 Locked no matter which of the two rejected.
+	ErrHalted       = translate.ErrHalted
 	ErrUnresolvable = errors.New("ingest: could not resolve order size")
 )

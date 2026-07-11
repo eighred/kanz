@@ -105,6 +105,13 @@ type Options struct {
 	Alloc     AllocationPolicy
 	Publisher Publisher
 
+	// Gate is the kill-switch, and it is REQUIRED — not because the translator
+	// cannot run without one, but because the seam this replaced was optional,
+	// defaulted open, and was never wired in any binary. An optional brake is an
+	// absent brake. Tests and local dev pass OpenGate; production passes NewGate and
+	// lets the lifecycle stream open it.
+	Gate *Gate
+
 	// TenantOf maps a fund to its tenant_id; nil ⇒ the fund_id is the tenant.
 	TenantOf func(fundID string) string
 	Now      func() time.Time
@@ -123,6 +130,9 @@ func New(opt Options) (*Translator, error) {
 		opt.Alloc == nil || opt.Publisher == nil {
 		return nil, errors.New("translate: prices, equity, positions, alloc, and publisher are required")
 	}
+	if opt.Gate == nil {
+		return nil, errors.New("translate: gate is required (use NewGate for production, OpenGate for tests/dev)")
+	}
 	if opt.TenantOf == nil {
 		opt.TenantOf = func(fundID string) string { return fundID }
 	}
@@ -137,6 +147,15 @@ func New(opt Options) (*Translator, error) {
 // correlation_id = signal_id, so the durable log threads signal → orders → fills
 // as one transaction.
 func (t *Translator) Emit(ctx context.Context, in Intent) (*Result, error) {
+	// The brake comes before everything — before validation, before the FACT is
+	// recorded. A halted system does not even leave an audit trail of intents it
+	// refused to act on; it simply does not act. Both brains reach the venues
+	// through here, so this single check paralyzes ingest and autonomous execution
+	// together.
+	if t.opt.Gate.Halted() {
+		_, reason, since := t.opt.Gate.State()
+		return nil, fmt.Errorf("%w: %s (since %s)", ErrHalted, reason, since.UTC().Format(time.RFC3339))
+	}
 	if err := in.validate(); err != nil {
 		return nil, err
 	}
@@ -369,4 +388,7 @@ func toDec(r *big.Rat) *commonpb.Decimal {
 var (
 	ErrInvalidIntent = errors.New("translate: invalid intent")
 	ErrUnresolvable  = errors.New("translate: could not resolve order size")
+	// ErrHalted is returned when the kill-switch is closed. Both front ends map it
+	// to their own surface (the webhook perimeter answers 423 Locked).
+	ErrHalted = errors.New("translate: trading halted")
 )

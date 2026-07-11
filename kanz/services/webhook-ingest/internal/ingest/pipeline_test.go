@@ -15,6 +15,7 @@ import (
 	signalpb "github.com/kanz-eng/kanz-schemas-go/signal/v1"
 
 	"github.com/kanz-eng/kanz/internal/dec"
+	"github.com/kanz-eng/kanz/internal/signal/translate"
 	"github.com/kanz-eng/kanz/pkg/bus"
 )
 
@@ -73,6 +74,7 @@ func harness(t *testing.T) (*Pipeline, *capture) {
 			{Venue: "OKX", Weight: big.NewRat(4, 10)},
 		}},
 		Publisher: cap,
+		Gate:      translate.OpenGate(nil),
 	})
 	if err != nil {
 		t.Fatalf("NewPipeline: %v", err)
@@ -196,18 +198,74 @@ func TestBadSignatureRejected(t *testing.T) {
 	}
 }
 
+// The kill-switch at the perimeter: a halted gate rejects an otherwise perfectly
+// valid, correctly-signed webhook, and NOTHING reaches the bus — no signal FACT,
+// no order commands.
+func TestHaltedGateRejectsValidWebhook(t *testing.T) {
+	cap := &capture{}
+	auth := NewAuthenticator(StaticSecrets{"momentum": testSecret}, nil, time.Minute, time.Now)
+	gate := translate.NewGate(nil) // CLOSED — no lifecycle FACT has opened it
+	p, err := NewPipeline(Options{
+		Auth: auth, Symbols: StaticSymbols{"BINANCE:BTCUSDT": "BTC-USD"},
+		Prices:    StaticPrices{"BTC-USD": big.NewRat(50000, 1)},
+		Equity:    StaticEquity{"fund-alpha": big.NewRat(1_000_000, 1)},
+		Positions: StaticPositions{}, Alloc: StaticAllocation{"fund-alpha": {{Venue: "BINANCE", Weight: big.NewRat(1, 1)}}},
+		Publisher: cap,
+		Gate:      gate,
+	})
+	if err != nil {
+		t.Fatalf("NewPipeline: %v", err)
+	}
+
+	raw := body("buy", "1", "absolute_qty", "halt-1")
+	_, err = p.Process(context.Background(), []byte(raw), net.ParseIP("10.0.0.1"), sign(raw, testSecret))
+	if !errors.Is(err, ErrHalted) {
+		t.Fatalf("halted pipeline accepted a webhook: err = %v, want ErrHalted", err)
+	}
+	if n := len(cap.events); n != 0 {
+		t.Fatalf("a halted pipeline published %d events, want 0 — the kill-switch let traffic through", n)
+	}
+
+	// Once an operator opens the gate, traffic flows again: the brake stops trading,
+	// it does not permanently break the service.
+	//
+	// Note the fresh nonce. Authenticate runs BEFORE the gate check, so the rejected
+	// webhook already burned "halt-1" into the replay cache — a TradingView retry of
+	// that same alert after the resume would be dropped as a replay. That is the
+	// behaviour we want (an alert that fired during a halt is stale by the time the
+	// halt clears, and re-firing it into a moved market is worse than dropping it),
+	// but it is load-bearing enough to pin down here.
+	gate.Resume("operator:akif", "cleared")
+	fresh := body("buy", "1", "absolute_qty", "halt-2")
+	if _, err := p.Process(context.Background(), []byte(fresh), net.ParseIP("10.0.0.1"), sign(fresh, testSecret)); err != nil {
+		t.Fatalf("after operator resume, Process = %v, want nil", err)
+	}
+	if len(cap.commands()) == 0 {
+		t.Fatal("after operator resume, no order commands were produced")
+	}
+
+	// The stale alert that arrived during the halt stays dropped.
+	if _, err := p.Process(context.Background(), []byte(raw), net.ParseIP("10.0.0.1"), sign(raw, testSecret)); !errors.Is(err, ErrReplayed) {
+		t.Fatalf("replay of the halted alert = %v, want ErrReplayed", err)
+	}
+}
+
 func TestIPAllowlistRejects(t *testing.T) {
 	cap := &capture{}
 	_, cidr, _ := net.ParseCIDR("203.0.113.0/24")
 	auth := NewAuthenticator(StaticSecrets{"momentum": testSecret}, []*net.IPNet{cidr}, time.Minute, time.Now)
-	p, _ := NewPipeline(Options{
+	p, err := NewPipeline(Options{
 		Auth: auth, Symbols: StaticSymbols{"BINANCE:BTCUSDT": "BTC-USD"},
 		Prices: StaticPrices{"BTC-USD": big.NewRat(50000, 1)}, Equity: StaticEquity{},
 		Positions: StaticPositions{}, Alloc: StaticAllocation{"fund-alpha": {{Venue: "BINANCE", Weight: big.NewRat(1, 1)}}},
 		Publisher: cap,
+		Gate:      translate.OpenGate(nil),
 	})
+	if err != nil {
+		t.Fatalf("NewPipeline: %v", err)
+	}
 	raw := body("buy", "1", "absolute_qty", "n6")
-	_, err := p.Process(context.Background(), []byte(raw), net.ParseIP("10.0.0.1"), sign(raw, testSecret))
+	_, err = p.Process(context.Background(), []byte(raw), net.ParseIP("10.0.0.1"), sign(raw, testSecret))
 	if !errors.Is(err, ErrUnauthorized) {
 		t.Fatalf("off-allowlist IP = %v, want ErrUnauthorized", err)
 	}

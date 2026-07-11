@@ -47,6 +47,11 @@ type Config struct {
 	Equity    translate.EquitySource
 	Positions translate.PositionSource
 	Alloc     translate.AllocationPolicy
+	// Gate is the kill-switch — the SAME *translate.Gate the webhook perimeter
+	// holds, so one trip stops both brains at once. Required IF engines are
+	// registered: an autonomous loop firing every 100ms with no operational brake
+	// leaves `kill -9` as the only risk control, which is not one.
+	Gate *translate.Gate
 	// TenantOf maps a fund to its tenant; nil ⇒ the fund is the tenant.
 	TenantOf func(fundID string) string
 
@@ -73,6 +78,9 @@ type Runner struct {
 	books  []*book.Book
 	tapes  []*trades.Tape
 	logger *slog.Logger
+	// halted is the last observed gate state, for edge-triggered logging. Owned by
+	// the tick goroutine.
+	halted bool
 }
 
 // New validates the configuration and builds the Runner.
@@ -104,7 +112,7 @@ func New(cfg Config) (*Runner, error) {
 	if len(cfg.Engines) > 0 {
 		tr, err := translate.New(translate.Options{
 			Prices: cfg.Prices, Equity: cfg.Equity, Positions: cfg.Positions,
-			Alloc: cfg.Alloc, Publisher: cfg.Publisher,
+			Alloc: cfg.Alloc, Publisher: cfg.Publisher, Gate: cfg.Gate,
 			TenantOf: cfg.TenantOf, Now: cfg.Now,
 		})
 		if err != nil {
@@ -202,6 +210,26 @@ func (r *Runner) tickLoop(ctx context.Context) {
 }
 
 func (r *Runner) tick(ctx context.Context) {
+	// The brake, at the top of every cycle. Engines are not even evaluated while
+	// halted: a halted system produces no decisions, not decisions it then declines
+	// to act on. This is the same gate the webhook perimeter checks, so one trip
+	// paralyzes both channels simultaneously.
+	//
+	// Logged on the EDGE, not the level: at a 100ms tick, logging the halted state
+	// itself would emit ten lines a second for the whole outage and bury the cause
+	// under the symptom. tick runs on one goroutine, so the flag needs no lock.
+	if halted := r.cfg.Gate.Halted(); halted != r.halted {
+		r.halted = halted
+		_, reason, _ := r.cfg.Gate.State()
+		if halted {
+			r.logger.Warn("alpha execution halted: engines suppressed", "reason", reason)
+		} else {
+			r.logger.Info("alpha execution resumed", "reason", reason)
+		}
+	}
+	if r.halted {
+		return
+	}
 	for _, e := range r.cfg.Engines {
 		for _, in := range e.Evaluate(ctx, r.views) {
 			if err := r.emit(ctx, e.Name(), in); err != nil {

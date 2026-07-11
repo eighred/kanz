@@ -40,6 +40,19 @@ type NATSConfig struct {
 	Username string
 	Password string
 	Token    string
+
+	// OnDisconnect fires when the spine is lost. MaxReconnects defaults to -1
+	// (retry forever), which means a disconnect is otherwise SILENT: the client
+	// buffers and heals and nothing upstream ever learns the bus went away. A
+	// trading process must learn — losing the spine means fills and the halt FACT
+	// itself stop flowing, so it can no longer know whether it is safe to trade.
+	// Wire this to translate.Gate.TripOnBusLoss to fail closed. err is nil on a
+	// clean close. Called on a NATS goroutine: do not block.
+	OnDisconnect func(err error)
+	// OnReconnect fires when the spine returns. It deliberately does NOT reopen the
+	// halt gate — the wire is back, which is not the same as the book being safe.
+	// Use it for logging and metrics.
+	OnReconnect func()
 }
 
 type NATSClient struct {
@@ -69,6 +82,20 @@ func DialNATS(_ context.Context, cfg NATSConfig) (*NATSClient, error) {
 		nats.Timeout(cfg.ConnectTimeout),
 		nats.ReconnectWait(cfg.ReconnectWait),
 		nats.MaxReconnects(cfg.MaxReconnects),
+	}
+	if cfg.OnDisconnect != nil {
+		fn := cfg.OnDisconnect
+		opts = append(opts,
+			nats.DisconnectErrHandler(func(_ *nats.Conn, err error) { fn(err) }),
+			// A client that exhausts MaxReconnects closes for good without ever firing
+			// DisconnectErrHandler again, so the terminal case gets its own hook —
+			// otherwise the one disconnect that is permanent is the one we miss.
+			nats.ClosedHandler(func(c *nats.Conn) { fn(c.LastError()) }),
+		)
+	}
+	if cfg.OnReconnect != nil {
+		fn := cfg.OnReconnect
+		opts = append(opts, nats.ReconnectHandler(func(*nats.Conn) { fn() }))
 	}
 	if cfg.TLSConfig != nil {
 		opts = append(opts, nats.Secure(cfg.TLSConfig))

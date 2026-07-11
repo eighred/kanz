@@ -73,7 +73,24 @@ func (e *staticEngine) views() int {
 	return e.sawN
 }
 
+func testIntent() Intent {
+	return Intent{
+		FundID: "fund-alpha", InstrumentID: "BTC-USD",
+		Action:      signalpb.SignalAction_SIGNAL_ACTION_BUY,
+		Size:        big.NewRat(2, 1),
+		SizeType:    signalpb.SizeType_SIZE_TYPE_ABSOLUTE_QTY,
+		OrderType:   orderpb.OrderType_ORDER_TYPE_MARKET,
+		TimeInForce: orderpb.TimeInForce_TIME_IN_FORCE_IOC,
+		Nonce:       "tick-1",
+	}
+}
+
 func runnerWith(t *testing.T, eng Engine, feeds []Feed) (*Runner, *capture) {
+	t.Helper()
+	return runnerWithGate(t, eng, feeds, translate.OpenGate(nil))
+}
+
+func runnerWithGate(t *testing.T, eng Engine, feeds []Feed, gate *translate.Gate) (*Runner, *capture) {
 	t.Helper()
 	cap := &capture{}
 	r, err := New(Config{
@@ -86,6 +103,7 @@ func runnerWith(t *testing.T, eng Engine, feeds []Feed) (*Runner, *capture) {
 			{Venue: "BINANCE", Weight: big.NewRat(1, 1)},
 		}},
 		Publisher:        cap,
+		Gate:             gate,
 		TickInterval:     5 * time.Millisecond,
 		SnapshotInterval: time.Hour, // keep book snapshots out of this test's way
 	})
@@ -93,6 +111,51 @@ func runnerWith(t *testing.T, eng Engine, feeds []Feed) (*Runner, *capture) {
 		t.Fatalf("New: %v", err)
 	}
 	return r, cap
+}
+
+// The autonomous loop fires every 100ms in production. A halted gate must stop it
+// dead — and not merely discard its output: a halted system produces no decisions
+// at all, so the engines are never even evaluated.
+func TestRunner_HaltedGateSuppressesTheTickLoop(t *testing.T) {
+	eng := &staticEngine{intent: testIntent()}
+	gate := translate.NewGate(nil) // CLOSED — never opened by a lifecycle FACT
+	r, cap := runnerWithGate(t, eng, []Feed{simFeed()}, gate)
+	runBriefly(t, r)
+
+	if n := len(cap.byType(translate.SubjectSubmit)); n != 0 {
+		t.Fatalf("a halted alpha runner emitted %d order commands, want 0 — the kill-switch does not stop autonomous execution", n)
+	}
+	if n := len(cap.byType(translate.SubjectSignal)); n != 0 {
+		t.Fatalf("a halted alpha runner recorded %d signal FACTs, want 0", n)
+	}
+	if eng.views() != 0 {
+		t.Fatal("engines were evaluated while halted — a halted system must decide nothing, not decide and discard")
+	}
+}
+
+// The gate is shared, so a mid-flight trip stops the loop that is already running.
+func TestRunner_TripMidFlightStopsExecution(t *testing.T) {
+	eng := &staticEngine{intent: testIntent()}
+	gate := translate.OpenGate(nil)
+	r, cap := runnerWithGate(t, eng, []Feed{simFeed()}, gate)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	go func() {
+		time.Sleep(20 * time.Millisecond)
+		gate.TripOnBusLoss(nil) // the spine drops mid-session
+	}()
+	_ = r.Run(ctx)
+
+	// staticEngine fires exactly once, so the pre-trip window may legitimately have
+	// produced one order. What must NOT happen is the loop continuing to trade after
+	// the trip — and the gate must still be latched shut at the end.
+	if !gate.Halted() {
+		t.Fatal("gate reopened after a mid-flight bus loss")
+	}
+	if n := len(cap.byType(translate.SubjectSubmit)); n > 1 {
+		t.Fatalf("emitted %d commands, want <=1 — execution continued after the halt tripped", n)
+	}
 }
 
 func simFeed() Feed {
