@@ -51,17 +51,16 @@ func newFakeRedis(now func() time.Time) *fakeRedis {
 
 // --- bus.RedisClient (dedup) ---
 
-func (f *fakeRedis) Exists(_ context.Context, key string) (bool, error) {
+// ClaimNX models real Redis's `SET key v NX EX ttl`: the check and the set happen
+// under ONE lock hold, so concurrent claimants are serialized and exactly one
+// wins. Splitting them would model a Redis that does not exist.
+func (f *fakeRedis) ClaimNX(_ context.Context, key string, lease time.Duration) (bool, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	exp, ok := f.keys[key]
-	if !ok {
-		return false, nil
+	if exp, ok := f.keys[key]; ok && !f.now().After(exp) {
+		return false, nil // held
 	}
-	if f.now().After(exp) {
-		delete(f.keys, key)
-		return false, nil
-	}
+	f.keys[key] = f.now().Add(lease)
 	return true, nil
 }
 
@@ -69,6 +68,13 @@ func (f *fakeRedis) SetWithTTL(_ context.Context, key string, ttl time.Duration)
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.keys[key] = f.now().Add(ttl)
+	return nil
+}
+
+func (f *fakeRedis) Del(_ context.Context, key string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	delete(f.keys, key)
 	return nil
 }
 
@@ -111,16 +117,20 @@ var (
 	_ integrity.RedisEval = (*fakeRedis)(nil)
 )
 
-// sideEffectGate models what a bus.Consumer does around a handler: check the
-// (shared) deduper, and only run the side effect + Record on first sight. This
-// is the exactly-once gate the RedisDedup provides across replicas, without
-// pulling in the framing internals the bus_test harness uses.
+// sideEffectGate models what a bus.Consumer does around a handler: atomically
+// CLAIM the key, run the side effect only if the claim was won, then COMMIT. This
+// is the exactly-once gate RedisDedup provides across replicas, without pulling in
+// the framing internals the bus_test harness uses.
+//
+// It used to be Seen()-then-Record(), mirroring the old Deduper contract — and
+// that check-then-act is exactly what let concurrent deliveries of one key both
+// run the effect. Claim is a single atomic round-trip, so they cannot.
 func sideEffectGate(d bus.Deduper, key string, effect func()) {
-	if d.Seen(key) {
+	if !d.Claim(key) {
 		return
 	}
 	effect()
-	d.Record(key)
+	d.Commit(key)
 }
 
 // TestCutover_ExactlyOnceSideEffectsAndReconcileUnderChaos is the flagship
@@ -240,22 +250,21 @@ func TestCutover_ConcurrentRedeliveryConvergesOnLTEOnce(t *testing.T) {
 	if len(effects) != keys {
 		t.Fatalf("distinct keys = %d, want %d", len(effects), keys)
 	}
-	over := 0
-	for _, n := range effects {
-		if n < 1 {
-			t.Fatalf("a key produced %d side effects (<1) — dedup dropped a real event", n)
+	// EXACTLY once. Not "mostly once".
+	//
+	// This assertion used to tolerate up to keys/4 duplicate leakage, on the grounds
+	// that dedup was best-effort and idempotent handlers were the real guarantee.
+	// Both halves of that were false: the leak was a check-then-act TOCTOU in the
+	// deduper (Seen-then-Record), and the handler it was leaning on — the OMS order
+	// path — was itself a check-then-act that routed to a VENUE, so a "tolerated"
+	// duplicate was a double trade. A threshold that tolerates a race also hides it:
+	// under -race the leakage ran 33-60% and the 25% bound simply flapped.
+	//
+	// Claim is atomic, so the correct bound is zero, and a bound of zero is the only
+	// one that cannot silently drift.
+	for key, n := range effects {
+		if n != 1 {
+			t.Errorf("key %s produced %d side effects, want exactly 1 — every extra one is a duplicate dispatch", key, n)
 		}
-		if n > 1+redeliveries {
-			t.Fatalf("a key produced %d side effects, exceeding deliveries", n)
-		}
-		if n > 1 {
-			over++
-		}
-	}
-	// The shared store collapses the vast majority even under concurrency; a few
-	// races are tolerated (idempotent handlers are the real guarantee). Guard a
-	// gross regression, not the exact race count.
-	if over > keys/4 {
-		t.Errorf("%d/%d keys leaked duplicates under concurrency — dedup not effective", over, keys)
 	}
 }

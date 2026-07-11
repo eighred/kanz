@@ -172,3 +172,85 @@ func equal(a, b []string) bool {
 	}
 	return true
 }
+
+// countingVenue wraps a Venue and counts how many orders it was actually asked to
+// execute. That count is the only thing that matters here: it is the number of
+// orders that reached the exchange.
+type countingVenue struct {
+	execution.Venue
+	mu sync.Mutex
+	n  int
+}
+
+func (v *countingVenue) Execute(ctx context.Context, st *orderpb.OrderState) ([]*orderpb.Fill, error) {
+	v.mu.Lock()
+	v.n++
+	v.mu.Unlock()
+	return v.Venue.Execute(ctx, st)
+}
+
+func (v *countingVenue) count() int {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	return v.n
+}
+
+// THE double-trade test.
+//
+// TestService_IdempotentResubmit covers the SEQUENTIAL re-submit, which is why it
+// passed while the bug was live: admission was Load()-then-Save(), and the two
+// calls raced only when they overlapped. Concurrently, both deliveries of one
+// SubmitOrder saw ErrNotFound, both admitted, and both routed to the venue — the
+// stored state converged (Save is an upsert, so it LOOKED idempotent) while the
+// fund traded twice.
+//
+// store.Create is now the atomic admission gate, so exactly one delivery can reach
+// the venue. Run with -race.
+func TestService_ConcurrentResubmit_RoutesToVenueExactlyOnce(t *testing.T) {
+	const deliveries = 16
+
+	fb := &fakeBus{}
+	venue := &countingVenue{Venue: execution.NewSimVenue("XSIM")}
+	store := NewMemoryStore()
+	svc, err := NewService(store, NewEmitter(fb), nil, execution.NewRouter(venue), nil, nil)
+	if err != nil {
+		t.Fatalf("NewService: %v", err)
+	}
+
+	// One order, delivered many times at once — a redelivery storm, or several OMS
+	// replicas handed the same command.
+	cmd := limitOrder(d(100, 0), d(1025, -2))
+	body := mustMarshal(t, cmd)
+
+	var wg sync.WaitGroup
+	errs := make(chan error, deliveries)
+	for i := 0; i < deliveries; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if err := svc.Handle(context.Background(), submitEnv(), body); err != nil {
+				errs <- err
+			}
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		t.Fatalf("Handle: %v", err)
+	}
+
+	if got := venue.count(); got != 1 {
+		t.Fatalf("the same order reached the venue %d times, want exactly 1 — every extra one is a real trade against the fund's capital", got)
+	}
+
+	// And the order was admitted once: no duplicate ACCEPTED FACT on the bus.
+	accepted := 0
+	for _, et := range fb.types() {
+		if et == EventTypeAccepted {
+			accepted++
+		}
+	}
+	if accepted != 1 {
+		t.Errorf("emitted %d ACCEPTED facts, want 1", accepted)
+	}
+}

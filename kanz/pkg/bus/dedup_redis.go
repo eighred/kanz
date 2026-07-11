@@ -19,19 +19,30 @@ import (
 // methods (see the package docs / coordination.md for the ~10-line adapter), so
 // no consumer pays for a Redis dependency it doesn't use.
 //
-// # Best-effort, fail-open
+// # Atomic claim, cross-pod
 //
-// Redis dedup is an OPTIMIZATION that cuts cross-pod duplicate side-effects — it
-// is not the correctness guarantee. The authoritative defense is idempotent
-// handlers (event-class-rules §1). So a Redis error fails OPEN: Seen returns
-// false and Record is a no-op (both reported via the error hook), degrading to
-// "no dedup" rather than blocking consumption when Redis is down. And because
-// Seen and Record are distinct (Record only after a successful dispatch), two
-// replicas can both pass Seen before either Records the key — same non-atomic
-// caveat as DedupWindow, now cross-pod, and the same answer: idempotent handlers.
+// Claim is a SINGLE round-trip SET NX EX. That is what makes it safe across
+// replicas: two pods racing the same key both issue the same command, and Redis
+// serializes them, so exactly one gets the key. The previous Seen()+Record() pair
+// could not do this — two round-trips are two chances to interleave, and both
+// replicas passed Seen before either Recorded.
+//
+// A failed dispatch Releases the key rather than committing it, so the retry
+// semantics the old split protected are preserved: a handler failure does not
+// poison the window. And a worker that dies mid-dispatch does not strand the key
+// forever — the claim carries a LEASE (WithRedisDedupLease, default 5s), so the
+// event is reprocessed once it expires rather than being silently lost.
+//
+// # Fail-open
+//
+// A Redis error fails OPEN: Claim returns true (proceed), Commit and Release are
+// no-ops, all reported via the error hook. A Redis outage degrades to "no dedup"
+// rather than halting consumption — dedup suppresses duplicate work; it is not the
+// thing standing between the platform and an unprocessed event.
 type RedisDedup struct {
 	client RedisClient
 	ttl    time.Duration
+	lease  time.Duration
 	prefix string
 	ctx    context.Context
 	onErr  func(op string, err error)
@@ -41,12 +52,17 @@ type RedisDedup struct {
 // go-redis, Dragonfly, or a cluster client at the composition root. Methods take
 // a context so the adapter can bound each call; RedisDedup passes its base ctx.
 type RedisClient interface {
-	// Exists reports whether key is present (backs Seen). Returning an error
-	// makes Seen fail open (treat as not-seen).
-	Exists(ctx context.Context, key string) (bool, error)
-	// SetWithTTL records key with the given TTL (backs Record). An overwrite of
-	// an existing key is fine — the TTL simply refreshes.
+	// ClaimNX atomically sets key IFF it is absent, with lease as its TTL, and
+	// reports whether this caller set it. It MUST be a single atomic operation —
+	// `SET key v NX EX lease`, one round-trip. An Exists-then-Set pair here would
+	// reintroduce exactly the TOCTOU window this interface exists to close.
+	// Returning an error makes Claim fail open (proceed with the dispatch).
+	ClaimNX(ctx context.Context, key string, lease time.Duration) (bool, error)
+	// SetWithTTL overwrites key with the given TTL (backs Commit): the claim's
+	// short lease is replaced by the full dedup window once the dispatch succeeds.
 	SetWithTTL(ctx context.Context, key string, ttl time.Duration) error
+	// Del removes key (backs Release), freeing a failed dispatch for redelivery.
+	Del(ctx context.Context, key string) error
 }
 
 // RedisDedupOption customizes a RedisDedup.
@@ -71,10 +87,24 @@ func WithRedisDedupContext(ctx context.Context) RedisDedupOption {
 }
 
 // WithRedisDedupErrorHandler sets the observability hook invoked (with the op
-// name "seen"/"record") on a Redis error before failing open. Nil ⇒ errors are
-// silently swallowed (still fail-open).
+// name "claim"/"commit"/"release") on a Redis error before failing open. Nil ⇒
+// errors are silently swallowed (still fail-open).
 func WithRedisDedupErrorHandler(fn func(op string, err error)) RedisDedupOption {
 	return func(d *RedisDedup) { d.onErr = fn }
+}
+
+// WithRedisDedupLease bounds how long a claimed-but-unfinished key stays claimed
+// (default 5s). This is the crash window: a worker that dies mid-dispatch strands
+// its claim until the lease expires, and only then is the event reprocessed. Size
+// it ABOVE the consumer's worst-case dispatch time including retry backoff — a
+// dispatch that outlives its lease can be claimed concurrently by a redelivery,
+// which is the very race the claim exists to prevent.
+func WithRedisDedupLease(lease time.Duration) RedisDedupOption {
+	return func(d *RedisDedup) {
+		if lease > 0 {
+			d.lease = lease
+		}
+	}
 }
 
 // NewRedisDedup builds a distributed Deduper over client with the given TTL
@@ -85,9 +115,14 @@ func NewRedisDedup(client RedisClient, ttl time.Duration, opts ...RedisDedupOpti
 	if client == nil || ttl <= 0 {
 		return nil
 	}
+	lease := defaultClaimLease
+	if ttl < lease {
+		lease = ttl
+	}
 	d := &RedisDedup{
 		client: client,
 		ttl:    ttl,
+		lease:  lease,
 		prefix: "kanz:dedup:",
 		ctx:    context.Background(),
 	}
@@ -97,28 +132,40 @@ func NewRedisDedup(client RedisClient, ttl time.Duration, opts ...RedisDedupOpti
 	return d
 }
 
-// Seen reports whether key is in the distributed window. Fails open (false) on a
-// Redis error so an outage degrades to no-dedup rather than blocking.
-func (d *RedisDedup) Seen(key string) bool {
+// Claim atomically takes key across every replica — one SET NX EX round-trip.
+// Fails OPEN (true) on a Redis error, so an outage degrades to no-dedup rather
+// than stalling consumption.
+func (d *RedisDedup) Claim(key string) bool {
 	if d == nil || key == "" {
-		return false
+		return true
 	}
-	ok, err := d.client.Exists(d.ctx, d.prefix+key)
+	ok, err := d.client.ClaimNX(d.ctx, d.prefix+key, d.lease)
 	if err != nil {
-		d.reportErr("seen", err)
-		return false
+		d.reportErr("claim", err)
+		return true // fail open: process rather than block
 	}
 	return ok
 }
 
-// Record marks key seen for ttl. Best-effort — a Redis error is reported and
-// swallowed (idempotent handlers are the real guarantee).
-func (d *RedisDedup) Record(key string) {
+// Commit promotes a claim to the full dedup window after a successful dispatch.
+func (d *RedisDedup) Commit(key string) {
 	if d == nil || key == "" {
 		return
 	}
 	if err := d.client.SetWithTTL(d.ctx, d.prefix+key, d.ttl); err != nil {
-		d.reportErr("record", err)
+		d.reportErr("commit", err)
+	}
+}
+
+// Release drops a claim after a failed dispatch so a redelivery can retry. On a
+// Redis error the key is simply left to its lease, which expires — the failure
+// mode is a delayed retry, never a lost event.
+func (d *RedisDedup) Release(key string) {
+	if d == nil || key == "" {
+		return
+	}
+	if err := d.client.Del(d.ctx, d.prefix+key); err != nil {
+		d.reportErr("release", err)
 	}
 }
 

@@ -155,7 +155,13 @@ func (c *Consumer) Subscribe(ctx context.Context, subject, group string, h Event
 			c.metrics.observeConsume(subject, group, 0, err)
 			return c.routeToDLQ(ctx, subject, msg, 0, fmt.Errorf("envelope validation: %w", err))
 		}
-		if c.dedup.Seen(env.IdempotencyKey) {
+		// Atomically claim the key. A false claim means another delivery of this
+		// same event either holds it right now or already completed it — either way
+		// this delivery must not dispatch. The claim is taken BEFORE the handler
+		// runs (that is the point: it closes the window where two concurrent
+		// deliveries both ran it), and every exit path below must either Commit it
+		// or Release it, or the event is stranded until the lease expires.
+		if !c.dedup.Claim(env.IdempotencyKey) {
 			return nil // duplicate within window — ack and skip (not a dispatch)
 		}
 		ctx = WithCorrelationID(ctx, env.CorrelationId)
@@ -181,7 +187,7 @@ func (c *Consumer) Subscribe(ctx context.Context, subject, group string, h Event
 		var lastErr error
 		for attempt := 1; attempt <= c.retry.MaxAttempts; attempt++ {
 			if err := h(ctx, env, payload); err == nil {
-				c.dedup.Record(env.IdempotencyKey)
+				c.dedup.Commit(env.IdempotencyKey) // done — hold for the full window
 				endSpan(span, nil)
 				c.metrics.observeConsume(subject, group, time.Since(start), nil)
 				return nil
@@ -190,6 +196,10 @@ func (c *Consumer) Subscribe(ctx context.Context, subject, group string, h Event
 			}
 			if attempt < c.retry.MaxAttempts {
 				if err := sleepWithCtx(ctx, c.retry.Backoff(attempt)); err != nil {
+					// Shutting down mid-dispatch. Release, or this event sits claimed
+					// until its lease expires and the redelivery after restart is
+					// silently skipped.
+					c.dedup.Release(env.IdempotencyKey)
 					endSpan(span, err)
 					c.metrics.observeConsume(subject, group, time.Since(start), err)
 					return err // ctx canceled during backoff
@@ -201,11 +211,18 @@ func (c *Consumer) Subscribe(ctx context.Context, subject, group string, h Event
 		c.metrics.observeConsume(subject, group, time.Since(start), lastErr)
 		if c.dlq != nil {
 			if err := c.publishDLQ(ctx, subject, msg, c.retry.MaxAttempts, lastErr); err != nil {
+				// The DLQ publish itself failed, so this event is neither handled nor
+				// parked. Release so the broker's redelivery gets a real second chance.
+				c.dedup.Release(env.IdempotencyKey)
 				return err
 			}
-			c.dedup.Record(env.IdempotencyKey) // DLQ is terminal — dedup future duplicates
+			c.dedup.Commit(env.IdempotencyKey) // DLQ is terminal — dedup future duplicates
 			return nil
 		}
+		// No DLQ: the dispatch failed and the event is going back to the broker.
+		// Release the claim, otherwise the redelivery this return is asking for would
+		// be deduped away by our own stranded claim.
+		c.dedup.Release(env.IdempotencyKey)
 		return lastErr
 	})
 }

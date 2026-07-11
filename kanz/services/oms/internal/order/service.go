@@ -83,9 +83,11 @@ func (s *Service) handleSubmit(ctx context.Context, payload []byte) error {
 	}
 	now := s.now().UTC()
 
-	// Idempotent re-submit: the order already exists ⇒ ack without re-processing
-	// (the envelope idempotency-key dedup is the first guard; this covers a
-	// re-submit under a fresh key). One order per order_id.
+	// Fast path for an obvious re-submit: skip the compliance gate and validation
+	// for an order we already know. This is an OPTIMIZATION ONLY — it is a
+	// check-then-act and cannot be the guard. Admission is enforced atomically by
+	// store.Create below, which is what actually stands between a duplicated
+	// SubmitOrder and a duplicated venue order.
 	if _, err := s.store.Load(ctx, cmd.GetOrderId()); err == nil {
 		return nil
 	} else if !errors.Is(err, ErrNotFound) {
@@ -110,7 +112,16 @@ func (s *Service) handleSubmit(ctx context.Context, payload []byte) error {
 		}
 		return err
 	}
-	if err := s.store.Save(ctx, st); err != nil {
+	// THE ADMISSION GATE. Create is atomic: exactly one concurrent delivery of this
+	// order_id can insert it, and every other gets ErrExists. Losing the race means
+	// another delivery already owns this order and is working it — so this one acks
+	// and stops, HERE, before s.work() below routes it to a venue. The old
+	// Load()-then-Save() let both deliveries through this point and both reached the
+	// venue: the state converged (Save upserts) while the fund traded twice.
+	if err := s.store.Create(ctx, st); err != nil {
+		if errors.Is(err, ErrExists) {
+			return nil // lost the admission race — the winner works the order
+		}
 		return err
 	}
 	if err := s.emitter.EmitAccepted(ctx, st); err != nil {
