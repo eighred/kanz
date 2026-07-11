@@ -33,7 +33,15 @@ data:
     # FACT-grade data-quality signals); observability is ephemeral.
     ensure_stream MARKET        "market.>"        24h
     ensure_stream RISK          "risk.>"          24h
-    ensure_stream EXECUTION     "execution.>"     24h
+    # EXECUTION also carries strategy.> and order.> — the signal→order path.
+    # bus.Publish is a JETSTREAM publish, so a subject with no stream bound to it
+    # is not "fire and forget", it is a hard publish failure. Both subjects were
+    # unbound: every StrategySignal FACT and SubmitOrder COMMAND webhook-ingest and
+    # the alpha Runner produced would have been dropped on the floor of a live
+    # spine. They are added to EXECUTION rather than renamed under execution.>
+    # because a subject rename would break every existing consumer binding and the
+    # replay log's subject history; the stream's subject list is the cheap seam.
+    ensure_stream EXECUTION     "execution.>,strategy.>,order.>" 24h
     ensure_stream INFERENCE     "inference.>"     24h
     ensure_stream PLATFORM      "platform.>"      168h
     ensure_stream DATA          "data.>"          168h

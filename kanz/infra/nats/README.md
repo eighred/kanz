@@ -23,7 +23,8 @@ the envelope `idempotency_key`).
 
 | Stream | Subjects | Max age |
 |---|---|---|
-| `MARKET` `RISK` `EXECUTION` `INFERENCE` | `<domain>.>` | 24h |
+| `MARKET` `RISK` `INFERENCE` | `<domain>.>` | 24h |
+| `EXECUTION` | `execution.>` + `strategy.>` + `order.>` (the signal→order path) | 24h |
 | `PLATFORM` `DATA` | `<domain>.>` | 168h (lifecycle + FACT-grade data-quality) |
 | `OBSERVABILITY` | `observability.>` | 1h (ephemeral metrics) |
 | `DLQ` | `dlq.>` | 720h (poison-event investigation runway) |

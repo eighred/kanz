@@ -251,9 +251,34 @@ func (p *Producer) stamp(ctx context.Context, e Event) (*envelopepb.Envelope, er
 		ProducerSequence: seq,
 		IdempotencyKey:   idem,
 		QualityFlags:     e.QualityFlags,
-		PayloadSchemaRef: e.PayloadSchemaRef,
+		PayloadSchemaRef: schemaRef(e),
 		TenantId:         tenant,
 	}, nil
+}
+
+// schemaRef resolves the envelope's payload_schema_ref, which Validate REQUIRES
+// on every event. An explicit Event.PayloadSchemaRef wins; otherwise it is derived
+// from the payload itself.
+//
+// It is derived rather than demanded because it is not new information: the
+// convention is exactly "{proto full name}:{schema_version}" (domain.v1.RiskMeasureSet:1,
+// signal.v1.StrategySignal:1), and the producer already holds both halves — the
+// payload message and e.SchemaVersion, which Validate independently requires to be
+// >= 1. Asking each caller to restate it bought nothing and cost everything: TWELVE
+// publish sites across the module omitted it — the whole signal→order path, every
+// OMS venue connector/recon/userdata emitter, market-ingest's book snapshots, the
+// gateway's order route — and each one was a publisher that validated fine in unit
+// tests (which inject fake Publishers that never validate) and failed on the first
+// real broker. A required field that the producer can compute itself should never
+// have been the caller's job to remember.
+func schemaRef(e Event) string {
+	if e.PayloadSchemaRef != "" {
+		return e.PayloadSchemaRef
+	}
+	if e.Payload == nil {
+		return "" // publish() rejects a nil payload before stamp; Validate is the backstop.
+	}
+	return fmt.Sprintf("%s:%d", e.Payload.ProtoReflect().Descriptor().FullName(), e.SchemaVersion)
 }
 
 func (p *Producer) nextSequence(eventType, partitionKey string) uint64 {

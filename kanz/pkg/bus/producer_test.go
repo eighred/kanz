@@ -303,3 +303,42 @@ func TestNewProducerRequiresSourceAndVersion(t *testing.T) {
 		t.Error("expected error for nil client")
 	}
 }
+
+// payload_schema_ref is REQUIRED by Validate, and the producer derives it from the
+// payload when the caller does not supply one. Before this, twelve publish sites
+// across the module silently omitted it — the whole signal→order path, every OMS
+// venue emitter, market-ingest's snapshots — and each one validated fine against a
+// fake Publisher in unit tests and was rejected by the first real broker.
+func TestProducerDerivesPayloadSchemaRef(t *testing.T) {
+	p, cc := newTestProducer(t)
+
+	e := factEvent()
+	e.PayloadSchemaRef = "" // the caller forgot — the producer must not care
+	if err := p.Publish(context.Background(), e); err != nil {
+		t.Fatalf("Publish without an explicit schema ref = %v, want nil (it is derivable)", err)
+	}
+	env, _, err := bus.Unframe(cc.sent[0].Body)
+	if err != nil {
+		t.Fatalf("Unframe: %v", err)
+	}
+	// "{proto full name}:{schema_version}" — the convention every explicit ref in
+	// the module already follows (domain.v1.RiskMeasureSet:1, signal.v1.StrategySignal:1).
+	if want := "google.protobuf.Timestamp:1"; env.PayloadSchemaRef != want {
+		t.Fatalf("derived payload_schema_ref = %q, want %q", env.PayloadSchemaRef, want)
+	}
+}
+
+// An explicit ref still wins — derivation is a floor, not an override.
+func TestProducerPrefersExplicitPayloadSchemaRef(t *testing.T) {
+	p, cc := newTestProducer(t)
+	if err := p.Publish(context.Background(), factEvent()); err != nil {
+		t.Fatalf("Publish: %v", err)
+	}
+	env, _, err := bus.Unframe(cc.sent[0].Body)
+	if err != nil {
+		t.Fatalf("Unframe: %v", err)
+	}
+	if want := "market.v1.MarketDataEvent:1"; env.PayloadSchemaRef != want {
+		t.Fatalf("payload_schema_ref = %q, want the caller's explicit %q", env.PayloadSchemaRef, want)
+	}
+}
