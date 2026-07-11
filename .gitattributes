@@ -3,3 +3,11 @@
 # the SEC-02e self-test scripts. Force LF regardless of core.autocrlf.
 *.sh text eol=lf
 kanz/.githooks/* text eol=lf
+
+# Go and proto sources MUST keep LF for the same class of reason: gofmt emits LF,
+# so a CRLF checkout (core.autocrlf=true on Windows) makes `gofmt -l` flag every
+# file and breaks `make fmt` / `make lint` — the difference is line endings, not
+# formatting. The repo already stores LF; this pins the working tree to match so
+# a Windows/JetBrains clone lints clean. See kanz/docs/jetbrains-setup.md.
+*.go text eol=lf
+*.proto text eol=lf

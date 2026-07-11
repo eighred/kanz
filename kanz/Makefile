@@ -7,6 +7,17 @@
 # failing the build (the EVT-15a generated-not-committed stance).
 export GOFLAGS := -mod=mod
 
+# Windows Application Control intermittently blocks freshly built test binaries
+# in %TEMP%, which makes `go test` fail at random with "Uygulama Denetimi ilkesi
+# bu dosyayı engelledi". Building them under a project-local dir is not blocked,
+# so every target that compiles a binary points GOTMPDIR here. Exported (not
+# per-target) so it holds for an ad-hoc `go test` run from this directory too.
+export GOTMPDIR := $(CURDIR)/.gotmp
+
+# The exchange connectors are compiled in behind build tags; the default build is
+# vendor-free. VENUE_TAGS is what the *-venues targets link.
+VENUE_TAGS := binance okx
+
 SCHEMAS_DIR := ../kanz-schemas
 PROTOC_GEN_GO_VERSION := v1.36.11
 PROTOC_GEN_GO_GRPC_VERSION := v1.5.1
@@ -47,9 +58,27 @@ release: ## Build stripped, trimpath production binaries into bin/ (TAGS="binanc
 	@mkdir -p bin
 	go build -trimpath -ldflags="$(GO_RELEASE_LDFLAGS)" -tags "$(TAGS)" -o bin/ ./services/...
 
+# NOTE: -race requires cgo (CGO_ENABLED=1). On a box without a C toolchain it
+# fails with "-race requires cgo"; run `make test` there and `make test-race`
+# where cgo is available (CI).
 .PHONY: test
-test: ## Run the test suite (race detector)
+test: | $(GOTMPDIR) ## Run the test suite (default, vendor-free build)
+	go test ./...
+
+.PHONY: test-race
+test-race: | $(GOTMPDIR) ## Run the test suite with the race detector (needs CGO_ENABLED=1)
 	go test -race ./...
+
+.PHONY: test-venues
+test-venues: | $(GOTMPDIR) ## Run the test suite with the exchange connectors linked
+	go test -tags "$(VENUE_TAGS)" ./...
+
+.PHONY: build-venues
+build-venues: ## Build every package with the exchange connectors linked
+	go build -tags "$(VENUE_TAGS)" ./...
+
+$(GOTMPDIR):
+	@mkdir -p $(GOTMPDIR)
 
 .PHONY: vet
 vet: ## go vet

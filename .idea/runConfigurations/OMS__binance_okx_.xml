@@ -1,0 +1,16 @@
+<component name="ProjectRunConfigurationManager">
+  <configuration default="false" name="OMS (binance okx)" type="GoApplicationRunConfiguration" factoryName="Go Application">
+    <module name="eighred-kanz" />
+    <working_directory value="$PROJECT_DIR$/kanz" />
+    <go_parameters value="-tags &quot;binance okx&quot;" />
+    <envs>
+      <env name="GOFLAGS" value="-mod=mod" />
+      <env name="GOTMPDIR" value="$PROJECT_DIR$/kanz/.gotmp" />
+    </envs>
+    <kind value="PACKAGE" />
+    <package value="github.com/kanz-eng/kanz/services/oms/cmd/oms" />
+    <directory value="$PROJECT_DIR$/kanz" />
+    <filePath value="$PROJECT_DIR$/kanz" />
+    <method v="2" />
+  </configuration>
+</component>

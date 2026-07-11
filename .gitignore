@@ -1,0 +1,15 @@
+# JetBrains IDEs (GoLand / IntelliJ IDEA).
+# User-specific IDE state is ignored; the shared run configurations under
+# .idea/runConfigurations/ ARE tracked, so everyone gets the correct build tags
+# and GOTMPDIR without rediscovering them. See kanz/docs/jetbrains-setup.md.
+.idea/*
+!.idea/runConfigurations/
+*.iml
+
+# Project-local Go temp dir. Windows Application Control intermittently blocks
+# freshly built test binaries in %TEMP%, so the Makefile and the shared run
+# configurations point GOTMPDIR here instead.
+.gotmp/
+
+# Stripped release binaries (`make release`).
+bin/
