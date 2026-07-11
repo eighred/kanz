@@ -49,6 +49,8 @@ type Config struct {
 	DepthLimit int
 	// DNSTTL is the DNS-bypass cache TTL on the live exchange path.
 	DNSTTL time.Duration
+	// TradeRetention bounds the in-memory trade tape (the volume-delta window).
+	TradeRetention time.Duration
 }
 
 // Load reads and validates the environment.
@@ -72,8 +74,9 @@ func Load() Config {
 		OKXWSURL:   envOr("MARKET_INGEST_OKX_WS_URL", "wss://ws.okx.com:8443/ws/v5/public"),
 		OKXSymbols: parseSymbolMap(os.Getenv("MARKET_INGEST_OKX_SYMBOLS")),
 
-		DepthLimit: parseInt(os.Getenv("MARKET_INGEST_DEPTH_LIMIT"), 1000),
-		DNSTTL:     parseDuration(os.Getenv("MARKET_INGEST_DNS_TTL"), 5*time.Minute),
+		DepthLimit:     parseInt(os.Getenv("MARKET_INGEST_DEPTH_LIMIT"), 1000),
+		DNSTTL:         parseDuration(os.Getenv("MARKET_INGEST_DNS_TTL"), 5*time.Minute),
+		TradeRetention: parseDuration(os.Getenv("MARKET_INGEST_TRADE_RETENTION"), time.Minute),
 	}
 }
 

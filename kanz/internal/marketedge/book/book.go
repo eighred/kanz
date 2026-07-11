@@ -22,7 +22,7 @@ import (
 	marketpb "github.com/kanz-eng/kanz-schemas-go/market/v1"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
-	"github.com/kanz-eng/kanz/services/market-ingest/internal/dec"
+	"github.com/kanz-eng/kanz/internal/dec"
 )
 
 // ErrSequenceGap is returned by ApplyDelta when a delta does not chain onto the
@@ -116,6 +116,26 @@ func (b *Book) Snapshot(depth int) *marketpb.OrderBookSnapshot {
 func (b *Book) BestBid() *big.Rat { b.mu.RLock(); defer b.mu.RUnlock(); return best(b.bids, true) }
 func (b *Book) BestAsk() *big.Rat { b.mu.RLock(); defer b.mu.RUnlock(); return best(b.asks, false) }
 
+// Level is one aggregated L2 level — the exact, proto-free read type the alpha
+// read-seam is built from. The engines run on the hot path, so they read the book
+// directly as rationals rather than paying a proto marshal per tick.
+type Level struct {
+	Price *big.Rat
+	Size  *big.Rat
+}
+
+// Top returns the best n levels per side (n <= 0 ⇒ the full book): bids by
+// decreasing price, asks by increasing price. The returned rationals are copies,
+// so a caller can hold or mutate them while the fold goroutine keeps writing.
+func (b *Book) Top(n int) (bids, asks []Level) {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	return topLevels(b.bids, true, n), topLevels(b.asks, false, n)
+}
+
+// MIC reports the venue this book is of.
+func (b *Book) MIC() string { return b.mic }
+
 // --- helpers ---
 
 func levelsToMap(levels []*marketpb.PriceLevel) map[string]*big.Rat {
@@ -164,6 +184,28 @@ func sortedLevels(side map[string]*big.Rat, descending bool, depth int) []*marke
 	out := make([]*marketpb.PriceLevel, len(all))
 	for i, l := range all {
 		out[i] = &marketpb.PriceLevel{Price: dec.ToProto(l.price), Size: dec.ToProto(l.size)}
+	}
+	return out
+}
+
+// topLevels sorts one side and truncates to n. Callers hold the read lock.
+func topLevels(side map[string]*big.Rat, descending bool, n int) []Level {
+	out := make([]Level, 0, len(side))
+	for k, size := range side {
+		p, ok := new(big.Rat).SetString(k)
+		if !ok {
+			continue
+		}
+		out = append(out, Level{Price: p, Size: new(big.Rat).Set(size)})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if descending {
+			return out[i].Price.Cmp(out[j].Price) > 0
+		}
+		return out[i].Price.Cmp(out[j].Price) < 0
+	})
+	if n > 0 && len(out) > n {
+		out = out[:n]
 	}
 	return out
 }

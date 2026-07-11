@@ -4,7 +4,7 @@ import (
 	"math/big"
 	"testing"
 
-	"github.com/kanz-eng/kanz/services/accounting/internal/dec"
+	"github.com/kanz-eng/kanz/internal/dec"
 	"github.com/kanz-eng/kanz/services/accounting/internal/ledger"
 )
 

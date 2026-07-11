@@ -3,34 +3,32 @@ package main
 import (
 	"log/slog"
 
+	"github.com/kanz-eng/kanz/pkg/alpha"
 	"github.com/kanz-eng/kanz/services/market-ingest/internal/config"
-	"github.com/kanz-eng/kanz/services/market-ingest/internal/depth"
 )
 
-// venueSource is one instrument's depth feed on one venue. Depth is per-venue and
-// books are never merged across venues (see market.v1.OrderBookSnapshot), so a
-// build carrying both exchange tags tracks TWO books for the same instrument —
-// one per venue. That is exactly the shape the cross-venue engines read.
-type venueSource struct {
-	mic string
-	src depth.DepthSource
-}
-
-// depthSources is the market-ingest composition root's feed selector, mirroring
-// the OMS venue aggregator: it collects whatever exchange depth feeds are
-// compiled in — Binance under -tags binance, OKX under -tags okx, each
-// contributed by a build-tag-split helper — and falls back to the vendor-free
-// deterministic simulator when none are configured, so the default binary and dev
-// builds still run end to end without a network.
-func depthSources(cfg config.Config, instrument string, logger *slog.Logger) []venueSource {
-	var out []venueSource
-	out = append(out, binanceDepthSources(cfg, instrument, logger)...)
-	out = append(out, okxDepthSources(cfg, instrument, logger)...)
-	if len(out) == 0 {
-		return []venueSource{{
-			mic: "SIM",
-			src: depth.NewSimSource(depth.SimConfig{InstrumentID: instrument, Symbol: instrument}),
-		}}
+// feeds is the market-ingest composition root's feed selector, mirroring the OMS
+// venue aggregator: it collects whatever exchange feeds are compiled in — Binance
+// under -tags binance, OKX under -tags okx, each contributed by a
+// build-tag-split helper — and falls back to the vendor-free deterministic
+// simulator when none are configured, so the default binary and dev builds still
+// run end to end without a network.
+//
+// One feed per (instrument, venue): depth is per-venue and books are never merged
+// across venues, so a build carrying both exchange tags folds TWO independent
+// books for the same instrument. That is exactly the shape a cross-venue engine
+// reads — it compares the venues itself.
+func feeds(cfg config.Config, logger *slog.Logger) []alpha.Feed {
+	var out []alpha.Feed
+	for _, instrument := range cfg.Instruments {
+		out = append(out, binanceFeeds(cfg, instrument, logger)...)
+		out = append(out, okxFeeds(cfg, instrument, logger)...)
+	}
+	if len(out) == 0 && len(cfg.Instruments) > 0 {
+		logger.Info("no exchange feeds configured — folding the deterministic simulator")
+		for _, instrument := range cfg.Instruments {
+			out = append(out, alpha.SimFeed(instrument))
+		}
 	}
 	return out
 }

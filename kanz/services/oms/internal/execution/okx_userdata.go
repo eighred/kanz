@@ -21,8 +21,8 @@ import (
 
 	"github.com/coder/websocket"
 
+	"github.com/kanz-eng/kanz/internal/dec"
 	"github.com/kanz-eng/kanz/pkg/bus"
-	"github.com/kanz-eng/kanz/services/oms/internal/dec"
 )
 
 // okxOrdersMsg is a private "orders"-channel push. Each data element is an order

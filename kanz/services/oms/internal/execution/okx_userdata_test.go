@@ -16,8 +16,8 @@ import (
 
 	"github.com/coder/websocket"
 
+	"github.com/kanz-eng/kanz/internal/dec"
 	"github.com/kanz-eng/kanz/pkg/bus"
-	"github.com/kanz-eng/kanz/services/oms/internal/dec"
 )
 
 // --- okx-tagged test seams (mirror the binance-tagged helpers) ---

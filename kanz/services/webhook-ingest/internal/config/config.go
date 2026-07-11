@@ -17,7 +17,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/kanz-eng/kanz/services/webhook-ingest/internal/dec"
+	"github.com/kanz-eng/kanz/internal/dec"
 	"github.com/kanz-eng/kanz/services/webhook-ingest/internal/ingest"
 )
 

@@ -14,8 +14,8 @@ import (
 	orderpb "github.com/kanz-eng/kanz-schemas-go/order/v1"
 	signalpb "github.com/kanz-eng/kanz-schemas-go/signal/v1"
 
+	"github.com/kanz-eng/kanz/internal/dec"
 	"github.com/kanz-eng/kanz/pkg/bus"
-	"github.com/kanz-eng/kanz/services/webhook-ingest/internal/dec"
 )
 
 const testSecret = "topsecret"

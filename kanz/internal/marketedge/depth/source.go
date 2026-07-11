@@ -16,7 +16,7 @@ import (
 	marketpb "github.com/kanz-eng/kanz-schemas-go/market/v1"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
-	"github.com/kanz-eng/kanz/services/market-ingest/internal/dec"
+	"github.com/kanz-eng/kanz/internal/dec"
 )
 
 // Update is one message from a depth feed: exactly one of Snapshot or Delta is

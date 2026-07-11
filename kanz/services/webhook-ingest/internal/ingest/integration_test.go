@@ -28,8 +28,8 @@ import (
 	orderpb "github.com/kanz-eng/kanz-schemas-go/order/v1"
 	"google.golang.org/protobuf/proto"
 
+	"github.com/kanz-eng/kanz/internal/dec"
 	"github.com/kanz-eng/kanz/pkg/bus"
-	"github.com/kanz-eng/kanz/services/webhook-ingest/internal/dec"
 )
 
 func TestIntegration_LoopOverNATS(t *testing.T) {

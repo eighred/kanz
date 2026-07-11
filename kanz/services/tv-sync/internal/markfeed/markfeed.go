@@ -15,7 +15,7 @@ import (
 	marketpb "github.com/kanz-eng/kanz-schemas-go/market/v1"
 	"google.golang.org/protobuf/proto"
 
-	"github.com/kanz-eng/kanz/services/tv-sync/internal/dec"
+	"github.com/kanz-eng/kanz/internal/dec"
 )
 
 // BusMarkSource holds the latest mark per instrument, folded from the price

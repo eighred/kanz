@@ -7,7 +7,7 @@ import (
 	commonpb "github.com/kanz-eng/kanz-schemas-go/common/v1"
 	marketpb "github.com/kanz-eng/kanz-schemas-go/market/v1"
 
-	"github.com/kanz-eng/kanz/services/market-ingest/internal/dec"
+	"github.com/kanz-eng/kanz/internal/dec"
 )
 
 func d(s string) *commonpb.Decimal {

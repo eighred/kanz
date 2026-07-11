@@ -18,8 +18,8 @@ import (
 	marketpb "github.com/kanz-eng/kanz-schemas-go/market/v1"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
+	"github.com/kanz-eng/kanz/internal/dec"
 	"github.com/kanz-eng/kanz/internal/exchange/netdial"
-	"github.com/kanz-eng/kanz/services/market-ingest/internal/dec"
 )
 
 // BinanceSource is the live Binance Spot L2 depth feed — a DepthSource over the

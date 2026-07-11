@@ -21,11 +21,10 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/kanz-eng/kanz/pkg/alpha"
 	"github.com/kanz-eng/kanz/pkg/bus"
 	"github.com/kanz-eng/kanz/pkg/observability"
-	"github.com/kanz-eng/kanz/services/market-ingest/internal/book"
 	"github.com/kanz-eng/kanz/services/market-ingest/internal/config"
-	"github.com/kanz-eng/kanz/services/market-ingest/internal/ingest"
 )
 
 func main() {
@@ -85,27 +84,37 @@ func main() {
 		logger.Warn("no instruments configured — idling (set MARKET_INGEST_INSTRUMENTS)")
 	}
 
-	// One book + engine per instrument PER VENUE. Depth is per-venue and books are
-	// never merged across venues, so a build carrying both exchange tags folds two
-	// independent books for the same instrument — the shape the cross-venue engines
-	// read. The default (vendor-free) build gets the deterministic simulator.
-	var wg sync.WaitGroup
-	for _, instrument := range cfg.Instruments {
-		for _, vs := range depthSources(cfg, instrument, logger) {
-			b := book.New(instrument, instrument, vs.mic)
-			eng := ingest.New(ingest.Config{
-				Book: b, Source: vs.src, Publisher: producer, Logger: logger,
-				SnapshotInterval: cfg.SnapshotInterval, SnapshotDepth: cfg.SnapshotDepth,
-			})
-			wg.Add(1)
-			go func(inst, mic string) {
-				defer wg.Done()
-				if err := eng.Run(ctx); err != nil {
-					logger.Error("depth engine stopped", "instrument", inst, "venue", mic, "err", err)
-				}
-			}(instrument, vs.mic)
-		}
+	// The alpha Runner owns the edge: it folds each feed's depth into an in-memory
+	// book and its trades into a tape (both off the bus), publishes the bounded
+	// periodic snapshots, and ticks whatever engines are registered.
+	//
+	// THIS binary registers NONE. It is the open edge: it folds, it snapshots, and
+	// it decides nothing. The proprietary engines live in the restricted layer,
+	// which imports pkg/alpha and runs this same Runner with its engines supplied —
+	// so the code that touches the market is identical either way, and only the
+	// decision-making differs.
+	runner, err := alpha.New(alpha.Config{
+		Feeds:            feeds(cfg, logger),
+		Publisher:        producer,
+		TradeRetention:   cfg.TradeRetention,
+		SnapshotInterval: cfg.SnapshotInterval,
+		SnapshotDepth:    cfg.SnapshotDepth,
+		Logger:           logger,
+	})
+	if err != nil {
+		logger.Error("alpha runner init failed", "err", err)
+		os.Exit(2)
 	}
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		if err := runner.Run(ctx); err != nil {
+			logger.Error("market edge stopped", "err", err)
+			stop()
+		}
+	}()
 	ready.set(true)
 
 	<-ctx.Done()

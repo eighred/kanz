@@ -22,7 +22,7 @@ import (
 	orderpb "github.com/kanz-eng/kanz-schemas-go/order/v1"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
-	"github.com/kanz-eng/kanz/services/oms/internal/dec"
+	"github.com/kanz-eng/kanz/internal/dec"
 )
 
 type key struct{ portfolio, instrument string }

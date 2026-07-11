@@ -10,7 +10,7 @@ import (
 
 	marketpb "github.com/kanz-eng/kanz-schemas-go/market/v1"
 
-	"github.com/kanz-eng/kanz/services/oms/internal/dec"
+	"github.com/kanz-eng/kanz/internal/dec"
 )
 
 // The ticker feed polls the last price and publishes a market.v1.MarketDataEvent
