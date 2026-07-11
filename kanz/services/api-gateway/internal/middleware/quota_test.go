@@ -71,11 +71,14 @@ func TestQuotaAdmissionConcurrency(t *testing.T) {
 	}
 }
 
-type fakeObs struct{ rateLimited, admission int; inflight float64 }
+type fakeObs struct {
+	rateLimited, admission int
+	inflight               float64
+}
 
-func (f *fakeObs) RateLimited(string)              { f.rateLimited++ }
-func (f *fakeObs) AdmissionRejected(string)        { f.admission++ }
-func (f *fakeObs) InFlight(_ string, d float64)    { f.inflight += d }
+func (f *fakeObs) RateLimited(string)           { f.rateLimited++ }
+func (f *fakeObs) AdmissionRejected(string)     { f.admission++ }
+func (f *fakeObs) InFlight(_ string, d float64) { f.inflight += d }
 
 func TestQuotaObserver(t *testing.T) {
 	obs := &fakeObs{}

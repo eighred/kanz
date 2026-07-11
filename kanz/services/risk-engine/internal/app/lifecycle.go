@@ -23,19 +23,19 @@ const DefaultShutdownTimeout = 20 * time.Second
 //
 // # Why this order
 //
-// 1. Readiness off first so the load balancer/k8s endpoint controller
-//    pulls the pod from rotation before anything is torn down — in-flight
-//    work finishes, but no NEW external traffic arrives.
-// 2. Stop consumers (cancel the ingest ctx). bus.Consumer dispatches one
-//    delivery at a time synchronously, so a returning Subscribe means the
-//    in-flight apply already completed — that is the "drain applies" step.
-// 3. Drain recomputes: with no more applies arriving, flush the debounced
-//    work so the LAST settled state is published (not dropped). The
-//    Recomputer's baseCtx must outlive this, so it is constructed with an
-//    app-scoped context, not the signal context.
-// 4. Checkpoint durable state (PERS-01 seam; nil until that lands).
-// 5. Close transports last so the publisher stays usable through step 3
-//    and Kafka batches flush on close.
+//  1. Readiness off first so the load balancer/k8s endpoint controller
+//     pulls the pod from rotation before anything is torn down — in-flight
+//     work finishes, but no NEW external traffic arrives.
+//  2. Stop consumers (cancel the ingest ctx). bus.Consumer dispatches one
+//     delivery at a time synchronously, so a returning Subscribe means the
+//     in-flight apply already completed — that is the "drain applies" step.
+//  3. Drain recomputes: with no more applies arriving, flush the debounced
+//     work so the LAST settled state is published (not dropped). The
+//     Recomputer's baseCtx must outlive this, so it is constructed with an
+//     app-scoped context, not the signal context.
+//  4. Checkpoint durable state (PERS-01 seam; nil until that lands).
+//  5. Close transports last so the publisher stays usable through step 3
+//     and Kafka batches flush on close.
 type App struct {
 	Readiness  *server.Readiness
 	Ingest     *Ingest

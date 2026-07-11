@@ -102,9 +102,11 @@ type FeatureValue struct {
 // constructors for the four FeatureValue kinds. Recommended call-
 // site form: `prediction.Scalar(1.5)` rather than building the
 // FeatureValue struct by hand.
-func Scalar(f float64) FeatureValue      { return FeatureValue{Kind: ValueKindScalar, Scalar: f} }
-func Ordinal(i int64) FeatureValue       { return FeatureValue{Kind: ValueKindOrdinal, Ordinal: i} }
-func Categorical(s string) FeatureValue  { return FeatureValue{Kind: ValueKindCategorical, Categorical: s} }
+func Scalar(f float64) FeatureValue { return FeatureValue{Kind: ValueKindScalar, Scalar: f} }
+func Ordinal(i int64) FeatureValue  { return FeatureValue{Kind: ValueKindOrdinal, Ordinal: i} }
+func Categorical(s string) FeatureValue {
+	return FeatureValue{Kind: ValueKindCategorical, Categorical: s}
+}
 func Vector(v []float64) FeatureValue {
 	cp := make([]float64, len(v))
 	copy(cp, v)

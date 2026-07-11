@@ -17,9 +17,9 @@ import (
 // Schema is the persisted form of a payload schema version.
 type Schema struct {
 	Ref         Ref
-	Descriptor  []byte    // opaque schema bytes (typically a FileDescriptorSet subset)
-	Fingerprint string    // sha256 hex of Descriptor; derived in Put when empty
-	SourceTag   string    // kanz-schemas release tag this version was ingested from
+	Descriptor  []byte // opaque schema bytes (typically a FileDescriptorSet subset)
+	Fingerprint string // sha256 hex of Descriptor; derived in Put when empty
+	SourceTag   string // kanz-schemas release tag this version was ingested from
 	CreatedAt   time.Time
 }
 
