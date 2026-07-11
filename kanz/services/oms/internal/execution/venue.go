@@ -31,6 +31,22 @@ type Venue interface {
 	Execute(ctx context.Context, st *orderpb.OrderState) ([]*orderpb.Fill, error)
 }
 
+// Closer is the optional Venue capability to withdraw a working order AT the
+// exchange. It is separate from Venue because not every venue has an order
+// resting externally to withdraw — SimVenue fills or rests in-process, so
+// cancelling it is purely a ledger operation. The OMS type-asserts: a venue that
+// implements Closer gets a real venue-side cancel dispatched before the ledger
+// records the cancellation; one that does not is a ledger-only cancel.
+//
+// CancelOrder addresses the order by st.order_id — our deterministic clOrdId /
+// origClientOrderId — the same identity the submit used, so a cancel is
+// idempotent at the venue. A nil error means the venue CONFIRMED the withdrawal;
+// any error (including an ambiguous timeout) leaves the close in flight and is
+// the healing watchdog's to resolve — never assume a cancel landed.
+type Closer interface {
+	CancelOrder(ctx context.Context, st *orderpb.OrderState) error
+}
+
 // PriceFunc resolves the execution price for an order. SimVenue uses it for
 // MARKET orders (which carry no limit); priced orders fill at their limit. A
 // nil result means "no price available" — the order does not fill.

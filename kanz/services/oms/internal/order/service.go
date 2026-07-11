@@ -31,13 +31,17 @@ type Service struct {
 	gate    compliance.Gate
 	emitter *Emitter
 	router  *execution.Router
+	closes  execution.CloseTracker
 	now     func() time.Time
 	logger  *slog.Logger
 }
 
 // NewService wires the handler. gate defaults to deny-nothing (compliance.AllowAll)
 // when nil; router may be nil to admit orders without working them (they rest).
-func NewService(store Store, emitter *Emitter, gate compliance.Gate, router *execution.Router, logger *slog.Logger) (*Service, error) {
+// closes is the in-flight-close registry the venue-close dispatch path writes to
+// and the reconcilers' healing watchdogs drain; nil disables venue-side cancel
+// dispatch (the cancel stays ledger-only).
+func NewService(store Store, emitter *Emitter, gate compliance.Gate, router *execution.Router, closes execution.CloseTracker, logger *slog.Logger) (*Service, error) {
 	if store == nil || emitter == nil {
 		return nil, errors.New("oms: store and emitter required")
 	}
@@ -47,7 +51,10 @@ func NewService(store Store, emitter *Emitter, gate compliance.Gate, router *exe
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &Service{store: store, gate: gate, emitter: emitter, router: router, now: time.Now, logger: logger}, nil
+	return &Service{
+		store: store, gate: gate, emitter: emitter, router: router, closes: closes,
+		now: time.Now, logger: logger,
+	}, nil
 }
 
 // Handle is the bus.EventHandler. It dispatches by the command subject/type.
@@ -188,6 +195,8 @@ func (s *Service) handleCancel(ctx context.Context, payload []byte) error {
 	if err != nil {
 		return err
 	}
+	// Validate the withdrawal against the aggregate first (the terminal guard), so
+	// a cancel the ledger refuses never reaches the exchange.
 	next, cancelledQty, cerr := Cancel(st, now)
 	if cerr != nil {
 		var re *RejectError
@@ -196,6 +205,12 @@ func (s *Service) handleCancel(ctx context.Context, payload []byte) error {
 		}
 		return cerr
 	}
+	// Withdraw the order AT the venue before recording the cancellation. Without
+	// this the ledger calls the order CANCELLED while it is still resting — and
+	// still fillable — on the exchange. st (not next) carries the pre-cancel
+	// quantities the close intent is built from.
+	s.closeAtVenue(ctx, st, now)
+
 	if err := s.store.Save(ctx, next); err != nil {
 		return err
 	}
@@ -204,6 +219,53 @@ func (s *Service) handleCancel(ctx context.Context, payload []byte) error {
 	}
 	return s.emitter.EmitOutcome(ctx, next.GetOrderId(),
 		commandpb.CommandOutcomeStatus_COMMAND_OUTCOME_STATUS_EXECUTED, "order cancelled", "", "", now)
+}
+
+// closeAtVenue withdraws a working order at the exchange holding it, recording
+// the close in the in-flight registry BEFORE it races the venue so the
+// reconciler's healing watchdog owns the acknowledgement window (the In-Flight
+// Certainty seam). A venue with nothing resting externally (SimVenue) does not
+// implement execution.Closer and is skipped — its cancel is ledger-only.
+//
+// It deliberately reports no error: the ledger must never freeze on a venue that
+// will not answer. A failed or hung cancel stays TRACKED and the watchdog
+// force-resolves it against venue truth. Returning it as a transient fault would
+// instead nack the command and redeliver a cancel the venue may already have
+// applied.
+func (s *Service) closeAtVenue(ctx context.Context, st *orderpb.OrderState, now time.Time) {
+	if s.router == nil || s.closes == nil {
+		return
+	}
+	venue, err := s.router.Route(st)
+	if err != nil {
+		return // nothing is working this order at a venue
+	}
+	closer, ok := venue.(execution.Closer)
+	if !ok {
+		return // no order resting at an exchange to withdraw
+	}
+
+	// Track BEFORE dispatch: if the call hangs, times out ambiguously, or the
+	// process dies mid-flight, the watchdog still sees the close. Tracking after
+	// the ack would cover none of those windows.
+	//
+	// A cancelled resting order carries NO residual exposure to sweep — it has not
+	// traded, so withdrawing it opens nothing (see execution.CloseIntent). Leaves
+	// and SweepSide stay zero and the watchdog force-clears without sweeping. If
+	// the cancel raced a fill, the watchdog's venue query returns the order
+	// terminal and StateHealed carries that truth: we learn the fill, we never
+	// invent an offsetting trade.
+	s.closes.Track(execution.CloseIntent{
+		OrderID:      st.GetOrderId(),
+		InstrumentID: st.GetInstrumentId(),
+		RequestedAt:  now,
+	})
+	if err := closer.CancelOrder(ctx, st); err != nil {
+		s.logger.Error("oms: venue cancel unconfirmed — left to the healing watchdog",
+			"order_id", st.GetOrderId(), "venue", venue.MIC(), "err", err)
+		return
+	}
+	s.closes.Resolve(st.GetOrderId()) // venue confirmed the withdrawal — nothing to heal
 }
 
 func (s *Service) handleAmend(ctx context.Context, payload []byte) error {

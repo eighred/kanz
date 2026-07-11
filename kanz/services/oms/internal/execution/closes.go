@@ -19,14 +19,28 @@ import (
 
 // CloseIntent records a close command the OMS dispatched to a venue but has not
 // yet seen confirmed terminal. The reconciler's healing loop watches it.
+//
+// SweepSide/Leaves describe the exposure that is left OPEN if the close does not
+// land, and the two kinds of close differ sharply here:
+//
+//   - Flattening an open position (an IOC market close): the residual is the part
+//     of the position the close failed to flatten, so SweepSide is the close's own
+//     side (SELL to flatten a long) and Leaves is its unfilled remainder. A stuck
+//     close leaves us still exposed ⇒ sweep it.
+//   - Cancelling a resting order: the order has not traded, so withdrawing it
+//     opens nothing. There is NO residual exposure and the sweep must be
+//     suppressed (SweepSide UNSPECIFIED / Leaves nil) — sweeping here would open
+//     a brand-new position in the opposite direction, the exact fabrication the
+//     healing seam exists to prevent. If the cancel raced a fill, the watchdog's
+//     venue query returns it terminal and StateHealed carries that truth instead.
 type CloseIntent struct {
 	// OrderID is the order being closed — the venue clOrdId used to query it.
 	OrderID string
 	// InstrumentID is the instrument, mapped to the venue symbol on query/sweep.
 	InstrumentID string
 	// SweepSide is the side an aggressive market order must take to flatten the
-	// residual exposure if the close is stuck (the opposite of the open position's
-	// side). Sweep is skipped when SweepSide is UNSPECIFIED.
+	// residual exposure if the close is stuck. Sweep is skipped when SweepSide is
+	// UNSPECIFIED — see the type doc for which closes carry one.
 	SweepSide orderpb.Side
 	// Leaves is the residual open quantity to sweep if the close is stuck. A
 	// non-positive value means there is nothing to sweep (just force-clear).
@@ -43,6 +57,20 @@ type PendingCloses interface {
 	DueCloses(now time.Time, timeout time.Duration) []CloseIntent
 	// Resolve removes a close once it has been healed (confirmed terminal or
 	// force-cleared) so it is not processed again.
+	Resolve(orderID string)
+}
+
+// CloseTracker is the WRITE half of the in-flight-close seam — the OMS's side.
+// It records a close the moment the OMS decides to dispatch it and drops it once
+// the venue confirms; PendingCloses is the reconciler's read half over the same
+// registry. Both are satisfied by *CloseRegistry.
+type CloseTracker interface {
+	// Track records a close about to be dispatched. It MUST be called before the
+	// venue call, never after: the window the healing seam exists to cover is
+	// precisely the one where the dispatch hangs, times out ambiguously, or the
+	// process dies mid-call. A close tracked after a successful ack covers nothing.
+	Track(ci CloseIntent)
+	// Resolve drops a close the venue confirmed terminal — nothing left to heal.
 	Resolve(orderID string)
 }
 
@@ -100,4 +128,7 @@ func (r *CloseRegistry) Len() int {
 	return len(r.pending)
 }
 
-var _ PendingCloses = (*CloseRegistry)(nil)
+var (
+	_ PendingCloses = (*CloseRegistry)(nil)
+	_ CloseTracker  = (*CloseRegistry)(nil)
+)

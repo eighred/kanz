@@ -195,6 +195,31 @@ func (c *binanceREST) queryOrder(ctx context.Context, symbol, origClientOrderID 
 	return c.signedOrderCall(ctx, http.MethodGet, "/api/v3/order", params, 2)
 }
 
+// cancelOrder withdraws a working order by its client order id (DELETE
+// /api/v3/order, weight 1). It addresses the order by the SAME deterministic
+// origClientOrderId the submit stamped, so a retried cancel resolves to the
+// original order instead of racing a second one. A nil error means Binance
+// confirmed the withdrawal; a -2011 ("Unknown order sent") means it is already
+// gone — the caller treats that as confirmed, not as a failure.
+func (c *binanceREST) cancelOrder(ctx context.Context, symbol, origClientOrderID string) (*orderResponse, error) {
+	params := url.Values{"symbol": {symbol}, "origClientOrderId": {origClientOrderID}}
+	return c.signedOrderCall(ctx, http.MethodDelete, "/api/v3/order", params, 1)
+}
+
+// sweepMarket places an aggressive MARKET order to flatten a residual exposure
+// left by a close that did not land (the healing sweep). clOrdID is the
+// deterministic "heal-"+orderID, so a retried sweep resolves to the original
+// sweep at the venue and NEVER double-flattens the position.
+func (c *binanceREST) sweepMarket(ctx context.Context, symbol, side, qty, clOrdID string) (*orderResponse, error) {
+	return c.newOrder(ctx, url.Values{
+		"symbol":           {symbol},
+		"side":             {side},
+		"type":             {"MARKET"},
+		"quantity":         {qty},
+		"newClientOrderId": {clOrdID},
+	})
+}
+
 // tickerPrice returns the last price for a symbol (GET /api/v3/ticker/price,
 // weight 1) — feeds the MarkSource seam for live unrealized P&L.
 func (c *binanceREST) tickerPrice(ctx context.Context, symbol string) (string, error) {

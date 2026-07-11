@@ -41,14 +41,21 @@ func (c *BinanceConnector) Start(ctx context.Context, deps WorkerDeps) {
 	if deps.Logger == nil {
 		deps.Logger = slog.Default()
 	}
-	// Reconciliation loop (secondary audit; emits correcting FACTs).
-	if deps.Expected != nil {
+	// Reconciliation loop (secondary audit; emits correcting FACTs) + the
+	// In-Flight Certainty healing watchdog, which runs on its own fast tick.
+	if deps.Expected != nil || deps.Closes != nil {
 		rec := newReconciler(ReconcilerConfig{
 			REST: c.rest, Symbols: StaticSymbolMap(c.settings.Symbols),
 			Expected: deps.Expected, Balances: deps.Balances, Pub: deps.Publisher,
+			Closes: deps.Closes, CloseTimeout: deps.CloseTimeout,
 			Venue: c.settings.MIC, Tenant: deps.Tenant,
 		})
-		go rec.Run(ctx, deps.ReconcileInterval)
+		if deps.Expected != nil {
+			go rec.Run(ctx, deps.ReconcileInterval)
+		}
+		if deps.Closes != nil {
+			go rec.RunHealing(ctx, deps.HealInterval)
+		}
 	}
 	// User-data stream ingester with resilient reconnect.
 	if deps.Lookup != nil {

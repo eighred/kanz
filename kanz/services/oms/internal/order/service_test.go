@@ -64,7 +64,7 @@ func newService(t *testing.T, fb *fakeBus, gate compliance.Gate) (*Service, *Mem
 	t.Helper()
 	store := NewMemoryStore()
 	router := execution.NewRouter(execution.NewSimVenue("XSIM"))
-	svc, err := NewService(store, NewEmitter(fb), gate, router, nil)
+	svc, err := NewService(store, NewEmitter(fb), gate, router, nil, nil)
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
 	}
@@ -147,7 +147,7 @@ func TestService_ComplianceBreach_RejectsBeforeAccept(t *testing.T) {
 func TestService_CancelUnknownOrder(t *testing.T) {
 	fb := &fakeBus{}
 	store := NewMemoryStore()
-	svc, err := NewService(store, NewEmitter(fb), nil, nil, nil)
+	svc, err := NewService(store, NewEmitter(fb), nil, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
 	}

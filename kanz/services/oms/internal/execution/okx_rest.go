@@ -156,6 +156,35 @@ func (c *okxREST) sweepMarket(ctx context.Context, instID, side, sz, clOrdID str
 	})
 }
 
+// cancelOrder withdraws a working order by clOrdId (POST
+// /api/v5/trade/cancel-order, weight 1). It addresses the order by the SAME
+// deterministic clOrdId the submit stamped, so a retried cancel resolves to the
+// original order rather than racing a second one.
+func (c *okxREST) cancelOrder(ctx context.Context, instID, clOrdID string) (*okxPlaceData, error) {
+	if !c.bucket.allow(1) {
+		c.onThrottle()
+		return nil, ErrRateLimited
+	}
+	raw, err := c.signedRequest(ctx, http.MethodPost, "/api/v5/trade/cancel-order", map[string]string{
+		"instId": instID, "clOrdId": clOrdID,
+	})
+	if err != nil {
+		return nil, err
+	}
+	var out okxPlaceResp
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return nil, fmt.Errorf("okx: decode cancel response: %w", err)
+	}
+	if len(out.Data) == 0 {
+		return nil, &APIError{Code: atoiSafe(out.Code), Msg: out.Msg}
+	}
+	d := out.Data[0]
+	if out.Code != "0" || d.SCode != "0" {
+		return &d, &APIError{Code: atoiSafe(d.SCode), Msg: d.SMsg}
+	}
+	return &d, nil
+}
+
 // okxBalances is GET /api/v5/account/balance — cash balances for reconciliation.
 type okxBalances struct {
 	Code string `json:"code"`

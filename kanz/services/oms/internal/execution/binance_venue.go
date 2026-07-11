@@ -106,6 +106,36 @@ func (v *BinanceVenue) Execute(ctx context.Context, st *orderpb.OrderState) ([]*
 	return v.fills(resp, st), nil
 }
 
+// binanceUnknownOrder is Binance's -2011 "Unknown order sent". For a CANCEL this
+// is a confirmed withdrawal, not a failure: the order is not working at the venue
+// (already filled, expired, or withdrawn by an earlier attempt), so the close has
+// landed and nothing is left in flight. Surfacing it as an error would send an
+// already-closed order to the healing watchdog.
+const binanceUnknownOrder = -2011
+
+// CancelOrder withdraws a working order at Binance, satisfying the Closer seam.
+// It addresses the order by our deterministic clientOrderId, so a retried cancel
+// resolves to the original order. Any other error is surfaced verbatim — an
+// ambiguous timeout must NEVER be read as a successful cancel; the OMS leaves the
+// close in flight and the healing watchdog resolves it against venue truth.
+func (v *BinanceVenue) CancelOrder(ctx context.Context, st *orderpb.OrderState) error {
+	if st == nil {
+		return errors.New("binance: nil order state")
+	}
+	symbol, ok := v.symbols.Symbol(st.GetInstrumentId())
+	if !ok {
+		return fmt.Errorf("binance: no symbol mapping for %s", st.GetInstrumentId())
+	}
+	_, err := v.rest.cancelOrder(ctx, symbol, st.GetOrderId())
+	var apiErr *APIError
+	if errors.As(err, &apiErr) && apiErr.Code == binanceUnknownOrder {
+		return nil
+	}
+	return err
+}
+
+var _ Closer = (*BinanceVenue)(nil)
+
 // orderParams maps an OrderState onto Binance Spot new-order parameters,
 // stamping newClientOrderId = order_id.
 func orderParams(st *orderpb.OrderState, symbol string) (url.Values, error) {

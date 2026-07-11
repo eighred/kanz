@@ -54,6 +54,42 @@ func (v *OKXVenue) MIC() string { return v.mic }
 
 var _ Venue = (*OKXVenue)(nil)
 
+// OKX cancel sCodes that mean "the order is not working at the venue": it never
+// existed here, was already cancelled, or already completed. For a CANCEL each is
+// a CONFIRMED withdrawal, not a failure — the close has landed and nothing is in
+// flight. Surfacing them as errors would send an already-closed order to the
+// healing watchdog.
+const (
+	okxCancelOrderNotExist = 51400
+	okxCancelAlreadyDone   = 51401
+	okxCancelCompleted     = 51402
+)
+
+// CancelOrder withdraws a working order at OKX, satisfying the Closer seam. Any
+// other error is surfaced verbatim — an ambiguous timeout must NEVER be read as a
+// successful cancel; the OMS leaves the close in flight and the healing watchdog
+// resolves it against venue truth.
+func (v *OKXVenue) CancelOrder(ctx context.Context, st *orderpb.OrderState) error {
+	if st == nil {
+		return errors.New("okx: nil order state")
+	}
+	instID, ok := v.symbols.Symbol(st.GetInstrumentId())
+	if !ok {
+		return fmt.Errorf("okx: no symbol mapping for %s", st.GetInstrumentId())
+	}
+	_, err := v.rest.cancelOrder(ctx, instID, st.GetOrderId())
+	var apiErr *APIError
+	if errors.As(err, &apiErr) {
+		switch apiErr.Code {
+		case okxCancelOrderNotExist, okxCancelAlreadyDone, okxCancelCompleted:
+			return nil
+		}
+	}
+	return err
+}
+
+var _ Closer = (*OKXVenue)(nil)
+
 // Execute places st on OKX and returns the fills observed by an immediate query.
 func (v *OKXVenue) Execute(ctx context.Context, st *orderpb.OrderState) ([]*orderpb.Fill, error) {
 	if st == nil {

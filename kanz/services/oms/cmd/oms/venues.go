@@ -13,6 +13,14 @@ import (
 	"github.com/kanz-eng/kanz/services/oms/internal/order"
 )
 
+// closeRegistry is the shared in-flight-close registry — the In-Flight Certainty
+// seam's single instance for the process. It is deliberately UNTAGGED and shared:
+// the OMS order service Tracks a close here the moment it dispatches a venue
+// cancel (the writer), and whichever exchange reconcilers are compiled in drain
+// it from their healing watchdogs (the readers). One registry across Binance and
+// OKX — the seam is shared, never duplicated per venue.
+var closeRegistry = execution.NewCloseRegistry()
+
 // configuredVenues is the multi-venue allocation matrix's composition root. It
 // aggregates whatever exchange venues are compiled in — Binance under
 // -tags binance, OKX under -tags okx (each contributed by a build-tag-split

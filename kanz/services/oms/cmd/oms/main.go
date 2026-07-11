@@ -134,7 +134,7 @@ func runConsumers(ctx context.Context, cfg config.Config, readiness *server.Read
 	// (configuredVenues is build-tag split, wired to the shared order store).
 	store := order.NewMemoryStore()
 	router := execution.NewRouter(configuredVenues(ctx, cfg, store, producer, logger)...)
-	svc, err := order.NewService(store, emitter, gate, router, logger)
+	svc, err := order.NewService(store, emitter, gate, router, closeRegistry, logger)
 	if err != nil {
 		return err
 	}

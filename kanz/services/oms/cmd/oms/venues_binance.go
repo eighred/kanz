@@ -38,8 +38,9 @@ func binanceVenues(ctx context.Context, cfg config.Config, adapter storeAdapter,
 	}, wsBase)
 	conn.Start(ctx, execution.WorkerDeps{
 		Publisher: producer, Lookup: adapter, Expected: adapter,
-		Tenant: os.Getenv("BINANCE_TENANT"), Logger: logger,
+		Closes: closeRegistry, Tenant: os.Getenv("BINANCE_TENANT"), Logger: logger,
 	})
-	logger.Info("binance venue wired", "base_url", baseURL, "ws_base", wsBase)
+	logger.Info("binance venue wired", "base_url", baseURL, "ws_base", wsBase,
+		"heal_timeout", "1500ms")
 	return []execution.Venue{conn.Venue()}
 }

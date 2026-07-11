@@ -27,9 +27,14 @@ type fakeBinance struct {
 	sawAPIKey        bool
 	sawType          string
 
+	posts       int    // POST /api/v3/order count — a healing sweep is a POST
+	deletes     int    // DELETE /api/v3/order count — a venue cancel
+	sawDeleteCl string // origClientOrderId of the last cancel
+
 	newOrderStatus int    // HTTP status for POST /api/v3/order
 	newOrderBody   string // body for POST
 	queryBody      string // body for GET /api/v3/order
+	cancelBody     string // body for DELETE /api/v3/order
 	accountBody    string // body for GET /api/v3/account
 	tickerPrice    string // price for GET /api/v3/ticker/price
 }
@@ -42,14 +47,20 @@ func newFakeBinance(t *testing.T) *fakeBinance {
 		q := r.URL.Query()
 		f.sawSignature = q.Get("signature") != ""
 		f.sawAPIKey = r.Header.Get("X-MBX-APIKEY") != ""
-		if r.Method == http.MethodPost {
+		switch r.Method {
+		case http.MethodPost:
+			f.posts++
 			f.sawClientOrderID = q.Get("newClientOrderId")
 			f.sawType = q.Get("type")
 			w.WriteHeader(f.newOrderStatus)
 			_, _ = w.Write([]byte(f.newOrderBody))
-			return
+		case http.MethodDelete:
+			f.deletes++
+			f.sawDeleteCl = q.Get("origClientOrderId")
+			_, _ = w.Write([]byte(f.cancelBody))
+		default:
+			_, _ = w.Write([]byte(f.queryBody)) // GET: query-order
 		}
-		_, _ = w.Write([]byte(f.queryBody)) // GET: query-order
 	})
 	mux.HandleFunc("/api/v3/account", func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte(f.accountBody))
