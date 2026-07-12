@@ -20,17 +20,23 @@ data:
     # met a real spine and found its subject unbound.
     NATS_REPLICAS="${NATS_REPLICAS:-3}"
 
+    # ensure_stream NAME SUBJECTS MAX_AGE [extra flags...]
+    #
+    # EVERY stream goes through this ONE function, including the compacted MANDATE
+    # stream below. A second, hand-rolled code path would be invisible to the
+    # build-time check that every subject the code names is carried by a stream
+    # (test/arch) — which is exactly the check that caught it when I wrote one.
     ensure_stream() {
-      name="$1"; subjects="$2"; max_age="$3"
+      name="$1"; subjects="$2"; max_age="$3"; shift 3
       if nats --server "$NATS_URL" stream info "$name" >/dev/null 2>&1; then
         echo "stream $name — updating"
         nats --server "$NATS_URL" stream edit "$name" --force \
-          --subjects="$subjects" --max-age="$max_age"
+          --subjects="$subjects" --max-age="$max_age" "$@"
       else
         echo "stream $name — creating"
         nats --server "$NATS_URL" stream add "$name" --defaults \
           --subjects="$subjects" --storage=file --retention=limits \
-          --replicas="$NATS_REPLICAS" --discard=old --dupe-window=2m --max-age="$max_age"
+          --replicas="$NATS_REPLICAS" --discard=old --dupe-window=2m --max-age="$max_age" "$@"
       fi
     }
 
@@ -74,8 +80,35 @@ data:
     # consumer down over a long weekend must not come back to find its inputs aged
     # out of the stream — that is a silently short ledger, and it looks like nothing.
     ensure_stream ACCOUNTING    "accounting.>"    168h
-    ensure_stream COMPLIANCE    "compliance.>"    168h
+    ensure_stream COMPLIANCE    "compliance.breach.>" 168h
     ensure_stream SETTLEMENT    "settlement.>"    168h
+
+    # THE MANDATE STREAM IS NOT A LOG. IT IS THE CURRENT STATE.
+    #
+    # A mandate is what GOVERNS a portfolio — the pre-trade gate in the OMS reads it
+    # on every order. The registry that holds it is in-memory and was filled by a
+    # durable consumer resuming at its last ack, so a RESTARTED OMS came back with an
+    # EMPTY registry and PASSED EVERY ORDER. The control did not fail; it DISARMED,
+    # silently, on every rolling update (EXEC-M13).
+    #
+    # So mandates get their own stream with a different shape:
+    #
+    #   --max-msgs-per-subject=1  keep exactly the mandate IN FORCE per portfolio
+    #                             (one subject per tenant/portfolio), so the stream IS
+    #                             the current state and a booting consumer arms itself
+    #                             in one read.
+    #   no --max-age              A MANDATE MUST NOT AGE OUT. On the 168h streams a
+    #                             mandate published nine days ago is deleted, and the
+    #                             next restart comes back ungoverned. Retention here is
+    #                             the control's memory.
+    #
+    # COMPLIANCE is narrowed to compliance.breach.> because two streams may not claim
+    # overlapping subjects — and a breach FACT is an event (append-only), while a
+    # mandate is state (compacted). They are different things and want different
+    # streams.
+    # 0 = NEVER AGE OUT (the CLI rejects -1 on the edit path); one message per subject
+    # = the mandate IN FORCE.
+    ensure_stream MANDATE       "compliance.mandate.>" 0 --max-msgs-per-subject=1
     # Dead-letter: poison events need investigation runway.
     ensure_stream DLQ           "dlq.>"           720h
 

@@ -39,6 +39,43 @@ func MandateConfigKey(tenantID, portfolioID string) string {
 	return MandateConfigKeyPrefix + tenantID + "/" + portfolioID
 }
 
+// SubjectMandateAll is the wildcard every mandate consumer subscribes to.
+const SubjectMandateAll = SubjectMandateChanged + ".>"
+
+// SubjectMandateFor is the subject ONE portfolio's mandate rides on.
+//
+// # A mandate is STATE, not an event, and its subject has to say so
+//
+// The comment above says the mandate stream "compacts to the latest mandate per
+// portfolio". It could not: every portfolio's mandate was published to ONE flat
+// subject, and JetStream compacts PER SUBJECT. So the stream was an append-only
+// log of changes with no way to ask "what governs portfolio P right now" other
+// than replaying all of history — which nothing did.
+//
+// What that cost: the mandate registry is in-memory and is filled by a durable
+// consumer, which resumes at its last ack. A RESTARTED OMS therefore came back with
+// an EMPTY registry and its PRE-TRADE COMPLIANCE GATE PASSED EVERY ORDER — the
+// control did not fail, it disarmed, silently, on every rolling update (EXEC-M13).
+//
+// One subject per (tenant, portfolio) makes the stream a compacted CURRENT-STATE
+// store: MaxMsgsPerSubject=1 keeps exactly the mandate in force, forever, and a
+// booting consumer replays DeliverLastPerSubject to arm itself with all of them.
+// State that a control depends on must be recoverable in one read, not reconstructed
+// from a history nobody keeps.
+func SubjectMandateFor(tenantID, portfolioID string) string {
+	return SubjectMandateChanged + "." + subjectToken(tenantID) + "." + subjectToken(portfolioID)
+}
+
+// subjectToken makes an id safe as a NATS subject token: `.` would split it into
+// two tokens and `*`/`>` are wildcards, so an id containing one would silently
+// widen or narrow what a consumer matches.
+func subjectToken(s string) string {
+	if s == "" {
+		return "_"
+	}
+	return strings.NewReplacer(".", "_", "*", "_", ">", "_", " ", "_").Replace(s)
+}
+
 // MarshalMandateValue renders a Mandate as the canonical serialized value stored
 // in ConfigChanged.new_value. protojson (not binary) keeps the audited value
 // human-readable and diffable, which an auditor of "what changed" wants.

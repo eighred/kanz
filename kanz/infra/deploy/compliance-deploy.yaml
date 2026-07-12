@@ -1,21 +1,20 @@
 ---
 # EXEC-M11 — the pre-trade mandate authority, which had no deployment.
 #
-# ⚠️ READ THIS BEFORE YOU RELY ON IT: TODAY IT ENFORCES NOTHING.
+# IT ENFORCES — BUT ONLY WHAT SOMEBODY PUT UNDER MANDATE (EXEC-M13).
 #
-#   compliance CONSUMES compliance.mandate.changed to build its mandate registry.
-#   So does the OMS. NOTHING ON THIS PLATFORM PUBLISHES IT. The publisher exists
-#   (services/compliance/internal/mandate/publisher.go) and is wired to no binary.
+#   A portfolio with no mandate is governed by nothing, and that is SILENT: the
+#   engine takes the "no mandate governs this portfolio" branch and returns nil. It
+#   is not an error, and it does not look like one.
 #
-#   The registry is therefore always EMPTY, and an empty registry does not fail
-#   loudly — the monitor takes the "no mandate governs this portfolio" branch and
-#   silently returns nil. A deployed compliance service with no mandate producer is
-#   a green pod that permits everything.
+#   So: `kanz-mandate` is the operator tool that puts a portfolio under mandate, and
+#   it is the ONLY producer. Until it is run for a portfolio, that portfolio's orders
+#   are unconstrained — by both this monitor and the OMS's pre-trade gate.
 #
-#   Deploying it is still right: the consumer must exist before the producer does,
-#   the breach path is delivered and tested, and a pod that is present and inert is
-#   honest in a way that an absent service is not. But DO NOT report compliance as
-#   "enforcing" until a mandate producer lands (board: EXEC-M12).
+#   (Until EXEC-M13 there was no producer AT ALL: the publisher sat in a package no
+#   other binary could import, every registry on the platform was permanently empty,
+#   and two controls — one of them on the capital path — reported healthy while
+#   permitting everything.)
 #
 # THE REPLICA INVARIANT: 1, AND IT IS A CORRECTNESS BOUND.
 #
@@ -32,11 +31,12 @@
 #
 #   Recreate, not RollingUpdate: an overlap of two pods is the same defect.
 #
-# COLD-START DISARM — flagged, not hidden. The mandate durable persists across
-# restarts and resumes at its last ack, so a restarted pod REPLAYS NOTHING and comes
-# back with an empty registry. A rolling restart therefore silently disarms
-# enforcement even once a producer exists. That needs a replay-from-start or a
-# snapshot before this service can be trusted as a control (board: EXEC-M12).
+# COLD-START — FIXED (EXEC-M13). The mandate registry used to be fed by a durable
+# consumer that resumes at its last ack, so a restarted pod replayed NOTHING and came
+# back with an empty registry: a rolling restart silently DISARMED enforcement. It now
+# arms by BROADCAST over the compacted MANDATE stream (one subject per portfolio,
+# DeliverLastPerSubject), so a pod that boots — today or next year — comes up holding
+# the mandate in force for every portfolio.
 apiVersion: v1
 kind: ServiceAccount
 metadata:

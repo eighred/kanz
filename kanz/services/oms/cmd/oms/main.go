@@ -164,8 +164,18 @@ func runConsumers(ctx context.Context, cfg config.Config, readiness *server.Read
 	for _, s := range cfg.FillSubjects() {
 		subs = append(subs, sub{s, projector.Handle})
 	}
-	// Feed the pre-trade gate's mandate registry from the shared mandate stream.
-	subs = append(subs, sub{comp.SubjectMandateChanged, mandateConsumer.Handle})
+	// THE PRE-TRADE GATE'S MANDATE REGISTRY — BROADCAST, NOT A WORK QUEUE.
+	//
+	// This fed from a durable CONSUMER GROUP, which resumes at its last ack. So a
+	// RESTARTED OMS came back with an EMPTY registry and its pre-trade compliance
+	// gate PASSED EVERY ORDER: the control did not fail, it DISARMED — silently, on
+	// every rolling update, with the pod reporting ready throughout (EXEC-M13).
+	//
+	// A broadcast subscription over the per-portfolio mandate subjects replays
+	// DeliverLastPerSubject, so this process boots holding the mandate IN FORCE for
+	// every portfolio. It is also a broadcast because a mandate must reach EVERY
+	// replica — a group would arm one OMS pod and leave the other ungoverned.
+	mandateSub := comp.SubjectMandateAll
 
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -189,6 +199,18 @@ func runConsumers(ctx context.Context, cfg config.Config, readiness *server.Read
 			}
 		}(s)
 	}
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		logger.Info("oms arming the pre-trade mandate registry", "subject", mandateSub)
+		err := consumer.SubscribeBroadcast(ctx, mandateSub, mandateConsumer.Handle)
+		if err != nil && !errors.Is(err, context.Canceled) {
+			once.Do(func() {
+				firstErr = err
+				cancel()
+			})
+		}
+	}()
 	readiness.Set(true)
 	wg.Wait()
 	readiness.Set(false)

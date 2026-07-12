@@ -127,7 +127,10 @@ func runConsumers(ctx context.Context, cfg config.Config, readiness *server.Read
 		subject string
 		handler bus.EventHandler
 	}
-	subs := []sub{{cfg.MandateSubject(), mandateConsumer.Handle}}
+	// The mandate registry arms by BROADCAST — see the OMS's comment. A durable group
+	// here meant a restarted compliance pod came back with an empty registry and
+	// silently governed nothing (EXEC-M13).
+	var subs []sub
 	for _, s := range cfg.MonitorSubjects() {
 		subs = append(subs, sub{s, mon.Handle})
 	}
@@ -140,6 +143,18 @@ func runConsumers(ctx context.Context, cfg config.Config, readiness *server.Read
 		once     sync.Once
 		firstErr error
 	)
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		logger.Info("compliance arming the mandate registry", "subject", comp.SubjectMandateAll)
+		err := consumer.SubscribeBroadcast(ctx, comp.SubjectMandateAll, mandateConsumer.Handle)
+		if err != nil && !errors.Is(err, context.Canceled) {
+			once.Do(func() {
+				firstErr = err
+				cancel()
+			})
+		}
+	}()
 	for _, s := range subs {
 		wg.Add(1)
 		go func(s sub) {
