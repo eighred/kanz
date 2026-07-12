@@ -108,6 +108,14 @@ spec:
           env:
             - name: NATS_URL
               value: "nats://nats:4222"
+            # The stream replica factor. 3 is the production posture and matches the
+            # 3-node NATS cluster. It is surfaced HERE, not buried in the script,
+            # because a broker with fewer nodes CANNOT bootstrap at 3 — nats-server
+            # refuses with "replicas > 1 not supported in non-clustered mode" and the
+            # Job fails outright, taking the whole spine with it. A single-node
+            # staging or dev cluster sets this to 1; nothing else changes.
+            - name: NATS_REPLICAS
+              value: "3"
           volumeMounts:
             - { name: scripts, mountPath: /scripts }
       volumes:

@@ -38,6 +38,8 @@ import (
 	"context"
 	"crypto/tls"
 	"errors"
+	"fmt"
+	"time"
 
 	"github.com/spiffe/go-spiffe/v2/bundle/x509bundle"
 	"github.com/spiffe/go-spiffe/v2/spiffeid"
@@ -73,18 +75,64 @@ type Source interface {
 	GetX509BundleForTrustDomain(td spiffeid.TrustDomain) (*x509bundle.Bundle, error)
 }
 
+// InitialSVIDTimeout bounds the wait for the FIRST SVID. It does not bound
+// rotation: go-spiffe's watcher runs on its own context.Background()-derived
+// context, so the deadline here applies only to the initial fetch.
+const InitialSVIDTimeout = 30 * time.Second
+
 // NewSource connects to the SPIFFE Workload API and returns an auto-rotating
 // X509 source. It blocks until the first SVID arrives, so a caller that gets a
 // Source already holds a usable identity. socket is the agent socket address
 // (the SEC-01a CSI mount, e.g. "unix:///run/spiffe/spire-agent.sock"); empty ⇒
 // go-spiffe reads the SPIFFE_ENDPOINT_SOCKET env var. The caller must Close the
 // returned source on shutdown.
+//
+// # It waits, but it does not wait forever
+//
+// This used to block on the CALLER'S context — which for every service on this
+// platform is the root context, cancelled only by SIGTERM. So a workload whose
+// SPIRE agent was not there simply STOPPED, silently, inside its own startup:
+//
+//	no error. no log line. no crash. no restart. Running, 0/1 Ready, forever.
+//
+// Found by deploying the OMS to a cluster with no SPIRE agent (EXEC-M10): the pod
+// emitted exactly one line — "oms listening" — and then nothing, for as long as it
+// was left alone. Nothing in the platform could tell an operator why, because the
+// process never got far enough to say anything. And this is NOT an exotic state: a
+// SPIRE agent DaemonSet that has not scheduled yet, an agent that crashed, a socket
+// that failed to mount — all produce it, on every SPIFFE-enabled service.
+//
+// So the initial fetch is bounded. On timeout the caller gets a real error naming
+// the socket, the service exits loudly, and the kubelet restarts it with backoff —
+// which is the correct shape for "a dependency is not up yet": visible, diagnosable,
+// and self-healing once SPIRE arrives. A pod that crash-loops with a clear reason is
+// strictly better than a pod that hangs with none.
 func NewSource(ctx context.Context, socket string) (*workloadapi.X509Source, error) {
 	var opts []workloadapi.X509SourceOption
 	if socket != "" {
 		opts = append(opts, workloadapi.WithClientOptions(workloadapi.WithAddr(socket)))
 	}
-	return workloadapi.NewX509Source(ctx, opts...)
+	// WithTimeout respects an earlier parent deadline, so a caller that wants a
+	// shorter wait still gets it.
+	ctx, cancel := context.WithTimeout(ctx, InitialSVIDTimeout)
+	defer cancel()
+
+	src, err := workloadapi.NewX509Source(ctx, opts...)
+	if err != nil {
+		return nil, fmt.Errorf("transport: no SVID from the SPIFFE workload API at %s within %s "+
+			"(is the SPIRE agent running, and is its socket mounted into this pod?): %w",
+			socketDesc(socket), InitialSVIDTimeout, err)
+	}
+	return src, nil
+}
+
+// socketDesc names the socket in an error, whether it was configured explicitly or
+// left to go-spiffe's env lookup.
+func socketDesc(socket string) string {
+	if socket == "" {
+		return "$SPIFFE_ENDPOINT_SOCKET"
+	}
+	return socket
 }
 
 // ServiceID builds the SPIFFE ID for a Kanz workload — the identity the SEC-01a
