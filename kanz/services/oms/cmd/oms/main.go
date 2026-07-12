@@ -17,6 +17,9 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
+
 	comp "github.com/kanz-eng/kanz/internal/compliance"
 	"github.com/kanz-eng/kanz/pkg/bus"
 	"github.com/kanz-eng/kanz/pkg/observability"
@@ -127,12 +130,16 @@ func runConsumers(ctx context.Context, cfg config.Config, readiness *server.Read
 	preTrade := comp.NewPreTradeGate(comp.NewEngine(nil), compliance.NewBookSource(book), mandateReg, nil, nil, logger)
 	gate := compliance.NewCOMP01Gate(preTrade, cfg.BaseCurrency)
 
-	// OMS-01b/c: order command handler over an in-memory store + a sim venue.
+	// OMS-01b/c: order command handler over the order store + a sim venue.
 	emitter := order.NewEmitter(producer)
 	// Venue set is composition-root-selected: SimVenue by default; Binance Spot +
 	// its user-data/reconciliation/ticker workers under -tags binance
 	// (configuredVenues is build-tag split, wired to the shared order store).
-	store := order.NewMemoryStore()
+	store, closeStore, err := openStore(ctx, cfg)
+	if err != nil {
+		return err
+	}
+	defer closeStore()
 	router := execution.NewRouter(configuredVenues(ctx, cfg, store, producer, logger)...)
 	svc, err := order.NewService(store, emitter, gate, router, closeRegistry, logger)
 	if err != nil {
@@ -184,6 +191,41 @@ func runConsumers(ctx context.Context, cfg config.Config, readiness *server.Read
 	wg.Wait()
 	readiness.Set(false)
 	return firstErr
+}
+
+// openStore selects the durable Postgres order store when a DSN is set
+// (EXEC-M7c), otherwise the in-memory store. Returns a close func that tears
+// down the pool (a no-op for the in-memory store). Both satisfy order.Store, so
+// the command handler and the venue adapters share one store either way.
+//
+// The choice is a SAFETY choice, not a persistence one. order.Store.Create is
+// the admission gate that decides which delivery of an order routes to a live
+// venue; MemoryStore enforces it with a mutex, so its guarantee stops at the
+// process boundary. Two replicas over two maps both admit the same order_id and
+// the fund trades twice. Postgres enforces it with a PRIMARY KEY, which holds
+// across replicas — so a multi-replica OMS requires OMS_DATABASE_URL.
+func openStore(ctx context.Context, cfg config.Config) (order.Store, func(), error) {
+	if cfg.DatabaseURL == "" {
+		return order.NewMemoryStore(), func() {}, nil
+	}
+	// MT-01d: every connection carries this deployment's tenant as the
+	// `app.tenant_id` GUC, so Postgres RLS scopes all order reads/writes to it
+	// (the authenticated-session-GUC pattern). A non-superuser DB role is
+	// required for FORCE RLS to apply.
+	poolCfg, err := pgxpool.ParseConfig(cfg.DatabaseURL)
+	if err != nil {
+		return nil, nil, err
+	}
+	tenant := cfg.Tenant
+	poolCfg.AfterConnect = func(ctx context.Context, conn *pgx.Conn) error {
+		_, err := conn.Exec(ctx, "SELECT set_config('app.tenant_id', $1, false)", tenant)
+		return err
+	}
+	pool, err := pgxpool.NewWithConfig(ctx, poolCfg)
+	if err != nil {
+		return nil, nil, err
+	}
+	return order.NewPostgres(pool), pool.Close, nil
 }
 
 // version is the service version stamped on telemetry. Hardcoded until the build

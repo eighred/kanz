@@ -1,6 +1,7 @@
 package config
 
 import (
+	"errors"
 	"log/slog"
 	"os"
 	"strings"
@@ -21,6 +22,16 @@ type Config struct {
 	NATSURL string
 	// ConsumerGroup is the durable group the command + fill consumers share.
 	ConsumerGroup string
+	// DatabaseURL is the durable order store (EXEC-M7c). Empty ⇒ the in-memory
+	// store, whose admission gate is a process-local mutex — correct for tests
+	// and a single replica ONLY. A multi-replica deployment MUST set this: two
+	// pods over two in-memory maps both admit the same order_id and both route
+	// it to the venue.
+	DatabaseURL string
+	// Tenant is the owning tenant of this OMS deployment, carried as the
+	// `app.tenant_id` GUC on every DB connection so Postgres RLS scopes the order
+	// store (MT-01d). Required whenever DatabaseURL is set — RLS is fail-closed.
+	Tenant string
 	// SimVenueMIC is the simulation execution venue's MIC (OMS-01c). Empty ⇒ a
 	// default sim venue; a deployment swaps in a real venue adapter.
 	SimVenueMIC string
@@ -40,16 +51,24 @@ func (Config) FillSubjects() []string {
 }
 
 func Load() (Config, error) {
-	return Config{
+	cfg := Config{
 		Listen:        envOr("OMS_LISTEN", ":8090"),
 		LogLevel:      parseLevel(envOr("OMS_LOG_LEVEL", "info")),
 		Source:        envOr("OMS_SOURCE", "oms"),
 		OTLPEndpoint:  os.Getenv("OMS_OTLP_ENDPOINT"),
 		NATSURL:       os.Getenv("OMS_NATS_URL"),
 		ConsumerGroup: envOr("OMS_CONSUMER_GROUP", "oms"),
+		DatabaseURL:   os.Getenv("OMS_DATABASE_URL"),
+		Tenant:        os.Getenv("OMS_TENANT"),
 		SimVenueMIC:   envOr("OMS_SIM_VENUE_MIC", "XSIM"),
 		BaseCurrency:  envOr("OMS_BASE_CURRENCY", "USD"),
-	}, nil
+	}
+	// Fail fast rather than fail silently: RLS is deny-by-default, so an unset
+	// tenant against a real database yields a store that reads back nothing.
+	if cfg.DatabaseURL != "" && cfg.Tenant == "" {
+		return Config{}, errors.New("oms: OMS_TENANT is required when OMS_DATABASE_URL is set (RLS scoping)")
+	}
+	return cfg, nil
 }
 
 func envOr(k, def string) string {
