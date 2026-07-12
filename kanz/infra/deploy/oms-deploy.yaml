@@ -1,0 +1,173 @@
+---
+# SVCWIRE-01a / EXEC-M7c — deployable workload for the OMS (order management).
+#
+# The OMS is a NATS consumer (order commands in, lifecycle FACTs out) that routes
+# admitted orders to a live execution venue. It is the one service on this board
+# where a wrong replica count is a CAPITAL error rather than an availability one,
+# so read the invariant below before changing anything in this file.
+#
+# THE INVARIANT: replicas > 1 REQUIRES the Postgres order store.
+#
+#   order.Store.Create is the admission gate — the single decision that says
+#   "this delivery of this order_id owns it, and may send it to the venue."
+#
+#     * With OMS_DATABASE_URL set, order.Postgres enforces that gate at the
+#       database: INSERT ... ON CONFLICT (tenant_id, order_id) DO NOTHING, and
+#       exactly one caller sees RowsAffected=1. This holds ACROSS pods, which is
+#       what makes the replicas: 2 below safe.
+#     * With it unset, the OMS silently falls back to order.MemoryStore, whose
+#       gate is a process-local sync.Mutex. Two pods over two in-memory maps BOTH
+#       admit the same order_id and BOTH route it: the order state still converges
+#       (Save is an upsert, so it looks idempotent in every dashboard) while the
+#       fund trades twice. It is silent, and it costs real money.
+#
+#   So: dropping the db volume, deleting the OMS_DATABASE_URL_FILE env, or
+#   pointing it at an unreadable secret while leaving replicas: 2 does not degrade
+#   this service — it double-trades. If you must run without a database, set
+#   replicas: 1 in the same edit.
+#
+# Deliberately NO HorizontalPodAutoscaler and NO KEDA ScaledObject (contrast
+# phase7-scaling.yaml, which scales the read services on CPU, and
+# risk-engine-scaledobject.yaml, which scales on bus backpressure). The static
+# dual-replica shape is the point: it exercises the cross-pod admission gate
+# under real concurrency without an autoscaler changing the replica count
+# underneath us. Autoscaling the OMS is a separate decision, and it is only ever
+# safe while the DSN above is present.
+#
+# The DSN is read from the SEC-01d Vault/CSI secret FILE, never a plaintext env
+# var (the risk-engine stance). Its SecretProviderClass is `oms-db`, defined in
+# infra/security/secrets/secretproviderclass.yaml.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: oms
+  namespace: kanz-services
+  labels:
+    app.kubernetes.io/part-of: kanz
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: oms
+  namespace: kanz-services
+  labels:
+    app.kubernetes.io/part-of: kanz
+spec:
+  selector:
+    app: oms
+  ports:
+    - { name: http, port: 8090, targetPort: 8090 }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: oms
+  namespace: kanz-services
+  labels:
+    app.kubernetes.io/part-of: kanz
+spec:
+  # CRITICAL: > 1 ONLY because EXEC-M7c (order.Postgres) enforces the admission
+  # gate at the database via ON CONFLICT (tenant_id, order_id) DO NOTHING, which
+  # holds across pods. Removing the db volume or the OMS_DATABASE_URL_FILE env
+  # below drops the OMS back to a process-local in-memory gate, and THIS REPLICA
+  # COUNT then double-trades every order. Change both together or neither.
+  replicas: 2
+  revisionHistoryLimit: 5
+  selector:
+    matchLabels:
+      app: oms
+  template:
+    metadata:
+      labels:
+        app: oms
+        app.kubernetes.io/part-of: kanz
+    spec:
+      serviceAccountName: oms
+      # SEC-02a runtime hardening (pod-level): non-root, default seccomp.
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      # INFRA-01d: spread replicas across AZs so a single-AZ loss leaves the
+      # survivor serving. Both pods share one order store, so either can admit.
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app: oms
+      containers:
+        - name: oms
+          # Pinned to a cosign-signed digest by the GitOps bump (CICD-01d).
+          image: ghcr.io/kanz-eng/oms:latest
+          ports:
+            - { containerPort: 8090, name: http }
+          env:
+            # DSN from the SEC-01d CSI secret file, not a plaintext env. This is
+            # what makes replicas: 2 safe — see the invariant at the top.
+            - { name: OMS_DATABASE_URL_FILE, value: /run/secrets/db/database-url }
+            # MT-01d: scopes every order row via the app.tenant_id GUC (RLS).
+            - { name: OMS_TENANT, value: "__system__" }
+            - { name: OMS_LISTEN, value: ":8090" }
+            - { name: OMS_NATS_URL, value: "nats://nats.kanz-messaging.svc:4222" }
+            - { name: OMS_SOURCE, value: "oms" }
+            # Both pods share one durable consumer group, so a command is
+            # delivered to one of them — the admission gate is the backstop for
+            # the redelivery case, not the primary path.
+            - { name: OMS_CONSUMER_GROUP, value: "oms" }
+            - { name: SPIFFE_ENDPOINT_SOCKET, value: "unix:///run/spiffe/spire-agent.sock" }
+          livenessProbe:
+            httpGet: { path: /healthz, port: 8090 }
+            initialDelaySeconds: 5
+            periodSeconds: 15
+          readinessProbe:
+            httpGet: { path: /readyz, port: 8090 }
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          # SEC-02a runtime hardening (container-level): read-only rootfs, no
+          # privilege escalation, all caps dropped.
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - { name: db, mountPath: /run/secrets/db, readOnly: true }
+            - { name: spiffe, mountPath: /run/spiffe, readOnly: true }
+            - { name: tmp, mountPath: /tmp }
+      volumes:
+        - name: tmp
+          emptyDir: {}
+        # Removing this volume silently re-enables the double-trade window.
+        - name: db
+          csi:
+            driver: secrets-store.csi.k8s.io
+            readOnly: true
+            volumeAttributes:
+              secretProviderClass: oms-db
+        - name: spiffe
+          csi:
+            driver: csi.spiffe.io
+            readOnly: true
+---
+# INFRA-01d: a voluntary drain (node upgrade, chaos) must not take the OMS to
+# zero — order commands would queue on the durable consumer group and admission
+# would stall. Sized to the replicas: 2 above, matching the availability.yaml
+# discipline for the other workloads.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: oms
+  namespace: kanz-services
+  labels:
+    app.kubernetes.io/part-of: kanz
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: oms

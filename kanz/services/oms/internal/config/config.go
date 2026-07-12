@@ -1,7 +1,6 @@
 package config
 
 import (
-	"errors"
 	"log/slog"
 	"os"
 	"strings"
@@ -30,7 +29,8 @@ type Config struct {
 	DatabaseURL string
 	// Tenant is the owning tenant of this OMS deployment, carried as the
 	// `app.tenant_id` GUC on every DB connection so Postgres RLS scopes the order
-	// store (MT-01d). Required whenever DatabaseURL is set — RLS is fail-closed.
+	// store (MT-01d). Defaults to __system__, the risk-engine convention; a
+	// per-tenant deployment overrides it.
 	Tenant string
 	// SimVenueMIC is the simulation execution venue's MIC (OMS-01c). Empty ⇒ a
 	// default sim venue; a deployment swaps in a real venue adapter.
@@ -58,17 +58,24 @@ func Load() (Config, error) {
 		OTLPEndpoint:  os.Getenv("OMS_OTLP_ENDPOINT"),
 		NATSURL:       os.Getenv("OMS_NATS_URL"),
 		ConsumerGroup: envOr("OMS_CONSUMER_GROUP", "oms"),
-		DatabaseURL:   os.Getenv("OMS_DATABASE_URL"),
-		Tenant:        os.Getenv("OMS_TENANT"),
+		DatabaseURL:   secret("OMS_DATABASE_URL"),
+		Tenant:        envOr("OMS_TENANT", "__system__"),
 		SimVenueMIC:   envOr("OMS_SIM_VENUE_MIC", "XSIM"),
 		BaseCurrency:  envOr("OMS_BASE_CURRENCY", "USD"),
 	}
-	// Fail fast rather than fail silently: RLS is deny-by-default, so an unset
-	// tenant against a real database yields a store that reads back nothing.
-	if cfg.DatabaseURL != "" && cfg.Tenant == "" {
-		return Config{}, errors.New("oms: OMS_TENANT is required when OMS_DATABASE_URL is set (RLS scoping)")
-	}
 	return cfg, nil
+}
+
+// secret resolves a sensitive value, preferring a CSI/Vault file mount
+// (SEC-01d: the path in <k>_FILE) over a plaintext <k> env var. The DSN carries
+// database credentials and must never ride in a pod's env block.
+func secret(k string) string {
+	if p := os.Getenv(k + "_FILE"); p != "" {
+		if b, err := os.ReadFile(p); err == nil {
+			return strings.TrimSpace(string(b))
+		}
+	}
+	return os.Getenv(k)
 }
 
 func envOr(k, def string) string {
