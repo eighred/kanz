@@ -18,9 +18,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
-
+	"github.com/kanz-eng/kanz/internal/pg"
 	"github.com/kanz-eng/kanz/pkg/observability"
 	"github.com/kanz-eng/kanz/services/alternatives/internal/config"
 	"github.com/kanz-eng/kanz/services/alternatives/internal/fund"
@@ -103,16 +101,7 @@ func openStore(ctx context.Context, cfg config.Config) (fund.Store, func(), erro
 	// MT-01d: every connection carries this deployment's tenant as the
 	// `app.tenant_id` GUC, so Postgres RLS scopes all reads/writes to it. A
 	// non-superuser DB role is required for FORCE RLS to apply.
-	poolCfg, err := pgxpool.ParseConfig(cfg.DatabaseURL)
-	if err != nil {
-		return nil, nil, err
-	}
-	tenant := cfg.Tenant
-	poolCfg.AfterConnect = func(ctx context.Context, conn *pgx.Conn) error {
-		_, err := conn.Exec(ctx, "SELECT set_config('app.tenant_id', $1, false)", tenant)
-		return err
-	}
-	pool, err := pgxpool.NewWithConfig(ctx, poolCfg)
+	pool, err := pg.NewTenantPool(ctx, cfg.DatabaseURL, cfg.Tenant)
 	if err != nil {
 		return nil, nil, err
 	}

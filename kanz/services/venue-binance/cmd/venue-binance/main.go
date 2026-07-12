@@ -31,12 +31,11 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
 	venuepb "github.com/kanz-eng/kanz-schemas-go/venue/v1"
 	"google.golang.org/grpc"
 
 	"github.com/kanz-eng/kanz/internal/execution"
+	"github.com/kanz-eng/kanz/internal/pg"
 	"github.com/kanz-eng/kanz/internal/venueadapter/orderview"
 	"github.com/kanz-eng/kanz/internal/venueadapter/server"
 	"github.com/kanz-eng/kanz/pkg/bus"
@@ -228,17 +227,7 @@ func openView(ctx context.Context, cfg config.Config) (orderview.Store, func(), 
 	if cfg.DatabaseURL == "" {
 		return orderview.NewMemory(), func() {}, nil
 	}
-	poolCfg, err := pgxpool.ParseConfig(cfg.DatabaseURL)
-	if err != nil {
-		return nil, nil, err
-	}
-	tenant := cfg.Tenant
-	// MT-01d: RLS scopes every row to this deployment's tenant.
-	poolCfg.AfterConnect = func(ctx context.Context, conn *pgx.Conn) error {
-		_, err := conn.Exec(ctx, "SELECT set_config('app.tenant_id', $1, false)", tenant)
-		return err
-	}
-	pool, err := pgxpool.NewWithConfig(ctx, poolCfg)
+	pool, err := pg.NewTenantPool(ctx, cfg.DatabaseURL, cfg.Tenant)
 	if err != nil {
 		return nil, nil, err
 	}

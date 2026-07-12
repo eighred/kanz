@@ -19,9 +19,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
-
+	"github.com/kanz-eng/kanz/internal/pg"
 	"github.com/kanz-eng/kanz/pkg/bus"
 	"github.com/kanz-eng/kanz/pkg/observability"
 	accounting "github.com/kanz-eng/kanz/services/accounting/internal"
@@ -161,16 +159,7 @@ func openStore(ctx context.Context, cfg config.Config) (ledger.Store, func(), er
 	// write ERRORS and every read returns ZERO ROWS — the IBOR silently holds
 	// nothing. The Postgres tests set the GUC in their own pool and passed; this
 	// composition root never did, which is exactly why it went unnoticed.
-	poolCfg, err := pgxpool.ParseConfig(cfg.DatabaseURL)
-	if err != nil {
-		return nil, nil, err
-	}
-	tenant := cfg.Tenant
-	poolCfg.AfterConnect = func(ctx context.Context, conn *pgx.Conn) error {
-		_, err := conn.Exec(ctx, "SELECT set_config('app.tenant_id', $1, false)", tenant)
-		return err
-	}
-	pool, err := pgxpool.NewWithConfig(ctx, poolCfg)
+	pool, err := pg.NewTenantPool(ctx, cfg.DatabaseURL, cfg.Tenant)
 	if err != nil {
 		return nil, nil, err
 	}

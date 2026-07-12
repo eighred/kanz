@@ -18,12 +18,12 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"google.golang.org/grpc"
 
 	"github.com/kanz-eng/kanz/internal/marketdata/returns"
 	mdstore "github.com/kanz-eng/kanz/internal/marketdata/store"
+	"github.com/kanz-eng/kanz/internal/pg"
 	risk "github.com/kanz-eng/kanz/internal/risk"
 	"github.com/kanz-eng/kanz/internal/risk/compute"
 	varmodel "github.com/kanz-eng/kanz/internal/risk/compute/var"
@@ -184,16 +184,7 @@ func runEngine(ctx context.Context, cfg config.Config, readiness *server.Readine
 		// it (the authenticated-session-GUC pattern). The engine is single-tenant
 		// per deployment (cfg.Tenant); a non-superuser DB role is required for
 		// FORCE RLS to apply.
-		poolCfg, err := pgxpool.ParseConfig(cfg.DatabaseURL)
-		if err != nil {
-			return err
-		}
-		tenant := cfg.Tenant
-		poolCfg.AfterConnect = func(ctx context.Context, conn *pgx.Conn) error {
-			_, err := conn.Exec(ctx, "SELECT set_config('app.tenant_id', $1, false)", tenant)
-			return err
-		}
-		pool, err := pgxpool.NewWithConfig(ctx, poolCfg)
+		pool, err := pg.NewTenantPool(ctx, cfg.DatabaseURL, cfg.Tenant)
 		if err != nil {
 			return err
 		}
