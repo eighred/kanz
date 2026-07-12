@@ -100,6 +100,32 @@ spec:
           labelSelector:
             matchLabels:
               app: oms
+      # INFRA-M6a: apply the schema BEFORE the OMS starts. Without this the pods
+      # come up, connect, and fail every order with `relation "orders" does not
+      # exist` — the manifest was correct and undeployable until this existed.
+      #
+      # Both replicas run this against ONE database at the same moment. That is
+      # safe: kanz-migrate takes a pg_advisory_lock, so one pod applies and the
+      # other waits and then finds nothing to do. Exit 0 with nothing applied is
+      # the normal case — for the second pod, and for every restart thereafter.
+      #
+      # It uses a SEPARATE, DDL-capable DSN (migrate-database-url). The OMS's own
+      # credential is a non-superuser, which is what makes FORCE RLS apply to it;
+      # it deliberately cannot create tables.
+      initContainers:
+        - name: migrate
+          image: ghcr.io/kanz-eng/kanz-migrate:latest
+          args: ["--dir", "/migrations/oms"]
+          env:
+            - { name: KANZ_MIGRATE_DATABASE_URL_FILE, value: /run/secrets/db/migrate-database-url }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - { name: db, mountPath: /run/secrets/db, readOnly: true }
       containers:
         - name: oms
           # Pinned to a cosign-signed digest by the GitOps bump (CICD-01d).

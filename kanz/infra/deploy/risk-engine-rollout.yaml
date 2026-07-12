@@ -97,6 +97,28 @@ spec:
           labelSelector:
             matchLabels:
               app: risk-engine
+      # INFRA-M6a: apply 0001_state.sql / 0002_tenant_rls.sql before the engine
+      # starts. Nothing applied these before — the tables existed only where a
+      # human or a test had created them. All 3 replicas run this against one
+      # database simultaneously; kanz-migrate's advisory lock serializes them, so
+      # one applies and the others exit 0 with nothing to do.
+      #
+      # Separate DDL-capable DSN: the engine itself connects as a non-superuser so
+      # FORCE RLS applies to it (MT-01d), and therefore cannot create tables.
+      initContainers:
+        - name: migrate
+          image: ghcr.io/kanz-eng/kanz-migrate:latest
+          args: ["--dir", "/migrations/risk-engine"]
+          env:
+            - { name: KANZ_MIGRATE_DATABASE_URL_FILE, value: /run/secrets/db/migrate-database-url }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - { name: db, mountPath: /run/secrets/db, readOnly: true }
       containers:
         - name: risk-engine
           # Pinned to a digest in production (set by the GitOps bump); the
