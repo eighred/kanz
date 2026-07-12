@@ -12,6 +12,8 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
@@ -59,7 +61,7 @@ func main() {
 	}
 	defer func() { _ = client.Close() }()
 
-	producer, err := bus.NewProducer(client, bus.ProducerConfig{
+	rawProducer, err := bus.NewProducer(client, bus.ProducerConfig{
 		Source:          cfg.Source,
 		ProducerVersion: version(),
 		// MT-01b: without this, bus.Validate rejects every envelope
@@ -73,9 +75,18 @@ func main() {
 		os.Exit(2)
 	}
 
+	// Every FACT this service emits goes through here, so this is what /readyz
+	// asks: is publishing actually WORKING? A market-ingest that folds its book
+	// perfectly and lands nothing on the bus is not ready, however alive it looks.
+	publishHealth := bus.NewHealthPublisher(rawProducer, bus.DefaultPublishFailureThreshold)
+
 	// Health/readiness endpoint for the orchestrator.
 	ready := &readiness{}
-	httpSrv := &http.Server{Addr: cfg.Listen, Handler: healthMux(ready, obs.MetricsHandler()), ReadHeaderTimeout: 5 * time.Second}
+	httpSrv := &http.Server{
+		Addr:              cfg.Listen,
+		Handler:           healthMux(ready, publishHealth, obs.MetricsHandler()),
+		ReadHeaderTimeout: 5 * time.Second,
+	}
 	go func() {
 		logger.Info("market-ingest health listening", "addr", cfg.Listen)
 		if err := httpSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -108,7 +119,7 @@ func main() {
 	}
 	runner, err := alpha.New(alpha.Config{
 		Feeds:            srcs,
-		Publisher:        producer,
+		Publisher:        publishHealth,
 		TradeRetention:   cfg.TradeRetention,
 		SnapshotInterval: cfg.SnapshotInterval,
 		SnapshotDepth:    cfg.SnapshotDepth,
@@ -149,15 +160,40 @@ type readiness struct {
 func (r *readiness) set(v bool) { r.mu.Lock(); r.ok = v; r.mu.Unlock() }
 func (r *readiness) get() bool  { r.mu.RLock(); defer r.mu.RUnlock(); return r.ok }
 
-func healthMux(ready *readiness, metrics http.Handler) http.Handler {
+// healthMux serves the probes. /readyz means "this service is DOING ITS JOB", not
+// merely "the process is up".
+//
+// health is the publish-health tracker. A market-ingest whose every publish is
+// rejected folds its book perfectly and emits NOTHING — and that is exactly how it
+// shipped: readyz answered 200 while not one FACT reached the bus. Its FACTs are
+// the only reason it exists, so if none of them land, it is not ready, and the
+// kubelet should pull it out of its Service and let someone notice.
+//
+// health may be nil (before the producer is built), which reads as "no publish
+// problem observed".
+func healthMux(ready *readiness, health *bus.HealthPublisher, metrics http.Handler) http.Handler {
 	mux := http.NewServeMux()
+	// Liveness is still just "the process is up" — restarting a pod does not fix a
+	// bad tenant or a missing stream, and a crash-loop would only hide the reason.
 	mux.HandleFunc("/livez", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
 	mux.HandleFunc("/readyz", func(w http.ResponseWriter, _ *http.Request) {
-		if ready.get() {
-			w.WriteHeader(http.StatusOK)
+		if !ready.get() {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = io.WriteString(w, "not ready: starting up")
 			return
 		}
-		w.WriteHeader(http.StatusServiceUnavailable)
+		if health != nil {
+			if ok, consecutive, lastErr := health.Status(); !ok {
+				// Say WHY. A bare 503 sends someone to the logs to find what this
+				// endpoint already knows.
+				w.WriteHeader(http.StatusServiceUnavailable)
+				_, _ = fmt.Fprintf(w, "not ready: %d consecutive publish failures — this service is ingesting and emitting NOTHING. last error: %v",
+					consecutive, lastErr)
+				return
+			}
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, "ready")
 	})
 	if metrics != nil {
 		mux.Handle("/metrics", metrics)
