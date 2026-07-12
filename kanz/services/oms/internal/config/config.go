@@ -32,7 +32,10 @@ type Config struct {
 	// store (MT-01d). Defaults to __system__, the risk-engine convention; a
 	// per-tenant deployment overrides it.
 	Tenant string
-	// SimVenueMIC is the simulation execution venue's MIC (OMS-01c). Empty ⇒ a
+	// SimVenueMIC is the simulation execution venue's MIC, or a COMMA-SEPARATED
+	// LIST of them ("XNAS,XLON") — one SimVenue per MIC. A fanned-out allocation
+	// stamps each leg with its target venue and the router matches on MIC, so a
+	// single-venue simulator cannot work a multi-venue allocation at all. Empty ⇒ a
 	// default sim venue; a deployment swaps in a real venue adapter.
 	SimVenueMIC string
 	// VenueEndpoints maps MIC → adapter address for OUT-OF-PROCESS venues

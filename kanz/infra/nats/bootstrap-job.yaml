@@ -14,6 +14,12 @@ data:
     set -eu
     NATS_URL="${NATS_URL:-nats://nats:4222}"
 
+    # NATS_REPLICAS exists so CI can run THIS SCRIPT — the one production applies —
+    # against a single-node broker. A copy of the stream list in the CI workflow
+    # would drift from this one, and the drift would be invisible until a service
+    # met a real spine and found its subject unbound.
+    NATS_REPLICAS="${NATS_REPLICAS:-3}"
+
     ensure_stream() {
       name="$1"; subjects="$2"; max_age="$3"
       if nats --server "$NATS_URL" stream info "$name" >/dev/null 2>&1; then
@@ -24,7 +30,7 @@ data:
         echo "stream $name — creating"
         nats --server "$NATS_URL" stream add "$name" --defaults \
           --subjects="$subjects" --storage=file --retention=limits \
-          --replicas=3 --discard=old --dupe-window=2m --max-age="$max_age"
+          --replicas="$NATS_REPLICAS" --discard=old --dupe-window=2m --max-age="$max_age"
       fi
     }
 
@@ -46,6 +52,30 @@ data:
     ensure_stream PLATFORM      "platform.>"      168h
     ensure_stream DATA          "data.>"          168h
     ensure_stream OBSERVABILITY "observability.>" 1h
+
+    # THREE DOMAINS WERE UNBOUND, and the paragraph above says exactly why that is
+    # fatal — it was written for strategy.>/order.> and the lesson did not travel.
+    #
+    #   compliance.>  THE OMS SUBSCRIBES TO compliance.mandate.changed. A consumer
+    #                 on a subject with no stream does not degrade — it 404s, and it
+    #                 takes the OMS's WHOLE consumer group down with it. On a real
+    #                 spine the OMS consumed NOTHING: no orders, at all. This was
+    #                 found by booting the OMS against a correctly-bootstrapped
+    #                 broker for the first time (EXEC-M9), which is also the first
+    #                 time anyone had done it.
+    #   accounting.>  The venue adapters publish accounting.balance.reconciled and
+    #                 the cash-movement FACTs land on accounting.cash.*. Every one
+    #                 was a hard publish failure: the ledger's inputs, dropped.
+    #   settlement.>  The OMS's post-trade fail sink publishes
+    #                 settlement.instruction.fail. A failed settlement that cannot
+    #                 be reported is a failed settlement nobody knows about.
+    #
+    # 168h, not 24h: these carry money, mandates and post-trade obligations. A
+    # consumer down over a long weekend must not come back to find its inputs aged
+    # out of the stream — that is a silently short ledger, and it looks like nothing.
+    ensure_stream ACCOUNTING    "accounting.>"    168h
+    ensure_stream COMPLIANCE    "compliance.>"    168h
+    ensure_stream SETTLEMENT    "settlement.>"    168h
     # Dead-letter: poison events need investigation runway.
     ensure_stream DLQ           "dlq.>"           720h
 

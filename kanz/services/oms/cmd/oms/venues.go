@@ -58,12 +58,42 @@ func configuredVenues(ctx context.Context, cfg config.Config, store order.Store,
 		// THIS OMS IS A SIMULATOR. It will accept orders and fill them against
 		// nothing. That is correct for tests and local dev and catastrophic in
 		// production, so it is stated at WARN, not buried at Info.
-		logger.Warn("NO REAL VENUES CONFIGURED — every order will be filled by the in-process SimVenue and NOTHING will reach an exchange",
-			"sim_mic", cfg.SimVenueMIC,
+		//
+		// OMS_SIM_VENUE_MIC takes a LIST ("XNAS,XLON"), one SimVenue per MIC. This
+		// platform is multi-venue by construction: an allocation fans one signal out
+		// across venues and stamps each leg with its target MIC, and the router sends
+		// a leg only to the venue whose MIC matches. A simulator that can be exactly
+		// ONE venue therefore cannot simulate this platform's own core loop — every
+		// leg addressed to any other MIC is refused. That is why the M1 end-to-end
+		// loop certification (webhook-ingest's TestIntegration_LoopOverNATS, which
+		// fans out to XNAS and XLON) has never once passed: with a single XSIM venue
+		// both legs were unroutable, so no fills ever came back.
+		mics := parseMICs(cfg.SimVenueMIC)
+		logger.Warn("NO REAL VENUES CONFIGURED — every order will be filled by an in-process SimVenue and NOTHING will reach an exchange",
+			"sim_mics", mics,
 			"fix", "set OMS_VENUE_ENDPOINTS (e.g. XBIN=venue-binance.kanz-services.svc:9000)")
-		return []execution.Venue{execution.NewSimVenue(cfg.SimVenueMIC)}, closeConns
+		sims := make([]execution.Venue, 0, len(mics))
+		for _, mic := range mics {
+			sims = append(sims, execution.NewSimVenue(mic))
+		}
+		return sims, closeConns
 	}
 	return venues, closeConns
+}
+
+// parseMICs splits the sim-venue MIC list ("XNAS,XLON"). An empty setting yields
+// one unnamed SimVenue, which is the historical single-venue behaviour.
+func parseMICs(s string) []string {
+	var out []string
+	for _, mic := range strings.Split(s, ",") {
+		if mic = strings.TrimSpace(mic); mic != "" {
+			out = append(out, mic)
+		}
+	}
+	if len(out) == 0 {
+		out = []string{""}
+	}
+	return out
 }
 
 // dialVenues turns OMS_VENUE_ENDPOINTS ("XBIN=host:port,XOKX=host:port") into

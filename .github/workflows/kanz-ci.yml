@@ -137,12 +137,60 @@ jobs:
           done
           echo "NATS did not become ready"; docker logs kanz-ci-nats; exit 1
 
-      - name: Test (race) — incl. arch + contract + Postgres + real-bus suites
+      # Bootstrap the spine with THE SCRIPT PRODUCTION APPLIES — extracted from the
+      # very ConfigMap infra/nats/bootstrap-job.yaml ships. A copy of the stream
+      # list here would drift from that one, and the drift is invisible until a
+      # service meets a real broker and finds its subject unbound: a JetStream
+      # publish to an unbound subject is a hard failure, and a CONSUMER on one 404s
+      # and takes the service's whole consumer group down with it. Both have already
+      # happened here (EXEC-M7a, EXEC-M9). NATS_REPLICAS=1 because CI is one node.
+      - name: Bootstrap the NATS topology (the script production applies)
+        run: |
+          awk '/^  bootstrap\.sh: \|/{f=1;next} f&&/^---/{exit} f{sub(/^    /,"");print}' \
+            kanz/infra/nats/bootstrap-job.yaml > /tmp/bootstrap.sh
+          test -s /tmp/bootstrap.sh || { echo "could not extract bootstrap.sh from the ConfigMap"; exit 1; }
+          docker run --rm -i --network host \
+            -e NATS_URL=nats://localhost:4222 -e NATS_REPLICAS=1 \
+            natsio/nats-box:0.14.5 sh -s < /tmp/bootstrap.sh
+
+      # The M1 loop certification (webhook-ingest's TestIntegration_LoopOverNATS)
+      # drives a real SubmitOrder onto the real spine and asserts the OMS's
+      # OrderFilled FACTs come back. It needs an OMS ON THE BUS, and it has never
+      # had one — so it has never run anywhere but a developer's laptop, and the
+      # first time it was run it failed for three separate production reasons.
+      #
+      # OMS_SIM_VENUE_MIC takes both MICs the allocation fans out to: the router
+      # matches a leg to the venue whose MIC equals the leg's target, so a
+      # single-venue simulator cannot work a multi-venue allocation at all.
+      - name: Start the OMS on the bus (for the M1 loop certification)
+        working-directory: kanz
+        env:
+          KANZ_MIGRATE_DATABASE_URL: postgres://kanzapp:kanz@localhost:5432/kanzapp?sslmode=disable
+        run: |
+          go run ./cmd/kanz-migrate --dir services/oms/migrations
+          go build -o /tmp/oms ./services/oms/cmd/oms
+          OMS_NATS_URL=nats://localhost:4222 \
+          OMS_DATABASE_URL='postgres://kanzapp:kanz@localhost:5432/kanzapp?sslmode=disable' \
+          OMS_TENANT=__system__ \
+          OMS_SIM_VENUE_MIC=XNAS,XLON \
+          /tmp/oms > /tmp/oms.log 2>&1 &
+          for i in $(seq 1 30); do
+            grep -q '"msg":"oms subscribing"' /tmp/oms.log && exit 0
+            sleep 1
+          done
+          echo "the OMS never subscribed:"; cat /tmp/oms.log; exit 1
+
+      - name: Test (race) — incl. arch + contract + Postgres + real-bus + M1 loop
         working-directory: kanz
         env:
           TEST_POSTGRES_URL: postgres://kanzapp:kanz@localhost:5432/kanzapp?sslmode=disable
           TEST_NATS_URL: nats://localhost:4222
+          TEST_OMS_ON_BUS: "1"
         run: go test -race ./...
+
+      - name: OMS log (on failure)
+        if: failure()
+        run: cat /tmp/oms.log || true
 
       - name: golangci-lint
         uses: golangci/golangci-lint-action@v6

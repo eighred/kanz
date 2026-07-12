@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/nats-io/nats.go"
@@ -143,13 +144,32 @@ func (c *NATSClient) Subscribe(ctx context.Context, subject, group string, h Han
 	if err != nil {
 		return fmt.Errorf("nats: stream for subject %q: %w", subject, err)
 	}
+	// ONE DURABLE PER (GROUP, SUBJECT) — not one per group.
+	//
+	// This used to be `Durable: group` with `FilterSubject: subject`, through
+	// CreateOrUpdate. A service that subscribes to several subjects under one
+	// consumer group — which is every service on this platform — therefore created
+	// ONE consumer and then OVERWROTE its filter with each subsequent Subscribe.
+	// The last call won and every earlier subscription went silently dead: the
+	// handler was registered, the consumer existed, nothing errored, and the events
+	// were simply never delivered.
+	//
+	// For the OMS that meant a durable filtered to `order.order.amend` — the last
+	// subject it happens to subscribe to — and NO SUBMITTED ORDER WAS EVER
+	// PROCESSED on a real spine. It was invisible because CreateOrUpdate is a
+	// silent overwrite, and because nothing had ever run the OMS against a real
+	// broker (EXEC-M9).
+	//
+	// The durable name carries the subject so each subscription gets its own
+	// consumer. Group semantics are unchanged: every pod of a service still shares
+	// one durable PER SUBJECT, so a message goes to exactly one of them.
 	cons, err := c.js.CreateOrUpdateConsumer(ctx, stream, jetstream.ConsumerConfig{
-		Durable:       group,
+		Durable:       durableName(group, subject),
 		AckPolicy:     jetstream.AckExplicitPolicy,
 		FilterSubject: subject,
 	})
 	if err != nil {
-		return fmt.Errorf("nats: consumer %q on stream %q: %w", group, stream, err)
+		return fmt.Errorf("nats: consumer %q on stream %q: %w", durableName(group, subject), stream, err)
 	}
 	cc, err := cons.Consume(func(m jetstream.Msg) {
 		if err := h(ctx, natsToMessage(m)); err != nil {
@@ -194,4 +214,16 @@ func natsToMessage(m jetstream.Msg) Message {
 		out.Headers = h
 	}
 	return out
+}
+
+// durableName builds the JetStream durable for one (group, subject) pair.
+//
+// A durable name may not contain `.`, `*`, `>`, or whitespace, so the subject's
+// dots become underscores: group "oms" + subject "order.order.submit" ⇒
+// "oms-order_order_submit". The name is deterministic, so every replica of a
+// service binds to the SAME durable for a subject and the messages are shared
+// between them — which is what a consumer group means.
+func durableName(group, subject string) string {
+	safe := strings.NewReplacer(".", "_", "*", "_", ">", "_", " ", "_").Replace(subject)
+	return group + "-" + safe
 }

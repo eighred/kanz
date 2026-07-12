@@ -23,6 +23,7 @@ import (
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 
+	"github.com/kanz-eng/kanz/internal/bustest"
 	"github.com/kanz-eng/kanz/internal/platform/mode"
 	"github.com/kanz-eng/kanz/internal/signal/translate"
 	"github.com/kanz-eng/kanz/pkg/bus"
@@ -42,21 +43,17 @@ func TestIntegration_ToolFlipsTheRealGate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("setup connect: %v", err)
 	}
-	defer setupConn.Close()
+	// t.Cleanup, not defer: a deferred Close runs BEFORE the cleanups, tearing the
+	// connection down under any stream deletion registered below.
+	t.Cleanup(setupConn.Close)
 	js, err := jetstream.New(setupConn)
 	if err != nil {
 		t.Fatalf("setup jetstream: %v", err)
 	}
-	const streamName = "PLATFORM_HALT_IT"
-	if _, err := js.CreateStream(ctx, jetstream.StreamConfig{
-		Name:      streamName,
-		Subjects:  []string{mode.Subject},
-		Storage:   jetstream.MemoryStorage,
-		Retention: jetstream.LimitsPolicy,
-	}); err != nil {
-		t.Fatalf("create stream: %v", err)
-	}
-	t.Cleanup(func() { _ = js.DeleteStream(context.Background(), streamName) })
+	// The halt FACT rides a REAL subject on a REAL stream. When the production
+	// topology is provisioned (CI bootstraps it), this binds to that stream — which
+	// is the point: the tool is only a kill switch if its subject is actually bound.
+	bustest.EnsureSubjects(t, ctx, js, "PLATFORM_HALT_IT", []string{mode.Subject})
 
 	// The real gate, wired to the real subject exactly as webhook-ingest wires it.
 	gate := translate.OpenGate(nil)

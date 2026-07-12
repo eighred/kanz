@@ -15,6 +15,7 @@ package translate_test
 
 import (
 	"context"
+	"fmt"
 	"math/big"
 	"os"
 	"sync"
@@ -27,6 +28,7 @@ import (
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 
+	"github.com/kanz-eng/kanz/internal/bustest"
 	"github.com/kanz-eng/kanz/internal/signal/translate"
 	"github.com/kanz-eng/kanz/pkg/bus"
 )
@@ -57,18 +59,11 @@ func TestIntegration_EmitReachesTheWire(t *testing.T) {
 	if err != nil {
 		t.Fatalf("setup jetstream: %v", err)
 	}
-	const streamName = "EXECUTION_IT"
-	// Idempotent: a previous run that died mid-test must not decide this one.
-	_ = js.DeleteStream(ctx, streamName)
-	if _, err := js.CreateStream(ctx, jetstream.StreamConfig{
-		Name:      streamName,
-		Subjects:  []string{"execution.>", "strategy.>", "order.>"},
-		Storage:   jetstream.MemoryStorage,
-		Retention: jetstream.LimitsPolicy,
-	}); err != nil {
-		t.Fatalf("create stream: %v", err)
-	}
-	t.Cleanup(func() { _ = js.DeleteStream(context.Background(), streamName) })
+	// These are the REAL subjects — that is the whole point of this test, since the
+	// EXEC-M7a bug was that no stream was bound to them at all. When the production
+	// topology is provisioned (CI bootstraps the same script prod applies), this
+	// binds to the real EXECUTION stream and proves the real binding.
+	bustest.EnsureSubjects(t, ctx, js, "EXECUTION_IT", []string{"execution.>", "strategy.>", "order.>"})
 
 	client, err := bus.DialNATS(ctx, bus.NATSConfig{URL: url, Name: "translate-it"})
 	if err != nil {
@@ -97,8 +92,27 @@ func TestIntegration_EmitReachesTheWire(t *testing.T) {
 	}
 	subCtx, stopSub := context.WithCancel(ctx)
 	defer stopSub()
-	go func() { _ = consumer.Subscribe(subCtx, translate.SubjectSignal, "translate-it-sig", collect) }()
-	go func() { _ = consumer.Subscribe(subCtx, translate.SubjectSubmit, "translate-it-cmd", collect) }()
+	// A Subscribe error must not be swallowed. A subscription that never started is
+	// indistinguishable from a subject nobody publishes to — which is the entire
+	// class of bug this test exists to catch.
+	subErr := make(chan error, 2)
+	go func() {
+		err := consumer.Subscribe(subCtx, translate.SubjectSignal, "translate-it-sig", collect)
+		if err != nil && subCtx.Err() == nil {
+			subErr <- fmt.Errorf("subscribe %s: %w", translate.SubjectSignal, err)
+		}
+	}()
+	go func() {
+		err := consumer.Subscribe(subCtx, translate.SubjectSubmit, "translate-it-cmd", collect)
+		if err != nil && subCtx.Err() == nil {
+			subErr <- fmt.Errorf("subscribe %s: %w", translate.SubjectSubmit, err)
+		}
+	}()
+	select {
+	case err := <-subErr:
+		t.Fatal(err)
+	case <-time.After(time.Second): // both subscriptions are up
+	}
 
 	tr, err := translate.New(translate.Options{
 		Prices:    translate.StaticPrices{"BTC-USD": big.NewRat(50000, 1)},
@@ -114,8 +128,16 @@ func TestIntegration_EmitReachesTheWire(t *testing.T) {
 		t.Fatalf("translate.New: %v", err)
 	}
 
+	// A FRESH signal id per run. The order command's idempotency key is derived from
+	// it and is therefore deterministic — which is the point in production, and a
+	// trap here: the real EXECUTION stream carries a 2-minute duplicate window
+	// (infra/nats/bootstrap-job.yaml), so re-running this test with a fixed id had
+	// the broker SILENTLY DEDUPLICATE the SubmitOrder. The publish "succeeded", the
+	// command never landed, and the test timed out looking for it. The old test
+	// deleted and recreated its own stream each run, which wiped the dedup state and
+	// hid this entirely. Exactly-once is working; the test was replaying a command.
 	res, err := tr.Emit(ctx, translate.Intent{
-		SignalID:     translate.DeterministicID("it-signal-1"),
+		SignalID:     translate.DeterministicID(fmt.Sprintf("it-signal-%d", time.Now().UnixNano())),
 		StrategyID:   "momentum",
 		FundID:       "fund-alpha",
 		InstrumentID: "BTC-USD",

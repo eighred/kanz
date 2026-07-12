@@ -17,6 +17,7 @@ package ingest
 
 import (
 	"context"
+	"fmt"
 	"math/big"
 	"net"
 	"os"
@@ -106,8 +107,15 @@ func TestIntegration_LoopOverNATS(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	raw := `{"strategy_id":"momentum","fund_id":"fund-alpha","symbol":"BINANCE:BTCUSDT",` +
-		`"action":"buy","size":"1","size_type":"absolute_qty","order_type":"limit","limit_price":"50000","nonce":"it-1"}`
+	// A FRESH nonce per run. It is the webhook's replay guard, and it also flows into
+	// the deterministic order ids — so a fixed nonce makes every run publish the SAME
+	// SubmitOrder, and the real EXECUTION stream's 2-minute duplicate window
+	// (infra/nats/bootstrap-job.yaml) then SILENTLY DEDUPLICATES it at the broker.
+	// The publish succeeds, the command never lands, and the OMS never sees an order
+	// to fill. Exactly-once is doing its job; the test was replaying a command.
+	raw := fmt.Sprintf(`{"strategy_id":"momentum","fund_id":"fund-alpha","symbol":"BINANCE:BTCUSDT",`+
+		`"action":"buy","size":"1","size_type":"absolute_qty","order_type":"limit","limit_price":"50000","nonce":"it-%d"}`,
+		time.Now().UnixNano())
 	res, err := p.Process(ctx, []byte(raw), net.ParseIP("10.0.0.1"), sign(raw, testSecret))
 	if err != nil {
 		t.Fatalf("Process: %v", err)
