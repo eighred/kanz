@@ -1,0 +1,86 @@
+syntax = "proto3";
+
+// gRPC interface for OUT-OF-PROCESS venue adapters (INFRA-M7a).
+//
+// Today the exchange connectors are compiled INTO the OMS behind build tags
+// (services/oms/cmd/oms/venues_binance.go, `//go:build binance`). That puts
+// third-party client code, request signing, and vendor websocket loops inside the
+// address space of the process that owns order state. This interface moves them
+// out: an adapter becomes its own deployment, reached over mTLS, and the OMS
+// holds no vendor code at all.
+//
+// # Why this speaks order.v1 and not its own types
+//
+// The obvious shape for a venue RPC is a bespoke request — symbol, side, price,
+// quantity — with its own field types. That shape is a trap here. Money, sizes,
+// and prices in this platform are EXACT base-10 (common.v1.Decimal, backed by
+// big.Rat); `double` is banned on any path that moves capital (KANZ_BRAIN,
+// EVT-14). A hand-rolled venue message re-declares those fields, and every
+// re-declaration is a chance to widen a decimal into a float or to invent a
+// second encoding of "BUY".
+//
+// So the wire carries the platform's OWN types: OrderState in, Fill out. The
+// decimals inside them are already common.v1.Decimal; side and order type are
+// already enums that `buf breaking` guards. There is exactly one representation
+// of a price in this system, and an adapter cannot introduce a second.
+//
+// It also keeps the adapter honest about what the OMS actually needs back. The
+// OMS aggregate folds FILLS — it does not consume a status string. An adapter
+// that reports "FILLED" without saying what filled, at what price, cannot drive
+// the state machine.
+package venue.v1;
+
+import "order/v1/order_events.proto";
+
+// VenueAdapterService is one exchange, out of process. One adapter serves one venue;
+// the OMS holds a client per MIC and routes by the MIC on the order.
+//
+// A MIC with no registered adapter is a HARD ERROR at the router — never a
+// silent fall back to the simulator. An OMS that quietly simulates while
+// believing it is trading is the worst failure this system has.
+service VenueAdapterService {
+  // Execute works the order and returns the fills it produced.
+  //
+  // Zero fills is a VALID, non-error response: a resting limit order that did
+  // not trade. It leaves the order working. The error return is for "I could not
+  // work this order", not "it did not fill" — conflating them either loses orders
+  // or invents trades.
+  rpc Execute(ExecuteRequest) returns (ExecuteResponse);
+
+  // CancelOrder withdraws a working order AT the exchange, addressed by
+  // state.order_id — our deterministic clOrdId, the same identity the submit
+  // used, so a cancel is idempotent at the venue.
+  //
+  // A nil (OK) response means the venue CONFIRMED the withdrawal. ANY error —
+  // including an ambiguous timeout — means the close is still in flight and
+  // belongs to the healing watchdog (EXEC-M4c). Never assume a cancel landed.
+  // This is why the response carries no `success` field: a bool invites
+  // `success=false` with an OK status, which is exactly the ambiguity the
+  // healing seam exists to prevent.
+  rpc CancelOrder(CancelOrderRequest) returns (CancelOrderResponse);
+}
+
+message ExecuteRequest {
+  // Owning tenant (MT-01a). The adapter stamps it on anything it emits and
+  // scopes its own credentials by it.
+  string tenant_id = 1;
+  // The order to work. Carries instrument, side, quantity, and limit price as
+  // common.v1.Decimal — the platform's exact base-10 type.
+  order.v1.OrderState state = 2;
+}
+
+message ExecuteResponse {
+  // Fills produced, each strictly within the order's open quantity. Empty means
+  // the order rests, unfilled — not an error.
+  repeated order.v1.Fill fills = 1;
+}
+
+message CancelOrderRequest {
+  string tenant_id = 1;
+  // Addressed by state.order_id (the clOrdId used at submit).
+  order.v1.OrderState state = 2;
+}
+
+// Deliberately empty. OK ⇒ the withdrawal is CONFIRMED; an error ⇒ the close is
+// in flight. There is no third answer, so there is no field to carry one.
+message CancelOrderResponse {}

@@ -140,7 +140,9 @@ func runConsumers(ctx context.Context, cfg config.Config, readiness *server.Read
 		return err
 	}
 	defer closeStore()
-	router := execution.NewRouter(configuredVenues(ctx, cfg, store, producer, logger)...)
+	venues, closeVenues := configuredVenues(ctx, cfg, store, producer, logger)
+	defer closeVenues()
+	router := execution.NewRouter(venues...)
 	svc, err := order.NewService(store, emitter, gate, router, closeRegistry, logger)
 	if err != nil {
 		return err

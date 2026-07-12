@@ -35,6 +35,15 @@ type Config struct {
 	// SimVenueMIC is the simulation execution venue's MIC (OMS-01c). Empty ⇒ a
 	// default sim venue; a deployment swaps in a real venue adapter.
 	SimVenueMIC string
+	// VenueEndpoints maps MIC → adapter address for OUT-OF-PROCESS venues
+	// (INFRA-M7a): "XBIN=venue-binance.kanz-services.svc:9000,XOKX=venue-okx...".
+	// Each becomes an execution.GRPCVenue. This is how a venue reaches the OMS
+	// without a line of vendor code being linked into it.
+	VenueEndpoints string
+	// SPIFFESocket is the workload API socket used to mTLS the venue dials
+	// (SEC-01a). Empty ⇒ plaintext, which is a DEV-ONLY posture: the venue
+	// connection carries live orders.
+	SPIFFESocket string
 	// BaseCurrency stamps Money on projected positions until a reference-data
 	// currency join lands (OMS-01e).
 	BaseCurrency string
@@ -52,16 +61,18 @@ func (Config) FillSubjects() []string {
 
 func Load() (Config, error) {
 	cfg := Config{
-		Listen:        envOr("OMS_LISTEN", ":8090"),
-		LogLevel:      parseLevel(envOr("OMS_LOG_LEVEL", "info")),
-		Source:        envOr("OMS_SOURCE", "oms"),
-		OTLPEndpoint:  os.Getenv("OMS_OTLP_ENDPOINT"),
-		NATSURL:       os.Getenv("OMS_NATS_URL"),
-		ConsumerGroup: envOr("OMS_CONSUMER_GROUP", "oms"),
-		DatabaseURL:   secret("OMS_DATABASE_URL"),
-		Tenant:        envOr("OMS_TENANT", "__system__"),
-		SimVenueMIC:   envOr("OMS_SIM_VENUE_MIC", "XSIM"),
-		BaseCurrency:  envOr("OMS_BASE_CURRENCY", "USD"),
+		Listen:         envOr("OMS_LISTEN", ":8090"),
+		LogLevel:       parseLevel(envOr("OMS_LOG_LEVEL", "info")),
+		Source:         envOr("OMS_SOURCE", "oms"),
+		OTLPEndpoint:   os.Getenv("OMS_OTLP_ENDPOINT"),
+		NATSURL:        os.Getenv("OMS_NATS_URL"),
+		ConsumerGroup:  envOr("OMS_CONSUMER_GROUP", "oms"),
+		DatabaseURL:    secret("OMS_DATABASE_URL"),
+		Tenant:         envOr("OMS_TENANT", "__system__"),
+		SimVenueMIC:    envOr("OMS_SIM_VENUE_MIC", "XSIM"),
+		VenueEndpoints: os.Getenv("OMS_VENUE_ENDPOINTS"),
+		SPIFFESocket:   os.Getenv("SPIFFE_ENDPOINT_SOCKET"),
+		BaseCurrency:   envOr("OMS_BASE_CURRENCY", "USD"),
 	}
 	return cfg, nil
 }
