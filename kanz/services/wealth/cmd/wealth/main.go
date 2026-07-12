@@ -18,6 +18,9 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
+
 	"github.com/kanz-eng/kanz/pkg/observability"
 	"github.com/kanz-eng/kanz/services/wealth/internal/book"
 	"github.com/kanz-eng/kanz/services/wealth/internal/config"
@@ -53,7 +56,13 @@ func main() {
 		_ = obs.Shutdown(shutCtx)
 	}()
 
-	store := book.NewMemoryStore()
+	store, closeStore, err := openStore(ctx, cfg)
+	if err != nil {
+		logger.Error("store init failed", "err", err)
+		os.Exit(2)
+	}
+	defer closeStore()
+
 	readiness := &server.Readiness{}
 	httpSrv := &http.Server{
 		Addr:              cfg.Listen,
@@ -77,6 +86,37 @@ func main() {
 	if err := httpSrv.Shutdown(shutdownCtx); err != nil {
 		logger.Error("http shutdown error", "err", err)
 	}
+}
+
+// openStore selects the durable Postgres household book when a DSN is set,
+// otherwise the in-memory store. Returns a close func that tears down the pool
+// (a no-op for the in-memory store). Both satisfy book.Store, so the server is
+// identical either way.
+//
+// book.Postgres has existed since PARITY-02b, tested and unused: nothing ever
+// constructed it, so every household this service served lived in a map and
+// vanished on restart.
+func openStore(ctx context.Context, cfg config.Config) (book.Store, func(), error) {
+	if cfg.DatabaseURL == "" {
+		return book.NewMemoryStore(), func() {}, nil
+	}
+	// MT-01d: every connection carries this deployment's tenant as the
+	// `app.tenant_id` GUC, so Postgres RLS scopes all reads/writes to it. A
+	// non-superuser DB role is required for FORCE RLS to apply.
+	poolCfg, err := pgxpool.ParseConfig(cfg.DatabaseURL)
+	if err != nil {
+		return nil, nil, err
+	}
+	tenant := cfg.Tenant
+	poolCfg.AfterConnect = func(ctx context.Context, conn *pgx.Conn) error {
+		_, err := conn.Exec(ctx, "SELECT set_config('app.tenant_id', $1, false)", tenant)
+		return err
+	}
+	pool, err := pgxpool.NewWithConfig(ctx, poolCfg)
+	if err != nil {
+		return nil, nil, err
+	}
+	return book.NewPostgres(pool), pool.Close, nil
 }
 
 // version reads the build's VCS revision for the service-version label.

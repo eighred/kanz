@@ -64,6 +64,23 @@ spec:
           labelSelector:
             matchLabels:
               app: wealth
+      # INFRA-M6a: apply wealth's schema before the pods start. Both replicas run
+      # this against one database simultaneously; kanz-migrate's advisory lock
+      # serializes them, so one applies and the other exits 0 with nothing to do.
+      initContainers:
+        - name: migrate
+          image: ghcr.io/kanz-eng/kanz-migrate:latest
+          args: ["--dir", "/migrations/wealth"]
+          env:
+            - { name: KANZ_MIGRATE_DATABASE_URL_FILE, value: /run/secrets/db/migrate-database-url }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - { name: db, mountPath: /run/secrets/db, readOnly: true }
       containers:
         - name: wealth
           # Pinned to a cosign-signed digest by the GitOps bump (CICD-01d).
@@ -71,6 +88,12 @@ spec:
           ports:
             - { containerPort: 8080, name: http }
           env:
+            # DSN from the SEC-01d CSI secret file, not a plaintext env. Without
+            # it this service silently falls back to the in-memory store and
+            # loses all state on restart.
+            - { name: WEALTH_DATABASE_URL_FILE, value: /run/secrets/db/database-url }
+            # MT-01d: scopes every row via the app.tenant_id GUC (RLS).
+            - { name: WEALTH_TENANT, value: "__system__" }
             - { name: WEALTH_LISTEN, value: ":8080" }
             - { name: SPIFFE_ENDPOINT_SOCKET, value: "unix:///run/spiffe/spire-agent.sock" }
           livenessProbe:
@@ -88,11 +111,18 @@ spec:
             capabilities:
               drop: ["ALL"]
           volumeMounts:
+            - { name: db, mountPath: /run/secrets/db, readOnly: true }
             - { name: spiffe, mountPath: /run/spiffe, readOnly: true }
             - { name: tmp, mountPath: /tmp }
       volumes:
         - name: tmp
           emptyDir: {}
+        - name: db
+          csi:
+            driver: secrets-store.csi.k8s.io
+            readOnly: true
+            volumeAttributes:
+              secretProviderClass: wealth-db
         - name: spiffe
           csi:
             driver: csi.spiffe.io

@@ -20,6 +20,16 @@ type Config struct {
 
 	// OTLPEndpoint is the OTel collector for span export (OBS-01). Empty ⇒ none.
 	OTLPEndpoint string
+
+	// DatabaseURL selects the durable commitment journal. Empty ⇒ the in-memory
+	// store, correct for tests and a single replica but it loses every capital
+	// call and distribution on restart. fund.Postgres has existed since PARITY-02b;
+	// nothing constructed it until now.
+	DatabaseURL string
+	// Tenant is carried as the `app.tenant_id` GUC on every DB connection so
+	// Postgres RLS scopes the journal (MT-01d). Defaults to __system__, the
+	// risk-engine convention.
+	Tenant string
 }
 
 // Load reads the configuration from the environment with production-safe
@@ -29,7 +39,22 @@ func Load() (Config, error) {
 		Listen:       envOr("ALTERNATIVES_LISTEN", ":8080"),
 		LogLevel:     parseLevel(os.Getenv("ALTERNATIVES_LOG_LEVEL")),
 		OTLPEndpoint: os.Getenv("ALTERNATIVES_OTLP_ENDPOINT"),
+		DatabaseURL:  secret("ALTERNATIVES_DATABASE_URL"),
+		Tenant:       envOr("ALTERNATIVES_TENANT", "__system__"),
 	}, nil
+}
+
+// secret resolves a sensitive value, preferring a CSI/Vault file mount (SEC-01d:
+// the path in <k>_FILE) over a plaintext <k> env var — the convention the other
+// service configs use. A DSN carries database credentials and must never ride in
+// a pod's env block.
+func secret(k string) string {
+	if p := os.Getenv(k + "_FILE"); p != "" {
+		if b, err := os.ReadFile(p); err == nil {
+			return strings.TrimSpace(string(b))
+		}
+	}
+	return os.Getenv(k)
 }
 
 func envOr(key, def string) string {
