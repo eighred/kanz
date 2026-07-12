@@ -70,6 +70,14 @@ jobs:
             dockerfile: kanz/services/copilot/Dockerfile
           - service: market-data
             dockerfile: kanz/services/market-data/Dockerfile
+          # The Phase-7 services. Their manifests referenced these images all along;
+          # nothing built them, so the durable stores wired in 156ec19 could not deploy.
+          - service: wealth
+            dockerfile: kanz/services/wealth/Dockerfile
+          - service: alternatives
+            dockerfile: kanz/services/alternatives/Dockerfile
+          - service: datamaster
+            dockerfile: kanz/services/datamaster/Dockerfile
     steps:
       - uses: actions/checkout@v4
 
