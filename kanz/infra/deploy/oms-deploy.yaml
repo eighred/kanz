@@ -128,8 +128,21 @@ spec:
             - { name: db, mountPath: /run/secrets/db, readOnly: true }
       containers:
         - name: oms
+          # NOT :latest. CI builds oms:latest from the DEFAULT, vendor-free
+          # Dockerfile — no Binance, no OKX, SimVenue only. That image starts,
+          # passes both probes, accepts orders, and routes every one of them to a
+          # SIMULATOR, successfully and silently. An OMS that looks perfectly
+          # healthy while trading nothing is the worst failure this service has.
+          #
+          # :venues is the image built with `--build-arg GOTAGS=binance,okx` — the
+          # only one that can reach a real exchange. It is a deliberate, separate
+          # build (see services/oms/Dockerfile).
+          #
+          # If that image has not been built, this Deployment fails ImagePullBackOff.
+          # That is the intended failure: loud and stuck, not quiet and simulated.
+          #
           # Pinned to a cosign-signed digest by the GitOps bump (CICD-01d).
-          image: ghcr.io/kanz-eng/oms:latest
+          image: ghcr.io/kanz-eng/oms:venues
           ports:
             - { containerPort: 8090, name: http }
           env:

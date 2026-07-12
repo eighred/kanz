@@ -30,6 +30,13 @@ jobs:
             dockerfile: kanz/services/risk-engine/Dockerfile
           - service: schema-registry
             dockerfile: kanz/services/schema-registry/Dockerfile
+          # The OMS image its deploy manifest has been pointing at all along, and
+          # which nothing built. NOTE: this is the vendor-free build — no Binance,
+          # no OKX, SimVenue only (see the Dockerfile's GOTAGS section). It is a
+          # SIMULATOR. A trading image is an explicit --build-arg GOTAGS=binance,okx
+          # build and must not share this tag.
+          - service: oms
+            dockerfile: kanz/services/oms/Dockerfile
           # INFRA-M6a: the migration runner. Not a service — a job image that a
           # Deployment runs as an initContainer before its pods start. It carries
           # every service's migrations/ (see its Dockerfile) and is selected per
