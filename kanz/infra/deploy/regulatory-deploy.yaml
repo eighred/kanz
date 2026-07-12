@@ -3,19 +3,24 @@
 # regulatory shipped a migrations/ directory and a postgres.go and was never
 # deployable: no image, no manifest. Nothing ever applied its schema either.
 #
-# THE SCALE INVARIANT: replicas: 1. This one CANNOT be scaled as written.
+# THE SCALE INVARIANT: replicas: 2 is safe -- but only because the DATABASE owns
+# the chain head.
 #
-#   regulatory reads the chain Head() at startup, and the signer then carries it
-#   IN-PROCESS, chaining each filing off the last one it signed. Two pods would both
-#   start from the same head and produce two divergent chains of signature links --
-#   a forked audit chain, which is precisely the thing a regulator would ask about.
+#   This service was pinned to ONE replica. It read the chain Head() at startup and
+#   the SIGNER carried it in-process, chaining each filing off the last one that pod
+#   signed. Two pods would both start from the same head and produce two divergent
+#   chains of signature links -- a forked audit chain, which is exactly what a
+#   regulator would ask about, and the store's ON CONFLICT (hash) could not detect
+#   it because the forked hashes differ.
 #
-#   Unlike audit (which serializes read-head -> insert with an advisory lock INSIDE
-#   the store), the chaining here happens in the SIGNER, above the store, so the
-#   store's ON CONFLICT (hash) DO NOTHING cannot save it.
+#   linkstore.AppendChained now extends the chain ATOMICALLY: read-head -> compute
+#   -> insert, inside one transaction holding a pg_advisory_xact_lock. There is no
+#   in-process head left to fork. Verified red-green: with the lock removed, 16
+#   concurrent writers produced 4 divergent histories.
 #
-#   Making this scalable means moving the chain-head read under the same per-append
-#   lock audit already uses. Until then: one pod, Recreate, no overlap.
+#   That lock is what makes this replica count legal. If it is ever removed, this
+#   manifest becomes a chain-forking engine -- put the replica count back to 1 in
+#   the same edit.
 #
 # The DSN arrives as a SEC-01d Vault/CSI secret FILE, never a plaintext env var, and
 # the kanz-migrate initContainer applies the schema before the pods start -- with a
@@ -50,11 +55,8 @@ metadata:
   labels:
     app.kubernetes.io/part-of: kanz
 spec:
-  replicas: 1
+  replicas: 2
   revisionHistoryLimit: 5
-  strategy:
-    # Never overlap two pods: an in-process chain head must not exist twice.
-    type: Recreate
   selector:
     matchLabels:
       app: regulatory
@@ -72,6 +74,14 @@ spec:
         fsGroup: 65532
         seccompProfile:
           type: RuntimeDefault
+      # INFRA-01d: spread replicas across AZs.
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app: regulatory
       # INFRA-M6a: apply the schema BEFORE the service starts. All replicas run this
       # against one database simultaneously; kanz-migrate's advisory lock serializes
       # them, so one applies and the rest exit 0 with nothing to do.

@@ -15,7 +15,10 @@
 package signer
 
 import (
+	"context"
+	"fmt"
 	"sync"
+	"time"
 
 	"github.com/kanz-eng/kanz/internal/audit/chain"
 )
@@ -43,26 +46,52 @@ var _ chain.Link = Link{}
 // signer's lock, in chain order, so appends are serialized.
 type LinkSink func(link Link) error
 
-// ChainSigner signs report canonical bytes into the audit hash chain. Safe for
-// concurrent Sign calls; each advances the shared head atomically so the chain
-// stays linear even when REG-01 and CLIMATE-01 reports sign concurrently.
+// Chainer extends the durable chain ATOMICALLY: it reads the head, computes the
+// next link, and records it, serialized against every other writer. Bound to
+// linkstore.Store at the composition root.
+//
+// This exists because an in-process head is only single-writer-safe. Two pods each
+// holding their own head both chain off the same value and FORK the chain into two
+// divergent histories of signature links. With a Chainer the DATABASE owns the
+// head, so N pods extend one linear chain — which is what lets regulatory scale
+// past a single replica.
+type Chainer interface {
+	AppendChained(ctx context.Context, body []byte) (Link, error)
+}
+
+// ChainSigner signs report canonical bytes into the audit hash chain.
+//
+// Two modes, and the difference is who owns the chain head:
+//
+//   - WithChainer (production): the DATABASE owns it. Every Sign is an atomic,
+//     serialized read-head→append. Safe for any number of processes.
+//   - in-process (tests, the no-database default): this struct owns it under a
+//     mutex. Safe within ONE process, and only one.
 type ChainSigner struct {
-	mu    sync.Mutex
-	head  string
-	sink  LinkSink
-	onErr func(error)
+	mu      sync.Mutex
+	head    string
+	sink    LinkSink
+	chainer Chainer
+	onErr   func(error)
+	timeout time.Duration
 }
 
 // Option customizes a ChainSigner.
 type Option func(*ChainSigner)
 
 // WithSink sets the durable link appender (the AUDIT-01 store at the composition
-// root).
+// root). Single-writer only — the chain head stays in this process. Prefer
+// WithChainer wherever more than one replica can exist.
 func WithSink(sink LinkSink) Option { return func(s *ChainSigner) { s.sink = sink } }
 
-// WithErrorHandler sets the hook invoked when the sink returns an error. The
-// signature is still returned and the head still advances (the in-memory chain
-// stays consistent); the hook lets a deployment alert on a failed durable append.
+// WithChainer makes the STORE the chain authority: each Sign atomically reads the
+// head and appends, serialized across every writer. This is what makes a
+// multi-replica signer safe. It supersedes WithSink when both are set.
+func WithChainer(c Chainer) Option { return func(s *ChainSigner) { s.chainer = c } }
+
+// WithErrorHandler sets a hook invoked when a durable append fails. It is for
+// ALERTING ONLY — the failure is also returned from Sign, and the report is NOT
+// signed. See Sign.
 func WithErrorHandler(fn func(error)) Option { return func(s *ChainSigner) { s.onErr = fn } }
 
 // New returns a ChainSigner whose chain starts at head — pass the current audit
@@ -78,24 +107,64 @@ func New(head string, opts ...Option) *ChainSigner {
 	return s
 }
 
-// Sign folds canonical into the chain (H(head || canonical)), advances the head,
-// appends the link via the sink, and returns the new hash — the report's
-// Signature, and its position in the audit chain.
-func (s *ChainSigner) Sign(canonical []byte) string {
-	// Copy so a later mutation of the caller's slice can't retroactively change
+// Sign folds canonical into the audit chain and returns the resulting hash — the
+// report's Signature, and its position in the chain.
+//
+// IT RETURNS AN ERROR IF THE LINK DID NOT DURABLY LAND, AND NO SIGNATURE.
+//
+// It used to log the failure and hand back the signature anyway ("the signature is
+// still returned and the head still advances"). That meant a regulatory filing
+// could be issued carrying a chain position that exists in no durable chain: the
+// chain has a hole, and the filing claims a place in it. A filing that cannot be
+// recorded must not be signed — degrade loudly, never fabricate.
+func (s *ChainSigner) Sign(canonical []byte) (string, error) {
+	// Copy so a later mutation of the caller's slice cannot retroactively change
 	// what the chain committed to.
 	body := append([]byte(nil), canonical...)
+
+	// Production: the database owns the head, so concurrent writers — in this pod
+	// or another — extend ONE linear chain.
+	if s.chainer != nil {
+		// The append is an audit record that must survive a cancelled request, so
+		// it gets its own deadline rather than the caller's context.
+		ctx, cancel := context.WithTimeout(context.Background(), s.appendTimeout())
+		defer cancel()
+		link, err := s.chainer.AppendChained(ctx, body)
+		if err != nil {
+			s.reportErr(err)
+			return "", fmt.Errorf("signer: chain link not recorded, refusing to sign: %w", err)
+		}
+		return link.Cur, nil
+	}
+
+	// In-process chain: one writer only.
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	h := chain.Next(s.head, body)
 	link := Link{Prev: s.head, Cur: h, Body: body}
 	if s.sink != nil {
-		if err := s.sink(link); err != nil && s.onErr != nil {
-			s.onErr(err)
+		if err := s.sink(link); err != nil {
+			// The head does NOT advance and no signature is returned. A chain with a
+			// hole is not a chain.
+			s.reportErr(err)
+			return "", fmt.Errorf("signer: chain link not recorded, refusing to sign: %w", err)
 		}
 	}
 	s.head = h
-	return h
+	return h, nil
+}
+
+func (s *ChainSigner) appendTimeout() time.Duration {
+	if s.timeout > 0 {
+		return s.timeout
+	}
+	return 5 * time.Second
+}
+
+func (s *ChainSigner) reportErr(err error) {
+	if s.onErr != nil {
+		s.onErr(err)
+	}
 }
 
 // Head returns the current chain head — the hash the next Sign will chain from.

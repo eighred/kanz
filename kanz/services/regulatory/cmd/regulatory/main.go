@@ -8,7 +8,6 @@ package main
 import (
 	"context"
 	"errors"
-	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -105,25 +104,24 @@ func buildSigner(ctx context.Context, cfg config.Config, logger *slog.Logger) (s
 	if err != nil {
 		return nil, nil, err
 	}
-	head, err := store.Head(ctx)
-	if err != nil {
-		closeStore()
-		return nil, nil, fmt.Errorf("recover audit chain head: %w", err)
-	}
-	sgnr := signer.New(head,
-		signer.WithSink(func(link signer.Link) error {
-			// The sink runs synchronously under the signer lock during a request,
-			// but the append is an audit record that must not be dropped if the
-			// request is cancelled — bound it to its own short deadline instead.
-			appendCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer cancel()
-			return store.Append(appendCtx, link)
-		}),
+	// The STORE owns the chain head, not this process.
+	//
+	// This used to read Head() once at startup and carry it in-process, chaining
+	// each filing off the last one THIS pod signed. Two pods would both start from
+	// the same head and produce two divergent chains of signature links — a forked
+	// audit chain, which is precisely what a regulator would ask about. It is why
+	// this service was pinned to a single replica.
+	//
+	// WithChainer makes every Sign an atomic, advisory-locked read-head→append at
+	// the database, serialized across every writer in every pod. There is no head
+	// here to fork.
+	sgnr := signer.New("",
+		signer.WithChainer(store),
 		signer.WithErrorHandler(func(err error) {
-			logger.Error("filing chain-link sink failed", "err", err)
+			logger.Error("filing chain-link append failed — the filing was REFUSED, not issued unsigned", "err", err)
 		}),
 	)
-	logger.Info("filing signer ready", "backend", "chain", "durable", cfg.DatabaseURL != "", "resumed", head != "")
+	logger.Info("filing signer ready", "backend", "chain", "durable", cfg.DatabaseURL != "", "chain_head_owner", "database")
 	return sgnr, closeStore, nil
 }
 

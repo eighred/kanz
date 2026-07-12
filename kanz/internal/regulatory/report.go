@@ -73,16 +73,18 @@ type Report struct {
 // default HashSigner is a SHA-256 digest; a deployment injects the audit hash-
 // chain signer.
 type Signer interface {
-	Sign(canonical []byte) string
+	// Sign returns the signature, or an error if the report could not be recorded
+	// in the durable audit chain — in which case it must NOT be issued.
+	Sign(canonical []byte) (string, error)
 }
 
 // HashSigner is the default content-hash Signer (tamper-evidence without a key).
 type HashSigner struct{}
 
 // Sign returns the hex SHA-256 of the canonical bytes.
-func (HashSigner) Sign(canonical []byte) string {
+func (HashSigner) Sign(canonical []byte) (string, error) {
 	sum := sha256.Sum256(canonical)
-	return hex.EncodeToString(sum[:])
+	return hex.EncodeToString(sum[:]), nil
 }
 
 // BuildReport assembles the framework's report from values (code → amount) as of
@@ -106,7 +108,13 @@ func BuildReport(framework Framework, asOf time.Time, values map[string]float64,
 		items = append(items, LineItem{Code: f.Code, Label: f.Label, Value: v})
 	}
 	r := Report{Framework: framework, AsOf: asOf, LineItems: items}
-	r.Signature = signer.Sign(r.canonical())
+	sig, err := signer.Sign(r.canonical())
+	if err != nil {
+		// The filing could not be recorded in the audit chain. Do not hand back a
+		// report claiming a chain position it does not have.
+		return Report{}, fmt.Errorf("%s: %w", framework, err)
+	}
+	r.Signature = sig
 	return r, nil
 }
 

@@ -43,7 +43,7 @@ func driveRestartContinuity(t *testing.T, store Store) {
 	}
 
 	s1 := newSigner(t, store)
-	s1.Sign([]byte("filing-A"))
+	_, _ = s1.Sign([]byte("filing-A"))
 	s1.Sign([]byte("filing-B"))
 	preRestartHead := s1.Head()
 
@@ -52,7 +52,7 @@ func driveRestartContinuity(t *testing.T, store Store) {
 	if s2.Head() != preRestartHead {
 		t.Fatalf("head not recovered across restart: got %q want %q", s2.Head(), preRestartHead)
 	}
-	s2.Sign([]byte("filing-C"))
+	_, _ = s2.Sign([]byte("filing-C"))
 
 	links, err := store.Links(ctx)
 	if err != nil {

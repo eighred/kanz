@@ -20,6 +20,7 @@ import (
 	"errors"
 	"sync"
 
+	"github.com/kanz-eng/kanz/internal/audit/chain"
 	"github.com/kanz-eng/kanz/internal/audit/signer"
 )
 
@@ -28,7 +29,19 @@ import (
 // Genesis. Append is idempotent on the link hash — a redelivered identical
 // filing signed at the same head produces the same link, recorded once.
 type Store interface {
-	// Append records one chain link, idempotent on its Hash (link.Cur).
+	// AppendChained is the ONLY safe way to extend the chain when more than one
+	// writer exists. It reads the current head, computes the next link, and
+	// inserts it — ATOMICALLY, serialized against every other writer.
+	//
+	// The alternative (read Head(), chain in your process, then Append) is a
+	// check-then-act: two pods both read the same head, both chain off it, and the
+	// chain FORKS into two divergent histories of signature links. That is exactly
+	// what a regulator would ask about, and it is why regulatory was pinned to one
+	// replica until this existed.
+	AppendChained(ctx context.Context, body []byte) (signer.Link, error)
+	// Append records one pre-chained link, idempotent on its Hash (link.Cur). Safe
+	// only for a single writer, or for replaying links whose chain position is
+	// already decided.
 	Append(ctx context.Context, link signer.Link) error
 	// Head returns the hash of the most recently appended link, or "" when the
 	// chain is empty (a fresh deployment starts at Genesis).
@@ -44,6 +57,26 @@ type MemoryStore struct {
 	mu    sync.RWMutex
 	links []signer.Link
 	seen  map[string]bool // link hash -> present, for idempotent append
+}
+
+// AppendChained chains body onto the current head under the store's lock. In one
+// process this is exactly as safe as the Postgres path; across processes there is
+// no shared memory, which is precisely the problem the Postgres implementation
+// solves with an advisory lock.
+func (m *MemoryStore) AppendChained(_ context.Context, body []byte) (signer.Link, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	prev := chain.Genesis
+	if n := len(m.links); n > 0 {
+		prev = m.links[n-1].Cur
+	}
+	link := signer.Link{Prev: prev, Cur: chain.Next(prev, body), Body: append([]byte(nil), body...)}
+	if !m.seen[link.Cur] {
+		m.links = append(m.links, link)
+		m.seen[link.Cur] = true
+	}
+	return link, nil
 }
 
 // NewMemoryStore returns an empty in-memory Store.

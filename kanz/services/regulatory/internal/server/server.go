@@ -26,7 +26,11 @@ import (
 // AUDIT-01 signer.ChainSigner, or a bare content-hash signer) drives every
 // framework's filing. The composition root injects the concrete signer.
 type Signer interface {
-	Sign(canonical []byte) string
+	// Sign returns the report's signature — its position in the durable audit
+	// chain. An error means the chain link did NOT land, and the report must not be
+	// issued: a filing carrying a chain position that exists in no chain is worse
+	// than no filing.
+	Sign(canonical []byte) (string, error)
 }
 
 // Readiness gates traffic; the endpoints are pure over the request, so the
