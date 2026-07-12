@@ -1,6 +1,8 @@
 package main
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/kanz-eng/kanz/services/datamaster/internal/config"
@@ -26,18 +28,48 @@ func TestGuardSimRefusesASimulatedMaster(t *testing.T) {
 	}
 }
 
-// The default build wires no vendor at all: nothing implements feed.RefSource, so
-// there is no production feed to construct. An empty master is the honest state —
-// the canned set exists only under the flag.
+// With no vendor drop configured the service wires nothing. An empty master is the
+// honest state — the canned set exists only under the flag.
 func TestBuildFeedsIsEmptyUnlessSimIsAllowed(t *testing.T) {
-	if feeds := buildFeeds(config.Config{}); len(feeds) != 0 {
+	feeds, err := buildFeeds(config.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(feeds) != 0 {
 		t.Fatalf("the default configuration wired %d feed(s); it must wire none", len(feeds))
 	}
-	feeds := buildFeeds(config.Config{AllowSim: true})
+	feeds, err = buildFeeds(config.Config{AllowSim: true})
+	if err != nil {
+		t.Fatal(err)
+	}
 	if len(feeds) == 0 {
 		t.Fatal("DATAMASTER_ALLOW_SIM wired no feeds — the developer path is dead")
 	}
 	if err := guardSim(feeds, true); err != nil {
 		t.Fatalf("the sim feeds it builds must pass their own guard: %v", err)
+	}
+}
+
+// A configured vendor drop displaces the canned book entirely: with a real vendor
+// wired, ALLOW_SIM must not quietly mix invented records into the master beside it.
+func TestARealVendorDisplacesTheSimBook(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "reference.csv")
+	if err := os.WriteFile(path, []byte("figi,currency\nBBG000BLNNH6,USD\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	feeds, err := buildFeeds(config.Config{
+		AllowSim:       true, // even so
+		RefFiles:       map[string]string{"BLOOMBERG": path},
+		VendorPriority: map[string]int{"BLOOMBERG": 0},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(feeds) != 1 || feeds[0].Vendor() != "BLOOMBERG" {
+		t.Fatalf("want exactly the real vendor, got %d feed(s)", len(feeds))
+	}
+	if err := guardSim(feeds, false); err != nil {
+		t.Fatalf("a real vendor feed is not a simulator: %v", err)
 	}
 }

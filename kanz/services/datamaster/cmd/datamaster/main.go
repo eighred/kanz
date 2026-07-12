@@ -5,12 +5,14 @@
 // trusted-data foundation every analytic silently assumes (ROI #41).
 //
 // This is the composition root: it opens the durable stores, builds the vendor
-// feeds, and starts the projector that folds the feeds into the golden store. A
-// real Bloomberg/Refinitiv/ICE adapter wires in behind the feed.RefSource seam
-// here — feed.NewReferenceAdapter already normalizes such a source into the
-// VendorFeed contract; nothing implements RefSource yet, so with no feeds
-// configured the projector has nothing to project and the master stays empty.
-// That is the honest state: an empty master, not an invented one.
+// feeds, and starts the projector that folds the feeds into the golden store.
+//
+// The vendors are mounted file drops (DATA-M8c) — DATAMASTER_REF_FILES and
+// DATAMASTER_PRICE_FILES — which is how Bloomberg Data License / Refinitiv
+// DataScope actually deliver reference data. A vendor with a REST reference API
+// implements the same feed.RefSource / feed.PriceSource seams beside them and
+// nothing downstream changes. With no vendor configured the projector has nothing
+// to project and the master stays empty: an empty master, not an invented one.
 package main
 
 import (
@@ -21,6 +23,7 @@ import (
 	"os"
 	"os/signal"
 	"runtime/debug"
+	"sort"
 	"syscall"
 	"time"
 
@@ -67,10 +70,17 @@ func main() {
 		_ = obs.Shutdown(shutCtx)
 	}()
 
-	feeds := buildFeeds(cfg)
+	feeds, err := buildFeeds(cfg)
+	if err != nil {
+		logger.Error("vendor feed configuration is invalid", "err", err)
+		os.Exit(2)
+	}
 	if err := guardSim(feeds, cfg.AllowSim); err != nil {
 		logger.Error("refusing to start", "err", err)
 		os.Exit(2)
+	}
+	for _, f := range feeds {
+		logger.Info("vendor feed wired", "vendor", f.Vendor())
 	}
 
 	golden, exceptions, cycleLock, closeStores, err := openStores(ctx, cfg)
@@ -114,7 +124,7 @@ func main() {
 		}
 		go proj.Run(ctx, cfg.RefreshInterval)
 	} else {
-		logger.Warn("no vendor feeds configured; the golden master will not be refreshed (implement feed.RefSource to wire a vendor)")
+		logger.Warn("no vendor feeds configured; the golden master will not be refreshed (set DATAMASTER_REF_FILES / DATAMASTER_PRICE_FILES to a mounted vendor drop)")
 	}
 	readiness.Set(true)
 
@@ -163,16 +173,55 @@ func openStores(ctx context.Context, cfg config.Config) (store.GoldenStore, stor
 		store.NewPostgresCycleLock(pool, tenant), pool.Close, nil
 }
 
-// buildFeeds assembles the vendor feeds. There is no production feed to build: no
-// type implements feed.RefSource, so a real vendor is not wired and this returns
-// nothing. The canned SimFeed set is built ONLY under DATAMASTER_ALLOW_SIM, for a
-// developer running the resolve→arbitrate→persist path with no vendor account.
+// buildFeeds assembles the vendor feeds.
 //
-// The canned book is deliberately not clean: three vendors quote SIM1 at 100, 101
-// and 130, so the consensus is 101 and the third breaches tolerance. A simulator
-// that never produces a break cannot exercise the surface it exists to exercise —
-// the developer would see an empty oversight queue and learn nothing about it.
-func buildFeeds(cfg config.Config) []feed.VendorFeed {
+// The REAL feeds are the mounted vendor drops (DATA-M8c): DATAMASTER_REF_FILES
+// gives each vendor's reference extract and DATAMASTER_PRICE_FILES its price
+// extract, which is how Bloomberg Data License / Refinitiv DataScope actually
+// deliver. Reference and price are separate sources because they are separate
+// files with separate cadences — a vendor may supply either or both.
+//
+// The canned SimFeed set is built ONLY under DATAMASTER_ALLOW_SIM, and only when
+// no real vendor is configured: a laptop with no vendor account still needs to run
+// the resolve→arbitrate→persist path. It is deliberately not clean — three vendors
+// quote SIM1 at 100, 101 and 130, so the consensus is 101 and the third breaches
+// tolerance. A simulator that never raises a break cannot exercise the surface it
+// exists to exercise.
+func buildFeeds(cfg config.Config) ([]feed.VendorFeed, error) {
+	var feeds []feed.VendorFeed
+
+	for _, vendor := range sortedVendors(cfg.RefFiles) {
+		src, err := feed.NewFileRefSource(vendor, cfg.VendorPriority[vendor], cfg.RefFiles[vendor])
+		if err != nil {
+			return nil, err
+		}
+		feeds = append(feeds, feed.NewReferenceAdapter(src, nil))
+	}
+	for _, vendor := range sortedVendors(cfg.PriceFiles) {
+		src, err := feed.NewFilePriceSource(vendor, cfg.PriceFiles[vendor])
+		if err != nil {
+			return nil, err
+		}
+		feeds = append(feeds, feed.NewPriceAdapter(src, nil))
+	}
+	if len(feeds) > 0 {
+		return feeds, nil
+	}
+	return simFeeds(cfg), nil
+}
+
+// sortedVendors keeps feed construction deterministic (a map range is not).
+func sortedVendors(m map[string]string) []string {
+	out := make([]string, 0, len(m))
+	for v := range m {
+		out = append(out, v)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// simFeeds is the canned developer book. Nil unless DATAMASTER_ALLOW_SIM.
+func simFeeds(cfg config.Config) []feed.VendorFeed {
 	if !cfg.AllowSim {
 		return nil
 	}

@@ -29,10 +29,24 @@
 #   This means scaling datamaster buys read capacity and availability, NOT faster
 #   refreshes. The cycle is DATAMASTER_REFRESH_INTERVAL, whatever the replica count.
 #
-# There is no vendor feed today: nothing implements feed.RefSource, so the
-# projector has nothing to project and the master stays empty. That is the honest
-# state. DATAMASTER_ALLOW_SIM would fill it from canned data — hence the guard
-# below, which is what keeps an invented security book out of a real database.
+# THE VENDOR DROP (DATA-M8c).
+#
+#   The vendors are mounted flat-file extracts — how Bloomberg Data License and
+#   Refinitiv DataScope actually deliver a security master. Ops lands the files on
+#   the `vendor` volume (an SFTP sync sidecar, a PVC, or a CSI mount of the drop
+#   bucket); the projector re-reads them every cycle, so a fresh delivery needs no
+#   restart.
+#
+#   DATAMASTER_VENDOR_PRIORITY has NO DEFAULT and the service refuses to start
+#   without one for every reference vendor. It is the survivorship trust rank —
+#   whose ISIN wins when two vendors disagree — and that is a decision about who
+#   the fund believes. This service will not quietly make it for you.
+#
+#   With no vendor configured the projector has nothing to project and the master
+#   stays EMPTY. That is the honest state, and it is what you get until the files
+#   are mounted. DATAMASTER_ALLOW_SIM would fill it from canned data instead —
+#   hence the guard below, which is what keeps an invented security book out of a
+#   real database.
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -121,6 +135,18 @@ spec:
             - { name: DATAMASTER_TENANT, value: "__system__" }
             - { name: DATAMASTER_LISTEN, value: ":8080" }
             - { name: DATAMASTER_REFRESH_INTERVAL, value: "5m" }
+            # The vendor drops. Reference and price are separate extracts with
+            # separate cadences; a vendor may supply either or both. Adjust to the
+            # vendors this fund actually licenses.
+            - name: DATAMASTER_REF_FILES
+              value: "BLOOMBERG=/vendor/bloomberg/reference.csv,ICE=/vendor/ice/reference.csv"
+            - name: DATAMASTER_PRICE_FILES
+              value: "BLOOMBERG=/vendor/bloomberg/prices.csv,ICE=/vendor/ice/prices.csv"
+            # Survivorship trust rank; LOWER WINS. No default — the service refuses
+            # to start if a reference vendor has none, because "whose ISIN do we
+            # believe" is not a question infrastructure may answer by accident.
+            - name: DATAMASTER_VENDOR_PRIORITY
+              value: "BLOOMBERG=0,ICE=1"
             # DATAMASTER_ALLOW_SIM is deliberately absent. Setting it here would
             # let canned vendor data be resolved into golden_records, where it is
             # indistinguishable from mastered reference data and is trusted as the
@@ -143,11 +169,22 @@ spec:
               drop: ["ALL"]
           volumeMounts:
             - { name: db, mountPath: /run/secrets/db, readOnly: true }
+            # The vendor drop, read-only: this service consumes an extract, it never
+            # writes one. A datamaster that could edit its own vendor file is a
+            # datamaster that can invent a security master.
+            - { name: vendor, mountPath: /vendor, readOnly: true }
             - { name: spiffe, mountPath: /run/spiffe, readOnly: true }
             - { name: tmp, mountPath: /tmp }
       volumes:
         - name: tmp
           emptyDir: {}
+        # The vendor extract drop. Point this at wherever the licensed feed lands —
+        # a PVC an SFTP sync writes, or a CSI mount of the delivery bucket. It is
+        # ReadOnlyMany because every replica reads the same delivery.
+        - name: vendor
+          persistentVolumeClaim:
+            claimName: datamaster-vendor-drop
+            readOnly: true
         - name: db
           csi:
             driver: secrets-store.csi.k8s.io
@@ -158,3 +195,30 @@ spec:
           csi:
             driver: csi.spiffe.io
             readOnly: true
+---
+# The vendor extract drop.
+#
+# ReadWriteMany because two different things touch it: the ops-side delivery
+# (an SFTP sync job / the vendor's scheduled push) WRITES it, and every datamaster
+# replica READS it. The datamaster container itself mounts it readOnly — it
+# consumes an extract and must never be able to edit one, because a service that
+# can rewrite its own vendor file is a service that can invent a security master.
+#
+# A site that takes delivery into object storage should replace this volume with
+# the S3/GCS CSI driver instead of a PVC; nothing in the service changes — it reads
+# whatever is at the paths in DATAMASTER_REF_FILES / DATAMASTER_PRICE_FILES.
+#
+# storageClassName is deliberately unset: it is a site decision, and RWX support
+# differs by provider (EFS, Filestore, Azure Files, CephFS).
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: datamaster-vendor-drop
+  namespace: kanz-services
+  labels:
+    app.kubernetes.io/part-of: kanz
+spec:
+  accessModes: ["ReadWriteMany"]
+  resources:
+    requests:
+      storage: 10Gi

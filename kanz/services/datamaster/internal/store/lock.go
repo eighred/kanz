@@ -45,11 +45,13 @@ func NewPostgresCycleLock(pool *pgxpool.Pool, tenant string) *PostgresCycleLock 
 }
 
 // cycleLockKey derives this tenant's advisory-lock key. Any deterministic value
-// works — an advisory lock key is just a namespace both sides agree on.
+// works — an advisory lock key is just a namespace both sides agree on. The high
+// bit is masked off so the key is always positive: a bare uint64→int64 conversion
+// would be a wraparound that reads like a bug to anyone auditing this later.
 func cycleLockKey(tenant string) int64 {
 	h := fnv.New64a()
 	_, _ = h.Write([]byte("datamaster/projector/" + tenant))
-	return int64(h.Sum64())
+	return int64(h.Sum64() & 0x7FFF_FFFF_FFFF_FFFF)
 }
 
 // TryAcquire takes the cycle lock without waiting. It returns a release func and
