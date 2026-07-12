@@ -37,8 +37,45 @@ env:
 jobs:
   go:
     runs-on: ubuntu-latest
+    # A live Postgres for the durable-store integration suites. Without it every
+    # test gated on TEST_POSTGRES_URL silently SKIPS — including EXEC-M7c's
+    # TestPostgresCreateIsAtomicAdmissionGate, the only automated proof that the
+    # OMS admission gate holds across pods. That test is what makes
+    # infra/deploy/oms-deploy.yaml's `replicas: 2` safe rather than a double-trade,
+    # so a green pipeline that skipped it is not a green pipeline.
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: kanz
+          POSTGRES_PASSWORD: kanz
+          POSTGRES_DB: kanz
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
     steps:
       - uses: actions/checkout@v4
+
+      # The suites must connect as a NON-SUPERUSER. Postgres bypasses row-level
+      # security for superusers, so the MT-01d tenant-isolation tests detect that
+      # and skip (persist/postgres_test.go: "RLS is bypassed for superusers").
+      # Running as the superuser would mean a green pipeline that never once
+      # verified that one tenant cannot read another's rows. `kanzapp` owns its
+      # database, so it can run the migrations' DDL while FORCE RLS still applies
+      # to it — the same posture the services run under in production.
+      - name: Provision non-superuser DB role (so RLS is enforced, not bypassed)
+        env:
+          PGPASSWORD: kanz
+        run: |
+          psql -h localhost -U kanz -d kanz -v ON_ERROR_STOP=1 \
+            -c "CREATE ROLE kanzapp LOGIN PASSWORD 'kanz' NOSUPERUSER;" \
+            -c "CREATE DATABASE kanzapp OWNER kanzapp;"
+          psql -h localhost -U kanz -d kanzapp -v ON_ERROR_STOP=1 \
+            -c "GRANT ALL ON SCHEMA public TO kanzapp;"
 
       - uses: actions/setup-go@v5
         with:
@@ -74,11 +111,18 @@ jobs:
         run: go vet ./...
 
       # ./... includes the arch (test/arch) + contract (test/contract) suites —
-      # they are ordinary, untagged _test.go files. Postgres/Kafka integration
-      # tests skip without TEST_POSTGRES_URL / TEST_KAFKA_BROKERS, so the gate
-      # needs no live brokers. -race needs cgo (default-on on ubuntu runners).
-      - name: Test (race) — incl. arch + contract suites
+      # they are ordinary, untagged _test.go files. -race needs cgo (default-on
+      # on ubuntu runners).
+      #
+      # TEST_POSTGRES_URL points at the non-superuser role above, so the durable
+      # -store suites RUN here instead of skipping — the order-store admission
+      # gate and the RLS tenant-isolation tests included. Kafka integration tests
+      # still skip without TEST_KAFKA_BROKERS; that gap is real, but Kafka's tests
+      # do not guard a capital-path invariant the way the order store's do.
+      - name: Test (race) — incl. arch + contract + Postgres suites
         working-directory: kanz
+        env:
+          TEST_POSTGRES_URL: postgres://kanzapp:kanz@localhost:5432/kanzapp?sslmode=disable
         run: go test -race ./...
 
       - name: golangci-lint
