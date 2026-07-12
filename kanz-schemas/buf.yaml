@@ -4,6 +4,18 @@ modules:
 lint:
   use:
     - STANDARD
+  ignore_only:
+    # inference.v1 deliberately transports the SAME payloads on the sync gRPC path
+    # and the async streaming path — FeatureVector in, PredictionEnvelope out (see
+    # that file's header). A FeatureVector logged from the streaming path replays
+    # into this RPC without field migration. Renaming them to PredictRequest /
+    # PredictResponse to satisfy the naming rule would BREAK that symmetry and the
+    # wire compatibility of a published SDK, to gain nothing. The design is the
+    # exception, so the exception is recorded here rather than the design bent.
+    RPC_REQUEST_STANDARD_NAME:
+      - proto/inference/v1/inference_service.proto
+    RPC_RESPONSE_STANDARD_NAME:
+      - proto/inference/v1/inference_service.proto
 breaking:
   use:
     - FILE

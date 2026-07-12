@@ -24,7 +24,6 @@ package accounting.v1;
 
 import "google/protobuf/timestamp.proto";
 import "common/v1/decimal.proto";
-import "common/v1/money.proto";
 
 // EntryType classifies a ledger journal entry by what produced it.
 enum EntryType {

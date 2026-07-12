@@ -16,7 +16,14 @@ syntax = "proto3";
 package reference.v1;
 
 import "common/v1/decimal.proto";
-import "reference/v1/fixed_income.proto"; // reuses DayCountConvention / PaymentFrequency
+import "reference/v1/fixed_income.proto"; // reuses DayCountConvention
+// PaymentFrequency lives in contract.proto and must be imported DIRECTLY. proto
+// imports are not transitive: importing fixed_income.proto (which itself imports
+// contract.proto) does NOT bring PaymentFrequency into this file's scope. Without
+// this line `buf generate` fails with "cannot find PaymentFrequency in this
+// scope" — and since CI generates the SDK before it builds or tests, that failure
+// takes the entire Go pipeline down before a single test runs.
+import "reference/v1/contract.proto"; // PaymentFrequency
 
 // CollateralPool is the amortizing asset pool backing a deal — the cashflow
 // source the waterfall distributes.
