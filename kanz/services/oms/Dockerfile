@@ -10,11 +10,14 @@
 #
 # # GOTAGS decides whether this image can trade
 #
-# The venue adapters are build-tag split (services/oms/cmd/oms/venues_*.go). The
-# DEFAULT build is vendor-free: `//go:build !binance` and `!okx` compile in no
-# exchange connector at all, leaving only the SimVenue. That default is
-# deliberate — it keeps the vendor SDKs and the IP-hardened connector code out of
-# an artifact that does not need them.
+# BINANCE IS NO LONGER A TAG (INFRA-M7a-2). It is its own service now
+# (services/venue-binance), reached over venue.v1/mTLS, and no Binance code links
+# into this image under any build. Only OKX remains tag-split, and M7a-3 removes
+# it the same way — after which this ARG disappears entirely.
+#
+# The remaining venue adapter is build-tag split (venues_okx*.go). The DEFAULT
+# build is vendor-free: `//go:build !okx` compiles in no in-process exchange
+# connector at all, leaving only the SimVenue.
 #
 # It also means an untagged image is a SIMULATOR. It starts, passes its probes,
 # accepts orders, and routes every one of them to a fake venue — successfully,
@@ -23,10 +26,14 @@
 #
 # So a real-venue image is an EXPLICIT act:
 #
-#   docker build --build-arg GOTAGS=binance,okx -f kanz/services/oms/Dockerfile .
+#   docker build --build-arg GOTAGS=okx -f kanz/services/oms/Dockerfile .
 #
 # and the resulting image must be tagged so that nobody can mistake one for the
-# other. If oms-deploy.yaml points at an untagged build, the OMS is not trading.
+# other. If oms-deploy.yaml points at an untagged build, the OMS cannot reach OKX.
+#
+# NOTE: an untagged image can now still trade BINANCE, because Binance is an
+# out-of-process adapter selected by OMS_VENUE_ENDPOINTS, not by a build tag. The
+# simulator fallback only applies when NO venue is configured at all.
 FROM golang:1.26.1 AS build
 WORKDIR /src
 ENV GOFLAGS=-mod=mod

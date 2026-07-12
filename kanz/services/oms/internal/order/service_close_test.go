@@ -10,7 +10,7 @@ import (
 	envelopepb "github.com/kanz-eng/kanz-schemas-go/envelope/v1"
 	orderpb "github.com/kanz-eng/kanz-schemas-go/order/v1"
 
-	"github.com/kanz-eng/kanz/services/oms/internal/execution"
+	"github.com/kanz-eng/kanz/internal/execution"
 )
 
 // The venue-close dispatch path (EXEC-M4d): a cancel must reach the EXCHANGE,

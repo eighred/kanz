@@ -10,9 +10,9 @@ import (
 	orderpb "github.com/kanz-eng/kanz-schemas-go/order/v1"
 	"google.golang.org/protobuf/proto"
 
+	"github.com/kanz-eng/kanz/internal/execution"
 	"github.com/kanz-eng/kanz/pkg/bus"
 	"github.com/kanz-eng/kanz/services/oms/internal/compliance"
-	"github.com/kanz-eng/kanz/services/oms/internal/execution"
 )
 
 // fakeBus records published events for assertion.

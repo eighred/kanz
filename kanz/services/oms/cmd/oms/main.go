@@ -21,11 +21,11 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	comp "github.com/kanz-eng/kanz/internal/compliance"
+	"github.com/kanz-eng/kanz/internal/execution"
 	"github.com/kanz-eng/kanz/pkg/bus"
 	"github.com/kanz-eng/kanz/pkg/observability"
 	"github.com/kanz-eng/kanz/services/oms/internal/compliance"
 	"github.com/kanz-eng/kanz/services/oms/internal/config"
-	"github.com/kanz-eng/kanz/services/oms/internal/execution"
 	"github.com/kanz-eng/kanz/services/oms/internal/order"
 	"github.com/kanz-eng/kanz/services/oms/internal/position"
 	"github.com/kanz-eng/kanz/services/oms/internal/server"

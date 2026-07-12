@@ -11,9 +11,9 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 
+	"github.com/kanz-eng/kanz/internal/execution"
 	"github.com/kanz-eng/kanz/pkg/transport"
 	"github.com/kanz-eng/kanz/services/oms/internal/config"
-	"github.com/kanz-eng/kanz/services/oms/internal/execution"
 	"github.com/kanz-eng/kanz/services/oms/internal/order"
 )
 
@@ -43,7 +43,6 @@ var closeRegistry = execution.NewCloseRegistry()
 func configuredVenues(ctx context.Context, cfg config.Config, store order.Store, producer execution.Publisher, logger *slog.Logger) ([]execution.Venue, func()) {
 	adapter := storeAdapter{store: store}
 	var venues []execution.Venue
-	venues = append(venues, binanceVenues(ctx, cfg, adapter, producer, logger)...)
 	venues = append(venues, okxVenues(ctx, cfg, adapter, producer, logger)...)
 
 	// INFRA-M7a: out-of-process adapters. These need no build tag and link no

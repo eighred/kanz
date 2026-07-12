@@ -43,6 +43,11 @@ jobs:
           # pod with --dir /migrations/<service>.
           - service: kanz-migrate
             dockerfile: kanz/cmd/kanz-migrate/Dockerfile
+          # INFRA-M7a-2: the Binance exchange as its own process. Unlike the oms
+          # image this needs no GOTAGS — it IS the connector, so there is no
+          # variant of it that silently trades against nothing.
+          - service: venue-binance
+            dockerfile: kanz/services/venue-binance/Dockerfile
     steps:
       - uses: actions/checkout@v4
 

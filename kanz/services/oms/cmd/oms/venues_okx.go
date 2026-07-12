@@ -7,8 +7,8 @@ import (
 	"log/slog"
 	"os"
 
+	"github.com/kanz-eng/kanz/internal/execution"
 	"github.com/kanz-eng/kanz/services/oms/internal/config"
-	"github.com/kanz-eng/kanz/services/oms/internal/execution"
 )
 
 // okxVenues (okx build) builds the OKX Spot venue and starts its background

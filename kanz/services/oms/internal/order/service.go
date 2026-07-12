@@ -11,8 +11,8 @@ import (
 	orderpb "github.com/kanz-eng/kanz-schemas-go/order/v1"
 	"google.golang.org/protobuf/proto"
 
+	"github.com/kanz-eng/kanz/internal/execution"
 	"github.com/kanz-eng/kanz/services/oms/internal/compliance"
-	"github.com/kanz-eng/kanz/services/oms/internal/execution"
 )
 
 // Service is the OMS command handler (OMS-01b): the bus.EventHandler that
@@ -266,11 +266,17 @@ func (s *Service) closeAtVenue(ctx context.Context, st *orderpb.OrderState, now 
 	// the cancel raced a fill, the watchdog's venue query returns the order
 	// terminal and StateHealed carries that truth: we learn the fill, we never
 	// invent an offsetting trade.
-	s.closes.Track(execution.CloseIntent{
-		OrderID:      st.GetOrderId(),
-		InstrumentID: st.GetInstrumentId(),
-		RequestedAt:  now,
-	})
+	// A SelfHealing venue (an out-of-process adapter) tracks and heals its own
+	// closes. Tracking it here too would leave an entry nobody resolves in a
+	// registry the in-process OKX reconciler drains indiscriminately — and it would
+	// then try to heal another venue's order. Hands off.
+	if _, selfHealing := closer.(execution.SelfHealing); !selfHealing {
+		s.closes.Track(execution.CloseIntent{
+			OrderID:      st.GetOrderId(),
+			InstrumentID: st.GetInstrumentId(),
+			RequestedAt:  now,
+		})
+	}
 	if err := closer.CancelOrder(ctx, st); err != nil {
 		s.logger.Error("oms: venue cancel unconfirmed — left to the healing watchdog",
 			"order_id", st.GetOrderId(), "venue", venue.MIC(), "err", err)
