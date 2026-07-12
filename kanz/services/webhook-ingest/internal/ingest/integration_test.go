@@ -39,6 +39,17 @@ func TestIntegration_LoopOverNATS(t *testing.T) {
 	if url == "" {
 		t.Skip("set TEST_NATS_URL (with the dev stack + OMS running) to run the end-to-end loop")
 	}
+	// This test needs TWO things: a live NATS *and* a running OMS consuming from it.
+	// It gated on the first and assumed the second, so the moment a CI job provided
+	// NATS without an OMS it did not skip — it FAILED, waiting 15s for fills from a
+	// service that was never started. That is why NATS could not be added to CI, and
+	// so why the real-bus guards (the EXEC-M7a publish test, the EXEC-M8 venue
+	// publish-health test) have never once run there.
+	//
+	// A test must gate on ALL of its preconditions. This one now declares the OMS.
+	if os.Getenv("TEST_OMS_ON_BUS") == "" {
+		t.Skip("set TEST_OMS_ON_BUS=1 with an OMS consuming order.order.submit on TEST_NATS_URL to run the end-to-end loop")
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 

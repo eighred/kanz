@@ -7,8 +7,24 @@ import (
 	orderpb "github.com/kanz-eng/kanz-schemas-go/order/v1"
 )
 
-// ErrNoVenue is returned when the router has no venue to work an order.
+// ErrNoVenue is returned when the router has NO venue at all. An OMS with no
+// execution wired is a deliberate configuration (a paper/observation deployment),
+// and its orders rest.
 var ErrNoVenue = errors.New("execution: no venue available")
+
+// ErrVenueNotConfigured is returned when an order NAMES a venue this OMS has no
+// adapter for. It is deliberately NOT wrapped in ErrNoVenue, because the two are
+// opposite situations and the caller must not confuse them:
+//
+//   - ErrNoVenue          — nothing is wired; resting the order is correct.
+//   - ErrVenueNotConfigured — the order asked for a specific venue by name and
+//     this OMS has no way to reach it. It can never be executed: not now, not on a
+//     retry, not ever. Resting it tells the strategy its order is working while
+//     nothing on this platform will ever send it anywhere.
+//
+// It used to wrap ErrNoVenue, so `errors.Is(err, ErrNoVenue)` was true for both and
+// the OMS rested an order it could never fill (EXEC-M8).
+var ErrVenueNotConfigured = errors.New("execution: target venue is not configured")
 
 // Router is the smart-order-router + multi-venue allocation matrix (M4). When an
 // order carries a target venue (OrderState.venue, stamped by the allocation
@@ -36,7 +52,20 @@ func (r *Router) Route(st *orderpb.OrderState) (Venue, error) {
 				return v, nil
 			}
 		}
-		return nil, fmt.Errorf("%w: target venue %q is not configured", ErrNoVenue, target)
+		return nil, fmt.Errorf("%w: %q", ErrVenueNotConfigured, target)
 	}
 	return r.venues[0], nil
+}
+
+// Supports reports whether an adapter for this MIC is configured. The OMS checks
+// it at ADMISSION, so an order naming a venue that does not exist is refused
+// before it is ever admitted — the same treatment a compliance breach or a
+// malformed order gets, and for the same reason: it can never be executed.
+func (r *Router) Supports(mic string) bool {
+	for _, v := range r.venues {
+		if v.MIC() == mic {
+			return true
+		}
+	}
+	return false
 }

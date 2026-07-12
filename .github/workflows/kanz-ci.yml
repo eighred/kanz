@@ -119,10 +119,29 @@ jobs:
       # gate and the RLS tenant-isolation tests included. Kafka integration tests
       # still skip without TEST_KAFKA_BROKERS; that gap is real, but Kafka's tests
       # do not guard a capital-path invariant the way the order store's do.
-      - name: Test (race) — incl. arch + contract + Postgres suites
+      # The real-bus guards are worthless if they never run, and until now they
+      # never did: CI provisioned Postgres but no broker, so TEST_NATS_URL was
+      # unset and EVERY NATS integration test silently skipped — including the
+      # EXEC-M7a guard, which exists precisely because a fake Publisher cannot fail
+      # the way a broker fails, and the EXEC-M8 venue publish-health test, which is
+      # the capital control that stops an adapter trading while nobody records it.
+      #
+      # A service container cannot pass the `-js` arg the image needs, so JetStream
+      # is started as a step.
+      - name: Start NATS (JetStream)
+        run: |
+          docker run -d --name kanz-ci-nats -p 4222:4222 nats:2 -js
+          for i in $(seq 1 30); do
+            docker logs kanz-ci-nats 2>&1 | grep -q "Server is ready" && exit 0
+            sleep 1
+          done
+          echo "NATS did not become ready"; docker logs kanz-ci-nats; exit 1
+
+      - name: Test (race) — incl. arch + contract + Postgres + real-bus suites
         working-directory: kanz
         env:
           TEST_POSTGRES_URL: postgres://kanzapp:kanz@localhost:5432/kanzapp?sslmode=disable
+          TEST_NATS_URL: nats://localhost:4222
         run: go test -race ./...
 
       - name: golangci-lint

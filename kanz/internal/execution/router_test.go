@@ -25,9 +25,20 @@ func TestRouter_RoutesByTargetVenue(t *testing.T) {
 	if err != nil || v.MIC() != "BINANCE" {
 		t.Fatalf("no target → %v (mic %q), want BINANCE", err, mic(v))
 	}
-	// An unconfigured target is refused — never silently misrouted.
-	if _, err := r.Route(&orderpb.OrderState{Venue: "KRAKEN"}); !errors.Is(err, ErrNoVenue) {
-		t.Fatalf("unconfigured target = %v, want ErrNoVenue", err)
+	// An unconfigured target is refused — never silently misrouted, and never
+	// confused with "no venues at all".
+	//
+	// This used to return ErrNoVenue, and the OMS treats ErrNoVenue as "rest the
+	// order". So an order naming a venue this OMS could never reach was ADMITTED
+	// and left resting: the strategy was told its order was working while nothing
+	// on the platform would ever route it anywhere (EXEC-M8). The two errors are
+	// opposite situations and must not answer to the same errors.Is.
+	_, err = r.Route(&orderpb.OrderState{Venue: "KRAKEN"})
+	if !errors.Is(err, ErrVenueNotConfigured) {
+		t.Fatalf("unconfigured target = %v, want ErrVenueNotConfigured", err)
+	}
+	if errors.Is(err, ErrNoVenue) {
+		t.Fatal("a named-but-unconfigured venue answered to ErrNoVenue — the OMS would rest an order it can never execute")
 	}
 }
 

@@ -3,6 +3,7 @@ package order
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"time"
 
@@ -103,6 +104,20 @@ func (s *Service) handleSubmit(ctx context.Context, payload []byte) error {
 		return s.refuse(ctx, cmd.GetOrderId(), "COMPLIANCE_"+breach.Code, breach.Reason, now)
 	}
 
+	// An order that names a venue this OMS has no adapter for can NEVER be executed
+	// — not now, not on a retry, not ever. Refuse it HERE, at admission, alongside
+	// the compliance and validation rejections, because that is what it is: an order
+	// this OMS cannot work. It used to be admitted and left to "rest", which told
+	// the strategy its order was working while nothing on this platform would ever
+	// route it anywhere, and nothing would ever say so (EXEC-M8).
+	//
+	// This is NOT the "no venues configured at all" case — that is a deliberate
+	// paper/observation deployment, and its orders still rest.
+	if target := cmd.GetVenue(); target != "" && s.router != nil && !s.router.Supports(target) {
+		return s.refuse(ctx, cmd.GetOrderId(), "VENUE_NOT_CONFIGURED",
+			fmt.Sprintf("target venue %q is not configured on this OMS", target), now)
+	}
+
 	// Validate + admit.
 	st, err := Accept(&cmd, now)
 	if err != nil {
@@ -152,8 +167,11 @@ func (s *Service) work(ctx context.Context, st *orderpb.OrderState) (*orderpb.Or
 	}
 	venue, err := s.router.Route(st)
 	if errors.Is(err, execution.ErrNoVenue) {
-		return st, nil // no venue ⇒ rest
+		return st, nil // nothing wired at all ⇒ rest (a paper deployment)
 	}
+	// A named-but-unconfigured venue is refused at admission and cannot reach here.
+	// If it ever does, it is an error — never a silent rest. An order nobody can
+	// execute must not look like an order that is working.
 	if err != nil {
 		return st, err
 	}

@@ -47,12 +47,19 @@ func TestIntegration_EmitReachesTheWire(t *testing.T) {
 	if err != nil {
 		t.Fatalf("setup connect: %v", err)
 	}
-	defer setupConn.Close()
+	// t.Cleanup, NOT defer. A deferred Close runs BEFORE the registered cleanups, so
+	// the DeleteStream below was firing on a connection this line had already torn
+	// down: the stream survived the test, kept its messages, and poisoned the next
+	// run — the test passed on a fresh broker and failed on every repeat. Cleanups
+	// run last-registered-first, so registering the close FIRST makes it run LAST.
+	t.Cleanup(setupConn.Close)
 	js, err := jetstream.New(setupConn)
 	if err != nil {
 		t.Fatalf("setup jetstream: %v", err)
 	}
 	const streamName = "EXECUTION_IT"
+	// Idempotent: a previous run that died mid-test must not decide this one.
+	_ = js.DeleteStream(ctx, streamName)
 	if _, err := js.CreateStream(ctx, jetstream.StreamConfig{
 		Name:      streamName,
 		Subjects:  []string{"execution.>", "strategy.>", "order.>"},
