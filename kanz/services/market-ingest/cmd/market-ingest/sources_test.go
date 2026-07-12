@@ -90,3 +90,15 @@ func TestFeedsWithNoInstrumentsIsNotAnError(t *testing.T) {
 		t.Fatalf("got %d feeds, want 0", len(got))
 	}
 }
+
+// TestConfigCarriesATenant guards a bug that made this service silently useless:
+// bus.Validate REJECTS an envelope without a tenant_id, and market-ingest never
+// set one. It connected to the exchange, folded the book correctly, and then
+// failed EVERY publish with "tenant_id required" — while /readyz kept returning
+// 200. It ingested perfectly and emitted nothing.
+func TestConfigCarriesATenant(t *testing.T) {
+	cfg := config.Load()
+	if cfg.Tenant == "" {
+		t.Fatal("no tenant configured — bus.Validate rejects every envelope and this service publishes NOTHING while reporting ready")
+	}
+}

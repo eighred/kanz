@@ -50,6 +50,11 @@ jobs:
             dockerfile: kanz/services/venue-binance/Dockerfile
           - service: venue-okx
             dockerfile: kanz/services/venue-okx/Dockerfile
+          # INFRA-M7a-4: the market-data edge. Public quotes, no credentials, one
+          # image — the venue build tags (and the silent-simulator fallback behind
+          # them) are gone.
+          - service: market-ingest
+            dockerfile: kanz/services/market-ingest/Dockerfile
     steps:
       - uses: actions/checkout@v4
 

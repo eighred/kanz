@@ -27,6 +27,14 @@ type Config struct {
 	// (deny-by-default: it never invents instruments).
 	Instruments []string
 
+	// Tenant is stamped on every market.v1 FACT this service publishes (MT-01b).
+	//
+	// It is REQUIRED, not optional: bus.Validate rejects an envelope without a
+	// tenant_id, so without this the service connects to the exchange, folds the
+	// book correctly, and then fails EVERY publish — while /readyz keeps returning
+	// 200. It ingests perfectly and emits nothing.
+	Tenant string
+
 	// AllowSim permits the deterministic SimFeed to stand in when no exchange
 	// symbols are mapped. It is OFF by default and must be set deliberately.
 	//
@@ -73,6 +81,7 @@ func Load() Config {
 		OTLPEndpoint:     os.Getenv("MARKET_INGEST_OTLP_ENDPOINT"),
 		NATSURL:          envOr("MARKET_INGEST_NATS_URL", "nats://localhost:4222"),
 		Source:           envOr("MARKET_INGEST_SOURCE", "market-ingest"),
+		Tenant:           envOr("MARKET_INGEST_TENANT", "__system__"),
 		Instruments:      parseList(os.Getenv("MARKET_INGEST_INSTRUMENTS")),
 		AllowSim:         os.Getenv("MARKET_INGEST_ALLOW_SIM") == "true",
 		SnapshotInterval: parseDuration(os.Getenv("MARKET_INGEST_SNAPSHOT_INTERVAL"), time.Second),

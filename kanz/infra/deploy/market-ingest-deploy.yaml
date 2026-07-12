@@ -1,0 +1,144 @@
+---
+# INFRA-M7a-4 — the market-data edge: public L2 depth + trades from the exchanges,
+# folded into order books and published to the bus as market.v1 FACTs.
+#
+# Everything downstream marks against what this service publishes: risk valuations,
+# NAV, the OMS's pricing. It holds NO credentials — it reads public quotes — which
+# is precisely why it did not need the process isolation the venue adapters got.
+# What it needs instead is to be honest about what it is publishing.
+#
+# THE FABRICATION GUARD: an ingest with nothing real to ingest publishes NOTHING.
+#
+#   This service used to fall back to a deterministic simulator whenever no
+#   exchange feed was wired, and log it at Info. SimFeed does not read a market —
+#   it GENERATES prices, and they went onto the bus as market.v1 FACTs that risk
+#   and NAV marked against. It reported itself healthy the whole time.
+#
+#   It now REFUSES to start unless either a venue symbol map is configured (below)
+#   or MARKET_INGEST_ALLOW_SIM is explicitly true. Do not "fix" a CrashLoopBackOff
+#   here by setting ALLOW_SIM — that does not restore market data, it replaces it
+#   with fiction. Fix the symbol map.
+#
+# THE SCALE INVARIANT: replicas: 1, and for a third distinct reason.
+#
+#   The OMS is pinned by a correctness gate; venue-binance by a per-API-KEY rate
+#   limit. This one is a state problem: each pod folds its OWN order book from its
+#   OWN websocket stream, and a book snapshot carries no idempotency key (the
+#   producer stamps a fresh event id per publish, so nothing dedups them). Two pods
+#   would publish two competing snapshot streams for the same instrument, folded
+#   from two streams that arrived at slightly different times — and downstream
+#   marks would flap between two views of the same book.
+#
+#   Scaling this service means SHARDING BY INSTRUMENT: one Deployment per shard,
+#   each with its own MARKET_INGEST_INSTRUMENTS. Never simply raise the count.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: market-ingest
+  namespace: kanz-services
+  labels:
+    app.kubernetes.io/part-of: kanz
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: market-ingest
+  namespace: kanz-services
+  labels:
+    app.kubernetes.io/part-of: kanz
+spec:
+  selector:
+    app: market-ingest
+  ports:
+    - { name: http, port: 8091, targetPort: 8091 }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: market-ingest
+  namespace: kanz-services
+  labels:
+    app.kubernetes.io/part-of: kanz
+spec:
+  # See THE SCALE INVARIANT above. Two pods fold two competing books.
+  replicas: 1
+  revisionHistoryLimit: 5
+  strategy:
+    # Never overlap two pods, even briefly: the overlap publishes two snapshot
+    # streams for the same instrument and the marks flap.
+    type: Recreate
+  selector:
+    matchLabels:
+      app: market-ingest
+  template:
+    metadata:
+      labels:
+        app: market-ingest
+        app.kubernetes.io/part-of: kanz
+    spec:
+      serviceAccountName: market-ingest
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: market-ingest
+          # Pinned to a cosign-signed digest by the GitOps bump (CICD-01d). One
+          # image, no variants — the venue build tags are gone.
+          image: ghcr.io/kanz-eng/market-ingest:latest
+          ports:
+            - { containerPort: 8091, name: http }
+          env:
+            - { name: MARKET_INGEST_LISTEN, value: ":8091" }
+            - { name: MARKET_INGEST_SOURCE, value: "market-ingest" }
+            # MT-01b: stamped on every market.v1 FACT. Without it bus.Validate
+            # rejects EVERY envelope and this pod ingests perfectly while emitting
+            # nothing — with /readyz still green.
+            - { name: MARKET_INGEST_TENANT, value: "__system__" }
+            - { name: MARKET_INGEST_NATS_URL, value: "nats://nats.kanz-messaging.svc:4222" }
+            # The instruments this shard folds. Scaling = another Deployment with a
+            # DIFFERENT list here, not a higher replica count.
+            - { name: MARKET_INGEST_INSTRUMENTS, value: "BTC-USD,ETH-USD" }
+            # THE SYMBOL MAPS ARE WHAT MAKE THIS SERVICE REAL. Every instrument
+            # above needs a mapping on at least one venue, or the pod refuses to
+            # start rather than invent prices for it. An instrument mapped on both
+            # venues folds two INDEPENDENT books — books are never merged across
+            # venues; a cross-venue engine compares them itself.
+            - { name: MARKET_INGEST_BINANCE_SYMBOLS, value: "BTC-USD=BTCUSDT,ETH-USD=ETHUSDT" }
+            - { name: MARKET_INGEST_OKX_SYMBOLS, value: "BTC-USD=BTC-USDT,ETH-USD=ETH-USDT" }
+            # Public endpoints — no API key exists for this service to hold.
+            - { name: MARKET_INGEST_BINANCE_WS_BASE, value: "wss://stream.binance.com:9443" }
+            - { name: MARKET_INGEST_BINANCE_REST_BASE, value: "https://api.binance.com" }
+            - { name: MARKET_INGEST_OKX_WS_URL, value: "wss://ws.okx.com:8443/ws/v5/public" }
+            - { name: SPIFFE_ENDPOINT_SOCKET, value: "unix:///run/spiffe/spire-agent.sock" }
+            # MARKET_INGEST_ALLOW_SIM is deliberately ABSENT. Setting it to "true"
+            # makes this pod publish generated prices as market data. It exists for
+            # local dev and tests, and it is never the fix for a failing deploy.
+          livenessProbe:
+            # /livez, NOT /healthz — this service's mux serves /livez + /readyz.
+            httpGet: { path: /livez, port: 8091 }
+            initialDelaySeconds: 5
+            periodSeconds: 15
+          readinessProbe:
+            httpGet: { path: /readyz, port: 8091 }
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - { name: spiffe, mountPath: /run/spiffe, readOnly: true }
+            - { name: tmp, mountPath: /tmp }
+      volumes:
+        - name: tmp
+          emptyDir: {}
+        - name: spiffe
+          csi:
+            driver: csi.spiffe.io
+            readOnly: true

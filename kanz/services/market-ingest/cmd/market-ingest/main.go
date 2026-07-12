@@ -62,7 +62,11 @@ func main() {
 	producer, err := bus.NewProducer(client, bus.ProducerConfig{
 		Source:          cfg.Source,
 		ProducerVersion: version(),
-		Metrics:         bus.NewBusMetrics(obs.Registry),
+		// MT-01b: without this, bus.Validate rejects every envelope
+		// ("tenant_id required") and the service publishes NOTHING while still
+		// reporting ready. The book folds; nothing leaves.
+		Tenant:  cfg.Tenant,
+		Metrics: bus.NewBusMetrics(obs.Registry),
 	})
 	if err != nil {
 		logger.Error("producer init failed", "err", err)
