@@ -109,7 +109,14 @@ func main() {
 		os.Exit(2)
 	}
 	go func() {
-		err := consumer.Subscribe(ctx, translate.SubjectModeChanged, cfg.Source+"-halt", gate.Handle)
+		// BROADCAST, not a consumer group. The gate is constructed CLOSED and only a
+		// ModeChanged FACT opens it — so a durable group meant a RESTARTED pod resumed
+		// past the operator's resume and never saw it: it came back halted, reported
+		// /readyz 200, and answered 423 to every signal until a human noticed. Every
+		// rolling update was a silent trading outage. A broadcast subscription starts
+		// at the LAST ModeChanged, so a pod that boots learns the CURRENT mode.
+		// Deny-by-default survives: no FACT ever published ⇒ nothing delivered ⇒ closed.
+		err := consumer.SubscribeBroadcast(ctx, translate.SubjectModeChanged, gate.Handle)
 		if err != nil && ctx.Err() == nil {
 			gate.Trip(lifecyclepb.OperatingMode_OPERATING_MODE_HALTED,
 				"halt subscription failed: "+err.Error())

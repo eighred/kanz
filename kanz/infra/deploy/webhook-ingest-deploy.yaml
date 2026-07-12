@@ -9,25 +9,23 @@
 #
 # THE REPLICA INVARIANT: 1, AND IT IS NOT ABOUT CAPACITY.
 #
-#   Two independent reasons, either one sufficient:
-#
-#   1. THE HALT GATE WOULD ONLY HALF-WORK. The gate is per-process and is opened by
-#      a ModeChanged FACT consumed through a CONSUMER GROUP — and a group
-#      load-balances: the message goes to exactly ONE pod. So an operator's RESUME
-#      reaches one replica while the other stays latched closed and answers 423 to
-#      roughly half the webhooks; and a HALT may land on the idle replica while the
-#      other keeps trading. A broadcast control signal consumed through a queue group
-#      is wrong at any replica count above one.
-#
-#   2. THE REPLAY DEFENCE IS AN IN-PROCESS MAP. The nonce cache
-#      (strategy_id + nonce) lives in one process. Two pods are two caches, so a
-#      re-delivered TradingView alert that lands on the other pod is admitted a
-#      SECOND time and fans out a SECOND set of SubmitOrder commands. The OMS's
-#      admission gate dedups on order_id, but a fresh nonce mints a fresh order_id —
-#      this is exactly the gap the OMS gate cannot close.
+#   THE REPLAY DEFENCE IS AN IN-PROCESS MAP. The nonce cache (strategy_id + nonce)
+#   lives in one process. Two pods are two caches, so a re-delivered TradingView
+#   alert that lands on the other pod is admitted a SECOND time and fans out a SECOND
+#   set of SubmitOrder commands. The OMS's admission gate dedups on order_id — but a
+#   fresh nonce mints a fresh order_id, so this is exactly the gap that gate cannot
+#   close. Moving the nonce cache to Redis (the dedup store already there) is what
+#   would lift this bound; until then, ONE.
 #
 #   Recreate, not RollingUpdate: two webhook-ingest processes must never be live at
-#   once, for reason (2).
+#   once, for the reason above.
+#
+#   (The halt gate USED to be a second, independent reason: it was opened by a
+#   ModeChanged FACT consumed through a CONSUMER GROUP, and a group load-balances —
+#   so an operator's resume reached one replica while the other stayed latched closed
+#   and 423'd half the signals. EXEC-M12 made that subscription a BROADCAST, so every
+#   pod now learns the current mode, and a restarted pod learns it at startup instead
+#   of coming back halted forever. That bound is lifted; the nonce cache is not.)
 #
 # THE CONFIG IS THE SECRET. WEBHOOK_INGEST_CONFIG points at a bootstrap JSON that
 # carries the per-strategy HMAC SECRETS (the authority boundary for every signal

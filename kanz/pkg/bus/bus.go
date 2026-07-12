@@ -52,6 +52,29 @@ type Subscriber interface {
 	Subscribe(ctx context.Context, subject, group string, h Handler) error
 }
 
+// BroadcastSubscriber delivers a subject's LATEST message to EVERY subscriber on
+// startup, and every subsequent one — an OPTIONAL capability (NATS/JetStream has it;
+// Kafka's client does not implement it, and callers that need it say so).
+//
+// It exists because a CONTROL-PLANE BROADCAST is not a work queue, and Subscribe is
+// a work queue. The halt gate is the example that cost us: it is constructed CLOSED
+// and is opened only by a ModeChanged FACT, consumed through Subscribe — so
+//
+//   - a RESTARTED pod resumed its durable at the last ack and NEVER SAW the
+//     operator's resume. It came back halted, reported /readyz 200, and answered
+//     423 to every signal until a human noticed. Every rolling update was a silent
+//     trading outage.
+//   - and with more than one pod, the consumer GROUP load-balanced the halt: the
+//     resume reached ONE replica while the other stayed closed.
+//
+// A broadcast consumer is ephemeral (no durable — every pod gets its own) and starts
+// at DeliverLastPerSubject, so a pod that boots learns the CURRENT mode at once.
+// Deny-by-default survives: if no ModeChanged FACT was ever published, nothing is
+// delivered and the gate stays closed.
+type BroadcastSubscriber interface {
+	SubscribeBroadcast(ctx context.Context, subject string, h Handler) error
+}
+
 // Client is a transport that does both. NATSClient and KafkaClient each
 // satisfy it; higher layers (EVT-17b–e) hold a Client rather than caring
 // which transport is underneath.

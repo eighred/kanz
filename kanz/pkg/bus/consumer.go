@@ -249,3 +249,44 @@ func (c *Consumer) publishDLQ(ctx context.Context, origSubject string, msg Messa
 	}
 	return nil
 }
+
+// SubscribeBroadcast delivers a subject's LATEST message to THIS process on startup,
+// and every subsequent one. Use it for CONTROL-PLANE STATE — a mode, a mandate, a
+// kill switch — never for work.
+//
+// It deliberately does NOT take the shared dedup claim that Subscribe takes. Dedup
+// exists to hand an event to exactly ONE consumer, and a broadcast must reach ALL of
+// them: running the halt FACT through it would let one pod claim the operator's
+// resume and leave every other pod latched closed — the same bug in a new place.
+//
+// Nor does it route to the DLQ. An unreadable control message must not be quietly
+// parked: it is returned as an error, the message is nacked, and the process stays in
+// whatever state it was in — which for the halt gate means CLOSED. "I could not read
+// the brake signal" must never resolve to "keep trading".
+func (c *Consumer) SubscribeBroadcast(ctx context.Context, subject string, h EventHandler) error {
+	bs, ok := c.subscriber.(BroadcastSubscriber)
+	if !ok {
+		return fmt.Errorf("bus: this transport cannot broadcast %q — a control signal delivered to one pod out of N is not a control signal", subject)
+	}
+	return bs.SubscribeBroadcast(ctx, subject, func(ctx context.Context, msg Message) error {
+		env, payload, err := Unframe(msg.Body)
+		if err != nil {
+			return fmt.Errorf("unframe %s: %w", subject, err)
+		}
+		if err := c.validate(env); err != nil {
+			return fmt.Errorf("envelope validation on %s: %w", subject, err)
+		}
+		ctx = WithCorrelationID(ctx, env.CorrelationId)
+		ctx = WithCausationID(ctx, env.EventId)
+		tenant := env.TenantId
+		if tenant == "" {
+			tenant = SystemTenant
+		}
+		ctx = WithTenantID(ctx, tenant)
+		if env.TraceContext != "" {
+			ctx = WithTraceContext(ctx, env.TraceContext)
+			ctx = observability.ContextWithTraceparent(ctx, env.TraceContext)
+		}
+		return h(ctx, env, payload)
+	})
+}

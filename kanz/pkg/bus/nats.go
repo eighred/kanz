@@ -227,3 +227,48 @@ func durableName(group, subject string) string {
 	safe := strings.NewReplacer(".", "_", "*", "_", ">", "_", " ", "_").Replace(subject)
 	return group + "-" + safe
 }
+
+// SubscribeBroadcast implements BroadcastSubscriber: an EPHEMERAL consumer starting
+// at the subject's LAST message.
+//
+// Ephemeral (no Durable) so every pod gets its OWN consumer and therefore its own
+// copy — a durable group would hand the message to exactly one of them, which is
+// what left one webhook-ingest replica trading while another stayed halted.
+//
+// DeliverLastPerSubject so a pod that starts LEARNS THE CURRENT STATE immediately,
+// rather than resuming a durable past the only message that mattered. This is what
+// makes a restart safe: the last operator-declared mode is re-applied, whatever it
+// was. If it was HALTED, the pod comes back halted — the lifecycle contract that
+// HALTED requires intervention to leave is preserved, because a replay of the halt
+// FACT is not an intervention, it is the truth.
+func (c *NATSClient) SubscribeBroadcast(ctx context.Context, subject string, h Handler) error {
+	stream, err := c.js.StreamNameBySubject(ctx, subject)
+	if err != nil {
+		return fmt.Errorf("nats: stream for subject %q: %w", subject, err)
+	}
+	cons, err := c.js.CreateConsumer(ctx, stream, jetstream.ConsumerConfig{
+		AckPolicy:     jetstream.AckExplicitPolicy,
+		FilterSubject: subject,
+		DeliverPolicy: jetstream.DeliverLastPerSubjectPolicy,
+		// The server reaps the ephemeral consumer once the pod is gone.
+		InactiveThreshold: 5 * time.Minute,
+	})
+	if err != nil {
+		return fmt.Errorf("nats: broadcast consumer on %q: %w", subject, err)
+	}
+	cc, err := cons.Consume(func(m jetstream.Msg) {
+		if err := h(ctx, natsToMessage(m)); err != nil {
+			_ = m.Nak()
+			return
+		}
+		_ = m.Ack()
+	})
+	if err != nil {
+		return fmt.Errorf("nats: start broadcast consume: %w", err)
+	}
+	<-ctx.Done()
+	cc.Stop()
+	return nil
+}
+
+var _ BroadcastSubscriber = (*NATSClient)(nil)

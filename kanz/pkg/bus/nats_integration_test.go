@@ -180,3 +180,88 @@ func TestOneGroupManySubjects(t *testing.T) {
 		}
 	}
 }
+
+// TestBroadcastReachesEveryPodAndSurvivesRestart pins EXEC-M12.
+//
+// The halt gate is constructed CLOSED and is opened only by a ModeChanged FACT. It
+// consumed that FACT through Subscribe — a consumer GROUP — which is a work queue.
+// Two consequences, both found by deploying the platform to a real cluster:
+//
+//   - A RESTARTED pod resumed its durable at the last ack and NEVER SAW the
+//     operator's resume. It came back halted, answered 423 to every signal, and
+//     reported /readyz 200 the whole time. Every rolling update was a SILENT TRADING
+//     OUTAGE that only ended when a human noticed and re-armed it by hand.
+//   - With more than one pod, the group handed the resume to exactly ONE of them.
+//
+// A control signal delivered to one pod out of N is not a control signal.
+func TestBroadcastReachesEveryPodAndSurvivesRestart(t *testing.T) {
+	url := os.Getenv("TEST_NATS_URL")
+	if url == "" {
+		t.Skip("TEST_NATS_URL not set")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	suffix := fmt.Sprintf("%d", time.Now().UnixNano())
+	streamName := "TEST_BCAST_" + suffix
+	subject := "bcast." + suffix + ".mode"
+
+	setupConn, err := nats.Connect(url)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	t.Cleanup(setupConn.Close)
+	js, err := jetstream.New(setupConn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := js.CreateStream(ctx, jetstream.StreamConfig{
+		Name:      streamName,
+		Subjects:  []string{"bcast." + suffix + ".>"},
+		Storage:   jetstream.MemoryStorage,
+		Retention: jetstream.LimitsPolicy,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = js.DeleteStream(context.Background(), streamName) })
+
+	client, err := bus.DialNATS(ctx, bus.NATSConfig{URL: url, Name: "bcast-it"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = client.Close() })
+
+	// THE OPERATOR RESUMES — before any pod is listening. This is the ordering that
+	// broke us: the FACT is already on the stream when the pod starts.
+	if err := client.Publish(ctx, bus.Message{Subject: subject, Body: []byte("NORMAL")}); err != nil {
+		t.Fatalf("publish: %v", err)
+	}
+
+	// TWO pods start AFTERWARDS. Both must learn the current mode.
+	got := make(chan string, 4)
+	for i := 0; i < 2; i++ {
+		pod := fmt.Sprintf("pod-%d", i)
+		go func() {
+			_ = client.SubscribeBroadcast(ctx, subject, func(_ context.Context, m bus.Message) error {
+				got <- pod + ":" + string(m.Body)
+				return nil
+			})
+		}()
+	}
+
+	seen := map[string]bool{}
+	deadline := time.After(15 * time.Second)
+	for len(seen) < 2 {
+		select {
+		case s := <-got:
+			seen[s] = true
+		case <-deadline:
+			t.Fatalf("only %d of 2 pods learned the mode that was ALREADY on the stream (%v).\n"+
+				"A pod that starts after the operator's resume comes back HALTED and stays there — "+
+				"reporting ready while refusing every signal — until a human re-arms it by hand.", len(seen), seen)
+		}
+	}
+	if !seen["pod-0:NORMAL"] || !seen["pod-1:NORMAL"] {
+		t.Fatalf("both pods must see the resume, got %v", seen)
+	}
+}
