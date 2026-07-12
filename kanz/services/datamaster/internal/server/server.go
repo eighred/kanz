@@ -1,10 +1,22 @@
 // Package server is the datamaster service's HTTP surface (MASTER-01b/c/d): it
-// resolves a golden SecurityMaster across the configured vendor feeds, arbitrates
-// multi-source prices, and serves the pricing-oversight exception queue with a
-// human-override path. Vendor data comes from feed.VendorFeed seams (SimFeed by
-// default); the exception queue is in-memory. A durable store and a bus consumer
-// that feeds live vendor records/prices wire at the composition root behind the
-// same seams.
+// serves the golden SecurityMaster, arbitrates multi-source prices, and serves the
+// pricing-oversight exception queue with a human-override path.
+//
+// # What is read from the store, and what is read through to the vendors
+//
+// The golden record is READ FROM THE STORE. The projector resolves it on a cycle
+// and persists it; this surface only reads it back. It used to call master.Resolve
+// over the live feeds inside the request, which meant N reads cost N vendor API
+// calls, the answer could change between two reads of the same instrument, and the
+// resolution was a side effect of somebody happening to ask.
+//
+// The price is still READ THROUGH to the vendors and arbitrated per request. That
+// is not an oversight: there is no durable price store, and there must not be one
+// until pricing stops representing a price as a float64 (pricing's own package
+// comment concedes this — fine for a comparison statistic, not for a number a
+// valuation is struck on). A NUMERIC column filled from a float64 would launder a
+// rounded number into a durable, audited price. Prices stay live until that is
+// fixed; the breaks they raise are durable already.
 package server
 
 import (
@@ -16,13 +28,13 @@ import (
 	"time"
 
 	"github.com/kanz-eng/kanz/services/datamaster/internal/feed"
-	"github.com/kanz-eng/kanz/services/datamaster/internal/master"
 	"github.com/kanz-eng/kanz/services/datamaster/internal/pricing"
+	"github.com/kanz-eng/kanz/services/datamaster/internal/store"
 )
 
-// Readiness gates traffic; the read endpoints are pure over the feeds + queue, so
-// the service is ready as soon as it is up (the flag exists for graceful
-// shutdown).
+// Readiness gates traffic. The composition root holds it down until the first
+// golden projection has run, so the service never answers "instrument not found"
+// merely because it has not read the vendors yet.
 type Readiness struct{ ready atomic.Bool }
 
 func (r *Readiness) Set(ready bool) { r.ready.Store(ready) }
@@ -30,13 +42,14 @@ func (r *Readiness) Ready() bool    { return r.ready.Load() }
 
 // Server is the HTTP handler.
 type Server struct {
-	logger    *slog.Logger
-	readiness *Readiness
-	feeds     []feed.VendorFeed
-	queue     *pricing.Queue
-	now       func() time.Time
-	metrics   http.Handler
-	mux       *http.ServeMux
+	logger     *slog.Logger
+	readiness  *Readiness
+	golden     store.GoldenStore
+	exceptions store.ExceptionStore
+	feeds      []feed.VendorFeed
+	now        func() time.Time
+	metrics    http.Handler
+	mux        *http.ServeMux
 }
 
 // Option customizes the server.
@@ -48,18 +61,23 @@ func WithMetrics(h http.Handler) Option { return func(s *Server) { s.metrics = h
 // WithClock overrides the clock (tests pin a fixed now for staleness checks).
 func WithClock(now func() time.Time) Option { return func(s *Server) { s.now = now } }
 
-// New builds the server over a set of vendor feeds and an exception queue.
-func New(readiness *Readiness, logger *slog.Logger, feeds []feed.VendorFeed, queue *pricing.Queue, opts ...Option) *Server {
+// New builds the server over the golden store, the exception store, and the vendor
+// feeds the price path arbitrates.
+func New(readiness *Readiness, logger *slog.Logger, golden store.GoldenStore, exceptions store.ExceptionStore, feeds []feed.VendorFeed, opts ...Option) *Server {
 	s := &Server{
-		logger:    logger,
-		readiness: readiness,
-		feeds:     feeds,
-		queue:     queue,
-		now:       time.Now,
-		mux:       http.NewServeMux(),
+		logger:     logger,
+		readiness:  readiness,
+		golden:     golden,
+		exceptions: exceptions,
+		feeds:      feeds,
+		now:        time.Now,
+		mux:        http.NewServeMux(),
 	}
 	for _, opt := range opts {
 		opt(s)
+	}
+	if s.logger == nil {
+		s.logger = slog.Default()
 	}
 	s.routes()
 	return s
@@ -91,24 +109,9 @@ func (s *Server) handleReadyz(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ready"})
 }
 
-// records pulls every vendor's records for one instrument across the feeds.
-func (s *Server) records(ctx context.Context, instrumentID string) ([]master.VendorRecord, error) {
-	var out []master.VendorRecord
-	for _, f := range s.feeds {
-		recs, err := f.Records(ctx)
-		if err != nil {
-			return nil, err
-		}
-		for _, r := range recs {
-			if r.InstrumentID == instrumentID {
-				out = append(out, r)
-			}
-		}
-	}
-	return out, nil
-}
-
-// candidates pulls every vendor's price candidates for one instrument.
+// candidates pulls every vendor's price candidates FOR ONE INSTRUMENT. The filter
+// on InstrumentID is load-bearing: a feed returns its whole price list, so without
+// it this instrument would be arbitrated against every other instrument's quotes.
 func (s *Server) candidates(ctx context.Context, instrumentID string) ([]pricing.Candidate, error) {
 	var out []pricing.Candidate
 	for _, f := range s.feeds {
@@ -116,37 +119,27 @@ func (s *Server) candidates(ctx context.Context, instrumentID string) ([]pricing
 		if err != nil {
 			return nil, err
 		}
-		// SimFeed scopes prices to its own instrument set via the candidate's
-		// implicit instrument (the feed only returns its instrument's prices);
-		// the source carries the vendor, so all returned candidates apply.
-		_ = instrumentID
-		out = append(out, ps...)
+		for _, c := range ps {
+			if c.InstrumentID == instrumentID {
+				out = append(out, c)
+			}
+		}
 	}
 	return out, nil
 }
 
-// handleSecurity resolves and returns the golden record for an instrument.
+// handleSecurity returns the projected golden record for an instrument.
 func (s *Server) handleSecurity(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	recs, err := s.records(r.Context(), id)
+	sm, ok, err := s.golden.Get(r.Context(), id)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		s.logger.Error("golden read failed", "instrument_id", id, "err", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "golden store unavailable"})
 		return
 	}
-	if len(recs) == 0 {
+	if !ok {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "instrument not found"})
 		return
-	}
-	sm, conflicts := master.Resolve(recs)
-	for _, c := range conflicts {
-		s.queue.Add(pricing.Exception{
-			ID:           id + ":IDENTIFIER_CONFLICT:" + string(c.Scheme),
-			Kind:         pricing.KindIdentifierConflict,
-			InstrumentID: id,
-			Detail:       c.Error(),
-			Status:       pricing.StatusOpen,
-			DetectedAt:   s.now(),
-		})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"instrument_id": sm.InstrumentID,
@@ -161,16 +154,24 @@ func (s *Server) handleSecurity(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// handlePrice arbitrates an instrument's price candidates and records any breaks.
+// handlePrice arbitrates an instrument's price candidates and files any breaks.
 func (s *Server) handlePrice(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	cands, err := s.candidates(r.Context(), id)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		s.logger.Error("vendor price fetch failed", "instrument_id", id, "err", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "vendor feed unavailable"})
 		return
 	}
 	a := pricing.Arbitrate(id, cands, 0, 0, s.now())
-	s.queue.AddAll(a.Exceptions)
+	// A break that cannot be recorded must not be reported as recorded: the queue
+	// is the oversight surface a human works, and an exception that vanished on the
+	// way to it is worse than a failed read.
+	if err := s.exceptions.AddAll(r.Context(), a.Exceptions); err != nil {
+		s.logger.Error("exception file failed", "instrument_id", id, "err", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "exception store unavailable"})
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"instrument_id": a.InstrumentID,
 		"has_price":     a.HasPrice,
@@ -179,8 +180,17 @@ func (s *Server) handlePrice(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func (s *Server) handleExceptions(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, http.StatusOK, s.queue.Open())
+func (s *Server) handleExceptions(w http.ResponseWriter, r *http.Request) {
+	open, err := s.exceptions.Open(r.Context())
+	if err != nil {
+		s.logger.Error("exception queue read failed", "err", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "exception store unavailable"})
+		return
+	}
+	if open == nil {
+		open = []pricing.Exception{}
+	}
+	writeJSON(w, http.StatusOK, open)
 }
 
 func (s *Server) handleOverride(w http.ResponseWriter, r *http.Request) {
@@ -194,11 +204,16 @@ func (s *Server) handleOverride(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid body"})
 		return
 	}
-	if err := s.queue.Override(id, body.Actor, body.Reason, body.ChosenPrice, s.now()); err != nil {
+	if err := s.exceptions.Override(r.Context(), id, body.Actor, body.Reason, body.ChosenPrice, s.now()); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
-	ex, _ := s.queue.Get(id)
+	ex, ok, err := s.exceptions.Get(r.Context(), id)
+	if err != nil || !ok {
+		s.logger.Error("override recorded but read-back failed", "exception_id", id, "err", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "exception store unavailable"})
+		return
+	}
 	writeJSON(w, http.StatusOK, ex)
 }
 

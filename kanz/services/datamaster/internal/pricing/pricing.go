@@ -20,10 +20,16 @@ import (
 )
 
 // Candidate is one source's price for an instrument — an arbitration input.
+//
+// InstrumentID is what the candidate is a price OF. Without it a feed's price
+// list is unattributed, and a caller holding candidates from several instruments
+// has no way to select the ones it is arbitrating: it would price AAPL off MSFT's
+// quotes. Callers filter to one instrument before calling Arbitrate.
 type Candidate struct {
-	Source string
-	Price  float64
-	AsOf   time.Time
+	InstrumentID string
+	Source       string
+	Price        float64
+	AsOf         time.Time
 }
 
 // ExceptionKind classifies a data-quality break (mirrors master.v1.ExceptionKind).
@@ -102,7 +108,7 @@ func Arbitrate(instrumentID string, candidates []Candidate, tolerance float64, s
 
 	if len(candidates) == 0 {
 		res.Exceptions = append(res.Exceptions, Exception{
-			ID:           exID(instrumentID, KindMissingPrice, ""),
+			ID:           ExceptionID(instrumentID, KindMissingPrice, ""),
 			Kind:         KindMissingPrice,
 			InstrumentID: instrumentID,
 			Detail:       "no price candidates",
@@ -117,7 +123,7 @@ func Arbitrate(instrumentID string, candidates []Candidate, tolerance float64, s
 	for _, c := range candidates {
 		if c.AsOf.Before(cutoff) {
 			res.Exceptions = append(res.Exceptions, Exception{
-				ID:           exID(instrumentID, KindStalePrice, c.Source),
+				ID:           ExceptionID(instrumentID, KindStalePrice, c.Source),
 				Kind:         KindStalePrice,
 				InstrumentID: instrumentID,
 				Detail:       fmt.Sprintf("source %s price as of %s is older than %s", c.Source, c.AsOf.UTC().Format(time.RFC3339), staleness),
@@ -147,7 +153,7 @@ func Arbitrate(instrumentID string, candidates []Candidate, tolerance float64, s
 			}
 			if dev > tolerance {
 				res.Exceptions = append(res.Exceptions, Exception{
-					ID:           exID(instrumentID, KindPriceTolerance, c.Source),
+					ID:           ExceptionID(instrumentID, KindPriceTolerance, c.Source),
 					Kind:         KindPriceTolerance,
 					InstrumentID: instrumentID,
 					Detail:       fmt.Sprintf("source %s price %.4f deviates %.2f%% from consensus %.4f (tolerance %.2f%%)", c.Source, c.Price, dev*100, consensus, tolerance*100),
@@ -174,9 +180,9 @@ func median(cs []Candidate) float64 {
 	return (v[n/2-1] + v[n/2]) / 2
 }
 
-// exID builds a deterministic exception id so a re-detected break maps to the
+// ExceptionID builds a deterministic exception id so a re-detected break maps to the
 // same queue entry (idempotent detection — the DATA break-detection discipline).
-func exID(instrumentID string, kind ExceptionKind, source string) string {
+func ExceptionID(instrumentID string, kind ExceptionKind, source string) string {
 	if source == "" {
 		return fmt.Sprintf("%s:%s", instrumentID, kind)
 	}

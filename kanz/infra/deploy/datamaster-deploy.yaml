@@ -1,9 +1,30 @@
 ---
-# SVCWIRE-01a — deployable workload for the datamaster (golden-source) service.
-# A stateless HTTP read surface on :8080 that boots on its SimFeed + in-memory
-# golden-record/exception stores (no broker, no DB). Same shape + SEC-02a
-# hardening + SEC-01a SPIFFE SVID as wealth-deploy.yaml; the Rollout/PDB/KEDA
-# come in SVCWIRE-01d.
+# Deployable workload for the datamaster (golden-source) service: the golden
+# security master, the multi-source price arbitration, and the pricing-oversight
+# exception queue that a human works.
+#
+# THE DURABILITY INVARIANT: the exception queue is an audit surface.
+#
+#   An override is a named human accepting a price the system flagged. Without
+#   DATAMASTER_DATABASE_URL that decision is written to a map and is GONE on the
+#   next restart — a compliance record silently deleted by a rolling update. The
+#   in-memory store is a laptop convenience, never a deployment.
+#
+# THE SCALE INVARIANT: safe to run 2, and it costs 2x the vendor calls.
+#
+#   Every pod runs the projector. The writes are idempotent and content-identical
+#   (golden_records upserts the resolved record; exceptions is ON CONFLICT DO
+#   NOTHING on a deterministic id, so a re-detected break keeps the review state a
+#   human already gave it). There is no chain and no in-process sequence, so two
+#   pods projecting concurrently is benign. What it is NOT is free: N pods make N
+#   rounds of vendor API calls per cycle. When a real feed.RefSource lands (vendor
+#   reference data is metered and rate-limited), gate the cycle behind a
+#   pg_try_advisory_lock so N pods make ONE set of calls.
+#
+# There is no vendor feed today: nothing implements feed.RefSource, so the
+# projector has nothing to project and the master stays empty. That is the honest
+# state. DATAMASTER_ALLOW_SIM would fill it from canned data — hence the guard
+# below, which is what keeps an invented security book out of a real database.
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -59,13 +80,44 @@ spec:
           labelSelector:
             matchLabels:
               app: datamaster
+      # INFRA-M6a: apply 0001_master.sql before the pods start. Every replica runs
+      # this against one database simultaneously; kanz-migrate's advisory lock
+      # serializes them, so one applies and the rest exit 0 with nothing to do.
+      initContainers:
+        - name: migrate
+          image: ghcr.io/kanz-eng/kanz-migrate:latest
+          args: ["--dir", "/migrations/datamaster"]
+          env:
+            - { name: KANZ_MIGRATE_DATABASE_URL_FILE, value: /run/secrets/db/migrate-database-url }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - { name: db, mountPath: /run/secrets/db, readOnly: true }
       containers:
         - name: datamaster
           image: ghcr.io/kanz-eng/datamaster:latest
           ports:
             - { containerPort: 8080, name: http }
           env:
+            # DSN from the SEC-01d CSI secret file, not a plaintext env. Without it
+            # the golden records and every operator override live in a map and die
+            # with the pod.
+            - { name: DATAMASTER_DATABASE_URL_FILE, value: /run/secrets/db/database-url }
+            # MT-01d: carried as the app.tenant_id GUC on every connection. The
+            # tables are FORCE RLS; a wrong or missing tenant does not error, it
+            # silently returns nothing (the accounting incident).
+            - { name: DATAMASTER_TENANT, value: "__system__" }
             - { name: DATAMASTER_LISTEN, value: ":8080" }
+            - { name: DATAMASTER_REFRESH_INTERVAL, value: "5m" }
+            # DATAMASTER_ALLOW_SIM is deliberately absent. Setting it here would
+            # let canned vendor data be resolved into golden_records, where it is
+            # indistinguishable from mastered reference data and is trusted as the
+            # identity of an instrument by every analytic downstream. The service
+            # refuses to start with a sim feed unless this is true.
             - { name: SPIFFE_ENDPOINT_SOCKET, value: "unix:///run/spiffe/spire-agent.sock" }
           livenessProbe:
             httpGet: { path: /healthz, port: 8080 }
@@ -82,11 +134,18 @@ spec:
             capabilities:
               drop: ["ALL"]
           volumeMounts:
+            - { name: db, mountPath: /run/secrets/db, readOnly: true }
             - { name: spiffe, mountPath: /run/spiffe, readOnly: true }
             - { name: tmp, mountPath: /tmp }
       volumes:
         - name: tmp
           emptyDir: {}
+        - name: db
+          csi:
+            driver: secrets-store.csi.k8s.io
+            readOnly: true
+            volumeAttributes:
+              secretProviderClass: datamaster-db
         - name: spiffe
           csi:
             driver: csi.spiffe.io
