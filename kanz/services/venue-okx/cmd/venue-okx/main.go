@@ -127,7 +127,7 @@ func run(cfg config.Config) error {
 	}
 	defer func() { _ = client.Close() }()
 
-	producer, err := bus.NewProducer(client, bus.ProducerConfig{
+	rawProducer, err := bus.NewProducer(client, bus.ProducerConfig{
 		Source:          cfg.Source,
 		ProducerVersion: version(),
 		Metrics:         busMetrics,
@@ -135,6 +135,17 @@ func run(cfg config.Config) error {
 	if err != nil {
 		return err
 	}
+
+	// EVERY async FACT this adapter emits goes through here: the fills that arrive
+	// on the user-data websocket (which is MOST fills — a resting order fills long
+	// after Execute returned) and the reconciler's StateHealed FACTs.
+	//
+	// If these stop landing, this adapter is executing orders at a live exchange
+	// and losing the results. It must stop taking orders, not keep answering gRPC
+	// while money moves unrecorded — so publish health feeds /readyz, the pod drops
+	// out of its Service, and the OMS's router hard-errors on this MIC.
+	publishHealth := bus.NewHealthPublisher(rawProducer, bus.DefaultPublishFailureThreshold)
+	readiness.TrackPublisher(publishHealth)
 
 	// The in-flight-close registry now lives HERE. The gRPC CancelOrder handler is
 	// the writer; the connector's healing watchdog is the reader. Before the split
@@ -160,7 +171,7 @@ func run(cfg config.Config) error {
 		logger.Error("venue-okx: order view read failed — reconciliation is degraded", "err", err)
 	})
 	conn.Start(ctx, execution.WorkerDeps{
-		Publisher: producer,
+		Publisher: publishHealth,
 		Lookup:    seam,
 		Expected:  seam,
 		Closes:    closes,
