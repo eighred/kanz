@@ -7,7 +7,6 @@ import (
 	"os"
 	"strings"
 
-	orderpb "github.com/kanz-eng/kanz-schemas-go/order/v1"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 
@@ -25,25 +24,22 @@ import (
 // OKX — the seam is shared, never duplicated per venue.
 var closeRegistry = execution.NewCloseRegistry()
 
-// configuredVenues is the multi-venue allocation matrix's composition root. It
-// aggregates venues from two sources and falls back to the in-process SimVenue
-// when neither yields one, so the default (vendor-free) binary and dev builds
-// still run. The router then sends each fanned-out order to its allocated venue
-// by MIC — and hard-errors on a MIC it has no venue for, rather than simulating.
+// configuredVenues is the venue composition root. Every venue is now OUT OF
+// PROCESS (INFRA-M7a): OMS_VENUE_ENDPOINTS maps each MIC to an adapter, dialed
+// over mTLS as an execution.GRPCVenue.
 //
-//   - COMPILED IN (legacy): Binance under -tags binance, OKX under -tags okx.
-//     Vendor SDKs, request signing, and exchange websocket loops live inside this
-//     process, sharing an address space with order state.
-//   - OUT OF PROCESS (INFRA-M7a): OMS_VENUE_ENDPOINTS → one execution.GRPCVenue
-//     per MIC, over mTLS. No build tag, no vendor code linked here at all.
+// There are no build tags left. There is no Binance code and no OKX code in this
+// binary — no vendor SDK, no request signing, no exchange websocket. The OMS
+// cannot reach an exchange except through an adapter, which is the entire point:
+// a crash or a compromise in vendor client code no longer shares an address space
+// with the process that owns order state.
 //
-// The second retires the first. Once an adapter exists for each venue, the tags
-// and the connectors under them come out of the OMS entirely (M7a-2/3/4) and this
-// function loses half its job.
+// The SimVenue fallback survives for tests and local dev, and ONLY for that. If it
+// is ever reached in production the OMS is filling orders against nothing, so it
+// says so at WARN in as many words, and the router hard-errors on any MIC it has
+// no venue for rather than quietly routing there.
 func configuredVenues(ctx context.Context, cfg config.Config, store order.Store, producer execution.Publisher, logger *slog.Logger) ([]execution.Venue, func()) {
-	adapter := storeAdapter{store: store}
 	var venues []execution.Venue
-	venues = append(venues, okxVenues(ctx, cfg, adapter, producer, logger)...)
 
 	// INFRA-M7a: out-of-process adapters. These need no build tag and link no
 	// vendor code — the OMS speaks venue.v1 over mTLS and never imports an
@@ -119,48 +115,6 @@ func dialVenues(ctx context.Context, cfg config.Config, logger *slog.Logger) ([]
 	return venues, closeConns, nil
 }
 
-// storeAdapter surfaces the OMS order store to the connectors' background
-// workers (OrderLookup + ExpectedOrders). It lives here (the composition root),
-// not in execution, because execution must not import order — order already
-// imports execution (an import cycle).
-type storeAdapter struct{ store order.Store }
-
-func (a storeAdapter) Lookup(orderID string) (*orderpb.OrderState, bool) {
-	st, err := a.store.Load(context.Background(), orderID)
-	if err != nil {
-		return nil, false
-	}
-	return st, true
-}
-
-func (a storeAdapter) OpenOrders() []*orderpb.OrderState {
-	all, err := a.store.List(context.Background())
-	if err != nil {
-		return nil
-	}
-	var open []*orderpb.OrderState
-	for _, st := range all {
-		if !terminalStatus(st.GetStatus()) {
-			open = append(open, st)
-		}
-	}
-	return open
-}
-
-func terminalStatus(s orderpb.OrderStatus) bool {
-	switch s {
-	case orderpb.OrderStatus_ORDER_STATUS_FILLED,
-		orderpb.OrderStatus_ORDER_STATUS_CANCELLED,
-		orderpb.OrderStatus_ORDER_STATUS_REJECTED,
-		orderpb.OrderStatus_ORDER_STATUS_EXPIRED:
-		return true
-	default:
-		return false
-	}
-}
-
-// --- shared composition-root helpers (used by both venue builders) ---
-
 // parseSymbolMap parses "BTC-USD=BTCUSDT,ETH-USD=ETHUSDT" into a map.
 func parseSymbolMap(s string) map[string]string {
 	out := map[string]string{}
@@ -174,16 +128,6 @@ func parseSymbolMap(s string) map[string]string {
 		}
 	}
 	return out
-}
-
-// secretEnv prefers a CSI/Vault file mount (<k>_FILE) over a plaintext env var.
-func secretEnv(k string) string {
-	if p := os.Getenv(k + "_FILE"); p != "" {
-		if b, err := os.ReadFile(p); err == nil {
-			return strings.TrimSpace(string(b))
-		}
-	}
-	return os.Getenv(k)
 }
 
 func envOr(k, def string) string {

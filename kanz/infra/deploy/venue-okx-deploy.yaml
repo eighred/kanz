@@ -1,0 +1,171 @@
+---
+# INFRA-M7a-3 — the OKX Spot exchange, as its own workload.
+#
+# This process holds the exchange API credentials, signs the requests, and runs
+# the private websocket. The OMS holds none of that any more: it reaches this
+# service over venue.v1/mTLS and links no OKX code at all. That is the whole
+# point of the split — a compromise or a crash in vendor client code no longer
+# shares an address space with the process that owns order state.
+#
+# THE SCALE INVARIANT: replicas: 1, and NOT for the reason the OMS was pinned.
+#
+#   The OMS's old pin was a correctness bug (a process-local admission gate).
+#   This one is an exchange constraint, identical in shape to venue-binance's:
+#   OKX's REST rate limit is per API KEY, not per process, while the connector's
+#   weight budget is enforced per process. Two pods spend twice the budget against
+#   one key and get the account RATE-LIMITED or BANNED — taking this venue down
+#   entirely, not just one pod.
+#
+#   Fills themselves are safe to duplicate: fill_id is derived from the exchange
+#   trade id (symbol-tradeId), so two pods publishing the same fill dedup on the
+#   bus. It is the REST budget, not correctness, that makes this a singleton.
+#
+#   Scaling this service means sharding by symbol with a key per shard, or moving
+#   the weight budget into a shared store. Do not simply raise the replica count.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: venue-okx
+  namespace: kanz-services
+  labels:
+    app.kubernetes.io/part-of: kanz
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: venue-okx
+  namespace: kanz-services
+  labels:
+    app.kubernetes.io/part-of: kanz
+spec:
+  selector:
+    app: venue-okx
+  ports:
+    # venue.v1 — the OMS dials this. It can submit orders to a live exchange.
+    - { name: grpc, port: 9000, targetPort: 9000 }
+    - { name: http, port: 8092, targetPort: 8092 }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: venue-okx
+  namespace: kanz-services
+  labels:
+    app.kubernetes.io/part-of: kanz
+spec:
+  # See THE SCALE INVARIANT above. Raising this without sharding the API key
+  # exhausts the exchange weight budget and can get the account banned.
+  replicas: 1
+  revisionHistoryLimit: 5
+  strategy:
+    # Never run two pods at once, even briefly during a rollout — the overlap
+    # would double the REST weight against one key.
+    type: Recreate
+  selector:
+    matchLabels:
+      app: venue-okx
+  template:
+    metadata:
+      labels:
+        app: venue-okx
+        app.kubernetes.io/part-of: kanz
+    spec:
+      serviceAccountName: venue-okx
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      # INFRA-M6a: the adapter's own order view schema, before it starts.
+      initContainers:
+        - name: migrate
+          image: ghcr.io/kanz-eng/kanz-migrate:latest
+          args: ["--dir", "/migrations/venue-okx"]
+          env:
+            - { name: KANZ_MIGRATE_DATABASE_URL_FILE, value: /run/secrets/db/migrate-database-url }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - { name: db, mountPath: /run/secrets/db, readOnly: true }
+      containers:
+        - name: venue-okx
+          # Pinned to a cosign-signed digest by the GitOps bump (CICD-01d).
+          image: ghcr.io/kanz-eng/venue-okx:latest
+          ports:
+            - { containerPort: 9000, name: grpc }
+            - { containerPort: 8092, name: http }
+          env:
+            # Exchange credentials from the SEC-01d Vault/CSI secret FILES. These
+            # can move the fund's money — they never ride in a pod's env block.
+            - { name: OKX_API_KEY_FILE, value: /run/secrets/okx/api-key }
+            - { name: OKX_API_SECRET_FILE, value: /run/secrets/okx/api-secret }
+            # OKX's THIRD credential (OK-ACCESS-PASSPHRASE), chosen when the API
+            # key was created. Without it EVERY signed request is rejected — it is
+            # as load-bearing as the secret, and mounted the same way.
+            - { name: OKX_API_PASSPHRASE_FILE, value: /run/secrets/okx/api-passphrase }
+            # The adapter's own order view (INFRA-M7a-3). Without it the healing
+            # watchdog goes blind across a restart.
+            - { name: VENUE_OKX_DATABASE_URL_FILE, value: /run/secrets/db/database-url }
+            - { name: VENUE_OKX_TENANT, value: "__system__" }
+            # The ASYNC half of the venue contract. A resting order fills minutes
+            # later on the websocket and this is the ONLY way that fill reaches the
+            # OMS. The binary refuses to start without it, deliberately.
+            - { name: VENUE_OKX_NATS_URL, value: "nats://nats.kanz-messaging.svc:4222" }
+            - { name: VENUE_OKX_GRPC_LISTEN, value: ":9000" }
+            - { name: VENUE_OKX_LISTEN, value: ":8092" }
+            - { name: VENUE_OKX_SOURCE, value: "venue-okx" }
+            - { name: OKX_MIC, value: "XOKX" }
+            # OKX has no separate testnet host — this IS the live exchange, and the
+            # credentials decide whether the account is a demo one. Treat a change
+            # to the key mount as a change to what this pod can spend.
+            - { name: OKX_BASE_URL, value: "https://www.okx.com" }
+            - { name: OKX_WS_BASE, value: "wss://ws.okx.com:8443" }
+            - { name: OKX_SYMBOLS, value: "BTC-USD=BTC-USDT,ETH-USD=ETH-USDT" }
+            - { name: SPIFFE_ENDPOINT_SOCKET, value: "unix:///run/spiffe/spire-agent.sock" }
+          livenessProbe:
+            httpGet: { path: /healthz, port: 8092 }
+            initialDelaySeconds: 5
+            periodSeconds: 15
+          # Not ready until it can actually work an order: credentials loaded,
+          # order view open, bus connected, venue.v1 listening. A venue adapter
+          # that reports ready before it can trade gets live orders routed into it.
+          readinessProbe:
+            httpGet: { path: /readyz, port: 8092 }
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - { name: okx, mountPath: /run/secrets/okx, readOnly: true }
+            - { name: db, mountPath: /run/secrets/db, readOnly: true }
+            - { name: spiffe, mountPath: /run/spiffe, readOnly: true }
+            - { name: tmp, mountPath: /tmp }
+      volumes:
+        - name: tmp
+          emptyDir: {}
+        - name: okx
+          csi:
+            driver: secrets-store.csi.k8s.io
+            readOnly: true
+            volumeAttributes:
+              secretProviderClass: venue-okx-keys
+        - name: db
+          csi:
+            driver: secrets-store.csi.k8s.io
+            readOnly: true
+            volumeAttributes:
+              secretProviderClass: venue-okx-db
+        - name: spiffe
+          csi:
+            driver: csi.spiffe.io
+            readOnly: true

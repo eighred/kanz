@@ -1,5 +1,6 @@
-// Package server is venue-binance's gRPC face: the venue.v1.VenueAdapterService
-// the OMS calls (INFRA-M7a-2).
+// Package server is a venue adapter's gRPC face: the venue.v1.VenueAdapterService
+// the OMS calls (INFRA-M7a). It is venue-agnostic — venue-binance and venue-okx
+// both serve it, fronting their own connector.
 //
 // It is a thin shell on purpose. All the exchange behaviour — signing, rate
 // limits, partial-fill aggregation, the healing seam — already lives in the
@@ -20,7 +21,7 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	"github.com/kanz-eng/kanz/internal/execution"
-	"github.com/kanz-eng/kanz/services/venue-binance/internal/orderview"
+	"github.com/kanz-eng/kanz/internal/venueadapter/orderview"
 )
 
 // Server implements venue.v1.VenueAdapterService over one exchange connector.
@@ -63,7 +64,7 @@ func (s *Server) Execute(ctx context.Context, req *venuepb.ExecuteRequest) (*ven
 		// Not a soft failure. Working an order we have no record of leaves its
 		// fills unenrichable and invisible to the reconciler — better to refuse it
 		// and let the OMS see the error than to trade blind.
-		s.logger.Error("venue-binance: could not record order before working it", "order_id", st.GetOrderId(), "err", err)
+		s.logger.Error("venue: could not record order before working it", "mic", s.venue.MIC(), "order_id", st.GetOrderId(), "err", err)
 		return nil, status.Errorf(codes.Internal, "venue: record order %s: %v", st.GetOrderId(), err)
 	}
 
@@ -114,7 +115,7 @@ func (s *Server) CancelOrder(ctx context.Context, req *venuepb.CancelOrderReques
 	if err := s.recordStatus(ctx, st, orderpb.OrderStatus_ORDER_STATUS_CANCELLED); err != nil {
 		// The cancel landed; only our local view is stale. Log it — do not fail the
 		// RPC, or the OMS would retry a cancel that already succeeded.
-		s.logger.Warn("venue-binance: cancel confirmed but order view not updated",
+		s.logger.Warn("venue: cancel confirmed but order view not updated", "mic", s.venue.MIC(),
 			"order_id", st.GetOrderId(), "err", err)
 	}
 	return &venuepb.CancelOrderResponse{}, nil

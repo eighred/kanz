@@ -20,7 +20,7 @@ import (
 	venuepb "github.com/kanz-eng/kanz-schemas-go/venue/v1"
 
 	"github.com/kanz-eng/kanz/internal/execution"
-	"github.com/kanz-eng/kanz/services/venue-binance/internal/orderview"
+	"github.com/kanz-eng/kanz/internal/venueadapter/orderview"
 )
 
 // fakeVenue records the order in which the shell called it.

@@ -1,6 +1,4 @@
-//go:build okx
-
-package execution
+package okx
 
 import (
 	"context"

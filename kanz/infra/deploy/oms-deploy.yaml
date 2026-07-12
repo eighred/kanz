@@ -128,22 +128,19 @@ spec:
             - { name: db, mountPath: /run/secrets/db, readOnly: true }
       containers:
         - name: oms
-          # :venues is the image built with `--build-arg GOTAGS=okx` — the only one
-          # that links the in-process OKX connector. Binance no longer needs a tag
-          # at all (INFRA-M7a-2): it is reached over venue.v1 via
-          # OMS_VENUE_ENDPOINTS above, so even an untagged image trades Binance.
+          # :latest, and there is only one OMS image now (INFRA-M7a).
           #
-          # The SimVenue fallback now applies only when NO venue is configured —
-          # neither an endpoint nor a compiled connector. It is still silent and
-          # still catastrophic, which is why the router hard-errors on a MIC it
-          # cannot route and the process WARNs loudly at boot.
+          # It used to be :venues, because an untagged OMS compiled in no exchange
+          # connector and would silently simulate every order while looking healthy.
+          # There are no venue build tags any more: every exchange is an
+          # out-of-process adapter selected by OMS_VENUE_ENDPOINTS below, so this
+          # image is identical whether it trades Binance, OKX, both, or nothing.
           #
-          # If the image has not been built, this Deployment fails ImagePullBackOff:
-          # loud and stuck, never quiet and simulated. M7a-3 retires the OKX tag and
-          # this whole distinction with it.
+          # What it trades is now a deployment decision, visible in the env below —
+          # not a compile-time one hidden in a build arg.
           #
           # Pinned to a cosign-signed digest by the GitOps bump (CICD-01d).
-          image: ghcr.io/kanz-eng/oms:venues
+          image: ghcr.io/kanz-eng/oms:latest
           ports:
             - { containerPort: 8090, name: http }
           env:
@@ -155,11 +152,11 @@ spec:
             - { name: OMS_LISTEN, value: ":8090" }
             - { name: OMS_NATS_URL, value: "nats://nats.kanz-messaging.svc:4222" }
             - { name: OMS_SOURCE, value: "oms" }
-            # INFRA-M7a-2: Binance is now an out-of-process adapter reached over
-            # venue.v1/mTLS. No Binance code is linked into this image. A MIC with
-            # no endpoint here is a HARD ERROR at the router, never a silent
-            # fallback to the simulator.
-            - { name: OMS_VENUE_ENDPOINTS, value: "XBIN=venue-binance.kanz-services.svc:9000" }
+            # INFRA-M7a: EVERY venue is an out-of-process adapter reached over
+            # venue.v1/mTLS. No exchange code of any kind is linked into this image.
+            # A MIC with no endpoint here is a HARD ERROR at the router, never a
+            # silent fallback to the simulator. This line is what the OMS trades.
+            - { name: OMS_VENUE_ENDPOINTS, value: "XBIN=venue-binance.kanz-services.svc:9000,XOKX=venue-okx.kanz-services.svc:9000" }
             # Both pods share one durable consumer group, so a command is
             # delivered to one of them — the admission gate is the backstop for
             # the redelivery case, not the primary path.

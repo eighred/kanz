@@ -1,9 +1,9 @@
-// venue-binance is the Binance Spot exchange, as its own process (INFRA-M7a-2).
+// venue-okx is the OKX Spot exchange, as its own process (INFRA-M7a-3).
 //
-// It used to be compiled INTO the OMS behind `-tags binance`, which put the
+// It used to be compiled INTO the OMS behind `-tags okx`, which put the
 // vendor client, HMAC request signing, and the exchange's websocket loops inside
 // the address space of the process that owns order state. Now the OMS holds none
-// of it: it speaks venue.v1 over mTLS and links no Binance code at all.
+// of it: it speaks venue.v1 over mTLS and links no OKX code at all.
 //
 // The adapter answers on TWO channels, and both are load-bearing:
 //
@@ -42,8 +42,8 @@ import (
 	"github.com/kanz-eng/kanz/pkg/bus"
 	"github.com/kanz-eng/kanz/pkg/observability"
 	"github.com/kanz-eng/kanz/pkg/transport"
-	"github.com/kanz-eng/kanz/services/venue-binance/internal/binance"
-	"github.com/kanz-eng/kanz/services/venue-binance/internal/config"
+	"github.com/kanz-eng/kanz/services/venue-okx/internal/config"
+	"github.com/kanz-eng/kanz/services/venue-okx/internal/okx"
 )
 
 func main() {
@@ -53,7 +53,7 @@ func main() {
 		os.Exit(2)
 	}
 	if err := run(cfg); err != nil {
-		slog.Default().Error("venue-binance stopped with error", "err", err)
+		slog.Default().Error("venue-okx stopped with error", "err", err)
 		os.Exit(1)
 	}
 }
@@ -64,7 +64,7 @@ func run(cfg config.Config) error {
 
 	base := slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: cfg.LogLevel})
 	obs, err := observability.New(ctx, observability.Config{
-		ServiceName:    "venue-binance",
+		ServiceName:    "venue-okx",
 		ServiceVersion: version(),
 		OTLPEndpoint:   cfg.OTLPEndpoint,
 		SampleRatio:    1,
@@ -83,8 +83,8 @@ func run(cfg config.Config) error {
 	// Credentials are the whole point of this process existing. Without them it
 	// cannot reach the exchange, and a venue adapter that cannot trade must not
 	// pretend to be ready — the OMS would route orders into it and they would die.
-	if cfg.APIKey == "" || cfg.APISecret == "" {
-		return errors.New("no BINANCE_API_KEY/_SECRET (or their _FILE mounts) — this adapter cannot reach the exchange")
+	if cfg.APIKey == "" || cfg.APISecret == "" || cfg.Passphrase == "" {
+		return errors.New("no OKX_API_KEY/_SECRET/_PASSPHRASE (or their _FILE mounts) — this adapter cannot reach the exchange")
 	}
 
 	// Probes first, so a slow exchange handshake does not look like a crash.
@@ -95,7 +95,7 @@ func run(cfg config.Config) error {
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 	go func() {
-		logger.Info("venue-binance probes listening", "addr", cfg.HTTPListen)
+		logger.Info("venue-okx probes listening", "addr", cfg.HTTPListen)
 		if err := httpSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			logger.Error("probe server failed", "err", err)
 			stop()
@@ -118,7 +118,7 @@ func run(cfg config.Config) error {
 	// The async channel. No bus ⇒ no way to report a fill that arrives after
 	// Execute returned, which is most fills. Refuse rather than lose them.
 	if cfg.NATSURL == "" {
-		return errors.New("no VENUE_BINANCE_NATS_URL — async fills (resting orders, healing FACTs) would be silently dropped")
+		return errors.New("no VENUE_OKX_NATS_URL — async fills (resting orders, healing FACTs) would be silently dropped")
 	}
 	busMetrics := bus.NewBusMetrics(obs.Registry)
 	client, err := bus.DialNATS(ctx, bus.NATSConfig{URL: cfg.NATSURL, Name: cfg.Source})
@@ -142,21 +142,22 @@ func run(cfg config.Config) error {
 	// all (execution.SelfHealing).
 	closes := execution.NewCloseRegistry()
 
-	conn := binance.NewBinanceConnector(execution.VenueSettings{
+	conn := okx.NewOKXConnector(execution.VenueSettings{
 		MIC:          cfg.MIC,
 		BaseURL:      cfg.BaseURL,
 		APIKey:       cfg.APIKey,
 		APISecret:    cfg.APISecret,
+		Passphrase:   cfg.Passphrase,
 		Symbols:      parseSymbolMap(cfg.Symbols),
 		WeightBudget: 1200,
 		OnThrottle: func() {
-			logger.Error("binance: REST weight budget exhausted — backing off (structural alert)")
+			logger.Error("okx: REST weight budget exhausted — backing off (structural alert)")
 		},
 	}, cfg.WSBase)
 
 	seam := orderview.NewSeam(view, func(err error) {
 		// A blind order view makes the healing watchdog blind. Never silent.
-		logger.Error("venue-binance: order view read failed — reconciliation is degraded", "err", err)
+		logger.Error("venue-okx: order view read failed — reconciliation is degraded", "err", err)
 	})
 	conn.Start(ctx, execution.WorkerDeps{
 		Publisher: producer,
@@ -176,7 +177,7 @@ func run(cfg config.Config) error {
 		return err
 	}
 	go func() {
-		logger.Info("venue-binance venue.v1 listening", "addr", cfg.GRPCListen, "mic", cfg.MIC, "base_url", cfg.BaseURL)
+		logger.Info("venue-okx venue.v1 listening", "addr", cfg.GRPCListen, "mic", cfg.MIC, "base_url", cfg.BaseURL)
 		if err := grpcSrv.Serve(lis); err != nil {
 			logger.Error("grpc server failed", "err", err)
 			stop()
@@ -203,7 +204,7 @@ func newGRPCServer(ctx context.Context, cfg config.Config, venue execution.Venue
 			return nil, err
 		}
 		opts = append(opts, transport.ServerOption(src, transport.AuthorizeMesh()))
-		logger.Info("venue-binance: venue.v1 mTLS enabled")
+		logger.Info("venue-okx: venue.v1 mTLS enabled")
 	} else {
 		logger.Warn("VENUE.V1 IS PLAINTEXT — no SPIFFE_ENDPOINT_SOCKET. Anyone who can reach this port can submit orders to a live exchange")
 	}

@@ -48,6 +48,8 @@ jobs:
           # variant of it that silently trades against nothing.
           - service: venue-binance
             dockerfile: kanz/services/venue-binance/Dockerfile
+          - service: venue-okx
+            dockerfile: kanz/services/venue-okx/Dockerfile
     steps:
       - uses: actions/checkout@v4
 

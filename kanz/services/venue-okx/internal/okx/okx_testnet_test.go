@@ -1,6 +1,4 @@
-//go:build okx
-
-package execution
+package okx
 
 // Physical OKX demo/testnet round-trip (M4 parity mandate). Gated on
 // TEST_OKX_TESTNET=1 plus OKX_TESTNET_KEY / _SECRET / _PASSPHRASE — it needs
