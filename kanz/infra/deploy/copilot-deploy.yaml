@@ -73,6 +73,14 @@ spec:
             - { name: COPILOT_LISTEN, value: ":8080" }
             # The version knob — seam is version-agnostic, switch without a rebuild.
             - { name: COPILOT_MODEL_ID, value: "claude-fable-5" }
+            # SEC-01d: a BILLABLE credential — it arrives as a Vault/CSI secret FILE,
+            # never a plaintext env var.
+            - { name: COPILOT_ANTHROPIC_API_KEY_FILE, value: /run/secrets/anthropic/api-key }
+            # COPILOT_ALLOW_STUB is deliberately ABSENT. Setting it "true" makes this
+            # pod serve llm.StubModel, which does not answer a portfolio manager's
+            # questions — it FABRICATES answers that read exactly like real ones. The
+            # image is built with -tags anthropic so the stub is not even linked; the
+            # flag exists for local dev, and it is never the fix for a failing deploy.
             # No COPILOT_POLICY_PATH ⇒ fail-closed deny-all until the AUTH-01b
             # policy bundle is mounted; the Claude API key + governed mTLS client
             # wire at the composition root (PARITY-04a/b).
@@ -92,11 +100,18 @@ spec:
             capabilities:
               drop: ["ALL"]
           volumeMounts:
+            - { name: anthropic, mountPath: /run/secrets/anthropic, readOnly: true }
             - { name: spiffe, mountPath: /run/spiffe, readOnly: true }
             - { name: tmp, mountPath: /tmp }
       volumes:
         - name: tmp
           emptyDir: {}
+        - name: anthropic
+          csi:
+            driver: secrets-store.csi.k8s.io
+            readOnly: true
+            volumeAttributes:
+              secretProviderClass: copilot-anthropic
         - name: spiffe
           csi:
             driver: csi.spiffe.io

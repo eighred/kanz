@@ -25,6 +25,21 @@ type Config struct {
 	// Defaults to the MAX / most-capable model (llm.DefaultModelID).
 	ModelID string
 
+	// AnthropicAPIKey authenticates the Claude client. Sourced from a SEC-01d
+	// Vault/CSI secret FILE (COPILOT_ANTHROPIC_API_KEY_FILE), never a plaintext env
+	// var — it is a billable credential.
+	AnthropicAPIKey string
+
+	// AllowStub permits the StubModel to serve. OFF by default; must be set
+	// deliberately.
+	//
+	// The stub does not answer questions — it FABRICATES answers, and they reach a
+	// portfolio manager as analysis, reading exactly like real ones. This is the
+	// copilot twin of market-ingest's SimFeed and the OMS's SimVenue, and it breaks
+	// the same rule: never inject data. It must not be reachable by forgetting a
+	// build tag.
+	AllowStub bool
+
 	// PolicyPath is the AUTH-01b policy bundle (role→action grants). Empty ⇒ the
 	// service boots with a deny-all default authorizer.
 	PolicyPath string
@@ -53,14 +68,16 @@ type Config struct {
 // defaults.
 func Load() (Config, error) {
 	return Config{
-		Listen:        envOr("COPILOT_LISTEN", ":8080"),
-		LogLevel:      parseLevel(os.Getenv("COPILOT_LOG_LEVEL")),
-		ModelID:       envOr("COPILOT_MODEL_ID", llm.DefaultModelID),
-		PolicyPath:    os.Getenv("COPILOT_POLICY_PATH"),
-		LineageAddr:   os.Getenv("COPILOT_LINEAGE_ADDR"),
-		RiskQueryAddr: os.Getenv("COPILOT_RISK_QUERY_ADDR"),
-		SPIFFESocket:  os.Getenv("COPILOT_SPIFFE_SOCKET"),
-		OTLPEndpoint:  os.Getenv("COPILOT_OTLP_ENDPOINT"),
+		Listen:          envOr("COPILOT_LISTEN", ":8080"),
+		LogLevel:        parseLevel(os.Getenv("COPILOT_LOG_LEVEL")),
+		ModelID:         envOr("COPILOT_MODEL_ID", llm.DefaultModelID),
+		AnthropicAPIKey: secret("COPILOT_ANTHROPIC_API_KEY"),
+		AllowStub:       os.Getenv("COPILOT_ALLOW_STUB") == "true",
+		PolicyPath:      os.Getenv("COPILOT_POLICY_PATH"),
+		LineageAddr:     os.Getenv("COPILOT_LINEAGE_ADDR"),
+		RiskQueryAddr:   os.Getenv("COPILOT_RISK_QUERY_ADDR"),
+		SPIFFESocket:    os.Getenv("COPILOT_SPIFFE_SOCKET"),
+		OTLPEndpoint:    os.Getenv("COPILOT_OTLP_ENDPOINT"),
 	}, nil
 }
 
@@ -82,4 +99,15 @@ func parseLevel(s string) slog.Level {
 	default:
 		return slog.LevelInfo
 	}
+}
+
+// secret resolves a sensitive value, preferring a CSI/Vault file mount (SEC-01d:
+// the path in <k>_FILE) over a plaintext <k> env var.
+func secret(k string) string {
+	if p := os.Getenv(k + "_FILE"); p != "" {
+		if b, err := os.ReadFile(p); err == nil {
+			return strings.TrimSpace(string(b))
+		}
+	}
+	return os.Getenv(k)
 }

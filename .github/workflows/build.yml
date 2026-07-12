@@ -63,6 +63,13 @@ jobs:
             dockerfile: kanz/services/audit/Dockerfile
           - service: regulatory
             dockerfile: kanz/services/regulatory/Dockerfile
+          # The last two services whose manifests referenced an image nothing built.
+          # copilot is built WITH -tags anthropic: an untagged copilot serves a stub
+          # that fabricates analysis (see its Dockerfile).
+          - service: copilot
+            dockerfile: kanz/services/copilot/Dockerfile
+          - service: market-data
+            dockerfile: kanz/services/market-data/Dockerfile
     steps:
       - uses: actions/checkout@v4
 

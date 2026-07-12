@@ -23,6 +23,7 @@ import (
 	"strings"
 
 	"github.com/anthropics/anthropic-sdk-go"
+	"github.com/anthropics/anthropic-sdk-go/option"
 	"github.com/kanz-eng/kanz/services/copilot/internal/config"
 	"github.com/kanz-eng/kanz/services/copilot/internal/llm"
 )
@@ -47,8 +48,15 @@ type anthropicModel struct {
 func newModel(cfg config.Config, logger *slog.Logger) llm.Model {
 	fb := isRefusalFallbackModel(cfg.ModelID)
 	logger.Info("copilot llm: anthropic client", "model", cfg.ModelID, "refusal_fallback", fb)
+	// SEC-01d: the key arrives as a Vault/CSI file, not a plaintext env var. Falling
+	// through to anthropic.NewClient() (env / OAuth profile / WIF) keeps local dev
+	// working without a mount.
+	var opts []option.RequestOption
+	if cfg.AnthropicAPIKey != "" {
+		opts = append(opts, option.WithAPIKey(cfg.AnthropicAPIKey))
+	}
 	return &anthropicModel{
-		client:   anthropic.NewClient(),
+		client:   anthropic.NewClient(opts...),
 		modelID:  cfg.ModelID,
 		fallback: fb,
 	}
@@ -164,9 +172,14 @@ func fromBetaMessage(msg anthropic.BetaMessage) llm.Response {
 		case anthropic.BetaTextBlock:
 			text.WriteString(b.Text)
 		case anthropic.BetaToolUseBlock:
+			// BetaToolUseBlock.Input is `any`, NOT []byte — the raw JSON comes off the
+			// block's JSON view. This is what rotted: the adapter unmarshalled Input
+			// directly, which stopped compiling when the SDK widened the field, and
+			// nothing caught it because the `anthropic` build tag was never compiled by
+			// CI. The only copilot binary that built was the stub.
 			var input map[string]any
-			if len(b.Input) > 0 {
-				_ = json.Unmarshal(b.Input, &input)
+			if raw := b.JSON.Input.Raw(); raw != "" {
+				_ = json.Unmarshal([]byte(raw), &input)
 			}
 			out.ToolCalls = append(out.ToolCalls, llm.ToolCall{ID: b.ID, Name: b.Name, Input: input})
 		}
