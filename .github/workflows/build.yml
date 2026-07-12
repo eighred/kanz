@@ -25,7 +25,17 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        service: [risk-engine, schema-registry]
+        include:
+          - service: risk-engine
+            dockerfile: kanz/services/risk-engine/Dockerfile
+          - service: schema-registry
+            dockerfile: kanz/services/schema-registry/Dockerfile
+          # INFRA-M6a: the migration runner. Not a service — a job image that a
+          # Deployment runs as an initContainer before its pods start. It carries
+          # every service's migrations/ (see its Dockerfile) and is selected per
+          # pod with --dir /migrations/<service>.
+          - service: kanz-migrate
+            dockerfile: kanz/cmd/kanz-migrate/Dockerfile
     steps:
       - uses: actions/checkout@v4
 
@@ -82,7 +92,7 @@ jobs:
           # context: . uses the local checkout (incl. the generated gen/go),
           # not the git context which would omit the uncommitted SDK.
           context: .
-          file: kanz/services/${{ matrix.service }}/Dockerfile
+          file: ${{ matrix.dockerfile }}
           push: ${{ github.event_name == 'push' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}

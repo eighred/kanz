@@ -1,0 +1,47 @@
+# syntax=docker/dockerfile:1
+#
+# kanz-migrate container (INFRA-M6a). Distroless + static binary, and the ONE
+# image that carries every service's migrations.
+#
+# Build context is the repo ROOT, not kanz/ — same as the service images: the
+# module's go.mod replaces github.com/kanz-eng/kanz-schemas-go =>
+# ../kanz-schemas/gen/go, which is generated-not-committed (EVT-15a). Build with:
+#   docker build -f kanz/cmd/kanz-migrate/Dockerfile .
+#
+# # Why one image, not one per service
+#
+# The migrations are ~11 small .sql files. Baking all of them into a single image
+# and selecting with `--dir /migrations/<service>` means one image to build, sign,
+# and pin — instead of ten near-identical ones that can drift apart. The
+# initContainer in each Deployment points at its own subdirectory.
+FROM golang:1.26.1 AS build
+WORKDIR /src
+ENV GOFLAGS=-mod=mod
+
+COPY kanz-schemas/gen/go/ ./kanz-schemas/gen/go/
+COPY kanz/go.mod kanz/go.sum ./kanz/
+WORKDIR /src/kanz
+RUN go mod download
+
+COPY kanz/ ./
+# CGO off ⇒ a fully static binary, which is what distroless/static requires.
+RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" \
+      -o /out/kanz-migrate ./cmd/kanz-migrate
+
+# Collect every service's migrations under one root, keyed by service name, so a
+# pod can ask for exactly its own: --dir /migrations/oms.
+RUN set -eu; \
+    mkdir -p /out/migrations; \
+    for d in ./services/*/migrations; do \
+      svc="$(basename "$(dirname "$d")")"; \
+      mkdir -p "/out/migrations/$svc"; \
+      cp "$d"/*.sql "/out/migrations/$svc/"; \
+    done
+
+# Distroless static: no shell, no libc, no package manager. :nonroot is uid 65532,
+# which matches the runAsUser the pods set.
+FROM gcr.io/distroless/static:nonroot
+COPY --from=build /out/kanz-migrate /kanz-migrate
+COPY --from=build /out/migrations /migrations
+USER nonroot:nonroot
+ENTRYPOINT ["/kanz-migrate"]
