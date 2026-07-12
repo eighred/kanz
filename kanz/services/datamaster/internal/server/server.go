@@ -10,13 +10,12 @@
 // calls, the answer could change between two reads of the same instrument, and the
 // resolution was a side effect of somebody happening to ask.
 //
-// The price is still READ THROUGH to the vendors and arbitrated per request. That
-// is not an oversight: there is no durable price store, and there must not be one
-// until pricing stops representing a price as a float64 (pricing's own package
-// comment concedes this — fine for a comparison statistic, not for a number a
-// valuation is struck on). A NUMERIC column filled from a float64 would launder a
-// rounded number into a durable, audited price. Prices stay live until that is
-// fixed; the breaks they raise are durable already.
+// The price is still READ THROUGH to the vendors and arbitrated per request. A
+// price is a point-in-time observation and the freshest one is the right one to
+// serve; the golden record is slowly-changing reference data and the right thing
+// to project. What the two now share is the type: every price on this surface —
+// candidate, consensus, and the price a human chose — is an exact decimal
+// (DATA-M8b), and every one of them crosses the wire as a decimal STRING.
 package server
 
 import (
@@ -27,6 +26,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/kanz-eng/kanz/internal/dec"
 	"github.com/kanz-eng/kanz/services/datamaster/internal/feed"
 	"github.com/kanz-eng/kanz/services/datamaster/internal/pricing"
 	"github.com/kanz-eng/kanz/services/datamaster/internal/store"
@@ -163,7 +163,7 @@ func (s *Server) handlePrice(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "vendor feed unavailable"})
 		return
 	}
-	a := pricing.Arbitrate(id, cands, 0, 0, s.now())
+	a := pricing.Arbitrate(id, cands, nil, 0, s.now())
 	// A break that cannot be recorded must not be reported as recorded: the queue
 	// is the oversight surface a human works, and an exception that vanished on the
 	// way to it is worse than a failed read.
@@ -172,12 +172,18 @@ func (s *Server) handlePrice(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "exception store unavailable"})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
+	// The consensus goes out as an exact decimal STRING, never a JSON number: this
+	// is the mark the instrument is valued at, and a regulator or a reconciler must
+	// not have to guess which double we meant.
+	out := map[string]any{
 		"instrument_id": a.InstrumentID,
 		"has_price":     a.HasPrice,
-		"chosen":        a.Chosen,
 		"exceptions":    len(a.Exceptions),
-	})
+	}
+	if a.HasPrice {
+		out["chosen"] = dec.Str(a.Chosen)
+	}
+	writeJSON(w, http.StatusOK, out)
 }
 
 func (s *Server) handleExceptions(w http.ResponseWriter, r *http.Request) {
@@ -195,16 +201,39 @@ func (s *Server) handleExceptions(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleOverride(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
+	// chosen_price is an exact decimal STRING. A JSON number is an IEEE-754 double
+	// by definition, so accepting one would round the price a human chose on its
+	// way into an append-only compliance record — it decodes into a string field
+	// and is refused outright, the same contract the regulatory filing API takes
+	// with money.
 	var body struct {
-		Actor       string  `json:"actor"`
-		Reason      string  `json:"reason"`
-		ChosenPrice float64 `json:"chosen_price"`
+		Actor       string `json:"actor"`
+		Reason      string `json:"reason"`
+		ChosenPrice string `json:"chosen_price"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid body"})
+		writeJSON(w, http.StatusBadRequest, map[string]string{
+			"error": "invalid body: chosen_price must be an exact decimal string (a JSON number is a float)",
+		})
 		return
 	}
-	if err := s.exceptions.Override(r.Context(), id, body.Actor, body.Reason, body.ChosenPrice, s.now()); err != nil {
+	price, err := dec.ParseRat(body.ChosenPrice)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	// And it must be a price this platform can actually carry. common.v1.Decimal
+	// has a fixed scale, so a figure with more precision than that would be stored
+	// exactly here and then rounded by every surface that shows or publishes it —
+	// an audit record whose value nobody would ever see. Refuse it rather than keep
+	// a number that disagrees with itself.
+	if dec.FromProto(dec.ToProto(price)).Cmp(price) != 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{
+			"error": "chosen_price carries more precision than the platform's decimal scale and cannot be represented exactly",
+		})
+		return
+	}
+	if err := s.exceptions.Override(r.Context(), id, body.Actor, body.Reason, price, s.now()); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}

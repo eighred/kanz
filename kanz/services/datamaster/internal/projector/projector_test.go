@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/kanz-eng/kanz/internal/dec"
 	"github.com/kanz-eng/kanz/services/datamaster/internal/feed"
 	"github.com/kanz-eng/kanz/services/datamaster/internal/master"
 	"github.com/kanz-eng/kanz/services/datamaster/internal/pricing"
@@ -28,7 +29,7 @@ func vendors() []feed.VendorFeed {
 				AssetClass: "EQUITY", CurrencyCode: "USD",
 				Identifiers: master.Identifiers{ISIN: "US0000001"}, AsOf: now,
 			}},
-			Candidates: []pricing.Candidate{{InstrumentID: "INST1", Source: "BLOOMBERG", Price: 100, AsOf: now}},
+			Candidates: []pricing.Candidate{{InstrumentID: "INST1", Source: "BLOOMBERG", Price: dec.Rat("100"), AsOf: now}},
 		},
 		feed.SimFeed{
 			Name: "ICE",
@@ -37,7 +38,7 @@ func vendors() []feed.VendorFeed {
 				Description: "Apple Inc",
 				Identifiers: master.Identifiers{ISIN: "US9999999"}, AsOf: now, // conflicting ISIN
 			}},
-			Candidates: []pricing.Candidate{{InstrumentID: "INST1", Source: "ICE", Price: 101, AsOf: now}},
+			Candidates: []pricing.Candidate{{InstrumentID: "INST1", Source: "ICE", Price: dec.Rat("101"), AsOf: now}},
 		},
 	}
 }
@@ -170,7 +171,7 @@ func TestRefreshDoesNotReopenAnAdjudicatedBreak(t *testing.T) {
 		t.Fatalf("no exceptions filed: %v %v", open, err)
 	}
 	id := open[0].ID
-	if err := exceptions.Override(ctx, id, "alice@kanz", "vendor confirmed", 0, now); err != nil {
+	if err := exceptions.Override(ctx, id, "alice@kanz", "vendor confirmed", dec.Rat("101"), now); err != nil {
 		t.Fatal(err)
 	}
 

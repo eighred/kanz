@@ -7,6 +7,7 @@ package store
 
 import (
 	"context"
+	"math/big"
 	"sync"
 	"time"
 
@@ -28,7 +29,7 @@ type GoldenStore interface {
 type ExceptionStore interface {
 	Add(ctx context.Context, e pricing.Exception) error
 	AddAll(ctx context.Context, exs []pricing.Exception) error
-	Override(ctx context.Context, id, actor, reason string, chosenPrice float64, at time.Time) error
+	Override(ctx context.Context, id, actor, reason string, chosenPrice *big.Rat, at time.Time) error
 	Get(ctx context.Context, id string) (pricing.Exception, bool, error)
 	Open(ctx context.Context) ([]pricing.Exception, error)
 }
@@ -80,7 +81,7 @@ func (s *QueueStore) AddAll(_ context.Context, exs []pricing.Exception) error {
 	return nil
 }
 
-func (s *QueueStore) Override(_ context.Context, id, actor, reason string, chosenPrice float64, at time.Time) error {
+func (s *QueueStore) Override(_ context.Context, id, actor, reason string, chosenPrice *big.Rat, at time.Time) error {
 	return s.q.Override(id, actor, reason, chosenPrice, at)
 }
 

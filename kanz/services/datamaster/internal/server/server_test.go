@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/kanz-eng/kanz/internal/dec"
 	"github.com/kanz-eng/kanz/services/datamaster/internal/feed"
 	"github.com/kanz-eng/kanz/services/datamaster/internal/master"
 	"github.com/kanz-eng/kanz/services/datamaster/internal/pricing"
@@ -27,22 +28,22 @@ func testFeeds() []feed.VendorFeed {
 			Name:     "BLOOMBERG",
 			VRecords: []master.VendorRecord{{Vendor: "BLOOMBERG", InstrumentID: "INST1", Priority: 0, AssetClass: "EQUITY", CurrencyCode: "USD", Identifiers: master.Identifiers{ISIN: "US0000001"}, AsOf: now}},
 			Candidates: []pricing.Candidate{
-				{InstrumentID: "INST1", Source: "BLOOMBERG", Price: 100, AsOf: now},
+				{InstrumentID: "INST1", Source: "BLOOMBERG", Price: dec.Rat("100"), AsOf: now},
 			},
 		},
 		feed.SimFeed{
 			Name: "REFINITIV",
 			Candidates: []pricing.Candidate{
-				{InstrumentID: "INST1", Source: "REFINITIV", Price: 100, AsOf: now},
+				{InstrumentID: "INST1", Source: "REFINITIV", Price: dec.Rat("100"), AsOf: now},
 				// A different instrument entirely. Its price must never reach INST1.
-				{InstrumentID: "INST2", Source: "REFINITIV", Price: 999, AsOf: now},
+				{InstrumentID: "INST2", Source: "REFINITIV", Price: dec.Rat("999"), AsOf: now},
 			},
 		},
 		feed.SimFeed{
 			Name:     "ICE",
 			VRecords: []master.VendorRecord{{Vendor: "ICE", InstrumentID: "INST1", Priority: 1, Description: "Apple Inc", Identifiers: master.Identifiers{ISIN: "US0000001"}, AsOf: now}},
 			Candidates: []pricing.Candidate{
-				{InstrumentID: "INST1", Source: "ICE", Price: 130, AsOf: now}, // outlier ⇒ tolerance breach (median 100 outvotes it)
+				{InstrumentID: "INST1", Source: "ICE", Price: dec.Rat("130"), AsOf: now}, // outlier ⇒ tolerance breach (median 100 outvotes it)
 			},
 		},
 	}
@@ -156,12 +157,12 @@ func TestPriceArbitratesOnlyItsOwnInstrument(t *testing.T) {
 		t.Fatalf("price: want 200 got %d", rec.Code)
 	}
 	var out struct {
-		Chosen   float64 `json:"chosen"`
-		HasPrice bool    `json:"has_price"`
+		Chosen   string `json:"chosen"` // an exact decimal string, never a JSON float
+		HasPrice bool   `json:"has_price"`
 	}
 	_ = json.Unmarshal(rec.Body.Bytes(), &out)
-	if !out.HasPrice || out.Chosen != 100 {
-		t.Fatalf("chosen = %v (has_price=%v), want the median of INST1's OWN candidates (100) — INST2's 999 must not vote",
+	if !out.HasPrice || out.Chosen != "100" {
+		t.Fatalf("chosen = %q (has_price=%v), want the median of INST1's OWN candidates (100) — INST2's 999 must not vote",
 			out.Chosen, out.HasPrice)
 	}
 }
@@ -190,7 +191,7 @@ func TestPriceAndOverrideFlow(t *testing.T) {
 	}
 
 	// Override it through the HTTP surface.
-	body := `{"actor":"alice@kanz","reason":"corp action confirmed","chosen_price":130}`
+	body := `{"actor":"alice@kanz","reason":"corp action confirmed","chosen_price":"130"}`
 	rec := httptest.NewRecorder()
 	s.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/exceptions/"+id+"/override", strings.NewReader(body)))
 	if rec.Code != http.StatusOK {
@@ -203,11 +204,70 @@ func TestPriceAndOverrideFlow(t *testing.T) {
 	if ex.Status != pricing.StatusOverridden || len(ex.Overrides) != 1 || ex.Overrides[0].Actor != "alice@kanz" {
 		t.Errorf("override not recorded in the exception store: %+v", ex)
 	}
+	if ex.Overrides[0].ChosenPrice.Cmp(dec.Rat("130")) != 0 {
+		t.Errorf("chosen price = %v, want exactly 130", ex.Overrides[0].ChosenPrice)
+	}
 
 	// A bad override (missing actor) is rejected.
 	rec = httptest.NewRecorder()
 	s.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/exceptions/"+id+"/override", strings.NewReader(`{"reason":"x"}`)))
 	if rec.Code != http.StatusBadRequest {
 		t.Errorf("bad override: want 400 got %d", rec.Code)
+	}
+}
+
+// TestOverrideRefusesAJSONFloat pins the API contract DATA-M8b bought.
+//
+// The overridden price is what a NAMED HUMAN decided when accepting a break the
+// system flagged, and it is written to an append-only audit trail. A JSON number
+// is an IEEE-754 double by definition, so taking one would round that decision on
+// its way into a compliance record — the same reason the regulatory filing API
+// refuses a JSON float for money. It must arrive as an exact decimal string.
+func TestOverrideRefusesAJSONFloat(t *testing.T) {
+	s, exceptions := newServer(t)
+	open, err := exceptions.Open(context.Background())
+	if err != nil || len(open) == 0 {
+		t.Fatalf("no exception to override: %v %v", open, err)
+	}
+	id := open[0].ID
+
+	rec := httptest.NewRecorder()
+	s.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/exceptions/"+id+"/override",
+		strings.NewReader(`{"actor":"alice@kanz","reason":"x","chosen_price":130.1}`)))
+	if rec.Code == http.StatusOK {
+		t.Fatal("the API accepted a JSON float for the overridden price — a human's decision would be rounded into the audit trail")
+	}
+
+	// And a non-numeric string is not a price either.
+	rec = httptest.NewRecorder()
+	s.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/exceptions/"+id+"/override",
+		strings.NewReader(`{"actor":"alice@kanz","reason":"x","chosen_price":"about a hundred"}`)))
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("want 400 for an unparseable price, got %d", rec.Code)
+	}
+}
+
+// A price the platform's decimal scale cannot represent is refused, rather than
+// stored exactly and then rounded by every surface that displays or publishes it.
+// The audit record and the mark must be the same number.
+func TestOverrideRefusesUnrepresentablePrecision(t *testing.T) {
+	s, exceptions := newServer(t)
+	open, err := exceptions.Open(context.Background())
+	if err != nil || len(open) == 0 {
+		t.Fatalf("no exception to override: %v %v", open, err)
+	}
+	id := open[0].ID
+
+	post := func(price string) int {
+		rec := httptest.NewRecorder()
+		s.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/exceptions/"+id+"/override",
+			strings.NewReader(`{"actor":"alice@kanz","reason":"x","chosen_price":"`+price+`"}`)))
+		return rec.Code
+	}
+	if code := post("130.123456789012345"); code != http.StatusBadRequest {
+		t.Fatalf("a 15dp price was accepted (HTTP %d): it would be stored exactly and shown rounded", code)
+	}
+	if code := post("130.12345678"); code != http.StatusOK { // exactly at the platform scale
+		t.Fatalf("a representable price was refused: HTTP %d", code)
 	}
 }

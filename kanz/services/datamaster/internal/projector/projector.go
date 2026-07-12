@@ -28,6 +28,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"math/big"
 	"sort"
 	"time"
 
@@ -42,7 +43,7 @@ type Projector struct {
 	feeds      []feed.VendorFeed
 	golden     store.GoldenStore
 	exceptions store.ExceptionStore
-	tolerance  float64
+	tolerance  *big.Rat
 	staleness  time.Duration
 	now        func() time.Time
 	logger     *slog.Logger
@@ -51,8 +52,9 @@ type Projector struct {
 // Option customizes the projector.
 type Option func(*Projector)
 
-// WithTolerance overrides the price-arbitration tolerance (≤ 0 ⇒ the default).
-func WithTolerance(t float64) Option { return func(p *Projector) { p.tolerance = t } }
+// WithTolerance overrides the price-arbitration tolerance as an exact fraction
+// (nil or ≤ 0 ⇒ the default 5%).
+func WithTolerance(t *big.Rat) Option { return func(p *Projector) { p.tolerance = t } }
 
 // WithStaleness overrides the price-staleness window (≤ 0 ⇒ the default).
 func WithStaleness(d time.Duration) Option { return func(p *Projector) { p.staleness = d } }

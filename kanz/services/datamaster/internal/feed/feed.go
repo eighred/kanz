@@ -9,14 +9,13 @@ package feed
 
 import (
 	"context"
-	"math"
 	"time"
 
-	commonpb "github.com/kanz-eng/kanz-schemas-go/common/v1"
 	marketpb "github.com/kanz-eng/kanz-schemas-go/market/v1"
 	referencepb "github.com/kanz-eng/kanz-schemas-go/reference/v1"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
+	"github.com/kanz-eng/kanz/internal/dec"
 	"github.com/kanz-eng/kanz/services/datamaster/internal/master"
 	"github.com/kanz-eng/kanz/services/datamaster/internal/pricing"
 )
@@ -47,9 +46,6 @@ func (f SimFeed) Vendor() string { return f.Name }
 func (f SimFeed) Records(context.Context) ([]master.VendorRecord, error) { return f.VRecords, nil }
 
 func (f SimFeed) Prices(context.Context) ([]pricing.Candidate, error) { return f.Candidates, nil }
-
-// priceExponent is the fixed scale for a normalized price Decimal (4 dp).
-const priceExponent = -4
 
 // NormalizeReference maps a resolved golden record onto a reference.v1
 // InstrumentReference — the canonical instrument-master shape the analytics plane
@@ -87,11 +83,17 @@ func NormalizeReference(sm master.SecurityMaster) *referencepb.InstrumentReferen
 // MarketDataEvent as a degenerate Quote (bid = ask = the consensus mark) — the
 // canonical hot-path shape, so a mastered price flows to consumers like any
 // other market quote. No consensus (all-stale / missing) ⇒ nil.
+//
+// dec.ToProto is the ONE place a rounding is introduced on this path (DATA-M8b):
+// the consensus is an exact rational all the way here, and only the fixed-scale
+// wire Decimal rounds it. This used to be a float64 multiplied by 10^4 and
+// truncated to an int64 coefficient — two roundings on the mark the market plane
+// consumes.
 func NormalizePrice(a pricing.Arbitration, asOf time.Time) *marketpb.MarketDataEvent {
 	if !a.HasPrice {
 		return nil
 	}
-	p := floatToDecimal(a.Chosen, priceExponent)
+	p := dec.ToProto(a.Chosen)
 	ev := &marketpb.MarketDataEvent{
 		InstrumentId: a.InstrumentID,
 		Mic:          "COMPOSITE",
@@ -111,11 +113,4 @@ func assetClass(s string) referencepb.AssetClass {
 		return referencepb.AssetClass(v)
 	}
 	return referencepb.AssetClass_ASSET_CLASS_UNSPECIFIED
-}
-
-// floatToDecimal builds a common.v1.Decimal at the given exponent (value =
-// coefficient·10^exponent), rounding the coefficient to nearest.
-func floatToDecimal(f float64, exp int32) *commonpb.Decimal {
-	scale := math.Pow(10, float64(-exp))
-	return &commonpb.Decimal{Coefficient: int64(math.Round(f * scale)), Exponent: exp}
 }

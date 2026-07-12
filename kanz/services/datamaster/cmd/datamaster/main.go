@@ -27,6 +27,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/kanz-eng/kanz/internal/dec"
 	"github.com/kanz-eng/kanz/pkg/observability"
 	"github.com/kanz-eng/kanz/services/datamaster/internal/config"
 	"github.com/kanz-eng/kanz/services/datamaster/internal/feed"
@@ -174,7 +175,7 @@ func buildFeeds(cfg config.Config) []feed.VendorFeed {
 				CurrencyCode: "USD",
 				AsOf:         now,
 			}},
-			Candidates: []pricing.Candidate{{InstrumentID: "SIM1", Source: "SIM_A", Price: 100, AsOf: now}},
+			Candidates: []pricing.Candidate{{InstrumentID: "SIM1", Source: "SIM_A", Price: dec.Rat("100"), AsOf: now}},
 		},
 		feed.SimFeed{
 			Name: "SIM_B",
@@ -185,11 +186,11 @@ func buildFeeds(cfg config.Config) []feed.VendorFeed {
 				CurrencyCode: "USD",
 				AsOf:         now,
 			}},
-			Candidates: []pricing.Candidate{{InstrumentID: "SIM1", Source: "SIM_B", Price: 101, AsOf: now}},
+			Candidates: []pricing.Candidate{{InstrumentID: "SIM1", Source: "SIM_B", Price: dec.Rat("101"), AsOf: now}},
 		},
 		feed.SimFeed{
 			Name:       "SIM_C",
-			Candidates: []pricing.Candidate{{InstrumentID: "SIM1", Source: "SIM_C", Price: 130, AsOf: now}},
+			Candidates: []pricing.Candidate{{InstrumentID: "SIM1", Source: "SIM_C", Price: dec.Rat("130"), AsOf: now}},
 		},
 	}
 }

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math/big"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -101,9 +102,12 @@ func (p *PostgresExceptions) AddAll(ctx context.Context, exs []pricing.Exception
 	return nil
 }
 
-func (p *PostgresExceptions) Override(ctx context.Context, id, actor, reason string, chosenPrice float64, at time.Time) error {
+func (p *PostgresExceptions) Override(ctx context.Context, id, actor, reason string, chosenPrice *big.Rat, at time.Time) error {
 	if actor == "" || reason == "" {
 		return fmt.Errorf("store: override requires actor and reason")
+	}
+	if chosenPrice == nil {
+		return fmt.Errorf("store: override requires a chosen price")
 	}
 	tx, err := p.pool.Begin(ctx)
 	if err != nil {
@@ -119,10 +123,14 @@ func (p *PostgresExceptions) Override(ctx context.Context, id, actor, reason str
 	if err != nil {
 		return fmt.Errorf("lock exception %s: %w", id, err)
 	}
+	// chosen_price is TEXT holding the rational's exact RatString (0002), the same
+	// stance as the accounting ledger's money columns: a lossless round-trip, and
+	// `double` is banned for a price. It was DOUBLE PRECISION, which rounded the
+	// figure a named human chose on its way into the audit trail.
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO exception_overrides (tenant_id, exception_id, actor, reason, chosen_price, overridden_at)
 		VALUES (current_setting('app.tenant_id'), $1, $2, $3, $4, $5)
-	`, id, actor, reason, chosenPrice, at); err != nil {
+	`, id, actor, reason, chosenPrice.RatString(), at); err != nil {
 		return fmt.Errorf("append override %s: %w", id, err)
 	}
 	if _, err := tx.Exec(ctx, `
@@ -192,9 +200,17 @@ func (p *PostgresExceptions) loadOverrides(ctx context.Context, id string) ([]pr
 	var out []pricing.Override
 	for rows.Next() {
 		var o pricing.Override
-		if err := rows.Scan(&o.Actor, &o.Reason, &o.ChosenPrice, &o.At); err != nil {
+		var price string
+		if err := rows.Scan(&o.Actor, &o.Reason, &price, &o.At); err != nil {
 			return nil, fmt.Errorf("scan override %s: %w", id, err)
 		}
+		// A stored price that will not parse is a corrupt audit record. Refuse the
+		// read rather than serving a reviewer a zero, or a number nobody chose.
+		rat, ok := new(big.Rat).SetString(price)
+		if !ok {
+			return nil, fmt.Errorf("override %s: chosen price %q is not an exact decimal", id, price)
+		}
+		o.ChosenPrice = rat
 		out = append(out, o)
 	}
 	return out, rows.Err()

@@ -11,6 +11,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/kanz-eng/kanz/internal/dec"
 	"github.com/kanz-eng/kanz/services/datamaster/internal/master"
 	"github.com/kanz-eng/kanz/services/datamaster/internal/pricing"
 )
@@ -85,15 +86,15 @@ func runExceptionContract(t *testing.T, ctx context.Context, es ExceptionStore) 
 	}
 
 	at := time.Unix(1_700_001_000, 0).UTC()
-	if err := es.Override(ctx, ex.ID, "ops@kanz", "vendor confirmed", 152.40, at); err != nil {
+	if err := es.Override(ctx, ex.ID, "ops@kanz", "vendor confirmed", dec.Rat("152.40"), at); err != nil {
 		t.Fatalf("override: %v", err)
 	}
 	// Override requires actor + reason.
-	if err := es.Override(ctx, ex.ID, "", "", 1, at); err == nil {
+	if err := es.Override(ctx, ex.ID, "", "", dec.Rat("1"), at); err == nil {
 		t.Fatal("override without actor/reason should error")
 	}
 	// Unknown id errors.
-	if err := es.Override(ctx, "nope", "a", "r", 1, at); err == nil {
+	if err := es.Override(ctx, "nope", "a", "r", dec.Rat("1"), at); err == nil {
 		t.Fatal("override unknown id should error")
 	}
 
@@ -178,4 +179,46 @@ func TestPostgresGoldenStore(t *testing.T) {
 func TestPostgresExceptionStore(t *testing.T) {
 	pool := newPool(t)
 	runExceptionContract(t, context.Background(), NewPostgresExceptions(pool))
+}
+
+// TestPostgresOverridePriceIsExact pins DATA-M8b at the durable boundary.
+//
+// chosen_price was DOUBLE PRECISION, described in 0001 as "an oversight statistic,
+// not a stored price". It is neither: it is the price a NAMED HUMAN chose when
+// accepting a break, stored in an append-only audit trail. 123456789.123456789 has
+// 18 significant digits — more than an IEEE-754 double can hold — so a double
+// column silently returns 123456789.12345679 and the compliance record no longer
+// says what the human decided. TEXT holding the rational's exact RatString (the
+// accounting ledger's stance for money) round-trips it untouched.
+func TestPostgresOverridePriceIsExact(t *testing.T) {
+	pool := newPool(t)
+	ctx := context.Background()
+	es := NewPostgresExceptions(pool)
+
+	ex := pricing.Exception{
+		ID: "EXACT:PRICE_TOLERANCE:ICE", Kind: pricing.KindPriceTolerance,
+		InstrumentID: "EXACT", Detail: "outlier", Status: pricing.StatusOpen,
+		DetectedAt: time.Unix(1_700_000_000, 0).UTC(),
+	}
+	if err := es.Add(ctx, ex); err != nil {
+		t.Fatal(err)
+	}
+
+	const chosen = "123456789.123456789" // 18 significant digits: a double cannot hold this
+	want := dec.Rat(chosen)
+	if err := es.Override(ctx, ex.ID, "alice@kanz", "vendor confirmed", want, time.Unix(1_700_000_001, 0).UTC()); err != nil {
+		t.Fatal(err)
+	}
+
+	got, ok, err := es.Get(ctx, ex.ID)
+	if err != nil || !ok {
+		t.Fatalf("read back: ok=%v err=%v", ok, err)
+	}
+	if len(got.Overrides) != 1 {
+		t.Fatalf("override trail = %d entries, want 1", len(got.Overrides))
+	}
+	if got.Overrides[0].ChosenPrice.Cmp(want) != 0 {
+		t.Fatalf("chosen price round-tripped as %s, want exactly %s — the audit trail no longer says what the human chose",
+			got.Overrides[0].ChosenPrice.FloatString(9), chosen)
+	}
 }

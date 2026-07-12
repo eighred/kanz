@@ -1,0 +1,24 @@
+-- 0002: the overridden price is money, not a statistic (DATA-M8b).
+--
+-- 0001 declared:
+--
+--   chosen_price DOUBLE PRECISION NOT NULL  -- an oversight statistic, not a stored price
+--
+-- That rationale was false in both halves. The value is the price a NAMED HUMAN
+-- chose when accepting a break the system flagged, and 0001 is the append-only
+-- audit trail it is stored in — so it is neither a transient statistic nor
+-- un-stored. A double rounds it, and a compliance record must say what the human
+-- decided, not the nearest binary double to it.
+--
+-- TEXT holding *big.Rat.RatString() is the house stance for money on this
+-- platform (accounting's ledger.quantity/price, alternatives' commitment.amount):
+-- exact, lossless, and round-trips through big.Rat.SetString. `double` is banned
+-- for money, prices and sizes (KANZ_BRAIN).
+--
+-- The USING cast is written for completeness, not for data: nothing ever wrote
+-- this column before DATA-M8a wired the store, one commit ago. If any row does
+-- exist it was a double, so its text form is the closest decimal Postgres can
+-- render — the rounding already happened at write time and this migration cannot
+-- undo it. It does not pretend to.
+ALTER TABLE exception_overrides
+    ALTER COLUMN chosen_price TYPE TEXT USING chosen_price::text;
