@@ -109,6 +109,12 @@ spec:
             - { name: API_GATEWAY_WEALTH_ADDR, value: "http://wealth.kanz-services.svc:8080" }
             - { name: API_GATEWAY_DATAMASTER_ADDR, value: "http://datamaster.kanz-services.svc:8080" }
             - { name: API_GATEWAY_COPILOT_ADDR, value: "http://copilot.kanz-services.svc:8080" }
+            # tv-sync — the Broker API behind /v1/broker/*, which is how an authorized
+            # human (or a TradingView chart) sees the orders Kanz opened. It is
+            # reachable ONLY through this gateway: it authenticates nothing and serves
+            # whatever tenant the principal header names, so a direct route to it would
+            # let any caller read any tenant's book. Empty ⇒ those routes 503.
+            - { name: API_GATEWAY_TV_SYNC_ADDR, value: "http://tv-sync.kanz-services.svc:8091" }
             # PER POD, not platform-wide. See THE SCALE INVARIANT above.
             - { name: API_GATEWAY_RATE_LIMIT_PER_SEC, value: "50" }
             - { name: API_GATEWAY_RATE_LIMIT_BURST, value: "100" }

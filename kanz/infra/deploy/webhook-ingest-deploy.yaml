@@ -100,10 +100,27 @@ spec:
             - { name: WEBHOOK_INGEST_SOURCE, value: "webhook-ingest" }
             # The nonce replay window. A signal replayed outside it is refused.
             - { name: WEBHOOK_INGEST_REPLAY_WINDOW, value: "5m" }
-            # TradingView's published egress ranges. EMPTY MEANS ANY SOURCE IP MAY
-            # POST A SIGNAL — the HMAC is still required, but the allowlist is the
-            # cheap outer perimeter and it should not be left open.
-            - { name: WEBHOOK_INGEST_IP_ALLOWLIST, value: "52.89.214.238/32,34.212.75.30/32,54.218.53.128/32,52.32.178.7/32" }
+            # EMPTY, ON PURPOSE — and it is NOT an open door. See
+            # webhook-ingest-ingress.yaml.
+            #
+            # This allowlist is checked against the CONNECTION PEER (r.RemoteAddr);
+            # X-Forwarded-For is deliberately not trusted, because a client can forge
+            # it. Behind the Ingress the peer is ALWAYS the ingress-nginx pod and
+            # NEVER TradingView — so this variable used to name TradingView's four
+            # egress ranges and would have 401'd EVERY SIGNAL the moment the service
+            # was actually exposed. The loop's entry point, dead, with the pod
+            # reporting healthy.
+            #
+            # The perimeter is therefore split across the layers that can each see
+            # what they check: the CLIENT IP at the Ingress (whitelist-source-range),
+            # the PEER by pod identity in NetworkPolicy (allow-ingress-to-webhook-
+            # ingest, which admits only ingress-nginx), and the SENDER by HMAC over
+            # the raw body + the nonce replay cache — the only one of the three that
+            # authenticates anything.
+            #
+            # Set this ONLY in the Cloudflare-relay topology (WEBHOOK_INGEST_
+            # CLOUDFLARE_ONLY=1, no Ingress), where the peer really is Cloudflare.
+            - { name: WEBHOOK_INGEST_IP_ALLOWLIST, value: "" }
           livenessProbe:
             httpGet: { path: /healthz, port: 8090 }
             initialDelaySeconds: 5

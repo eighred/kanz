@@ -1,0 +1,60 @@
+---
+# EXEC-M15 — the public edge for humans and machines that read the platform.
+#
+# One route in, one prefix exposed: /v1. The gateway also serves /healthz, /readyz
+# and /metrics on the same port; a `/` Prefix rule would publish all three.
+#
+# THE GATEWAY IS THE SOLE IDENTITY AUTHORITY, AND THAT IS WHY tv-sync HAS NO INGRESS.
+#
+#   Everything under /v1 goes through the edge chain — version, request signing,
+#   AUTH, metrics, quota, idempotency — and only then to an upstream, carrying the
+#   authenticated principal in X-Kanz-Principal-Subject/Tenant/Roles. The upstreams
+#   TRUST those headers: tv-sync reads the tenant out of the header and serves that
+#   tenant's book. It authenticates NOTHING itself.
+#
+#   That is a sound arrangement only while the gateway is the ONLY thing that can
+#   reach tv-sync (NetworkPolicy allow-gateway-to-tv-sync) and nothing outside can.
+#   Give tv-sync an Ingress and any caller could name any tenant and read that
+#   tenant's book. There is deliberately no tv-sync-ingress.yaml in this directory,
+#   and test/arch/edge_test.go fails the build if one appears.
+#
+#   The chart-facing Broker API therefore lives HERE, under /v1/broker/*, where a
+#   request must present a token before it sees an order.
+#
+# NOT EXPOSED: GET /broker/accounts/{id}/stream. The SSE endpoint exists on tv-sync
+# but the gateway's proxy buffers the whole upstream response (io.ReadAll) before it
+# replies, so a stream would hang until the limit. Charts poll /positions and
+# /orders. Proxying SSE means teaching the proxy to stream — a real change, not a
+# route.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: api-gateway
+  namespace: kanz-services
+  labels:
+    app.kubernetes.io/part-of: kanz
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-body-size: "1m"
+    nginx.ingress.kubernetes.io/force-ssl-redirect: "true"
+    # The gateway's own limiter (API_GATEWAY_RATE_LIMIT_PER_SEC) is per-principal and
+    # runs after auth. This one is per-source-IP and runs before a request reaches a
+    # pod — it is what an unauthenticated flood hits.
+    nginx.ingress.kubernetes.io/limit-rps: "100"
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts: ["api.eighred.com"]
+      secretName: kanz-tls-api
+  rules:
+    - host: api.eighred.com
+      http:
+        paths:
+          # /v1 ONLY. The gateway mounts its auth chain on /v1/ — a route published
+          # outside that prefix would reach a handler with no principal attached.
+          - path: /v1
+            pathType: Prefix
+            backend:
+              service:
+                name: api-gateway
+                port:
+                  number: 8080

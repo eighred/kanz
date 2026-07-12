@@ -1,0 +1,75 @@
+---
+# EXEC-M15 — the public edge of the trading loop.
+#
+# This is the ONLY route from the internet into webhook-ingest, and it exposes ONE
+# path: POST /webhook/tradingview. Not /healthz, not /readyz, not /metrics — the
+# service serves all three on the same port, and an Ingress with a `/` prefix would
+# publish the platform's liveness and its Prometheus metrics to anyone who asked.
+# pathType: Exact is what keeps this to the single path; do not relax it to Prefix.
+#
+# WHERE THE IP PERIMETER LIVES, AND WHY IT MOVED
+#
+#   webhook-ingest's own allowlist (WEBHOOK_INGEST_IP_ALLOWLIST) is checked against
+#   the CONNECTION PEER — r.RemoteAddr. X-Forwarded-For is deliberately not trusted
+#   there, because a client can forge it. Behind this Ingress the peer is ALWAYS the
+#   ingress-nginx pod and NEVER TradingView, so TradingView's egress ranges at the
+#   pod layer would 401 EVERY SIGNAL — the loop's entry point, dead on arrival, with
+#   the pod reporting healthy. (It was configured exactly that way until this file
+#   existed: the manifest named a perimeter that only works if TradingView dials the
+#   pod directly, and nothing exposed the pod at all.)
+#
+#   So the client-IP perimeter belongs HERE, at the only layer that sees the client
+#   IP: whitelist-source-range, evaluated by nginx. The pod's peer perimeter is now
+#   the NetworkPolicy (allow-ingress-to-webhook-ingest), which says the same thing
+#   against pod identity instead of IP literals and does not rot when a CIDR moves.
+#
+#   Neither is the authenticator. The HMAC over the raw body plus the nonce replay
+#   cache is what proves a signal came from a strategy that holds the secret; the IP
+#   ranges are a cheap outer wall in front of it. Do not treat this list as the
+#   authority boundary — TradingView publishes these ranges and they change.
+#
+#   CLOUDFLARE_ONLY (WEBHOOK_INGEST_CLOUDFLARE_ONLY=1) is the ALTERNATIVE topology —
+#   the Cloudflare Signing Relay dialing the pod through an L4 path, where the peer
+#   IS Cloudflare and CF-Connecting-IP is real. It is MUTUALLY EXCLUSIVE with this
+#   Ingress: nginx sets no CF-Connecting-IP, so with both, every signal 401s. Run one
+#   or the other.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: webhook-ingest
+  namespace: kanz-services
+  labels:
+    app.kubernetes.io/part-of: kanz
+  annotations:
+    # TradingView's published webhook egress ranges. THIS is the IP perimeter — it
+    # is the one place in the request path that sees the real client address.
+    nginx.ingress.kubernetes.io/whitelist-source-range: "52.89.214.238/32,34.212.75.30/32,54.218.53.128/32,52.32.178.7/32"
+    # A TradingView alert is a small JSON object. The handler already caps the body
+    # it will read; this refuses the oversized request before it reaches a pod.
+    nginx.ingress.kubernetes.io/proxy-body-size: "16k"
+    # A signal is worthless late. Fail fast rather than hold the connection.
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "10"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "10"
+    # TradingView will not follow a redirect for a POST.
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/force-ssl-redirect: "true"
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts: ["signals.eighred.com"]
+      # Issued into this Secret by cert-manager. Until it exists nginx serves its
+      # self-signed default and TradingView's TLS verification fails — loudly, at
+      # the edge, which is the correct place for that to be visible.
+      secretName: kanz-tls-signals
+  rules:
+    - host: signals.eighred.com
+      http:
+        paths:
+          # Exact. The service also serves /healthz, /readyz and /metrics on 8090.
+          - path: /webhook/tradingview
+            pathType: Exact
+            backend:
+              service:
+                name: webhook-ingest
+                port:
+                  number: 8090

@@ -161,3 +161,131 @@ spec:
               kubernetes.io/metadata.name: kanz-observability
       ports:
         - { protocol: TCP, port: 8080 }
+---
+# EXEC-M15 — the trading loop's entry point. TradingView reaches webhook-ingest
+# through the ingress controller and NOTHING else does. This is the pod-level half
+# of the perimeter: webhook-ingest's own IP allowlist is checked against the
+# connection peer, and behind an L7 Ingress the peer is always the nginx pod — so
+# the peer check is expressed HERE, against pod identity, and the CLIENT-IP check
+# lives on the Ingress (whitelist-source-range), the only layer that sees the client.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-ingress-to-webhook-ingest
+  namespace: kanz-services
+  labels:
+    app.kubernetes.io/part-of: kanz
+spec:
+  podSelector:
+    matchLabels:
+      app: webhook-ingest
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: ingress-nginx
+      ports:
+        - { protocol: TCP, port: 8090 }
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kanz-observability
+      ports:
+        - { protocol: TCP, port: 8090 }
+---
+# EXEC-M15 — the gateway's READ upstreams: tv-sync (the Broker API a TradingView
+# chart reads to see the orders Kanz opened) and the Phase-7 services.
+#
+# THE NAMESPACE IS DEFAULT-DENY IN BOTH DIRECTIONS. Until this policy existed the
+# gateway could reach exactly one peer — risk-engine — so every proxied route
+# (/v1/households, /v1/securities, /v1/ask, and now /v1/broker/*) was DEAD at the
+# network layer on any cluster with a CNI that enforces NetworkPolicy. It was not
+# visible in kind: kindnetd does not enforce NetworkPolicy, so the policy set in this
+# file has never actually been executed. test/arch/edge_test.go asserts every proxied
+# upstream appears below — a check on the FILES, not on a running cluster.
+#
+# tv-sync accepts NOTHING but this. It trusts X-Kanz-Principal-Tenant and serves the
+# named tenant's book, so the gateway being its only ingress is what makes that trust
+# sound. It has no Ingress, and it must not get one.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-gateway-to-read-upstreams
+  namespace: kanz-services
+  labels:
+    app.kubernetes.io/part-of: kanz
+spec:
+  podSelector:
+    matchLabels:
+      app: api-gateway
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app: tv-sync
+      ports:
+        - { protocol: TCP, port: 8091 }
+    - to:
+        - podSelector:
+            matchExpressions:
+              - key: app
+                operator: In
+                values: [wealth, datamaster, copilot]
+      ports:
+        - { protocol: TCP, port: 8080 }
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-gateway-to-tv-sync
+  namespace: kanz-services
+  labels:
+    app.kubernetes.io/part-of: kanz
+spec:
+  podSelector:
+    matchLabels:
+      app: tv-sync
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: api-gateway
+      ports:
+        - { protocol: TCP, port: 8091 }
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kanz-observability
+      ports:
+        - { protocol: TCP, port: 8091 }
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-gateway-to-phase7
+  namespace: kanz-services
+  labels:
+    app.kubernetes.io/part-of: kanz
+spec:
+  podSelector:
+    matchExpressions:
+      - key: app
+        operator: In
+        values: [wealth, datamaster, copilot]
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: api-gateway
+      ports:
+        - { protocol: TCP, port: 8080 }
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kanz-observability
+      ports:
+        - { protocol: TCP, port: 8080 }

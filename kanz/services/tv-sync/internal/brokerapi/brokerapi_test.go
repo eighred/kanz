@@ -55,7 +55,7 @@ func get(t *testing.T, mux *http.ServeMux, path, tenant string) *httptest.Respon
 	t.Helper()
 	req := httptest.NewRequest(http.MethodGet, path, nil)
 	if tenant != "" {
-		req.Header.Set("X-Tenant", tenant)
+		req.Header.Set(HeaderPrincipalTenant, tenant)
 	}
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
@@ -148,7 +148,7 @@ func TestStream_DeliversDeltas(t *testing.T) {
 	defer srv.Close()
 
 	req, _ := http.NewRequest(http.MethodGet, srv.URL+"/broker/accounts/fund-alpha/stream", nil)
-	req.Header.Set("X-Tenant", "acme")
+	req.Header.Set(HeaderPrincipalTenant, "acme")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)

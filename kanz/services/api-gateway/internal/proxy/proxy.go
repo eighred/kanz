@@ -19,6 +19,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strings"
 
 	"github.com/kanz-eng/kanz/services/api-gateway/internal/middleware"
 )
@@ -31,6 +32,7 @@ const (
 	ServiceWealth     Service = "wealth"
 	ServiceDataMaster Service = "datamaster"
 	ServiceCopilot    Service = "copilot"
+	ServiceTVSync     Service = "tv-sync"
 )
 
 // Request is the upstream call the Backend forwards. Principal is the
@@ -75,19 +77,46 @@ func New(backend Backend) *Handler { return &Handler{backend: backend} }
 // service routes, so no path rewriting is needed — the gateway path IS the
 // upstream path.
 func (h *Handler) Routes(mux *http.ServeMux) {
-	mux.HandleFunc("GET /v1/households/{id}", h.handle(ServiceWealth, false))
-	mux.HandleFunc("GET /v1/securities/{id}", h.handle(ServiceDataMaster, false))
-	mux.HandleFunc("GET /v1/prices/{id}", h.handle(ServiceDataMaster, false))
-	mux.HandleFunc("GET /v1/exceptions", h.handle(ServiceDataMaster, false))
+	mux.HandleFunc("GET /v1/households/{id}", h.handle(ServiceWealth, false, nil))
+	mux.HandleFunc("GET /v1/securities/{id}", h.handle(ServiceDataMaster, false, nil))
+	mux.HandleFunc("GET /v1/prices/{id}", h.handle(ServiceDataMaster, false, nil))
+	mux.HandleFunc("GET /v1/exceptions", h.handle(ServiceDataMaster, false, nil))
 	// The copilot is never anonymous: require the principal at the edge.
-	mux.HandleFunc("POST /v1/ask", h.handle(ServiceCopilot, true))
+	mux.HandleFunc("POST /v1/ask", h.handle(ServiceCopilot, true, nil))
+
+	// THE TRADINGVIEW BROKER SURFACE — what a chart shows an authorized human about
+	// the orders Kanz opened for them.
+	//
+	// tv-sync AUTHENTICATES NOTHING. It reads the tenant out of a header and trusts
+	// it, because the gateway is the sole identity authority on this platform and the
+	// mesh is what stops anyone else reaching the service. Put tv-sync on the open
+	// internet as it stands and ANY CALLER COULD NAME ANY TENANT AND READ THAT
+	// TENANT'S BOOK. So it is reachable only through here, and only with a principal:
+	// requirePrincipal is true, so even an auth-disabled dev gateway will not forward
+	// an anonymous request for somebody's positions.
+	//
+	// The path is rewritten (/v1/broker/... → /broker/...) because the gateway's edge
+	// chain — version, signing, AUTH, metrics, quota, idempotency — is mounted on
+	// /v1/. A route outside /v1 would skip every one of those. The prefix is not
+	// cosmetic; it is what makes the request authenticated at all.
+	//
+	// NOT PROXIED: GET /broker/accounts/{id}/stream. It is Server-Sent Events, and
+	// this backend BUFFERS the upstream response (io.ReadAll) — a stream through it
+	// would hang until 8 MiB or forever, whichever came first. A live feed needs a
+	// streaming reverse proxy, which this is deliberately not.
+	stripV1 := func(p string) string { return strings.TrimPrefix(p, "/v1") }
+	mux.HandleFunc("GET /v1/broker/accounts", h.handle(ServiceTVSync, true, stripV1))
+	mux.HandleFunc("GET /v1/broker/accounts/{id}/state", h.handle(ServiceTVSync, true, stripV1))
+	mux.HandleFunc("GET /v1/broker/accounts/{id}/positions", h.handle(ServiceTVSync, true, stripV1))
+	mux.HandleFunc("GET /v1/broker/accounts/{id}/orders", h.handle(ServiceTVSync, true, stripV1))
+	mux.HandleFunc("GET /v1/broker/accounts/{id}/executions", h.handle(ServiceTVSync, true, stripV1))
 }
 
 // handle builds a forwarding handler for one upstream. requirePrincipal gates
 // the route on an authenticated caller at the edge (copilot's /v1/ask), beyond
 // the chain's auth middleware — so even an auth-disabled dev gateway never
 // forwards an anonymous question.
-func (h *Handler) handle(svc Service, requirePrincipal bool) http.HandlerFunc {
+func (h *Handler) handle(svc Service, requirePrincipal bool, rewrite func(string) string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if h.backend == nil {
 			writeError(w, http.StatusServiceUnavailable, "the "+string(svc)+" surface is disabled")
@@ -107,10 +136,14 @@ func (h *Handler) handle(svc Service, requirePrincipal bool) http.HandlerFunc {
 			writeError(w, http.StatusRequestEntityTooLarge, "request body too large")
 			return
 		}
+		path := r.URL.Path
+		if rewrite != nil {
+			path = rewrite(path)
+		}
 		resp, err := h.backend.Forward(r.Context(), Request{
 			Service:   svc,
 			Method:    r.Method,
-			Path:      r.URL.Path,
+			Path:      path,
 			Query:     r.URL.Query(),
 			Body:      body,
 			Principal: p,

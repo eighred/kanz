@@ -5,7 +5,7 @@
 // Eighred trader watches the automated funds directly on TV charts.
 //
 // Every read is tenant-scoped: the tenant is taken from the trusted principal
-// the edge injects (the X-Tenant header here; in production the gateway sets it
+// the edge injects (X-Kanz-Principal-Tenant; the api-gateway sets it
 // from the authenticated principal, the MT-01 stance). An account that is not
 // the caller's tenant simply is not found — cross-tenant reads are impossible,
 // not merely denied.
@@ -168,12 +168,34 @@ func (h *Handler) stream(w http.ResponseWriter, r *http.Request) {
 
 // --- tenant + as-of extraction ---
 
-// tenantOf reads the trusted tenant header, rejecting an unscoped request
-// (deny-by-default).
+// HeaderPrincipalTenant is the tenant of the AUTHENTICATED caller, injected by the
+// api-gateway — the platform's sole identity authority — from the verified token.
+// It is the same header every other Phase-7 service reads
+// (proxy.HeaderPrincipalTenant), and using the platform's header rather than a
+// bespoke one is the point: there is exactly one thing on this platform that decides
+// who you are.
+const HeaderPrincipalTenant = "X-Kanz-Principal-Tenant"
+
+// tenantOf reads the tenant of the authenticated caller, rejecting an unscoped
+// request (deny-by-default).
+//
+// # This service authenticates NOTHING, and that is only safe behind the gateway
+//
+// It trusts this header because the caller can only be the gateway: the gateway
+// validates the token, and the mesh (mTLS, SVID-authorized) is what stops anyone
+// else reaching this port. EXPOSE THIS SERVICE DIRECTLY TO THE INTERNET AND ANY
+// CALLER CAN NAME ANY TENANT AND READ THAT TENANT'S BOOK — its positions, its
+// orders, its executions. There is no Ingress for tv-sync, deliberately; it is
+// reachable only through /v1/broker/* on the gateway, which requires a principal.
+//
+// It used to read a bespoke "X-Tenant". Nothing set it, and any caller could.
 func tenantOf(w http.ResponseWriter, r *http.Request) (string, bool) {
-	tenant := r.Header.Get("X-Tenant")
+	tenant := r.Header.Get(HeaderPrincipalTenant)
 	if tenant == "" {
-		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "missing tenant scope"})
+		writeJSON(w, http.StatusUnauthorized, map[string]string{
+			"error": "missing tenant scope: this surface is reachable only through the api-gateway, " +
+				"which injects the authenticated principal",
+		})
 		return "", false
 	}
 	return tenant, true

@@ -71,6 +71,12 @@ type Config struct {
 	WealthAddr     string
 	DataMasterAddr string
 	CopilotAddr    string
+	// TVSyncAddr is the tv-sync Broker API — what a TradingView chart (and any
+	// authorized human) reads to see the orders Kanz opened. It is exposed ONLY
+	// through this gateway: tv-sync authenticates nothing and trusts the principal
+	// header, so a direct route to it would let any caller name any tenant and read
+	// that tenant's book. Empty ⇒ the /v1/broker/* routes 503.
+	TVSyncAddr string
 }
 
 func Load() (Config, error) {
@@ -97,6 +103,7 @@ func Load() (Config, error) {
 		WealthAddr:      os.Getenv("API_GATEWAY_WEALTH_ADDR"),
 		DataMasterAddr:  os.Getenv("API_GATEWAY_DATAMASTER_ADDR"),
 		CopilotAddr:     os.Getenv("API_GATEWAY_COPILOT_ADDR"),
+		TVSyncAddr:      os.Getenv("API_GATEWAY_TV_SYNC_ADDR"),
 	}, nil
 }
 
