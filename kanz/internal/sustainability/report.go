@@ -8,12 +8,15 @@ package sustainability
 // through a Signer seam the AUDIT-01 hash-chain wires into).
 
 import (
+	"encoding/json"
+	"math/big"
+
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"github.com/kanz-eng/kanz/internal/dec"
 	"math"
 	"sort"
-	"strconv"
 	"time"
 )
 
@@ -104,10 +107,29 @@ var templates = map[Framework][]field{
 }
 
 // LineItem is one row of a report.
+// Value is an EXACT rational, matching internal/regulatory. The METRICS behind it
+// are model outputs (emissions intensity, implied temperature rise, climate VaR) —
+// float64 in the model, and honestly so: they are not exact base-10 quantities and
+// no type can make them so.
+//
+// What is exact is the FILED number: what the regulator receives and what the
+// signature commits to are one deterministic decimal string. It also means this
+// service emits a filed value ONE way — a decimal string — whether the filing is a
+// capital charge, a NAV, or a carbon intensity.
 type LineItem struct {
 	Code  string
 	Label string
-	Value float64
+	Value *big.Rat
+}
+
+// MarshalJSON emits the value as a decimal STRING, never a JSON number — the same
+// rendering the signature commits to.
+func (l LineItem) MarshalJSON() ([]byte, error) {
+	return json.Marshal(struct {
+		Code  string `json:"code"`
+		Label string `json:"label"`
+		Value string `json:"value"`
+	}{Code: l.Code, Label: l.Label, Value: dec.Str(l.Value)})
 }
 
 // Report is a point-in-time, signed climate disclosure.
@@ -140,7 +162,7 @@ func (HashSigner) Sign(canonical []byte) (string, error) {
 // as of asOf and signs it. It errors when the framework is unknown or any
 // templated line item is missing — so an incomplete disclosure never gets signed.
 // A nil signer defaults to HashSigner.
-func BuildReport(framework Framework, asOf time.Time, values map[string]float64, signer Signer) (Report, error) {
+func BuildReport(framework Framework, asOf time.Time, values map[string]*big.Rat, signer Signer) (Report, error) {
 	tmpl, ok := templates[framework]
 	if !ok {
 		return Report{}, fmt.Errorf("sustainability: unknown framework %q", framework)
@@ -175,7 +197,8 @@ func (r Report) canonical() []byte {
 	lines = append(lines, string(r.Framework), r.AsOf.UTC().Format(time.RFC3339))
 	codes := make([]string, len(r.LineItems))
 	for i, li := range r.LineItems {
-		codes[i] = li.Code + "=" + strconv.FormatFloat(li.Value, 'f', -1, 64)
+		// Sign what you file: dec.Str is the same string the client receives.
+		codes[i] = li.Code + "=" + dec.Str(li.Value)
 	}
 	sort.Strings(codes)
 	lines = append(lines, codes...)
@@ -188,11 +211,11 @@ func (r Report) canonical() []byte {
 }
 
 // Lookup returns a line item's value by code.
-func (r Report) Lookup(code string) (float64, bool) {
+func (r Report) Lookup(code string) (*big.Rat, bool) {
 	for _, li := range r.LineItems {
 		if li.Code == code {
 			return li.Value, true
 		}
 	}
-	return 0, false
+	return nil, false
 }

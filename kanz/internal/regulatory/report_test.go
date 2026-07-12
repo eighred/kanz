@@ -1,18 +1,20 @@
 package regulatory
 
 import (
+	"github.com/kanz-eng/kanz/internal/dec"
+	"math/big"
 	"testing"
 	"time"
 )
 
-func frtbValues() map[string]float64 {
-	return map[string]float64{
-		"FRTB_DELTA":     1_200_000,
-		"FRTB_VEGA":      300_000,
-		"FRTB_CURVATURE": 150_000,
-		"FRTB_DRC":       400_000,
-		"FRTB_RRAO":      50_000,
-		"FRTB_TOTAL":     2_100_000,
+func frtbValues() map[string]*big.Rat {
+	return map[string]*big.Rat{
+		"FRTB_DELTA":     dec.Rat("1200000"),
+		"FRTB_VEGA":      dec.Rat("300000"),
+		"FRTB_CURVATURE": dec.Rat("150000"),
+		"FRTB_DRC":       dec.Rat("400000"),
+		"FRTB_RRAO":      dec.Rat("50000"),
+		"FRTB_TOTAL":     dec.Rat("2100000"),
 	}
 }
 
@@ -28,8 +30,8 @@ func TestBuildReport_Complete(t *testing.T) {
 	if r.Signature == "" {
 		t.Fatal("a built report must be signed")
 	}
-	if v, ok := r.Lookup("FRTB_TOTAL"); !ok || v != 2_100_000 {
-		t.Fatalf("FRTB_TOTAL line item missing/wrong: %.0f ok=%v", v, ok)
+	if v, ok := r.Lookup("FRTB_TOTAL"); !ok || v.Cmp(dec.Rat("2100000")) != 0 {
+		t.Fatalf("FRTB_TOTAL line item missing/wrong: %v ok=%v", v, ok)
 	}
 }
 
@@ -55,7 +57,7 @@ func TestBuildReport_SignatureDeterministicAndTamperEvident(t *testing.T) {
 		t.Fatal("the same inputs must produce the same signature")
 	}
 	tampered := frtbValues()
-	tampered["FRTB_TOTAL"] = 1_650_001
+	tampered["FRTB_TOTAL"] = dec.Rat("1650001")
 	c, _ := BuildReport(FRTB, asOf, tampered, nil)
 	if c.Signature == a.Signature {
 		t.Fatal("a changed line item must change the signature (tamper-evident)")
@@ -63,14 +65,14 @@ func TestBuildReport_SignatureDeterministicAndTamperEvident(t *testing.T) {
 }
 
 func TestBuildReport_FormPFAndAIFMD(t *testing.T) {
-	pf, err := BuildReport(FormPF, time.Now(), map[string]float64{
-		"FORM_PF_GROSS_NAV": 1e9, "FORM_PF_NET_NAV": 8e8, "FORM_PF_VAR": 2e7, "FORM_PF_GROSS_EXPOSURE": 3e9,
+	pf, err := BuildReport(FormPF, time.Now(), map[string]*big.Rat{
+		"FORM_PF_GROSS_NAV": dec.Rat("1000000000"), "FORM_PF_NET_NAV": dec.Rat("800000000"), "FORM_PF_VAR": dec.Rat("20000000"), "FORM_PF_GROSS_EXPOSURE": dec.Rat("3000000000"),
 	}, nil)
 	if err != nil || len(pf.LineItems) != 4 {
 		t.Fatalf("Form PF report build failed: %v", err)
 	}
-	aifmd, err := BuildReport(AIFMD, time.Now(), map[string]float64{
-		"AIFMD_AUM": 5e8, "AIFMD_LEVERAGE_GROSS": 2.5, "AIFMD_LEVERAGE_COMMITMENT": 1.8,
+	aifmd, err := BuildReport(AIFMD, time.Now(), map[string]*big.Rat{
+		"AIFMD_AUM": dec.Rat("500000000"), "AIFMD_LEVERAGE_GROSS": dec.Rat("2.5"), "AIFMD_LEVERAGE_COMMITMENT": dec.Rat("1.8"),
 	}, nil)
 	if err != nil || len(aifmd.LineItems) != 3 {
 		t.Fatalf("AIFMD report build failed: %v", err)

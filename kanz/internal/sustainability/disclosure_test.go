@@ -1,6 +1,7 @@
 package sustainability
 
 import (
+	"math/big"
 	"testing"
 	"time"
 )
@@ -40,17 +41,17 @@ func TestFileTCFD_LiveMetricsSignedComplete(t *testing.T) {
 		t.Fatalf("TCFD disclosure malformed: sig=%q items=%d", rep.Signature, len(rep.LineItems))
 	}
 	waci, _ := rep.Lookup("TCFD_WACI")
-	if waci != WeightedAverageCarbonIntensity(in.Holdings) {
-		t.Fatalf("filed WACI %.4f != computed", waci)
+	if waci.Cmp(new(big.Rat).SetFloat64(WeightedAverageCarbonIntensity(in.Holdings))) != 0 {
+		t.Fatalf("filed WACI %v != computed", waci)
 	}
 	fe, _ := rep.Lookup("TCFD_FINANCED_EMISSIONS")
-	if fe != FinancedEmissions(in.Holdings) {
-		t.Fatalf("filed financed emissions %.4f != computed", fe)
+	if fe.Cmp(new(big.Rat).SetFloat64(FinancedEmissions(in.Holdings))) != 0 {
+		t.Fatalf("filed financed emissions %v != computed", fe)
 	}
 	// The book overshoots its 2030 glide-path target, so implied rise > 1.5°C.
 	itr, _ := rep.Lookup("TCFD_IMPLIED_TEMP_RISE")
-	if itr <= 1.5 {
-		t.Fatalf("implied temp rise %.3f should exceed 1.5°C for an over-budget book", itr)
+	if itr.Cmp(big.NewRat(3, 2)) <= 0 { // 1.5 °C, exactly
+		t.Fatalf("implied temp rise %v should exceed 1.5°C for an over-budget book", itr)
 	}
 }
 
@@ -68,12 +69,12 @@ func TestFileSFDR_DerivesFootprintAndFossilShare(t *testing.T) {
 	}
 	// One of two equal-value holdings is fossil-flagged ⇒ 50% exposure.
 	fossil, _ := rep.Lookup("SFDR_FOSSIL_FUEL_EXPOSURE")
-	if fossil != 0.5 {
-		t.Fatalf("fossil-fuel exposure = %.3f want 0.5", fossil)
+	if fossil.Cmp(big.NewRat(1, 2)) != 0 { // 0.5, exactly
+		t.Fatalf("fossil-fuel exposure = %v want 0.5", fossil)
 	}
 	// Footprint is financed emissions normalized per $m invested — positive here.
 	fp, _ := rep.Lookup("SFDR_CARBON_FOOTPRINT")
-	if fp <= 0 {
-		t.Fatalf("carbon footprint = %.4f, want > 0", fp)
+	if fp.Sign() <= 0 {
+		t.Fatalf("carbon footprint = %v, want.Sign() > 0", fp)
 	}
 }

@@ -1,6 +1,8 @@
 package sustainability
 
 import (
+	"github.com/kanz-eng/kanz/internal/dec"
+	"math/big"
 	"testing"
 	"time"
 )
@@ -45,11 +47,11 @@ func TestTemperatureAlignmentMonotone(t *testing.T) {
 
 func TestBuildReportCompletenessAndSigning(t *testing.T) {
 	asOf := time.Date(2026, 6, 30, 0, 0, 0, 0, time.UTC)
-	values := map[string]float64{
-		"TCFD_WACI":               92,
-		"TCFD_FINANCED_EMISSIONS": 115,
-		"TCFD_IMPLIED_TEMP_RISE":  2.4,
-		"TCFD_CLIMATE_VAR":        50000,
+	values := map[string]*big.Rat{
+		"TCFD_WACI":               big.NewRat(92, 1),
+		"TCFD_FINANCED_EMISSIONS": big.NewRat(115, 1),
+		"TCFD_IMPLIED_TEMP_RISE":  big.NewRat(12, 5), // 2.4, exactly
+		"TCFD_CLIMATE_VAR":        big.NewRat(50000, 1),
 	}
 	r, err := BuildReport(TCFD, asOf, values, nil)
 	if err != nil {
@@ -58,7 +60,7 @@ func TestBuildReportCompletenessAndSigning(t *testing.T) {
 	if len(r.LineItems) != 4 || r.Signature == "" {
 		t.Fatalf("report incomplete: items=%d sig=%q", len(r.LineItems), r.Signature)
 	}
-	if v, ok := r.Lookup("TCFD_WACI"); !ok || v != 92 {
+	if v, ok := r.Lookup("TCFD_WACI"); !ok || v.Cmp(dec.Rat("92")) != 0 {
 		t.Fatalf("lookup WACI: %v %v", v, ok)
 	}
 
@@ -71,10 +73,10 @@ func TestBuildReportCompletenessAndSigning(t *testing.T) {
 
 func TestReportSignatureDeterministicAndTamperEvident(t *testing.T) {
 	asOf := time.Date(2026, 6, 30, 0, 0, 0, 0, time.UTC)
-	values := map[string]float64{
-		"SFDR_GHG_INTENSITY":        92,
-		"SFDR_CARBON_FOOTPRINT":     115,
-		"SFDR_FOSSIL_FUEL_EXPOSURE": 0.05,
+	values := map[string]*big.Rat{
+		"SFDR_GHG_INTENSITY":        dec.Rat("92"),
+		"SFDR_CARBON_FOOTPRINT":     dec.Rat("115"),
+		"SFDR_FOSSIL_FUEL_EXPOSURE": dec.Rat("0.05"),
 	}
 	a, _ := BuildReport(SFDR, asOf, values, nil)
 	b, _ := BuildReport(SFDR, asOf, values, nil)
@@ -82,7 +84,7 @@ func TestReportSignatureDeterministicAndTamperEvident(t *testing.T) {
 		t.Fatal("signature should be deterministic for the same content")
 	}
 	// Tamper: change a value ⇒ a different signature.
-	values["SFDR_CARBON_FOOTPRINT"] = 999
+	values["SFDR_CARBON_FOOTPRINT"] = dec.Rat("999")
 	c, _ := BuildReport(SFDR, asOf, values, nil)
 	if c.Signature == a.Signature {
 		t.Fatal("tampered report should produce a different signature")
@@ -90,7 +92,7 @@ func TestReportSignatureDeterministicAndTamperEvident(t *testing.T) {
 }
 
 func TestUnknownFramework(t *testing.T) {
-	if _, err := BuildReport(Framework("XYZ"), time.Now(), map[string]float64{}, nil); err == nil {
+	if _, err := BuildReport(Framework("XYZ"), time.Now(), map[string]*big.Rat{}, nil); err == nil {
 		t.Fatal("unknown framework should error")
 	}
 }

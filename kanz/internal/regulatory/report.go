@@ -6,11 +6,14 @@
 package regulatory
 
 import (
+	"encoding/json"
+	"math/big"
+
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"github.com/kanz-eng/kanz/internal/dec"
 	"sort"
-	"strconv"
 	"time"
 )
 
@@ -55,10 +58,34 @@ var templates = map[Framework][]field{
 }
 
 // LineItem is one row of a report.
+//
+// Value is an EXACT base-10 rational, not a float64. It used to be a float64, and
+// on the money filings (Form PF gross/net NAV, AIFMD AUM) that meant the ledger's
+// exact figure was rounded to the nearest binary double on its way into a filing.
+// A filed NAV that does not reconcile to the book of record is a reportable
+// discrepancy — `double` is banned on any path carrying money, and a regulatory
+// filing is the last place to relax that.
+//
+// The rational is exact; what gets FILED and what gets SIGNED are the same
+// rendering of it (dec.Str), so the signature always commits to the number the
+// regulator actually receives.
 type LineItem struct {
 	Code  string
 	Label string
-	Value float64
+	Value *big.Rat
+}
+
+// MarshalJSON emits the value as a decimal STRING, never a JSON number.
+//
+// A JSON float is exactly the ambiguity this type exists to remove: 0.1 is not 0.1
+// in IEEE-754, and a regulator parsing our filing must not have to guess which
+// double we meant. The string is the same rendering the signature commits to.
+func (l LineItem) MarshalJSON() ([]byte, error) {
+	return json.Marshal(struct {
+		Code  string `json:"code"`
+		Label string `json:"label"`
+		Value string `json:"value"`
+	}{Code: l.Code, Label: l.Label, Value: dec.Str(l.Value)})
 }
 
 // Report is a point-in-time, signed regulatory filing.
@@ -87,11 +114,13 @@ func (HashSigner) Sign(canonical []byte) (string, error) {
 	return hex.EncodeToString(sum[:]), nil
 }
 
-// BuildReport assembles the framework's report from values (code → amount) as of
-// asOf and signs it. It errors when the framework is unknown or any templated
-// line item is missing — so an incomplete filing never gets signed. A nil signer
-// defaults to HashSigner.
-func BuildReport(framework Framework, asOf time.Time, values map[string]float64, signer Signer) (Report, error) {
+// BuildReport assembles the framework's report from values (code → exact amount)
+// as of asOf and signs it. It errors when the framework is unknown or any
+// templated line item is missing — so an incomplete filing never gets signed — and
+// now also when a value is nil, which is what a non-finite model output (NaN, ±Inf)
+// becomes at this boundary. A capital charge that is not a number must not be
+// filed as one. A nil signer defaults to HashSigner.
+func BuildReport(framework Framework, asOf time.Time, values map[string]*big.Rat, signer Signer) (Report, error) {
 	tmpl, ok := templates[framework]
 	if !ok {
 		return Report{}, fmt.Errorf("regulatory: unknown framework %q", framework)
@@ -104,6 +133,11 @@ func BuildReport(framework Framework, asOf time.Time, values map[string]float64,
 		v, ok := values[f.Code]
 		if !ok {
 			return Report{}, fmt.Errorf("regulatory: %s report missing required line item %q", framework, f.Code)
+		}
+		if v == nil {
+			// nil is how a non-finite float (NaN/±Inf) arrives here from a model. It
+			// is not a number, so it is not a filing.
+			return Report{}, fmt.Errorf("regulatory: %s report line item %q is not a finite number", framework, f.Code)
 		}
 		items = append(items, LineItem{Code: f.Code, Label: f.Label, Value: v})
 	}
@@ -126,7 +160,9 @@ func (r Report) canonical() []byte {
 	lines = append(lines, string(r.Framework), r.AsOf.UTC().Format(time.RFC3339))
 	codes := make([]string, len(r.LineItems))
 	for i, li := range r.LineItems {
-		codes[i] = li.Code + "=" + strconv.FormatFloat(li.Value, 'f', -1, 64)
+		// dec.Str is the platform's canonical decimal rendering — the SAME string the
+		// regulator receives in the JSON. Sign what you file.
+		codes[i] = li.Code + "=" + dec.Str(li.Value)
 	}
 	sort.Strings(codes)
 	lines = append(lines, codes...)
@@ -138,12 +174,12 @@ func (r Report) canonical() []byte {
 	return b
 }
 
-// Lookup returns a line item's value by code.
-func (r Report) Lookup(code string) (float64, bool) {
+// Lookup returns a line item's exact value by code.
+func (r Report) Lookup(code string) (*big.Rat, bool) {
 	for _, li := range r.LineItems {
 		if li.Code == code {
 			return li.Value, true
 		}
 	}
-	return 0, false
+	return nil, false
 }

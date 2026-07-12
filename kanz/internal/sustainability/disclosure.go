@@ -1,5 +1,7 @@
 package sustainability
 
+import "math/big"
+
 import "time"
 
 // TCFD/SFDR disclosures end-to-end (PARITY-06c / CLIMATE-01d). The package ships
@@ -28,24 +30,28 @@ type DisclosureInputs struct {
 // The implied temperature rise measures the portfolio's financed emissions against
 // its glide-path target for the disclosure year; climate VaR runs the supplied
 // NGFS scenario over the book.
-func (in DisclosureInputs) TCFDValues() map[string]float64 {
+func (in DisclosureInputs) TCFDValues() map[string]*big.Rat {
 	waci := WeightedAverageCarbonIntensity(in.Holdings)
 	financed := FinancedEmissions(in.Holdings)
 	target := in.GlidePath.Target(in.Year)
 	impliedRise, _ := TemperatureAlignment(financed, target, 0, in.TempSensitivity)
 	climateVaR := in.Scenario.ClimateVaR(in.Holdings)
-	return map[string]float64{
-		"TCFD_WACI":               waci,
-		"TCFD_FINANCED_EMISSIONS": financed,
-		"TCFD_IMPLIED_TEMP_RISE":  impliedRise,
-		"TCFD_CLIMATE_VAR":        climateVaR,
+	// The metrics come out of a climate model as float64 and stay honest about
+	// that; exactOrNil captures each double's TRUE value so nothing further is lost
+	// between the model and the regulator, and the filed number is deterministic and
+	// signable. A non-finite metric maps to nil, which BuildReport refuses.
+	return map[string]*big.Rat{
+		"TCFD_WACI":               exactOrNil(waci),
+		"TCFD_FINANCED_EMISSIONS": exactOrNil(financed),
+		"TCFD_IMPLIED_TEMP_RISE":  exactOrNil(impliedRise),
+		"TCFD_CLIMATE_VAR":        exactOrNil(climateVaR),
 	}
 }
 
 // SFDRValues computes the three SFDR principal-adverse-impact line items. Carbon
 // footprint is the PCAF financed emissions normalized per $m invested; fossil-fuel
 // exposure is the market-value share of holdings flagged as fossil-fuel companies.
-func (in DisclosureInputs) SFDRValues() map[string]float64 {
+func (in DisclosureInputs) SFDRValues() map[string]*big.Rat {
 	ghgIntensity := WeightedAverageCarbonIntensity(in.Holdings)
 	financed := FinancedEmissions(in.Holdings)
 	total := totalValue(in.Holdings)
@@ -64,10 +70,10 @@ func (in DisclosureInputs) SFDRValues() map[string]float64 {
 		}
 		fossil = fossil / total // fraction of NAV in fossil-fuel companies
 	}
-	return map[string]float64{
-		"SFDR_GHG_INTENSITY":        ghgIntensity,
-		"SFDR_CARBON_FOOTPRINT":     footprint,
-		"SFDR_FOSSIL_FUEL_EXPOSURE": fossil,
+	return map[string]*big.Rat{
+		"SFDR_GHG_INTENSITY":        exactOrNil(ghgIntensity),
+		"SFDR_CARBON_FOOTPRINT":     exactOrNil(footprint),
+		"SFDR_FOSSIL_FUEL_EXPOSURE": exactOrNil(fossil),
 	}
 }
 
@@ -81,4 +87,11 @@ func FileTCFD(in DisclosureInputs, asOf time.Time, signer Signer) (Report, error
 // FileSFDR assembles the signed, completeness-gated SFDR disclosure as of asOf.
 func FileSFDR(in DisclosureInputs, asOf time.Time, signer Signer) (Report, error) {
 	return BuildReport(SFDR, asOf, in.SFDRValues(), signer)
+}
+
+// exactOrNil converts a model float to its exact rational value, or nil if it is
+// not a finite number (SetFloat64 returns nil for NaN/±Inf). A metric that is not
+// a number must not be filed as one.
+func exactOrNil(f float64) *big.Rat {
+	return new(big.Rat).SetFloat64(f)
 }

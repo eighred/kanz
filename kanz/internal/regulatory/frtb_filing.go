@@ -2,6 +2,7 @@ package regulatory
 
 import (
 	"fmt"
+	"math/big"
 	"time"
 
 	"github.com/kanz-eng/kanz/internal/regulatory/frtb"
@@ -46,15 +47,42 @@ type FRTBResult struct {
 
 // Values renders the breakdown to the report.BuildReport code→amount map — the
 // exact set the FRTB template requires, so the filing is complete by construction.
-func (r FRTBResult) Values() map[string]float64 {
-	return map[string]float64{
-		"FRTB_DELTA":     r.Delta,
-		"FRTB_VEGA":      r.Vega,
-		"FRTB_CURVATURE": r.Curvature,
-		"FRTB_DRC":       r.DRC,
-		"FRTB_RRAO":      r.RRAO,
-		"FRTB_TOTAL":     r.Total,
+// Values renders the model's capital charges as EXACT rationals for the filing.
+//
+// # This is the one honest float boundary in the filing path
+//
+// FRTBResult stays float64 on purpose, and that is not laziness. The FRTB
+// aggregation takes SQUARE ROOTS of quadratic forms over correlation matrices —
+// sqrt(x) is irrational for almost every x, so the charge is NOT representable as
+// a base-10 rational at all. A big.Rat pipeline through the model would be a lie
+// told in a stricter-looking type.
+//
+// What this conversion does: capture the double's TRUE value exactly (SetFloat64
+// is lossless — a float64 IS a rational), so nothing further is lost between the
+// model and the regulator, and the filed number is deterministic and signable.
+//
+// What it does NOT do: invent precision the model never had. The money filings
+// (Form PF, AIFMD) ARE exact end to end, because sums and quotients of exact
+// figures stay exact. A capital charge derived through a square root is not, and
+// pretending otherwise would be theatre.
+//
+// A non-finite charge (NaN, ±Inf) maps to nil, which BuildReport REFUSES: a
+// capital charge that is not a number must not be filed as one.
+func (r FRTBResult) Values() map[string]*big.Rat {
+	return map[string]*big.Rat{
+		"FRTB_DELTA":     exactOrNil(r.Delta),
+		"FRTB_VEGA":      exactOrNil(r.Vega),
+		"FRTB_CURVATURE": exactOrNil(r.Curvature),
+		"FRTB_DRC":       exactOrNil(r.DRC),
+		"FRTB_RRAO":      exactOrNil(r.RRAO),
+		"FRTB_TOTAL":     exactOrNil(r.Total),
 	}
+}
+
+// exactOrNil converts a model float to its exact rational value, or nil if it is
+// not a finite number (SetFloat64 returns nil for NaN/±Inf).
+func exactOrNil(f float64) *big.Rat {
+	return new(big.Rat).SetFloat64(f)
 }
 
 // ComputeFRTB runs every FRTB charge over the inputs and totals them. It validates
@@ -97,15 +125,18 @@ func FileFRTB(in FRTBInputs, asOf time.Time, signer Signer) (Report, FRTBResult,
 // filing whose total does not reproduce the benchmark is NOT signed off, even
 // though it is internally complete. Returns the signed delta (filed − expected)
 // and whether it is within tolerance.
-func (r Report) Reconcile(expectedTotal, tol float64) (delta float64, ok bool) {
+// The comparison is EXACT. Both the regulator's worked example and the tolerance
+// are decimal figures, so a rational comparison is strictly stronger than a float
+// one: a delta that sits exactly on the tolerance boundary now decides
+// deterministically rather than on whichever way the last binary rounding fell.
+func (r Report) Reconcile(expectedTotal, tol *big.Rat) (delta *big.Rat, ok bool) {
+	if expectedTotal == nil || tol == nil {
+		return nil, false
+	}
 	filed, found := r.Lookup("FRTB_TOTAL")
-	if !found {
-		return 0, false
+	if !found || filed == nil {
+		return nil, false
 	}
-	delta = filed - expectedTotal
-	d := delta
-	if d < 0 {
-		d = -d
-	}
-	return delta, d <= tol
+	delta = new(big.Rat).Sub(filed, expectedTotal)
+	return delta, new(big.Rat).Abs(delta).Cmp(tol) <= 0
 }

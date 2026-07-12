@@ -47,10 +47,10 @@ func TestHealthAndReady(t *testing.T) {
 func TestFormPFFiling(t *testing.T) {
 	s := newServer(t)
 	rec := post(t, s, "/v1/filings/formpf", map[string]any{
-		"GrossAssetValue": 1_000_000.0,
-		"NetAssetValue":   900_000.0,
-		"VaR":             50_000.0,
-		"GrossExposure":   1_500_000.0,
+		"GrossAssetValue": "1000000",
+		"NetAssetValue":   "900000",
+		"VaR":             "50000",
+		"GrossExposure":   "1500000",
 	})
 	if rec.Code != http.StatusOK {
 		t.Fatalf("want 200 got %d (%s)", rec.Code, rec.Body.String())
@@ -76,7 +76,7 @@ func TestFormPFFiling(t *testing.T) {
 func TestFormPFRejectsGrossBelowNet(t *testing.T) {
 	s := newServer(t)
 	rec := post(t, s, "/v1/filings/formpf", map[string]any{
-		"GrossAssetValue": 800_000.0, "NetAssetValue": 900_000.0, "VaR": 1.0, "GrossExposure": 1.0,
+		"GrossAssetValue": "800000", "NetAssetValue": "900000", "VaR": "1", "GrossExposure": "1",
 	})
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("want 400 got %d (%s)", rec.Code, rec.Body.String())
@@ -87,7 +87,7 @@ func TestFormPFRejectsGrossBelowNet(t *testing.T) {
 func TestAIFMDRejectsZeroNAV(t *testing.T) {
 	s := newServer(t)
 	rec := post(t, s, "/v1/filings/aifmd", map[string]any{
-		"NAV": 0.0, "GrossExposure": 1.0, "CommitmentExposure": 1.0,
+		"NAV": "0", "GrossExposure": "1", "CommitmentExposure": "1",
 	})
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("want 400 got %d (%s)", rec.Code, rec.Body.String())
@@ -97,17 +97,39 @@ func TestAIFMDRejectsZeroNAV(t *testing.T) {
 func TestAIFMDFiling(t *testing.T) {
 	s := newServer(t)
 	rec := post(t, s, "/v1/filings/aifmd", map[string]any{
-		"NAV": 1_000_000.0, "GrossExposure": 2_500_000.0, "CommitmentExposure": 1_800_000.0,
+		"NAV": "1000000", "GrossExposure": "2500000", "CommitmentExposure": "1800000",
 	})
 	if rec.Code != http.StatusOK {
 		t.Fatalf("want 200 got %d (%s)", rec.Code, rec.Body.String())
 	}
+	// The breakdown comes back as exact decimal STRINGS, not JSON floats. Leverage
+	// is a compliance threshold — a regulator must not have to guess which double
+	// we meant.
 	var out struct {
-		Breakdown map[string]float64 `json:"breakdown"`
+		Breakdown map[string]string `json:"breakdown"`
 	}
 	_ = json.Unmarshal(rec.Body.Bytes(), &out)
-	if out.Breakdown["gross_leverage"] != 2.5 {
-		t.Fatalf("gross leverage = %v, want 2.5", out.Breakdown["gross_leverage"])
+	if out.Breakdown["gross_leverage"] != "2.5" {
+		t.Fatalf("gross leverage = %q, want \"2.5\"", out.Breakdown["gross_leverage"])
+	}
+}
+
+// TestMoneyMustNotArriveAsAJSONFloat pins the contract this change bought.
+//
+// Money on this API is an EXACT decimal string. A JSON number is an IEEE-754
+// double by definition, so accepting one would silently round the ledger's figure
+// on its way into a regulatory filing — and a filed NAV that does not reconcile to
+// the book of record is a reportable discrepancy. The API refuses it outright
+// rather than filing a number nobody chose.
+func TestMoneyMustNotArriveAsAJSONFloat(t *testing.T) {
+	rec := post(t, newServer(t), "/v1/filings/formpf", map[string]any{
+		"GrossAssetValue": 1000000.0, // a JSON float — not acceptable for money
+		"NetAssetValue":   "900000",
+		"VaR":             "50000",
+		"GrossExposure":   "1500000",
+	})
+	if rec.Code == http.StatusOK {
+		t.Fatal("the API accepted a JSON float for a money field — the ledger's exact figure would be rounded into the filing")
 	}
 }
 
@@ -172,7 +194,7 @@ func TestSignaturesAdvanceChain(t *testing.T) {
 	s := newServer(t)
 	sig := func() string {
 		rec := post(t, s, "/v1/filings/aifmd", map[string]any{
-			"NAV": 1.0, "GrossExposure": 1.0, "CommitmentExposure": 1.0,
+			"NAV": "1", "GrossExposure": "1", "CommitmentExposure": "1",
 		})
 		var out struct {
 			Signature string `json:"signature"`

@@ -1,6 +1,7 @@
 package regulatory
 
 import (
+	"math/big"
 	"testing"
 	"time"
 
@@ -36,17 +37,17 @@ func TestComputeFRTB_AssemblesEveryCharge(t *testing.T) {
 	wantRRAO := frtb.RRAO(in.RRAO)
 	if res.Delta != wantDelta || res.Vega != wantVega || res.Curvature != wantCurv ||
 		res.DRC != wantDRC || res.RRAO != wantRRAO {
-		t.Fatalf("component mismatch: %+v vs direct (%.2f %.2f %.2f %.2f %.2f)",
+		t.Fatalf("component mismatch: %+v vs direct (%v %v %v %v %v)",
 			res, wantDelta, wantVega, wantCurv, wantDRC, wantRRAO)
 	}
 	wantTotal := wantDelta + wantVega + wantCurv + wantDRC + wantRRAO
 	if res.Total != wantTotal {
-		t.Fatalf("total = %.2f want %.2f (sum of charges)", res.Total, wantTotal)
+		t.Fatalf("total = %v want %v (sum of charges)", res.Total, wantTotal)
 	}
 	// Every charge is a non-negative capital number, and RRAO is 1% of the exotic
 	// notional (MAR23.8) — a concrete worked figure the filing must reproduce.
-	if res.RRAO != 50_000 {
-		t.Fatalf("RRAO = %.2f want 50000 (1%% of 5m exotic)", res.RRAO)
+	if res.RRAO != 50000 {
+		t.Fatalf("RRAO = %v want 50000 (1%% of 5m exotic)", res.RRAO)
 	}
 }
 
@@ -66,15 +67,17 @@ func TestFileFRTB_SignedCompleteAndReconciles(t *testing.T) {
 		t.Fatalf("filing should carry all 6 FRTB line items, got %d", len(rep.LineItems))
 	}
 	filed, ok := rep.Lookup("FRTB_TOTAL")
-	if !ok || filed != res.Total {
-		t.Fatalf("filed total %.2f (ok=%v) != computed %.2f", filed, ok, res.Total)
+	// The filed value must be the model's total EXACTLY — the conversion at the
+	// filing boundary captures the double's true value, it does not round it.
+	if !ok || filed.Cmp(new(big.Rat).SetFloat64(res.Total)) != 0 {
+		t.Fatalf("filed total %v (ok=%v) != computed %v", filed, ok, res.Total)
 	}
 	// Reconciliation against the (independent) expected total passes within tol.
-	if delta, ok := rep.Reconcile(res.Total, 1.0); !ok || delta != 0 {
-		t.Fatalf("reconcile against exact total failed: delta=%.4f ok=%v", delta, ok)
+	if delta, ok := rep.Reconcile(new(big.Rat).SetFloat64(res.Total), big.NewRat(1, 1)); !ok || delta.Sign() != 0 {
+		t.Fatalf("reconcile against exact total failed: delta=%v ok=%v", delta, ok)
 	}
 	// A total that disagrees beyond tolerance fails the reconciliation gate.
-	if _, ok := rep.Reconcile(res.Total+1000, 1.0); ok {
+	if _, ok := rep.Reconcile(new(big.Rat).SetFloat64(res.Total+1000), big.NewRat(1, 1)); ok {
 		t.Fatal("reconcile should fail when the expected total is off by 1000 > tol")
 	}
 }

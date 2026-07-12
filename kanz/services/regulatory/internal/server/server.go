@@ -17,6 +17,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/kanz-eng/kanz/internal/dec"
 	"github.com/kanz-eng/kanz/internal/regulatory"
 	"github.com/kanz-eng/kanz/internal/sustainability"
 )
@@ -160,9 +161,11 @@ func (s *Server) handleAIFMD(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	out := regReport(rep)
-	out["breakdown"] = map[string]float64{
-		"aum": breakdown.AUM, "gross_leverage": breakdown.GrossLeverage,
-		"commitment_leverage": breakdown.CommitmentLeverage,
+	// Exact decimal strings, like the line items. The leverage ratios are a
+	// compliance threshold — they must not round on the way out.
+	out["breakdown"] = map[string]string{
+		"aum": dec.Str(breakdown.AUM), "gross_leverage": dec.Str(breakdown.GrossLeverage),
+		"commitment_leverage": dec.Str(breakdown.CommitmentLeverage),
 	}
 	writeJSON(w, http.StatusOK, out)
 }
@@ -199,7 +202,10 @@ func (s *Server) handleSFDR(w http.ResponseWriter, r *http.Request) {
 func regReport(rep regulatory.Report) map[string]any {
 	items := make([]map[string]any, len(rep.LineItems))
 	for i, li := range rep.LineItems {
-		items[i] = map[string]any{"code": li.Code, "label": li.Label, "value": li.Value}
+		// The value is emitted as a decimal STRING, never a JSON number. A regulator
+		// parsing our filing must not have to guess which IEEE-754 double we meant by
+		// 0.1, and this is the same rendering the signature commits to.
+		items[i] = map[string]any{"code": li.Code, "label": li.Label, "value": dec.Str(li.Value)}
 	}
 	return map[string]any{
 		"framework":  string(rep.Framework),
