@@ -19,6 +19,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/kanz-eng/kanz/pkg/bus"
@@ -153,7 +154,23 @@ func openStore(ctx context.Context, cfg config.Config) (ledger.Store, func(), er
 	if cfg.DatabaseURL == "" {
 		return ledger.NewMemoryStore(), func() {}, nil
 	}
-	pool, err := pgxpool.New(ctx, cfg.DatabaseURL)
+	// MT-01d: every connection carries this deployment's tenant as the
+	// `app.tenant_id` GUC. 0001_ledger.sql runs FORCE ROW LEVEL SECURITY with a
+	// policy on it, and Append inserts VALUES (current_setting('app.tenant_id'),
+	// ...). Without this, against the non-superuser role production requires, every
+	// write ERRORS and every read returns ZERO ROWS — the IBOR silently holds
+	// nothing. The Postgres tests set the GUC in their own pool and passed; this
+	// composition root never did, which is exactly why it went unnoticed.
+	poolCfg, err := pgxpool.ParseConfig(cfg.DatabaseURL)
+	if err != nil {
+		return nil, nil, err
+	}
+	tenant := cfg.Tenant
+	poolCfg.AfterConnect = func(ctx context.Context, conn *pgx.Conn) error {
+		_, err := conn.Exec(ctx, "SELECT set_config('app.tenant_id', $1, false)", tenant)
+		return err
+	}
+	pool, err := pgxpool.NewWithConfig(ctx, poolCfg)
 	if err != nil {
 		return nil, nil, err
 	}

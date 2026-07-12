@@ -1,0 +1,130 @@
+---
+# One of the last services that had a database, a schema, and no way to run.
+# schema-registry shipped a migrations/ directory and a postgres.go and was never
+# deployable: no image, no manifest. Nothing ever applied its schema either.
+#
+# THE SCALE INVARIANT: replicas: 2 is safe.
+#
+#   Registration is idempotent at the engine -- ON CONFLICT (schema_id, version) --
+#   so two pods registering the same schema version converge rather than conflict.
+#   There is no chain and no in-process sequence here.
+#
+# The DSN arrives as a SEC-01d Vault/CSI secret FILE, never a plaintext env var, and
+# the kanz-migrate initContainer applies the schema before the pods start -- with a
+# SEPARATE, DDL-capable credential, because the app role is a non-superuser (that is
+# what makes FORCE RLS apply to it) and deliberately cannot create tables.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: schema-registry
+  namespace: kanz-services
+  labels:
+    app.kubernetes.io/part-of: kanz
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: schema-registry
+  namespace: kanz-services
+  labels:
+    app.kubernetes.io/part-of: kanz
+spec:
+  selector:
+    app: schema-registry
+  ports:
+    - { name: http, port: 8080, targetPort: 8080 }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: schema-registry
+  namespace: kanz-services
+  labels:
+    app.kubernetes.io/part-of: kanz
+spec:
+  replicas: 2
+  revisionHistoryLimit: 5
+  selector:
+    matchLabels:
+      app: schema-registry
+  template:
+    metadata:
+      labels:
+        app: schema-registry
+        app.kubernetes.io/part-of: kanz
+    spec:
+      serviceAccountName: schema-registry
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      # INFRA-01d: spread replicas across AZs.
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app: schema-registry
+      # INFRA-M6a: apply the schema BEFORE the service starts. All replicas run this
+      # against one database simultaneously; kanz-migrate's advisory lock serializes
+      # them, so one applies and the rest exit 0 with nothing to do.
+      initContainers:
+        - name: migrate
+          image: ghcr.io/kanz-eng/kanz-migrate:latest
+          args: ["--dir", "/migrations/schema-registry"]
+          env:
+            - { name: KANZ_MIGRATE_DATABASE_URL_FILE, value: /run/secrets/db/migrate-database-url }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - { name: db, mountPath: /run/secrets/db, readOnly: true }
+      containers:
+        - name: schema-registry
+          # Pinned to a cosign-signed digest by the GitOps bump (CICD-01d).
+          image: ghcr.io/kanz-eng/schema-registry:latest
+          ports:
+            - { containerPort: 8080, name: http }
+          env:
+            # DSN from the SEC-01d CSI secret file, not a plaintext env.
+            - { name: SCHEMA_REGISTRY_DATABASE_URL_FILE, value: /run/secrets/db/database-url }
+            - { name: SCHEMA_REGISTRY_LISTEN, value: ":8080" }
+            - { name: SPIFFE_ENDPOINT_SOCKET, value: "unix:///run/spiffe/spire-agent.sock" }
+          livenessProbe:
+            httpGet: { path: /healthz, port: 8080 }
+            initialDelaySeconds: 5
+            periodSeconds: 15
+          readinessProbe:
+            httpGet: { path: /readyz, port: 8080 }
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - { name: db, mountPath: /run/secrets/db, readOnly: true }
+            - { name: spiffe, mountPath: /run/spiffe, readOnly: true }
+            - { name: tmp, mountPath: /tmp }
+      volumes:
+        - name: tmp
+          emptyDir: {}
+        - name: db
+          csi:
+            driver: secrets-store.csi.k8s.io
+            readOnly: true
+            volumeAttributes:
+              secretProviderClass: schema-registry-db
+        - name: spiffe
+          csi:
+            driver: csi.spiffe.io
+            readOnly: true

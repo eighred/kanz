@@ -55,6 +55,14 @@ jobs:
           # them) are gone.
           - service: market-ingest
             dockerfile: kanz/services/market-ingest/Dockerfile
+          # The last four services with a database and no deployment. schema-registry
+          # already had an image; these three did not.
+          - service: accounting
+            dockerfile: kanz/services/accounting/Dockerfile
+          - service: audit
+            dockerfile: kanz/services/audit/Dockerfile
+          - service: regulatory
+            dockerfile: kanz/services/regulatory/Dockerfile
     steps:
       - uses: actions/checkout@v4
 

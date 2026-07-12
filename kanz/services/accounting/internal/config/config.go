@@ -37,6 +37,17 @@ type Config struct {
 	// Empty ⇒ the in-memory store: folding works but loses the journal on
 	// restart (local/dev).
 	DatabaseURL string
+	// Tenant is carried as the `app.tenant_id` GUC on every DB connection.
+	//
+	// It is REQUIRED, not decorative. 0001_ledger.sql runs FORCE ROW LEVEL
+	// SECURITY with a policy on current_setting('app.tenant_id'), and Append
+	// inserts VALUES (current_setting('app.tenant_id'), ...). Without the GUC set,
+	// against the non-superuser role production requires, every write ERRORS and
+	// every read returns ZERO ROWS — the ledger silently holds nothing.
+	//
+	// The Postgres tests set this GUC in their own pool (AfterConnect) and pass.
+	// main.go never did. That is why this was invisible.
+	Tenant string
 
 	// Live FX for multi-currency NAV (WIRE-01d): a latest-rate cache folded from
 	// the market.v1 FX spine, so the NAV endpoint values a multi-currency book
@@ -97,6 +108,7 @@ func Load() (Config, error) {
 		FillSubjects:  subjects,
 		CashSubjects:  cashSubjects,
 		DatabaseURL:   secret("ACCOUNTING_DATABASE_URL"),
+		Tenant:        envOr("ACCOUNTING_TENANT", "__system__"),
 		OTLPEndpoint:  os.Getenv("ACCOUNTING_OTLP_ENDPOINT"),
 
 		FXPairs:            os.Getenv("ACCOUNTING_FX_PAIRS"),

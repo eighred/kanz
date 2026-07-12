@@ -1,0 +1,133 @@
+---
+# One of the last services that had a database, a schema, and no way to run.
+# regulatory shipped a migrations/ directory and a postgres.go and was never
+# deployable: no image, no manifest. Nothing ever applied its schema either.
+#
+# THE SCALE INVARIANT: replicas: 1. This one CANNOT be scaled as written.
+#
+#   regulatory reads the chain Head() at startup, and the signer then carries it
+#   IN-PROCESS, chaining each filing off the last one it signed. Two pods would both
+#   start from the same head and produce two divergent chains of signature links --
+#   a forked audit chain, which is precisely the thing a regulator would ask about.
+#
+#   Unlike audit (which serializes read-head -> insert with an advisory lock INSIDE
+#   the store), the chaining here happens in the SIGNER, above the store, so the
+#   store's ON CONFLICT (hash) DO NOTHING cannot save it.
+#
+#   Making this scalable means moving the chain-head read under the same per-append
+#   lock audit already uses. Until then: one pod, Recreate, no overlap.
+#
+# The DSN arrives as a SEC-01d Vault/CSI secret FILE, never a plaintext env var, and
+# the kanz-migrate initContainer applies the schema before the pods start -- with a
+# SEPARATE, DDL-capable credential, because the app role is a non-superuser (that is
+# what makes FORCE RLS apply to it) and deliberately cannot create tables.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: regulatory
+  namespace: kanz-services
+  labels:
+    app.kubernetes.io/part-of: kanz
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: regulatory
+  namespace: kanz-services
+  labels:
+    app.kubernetes.io/part-of: kanz
+spec:
+  selector:
+    app: regulatory
+  ports:
+    - { name: http, port: 8083, targetPort: 8083 }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: regulatory
+  namespace: kanz-services
+  labels:
+    app.kubernetes.io/part-of: kanz
+spec:
+  replicas: 1
+  revisionHistoryLimit: 5
+  strategy:
+    # Never overlap two pods: an in-process chain head must not exist twice.
+    type: Recreate
+  selector:
+    matchLabels:
+      app: regulatory
+  template:
+    metadata:
+      labels:
+        app: regulatory
+        app.kubernetes.io/part-of: kanz
+    spec:
+      serviceAccountName: regulatory
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      # INFRA-M6a: apply the schema BEFORE the service starts. All replicas run this
+      # against one database simultaneously; kanz-migrate's advisory lock serializes
+      # them, so one applies and the rest exit 0 with nothing to do.
+      initContainers:
+        - name: migrate
+          image: ghcr.io/kanz-eng/kanz-migrate:latest
+          args: ["--dir", "/migrations/regulatory"]
+          env:
+            - { name: KANZ_MIGRATE_DATABASE_URL_FILE, value: /run/secrets/db/migrate-database-url }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - { name: db, mountPath: /run/secrets/db, readOnly: true }
+      containers:
+        - name: regulatory
+          # Pinned to a cosign-signed digest by the GitOps bump (CICD-01d).
+          image: ghcr.io/kanz-eng/regulatory:latest
+          ports:
+            - { containerPort: 8083, name: http }
+          env:
+            # DSN from the SEC-01d CSI secret file, not a plaintext env.
+            - { name: REGULATORY_DATABASE_URL_FILE, value: /run/secrets/db/database-url }
+            - { name: REGULATORY_LISTEN, value: ":8083" }
+            - { name: SPIFFE_ENDPOINT_SOCKET, value: "unix:///run/spiffe/spire-agent.sock" }
+          livenessProbe:
+            httpGet: { path: /healthz, port: 8083 }
+            initialDelaySeconds: 5
+            periodSeconds: 15
+          readinessProbe:
+            httpGet: { path: /readyz, port: 8083 }
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - { name: db, mountPath: /run/secrets/db, readOnly: true }
+            - { name: spiffe, mountPath: /run/spiffe, readOnly: true }
+            - { name: tmp, mountPath: /tmp }
+      volumes:
+        - name: tmp
+          emptyDir: {}
+        - name: db
+          csi:
+            driver: secrets-store.csi.k8s.io
+            readOnly: true
+            volumeAttributes:
+              secretProviderClass: regulatory-db
+        - name: spiffe
+          csi:
+            driver: csi.spiffe.io
+            readOnly: true

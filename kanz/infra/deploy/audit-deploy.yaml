@@ -1,0 +1,138 @@
+---
+# One of the last services that had a database, a schema, and no way to run.
+# audit shipped a migrations/ directory and a postgres.go and was never
+# deployable: no image, no manifest. Nothing ever applied its schema either.
+#
+# THE SCALE INVARIANT: replicas: 2 is safe -- but only because of one line.
+#
+#   This is an append-only HASH CHAIN: every record's prev_hash is the hash of the
+#   record before it. A naive implementation would read the head, compute the next
+#   hash, and insert -- and two pods doing that concurrently would both chain off the
+#   SAME head and FORK the chain, destroying the tamper-evidence this service exists
+#   to provide.
+#
+#   audit.Postgres.Append takes a pg_advisory_xact_lock around read-head -> insert,
+#   so the chain is serialized AT THE DATABASE and cannot fork across pods. That lock
+#   is what makes this replica count legal. Remove it and this manifest becomes a
+#   corruption engine.
+#
+# The DSN arrives as a SEC-01d Vault/CSI secret FILE, never a plaintext env var, and
+# the kanz-migrate initContainer applies the schema before the pods start -- with a
+# SEPARATE, DDL-capable credential, because the app role is a non-superuser (that is
+# what makes FORCE RLS apply to it) and deliberately cannot create tables.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: audit
+  namespace: kanz-services
+  labels:
+    app.kubernetes.io/part-of: kanz
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: audit
+  namespace: kanz-services
+  labels:
+    app.kubernetes.io/part-of: kanz
+spec:
+  selector:
+    app: audit
+  ports:
+    - { name: http, port: 8083, targetPort: 8083 }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: audit
+  namespace: kanz-services
+  labels:
+    app.kubernetes.io/part-of: kanz
+spec:
+  replicas: 2
+  revisionHistoryLimit: 5
+  selector:
+    matchLabels:
+      app: audit
+  template:
+    metadata:
+      labels:
+        app: audit
+        app.kubernetes.io/part-of: kanz
+    spec:
+      serviceAccountName: audit
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      # INFRA-01d: spread replicas across AZs.
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app: audit
+      # INFRA-M6a: apply the schema BEFORE the service starts. All replicas run this
+      # against one database simultaneously; kanz-migrate's advisory lock serializes
+      # them, so one applies and the rest exit 0 with nothing to do.
+      initContainers:
+        - name: migrate
+          image: ghcr.io/kanz-eng/kanz-migrate:latest
+          args: ["--dir", "/migrations/audit"]
+          env:
+            - { name: KANZ_MIGRATE_DATABASE_URL_FILE, value: /run/secrets/db/migrate-database-url }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - { name: db, mountPath: /run/secrets/db, readOnly: true }
+      containers:
+        - name: audit
+          # Pinned to a cosign-signed digest by the GitOps bump (CICD-01d).
+          image: ghcr.io/kanz-eng/audit:latest
+          ports:
+            - { containerPort: 8083, name: http }
+          env:
+            # DSN from the SEC-01d CSI secret file, not a plaintext env.
+            - { name: AUDIT_DATABASE_URL_FILE, value: /run/secrets/db/database-url }
+            - { name: AUDIT_LISTEN, value: ":8083" }
+            - { name: AUDIT_NATS_URL, value: "nats://nats.kanz-messaging.svc:4222" }
+            - { name: SPIFFE_ENDPOINT_SOCKET, value: "unix:///run/spiffe/spire-agent.sock" }
+          livenessProbe:
+            httpGet: { path: /healthz, port: 8083 }
+            initialDelaySeconds: 5
+            periodSeconds: 15
+          readinessProbe:
+            httpGet: { path: /readyz, port: 8083 }
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - { name: db, mountPath: /run/secrets/db, readOnly: true }
+            - { name: spiffe, mountPath: /run/spiffe, readOnly: true }
+            - { name: tmp, mountPath: /tmp }
+      volumes:
+        - name: tmp
+          emptyDir: {}
+        - name: db
+          csi:
+            driver: secrets-store.csi.k8s.io
+            readOnly: true
+            volumeAttributes:
+              secretProviderClass: audit-db
+        - name: spiffe
+          csi:
+            driver: csi.spiffe.io
+            readOnly: true

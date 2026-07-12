@@ -232,3 +232,49 @@ func ids(events []*Event) []string {
 	}
 	return out
 }
+
+// TestPostgresWithoutTenantGUCIsFailClosed pins the bug that made accounting's
+// durable ledger silently useless in production.
+//
+// 0001_ledger.sql runs FORCE ROW LEVEL SECURITY with a policy on
+// current_setting('app.tenant_id'), and Append inserts
+// VALUES (current_setting('app.tenant_id'), ...). Every test in this file sets that
+// GUC on its pool via AfterConnect — and passes. The composition root (main.go)
+// did NOT, so against the non-superuser role production requires, RLS was
+// fail-closed: writes errored and reads returned nothing. The IBOR held nothing,
+// and the tests were green the whole time.
+//
+// This test connects the way main.go used to, and asserts the database refuses it.
+// If it ever starts passing silently, RLS has stopped protecting this table.
+func TestPostgresWithoutTenantGUCIsFailClosed(t *testing.T) {
+	url := os.Getenv("TEST_POSTGRES_URL")
+	if url == "" {
+		t.Skip("set TEST_POSTGRES_URL to run ledger Postgres integration tests")
+	}
+	// Ensure the schema exists (via a properly-scoped pool), then connect WITHOUT
+	// the GUC — the old production path.
+	newPool(t)
+
+	bare, err := pgxpool.New(context.Background(), url)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	t.Cleanup(bare.Close)
+
+	var superuser bool
+	if err := bare.QueryRow(context.Background(),
+		"SELECT current_setting('is_superuser')::bool").Scan(&superuser); err != nil {
+		t.Fatalf("is_superuser: %v", err)
+	}
+	if superuser {
+		t.Skip("RLS is bypassed for superusers; run TEST_POSTGRES_URL as a non-superuser role")
+	}
+
+	err = NewPostgres(bare).Append(context.Background(), &Event{
+		EntryID:     "E-NO-GUC",
+		PortfolioID: "P-1",
+	})
+	if err == nil {
+		t.Fatal("Append succeeded with no app.tenant_id GUC set — RLS is not protecting this table, or the tenant scoping is gone")
+	}
+}
