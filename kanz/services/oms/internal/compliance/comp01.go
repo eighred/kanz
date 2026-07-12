@@ -57,6 +57,16 @@ func (g *COMP01Gate) Check(ctx context.Context, cmd *orderpb.SubmitOrder) (*Brea
 	if dec.Allowed {
 		return nil, nil
 	}
+	// An UNGOVERNED portfolio is refused under its own code, not a rule violation:
+	// nothing was breached, because nothing governs it. A reviewer reading
+	// MANDATE_MISSING knows to go and write a mandate — not to go and look for the
+	// rule that fired (EXEC-M14).
+	if dec.Ungoverned {
+		return &Breach{
+			Code:   "MANDATE_MISSING",
+			Reason: "no mandate governs portfolio " + cmd.GetPortfolioId(),
+		}, nil
+	}
 	return breachFromResult(dec.Result), nil
 }
 

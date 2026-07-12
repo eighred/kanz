@@ -19,6 +19,8 @@ import (
 
 	comp "github.com/kanz-eng/kanz/internal/compliance"
 	"github.com/kanz-eng/kanz/internal/execution"
+	"github.com/prometheus/client_golang/prometheus"
+
 	"github.com/kanz-eng/kanz/internal/pg"
 	"github.com/kanz-eng/kanz/pkg/bus"
 	"github.com/kanz-eng/kanz/pkg/observability"
@@ -121,12 +123,41 @@ func runConsumers(ctx context.Context, cfg config.Config, readiness *server.Read
 	// OMS-01f + COMP-01c: the pre-trade gate is the COMP-01 engine resolving
 	// against the mandate stream (a MandateConsumer feeds the registry from the
 	// shared ConfigChanged subject) and projecting onto the live position book.
-	// An empty registry resolves to "no mandate" ⇒ admit, so the OMS runs
-	// correctly before any mandate is published.
 	mandateReg := comp.NewMandateRegistry()
 	mandateConsumer := comp.NewMandateConsumer(mandateReg, logger)
-	preTrade := comp.NewPreTradeGate(comp.NewEngine(nil), compliance.NewBookSource(book), mandateReg, nil, nil, logger)
+
+	// AN UNGOVERNED PORTFOLIO IS NOW COUNTED AND ANNOUNCED (EXEC-M14).
+	//
+	// It used to be silent: an order for a portfolio nobody had put under mandate
+	// returned Allowed:true with no log and no metric, so "we forgot to mandate fund
+	// X" and "fund X passed compliance" were the same observable event. This counter
+	// is what makes "how much of the book is ungoverned" a number somebody can look
+	// at, rather than a question nobody has asked.
+	ungoverned := prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "kanz_compliance_ungoverned_orders_total",
+		Help: "Orders admitted or refused for a portfolio that NO MANDATE GOVERNS. " +
+			"Non-zero means part of the book is trading with no compliance constraints (or, with " +
+			"OMS_REQUIRE_MANDATE, is being refused for want of one).",
+	})
+	obs.Registry.MustRegister(ungoverned)
+
+	preTrade := comp.NewPreTradeGate(
+		comp.NewEngine(nil), compliance.NewBookSource(book), mandateReg, nil, nil, logger,
+		comp.WithRequireMandate(cfg.RequireMandate),
+		comp.WithUngovernedObserver(func(string) { ungoverned.Inc() }),
+	)
 	gate := compliance.NewCOMP01Gate(preTrade, cfg.BaseCurrency)
+
+	// State the posture, loudly, at startup. Which of these two lines is in the log is
+	// the difference between "an unmandated portfolio trades unconstrained" and "an
+	// unmandated portfolio cannot trade at all", and nobody should have to read the
+	// config to find out which one they deployed.
+	if cfg.RequireMandate {
+		logger.Info("pre-trade compliance: MANDATE REQUIRED — an order for a portfolio with no mandate is REJECTED (MANDATE_MISSING)")
+	} else {
+		logger.Warn("pre-trade compliance: MANDATE ADVISORY — an order for a portfolio with NO MANDATE is ADMITTED, unconstrained. " +
+			"Put every live portfolio under mandate with kanz-mandate, or set OMS_REQUIRE_MANDATE=true to refuse instead")
+	}
 
 	// OMS-01b/c: order command handler over the order store + a sim venue.
 	emitter := order.NewEmitter(producer)

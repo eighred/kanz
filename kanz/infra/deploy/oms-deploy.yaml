@@ -149,6 +149,24 @@ spec:
             - { name: OMS_DATABASE_URL_FILE, value: /run/secrets/db/database-url }
             # MT-01d: scopes every order row via the app.tenant_id GUC (RLS).
             - { name: OMS_TENANT, value: "__system__" }
+            # THE MANDATE POSTURE — a deployment decision, and it is stated in the
+            # OMS's startup log either way (EXEC-M14).
+            #
+            #   unset/false  ADVISORY. An order for a portfolio NO MANDATE GOVERNS is
+            #                ADMITTED, unconstrained. It is counted
+            #                (kanz_compliance_ungoverned_orders_total) and WARNed once
+            #                per portfolio — but it trades.
+            #   "true"       REQUIRED. That order is REJECTED (MANDATE_MISSING).
+            #
+            # It defaults to ADVISORY, and that default is uncomfortable on purpose:
+            # switching it on refuses every order for every portfolio nobody has run
+            # kanz-mandate for yet, which is a trading outage dressed as a control. Turn
+            # it on with the list of governed portfolios in front of you — not because
+            # deny-by-default sounds right.
+            #
+            # If the counter above is non-zero, part of your book is trading with no
+            # compliance constraints at all. That is the number to watch.
+            - { name: OMS_REQUIRE_MANDATE, value: "false" }
             - { name: OMS_LISTEN, value: ":8090" }
             - { name: OMS_NATS_URL, value: "nats://nats.kanz-messaging.svc:4222" }
             - { name: OMS_SOURCE, value: "oms" }

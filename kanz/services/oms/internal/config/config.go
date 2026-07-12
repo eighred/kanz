@@ -32,6 +32,14 @@ type Config struct {
 	// store (MT-01d). Defaults to __system__, the risk-engine convention; a
 	// per-tenant deployment overrides it.
 	Tenant string
+	// RequireMandate refuses an order for a portfolio NO MANDATE GOVERNS, instead of
+	// admitting it. Default FALSE, and that default is a deliberate, uncomfortable
+	// choice: turning it on rejects every order for every portfolio nobody has run
+	// kanz-mandate for yet — a trading outage dressed as a control. The posture is
+	// logged loudly at startup either way, and an ungoverned order is always counted
+	// and warned about (EXEC-M14).
+	RequireMandate bool
+
 	// SimVenueMIC is the simulation execution venue's MIC, or a COMMA-SEPARATED
 	// LIST of them ("XNAS,XLON") — one SimVenue per MIC. A fanned-out allocation
 	// stamps each leg with its target venue and the router matches on MIC, so a
@@ -72,6 +80,7 @@ func Load() (Config, error) {
 		ConsumerGroup:  envOr("OMS_CONSUMER_GROUP", "oms"),
 		DatabaseURL:    secret("OMS_DATABASE_URL"),
 		Tenant:         envOr("OMS_TENANT", "__system__"),
+		RequireMandate: os.Getenv("OMS_REQUIRE_MANDATE") == "true",
 		SimVenueMIC:    envOr("OMS_SIM_VENUE_MIC", "XSIM"),
 		VenueEndpoints: os.Getenv("OMS_VENUE_ENDPOINTS"),
 		SPIFFESocket:   os.Getenv("SPIFFE_ENDPOINT_SOCKET"),

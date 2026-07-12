@@ -3,6 +3,7 @@ package compliance
 import (
 	"context"
 	"log/slog"
+	"sync"
 	"time"
 
 	commonpb "github.com/kanz-eng/kanz-schemas-go/common/v1"
@@ -26,6 +27,35 @@ type PreTradeGate struct {
 	classifier Classifier
 	recorder   DecisionRecorder
 	logger     *slog.Logger
+
+	requireMandate bool
+	onUngoverned   func(portfolioID string)
+
+	mu     sync.Mutex
+	warned map[string]bool // portfolios already named in a WARN — say it once, count always
+}
+
+// PreTradeOption customizes the gate.
+type PreTradeOption func(*PreTradeGate)
+
+// WithRequireMandate makes an UNGOVERNED portfolio a REJECTION rather than an
+// admission (EXEC-M14).
+//
+// Deny-by-default is the house rule everywhere else on this platform, and it is not
+// the default HERE for one reason: switching it on rejects every order for every
+// portfolio nobody has run kanz-mandate for yet. That is a trading outage dressed as
+// a control, and it must be a decision somebody makes on purpose — with the list of
+// governed portfolios in front of them. The posture is logged, loudly, at startup
+// either way.
+func WithRequireMandate(require bool) PreTradeOption {
+	return func(g *PreTradeGate) { g.requireMandate = require }
+}
+
+// WithUngovernedObserver is called for EVERY order against a portfolio no mandate
+// governs — the composition root wires it to a counter, so "how much of the book is
+// ungoverned" is a number on a dashboard rather than a thing nobody has asked.
+func WithUngovernedObserver(fn func(portfolioID string)) PreTradeOption {
+	return func(g *PreTradeGate) { g.onUngoverned = fn }
 }
 
 // BookSource loads the current book for a portfolio — the holdings the order is
@@ -65,18 +95,64 @@ type OrderDelta struct {
 type Decision struct {
 	Allowed bool
 	Result  *compliancepb.ComplianceResult
+
+	// Ungoverned means NO MANDATE EXISTS for this portfolio — nobody has decided what
+	// governs it. That is NOT the same as a mandate with no rules, which is somebody
+	// deciding, explicitly, to constrain nothing. The old code collapsed the two into
+	// one silent `return Allowed:true`, so "we forgot to put fund X under mandate"
+	// and "fund X passed compliance" were the same observable event (EXEC-M14).
+	Ungoverned bool
 }
 
 // NewPreTradeGate wires the gate. engine defaults to NewEngine(nil); a nil
 // recorder disables decision logging (the decision still flows).
-func NewPreTradeGate(engine *Engine, books BookSource, mandates MandateSource, classifier Classifier, recorder DecisionRecorder, logger *slog.Logger) *PreTradeGate {
+func NewPreTradeGate(engine *Engine, books BookSource, mandates MandateSource, classifier Classifier, recorder DecisionRecorder, logger *slog.Logger, opts ...PreTradeOption) *PreTradeGate {
 	if engine == nil {
 		engine = NewEngine(nil)
 	}
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &PreTradeGate{engine: engine, books: books, mandates: mandates, classifier: classifier, recorder: recorder, logger: logger}
+	g := &PreTradeGate{
+		engine: engine, books: books, mandates: mandates,
+		classifier: classifier, recorder: recorder, logger: logger,
+		warned: map[string]bool{},
+	}
+	for _, opt := range opts {
+		opt(g)
+	}
+	return g
+}
+
+// noteUngoverned makes the ungoverned case AUDIBLE.
+//
+// It was silent: the gate returned Allowed:true and said nothing, so an order for a
+// portfolio nobody had put under mandate looked exactly like an order that passed
+// compliance. No log, no metric, no difference.
+//
+// The counter fires on EVERY such order (that is the number that belongs on a
+// dashboard). The WARN fires ONCE PER PORTFOLIO — loud enough to be seen in a log,
+// quiet enough that it does not drown the log for a fund that trades all day.
+func (g *PreTradeGate) noteUngoverned(portfolioID string) {
+	if g.onUngoverned != nil {
+		g.onUngoverned(portfolioID)
+	}
+	g.mu.Lock()
+	first := !g.warned[portfolioID]
+	g.warned[portfolioID] = true
+	g.mu.Unlock()
+	if !first {
+		return
+	}
+	if g.requireMandate {
+		g.logger.Warn("REFUSING orders: no mandate governs this portfolio",
+			"portfolio_id", portfolioID,
+			"fix", "put it under mandate with kanz-mandate, or unset OMS_REQUIRE_MANDATE")
+		return
+	}
+	g.logger.Warn("UNGOVERNED: no mandate governs this portfolio — its orders are being ADMITTED WITH NO COMPLIANCE CONSTRAINTS",
+		"portfolio_id", portfolioID,
+		"fix", "put it under mandate with kanz-mandate, or set OMS_REQUIRE_MANDATE=true to refuse instead")
 }
 
 // Evaluate runs the pre-trade check for one order. A returned error is TRANSIENT
@@ -88,8 +164,22 @@ func (g *PreTradeGate) Evaluate(ctx context.Context, d OrderDelta) (Decision, er
 	if err != nil {
 		return Decision{}, err
 	}
-	if !ok || len(mandate.GetRules()) == 0 {
-		return Decision{Allowed: true}, nil // no constraints
+	// TWO DIFFERENT STATES, and collapsing them is what made this silent.
+	//
+	//   no mandate at all      → NOBODY HAS DECIDED what governs this portfolio.
+	//   a mandate, zero rules  → somebody decided, explicitly, to constrain nothing.
+	//
+	// The second is a choice and needs no noise. The first is a GAP, and it must not
+	// be indistinguishable from passing compliance (EXEC-M14).
+	if !ok {
+		g.noteUngoverned(d.PortfolioID)
+		if g.requireMandate {
+			return Decision{Allowed: false, Ungoverned: true}, nil
+		}
+		return Decision{Allowed: true, Ungoverned: true}, nil
+	}
+	if len(mandate.GetRules()) == 0 {
+		return Decision{Allowed: true}, nil // governed by a mandate that constrains nothing
 	}
 	book, err := g.books.Book(ctx, d.PortfolioID)
 	if err != nil {

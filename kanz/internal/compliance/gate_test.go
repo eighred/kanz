@@ -3,6 +3,7 @@ package compliance
 import (
 	"context"
 	"testing"
+	"time"
 
 	compliancepb "github.com/kanz-eng/kanz-schemas-go/compliance/v1"
 	"google.golang.org/protobuf/types/known/timestamppb"
@@ -108,5 +109,78 @@ func TestPreTradeGate_RecordsDecision(t *testing.T) {
 	}
 	if len(rec.records) != 1 || rec.records[0].Phase != PhasePreTrade || rec.records[0].Allowed {
 		t.Fatalf("expected one pre-trade reject record, got %+v", rec.records)
+	}
+}
+
+// TestAnUngovernedPortfolioIsNotSilent pins EXEC-M14.
+//
+// An order for a portfolio NO MANDATE GOVERNS used to return Allowed:true with no
+// log, no metric, and no field on the decision to say so. "We forgot to put fund X
+// under mandate" and "fund X passed compliance" were THE SAME OBSERVABLE EVENT — and
+// the one that means nobody is checking anything is the one you cannot see.
+func TestAnUngovernedPortfolioIsNotSilent(t *testing.T) {
+	var counted []string
+	g := NewPreTradeGate(NewEngine(nil), MapBookSource{"p1": currentBook()}, NewMandateRegistry(), nil, nil, nil,
+		WithUngovernedObserver(func(pf string) { counted = append(counted, pf) }))
+
+	dec, err := g.Evaluate(context.Background(), OrderDelta{PortfolioID: "unmandated", AsOf: time.Now()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !dec.Allowed {
+		t.Fatal("the default posture ADMITS an ungoverned order — turning that off is a deliberate switch, not a surprise")
+	}
+	if !dec.Ungoverned {
+		t.Fatal("the decision does not say the portfolio is ungoverned: it is indistinguishable from passing compliance")
+	}
+	if len(counted) != 1 || counted[0] != "unmandated" {
+		t.Fatalf("the ungoverned order was not counted: %v", counted)
+	}
+}
+
+// A mandate with NO RULES is a CHOICE — somebody decided, explicitly, to constrain
+// nothing. It is not the same as no mandate at all, and it must not be reported as a
+// gap: that is how a real signal gets buried under noise nobody can action.
+func TestAMandateWithNoRulesIsGovernedNotUngoverned(t *testing.T) {
+	reg := NewMandateRegistry()
+	reg.Put(&compliancepb.Mandate{
+		MandateId: "m1", TenantId: "acme", PortfolioId: "p1", Version: 1,
+		EffectiveAt: timestamppb.New(time.Now().Add(-time.Hour)),
+		// no rules, on purpose
+	})
+	var counted int
+	g := NewPreTradeGate(NewEngine(nil), MapBookSource{"p1": currentBook()}, reg, nil, nil, nil,
+		WithUngovernedObserver(func(string) { counted++ }))
+
+	dec, err := g.Evaluate(context.Background(), OrderDelta{PortfolioID: "p1", AsOf: time.Now()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !dec.Allowed {
+		t.Fatal("a mandate that declares no rules permits the order")
+	}
+	if dec.Ungoverned {
+		t.Fatal("a portfolio governed by a permissive mandate was reported as UNGOVERNED — somebody made that decision, and " +
+			"burying it among the real gaps is how the real gaps get ignored")
+	}
+	if counted != 0 {
+		t.Fatalf("a deliberate choice was counted as a gap %d time(s)", counted)
+	}
+}
+
+// With OMS_REQUIRE_MANDATE, an ungoverned portfolio cannot trade at all.
+func TestRequireMandateRefusesAnUngovernedPortfolio(t *testing.T) {
+	g := NewPreTradeGate(NewEngine(nil), MapBookSource{"p1": currentBook()}, NewMandateRegistry(), nil, nil, nil,
+		WithRequireMandate(true))
+
+	dec, err := g.Evaluate(context.Background(), OrderDelta{PortfolioID: "unmandated", AsOf: time.Now()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dec.Allowed {
+		t.Fatal("OMS_REQUIRE_MANDATE is set and the order was ADMITTED for a portfolio nothing governs")
+	}
+	if !dec.Ungoverned {
+		t.Fatal("the refusal must say WHY: nothing was breached, because nothing governs this portfolio")
 	}
 }

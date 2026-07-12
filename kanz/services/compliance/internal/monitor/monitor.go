@@ -30,6 +30,10 @@ import (
 
 // Monitor re-evaluates portfolios on every position change. Goroutine-safe.
 type Monitor struct {
+	// warnedUngoverned names each ungoverned portfolio once (guarded by mu, which
+	// already protects the books below).
+	warnedUngoverned map[string]bool
+
 	engine     *comp.Engine
 	mandates   comp.MandateSource
 	classifier comp.Classifier
@@ -53,15 +57,16 @@ func NewMonitor(engine *comp.Engine, mandates comp.MandateSource, classifier com
 		logger = slog.Default()
 	}
 	return &Monitor{
-		engine:     engine,
-		mandates:   mandates,
-		classifier: classifier,
-		emitter:    emitter,
-		recorder:   recorder,
-		now:        time.Now,
-		logger:     logger,
-		books:      make(map[string]map[string]comp.Position),
-		lastStatus: make(map[string]compliancepb.ComplianceStatus),
+		engine:           engine,
+		mandates:         mandates,
+		classifier:       classifier,
+		emitter:          emitter,
+		recorder:         recorder,
+		now:              time.Now,
+		logger:           logger,
+		books:            make(map[string]map[string]comp.Position),
+		lastStatus:       make(map[string]compliancepb.ComplianceStatus),
+		warnedUngoverned: make(map[string]bool),
 	}
 }
 
@@ -85,8 +90,24 @@ func (m *Monitor) Handle(ctx context.Context, _ *envelopepb.Envelope, payload []
 	if err != nil {
 		return err // transient mandate lookup ⇒ retry
 	}
-	if !ok || len(mandate.GetRules()) == 0 {
-		return nil // no mandate governs this portfolio
+	// The same two states the pre-trade gate distinguishes (EXEC-M14): a portfolio
+	// with NO MANDATE is a gap nobody decided on, and it must not look identical to a
+	// portfolio somebody deliberately left unconstrained. Said ONCE per portfolio —
+	// this handler runs on every position change, and a monitor that floods its own
+	// log is a monitor nobody reads.
+	if !ok {
+		m.mu.Lock()
+		first := !m.warnedUngoverned[pid]
+		m.warnedUngoverned[pid] = true
+		m.mu.Unlock()
+		if first {
+			m.logger.Warn("UNGOVERNED: no mandate governs this portfolio — nothing is being checked against it",
+				"portfolio_id", pid, "fix", "put it under mandate with kanz-mandate")
+		}
+		return nil
+	}
+	if len(mandate.GetRules()) == 0 {
+		return nil // governed by a mandate that constrains nothing — a choice, not a gap
 	}
 
 	res := m.engine.Evaluate(ctx, &comp.Candidate{Book: book, Classifier: m.classifier, AsOf: asOf}, mandate)
