@@ -27,6 +27,18 @@ type Config struct {
 	// (deny-by-default: it never invents instruments).
 	Instruments []string
 
+	// AllowSim permits the deterministic SimFeed to stand in when no exchange
+	// symbols are mapped. It is OFF by default and must be set deliberately.
+	//
+	// SimFeed does not read a market — it GENERATES prices. Those prices publish
+	// to the bus as market.v1 FACTs and everything downstream marks positions on
+	// them: risk, NAV, the OMS's pricing. Stamping MIC "SIM" labels them but
+	// nothing filters on it. Ingesting invented prices as though they were
+	// observed is exactly the "never fabricate — degrade or emit a correcting
+	// FACT, never inject data" rule, so it cannot be something you get by
+	// forgetting to set a symbol map.
+	AllowSim bool
+
 	SnapshotInterval time.Duration
 	SnapshotDepth    int
 
@@ -62,6 +74,7 @@ func Load() Config {
 		NATSURL:          envOr("MARKET_INGEST_NATS_URL", "nats://localhost:4222"),
 		Source:           envOr("MARKET_INGEST_SOURCE", "market-ingest"),
 		Instruments:      parseList(os.Getenv("MARKET_INGEST_INSTRUMENTS")),
+		AllowSim:         os.Getenv("MARKET_INGEST_ALLOW_SIM") == "true",
 		SnapshotInterval: parseDuration(os.Getenv("MARKET_INGEST_SNAPSHOT_INTERVAL"), time.Second),
 		SnapshotDepth:    parseInt(os.Getenv("MARKET_INGEST_SNAPSHOT_DEPTH"), 20),
 

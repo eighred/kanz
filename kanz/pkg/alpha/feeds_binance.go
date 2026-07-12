@@ -1,5 +1,3 @@
-//go:build binance
-
 package alpha
 
 import (

@@ -1,5 +1,3 @@
-//go:build okx
-
 package alpha
 
 import (

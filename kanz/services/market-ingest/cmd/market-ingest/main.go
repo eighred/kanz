@@ -93,8 +93,17 @@ func main() {
 	// which imports pkg/alpha and runs this same Runner with its engines supplied —
 	// so the code that touches the market is identical either way, and only the
 	// decision-making differs.
+	// A market-ingest with nothing real to ingest is a HARD failure now, not a
+	// silent swap to generated prices (see feeds()).
+	srcs, err := feeds(cfg, logger)
+	if err != nil {
+		// Refusing to start beats starting and publishing invented prices that
+		// risk, NAV and pricing will all mark against.
+		logger.Error("market-ingest cannot start", "err", err)
+		os.Exit(2)
+	}
 	runner, err := alpha.New(alpha.Config{
-		Feeds:            feeds(cfg, logger),
+		Feeds:            srcs,
 		Publisher:        producer,
 		TradeRetention:   cfg.TradeRetention,
 		SnapshotInterval: cfg.SnapshotInterval,

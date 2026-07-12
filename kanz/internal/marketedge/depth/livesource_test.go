@@ -1,5 +1,3 @@
-//go:build binance || okx
-
 package depth
 
 import (
