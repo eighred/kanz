@@ -1,0 +1,115 @@
+---
+# EXEC-M11 — the LAST HOP of the trading loop, which had no deployment either.
+#
+# tv-sync folds the OMS's order FACTs into the Broker-API projection TradingView
+# reads back. Like webhook-ingest (the first hop), it had no manifest and no image:
+# the loop was delivered end to end in code and could not run end to end in a
+# cluster.
+#
+# THE REPLICA INVARIANT: 1, AND IT IS A CORRECTNESS BOUND.
+#
+#   The projection is an in-process map — tenant → account → positions/orders — and
+#   it is fed by a durable CONSUMER GROUP. A group LOAD-BALANCES: each FACT goes to
+#   exactly one pod. So with two replicas each pod folds only PART of the stream and
+#   EVERY POD'S BOOK IS WRONG. A trader hitting /broker/accounts/{id}/positions gets
+#   a different, partial answer depending on which pod the Service happened to pick.
+#
+#   This is not a capacity trade-off. Scaling this service does not make it faster,
+#   it makes it incorrect.
+#
+#   Recreate, not RollingUpdate: a rolling update runs two pods at once, which is
+#   the same defect for as long as the overlap lasts.
+#
+# COLD BOOK ON RESTART — a real gap, flagged rather than hidden. Readiness flips
+# true as soon as the consumer goroutine starts, NOT once the backlog is folded, so
+# a fresh pod serves an EMPTY book while reporting Ready. There is no replay-to-
+# current gate. Until there is one, a restart of this service means the Broker API
+# briefly answers from a book that is missing everything before the durable's last
+# ack. Treat a tv-sync restart as a data-visibility event.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: tv-sync
+  namespace: kanz-services
+  labels:
+    app.kubernetes.io/part-of: kanz
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: tv-sync
+  namespace: kanz-services
+  labels:
+    app.kubernetes.io/part-of: kanz
+spec:
+  selector:
+    app: tv-sync
+  ports:
+    - { name: http, port: 8091, targetPort: 8091 }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: tv-sync
+  namespace: kanz-services
+  labels:
+    app.kubernetes.io/part-of: kanz
+spec:
+  # ONE. See THE REPLICA INVARIANT above: a second replica does not add capacity,
+  # it splits the event stream and corrupts both books.
+  replicas: 1
+  strategy:
+    type: Recreate
+  revisionHistoryLimit: 5
+  selector:
+    matchLabels:
+      app: tv-sync
+  template:
+    metadata:
+      labels:
+        app: tv-sync
+        app.kubernetes.io/part-of: kanz
+    spec:
+      serviceAccountName: tv-sync
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: tv-sync
+          # Pinned to a cosign-signed digest by the GitOps bump (CICD-01d).
+          image: ghcr.io/kanz-eng/tv-sync:latest
+          ports:
+            - { containerPort: 8091, name: http }
+          env:
+            - { name: TV_SYNC_LISTEN, value: ":8091" }
+            - { name: TV_SYNC_NATS_URL, value: "nats://nats.kanz-messaging.svc:4222" }
+            - { name: TV_SYNC_SOURCE, value: "tv-sync" }
+            # The durable group. One pod (see above), so this shares nothing — but
+            # it is the name the OMS FACT durables are created under, and changing
+            # it re-reads from the durable's default position, not from the start.
+            - { name: TV_SYNC_CONSUMER_GROUP, value: "tv-sync" }
+            # The mark source for unrealized P&L.
+            - { name: TV_SYNC_PRICE_SUBJECT, value: "market.>" }
+          livenessProbe:
+            httpGet: { path: /healthz, port: 8091 }
+            initialDelaySeconds: 5
+            periodSeconds: 15
+          readinessProbe:
+            httpGet: { path: /readyz, port: 8091 }
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - { name: tmp, mountPath: /tmp }
+      volumes:
+        - name: tmp
+          emptyDir: {}

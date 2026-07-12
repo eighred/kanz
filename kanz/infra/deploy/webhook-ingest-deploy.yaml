@@ -1,0 +1,134 @@
+---
+# EXEC-M11 — the FIRST HOP OF THE TRADING LOOP, which had no deployment at all.
+#
+# This is the HMAC webhook that receives every TradingView signal. It had no
+# manifest and no image, so nothing on this platform could accept a signal: the
+# delivered loop had no entry point in production. It was invisible because the
+# deployability check we were running compared images against MANIFESTS — a closed
+# loop over the files that happened to exist (EXEC-M10).
+#
+# THE REPLICA INVARIANT: 1, AND IT IS NOT ABOUT CAPACITY.
+#
+#   Two independent reasons, either one sufficient:
+#
+#   1. THE HALT GATE WOULD ONLY HALF-WORK. The gate is per-process and is opened by
+#      a ModeChanged FACT consumed through a CONSUMER GROUP — and a group
+#      load-balances: the message goes to exactly ONE pod. So an operator's RESUME
+#      reaches one replica while the other stays latched closed and answers 423 to
+#      roughly half the webhooks; and a HALT may land on the idle replica while the
+#      other keeps trading. A broadcast control signal consumed through a queue group
+#      is wrong at any replica count above one.
+#
+#   2. THE REPLAY DEFENCE IS AN IN-PROCESS MAP. The nonce cache
+#      (strategy_id + nonce) lives in one process. Two pods are two caches, so a
+#      re-delivered TradingView alert that lands on the other pod is admitted a
+#      SECOND time and fans out a SECOND set of SubmitOrder commands. The OMS's
+#      admission gate dedups on order_id, but a fresh nonce mints a fresh order_id —
+#      this is exactly the gap the OMS gate cannot close.
+#
+#   Recreate, not RollingUpdate: two webhook-ingest processes must never be live at
+#   once, for reason (2).
+#
+# THE CONFIG IS THE SECRET. WEBHOOK_INGEST_CONFIG points at a bootstrap JSON that
+# carries the per-strategy HMAC SECRETS (the authority boundary for every signal
+# this platform acts on) alongside the symbol map and the venue allocation. The
+# service has no <VAR>_FILE convention because it does not need one: the whole file
+# is mounted from Vault/CSI and read from disk. It is REQUIRED — the process exits 2
+# without it.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: webhook-ingest
+  namespace: kanz-services
+  labels:
+    app.kubernetes.io/part-of: kanz
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: webhook-ingest
+  namespace: kanz-services
+  labels:
+    app.kubernetes.io/part-of: kanz
+spec:
+  selector:
+    app: webhook-ingest
+  ports:
+    - { name: http, port: 8090, targetPort: 8090 }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: webhook-ingest
+  namespace: kanz-services
+  labels:
+    app.kubernetes.io/part-of: kanz
+spec:
+  # ONE. See THE REPLICA INVARIANT above. This is a correctness bound, not a
+  # capacity one: raising it silently breaks the kill switch and the replay guard.
+  replicas: 1
+  strategy:
+    type: Recreate
+  revisionHistoryLimit: 5
+  selector:
+    matchLabels:
+      app: webhook-ingest
+  template:
+    metadata:
+      labels:
+        app: webhook-ingest
+        app.kubernetes.io/part-of: kanz
+    spec:
+      serviceAccountName: webhook-ingest
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: webhook-ingest
+          # Pinned to a cosign-signed digest by the GitOps bump (CICD-01d).
+          image: ghcr.io/kanz-eng/webhook-ingest:latest
+          ports:
+            - { containerPort: 8090, name: http }
+          env:
+            # The bootstrap config — HMAC secrets, symbol map, venue allocation —
+            # mounted from Vault/CSI. REQUIRED: the process exits 2 without it.
+            - { name: WEBHOOK_INGEST_CONFIG, value: /run/secrets/webhook/config.json }
+            - { name: WEBHOOK_INGEST_LISTEN, value: ":8090" }
+            - { name: WEBHOOK_INGEST_NATS_URL, value: "nats://nats.kanz-messaging.svc:4222" }
+            - { name: WEBHOOK_INGEST_SOURCE, value: "webhook-ingest" }
+            # The nonce replay window. A signal replayed outside it is refused.
+            - { name: WEBHOOK_INGEST_REPLAY_WINDOW, value: "5m" }
+            # TradingView's published egress ranges. EMPTY MEANS ANY SOURCE IP MAY
+            # POST A SIGNAL — the HMAC is still required, but the allowlist is the
+            # cheap outer perimeter and it should not be left open.
+            - { name: WEBHOOK_INGEST_IP_ALLOWLIST, value: "52.89.214.238/32,34.212.75.30/32,54.218.53.128/32,52.32.178.7/32" }
+          livenessProbe:
+            httpGet: { path: /healthz, port: 8090 }
+            initialDelaySeconds: 5
+            periodSeconds: 15
+          readinessProbe:
+            httpGet: { path: /readyz, port: 8090 }
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - { name: webhook-config, mountPath: /run/secrets/webhook, readOnly: true }
+            - { name: tmp, mountPath: /tmp }
+      volumes:
+        - name: tmp
+          emptyDir: {}
+        - name: webhook-config
+          csi:
+            driver: secrets-store.csi.k8s.io
+            readOnly: true
+            volumeAttributes:
+              secretProviderClass: webhook-ingest-config

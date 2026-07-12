@@ -1,0 +1,123 @@
+---
+# EXEC-M11 — the pre-trade mandate authority, which had no deployment.
+#
+# ⚠️ READ THIS BEFORE YOU RELY ON IT: TODAY IT ENFORCES NOTHING.
+#
+#   compliance CONSUMES compliance.mandate.changed to build its mandate registry.
+#   So does the OMS. NOTHING ON THIS PLATFORM PUBLISHES IT. The publisher exists
+#   (services/compliance/internal/mandate/publisher.go) and is wired to no binary.
+#
+#   The registry is therefore always EMPTY, and an empty registry does not fail
+#   loudly — the monitor takes the "no mandate governs this portfolio" branch and
+#   silently returns nil. A deployed compliance service with no mandate producer is
+#   a green pod that permits everything.
+#
+#   Deploying it is still right: the consumer must exist before the producer does,
+#   the breach path is delivered and tested, and a pod that is present and inert is
+#   honest in a way that an absent service is not. But DO NOT report compliance as
+#   "enforcing" until a mandate producer lands (board: EXEC-M12).
+#
+# THE REPLICA INVARIANT: 1, AND IT IS A CORRECTNESS BOUND.
+#
+#   The monitor holds each portfolio's whole book in memory and computes NAV and
+#   concentration by summing it. Its subscriptions use a CONSUMER GROUP, which
+#   LOAD-BALANCES: each risk.position.changed FACT goes to exactly one pod. With two
+#   replicas each pod sums only the positions IT happened to receive, so both
+#   evaluate mandates against a partial book — WRONG NAV, WRONG RATIOS, MISSED
+#   BREACHES AND PHANTOM ONES.
+#
+#   Breach emission is also per-pod: it fires on the TRANSITION into BREACH using an
+#   in-process lastStatus map, so N replicas can emit N breach FACTs for one event —
+#   distinct event_ids, so the bus will not collapse them.
+#
+#   Recreate, not RollingUpdate: an overlap of two pods is the same defect.
+#
+# COLD-START DISARM — flagged, not hidden. The mandate durable persists across
+# restarts and resumes at its last ack, so a restarted pod REPLAYS NOTHING and comes
+# back with an empty registry. A rolling restart therefore silently disarms
+# enforcement even once a producer exists. That needs a replay-from-start or a
+# snapshot before this service can be trusted as a control (board: EXEC-M12).
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: compliance
+  namespace: kanz-services
+  labels:
+    app.kubernetes.io/part-of: kanz
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: compliance
+  namespace: kanz-services
+  labels:
+    app.kubernetes.io/part-of: kanz
+spec:
+  selector:
+    app: compliance
+  ports:
+    - { name: http, port: 8091, targetPort: 8091 }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: compliance
+  namespace: kanz-services
+  labels:
+    app.kubernetes.io/part-of: kanz
+spec:
+  # ONE. See THE REPLICA INVARIANT above.
+  replicas: 1
+  strategy:
+    type: Recreate
+  revisionHistoryLimit: 5
+  selector:
+    matchLabels:
+      app: compliance
+  template:
+    metadata:
+      labels:
+        app: compliance
+        app.kubernetes.io/part-of: kanz
+    spec:
+      serviceAccountName: compliance
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: compliance
+          # Pinned to a cosign-signed digest by the GitOps bump (CICD-01d).
+          image: ghcr.io/kanz-eng/compliance:latest
+          ports:
+            - { containerPort: 8091, name: http }
+          env:
+            - { name: COMPLIANCE_LISTEN, value: ":8091" }
+            # WITHOUT THIS the service reports READY while consuming nothing at all —
+            # it degrades to probes-only and says so in one log line. Readiness is
+            # only meaningful when the spine is configured.
+            - { name: COMPLIANCE_NATS_URL, value: "nats://nats.kanz-messaging.svc:4222" }
+            - { name: COMPLIANCE_SOURCE, value: "compliance" }
+            - { name: COMPLIANCE_CONSUMER_GROUP, value: "compliance" }
+          livenessProbe:
+            httpGet: { path: /healthz, port: 8091 }
+            initialDelaySeconds: 5
+            periodSeconds: 15
+          readinessProbe:
+            httpGet: { path: /readyz, port: 8091 }
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - { name: tmp, mountPath: /tmp }
+      volumes:
+        - name: tmp
+          emptyDir: {}

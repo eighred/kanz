@@ -78,6 +78,22 @@ jobs:
             dockerfile: kanz/services/alternatives/Dockerfile
           - service: datamaster
             dockerfile: kanz/services/datamaster/Dockerfile
+          # EXEC-M11: the trading loop's own services, which had no images at all.
+          # webhook-ingest is the FIRST HOP (the HMAC webhook that receives every
+          # TradingView signal) and tv-sync is the LAST (the Broker-API projection).
+          # The loop was delivered end to end in code and could not run end to end in
+          # a cluster, because two of its four hops had neither an image nor a
+          # manifest — and the image/manifest parity check could not see them.
+          - service: webhook-ingest
+            dockerfile: kanz/services/webhook-ingest/Dockerfile
+          - service: tv-sync
+            dockerfile: kanz/services/tv-sync/Dockerfile
+          # The pre-trade mandate authority the OMS consumes FACTs from.
+          - service: compliance
+            dockerfile: kanz/services/compliance/Dockerfile
+          # The external REST edge. It had an image target and no deployment.
+          - service: api-gateway
+            dockerfile: kanz/services/api-gateway/Dockerfile
     steps:
       - uses: actions/checkout@v4
 

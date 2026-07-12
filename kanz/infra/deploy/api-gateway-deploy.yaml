@@ -1,0 +1,151 @@
+---
+# EXEC-M11 — the external REST edge. It had an image and no deployment.
+#
+# The gateway is the authenticated, rate-limited surface the CLI talks to: it
+# transcodes JSON↔proto over the risk-engine's query.v1 gRPC API, proxies the
+# Phase-7 read surfaces, and PUBLISHES order.order.submit / order.order.cancel — so
+# it is a capital path, not just a read edge.
+#
+# ⚠️ AUTHENTICATION IS OFF BY DEFAULT, AND IT DOES NOT SAY NO — IT SAYS NOTHING.
+#
+#   With no OIDC issuer AND no JWT secret, the gateway logs "authentication
+#   DISABLED" and serves /v1/* — INCLUDING POST /v1/orders — UNAUTHENTICATED. It
+#   does not refuse to start. So API_GATEWAY_OIDC_ISSUER is set here, and
+#   API_GATEWAY_REQUIRED_ROLE with it. If you are tempted to clear them for a
+#   staging environment, understand exactly what you are opening: an unauthenticated
+#   order-submission endpoint.
+#
+# THE SCALE INVARIANT: safe to scale, and the RATE LIMITS DIVIDE.
+#
+#   No chain, no sequence, no per-key ordering. A client retry that lands on a
+#   different pod cannot double-submit: the order's Idempotency-Key rides as the
+#   broker's Nats-Msg-Id and JetStream collapses the duplicate. That is the one
+#   thing that would have made scaling dangerous, and it is handled at the bus.
+#
+#   BUT the token buckets and the in-flight caps are PER POD, in-process. N replicas
+#   means N × the configured budget reaching the risk-engine. The values below are
+#   PER POD: with replicas: 2, a tenant's real ceiling is twice what they say.
+#   Divide by the replica count, or accept the multiple — but do not read these
+#   numbers as a platform-wide limit.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: api-gateway
+  namespace: kanz-services
+  labels:
+    app.kubernetes.io/part-of: kanz
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: api-gateway
+  namespace: kanz-services
+  labels:
+    app.kubernetes.io/part-of: kanz
+spec:
+  selector:
+    app: api-gateway
+  ports:
+    - { name: http, port: 8080, targetPort: 8080 }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api-gateway
+  namespace: kanz-services
+  labels:
+    app.kubernetes.io/part-of: kanz
+spec:
+  replicas: 2
+  revisionHistoryLimit: 5
+  selector:
+    matchLabels:
+      app: api-gateway
+  template:
+    metadata:
+      labels:
+        app: api-gateway
+        app.kubernetes.io/part-of: kanz
+    spec:
+      serviceAccountName: api-gateway
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app: api-gateway
+      containers:
+        - name: api-gateway
+          # Pinned to a cosign-signed digest by the GitOps bump (CICD-01d).
+          image: ghcr.io/kanz-eng/api-gateway:latest
+          ports:
+            - { containerPort: 8080, name: http }
+          env:
+            - { name: API_GATEWAY_LISTEN, value: ":8080" }
+            # REQUIRED: the process exits 2 without it. The dial itself is lazy, so a
+            # momentarily-unreachable risk-engine does not fail startup.
+            - { name: API_GATEWAY_RISK_ENGINE_ADDR, value: "risk-engine.kanz-services.svc:9090" }
+            # AuthN. Without an issuer (and with no JWT secret) the gateway serves
+            # /v1/* unauthenticated — see the warning at the top of this file.
+            - { name: API_GATEWAY_OIDC_ISSUER, value: "https://login.eighred.com" }
+            - { name: API_GATEWAY_OIDC_AUDIENCE, value: "kanz" }
+            - { name: API_GATEWAY_REQUIRED_ROLE, value: "kanz-user" }
+            # AuthZ over the mesh: the gateway's CLIENTS (risk-engine gRPC, the
+            # Phase-7 HTTP upstreams) present this workload's SVID. Note the
+            # NON-STANDARD env name — this service does not read SPIFFE_ENDPOINT_SOCKET.
+            # Empty ⇒ the upstream calls silently downgrade to PLAINTEXT.
+            - { name: API_GATEWAY_SPIFFE_SOCKET, value: "unix:///run/spiffe/spire-agent.sock" }
+            # The order write surface. Unset ⇒ POST /v1/orders* return 503.
+            - { name: API_GATEWAY_NATS_URL, value: "nats://nats.kanz-messaging.svc:4222" }
+            # Phase-7 read upstreams. Unset ⇒ those routes 503.
+            - { name: API_GATEWAY_WEALTH_ADDR, value: "http://wealth.kanz-services.svc:8080" }
+            - { name: API_GATEWAY_DATAMASTER_ADDR, value: "http://datamaster.kanz-services.svc:8080" }
+            - { name: API_GATEWAY_COPILOT_ADDR, value: "http://copilot.kanz-services.svc:8080" }
+            # PER POD, not platform-wide. See THE SCALE INVARIANT above.
+            - { name: API_GATEWAY_RATE_LIMIT_PER_SEC, value: "50" }
+            - { name: API_GATEWAY_RATE_LIMIT_BURST, value: "100" }
+            - { name: API_GATEWAY_MAX_IN_FLIGHT, value: "64" }
+            # The request-signing HMAC, from the SEC-01d CSI file (never a plaintext
+            # env). The config prefers <VAR>_FILE for exactly this reason.
+            - { name: API_GATEWAY_SIGNING_SECRET_FILE, value: /run/secrets/gateway/signing-secret }
+          livenessProbe:
+            httpGet: { path: /healthz, port: 8080 }
+            initialDelaySeconds: 5
+            periodSeconds: 15
+          readinessProbe:
+            # /readyz — NOT /v1/health. That route exists, but it lives INSIDE the
+            # authenticated chain and would answer a kubelet probe with 401.
+            httpGet: { path: /readyz, port: 8080 }
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - { name: gateway, mountPath: /run/secrets/gateway, readOnly: true }
+            - { name: spiffe, mountPath: /run/spiffe, readOnly: true }
+            - { name: tmp, mountPath: /tmp }
+      volumes:
+        - name: tmp
+          emptyDir: {}
+        - name: gateway
+          csi:
+            driver: secrets-store.csi.k8s.io
+            readOnly: true
+            volumeAttributes:
+              secretProviderClass: api-gateway-secrets
+        - name: spiffe
+          csi:
+            driver: csi.spiffe.io
+            readOnly: true
