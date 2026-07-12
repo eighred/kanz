@@ -73,7 +73,7 @@ func main() {
 		os.Exit(2)
 	}
 
-	golden, exceptions, closeStores, err := openStores(ctx, cfg)
+	golden, exceptions, cycleLock, closeStores, err := openStores(ctx, cfg)
 	if err != nil {
 		logger.Error("store init failed", "err", err)
 		os.Exit(2)
@@ -95,7 +95,16 @@ func main() {
 	}()
 
 	if len(feeds) > 0 {
-		proj := projector.New(feeds, golden, exceptions, logger)
+		// The cycle lock elects ONE replica per cycle. Concurrent projection is
+		// harmless to the data (idempotent, content-identical writes) but not to the
+		// vendor: N pods would make N rounds of metered API calls for one cycle's
+		// worth of information. Nil for the in-memory store — a lone process
+		// projecting into its own map has nobody to race.
+		opts := []projector.Option{}
+		if cycleLock != nil {
+			opts = append(opts, projector.WithCycleLock(cycleLock))
+		}
+		proj := projector.New(feeds, golden, exceptions, logger, opts...)
 		// Project once before serving, so the first reader sees a mastered book
 		// rather than a cold store. A failure here does NOT stop the service: the
 		// durable store still holds the last good projection, and serving that is
@@ -128,16 +137,16 @@ func main() {
 // MASTER-01: nothing ever constructed them. Until now every operator override — a
 // named human's signed decision to accept a price the system flagged — lived in a
 // map and vanished on the next restart.
-func openStores(ctx context.Context, cfg config.Config) (store.GoldenStore, store.ExceptionStore, func(), error) {
+func openStores(ctx context.Context, cfg config.Config) (store.GoldenStore, store.ExceptionStore, projector.CycleLock, func(), error) {
 	if cfg.DatabaseURL == "" {
-		return store.NewMemoryGoldenStore(), store.NewQueueStore(pricing.NewQueue()), func() {}, nil
+		return store.NewMemoryGoldenStore(), store.NewQueueStore(pricing.NewQueue()), nil, func() {}, nil
 	}
 	// MT-01d: every connection carries this deployment's tenant as the
 	// `app.tenant_id` GUC, so Postgres RLS scopes all reads/writes to it. A
 	// non-superuser DB role is required for FORCE RLS to apply.
 	poolCfg, err := pgxpool.ParseConfig(cfg.DatabaseURL)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, nil, nil, err
 	}
 	tenant := cfg.Tenant
 	poolCfg.AfterConnect = func(ctx context.Context, conn *pgx.Conn) error {
@@ -146,9 +155,12 @@ func openStores(ctx context.Context, cfg config.Config) (store.GoldenStore, stor
 	}
 	pool, err := pgxpool.NewWithConfig(ctx, poolCfg)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, nil, nil, err
 	}
-	return store.NewPostgresGolden(pool), store.NewPostgresExceptions(pool), pool.Close, nil
+	// The cycle lock is keyed on the TENANT: a shared key would let one tenant's
+	// deployment starve every other tenant's projector forever.
+	return store.NewPostgresGolden(pool), store.NewPostgresExceptions(pool),
+		store.NewPostgresCycleLock(pool, tenant), pool.Close, nil
 }
 
 // buildFeeds assembles the vendor feeds. There is no production feed to build: no

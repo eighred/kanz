@@ -10,16 +10,24 @@
 #   next restart — a compliance record silently deleted by a rolling update. The
 #   in-memory store is a laptop convenience, never a deployment.
 #
-# THE SCALE INVARIANT: safe to run 2, and it costs 2x the vendor calls.
+# THE SCALE INVARIANT: safe to run 2, and one replica per cycle talks to the vendor.
 #
 #   Every pod runs the projector. The writes are idempotent and content-identical
 #   (golden_records upserts the resolved record; exceptions is ON CONFLICT DO
 #   NOTHING on a deterministic id, so a re-detected break keeps the review state a
-#   human already gave it). There is no chain and no in-process sequence, so two
-#   pods projecting concurrently is benign. What it is NOT is free: N pods make N
-#   rounds of vendor API calls per cycle. When a real feed.RefSource lands (vendor
-#   reference data is metered and rate-limited), gate the cycle behind a
-#   pg_try_advisory_lock so N pods make ONE set of calls.
+#   human already gave it), so concurrent projection was never a data hazard. It
+#   was a BILLING and RATE-LIMIT hazard: vendor reference data is metered per call,
+#   and N pods made N rounds of API requests for one cycle's worth of information.
+#
+#   A pg_try_advisory_lock now elects ONE replica per cycle; the losers skip and
+#   get on with serving reads. TRY, not wait — a loser must not queue behind the
+#   winner and then run a redundant refresh the moment the lock frees. The lock
+#   dies with the session, so a pod OOM-killed mid-refresh strands nothing (no TTL,
+#   no lease reaper). It is keyed PER TENANT: one shared key would let this
+#   deployment starve every other tenant's projector forever.
+#
+#   This means scaling datamaster buys read capacity and availability, NOT faster
+#   refreshes. The cycle is DATAMASTER_REFRESH_INTERVAL, whatever the replica count.
 #
 # There is no vendor feed today: nothing implements feed.RefSource, so the
 # projector has nothing to project and the master stays empty. That is the honest

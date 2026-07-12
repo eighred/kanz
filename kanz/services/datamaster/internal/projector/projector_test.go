@@ -189,3 +189,78 @@ func TestRefreshDoesNotReopenAnAdjudicatedBreak(t *testing.T) {
 		t.Fatalf("the override audit trail was disturbed by re-detection: %+v", ex.Overrides)
 	}
 }
+
+// --- cycle election ------------------------------------------------------
+
+// fakeLock records what the projector asked of it.
+type fakeLock struct {
+	acquired bool
+	err      error
+	released bool
+	calls    int
+}
+
+func (f *fakeLock) TryAcquire(context.Context) (func(), bool, error) {
+	f.calls++
+	if f.err != nil {
+		return nil, false, f.err
+	}
+	if !f.acquired {
+		return nil, false, nil
+	}
+	return func() { f.released = true }, true, nil
+}
+
+// A replica that loses the election does NO work — it does not call the vendors
+// and it does not write. That is the whole point: every pod runs the projector, and
+// vendor reference data is metered per call, so N replicas must not make N rounds
+// of API requests for one cycle's worth of information.
+func TestRefreshSkipsTheCycleWhenAnotherReplicaHoldsIt(t *testing.T) {
+	ctx := context.Background()
+	golden := store.NewMemoryGoldenStore()
+	exceptions := store.NewQueueStore(nil)
+	lock := &fakeLock{acquired: false}
+
+	// A feed that fails if it is so much as touched: losing the election must not
+	// cost a vendor call.
+	p := New([]feed.VendorFeed{failing{}}, golden, exceptions, nil, fixedClock(), WithCycleLock(lock))
+
+	if err := p.Refresh(ctx); err != nil {
+		t.Fatalf("losing the election is not a failure: %v", err)
+	}
+	if lock.calls != 1 {
+		t.Fatalf("the lock was consulted %d times, want 1", lock.calls)
+	}
+	if _, ok, _ := golden.Get(ctx, "INST1"); ok {
+		t.Fatal("a replica that lost the election still wrote to the golden store")
+	}
+}
+
+// The winner does the work and always hands the lock back, so the next cycle is
+// not starved by this one.
+func TestRefreshReleasesTheCycleLock(t *testing.T) {
+	lock := &fakeLock{acquired: true}
+	p, golden, _ := newProjector(vendors())
+	WithCycleLock(lock)(p)
+
+	if err := p.Refresh(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if !lock.released {
+		t.Fatal("the winner did not release the cycle lock — no replica could ever project again")
+	}
+	if _, ok, _ := golden.Get(context.Background(), "INST1"); !ok {
+		t.Fatal("the winner did not project")
+	}
+}
+
+// A lock that cannot be reached is not permission to project: two replicas both
+// assuming they won is exactly the duplicate-vendor-call storm the lock prevents.
+func TestRefreshFailsWhenTheCycleLockIsUnreachable(t *testing.T) {
+	p, _, _ := newProjector(vendors())
+	WithCycleLock(&fakeLock{err: errors.New("db down")})(p)
+
+	if err := p.Refresh(context.Background()); err == nil {
+		t.Fatal("an unreachable cycle lock must fail the refresh, not proceed as if elected")
+	}
+}

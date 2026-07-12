@@ -43,14 +43,33 @@ type Projector struct {
 	feeds      []feed.VendorFeed
 	golden     store.GoldenStore
 	exceptions store.ExceptionStore
+	lock       CycleLock
 	tolerance  *big.Rat
 	staleness  time.Duration
 	now        func() time.Time
 	logger     *slog.Logger
 }
 
+// CycleLock elects one replica to run a cycle. TryAcquire returns false (with a
+// nil error) when another replica already holds it, and the loser SKIPS — it does
+// not wait and then run a redundant refresh.
+//
+// Every pod runs the projector, and concurrent projection is harmless to the data
+// (the writes are idempotent and content-identical). It is the VENDOR CALLS that
+// are not harmless: without this, N replicas make N rounds of metered, rate-limited
+// vendor API requests per cycle for exactly one cycle's worth of information.
+//
+// Nil ⇒ no election, which is right for the in-memory store (a single process
+// projecting into its own map has no one to race).
+type CycleLock interface {
+	TryAcquire(ctx context.Context) (release func(), acquired bool, err error)
+}
+
 // Option customizes the projector.
 type Option func(*Projector)
+
+// WithCycleLock elects one replica per cycle (store.PostgresCycleLock).
+func WithCycleLock(l CycleLock) Option { return func(p *Projector) { p.lock = l } }
 
 // WithTolerance overrides the price-arbitration tolerance as an exact fraction
 // (nil or ≤ 0 ⇒ the default 5%).
@@ -101,8 +120,27 @@ func (p *Projector) Run(ctx context.Context, interval time.Duration) {
 	}
 }
 
-// Refresh runs one full cycle: collect → resolve → persist → file exceptions.
+// Refresh runs one full cycle: elect → collect → resolve → persist → file
+// exceptions. Losing the election is not a failure — it means another replica is
+// doing this cycle's work, and its results land in the same store this one reads.
 func (p *Projector) Refresh(ctx context.Context) error {
+	if p.lock == nil {
+		return p.refresh(ctx)
+	}
+	release, acquired, err := p.lock.TryAcquire(ctx)
+	if err != nil {
+		return fmt.Errorf("cycle lock: %w", err)
+	}
+	if !acquired {
+		p.logger.Debug("another replica is projecting this cycle; skipping")
+		return nil
+	}
+	defer release()
+	return p.refresh(ctx)
+}
+
+// refresh is the cycle itself, run by whichever replica won the election.
+func (p *Projector) refresh(ctx context.Context) error {
 	records, candidates, err := p.collect(ctx)
 	if err != nil {
 		return err

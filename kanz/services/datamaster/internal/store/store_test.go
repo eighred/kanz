@@ -222,3 +222,66 @@ func TestPostgresOverridePriceIsExact(t *testing.T) {
 			got.Overrides[0].ChosenPrice.FloatString(9), chosen)
 	}
 }
+
+// TestPostgresCycleLockElectsOneReplica drives the real advisory lock across two
+// sessions — the two pods.
+//
+// Concurrent projection is harmless to the DATA (idempotent, content-identical
+// writes), but every pod runs the projector and vendor reference data is metered
+// per call: at replicas: 2 that is double the vendor bill and double the rate-limit
+// budget for one cycle's worth of information. One replica wins, the other skips.
+func TestPostgresCycleLockElectsOneReplica(t *testing.T) {
+	pool := newPool(t)
+	ctx := context.Background()
+
+	podA := NewPostgresCycleLock(pool, "acme-capital")
+	podB := NewPostgresCycleLock(pool, "acme-capital")
+
+	releaseA, wonA, err := podA.TryAcquire(ctx)
+	if err != nil || !wonA {
+		t.Fatalf("pod A did not win an uncontended cycle: won=%v err=%v", wonA, err)
+	}
+
+	// TRY, not wait: pod B does not block behind A and then run a redundant refresh.
+	_, wonB, err := podB.TryAcquire(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if wonB {
+		t.Fatal("both replicas won the cycle — every vendor call would be made twice")
+	}
+
+	// The lock is handed back, so the next cycle is not starved by this one.
+	releaseA()
+	releaseB, wonB, err := podB.TryAcquire(ctx)
+	if err != nil || !wonB {
+		t.Fatalf("pod B could not take the released cycle: won=%v err=%v — the projector would never run again", wonB, err)
+	}
+	releaseB()
+}
+
+// The lock is namespaced per TENANT. A single shared key would let one tenant's
+// deployment starve every other tenant's projector: the loser skips, every cycle,
+// forever, and its security master would simply never be refreshed.
+func TestPostgresCycleLockIsPerTenant(t *testing.T) {
+	pool := newPool(t)
+	ctx := context.Background()
+
+	acme := NewPostgresCycleLock(pool, "acme-capital")
+	other := NewPostgresCycleLock(pool, "other-fund")
+	if acme.Key() == other.Key() {
+		t.Fatal("two tenants share a cycle-lock key — one would starve the other forever")
+	}
+
+	releaseAcme, won, err := acme.TryAcquire(ctx)
+	if err != nil || !won {
+		t.Fatalf("acme: won=%v err=%v", won, err)
+	}
+	defer releaseAcme()
+
+	releaseOther, won, err := other.TryAcquire(ctx)
+	if err != nil || !won {
+		t.Fatal("a second tenant was blocked by the first tenant's cycle — its master would never refresh")
+	}
+	releaseOther()
+}
