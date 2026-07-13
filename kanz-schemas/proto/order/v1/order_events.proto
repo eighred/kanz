@@ -93,6 +93,13 @@ message OrderState {
   // to the venue whose MIC matches; empty ⇒ smart-order-routing default. Once
   // routed, OrderRouted.venue records the acknowledged venue. Optional.
   string venue = 14;
+
+  // venue_account_id is the exchange account this order executes against — the
+  // COLLATERAL BOUNDARY (see SubmitOrder.venue_account_id). Stamped by the OMS at
+  // admission from the (tenant, portfolio, venue) binding, and carried on every
+  // state transition so the account that bore the risk is on the record, not
+  // reconstructed later from config that has since changed.
+  string venue_account_id = 15;
 }
 
 // Fill is one atomic execution against an order — the execution-report payload
@@ -124,6 +131,15 @@ message Fill {
 
   // venue is the ISO 10383 MIC of the execution venue. Required.
   string venue = 8;
+
+  // venue_account_id is the exchange account this fill SETTLED AGAINST — the
+  // account whose collateral moved. Required.
+  //
+  // It is stamped by the venue that executed the fill, not copied from intent: the
+  // account that actually bore the trade is the one the ledger must post to, and
+  // the whole point of segregating collateral is lost if the books record where the
+  // cash was SUPPOSED to go.
+  string venue_account_id = 11;
 
   // venue_execution_id is the venue's own execution reference, retained for
   // reconciliation against POST-01 confirmations. Optional.

@@ -24,6 +24,7 @@ import (
 // fills here and is filled asynchronously by the user-data stream (Phase 3.2).
 type BinanceVenue struct {
 	mic     string
+	account string
 	rest    *binanceREST
 	symbols SymbolMapper
 	now     func() time.Time
@@ -35,6 +36,8 @@ type BinanceConfig struct {
 	Symbols SymbolMapper
 	REST    *binanceREST
 	Now     func() time.Time
+	// Account is the exchange account the REST credential belongs to.
+	Account string
 }
 
 // NewBinanceVenue builds the venue. MIC defaults to "BINANCE".
@@ -45,7 +48,7 @@ func NewBinanceVenue(cfg BinanceConfig) *BinanceVenue {
 	if cfg.Now == nil {
 		cfg.Now = time.Now
 	}
-	return &BinanceVenue{mic: cfg.MIC, rest: cfg.REST, symbols: cfg.Symbols, now: cfg.Now}
+	return &BinanceVenue{mic: cfg.MIC, account: cfg.Account, rest: cfg.REST, symbols: cfg.Symbols, now: cfg.Now}
 }
 
 // NewBinanceVenueFromSettings assembles the rate bucket + signed REST client +
@@ -61,11 +64,15 @@ func NewBinanceVenueFromSettings(s VenueSettings) *BinanceVenue {
 		Bucket: bucket, OnThrottle: s.OnThrottle,
 		HTTPClient: newExchangeHTTPClient(s.DNSTTL), // DNS-bypass dialer on the hot path
 	})
-	return NewBinanceVenue(BinanceConfig{MIC: s.MIC, Symbols: StaticSymbolMap(s.Symbols), REST: rest})
+	return NewBinanceVenue(BinanceConfig{MIC: s.MIC, Account: s.Account, Symbols: StaticSymbolMap(s.Symbols), REST: rest})
 }
 
 // MIC returns the venue code.
 func (v *BinanceVenue) MIC() string { return v.mic }
+
+// Account is the exchange account this adapter's API credential belongs to — the
+// collateral pool every fill it produces settles against.
+func (v *BinanceVenue) Account() string { return v.account }
 
 var _ Venue = (*BinanceVenue)(nil)
 

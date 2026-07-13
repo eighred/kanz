@@ -96,8 +96,13 @@ func parseMICs(s string) []string {
 	return out
 }
 
-// dialVenues turns OMS_VENUE_ENDPOINTS ("XBIN=host:port,XOKX=host:port") into
-// execution.GRPCVenue clients, one per MIC, and returns a func that closes them.
+// dialVenues turns OMS_VENUE_ENDPOINTS ("XBIN/binance-main=host:port,XOKX/okx-sub-1=host:port")
+// into execution.GRPCVenue clients and returns a func that closes them.
+//
+// The key is MIC/account. An adapter deployment holds one API credential and is
+// therefore exactly ONE exchange account — the pool its fills margin against. Naming
+// it is what makes segregation possible: a portfolio is bound to an account, and the
+// router will not send its orders to an adapter holding a different one.
 //
 // The dial is mTLS when a SPIFFE socket is configured (SEC-01a: the workload's
 // SVID is the credential, authorized against the mesh). Without one it is
@@ -132,15 +137,29 @@ func dialVenues(ctx context.Context, cfg config.Config, logger *slog.Logger) ([]
 			_ = c.Close()
 		}
 	}
-	for mic, addr := range endpoints {
+	for key, addr := range endpoints {
+		// The endpoint key is MIC or MIC/account. THE ACCOUNT IS THE COLLATERAL
+		// BOUNDARY: this adapter holds ONE API credential, so everything it fills
+		// margins against ONE exchange account, whichever portfolio the order was for.
+		// Declaring it here is what lets a portfolio be bound to it — and what lets the
+		// router refuse to send another portfolio's order to it.
+		mic, account, ok := strings.Cut(key, "/")
+		if !ok || account == "" {
+			// The venue is its own account: every portfolio trading here shares one
+			// collateral pool. That may be true and fine — one account is the normal
+			// case — but it must be a stated fact, not an absence.
+			account = mic
+			logger.Warn("venue adapter declares no account — treating the venue as ONE account, shared by every portfolio that trades it. An exchange liquidates per account",
+				"mic", mic, "fix", fmt.Sprintf("OMS_VENUE_ENDPOINTS=%s/<account>=%s", mic, addr))
+		}
 		conn, err := grpc.NewClient(addr, dialOpt)
 		if err != nil {
 			closeConns()
 			return nil, nil, fmt.Errorf("venue %s at %s: %w", mic, addr, err)
 		}
 		conns = append(conns, conn)
-		venues = append(venues, execution.NewGRPCVenue(mic, conn, cfg.Tenant))
-		logger.Info("venue adapter registered", "mic", mic, "endpoint", addr)
+		venues = append(venues, execution.NewGRPCVenue(mic, account, conn, cfg.Tenant))
+		logger.Info("venue adapter registered", "mic", mic, "account", account, "endpoint", addr)
 	}
 	return venues, closeConns, nil
 }

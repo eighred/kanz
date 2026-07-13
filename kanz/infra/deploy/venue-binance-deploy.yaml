@@ -117,6 +117,13 @@ spec:
             - { name: VENUE_BINANCE_LISTEN, value: ":8091" }
             - { name: VENUE_BINANCE_SOURCE, value: "venue-binance" }
             - { name: BINANCE_MIC, value: "XBIN" }
+            # The EXCHANGE ACCOUNT this adapter's API credential belongs to. Everything it
+            # fills margins and liquidates against THIS account, whichever portfolio the
+            # order was for — so it is the collateral boundary, and the OMS binds
+            # portfolios to it by this name (OMS_VENUE_ACCOUNTS). It must match the
+            # account the mounted API key actually belongs to: nothing verifies that
+            # today, and a wrong name posts fills to the wrong account's ledger rows.
+            - { name: BINANCE_VENUE_ACCOUNT, value: "binance-main" }
             # Testnet by default. Pointing this at the live exchange is a
             # deliberate, reviewable edit — not a default.
             - { name: BINANCE_BASE_URL, value: "https://testnet.binance.vision" }

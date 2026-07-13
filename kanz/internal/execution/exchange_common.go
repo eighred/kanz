@@ -80,7 +80,13 @@ func (m StaticSymbolMap) Symbol(id string) (string, bool) { s, ok := m[id]; retu
 // build an exchange venue without touching the internal REST client / rate
 // bucket. Shared across Binance and OKX; Passphrase is OKX-only.
 type VenueSettings struct {
-	MIC          string
+	MIC string
+	// Account is the EXCHANGE ACCOUNT the APIKey below belongs to — the OKX
+	// sub-account, the Binance account. It is the collateral boundary: everything
+	// this adapter fills is margined and liquidated against it, for every portfolio
+	// whose orders reach it. The adapter holds the credential, so the adapter is the
+	// only thing that can honestly say which account it trades.
+	Account      string
 	BaseURL      string
 	APIKey       string
 	APISecret    string

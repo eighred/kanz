@@ -23,6 +23,7 @@ import (
 // failure it recovers via query by clOrdId — never a fabricated fill.
 type OKXVenue struct {
 	mic     string
+	account string
 	rest    *okxREST
 	symbols SymbolMapper
 	now     func() time.Time
@@ -44,11 +45,15 @@ func NewOKXVenueFromSettings(s VenueSettings) *OKXVenue {
 	if mic == "" {
 		mic = "OKX"
 	}
-	return &OKXVenue{mic: mic, rest: rest, symbols: StaticSymbolMap(s.Symbols), now: time.Now}
+	return &OKXVenue{mic: mic, account: s.Account, rest: rest, symbols: StaticSymbolMap(s.Symbols), now: time.Now}
 }
 
 // MIC returns the venue code.
 func (v *OKXVenue) MIC() string { return v.mic }
+
+// Account is the exchange account this adapter's API credential belongs to — the
+// collateral pool every fill it produces settles against.
+func (v *OKXVenue) Account() string { return v.account }
 
 var _ Venue = (*OKXVenue)(nil)
 

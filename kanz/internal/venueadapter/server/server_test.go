@@ -34,7 +34,8 @@ type fakeVenue struct {
 	closes               *execution.CloseRegistry
 }
 
-func (f *fakeVenue) MIC() string { return "XBIN" }
+func (f *fakeVenue) MIC() string     { return "XBIN" }
+func (f *fakeVenue) Account() string { return "binance-main" }
 
 func (f *fakeVenue) Execute(context.Context, *orderpb.OrderState) ([]*orderpb.Fill, error) {
 	if f.execErr != nil {

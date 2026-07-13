@@ -85,6 +85,19 @@ message LedgerEntry {
   // source_ref links back to the producing fact (the OMS Fill fill_id, the
   // CorporateAction id). Optional, for lineage.
   string source_ref = 11;
+
+  // venue_account_id is the exchange account whose collateral this entry moved.
+  //
+  // The ledger has always segregated cash by PORTFOLIO. The exchange does not: it
+  // margins and liquidates per ACCOUNT. If two portfolios settle into one account,
+  // a per-portfolio ledger reports cash that a liquidation in the other portfolio
+  // has already consumed — books that are not merely imprecise but WRONG. So an
+  // entry records the account it settled against, and the engine refuses to write
+  // one into an account the transaction did not declare (app.venue_account_id).
+  //
+  // Required for entries derived from a fill. Empty for entries that touch no
+  // exchange account (a manual cash movement, a corporate action).
+  string venue_account_id = 12;
 }
 
 // CorporateActionType is the kind of corporate action.

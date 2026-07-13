@@ -34,7 +34,7 @@ func deadVenue(t *testing.T, mic string) execution.Venue {
 		t.Fatalf("dial: %v", err)
 	}
 	t.Cleanup(func() { _ = conn.Close() })
-	return execution.NewGRPCVenue(mic, conn, "acme-capital")
+	return execution.NewGRPCVenue(mic, "acct-test", conn, "acme-capital")
 }
 
 // An evicted adapter must stop the order, not lose it.

@@ -25,6 +25,12 @@ import (
 type Venue interface {
 	// MIC is the ISO 10383 venue code stamped on routing + fills.
 	MIC() string
+	// Account is the EXCHANGE ACCOUNT this venue trades — the sub-account behind
+	// the API credential it holds. It is the collateral boundary: whatever this
+	// venue fills is margined, netted and liquidated against this account, whoever
+	// the order was for. One adapter deployment holds one credential and is
+	// therefore exactly one account.
+	Account() string
 	// Execute works st and returns zero or more fills (each strictly within the
 	// order's open quantity). Returning no fills is valid — a resting order that
 	// did not trade — and leaves the order working.
@@ -72,10 +78,11 @@ type PriceFunc func(st *orderpb.OrderState) *commonpb.Decimal
 // full, in one fill, at the order's limit price (LIMIT/STOP_LIMIT) or the
 // resolved mark price (MARKET). Deterministic given its clock + id generator.
 type SimVenue struct {
-	mic   string
-	price PriceFunc
-	now   func() time.Time
-	newID func() string
+	mic     string
+	account string
+	price   PriceFunc
+	now     func() time.Time
+	newID   func() string
 }
 
 // SimOption customizes a SimVenue.
@@ -83,6 +90,11 @@ type SimOption func(*SimVenue)
 
 // WithPrice sets the MARKET-order price resolver.
 func WithPrice(p PriceFunc) SimOption { return func(v *SimVenue) { v.price = p } }
+
+// WithAccount names the exchange account this simulator stands in for. Without it
+// the account is "sim:<MIC>" — deliberately not a plausible account id, because a
+// simulated fill must never be mistaken for collateral that moved somewhere real.
+func WithAccount(a string) SimOption { return func(v *SimVenue) { v.account = a } }
 
 // WithClock overrides the fill timestamp source (tests).
 func WithClock(now func() time.Time) SimOption { return func(v *SimVenue) { v.now = now } }
@@ -92,7 +104,7 @@ func WithIDGen(f func() string) SimOption { return func(v *SimVenue) { v.newID =
 
 // NewSimVenue returns a simulation venue with the given MIC.
 func NewSimVenue(mic string, opts ...SimOption) *SimVenue {
-	v := &SimVenue{mic: mic, now: time.Now, newID: uuid.NewString}
+	v := &SimVenue{mic: mic, account: "sim:" + mic, now: time.Now, newID: uuid.NewString}
 	for _, opt := range opts {
 		opt(v)
 	}
@@ -101,6 +113,9 @@ func NewSimVenue(mic string, opts ...SimOption) *SimVenue {
 
 // MIC returns the venue code.
 func (v *SimVenue) MIC() string { return v.mic }
+
+// Account returns the simulated exchange account.
+func (v *SimVenue) Account() string { return v.account }
 
 // Execute fills the open quantity in full at the resolved price.
 func (v *SimVenue) Execute(_ context.Context, st *orderpb.OrderState) ([]*orderpb.Fill, error) {
@@ -119,7 +134,10 @@ func (v *SimVenue) Execute(_ context.Context, st *orderpb.OrderState) ([]*orderp
 		Quantity:     st.GetLeavesQuantity(),
 		Price:        price,
 		Venue:        v.mic,
-		ExecutedAt:   timestamppb.New(v.now().UTC()),
+		// The account that ACTUALLY executed — the venue's own, not the order's
+		// intent. The ledger posts where the cash moved, not where it was meant to.
+		VenueAccountId: v.account,
+		ExecutedAt:     timestamppb.New(v.now().UTC()),
 	}
 	return []*orderpb.Fill{fill}, nil
 }

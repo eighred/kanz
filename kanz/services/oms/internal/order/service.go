@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sync"
 	"time"
 
 	commandpb "github.com/kanz-eng/kanz-schemas-go/command/v1"
@@ -14,6 +15,8 @@ import (
 
 	"github.com/kanz-eng/kanz/internal/execution"
 	"github.com/kanz-eng/kanz/services/oms/internal/compliance"
+
+	"github.com/prometheus/client_golang/prometheus"
 )
 
 // Service is the OMS command handler (OMS-01b): the bus.EventHandler that
@@ -35,6 +38,37 @@ type Service struct {
 	closes  execution.CloseTracker
 	now     func() time.Time
 	logger  *slog.Logger
+
+	// accounts binds each portfolio to the exchange account it may execute against.
+	// Empty ⇒ nothing is bound, and every portfolio trades whatever account its
+	// venue adapter happens to hold — one collateral pool, shared. See noteShared.
+	accounts       *execution.AccountBindings
+	requireAccount bool
+	sharedOnce     sync.Map // "tenant/portfolio@MIC" → struct{}, so the warning is said once
+	sharedCount    prometheus.Counter
+}
+
+// ServiceOption customizes the handler.
+type ServiceOption func(*Service)
+
+// WithAccountBindings gives the OMS the portfolio→exchange-account bindings and the
+// posture to take when an order's portfolio has none.
+//
+// require=true REFUSES an order whose portfolio is bound to no account at the target
+// venue. That is the deny-by-default posture and it is the only one under which
+// "Basket Alpha's drawdown cannot touch Basket Beta's collateral" is a guarantee
+// rather than an intention — but turning it on refuses every order for every portfolio
+// nobody has bound yet, which is a trading outage dressed as a control. So it is a
+// deliberate switch, defaulted OFF, and the OMS states its posture at startup.
+//
+// require=false still STAMPS the account the order will actually hit, and says once,
+// loudly, per portfolio that its collateral is shared.
+func WithAccountBindings(b *execution.AccountBindings, require bool, shared prometheus.Counter) ServiceOption {
+	return func(s *Service) {
+		s.accounts = b
+		s.requireAccount = require
+		s.sharedCount = shared
+	}
 }
 
 // NewService wires the handler. gate defaults to deny-nothing (compliance.AllowAll)
@@ -42,7 +76,7 @@ type Service struct {
 // closes is the in-flight-close registry the venue-close dispatch path writes to
 // and the reconcilers' healing watchdogs drain; nil disables venue-side cancel
 // dispatch (the cancel stays ledger-only).
-func NewService(store Store, emitter *Emitter, gate compliance.Gate, router *execution.Router, closes execution.CloseTracker, logger *slog.Logger) (*Service, error) {
+func NewService(store Store, emitter *Emitter, gate compliance.Gate, router *execution.Router, closes execution.CloseTracker, logger *slog.Logger, opts ...ServiceOption) (*Service, error) {
 	if store == nil || emitter == nil {
 		return nil, errors.New("oms: store and emitter required")
 	}
@@ -52,17 +86,21 @@ func NewService(store Store, emitter *Emitter, gate compliance.Gate, router *exe
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &Service{
+	svc := &Service{
 		store: store, gate: gate, emitter: emitter, router: router, closes: closes,
 		now: time.Now, logger: logger,
-	}, nil
+	}
+	for _, opt := range opts {
+		opt(svc)
+	}
+	return svc, nil
 }
 
 // Handle is the bus.EventHandler. It dispatches by the command subject/type.
 func (s *Service) Handle(ctx context.Context, env *envelopepb.Envelope, payload []byte) error {
 	switch env.GetEventType() {
 	case SubjectSubmit:
-		return s.handleSubmit(ctx, payload)
+		return s.handleSubmit(ctx, env, payload)
 	case SubjectCancel:
 		return s.handleCancel(ctx, payload)
 	case SubjectAmend:
@@ -74,7 +112,7 @@ func (s *Service) Handle(ctx context.Context, env *envelopepb.Envelope, payload 
 	}
 }
 
-func (s *Service) handleSubmit(ctx context.Context, payload []byte) error {
+func (s *Service) handleSubmit(ctx context.Context, env *envelopepb.Envelope, payload []byte) error {
 	var cmd orderpb.SubmitOrder
 	if err := proto.Unmarshal(payload, &cmd); err != nil {
 		// A malformed command body is a permanent defect; reject-and-ack rather
@@ -113,9 +151,18 @@ func (s *Service) handleSubmit(ctx context.Context, payload []byte) error {
 	//
 	// This is NOT the "no venues configured at all" case — that is a deliberate
 	// paper/observation deployment, and its orders still rest.
-	if target := cmd.GetVenue(); target != "" && s.router != nil && !s.router.Supports(target) {
+	if target := cmd.GetVenue(); target != "" && s.router != nil && !s.router.Supports(target, "") {
 		return s.refuse(ctx, cmd.GetOrderId(), "VENUE_NOT_CONFIGURED",
 			fmt.Sprintf("target venue %q is not configured on this OMS", target), now)
+	}
+
+	// WHOSE COLLATERAL DOES THIS ORDER SPEND? Resolve the exchange account before the
+	// order exists, because it is not a routing detail — it is the answer to that
+	// question, and an order admitted without one is an order that will margin against
+	// whichever account its adapter happens to hold.
+	account, rej := s.resolveAccount(env.GetTenantId(), cmd.GetPortfolioId(), cmd.GetVenue())
+	if rej != nil {
+		return s.refuse(ctx, cmd.GetOrderId(), rej.Code, rej.Msg, now)
 	}
 
 	// Validate + admit.
@@ -127,6 +174,11 @@ func (s *Service) handleSubmit(ctx context.Context, payload []byte) error {
 		}
 		return err
 	}
+	// The account is stamped by the OMS, never by the caller. A caller that could name
+	// the account could name ANY portfolio's account — it would be choosing whose
+	// collateral to spend — which is why SubmitOrder has no such field to set.
+	st.VenueAccountId = account
+
 	// THE ADMISSION GATE. Create is atomic: exactly one concurrent delivery of this
 	// order_id can insert it, and every other gets ErrExists. Losing the race means
 	// another delivery already owns this order and is working it — so this one acks
@@ -156,6 +208,83 @@ func (s *Service) handleSubmit(ctx context.Context, payload []byte) error {
 		reason = "order filled"
 	}
 	return s.emitter.EmitOutcome(ctx, st.GetOrderId(), status, reason, "", "", now)
+}
+
+// resolveAccount answers: which exchange account may this portfolio spend from at this
+// venue?
+//
+// Three outcomes, and the difference between them is the whole point:
+//
+//   - BOUND — the portfolio has an account at this venue. Stamp it. The router will
+//     only reach the adapter holding that credential, so this order cannot touch any
+//     other portfolio's collateral. This is the guarantee.
+//
+//   - UNBOUND, and the OMS REQUIRES a binding — refuse, under a code of its own:
+//     VENUE_ACCOUNT_UNBOUND. Nothing is broken and no rule was breached; nobody has
+//     said which collateral this portfolio may spend, and the platform will not
+//     guess.
+//
+//   - UNBOUND, and the OMS does not require one — the order still executes, against
+//     whatever account the adapter holds, TOGETHER WITH every other unbound portfolio
+//     on that venue. That is a shared collateral pool, and it is the default state of
+//     a platform that has never configured a binding. It gets stamped with the REAL
+//     account (not left empty), so the ledger records where the cash actually went,
+//     and it is said out loud once per portfolio. Silence here would be the ledger
+//     reporting segregated books over a pool the exchange will liquidate as one.
+//
+// A resting order (no venue) and a paper deployment (no router) have no account,
+// because they touch no collateral.
+func (s *Service) resolveAccount(tenant, portfolio, mic string) (string, *RejectError) {
+	if mic == "" || s.router == nil {
+		return "", nil
+	}
+	if account, ok := s.accounts.Account(tenant, portfolio, mic); ok {
+		if !s.router.Supports(mic, account) {
+			// The binding names an account no adapter here holds. Executing anyway
+			// would put the order on somebody else's collateral, which is precisely
+			// what the binding forbids — so it can never be worked, and it is refused
+			// at admission rather than left resting forever.
+			return "", &RejectError{
+				Code: "VENUE_ACCOUNT_UNREACHABLE",
+				Msg: fmt.Sprintf("portfolio %s/%s is bound to account %q at %s, and no adapter on this OMS holds it",
+					tenant, portfolio, account, mic),
+			}
+		}
+		return account, nil
+	}
+	if s.requireAccount {
+		return "", &RejectError{
+			Code: "VENUE_ACCOUNT_UNBOUND",
+			Msg: fmt.Sprintf("no venue account is bound to portfolio %s/%s at %s — nothing says whose collateral this order may spend",
+				tenant, portfolio, mic),
+		}
+	}
+	account, ok := s.router.AccountFor(mic)
+	if !ok {
+		return "", nil // no adapter at this MIC; the VENUE_NOT_CONFIGURED check owns that
+	}
+	s.noteShared(tenant, portfolio, mic, account)
+	return account, nil
+}
+
+// noteShared says, once per (portfolio, venue), that this portfolio's orders are
+// margining against an account nobody bound to it — which means against an account
+// other portfolios are using too.
+func (s *Service) noteShared(tenant, portfolio, mic, account string) {
+	if s.sharedCount != nil {
+		s.sharedCount.Inc()
+	}
+	key := tenant + "/" + portfolio + "@" + mic
+	if _, seen := s.sharedOnce.LoadOrStore(key, struct{}{}); seen {
+		return
+	}
+	s.logger.Warn("COLLATERAL IS SHARED — this portfolio is bound to no venue account, so its orders margin against whatever account the adapter holds, alongside every other unbound portfolio. An exchange liquidates per ACCOUNT: a drawdown in one of them consumes the margin of all of them, and the ledger will still show each portfolio's cash intact",
+		"tenant", tenant,
+		"portfolio", portfolio,
+		"venue", mic,
+		"account", account,
+		"fix", fmt.Sprintf("bind it: OMS_VENUE_ACCOUNTS=%s/%s@%s=<account>", tenant, portfolio, mic),
+	)
 }
 
 // work routes an admitted order to a venue and folds the resulting fills. A nil

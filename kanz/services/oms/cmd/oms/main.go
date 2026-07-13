@@ -159,6 +159,43 @@ func runConsumers(ctx context.Context, cfg config.Config, readiness *server.Read
 			"Put every live portfolio under mandate with kanz-mandate, or set OMS_REQUIRE_MANDATE=true to refuse instead")
 	}
 
+	// EXEC-M16 — WHOSE COLLATERAL DOES AN ORDER SPEND?
+	//
+	// An exchange margins, nets and LIQUIDATES per ACCOUNT. Two portfolios settling
+	// into one exchange account share one collateral pool, so a drawdown in the first
+	// consumes the second's margin — while a per-portfolio ledger still shows that
+	// cash sitting there. Segregation is therefore a property of the ACCOUNT, and this
+	// is where the platform learns which account each portfolio may spend from.
+	//
+	// A BAD BINDING IS FATAL. If one account is bound to two portfolios, the platform
+	// would report segregated books over a shared pool — the exact failure this exists
+	// to prevent. That is not a config typo to warn about and carry on from; the OMS
+	// refuses to start.
+	bindings, err := execution.ParseBindings(cfg.VenueAccounts)
+	if err != nil {
+		logger.Error("OMS_VENUE_ACCOUNTS is not safe to trade on", "err", err)
+		os.Exit(2)
+	}
+	// Orders that margin against an account nobody bound to their portfolio. Non-zero
+	// means some part of the book is sharing collateral with the rest of it.
+	sharedCollateral := prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "kanz_oms_shared_collateral_orders_total",
+		Help: "Orders executed against an exchange account NOT bound to their portfolio — i.e. against " +
+			"a collateral pool shared with every other unbound portfolio at that venue. An exchange " +
+			"liquidates per account, so this is the number of orders whose segregation is nominal only.",
+	})
+	obs.Registry.MustRegister(sharedCollateral)
+
+	if bindings.Empty() {
+		logger.Warn("COLLATERAL IS SHARED — no venue-account bindings configured (OMS_VENUE_ACCOUNTS). Every portfolio trades whatever account its venue adapter holds, so they all margin against ONE pool per venue: a liquidation caused by one portfolio consumes the margin of all of them, and each ledger still reports its own cash intact")
+	} else if cfg.RequireVenueAccount {
+		logger.Info("venue accounts: BINDING REQUIRED — an order for a portfolio bound to no account at its venue is REJECTED (VENUE_ACCOUNT_UNBOUND)",
+			"bindings", bindings.Len(), "accounts", bindings.Accounts())
+	} else {
+		logger.Warn("venue accounts: BINDING ADVISORY — a portfolio with no binding still trades, against a SHARED account. Set OMS_REQUIRE_VENUE_ACCOUNT=true to refuse instead",
+			"bindings", bindings.Len(), "accounts", bindings.Accounts())
+	}
+
 	// OMS-01b/c: order command handler over the order store + a sim venue.
 	emitter := order.NewEmitter(producer)
 	// Venue set is composition-root-selected: SimVenue by default; Binance Spot +
@@ -172,7 +209,8 @@ func runConsumers(ctx context.Context, cfg config.Config, readiness *server.Read
 	venues, closeVenues := configuredVenues(ctx, cfg, store, producer, logger)
 	defer closeVenues()
 	router := execution.NewRouter(venues...)
-	svc, err := order.NewService(store, emitter, gate, router, closeRegistry, logger)
+	svc, err := order.NewService(store, emitter, gate, router, closeRegistry, logger,
+		order.WithAccountBindings(bindings, cfg.RequireVenueAccount, sharedCollateral))
 	if err != nil {
 		return err
 	}

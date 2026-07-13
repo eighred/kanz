@@ -15,6 +15,7 @@ import (
 
 	commonpb "github.com/kanz-eng/kanz-schemas-go/common/v1"
 	orderpb "github.com/kanz-eng/kanz-schemas-go/order/v1"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/kanz-eng/kanz/internal/dec"
 )
@@ -203,21 +204,16 @@ func Amend(st *orderpb.OrderState, cmd *orderpb.AmendOrder, now time.Time) (*ord
 	return next, nil
 }
 
+// cloneState copies the order state. Every transition (route, fill, amend, cancel)
+// goes through it, so a field it does not copy is a field that DISAPPEARS the moment
+// the order does anything.
+//
+// It used to be a hand-rolled, field-by-field copy that happened to list every field —
+// and the first field added after it was written (venue_account_id, the exchange
+// account whose collateral the order spends) was silently dropped at routing. The
+// order was admitted knowing whose money it was, and by the time it reached the venue
+// it no longer did. A copy that must be edited whenever the message changes is a copy
+// that will be forgotten; proto.Clone cannot forget.
 func cloneState(st *orderpb.OrderState) *orderpb.OrderState {
-	return &orderpb.OrderState{
-		OrderId:          st.GetOrderId(),
-		PortfolioId:      st.GetPortfolioId(),
-		InstrumentId:     st.GetInstrumentId(),
-		Side:             st.GetSide(),
-		OrderType:        st.GetOrderType(),
-		TimeInForce:      st.GetTimeInForce(),
-		OrderedQuantity:  st.GetOrderedQuantity(),
-		LimitPrice:       st.GetLimitPrice(),
-		Status:           st.GetStatus(),
-		FilledQuantity:   st.GetFilledQuantity(),
-		LeavesQuantity:   st.GetLeavesQuantity(),
-		AverageFillPrice: st.GetAverageFillPrice(),
-		Venue:            st.GetVenue(),
-		AsOf:             st.GetAsOf(),
-	}
+	return proto.Clone(st).(*orderpb.OrderState)
 }

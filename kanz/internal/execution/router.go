@@ -42,30 +42,72 @@ func NewRouter(venues ...Venue) *Router { return &Router{venues: venues} }
 // that specific venue by MIC (the allocation-matrix path); empty falls back to
 // the first-configured venue (the SOR default; st is available so a richer
 // policy can rank by price/liquidity/cost).
+// THE ACCOUNT IS PART OF THE ROUTE, AND IT IS THE PART THAT SPENDS THE MONEY.
+//
+// A venue (MIC) can hold many exchange accounts, and each adapter deployment holds
+// exactly one credential — so an adapter IS an account. Routing on the MIC alone means
+// every portfolio's orders reach whichever adapter happens to be configured for that
+// venue, and they all margin against ITS collateral. That is cross-collateralization,
+// and it happens in the router, silently, one line above the exchange.
+//
+// So when an order names an account (the OMS stamps it at admission from the
+// portfolio's binding), the route must match BOTH: the venue AND the account. An order
+// for Basket Alpha cannot reach Basket Beta's credential, because no venue in this
+// router holds both.
 func (r *Router) Route(st *orderpb.OrderState) (Venue, error) {
 	if len(r.venues) == 0 {
 		return nil, ErrNoVenue
 	}
-	if target := st.GetVenue(); target != "" {
+	target, account := st.GetVenue(), st.GetVenueAccountId()
+	if target != "" {
 		for _, v := range r.venues {
-			if v.MIC() == target {
-				return v, nil
+			if v.MIC() != target {
+				continue
 			}
+			if account != "" && v.Account() != account {
+				continue // right venue, WRONG COLLATERAL — keep looking
+			}
+			return v, nil
+		}
+		if account != "" {
+			return nil, fmt.Errorf("%w: no adapter at %q holds account %q", ErrVenueNotConfigured, target, account)
 		}
 		return nil, fmt.Errorf("%w: %q", ErrVenueNotConfigured, target)
 	}
 	return r.venues[0], nil
 }
 
-// Supports reports whether an adapter for this MIC is configured. The OMS checks
-// it at ADMISSION, so an order naming a venue that does not exist is refused
-// before it is ever admitted — the same treatment a compliance breach or a
-// malformed order gets, and for the same reason: it can never be executed.
-func (r *Router) Supports(mic string) bool {
+// Supports reports whether an adapter for this MIC — and, when account is non-empty,
+// for that specific exchange account — is configured. The OMS checks it at ADMISSION,
+// so an order naming a venue that does not exist is refused before it is ever admitted
+// — the same treatment a compliance breach or a malformed order gets, and for the same
+// reason: it can never be executed.
+//
+// An empty account asks only "can this OMS reach that venue at all".
+func (r *Router) Supports(mic, account string) bool {
 	for _, v := range r.venues {
-		if v.MIC() == mic {
-			return true
+		if v.MIC() != mic {
+			continue
 		}
+		if account != "" && v.Account() != account {
+			continue
+		}
+		return true
 	}
 	return false
+}
+
+// AccountFor returns the account the configured adapter at this MIC actually trades.
+//
+// It is what the OMS stamps when no binding governs the portfolio: the account the
+// order WILL hit is a fact whether or not anybody decided it should, and recording the
+// real one is what makes shared collateral visible in the ledger instead of hidden by
+// it.
+func (r *Router) AccountFor(mic string) (string, bool) {
+	for _, v := range r.venues {
+		if v.MIC() == mic {
+			return v.Account(), true
+		}
+	}
+	return "", false
 }

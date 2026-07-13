@@ -25,7 +25,8 @@ type closerVenue struct {
 	err       error
 }
 
-func (v *closerVenue) MIC() string { return v.mic }
+func (v *closerVenue) MIC() string     { return v.mic }
+func (v *closerVenue) Account() string { return "acct-" + v.mic }
 
 func (v *closerVenue) Execute(context.Context, *orderpb.OrderState) ([]*orderpb.Fill, error) {
 	return nil, nil // rests

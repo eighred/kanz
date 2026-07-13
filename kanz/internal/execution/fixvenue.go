@@ -99,6 +99,7 @@ type FIXSession interface {
 // FIXVenue works orders over a FIXSession.
 type FIXVenue struct {
 	mic     string
+	account string
 	session FIXSession
 	now     func() time.Time
 	newID   func() string
@@ -115,7 +116,7 @@ func WithFIXIDGen(f func() string) FIXOption { return func(v *FIXVenue) { v.newI
 
 // NewFIXVenue builds a FIX venue with the given MIC over session.
 func NewFIXVenue(mic string, session FIXSession, opts ...FIXOption) *FIXVenue {
-	v := &FIXVenue{mic: mic, session: session, now: time.Now, newID: uuid.NewString}
+	v := &FIXVenue{mic: mic, account: "fix:" + mic, session: session, now: time.Now, newID: uuid.NewString}
 	for _, o := range opts {
 		o(v)
 	}
@@ -126,6 +127,15 @@ var _ Venue = (*FIXVenue)(nil)
 
 // MIC returns the venue code.
 func (v *FIXVenue) MIC() string { return v.mic }
+
+// Account is the exchange account behind this FIX session's credentials. FIX sessions
+// are per-account by construction (the SenderCompID authenticates one account), so
+// this defaults to the session's venue and should be set to the real account id when
+// this venue is used against a live broker.
+func (v *FIXVenue) Account() string { return v.account }
+
+// WithFIXAccount names the exchange account this FIX session trades.
+func WithFIXAccount(a string) FIXOption { return func(v *FIXVenue) { v.account = a } }
 
 // Execute submits st as a NewOrderSingle and aggregates the ExecutionReport
 // stream into fills until the order is terminal. Partial fills accumulate; a
@@ -183,7 +193,9 @@ func (v *FIXVenue) fill(st *orderpb.OrderState, rep ExecutionReport) *orderpb.Fi
 		Quantity:     rep.LastQty,
 		Price:        rep.LastPx,
 		Venue:        v.mic,
-		ExecutedAt:   timestamppb.New(v.now().UTC()),
+		// The account this fill settled against — where the collateral actually moved.
+		VenueAccountId: v.account,
+		ExecutedAt:     timestamppb.New(v.now().UTC()),
 	}
 }
 

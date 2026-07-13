@@ -121,6 +121,13 @@ spec:
             - { name: VENUE_OKX_LISTEN, value: ":8092" }
             - { name: VENUE_OKX_SOURCE, value: "venue-okx" }
             - { name: OKX_MIC, value: "XOKX" }
+            # The EXCHANGE ACCOUNT this adapter's API credential belongs to. Everything it
+            # fills margins and liquidates against THIS account, whichever portfolio the
+            # order was for — so it is the collateral boundary, and the OMS binds
+            # portfolios to it by this name (OMS_VENUE_ACCOUNTS). It must match the
+            # account the mounted API key actually belongs to: nothing verifies that
+            # today, and a wrong name posts fills to the wrong account's ledger rows.
+            - { name: OKX_VENUE_ACCOUNT, value: "okx-sub-1" }
             # OKX has no separate testnet host — this IS the live exchange, and the
             # credentials decide whether the account is a demo one. Treat a change
             # to the key mount as a change to what this pod can spend.

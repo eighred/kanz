@@ -42,7 +42,14 @@ type Config struct {
 
 	// --- the exchange ---
 
-	MIC       string
+	MIC string
+	// Account is the EXCHANGE ACCOUNT the API credential above belongs to — the
+	// sub-account whose collateral every fill this adapter produces settles against.
+	// An exchange margins and LIQUIDATES per account, so this is the boundary that
+	// segregates one fund's capital from another's; the OMS binds portfolios to it.
+	// Empty ⇒ the MIC is used, i.e. "this venue is one account", which is a claim, not
+	// an absence — the adapter says so at startup.
+	Account   string
 	BaseURL   string
 	WSBase    string
 	APIKey    string
@@ -65,6 +72,7 @@ func Load() (Config, error) {
 		SPIFFESocket: os.Getenv("SPIFFE_ENDPOINT_SOCKET"),
 
 		MIC:     envOr("BINANCE_MIC", "BINANCE"),
+		Account: envOr("BINANCE_VENUE_ACCOUNT", envOr("BINANCE_MIC", "BINANCE")),
 		BaseURL: envOr("BINANCE_BASE_URL", "https://testnet.binance.vision"),
 		WSBase:  envOr("BINANCE_WS_BASE", "wss://testnet.binance.vision"),
 		// Keys come from a CSI/Vault file mount, never from code and never from a

@@ -39,16 +39,20 @@ func FromFill(portfolioID string, fill *orderpb.Fill, cashCurrency string, knowl
 		eff = knowledge
 	}
 	return &Event{
-		EntryID:      "fill:" + fill.GetFillId(),
-		PortfolioID:  portfolioID,
-		Type:         EntryTrade,
-		InstrumentID: fill.GetInstrumentId(),
-		Quantity:     signedQty,
-		Price:        price,
-		Cash:         cash,
-		CashCurrency: cashCurrency,
-		Effective:    eff,
-		Knowledge:    knowledge,
-		SourceRef:    fill.GetFillId(),
+		EntryID:     "fill:" + fill.GetFillId(),
+		PortfolioID: portfolioID,
+		// The account the fill SETTLED against — reported by the venue that executed
+		// it, not inferred from the order's intent. Where the cash actually went is
+		// the only thing a book of record may say about where the cash went.
+		VenueAccountID: fill.GetVenueAccountId(),
+		Type:           EntryTrade,
+		InstrumentID:   fill.GetInstrumentId(),
+		Quantity:       signedQty,
+		Price:          price,
+		Cash:           cash,
+		CashCurrency:   cashCurrency,
+		Effective:      eff,
+		Knowledge:      knowledge,
+		SourceRef:      fill.GetFillId(),
 	}
 }

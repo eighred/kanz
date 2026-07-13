@@ -51,6 +51,25 @@ type Config struct {
 	// Each becomes an execution.GRPCVenue. This is how a venue reaches the OMS
 	// without a line of vendor code being linked into it.
 	VenueEndpoints string
+	// VenueAccounts binds each portfolio to the EXCHANGE ACCOUNT it may execute
+	// against, per venue:
+	//
+	//	OMS_VENUE_ACCOUNTS="acme/fund-alpha@XNAS=okx-sub-1,acme/fund-beta@XLON=binance-main"
+	//
+	// An exchange liquidates per ACCOUNT, so an account is a collateral pool and two
+	// portfolios in one pool are not segregated, whatever the ledger says. An account
+	// bound to two portfolios is a startup ERROR, not a warning.
+	//
+	// Empty ⇒ nothing is bound: every portfolio trades whatever account its adapter
+	// holds, sharing one pool per venue. The OMS says so, loudly, at startup.
+	VenueAccounts string
+	// RequireVenueAccount REFUSES an order whose portfolio is bound to no account at
+	// its target venue (VENUE_ACCOUNT_UNBOUND), instead of executing it against a
+	// shared one. Deny-by-default is the correct posture, and it defaults to FALSE for
+	// the same reason OMS_REQUIRE_MANDATE does: switching it on refuses every order for
+	// every portfolio nobody has bound yet, which is a trading outage, and that must be
+	// a decision somebody makes with the list of accounts in hand.
+	RequireVenueAccount bool
 	// SPIFFESocket is the workload API socket used to mTLS the venue dials
 	// (SEC-01a). Empty ⇒ plaintext, which is a DEV-ONLY posture: the venue
 	// connection carries live orders.
@@ -72,19 +91,21 @@ func (Config) FillSubjects() []string {
 
 func Load() (Config, error) {
 	cfg := Config{
-		Listen:         envOr("OMS_LISTEN", ":8090"),
-		LogLevel:       parseLevel(envOr("OMS_LOG_LEVEL", "info")),
-		Source:         envOr("OMS_SOURCE", "oms"),
-		OTLPEndpoint:   os.Getenv("OMS_OTLP_ENDPOINT"),
-		NATSURL:        os.Getenv("OMS_NATS_URL"),
-		ConsumerGroup:  envOr("OMS_CONSUMER_GROUP", "oms"),
-		DatabaseURL:    secret("OMS_DATABASE_URL"),
-		Tenant:         envOr("OMS_TENANT", "__system__"),
-		RequireMandate: os.Getenv("OMS_REQUIRE_MANDATE") == "true",
-		SimVenueMIC:    envOr("OMS_SIM_VENUE_MIC", "XSIM"),
-		VenueEndpoints: os.Getenv("OMS_VENUE_ENDPOINTS"),
-		SPIFFESocket:   os.Getenv("SPIFFE_ENDPOINT_SOCKET"),
-		BaseCurrency:   envOr("OMS_BASE_CURRENCY", "USD"),
+		Listen:              envOr("OMS_LISTEN", ":8090"),
+		LogLevel:            parseLevel(envOr("OMS_LOG_LEVEL", "info")),
+		Source:              envOr("OMS_SOURCE", "oms"),
+		OTLPEndpoint:        os.Getenv("OMS_OTLP_ENDPOINT"),
+		NATSURL:             os.Getenv("OMS_NATS_URL"),
+		ConsumerGroup:       envOr("OMS_CONSUMER_GROUP", "oms"),
+		DatabaseURL:         secret("OMS_DATABASE_URL"),
+		Tenant:              envOr("OMS_TENANT", "__system__"),
+		RequireMandate:      os.Getenv("OMS_REQUIRE_MANDATE") == "true",
+		VenueAccounts:       os.Getenv("OMS_VENUE_ACCOUNTS"),
+		RequireVenueAccount: os.Getenv("OMS_REQUIRE_VENUE_ACCOUNT") == "true",
+		SimVenueMIC:         envOr("OMS_SIM_VENUE_MIC", "XSIM"),
+		VenueEndpoints:      os.Getenv("OMS_VENUE_ENDPOINTS"),
+		SPIFFESocket:        os.Getenv("SPIFFE_ENDPOINT_SOCKET"),
+		BaseCurrency:        envOr("OMS_BASE_CURRENCY", "USD"),
 	}
 	return cfg, nil
 }

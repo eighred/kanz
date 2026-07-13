@@ -154,6 +154,7 @@ func run(cfg config.Config) error {
 
 	conn := okx.NewOKXConnector(execution.VenueSettings{
 		MIC:          cfg.MIC,
+		Account:      cfg.Account,
 		BaseURL:      cfg.BaseURL,
 		APIKey:       cfg.APIKey,
 		APISecret:    cfg.APISecret,

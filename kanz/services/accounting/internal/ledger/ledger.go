@@ -44,10 +44,22 @@ const (
 // accounting.v1.LedgerEntry. Money and quantity are exact (*big.Rat); the journal
 // is append-only, so a correction is a new offsetting Event, never a mutation.
 type Event struct {
-	EntryID      string
-	PortfolioID  string
-	Type         EntryType
-	InstrumentID string
+	EntryID     string
+	PortfolioID string
+	// VenueAccountID is the EXCHANGE ACCOUNT whose collateral this entry moved.
+	//
+	// The ledger has always kept cash per PORTFOLIO. An exchange does not: it margins
+	// and LIQUIDATES per ACCOUNT. If two portfolios settle into one account, a
+	// per-portfolio ledger reports cash that a liquidation in the other portfolio has
+	// already consumed — books that are not imprecise but WRONG, in the direction that
+	// loses money. So an entry records the account it settled against, and the engine
+	// refuses to write it into an account the transaction did not declare.
+	//
+	// Set from the Fill (the account that actually executed). Empty for entries that
+	// touch no exchange account: a manual cash movement, a corporate action.
+	VenueAccountID string
+	Type           EntryType
+	InstrumentID   string
 
 	// Quantity is the signed position change; Price the per-unit price. Both nil
 	// for a pure cash entry.

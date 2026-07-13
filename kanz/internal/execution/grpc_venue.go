@@ -28,24 +28,36 @@ import (
 // sizes stay common.v1.Decimal end to end. No float, and no second encoding of a
 // price, can enter through this boundary — there is nowhere to put one.
 type GRPCVenue struct {
-	mic    string
-	tenant string
-	client venuepb.VenueAdapterServiceClient
+	mic     string
+	account string
+	tenant  string
+	client  venuepb.VenueAdapterServiceClient
 }
 
 // NewGRPCVenue returns a Venue backed by an out-of-process adapter on conn. The
 // caller owns the connection (and its mTLS credentials); tenant is stamped on
 // every request so the adapter can scope its credentials and anything it emits.
-func NewGRPCVenue(mic string, conn *grpc.ClientConn, tenant string) *GRPCVenue {
+func NewGRPCVenue(mic, account string, conn *grpc.ClientConn, tenant string) *GRPCVenue {
 	return &GRPCVenue{
-		mic:    mic,
-		tenant: tenant,
-		client: venuepb.NewVenueAdapterServiceClient(conn),
+		mic:     mic,
+		account: account,
+		tenant:  tenant,
+		client:  venuepb.NewVenueAdapterServiceClient(conn),
 	}
 }
 
 // MIC returns the venue code stamped on routing + fills.
 func (v *GRPCVenue) MIC() string { return v.mic }
+
+// Account is the exchange account behind this adapter's API credential, as declared
+// in OMS_VENUE_ENDPOINTS.
+//
+// THE OMS TAKES THIS ON TRUST. The adapter holds the key; it does not report which
+// account the key belongs to (venue.v1 has no such RPC), so a mis-declared endpoint
+// would post fills to the wrong account's ledger rows while the exchange debited the
+// right one. Having the adapter report its own account is the fix, and it is not
+// built yet.
+func (v *GRPCVenue) Account() string { return v.account }
 
 // Execute works st at the remote venue and returns the fills it produced.
 //

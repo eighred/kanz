@@ -96,7 +96,7 @@ func TestGRPCVenueExecuteRoundTripsFillsExactly(t *testing.T) {
 		Price:    price,
 		Venue:    "XBIN",
 	}}}
-	v := NewGRPCVenue("XBIN", dialStub(t, srv), "acme")
+	v := NewGRPCVenue("XBIN", "binance-main", dialStub(t, srv), "acme")
 
 	fills, err := v.Execute(context.Background(), testOrder())
 	if err != nil {
@@ -123,7 +123,7 @@ func TestGRPCVenueExecuteRoundTripsFillsExactly(t *testing.T) {
 func TestGRPCVenueNoFillsIsNotAnError(t *testing.T) {
 	// A resting limit order that did not trade. Turning this into an error would
 	// make the OMS treat a working order as a failed one.
-	v := NewGRPCVenue("XBIN", dialStub(t, &stubAdapter{fills: nil}), "acme")
+	v := NewGRPCVenue("XBIN", "binance-main", dialStub(t, &stubAdapter{fills: nil}), "acme")
 	fills, err := v.Execute(context.Background(), testOrder())
 	if err != nil {
 		t.Fatalf("no-fill execute returned error: %v", err)
@@ -138,7 +138,7 @@ func TestGRPCVenueExecuteErrorDoesNotInventFills(t *testing.T) {
 	// must NOT receive fills — fabricating a fill here books a trade that never
 	// happened.
 	srv := &stubAdapter{execErr: status.Error(codes.Unavailable, "exchange unreachable")}
-	v := NewGRPCVenue("XBIN", dialStub(t, srv), "acme")
+	v := NewGRPCVenue("XBIN", "binance-main", dialStub(t, srv), "acme")
 
 	fills, err := v.Execute(context.Background(), testOrder())
 	if err == nil {
@@ -151,7 +151,7 @@ func TestGRPCVenueExecuteErrorDoesNotInventFills(t *testing.T) {
 
 func TestGRPCVenueCancelConfirmsOnlyOnOK(t *testing.T) {
 	// nil error ⇒ the venue CONFIRMED the withdrawal.
-	v := NewGRPCVenue("XBIN", dialStub(t, &stubAdapter{}), "acme")
+	v := NewGRPCVenue("XBIN", "binance-main", dialStub(t, &stubAdapter{}), "acme")
 	if err := v.CancelOrder(context.Background(), testOrder()); err != nil {
 		t.Fatalf("cancel: want nil (confirmed), got %v", err)
 	}
@@ -159,7 +159,7 @@ func TestGRPCVenueCancelConfirmsOnlyOnOK(t *testing.T) {
 	// Any error — including an ambiguous timeout — leaves the close IN FLIGHT for
 	// the healing watchdog. It must never be swallowed into a nil.
 	srv := &stubAdapter{cancelErr: status.Error(codes.DeadlineExceeded, "timeout")}
-	v2 := NewGRPCVenue("XBIN", dialStub(t, srv), "acme")
+	v2 := NewGRPCVenue("XBIN", "binance-main", dialStub(t, srv), "acme")
 	err := v2.CancelOrder(context.Background(), testOrder())
 	if err == nil {
 		t.Fatal("cancel: an ambiguous timeout was reported as a confirmed cancel")
@@ -169,7 +169,7 @@ func TestGRPCVenueCancelConfirmsOnlyOnOK(t *testing.T) {
 // GRPCVenue must satisfy both interfaces, or the OMS will silently downgrade a
 // real venue cancel to a ledger-only one.
 func TestGRPCVenueImplementsVenueAndCloser(t *testing.T) {
-	var v any = NewGRPCVenue("XBIN", dialStub(t, &stubAdapter{}), "acme")
+	var v any = NewGRPCVenue("XBIN", "binance-main", dialStub(t, &stubAdapter{}), "acme")
 	if _, ok := v.(Venue); !ok {
 		t.Fatal("GRPCVenue does not implement Venue")
 	}
@@ -198,7 +198,7 @@ func TestRouterRejectsUnroutableOrderRatherThanSimulating(t *testing.T) {
 // instrument listed on both venues (BTC-USD is) OKX would query itself for a
 // Binance order id, not find it, and "heal" an order that was never its own.
 func TestGRPCVenueIsSelfHealing(t *testing.T) {
-	var v any = NewGRPCVenue("XBIN", dialStub(t, &stubAdapter{}), "acme")
+	var v any = NewGRPCVenue("XBIN", "binance-main", dialStub(t, &stubAdapter{}), "acme")
 	if _, ok := v.(SelfHealing); !ok {
 		t.Fatal("GRPCVenue is not SelfHealing — the OMS would double-track its closes and OKX could heal a Binance order")
 	}

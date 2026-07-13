@@ -36,18 +36,44 @@ func (p *Postgres) Append(ctx context.Context, e *Event) error {
 	if err != nil {
 		return fmt.Errorf("encode action %s: %w", e.EntryID, err)
 	}
-	_, err = p.pool.Exec(ctx, `
+
+	// THE WRITE DECLARES WHOSE COLLATERAL IT MOVES.
+	//
+	// An exchange liquidates per ACCOUNT, so an entry that cannot say which account it
+	// settled against is an entry the books cannot be trusted on. app.venue_account_id
+	// is that declaration, and the engine RAISES (42501) on an INSERT that omits it —
+	// so a future code path that forgets cannot silently misfile a fill into another
+	// portfolio's collateral. Empty is a legitimate declaration: an entry that touches
+	// no exchange account at all (a manual cash movement, a corporate action).
+	//
+	// It is TRANSACTION-scoped (set_config local=true), not session-scoped: this pool
+	// is shared, one connection serves many accounts in turn, and a declaration that
+	// outlived its transaction would be the next entry's silent default — which is the
+	// exact bug this guards against, reintroduced by the guard itself.
+	tx, err := p.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("append entry %s: begin: %w", e.EntryID, err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }() // no-op after a successful Commit
+
+	if _, err := tx.Exec(ctx, `SELECT set_config('app.venue_account_id', $1, true)`, e.VenueAccountID); err != nil {
+		return fmt.Errorf("append entry %s: declare venue account: %w", e.EntryID, err)
+	}
+	_, err = tx.Exec(ctx, `
 		INSERT INTO ledger_entries
-			(tenant_id, entry_id, portfolio_id, entry_type, instrument_id,
+			(tenant_id, entry_id, portfolio_id, venue_account_id, entry_type, instrument_id,
 			 quantity, price, cash, cash_currency, action,
 			 effective_time, knowledge_time, source_ref)
-		VALUES (current_setting('app.tenant_id'), $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+		VALUES (current_setting('app.tenant_id'), $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
 		ON CONFLICT (tenant_id, entry_id) DO NOTHING
-	`, e.EntryID, e.PortfolioID, int(e.Type), e.InstrumentID,
+	`, e.EntryID, e.PortfolioID, e.VenueAccountID, int(e.Type), e.InstrumentID,
 		ratText(e.Quantity), ratText(e.Price), ratText(e.Cash), e.CashCurrency, action,
 		e.Effective, e.Knowledge, e.SourceRef)
 	if err != nil {
 		return fmt.Errorf("append entry %s: %w", e.EntryID, err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("append entry %s: commit: %w", e.EntryID, err)
 	}
 	return nil
 }
