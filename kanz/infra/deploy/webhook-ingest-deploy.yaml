@@ -7,35 +7,45 @@
 # deployability check we were running compared images against MANIFESTS — a closed
 # loop over the files that happened to exist (EXEC-M10).
 #
-# THE REPLICA INVARIANT: 1, AND IT IS NOT ABOUT CAPACITY.
+# THE REPLICA PIN IS OFF (EXEC-M22): 2 REPLICAS, RollingUpdate.
 #
-#   THE REPLAY DEFENCE IS PER-POD, BECAUSE NO REDIS IS CONFIGURED. The nonce cache
-#   (strategy_id + nonce) lives in one process. Two pods are two caches, so a
-#   re-delivered TradingView alert that lands on the other pod is admitted a SECOND
-#   time and fans out a SECOND set of SubmitOrder commands. The OMS's admission gate
-#   dedups on order_id — but a fresh nonce mints a fresh order_id, so this is exactly
-#   the gap that gate cannot close.
+#   It used to be 1/Recreate, and that was a CORRECTNESS bound, not a capacity one: the
+#   replay defence was an IN-PROCESS map. Two pods were two caches, so a re-delivered
+#   TradingView alert landing on the other pod was admitted a SECOND time and fanned out a
+#   SECOND set of SubmitOrder commands. The OMS's admission gate dedups on order_id — but a
+#   fresh nonce mints a fresh order_id, so that gate could never close this gap.
 #
-#   THE CODE NO LONGER FORCES THIS (EXEC-M17). The nonce store is cross-pod the moment
-#   WEBHOOK_INGEST_REDIS_URL points at a Redis and the image is built with -tags redis;
-#   then a re-delivered alert is a replay wherever it lands, and this pin comes off. What
-#   remains is that the estate HAS no Redis yet (infra-gated), so the flag below is set
-#   and the pod says so at WARN on every boot.
+#   WHAT THE PIN COST: this is the FIRST HOP of the trading loop, the one service the
+#   internet talks to. On `Recreate`, every deploy, node drain and pod eviction took it
+#   FULLY OFFLINE, and a TradingView alert arriving in that window hit nothing — TradingView
+#   does not reliably retry, so the fund silently missed the trade. The platform could not be
+#   updated without a hole in its own entrance.
 #
-#   The pin and the flag are ONE decision, and they move together: point REDIS_URL at a
-#   Redis, delete WEBHOOK_INGEST_ALLOW_INPROCESS_NONCE, raise replicas, drop Recreate. If
-#   you raise replicas WITHOUT the first two, every extra pod is a double-trade machine —
-#   which is why the binary REFUSES TO START without one of them.
+#   WHAT LIFTED IT: the nonce store is now Redis (infra/messaging/redis.yaml), so a
+#   re-delivered alert is a replay WHEREVER IT LANDS. The image is built with `-tags redis`
+#   and WEBHOOK_INGEST_REDIS_URL_FILE points at the DSN below.
 #
-#   Recreate, not RollingUpdate: two webhook-ingest processes must never be live at
-#   once, for the reason above.
+#   THE THREE MOVE TOGETHER, ALWAYS: the Redis DSN, the `-tags redis` image, and replicas > 1.
+#   Raising replicas without the first two makes every extra pod a double-trade machine —
+#   which is why the binary REFUSES TO START if it has neither a reachable Redis nor the
+#   explicit in-process admission, and refuses to start if the DSN is set but the binary was
+#   built without the tag. The image and the manifest cannot silently disagree.
+#
+#   maxUnavailable: 0 — a surge pod passes readiness BEFORE an old one goes down, so there is
+#   no instant with nothing listening. That is the point of the whole task.
+#
+#   IF REDIS IS DOWN, the store fails CLOSED: alerts are refused with a retryable 503, not
+#   admitted with no replay defence. A refusal the sender can retry is recoverable; a double
+#   trade against a live exchange is not. Redis is a single instance today (see its manifest)
+#   — that residual is on the board, and it is a strictly better failure than the one it
+#   replaced.
 #
 #   (The halt gate USED to be a second, independent reason: it was opened by a
 #   ModeChanged FACT consumed through a CONSUMER GROUP, and a group load-balances —
 #   so an operator's resume reached one replica while the other stayed latched closed
 #   and 423'd half the signals. EXEC-M12 made that subscription a BROADCAST, so every
 #   pod now learns the current mode, and a restarted pod learns it at startup instead
-#   of coming back halted forever. That bound is lifted; the nonce cache is not.)
+#   of coming back halted forever. Both bounds are now lifted.)
 #
 # THE CONFIG IS THE SECRET. WEBHOOK_INGEST_CONFIG points at a bootstrap JSON that
 # carries the per-strategy HMAC SECRETS (the authority boundary for every signal
@@ -72,11 +82,24 @@ metadata:
   labels:
     app.kubernetes.io/part-of: kanz
 spec:
-  # ONE. See THE REPLICA INVARIANT above. This is a correctness bound, not a
-  # capacity one: raising it silently breaks the kill switch and the replay guard.
-  replicas: 1
+  # TWO, and the pin is off (EXEC-M22).
+  #
+  # This was 1/Recreate — a CORRECTNESS bound, not a capacity one: the replay defence was an
+  # in-process map, so a second pod was a second cache and a re-delivered alert traded twice.
+  # The cost was that every deploy, drain and eviction took the platform's ENTRANCE fully
+  # offline, and a TradingView alert arriving in that window hit nothing and was never
+  # retried. The fund silently missed the trade.
+  #
+  # The defence is cross-pod now (Redis, above), so the bound is gone and the entrance
+  # survives its own rollout.
+  replicas: 2
   strategy:
-    type: Recreate
+    type: RollingUpdate
+    rollingUpdate:
+      # Never fewer than 2 live: a surge pod comes up and passes readiness BEFORE an old one
+      # is taken down, so there is no instant at which nothing is listening for an alert.
+      maxUnavailable: 0
+      maxSurge: 1
   revisionHistoryLimit: 5
   selector:
     matchLabels:
@@ -110,21 +133,27 @@ spec:
             - { name: WEBHOOK_INGEST_SOURCE, value: "webhook-ingest" }
             # The nonce replay window. A signal replayed outside it is refused.
             - { name: WEBHOOK_INGEST_REPLAY_WINDOW, value: "5m" }
-            # THE REPLAY DEFENCE'S STORE (EXEC-M17). Empty ⇒ the nonce cache is an
-            # in-process map, which is correct for EXACTLY ONE REPLICA — see the replica
-            # invariant at the top of this file. Point it at a Redis (and build the image
-            # with -tags redis) and the defence becomes cross-pod.
+            # THE REPLAY DEFENCE'S STORE — now CROSS-POD (EXEC-M17 wrote it, EXEC-M22
+            # landed the Redis it was waiting for).
             #
-            # It carries a password, so in a real deployment it is a CSI/Vault file mount
-            # (WEBHOOK_INGEST_REDIS_URL_FILE), never a plaintext value here.
-            - { name: WEBHOOK_INGEST_REDIS_URL, value: "" }
-            # The EXPLICIT admission that the replay defence is per-pod. Without it — and
-            # without a Redis URL — the process REFUSES TO START, because a per-pod replay
-            # defence reachable by FORGETTING to configure Redis is indistinguishable from
-            # a correct one, and the deployment that forgot is the one an autoscaler will
-            # quietly take to N pods. Delete this the day Redis lands, and lift replicas
-            # in the same change.
-            - { name: WEBHOOK_INGEST_ALLOW_INPROCESS_NONCE, value: "true" }
+            # The nonce cache lives in Redis, so a re-delivered TradingView alert is a
+            # replay WHEREVER IT LANDS. That is the whole reason this Deployment can run
+            # more than one pod, and therefore the reason a deploy no longer takes the
+            # platform's entrance offline.
+            #
+            # The DSN carries a password, so it is a CSI/Vault file mount (SEC-01d), never
+            # a plaintext value in the pod spec.
+            #
+            # If Redis is unreachable the store FAILS CLOSED: the alert is refused with a
+            # retryable 503 rather than admitted with no replay defence. A refusal the
+            # sender can retry is recoverable; a double trade against a live exchange is not.
+            - { name: WEBHOOK_INGEST_REDIS_URL_FILE, value: /run/secrets/redis/redis-url }
+            #
+            # WEBHOOK_INGEST_ALLOW_INPROCESS_NONCE IS DELETED, and must not come back.
+            # It was the explicit admission that the replay defence was per-pod, and it is
+            # what made `replicas: 1` mandatory. Re-adding it while replicas > 1 turns every
+            # extra pod into a double-trade machine — which is why the binary refuses to
+            # start with a REDIS_URL it cannot reach, and refuses to start with neither.
             # EMPTY, ON PURPOSE — and it is NOT an open door. See
             # webhook-ingest-ingress.yaml.
             #
@@ -166,6 +195,14 @@ spec:
       volumes:
         - name: tmp
           emptyDir: {}
+        # Removing this volume does not degrade the replay defence — it stops the pod from
+        # starting, because the binary refuses to run without a nonce store it can reach.
+        - name: redis
+          csi:
+            driver: secrets-store.csi.k8s.io
+            readOnly: true
+            volumeAttributes:
+              secretProviderClass: webhook-ingest-redis
         - name: webhook-config
           csi:
             driver: secrets-store.csi.k8s.io

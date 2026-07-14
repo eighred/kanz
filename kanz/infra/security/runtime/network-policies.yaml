@@ -62,6 +62,10 @@ spec:
       ports:
         - { protocol: TCP, port: 4222 } # NATS
         - { protocol: TCP, port: 9094 } # Kafka
+        # Redis (EXEC-M22): webhook-ingest's cross-pod replay defence, and the bus dedup.
+        # It is spine infrastructure in the same namespace and the same trust class as NATS
+        # and Kafka — a store every service may reach, none of which is a tenant boundary.
+        - { protocol: TCP, port: 6379 } # Redis
 ---
 # Telemetry: allow egress to the OTLP collector (OBS-01) on 4317. Scoped to the
 # observability namespace.

@@ -1,0 +1,162 @@
+# EXEC-M22 — the replay defence that lets the platform's ENTRANCE run more than one pod.
+#
+# webhook-ingest is the HMAC webhook that receives every TradingView alert. It was pinned to
+# `replicas: 1` with `strategy: Recreate` — not for capacity, but because its nonce cache
+# lived in process memory. Two pods were two caches: a re-delivered alert landing on the
+# other pod was admitted a SECOND time and fanned out a SECOND set of orders against a live
+# exchange, and nothing downstream could catch it (a fresh claim mints a fresh signal_id, so
+# the OMS's admission gate sees two different orders, not a duplicate).
+#
+# So every deploy, node drain and pod eviction took the entrance FULLY OFFLINE, and a
+# TradingView alert arriving in that window hit nothing and was never retried — the fund
+# silently missing the trade.
+#
+# The code to fix it shipped with EXEC-M17. This is the infrastructure it was waiting for.
+#
+# # Why Redis and not Postgres
+#
+# A nonce claim is a TTL'd compare-and-set (`SET key NX PX`), which is precisely what Redis
+# is. Postgres would put a synchronous write on the hot path of EVERY alert, and
+# webhook-ingest deliberately has no database. pkg/redisadapter already exists and is shared
+# with the bus dedup — one adapter in the repository, not two.
+#
+# # Why AOF, on a cache
+#
+# Because it is not a cache. If Redis restarts empty, every nonce it was holding is gone and
+# the replay window SILENTLY REOPENS: an alert re-delivered across that restart is admitted
+# again and trades twice. `appendonly yes` + `everysec` bounds that to at most one second of
+# claims, at a cost that does not matter for a key space this small.
+#
+# `maxmemory-policy noeviction` for the same reason: a nonce evicted under memory pressure is
+# a replay defence that silently forgot, and forgetting is the one thing it must not do. The
+# keys carry their own TTL (the replay window), so the space is self-limiting; if it is not,
+# we want the write to FAIL — webhook-ingest fails closed on a store error and answers 503,
+# which is a retryable refusal rather than a double trade.
+#
+# # The residual, stated plainly
+#
+# This is ONE Redis. It removes the PLANNED outage (every deploy — the common case) and
+# converts the unplanned one into a fail-closed refusal: if Redis is unreachable, the nonce
+# store errors, webhook-ingest refuses the alert with a retryable 503, and NOTHING is double
+# traded. That is strictly better than silently losing the signal, but it is a trade, not a
+# free win. Redis HA (Sentinel) is a separate piece of infra; it is on the board, not here.
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis
+  namespace: kanz-messaging
+  labels:
+    app.kubernetes.io/part-of: kanz
+spec:
+  selector:
+    app: redis
+  ports:
+    - { name: redis, port: 6379, targetPort: 6379 }
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: redis
+  namespace: kanz-messaging
+  labels:
+    app: redis
+    app.kubernetes.io/part-of: kanz
+spec:
+  serviceName: redis
+  # ONE. See "the residual" above: this is a fail-closed dependency, not a replicated one.
+  replicas: 1
+  selector:
+    matchLabels:
+      app: redis
+  template:
+    metadata:
+      labels:
+        app: redis
+        app.kubernetes.io/part-of: kanz
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 999
+        runAsGroup: 999
+        fsGroup: 999
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: redis
+          image: redis:7-alpine
+          # The password is read from a FILE MOUNT at start (SEC-01d) and never appears as a
+          # plaintext arg in the pod spec. Redis has no --requirepass-file directive — it
+          # REJECTS one ("Bad directive") — so the value is interpolated here.
+          #
+          # AND IT REFUSES TO START WITHOUT ONE. `--requirepass "$(cat ...)"` with a missing or
+          # empty file expands to `--requirepass ""`, and Redis then starts with NO PASSWORD AT
+          # ALL — wide open on the pod network, holding the replay defence for a platform that
+          # trades real money. A secret that fails to mount must take the pod DOWN, not silently
+          # disarm the auth on it. (Found by RUNNING this command, not by reading it: the mount
+          # failed in a local rehearsal and Redis came up unauthenticated.)
+          #
+          # `exec` replaces the shell, so redis stays PID 1 and still receives SIGTERM on drain.
+          command:
+            - "sh"
+            - "-c"
+            - |
+              set -eu
+              PW="$(cat /run/secrets/redis/password)"
+              if [ -z "$PW" ]; then
+                echo "redis: password file missing or empty - refusing to start UNAUTHENTICATED" >&2
+                exit 1
+              fi
+              exec redis-server --appendonly yes --appendfsync everysec --maxmemory-policy noeviction --requirepass "$PW"
+          ports:
+            - { containerPort: 6379, name: redis }
+          livenessProbe:
+            exec:
+              # redis-cli must AUTHENTICATE, or the probe gets NOAUTH and kills a healthy pod.
+              command: ["sh", "-c", "redis-cli -a \"$(cat /run/secrets/redis/password)\" --no-auth-warning ping"]
+            initialDelaySeconds: 10
+            periodSeconds: 15
+          readinessProbe:
+            exec:
+              command: ["sh", "-c", "redis-cli -a \"$(cat /run/secrets/redis/password)\" --no-auth-warning ping"]
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - { name: data, mountPath: /data }
+            - { name: secret, mountPath: /run/secrets/redis, readOnly: true }
+      volumes:
+        - name: secret
+          csi:
+            driver: secrets-store.csi.k8s.io
+            readOnly: true
+            volumeAttributes:
+              secretProviderClass: redis-auth
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 1Gi
+---
+# A drain must not take the replay defence with it: while Redis is down, webhook-ingest fails
+# closed and every TradingView alert gets a 503. That is safe, but it is still an outage of
+# the entrance — so the node drain waits.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: redis
+  namespace: kanz-messaging
+  labels:
+    app.kubernetes.io/part-of: kanz
+spec:
+  maxUnavailable: 0
+  selector:
+    matchLabels:
+      app: redis

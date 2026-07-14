@@ -24,7 +24,21 @@ RUN go mod download
 
 COPY kanz/ ./
 # CGO off ⇒ a fully static binary, which is what distroless/static requires.
-RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w"       -o /out/webhook-ingest ./services/webhook-ingest/cmd/webhook-ingest
+# -tags redis (EXEC-M22) LINKS THE CROSS-POD NONCE STORE.
+#
+# Without it the only replay defence available to the binary is the in-process one, which is
+# correct for EXACTLY ONE REPLICA: two pods are two maps, so a re-delivered TradingView alert
+# landing on the other pod is admitted a SECOND time and fans out a SECOND set of orders
+# against a live exchange. Nothing downstream catches it — a fresh claim mints a fresh
+# signal_id, so the OMS's admission gate sees two different orders, not a duplicate.
+#
+# That pinned the platform's ENTRANCE to one pod on `Recreate`, which made every deploy,
+# drain and eviction a window in which TradingView alerts hit nothing and were never retried.
+#
+# The tag and the manifest move TOGETHER: this binary refuses to start if
+# WEBHOOK_INGEST_REDIS_URL is unset, and the untagged one refuses if it is SET — so the image
+# and the deployment cannot silently disagree about which defence is in force.
+RUN CGO_ENABLED=0 go build -tags redis -trimpath -ldflags="-s -w"       -o /out/webhook-ingest ./services/webhook-ingest/cmd/webhook-ingest
 
 # Distroless static: no shell, no libc, no package manager. :nonroot runs as uid
 # 65532, matching the pod's runAsUser.

@@ -57,6 +57,20 @@ jobs:
     # infra/deploy/oms-deploy.yaml's `replicas: 2` safe rather than a double-trade,
     # so a green pipeline that skipped it is not a green pipeline.
     services:
+      # EXEC-M22 — webhook-ingest's cross-pod nonce store. The `redis` build tag was
+      # NEVER COMPILED by this pipeline, so nonces_redis.go and pkg/redisadapter were
+      # dead code as far as CI was concerned — and they are what makes the platform's
+      # ENTRANCE safe to run on more than one pod. A real Redis runs here now, and the
+      # tagged build is compiled, vetted and tested against it.
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
       postgres:
         image: postgres:16-alpine
         env:
@@ -200,6 +214,26 @@ jobs:
           TEST_NATS_URL: nats://localhost:4222
           TEST_OMS_ON_BUS: "1"
         run: go test -race ./...
+
+      # THE `redis` BUILD (EXEC-M22). This tag is what webhook-ingest's production image is
+      # built with, and it is the ONLY thing that makes `replicas: 2` on the platform's
+      # entrance safe rather than a double-trade machine. It was never compiled here, so a
+      # break in nonces_redis.go or pkg/redisadapter would have shipped silently — and the
+      # only test that touched RedisNonces drove it against a FAKE, which cannot prove that
+      # ClaimNX is really an atomic SET NX PX.
+      #
+      # Built, vetted and tested against a REAL Redis, so the tag cannot rot back into dead
+      # code the next time someone changes the adapter.
+      - name: Build + vet + test the `redis` tag (real Redis)
+        working-directory: kanz
+        env:
+          TEST_REDIS_URL: redis://localhost:6379/0
+          TEST_POSTGRES_URL: postgres://kanzapp:kanz@localhost:5432/kanzapp?sslmode=disable
+          TEST_NATS_URL: nats://localhost:4222
+        run: |
+          go build -tags redis ./...
+          go vet -tags redis ./...
+          go test -tags redis -race ./services/webhook-ingest/... ./pkg/redisadapter/... ./pkg/bus/...
 
       - name: OMS log (on failure)
         if: failure()
