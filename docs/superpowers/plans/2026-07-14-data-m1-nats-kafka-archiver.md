@@ -1280,6 +1280,12 @@ func setup(t *testing.T, partitions int) *harness {
 }
 
 // publish puts one envelope on the NATS spine.
+//
+// THE BODY IS AN EventFrame, NOT A BARE Envelope. bus.Unframe unmarshals into
+// envelopepb.EventFrame{Envelope, Payload}, and this is a trap: EventFrame's field 1
+// and Envelope's field 1 are BOTH wire-type 2, so a bare marshaled Envelope does not
+// fail to decode — it silently yields a frame holding a garbage envelope. Marshal the
+// frame, exactly as bus.Producer does on the real publish path.
 func (h *harness) publish(t *testing.T, eventID, partitionKey string) {
 	t.Helper()
 	e := &envelopepb.Envelope{
@@ -1289,7 +1295,7 @@ func (h *harness) publish(t *testing.T, eventID, partitionKey string) {
 		PartitionKey: partitionKey,
 		EventClass:   envelopepb.EventClass_EVENT_CLASS_FACT,
 	}
-	body, err := proto.Marshal(e)
+	body, err := proto.Marshal(&envelopepb.EventFrame{Envelope: e})
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
@@ -1318,12 +1324,16 @@ func (h *harness) drain(t *testing.T, want int, timeout time.Duration) map[strin
 		if err != nil {
 			break // timeout: caller asserts on what did (or did not) arrive
 		}
-		var e envelopepb.Envelope
-		if err := proto.Unmarshal(m.Value, &e); err != nil {
-			t.Fatalf("the archived body is not a valid envelope — it was rewritten in flight: %v", err)
+		// The archived body is the EventFrame, byte-for-byte as it rode the spine.
+		var frame envelopepb.EventFrame
+		if err := proto.Unmarshal(m.Value, &frame); err != nil {
+			t.Fatalf("the archived body is not a valid EventFrame — it was rewritten in flight: %v", err)
+		}
+		if frame.GetEnvelope() == nil {
+			t.Fatal("the archived frame has no envelope — the body was rewritten in flight")
 		}
 		key := string(m.Key)
-		out[key] = append(out[key], e.GetEventId())
+		out[key] = append(out[key], frame.GetEnvelope().GetEventId())
 	}
 	return out
 }
@@ -1485,7 +1495,7 @@ func TestArchiver_UnprovisionedTenantNacksAndDoesNotCrossFile(t *testing.T) {
 		PartitionKey: "portfolio-A",
 		EventClass:   envelopepb.EventClass_EVENT_CLASS_FACT,
 	}
-	body, err := proto.Marshal(e)
+	body, err := proto.Marshal(&envelopepb.EventFrame{Envelope: e}) // frame, not bare envelope
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
