@@ -18,7 +18,7 @@ class NATSClient:
     Use as an async context manager::
 
         async with NATSClient(url="nats://localhost:4222") as client:
-            await client.publish(Message(subject="market.equity.trade", body=b"..."))
+            await client.publish(Message(subject="order.order.submit", body=b"..."))
 
     Or call :meth:`connect` and :meth:`close` directly. Re-calling
     :meth:`connect` on a connected client is a no-op.

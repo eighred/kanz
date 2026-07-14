@@ -35,19 +35,50 @@ data:
         ensure_topic "dlq.${name}" 3 delete 2592000000
       fi
     done <<'EOF'
-    market.equity              12  delete   604800000   yes
-    market.option              6   delete   604800000   yes
+    # name                     partitions  cleanup  retention_ms  dlq
+    #
+    # GROUND TRUTH, NOT THE TAXONOMY DOC'S EXAMPLES. This table used to name
+    # execution.order, market.equity, market.option, data.market_stream,
+    # observability.model, platform.model and platform.config — NOT ONE of which is
+    # published by any service. Meanwhile the entire money path (orders, fills,
+    # accounting, settlement, mandates, positions) had no topic at all. Auto-create
+    # is disabled, so those events had nowhere to land. TestEverySubjectHasAKafkaTopic
+    # now fails the build if this table and the code ever drift apart again.
+    #
+    # STATE, NOT EVENTS -> compact, keyed by partition_key. A mandate that ages out
+    # of the log is a control that comes back DISARMED after a restart (EXEC-M13);
+    # a position that ages out is a book that rebuilds wrong. Their NATS streams
+    # already know this (--max-msgs-per-subject=1, no max-age); Kafka must not be
+    # the place the lesson is forgotten.
+    compliance.mandate         3   compact  -1          no
+    risk.position              6   compact  -1          no
+
+    # MONEY AND OBLIGATIONS -> 30d + a DLQ. 30 days is what the ARCHIVER buys;
+    # permanence is the lakehouse's job (DATA-M2), not a retention setting here.
+    order.order                6   delete   2592000000  yes
+    strategy.signal            6   delete   2592000000  yes
+    accounting.balance         6   delete   2592000000  yes
+    settlement.instruction     3   delete   2592000000  yes
+    compliance.breach          3   delete   2592000000  yes
     risk.portfolio             6   delete   2592000000  yes
-    risk.portfolio.snapshot    6   compact  -1          no
-    execution.order            6   delete   2592000000  yes
-    execution.order.snapshot   6   compact  -1          no
+
+    # PLATFORM LIFECYCLE -> 30d + a DLQ. Authz/mode/compliance-config changes are
+    # the audit trail of who was allowed to do what, and when.
+    platform.authz             3   delete   2592000000  yes
+    platform.compliance        3   delete   2592000000  yes
+    platform.mode              3   delete   2592000000  yes
+
+    # INFERENCE / DATA QUALITY. inference.prediction and data.feature are published
+    # by kanz-py, not Go — see the arch test's cross-language note.
     inference.feature          6   delete   604800000   yes
     inference.prediction       6   delete   2592000000  yes
-    platform.model             3   delete   -1          no
-    platform.config            3   compact  -1          no
-    data.market_stream         3   delete   2592000000  yes
     data.feature               3   delete   2592000000  yes
-    observability.model        3   delete   604800000   no
+
+    # MARKET. Provisioned but NOT ARCHIVED by DATA-M1 (see the spec's scope): ticks
+    # are the highest-volume streams by far and are re-fetchable from the venue,
+    # unlike a fill. Archiving them is its own capacity and cost decision.
+    market.book                12  delete   604800000   yes
+    market.crypto              12  delete   604800000   yes
     EOF
 
     echo "topic provisioning complete"
