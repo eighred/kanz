@@ -52,7 +52,7 @@ function envelope(
     eventType: "x.y.z",
     schemaVersion: 1,
     envelopeVersion: 1,
-    eventClass: EventClass.EVENT_CLASS_FACT,
+    eventClass: EventClass.FACT,
     domain: "market",
     eventTime: ts,
     ingestionTime: ts,
@@ -174,7 +174,7 @@ test("Consumer → Producer chain inherits correlation/causation/trace", async (
     const ev: Event = {
       subject: "y",
       eventType: "downstream.event",
-      eventClass: EventClass.EVENT_CLASS_FACT,
+      eventClass: EventClass.FACT,
       schemaVersion: 1,
       domain: "market",
       eventTime: et,
@@ -205,7 +205,7 @@ test("Consumer explicit Event field beats async-store value", async () => {
     await p.publish({
       subject: "y",
       eventType: "downstream.event",
-      eventClass: EventClass.EVENT_CLASS_FACT,
+      eventClass: EventClass.FACT,
       schemaVersion: 1,
       domain: "market",
       eventTime: et,

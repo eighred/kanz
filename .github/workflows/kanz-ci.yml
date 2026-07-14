@@ -193,13 +193,27 @@ jobs:
         run: cat /tmp/oms.log || true
 
       - name: golangci-lint
-        uses: golangci/golangci-lint-action@v6
+        # v7 is REQUIRED for golangci-lint v2: v6 only knows the v1 module path
+        # (.../cmd/golangci-lint), and v2 lives behind .../v2/cmd/golangci-lint. That
+        # mismatch is exactly why `version: latest` on v6 silently pinned us to v1.
+        uses: golangci/golangci-lint-action@v7
         with:
           # goinstall builds golangci-lint with this job's Go 1.26 toolchain, so
-          # its parser always understands the module's language version. Bump
-          # the pinned version as the toolchain advances.
+          # its parser always understands the module's language version.
           install-mode: goinstall
-          version: latest
+          # PINNED, AND ON PURPOSE.
+          #
+          # This said `latest`, which is not a version — it is a promise that the gate
+          # can change without a commit. Worse, the action installs the v1 module path
+          # (github.com/golangci/golangci-lint/cmd/golangci-lint), and v2 lives behind a
+          # /v2 path — so `latest` silently resolved to the last v1 release FOREVER. The
+          # gate was running a legacy major nobody chose, and a developer who installed
+          # the actual latest locally got a different answer on identical code: 42 issues
+          # against CI's 1.
+          #
+          # Pinned to v2, with the rules written down in kanz/.golangci.yml. Local and CI
+          # now agree, and moving the gate is a reviewable change.
+          version: v2.12.2
           working-directory: kanz
           args: --timeout=5m
 

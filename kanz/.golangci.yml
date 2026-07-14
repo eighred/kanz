@@ -1,0 +1,57 @@
+# golangci-lint configuration.
+#
+# THIS FILE EXISTS BECAUSE THE GATE WAS NOT REPRODUCIBLE.
+#
+# CI pinned `version: latest`, and the action installs
+# `github.com/golangci/golangci-lint/cmd/golangci-lint@latest` — the V1 module path. So
+# "latest" resolved to the last v1 release, forever, while v2 lives behind a /v2 path.
+# The gate was therefore running a legacy major version that nobody chose, and a
+# developer who installed the real latest locally got a DIFFERENT ANSWER: 42 issues here
+# against 1 in CI, on identical code and identical flags.
+#
+# The gap is v1's implicit default exclusions (the EXC0001 set: unchecked Close/Flush/
+# print). v2 dropped them. Both behaviours are defensible; a gate that silently picks one
+# based on how a module path resolves is not. So the version is pinned in the workflow
+# and the exclusions are written down HERE, where they can be argued with.
+version: "2"
+
+linters:
+  # errcheck, govet, ineffassign, staticcheck, unused.
+  default: standard
+
+  settings:
+    staticcheck:
+      # CORRECTNESS, NOT STYLE.
+      #
+      # v1 split this tool into three linters — staticcheck (SA: bugs), gosimple (S1:
+      # simplifications) and stylecheck (ST: style) — and enabled only the first two by
+      # default. v2 merged all of them, plus QF (quickfix), under one name, so adopting
+      # v2 naively turns on style checks this codebase never opted into: "could apply De
+      # Morgan's law", "could use a tagged switch". Those are opinions, and a gate that
+      # fails a build over an opinion nobody chose is how gates get switched off.
+      #
+      # SA + S1 stay: they find bugs and dead simplifications. ST/QF are off until
+      # somebody decides they want them.
+      checks:
+        - all
+        - -ST*
+        - -QF*
+
+  exclusions:
+    generated: lax
+    presets:
+      # An unchecked `defer f.Close()` on a read path, or a failed `fmt.Fprintf` to a
+      # buffer, is noise: there is nothing the caller could usefully do, and burying the
+      # real findings under hundreds of them is how a gate gets ignored. This is the
+      # exclusion set v1 applied by default and v2 makes explicit.
+      - std-error-handling
+      - common-false-positives
+      - legacy
+
+issues:
+  # DO NOT TRUNCATE. The defaults (max-same-issues: 3, max-issues-per-linter: 50) hide
+  # findings, and hidden findings surface one at a time as you fix the visible ones — we
+  # fixed three nil-context bugs and CI then revealed a fourth it had been sitting on.
+  # Every round trip costs a full CI run. Show everything, once.
+  max-issues-per-linter: 0
+  max-same-issues: 0

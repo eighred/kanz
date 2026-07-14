@@ -23,7 +23,7 @@ export function validate(env: Envelope | null | undefined): void {
   if (env.envelopeVersion === 0) {
     throw new Error("envelope_version required");
   }
-  if (env.eventClass === EventClass.EVENT_CLASS_UNSPECIFIED) {
+  if (env.eventClass === EventClass.UNSPECIFIED) {
     throw new Error("event_class must not be UNSPECIFIED");
   }
   requireNonEmpty(env.domain, "domain");
@@ -37,7 +37,7 @@ export function validate(env: Envelope | null | undefined): void {
   requireNonEmpty(env.payloadSchemaRef, "payload_schema_ref");
   // FACT events: idempotency_key MUST equal event_id (event-class-rules §1).
   if (
-    env.eventClass === EventClass.EVENT_CLASS_FACT &&
+    env.eventClass === EventClass.FACT &&
     env.idempotencyKey !== env.eventId
   ) {
     throw new Error("FACT events require idempotency_key == event_id");
@@ -45,7 +45,7 @@ export function validate(env: Envelope | null | undefined): void {
   // QUALITY_FLAG_REPLAYED is set only by replay tooling (EVT-20). A live
   // publisher must reject it before the bus.
   for (const qf of env.qualityFlags) {
-    if (qf === QualityFlag.QUALITY_FLAG_REPLAYED) {
+    if (qf === QualityFlag.REPLAYED) {
       throw new Error("live publish must not set QUALITY_FLAG_REPLAYED");
     }
   }

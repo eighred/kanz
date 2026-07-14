@@ -140,7 +140,7 @@ export class Producer {
     const trace = e.traceContext || getTraceContext();
 
     let idempotency: string;
-    if (e.eventClass === EventClass.EVENT_CLASS_COMMAND) {
+    if (e.eventClass === EventClass.COMMAND) {
       if (!e.idempotencyKey) {
         throw new Error("idempotency_key required for COMMAND events");
       }

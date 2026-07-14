@@ -19,7 +19,7 @@ function validEnvelope() {
     eventType: "market.equity.trade",
     schemaVersion: 1,
     envelopeVersion: 1,
-    eventClass: EventClass.EVENT_CLASS_FACT,
+    eventClass: EventClass.FACT,
     domain: "market",
     eventTime: ts,
     ingestionTime: ts,
@@ -47,7 +47,7 @@ const missingFieldCases: Array<[string, (env: ReturnType<typeof validEnvelope>) 
   ["event_type", (e) => { e.eventType = ""; }],
   ["schema_version", (e) => { e.schemaVersion = 0; }],
   ["envelope_version", (e) => { e.envelopeVersion = 0; }],
-  ["event_class", (e) => { e.eventClass = EventClass.EVENT_CLASS_UNSPECIFIED; }],
+  ["event_class", (e) => { e.eventClass = EventClass.UNSPECIFIED; }],
   ["domain", (e) => { e.domain = ""; }],
   ["event_time", (e) => { e.eventTime = undefined; }],
   ["ingestion_time", (e) => { e.ingestionTime = undefined; }],
@@ -75,7 +75,7 @@ test("validate rejects FACT with mismatched idempotency_key", () => {
 
 test("validate rejects REPLAYED flag", () => {
   const env = validEnvelope();
-  env.qualityFlags = [QualityFlag.QUALITY_FLAG_REPLAYED];
+  env.qualityFlags = [QualityFlag.REPLAYED];
   assert.throws(() => validate(env), /REPLAYED/);
 });
 
@@ -88,7 +88,7 @@ test("validate rejects sequence without partition_key", () => {
 
 test("validate allows COMMAND with caller idempotency_key", () => {
   const env = validEnvelope();
-  env.eventClass = EventClass.EVENT_CLASS_COMMAND;
+  env.eventClass = EventClass.COMMAND;
   env.idempotencyKey = "caller-key"; // != event_id is fine for COMMAND
   validate(env);
 });

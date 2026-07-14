@@ -1,7 +1,6 @@
 /** Kafka wrapper — connection mgmt + publish/subscribe via kafkajs. */
 
-import {
-  CompressionCodecs,
+import kafkajs, {
   CompressionTypes,
   type Consumer,
   Kafka,
@@ -12,6 +11,24 @@ import {
 import SnappyCodec from "kafkajs-snappy";
 
 import type { Client, Handler, Message } from "./bus.js";
+
+// CompressionCodecs comes off the DEFAULT export, not a named one — and that is not a
+// style choice.
+//
+// This package is ESM ("type": "module"); kafkajs is CommonJS. Node's interop only
+// exposes the named exports that cjs-module-lexer can find by STATIC analysis of
+// module.exports. It finds Kafka and CompressionTypes. It does not find
+// CompressionCodecs, so importing it by name threw at load time:
+//
+//   SyntaxError: The requested module 'kafkajs' does not provide an export named
+//   'CompressionCodecs'
+//
+// That is a module-level throw, so it killed every import of this file — the entire TS
+// bus client and all three of its test suites. It had never been executed: the tests
+// could not even reach it, because the generated schema SDK failed to resolve first
+// (see the "Install the generated SDK's dependencies" step in kanz-ci.yml). One broken
+// thing was hiding another.
+const { CompressionCodecs } = kafkajs;
 
 // Snappy must be wired up before the first send/receive that touches a
 // snappy-compressed batch. Idempotent — the assignment is harmless if

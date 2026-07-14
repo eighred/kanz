@@ -1,6 +1,7 @@
 package replay
 
 import (
+	"context"
 	"strings"
 	"testing"
 	"time"
@@ -96,7 +97,9 @@ func TestResolvePartitionsExplicitDedupSort(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewReader: %v", err)
 	}
-	got, err := r.resolvePartitions(nil) // explicit path doesn't dial
+	// context.Background(), not nil: this path does not dial today, but a nil ctx is a
+	// panic waiting for the day it does.
+	got, err := r.resolvePartitions(context.Background())
 	if err != nil {
 		t.Fatalf("resolvePartitions: %v", err)
 	}

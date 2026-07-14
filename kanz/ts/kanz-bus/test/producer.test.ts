@@ -40,7 +40,7 @@ function factEvent(): Event {
   return {
     subject: "market.equity.trade",
     eventType: "market.equity.trade",
-    eventClass: EventClass.EVENT_CLASS_FACT,
+    eventClass: EventClass.FACT,
     schemaVersion: 1,
     domain: "market",
     eventTime: et,
@@ -104,7 +104,7 @@ test("producer sequence is 0 without partition_key", async () => {
 test("COMMAND requires idempotency_key", async () => {
   const { producer } = makeProducer();
   const e = factEvent();
-  e.eventClass = EventClass.EVENT_CLASS_COMMAND;
+  e.eventClass = EventClass.COMMAND;
   e.eventType = "risk.command.rebalance";
   e.idempotencyKey = "";
   await assert.rejects(producer.publish(e), /idempotency_key/);
@@ -113,7 +113,7 @@ test("COMMAND requires idempotency_key", async () => {
 test("COMMAND preserves caller idempotency_key", async () => {
   const { producer, client } = makeProducer();
   const e = factEvent();
-  e.eventClass = EventClass.EVENT_CLASS_COMMAND;
+  e.eventClass = EventClass.COMMAND;
   e.idempotencyKey = "caller-key-123";
   await producer.publish(e);
   const { envelope: env } = unframe(client.sent[0]!.body);
