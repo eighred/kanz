@@ -61,9 +61,13 @@ func TestFor_FailsClosed(t *testing.T) {
 	}{
 		{"cross-tenant leak", env("order.order.submitted", "evil", fact), "acme", "tenant"},
 		{"empty tenant on envelope", env("order.order.submitted", "", fact), "acme", "tenant"},
+		{"empty archiver tenant", env("order.order.submitted", "", fact), "", "tenant"},
 		{"two segments", env("order.submitted", "acme", fact), "acme", "event_type"},
 		{"four segments", env("a.b.c.d", "acme", fact), "acme", "event_type"},
 		{"empty event_type", env("", "acme", fact), "acme", "event_type"},
+		{"empty segments", env("..", "acme", fact), "acme", "event_type"},
+		{"empty middle segment", env("a..c", "acme", fact), "acme", "event_type"},
+		{"empty trailing segment", env("a.b.", "acme", fact), "acme", "event_type"},
 		{"reserved replay prefix", env("replay.run1.order", "acme", fact), "acme", "reserved"},
 		{"reserved dlq prefix", env("dlq.order.submitted", "acme", fact), "acme", "reserved"},
 	}
