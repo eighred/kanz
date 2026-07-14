@@ -14,6 +14,7 @@ import (
 	"google.golang.org/protobuf/encoding/protojson"
 
 	"github.com/kanz-eng/kanz/pkg/bus"
+	"github.com/kanz-eng/kanz/services/api-gateway/internal/authz"
 	"github.com/kanz-eng/kanz/services/api-gateway/internal/middleware"
 )
 
@@ -24,19 +25,29 @@ func (f *fakePub) Publish(_ context.Context, e bus.Event) error {
 	return nil
 }
 
+// testMux is the router the gateway actually serves /v1 on (SEC-M2): every route declares a
+// capability, and only a principal whose roles carry it gets through. The order routes
+// require Trade, so these tests must hold a role that grants it — as a real caller must.
+func testMux() *authz.Mux {
+	return authz.NewMux(authz.Grants{"trader": {authz.Read, authz.Trade}})
+}
+
 func authed(req *http.Request, sub, tenant string) *http.Request {
 	ctx := middleware.WithPrincipal(req.Context(), &middleware.Principal{Subject: sub, Tenant: tenant, Roles: []string{"trader"}})
 	return req.WithContext(ctx)
 }
 
+// TestSubmit_Unauthenticated_401 exercises the HANDLER'S OWN guard, by calling it directly
+// rather than through the router. Both layers refuse an anonymous caller and both are
+// deliberate: the router refuses because no principal carries the Trade capability (403 —
+// see internal/authz), and the handler refuses because it will not build an order command
+// with nobody to attribute it to (401). Defence in depth on the capital path is not
+// redundancy; it is the point.
 func TestSubmit_Unauthenticated_401(t *testing.T) {
 	h := New(&fakePub{})
 	rr := httptest.NewRecorder()
-	h.Routes(http.NewServeMux())
 	req := httptest.NewRequest(http.MethodPost, "/v1/orders", strings.NewReader(`{}`))
-	mux := http.NewServeMux()
-	h.Routes(mux)
-	mux.ServeHTTP(rr, req) // no principal on ctx
+	h.submit(rr, req) // no principal on ctx
 	if rr.Code != http.StatusUnauthorized {
 		t.Fatalf("status = %d, want 401", rr.Code)
 	}
@@ -45,7 +56,7 @@ func TestSubmit_Unauthenticated_401(t *testing.T) {
 func TestSubmit_BindsIssuerAndTenant(t *testing.T) {
 	pub := &fakePub{}
 	h := New(pub)
-	mux := http.NewServeMux()
+	mux := testMux()
 	h.Routes(mux)
 
 	// Body carries a FORGED issuer the gateway must override.
@@ -92,7 +103,7 @@ func TestSubmit_BindsIssuerAndTenant(t *testing.T) {
 func TestSubmit_GeneratesOrderID(t *testing.T) {
 	pub := &fakePub{}
 	h := New(pub)
-	mux := http.NewServeMux()
+	mux := testMux()
 	h.Routes(mux)
 	req := httptest.NewRequest(http.MethodPost, "/v1/orders",
 		strings.NewReader(`{"portfolioId":"pf1","instrumentId":"AAPL","side":"SIDE_BUY","quantity":{"coefficient":"100","exponent":0},"orderType":"ORDER_TYPE_MARKET","timeInForce":"TIME_IN_FORCE_DAY"}`))
@@ -113,7 +124,7 @@ func TestSubmit_GeneratesOrderID(t *testing.T) {
 
 func TestSubmit_WritesDisabled_503(t *testing.T) {
 	h := New(nil) // no publisher
-	mux := http.NewServeMux()
+	mux := testMux()
 	h.Routes(mux)
 	req := authed(httptest.NewRequest(http.MethodPost, "/v1/orders", strings.NewReader(`{"orderId":"o1"}`)), "alice", "acme")
 	rr := httptest.NewRecorder()

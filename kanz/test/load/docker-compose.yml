@@ -100,5 +100,9 @@ services:
       #     k6 run test/load/gateway.js
       API_GATEWAY_JWT_SECRET: "load-secret"
       API_GATEWAY_REQUIRED_ROLE: "kanz-user"
+      # SEC-M2: only this role reaches POST /v1/orders. It MUST differ from the
+      # baseline role above — the gateway refuses to start if they match, because
+      # every authenticated caller carries the baseline one.
+      API_GATEWAY_TRADE_ROLE: "kanz-trader"
     ports:
       - "8080:8080"

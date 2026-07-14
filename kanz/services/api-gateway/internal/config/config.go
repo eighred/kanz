@@ -47,6 +47,12 @@ type Config struct {
 	// refuses (SEC-M1).
 	RequiredRole string
 
+	// TradeRole is the role a Principal must carry to reach a route that MOVES CAPITAL —
+	// POST /v1/orders and POST /v1/orders/{id}/cancel (SEC-M2). REQUIRED, and it must
+	// differ from RequiredRole: every authenticated caller carries the baseline role, so
+	// making them the same would hand order entry to everyone who can read.
+	TradeRole string
+
 	// RateLimitPerSec / RateLimitBurst configure the DEFAULT per-tenant token
 	// bucket (API-01d). A non-positive rate disables rate limiting.
 	RateLimitPerSec float64
@@ -98,6 +104,7 @@ func Load() (Config, error) {
 		OIDCRolesClaim:  os.Getenv("API_GATEWAY_OIDC_ROLES_CLAIM"),
 		JWTSecret:       secret("API_GATEWAY_JWT_SECRET"),
 		RequiredRole:    os.Getenv("API_GATEWAY_REQUIRED_ROLE"),
+		TradeRole:       os.Getenv("API_GATEWAY_TRADE_ROLE"),
 		RateLimitPerSec: parseFloat(os.Getenv("API_GATEWAY_RATE_LIMIT_PER_SEC")),
 		RateLimitBurst:  parseInt(os.Getenv("API_GATEWAY_RATE_LIMIT_BURST")),
 		MaxInFlight:     parseInt(os.Getenv("API_GATEWAY_MAX_IN_FLIGHT")),
@@ -133,6 +140,23 @@ func (c Config) validateAuth() error {
 		return errors.New("api-gateway: no authorization configured — set API_GATEWAY_REQUIRED_ROLE. " +
 			"Authentication alone admits every token the issuer ever minted, for any client and any " +
 			"purpose, to every /v1 route — POST /v1/orders included")
+	}
+	// SEC-M2. One role for everything meant any principal who could READ could TRADE: the
+	// token handed to an analyst to look at exposure would submit an order to a live
+	// exchange. The gateway must be told who may move capital, and it will not guess.
+	//
+	// Leaving TradeRole empty would fail closed (nobody trades) — but that is a trading
+	// outage dressed as a control, and it would be discovered by an order that did not go
+	// out. Say who trades, out loud, in the deployment.
+	if c.TradeRole == "" {
+		return errors.New("api-gateway: no trade authority configured — set API_GATEWAY_TRADE_ROLE. " +
+			"Without it there is one role for everything, and the token you give an analyst to read " +
+			"exposure also submits orders against a live exchange (SEC-M2)")
+	}
+	if c.TradeRole == c.RequiredRole {
+		return errors.New("api-gateway: API_GATEWAY_TRADE_ROLE must differ from API_GATEWAY_REQUIRED_ROLE. " +
+			"EVERY authenticated caller carries the baseline role — making it the trade role hands " +
+			"order entry to everyone who can read, which is the exact failure SEC-M2 exists to end")
 	}
 	return nil
 }

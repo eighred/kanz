@@ -15,6 +15,7 @@ func clearAuthEnv(t *testing.T) {
 		"API_GATEWAY_JWT_SECRET",
 		"API_GATEWAY_JWT_SECRET_FILE",
 		"API_GATEWAY_REQUIRED_ROLE",
+		"API_GATEWAY_TRADE_ROLE",
 	} {
 		t.Setenv(k, "")
 	}
@@ -44,6 +45,7 @@ func TestLoadRefusesUnauthenticated(t *testing.T) {
 func TestLoadRefusesWithoutRequiredRole(t *testing.T) {
 	clearAuthEnv(t)
 	t.Setenv("API_GATEWAY_OIDC_ISSUER", "https://login.eighred.com")
+	t.Setenv("API_GATEWAY_TRADE_ROLE", "kanz-trader")
 
 	_, err := Load()
 	if err == nil {
@@ -61,12 +63,13 @@ func TestLoadAcceptsConfiguredAuth(t *testing.T) {
 		clearAuthEnv(t)
 		t.Setenv("API_GATEWAY_OIDC_ISSUER", "https://login.eighred.com")
 		t.Setenv("API_GATEWAY_REQUIRED_ROLE", "kanz-user")
+		t.Setenv("API_GATEWAY_TRADE_ROLE", "kanz-trader")
 
 		cfg, err := Load()
 		if err != nil {
 			t.Fatalf("Load() = %v; want a configured gateway to start", err)
 		}
-		if cfg.OIDCIssuer != "https://login.eighred.com" || cfg.RequiredRole != "kanz-user" {
+		if cfg.OIDCIssuer != "https://login.eighred.com" || cfg.RequiredRole != "kanz-user" || cfg.TradeRole != "kanz-trader" {
 			t.Errorf("cfg = %+v", cfg)
 		}
 	})
@@ -75,6 +78,7 @@ func TestLoadAcceptsConfiguredAuth(t *testing.T) {
 		clearAuthEnv(t)
 		t.Setenv("API_GATEWAY_JWT_SECRET", "dev-secret")
 		t.Setenv("API_GATEWAY_REQUIRED_ROLE", "kanz-user")
+		t.Setenv("API_GATEWAY_TRADE_ROLE", "kanz-trader")
 
 		cfg, err := Load()
 		if err != nil {
@@ -84,4 +88,44 @@ func TestLoadAcceptsConfiguredAuth(t *testing.T) {
 			t.Errorf("cfg = %+v", cfg)
 		}
 	})
+}
+
+// TestLoadRefusesWithoutATradeRole (SEC-M2): one role for everything meant any principal who
+// could READ could TRADE — the token handed to an analyst to look at exposure would submit an
+// order to a live exchange. The gateway must be told who may move capital, and it will not
+// guess.
+//
+// It could have failed closed instead (no trade role ⇒ nobody trades). That is a TRADING
+// OUTAGE DRESSED AS A CONTROL: it would be discovered by an order that quietly did not go
+// out. Refusing to start is discovered by whoever deployed it, immediately.
+func TestLoadRefusesWithoutATradeRole(t *testing.T) {
+	clearAuthEnv(t)
+	t.Setenv("API_GATEWAY_OIDC_ISSUER", "https://login.eighred.com")
+	t.Setenv("API_GATEWAY_REQUIRED_ROLE", "kanz-user")
+
+	_, err := Load()
+	if err == nil {
+		t.Fatal("Load() = nil error with no trade role; want refusal — one role for everything means every reader can trade")
+	}
+	if !strings.Contains(err.Error(), "API_GATEWAY_TRADE_ROLE") {
+		t.Errorf("error does not name API_GATEWAY_TRADE_ROLE (the operator reading the crash must know what to set): %v", err)
+	}
+}
+
+// TestLoadRefusesATradeRoleThatIsTheBaselineRole is SEC-M2 undone in one line of config.
+//
+// EVERY authenticated caller carries the baseline role — it is what admits them to the
+// gateway at all (SEC-M1). Setting it as the trade role hands order entry to everyone who can
+// read, which is the exact failure this task exists to end, restored by a config edit that
+// looks harmless in a diff.
+func TestLoadRefusesATradeRoleThatIsTheBaselineRole(t *testing.T) {
+	clearAuthEnv(t)
+	t.Setenv("API_GATEWAY_OIDC_ISSUER", "https://login.eighred.com")
+	t.Setenv("API_GATEWAY_REQUIRED_ROLE", "kanz-user")
+	t.Setenv("API_GATEWAY_TRADE_ROLE", "kanz-user")
+
+	_, err := Load()
+	if err == nil {
+		t.Fatal("Load() accepted the baseline role AS the trade role — every reader can now submit orders")
+	}
 }

@@ -21,6 +21,7 @@ import (
 	"net/url"
 	"strings"
 
+	"github.com/kanz-eng/kanz/services/api-gateway/internal/authz"
 	"github.com/kanz-eng/kanz/services/api-gateway/internal/middleware"
 )
 
@@ -76,13 +77,14 @@ func New(backend Backend) *Handler { return &Handler{backend: backend} }
 // Routes registers the Phase-7 read endpoints. They are 1:1 with the upstream
 // service routes, so no path rewriting is needed — the gateway path IS the
 // upstream path.
-func (h *Handler) Routes(mux *http.ServeMux) {
-	mux.HandleFunc("GET /v1/households/{id}", h.handle(ServiceWealth, false, nil))
-	mux.HandleFunc("GET /v1/securities/{id}", h.handle(ServiceDataMaster, false, nil))
-	mux.HandleFunc("GET /v1/prices/{id}", h.handle(ServiceDataMaster, false, nil))
-	mux.HandleFunc("GET /v1/exceptions", h.handle(ServiceDataMaster, false, nil))
-	// The copilot is never anonymous: require the principal at the edge.
-	mux.HandleFunc("POST /v1/ask", h.handle(ServiceCopilot, true, nil))
+func (h *Handler) Routes(mux *authz.Mux) {
+	mux.Handle(authz.Read, "GET /v1/households/{id}", h.handle(ServiceWealth, false, nil))
+	mux.Handle(authz.Read, "GET /v1/securities/{id}", h.handle(ServiceDataMaster, false, nil))
+	mux.Handle(authz.Read, "GET /v1/prices/{id}", h.handle(ServiceDataMaster, false, nil))
+	mux.Handle(authz.Read, "GET /v1/exceptions", h.handle(ServiceDataMaster, false, nil))
+	// The copilot is never anonymous: require the principal at the edge. It ASKS about the
+	// book, it does not move it — a read (SEC-M2).
+	mux.Handle(authz.Read, "POST /v1/ask", h.handle(ServiceCopilot, true, nil))
 
 	// THE TRADINGVIEW BROKER SURFACE — what a chart shows an authorized human about
 	// the orders Kanz opened for them.
@@ -105,11 +107,11 @@ func (h *Handler) Routes(mux *http.ServeMux) {
 	// would hang until 8 MiB or forever, whichever came first. A live feed needs a
 	// streaming reverse proxy, which this is deliberately not.
 	stripV1 := func(p string) string { return strings.TrimPrefix(p, "/v1") }
-	mux.HandleFunc("GET /v1/broker/accounts", h.handle(ServiceTVSync, true, stripV1))
-	mux.HandleFunc("GET /v1/broker/accounts/{id}/state", h.handle(ServiceTVSync, true, stripV1))
-	mux.HandleFunc("GET /v1/broker/accounts/{id}/positions", h.handle(ServiceTVSync, true, stripV1))
-	mux.HandleFunc("GET /v1/broker/accounts/{id}/orders", h.handle(ServiceTVSync, true, stripV1))
-	mux.HandleFunc("GET /v1/broker/accounts/{id}/executions", h.handle(ServiceTVSync, true, stripV1))
+	mux.Handle(authz.Read, "GET /v1/broker/accounts", h.handle(ServiceTVSync, true, stripV1))
+	mux.Handle(authz.Read, "GET /v1/broker/accounts/{id}/state", h.handle(ServiceTVSync, true, stripV1))
+	mux.Handle(authz.Read, "GET /v1/broker/accounts/{id}/positions", h.handle(ServiceTVSync, true, stripV1))
+	mux.Handle(authz.Read, "GET /v1/broker/accounts/{id}/orders", h.handle(ServiceTVSync, true, stripV1))
+	mux.Handle(authz.Read, "GET /v1/broker/accounts/{id}/executions", h.handle(ServiceTVSync, true, stripV1))
 }
 
 // handle builds a forwarding handler for one upstream. requirePrincipal gates

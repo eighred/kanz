@@ -14,6 +14,7 @@ import (
 
 	querypb "github.com/kanz-eng/kanz-schemas-go/query/v1"
 
+	"github.com/kanz-eng/kanz/services/api-gateway/internal/authz"
 	"github.com/kanz-eng/kanz/services/api-gateway/internal/gateway"
 	"github.com/kanz-eng/kanz/services/api-gateway/internal/middleware"
 )
@@ -29,7 +30,9 @@ const contractSecret = "contract-secret"
 // limit → idempotency, wrapping the gateway routes.
 func chainedServer(t *testing.T, fc *fakeClient, perSec float64, burst int, requiredRole string) *httptest.Server {
 	t.Helper()
-	gwMux := http.NewServeMux()
+	// The risk routes are READS (SEC-M2), and the contract's token carries requiredRole —
+	// so that role is what grants Read here, exactly as cfg.RequiredRole does in main.
+	gwMux := authz.NewMux(authz.Grants{requiredRole: {authz.Read}})
 	gateway.New(fc).Routes(gwMux)
 	chain := middleware.Chain(
 		middleware.Version(),

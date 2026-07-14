@@ -12,7 +12,8 @@
 #   DISABLED" and serve /v1/* — POST /v1/orders included — to anyone, and all that
 #   stood between that and production was a warning nobody was obliged to read.
 #   It now REFUSES TO START (exit 2) without a credential (API_GATEWAY_OIDC_ISSUER,
-#   or API_GATEWAY_JWT_SECRET for dev) and without API_GATEWAY_REQUIRED_ROLE — auth
+#   or API_GATEWAY_JWT_SECRET for dev), without API_GATEWAY_TRADE_ROLE (SEC-M2:
+#   who may move capital), and without API_GATEWAY_REQUIRED_ROLE — auth
 #   alone would admit every token the issuer ever minted to the order path. Clearing
 #   either below does not open a staging hole; it CrashLoopBackOffs, by design.
 #
@@ -99,6 +100,15 @@ spec:
             - { name: API_GATEWAY_OIDC_ISSUER, value: "https://login.eighred.com" }
             - { name: API_GATEWAY_OIDC_AUDIENCE, value: "kanz" }
             - { name: API_GATEWAY_REQUIRED_ROLE, value: "kanz-user" }
+            # WHO MAY MOVE CAPITAL (SEC-M2). REQUIRED, and it must DIFFER from the
+            # baseline role above: every authenticated caller carries that one, so
+            # setting them the same hands order entry to everyone who can read — the
+            # exact failure SEC-M2 exists to end, restored by a config edit that looks
+            # harmless in a diff. The gateway refuses to start if they match.
+            #
+            # Only a principal holding this role can reach POST /v1/orders or
+            # POST /v1/orders/{id}/cancel. Everything else on /v1 is a read.
+            - { name: API_GATEWAY_TRADE_ROLE, value: "kanz-trader" }
             # AuthZ over the mesh: the gateway's CLIENTS (risk-engine gRPC, the
             # Phase-7 HTTP upstreams) present this workload's SVID. Note the
             # NON-STANDARD env name — this service does not read SPIFFE_ENDPOINT_SOCKET.

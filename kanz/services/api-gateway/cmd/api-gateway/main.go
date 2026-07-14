@@ -27,6 +27,7 @@ import (
 	"github.com/kanz-eng/kanz/pkg/bus"
 	"github.com/kanz-eng/kanz/pkg/observability"
 	"github.com/kanz-eng/kanz/pkg/transport"
+	"github.com/kanz-eng/kanz/services/api-gateway/internal/authz"
 	"github.com/kanz-eng/kanz/services/api-gateway/internal/config"
 	"github.com/kanz-eng/kanz/services/api-gateway/internal/gateway"
 	"github.com/kanz-eng/kanz/services/api-gateway/internal/middleware"
@@ -184,7 +185,23 @@ func buildProxy(ctx context.Context, cfg config.Config, logger *slog.Logger) *pr
 // buildRouter wires the public probes/metrics/openapi (un-gated) and the /v1
 // risk + order + Phase-7 read routes behind the edge middleware chain.
 func buildRouter(cfg config.Config, h *gateway.Handler, o *orders.Handler, p *proxy.Handler, obs *observability.Provider, ready *atomic.Bool, logger *slog.Logger) http.Handler {
-	gwMux := http.NewServeMux()
+	// EVERY /v1 ROUTE DECLARES WHAT IT TAKES TO REACH IT (SEC-M2).
+	//
+	// The gateway used to wrap all of /v1 in ONE role check, so `GET /v1/portfolios/{id}/
+	// exposure` and `POST /v1/orders` were guarded identically: the token handed to an
+	// analyst to look at exposure would submit an order to a live exchange.
+	//
+	// authz.Mux takes the capability as a required parameter of registration, so a route
+	// cannot be added without deciding who may call it — the code would not compile. The
+	// grants below are the only place a role becomes an authority.
+	gwMux := authz.NewMux(authz.Grants{
+		// The baseline role admits a caller to the gateway at all (SEC-M1) and lets them
+		// READ. It must never carry Trade: every authenticated caller holds it.
+		cfg.RequiredRole: {authz.Read},
+		// The trade role MOVES CAPITAL. A trader can obviously also read — a control that
+		// made traders carry two tokens would be routed around within a week.
+		cfg.TradeRole: {authz.Read, authz.Trade},
+	})
 	h.Routes(gwMux)
 	o.Routes(gwMux)
 	p.Routes(gwMux)

@@ -15,6 +15,7 @@ package gateway
 
 import (
 	"errors"
+	"github.com/kanz-eng/kanz/services/api-gateway/internal/authz"
 	"net/http"
 	"time"
 
@@ -49,11 +50,15 @@ func New(client querypb.RiskQueryServiceClient) *Handler {
 // Routes registers the v1 REST endpoints on a mux. All paths are under /v1 so
 // the version is explicit in the URL (complementing the X-API-Version header
 // negotiation in middleware).
-func (h *Handler) Routes(mux *http.ServeMux) {
-	mux.HandleFunc("GET /v1/portfolios/{id}/exposure", h.exposure)
-	mux.HandleFunc("GET /v1/portfolios/{id}/measures", h.measures)
-	mux.HandleFunc("POST /v1/portfolios/{id}/scenario", h.scenario)
-	mux.HandleFunc("GET /v1/health", h.health)
+//
+// Every route DECLARES the capability required to reach it (SEC-M2). These are all reads:
+// a scenario is a POST, but it computes a what-if and moves no capital — the HTTP verb is
+// not the authority on effect.
+func (h *Handler) Routes(mux *authz.Mux) {
+	mux.Handle(authz.Read, "GET /v1/portfolios/{id}/exposure", h.exposure)
+	mux.Handle(authz.Read, "GET /v1/portfolios/{id}/measures", h.measures)
+	mux.Handle(authz.Read, "POST /v1/portfolios/{id}/scenario", h.scenario)
+	mux.Handle(authz.Read, "GET /v1/health", h.health)
 }
 
 func (h *Handler) exposure(w http.ResponseWriter, r *http.Request) {

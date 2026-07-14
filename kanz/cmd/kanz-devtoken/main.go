@@ -8,6 +8,7 @@
 //	export TOKEN=$(kanz-devtoken --secret dev-secret --tenant acme --role kanz-user)
 //	curl -H "Authorization: Bearer $TOKEN" localhost:8080/v1/exposure?portfolio=PF1
 //
+// A read token cannot trade (SEC-M2): POST /v1/orders needs API_GATEWAY_TRADE_ROLE.
 // The --role must be the one the gateway requires (API_GATEWAY_REQUIRED_ROLE), or
 // every route answers 403 — authenticated, and authorized for nothing.
 //
@@ -34,7 +35,7 @@ func main() {
 		secret  = flag.String("secret", os.Getenv("API_GATEWAY_JWT_SECRET"), "HS256 secret the gateway validates against (default $API_GATEWAY_JWT_SECRET)")
 		subject = flag.String("subject", "dev-user", "token subject (sub)")
 		tenant  = flag.String("tenant", "", "tenant the caller acts as — the RLS scope every query runs under (required)")
-		roles   = flag.String("role", "kanz-user", "comma-separated roles; must include API_GATEWAY_REQUIRED_ROLE or every route 403s")
+		roles   = flag.String("role", "kanz-user", "comma-separated roles; must include API_GATEWAY_REQUIRED_ROLE or every route 403s. To TRADE, add API_GATEWAY_TRADE_ROLE too (SEC-M2): --role kanz-user,kanz-trader")
 		ttl     = flag.Duration("ttl", time.Hour, "how long the token is valid")
 	)
 	flag.Parse()

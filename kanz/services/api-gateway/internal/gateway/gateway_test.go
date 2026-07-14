@@ -18,7 +18,9 @@ import (
 	domainpb "github.com/kanz-eng/kanz-schemas-go/domain/v1"
 	querypb "github.com/kanz-eng/kanz-schemas-go/query/v1"
 
+	"github.com/kanz-eng/kanz/services/api-gateway/internal/authz"
 	"github.com/kanz-eng/kanz/services/api-gateway/internal/gateway"
+	"github.com/kanz-eng/kanz/services/api-gateway/internal/middleware"
 )
 
 // fakeClient is a querypb.RiskQueryServiceClient that records the last request
@@ -51,11 +53,19 @@ func (f *fakeClient) Health(_ context.Context, _ *querypb.HealthRequest, _ ...gr
 	return f.healthResp, f.err
 }
 
+// serve mounts the risk routes on the real capability router (SEC-M2) and authenticates in
+// front of it, as middleware.Auth does in production — the router runs INSIDE the auth
+// middleware, so a principal is always on ctx by the time a route is reached. These tests are
+// about JSON↔proto transcoding; authorization itself is proven in internal/authz.
 func serve(t *testing.T, fc *fakeClient) *httptest.Server {
 	t.Helper()
-	mux := http.NewServeMux()
+	mux := authz.NewMux(authz.Grants{"analyst": {authz.Read}})
 	gateway.New(fc).Routes(mux)
-	ts := httptest.NewServer(mux)
+	authed := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		p := &middleware.Principal{Subject: "u1", Tenant: "t1", Roles: []string{"analyst"}}
+		mux.ServeHTTP(w, r.WithContext(middleware.WithPrincipal(r.Context(), p)))
+	})
+	ts := httptest.NewServer(authed)
 	t.Cleanup(ts.Close)
 	return ts
 }

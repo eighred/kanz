@@ -22,6 +22,7 @@ import (
 
 	"github.com/kanz-eng/kanz/pkg/auth"
 	"github.com/kanz-eng/kanz/pkg/bus"
+	"github.com/kanz-eng/kanz/services/api-gateway/internal/authz"
 	"github.com/kanz-eng/kanz/services/api-gateway/internal/middleware"
 )
 
@@ -54,9 +55,13 @@ func New(pub Publisher) *Handler {
 }
 
 // Routes registers the write endpoints.
-func (h *Handler) Routes(mux *http.ServeMux) {
-	mux.HandleFunc("POST /v1/orders", h.submit)
-	mux.HandleFunc("POST /v1/orders/{id}/cancel", h.cancel)
+//
+// THIS IS THE CAPITAL PATH. Every route here reaches a live exchange, so every route here
+// requires Trade (SEC-M2) — and an arch test asserts that property over WHATEVER this
+// package registers, so a route added tomorrow is covered the moment it exists.
+func (h *Handler) Routes(mux *authz.Mux) {
+	mux.Handle(authz.Trade, "POST /v1/orders", h.submit)
+	mux.Handle(authz.Trade, "POST /v1/orders/{id}/cancel", h.cancel)
 }
 
 func (h *Handler) submit(w http.ResponseWriter, r *http.Request) {

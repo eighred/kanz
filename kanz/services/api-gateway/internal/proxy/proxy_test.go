@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/kanz-eng/kanz/services/api-gateway/internal/authz"
 	"github.com/kanz-eng/kanz/services/api-gateway/internal/middleware"
 )
 
@@ -22,6 +23,13 @@ func (f *fakeBackend) Forward(_ context.Context, req Request) (Response, error) 
 	return f.resp, f.err
 }
 
+// testMux is the router the gateway actually serves /v1 on (SEC-M2). These are all READ
+// routes, so the analyst role that authed() carries is enough — and that is the fix: an
+// analyst can read the book and cannot reach POST /v1/orders.
+func testMux() *authz.Mux {
+	return authz.NewMux(authz.Grants{"analyst": {authz.Read}})
+}
+
 func authed(req *http.Request, sub, tenant string) *http.Request {
 	ctx := middleware.WithPrincipal(req.Context(), &middleware.Principal{Subject: sub, Tenant: tenant, Roles: []string{"analyst"}})
 	return req.WithContext(ctx)
@@ -29,7 +37,7 @@ func authed(req *http.Request, sub, tenant string) *http.Request {
 
 func TestRoutes_NilBackend_503(t *testing.T) {
 	h := New(nil)
-	mux := http.NewServeMux()
+	mux := testMux()
 	h.Routes(mux)
 	for _, tc := range []struct {
 		method, path string
@@ -48,14 +56,17 @@ func TestRoutes_NilBackend_503(t *testing.T) {
 	}
 }
 
+// TestAsk_Unauthenticated_401 exercises the HANDLER'S OWN requirePrincipal guard, by calling
+// it directly rather than through the router. Through the router an anonymous caller is
+// refused earlier and differently (403: no principal carries any capability — see
+// internal/authz); this asserts the handler does not forward somebody's question upstream
+// with nobody attached to it either.
 func TestAsk_Unauthenticated_401(t *testing.T) {
 	be := &fakeBackend{resp: Response{Status: 200, Body: []byte(`{"answer":"x"}`)}}
 	h := New(be)
-	mux := http.NewServeMux()
-	h.Routes(mux)
 	rr := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/v1/ask", strings.NewReader(`{"question":"q"}`))
-	mux.ServeHTTP(rr, req) // no principal on ctx
+	h.handle(ServiceCopilot, true, nil)(rr, req) // no principal on ctx
 	if rr.Code != http.StatusUnauthorized {
 		t.Fatalf("status = %d, want 401", rr.Code)
 	}
@@ -67,7 +78,7 @@ func TestAsk_Unauthenticated_401(t *testing.T) {
 func TestAsk_ForwardsPrincipalAndBody(t *testing.T) {
 	be := &fakeBackend{resp: Response{Status: 200, ContentType: "application/json", Body: []byte(`{"answer":"42"}`)}}
 	h := New(be)
-	mux := http.NewServeMux()
+	mux := testMux()
 	h.Routes(mux)
 	rr := httptest.NewRecorder()
 	req := authed(httptest.NewRequest(http.MethodPost, "/v1/ask", strings.NewReader(`{"question":"q"}`)), "u1", "t1")
@@ -92,7 +103,7 @@ func TestAsk_ForwardsPrincipalAndBody(t *testing.T) {
 func TestRead_ForwardsToDataMaster(t *testing.T) {
 	be := &fakeBackend{resp: Response{Status: 200, Body: []byte(`[]`)}}
 	h := New(be)
-	mux := http.NewServeMux()
+	mux := testMux()
 	h.Routes(mux)
 	rr := httptest.NewRecorder()
 	req := authed(httptest.NewRequest(http.MethodGet, "/v1/prices/AAPL?as_of=2026-06-30T00:00:00Z", nil), "u1", "t1")
@@ -114,7 +125,7 @@ func TestRead_ForwardsToDataMaster(t *testing.T) {
 func TestForward_BackendUnavailable_503(t *testing.T) {
 	be := &fakeBackend{err: ErrBackendUnavailable}
 	h := New(be)
-	mux := http.NewServeMux()
+	mux := testMux()
 	h.Routes(mux)
 	rr := httptest.NewRecorder()
 	req := authed(httptest.NewRequest(http.MethodGet, "/v1/households/h1", nil), "u1", "t1")
@@ -127,7 +138,7 @@ func TestForward_BackendUnavailable_503(t *testing.T) {
 func TestForward_UpstreamFault_502(t *testing.T) {
 	be := &fakeBackend{err: context.DeadlineExceeded}
 	h := New(be)
-	mux := http.NewServeMux()
+	mux := testMux()
 	h.Routes(mux)
 	rr := httptest.NewRecorder()
 	req := authed(httptest.NewRequest(http.MethodGet, "/v1/households/h1", nil), "u1", "t1")
@@ -146,7 +157,7 @@ func TestForward_UpstreamFault_502(t *testing.T) {
 // auth-disabled dev gateway must not be the thing that decides.
 func TestBroker_AnonymousIsRefused(t *testing.T) {
 	be := &fakeBackend{resp: Response{Status: 200, Body: []byte(`{"positions":[]}`)}}
-	mux := http.NewServeMux()
+	mux := testMux()
 	New(be).Routes(mux)
 
 	for _, path := range []string{
@@ -158,9 +169,13 @@ func TestBroker_AnonymousIsRefused(t *testing.T) {
 	} {
 		rr := httptest.NewRecorder()
 		mux.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, path, nil)) // no principal
-		if rr.Code != http.StatusUnauthorized {
-			t.Fatalf("%s: status = %d, want 401 — an anonymous caller reached somebody's book", path, rr.Code)
+		// TWO layers refuse this, and either is a pass. The capability router gets there
+		// first (403: nobody carries Read — SEC-M2), and behind it the handler's own
+		// requirePrincipal would refuse too (401). What must never happen is a 200.
+		if rr.Code != http.StatusUnauthorized && rr.Code != http.StatusForbidden {
+			t.Fatalf("%s: status = %d, want 401 or 403 — an anonymous caller reached somebody's book", path, rr.Code)
 		}
+		// THE ASSERTION THAT MATTERS: the request never became an upstream call.
 		if be.last.Service != "" {
 			t.Fatalf("%s: the backend was called for an ANONYMOUS request", path)
 		}
@@ -174,7 +189,7 @@ func TestBroker_AnonymousIsRefused(t *testing.T) {
 func TestBroker_ForwardsToTVSyncWithTheStrippedPathAndThePrincipal(t *testing.T) {
 	be := &fakeBackend{resp: Response{Status: 200, ContentType: "application/json",
 		Body: []byte(`{"positions":[{"instrument":"BTC-USD","qty":"1"}]}`)}}
-	mux := http.NewServeMux()
+	mux := testMux()
 	New(be).Routes(mux)
 
 	rr := httptest.NewRecorder()
