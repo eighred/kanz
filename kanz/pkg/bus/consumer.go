@@ -264,11 +264,18 @@ func (c *Consumer) publishDLQ(ctx context.Context, origSubject string, msg Messa
 // whatever state it was in — which for the halt gate means CLOSED. "I could not read
 // the brake signal" must never resolve to "keep trading".
 func (c *Consumer) SubscribeBroadcast(ctx context.Context, subject string, h EventHandler) error {
+	return c.SubscribeBroadcastReady(ctx, subject, h, nil)
+}
+
+// SubscribeBroadcastReady is SubscribeBroadcast plus an ARMED signal — see
+// BroadcastSubscriber. ready fires once the state that existed at subscribe time has been
+// folded, so a caller can keep /readyz closed until it knows the book it is about to act on.
+func (c *Consumer) SubscribeBroadcastReady(ctx context.Context, subject string, h EventHandler, ready func()) error {
 	bs, ok := c.subscriber.(BroadcastSubscriber)
 	if !ok {
 		return fmt.Errorf("bus: this transport cannot broadcast %q — a control signal delivered to one pod out of N is not a control signal", subject)
 	}
-	return bs.SubscribeBroadcast(ctx, subject, func(ctx context.Context, msg Message) error {
+	return bs.SubscribeBroadcastReady(ctx, subject, func(ctx context.Context, msg Message) error {
 		env, payload, err := Unframe(msg.Body)
 		if err != nil {
 			return fmt.Errorf("unframe %s: %w", subject, err)
@@ -288,5 +295,5 @@ func (c *Consumer) SubscribeBroadcast(ctx context.Context, subject string, h Eve
 			ctx = observability.ContextWithTraceparent(ctx, env.TraceContext)
 		}
 		return h(ctx, env, payload)
-	})
+	}, ready)
 }

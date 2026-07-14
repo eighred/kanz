@@ -119,6 +119,14 @@ func (s *Server) writePipelineError(w http.ResponseWriter, err error) {
 		// signal on the floor over a Redis blink. 503 says: try again.
 		s.logger.Error("replay defence unavailable — refusing the alert rather than risking a double trade", "err", err)
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "replay defence unavailable; retry"})
+	case errors.Is(err, ingest.ErrPositionsNotArmed):
+		// We do not yet know what the fund holds, so we cannot size a CLOSE (EXEC-M19b).
+		// Readiness gates on the book being armed, so this should be unreachable in a healthy
+		// pod — but if the replay is lost mid-flight, REFUSE. The alternative is treating "I
+		// have not learned the book" as "the fund is flat", which sizes every flatten leg at
+		// zero and answers 202 Accepted for a close that never sent an order.
+		s.logger.Error("position book not armed — refusing the alert rather than sizing a close against an unknown book", "err", err)
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "position book not ready; retry"})
 	case errors.Is(err, ingest.ErrHalted):
 		writeJSON(w, http.StatusLocked, map[string]string{"error": "trading halted"})
 	case errors.Is(err, ingest.ErrBadRequest):

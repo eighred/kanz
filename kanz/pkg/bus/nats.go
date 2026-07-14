@@ -242,6 +242,13 @@ func durableName(group, subject string) string {
 // HALTED requires intervention to leave is preserved, because a replay of the halt
 // FACT is not an intervention, it is the truth.
 func (c *NATSClient) SubscribeBroadcast(ctx context.Context, subject string, h Handler) error {
+	return c.SubscribeBroadcastReady(ctx, subject, h, nil)
+}
+
+// SubscribeBroadcastReady is SubscribeBroadcast with an ARMED signal: ready fires once the
+// backlog that existed at subscribe time has been delivered and acked, so a caller can hold
+// /readyz closed until it actually knows the state it is about to act on.
+func (c *NATSClient) SubscribeBroadcastReady(ctx context.Context, subject string, h Handler, ready func()) error {
 	stream, err := c.js.StreamNameBySubject(ctx, subject)
 	if err != nil {
 		return fmt.Errorf("nats: stream for subject %q: %w", subject, err)
@@ -266,6 +273,33 @@ func (c *NATSClient) SubscribeBroadcast(ctx context.Context, subject string, h H
 	if err != nil {
 		return fmt.Errorf("nats: start broadcast consume: %w", err)
 	}
+
+	// ARMED = the replay that existed when we subscribed has been delivered AND acked.
+	// NumPending alone is not enough: the server can have nothing left to send while the
+	// handler is still folding what it already sent, and a caller that opened /readyz then
+	// would act on a half-learned book.
+	if ready != nil {
+		go func() {
+			t := time.NewTicker(50 * time.Millisecond)
+			defer t.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-t.C:
+					info, err := cons.Info(ctx)
+					if err != nil {
+						continue // transient; keep waiting rather than declare a book we do not have
+					}
+					if info.NumPending == 0 && info.NumAckPending == 0 {
+						ready()
+						return
+					}
+				}
+			}
+		}()
+	}
+
 	<-ctx.Done()
 	cc.Stop()
 	return nil

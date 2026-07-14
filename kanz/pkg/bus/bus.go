@@ -73,6 +73,20 @@ type Subscriber interface {
 // delivered and the gate stays closed.
 type BroadcastSubscriber interface {
 	SubscribeBroadcast(ctx context.Context, subject string, h Handler) error
+	// SubscribeBroadcastReady is SubscribeBroadcast, plus a signal for WHEN THE INITIAL
+	// REPLAY HAS DRAINED — the moment the subscriber has seen the current state of every
+	// entity on the subject and not merely started listening for the next change.
+	//
+	// A consumer that ARMS ITSELF from a compacted stream is empty until the replay
+	// lands, and an empty state is not a neutral state: webhook-ingest's CLOSE path sizes
+	// each leg from the position it believes the fund holds, so a signal arriving before
+	// the replay finishes would find NO POSITION, emit ZERO orders, and answer 202
+	// Accepted — the very failure the arming exists to end, just in a narrower window.
+	//
+	// So the arming has to be observable, and readiness has to wait for it: a pod that
+	// has not learned the book must not be handed traffic. ready is called ONCE, after
+	// the backlog that existed at subscribe time has been delivered AND acked.
+	SubscribeBroadcastReady(ctx context.Context, subject string, h Handler, ready func()) error
 }
 
 // Client is a transport that does both. NATSClient and KafkaClient each

@@ -40,6 +40,17 @@ func (b *brokenPublisher) Publish(_ context.Context, e bus.Event) error {
 	return nil
 }
 
+// submitted returns the SubmitOrder commands published.
+func (b *brokenPublisher) submitted() []*orderpb.SubmitOrder {
+	var out []*orderpb.SubmitOrder
+	for _, e := range b.events {
+		if c, ok := e.Payload.(*orderpb.SubmitOrder); ok {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
 func (b *brokenPublisher) commands() int {
 	n := 0
 	for _, e := range b.events {
@@ -63,6 +74,31 @@ func pipelineOver(t *testing.T, nonces NonceStore, pub translate.Publisher) *Pip
 		Equity:    StaticEquity{"fund-alpha": big.NewRat(1_000_000, 1)},
 		Positions: StaticPositions{},
 		Alloc:     StaticAllocation{"fund-alpha": {{Venue: "BINANCE", Weight: big.NewRat(1, 1)}}},
+		Publisher: pub,
+		Gate:      translate.OpenGate(nil),
+	})
+	if err != nil {
+		t.Fatalf("NewPipeline: %v", err)
+	}
+	return p
+}
+
+// pipelineWithPositions builds a two-venue pipeline over a REAL position source — the
+// binding production was missing (EXEC-M19b).
+func pipelineWithPositions(t *testing.T, positions translate.PositionSource, pub translate.Publisher) *Pipeline {
+	t.Helper()
+	auth := NewAuthenticator(StaticSecrets{"momentum": testSecret}, nil, time.Minute, time.Now,
+		WithNonceStore(NewMemoryNonces(time.Minute, 1000)))
+	p, err := NewPipeline(Options{
+		Auth:      auth,
+		Symbols:   StaticSymbols{"BINANCE:BTCUSDT": "BTC-USD"},
+		Prices:    StaticPrices{"BTC-USD": big.NewRat(50000, 1)},
+		Equity:    StaticEquity{"fund-alpha": big.NewRat(1_000_000, 1)},
+		Positions: positions,
+		Alloc: StaticAllocation{"fund-alpha": {
+			{Venue: "BINANCE", Weight: big.NewRat(6, 10)},
+			{Venue: "OKX", Weight: big.NewRat(4, 10)},
+		}},
 		Publisher: pub,
 		Gate:      translate.OpenGate(nil),
 	})

@@ -19,6 +19,7 @@ import (
 
 	lifecyclepb "github.com/kanz-eng/kanz-schemas-go/lifecycle/v1"
 
+	"github.com/kanz-eng/kanz/internal/platform/subject"
 	"github.com/kanz-eng/kanz/internal/signal/translate"
 	"github.com/kanz-eng/kanz/pkg/bus"
 	"github.com/kanz-eng/kanz/pkg/observability"
@@ -136,6 +137,21 @@ func main() {
 		defer func() { _ = closeNonces.Close() }()
 	}
 
+	// THE FUND'S BOOK — the binding that was missing (EXEC-M19b).
+	//
+	// This wired `ingest.StaticPositions{}` — an EMPTY MAP — with the comment "M1 sim: flat
+	// by default; M3+ binds the OMS projection". M3+ never bound it. So translate's CLOSE
+	// path sized every flatten leg from a position of ZERO, the fan-out skipped every leg,
+	// and a `close` alert produced NO ORDERS AT ALL while the webhook answered 202 Accepted.
+	// A strategy that opened a position and later told Kanz to close it was silently ignored,
+	// and the position stayed open. The loop could OPEN a trade and could not CLOSE one.
+	//
+	// The cache folds the OMS's per-venue position FACTs (EXEC-M19a) off the compacted
+	// POSITION stream, so it is correct after a restart and on every replica — and it REFUSES
+	// to answer until the replay has landed, because "I have not learned the book" must never
+	// be rendered as "the fund is flat", which is precisely how a CLOSE gets swallowed.
+	positions := ingest.NewPositionCache()
+
 	auth := ingest.NewAuthenticator(cfg.Secrets, cfg.Allowlist, cfg.ReplayWindow, time.Now,
 		ingest.WithNonceStore(nonces))
 	pipeline, err := ingest.NewPipeline(ingest.Options{
@@ -143,7 +159,7 @@ func main() {
 		Symbols:      cfg.Symbols,
 		Prices:       cfg.Prices,
 		Equity:       cfg.Equity,
-		Positions:    ingest.StaticPositions{}, // M1 sim: flat by default; M3+ binds the OMS projection
+		Positions:    positions, // the fund's REAL per-venue book (EXEC-M19b)
 		Alloc:        cfg.Alloc,
 		Publisher:    producer,
 		Gate:         gate,
@@ -155,6 +171,17 @@ func main() {
 		logger.Error("pipeline init failed", "err", err)
 		os.Exit(2)
 	}
+
+	// Arm the book from the compacted stream, and DO NOT REPORT READY UNTIL IT HAS. A pod
+	// that does not know what the fund holds must not be handed a signal that closes it: the
+	// kubelet keeps it out of its Service until the replay has drained.
+	go func() {
+		err := consumer.SubscribeBroadcastReady(ctx, subject.VenuePositionAll, positions.Handle, positions.Arm)
+		if err != nil && ctx.Err() == nil {
+			logger.Error("position book subscription failed — a CLOSE signal cannot be sized without it", "err", err)
+			stop()
+		}
+	}()
 
 	readiness := &server.Readiness{}
 	httpSrv := &http.Server{
@@ -169,7 +196,22 @@ func main() {
 			stop()
 		}
 	}()
-	readiness.Set(true)
+	// Ready = the book is learned. Until then the pod stays out of its Service, so a CLOSE
+	// cannot arrive to find an empty cache and be answered with 202 and no orders.
+waitForBook:
+	for !positions.Armed() {
+		select {
+		case <-ctx.Done():
+			// Shut down before the replay landed. Fall through to graceful shutdown WITHOUT
+			// reporting ready: this pod never learned what the fund holds.
+			break waitForBook
+		case <-time.After(50 * time.Millisecond):
+		}
+	}
+	if positions.Armed() {
+		logger.Info("position book armed — the fund's holdings are known", "subject", subject.VenuePositionAll)
+		readiness.Set(true)
+	}
 
 	<-ctx.Done()
 	readiness.Set(false)
