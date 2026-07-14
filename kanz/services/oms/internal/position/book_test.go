@@ -1,6 +1,7 @@
 package position
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -27,8 +28,8 @@ func fill(side orderpb.Side, qty, price *commonpb.Decimal) *orderpb.Fill {
 
 func TestBook_BuyThenReduce_RealizesPnL(t *testing.T) {
 	b := NewBook("USD")
-	b.Apply("pf1", fill(orderpb.Side_SIDE_BUY, d(100, 0), d(10, 0)), time.Unix(0, 0))
-	st := b.Apply("pf1", fill(orderpb.Side_SIDE_SELL, d(40, 0), d(12, 0)), time.Unix(0, 0))
+	_, _ = b.Apply(context.Background(), "pf1", fill(orderpb.Side_SIDE_BUY, d(100, 0), d(10, 0)), time.Unix(0, 0))
+	st, _ := b.Apply(context.Background(), "pf1", fill(orderpb.Side_SIDE_SELL, d(40, 0), d(12, 0)), time.Unix(0, 0))
 
 	if dec.Cmp(st.GetQuantity(), d(60, 0)) != 0 {
 		t.Fatalf("qty = %v, want 60", st.GetQuantity())
@@ -51,8 +52,8 @@ func TestBook_BuyThenReduce_RealizesPnL(t *testing.T) {
 
 func TestBook_CrossesZero_OpensNewLot(t *testing.T) {
 	b := NewBook("USD")
-	b.Apply("pf1", fill(orderpb.Side_SIDE_BUY, d(100, 0), d(10, 0)), time.Unix(0, 0))
-	st := b.Apply("pf1", fill(orderpb.Side_SIDE_SELL, d(150, 0), d(12, 0)), time.Unix(0, 0))
+	_, _ = b.Apply(context.Background(), "pf1", fill(orderpb.Side_SIDE_BUY, d(100, 0), d(10, 0)), time.Unix(0, 0))
+	st, _ := b.Apply(context.Background(), "pf1", fill(orderpb.Side_SIDE_SELL, d(150, 0), d(12, 0)), time.Unix(0, 0))
 
 	// closed 100 long @ +2 ⇒ realized 200; remaining 50 short opened at 12.
 	if dec.Cmp(st.GetQuantity(), d(-50, 0)) != 0 {

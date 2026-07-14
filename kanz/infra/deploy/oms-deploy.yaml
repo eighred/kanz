@@ -26,6 +26,24 @@
 #   this service — it double-trades. If you must run without a database, set
 #   replicas: 1 in the same edit.
 #
+#   AND THE SAME DSN CARRIES THE POSITION BOOK (EXEC-M18). The paragraph above was
+#   true and INCOMPLETE: the durable order store made the ADMISSION GATE safe across
+#   pods, and left the position book an in-process map. The projector consumes fills
+#   through a durable consumer GROUP, which LOAD-BALANCES — so each of these two pods
+#   folded only the fills it happened to receive, and then PUBLISHED the result as the
+#   fund's ABSOLUTE position on risk.position.changed.
+#
+#   That is worse than a control that fails, because a projection does not merely fail
+#   to act — it SPEAKS, and the risk engine, the compliance monitor, tv-sync and the
+#   OMS's OWN PRE-TRADE GATE all believed it. A concentration limit evaluated against
+#   half a book does not refuse loudly; it quietly says yes. On restart the map came
+#   back EMPTY, so the next 0.1 BTC fill published `position = 0.1` while the fund
+#   held 5.1.
+#
+#   Both stores now come from ONE pool and this ONE DSN, and they degrade together:
+#   no OMS_DATABASE_URL ⇒ both in-process ⇒ EXACTLY ONE REPLICA, and the OMS says so
+#   at WARN on every boot.
+#
 # Deliberately NO HorizontalPodAutoscaler and NO KEDA ScaledObject (contrast
 # phase7-scaling.yaml, which scales the read services on CPU, and
 # risk-engine-scaledobject.yaml, which scales on bus backpressure). The static

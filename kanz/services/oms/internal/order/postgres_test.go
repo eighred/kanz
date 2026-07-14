@@ -34,6 +34,9 @@ func newPool(t *testing.T) *pgxpool.Pool {
 		t.Fatalf("parse config: %v", err)
 	}
 	cfg.AfterConnect = func(ctx context.Context, conn *pgx.Conn) error {
+		if _, err := conn.Exec(ctx, "SET search_path TO "+testSchema); err != nil {
+			return err
+		}
 		_, err := conn.Exec(ctx, "SELECT set_config('app.tenant_id', $1, false)", "__system__")
 		return err
 	}
@@ -46,11 +49,32 @@ func newPool(t *testing.T) *pgxpool.Pool {
 	return pool
 }
 
+// testSchema isolates this suite's tables in their OWN Postgres schema.
+//
+// `go test ./...` runs packages IN PARALLEL against ONE database, and migration 0002
+// rewrites the RLS policy on EVERY table in current_schema(). Two suites replaying their
+// migrations into `public` at the same time therefore fight over each other's tables
+// ("tuple concurrently updated", "relation ... does not exist") — a race that grows with
+// every table any service adds. A schema per suite ends it: nothing this service's
+// migrations create is visible to anybody else's DO-block.
+const testSchema = "oms_order_test"
+
 func applySchema(t *testing.T, pool *pgxpool.Pool) {
 	t.Helper()
 	ctx := context.Background()
-	if _, err := pool.Exec(ctx, `DROP TABLE IF EXISTS orders CASCADE`); err != nil {
-		t.Fatalf("drop: %v", err)
+
+	// The pool's connections already point at the schema, so it must exist before they
+	// are used — recreate it on a connection of our own.
+	admin, err := pgxpool.New(ctx, os.Getenv("TEST_POSTGRES_URL"))
+	if err != nil {
+		t.Fatalf("admin connect: %v", err)
+	}
+	defer admin.Close()
+	if _, err := admin.Exec(ctx, `DROP SCHEMA IF EXISTS `+testSchema+` CASCADE`); err != nil {
+		t.Fatalf("drop schema: %v", err)
+	}
+	if _, err := admin.Exec(ctx, `CREATE SCHEMA `+testSchema); err != nil {
+		t.Fatalf("create schema: %v", err)
 	}
 	files, err := filepath.Glob(filepath.Join("../../migrations", "*.sql"))
 	if err != nil || len(files) == 0 {

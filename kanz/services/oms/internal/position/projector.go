@@ -22,14 +22,18 @@ type Bus interface {
 // it folds each fill into the Book and publishes the resulting PositionState on
 // positionEventChanged (the risk engine's existing input subject).
 type Projector struct {
-	book *Book
+	book Store
 	bus  Bus
 }
 
-// NewProjector wires a Book to a Bus.
-func NewProjector(book *Book, b Bus) (*Projector, error) {
+// NewProjector wires a position Store to a Bus.
+//
+// It takes the STORE, not the in-memory Book: what this publishes is the fund's ABSOLUTE
+// position, and with `replicas: 2` a per-pod map publishes a fraction of it as though it
+// were the whole (EXEC-M18).
+func NewProjector(book Store, b Bus) (*Projector, error) {
 	if book == nil || b == nil {
-		return nil, errors.New("position: book and bus required")
+		return nil, errors.New("position: store and bus required")
 	}
 	return &Projector{book: book, bus: b}, nil
 }
@@ -43,7 +47,13 @@ func (p *Projector) Handle(ctx context.Context, env *envelopepb.Envelope, payloa
 	if fill == nil {
 		return nil // not a fill-bearing event; ack
 	}
-	st := p.book.Apply(portfolioID, fill, fill.GetExecutedAt().AsTime())
+	st, err := p.book.Apply(ctx, portfolioID, fill, fill.GetExecutedAt().AsTime())
+	if err != nil {
+		// Never publish a position we could not fold. A PositionState built from a failed
+		// write is a number the risk engine, the compliance monitor and the pre-trade gate
+		// would all believe. Returning the error nacks the fill, so the bus redelivers it.
+		return err
+	}
 	return p.publish(ctx, st)
 }
 

@@ -113,8 +113,16 @@ func runConsumers(ctx context.Context, cfg config.Config, readiness *server.Read
 		return err
 	}
 
-	// OMS-01e: fill→position projector over a shared book.
-	book := position.NewBook(cfg.BaseCurrency)
+	// The two durable stores, over ONE pool: the order store (the admission gate,
+	// EXEC-M7c) and the POSITION BOOK (EXEC-M18). Both are safety choices, not
+	// persistence ones, and both stop being safe the moment there is a second pod.
+	store, book, closeStores, err := openStores(ctx, cfg, logger)
+	if err != nil {
+		return err
+	}
+	defer closeStores()
+
+	// OMS-01e: fill→position projector over the shared book.
 	projector, err := position.NewProjector(book, producer)
 	if err != nil {
 		return err
@@ -214,11 +222,6 @@ func runConsumers(ctx context.Context, cfg config.Config, readiness *server.Read
 	// Venue set is composition-root-selected: SimVenue by default; Binance Spot +
 	// its user-data/reconciliation/ticker workers under -tags binance
 	// (configuredVenues is build-tag split, wired to the shared order store).
-	store, closeStore, err := openStore(ctx, cfg)
-	if err != nil {
-		return err
-	}
-	defer closeStore()
 	venues, closeVenues := configuredVenues(ctx, cfg, store, producer, unverifiedAccounts, logger)
 	defer closeVenues()
 	router := execution.NewRouter(venues...)
@@ -308,19 +311,36 @@ func runConsumers(ctx context.Context, cfg config.Config, readiness *server.Read
 // process boundary. Two replicas over two maps both admit the same order_id and
 // the fund trades twice. Postgres enforces it with a PRIMARY KEY, which holds
 // across replicas — so a multi-replica OMS requires OMS_DATABASE_URL.
-func openStore(ctx context.Context, cfg config.Config) (order.Store, func(), error) {
+// THE POSITION BOOK IS THE SAME KIND OF SAFETY CHOICE (EXEC-M18).
+//
+// position.Book is an in-process map. The projector consumes fills through a durable
+// consumer GROUP, which LOAD-BALANCES, so with two pods each folds only the fills it
+// received — and then PUBLISHES the result as the fund's ABSOLUTE position. Worse than a
+// control that fails: a projection does not merely fail to act, it SPEAKS, and the risk
+// engine, the compliance monitor, tv-sync AND THIS OMS'S OWN PRE-TRADE GATE all believe
+// it. A concentration limit evaluated against half a book does not refuse loudly; it
+// quietly says yes. And a restarted pod comes back flat, so its next 0.1 BTC fill
+// publishes `position = 0.1` while the fund holds 5.1.
+//
+// So both stores come from ONE pool and one DSN, and both degrade together: no
+// OMS_DATABASE_URL ⇒ in-memory ⇒ EXACTLY ONE REPLICA, said out loud.
+func openStores(ctx context.Context, cfg config.Config, logger *slog.Logger) (order.Store, position.Store, func(), error) {
 	if cfg.DatabaseURL == "" {
-		return order.NewMemoryStore(), func() {}, nil
+		logger.Warn("NO OMS_DATABASE_URL — the order store AND the position book are IN-PROCESS. This deployment "+
+			"MUST run exactly ONE replica: two pods would each admit the same order (double trade) and each publish "+
+			"an ABSOLUTE position folded from only the fills it happened to receive",
+			"fix", "set OMS_DATABASE_URL; the shipped manifest runs replicas: 2")
+		return order.NewMemoryStore(), position.NewBook(cfg.BaseCurrency), func() {}, nil
 	}
 	// MT-01d: every connection carries this deployment's tenant as the
-	// `app.tenant_id` GUC, so Postgres RLS scopes all order reads/writes to it
-	// (the authenticated-session-GUC pattern). A non-superuser DB role is
-	// required for FORCE RLS to apply.
+	// `app.tenant_id` GUC, so Postgres RLS scopes all reads/writes to it (the
+	// authenticated-session-GUC pattern). A non-superuser DB role is required for
+	// FORCE RLS to apply.
 	pool, err := pg.NewTenantPool(ctx, cfg.DatabaseURL, cfg.Tenant)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
-	return order.NewPostgres(pool), pool.Close, nil
+	return order.NewPostgres(pool), position.NewPostgres(pool, cfg.BaseCurrency), pool.Close, nil
 }
 
 // version is the service version stamped on telemetry. Hardcoded until the build

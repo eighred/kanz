@@ -13,6 +13,7 @@
 package position
 
 import (
+	"context"
 	"math/big"
 	"sync"
 	"time"
@@ -55,7 +56,13 @@ func NewBook(baseCcy string) *Book {
 // opposite position; a fill that crosses through zero opens a new lot at the
 // fill price. market_value and unrealized_pnl are marked at the fill price (the
 // latest trade), until a market-data mark is wired.
-func (b *Book) Apply(portfolioID string, fill *orderpb.Fill, asOf time.Time) *domainpb.PositionState {
+//
+// IN-PROCESS, AND THEREFORE CORRECT FOR EXACTLY ONE REPLICA. It cannot fail and it
+// cannot be shared: two pods are two maps, each folding the fills its consumer group
+// handed it, each publishing an ABSOLUTE position built from a fraction of the trades
+// (EXEC-M18). Use Postgres in any deployment that runs more than one pod — which the
+// shipped one does. The ctx and error exist to satisfy Store; neither is used here.
+func (b *Book) Apply(_ context.Context, portfolioID string, fill *orderpb.Fill, asOf time.Time) (*domainpb.PositionState, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
@@ -72,7 +79,7 @@ func (b *Book) Apply(portfolioID string, fill *orderpb.Fill, asOf time.Time) *do
 		signed = new(big.Rat).Neg(signed)
 	}
 
-	b.fold(l, signed, price)
+	foldLot(l, signed, price)
 
 	// Mark unrealized at the fill price: (price - avg) * qty.
 	unreal := new(big.Rat).Mul(new(big.Rat).Sub(price, l.avg), l.qty)
@@ -87,12 +94,17 @@ func (b *Book) Apply(portfolioID string, fill *orderpb.Fill, asOf time.Time) *do
 		RealizedPnl:   b.money(l.realized),
 		UnrealizedPnl: b.money(unreal),
 		AsOf:          timestamppb.New(asOf.UTC()),
-	}
+	}, nil
 }
 
-// fold mutates the lot by a signed fill quantity at price, applying
+// foldLot mutates the lot by a signed fill quantity at price, applying
 // weighted-average-cost accounting with realized P&L.
-func (b *Book) fold(l *lot, signed, price *big.Rat) {
+//
+// It is a package-level function, not a Book method, because the DURABLE book folds with
+// exactly the same arithmetic (EXEC-M18) — the only thing that changed is where the lot
+// lives between fills. Two implementations of weighted-average cost would be two chances
+// to disagree about a fund's basis, so there is one.
+func foldLot(l *lot, signed, price *big.Rat) {
 	cur := l.qty.Sign()
 	add := signed.Sign()
 
@@ -146,7 +158,7 @@ func (b *Book) money(r *big.Rat) *commonpb.Money {
 // Positions are marked at average cost (no market mark is wired here); NAV is
 // the net market value of the holdings, a funded-book proxy until a cash/equity
 // source lands. Empty portfolio ⇒ a snapshot with no positions.
-func (b *Book) Snapshot(portfolioID string, asOf time.Time) *domainpb.PortfolioSnapshot {
+func (b *Book) Snapshot(_ context.Context, portfolioID string, asOf time.Time) (*domainpb.PortfolioSnapshot, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	ts := timestamppb.New(asOf.UTC())
@@ -177,5 +189,5 @@ func (b *Book) Snapshot(portfolioID string, asOf time.Time) *domainpb.PortfolioS
 			AsOf:             ts,
 		},
 		Positions: positions,
-	}
+	}, nil
 }
