@@ -1599,6 +1599,8 @@ cc.Stop()
 
 **Blast radius, stated plainly.** This changes shutdown semantics for every consumer in the fleet. That is the point (they all have the bug), but it means the bus suite passing is a hard gate, not a formality.
 
+**OUTCOME (2026-07-15).** The Drain fix landed and is proven (regression test 14/20 fail against `Stop()`, 40/40 pass against `Drain()`). But restoring the strict-order assertion in test 2 revealed a SECOND, independent cause: across a *sustained outage*, repeated NAKs of the same messages are re-scheduled by JetStream's redelivery in an order that does not preserve the original — server-side, not fixable from the client. **Decision (lead, 2026-07-15): the archiver's contract is DURABILITY + LOCALITY, not partition-position order.** Same key ⇒ same partition, so a consumer *can* order; but the authoritative per-key order is carried in the event, and an order-dependent consumer (DR rebuild, replay) reconstructs it from the envelope's ordering fields rather than trusting Kafka partition position. So `TestArchiver_KafkaOutageLosesNothing` correctly keeps its "nothing lost" assertion — that IS the guarantee — and must not be silently re-strengthened. **Nuance for the BRAIN (Task 8 records it):** `producer_sequence` is monotonic *per producer* — a per-key total order only where one service owns an entity's events; across multiple producers to one key, the consumer falls back to `event_time` / the causal fields.
+
 ---
 
 ## Task 5b: Terminal vs retryable — give fail-closed a terminal state
@@ -1868,7 +1870,7 @@ git commit -m "feat(infra,ci): deploy the archiver (single writer, Recreate); ru
 
 - [ ] **Step 1: Update `KANZ_TASKS.md`** — DATA-M1 to DONE; leave DATA-M2 and RISK-M1 in TODO. Note in DATA-M2 that the log is now non-empty, so the sink has something to land.
 
-- [ ] **Step 2: Update `KANZ_BRAIN.md`** — remove "NOT YET BUILT — DATA-M1; until it ships, read this bullet as a target"; keep the decision itself and the DATA-05 consequence.
+- [ ] **Step 2: Update `KANZ_BRAIN.md`** — remove "NOT YET BUILT — DATA-M1; until it ships, read this bullet as a target"; keep the decision itself and the DATA-05 consequence. **Also record the ordering contract decided 2026-07-15:** the archiver guarantees DURABILITY (nothing lost, ack only after Kafka acknowledges) and LOCALITY (same partition_key ⇒ same partition), but NOT Kafka-partition-position order across an outage — repeated NAKs are re-scheduled by JetStream out of order, server-side. The authoritative per-key order is the envelope's own ordering fields (`producer_sequence`, monotonic *per producer*; `event_time` / causal fields across producers), and order-dependent consumers (DR rebuild, replay) reconstruct order from those, not from partition position. Also record the Task 5c fix as a durable platform fact: `bus` consumers `Drain()` on shutdown, not `Stop()`, so in-flight messages are handled rather than stranded for a full `AckWait`.
 
 - [ ] **Step 3: Full verification before claiming done**
 
