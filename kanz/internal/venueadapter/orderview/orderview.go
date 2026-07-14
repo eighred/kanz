@@ -211,9 +211,8 @@ var (
 // degrades to "I don't know about this order" — the reconciler then treats it as
 // unknown rather than inventing context for it. It never fabricates.
 type Seam struct {
-	store  Store
-	onErr  func(error)
-	tenant string
+	store Store
+	onErr func(error)
 }
 
 // NewSeam wraps store. onErr is called on a store failure (log it — a silently

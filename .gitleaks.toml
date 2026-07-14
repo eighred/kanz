@@ -16,8 +16,28 @@ paths = [
   '''kanz/test/.*''',
   '''.*/testdata/.*''',
   '''.*/fixtures/.*''',
+  # THE SCANNER'S OWN SELF-TEST FIXTURE. It contains a deliberate fake github_pat,
+  # because its whole job is to be found: secret-scan-selftest runs this script, which
+  # plants that secret in a TEMP DIR and asserts gitleaks detects it — the guard against
+  # a misconfigured scanner silently passing everything (SEC-02e).
+  #
+  # Allowlisting the file here exempts it from the REPO-WIDE scan only. The self-test is
+  # unaffected: it scans the temp dir it creates, not this path. Without this line the
+  # secret gate can NEVER be green — it fails on the fixture that proves it works, which
+  # is exactly what happened the first time CI ever ran (2026-07-14).
+  '''kanz/infra/security/test/gitleaks-planted-secret\.sh$''',
 ]
 # Obvious placeholder credentials anywhere (docs, examples, READMEs).
 regexes = [
   '''(?i)(example|dummy|sample|test|dev[-_]?only|changeme|placeholder|redacted|your[-_])[-_]?(secret|token|key|password|pat)''',
+  # Prose, not a credential. `generic-api-key` fires on "…as creds land: Bloomberg/
+  # Refinitiv/ICE `Source`…" in the board and roadmap — it reads "creds land:" as a
+  # key/value assignment and the vendor list as the value. Allowlisted by the matched
+  # STRING rather than by exempting the markdown files: a real key pasted into a doc is
+  # exactly the accident this gate exists to catch, so the docs stay scanned.
+  '''Bloomberg/Refinitiv/ICE''',
+  # A Postgres advisory-lock namespace, not a key: 0x6b616e7a4d494752 spells "kanzMIGR"
+  # (internal/migrate). It is a constant the migration runner locks on — public by
+  # design, and it is in the source precisely so two runners agree on it.
+  '''0x6b616e7a4d494752''',
 ]

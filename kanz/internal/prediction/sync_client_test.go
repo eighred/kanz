@@ -189,7 +189,7 @@ func TestPredict_CircuitOpensAfterThresholdFailures(t *testing.T) {
 	// First N failures attempt the call; subsequent attempts
 	// short-circuit and never hit the stub.
 	for i := 0; i < opts.BreakerThreshold; i++ {
-		client.Predict(context.Background(), goodFV())
+		_, _ = client.Predict(context.Background(), goodFV()) // driving the breaker; the error is expected
 	}
 	stubCallsBeforeOpen := stub.calls
 
@@ -217,7 +217,7 @@ func TestPredict_CircuitClosesAfterSuccessfulProbe(t *testing.T) {
 
 	// Trip the breaker.
 	for i := 0; i < opts.BreakerThreshold; i++ {
-		client.Predict(context.Background(), goodFV())
+		_, _ = client.Predict(context.Background(), goodFV()) // driving the breaker; the error is expected
 	}
 	// Wait past cooldown.
 	time.Sleep(10 * time.Millisecond)

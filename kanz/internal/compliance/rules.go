@@ -1,6 +1,7 @@
 package compliance
 
 import (
+	"context"
 	"math/big"
 	"sort"
 
@@ -235,7 +236,10 @@ func classify(c *Candidate, pos Position) Attributes {
 	if c.Classifier == nil {
 		return Attributes{}
 	}
-	a, _ := c.Classifier.Classify(nil, pos.InstrumentID, c.AsOf)
+	// context.TODO, not nil: no request context reaches the rule engine yet (the
+	// evaluators take only a *Candidate). A nil ctx is not a placeholder, it is a
+	// panic waiting for the first Classifier that does I/O.
+	a, _ := c.Classifier.Classify(context.TODO(), pos.InstrumentID, c.AsOf)
 	return a
 }
 

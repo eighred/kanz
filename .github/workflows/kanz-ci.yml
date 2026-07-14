@@ -273,6 +273,23 @@ jobs:
           cp packaging/ts/package.json gen/ts/package.json
           node -e "const fs=require('fs');const p='gen/ts/package.json';const j=JSON.parse(fs.readFileSync(p));j.version='0.1.0';fs.writeFileSync(p,JSON.stringify(j,null,2));"
 
+      # Give the generated package its OWN node_modules.
+      #
+      # gen/ts/package.json declares @bufbuild/protobuf, and the consumer installs the
+      # package with `file:` — which npm links as a SYMLINK. Node's ESM resolver then
+      # resolves the REAL path, so it looks for node_modules starting at
+      # kanz-schemas/gen/ts/… and walks UP — never reaching kanz/ts/kanz-bus/node_modules
+      # where npm hoisted the dependency. Every import of the SDK died with
+      # ERR_MODULE_NOT_FOUND: Cannot find package '@bufbuild/protobuf'.
+      #
+      # Installing inside gen/ts puts the dep where that upward walk will actually find
+      # it. (This is the same class of failure a published SDK would not have — when
+      # PARITY-07 publishes it for real, it installs as a normal copied package and the
+      # hoist works. Until then, it is a symlink, and symlinks resolve differently.)
+      - name: Install the generated SDK's dependencies
+        working-directory: kanz-schemas/gen/ts
+        run: npm install --omit=dev --no-audit --no-fund
+
       # The @kanz-eng/kanz-schemas dep isn't published (DEBT-01b); repoint it at
       # the freshly generated local package so npm resolves it from disk, not the
       # registry. The package.json edit is ephemeral (CI only).

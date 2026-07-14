@@ -26,7 +26,6 @@ package factormodel
 
 import (
 	"math"
-	"sort"
 )
 
 // FactorType is the category a factor belongs to — the dimension a risk report
@@ -220,11 +219,3 @@ func (m *Model) covApply(values map[string]float64) (perInstrument map[string]fl
 // sortedFactorNames returns the factor names in declaration order — a small
 // helper for deterministic map-keyed output.
 func (m *Model) factorName(k int) string { return m.Factors[k].Name }
-
-// orderedInstruments returns the universe sorted (deterministic iteration where a
-// map would otherwise randomize order).
-func (m *Model) orderedInstruments() []string {
-	out := append([]string(nil), m.Instruments...)
-	sort.Strings(out)
-	return out
-}

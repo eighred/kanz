@@ -115,7 +115,7 @@ func IRR(flows []CashFlow) (float64, error) {
 			return mid, nil
 		}
 		if fLo*fMid < 0 {
-			hi, fHi = mid, fMid
+			hi = mid // fHi is never read again: the loop brackets on fLo's sign
 		} else {
 			lo, fLo = mid, fMid
 		}

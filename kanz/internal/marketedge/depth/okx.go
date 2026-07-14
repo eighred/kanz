@@ -43,11 +43,10 @@ type OKXSource struct {
 	wsURL        string
 	httpc        *http.Client
 
-	conn     *websocket.Conn
-	stopKA   context.CancelFunc
-	lastSeq  int64 // last seqId folded
-	seeded   bool  // a snapshot has been folded; updates before it are dropped
-	depthCap int
+	conn    *websocket.Conn
+	stopKA  context.CancelFunc
+	lastSeq int64 // last seqId folded
+	seeded  bool  // a snapshot has been folded; updates before it are dropped
 }
 
 // OKXConfig configures an OKXSource.

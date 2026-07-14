@@ -44,7 +44,7 @@ func driveRestartContinuity(t *testing.T, store Store) {
 
 	s1 := newSigner(t, store)
 	_, _ = s1.Sign([]byte("filing-A"))
-	s1.Sign([]byte("filing-B"))
+	_, _ = s1.Sign([]byte("filing-B")) // advancing the chain; the persisted links are what this asserts
 	preRestartHead := s1.Head()
 
 	// Restart: a new signer must resume from the persisted head, not Genesis.

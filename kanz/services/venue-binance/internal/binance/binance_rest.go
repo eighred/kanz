@@ -86,18 +86,6 @@ type orderFill struct {
 	TradeID         int64  `json:"tradeId"`
 }
 
-// openOrder is one element of GET /api/v3/openOrders (the reconciliation read).
-type openOrder struct {
-	Symbol        string `json:"symbol"`
-	OrderID       int64  `json:"orderId"`
-	ClientOrderID string `json:"clientOrderId"`
-	Status        string `json:"status"`
-	OrigQty       string `json:"origQty"`
-	ExecutedQty   string `json:"executedQty"`
-	Price         string `json:"price"`
-	Side          string `json:"side"`
-}
-
 // accountInfo is GET /api/v3/account (balances for reconciliation, and the uid that
 // says WHOSE account this key is — SOV-02a).
 type accountInfo struct {
@@ -153,39 +141,6 @@ func (c *binanceREST) ExchangeAccountID(ctx context.Context) (string, error) {
 			"this API key belongs to, so it cannot be verified")
 	}
 	return strconv.FormatInt(info.UID, 10), nil
-}
-
-// openOrders fetches working orders (GET /api/v3/openOrders, weight 3 per
-// symbol). An empty symbol lists all (weight 40).
-func (c *binanceREST) openOrders(ctx context.Context, symbol string) ([]openOrder, error) {
-	weight := 3
-	params := url.Values{}
-	if symbol != "" {
-		params.Set("symbol", symbol)
-	} else {
-		weight = 40
-	}
-	if !c.bucket.Allow(weight) {
-		c.onThrottle()
-		return nil, ErrRateLimited
-	}
-	body, err := c.signedGet(ctx, "/api/v3/openOrders", params)
-	if err != nil {
-		return nil, err
-	}
-	// The success body is a JSON array; an error body is a {code,msg} object.
-	var apiErr struct {
-		Code int    `json:"code"`
-		Msg  string `json:"msg"`
-	}
-	if json.Unmarshal(body, &apiErr) == nil && apiErr.Code != 0 {
-		return nil, &APIError{Code: apiErr.Code, Msg: apiErr.Msg}
-	}
-	var out []openOrder
-	if err := json.Unmarshal(body, &out); err != nil {
-		return nil, fmt.Errorf("binance: decode openOrders: %w", err)
-	}
-	return out, nil
 }
 
 // signedGet performs a signed GET and returns the raw body (weight already

@@ -239,10 +239,3 @@ func parseSymbolMap(s string) map[string]string {
 	}
 	return out
 }
-
-func envOr(k, def string) string {
-	if v := strings.TrimSpace(os.Getenv(k)); v != "" {
-		return v
-	}
-	return def
-}

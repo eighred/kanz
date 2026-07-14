@@ -1,6 +1,9 @@
 package retrieval
 
-import "testing"
+import (
+	"context"
+	"testing"
+)
 
 func TestCheckGrounding(t *testing.T) {
 	cited := []float64{1250000, 0.42}
@@ -26,11 +29,11 @@ func TestCheckGrounding(t *testing.T) {
 
 func TestIdentityCatalog(t *testing.T) {
 	cat := IdentityCatalog{}
-	node, ok := cat.Resolve(nil, "evt-1")
+	node, ok := cat.Resolve(context.Background(), "evt-1")
 	if !ok || node != "evt-1" {
 		t.Errorf("identity resolve = %q,%v", node, ok)
 	}
-	if _, ok := cat.Resolve(nil, ""); ok {
+	if _, ok := cat.Resolve(context.Background(), ""); ok {
 		t.Errorf("empty event id should not resolve")
 	}
 }

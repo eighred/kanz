@@ -57,7 +57,7 @@ func TestTamperBreaksVerification(t *testing.T) {
 		return nil
 	}))
 	_, _ = s.Sign([]byte("clean-1"))
-	s.Sign([]byte("clean-2"))
+	_, _ = s.Sign([]byte("clean-2")) // driving the chain forward; the value is asserted below
 	_, _ = s.Sign([]byte("clean-3"))
 
 	// Forge the middle report's canonical bytes (signature/prev untouched).

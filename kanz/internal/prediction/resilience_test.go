@@ -119,7 +119,7 @@ func TestPredict_OpenCircuitWithCacheHitReportsCircuitOpen(t *testing.T) {
 	stub.resp = nil
 	stub.err = errors.New("down")
 	for i := 0; i < opts.BreakerThreshold; i++ {
-		client.Predict(context.Background(), fvFor("AAPL"))
+		_, _ = client.Predict(context.Background(), fvFor("AAPL")) // driving load; failures are the point
 	}
 	callsBeforeOpen := stub.calls
 
