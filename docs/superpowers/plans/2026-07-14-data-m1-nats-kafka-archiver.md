@@ -724,15 +724,23 @@ type Archiver struct {
 func New(cfg Config) *Archiver { return &Archiver{cfg: cfg} }
 
 // Run subscribes every configured subject and blocks until ctx is done.
+//
+// ONE GOROUTINE PER SUBJECT — NOT a sequential loop. bus.NATSClient.Subscribe does
+// NOT return until the context is done: it is a blocking, per-subject call by
+// design. A plain `for … { Subscribe(…) }` therefore blocks forever inside its FIRST
+// iteration, and subjects 2..N are never subscribed at all for the entire life of
+// the process — an archiver that comes up healthy and archives one stream out of
+// fifteen, which is the exact silent-retention failure this service exists to end.
+// services/lake-sink/cmd/lake-sink/main.go (runSink) already does it correctly;
+// mirror it: a goroutine per subject, fail fast on the first non-cancellation error
+// (cancelling the siblings), and signal Ready once the subscriptions are launched so
+// the composition root does not report ready with zero live subscriptions.
 func (a *Archiver) Run(ctx context.Context) error {
-	for _, subject := range a.cfg.Subjects {
-		if err := a.cfg.NATS.Subscribe(ctx, subject, a.cfg.Group, a.Handle); err != nil {
-			return fmt.Errorf("archiver: subscribe %q: %w", subject, err)
-		}
-		a.cfg.Logger.Info("archiving", "subject", subject, "group", a.cfg.Group, "tenant", a.cfg.Tenant)
-	}
-	<-ctx.Done()
-	return nil
+	// See the shipped implementation in
+	// kanz/services/archiver/internal/archive/archiver.go — errgroup, one goroutine
+	// per subject, Ready callback after launch. Guard it with a test whose fake
+	// Subscriber BLOCKS until ctx is done; a non-blocking fake cannot reproduce the
+	// bug and the test would be worthless.
 }
 
 // Handle archives one message. A non-nil return NACKs it — which is the point: the
