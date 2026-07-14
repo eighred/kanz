@@ -78,6 +78,24 @@ spec:
         fsGroup: 65532
         seccompProfile:
           type: RuntimeDefault
+      # The fact log's schema (EXEC-M21). kanz-migrate takes a pg_advisory_lock, so a
+      # restart finds nothing to do and exits 0 — the normal case. It uses a SEPARATE,
+      # DDL-capable DSN: tv-sync's own credential is a non-superuser, which is what
+      # makes FORCE RLS apply to it, and it deliberately cannot create tables.
+      initContainers:
+        - name: migrate
+          image: ghcr.io/kanz-eng/kanz-migrate:latest
+          args: ["--dir", "/migrations/tv-sync"]
+          env:
+            - { name: KANZ_MIGRATE_DATABASE_URL_FILE, value: /run/secrets/db/migrate-database-url }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - { name: db, mountPath: /run/secrets/db, readOnly: true }
       containers:
         - name: tv-sync
           # Pinned to a cosign-signed digest by the GitOps bump (CICD-01d).
@@ -94,6 +112,26 @@ spec:
             - { name: TV_SYNC_CONSUMER_GROUP, value: "tv-sync" }
             # The mark source for unrealized P&L.
             - { name: TV_SYNC_PRICE_SUBJECT, value: "market.>" }
+            # THE DURABLE FACT LOG (EXEC-M21). Removing this env, or the db volume
+            # below, does not degrade tv-sync — it makes the service REFUSE TO START,
+            # because the alternative is a book that vanishes on the next pod roll and
+            # a trader looking at an empty account while the fund holds positions.
+            #
+            # DSN from the SEC-01d CSI secret file, never a plaintext env.
+            - { name: TV_SYNC_DATABASE_URL_FILE, value: /run/secrets/db/database-url }
+            # MT-01d: scopes every fact row via the app.tenant_id GUC (RLS), as it does
+            # for every durable service here.
+            - { name: TV_SYNC_TENANT, value: "__system__" }
+          # THE BOOK IS REBUILT BEFORE THE SERVER BINDS (EXEC-M21), so on a pod with a
+          # long fact log there is a window where nothing answers on :8091 at all. The
+          # liveness probe would read that as a hung process and RESTART it — into the
+          # same replay, from the top: a crashloop that gets slower as the fund trades
+          # more. A startupProbe holds liveness off until the first success, giving the
+          # replay up to 5 minutes (60 x 5s) before anything is allowed to call it dead.
+          startupProbe:
+            httpGet: { path: /healthz, port: 8091 }
+            periodSeconds: 5
+            failureThreshold: 60
           livenessProbe:
             httpGet: { path: /healthz, port: 8091 }
             initialDelaySeconds: 5
@@ -110,6 +148,14 @@ spec:
               drop: ["ALL"]
           volumeMounts:
             - { name: tmp, mountPath: /tmp }
+            - { name: db, mountPath: /run/secrets/db, readOnly: true }
       volumes:
         - name: tmp
           emptyDir: {}
+        # Removing this volume does not degrade the book — it stops the pod from starting.
+        - name: db
+          csi:
+            driver: secrets-store.csi.k8s.io
+            readOnly: true
+            volumeAttributes:
+              secretProviderClass: tv-sync-db

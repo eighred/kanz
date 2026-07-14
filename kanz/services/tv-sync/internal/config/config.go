@@ -4,6 +4,7 @@
 package config
 
 import (
+	"errors"
 	"log/slog"
 	"os"
 	"strings"
@@ -21,11 +22,17 @@ type Config struct {
 	// for live unrealized P&L (M3.5). Default "market.>" catches every market
 	// variant, incl. the Binance ticker feed's market.crypto.trade.
 	PriceSubject string
+
+	// DatabaseURL is the durable fact log (EXEC-M21). REQUIRED.
+	DatabaseURL string
+	// Tenant scopes this pod, as it scopes every durable service on this platform
+	// (internal/pg.NewTenantPool refuses an empty one). REQUIRED.
+	Tenant string
 }
 
 // Load reads TV_SYNC_* environment variables with production-safe defaults.
 func Load() (Config, error) {
-	return Config{
+	cfg := Config{
 		Listen:        envOr("TV_SYNC_LISTEN", ":8091"),
 		LogLevel:      parseLevel(os.Getenv("TV_SYNC_LOG_LEVEL")),
 		OTLPEndpoint:  os.Getenv("TV_SYNC_OTLP_ENDPOINT"),
@@ -33,7 +40,45 @@ func Load() (Config, error) {
 		Source:        envOr("TV_SYNC_SOURCE", "tv-sync"),
 		ConsumerGroup: envOr("TV_SYNC_CONSUMER_GROUP", "tv-sync"),
 		PriceSubject:  envOr("TV_SYNC_PRICE_SUBJECT", "market.>"),
-	}, nil
+		DatabaseURL:   secret("TV_SYNC_DATABASE_URL"),
+		Tenant:        os.Getenv("TV_SYNC_TENANT"),
+	}
+	if err := cfg.validateBook(); err != nil {
+		return Config{}, err
+	}
+	return cfg, nil
+}
+
+// validateBook REFUSES to start a tv-sync that cannot rebuild its book (EXEC-M21).
+//
+// tv-sync folds the fund's orders, executions and P&L into memory and serves them to
+// TradingView. Its bus consumer is a DURABLE GROUP, so a restarted pod resumes at its last
+// ack and never re-reads what it folded: with no fact log, a pod roll leaves the trader
+// looking at an EMPTY ACCOUNT while the fund's positions sit open at the exchanges — and
+// nothing can rebuild it, because the order stream ages off at 24h.
+//
+// An ephemeral book is not a degraded mode, it is a LIE with a delay on it. There is no
+// default that makes this safe, so there is no default.
+func (c Config) validateBook() error {
+	if c.DatabaseURL == "" {
+		return errors.New("tv-sync: TV_SYNC_DATABASE_URL (or _FILE) is required — without a durable fact log the fund's book is lost on every restart and cannot be rebuilt")
+	}
+	if c.Tenant == "" {
+		return errors.New("tv-sync: TV_SYNC_TENANT is required — the fact log is tenant-scoped, and an unscoped session cannot read or write it")
+	}
+	return nil
+}
+
+// secret resolves a sensitive value, preferring a CSI/Vault file mount (SEC-01d: the path in
+// <k>_FILE) over a plaintext <k> env var. The DSN carries database credentials and must never
+// ride in a pod's env block.
+func secret(k string) string {
+	if p := os.Getenv(k + "_FILE"); p != "" {
+		if b, err := os.ReadFile(p); err == nil {
+			return strings.TrimSpace(string(b))
+		}
+	}
+	return os.Getenv(k)
 }
 
 func envOr(key, def string) string {

@@ -44,25 +44,106 @@ type Projection struct {
 	now      func() time.Time
 	marks    MarkSource
 	subs     *subscribers
+	log      Log    // durable record of the FACTs folded (EXEC-M21); nil ⇒ memory only
+	tenant   string // the tenant this pod is scoped to, when a log is bound
+}
+
+// Option configures a Projection.
+type Option func(*Projection)
+
+// WithLog makes the projection DURABLE (EXEC-M21).
+//
+// Without it the book lives only in RAM, and tv-sync's consumer is a durable group: a
+// restarted pod resumes at its last ack and never re-reads what it folded, so it comes back
+// EMPTY and stays empty. The trader sees a TradingView account with no positions and zero
+// P&L while the fund's positions sit open at the exchanges.
+//
+// The tenant is required and scopes the pod: the log's pool is tenant-scoped by construction
+// (internal/pg.NewTenantPool), as every durable service on this platform is, so a FACT for
+// another tenant has nowhere to land and is skipped rather than written across the boundary.
+func WithLog(log Log, tenant string) Option {
+	return func(p *Projection) {
+		p.log = log
+		p.tenant = tenant
+	}
 }
 
 // New builds a Projection. now defaults to time.Now; marks may be nil.
-func New(now func() time.Time, marks MarkSource) *Projection {
+func New(now func() time.Time, marks MarkSource, opts ...Option) *Projection {
 	if now == nil {
 		now = time.Now
 	}
-	return &Projection{accounts: make(map[string]map[string]*account), now: now, marks: marks, subs: newSubscribers()}
+	p := &Projection{accounts: make(map[string]map[string]*account), now: now, marks: marks, subs: newSubscribers()}
+	for _, opt := range opts {
+		opt(p)
+	}
+	return p
+}
+
+// Rehydrate rebuilds the book from the durable fact log (EXEC-M21).
+//
+// It replays the FACTs this tenant folded, in the order it folded them, through the SAME
+// fold — so the rebuilt book is the book the dead pod had, not an approximation of it.
+// Nothing else can rebuild it: the EXECUTION stream ages off at 24h, nothing archives it,
+// and no other table persists a fill.
+//
+// Deltas are discarded: rehydration happens BEFORE the pod reports ready, so there is no
+// subscriber to stream them to, and replaying a month of history to a live TradingView
+// session would look like a month of trades happening at once.
+//
+// Call it before serving. A pod that has not finished rebuilding does not know what the fund
+// holds, and reporting an empty account is worse than reporting nothing at all.
+func (p *Projection) Rehydrate(ctx context.Context) error {
+	if p.log == nil {
+		return nil
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.log.Replay(ctx, func(f Fact) error {
+		p.fold(p.tenant, f.EventType, f.Payload, f.Knowledge)
+		return nil
+	})
 }
 
 // Handle is the bus.EventHandler: it folds one order-lifecycle FACT. Malformed
 // payloads are acked (nil) — a poison FACT must not wedge the partition; the
 // projection is a monitor, not the book of record.
-func (p *Projection) Handle(_ context.Context, env *envelopepb.Envelope, payload []byte) error {
+//
+// The FACT is DURABLY RECORDED BEFORE IT IS FOLDED (EXEC-M21). The order is the whole
+// point: fold-then-record would put a FACT in RAM that a crash could lose, while the durable
+// consumer group — which acks on return — would never send it again. Recording first means
+// the fold is either durable or retried, never neither.
+func (p *Projection) Handle(ctx context.Context, env *envelopepb.Envelope, payload []byte) error {
 	tenant := env.GetTenantId()
 	if tenant == "" {
 		return nil // untenanted event — cannot scope; skip (monitor only)
 	}
 	know := p.now().UTC()
+
+	if p.log != nil {
+		if tenant != p.tenant {
+			// Not this pod's tenant. The log is scoped to one tenant (as every durable
+			// service on this platform is), so this FACT has nowhere to land — and folding
+			// it into memory only would put it in a book no restart could rebuild.
+			return nil
+		}
+		fresh, err := p.log.Append(ctx, Fact{
+			EventID: env.GetEventId(), EventType: env.GetEventType(),
+			Payload: payload, Knowledge: know,
+		})
+		if err != nil {
+			// NACK. Never fold what we could not durably record: the consumer group would
+			// ack it, never resend it, and the next restart would lose it silently — the
+			// original bug, one layer down.
+			return err
+		}
+		if !fresh {
+			// Already folded — a redelivery after a lost ack, or a FACT this pod replayed at
+			// boot. Folding it again would double a fill, and with it the position and the
+			// realized P&L the Broker API reports.
+			return nil
+		}
+	}
 
 	p.mu.Lock()
 	deltas := p.fold(tenant, env.GetEventType(), payload, know)

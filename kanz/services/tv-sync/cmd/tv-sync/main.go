@@ -18,6 +18,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/kanz-eng/kanz/internal/pg"
 	"github.com/kanz-eng/kanz/pkg/bus"
 	"github.com/kanz-eng/kanz/pkg/observability"
 	"github.com/kanz-eng/kanz/services/tv-sync/internal/brokerapi"
@@ -56,10 +57,29 @@ func main() {
 		_ = obs.Shutdown(shutCtx)
 	}()
 
+	// THE BOOK MUST SURVIVE A RESTART (EXEC-M21).
+	//
+	// The projection folds the fund's orders, executions and P&L into memory, and the
+	// Broker API serves TradingView out of it. The bus consumer is a DURABLE GROUP: a
+	// restarted pod resumes at its last ack and never re-reads what it already folded. With
+	// no durable log, a pod roll left the trader looking at an EMPTY ACCOUNT — no positions,
+	// no orders, zero P&L — while the fund's real positions sat open at the exchanges. And
+	// nothing could rebuild it: the EXECUTION stream ages off at 24h and no table anywhere
+	// persists a fill.
+	//
+	// The pool is tenant-scoped, as every durable service on this platform is: an unscoped
+	// session cannot read or write the log at all (app_current_tenant() RAISES).
+	pool, err := pg.NewTenantPool(ctx, cfg.DatabaseURL, cfg.Tenant)
+	if err != nil {
+		logger.Error("fact log unavailable — tv-sync would lose the fund's book on the next restart", "err", err)
+		os.Exit(2)
+	}
+	defer pool.Close()
+
 	// M3.5: fold the market price spine into a live mark source so the
 	// projection computes floating unrealized P&L dynamically.
 	mark := markfeed.New()
-	proj := projection.New(time.Now, mark)
+	proj := projection.New(time.Now, mark, projection.WithLog(projection.NewPostgresLog(pool), cfg.Tenant))
 
 	client, err := bus.DialNATS(ctx, bus.NATSConfig{URL: cfg.NATSURL, Name: cfg.Source})
 	if err != nil {
@@ -73,6 +93,23 @@ func main() {
 		logger.Error("consumer init failed", "err", err)
 		os.Exit(2)
 	}
+
+	// REBUILD THE BOOK BEFORE ANYTHING CAN READ IT OR ADD TO IT (EXEC-M21).
+	//
+	// This runs before the HTTP server, before the consumers, and before readiness: a pod
+	// that has not replayed its fact log does not know what the fund holds, and an empty
+	// account served to TradingView is not a degraded answer — it is a wrong one, and it
+	// looks exactly like a fund that has never traded.
+	//
+	// It is also why the fold stays exactly-once across the boundary: a FACT replayed here
+	// is already in the log, so if the consumer redelivers it, Append reports it stale and
+	// the projection skips it rather than folding the same fill twice.
+	rehydrateStart := time.Now()
+	if err := proj.Rehydrate(ctx); err != nil {
+		logger.Error("could not rebuild the book from the fact log — refusing to serve an account we cannot vouch for", "err", err)
+		os.Exit(2)
+	}
+	logger.Info("book rebuilt from the fact log", "took", time.Since(rehydrateStart).String(), "tenant", cfg.Tenant)
 
 	readiness := &server.Readiness{}
 	broker := brokerapi.New(proj)
