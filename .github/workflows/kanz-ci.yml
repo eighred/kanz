@@ -25,6 +25,19 @@ on:
       - '.github/workflows/kanz-ci.yml'
   push:
     branches: [main]
+    # DOCS DO NOT BUILD IMAGES.
+    #
+    # The pull_request trigger above is already path-filtered; this one was not, so a
+    # commit touching only KANZ_TASKS.md ran the full matrix — for kanz-build, that is 19
+    # Docker image builds to record that a board item moved. On a private repo billing per
+    # minute, that is real money for zero signal.
+    #
+    # paths-ignore only skips a push when EVERY changed file matches, so a commit mixing
+    # docs and code still runs the gate.
+    paths-ignore:
+      - '**/*.md'
+      - 'docs/**'
+      - '.gitignore'
 
 permissions:
   contents: read

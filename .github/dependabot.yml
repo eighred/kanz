@@ -4,6 +4,17 @@
 # remediation SLA lives in SECURITY.md. Grouped so routine bumps land as one PR
 # per ecosystem (less review churn) while SECURITY updates always come alone +
 # promptly.
+#
+# EVERY PR HERE COSTS A FULL CI MATRIX. Each one triggers kanz-ci AND kanz-build —
+# and kanz-build is 19 Docker image builds, one per service. The first time this
+# repository ever had a remote, Dependabot opened nine PRs at once and they queued
+# ~114 image builds ahead of main's own gate; the push that actually mattered waited
+# 45 minutes behind dependency bumps.
+#
+# So the unit to minimize is NOT the cadence (weekly is right — stale deps are a
+# security problem). It is the NUMBER OF PRs. Every ungrouped ecosystem below is a
+# separate PR and therefore a separate 19-job matrix, which is why the three Docker
+# entries are now ONE multi-directory entry and every ecosystem carries a group.
 version: 2
 
 updates:
@@ -17,11 +28,17 @@ updates:
         patterns: ["*"]
         update-types: [minor, patch]
 
-  # The standalone schema-ingest tool module (its own go.mod, EVT-16b).
+  # The standalone schema-ingest tool module (its own go.mod, EVT-16b). Grouped: it
+  # was the one ecosystem that could open a PR per dependency, and each one paid for
+  # 19 image builds to bump a tool that ships in no image.
   - package-ecosystem: gomod
     directory: /kanz-schemas/tools/registry-ingest
     schedule: { interval: weekly }
-    open-pull-requests-limit: 3
+    open-pull-requests-limit: 2
+    groups:
+      registry-ingest-deps:
+        patterns: ["*"]
+        update-types: [minor, patch]
 
   # Python inference package.
   - package-ecosystem: pip
@@ -53,12 +70,19 @@ updates:
         patterns: ["*"]
 
   # Container base images in the service Dockerfiles.
+  #
+  # ONE entry over several directories, not one entry per directory. These were three
+  # separate blocks, so a single distroless base bump opened THREE PRs and paid for
+  # three 19-job image matrices — 57 Docker builds to move one base image tag. They
+  # share the same base images, so they should move together anyway: a base bump that
+  # lands on one service and not the others is drift.
   - package-ecosystem: docker
-    directory: /kanz/services/risk-engine
+    directories:
+      - /kanz/services/risk-engine
+      - /kanz/services/schema-registry
+      - /kanz/services/api-gateway
     schedule: { interval: weekly }
-  - package-ecosystem: docker
-    directory: /kanz/services/schema-registry
-    schedule: { interval: weekly }
-  - package-ecosystem: docker
-    directory: /kanz/services/api-gateway
-    schedule: { interval: weekly }
+    open-pull-requests-limit: 2
+    groups:
+      base-images:
+        patterns: ["*"]
