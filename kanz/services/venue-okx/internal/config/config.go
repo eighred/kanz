@@ -49,11 +49,27 @@ type Config struct {
 	// segregates one fund's capital from another's; the OMS binds portfolios to it.
 	// Empty ⇒ the MIC is used, i.e. "this venue is one account", which is a claim, not
 	// an absence — the adapter says so at startup.
-	Account   string
-	BaseURL   string
-	WSBase    string
-	APIKey    string
-	APISecret string
+	Account string
+	// AccountUID is OKX'S OWN id (the uid) for the account named above — what the label
+	// is bound TO, and the only thing that can be checked (SOV-02a). At startup the
+	// adapter asks OKX which account its API key belongs to and REFUSES TO SERVE ORDERS
+	// if the answer is not this. Without it, Account is a claim nobody has ever tested:
+	// a mis-configured adapter and a correct one are the same deployment, and the first
+	// books its fills to the wrong fund's ledger while the exchange debits the right one.
+	//
+	// Empty ⇒ nothing can be proved ⇒ the adapter refuses to start unless
+	// AllowUnverifiedAccount says otherwise.
+	AccountUID string
+	// AllowUnverifiedAccount permits booting with an account NOBODY has confirmed — the
+	// explicit, affirmative choice the brain's no-simulator-reachable-by-omission rule
+	// demands, since absence of configuration must never quietly become trust. It does
+	// NOT permit booting a WRONG account: if OKX says the key belongs elsewhere, the
+	// adapter refuses whatever this says.
+	AllowUnverifiedAccount bool
+	BaseURL                string
+	WSBase                 string
+	APIKey                 string
+	APISecret              string
 	// Passphrase is OKX's THIRD credential. Binance signs with key+secret; OKX
 	// additionally requires the passphrase chosen when the API key was created,
 	// sent as an OK-ACCESS-PASSPHRASE header. Without it every signed request is
@@ -76,10 +92,12 @@ func Load() (Config, error) {
 		Tenant:       envOr("VENUE_OKX_TENANT", "__system__"),
 		SPIFFESocket: os.Getenv("SPIFFE_ENDPOINT_SOCKET"),
 
-		MIC:     envOr("OKX_MIC", "OKX"),
-		Account: envOr("OKX_VENUE_ACCOUNT", envOr("OKX_MIC", "OKX")),
-		BaseURL: envOr("OKX_BASE_URL", "https://www.okx.com"),
-		WSBase:  envOr("OKX_WS_BASE", "wss://ws.okx.com:8443"),
+		MIC:                    envOr("OKX_MIC", "OKX"),
+		Account:                envOr("OKX_VENUE_ACCOUNT", envOr("OKX_MIC", "OKX")),
+		AccountUID:             os.Getenv("OKX_VENUE_ACCOUNT_UID"),
+		AllowUnverifiedAccount: os.Getenv("OKX_ALLOW_UNVERIFIED_ACCOUNT") == "true",
+		BaseURL:                envOr("OKX_BASE_URL", "https://www.okx.com"),
+		WSBase:                 envOr("OKX_WS_BASE", "wss://ws.okx.com:8443"),
 		// Keys come from a CSI/Vault file mount, never from code and never from a
 		// plaintext env in a manifest.
 		APIKey:     secret("OKX_API_KEY"),

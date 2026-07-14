@@ -55,7 +55,7 @@ func newServer(t *testing.T, v *fakeVenue) (*Server, *execution.CloseRegistry, o
 	v.closes = closes
 	view := orderview.NewMemory()
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	return New(v, view, closes, logger), closes, view
+	return New(v, view, closes, execution.AccountProof{Verified: true, ExchangeAccountID: "12345678"}, logger), closes, view
 }
 
 func order() *orderpb.OrderState {

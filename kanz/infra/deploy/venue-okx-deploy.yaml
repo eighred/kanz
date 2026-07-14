@@ -124,10 +124,27 @@ spec:
             # The EXCHANGE ACCOUNT this adapter's API credential belongs to. Everything it
             # fills margins and liquidates against THIS account, whichever portfolio the
             # order was for — so it is the collateral boundary, and the OMS binds
-            # portfolios to it by this name (OMS_VENUE_ACCOUNTS). It must match the
-            # account the mounted API key actually belongs to: nothing verifies that
-            # today, and a wrong name posts fills to the wrong account's ledger rows.
+            # portfolios to it by this name (OMS_VENUE_ACCOUNTS).
             - { name: OKX_VENUE_ACCOUNT, value: "okx-sub-1" }
+            # ...and this is OKX'S OWN id (uid) for that account — the only thing that can
+            # be CHECKED (SOV-02a). At startup the adapter asks OKX which account the
+            # mounted API key belongs to (GET /api/v5/account/config) and REFUSES TO SERVE
+            # ORDERS if the answer is not this. Without it the name above is a claim nobody
+            # has ever tested, and a wrong one posts fills to another fund's ledger rows
+            # while the exchange debits the right account.
+            #
+            # EMPTY, as shipped: nobody has bound the uid yet, so the adapter cannot prove
+            # itself — and it would refuse to start, which is why the escape hatch below is
+            # set. Fill this in with the uid of the account the mounted key belongs to,
+            # then DELETE the escape hatch and set OMS_REQUIRE_VERIFIED_ACCOUNT on the OMS.
+            - { name: OKX_VENUE_ACCOUNT_UID, value: "" }
+            # The explicit admission that this adapter's account is UNPROVEN. It is not a
+            # default and it is not an absence: without it the adapter refuses to start,
+            # because absence of configuration must never quietly become trust. It does NOT
+            # forgive a WRONG account — if OKX says the key belongs elsewhere, the adapter
+            # refuses regardless. The OMS counts every adapter in this state
+            # (kanz_oms_unverified_venue_account_total).
+            - { name: OKX_ALLOW_UNVERIFIED_ACCOUNT, value: "true" }
             # OKX has no separate testnet host — this IS the live exchange, and the
             # credentials decide whether the account is a demo one. Treat a change
             # to the key mount as a change to what this pod can spend.

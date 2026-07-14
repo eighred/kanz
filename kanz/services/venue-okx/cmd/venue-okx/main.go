@@ -36,6 +36,7 @@ import (
 
 	"github.com/kanz-eng/kanz/internal/execution"
 	"github.com/kanz-eng/kanz/internal/pg"
+	"github.com/kanz-eng/kanz/internal/venueadapter/accountproof"
 	"github.com/kanz-eng/kanz/internal/venueadapter/orderview"
 	"github.com/kanz-eng/kanz/internal/venueadapter/server"
 	"github.com/kanz-eng/kanz/pkg/bus"
@@ -179,7 +180,23 @@ func run(cfg config.Config) error {
 		Logger:    logger,
 	})
 
-	grpcSrv, err := newGRPCServer(ctx, cfg, conn.Venue(), view, closes, logger)
+	// WHOSE MONEY DOES THIS ADAPTER SPEND? (SOV-02a)
+	//
+	// Ask OKX, before serving a single order. The account is the collateral boundary —
+	// an exchange margins and LIQUIDATES per account — and until now it was asserted by
+	// config on both sides of the wire and checked by nobody. If OKX says this key
+	// belongs to a different account than we claim, we do not start: every fill would be
+	// booked to the account we NAME while the exchange debits the account we HOLD.
+	proof, err := accountproof.Resolve(ctx, conn.Exchange(), accountproof.Want{
+		Account:         cfg.Account,
+		ExchangeUID:     cfg.AccountUID,
+		AllowUnverified: cfg.AllowUnverifiedAccount,
+	}, logger)
+	if err != nil {
+		return err
+	}
+
+	grpcSrv, err := newGRPCServer(ctx, cfg, conn.Venue(), view, closes, proof, logger)
 	if err != nil {
 		return err
 	}
@@ -207,7 +224,7 @@ func run(cfg config.Config) error {
 // This endpoint submits orders to a live exchange. An unauthenticated peer that
 // can reach it can trade with the fund's money, so plaintext is a dev-only
 // posture and it says so at WARN — it is never silently acceptable.
-func newGRPCServer(ctx context.Context, cfg config.Config, venue execution.Venue, view orderview.Store, closes execution.CloseTracker, logger *slog.Logger) (*grpc.Server, error) {
+func newGRPCServer(ctx context.Context, cfg config.Config, venue execution.Venue, view orderview.Store, closes execution.CloseTracker, proof execution.AccountProof, logger *slog.Logger) (*grpc.Server, error) {
 	var opts []grpc.ServerOption
 	if cfg.SPIFFESocket != "" {
 		src, err := transport.NewSource(ctx, cfg.SPIFFESocket)
@@ -220,7 +237,7 @@ func newGRPCServer(ctx context.Context, cfg config.Config, venue execution.Venue
 		logger.Warn("VENUE.V1 IS PLAINTEXT — no SPIFFE_ENDPOINT_SOCKET. Anyone who can reach this port can submit orders to a live exchange")
 	}
 	srv := grpc.NewServer(opts...)
-	venuepb.RegisterVenueAdapterServiceServer(srv, server.New(venue, view, closes, logger))
+	venuepb.RegisterVenueAdapterServiceServer(srv, server.New(venue, view, closes, proof, logger))
 	return srv, nil
 }
 

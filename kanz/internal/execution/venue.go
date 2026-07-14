@@ -37,6 +37,29 @@ type Venue interface {
 	Execute(ctx context.Context, st *orderpb.OrderState) ([]*orderpb.Fill, error)
 }
 
+// AccountProof is the EXCHANGE's own confirmation that an adapter's API credential
+// belongs to the account the adapter claims to be (SOV-02a).
+//
+// Account() alone is a CLAIM: an adapter reads its account from its own config, so
+// two mis-configured deployments agree with each other perfectly while the exchange
+// debits a third account entirely. The only authority on which account a key belongs
+// to is the venue that issued the key, so the adapter asks it at startup and carries
+// the answer here.
+//
+// The ZERO VALUE IS UNVERIFIED, deliberately. An adapter that never checks reports
+// the safe answer rather than the flattering one, and the OMS can see the difference
+// between "the exchange confirmed this" and "nobody has ever checked" — which were
+// previously the same observable state.
+type AccountProof struct {
+	// Verified is true only when the exchange itself confirmed the credential
+	// belongs to the claimed account.
+	Verified bool
+	// ExchangeAccountID is the exchange's OWN id for the account behind the
+	// credential (a Binance/OKX uid) — what the platform's account label is a label
+	// FOR. Empty when nothing was verified.
+	ExchangeAccountID string
+}
+
 // Closer is the optional Venue capability to withdraw a working order AT the
 // exchange. It is separate from Venue because not every venue has an order
 // resting externally to withdraw — SimVenue fills or rests in-process, so

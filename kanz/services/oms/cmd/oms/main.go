@@ -186,6 +186,19 @@ func runConsumers(ctx context.Context, cfg config.Config, readiness *server.Read
 	})
 	obs.Registry.MustRegister(sharedCollateral)
 
+	// Venue adapters trading an account NOBODY has proved against the exchange
+	// (SOV-02a). The adapter's account is read from its own config, so a mis-declared
+	// deployment looks exactly like a correct one — non-zero means some part of the
+	// book is settling against a collateral pool that only a human's typing says it
+	// belongs to.
+	unverifiedAccounts := prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "kanz_oms_unverified_venue_account_total",
+		Help: "Venue adapters registered whose exchange account was NOT confirmed by the exchange itself. " +
+			"The adapter holds the API credential but has not proved which account it belongs to, so its fills " +
+			"could margin against a different fund's collateral than the ledger books them to.",
+	})
+	obs.Registry.MustRegister(unverifiedAccounts)
+
 	if bindings.Empty() {
 		logger.Warn("COLLATERAL IS SHARED — no venue-account bindings configured (OMS_VENUE_ACCOUNTS). Every portfolio trades whatever account its venue adapter holds, so they all margin against ONE pool per venue: a liquidation caused by one portfolio consumes the margin of all of them, and each ledger still reports its own cash intact")
 	} else if cfg.RequireVenueAccount {
@@ -206,7 +219,7 @@ func runConsumers(ctx context.Context, cfg config.Config, readiness *server.Read
 		return err
 	}
 	defer closeStore()
-	venues, closeVenues := configuredVenues(ctx, cfg, store, producer, logger)
+	venues, closeVenues := configuredVenues(ctx, cfg, store, producer, unverifiedAccounts, logger)
 	defer closeVenues()
 	router := execution.NewRouter(venues...)
 	svc, err := order.NewService(store, emitter, gate, router, closeRegistry, logger,

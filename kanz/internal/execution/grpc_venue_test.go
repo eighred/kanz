@@ -52,7 +52,7 @@ func (s *stubAdapter) CancelOrder(_ context.Context, req *venuepb.CancelOrderReq
 	return &venuepb.CancelOrderResponse{}, nil
 }
 
-func dialStub(t *testing.T, srv *stubAdapter) *grpc.ClientConn {
+func dialStub(t *testing.T, srv venuepb.VenueAdapterServiceServer) *grpc.ClientConn {
 	t.Helper()
 	lis := bufconn.Listen(1 << 20)
 	gs := grpc.NewServer()

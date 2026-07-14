@@ -9,6 +9,7 @@ import (
 	marketpb "github.com/kanz-eng/kanz-schemas-go/market/v1"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
+	"github.com/kanz-eng/kanz/internal/venueadapter/accountproof"
 	"github.com/kanz-eng/kanz/pkg/bus"
 )
 
@@ -31,6 +32,13 @@ func NewOKXConnector(settings VenueSettings, wsURL string) *OKXConnector {
 
 // Venue returns the execution venue for the router.
 func (c *OKXConnector) Venue() Venue { return c.venue }
+
+// Exchange is the seam that asks OKX which account this adapter's API credential
+// actually belongs to (SOV-02a) — accountproof.Exchange, satisfied by the same signed
+// REST client the reconciler already uses. The composition root calls it ONCE, at
+// startup, and refuses to serve orders if OKX names a different account than this
+// deployment claims to be.
+func (c *OKXConnector) Exchange() accountproof.Exchange { return c.rest }
 
 // Start launches the reconciler, user-data ingester (with reconnect), and ticker
 // feed as background goroutines until ctx is cancelled.

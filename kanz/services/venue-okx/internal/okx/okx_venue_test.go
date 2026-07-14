@@ -27,6 +27,7 @@ type fakeOKX struct {
 	queryBody   string
 	balanceBody string
 	tickerBody  string
+	configBody  string // body for GET /api/v5/account/config — carries the account uid
 }
 
 func newFakeOKX(t *testing.T) *fakeOKX {
@@ -55,6 +56,9 @@ func newFakeOKX(t *testing.T) *fakeOKX {
 	})
 	mux.HandleFunc("/api/v5/market/ticker", func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte(f.tickerBody))
+	})
+	mux.HandleFunc("/api/v5/account/config", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(f.configBody))
 	})
 	f.srv = httptest.NewServer(mux)
 	t.Cleanup(f.srv.Close)

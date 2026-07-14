@@ -6,7 +6,9 @@ import (
 	"log/slog"
 	"os"
 	"strings"
+	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 
@@ -15,6 +17,13 @@ import (
 	"github.com/kanz-eng/kanz/services/oms/internal/config"
 	"github.com/kanz-eng/kanz/services/oms/internal/order"
 )
+
+// venueDescribeTimeout bounds the startup ask ("which account do you hold?") against
+// each adapter. It is the EXEC-M10 stance: an unbounded startup call against a
+// dependency that has not scheduled yet is a process that hangs Running, 0/1 Ready,
+// forever, with nothing in the platform able to say why. Bounded, it exits with a
+// named error and the kubelet restarts it with backoff.
+const venueDescribeTimeout = 30 * time.Second
 
 // closeRegistry is the shared in-flight-close registry — the In-Flight Certainty
 // seam's single instance for the process. It is deliberately UNTAGGED and shared:
@@ -38,13 +47,13 @@ var closeRegistry = execution.NewCloseRegistry()
 // is ever reached in production the OMS is filling orders against nothing, so it
 // says so at WARN in as many words, and the router hard-errors on any MIC it has
 // no venue for rather than quietly routing there.
-func configuredVenues(ctx context.Context, cfg config.Config, store order.Store, producer execution.Publisher, logger *slog.Logger) ([]execution.Venue, func()) {
+func configuredVenues(ctx context.Context, cfg config.Config, store order.Store, producer execution.Publisher, unverified prometheus.Counter, logger *slog.Logger) ([]execution.Venue, func()) {
 	var venues []execution.Venue
 
 	// INFRA-M7a: out-of-process adapters. These need no build tag and link no
 	// vendor code — the OMS speaks venue.v1 over mTLS and never imports an
 	// exchange SDK. They are the path that retires the tags above.
-	grpcVenues, closeConns, err := dialVenues(ctx, cfg, logger)
+	grpcVenues, closeConns, err := dialVenues(ctx, cfg, unverified, logger)
 	if err != nil {
 		// A configured venue that will not dial is FATAL, not a degradation. The
 		// alternative is booting without it and silently routing its orders
@@ -109,7 +118,16 @@ func parseMICs(s string) []string {
 // PLAINTEXT, which is a dev-only posture and says so loudly — this connection
 // carries live orders to a live exchange, and an unauthenticated peer on it can
 // submit trades.
-func dialVenues(ctx context.Context, cfg config.Config, logger *slog.Logger) ([]execution.Venue, func(), error) {
+//
+// AND THE ACCOUNT IN THAT STRING IS NOT BELIEVED (SOV-02a). Every adapter is ASKED
+// who it is (venue.v1.Describe) before it is registered, and one that answers with a
+// different account than it was declared as STOPS THE OMS FROM STARTING. The adapter
+// holds the API credential; this manifest holds a human's typing. When they disagree,
+// the credential is what the exchange will act on — the orders would margin against
+// the account the adapter really holds while the ledger booked them to the one named
+// here, which is the exact failure EXEC-M16 exists to prevent, arriving through the
+// one door EXEC-M16 left open.
+func dialVenues(ctx context.Context, cfg config.Config, unverified prometheus.Counter, logger *slog.Logger) ([]execution.Venue, func(), error) {
 	endpoints := parseSymbolMap(cfg.VenueEndpoints) // MIC → address; same "K=V,K=V" form
 	if len(endpoints) == 0 {
 		return nil, func() {}, nil
@@ -158,8 +176,51 @@ func dialVenues(ctx context.Context, cfg config.Config, logger *slog.Logger) ([]
 			return nil, nil, fmt.Errorf("venue %s at %s: %w", mic, addr, err)
 		}
 		conns = append(conns, conn)
-		venues = append(venues, execution.NewGRPCVenue(mic, account, conn, cfg.Tenant))
-		logger.Info("venue adapter registered", "mic", mic, "account", account, "endpoint", addr)
+		venue := execution.NewGRPCVenue(mic, account, conn, cfg.Tenant)
+
+		// ASK THE ADAPTER WHO IT IS, before it is allowed to take an order.
+		//
+		// grpc.NewClient is lazy, so this is also the first time the connection is
+		// actually made — and that is deliberate. An adapter the OMS cannot reach is
+		// one whose account it cannot confirm, and a venue that will not answer is
+		// already FATAL here (see configuredVenues): booting without it would route
+		// its orders nowhere, or to the simulator. The call is BOUNDED (the EXEC-M10
+		// stance) so an adapter that has not scheduled yet produces a named error and
+		// a kubelet restart, never a process hanging silently at startup.
+		dctx, cancel := context.WithTimeout(ctx, venueDescribeTimeout)
+		id, err := venue.Describe(dctx)
+		cancel()
+		if err != nil {
+			closeConns()
+			return nil, nil, fmt.Errorf("venue %s at %s: cannot ask the adapter which exchange account it holds "+
+				"(is it running?): %w", mic, addr, err)
+		}
+		if err := execution.VerifyIdentity(mic, account, id); err != nil {
+			closeConns()
+			return nil, nil, fmt.Errorf("venue adapter at %s is not who OMS_VENUE_ENDPOINTS says it is: %w", addr, err)
+		}
+
+		switch {
+		case id.Proof.Verified:
+			logger.Info("venue adapter registered — account PROVEN against the exchange",
+				"mic", mic, "account", account, "exchange_account_id", id.Proof.ExchangeAccountID, "endpoint", addr)
+		case cfg.RequireVerifiedAccount:
+			closeConns()
+			return nil, nil, fmt.Errorf("venue %s at %s: account %q is UNVERIFIED — the adapter has not proved its "+
+				"credential belongs to it, and OMS_REQUIRE_VERIFIED_ACCOUNT=true. Bind the exchange account id at the "+
+				"adapter (e.g. BINANCE_VENUE_ACCOUNT_UID) so it can prove itself, or unset the requirement",
+				mic, addr, account)
+		default:
+			// The adapter agrees with the manifest but nobody has checked it against the
+			// exchange. Both mis-configured and correct deployments look like this, so it
+			// must not be silent: it is named, and it is counted.
+			unverified.Inc()
+			logger.Warn("venue adapter registered with an UNVERIFIED account — nobody has confirmed this API credential "+
+				"belongs to the collateral pool it names. An exchange liquidates per account",
+				"mic", mic, "account", account, "endpoint", addr,
+				"fix", "bind the exchange account id at the adapter (e.g. BINANCE_VENUE_ACCOUNT_UID), then set OMS_REQUIRE_VERIFIED_ACCOUNT=true")
+		}
+		venues = append(venues, venue)
 	}
 	return venues, closeConns, nil
 }

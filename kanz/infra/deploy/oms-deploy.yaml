@@ -181,7 +181,24 @@ spec:
             # lets the router refuse to send another portfolio's order to it. Omit the
             # /account and the venue is treated as ONE account shared by every
             # portfolio trading it — the OMS says so at WARN.
+            #
+            # AND THE ACCOUNT IN THIS STRING IS NOT BELIEVED (SOV-02a). At startup the OMS
+            # ASKS each adapter who it is (venue.v1 Describe) and REFUSES TO START if the
+            # adapter — which holds the API credential — names a different account than
+            # this line does. A typo here used to post fills to one fund's ledger rows
+            # while the exchange debited another's, and nothing could see it.
             - { name: OMS_VENUE_ENDPOINTS, value: "XBIN/binance-main=venue-binance.kanz-services.svc:9000,XOKX/okx-sub-1=venue-okx.kanz-services.svc:9000" }
+            # Deny-by-default for the adapter's account CLAIM. true ⇒ the OMS refuses to
+            # start on any adapter that has not PROVED its account against the exchange
+            # itself (venue.v1 Describe answering account_verified=false).
+            #
+            # It ships FALSE for the same reason as the two below: arming it refuses every
+            # adapter nobody has bound an exchange uid to yet (*_VENUE_ACCOUNT_UID), which
+            # is a trading outage. With it off, an unproven adapter still trades — but it
+            # is WARNed by name and counted (kanz_oms_unverified_venue_account_total), so
+            # "how much of the book settles against an unproven account" is a number, not
+            # an assumption. A MISMATCH is fatal regardless of this flag.
+            - { name: OMS_REQUIRE_VERIFIED_ACCOUNT, value: "false" }
             # WHICH PORTFOLIO MAY SPEND WHICH ACCOUNT (EXEC-M16).
             #
             #   OMS_VENUE_ACCOUNTS="tenant/portfolio@MIC=account,..."

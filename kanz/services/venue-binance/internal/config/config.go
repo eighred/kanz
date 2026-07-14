@@ -49,11 +49,28 @@ type Config struct {
 	// segregates one fund's capital from another's; the OMS binds portfolios to it.
 	// Empty ⇒ the MIC is used, i.e. "this venue is one account", which is a claim, not
 	// an absence — the adapter says so at startup.
-	Account   string
-	BaseURL   string
-	WSBase    string
-	APIKey    string
-	APISecret string
+	Account string
+	// AccountUID is BINANCE'S OWN id (the uid) for the account named above — what the
+	// label is bound TO, and the only thing that can be checked (SOV-02a). At startup
+	// the adapter asks Binance which account its API key belongs to and REFUSES TO
+	// SERVE ORDERS if the answer is not this. Without it, Account is a claim nobody has
+	// ever tested: a mis-configured adapter and a correct one are the same deployment,
+	// and the first books its fills to the wrong fund's ledger while the exchange
+	// debits the right one.
+	//
+	// Empty ⇒ nothing can be proved ⇒ the adapter refuses to start unless
+	// AllowUnverifiedAccount says otherwise.
+	AccountUID string
+	// AllowUnverifiedAccount permits booting with an account NOBODY has confirmed. It
+	// is the explicit, affirmative choice the brain's no-simulator-reachable-by-
+	// omission rule demands — absence of configuration must never quietly become
+	// trust. It does NOT permit booting a WRONG account: if Binance says the key
+	// belongs elsewhere, the adapter refuses whatever this says.
+	AllowUnverifiedAccount bool
+	BaseURL                string
+	WSBase                 string
+	APIKey                 string
+	APISecret              string
 	// Symbols maps Kanz instrument_id → Binance symbol ("BTC-USD=BTCUSDT").
 	Symbols string
 }
@@ -71,10 +88,12 @@ func Load() (Config, error) {
 		Tenant:       envOr("VENUE_BINANCE_TENANT", "__system__"),
 		SPIFFESocket: os.Getenv("SPIFFE_ENDPOINT_SOCKET"),
 
-		MIC:     envOr("BINANCE_MIC", "BINANCE"),
-		Account: envOr("BINANCE_VENUE_ACCOUNT", envOr("BINANCE_MIC", "BINANCE")),
-		BaseURL: envOr("BINANCE_BASE_URL", "https://testnet.binance.vision"),
-		WSBase:  envOr("BINANCE_WS_BASE", "wss://testnet.binance.vision"),
+		MIC:                    envOr("BINANCE_MIC", "BINANCE"),
+		Account:                envOr("BINANCE_VENUE_ACCOUNT", envOr("BINANCE_MIC", "BINANCE")),
+		AccountUID:             os.Getenv("BINANCE_VENUE_ACCOUNT_UID"),
+		AllowUnverifiedAccount: os.Getenv("BINANCE_ALLOW_UNVERIFIED_ACCOUNT") == "true",
+		BaseURL:                envOr("BINANCE_BASE_URL", "https://testnet.binance.vision"),
+		WSBase:                 envOr("BINANCE_WS_BASE", "wss://testnet.binance.vision"),
 		// Keys come from a CSI/Vault file mount, never from code and never from a
 		// plaintext env in a manifest.
 		APIKey:    secret("BINANCE_API_KEY"),

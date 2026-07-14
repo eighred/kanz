@@ -32,14 +32,21 @@ type Server struct {
 	closer execution.Closer
 	view   orderview.Store
 	closes execution.CloseTracker
+	proof  execution.AccountProof
 	logger *slog.Logger
 }
 
 // New returns a Server fronting venue. closes is the in-flight-close registry the
 // connector's healing watchdog drains — it lives in THIS process now (before the
 // split, the OMS wrote it and the connector read it through a shared pointer).
-func New(venue execution.Venue, view orderview.Store, closes execution.CloseTracker, logger *slog.Logger) *Server {
-	s := &Server{venue: venue, view: view, closes: closes, logger: logger}
+//
+// proof is what the EXCHANGE said about this adapter's credential at startup, and
+// it is a required argument rather than an option because its zero value is the
+// honest one: an adapter that never proved its account reports an unverified claim,
+// and the OMS can tell the difference. An optional proof would default to "trust
+// me" in exactly the deployments nobody remembered to configure.
+func New(venue execution.Venue, view orderview.Store, closes execution.CloseTracker, proof execution.AccountProof, logger *slog.Logger) *Server {
+	s := &Server{venue: venue, view: view, closes: closes, proof: proof, logger: logger}
 	// A venue that cannot cancel AT the exchange would silently downgrade every
 	// cancel to a ledger-only entry while the order stays live. BinanceVenue is a
 	// Closer; assert it rather than discover otherwise in production.
@@ -119,6 +126,23 @@ func (s *Server) CancelOrder(ctx context.Context, req *venuepb.CancelOrderReques
 			"order_id", st.GetOrderId(), "err", err)
 	}
 	return &venuepb.CancelOrderResponse{}, nil
+}
+
+// Describe reports who this adapter is: the venue it trades, the exchange account
+// its credential belongs to, and whether the EXCHANGE ITSELF confirmed that.
+//
+// The OMS calls it at dial time and refuses to start when the answer disagrees with
+// its own configuration. That is the point: the account is the collateral boundary,
+// and before this RPC existed the OMS could only believe a string in its own
+// manifest — so a typo posted fills to one fund's ledger rows while the exchange
+// debited another's, with nothing in the platform able to notice.
+func (s *Server) Describe(context.Context, *venuepb.DescribeRequest) (*venuepb.DescribeResponse, error) {
+	return &venuepb.DescribeResponse{
+		Mic:               s.venue.MIC(),
+		Account:           s.venue.Account(),
+		AccountVerified:   s.proof.Verified,
+		ExchangeAccountId: s.proof.ExchangeAccountID,
+	}, nil
 }
 
 func (s *Server) recordStatus(ctx context.Context, st *orderpb.OrderState, next orderpb.OrderStatus) error {

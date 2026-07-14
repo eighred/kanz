@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -97,8 +98,13 @@ type openOrder struct {
 	Side          string `json:"side"`
 }
 
-// accountInfo is GET /api/v3/account (balances for reconciliation).
+// accountInfo is GET /api/v3/account (balances for reconciliation, and the uid that
+// says WHOSE account this key is — SOV-02a).
 type accountInfo struct {
+	// UID is Binance's own id for the account behind this API key. It is the only
+	// authority on which collateral pool this adapter's fills margin against; every
+	// other layer was believing a string a human typed.
+	UID      int64          `json:"uid"`
 	Balances []balanceEntry `json:"balances"`
 	Code     int            `json:"code"`
 	Msg      string         `json:"msg"`
@@ -128,6 +134,25 @@ func (c *binanceREST) account(ctx context.Context) (*accountInfo, error) {
 		return nil, &APIError{Code: out.Code, Msg: out.Msg}
 	}
 	return &out, nil
+}
+
+// ExchangeAccountID asks Binance which account this API key belongs to (SOV-02a).
+//
+// It implements accountproof.Exchange, and it is called ONCE at startup: the adapter
+// refuses to trade if Binance names an account other than the one the deployment says
+// it is. An account response with NO uid is an error, never "" — an empty id would
+// compare equal to nothing and would sail upstream as a verified account, which is
+// precisely how an unproven adapter would boot looking proven.
+func (c *binanceREST) ExchangeAccountID(ctx context.Context) (string, error) {
+	info, err := c.account(ctx)
+	if err != nil {
+		return "", err
+	}
+	if info.UID == 0 {
+		return "", errors.New("binance: GET /api/v3/account carried no uid — the exchange did not say which account " +
+			"this API key belongs to, so it cannot be verified")
+	}
+	return strconv.FormatInt(info.UID, 10), nil
 }
 
 // openOrders fetches working orders (GET /api/v3/openOrders, weight 3 per

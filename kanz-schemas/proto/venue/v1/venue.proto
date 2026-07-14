@@ -58,6 +58,50 @@ service VenueAdapterService {
   // `success=false` with an OK status, which is exactly the ambiguity the
   // healing seam exists to prevent.
   rpc CancelOrder(CancelOrderRequest) returns (CancelOrderResponse);
+
+  // Describe reports WHO THIS ADAPTER IS: the venue it trades and, more
+  // importantly, the EXCHANGE ACCOUNT its API credential belongs to.
+  //
+  // The account is the collateral boundary (EXEC-M16). An exchange margins, nets
+  // and LIQUIDATES per account, so a fill posted against the wrong account's
+  // ledger rows is not imprecise — it is wrong in the direction that spends
+  // another fund's margin. The OMS used to learn the account from a string in its
+  // own manifest (OMS_VENUE_ENDPOINTS="MIC/account=addr"), which means a typo
+  // there posted fills to the wrong fund's books while the exchange debited the
+  // right one, and NOTHING could see it: the OMS had no way to ask.
+  //
+  // The adapter is the only process that HOLDS the credential, so it is the only
+  // one that can be asked. The OMS calls this at DIAL TIME and refuses to start
+  // when the answer disagrees with what it was told — a mismatch is not a typo to
+  // paper over, it is a false statement about whose money moves.
+  rpc Describe(DescribeRequest) returns (DescribeResponse);
+}
+
+message DescribeRequest {}
+
+message DescribeResponse {
+  // ISO 10383 venue code this adapter trades.
+  string mic = 1;
+
+  // The exchange account this adapter's API credential belongs to — the platform's
+  // OWN name for the collateral pool (e.g. "binance-main", "okx-sub-1"), the same
+  // identity stamped on every OrderState, Fill and LedgerEntry as venue_account_id.
+  string account = 2;
+
+  // Whether the EXCHANGE confirmed that this adapter's API key really belongs to
+  // `account`, by answering with the account id below at startup.
+  //
+  // False means NOBODY has verified it: the adapter is asserting an account it was
+  // configured with, and a mis-configured deployment is indistinguishable from a
+  // correct one. It is a bool and not an enum because there are exactly two states
+  // — the exchange said so, or nobody did.
+  bool account_verified = 3;
+
+  // The EXCHANGE'S OWN id for the account behind the credential (a Binance/OKX
+  // uid), as reported by the exchange. This is what `account` is a label FOR: the
+  // operator binds the two, and the adapter proves the binding against the venue.
+  // Empty when unverified.
+  string exchange_account_id = 4;
 }
 
 message ExecuteRequest {

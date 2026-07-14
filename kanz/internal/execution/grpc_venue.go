@@ -50,13 +50,15 @@ func NewGRPCVenue(mic, account string, conn *grpc.ClientConn, tenant string) *GR
 func (v *GRPCVenue) MIC() string { return v.mic }
 
 // Account is the exchange account behind this adapter's API credential, as declared
-// in OMS_VENUE_ENDPOINTS.
+// in OMS_VENUE_ENDPOINTS — and CHECKED against the adapter itself at dial time
+// (SOV-02a).
 //
-// THE OMS TAKES THIS ON TRUST. The adapter holds the key; it does not report which
-// account the key belongs to (venue.v1 has no such RPC), so a mis-declared endpoint
-// would post fills to the wrong account's ledger rows while the exchange debited the
-// right one. Having the adapter report its own account is the fix, and it is not
-// built yet.
+// It used to be taken on trust: the adapter held the key and had no way to report
+// which account the key belonged to, so a mis-declared endpoint posted fills to the
+// wrong account's ledger rows while the exchange debited the right one. The OMS now
+// asks (Describe) and refuses to start when the answer disagrees, so by the time this
+// value is readable it is the account the ADAPTER says it holds, not merely the one a
+// manifest claimed.
 func (v *GRPCVenue) Account() string { return v.account }
 
 // Execute works st at the remote venue and returns the fills it produced.

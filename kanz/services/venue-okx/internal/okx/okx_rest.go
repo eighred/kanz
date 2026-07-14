@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -219,6 +220,48 @@ func (c *okxREST) balances(ctx context.Context) (map[string]string, error) {
 		}
 	}
 	return m, nil
+}
+
+// okxAccountConfig is GET /api/v5/account/config — the account behind the credential.
+type okxAccountConfig struct {
+	Code string `json:"code"`
+	Msg  string `json:"msg"`
+	Data []struct {
+		// UID is OKX's own id for the account this API key belongs to. OKX returns it
+		// as a STRING (unlike Binance's numeric uid), so it is kept as one — the value
+		// is an identity to compare, never a number to do arithmetic on.
+		UID string `json:"uid"`
+	} `json:"data"`
+}
+
+// ExchangeAccountID asks OKX which account this API key belongs to (SOV-02a).
+//
+// It implements accountproof.Exchange, and it is called ONCE at startup: the adapter
+// refuses to trade if OKX names an account other than the one the deployment claims.
+// An empty uid is an ERROR, never "" — an empty id would compare equal to nothing and
+// would ride upstream as a verified account, which is exactly how an unproven adapter
+// would boot looking proven.
+func (c *okxREST) ExchangeAccountID(ctx context.Context) (string, error) {
+	if !c.bucket.Allow(1) {
+		c.onThrottle()
+		return "", ErrRateLimited
+	}
+	raw, err := c.signedRequest(ctx, http.MethodGet, "/api/v5/account/config", nil)
+	if err != nil {
+		return "", err
+	}
+	var out okxAccountConfig
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return "", fmt.Errorf("okx: decode account config: %w", err)
+	}
+	if out.Code != "0" {
+		return "", &APIError{Code: atoiSafe(out.Code), Msg: out.Msg}
+	}
+	if len(out.Data) == 0 || out.Data[0].UID == "" {
+		return "", errors.New("okx: GET /api/v5/account/config carried no uid — the exchange did not say which " +
+			"account this API key belongs to, so it cannot be verified")
+	}
+	return out.Data[0].UID, nil
 }
 
 // tickerPrice returns the last price for an instrument (public GET
