@@ -21,11 +21,11 @@ import (
 const defaultDrainGrace = 5 * time.Second
 
 // drainStopSlack is added on top of the drain grace period before Subscribe gives
-// up on Drain() and falls back to Stop(). A well-behaved handler that honors ctx
+// up waiting on Drain() and returns anyway. A well-behaved handler that honors ctx
 // cancellation returns (and gets Nak'd) within microseconds of the grace deadline,
 // so Drain ordinarily finishes just after `grace` elapses — this margin exists
 // only to bound the pathological case (a handler that never observes ctx) rather
-// than to be routinely used.
+// than to be routinely used. It does not stop anything by itself; see Subscribe.
 const drainStopSlack = 2 * time.Second
 
 // natsKeyHeader carries Message.Key over NATS, which lacks a native
@@ -249,12 +249,24 @@ func (c *NATSClient) Subscribe(ctx context.Context, subject, group string, h Han
 		// deadline, NAK'd immediately above. Nothing was left in limbo.
 	case <-time.After(grace + drainStopSlack):
 		// Drain did not finish within a bounded safety margin past the handler
-		// deadline — e.g. a handler that never observes ctx cancellation. Hard
-		// stop rather than hang shutdown forever. This is the last resort, not
-		// the common case: a handler that honors ctx returns (and gets NAK'd)
-		// promptly once drainCtx expires, so Drain ordinarily finishes just
-		// after `grace`, well inside this margin.
-		cc.Stop()
+		// deadline. This is what actually bounds Subscribe's return — not a
+		// fallback Stop() call, which would not help here: jetstream's
+		// ConsumeContext.Stop() and Drain() share one CompareAndSwap-guarded
+		// "closed" flag (nats.go jetstream/pull.go), Drain() above already won
+		// it, so a Stop() call at this point no-ops (its own CAS fails and it
+		// returns immediately, unsubscribing and discarding nothing).
+		//
+		// The only way this branch fires is a handler that never observes
+		// drainCtx cancellation and is stuck mid-call. Neither Stop() nor
+		// Drain() can preempt a goroutine blocked inside a synchronous
+		// callback, so that handler invocation keeps running on the NATS
+		// client's per-subscription dispatch goroutine, and jetstream's
+		// internal consumer-monitor goroutine stays up alongside it, until the
+		// handler eventually returns or the process exits. Subscribe returning
+		// here does not reclaim either goroutine — it only stops this function
+		// from blocking shutdown on a handler that will not cooperate. The
+		// real backstop for that case is the process being killed (the pod's
+		// terminationGracePeriodSeconds), not this select.
 	}
 	return nil
 }
