@@ -12,6 +12,7 @@ import (
 	"log/slog"
 	"sync"
 
+	"github.com/kanz-eng/kanz/internal/platform/subject"
 	"github.com/kanz-eng/kanz/internal/risk/ingest"
 	"github.com/kanz-eng/kanz/pkg/bus"
 )
@@ -25,9 +26,14 @@ const DefaultConsumerGroup = "risk-engine"
 // stateSubjects are the three risk state subjects the engine ingests
 // (subject == event_type per subject-taxonomy §1). The Ingestor's
 // dispatch keys on env.EventType, so a subject and its event_type match.
+// The POSITION subject is the WILDCARD now (EXEC-M20): a position rides one subject per
+// (tenant, portfolio, instrument) on a compacted stream, so the flat name no longer
+// carries anything. The engine keeps its DURABLE GROUP — its state is already durable
+// (PERS-01 snapshots), so it does not need to re-arm from the stream at boot, and a group
+// is what keeps one delivery per event across its replicas.
 var stateSubjects = []string{
 	ingest.EventTypePortfolioRevalued,
-	ingest.EventTypePositionChanged,
+	subject.PositionAll,
 	ingest.EventTypePortfolioSnapshot,
 }
 

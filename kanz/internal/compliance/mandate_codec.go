@@ -10,6 +10,8 @@ import (
 	lifecyclepb "github.com/kanz-eng/kanz-schemas-go/lifecycle/v1"
 	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/proto"
+
+	"github.com/kanz-eng/kanz/internal/platform/subject"
 )
 
 // Compliance-domain subjects and event types. A mandate change is carried as a
@@ -66,15 +68,9 @@ func SubjectMandateFor(tenantID, portfolioID string) string {
 	return SubjectMandateChanged + "." + subjectToken(tenantID) + "." + subjectToken(portfolioID)
 }
 
-// subjectToken makes an id safe as a NATS subject token: `.` would split it into
-// two tokens and `*`/`>` are wildcards, so an id containing one would silently
-// widen or narrow what a consumer matches.
-func subjectToken(s string) string {
-	if s == "" {
-		return "_"
-	}
-	return strings.NewReplacer(".", "_", "*", "_", ">", "_", " ", "_").Replace(s)
-}
+// subjectToken is subject.Token, promoted to internal/platform/subject on the
+// second-consumer trigger (positions now build a subject the same way — EXEC-M20).
+func subjectToken(s string) string { return subject.Token(s) }
 
 // MarshalMandateValue renders a Mandate as the canonical serialized value stored
 // in ConfigChanged.new_value. protojson (not binary) keeps the audited value

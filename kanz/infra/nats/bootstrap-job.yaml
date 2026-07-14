@@ -44,7 +44,17 @@ data:
     # is the durable log of record. platform/data keep longer (lifecycle +
     # FACT-grade data-quality signals); observability is ephemeral.
     ensure_stream MARKET        "market.>"        24h
-    ensure_stream RISK          "risk.>"          24h
+    # RISK is NARROWED, and deliberately: it used to be the wildcard `risk.>`, which
+    # swallowed risk.position.> too. A subject can belong to exactly ONE stream in
+    # JetStream, so positions could not be given the compacted, never-ageing stream they
+    # need (POSITION, below) while `risk.>` still claimed them.
+    #
+    # An unbound subject is not a soft failure — a JetStream publish to one is a hard error,
+    # and a consumer on one 404s and takes its whole group down. That is why this list is
+    # explicit rather than clever: test/arch's TestEverySubjectIsCarriedByAStream walks the
+    # AST for every subject the code names and fails the build if any of them is not carried
+    # here, so narrowing this is guarded rather than a gamble.
+    ensure_stream RISK          "risk.portfolio.>,risk.exposure.>,risk.signal.>,risk.command.>" 24h
     # EXECUTION also carries strategy.> and order.> — the signal→order path.
     # bus.Publish is a JETSTREAM publish, so a subject with no stream bound to it
     # is not "fire and forget", it is a hard publish failure. Both subjects were
@@ -109,6 +119,28 @@ data:
     # 0 = NEVER AGE OUT (the CLI rejects -1 on the edit path); one message per subject
     # = the mandate IN FORCE.
     ensure_stream MANDATE       "compliance.mandate.>" 0 --max-msgs-per-subject=1
+
+    # POSITION — the same shape, for the same reason (EXEC-M20).
+    #
+    #   A POSITION IS STATE, NOT AN EVENT. Every position FACT used to ride the flat
+    #   `risk.position.changed` on the 24h RISK stream, which is wrong twice over:
+    #
+    #     · JetStream compacts PER SUBJECT, so a flat subject retains ONE message for the
+    #       whole platform — DeliverLastPerSubject gives a booting consumer one instrument's
+    #       position and silence about every other.
+    #     · a 24h max-age means a holding that has not traded today AGES OFF THE STREAM, and
+    #       the next restart is blind to it. A position must not expire, for the same reason
+    #       a mandate must not.
+    #
+    #   What that cost: the compliance monitor's book is in-memory, filled by a durable
+    #   consumer that resumes at its last ack. A restarted monitor came back with a PARTIAL
+    #   book — and a fund holding an instrument its mandate FORBIDS looked compliant, because
+    #   the holding was not there to see. The control did not fail. It went blind.
+    #
+    #   --max-msgs-per-subject=1 + no max-age makes this stream the CURRENT BOOK: one
+    #   retained message per (tenant, portfolio, instrument), forever, so a consumer arms
+    #   itself with the whole thing in one read.
+    ensure_stream POSITION      "risk.position.>" 0 --max-msgs-per-subject=1
     # Dead-letter: poison events need investigation runway.
     ensure_stream DLQ           "dlq.>"           720h
 

@@ -130,6 +130,18 @@ func runConsumers(ctx context.Context, cfg config.Config, readiness *server.Read
 	// The mandate registry arms by BROADCAST — see the OMS's comment. A durable group
 	// here meant a restarted compliance pod came back with an empty registry and
 	// silently governed nothing (EXEC-M13).
+	// THE MONITOR ARMS ITSELF AT BOOT, exactly as the mandate registry does (EXEC-M20).
+	//
+	// Its book was filled by a durable consumer GROUP, which resumes at its last ack — so
+	// a restarted monitor came back with an EMPTY book and rebuilt it only as new position
+	// FACTs happened to arrive. An instrument that did not trade again was simply gone, and
+	// a fund holding an instrument its mandate FORBIDS looked compliant, because the holding
+	// was not there to see. The control did not fail; it went blind.
+	//
+	// SubscribeBroadcast delivers DeliverLastPerSubject over the compacted POSITION stream,
+	// so a booting pod learns the CURRENT state of every holding in one read. (This is why
+	// the service stays at replicas: 1 — broadcast means every pod folds every position and
+	// would emit its own duplicate breach FACT. Lifting that pin is a separate decision.)
 	var subs []sub
 	for _, s := range cfg.MonitorSubjects() {
 		subs = append(subs, sub{s, mon.Handle})
@@ -159,8 +171,8 @@ func runConsumers(ctx context.Context, cfg config.Config, readiness *server.Read
 		wg.Add(1)
 		go func(s sub) {
 			defer wg.Done()
-			logger.Info("compliance subscribing", "subject", s.subject, "group", cfg.ConsumerGroup)
-			err := consumer.Subscribe(ctx, s.subject, cfg.ConsumerGroup, s.handler)
+			logger.Info("compliance arming the post-trade book", "subject", s.subject)
+			err := consumer.SubscribeBroadcast(ctx, s.subject, s.handler)
 			if err != nil && !errors.Is(err, context.Canceled) {
 				once.Do(func() {
 					firstErr = err

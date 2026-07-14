@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	comp "github.com/kanz-eng/kanz/internal/compliance"
+	"github.com/kanz-eng/kanz/internal/platform/subject"
 )
 
 // Config is the compliance service runtime configuration, sourced from the
@@ -22,11 +23,15 @@ type Config struct {
 	ConsumerGroup string
 }
 
-// PositionSubject is the position-changed FACT the monitor re-evaluates on — the
-// same subject the OMS projector publishes and the risk engine ingests. The
-// literal mirrors risk's ingest.EventTypePositionChanged without importing the
-// risk-internal package (RISK-02 boundary).
-const PositionSubject = "risk.position.changed"
+// PositionSubject is what the monitor BINDS: every holding's latest state
+// (EXEC-M20). It is the wildcard, not the flat subject, because a position now rides
+// one subject per (tenant, portfolio, instrument) on a COMPACTED stream — which is what
+// lets a booting monitor rebuild the whole book in one read instead of resuming past it.
+//
+// subject.PositionAll lives in internal/platform/subject, not internal/risk: the OMS
+// publishes it and this service consumes it, and the RISK-02 boundary forbids outsiders
+// importing risk internals.
+const PositionSubject = subject.PositionAll
 
 // MonitorSubjects are the FACTs the post-trade monitor consumes: position
 // changes (re-evaluate) and mandate changes (keep the registry current so a

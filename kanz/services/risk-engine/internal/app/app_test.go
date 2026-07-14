@@ -10,6 +10,7 @@ package app_test
 import (
 	"context"
 	"sort"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -20,6 +21,7 @@ import (
 	domainpb "github.com/kanz-eng/kanz-schemas-go/domain/v1"
 	envelopepb "github.com/kanz-eng/kanz-schemas-go/envelope/v1"
 
+	"github.com/kanz-eng/kanz/internal/platform/subject"
 	risk "github.com/kanz-eng/kanz/internal/risk"
 	v1 "github.com/kanz-eng/kanz/internal/risk/api/v1"
 	"github.com/kanz-eng/kanz/internal/risk/compute"
@@ -44,9 +46,38 @@ type memBus struct {
 
 func newMemBus() *memBus { return &memBus{subs: map[string][]chan bus.Message{}} }
 
+// subjectMatches is NATS subject matching: tokens split on `.`, `*` matches exactly one
+// token, `>` matches one or more trailing tokens.
+//
+// The fake used to compare subjects with `==`, which a real broker does not do — and the
+// moment the risk engine bound a WILDCARD (risk.position.>, EXEC-M20) the fake silently
+// delivered nothing while the broker would have delivered everything. A fake that cannot
+// match the way the broker matches is a fake that cannot fail the way the broker fails.
+func subjectMatches(pattern, subj string) bool {
+	p := strings.Split(pattern, ".")
+	s := strings.Split(subj, ".")
+	for i, tok := range p {
+		if tok == ">" {
+			return i < len(s) // `>` needs at least one token to swallow
+		}
+		if i >= len(s) {
+			return false
+		}
+		if tok != "*" && tok != s[i] {
+			return false
+		}
+	}
+	return len(p) == len(s)
+}
+
 func (m *memBus) Publish(ctx context.Context, msg bus.Message) error {
 	m.mu.Lock()
-	chans := append([]chan bus.Message(nil), m.subs[msg.Subject]...)
+	var chans []chan bus.Message
+	for pattern, cs := range m.subs {
+		if subjectMatches(pattern, msg.Subject) {
+			chans = append(chans, cs...)
+		}
+	}
 	m.mu.Unlock()
 	for _, ch := range chans {
 		select {
@@ -81,10 +112,14 @@ func (m *memBus) subscriberCount(subject string) int {
 	return len(m.subs[subject])
 }
 
-// inputSubjects are the three risk state subjects the engine subscribes.
+// inputSubjects are the three risk state subjects the engine subscribes. The position
+// one is the WILDCARD (EXEC-M20): a holding rides one subject per (tenant, portfolio,
+// instrument) on a compacted stream, so the engine binds risk.position.> — and this list
+// must say what the engine actually binds, or waitSubscribed waits for a subscription
+// nobody ever makes.
 var inputSubjects = []string{
 	ingest.EventTypePortfolioRevalued,
-	ingest.EventTypePositionChanged,
+	subject.PositionAll,
 	ingest.EventTypePortfolioSnapshot,
 }
 
@@ -154,10 +189,15 @@ func subscribeOutput(t *testing.T, broker *memBus, subject string, onMsg func(*e
 // one portfolio through the broker, mirroring a real upstream producer.
 func publishState(t *testing.T, prod *bus.Producer, pk string, asOf time.Time, marketValue int64) {
 	t.Helper()
-	emit := func(subject, schemaRef string, payload proto.Message) {
+	// subj and eventType are SEPARATE now (EXEC-M20): a position rides one subject per
+	// holding, while its event_type stays the taxonomy name. Publishing the flat subject
+	// here would test a producer that no longer exists — the OMS emits
+	// risk.position.changed.<tenant>.<portfolio>.<instrument>, and the engine binds the
+	// wildcard over it.
+	emit := func(subj, eventType, schemaRef string, payload proto.Message) {
 		if err := prod.Publish(context.Background(), bus.Event{
-			Subject:          subject,
-			EventType:        subject,
+			Subject:          subj,
+			EventType:        eventType,
 			EventClass:       envelopepb.EventClass_EVENT_CLASS_FACT,
 			SchemaVersion:    1,
 			Domain:           "risk",
@@ -166,13 +206,13 @@ func publishState(t *testing.T, prod *bus.Producer, pk string, asOf time.Time, m
 			PayloadSchemaRef: schemaRef,
 			Payload:          payload,
 		}); err != nil {
-			t.Fatalf("publish %s: %v", subject, err)
+			t.Fatalf("publish %s: %v", subj, err)
 		}
 	}
-	emit(ingest.EventTypePortfolioRevalued, "domain.v1.PortfolioState:1", &domainpb.PortfolioState{
+	emit(ingest.EventTypePortfolioRevalued, ingest.EventTypePortfolioRevalued, "domain.v1.PortfolioState:1", &domainpb.PortfolioState{
 		PortfolioId: pk, BaseCurrency: "USD", AsOf: timestamppb.New(asOf),
 	})
-	emit(ingest.EventTypePositionChanged, "domain.v1.PositionState:1", &domainpb.PositionState{
+	emit(subject.PositionFor("acme", pk, "AAPL"), ingest.EventTypePositionChanged, "domain.v1.PositionState:1", &domainpb.PositionState{
 		PortfolioId: pk, InstrumentId: "AAPL", MarketValue: money(marketValue, "USD"), AsOf: timestamppb.New(asOf),
 	})
 }

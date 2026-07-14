@@ -34,12 +34,12 @@ import (
 	domainpb "github.com/kanz-eng/kanz-schemas-go/domain/v1"
 	envelopepb "github.com/kanz-eng/kanz-schemas-go/envelope/v1"
 
+	"github.com/kanz-eng/kanz/internal/platform/subject"
 	"github.com/kanz-eng/kanz/pkg/bus"
 )
 
 const (
 	positionEventType = "risk.position.changed"
-	positionSubject   = "risk.position.changed"
 	positionDomain    = "risk"
 	positionSchemaRef = "domain.v1.PositionState:1"
 )
@@ -111,7 +111,7 @@ func main() {
 			if portfolios > 1 {
 				portfolio = fmt.Sprintf("%s-%04d", prefix, rng.Intn(portfolios))
 			}
-			ev := tick(portfolio, instruments[rng.Intn(len(instruments))], rng)
+			ev := tick(tenant, portfolio, instruments[rng.Intn(len(instruments))], rng)
 			if err := producer.Publish(ctx, ev); err != nil {
 				atomic.AddInt64(&failed, 1)
 			} else {
@@ -124,7 +124,7 @@ func main() {
 // tick builds one PositionState update — a fresh mark on a random instrument of a
 // random portfolio, partition-keyed by portfolio so per-aggregate ordering holds
 // (RISK-05) and the shard fan-out (PARITY-05a) keys on the same id.
-func tick(portfolio, instrument string, rng *rand.Rand) bus.Event {
+func tick(tenant, portfolio, instrument string, rng *rand.Rand) bus.Event {
 	now := time.Now().UTC()
 	qty := int64(100 + rng.Intn(900))
 	px := int64(10_000 + rng.Intn(40_000)) // cents·100
@@ -137,7 +137,10 @@ func tick(portfolio, instrument string, rng *rand.Rand) bus.Event {
 		AsOf:         timestamppb.New(now),
 	}
 	return bus.Event{
-		Subject:          positionSubject,
+		// ONE SUBJECT PER HOLDING (EXEC-M20). The flat subject is no longer carried by any
+		// stream, and a JetStream publish to an unbound subject is a HARD ERROR — so a
+		// seeder still using it would not degrade, it would fail outright.
+		Subject:          subject.PositionFor(tenant, portfolio, instrument),
 		EventType:        positionEventType,
 		EventClass:       envelopepb.EventClass_EVENT_CLASS_FACT,
 		SchemaVersion:    1,

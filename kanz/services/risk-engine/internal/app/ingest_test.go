@@ -15,6 +15,7 @@ import (
 	domainpb "github.com/kanz-eng/kanz-schemas-go/domain/v1"
 	envelopepb "github.com/kanz-eng/kanz-schemas-go/envelope/v1"
 
+	"github.com/kanz-eng/kanz/internal/platform/subject"
 	"github.com/kanz-eng/kanz/internal/risk/ingest"
 	"github.com/kanz-eng/kanz/internal/risk/state"
 	"github.com/kanz-eng/kanz/pkg/bus"
@@ -47,9 +48,18 @@ type fakeSub struct {
 	msgs map[string][]bus.Message
 }
 
+// Subscribe matches subjects the way a broker does, not with `==`. The engine binds
+// risk.position.> (EXEC-M20), and a fake that only compares strings would deliver nothing
+// while a real broker delivered everything — the fake would pass and production would
+// starve.
 func (f *fakeSub) Subscribe(ctx context.Context, subject, _ string, h bus.Handler) error {
-	for _, m := range f.msgs[subject] {
-		_ = h(ctx, m)
+	for subj, ms := range f.msgs {
+		if !subjectMatches(subject, subj) {
+			continue
+		}
+		for _, m := range ms {
+			_ = h(ctx, m)
+		}
 	}
 	<-ctx.Done()
 	return ctx.Err()
@@ -70,11 +80,11 @@ func produceState(t *testing.T, cc *captureClient) {
 		t.Fatalf("NewProducer: %v", err)
 	}
 	now := time.Now()
-	publish := func(subject, pk, schemaRef string, payload proto.Message) {
+	publish := func(subj, eventType, pk, schemaRef string, payload proto.Message) {
 		t.Helper()
 		if err := prod.Publish(context.Background(), bus.Event{
-			Subject:          subject,
-			EventType:        subject, // subject == event_type for risk state subjects
+			Subject:          subj,
+			EventType:        eventType,
 			EventClass:       envelopepb.EventClass_EVENT_CLASS_FACT,
 			SchemaVersion:    1,
 			Domain:           "risk",
@@ -83,14 +93,14 @@ func produceState(t *testing.T, cc *captureClient) {
 			PayloadSchemaRef: schemaRef,
 			Payload:          payload,
 		}); err != nil {
-			t.Fatalf("publish %s: %v", subject, err)
+			t.Fatalf("publish %s: %v", subj, err)
 		}
 	}
 
-	publish(ingest.EventTypePortfolioRevalued, "PORT-1", "domain.v1.PortfolioState:1", &domainpb.PortfolioState{
+	publish(ingest.EventTypePortfolioRevalued, ingest.EventTypePortfolioRevalued, "PORT-1", "domain.v1.PortfolioState:1", &domainpb.PortfolioState{
 		PortfolioId: "PORT-1", BaseCurrency: "USD", AsOf: timestamppb.New(now),
 	})
-	publish(ingest.EventTypePositionChanged, "PORT-1", "domain.v1.PositionState:1", &domainpb.PositionState{
+	publish(subject.PositionFor("acme", "PORT-1", "AAPL"), ingest.EventTypePositionChanged, "PORT-1", "domain.v1.PositionState:1", &domainpb.PositionState{
 		PortfolioId: "PORT-1", InstrumentId: "AAPL", MarketValue: money(1000, "USD"), AsOf: timestamppb.New(now),
 	})
 }
@@ -190,7 +200,7 @@ type errBoomT string
 func (e errBoomT) Error() string { return string(e) }
 
 func TestIngest_SubscribeFailureSurfaces(t *testing.T) {
-	consumer, _ := bus.NewConsumer(&errSub{failOn: ingest.EventTypePositionChanged})
+	consumer, _ := bus.NewConsumer(&errSub{failOn: subject.PositionAll}) // the subject the engine actually binds (EXEC-M20)
 	ing, _ := app.NewIngest(consumer, state.NewStore(), "", discardLogger())
 
 	done := make(chan error, 1)

@@ -123,7 +123,7 @@ func runConsumers(ctx context.Context, cfg config.Config, readiness *server.Read
 	defer closeStores()
 
 	// OMS-01e: fill→position projector over the shared book.
-	projector, err := position.NewProjector(book, producer)
+	projector, err := position.NewProjector(book, producer, cfg.Tenant)
 	if err != nil {
 		return err
 	}

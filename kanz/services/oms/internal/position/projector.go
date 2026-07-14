@@ -9,6 +9,7 @@ import (
 	orderpb "github.com/kanz-eng/kanz-schemas-go/order/v1"
 	"google.golang.org/protobuf/proto"
 
+	"github.com/kanz-eng/kanz/internal/platform/subject"
 	"github.com/kanz-eng/kanz/pkg/bus"
 )
 
@@ -22,8 +23,9 @@ type Bus interface {
 // it folds each fill into the Book and publishes the resulting PositionState on
 // positionEventChanged (the risk engine's existing input subject).
 type Projector struct {
-	book Store
-	bus  Bus
+	book   Store
+	bus    Bus
+	tenant string
 }
 
 // NewProjector wires a position Store to a Bus.
@@ -31,11 +33,17 @@ type Projector struct {
 // It takes the STORE, not the in-memory Book: what this publishes is the fund's ABSOLUTE
 // position, and with `replicas: 2` a per-pod map publishes a fraction of it as though it
 // were the whole (EXEC-M18).
-func NewProjector(book Store, b Bus) (*Projector, error) {
+func NewProjector(book Store, b Bus, tenant string) (*Projector, error) {
 	if book == nil || b == nil {
 		return nil, errors.New("position: store and bus required")
 	}
-	return &Projector{book: book, bus: b}, nil
+	if tenant == "" {
+		// The tenant is a TOKEN IN THE SUBJECT now (EXEC-M20). An empty one would put
+		// every tenant's holdings on the same subject, where a compacted stream keeps
+		// one and silently discards the rest.
+		return nil, errors.New("position: tenant required — it is a token in the position subject")
+	}
+	return &Projector{book: book, bus: b, tenant: tenant}, nil
 }
 
 // Handle is the bus.EventHandler for fill FACTs.
@@ -58,8 +66,12 @@ func (p *Projector) Handle(ctx context.Context, env *envelopepb.Envelope, payloa
 }
 
 func (p *Projector) publish(ctx context.Context, st *domainpb.PositionState) error {
+	// ONE SUBJECT PER HOLDING (EXEC-M20). The subject carries (tenant, portfolio,
+	// instrument) so the POSITION stream compacts to the CURRENT state of each holding
+	// and a booting consumer can learn all of them in one read. The event_type stays the
+	// taxonomy name — consumers still dispatch on it.
 	return p.bus.Publish(ctx, bus.Event{
-		Subject:          positionEventChanged,
+		Subject:          subject.PositionFor(p.tenant, st.GetPortfolioId(), st.GetInstrumentId()),
 		EventType:        positionEventChanged,
 		EventClass:       envelopepb.EventClass_EVENT_CLASS_FACT,
 		SchemaVersion:    1,
