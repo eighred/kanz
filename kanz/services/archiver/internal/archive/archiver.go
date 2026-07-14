@@ -31,8 +31,10 @@ package archive
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
+	"sync"
 
 	"github.com/kanz-eng/kanz/pkg/bus"
 	"github.com/kanz-eng/kanz/services/archiver/internal/topic"
@@ -65,6 +67,11 @@ type Config struct {
 	Kafka    Publisher
 	NATS     Subscriber
 	Logger   *slog.Logger
+	// Ready, if set, is invoked once every subject's Subscribe goroutine has been
+	// launched — NOT once messages are flowing, since Subscribe itself doesn't
+	// signal that. It lets a caller (main) flip readiness only after subscriptions
+	// are actually being established, instead of at construction time.
+	Ready func()
 	// Metrics is added in Task 6. Leave it out for now.
 }
 
@@ -76,16 +83,46 @@ type Archiver struct {
 // New builds an Archiver.
 func New(cfg Config) *Archiver { return &Archiver{cfg: cfg} }
 
-// Run subscribes every configured subject and blocks until ctx is done.
+// Run subscribes every configured subject CONCURRENTLY and blocks until ctx is
+// done or a subscription fails.
+//
+// bus.NATSClient.Subscribe does not return until ctx is done — it is a blocking,
+// per-subject call by design (one JetStream consumer per subject). A sequential
+// loop over cfg.Subjects therefore blocks forever inside its first iteration,
+// leaving every subject after the first NEVER subscribed for the life of the
+// process while the service reports healthy. Each subject gets its own
+// goroutine instead — mirroring lake-sink's runSink (services/lake-sink/cmd/lake-sink/main.go).
+//
+// The first non-cancellation error cancels the remaining subscriptions and is
+// returned: a broken subscription must bring the archiver down, not silently
+// archive fourteen of fifteen streams.
 func (a *Archiver) Run(ctx context.Context) error {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	var (
+		wg       sync.WaitGroup
+		once     sync.Once
+		firstErr error
+	)
 	for _, subject := range a.cfg.Subjects {
-		if err := a.cfg.NATS.Subscribe(ctx, subject, a.cfg.Group, a.Handle); err != nil {
-			return fmt.Errorf("archiver: subscribe %q: %w", subject, err)
-		}
-		a.cfg.Logger.Info("archiving", "subject", subject, "group", a.cfg.Group, "tenant", a.cfg.Tenant)
+		wg.Add(1)
+		go func(subject string) {
+			defer wg.Done()
+			a.cfg.Logger.Info("archiving", "subject", subject, "group", a.cfg.Group, "tenant", a.cfg.Tenant)
+			if err := a.cfg.NATS.Subscribe(ctx, subject, a.cfg.Group, a.Handle); err != nil && !errors.Is(err, context.Canceled) {
+				once.Do(func() {
+					firstErr = fmt.Errorf("archiver: subscribe %q: %w", subject, err)
+					cancel()
+				})
+			}
+		}(subject)
 	}
-	<-ctx.Done()
-	return nil
+	if a.cfg.Ready != nil {
+		a.cfg.Ready()
+	}
+	wg.Wait()
+	return firstErr
 }
 
 // Handle archives one message. A non-nil return NACKs it — which is the point: the

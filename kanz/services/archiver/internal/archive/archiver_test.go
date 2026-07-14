@@ -5,7 +5,9 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"sync"
 	"testing"
+	"time"
 
 	envelopepb "github.com/kanz-eng/kanz-schemas-go/envelope/v1"
 	"google.golang.org/protobuf/proto"
@@ -112,5 +114,77 @@ func TestHandle_UndecodableBodyNacks(t *testing.T) {
 	k := &fakeKafka{}
 	if err := newArchiver(k).Handle(context.Background(), bus.Message{Body: []byte("not a protobuf envelope")}); err == nil {
 		t.Fatal("garbage body was accepted — expected a refusal")
+	}
+}
+
+// blockingSubscriber mimics bus.NATSClient.Subscribe: it does not return until ctx
+// is done. Each call records its subject the instant it is invoked, BEFORE
+// blocking — which is what lets the test observe "was this subject ever
+// subscribed" without waiting for the (never-happening, pre-fix) return.
+type blockingSubscriber struct {
+	mu       sync.Mutex
+	subjects []string
+	calledCh chan string
+}
+
+func (b *blockingSubscriber) Subscribe(ctx context.Context, subject, _ string, _ bus.Handler) error {
+	b.mu.Lock()
+	b.subjects = append(b.subjects, subject)
+	b.mu.Unlock()
+	b.calledCh <- subject
+	<-ctx.Done()
+	return nil
+}
+
+// TestRun_SubscribesEveryConfiguredSubject is the regression test for the
+// CRITICAL finding: Run() looped over subjects and called the (blocking)
+// Subscribe SEQUENTIALLY, so it never got past subject #1 — subjects 2..N were
+// never subscribed for the life of the process while the service reported
+// healthy. bus.NATSClient.Subscribe genuinely blocks until ctx.Done() (see
+// pkg/bus/nats.go), so a non-blocking fake would not catch this; this fake
+// blocks the same way.
+func TestRun_SubscribesEveryConfiguredSubject(t *testing.T) {
+	subjects := []string{"order.>", "strategy.>", "execution.>", "accounting.>"}
+	sub := &blockingSubscriber{calledCh: make(chan string, len(subjects))}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	a := archive.New(archive.Config{
+		Tenant:   "acme",
+		Group:    "archiver",
+		Subjects: subjects,
+		NATS:     sub,
+		Logger:   slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+
+	runDone := make(chan error, 1)
+	go func() { runDone <- a.Run(ctx) }()
+
+	got := map[string]bool{}
+	deadline := time.After(3 * time.Second)
+	for len(got) < len(subjects) {
+		select {
+		case s := <-sub.calledCh:
+			got[s] = true
+		case <-deadline:
+			t.Fatalf("timed out waiting for all subjects to be subscribed — only %v were ever subscribed, want all of %v (Run is blocking sequentially on the first subject)", got, subjects)
+		}
+	}
+
+	cancel()
+	select {
+	case err := <-runDone:
+		if err != nil {
+			t.Fatalf("Run returned error after ctx cancel: %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("Run did not return after ctx was cancelled")
+	}
+
+	for _, s := range subjects {
+		if !got[s] {
+			t.Errorf("subject %q was never subscribed", s)
+		}
 	}
 }
