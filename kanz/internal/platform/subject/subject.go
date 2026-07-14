@@ -45,6 +45,39 @@ func PositionFor(tenantID, portfolioID, instrumentID string) string {
 	return PositionChanged + "." + Token(tenantID) + "." + Token(portfolioID) + "." + Token(instrumentID)
 }
 
+// THE EXECUTION PLANE NEEDS TO KNOW WHICH VENUE HOLDS IT (EXEC-M19a).
+//
+// A fund's EXPOSURE does not care which exchange the BTC sits at: one instrument, one
+// number, and that is exactly what the risk engine and the compliance monitor consume. But
+// EXECUTION cannot work without it — a CLOSE signal must flatten what is held AT EACH
+// VENUE, and you cannot sell 1 BTC on Binance if it is sitting at OKX. The fill has always
+// carried the venue; the projector threw it away, so nothing could answer "how much BTC do
+// we hold at OKX" — and webhook-ingest's CLOSE path was wired to an EMPTY position map, so
+// a `close` alert produced ZERO orders and the webhook answered 202.
+//
+// So the OMS's book is keyed per (portfolio, venue, instrument) — the finest true grain —
+// and PROJECTED TWICE: the fund-level aggregate on PositionChanged (its consumers untouched,
+// and unable to lose a venue), and the per-venue holding here. One source of truth at two
+// granularities, each serving a consumer with a genuinely different need.
+//
+// The two subjects must never collide, and the aggregate's wildcard must never SWALLOW the
+// per-venue FACTs — a monitor that folded each venue as though it were the fund's total
+// would understate every limit it checks. `risk.position.changed.>` and
+// `risk.position.venue.changed.>` diverge at the third token, so neither matches the other.
+// Both still ride the compacted POSITION stream, which carries `risk.position.>`.
+const (
+	// VenuePositionChanged is the event_type of the per-venue holding FACT.
+	VenuePositionChanged = "risk.position.venue.changed"
+	// VenuePositionAll is what the execution plane BINDS: every venue of every holding.
+	VenuePositionAll = VenuePositionChanged + ".>"
+)
+
+// VenuePositionFor is the subject ONE holding AT ONE VENUE rides on.
+func VenuePositionFor(tenantID, portfolioID, venue, instrumentID string) string {
+	return VenuePositionChanged + "." +
+		Token(tenantID) + "." + Token(portfolioID) + "." + Token(venue) + "." + Token(instrumentID)
+}
+
 // Token makes an id safe as a single NATS subject token.
 //
 // A subject is DOT-DELIMITED, and `*` (one token) and `>` (all remaining tokens) are

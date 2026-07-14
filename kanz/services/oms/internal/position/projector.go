@@ -55,24 +55,47 @@ func (p *Projector) Handle(ctx context.Context, env *envelopepb.Envelope, payloa
 	if fill == nil {
 		return nil // not a fill-bearing event; ack
 	}
-	st, err := p.book.Apply(ctx, portfolioID, fill, fill.GetExecutedAt().AsTime())
+	applied, err := p.book.Apply(ctx, portfolioID, fill, fill.GetExecutedAt().AsTime())
 	if err != nil {
 		// Never publish a position we could not fold. A PositionState built from a failed
 		// write is a number the risk engine, the compliance monitor and the pre-trade gate
 		// would all believe. Returning the error nacks the fill, so the bus redelivers it.
 		return err
 	}
-	return p.publish(ctx, st)
+
+	// ONE BOOK, PUBLISHED TWICE (EXEC-M19a).
+	//
+	// The FUND-LEVEL position first: it is what the risk engine and the compliance monitor
+	// consume, and a fund's exposure does not care which exchange holds the BTC.
+	//
+	// Then the PER-VENUE holding: a CLOSE signal must flatten what EACH VENUE actually
+	// holds, and you cannot sell 1 BTC on Binance if it is sitting at OKX. The fill has
+	// always carried the venue; until now the projector threw it away, and webhook-ingest's
+	// CLOSE path was wired to an empty map because there was nothing to wire.
+	//
+	// The per-venue publish is NOT allowed to fail silently: a venue FACT that never lands
+	// leaves the execution plane's book missing a holding, and a holding it cannot see is a
+	// holding it will never close. Returning the error nacks the fill, and the aggregate is
+	// idempotent on redelivery (the fold is claimed exactly once), so the retry is safe.
+	if err := p.publish(ctx, subject.PositionFor(p.tenant, portfolioID, fill.GetInstrumentId()),
+		positionEventChanged, applied.Aggregate); err != nil {
+		return err
+	}
+	return p.publish(ctx,
+		subject.VenuePositionFor(p.tenant, portfolioID, fill.GetVenue(), fill.GetInstrumentId()),
+		subject.VenuePositionChanged, applied.Venue)
 }
 
-func (p *Projector) publish(ctx context.Context, st *domainpb.PositionState) error {
-	// ONE SUBJECT PER HOLDING (EXEC-M20). The subject carries (tenant, portfolio,
-	// instrument) so the POSITION stream compacts to the CURRENT state of each holding
-	// and a booting consumer can learn all of them in one read. The event_type stays the
-	// taxonomy name — consumers still dispatch on it.
+// publish emits one PositionState FACT.
+//
+// The SUBJECT carries the entity (EXEC-M20) so the compacted POSITION stream keeps the
+// current state of each holding and a booting consumer learns them all in one read. The
+// event_type stays the taxonomy name — consumers dispatch on it, and it is what tells them
+// whether this is the fund's position or one venue's.
+func (p *Projector) publish(ctx context.Context, subj, eventType string, st *domainpb.PositionState) error {
 	return p.bus.Publish(ctx, bus.Event{
-		Subject:          subject.PositionFor(p.tenant, st.GetPortfolioId(), st.GetInstrumentId()),
-		EventType:        positionEventChanged,
+		Subject:          subj,
+		EventType:        eventType,
 		EventClass:       envelopepb.EventClass_EVENT_CLASS_FACT,
 		SchemaVersion:    1,
 		Domain:           "risk",

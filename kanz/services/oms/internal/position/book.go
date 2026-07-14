@@ -26,7 +26,8 @@ import (
 	"github.com/kanz-eng/kanz/internal/dec"
 )
 
-type key struct{ portfolio, instrument string }
+// key: a holding is identified by WHERE it sits, not just what it is (EXEC-M19a).
+type key struct{ portfolio, venue, instrument string }
 
 // lot is the running state of one holding: signed quantity, the average cost of
 // the open position (always non-negative), and cumulative realized P&L.
@@ -62,14 +63,17 @@ func NewBook(baseCcy string) *Book {
 // handed it, each publishing an ABSOLUTE position built from a fraction of the trades
 // (EXEC-M18). Use Postgres in any deployment that runs more than one pod — which the
 // shipped one does. The ctx and error exist to satisfy Store; neither is used here.
-func (b *Book) Apply(_ context.Context, portfolioID string, fill *orderpb.Fill, asOf time.Time) (*domainpb.PositionState, error) {
+func (b *Book) Apply(_ context.Context, portfolioID string, fill *orderpb.Fill, asOf time.Time) (*Applied, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
-	k := key{portfolioID, fill.GetInstrumentId()}
+	if fill.GetVenue() == "" {
+		return nil, ErrFillHasNoVenue
+	}
+	k := key{portfolioID, fill.GetVenue(), fill.GetInstrumentId()}
 	l := b.lots[k]
 	if l == nil {
-		l = &lot{qty: new(big.Rat), avg: new(big.Rat), realized: new(big.Rat)}
+		l = zeroLot()
 		b.lots[k] = l
 	}
 
@@ -81,20 +85,48 @@ func (b *Book) Apply(_ context.Context, portfolioID string, fill *orderpb.Fill, 
 
 	foldLot(l, signed, price)
 
-	// Mark unrealized at the fill price: (price - avg) * qty.
-	unreal := new(big.Rat).Mul(new(big.Rat).Sub(price, l.avg), l.qty)
-	marketValue := new(big.Rat).Mul(price, l.qty)
+	return &Applied{
+		Venue:     b.stateOf(portfolioID, fill.GetVenue(), fill.GetInstrumentId(), l, price, asOf),
+		Aggregate: b.stateOf(portfolioID, "", fill.GetInstrumentId(), b.aggregate(portfolioID, fill.GetInstrumentId()), price, asOf),
+	}, nil
+}
 
+// aggregate sums every venue's holding of one instrument into the fund's position — the
+// same cost-weighted fold the durable store does in SQL. Caller holds b.mu.
+func (b *Book) aggregate(portfolioID, instrument string) *lot {
+	agg := zeroLot()
+	cost, absQty := new(big.Rat), new(big.Rat)
+	for k, l := range b.lots {
+		if k.portfolio != portfolioID || k.instrument != instrument {
+			continue
+		}
+		agg.qty.Add(agg.qty, l.qty)
+		agg.realized.Add(agg.realized, l.realized)
+		abs := new(big.Rat).Abs(l.qty)
+		absQty.Add(absQty, abs)
+		cost.Add(cost, new(big.Rat).Mul(abs, l.avg))
+	}
+	if absQty.Sign() != 0 {
+		agg.avg = new(big.Rat).Quo(cost, absQty)
+	}
+	return agg
+}
+
+// stateOf marks at the fill price (the latest trade). An empty venue is the fund-level
+// aggregate: it belongs to no single exchange.
+func (b *Book) stateOf(portfolioID, venue, instrument string, l *lot, price *big.Rat, asOf time.Time) *domainpb.PositionState {
+	unreal := new(big.Rat).Mul(new(big.Rat).Sub(price, l.avg), l.qty)
 	return &domainpb.PositionState{
 		PortfolioId:   portfolioID,
-		InstrumentId:  fill.GetInstrumentId(),
+		Venue:         venue,
+		InstrumentId:  instrument,
 		Quantity:      dec.ToProto(l.qty),
 		AveragePrice:  dec.ToProto(l.avg),
-		MarketValue:   b.money(marketValue),
+		MarketValue:   b.money(new(big.Rat).Mul(price, l.qty)),
 		RealizedPnl:   b.money(l.realized),
 		UnrealizedPnl: b.money(unreal),
 		AsOf:          timestamppb.New(asOf.UTC()),
-	}, nil
+	}
 }
 
 // foldLot mutates the lot by a signed fill quantity at price, applying
@@ -164,14 +196,21 @@ func (b *Book) Snapshot(_ context.Context, portfolioID string, asOf time.Time) (
 	ts := timestamppb.New(asOf.UTC())
 	nav := new(big.Rat)
 	var positions []*domainpb.PositionState
-	for k, l := range b.lots {
-		if k.portfolio != portfolioID {
+
+	// AGGREGATED ACROSS VENUES. BTC held at two exchanges is ONE instrument to a
+	// concentration limit; handing the gate two rows would let it check a limit against a
+	// fraction of the fund's actual holding.
+	seen := map[string]bool{}
+	for k := range b.lots {
+		if k.portfolio != portfolioID || seen[k.instrument] {
 			continue
 		}
+		seen[k.instrument] = true
+		l := b.aggregate(portfolioID, k.instrument)
 		mv := new(big.Rat).Mul(l.avg, l.qty)
 		nav.Add(nav, mv)
 		positions = append(positions, &domainpb.PositionState{
-			PortfolioId:  k.portfolio,
+			PortfolioId:  portfolioID,
 			InstrumentId: k.instrument,
 			Quantity:     dec.ToProto(l.qty),
 			AveragePrice: dec.ToProto(l.avg),

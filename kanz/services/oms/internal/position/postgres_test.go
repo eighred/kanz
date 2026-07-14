@@ -102,9 +102,12 @@ func freshSchema(t *testing.T, pool *pgxpool.Pool) {
 	}
 }
 
-// buy is one BUY fill of qty at price.
+// buy is one BUY fill of qty at price, at a venue — because a holding sits AT a venue and
+// the store refuses a fill that cannot say where it happened (EXEC-M19a).
 func buy(id, instrument, qty, price string, at time.Time) *orderpb.Fill {
-	return fillAt(id, instrument, qty, price, orderpb.Side_SIDE_BUY, at)
+	f := fillAt(id, instrument, qty, price, orderpb.Side_SIDE_BUY, at)
+	f.Venue = "XBIN"
+	return f
 }
 
 func fillAt(id, instrument, qty, price string, side orderpb.Side, at time.Time) *orderpb.Fill {
@@ -149,7 +152,7 @@ func TestTwoPodsConvergeOnOneBook(t *testing.T) {
 	}
 
 	// Pod B never saw fill f1. It must still publish the fund's REAL position.
-	if got := dec.FromProto(st.GetQuantity()); got.Cmp(big.NewRat(3, 1)) != 0 {
+	if got := dec.FromProto(st.Aggregate.GetQuantity()); got.Cmp(big.NewRat(3, 1)) != 0 {
 		t.Fatalf("pod B published position %s, want 3 — it folded only its own fill and asserted it as the ABSOLUTE position", got.RatString())
 	}
 
@@ -187,7 +190,7 @@ func TestTheSameFillIsCountedOnce(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := dec.FromProto(st.GetQuantity()); got.Cmp(big.NewRat(1, 1)) != 0 {
+	if got := dec.FromProto(st.Aggregate.GetQuantity()); got.Cmp(big.NewRat(1, 1)) != 0 {
 		t.Errorf("position = %s after the SAME fill was applied twice, want 1", got.RatString())
 	}
 }
@@ -213,7 +216,7 @@ func TestTheBookSurvivesARestart(t *testing.T) {
 		t.Fatal(err)
 	}
 	want, _ := new(big.Rat).SetString("5.1")
-	if got := dec.FromProto(st.GetQuantity()); got.Cmp(want) != 0 {
+	if got := dec.FromProto(st.Aggregate.GetQuantity()); got.Cmp(want) != 0 {
 		t.Errorf("position after restart = %s, want 5.1 — the restarted pod published a position built from nothing", got.RatString())
 	}
 }
@@ -237,5 +240,86 @@ func TestPositionsAreTenantIsolated(t *testing.T) {
 	}
 	if n := len(snap.GetPositions()); n != 0 {
 		t.Errorf("another tenant read %d of acme's positions, want 0", n)
+	}
+}
+
+// buyAtVenue is a BUY fill AT a venue — which is where a holding actually sits.
+func buyAtVenue(id, instrument, venue, qty, price string, at time.Time) *orderpb.Fill {
+	f := buy(id, instrument, qty, price, at)
+	f.Venue = venue
+	return f
+}
+
+// TestTwoVenuesAreTwoHoldings is THE test for EXEC-M19a.
+//
+// The fund holds 1 BTC at Binance and 2 BTC at OKX. Those are DIFFERENT HOLDINGS: you
+// cannot sell the OKX BTC on Binance, and a CLOSE signal must flatten each venue for what
+// it actually holds. The book keyed on (portfolio, instrument) alone, so the second venue's
+// fill OVERWROTE the first — the platform could not answer "how much BTC is at OKX", and
+// webhook-ingest's CLOSE path was wired to an empty map because there was nothing to wire.
+//
+// The FUND still holds 3 BTC, and that — the aggregate — is what the risk engine and the
+// compliance monitor consume. Both must be true at once.
+func TestTwoVenuesAreTwoHoldings(t *testing.T) {
+	pool := newPool(t, "__system__")
+	freshSchema(t, pool)
+	ctx := context.Background()
+	now := time.Now().UTC()
+
+	store := NewPostgres(pool, "USD")
+
+	if _, err := store.Apply(ctx, "fund-alpha", buyAtVenue("f1", "BTC-USD", "XBIN", "1", "50000", now), now); err != nil {
+		t.Fatal(err)
+	}
+	res, err := store.Apply(ctx, "fund-alpha", buyAtVenue("f2", "BTC-USD", "XOKX", "2", "50000", now), now)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// The per-venue FACT is about OKX ALONE — 2 BTC, not the fund's 3.
+	if got := dec.FromProto(res.Venue.GetQuantity()); got.Cmp(big.NewRat(2, 1)) != 0 {
+		t.Errorf("OKX holding = %s, want 2 — a CLOSE at OKX must flatten what OKX holds", got.RatString())
+	}
+	if res.Venue.GetVenue() != "XOKX" {
+		t.Errorf("per-venue FACT carries venue %q, want XOKX", res.Venue.GetVenue())
+	}
+
+	// The fund-level FACT is the SUM across venues — what risk and compliance consume. If
+	// this reported 2, the fund's BTC exposure would be understated by everything held at
+	// Binance, and every limit checked against it would be checked against a smaller book.
+	if got := dec.FromProto(res.Aggregate.GetQuantity()); got.Cmp(big.NewRat(3, 1)) != 0 {
+		t.Errorf("fund-level BTC = %s, want 3 — one venue's holding overwrote the other", got.RatString())
+	}
+	if res.Aggregate.GetVenue() != "" {
+		t.Errorf("the aggregate carries venue %q — it belongs to no single venue", res.Aggregate.GetVenue())
+	}
+}
+
+// TestSnapshotAggregatesAcrossVenues: the PRE-TRADE GATE reads Snapshot. It must see the
+// fund's whole BTC position, not one venue's slice of it — a concentration limit checked
+// against a fraction of the holding does not refuse loudly, it says yes.
+func TestSnapshotAggregatesAcrossVenues(t *testing.T) {
+	pool := newPool(t, "__system__")
+	freshSchema(t, pool)
+	ctx := context.Background()
+	now := time.Now().UTC()
+
+	store := NewPostgres(pool, "USD")
+	if _, err := store.Apply(ctx, "fund-alpha", buyAtVenue("f1", "BTC-USD", "XBIN", "1", "50000", now), now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Apply(ctx, "fund-alpha", buyAtVenue("f2", "BTC-USD", "XOKX", "2", "50000", now), now); err != nil {
+		t.Fatal(err)
+	}
+
+	snap, err := store.Snapshot(ctx, "fund-alpha", now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := len(snap.GetPositions()); n != 1 {
+		t.Fatalf("snapshot has %d positions, want 1 — BTC held at two venues is ONE instrument to the gate", n)
+	}
+	if got := dec.FromProto(snap.GetPositions()[0].GetQuantity()); got.Cmp(big.NewRat(3, 1)) != 0 {
+		t.Errorf("snapshot BTC = %s, want 3", got.RatString())
 	}
 }

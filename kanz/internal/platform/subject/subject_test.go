@@ -10,6 +10,7 @@ package subject_test
 // state, or with everybody's.
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/kanz-eng/kanz/internal/platform/subject"
@@ -38,5 +39,35 @@ func TestTokenNeutralizesSubjectSyntax(t *testing.T) {
 		if got := subject.Token(tc.in); got != tc.want {
 			t.Errorf("Token(%q) = %q, want %q", tc.in, got, tc.want)
 		}
+	}
+}
+
+// The PER-VENUE position subject (EXEC-M19a).
+//
+// A fund's exposure does not care which exchange holds the BTC — but EXECUTION does, and
+// cannot work without it: a CLOSE must flatten what is held AT EACH VENUE. So the book is
+// projected twice, and the two FACTs must never collide on a subject: one is the fund-level
+// aggregate, the other is the holding at one venue.
+func TestVenuePositionSubjectIsDistinctFromTheAggregate(t *testing.T) {
+	agg := subject.PositionFor("acme", "fund-alpha", "BTC-USD")
+	venue := subject.VenuePositionFor("acme", "fund-alpha", "XBIN", "BTC-USD")
+
+	if want := "risk.position.venue.changed.acme.fund-alpha.XBIN.BTC-USD"; venue != want {
+		t.Errorf("VenuePositionFor = %q, want %q", venue, want)
+	}
+	if agg == venue {
+		t.Fatal("the aggregate and the per-venue FACT share a subject — on a COMPACTED stream one would overwrite the other")
+	}
+	// The aggregate's wildcard must NOT swallow the per-venue FACTs, or the compliance
+	// monitor and the risk engine would fold each venue as though it were the whole fund.
+	if strings.HasPrefix(venue, strings.TrimSuffix(subject.PositionAll, ">")) {
+		t.Errorf("the per-venue subject %q is matched by the aggregate binding %q — risk and compliance would "+
+			"receive per-venue FACTs and treat each as the fund's total", venue, subject.PositionAll)
+	}
+}
+
+func TestVenuePositionAllIsWhatTheExecutionPlaneBinds(t *testing.T) {
+	if subject.VenuePositionAll != "risk.position.venue.changed.>" {
+		t.Errorf("VenuePositionAll = %q", subject.VenuePositionAll)
 	}
 }

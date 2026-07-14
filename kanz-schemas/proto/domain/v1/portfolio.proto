@@ -52,6 +52,32 @@ message PositionState {
   // as_of is the domain time this state is effective at — the event_time of
   // the change that produced it. Required.
   google.protobuf.Timestamp as_of = 8;
+
+  // venue is the execution venue MIC this holding sits AT — set on the per-venue
+  // FACT (risk.position.venue.changed), EMPTY on the fund-level aggregate
+  // (risk.position.changed). EXEC-M19a.
+  //
+  // # Why a position has a venue at all
+  //
+  // A fund's exposure does not care which exchange holds the BTC — one instrument,
+  // one number, and that is what the risk engine and the compliance monitor consume.
+  // But EXECUTION does care, and it cannot work without it: a CLOSE signal must
+  // flatten what is held AT EACH VENUE, and you cannot sell 1 BTC on Binance if it is
+  // sitting at OKX. The fill has always carried the venue (order.v1.Fill.venue); the
+  // position projector simply threw it away, so nothing in the platform could answer
+  // "how much BTC do we hold at OKX" — and webhook-ingest's CLOSE path was wired to an
+  // EMPTY position map, which meant a `close` alert produced ZERO orders and the
+  // webhook answered 202 Accepted.
+  //
+  // It is the same axis EXEC-M16 established for collateral: an exchange margins and
+  // liquidates per ACCOUNT, and an account belongs to a venue.
+  //
+  // Two FACTs, one book: the OMS keys its durable book per (portfolio, venue,
+  // instrument) — the finest true grain — and projects it twice. That is one source of
+  // truth at two granularities, not two sources of truth: the fund-level FACT keeps its
+  // existing consumers (risk, compliance) untouched and unable to lose a venue, while
+  // the per-venue FACT serves the execution plane, which is the only one that needs it.
+  string venue = 9;
 }
 
 // PortfolioState is the portfolio-level identity and aggregate state. It does
