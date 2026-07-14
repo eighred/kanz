@@ -32,6 +32,23 @@ type Config struct {
 
 	ReplayWindow time.Duration
 	Allowlist    []*net.IPNet
+
+	// RedisURL backs the CROSS-POD nonce store (EXEC-M17). The nonce cache is the
+	// replay defence at the internet-facing perimeter, and in-process it is per-pod:
+	// two replicas are two caches, so a re-delivered TradingView alert landing on the
+	// other pod is admitted a SECOND time and fans out a SECOND set of orders. Nothing
+	// downstream can catch that — a fresh claim mints a fresh signal_id, so the OMS's
+	// admission gate sees two different orders.
+	//
+	// Empty ⇒ the in-process store, which is correct for EXACTLY ONE REPLICA and is
+	// therefore what pins this service — the one the internet talks to — to a single
+	// pod. Set this (with -tags redis) and the pin can be lifted.
+	RedisURL string
+	// AllowInProcessNonce is the EXPLICIT admission that the replay defence is per-pod.
+	// Without it, and without a RedisURL, the service REFUSES TO START: a per-pod replay
+	// defence reachable by FORGETTING to configure Redis is indistinguishable from a
+	// correct one, and the deployment that forgot is the one running N replicas.
+	AllowInProcessNonce bool
 	// CloudflareOnly locks the webhook to the Cloudflare Signing Relay edge: the
 	// peer (Allowlist, set to Cloudflare's CIDR ranges) must be a Cloudflare IP,
 	// and every request must carry CF-Connecting-IP — public traffic bypassing
@@ -76,6 +93,9 @@ func Load() (Config, error) {
 		Source:         envOr("WEBHOOK_INGEST_SOURCE", "webhook-ingest"),
 		ReplayWindow:   parseDuration(os.Getenv("WEBHOOK_INGEST_REPLAY_WINDOW"), 5*time.Minute),
 		CloudflareOnly: os.Getenv("WEBHOOK_INGEST_CLOUDFLARE_ONLY") == "1",
+
+		RedisURL:            secret("WEBHOOK_INGEST_REDIS_URL"),
+		AllowInProcessNonce: os.Getenv("WEBHOOK_INGEST_ALLOW_INPROCESS_NONCE") == "true",
 	}
 	allow, err := parseAllowlist(os.Getenv("WEBHOOK_INGEST_IP_ALLOWLIST"))
 	if err != nil {
@@ -179,6 +199,17 @@ func parseAllowlist(s string) ([]*net.IPNet, error) {
 		out = append(out, n)
 	}
 	return out, nil
+}
+
+// secret prefers a CSI/Vault file mount (<k>_FILE) over a plaintext <k> env var
+// (SEC-01d). The Redis URL carries a password.
+func secret(k string) string {
+	if p := os.Getenv(k + "_FILE"); p != "" {
+		if b, err := os.ReadFile(p); err == nil {
+			return strings.TrimSpace(string(b))
+		}
+	}
+	return os.Getenv(k)
 }
 
 func envOr(key, def string) string {

@@ -9,13 +9,23 @@
 #
 # THE REPLICA INVARIANT: 1, AND IT IS NOT ABOUT CAPACITY.
 #
-#   THE REPLAY DEFENCE IS AN IN-PROCESS MAP. The nonce cache (strategy_id + nonce)
-#   lives in one process. Two pods are two caches, so a re-delivered TradingView
-#   alert that lands on the other pod is admitted a SECOND time and fans out a SECOND
-#   set of SubmitOrder commands. The OMS's admission gate dedups on order_id — but a
-#   fresh nonce mints a fresh order_id, so this is exactly the gap that gate cannot
-#   close. Moving the nonce cache to Redis (the dedup store already there) is what
-#   would lift this bound; until then, ONE.
+#   THE REPLAY DEFENCE IS PER-POD, BECAUSE NO REDIS IS CONFIGURED. The nonce cache
+#   (strategy_id + nonce) lives in one process. Two pods are two caches, so a
+#   re-delivered TradingView alert that lands on the other pod is admitted a SECOND
+#   time and fans out a SECOND set of SubmitOrder commands. The OMS's admission gate
+#   dedups on order_id — but a fresh nonce mints a fresh order_id, so this is exactly
+#   the gap that gate cannot close.
+#
+#   THE CODE NO LONGER FORCES THIS (EXEC-M17). The nonce store is cross-pod the moment
+#   WEBHOOK_INGEST_REDIS_URL points at a Redis and the image is built with -tags redis;
+#   then a re-delivered alert is a replay wherever it lands, and this pin comes off. What
+#   remains is that the estate HAS no Redis yet (infra-gated), so the flag below is set
+#   and the pod says so at WARN on every boot.
+#
+#   The pin and the flag are ONE decision, and they move together: point REDIS_URL at a
+#   Redis, delete WEBHOOK_INGEST_ALLOW_INPROCESS_NONCE, raise replicas, drop Recreate. If
+#   you raise replicas WITHOUT the first two, every extra pod is a double-trade machine —
+#   which is why the binary REFUSES TO START without one of them.
 #
 #   Recreate, not RollingUpdate: two webhook-ingest processes must never be live at
 #   once, for the reason above.
@@ -100,6 +110,21 @@ spec:
             - { name: WEBHOOK_INGEST_SOURCE, value: "webhook-ingest" }
             # The nonce replay window. A signal replayed outside it is refused.
             - { name: WEBHOOK_INGEST_REPLAY_WINDOW, value: "5m" }
+            # THE REPLAY DEFENCE'S STORE (EXEC-M17). Empty ⇒ the nonce cache is an
+            # in-process map, which is correct for EXACTLY ONE REPLICA — see the replica
+            # invariant at the top of this file. Point it at a Redis (and build the image
+            # with -tags redis) and the defence becomes cross-pod.
+            #
+            # It carries a password, so in a real deployment it is a CSI/Vault file mount
+            # (WEBHOOK_INGEST_REDIS_URL_FILE), never a plaintext value here.
+            - { name: WEBHOOK_INGEST_REDIS_URL, value: "" }
+            # The EXPLICIT admission that the replay defence is per-pod. Without it — and
+            # without a Redis URL — the process REFUSES TO START, because a per-pod replay
+            # defence reachable by FORGETTING to configure Redis is indistinguishable from
+            # a correct one, and the deployment that forgot is the one an autoscaler will
+            # quietly take to N pods. Delete this the day Redis lands, and lift replicas
+            # in the same change.
+            - { name: WEBHOOK_INGEST_ALLOW_INPROCESS_NONCE, value: "true" }
             # EMPTY, ON PURPOSE — and it is NOT an open door. See
             # webhook-ingest-ingress.yaml.
             #

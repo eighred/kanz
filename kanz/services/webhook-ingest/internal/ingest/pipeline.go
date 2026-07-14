@@ -94,9 +94,48 @@ func (p *Pipeline) Process(ctx context.Context, rawBody []byte, remoteIP net.IP,
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrBadRequest, err)
 	}
-	if err := p.opt.Auth.Authenticate(rawBody, remoteIP, sigHeader, wh.StrategyID, wh.Nonce, p.window); err != nil {
-		return nil, err // ErrUnauthorized / ErrReplayed
+	// Authenticate CLAIMS the nonce; it does not consume it. The claim is a lease, and
+	// this function owns settling it.
+	if err := p.opt.Auth.Authenticate(ctx, rawBody, remoteIP, sigHeader, wh.StrategyID, wh.Nonce); err != nil {
+		return nil, err // ErrUnauthorized / ErrReplayed / ErrNonceStoreUnavailable
 	}
+
+	res, err := p.decide(ctx, wh)
+
+	// SETTLE THE NONCE (EXEC-M17).
+	//
+	// COMMIT when the platform reached a VERDICT on this alert — it emitted it, or it
+	// deliberately refused it (halted, malformed, oversized). A redelivery of a decided
+	// alert is a replay, and re-firing it is a double trade.
+	//
+	// RELEASE when the platform FAILED TO DECIDE — the broker was down, the size could
+	// not be priced. Nobody acted on the signal, so a redelivery must be free to retry
+	// it. This used to burn the nonce regardless, which meant a transient broker error
+	// made a live trading signal PERMANENTLY unreplayable — the loss the three-phase
+	// lease exists to prevent. The retry is safe by construction: signal_id is
+	// DeterministicID(strategy, nonce), so it re-derives the same idempotency keys and
+	// the broker collapses anything that did land.
+	if decided(err) {
+		p.opt.Auth.CommitNonce(ctx, wh.StrategyID, wh.Nonce)
+	} else {
+		p.opt.Auth.ReleaseNonce(ctx, wh.StrategyID, wh.Nonce)
+	}
+	return res, err
+}
+
+// decided reports whether err represents a VERDICT on the alert, as opposed to a
+// failure to reach one.
+//
+// A HALT is a verdict, and deliberately so: an alert that fired during a halt is stale
+// by the time the halt clears, and re-firing it into a moved market is worse than
+// dropping it. So a halt keeps burning the nonce, exactly as it did before.
+func decided(err error) bool {
+	return err == nil || errors.Is(err, ErrHalted) || errors.Is(err, ErrBadRequest)
+}
+
+// decide runs everything after authentication: the halt gate, validation, size
+// resolution, and the fan-out. Its error decides whether the nonce is held or freed.
+func (p *Pipeline) decide(ctx context.Context, wh *Webhook) (*Result, error) {
 	// The brake, at the perimeter: reject before parsing, before any work. The
 	// translator checks the same gate again on Emit — that is not redundant, it is
 	// the point. The gate can trip in the microseconds between here and there, and

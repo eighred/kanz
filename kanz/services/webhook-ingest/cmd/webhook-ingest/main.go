@@ -124,7 +124,20 @@ func main() {
 		}
 	}()
 
-	auth := ingest.NewAuthenticator(cfg.Secrets, cfg.Allowlist, cfg.ReplayWindow, time.Now)
+	// The replay defence (EXEC-M17). Cross-pod against Redis, or in-process — and
+	// in-process is an EXPLICIT admission, not a default, because a per-pod nonce cache
+	// silently makes every extra replica a double-trade machine.
+	nonces, closeNonces, err := newNonceStore(cfg, logger)
+	if err != nil {
+		logger.Error("replay defence is not safe to run", "err", err)
+		os.Exit(2)
+	}
+	if closeNonces != nil {
+		defer func() { _ = closeNonces.Close() }()
+	}
+
+	auth := ingest.NewAuthenticator(cfg.Secrets, cfg.Allowlist, cfg.ReplayWindow, time.Now,
+		ingest.WithNonceStore(nonces))
 	pipeline, err := ingest.NewPipeline(ingest.Options{
 		Auth:         auth,
 		Symbols:      cfg.Symbols,

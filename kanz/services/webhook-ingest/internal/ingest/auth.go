@@ -1,13 +1,13 @@
 package ingest
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"net"
 	"strings"
-	"sync"
 	"time"
 )
 
@@ -38,26 +38,65 @@ func (s StaticSecrets) SecretFor(id string) (string, bool) { v, ok := s[id]; ret
 type Authenticator struct {
 	secrets   SecretStore
 	allowlist []*net.IPNet // empty ⇒ allow any source (dev)
-	replay    *replayCache
+	nonces    NonceStore
 	now       func() time.Time
+}
+
+// AuthOption customizes an Authenticator.
+type AuthOption func(*Authenticator)
+
+// WithNonceStore sets the store the replay defence claims nonces in.
+//
+// The DEFAULT is MemoryNonces, which is correct for exactly ONE replica: two pods are
+// two maps, so a re-delivered alert landing on the other pod is admitted a SECOND time
+// and fans out a SECOND set of orders — and nothing downstream can catch it, because a
+// fresh claim mints a fresh signal_id and therefore fresh order_ids. Pass RedisNonces
+// and the defence spans every replica; that is what lets webhook-ingest — the one
+// service the internet talks to — run more than one pod (EXEC-M17).
+//
+// The composition root REFUSES to run on the in-process default unless the deployment
+// says so out loud (WEBHOOK_INGEST_ALLOW_INPROCESS_NONCE): a per-pod replay defence
+// reachable by forgetting to configure Redis looks exactly like a correct one.
+func WithNonceStore(s NonceStore) AuthOption {
+	return func(a *Authenticator) { a.nonces = s }
 }
 
 // NewAuthenticator builds the authenticator. allowlist entries are CIDRs; an
 // empty allowlist accepts any source IP. window bounds the replay cache.
-func NewAuthenticator(secrets SecretStore, allowlist []*net.IPNet, window time.Duration, now func() time.Time) *Authenticator {
+func NewAuthenticator(secrets SecretStore, allowlist []*net.IPNet, window time.Duration, now func() time.Time, opts ...AuthOption) *Authenticator {
 	if now == nil {
 		now = time.Now
 	}
 	if window <= 0 {
 		window = 5 * time.Minute
 	}
-	return &Authenticator{secrets: secrets, allowlist: allowlist, replay: newReplayCache(now), now: now}
+	a := &Authenticator{secrets: secrets, allowlist: allowlist, now: now}
+	for _, opt := range opts {
+		opt(a)
+	}
+	if a.nonces == nil {
+		a.nonces = NewMemoryNonces(window, maxInProcessNonces)
+	}
+	return a
 }
 
-// Authenticate verifies the source IP, the HMAC signature over rawBody, and that
-// (strategyID, nonce) has not been seen. It returns ErrUnauthorized for an
+// maxInProcessNonces bounds the default in-process nonce window so a nonce storm
+// cannot exhaust memory. Only reached on a single-replica deployment.
+const maxInProcessNonces = 100_000
+
+// nonceKey namespaces a nonce by the strategy that signed it, so two strategies
+// cannot collide (or evict each other) on the same nonce value.
+func nonceKey(strategyID, nonce string) string { return strategyID + ":" + nonce }
+
+// Authenticate verifies the source IP, the HMAC signature over rawBody, and CLAIMS
+// (strategyID, nonce) for this delivery. It returns ErrUnauthorized for an
 // IP/secret/signature failure and ErrReplayed for a duplicate.
-func (a *Authenticator) Authenticate(rawBody []byte, remoteIP net.IP, sigHeader, strategyID, nonce string, window time.Duration) error {
+//
+// The claim is a LEASE, not a consumption: the caller MUST later CommitNonce (the
+// alert was acted on, or deliberately refused — hold it for the full window) or
+// ReleaseNonce (nothing happened — let a redelivery retry). Claiming and never
+// releasing is what turned a broker blip into a permanently-lost trading signal.
+func (a *Authenticator) Authenticate(ctx context.Context, rawBody []byte, remoteIP net.IP, sigHeader, strategyID, nonce string) error {
 	if !a.ipAllowed(remoteIP) {
 		return ErrUnauthorized
 	}
@@ -68,12 +107,35 @@ func (a *Authenticator) Authenticate(rawBody []byte, remoteIP net.IP, sigHeader,
 	if !validHMAC(secret, rawBody, sigHeader) {
 		return ErrUnauthorized
 	}
-	// Replay defense is LAST: only a fully-authenticated request consumes a nonce,
+	// Replay defense is LAST: only a fully-authenticated request claims a nonce,
 	// so a forged request can neither replay nor poison the cache.
-	if !a.replay.admit(strategyID+":"+nonce, window) {
+	//
+	// FAIL CLOSED. If the store cannot be reached we do not know whether this alert has
+	// already traded, and "I cannot tell" must never resolve to "trade it" on the path
+	// that submits orders to a live exchange. The caller answers 503 — a retryable
+	// outage — rather than 409, which would tell TradingView the alert was a duplicate
+	// and lose a live signal to a Redis blink.
+	ok, err := a.nonces.Claim(ctx, nonceKey(strategyID, nonce))
+	if err != nil {
+		return err // ErrNonceStoreUnavailable
+	}
+	if !ok {
 		return ErrReplayed
 	}
 	return nil
+}
+
+// CommitNonce holds the nonce for the full replay window: this alert has been DECIDED
+// — emitted, or deliberately refused. A redelivery of it is a replay.
+func (a *Authenticator) CommitNonce(ctx context.Context, strategyID, nonce string) {
+	a.nonces.Commit(ctx, nonceKey(strategyID, nonce))
+}
+
+// ReleaseNonce frees the nonce: nothing acted on this alert (the broker was down, the
+// size could not be resolved), so a redelivery MUST be free to retry it. Without this,
+// a transient failure burns the nonce and the trading signal is lost for good.
+func (a *Authenticator) ReleaseNonce(ctx context.Context, strategyID, nonce string) {
+	a.nonces.Release(ctx, nonceKey(strategyID, nonce))
 }
 
 func (a *Authenticator) ipAllowed(ip net.IP) bool {
@@ -101,31 +163,8 @@ func validHMAC(secret string, body []byte, sigHeader string) bool {
 	return hmac.Equal(mac.Sum(nil), provided)
 }
 
-// replayCache is a TTL set of admitted (strategy, nonce) keys. admit records and
-// returns true the first time; a repeat within the window returns false.
-type replayCache struct {
-	mu   sync.Mutex
-	seen map[string]time.Time
-	now  func() time.Time
-}
-
-func newReplayCache(now func() time.Time) *replayCache {
-	return &replayCache{seen: make(map[string]time.Time), now: now}
-}
-
-func (c *replayCache) admit(key string, window time.Duration) bool {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	now := c.now()
-	// Opportunistic sweep so the cache never grows unbounded under a nonce storm.
-	for k, exp := range c.seen {
-		if now.After(exp) {
-			delete(c.seen, k)
-		}
-	}
-	if exp, ok := c.seen[key]; ok && !now.After(exp) {
-		return false
-	}
-	c.seen[key] = now.Add(window)
-	return true
-}
+// The replay cache used to live here as a per-process map with a check-then-act
+// admit(). It is now a NonceStore (see nonce.go) — the SAME three-phase lease the bus
+// consumers use (EXEC-M7b), so the atomic claim, the lease expiry for a pod that dies
+// mid-signal, and the release-on-failure retry semantics are one implementation, not
+// two. MemoryNonces is that map; RedisNonces makes it cross-pod.

@@ -111,6 +111,14 @@ func (s *Server) writePipelineError(w http.ResponseWriter, err error) {
 	case errors.Is(err, ingest.ErrReplayed):
 		// Idempotent duplicate — acknowledge so TradingView does not retry-storm.
 		writeJSON(w, http.StatusOK, map[string]string{"status": "duplicate ignored"})
+	case errors.Is(err, ingest.ErrNonceStoreUnavailable):
+		// We could not find out whether this alert has already traded, so we did not
+		// trade it (EXEC-M17: the replay defence fails CLOSED). This must NOT be the
+		// 200 "duplicate ignored" above — the alert is not a duplicate, it is
+		// UNVERIFIED, and telling the sender we handled it would drop a live trading
+		// signal on the floor over a Redis blink. 503 says: try again.
+		s.logger.Error("replay defence unavailable — refusing the alert rather than risking a double trade", "err", err)
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "replay defence unavailable; retry"})
 	case errors.Is(err, ingest.ErrHalted):
 		writeJSON(w, http.StatusLocked, map[string]string{"error": "trading halted"})
 	case errors.Is(err, ingest.ErrBadRequest):
