@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"sync"
 	"testing"
 	"time"
 
@@ -263,5 +264,174 @@ func TestBroadcastReachesEveryPodAndSurvivesRestart(t *testing.T) {
 	}
 	if !seen["pod-0:NORMAL"] || !seen["pod-1:NORMAL"] {
 		t.Fatalf("both pods must see the resume, got %v", seen)
+	}
+}
+
+// TestSubscribeDrainsBufferedMessagesOnShutdown pins the bug found against real
+// brokers (2 of 4 runs, reproduced before this fix): Subscribe used to end a
+// subscription with cc.Stop(), which jetstream.ConsumeContext documents as
+// DISCARDING whatever is already in the client's local delivery buffer. JetStream
+// marks a message delivered — starting its AckWait timer (30s default) — at FETCH
+// time, not callback time, so a message sitting in that buffer when the process
+// stopped was neither acked nor nacked: the server held it for the full AckWait
+// while its cleanly-handled siblings moved on. Worse, a sibling NAK'd by a failed
+// in-flight handler redelivers INSTANTLY, so it can land AHEAD of the AckWait
+// straggler on restart — inverting per-key order for exactly the kind of
+// order-dependent fold the archiver and tv-sync's cost-basis calculation do.
+//
+// To make this deterministic instead of relying on real-broker timing luck, every
+// message is published BEFORE the consumer starts (so the whole batch is fetched
+// into the local buffer in one pull), and the handler does slow, ctx-aware work —
+// modeling a real downstream call like the archiver's Kafka publish. The
+// subscribe context is canceled almost immediately, guaranteeing several messages
+// are still sitting in the buffer, undelivered to the handler, at cancel time.
+//
+// The assertion: a FRESH subscriber restarted on the SAME durable must see every
+// message that the first run didn't successfully ack, well within a window far
+// shorter than the 30s AckWait — proving nothing was left stranded for the server
+// timeout to rediscover.
+func TestSubscribeDrainsBufferedMessagesOnShutdown(t *testing.T) {
+	url := os.Getenv("TEST_NATS_URL")
+	if url == "" {
+		t.Skip("TEST_NATS_URL not set")
+	}
+
+	const n = 8
+	const handlerDelay = 300 * time.Millisecond
+	const drainGrace = 500 * time.Millisecond
+
+	ctx := context.Background()
+	suffix := fmt.Sprintf("%d", time.Now().UnixNano())
+	streamName := "TEST_DRAIN_" + suffix
+	subject := "drain." + suffix
+	group := "drain-consumer-" + suffix
+
+	setupConn, err := nats.Connect(url)
+	if err != nil {
+		t.Fatalf("setup connect: %v", err)
+	}
+	t.Cleanup(setupConn.Close)
+	setupJS, err := jetstream.New(setupConn)
+	if err != nil {
+		t.Fatalf("setup jetstream: %v", err)
+	}
+	if _, err := setupJS.CreateStream(ctx, jetstream.StreamConfig{
+		Name:      streamName,
+		Subjects:  []string{subject},
+		Storage:   jetstream.MemoryStorage,
+		Retention: jetstream.LimitsPolicy,
+	}); err != nil {
+		t.Fatalf("create stream: %v", err)
+	}
+	t.Cleanup(func() { _ = setupJS.DeleteStream(context.Background(), streamName) })
+
+	client, err := bus.DialNATS(ctx, bus.NATSConfig{URL: url, Name: "drain-it", DrainGrace: drainGrace})
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	t.Cleanup(func() { _ = client.Close() })
+
+	// All N messages land on the stream BEFORE any consumer exists, so the first
+	// pull request fetches the whole batch into the client's local buffer at once.
+	for i := 0; i < n; i++ {
+		if err := client.Publish(ctx, bus.Message{
+			Subject: subject,
+			Key:     []byte("k"),
+			Body:    []byte(fmt.Sprintf("m%d", i)),
+		}); err != nil {
+			t.Fatalf("publish m%d: %v", i, err)
+		}
+	}
+
+	var mu sync.Mutex
+	firstRunAcked := map[string]bool{}
+
+	subCtx, cancel := context.WithCancel(ctx)
+	done := make(chan error, 1)
+	go func() {
+		done <- client.Subscribe(subCtx, subject, group, func(hctx context.Context, m bus.Message) error {
+			// Real, ctx-aware work — like the archiver's Kafka publish: it either
+			// finishes or is cut short by the caller's deadline, it does not
+			// ignore ctx and block regardless.
+			select {
+			case <-time.After(handlerDelay):
+				mu.Lock()
+				firstRunAcked[string(m.Body)] = true
+				mu.Unlock()
+				return nil
+			case <-hctx.Done():
+				return hctx.Err()
+			}
+		})
+	}()
+
+	// Cancel almost immediately: well before even the first 300ms handler call
+	// can complete, guaranteeing several of the N messages are still sitting in
+	// the local buffer, never having reached the handler, at cancel time.
+	time.Sleep(30 * time.Millisecond)
+	cancel()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Subscribe returned error: %v", err)
+		}
+	case <-time.After(drainGrace + 10*time.Second):
+		t.Fatal("Subscribe did not return within the drain grace period + safety margin — shutdown hung")
+	}
+
+	mu.Lock()
+	ackedByFirstRun := len(firstRunAcked)
+	mu.Unlock()
+	if ackedByFirstRun == n {
+		t.Fatal("every message was acked by the first run — the cancellation raced too late to catch " +
+			"any message buffered-but-undelivered; tighten the timing so this test actually exercises the drain path")
+	}
+
+	// RESTART: a fresh client, fresh Subscribe call, same durable (same group +
+	// subject). Whatever the first run didn't ack must show up here — and quickly,
+	// not after the 30s AckWait.
+	client2, err := bus.DialNATS(ctx, bus.NATSConfig{URL: url, Name: "drain-it-restart"})
+	if err != nil {
+		t.Fatalf("dial (restart): %v", err)
+	}
+	t.Cleanup(func() { _ = client2.Close() })
+
+	got := make(chan string, n)
+	subCtx2, cancel2 := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel2()
+	go func() {
+		_ = client2.Subscribe(subCtx2, subject, group, func(_ context.Context, m bus.Message) error {
+			got <- string(m.Body)
+			return nil
+		})
+	}()
+
+	seen := map[string]bool{}
+	for k := range firstRunAcked {
+		seen[k] = true
+	}
+	// A window far short of the 30s AckWait: if anything was stranded by an
+	// abrupt Stop() rather than drained, it will NOT show up in this window.
+	deadline := time.After(8 * time.Second)
+loop:
+	for len(seen) < n {
+		select {
+		case s := <-got:
+			seen[s] = true
+		case <-deadline:
+			break loop
+		}
+	}
+
+	if len(seen) != n {
+		missing := 0
+		for i := 0; i < n; i++ {
+			if !seen[fmt.Sprintf("m%d", i)] {
+				missing++
+			}
+		}
+		t.Fatalf("only %d of %d messages were observed within 8s of restart (%d missing, presumably stranded "+
+			"server-side awaiting the 30s AckWait): %v", len(seen), n, missing, seen)
 	}
 }

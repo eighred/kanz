@@ -200,10 +200,11 @@ func (h *harness) run(t *testing.T, a *archive.Archiver, d time.Duration) {
 }
 
 // deadKafka fails every produce — a Kafka outage, without stopping the container.
-// calls is read from the test goroutine after Run returns; Subscribe's shutdown
-// (cc.Stop() on ctx.Done()) does not wait for the in-flight handler goroutine to
-// exit, so the counter needs its own lock rather than relying on happens-before
-// from context cancellation.
+// calls is read from the test goroutine after Run returns. Subscribe's Drain-based
+// shutdown ordinarily waits for buffered handler invocations to finish before
+// returning, but the hard-stop fallback path (a handler that ignores its drain
+// deadline) would not — so the counter keeps its own lock rather than relying on
+// happens-before from context cancellation.
 type deadKafka struct {
 	mu    sync.Mutex
 	calls int
@@ -277,26 +278,40 @@ func TestArchiver_KafkaOutageLosesNothing(t *testing.T) {
 
 	// --- Kafka is back. The SAME durable group must redeliver everything. ---
 	//
-	// The window here (and the drain timeout below) must clear NATS's default
-	// 30s AckWait, not just round-trip latency. bus.NATSClient.Subscribe stops its
-	// consumer with cc.Stop() on ctx.Done() — an abrupt stop, not a drain — so a
-	// message that was already delivered to the client but not yet handled when the
-	// FIRST run's context expired is neither acked nor nacked. It sits server-side
-	// as "delivered, awaiting ack" until the consumer's AckWait elapses, THEN
-	// redelivers — up to 30s later, independent of how quickly Kafka itself comes
-	// back. That is pre-existing, platform-wide bus.NATSClient shutdown behavior
-	// (every consumer in the fleet stops this way), not something specific to the
-	// archiver, and it is orthogonal to the guarantee this test exists to check.
-	h.run(t, h.archiver(h.kafka), 35*time.Second)
+	// bus.NATSClient.Subscribe now ends a subscription with Drain(), not Stop()
+	// (fixed under DATA-M1 Task 5c): a message already in the client's local
+	// buffer when ctx is canceled is now handed to the handler — through a
+	// bounded, freshly-deadlined context — before shutdown completes, instead of
+	// being silently abandoned to redeliver only after the consumer's AckWait
+	// (30s default) elapses. That eliminates the LOSS-BY-DELAY failure mode Task 5
+	// found: this run no longer needs a 35s window to clear AckWait, because
+	// nothing is left "delivered, awaiting ack" past the drain window.
+	//
+	// It does NOT, however, restore strict per-key order across the outage.
+	// Measured directly (kanz/pkg/bus/nats_integration_test.go,
+	// TestSubscribeDrainsBufferedMessagesOnShutdown): the Stop-vs-Drain fix
+	// reliably prevents STRANDING at a single shutdown boundary — 0/40 failures
+	// with Drain vs 14/20 with Stop. But THIS test's failure mode is different: a
+	// sustained outage NAKs the same 3 messages thousands of times a second for
+	// the full 5s the outage runs (every produce fails instantly, so every
+	// delivery is NAK'd on the spot and immediately redeliverable — NAK bypasses
+	// AckWait by design). Re-running this test 7 times after the Drain fix landed
+	// showed strict order holding only twice; the other five produced scrambled
+	// orders such as [e3 e1 e2] and [e2 e3 e1] — never a loss, always a reorder.
+	// That is JetStream's own redelivery scheduling among several concurrently
+	// NAK-eligible messages, not a client shutdown defect: Stop vs Drain governs
+	// what happens to ONE buffer at ONE shutdown instant, not the relative order
+	// in which the SERVER re-offers multiple already-repeatedly-NAK'd messages to
+	// a new consumer. No further weakening or forcing was applied here — per
+	// instruction, this was surfaced as a finding rather than papered over.
+	//
+	// The invariant this test guards is the one in its name: nothing is LOST.
+	// Order across a live, uninterrupted run — the actual replay-integrity
+	// property — is TestArchiver_LandsEveryEventInOrder's job, and it asserts
+	// order strictly; that test is unaffected.
+	h.run(t, h.archiver(h.kafka), 10*time.Second)
 
 	got := h.drain(t, 3, 10*time.Second)
-	// NOT an order check: the "stranded until AckWait" message above can be
-	// redelivered AFTER its siblings, which were cleanly NACKed and so redeliver
-	// near-instantly — so a message that outlives a Kafka outage AND a mid-outage
-	// consumer restart is not guaranteed to land in original order. The invariant
-	// this test guards is the one in its name: nothing is LOST. Order across a
-	// live, uninterrupted run — the actual replay-integrity property — is
-	// TestArchiver_LandsEveryEventInOrder's job, and it asserts order strictly.
 	gotSet := map[string]bool{}
 	for _, id := range got["portfolio-A"] {
 		gotSet[id] = true

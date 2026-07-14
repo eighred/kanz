@@ -6,11 +6,27 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 )
+
+// defaultDrainGrace bounds how long Subscribe's shutdown waits for a JetStream
+// pull consumer to drain its local buffer (see Subscribe). Long enough to carry a
+// realistic in-flight batch through a downstream call (e.g. a Kafka produce);
+// short enough that a handler which ignores context cancellation cannot hang
+// shutdown indefinitely.
+const defaultDrainGrace = 5 * time.Second
+
+// drainStopSlack is added on top of the drain grace period before Subscribe gives
+// up on Drain() and falls back to Stop(). A well-behaved handler that honors ctx
+// cancellation returns (and gets Nak'd) within microseconds of the grace deadline,
+// so Drain ordinarily finishes just after `grace` elapses — this margin exists
+// only to bound the pathological case (a handler that never observes ctx) rather
+// than to be routinely used.
+const drainStopSlack = 2 * time.Second
 
 // natsKeyHeader carries Message.Key over NATS, which lacks a native
 // partition-key concept (Kafka has one). The receive path strips this
@@ -26,6 +42,9 @@ type NATSConfig struct {
 	ReconnectWait  time.Duration // default 2s
 	MaxReconnects  int           // default -1 (forever); set finite for fail-fast
 	PublishTimeout time.Duration // default 5s
+	// DrainGrace bounds Subscribe's shutdown drain window (default 5s). See
+	// Subscribe for why shutdown drains rather than stops.
+	DrainGrace time.Duration
 
 	// TLSConfig enables TLS (SEC-01c). For the zero-trust mesh the caller
 	// builds it from the workload SVID via transport.ClientTLSConfig
@@ -77,6 +96,9 @@ func DialNATS(_ context.Context, cfg NATSConfig) (*NATSClient, error) {
 	}
 	if cfg.PublishTimeout == 0 {
 		cfg.PublishTimeout = 5 * time.Second
+	}
+	if cfg.DrainGrace == 0 {
+		cfg.DrainGrace = defaultDrainGrace
 	}
 	opts := []nats.Option{
 		nats.Name(cfg.Name),
@@ -171,8 +193,16 @@ func (c *NATSClient) Subscribe(ctx context.Context, subject, group string, h Han
 	if err != nil {
 		return fmt.Errorf("nats: consumer %q on stream %q: %w", durableName(group, subject), stream, err)
 	}
+	// handlerCtx is the context handed to h() for each delivery. It starts as ctx
+	// and is swapped to a fresh drain context at shutdown (below) — read via
+	// atomic.Pointer since it's written from this goroutine and read from the
+	// NATS library's delivery goroutine invoking the callback.
+	var handlerCtx atomic.Pointer[context.Context]
+	handlerCtx.Store(&ctx)
+
 	cc, err := cons.Consume(func(m jetstream.Msg) {
-		if err := h(ctx, natsToMessage(m)); err != nil {
+		hctx := *handlerCtx.Load()
+		if err := h(hctx, natsToMessage(m)); err != nil {
 			_ = m.Nak()
 			return
 		}
@@ -182,9 +212,53 @@ func (c *NATSClient) Subscribe(ctx context.Context, subject, group string, h Han
 		return fmt.Errorf("nats: start consume: %w", err)
 	}
 	<-ctx.Done()
-	cc.Stop()
+
+	// Shut down via Drain, not Stop. jetstream.ConsumeContext documents the
+	// difference explicitly: Stop "discards" whatever is already in the client's
+	// local delivery buffer; Drain "processes" it through the callback. JetStream
+	// marks a message delivered — starting its AckWait timer (30s default) — at
+	// FETCH time, not callback time, so a message Stop() abandons in the buffer
+	// is neither acked nor nacked: the server sits on it for the full AckWait
+	// while its cleanly-NACKed siblings redeliver instantly and get reprocessed
+	// first. For a per-key-ordered consumer (the archiver, tv-sync's cost-basis
+	// fold) that reorders the replayed log on every restart — including an
+	// ordinary rolling deploy.
+	//
+	// The drain window gets its OWN context, not ctx itself: ctx.Done() just
+	// fired, and handing an already-cancelled context to h() would make any
+	// downstream call it makes (e.g. the archiver's Kafka publish) fail
+	// instantly — NAKing the very messages the drain exists to save, a more
+	// convoluted way to reproduce the same loss. A fresh context bounded by its
+	// own deadline lets a handler that's mid-flight finish real work if it can;
+	// anything still running when the deadline hits observes cancellation the
+	// same way it would observe any other downstream failure, returns an error,
+	// and gets NAK'd through the existing error path above — an EXPLICIT
+	// immediate-redelivery NAK, not a silent 30s wait.
+	grace := c.cfg.DrainGrace
+	if grace <= 0 {
+		grace = defaultDrainGrace
+	}
+	drainCtx, cancel := context.WithTimeout(context.Background(), grace)
+	defer cancel()
+	handlerCtx.Store(&drainCtx)
+	cc.Drain()
+
+	select {
+	case <-cc.Closed():
+		// Every buffered message was handed to h() — acked or, past the drain
+		// deadline, NAK'd immediately above. Nothing was left in limbo.
+	case <-time.After(grace + drainStopSlack):
+		// Drain did not finish within a bounded safety margin past the handler
+		// deadline — e.g. a handler that never observes ctx cancellation. Hard
+		// stop rather than hang shutdown forever. This is the last resort, not
+		// the common case: a handler that honors ctx returns (and gets NAK'd)
+		// promptly once drainCtx expires, so Drain ordinarily finishes just
+		// after `grace`, well inside this margin.
+		cc.Stop()
+	}
 	return nil
 }
+
 
 func (c *NATSClient) Close() error {
 	if c.conn != nil {
