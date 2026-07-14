@@ -11,18 +11,50 @@ import (
 	"go.opentelemetry.io/otel/propagation"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/trace"
+	"go.opentelemetry.io/otel/trace/noop"
 
 	"github.com/kanz-eng/kanz/pkg/bus"
 )
 
 // installTracing sets a real (in-memory) tracer + the W3C propagator for the
 // test, returning the recorded spans. Mirrors what observability.New installs.
+//
+// It RESTORES the previous global provider and propagator afterwards. otel's
+// setters are process-global and sticky — Shutdown()ing the provider does not
+// uninstall it — so a test that installs one and walks away leaves every LATER
+// test in the process running against a live tracer.
+//
+// That is not hypothetical: it silently broke the two lineage tests, which assert
+// the LEGACY-STRING branch of the producer's documented trace precedence (explicit
+// field > active OTel span > legacy string ctx). With a provider still installed,
+// the producer opens a real span, the OTel branch wins, and the legacy string is
+// never reached. They passed on the first pass and failed on the second — the
+// classic shape of a global leaked between tests, and the reason `-count=2` was red.
 func installTracing(t *testing.T) *sdktrace.TracerProvider {
 	t.Helper()
 	tp := sdktrace.NewTracerProvider(sdktrace.WithSampler(sdktrace.AlwaysSample()))
 	otel.SetTracerProvider(tp)
 	otel.SetTextMapPropagator(propagation.TraceContext{})
-	t.Cleanup(func() { _ = tp.Shutdown(context.Background()) })
+
+	t.Cleanup(func() {
+		// UNINSTALL, explicitly — and with FRESH no-op values, never with whatever
+		// otel.Get*() returned beforehand. Both getters hand back a process-global
+		// DELEGATING wrapper whose delegate is set exactly once (a sync.Once), so
+		// "restoring" them re-installs a wrapper that still delegates to the SDK. The
+		// only way to turn tracing back off is to install something that does nothing.
+		//
+		// The propagator is the one that actually matters here: the producer's trace
+		// stamp comes from observability.TraceparentFromContext, which INJECTS through
+		// the global propagator — with an empty composite it writes nothing, the
+		// traceparent is empty, and the producer falls through to the legacy-string
+		// branch the lineage tests assert. (The tracer provider cannot be truly
+		// uninstalled at all: pkg/bus caches its Tracer in a package var at init, and
+		// that handle's delegate is bound for the life of the process. Which is exactly
+		// why this cleanup must exist — no later test can undo it.)
+		otel.SetTracerProvider(noop.NewTracerProvider())
+		otel.SetTextMapPropagator(propagation.NewCompositeTextMapPropagator())
+		_ = tp.Shutdown(context.Background())
+	})
 	return tp
 }
 

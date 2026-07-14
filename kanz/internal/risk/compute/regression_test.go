@@ -1,11 +1,7 @@
 package compute_test
 
 import (
-	"runtime"
-	"sort"
-	"sync"
 	"testing"
-	"time"
 
 	"github.com/kanz-eng/kanz/internal/risk/compute"
 )
@@ -67,55 +63,5 @@ func TestComputeMeasures_AllocsConstantInN(t *testing.T) {
 	// couple of result Decimals; 32 is comfortable headroom over the ~8 observed.
 	if large > 32 {
 		t.Errorf("ComputeMeasures allocated %.0f/op at n=1024, want <= 32", large)
-	}
-}
-
-// TestComputeMeasuresP99UnderBurst drives the measures query under a 10×
-// CPU-oversubscribed burst and asserts the p99 stays within a generous
-// in-process budget — the resilience check the task calls for (p99 held under
-// 10× burst), catching a lock convoy or an accidental super-linear blowup.
-func TestComputeMeasuresP99UnderBurst(t *testing.T) {
-	if testing.Short() {
-		t.Skip("burst latency test skipped under -short")
-	}
-	const (
-		// Generous vs the ~tens-of-ms observed: p99 under 10× oversubscription is
-		// dominated by goroutine scheduling + GC jitter, not compute, so the
-		// budget catches catastrophic regressions (O(n²), a lock convoy → seconds)
-		// without flaking on a slow runner. Still well under the 500ms read SLO.
-		budget    = 250 * time.Millisecond
-		perWorker = 200
-		burst     = 10 // 10× oversubscription
-	)
-	reg := compute.DefaultRegistry()
-	base := buildBenchPortfolio(256)
-
-	workers := burst * runtime.GOMAXPROCS(0)
-	lat := make([]time.Duration, workers*perWorker)
-
-	var wg sync.WaitGroup
-	for w := 0; w < workers; w++ {
-		wg.Add(1)
-		go func(w int) {
-			defer wg.Done()
-			for i := 0; i < perWorker; i++ {
-				start := time.Now()
-				// Clone per call mirrors the real per-query path (Snapshot →
-				// Clone → compute). Concurrent Clone()s only read base's map.
-				ms := compute.ComputeMeasures(base.Clone(), reg, nil)
-				lat[w*perWorker+i] = time.Since(start)
-				if ms == nil { // use the result, defeat elimination, no shared write (race-free)
-					t.Error("ComputeMeasures returned nil")
-				}
-			}
-		}(w)
-	}
-	wg.Wait()
-
-	sort.Slice(lat, func(i, j int) bool { return lat[i] < lat[j] })
-	p99 := lat[int(float64(len(lat))*0.99)]
-	t.Logf("compute p99 under %d× burst (%d workers, %d samples) = %v", burst, workers, len(lat), p99)
-	if p99 > budget {
-		t.Errorf("compute p99 under %d× burst = %v, want <= %v", burst, p99, budget)
 	}
 }

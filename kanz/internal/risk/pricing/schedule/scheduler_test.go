@@ -83,30 +83,51 @@ func TestRunFiresImmediately(t *testing.T) {
 
 // A Refresh error is swallowed: the loop keeps ticking and sibling jobs are
 // unaffected (the scheduler-side of deny-on-garbage).
+//
+// It WAITS FOR THE EVENT, not for a duration. The old version ran the scheduler for
+// 60ms of wall clock and then asserted that at least two 5ms ticks had landed — which
+// is not the claim being made. It is a claim about how many ticks a loaded machine can
+// fit in 60 milliseconds, and under `-race` in a CI container the answer is sometimes
+// "fewer than two". The behaviour under test — a failing job keeps ticking, and its
+// sibling is untouched — is reached here by waiting for it, so the test passes as fast
+// as the machine allows and fails only if a loop has genuinely stopped. The 5s below is
+// a deadline for a hung test, never a performance budget.
 func TestRefreshErrorDoesNotStopLoop(t *testing.T) {
 	var badCalls, goodCalls atomic.Int64
+	const wantEach = 2
+
+	done := make(chan struct{})
+	var once sync.Once
+	reached := func() {
+		if badCalls.Load() >= wantEach && goodCalls.Load() >= wantEach {
+			once.Do(func() { close(done) })
+		}
+	}
+
 	s := New([]Job{
-		{Name: "bad", Interval: 5 * time.Millisecond, Refresh: func(context.Context, time.Time) error {
+		{Name: "bad", Interval: time.Millisecond, Refresh: func(context.Context, time.Time) error {
 			badCalls.Add(1)
+			reached()
 			return errors.New("uncalibratable quote set")
 		}},
-		{Name: "good", Interval: 5 * time.Millisecond, Refresh: func(context.Context, time.Time) error {
+		{Name: "good", Interval: time.Millisecond, Refresh: func(context.Context, time.Time) error {
 			goodCalls.Add(1)
+			reached()
 			return nil
 		}},
 	}, WithLogger(quietLogger()))
 
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Millisecond)
+	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	_ = s.Run(ctx)
+	go func() { _ = s.Run(ctx) }()
 
-	// The failing job kept firing (immediate + several ticks), proving the error
-	// never broke its loop; the good job was untouched by its sibling's failures.
-	if badCalls.Load() < 2 {
-		t.Fatalf("failing job fired %d times, want it to keep ticking", badCalls.Load())
-	}
-	if goodCalls.Load() < 2 {
-		t.Fatalf("good job fired %d times, want it unaffected by sibling failure", goodCalls.Load())
+	select {
+	case <-done:
+		// The failing job kept firing, proving the error never broke its loop; the good
+		// job fired too, proving it was untouched by its sibling's failures.
+	case <-time.After(5 * time.Second):
+		t.Fatalf("a job stopped ticking: bad fired %d times, good fired %d (want >= %d each)",
+			badCalls.Load(), goodCalls.Load(), wantEach)
 	}
 }
 

@@ -35,7 +35,13 @@ func TestEveryServiceIsDeployableOrExempt(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read the image build matrix: %v", err)
 	}
-	matrix := string(build)
+	// NORMALIZE THE LINE ENDINGS before matching. The check below is an exact match
+	// ending in "\n", and git on Windows (core.autocrlf=true) hands this file over with
+	// CRLF — so every service looked un-built, and this guard failed for ALL of them on
+	// any Windows checkout. It could never have been run by a Windows developer; it
+	// passed only because CI is Linux. A test that cannot run on a contributor's machine
+	// is a test that contributor cannot trust.
+	matrix := strings.ReplaceAll(string(build), "\r\n", "\n")
 
 	var problems []string
 	for _, svc := range servicesWithEntrypoints(t, root) {

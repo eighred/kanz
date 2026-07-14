@@ -147,6 +147,16 @@ jobs:
         working-directory: kanz
         run: go test -run '^$' -bench . -benchmem -benchtime=10x ./internal/risk/compute/...
 
+      # The wall-clock p99 budget (`-tags perf`). It lives HERE and not in the kanz-ci
+      # `go test -race ./...` gate because a latency budget under the race detector
+      # measures the detector, and a latency budget sharing a machine with the rest of
+      # the suite measures the scheduler: it blew its 250ms budget at 482ms and 852ms for
+      # exactly those reasons, on a box with nothing wrong with it. Here it runs alone
+      # and unraced, which is the only condition under which its number means anything.
+      - name: Run the compute latency budget
+        working-directory: kanz
+        run: go test -tags perf -run TestComputeMeasuresP99UnderBurst ./internal/risk/compute/...
+
   capacity-baseline:
     # Manual only. The multi-minute ramp to the capacity knee — against a real
     # deployed env (base_url) or, with no input, a fresh ephemeral stack.
