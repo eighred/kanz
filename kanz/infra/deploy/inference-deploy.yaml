@@ -1,0 +1,138 @@
+# AI-M1 — the inference service. It had no manifest, so it never ran.
+#
+# kanz_inference shipped a gRPC servicer with admission control, a bus streaming worker, a
+# point-in-time feature store, a permutation-Shapley explainer, a model registry with an
+# MLOPS-01a promotion gate, shadow execution, validation and governance. What it did not have
+# was an entrypoint, an image, a manifest, or a single concrete model — and on the Go side
+# internal/prediction (the resilient client, the feature publisher) had ZERO IMPORTERS outside
+# its own tests. Nothing served inference.v1.InferenceService and nothing called it.
+#
+# The platform's entire AI capability was an exceptionally well-specified contract with no
+# traffic on it, and the fifteen-layer AI brief was to be built on top of that.
+#
+# # It REFUSES TO START without a validated model
+#
+# KANZ_INFERENCE_MODELS points at the model card. With no card — or a card whose validation
+# has EXPIRED — the process exits 2 and this pod crashloops, loudly.
+#
+# That is deliberate, and it is the same posture as every other gate that matters here: the
+# gateway will not start unauthenticated (SEC-M1), webhook-ingest will not start without a
+# replay defence (EXEC-M17/M22), tv-sync will not start without a fact log (EXEC-M21). A
+# prediction service with no model does not fail — it reports healthy and it ANSWERS. That is
+# the one outcome worse than being down.
+#
+# # A prediction is an OBSERVATION, never an order
+#
+# Nothing here reaches the trading path. The risk engine publishes features and this service
+# scores them; the score is published as a FACT and consumed by whoever wants it. The OMS
+# pre-trade gate and webhook-ingest's gate are untouched, and a model that is down or wrong
+# cannot stop or start a trade. Wiring a model to capital is a separate decision that has not
+# been taken.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: inference
+  namespace: kanz-services
+  labels:
+    app.kubernetes.io/part-of: kanz
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: inference
+  namespace: kanz-services
+  labels:
+    app.kubernetes.io/part-of: kanz
+spec:
+  selector:
+    app: inference
+  ports:
+    - { name: grpc, port: 50051, targetPort: 50051 }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: inference
+  namespace: kanz-services
+  labels:
+    app: inference
+    app.kubernetes.io/part-of: kanz
+spec:
+  # TWO. The interactive path is stateless (the registry is rebuilt from the mounted model
+  # card at boot, identically on every pod), so replicas add availability and nothing else.
+  #
+  # The STREAMING path shares ONE durable consumer group, so the feature stream is
+  # load-balanced across the pods rather than double-scored — and a prediction is idempotent
+  # on its feature event anyway (the publisher threads causation_id back to the FeatureVector).
+  replicas: 2
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  revisionHistoryLimit: 5
+  selector:
+    matchLabels:
+      app: inference
+  template:
+    metadata:
+      labels:
+        app: inference
+        app.kubernetes.io/part-of: kanz
+    spec:
+      serviceAccountName: inference
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: inference
+          # Pinned to a cosign-signed digest by the GitOps bump (CICD-01d).
+          image: ghcr.io/kanz-eng/inference:latest
+          ports:
+            - { containerPort: 50051, name: grpc }
+          env:
+            # THE MODEL CARD. Weights and validation evidence travel together, because the
+            # registry will not promote a model to PRIMARY without a recorded, non-expired,
+            # passing validation (MLOPS-01a / SR 11-7). Remove this and the pod does not
+            # degrade — it refuses to start.
+            - { name: KANZ_INFERENCE_MODELS, value: /etc/kanz/models/models.json }
+            # The streaming half: score the FeatureVectors the risk engine publishes.
+            - { name: KANZ_INFERENCE_NATS_URL, value: "nats://nats.kanz-messaging.svc:4222" }
+            - { name: KANZ_INFERENCE_CONSUMER_GROUP, value: "inference" }
+            - { name: KANZ_INFERENCE_SOURCE, value: "inference" }
+            - { name: KANZ_INFERENCE_BIND, value: "[::]:50051" }
+            # Every served prediction carries its own attribution (permutation Shapley). A
+            # risk desk that cannot attribute a number cannot sign off on it.
+            - { name: KANZ_INFERENCE_EXPLAIN, value: "true" }
+          # gRPC has no HTTP probe surface here, and a TCP check is the honest one: the port
+          # is bound only AFTER a PRIMARY model is loaded (the process exits 2 otherwise), so
+          # "listening" genuinely means "has a validated model to serve".
+          readinessProbe:
+            tcpSocket: { port: 50051 }
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          livenessProbe:
+            tcpSocket: { port: 50051 }
+            initialDelaySeconds: 10
+            periodSeconds: 15
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - { name: models, mountPath: /etc/kanz/models, readOnly: true }
+            - { name: tmp, mountPath: /tmp }
+      volumes:
+        # The model card. A ConfigMap, not a secret: weights and validation evidence are
+        # auditable artifacts, and a model nobody can inspect is a model nobody can validate.
+        - name: models
+          configMap:
+            name: inference-models
+        - name: tmp
+          emptyDir: {}

@@ -24,6 +24,7 @@ import (
 	"github.com/kanz-eng/kanz/internal/marketdata/returns"
 	mdstore "github.com/kanz-eng/kanz/internal/marketdata/store"
 	"github.com/kanz-eng/kanz/internal/pg"
+	"github.com/kanz-eng/kanz/internal/prediction"
 	risk "github.com/kanz-eng/kanz/internal/risk"
 	"github.com/kanz-eng/kanz/internal/risk/compute"
 	varmodel "github.com/kanz-eng/kanz/internal/risk/compute/var"
@@ -162,11 +163,41 @@ func runEngine(ctx context.Context, cfg config.Config, readiness *server.Readine
 	} else {
 		logger.Warn("no RISK_ENGINE_MARKETDATA_DATABASE_URL — VaR99 serves the RISK-07 1%×gross placeholder")
 	}
+	// THE AI LAYER GETS ITS INPUT (AI-M1).
+	//
+	// internal/prediction shipped a feature publisher, a resilient inference client and a
+	// model registry — and had ZERO IMPORTERS outside its own tests. Nothing computed a
+	// feature, nothing published one, nothing consumed a prediction. The platform's whole AI
+	// capability was a well-specified contract with no traffic on it, and the brief's next
+	// fifteen layers were all to be built on top of it.
+	//
+	// KANZ_BRAIN's hybrid design says features are computed in GO — the engine holds the
+	// source state — and scored in PYTHON, where the model serving stack lives. This is the
+	// Go half, finally connected: every recompute turns the engine's OWN measures
+	// (GrossExposure, VaR99) into a FeatureVector and publishes it on
+	// inference.feature.computed, which is the subject the Python streaming worker has
+	// always subscribed to.
+	//
+	// It is an OBSERVER, not a dependency. It runs after the risk FACTs are emitted, and a
+	// publish failure is logged and dropped — a model that cannot be scored must never stop
+	// the engine from computing, publishing and serving the risk numbers the platform
+	// actually trades on. A prediction is an observation, never an order.
+	recomputeOpts := []engine.RecomputerOption{engine.WithMetrics(riskMetrics)}
+	features, err := prediction.NewPublisher(producer)
+	if err != nil {
+		return err
+	}
+	recomputeOpts = append(recomputeOpts,
+		engine.WithMeasureObserver(app.PublishFeaturesOn(features, logger)))
+	logger.Info("AI-M1: publishing risk features for scoring",
+		"subject", prediction.EventTypeFeatureComputed,
+		"feature_set", app.FeatureSetPortfolioRisk)
+
 	// Recomputer baseCtx is app-scoped (Background), not the signal ctx, so
 	// the shutdown Drain can still publish the last settled state after the
 	// signal cancels ingestion.
 	recomputer := engine.NewRecomputer(context.Background(), store, registry,
-		cache, publisher, engine.DefaultDebounceInterval, logger, engine.WithMetrics(riskMetrics))
+		cache, publisher, engine.DefaultDebounceInterval, logger, recomputeOpts...)
 
 	a := &app.App{
 		Readiness:  readiness,

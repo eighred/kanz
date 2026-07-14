@@ -36,7 +36,7 @@ def _make_producer() -> tuple[Producer, CaptureClient]:
     client = CaptureClient()
     p = Producer(
         client,
-        ProducerConfig(source="test-svc/inst-1", producer_version="test-1.0.0"),
+        ProducerConfig(source="test-svc/inst-1", producer_version="test-1.0.0", tenant="acme"),
     )
     return p, client
 
@@ -155,17 +155,17 @@ def test_new_producer_requires_source_and_version():
     with pytest.raises(ValueError):
         Producer(
             CaptureClient(),
-            ProducerConfig(source="", producer_version=""),
+            ProducerConfig(source="", producer_version="", tenant="acme"),
         )
     with pytest.raises(ValueError):
         Producer(
             CaptureClient(),
-            ProducerConfig(source="x", producer_version=""),
+            ProducerConfig(source="x", producer_version="", tenant="acme"),
         )
     with pytest.raises(ValueError):
         Producer(
             None,  # type: ignore[arg-type]
-            ProducerConfig(source="x", producer_version="v"),
+            ProducerConfig(source="x", producer_version="v", tenant="acme"),
         )
 
 

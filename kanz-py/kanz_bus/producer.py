@@ -19,6 +19,7 @@ from google.protobuf.message import Message as ProtoMessage
 
 from kanz_bus.bus import Client, Message
 from kanz_bus.propagation import (
+    get_tenant_id,
     get_causation_id,
     get_correlation_id,
     get_trace_context,
@@ -54,6 +55,15 @@ class ProducerConfig:
     producer_version: str
     """git SHA or semver of the producing code."""
 
+    tenant: str = ""
+    """MT-01a fallback tenant, stamped on events that carry neither an explicit
+    ``Event.tenant_id`` nor an inbound tenant on the context.
+
+    A SINGLE-TENANT service sets it. A multi-tenant one leaves it empty and lets
+    each event carry its own — either explicitly, or inherited from the event that
+    caused it (the Consumer stashes the inbound tenant, so a derived event belongs
+    to the tenant of the event it was derived from). Exactly the Go client's rule."""
+
 
 @dataclass
 class Event:
@@ -74,6 +84,7 @@ class Event:
     payload: ProtoMessage  # any protobuf message
 
     ingestion_time: datetime | None = None  # default: now()
+    tenant_id: str = ""  # MT-01a; empty ⇒ inherited from ctx, else ProducerConfig.tenant
     correlation_id: str = ""  # empty on roots; Producer fills with event_id
     causation_id: str = ""
     trace_context: str = ""
@@ -132,6 +143,9 @@ class Producer:
         # Lineage precedence: explicit Event field > contextvar > root default.
         # Consumer stashes inbound envelope fields onto contextvars (EVT-18c)
         # so a handler that publishes a derived event auto-inherits them.
+        # MT-01a. Precedence matches lineage: explicit > inherited > configured. A
+        # derived event belongs to the tenant of the event that caused it.
+        tenant = e.tenant_id or get_tenant_id() or self._config.tenant
         correlation = e.correlation_id or get_correlation_id() or event_id
         causation = e.causation_id or get_causation_id()
         trace = e.trace_context or get_trace_context()
@@ -163,6 +177,7 @@ class Producer:
         env.correlation_id = correlation
         env.causation_id = causation
         env.trace_context = trace
+        env.tenant_id = tenant
         env.source = self._config.source
         env.producer_version = self._config.producer_version
         env.partition_key = e.partition_key

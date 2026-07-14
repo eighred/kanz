@@ -224,6 +224,20 @@ jobs:
       #
       # Built, vetted and tested against a REAL Redis, so the tag cannot rot back into dead
       # code the next time someone changes the adapter.
+      # THE `anthropic` TAG (AI-M1). copilot's PRODUCTION IMAGE is built with it
+      # (build.yml), and this pipeline never vetted, tested or linted it — the same hole
+      # `-tags redis` sat in until EXEC-M22, and the same hole that let the entire AI layer
+      # rot: code that ships but is never exercised by any check on this repository.
+      #
+      # There is no Anthropic credential here and there does not need to be: compiling and
+      # vetting the tag is what catches the break. A model call is not what rots — the
+      # adapter around it is.
+      - name: Build + vet the `anthropic` tag
+        working-directory: kanz
+        run: |
+          go build -tags anthropic ./...
+          go vet -tags anthropic ./services/copilot/...
+
       - name: Build + vet + test the `redis` tag (real Redis)
         working-directory: kanz
         env:

@@ -46,7 +46,7 @@ def _make_publisher() -> tuple[Publisher, CaptureClient]:
     client = CaptureClient()
     producer = Producer(
         client,
-        ProducerConfig(source="inference-svc/test", producer_version="inf-1.0.0"),
+        ProducerConfig(source="inference-svc/test", producer_version="inf-1.0.0", tenant="acme"),
     )
     return Publisher(producer), client
 

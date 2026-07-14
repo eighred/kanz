@@ -53,6 +53,7 @@ def _envelope(
     event_id: str = "evt-inbound",
     correlation_id: str = "evt-inbound",
     trace: str = "",
+    tenant_id: str = "acme",
 ) -> Envelope:
     et = datetime(2026, 5, 15, 12, 0, 0, tzinfo=timezone.utc)
     ts = Timestamp(seconds=int(et.timestamp()))
@@ -67,6 +68,7 @@ def _envelope(
     env.ingestion_time.CopyFrom(ts)
     env.publish_time.CopyFrom(ts)
     env.correlation_id = correlation_id
+    env.tenant_id = tenant_id  # MT-01a
     env.source = "svc/inst"
     env.producer_version = "1.0"
     env.idempotency_key = event_id
@@ -172,7 +174,7 @@ async def test_consumer_to_producer_chains_lineage():
     c = Consumer(sub)
 
     cc = CaptureClient()
-    p = Producer(cc, ProducerConfig(source="test/inst", producer_version="v1"))
+    p = Producer(cc, ProducerConfig(source="test/inst", producer_version="v1", tenant="acme"))
 
     et = datetime(2026, 5, 15, 12, 0, 0, tzinfo=timezone.utc)
 

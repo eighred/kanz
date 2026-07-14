@@ -39,6 +39,12 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # THE AI LAYER'S FIRST IMAGE (AI-M1). kanz_inference had a servicer, a streaming
+          # worker, a feature store, an explainer and a model registry — and no entrypoint,
+          # no image and no model. It could not be deployed, so it never ran, so the Go
+          # prediction seam had no server to call and zero importers.
+          - service: inference
+            dockerfile: kanz-py/Dockerfile
           - service: risk-engine
             dockerfile: kanz/services/risk-engine/Dockerfile
           - service: schema-registry

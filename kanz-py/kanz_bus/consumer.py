@@ -93,6 +93,7 @@ class Consumer:
             # causation_id for the *next* event the handler emits is *this*
             # event's event_id — that's how lineage chains.
             with propagation_context(
+                tenant_id=env.tenant_id,
                 correlation_id=env.correlation_id,
                 causation_id=env.event_id,
                 trace_context=env.trace_context,

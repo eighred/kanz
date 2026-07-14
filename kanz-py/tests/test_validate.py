@@ -23,6 +23,7 @@ def _valid_envelope() -> Envelope:
     env.publish_time.CopyFrom(ts)
     env.correlation_id = "evt-1"
     env.source = "svc/inst"
+    env.tenant_id = "acme"  # MT-01a: a live event without one is rejected by every Go consumer
     env.producer_version = "1.0.0"
     env.idempotency_key = "evt-1"  # FACT: equals event_id
     env.payload_schema_ref = "market.v1.MarketDataEvent:1"

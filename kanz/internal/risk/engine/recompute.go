@@ -12,6 +12,7 @@ import (
 	risk "github.com/kanz-eng/kanz/internal/risk"
 	v1 "github.com/kanz-eng/kanz/internal/risk/api/v1"
 	"github.com/kanz-eng/kanz/internal/risk/compute"
+	"github.com/kanz-eng/kanz/internal/risk/domain"
 	"github.com/kanz-eng/kanz/internal/risk/ingest"
 	"github.com/kanz-eng/kanz/internal/risk/publish"
 	"github.com/kanz-eng/kanz/internal/risk/state"
@@ -65,6 +66,10 @@ type Recomputer struct {
 	dirty  map[v1.PortfolioID]time.Time // id → recompute deadline (lastTrigger+debounce)
 	closed bool
 
+	// observe is the AI-M1 measure observer (nil ⇒ nothing observes). Called after the
+	// risk FACTs are emitted; see WithMeasureObserver.
+	observe func(context.Context, *domain.MeasureSet)
+
 	wake chan struct{}  // nudges the worker to re-scan deadlines
 	wg   sync.WaitGroup // tracks in-flight recompute goroutines
 	done chan struct{}  // closed when the worker loop exits
@@ -87,6 +92,22 @@ func WithMetrics(m *Metrics) RecomputerOption {
 // two construction seams.)
 func WithRecomputeVolModel(vm compute.VolModel) RecomputerOption {
 	return func(r *Recomputer) { r.volModel = vm }
+}
+
+// WithMeasureObserver calls fn with each freshly recomputed MeasureSet, AFTER the risk
+// FACTs have been emitted (AI-M1).
+//
+// It exists so the prediction layer can turn the engine's measures into features without
+// the engine knowing the prediction layer exists — internal/risk imports nothing from
+// internal/prediction, and the wiring lives at the composition root where it belongs.
+//
+// THE OBSERVER IS DOWNSTREAM OF THE EMIT, AND ITS FAILURES ARE ITS OWN. A model that
+// cannot be scored must never stop the engine from computing, publishing and serving the
+// risk numbers the platform actually trades on. If fn panics or blocks, that is a bug in
+// fn — it is called synchronously and deliberately: an observer that fell behind silently
+// would produce features that no longer describe the book they claim to.
+func WithMeasureObserver(fn func(context.Context, *domain.MeasureSet)) RecomputerOption {
+	return func(r *Recomputer) { r.observe = fn }
 }
 
 // NewRecomputer constructs a Recomputer and starts its worker goroutine.
@@ -289,6 +310,11 @@ func (r *Recomputer) recompute(id v1.PortfolioID) {
 	if err := r.publisher.EmitMeasures(r.baseCtx, ms, nil); err != nil {
 		emitErr = err
 		r.logger.Error("emit measures failed", "portfolio", id, "err", err)
+	}
+	// LAST, and after the FACTs are out. The prediction layer observes the risk engine; it
+	// does not gate it (AI-M1).
+	if r.observe != nil {
+		r.observe(r.baseCtx, ms)
 	}
 	r.metrics.observeRecompute(time.Since(start), emitErr)
 }

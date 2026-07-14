@@ -21,6 +21,12 @@ from typing import Iterator
 _correlation_id: ContextVar[str] = ContextVar("kanz_bus.correlation_id", default="")
 _causation_id: ContextVar[str] = ContextVar("kanz_bus.causation_id", default="")
 _trace_context: ContextVar[str] = ContextVar("kanz_bus.trace_context", default="")
+# MT-01a: the tenant rides the same mechanism as lineage. A derived event belongs
+# to the tenant of the event that caused it — a prediction about acme's portfolio
+# is acme's, and it cannot be re-attributed by whatever the consuming process was
+# configured with. The Go client stashes the inbound tenant on ctx for exactly the
+# same reason.
+_tenant_id: ContextVar[str] = ContextVar("kanz_bus.tenant_id", default="")
 
 
 def get_correlation_id() -> str:
@@ -31,6 +37,11 @@ def get_correlation_id() -> str:
 def get_causation_id() -> str:
     """Return the causation_id from the current context, or ``""``."""
     return _causation_id.get()
+
+
+def get_tenant_id() -> str:
+    """The inbound event's tenant, for a derived event to inherit."""
+    return _tenant_id.get()
 
 
 def get_trace_context() -> str:
@@ -44,6 +55,7 @@ def propagation_context(
     correlation_id: str = "",
     causation_id: str = "",
     trace_context: str = "",
+    tenant_id: str = "",
 ) -> Iterator[None]:
     """Set lineage fields on the current context for the block's duration.
 
@@ -63,6 +75,8 @@ def propagation_context(
         tokens.append((_causation_id, _causation_id.set(causation_id)))
     if trace_context:
         tokens.append((_trace_context, _trace_context.set(trace_context)))
+    if tenant_id:
+        tokens.append((_tenant_id, _tenant_id.set(tenant_id)))
     try:
         yield
     finally:

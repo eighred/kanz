@@ -293,3 +293,34 @@ spec:
               kubernetes.io/metadata.name: kanz-observability
       ports:
         - { protocol: TCP, port: 8080 }
+---
+# AI-M1 — who may ask the model.
+#
+# The inference service scores the risk engine's features. Nothing else on the platform has a
+# reason to call it, and a prediction surface reachable by everything is a prediction surface
+# whose callers nobody can enumerate. Deny-by-default holds: the namespace policy denies all,
+# and this admits exactly one caller.
+#
+# The trading path is NOT here, and that is the point. A prediction is an observation, never
+# an order: webhook-ingest and the OMS cannot reach this service, so a model cannot start or
+# stop a trade even if it wanted to. The safety boundary is enforced by the network, not by a
+# comment in a handler.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-risk-engine-to-inference
+  namespace: kanz-services
+  labels:
+    app.kubernetes.io/part-of: kanz
+spec:
+  podSelector:
+    matchLabels:
+      app: inference
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: risk-engine
+      ports:
+        - { protocol: TCP, port: 50051 }
