@@ -1570,6 +1570,37 @@ git commit -m "test(archiver): prove it against a real NATS and a real Kafka —
 
 ---
 
+## Task 5c: `bus` strands in-flight messages on shutdown — a routine deploy reorders the log
+
+**Run this BEFORE Task 5b.** Added 2026-07-15 after review of Task 5, which reproduced it against real brokers (2 of 4 runs reordered).
+
+`kanz/pkg/bus/nats.go` (~line 184) ends a subscription with:
+
+```go
+<-ctx.Done()
+cc.Stop()
+```
+
+`jetstream.ConsumeContext.Stop()` **discards buffered-but-undelivered messages**; `Drain()` puts them through the callback first (the library's own doc says so). And JetStream marks a message delivered — starting its `AckWait` timer — at **fetch** time, not at callback time. So a message sitting in the client buffer when the pod stops is stranded **server-side for the full 30s default `AckWait`**, while its cleanly-NACKed siblings redeliver immediately on restart and reach Kafka first. **The archived log comes back out of order for that key.**
+
+**Why this is in DATA-M1's scope and not a footnote.** Per-key ordering is the reason the log can be replayed into the same book, and it is the stated justification for the archiver's single-writer `Recreate` deployment. This gap is triggered by an **ordinary rollout**, not an outage — so shipping the archiver without fixing it means shipping the subtler version of the exact bug the service exists to prevent: not a lost log, a *silently reordered* one. It is also **fleet-wide**: every durable consumer on this platform uses this code path, including `tv-sync`, whose fold is explicitly order-dependent (an average-cost basis depends on which fill came first).
+
+**Files:**
+- Modify: `kanz/pkg/bus/nats.go` — the `Subscribe` shutdown path.
+- Test: `kanz/pkg/bus/nats_integration_test.go` (real broker) — the regression test.
+- Modify: `kanz/services/archiver/internal/archive/archiver_integration_test.go` — restore the strict ordering assertion.
+
+**Design.** On `ctx.Done()`, `Drain()` rather than `Stop()`, and give the drain a bounded grace period so a shutdown cannot hang forever. The handler must still be able to do its work while draining: **do not pass the already-cancelled context into the drained callbacks** — a cancelled ctx makes every Kafka publish fail, which NACKs the very messages we are trying to drain and gains nothing. Use a fresh, short-deadline context for the drain window. Anything still unhandled when the grace period expires is NACKed explicitly so it redelivers **immediately** on restart rather than sitting out a 30s `AckWait`.
+
+**Tests:**
+1. **The regression test, against a real broker.** Publish N messages for one partition key; stop the consumer mid-flight (while messages are buffered); restart; assert every message is handled and — the point — that **no message is stranded past the drain window**. It must FAIL against `Stop()` and PASS against `Drain()`. Run it enough times to be confident (the reviewer saw 2-in-4 reordering, so a single green run proves nothing).
+2. **Restore the strict per-key ordering assertion in `TestArchiver_KafkaOutageLosesNothing`** (Task 5 had to weaken it to a set/count "nothing lost" check because of this bug). With the fix, strict cross-restart ordering should hold. **If it still cannot hold, that is a finding, not a test to weaken again — stop and report it.**
+3. Run the existing bus suite and the archiver suite: this touches shared code every service depends on, so a regression here is a regression everywhere. `GOFLAGS=-mod=mod go test ./pkg/bus/... ./services/archiver/...`
+
+**Blast radius, stated plainly.** This changes shutdown semantics for every consumer in the fleet. That is the point (they all have the bug), but it means the bus suite passing is a hard gate, not a formality.
+
+---
+
 ## Task 5b: Terminal vs retryable — give fail-closed a terminal state
 
 Added 2026-07-15 after review of Task 3. **The plan as written retries every failure forever.** The raw bus subscribe path NAKs on any handler error and JetStream is configured with no `MaxDeliver`, so redelivery is unlimited. That is exactly right for a *transient* failure (Kafka is down ⇒ retry forever ⇒ never lose an event — the whole point of the service). It is wrong for a *permanent* one: an event that is structurally unmappable can never succeed, so it NAKs → redelivers → NAKs indefinitely, burning the delivery loop until a human purges the stream. Task 2 already provisions `dlq.*` topics and the archiver wires none of them.
