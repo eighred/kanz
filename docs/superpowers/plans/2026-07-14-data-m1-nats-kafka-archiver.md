@@ -1570,6 +1570,37 @@ git commit -m "test(archiver): prove it against a real NATS and a real Kafka —
 
 ---
 
+## Task 5b: Terminal vs retryable — give fail-closed a terminal state
+
+Added 2026-07-15 after review of Task 3. **The plan as written retries every failure forever.** The raw bus subscribe path NAKs on any handler error and JetStream is configured with no `MaxDeliver`, so redelivery is unlimited. That is exactly right for a *transient* failure (Kafka is down ⇒ retry forever ⇒ never lose an event — the whole point of the service). It is wrong for a *permanent* one: an event that is structurally unmappable can never succeed, so it NAKs → redelivers → NAKs indefinitely, burning the delivery loop until a human purges the stream. Task 2 already provisions `dlq.*` topics and the archiver wires none of them.
+
+**The distinction, and it is the whole task:**
+
+| Failure | Nature | Action |
+|---|---|---|
+| Kafka produce fails (broker down, timeout) | **Transient** — it will succeed on retry | NACK. Retry forever. Never drop. |
+| `bus.Unframe` fails (undecodable body) | **Terminal** — it will never decode | DLQ, then ACK |
+| `topic.For` fails (malformed `event_type`, cross-tenant, reserved prefix) | **Terminal** — it will never map | DLQ, then ACK |
+
+**Files:**
+- Modify: `kanz/services/archiver/internal/archive/archiver.go`
+- Modify: `kanz/services/archiver/internal/archive/archiver_test.go`
+- Modify: `kanz/infra/kafka/topics-job.yaml` (provision the archiver's DLQ sink)
+
+**Design:**
+- One sink, `dlq.archiver` (un-prefixed; `dlq.` is a reserved leading segment per the taxonomy, and an unmappable event by definition has no `{domain}.{entity}` to derive a per-topic DLQ name from). Provision it in `topics-job.yaml`: 3 partitions, `delete`, 30d. The arch test does not assert the reverse direction, so a topic with no publisher in the scan is fine.
+- A terminal failure produces the **raw body verbatim** to `dlq.archiver`, with headers naming the cause: `Kanz-DLQ-Reason` (`unframe` | `route`), `Kanz-DLQ-Error` (the error string), `Kanz-DLQ-Subject` (the NATS subject it arrived on), and `Kanz-Event-Id` where an event_id could be read. Then **ack** — retrying it is pointless, and the event is preserved for a human.
+- **If the DLQ produce itself fails, that is transient: NACK.** Never ack an event that reached neither its topic nor the DLQ.
+
+**Tests (add to the existing unit suite):**
+- An unmappable event (cross-tenant) is produced to `dlq.archiver` with the right reason header, and `Handle` returns **nil** (acked, not looped).
+- An undecodable body goes to `dlq.archiver` with reason `unframe`, and `Handle` returns nil.
+- A Kafka failure on the REAL topic still returns a non-nil error (NACK) — **the existing `TestHandle_KafkaFailureNacks` must still pass unchanged.** Transient must not be re-routed to the DLQ.
+- A terminal event whose **DLQ produce also fails** returns a non-nil error (NACK). Assert this explicitly — it is the one path where "fail closed" and "give it a terminal state" pull against each other, and NACK must win.
+- **Mutation check:** make the terminal path ack WITHOUT producing to the DLQ; the first two tests must fail.
+
+---
+
 ## Task 6: Lag metric
 
 The real failure mode is not downtime, it is falling behind. An archiver silently lagging past its stream's max-age is data loss with a delay on it.
