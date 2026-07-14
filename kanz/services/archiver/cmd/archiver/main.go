@@ -91,6 +91,8 @@ func run() int {
 		}
 	}()
 
+	metrics := archive.NewMetrics(obs.Registry)
+
 	a := archive.New(archive.Config{
 		Tenant:   cfg.Tenant,
 		Group:    cfg.Group,
@@ -98,12 +100,38 @@ func run() int {
 		Kafka:    kafka,
 		NATS:     nc,
 		Logger:   logger,
+		Metrics:  metrics,
 		// Ready fires once every subject's Subscribe goroutine has been launched —
 		// NOT at construction time (before this call, readiness.Set(true) ran
 		// before a single subscription existed, so /readyz reported ready with
 		// zero live subscriptions).
 		Ready: func() { readiness.Set(true) },
 	})
+
+	// Lag poller. The archiver's real failure mode is falling behind its
+	// stream's max-age, not going down — and that is invisible on /healthz the
+	// whole time it is happening. Poll each subscribed durable's pending count
+	// independently of the message path so it keeps reporting even while the
+	// archiver itself is stuck (e.g. NACK-looping a produce failure).
+	go func() {
+		ticker := time.NewTicker(15 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				for _, subject := range cfg.Subjects {
+					pending, err := nc.Pending(ctx, subject, cfg.Group)
+					if err != nil {
+						logger.Warn("archiver: lag poll failed", "subject", subject, "err", err)
+						continue
+					}
+					metrics.Lag.WithLabelValues(subject).Set(float64(pending))
+				}
+			}
+		}
+	}()
 
 	runErr := a.Run(ctx)
 	readiness.Set(false)

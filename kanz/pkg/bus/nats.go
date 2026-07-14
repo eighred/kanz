@@ -272,6 +272,32 @@ func (c *NATSClient) Subscribe(ctx context.Context, subject, group string, h Han
 }
 
 
+// Pending returns the number of messages waiting to be delivered to the
+// durable consumer for (subject, group) — the same (stream, durable) pair
+// Subscribe binds. It is the lag signal for a subscriber whose real failure
+// mode is falling behind, not going down (the archiver, DATA-M1): being down
+// is visible and self-healing; being slow is invisible without this.
+//
+// It looks up the EXISTING consumer rather than creating one — Pending is
+// meant to be polled alongside an already-running Subscribe, not to conjure a
+// consumer of its own — so it returns an error until Subscribe has run at
+// least once for this (subject, group).
+func (c *NATSClient) Pending(ctx context.Context, subject, group string) (int64, error) {
+	stream, err := c.js.StreamNameBySubject(ctx, subject)
+	if err != nil {
+		return 0, fmt.Errorf("nats: stream for subject %q: %w", subject, err)
+	}
+	cons, err := c.js.Consumer(ctx, stream, durableName(group, subject))
+	if err != nil {
+		return 0, fmt.Errorf("nats: consumer %q on stream %q: %w", durableName(group, subject), stream, err)
+	}
+	info, err := cons.Info(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("nats: consumer info for %q: %w", durableName(group, subject), err)
+	}
+	return int64(info.NumPending), nil
+}
+
 func (c *NATSClient) Close() error {
 	if c.conn != nil {
 		c.conn.Close()

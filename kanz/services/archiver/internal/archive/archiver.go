@@ -92,7 +92,11 @@ type Config struct {
 	// signal that. It lets a caller (main) flip readiness only after subscriptions
 	// are actually being established, instead of at construction time.
 	Ready func()
-	// Metrics is added in Task 6. Leave it out for now.
+	// Metrics records outcome counters (Archived/Failed) and is consulted by
+	// Handle on every exit path. Optional — nil is a no-op, so a Config built
+	// without it (existing tests, callers that haven't wired observability yet)
+	// behaves exactly as before Task 6.
+	Metrics *Metrics
 }
 
 // Archiver drains NATS subjects into Kafka topics.
@@ -156,6 +160,7 @@ func (a *Archiver) Handle(ctx context.Context, msg bus.Message) error {
 	if err != nil {
 		// Not decodable ⇒ it will NEVER decode differently on redelivery. Terminal.
 		a.cfg.Logger.Error("archiver: undecodable envelope", "subject", msg.Subject, "err", err)
+		a.observeFail("", "unframe")
 		return a.deadLetter(ctx, msg, "unframe", err, "")
 	}
 
@@ -165,6 +170,7 @@ func (a *Archiver) Handle(ctx context.Context, msg bus.Message) error {
 		// on redelivery. Terminal.
 		a.cfg.Logger.Error("archiver: refusing to route event",
 			"subject", msg.Subject, "event_id", env.GetEventId(), "event_type", env.GetEventType(), "err", err)
+		a.observeFail("", "route")
 		return a.deadLetter(ctx, msg, "route", err, env.GetEventId())
 	}
 
@@ -181,9 +187,21 @@ func (a *Archiver) Handle(ctx context.Context, msg bus.Message) error {
 		// event we failed to archive.
 		a.cfg.Logger.Error("archiver: kafka produce failed — NACKing",
 			"topic", name, "event_id", env.GetEventId(), "err", err)
+		a.observeFail(name, "publish")
 		return fmt.Errorf("archiver: publish to %q: %w", name, err)
 	}
+	if a.cfg.Metrics != nil {
+		a.cfg.Metrics.Archived.WithLabelValues(name).Inc()
+	}
 	return nil
+}
+
+// observeFail records a Failed outcome. topic may be "" (unframe/route fail
+// before a topic is known). Metrics is optional; nil is a no-op.
+func (a *Archiver) observeFail(topic, reason string) {
+	if a.cfg.Metrics != nil {
+		a.cfg.Metrics.Failed.WithLabelValues(topic, reason).Inc()
+	}
 }
 
 // deadLetter produces msg's raw body VERBATIM to DLQSubject with headers naming
@@ -211,6 +229,10 @@ func (a *Archiver) deadLetter(ctx context.Context, msg bus.Message, reason strin
 	if err := a.cfg.Kafka.Publish(ctx, out); err != nil {
 		a.cfg.Logger.Error("archiver: dlq produce failed — NACKing",
 			"reason", reason, "cause", cause, "err", err)
+		// The underlying cause (reason: "unframe"/"route") was already counted by
+		// the caller — this is the SEPARATE, more severe outcome: the event
+		// reached neither its real topic nor the DLQ.
+		a.observeFail(DLQSubject, "dlq_publish")
 		return fmt.Errorf("archiver: dlq publish: %w", err)
 	}
 	a.cfg.Logger.Warn("archiver: terminal failure — dead-lettered and acked",

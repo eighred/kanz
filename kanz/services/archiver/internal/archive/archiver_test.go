@@ -9,6 +9,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/testutil"
+
 	envelopepb "github.com/kanz-eng/kanz-schemas-go/envelope/v1"
 	"google.golang.org/protobuf/proto"
 
@@ -245,5 +248,96 @@ func TestRun_SubscribesEveryConfiguredSubject(t *testing.T) {
 		if !got[s] {
 			t.Errorf("subject %q was never subscribed", s)
 		}
+	}
+}
+
+// Lag is the metric that matters. Success and failure counts are how an operator
+// sees the archiver refusing events (a NACK loop is invisible otherwise: it logs,
+// redelivers, logs, redelivers, and nothing else changes).
+func TestHandle_CountsOutcomes(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	m := archive.NewMetrics(reg)
+
+	e := &envelopepb.Envelope{EventType: "order.order.submitted", TenantId: "acme", EventId: "evt-1"}
+	ok := &fakeKafka{}
+	a := archive.New(archive.Config{
+		Tenant: "acme", Group: "archiver", Kafka: ok, Metrics: m,
+		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+
+	if err := a.Handle(context.Background(), bus.Message{Body: body(t, e)}); err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	if got := testutil.ToFloat64(m.Archived.WithLabelValues("acme.order.order")); got != 1 {
+		t.Errorf("archived_total = %v, want 1", got)
+	}
+
+	bad := &fakeKafka{fail: errors.New("kafka down")}
+	a2 := archive.New(archive.Config{
+		Tenant: "acme", Group: "archiver", Kafka: bad, Metrics: m,
+		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	if err := a2.Handle(context.Background(), bus.Message{Body: body(t, e)}); err == nil {
+		t.Fatal("expected a produce failure")
+	}
+	if got := testutil.ToFloat64(m.Failed.WithLabelValues("acme.order.order", "publish")); got != 1 {
+		t.Errorf("failed_total{reason=publish} = %v, want 1", got)
+	}
+}
+
+// The two terminal (dead-letter-then-ack) paths must each be counted under their
+// own cause — an operator watching failed_total must be able to tell "we are
+// receiving cross-tenant junk" (route) apart from "our own producer is emitting
+// garbage" (unframe) without reading logs.
+func TestHandle_CountsDeadLetterCauses(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	m := archive.NewMetrics(reg)
+	k := &fakeKafka{}
+	a := archive.New(archive.Config{
+		Tenant: "acme", Group: "archiver", Kafka: k, Metrics: m,
+		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+
+	// route: cross-tenant event can never map to a topic for this archiver.
+	routeEvt := &envelopepb.Envelope{EventType: "order.order.submitted", TenantId: "someone-else", EventId: "evt-1"}
+	if err := a.Handle(context.Background(), bus.Message{Subject: "order.order.submitted", Body: body(t, routeEvt)}); err != nil {
+		t.Fatalf("Handle (route): %v", err)
+	}
+	if got := testutil.ToFloat64(m.Failed.WithLabelValues("", "route")); got != 1 {
+		t.Errorf("failed_total{reason=route} = %v, want 1", got)
+	}
+
+	// unframe: undecodable body.
+	if err := a.Handle(context.Background(), bus.Message{Subject: "order.order.submitted", Body: []byte("not a protobuf envelope")}); err != nil {
+		t.Fatalf("Handle (unframe): %v", err)
+	}
+	if got := testutil.ToFloat64(m.Failed.WithLabelValues("", "unframe")); got != 1 {
+		t.Errorf("failed_total{reason=unframe} = %v, want 1", got)
+	}
+}
+
+// If the DLQ produce itself fails, the event reached NEITHER its real topic NOR
+// the DLQ — the most severe outcome the archiver can have, and it must be
+// distinguishable in failed_total from an ordinary successful dead-letter.
+func TestHandle_CountsDLQPublishFailure(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	m := archive.NewMetrics(reg)
+	bad := &fakeKafka{fail: errors.New("kafka down")}
+	a := archive.New(archive.Config{
+		Tenant: "acme", Group: "archiver", Kafka: bad, Metrics: m,
+		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+
+	e := &envelopepb.Envelope{EventType: "order.order.submitted", TenantId: "someone-else", EventId: "evt-1"}
+	if err := a.Handle(context.Background(), bus.Message{Body: body(t, e)}); err == nil {
+		t.Fatal("expected the DLQ produce failure to NACK")
+	}
+	if got := testutil.ToFloat64(m.Failed.WithLabelValues(archive.DLQSubject, "dlq_publish")); got != 1 {
+		t.Errorf("failed_total{topic=%q, reason=dlq_publish} = %v, want 1", archive.DLQSubject, got)
+	}
+	// The routing cause is ALSO counted — dlq_publish does not replace it, since
+	// the underlying cause (route, here) is still true operational signal.
+	if got := testutil.ToFloat64(m.Failed.WithLabelValues("", "route")); got != 1 {
+		t.Errorf("failed_total{reason=route} = %v, want 1", got)
 	}
 }
