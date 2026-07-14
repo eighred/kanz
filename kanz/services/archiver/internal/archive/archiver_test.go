@@ -97,23 +97,82 @@ func TestHandle_KafkaFailureNacks(t *testing.T) {
 	}
 }
 
-// An unmappable event must NACK too, never fall back to a default topic.
-func TestHandle_UnmappableNacksAndPublishesNothing(t *testing.T) {
+// An unmappable event can NEVER succeed on redelivery — it is TERMINAL, not
+// transient. It is dead-lettered to dlq.archiver verbatim, with cause
+// headers, and Handle returns nil so NATS acks it: NACK-looping a message
+// that will never map is exactly the failure mode this split exists to end.
+func TestHandle_UnroutableEventIsDeadLetteredAndAcked(t *testing.T) {
 	e := &envelopepb.Envelope{EventType: "order.order.submitted", TenantId: "someone-else", EventId: "evt-1"}
+	raw := body(t, e)
 	k := &fakeKafka{}
 
-	if err := newArchiver(k).Handle(context.Background(), bus.Message{Body: body(t, e)}); err == nil {
-		t.Fatal("cross-tenant event was accepted — expected a refusal")
+	err := newArchiver(k).Handle(context.Background(), bus.Message{Subject: "order.order.submitted", Body: raw})
+	if err != nil {
+		t.Fatalf("Handle returned %v for a terminal (unroutable) event — want nil (acked)", err)
 	}
-	if len(k.got) != 0 {
-		t.Fatalf("published %d messages for an unmappable event, want 0", len(k.got))
+	if len(k.got) != 1 {
+		t.Fatalf("published %d messages, want 1 (the DLQ produce)", len(k.got))
+	}
+	m := k.got[0]
+	if m.Subject != "dlq.archiver" {
+		t.Errorf("DLQ subject = %q, want dlq.archiver", m.Subject)
+	}
+	if string(m.Body) != string(raw) {
+		t.Error("DLQ body was not the raw envelope verbatim")
+	}
+	if m.Headers["Kanz-DLQ-Reason"] != "route" {
+		t.Errorf("Kanz-DLQ-Reason = %q, want route", m.Headers["Kanz-DLQ-Reason"])
+	}
+	if m.Headers["Kanz-DLQ-Subject"] != "order.order.submitted" {
+		t.Errorf("Kanz-DLQ-Subject = %q, want order.order.submitted", m.Headers["Kanz-DLQ-Subject"])
+	}
+	if m.Headers["Kanz-DLQ-Error"] == "" {
+		t.Error("Kanz-DLQ-Error is empty, want the routing error")
+	}
+	if m.Headers["Kanz-Event-Id"] != "evt-1" {
+		t.Errorf("Kanz-Event-Id = %q, want evt-1 (readable even though routing failed)", m.Headers["Kanz-Event-Id"])
 	}
 }
 
-func TestHandle_UndecodableBodyNacks(t *testing.T) {
+// An undecodable body is equally terminal: it will never decode differently
+// on redelivery. Same dead-letter-then-ack treatment, but no event_id header
+// — the body couldn't even be unframed to read one.
+func TestHandle_UndecodableBodyIsDeadLetteredAndAcked(t *testing.T) {
+	raw := []byte("not a protobuf envelope")
 	k := &fakeKafka{}
-	if err := newArchiver(k).Handle(context.Background(), bus.Message{Body: []byte("not a protobuf envelope")}); err == nil {
-		t.Fatal("garbage body was accepted — expected a refusal")
+
+	err := newArchiver(k).Handle(context.Background(), bus.Message{Subject: "order.order.submitted", Body: raw})
+	if err != nil {
+		t.Fatalf("Handle returned %v for an undecodable body — want nil (acked)", err)
+	}
+	if len(k.got) != 1 {
+		t.Fatalf("published %d messages, want 1 (the DLQ produce)", len(k.got))
+	}
+	m := k.got[0]
+	if m.Subject != "dlq.archiver" {
+		t.Errorf("DLQ subject = %q, want dlq.archiver", m.Subject)
+	}
+	if string(m.Body) != string(raw) {
+		t.Error("DLQ body was not the raw body verbatim")
+	}
+	if m.Headers["Kanz-DLQ-Reason"] != "unframe" {
+		t.Errorf("Kanz-DLQ-Reason = %q, want unframe", m.Headers["Kanz-DLQ-Reason"])
+	}
+	if _, ok := m.Headers["Kanz-Event-Id"]; ok {
+		t.Error("Kanz-Event-Id was set for an undecodable body — no event_id could ever be read")
+	}
+}
+
+// If the DLQ produce ITSELF fails, that is just another Kafka outage —
+// transient, not terminal. Handle must NACK: an event that reached neither
+// its real topic nor the DLQ must never be acked, or it is lost forever.
+func TestHandle_DeadLetterProduceFailureNacks(t *testing.T) {
+	e := &envelopepb.Envelope{EventType: "order.order.submitted", TenantId: "someone-else", EventId: "evt-1"}
+	k := &fakeKafka{fail: errors.New("kafka down")}
+
+	err := newArchiver(k).Handle(context.Background(), bus.Message{Body: body(t, e)})
+	if err == nil {
+		t.Fatal("Handle returned nil when the DLQ produce itself failed — event reached neither the real topic nor the DLQ and would be LOST")
 	}
 }
 

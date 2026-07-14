@@ -79,6 +79,14 @@ data:
     # unlike a fill. Archiving them is its own capacity and cost decision.
     market.book                12  delete   604800000   yes
     market.crypto              12  delete   604800000   yes
+
+    # ARCHIVER'S OWN DLQ (Task 5b). One sink for every TERMINAL failure the
+    # archiver can hit (undecodable body, unroutable event) — un-prefixed because
+    # dlq is a reserved leading segment and an unmappable event has no
+    # {domain}.{entity} to derive a per-topic DLQ name from. Named directly, not via
+    # the `dlq` column above: that column pairs a DLQ with a real topic, and
+    # dlq.archiver has no real-topic sibling.
+    dlq.archiver                3   delete   2592000000  no
     EOF
 
     echo "topic provisioning complete"
