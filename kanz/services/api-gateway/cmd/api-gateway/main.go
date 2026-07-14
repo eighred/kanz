@@ -189,6 +189,10 @@ func buildRouter(cfg config.Config, h *gateway.Handler, o *orders.Handler, p *pr
 	o.Routes(gwMux)
 	p.Routes(gwMux)
 
+	// One of these two arms always runs: config.Load refuses to return a Config
+	// with neither an OIDC issuer nor a JWT secret, so the gateway cannot reach
+	// here unauthenticated. There is no third arm, and middleware.Auth refuses
+	// every request if a nil Authenticator ever reaches it anyway.
 	var authn middleware.Authenticator
 	switch {
 	case cfg.OIDCIssuer != "":
@@ -208,8 +212,6 @@ func buildRouter(cfg config.Config, h *gateway.Handler, o *orders.Handler, p *pr
 	case cfg.JWTSecret != "":
 		authn = middleware.NewJWTAuthenticator(cfg.JWTSecret)
 		logger.Warn("api-gateway: using dev HS256 validator (set API_GATEWAY_OIDC_ISSUER for production)")
-	default:
-		logger.Warn("api-gateway: authentication DISABLED (no OIDC issuer or JWT secret)")
 	}
 	// Per-tenant quota policy (MT-01e): default budget + optional per-tenant
 	// JSON overrides; metrics carry the tenant label.

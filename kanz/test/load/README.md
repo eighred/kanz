@@ -34,9 +34,18 @@ k6 run -e BASE_URL=https://gw.kanz.example baseline.js
 k6 run -e BASE_URL=https://gw.kanz.example -e RATE=300 -e DURATION=2h soak.js
 ```
 
-Env: `BASE_URL` (gateway), `PORTFOLIO` (default `PF1`), `TOKEN` (bearer, if the
-AUTH-01 edge requires it — pass at invocation, never commit), `RATE`/`DURATION`
-(soak).
+Env: `BASE_URL` (gateway), `PORTFOLIO` (default `PF1`), `TOKEN` (bearer — now
+REQUIRED: the gateway refuses to start unauthenticated (SEC-M1), so an
+unauthenticated run measures the latency of 401s), `RATE`/`DURATION` (soak).
+
+Against the local stack in `docker-compose.yml`, mint one:
+
+```bash
+TOKEN=$(go run ./cmd/kanz-devtoken --secret load-secret --tenant PF1-tenant) \
+  k6 run -e BASE_URL=http://localhost:8080 -e TOKEN=$TOKEN baseline.js
+```
+
+Against a real gateway, use a real SSO token — never commit either.
 
 ## Production-volume runs (PARITY-05d)
 

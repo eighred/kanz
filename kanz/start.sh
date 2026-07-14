@@ -135,8 +135,9 @@ dashboard() {
 ${GREEN}${BOLD}Kanz is up.${RESET}
 
   ${BOLD}Open / poke it${RESET}
-    api-gateway      ${CYAN}http://localhost:8080${RESET}
-      try:           curl localhost:8080/v1/portfolios/PF1/exposure
+    api-gateway      ${CYAN}http://localhost:8080${RESET}   ${DIM}(authenticated — it refuses to run otherwise)${RESET}
+      get a token:   export TOKEN=\$(go run ./cmd/kanz-devtoken --secret dev-secret --tenant acme)
+      try:           curl -H "Authorization: Bearer \$TOKEN" localhost:8080/v1/portfolios/PF1/exposure
     risk-engine      ${CYAN}http://localhost:8082/healthz${RESET}   ${DIM}(gRPC query on :8081)${RESET}
     NATS monitor     ${CYAN}http://localhost:8222${RESET}
     PostgreSQL       ${CYAN}localhost:5432${RESET}   ${DIM}(user/pass/db: kanz/kanz/kanz)${RESET}

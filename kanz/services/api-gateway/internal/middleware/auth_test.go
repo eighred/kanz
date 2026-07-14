@@ -101,10 +101,26 @@ func TestAuthMiddleware(t *testing.T) {
 			t.Errorf("code = %d, want 200", code)
 		}
 	})
-	t.Run("nil authenticator disables auth", func(t *testing.T) {
-		h := Auth(nil, "", nil)(ok)
-		if code := call(h, ""); code != http.StatusOK {
-			t.Errorf("code = %d, want 200 (auth disabled)", code)
+	// A nil authenticator means "I cannot establish who you are", which is never
+	// "come in". It used to be a pass-through, and POST /v1/orders sits behind
+	// this chain. 503, not 401: the fault is the server's, not the caller's.
+	t.Run("nil authenticator refuses", func(t *testing.T) {
+		var reached bool
+		sink := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			reached = true
+			w.WriteHeader(http.StatusOK)
+		})
+		h := Auth(nil, "", nil)(sink)
+
+		req := httptest.NewRequest(http.MethodPost, "/v1/orders", nil)
+		rr := httptest.NewRecorder()
+		h.ServeHTTP(rr, req)
+
+		if rr.Code != http.StatusServiceUnavailable {
+			t.Errorf("code = %d, want 503", rr.Code)
+		}
+		if reached {
+			t.Error("POST /v1/orders reached the handler with no authenticator")
 		}
 	})
 }

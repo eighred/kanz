@@ -1,6 +1,7 @@
 package config
 
 import (
+	"errors"
 	"log/slog"
 	"os"
 	"strconv"
@@ -36,11 +37,14 @@ type Config struct {
 
 	// JWTSecret is the HS256 shared secret the bundled minimal JWT validator
 	// verifies bearer tokens against (API-01d) — a dev-only stand-in used only
-	// when no OIDC issuer is configured. Empty (and no OIDC) ⇒ authentication
-	// is DISABLED (local/dev only).
+	// when no OIDC issuer is configured. One of OIDCIssuer or JWTSecret is
+	// REQUIRED: with neither, Load refuses and the gateway does not start
+	// (SEC-M1).
 	JWTSecret string
-	// RequiredRole, when set, is the role a Principal must carry to reach any
-	// query endpoint (deny-by-default once auth is enabled).
+	// RequiredRole is the role a Principal must carry to reach any /v1 route
+	// (deny-by-default). REQUIRED: without it, authentication admits every token
+	// the issuer ever minted to every route, POST /v1/orders included, so Load
+	// refuses (SEC-M1).
 	RequiredRole string
 
 	// RateLimitPerSec / RateLimitBurst configure the DEFAULT per-tenant token
@@ -80,7 +84,7 @@ type Config struct {
 }
 
 func Load() (Config, error) {
-	return Config{
+	cfg := Config{
 		Listen:          envOr("API_GATEWAY_LISTEN", ":8080"),
 		LogLevel:        parseLevel(envOr("API_GATEWAY_LOG_LEVEL", "info")),
 		Source:          envOr("API_GATEWAY_SOURCE", "api-gateway"),
@@ -104,7 +108,33 @@ func Load() (Config, error) {
 		DataMasterAddr:  os.Getenv("API_GATEWAY_DATAMASTER_ADDR"),
 		CopilotAddr:     os.Getenv("API_GATEWAY_COPILOT_ADDR"),
 		TVSyncAddr:      os.Getenv("API_GATEWAY_TV_SYNC_ADDR"),
-	}, nil
+	}
+	if err := cfg.validateAuth(); err != nil {
+		return Config{}, err
+	}
+	return cfg, nil
+}
+
+// validateAuth refuses to hand back a gateway that cannot say no.
+//
+// This process is the platform's sole identity authority: every /v1 route,
+// POST /v1/orders included, is reachable only through it, and tv-sync trusts
+// the principal header it injects. Deny-by-default is the house rule at every
+// other gate on this platform (the mandate gate, the venue-account gate, RLS),
+// and it is enforced here the same way — by refusing to run, not by logging a
+// warning that scrolls past.
+func (c Config) validateAuth() error {
+	if c.OIDCIssuer == "" && c.JWTSecret == "" {
+		return errors.New("api-gateway: no authentication configured — set API_GATEWAY_OIDC_ISSUER " +
+			"(production, OIDC/JWKS) or API_GATEWAY_JWT_SECRET (dev, HS256). The gateway will not " +
+			"serve /v1/* — including POST /v1/orders — to unauthenticated callers")
+	}
+	if c.RequiredRole == "" {
+		return errors.New("api-gateway: no authorization configured — set API_GATEWAY_REQUIRED_ROLE. " +
+			"Authentication alone admits every token the issuer ever minted, for any client and any " +
+			"purpose, to every /v1 route — POST /v1/orders included")
+	}
+	return nil
 }
 
 // secret prefers a CSI/Vault file mount (<k>_FILE) over a plaintext <k> env

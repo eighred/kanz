@@ -65,13 +65,19 @@ var ErrUnauthenticated = errors.New("auth: unauthenticated")
 // Auth is the authentication+authorization middleware. It extracts the bearer
 // token, authenticates it, requires requiredRole (when non-empty,
 // deny-by-default), and stashes the Principal on ctx. A nil authenticator
-// disables auth entirely (local/dev) — the request passes through with no
-// Principal.
+// REFUSES every request (503): it means this process cannot establish who the
+// caller is, and POST /v1/orders sits behind this chain (SEC-M1).
 func Auth(authn Authenticator, requiredRole string, logger *slog.Logger) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			// No authenticator means this process cannot establish who the caller
+			// is — which is never a reason to let them in. It refuses rather than
+			// passing through, so no composition root, present or future, can
+			// serve /v1/* anonymously by omitting a check. 503, not 401: nothing
+			// is wrong with the caller's credentials; we never had a validator to
+			// judge them with, and that is the server's fault to fix.
 			if authn == nil {
-				next.ServeHTTP(w, r)
+				writeError(w, http.StatusServiceUnavailable, "authentication unavailable")
 				return
 			}
 			token, ok := bearerToken(r)

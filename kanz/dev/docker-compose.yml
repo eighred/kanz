@@ -106,5 +106,16 @@ services:
       API_GATEWAY_RISK_ENGINE_ADDR: "risk-engine:8081"
       API_GATEWAY_SOURCE: "api-gateway/dev"
       API_GATEWAY_LOG_LEVEL: "info"
+      # The gateway will not start unauthenticated (SEC-M1) — it exits 2 rather
+      # than serving /v1/*, POST /v1/orders included, to anyone. This stack ran
+      # exactly that way until now. Locally it runs the bundled HS256 validator;
+      # mint a token the gateway accepts with:
+      #
+      #   go run ./cmd/kanz-devtoken --secret dev-secret --tenant acme
+      #
+      # The secret is symmetric and public — it is fine here and NOWHERE ELSE.
+      # Production authenticates against Eighred SSO over OIDC/JWKS.
+      API_GATEWAY_JWT_SECRET: "dev-secret"
+      API_GATEWAY_REQUIRED_ROLE: "kanz-user"
     ports:
       - "8080:8080"

@@ -6,14 +6,15 @@
 # Phase-7 read surfaces, and PUBLISHES order.order.submit / order.order.cancel — so
 # it is a capital path, not just a read edge.
 #
-# ⚠️ AUTHENTICATION IS OFF BY DEFAULT, AND IT DOES NOT SAY NO — IT SAYS NOTHING.
+# AUTHENTICATION IS NOT OPTIONAL, AND THE BINARY ENFORCES THAT (SEC-M1).
 #
-#   With no OIDC issuer AND no JWT secret, the gateway logs "authentication
-#   DISABLED" and serves /v1/* — INCLUDING POST /v1/orders — UNAUTHENTICATED. It
-#   does not refuse to start. So API_GATEWAY_OIDC_ISSUER is set here, and
-#   API_GATEWAY_REQUIRED_ROLE with it. If you are tempted to clear them for a
-#   staging environment, understand exactly what you are opening: an unauthenticated
-#   order-submission endpoint.
+#   This prose used to be the control: the gateway would log "authentication
+#   DISABLED" and serve /v1/* — POST /v1/orders included — to anyone, and all that
+#   stood between that and production was a warning nobody was obliged to read.
+#   It now REFUSES TO START (exit 2) without a credential (API_GATEWAY_OIDC_ISSUER,
+#   or API_GATEWAY_JWT_SECRET for dev) and without API_GATEWAY_REQUIRED_ROLE — auth
+#   alone would admit every token the issuer ever minted to the order path. Clearing
+#   either below does not open a staging hole; it CrashLoopBackOffs, by design.
 #
 # THE SCALE INVARIANT: safe to scale, and the RATE LIMITS DIVIDE.
 #
@@ -93,8 +94,8 @@ spec:
             # REQUIRED: the process exits 2 without it. The dial itself is lazy, so a
             # momentarily-unreachable risk-engine does not fail startup.
             - { name: API_GATEWAY_RISK_ENGINE_ADDR, value: "risk-engine.kanz-services.svc:9090" }
-            # AuthN. Without an issuer (and with no JWT secret) the gateway serves
-            # /v1/* unauthenticated — see the warning at the top of this file.
+            # AuthN + AuthZ. REQUIRED: the process exits 2 without a credential and
+            # without a required role — see the note at the top of this file.
             - { name: API_GATEWAY_OIDC_ISSUER, value: "https://login.eighred.com" }
             - { name: API_GATEWAY_OIDC_AUDIENCE, value: "kanz" }
             - { name: API_GATEWAY_REQUIRED_ROLE, value: "kanz-user" }
