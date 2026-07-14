@@ -88,10 +88,16 @@ func provisionedTopics(t *testing.T, path string) map[string]bool {
 	return out
 }
 
-// pythonSubjects scans kanz-py for three-segment subject literals. The Python side
-// has no AST walker and does not need one for this: subjects are written as plain
-// string literals (kanz_inference/publish.py, governance/drift_trigger.py).
-var pySubject = regexp.MustCompile(`"([a-z][a-z0-9]*(?:\.[a-z0-9_]+){2})"`)
+// pySubjectAssign matches a line-anchored assignment of a string literal to an
+// identifier — the same shape as a Go `const Foo = "..."` — mirroring the Go side's
+// own convention: every real subject in kanz-py is a module-level constant like
+// `SUBJECT_DRIFT_DETECTED = "data.feature.drift_detected"`. Anchoring on the
+// assignment statement (not a bare string-literal scan) means prose can never
+// match: a docstring line such as `subject="market.equity.trade"` inside a call
+// expression is not `IDENT = "..."` at the start of a line, so it is structurally
+// invisible to this pattern — no regex ever has to special-case a comment or
+// docstring to stay correct.
+var pySubjectAssign = regexp.MustCompile(`(?m)^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*"([a-z][a-z0-9]*(?:\.[a-z0-9_]+){2})"`)
 
 func pythonSubjects(t *testing.T, root string) []string {
 	t.Helper()
@@ -114,11 +120,15 @@ func pythonSubjects(t *testing.T, root string) []string {
 		if rerr != nil {
 			return rerr
 		}
-		for _, m := range pySubject.FindAllStringSubmatch(string(b), -1) {
-			if strings.Contains(m[1], ".v1.") {
-				continue // proto type ref, not a subject
+		for _, m := range pySubjectAssign.FindAllStringSubmatch(string(b), -1) {
+			name, value := m[1], m[2]
+			if !subjectish(name) {
+				continue // not a *Subject*/*EventType* constant, same filter as the Go AST walker
 			}
-			out = append(out, m[1])
+			if protoTypeRef.MatchString(value) {
+				continue // proto type ref (e.g. "inference.v1.PredictionEnvelope"), not a subject
+			}
+			out = append(out, value)
 		}
 		return nil
 	})
