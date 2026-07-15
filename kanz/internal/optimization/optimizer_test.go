@@ -118,3 +118,52 @@ func TestOptimize_InputValidation(t *testing.T) {
 		t.Fatalf("want ErrNeedCovariance, got %v", err)
 	}
 }
+
+func TestOptimize_HRP(t *testing.T) {
+	// Same two-cluster cov as the hrp unit test ⇒ [0.4,0.4,0.1,0.1], keyed by id.
+	cov := [][]float64{
+		{0.04, 0.036, 0, 0},
+		{0.036, 0.04, 0, 0},
+		{0, 0, 0.16, 0.144},
+		{0, 0, 0.144, 0.16},
+	}
+	in := MarketInputs{Instruments: []string{"A", "B", "C", "D"}, Covariance: cov}
+	res, err := Optimize(in, Objective{Type: HRP}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	approx(t, "w_A", res.Weights["A"], 0.4, 1e-9)
+	approx(t, "w_D", res.Weights["D"], 0.1, 1e-9)
+	approx(t, "sum", sumWeights(res.Weights), 1, 1e-9)
+	// ExpectedRisk = √(wᵀΣw); ExpectedReturn = 0 with no μ supplied.
+	if res.ExpectedRisk <= 0 {
+		t.Fatalf("HRP result should carry a positive ExpectedRisk, got %v", res.ExpectedRisk)
+	}
+	approx(t, "no μ ⇒ zero expected return", res.ExpectedReturn, 0, 1e-12)
+}
+
+func TestOptimize_HRP_NeedsCovariance(t *testing.T) {
+	in := MarketInputs{Instruments: []string{"A", "B"}}
+	if _, err := Optimize(in, Objective{Type: HRP}, nil); err != ErrNeedCovariance {
+		t.Fatalf("HRP with no covariance ⇒ ErrNeedCovariance, got %v", err)
+	}
+}
+
+// HRP ignores box bounds (the approved decision): the result equals the
+// unconstrained HRP weights even when a non-default ConstraintSet is supplied.
+func TestOptimize_HRP_IgnoresBoxBounds(t *testing.T) {
+	cov := [][]float64{
+		{0.04, 0.036, 0, 0},
+		{0.036, 0.04, 0, 0},
+		{0, 0, 0.16, 0.144},
+		{0, 0, 0.144, 0.16},
+	}
+	in := MarketInputs{Instruments: []string{"A", "B", "C", "D"}, Covariance: cov}
+	// A 0.3 cap on A would bind for a bounds-respecting objective; HRP must ignore it.
+	cons := &ConstraintSet{LongOnly: true, MaxWeight: 0.3}
+	res, err := Optimize(in, Objective{Type: HRP}, cons)
+	if err != nil {
+		t.Fatal(err)
+	}
+	approx(t, "w_A unclamped", res.Weights["A"], 0.4, 1e-9)
+}

@@ -36,6 +36,12 @@ enum ObjectiveType {
   // RISK_PARITY: equalize each asset's risk contribution (the equal-risk-
   // contribution portfolio) — no expected returns needed.
   OBJECTIVE_TYPE_RISK_PARITY = 4;
+
+  // HRP: hierarchical risk parity — clustering-based allocation from the
+  // covariance alone (no expected returns), robust to an ill-conditioned Σ
+  // because it never inverts it. Long-only, fully-invested; does not honor
+  // per-asset box bounds (mandate compliance is validated downstream).
+  OBJECTIVE_TYPE_HRP = 5;
 }
 
 // ObjectiveSpec parameterizes the optimization objective.

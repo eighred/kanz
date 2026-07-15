@@ -39,6 +39,13 @@ const (
 	MaxSharpe
 	// RiskParity equalizes each asset's risk contribution.
 	RiskParity
+	// HRP is hierarchical risk parity: a covariance-only, long-only allocation
+	// from asset clustering (no expected returns), robust to an ill-conditioned Σ
+	// because it never inverts it. Unlike every other objective, HRP does NOT
+	// honor per-asset box/group bounds — it returns its natural allocation, and
+	// mandate compliance is validated downstream by CheckMandate. Mirrors
+	// optimization.v1.OBJECTIVE_TYPE_HRP.
+	HRP
 )
 
 // Objective parameterizes the optimization.
@@ -118,6 +125,9 @@ func Optimize(in MarketInputs, obj Objective, cons *ConstraintSet) (Result, erro
 		w = maxSharpe(in.Covariance, in.ExpectedReturns, obj.RiskFreeRate, lo, hi)
 	case RiskParity:
 		w = riskParity(in.Covariance, lo, hi)
+	case HRP:
+		// Covariance-only; bounds deliberately not applied (see the HRP comment).
+		w = hrp(in.Covariance)
 	default:
 		return Result{}, errors.New("optimization: unknown objective type")
 	}
