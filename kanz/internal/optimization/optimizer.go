@@ -100,6 +100,11 @@ func Optimize(in MarketInputs, obj Objective, cons *ConstraintSet) (Result, erro
 	if in.Covariance != nil && (len(in.Covariance) != n || !square(in.Covariance, n)) {
 		return Result{}, ErrInputsMismatch
 	}
+	if in.Covariance != nil {
+		if err := checkPSD(in.Covariance); err != nil {
+			return Result{}, err
+		}
+	}
 	needsReturns := obj.Type == MaxReturn || obj.Type == MaxSharpe
 	needsCov := obj.Type != MaxReturn || obj.RiskAversion > 0
 	if needsReturns && in.ExpectedReturns == nil {

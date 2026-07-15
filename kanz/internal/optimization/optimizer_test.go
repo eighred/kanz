@@ -167,3 +167,10 @@ func TestOptimize_HRP_IgnoresBoxBounds(t *testing.T) {
 	}
 	approx(t, "w_A unclamped", res.Weights["A"], 0.4, 1e-9)
 }
+
+func TestOptimize_RejectsNonPSD(t *testing.T) {
+	in := MarketInputs{Instruments: []string{"A", "B"}, Covariance: [][]float64{{1, -2}, {-2, 1}}}
+	if _, err := Optimize(in, Objective{Type: MinVariance}, nil); err != ErrNotPSD {
+		t.Fatalf("indefinite Σ ⇒ ErrNotPSD, got %v", err)
+	}
+}

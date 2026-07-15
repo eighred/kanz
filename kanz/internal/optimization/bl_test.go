@@ -151,3 +151,14 @@ func TestBlackLitterman_FeedsMaxSharpe(t *testing.T) {
 		t.Fatalf("sanity: μ_A should be 0.125, got %v", mu[0])
 	}
 }
+
+func TestBlackLitterman_RejectsNonPSD(t *testing.T) {
+	_, err := BlackLitterman(BLInput{
+		Covariance:    [][]float64{{1, -2}, {-2, 1}},
+		MarketWeights: []float64{0.5, 0.5},
+		RiskAversion:  2.5, Tau: 0.05,
+	})
+	if err != ErrNotPSD {
+		t.Fatalf("indefinite Σ ⇒ ErrNotPSD, got %v", err)
+	}
+}

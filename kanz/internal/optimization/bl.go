@@ -49,6 +49,9 @@ func BlackLitterman(in BLInput) ([]float64, error) {
 	if !square(in.Covariance, n) || len(in.MarketWeights) != n {
 		return nil, ErrBLDims
 	}
+	if err := checkPSD(in.Covariance); err != nil {
+		return nil, err
+	}
 	if in.RiskAversion <= 0 {
 		return nil, ErrBLRiskAversion
 	}
