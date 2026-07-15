@@ -1,0 +1,132 @@
+---
+# DATA-M1 — the durable log of record had a producer with no deployment. archiver
+# drains the NATS live spine (EVT-08, 24h/168h retention) into the Kafka durable
+# log (EVT-09, kept for years) that replay, the lakehouse and every regulatory
+# reconstruction depend on. Until this manifest existed, the fold, the topic
+# mapping, the DLQ path and the real-broker integration tests (Task 5) had
+# nothing to run them in a cluster — an image/manifest parity check that only
+# looks at files that exist cannot see a service that has neither.
+#
+# SINGLE WRITER — DELIBERATELY, AND FOR A DIFFERENT REASON THAN webhook-ingest.
+#
+#   replicas: 1, strategy: Recreate. Archiver's durable NATS consumer group
+#   load-balances across whoever is subscribed, same as tv-sync's: two archiver
+#   pods on the same group would each fold PART of the stream, and each Kafka
+#   producer partitions independently by key — so two producers can INTERLEAVE
+#   and INVERT per-key order across the two pods' writes. A reordered durable
+#   log is not a partial log, it is a WRONG one: replay and every downstream
+#   reader (lake-sink, the regulatory reconstruction) trusts Kafka's per-key
+#   order as the source of truth.
+#
+#   This is the OPPOSITE call from webhook-ingest (EXEC-M22), which runs
+#   replicas: 2 behind a cross-pod nonce store because it is the platform's
+#   INGRESS: a gap there is a TradingView signal that never arrives — permanent
+#   signal loss with nothing downstream to retry it. archiver is not an
+#   ingress; it is a tap on a spine that already retains its own history. A gap
+#   here is DEFERRED WORK, not signal loss: NATS keeps every event for the
+#   stream's max-age, the durable consumer's ack position marks exactly where
+#   the pod left off, and a restarted pod catches up from that position with
+#   nothing lost. Recreate is what keeps the single-writer ordering guarantee
+#   true across a rollout — a RollingUpdate's pod overlap window is exactly the
+#   two-producer defect above, just bounded in time instead of permanent.
+#
+#   Do not "fix" this to RollingUpdate for availability. There is nothing to
+#   make available: catching up after a short Recreate gap is cheaper, safer,
+#   and produces a CORRECT log, where availability during the gap would not.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: archiver
+  namespace: kanz-services
+  labels:
+    app.kubernetes.io/part-of: kanz
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: archiver
+  namespace: kanz-services
+  labels:
+    app.kubernetes.io/part-of: kanz
+spec:
+  selector:
+    app: archiver
+  ports:
+    - { name: http, port: 8086, targetPort: 8086 }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: archiver
+  namespace: kanz-services
+  labels:
+    app.kubernetes.io/part-of: kanz
+spec:
+  # ONE. See the single-writer note above: a second replica does not add
+  # throughput, it risks inverting per-key order in the durable log of record.
+  replicas: 1
+  strategy:
+    type: Recreate
+  revisionHistoryLimit: 5
+  selector:
+    matchLabels:
+      app: archiver
+  template:
+    metadata:
+      labels:
+        app: archiver
+        app.kubernetes.io/part-of: kanz
+    spec:
+      serviceAccountName: archiver
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: archiver
+          # Pinned to a cosign-signed digest by the GitOps bump (CICD-01d).
+          image: ghcr.io/kanz-eng/archiver:latest
+          ports:
+            - { containerPort: 8086, name: http }
+          env:
+            - { name: ARCHIVER_LISTEN, value: ":8086" }
+            - { name: ARCHIVER_NATS_URL, value: "nats://nats.kanz-messaging.svc:4222" }
+            # The durable log this pod writes into. Plain value, not a CSI secret
+            # mount: the platform's Kafka listener is unauthenticated in-cluster
+            # (the same broker address risk-engine's feature stream dials), so
+            # there is no credential here to protect. If that changes, this env
+            # becomes a *_FILE pointing at a Vault CSI mount, same as tv-sync's
+            # ARCHIVER_KAFKA_BROKERS would need to become TV_SYNC_DATABASE_URL_FILE's
+            # sibling.
+            - { name: ARCHIVER_KAFKA_BROKERS, value: "kafka.kanz-messaging.svc:9094" }
+            - { name: ARCHIVER_OTLP_ENDPOINT, value: "otel-collector.kanz-observability.svc:4317" }
+            # MT-01c: __system__ carries the platform's cross-cutting FACTs
+            # (order/execution/risk/accounting/...) under their un-prefixed
+            # legacy topic names (topic.SystemTenant) — the same tenant value
+            # every other durable service in this fleet is deployed under
+            # (OMS_TENANT, TV_SYNC_TENANT, ACCOUNTING_TENANT, ...). archiver's
+            # own topic mapping refuses (NACKs, never misfiles) any envelope
+            # whose tenant_id does not match this exactly — see internal/topic.
+            - { name: ARCHIVER_TENANT, value: "__system__" }
+          livenessProbe:
+            httpGet: { path: /healthz, port: 8086 }
+            initialDelaySeconds: 5
+            periodSeconds: 15
+          readinessProbe:
+            httpGet: { path: /readyz, port: 8086 }
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - { name: tmp, mountPath: /tmp }
+      volumes:
+        - name: tmp
+          emptyDir: {}

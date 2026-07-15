@@ -324,3 +324,70 @@ spec:
               app: risk-engine
       ports:
         - { protocol: TCP, port: 50051 }
+---
+# DATA-M1 — archiver's blast radius, made explicit and named rather than left to
+# be reconstructed from the three namespace-wide allows above (messaging, OTLP,
+# DNS). NetworkPolicy allows are ADDITIVE (OR'd), so this block does not narrow
+# anything those already grant — archiver gets NATS/Kafka/OTLP from them either
+# way. It exists so a reviewer auditing what archiver can reach does not have to
+# re-derive it from unrelated blanket rules, and so the restriction keeps
+# holding on its own if those blanket rules are ever scoped down to named
+# services instead of podSelector: {}.
+#
+# archiver reads the NATS live spine and writes the Kafka durable log. That is
+# ALL it does. It has no gRPC/HTTP client to the OMS, no venue credentials, and
+# no reason to reach webhook-ingest — there is deliberately no egress rule to
+# any of them here, and none anywhere else in this file selects archiver as a
+# permitted caller. The namespace default-deny (allow-messaging-egress's
+# preamble) means that absence IS the enforcement: archiver cannot reach the
+# capital path because nothing ever said it could.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-archiver-egress
+  namespace: kanz-services
+  labels:
+    app.kubernetes.io/part-of: kanz
+spec:
+  podSelector:
+    matchLabels:
+      app: archiver
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kanz-messaging
+      ports:
+        - { protocol: TCP, port: 4222 } # NATS: the live spine it drains
+        - { protocol: TCP, port: 9094 } # Kafka: the durable log it writes
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kanz-observability
+      ports:
+        - { protocol: TCP, port: 4317 } # OTLP span/metric export
+---
+# Prometheus scrape of archiver's /metrics (OBS-01), and the kubelet-adjacent
+# health checks in front of it. archiver accepts NOTHING else on 8086: no other
+# service pod calls it, because nothing downstream of the durable Kafka log
+# talks to the archiver that wrote it — a reader goes to Kafka directly.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-observability-to-archiver
+  namespace: kanz-services
+  labels:
+    app.kubernetes.io/part-of: kanz
+spec:
+  podSelector:
+    matchLabels:
+      app: archiver
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kanz-observability
+      ports:
+        - { protocol: TCP, port: 8086 }

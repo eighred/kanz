@@ -113,6 +113,13 @@ jobs:
           # The external REST edge. It had an image target and no deployment.
           - service: api-gateway
             dockerfile: kanz/services/api-gateway/Dockerfile
+          # DATA-M1 (Task 7): the durable-log producer. archiver drains the NATS
+          # live spine into the Kafka log of record; it had a Dockerfile, a
+          # single-writer deploy manifest and real-broker integration tests
+          # (Task 5) but no entry here, so nothing built the image the manifest
+          # referenced.
+          - service: archiver
+            dockerfile: kanz/services/archiver/Dockerfile
     steps:
       - uses: actions/checkout@v4
 

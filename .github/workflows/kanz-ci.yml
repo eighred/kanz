@@ -143,9 +143,7 @@ jobs:
       #
       # TEST_POSTGRES_URL points at the non-superuser role above, so the durable
       # -store suites RUN here instead of skipping — the order-store admission
-      # gate and the RLS tenant-isolation tests included. Kafka integration tests
-      # still skip without TEST_KAFKA_BROKERS; that gap is real, but Kafka's tests
-      # do not guard a capital-path invariant the way the order store's do.
+      # gate and the RLS tenant-isolation tests included.
       # The real-bus guards are worthless if they never run, and until now they
       # never did: CI provisioned Postgres but no broker, so TEST_NATS_URL was
       # unset and EVERY NATS integration test silently skipped — including the
@@ -163,6 +161,42 @@ jobs:
             sleep 1
           done
           echo "NATS did not become ready"; docker logs kanz-ci-nats; exit 1
+
+      # DATA-M1 (Task 7) — the archiver's and pkg/bus's TEST_KAFKA_BROKERS-gated
+      # integration tests had never run in CI: no Kafka existed here to point them
+      # at, so they silently skipped on every run since the day they were written.
+      # That is exactly the shape of the gap `-tags redis` sat in before EXEC-M22 —
+      # a real guard that compiled clean and never once executed.
+      #
+      # A `services:` container cannot work for this image: it needs a FULL
+      # single-node KRaft env set (partial env — e.g. only
+      # KAFKA_AUTO_CREATE_TOPICS_ENABLE — switches the entrypoint from "use the
+      # baked-in server.properties" to "assemble config purely from env" and it
+      # then fails looking for zookeeper.connect). Started as a step, exactly like
+      # NATS above, with the exact env this workflow's own archiver Task 5 proved
+      # boots clean (see .superpowers/sdd/task-5-report.md). No `-js`-equivalent
+      # flag is needed here, only env, but the boot-and-poll shape matches NATS's
+      # for the same reason: neither image's readiness is visible to Docker's own
+      # health-check without a broker-specific probe this workflow doesn't need.
+      - name: Start Kafka (single-node KRaft)
+        run: |
+          docker run -d --name kanz-ci-kafka -p 9092:9092 \
+            -e KAFKA_NODE_ID=1 \
+            -e KAFKA_PROCESS_ROLES=broker,controller \
+            -e KAFKA_LISTENERS=PLAINTEXT://:9092,CONTROLLER://:9093 \
+            -e KAFKA_ADVERTISED_LISTENERS=PLAINTEXT://localhost:9092 \
+            -e KAFKA_CONTROLLER_LISTENER_NAMES=CONTROLLER \
+            -e KAFKA_LISTENER_SECURITY_PROTOCOL_MAP=CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT \
+            -e KAFKA_CONTROLLER_QUORUM_VOTERS=1@localhost:9093 \
+            -e KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR=1 \
+            -e KAFKA_INTER_BROKER_LISTENER_NAME=PLAINTEXT \
+            -e KAFKA_AUTO_CREATE_TOPICS_ENABLE=false \
+            apache/kafka:3.9.0
+          for i in $(seq 1 60); do
+            docker logs kanz-ci-kafka 2>&1 | grep -q "Kafka Server started" && exit 0
+            sleep 2
+          done
+          echo "Kafka did not become ready"; docker logs kanz-ci-kafka; exit 1
 
       # Bootstrap the spine with THE SCRIPT PRODUCTION APPLIES — extracted from the
       # very ConfigMap infra/nats/bootstrap-job.yaml ships. A copy of the stream
@@ -207,11 +241,21 @@ jobs:
           done
           echo "the OMS never subscribed:"; cat /tmp/oms.log; exit 1
 
+      # TEST_KAFKA_BROKERS points at the KRaft broker started above. Until now this
+      # was unset, so every Kafka-gated integration test silently skipped:
+      # pkg/bus/kafka_integration_test.go (the bus's own real-broker guard),
+      # tools/replay/reader_integration_test.go (replay against the durable log),
+      # and — the payoff — services/archiver/internal/archive's four
+      # TestArchiver_* tests: the ordering guarantee, the outage-loses-nothing
+      # proof, the ack-before-produce red twin, and the unprovisioned-tenant NACK.
+      # Those are DATA-M1's entire reason to exist; a green pipeline that never
+      # ran them was not proof of anything.
       - name: Test (race) — incl. arch + contract + Postgres + real-bus + M1 loop
         working-directory: kanz
         env:
           TEST_POSTGRES_URL: postgres://kanzapp:kanz@localhost:5432/kanzapp?sslmode=disable
           TEST_NATS_URL: nats://localhost:4222
+          TEST_KAFKA_BROKERS: localhost:9092
           TEST_OMS_ON_BUS: "1"
         run: go test -race ./...
 
@@ -244,6 +288,9 @@ jobs:
           TEST_REDIS_URL: redis://localhost:6379/0
           TEST_POSTGRES_URL: postgres://kanzapp:kanz@localhost:5432/kanzapp?sslmode=disable
           TEST_NATS_URL: nats://localhost:4222
+          # This re-runs ./pkg/bus/..., which includes kafka_integration_test.go —
+          # without this it would silently skip under the redis-tagged build too.
+          TEST_KAFKA_BROKERS: localhost:9092
         run: |
           go build -tags redis ./...
           go vet -tags redis ./...
