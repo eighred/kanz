@@ -84,40 +84,13 @@ func Historical(cfg Config) compute.ReturnsMeasure {
 	conf := cfg.confidence()
 	window := cfg.Window
 	return func(ctx context.Context, p *domain.Portfolio, rp compute.ReturnsProvider) v1.Measure {
-		base := string(p.BaseCurrency())
-		type leg struct {
-			value   float64
-			returns []float64
+		pnl, _, ok := portfolioPnL(ctx, p, rp, window)
+		if !ok {
+			return zeroNamed(compute.MeasureVaR99)
 		}
-		var legs []leg
-		minLen := -1
-		for _, pos := range p.Positions() {
-			if pos.MarketValue == nil || pos.MarketValue.CurrencyCode != base {
-				continue
-			}
-			r, err := rp.Returns(ctx, string(pos.InstrumentID), p.AsOf(), window)
-			if err != nil || len(r) == 0 {
-				continue
-			}
-			legs = append(legs, leg{value: decimalToFloat(pos.MarketValue.Amount), returns: r})
-			if minLen < 0 || len(r) < minLen {
-				minLen = len(r)
-			}
-		}
-		if len(legs) == 0 || minLen < 2 {
-			return zeroMeasure()
-		}
-
-		pnl := make([]float64, minLen)
-		for _, lg := range legs {
-			off := len(lg.returns) - minLen // tail-align to the common window
-			for t := 0; t < minLen; t++ {
-				pnl[t] += lg.value * lg.returns[off+t]
-			}
-		}
-		sort.Float64s(pnl)
-
-		loss := -quantile(pnl, 1-conf)
+		sorted := append([]float64(nil), pnl...)
+		sort.Float64s(sorted)
+		loss := -quantile(sorted, 1-conf)
 		if loss < 0 {
 			loss = 0
 		}
@@ -126,6 +99,56 @@ func Historical(cfg Config) compute.ReturnsMeasure {
 			Value: floatToDecimal(loss, varExponent),
 		}
 	}
+}
+
+// portfolioPnL builds the TIME-ORDERED per-scenario P&L series for the
+// portfolio's base-currency positions over the window, tail-aligned to the
+// shortest available series (providers return most-recent-N, so the recent
+// tail lines up). pnl[t] = Σ_i value_i × return_i[t]. v0 is the signed sum of
+// the included positions' base-currency values — the starting portfolio value
+// the drawdown path folds P&L onto. ok=false on insufficient data (no legs, or
+// the common window < 2), matching Historical's original guard. The series is
+// NOT sorted: VaR/ES sort a copy, drawdown walks it in time order.
+func portfolioPnL(ctx context.Context, p *domain.Portfolio, rp compute.ReturnsProvider, window int) (pnl []float64, v0 float64, ok bool) {
+	base := string(p.BaseCurrency())
+	type leg struct {
+		value   float64
+		returns []float64
+	}
+	var legs []leg
+	minLen := -1
+	for _, pos := range p.Positions() {
+		if pos.MarketValue == nil || pos.MarketValue.CurrencyCode != base {
+			continue
+		}
+		r, err := rp.Returns(ctx, string(pos.InstrumentID), p.AsOf(), window)
+		if err != nil || len(r) == 0 {
+			continue
+		}
+		val := decimalToFloat(pos.MarketValue.Amount)
+		legs = append(legs, leg{value: val, returns: r})
+		v0 += val
+		if minLen < 0 || len(r) < minLen {
+			minLen = len(r)
+		}
+	}
+	if len(legs) == 0 || minLen < 2 {
+		return nil, 0, false
+	}
+	pnl = make([]float64, minLen)
+	for _, lg := range legs {
+		off := len(lg.returns) - minLen // tail-align to the common window
+		for t := 0; t < minLen; t++ {
+			pnl[t] += lg.value * lg.returns[off+t]
+		}
+	}
+	return pnl, v0, true
+}
+
+// zeroNamed is the zero-value measure for name — the MeasureFunc never-error
+// return when there is insufficient data.
+func zeroNamed(name v1.MeasureName) v1.Measure {
+	return v1.Measure{Name: name, Value: &commonpb.Decimal{Coefficient: 0, Exponent: 0}}
 }
 
 // Register overrides MeasureVaR99 in r with historical-simulation VaR closed
@@ -159,9 +182,7 @@ func quantile(sorted []float64, q float64) float64 {
 	return sorted[lo] + (h-float64(lo))*(sorted[lo+1]-sorted[lo])
 }
 
-func zeroMeasure() v1.Measure {
-	return v1.Measure{Name: compute.MeasureVaR99, Value: &commonpb.Decimal{Coefficient: 0, Exponent: 0}}
-}
+func zeroMeasure() v1.Measure { return zeroNamed(compute.MeasureVaR99) }
 
 // decimalToFloat / floatToDecimal are the local Decimal⇄float bridge (compute's
 // equivalents are package-private). Returns/VaR are float-domain statistics; the
