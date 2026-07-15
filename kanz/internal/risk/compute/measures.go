@@ -11,7 +11,9 @@ import (
 
 // RISK-07 ships the *framework* for risk-measure computation plus
 // four illustrative measures (GrossExposure, NetExposure, a
-// parametric VaR placeholder, and a Delta placeholder).
+// parametric VaR placeholder, and a Delta placeholder). A fifth
+// measure, HHI, is a real (non-placeholder) concentration measure —
+// see its doc comment in concentration.go.
 //
 // # Honest scope
 //
@@ -84,8 +86,9 @@ func (r *Registry) Names() []v1.MeasureName {
 }
 
 // DefaultRegistry returns the RISK-07 baseline registry — the four
-// illustrative measures plus the framework. Engines override by
-// constructing this then calling Register with real models.
+// illustrative measures, the real HHI concentration measure, and the
+// framework. Engines override by constructing this then calling
+// Register with real models.
 func DefaultRegistry() *Registry {
 	r := NewRegistry()
 	r.Register(MeasureGrossExposure, GrossExposure)
@@ -130,14 +133,14 @@ func ComputeMeasures(p *domain.Portfolio, r *Registry, filter []v1.MeasureName) 
 
 // Names — short, CamelCase, dimensional suffix where meaningful.
 const (
-	MeasureGrossExposure       v1.MeasureName = "GrossExposure"
-	MeasureNetExposure         v1.MeasureName = "NetExposure"
-	MeasureVaR99               v1.MeasureName = "VaR99"
-	MeasureES99                v1.MeasureName = "ES99"
-	MeasureDelta               v1.MeasureName = "Delta"
-	MeasureHHI                 v1.MeasureName = "HHI"
-	MeasureMaxDrawdown         v1.MeasureName = "MaxDrawdown"
-	MeasureMaxDrawdownAmount   v1.MeasureName = "MaxDrawdownAmount"
+	MeasureGrossExposure     v1.MeasureName = "GrossExposure"
+	MeasureNetExposure       v1.MeasureName = "NetExposure"
+	MeasureVaR99             v1.MeasureName = "VaR99"
+	MeasureES99              v1.MeasureName = "ES99"
+	MeasureDelta             v1.MeasureName = "Delta"
+	MeasureHHI               v1.MeasureName = "HHI"
+	MeasureMaxDrawdown       v1.MeasureName = "MaxDrawdown"
+	MeasureMaxDrawdownAmount v1.MeasureName = "MaxDrawdownAmount"
 )
 
 // GrossExposure is the sum of absolute MarketValue across positions

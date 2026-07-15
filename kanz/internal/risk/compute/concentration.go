@@ -3,8 +3,6 @@ package compute
 import (
 	"math"
 
-	commonpb "github.com/kanz-eng/kanz-schemas-go/common/v1"
-
 	v1 "github.com/kanz-eng/kanz/internal/risk/api/v1"
 	"github.com/kanz-eng/kanz/internal/risk/domain"
 )
@@ -34,7 +32,7 @@ func HHI(p *domain.Portfolio) v1.Measure {
 		gross += v
 	}
 	if gross == 0 {
-		return v1.Measure{Name: MeasureHHI, Value: &commonpb.Decimal{Coefficient: 0, Exponent: 0}}
+		return v1.Measure{Name: MeasureHHI, Value: zeroDecimal()}
 	}
 	hhi := sumSq / (gross * gross)
 	return v1.Measure{Name: MeasureHHI, Value: floatToDecimal(hhi, hhiExponent)}
