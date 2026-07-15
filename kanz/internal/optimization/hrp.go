@@ -156,27 +156,34 @@ func clusterVar(cov [][]float64, items []int) float64 {
 }
 
 // inverseVariancePortfolio returns the normalized inverse-variance weights over a
-// cluster: ivp_i ∝ 1/Σ_ii. A non-positive Σ_ii contributes 0 (guarded against
-// 1/0). If every variance in the cluster is non-positive, it falls back to equal
-// weights (a degenerate cluster carries no variance information to tilt on).
+// cluster: ivp_i ∝ 1/Σ_ii. A riskless asset (Σ_ii ≤ 0) is the limit 1/Σ_ii → ∞:
+// it DOMINATES the portfolio. If any exist, weight is split equally among the
+// riskless assets and the risk-bearing assets get zero (all-riskless ⇒ equal
+// weights). Otherwise the standard normalized inverse-variance.
 func inverseVariancePortfolio(cov [][]float64, items []int) []float64 {
 	ivp := make([]float64, len(items))
+	var riskless int
+	for _, i := range items {
+		if cov[i][i] <= 0 {
+			riskless++
+		}
+	}
+	if riskless > 0 {
+		w := 1 / float64(riskless)
+		for k, i := range items {
+			if cov[i][i] <= 0 {
+				ivp[k] = w
+			}
+		}
+		return ivp
+	}
 	var sum float64
 	for k, i := range items {
-		if cov[i][i] > 0 {
-			ivp[k] = 1 / cov[i][i]
-		}
+		ivp[k] = 1 / cov[i][i]
 		sum += ivp[k]
 	}
-	if sum > 0 {
-		for k := range ivp {
-			ivp[k] /= sum
-		}
-	} else {
-		eq := 1 / float64(len(items))
-		for k := range ivp {
-			ivp[k] = eq
-		}
+	for k := range ivp {
+		ivp[k] /= sum
 	}
 	return ivp
 }

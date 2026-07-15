@@ -114,3 +114,27 @@ func TestHRP_EdgeCases(t *testing.T) {
 		approx(t, "degenerate equal weight "+string(rune('A'+i)), v, 0.25, 1e-9)
 	}
 }
+
+func TestInverseVariancePortfolio_RisklessDominates(t *testing.T) {
+	// A riskless asset (variance 0) among risky ones takes all the weight —
+	// the 1/σ²→∞ limit. Previously it was (wrongly) excluded.
+	ivp := inverseVariancePortfolio(diag(0.0, 0.04, 0.04), []int{0, 1, 2})
+	approx(t, "riskless dominates", ivp[0], 1.0, 1e-12)
+	approx(t, "risky 1 zero", ivp[1], 0.0, 1e-12)
+	approx(t, "risky 2 zero", ivp[2], 0.0, 1e-12)
+}
+
+func TestInverseVariancePortfolio_AllPositiveUnchanged(t *testing.T) {
+	// σ²=[0.01,0.04] ⇒ ivp ∝ [100,25] ⇒ [0.8,0.2] — the common case, unchanged.
+	ivp := inverseVariancePortfolio(diag(0.01, 0.04), []int{0, 1})
+	approx(t, "w0", ivp[0], 0.8, 1e-12)
+	approx(t, "w1", ivp[1], 0.2, 1e-12)
+}
+
+func TestInverseVariancePortfolio_AllRisklessEqual(t *testing.T) {
+	// All-riskless ⇒ equal weights (unchanged fallback).
+	ivp := inverseVariancePortfolio(diag(0.0, 0.0, 0.0, 0.0), []int{0, 1, 2, 3})
+	for i := 0; i < 4; i++ {
+		approx(t, "equal", ivp[i], 0.25, 1e-12)
+	}
+}
