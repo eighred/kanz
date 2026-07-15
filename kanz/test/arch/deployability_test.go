@@ -91,13 +91,6 @@ var notDeployed = map[string]string{
 		"drift/SLO signals and ACTS on the platform. An autonomous remediator must not be turned on before " +
 		"the system it remediates has ever run in production and been watched by a human.",
 
-	"lake-sink": "NOT YET, AND DELIBERATELY. It streams the durable Kafka log (the system of record) into " +
-		"the lakehouse. It has no Dockerfile and no deploy manifest — Task 7 (DATA-M1) provisioned a real " +
-		"Kafka broker in CI for the archiver's integration tests, so 'Kafka is not provisioned' is no " +
-		"longer the blocker; lake-sink itself was never built out beyond its CDC decode/sink core. " +
-		"Deploying a sink with no upstream archiver running in production would be a pod that reports " +
-		"healthy and moves nothing — it belongs after archiver actually ships traffic, not before.",
-
 	"performance": "ANALYTICS PLANE, PARKED. Stateless return/attribution analytics with no consumer on " +
 		"the active execution direction. It ships behind the analytics surface, not with the trading loop.",
 

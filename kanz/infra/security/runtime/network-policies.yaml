@@ -391,3 +391,82 @@ spec:
               kubernetes.io/metadata.name: kanz-observability
       ports:
         - { protocol: TCP, port: 8086 }
+---
+# DATA-M2 — lake-sink's blast radius. Like the archiver it reads the Kafka
+# durable log (9094) and exports OTLP (4317), both of which the namespace-wide
+# allow-messaging-egress / allow-otlp-egress rules above already grant every pod,
+# so there is deliberately no rule for them here. What lake-sink needs that the
+# archiver did not is the INTRA-NAMESPACE path to schema-registry: it decodes
+# each payload against the EVT-16 registry, and this namespace is default-deny for
+# pod-to-pod traffic. This rule (egress) and allow-lake-sink-to-schema-registry
+# (the ingress half) are the ONLY thing that opens it — lake-sink is the
+# registry's first in-cluster consumer.
+#
+# It has no path to the OMS, the venues or webhook-ingest, and no reason for one:
+# it reads the log and writes the lakehouse, nothing near the capital path. The
+# namespace default-deny means that absence IS the enforcement.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-lake-sink-egress
+  namespace: kanz-services
+  labels:
+    app.kubernetes.io/part-of: kanz
+spec:
+  podSelector:
+    matchLabels:
+      app: lake-sink
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app: schema-registry
+      ports:
+        - { protocol: TCP, port: 8080 } # EVT-16 schema registry: payload decode
+---
+# The ingress half: schema-registry accepts the registry read from lake-sink.
+# Scoped to lake-sink's pods and 8080 only — the registry's HTTP resolve surface.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-lake-sink-to-schema-registry
+  namespace: kanz-services
+  labels:
+    app.kubernetes.io/part-of: kanz
+spec:
+  podSelector:
+    matchLabels:
+      app: schema-registry
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: lake-sink
+      ports:
+        - { protocol: TCP, port: 8080 }
+---
+# Prometheus scrape of lake-sink's /metrics (OBS-01) and the kubelet-adjacent
+# health checks. lake-sink accepts NOTHING else on 8085: nothing downstream calls
+# it — a reader of the lakehouse goes to the landing store directly, not through
+# the process that wrote it.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-observability-to-lake-sink
+  namespace: kanz-services
+  labels:
+    app.kubernetes.io/part-of: kanz
+spec:
+  podSelector:
+    matchLabels:
+      app: lake-sink
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kanz-observability
+      ports:
+        - { protocol: TCP, port: 8085 }

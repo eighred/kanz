@@ -1,0 +1,167 @@
+---
+# DATA-M2 — the lakehouse consumer that had no deployment. lake-sink was fully
+# written (schema-evolution-aware CDC: dynamicpb decode against the EVT-16 schema
+# registry, Hive-partitioned NDJSON the catalog ingest commits as Iceberg/Delta
+# tables) and had no manifest in this directory at all — it could not run in a
+# cluster. DATA-M1 gave the Kafka log a producer (archiver); this gives it the
+# consumer that makes history PERMANENT.
+#
+# THE RETENTION ARITHMETIC IS THE WHOLE POINT. archiver buys 30 days
+# (order.order et al. are delete/2592000000ms); the compacted STATE topics
+# (compliance.mandate, risk.position) keep only the LATEST value per key. Neither
+# is permanence. P&L-since-inception, the regulatory retention window and any
+# future model-training set all read the LAKEHOUSE, not the Kafka log's retention
+# window. lake-sink is what lands the log somewhere it is never aged out of.
+#
+# SINGLE WRITER — DELIBERATELY, AND FOR A DIFFERENT REASON THAN THE ARCHIVER.
+#
+#   replicas: 1, strategy: Recreate. Unlike the archiver (whose single-writer
+#   constraint is about per-key ORDER in the durable log), lake-sink reads Kafka
+#   with a CONSUMER GROUP: Kafka assigns each partition to exactly one member and
+#   preserves per-partition order regardless of member count, and each process
+#   writes its OWN part-{instance} file (FileSink keys the filename by instance),
+#   so N replicas never interleave into one file. lake-sink is therefore
+#   HORIZONTALLY SAFE from the log's side — the only thing pinning it to one pod
+#   is the STORAGE below.
+#
+#   The landing root is a ReadWriteOnce PersistentVolumeClaim (see the PVC). A RWO
+#   volume mounts on one node at a time, so two pods cannot both hold it, so a
+#   RollingUpdate (which briefly runs old+new together) would deadlock on the
+#   mount — hence Recreate, and hence replicas: 1. This is a STORAGE limit, not an
+#   ordering one. A restart is catch-up, never loss: the consumer group's
+#   committed offset marks exactly where the pod left off, and a restarted pod
+#   resumes from there against a log that retains its own history.
+#
+#   THE SCALING PATH IS OBJECT STORAGE, NOT MORE REPLICAS ON THIS PVC. When the
+#   landing root is backed by shared object storage (S3/MinIO) — either a real
+#   object-store Sink behind the sink.Sink interface, or a RWX CSI mount — this
+#   becomes replicas: N + RollingUpdate with no code change: the consumer group
+#   splits the partitions and each pod writes distinct part-files into the shared
+#   root. That is infra-gated (a bucket + credentials this cluster does not yet
+#   have), so the correct minimal deployment today is one pod on one PVC.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: lake-sink
+  namespace: kanz-services
+  labels:
+    app.kubernetes.io/part-of: kanz
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: lake-sink
+  namespace: kanz-services
+  labels:
+    app.kubernetes.io/part-of: kanz
+spec:
+  selector:
+    app: lake-sink
+  ports:
+    - { name: http, port: 8085, targetPort: 8085 }
+---
+# The durable landing root. NDJSON part-files accumulate here and are read in
+# place by the lakehouse catalog ingest (Trino/Spark → Iceberg/Delta); losing it
+# on a pod restart would defeat the permanence this service exists to provide, so
+# it MUST outlive the pod — an emptyDir here would be the silent history loss.
+# ReadWriteOnce because the FileSink is a POSIX writer and one pod holds it (see
+# the single-writer note). storageClassName omitted ⇒ the cluster default class.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: lake-sink-landing
+  namespace: kanz-services
+  labels:
+    app.kubernetes.io/part-of: kanz
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 50Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: lake-sink
+  namespace: kanz-services
+  labels:
+    app.kubernetes.io/part-of: kanz
+spec:
+  # ONE. See the single-writer note above: pinned by the ReadWriteOnce PVC, not
+  # by ordering. The scaling path is object storage, not a second replica here.
+  replicas: 1
+  strategy:
+    type: Recreate
+  revisionHistoryLimit: 5
+  selector:
+    matchLabels:
+      app: lake-sink
+  template:
+    metadata:
+      labels:
+        app: lake-sink
+        app.kubernetes.io/part-of: kanz
+    spec:
+      serviceAccountName: lake-sink
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        # fsGroup sets group ownership on the PVC mount so the non-root uid can
+        # write its part-files into the landing root.
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: lake-sink
+          # Pinned to a cosign-signed digest by the GitOps bump (CICD-01d).
+          image: ghcr.io/kanz-eng/lake-sink:latest
+          ports:
+            - { containerPort: 8085, name: http }
+          env:
+            - { name: LAKE_SINK_LISTEN, value: ":8085" }
+            # The durable log this pod READS. Plain value, not a CSI secret mount:
+            # the platform's Kafka listener is unauthenticated in-cluster (the same
+            # broker address the archiver writes to and risk-engine's feature
+            # stream dials), so there is no credential here to protect.
+            - { name: LAKE_SINK_BROKERS, value: "kafka.kanz-messaging.svc:9094" }
+            # The topics to land — the DURABLE business/audit/platform/inference
+            # log. This mirrors what the archiver produces, MINUS the two
+            # deliberate exclusions: market.book/market.crypto (highest-volume,
+            # re-fetchable from the venue — out of DATA-M1 scope and out of here
+            # for the same reason) and the dlq.* topics (operational failure sinks,
+            # not business history). Kafka has no subject wildcard, so the set is
+            # explicit; TestEverySubjectHasAKafkaTopic keeps the topic names honest.
+            - name: LAKE_SINK_TOPICS
+              value: "compliance.mandate,risk.position,order.order,strategy.signal,accounting.balance,settlement.instruction,compliance.breach,risk.portfolio,platform.authz,platform.compliance,platform.mode,inference.feature,inference.prediction,data.feature"
+            # Schema-evolution-aware decode is the whole of LAKE-01a: without the
+            # registry, payloads land envelope-only (undecoded). Point it at the
+            # EVT-16 registry so an additively-added field surfaces as a new column
+            # with no redeploy.
+            - { name: LAKE_SINK_REGISTRY_URL, value: "http://schema-registry.kanz-services.svc:8080" }
+            # The PVC mount below — the Hive-partitioned NDJSON landing root.
+            - { name: LAKE_SINK_OUTPUT_DIR, value: "/var/lake/landing" }
+            - { name: LAKE_SINK_OTLP_ENDPOINT, value: "otel-collector.kanz-observability.svc:4317" }
+          livenessProbe:
+            httpGet: { path: /healthz, port: 8085 }
+            initialDelaySeconds: 5
+            periodSeconds: 15
+          readinessProbe:
+            httpGet: { path: /readyz, port: 8085 }
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - { name: landing, mountPath: /var/lake/landing }
+            - { name: tmp, mountPath: /tmp }
+      volumes:
+        - name: landing
+          persistentVolumeClaim:
+            claimName: lake-sink-landing
+        - name: tmp
+          emptyDir: {}

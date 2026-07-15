@@ -120,6 +120,12 @@ jobs:
           # referenced.
           - service: archiver
             dockerfile: kanz/services/archiver/Dockerfile
+          # DATA-M2: the durable-log consumer. lake-sink reads the Kafka log of
+          # record and lands it into the lakehouse (permanent history); it had a
+          # deploy manifest and a PVC but no entry here, so nothing built the image
+          # the manifest referenced.
+          - service: lake-sink
+            dockerfile: kanz/services/lake-sink/Dockerfile
     steps:
       - uses: actions/checkout@v4
 
