@@ -12,10 +12,10 @@ import (
 	"testing"
 	"time"
 
+	envelopepb "github.com/kanz-eng/kanz-schemas-go/envelope/v1"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/segmentio/kafka-go"
-	envelopepb "github.com/kanz-eng/kanz-schemas-go/envelope/v1"
 	"google.golang.org/protobuf/proto"
 
 	"github.com/kanz-eng/kanz/pkg/bus"

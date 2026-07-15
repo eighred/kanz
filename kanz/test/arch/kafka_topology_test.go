@@ -39,7 +39,7 @@ func TestEverySubjectHasAKafkaTopic(t *testing.T) {
 		t.Fatal("no topics found in topics-job.yaml — has the table format changed?")
 	}
 
-	subjects := declaredSubjects(t, root)                                            // Go
+	subjects := declaredSubjects(t, root)                                             // Go
 	subjects = append(subjects, pythonSubjects(t, filepath.Join(repo, "kanz-py"))...) // Python
 	if len(subjects) == 0 {
 		t.Fatal("no subjects found — this test would pass vacuously")

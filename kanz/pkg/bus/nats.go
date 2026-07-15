@@ -271,7 +271,6 @@ func (c *NATSClient) Subscribe(ctx context.Context, subject, group string, h Han
 	return nil
 }
 
-
 // Pending returns the number of messages waiting to be delivered to the
 // durable consumer for (subject, group) — the same (stream, durable) pair
 // Subscribe binds. It is the lag signal for a subscriber whose real failure
