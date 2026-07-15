@@ -61,7 +61,7 @@ func TestDelta_PlaceholderEqualsNetExposure(t *testing.T) {
 	}
 }
 
-func TestComputeMeasures_DefaultRegistryProducesAllFour(t *testing.T) {
+func TestComputeMeasures_DefaultRegistryProducesAll(t *testing.T) {
 	p := makePortfolio("PORT-1", "USD",
 		domain.Position{InstrumentID: "A", MarketValue: mkMoney(1000, 0, "USD"), AsOf: baseTime},
 	)
@@ -70,6 +70,7 @@ func TestComputeMeasures_DefaultRegistryProducesAllFour(t *testing.T) {
 	want := []v1.MeasureName{
 		compute.MeasureDelta,
 		compute.MeasureGrossExposure,
+		compute.MeasureHHI,
 		compute.MeasureNetExposure,
 		compute.MeasureVaR99,
 	}

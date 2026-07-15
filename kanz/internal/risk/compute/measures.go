@@ -92,6 +92,7 @@ func DefaultRegistry() *Registry {
 	r.Register(MeasureNetExposure, NetExposure)
 	r.Register(MeasureVaR99, VaR99)
 	r.Register(MeasureDelta, Delta)
+	r.Register(MeasureHHI, HHI)
 	return r
 }
 
@@ -133,6 +134,7 @@ const (
 	MeasureNetExposure   v1.MeasureName = "NetExposure"
 	MeasureVaR99         v1.MeasureName = "VaR99"
 	MeasureDelta         v1.MeasureName = "Delta"
+	MeasureHHI           v1.MeasureName = "HHI"
 )
 
 // GrossExposure is the sum of absolute MarketValue across positions
