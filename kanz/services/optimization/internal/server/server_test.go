@@ -122,3 +122,13 @@ func TestServer_Propose_BlackLittermanInvalid(t *testing.T) {
 		t.Fatalf("malformed BL ⇒ 400, got %d", rec.Code)
 	}
 }
+
+func TestServer_Propose_BodyTooLarge(t *testing.T) {
+	// A body over the 8 MiB cap ⇒ 400 (MaxBytesReader makes the decoder error).
+	big := strings.Repeat("A", (8<<20)+1024)
+	body := `{"portfolio_id":"` + big + `","instruments":["A"],"covariance":[[0.04]],"objective":{"Type":1}}`
+	rec := do(t, newTestServer(), http.MethodPost, "/v1/propose", body)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("oversized body ⇒ 400, got %d", rec.Code)
+	}
+}

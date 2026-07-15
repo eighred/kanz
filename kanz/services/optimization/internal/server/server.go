@@ -18,6 +18,11 @@ import (
 	"github.com/kanz-eng/kanz/services/optimization/internal/bridge"
 )
 
+// maxRequestBytes bounds a /v1 request body. A dense covariance for a several-
+// hundred-asset universe fits well under 8 MiB; the cap turns an unbounded body
+// (which drives O(n³)/O(k³) solver work) into a 400.
+const maxRequestBytes = 8 << 20 // 8 MiB
+
 // Readiness gates traffic; the compute endpoints are pure, so the service is
 // ready as soon as it is up (the flag exists for graceful shutdown).
 type Readiness struct{ ready atomic.Bool }
@@ -214,6 +219,7 @@ func pow10(exp int32) float64 {
 }
 
 func decode(w http.ResponseWriter, r *http.Request, v any) bool {
+	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBytes)
 	if err := json.NewDecoder(r.Body).Decode(v); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request body"})
 		return false
