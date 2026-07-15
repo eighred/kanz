@@ -83,3 +83,42 @@ func TestServer_OrdersRequiresIssuer(t *testing.T) {
 		t.Fatalf("missing issuer must 400, got %d", rec.Code)
 	}
 }
+
+func TestServer_Propose_BlackLitterman(t *testing.T) {
+	// MaxSharpe (Type 2) over two equal-vol uncorrelated assets, equal market
+	// weights, with a bullish absolute view on A (q=0.20). μ_BL tilts to A, so the
+	// tangency target for A exceeds the 0.5 equilibrium.
+	body := `{"portfolio_id":"PF","instruments":["A","B"],
+		"covariance":[[0.04,0],[0,0.04]],
+		"objective":{"Type":2},
+		"black_litterman":{"market_weights":[0.5,0.5],"risk_aversion":2.5,"tau":0.05,
+			"views":[{"p":[1,0],"q":0.20,"omega":0}]},
+		"current_weights":{"A":0.5,"B":0.5},"nav":100000,"prices":{"A":10,"B":10}}`
+	rec := do(t, newTestServer(), http.MethodPost, "/v1/propose", body)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("propose+BL: got %d body %s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		Targets map[string]float64
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp.Targets["A"] <= 0.5 {
+		t.Fatalf("bullish BL view on A should raise A's target above 0.5, got %.4f", resp.Targets["A"])
+	}
+}
+
+func TestServer_Propose_BlackLittermanInvalid(t *testing.T) {
+	// A malformed BL block (risk_aversion 0) ⇒ 400 from the BL error path.
+	body := `{"portfolio_id":"PF","instruments":["A","B"],
+		"covariance":[[0.04,0],[0,0.04]],
+		"objective":{"Type":2},
+		"black_litterman":{"market_weights":[0.5,0.5],"risk_aversion":0,"tau":0.05,
+			"views":[{"p":[1,0],"q":0.20,"omega":0}]},
+		"current_weights":{"A":0.5,"B":0.5},"nav":100000,"prices":{"A":10,"B":10}}`
+	rec := do(t, newTestServer(), http.MethodPost, "/v1/propose", body)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("malformed BL ⇒ 400, got %d", rec.Code)
+	}
+}

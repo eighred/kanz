@@ -80,6 +80,7 @@ type proposeRequest struct {
 	Instruments     []string                    `json:"instruments"`
 	ExpectedReturns []float64                   `json:"expected_returns"`
 	Covariance      [][]float64                 `json:"covariance"`
+	BlackLitterman  *blRequest                  `json:"black_litterman"`
 	Objective       optimization.Objective      `json:"objective"`
 	Constraints     *optimization.ConstraintSet `json:"constraints"`
 	Current         map[string]float64          `json:"current_weights"`
@@ -88,12 +89,37 @@ type proposeRequest struct {
 	Threshold       float64                     `json:"threshold"`
 }
 
+// blRequest is the optional Black-Litterman input on /v1/propose. Present ⇒ the
+// handler computes the posterior μ and uses it as ExpectedReturns before Optimize.
+type blRequest struct {
+	MarketWeights []float64 `json:"market_weights"`
+	RiskAversion  float64   `json:"risk_aversion"`
+	Tau           float64   `json:"tau"`
+	Views         []viewDTO `json:"views"`
+}
+
+// viewDTO is one Black-Litterman view: a picking row p (length n), its return q,
+// and its variance omega (0 ⇒ the He-Litterman default for this view).
+type viewDTO struct {
+	P     []float64 `json:"p"`
+	Q     float64   `json:"q"`
+	Omega float64   `json:"omega"`
+}
+
 func (s *Server) handlePropose(w http.ResponseWriter, r *http.Request) {
 	var req proposeRequest
 	if !decode(w, r, &req) {
 		return
 	}
 	in := optimization.MarketInputs{Instruments: req.Instruments, ExpectedReturns: req.ExpectedReturns, Covariance: req.Covariance}
+	if req.BlackLitterman != nil {
+		mu, err := blMu(req)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+		in.ExpectedReturns = mu
+	}
 	res, err := optimization.Optimize(in, req.Objective, req.Constraints)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
@@ -150,6 +176,31 @@ func (s *Server) handleOrders(w http.ResponseWriter, r *http.Request) {
 }
 
 // --- helpers -----------------------------------------------------------------
+
+// blMu assembles a BLInput from the request's black_litterman block and returns
+// the posterior expected returns. A view omega of 0 stays 0 in the diagonal we
+// pass, which BlackLitterman reads as "use the He-Litterman default for this view".
+func blMu(req proposeRequest) ([]float64, error) {
+	bl := req.BlackLitterman
+	k := len(bl.Views)
+	p := make([][]float64, k)
+	q := make([]float64, k)
+	omega := make([]float64, k)
+	for i, v := range bl.Views {
+		p[i] = v.P
+		q[i] = v.Q
+		omega[i] = v.Omega
+	}
+	return optimization.BlackLitterman(optimization.BLInput{
+		Covariance:    req.Covariance,
+		MarketWeights: bl.MarketWeights,
+		RiskAversion:  bl.RiskAversion,
+		Tau:           bl.Tau,
+		P:             p,
+		Q:             q,
+		Omega:         omega,
+	})
+}
 
 func pow10(exp int32) float64 {
 	p := 1.0
