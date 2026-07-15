@@ -45,9 +45,9 @@ jobs:
     if: github.event_name != 'workflow_dispatch' || github.event.inputs.base_url == ''
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v6
         with:
           go-version-file: kanz/go.mod
           cache-dependency-path: kanz/go.sum
@@ -122,8 +122,8 @@ jobs:
     if: github.event_name != 'workflow_dispatch'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v6
         with:
           go-version-file: kanz/go.mod
           cache-dependency-path: kanz/go.sum
@@ -163,7 +163,7 @@ jobs:
     if: github.event_name == 'workflow_dispatch' && github.event.inputs.base_url != ''
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Run k6 baseline against ${{ github.event.inputs.base_url }}
         run: |
           docker run --rm \

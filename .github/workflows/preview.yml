@@ -26,13 +26,13 @@ jobs:
       matrix:
         service: [risk-engine, api-gateway]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: bufbuild/buf-setup-action@v1
         with:
           version: 1.69.0
           github_token: ${{ secrets.GITHUB_TOKEN }}
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v6
         with:
           go-version: '1.26'
       - name: Generate schema SDK
@@ -42,13 +42,13 @@ jobs:
           echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
           cd kanz-schemas && buf generate
 
-      - uses: docker/login-action@v3
+      - uses: docker/login-action@v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - uses: docker/build-push-action@v6
+      - uses: docker/build-push-action@v7
         with:
           context: .
           file: kanz/services/${{ matrix.service }}/Dockerfile
@@ -61,7 +61,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Comment the preview namespace
-        uses: actions/github-script@v7
+        uses: actions/github-script@v9
         with:
           script: |
             const ns = `kanz-preview-${context.issue.number}`;
