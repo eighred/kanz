@@ -130,12 +130,14 @@ func ComputeMeasures(p *domain.Portfolio, r *Registry, filter []v1.MeasureName) 
 
 // Names — short, CamelCase, dimensional suffix where meaningful.
 const (
-	MeasureGrossExposure v1.MeasureName = "GrossExposure"
-	MeasureNetExposure   v1.MeasureName = "NetExposure"
-	MeasureVaR99         v1.MeasureName = "VaR99"
-	MeasureES99          v1.MeasureName = "ES99"
-	MeasureDelta         v1.MeasureName = "Delta"
-	MeasureHHI           v1.MeasureName = "HHI"
+	MeasureGrossExposure       v1.MeasureName = "GrossExposure"
+	MeasureNetExposure         v1.MeasureName = "NetExposure"
+	MeasureVaR99               v1.MeasureName = "VaR99"
+	MeasureES99                v1.MeasureName = "ES99"
+	MeasureDelta               v1.MeasureName = "Delta"
+	MeasureHHI                 v1.MeasureName = "HHI"
+	MeasureMaxDrawdown         v1.MeasureName = "MaxDrawdown"
+	MeasureMaxDrawdownAmount   v1.MeasureName = "MaxDrawdownAmount"
 )
 
 // GrossExposure is the sum of absolute MarketValue across positions

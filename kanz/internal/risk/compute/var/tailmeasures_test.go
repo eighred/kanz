@@ -54,3 +54,37 @@ func TestExpectedShortfall_InsufficientData(t *testing.T) {
 		t.Fatalf("insufficient data ⇒ zero ES99, got %v", got)
 	}
 }
+
+// $1000, returns {-10,-5,+20}% ⇒ P&L {-100,-50,+200}, v0=1000. Drawdown: 15% and
+// $150 (both at the 850 trough vs the 1000 start-peak).
+func TestMaxDrawdownMeasures(t *testing.T) {
+	p := portfolio("USD", domain.Position{InstrumentID: "AAPL", MarketValue: money(1000, "USD")})
+	prov := fixedProvider{ret: []float64{-0.10, -0.05, 0.20}}
+
+	frac := varmodel.MaxDrawdownFraction(varmodel.Config{})(context.Background(), p, prov)
+	if frac.Name != compute.MeasureMaxDrawdown {
+		t.Fatalf("name = %q, want MaxDrawdown", frac.Name)
+	}
+	if got := dval(frac.Value); math.Abs(got-0.15) > 1e-4 {
+		t.Fatalf("MaxDrawdown = %v, want 0.15", got)
+	}
+
+	amt := varmodel.MaxDrawdownAmount(varmodel.Config{})(context.Background(), p, prov)
+	if amt.Name != compute.MeasureMaxDrawdownAmount {
+		t.Fatalf("name = %q, want MaxDrawdownAmount", amt.Name)
+	}
+	if got := dval(amt.Value); math.Abs(got-150.0) > 1e-9 {
+		t.Fatalf("MaxDrawdownAmount = %v, want 150.00", got)
+	}
+}
+
+func TestMaxDrawdown_InsufficientData(t *testing.T) {
+	p := portfolio("USD", domain.Position{InstrumentID: "AAPL", MarketValue: money(1000, "USD")})
+	prov := fixedProvider{ret: []float64{0.01}} // <2 scenarios
+	if got := dval(varmodel.MaxDrawdownFraction(varmodel.Config{})(context.Background(), p, prov).Value); got != 0 {
+		t.Fatalf("insufficient data ⇒ zero MaxDrawdown, got %v", got)
+	}
+	if got := dval(varmodel.MaxDrawdownAmount(varmodel.Config{})(context.Background(), p, prov).Value); got != 0 {
+		t.Fatalf("insufficient data ⇒ zero MaxDrawdownAmount, got %v", got)
+	}
+}
