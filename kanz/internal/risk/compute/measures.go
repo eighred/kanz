@@ -133,6 +133,7 @@ const (
 	MeasureGrossExposure v1.MeasureName = "GrossExposure"
 	MeasureNetExposure   v1.MeasureName = "NetExposure"
 	MeasureVaR99         v1.MeasureName = "VaR99"
+	MeasureES99          v1.MeasureName = "ES99"
 	MeasureDelta         v1.MeasureName = "Delta"
 	MeasureHHI           v1.MeasureName = "HHI"
 )
