@@ -159,7 +159,7 @@ func runEngine(ctx context.Context, cfg config.Config, readiness *server.Readine
 		}
 		provider := returns.NewStoreReturnsProvider(priceStore, returns.ReturnsConfig{})
 		varmodel.Register(context.Background(), registry, provider, varmodel.Config{})
-		logger.Info("RISK-12: historical-simulation VaR99 registered off market-data price store")
+		logger.Info("RISK-12/RISK-M1: historical-simulation VaR99 + ES99 + MaxDrawdown(+Amount) registered off market-data price store")
 	} else {
 		logger.Warn("no RISK_ENGINE_MARKETDATA_DATABASE_URL — VaR99 serves the RISK-07 1%×gross placeholder")
 	}

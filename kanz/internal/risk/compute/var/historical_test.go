@@ -143,3 +143,65 @@ func TestRegister_OverridesPlaceholderEndToEnd(t *testing.T) {
 		t.Fatalf("registered VaR still equals the placeholder (10), override failed: %v", hist)
 	}
 }
+
+// TestRegister_RegistersTailMeasures asserts the one Register call wires ES99 and
+// both drawdown measures alongside VaR99, all served off the same provider.
+func TestRegister_RegistersTailMeasures(t *testing.T) {
+	s := store.NewMemory()
+	closes := []float64{100, 110, 105, 95, 90}
+	var obs []store.Observation
+	for i, px := range closes {
+		obs = append(obs, store.Observation{
+			InstrumentID:    "AAPL",
+			ObservationTime: asOf.AddDate(0, 0, i-len(closes)),
+			Price:           &commonpb.Decimal{Coefficient: int64(px * 100), Exponent: -2},
+			Kind:            store.PriceKindClose,
+			KnowledgeTime:   asOf.AddDate(0, 0, i-len(closes)),
+		})
+	}
+	if err := s.Put(context.Background(), obs); err != nil {
+		t.Fatal(err)
+	}
+	provider := returns.NewStoreReturnsProvider(s, returns.ReturnsConfig{Method: returns.ReturnSimple})
+
+	r := compute.DefaultRegistry()
+	varmodel.Register(context.Background(), r, provider, varmodel.Config{})
+
+	p := portfolio("USD", domain.Position{InstrumentID: "AAPL", MarketValue: money(1000, "USD")})
+	set := compute.ComputeMeasures(p, r, nil)
+
+	for _, name := range []v1.MeasureName{
+		compute.MeasureES99, compute.MeasureMaxDrawdown, compute.MeasureMaxDrawdownAmount,
+	} {
+		if _, ok := set.Lookup(name); !ok {
+			t.Errorf("%s missing from the registered set", name)
+		}
+	}
+	// ES99 ≥ VaR99 on the served set.
+	varM, _ := set.Lookup(compute.MeasureVaR99)
+	esM, _ := set.Lookup(compute.MeasureES99)
+	if dval(esM.Value) < dval(varM.Value)-1e-9 {
+		t.Fatalf("served ES99 (%v) must be ≥ VaR99 (%v)", dval(esM.Value), dval(varM.Value))
+	}
+}
+
+// TestDefaultRegistry_NoMarketDataHasHHINotTail: without Register (no price
+// store), HHI is served (positions-only) but the returns-backed tail measures
+// are absent — the honest no-market-data posture.
+func TestDefaultRegistry_NoMarketDataHasHHINotTail(t *testing.T) {
+	r := compute.DefaultRegistry()
+	names := map[v1.MeasureName]bool{}
+	for _, n := range r.Names() {
+		names[n] = true
+	}
+	if !names[compute.MeasureHHI] {
+		t.Error("HHI must be served even without market data")
+	}
+	for _, n := range []v1.MeasureName{
+		compute.MeasureES99, compute.MeasureMaxDrawdown, compute.MeasureMaxDrawdownAmount,
+	} {
+		if names[n] {
+			t.Errorf("%s must NOT be in the default (no-market-data) registry", n)
+		}
+	}
+}

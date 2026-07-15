@@ -151,11 +151,17 @@ func zeroNamed(name v1.MeasureName) v1.Measure {
 	return v1.Measure{Name: name, Value: &commonpb.Decimal{Coefficient: 0, Exponent: 0}}
 }
 
-// Register overrides MeasureVaR99 in r with historical-simulation VaR closed
-// over provider. The engine calls this at startup once it has a price-store
-// provider; absent that, r keeps compute.VaR99 (the placeholder).
+// Register overrides MeasureVaR99 with historical-simulation VaR and registers
+// the tail measures that read the same distribution — ES99 and both drawdown
+// measures — all closed over provider. The engine calls this at startup once it
+// has a price-store provider; absent that, the registry keeps the placeholder
+// VaR (compute.VaR99) and serves none of the tail measures (HHI, being
+// positions-only, is already in DefaultRegistry).
 func Register(ctx context.Context, r *compute.Registry, provider compute.ReturnsProvider, cfg Config) {
 	r.Register(compute.MeasureVaR99, compute.BindReturns(ctx, provider, Historical(cfg)))
+	r.Register(compute.MeasureES99, compute.BindReturns(ctx, provider, ExpectedShortfall(cfg)))
+	r.Register(compute.MeasureMaxDrawdown, compute.BindReturns(ctx, provider, MaxDrawdownFraction(cfg)))
+	r.Register(compute.MeasureMaxDrawdownAmount, compute.BindReturns(ctx, provider, MaxDrawdownAmount(cfg)))
 }
 
 // quantile is the empirical α-quantile of an ascending-sorted sample, with
