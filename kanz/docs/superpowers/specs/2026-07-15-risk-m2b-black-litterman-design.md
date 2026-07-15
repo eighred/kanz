@@ -34,7 +34,7 @@ y    = solveLinear(M, Q − P·Π)                        k-vector  (the one lin
 
 - **Π (the prior)** = `δ Σ w_mkt`: the returns that make the market-cap portfolio `w_mkt` optimal under risk-aversion `δ` (reverse optimization). With **no views** (`k=0`), `μ_BL = Π` exactly — BL degenerates to the equilibrium prior.
 - **Views**: `P` is the `k×n` picking matrix (row `i` is view `i`'s asset weights), `Q` is the `k` view returns. A row `[1,0,…]` with `q=0.05` is the absolute view "asset 0 returns 5%"; a row `[1,−1,0,…]` with `q=0.02` is the relative view "asset 0 beats asset 1 by 2%". General P-rows support both (an absolute-only friendlier DTO is a later refinement, not needed).
-- **Ω (view uncertainty)**, `k×k`: supplied explicitly, or when omitted defaulted to `diag(P·(τΣ)·Pᵀ)` — the He-Litterman convention that makes each view's uncertainty proportional to the prior variance along that view, so the caller does not have to hand-tune Ω to get sensible behavior.
+- **Ω (view uncertainty)**: a **per-view diagonal** — views are assumed independent (the near-universal case; a full correlated `k×k` Ω is a documented non-goal). Each view's variance is supplied, or defaulted **per view** to `(P·(τΣ)·Pᵀ)_ii` — the He-Litterman convention that makes each view's uncertainty proportional to the prior variance along that view, so the caller does not have to hand-tune Ω. `M` is then `P·τΣ·Pᵀ + diag(Ω)`.
 - **τ**: the scalar weight on the prior's uncertainty (typically small, e.g. 0.025–0.05). Supplied.
 
 Only **one k×k `solveLinear`** is performed; Σ is never inverted. A singular `M` (e.g. two identical views with zero Ω) ⇒ an error, never a fabricated μ.
@@ -51,7 +51,7 @@ type BLInput struct {
 	Tau           float64     // τ > 0
 	P             [][]float64 // k×n view-picking matrix (k views, may be empty)
 	Q             []float64   // k view returns
-	Omega         [][]float64 // k×k view uncertainty; nil/empty ⇒ diag(P·τΣ·Pᵀ)
+	Omega         []float64   // per-view variances (the diagonal of Ω); nil ⇒ all He-Litterman defaults; a 0 entry ⇒ the He-Litterman default for that view
 }
 
 // BlackLitterman returns the posterior expected-returns vector μ_BL (length n),
@@ -121,7 +121,7 @@ Deterministic unit tests in `internal/optimization` (`package optimization`, reu
 ## 5. Scope boundary & non-goals
 
 - **In:** the `BlackLitterman` function + helpers, its errors, and the `/v1/propose` `black_litterman` block wiring; tests at both layers.
-- **Out (deliberate / YAGNI):** a friendlier absolute-only views DTO (P-rows already cover absolute views); Idzorek's confidence-to-Ω calibration procedure (we accept explicit Ω or the He-Litterman proportional default — the round-trip "target this % tilt" calibration is a later refinement); any n×n matrix inversion (the Idzorek form avoids it); a new `ObjectiveType` (BL is a μ-producer, not an objective); any change to HRP or the other objectives; a proto change (BL is a service-request shape over HTTP/JSON, and — like the other propose fields — is not carried on the `optimization.v1` proto, which only models the objective enum).
+- **Out (deliberate / YAGNI):** a full correlated `k×k` Ω (views are assumed independent — Ω is a per-view diagonal; correlated view errors are a rare, advanced case); a friendlier absolute-only views DTO (P-rows already cover absolute views); Idzorek's confidence-to-Ω calibration procedure (we accept explicit Ω or the He-Litterman proportional default — the round-trip "target this % tilt" calibration is a later refinement); any n×n matrix inversion (the Idzorek form avoids it); a new `ObjectiveType` (BL is a μ-producer, not an objective); any change to HRP or the other objectives; a proto change (BL is a service-request shape over HTTP/JSON, and — like the other propose fields — is not carried on the `optimization.v1` proto, which only models the objective enum).
 - **Out (follow-up, from RISK-M2a):** the module-wide Σ-PSD validation pass and the zero-variance IVP guard — unchanged by this task, still tracked.
 
 ---
