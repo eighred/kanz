@@ -40,8 +40,9 @@ Properties that hold by construction: **all weights ≥ 0** (products of convex 
 
 **Edge cases (all yield a valid weight vector, never NaN/panic — the optimizer's honest-degradation stance):**
 - `n == 1` ⇒ weight `{1.0}`.
-- A zero/near-zero diagonal variance `Σ_ii ≤ 0`: that asset's inverse variance is undefined; treat its variance as `+∞` (inverse-variance 0 ⇒ it receives ~0 weight) rather than dividing by zero. If ALL variances are non-positive, fall back to equal weights `1/n` (a degenerate Σ carries no information to allocate on).
-- A cluster whose total inverse-variance is 0 ⇒ split evenly (½/½).
+- A zero/non-positive diagonal variance `Σ_ii`: guard the `1/Σ_ii` in the inverse-variance step (treat `1/Σ_ii` as 0 when `Σ_ii ≤ 0`) so there is never a division by zero or NaN. A zero-variance singleton's cluster variance is then 0, which the bisection *favors* (α→1 on its split — a riskless asset attracts weight); the guarantee here is finiteness and a valid long-only, sum-to-1 vector, NOT a prescribed weight direction.
+- If every variance in a cluster is non-positive, the inverse-variance portfolio for that cluster falls back to equal weights.
+- A fully degenerate Σ (all variances 0): every cluster variance is 0, so every split is 50/50 (α=0.5); the weights then follow the bisection tree — equal for a balanced/power-of-two universe, and always finite, long-only, and summing to 1.
 
 ### 2.2 Integration into `Optimize`
 
@@ -81,7 +82,7 @@ Deterministic unit tests in `internal/optimization` (package-internal where the 
 - **`hrp` reference case**: a small hand-traceable universe (e.g. 4 assets in two correlated pairs) where the clustering, ordering, and bisection can be computed by hand or against a published HRP worked example — assert the weight vector to a tolerance.
 - **Invariants** (property-style over a few covariance matrices): all weights ≥ 0, Σw = 1 within 1e-9.
 - **Diversification property**: on a covariance where one asset has much lower variance, min-variance concentrates heavily in it while HRP spreads materially more — assert `max(hrp weight) < max(min-variance weight)` on that input (the concrete statement of "HRP diversifies where mean-variance concentrates").
-- **Edge cases**: `n==1 ⇒ {1.0}`; one zero-variance asset ⇒ finite weights, that asset ~0; all-zero-variance Σ ⇒ equal weights; a 2-asset case ⇒ the closed-form inverse-variance split (assert exact).
+- **Edge cases**: `n==1 ⇒ {1.0}`; one zero-variance asset ⇒ finite weights, no NaN, still long-only and summing to 1; all-zero-variance Σ on a 4-asset universe ⇒ equal `0.25` weights (balanced tree, every split 50/50); a 2-asset case ⇒ the closed-form inverse-variance split (assert exact — e.g. Σ=diag(0.01,0.04) ⇒ weights [0.8, 0.2]).
 - **`Optimize` integration**: `case HRP` returns weights keyed by instrument summing to 1, `ExpectedRisk=√(wᵀΣw)`, `ExpectedReturn=0` when μ nil and `μᵀw` when μ present; `HRP` with nil covariance ⇒ `ErrNeedCovariance`; a supplied `ConstraintSet` with non-default box bounds is **ignored** by HRP (assert the weights equal the unconstrained HRP weights, pinning the approved "bounds not applied" decision).
 - Existing solver/`Optimize` tests stay green (HRP is additive; no existing path changes).
 
