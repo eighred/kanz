@@ -2,6 +2,8 @@ module github.com/kanz-eng/kanz
 
 go 1.26.1
 
+toolchain go1.26.5
+
 require (
 	github.com/anthropics/anthropic-sdk-go v1.57.0
 	github.com/coder/websocket v1.8.15
