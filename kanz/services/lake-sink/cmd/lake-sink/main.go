@@ -92,10 +92,13 @@ func main() {
 }
 
 // runSink dials Kafka, subscribes every configured topic on the one consumer
-// group, and folds each event into the sink. A periodic flush bounds how long a
-// buffered row waits before it is durable. The first non-cancellation
-// subscription error cancels the siblings and is returned — fail-fast, so a
-// broken subscription brings the sink down rather than silently losing the log.
+// group, and folds each event into the sink. Durability has no lag to bound:
+// cdc.EventSink.Handle flushes (bufio.Flush + fsync) every row before acking,
+// so a row is durable by the time its offset commits (DATA-M5) — there is no
+// periodic flush here because there is nothing left for one to do. The first
+// non-cancellation subscription error cancels the siblings and is returned —
+// fail-fast, so a broken subscription brings the sink down rather than
+// silently losing the log.
 func runSink(ctx context.Context, cfg config.Config, fileSink sink.Sink, readiness *server.Readiness, logger *slog.Logger, obs *observability.Provider) error {
 	busMetrics := bus.NewBusMetrics(obs.Registry)
 	metrics := cdc.NewMetrics(obs.Registry)
@@ -121,22 +124,6 @@ func runSink(ctx context.Context, cfg config.Config, fileSink sink.Sink, readine
 
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
-
-	// Periodic flush — bounds buffered-row durability lag to FlushInterval.
-	go func() {
-		t := time.NewTicker(cfg.FlushInterval)
-		defer t.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-t.C:
-				if err := fileSink.Flush(); err != nil {
-					logger.Error("sink flush error", "err", err)
-				}
-			}
-		}
-	}()
 
 	var (
 		wg       sync.WaitGroup

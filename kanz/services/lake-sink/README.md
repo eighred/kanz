@@ -53,7 +53,11 @@ by downstream compaction). Decode outcomes:
   envelope-only with `decode_error` set and **ack**, so a poison message neither
   blocks the partition nor erases that the event occurred.
 
-Buffered writes are made durable on a `FLUSH_INTERVAL` ticker and on shutdown.
+Every row is flushed (`bufio.Flush` + `fsync`) before the handler acks, so a
+row is durable by the time its Kafka offset commits — never buffered past an
+ack (DATA-M5). Clean shutdown flushes and closes the sink as a final
+backstop, but there is no periodic flush: acking without flushing would be
+exactly the bug this sink exists to not have.
 
 ## Run
 
@@ -68,8 +72,7 @@ go run ./services/lake-sink/cmd/lake-sink
 Config (env): `LAKE_SINK_LISTEN` (`:8085`), `LAKE_SINK_BROKERS` (required),
 `LAKE_SINK_TOPICS` (required), `LAKE_SINK_REGISTRY_URL` (unset ⇒ envelope-only,
 payloads undecoded), `LAKE_SINK_OUTPUT_DIR` (required), `LAKE_SINK_CONSUMER_GROUP`
-(`lake-sink`), `LAKE_SINK_SOURCE` (`lake-sink`), `LAKE_SINK_FLUSH_INTERVAL`
-(`5s`), `LAKE_SINK_OTLP_ENDPOINT`.
+(`lake-sink`), `LAKE_SINK_SOURCE` (`lake-sink`), `LAKE_SINK_OTLP_ENDPOINT`.
 
 ## Tests
 

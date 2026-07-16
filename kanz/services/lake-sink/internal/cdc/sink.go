@@ -47,6 +47,17 @@ func NewEventSink(decoder *decode.Decoder, s sink.Sink, now func() time.Time, lo
 //
 // A Sink write failure is returned so the bus retries; the lake sees
 // at-least-once delivery (duplicates share event_id, compacted downstream).
+//
+// Handle does not return nil until the row it landed is durable. The bus
+// (pkg/bus/kafka.go) commits the Kafka offset the instant Handle returns
+// nil — CommitInterval is 0, so that commit is synchronous and irreversible.
+// A row sitting only in FileSink's bufio buffer is process-local memory: on
+// a crash it is gone, but its offset is already committed, so the consumer
+// group resumes past it forever. Every path below that lands a row therefore
+// flushes (bufio.Flush + fsync, via Sink.Flush) before returning nil. A flush
+// failure is treated as transient — the error is returned so the bus does
+// not commit and the broker redelivers, which is safe because a duplicate
+// write is resolved by downstream compaction (see the Sink doc comment).
 func (e *EventSink) Handle(ctx context.Context, env *envelopepb.Envelope, payload []byte) error {
 	ref := env.GetPayloadSchemaRef()
 	domain := env.GetDomain()
@@ -86,6 +97,14 @@ func (e *EventSink) Handle(ctx context.Context, env *envelopepb.Envelope, payloa
 	}
 
 	if err := e.sink.Write(ctx, row); err != nil {
+		e.metrics.incRow(domain, entity, "error")
+		return err
+	}
+	// The row is buffered but not yet durable. Flush before acking — this is
+	// the barrier that keeps the offset commit from racing ahead of the row
+	// actually reaching disk (see the Handle doc comment above). Covers both
+	// the decoded-ok row and the permanent-decode-error row: both reach here.
+	if err := e.sink.Flush(); err != nil {
 		e.metrics.incRow(domain, entity, "error")
 		return err
 	}

@@ -18,18 +18,27 @@ import (
 )
 
 type fakeSink struct {
-	rows []sink.Row
-	err  error
+	rows     []sink.Row
+	err      error
+	flushErr error
+
+	flushed int      // number of Flush calls
+	calls   []string // "write"/"flush" in invocation order, for ordering assertions
 }
 
 func (f *fakeSink) Write(_ context.Context, r sink.Row) error {
+	f.calls = append(f.calls, "write")
 	if f.err != nil {
 		return f.err
 	}
 	f.rows = append(f.rows, r)
 	return nil
 }
-func (f *fakeSink) Flush() error { return nil }
+func (f *fakeSink) Flush() error {
+	f.calls = append(f.calls, "flush")
+	f.flushed++
+	return f.flushErr
+}
 func (f *fakeSink) Close() error { return nil }
 
 type fakeResolver struct {
@@ -75,6 +84,9 @@ func TestHandleDecodesAndLands(t *testing.T) {
 	if r.Payload == nil || r.DecodeError != "" {
 		t.Errorf("want decoded payload and no error, got payload=%s err=%q", r.Payload, r.DecodeError)
 	}
+	if fs.flushed != 1 {
+		t.Errorf("flushed %d times, want exactly 1 — Handle must not ack (nil) until the row is durable", fs.flushed)
+	}
 }
 
 func TestHandlePermanentDecodeLandsEnvelopeOnlyAndAcks(t *testing.T) {
@@ -93,6 +105,11 @@ func TestHandlePermanentDecodeLandsEnvelopeOnlyAndAcks(t *testing.T) {
 	if r.Payload != nil || r.DecodeError == "" {
 		t.Errorf("want envelope-only with DecodeError set, got payload=%s err=%q", r.Payload, r.DecodeError)
 	}
+	// A permanent-decode-error row still lands and still acks — the bus still
+	// commits its offset — so it must be durable too, exactly like the ok path.
+	if fs.flushed != 1 {
+		t.Errorf("flushed %d times on the permanent-decode-error path, want exactly 1", fs.flushed)
+	}
 }
 
 func TestHandleTransientDecodeNaks(t *testing.T) {
@@ -108,6 +125,9 @@ func TestHandleTransientDecodeNaks(t *testing.T) {
 	if len(fs.rows) != 0 {
 		t.Errorf("landed %d rows on transient failure, want 0", len(fs.rows))
 	}
+	if fs.flushed != 0 {
+		t.Errorf("flushed %d times on transient decode failure (no row written), want 0", fs.flushed)
+	}
 }
 
 func TestHandleWriteErrorRetries(t *testing.T) {
@@ -116,5 +136,48 @@ func TestHandleWriteErrorRetries(t *testing.T) {
 	payload, _ := proto.Marshal(&commonv1.Decimal{})
 	if err := es.Handle(context.Background(), env("common.v1.Decimal:1"), payload); err == nil {
 		t.Fatal("want error so the bus retries a failed sink write, got nil")
+	}
+	if fs.flushed != 0 {
+		t.Errorf("flushed %d times after a failed write, want 0 — nothing landed, nothing to flush", fs.flushed)
+	}
+}
+
+// TestHandleFlushErrorRetries is the crash-defense unit test: a flush failure
+// (the fsync itself failing — disk full, I/O error, ENOSPC) must be treated
+// exactly like a write failure. The row was accepted into the buffer but
+// never reached the fd, so Handle must return the error — never nil — or the
+// bus commits the offset for a row that still only exists in memory.
+func TestHandleFlushErrorRetries(t *testing.T) {
+	fs := &fakeSink{flushErr: errors.New("fsync failed")}
+	es := newSink(fakeResolver{md: (&commonv1.Decimal{}).ProtoReflect().Descriptor()}, fs)
+	payload, _ := proto.Marshal(&commonv1.Decimal{})
+	if err := es.Handle(context.Background(), env("common.v1.Decimal:1"), payload); err == nil {
+		t.Fatal("want error so the bus does not commit when Flush fails, got nil")
+	}
+	if fs.flushed != 1 {
+		t.Errorf("flush called %d times, want exactly 1", fs.flushed)
+	}
+}
+
+// TestHandleFlushesAfterWrite pins the ordering the whole fix depends on:
+// Flush must happen strictly after Write, on every call to Handle. Flushing
+// before the row is written would fsync nothing useful; flushing out of
+// order would be indistinguishable from not flushing at all under a
+// buggy-but-passing fake.
+func TestHandleFlushesAfterWrite(t *testing.T) {
+	fs := &fakeSink{}
+	es := newSink(fakeResolver{md: (&commonv1.Decimal{}).ProtoReflect().Descriptor()}, fs)
+	payload, _ := proto.Marshal(&commonv1.Decimal{})
+	if err := es.Handle(context.Background(), env("common.v1.Decimal:1"), payload); err != nil {
+		t.Fatalf("handle: %v", err)
+	}
+	want := []string{"write", "flush"}
+	if len(fs.calls) != len(want) {
+		t.Fatalf("call sequence = %v, want %v", fs.calls, want)
+	}
+	for i := range want {
+		if fs.calls[i] != want[i] {
+			t.Fatalf("call sequence = %v, want %v", fs.calls, want)
+		}
 	}
 }

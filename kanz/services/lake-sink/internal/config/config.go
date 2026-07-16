@@ -5,7 +5,6 @@ import (
 	"log/slog"
 	"os"
 	"strings"
-	"time"
 )
 
 // Config is the lake-sink runtime configuration, sourced from the environment so
@@ -36,8 +35,6 @@ type Config struct {
 	// OutputDir is the FileSink landing root (Hive-partitioned NDJSON the
 	// catalog ingest commits as a table). Required by the default sink.
 	OutputDir string
-	// FlushInterval bounds how long a buffered row waits before it is durable.
-	FlushInterval time.Duration
 
 	// OTLPEndpoint is the OTel collector for span export (OBS-01).
 	OTLPEndpoint string
@@ -53,7 +50,6 @@ func Load() (Config, error) {
 		ConsumerGroup: envOr("LAKE_SINK_CONSUMER_GROUP", "lake-sink"),
 		RegistryURL:   strings.TrimRight(os.Getenv("LAKE_SINK_REGISTRY_URL"), "/"),
 		OutputDir:     os.Getenv("LAKE_SINK_OUTPUT_DIR"),
-		FlushInterval: durationOr("LAKE_SINK_FLUSH_INTERVAL", 5*time.Second),
 		OTLPEndpoint:  os.Getenv("LAKE_SINK_OTLP_ENDPOINT"),
 	}
 	if len(cfg.Brokers) == 0 {
@@ -81,15 +77,6 @@ func splitList(s string) []string {
 func envOr(k, def string) string {
 	if v, ok := os.LookupEnv(k); ok && v != "" {
 		return v
-	}
-	return def
-}
-
-func durationOr(k string, def time.Duration) time.Duration {
-	if v := os.Getenv(k); v != "" {
-		if d, err := time.ParseDuration(v); err == nil && d > 0 {
-			return d
-		}
 	}
 	return def
 }
