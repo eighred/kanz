@@ -54,6 +54,11 @@
 #
 # Exit codes:
 #   0 = fully onboarded/offboarded — every step ran for real, no manual steps.
+#   1 = a genuine step failure (e.g. `set -euo pipefail` tripping on a failed
+#       kubectl/psql/nsc call, or the Kafka provisioning/offboard Job failing
+#       or timing out per wait_for_job). Nothing about this is a lie: the
+#       step ran for real and reported failure, or never reached a terminal
+#       state within KAFKA_JOB_TIMEOUT.
 #   2 = REFUSED — a required prerequisite is missing and no manual escape was
 #       declared (also used for a bad/missing subcommand). Nothing was
 #       touched: preflight is the first thing each case branch calls, and it
@@ -65,6 +70,15 @@
 #       and the exit is non-zero so provision-tenant.sh's `set -eu`
 #       composition aborts rather than seeding a portfolio onto broker/DB
 #       infrastructure that does not exist yet.
+#
+# Note on precedence: TENANTCTL_MANUAL_NATS=true (and TENANTCTL_MANUAL_DB=true)
+# only ever relaxes preflight — it never forces the manual path. If nsc +
+# NATS_OPERATOR (or ADMIN_DATABASE_URL) are actually present, onboard_nats /
+# offboard_nats (and the DB step) still do the real thing and the flag is
+# quietly ignored. Real-over-manual is intentional: a flag set out of habit
+# after the tooling was fixed should not downgrade a real provisioning step
+# to a manual one. It just means the flag alone is not proof anything is
+# manual — check the tooling, not just the env var.
 set -euo pipefail
 
 : "${TENANT:?set TENANT (e.g. acme)}"
@@ -183,6 +197,11 @@ onboard_nats() {
   # not exist at all.
   local add_out
   if ! add_out=$(nsc add account --name "${TENANT}" 2>&1); then
+    # Known, accepted seam: this string-matches nsc's error PROSE, not a
+    # stable error code. An nsc reword could break idempotent reruns — but
+    # it would break them LOUDLY (falls into the FAILED branch below and
+    # aborts), never silently, so it is acceptable without a stable
+    # machine-readable alternative from nsc.
     if ! grep -qi 'already exist' <<<"${add_out}"; then
       log nats "FAILED to create account ${TENANT}: ${add_out}"
       return 1
@@ -203,6 +222,10 @@ offboard_nats() {
   # of an account that was never fully created), propagate everything else.
   local del_out
   if ! del_out=$(nsc delete account --name "${TENANT}" --revoke 2>&1); then
+    # Same accepted seam as onboard_nats: matches nsc's error PROSE. A reword
+    # fails loudly (FAILED branch, non-zero exit) rather than silently
+    # treating a real deletion failure as "already absent", so this is a
+    # known tradeoff, not an oversight.
     if ! grep -Eqi 'not found|no such account|does not exist' <<<"${del_out}"; then
       log nats "FAILED to delete account ${TENANT}: ${del_out}"
       return 1
@@ -222,17 +245,21 @@ offboard_nats() {
 # out" behavior called for over a single long wait-for-complete call.
 wait_for_job() {
   local ns="$1" job="$2" total="${3:-${KAFKA_JOB_TIMEOUT}}"
-  local slice=10 elapsed=0
+  # Each iteration costs slice+1 seconds of real time (the complete-wait plus
+  # the 1s failed-probe below), not just `slice` — account for both so
+  # `elapsed` tracks wall clock and the loop actually bounds at ~`total`,
+  # rather than the ~1.1x overrun you get by only counting `slice`.
+  local slice=10 probe=1 elapsed=0
   while [ "${elapsed}" -lt "${total}" ]; do
     if kubectl -n "${ns}" wait --for=condition=complete "job/${job}" --timeout="${slice}s" >/dev/null 2>&1; then
       return 0
     fi
-    if kubectl -n "${ns}" wait --for=condition=failed "job/${job}" --timeout=1s >/dev/null 2>&1; then
+    if kubectl -n "${ns}" wait --for=condition=failed "job/${job}" --timeout="${probe}s" >/dev/null 2>&1; then
       log kafka "job ${job} reported condition=failed"
       kubectl -n "${ns}" logs "job/${job}" --all-containers --tail=50 2>/dev/null || true
       return 1
     fi
-    elapsed=$(( elapsed + slice ))
+    elapsed=$(( elapsed + slice + probe ))
   done
   log kafka "job ${job} did not reach condition=complete within ${total}s"
   kubectl -n "${ns}" logs "job/${job}" --all-containers --tail=50 2>/dev/null || true
@@ -348,6 +375,12 @@ spec:
         - { name: spiffe, csi: { driver: csi.spiffe.io, readOnly: true } }
         - { name: spiffe-helper-config, configMap: { name: kafka-spiffe-helper } }
 YAML
+  local job="kafka-offboard-${TENANT}"
+  if ! wait_for_job "${MSG_NS}" "${job}"; then
+    log kafka "FAILED: ${job} did not complete — aborting offboard"
+    return 1
+  fi
+  log kafka "job ${job} completed"
 }
 
 # --- 3. state: Postgres role for RLS (MT-01d) -----------------------------
