@@ -43,6 +43,7 @@ import (
 
 	comp "github.com/kanz-eng/kanz/internal/compliance"
 	"github.com/kanz-eng/kanz/pkg/bus"
+	"github.com/kanz-eng/kanz/pkg/transport"
 )
 
 func main() {
@@ -53,12 +54,13 @@ func main() {
 }
 
 type options struct {
-	natsURL string
-	tenant  string
-	file    string
-	by      string
-	reason  string
-	dryRun  bool
+	natsURL      string
+	spiffeSocket string
+	tenant       string
+	file         string
+	by           string
+	reason       string
+	dryRun       bool
 }
 
 func run(args []string, out *os.File) error {
@@ -83,7 +85,19 @@ func run(args []string, out *os.File) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
-	client, err := bus.DialNATS(ctx, bus.NATSConfig{URL: opt.natsURL, Name: "kanz-mandate", MaxReconnects: 1})
+	// SEC-M3c: the operator plane's identity. Arming a portfolio's mandate is an
+	// operator action on the same plane as the kill-switch, and the production
+	// broker requires a client SVID — without one this dial is refused and no
+	// portfolio can be put under mandate at all.
+	mesh, err := transport.NewMesh(ctx, opt.spiffeSocket)
+	if err != nil {
+		return fmt.Errorf("spiffe identity (%s): %w", opt.spiffeSocket, err)
+	}
+	defer func() { _ = mesh.Close() }()
+
+	client, err := bus.DialNATS(ctx, bus.NATSConfig{
+		URL: opt.natsURL, Name: "kanz-mandate", MaxReconnects: 1, TLSConfig: mesh.Client,
+	})
 	if err != nil {
 		return fmt.Errorf("dial %s: %w", opt.natsURL, err)
 	}
@@ -115,6 +129,9 @@ func parseFlags(args []string) (options, error) {
 	fs := flag.NewFlagSet("kanz-mandate", flag.ContinueOnError)
 	var opt options
 	fs.StringVar(&opt.natsURL, "nats", envOr("KANZ_NATS_URL", "nats://localhost:4222"), "NATS URL of the spine")
+	fs.StringVar(&opt.spiffeSocket, "spiffe-socket", envOr("SPIFFE_ENDPOINT_SOCKET", ""),
+		"SPIFFE Workload API socket for the operator SVID the production broker requires.\n"+
+			"Empty ⇒ a PLAINTEXT dial: fine against a local dev broker, refused by production.")
 	fs.StringVar(&opt.tenant, "tenant", envOr("KANZ_TENANT", ""), "envelope tenant_id — REQUIRED (the bus rejects an untenanted envelope)")
 	fs.StringVar(&opt.file, "file", "", "path to the mandate, as protojson compliance.v1.Mandate — REQUIRED")
 	fs.StringVar(&opt.by, "by", "", `operator principal, "{type}:{id}" (e.g. operator:akif) — REQUIRED`)

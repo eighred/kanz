@@ -75,14 +75,32 @@ func systemAccountUsers(t *testing.T, path string) map[string]bool {
 	return users
 }
 
-// dialsNATS reports whether a service's entrypoint tree calls bus.DialNATS.
+// operatorSVIDs maps a top-level cmd/ entrypoint that dials the spine to the
+// SPIFFE ID its manifest gives it. These are the OPERATOR PLANE (SEC-M3c): they
+// are not services, have no Deployment, and are not covered by the deployability
+// guard — so they are named here explicitly, with the manifest that issues each.
+//
+// A cmd/ dialer that is NOT here fails the build. That is the point: kanz-halt
+// dialed plaintext for the life of the project, and because the halt gate is
+// deny-by-default that meant the production platform could not be RESUMED, let
+// alone stopped. Nothing caught it, because nothing was looking at cmd/.
+var operatorSVIDs = map[string]string{
+	"kanz-halt": "spiffe://kanz.internal/ns/kanz-operator/sa/kanz-halt",
+	// kanz-mandate arms the compliance gate — the same plane, the same broker,
+	// the same requirement. It has no Job manifest yet, so it runs from an
+	// operator's shell against a dev broker or reuses the kanz-halt SA's socket;
+	// either way the code must present the SVID, which is what this asserts.
+	"kanz-mandate": "spiffe://kanz.internal/ns/kanz-operator/sa/kanz-halt",
+}
+
+// dialsNATSInDir reports whether a directory tree calls bus.DialNATS.
 // AST, not grep: a comment naming DialNATS is not a dial, and this codebase's
 // prose discusses the calls it makes (retiring internal/integrity turned on
 // exactly that distinction — see KANZ_BRAIN.md).
-func dialsNATS(t *testing.T, root, svc string) bool {
+func dialsNATSInDir(t *testing.T, dir string) bool {
 	t.Helper()
 	found := false
-	cmdDir := filepath.Join(root, "services", svc, "cmd")
+	cmdDir := dir
 	err := filepath.WalkDir(cmdDir, func(path string, d os.DirEntry, err error) error {
 		if err != nil || d.IsDir() || !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
 			return nil
@@ -111,6 +129,62 @@ func dialsNATS(t *testing.T, root, svc string) bool {
 		t.Fatalf("walk %s: %v", cmdDir, err)
 	}
 	return found
+}
+
+// dialsNATS reports whether a service's entrypoint tree calls bus.DialNATS.
+func dialsNATS(t *testing.T, root, svc string) bool {
+	t.Helper()
+	return dialsNATSInDir(t, filepath.Join(root, "services", svc, "cmd"))
+}
+
+// TestOperatorCLIsHaveBrokerAccounts is the cmd/ half. The services guard above
+// walks services/*/cmd, and every top-level cmd/ dialer fell through that gap —
+// which is precisely where the worst instance lived: the KILL-SWITCH, the one
+// tool that must work while the system is on fire, could not authenticate to the
+// production broker.
+//
+// An operator CLI has no Deployment, so its identity comes from a Job manifest
+// rather than a service manifest; operatorSVIDs names each one. A new cmd/ dialer
+// must declare its SVID here and be admitted to __system__, or it does not ship.
+func TestOperatorCLIsHaveBrokerAccounts(t *testing.T) {
+	root := moduleRoot(t)
+	users := systemAccountUsers(t, filepath.Join(root, "infra", "nats", "tenancy.yaml"))
+
+	entries, err := os.ReadDir(filepath.Join(root, "cmd"))
+	if err != nil {
+		t.Fatalf("read cmd/: %v", err)
+	}
+
+	var problems []string
+	seen := map[string]bool{}
+	for _, e := range entries {
+		if !e.IsDir() || !dialsNATSInDir(t, filepath.Join(root, "cmd", e.Name())) {
+			continue
+		}
+		seen[e.Name()] = true
+		svid, declared := operatorSVIDs[e.Name()]
+		if !declared {
+			problems = append(problems, e.Name()+": dials bus.DialNATS but declares no SVID in operatorSVIDs — "+
+				"the production broker requires one, so this tool cannot reach the spine at all")
+			continue
+		}
+		if !users[svid] {
+			problems = append(problems, e.Name()+": declares "+svid+" but tenancy.yaml's __system__ does not admit it — "+
+				"it would authenticate into no account")
+		}
+	}
+	// An entry for a cmd that no longer dials is dead: it would keep an operator
+	// account alive for nothing, and the next reader would believe it load-bearing.
+	for name := range operatorSVIDs {
+		if !seen[name] {
+			problems = append(problems, name+": is in operatorSVIDs but cmd/"+name+" no longer dials NATS — remove it (dead entry)")
+		}
+	}
+
+	if len(problems) > 0 {
+		sort.Strings(problems)
+		t.Fatalf("operator CLIs without a broker account (SEC-M3c):\n  %s", strings.Join(problems, "\n  "))
+	}
 }
 
 // TestNATSDialersHaveBrokerAccounts asserts every DEPLOYED service that dials the

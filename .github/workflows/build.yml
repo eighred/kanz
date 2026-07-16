@@ -62,6 +62,15 @@ jobs:
           # pod with --dir /migrations/<service>.
           - service: kanz-migrate
             dockerfile: kanz/cmd/kanz-migrate/Dockerfile
+          # SEC-M3c: the kill-switch needs an image because it needs an IDENTITY.
+          # The production broker requires a client SVID and SPIRE issues one to a
+          # POD, from its ServiceAccount — so the operator plane runs in-cluster as
+          # a Job (infra/operator/), and a Job needs an image. Until this existed,
+          # kanz-halt could not connect to the production spine at all: the halt
+          # gate is deny-by-default, so nothing could RESUME it and the platform
+          # could not be brought live.
+          - service: kanz-halt
+            dockerfile: kanz/cmd/kanz-halt/Dockerfile
           # INFRA-M7a-2: the Binance exchange as its own process. Unlike the oms
           # image this needs no GOTAGS — it IS the connector, so there is no
           # variant of it that silently trades against nothing.

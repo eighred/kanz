@@ -38,6 +38,7 @@ import (
 
 	"github.com/kanz-eng/kanz/internal/platform/mode"
 	"github.com/kanz-eng/kanz/pkg/bus"
+	"github.com/kanz-eng/kanz/pkg/transport"
 )
 
 // schemaRefModeChanged identifies the payload on the wire, "{package}.{Message}:{version}".
@@ -54,13 +55,14 @@ func main() {
 }
 
 type options struct {
-	natsURL  string
-	by       string
-	reason   string
-	tenant   string
-	previous string
-	resume   bool
-	timeout  time.Duration
+	natsURL      string
+	spiffeSocket string
+	by           string
+	reason       string
+	tenant       string
+	previous     string
+	resume       bool
+	timeout      time.Duration
 }
 
 func run(args []string, out *os.File) error {
@@ -77,9 +79,35 @@ func run(args []string, out *os.File) error {
 	ctx, cancel := context.WithTimeout(context.Background(), opt.timeout)
 	defer cancel()
 
+	// THE OPERATOR PLANE'S IDENTITY (SEC-M3c).
+	//
+	// The production broker requires a client SVID (infra/nats/nats.yaml: `tls {
+	// verify: true, verify_and_map: true }`). This tool presented none — so the
+	// one command that must work while the system is on fire could not connect to
+	// the spine at all, and because the halt gate is DENY-BY-DEFAULT that also
+	// meant nothing could RESUME it: the platform could not be brought live.
+	//
+	// It authenticates by SPIFFE, not OIDC, and that is the decision, not a
+	// convenience (KANZ_BRAIN.md, "TWO IDENTITY PLANES"): an SSO round-trip to
+	// stop a system whose auth may be part of the incident is a dependency on the
+	// thing you are escaping. An SVID is issued to this Job by SPIRE, and it grants
+	// no `Trade` — the two planes still do not meet.
+	//
+	// Bounded by the SAME deadline as the dial, deliberately: NewSource respects an
+	// earlier parent deadline, so --timeout still means what it says. A break-glass
+	// tool that blocks 30s waiting for an agent is a broken brake.
+	mesh, err := transport.NewMesh(ctx, opt.spiffeSocket)
+	if err != nil {
+		return fmt.Errorf("spiffe identity (%s): %w", opt.spiffeSocket, err)
+	}
+	defer func() { _ = mesh.Close() }()
+
 	client, err := bus.DialNATS(ctx, bus.NATSConfig{
 		URL:  opt.natsURL,
 		Name: "kanz-halt",
+		// nil when no socket is configured — a plaintext dial, correct against a
+		// local dev broker and refused by the production one.
+		TLSConfig: mesh.Client,
 		// Fail fast. A break-glass tool that silently retries a dead spine forever
 		// is worse than one that tells the operator it could not stop the system.
 		MaxReconnects:  1,
@@ -132,6 +160,10 @@ func parseFlags(args []string) (options, error) {
 	fs := flag.NewFlagSet("kanz-halt", flag.ContinueOnError)
 	var opt options
 	fs.StringVar(&opt.natsURL, "nats", envOr("KANZ_NATS_URL", "nats://localhost:4222"), "NATS URL of the spine")
+	fs.StringVar(&opt.spiffeSocket, "spiffe-socket", envOr("SPIFFE_ENDPOINT_SOCKET", ""),
+		"SPIFFE Workload API socket for the operator SVID the production broker requires\n"+
+			"(e.g. unix:///run/spiffe/spire-agent.sock). Empty ⇒ a PLAINTEXT dial: fine against\n"+
+			"a local dev broker, refused by production. See infra/nats/halt-job.yaml.")
 	fs.StringVar(&opt.by, "by", "", `operator principal, "{type}:{id}" (e.g. operator:akif) — REQUIRED`)
 	fs.StringVar(&opt.reason, "reason", "", "why the mode is changing; recorded in the FACT — REQUIRED")
 	fs.StringVar(&opt.tenant, "tenant", envOr("KANZ_TENANT", ""), "envelope tenant_id — REQUIRED.\n"+

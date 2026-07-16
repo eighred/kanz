@@ -1,0 +1,141 @@
+---
+# THE OPERATOR PLANE (SEC-M3c). Decided 2026-07-16 — see KANZ_BRAIN.md,
+# "TWO IDENTITY PLANES" and "THE ESTATE IS KUBERNETES-MANAGED".
+#
+# The sovereign blueprint put the operator plane on SSH keys, because it was to be
+# an SSH transport pushing binaries to host vectors. That transport is cancelled:
+# the estate is Kubernetes. So the operator authenticates the way everything else
+# in this cluster does — a SPIFFE SVID, issued by SPIRE to a pod's ServiceAccount.
+#
+# It is deliberately NOT the OIDC gateway plane. An SSO round-trip to stop a system
+# whose auth may be part of the incident is a dependency on the thing you are
+# escaping. And the planes still do not meet: this SVID grants no `Trade`, and no
+# OIDC principal can reach this Job.
+#
+# # Its own namespace, on purpose
+#
+# The plane separation is physical, not a convention: a distinct namespace gives
+# SPIRE a distinct SPIFFE ID (ns/kanz-operator/sa/kanz-halt), gives the
+# NetworkPolicy below a boundary to draw, and makes "who may halt the platform" a
+# question about RBAC on ONE namespace rather than a search through kanz-services.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: kanz-operator
+  labels:
+    app.kubernetes.io/part-of: kanz
+    # SEC-01a: opts this namespace into SPIRE issuance — the ClusterSPIFFEID
+    # namespaceSelector (infra/security/spire/registration.yaml) matches this.
+    # Without it the Job gets NO SVID and the broker refuses it, which is the
+    # failure this whole task exists to end.
+    kanz.internal/spiffe: enabled
+---
+# The identity itself. tenancy.yaml's __system__ account admits
+# spiffe://kanz.internal/ns/kanz-operator/sa/kanz-halt — issued from THIS
+# ServiceAccount, in THIS namespace. Rename either and the SVID changes and the
+# broker stops admitting it; the two are one fact written in two files.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: kanz-halt
+  namespace: kanz-operator
+  labels:
+    app.kubernetes.io/part-of: kanz
+---
+# The brake reaches the broker and NOTHING else. It publishes one FACT on one
+# subject; it has no reason to talk to any service, and a compromised operator
+# credential should not be able to.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: kanz-halt-egress
+  namespace: kanz-operator
+spec:
+  podSelector:
+    matchLabels:
+      app: kanz-halt
+  policyTypes: [Egress]
+  egress:
+    # The spine.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kanz-messaging
+          podSelector:
+            matchLabels:
+              app: nats
+      ports:
+        - { protocol: TCP, port: 4222 }
+    # DNS, or the NATS URL below never resolves.
+    - to:
+        - namespaceSelector: {}
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - { protocol: UDP, port: 53 }
+        - { protocol: TCP, port: 53 }
+---
+# A TEMPLATE, not a deployable. Copy it, set --by and --reason, apply it.
+#
+#   kubectl apply -f halt-job.yaml           # after editing the args below
+#   kubectl -n kanz-operator logs job/kanz-halt
+#   kubectl -n kanz-operator delete job kanz-halt   # before the next one
+#
+# The args are per-invocation BY DESIGN and cannot be baked in: kanz-halt refuses
+# to publish without --by and --reason, because bringing the platform up or down
+# is a deliberate, attributed, audited act by a named human. A manifest with those
+# pre-filled would attribute every future halt to whoever wrote the YAML.
+#
+# TO RESUME (the deployment sign-off — every edge boots CLOSED and refuses to
+# trade until it hears this), add "--resume" to args.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: kanz-halt
+  namespace: kanz-operator
+  labels:
+    app.kubernetes.io/part-of: kanz
+spec:
+  # One shot. A brake that retries itself is not a brake — if it failed, an
+  # operator needs to see that and decide, not have the cluster decide for them.
+  backoffLimit: 0
+  template:
+    metadata:
+      labels:
+        app: kanz-halt
+    spec:
+      restartPolicy: Never
+      serviceAccountName: kanz-halt
+      containers:
+        - name: kanz-halt
+          image: ghcr.io/kanz-eng/kanz-halt:latest # pin by digest at deploy (SUPPLY-01)
+          args:
+            # EDIT THESE. Add "--resume" to bring the platform live.
+            - "--by=operator:CHANGE_ME"
+            - "--reason=CHANGE_ME"
+          env:
+            # Must match a DNS SAN on the broker's SVID. SPIRE issues `nats-0` and
+            # `nats.kanz-messaging.svc` (registration.yaml dnsNameTemplates); the
+            # short name `nats` matches NEITHER. A Go client verifies the SPIFFE ID
+            # and skips hostname checks, so this one is belt-and-braces — but the
+            # bootstrap Job's `nats` CLI does check, and it is the same URL, so
+            # they stay consistent.
+            - { name: KANZ_NATS_URL, value: "nats://nats.kanz-messaging.svc:4222" }
+            # The agent socket. Empty ⇒ a plaintext dial the production broker
+            # refuses, so this is what makes the tool work at all.
+            - { name: SPIFFE_ENDPOINT_SOCKET, value: "unix:///run/spiffe/spire-agent.sock" }
+            - { name: KANZ_TENANT, value: "__system__" }
+          volumeMounts:
+            - { name: spiffe, mountPath: /run/spiffe, readOnly: true }
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65532
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
+      volumes:
+        - name: spiffe
+          csi:
+            driver: csi.spiffe.io
+            readOnly: true

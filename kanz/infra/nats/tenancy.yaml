@@ -53,6 +53,14 @@ data:
           # is admitted here before any service has anything to connect to. It
           # lives in kanz-messaging beside the broker, not in kanz-services.
           { user: "spiffe://kanz.internal/ns/kanz-messaging/sa/nats-bootstrap" }
+          # THE OPERATOR PLANE (SEC-M3c, infra/operator/halt-job.yaml). The
+          # kill-switch publishes platform.mode.changed, which lives here in
+          # __system__. It had no identity at all, so on the production broker
+          # nothing could halt the platform — and, because the gate is
+          # deny-by-default, nothing could RESUME it either: the platform could not
+          # be brought live. This SVID admits the brake and nothing else; it grants
+          # no `Trade`, and the OIDC plane cannot reach it (KANZ_BRAIN.md).
+          { user: "spiffe://kanz.internal/ns/kanz-operator/sa/kanz-halt" }
           { user: "spiffe://kanz.internal/ns/kanz-services/sa/risk-engine" }
           { user: "spiffe://kanz.internal/ns/kanz-services/sa/api-gateway" }
           { user: "spiffe://kanz.internal/ns/kanz-services/sa/accounting" }
