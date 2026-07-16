@@ -123,12 +123,24 @@ fi
 #    the shared clusters; the tenant id is carried on every connection's GUC by
 #    the services (the AfterConnect set_config path). This step is a VERIFY, not a
 #    mutate — RLS already isolates any tenant id that appears.
+#
+#    The query returns a relname when FORCE RLS is active and NOTHING when it is
+#    not — the OUTPUT is the verdict, not the exit status. `psql -tAc` exits 0 for
+#    a successful query that returns zero rows, so a version of this check that
+#    piped the query to `>/dev/null` and branched on `$?` alone could never tell
+#    "RLS is off" from "RLS is on": both are a successful query, so both exit 0
+#    and both pass. The output is captured into `out` below and asserted
+#    non-empty for exactly the reason app_current_tenant() RAISES instead of
+#    returning NULL (KANZ_BRAIN.md): an empty result and a broken query must
+#    never be the same observable event. Do NOT "tidy" the capture back into
+#    `>/dev/null` — that silently restores the vacuous check.
 if step storage; then
   echo "-- [1/5] verify RLS isolation is active (kanz-risk, kanz-books)"
   for c in kanz-risk kanz-books; do
-    k -n "$DATA_NS" exec "$c-1" -- psql -tAc \
-      "select relname from pg_class where relrowsecurity and relforcerowsecurity limit 1" \
-      >/dev/null || { echo "FATAL: FORCE RLS not active on $c — MT-01d not deployed"; exit 1; }
+    out="$(k -n "$DATA_NS" exec "$c-1" -- psql -tAc \
+      "select relname from pg_class where relrowsecurity and relforcerowsecurity limit 1")" \
+      || { echo "FATAL: could not run the RLS check on $c — kubectl exec or psql failed (see the error above); this is NOT a verdict on RLS, it means the check could not be run. Fix the underlying infrastructure (namespace/pod/DB reachability) and retry" >&2; exit 1; }
+    [ -n "$out" ] || { echo "FATAL: FORCE RLS not active on $c — MT-01d not deployed" >&2; exit 1; }
   done
 fi
 
