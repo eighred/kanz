@@ -3,8 +3,7 @@
 // exception queue whose entries carry a human-override audit trail. It is the
 // DATA-05/IBOR-01e break-detection stance applied to prices — two-or-more
 // independent views keyed on a shared identity, a deviation beyond tolerance
-// surfaced as an exception rather than silently absorbed. Kept in the datamaster
-// service (not internal/integrity, whose detectors are envelope/stream-specific).
+// surfaced as an exception rather than silently absorbed.
 //
 // # Prices here are exact (DATA-M8b)
 //

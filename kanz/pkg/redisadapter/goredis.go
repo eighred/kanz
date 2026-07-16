@@ -8,14 +8,12 @@ import (
 
 	"github.com/redis/go-redis/v9"
 
-	"github.com/kanz-eng/kanz/internal/integrity"
 	"github.com/kanz-eng/kanz/pkg/bus"
 )
 
-// Client adapts a go-redis client to both shared-state seams: it satisfies
-// bus.RedisClient (cross-pod dedup) and integrity.RedisEval (the reconciler's
-// atomic PendingStore), so one Redis connection serves both. Any go-redis
-// Cmdable works — *redis.Client, *redis.ClusterClient, or a Dragonfly client.
+// Client adapts a go-redis client to bus.RedisClient, the cross-pod dedup
+// seen-set. Any go-redis Cmdable works — *redis.Client, *redis.ClusterClient,
+// or a Dragonfly client.
 type Client struct{ c redis.Cmdable }
 
 // New wraps a go-redis Cmdable.
@@ -42,14 +40,4 @@ func (a *Client) Del(ctx context.Context, key string) error {
 	return a.c.Del(ctx, key).Err()
 }
 
-// Eval backs integrity.RedisEval — the atomic PendingStore Lua scripts run
-// server-side, so ClaimOrMatch is atomic across replicas.
-func (a *Client) Eval(ctx context.Context, script string, keys []string, args ...any) (any, error) {
-	return a.c.Eval(ctx, script, keys, args...).Result()
-}
-
-// Compile-time assertions: one Client satisfies both seams.
-var (
-	_ bus.RedisClient     = (*Client)(nil)
-	_ integrity.RedisEval = (*Client)(nil)
-)
+var _ bus.RedisClient = (*Client)(nil)

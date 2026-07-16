@@ -15,8 +15,8 @@ import (
 // Bus-backed FailSink (PARITY-04g): the concrete emitter that maps a settlement
 // Fail onto the settlement.v1.SettlementFail FACT and publishes it on the bus,
 // so the AUTO-01 controller (severity → remediation) and IBOR-01e reconciliation
-// consume it. It wraps a shared bus.Producer — the RISK-10 / integrity.Publisher
-// stance — so producer_sequence stays monotonic across emitted fails.
+// consume it. It wraps a shared bus.Producer — the RISK-10 stance — so
+// producer_sequence stays monotonic across emitted fails.
 //
 // # The payload proto is an injected seam (settlement.v1 is generated-not-committed)
 //

@@ -23,10 +23,9 @@ import (
 //
 // Every breach is reported to onBreach, which the composition root maps to a
 // DataException + the AUTO-01 observation FACT (the same break-detection →
-// exception → controller path datamaster/integrity use). The staleness check is
-// the internal/integrity staleness stance applied to a pre-publish market.v1
-// tick (event_time vs wall-clock budget) — integrity's own detector is envelope-
-// bound, so the concept is reused here, not the transport-specific detector.
+// exception → controller path datamaster uses). The staleness check is that
+// stance applied to a pre-publish market.v1 tick: event_time vs a wall-clock
+// budget, on the tick itself rather than on its envelope.
 type Gate struct {
 	inner    Sink
 	onBreach func(Breach)
