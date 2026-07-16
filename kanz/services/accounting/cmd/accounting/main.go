@@ -22,6 +22,7 @@ import (
 	"github.com/kanz-eng/kanz/internal/pg"
 	"github.com/kanz-eng/kanz/pkg/bus"
 	"github.com/kanz-eng/kanz/pkg/observability"
+	"github.com/kanz-eng/kanz/pkg/transport"
 	accounting "github.com/kanz-eng/kanz/services/accounting/internal"
 	"github.com/kanz-eng/kanz/services/accounting/internal/cashmove"
 	"github.com/kanz-eng/kanz/services/accounting/internal/config"
@@ -54,6 +55,21 @@ func main() {
 	}
 	logger := obs.Logger
 	slog.SetDefault(logger)
+
+	// SEC-M3: ONE workload identity for the process, shared by all three bus
+	// dials below (consumer, cash publisher, FX feed). The production broker
+	// requires a client SVID; a nil TLSConfig is a plaintext client it refuses at
+	// the handshake. Built here rather than per-dial because an X509Source is a
+	// live rotation watcher — three of them would be three watchers for one
+	// identity.
+	mesh, err := transport.NewMesh(ctx, cfg.SPIFFESocket)
+	if err != nil {
+		logger.Error("spiffe source init failed", "err", err)
+		os.Exit(2)
+	}
+	defer func() { _ = mesh.Close() }()
+	logger.Info("bus transport", "mtls", mesh.Enabled())
+
 	defer func() {
 		shutCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
@@ -84,7 +100,7 @@ func main() {
 	// subscription/redemption/fee is replayable. A dial failure is fatal (a
 	// configured broker that won't connect is a misconfiguration).
 	if cfg.NATSURL != "" {
-		pub, closePub, err := buildCashPublisher(ctx, cfg)
+		pub, closePub, err := buildCashPublisher(ctx, cfg, mesh)
 		if err != nil {
 			logger.Error("cash publisher init failed", "err", err)
 			os.Exit(2)
@@ -113,7 +129,7 @@ func main() {
 	// together. Empty ACCOUNTING_NATS_URL ⇒ read/reconcile only (default).
 	if cfg.NATSURL != "" {
 		go func() {
-			if err := runConsumer(ctx, cfg, store, logger, obs); err != nil && !errors.Is(err, context.Canceled) {
+			if err := runConsumer(ctx, cfg, store, mesh, logger, obs); err != nil && !errors.Is(err, context.Canceled) {
 				logger.Error("fill consumer stopped with error", "err", err)
 				stop()
 			}
@@ -124,7 +140,7 @@ func main() {
 		// than bringing the service down, so it does not stop() on error.
 		if liveFX != nil {
 			go func() {
-				if err := runFXFeed(ctx, cfg, liveFX, logger, obs); err != nil && !errors.Is(err, context.Canceled) {
+				if err := runFXFeed(ctx, cfg, liveFX, mesh, logger, obs); err != nil && !errors.Is(err, context.Canceled) {
 					logger.Error("FX feed stopped with error", "err", err)
 				}
 			}()
@@ -173,14 +189,14 @@ func openStore(ctx context.Context, cfg config.Config) (ledger.Store, func(), er
 // so a broken subscription brings folding down rather than running silently
 // degraded (book-of-record data loss must be loud). Idempotency is handled below
 // this layer (consumer dedup + ledger.Store.Append on the entry id).
-func runConsumer(ctx context.Context, cfg config.Config, store ledger.Store, logger *slog.Logger, obs *observability.Provider) error {
+func runConsumer(ctx context.Context, cfg config.Config, store ledger.Store, mesh *transport.Mesh, logger *slog.Logger, obs *observability.Provider) error {
 	folder, err := consume.NewFolder(store, cfg.BaseCurrency)
 	if err != nil {
 		return err
 	}
 
 	busMetrics := bus.NewBusMetrics(obs.Registry)
-	client, err := bus.DialNATS(ctx, bus.NATSConfig{URL: cfg.NATSURL, Name: cfg.Source})
+	client, err := bus.DialNATS(ctx, bus.NATSConfig{URL: cfg.NATSURL, Name: cfg.Source, TLSConfig: mesh.Client})
 	if err != nil {
 		return err
 	}
@@ -227,8 +243,8 @@ func runConsumer(ctx context.Context, cfg config.Config, store ledger.Store, log
 
 // buildCashPublisher dials a producer connection and builds the WIRE-01f
 // cash-movement publisher. It returns a close func for the producer client.
-func buildCashPublisher(ctx context.Context, cfg config.Config) (*cashmove.Publisher, func(), error) {
-	client, err := bus.DialNATS(ctx, bus.NATSConfig{URL: cfg.NATSURL, Name: cfg.Source + "-producer"})
+func buildCashPublisher(ctx context.Context, cfg config.Config, mesh *transport.Mesh) (*cashmove.Publisher, func(), error) {
+	client, err := bus.DialNATS(ctx, bus.NATSConfig{URL: cfg.NATSURL, Name: cfg.Source + "-producer", TLSConfig: mesh.Client})
 	if err != nil {
 		return nil, nil, err
 	}
@@ -280,9 +296,9 @@ func buildLiveFX(cfg config.Config, opts *[]server.Option) (*fxfeed.LiveFX, erro
 // valuation, completeness-gated) rather than stopping the service. The cache
 // must SEE every FX event, so it subscribes under a per-source broadcast group
 // distinct from the fill consumer's load-balanced group.
-func runFXFeed(ctx context.Context, cfg config.Config, liveFX *fxfeed.LiveFX, logger *slog.Logger, obs *observability.Provider) error {
+func runFXFeed(ctx context.Context, cfg config.Config, liveFX *fxfeed.LiveFX, mesh *transport.Mesh, logger *slog.Logger, obs *observability.Provider) error {
 	busMetrics := bus.NewBusMetrics(obs.Registry)
-	client, err := bus.DialNATS(ctx, bus.NATSConfig{URL: cfg.NATSURL, Name: cfg.Source + "-fx"})
+	client, err := bus.DialNATS(ctx, bus.NATSConfig{URL: cfg.NATSURL, Name: cfg.Source + "-fx", TLSConfig: mesh.Client})
 	if err != nil {
 		return err
 	}

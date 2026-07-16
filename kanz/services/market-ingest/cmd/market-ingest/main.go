@@ -26,6 +26,7 @@ import (
 	"github.com/kanz-eng/kanz/pkg/alpha"
 	"github.com/kanz-eng/kanz/pkg/bus"
 	"github.com/kanz-eng/kanz/pkg/observability"
+	"github.com/kanz-eng/kanz/pkg/transport"
 	"github.com/kanz-eng/kanz/services/market-ingest/internal/config"
 )
 
@@ -54,7 +55,16 @@ func main() {
 		_ = obs.Shutdown(shutCtx)
 	}()
 
-	client, err := bus.DialNATS(ctx, bus.NATSConfig{URL: cfg.NATSURL, Name: cfg.Source})
+	// SEC-M3: the production broker requires a client SVID; a nil TLSConfig is a
+	// plaintext client it refuses at the handshake.
+	mesh, err := transport.NewMesh(ctx, cfg.SPIFFESocket)
+	if err != nil {
+		logger.Error("spiffe source init failed", "err", err)
+		os.Exit(2)
+	}
+	defer func() { _ = mesh.Close() }()
+	logger.Info("bus transport", "mtls", mesh.Enabled())
+	client, err := bus.DialNATS(ctx, bus.NATSConfig{URL: cfg.NATSURL, Name: cfg.Source, TLSConfig: mesh.Client})
 	if err != nil {
 		logger.Error("bus dial failed", "err", err)
 		os.Exit(2)

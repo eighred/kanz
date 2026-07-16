@@ -118,38 +118,20 @@ func runEngine(ctx context.Context, cfg config.Config, readiness *server.Readine
 	busMetrics := bus.NewBusMetrics(obs.Registry)
 	riskMetrics := engine.NewMetrics(obs.Registry)
 
-	// SEC-M3a: ONE workload identity, used by everything that speaks mTLS here —
-	// the NATS spine below and the query gRPC listener (serveQueryGRPC). It is
-	// built once because an X509Source is a live workload-API watcher, not a
-	// value: two of them would run two rotation loops for one identity.
-	//
-	// The bus is the reason this moved. infra/nats/nats.yaml requires a client
-	// SVID (`tls { verify: true, verify_and_map: true }`), and this dial passed
-	// {URL, Name} — a PLAINTEXT client the production broker refuses at the
-	// handshake. Every DialNATS in the repository had the same hole (SEC-M3);
-	// this is the composition-root pattern the rest inherit.
-	var spiffeSrc transport.Source
-	if cfg.SPIFFESocket != "" {
-		src, err := transport.NewSource(ctx, cfg.SPIFFESocket)
-		if err != nil {
-			return err
-		}
-		defer func() { _ = src.Close() }()
-		spiffeSrc = src
+	// SEC-M3: ONE workload identity for everything in this process that speaks
+	// mTLS — the NATS spine below and the query gRPC listener (serveQueryGRPC).
+	// Built once because an X509Source is a live rotation watcher, not a value.
+	mesh, err := transport.NewMesh(ctx, cfg.SPIFFESocket)
+	if err != nil {
+		return err
 	}
+	defer func() { _ = mesh.Close() }()
+	// Whether a pod is on mTLS must be visible, not inferred: a plaintext dial
+	// against the production broker fails at the handshake, and this line is what
+	// says why. mesh.Client is nil when disabled — the dev/plaintext path.
+	logger.Info("bus transport", "mtls", mesh.Enabled())
 
-	natsCfg := bus.NATSConfig{URL: cfg.NATSURL, Name: cfg.Source}
-	if spiffeSrc != nil {
-		natsCfg.TLSConfig = transport.ClientTLSConfig(spiffeSrc, transport.AuthorizeMesh())
-		logger.Info("risk-engine bus: mTLS enabled", "socket", cfg.SPIFFESocket)
-	} else {
-		// Dev/local only: dev/docker-compose.yml runs a plaintext broker. Against
-		// the production config this dial CANNOT connect, so say so rather than
-		// fail opaquely at the handshake.
-		logger.Warn("risk-engine bus: dialing PLAINTEXT (no RISK_ENGINE_SPIFFE_SOCKET) — " +
-			"the production broker requires an SVID and will refuse this connection")
-	}
-	client, err := bus.DialNATS(ctx, natsCfg)
+	client, err := bus.DialNATS(ctx, bus.NATSConfig{URL: cfg.NATSURL, Name: cfg.Source, TLSConfig: mesh.Client})
 	if err != nil {
 		return err
 	}
@@ -316,7 +298,7 @@ func runEngine(ctx context.Context, cfg config.Config, readiness *server.Readine
 	// an address is configured; stopped gracefully when ctx is canceled.
 	if cfg.GRPCListen != "" {
 		engineImpl := engine.New(store, registry, cache, risk.NewDetector())
-		stopGRPC, err := serveQueryGRPC(ctx, cfg, spiffeSrc, engineImpl, logger)
+		stopGRPC, err := serveQueryGRPC(ctx, cfg, mesh.Source, engineImpl, logger)
 		if err != nil {
 			return err
 		}

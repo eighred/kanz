@@ -49,6 +49,10 @@ data:
       __system__ {
         jetstream: enabled
         users: [
+          # The bootstrap Job (bootstrap-job.yaml) — it CREATES the streams, so it
+          # is admitted here before any service has anything to connect to. It
+          # lives in kanz-messaging beside the broker, not in kanz-services.
+          { user: "spiffe://kanz.internal/ns/kanz-messaging/sa/nats-bootstrap" }
           { user: "spiffe://kanz.internal/ns/kanz-services/sa/risk-engine" }
           { user: "spiffe://kanz.internal/ns/kanz-services/sa/api-gateway" }
           { user: "spiffe://kanz.internal/ns/kanz-services/sa/accounting" }

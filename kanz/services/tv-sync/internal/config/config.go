@@ -12,9 +12,16 @@ import (
 
 // Config is the resolved configuration.
 type Config struct {
-	Listen        string
-	LogLevel      slog.Level
-	OTLPEndpoint  string
+	Listen       string
+	LogLevel     slog.Level
+	OTLPEndpoint string
+
+	// SPIFFESocket is the SPIFFE Workload API socket (SEC-01a CSI mount). When
+	// set, the bus dials the spine over mTLS presenting this workload SVID; empty
+	// means a PLAINTEXT dial, which the production broker refuses at the
+	// handshake (SEC-M3). Reads the go-spiffe standard env, as oms/venue-* do, so
+	// one manifest env name serves every service.
+	SPIFFESocket  string
 	NATSURL       string
 	Source        string
 	ConsumerGroup string
@@ -36,6 +43,7 @@ func Load() (Config, error) {
 		Listen:        envOr("TV_SYNC_LISTEN", ":8091"),
 		LogLevel:      parseLevel(os.Getenv("TV_SYNC_LOG_LEVEL")),
 		OTLPEndpoint:  os.Getenv("TV_SYNC_OTLP_ENDPOINT"),
+		SPIFFESocket:  os.Getenv("SPIFFE_ENDPOINT_SOCKET"),
 		NATSURL:       envOr("TV_SYNC_NATS_URL", "nats://localhost:4222"),
 		Source:        envOr("TV_SYNC_SOURCE", "tv-sync"),
 		ConsumerGroup: envOr("TV_SYNC_CONSUMER_GROUP", "tv-sync"),

@@ -20,6 +20,7 @@ import (
 	comp "github.com/kanz-eng/kanz/internal/compliance"
 	"github.com/kanz-eng/kanz/pkg/bus"
 	"github.com/kanz-eng/kanz/pkg/observability"
+	"github.com/kanz-eng/kanz/pkg/transport"
 	"github.com/kanz-eng/kanz/services/compliance/internal/audit"
 	"github.com/kanz-eng/kanz/services/compliance/internal/config"
 	"github.com/kanz-eng/kanz/services/compliance/internal/monitor"
@@ -93,7 +94,15 @@ func main() {
 func runConsumers(ctx context.Context, cfg config.Config, readiness *server.Readiness, logger *slog.Logger, obs *observability.Provider) error {
 	busMetrics := bus.NewBusMetrics(obs.Registry)
 
-	client, err := bus.DialNATS(ctx, bus.NATSConfig{URL: cfg.NATSURL, Name: cfg.Source})
+	// SEC-M3: the production broker requires a client SVID; a nil TLSConfig is a
+	// plaintext client it refuses at the handshake.
+	mesh, err := transport.NewMesh(ctx, cfg.SPIFFESocket)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = mesh.Close() }()
+	logger.Info("bus transport", "mtls", mesh.Enabled())
+	client, err := bus.DialNATS(ctx, bus.NATSConfig{URL: cfg.NATSURL, Name: cfg.Source, TLSConfig: mesh.Client})
 	if err != nil {
 		return err
 	}

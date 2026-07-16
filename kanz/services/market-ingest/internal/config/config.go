@@ -19,6 +19,13 @@ type Config struct {
 	LogLevel     slog.Level
 	OTLPEndpoint string
 
+	// SPIFFESocket is the SPIFFE Workload API socket (SEC-01a CSI mount). When
+	// set, the bus dials the spine over mTLS presenting this workload SVID; empty
+	// means a PLAINTEXT dial, which the production broker refuses at the
+	// handshake (SEC-M3). Reads the go-spiffe standard env, as oms/venue-* do, so
+	// one manifest env name serves every service.
+	SPIFFESocket string
+
 	NATSURL string
 	Source  string
 
@@ -79,6 +86,7 @@ func Load() Config {
 		Listen:           envOr("MARKET_INGEST_LISTEN", ":8091"),
 		LogLevel:         parseLevel(os.Getenv("MARKET_INGEST_LOG_LEVEL")),
 		OTLPEndpoint:     os.Getenv("MARKET_INGEST_OTLP_ENDPOINT"),
+		SPIFFESocket:     os.Getenv("SPIFFE_ENDPOINT_SOCKET"),
 		NATSURL:          envOr("MARKET_INGEST_NATS_URL", "nats://localhost:4222"),
 		Source:           envOr("MARKET_INGEST_SOURCE", "market-ingest"),
 		Tenant:           envOr("MARKET_INGEST_TENANT", "__system__"),

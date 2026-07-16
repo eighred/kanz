@@ -123,8 +123,16 @@ func buildOrders(ctx context.Context, cfg config.Config, logger *slog.Logger) (*
 		logger.Warn("api-gateway: order write surface disabled (no API_GATEWAY_NATS_URL)")
 		return orders.New(nil), func() {}, nil
 	}
-	client, err := bus.DialNATS(ctx, bus.NATSConfig{URL: cfg.NATSURL, Name: cfg.Source})
+	// SEC-M3: the production broker requires a client SVID; a nil TLSConfig is a
+	// plaintext client it refuses at the handshake.
+	mesh, err := transport.NewMesh(ctx, cfg.SPIFFESocket)
 	if err != nil {
+		return nil, func() {}, err
+	}
+	logger.Info("bus transport", "mtls", mesh.Enabled())
+	client, err := bus.DialNATS(ctx, bus.NATSConfig{URL: cfg.NATSURL, Name: cfg.Source, TLSConfig: mesh.Client})
+	if err != nil {
+		_ = mesh.Close()
 		return nil, func() {}, err
 	}
 	producer, err := bus.NewProducer(client, bus.ProducerConfig{
@@ -134,10 +142,11 @@ func buildOrders(ctx context.Context, cfg config.Config, logger *slog.Logger) (*
 	})
 	if err != nil {
 		_ = client.Close()
+		_ = mesh.Close()
 		return nil, func() {}, err
 	}
 	logger.Info("api-gateway: order write surface enabled")
-	return orders.New(producer), func() { _ = client.Close() }, nil
+	return orders.New(producer), func() { _ = client.Close(); _ = mesh.Close() }, nil
 }
 
 // buildProxy wires the Phase-7 read surfaces (SVCWIRE-01c). It collects the

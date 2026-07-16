@@ -23,6 +23,7 @@ import (
 	"github.com/kanz-eng/kanz/internal/signal/translate"
 	"github.com/kanz-eng/kanz/pkg/bus"
 	"github.com/kanz-eng/kanz/pkg/observability"
+	"github.com/kanz-eng/kanz/pkg/transport"
 	"github.com/kanz-eng/kanz/services/webhook-ingest/internal/config"
 	"github.com/kanz-eng/kanz/services/webhook-ingest/internal/ingest"
 	"github.com/kanz-eng/kanz/services/webhook-ingest/internal/server"
@@ -63,9 +64,22 @@ func main() {
 	// watchdog — the gate has to exist before the connection it is watching.
 	gate := translate.NewGate(time.Now)
 
+	// SEC-M3: the production broker requires a client SVID; a nil TLSConfig is a
+	// plaintext client it refuses at the handshake. This is the platform's public
+	// entrance — the first hop of the trading loop — so it is also the first thing
+	// that would have discovered the spine unreachable, in production.
+	mesh, err := transport.NewMesh(ctx, cfg.SPIFFESocket)
+	if err != nil {
+		logger.Error("spiffe source init failed", "err", err)
+		os.Exit(2)
+	}
+	defer func() { _ = mesh.Close() }()
+	logger.Info("bus transport", "mtls", mesh.Enabled())
+
 	client, err := bus.DialNATS(ctx, bus.NATSConfig{
-		URL:  cfg.NATSURL,
-		Name: cfg.Source,
+		URL:       cfg.NATSURL,
+		Name:      cfg.Source,
+		TLSConfig: mesh.Client,
 		OnDisconnect: func(err error) {
 			gate.TripOnBusLoss(err)
 			logger.Error("NATS spine lost — trading halted, operator resume required", "err", err)

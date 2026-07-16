@@ -34,6 +34,13 @@ type Config struct {
 
 	// OTLPEndpoint is the OTel collector for span export (OBS-01).
 	OTLPEndpoint string
+
+	// SPIFFESocket is the SPIFFE Workload API socket (SEC-01a CSI mount). When
+	// set, the bus dials the spine over mTLS presenting this workload SVID; empty
+	// means a PLAINTEXT dial, which the production broker refuses at the
+	// handshake (SEC-M3). Reads the go-spiffe standard env, as oms/venue-* do, so
+	// one manifest env name serves every service.
+	SPIFFESocket string
 }
 
 // DefaultSubjects materializes everything — audit completeness over economy.
@@ -53,6 +60,7 @@ func Load() (Config, error) {
 		Subjects:      subjects,
 		DatabaseURL:   secret("AUDIT_DATABASE_URL"),
 		OTLPEndpoint:  os.Getenv("AUDIT_OTLP_ENDPOINT"),
+		SPIFFESocket:  os.Getenv("SPIFFE_ENDPOINT_SOCKET"),
 	}, nil
 }
 

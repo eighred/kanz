@@ -16,6 +16,13 @@ type Config struct {
 	LogLevel     slog.Level
 	Source       string
 	OTLPEndpoint string
+
+	// SPIFFESocket is the SPIFFE Workload API socket (SEC-01a CSI mount). When
+	// set, the bus dials the spine over mTLS presenting this workload SVID; empty
+	// means a PLAINTEXT dial, which the production broker refuses at the
+	// handshake (SEC-M3). Reads the go-spiffe standard env, as oms/venue-* do, so
+	// one manifest env name serves every service.
+	SPIFFESocket string
 	// NATSURL is the spine. Empty ⇒ HTTP/probes only (no consumption), a
 	// read-only/degraded posture.
 	NATSURL string
@@ -49,6 +56,7 @@ func Load() (Config, error) {
 		LogLevel:      parseLevel(envOr("COMPLIANCE_LOG_LEVEL", "info")),
 		Source:        envOr("COMPLIANCE_SOURCE", "compliance"),
 		OTLPEndpoint:  os.Getenv("COMPLIANCE_OTLP_ENDPOINT"),
+		SPIFFESocket:  os.Getenv("SPIFFE_ENDPOINT_SOCKET"),
 		NATSURL:       os.Getenv("COMPLIANCE_NATS_URL"),
 		ConsumerGroup: envOr("COMPLIANCE_CONSUMER_GROUP", "compliance"),
 	}, nil

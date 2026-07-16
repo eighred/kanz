@@ -121,7 +121,15 @@ func run(cfg config.Config) error {
 		return errors.New("no VENUE_BINANCE_NATS_URL — async fills (resting orders, healing FACTs) would be silently dropped")
 	}
 	busMetrics := bus.NewBusMetrics(obs.Registry)
-	client, err := bus.DialNATS(ctx, bus.NATSConfig{URL: cfg.NATSURL, Name: cfg.Source})
+	// SEC-M3: the production broker requires a client SVID; a nil TLSConfig is a
+	// plaintext client it refuses at the handshake.
+	mesh, err := transport.NewMesh(ctx, cfg.SPIFFESocket)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = mesh.Close() }()
+	logger.Info("bus transport", "mtls", mesh.Enabled())
+	client, err := bus.DialNATS(ctx, bus.NATSConfig{URL: cfg.NATSURL, Name: cfg.Source, TLSConfig: mesh.Client})
 	if err != nil {
 		return err
 	}

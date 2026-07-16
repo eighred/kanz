@@ -22,6 +22,7 @@ import (
 	"github.com/kanz-eng/kanz/internal/marketdata/store"
 	"github.com/kanz-eng/kanz/pkg/bus"
 	"github.com/kanz-eng/kanz/pkg/observability"
+	"github.com/kanz-eng/kanz/pkg/transport"
 	"github.com/kanz-eng/kanz/services/market-data/internal/config"
 	"github.com/kanz-eng/kanz/services/market-data/internal/feed"
 	"github.com/kanz-eng/kanz/services/market-data/internal/server"
@@ -124,7 +125,15 @@ func runIngest(ctx context.Context, cfg config.Config, readiness *server.Readine
 		return err
 	}
 
-	client, err := bus.DialNATS(ctx, bus.NATSConfig{URL: cfg.NATSURL, Name: cfg.Source})
+	// SEC-M3: the production broker requires a client SVID; a nil TLSConfig is a
+	// plaintext client it refuses at the handshake.
+	mesh, err := transport.NewMesh(ctx, cfg.SPIFFESocket)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = mesh.Close() }()
+	logger.Info("bus transport", "mtls", mesh.Enabled())
+	client, err := bus.DialNATS(ctx, bus.NATSConfig{URL: cfg.NATSURL, Name: cfg.Source, TLSConfig: mesh.Client})
 	if err != nil {
 		return err
 	}
@@ -179,7 +188,15 @@ func runFeed(ctx context.Context, cfg config.Config, logger *slog.Logger, obs *o
 	}
 
 	busMetrics := bus.NewBusMetrics(obs.Registry)
-	client, err := bus.DialNATS(ctx, bus.NATSConfig{URL: cfg.NATSURL, Name: cfg.Source + "-feed"})
+	// SEC-M3: the production broker requires a client SVID; a nil TLSConfig is a
+	// plaintext client it refuses at the handshake.
+	mesh, err := transport.NewMesh(ctx, cfg.SPIFFESocket)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = mesh.Close() }()
+	logger.Info("bus transport", "mtls", mesh.Enabled())
+	client, err := bus.DialNATS(ctx, bus.NATSConfig{URL: cfg.NATSURL, Name: cfg.Source + "-feed", TLSConfig: mesh.Client})
 	if err != nil {
 		return err
 	}

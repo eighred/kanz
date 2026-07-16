@@ -1,4 +1,38 @@
 ---
+# SEC-M3b: the bootstrap Job's own identity. The broker requires a client SVID
+# (nats.yaml `tls { verify: true, verify_and_map: true }`), and SPIRE issues one
+# per ServiceAccount — so the Job that provisions every stream needs an SA of its
+# own, admitted by tenancy.yaml's __system__ account. It had none, presented no
+# certificate, and was therefore refused at the handshake: the spine could not be
+# provisioned at all.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: nats-bootstrap
+  namespace: kanz-messaging
+  labels:
+    app.kubernetes.io/part-of: kanz
+---
+# spiffe-helper config for the bootstrap Job. The `nats` CLI cannot speak the
+# SPIFFE Workload API, so the SVID is materialised as PEM files it reads via
+# NATS_CERT/NATS_KEY/NATS_CA. No `cmd` here (unlike the broker's helper, which
+# SIGHUPs nats-server on renewal): this runs once, before a short-lived Job, and
+# there is nothing to reload.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nats-bootstrap-spiffe-helper
+  namespace: kanz-messaging
+  labels:
+    app.kubernetes.io/part-of: kanz
+data:
+  helper.conf: |
+    agent_address         = "/run/spiffe/spire-agent.sock"
+    cert_dir              = "/etc/nats-certs"
+    svid_file_name        = "svid.pem"
+    svid_key_file_name    = "svid_key.pem"
+    svid_bundle_file_name = "bundle.pem"
+---
 # Stream/consumer provisioning script. Idempotent — re-run after taxonomy
 # changes. Stream layout follows kanz-schemas/docs/subject-taxonomy.md §4:
 # one stream per domain binding "{domain}.>", plus DLQ. Replay streams are
@@ -166,13 +200,48 @@ spec:
   template:
     spec:
       restartPolicy: OnFailure
+      # SEC-M3b: its own identity, so SPIRE issues this Job an SVID that
+      # tenancy.yaml's __system__ account admits. Without one the Job is refused at
+      # the TLS handshake and NO STREAM IS EVER CREATED — which is where the whole
+      # spine starts.
+      serviceAccountName: nats-bootstrap
+      # spiffe-helper writes the SVID as PEM FILES because the `nats` CLI cannot
+      # speak the SPIFFE Workload API — it reads NATS_CERT/NATS_KEY/NATS_CA. Same
+      # helper, same file names as the broker's own sidecar (nats.yaml).
+      # daemon_mode=false: run once, block until the first SVID exists, exit — a
+      # Job needs the certs before its command starts, not renewal.
+      initContainers:
+        - name: spiffe-helper
+          image: ghcr.io/spiffe/spiffe-helper:0.9.0
+          args: ["-config", "/etc/spiffe-helper/helper.conf", "-daemon-mode=false"]
+          volumeMounts:
+            - { name: spiffe, mountPath: /run/spiffe, readOnly: true }
+            - { name: helper-config, mountPath: /etc/spiffe-helper }
+            - { name: certs, mountPath: /etc/nats-certs }
       containers:
         - name: bootstrap
           image: natsio/nats-box:0.14.5
           command: ["sh", "/scripts/bootstrap.sh"]
           env:
+            # THE HOSTNAME MUST MATCH A DNS SAN, and "nats" does not.
+            #
+            # This was nats://nats:4222. The broker's SVID carries the SANs SPIRE's
+            # dnsNameTemplates issue — `nats-0` and `nats.kanz-messaging.svc` — and
+            # the `nats` CLI, unlike a SPIFFE-aware Go client, checks the hostname
+            # against them. The short name matches neither, so the CLI would reject
+            # the broker's own certificate ("certificate is not valid for any
+            # names") even once the certs below are mounted. Verified against a real
+            # broker in test/mtls (CI drives this exact script over mTLS).
             - name: NATS_URL
-              value: "nats://nats:4222"
+              value: "nats://nats.kanz-messaging.svc:4222"
+            # The client SVID the helper wrote. These three are what make the CLI
+            # present an identity `verify_and_map` can map to a __system__ user.
+            - name: NATS_CERT
+              value: "/etc/nats-certs/svid.pem"
+            - name: NATS_KEY
+              value: "/etc/nats-certs/svid_key.pem"
+            - name: NATS_CA
+              value: "/etc/nats-certs/bundle.pem"
             # The stream replica factor. 3 is the production posture and matches the
             # 3-node NATS cluster. It is surfaced HERE, not buried in the script,
             # because a broker with fewer nodes CANNOT bootstrap at 3 — nats-server
@@ -183,7 +252,20 @@ spec:
               value: "3"
           volumeMounts:
             - { name: scripts, mountPath: /scripts }
+            - { name: certs, mountPath: /etc/nats-certs, readOnly: true }
       volumes:
         - name: scripts
           configMap:
             name: nats-bootstrap
+        - name: helper-config
+          configMap:
+            name: nats-bootstrap-spiffe-helper
+        # The agent socket (SEC-01a). Read-only: the workload only fetches.
+        - name: spiffe
+          csi:
+            driver: csi.spiffe.io
+            readOnly: true
+        # emptyDir, not a mount: the SVID is short-lived and must never touch
+        # durable storage — the memory-only-secrets stance.
+        - name: certs
+          emptyDir: {}

@@ -39,6 +39,13 @@ type Config struct {
 
 	// OTLPEndpoint is the OTel collector for span export (OBS-01).
 	OTLPEndpoint string
+
+	// SPIFFESocket is the SPIFFE Workload API socket (SEC-01a CSI mount). When
+	// set, the bus dials the spine over mTLS presenting this workload SVID; empty
+	// means a PLAINTEXT dial, which the production broker refuses at the
+	// handshake (SEC-M3). Reads the go-spiffe standard env, as oms/venue-* do, so
+	// one manifest env name serves every service.
+	SPIFFESocket string
 }
 
 // DefaultSubjects harvests everything — lineage completeness over economy.
@@ -60,6 +67,7 @@ func Load() (Config, error) {
 		GovernanceFile: os.Getenv("LINEAGE_GOVERNANCE_FILE"),
 		OpenLineageURL: strings.TrimRight(os.Getenv("LINEAGE_OPENLINEAGE_URL"), "/"),
 		OTLPEndpoint:   os.Getenv("LINEAGE_OTLP_ENDPOINT"),
+		SPIFFESocket:   os.Getenv("SPIFFE_ENDPOINT_SOCKET"),
 	}, nil
 }
 

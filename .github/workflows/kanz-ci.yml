@@ -270,6 +270,28 @@ jobs:
       - name: Start NATS (mTLS — the broker config production applies)
         run: kanz/test/mtls/up.sh /tmp/kanz-mtls 4223
 
+      # SEC-M3b — CAN THE TOPOLOGY EVEN BE PROVISIONED? infra/nats/bootstrap-job.yaml
+      # is the Job that creates every stream, and it dialed nats://nats:4222 with no
+      # certs — so against the production broker it was refused exactly like the
+      # services, and the cluster could not create the streams those services then
+      # fail to find. It is not a Go client, so the M3a wire does not apply: it runs
+      # the `nats` CLI, which is not SPIFFE-aware and does ordinary DNS hostname
+      # verification (against a URI-SAN-only cert it fails outright). It needs a
+      # client SVID via NATS_CERT/KEY/CA and a URL that MATCHES a DNS SAN.
+      #
+      # This runs THE SCRIPT PRODUCTION APPLIES against the mTLS broker, so the
+      # bootstrap path is proven by execution rather than by reading the manifest —
+      # which is the only reason any of this was ever wrong.
+      - name: Bootstrap the topology over mTLS (the script production applies)
+        run: |
+          awk '/^  bootstrap\.sh: \|/{f=1;next} f&&/^---/{exit} f{sub(/^    /,"");print}' \
+            kanz/infra/nats/bootstrap-job.yaml > /tmp/bootstrap-mtls.sh
+          test -s /tmp/bootstrap-mtls.sh || { echo "could not extract bootstrap.sh"; exit 1; }
+          docker run --rm -i --network host -v /tmp/kanz-mtls:/c:ro \
+            -e NATS_URL=nats://localhost:4223 -e NATS_REPLICAS=1 \
+            -e NATS_CERT=/c/client.pem -e NATS_KEY=/c/client.key -e NATS_CA=/c/bundle.pem \
+            natsio/nats-box:0.14.5 sh -s < /tmp/bootstrap-mtls.sh
+
       - name: Test (race) — incl. arch + contract + Postgres + real-bus + M1 loop
         working-directory: kanz
         env:

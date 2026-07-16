@@ -22,6 +22,7 @@ import (
 
 	"github.com/kanz-eng/kanz/pkg/bus"
 	"github.com/kanz-eng/kanz/pkg/observability"
+	"github.com/kanz-eng/kanz/pkg/transport"
 	"github.com/kanz-eng/kanz/services/audit/internal/audit"
 	"github.com/kanz-eng/kanz/services/audit/internal/config"
 	"github.com/kanz-eng/kanz/services/audit/internal/server"
@@ -108,7 +109,15 @@ func runProjection(ctx context.Context, cfg config.Config, store audit.Store, re
 	busMetrics := bus.NewBusMetrics(obs.Registry)
 	projector := audit.NewProjector(store, time.Now)
 
-	client, err := bus.DialNATS(ctx, bus.NATSConfig{URL: cfg.NATSURL, Name: cfg.Source})
+	// SEC-M3: the production broker requires a client SVID; a nil TLSConfig is a
+	// plaintext client it refuses at the handshake.
+	mesh, err := transport.NewMesh(ctx, cfg.SPIFFESocket)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = mesh.Close() }()
+	logger.Info("bus transport", "mtls", mesh.Enabled())
+	client, err := bus.DialNATS(ctx, bus.NATSConfig{URL: cfg.NATSURL, Name: cfg.Source, TLSConfig: mesh.Client})
 	if err != nil {
 		return err
 	}

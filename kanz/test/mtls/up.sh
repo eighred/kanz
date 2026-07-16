@@ -61,25 +61,39 @@ rm -rf "$OUT" && mkdir -p "$OUT" && cd "$OUT"
 # SPIFFE requires of a leaf: digitalSignature key usage, client+server auth EKU,
 # CA:FALSE, and the SPIFFE ID as a URI SAN. go-spiffe's x509svid.Load REJECTS a
 # cert missing them, so these extensions are the contract, not decoration.
-svid_ext() {
+svid_ext() { # svid_ext <spiffe-id> [extra-sans]
   cat <<EOF
-subjectAltName=URI:$1
+subjectAltName=URI:$1${2:+,$2}
 keyUsage=critical,digitalSignature,keyEncipherment
 extendedKeyUsage=clientAuth,serverAuth
 basicConstraints=critical,CA:FALSE
 EOF
 }
 
+# The broker's SVID carries DNS SANs beside the URI SAN, because SPIRE's real one
+# does: infra/security/spire/registration.yaml sets dnsNameTemplates to
+# {{ .PodMeta.Name }} and {{ app }}.{{ namespace }}.svc, and says why — "DNS SANs
+# ease any library that still checks hostnames".
+#
+# That is not cosmetic here. A SPIFFE-aware Go client verifies the peer's SPIFFE
+# ID and skips hostname checks, so it never needed them. The `nats` CLI — which
+# is what infra/nats/bootstrap-job.yaml runs to PROVISION EVERY STREAM — is not
+# SPIFFE-aware and does ordinary DNS verification: against a URI-SAN-only cert it
+# fails with "certificate is not valid for any names". Minting these makes the
+# test broker match production and lets CI drive the real bootstrap script over
+# mTLS. `localhost` is the CI-local stand-in for the in-cluster service DNS.
+SERVER_SANS="DNS:nats-0,DNS:nats.kanz-messaging.svc,DNS:localhost"
+
 openssl req -x509 -newkey rsa:2048 -keyout ca.key -out bundle.pem -nodes \
   -subj "/CN=kanz-mtls-test-ca" -days 1 2>/dev/null
 
-mint() { # mint <name> <spiffe-id>
+mint() { # mint <name> <spiffe-id> [extra-sans]
   openssl req -newkey rsa:2048 -keyout "$1.key" -out "$1.csr" -nodes -subj "/CN=$1" 2>/dev/null
-  svid_ext "$2" > "$1.ext"
+  svid_ext "$2" "${3:-}" > "$1.ext"
   openssl x509 -req -in "$1.csr" -CA bundle.pem -CAkey ca.key -CAcreateserial \
     -out "$1.pem" -days 1 -extfile "$1.ext" 2>/dev/null
 }
-mint server "$SERVER_ID"
+mint server "$SERVER_ID" "$SERVER_SANS"
 mint client "$CLIENT_ID"
 # spiffe-helper writes the broker's SVID under these exact names (see the
 # nats-spiffe-helper ConfigMap); nats.conf reads them by path.
