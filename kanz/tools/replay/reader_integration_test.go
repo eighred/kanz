@@ -161,6 +161,10 @@ func drain(t *testing.T, ctx context.Context, r *replay.Reader) (ok, bad int) {
 		if errors.Is(err, io.EOF) {
 			return
 		}
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("Next: %v (reader did not terminate before the context expired)", err)
+			return
+		}
 		if err != nil && ev.Envelope == nil {
 			bad++
 			continue

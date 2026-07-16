@@ -17,9 +17,17 @@ import (
 
 // Range bounds a per-partition read. Exactly one of StartOffset / StartTime
 // may be set (zero values mean "earliest"); exactly one of EndOffset /
-// EndTime must be set so the read terminates in finite time without needing
-// a high-water-mark probe. EndOffset is inclusive; EndTime is exclusive,
+// EndTime must be set. EndOffset is inclusive; EndTime is exclusive,
 // matching the [start, end) convention of common windowing.
+//
+// Replay is a snapshot of history, not a tail. The reader probes each
+// partition's high-water mark once, at seek time, and stops at
+// min(EndOffset, HWM-1) regardless of which end bound was supplied: the
+// caller's end bound bounds the request, the high-water mark bounds
+// reality, and the read stops at whichever comes first. A read that
+// blocked waiting for a message beyond the end of the log at seek time
+// would be tailing, not replaying — and a DR restore that never returns
+// is useless.
 type Range struct {
 	StartOffset *int64
 	StartTime   *time.Time
@@ -265,6 +273,46 @@ func (r *Reader) readPartition(ctx context.Context, partition int) {
 		return
 	}
 
+	// Replay is a snapshot of history, not a tail: probe the high-water mark
+	// once, at seek time, and never read past it. A message that does not
+	// exist yet will never satisfy an EndOffset/EndTime filter, so without
+	// this cap a range whose bound lies beyond the log's current end blocks
+	// in FetchMessage until the caller's context dies — a hang, not a
+	// termination.
+	hwm, err := r.partitionHighWaterMark(ctx, partition)
+	if err != nil {
+		r.send(ctx, Event{Topic: r.cfg.Topic, Partition: partition}, fmt.Errorf("replay: probe high-water mark for partition %d: %w", partition, err))
+		return
+	}
+	if hwm == 0 {
+		return // partition has no messages at all; nothing to read.
+	}
+	endOffset := hwm - 1 // HWM is the offset of the next (unwritten) message.
+	if r.cfg.Range.EndOffset != nil && *r.cfg.Range.EndOffset < endOffset {
+		endOffset = *r.cfg.Range.EndOffset
+	}
+	if off := kr.Offset(); off >= 0 && off > endOffset {
+		return // the requested start is beyond every message this snapshot will ever see.
+	}
+
+	// Kafka message timestamps are millisecond-resolution on the wire. A
+	// caller's Range bound is an ordinary Go time.Time and routinely carries
+	// sub-millisecond precision (e.g. from time.Now()). A message written
+	// with a timestamp that exactly equals an exclusive EndTime round-trips
+	// through Kafka truncated to whole milliseconds and comes back strictly
+	// *before* the untruncated bound, so the exclusive check fails to
+	// exclude it. Truncate both bounds to the same resolution Kafka actually
+	// stores so equal-at-the-boundary compares equal, not before.
+	var startTime, endTime *time.Time
+	if r.cfg.Range.StartTime != nil {
+		t := r.cfg.Range.StartTime.Truncate(time.Millisecond)
+		startTime = &t
+	}
+	if r.cfg.Range.EndTime != nil {
+		t := r.cfg.Range.EndTime.Truncate(time.Millisecond)
+		endTime = &t
+	}
+
 	for {
 		m, err := kr.FetchMessage(ctx)
 		if err != nil {
@@ -274,41 +322,73 @@ func (r *Reader) readPartition(ctx context.Context, partition int) {
 			r.send(ctx, Event{Topic: r.cfg.Topic, Partition: partition}, fmt.Errorf("replay: fetch partition %d: %w", partition, err))
 			return
 		}
-		if r.cfg.Range.EndOffset != nil && m.Offset > *r.cfg.Range.EndOffset {
+		if m.Offset > endOffset {
 			return
 		}
-		if r.cfg.Range.EndTime != nil && !m.Time.Before(*r.cfg.Range.EndTime) {
-			return
-		}
+		atCap := m.Offset >= endOffset
 
-		ev := Event{
-			Topic:     m.Topic,
-			Partition: m.Partition,
-			Offset:    m.Offset,
-			KafkaTime: m.Time,
-			Key:       m.Key,
-		}
-		if len(m.Headers) > 0 {
-			ev.Headers = make(map[string]string, len(m.Headers))
-			for _, h := range m.Headers {
-				ev.Headers[h.Key] = string(h.Value)
+		switch {
+		case startTime != nil && m.Time.Before(*startTime):
+			// A seek is a positioning hint, not a guarantee — don't trust it
+			// blindly. Anything that lands before the requested start is
+			// dropped without stopping the read.
+		case endTime != nil && !m.Time.Before(*endTime):
+			// Reached the exclusive end of the time window.
+			return
+		default:
+			ev := Event{
+				Topic:     m.Topic,
+				Partition: m.Partition,
+				Offset:    m.Offset,
+				KafkaTime: m.Time,
+				Key:       m.Key,
+			}
+			if len(m.Headers) > 0 {
+				ev.Headers = make(map[string]string, len(m.Headers))
+				for _, h := range m.Headers {
+					ev.Headers[h.Key] = string(h.Value)
+				}
+			}
+			env, payload, uerr := bus.Unframe(m.Value)
+			if uerr != nil {
+				r.send(ctx, ev, &MalformedFrameError{
+					Topic: ev.Topic, Partition: ev.Partition, Offset: ev.Offset, Err: uerr,
+				})
+			} else {
+				ev.Envelope = env
+				ev.Payload = payload
+				r.send(ctx, ev, nil)
 			}
 		}
-		env, payload, uerr := bus.Unframe(m.Value)
-		if uerr != nil {
-			r.send(ctx, ev, &MalformedFrameError{
-				Topic: ev.Topic, Partition: ev.Partition, Offset: ev.Offset, Err: uerr,
-			})
-		} else {
-			ev.Envelope = env
-			ev.Payload = payload
-			r.send(ctx, ev, nil)
-		}
 
-		if r.cfg.Range.EndOffset != nil && m.Offset >= *r.cfg.Range.EndOffset {
+		if atCap {
 			return
 		}
 	}
+}
+
+// partitionHighWaterMark returns the offset of the next message that would
+// be written to partition — i.e. one past the last message currently on the
+// log. It dials the partition leader directly (the same ListOffsets seam
+// SetOffsetAt already uses) rather than hand-rolling a protocol call.
+func (r *Reader) partitionHighWaterMark(ctx context.Context, partition int) (int64, error) {
+	dialer := &kafka.Dialer{Timeout: r.cfg.PartitionDialTimeout}
+	var lastErr error
+	for _, broker := range r.cfg.Brokers {
+		conn, err := dialer.DialLeader(ctx, "tcp", broker, r.cfg.Topic, partition)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		hwm, err := conn.ReadLastOffset()
+		conn.Close()
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		return hwm, nil
+	}
+	return 0, fmt.Errorf("dialing all brokers, last error: %w", lastErr)
 }
 
 func (r *Reader) seekStart(ctx context.Context, kr *kafka.Reader) error {
