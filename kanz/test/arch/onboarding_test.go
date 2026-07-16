@@ -5,6 +5,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"testing"
 )
@@ -637,5 +638,225 @@ func TestProvisionTenantStorageDistinguishesCheckFailureFromRLSOff(t *testing.T)
 		t.Fatalf("provision-tenant.sh (STEP=storage) output contains \"FORCE RLS not active\" despite "+
 			"kubectl/psql having no reachable cluster to query — this is the exact misdiagnosis ONBOARD-M4 "+
 			"Task 1 retired: a check that never ran is not a verdict that RLS is off. Output:\n%s", output)
+	}
+}
+
+// serviceMigrationsRelPath maps a step-1 cluster name — as it appears on the
+// left of provision-tenant.sh's `case "$c" in kanz-risk) tables="..." ;;
+// kanz-books) tables="..." ;; esac` — to the migrations directory that is the
+// SOURCE of the FORCE-RLS table list for that cluster. These are the only two
+// clusters ONBOARD-M5 Task 1's storage step checks.
+//
+// This is deliberately the only place either name is written down for this
+// test: the expected table lists themselves are never hardcoded here (that
+// would be a THIRD copy of the same fact the migrations and the script
+// already each declare once) — they are parsed out of both sources below and
+// compared.
+var serviceMigrationsRelPath = map[string]string{
+	"kanz-risk":  "services/risk-engine/migrations",
+	"kanz-books": "services/accounting/migrations",
+}
+
+// scriptCaseTablesPattern matches one `kanz-risk) tables="..." ;;` /
+// `kanz-books) tables="..." ;;` arm of provision-tenant.sh's case statement.
+// It captures the service name and the space-separated table list literal,
+// without assuming which tables are in it — the whole point of this guard is
+// that the expected set comes from the migrations, not from a list an
+// engineer typed into this test.
+var scriptCaseTablesPattern = regexp.MustCompile(`(kanz-risk|kanz-books)\)\s+tables="([^"]*)"`)
+
+// scriptForceRLSTables parses provision-tenant.sh's step-1 case statement and
+// returns, per cluster name, the table list it declares. A cluster whose arm
+// is missing or whose tables="" is empty is absent from the returned map —
+// callers must treat that as a failure (see the non-vacuous requirement),
+// not silently skip the comparison.
+func scriptForceRLSTables(content string) map[string][]string {
+	out := map[string][]string{}
+	for _, m := range scriptCaseTablesPattern.FindAllStringSubmatch(content, -1) {
+		service, list := m[1], m[2]
+		if fields := strings.Fields(list); len(fields) > 0 {
+			out[service] = fields
+		}
+	}
+	return out
+}
+
+// forEachArrayForcePattern matches a `FOREACH t IN ARRAY ARRAY[...] ... END
+// LOOP` block — the form services/risk-engine/migrations/0002_tenant_rls.sql
+// and services/accounting/migrations/0001_ledger.sql both use to declare
+// their FORCE-RLS table sets, one array literal driving a dynamic
+// `EXECUTE format('ALTER TABLE %I FORCE ROW LEVEL SECURITY', t)` rather than
+// one static `ALTER TABLE x FORCE ROW LEVEL SECURITY` per table. Capture
+// group 1 is the array literal's contents; group 2 is the loop body, which
+// the caller must additionally confirm contains a FORCE ROW LEVEL SECURITY
+// statement — a FOREACH loop over the same array shape that never forces RLS
+// (e.g. one that only enables it) must not be credited as declaring these
+// tables FORCE-RLS.
+//
+// Non-greedy up to the nearest "END LOOP" rather than a whitespace class
+// matching arbitrary text unboundedly — each migration file here has exactly
+// one such loop, and stopping at the first END LOOP keeps this from
+// accidentally swallowing unrelated SQL that follows in the same file.
+var forEachArrayForcePattern = regexp.MustCompile(`(?is)FOREACH\s+\w+\s+IN\s+ARRAY\s+ARRAY\s*\[([^\]]+)\](.*?)END\s+LOOP`)
+
+// forceRLSStmtPattern matches the FORCE ROW LEVEL SECURITY clause itself,
+// used both to gate a FOREACH loop body (see forEachArrayForcePattern above)
+// and to find static per-table statements
+// (directForceAlterTablePattern below). `\s+` throughout, not a literal
+// single space: the actual SQL in this repo is `FORCE  ROW LEVEL SECURITY`
+// with TWO spaces (services/risk-engine/migrations/0002_tenant_rls.sql,
+// services/accounting/migrations/0001_ledger.sql and 0003_venue_account_scope.sql)
+// — a pattern hardcoding one space between FORCE and ROW would match none of
+// them and this guard would silently parse an empty set from every
+// migration, which the non-vacuous check exists to catch but a sloppier
+// regex should not have to rely on that safety net to be noticed.
+var forceRLSStmtPattern = regexp.MustCompile(`(?i)FORCE\s+ROW\s+LEVEL\s+SECURITY`)
+
+// directForceAlterTablePattern matches a static `ALTER TABLE x FORCE ROW
+// LEVEL SECURITY` naming its table directly, as opposed to the dynamic
+// `EXECUTE format(..., %I, t)` form inside a FOREACH loop. This is the form
+// services/accounting/migrations/0003_venue_account_scope.sql uses for
+// ledger_entries — a table ALSO declared via the FOREACH form in 0001. Its
+// %I placeholder does not match `\w+` (the `%` is not a word character), so
+// this pattern never double-matches the dynamic form's EXECUTE line.
+var directForceAlterTablePattern = regexp.MustCompile(`(?i)ALTER\s+TABLE\s+(\w+)\s+FORCE\s+ROW\s+LEVEL\s+SECURITY`)
+
+// arrayLiteralElemPattern extracts each single-quoted element of a
+// `ARRAY['a', 'b', 'c']` literal.
+var arrayLiteralElemPattern = regexp.MustCompile(`'([^']+)'`)
+
+// migrationForceRLSTables returns the set (deduplicated, sorted) of table
+// names that migrationsRelDir's *.sql files FORCE row-level security on,
+// across both the FOREACH-array form and the static ALTER TABLE form. A
+// table declared both ways (ledger_entries: FOREACH in 0001, static ALTER in
+// 0003) contributes exactly once — the guard against exactly the "same
+// table, counted twice, becomes a phantom mismatch" failure mode the brief
+// calls out.
+func migrationForceRLSTables(t *testing.T, root, migrationsRelDir string) []string {
+	t.Helper()
+	dir := filepath.Join(root, filepath.FromSlash(migrationsRelDir))
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("read dir %s: %v — this guard cannot verify the FORCE-RLS table set without the "+
+			"migrations that declare it", migrationsRelDir, err)
+	}
+
+	seen := map[string]bool{}
+	var tables []string
+	add := func(name string) {
+		if !seen[name] {
+			seen[name] = true
+			tables = append(tables, name)
+		}
+	}
+
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".sql") {
+			continue
+		}
+		b, err := os.ReadFile(filepath.Join(dir, e.Name()))
+		if err != nil {
+			t.Fatalf("read %s/%s: %v", migrationsRelDir, e.Name(), err)
+		}
+		content := strings.ReplaceAll(string(b), "\r\n", "\n")
+
+		for _, m := range forEachArrayForcePattern.FindAllStringSubmatch(content, -1) {
+			arrayLiteral, body := m[1], m[2]
+			if !forceRLSStmtPattern.MatchString(body) {
+				continue // a FOREACH ARRAY[...] loop that never forces RLS isn't this declaration
+			}
+			for _, em := range arrayLiteralElemPattern.FindAllStringSubmatch(arrayLiteral, -1) {
+				add(em[1])
+			}
+		}
+		for _, m := range directForceAlterTablePattern.FindAllStringSubmatch(content, -1) {
+			add(m[1])
+		}
+	}
+
+	sort.Strings(tables)
+	return tables
+}
+
+// TestProvisionTenantStorageTablesMatchMigrations guards against the exact
+// defect family this whole epic is about: Task 1 (ONBOARD-M5) made step 1
+// name its tenant-scoped tables explicitly instead of a vacuous `limit 1` —
+// but it hardcoded those names in provision-tenant.sh's case statement, and
+// the migrations that actually FORCE row-level security on those tables
+// declare the same fact a second time, independently. Nothing compared the
+// two. A migration adding (or renaming, or dropping) a tenant-scoped table
+// would leave step 1 silently certifying a stale set: it would keep passing,
+// keep printing that isolation is active, while a real table gained or lost
+// FORCE RLS with no test failing either way. That is the identical shape of
+// ONBOARD-M1 (two scripts disagreeing on the broker), SEC-M3 (code and
+// broker config disagreeing), and SEC-M4 (3 of 22 Dockerfiles bumped): one
+// fact, two independent copies, nothing checking they agree.
+//
+// Both sides are parsed from source — never hardcoded here — so this test
+// itself cannot become a third, independently-drifting copy of the list.
+func TestProvisionTenantStorageTablesMatchMigrations(t *testing.T) {
+	root := moduleRoot(t)
+	scriptContent := readOnboardingScript(t, root, provisionTenantRelPath)
+	scriptTables := scriptForceRLSTables(scriptContent)
+
+	services := make([]string, 0, len(serviceMigrationsRelPath))
+	for service := range serviceMigrationsRelPath {
+		services = append(services, service)
+	}
+	sort.Strings(services)
+
+	for _, service := range services {
+		migrationsRelDir := serviceMigrationsRelPath[service]
+
+		script := scriptTables[service]
+		if len(script) == 0 {
+			t.Fatalf("%s declares no (or an empty) tables= list for case %q — step 1 cannot verify "+
+				"isolation for a cluster it names no tables for; this is a FAILURE, not a vacuous pass, "+
+				"because an empty expected set would make any comparison trivially satisfied",
+				provisionTenantRelPath, service)
+		}
+
+		migrated := migrationForceRLSTables(t, root, migrationsRelDir)
+		if len(migrated) == 0 {
+			t.Fatalf("no FORCE ROW LEVEL SECURITY table found under %s — either the migrations that "+
+				"force RLS for %q moved/changed shape and this parser no longer finds them, or MT-01d "+
+				"was never actually deployed there; either way this is a FAILURE, not a vacuous pass, "+
+				"because an empty migrated set would make step 1's check trivially satisfiable no "+
+				"matter what it names", migrationsRelDir, service)
+		}
+
+		scriptSet := map[string]bool{}
+		for _, tb := range script {
+			scriptSet[tb] = true
+		}
+		migSet := map[string]bool{}
+		for _, tb := range migrated {
+			migSet[tb] = true
+		}
+
+		var onlyInScript, onlyInMigrations []string
+		for tb := range scriptSet {
+			if !migSet[tb] {
+				onlyInScript = append(onlyInScript, tb)
+			}
+		}
+		for tb := range migSet {
+			if !scriptSet[tb] {
+				onlyInMigrations = append(onlyInMigrations, tb)
+			}
+		}
+		sort.Strings(onlyInScript)
+		sort.Strings(onlyInMigrations)
+
+		if len(onlyInScript) > 0 || len(onlyInMigrations) > 0 {
+			t.Fatalf("case %q FORCE-RLS table sets disagree between %s (tables=%v) and %s (FORCE "+
+				"RLS on %v): script names %v that the migrations do not FORCE (step 1 is checking a "+
+				"stale/wrong table) and the migrations FORCE %v that the script never checks (a real "+
+				"tenant-scoped table step 1 would silently NOT verify) — update whichever side is "+
+				"behind so step 1 certifies exactly the tables MT-01d actually forces RLS on, no more "+
+				"and no less",
+				service, provisionTenantRelPath, script, migrationsRelDir, migrated,
+				onlyInScript, onlyInMigrations)
+		}
 	}
 }
