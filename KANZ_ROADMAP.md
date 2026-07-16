@@ -4,7 +4,9 @@
 >
 > **Discipline (per `/forge-tasks`):** every item here is grounded in either (a) a verified in-repo gap, or (b) a boundary already documented in `KANZ_TASKS.md` PATH TO PARITY behind a delivered seam. Nothing here is a speculative feature. **Confidence decays over the horizon:** Year 1 is verifiable against the code today; Years 2–3 are boundary-gated themes — each must be re-scanned against ground truth and split into 1–3 day tasks *at the point its enabling boundary lands*, not before. The codebase is always the ground truth; when a roadmap line and the code disagree, the code wins and the line is discarded.
 >
-> Last reconciled 2026-07-11.
+> Last reconciled 2026-07-16.
+>
+> **Reconciliation note (2026-07-16, forge pass).** Every non-gated line in Year 1 — both tracks — is now **DELIVERED**, verified against the code and marked inline below. This file had gone stale in the exact way its own discipline warns about: it still directed the reader to a "verified buildable tranche — do first … the only tranche fully executable on this box today" whose three items (RISK-12, REG-02, WIRE-03) had all shipped, and to a Binance healing-seam port that had also shipped. A roadmap that points at completed work does not merely waste a pass — it *manufactures* the ground-truth-vs-roadmap disagreement rule 5 exists to resolve. **What remains on this roadmap is gated, without exception:** credentials, licensed data, real infra, a vendor account, or a human/ops loop. The one unblocked lever is a DECISION, not engineering — see SOV-05 in `KANZ_TASKS.md`: until the estate is declared k8s-managed (delivered) or SSH-pushed (new), SOV-03/04/05 cannot be planned, and nothing else in the sovereign control plane is buildable.
 
 ---
 
@@ -22,7 +24,7 @@ This roadmap now has **two tracks**. The **execution track** (below, Year 1) is 
 
 A real analytics workflow executes start-to-finish today on in-repo infra: `./start.sh` boots the NATS/Kafka/Postgres spine + risk-engine + api-gateway, seeds a portfolio through the production bus, and serves live exposure/measures/scenario queries through the gateway. Accounting NAV/cash, regulatory signing, FX folding, and the copilot governed-read path are genuinely wired through composition roots. **The architecture, seams, and composition-root wiring are done and internally consistent** — and now double as the pre-trade risk / post-trade valuation substrate under the execution loop.
 
-Three classes of substrate work remain: (1) a small set of **verified non-gated in-repo gaps** — chiefly a running engine serving a placeholder VaR; (2) **binding the credential/infra/human boundaries** already seamed in PATH TO PARITY; (3) **breadth and operational maturity** once the platform is live.
+Two classes of substrate work remain (2026-07-16): (1) **binding the credential/infra/human boundaries** already seamed in PATH TO PARITY; (2) **breadth and operational maturity** once the platform is live. The third class this section used to name — *verified non-gated in-repo gaps, chiefly a running engine serving a placeholder VaR* — is **closed**: RISK-12 retired the placeholder from the serving path, and no non-gated substrate gap has survived verification since.
 
 ---
 
@@ -32,7 +34,7 @@ Three classes of substrate work remain: (1) a small set of **verified non-gated 
 
 ### H1 — Operational parity + live venue bring-up
 
-- **Binance healing-seam parity.** Port the In-Flight Certainty watchdog (M4c) to the Binance reconciler via the shared, untagged `CloseIntent`/`PendingCloses` seam — a trivial follow-on, no new seam. Then wire the OMS venue-close dispatch path to `Track` closes so the registry has a live writer end to end.
+- **Binance healing-seam parity. ✅ DONE** (verified 2026-07-16). The In-Flight Certainty watchdog is ported to the Binance reconciler over the shared untagged `CloseIntent`/`PendingCloses` seam (`binance_healing_test.go` beside `okx_healing_test.go`), and the OMS Tracks a close *before* it dispatches, so the registry has a live writer end to end.
 - **Live venue depth `DepthSource`s (EXEC-M5c).** Binance/OKX L2-depth websockets behind the existing per-venue build tags, replacing the deterministic sim on the live path; the fold/snapshot pipeline is unchanged. *(exchange creds-gated; testnet first)*
 - **Testnet → production key rotation.** Exercise `TEST_BINANCE_TESTNET` / `TEST_OKX_TESTNET` signed round-trips, then bind production keys via mock-Vault `*_FILE` mounts locked to the Tokyo/London egress IPs (the `ErrEgressDenied` boundary is already in place). *(creds/infra-gated)*
 
@@ -52,8 +54,8 @@ Three classes of substrate work remain: (1) a small set of **verified non-gated 
 
 ### H1 — Retire the verified in-repo gaps, then bind the first boundaries
 
-- **Verified buildable tranche (no credentials) — do first.** `RISK-12` (register real historical VaR at the composition root; retire the 1%×gross placeholder), `REG-02` (durable `LinkSink` for the regulatory ChainSigner), `WIRE-03` (surface the durable-log fold position into `query.v1 source_position`). All three sit behind delivered, tested seams — see `KANZ_TASKS.md` TODO. **This is the only tranche fully executable on this box today.**
-- **Monte-Carlo VaR alongside historical.** `MODEL-01e` is anticipated in `var/historical.go`; once `RISK-12` lands the provider seam, add the Monte-Carlo model over the same `compute.BindReturns` path (deterministic given seed + inputs, for replay).
+- **Verified buildable tranche (no credentials). ✅ ALL THREE DONE** (verified 2026-07-16; see `KANZ_TASKS.md` DONE). `RISK-12` registered data-driven historical VaR at the risk-engine composition root — **the 1%×gross placeholder no longer serves** where `RISK_ENGINE_MARKETDATA_DATABASE_URL` is set, and stands only as the honest no-market-data fallback. `REG-02` made the regulatory hash-chain durable across restarts (`internal/audit/linkstore`). `WIRE-03` surfaced the fold position into `query.v1 source_position`, completing the copilot citation seed end to end.
+- **Monte-Carlo VaR alongside historical.** `MODEL-01e` is anticipated in `var/historical.go`, and `RISK-12` has now landed the provider seam it waited on — so this is **unblocked and buildable**. It is nonetheless *feature expansion* (a second VaR model beside a working, data-driven one), which the `engineering-standard` ranks last and which no live requirement is asking for. **Promote it only when a mandate, a regulator, or a measured gap in the historical model asks for it** — not because the seam exists.
 
 ### H2 — Bind the credential/infra/human boundaries (PATH TO PARITY M2–M6)
 
