@@ -12,13 +12,30 @@ _**Active direction (2026-07): the Automated Fund-Management & Multi-Exchange Ex
 
 _**Two tracks completed 2026-07-15:** the **data-durability foundation** (DATA-M1 archiver + DATA-M2 lake-sink — history now lands permanently in the lakehouse, past the 30-day Kafka retention) and the **optimizer** (RISK-M1 tail measures; RISK-M2a HRP + RISK-M2b Black-Litterman + OPT-HARDEN input validation — spanning mean-variance/min-variance/max-Sharpe/risk-parity/HRP allocation, BL posterior returns, and a PSD/body-cap hardening pass). Both tracks are complete (DATA-M3 closed the archiver consume↔topic contract; see DONE). The next major direction lives in `KANZ_ROADMAP.md` — promote a line from there to a decomposed TODO only after ground-truth verification when its turn comes._
 
-**ONBOARD-M6 · The repo does not know what its own databases are called, and `cluster.yaml` contradicts itself.** _(Forged 2026-07-16 by ONBOARD-M5's review, which blocked M5 for guessing a database name. Infra; the manifest half is ungated.)_
+**ONBOARD-M6 · The repo gives FIVE answers for its own database names; the truth is in Vault.** _(Forged 2026-07-16 by ONBOARD-M5's review. **Lead decision: resolve from the sealed DSN first — correct, and it is why this is now BLOCKED ON VAULT ACCESS, not on engineering.**)_
 
-**Four different answers, no agreement.** `infra/dr/postgres/README.md` and `cluster.yaml`'s **own comment** both say *"one database per service"* (accounting/IBOR ledger, alternatives/fund journal, wealth/household book, datamaster/golden records) — while **`cluster.yaml`'s spec declares no `bootstrap`/`initdb` block**, so CNPG creates exactly **one** database, `app`. **Nothing anywhere creates per-service databases** — verified: no `postInitSQL`, no `initdb`, no `CREATE DATABASE`, no `createdb` in `infra/` at all. Meanwhile `dev/docker-compose.yml` uses database `kanz` and CI's `TEST_POSTGRES_URL` uses `kanzapp`. The real DSNs are sealed secrets. **So a manifest contradicts the comment printed beside it, and the deployed truth is unreadable from the repo.**
+**Traced as far as the repo can go (2026-07-16).** The DSNs are mounted by `infra/security/secrets/secretproviderclass.yaml` from Vault: **`secretPath: kv/data/kanz/<service>`, `secretKey: dsn`** (and `migrate_dsn` for the migrate initContainer). The **values live only in Vault** — no seed, no template, no fixture in-repo. **One command, from a box with Vault access, ends this:**
 
-**Why it matters beyond tidiness:** every service's schema is applied by a `kanz-migrate` initContainer against its own sealed DSN, so if CNPG really only creates `app`, either every service's tables share one database (and the README/comment are a lie the next engineer inherits), or the databases are created by something outside this repo (and the manifest is not the source of truth it appears to be). **Both answers change what DR restores** — the README's whole subject.
+```
+vault kv get -field=dsn kv/kanz/risk-engine     # the kanz-risk database name
+vault kv get -field=dsn kv/kanz/accounting      # the kanz-books database name
+```
 
-**This is the same one-fact-two-places family** as ONBOARD-M1 (two scripts disagreeing on the broker), SEC-M3 (code vs broker config), SEC-M4 (3 of 22 Dockerfiles): a fact in two places with nothing comparing them. Here it is a fact in **four**. **Resolve against the sealed DSN or `kanz-migrate`'s secret, then make the manifest and the prose agree** — and if `app` is shared, the README and the `cluster.yaml` comment are the stale copy and must be corrected, not the manifest.
+**The five answers, all in-repo, none authoritative:**
+
+| source | says the database is | note |
+|---|---|---|
+| `infra/dr/postgres/README.md` + `cluster.yaml`'s own comment | **one per service** (accounting/alternatives/wealth/datamaster) | for `kanz-books` only |
+| `infra/dr/postgres/cluster.yaml` **spec** | **`app`** | no `bootstrap` block ⇒ CNPG default; **nothing** in `infra/` creates any other database |
+| `infra/security/secrets/README.md:64` | **`risk`** | `postgres://risk:…@**pg.kanz-data.svc**/risk` — and that host is not CNPG's `kanz-risk-rw` either |
+| `dev/docker-compose.yml` | **`kanz`** | dev rig |
+| CI `TEST_POSTGRES_URL` | **`kanzapp`** | CI rig |
+
+**What is NOT in dispute:** `kanz-risk` and `kanz-registry` are single-service (the DR README's own table), so one database is right for them and there is no contradiction — the per-service claim is scoped to **`kanz-books`** alone, which hosts four services. Their tables do **not** collide (`ledger_entries`/`ledger_snapshots`, `fund_events`, `households`, `golden_records`/`exceptions`/`exception_overrides`), so a shared `app` would *work* — it just is not what the repo says, and DR restores whatever is actually there.
+
+**This vindicates ONBOARD-M5's refusal:** a script that guessed a database name would be guessing among five, and would FATAL *"MT-01d not deployed"* on a healthy cluster. M5 refuses and names the secret to read — which is the correct behaviour precisely because this is unresolved.
+
+**Once the DSN is known:** make the manifest and the prose agree with it. If it is `app`, the DR README and `cluster.yaml`'s comment are the stale copy and must be corrected — DR's whole subject is what gets restored, and it currently describes databases that do not exist. If it is per-service, `cluster.yaml` is incomplete and must create them (CNPG `managed.databases` / `bootstrap.initdb`). **Also unexplained: `oms`, `tv-sync` and `venue-*` have RLS'd migrations and `*-db` SecretProviderClasses but appear in NO cluster in the DR plan** — worth resolving in the same pass, since it decides whether the order store is in the backup set at all.
 
 **Documented, deferred (2):** **(1) Redis is a single instance** — EXEC-M22 removed the PLANNED outage and converted the unplanned one into a fail-closed refusal (a 503 the sender can retry, never a double trade). Redis HA is the remaining half, and it is infra-gated. **(2)** a pre-existing race in the Postgres TEST harness — the `accounting`, `alternatives`, `datamaster` and `wealth` suites apply their migrations into the `public` schema concurrently, and migration `0002`'s DO-block races itself (`tuple concurrently updated`). It fails a DIFFERENT test on each run, reproduces at baseline, and `go test -p 1` is green. The fix is a schema per suite, as `oms/internal/position`, `oms/internal/order` and `tv-sync/internal/projection` already do (verified 2026-07-15). A test-harness defect, not a production one — and test-only work, which `engineering-standard` excludes from forging; recorded here, not promoted.
 
