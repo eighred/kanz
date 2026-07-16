@@ -353,3 +353,145 @@ func TestTenantctlOnboardRefusesWithoutPrerequisites(t *testing.T) {
 			"the tenant as onboarded while required prerequisites are missing. Output:\n%s", output)
 	}
 }
+
+// verifyProbeTenant is a second, distinct probe name from probeTenant above —
+// this test exercises provision-tenant.sh's verify step, not tenantctl.sh's
+// onboard step, and giving it its own constant keeps a future failure
+// message from implying the two runtime guards share a tenant or a script.
+const verifyProbeTenant = "onboard-m2-verify-gate-probe"
+
+// TestProvisionTenantVerifyRefusesWithoutBearerTokens is the RUNTIME
+// counterpart to ONBOARD-M2 Task 1, in the same spirit as
+// TestTenantctlOnboardRefusesWithoutPrerequisites above: a static guard can
+// only confirm the verify step's shell text PARSES; it cannot see that the
+// step LIES at runtime. That is exactly what this gate did for the entire
+// life of the project — before Task 1, the "verify cross-tenant isolation"
+// step sent no bearer token at all and read an X-Kanz-Tenant header the
+// gateway never even looks at, so every run printed "isolation holds"
+// unconditionally. Nobody noticed, because no tenant had ever been
+// onboarded through this path. A comment saying "this step now checks real
+// tokens" is exactly as capable of silently rotting back to that state as
+// the composition Task 1 fixed in TestProvisionTenantInvokesTenantctl above;
+// only executing the script proves the refusal is real.
+//
+// This test runs `sh provision-tenant.sh` with STEP=verify and a
+// deliberately bare environment carrying neither VERIFY_TOKEN nor
+// VERIFY_TOKEN_OTHER, and pins three properties of verify_preflight (see the
+// script's header comment and verify_preflight function):
+//
+//  1. it exits non-zero, and specifically 2 (REFUSED) — not some other
+//     non-zero code that would mean the script failed for the WRONG reason
+//     (127 "no such file", a shell parse error, ...), which would prove
+//     nothing about the gate itself;
+//  2. the output names BOTH missing prerequisites — VERIFY_TOKEN and
+//     VERIFY_TOKEN_OTHER — so a regression that checks only one of the two
+//     tokens still fails this test; and
+//  3. the string "isolation holds" NEVER appears — that is the literal lie
+//     this gate existed to stop telling: the pre-Task-1 script printed
+//     exactly that line after probing with no identity and reading a 401 as
+//     success.
+//
+// (3) is the load-bearing assertion, mirroring the "onboarded" check on
+// tenantctl.sh above: (1) and (2) establish the script ran and refused for
+// the documented reason, but (3) is what fails a future regression that
+// reintroduces ANY path to "isolation holds" printing without both tokens
+// present — whether by neutering verify_preflight, moving its call after
+// the curl probes, or reintroducing the old unauthenticated-401-as-pass
+// logic.
+//
+// STEP=verify gates off steps 1-4 entirely (see the step() helper), so a
+// passing run of this test never reaches the storage check, tenantctl.sh,
+// the policy/seed steps, or (within the verify step itself) the curl calls —
+// verify_preflight runs and exits 2 before any of GW/curl is touched. That
+// property depends on verify_preflight actually running first inside the
+// verify step, which is exactly what this test verifies; it is not
+// separately enforced by skipping when a cluster or gateway is unreachable —
+// doing that would make the guard vacuous on any CI box without one, which
+// is the opposite of what this test is for.
+//
+// Belt-and-suspenders on top of that, matching the tenantctl.sh guard above:
+// KUBECONFIG is pinned to a path inside t.TempDir() that is never created.
+// This step never calls kubectl at all (steps 1 and 2, the only ones that
+// would, are STEP-gated off), so this is defense in depth against a future
+// regression that moves the verify_preflight call, not a property this
+// specific step currently depends on — but the tenantctl.sh guard's history
+// (a real kind-kanz-dryrun cluster was mutated by accident once already,
+// because bash recomputes HOME independent of the env passed to it) is
+// reason enough to pin it here unconditionally rather than reason about
+// whether the current script needs it.
+func TestProvisionTenantVerifyRefusesWithoutBearerTokens(t *testing.T) {
+	shPath, err := exec.LookPath("sh")
+	if err != nil {
+		t.Skipf("sh not on PATH (%v) — this guard runs provision-tenant.sh for real and has no other way "+
+			"to do that; install sh (git-bash on Windows, or any POSIX sh on Linux/macOS CI) to enable it", err)
+	}
+
+	root := moduleRoot(t)
+	readOnboardingScript(t, root, provisionTenantRelPath) // must exist and be non-empty before we bother invoking it
+
+	// Built explicitly, never os.Environ() — an engineer who happens to have
+	// VERIFY_TOKEN or VERIFY_TOKEN_OTHER exported in their own shell would
+	// silently make verify_preflight succeed here, and this test would stop
+	// proving anything about a bare environment. Four variables are passed:
+	//   - PATH, so sh can find its own shell builtins/coreutils.
+	//   - TENANT, set to an obviously-fake probe value.
+	//   - STEP=verify, so only step 5 runs — steps 1-4 (storage check,
+	//     tenantctl.sh, policy, seed) never execute.
+	//   - KUBECONFIG, pinned to a path inside t.TempDir() that is never
+	//     created — see the doc comment above for why this is pinned even
+	//     though this step does not currently call kubectl.
+	// VERIFY_TOKEN and VERIFY_TOKEN_OTHER are simply absent, which is the
+	// "deliberately bare environment" this test is required to exercise.
+	unreachableKubeconfig := filepath.Join(t.TempDir(), "kubeconfig-does-not-exist")
+	cmd := exec.Command(shPath, provisionTenantRelPath)
+	cmd.Dir = root
+	cmd.Env = []string{
+		"PATH=" + os.Getenv("PATH"),
+		"TENANT=" + verifyProbeTenant,
+		"STEP=verify",
+		"KUBECONFIG=" + unreachableKubeconfig,
+	}
+	out, err := cmd.CombinedOutput()
+	output := string(out)
+
+	if err == nil {
+		t.Fatalf("provision-tenant.sh (STEP=verify) exited 0 against an environment with no VERIFY_TOKEN "+
+			"or VERIFY_TOKEN_OTHER — Task 1's verify_preflight must REFUSE when either bearer token is "+
+			"unset, never silently proceed to probe or declare isolation held. Output:\n%s", output)
+	}
+	exitErr, ok := err.(*exec.ExitError)
+	if !ok {
+		t.Fatalf("provision-tenant.sh (STEP=verify) did not even start (%v) — this proves nothing about "+
+			"verify_preflight; fix the invocation (sh %q, dir %q) rather than the script",
+			err, provisionTenantRelPath, cmd.Dir)
+	}
+	if exitErr.ExitCode() != 2 {
+		t.Fatalf("provision-tenant.sh (STEP=verify) exited %d, want 2 (REFUSED) — any other non-zero code "+
+			"(1 FATAL from a curl probe that should never have run, 127 'no such file', ...) means the "+
+			"script failed for the WRONG reason, not because verify_preflight refused a bare environment. "+
+			"Output:\n%s", exitErr.ExitCode(), output)
+	}
+
+	wantSubstrings := []string{
+		"REFUSED: cannot verify cross-tenant isolation for '" + verifyProbeTenant + "'",
+		"VERIFY_TOKEN (bearer token for tenant",
+		"VERIFY_TOKEN_OTHER (bearer token for any OTHER existing tenant",
+	}
+	for _, want := range wantSubstrings {
+		if !strings.Contains(output, want) {
+			t.Fatalf("provision-tenant.sh (STEP=verify) output missing %q — a bare environment (no "+
+				"VERIFY_TOKEN, no VERIFY_TOKEN_OTHER) must name BOTH as missing prerequisites before "+
+				"refusing. Output:\n%s", want, output)
+		}
+	}
+
+	// The load-bearing assertion (see doc comment above): no matter how
+	// verify_preflight regresses, "isolation holds" reappearing in the
+	// output IS the pre-Task-1 defect — the gate proving nothing and lying
+	// about it — full stop.
+	if strings.Contains(output, "isolation holds") {
+		t.Fatalf("provision-tenant.sh (STEP=verify) output contains \"isolation holds\" despite a "+
+			"non-zero, REFUSED exit — this is the exact lie ONBOARD-M2 Task 1 fixed: the verify step "+
+			"must never claim isolation holds when it never even ran a probe. Output:\n%s", output)
+	}
+}
