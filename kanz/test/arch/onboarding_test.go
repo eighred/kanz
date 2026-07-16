@@ -495,3 +495,147 @@ func TestProvisionTenantVerifyRefusesWithoutBearerTokens(t *testing.T) {
 			"must never claim isolation holds when it never even ran a probe. Output:\n%s", output)
 	}
 }
+
+// storageProbeTenant is a third, distinct probe name — this test exercises
+// provision-tenant.sh's storage step (STEP=storage), not tenantctl.sh's
+// onboard step or the verify step's bearer-token gate, and giving it its own
+// constant keeps a future failure message from implying this guard shares a
+// tenant or a script with either of the other two runtime guards.
+const storageProbeTenant = "onboard-m4-storage-diagnosis-probe"
+
+// TestProvisionTenantStorageDistinguishesCheckFailureFromRLSOff is the RUNTIME
+// counterpart to ONBOARD-M4 Task 1, in the same spirit as the two runtime
+// guards above: a static guard can confirm the storage step's shell text
+// captures `out` instead of discarding it into `>/dev/null`, but it cannot see
+// that `psql -tAc` exits 0 on a query that legitimately returns zero rows —
+// that is a runtime fact about a program this repo does not own. Before
+// Task 1, the storage step piped that query straight to `>/dev/null` and
+// branched on `$? ` alone, so "kubectl/psql could not even run" and "the
+// query ran fine and FORCE RLS is off" were the exact same observable event:
+// both exit 0, so both PASSED. A tenant provisioned against an unreachable
+// database or pod would have sailed through step 1 believing RLS was active
+// when nothing had actually been checked.
+//
+// This test executes `sh provision-tenant.sh` with STEP=storage, TENANT set
+// to an obviously-fake probe, and KUBECONFIG pinned to a path that cannot
+// exist — so `kubectl exec` (and therefore `psql`) cannot run at all. That is
+// deliberately the "check could not be run" branch (line 142), not the "ran
+// fine, found nothing" branch (line 143): this box has no live kanz-risk/
+// kanz-books pods to query in the first place, so the only way to reach step
+// 1 without a real cluster is to make the check itself fail to execute, which
+// is exactly the failure mode Task 1 exists to separate from "RLS is off".
+//
+// Pinned properties:
+//
+//  1. non-zero exit — specifically 1, matching the storage step's `exit 1`
+//     on the could-not-run branch (line 142). Any other exit code would mean
+//     this test reached a different failure path than the one Task 1 fixed.
+//  2. the output says the RLS check could not be run — Task 1's diagnostic
+//     text distinguishing "could not run" from "the check failed".
+//  3. the output does NOT contain "FORCE RLS not active" — that is the
+//     misdiagnosis Task 1 retired: a pre-Task-1 script (or a regression that
+//     restores `>/dev/null` piping) cannot reach line 143's message from a
+//     kubectl/psql failure, because line 143 only runs after `out` is
+//     successfully captured. Its presence here would mean the could-not-run
+//     branch stopped being taken and the vacuous form is back.
+//
+// (3) is the load-bearing assertion, mirroring "onboarded" and "isolation
+// holds" in the two guards above: (1) and (2) establish the script ran and
+// took the could-not-run branch, but (3) is what fails a future regression
+// that reintroduces ANY path from a kubectl/psql failure to the RLS-off
+// message — whether by restoring `out="$(... )" >/dev/null` and collapsing
+// both branches back into one `||`, or by any other means of losing the
+// captured output.
+//
+// KUBECONFIG is pinned to a path inside t.TempDir() that is never created,
+// exactly as in the two runtime guards above, and for the identical reason: a
+// real kind cluster (kind-kanz-dryrun) is reachable from this box and is the
+// user's, and an earlier agent mutated it by accident proving out a mutation
+// of the tenantctl.sh guard, because bash recomputes HOME at startup
+// independent of whatever environment its parent process passed it, so
+// kubectl found that HOME's default kubeconfig despite an env that never
+// included it. This guard never reaches namespace/ServiceAccount/Job
+// creation the way that one could — `kubectl exec` against a pinned,
+// nonexistent KUBECONFIG fails on `Stat` before dialing anything — but the
+// pin costs nothing and removes any dependence on this box's ambient
+// kubeconfig for a passing result. No kubectl-skip-guard is added alongside
+// it: skipping when kubectl is unreachable would make this test vacuous on
+// any CI box without one, which is the opposite of what it is for — the
+// KUBECONFIG pin is what keeps the test deterministic AND off the real
+// cluster, not a substitute for actually running the script.
+func TestProvisionTenantStorageDistinguishesCheckFailureFromRLSOff(t *testing.T) {
+	shPath, err := exec.LookPath("sh")
+	if err != nil {
+		t.Skipf("sh not on PATH (%v) — this guard runs provision-tenant.sh for real and has no other way "+
+			"to do that; install sh (git-bash on Windows, or any POSIX sh on Linux/macOS CI) to enable it", err)
+	}
+
+	root := moduleRoot(t)
+	readOnboardingScript(t, root, provisionTenantRelPath) // must exist and be non-empty before we bother invoking it
+
+	// Built explicitly, never os.Environ() — see the identical rationale on
+	// the two runtime guards above: an engineer's own shell could carry state
+	// (e.g. an already-exported KUBECONFIG pointing at a real cluster) that
+	// would change what this test actually exercises. Four variables are
+	// passed:
+	//   - PATH, so sh can find its own shell builtins/coreutils, and so
+	//     whatever `kubectl` this box does or doesn't have on PATH is free to
+	//     vary machine-to-machine.
+	//   - TENANT, set to an obviously-fake probe value.
+	//   - STEP=storage, so only step 1 runs — steps 2-5 (tenantctl.sh,
+	//     policy, seed, verify) never execute.
+	//   - KUBECONFIG, pinned to a path inside t.TempDir() that is never
+	//     created, so `kubectl exec` cannot reach any cluster, real or
+	//     otherwise — see the doc comment above.
+	unreachableKubeconfig := filepath.Join(t.TempDir(), "kubeconfig-does-not-exist")
+	cmd := exec.Command(shPath, provisionTenantRelPath)
+	cmd.Dir = root
+	cmd.Env = []string{
+		"PATH=" + os.Getenv("PATH"),
+		"TENANT=" + storageProbeTenant,
+		"STEP=storage",
+		"KUBECONFIG=" + unreachableKubeconfig,
+	}
+	out, err := cmd.CombinedOutput()
+	output := string(out)
+
+	if err == nil {
+		t.Fatalf("provision-tenant.sh (STEP=storage) exited 0 with KUBECONFIG pinned to a nonexistent "+
+			"path — kubectl exec cannot possibly have succeeded, so the RLS check could not have run; "+
+			"the storage step must FATAL when the check itself fails to execute, never exit 0. Output:\n%s",
+			output)
+	}
+	exitErr, ok := err.(*exec.ExitError)
+	if !ok {
+		t.Fatalf("provision-tenant.sh (STEP=storage) did not even start (%v) — this proves nothing about "+
+			"the storage step's diagnosis; fix the invocation (sh %q, dir %q) rather than the script",
+			err, provisionTenantRelPath, cmd.Dir)
+	}
+	if exitErr.ExitCode() != 1 {
+		t.Fatalf("provision-tenant.sh (STEP=storage) exited %d, want 1 (the storage step's could-not-run "+
+			"FATAL) — any other non-zero code (127 'no such file', ...) means this test failed to start "+
+			"or reach the check for the WRONG reason, not because kubectl/psql failed to run against a "+
+			"pinned, nonexistent KUBECONFIG. Output:\n%s", exitErr.ExitCode(), output)
+	}
+
+	if !strings.Contains(output, "could not run the RLS check") {
+		t.Fatalf("provision-tenant.sh (STEP=storage) output missing \"could not run the RLS check\" — "+
+			"with kubectl unable to reach any cluster (KUBECONFIG pinned to a nonexistent path), Task 1's "+
+			"storage step must say the CHECK could not be run, not stay silent about why it failed or "+
+			"claim a verdict it never reached. Output:\n%s", output)
+	}
+
+	// The load-bearing assertion (see doc comment above): no matter how the
+	// storage step regresses, "FORCE RLS not active" reappearing in output
+	// alongside a kubectl/psql failure IS the pre-Task-1 defect — line 143's
+	// message can only be reached today after `out` is successfully
+	// captured, so its presence here means a regression (most plausibly
+	// restoring `out="$(...)" >/dev/null` and collapsing both branches back
+	// into the single vacuous `||`) has reintroduced the exact misdiagnosis
+	// Task 1 retired: treating "the check could not run" as "RLS is off".
+	if strings.Contains(output, "FORCE RLS not active") {
+		t.Fatalf("provision-tenant.sh (STEP=storage) output contains \"FORCE RLS not active\" despite "+
+			"kubectl/psql having no reachable cluster to query — this is the exact misdiagnosis ONBOARD-M4 "+
+			"Task 1 retired: a check that never ran is not a verdict that RLS is off. Output:\n%s", output)
+	}
+}
