@@ -33,11 +33,35 @@ data:
       # platform + observability streams AND pre-tenancy (untenanted) events —
       # which the consumer maps to SystemTenant — live here. Platform services
       # connect into it; per-tenant accounts cannot reach its subjects.
+      #
+      # SEC-M3b: this list held TWO users while THIRTEEN services dialed the
+      # spine. `verify_and_map` maps a verified SVID to a user, and a user that is
+      # not here maps to NO ACCOUNT — so eleven services would have authenticated
+      # and then been unable to publish or subscribe at all. It was invisible for
+      # the same reason SEC-M3 was: nothing ever ran a service against this file.
+      # test/arch/nats_identity_test.go now fails the build if a NATS-dialing
+      # service is missing here, so the list cannot fall behind the code again.
+      #
+      # Each entry is the SVID infra/security/spire/registration.yaml issues that
+      # pod — spiffe://kanz.internal/ns/{namespace}/sa/{serviceAccountName} — from
+      # the namespace + serviceAccountName in its own deploy manifest. Adding a
+      # service here without a matching ServiceAccount admits nothing.
       __system__ {
         jetstream: enabled
         users: [
           { user: "spiffe://kanz.internal/ns/kanz-services/sa/risk-engine" }
           { user: "spiffe://kanz.internal/ns/kanz-services/sa/api-gateway" }
+          { user: "spiffe://kanz.internal/ns/kanz-services/sa/accounting" }
+          { user: "spiffe://kanz.internal/ns/kanz-services/sa/archiver" }
+          { user: "spiffe://kanz.internal/ns/kanz-services/sa/audit" }
+          { user: "spiffe://kanz.internal/ns/kanz-services/sa/compliance" }
+          { user: "spiffe://kanz.internal/ns/kanz-services/sa/market-data" }
+          { user: "spiffe://kanz.internal/ns/kanz-services/sa/market-ingest" }
+          { user: "spiffe://kanz.internal/ns/kanz-services/sa/oms" }
+          { user: "spiffe://kanz.internal/ns/kanz-services/sa/tv-sync" }
+          { user: "spiffe://kanz.internal/ns/kanz-services/sa/venue-binance" }
+          { user: "spiffe://kanz.internal/ns/kanz-services/sa/venue-okx" }
+          { user: "spiffe://kanz.internal/ns/kanz-services/sa/webhook-ingest" }
         ]
       }
 
