@@ -163,7 +163,7 @@ fi
 #    silently restores the vacuous check, and do NOT go back to `limit 1` or a
 #    bare count — a count alone cannot say WHICH table lost FORCE RLS.
 if step storage; then
-  echo "-- [1/5] verify RLS isolation is active (kanz-risk, kanz-books)"
+  echo "-- [1/6] verify RLS isolation is active (kanz-risk, kanz-books)"
 
   # REFUSE before any kubectl runs if either database name is unset. This
   # script will not guess: see the RISK_DB_NAME/BOOKS_DB_NAME header comment
@@ -235,16 +235,79 @@ fi
 #    B's defaults apply (50/s, burst 100, max-in-flight 64) — NOT Path A's old
 #    200/400/100, a deliberate consequence of B being the one quota owner.
 if step infra; then
-  echo "-- [2/5] provision infrastructure lifecycle for $TENANT (tenantctl.sh onboard)"
+  echo "-- [2/6] provision infrastructure lifecycle for $TENANT (tenantctl.sh onboard)"
   TENANT="$TENANT" bash ../tenancy/tenantctl.sh onboard
 fi
 
-# 3) AUTH-01b policy bundle: install the tenant's role→permission bundle. The
+# 3) Compute (MT-02): emit the tenant's OMS overlay to kanz/infra/tenants/$TENANT/.
+#    Placed right after `infra`, before `policy`: compute is worthless without the
+#    identity tenantctl.sh's infra step just established, and a tenant should never
+#    be granted a policy bundle (step 4) for a service that has no process to serve
+#    it yet. This step only EMITS the overlay — see infra/tenants/README.md "Never
+#    kubectl apply this": infra/deploy/ and infra/tenants/* are raw/kustomize-synced
+#    by ArgoCD with prune:true + selfHeal:true, so anything applied here would come
+#    up and then be PRUNED minutes later because it is not in git. Committing the
+#    emitted directory is what deploys it, not this script.
+if step compute; then
+  echo "-- [3/6] emit per-tenant compute overlay for $TENANT (kanz/infra/tenants/$TENANT/)"
+
+  SHAPE="../tenants/_example/kustomization.yaml"
+  OUT_DIR="../tenants/$TENANT"
+
+  # REFUSE before writing anything — same preflight-first stance as
+  # tenantctl.sh: name every missing prerequisite in one pass.
+  compute_missing=""
+  if [ "$TENANT" = "_example" ]; then
+    compute_missing="$compute_missing  - TENANT is '_example' — kanz/infra/tenants/_example/ is the worked-example fixture (see its README.md), never a real tenant; choose a different TENANT id
+"
+  fi
+  [ -f "$SHAPE" ] || compute_missing="$compute_missing  - $SHAPE not found — the shape this step copies is missing; the checkout looks incomplete
+"
+  if [ -n "$compute_missing" ]; then
+    echo "REFUSED: cannot emit compute overlay for '$TENANT' — missing prerequisite(s):" >&2
+    printf '%s' "$compute_missing" >&2
+    exit 2
+  fi
+
+  mkdir -p "$OUT_DIR"
+  # Deterministic regeneration from the shape + $TENANT: this file carries no
+  # per-tenant hand customization to preserve, so a rerun always overwrites
+  # rather than guessing whether an existing copy is stale or intentional.
+  # Strip _example's own "why this fixture can never be a real tenant" header
+  # (starts at the first `apiVersion:` line) — that explanation lives in
+  # infra/tenants/README.md and does not generalize to a real tenant's file.
+  sed -n '/^apiVersion:/,$p' "$SHAPE" | sed "s/_example/$TENANT/g" > "$OUT_DIR/kustomization.yaml"
+  echo "   wrote $OUT_DIR/kustomization.yaml"
+
+  # NATS user (SEC-M3): the OMS pod's SPIFFE ID is derived from its
+  # ServiceAccount, not from tenantctl.sh's per-tenant-namespace TENANT_SAS
+  # pattern (compute lives in kanz-services, not tenant-$TENANT — ground
+  # truth of MT-02's design). tenantctl.sh's own onboard_nats already
+  # documents the static/manual path for exactly this shape of edit
+  # (nats/tenancy.yaml's header: "Add a tenant by appending an account + user
+  # keyed on the tenant workload's SPIFFE URI SAN, then 'nats-server --signal
+  # reload'") — follow it here rather than inventing a second mechanism.
+  OMS_PRINCIPAL="spiffe://kanz.internal/ns/kanz-services/sa/oms-${TENANT}"
+  echo ""
+  echo "   MANUAL (same static-mode path as tenantctl.sh's onboard_nats): add the"
+  echo "   compute user to tenant $TENANT's account in infra/nats/tenancy.yaml:"
+  echo "     { user: \"${OMS_PRINCIPAL}\" }"
+  echo "   then 'nats-server --signal reload'. Without this the OMS pod authenticates"
+  echo "   but cannot reach any account (SEC-M3) — verified by"
+  echo "   test/arch/tenant_compute_test.go, which fails the build if it's missing."
+
+  echo ""
+  echo "   THIS SCRIPT DID NOT DEPLOY ANYTHING. NEXT STEP: commit $OUT_DIR/ to main —"
+  echo "     git add $OUT_DIR && git commit -m 'tenant $TENANT: compute (MT-02)'"
+  echo "   The commit — not this script — is what deploys the tenant's OMS."
+fi
+
+# 4) AUTH-01b policy bundle: install the tenant's role→permission bundle. The
 #    shape is the shipped infra/security/policies/risk-authz.json (policy-as-data,
 #    ConfigMap-mounted). A tenant gets the standard roles; the client's admin is
 #    granted risk.admin, analysts risk.analyst, everyone else risk.reader.
 if step policy; then
-  echo "-- [3/5] install AUTH-01b policy bundle for $TENANT"
+  echo "-- [4/6] install AUTH-01b policy bundle for $TENANT"
   k -n "$SVC_NS" create configmap "authz-$TENANT" \
     --from-file=risk-authz.json=../security/policies/risk-authz.json \
     --dry-run=client -o yaml | k apply -f -
@@ -255,7 +318,7 @@ fi
 #    entitlements (composition-root env on the market-data/datamaster adapters) and
 #    seed a first portfolio so the read path serves real data on day one.
 if step seed; then
-  echo "-- [4/5] seed first portfolio for $TENANT"
+  echo "-- [5/6] seed first portfolio for $TENANT"
   SEED_TENANT="$TENANT" SEED_PORTFOLIO="${FIRST_PORTFOLIO:-PF1}" \
     SEED_NATS_URL="${SEED_NATS_URL:-nats://nats.$MSG_NS:4222}" \
     go run ../../test/load/seed
@@ -268,7 +331,7 @@ fi
 #    header above for VERIFY_TOKEN/VERIFY_TOKEN_OTHER, the exit codes, and
 #    the honest limit on what this check cannot distinguish.
 if step verify; then
-  echo "-- [5/5] verify cross-tenant isolation"
+  echo "-- [6/6] verify cross-tenant isolation"
   verify_preflight
   GW="${GW:-http://api-gateway.$SVC_NS:8080}"
   code_self="$(curl -s -o /dev/null -w '%{http_code}' \

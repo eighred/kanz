@@ -1,0 +1,220 @@
+package arch
+
+import (
+	"fmt"
+	"os"
+	"path/filepath"
+	"regexp"
+	"sort"
+	"strings"
+	"testing"
+
+	"gopkg.in/yaml.v3"
+)
+
+// MT-02 Task 3 — the tenant compute guard.
+//
+// tenancy.yaml lists tenant NATS accounts (the storage/streams isolation
+// boundary, MT-01c); infra/tenants/ lists tenant compute (the per-tenant OMS
+// overlay, MT-02). Nothing compares them. A tenant provisioned with an
+// account and no compute overlay is exactly the production defect this whole
+// epic closes, and it would silently return the day someone adds a
+// tenancy.yaml account by hand without also adding the overlay — or adds an
+// overlay without ever admitting its ServiceAccount to the broker (SEC-M3
+// all over again).
+//
+// This guard is PURE GO (ground truth #7 — CI has no kubectl/kustomize, so a
+// guard that shells out would skip in CI exactly the way DATA-M6 did).
+//
+// It parses, rather than greps: `data["tenants.conf"]` is reached via a real
+// YAML unmarshal of the outer ConfigMap, not a keyword search over the whole
+// raw file — tenancy.yaml's header discusses tenants in prose ("Reserved
+// platform/legacy tenant", "per-tenant streams", ...), and a grep across the
+// entire byte content would over-report on that prose exactly the way the
+// retired internal/integrity package once did (KANZ_BRAIN.md). The extracted
+// `tenants.conf` value is NATS's own config-language, not YAML, so it gets
+// its own brace-depth-aware scanner below (natsAccounts) rather than a
+// second YAML parse — that scanner is structural (it tracks block
+// boundaries), not a flat regex over the blob, for the same reason.
+
+// tenantConfigMap is the minimal shape of infra/nats/tenancy.yaml's outer
+// Kubernetes object — just enough to reach the ConfigMap's data.
+type tenantConfigMap struct {
+	Data map[string]string `yaml:"data"`
+}
+
+// tenantOverlay is the minimal shape of a kanz/infra/tenants/<tenant>/
+// kustomization.yaml this guard needs: the nameSuffix that determines the
+// ServiceAccount the overlay actually renders (kanz/infra/tenants/README.md
+// — "oms" is the base's declared ServiceAccount name; nameSuffix appends
+// verbatim).
+type tenantOverlay struct {
+	NameSuffix string `yaml:"nameSuffix"`
+}
+
+// blockOpenLine matches a NATS-config-language line that OPENS a new
+// top-level block, e.g. `acme {` or `__system__ {` — a bare identifier
+// (letters, digits, underscore, or `$`) followed by `{` and nothing else.
+// It deliberately does not match a self-contained line like
+// `jetstream { max_memory: 64MB, ... }` (that has a trailing `}` too, so the
+// regex's `$` anchor after `\{` fails), which is what keeps a one-line inner
+// block from ever being mistaken for a new tenant account.
+var blockOpenLine = regexp.MustCompile(`^([A-Za-z0-9_$]+)\s*\{\s*$`)
+
+// natsAccounts parses the NATS server config-language `tenants.conf` value
+// into account name -> set of user SPIFFE IDs. It tracks brace DEPTH rather
+// than grepping the blob: a top-level account can only open at depth 1 (i.e.
+// directly inside the outer `accounts { ... }` block), and only a `{ user:
+// "..." }` line found while INSIDE that account's own block (depth 2) is
+// attributed to it. userLine is nats_identity_test.go's existing regex,
+// reused rather than redefined.
+func natsAccounts(conf string) map[string]map[string]bool {
+	accounts := map[string]map[string]bool{}
+	depth := 0
+	current := ""
+	for _, raw := range strings.Split(strings.ReplaceAll(conf, "\r\n", "\n"), "\n") {
+		line := strings.TrimSpace(raw)
+		opens := strings.Count(line, "{")
+		closes := strings.Count(line, "}")
+
+		if depth == 2 {
+			if m := userLine.FindStringSubmatch(line); m != nil {
+				accounts[current][m[1]] = true
+			}
+		}
+		if depth == 1 && opens > closes {
+			if m := blockOpenLine.FindStringSubmatch(line); m != nil && m[1] != "accounts" {
+				current = m[1]
+				if accounts[current] == nil {
+					accounts[current] = map[string]bool{}
+				}
+			}
+		}
+		depth += opens - closes
+	}
+	return accounts
+}
+
+// isPlatformNATSAccount excludes the two reserved, non-tenant accounts: the
+// platform's own __system__ (archiver's manifest: "__system__ carries the
+// platform's cross-cutting FACTs") and NATS's reserved system account — which
+// tenancy.yaml declares as `SYS` (see its `system_account: SYS` line; this is
+// the "$SYS" the plan refers to, spelled without the leading `$` in this
+// file's own account block).
+func isPlatformNATSAccount(name string) bool {
+	return name == "__system__" || name == "SYS"
+}
+
+// TestTenantComputeGuard asserts, both directions, that every tenant NATS
+// account has a matching compute overlay and vice versa, and that each
+// overlay's rendered ServiceAccount is the exact SPIFFE ID its account
+// admits.
+func TestTenantComputeGuard(t *testing.T) {
+	root := moduleRoot(t)
+
+	tenancyPath := filepath.Join(root, "infra", "nats", "tenancy.yaml")
+	raw, err := os.ReadFile(tenancyPath)
+	if err != nil {
+		t.Fatalf("read %s: %v", tenancyPath, err)
+	}
+	var cm tenantConfigMap
+	if err := yaml.Unmarshal(raw, &cm); err != nil {
+		t.Fatalf("parse %s as YAML: %v", tenancyPath, err)
+	}
+	conf, ok := cm.Data["tenants.conf"]
+	if !ok {
+		t.Fatalf(`%s has no data["tenants.conf"] key — has the ConfigMap shape changed?`, tenancyPath)
+	}
+
+	tenantAccounts := map[string]map[string]bool{}
+	for name, users := range natsAccounts(conf) {
+		if isPlatformNATSAccount(name) {
+			continue
+		}
+		tenantAccounts[name] = users
+	}
+	if len(tenantAccounts) == 0 {
+		t.Fatal("zero tenant accounts parsed from tenancy.yaml (excluding __system__/SYS) — non-vacuous by design " +
+			"(MT-02 Task 3, matching the SEC-M5/ONBOARD-M1 lesson on false-green guards): finding none is a FAILURE, " +
+			"not a pass. If tenancy.yaml's account block format genuinely changed, update natsAccounts — don't relax this check.")
+	}
+
+	tenantsDir := filepath.Join(root, "infra", "tenants")
+	entries, err := os.ReadDir(tenantsDir)
+	if err != nil {
+		t.Fatalf("read %s: %v", tenantsDir, err)
+	}
+
+	// tenant -> the SPIFFE ID its overlay's rendered ServiceAccount would
+	// produce (spiffe://kanz.internal/ns/kanz-services/sa/oms-<tenant>,
+	// per ground truth #5), derived from the overlay's OWN nameSuffix field
+	// rather than assumed from the directory name.
+	overlays := map[string]string{}
+	for _, e := range entries {
+		if !e.IsDir() || e.Name() == "_example" {
+			// _example is the worked-example fixture (kanz/infra/tenants/README.md),
+			// excluded from ArgoCD's tenants generator for the same reason it is
+			// excluded here: it can never be mistaken for a real tenant.
+			continue
+		}
+		tenant := e.Name()
+		kPath := filepath.Join(tenantsDir, tenant, "kustomization.yaml")
+		kb, err := os.ReadFile(kPath)
+		if err != nil {
+			t.Fatalf("infra/tenants/%s has no kustomization.yaml (%v) — every tenant directory must be a real overlay", tenant, err)
+		}
+		var k tenantOverlay
+		if err := yaml.Unmarshal(kb, &k); err != nil {
+			t.Fatalf("parse infra/tenants/%s/kustomization.yaml: %v", tenant, err)
+		}
+		wantSuffix := "-" + tenant
+		if k.NameSuffix != wantSuffix {
+			t.Errorf("infra/tenants/%s/kustomization.yaml: nameSuffix is %q, expected %q — the rendered "+
+				"ServiceAccount would not be oms-%s", tenant, k.NameSuffix, wantSuffix, tenant)
+			continue
+		}
+		overlays[tenant] = "spiffe://kanz.internal/ns/kanz-services/sa/oms" + k.NameSuffix
+	}
+	if len(overlays) == 0 {
+		t.Fatal("zero tenant overlays found under infra/tenants/ (excluding _example) — non-vacuous by design " +
+			"(MT-02 Task 3): finding none is a FAILURE, not a pass. Either no tenant has compute provisioned yet " +
+			"(run provision-tenant.sh's compute step) or infra/tenants/ moved.")
+	}
+
+	var problems []string
+	for tenant := range tenantAccounts {
+		if _, ok := overlays[tenant]; !ok {
+			problems = append(problems, fmt.Sprintf(
+				"tenant %q has a NATS account in infra/nats/tenancy.yaml but no infra/tenants/%s/ overlay — "+
+					"it is provisioned with streams and no compute; run provision-tenant.sh's compute step "+
+					"(see kanz/infra/tenants/README.md) then commit the result", tenant, tenant))
+		}
+	}
+	for tenant, expectedSPIFFE := range overlays {
+		users, ok := tenantAccounts[tenant]
+		if !ok {
+			problems = append(problems, fmt.Sprintf(
+				"infra/tenants/%s/ has a compute overlay but no NATS account in infra/nats/tenancy.yaml — "+
+					"its pod would authenticate and reach no account (SEC-M3); add %q to the tenant's account "+
+					"the same way provision-tenant.sh's compute step instructs (tenantctl.sh's static-mode path)",
+				tenant, expectedSPIFFE))
+			continue
+		}
+		if !users[expectedSPIFFE] {
+			var got []string
+			for u := range users {
+				got = append(got, u)
+			}
+			sort.Strings(got)
+			problems = append(problems, fmt.Sprintf(
+				"tenant %q: overlay renders ServiceAccount SPIFFE ID %s but tenancy.yaml's %q account admits %v — "+
+					"the pod would authenticate and reach no account (SEC-M3)", tenant, expectedSPIFFE, tenant, got))
+		}
+	}
+
+	if len(problems) > 0 {
+		sort.Strings(problems)
+		t.Fatalf("tenant compute guard (MT-02 Task 3):\n  %s", strings.Join(problems, "\n  "))
+	}
+	t.Logf("%d tenant(s) checked, each with a matching NATS account and compute overlay", len(overlays))
+}
