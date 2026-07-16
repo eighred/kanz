@@ -588,6 +588,12 @@ func TestProvisionTenantStorageDistinguishesCheckFailureFromRLSOff(t *testing.T)
 	//   - KUBECONFIG, pinned to a path inside t.TempDir() that is never
 	//     created, so `kubectl exec` cannot reach any cluster, real or
 	//     otherwise — see the doc comment above.
+	//   - RISK_DB_NAME / BOOKS_DB_NAME, set to arbitrary placeholders. The
+	//     storage step refuses (exit 2) before any kubectl runs if either is
+	//     unset (it will not guess a database name — see provision-tenant.sh's
+	//     header); this test exercises the DIFFERENT failure mode below it
+	//     (kubectl/psql cannot run at all), so both must be set to even reach
+	//     that branch.
 	unreachableKubeconfig := filepath.Join(t.TempDir(), "kubeconfig-does-not-exist")
 	cmd := exec.Command(shPath, provisionTenantRelPath)
 	cmd.Dir = root
@@ -596,6 +602,8 @@ func TestProvisionTenantStorageDistinguishesCheckFailureFromRLSOff(t *testing.T)
 		"TENANT=" + storageProbeTenant,
 		"STEP=storage",
 		"KUBECONFIG=" + unreachableKubeconfig,
+		"RISK_DB_NAME=probe-risk-db",
+		"BOOKS_DB_NAME=probe-books-db",
 	}
 	out, err := cmd.CombinedOutput()
 	output := string(out)

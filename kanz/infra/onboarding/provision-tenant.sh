@@ -78,16 +78,24 @@ ADMIN_SUBJECT="${ADMIN_SUBJECT:-admin@$TENANT}"
 DATA_NS="${DATA_NS:-kanz-data}"
 SVC_NS="${SVC_NS:-kanz-services}"
 MSG_NS="${MSG_NS:-kanz-messaging}"
-# DB_NAME: the database step 1's RLS check queries. CNPG's default initdb
-# creates a database named "app" when a Cluster's spec declares no
-# bootstrap/initdb block — verified: infra/dr/postgres/cluster.yaml declares
-# no bootstrap block for either kanz-risk or kanz-books. pg_class is
-# per-database, so querying the wrong one (psql's own default, "postgres",
-# with no -d) returns nothing and step 1 misdiagnoses a HEALTHY cluster as
-# "MT-01d not deployed". Overridable because a future bootstrap.initdb.database
-# entry in cluster.yaml would change CNPG's default database again, and this
-# script must not go back to silently querying the wrong one.
-DB_NAME="${DB_NAME:-app}"
+# RISK_DB_NAME / BOOKS_DB_NAME: the database step 1's RLS check queries, one
+# per cluster (kanz-risk, kanz-books) — pg_class is per-database, so querying
+# the wrong one returns nothing and step 1 misdiagnoses a HEALTHY cluster as
+# "MT-01d not deployed". There is NO default, deliberately: infra/dr/postgres/
+# README.md and cluster.yaml's own comment say this platform hosts "one
+# database per service", but cluster.yaml's spec declares no bootstrap/initdb
+# block for either cluster — the manifest contradicts its own comment, so
+# CNPG's actual default database name ("app") is not something this repo
+# agrees on, and nothing under infra/ creates a per-service database anyway
+# (no postInitSQL, no CREATE DATABASE). A prior version of this script
+# defaulted to "app"; that was a guess, and a wrong guess produces the exact
+# false "MT-01d not deployed" alarm on a healthy cluster this step exists to
+# prevent. So: no fallback. The operator supplies both names, read off the
+# real DSN each service's deployment mounts — RISK_ENGINE_DATABASE_URL_FILE
+# (services/risk-engine, cluster kanz-risk) and ACCOUNTING_DATABASE_URL_FILE
+# (services/accounting, cluster kanz-books), both at
+# /run/secrets/db/database-url in their respective Deployments. Step 1
+# refuses (exit 2) before any kubectl runs if either is unset.
 STEP="${STEP:-all}"
 k() { kubectl "$@"; }
 step() { [ "$STEP" = "all" ] || [ "$STEP" = "$1" ]; }
@@ -139,8 +147,8 @@ fi
 #    proved RLS was on SOMEWHERE — if `positions` alone lost FORCE RLS,
 #    `portfolios` still satisfied `limit 1` and this step reported isolation
 #    active while positions leaked across tenants. It also now connects with
-#    `-d "$DB_NAME"` (see DB_NAME above) instead of psql's default "postgres"
-#    database, where these tables do not exist.
+#    `-d "$db"` (RISK_DB_NAME/BOOKS_DB_NAME, see the header above) instead of
+#    psql's default "postgres" database, where these tables do not exist.
 #
 #    The query returns the FORCE-RLS relnames among the named tables, and the
 #    OUTPUT is the verdict, not the exit status — `psql -tAc` exits 0 for a
@@ -156,6 +164,24 @@ fi
 #    bare count — a count alone cannot say WHICH table lost FORCE RLS.
 if step storage; then
   echo "-- [1/5] verify RLS isolation is active (kanz-risk, kanz-books)"
+
+  # REFUSE before any kubectl runs if either database name is unset. This
+  # script will not guess: see the RISK_DB_NAME/BOOKS_DB_NAME header comment
+  # above for why there is no default — a wrong guess produces a false
+  # "MT-01d not deployed" on a HEALTHY cluster, which is the exact harm this
+  # step exists to catch, merely relocated to the wrong database.
+  db_missing=""
+  [ -n "${RISK_DB_NAME:-}" ] || db_missing="$db_missing  - RISK_DB_NAME (the kanz-risk database name — read it off RISK_ENGINE_DATABASE_URL_FILE, /run/secrets/db/database-url in the risk-engine Deployment)
+"
+  [ -n "${BOOKS_DB_NAME:-}" ] || db_missing="$db_missing  - BOOKS_DB_NAME (the kanz-books database name — read it off ACCOUNTING_DATABASE_URL_FILE, /run/secrets/db/database-url in the accounting Deployment)
+"
+  if [ -n "$db_missing" ]; then
+    echo "REFUSED: cannot verify RLS isolation — missing prerequisite(s):" >&2
+    printf '%s' "$db_missing" >&2
+    echo "This script will not guess a database name: a wrong guess reports a HEALTHY cluster as \"MT-01d not deployed\" instead of refusing. Supply both and retry." >&2
+    exit 2
+  fi
+
   for c in kanz-risk kanz-books; do
     # The expected FORCE-RLS table set per cluster, read off the migrations
     # that declare it (services/risk-engine/migrations/0002_tenant_rls.sql;
@@ -163,8 +189,9 @@ if step storage; then
     # `FORCE  ROW LEVEL SECURITY` with TWO SPACES, in a `FOREACH t IN ARRAY
     # ARRAY[...]` loop, not individual `ALTER TABLE x FORCE` statements).
     case "$c" in
-      kanz-risk)  tables="portfolios positions applied_keys" ;;
-      kanz-books) tables="ledger_entries ledger_snapshots" ;;
+      kanz-risk)  tables="portfolios positions applied_keys"; db="$RISK_DB_NAME" ;;
+      kanz-books) tables="ledger_entries ledger_snapshots"; db="$BOOKS_DB_NAME" ;;
+      *) echo "FATAL: no table set declared for $c" >&2; exit 1 ;;
     esac
     expected="$(set -- $tables; echo $#)"
 
@@ -173,7 +200,7 @@ if step storage; then
       in_list="${in_list:+$in_list,}'$t'"
     done
 
-    present="$(k -n "$DATA_NS" exec "$c-1" -- psql -d "$DB_NAME" -tAc \
+    present="$(k -n "$DATA_NS" exec "$c-1" -- psql -d "$db" -tAc \
       "select relname from pg_class where relname in ($in_list) and relrowsecurity and relforcerowsecurity order by relname")" \
       || { echo "FATAL: could not run the RLS check on $c — kubectl exec or psql failed (see the error above); this is NOT a verdict on RLS, it means the check could not be run. Fix the underlying infrastructure (namespace/pod/DB reachability) and retry" >&2; exit 1; }
 
@@ -195,7 +222,7 @@ if step storage; then
       fi
     done
 
-    [ "$found_count" -eq "$expected" ] || { echo "FATAL: FORCE RLS not active on $c for:$missing (expected $expected of {$tables}, database '$DB_NAME') — MT-01d not deployed for the named table(s), or FORCE RLS was turned off" >&2; exit 1; }
+    [ "$found_count" -eq "$expected" ] || { echo "FATAL: FORCE RLS not active on $c for:$missing (expected $expected of {$tables}, database '$db') — MT-01d not deployed for the named table(s), or FORCE RLS was turned off" >&2; exit 1; }
   done
 fi
 
