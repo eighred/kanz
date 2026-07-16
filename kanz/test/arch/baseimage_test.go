@@ -13,8 +13,8 @@ import (
 // SEC-M4: every Go Dockerfile must pin the SAME golang base image.
 //
 // The defect this guards against was never that the base image was old. It
-// was that a Dependabot bump moved 3 of the 22 golang:* Dockerfiles to a newer
-// patch and left the other 19 (including this repo's own) untouched — and
+// was that a Dependabot bump moved 3 of the golang:* Dockerfiles to a newer
+// patch and left 18 of them (the majority) untouched — and
 // nothing noticed, because nothing compared them to each other. Eighteen
 // images sat on a version with 13 vulnerabilities the code actually reached,
 // silently, because "did the bump run" and "did the bump run EVERYWHERE" were
@@ -171,9 +171,9 @@ func TestAllDockerfilesPinTheSameGolangVersion(t *testing.T) {
 			"  older, to bump up:\n    %s\n\n"+
 			"Bump the older Dockerfile(s) above to golang:%s so every image builds from the same, most-current "+
 			"base — never the other direction. This is exactly how SEC-M4 happened: a base-image bump moved 3 "+
-			"of 22 Dockerfiles to a newer, patched version and left the other 19 (a majority) on an old one "+
-			"with 13 reachable vulnerabilities, and nothing compared them to each other. The minority is "+
-			"presumed the fix, not the outlier.",
+			"Dockerfiles to a newer, patched version and left 18 (the majority) on an old one with 13 "+
+			"reachable vulnerabilities, and nothing compared them to each other. The minority is presumed "+
+			"the fix, not the outlier.",
 			len(versionToFiles), dockerfileCount, newest, len(versionToFiles[newest]),
 			strings.Join(problems, "\n    "), newest)
 	}
