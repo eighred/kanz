@@ -17,7 +17,12 @@
 #   TENANT=acme ADMIN_SUBJECT=alice@acme.com ./provision-tenant.sh
 #   TENANT=acme STEP=policy ./provision-tenant.sh        # run one step
 #
-# Requires: kubectl, psql (or the cnpg plugin), and the target cluster context.
+# Requires: kubectl, psql (or the cnpg plugin), and the target cluster context —
+# plus, for the tenantctl.sh `infra` step this script composes: nsc + NATS_OPERATOR
+# (else the NATS account step logs a manual instruction and returns 0 instead of
+# provisioning anything), ADMIN_DATABASE_URL + TENANT_DB_PASSWORD (else the
+# Postgres role step is skipped), and jq (the gateway quota step reads/writes the
+# quota ConfigMap through it).
 set -eu
 
 TENANT="${TENANT:?set TENANT to the new tenant id (lowercase, dns-safe)}"
