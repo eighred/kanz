@@ -2,6 +2,7 @@ package arch
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -208,5 +209,147 @@ func TestProvisionTenantDoesNotClaimNoStreamNeeded(t *testing.T) {
 			"covers comments as well as executed lines — remove the statement entirely, it does not "+
 			"belong in this file in any form",
 			provisionTenantRelPath, retiredNoStreamClaim)
+	}
+}
+
+// probeTenant is an obviously-fake tenant name for the runtime guard below —
+// it must never collide with a real tenant, and its distinctiveness lets the
+// REFUSED-message assertion pin the exact tenant name tenantctl.sh echoes
+// back, not just the word "REFUSED" in isolation.
+const probeTenant = "onboard-m3-runtime-guard-probe"
+
+// TestTenantctlOnboardRefusesWithoutPrerequisites is the RUNTIME counterpart
+// to the static guards above. Every other check in this file reads the
+// scripts as TEXT — grep with extra steps. That is exactly why ONBOARD-M1
+// (and M3) could exist in the first place: tenantctl.sh, pre-Task-1, parsed
+// perfectly fine and STILL printed "tenant X onboarded" after silently
+// falling back to a "static mode" log line for NATS (no nsc/NATS_OPERATOR)
+// and silently skipping the Postgres role (no ADMIN_DATABASE_URL). No static
+// check — however sophisticated — can see a script lie about what it did at
+// runtime; only running it can. That is the entire reason the ONBOARD epic
+// exists: nobody had ever run these two scripts together and watched what
+// they actually did.
+//
+// So this test executes `bash tenantctl.sh onboard` for real, against a
+// deliberately narrow environment, and pins the three properties Task 1's
+// preflight (see tenantctl.sh's preflight()) exists to guarantee:
+//
+//  1. it exits non-zero, and specifically 2 (REFUSED) — not some other
+//     non-zero code that would mean the script failed for the WRONG reason
+//     (e.g. 127 "no such file", which would mean this test isn't even
+//     exercising the real script);
+//  2. the output names the prerequisites that are actually missing in a
+//     clean environment (no NATS_OPERATOR, no ADMIN_DATABASE_URL, no
+//     TENANTCTL_MANUAL_* escape declared); and
+//  3. the word "onboarded" NEVER appears — that is the literal lie
+//     ONBOARD-M3 fixed (finish() printing success, or a PARTIAL line naming
+//     the tenant as "onboarded", while steps were silently skipped).
+//
+// (3) is the load-bearing assertion: (1) and (2) establish the script ran
+// and refused for the documented reason, but (3) is what makes a future
+// regression that reintroduces ANY path to the success/partial line —
+// whether by neutering preflight or restoring a silent skip inside
+// onboard_nats/onboard_db — fail this test, because that is precisely the
+// lie a paying tenant would receive.
+//
+// Because preflight runs before onboard_identity (the first step that would
+// ever call kubectl) and only ever shells out to `command -v`, a passing run
+// of this test never reaches kubectl, psql, or nsc — nothing here touches a
+// cluster or a database. That property depends entirely on preflight
+// actually running first, which is exactly what this test verifies; it is
+// not separately enforced by, say, skipping when kubectl is unreachable —
+// doing that would make the guard vacuous on any CI box that lacks a
+// cluster, which is the opposite of what this test is for.
+//
+// Belt-and-suspenders on top of that: cmd.Env below also pins KUBECONFIG to a
+// path that cannot exist. This was not a hypothetical — the first version of
+// this test omitted it and, while proving out the "preflight returns 0
+// unconditionally" mutation below by hand, kubectl (invoked by the mutated
+// onboard_identity) inherited a real ~/.kube/config anyway and created a
+// namespace, ServiceAccounts, and a Job on the real kind-kanz-dryrun cluster
+// reachable from this box — because bash on this host computes its own HOME
+// at startup independent of whatever environment its parent process passed
+// it, and kubectl then found that HOME's default kubeconfig. A correct
+// preflight makes this moot in the passing case, but a regression is exactly
+// what this test exists to catch, and a regression that also reaches a real
+// cluster is strictly worse than one that doesn't. Pinning KUBECONFIG to a
+// nonexistent path makes kubectl fail on `Stat` before it ever dials
+// anything, whether preflight is correct or not.
+func TestTenantctlOnboardRefusesWithoutPrerequisites(t *testing.T) {
+	bashPath, err := exec.LookPath("bash")
+	if err != nil {
+		t.Skipf("bash not on PATH (%v) — this guard runs tenantctl.sh for real and has no other way to "+
+			"do that; install bash (git-bash on Windows, or any POSIX bash on Linux/macOS CI) to enable it", err)
+	}
+
+	root := moduleRoot(t)
+	readOnboardingScript(t, root, tenantctlRelPath) // must exist and be non-empty before we bother invoking it
+
+	// The environment is built explicitly — never os.Environ() — because an
+	// engineer who happens to have ADMIN_DATABASE_URL, NATS_OPERATOR, or a
+	// TENANTCTL_MANUAL_* flag exported in their own shell would silently make
+	// preflight succeed here and this test would stop proving anything about
+	// a clean environment. Three variables are passed:
+	//   - PATH, so bash can find its own shell builtins/coreutils, and so
+	//     whatever `jq`/`kubectl`/`nsc` this box does or doesn't have on PATH
+	//     is free to vary machine-to-machine — deliberately NOT asserted on
+	//     below, since which of those happen to be installed here is not
+	//     what this guard is pinning.
+	//   - TENANT, set to an obviously-fake probe value.
+	//   - KUBECONFIG, pinned to a path inside t.TempDir() that is never
+	//     created. See the doc comment above for why this line exists: it is
+	//     not optional. Without it, a regressed preflight lets kubectl fall
+	//     back to whatever real kubeconfig this host's HOME resolves to.
+	// Everything preflight cares about beyond that (NATS_OPERATOR,
+	// ADMIN_DATABASE_URL, TENANTCTL_MANUAL_NATS, TENANTCTL_MANUAL_DB,
+	// TENANT_DB_PASSWORD) is simply absent, which is the "deliberately empty
+	// environment" this test is required to exercise.
+	unreachableKubeconfig := filepath.Join(t.TempDir(), "kubeconfig-does-not-exist")
+	cmd := exec.Command(bashPath, tenantctlRelPath, "onboard")
+	cmd.Dir = root
+	cmd.Env = []string{
+		"PATH=" + os.Getenv("PATH"),
+		"TENANT=" + probeTenant,
+		"KUBECONFIG=" + unreachableKubeconfig,
+	}
+	out, err := cmd.CombinedOutput()
+	output := string(out)
+
+	if err == nil {
+		t.Fatalf("tenantctl.sh onboard exited 0 against a bare PATH+TENANT environment — Task 1's "+
+			"preflight must REFUSE when NATS_OPERATOR/ADMIN_DATABASE_URL are unset and no "+
+			"TENANTCTL_MANUAL_* escape is declared, never silently succeed. Output:\n%s", output)
+	}
+	exitErr, ok := err.(*exec.ExitError)
+	if !ok {
+		t.Fatalf("tenantctl.sh onboard did not even start (%v) — this proves nothing about preflight; "+
+			"fix the invocation (bash %q, dir %q) rather than the script", err, tenantctlRelPath, root)
+	}
+	if exitErr.ExitCode() != 2 {
+		t.Fatalf("tenantctl.sh onboard exited %d, want 2 (REFUSED) — any other non-zero code (127 'no "+
+			"such file', 3 PARTIAL, ...) means the script failed for the WRONG reason, not because "+
+			"preflight refused a clean environment. Output:\n%s", exitErr.ExitCode(), output)
+	}
+
+	wantSubstrings := []string{
+		"REFUSED: cannot onboard tenant '" + probeTenant + "'",
+		"nsc on PATH + NATS_OPERATOR set",
+		"ADMIN_DATABASE_URL",
+	}
+	for _, want := range wantSubstrings {
+		if !strings.Contains(output, want) {
+			t.Fatalf("tenantctl.sh onboard output missing %q — a clean environment (no NATS_OPERATOR, "+
+				"no ADMIN_DATABASE_URL, no TENANTCTL_MANUAL_* escape) must name every one of these as a "+
+				"missing prerequisite before refusing. Output:\n%s", want, output)
+		}
+	}
+
+	// The load-bearing assertion (see doc comment above): no matter how
+	// preflight regresses, "onboarded" reappearing in the output IS the M3
+	// defect, full stop.
+	if strings.Contains(strings.ToLower(output), "onboarded") {
+		t.Fatalf("tenantctl.sh onboard output contains \"onboarded\" despite a non-zero, REFUSED exit — "+
+			"this is the exact lie ONBOARD-M3 fixed: printing a success or PARTIAL-success line naming "+
+			"the tenant as onboarded while required prerequisites are missing. Output:\n%s", output)
 	}
 }
