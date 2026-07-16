@@ -239,45 +239,45 @@ if step infra; then
   TENANT="$TENANT" bash ../tenancy/tenantctl.sh onboard
 fi
 
-# 3) Compute (MT-02): emit the tenant's OMS overlay to kanz/infra/tenants/$TENANT/.
-#    Placed right after `infra`, before `policy`: compute is worthless without the
-#    identity tenantctl.sh's infra step just established, and a tenant should never
-#    be granted a policy bundle (step 4) for a service that has no process to serve
-#    it yet. This step only EMITS the overlay — see infra/tenants/README.md "Never
-#    kubectl apply this": infra/deploy/ and infra/tenants/* are raw/kustomize-synced
-#    by ArgoCD with prune:true + selfHeal:true, so anything applied here would come
-#    up and then be PRUNED minutes later because it is not in git. Committing the
-#    emitted directory is what deploys it, not this script.
+# 3) Compute (MT-02): render the tenant's OMS manifest to
+#    kanz/infra/deploy/tenants/$TENANT/oms-$TENANT.yaml. Placed right after
+#    `infra`, before `policy`: compute is worthless without the identity
+#    tenantctl.sh's infra step just established, and a tenant should never be
+#    granted a policy bundle (step 4) for a service that has no process to
+#    serve it yet. This step only WRITES the file — it is plain YAML under
+#    infra/deploy/, which the ApplicationSet's `workloads` component already
+#    raw-syncs with prune:true + selfHeal:true, so anything applied here
+#    out-of-band would come up and then be PRUNED minutes later because it is
+#    not in git. Committing the rendered file is what deploys it, not this
+#    script.
 if step compute; then
-  echo "-- [3/6] emit per-tenant compute overlay for $TENANT (kanz/infra/tenants/$TENANT/)"
-
-  SHAPE="../tenants/_example/kustomization.yaml"
-  OUT_DIR="../tenants/$TENANT"
+  echo "-- [3/6] render per-tenant compute manifest for $TENANT (kanz/infra/deploy/tenants/$TENANT/)"
 
   # REFUSE before writing anything — same preflight-first stance as
   # tenantctl.sh: name every missing prerequisite in one pass.
   compute_missing=""
-  if [ "$TENANT" = "_example" ]; then
-    compute_missing="$compute_missing  - TENANT is '_example' — kanz/infra/tenants/_example/ is the worked-example fixture (see its README.md), never a real tenant; choose a different TENANT id
+  if [ "$TENANT" = "__system__" ]; then
+    compute_missing="$compute_missing  - TENANT is '__system__' — that is the reserved platform tenant (infra/nats/tenancy.yaml), never a real tenant; choose a different TENANT id
 "
   fi
-  [ -f "$SHAPE" ] || compute_missing="$compute_missing  - $SHAPE not found — the shape this step copies is missing; the checkout looks incomplete
+  [ -f "../deploy/oms-deploy.yaml" ] || compute_missing="$compute_missing  - ../deploy/oms-deploy.yaml not found — the base this step renders is missing; the checkout looks incomplete
 "
   if [ -n "$compute_missing" ]; then
-    echo "REFUSED: cannot emit compute overlay for '$TENANT' — missing prerequisite(s):" >&2
+    echo "REFUSED: cannot render compute manifest for '$TENANT' — missing prerequisite(s):" >&2
     printf '%s' "$compute_missing" >&2
     exit 2
   fi
 
-  mkdir -p "$OUT_DIR"
-  # Deterministic regeneration from the shape + $TENANT: this file carries no
-  # per-tenant hand customization to preserve, so a rerun always overwrites
-  # rather than guessing whether an existing copy is stale or intentional.
-  # Strip _example's own "why this fixture can never be a real tenant" header
-  # (starts at the first `apiVersion:` line) — that explanation lives in
-  # infra/tenants/README.md and does not generalize to a real tenant's file.
-  sed -n '/^apiVersion:/,$p' "$SHAPE" | sed "s/_example/$TENANT/g" > "$OUT_DIR/kustomization.yaml"
-  echo "   wrote $OUT_DIR/kustomization.yaml"
+  # internal/tenantgen.Render is the ONE generator — this is the same code
+  # path test/arch/tenant_compute_test.go's drift guard calls to re-render
+  # every committed tenant manifest from the live base. Deterministic: a
+  # rerun with an unchanged base always overwrites with the byte-identical
+  # result, never a guess about whether an existing copy is stale.
+  OUT="../deploy/tenants/$TENANT/oms-$TENANT.yaml"
+  ( cd ../.. && go run ./cmd/kanz-tenantgen -tenant "$TENANT" \
+      -base infra/deploy/oms-deploy.yaml \
+      -out "infra/deploy/tenants/$TENANT/oms-$TENANT.yaml" )
+  echo "   wrote $OUT"
 
   # NATS user (SEC-M3): the OMS pod's SPIFFE ID is derived from its
   # ServiceAccount, not from tenantctl.sh's per-tenant-namespace TENANT_SAS
@@ -297,8 +297,8 @@ if step compute; then
   echo "   test/arch/tenant_compute_test.go, which fails the build if it's missing."
 
   echo ""
-  echo "   THIS SCRIPT DID NOT DEPLOY ANYTHING. NEXT STEP: commit $OUT_DIR/ to main —"
-  echo "     git add $OUT_DIR && git commit -m 'tenant $TENANT: compute (MT-02)'"
+  echo "   THIS SCRIPT DID NOT DEPLOY ANYTHING. NEXT STEP: commit $OUT to main —"
+  echo "     git add $OUT && git commit -m 'tenant $TENANT: compute (MT-02)'"
   echo "   The commit — not this script — is what deploys the tenant's OMS."
 fi
 

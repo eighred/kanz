@@ -90,11 +90,11 @@ data:
           # MT-02 compute: the per-tenant OMS pod's ServiceAccount is
           # oms-acme in kanz-services (not tenant-acme — the compute layer is
           # a name-suffixed platform ServiceAccount, not a per-tenant
-          # namespace; see kanz/infra/tenants/README.md). Added by
+          # namespace; see kanz/infra/deploy/tenants/README.md). Added by
           # provision-tenant.sh's `compute` step per its printed instruction;
           # without this the pod authenticates but cannot reach any account
           # (SEC-M3). test/arch/tenant_compute_test.go fails the build if
-          # this and kanz/infra/tenants/acme/ ever drift apart.
+          # this and kanz/infra/deploy/tenants/acme/ ever drift apart.
           { user: "spiffe://kanz.internal/ns/kanz-services/sa/oms-acme" }
         ]
       }

@@ -29,56 +29,13 @@ spec:
               elements:
                 - { component: messaging-nats, path: kanz/infra/nats, namespace: kanz-messaging }
                 - { component: messaging-kafka, path: kanz/infra/kafka, namespace: kanz-messaging }
+                # MT-02: per-tenant OMS compute (infra/deploy/tenants/<tenant>/
+                # oms-<tenant>.yaml) is plain, rendered YAML under this same tree —
+                # directory.recurse below picks it up for free. No separate
+                # generator, no kustomize, no ArgoCD-side flag: what is in git is
+                # exactly what deploys. See internal/tenantgen's package doc.
                 - { component: workloads, path: kanz/infra/deploy, namespace: kanz-services }
                 - { component: security, path: kanz/infra/security, namespace: kanz-services }
-    # MT-02: per-tenant compute, one Application per kanz/infra/tenants/<tenant>
-    # directory — "adding a component = one list entry; adding an environment
-    # = one list entry" (above), extended one level further: adding a tenant =
-    # adding a directory. A sibling generator, not folded into the matrix
-    # above: each tenant dir is a real kustomize app (references
-    # ../../deploy/oms-deploy.yaml, never a copy — see infra/tenants/README.md),
-    # so it needs its own `source.kustomize` stanza, not the raw
-    # `directory.recurse` mode the matrix's `workloads` component uses. `_example`
-    # is excluded — it is a worked example for the README, never a real tenant
-    # (see infra/tenants/README.md for why its name can never collide with one).
-    #
-    # PREREQUISITE (see infra/tenants/README.md "ArgoCD prerequisite"): this repo
-    # does not manage ArgoCD's own installation, so its argocd-cm ConfigMap is
-    # out of scope here — the same way registering cluster names is (see the
-    # comment on the `env` list above). Before this generator's first sync,
-    # confirm argocd-cm sets `kustomize.buildOptions: "--load-restrictor
-    # LoadRestrictionsNone"`; without it every tenant Application fails to sync
-    # (reproduced in infra/tenants/README.md), because oms-deploy.yaml is
-    # deliberately referenced, not copied, from outside each tenant's own
-    # directory.
-    - git:
-        repoURL: https://github.com/kanz-eng/kanz.git
-        revision: main
-        directories:
-          - path: kanz/infra/tenants/*
-          - path: kanz/infra/tenants/_example
-            exclude: true
-      template:
-        metadata:
-          name: "kanz-tenant-{{.path.basename}}-oms"
-          labels:
-            app.kubernetes.io/part-of: kanz
-            kanz.io/tenant: "{{.path.basename}}"
-        spec:
-          project: kanz
-          source:
-            repoURL: https://github.com/kanz-eng/kanz.git
-            targetRevision: main
-            path: "{{.path.path}}"
-            kustomize: {}
-          destination:
-            server: https://kubernetes.default.svc
-            namespace: kanz-services
-          syncPolicy:
-            automated: { prune: true, selfHeal: true }
-            syncOptions:
-              - CreateNamespace=true
-              - ApplyOutOfSyncOnly=true
   template:
     metadata:
       name: "kanz-{{.env}}-{{.component}}"

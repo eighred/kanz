@@ -1,6 +1,7 @@
 package arch
 
 import (
+	"bytes"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -10,46 +11,53 @@ import (
 	"testing"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/kanz-eng/kanz/internal/tenantgen"
 )
 
-// MT-02 Task 3 — the tenant compute guard.
+// MT-02 Task 3/4 — the tenant compute guard.
 //
 // tenancy.yaml lists tenant NATS accounts (the storage/streams isolation
-// boundary, MT-01c); infra/tenants/ lists tenant compute (the per-tenant OMS
-// overlay, MT-02). Nothing compares them. A tenant provisioned with an
-// account and no compute overlay is exactly the production defect this whole
-// epic closes, and it would silently return the day someone adds a
-// tenancy.yaml account by hand without also adding the overlay — or adds an
-// overlay without ever admitting its ServiceAccount to the broker (SEC-M3
-// all over again).
+// boundary, MT-01c); infra/deploy/tenants/ lists tenant compute (the
+// per-tenant OMS manifest, MT-02). Nothing compares them. A tenant
+// provisioned with an account and no compute manifest is exactly the
+// production defect this whole epic closes, and it would silently return the
+// day someone adds a tenancy.yaml account by hand without also adding the
+// manifest — or adds a manifest without ever admitting its ServiceAccount to
+// the broker (SEC-M3 all over again).
+//
+// The corrected MT-02 design commits a RENDERED, plain-YAML manifest per
+// tenant rather than a kustomize overlay referencing the base out-of-tree —
+// see kanz/infra/deploy/tenants/README.md and internal/tenantgen's package
+// doc for why. A committed copy is only safe because nothing hand-maintains
+// it: this guard re-renders EVERY committed tenant manifest from the LIVE
+// base (infra/deploy/oms-deploy.yaml) via the exact same
+// internal/tenantgen.Render used by cmd/kanz-tenantgen, and diffs the WHOLE
+// document byte-for-byte. A base gaining a new env var, volume, or field
+// becomes a CI failure here, not a silently divergent tenant — and because
+// the diff is over the entire rendered output, not a blacklist of fields
+// this test's author thought to check, no future field can slip past it
+// unnoticed.
 //
 // This guard is PURE GO (ground truth #7 — CI has no kubectl/kustomize, so a
 // guard that shells out would skip in CI exactly the way DATA-M6 did).
 //
-// It parses, rather than greps: `data["tenants.conf"]` is reached via a real
-// YAML unmarshal of the outer ConfigMap, not a keyword search over the whole
-// raw file — tenancy.yaml's header discusses tenants in prose ("Reserved
-// platform/legacy tenant", "per-tenant streams", ...), and a grep across the
-// entire byte content would over-report on that prose exactly the way the
-// retired internal/integrity package once did (KANZ_BRAIN.md). The extracted
-// `tenants.conf` value is NATS's own config-language, not YAML, so it gets
-// its own brace-depth-aware scanner below (natsAccounts) rather than a
-// second YAML parse — that scanner is structural (it tracks block
-// boundaries), not a flat regex over the blob, for the same reason.
+// It parses, rather than greps, tenancy.yaml: `data["tenants.conf"]` is
+// reached via a real YAML unmarshal of the outer ConfigMap, not a keyword
+// search over the whole raw file — tenancy.yaml's header discusses tenants
+// in prose ("Reserved platform/legacy tenant", "per-tenant streams", ...),
+// and a grep across the entire byte content would over-report on that prose
+// exactly the way the retired internal/integrity package once did
+// (KANZ_BRAIN.md). The extracted `tenants.conf` value is NATS's own
+// config-language, not YAML, so it gets its own brace-depth-aware scanner
+// below (natsAccounts) rather than a second YAML parse — that scanner is
+// structural (it tracks block boundaries), not a flat regex over the blob,
+// for the same reason.
 
 // tenantConfigMap is the minimal shape of infra/nats/tenancy.yaml's outer
 // Kubernetes object — just enough to reach the ConfigMap's data.
 type tenantConfigMap struct {
 	Data map[string]string `yaml:"data"`
-}
-
-// tenantOverlay is the minimal shape of a kanz/infra/tenants/<tenant>/
-// kustomization.yaml this guard needs: the nameSuffix that determines the
-// ServiceAccount the overlay actually renders (kanz/infra/tenants/README.md
-// — "oms" is the base's declared ServiceAccount name; nameSuffix appends
-// verbatim).
-type tenantOverlay struct {
-	NameSuffix string `yaml:"nameSuffix"`
 }
 
 // blockOpenLine matches a NATS-config-language line that OPENS a new
@@ -106,9 +114,10 @@ func isPlatformNATSAccount(name string) bool {
 }
 
 // TestTenantComputeGuard asserts, both directions, that every tenant NATS
-// account has a matching compute overlay and vice versa, and that each
-// overlay's rendered ServiceAccount is the exact SPIFFE ID its account
-// admits.
+// account has a matching compute manifest and vice versa, that each
+// manifest's rendered ServiceAccount is the exact SPIFFE ID its account
+// admits, and that each committed manifest is byte-identical to what
+// internal/tenantgen.Render produces from the LIVE base today.
 func TestTenantComputeGuard(t *testing.T) {
 	root := moduleRoot(t)
 
@@ -139,62 +148,72 @@ func TestTenantComputeGuard(t *testing.T) {
 			"not a pass. If tenancy.yaml's account block format genuinely changed, update natsAccounts — don't relax this check.")
 	}
 
-	tenantsDir := filepath.Join(root, "infra", "tenants")
+	basePath := filepath.Join(root, "infra", "deploy", "oms-deploy.yaml")
+	baseBytes, err := os.ReadFile(basePath)
+	if err != nil {
+		t.Fatalf("read %s: %v", basePath, err)
+	}
+
+	tenantsDir := filepath.Join(root, "infra", "deploy", "tenants")
 	entries, err := os.ReadDir(tenantsDir)
 	if err != nil {
 		t.Fatalf("read %s: %v", tenantsDir, err)
 	}
 
-	// tenant -> the SPIFFE ID its overlay's rendered ServiceAccount would
-	// produce (spiffe://kanz.internal/ns/kanz-services/sa/oms-<tenant>,
-	// per ground truth #5), derived from the overlay's OWN nameSuffix field
-	// rather than assumed from the directory name.
+	// tenant -> the SPIFFE ID its committed manifest's rendered ServiceAccount
+	// actually carries (spiffe://kanz.internal/ns/kanz-services/sa/<name>,
+	// per ground truth #5), read back from the manifest itself rather than
+	// assumed from the directory name.
 	overlays := map[string]string{}
 	for _, e := range entries {
-		if !e.IsDir() || e.Name() == "_example" {
-			// _example is the worked-example fixture (kanz/infra/tenants/README.md),
-			// excluded from ArgoCD's tenants generator for the same reason it is
-			// excluded here: it can never be mistaken for a real tenant.
+		if !e.IsDir() {
 			continue
 		}
 		tenant := e.Name()
-		kPath := filepath.Join(tenantsDir, tenant, "kustomization.yaml")
-		kb, err := os.ReadFile(kPath)
+		manifestPath := filepath.Join(tenantsDir, tenant, "oms-"+tenant+".yaml")
+		committed, err := os.ReadFile(manifestPath)
 		if err != nil {
-			t.Fatalf("infra/tenants/%s has no kustomization.yaml (%v) — every tenant directory must be a real overlay", tenant, err)
+			t.Fatalf("infra/deploy/tenants/%s has no oms-%s.yaml (%v) — every tenant directory must hold its rendered compute manifest", tenant, tenant, err)
 		}
-		var k tenantOverlay
-		if err := yaml.Unmarshal(kb, &k); err != nil {
-			t.Fatalf("parse infra/tenants/%s/kustomization.yaml: %v", tenant, err)
+
+		rendered, err := tenantgen.Render(baseBytes, tenant)
+		if err != nil {
+			t.Fatalf("infra/deploy/tenants/%s: re-render from the live base failed: %v", tenant, err)
 		}
-		wantSuffix := "-" + tenant
-		if k.NameSuffix != wantSuffix {
-			t.Errorf("infra/tenants/%s/kustomization.yaml: nameSuffix is %q, expected %q — the rendered "+
-				"ServiceAccount would not be oms-%s", tenant, k.NameSuffix, wantSuffix, tenant)
+		if !bytes.Equal(rendered, committed) {
+			t.Errorf("infra/deploy/tenants/%s/oms-%s.yaml has DRIFTED from infra/deploy/oms-deploy.yaml — "+
+				"the committed manifest no longer matches what internal/tenantgen.Render produces from the live "+
+				"base. Re-run: go run ./cmd/kanz-tenantgen -tenant %s, then commit the result.",
+				tenant, tenant, tenant)
 			continue
 		}
-		overlays[tenant] = "spiffe://kanz.internal/ns/kanz-services/sa/oms" + k.NameSuffix
+
+		sa, err := tenantgen.ServiceAccountName(committed)
+		if err != nil {
+			t.Fatalf("infra/deploy/tenants/%s/oms-%s.yaml: %v", tenant, tenant, err)
+		}
+		overlays[tenant] = "spiffe://kanz.internal/ns/kanz-services/sa/" + sa
 	}
 	if len(overlays) == 0 {
-		t.Fatal("zero tenant overlays found under infra/tenants/ (excluding _example) — non-vacuous by design " +
+		t.Fatal("zero tenant compute manifests found under infra/deploy/tenants/ — non-vacuous by design " +
 			"(MT-02 Task 3): finding none is a FAILURE, not a pass. Either no tenant has compute provisioned yet " +
-			"(run provision-tenant.sh's compute step) or infra/tenants/ moved.")
+			"(run provision-tenant.sh's compute step) or infra/deploy/tenants/ moved.")
 	}
 
 	var problems []string
 	for tenant := range tenantAccounts {
 		if _, ok := overlays[tenant]; !ok {
 			problems = append(problems, fmt.Sprintf(
-				"tenant %q has a NATS account in infra/nats/tenancy.yaml but no infra/tenants/%s/ overlay — "+
+				"tenant %q has a NATS account in infra/nats/tenancy.yaml but no infra/deploy/tenants/%s/ manifest — "+
 					"it is provisioned with streams and no compute; run provision-tenant.sh's compute step "+
-					"(see kanz/infra/tenants/README.md) then commit the result", tenant, tenant))
+					"(see kanz/infra/deploy/tenants/README.md) then commit the result", tenant, tenant))
 		}
 	}
 	for tenant, expectedSPIFFE := range overlays {
 		users, ok := tenantAccounts[tenant]
 		if !ok {
 			problems = append(problems, fmt.Sprintf(
-				"infra/tenants/%s/ has a compute overlay but no NATS account in infra/nats/tenancy.yaml — "+
+				"infra/deploy/tenants/%s/ has a compute manifest but no NATS account in infra/nats/tenancy.yaml — "+
 					"its pod would authenticate and reach no account (SEC-M3); add %q to the tenant's account "+
 					"the same way provision-tenant.sh's compute step instructs (tenantctl.sh's static-mode path)",
 				tenant, expectedSPIFFE))
@@ -207,14 +226,14 @@ func TestTenantComputeGuard(t *testing.T) {
 			}
 			sort.Strings(got)
 			problems = append(problems, fmt.Sprintf(
-				"tenant %q: overlay renders ServiceAccount SPIFFE ID %s but tenancy.yaml's %q account admits %v — "+
+				"tenant %q: manifest renders ServiceAccount SPIFFE ID %s but tenancy.yaml's %q account admits %v — "+
 					"the pod would authenticate and reach no account (SEC-M3)", tenant, expectedSPIFFE, tenant, got))
 		}
 	}
 
 	if len(problems) > 0 {
 		sort.Strings(problems)
-		t.Fatalf("tenant compute guard (MT-02 Task 3):\n  %s", strings.Join(problems, "\n  "))
+		t.Fatalf("tenant compute guard (MT-02 Task 3/4):\n  %s", strings.Join(problems, "\n  "))
 	}
-	t.Logf("%d tenant(s) checked, each with a matching NATS account and compute overlay", len(overlays))
+	t.Logf("%d tenant(s) checked, each with a matching NATS account and non-drifted compute manifest", len(overlays))
 }
