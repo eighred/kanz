@@ -10,7 +10,7 @@
 #
 # The last hop: the Broker-API feedback projection TradingView reads. Like
 # webhook-ingest, it had neither an image nor a manifest.
-FROM golang:1.26.1 AS build
+FROM golang:1.26.5 AS build
 WORKDIR /src
 ENV GOFLAGS=-mod=mod
 

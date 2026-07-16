@@ -11,7 +11,7 @@
 # THE FIRST HOP OF THE TRADING LOOP. It had no image and no manifest, so nothing
 # on this platform could accept a TradingView signal at all — the loop had no
 # entry point in production (EXEC-M10, found by deploying to a real cluster).
-FROM golang:1.26.1 AS build
+FROM golang:1.26.5 AS build
 WORKDIR /src
 ENV GOFLAGS=-mod=mod
 

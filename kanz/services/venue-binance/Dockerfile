@@ -11,7 +11,7 @@
 # github.com/kanz-eng/kanz-schemas-go => ../kanz-schemas/gen/go, which is
 # generated-not-committed (EVT-15a). Build with:
 #   docker build -f kanz/services/venue-binance/Dockerfile .
-FROM golang:1.26.1 AS build
+FROM golang:1.26.5 AS build
 WORKDIR /src
 ENV GOFLAGS=-mod=mod
 
