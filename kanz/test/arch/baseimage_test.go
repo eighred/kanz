@@ -27,7 +27,26 @@ import (
 // next one too. The invariant is AGREEMENT: every FROM golang: line in the
 // module must name the same version, or the build fails and says which files
 // disagree with which.
+//
+// SEC-M5 extends the same invariant to go.mod's `toolchain` directive. After
+// SEC-M5 task 1, go.mod pins `toolchain go1.26.5` so CI's vulnerability
+// scanner measures the Go version the Dockerfiles actually ship, instead of
+// whatever `go` version happened to be on the CI runner's PATH. That gives
+// the toolchain version a SECOND home, in a different language and edited by
+// different tooling (`go mod edit`, Dependabot, a manual bump) than the
+// Dockerfiles are. Nothing compared the two, which reproduces SEC-M4 one
+// level up: the next bump moves one and not the other, and every gate —
+// including this one, unextended — stays green. go.mod's toolchain version
+// now participates in the same agreement check as every Dockerfile.
 var fromGolangLine = regexp.MustCompile(`(?m)^FROM\s+golang:(\S+)`)
+
+// toolchainLine matches go.mod's `toolchain goX.Y.Z` directive, capturing the
+// version WITHOUT the leading "go" — go.mod spells the version "go1.26.5"
+// while the Dockerfiles spell the same version "1.26.5". That is a
+// difference in FORM, not a disagreement in version, so the "go" prefix is
+// stripped here, at the source, rather than carried into the comparison
+// where it would make an identical version look like a mismatch.
+var toolchainLine = regexp.MustCompile(`(?m)^toolchain\s+go(\S+)`)
 
 var leadingDigits = regexp.MustCompile(`^\d+`)
 
@@ -78,6 +97,39 @@ func compareVersions(a, b string) int {
 		}
 	}
 	return 0
+}
+
+// goModToolchainVersion returns the version go.mod's `toolchain` directive
+// names, with the leading "go" stripped so it compares equal to the
+// Dockerfiles' bare "1.26.5" form.
+//
+// A missing or unparsable directive is a FAILURE here, not a skip. go.mod's
+// toolchain line is the version CI's vulnerability scanner actually measures
+// (SEC-M5 task 1) — if this guard silently ignored a missing or malformed
+// directive, it would have nothing left to compare the Dockerfiles against,
+// and the two would be free to drift apart exactly as SEC-M4 did, just one
+// source of truth over.
+func goModToolchainVersion(t *testing.T, root string) string {
+	t.Helper()
+	path := filepath.Join(root, "go.mod")
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	// NORMALIZE CRLF: kanz/go.mod is CRLF on a Windows checkout
+	// (core.autocrlf=true), same reason the Dockerfile walk above
+	// normalises — an anchored regex against "\n" alone would otherwise see
+	// no toolchain line at all and this guard would silently pass with
+	// nothing checked.
+	content := strings.ReplaceAll(string(b), "\r\n", "\n")
+	m := toolchainLine.FindStringSubmatch(content)
+	if m == nil {
+		t.Fatal("go.mod has no `toolchain goX.Y.Z` directive (or it does not match the expected format) — " +
+			"this guard cannot verify the Dockerfiles agree with the Go version CI's vulnerability scanner " +
+			"actually measures. Add (or fix) the toolchain directive; a guard that skips a missing " +
+			"source-of-truth is how the version drifts back apart")
+	}
+	return m[1]
 }
 
 func TestAllDockerfilesPinTheSameGolangVersion(t *testing.T) {
@@ -135,6 +187,15 @@ func TestAllDockerfilesPinTheSameGolangVersion(t *testing.T) {
 			dockerfileCount)
 	}
 
+	// SEC-M5: go.mod's toolchain directive is a second source of truth for
+	// the same version, added to the identical agreement check below. It
+	// joins the map AFTER the Dockerfile-only non-vacuity checks above, so
+	// those checks keep asserting what they always asserted (the Dockerfile
+	// fleet itself is present and parseable) — this addition cannot mask a
+	// broken Dockerfile walk by supplying the map's only entry.
+	goModVersion := goModToolchainVersion(t, root)
+	versionToFiles[goModVersion] = append(versionToFiles[goModVersion], "go.mod")
+
 	if len(versionToFiles) > 1 {
 		// The HIGHEST version is presumed the intended target, never the
 		// most common one. A partial base-image bump always starts as a
@@ -162,19 +223,21 @@ func TestAllDockerfilesPinTheSameGolangVersion(t *testing.T) {
 		for _, v := range versions[1:] {
 			files := append([]string(nil), versionToFiles[v]...)
 			sort.Strings(files)
-			problems = append(problems, "golang:"+v+" ("+strings.Join(files, ", ")+")")
+			problems = append(problems, "go"+v+" ("+strings.Join(files, ", ")+")")
 		}
 		sort.Strings(problems)
 
-		t.Fatalf("Dockerfiles disagree on the golang base image — %d version(s) in use across %d files:\n\n"+
-			"  newest (bump everything up to this): golang:%s (%d file(s))\n"+
+		t.Fatalf("Dockerfiles and go.mod disagree on the Go version — %d version(s) in use across %d source(s):\n\n"+
+			"  newest (bump everything up to this): go%s (%d source(s))\n"+
 			"  older, to bump up:\n    %s\n\n"+
-			"Bump the older Dockerfile(s) above to golang:%s so every image builds from the same, most-current "+
-			"base — never the other direction. This is exactly how SEC-M4 happened: a base-image bump moved 3 "+
-			"Dockerfiles to a newer, patched version and left 18 (the majority) on an old one with 13 "+
-			"reachable vulnerabilities, and nothing compared them to each other. The minority is presumed "+
-			"the fix, not the outlier.",
-			len(versionToFiles), dockerfileCount, newest, len(versionToFiles[newest]),
+			"Bump the older source(s) above to go%s — every Dockerfile's FROM golang: pin and go.mod's toolchain "+
+			"directive must build from the same, most-current Go, never the other direction. This is exactly how "+
+			"SEC-M4 happened: a base-image bump moved 3 Dockerfiles to a newer, patched version and left 18 (the "+
+			"majority) on an old one with 13 reachable vulnerabilities, and nothing compared them to each other. "+
+			"SEC-M5 closes the same gap one level up — between the Dockerfiles and go.mod's toolchain directive, "+
+			"which is the version CI's vulnerability scanner actually measures. The minority is presumed the fix, "+
+			"not the outlier — even when go.mod itself is the lone dissenter.",
+			len(versionToFiles), dockerfileCount+1, newest, len(versionToFiles[newest]),
 			strings.Join(problems, "\n    "), newest)
 	}
 }
