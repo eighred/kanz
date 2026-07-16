@@ -41,10 +41,10 @@ func (g *COMP01Gate) Check(ctx context.Context, cmd *orderpb.SubmitOrder) (*Brea
 		PortfolioID:    cmd.GetPortfolioId(),
 		InstrumentID:   cmd.GetInstrumentId(),
 		SignedQuantity: signedQuantity(cmd.GetSide(), cmd.GetQuantity()),
-		// Price values the order's notional. The limit price is used when set; a
-		// market order without a limit projects at zero incremental value until a
-		// reference-price source is wired (a known v1 gap — the existing book is
-		// still fully checked).
+		// Price values the order's notional. The limit price is the only price a
+		// SubmitOrder carries; a MARKET/STOP order has none, and the gate refuses
+		// those pre-trade (COMP-M1) rather than valuing them at zero. Admitting
+		// market orders again needs a reference-price source wired here — COMP-M2.
 		Price:    cmd.GetLimitPrice(),
 		Currency: g.currency,
 		OrderID:  cmd.GetOrderId(),
@@ -65,6 +65,16 @@ func (g *COMP01Gate) Check(ctx context.Context, cmd *orderpb.SubmitOrder) (*Brea
 		return &Breach{
 			Code:   "MANDATE_MISSING",
 			Reason: "no mandate governs portfolio " + cmd.GetPortfolioId(),
+		}, nil
+	}
+	// An UNPRICED order is refused under its own code, not a rule violation:
+	// nothing was breached, because nothing could be evaluated. A reviewer
+	// reading PRICE_UNAVAILABLE knows to go wire a reference-price source
+	// (COMP-M2) — not to go look for the rule that fired (COMP-M1).
+	if dec.Unpriced {
+		return &Breach{
+			Code:   "PRICE_UNAVAILABLE",
+			Reason: "no usable price to value order for instrument " + cmd.GetInstrumentId(),
 		}, nil
 	}
 	return breachFromResult(dec.Result), nil

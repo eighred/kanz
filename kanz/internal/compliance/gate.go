@@ -8,6 +8,12 @@ import (
 
 	commonpb "github.com/kanz-eng/kanz-schemas-go/common/v1"
 	compliancepb "github.com/kanz-eng/kanz-schemas-go/compliance/v1"
+
+	// decutil: this package's own tests declare a local `dec(...)` Decimal-literal
+	// helper (engine_test.go), so the platform decimal package is aliased here to
+	// avoid the name clash rather than renaming a helper used across every test
+	// file in the package.
+	decutil "github.com/kanz-eng/kanz/internal/dec"
 )
 
 // PreTradeGate is the COMP-01c pre-trade enforcement point — the engine wired to
@@ -30,6 +36,7 @@ type PreTradeGate struct {
 
 	requireMandate bool
 	onUngoverned   func(portfolioID string)
+	onUnpriced     func(portfolioID, instrumentID string)
 
 	mu     sync.Mutex
 	warned map[string]bool // portfolios already named in a WARN — say it once, count always
@@ -56,6 +63,14 @@ func WithRequireMandate(require bool) PreTradeOption {
 // ungoverned" is a number on a dashboard rather than a thing nobody has asked.
 func WithUngovernedObserver(fn func(portfolioID string)) PreTradeOption {
 	return func(g *PreTradeGate) { g.onUngoverned = fn }
+}
+
+// WithUnpricedObserver is called for EVERY order the gate refuses for lack of a
+// usable price — the composition root wires it to a counter (COMP-M1), the same
+// way WithUngovernedObserver makes the ungoverned gap a number on a dashboard
+// instead of a thing nobody has asked about.
+func WithUnpricedObserver(fn func(portfolioID, instrumentID string)) PreTradeOption {
+	return func(g *PreTradeGate) { g.onUnpriced = fn }
 }
 
 // BookSource loads the current book for a portfolio — the holdings the order is
@@ -102,6 +117,19 @@ type Decision struct {
 	// one silent `return Allowed:true`, so "we forgot to put fund X under mandate"
 	// and "fund X passed compliance" were the same observable event (EXEC-M14).
 	Ungoverned bool
+
+	// Unpriced means the order could not be valued — Price was nil, zero, or
+	// negative — so NO RULE WAS EVALUATED against it. That is NOT a rule breach:
+	// nothing was checked, because nothing could be checked. The old code
+	// collapsed the two into one silent projection: an unpriced order projects
+	// at zero market value, and heldPositions (rules.go) treats a zero-value
+	// position as flat and skips it — so "we cannot value this order" and "this
+	// order passed compliance" were the same observable event, and worse, a
+	// market order touching an already-breaching position ERASED that breach
+	// from the check (COMP-M1, the same EXEC-M14 collapse one door over). A
+	// reviewer reading Unpriced knows to go wire a reference-price source, not
+	// to go look for the rule that fired.
+	Unpriced bool
 }
 
 // NewPreTradeGate wires the gate. engine defaults to NewEngine(nil); a nil
@@ -155,6 +183,33 @@ func (g *PreTradeGate) noteUngoverned(portfolioID string) {
 		"fix", "put it under mandate with kanz-mandate, or set OMS_REQUIRE_MANDATE=true to refuse instead")
 }
 
+// noteUnpriced makes the unpriced-refusal case AUDIBLE, mirroring noteUngoverned
+// (EXEC-M14): an order the gate cannot value must not look like an order that
+// passed compliance in the logs — it was never evaluated at all.
+//
+// The counter fires on EVERY such order (that is the number that belongs on a
+// dashboard: how often a market/stop order is going unpriced). The WARN fires
+// once per (portfolio, instrument) pair — loud enough to be seen, quiet enough
+// not to drown the log for an instrument that trades all day with no reference
+// price wired.
+func (g *PreTradeGate) noteUnpriced(portfolioID, instrumentID string) {
+	if g.onUnpriced != nil {
+		g.onUnpriced(portfolioID, instrumentID)
+	}
+	key := "unpriced:" + portfolioID + ":" + instrumentID
+	g.mu.Lock()
+	first := !g.warned[key]
+	g.warned[key] = true
+	g.mu.Unlock()
+	if !first {
+		return
+	}
+	g.logger.Warn("REFUSING order: no usable price to evaluate compliance against",
+		"portfolio_id", portfolioID,
+		"instrument_id", instrumentID,
+		"fix", "wire a reference-price source for market/stop orders (COMP-M2)")
+}
+
 // Evaluate runs the pre-trade check for one order. A returned error is TRANSIENT
 // (book/mandate load failure) and the caller should retry; a clean Decision with
 // Allowed=false is a terminal compliance rejection. An order against a portfolio
@@ -180,6 +235,16 @@ func (g *PreTradeGate) Evaluate(ctx context.Context, d OrderDelta) (Decision, er
 	}
 	if len(mandate.GetRules()) == 0 {
 		return Decision{Allowed: true}, nil // governed by a mandate that constrains nothing
+	}
+	// An order the gate cannot value must not reach project()/heldPositions: a
+	// nil, zero, or negative price projects at zero market value, and
+	// heldPositions (rules.go) treats a zero-value position as FLAT — the exact
+	// EXEC-M14 collapse above, one door over (COMP-M1). Refused here, before any
+	// I/O, so a market/stop order can never silently erase an existing breach on
+	// the same instrument from the check.
+	if !decutil.IsPositive(d.Price) {
+		g.noteUnpriced(d.PortfolioID, d.InstrumentID)
+		return Decision{Allowed: false, Unpriced: true}, nil
 	}
 	book, err := g.books.Book(ctx, d.PortfolioID)
 	if err != nil {

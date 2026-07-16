@@ -97,6 +97,62 @@ func TestMaterialize_GateRejectsAreNotPublished(t *testing.T) {
 	}
 }
 
+// unpricedGate refuses every order as Unpriced — the shape gate.Evaluate
+// returns for a nil/zero/negative price (COMP-M1).
+type unpricedGate struct{}
+
+func (unpricedGate) Evaluate(_ context.Context, _ compliance.OrderDelta) (compliance.Decision, error) {
+	return compliance.Decision{Allowed: false, Unpriced: true}, nil
+}
+
+// ungovernedGate refuses every order as Ungoverned — no mandate exists.
+type ungovernedGate struct{}
+
+func (ungovernedGate) Evaluate(_ context.Context, _ compliance.OrderDelta) (compliance.Decision, error) {
+	return compliance.Decision{Allowed: false, Ungoverned: true}, nil
+}
+
+// TestMaterialize_UnpricedInstrumentRejectsWithoutClaimingABreach: an
+// instrument absent from the prices map leaves orderDelta's Price nil, the
+// gate refuses it as Unpriced, and the rejection reason must say so — NOTHING
+// BREACHED, and reporting "pre-trade compliance breach" here is actively
+// misleading (COMP-M1 Task 2).
+func TestMaterialize_UnpricedInstrumentRejectsWithoutClaimingABreach(t *testing.T) {
+	pub := &recordingPublisher{}
+	res, err := Materialize(context.Background(), sampleProposal(), "alice", "USD",
+		map[string]float64{"AAA": 10}, // BBB is absent ⇒ nil price ⇒ Unpriced
+		unpricedGate{}, pub)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Rejected) == 0 {
+		t.Fatal("an unpriced order must be rejected")
+	}
+	reason := res.Rejected[0].Reason
+	if reason == "pre-trade compliance breach" {
+		t.Fatalf("an Unpriced decision must not be reported as a breach — nothing was evaluated, got %q", reason)
+	}
+}
+
+// TestMaterialize_UngovernedInstrumentRejectsWithoutClaimingABreach: the
+// same pre-existing defect existed for Ungoverned — fixed alongside Unpriced
+// since it is the identical principle in the same function.
+func TestMaterialize_UngovernedInstrumentRejectsWithoutClaimingABreach(t *testing.T) {
+	pub := &recordingPublisher{}
+	res, err := Materialize(context.Background(), sampleProposal(), "alice", "USD",
+		map[string]float64{"AAA": 10, "BBB": 20}, ungovernedGate{}, pub)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Rejected) == 0 {
+		t.Fatal("an ungoverned order must be rejected")
+	}
+	reason := res.Rejected[0].Reason
+	if reason == "pre-trade compliance breach" {
+		t.Fatalf("an Ungoverned decision must not be reported as a breach — nothing governs the portfolio, got %q", reason)
+	}
+}
+
 func TestMaterialize_PublishErrorPropagates(t *testing.T) {
 	_, err := Materialize(context.Background(), sampleProposal(), "alice", "USD", nil, nil, errPublisher{})
 	if err == nil {
