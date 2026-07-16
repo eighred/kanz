@@ -250,6 +250,26 @@ jobs:
       # proof, the ack-before-produce red twin, and the unprovisioned-tenant NACK.
       # Those are DATA-M1's entire reason to exist; a green pipeline that never
       # ran them was not proof of anything.
+      # SEC-M3a — THE PRODUCTION BROKER CONTRACT. Every NATS step above runs a
+      # broker with NO TLS, and that is why nobody saw SEC-M3: infra/nats/nats.yaml
+      # requires a client SVID (`tls { verify: true, verify_and_map: true }`), and
+      # not one bus.DialNATS call site in the repository set TLSConfig — so the
+      # whole platform, kanz-halt included, was refused at the handshake by the
+      # config it actually deploys, while CI stayed green against a broker
+      # configured unlike production in the one dimension that decides whether a
+      # connection is possible at all.
+      #
+      # This stands the REAL nats.conf + tenants.conf up (extracted from the
+      # ConfigMaps production applies — the same stance as the bootstrap-script
+      # extraction above; a copy would drift and the drift would be invisible).
+      # It runs BESIDE the plaintext broker on its own port: the TEST_NATS_URL
+      # suite proves bus SEMANTICS, this proves the production TRANSPORT, and
+      # neither substitutes for the other. The script refuses to report success
+      # unless the broker logs "TLS required for client connections" — a gate that
+      # comes up without its gate armed proves nothing.
+      - name: Start NATS (mTLS — the broker config production applies)
+        run: kanz/test/mtls/up.sh /tmp/kanz-mtls 4223
+
       - name: Test (race) — incl. arch + contract + Postgres + real-bus + M1 loop
         working-directory: kanz
         env:
@@ -257,6 +277,10 @@ jobs:
           TEST_NATS_URL: nats://localhost:4222
           TEST_KAFKA_BROKERS: localhost:9092
           TEST_OMS_ON_BUS: "1"
+          # Both are required by the mTLS suite; a test that gated on one alone
+          # would FAIL rather than skip when the other went missing.
+          TEST_NATS_MTLS_URL: nats://localhost:4223
+          TEST_NATS_MTLS_CERT_DIR: /tmp/kanz-mtls
         run: go test -race ./...
 
       # THE `redis` BUILD (EXEC-M22). This tag is what webhook-ingest's production image is
