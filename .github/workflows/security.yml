@@ -76,12 +76,17 @@ jobs:
       # trivy fs covers the other ecosystems' lockfiles (npm, pip, go.sum) in one
       # pass. Fail on HIGH/CRITICAL with a fix available (the SECURITY.md SLA tiers).
       - name: trivy filesystem (deps)
-        # Held tag-pinned pending GHSA #1/#2 (trivy-action was compromised): the
-        # advisory's affected range decides which SHA is safe, not readable here.
-        uses: aquasecurity/trivy-action@0.28.0
+        # 0.28.0 was deleted by the GHSA-69fq-xp46-6x23 compromise remediation
+        # (attacker force-pushed most version tags to credential-stealing
+        # malware; the original tags were then removed). <0.35.0 is the
+        # advisory's affected range, so this is pinned to v0.36.0's commit.
+        # Scanner binary pinned too: the malicious artifacts were binaries,
+        # not the action itself.
+        uses: aquasecurity/trivy-action@a9c7b0f06e461e9d4b4d1711f154ee024b8d7ab8 # v0.36.0
         with:
           scan-type: fs
           scan-ref: .
           severity: HIGH,CRITICAL
           ignore-unfixed: true
           exit-code: '1'
+          version: v0.72.0

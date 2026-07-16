@@ -127,11 +127,7 @@ func TestWorkflowActionsArePinnedToSHA(t *testing.T) {
 // pinExempt lists actions deliberately held at a tag instead of a commit SHA,
 // each with the reason. An action is here because somebody DECIDED it, not
 // because somebody forgot to pin it.
-var pinExempt = map[string]string{
-	"aquasecurity/trivy-action": "held tag-pinned pending GHSA #1/#2 — trivy-action was compromised, so pinning " +
-		"its current tag to a SHA could pin the compromise permanently; move to a SHA once the advisory names a " +
-		"safe range",
-}
+var pinExempt = map[string]string{}
 
 // workflowFiles walks the repo root for every *.yml / *.yaml under a
 // .github/workflows directory — both the root .github/workflows and
