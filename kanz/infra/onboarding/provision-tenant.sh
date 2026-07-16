@@ -78,6 +78,16 @@ ADMIN_SUBJECT="${ADMIN_SUBJECT:-admin@$TENANT}"
 DATA_NS="${DATA_NS:-kanz-data}"
 SVC_NS="${SVC_NS:-kanz-services}"
 MSG_NS="${MSG_NS:-kanz-messaging}"
+# DB_NAME: the database step 1's RLS check queries. CNPG's default initdb
+# creates a database named "app" when a Cluster's spec declares no
+# bootstrap/initdb block — verified: infra/dr/postgres/cluster.yaml declares
+# no bootstrap block for either kanz-risk or kanz-books. pg_class is
+# per-database, so querying the wrong one (psql's own default, "postgres",
+# with no -d) returns nothing and step 1 misdiagnoses a HEALTHY cluster as
+# "MT-01d not deployed". Overridable because a future bootstrap.initdb.database
+# entry in cluster.yaml would change CNPG's default database again, and this
+# script must not go back to silently querying the wrong one.
+DB_NAME="${DB_NAME:-app}"
 STEP="${STEP:-all}"
 k() { kubectl "$@"; }
 step() { [ "$STEP" = "all" ] || [ "$STEP" = "$1" ]; }
@@ -124,23 +134,68 @@ fi
 #    the services (the AfterConnect set_config path). This step is a VERIFY, not a
 #    mutate — RLS already isolates any tenant id that appears.
 #
-#    The query returns a relname when FORCE RLS is active and NOTHING when it is
-#    not — the OUTPUT is the verdict, not the exit status. `psql -tAc` exits 0 for
-#    a successful query that returns zero rows, so a version of this check that
+#    ONBOARD-M5: the query now names the NAMED tenant-scoped tables per cluster
+#    (below), not `limit 1` on any relation anywhere in the database. `limit 1`
+#    proved RLS was on SOMEWHERE — if `positions` alone lost FORCE RLS,
+#    `portfolios` still satisfied `limit 1` and this step reported isolation
+#    active while positions leaked across tenants. It also now connects with
+#    `-d "$DB_NAME"` (see DB_NAME above) instead of psql's default "postgres"
+#    database, where these tables do not exist.
+#
+#    The query returns the FORCE-RLS relnames among the named tables, and the
+#    OUTPUT is the verdict, not the exit status — `psql -tAc` exits 0 for a
+#    successful query that returns zero rows, so a version of this check that
 #    piped the query to `>/dev/null` and branched on `$?` alone could never tell
 #    "RLS is off" from "RLS is on": both are a successful query, so both exit 0
-#    and both pass. The output is captured into `out` below and asserted
-#    non-empty for exactly the reason app_current_tenant() RAISES instead of
-#    returning NULL (KANZ_BRAIN.md): an empty result and a broken query must
-#    never be the same observable event. Do NOT "tidy" the capture back into
-#    `>/dev/null` — that silently restores the vacuous check.
+#    and both pass. The output is captured into `present` below and compared,
+#    by NAME, against the expected set for exactly the reason
+#    app_current_tenant() RAISES instead of returning NULL (KANZ_BRAIN.md): an
+#    empty or partial result and a broken query must never be the same
+#    observable event. Do NOT "tidy" the capture back into `>/dev/null` — that
+#    silently restores the vacuous check, and do NOT go back to `limit 1` or a
+#    bare count — a count alone cannot say WHICH table lost FORCE RLS.
 if step storage; then
   echo "-- [1/5] verify RLS isolation is active (kanz-risk, kanz-books)"
   for c in kanz-risk kanz-books; do
-    out="$(k -n "$DATA_NS" exec "$c-1" -- psql -tAc \
-      "select relname from pg_class where relrowsecurity and relforcerowsecurity limit 1")" \
+    # The expected FORCE-RLS table set per cluster, read off the migrations
+    # that declare it (services/risk-engine/migrations/0002_tenant_rls.sql;
+    # services/accounting/migrations/0001_ledger.sql — note the SQL there is
+    # `FORCE  ROW LEVEL SECURITY` with TWO SPACES, in a `FOREACH t IN ARRAY
+    # ARRAY[...]` loop, not individual `ALTER TABLE x FORCE` statements).
+    case "$c" in
+      kanz-risk)  tables="portfolios positions applied_keys" ;;
+      kanz-books) tables="ledger_entries ledger_snapshots" ;;
+    esac
+    expected="$(set -- $tables; echo $#)"
+
+    in_list=""
+    for t in $tables; do
+      in_list="${in_list:+$in_list,}'$t'"
+    done
+
+    present="$(k -n "$DATA_NS" exec "$c-1" -- psql -d "$DB_NAME" -tAc \
+      "select relname from pg_class where relname in ($in_list) and relrowsecurity and relforcerowsecurity order by relname")" \
       || { echo "FATAL: could not run the RLS check on $c — kubectl exec or psql failed (see the error above); this is NOT a verdict on RLS, it means the check could not be run. Fix the underlying infrastructure (namespace/pod/DB reachability) and retry" >&2; exit 1; }
-    [ -n "$out" ] || { echo "FATAL: FORCE RLS not active on $c — MT-01d not deployed" >&2; exit 1; }
+
+    missing=""
+    found_count=0
+    for t in $tables; do
+      found=0
+      old_ifs="$IFS"
+      IFS='
+'
+      for line in $present; do
+        [ "$line" = "$t" ] && found=1
+      done
+      IFS="$old_ifs"
+      if [ "$found" -eq 1 ]; then
+        found_count=$((found_count + 1))
+      else
+        missing="$missing $t"
+      fi
+    done
+
+    [ "$found_count" -eq "$expected" ] || { echo "FATAL: FORCE RLS not active on $c for:$missing (expected $expected of {$tables}, database '$DB_NAME') — MT-01d not deployed for the named table(s), or FORCE RLS was turned off" >&2; exit 1; }
   done
 fi
 
