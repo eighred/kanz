@@ -67,12 +67,30 @@ func leadingInt(component string) int {
 	return n
 }
 
-// compareVersions orders two dotted version tags ("1.26.5", "1.26.10",
-// "1.26.5-alpine") oldest to newest, comparing components numerically
-// left-to-right with a missing trailing component treated as 0. Only the
-// leading digits of each component participate, so "1.26.5-alpine" and
-// "1.26.5-bookworm" compare equal — this guard cares about version drift
-// between Dockerfiles, not packaging variant.
+// normalizeVersion strips each dotted component down to its leading digits,
+// discarding any packaging suffix: "1.26.5-alpine" and "1.26.5-bookworm" both
+// normalize to "1.26.5". This is the key the guard below groups Dockerfile
+// pins and go.mod's toolchain version by — two tags that normalize to the
+// same string ship the identical Go standard library (the only thing this
+// guard protects) and must land in the same group, never be treated as a
+// disagreement to fix. Grouping by the raw tag instead was the bug: it put
+// "1.26.5-alpine" and "1.26.5" in different buckets and failed a fleet that
+// was already in agreement.
+func normalizeVersion(v string) string {
+	parts := strings.Split(v, ".")
+	for i, p := range parts {
+		parts[i] = strconv.Itoa(leadingInt(p))
+	}
+	return strings.Join(parts, ".")
+}
+
+// compareVersions orders two dotted version strings ("1.26.5", "1.26.10")
+// oldest to newest, comparing components numerically left-to-right with a
+// missing trailing component treated as 0. It only looks at the leading
+// digits of each component, so it happens to rank suffixed and unsuffixed
+// forms of the same version as equal too — but within this guard it is only
+// ever called on the already-normalized keys produced by normalizeVersion,
+// which never have a suffix left to strip.
 //
 // A lexical string compare would rank "1.26.10" below "1.26.9" (since '1' <
 // '9' byte-wise), which is exactly the class of bug this test exists to
@@ -132,10 +150,27 @@ func goModToolchainVersion(t *testing.T, root string) string {
 	return m[1]
 }
 
+// pin records one place a Go version is written down: the file that holds
+// it, and the RAW tag exactly as written there ("1.26.5-alpine", not the
+// normalized "1.26.5"). The raw tag is kept alongside the file so a failure
+// message can still tell a reader exactly what is in each file, even though
+// files are grouped — and compared — by normalized version, not by this
+// raw value.
+type pin struct {
+	file string
+	raw  string
+}
+
 func TestAllDockerfilesPinTheSameGolangVersion(t *testing.T) {
 	root := moduleRoot(t)
 
-	versionToFiles := map[string][]string{}
+	// Keyed by NORMALIZED version (see normalizeVersion), not the raw tag.
+	// Keying by the raw tag was the bug this test is being fixed for:
+	// "1.26.5-alpine" and "1.26.5" are the same Go standard library and must
+	// group together, or a fleet-wide move to a suffixed tag — a legitimate,
+	// no-op-for-this-guard change — fails a guard whose own doc comment
+	// promises suffix variants "compare equal."
+	versionToPins := map[string][]pin{}
 	dockerfileCount := 0
 
 	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
@@ -165,8 +200,9 @@ func TestAllDockerfilesPinTheSameGolangVersion(t *testing.T) {
 		rel = filepath.ToSlash(rel)
 
 		for _, m := range fromGolangLine.FindAllStringSubmatch(content, -1) {
-			version := m[1]
-			versionToFiles[version] = append(versionToFiles[version], rel)
+			raw := m[1]
+			norm := normalizeVersion(raw)
+			versionToPins[norm] = append(versionToPins[norm], pin{file: rel, raw: raw})
 		}
 		return nil
 	})
@@ -181,7 +217,7 @@ func TestAllDockerfilesPinTheSameGolangVersion(t *testing.T) {
 	if dockerfileCount == 0 {
 		t.Fatal("found zero Dockerfiles under the module root — the walk is broken, not the fleet")
 	}
-	if len(versionToFiles) == 0 {
+	if len(versionToPins) == 0 {
 		t.Fatalf("found %d Dockerfile(s) but zero \"FROM golang:<version>\" lines — the format changed "+
 			"(e.g. a different keyword, casing, or missing tag) and this guard no longer sees any base image",
 			dockerfileCount)
@@ -193,10 +229,11 @@ func TestAllDockerfilesPinTheSameGolangVersion(t *testing.T) {
 	// those checks keep asserting what they always asserted (the Dockerfile
 	// fleet itself is present and parseable) — this addition cannot mask a
 	// broken Dockerfile walk by supplying the map's only entry.
-	goModVersion := goModToolchainVersion(t, root)
-	versionToFiles[goModVersion] = append(versionToFiles[goModVersion], "go.mod")
+	goModRaw := goModToolchainVersion(t, root)
+	goModNorm := normalizeVersion(goModRaw)
+	versionToPins[goModNorm] = append(versionToPins[goModNorm], pin{file: "go.mod", raw: goModRaw})
 
-	if len(versionToFiles) > 1 {
+	if len(versionToPins) > 1 {
 		// The HIGHEST version is presumed the intended target, never the
 		// most common one. A partial base-image bump always starts as a
 		// minority on the newer version — that is what SEC-M4 was: 18 of 22
@@ -208,7 +245,7 @@ func TestAllDockerfilesPinTheSameGolangVersion(t *testing.T) {
 		// ordering deterministic on an even split (e.g. 11/11), which a
 		// count-based tie-break is not.
 		var versions []string
-		for v := range versionToFiles {
+		for v := range versionToPins {
 			versions = append(versions, v)
 		}
 		sort.Slice(versions, func(i, j int) bool {
@@ -219,11 +256,22 @@ func TestAllDockerfilesPinTheSameGolangVersion(t *testing.T) {
 		})
 		newest := versions[0]
 
+		// Each listed source keeps its raw tag in parentheses — the
+		// normalized version is what decided the grouping, but an engineer
+		// fixing the file needs to know exactly what is written there today.
 		var problems []string
 		for _, v := range versions[1:] {
-			files := append([]string(nil), versionToFiles[v]...)
-			sort.Strings(files)
-			problems = append(problems, "go"+v+" ("+strings.Join(files, ", ")+")")
+			pins := append([]pin(nil), versionToPins[v]...)
+			sort.Slice(pins, func(i, j int) bool { return pins[i].file < pins[j].file })
+			var labels []string
+			for _, p := range pins {
+				if p.file == "go.mod" {
+					labels = append(labels, "go.mod (toolchain go"+p.raw+")")
+				} else {
+					labels = append(labels, p.file+" (golang:"+p.raw+")")
+				}
+			}
+			problems = append(problems, "go"+v+" ("+strings.Join(labels, ", ")+")")
 		}
 		sort.Strings(problems)
 
@@ -237,7 +285,7 @@ func TestAllDockerfilesPinTheSameGolangVersion(t *testing.T) {
 			"SEC-M5 closes the same gap one level up — between the Dockerfiles and go.mod's toolchain directive, "+
 			"which is the version CI's vulnerability scanner actually measures. The minority is presumed the fix, "+
 			"not the outlier — even when go.mod itself is the lone dissenter.",
-			len(versionToFiles), dockerfileCount+1, newest, len(versionToFiles[newest]),
+			len(versionToPins), dockerfileCount+1, newest, len(versionToPins[newest]),
 			strings.Join(problems, "\n    "), newest)
 	}
 }
