@@ -62,8 +62,18 @@ updates:
 
   # GitHub Actions pinned in the workflows (keep the supply chain of CI itself
   # current — the actions are part of the build's trust base).
+  #
+  # Both directories, not just root: SUPPLY-M1 pinned every `uses:` to an
+  # immutable commit SHA, in both .github/workflows and
+  # kanz-schemas/.github/workflows. A pin is only as fresh as whatever can move
+  # it, and Dependabot is now the ONLY thing that can — a floating tag used to
+  # absorb upstream security fixes silently, a SHA never will. Scanning just "/"
+  # leaves the 14 pins under kanz-schemas frozen forever with no updater
+  # watching them. (If kanz-schemas is ever split into its own mirrored repo,
+  # its own Dependabot config would cover its workflows there — but today its
+  # workflows live, and run, in this monorepo, so they're covered here.)
   - package-ecosystem: github-actions
-    directory: /
+    directories: ["/", "/kanz-schemas"]
     schedule: { interval: weekly }
     groups:
       ci-actions:

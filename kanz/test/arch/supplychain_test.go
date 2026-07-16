@@ -35,8 +35,9 @@ func TestWorkflowActionsArePinnedToSHA(t *testing.T) {
 			"(this test would otherwise pass vacuously)")
 	}
 
-	usesRe := regexp.MustCompile(`(?m)^\s*(?:-\s*)?uses:\s*(\S+)`)
+	usesRe := regexp.MustCompile(`(?m)^\s*(?:-\s*)?uses:\s*(\S+)(.*)$`)
 	shaRe := regexp.MustCompile(`^[0-9a-fA-F]{40}$`)
+	trailerRe := regexp.MustCompile(`#\s*\S+`)
 
 	var problems []string
 	seen := map[string]bool{} // action name -> referenced anywhere (for dead-exemption check)
@@ -59,6 +60,7 @@ func TestWorkflowActionsArePinnedToSHA(t *testing.T) {
 
 		for _, m := range usesRe.FindAllStringSubmatch(body, -1) {
 			actionRef := m[1]
+			trailer := m[2]
 			if strings.HasPrefix(actionRef, "./") {
 				// A local composite action is in-repo, not a supply-chain edge —
 				// there is nothing external to pin.
@@ -73,7 +75,7 @@ func TestWorkflowActionsArePinnedToSHA(t *testing.T) {
 			name, ref := actionRef[:at], actionRef[at+1:]
 			seen[name] = true
 
-			reason, exempt := pinExempt[name]
+			_, exempt := pinExempt[name]
 			isSHA := shaRe.MatchString(ref)
 
 			if exempt {
@@ -81,13 +83,17 @@ func TestWorkflowActionsArePinnedToSHA(t *testing.T) {
 					problems = append(problems, name+" ("+rel+"): now SHA-pinned ("+ref+") — remove it from "+
 						"pinExempt, the exemption is stale")
 				}
-				_ = reason // reason is written documentation, asserted non-empty below
 				continue
 			}
 			if !isSHA {
 				problems = append(problems, rel+": "+name+"@"+ref+" is pinned to a tag/branch, not a commit SHA — "+
 					"pin it to the commit SHA "+ref+" currently resolves to, keeping \""+ref+"\" as a trailing comment "+
 					"(e.g. uses: "+name+"@<40-char-sha> # "+ref+")")
+			} else if !trailerRe.MatchString(trailer) {
+				problems = append(problems, rel+": "+name+"@"+ref+" is SHA-pinned but has no trailing \"# <ref>\" "+
+					"comment — Dependabot reads that comment to know what tag/version the SHA corresponds to; a bare "+
+					"SHA with no comment is invisible to it and will never receive a security bump (add e.g. \"# v4\" "+
+					"after the SHA)")
 			}
 		}
 	}
