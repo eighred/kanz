@@ -30,15 +30,15 @@ jobs:
     env:
       IMAGE: ghcr.io/${{ github.repository_owner }}/${{ matrix.service }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
       # Generate the uncommitted Go SDK (EVT-15a) the image build COPYs — same
       # as build.yml / the kanz-ci Go job.
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version-file: kanz/go.mod
           cache-dependency-path: kanz/go.sum
-      - uses: bufbuild/buf-setup-action@v1
+      - uses: bufbuild/buf-setup-action@a47c93e0b1648d5651a065437926377d060baa99 # v1
         with:
           version: 1.69.0
           github_token: ${{ secrets.GITHUB_TOKEN }}
@@ -56,9 +56,9 @@ jobs:
           cd gen/go && go mod init github.com/kanz-eng/kanz-schemas-go || true
           cd gen/go && go mod tidy
 
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
       - name: Log in to GHCR
-        uses: docker/login-action@v3
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -66,7 +66,7 @@ jobs:
 
       - name: Image metadata
         id: meta
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5
         with:
           images: ${{ env.IMAGE }}
           tags: |
@@ -75,7 +75,7 @@ jobs:
 
       - name: Build and push
         id: build
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: .
           file: kanz/services/${{ matrix.service }}/Dockerfile
@@ -87,6 +87,8 @@ jobs:
 
       # Everything below pins to the immutable digest, never a tag.
       - name: Vulnerability scan (fail on CRITICAL)
+        # Held tag-pinned pending GHSA #1/#2 (trivy-action was compromised): the
+        # advisory's affected range decides which SHA is safe, not readable here.
         uses: aquasecurity/trivy-action@0.28.0
         with:
           image-ref: ${{ env.IMAGE }}@${{ steps.build.outputs.digest }}
@@ -98,8 +100,8 @@ jobs:
           # but unsigned — admission then refuses it. Bump to HIGH once the base
           # images are clean.
 
-      - uses: sigstore/cosign-installer@v3
-      - uses: anchore/sbom-action@v0
+      - uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3
+      - uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0
         with:
           image: ${{ env.IMAGE }}@${{ steps.build.outputs.digest }}
           format: spdx-json
@@ -110,6 +112,8 @@ jobs:
       # never ran a scan can't run) and the SEC-02c scheduled re-scan has a
       # baseline. cosign-vuln is the standard predicate format trivy emits.
       - name: Vulnerability attestation predicate
+        # Held tag-pinned pending GHSA #1/#2 (trivy-action was compromised): the
+        # advisory's affected range decides which SHA is safe, not readable here.
         uses: aquasecurity/trivy-action@0.28.0
         with:
           image-ref: ${{ env.IMAGE }}@${{ steps.build.outputs.digest }}
