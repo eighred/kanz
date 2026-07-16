@@ -40,12 +40,12 @@
 # production identity. In dev/staging against the HS256 validator, mint both
 # with cmd/kanz-devtoken (a standalone CLI in no service image).
 #
-# Both are sent as `Authorization: Bearer <token>`. There is no
-# `X-Kanz-Tenant` header anywhere in this script: the gateway never reads
-# that header, it derives the caller's tenant from the authenticated
-# principal (injecting X-Kanz-Principal-Tenant downstream itself) — a header
-# the gateway ignores is a lie the next reader inherits, the same defect
-# class ONBOARD-M1 deleted from this same file.
+# Both are sent as `Authorization: Bearer <token>`. Neither probe request
+# sets an `X-Kanz-Tenant` header: the gateway never reads that header, it
+# derives the caller's tenant from the authenticated principal (injecting
+# X-Kanz-Principal-Tenant downstream itself) — a header the gateway ignores
+# is a lie the next reader inherits, the same defect class ONBOARD-M1
+# deleted from this same file.
 #
 # Exit codes (verify step only):
 #   0 = isolation confirmed: self=200, cross=403/404.
@@ -54,17 +54,23 @@
 #       REAL cross-tenant leak — the one outcome this script exists to
 #       prevent), or cross=401 (the probe token itself does not authenticate,
 #       so its denial proves nothing about isolation — reported as
-#       inconclusive, never as "isolation holds").
-#   2 = REFUSED: VERIFY_TOKEN and/or VERIFY_TOKEN_OTHER are unset. Checked
-#       before step 1 whenever STEP=all, so a run never provisions steps 1-4
-#       only to discover at step 5 that the gate cannot run.
+#       inconclusive, never as "isolation holds") — or the gateway itself was
+#       unreachable on either probe (curl failed outright), reported as a
+#       FATAL naming the unreachable gateway, never a silent abort.
+#   2 = REFUSED: VERIFY_TOKEN and/or VERIFY_TOKEN_OTHER are unset, or the two
+#       are byte-identical (the cross-tenant probe token must belong to a
+#       DIFFERENT tenant). Checked before step 1 whenever STEP=all, so a run
+#       never provisions steps 1-4 only to discover at step 5 that the gate
+#       cannot run.
 #
-# Honest limit: if VERIFY_TOKEN_OTHER happens to belong to the SAME tenant as
-# VERIFY_TOKEN (operator error, not a real second tenant), the cross probe
-# returns 200 and this script reports a CROSS-TENANT LEAK that is not real.
-# This check cannot distinguish "wrong-tenant token" from "same-tenant token
-# by mistake" — it can only observe that the two tokens read the same data.
-# Verify VERIFY_TOKEN_OTHER's subject before treating a reported leak as real.
+# Honest limit: verify_preflight refuses (exit 2) when VERIFY_TOKEN and
+# VERIFY_TOKEN_OTHER are byte-identical, which catches the single most likely
+# operator error (copy-paste) before any probe runs. This shrinks but does
+# not eliminate the limit: if VERIFY_TOKEN_OTHER is a DISTINCT token that
+# still happens to authenticate as the SAME tenant as VERIFY_TOKEN, the cross
+# probe returns 200 and this script reports a CROSS-TENANT LEAK that is not
+# real — it can only compare token strings, never subjects. Verify
+# VERIFY_TOKEN_OTHER's subject before treating a reported leak as real.
 set -eu
 
 TENANT="${TENANT:?set TENANT to the new tenant id (lowercase, dns-safe)}"
@@ -92,6 +98,10 @@ verify_preflight() {
   if [ -n "$missing" ]; then
     echo "REFUSED: cannot verify cross-tenant isolation for '$TENANT' — missing prerequisite(s):" >&2
     printf '%s' "$missing" >&2
+    exit 2
+  fi
+  if [ "$VERIFY_TOKEN" = "$VERIFY_TOKEN_OTHER" ]; then
+    echo "REFUSED: VERIFY_TOKEN and VERIFY_TOKEN_OTHER are the same token — the cross-tenant probe token (VERIFY_TOKEN_OTHER) must belong to a DIFFERENT, already-existing tenant, not '$TENANT' itself. Mint a distinct token for another tenant and retry." >&2
     exit 2
   fi
 }
@@ -169,10 +179,12 @@ if step verify; then
   GW="${GW:-http://api-gateway.$SVC_NS:8080}"
   code_self="$(curl -s -o /dev/null -w '%{http_code}' \
     -H "Authorization: Bearer $VERIFY_TOKEN" \
-    "$GW/v1/portfolios/${FIRST_PORTFOLIO:-PF1}/exposure")"
+    "$GW/v1/portfolios/${FIRST_PORTFOLIO:-PF1}/exposure")" \
+    || { echo "FATAL: gateway unreachable at $GW (self probe) — cannot verify isolation" >&2; exit 1; }
   code_other="$(curl -s -o /dev/null -w '%{http_code}' \
     -H "Authorization: Bearer $VERIFY_TOKEN_OTHER" \
-    "$GW/v1/portfolios/${FIRST_PORTFOLIO:-PF1}/exposure")"
+    "$GW/v1/portfolios/${FIRST_PORTFOLIO:-PF1}/exposure")" \
+    || { echo "FATAL: gateway unreachable at $GW (cross probe) — cannot verify isolation" >&2; exit 1; }
   echo "   self=$code_self other=$code_other"
 
   if [ "$code_self" != "200" ]; then
