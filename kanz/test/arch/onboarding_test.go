@@ -301,10 +301,17 @@ func TestTenantctlOnboardRefusesWithoutPrerequisites(t *testing.T) {
 	//     created. See the doc comment above for why this line exists: it is
 	//     not optional. Without it, a regressed preflight lets kubectl fall
 	//     back to whatever real kubeconfig this host's HOME resolves to.
-	// Everything preflight cares about beyond that (NATS_OPERATOR,
-	// ADMIN_DATABASE_URL, TENANTCTL_MANUAL_NATS, TENANTCTL_MANUAL_DB,
-	// TENANT_DB_PASSWORD) is simply absent, which is the "deliberately empty
-	// environment" this test is required to exercise.
+	// Everything ONBOARD's preflight actually cares about beyond that
+	// (NATS_OPERATOR, TENANTCTL_MANUAL_NATS) is simply absent, which is the
+	// "deliberately empty environment" this test is required to exercise.
+	// ADMIN_DATABASE_URL and TENANTCTL_MANUAL_DB are also absent here, but
+	// that is incidental, not load-bearing: onboard opens no psql connection,
+	// so preflight is indifferent to both on this path — see the negative
+	// assertion below, which pins exactly that. They bind only the offboard
+	// purge path (PURGE_ROWS=1); see
+	// TestTenantctlOffboardPurgeRefusesWithoutAdminDSN for where they're
+	// actually exercised. TENANT_DB_PASSWORD no longer exists anywhere in the
+	// script at all.
 	unreachableKubeconfig := filepath.Join(t.TempDir(), "kubeconfig-does-not-exist")
 	cmd := exec.Command(bashPath, tenantctlRelPath, "onboard")
 	cmd.Dir = root
