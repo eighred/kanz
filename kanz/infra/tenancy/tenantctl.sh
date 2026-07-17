@@ -432,16 +432,28 @@ offboard_db() {
   fi
   if [ -z "${ADMIN_DATABASE_URL:-}" ]; then
     log db "MANUAL (TENANTCTL_MANUAL_DB=true): delete tenant '${TENANT}' rows yourself"
-    MANUAL_STEPS+=("db: tenant '${TENANT}' rows not purged — DELETE FROM portfolios WHERE tenant_id = '${TENANT}'; (cascades positions/applied_keys) by hand")
+    MANUAL_STEPS+=("db: tenant '${TENANT}' rows not purged — SET app.tenant_id = '${TENANT}'; DELETE FROM portfolios WHERE tenant_id = '${TENANT}'; (cascades positions/applied_keys) by hand")
     return
   fi
-  log db "purging tenant '${TENANT}' rows (PURGE_ROWS=1)"
-  # Scoped by an explicit WHERE, not by RLS. ADMIN_DATABASE_URL is a DB-ADMIN
-  # DSN, and a superuser BYPASSES RLS even with FORCE — under which the old
-  # unqualified `SET app.tenant_id; DELETE FROM portfolios;` deleted EVERY
-  # tenant's portfolios. Do not "simplify" this back to relying on the GUC.
+  log db "purging tenant '${TENANT}' portfolios/positions/applied_keys in the DB ADMIN_DATABASE_URL points at (PURGE_ROWS=1) — ledger, orders, and fund events are NOT touched by this step"
+  # Both the SET and the WHERE are required — they are not alternatives, and
+  # each covers the branch the other doesn't:
+  #   - SET app.tenant_id satisfies the RLS policy predicate
+  #     (app_current_tenant(), services/risk-engine/migrations/
+  #     0003_tenant_scope_required.sql) so the DELETE is even permitted when
+  #     ADMIN_DATABASE_URL is a non-superuser role. Without it,
+  #     app_current_tenant() RAISES 42501 ("app.tenant_id is not set"), psql
+  #     exits non-zero under ON_ERROR_STOP=1, and set -e aborts the offboard
+  #     mid-teardown after the quota entry is already gone.
+  #   - WHERE tenant_id is the scope for a superuser. A superuser BYPASSES RLS
+  #     even under FORCE ROW LEVEL SECURITY, so under a superuser DSN the SET
+  #     is a no-op and the WHERE is the *only* thing preventing an unqualified
+  #     `DELETE FROM portfolios` from deleting EVERY tenant's rows.
+  # Whether ADMIN_DATABASE_URL is a superuser is not something this script can
+  # verify, so both must be present. Do not "simplify" this back to relying on
+  # only one of them.
   psql "${ADMIN_DATABASE_URL}" -v ON_ERROR_STOP=1 -c \
-    "DELETE FROM portfolios WHERE tenant_id = '${TENANT}';"  # cascades positions/applied_keys
+    "SET app.tenant_id = '${TENANT}'; DELETE FROM portfolios WHERE tenant_id = '${TENANT}';"  # cascades positions/applied_keys
 }
 
 # --- 4. quota: gateway per-tenant budget (MT-01e) -------------------------
