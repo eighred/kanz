@@ -69,6 +69,4 @@ kubectl -n kanz-tenancy wait --for=condition=complete job/tenant-onboard-acme
 - **Kafka** onboard/offboard each render a one-shot Job (the broker ACL writes
   need the `kafka-provisioner` SVID over the SSL listener); offboard revokes
   ACLs before deleting topics.
-- **State** role provisioning is skipped unless `ADMIN_DATABASE_URL` is set
-  (RLS itself needs no per-tenant DDL — policies already exist; the role only
-  needs table grants + a non-superuser identity so FORCE RLS applies).
+- **State** needs no per-tenant provisioning at all — isolation is FORCE RLS + the `app.tenant_id` GUC. On offboard, rows are kept for audit unless `PURGE_ROWS=1`, which needs `ADMIN_DATABASE_URL`

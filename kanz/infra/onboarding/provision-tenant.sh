@@ -20,9 +20,9 @@
 # Requires: kubectl, psql (or the cnpg plugin), and the target cluster context —
 # plus, for the tenantctl.sh `infra` step this script composes: nsc + NATS_OPERATOR
 # (else the NATS account step logs a manual instruction and returns 0 instead of
-# provisioning anything), ADMIN_DATABASE_URL + TENANT_DB_PASSWORD (else the
-# Postgres role step is skipped), and jq (the gateway quota step reads/writes the
-# quota ConfigMap through it).
+# provisioning anything), and jq (the gateway quota step reads/writes the quota
+# ConfigMap through it). No DB credential is needed to onboard: nothing is
+# provisioned per tenant in Postgres (see step 1 below).
 #
 # --- ONBOARD-M2 Task 1: the verify step (step 5) tests REAL cross-tenant
 # isolation, or refuses — it no longer probes with no identity at all and

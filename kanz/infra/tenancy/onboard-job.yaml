@@ -69,7 +69,9 @@ spec:
       containers:
         - name: tenantctl
           # bitnami/kubectl bundles kubectl + jq + bash, the tools tenantctl needs;
-          # psql/nsc steps no-op unless ADMIN_DATABASE_URL / NATS_OPERATOR are set.
+          # The nsc step no-ops unless NATS_OPERATOR is set. Onboard does no DB
+          # work: state isolation is FORCE RLS + the app.tenant_id GUC, with
+          # nothing to provision per tenant.
           image: bitnami/kubectl:1.30
           command: ["bash", "/scripts/tenantctl.sh", "onboard"]
           env:
