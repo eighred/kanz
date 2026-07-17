@@ -488,6 +488,22 @@ func TestTenantctlOffboardPurgeRefusesWithoutAdminDSN(t *testing.T) {
 		// immediately logs ">> [quota] removing budget <tenant>", also naming
 		// the tenant. Either way this string must appear if the run got past
 		// process startup and into the script's real logic.
+		//
+		// A third path also names the tenant: the TENANT charset guard
+		// (tenantctl.sh, right after `set -euo pipefail`) echoes
+		// "REFUSED: TENANT '<tenant>' must contain only lowercase letters,
+		// digits, and '-'" and exits 2 — and it runs BEFORE preflight, so a
+		// tenant name tripping it would satisfy this anchor while the run
+		// never reached preflight or offboard_quota at all. That does not
+		// make this anchor vacuous today: offboardProbeTenant is a fixed,
+		// well-formed lowercase-and-hyphens literal (see its declaration
+		// above) that cannot trip the charset guard by construction, and if
+		// it were ever renamed into something the guard rejects, the sibling
+		// "PURGE_ROWS=1" subtest above — which asserts on ADMIN_DATABASE_URL,
+		// a string the charset guard never emits — would fail loudly rather
+		// than passing vacuously. So the function as a whole stays anchored
+		// even though this one string no longer proves, by itself, that
+		// preflight or offboard_quota specifically ran.
 		if !strings.Contains(output, offboardProbeTenant) {
 			t.Fatalf("tenantctl.sh offboard without PURGE_ROWS produced no output naming %q — this proves "+
 				"the run never reached tenant-specific output (preflight's refusal or offboard_quota's "+

@@ -80,6 +80,25 @@
 # proof anything is manual — check the tooling, not just the env var.
 set -euo pipefail
 
+# Pin the locale before the TENANT charset guard below ever runs. Bracket-
+# expression ranges like [a-z] are collation-dependent, not codepoint-
+# dependent: under a UTF-8 locale (e.g. glibc's en_US.UTF-8, which collates
+# case-insensitively — aAbBcC...zZ — rather than by codepoint) [a-z] can span
+# most uppercase letters too, so [!a-z0-9-] would silently fail to flag
+# something like TENANT=Acme. That would let an uppercase-containing tenant
+# name straight through to the SQL literal and the Kubernetes namespace name
+# below, while the refusal message keeps promising "only lowercase letters" —
+# a guard that lies about what it enforces is worse than no guard, because it
+# looks like protection. LC_ALL=C is also just the right default for an
+# infrastructure script in general: string comparison, sorting, and
+# case-matching become deterministic regardless of the operator's shell
+# environment, so this script's behavior never depends on who happens to
+# invoke it or from where. Nothing here is sensitive to the change — no step
+# parses localized output; kubectl calls use -o jsonpath and the quota steps
+# use jq, both locale-independent — so pinning it costs nothing and removes a
+# real, if obscure, correctness gap.
+export LC_ALL=C
+
 : "${TENANT:?set TENANT (e.g. acme)}"
 # TENANT is interpolated, unescaped, into two places that do not tolerate
 # arbitrary characters: a SQL string literal in offboard_db's DELETE (a
