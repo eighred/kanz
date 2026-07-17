@@ -240,8 +240,11 @@ const probeTenant = "onboard-m3-runtime-guard-probe"
 //     (e.g. 127 "no such file", which would mean this test isn't even
 //     exercising the real script);
 //  2. the output names the prerequisites that are actually missing in a
-//     clean environment (no NATS_OPERATOR, no ADMIN_DATABASE_URL, no
-//     TENANTCTL_MANUAL_* escape declared); and
+//     clean environment (no NATS_OPERATOR, no TENANTCTL_MANUAL_* escape
+//     declared) — ADMIN_DATABASE_URL is deliberately NOT among them: as of
+//     Task 1 that credential binds only the offboard purge path (see
+//     TestTenantctlOffboardPurgeRefusesWithoutAdminDSN), and the negative
+//     assertion further down this function pins its absence here; and
 //  3. the word "onboarded" NEVER appears — that is the literal lie
 //     ONBOARD-M3 fixed (finish() printing success, or a PARTIAL line naming
 //     the tenant as "onboarded", while steps were silently skipped).
@@ -250,8 +253,8 @@ const probeTenant = "onboard-m3-runtime-guard-probe"
 // and refused for the documented reason, but (3) is what makes a future
 // regression that reintroduces ANY path to the success/partial line —
 // whether by neutering preflight or restoring a silent skip inside
-// onboard_nats/onboard_db — fail this test, because that is precisely the
-// lie a paying tenant would receive.
+// onboard_nats — fail this test, because that is precisely the lie a
+// paying tenant would receive.
 //
 // Because preflight runs before onboard_identity (the first step that would
 // ever call kubectl) and only ever shells out to `command -v`, a passing run
@@ -469,6 +472,28 @@ func TestTenantctlOffboardPurgeRefusesWithoutAdminDSN(t *testing.T) {
 				"for audit (the default) this run opens no psql connection and has no DB prerequisite. "+
 				"Demanding a credential for work that never happens is a refusal that misstates its "+
 				"cause. Output:\n%s", output)
+		}
+
+		// The assertion above proves an ABSENCE (ADMIN_DATABASE_URL not named),
+		// and an absence assertion is only meaningful if the run actually
+		// reached the code that would have named it. A script that dies before
+		// ever reaching preflight — exit 127, a syntax error, a bad invocation —
+		// emits no such string either, and would pass this subtest vacuously
+		// while proving nothing. This anchors on tenant-specific output instead,
+		// so a dead-before-preflight run fails loudly here rather than passing
+		// silently above. Two environments, one anchor: with jq absent (this
+		// box, and any dev box without it) preflight itself refuses with
+		// "REFUSED: cannot offboard tenant '<tenant>' — ...", naming the
+		// tenant; with jq present (CI) preflight passes and offboard_quota
+		// immediately logs ">> [quota] removing budget <tenant>", also naming
+		// the tenant. Either way this string must appear if the run got past
+		// process startup and into the script's real logic.
+		if !strings.Contains(output, offboardProbeTenant) {
+			t.Fatalf("tenantctl.sh offboard without PURGE_ROWS produced no output naming %q — this proves "+
+				"the run never reached tenant-specific output (preflight's refusal or offboard_quota's "+
+				"log line), so the ADMIN_DATABASE_URL absence check above may have passed vacuously "+
+				"because the script died before ever reaching preflight, not because the DB rule is "+
+				"correct. Output:\n%s", offboardProbeTenant, output)
 		}
 	})
 }

@@ -74,14 +74,27 @@
 # only ever relaxes preflight — it never forces the manual path. If nsc +
 # NATS_OPERATOR (or ADMIN_DATABASE_URL, on a PURGE_ROWS=1 offboard) are actually
 # present, onboard_nats / offboard_nats (and the purge step) still do the real
-# thing and the flag is
-# quietly ignored. Real-over-manual is intentional: a flag set out of habit
-# after the tooling was fixed should not downgrade a real provisioning step
-# to a manual one. It just means the flag alone is not proof anything is
-# manual — check the tooling, not just the env var.
+# thing and the flag is quietly ignored. Real-over-manual is intentional: a
+# flag set out of habit after the tooling was fixed should not downgrade a
+# real provisioning step to a manual one. It just means the flag alone is not
+# proof anything is manual — check the tooling, not just the env var.
 set -euo pipefail
 
 : "${TENANT:?set TENANT (e.g. acme)}"
+# TENANT is interpolated, unescaped, into two places that do not tolerate
+# arbitrary characters: a SQL string literal in offboard_db's DELETE (a
+# tenant name containing a single quote breaks out of the literal), and
+# NS="tenant-${TENANT}" below, which becomes a Kubernetes namespace name —
+# and a namespace name must already be a valid RFC1123 label (lowercase
+# alphanumeric + '-'). So this charset is not a new restriction invented
+# here; it is what the estate already requires of a tenant name the moment
+# it touches Kubernetes, made explicit and enforced before that SQL literal
+# or namespace is ever built. Refuse (exit 2 = REFUSED, matching every other
+# preflight-style refusal in this script) rather than let a malformed
+# TENANT reach either interpolation site.
+case "${TENANT}" in
+  *[!a-z0-9-]*) echo "REFUSED: TENANT '${TENANT}' must contain only lowercase letters, digits, and '-'" >&2; exit 2 ;;
+esac
 : "${TENANT_SAS:=risk-engine api-gateway}"            # ServiceAccounts to mint
 : "${TRUST_DOMAIN:=kanz.internal}"
 : "${MSG_NS:=kanz-messaging}"                         # NATS/Kafka namespace
