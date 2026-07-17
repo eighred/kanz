@@ -60,8 +60,8 @@ kubectl -n kanz-tenancy wait --for=condition=complete job/tenant-onboard-acme
   — deleting a client's data is a one-way door, kept opt-in. `PURGE_ROWS=1`
   only deletes `portfolios` (cascading to `positions`/`applied_keys`) in the
   single database `ADMIN_DATABASE_URL` points at — it does not reach the
-  ledger, orders, or fund events, which live in other tenant-scoped clusters
-  and are not purged by this step.
+  ledger, orders, or fund events, which live in other databases and are not
+  purged by this step.
 
 ## Dependencies / current edges
 
@@ -73,4 +73,4 @@ kubectl -n kanz-tenancy wait --for=condition=complete job/tenant-onboard-acme
 - **Kafka** onboard/offboard each render a one-shot Job (the broker ACL writes
   need the `kafka-provisioner` SVID over the SSL listener); offboard revokes
   ACLs before deleting topics.
-- **State** needs no per-tenant provisioning at all — isolation is FORCE RLS + the `app.tenant_id` GUC. On offboard, rows are kept for audit unless `PURGE_ROWS=1`, which needs `ADMIN_DATABASE_URL` and only purges `portfolios`/`positions`/`applied_keys` in that one database — the ledger, orders, and fund events (other tenant-scoped clusters) are untouched by this step
+- **State** needs no per-tenant provisioning at all — isolation is FORCE RLS + the `app.tenant_id` GUC. On offboard, rows are kept for audit unless `PURGE_ROWS=1`, which needs `ADMIN_DATABASE_URL` and only purges `portfolios`/`positions`/`applied_keys` in that one database — the ledger, orders, and fund events (other databases) are untouched by this step

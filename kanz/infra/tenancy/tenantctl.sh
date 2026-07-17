@@ -432,7 +432,10 @@ offboard_db() {
   fi
   if [ -z "${ADMIN_DATABASE_URL:-}" ]; then
     log db "MANUAL (TENANTCTL_MANUAL_DB=true): delete tenant '${TENANT}' rows yourself"
-    MANUAL_STEPS+=("db: tenant '${TENANT}' rows not purged — SET app.tenant_id = '${TENANT}'; DELETE FROM portfolios WHERE tenant_id = '${TENANT}'; (cascades positions/applied_keys) by hand")
+    # The SQL goes LAST so the operator can paste from `SET` to the end and have
+    # it run clean — prose after a pasteable statement earns a syntax error the
+    # operator reads as failure, after the DELETE has already committed.
+    MANUAL_STEPS+=("db: tenant '${TENANT}' rows not purged — connect to the database ADMIN_DATABASE_URL points at (this cascades to positions/applied_keys; the ledger, orders and fund events live elsewhere and are NOT purged) and run: SET app.tenant_id = '${TENANT}'; DELETE FROM portfolios WHERE tenant_id = '${TENANT}';")
     return
   fi
   log db "purging tenant '${TENANT}' portfolios/positions/applied_keys in the DB ADMIN_DATABASE_URL points at (PURGE_ROWS=1) — ledger, orders, and fund events are NOT touched by this step"
