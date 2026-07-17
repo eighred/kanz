@@ -80,10 +80,36 @@ SET app.tenant_id = '${TENANT}'; DELETE FROM portfolios;
 
 Which role that DSN carries cannot be confirmed here — there is no Vault and no Postgres in this
 environment, and the repo pins it nowhere. It is a real risk, not a confirmed bug. The purge is
-therefore scoped by an explicit `WHERE tenant_id = '${TENANT}'`, which is correct whether or not the
-DSN is a superuser and does not depend on a fact we cannot check. This is a deliberate, approved
+therefore scoped by an explicit `WHERE tenant_id = '${TENANT}'`. This is a deliberate, approved
 widening of the "role only" cut: preserving an unqualified `DELETE` that this same change flagged
 would be knowingly shipping the risk.
+
+**The `SET` stays. `SET` and `WHERE` are not alternatives** (corrected 2026-07-17 after the final
+review caught the error below):
+
+```sql
+SET app.tenant_id = '${TENANT}'; DELETE FROM portfolios WHERE tenant_id = '${TENANT}';
+```
+
+- **`SET` is required for a non-superuser DSN.** The live policy is
+  `services/risk-engine/migrations/0003_tenant_scope_required.sql:69-71` —
+  `USING (tenant_id = app_current_tenant())` — and `app_current_tenant()` **RAISES `42501`** when the
+  GUC is unset rather than returning NULL. Without the `SET`, a non-superuser purge aborts the
+  offboard mid-teardown, after the quota entry is already deleted. On a deployment still at `0002`
+  (predicate → NULL) it is worse: the `DELETE` matches zero rows and **exits 0**, so offboard reports
+  a successful purge that deleted nothing.
+- **`WHERE` is required for a superuser DSN**, which bypasses RLS entirely even with `FORCE`, making
+  the `WHERE` the only thing scoping the delete.
+
+An earlier draft of this spec claimed the `WHERE` alone "is correct whether or not the DSN is a
+superuser and does not depend on a fact we cannot check." **That was false**: dropping the `SET` made
+the purge depend on the DSN's superuser-ness *harder* than the code it replaced — correct only in the
+superuser branch. With both clauses, the unverifiable fact leaves the critical path entirely, which is
+what the original reasoning was reaching for.
+
+Note also that ground truth #2 above cites `0002_tenant_rls.sql` for the policy shape. `0003` is the
+live policy and is *stronger* evidence for the same conclusion: it drops and recreates every policy
+on every RLS-enabled table, and `current_user` appears in none of them.
 
 ### 3. `preflight()` — gate the DB prereq on the path that opens a connection
 
