@@ -294,10 +294,17 @@ Expected: **PASS**, all subtests.
 
 ```bash
 bash -n kanz/infra/tenancy/tenantctl.sh && echo "parses"
-grep -rn "kanz_tenant\|TENANT_DB_PASSWORD" kanz/
+grep -rn "kanz_tenant\|TENANT_DB_PASSWORD" kanz/infra/tenancy/tenantctl.sh
 ```
 
-Expected: `parses`, and the grep returns **nothing** (exit 1). Any hit in `kanz/` is an incomplete deletion. Hits under `docs/superpowers/` are expected and must be left alone — the plans and spec name the role deliberately as a historical record.
+Expected: `parses`, and the grep returns **nothing** (exit 1) — `tenantctl.sh` is the file this task deletes the role from, and it must be completely clean.
+
+**Do not expect a repo-wide grep to be empty at this point** (a correction to an earlier draft of this plan, which wrongly asserted it would be):
+
+- `kanz/infra/onboarding/provision-tenant.sh` and `kanz/infra/tenancy/tenant.example.env` still name the retired terms. **That is Task 2's job — leave them alone here.**
+- `kanz/test/arch/onboarding_test.go` names them **permanently and correctly**: the negative assertion added in Step 1 must contain the literal strings in order to assert their absence, and the new test's doc comment explains the retired role by name. These are not leftovers and must never be "cleaned up".
+
+The repo-wide completeness check lives at the end of Task 2, where it can actually pass.
 
 - [ ] **Step 10: Prove the new guard can actually fail**
 
