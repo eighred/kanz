@@ -1,8 +1,8 @@
 # Per-tenant compute (MT-02)
 
-An onboarded tenant (`tenantctl.sh onboard`) gets a database role, a NATS
-account, and Kafka topics — but no process to serve it. This directory is
-where that gap closes for the OMS, one rendered manifest per tenant.
+An onboarded tenant (`tenantctl.sh onboard`) gets a NATS account and Kafka
+topics — but no process to serve it. This directory is where that gap closes
+for the OMS, one rendered manifest per tenant.
 
 **Scope: OMS only.** `archiver` and `market-ingest` stay platform-level on
 `__system__` (see `KANZ_BRAIN.md` / archiver's manifest). Extending this

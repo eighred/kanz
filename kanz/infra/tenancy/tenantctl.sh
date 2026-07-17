@@ -4,11 +4,13 @@
 #
 #   1. identity  — k8s namespace + ServiceAccounts ⇒ SPIRE SVIDs (SEC-01a)
 #   2. broker    — NATS account (MT-01c) + Kafka prefixed topics & ACLs (MT-01c)
-#   3. state     — Postgres per-tenant login role for RLS (MT-01d)
+#   3. state     — nothing on onboard; offboard purges the tenant's rows only
+#                  when PURGE_ROWS=1 (kept for audit by default) (MT-01d)
 #   4. quota     — gateway per-tenant budget entry (MT-01e)
 #
 # Identity is first because the SVID is the credential the broker (NATS account
-# mapping, Kafka ACL principal) and DB role all key on. The schema registry is
+# mapping, Kafka ACL principal) keys on. State keys on no per-tenant credential
+# at all — isolation is FORCE RLS + the app.tenant_id GUC. The schema registry is
 # intentionally NOT provisioned — it is platform-global (MT-01d). Every step is
 # idempotent, so a partial run re-runs cleanly. Offboard reverses the order.
 #

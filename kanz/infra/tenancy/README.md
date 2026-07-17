@@ -15,7 +15,7 @@ every later step keys on.
 |---|---|---|---|
 | 1 | Identity | `tenant-<name>` namespace (SPIFFE-enabled) + ServiceAccounts ⇒ SVIDs | SEC-01a |
 | 2 | Broker | NATS account + Kafka `{tenant}.` prefixed topics & PREFIXED ACLs | MT-01c |
-| 3 | State | Postgres per-tenant login role granted on the RLS-scoped state tables | MT-01d |
+| 3 | State | nothing provisioned per tenant — FORCE RLS + the `app.tenant_id` GUC on shared state tables | MT-01d |
 | 4 | Quota | gateway per-tenant budget entry (rate + burst + max-in-flight) | MT-01e |
 
 **Not provisioned: the schema registry** — it is platform-global (schemas are

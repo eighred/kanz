@@ -228,8 +228,10 @@ fi
 
 # 2) Infrastructure lifecycle (MT-01c/d/e via tenantctl.sh): identity (namespace
 #    + ServiceAccounts + SPIFFE), broker isolation (NATS account + Kafka
-#    prefixed topics/ACLs), the Postgres per-tenant login role, and the gateway
-#    per-tenant quota entry. tenantctl.sh is the sole owner of all four — this
+#    prefixed topics/ACLs), and the gateway per-tenant quota entry. State needs
+#    no per-tenant provisioning at all — isolation is FORCE RLS + the
+#    app.tenant_id GUC on shared tables (see the storage step above).
+#    tenantctl.sh is the sole owner of all three — this
 #    step composes it rather than re-implementing any of it. Quota knobs
 #    (RATE_PER_SEC, BURST, MAX_IN_FLIGHT) pass through to tenantctl.sh; if unset,
 #    B's defaults apply (50/s, burst 100, max-in-flight 64) — NOT Path A's old
