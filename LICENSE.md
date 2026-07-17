@@ -116,7 +116,7 @@ This License does not grant any rights to use the trademarks, service marks, log
 
 **EXHIBIT A.**
 
-Portions Copyright (c) 2020–2025 EIGHRED LIMITED All Rights Reserved.
+Portions Copyright (c) 2020–2026 EIGHRED LIMITED All Rights Reserved.
 
 This file contains Original Code and/or Modifications of Original Code as defined in and that are subject to the Eighred Public Source License Version 0.0.2 ("EPSL"). You may not use, copy, modify, or distribute this file except in compliance with the License.
 
