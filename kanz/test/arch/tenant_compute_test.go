@@ -165,6 +165,7 @@ func TestTenantComputeGuard(t *testing.T) {
 	// per ground truth #5), read back from the manifest itself rather than
 	// assumed from the directory name.
 	overlays := map[string]string{}
+	found := 0
 	for _, e := range entries {
 		if !e.IsDir() {
 			continue
@@ -175,6 +176,14 @@ func TestTenantComputeGuard(t *testing.T) {
 		if err != nil {
 			t.Fatalf("infra/deploy/tenants/%s has no oms-%s.yaml (%v) — every tenant directory must hold its rendered compute manifest", tenant, tenant, err)
 		}
+		// Counted HERE — the manifest exists, which is all the non-vacuity check
+		// below asks. `overlays` cannot answer that: the drift branch `continue`s
+		// past it, so a drifted tenant would leave overlays empty and the check
+		// would report "no tenant has compute provisioned yet" at someone whose
+		// manifest is sitting right there, drifted. A guard that fails for the
+		// right reason and then names the wrong one costs the next reader an hour
+		// (see DATA-M6: drain() reported bad=29759308 for a reader that had hung).
+		found++
 
 		rendered, err := tenantgen.Render(baseBytes, tenant)
 		if err != nil {
@@ -194,8 +203,8 @@ func TestTenantComputeGuard(t *testing.T) {
 		}
 		overlays[tenant] = "spiffe://kanz.internal/ns/kanz-services/sa/" + sa
 	}
-	if len(overlays) == 0 {
-		t.Fatal("zero tenant compute manifests found under infra/deploy/tenants/ — non-vacuous by design " +
+	if found == 0 {
+		t.Fatal("zero tenant compute manifests found under infra/deploy/tenants/ — non-vacuous by design" +
 			"(MT-02 Task 3): finding none is a FAILURE, not a pass. Either no tenant has compute provisioned yet " +
 			"(run provision-tenant.sh's compute step) or infra/deploy/tenants/ moved.")
 	}
