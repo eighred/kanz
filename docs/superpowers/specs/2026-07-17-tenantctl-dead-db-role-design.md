@@ -61,7 +61,29 @@ so the function goes rather than becoming an empty stub. Remove `onboard_db` fro
 Retitle the log line, which currently announces "revoking role".
 
 Default behavior (`PURGE_ROWS` unset) is now a genuine no-op: rows are kept for audit, as the
-existing log line already promises.
+existing log line already promises. The manual-escape branch must move inside the `PURGE_ROWS=1`
+path — otherwise an offboard that purges nothing would report PARTIAL (exit 3) for work it never
+needed to do.
+
+#### Scope the purge with an explicit `WHERE` (lead decision, 2026-07-17)
+
+The surviving `DELETE` is today unqualified and scoped **only by RLS**:
+
+```sql
+SET app.tenant_id = '${TENANT}'; DELETE FROM portfolios;
+```
+
+`ADMIN_DATABASE_URL` is documented as a DB-admin DSN, and **a superuser bypasses RLS even with
+`FORCE`** — the repo asserts this in three places (`0002_tenant_rls.sql:12`,
+`cmd/kanz-migrate/main.go:19`, `secretproviderclass.yaml:355-357`). If that DSN carries a superuser,
+`PURGE_ROWS=1` deletes **every tenant's** portfolios, cascading to positions and applied_keys.
+
+Which role that DSN carries cannot be confirmed here — there is no Vault and no Postgres in this
+environment, and the repo pins it nowhere. It is a real risk, not a confirmed bug. The purge is
+therefore scoped by an explicit `WHERE tenant_id = '${TENANT}'`, which is correct whether or not the
+DSN is a superuser and does not depend on a fact we cannot check. This is a deliberate, approved
+widening of the "role only" cut: preserving an unqualified `DELETE` that this same change flagged
+would be knowingly shipping the risk.
 
 ### 3. `preflight()` — gate the DB prereq on the path that opens a connection
 
@@ -118,7 +140,8 @@ existing doc comment gives at lines 265-278 — that was not hypothetical.
 - Do not re-key any RLS policy. Do not touch any migration.
 - Do not change `provision-tenant.sh`'s storage step. It is already correct and is the evidence for
   this change.
-- Do not remove `PURGE_ROWS`, `ADMIN_DATABASE_URL`, or `TENANTCTL_MANUAL_DB`.
+- Do not remove `PURGE_ROWS`, `ADMIN_DATABASE_URL`, or `TENANTCTL_MANUAL_DB`. (Scoping the purge's
+  `DELETE` with an explicit `WHERE` is approved and in scope — see above.)
 - Do not touch the `__system__` tenant or per-service DSN wiring.
 
 ## Verification

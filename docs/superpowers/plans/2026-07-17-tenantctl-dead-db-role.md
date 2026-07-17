@@ -233,7 +233,7 @@ offboard_db() {
 }
 ```
 
-**This changes the purge from RLS-scoped to WHERE-scoped — see the "Flagged finding" section at the bottom of this plan and get the lead's decision before running this step.**
+**The `WHERE` clause is a deliberate, lead-approved change (2026-07-17), not a transcription slip.** The old SQL was `SET app.tenant_id = '${TENANT}'; DELETE FROM portfolios;` — unqualified, scoped only by RLS, under a DSN that may be a superuser and therefore bypass RLS entirely. See the spec's "Scope the purge with an explicit `WHERE`" section. Do not "restore" the original.
 
 - [ ] **Step 6: Re-gate the DB prerequisite in preflight**
 
@@ -450,7 +450,7 @@ EOF
 
 ---
 
-## Flagged finding — needs the lead's decision before Task 1 Step 5
+## Resolved finding — the purge's unqualified DELETE (decided 2026-07-17: take the `WHERE` fix)
 
 **The existing purge may delete every tenant's rows.** `tenantctl.sh:417-418` today is:
 
@@ -465,10 +465,12 @@ I cannot confirm which role that DSN carries — there is no Vault and no Postgr
 
 Task 1 Step 5 as written fixes it by scoping the `DELETE` with an explicit `WHERE tenant_id = '${TENANT}'`, which is correct whether or not the DSN is a superuser. It is one line and strictly safer.
 
-This is **wider than the "role only" cut you approved**, and it changes the behavior of code the spec's non-goals said to keep. Three options:
+**Decision: take the `WHERE` fix.** Task 1 Step 5 scopes the `DELETE` with an explicit
+`WHERE tenant_id = '${TENANT}'`, which is correct whether or not the DSN is a superuser and does not
+depend on a fact this environment cannot check. This is a deliberate widening of the "role only"
+cut, approved by the lead on 2026-07-17 and recorded in the spec.
 
-1. **Take the `WHERE` fix** (what Step 5 currently does). One line; removes the risk permanently; keeps me from knowingly preserving an unqualified `DELETE` I just flagged.
-2. **Preserve the current SQL verbatim** and file the purge risk as its own task. Keeps this change a pure deletion, but ships a known-suspect `DELETE`.
-3. **Verify the DSN's role first** — needs a real Postgres, which this environment does not have. Defers the work.
-
-I recommend **(1)**.
+The rejected alternative worth naming: filing it separately. That is precisely what MT-02 did with
+this very role — recorded it as "filed separately", and it was never filed. A known-suspect
+`DELETE` left in place behind a promise to come back is the same bet, and this plan exists because
+that bet lost once already.
