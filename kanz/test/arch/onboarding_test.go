@@ -335,13 +335,28 @@ func TestTenantctlOnboardRefusesWithoutPrerequisites(t *testing.T) {
 	wantSubstrings := []string{
 		"REFUSED: cannot onboard tenant '" + probeTenant + "'",
 		"nsc on PATH + NATS_OPERATOR set",
-		"ADMIN_DATABASE_URL",
 	}
 	for _, want := range wantSubstrings {
 		if !strings.Contains(output, want) {
 			t.Fatalf("tenantctl.sh onboard output missing %q — a clean environment (no NATS_OPERATOR, "+
-				"no ADMIN_DATABASE_URL, no TENANTCTL_MANUAL_* escape) must name every one of these as a "+
-				"missing prerequisite before refusing. Output:\n%s", want, output)
+				"no TENANTCTL_MANUAL_NATS escape) must name it as a missing prerequisite before "+
+				"refusing. Output:\n%s", want, output)
+		}
+	}
+
+	// Onboard performs NO database work: the per-tenant role this script used to
+	// mint isolated nothing (every RLS policy keys only on the app.tenant_id GUC,
+	// and FORCE RLS already binds the owner), and provision-tenant.sh's storage
+	// step creates nothing per tenant by design. So preflight must NOT demand a
+	// DB credential to onboard. Naming one here would be a refusal that lies
+	// about its own cause — the ONBOARD-M3 defect inverted: that one lied about
+	// success, this would lie about why it failed. Both mislead the operator.
+	for _, unwanted := range []string{"ADMIN_DATABASE_URL", "TENANT_DB_PASSWORD"} {
+		if strings.Contains(output, unwanted) {
+			t.Fatalf("tenantctl.sh onboard refusal names %q — onboard opens no psql connection, so a "+
+				"DB credential is not one of its prerequisites. The DB prereq belongs ONLY to the "+
+				"offboard purge path (see TestTenantctlOffboardPurgeRefusesWithoutAdminDSN). "+
+				"Output:\n%s", unwanted, output)
 		}
 	}
 
@@ -353,6 +368,102 @@ func TestTenantctlOnboardRefusesWithoutPrerequisites(t *testing.T) {
 			"this is the exact lie ONBOARD-M3 fixed: printing a success or PARTIAL-success line naming "+
 			"the tenant as onboarded while required prerequisites are missing. Output:\n%s", output)
 	}
+}
+
+// offboardProbeTenant is a distinct probe name from probeTenant above: this
+// test exercises the OFFBOARD path, and sharing a constant would make a future
+// failure message imply the two guards share a run or a tenant.
+const offboardProbeTenant = "tenantctl-offboard-purge-guard-probe"
+
+// TestTenantctlOffboardPurgeRefusesWithoutAdminDSN pins where the DB credential
+// prerequisite lives after the per-tenant role was retired.
+//
+// The role (kanz_tenant_<tenant>) was deleted because it was dead in every
+// sense: nothing connected as it (services take per-service DSNs from Vault,
+// authorized by SPIFFE), it isolated nothing (every RLS policy keys only on
+// current_setting('app.tenant_id'); current_user appears in no policy; FORCE
+// RLS already binds the owner), and the password it minted was persisted to no
+// secret store. Deleting it removed a credential and no boundary.
+//
+// That left exactly ONE path in this script that opens a psql connection:
+// offboard with PURGE_ROWS=1. This test pins both halves of the resulting rule,
+// because each half fails differently and both failures harm an operator:
+//
+//   - PURGE_ROWS=1 without ADMIN_DATABASE_URL must REFUSE (exit 2) and name the
+//     credential. Losing this means a purge silently doing nothing while
+//     reporting success — a departed tenant's rows kept forever, believed gone.
+//   - PURGE_ROWS unset must NOT name a DB credential. Demanding one for a run
+//     that touches no database is a refusal that lies about its cause.
+//
+// Like the onboard guard above, this runs the real script: cmd.Env is built
+// explicitly (never os.Environ(), which would let an engineer's exported
+// ADMIN_DATABASE_URL make this vacuous) and KUBECONFIG is pinned to a path that
+// cannot exist (see that test's doc comment — kubectl reaching a real cluster
+// from a guard was not hypothetical here).
+func TestTenantctlOffboardPurgeRefusesWithoutAdminDSN(t *testing.T) {
+	bashPath, err := exec.LookPath("bash")
+	if err != nil {
+		t.Skipf("bash not on PATH (%v) — this guard runs tenantctl.sh for real and has no other way to "+
+			"do that; install bash (git-bash on Windows, or any POSIX bash on Linux/macOS CI) to enable it", err)
+	}
+
+	root := moduleRoot(t)
+	readOnboardingScript(t, root, tenantctlRelPath) // must exist and be non-empty before we bother invoking it
+
+	run := func(t *testing.T, purgeRows string) (string, int) {
+		t.Helper()
+		unreachableKubeconfig := filepath.Join(t.TempDir(), "kubeconfig-does-not-exist")
+		cmd := exec.Command(bashPath, tenantctlRelPath, "offboard")
+		cmd.Dir = root
+		env := []string{
+			"PATH=" + os.Getenv("PATH"),
+			"TENANT=" + offboardProbeTenant,
+			"KUBECONFIG=" + unreachableKubeconfig,
+			// TENANTCTL_MANUAL_NATS keeps this test focused on the DB prereq:
+			// without it, a missing NATS_OPERATOR refuses first and this guard
+			// would pass even if the DB rule were deleted outright.
+			"TENANTCTL_MANUAL_NATS=true",
+		}
+		if purgeRows != "" {
+			env = append(env, "PURGE_ROWS="+purgeRows)
+		}
+		cmd.Env = env
+		out, err := cmd.CombinedOutput()
+		if err == nil {
+			return string(out), 0
+		}
+		exitErr, ok := err.(*exec.ExitError)
+		if !ok {
+			t.Fatalf("tenantctl.sh offboard did not even start (%v) — this proves nothing about preflight; "+
+				"fix the invocation (bash %q, dir %q) rather than the script", err, tenantctlRelPath, root)
+		}
+		return string(out), exitErr.ExitCode()
+	}
+
+	t.Run("PURGE_ROWS=1 without ADMIN_DATABASE_URL refuses", func(t *testing.T) {
+		output, code := run(t, "1")
+		if code != 2 {
+			t.Fatalf("tenantctl.sh offboard PURGE_ROWS=1 exited %d, want 2 (REFUSED) — PURGE_ROWS=1 is the "+
+				"one path in this script that opens a psql connection, so a missing ADMIN_DATABASE_URL "+
+				"(with no TENANTCTL_MANUAL_DB escape declared) must refuse before anything is touched. "+
+				"Output:\n%s", code, output)
+		}
+		if !strings.Contains(output, "ADMIN_DATABASE_URL") {
+			t.Fatalf("tenantctl.sh offboard PURGE_ROWS=1 refused without naming ADMIN_DATABASE_URL — the "+
+				"operator asked for rows to be deleted and must be told exactly which credential is "+
+				"missing, not merely that something is. Output:\n%s", output)
+		}
+	})
+
+	t.Run("PURGE_ROWS unset does not demand a DB credential", func(t *testing.T) {
+		output, _ := run(t, "")
+		if strings.Contains(output, "ADMIN_DATABASE_URL") {
+			t.Fatalf("tenantctl.sh offboard without PURGE_ROWS names ADMIN_DATABASE_URL — with rows kept "+
+				"for audit (the default) this run opens no psql connection and has no DB prerequisite. "+
+				"Demanding a credential for work that never happens is a refusal that misstates its "+
+				"cause. Output:\n%s", output)
+		}
+	})
 }
 
 // verifyProbeTenant is a second, distinct probe name from probeTenant above —

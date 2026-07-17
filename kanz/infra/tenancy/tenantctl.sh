@@ -36,14 +36,13 @@
 #     operator declares TENANTCTL_MANUAL_NATS=true (they are adding/removing
 #     the account in nats/tenancy.yaml by hand — see that file's own header
 #     for the static/manual path it documents).
-#   - ADMIN_DATABASE_URL: required for the DB step, UNLESS the operator
-#     declares TENANTCTL_MANUAL_DB=true (they are provisioning/revoking the
-#     Postgres role by hand). TENANT_DB_PASSWORD is required in addition,
-#     but ONLY when ADMIN_DATABASE_URL is set on an onboard run — i.e. only
-#     when the DB step is actually about to run psql for real. Once
-#     ADMIN_DATABASE_URL is set the manual escape no longer applies to the
-#     password: that combination means "run it for real," and a real CREATE
-#     ROLE needs a real password.
+#   - ADMIN_DATABASE_URL: required ONLY for `offboard` with PURGE_ROWS=1 — the
+#     one step that opens a psql connection — UNLESS the operator declares
+#     TENANTCTL_MANUAL_DB=true (they are deleting the tenant's rows by hand).
+#     Onboard needs no DB credential: there is nothing to create per tenant.
+#     Tenant isolation is FORCE RLS + the app.tenant_id GUC, so a tenant's rows
+#     exist the moment its services write them (provision-tenant.sh's storage
+#     step VERIFIES that isolation rather than provisioning anything).
 #
 # TENANTCTL_MANUAL_NATS=true / TENANTCTL_MANUAL_DB=true are the ONLY way to
 # proceed without the tooling above, and each must be set explicitly and
@@ -73,8 +72,9 @@
 #
 # Note on precedence: TENANTCTL_MANUAL_NATS=true (and TENANTCTL_MANUAL_DB=true)
 # only ever relaxes preflight — it never forces the manual path. If nsc +
-# NATS_OPERATOR (or ADMIN_DATABASE_URL) are actually present, onboard_nats /
-# offboard_nats (and the DB step) still do the real thing and the flag is
+# NATS_OPERATOR (or ADMIN_DATABASE_URL, on a PURGE_ROWS=1 offboard) are actually
+# present, onboard_nats / offboard_nats (and the purge step) still do the real
+# thing and the flag is
 # quietly ignored. Real-over-manual is intentional: a flag set out of habit
 # after the tooling was fixed should not downgrade a real provisioning step
 # to a manual one. It just means the flag alone is not proof anything is
@@ -111,15 +111,17 @@ preflight() {
     fi
   fi
 
-  if [ -z "${ADMIN_DATABASE_URL:-}" ]; then
+  # The DB prerequisite belongs ONLY to the offboard purge path — the one place
+  # left that opens a psql connection (see offboard_db). Onboard performs no DB
+  # work at all: the per-tenant role that used to live here isolated nothing,
+  # and provision-tenant.sh's storage step verifies RLS and creates nothing per
+  # tenant. Demanding a DB-admin credential to onboard would refuse for work
+  # that never happens — a refusal that misstates its own cause, which is the
+  # ONBOARD-M3 lie inverted.
+  if [ "${mode}" = "offboard" ] && [ "${PURGE_ROWS:-0}" = "1" ] && [ -z "${ADMIN_DATABASE_URL:-}" ]; then
     if [ "${TENANTCTL_MANUAL_DB:-false}" != "true" ]; then
-      missing+=("ADMIN_DATABASE_URL (or export TENANTCTL_MANUAL_DB=true to provision/revoke the Postgres role by hand)")
+      missing+=("ADMIN_DATABASE_URL (or export TENANTCTL_MANUAL_DB=true to purge the tenant's rows by hand)")
     fi
-  elif [ "${mode}" = "onboard" ] && [ -z "${TENANT_DB_PASSWORD:-}" ]; then
-    # ADMIN_DATABASE_URL is set, so the DB step WILL run psql for real on this
-    # onboard — the manual escape does not apply here; a real CREATE ROLE
-    # needs a real password.
-    missing+=("TENANT_DB_PASSWORD (required: ADMIN_DATABASE_URL is set, so the Postgres role step will run for real)")
   fi
 
   if [ "${#missing[@]}" -gt 0 ]; then
@@ -383,44 +385,29 @@ YAML
   log kafka "job ${job} completed"
 }
 
-# --- 3. state: Postgres role for RLS (MT-01d) -----------------------------
-# RLS policies already exist (0002); a tenant needs only a non-superuser login
-# role granted on the state tables. The engine for this tenant connects as the
-# role and sets app.tenant_id from cfg.Tenant — FORCE RLS then scopes it.
-# The manual path (no ADMIN_DATABASE_URL) is a real workflow, but it is
-# legitimate ONLY when declared via TENANTCTL_MANUAL_DB=true (enforced by
-# preflight) — it always counts as a manual step, never a silent skip.
-onboard_db() {
-  if [ -z "${ADMIN_DATABASE_URL:-}" ]; then
-    log db "MANUAL (TENANTCTL_MANUAL_DB=true): create login role kanz_tenant_${TENANT} yourself and GRANT SELECT, INSERT, UPDATE, DELETE ON portfolios, positions, applied_keys TO kanz_tenant_${TENANT}"
-    MANUAL_STEPS+=("db: Postgres login role kanz_tenant_${TENANT} not created — create + grant it by hand before this tenant can read/write state")
-    return
-  fi
-  log db "login role kanz_tenant_${TENANT}"
-  psql "${ADMIN_DATABASE_URL}" -v ON_ERROR_STOP=1 <<SQL
-DO \$\$ BEGIN
-  IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'kanz_tenant_${TENANT}') THEN
-    CREATE ROLE kanz_tenant_${TENANT} LOGIN PASSWORD '${TENANT_DB_PASSWORD:?set TENANT_DB_PASSWORD}';
-  END IF;
-END \$\$;
-GRANT SELECT, INSERT, UPDATE, DELETE ON portfolios, positions, applied_keys TO kanz_tenant_${TENANT};
-SQL
-}
+# --- 3. state: purge a departed tenant's rows (MT-01d) --------------------
+# There is NOTHING per-tenant to tear down in Postgres. Tenant isolation is
+# FORCE RLS + the app.tenant_id GUC (services/risk-engine/migrations/
+# 0002_tenant_rls.sql), not a per-tenant role or database, so an offboard with
+# PURGE_ROWS unset is a genuine no-op and says so. Rows are kept for audit by
+# default; PURGE_ROWS=1 is the only path here that opens a psql connection.
 offboard_db() {
-  if [ -z "${ADMIN_DATABASE_URL:-}" ]; then
-    log db "MANUAL (TENANTCTL_MANUAL_DB=true): revoke + drop role kanz_tenant_${TENANT} yourself"
-    MANUAL_STEPS+=("db: Postgres login role kanz_tenant_${TENANT} not revoked — REVOKE + DROP ROLE by hand")
+  if [ "${PURGE_ROWS:-0}" != "1" ]; then
+    log db "tenant rows kept for audit (set PURGE_ROWS=1 to delete them)"
     return
   fi
-  log db "revoking role kanz_tenant_${TENANT} (tenant rows kept for audit unless PURGE_ROWS=1)"
-  if [ "${PURGE_ROWS:-0}" = "1" ]; then
-    psql "${ADMIN_DATABASE_URL}" -v ON_ERROR_STOP=1 -c \
-      "SET app.tenant_id = '${TENANT}'; DELETE FROM portfolios;"  # cascades positions/keys
+  if [ -z "${ADMIN_DATABASE_URL:-}" ]; then
+    log db "MANUAL (TENANTCTL_MANUAL_DB=true): delete tenant '${TENANT}' rows yourself"
+    MANUAL_STEPS+=("db: tenant '${TENANT}' rows not purged — DELETE FROM portfolios WHERE tenant_id = '${TENANT}'; (cascades positions/applied_keys) by hand")
+    return
   fi
-  psql "${ADMIN_DATABASE_URL}" -v ON_ERROR_STOP=1 <<SQL
-REVOKE ALL ON portfolios, positions, applied_keys FROM kanz_tenant_${TENANT};
-DROP ROLE IF EXISTS kanz_tenant_${TENANT};
-SQL
+  log db "purging tenant '${TENANT}' rows (PURGE_ROWS=1)"
+  # Scoped by an explicit WHERE, not by RLS. ADMIN_DATABASE_URL is a DB-ADMIN
+  # DSN, and a superuser BYPASSES RLS even with FORCE — under which the old
+  # unqualified `SET app.tenant_id; DELETE FROM portfolios;` deleted EVERY
+  # tenant's portfolios. Do not "simplify" this back to relying on the GUC.
+  psql "${ADMIN_DATABASE_URL}" -v ON_ERROR_STOP=1 -c \
+    "DELETE FROM portfolios WHERE tenant_id = '${TENANT}';"  # cascades positions/applied_keys
 }
 
 # --- 4. quota: gateway per-tenant budget (MT-01e) -------------------------
@@ -443,7 +430,7 @@ offboard_quota() {
 
 case "${1:-}" in
   onboard)  preflight onboard
-            onboard_identity; onboard_nats; onboard_kafka; onboard_db; onboard_quota
+            onboard_identity; onboard_nats; onboard_kafka; onboard_quota
             finish onboard ;;
   offboard) preflight offboard
             offboard_quota; offboard_db; offboard_kafka; offboard_nats; offboard_identity
