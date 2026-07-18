@@ -2,6 +2,7 @@ package execution
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	commonpb "github.com/kanz-eng/kanz-schemas-go/common/v1"
@@ -42,8 +43,18 @@ func TestSimVenue_FillsLimitInFull(t *testing.T) {
 	}
 }
 
-func TestSimVenue_MarketWithoutPriceRests(t *testing.T) {
-	v := NewSimVenue("XSIM") // no price func
+// CONTRACT CHANGE: this used to be TestSimVenue_MarketWithoutPriceRests, and it
+// asserted that an unpriceable market order returned (nil, nil) — "no fill" —
+// which the OMS could only read as a working order. The order then rested
+// FOREVER, indistinguishable from a legitimately working limit order, on the
+// capital path, with no per-order signal of any kind.
+//
+// The condition is PERMANENT: this venue has no price source for this order type
+// and will not acquire one at runtime. So it is now an error, and a typed one —
+// ErrUnpriced — so the caller can tell "never" from "not yet" and refuse the
+// order terminally instead of re-queuing it forever.
+func TestSimVenue_MarketWithoutPriceIsRefusedNotRested(t *testing.T) {
+	v := NewSimVenue("XSIM") // no price func — exactly how production builds it
 	st := &orderpb.OrderState{
 		OrderId:        "o2",
 		InstrumentId:   "AAPL",
@@ -52,11 +63,15 @@ func TestSimVenue_MarketWithoutPriceRests(t *testing.T) {
 		LeavesQuantity: d(100, 0),
 	}
 	fills, err := v.Execute(context.Background(), st)
-	if err != nil {
-		t.Fatalf("Execute: %v", err)
+	if err == nil {
+		t.Fatal("Execute returned no error — an order that can NEVER fill must not look like one that is working")
+	}
+	if !errors.Is(err, ErrUnpriced) {
+		t.Fatalf("err = %v, want ErrUnpriced — the caller distinguishes PERMANENT from transient on this sentinel, "+
+			"and a plain error would be retried forever", err)
 	}
 	if len(fills) != 0 {
-		t.Fatalf("fills = %d, want 0 (no price ⇒ rests)", len(fills))
+		t.Fatalf("fills = %d, want 0 alongside the refusal", len(fills))
 	}
 }
 

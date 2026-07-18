@@ -113,6 +113,21 @@ func Route(st *orderpb.OrderState, now time.Time) *orderpb.OrderState {
 	return next
 }
 
+// Reject marks an ADMITTED order terminally rejected. Returns a copy.
+//
+// Distinct from the pre-admission refusal path, which emits a rejection for an
+// order that was never stored: this one is for an order that passed admission
+// and then met a PERMANENT execution failure (a venue that cannot price it and
+// never will). Without persisting the terminal state the order stays ROUTED in
+// the store — the ledger would say rejected while the OMS's own truth says
+// working, and a later cancel or amend would act on a live-looking order.
+func Reject(st *orderpb.OrderState, now time.Time) *orderpb.OrderState {
+	next := cloneState(st)
+	next.Status = orderpb.OrderStatus_ORDER_STATUS_REJECTED
+	next.AsOf = timestamppb.New(now.UTC())
+	return next
+}
+
 // ApplyFill folds one fill into the order, recomputing filled/leaves quantity,
 // the quantity-weighted average fill price, and the status (PARTIALLY_FILLED or
 // FILLED). A fill exceeding the open quantity is rejected (over-fill guard).

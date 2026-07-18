@@ -10,6 +10,7 @@ package execution
 import (
 	"context"
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/google/uuid"
@@ -147,7 +148,14 @@ func (v *SimVenue) Execute(_ context.Context, st *orderpb.OrderState) ([]*orderp
 	}
 	price := v.executionPrice(st)
 	if price == nil || dec.IsZero(price) {
-		return nil, nil // no price ⇒ no fill; order rests
+		// PERMANENT, not transient: this venue has no price source for this order
+		// type and will not acquire one at runtime, so every retry resolves the
+		// same way. It used to return (nil, nil) — "no fill" — which left the
+		// order RESTING FOREVER and indistinguishable from a working limit order.
+		// A capital-path no-op that looks like normal operation is the wrong
+		// failure direction; the caller must refuse the order, not re-queue it.
+		return nil, fmt.Errorf("%w: %s has no price source for order type %s",
+			ErrUnpriced, v.mic, st.GetOrderType())
 	}
 	fill := &orderpb.Fill{
 		FillId:       v.newID(),

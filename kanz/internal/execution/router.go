@@ -12,6 +12,14 @@ import (
 // and its orders rest.
 var ErrNoVenue = errors.New("execution: no venue available")
 
+// ErrUnpriced is returned when a venue cannot resolve an execution price for an
+// order and never will — it has no price source for that order type. It is a
+// PERMANENT condition, deliberately distinct from a transient venue fault: a
+// caller must REFUSE the order (terminal) rather than return the error for
+// retry, because every retry resolves the same way. The order used to rest
+// silently instead, forever, looking exactly like a working limit order.
+var ErrUnpriced = errors.New("execution: no price source for this order type")
+
 // ErrVenueNotConfigured is returned when an order NAMES a venue this OMS has no
 // adapter for. It is deliberately NOT wrapped in ErrNoVenue, because the two are
 // opposite situations and the caller must not confuse them:

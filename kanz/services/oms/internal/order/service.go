@@ -197,6 +197,22 @@ func (s *Service) handleSubmit(ctx context.Context, env *envelopepb.Envelope, pa
 
 	// Work the order if a router is wired; otherwise it rests (ACCEPTED).
 	st, err = s.work(ctx, st)
+	// A venue that cannot price this order will NEVER price it, so this is
+	// terminal, not transient. Returning the error here would nack the command
+	// and retry it forever; refuse() emits the FACT + outcome and acks. Same
+	// code COMP-M1's gate uses for an order it cannot value — one name for one
+	// failure, discovered at two different points.
+	if errors.Is(err, execution.ErrUnpriced) {
+		rejectedAt := s.now().UTC()
+		// Persist the terminal state BEFORE announcing it. The order passed
+		// admission and is stored as ROUTED; leaving it there would have the
+		// ledger say rejected while the OMS's own truth says working, and a
+		// later cancel would act on a live-looking order.
+		if serr := s.store.Save(ctx, Reject(st, rejectedAt)); serr != nil {
+			return serr
+		}
+		return s.refuse(ctx, st.GetOrderId(), "PRICE_UNAVAILABLE", err.Error(), rejectedAt)
+	}
 	if err != nil {
 		return err
 	}
