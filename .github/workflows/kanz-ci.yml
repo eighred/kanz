@@ -514,6 +514,13 @@ jobs:
       # Compares kanz-schemas/proto against its state on main. A no-op (passes)
       # when a PR touches no proto; on a proto PR it fails any wire-incompatible
       # change, enforcing the additive-only envelope discipline (EVT-21c).
+      #
+      # Resolve the baseline as `origin/main`, NOT `branch=main`. A PR checkout is
+      # detached at refs/remotes/pull/N/merge and fetch-depth:0 populates only
+      # refs/remotes/origin/*, so no LOCAL `main` branch exists and buf fails with
+      # "fatal: couldn't find remote ref main" — on every PR, while still passing
+      # on push-to-main (where checkout does create the local branch). That split
+      # is why this guard was inert on exactly the changes it exists to gate.
       - name: Breaking-change check
         working-directory: kanz-schemas
-        run: buf breaking --against '../.git#branch=main,subdir=kanz-schemas'
+        run: buf breaking --against '../.git#ref=origin/main,subdir=kanz-schemas'
