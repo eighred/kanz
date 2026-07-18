@@ -147,7 +147,11 @@ func (s *Server) handleGet(w http.ResponseWriter, r *http.Request) {
 
 // handleLineage serves the AUDIT-01c causal reconstruction for an event.
 func (s *Server) handleLineage(w http.ResponseWriter, r *http.Request) {
-	lin, err := lineage.Reconstruct(r.Context(), s.store, r.PathValue("event_id"))
+	tenant, ok := tenantOf(w, r)
+	if !ok {
+		return
+	}
+	lin, err := lineage.Reconstruct(r.Context(), s.store, tenant, r.PathValue("event_id"))
 	if errors.Is(err, lineage.ErrNotFound) {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
 		return
@@ -162,6 +166,15 @@ func (s *Server) handleLineage(w http.ResponseWriter, r *http.Request) {
 // handleVerify serves the AUDIT-01b chain attestation. A broken chain returns
 // 409 Conflict — tamper detected — so a monitor can alert on the status code.
 func (s *Server) handleVerify(w http.ResponseWriter, r *http.Request) {
+	// Authenticated, but deliberately NOT tenant-scoped. The hash chain is ONE
+	// sequence across every tenant, so verifying a per-tenant subset proves
+	// nothing about the chain — it would break the tamper-evidence this
+	// endpoint exists to provide. What is removed here is ANONYMOUS access.
+	// Restricting it further, to an operator capability, is an open decision
+	// (see KANZ_TASKS.md) and must not be guessed at by narrowing the scan.
+	if _, ok := tenantOf(w, r); !ok {
+		return
+	}
 	att, err := report.Verify(r.Context(), s.store)
 	if err != nil {
 		s.fail(w, r, err)
@@ -176,6 +189,10 @@ func (s *Server) handleVerify(w http.ResponseWriter, r *http.Request) {
 
 // handleReport generates a built-in template; ?format=csv overrides the default.
 func (s *Server) handleReport(w http.ResponseWriter, r *http.Request) {
+	tenant, authed := tenantOf(w, r)
+	if !authed {
+		return
+	}
 	tmpl, ok := report.BuiltIns()[r.PathValue("template")]
 	if !ok {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "unknown template"})
@@ -184,6 +201,12 @@ func (s *Server) handleReport(w http.ResponseWriter, r *http.Request) {
 	if f := r.URL.Query().Get("format"); f != "" {
 		tmpl.Format = report.Format(f)
 	}
+	// Scope the template's filter to the caller. BuiltIns() returns a fresh map
+	// and tmpl is a copy, so this cannot leak into another request. Without it
+	// the report renders EVERY tenant's audit history into a downloadable
+	// artifact — the widest disclosure on this surface, because it is the one
+	// endpoint whose output is designed to leave the building.
+	tmpl.Filter.Tenant = tenant
 	rep, err := report.Generate(r.Context(), s.store, tmpl, time.Now)
 	if err != nil {
 		s.fail(w, r, err)
@@ -216,6 +239,14 @@ func (s *Server) handleReport(w http.ResponseWriter, r *http.Request) {
 // mapped control has insufficient evidence — a Type II exception a monitor alerts
 // on, the same status-code-as-signal stance handleVerify uses for a broken chain.
 func (s *Server) handleSOC2Evidence(w http.ResponseWriter, r *http.Request) {
+	// Same boundary as the reports endpoint, and for the same reason: this
+	// evidence is compiled from audit records and handed to an AUDITOR, so an
+	// unscoped collection puts other tenants' history into a document that
+	// leaves the building.
+	tenant, authed := tenantOf(w, r)
+	if !authed {
+		return
+	}
 	q := r.URL.Query()
 	var from, to time.Time
 	if t, ok := parseTime(q.Get("from")); ok {
@@ -224,7 +255,7 @@ func (s *Server) handleSOC2Evidence(w http.ResponseWriter, r *http.Request) {
 	if t, ok := parseTime(q.Get("to")); ok {
 		to = t
 	}
-	rep, err := soc2.CollectFromStore(r.Context(), s.store, from, to)
+	rep, err := soc2.CollectFromStore(r.Context(), s.store, tenant, from, to)
 	if err != nil {
 		s.fail(w, r, err)
 		return

@@ -78,7 +78,7 @@ func TestCollectFromStore_PullsWindowAndCollects(t *testing.T) {
 			t.Fatalf("append: %v", err)
 		}
 	}
-	report, err := CollectFromStore(ctx, store, now.Add(-time.Hour), time.Time{})
+	report, err := CollectFromStore(ctx, store, "", now.Add(-time.Hour), time.Time{})
 	if err != nil {
 		t.Fatal(err)
 	}

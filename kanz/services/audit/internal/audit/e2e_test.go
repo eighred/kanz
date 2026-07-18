@@ -70,7 +70,7 @@ func TestAuditEndToEnd(t *testing.T) {
 	// (1) Reconstruct the command outcome back to the market tick that triggered
 	// it — and prove it is fast (the <1min budget; in practice microseconds).
 	start := time.Now()
-	lin, err := lineage.Reconstruct(ctx, store, "outcome")
+	lin, err := lineage.Reconstruct(ctx, store, "", "outcome")
 	if err != nil {
 		t.Fatal(err)
 	}

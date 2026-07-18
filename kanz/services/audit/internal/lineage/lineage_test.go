@@ -32,7 +32,7 @@ func seed(t *testing.T) *audit.Memory {
 
 func TestReconstructAncestry(t *testing.T) {
 	st := seed(t)
-	lin, err := Reconstruct(context.Background(), st, "outcome")
+	lin, err := Reconstruct(context.Background(), st, "", "outcome")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -49,7 +49,7 @@ func TestReconstructAncestry(t *testing.T) {
 
 func TestReconstructTree(t *testing.T) {
 	st := seed(t)
-	lin, err := Reconstruct(context.Background(), st, "order")
+	lin, err := Reconstruct(context.Background(), st, "", "order")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -64,7 +64,7 @@ func TestReconstructTree(t *testing.T) {
 
 func TestReconstructNotFound(t *testing.T) {
 	st := seed(t)
-	if _, err := Reconstruct(context.Background(), st, "nope"); err != ErrNotFound {
+	if _, err := Reconstruct(context.Background(), st, "", "nope"); err != ErrNotFound {
 		t.Fatalf("err=%v want ErrNotFound", err)
 	}
 }

@@ -140,11 +140,11 @@ func Collect(controls []Control, records []*audit.Record, from, to time.Time) Ev
 // records from the audit store and collects evidence against the default control
 // matrix. This is what a nightly job (or the /v1/soc2/evidence endpoint) calls to
 // produce the running Type II evidence file. An empty/zero `to` means "now".
-func CollectFromStore(ctx context.Context, store audit.Store, from, to time.Time) (EvidenceReport, error) {
+func CollectFromStore(ctx context.Context, store audit.Store, tenant string, from, to time.Time) (EvidenceReport, error) {
 	if to.IsZero() {
 		to = time.Now()
 	}
-	recs, err := store.Query(ctx, audit.Filter{Since: from, Until: to, Limit: 0})
+	recs, err := store.Query(ctx, audit.Filter{Tenant: tenant, Since: from, Until: to, Limit: 0})
 	if err != nil {
 		return EvidenceReport{}, err
 	}

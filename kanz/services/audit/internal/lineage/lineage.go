@@ -41,21 +41,25 @@ type Lineage struct {
 // store — the causal ancestry (Get-walk up causation_id) and the correlation
 // cascade (one Query) — so it stays well under the AUDIT-01e <1min budget even
 // for large cascades (map-keyed, no scan).
-func Reconstruct(ctx context.Context, store audit.Store, eventID string) (*Lineage, error) {
+func Reconstruct(ctx context.Context, store audit.Store, tenant, eventID string) (*Lineage, error) {
 	target, ok, err := store.Get(ctx, eventID)
 	if err != nil {
 		return nil, err
 	}
-	if !ok {
+	// SCOPED, and structurally rather than at the handler: audit_log is not
+	// RLS'd, so the store answers for every tenant. An event belonging to
+	// someone else is ErrNotFound, never "forbidden" — on a cross-tenant
+	// boundary, forbidden confirms the record exists.
+	if !ok || target.TenantID != tenant {
 		return nil, ErrNotFound
 	}
 
-	ancestry, err := walkAncestry(ctx, store, target)
+	ancestry, err := walkAncestry(ctx, store, tenant, target)
 	if err != nil {
 		return nil, err
 	}
 
-	tree, err := buildTree(ctx, store, target.CorrelationID, target.EventID)
+	tree, err := buildTree(ctx, store, tenant, target.CorrelationID, target.EventID)
 	if err != nil {
 		return nil, err
 	}
@@ -67,7 +71,7 @@ func Reconstruct(ctx context.Context, store audit.Store, eventID string) (*Linea
 // chain root-first. A missing or empty causation_id ends the walk (root reached,
 // or the cause predates the audit log). A cycle (malformed lineage) is broken by
 // the visited set rather than looping forever.
-func walkAncestry(ctx context.Context, store audit.Store, target *audit.Record) ([]*audit.Record, error) {
+func walkAncestry(ctx context.Context, store audit.Store, tenant string, target *audit.Record) ([]*audit.Record, error) {
 	var rev []*audit.Record
 	visited := map[string]bool{}
 	cur := target
@@ -81,8 +85,12 @@ func walkAncestry(ctx context.Context, store audit.Store, target *audit.Record) 
 		if err != nil {
 			return nil, err
 		}
-		if !ok {
-			break // cause outside the audit window; ancestry is best-effort to the edge
+		// A parent in ANOTHER tenant terminates the walk exactly like a missing
+		// one: the ancestry is best-effort to the edge of what this caller may
+		// see, and a causation link that crosses tenants must not become a
+		// read of the other side.
+		if !ok || parent.TenantID != tenant {
+			break // cause outside the audit window (or outside this tenant)
 		}
 		cur = parent
 	}
@@ -98,8 +106,8 @@ func walkAncestry(ctx context.Context, store audit.Store, target *audit.Record) 
 // is absent (the correlation root, or causes outside the set) become tree roots.
 // With one true root the result is a single tree; defensively, multiple roots are
 // wrapped under a synthetic node so nothing is dropped.
-func buildTree(ctx context.Context, store audit.Store, correlationID, _ string) (*Node, error) {
-	recs, err := store.Query(ctx, audit.Filter{Correlation: correlationID})
+func buildTree(ctx context.Context, store audit.Store, tenant, correlationID, _ string) (*Node, error) {
+	recs, err := store.Query(ctx, audit.Filter{Correlation: correlationID, Tenant: tenant})
 	if err != nil {
 		return nil, err
 	}

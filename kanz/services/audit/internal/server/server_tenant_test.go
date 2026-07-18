@@ -161,3 +161,156 @@ func TestGet_ReturnsTheCallersOwnRecord(t *testing.T) {
 			rr.Code, rr.Body.String())
 	}
 }
+
+// --- lineage / verify / reports ---
+//
+// These three were left unscoped when the query and get endpoints were fixed,
+// and were flagged rather than patched because the same tenant filter is not
+// right for all of them. Resolved by looking at what each actually reads:
+//
+//   report.Generate    store.Query(tmpl.Filter) — Filter HAS a Tenant field, so
+//                      it scopes cleanly and its content is per-tenant records.
+//   lineage.Reconstruct store.Get + Query{Correlation} — the target record
+//                      carries TenantID, so it scopes too.
+//   report.Verify      store.All + store.Head — the hash chain is ONE sequence
+//                      across every tenant. Verifying a subset proves nothing
+//                      about the chain, so tenant-scoping it would BREAK the
+//                      tamper-evidence it exists to provide. It stays global,
+//                      and only anonymous access is removed.
+
+// A caller must not walk the lineage of another tenant's event. 404, not 403,
+// for the same reason as the single-record fetch.
+func TestLineage_RefusesAnEventBelongingToAnotherTenant(t *testing.T) {
+	st := &oneRecord{rec: &audit.Record{EventID: "e1", TenantID: "victim-corp", CorrelationID: "c1"}}
+	srv := newAuditServer(st)
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/audit/lineage/e1", nil)
+	req.Header.Set(HeaderPrincipalTenant, "acme")
+	rr := httptest.NewRecorder()
+	srv.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404 — acme walked victim-corp's causation graph (body: %s)",
+			rr.Code, rr.Body.String())
+	}
+}
+
+func TestLineage_RefusesARequestCarryingNoPrincipal(t *testing.T) {
+	st := &oneRecord{rec: &audit.Record{EventID: "e1", TenantID: "acme"}}
+	srv := newAuditServer(st)
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/audit/lineage/e1", nil)
+	rr := httptest.NewRecorder()
+	srv.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401", rr.Code)
+	}
+}
+
+// A report must be generated over the CALLER's records only. The template's
+// filter decides what the report contains, so an unscoped one renders every
+// tenant's audit history into a downloadable CSV.
+func TestReport_ScopesTheTemplateFilterToThePrincipalsTenant(t *testing.T) {
+	spy := &filterSpy{}
+	srv := newAuditServer(spy)
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/audit/reports/authz-decisions", nil)
+	req.Header.Set(HeaderPrincipalTenant, "acme")
+	rr := httptest.NewRecorder()
+	srv.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (body: %s)", rr.Code, rr.Body.String())
+	}
+	if spy.got.Tenant != "acme" {
+		t.Fatalf("report queried tenant = %q, want acme — the report renders every tenant's "+
+			"audit history into a downloadable artifact", spy.got.Tenant)
+	}
+	// NON-VACUITY: scoping must not discard the template's own filter.
+	if spy.got.Kind != audit.KindAuthzDecision {
+		t.Fatalf("kind = %q — scoping the tenant dropped the template's filter", spy.got.Kind)
+	}
+}
+
+func TestReport_RefusesARequestCarryingNoPrincipal(t *testing.T) {
+	spy := &filterSpy{}
+	srv := newAuditServer(spy)
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/audit/reports/authz-decisions", nil)
+	rr := httptest.NewRecorder()
+	srv.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401", rr.Code)
+	}
+}
+
+// Verify stays GLOBAL by design — the chain spans every tenant and a partial
+// verification is not a verification. What must go is ANONYMOUS access.
+func TestVerify_RefusesARequestCarryingNoPrincipal(t *testing.T) {
+	spy := &filterSpy{}
+	srv := newAuditServer(spy)
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/audit/verify", nil)
+	rr := httptest.NewRecorder()
+	srv.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401 — chain attestation must not be anonymous", rr.Code)
+	}
+}
+
+// NON-VACUITY for verify: an authenticated caller still gets the attestation,
+// and it is still computed over the WHOLE chain. A "fix" that tenant-scoped it
+// would pass the test above while silently destroying the tamper-evidence.
+func TestVerify_AuthenticatedCallerStillGetsAGlobalAttestation(t *testing.T) {
+	spy := &filterSpy{}
+	srv := newAuditServer(spy)
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/audit/verify", nil)
+	req.Header.Set(HeaderPrincipalTenant, "acme")
+	rr := httptest.NewRecorder()
+	srv.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (body: %s)", rr.Code, rr.Body.String())
+	}
+	if spy.got.Tenant != "" {
+		t.Fatalf("verify queried with tenant %q — the chain must be verified WHOLE; "+
+			"a per-tenant subset proves nothing about it", spy.got.Tenant)
+	}
+}
+
+// The SOC2 evidence endpoint was NOT in the reported set and nobody flagged it,
+// but it is the same defect on the same surface: soc2.CollectFromStore queries
+// with only a time window, so the evidence report was assembled from every
+// tenant's records. Like the report endpoint, its output is designed to leave
+// the building — an auditor receives it.
+func TestSOC2Evidence_ScopesToThePrincipalsTenant(t *testing.T) {
+	spy := &filterSpy{}
+	srv := newAuditServer(spy)
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/soc2/evidence", nil)
+	req.Header.Set(HeaderPrincipalTenant, "acme")
+	rr := httptest.NewRecorder()
+	srv.ServeHTTP(rr, req)
+
+	if spy.got.Tenant != "acme" {
+		t.Fatalf("evidence queried tenant = %q, want acme — the SOC2 report is compiled from "+
+			"every tenant's audit records and handed to an auditor", spy.got.Tenant)
+	}
+}
+
+func TestSOC2Evidence_RefusesARequestCarryingNoPrincipal(t *testing.T) {
+	spy := &filterSpy{}
+	srv := newAuditServer(spy)
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/soc2/evidence", nil)
+	rr := httptest.NewRecorder()
+	srv.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401", rr.Code)
+	}
+}
