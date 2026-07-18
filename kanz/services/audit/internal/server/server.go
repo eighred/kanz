@@ -22,6 +22,19 @@ type Readiness struct{ ready atomic.Bool }
 func (r *Readiness) Set(ready bool) { r.ready.Store(ready) }
 func (r *Readiness) Ready() bool    { return r.ready.Load() }
 
+// HeaderPrincipalTenant is the tenant of the AUTHENTICATED caller, injected by
+// the api-gateway — the platform's sole identity authority — from the verified
+// token. The same header every other service reads
+// (proxy.HeaderPrincipalTenant, tv-sync/brokerapi), deliberately: there is
+// exactly one thing on this platform that decides who you are.
+//
+// This service authenticates NOTHING, and that is only safe behind the gateway.
+// It is reachable only in-cluster over the SVID-authorized mesh, with no
+// Ingress. EXPOSE IT DIRECTLY AND ANY CALLER READS EVERY TENANT'S AUDIT HISTORY
+// — audit_log is deliberately not RLS'd (it is the cross-tenant compliance
+// record), so the database will not save you here; this handler is the boundary.
+const HeaderPrincipalTenant = "X-Kanz-Principal-Tenant"
+
 type Server struct {
 	logger    *slog.Logger
 	readiness *Readiness
@@ -80,10 +93,19 @@ func (s *Server) handleReadyz(w http.ResponseWriter, _ *http.Request) {
 
 // handleQuery serves GET /v1/audit/events with filter query params.
 func (s *Server) handleQuery(w http.ResponseWriter, r *http.Request) {
+	// The tenant comes from the authenticated principal, NEVER from the query
+	// string. `?tenant=` was caller-supplied input into a log that is
+	// deliberately not RLS'd, so naming another tenant read their entire audit
+	// history. Refused before the store is reached: an empty filter here does
+	// not mean "no records", it means EVERY tenant's records.
+	tenant, ok := tenantOf(w, r)
+	if !ok {
+		return
+	}
 	q := r.URL.Query()
 	f := audit.Filter{
 		Correlation: q.Get("correlation"),
-		Tenant:      q.Get("tenant"),
+		Tenant:      tenant,
 		Kind:        audit.Kind(q.Get("kind")),
 		EventType:   q.Get("event_type"),
 		Limit:       atoiOr(q.Get("limit"), 100),
@@ -103,12 +125,20 @@ func (s *Server) handleQuery(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleGet(w http.ResponseWriter, r *http.Request) {
-	rec, ok, err := s.store.Get(r.Context(), r.PathValue("event_id"))
+	tenant, ok := tenantOf(w, r)
+	if !ok {
+		return
+	}
+	rec, found, err := s.store.Get(r.Context(), r.PathValue("event_id"))
 	if err != nil {
 		s.fail(w, r, err)
 		return
 	}
-	if !ok {
+	// A record belonging to another tenant is NOT FOUND, not FORBIDDEN: this log
+	// is not RLS'd, so the store answers for every tenant, and "forbidden" would
+	// confirm the record exists — a disclosure in itself. The caller learns only
+	// that they have no such record.
+	if !found || rec.TenantID != tenant {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
 		return
 	}
@@ -227,6 +257,21 @@ func parseTime(s string) (time.Time, bool) {
 	}
 	t, err := time.Parse(time.RFC3339, s)
 	return t, err == nil
+}
+
+// tenantOf reads the tenant of the authenticated caller, rejecting an unscoped
+// request (deny-by-default). Mirrors tv-sync/brokerapi.tenantOf — the same
+// header, the same refusal, because this is the same boundary.
+func tenantOf(w http.ResponseWriter, r *http.Request) (string, bool) {
+	tenant := r.Header.Get(HeaderPrincipalTenant)
+	if tenant == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{
+			"error": "missing tenant scope: this surface is reachable only through the api-gateway, " +
+				"which injects the authenticated principal",
+		})
+		return "", false
+	}
+	return tenant, true
 }
 
 func writeJSON(w http.ResponseWriter, code int, body any) {

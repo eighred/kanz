@@ -15,7 +15,22 @@
 -- NOT tenant-RLS-scoped: the audit log is a cross-cutting compliance record that
 -- an auditor reads ACROSS tenants; tenant_id is a column for filtering/reporting,
 -- not an isolation boundary here (the same call market-data/schema-registry made
--- for universal data). Tenant-scoped read access is enforced at the query API.
+-- for universal data).
+--
+-- Tenant-scoped read access is therefore enforced ENTIRELY at the query API, and
+-- for a long time it was not enforced at all: `GET /v1/audit/events` took its
+-- tenant from a caller-supplied `?tenant=`, and `GET /v1/audit/events/{id}`
+-- checked no tenant whatsoever. This line asserted the enforcement existed while
+-- it did not, which is worse than silence -- it is the comment a reviewer trusts
+-- instead of reading the handler. Both are now scoped to the gateway-injected
+-- principal (server.tenantOf).
+--
+-- STILL UNSCOPED, deliberately flagged rather than quietly fixed, because each
+-- needs a decision and not a patch: /v1/audit/lineage/{id}, /v1/audit/verify and
+-- /v1/audit/reports/{template}. Chain verification is cross-tenant BY DESIGN --
+-- the hash chain spans every record, and scoping it would break the
+-- tamper-evidence it exists to provide -- so the answer there is probably an
+-- operator capability, not a tenant filter. Do not assume these are covered.
 
 CREATE TABLE IF NOT EXISTS audit_log (
     seq            BIGINT      PRIMARY KEY,
