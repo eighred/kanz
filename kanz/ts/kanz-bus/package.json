@@ -19,6 +19,9 @@
     "build": "tsc -p tsconfig.json",
     "test": "tsx --test test/*.test.ts"
   },
+  "engines": {
+    "node": ">=24 <25"
+  },
   "dependencies": {
     "@bufbuild/protobuf": "^2.2.3",
     "@kanz-eng/kanz-schemas": "^0.1.0",
@@ -27,7 +30,7 @@
     "nats": "^2.28.0"
   },
   "devDependencies": {
-    "@types/node": "^26.1.1",
+    "@types/node": "^24.13.3",
     "tsx": "^4.19.0",
     "typescript": "^7.0.2"
   }

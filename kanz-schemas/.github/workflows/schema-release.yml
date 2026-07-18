@@ -109,7 +109,14 @@ jobs:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
-          node-version: '20'
+          # Node 24 (Krypton) is the ACTIVE LTS; Node 20 (Iron) went end-of-life
+          # in April 2026, so this publish job was running on an unsupported
+          # runtime. Deliberately a literal and NOT kanz/ts/kanz-bus/.nvmrc:
+          # kanz-schemas is a candidate to be split into its own mirrored repo
+          # (see .github/dependabot.yml), and a path reaching outside this
+          # directory would break the moment it is. Bump both when the estate
+          # moves to the next LTS.
+          node-version: '24'
           registry-url: ${{ secrets.NPM_REGISTRY_URL || 'https://registry.npmjs.org' }}
       - uses: bufbuild/buf-setup-action@a47c93e0b1648d5651a065437926377d060baa99 # v1
         with:

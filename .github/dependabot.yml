@@ -59,6 +59,16 @@ updates:
       ts-deps:
         patterns: ["*"]
         update-types: [minor, patch]
+    # The group above covers only minor/patch, so a MAJOR arrives as its own
+    # ungrouped PR — which is how @types/node 22 -> 26 landed while CI ran
+    # Node 20. @types/node's major IS the Node major it describes, so bumping it
+    # freely lets tsc accept APIs the runtime does not have; nothing else would
+    # catch that, since tsx strips types rather than checking them. Pin it to the
+    # runtime instead: raise this bound and node-version/.nvmrc together when the
+    # estate moves to the next Node LTS, never separately.
+    ignore:
+      - dependency-name: "@types/node"
+        update-types: ["version-update:semver-major"]
 
   # GitHub Actions pinned in the workflows (keep the supply chain of CI itself
   # current — the actions are part of the build's trust base).

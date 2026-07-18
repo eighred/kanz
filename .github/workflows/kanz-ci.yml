@@ -416,7 +416,18 @@ jobs:
 
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
-          node-version: '20'
+          # Read the version from .nvmrc rather than repeating it here, so CI and
+          # a developer's local shell cannot drift apart — the file IS the pin.
+          #
+          # It says 24: Node 24 (Krypton) is the ACTIVE LTS, and Node 20 (Iron)
+          # went end-of-life in April 2026 (last release v20.20.2, 2026-03-24),
+          # so CI had been building on an unsupported runtime receiving no
+          # security fixes. @types/node's major must move WITH it — the types
+          # describe the runtime's API surface, and `tsc` is the only thing that
+          # checks them (tsx strips types), so a types major ahead of the runtime
+          # lets tsc accept an API that does not exist in production. That is why
+          # dependabot.yml ignores @types/node majors.
+          node-version-file: kanz/ts/kanz-bus/.nvmrc
 
       - uses: bufbuild/buf-setup-action@a47c93e0b1648d5651a065437926377d060baa99 # v1
         with:
