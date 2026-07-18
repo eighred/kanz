@@ -162,6 +162,28 @@ fi
 #    observable event. Do NOT "tidy" the capture back into `>/dev/null` — that
 #    silently restores the vacuous check, and do NOT go back to `limit 1` or a
 #    bare count — a count alone cannot say WHICH table lost FORCE RLS.
+# The tenant-scoped tables this step KNOWINGLY does not verify, and why.
+#
+# NINE services declare FORCE ROW LEVEL SECURITY; this step checks the five
+# tables in kanz-risk and kanz-books. It used to check those five and say
+# nothing about the rest, so a tenant was handed over as "isolation verified"
+# with most of the tenant-scoped estate never confirmed live — under-coverage
+# the operator had no way to see.
+#
+# These are NOT verified here because ONBOARD-M6 is unresolved: the repo gives
+# several answers for which DATABASE (and, for oms/tv-sync/venue-*, which
+# CNPG CLUSTER) each service's tables live in, and this script refuses to guess
+# one — a wrong guess reports a HEALTHY cluster as "MT-01d not deployed",
+# which is the exact harm step 1 exists to catch, merely relocated. Resolve M6
+# (`vault kv get -field=dsn kv/kanz/<service>`), then move the table into a
+# verified cluster arm above and delete it from this list.
+#
+# test/arch TestProvisionTenantAccountsForEveryTenantScopedTable fails the build
+# if a table is in neither this list nor a verified arm — a new RLS'd table
+# cannot silently widen the unchecked surface, it has to be triaged. Same shape
+# as the archiver's unbackedByDesign map.
+UNVERIFIED_RLS_TABLES="oms:orders,positions,position_fills alternatives:fund_events datamaster:golden_records,exceptions,exception_overrides wealth:households tv-sync:tv_facts venue-binance:venue_orders venue-okx:venue_orders"
+
 if step storage; then
   echo "-- [1/6] verify RLS isolation is active (kanz-risk, kanz-books)"
 
@@ -224,6 +246,16 @@ if step storage; then
 
     [ "$found_count" -eq "$expected" ] || { echo "FATAL: FORCE RLS not active on $c for:$missing (expected $expected of {$tables}, database '$db') — MT-01d not deployed for the named table(s), or FORCE RLS was turned off" >&2; exit 1; }
   done
+
+  # State the SCOPE of what just passed. This step verifies five tables; the
+  # tenant-scoped estate is larger, and an operator reading "RLS isolation is
+  # active" was previously entitled to assume it covered everything.
+  echo "   VERIFIED: FORCE RLS active on risk-engine{portfolios,positions,applied_keys} + accounting{ledger_entries,ledger_snapshots}"
+  echo "   NOT VERIFIED by this step (ONBOARD-M6: database/cluster unresolved, and this script will not guess):" >&2
+  for group in $UNVERIFIED_RLS_TABLES; do
+    echo "     - ${group%%:*}: $(printf '%s' "${group#*:}" | tr ',' ' ')" >&2
+  done
+  echo "   These tables' migrations DO declare FORCE RLS — this is an unverified claim, not a known failure. Resolve ONBOARD-M6 to close the gap." >&2
 fi
 
 # 2) Infrastructure lifecycle (MT-01c/d/e via tenantctl.sh): identity (namespace
