@@ -131,6 +131,29 @@ spec:
       volumes:
         # The model card. A ConfigMap, not a secret: weights and validation evidence are
         # auditable artifacts, and a model nobody can inspect is a model nobody can validate.
+        #
+        # OPERATOR-SUPPLIED, DELIBERATELY NOT IN GIT. This ConfigMap is the OUTPUT of the
+        # MLOPS-01g promotion/approval workflow — a specific model, its weights, and its
+        # recorded validation evidence — so it is environment-specific and changes when a
+        # model is promoted. Committing a placeholder here would put a FABRICATED validation
+        # record in the repo, and `require_primary` exists precisely to refuse a model whose
+        # validation is absent or expired; a fake one would satisfy the gate and defeat it.
+        #
+        # It was previously referenced with no explanation anywhere, which reads as an
+        # oversight and cost a review cycle. Create it before first rollout:
+        #
+        #   kubectl -n kanz-services create configmap inference-models --from-file=models.json
+        #
+        # models.json is one card or a JSON array of cards (kanz_inference/service.py:_spec_from):
+        #   REQUIRED  model_id, feature_set_ref, confidence_threshold, weights{name: float}
+        #   OPTIONAL  bias, scale, validated_at, expires_at (ISO-8601), validation_passed,
+        #             artifact_uri, report_uri
+        # A card whose validation is missing/expired/failed is NOT promoted to PRIMARY, and
+        # with no PRIMARY the process exits 2 by design (see the header) rather than serving.
+        #
+        # FAILURE MODE IF ABSENT, and it is NOT the loud exit-2 this file's header advertises:
+        # the kubelet cannot mount a missing ConfigMap, so the pod never starts and sits in
+        # CreateContainerConfigError — the process never runs to refuse anything.
         - name: models
           configMap:
             name: inference-models
