@@ -353,6 +353,12 @@ func (s *Service) handleCancel(ctx context.Context, payload []byte) error {
 	if err != nil {
 		return err
 	}
+	// Entitlement, BEFORE any side effect: tenant isolation proves this order
+	// belongs to this tenant, not that this CALLER may touch it.
+	if !entitledTo(cmd.GetMetadata().GetPrincipalPortfolios(), st.GetPortfolioId()) {
+		return s.outcomeReject(ctx, cmd.GetOrderId(), ReasonNotEntitled,
+			"principal is not entitled to this order's portfolio", now)
+	}
 	// Validate the withdrawal against the aggregate first (the terminal guard), so
 	// a cancel the ledger refuses never reaches the exchange.
 	next, cancelledQty, cerr := Cancel(st, now)
@@ -446,6 +452,12 @@ func (s *Service) handleAmend(ctx context.Context, payload []byte) error {
 	if err != nil {
 		return err
 	}
+	// Entitlement, BEFORE the aggregate mutates: an amend rewrites the size or
+	// price of a live order, so it carries the same exposure as a cancel.
+	if !entitledTo(cmd.GetMetadata().GetPrincipalPortfolios(), st.GetPortfolioId()) {
+		return s.outcomeReject(ctx, cmd.GetOrderId(), ReasonNotEntitled,
+			"principal is not entitled to this order's portfolio", now)
+	}
 	next, aerr := Amend(st, &cmd, now)
 	if aerr != nil {
 		var re *RejectError
@@ -473,4 +485,28 @@ func (s *Service) refuse(ctx context.Context, orderID, code, reason string, t ti
 func (s *Service) outcomeReject(ctx context.Context, orderID, code, reason string, t time.Time) error {
 	return s.emitter.EmitOutcome(ctx, orderID,
 		commandpb.CommandOutcomeStatus_COMMAND_OUTCOME_STATUS_REJECTED, reason, code, "", t)
+}
+
+// ReasonNotEntitled is the outcome code for a command whose issuer holds no
+// entitlement to the target order's portfolio.
+const ReasonNotEntitled = "NOT_ENTITLED"
+
+// entitledTo reports whether a principal scoped to allowed may act on an order
+// belonging to portfolio.
+//
+// EMPTY DENIES. This is deliberately the opposite of pkg/auth's PolicyAuthorizer,
+// which treats an absent portfolio claim as unrestricted — a sane default for a
+// read path and the wrong one here, where a dropped claim would silently
+// authorize a caller against every portfolio in the tenant. On the capital path
+// the absence of proof is not proof; it is the absence of entitlement.
+func entitledTo(allowed []string, portfolio string) bool {
+	if portfolio == "" {
+		return false // an order that cannot say whose it is cannot be authorized
+	}
+	for _, p := range allowed {
+		if p == portfolio {
+			return true
+		}
+	}
+	return false
 }

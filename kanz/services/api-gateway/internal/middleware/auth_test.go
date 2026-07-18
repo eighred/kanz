@@ -140,3 +140,42 @@ func TestAuthStashesPrincipal(t *testing.T) {
 		t.Errorf("principal not stashed: %+v", got)
 	}
 }
+
+// The `portfolios` claim must reach the Principal. It is the only source of the
+// caller's portfolio entitlement, and the OMS denies by default — so a claim
+// that is parsed into nothing does not merely lose a feature, it refuses every
+// cancel and amend the platform issues.
+func TestJWTAuthenticator_CarriesPortfolioClaim(t *testing.T) {
+	a := NewJWTAuthenticator(testSecret)
+	tok := mintJWT(t, jwtClaims{
+		Subject:    "user-1",
+		Tenant:     "acme",
+		Roles:      []string{"trader"},
+		Portfolios: []string{"pf1", "pf7"},
+	})
+
+	p, err := a.Authenticate(tok)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(p.Portfolios) != 2 || p.Portfolios[0] != "pf1" || p.Portfolios[1] != "pf7" {
+		t.Fatalf("portfolios = %v, want [pf1 pf7]", p.Portfolios)
+	}
+}
+
+// A token with no `portfolios` claim yields an EMPTY scope, which the OMS treats
+// as deny. Asserted explicitly so nobody later "fixes" the empty case by
+// widening it to mean unrestricted — that reintroduces the exact fail-open this
+// whole change exists to close.
+func TestJWTAuthenticator_AbsentPortfolioClaimIsEmptyNotUnrestricted(t *testing.T) {
+	a := NewJWTAuthenticator(testSecret)
+	tok := mintJWT(t, jwtClaims{Subject: "user-1", Tenant: "acme", Roles: []string{"trader"}})
+
+	p, err := a.Authenticate(tok)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(p.Portfolios) != 0 {
+		t.Fatalf("portfolios = %v, want empty — absence must not be widened", p.Portfolios)
+	}
+}

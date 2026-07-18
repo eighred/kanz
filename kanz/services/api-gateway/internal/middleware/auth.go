@@ -25,6 +25,13 @@ type Principal struct {
 	Subject string
 	Tenant  string
 	Roles   []string
+
+	// Portfolios is the portfolio allow-list this principal is entitled to, from
+	// the token's `portfolios` claim. Roles say WHAT a caller may do; this says
+	// WHICH portfolios they may do it to — the gateway carries it onto every
+	// order command so the OMS, which holds the order, can authorize the caller
+	// it cannot otherwise identify.
+	Portfolios []string
 }
 
 // HasRole reports whether the principal carries role.
@@ -128,6 +135,8 @@ type jwtClaims struct {
 	Tenant  string   `json:"tenant"`
 	Roles   []string `json:"roles"`
 	Expiry  int64    `json:"exp"`
+	// Portfolios is auth.ClaimPortfolios — the caller's portfolio entitlement.
+	Portfolios []string `json:"portfolios"`
 }
 
 // Authenticate verifies a compact JWS (header.payload.signature), checks the
@@ -159,7 +168,7 @@ func (a *JWTAuthenticator) Authenticate(token string) (*Principal, error) {
 	if c.Subject == "" {
 		return nil, ErrUnauthenticated
 	}
-	return &Principal{Subject: c.Subject, Tenant: c.Tenant, Roles: c.Roles}, nil
+	return &Principal{Subject: c.Subject, Tenant: c.Tenant, Roles: c.Roles, Portfolios: c.Portfolios}, nil
 }
 
 var _ Authenticator = (*JWTAuthenticator)(nil)

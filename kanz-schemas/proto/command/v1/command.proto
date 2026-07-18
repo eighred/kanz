@@ -41,4 +41,27 @@ message CommandMetadata {
   // reason is a human-readable note on why the command was issued, retained
   // for audit. Optional.
   string reason = 4;
+
+  // principal_portfolios is the portfolio allow-list the ISSUER was entitled to
+  // at the moment the command was admitted — the caller's scope, carried to the
+  // handler that can actually check it.
+  //
+  // It exists because the entitlement and the resource live in different
+  // processes: the api-gateway knows WHO is calling but not which portfolio an
+  // order belongs to (it never reads the order), and the OMS holds the order but
+  // has no identity store. Without this the two facts never meet, and every
+  // holder of the coarse trade capability can cancel or amend ANY order in the
+  // tenant — which is exactly what was true before this field existed.
+  //
+  // SEMANTICS, and they are deliberately the opposite of pkg/auth's default:
+  // EMPTY MEANS DENY, not unrestricted. A handler MUST refuse a command whose
+  // list does not contain the target's portfolio, including when the list is
+  // absent. An entitlement that silently widens when a claim goes missing is not
+  // an entitlement; it is the fail-open shape this platform has already been
+  // bitten by. Tenant isolation is a SEPARATE guarantee (RLS + per-tenant OMS)
+  // and is not weakened or replaced by this field.
+  //
+  // The gateway is the only writer. It is populated from the authenticated
+  // principal's claims — never from client input.
+  repeated string principal_portfolios = 5;
 }

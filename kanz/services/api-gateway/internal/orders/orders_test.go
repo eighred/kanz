@@ -133,3 +133,70 @@ func TestSubmit_WritesDisabled_503(t *testing.T) {
 		t.Fatalf("status = %d, want 503", rr.Code)
 	}
 }
+
+// authedScoped authenticates a caller entitled to an explicit portfolio set.
+func authedScoped(req *http.Request, sub, tenant string, portfolios ...string) *http.Request {
+	ctx := middleware.WithPrincipal(req.Context(), &middleware.Principal{
+		Subject: sub, Tenant: tenant, Roles: []string{"trader"}, Portfolios: portfolios,
+	})
+	return req.WithContext(ctx)
+}
+
+// The gateway knows WHO is calling; the OMS holds the order and knows which
+// portfolio it belongs to. Neither can authorize a cancel alone, so the caller's
+// entitlement must travel on the command. If the gateway does not stamp it, the
+// OMS's deny-by-default guard refuses every cancel — including legitimate ones.
+func TestCancel_CarriesThePrincipalsPortfolioScope(t *testing.T) {
+	pub := &fakePub{}
+	h := New(pub)
+	mux := testMux()
+	h.Routes(mux)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/orders/o1/cancel", nil)
+	req = authedScoped(req, "alice", "acme", "pf1", "pf7")
+
+	rr := httptest.NewRecorder()
+	mux.ServeHTTP(rr, req)
+	if rr.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want 202 (body: %s)", rr.Code, rr.Body.String())
+	}
+	cmd := pub.last.Payload.(*orderpb.CancelOrder)
+	got := cmd.GetMetadata().GetPrincipalPortfolios()
+	if len(got) != 2 || got[0] != "pf1" || got[1] != "pf7" {
+		t.Fatalf("principal_portfolios = %v, want [pf1 pf7] — without this the OMS cannot authorize the cancel", got)
+	}
+}
+
+// The scope must come from the AUTHENTICATED principal, never from client input
+// — otherwise the caller simply grants themselves the portfolio they are
+// attacking, and the whole check is theatre.
+func TestCancel_IgnoresClientSuppliedPortfolioScope(t *testing.T) {
+	pub := &fakePub{}
+	h := New(pub)
+	mux := testMux()
+	h.Routes(mux)
+
+	// A forged body claiming entitlement to someone else's portfolio.
+	forged := &orderpb.CancelOrder{
+		OrderId:  "o1",
+		Metadata: &commandpb.CommandMetadata{PrincipalPortfolios: []string{"pf-victim"}},
+	}
+	raw, _ := protojson.Marshal(forged)
+	req := httptest.NewRequest(http.MethodPost, "/v1/orders/o1/cancel", strings.NewReader(string(raw)))
+	req = authedScoped(req, "mallory", "acme", "pf1")
+
+	rr := httptest.NewRecorder()
+	mux.ServeHTTP(rr, req)
+	if rr.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want 202 (body: %s)", rr.Code, rr.Body.String())
+	}
+	got := pub.last.Payload.(*orderpb.CancelOrder).GetMetadata().GetPrincipalPortfolios()
+	for _, p := range got {
+		if p == "pf-victim" {
+			t.Fatalf("principal_portfolios = %v — a CLIENT-SUPPLIED portfolio survived into the command", got)
+		}
+	}
+	if len(got) != 1 || got[0] != "pf1" {
+		t.Fatalf("principal_portfolios = %v, want [pf1] (the authenticated scope)", got)
+	}
+}

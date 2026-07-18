@@ -153,6 +153,10 @@ func bindMetadata(existing *commandpb.CommandMetadata, p *middleware.Principal, 
 		Issuer:   "user:" + p.Subject,
 		TargetId: orderID,
 		Reason:   reason,
+		// From the AUTHENTICATED principal, never from `existing` — a
+		// client-supplied scope is a caller granting themselves the portfolio
+		// they are attacking. Same rule as Issuer above, and for the same reason.
+		PrincipalPortfolios: p.Portfolios,
 	}
 }
 

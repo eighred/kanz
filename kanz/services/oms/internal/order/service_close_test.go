@@ -62,7 +62,7 @@ func TestCancel_DispatchesToVenueAndResolves(t *testing.T) {
 	venue := &closerVenue{mic: "BINANCE"}
 	svc, reg := restingOrderOn(t, fb, venue)
 
-	if err := svc.Handle(context.Background(), cancelEnv(), mustMarshal(t, &orderpb.CancelOrder{OrderId: "o1"})); err != nil {
+	if err := svc.Handle(context.Background(), cancelEnv(), mustMarshal(t, cancelAs("pf1"))); err != nil {
 		t.Fatalf("cancel: %v", err)
 	}
 	if len(venue.cancelled) != 1 || venue.cancelled[0] != "o1" {
@@ -85,7 +85,7 @@ func TestCancel_UnconfirmedVenueLeavesCloseTracked(t *testing.T) {
 	venue := &closerVenue{mic: "BINANCE", err: errors.New("timeout")}
 	svc, reg := restingOrderOn(t, fb, venue)
 
-	if err := svc.Handle(context.Background(), cancelEnv(), mustMarshal(t, &orderpb.CancelOrder{OrderId: "o1"})); err != nil {
+	if err := svc.Handle(context.Background(), cancelEnv(), mustMarshal(t, cancelAs("pf1"))); err != nil {
 		t.Fatalf("cancel returned %v — an unconfirmed venue cancel must not nack the command", err)
 	}
 	if reg.Len() != 1 {
@@ -108,7 +108,7 @@ func TestCancel_TrackedCloseCarriesNoSweep(t *testing.T) {
 	venue := &closerVenue{mic: "BINANCE", err: errors.New("timeout")}
 	svc, reg := restingOrderOn(t, fb, venue)
 
-	if err := svc.Handle(context.Background(), cancelEnv(), mustMarshal(t, &orderpb.CancelOrder{OrderId: "o1"})); err != nil {
+	if err := svc.Handle(context.Background(), cancelEnv(), mustMarshal(t, cancelAs("pf1"))); err != nil {
 		t.Fatalf("cancel: %v", err)
 	}
 	due := reg.DueCloses(time.Now(), 0) // timeout 0 ⇒ every tracked close is due
@@ -139,7 +139,7 @@ func TestCancel_NonCloserVenueIsLedgerOnly(t *testing.T) {
 	if err := svc.Handle(context.Background(), submitEnv(), mustMarshal(t, marketOrder())); err != nil {
 		t.Fatalf("submit: %v", err)
 	}
-	if err := svc.Handle(context.Background(), cancelEnv(), mustMarshal(t, &orderpb.CancelOrder{OrderId: "o1"})); err != nil {
+	if err := svc.Handle(context.Background(), cancelEnv(), mustMarshal(t, cancelAs("pf1"))); err != nil {
 		t.Fatalf("cancel: %v", err)
 	}
 	if reg.Len() != 0 {
