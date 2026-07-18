@@ -127,6 +127,21 @@ jobs:
           buf generate
           cd gen/go
           go mod init github.com/kanz-eng/kanz-schemas-go || true
+          # PIN the generated module's `go` directive to the CONSUMER's, instead
+          # of letting `go mod init` stamp whatever toolchain happens to be
+          # installed. Without this, a newer runner Go silently deletes kanz's
+          # `toolchain` pin, and the SEC-M5 guard that protects it fails:
+          #
+          #   setup-go v7 reads go.mod's `toolchain` line (v5 read `go`), so it
+          #   installs 1.26.5 not 1.26.1 → `go mod init` stamps `go 1.26.5` here
+          #   → kanz `replace`s this module, so under GOFLAGS=-mod=mod Go raises
+          #   kanz/go.mod's `go` to 1.26.5 to satisfy it → `toolchain go1.26.5`
+          #   is no longer HIGHER than `go`, so Go deletes it as redundant.
+          #
+          # The failure is a rewrite of a TRACKED file mid-run, which is why it
+          # looked like a phantom: the committed go.mod has the directive and
+          # the tested one does not. Reproduced end to end locally.
+          go mod edit -go="$(awk '/^go [0-9]/{print $2; exit}' ../../../kanz/go.mod)"
           go mod tidy
 
       - name: Build
