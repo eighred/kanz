@@ -461,12 +461,25 @@ jobs:
       # The @kanz-eng/kanz-schemas dep isn't published (DEBT-01b); repoint it at
       # the freshly generated local package so npm resolves it from disk, not the
       # registry. The package.json edit is ephemeral (CI only).
-      - name: Test
+      - name: Install
         working-directory: kanz/ts/kanz-bus
         run: |
           npm pkg set dependencies.@kanz-eng/kanz-schemas="file:../../../kanz-schemas/gen/ts"
           npm install
-          npm test
+
+      # Typecheck, and it must run BEFORE the tests rather than instead of them.
+      # `npm test` is `tsx --test`, and tsx is esbuild-based: it STRIPS types and
+      # never checks them. So until this step existed the compiler never ran in
+      # CI at all — a genuine type violation in kanz-bus, including one in the
+      # .d.ts public surface other code consumes, kept every check green.
+      # `tsc` is the only thing that reads tsconfig's strict/noUncheckedIndexedAccess.
+      - name: Typecheck
+        working-directory: kanz/ts/kanz-bus
+        run: npm run build
+
+      - name: Test
+        working-directory: kanz/ts/kanz-bus
+        run: npm test
 
   # DEBT-01d SDK-hygiene guard (PARITY-07a). First check is always-on: the SDKs
   # are generated and published, never committed (EVT-15a), so any tracked
