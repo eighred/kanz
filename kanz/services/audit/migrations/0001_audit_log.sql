@@ -25,12 +25,16 @@
 -- instead of reading the handler. Both are now scoped to the gateway-injected
 -- principal (server.tenantOf).
 --
--- STILL UNSCOPED, deliberately flagged rather than quietly fixed, because each
--- needs a decision and not a patch: /v1/audit/lineage/{id}, /v1/audit/verify and
--- /v1/audit/reports/{template}. Chain verification is cross-tenant BY DESIGN --
--- the hash chain spans every record, and scoping it would break the
--- tamper-evidence it exists to provide -- so the answer there is probably an
--- operator capability, not a tenant filter. Do not assume these are covered.
+-- /v1/audit/lineage/{id}, /v1/audit/reports/{template} and GET /v1/soc2/evidence
+-- were also unscoped and are now scoped the same way (lineage STRUCTURALLY, in
+-- lineage.Reconstruct, so the ancestry walk itself cannot cross a tenant).
+--
+-- /v1/audit/verify REMAINS GLOBAL ON PURPOSE. Chain verification is cross-tenant
+-- BY DESIGN -- the hash chain spans every record, so verifying a subset proves
+-- nothing about it and scoping this endpoint would destroy the tamper-evidence it
+-- exists to provide. It is authenticated (no anonymous callers) but NOT scoped,
+-- and which principals may attest over the whole chain is an open operator-
+-- capability question. Do not "fix" it by adding a tenant filter.
 
 CREATE TABLE IF NOT EXISTS audit_log (
     seq            BIGINT      PRIMARY KEY,
