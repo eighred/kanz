@@ -242,11 +242,77 @@ func (g *PreTradeGate) noteUnvaluable(portfolioID, instrumentID string) {
 		"fix", "check the submitted quantity; the price is not the problem")
 }
 
+// maxDecimalExponent bounds the exponent of any Decimal entering the rules
+// engine.
+//
+// It is a SAFETY limit, not a statement about what money means on this platform.
+// Real financial values keep |exponent| well under 30 — the smallest crypto
+// prices sit near 1e-12, the largest plausible notionals near 1e13 — so nothing
+// legitimate is within thirty orders of magnitude of this bound, and it cannot
+// refuse a real order. A tighter, meaningful domain would be a POLICY bound, and
+// setting policy wrong refuses live orders, which is its own kind of incident.
+//
+// The number is set by the system's own arithmetic rather than by entry values:
+// mulDecimal sums exponents and rescales upward, so values bounded at ±64 on
+// entry reach at most ≈ ±168 internally before ratFromDecimal sees them, and
+// 10^168 is instant. A bound chosen only against entry values would be wrong.
+//
+// Why this exists at all: engine.go's ratFromDecimal materialises
+// 10^abs(exponent) with no bound, and Decimal.exponent is an unvalidated wire
+// field on an order that reaches this gate BEFORE Accept validates it. An order
+// carrying {0, 2000000000} did not return in 5 seconds.
+const maxDecimalExponent = 64
+
+// decimalInDomain reports whether a Decimal can be safely computed with.
+// nil is in-domain — absent is not out-of-range, and the unpriced check owns it.
+func decimalInDomain(d *commonpb.Decimal) bool {
+	if d == nil {
+		return true
+	}
+	exp := d.GetExponent()
+	return exp >= -maxDecimalExponent && exp <= maxDecimalExponent
+}
+
+// deltaInDomain reports whether every Decimal on an incoming order is in-domain.
+func deltaInDomain(d OrderDelta) bool {
+	return decimalInDomain(d.SignedQuantity) && decimalInDomain(d.Price)
+}
+
+// bookInDomain reports whether every Decimal on a loaded book is in-domain.
+// The book is built from venue fills, so it is externally influenced too;
+// validating only the order would leave the same hang reachable through a
+// corrupted position.
+func bookInDomain(b *Book) bool {
+	if b == nil {
+		return true
+	}
+	if b.NAV != nil && !decimalInDomain(b.NAV.GetAmount()) {
+		return false
+	}
+	for i := range b.Positions {
+		if !decimalInDomain(b.Positions[i].Quantity) {
+			return false
+		}
+		if b.Positions[i].MarketValue != nil && !decimalInDomain(b.Positions[i].MarketValue.GetAmount()) {
+			return false
+		}
+	}
+	return true
+}
+
 // Evaluate runs the pre-trade check for one order. A returned error is TRANSIENT
 // (book/mandate load failure) and the caller should retry; a clean Decision with
 // Allowed=false is a terminal compliance rejection. An order against a portfolio
 // with no mandate is allowed.
 func (g *PreTradeGate) Evaluate(ctx context.Context, d OrderDelta) (Decision, error) {
+	// INPUT VALIDATION, BEFORE ANYTHING COMPUTES WITH THESE NUMBERS — including
+	// before the mandate lookup, so an out-of-domain order against an UNGOVERNED
+	// portfolio is refused rather than admitted. That is deliberate: a malformed
+	// exponent is not a compliance question.
+	if !deltaInDomain(d) {
+		g.noteUnvaluable(d.PortfolioID, d.InstrumentID)
+		return Decision{Allowed: false, Unvaluable: true}, nil
+	}
 	mandate, ok, err := g.mandates.Mandate(ctx, d.PortfolioID, d.AsOf)
 	if err != nil {
 		return Decision{}, err
@@ -281,6 +347,10 @@ func (g *PreTradeGate) Evaluate(ctx context.Context, d OrderDelta) (Decision, er
 	book, err := g.books.Book(ctx, d.PortfolioID)
 	if err != nil {
 		return Decision{}, err
+	}
+	if !bookInDomain(book) {
+		g.noteUnvaluable(d.PortfolioID, d.InstrumentID)
+		return Decision{Allowed: false, Unvaluable: true}, nil
 	}
 	// The price was fine; the VALUATION did not fit. Refusing under its own
 	// flag keeps the two apart: Unpriced sends an operator to go wire a price

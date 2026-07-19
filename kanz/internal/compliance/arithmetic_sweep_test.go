@@ -566,7 +566,17 @@ func TestPreTradeGate_ZeroCoefficientCannotEraseTheBook(t *testing.T) {
 			// exponents are pinned one level down, on addDecimal itself, where
 			// nothing materialises the scale
 			// (TestAddDecimal_ZeroCoefficientDoesNotAnnihilateTheOtherOperand).
-			for _, exp := range []int32{100, 1000, -100, -1000} {
+			//
+			// Also bounded above by maxDecimalExponent (gate.go, 64): domain
+			// validation now refuses any order whose raw SignedQuantity exponent
+			// falls outside +/-64 before it ever reaches project()/addDecimal,
+			// deliberately coefficient-blind -- a zero-coefficient value only
+			// stays safe as long as every consumer special-cases it the way
+			// addDecimal does, and ratFromDecimal does not. 50/60 (originally
+			// 100/1000) keep this test past alignWindow, still exercising the
+			// clamp it targets, while staying inside the new entry bound so the
+			// order reaches the rules engine instead of being refused first.
+			for _, exp := range []int32{50, 60, -50, -60} {
 				verdict, err := g.Evaluate(ctx, OrderDelta{
 					PortfolioID:    "p1",
 					InstrumentID:   "AAPL",
