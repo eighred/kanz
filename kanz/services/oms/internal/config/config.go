@@ -147,6 +147,9 @@ func Load() (Config, error) {
 	if err != nil {
 		return Config{}, fmt.Errorf("OMS_PRICE_MAX_AGE: %w", err)
 	}
+	if maxAge <= 0 {
+		return Config{}, fmt.Errorf("OMS_PRICE_MAX_AGE: must be positive (got %v); a non-positive value would disable the staleness bound and admit orders against arbitrarily old prices", maxAge)
+	}
 	cfg.PriceMaxAge = maxAge
 
 	return cfg, nil
