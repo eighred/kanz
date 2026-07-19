@@ -461,8 +461,13 @@ func addDecimal(a, b *commonpb.Decimal) (*commonpb.Decimal, bool) {
 			if -gap >= 19 {
 				return big.NewInt(0)
 			}
-			// Quo (not Div) so a negative coefficient loses magnitude rather
-			// than gaining it — a SELL must not grow on the way in.
+			// Quo truncates toward zero, which is the conservative reading of
+			// a digit we are about to discard: it never grows the operand's
+			// magnitude. Div (floor) would be observationally identical here —
+			// the two differ only in the last unit of the truncated operand,
+			// and by construction that operand sits at least twenty-one orders
+			// of magnitude below the last digit the result can express. The
+			// choice is stated for intent, not because a rule can see it.
 			return c.Quo(c, new(big.Int).Exp(ten, big.NewInt(-gap), nil))
 		}
 	}

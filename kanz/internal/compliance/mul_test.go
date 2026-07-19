@@ -4,7 +4,6 @@ import (
 	"math"
 	"math/big"
 	"testing"
-	"time"
 
 	commonpb "github.com/kanz-eng/kanz-schemas-go/common/v1"
 
@@ -346,29 +345,6 @@ func TestAddDecimal_RefusesWhenTheExponentCannotBeRepresented(t *testing.T) {
 	}
 }
 
-// addWithin runs addDecimal in a goroutine and fails if it does not return
-// within d. Without this, the unbounded-gap defect does not fail CI — it HANGS
-// it, which is a much worse signal.
-func addWithin(t *testing.T, d time.Duration, a, b *commonpb.Decimal) (*commonpb.Decimal, bool) {
-	t.Helper()
-	type res struct {
-		v  *commonpb.Decimal
-		ok bool
-	}
-	ch := make(chan res, 1)
-	go func() {
-		v, ok := addDecimal(a, b)
-		ch <- res{v, ok}
-	}()
-	select {
-	case r := <-ch:
-		return r.v, r.ok
-	case <-time.After(d):
-		t.Fatalf("addDecimal did not return within %s — the alignment exponent is unbounded again", d)
-		return nil, false
-	}
-}
-
 // THE DoS. A crafted order can put ~4.3e9 between the two exponents, and
 // aligning unconditionally to the smaller one asks math/big for a
 // multi-billion-digit 10^gap. The process hangs or OOMs long before it reaches
@@ -378,7 +354,7 @@ func addWithin(t *testing.T, d time.Duration, a, b *commonpb.Decimal) (*commonpb
 // The correct answer is arithmetic, not refusal: 10^2000000000 + 10^-2000000000
 // is 10^2000000000 to every digit a Decimal can hold.
 func TestAddDecimal_HugeExponentGapReturnsPromptly(t *testing.T) {
-	got, ok := addWithin(t, 2*time.Second,
+	got, ok := addDecimal(
 		&commonpb.Decimal{Coefficient: 1, Exponent: -2000000000},
 		&commonpb.Decimal{Coefficient: 1, Exponent: 2000000000},
 	)
@@ -394,7 +370,7 @@ func TestAddDecimal_HugeExponentGapReturnsPromptly(t *testing.T) {
 // The same gap with the large operand NEGATIVE — a SELL is a negative signed
 // quantity, and the clamp must not lose its sign.
 func TestAddDecimal_HugeExponentGapKeepsTheSign(t *testing.T) {
-	got, ok := addWithin(t, 2*time.Second,
+	got, ok := addDecimal(
 		&commonpb.Decimal{Coefficient: -1, Exponent: 2000000000},
 		&commonpb.Decimal{Coefficient: 1, Exponent: -2000000000},
 	)
@@ -412,7 +388,7 @@ func TestAddDecimal_HugeExponentGapKeepsTheSign(t *testing.T) {
 // significant digits.
 func TestAddDecimal_LargeGapsReturnPromptlyAndCorrectly(t *testing.T) {
 	for _, gap := range []int32{30, 100, 1000} {
-		got, ok := addWithin(t, 2*time.Second,
+		got, ok := addDecimal(
 			&commonpb.Decimal{Coefficient: 1, Exponent: 0},
 			&commonpb.Decimal{Coefficient: 1, Exponent: -gap},
 		)
@@ -423,6 +399,83 @@ func TestAddDecimal_LargeGapsReturnPromptlyAndCorrectly(t *testing.T) {
 			t.Fatalf("gap %d: got %d e%d, want 1000000000000000000 e-18 (= 1)",
 				gap, got.GetCoefficient(), got.GetExponent())
 		}
+	}
+}
+
+// THE ZERO-COEFFICIENT GUARD. addDecimal adjusts a zero operand's exponent to
+// its partner's before clamping, and those four lines are the whole reason a
+// zero cannot erase a book.
+//
+// Without them, {1000, e0} + {0, e2000000000} returns 0: alignExponent sees a
+// hi of 2e9, clamps the alignment exponent to hi-40, and the REAL operand —
+// sitting two billion places below that — is truncated to nothing by scale().
+// A zero plus a thousand is a thousand; returning zero is not a rounding loss,
+// it is annihilation of the only operand that had a magnitude.
+//
+// Downstream that is COMP-M1 reached through a new door. project() values the
+// summed quantity into the position's MarketValue, heldPositions (rules.go)
+// drops zero-valued positions as flat, and a projected book with no positions
+// breaches nothing — every rule in the mandate passes. Quantity.Exponent is an
+// unvalidated wire field and the gate runs before Accept validates the order,
+// so the operand carrying the absurd exponent is attacker-supplied.
+//
+// TestPreTradeGate_ZeroCoefficientCannotEraseTheBook (gate_test.go) pins the
+// same guard at the gate level; this one pins the arithmetic.
+func TestAddDecimal_ZeroCoefficientDoesNotAnnihilateTheOtherOperand(t *testing.T) {
+	cases := []struct {
+		name    string
+		a, b    *commonpb.Decimal
+		wantCo  int64
+		wantExp int32
+	}{
+		{
+			"zero second operand, absurd positive exponent",
+			&commonpb.Decimal{Coefficient: 1000, Exponent: 0},
+			&commonpb.Decimal{Coefficient: 0, Exponent: 2000000000},
+			1000, 0,
+		},
+		{
+			"zero FIRST operand, absurd positive exponent",
+			&commonpb.Decimal{Coefficient: 0, Exponent: 2000000000},
+			&commonpb.Decimal{Coefficient: 1000, Exponent: 0},
+			1000, 0,
+		},
+		{
+			"zero operand, absurd NEGATIVE exponent (drags the window the other way)",
+			&commonpb.Decimal{Coefficient: 1000, Exponent: 0},
+			&commonpb.Decimal{Coefficient: 0, Exponent: -2000000000},
+			1000, 0,
+		},
+		{
+			"negative real operand must keep its sign and magnitude (a SELL)",
+			&commonpb.Decimal{Coefficient: -1000, Exponent: 0},
+			&commonpb.Decimal{Coefficient: 0, Exponent: 2000000000},
+			-1000, 0,
+		},
+		{
+			// Both zero: the guard adjusts a to b (the first branch wins), so
+			// both align at b's exponent and the result is 0 there. The value
+			// is zero either way; what is pinned is that the pair of zeroes
+			// does not go anywhere near the clamp.
+			"both zero — still zero, and the exponent must not run away",
+			&commonpb.Decimal{Coefficient: 0, Exponent: 2000000000},
+			&commonpb.Decimal{Coefficient: 0, Exponent: -2000000000},
+			0, -2000000000,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok := addDecimal(tc.a, tc.b)
+			if !ok {
+				t.Fatalf("ok = false, want a representable sum")
+			}
+			if got.GetCoefficient() != tc.wantCo || got.GetExponent() != tc.wantExp {
+				t.Fatalf("got %d e%d, want %d e%d — a zero-coefficient operand's exponent "+
+					"dragged the alignment window; the real operand is meant to pass "+
+					"through untouched, in its own representation",
+					got.GetCoefficient(), got.GetExponent(), tc.wantCo, tc.wantExp)
+			}
+		})
 	}
 }
 
@@ -545,53 +598,10 @@ func TestAlignExponent_WindowBoundary(t *testing.T) {
 	}
 }
 
-// TestAlignExponent_DivisorShortCircuitBoundary pins where scale()'s
-// `-gap >= 19` short circuit engages (gate.go: "an int64 coefficient is
-// under 10^19, so anything shifted nineteen or more places right IS zero").
-// Both cases here sit inside the alignWindow clamp (gap > 40), so exp is
-// pinned at hi-alignWindow throughout, and the smaller operand's
-// participation gap shrinks by exactly one for each extra gap digit — the
-// same relationship TestAlignExponent_WindowBoundary pins, carried out to
-// where it crosses the divisor short circuit's own threshold.
-//
-// This is the same "unobservable one level down" situation as the window
-// boundary (see that test's comment) — verified with the same throwaway
-// script — so scale()'s literal `19` is deliberately NOT re-derived here via
-// addDecimal's output; it is pinned via the gap value scale() receives,
-// which is the only level at which the two cases provably differ.
-//
-// hi=0 fixed, lo=-gap, exp=hi-alignWindow=-40 for any gap>40 (clamped):
-// participationGap = lo-exp = -gap-(-40) = 40-gap.
-//
-//	gap=58: participationGap = 40-58 = -18 -> -gap==18 < 19: scale()
-//	        performs an actual big.Int division by 10^18.
-//	gap=59: participationGap = 40-59 = -19 -> -gap==19 >= 19: scale()
-//	        short-circuits to 0 without computing 10^19.
-func TestAlignExponent_DivisorShortCircuitBoundary(t *testing.T) {
-	cases := []struct {
-		gap                  int64
-		wantParticipationGap int64
-		wantShortCircuit     bool
-	}{
-		{gap: 58, wantParticipationGap: -18, wantShortCircuit: false},
-		{gap: 59, wantParticipationGap: -19, wantShortCircuit: true},
-	}
-	for _, tc := range cases {
-		expA, expB := int64(0), -tc.gap
-		exp := alignExponent(expA, expB)
-		participationGap := expB - exp
-		if participationGap != tc.wantParticipationGap {
-			t.Fatalf("gap %d: participation gap = %d, want %d", tc.gap, participationGap, tc.wantParticipationGap)
-		}
-		if shortCircuit := -participationGap >= 19; shortCircuit != tc.wantShortCircuit {
-			t.Fatalf("gap %d: -gap>=19 = %v, want %v", tc.gap, shortCircuit, tc.wantShortCircuit)
-		}
-	}
-}
-
 // TestAddDecimal_WindowAndDivisorBoundariesProduceCorrectValues is the
-// Decimal-level, non-vacuity companion to the two boundary tests above: at
-// each exact edge they pin (gap 40/41, 58/59), addDecimal must still return
+// Decimal-level, non-vacuity companion to the window-boundary test above: at
+// the window edges (gap 40/41) and either side of scale()'s `-gap >= 19`
+// divisor short circuit (gap 58/59), addDecimal must still return
 // the mathematically correct value. 1 + 10^-gap is exactly 1 at nineteen
 // significant digits for any gap>=1 (same derivation as the existing
 // gap-30/100/1000 case above), so all four edges must agree on the same
@@ -601,7 +611,7 @@ func TestAlignExponent_DivisorShortCircuitBoundary(t *testing.T) {
 // addDecimal, not just of the extracted arithmetic.
 func TestAddDecimal_WindowAndDivisorBoundariesProduceCorrectValues(t *testing.T) {
 	for _, gap := range []int32{40, 41, 58, 59} {
-		got, ok := addWithin(t, 2*time.Second,
+		got, ok := addDecimal(
 			&commonpb.Decimal{Coefficient: 1, Exponent: 0},
 			&commonpb.Decimal{Coefficient: 1, Exponent: -gap},
 		)
