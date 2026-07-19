@@ -124,7 +124,7 @@ func runControlLoop(ctx context.Context, cfg config.Config, readiness *server.Re
 	}
 	defer func() { _ = client.Close() }()
 
-	consumer, err := bus.NewConsumer(client, bus.WithBusMetrics(busMetrics))
+	consumer, err := bus.NewConsumer(client, bus.WithBusMetrics(busMetrics), bus.WithDLQ(client))
 	if err != nil {
 		return err
 	}

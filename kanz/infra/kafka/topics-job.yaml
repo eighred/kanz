@@ -50,8 +50,16 @@ data:
     # a position that ages out is a book that rebuilds wrong. Their NATS streams
     # already know this (--max-msgs-per-subject=1, no max-age); Kafka must not be
     # the place the lesson is forgotten.
-    compliance.mandate         3   compact  -1          no
-    risk.position              6   compact  -1          no
+    # These two carry a DLQ even though they are COMPACTED, and the pairing is
+    # not symmetric with them: the topic holds state, the DLQ holds the poison
+    # message that could not be turned into state. lake-sink consumes both, and
+    # a consumer wired with WithDLQ has nowhere to park a failure on a topic with
+    # no `dlq.` sibling — Kafka auto-create is disabled, so the publish fails, the
+    # error surfaces, and the event goes back to the broker for the redelivery
+    # loop the DLQ exists to end. The DLQ itself stays delete/30d: a poison
+    # message is an incident to investigate, not state to retain forever.
+    compliance.mandate         3   compact  -1          yes
+    risk.position              6   compact  -1          yes
 
     # MONEY AND OBLIGATIONS -> 30d + a DLQ. 30 days is what the ARCHIVER buys;
     # permanence is the lakehouse's job (DATA-M2), not a retention setting here.

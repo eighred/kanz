@@ -98,7 +98,7 @@ func main() {
 	}
 	defer func() { _ = client.Close() }()
 
-	consumer, err := bus.NewConsumer(client)
+	consumer, err := bus.NewConsumer(client, bus.WithDLQ(client))
 	if err != nil {
 		logger.Error("consumer init failed", "err", err)
 		os.Exit(2)

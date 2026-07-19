@@ -123,7 +123,7 @@ func runProjection(ctx context.Context, cfg config.Config, store audit.Store, re
 	}
 	defer func() { _ = client.Close() }()
 
-	consumer, err := bus.NewConsumer(client, bus.WithBusMetrics(busMetrics))
+	consumer, err := bus.NewConsumer(client, bus.WithBusMetrics(busMetrics), bus.WithDLQ(client))
 	if err != nil {
 		return err
 	}

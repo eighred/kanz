@@ -202,7 +202,7 @@ func runConsumer(ctx context.Context, cfg config.Config, store ledger.Store, mes
 	}
 	defer func() { _ = client.Close() }()
 
-	consumer, err := bus.NewConsumer(client, bus.WithBusMetrics(busMetrics))
+	consumer, err := bus.NewConsumer(client, bus.WithBusMetrics(busMetrics), bus.WithDLQ(client))
 	if err != nil {
 		return err
 	}
@@ -304,7 +304,7 @@ func runFXFeed(ctx context.Context, cfg config.Config, liveFX *fxfeed.LiveFX, me
 	}
 	defer func() { _ = client.Close() }()
 
-	consumer, err := bus.NewConsumer(client, bus.WithBusMetrics(busMetrics))
+	consumer, err := bus.NewConsumer(client, bus.WithBusMetrics(busMetrics), bus.WithDLQ(client))
 	if err != nil {
 		return err
 	}

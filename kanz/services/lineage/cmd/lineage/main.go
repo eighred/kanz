@@ -163,7 +163,7 @@ func runHarvest(ctx context.Context, cfg config.Config, g graph.Graph, readiness
 	}
 	defer func() { _ = client.Close() }()
 
-	consumer, err := bus.NewConsumer(client, bus.WithBusMetrics(busMetrics))
+	consumer, err := bus.NewConsumer(client, bus.WithBusMetrics(busMetrics), bus.WithDLQ(client))
 	if err != nil {
 		return err
 	}

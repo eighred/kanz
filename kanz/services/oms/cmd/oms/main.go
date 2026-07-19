@@ -241,7 +241,15 @@ func runConsumers(ctx context.Context, cfg config.Config, readiness *server.Read
 		return err
 	}
 
-	consumer, err := bus.NewConsumer(client, bus.WithBusMetrics(busMetrics))
+	// WithDLQ is load-bearing on this path, not hygiene. Without it a SubmitOrder
+	// whose venue call fails AFTER admission returns an error with nowhere to go:
+	// the broker redelivers it, handleSubmit's fast path finds the order it
+	// already created and acks it as a duplicate, and the order is left at ROUTED
+	// looking exactly like a limit order resting normally — with nothing working
+	// it and nothing anywhere saying so. Parking it in dlq.<subject> is what makes
+	// that failure a thing an operator can see. Retry is deliberately NOT wired
+	// here; see test/arch/bus_dlq_test.go for why it would make this worse.
+	consumer, err := bus.NewConsumer(client, bus.WithBusMetrics(busMetrics), bus.WithDLQ(client))
 	if err != nil {
 		return err
 	}

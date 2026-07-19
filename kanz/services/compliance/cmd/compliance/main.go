@@ -127,7 +127,7 @@ func runConsumers(ctx context.Context, cfg config.Config, readiness *server.Read
 	breachEmitter := monitor.NewEmitter(producer)
 	mon := monitor.NewMonitor(comp.NewEngine(nil), mandateReg, nil /*classifier*/, breachEmitter, recorder, logger)
 
-	consumer, err := bus.NewConsumer(client, bus.WithBusMetrics(busMetrics))
+	consumer, err := bus.NewConsumer(client, bus.WithBusMetrics(busMetrics), bus.WithDLQ(client))
 	if err != nil {
 		return err
 	}

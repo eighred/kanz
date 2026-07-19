@@ -118,7 +118,7 @@ func main() {
 	// operator ModeChanged(system → NORMAL) lets this process trade. If the
 	// subscription itself dies, the gate latches shut — a process that cannot hear
 	// the brake does not drive.
-	consumer, err := bus.NewConsumer(client, bus.WithBusMetrics(busMetrics))
+	consumer, err := bus.NewConsumer(client, bus.WithBusMetrics(busMetrics), bus.WithDLQ(client))
 	if err != nil {
 		logger.Error("consumer init failed", "err", err)
 		os.Exit(2)

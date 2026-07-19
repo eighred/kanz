@@ -256,7 +256,7 @@ func runEngine(ctx context.Context, cfg config.Config, readiness *server.Readine
 	if dedupCloser != nil {
 		a.Closers = append(a.Closers, dedupCloser)
 	}
-	consumer, err := bus.NewConsumer(client, bus.WithBusMetrics(busMetrics), bus.WithDeduper(deduper))
+	consumer, err := bus.NewConsumer(client, bus.WithBusMetrics(busMetrics), bus.WithDeduper(deduper), bus.WithDLQ(client))
 	if err != nil {
 		return err
 	}
@@ -327,7 +327,7 @@ func startCalibration(ctx context.Context, cfg config.Config, client *bus.NATSCl
 	// A dedicated consumer + broadcast group: the cache must SEE every market
 	// event (it is a last-value cache, not a work queue), so it subscribes under
 	// a per-source group distinct from any load-balanced market-data consumer.
-	consumer, err := bus.NewConsumer(client, bus.WithBusMetrics(busMetrics))
+	consumer, err := bus.NewConsumer(client, bus.WithBusMetrics(busMetrics), bus.WithDLQ(client))
 	if err != nil {
 		return err
 	}
