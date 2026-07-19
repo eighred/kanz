@@ -3,9 +3,21 @@ package arch
 import (
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 )
+
+// sharedConfigMapMount matches the dev Job's volumes entry mounting the
+// `nats-bootstrap` ConfigMap by name, anchored to the `configMap:` volume
+// source specifically. A bare substring check for "name: nats-bootstrap" is
+// satisfied by the file's own metadata label
+// (app.kubernetes.io/name: nats-bootstrap) regardless of what the volume
+// actually mounts — proven by renaming the mounted ConfigMap and observing
+// the guard still pass. Anchoring to the line immediately after `configMap:`
+// ties the check to the actual mount rather than to any "nats-bootstrap"
+// string anywhere in the file.
+var sharedConfigMapMount = regexp.MustCompile(`configMap:\s*\n\s*name:\s*nats-bootstrap\s*(\n|$)`)
 
 // The NATS bootstrap exists in two postures, and the dangerous direction is not
 // the one people expect.
@@ -37,6 +49,19 @@ func TestNATSBootstrapKeepsItsMTLSPosture(t *testing.T) {
 	prod := readFile(t, filepath.Join(root, "infra", "nats", "bootstrap-job.yaml"))
 	dev := readFile(t, filepath.Join(root, "infra", "nats", "bootstrap-job-dev-plaintext.yaml"))
 
+	// Every needle below must test actual YAML configuration, not prose. Both
+	// files carry extensive comments that legitimately narrate the very tokens
+	// being asserted on (the dev file explains why NATS_CERT/NATS_KEY/NATS_CA
+	// are absent; the prod file explains what spiffe-helper does) — so scanning
+	// raw file text makes a comment indistinguishable from real config. This
+	// guard used to test raw `dev` with an exemption clause for exactly one such
+	// comment, and because that comment is always present, the exemption was
+	// permanently satisfied and every dev-posture needle below was dead: see
+	// stripYAMLComments. Stripped text is used everywhere a needle's own prose
+	// could otherwise satisfy or defeat the check.
+	prodConfig := stripYAMLComments(prod)
+	devConfig := stripYAMLComments(dev)
+
 	// --- the production Job must keep its identity -------------------------
 	for _, want := range []struct{ needle, why string }{
 		{"initContainers:", "the spiffe-helper init container is what materialises the SVID"},
@@ -45,7 +70,7 @@ func TestNATSBootstrapKeepsItsMTLSPosture(t *testing.T) {
 		{"NATS_KEY", "the CLI reads its client key from this env var"},
 		{"NATS_CA", "the CLI verifies the broker against this bundle"},
 	} {
-		if !strings.Contains(prod, want.needle) {
+		if !strings.Contains(prodConfig, want.needle) {
 			t.Errorf("bootstrap-job.yaml no longer contains %q — %s.\n\n"+
 				"If this was removed to get past an Init:0/1 hang on a cluster without SPIRE, "+
 				"that is what bootstrap-job-dev-plaintext.yaml is for. Stripping mTLS from the "+
@@ -55,26 +80,42 @@ func TestNATSBootstrapKeepsItsMTLSPosture(t *testing.T) {
 	}
 
 	// --- the dev Job must NOT quietly become a second production Job -------
+	//
+	// Previously: `strings.Contains(dev, forbidden) && !strings.Contains(dev,
+	// "# NATS_CERT / NATS_KEY / NATS_CA are deliberately ABSENT")`. That exemption
+	// comment is always present in the dev manifest (it is the documentation of
+	// this very posture), so the second half of that condition was permanently
+	// false and NONE of NATS_CERT, NATS_KEY, NATS_CA, or spiffe-helper could ever
+	// trip this check — proven by adding a real NATS_CERT env var to the dev file
+	// and observing the test still pass. Scanning comment-stripped text removes
+	// the need for an exemption clause at all: the comment that used to defeat
+	// the check is gone before the check runs, so it can only fire on real config.
 	for _, forbidden := range []string{"NATS_CERT", "NATS_KEY", "NATS_CA", "spiffe-helper"} {
-		if strings.Contains(dev, forbidden) && !strings.Contains(dev, "# NATS_CERT / NATS_KEY / NATS_CA are deliberately ABSENT") {
+		if strings.Contains(devConfig, forbidden) {
 			t.Errorf("bootstrap-job-dev-plaintext.yaml contains %q. It is the PLAINTEXT posture: "+
 				"the nats CLI selects TLS by the PRESENCE of those env vars, so a half-configured "+
 				"file gives a confusing partial-TLS failure rather than a clean plaintext connect. "+
-				"If this rig now has SPIRE, apply bootstrap-job.yaml instead.", forbidden)
+				"If this rig now has SPIRE, apply bootstrap-job.yaml instead. (This check was "+
+				"previously disabled by a comment-exemption clause; if you are seeing this fail for "+
+				"the first time, that is why — it is now effective.)", forbidden)
 		}
 	}
 
 	// --- both must run the SAME script, not two copies ---------------------
 	// This is the property that keeps a dev rig's stream topology identical to
 	// production's. A dev file with its own inline script would pass every other
-	// check here and still drift.
-	if !strings.Contains(dev, "configMap:") || !strings.Contains(dev, "name: nats-bootstrap") {
+	// check here and still drift. Scanning stripped text, since this must test
+	// whether the ConfigMap is actually mounted, not whether it is mentioned in
+	// prose (the file's header comments talk about the shared ConfigMap at length).
+	if !sharedConfigMapMount.MatchString(devConfig) {
 		t.Error("bootstrap-job-dev-plaintext.yaml does not mount the shared `nats-bootstrap` " +
 			"ConfigMap. Both Jobs must run the SAME bootstrap script: that is the only reason a " +
 			"second manifest is acceptable, because it means there is one stream topology rather " +
-			"than two that can drift apart.")
+			"than two that can drift apart. (A bare substring check here was previously satisfied " +
+			"by the file's own app.kubernetes.io/name: nats-bootstrap label regardless of what the " +
+			"volume actually mounts — this check is now anchored to the configMap: volume source.)")
 	}
-	if strings.Contains(dev, "ensure_stream ") {
+	if strings.Contains(devConfig, "ensure_stream ") {
 		t.Error("bootstrap-job-dev-plaintext.yaml appears to carry its own copy of the bootstrap " +
 			"script (it contains `ensure_stream `). It must mount the shared ConfigMap instead — " +
 			"a duplicated topology is the defect infra/kafka/tenancy.yaml already demonstrated, " +
@@ -82,10 +123,32 @@ func TestNATSBootstrapKeepsItsMTLSPosture(t *testing.T) {
 	}
 
 	// --- the two must not collide -----------------------------------------
+	// Scanning raw `dev` here is correct, not an oversight: "nats-bootstrap-dev-
+	// plaintext" appears exactly once in the file (the Job's own metadata.name)
+	// and nowhere in a comment, so there is nothing for stripping to change.
 	if !strings.Contains(dev, "name: nats-bootstrap-dev-plaintext") {
 		t.Error("the dev Job must be named nats-bootstrap-dev-plaintext, distinctly from the real " +
 			"one, so it cannot replace it in a kubectl apply and is obvious in a `get jobs` listing")
 	}
+}
+
+// stripYAMLComments removes every `#` comment so a guard scans CONFIGURATION
+// rather than prose. This file previously carried an exemption clause instead —
+// "unless the file also contains the comment saying these are deliberately
+// absent" — and because that comment is always present in the dev manifest, the
+// exemption was permanently satisfied and ALL FOUR needles below were dead. A
+// guard silenced by the very comment explaining what it guards is worse than no
+// guard: it reports success. Strip the prose, keep the check.
+func stripYAMLComments(s string) string {
+	var b strings.Builder
+	for _, line := range strings.Split(s, "\n") {
+		if i := strings.Index(line, "#"); i >= 0 {
+			line = line[:i]
+		}
+		b.WriteString(line)
+		b.WriteString("\n")
+	}
+	return b.String()
 }
 
 func readFile(t *testing.T, path string) string {
