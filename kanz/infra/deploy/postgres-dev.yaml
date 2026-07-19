@@ -1,0 +1,158 @@
+# DEV-ONLY Postgres for the kind rig. NOT a production database.
+#
+# WHY THIS FILE EXISTS. The rig's Postgres was never declared anywhere. Somebody
+# ran CREATE ROLE / CREATE DATABASE against a pod by hand on 2026-07-12 and wrote
+# the DSN into a Secret. The pod has no volumes, so when it was recreated the role
+# and the database went with it — and the OMS's migrate init container has been
+# failing since with `password authentication failed for user "kanzapp"`, which
+# reads like a wrong password and is really a missing role. The rig could not be
+# rebuilt from source, because the source never described it.
+#
+# This is the same failure the NATS bootstrap had: a one-shot setup step with no
+# re-run path. The fix has the same shape. Postgres's entrypoint runs every
+# /docker-entrypoint-initdb.d/*.sql on a FRESH data directory, so the role and
+# database are recreated by exactly the event that destroyed them.
+#
+# STORAGE IS DELIBERATELY EPHEMERAL. The goal is a rig that REBUILDS from this
+# file, not one that retains state. A PVC would preserve the data and, with it,
+# the next undeclared hand-edit — invisible again until the next restart.
+# Consequently: everything in this database is disposable. Do not put anything
+# here you would miss.
+#
+# THE PASSWORD IS COMMITTED ON PURPOSE. It is already plaintext in
+# .github/workflows/kanz-ci.yml, it guards nothing but a local kind cluster, and
+# a dev credential that lives only in somebody's shell history is precisely what
+# produced this outage. Production credentials come from Vault via the CSI mounts
+# in oms-deploy.yaml and tv-sync-deploy.yaml, which this file does not touch.
+#
+# THE VALUES COME FROM CI, NOT FROM TASTE. Role, password and database are copied
+# verbatim from kanz-ci.yml so that the rig and CI are one convention rather than
+# two. test/arch/postgres_dev_convention_test.go fails if they drift apart in
+# either direction.
+#
+#   kubectl apply -f infra/deploy/postgres-dev.yaml
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: postgres-dev-initdb
+  namespace: kanz-services
+  labels:
+    app.kubernetes.io/part-of: kanz
+    kanz.eighred.com/posture: dev-only
+data:
+  # Runs ONCE per fresh data directory, as the POSTGRES_USER superuser, before
+  # the server accepts external connections.
+  #
+  # NOSUPERUSER IS LOAD-BEARING — it is not hardening decoration. Every tenant
+  # table runs `FORCE  ROW LEVEL SECURITY` (13 occurrences across 11 migrations),
+  # which makes the isolation policy bind even the table's OWNER. It does NOT
+  # bind a superuser: Postgres exempts superusers from RLS unconditionally. So a
+  # superuser DSN does not merely widen access, it makes every tenant-isolation
+  # test pass while proving nothing.
+  #
+  # Because the tables FORCE RLS, one role owning its own database is safe, and
+  # that is why there is no separate migrate role here: CI does not have one
+  # either. A split would be a third convention.
+  010-kanzapp.sql: |
+    CREATE ROLE kanzapp LOGIN PASSWORD 'kanz' NOSUPERUSER;
+    CREATE DATABASE kanzapp OWNER kanzapp;
+    \connect kanzapp
+    GRANT ALL ON SCHEMA public TO kanzapp;
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: oms-db
+  namespace: kanz-services
+  labels:
+    app.kubernetes.io/part-of: kanz
+    kanz.eighred.com/posture: dev-only
+type: Opaque
+stringData:
+  # Two keys because the deployments mount two: the migrate init container reads
+  # migrate-database-url and the service reads database-url. In PRODUCTION these
+  # differ — migrate holds a DDL-capable credential the service deliberately does
+  # not have, so a compromised service cannot alter its own schema. Here they are
+  # the SAME string, because CI's single role owns its database and can therefore
+  # do both.
+  #
+  # That collapse is a dev simplification and must not be read as the production
+  # shape. Production keeps them distinct via the Vault-backed CSI mounts in
+  # oms-deploy.yaml; this file does not change that and does not apply there.
+  database-url: postgres://kanzapp:kanz@postgres.kanz-services.svc:5432/kanzapp?sslmode=disable
+  migrate-database-url: postgres://kanzapp:kanz@postgres.kanz-services.svc:5432/kanzapp?sslmode=disable
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+  namespace: kanz-services
+  labels:
+    app.kubernetes.io/part-of: kanz
+spec:
+  selector:
+    app: postgres
+  ports:
+    - { name: postgres, port: 5432, targetPort: 5432 }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: postgres
+  namespace: kanz-services
+  labels:
+    app.kubernetes.io/part-of: kanz
+    kanz.eighred.com/posture: dev-only
+spec:
+  # One. Two replicas over one emptyDir each are two unrelated databases behind a
+  # single Service name, handing out different answers per connection.
+  replicas: 1
+  strategy:
+    # Recreate, not RollingUpdate: a rolling update would briefly run a second,
+    # empty database serving the same Service.
+    type: Recreate
+  selector:
+    matchLabels:
+      app: postgres
+  template:
+    metadata:
+      labels:
+        app: postgres
+        app.kubernetes.io/part-of: kanz
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:16-alpine
+          ports:
+            - { containerPort: 5432, name: postgres }
+          env:
+            # The bootstrap superuser, used only by the initdb script above and
+            # by operators. Services connect as kanzapp.
+            - { name: POSTGRES_USER, value: "postgres" }
+            - { name: POSTGRES_PASSWORD, value: "postgres" }
+            - { name: POSTGRES_DB, value: "kanz" }
+            # initdb writes into the data directory, and mounting a volume at
+            # /var/lib/postgresql/data itself leaves a lost+found that initdb
+            # refuses to start on. The subdirectory is the documented shape.
+            - { name: PGDATA, value: "/var/lib/postgresql/data/pgdata" }
+          volumeMounts:
+            - { name: initdb, mountPath: /docker-entrypoint-initdb.d, readOnly: true }
+            - { name: data, mountPath: /var/lib/postgresql/data }
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", "postgres", "-d", "kanz"]
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          livenessProbe:
+            exec:
+              command: ["pg_isready", "-U", "postgres", "-d", "kanz"]
+            initialDelaySeconds: 20
+            periodSeconds: 15
+      volumes:
+        - name: initdb
+          configMap:
+            name: postgres-dev-initdb
+        # Ephemeral on purpose — see the header.
+        - name: data
+          emptyDir: {}
