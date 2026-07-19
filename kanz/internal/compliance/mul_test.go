@@ -217,3 +217,108 @@ func TestMulDecimal_RefusesWhenTheExponentCannotBeRepresented(t *testing.T) {
 		t.Fatal("ok = true, want false — the exponent sum is below MinInt32")
 	}
 }
+
+func TestAddDecimal_ExactInTheNormalRange(t *testing.T) {
+	// Values that do not overflow must be unchanged by this fix. Aligning to the
+	// smaller exponent: 100 (100e0) + 0.5 (5e-1) = 100.5 (1005e-1).
+	got, ok := addDecimal(
+		&commonpb.Decimal{Coefficient: 100, Exponent: 0},
+		&commonpb.Decimal{Coefficient: 5, Exponent: -1},
+	)
+	if !ok {
+		t.Fatal("ok = false for a value well inside int64 — the guard is refusing normal input")
+	}
+	if got.GetCoefficient() != 1005 || got.GetExponent() != -1 {
+		t.Fatalf("got %d e%d, want 1005 e-1", got.GetCoefficient(), got.GetExponent())
+	}
+}
+
+func TestAddDecimal_NilOperandsBehaveAsZero(t *testing.T) {
+	got, ok := addDecimal(nil, &commonpb.Decimal{Coefficient: 7, Exponent: 0})
+	if !ok || got.GetCoefficient() != 7 || got.GetExponent() != 0 {
+		t.Fatalf("got %v (ok=%v), want 7 e0 — a nil operand is zero, as before", got, ok)
+	}
+	if _, ok := addDecimal(nil, nil); !ok {
+		t.Fatal("addDecimal(nil, nil) must succeed as zero")
+	}
+}
+
+// THE ALIGNMENT WRAP. An exponent gap of 19 overflows pow10's int64.
+// Before the fix this returns 0.3875820196..., a number with no relationship
+// to the inputs.
+func TestAddDecimal_LargeExponentGapDoesNotWrap(t *testing.T) {
+	got, ok := addDecimal(
+		&commonpb.Decimal{Coefficient: 100, Exponent: 0},
+		&commonpb.Decimal{Coefficient: 1, Exponent: -19},
+	)
+	if !ok {
+		// Refusing is acceptable here (the exact sum needs more than int64 of
+		// precision); returning a WRONG number is not.
+		return
+	}
+	// If it did represent it, the value must be ~100, not 0.38.
+	f, _ := new(big.Rat).SetFrac(
+		big.NewInt(got.GetCoefficient()),
+		new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(-got.GetExponent())), nil),
+	).Float64()
+	if f < 99.9 || f > 100.1 {
+		t.Fatalf("got %v (%d e%d), want ~100 — the alignment multiply wrapped",
+			f, got.GetCoefficient(), got.GetExponent())
+	}
+}
+
+// THE SIGN FLIP. A gap of 25 wraps the alignment negative, so adding a tiny
+// POSITIVE quantity to 100 yields a NEGATIVE position.
+func TestAddDecimal_LargeGapNeverFlipsTheSign(t *testing.T) {
+	got, ok := addDecimal(
+		&commonpb.Decimal{Coefficient: 100, Exponent: 0},
+		&commonpb.Decimal{Coefficient: 5, Exponent: -25},
+	)
+	if ok && got.GetCoefficient() < 0 {
+		t.Fatalf("got a NEGATIVE coefficient (%d e%d) from adding two POSITIVE quantities",
+			got.GetCoefficient(), got.GetExponent())
+	}
+}
+
+// THE SECOND WRAP SITE, which the review did not report: both operands are
+// individually fine and the SUM overflows.
+func TestAddDecimal_OverflowingSumDoesNotWrap(t *testing.T) {
+	got, ok := addDecimal(
+		&commonpb.Decimal{Coefficient: math.MaxInt64, Exponent: 0},
+		&commonpb.Decimal{Coefficient: math.MaxInt64, Exponent: 0},
+	)
+	if !ok {
+		return // refusing is acceptable
+	}
+	if got.GetCoefficient() < 0 {
+		t.Fatalf("MaxInt64 + MaxInt64 produced a NEGATIVE coefficient (%d e%d)",
+			got.GetCoefficient(), got.GetExponent())
+	}
+	// Rescaled, it must still be ~1.8e19 in magnitude.
+	mag := new(big.Rat).SetFrac(
+		big.NewInt(got.GetCoefficient()),
+		big.NewInt(1),
+	)
+	if got.GetExponent() > 0 {
+		mag.Mul(mag, new(big.Rat).SetInt(new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(got.GetExponent())), nil)))
+	}
+	want := new(big.Rat).SetInt(new(big.Int).Mul(big.NewInt(math.MaxInt64), big.NewInt(2)))
+	ratio := new(big.Rat).Quo(mag, want)
+	f, _ := ratio.Float64()
+	if f < 0.999 || f > 1.001 {
+		t.Fatalf("magnitude %v is not ~2*MaxInt64 — the sum wrapped or was mis-rescaled", mag)
+	}
+}
+
+// NON-VACUITY: sign is preserved through rescaling for genuine negatives
+// (a SELL is a negative signed quantity).
+func TestAddDecimal_NegativeSumKeepsItsSign(t *testing.T) {
+	got, ok := addDecimal(
+		&commonpb.Decimal{Coefficient: -math.MaxInt64, Exponent: 0},
+		&commonpb.Decimal{Coefficient: -math.MaxInt64, Exponent: 0},
+	)
+	if ok && got.GetCoefficient() >= 0 {
+		t.Fatalf("two negative quantities summed to a non-negative coefficient (%d e%d)",
+			got.GetCoefficient(), got.GetExponent())
+	}
+}

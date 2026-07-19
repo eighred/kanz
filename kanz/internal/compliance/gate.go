@@ -335,7 +335,10 @@ func project(book *Book, d OrderDelta) (*Book, bool) {
 	if idx >= 0 {
 		existingQty = proj.Positions[idx].Quantity
 	}
-	newQty := addDecimal(existingQty, d.SignedQuantity)
+	newQty, ok := addDecimal(existingQty, d.SignedQuantity)
+	if !ok {
+		return nil, false
+	}
 	notional, ok := mulDecimal(newQty, d.Price)
 	if !ok {
 		return nil, false
@@ -353,22 +356,62 @@ func project(book *Book, d OrderDelta) (*Book, bool) {
 	return proj, true
 }
 
-// addDecimal returns a+b, exact, by aligning to the smaller exponent. nil is
-// treated as zero.
-func addDecimal(a, b *commonpb.Decimal) *commonpb.Decimal {
+// addDecimal sums two Decimals exactly, or refuses.
+//
+// It aligns to the SMALLER exponent, which means scaling one operand up by
+// 10^gap — and that is where it used to wrap: pow10 returns an int64 and
+// overflows at a gap of 19, so `addDecimal(100e0, 1e-19)` returned 0.3875…,
+// and at a gap of 25 the alignment went NEGATIVE, turning the sum of two
+// positive quantities into a negative position. The sum itself could overflow
+// independently even when both aligned operands fit.
+//
+// This is the same failure `mulDecimal` had and is fixed the same way, because
+// it is the same question: compute in math/big, rescale to a coarser exponent
+// to keep the MAGNITUDE when the coefficient will not fit an int64, and refuse
+// only when the exponent cannot move.
+//
+// The caller is project(), whose result values every compliance rule. A wrong
+// quantity here is not a rounding error — it is a position the rules never see
+// the true size of.
+func addDecimal(a, b *commonpb.Decimal) (*commonpb.Decimal, bool) {
 	if a == nil {
 		a = &commonpb.Decimal{}
 	}
 	if b == nil {
 		b = &commonpb.Decimal{}
 	}
-	exp := a.GetExponent()
-	if b.GetExponent() < exp {
-		exp = b.GetExponent()
+	exp := int64(a.GetExponent())
+	if int64(b.GetExponent()) < exp {
+		exp = int64(b.GetExponent())
 	}
-	ac := a.GetCoefficient() * pow10(a.GetExponent()-exp)
-	bc := b.GetCoefficient() * pow10(b.GetExponent()-exp)
-	return &commonpb.Decimal{Coefficient: ac + bc, Exponent: exp}
+	ten := big.NewInt(10)
+	scale := func(d *commonpb.Decimal) *big.Int {
+		gap := int64(d.GetExponent()) - exp // ≥ 0 by construction
+		c := big.NewInt(d.GetCoefficient())
+		if gap == 0 {
+			return c
+		}
+		return c.Mul(c, new(big.Int).Exp(ten, big.NewInt(gap), nil))
+	}
+	coeff := new(big.Int).Add(scale(a), scale(b))
+
+	five := big.NewInt(5)
+	rem := new(big.Int)
+	for !coeff.IsInt64() || exp > math.MaxInt32 {
+		if exp >= math.MaxInt32 {
+			return nil, false // cannot raise the exponent any further
+		}
+		coeff.QuoRem(coeff, ten, rem)
+		if rem.CmpAbs(five) >= 0 { // half-up, away from zero
+			if rem.Sign() < 0 {
+				coeff.Sub(coeff, big.NewInt(1))
+			} else {
+				coeff.Add(coeff, big.NewInt(1))
+			}
+		}
+		exp++
+	}
+	return &commonpb.Decimal{Coefficient: coeff.Int64(), Exponent: int32(exp)}, true
 }
 
 // mulDecimal returns a×b and whether the product is representable. nil is
@@ -423,13 +466,4 @@ func mulDecimal(a, b *commonpb.Decimal) (*commonpb.Decimal, bool) {
 		exp++
 	}
 	return &commonpb.Decimal{Coefficient: coeff.Int64(), Exponent: int32(exp)}, true
-}
-
-// pow10 returns 10^n for n ≥ 0 (n is a non-negative exponent gap here).
-func pow10(n int32) int64 {
-	p := int64(1)
-	for ; n > 0; n-- {
-		p *= 10
-	}
-	return p
 }
