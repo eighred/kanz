@@ -110,8 +110,15 @@ spec:
             # it is the name the OMS FACT durables are created under, and changing
             # it re-reads from the durable's default position, not from the start.
             - { name: TV_SYNC_CONSUMER_GROUP, value: "tv-sync" }
-            # The mark source for unrealized P&L.
-            - { name: TV_SYNC_PRICE_SUBJECT, value: "market.>" }
+            # The mark source for unrealized P&L. These are the subjects the mark
+            # fold actually consumes, not a convenient wildcard: `market.>` also
+            # delivers market.book.snapshot, which carries an OrderBookSnapshot —
+            # a message WIRE-COMPATIBLE with MarketDataEvent, so a one-sided
+            # bids-only snapshot decoded as a Trade at the deepest resting bid and
+            # POISONED the mark below mid. The fold now refuses it on the envelope's
+            # event type regardless of what is subscribed here, but the subscription
+            # should not deliver it either.
+            - { name: TV_SYNC_PRICE_SUBJECTS, value: "market.*.trade,market.*.quote" }
             # THE DURABLE FACT LOG (EXEC-M21). Removing this env, or the db volume
             # below, does not degrade tv-sync — it makes the service REFUSE TO START,
             # because the alternative is a book that vanishes on the next pod roll and

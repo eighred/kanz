@@ -111,11 +111,20 @@ type Config struct {
 	// these two subjects cover every asset class — present and future — while
 	// structurally excluding market.*.bar and, critically, market.book.snapshot.
 	//
-	// That last one is why this is not `market.>`: book snapshots carry an
-	// OrderBookSnapshot, a DIFFERENT message type, which the fold unmarshals as
-	// a MarketDataEvent, finds empty, and discards. It is the highest-volume
-	// stream in the estate (12 Kafka partitions), and the OMS was decoding all
-	// of it to throw all of it away.
+	// That last one is why this is not `market.>`, and the reason is worse than
+	// wasted CPU. Book snapshots carry an OrderBookSnapshot, a different message
+	// that is WIRE-COMPATIBLE with MarketDataEvent by construction: fields 1-4
+	// match, field 6 is `Trade` against `repeated PriceLevel bids`, and
+	// Trade.price and PriceLevel.price are both field 1 common.v1.Decimal. A
+	// one-sided, bids-only snapshot therefore decodes cleanly into a "Trade" at
+	// the DEEPEST resting bid and POISONS the mark below mid. (A two-sided one is
+	// rejected only by luck — its asks land in the `quote` oneof arm, win over
+	// trade, and fail the both-sides check.)
+	//
+	// An earlier version of this comment said such a snapshot "finds empty, and
+	// discards" — that was written before the behaviour was measured, and it is
+	// false. mark.Handle now refuses non-mark-bearing event types outright, so
+	// this subject list is the second of two layers, not the only one.
 	PriceSubjects []string
 
 	// PriceMaxAge is how old a mark may be and still value an order. It is a
