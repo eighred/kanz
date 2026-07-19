@@ -61,8 +61,11 @@ func FromProto(d *commonpb.Decimal) *big.Rat {
 	return r.SetFrac(coeff, den)
 }
 
-// ToProto rounds a rational to a fixed-scale common.v1.Decimal (half-up).
-func ToProto(r *big.Rat) *commonpb.Decimal {
+// scaledCoefficient rounds a rational to the fixed scale (half-up) and returns
+// the resulting coefficient as a big.Int. This is the ONE place the
+// scaling/rounding arithmetic is written; ToProto and ToProtoExact both call
+// it so their behaviour cannot drift apart.
+func scaledCoefficient(r *big.Rat) *big.Int {
 	pow := new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(scale)), nil)
 	scaledNum := new(big.Int).Mul(r.Num(), pow)
 	q, rem := new(big.Int).QuoRem(scaledNum, r.Denom(), new(big.Int))
@@ -74,7 +77,33 @@ func ToProto(r *big.Rat) *commonpb.Decimal {
 			q.Add(q, big.NewInt(1))
 		}
 	}
+	return q
+}
+
+// ToProto rounds a rational to a fixed-scale common.v1.Decimal (half-up). Its
+// signature and behaviour are unchanged by ToProtoExact's addition: callers
+// that never see coefficients near the int64 boundary are unaffected, and
+// this keeps wrapping (via big.Int.Int64(), per math/big's own documented
+// behaviour) for values that don't fit — callers needing a representability
+// check must use ToProtoExact instead.
+func ToProto(r *big.Rat) *commonpb.Decimal {
+	q := scaledCoefficient(r)
 	return &commonpb.Decimal{Coefficient: q.Int64(), Exponent: -scale}
+}
+
+// ToProtoExact is ToProto's representability-checked counterpart: it performs
+// the identical scaling and half-up rounding, but reports ok == false instead
+// of silently wrapping when the rounded coefficient does not fit in an int64.
+// Callers on a capital path — anywhere an out-of-range value must REFUSE
+// rather than be valued at a wrapped, fabricated coefficient — should call
+// this instead of ToProto. When ok is false, the returned *commonpb.Decimal
+// is nil.
+func ToProtoExact(r *big.Rat) (d *commonpb.Decimal, ok bool) {
+	q := scaledCoefficient(r)
+	if !q.IsInt64() {
+		return nil, false
+	}
+	return &commonpb.Decimal{Coefficient: q.Int64(), Exponent: -scale}, true
 }
 
 // Str renders a rational as a trimmed plain-decimal string.

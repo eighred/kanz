@@ -136,9 +136,9 @@ func (g *COMP01Gate) price(cmd *orderpb.SubmitOrder) *commonpb.Decimal {
 	if m == nil {
 		return nil
 	}
-	// A mark that dec.ToProto cannot represent exactly must refuse, not admit at
-	// a wrong price. dec.ToProto scales the rational by a fixed 10^8, rounds
-	// half-up to a big.Int, and returns big.Int.Int64() as the Decimal
+	// A mark that dec.ToProtoExact cannot represent exactly must refuse, not
+	// admit at a wrong price. dec.ToProto scales the rational by a fixed 10^8,
+	// rounds half-up to a big.Int, and returns big.Int.Int64() as the Decimal
 	// coefficient — but Int64() is UNDEFINED (silently wraps, per math/big) when
 	// that scaled value does not fit in an int64. A mark just past 2^64/10^8
 	// would wrap to an arbitrary small (even negative) coefficient, and the gate
@@ -147,34 +147,13 @@ func (g *COMP01Gate) price(cmd *orderpb.SubmitOrder) *commonpb.Decimal {
 	// which the gate already treats as Unpriced) is correct: we would rather
 	// refuse a real order than admit one at a fabricated price. dec.ToProto
 	// itself is not changed — it is shared by many other callers, and widening
-	// its contract is out of scope here.
-	if !markRepresentable(m) {
+	// its contract is out of scope here; ToProtoExact runs the identical
+	// scaling/rounding arithmetic and additionally reports whether it fit.
+	d, ok := dec.ToProtoExact(m)
+	if !ok {
 		return nil
 	}
-	return dec.ToProto(m)
-}
-
-// markRepresentable mirrors dec.ToProto's exact scaling and half-up rounding
-// (internal/dec/dec.go) to determine, BEFORE calling it, whether the resulting
-// coefficient fits in an int64. It must reproduce that arithmetic precisely —
-// checking the input's rough magnitude, or checking ToProto's output after the
-// fact, cannot distinguish a correctly rounded small coefficient from one that
-// already wrapped.
-func markRepresentable(r *big.Rat) bool {
-	const scale = 8 // dec.ToProto's fixed scale; duplicated only to detect
-	// non-representable input ahead of its unexported rounding step.
-	pow := new(big.Int).Exp(big.NewInt(10), big.NewInt(scale), nil)
-	scaledNum := new(big.Int).Mul(r.Num(), pow)
-	q, rem := new(big.Int).QuoRem(scaledNum, r.Denom(), new(big.Int))
-	twice := new(big.Int).Mul(new(big.Int).Abs(rem), big.NewInt(2))
-	if twice.Cmp(new(big.Int).Abs(r.Denom())) >= 0 {
-		if r.Sign() < 0 {
-			q.Sub(q, big.NewInt(1))
-		} else {
-			q.Add(q, big.NewInt(1))
-		}
-	}
-	return q.IsInt64()
+	return d
 }
 
 // signedQuantity returns +quantity for a buy and −quantity for a sell, so the
