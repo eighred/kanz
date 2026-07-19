@@ -106,9 +106,14 @@ type Config struct {
 	// PriceMaxAge is how old a mark may be and still value an order. It is a
 	// SAFETY BOUND, not a tuning knob: widening it to quiet PRICE_UNAVAILABLE
 	// refusals does not fix the feed, it just admits orders priced off a feed
-	// that is no longer reporting. Zero disables expiry entirely and is
-	// deliberately NOT reachable from the environment (an unparseable value is
-	// an error, not a fallback to zero).
+	// that is no longer reporting.
+	//
+	// mark.Source treats any maxAge <= 0 as "never expires", so EVERY route to a
+	// non-positive value is refused here: unparseable is an error rather than a
+	// fallback to zero, and zero and negative durations are rejected outright.
+	// They parse cleanly, which is what makes them dangerous — `-5s` is exactly
+	// what someone reaching for an off switch would set, and accepting it would
+	// disable the bound in silence. There is no off switch.
 	PriceMaxAge time.Duration
 }
 
