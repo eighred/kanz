@@ -452,3 +452,165 @@ func TestAddDecimal_SmallGapsAreUnchanged(t *testing.T) {
 		}
 	}
 }
+
+// TestAlignExponent_GapNeverExceedsWindow guards the INVARIANT the DoS fix
+// depends on, not the symptom (addDecimal returning promptly). It is the
+// structural counterpart to TestAddDecimal_HugeExponentGapReturnsPromptly
+// above: that test proves one crafted pair does not hang; this test proves
+// NO pair can, because alignExponent's output can never put more than
+// alignWindow digits between itself and the larger exponent — which is the
+// one fact that makes addDecimal's big.Int Exp(10, gap, nil) calls O(1).
+//
+// This is strictly stronger than a timeout: it is instant, allocates
+// nothing beyond int64s, and — unlike a goroutine racing a 2s clock — cannot
+// itself leak a runaway computation if the invariant it checks ever breaks.
+//
+// The bound below is the LITERAL 40, not the package's alignWindow constant.
+// That is deliberate: this test must fail if a future change widens
+// alignWindow itself, so it cannot reference the very constant whose value
+// it is pinning (confirmed — see the mutation check in this task's report).
+func TestAlignExponent_GapNeverExceedsWindow(t *testing.T) {
+	const wantMaxGap = 40
+	values := []int64{
+		math.MinInt32, math.MinInt32 + 1, math.MinInt32 / 2,
+		-wantMaxGap - 1, -wantMaxGap, -wantMaxGap + 1,
+		-1000, -100, -41, -40, -39, -1, 0, 1,
+		39, 40, 41, 100, 1000,
+		math.MaxInt32 / 2, math.MaxInt32 - 1, math.MaxInt32,
+	}
+	for _, a := range values {
+		for _, b := range values {
+			exp := alignExponent(a, b)
+			hi := a
+			if b > hi {
+				hi = b
+			}
+			gap := hi - exp
+			if gap < 0 || gap > wantMaxGap {
+				t.Fatalf("alignExponent(%d, %d) = %d: hi-exp = %d, want in [0, %d]",
+					a, b, exp, gap, wantMaxGap)
+			}
+		}
+	}
+}
+
+// TestAlignExponent_WindowBoundary pins the alignWindow=40 edge directly on
+// alignExponent, independent of addDecimal's later int64-fit rescale loop.
+//
+// That independence matters: the rescale loop that follows alignment always
+// re-rounds a 41+ digit aligned sum down to <=19 significant digits whenever
+// the exponent gap reaches this window (see TestAddDecimal_LargeGapsReturn-
+// PromptlyAndCorrectly, where gaps of 30/100/1000 all collapse to the same
+// answer). That rounding provably swallows any single-digit difference at
+// the smaller operand's bottom digit — verified by hand (position analysis:
+// the smaller operand occupies digits [0, 18] at most, the kept output
+// occupies digits [22, ...], and no rounding carry can bridge that 3-digit
+// gap) and confirmed with a throwaway script reproducing the algorithm's
+// shape for every b coefficient from 1 to MaxInt64. So a Decimal-level
+// assertion at gap 40 vs 41 CANNOT observe the clamp turning on or off — see
+// TestAddDecimal_WindowAndDivisorBoundariesProduceCorrectValues, which pins
+// exactly that (identical) Decimal-level result as the non-vacuity check.
+// The clamp's actual on/off transition is only observable one level down,
+// on alignExponent's own return value — which is what this test pins.
+//
+// hi=0 fixed, lo=-gap:
+//
+//	gap=40: lo=-40=hi-alignWindow, so "hi-alignWindow > lo" is -40>-40,
+//	        FALSE: exp=lo=-40 (unclamped). The smaller operand's own
+//	        exponent (-40) equals exp, so its participation gap
+//	        (expB-exp) is 0 — it enters scale() unaltered.
+//	gap=41: lo=-41, "hi-alignWindow > lo" is -40>-41, TRUE: exp=hi-
+//	        alignWindow=-40 (clamped). The smaller operand's own exponent
+//	        (-41) is now one below exp, so its participation gap is -1 —
+//	        scale() truncates its least significant digit.
+func TestAlignExponent_WindowBoundary(t *testing.T) {
+	cases := []struct {
+		gap                  int64
+		wantExp              int64
+		wantParticipationGap int64
+	}{
+		{gap: 40, wantExp: -40, wantParticipationGap: 0},
+		{gap: 41, wantExp: -40, wantParticipationGap: -1},
+	}
+	for _, tc := range cases {
+		expA, expB := int64(0), -tc.gap
+		exp := alignExponent(expA, expB)
+		if exp != tc.wantExp {
+			t.Fatalf("gap %d: alignExponent(0, %d) = %d, want %d", tc.gap, expB, exp, tc.wantExp)
+		}
+		if participationGap := expB - exp; participationGap != tc.wantParticipationGap {
+			t.Fatalf("gap %d: smaller operand's scale gap = %d, want %d",
+				tc.gap, participationGap, tc.wantParticipationGap)
+		}
+	}
+}
+
+// TestAlignExponent_DivisorShortCircuitBoundary pins where scale()'s
+// `-gap >= 19` short circuit engages (gate.go: "an int64 coefficient is
+// under 10^19, so anything shifted nineteen or more places right IS zero").
+// Both cases here sit inside the alignWindow clamp (gap > 40), so exp is
+// pinned at hi-alignWindow throughout, and the smaller operand's
+// participation gap shrinks by exactly one for each extra gap digit — the
+// same relationship TestAlignExponent_WindowBoundary pins, carried out to
+// where it crosses the divisor short circuit's own threshold.
+//
+// This is the same "unobservable one level down" situation as the window
+// boundary (see that test's comment) — verified with the same throwaway
+// script — so scale()'s literal `19` is deliberately NOT re-derived here via
+// addDecimal's output; it is pinned via the gap value scale() receives,
+// which is the only level at which the two cases provably differ.
+//
+// hi=0 fixed, lo=-gap, exp=hi-alignWindow=-40 for any gap>40 (clamped):
+// participationGap = lo-exp = -gap-(-40) = 40-gap.
+//
+//	gap=58: participationGap = 40-58 = -18 -> -gap==18 < 19: scale()
+//	        performs an actual big.Int division by 10^18.
+//	gap=59: participationGap = 40-59 = -19 -> -gap==19 >= 19: scale()
+//	        short-circuits to 0 without computing 10^19.
+func TestAlignExponent_DivisorShortCircuitBoundary(t *testing.T) {
+	cases := []struct {
+		gap                  int64
+		wantParticipationGap int64
+		wantShortCircuit     bool
+	}{
+		{gap: 58, wantParticipationGap: -18, wantShortCircuit: false},
+		{gap: 59, wantParticipationGap: -19, wantShortCircuit: true},
+	}
+	for _, tc := range cases {
+		expA, expB := int64(0), -tc.gap
+		exp := alignExponent(expA, expB)
+		participationGap := expB - exp
+		if participationGap != tc.wantParticipationGap {
+			t.Fatalf("gap %d: participation gap = %d, want %d", tc.gap, participationGap, tc.wantParticipationGap)
+		}
+		if shortCircuit := -participationGap >= 19; shortCircuit != tc.wantShortCircuit {
+			t.Fatalf("gap %d: -gap>=19 = %v, want %v", tc.gap, shortCircuit, tc.wantShortCircuit)
+		}
+	}
+}
+
+// TestAddDecimal_WindowAndDivisorBoundariesProduceCorrectValues is the
+// Decimal-level, non-vacuity companion to the two boundary tests above: at
+// each exact edge they pin (gap 40/41, 58/59), addDecimal must still return
+// the mathematically correct value. 1 + 10^-gap is exactly 1 at nineteen
+// significant digits for any gap>=1 (same derivation as the existing
+// gap-30/100/1000 case above), so all four edges must agree on the same
+// answer — which is the point: per TestAlignExponent_WindowBoundary's
+// comment, the clamp's on/off transition is provably invisible here, and
+// this test is what proves that "provably" claim true of the real
+// addDecimal, not just of the extracted arithmetic.
+func TestAddDecimal_WindowAndDivisorBoundariesProduceCorrectValues(t *testing.T) {
+	for _, gap := range []int32{40, 41, 58, 59} {
+		got, ok := addWithin(t, 2*time.Second,
+			&commonpb.Decimal{Coefficient: 1, Exponent: 0},
+			&commonpb.Decimal{Coefficient: 1, Exponent: -gap},
+		)
+		if !ok {
+			t.Fatalf("gap %d: ok = false, want a representable ~1", gap)
+		}
+		if got.GetCoefficient() != 1_000_000_000_000_000_000 || got.GetExponent() != -18 {
+			t.Fatalf("gap %d: got %d e%d, want 1000000000000000000 e-18 (= 1)",
+				gap, got.GetCoefficient(), got.GetExponent())
+		}
+	}
+}

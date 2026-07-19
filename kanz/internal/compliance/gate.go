@@ -403,6 +403,30 @@ func project(book *Book, d OrderDelta) (*Book, bool) {
 // below 10^-22 of the last digit the result can express. A nudge there could
 // not move a representable digit; it would only add machinery pretending to a
 // precision *commonpb.Decimal does not have.
+
+// alignWindow is how many decimal digits below the larger operand's exponent
+// addDecimal bothers to align. An int64 coefficient carries ~19 significant
+// digits; 40 is comfortably past double that, so every digit inside the
+// window that could ever reach the result is kept, with room to spare.
+const alignWindow = 40
+
+// alignExponent returns the exponent addDecimal aligns both operands to,
+// given their (zero-coefficient-adjusted) exponents. It is the smaller of the
+// two, but never lower than the larger minus alignWindow — see "THE ALIGNMENT
+// EXPONENT IS CLAMPED" above addDecimal for why an unclamped min(expA, expB)
+// is a DoS and why alignWindow is the right bound.
+func alignExponent(expA, expB int64) int64 {
+	lo, hi := expA, expB
+	if hi < lo {
+		lo, hi = hi, lo
+	}
+	exp := lo
+	if hi-alignWindow > exp {
+		exp = hi - alignWindow
+	}
+	return exp
+}
+
 func addDecimal(a, b *commonpb.Decimal) (*commonpb.Decimal, bool) {
 	if a == nil {
 		a = &commonpb.Decimal{}
@@ -419,19 +443,7 @@ func addDecimal(a, b *commonpb.Decimal) (*commonpb.Decimal, bool) {
 	} else if b.GetCoefficient() == 0 {
 		expB = expA
 	}
-	lo, hi := expA, expB
-	if hi < lo {
-		lo, hi = hi, lo
-	}
-	// alignWindow is how many decimal digits below the larger operand's
-	// exponent we bother to align. An int64 coefficient carries ~19 significant
-	// digits; 40 is comfortably past double that, so every digit inside the
-	// window that could ever reach the result is kept, with room to spare.
-	const alignWindow = 40
-	exp := lo
-	if hi-alignWindow > exp {
-		exp = hi - alignWindow
-	}
+	exp := alignExponent(expA, expB)
 	ten := big.NewInt(10)
 	scale := func(d *commonpb.Decimal, dexp int64) *big.Int {
 		c := big.NewInt(d.GetCoefficient())
