@@ -2,6 +2,7 @@ package compliance
 
 import (
 	"context"
+	"math/big"
 	"strings"
 	"time"
 
@@ -10,6 +11,7 @@ import (
 	orderpb "github.com/kanz-eng/kanz-schemas-go/order/v1"
 
 	comp "github.com/kanz-eng/kanz/internal/compliance"
+	"github.com/kanz-eng/kanz/internal/dec"
 )
 
 // COMP01Gate adapts the COMP-01 pre-trade engine to the OMS-01f Gate seam: it
@@ -22,13 +24,36 @@ type COMP01Gate struct {
 	gate     *comp.PreTradeGate
 	currency string
 	now      func() time.Time
+	marks    MarkSource
+}
+
+// MarkSource supplies a reference price for an order that carries none. It is
+// satisfied by internal/marketdata/mark.Source. nil means "no usable price" —
+// never a zero, never a guess.
+type MarkSource interface {
+	Mark(instrument string) *big.Rat
+}
+
+// COMP01Option configures the adapter.
+type COMP01Option func(*COMP01Gate)
+
+// WithMarkSource supplies the reference price used to value MARKET and STOP
+// orders, which carry no limit price of their own (COMP-M2). Without it those
+// orders are refused PRICE_UNAVAILABLE, which is COMP-M1's behaviour and
+// remains the behaviour whenever the source has no fresh mark to give.
+func WithMarkSource(m MarkSource) COMP01Option {
+	return func(g *COMP01Gate) { g.marks = m }
 }
 
 // NewCOMP01Gate wires the adapter. currency stamps the projected order's Money
 // (the OMS has no per-instrument currency join yet, OMS-01e); it is the
 // portfolio base currency.
-func NewCOMP01Gate(gate *comp.PreTradeGate, currency string) *COMP01Gate {
-	return &COMP01Gate{gate: gate, currency: currency, now: time.Now}
+func NewCOMP01Gate(gate *comp.PreTradeGate, currency string, opts ...COMP01Option) *COMP01Gate {
+	g := &COMP01Gate{gate: gate, currency: currency, now: time.Now}
+	for _, opt := range opts {
+		opt(g)
+	}
+	return g
 }
 
 var _ Gate = (*COMP01Gate)(nil)
@@ -41,15 +66,11 @@ func (g *COMP01Gate) Check(ctx context.Context, cmd *orderpb.SubmitOrder) (*Brea
 		PortfolioID:    cmd.GetPortfolioId(),
 		InstrumentID:   cmd.GetInstrumentId(),
 		SignedQuantity: signedQuantity(cmd.GetSide(), cmd.GetQuantity()),
-		// Price values the order's notional. The limit price is the only price a
-		// SubmitOrder carries; a MARKET/STOP order has none, and the gate refuses
-		// those pre-trade (COMP-M1) rather than valuing them at zero. Admitting
-		// market orders again needs a reference-price source wired here — COMP-M2.
-		Price:    cmd.GetLimitPrice(),
-		Currency: g.currency,
-		OrderID:  cmd.GetOrderId(),
-		Issuer:   cmd.GetMetadata().GetIssuer(),
-		AsOf:     g.now().UTC(),
+		Price:          g.price(cmd),
+		Currency:       g.currency,
+		OrderID:        cmd.GetOrderId(),
+		Issuer:         cmd.GetMetadata().GetIssuer(),
+		AsOf:           g.now().UTC(),
 	})
 	if err != nil {
 		return nil, err
@@ -78,6 +99,35 @@ func (g *COMP01Gate) Check(ctx context.Context, cmd *orderpb.SubmitOrder) (*Brea
 		}, nil
 	}
 	return breachFromResult(dec.Result), nil
+}
+
+// price values the order's notional.
+//
+// A LIMIT or STOP_LIMIT order carries its own limit price and is valued at it —
+// that is the price the fund has committed to, and repricing it at the market
+// would evaluate a different order than the one submitted. A MARKET or STOP
+// order carries none, so it is valued at the reference mark.
+//
+// The switch mirrors execution.SimVenue.executionPrice, deliberately: one
+// question ("what price does this order type carry?") should not have two
+// different answers in one codebase.
+//
+// nil is returned when there is no fresh mark, and nil is what the gate already
+// refuses (Decision.Unpriced). There is no new rejection path here and no way
+// to admit an order without a real price for it.
+func (g *COMP01Gate) price(cmd *orderpb.SubmitOrder) *commonpb.Decimal {
+	switch cmd.GetOrderType() {
+	case orderpb.OrderType_ORDER_TYPE_LIMIT, orderpb.OrderType_ORDER_TYPE_STOP_LIMIT:
+		return cmd.GetLimitPrice()
+	}
+	if g.marks == nil {
+		return nil
+	}
+	m := g.marks.Mark(cmd.GetInstrumentId())
+	if m == nil {
+		return nil
+	}
+	return dec.ToProto(m)
 }
 
 // signedQuantity returns +quantity for a buy and −quantity for a sell, so the
