@@ -373,6 +373,36 @@ func project(book *Book, d OrderDelta) (*Book, bool) {
 // The caller is project(), whose result values every compliance rule. A wrong
 // quantity here is not a rounding error — it is a position the rules never see
 // the true size of.
+//
+// THE ALIGNMENT EXPONENT IS CLAMPED, and that is load-bearing. Both exponents
+// come off the wire (SubmitOrder.Quantity → OrderDelta.SignedQuantity) and
+// nothing upstream constrains their range — the gate runs BEFORE Accept
+// validates the order. Aligning unconditionally to min(expA, expB) therefore
+// lets a crafted order ask math/big for 10^4300000000, a multi-billion-digit
+// bignum that hangs or OOMs the process long before the rescale loop below can
+// refuse anything. Exact-but-unbounded is worse than the int64 wrap it
+// replaced: that at least returned in O(1).
+//
+// It is also unnecessary work. A gap that large MEANS the smaller operand sits
+// billions of orders of magnitude below the larger; no int64 coefficient can
+// hold a difference of even forty. So the alignment exponent is clamped to
+// alignWindow digits below the LARGER exponent. Both scale factors are then
+// bounded by 10^alignWindow and Exp is O(1) in the gap. Inside the window
+// (every ordinary input) nothing changes: the clamp is inert and results stay
+// bit-identical.
+//
+// Refusing large gaps instead would be the wrong answer: 10^9 + 10^-9 is
+// perfectly representable, and NOTIONAL_UNREPRESENTABLE on a legitimate order
+// is a trading outage dressed as a control. We compute it; we just decline to
+// compute digits that cannot survive the return type.
+//
+// ROUNDING: digits pushed out of the window are DROPPED (truncated toward
+// zero), not carried as a rounding nudge. With alignWindow at 40 the larger
+// operand aligns to at least 10^40, which the loop below must then rescale by
+// ~22 exponent steps to fit an int64 — so everything the clamp discards lies
+// below 10^-22 of the last digit the result can express. A nudge there could
+// not move a representable digit; it would only add machinery pretending to a
+// precision *commonpb.Decimal does not have.
 func addDecimal(a, b *commonpb.Decimal) (*commonpb.Decimal, bool) {
 	if a == nil {
 		a = &commonpb.Decimal{}
@@ -380,20 +410,51 @@ func addDecimal(a, b *commonpb.Decimal) (*commonpb.Decimal, bool) {
 	if b == nil {
 		b = &commonpb.Decimal{}
 	}
-	exp := int64(a.GetExponent())
-	if int64(b.GetExponent()) < exp {
-		exp = int64(b.GetExponent())
+	expA, expB := int64(a.GetExponent()), int64(b.GetExponent())
+	// A zero coefficient has no magnitude, so its exponent must not drag the
+	// alignment window: {0, e} + {c, f} is {c, f} for any e. Left in, a zero
+	// operand carrying a wild exponent would clamp the real one away.
+	if a.GetCoefficient() == 0 {
+		expA = expB
+	} else if b.GetCoefficient() == 0 {
+		expB = expA
+	}
+	lo, hi := expA, expB
+	if hi < lo {
+		lo, hi = hi, lo
+	}
+	// alignWindow is how many decimal digits below the larger operand's
+	// exponent we bother to align. An int64 coefficient carries ~19 significant
+	// digits; 40 is comfortably past double that, so every digit inside the
+	// window that could ever reach the result is kept, with room to spare.
+	const alignWindow = 40
+	exp := lo
+	if hi-alignWindow > exp {
+		exp = hi - alignWindow
 	}
 	ten := big.NewInt(10)
-	scale := func(d *commonpb.Decimal) *big.Int {
-		gap := int64(d.GetExponent()) - exp // ≥ 0 by construction
+	scale := func(d *commonpb.Decimal, dexp int64) *big.Int {
 		c := big.NewInt(d.GetCoefficient())
-		if gap == 0 {
+		gap := dexp - exp // ≤ alignWindow by construction; negative only when clamped
+		switch {
+		case gap == 0:
 			return c
+		case gap > 0:
+			return c.Mul(c, new(big.Int).Exp(ten, big.NewInt(gap), nil))
+		default:
+			// Clamped away: truncate toward zero. An int64 coefficient is
+			// under 10^19, so anything shifted nineteen or more places right
+			// IS zero — computing the divisor for a gap of billions would
+			// reintroduce the very bignum this clamp exists to avoid.
+			if -gap >= 19 {
+				return big.NewInt(0)
+			}
+			// Quo (not Div) so a negative coefficient loses magnitude rather
+			// than gaining it — a SELL must not grow on the way in.
+			return c.Quo(c, new(big.Int).Exp(ten, big.NewInt(-gap), nil))
 		}
-		return c.Mul(c, new(big.Int).Exp(ten, big.NewInt(gap), nil))
 	}
-	coeff := new(big.Int).Add(scale(a), scale(b))
+	coeff := new(big.Int).Add(scale(a, expA), scale(b, expB))
 
 	five := big.NewInt(5)
 	rem := new(big.Int)

@@ -4,6 +4,7 @@ import (
 	"math"
 	"math/big"
 	"testing"
+	"time"
 
 	commonpb "github.com/kanz-eng/kanz-schemas-go/common/v1"
 
@@ -320,5 +321,134 @@ func TestAddDecimal_NegativeSumKeepsItsSign(t *testing.T) {
 	if ok && got.GetCoefficient() >= 0 {
 		t.Fatalf("two negative quantities summed to a non-negative coefficient (%d e%d)",
 			got.GetCoefficient(), got.GetExponent())
+	}
+}
+
+// TestAddDecimal_RefusesWhenTheExponentCannotBeRepresented mirrors
+// TestMulDecimal_RefusesWhenTheExponentCannotBeRepresented for the sum path.
+// The coverage gap here is what let the unbounded-gap defect through: nothing
+// exercised addDecimal's rescale loop to its refusal edge. The contract is the
+// same — REFUSE, never a wrapped number — and refusal routes through the
+// existing Decision.Unvaluable path at the call site.
+func TestAddDecimal_RefusesWhenTheExponentCannotBeRepresented(t *testing.T) {
+	// Two coefficients that cannot sum inside an int64, already sitting at the
+	// highest exponent a Decimal can express: the sum needs the exponent RAISED
+	// to fit, and there is nowhere left to raise it to.
+	got, ok := addDecimal(
+		&commonpb.Decimal{Coefficient: math.MaxInt64, Exponent: math.MaxInt32},
+		&commonpb.Decimal{Coefficient: math.MaxInt64, Exponent: math.MaxInt32},
+	)
+	if ok {
+		t.Fatalf("ok = true, want false — the exponent cannot be raised past MaxInt32 (got %+v)", got)
+	}
+	if got != nil {
+		t.Fatalf("got = %+v, want nil when not representable", got)
+	}
+}
+
+// addWithin runs addDecimal in a goroutine and fails if it does not return
+// within d. Without this, the unbounded-gap defect does not fail CI — it HANGS
+// it, which is a much worse signal.
+func addWithin(t *testing.T, d time.Duration, a, b *commonpb.Decimal) (*commonpb.Decimal, bool) {
+	t.Helper()
+	type res struct {
+		v  *commonpb.Decimal
+		ok bool
+	}
+	ch := make(chan res, 1)
+	go func() {
+		v, ok := addDecimal(a, b)
+		ch <- res{v, ok}
+	}()
+	select {
+	case r := <-ch:
+		return r.v, r.ok
+	case <-time.After(d):
+		t.Fatalf("addDecimal did not return within %s — the alignment exponent is unbounded again", d)
+		return nil, false
+	}
+}
+
+// THE DoS. A crafted order can put ~4.3e9 between the two exponents, and
+// aligning unconditionally to the smaller one asks math/big for a
+// multi-billion-digit 10^gap. The process hangs or OOMs long before it reaches
+// the "refuse if unrepresentable" loop — strictly worse than the int64 wrap it
+// replaced, which at least returned in O(1).
+//
+// The correct answer is arithmetic, not refusal: 10^2000000000 + 10^-2000000000
+// is 10^2000000000 to every digit a Decimal can hold.
+func TestAddDecimal_HugeExponentGapReturnsPromptly(t *testing.T) {
+	got, ok := addWithin(t, 2*time.Second,
+		&commonpb.Decimal{Coefficient: 1, Exponent: -2000000000},
+		&commonpb.Decimal{Coefficient: 1, Exponent: 2000000000},
+	)
+	if !ok {
+		t.Fatal("ok = false — 10^2000000000 is perfectly representable as 1e18 e1999999982; refusing it is wrong")
+	}
+	if got.GetCoefficient() != 1_000_000_000_000_000_000 || got.GetExponent() != 1_999_999_982 {
+		t.Fatalf("got %d e%d, want 1000000000000000000 e1999999982 (= 10^2000000000)",
+			got.GetCoefficient(), got.GetExponent())
+	}
+}
+
+// The same gap with the large operand NEGATIVE — a SELL is a negative signed
+// quantity, and the clamp must not lose its sign.
+func TestAddDecimal_HugeExponentGapKeepsTheSign(t *testing.T) {
+	got, ok := addWithin(t, 2*time.Second,
+		&commonpb.Decimal{Coefficient: -1, Exponent: 2000000000},
+		&commonpb.Decimal{Coefficient: 1, Exponent: -2000000000},
+	)
+	if !ok {
+		t.Fatal("ok = false, want a representable negative sum")
+	}
+	if got.GetCoefficient() != -1_000_000_000_000_000_000 || got.GetExponent() != 1_999_999_982 {
+		t.Fatalf("got %d e%d, want -1000000000000000000 e1999999982", got.GetCoefficient(), got.GetExponent())
+	}
+}
+
+// Large-but-not-absurd gaps: 30 sits inside the alignment window, 100 and 1000
+// are clamped. All three must return promptly with the SAME value, because
+// 1 + 10^-30, 1 + 10^-100 and 1 + 10^-1000 are all exactly 1 at nineteen
+// significant digits.
+func TestAddDecimal_LargeGapsReturnPromptlyAndCorrectly(t *testing.T) {
+	for _, gap := range []int32{30, 100, 1000} {
+		got, ok := addWithin(t, 2*time.Second,
+			&commonpb.Decimal{Coefficient: 1, Exponent: 0},
+			&commonpb.Decimal{Coefficient: 1, Exponent: -gap},
+		)
+		if !ok {
+			t.Fatalf("gap %d: ok = false, want a representable ~1", gap)
+		}
+		if got.GetCoefficient() != 1_000_000_000_000_000_000 || got.GetExponent() != -18 {
+			t.Fatalf("gap %d: got %d e%d, want 1000000000000000000 e-18 (= 1)",
+				gap, got.GetCoefficient(), got.GetExponent())
+		}
+	}
+}
+
+// NON-VACUITY. Ordinary gaps must produce exactly what they produce today —
+// a clamp set too tight would quietly corrupt normal arithmetic, which is the
+// main risk of this change.
+func TestAddDecimal_SmallGapsAreUnchanged(t *testing.T) {
+	cases := []struct {
+		name    string
+		a, b    *commonpb.Decimal
+		wantCo  int64
+		wantExp int32
+	}{
+		{"gap0", &commonpb.Decimal{Coefficient: 5, Exponent: 0}, &commonpb.Decimal{Coefficient: 7, Exponent: 0}, 12, 0},
+		{"gap1", &commonpb.Decimal{Coefficient: 3, Exponent: -1}, &commonpb.Decimal{Coefficient: 25, Exponent: -2}, 55, -2},
+		{"gap2", &commonpb.Decimal{Coefficient: 7, Exponent: 0}, &commonpb.Decimal{Coefficient: 125, Exponent: -2}, 825, -2},
+		{"gap8", &commonpb.Decimal{Coefficient: 1, Exponent: 0}, &commonpb.Decimal{Coefficient: 12345678, Exponent: -8}, 112345678, -8},
+		{"gap8-negative", &commonpb.Decimal{Coefficient: -1, Exponent: 0}, &commonpb.Decimal{Coefficient: 12345678, Exponent: -8}, -87654322, -8},
+	}
+	for _, tc := range cases {
+		got, ok := addDecimal(tc.a, tc.b)
+		if !ok {
+			t.Fatalf("%s: ok = false for ordinary input", tc.name)
+		}
+		if got.GetCoefficient() != tc.wantCo || got.GetExponent() != tc.wantExp {
+			t.Fatalf("%s: got %d e%d, want %d e%d", tc.name, got.GetCoefficient(), got.GetExponent(), tc.wantCo, tc.wantExp)
+		}
 	}
 }
