@@ -25,10 +25,11 @@
 # produced this outage. Production credentials come from Vault via the CSI mounts
 # in oms-deploy.yaml and tv-sync-deploy.yaml, which this file does not touch.
 #
-# THE VALUES COME FROM CI, NOT FROM TASTE. Role, password and database are copied
-# verbatim from kanz-ci.yml so that the rig and CI are one convention rather than
-# two. test/arch/postgres_dev_convention_test.go fails if they drift apart in
-# either direction.
+# THE APP ROLE'S VALUES COME FROM CI, NOT FROM TASTE. The kanzapp role, its
+# password and its database are copied verbatim from kanz-ci.yml so that the rig
+# and CI are one convention rather than two. test/arch/postgres_dev_convention_test.go
+# fails if they drift apart in either direction. The bootstrap superuser below is
+# NOT part of that pin — see the comment on POSTGRES_USER.
 #
 #   kubectl apply -f infra/deploy/postgres-dev.yaml
 ---
@@ -128,7 +129,11 @@ spec:
             - { containerPort: 5432, name: postgres }
           env:
             # The bootstrap superuser, used only by the initdb script above and
-            # by operators. Services connect as kanzapp.
+            # by operators. Services connect as kanzapp. This identity deliberately
+            # differs from CI's Postgres service (POSTGRES_USER/PASSWORD/DB: kanz) —
+            # it matches the postgres:16-alpine image default instead. Only the
+            # kanzapp role/database/password/DSN are pinned as a shared convention
+            # with CI; nothing depends on the bootstrap superuser's identity.
             - { name: POSTGRES_USER, value: "postgres" }
             - { name: POSTGRES_PASSWORD, value: "postgres" }
             - { name: POSTGRES_DB, value: "kanz" }

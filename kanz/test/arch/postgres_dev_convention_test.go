@@ -64,11 +64,20 @@ func TestDevPostgresMatchesTheCIConvention(t *testing.T) {
 	}
 
 	// --- NOSUPERUSER is the whole point ------------------------------------
-	if strings.Contains(manifest, "SUPERUSER;") && !strings.Contains(manifest, "NOSUPERUSER;") {
+	// NOSUPERUSER contains SUPERUSER as a substring, so a naive Contains check for
+	// "SUPERUSER" is true on a CORRECT manifest and a plain
+	// `Contains(SUPERUSER) && !Contains(NOSUPERUSER)` is dead in every case —
+	// including the one that matters, where somebody appends an
+	// `ALTER ROLE kanzapp SUPERUSER;` and leaves the original declaration in place.
+	// Removing the negated form first is what makes the remaining match mean
+	// "a genuine grant of superuser".
+	if strings.Contains(strings.ReplaceAll(manifest, "NOSUPERUSER", ""), "SUPERUSER") {
 		t.Error("infra/deploy/postgres-dev.yaml grants the app role SUPERUSER. A superuser BYPASSES " +
 			"row-level security even where the table sets FORCE, so every tenant-isolation test would " +
 			"pass without isolation existing. If migrations are failing on permissions, grant the " +
-			"specific privilege — do not widen the role.")
+			"specific privilege — do not widen the role. (This check previously could not fire: " +
+			"NOSUPERUSER contains SUPERUSER as a substring, so the old Contains/!Contains pair was " +
+			"dead even in this exact scenario. If you are reading this message, the check is now live.)")
 	}
 
 	// --- the DSN the services read must address that same database ---------
