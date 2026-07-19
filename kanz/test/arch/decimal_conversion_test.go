@@ -28,18 +28,13 @@ var capitalPathPackages = []string{
 }
 
 // pendingErrorThreading are capital-path call sites that still use the wrapping
-// conversion because their enclosing function has NO error return, so migrating
-// them means threading an error through several signatures in code that
-// currently cannot fail. That is a refactor with its own design question, not a
-// find-and-replace.
+// conversion because their enclosing function has NO error return.
 //
-// This map is the WORKLIST, not an excuse. A site here is a known gap with a
-// written reason; a site NOT here and not migrated fails the build. Removing an
-// entry is how the follow-up task reports progress.
-var pendingErrorThreading = map[string]string{
-	"services/oms/internal/position/book.go":     "Book.money and Book.stateOf return no error; threading one reaches Snapshot through three signatures",
-	"services/oms/internal/position/postgres.go": "same shape as book.go — the Postgres-backed twin of the same read model",
-}
+// EMPTY, and that is the point: it was the worklist, and the work is done. The
+// guard's stale-exemption arm means an entry whose file no longer calls
+// dec.ToProto FAILS the build, so this map cannot quietly accumulate excuses.
+// A new entry needs a written reason and should be temporary.
+var pendingErrorThreading = map[string]string{}
 
 func TestCapitalPathsDoNotUseWrappingToProto(t *testing.T) {
 	root := moduleRoot(t)

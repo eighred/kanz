@@ -14,6 +14,7 @@ package position
 
 import (
 	"context"
+	"fmt"
 	"math/big"
 	"sync"
 	"time"
@@ -85,10 +86,15 @@ func (b *Book) Apply(_ context.Context, portfolioID string, fill *orderpb.Fill, 
 
 	foldLot(l, signed, price)
 
-	return &Applied{
-		Venue:     b.stateOf(portfolioID, fill.GetVenue(), fill.GetInstrumentId(), l, price, asOf),
-		Aggregate: b.stateOf(portfolioID, "", fill.GetInstrumentId(), b.aggregate(portfolioID, fill.GetInstrumentId()), price, asOf),
-	}, nil
+	venueState, err := b.stateOf(portfolioID, fill.GetVenue(), fill.GetInstrumentId(), l, price, asOf)
+	if err != nil {
+		return nil, err
+	}
+	aggState, err := b.stateOf(portfolioID, "", fill.GetInstrumentId(), b.aggregate(portfolioID, fill.GetInstrumentId()), price, asOf)
+	if err != nil {
+		return nil, err
+	}
+	return &Applied{Venue: venueState, Aggregate: aggState}, nil
 }
 
 // aggregate sums every venue's holding of one instrument into the fund's position — the
@@ -114,19 +120,39 @@ func (b *Book) aggregate(portfolioID, instrument string) *lot {
 
 // stateOf marks at the fill price (the latest trade). An empty venue is the fund-level
 // aggregate: it belongs to no single exchange.
-func (b *Book) stateOf(portfolioID, venue, instrument string, l *lot, price *big.Rat, asOf time.Time) *domainpb.PositionState {
+func (b *Book) stateOf(portfolioID, venue, instrument string, l *lot, price *big.Rat, asOf time.Time) (*domainpb.PositionState, error) {
 	unreal := new(big.Rat).Mul(new(big.Rat).Sub(price, l.avg), l.qty)
+	qty, ok := dec.ToProtoScaled(l.qty)
+	if !ok {
+		return nil, fmt.Errorf("position %s/%s: quantity is not representable", portfolioID, instrument)
+	}
+	avg, ok := dec.ToProtoScaled(l.avg)
+	if !ok {
+		return nil, fmt.Errorf("position %s/%s: average price is not representable", portfolioID, instrument)
+	}
+	marketValue, err := b.money(new(big.Rat).Mul(price, l.qty))
+	if err != nil {
+		return nil, fmt.Errorf("position %s/%s market value: %w", portfolioID, instrument, err)
+	}
+	realized, err := b.money(l.realized)
+	if err != nil {
+		return nil, fmt.Errorf("position %s/%s realized pnl: %w", portfolioID, instrument, err)
+	}
+	unrealized, err := b.money(unreal)
+	if err != nil {
+		return nil, fmt.Errorf("position %s/%s unrealized pnl: %w", portfolioID, instrument, err)
+	}
 	return &domainpb.PositionState{
 		PortfolioId:   portfolioID,
 		Venue:         venue,
 		InstrumentId:  instrument,
-		Quantity:      dec.ToProto(l.qty),
-		AveragePrice:  dec.ToProto(l.avg),
-		MarketValue:   b.money(new(big.Rat).Mul(price, l.qty)),
-		RealizedPnl:   b.money(l.realized),
-		UnrealizedPnl: b.money(unreal),
+		Quantity:      qty,
+		AveragePrice:  avg,
+		MarketValue:   marketValue,
+		RealizedPnl:   realized,
+		UnrealizedPnl: unrealized,
 		AsOf:          timestamppb.New(asOf.UTC()),
-	}
+	}, nil
 }
 
 // foldLot mutates the lot by a signed fill quantity at price, applying
@@ -181,8 +207,18 @@ func foldLot(l *lot, signed, price *big.Rat) {
 	}
 }
 
-func (b *Book) money(r *big.Rat) *commonpb.Money {
-	return &commonpb.Money{Amount: dec.ToProto(r), CurrencyCode: b.baseCcy}
+// money wraps an exact amount as Money, refusing rather than fabricating one.
+// dec.ToProtoScaled preserves magnitude by rescaling; ok is false only when the
+// value cannot be represented at any exponent it will reach, which no real
+// position value approaches. Returning a zero Money here would be worse than
+// returning nothing: heldPositions treats a zero-valued position as flat and
+// drops it, so the compliance rules would stop seeing the holding entirely.
+func (b *Book) money(r *big.Rat) (*commonpb.Money, error) {
+	amt, ok := dec.ToProtoScaled(r)
+	if !ok {
+		return nil, fmt.Errorf("amount is not representable as a Decimal")
+	}
+	return &commonpb.Money{Amount: amt, CurrencyCode: b.baseCcy}, nil
 }
 
 // Snapshot returns a portfolio's current holdings as a PortfolioSnapshot — the
@@ -209,21 +245,41 @@ func (b *Book) Snapshot(_ context.Context, portfolioID string, asOf time.Time) (
 		l := b.aggregate(portfolioID, k.instrument)
 		mv := new(big.Rat).Mul(l.avg, l.qty)
 		nav.Add(nav, mv)
+		marketValue, err := b.money(mv)
+		if err != nil {
+			return nil, fmt.Errorf("portfolio %s position %s: %w", portfolioID, k.instrument, err)
+		}
+		realized, err := b.money(l.realized)
+		if err != nil {
+			return nil, fmt.Errorf("portfolio %s position %s realized pnl: %w", portfolioID, k.instrument, err)
+		}
+		qty, ok := dec.ToProtoScaled(l.qty)
+		if !ok {
+			return nil, fmt.Errorf("portfolio %s position %s: quantity is not representable", portfolioID, k.instrument)
+		}
+		avg, ok := dec.ToProtoScaled(l.avg)
+		if !ok {
+			return nil, fmt.Errorf("portfolio %s position %s: average price is not representable", portfolioID, k.instrument)
+		}
 		positions = append(positions, &domainpb.PositionState{
 			PortfolioId:  portfolioID,
 			InstrumentId: k.instrument,
-			Quantity:     dec.ToProto(l.qty),
-			AveragePrice: dec.ToProto(l.avg),
-			MarketValue:  b.money(mv),
-			RealizedPnl:  b.money(l.realized),
+			Quantity:     qty,
+			AveragePrice: avg,
+			MarketValue:  marketValue,
+			RealizedPnl:  realized,
 			AsOf:         ts,
 		})
+	}
+	navMoney, err := b.money(nav)
+	if err != nil {
+		return nil, fmt.Errorf("portfolio %s NAV: %w", portfolioID, err)
 	}
 	return &domainpb.PortfolioSnapshot{
 		Portfolio: &domainpb.PortfolioState{
 			PortfolioId:      portfolioID,
 			BaseCurrency:     b.baseCcy,
-			TotalMarketValue: b.money(nav),
+			TotalMarketValue: navMoney,
 			PositionCount:    uint32(len(positions)),
 			AsOf:             ts,
 		},

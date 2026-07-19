@@ -158,10 +158,15 @@ func (p *Postgres) Apply(ctx context.Context, portfolioID string, fill *orderpb.
 		return nil, fmt.Errorf("position: commit: %w", err)
 	}
 
-	return &Applied{
-		Venue:     p.stateOf(portfolioID, venue, instrument, l, price, asOf),
-		Aggregate: p.stateOf(portfolioID, "", instrument, agg, price, asOf),
-	}, nil
+	venueState, err := p.stateOf(portfolioID, venue, instrument, l, price, asOf)
+	if err != nil {
+		return nil, err
+	}
+	aggState, err := p.stateOf(portfolioID, "", instrument, agg, price, asOf)
+	if err != nil {
+		return nil, err
+	}
+	return &Applied{Venue: venueState, Aggregate: aggState}, nil
 }
 
 // loadLot reads one venue's lot FOR UPDATE, returning a zero lot when the holding is new.
@@ -308,22 +313,42 @@ func (p *Postgres) Snapshot(ctx context.Context, portfolioID string, asOf time.T
 		}
 		mv := new(big.Rat).Mul(x.l.avg, x.l.qty)
 		nav.Add(nav, mv)
+		marketValue, err := p.money(mv)
+		if err != nil {
+			return nil, fmt.Errorf("portfolio %s position %s: %w", portfolioID, instrument, err)
+		}
+		realized, err := p.money(x.l.realized)
+		if err != nil {
+			return nil, fmt.Errorf("portfolio %s position %s realized pnl: %w", portfolioID, instrument, err)
+		}
+		qty, ok := dec.ToProtoScaled(x.l.qty)
+		if !ok {
+			return nil, fmt.Errorf("portfolio %s position %s: quantity is not representable", portfolioID, instrument)
+		}
+		avg, ok := dec.ToProtoScaled(x.l.avg)
+		if !ok {
+			return nil, fmt.Errorf("portfolio %s position %s: average price is not representable", portfolioID, instrument)
+		}
 		positions = append(positions, &domainpb.PositionState{
 			PortfolioId:  portfolioID,
 			InstrumentId: instrument,
-			Quantity:     dec.ToProto(x.l.qty),
-			AveragePrice: dec.ToProto(x.l.avg),
-			MarketValue:  p.money(mv),
-			RealizedPnl:  p.money(x.l.realized),
+			Quantity:     qty,
+			AveragePrice: avg,
+			MarketValue:  marketValue,
+			RealizedPnl:  realized,
 			AsOf:         ts,
 		})
 	}
 
+	navMoney, err := p.money(nav)
+	if err != nil {
+		return nil, fmt.Errorf("portfolio %s NAV: %w", portfolioID, err)
+	}
 	return &domainpb.PortfolioSnapshot{
 		Portfolio: &domainpb.PortfolioState{
 			PortfolioId:      portfolioID,
 			BaseCurrency:     p.baseCcy,
-			TotalMarketValue: p.money(nav),
+			TotalMarketValue: navMoney,
 			PositionCount:    uint32(len(positions)),
 			AsOf:             ts,
 		},
@@ -334,21 +359,49 @@ func (p *Postgres) Snapshot(ctx context.Context, portfolioID string, asOf time.T
 // stateOf builds a published PositionState, marked at the fill price (the latest trade) —
 // the same marking the in-memory book applies. An empty venue means the fund-level
 // aggregate: it belongs to no single exchange.
-func (p *Postgres) stateOf(portfolioID, venue, instrument string, l *lot, price *big.Rat, asOf time.Time) *domainpb.PositionState {
+func (p *Postgres) stateOf(portfolioID, venue, instrument string, l *lot, price *big.Rat, asOf time.Time) (*domainpb.PositionState, error) {
 	unreal := new(big.Rat).Mul(new(big.Rat).Sub(price, l.avg), l.qty)
+	qty, ok := dec.ToProtoScaled(l.qty)
+	if !ok {
+		return nil, fmt.Errorf("position %s/%s: quantity is not representable", portfolioID, instrument)
+	}
+	avg, ok := dec.ToProtoScaled(l.avg)
+	if !ok {
+		return nil, fmt.Errorf("position %s/%s: average price is not representable", portfolioID, instrument)
+	}
+	marketValue, err := p.money(new(big.Rat).Mul(price, l.qty))
+	if err != nil {
+		return nil, fmt.Errorf("position %s/%s market value: %w", portfolioID, instrument, err)
+	}
+	realized, err := p.money(l.realized)
+	if err != nil {
+		return nil, fmt.Errorf("position %s/%s realized pnl: %w", portfolioID, instrument, err)
+	}
+	unrealized, err := p.money(unreal)
+	if err != nil {
+		return nil, fmt.Errorf("position %s/%s unrealized pnl: %w", portfolioID, instrument, err)
+	}
 	return &domainpb.PositionState{
 		PortfolioId:   portfolioID,
 		Venue:         venue,
 		InstrumentId:  instrument,
-		Quantity:      dec.ToProto(l.qty),
-		AveragePrice:  dec.ToProto(l.avg),
-		MarketValue:   p.money(new(big.Rat).Mul(price, l.qty)),
-		RealizedPnl:   p.money(l.realized),
-		UnrealizedPnl: p.money(unreal),
+		Quantity:      qty,
+		AveragePrice:  avg,
+		MarketValue:   marketValue,
+		RealizedPnl:   realized,
+		UnrealizedPnl: unrealized,
 		AsOf:          timestamppb.New(asOf.UTC()),
-	}
+	}, nil
 }
 
-func (p *Postgres) money(r *big.Rat) *commonpb.Money {
-	return &commonpb.Money{Amount: dec.ToProto(r), CurrencyCode: p.baseCcy}
+// money wraps an exact amount as Money, refusing rather than fabricating one.
+// Returning a zero Money would be worse than returning nothing: heldPositions
+// treats a zero-valued position as flat and drops it, so the compliance rules
+// would stop seeing the holding entirely.
+func (p *Postgres) money(r *big.Rat) (*commonpb.Money, error) {
+	amt, ok := dec.ToProtoScaled(r)
+	if !ok {
+		return nil, fmt.Errorf("amount is not representable as a Decimal")
+	}
+	return &commonpb.Money{Amount: amt, CurrencyCode: p.baseCcy}, nil
 }
