@@ -19,6 +19,7 @@ import (
 
 	comp "github.com/kanz-eng/kanz/internal/compliance"
 	"github.com/kanz-eng/kanz/internal/execution"
+	"github.com/kanz-eng/kanz/internal/marketdata/mark"
 	"github.com/prometheus/client_golang/prometheus"
 
 	"github.com/kanz-eng/kanz/internal/pg"
@@ -144,6 +145,13 @@ func runConsumers(ctx context.Context, cfg config.Config, readiness *server.Read
 	mandateReg := comp.NewMandateRegistry()
 	mandateConsumer := comp.NewMandateConsumer(mandateReg, logger)
 
+	// COMP-M2: the reference-mark source the pre-trade gate values MARKET/STOP
+	// orders from. It starts EMPTY and warms as the spine delivers, so a freshly
+	// started pod refuses market orders until the first tick for that instrument
+	// arrives. That is the safe direction and it is deliberate — the alternative
+	// is admitting an order at a price we do not have.
+	marks := mark.New(time.Now, cfg.PriceMaxAge)
+
 	// AN UNGOVERNED PORTFOLIO IS NOW COUNTED AND ANNOUNCED (EXEC-M14).
 	//
 	// It used to be silent: an order for a portfolio nobody had put under mandate
@@ -159,12 +167,48 @@ func runConsumers(ctx context.Context, cfg config.Config, readiness *server.Read
 	})
 	obs.Registry.MustRegister(ungoverned)
 
+	// AN UNPRICED REFUSAL IS NOW COUNTED TOO (COMP-M2).
+	//
+	// Ungoverned already had a counter; Unpriced and Unvaluable — the other
+	// "nothing was evaluated" refusals — had only a once-per-(portfolio,
+	// instrument) warn log. That log fires once for the LIFE OF THE PROCESS, so a
+	// sustained pricing outage goes invisible after the first refused order. The
+	// two causes are split by label because they are different incidents with
+	// different responses: "never_seen" is a cold pod, a thin instrument, or a
+	// subscription delivering nothing (a warm-up); "expired" is a feed that WAS
+	// reporting and has stalled (an outage).
+	unpriced := prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "kanz_compliance_unpriced_orders_total",
+		Help: "Orders refused PRICE_UNAVAILABLE because no usable reference mark exists for the instrument. " +
+			"Sustained non-zero means the market-data spine is not reaching this OMS for that instrument.",
+	}, []string{"reason"})
+	obs.Registry.MustRegister(unpriced)
+
 	preTrade := comp.NewPreTradeGate(
 		comp.NewEngine(nil), compliance.NewBookSource(book), mandateReg, nil, nil, logger,
 		comp.WithRequireMandate(cfg.RequireMandate),
 		comp.WithUngovernedObserver(func(string) { ungoverned.Inc() }),
+		comp.WithUnpricedObserver(func(portfolioID, instrumentID string) {
+			// Two very different incidents arrive at the same refusal, and an
+			// operator needs to tell them apart: a mark we have NEVER seen means a
+			// cold pod, a thin instrument, or a subscription delivering nothing;
+			// a mark we HAVE seen but which expired means the feed was working and
+			// stalled. One is a warm-up, the other is an outage.
+			if _, asOf, seen := marks.Lookup(instrumentID); seen {
+				unpriced.WithLabelValues("expired").Inc()
+				logger.Warn("order refused: the reference mark is STALE — the price feed has stopped reporting for this instrument",
+					"portfolio", portfolioID, "instrument", instrumentID,
+					"mark_as_of", asOf, "max_age", cfg.PriceMaxAge)
+				return
+			}
+			unpriced.WithLabelValues("never_seen").Inc()
+			logger.Warn("order refused: NO reference mark has ever been seen for this instrument — a cold pod warming up, an instrument nothing quotes, or a price subscription delivering nothing",
+				"portfolio", portfolioID, "instrument", instrumentID, "subject", cfg.PriceSubject)
+		}),
 	)
-	gate := compliance.NewCOMP01Gate(preTrade, cfg.BaseCurrency)
+	gate := compliance.NewCOMP01Gate(preTrade, cfg.BaseCurrency,
+		compliance.WithMarkSource(marks),
+	)
 
 	// State the posture, loudly, at startup. Which of these two lines is in the log is
 	// the difference between "an unmandated portfolio trades unconstrained" and "an
@@ -265,6 +309,10 @@ func runConsumers(ctx context.Context, cfg config.Config, readiness *server.Read
 	for _, s := range cfg.FillSubjects() {
 		subs = append(subs, sub{s, projector.Handle})
 	}
+	// The price spine is a plain work-queue subscription: unlike the mandate
+	// registry below, a mark is not a control that must reach every replica —
+	// it is refreshed continuously, so a pod that misses one tick gets the next.
+	subs = append(subs, sub{cfg.PriceSubject, marks.Handle})
 	// THE PRE-TRADE GATE'S MANDATE REGISTRY — BROADCAST, NOT A WORK QUEUE.
 	//
 	// This fed from a durable CONSUMER GROUP, which resumes at its last ack. So a
