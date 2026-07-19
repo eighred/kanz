@@ -3,7 +3,6 @@ package compliance
 import (
 	"context"
 	"testing"
-	"time"
 
 	commonpb "github.com/kanz-eng/kanz-schemas-go/common/v1"
 	compliancepb "github.com/kanz-eng/kanz-schemas-go/compliance/v1"
@@ -223,5 +222,3 @@ func TestDecimalInDomain_ZeroIsCheckedByExponent(t *testing.T) {
 			"coefficient does not make 10^2e9 cheap to compute")
 	}
 }
-
-var _ = time.Second // keep the time import if unused after edits
