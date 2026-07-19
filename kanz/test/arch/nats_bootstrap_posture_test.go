@@ -65,7 +65,14 @@ func TestNATSBootstrapKeepsItsMTLSPosture(t *testing.T) {
 	// --- the production Job must keep its identity -------------------------
 	for _, want := range []struct{ needle, why string }{
 		{"initContainers:", "the spiffe-helper init container is what materialises the SVID"},
-		{"spiffe-helper", "without the helper the nats CLI has no identity to present"},
+		// `- name: spiffe-helper`, not bare `spiffe-helper`. The bare token also
+		// appears in the ConfigMap resource name `nats-bootstrap-spiffe-helper`,
+		// which survives comment-stripping and is NOT the init container. So the
+		// bare needle stayed satisfied when the container itself was deleted —
+		// green guard, no SVID, which is the one failure this file exists to
+		// catch. Anchoring on the list-item declaration ties the assertion to the
+		// container and nothing else.
+		{"- name: spiffe-helper", "without the helper the nats CLI has no identity to present"},
 		{"NATS_CERT", "the CLI reads its client cert from this env var"},
 		{"NATS_KEY", "the CLI reads its client key from this env var"},
 		{"NATS_CA", "the CLI verifies the broker against this bundle"},
