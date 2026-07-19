@@ -131,17 +131,21 @@ func orderDelta(cmd *orderpb.SubmitOrder, currency string, prices map[string]flo
 	}
 }
 
-// gateReason renders a rejected Decision as a human-readable reason. Ungoverned
-// and Unpriced are refusals under their OWN code, not a rule violation —
-// nothing breached, because nothing was evaluated — so neither may fall
-// through to "pre-trade compliance breach" (that used to be true for
-// Ungoverned, and would otherwise now be true for Unpriced too; COMP-M1).
+// gateReason renders a rejected Decision as a human-readable reason.
+// Ungoverned, Unpriced and Unvaluable are refusals under their OWN code, not a
+// rule violation — nothing breached, because nothing was evaluated — so none
+// of them may fall through to "pre-trade compliance breach" (that used to be
+// true for Ungoverned, and would otherwise now be true for the other two;
+// COMP-M1).
 func gateReason(d compliance.Decision) string {
 	if d.Ungoverned {
 		return "no mandate governs this portfolio"
 	}
 	if d.Unpriced {
 		return "no usable price to value this order"
+	}
+	if d.Unvaluable {
+		return "order notional cannot be represented — the order was not evaluated"
 	}
 	if d.Result != nil && len(d.Result.GetViolations()) > 0 {
 		return d.Result.GetViolations()[0].GetMessage()

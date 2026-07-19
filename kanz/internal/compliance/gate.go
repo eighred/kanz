@@ -3,6 +3,8 @@ package compliance
 import (
 	"context"
 	"log/slog"
+	"math"
+	"math/big"
 	"sync"
 	"time"
 
@@ -130,6 +132,16 @@ type Decision struct {
 	// reviewer reading Unpriced knows to go wire a reference-price source, not
 	// to go look for the rule that fired.
 	Unpriced bool
+
+	// Unvaluable means the order HAD a usable price but its notional
+	// (quantity × price) could not be represented as a Decimal at all, so
+	// again NO RULE WAS EVALUATED. It is deliberately not Unpriced: the price
+	// was fine, and telling an operator to go wire a price source would send
+	// them after a problem that does not exist. It is deliberately not a rule
+	// breach either — nothing was checked. The alternative is what this
+	// replaced: an int64 multiply that wrapped a billion-dollar notional into
+	// a small number and ADMITTED the order.
+	Unvaluable bool
 }
 
 // NewPreTradeGate wires the gate. engine defaults to NewEngine(nil); a nil
@@ -210,6 +222,26 @@ func (g *PreTradeGate) noteUnpriced(portfolioID, instrumentID string) {
 		"fix", "wire a reference-price source for market/stop orders (COMP-M2)")
 }
 
+// noteUnvaluable makes the unvaluable-notional refusal audible, mirroring
+// noteUnpriced: once per (portfolio, instrument), loud enough to be seen. This
+// should never fire in practice — it takes a notional beyond any representable
+// Decimal — so if it does, somebody needs to look at the order, not the price
+// feed.
+func (g *PreTradeGate) noteUnvaluable(portfolioID, instrumentID string) {
+	key := "unvaluable:" + portfolioID + ":" + instrumentID
+	g.mu.Lock()
+	first := !g.warned[key]
+	g.warned[key] = true
+	g.mu.Unlock()
+	if !first {
+		return
+	}
+	g.logger.Warn("REFUSING order: its notional (quantity × price) cannot be represented — the order was NOT evaluated",
+		"portfolio_id", portfolioID,
+		"instrument_id", instrumentID,
+		"fix", "check the submitted quantity; the price is not the problem")
+}
+
 // Evaluate runs the pre-trade check for one order. A returned error is TRANSIENT
 // (book/mandate load failure) and the caller should retry; a clean Decision with
 // Allowed=false is a terminal compliance rejection. An order against a portfolio
@@ -250,7 +282,14 @@ func (g *PreTradeGate) Evaluate(ctx context.Context, d OrderDelta) (Decision, er
 	if err != nil {
 		return Decision{}, err
 	}
-	proj := project(book, d)
+	// The price was fine; the VALUATION did not fit. Refusing under its own
+	// flag keeps the two apart: Unpriced sends an operator to go wire a price
+	// source, which would be a wild goose chase here.
+	proj, ok := project(book, d)
+	if !ok {
+		g.noteUnvaluable(d.PortfolioID, d.InstrumentID)
+		return Decision{Allowed: false, Unvaluable: true}, nil
+	}
 	res := g.engine.Evaluate(ctx, &Candidate{Book: proj, Classifier: g.classifier, AsOf: d.AsOf}, mandate)
 	allowed := res.GetStatus() != compliancepb.ComplianceStatus_COMPLIANCE_STATUS_BREACH
 
@@ -281,7 +320,9 @@ func (g *PreTradeGate) record(ctx context.Context, rec DecisionRecord) {
 // forward — a trade swaps cash for position value, leaving net asset value
 // approximately unchanged (the FX/cash-impact refinement is deferred with the
 // rest of the FX layer, RISK-06).
-func project(book *Book, d OrderDelta) *Book {
+// ok=false means the notional could not be represented at all (see mulDecimal);
+// the caller must REFUSE, never fall through with a fabricated market value.
+func project(book *Book, d OrderDelta) (*Book, bool) {
 	proj := book.clone()
 	idx := -1
 	for i := range proj.Positions {
@@ -295,17 +336,21 @@ func project(book *Book, d OrderDelta) *Book {
 		existingQty = proj.Positions[idx].Quantity
 	}
 	newQty := addDecimal(existingQty, d.SignedQuantity)
+	notional, ok := mulDecimal(newQty, d.Price)
+	if !ok {
+		return nil, false
+	}
 	pos := Position{
 		InstrumentID: d.InstrumentID,
 		Quantity:     newQty,
-		MarketValue:  &commonpb.Money{Amount: mulDecimal(newQty, d.Price), CurrencyCode: d.Currency},
+		MarketValue:  &commonpb.Money{Amount: notional, CurrencyCode: d.Currency},
 	}
 	if idx >= 0 {
 		proj.Positions[idx] = pos
 	} else {
 		proj.Positions = append(proj.Positions, pos)
 	}
-	return proj
+	return proj, true
 }
 
 // addDecimal returns a+b, exact, by aligning to the smaller exponent. nil is
@@ -326,16 +371,58 @@ func addDecimal(a, b *commonpb.Decimal) *commonpb.Decimal {
 	return &commonpb.Decimal{Coefficient: ac + bc, Exponent: exp}
 }
 
-// mulDecimal returns a×b, exact (coefficients multiply, exponents add). nil is
+// mulDecimal returns a×b and whether the product is representable. nil is
 // treated as zero.
-func mulDecimal(a, b *commonpb.Decimal) *commonpb.Decimal {
+//
+// This computes the ORDER'S NOTIONAL (project, above), which every
+// concentration/exposure rule then evaluates, so a wrapped product is an
+// admission bypass, not a rounding nit: the old body multiplied the
+// coefficients as raw int64s, and a large-enough quantity wrapped that product
+// into a small — often negative — number. The rules saw a tiny position and
+// ADMITTED an order worth billions. The mark-priced path made this reachable
+// at plausible sizes, because dec.ToProtoExact always emits exponent -8 and so
+// spends eight digits of int64 headroom before the multiply even happens.
+//
+// The product is therefore taken in math/big, exactly. Three outcomes:
+//
+//   - it fits int64 at its natural exponent — returned as-is, so every input
+//     that never wrapped keeps bit-identical behaviour;
+//   - it does not fit — the exponent is RAISED (the coefficient divided by ten,
+//     half-up away from zero) until it does. This drops digits that cannot
+//     matter at that magnitude and keeps the one thing a compliance rule needs:
+//     the MAGNITUDE. A $184bn notional fits an int64 comfortably at a coarser
+//     exponent;
+//   - the exponent itself cannot be represented — the order is genuinely
+//     unvaluable, and ok=false makes the gate REFUSE it. Never a wrapped number.
+func mulDecimal(a, b *commonpb.Decimal) (*commonpb.Decimal, bool) {
 	if a == nil || b == nil {
-		return &commonpb.Decimal{}
+		return &commonpb.Decimal{}, true
 	}
-	return &commonpb.Decimal{
-		Coefficient: a.GetCoefficient() * b.GetCoefficient(),
-		Exponent:    a.GetExponent() + b.GetExponent(),
+	coeff := new(big.Int).Mul(big.NewInt(a.GetCoefficient()), big.NewInt(b.GetCoefficient()))
+	// int64 accumulator: two int32 exponents can sum past int32 range.
+	exp := int64(a.GetExponent()) + int64(b.GetExponent())
+	if exp < math.MinInt32 {
+		// Rescaling only ever RAISES the exponent; there is no way back from
+		// here, and no realistic input reaches it. Refuse rather than guess.
+		return nil, false
 	}
+	ten, five := big.NewInt(10), big.NewInt(5)
+	rem := new(big.Int)
+	for !coeff.IsInt64() || exp > math.MaxInt32 {
+		if exp >= math.MaxInt32 {
+			return nil, false // cannot raise the exponent any further
+		}
+		coeff.QuoRem(coeff, ten, rem)
+		if rem.CmpAbs(five) >= 0 { // half-up, away from zero
+			if rem.Sign() < 0 {
+				coeff.Sub(coeff, big.NewInt(1))
+			} else {
+				coeff.Add(coeff, big.NewInt(1))
+			}
+		}
+		exp++
+	}
+	return &commonpb.Decimal{Coefficient: coeff.Int64(), Exponent: int32(exp)}, true
 }
 
 // pow10 returns 10^n for n ≥ 0 (n is a non-negative exponent gap here).

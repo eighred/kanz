@@ -98,6 +98,18 @@ func (g *COMP01Gate) Check(ctx context.Context, cmd *orderpb.SubmitOrder) (*Brea
 			Reason: "no usable price to value order for instrument " + cmd.GetInstrumentId(),
 		}, nil
 	}
+	// An order whose NOTIONAL could not be represented is refused under its own
+	// code too. It is not PRICE_UNAVAILABLE — the price was fine, and that code
+	// would send a reviewer to go wire a price source that is already wired.
+	// NOTIONAL_UNREPRESENTABLE says what actually happened: quantity × price is
+	// beyond any Decimal, so no rule was evaluated. The order size is the thing
+	// to look at.
+	if decision.Unvaluable {
+		return &Breach{
+			Code:   "NOTIONAL_UNREPRESENTABLE",
+			Reason: "order notional (quantity × price) cannot be represented for instrument " + cmd.GetInstrumentId(),
+		}, nil
+	}
 	return breachFromResult(decision.Result), nil
 }
 
@@ -136,19 +148,10 @@ func (g *COMP01Gate) price(cmd *orderpb.SubmitOrder) *commonpb.Decimal {
 	if m == nil {
 		return nil
 	}
-	// A mark that dec.ToProtoExact cannot represent exactly must refuse, not
-	// admit at a wrong price. dec.ToProto scales the rational by a fixed 10^8,
-	// rounds half-up to a big.Int, and returns big.Int.Int64() as the Decimal
-	// coefficient — but Int64() is UNDEFINED (silently wraps, per math/big) when
-	// that scaled value does not fit in an int64. A mark just past 2^64/10^8
-	// would wrap to an arbitrary small (even negative) coefficient, and the gate
-	// would then evaluate a fabricated notional instead of the real one — the
-	// opposite of refusing an order it cannot value. Failing closed here (nil,
-	// which the gate already treats as Unpriced) is correct: we would rather
-	// refuse a real order than admit one at a fabricated price. dec.ToProto
-	// itself is not changed — it is shared by many other callers, and widening
-	// its contract is out of scope here; ToProtoExact runs the identical
-	// scaling/rounding arithmetic and additionally reports whether it fit.
+	// A mark that is not representable REFUSES rather than being clamped: a
+	// clamped mark is a fabricated price, and the gate would then admit or
+	// reject on a notional nobody submitted. nil is what the gate already
+	// treats as Unpriced. See internal/dec for the mechanism.
 	d, ok := dec.ToProtoExact(m)
 	if !ok {
 		return nil
