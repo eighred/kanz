@@ -18,13 +18,13 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/kanz-eng/kanz/internal/marketdata/mark"
 	"github.com/kanz-eng/kanz/internal/pg"
 	"github.com/kanz-eng/kanz/pkg/bus"
 	"github.com/kanz-eng/kanz/pkg/observability"
 	"github.com/kanz-eng/kanz/pkg/transport"
 	"github.com/kanz-eng/kanz/services/tv-sync/internal/brokerapi"
 	"github.com/kanz-eng/kanz/services/tv-sync/internal/config"
-	"github.com/kanz-eng/kanz/services/tv-sync/internal/markfeed"
 	"github.com/kanz-eng/kanz/services/tv-sync/internal/projection"
 	"github.com/kanz-eng/kanz/services/tv-sync/internal/server"
 )
@@ -79,8 +79,15 @@ func main() {
 
 	// M3.5: fold the market price spine into a live mark source so the
 	// projection computes floating unrealized P&L dynamically.
-	mark := markfeed.New()
-	proj := projection.New(time.Now, mark, projection.WithLog(projection.NewPostgresLog(pool), cfg.Tenant))
+	//
+	// maxAge 0 — tv-sync's marks deliberately DO NOT expire, which is the
+	// behaviour it has always had and is preserved here rather than inherited by
+	// accident. A stale mark makes a P&L number slightly old; the projection
+	// already degrades to empty when a mark is missing entirely. Whether a P&L
+	// display should refuse an hours-old mark is a real question and a separate
+	// decision — it is not settled by an OMS task needing a bound of its own.
+	marks := mark.New(time.Now, 0)
+	proj := projection.New(time.Now, marks, projection.WithLog(projection.NewPostgresLog(pool), cfg.Tenant))
 
 	// SEC-M3: the production broker requires a client SVID; a nil TLSConfig is a
 	// plaintext client it refuses at the handshake.
@@ -144,7 +151,7 @@ func main() {
 	for _, s := range projection.Subjects() {
 		subs[s] = proj.Handle
 	}
-	subs[cfg.PriceSubject] = mark.Handle
+	subs[cfg.PriceSubject] = marks.Handle
 	go func() {
 		if err := runConsumers(ctx, consumer, subs, cfg.ConsumerGroup); err != nil && ctx.Err() == nil {
 			logger.Error("fact consumer failed", "err", err)
