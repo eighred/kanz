@@ -62,7 +62,7 @@ var _ Gate = (*COMP01Gate)(nil)
 // returned so the handler retries; a BREACH returns a *Breach (terminal
 // rejection); PASS/WARN return nil (admit).
 func (g *COMP01Gate) Check(ctx context.Context, cmd *orderpb.SubmitOrder) (*Breach, error) {
-	dec, err := g.gate.Evaluate(ctx, comp.OrderDelta{
+	decision, err := g.gate.Evaluate(ctx, comp.OrderDelta{
 		PortfolioID:    cmd.GetPortfolioId(),
 		InstrumentID:   cmd.GetInstrumentId(),
 		SignedQuantity: signedQuantity(cmd.GetSide(), cmd.GetQuantity()),
@@ -75,14 +75,14 @@ func (g *COMP01Gate) Check(ctx context.Context, cmd *orderpb.SubmitOrder) (*Brea
 	if err != nil {
 		return nil, err
 	}
-	if dec.Allowed {
+	if decision.Allowed {
 		return nil, nil
 	}
 	// An UNGOVERNED portfolio is refused under its own code, not a rule violation:
 	// nothing was breached, because nothing governs it. A reviewer reading
 	// MANDATE_MISSING knows to go and write a mandate — not to go and look for the
 	// rule that fired (EXEC-M14).
-	if dec.Ungoverned {
+	if decision.Ungoverned {
 		return &Breach{
 			Code:   "MANDATE_MISSING",
 			Reason: "no mandate governs portfolio " + cmd.GetPortfolioId(),
@@ -92,13 +92,13 @@ func (g *COMP01Gate) Check(ctx context.Context, cmd *orderpb.SubmitOrder) (*Brea
 	// nothing was breached, because nothing could be evaluated. A reviewer
 	// reading PRICE_UNAVAILABLE knows to go wire a reference-price source
 	// (COMP-M2) — not to go look for the rule that fired (COMP-M1).
-	if dec.Unpriced {
+	if decision.Unpriced {
 		return &Breach{
 			Code:   "PRICE_UNAVAILABLE",
 			Reason: "no usable price to value order for instrument " + cmd.GetInstrumentId(),
 		}, nil
 	}
-	return breachFromResult(dec.Result), nil
+	return breachFromResult(decision.Result), nil
 }
 
 // price values the order's notional.
@@ -119,6 +119,15 @@ func (g *COMP01Gate) price(cmd *orderpb.SubmitOrder) *commonpb.Decimal {
 	switch cmd.GetOrderType() {
 	case orderpb.OrderType_ORDER_TYPE_LIMIT, orderpb.OrderType_ORDER_TYPE_STOP_LIMIT:
 		return cmd.GetLimitPrice()
+	case orderpb.OrderType_ORDER_TYPE_MARKET, orderpb.OrderType_ORDER_TYPE_STOP:
+		// falls through to mark pricing below
+	default:
+		// Anything else — including ORDER_TYPE_UNSPECIFIED — is refused, not
+		// mark-priced. This gate runs BEFORE order-type validation (Accept, in
+		// services/oms/internal/order/service.go), so an unrecognised order type
+		// reaching this switch must not be admitted here and recorded as a
+		// compliance PASS only to be rejected later by validation.
+		return nil
 	}
 	if g.marks == nil {
 		return nil
@@ -127,7 +136,45 @@ func (g *COMP01Gate) price(cmd *orderpb.SubmitOrder) *commonpb.Decimal {
 	if m == nil {
 		return nil
 	}
+	// A mark that dec.ToProto cannot represent exactly must refuse, not admit at
+	// a wrong price. dec.ToProto scales the rational by a fixed 10^8, rounds
+	// half-up to a big.Int, and returns big.Int.Int64() as the Decimal
+	// coefficient — but Int64() is UNDEFINED (silently wraps, per math/big) when
+	// that scaled value does not fit in an int64. A mark just past 2^64/10^8
+	// would wrap to an arbitrary small (even negative) coefficient, and the gate
+	// would then evaluate a fabricated notional instead of the real one — the
+	// opposite of refusing an order it cannot value. Failing closed here (nil,
+	// which the gate already treats as Unpriced) is correct: we would rather
+	// refuse a real order than admit one at a fabricated price. dec.ToProto
+	// itself is not changed — it is shared by many other callers, and widening
+	// its contract is out of scope here.
+	if !markRepresentable(m) {
+		return nil
+	}
 	return dec.ToProto(m)
+}
+
+// markRepresentable mirrors dec.ToProto's exact scaling and half-up rounding
+// (internal/dec/dec.go) to determine, BEFORE calling it, whether the resulting
+// coefficient fits in an int64. It must reproduce that arithmetic precisely —
+// checking the input's rough magnitude, or checking ToProto's output after the
+// fact, cannot distinguish a correctly rounded small coefficient from one that
+// already wrapped.
+func markRepresentable(r *big.Rat) bool {
+	const scale = 8 // dec.ToProto's fixed scale; duplicated only to detect
+	// non-representable input ahead of its unexported rounding step.
+	pow := new(big.Int).Exp(big.NewInt(10), big.NewInt(scale), nil)
+	scaledNum := new(big.Int).Mul(r.Num(), pow)
+	q, rem := new(big.Int).QuoRem(scaledNum, r.Denom(), new(big.Int))
+	twice := new(big.Int).Mul(new(big.Int).Abs(rem), big.NewInt(2))
+	if twice.Cmp(new(big.Int).Abs(r.Denom())) >= 0 {
+		if r.Sign() < 0 {
+			q.Sub(q, big.NewInt(1))
+		} else {
+			q.Add(q, big.NewInt(1))
+		}
+	}
+	return q.IsInt64()
 }
 
 // signedQuantity returns +quantity for a buy and −quantity for a sell, so the
