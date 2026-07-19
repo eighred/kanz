@@ -1,0 +1,91 @@
+# DEV-ONLY plaintext bootstrap. NEVER apply this to a cluster that has SPIRE.
+#
+# bootstrap-job.yaml is the real one. It runs a spiffe-helper init container to
+# materialise an SVID, and the `nats` CLI presents that identity so the broker's
+# `verify_and_map` can map it to a __system__ user (SEC-M3b). On a cluster with
+# no SPIRE the init container blocks forever on the workload socket, the Job
+# never starts, NO STREAM IS EVER CREATED — and every stream-dependent service
+# crash-loops with "stream not found". That is not hypothetical: it is exactly
+# how the kind-kanz-dryrun rig came to have compliance and tv-sync at ~495
+# restarts after a host reboot dropped JetStream state.
+#
+# THE ONE PROPERTY THAT MAKES THIS SAFE TO HAVE AT ALL: it mounts the SAME
+# `nats-bootstrap` ConfigMap as the real Job, so dev and production run the
+# BYTE-IDENTICAL bootstrap script and create the same streams with the same
+# subjects and retention. Only the transport differs. A dev rig cannot drift
+# into a different topology, because there is only one topology — copying the
+# script here instead would have reintroduced exactly the drift that
+# infra/kafka/tenancy.yaml spent a day proving is real.
+#
+# What it deliberately does NOT do:
+#   - it does not disable mTLS on the BROKER. nats.yaml still sets
+#     verify_and_map. This Job is plaintext because a dev broker without SPIRE
+#     is not requiring client certs in the first place; it does not weaken a
+#     broker that is.
+#   - it does not carry NATS_CERT/NATS_KEY/NATS_CA. The `nats` CLI reads those
+#     from the environment, so their ABSENCE is what selects plaintext — there
+#     is no flag to get wrong and no half-configured state where TLS is
+#     partially on.
+#
+# If you are looking at this on a cluster that has spire-system, you are in the
+# wrong file: apply bootstrap-job.yaml and find out why the SVID is not being
+# issued, rather than routing around the identity that makes the spine
+# multi-tenant-safe.
+#
+#   kubectl apply -f infra/nats/bootstrap-job-dev-plaintext.yaml
+#
+# It reuses the ConfigMap and ServiceAccount from bootstrap-job.yaml, so apply
+# that file first (its Job will sit in Init:0/1 on a SPIRE-less cluster, which
+# is harmless — delete it after).
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: nats-bootstrap-dev-plaintext
+  namespace: kanz-messaging
+  labels:
+    app.kubernetes.io/name: nats-bootstrap
+    # Named so it cannot be mistaken for the real Job in a `kubectl get jobs`
+    # listing, and so a GitOps sync that ever stopped excluding *-job.yaml would
+    # show it as an addition rather than silently replacing bootstrap-job.
+    kanz.eighred.com/posture: dev-plaintext
+spec:
+  backoffLimit: 4
+  template:
+    metadata:
+      labels:
+        kanz.eighred.com/posture: dev-plaintext
+    spec:
+      restartPolicy: OnFailure
+      # Same ServiceAccount as the real Job. It carries no SPIRE registration on
+      # a cluster without SPIRE, and on a cluster WITH SPIRE this Job should not
+      # be running at all — so there is nothing to gain from a second identity.
+      serviceAccountName: nats-bootstrap
+      # NO initContainers. That is the entire difference from bootstrap-job.yaml,
+      # and it is why this file exists.
+      containers:
+        - name: bootstrap
+          image: natsio/nats-box:0.14.5
+          command: ["sh", "/scripts/bootstrap.sh"]
+          env:
+            # Plaintext, so the SAN-matching hostname the real Job needs is not
+            # required here. It is kept identical anyway: a dev rig that later
+            # gains SPIRE should fail on the certs, not on a hostname that only
+            # this file uses.
+            - name: NATS_URL
+              value: "nats://nats.kanz-messaging.svc:4222"
+            # NATS_CERT / NATS_KEY / NATS_CA are deliberately ABSENT — see above.
+            #
+            # 1, not 3. A single-node dev broker CANNOT bootstrap at 3:
+            # nats-server refuses with "replicas > 1 not supported in
+            # non-clustered mode" and the Job fails outright, taking the whole
+            # spine with it. bootstrap-job.yaml documents this on its own
+            # NATS_REPLICAS and sets 3 for the production 3-node cluster.
+            - name: NATS_REPLICAS
+              value: "1"
+          volumeMounts:
+            - { name: scripts, mountPath: /scripts }
+      volumes:
+        # THE SAME ConfigMap the real Job mounts. Not a copy.
+        - name: scripts
+          configMap:
+            name: nats-bootstrap
