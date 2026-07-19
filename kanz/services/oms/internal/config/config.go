@@ -1,9 +1,11 @@
 package config
 
 import (
+	"fmt"
 	"log/slog"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/kanz-eng/kanz/services/oms/internal/order"
 )
@@ -96,6 +98,18 @@ type Config struct {
 	// BaseCurrency stamps Money on projected positions until a reference-data
 	// currency join lands (OMS-01e).
 	BaseCurrency string
+
+	// PriceSubject is the market-data spine the OMS folds into its reference-mark
+	// source, so the pre-trade gate can value MARKET/STOP orders (COMP-M2).
+	PriceSubject string
+
+	// PriceMaxAge is how old a mark may be and still value an order. It is a
+	// SAFETY BOUND, not a tuning knob: widening it to quiet PRICE_UNAVAILABLE
+	// refusals does not fix the feed, it just admits orders priced off a feed
+	// that is no longer reporting. Zero disables expiry entirely and is
+	// deliberately NOT reachable from the environment (an unparseable value is
+	// an error, not a fallback to zero).
+	PriceMaxAge time.Duration
 }
 
 // CommandSubjects are the order command subjects the OMS consumes.
@@ -126,7 +140,15 @@ func Load() (Config, error) {
 		VenueEndpoints:         os.Getenv("OMS_VENUE_ENDPOINTS"),
 		SPIFFESocket:           os.Getenv("SPIFFE_ENDPOINT_SOCKET"),
 		BaseCurrency:           envOr("OMS_BASE_CURRENCY", "USD"),
+		PriceSubject:           envOr("OMS_PRICE_SUBJECT", "market.>"),
 	}
+
+	maxAge, err := time.ParseDuration(envOr("OMS_PRICE_MAX_AGE", "30s"))
+	if err != nil {
+		return Config{}, fmt.Errorf("OMS_PRICE_MAX_AGE: %w", err)
+	}
+	cfg.PriceMaxAge = maxAge
+
 	return cfg, nil
 }
 
