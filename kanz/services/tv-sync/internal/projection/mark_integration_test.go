@@ -52,7 +52,13 @@ func TestMark_DrivesUnrealizedPnL(t *testing.T) {
 	_ = proj.Handle(context.Background(), &envelopepb.Envelope{TenantId: "acme", EventType: "order.order.filled"}, fb)
 
 	// Mark moves to 150 → unrealized = 2 × (150 − 100) = 100.
-	_ = m.Handle(context.Background(), &envelopepb.Envelope{}, tradeEvent(t, "BTC", 150))
+	//
+	// EventType must be a real market.<assetClass>.trade — mark.Source now
+	// guards on it before unmarshalling (isMarkBearingEventType in mark.go,
+	// added to close the market.book.snapshot poisoning bug), and
+	// bussink.go never publishes a MarketDataEvent with an empty EventType,
+	// so this fixture is realistic rather than weakened.
+	_ = m.Handle(context.Background(), &envelopepb.Envelope{EventType: "market.crypto.trade"}, tradeEvent(t, "BTC", 150))
 
 	stDTO, ok := proj.State("acme", "fund-alpha", time.Time{})
 	if !ok || stDTO.UnrealizedPnl != "100" {

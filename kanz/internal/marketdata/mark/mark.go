@@ -24,6 +24,7 @@ package mark
 import (
 	"context"
 	"math/big"
+	"strings"
 	"sync"
 	"time"
 
@@ -111,7 +112,22 @@ func (s *Source) expired(e entry) bool {
 // with an out-of-domain exponent (dec.FromProtoChecked) are all acked and
 // folded as no-ops — a price monitor never wedges the partition, and it never
 // fabricates a price it could not safely compute.
+//
+// The envelope's EventType is checked BEFORE the payload is unmarshalled at
+// all (isMarkBearingEventType). This is not redundant with the price checks
+// below: market.v1.OrderBookSnapshot — published on market.book.snapshot — is
+// WIRE-COMPATIBLE with MarketDataEvent by construction (see the package doc
+// and mark_guard_test.go), so a one-sided, bids-only book snapshot unmarshals
+// cleanly into a "Trade" at the deepest resting bid price and would otherwise
+// poison the mark below mid. Two callers folding this Source (the OMS and
+// tv-sync) each narrow their own subscription to exclude market.book.snapshot,
+// but that is two configs that can drift apart — this check is the one place
+// that cannot drift, because it does not depend on which subjects a caller
+// chose to subscribe to.
 func (s *Source) Handle(_ context.Context, env *envelopepb.Envelope, payload []byte) error {
+	if !isMarkBearingEventType(env.GetEventType()) {
+		return nil
+	}
 	var ev marketpb.MarketDataEvent
 	if proto.Unmarshal(payload, &ev) != nil || ev.GetInstrumentId() == "" {
 		return nil
@@ -146,6 +162,38 @@ func (s *Source) Handle(_ context.Context, env *envelopepb.Envelope, payload []b
 	s.mu.Unlock()
 	return nil
 }
+
+// isMarkBearingEventType reports whether eventType announces a payload this
+// fold can safely unmarshal as a market.v1.MarketDataEvent.
+//
+// services/market-data/internal/feed/bussink.go stamps every MarketDataEvent
+// it publishes as market.<assetClass>.<variant>, where variant comes from the
+// oneof actually set: "trade" or "quote" for the two variants this fold uses,
+// "bar" for the one it doesn't. market.book.snapshot (a DIFFERENT publisher,
+// internal/marketedge/ingest/engine.go) uses the bare subject as its
+// EventType too, with no third segment — a shape this check also rejects, on
+// top of "snapshot" not being a variant this fold understands.
+//
+// Anything that is not exactly "market.<assetClass>.trade" or
+// "market.<assetClass>.quote" is refused here, before Unmarshal ever runs —
+// by the time the bytes are decoded, a bids-only OrderBookSnapshot and a
+// genuine Trade are indistinguishable (see the Handle doc comment).
+func isMarkBearingEventType(eventType string) bool {
+	parts := strings.Split(eventType, ".")
+	if len(parts) != 3 || parts[0] != domainMarket {
+		return false
+	}
+	switch parts[2] {
+	case "trade", "quote":
+		return true
+	default:
+		return false
+	}
+}
+
+// domainMarket is the first EventType segment every mark-bearing event
+// shares — market.<assetClass>.<variant>.
+const domainMarket = "market"
 
 // clampSkew refuses to trust an asOf that is AHEAD of our own clock by more
 // than maxForwardSkew, and ages the mark from receive time instead.

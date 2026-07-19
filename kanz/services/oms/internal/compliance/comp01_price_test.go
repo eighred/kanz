@@ -280,7 +280,12 @@ func TestCheck_ExpiredRealMarkIsRefused(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
-	envelope := &envelopepb.Envelope{EventTime: timestamppb.New(base)}
+	// EventType must be a real market.<assetClass>.trade — mark.Source now guards
+	// on it before unmarshalling (isMarkBearingEventType in mark.go, added to
+	// close the market.book.snapshot poisoning bug), and bussink.go never
+	// publishes a MarketDataEvent with an empty EventType, so this fixture is
+	// realistic rather than weakened.
+	envelope := &envelopepb.Envelope{EventTime: timestamppb.New(base), EventType: "market.equity.trade"}
 	if err := src.Handle(context.Background(), envelope, payload); err != nil {
 		t.Fatalf("Handle: %v", err)
 	}

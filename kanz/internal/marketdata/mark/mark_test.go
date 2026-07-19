@@ -65,11 +65,21 @@ func quoteEvent(t *testing.T, instrument string, bid, ask *commonpb.Decimal, at 
 	return b
 }
 
-func env() *envelopepb.Envelope { return &envelopepb.Envelope{EventTime: timestamppb.New(base)} }
+// env builds an envelope carrying eventType — the field Handle's guard
+// (isMarkBearingEventType in mark.go) checks before it trusts the payload
+// bytes enough to unmarshal them as a MarketDataEvent. Every call site below
+// names a real market.<assetClass>.trade or .quote variant, mirroring what
+// bussink.go actually stamps on the wire
+// (services/market-data/internal/feed/bussink.go) — an envelope with no
+// EventType at all does not occur in production, so it is not a fixture worth
+// preserving now that Handle looks at it.
+func env(eventType string) *envelopepb.Envelope {
+	return &envelopepb.Envelope{EventTime: timestamppb.New(base), EventType: eventType}
+}
 
 func TestTradeSetsTheMark(t *testing.T) {
 	s := mark.New(func() time.Time { return base }, time.Minute)
-	if err := s.Handle(context.Background(), env(), tradeEvent(t, "BTC-USD", dec(4210050, -2), base)); err != nil {
+	if err := s.Handle(context.Background(), env("market.crypto.trade"), tradeEvent(t, "BTC-USD", dec(4210050, -2), base)); err != nil {
 		t.Fatalf("Handle: %v", err)
 	}
 	got := s.Mark("BTC-USD")
@@ -80,7 +90,7 @@ func TestTradeSetsTheMark(t *testing.T) {
 
 func TestQuoteSetsTheMid(t *testing.T) {
 	s := mark.New(func() time.Time { return base }, time.Minute)
-	if err := s.Handle(context.Background(), env(), quoteEvent(t, "BTC-USD", dec(100, 0), dec(102, 0), base)); err != nil {
+	if err := s.Handle(context.Background(), env("market.crypto.quote"), quoteEvent(t, "BTC-USD", dec(100, 0), dec(102, 0), base)); err != nil {
 		t.Fatalf("Handle: %v", err)
 	}
 	got := s.Mark("BTC-USD")
@@ -100,7 +110,7 @@ func TestAMarkOlderThanMaxAgeIsNil(t *testing.T) {
 	now := base
 	s := mark.New(func() time.Time { return now }, 30*time.Second)
 	// Stamped at base, read 31s later.
-	if err := s.Handle(context.Background(), env(), tradeEvent(t, "BTC-USD", dec(100, 0), base)); err != nil {
+	if err := s.Handle(context.Background(), env("market.crypto.trade"), tradeEvent(t, "BTC-USD", dec(100, 0), base)); err != nil {
 		t.Fatalf("Handle: %v", err)
 	}
 	now = base.Add(31 * time.Second)
@@ -118,7 +128,7 @@ func TestAMarkOlderThanMaxAgeIsNil(t *testing.T) {
 func TestZeroMaxAgeNeverExpires(t *testing.T) {
 	now := base
 	s := mark.New(func() time.Time { return now }, 0)
-	if err := s.Handle(context.Background(), env(), tradeEvent(t, "BTC-USD", dec(100, 0), base)); err != nil {
+	if err := s.Handle(context.Background(), env("market.crypto.trade"), tradeEvent(t, "BTC-USD", dec(100, 0), base)); err != nil {
 		t.Fatalf("Handle: %v", err)
 	}
 	now = base.Add(72 * time.Hour)
@@ -130,7 +140,7 @@ func TestZeroMaxAgeNeverExpires(t *testing.T) {
 func TestLookupSeparatesNeverSeenFromExpired(t *testing.T) {
 	now := base
 	s := mark.New(func() time.Time { return now }, 30*time.Second)
-	if err := s.Handle(context.Background(), env(), tradeEvent(t, "BTC-USD", dec(100, 0), base)); err != nil {
+	if err := s.Handle(context.Background(), env("market.crypto.trade"), tradeEvent(t, "BTC-USD", dec(100, 0), base)); err != nil {
 		t.Fatalf("Handle: %v", err)
 	}
 	now = base.Add(time.Hour)
@@ -154,7 +164,7 @@ func TestLookupSeparatesNeverSeenFromExpired(t *testing.T) {
 
 func TestMalformedPayloadIsAckedAndChangesNothing(t *testing.T) {
 	s := mark.New(func() time.Time { return base }, time.Minute)
-	if err := s.Handle(context.Background(), env(), []byte("not a protobuf")); err != nil {
+	if err := s.Handle(context.Background(), env("market.crypto.trade"), []byte("not a protobuf")); err != nil {
 		t.Fatalf("Handle returned %v — a malformed event must be acked, never wedge the partition", err)
 	}
 	if got := s.Mark("BTC-USD"); got != nil {
@@ -164,7 +174,7 @@ func TestMalformedPayloadIsAckedAndChangesNothing(t *testing.T) {
 
 func TestNonPositivePriceIsIgnored(t *testing.T) {
 	s := mark.New(func() time.Time { return base }, time.Minute)
-	if err := s.Handle(context.Background(), env(), tradeEvent(t, "BTC-USD", dec(0, 0), base)); err != nil {
+	if err := s.Handle(context.Background(), env("market.crypto.trade"), tradeEvent(t, "BTC-USD", dec(0, 0), base)); err != nil {
 		t.Fatalf("Handle: %v", err)
 	}
 	if got := s.Mark("BTC-USD"); got != nil {
@@ -180,7 +190,7 @@ func TestNonPositivePriceIsIgnored(t *testing.T) {
 // a fallback price.
 func TestOutOfDomainTradePriceIsIgnored(t *testing.T) {
 	s := mark.New(func() time.Time { return base }, time.Minute)
-	if err := s.Handle(context.Background(), env(), tradeEvent(t, "BTC-USD", dec(1, 2000000000), base)); err != nil {
+	if err := s.Handle(context.Background(), env("market.crypto.trade"), tradeEvent(t, "BTC-USD", dec(1, 2000000000), base)); err != nil {
 		t.Fatalf("Handle: %v", err)
 	}
 	if got := s.Mark("BTC-USD"); got != nil {
@@ -192,7 +202,7 @@ func TestOutOfDomainTradePriceIsIgnored(t *testing.T) {
 // a quote's bid/ask mid.
 func TestOutOfDomainQuotePriceIsIgnored(t *testing.T) {
 	s := mark.New(func() time.Time { return base }, time.Minute)
-	if err := s.Handle(context.Background(), env(), quoteEvent(t, "BTC-USD", dec(1, 2000000000), dec(100, 0), base)); err != nil {
+	if err := s.Handle(context.Background(), env("market.crypto.quote"), quoteEvent(t, "BTC-USD", dec(1, 2000000000), dec(100, 0), base)); err != nil {
 		t.Fatalf("Handle: %v", err)
 	}
 	if got := s.Mark("BTC-USD"); got != nil {
@@ -206,10 +216,10 @@ func TestOutOfDomainQuotePriceIsIgnored(t *testing.T) {
 // platform.
 func TestOutOfDomainPriceLeavesThePreviousMarkUntouched(t *testing.T) {
 	s := mark.New(func() time.Time { return base }, time.Minute)
-	if err := s.Handle(context.Background(), env(), tradeEvent(t, "BTC-USD", dec(4210050, -2), base)); err != nil {
+	if err := s.Handle(context.Background(), env("market.crypto.trade"), tradeEvent(t, "BTC-USD", dec(4210050, -2), base)); err != nil {
 		t.Fatalf("Handle: %v", err)
 	}
-	if err := s.Handle(context.Background(), env(), tradeEvent(t, "BTC-USD", dec(1, 2000000000), base)); err != nil {
+	if err := s.Handle(context.Background(), env("market.crypto.trade"), tradeEvent(t, "BTC-USD", dec(1, 2000000000), base)); err != nil {
 		t.Fatalf("Handle: %v", err)
 	}
 	got := s.Mark("BTC-USD")
@@ -224,7 +234,7 @@ func TestEnvelopeTimeFallbackWhenEventTimeIsNil(t *testing.T) {
 	s := mark.New(func() time.Time { return now }, 30*time.Second)
 
 	// Create an envelope with a specific time.
-	e := &envelopepb.Envelope{EventTime: timestamppb.New(envelopeTime)}
+	e := &envelopepb.Envelope{EventTime: timestamppb.New(envelopeTime), EventType: "market.crypto.trade"}
 
 	// Handle a trade event with no EventTime set (event's own time is nil).
 	// The mark should use the envelope's time as its asOf timestamp.
@@ -257,7 +267,7 @@ func TestEnvelopeTimeFallbackWhenEventTimeIsNil(t *testing.T) {
 
 func TestNegativePriceIsIgnored(t *testing.T) {
 	s := mark.New(func() time.Time { return base }, time.Minute)
-	if err := s.Handle(context.Background(), env(), tradeEvent(t, "BTC-USD", dec(-100, 0), base)); err != nil {
+	if err := s.Handle(context.Background(), env("market.crypto.trade"), tradeEvent(t, "BTC-USD", dec(-100, 0), base)); err != nil {
 		t.Fatalf("Handle: %v", err)
 	}
 	if got := s.Mark("BTC-USD"); got != nil {
@@ -274,7 +284,7 @@ func TestAFutureDatedMarkStillExpires(t *testing.T) {
 	now := base
 	s := mark.New(func() time.Time { return now }, 30*time.Second)
 	// A producer 24h ahead of us.
-	if err := s.Handle(context.Background(), env(), tradeEvent(t, "BTC-USD", dec(100, 0), base.Add(24*time.Hour))); err != nil {
+	if err := s.Handle(context.Background(), env("market.crypto.trade"), tradeEvent(t, "BTC-USD", dec(100, 0), base.Add(24*time.Hour))); err != nil {
 		t.Fatalf("Handle: %v", err)
 	}
 	if got := s.Mark("BTC-USD"); got == nil {
@@ -293,7 +303,7 @@ func TestAFutureDatedMarkStillExpires(t *testing.T) {
 func TestSmallForwardSkewIsTolerated(t *testing.T) {
 	now := base
 	s := mark.New(func() time.Time { return now }, 30*time.Second)
-	if err := s.Handle(context.Background(), env(), tradeEvent(t, "BTC-USD", dec(100, 0), base.Add(time.Second))); err != nil {
+	if err := s.Handle(context.Background(), env("market.crypto.trade"), tradeEvent(t, "BTC-USD", dec(100, 0), base.Add(time.Second))); err != nil {
 		t.Fatalf("Handle: %v", err)
 	}
 	_, asOf, seen := s.Lookup("BTC-USD")
@@ -315,7 +325,7 @@ func TestSmallForwardSkewIsTolerated(t *testing.T) {
 func TestLargeForwardSkewIsClampedToNow(t *testing.T) {
 	now := base
 	s := mark.New(func() time.Time { return now }, 30*time.Second)
-	if err := s.Handle(context.Background(), env(), tradeEvent(t, "BTC-USD", dec(100, 0), base.Add(time.Hour))); err != nil {
+	if err := s.Handle(context.Background(), env("market.crypto.trade"), tradeEvent(t, "BTC-USD", dec(100, 0), base.Add(time.Hour))); err != nil {
 		t.Fatalf("Handle: %v", err)
 	}
 	_, asOf, seen := s.Lookup("BTC-USD")
@@ -332,7 +342,7 @@ func TestLargeForwardSkewIsClampedToNow(t *testing.T) {
 func TestZeroMaxAgeStillNeverExpiresWithASkewedMark(t *testing.T) {
 	now := base
 	s := mark.New(func() time.Time { return now }, 0)
-	if err := s.Handle(context.Background(), env(), tradeEvent(t, "BTC-USD", dec(100, 0), base.Add(24*time.Hour))); err != nil {
+	if err := s.Handle(context.Background(), env("market.crypto.trade"), tradeEvent(t, "BTC-USD", dec(100, 0), base.Add(24*time.Hour))); err != nil {
 		t.Fatalf("Handle: %v", err)
 	}
 	now = base.Add(365 * 24 * time.Hour)

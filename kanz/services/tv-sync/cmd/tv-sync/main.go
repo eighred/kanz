@@ -151,7 +151,9 @@ func main() {
 	for _, s := range projection.Subjects() {
 		subs[s] = proj.Handle
 	}
-	subs[cfg.PriceSubject] = marks.Handle
+	for _, s := range cfg.PriceSubjects {
+		subs[s] = marks.Handle
+	}
 	go func() {
 		if err := runConsumers(ctx, consumer, subs, cfg.ConsumerGroup); err != nil && ctx.Err() == nil {
 			logger.Error("fact consumer failed", "err", err)

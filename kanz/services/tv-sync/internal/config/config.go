@@ -5,6 +5,7 @@ package config
 
 import (
 	"errors"
+	"fmt"
 	"log/slog"
 	"os"
 	"strings"
@@ -25,10 +26,34 @@ type Config struct {
 	NATSURL       string
 	Source        string
 	ConsumerGroup string
-	// PriceSubject is the market price spine tv-sync folds into its MarkSource
-	// for live unrealized P&L (M3.5). Default "market.>" catches every market
-	// variant, incl. the Binance ticker feed's market.crypto.trade.
-	PriceSubject string
+	// PriceSubjects are the market-data subjects tv-sync folds into its
+	// MarkSource for live unrealized P&L (M3.5).
+	//
+	// This mirrors services/oms/internal/config/config.go's PriceSubjects field
+	// (same default, same comma-separated parsing, same empty-is-an-error
+	// posture) rather than inventing a second convention — the OMS's copy was
+	// added first, to close the identical bug there. The two packages cannot
+	// share code (Go's internal rule makes anything under
+	// services/oms/internal reachable only from the OMS, and the reverse for
+	// tv-sync), so this is a deliberate parallel implementation, not drift.
+	//
+	// The default is the mark fold's CONSUMPTION SET expressed as subjects,
+	// not the convenient wildcard "market.>" this field used to default to.
+	// market.v1.MarketDataEvent publishes on market.<assetClass>.<variant>
+	// (services/market-data/internal/feed/bussink.go), and the fold
+	// (internal/marketdata/mark) uses Trade and Quote only. NATS `*` matches
+	// exactly one token, so these two subjects cover every asset class —
+	// present and future — while structurally excluding market.*.bar and,
+	// critically, market.book.snapshot: that subject carries an
+	// OrderBookSnapshot, a message WIRE-COMPATIBLE with MarketDataEvent by
+	// construction, and a one-sided (bids-only) snapshot silently decoded as
+	// a Trade at the deepest resting bid price — poisoning tv-sync's
+	// unrealized P&L with a mark below mid. mark.Source now also refuses that
+	// payload by its EventType regardless of subscription (the durable half
+	// of the fix), but this subject list is the first, cheaper line of
+	// defense: it stops the highest-volume stream in the estate from being
+	// decoded and discarded at all.
+	PriceSubjects []string
 
 	// DatabaseURL is the durable fact log (EXEC-M21). REQUIRED.
 	DatabaseURL string
@@ -47,9 +72,13 @@ func Load() (Config, error) {
 		NATSURL:       envOr("TV_SYNC_NATS_URL", "nats://localhost:4222"),
 		Source:        envOr("TV_SYNC_SOURCE", "tv-sync"),
 		ConsumerGroup: envOr("TV_SYNC_CONSUMER_GROUP", "tv-sync"),
-		PriceSubject:  envOr("TV_SYNC_PRICE_SUBJECT", "market.>"),
+		PriceSubjects: splitSubjects(priceSubjectsEnv()),
 		DatabaseURL:   secret("TV_SYNC_DATABASE_URL"),
 		Tenant:        os.Getenv("TV_SYNC_TENANT"),
+	}
+	if len(cfg.PriceSubjects) == 0 {
+		return Config{}, fmt.Errorf("TV_SYNC_PRICE_SUBJECTS: at least one subject is required; " +
+			"a pod subscribing to nothing folds no marks and silently shows no unrealized P&L")
 	}
 	if err := cfg.validateBook(); err != nil {
 		return Config{}, err
@@ -87,6 +116,38 @@ func secret(k string) string {
 		}
 	}
 	return os.Getenv(k)
+}
+
+// priceSubjectsEnv reads TV_SYNC_PRICE_SUBJECTS WITHOUT trimming first,
+// unlike this package's envOr. Trimming here would let a whitespace-only
+// override ("TV_SYNC_PRICE_SUBJECTS= ") silently fall back to the default —
+// exactly the config typo the empty-subjects check in Load exists to catch.
+// splitSubjects does its own per-entry trimming; a whitespace-only override
+// must reach it intact, not vanish before it. Mirrors the raw
+// os.LookupEnv check services/oms/internal/config/config.go uses for the
+// identical field.
+func priceSubjectsEnv() string {
+	if v, ok := os.LookupEnv("TV_SYNC_PRICE_SUBJECTS"); ok && v != "" {
+		return v
+	}
+	return "market.*.trade,market.*.quote"
+}
+
+// splitSubjects parses a comma-separated subject list, trimming whitespace
+// and dropping empty entries. An all-empty input yields an empty slice, which
+// Load rejects — subscribing to nothing is a silent P&L outage, not a
+// default. Mirrors services/oms/internal/config/config.go's splitSubjects;
+// see the PriceSubjects doc comment above for why this is a parallel
+// implementation rather than a shared one.
+func splitSubjects(s string) []string {
+	parts := strings.Split(s, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if t := strings.TrimSpace(p); t != "" {
+			out = append(out, t)
+		}
+	}
+	return out
 }
 
 func envOr(key, def string) string {
