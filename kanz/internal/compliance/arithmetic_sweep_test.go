@@ -82,6 +82,21 @@ var sweepClassifier = StaticClassifier{
 //     zero makes AAPL invisible and the rule silently passes. That is COMP-M1's
 //     failure mode and worth guarding, but it is ALL these three prove. They are
 //     not evidence that the arithmetic is correct, only that it is non-zero.
+//
+// THE RESOLUTION OF THE TWO DELTA-SENSITIVE ARMS, stated so nobody reads more
+// into a green run than it earns. The caps sit at 10%→20% weight and 1.0x→2.0x
+// leverage, so a PROPORTIONAL valuation error only flips a verdict at roughly
+// ×1.2 over-valuation or ×0.5 under-valuation. A projected value 20% too SMALL
+// passes this sweep silently — and under-valuation is the dangerous direction,
+// because it is the one that admits an order the rules should have refused.
+//
+// This is an ORDER-OF-MAGNITUDE guard, not a proportional one. It is left that
+// way deliberately: no plausible defect in exact math/big code lands in the
+// 1-ULP-to-2× band — the arithmetic either rounds by an ulp (caught by the unit
+// tests in mul_test.go, which do have ulp resolution) or collapses entirely
+// (caught here). Tightening the caps to chase the middle would be inventing a
+// failure mode nobody has produced. If a future change makes proportional drift
+// plausible, this is the comment that says the sweep will not see it.
 type sweepArm struct {
 	name string
 	rule *compliancepb.Rule
