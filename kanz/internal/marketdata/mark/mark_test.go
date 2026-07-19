@@ -172,6 +172,52 @@ func TestNonPositivePriceIsIgnored(t *testing.T) {
 	}
 }
 
+// TestOutOfDomainTradePriceIsIgnored (Finding 1): dec.FromProto materialises
+// 10^abs(exponent) with no bound. A MarketDataEvent trade price off the
+// wire at an absurd exponent would hang the fold. Handle must ignore it
+// exactly as a malformed or non-positive price already is — one more
+// unusable case, not a new failure mode — and must never fabricate zero as
+// a fallback price.
+func TestOutOfDomainTradePriceIsIgnored(t *testing.T) {
+	s := mark.New(func() time.Time { return base }, time.Minute)
+	if err := s.Handle(context.Background(), env(), tradeEvent(t, "BTC-USD", dec(1, 2000000000), base)); err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	if got := s.Mark("BTC-USD"); got != nil {
+		t.Fatalf("Mark = %v, want nil — an out-of-domain price must never become a mark", got)
+	}
+}
+
+// TestOutOfDomainQuotePriceIsIgnored covers the second FromProto call site:
+// a quote's bid/ask mid.
+func TestOutOfDomainQuotePriceIsIgnored(t *testing.T) {
+	s := mark.New(func() time.Time { return base }, time.Minute)
+	if err := s.Handle(context.Background(), env(), quoteEvent(t, "BTC-USD", dec(1, 2000000000), dec(100, 0), base)); err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	if got := s.Mark("BTC-USD"); got != nil {
+		t.Fatalf("Mark = %v, want nil — an out-of-domain bid must never become a mark", got)
+	}
+}
+
+// TestOutOfDomainPriceLeavesThePreviousMarkUntouched: a bad event must be
+// ignored outright, not fabricate a value or otherwise disturb an existing
+// mark — a zero-valued mark is never a safe substitute anywhere on this
+// platform.
+func TestOutOfDomainPriceLeavesThePreviousMarkUntouched(t *testing.T) {
+	s := mark.New(func() time.Time { return base }, time.Minute)
+	if err := s.Handle(context.Background(), env(), tradeEvent(t, "BTC-USD", dec(4210050, -2), base)); err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	if err := s.Handle(context.Background(), env(), tradeEvent(t, "BTC-USD", dec(1, 2000000000), base)); err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	got := s.Mark("BTC-USD")
+	if got == nil || got.Cmp(big.NewRat(4210050, 100)) != 0 {
+		t.Fatalf("Mark = %v, want 42100.50 unchanged — the out-of-domain event must not touch the previous mark", got)
+	}
+}
+
 func TestEnvelopeTimeFallbackWhenEventTimeIsNil(t *testing.T) {
 	envelopeTime := base
 	now := envelopeTime

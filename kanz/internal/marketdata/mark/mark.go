@@ -107,8 +107,10 @@ func (s *Source) expired(e entry) bool {
 
 // Handle is the bus.EventHandler: it folds one MarketDataEvent's price. A Trade
 // updates the mark to the last trade price; a Quote to the bid/ask mid. Other
-// payloads (Bar) are ignored. Malformed events are acked — a price monitor
-// never wedges the partition.
+// payloads (Bar) are ignored. Malformed events, non-positive prices, and prices
+// with an out-of-domain exponent (dec.FromProtoChecked) are all acked and
+// folded as no-ops — a price monitor never wedges the partition, and it never
+// fabricates a price it could not safely compute.
 func (s *Source) Handle(_ context.Context, env *envelopepb.Envelope, payload []byte) error {
 	var ev marketpb.MarketDataEvent
 	if proto.Unmarshal(payload, &ev) != nil || ev.GetInstrumentId() == "" {
@@ -117,9 +119,21 @@ func (s *Source) Handle(_ context.Context, env *envelopepb.Envelope, payload []b
 	var price *big.Rat
 	switch {
 	case ev.GetTrade() != nil && ev.GetTrade().GetPrice() != nil:
-		price = dec.FromProto(ev.GetTrade().GetPrice())
+		p, ok := dec.FromProtoChecked(ev.GetTrade().GetPrice())
+		if !ok {
+			return nil // out-of-domain exponent: unusable, same as malformed input — never fabricate a price
+		}
+		price = p
 	case ev.GetQuote() != nil && ev.GetQuote().GetBidPrice() != nil && ev.GetQuote().GetAskPrice() != nil:
-		mid := new(big.Rat).Add(dec.FromProto(ev.GetQuote().GetBidPrice()), dec.FromProto(ev.GetQuote().GetAskPrice()))
+		bid, ok := dec.FromProtoChecked(ev.GetQuote().GetBidPrice())
+		if !ok {
+			return nil
+		}
+		ask, ok := dec.FromProtoChecked(ev.GetQuote().GetAskPrice())
+		if !ok {
+			return nil
+		}
+		mid := new(big.Rat).Add(bid, ask)
 		price = mid.Quo(mid, big.NewRat(2, 1))
 	default:
 		return nil

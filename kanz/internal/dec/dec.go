@@ -62,6 +62,49 @@ func FromProto(d *commonpb.Decimal) *big.Rat {
 	return r.SetFrac(coeff, den)
 }
 
+// maxSafeExponent bounds the exponent FromProtoChecked will accept.
+//
+// It is a SAFETY limit, not a statement about what money means on this
+// platform: real financial values keep |exponent| well under 30 (the
+// smallest crypto prices sit near 1e-12, the largest plausible notionals
+// near 1e13), so nothing legitimate is within thirty orders of magnitude of
+// this bound and it cannot refuse a real value.
+//
+// The number mirrors internal/compliance's maxDecimalExponent (gate.go),
+// deliberately: it is the same question — how far can 10^abs(exponent) be
+// materialised before the computation itself becomes the incident — asked
+// at a different boundary. dec and compliance must not import each other,
+// so the value is duplicated here as a number rather than shared as a
+// constant; keeping it numerically identical is what keeps the platform
+// coherent. FromProto({Coefficient:1, Exponent:2000000000}) does not return
+// within seconds; {Coefficient:1, Exponent:64} is instant.
+const maxSafeExponent = 64
+
+// FromProtoChecked is FromProto with a bounded domain: it refuses an
+// out-of-domain exponent instead of hanging computing 10^abs(exponent).
+//
+// FromProto's signature and behaviour are UNCHANGED — it has many callers
+// this package does not audit, and the same reasoning that keeps ToProto
+// intact applies here. FromProtoChecked is the variant any UNTRUSTED
+// input — wire data that has not passed through a validating gate, such as
+// a MarketDataEvent price off the market.> subject — must use instead.
+//
+// ok == false means the exponent's magnitude exceeds maxSafeExponent; the
+// caller must treat the Decimal as unusable, exactly as it would a
+// malformed message, and must NEVER substitute zero. A zero price is not a
+// safe fallback anywhere on this platform: it can be silently treated as
+// "flat" and dropped from downstream checks (see mark.Handle's callers).
+func FromProtoChecked(d *commonpb.Decimal) (*big.Rat, bool) {
+	if d == nil {
+		return new(big.Rat), true
+	}
+	exp := d.GetExponent()
+	if exp > maxSafeExponent || exp < -maxSafeExponent {
+		return nil, false
+	}
+	return FromProto(d), true
+}
+
 // scaledCoefficient rounds a rational to the fixed scale (half-up) and returns
 // the resulting coefficient as a big.Int. This is the ONE place the
 // scaling/rounding arithmetic is written; ToProto and ToProtoScaled both call

@@ -3,6 +3,9 @@ package dec
 import (
 	"math/big"
 	"testing"
+	"time"
+
+	commonpb "github.com/kanz-eng/kanz-schemas-go/common/v1"
 )
 
 func TestToProtoScaled_NormalValueIsUnchangedAtScale8(t *testing.T) {
@@ -89,6 +92,86 @@ func TestToProtoScaled_NilIsZero(t *testing.T) {
 // deliberately — one overflowing value pinning that ToProto STILL WRAPS
 // exactly as it always has. That wrapping is preserved on purpose for
 // existing callers; ToProtoScaled is the variant a capital path must use.
+// TestFromProtoChecked_AbsurdExponentRefusesPromptly guards the fix for the
+// live hang: FromProto materialises 10^abs(exponent) with no bound, and a
+// MarketDataEvent price at exponent 2000000000, taken directly off the wire
+// by internal/marketdata/mark, hangs the fold indefinitely.
+// FromProtoChecked must refuse instead of computing.
+//
+// Guarded STRUCTURALLY rather than with a timeout: a timeout bounds the
+// test, not the process, and Go cannot cancel a goroutine still grinding a
+// multi-billion-digit bignum. If the bound regresses, this call never
+// returns and CI fails on its own panic timeout — which is loud, but the
+// real protection is that FromProtoChecked's domain check is O(1) by
+// construction, the same reasoning internal/compliance's decimalInDomain
+// relies on for the equivalent bound at the rules engine.
+func TestFromProtoChecked_AbsurdExponentRefusesPromptly(t *testing.T) {
+	for _, exp := range []int32{2000000000, -2000000000} {
+		done := make(chan struct {
+			ok bool
+		})
+		go func(e int32) {
+			_, ok := FromProtoChecked(&commonpb.Decimal{Coefficient: 1, Exponent: e})
+			done <- struct{ ok bool }{ok}
+		}(exp)
+		select {
+		case r := <-done:
+			if r.ok {
+				t.Fatalf("exponent %d: ok = true, want false", exp)
+			}
+		case <-time.After(4 * time.Second):
+			t.Fatalf("exponent %d: FromProtoChecked did not return within 4s — the bound regressed", exp)
+		}
+	}
+}
+
+// TestFromProtoChecked_BoundaryInBothSigns pins the exact domain: 64 mirrors
+// internal/compliance's maxDecimalExponent, reused as a number (not an
+// import — dec and compliance must not depend on each other).
+func TestFromProtoChecked_BoundaryInBothSigns(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		exp  int32
+		ok   bool
+	}{
+		{"at the positive bound", 64, true},
+		{"past the positive bound", 65, false},
+		{"at the negative bound", -64, true},
+		{"past the negative bound", -65, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, ok := FromProtoChecked(&commonpb.Decimal{Coefficient: 1, Exponent: tc.exp})
+			if ok != tc.ok {
+				t.Fatalf("exponent %d: ok = %v, want %v", tc.exp, ok, tc.ok)
+			}
+		})
+	}
+}
+
+// NON-VACUITY. Every guard above fails closed on absurd input, so a version
+// of FromProtoChecked that refused EVERYTHING would satisfy them all.
+// Ordinary values — a real price, zero, a negative — must still convert and
+// must agree with FromProto exactly, or the checked variant would be an
+// independent (and possibly diverging) implementation rather than a guard
+// in front of the real one.
+func TestFromProtoChecked_AgreesWithFromProtoForOrdinaryValues(t *testing.T) {
+	for _, d := range []*commonpb.Decimal{
+		{Coefficient: 12345, Exponent: -2}, // 123.45
+		{Coefficient: 0, Exponent: 0},      // zero
+		{Coefficient: -500, Exponent: 0},   // negative
+		nil,                                // absent, same as FromProto
+	} {
+		want := FromProto(d)
+		got, ok := FromProtoChecked(d)
+		if !ok {
+			t.Fatalf("%v: ok = false for an ordinary value", d)
+		}
+		if got.Cmp(want) != 0 {
+			t.Fatalf("%v: FromProtoChecked = %s, want %s (FromProto)", d, got.FloatString(4), want.FloatString(4))
+		}
+	}
+}
+
 func TestToProto_LiteralOutput(t *testing.T) {
 	cases := []struct {
 		name      string
