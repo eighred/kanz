@@ -18,6 +18,7 @@
 // time — that is what is true about the quote rather than about our plumbing,
 // and replayed events cannot poison it because the live-mode validator
 // hard-rejects QUALITY_FLAG_REPLAYED before dispatch (pkg/bus/consumer.go).
+// A FUTURE-DATED event time still can, though — see clampSkew.
 package mark
 
 import (
@@ -32,6 +33,12 @@ import (
 
 	"github.com/kanz-eng/kanz/internal/dec"
 )
+
+// maxForwardSkew is how far AHEAD of our own clock a producer's timestamp may
+// sit and still be taken at face value. Minor disagreement between honest hosts
+// is normal, so some tolerance is required or ordinary NTP jitter would look
+// like an incident.
+const maxForwardSkew = 5 * time.Second
 
 type entry struct {
 	price *big.Rat
@@ -121,9 +128,39 @@ func (s *Source) Handle(_ context.Context, env *envelopepb.Envelope, payload []b
 		return nil
 	}
 	s.mu.Lock()
-	s.prices[ev.GetInstrumentId()] = entry{price: price, asOf: eventTime(env, &ev)}
+	s.prices[ev.GetInstrumentId()] = entry{price: price, asOf: s.clampSkew(eventTime(env, &ev))}
 	s.mu.Unlock()
 	return nil
+}
+
+// clampSkew refuses to trust an asOf that is AHEAD of our own clock by more
+// than maxForwardSkew, and ages the mark from receive time instead.
+//
+// Without this, staleness (now - asOf > maxAge) is UNREACHABLE for a
+// future-dated mark: the age is negative, so it can never exceed the bound and
+// the mark is fresh forever. Age is taken from the event's own timestamp
+// (that is what is true about the quote rather than about our plumbing) and
+// nothing upstream bounds it — pkg/bus/validate.go only checks that the
+// envelope's event_time PARSES, and the value actually preferred here is the
+// payload's MarketDataEvent.event_time, which is not validated at all. Replay
+// is hard-rejected on the live path, but replay is not the only way event-time
+// goes wrong: A SKEWED VENUE OR GATEWAY CLOCK IS. That is the one route by
+// which the OMS pre-trade gate can value a MARKET order off a price from a feed
+// that died hours ago, which is exactly what the staleness bound exists to stop.
+//
+// CLAMPING, NOT REFUSING. Both close the hole. Refusing a skewed mark discards
+// the only price we have for that instrument, so a single misconfigured
+// producer turns every MARKET order on it into PRICE_UNAVAILABLE — a trading
+// outage caused by a clock. Clamping keeps the mark usable and merely makes it
+// age normally from when we received it, which is the weaker but still honest
+// statement "we knew this price at least by now". On a trading path an operator
+// would rather have a slightly conservatively-aged price than no price.
+func (s *Source) clampSkew(asOf time.Time) time.Time {
+	now := s.now()
+	if asOf.After(now.Add(maxForwardSkew)) {
+		return now
+	}
+	return asOf
 }
 
 // eventTime prefers the MarketDataEvent's own event_time — it is the venue

@@ -4,11 +4,17 @@ import (
 	"context"
 	"math/big"
 	"testing"
+	"time"
 
 	commonpb "github.com/kanz-eng/kanz-schemas-go/common/v1"
+	envelopepb "github.com/kanz-eng/kanz-schemas-go/envelope/v1"
+	marketpb "github.com/kanz-eng/kanz-schemas-go/market/v1"
 	orderpb "github.com/kanz-eng/kanz-schemas-go/order/v1"
+	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/types/known/timestamppb"
 
 	comp "github.com/kanz-eng/kanz/internal/compliance"
+	"github.com/kanz-eng/kanz/internal/marketdata/mark"
 )
 
 // stubMarks is a MarkSource returning a fixed price for one instrument.
@@ -238,5 +244,61 @@ func TestCheck_LimitOrderIgnoresTheMark(t *testing.T) {
 	if breach != nil {
 		t.Fatalf("breach = %+v, want nil — a LIMIT order must be valued at its own limit price, "+
 			"not repriced at the mark", breach)
+	}
+}
+
+// TestCheck_ExpiredRealMarkIsRefused (finding 3) is the only test that plugs the
+// REAL mark.Source into this gate. Every other case here uses stubMarks, which
+// has no expiry at all — so the seam between the two packages was untested:
+// nothing proved COMP01Gate consults Mark (expiry-aware) rather than Lookup
+// (not), the substitution mark.go's own comment warns is "one `if` away", and
+// the spec's required "with an expired mark, also refused" case lived only
+// inside the mark package and never crossed the seam.
+//
+// One order, one source, one clock: fresh mark admits it, and the SAME order is
+// refused PRICE_UNAVAILABLE once maxAge of local time passes with no new tick.
+func TestCheck_ExpiredRealMarkIsRefused(t *testing.T) {
+	base := time.Date(2026, 7, 19, 12, 0, 0, 0, time.UTC)
+	now := base
+	const maxAge = 30 * time.Second
+
+	src := mark.New(func() time.Time { return now }, maxAge)
+
+	payload, err := proto.Marshal(&marketpb.MarketDataEvent{
+		InstrumentId: "AAPL",
+		EventTime:    timestamppb.New(base),
+		Data: &marketpb.MarketDataEvent_Trade{Trade: &marketpb.Trade{
+			Price: &commonpb.Decimal{Coefficient: 100, Exponent: 0},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	envelope := &envelopepb.Envelope{EventTime: timestamppb.New(base)}
+	if err := src.Handle(context.Background(), envelope, payload); err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+
+	g := NewCOMP01Gate(bookedTestGate(t), "USD", WithMarkSource(src))
+	cmd := unpricedOrder(orderpb.OrderType_ORDER_TYPE_MARKET)
+
+	breach, err := g.Check(context.Background(), cmd)
+	if err != nil {
+		t.Fatalf("Check: %v", err)
+	}
+	if breach != nil {
+		t.Fatalf("breach = %+v, want nil — a MARKET order against a FRESH real mark must be valued and admitted", breach)
+	}
+
+	// No new tick; only local time moves.
+	now = base.Add(maxAge + time.Second)
+
+	breach, err = g.Check(context.Background(), cmd)
+	if err != nil {
+		t.Fatalf("Check: %v", err)
+	}
+	if breach == nil || breach.Code != "PRICE_UNAVAILABLE" {
+		t.Fatalf("breach = %+v, want PRICE_UNAVAILABLE — the mark is past maxAge with no new tick, so the SAME "+
+			"order must now be refused. A gate reading Lookup instead of Mark would still admit it", breach)
 	}
 }

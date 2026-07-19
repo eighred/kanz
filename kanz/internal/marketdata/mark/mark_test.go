@@ -218,3 +218,79 @@ func TestNegativePriceIsIgnored(t *testing.T) {
 		t.Fatalf("Mark = %v, want nil — a negative price must never become a mark", got)
 	}
 }
+
+// TestAFutureDatedMarkStillExpires (finding 1): staleness was computed as
+// now - asOf > maxAge, so an asOf AHEAD of the local clock gave a NEGATIVE age
+// that can never exceed the bound — the mark was permanently fresh. A venue or
+// gateway with a skewed clock could therefore pin a price into the OMS gate
+// forever, and MARKET orders would be valued off it long after the feed died.
+func TestAFutureDatedMarkStillExpires(t *testing.T) {
+	now := base
+	s := mark.New(func() time.Time { return now }, 30*time.Second)
+	// A producer 24h ahead of us.
+	if err := s.Handle(context.Background(), env(), tradeEvent(t, "BTC-USD", dec(100, 0), base.Add(24*time.Hour))); err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	if got := s.Mark("BTC-USD"); got == nil {
+		t.Fatal("Mark = nil immediately after the fold — a skewed mark must still be USABLE, just not immortal")
+	}
+	now = base.Add(31 * time.Second)
+	if got := s.Mark("BTC-USD"); got != nil {
+		t.Fatalf("Mark = %v, want nil — 31s of local time passed with no new tick under a 30s bound; "+
+			"a future-dated asOf must not make the mark permanently fresh", got)
+	}
+}
+
+// TestSmallForwardSkewIsTolerated: honest hosts disagree by milliseconds to a
+// couple of seconds. A mark a hair ahead of us must keep its own event time and
+// age from it, not be treated as an incident.
+func TestSmallForwardSkewIsTolerated(t *testing.T) {
+	now := base
+	s := mark.New(func() time.Time { return now }, 30*time.Second)
+	if err := s.Handle(context.Background(), env(), tradeEvent(t, "BTC-USD", dec(100, 0), base.Add(time.Second))); err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	_, asOf, seen := s.Lookup("BTC-USD")
+	if !seen {
+		t.Fatal("Lookup: not seen")
+	}
+	if !asOf.Equal(base.Add(time.Second)) {
+		t.Fatalf("asOf = %v, want %v — a 1s skew is within tolerance and the venue timestamp must be kept as-is",
+			asOf, base.Add(time.Second))
+	}
+	now = base.Add(20 * time.Second)
+	if got := s.Mark("BTC-USD"); got == nil {
+		t.Fatal("Mark = nil 20s in under a 30s bound — a small forward skew must not shorten the mark's life")
+	}
+}
+
+// TestLargeForwardSkewIsClampedToNow: beyond tolerance we stop trusting the
+// producer's clock and age the mark from OUR receive time.
+func TestLargeForwardSkewIsClampedToNow(t *testing.T) {
+	now := base
+	s := mark.New(func() time.Time { return now }, 30*time.Second)
+	if err := s.Handle(context.Background(), env(), tradeEvent(t, "BTC-USD", dec(100, 0), base.Add(time.Hour))); err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	_, asOf, seen := s.Lookup("BTC-USD")
+	if !seen {
+		t.Fatal("Lookup: not seen")
+	}
+	if !asOf.Equal(base) {
+		t.Fatalf("asOf = %v, want %v — an asOf an hour ahead of the local clock must be clamped to now", asOf, base)
+	}
+}
+
+// TestZeroMaxAgeStillNeverExpiresWithASkewedMark: tv-sync passes maxAge=0 and
+// depends on marks never expiring. Clamping forward skew must not change that.
+func TestZeroMaxAgeStillNeverExpiresWithASkewedMark(t *testing.T) {
+	now := base
+	s := mark.New(func() time.Time { return now }, 0)
+	if err := s.Handle(context.Background(), env(), tradeEvent(t, "BTC-USD", dec(100, 0), base.Add(24*time.Hour))); err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	now = base.Add(365 * 24 * time.Hour)
+	if got := s.Mark("BTC-USD"); got == nil {
+		t.Fatal("Mark = nil under maxAge=0 — marks must NEVER expire when no bound is set")
+	}
+}

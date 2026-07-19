@@ -309,10 +309,29 @@ func runConsumers(ctx context.Context, cfg config.Config, readiness *server.Read
 	for _, s := range cfg.FillSubjects() {
 		subs = append(subs, sub{s, projector.Handle})
 	}
-	// The price spine is a plain work-queue subscription: unlike the mandate
-	// registry below, a mark is not a control that must reach every replica —
-	// it is refreshed continuously, so a pod that misses one tick gets the next.
-	subs = append(subs, sub{cfg.PriceSubject, marks.Handle})
+	// THE PRICE SPINE — BROADCAST, NOT A WORK QUEUE, for the same reason as the
+	// mandate registry below.
+	//
+	// This was a durable consumer GROUP, which LOAD-BALANCES: with the shipped
+	// replicas: 2 each pod folded only the ticks it happened to receive, so each
+	// held a DIFFERENT mark map. The pre-trade gate values MARKET and STOP orders
+	// from that map, so the same order was admitted by one pod and refused
+	// PRICE_UNAVAILABLE by the other, and for a thin instrument a pod could hold
+	// no mark indefinitely. It fails safe, but admission stops being
+	// deterministic — and "whether your order is legal depends on which pod got
+	// it" is not a property a compliance gate may have. A mark is replicated
+	// STATE, not work.
+	//
+	// DeliverLastPerSubject over the market.> wildcard is a bonus: the server
+	// replays the latest tick PER CONCRETE SUBJECT, so a cold pod boots with a
+	// mark already folded for every instrument that has ever traded, instead of
+	// refusing orders until the next tick arrives on each one.
+	//
+	// THE COST IS DELIBERATE: every replica now folds every tick, so the market-
+	// data work is N× the work-queue arrangement. Deterministic admission on a
+	// compliance gate is worth more than the saved CPU. The tick-volume question
+	// is tracked separately on the board — do NOT "optimize" this back into a
+	// consumer group.
 	// THE PRE-TRADE GATE'S MANDATE REGISTRY — BROADCAST, NOT A WORK QUEUE.
 	//
 	// This fed from a durable CONSUMER GROUP, which resumes at its last ack. So a
@@ -348,6 +367,18 @@ func runConsumers(ctx context.Context, cfg config.Config, readiness *server.Read
 			}
 		}(s)
 	}
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		logger.Info("oms subscribing to the price spine (broadcast)", "subject", cfg.PriceSubject)
+		err := consumer.SubscribeBroadcast(ctx, cfg.PriceSubject, marks.Handle)
+		if err != nil && !errors.Is(err, context.Canceled) {
+			once.Do(func() {
+				firstErr = err
+				cancel()
+			})
+		}
+	}()
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
