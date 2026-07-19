@@ -203,7 +203,7 @@ func runConsumers(ctx context.Context, cfg config.Config, readiness *server.Read
 			}
 			unpriced.WithLabelValues("never_seen").Inc()
 			logger.Warn("order refused: NO reference mark has ever been seen for this instrument — a cold pod warming up, an instrument nothing quotes, or a price subscription delivering nothing",
-				"portfolio", portfolioID, "instrument", instrumentID, "subject", cfg.PriceSubject)
+				"portfolio", portfolioID, "instrument", instrumentID, "subjects", cfg.PriceSubjects)
 		}),
 	)
 	gate := compliance.NewCOMP01Gate(preTrade, cfg.BaseCurrency,
@@ -367,18 +367,20 @@ func runConsumers(ctx context.Context, cfg config.Config, readiness *server.Read
 			}
 		}(s)
 	}
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		logger.Info("oms subscribing to the price spine (broadcast)", "subject", cfg.PriceSubject)
-		err := consumer.SubscribeBroadcast(ctx, cfg.PriceSubject, marks.Handle)
-		if err != nil && !errors.Is(err, context.Canceled) {
-			once.Do(func() {
-				firstErr = err
-				cancel()
-			})
-		}
-	}()
+	for _, subject := range cfg.PriceSubjects {
+		wg.Add(1)
+		go func(subject string) {
+			defer wg.Done()
+			logger.Info("oms subscribing to the price spine (broadcast)", "subject", subject)
+			err := consumer.SubscribeBroadcast(ctx, subject, marks.Handle)
+			if err != nil && !errors.Is(err, context.Canceled) {
+				once.Do(func() {
+					firstErr = err
+					cancel()
+				})
+			}
+		}(subject)
+	}
 	wg.Add(1)
 	go func() {
 		defer wg.Done()

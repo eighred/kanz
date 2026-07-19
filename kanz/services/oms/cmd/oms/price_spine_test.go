@@ -2,7 +2,7 @@ package main
 
 // The price spine must be BROADCAST, not a work queue.
 //
-// cfg.PriceSubject folds into an in-process mark map that the pre-trade
+// cfg.PriceSubjects folds into an in-process mark map that the pre-trade
 // compliance gate values MARKET and STOP orders from. A durable consumer group
 // LOAD-BALANCES (pkg/bus/consumer.go), so with the shipped replicas: 2 each pod
 // folded only the ticks it happened to receive — the same MARKET order admitted
@@ -23,7 +23,10 @@ import (
 	"testing"
 )
 
-// priceSubjectWiring reports how cfg.PriceSubject is wired in main.go.
+// priceSubjectWiring reports how cfg.PriceSubjects is wired in main.go. Each
+// subject is subscribed individually (one goroutine per subject, ranging over
+// cfg.PriceSubjects), so the wiring lives inside that range statement's body
+// rather than on a call expression that names cfg.PriceSubjects directly.
 func priceSubjectWiring(t *testing.T) (broadcast bool, workQueue bool) {
 	t.Helper()
 	fset := token.NewFileSet()
@@ -31,41 +34,68 @@ func priceSubjectWiring(t *testing.T) (broadcast bool, workQueue bool) {
 	if err != nil {
 		t.Fatalf("parse main.go: %v", err)
 	}
-	isPriceSubject := func(e ast.Expr) bool {
+	isPriceSubjects := func(e ast.Expr) bool {
 		sel, ok := e.(*ast.SelectorExpr)
-		if !ok || sel.Sel.Name != "PriceSubject" {
+		if !ok || sel.Sel.Name != "PriceSubjects" {
 			return false
 		}
 		id, ok := sel.X.(*ast.Ident)
 		return ok && id.Name == "cfg"
 	}
-	containsPriceSubject := func(n ast.Node) bool {
+	containsPriceSubjects := func(n ast.Node) bool {
 		found := false
 		ast.Inspect(n, func(n ast.Node) bool {
-			if e, ok := n.(ast.Expr); ok && isPriceSubject(e) {
+			if e, ok := n.(ast.Expr); ok && isPriceSubjects(e) {
 				found = true
 			}
 			return !found
 		})
 		return found
 	}
+	inspectWiring := func(n ast.Node) {
+		ast.Inspect(n, func(n ast.Node) bool {
+			switch n := n.(type) {
+			case *ast.CallExpr:
+				if sel, ok := n.Fun.(*ast.SelectorExpr); ok {
+					switch {
+					case strings.HasPrefix(sel.Sel.Name, "SubscribeBroadcast"):
+						broadcast = true
+					case sel.Sel.Name == "Subscribe":
+						workQueue = true
+					}
+				}
+			case *ast.CompositeLit:
+				// subs = append(subs, sub{s, svc.Handle}) — the slice consumed by
+				// the work-queue Subscribe loop.
+				if id, ok := n.Type.(*ast.Ident); ok && id.Name == "sub" {
+					workQueue = true
+				}
+			}
+			return true
+		})
+	}
 	ast.Inspect(f, func(n ast.Node) bool {
 		switch n := n.(type) {
-		case *ast.CallExpr:
-			sel, ok := n.Fun.(*ast.SelectorExpr)
-			if !ok || !containsPriceSubject(n) {
-				return true
+		case *ast.RangeStmt:
+			// for _, subject := range cfg.PriceSubjects { ... } — inspect the
+			// loop body for how the per-subject subscription is wired.
+			if isPriceSubjects(n.X) {
+				inspectWiring(n.Body)
 			}
-			switch {
-			case strings.HasPrefix(sel.Sel.Name, "SubscribeBroadcast"):
-				broadcast = true
-			case sel.Sel.Name == "Subscribe":
-				workQueue = true
+		case *ast.CallExpr:
+			// A direct call naming cfg.PriceSubjects as an argument (not via a
+			// range loop) is also recognized, so this guard survives either
+			// wiring shape.
+			if sel, ok := n.Fun.(*ast.SelectorExpr); ok && containsPriceSubjects(n) {
+				switch {
+				case strings.HasPrefix(sel.Sel.Name, "SubscribeBroadcast"):
+					broadcast = true
+				case sel.Sel.Name == "Subscribe":
+					workQueue = true
+				}
 			}
 		case *ast.CompositeLit:
-			// subs = append(subs, sub{cfg.PriceSubject, marks.Handle}) — the
-			// slice consumed by the work-queue Subscribe loop.
-			if id, ok := n.Type.(*ast.Ident); ok && id.Name == "sub" && containsPriceSubject(n) {
+			if id, ok := n.Type.(*ast.Ident); ok && id.Name == "sub" && containsPriceSubjects(n) {
 				workQueue = true
 			}
 		}
@@ -77,12 +107,12 @@ func priceSubjectWiring(t *testing.T) (broadcast bool, workQueue bool) {
 func TestPriceSpineIsBroadcastNotAWorkQueue(t *testing.T) {
 	broadcast, workQueue := priceSubjectWiring(t)
 	if workQueue {
-		t.Error("cfg.PriceSubject is wired through the WORK-QUEUE path (consumer.Subscribe / the subs slice). " +
+		t.Error("cfg.PriceSubjects is wired through the WORK-QUEUE path (consumer.Subscribe / the subs slice). " +
 			"A consumer group load-balances, so each OMS replica would fold only some of the ticks and the same " +
 			"MARKET order would be admitted by one pod and refused PRICE_UNAVAILABLE by another")
 	}
 	if !broadcast {
-		t.Error("cfg.PriceSubject is not subscribed via SubscribeBroadcast — a mark is replicated STATE, " +
+		t.Error("cfg.PriceSubjects is not subscribed via SubscribeBroadcast — a mark is replicated STATE, " +
 			"not work, and every replica's compliance gate needs it")
 	}
 }

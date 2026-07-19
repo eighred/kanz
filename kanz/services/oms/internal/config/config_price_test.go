@@ -1,6 +1,7 @@
 package config_test
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -12,8 +13,16 @@ func TestPriceDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if cfg.PriceSubject != "market.>" {
-		t.Errorf("PriceSubject = %q, want \"market.>\"", cfg.PriceSubject)
+	wantSubjects := []string{"market.*.trade", "market.*.quote"}
+	if len(cfg.PriceSubjects) != len(wantSubjects) {
+		t.Errorf("PriceSubjects = %v, want %v", cfg.PriceSubjects, wantSubjects)
+	} else {
+		for i := range wantSubjects {
+			if cfg.PriceSubjects[i] != wantSubjects[i] {
+				t.Errorf("PriceSubjects = %v, want %v", cfg.PriceSubjects, wantSubjects)
+				break
+			}
+		}
 	}
 	if cfg.PriceMaxAge != 30*time.Second {
 		t.Errorf("PriceMaxAge = %v, want 30s", cfg.PriceMaxAge)
@@ -81,5 +90,66 @@ func TestValidMaxAgeAndDefault(t *testing.T) {
 	}
 	if cfg2.PriceMaxAge != 5*time.Second {
 		t.Errorf("valid PriceMaxAge = %v, want 5s", cfg2.PriceMaxAge)
+	}
+}
+
+func TestPriceSubjectsDefaultToTheFoldsConsumptionSet(t *testing.T) {
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	want := []string{"market.*.trade", "market.*.quote"}
+	if len(cfg.PriceSubjects) != len(want) {
+		t.Fatalf("PriceSubjects = %v, want %v", cfg.PriceSubjects, want)
+	}
+	for i := range want {
+		if cfg.PriceSubjects[i] != want[i] {
+			t.Fatalf("PriceSubjects = %v, want %v", cfg.PriceSubjects, want)
+		}
+	}
+}
+
+// The default must NOT be a bare market.> wildcard. That subject carries
+// market.book.snapshot — an OrderBookSnapshot, not a MarketDataEvent — which
+// the fold unmarshals as the wrong type and discards. It is the highest-volume
+// stream in the estate, and folding it was pure waste.
+func TestPriceSubjectsDoNotIncludeTheBookSpine(t *testing.T) {
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	for _, s := range cfg.PriceSubjects {
+		if s == "market.>" || strings.HasPrefix(s, "market.book") {
+			t.Fatalf("PriceSubjects contains %q, which delivers OrderBookSnapshot messages the "+
+				"mark fold cannot use — the OMS would decode and discard the estate's "+
+				"highest-volume stream", s)
+		}
+	}
+}
+
+func TestPriceSubjectsAreConfigurable(t *testing.T) {
+	t.Setenv("OMS_PRICE_SUBJECTS", "market.crypto.trade, market.crypto.quote")
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	want := []string{"market.crypto.trade", "market.crypto.quote"}
+	if len(cfg.PriceSubjects) != 2 || cfg.PriceSubjects[0] != want[0] || cfg.PriceSubjects[1] != want[1] {
+		t.Fatalf("PriceSubjects = %v, want %v (whitespace around commas must be trimmed)",
+			cfg.PriceSubjects, want)
+	}
+}
+
+// An empty or whitespace-only override must be an ERROR, not silently zero
+// subjects. A pod that subscribes to nothing folds no marks, and every
+// MARKET/STOP order is then refused PRICE_UNAVAILABLE forever — a trading
+// outage that looks like a quiet config typo.
+func TestEmptyPriceSubjectsIsAnError(t *testing.T) {
+	for _, v := range []string{" ", ",", " , "} {
+		t.Setenv("OMS_PRICE_SUBJECTS", v)
+		if _, err := config.Load(); err == nil {
+			t.Fatalf("Load accepted OMS_PRICE_SUBJECTS=%q, which subscribes to nothing and "+
+				"refuses every market order forever", v)
+		}
 	}
 }

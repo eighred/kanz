@@ -99,9 +99,24 @@ type Config struct {
 	// currency join lands (OMS-01e).
 	BaseCurrency string
 
-	// PriceSubject is the market-data spine the OMS folds into its reference-mark
-	// source, so the pre-trade gate can value MARKET/STOP orders (COMP-M2).
-	PriceSubject string
+	// PriceSubjects are the market-data subjects the OMS folds into its
+	// reference-mark source, so the pre-trade gate can value MARKET/STOP
+	// orders (COMP-M2).
+	//
+	// The default is the mark fold's CONSUMPTION SET expressed as subjects, not
+	// a convenient wildcard. market.v1.MarketDataEvent publishes on
+	// market.<assetClass>.<variant> where the variant token comes from the
+	// payload oneof (bussink.go: Trade→trade, Quote→quote, Bar→bar), and the
+	// fold uses Trade and Quote only. NATS `*` matches exactly one token, so
+	// these two subjects cover every asset class — present and future — while
+	// structurally excluding market.*.bar and, critically, market.book.snapshot.
+	//
+	// That last one is why this is not `market.>`: book snapshots carry an
+	// OrderBookSnapshot, a DIFFERENT message type, which the fold unmarshals as
+	// a MarketDataEvent, finds empty, and discards. It is the highest-volume
+	// stream in the estate (12 Kafka partitions), and the OMS was decoding all
+	// of it to throw all of it away.
+	PriceSubjects []string
 
 	// PriceMaxAge is how old a mark may be and still value an order. It is a
 	// SAFETY BOUND, not a tuning knob: widening it to quiet PRICE_UNAVAILABLE
@@ -145,7 +160,12 @@ func Load() (Config, error) {
 		VenueEndpoints:         os.Getenv("OMS_VENUE_ENDPOINTS"),
 		SPIFFESocket:           os.Getenv("SPIFFE_ENDPOINT_SOCKET"),
 		BaseCurrency:           envOr("OMS_BASE_CURRENCY", "USD"),
-		PriceSubject:           envOr("OMS_PRICE_SUBJECT", "market.>"),
+		PriceSubjects:          splitSubjects(envOr("OMS_PRICE_SUBJECTS", "market.*.trade,market.*.quote")),
+	}
+
+	if len(cfg.PriceSubjects) == 0 {
+		return Config{}, fmt.Errorf("OMS_PRICE_SUBJECTS: at least one subject is required; " +
+			"a pod subscribing to nothing folds no marks and refuses every MARKET/STOP order")
 	}
 
 	maxAge, err := time.ParseDuration(envOr("OMS_PRICE_MAX_AGE", "30s"))
@@ -177,6 +197,20 @@ func envOr(k, def string) string {
 		return v
 	}
 	return def
+}
+
+// splitSubjects parses a comma-separated subject list, trimming whitespace and
+// dropping empty entries. An all-empty input yields an empty slice, which Load
+// rejects — subscribing to nothing is a silent trading outage, not a default.
+func splitSubjects(s string) []string {
+	parts := strings.Split(s, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if t := strings.TrimSpace(p); t != "" {
+			out = append(out, t)
+		}
+	}
+	return out
 }
 
 func parseLevel(s string) slog.Level {
