@@ -148,11 +148,12 @@ func (g *COMP01Gate) price(cmd *orderpb.SubmitOrder) *commonpb.Decimal {
 	if m == nil {
 		return nil
 	}
-	// A mark that is not representable REFUSES rather than being clamped: a
-	// clamped mark is a fabricated price, and the gate would then admit or
-	// reject on a notional nobody submitted. nil is what the gate already
-	// treats as Unpriced. See internal/dec for the mechanism.
-	d, ok := dec.ToProtoExact(m)
+	// A mark too large for the fixed scale is RESCALED, not refused: the
+	// magnitude is what the gate values the order on, and eight decimal places
+	// on a very large price buy nothing. Refusing here would turn a real price
+	// into a refused order. Only a value that cannot be represented at ANY
+	// exponent yields nil, which the gate already treats as Unpriced.
+	d, ok := dec.ToProtoScaled(m)
 	if !ok {
 		return nil
 	}

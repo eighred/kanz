@@ -19,8 +19,9 @@ func qtyOrder(orderType orderpb.OrderType, coeff int64, exp int32) *orderpb.Subm
 
 // TestCheck_OversizedMarketOrderCannotWrapIntoAdmission is the CRITICAL repro.
 //
-// The mark path values a MARKET order via dec.ToProtoExact, which always emits
-// exponent -8, so a $100 mark arrives with coefficient 1e10. The projected
+// The mark path values a MARKET order via dec.ToProtoScaled, which emits
+// exponent -8 here (well inside int64), so a $100 mark arrives with
+// coefficient 1e10. The projected
 // notional is quantity × price as a raw int64 multiply — at 1,844,674,407
 // shares that product is ~1.8e19, which wraps int64 into a small (here
 // negative) coefficient. The rules then see a tiny position and ADMIT a true

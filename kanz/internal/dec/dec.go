@@ -16,6 +16,7 @@ package dec
 
 import (
 	"errors"
+	"math"
 	"math/big"
 	"strings"
 
@@ -63,7 +64,7 @@ func FromProto(d *commonpb.Decimal) *big.Rat {
 
 // scaledCoefficient rounds a rational to the fixed scale (half-up) and returns
 // the resulting coefficient as a big.Int. This is the ONE place the
-// scaling/rounding arithmetic is written; ToProto and ToProtoExact both call
+// scaling/rounding arithmetic is written; ToProto and ToProtoScaled both call
 // it so their behaviour cannot drift apart.
 func scaledCoefficient(r *big.Rat) *big.Int {
 	pow := new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(scale)), nil)
@@ -81,29 +82,53 @@ func scaledCoefficient(r *big.Rat) *big.Int {
 }
 
 // ToProto rounds a rational to a fixed-scale common.v1.Decimal (half-up). Its
-// signature and behaviour are unchanged by ToProtoExact's addition: callers
-// that never see coefficients near the int64 boundary are unaffected, and
-// this keeps wrapping (via big.Int.Int64(), per math/big's own documented
-// behaviour) for values that don't fit — callers needing a representability
-// check must use ToProtoExact instead.
+// signature and behaviour are UNCHANGED and stay that way: this keeps
+// wrapping (via big.Int.Int64(), per math/big's own documented behaviour) for
+// values whose scaled coefficient does not fit an int64, which is what its
+// ~30 remaining non-capital callers (reporting, analytics) already depend on.
+// Callers on a capital path — anywhere a wrapped, fabricated coefficient
+// would be acted on — must use ToProtoScaled instead.
 func ToProto(r *big.Rat) *commonpb.Decimal {
 	q := scaledCoefficient(r)
 	return &commonpb.Decimal{Coefficient: q.Int64(), Exponent: -scale}
 }
 
-// ToProtoExact is ToProto's representability-checked counterpart: it performs
-// the identical scaling and half-up rounding, but reports ok == false instead
-// of silently wrapping when the rounded coefficient does not fit in an int64.
-// Callers on a capital path — anywhere an out-of-range value must REFUSE
-// rather than be valued at a wrapped, fabricated coefficient — should call
-// this instead of ToProto. When ok is false, the returned *commonpb.Decimal
-// is nil.
-func ToProtoExact(r *big.Rat) (d *commonpb.Decimal, ok bool) {
-	q := scaledCoefficient(r)
-	if !q.IsInt64() {
-		return nil, false
+// ToProtoScaled converts an exact rational to a Decimal, preserving MAGNITUDE.
+//
+// It emits at the fixed scale when the coefficient fits an int64; otherwise it
+// raises the exponent (half-up, away from zero) until it does, and refuses only
+// when the exponent itself cannot move. This is the same shape as
+// internal/compliance's mulDecimal, deliberately: it is the same question asked
+// of a different operator.
+//
+// Use this on any capital path. ToProto wraps at roughly $92bn at scale -8, and
+// a wrapped coefficient is a fabricated number the system will then act on. The
+// alternative — refusing a large-but-real value — turns it into a failed
+// operation, which on an order path is a refused trade. You do not need eight
+// decimal places on $100bn; you do need the magnitude to be right.
+func ToProtoScaled(r *big.Rat) (*commonpb.Decimal, bool) {
+	if r == nil {
+		return &commonpb.Decimal{}, true
 	}
-	return &commonpb.Decimal{Coefficient: q.Int64(), Exponent: -scale}, true
+	q := scaledCoefficient(r)
+	exp := int64(-scale)
+	ten, five := big.NewInt(10), big.NewInt(5)
+	rem := new(big.Int)
+	for !q.IsInt64() {
+		if exp >= math.MaxInt32 {
+			return nil, false // cannot raise the exponent any further
+		}
+		q.QuoRem(q, ten, rem)
+		if rem.CmpAbs(five) >= 0 { // half-up, away from zero
+			if rem.Sign() < 0 {
+				q.Sub(q, big.NewInt(1))
+			} else {
+				q.Add(q, big.NewInt(1))
+			}
+		}
+		exp++
+	}
+	return &commonpb.Decimal{Coefficient: q.Int64(), Exponent: int32(exp)}, true
 }
 
 // Str renders a rational as a trimmed plain-decimal string.

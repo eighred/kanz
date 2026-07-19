@@ -85,14 +85,20 @@ func TestCheck_MarketOrderIsValuedFromTheMark(t *testing.T) {
 	}
 }
 
-// TestCheck_MarketOrderWithNonRepresentableMarkIsRefused (finding 1, CRITICAL):
-// 184467440738 scaled by dec.ToProto's fixed ×10^8 lands just past 2^64, which
-// wraps in big.Int.Int64() to a coefficient of 90448384 at exponent -8 — i.e.
-// $0.90. Before the fix this order is ADMITTED at that fabricated $0.90 price
-// (true notional ~1.8e12, never actually evaluated against the mandate).
-// Refusal is correct: we would rather refuse a real order than admit one at a
-// wrong price.
-func TestCheck_MarketOrderWithNonRepresentableMarkIsRefused(t *testing.T) {
+// TestCheck_MarketOrderWithVeryLargeMarkIsRescaledNotWrapped (Task 2 revision
+// of finding 1): 184467440738 scaled by dec.ToProto's fixed ×10^8 lands just
+// past 2^64, which wraps in big.Int.Int64() to a coefficient of 90448384 at
+// exponent -8 — i.e. $0.90. An unguarded gate ADMITS this order at that
+// fabricated $0.90 price (true notional ~1.8e12, never actually evaluated
+// against the mandate).
+//
+// comp01 no longer refuses this mark — it rescales it (dec.ToProtoScaled),
+// preserving magnitude at a coarser exponent instead of wrapping or refusing
+// a real, large price. This test's own NON-VACUITY is in the assertion:
+// admission at the wrapped $0.90 price would be a nil breach (10 units × $0.90
+// is immaterial next to the $80,000 book), so seeing CONCENTRATION here proves
+// the gate evaluated the TRUE magnitude, not a wrapped or fabricated one.
+func TestCheck_MarketOrderWithVeryLargeMarkIsRescaledNotWrapped(t *testing.T) {
 	g := NewCOMP01Gate(bookedTestGate(t), "USD",
 		WithMarkSource(stubMarks{instrument: "AAPL", price: big.NewRat(184467440738, 1)}))
 
@@ -100,9 +106,9 @@ func TestCheck_MarketOrderWithNonRepresentableMarkIsRefused(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Check: %v", err)
 	}
-	if breach == nil || breach.Code != "PRICE_UNAVAILABLE" {
-		t.Fatalf("breach = %+v, want PRICE_UNAVAILABLE — a mark that cannot be represented as a Decimal "+
-			"must refuse, not silently wrap to a fabricated price", breach)
+	if breach == nil || breach.Code != "CONCENTRATION" {
+		t.Fatalf("breach = %+v, want CONCENTRATION — a very large mark must be RESCALED and evaluated at its "+
+			"true magnitude, not wrapped to a fabricated near-zero price and admitted", breach)
 	}
 }
 

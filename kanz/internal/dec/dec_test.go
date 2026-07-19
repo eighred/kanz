@@ -5,110 +5,121 @@ import (
 	"testing"
 )
 
-// TestToProtoExact_RepresentableValueRoundTrips pins that a value whose scaled
-// coefficient fits in an int64 reports ok and produces the expected Decimal.
-func TestToProtoExact_RepresentableValueRoundTrips(t *testing.T) {
-	r := big.NewRat(100, 1) // 100.00000000 at scale 8
-	got, ok := ToProtoExact(r)
+func TestToProtoScaled_NormalValueIsUnchangedAtScale8(t *testing.T) {
+	got, ok := ToProtoScaled(big.NewRat(12345, 100)) // 123.45
 	if !ok {
-		t.Fatalf("ok = false, want true for a representable value")
+		t.Fatal("ok = false for a value well inside int64")
 	}
-	want := int64(100 * 1e8)
-	if got.GetCoefficient() != want || got.GetExponent() != -scale {
-		t.Fatalf("got = {coeff:%d exp:%d}, want {coeff:%d exp:%d}",
-			got.GetCoefficient(), got.GetExponent(), want, -scale)
+	if got.GetExponent() != -8 || got.GetCoefficient() != 12345000000 {
+		t.Fatalf("got %d e%d, want 12345000000 e-8", got.GetCoefficient(), got.GetExponent())
 	}
 }
 
-// TestToProtoExact_OverflowingValueReportsNotOK pins the exact case this
-// function exists for: 184467440738 scaled by 10^8 lands just past the int64
-// range and would silently wrap through big.Int.Int64() if unchecked.
-func TestToProtoExact_OverflowingValueReportsNotOK(t *testing.T) {
-	r := big.NewRat(184467440738, 1)
-	got, ok := ToProtoExact(r)
-	if ok {
-		t.Fatalf("ok = true, want false — %s scaled by 10^%d overflows int64", r.String(), scale)
+// The $92bn ceiling: at scale -8 this coefficient does not fit an int64.
+// ToProto WRAPS here; ToProtoScaled must keep the magnitude instead.
+func TestToProtoScaled_LargeValueRescalesInsteadOfWrapping(t *testing.T) {
+	v := new(big.Rat).SetInt64(100_000_000_000) // $100bn
+	got, ok := ToProtoScaled(v)
+	if !ok {
+		t.Fatal("ok = false for $100bn — a real institutional position must not refuse")
 	}
-	if got != nil {
-		t.Fatalf("got = %+v, want nil when not representable", got)
+	if got.GetCoefficient() < 0 {
+		t.Fatalf("negative coefficient %d — it wrapped", got.GetCoefficient())
+	}
+	// Reconstruct and compare: must be within one unit of the last kept digit.
+	back := new(big.Rat).SetInt64(got.GetCoefficient())
+	pow := new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(-got.GetExponent())), nil)
+	back.Quo(back, new(big.Rat).SetInt(pow))
+	diff := new(big.Rat).Sub(back, v)
+	if diff.Abs(diff).Cmp(big.NewRat(1, 1)) > 0 {
+		t.Fatalf("reconstructed %s differs from %s by more than 1", back.FloatString(2), v.FloatString(2))
 	}
 }
 
-// TestToProtoExact_AgreesWithToProto is the test that makes this refactor
-// worth doing: for every representable input, ToProtoExact's coefficient must
-// be IDENTICAL to ToProto's. If the two ever compute the scaled/rounded value
-// differently, this test catches the drift immediately — the two conversions
-// share one arithmetic path, so drift should be structurally impossible, but
-// this is the tripwire in case that ever stops being true.
-func TestToProtoExact_AgreesWithToProto(t *testing.T) {
-	cases := []*big.Rat{
-		big.NewRat(0, 1),
-		big.NewRat(1, 3),
-		big.NewRat(-1, 3),
-		big.NewRat(100, 1),
-		big.NewRat(1, 100000000),
-		big.NewRat(99999999, 1),
-		big.NewRat(-99999999, 1),
-		Rat("0.123456785"), // exercises half-up rounding
-		Rat("0.123456784"),
+func TestToProtoScaled_NegativeLargeValueKeepsItsSign(t *testing.T) {
+	got, ok := ToProtoScaled(new(big.Rat).SetInt64(-100_000_000_000))
+	if !ok {
+		t.Fatal("ok = false for -$100bn")
 	}
-	for _, r := range cases {
+	if got.GetCoefficient() >= 0 {
+		t.Fatalf("coefficient %d is not negative — the sign was lost", got.GetCoefficient())
+	}
+}
+
+// NON-VACUITY: ToProtoScaled must agree with ToProto wherever BOTH are
+// representable. This is the test retargeted from the deleted exact-or-refuse
+// conversion this function replaces — it is what protects ToProto's ~30
+// remaining callers from a regression in the shared scaledCoefficient helper.
+func TestToProtoScaled_AgreesWithToProtoWhereBothFit(t *testing.T) {
+	for _, r := range []*big.Rat{
+		big.NewRat(0, 1), big.NewRat(1, 1), big.NewRat(-1, 1),
+		big.NewRat(12345, 100), big.NewRat(-12345, 100),
+		big.NewRat(1, 3), big.NewRat(-1, 3),
+		big.NewRat(999999999, 1),
+	} {
 		want := ToProto(r)
-		got, ok := ToProtoExact(r)
+		got, ok := ToProtoScaled(r)
 		if !ok {
-			t.Fatalf("ToProtoExact(%s): ok = false, want true", r.String())
+			t.Fatalf("%s: ToProtoScaled refused a representable value", r.FloatString(4))
 		}
 		if got.GetCoefficient() != want.GetCoefficient() || got.GetExponent() != want.GetExponent() {
-			t.Fatalf("ToProtoExact(%s) = %+v, ToProto(%s) = %+v — must agree exactly",
-				r.String(), got, r.String(), want)
+			t.Fatalf("%s: ToProtoScaled = %d e%d, ToProto = %d e%d — they must agree where both fit",
+				r.FloatString(4), got.GetCoefficient(), got.GetExponent(),
+				want.GetCoefficient(), want.GetExponent())
 		}
+	}
+}
+
+func TestToProtoScaled_NilIsZero(t *testing.T) {
+	got, ok := ToProtoScaled(nil)
+	if !ok || got.GetCoefficient() != 0 {
+		t.Fatalf("got %v (ok=%v), want zero", got, ok)
 	}
 }
 
 // TestToProto_LiteralOutput pins ToProto's ABSOLUTE output.
 //
-// TestToProtoExact_AgreesWithToProto above cannot fail while both functions
-// delegate to scaledCoefficient, and it says nothing about the overflow region
-// where the two are DESIGNED to differ. The real regression risk is that
-// scaledCoefficient changes and silently alters ToProto for every caller in
-// the repository. This table is what makes that impossible: it names the
-// expected coefficient and exponent outright, including rounding ties in both
-// signs, values against the int64 boundary, and — deliberately — one
-// overflowing value pinning that ToProto STILL WRAPS exactly as it always has.
-// That wrapping is preserved on purpose for existing callers; ToProtoExact is
-// the variant a capital path must use.
+// TestToProtoScaled_AgreesWithToProtoWhereBothFit above cannot fail while both
+// functions delegate to scaledCoefficient, and it says nothing about the
+// overflow region where the two are DESIGNED to differ. The real regression
+// risk is that scaledCoefficient changes and silently alters ToProto for
+// every caller in the repository. This table is what makes that impossible:
+// it names the expected coefficient and exponent outright, including
+// rounding ties in both signs, values against the int64 boundary, and —
+// deliberately — one overflowing value pinning that ToProto STILL WRAPS
+// exactly as it always has. That wrapping is preserved on purpose for
+// existing callers; ToProtoScaled is the variant a capital path must use.
 func TestToProto_LiteralOutput(t *testing.T) {
 	cases := []struct {
 		name      string
 		in        *big.Rat
 		wantCoeff int64
 		wantExp   int32
-		wantOK    bool // what ToProtoExact must report for the same input
 	}{
-		{"zero", big.NewRat(0, 1), 0, -8, true},
-		{"one", big.NewRat(1, 1), 100000000, -8, true},
-		{"smallest representable", big.NewRat(1, 100000000), 1, -8, true},
-		{"negative smallest", big.NewRat(-1, 100000000), -1, -8, true},
-		{"third truncates and rounds up", big.NewRat(1, 3), 33333333, -8, true},
-		{"negative third", big.NewRat(-1, 3), -33333333, -8, true},
-		{"two thirds rounds up", big.NewRat(2, 3), 66666667, -8, true},
-		{"negative two thirds rounds away from zero", big.NewRat(-2, 3), -66666667, -8, true},
+		{"zero", big.NewRat(0, 1), 0, -8},
+		{"one", big.NewRat(1, 1), 100000000, -8},
+		{"smallest representable", big.NewRat(1, 100000000), 1, -8},
+		{"negative smallest", big.NewRat(-1, 100000000), -1, -8},
+		{"third truncates and rounds up", big.NewRat(1, 3), 33333333, -8},
+		{"negative third", big.NewRat(-1, 3), -33333333, -8},
+		{"two thirds rounds up", big.NewRat(2, 3), 66666667, -8},
+		{"negative two thirds rounds away from zero", big.NewRat(-2, 3), -66666667, -8},
 
 		// Rounding TIES, both signs: half-up is away from zero.
-		{"positive tie rounds up", Rat("0.000000005"), 1, -8, true},
-		{"negative tie rounds down", Rat("-0.000000005"), -1, -8, true},
-		{"positive tie mid-magnitude", Rat("1.234567895"), 123456790, -8, true},
-		{"negative tie mid-magnitude", Rat("-1.234567895"), -123456790, -8, true},
-		{"just below a tie", Rat("0.123456784"), 12345678, -8, true},
-		{"just above a tie", Rat("0.123456786"), 12345679, -8, true},
+		{"positive tie rounds up", Rat("0.000000005"), 1, -8},
+		{"negative tie rounds down", Rat("-0.000000005"), -1, -8},
+		{"positive tie mid-magnitude", Rat("1.234567895"), 123456790, -8},
+		{"negative tie mid-magnitude", Rat("-1.234567895"), -123456790, -8},
+		{"just below a tie", Rat("0.123456784"), 12345678, -8},
+		{"just above a tie", Rat("0.123456786"), 12345679, -8},
 
 		// The int64 boundary. 92233720368.54775807 × 10^8 is exactly MaxInt64.
-		{"exactly MaxInt64 scaled", Rat("92233720368.54775807"), 9223372036854775807, -8, true},
-		{"exactly MinInt64 scaled", Rat("-92233720368.54775808"), -9223372036854775808, -8, true},
+		{"exactly MaxInt64 scaled", Rat("92233720368.54775807"), 9223372036854775807, -8},
+		{"exactly MinInt64 scaled", Rat("-92233720368.54775808"), -9223372036854775808, -8},
 
 		// OVERFLOW: ToProto wraps (big.Int.Int64()), by design, for existing
 		// callers. This literal is the tripwire on that documented behaviour.
-		{"overflow wraps", big.NewRat(184467440738, 1), 90448384, -8, false},
+		{"overflow wraps", big.NewRat(184467440738, 1), 90448384, -8},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -117,40 +128,6 @@ func TestToProto_LiteralOutput(t *testing.T) {
 				t.Fatalf("ToProto(%s) = {coeff:%d exp:%d}, want {coeff:%d exp:%d}",
 					tc.in.String(), got.GetCoefficient(), got.GetExponent(), tc.wantCoeff, tc.wantExp)
 			}
-			exact, ok := ToProtoExact(tc.in)
-			if ok != tc.wantOK {
-				t.Fatalf("ToProtoExact(%s): ok = %v, want %v", tc.in.String(), ok, tc.wantOK)
-			}
-			if !ok {
-				if exact != nil {
-					t.Fatalf("ToProtoExact(%s) = %+v, want nil when not representable", tc.in.String(), exact)
-				}
-				return
-			}
-			if exact.GetCoefficient() != tc.wantCoeff || exact.GetExponent() != tc.wantExp {
-				t.Fatalf("ToProtoExact(%s) = {coeff:%d exp:%d}, want {coeff:%d exp:%d}",
-					tc.in.String(), exact.GetCoefficient(), exact.GetExponent(), tc.wantCoeff, tc.wantExp)
-			}
 		})
-	}
-}
-
-// TestToProtoExact_OKBoundaryIsPrecise pins where ok flips: one ulp inside the
-// int64 range must be representable, one ulp outside must not.
-func TestToProtoExact_OKBoundaryIsPrecise(t *testing.T) {
-	cases := []struct {
-		in     string
-		wantOK bool
-	}{
-		{"92233720368.54775807", true},   // MaxInt64 / 10^8
-		{"92233720368.54775808", false},  // one ulp past
-		{"-92233720368.54775808", true},  // MinInt64 / 10^8
-		{"-92233720368.54775809", false}, // one ulp past
-	}
-	for _, tc := range cases {
-		_, ok := ToProtoExact(Rat(tc.in))
-		if ok != tc.wantOK {
-			t.Fatalf("ToProtoExact(%s): ok = %v, want %v", tc.in, ok, tc.wantOK)
-		}
 	}
 }

@@ -571,8 +571,9 @@ func addDecimal(a, b *commonpb.Decimal) (*commonpb.Decimal, bool) {
 // coefficients as raw int64s, and a large-enough quantity wrapped that product
 // into a small — often negative — number. The rules saw a tiny position and
 // ADMITTED an order worth billions. The mark-priced path made this reachable
-// at plausible sizes, because dec.ToProtoExact always emits exponent -8 and so
-// spends eight digits of int64 headroom before the multiply even happens.
+// at plausible sizes, because dec.ToProtoScaled emits exponent -8 whenever that
+// fits and so spends eight digits of int64 headroom before the multiply even
+// happens.
 //
 // The product is therefore taken in math/big, exactly. Three outcomes:
 //
