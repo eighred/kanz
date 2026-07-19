@@ -42,9 +42,30 @@ data:
       echo "  topic ${name}: ${partitions} parts, ${cleanup}, retention.ms=${retention}"
     }
 
-    # Same topic layout as topics-job.yaml, prefixed with the tenant. Only the
-    # tenant-scoped domains (market/risk/execution/inference/data) are tenanted;
-    # platform + observability stay cross-cutting under __system__ (un-prefixed).
+    # THE SAME TABLE AS topics-job.yaml, prefixed with the tenant — enforced by
+    # TestTenantTopicTableMatchesTheSystemTable, which compares every column.
+    #
+    # This table used to be the OLD topics-job.yaml table, the one that file
+    # documents correcting away from: market.equity, market.option,
+    # execution.order and data.market_stream, none of which any service
+    # publishes, plus two .snapshot topics — and NONE of the money path. Every
+    # tenant after the first would have been provisioned that. It survived
+    # because the estate's one tenant is __system__, which is un-prefixed and
+    # provisioned by topics-job.yaml instead, so this Job has never run.
+    #
+    # NO DOMAIN SUBSETTING, and the previous version of this comment was wrong to
+    # claim it: services/archiver/internal/topic/topic.go:61-64 prefixes EVERY
+    # event for a non-__system__ tenant, unconditionally — there is no
+    # per-domain carve-out to mirror here. platform.* is in the table for that
+    # reason. The asymmetry settles the doubtful cases: an unused topic costs an
+    # empty partition set, while a missing one is a hard publish failure and a
+    # NACK loop, because auto-create is disabled.
+    #
+    # No .snapshot rows: topic.For appends `.snapshot` for STATE_SNAPSHOT events
+    # and nothing in production publishes one (only test fixtures and
+    # test/load/seed). Provisioning ahead of a publisher is what produced the
+    # discredited table above; when a real snapshot publisher is designed, BOTH
+    # tables need the sibling — topics-job.yaml has none either.
     while read -r name partitions cleanup retention dlq; do
       case "$name" in ''|\#*) continue ;; esac
       ensure_topic "${TENANT}.${name}" "$partitions" "$cleanup" "$retention"
@@ -52,16 +73,22 @@ data:
         ensure_topic "${TENANT}.dlq.${name}" 3 delete 2592000000
       fi
     done <<'EOF'
-    market.equity              12  delete   604800000   yes
-    market.option              6   delete   604800000   yes
+    compliance.mandate         3   compact  -1          yes
+    risk.position              6   compact  -1          yes
+    order.order                6   delete   2592000000  yes
+    strategy.signal            6   delete   2592000000  yes
+    accounting.balance         6   delete   2592000000  yes
+    settlement.instruction     3   delete   2592000000  yes
+    compliance.breach          3   delete   2592000000  yes
     risk.portfolio             6   delete   2592000000  yes
-    risk.portfolio.snapshot    6   compact  -1          no
-    execution.order            6   delete   2592000000  yes
-    execution.order.snapshot   6   compact  -1          no
+    platform.authz             3   delete   2592000000  yes
+    platform.compliance        3   delete   2592000000  yes
+    platform.mode              3   delete   2592000000  yes
     inference.feature          6   delete   604800000   yes
     inference.prediction       6   delete   2592000000  yes
-    data.market_stream         3   delete   2592000000  yes
     data.feature               3   delete   2592000000  yes
+    market.book                12  delete   604800000   yes
+    market.crypto              12  delete   604800000   yes
     EOF
 
     # PREFIXED ACLs: the tenant principal may produce/consume only under its own

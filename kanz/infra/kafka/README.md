@@ -19,27 +19,28 @@ Runs in the `kanz-messaging` namespace — created by the NATS provisioning, or
 ## Topics
 
 `topic = {domain}.{entity}` per `kanz-schemas/docs/subject-taxonomy.md` §5;
-`event_type` is discriminated within the topic. STATE_SNAPSHOT events use a
-separate compacted `{domain}.{entity}.snapshot` topic. Every delete-policy event
-topic has a paired `dlq.{name}` for poison events. Auto-create is disabled —
-topics exist only if provisioned here. RF 3, `min.insync.replicas` 2.
+`event_type` is discriminated within the topic. Every delete-policy event topic
+has a paired `dlq.{name}` for poison events. Auto-create is disabled — topics
+exist only if provisioned here. RF 3, `min.insync.replicas` 2.
 
-| Topic | Parts | Cleanup | Retention |
-|---|---|---|---|
-| `market.equity` | 12 | delete | 7d |
-| `market.option` | 6 | delete | 7d |
-| `risk.portfolio` | 6 | delete | 30d |
-| `risk.portfolio.snapshot` | 6 | compact | — |
-| `execution.order` | 6 | delete | 30d |
-| `execution.order.snapshot` | 6 | compact | — |
-| `inference.feature` | 6 | delete | 7d |
-| `inference.prediction` | 6 | delete | 30d |
-| `platform.model` | 3 | delete | infinite (lifecycle audit) |
-| `platform.config` | 3 | compact | — |
-| `data.market_stream` | 3 | delete | 30d |
-| `data.feature` | 3 | delete | 30d |
-| `observability.model` | 3 | delete | 7d |
-| `dlq.<name>` | 3 | delete | 30d |
+**The topic list is not repeated here. It lives in the `<<'EOF'` table in
+[`topics-job.yaml`](topics-job.yaml), and [`tenancy.yaml`](tenancy.yaml) carries
+the same table under a tenant prefix.** This section used to hold a third copy,
+and all three drifted independently: the README still listed `market.equity`,
+`execution.order`, `data.market_stream`, `platform.model`, `platform.config` and
+`observability.model` — six topics no service publishes and two that exist in
+neither Job — long after `topics-job.yaml` had been corrected to the real money
+path. A table a reader trusts instead of opening the manifest is worse than no
+table. `TestTenantTopicTableMatchesTheSystemTable` now holds the two real ones
+together, column by column; nothing can hold a prose copy to them.
+
+`topic.For` (`services/archiver/internal/topic/topic.go:56-59`) routes
+STATE_SNAPSHOT events to a compacted `{domain}.{entity}.snapshot` sibling.
+**No such topic is provisioned in either Job, deliberately** — nothing in
+production publishes a STATE_SNAPSHOT (only test fixtures and `test/load/seed`),
+and provisioning ahead of a publisher is what produced the stale table above. A
+premature publisher therefore fails closed and NACK-loops loudly, which is the
+archiver's never-silent rule. Design the publisher and the topic together.
 
 ## mTLS (SEC-01c)
 
