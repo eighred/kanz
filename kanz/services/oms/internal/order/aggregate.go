@@ -154,9 +154,21 @@ func ApplyFill(st *orderpb.OrderState, fill *orderpb.Fill, now time.Time) (*orde
 	avg := new(big.Rat).Quo(cost, newFilled)
 
 	next := cloneState(st)
-	next.FilledQuantity = dec.ToProto(newFilled)
-	next.LeavesQuantity = dec.ToProto(newLeaves)
-	next.AverageFillPrice = dec.ToProto(avg)
+	filled, ok := dec.ToProtoScaled(newFilled)
+	if !ok {
+		return nil, fmt.Errorf("order %s: filled quantity is not representable", st.GetOrderId())
+	}
+	newLeavesProto, ok := dec.ToProtoScaled(newLeaves)
+	if !ok {
+		return nil, fmt.Errorf("order %s: leaves quantity is not representable", st.GetOrderId())
+	}
+	avgPx, ok := dec.ToProtoScaled(avg)
+	if !ok {
+		return nil, fmt.Errorf("order %s: average fill price is not representable", st.GetOrderId())
+	}
+	next.FilledQuantity = filled
+	next.LeavesQuantity = newLeavesProto
+	next.AverageFillPrice = avgPx
 	next.AsOf = timestamppb.New(now.UTC())
 	if newLeaves.Sign() == 0 {
 		next.Status = orderpb.OrderStatus_ORDER_STATUS_FILLED
@@ -205,7 +217,11 @@ func Amend(st *orderpb.OrderState, cmd *orderpb.AmendOrder, now time.Time) (*ord
 			return nil, reject("INVALID_QUANTITY", "new_quantity below filled quantity")
 		}
 		next.OrderedQuantity = q
-		next.LeavesQuantity = dec.ToProto(new(big.Rat).Sub(dec.FromProto(q), dec.FromProto(st.GetFilledQuantity())))
+		remaining, ok := dec.ToProtoScaled(new(big.Rat).Sub(dec.FromProto(q), dec.FromProto(st.GetFilledQuantity())))
+		if !ok {
+			return nil, fmt.Errorf("order %s: amended leaves quantity is not representable", st.GetOrderId())
+		}
+		next.LeavesQuantity = remaining
 	}
 	if p := cmd.GetNewLimitPrice(); p != nil {
 		switch st.GetOrderType() {
