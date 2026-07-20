@@ -23,17 +23,22 @@
 # spire-server.yaml; kanz/test/arch/spire_crd_version_test.go fails the build
 # if the two drift apart.
 #
-# STAGES. --spire is the only stage this script implements today. A --deploy
-# stage (rolling out the Kanz workloads themselves once SPIRE is live) lands
-# in a follow-up task; the argument loop below is written so that stage drops
-# in as another case arm and another "did" contribution, not a rewrite.
+# STAGES. --spire applies the in-repo SPIRE manifests, making the rig's SPIFFE
+# mTLS real. --deploy rolls out the Kanz workloads themselves, once SPIRE is
+# live: it applies infra/deploy/, rewriting each workload's Vault CSI volumes
+# into references to the committed dev Secrets (rig-dev-secrets.yaml) — the
+# rig's ONE declared deviation from production posture, since Vault is absent
+# and unreachable from this box (ONBOARD-M6). SPIFFE CSI volumes are left
+# alone: after --spire they are real, and stripping them would reintroduce the
+# very deviation --deploy exists to replace.
 set -euo pipefail
 
 CLUSTER="${CLUSTER:-kanz-dryrun}"
 SPIRE_DIR="kanz/infra/security/spire"
 CRD_DIR="$SPIRE_DIR/crds"
+DEPLOY_DIR="kanz/infra/deploy"
 
-usage() { echo "usage: $0 [--spire] [--cluster NAME]" >&2; exit 2; }
+usage() { echo "usage: $0 --spire|--deploy [--cluster NAME]" >&2; exit 2; }
 
 # Fail closed if this isn't being run from the repo root: every path below is
 # repo-relative, and a relative-path kubectl apply that silently no-ops (or
@@ -86,18 +91,57 @@ apply_spire() {
   echo "==> SPIRE applied and rolled out"
 }
 
+apply_deploy() {
+  require_repo_root
+  # A regex that edits YAML volume blocks by hand would silently mangle a
+  # manifest, and a mangled manifest applied to the rig is the failure this
+  # whole plan exists to end — so this stage depends on a real YAML parser
+  # (tools/rig_dev_patch.py) rather than sed, and refuses to guess if that
+  # parser's interpreter is missing.
+  command -v python3 >/dev/null 2>&1 || {
+    echo "FATAL: python3 not found. tools/rig_dev_patch.py rewrites Vault CSI" >&2
+    echo "volumes into dev Secret references and needs a real YAML parser to do" >&2
+    echo "it safely; a sed-based substitute would risk silently mangling a" >&2
+    echo "manifest. Install python3 (kanz-py already requires a Python" >&2
+    echo "toolchain) and re-run." >&2
+    exit 1
+  }
+  echo "==> applying dev deploy manifests from $DEPLOY_DIR to context $KUBECTL_CONTEXT"
+
+  # oms-db lives in postgres-dev.yaml; the other four dev Secrets live here.
+  # Applied before the workloads that mount them.
+  kubectl --context "$KUBECTL_CONTEXT" apply -f "$DEPLOY_DIR/rig-dev-secrets.yaml"
+  kubectl --context "$KUBECTL_CONTEXT" apply -f "$DEPLOY_DIR/postgres-dev.yaml"
+  # Redis is declared in-repo and was simply never applied to the rig — the same
+  # never-applied pattern as SPIRE. webhook-ingest's nonce replay store needs it.
+  kubectl --context "$KUBECTL_CONTEXT" apply -f kanz/infra/messaging/redis.yaml
+
+  local applied=0
+  for f in "$DEPLOY_DIR"/*-deploy.yaml "$DEPLOY_DIR"/*-rollout.yaml; do
+    [ -e "$f" ] || continue
+    # Swap the Vault CSI volumes for the dev Secret; leave the SPIFFE CSI volumes
+    # alone, because after --spire they are real.
+    python3 tools/rig_dev_patch.py "$f" | kubectl --context "$KUBECTL_CONTEXT" apply -f -
+    applied=$((applied+1))
+  done
+  [ "$applied" -gt 0 ] || { echo "FATAL: applied 0 workloads from $DEPLOY_DIR" >&2; exit 1; }
+  echo "==> applied $applied workloads"
+}
+
 [ $# -gt 0 ] || usage
 want_spire=""
+want_deploy=""
 did=""
 while [ $# -gt 0 ]; do
   case "$1" in
-    # --spire only records intent here; it does not run yet. Every kubectl
-    # call in apply_spire targets $KUBECTL_CONTEXT, which is derived from
-    # $CLUSTER below — running immediately would use whatever $CLUSTER held
-    # at this point in the loop, so `--spire --cluster NAME` (flag after
-    # --spire) would silently apply against the wrong (default) cluster. All
-    # flags are parsed first; the requested stage runs once parsing is done.
+    # --spire and --deploy only record intent here; they do not run yet. Every
+    # kubectl call they trigger targets $KUBECTL_CONTEXT, which is derived from
+    # $CLUSTER below — running immediately would use whatever $CLUSTER held at
+    # this point in the loop, so `--spire --cluster NAME` (flag after --spire)
+    # would silently apply against the wrong (default) cluster. All flags are
+    # parsed first; the requested stage(s) run once parsing is done.
     --spire)   want_spire=1; did=1 ;;
+    --deploy)  want_deploy=1; did=1 ;;
     --cluster) shift; CLUSTER="${1:-}"; [ -n "$CLUSTER" ] || usage ;;
     *)         usage ;;
   esac
@@ -112,4 +156,5 @@ done
 # and then never read again).
 KUBECTL_CONTEXT="kind-$CLUSTER"
 
-[ -z "$want_spire" ] || apply_spire
+[ -z "$want_spire" ]  || apply_spire
+[ -z "$want_deploy" ] || apply_deploy
