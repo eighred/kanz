@@ -114,7 +114,14 @@ apply_deploy() {
   kubectl --context "$KUBECTL_CONTEXT" apply -f "$DEPLOY_DIR/postgres-dev.yaml"
   # Redis is declared in-repo and was simply never applied to the rig — the same
   # never-applied pattern as SPIRE. webhook-ingest's nonce replay store needs it.
-  kubectl --context "$KUBECTL_CONTEXT" apply -f kanz/infra/messaging/redis.yaml
+  #
+  # It goes through the SAME dev-secret patch as the workloads below, not `kubectl
+  # apply` raw: redis.yaml mounts its own Vault CSI volume (secretProviderClass:
+  # redis-auth) for the server's password, and on a Vault-less rig that mount
+  # resolves to nothing — Redis's own start script then refuses to run rather than
+  # come up unauthenticated (see redis.yaml's command block). Applying it raw was a
+  # second, undeclared deviation from the "one patch path" this stage exists to be.
+  python3 tools/rig_dev_patch.py kanz/infra/messaging/redis.yaml | kubectl --context "$KUBECTL_CONTEXT" apply -f -
 
   local applied=0
   for f in "$DEPLOY_DIR"/*-deploy.yaml "$DEPLOY_DIR"/*-rollout.yaml; do

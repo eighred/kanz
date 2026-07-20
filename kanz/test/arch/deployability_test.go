@@ -1,6 +1,9 @@
 package arch
 
 import (
+	"errors"
+	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -8,6 +11,8 @@ import (
 	"sort"
 	"strings"
 	"testing"
+
+	"gopkg.in/yaml.v3"
 )
 
 // EVERY SERVICE IS DEPLOYABLE, OR IT SAYS WHY NOT — IN WRITING.
@@ -183,6 +188,132 @@ func TestEveryProbePointsAtARouteTheServiceServes(t *testing.T) {
 			"pulls a broken pod out of its Service — is decorative. This is how market-ingest shipped a manifest "+
 			"probing /healthz against a service serving /livez.", strings.Join(problems, "\n  "))
 	}
+}
+
+// A DECLARED VOLUME MUST BE MOUNTED, OR IT IS DEAD CONFIGURATION THAT READS AS
+// WORKING.
+//
+// webhook-ingest-deploy.yaml declared a `redis` volume backing the CROSS-POD nonce
+// replay store and mounted only webhook-config and tmp — the volume's own comment
+// said removing it "stops the pod from starting" (the binary refuses to run
+// without a reachable nonce store), which is exactly what a declared-but-unmounted
+// volume also does, just later and less legibly: WEBHOOK_INGEST_REDIS_URL_FILE
+// pointed at a path (/run/secrets/redis/redis-url) nothing ever mounted, so the
+// platform's own public entrance could not start from its own manifest.
+//
+// This is a class of defect, not an instance of one: any workload manifest can
+// declare a volume in `volumes:` and forget it in every container's
+// `volumeMounts:`, and nothing before this test read the two lists together. So
+// this checks every pod spec (Deployment/StatefulSet/Rollout/etc — anything with a
+// spec.template.spec) under infra/deploy/ and infra/messaging/, across both
+// containers and initContainers (oms-deploy.yaml's kanz-migrate initContainer
+// mounts its own DSN volume, which is a legitimate mount site, not a miss).
+//
+// Parsed structurally (gopkg.in/yaml.v3), not grepped: a regex over volume names
+// cannot tell "declared, never mounted" from "declared, mounted three fields
+// later" without effectively re-implementing a YAML parser badly.
+func TestEveryDeclaredVolumeIsMounted(t *testing.T) {
+	root := moduleRoot(t)
+
+	var manifests []string
+	for _, dir := range []string{"deploy", "messaging"} {
+		matches, err := filepath.Glob(filepath.Join(root, "infra", dir, "*.yaml"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		manifests = append(manifests, matches...)
+	}
+	if len(manifests) == 0 {
+		t.Fatal("found zero manifests under infra/deploy or infra/messaging — non-vacuous by design: " +
+			"finding none is a FAILURE, not a pass. Did these directories move?")
+	}
+	sort.Strings(manifests)
+
+	var problems []string
+	for _, m := range manifests {
+		rel, err := filepath.Rel(root, m)
+		if err != nil {
+			t.Fatal(err)
+		}
+		rel = filepath.ToSlash(rel)
+		body := readFile(t, m)
+
+		dec := yaml.NewDecoder(strings.NewReader(body))
+		for {
+			var doc volumeCheckDoc
+			err := dec.Decode(&doc)
+			if errors.Is(err, io.EOF) {
+				break
+			}
+			if err != nil {
+				t.Fatalf("%s: parse as YAML: %v", rel, err)
+			}
+			spec := doc.Spec.Template.Spec
+			if len(spec.Volumes) == 0 {
+				continue // a Service/PDB/Ingress/ScaledObject/etc has no pod spec here — nothing to check
+			}
+
+			mounted := map[string]bool{}
+			for _, c := range spec.Containers {
+				for _, vm := range c.VolumeMounts {
+					mounted[vm.Name] = true
+				}
+			}
+			for _, c := range spec.InitContainers {
+				for _, vm := range c.VolumeMounts {
+					mounted[vm.Name] = true
+				}
+			}
+
+			for _, v := range spec.Volumes {
+				if mounted[v.Name] {
+					continue
+				}
+				problems = append(problems, fmt.Sprintf(
+					"%s: %s %q declares volume %q but no container or initContainer mounts it",
+					rel, doc.Kind, doc.Metadata.Name, v.Name))
+			}
+		}
+	}
+	sort.Strings(problems)
+	if len(problems) > 0 {
+		t.Fatalf("these manifests declare a volume that nothing mounts:\n\n  %s\n\n"+
+			"A declared-and-unmounted volume is dead configuration that reads as working: whatever the volume "+
+			"backs (a Vault CSI secret, a config file) is never actually available inside the container, and the "+
+			"failure surfaces later as a startup error that looks like a code bug. Either mount it at the path the "+
+			"consuming code expects, or remove the volume if it is genuinely unused.",
+			strings.Join(problems, "\n  "))
+	}
+}
+
+// volumeCheckDoc is the minimal shape of a Kubernetes workload manifest needed to
+// check volumes against volumeMounts. Deployment/StatefulSet/DaemonSet/Job and the
+// Argo Rollout all carry the pod spec at spec.template.spec (the same assumption
+// tools/rig_dev_patch.py makes); anything else (Service, PodDisruptionBudget,
+// Ingress, ScaledObject, AnalysisTemplate, ...) decodes with an empty
+// spec.template.spec and is skipped above.
+type volumeCheckDoc struct {
+	Kind     string `yaml:"kind"`
+	Metadata struct {
+		Name string `yaml:"name"`
+	} `yaml:"metadata"`
+	Spec struct {
+		Template struct {
+			Spec struct {
+				Volumes []struct {
+					Name string `yaml:"name"`
+				} `yaml:"volumes"`
+				Containers     []volumeCheckContainer `yaml:"containers"`
+				InitContainers []volumeCheckContainer `yaml:"initContainers"`
+			} `yaml:"spec"`
+		} `yaml:"template"`
+	} `yaml:"spec"`
+}
+
+type volumeCheckContainer struct {
+	VolumeMounts []struct {
+		Name string `yaml:"name"`
+	} `yaml:"volumeMounts"`
 }
 
 // servesPath reports whether the service registers the HTTP path.

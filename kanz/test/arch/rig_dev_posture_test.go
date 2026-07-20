@@ -55,6 +55,48 @@ func TestRigDevSecretsShadowEverySecretProviderClassTheRigMounts(t *testing.T) {
 		}
 	}
 
+	// redis.yaml lives under infra/messaging, not infra/deploy, so it is not a
+	// rigWorkloads entry — but tools/rig-apply.sh now routes it through the same
+	// tools/rig_dev_patch.py as the workloads above, so its Vault CSI volume
+	// (redis-auth) is bound by the exact same rule: no matching dev Secret means an
+	// empty mount and Redis exits 1 rather than start unauthenticated.
+	redisManifest := stripYAMLComments(readFile(t, filepath.Join(root, "infra", "messaging", "redis.yaml")))
+	for _, m := range regexp.MustCompile(`secretProviderClass:\s*(\S+)`).FindAllStringSubmatch(redisManifest, -1) {
+		spc := m[1]
+		if !declared[spc] {
+			t.Errorf("infra/messaging/redis.yaml mounts SecretProviderClass %q but no dev Secret of that name is "+
+				"declared in rig-dev-secrets.yaml or postgres-dev.yaml.\n"+
+				"tools/rig-apply.sh routes this manifest through tools/rig_dev_patch.py, which rewrites the Vault "+
+				"CSI volume into secretName: %s — an undeclared Secret mounts empty and Redis's own start script "+
+				"refuses to run rather than come up unauthenticated.", spc, spc)
+		}
+	}
+
+	// --- the redis-auth password and the password embedded in redis-url MUST MATCH ---
+	//
+	// Redis authenticates with exactly one password (redis.yaml's --requirepass); a
+	// webhook-ingest DSN carrying a different one connects to nothing and the
+	// cross-pod nonce store never comes up. Two literal copies of a secret in one
+	// file is exactly the kind of drift a text diff misses, so parse both out of the
+	// SAME devCfg blob and compare them structurally rather than trusting they were
+	// typed identically.
+	urlPassword := regexp.MustCompile(`redis-url:\s*redis://:([^@\s]+)@`).FindStringSubmatch(devCfg)
+	authPassword := regexp.MustCompile(`(?s)name:\s*redis-auth\b.*?password:\s*(\S+)`).FindStringSubmatch(devCfg)
+	if urlPassword == nil {
+		t.Fatal("rig-dev-secrets.yaml's webhook-ingest-redis Secret no longer carries a redis://:<password>@ DSN. " +
+			"Redis refuses to start unauthenticated (infra/messaging/redis.yaml), so an unauthenticated DSN cannot work.")
+	}
+	if authPassword == nil {
+		t.Fatal("rig-dev-secrets.yaml declares no redis-auth Secret with a password key. infra/messaging/redis.yaml " +
+			"mounts secretProviderClass: redis-auth and refuses to start without one.")
+	}
+	if urlPassword[1] != authPassword[1] {
+		t.Errorf("rig-dev-secrets.yaml: the password embedded in webhook-ingest-redis's redis-url (%q) does not "+
+			"match redis-auth's password (%q). Redis authenticates with exactly one password; a webhook-ingest DSN "+
+			"carrying a different one connects to nothing and the cross-pod nonce store never comes up.",
+			urlPassword[1], authPassword[1])
+	}
+
 	// --- the DSN must be the one convention, not a third copy of it ------------
 	dsn := regexp.MustCompile(`postgres://[^\s"']+`).FindString(pgCfg)
 	if dsn == "" {

@@ -191,6 +191,7 @@ spec:
               drop: ["ALL"]
           volumeMounts:
             - { name: webhook-config, mountPath: /run/secrets/webhook, readOnly: true }
+            - { name: redis, mountPath: /run/secrets/redis, readOnly: true }
             - { name: tmp, mountPath: /tmp }
       volumes:
         - name: tmp
