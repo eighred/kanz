@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """Adapt a production manifest for the dev rig, on stdout.
 
-Two rig-only transformations, both because the rig is deliberately unlike prod:
+Three rig-only transformations, each because the rig is deliberately unlike prod
+(Vault CSI -> dev Secret; :latest -> IfNotPresent; SPIFFE bus mesh -> plaintext,
+since the rig's NATS is dev-plaintext). See the inline comments for each:
 
 1. Vault CSI -> dev Secret. Production mounts DSNs and credentials from Vault via
    secrets-store.csi.k8s.io. The dev rig has no Vault (ONBOARD-M6), so each such
@@ -26,6 +28,17 @@ import yaml
 
 VAULT_DRIVER = "secrets-store.csi.k8s.io"
 
+# Env vars that point a workload at production-only infrastructure the rig does
+# not run. Removed so the workload takes its in-process / plaintext fallback.
+_DROP_ENV_EXACT = frozenset({"OMS_VENUE_ENDPOINTS"})
+
+
+def _drop_on_rig(name):
+    if name in _DROP_ENV_EXACT:
+        return True
+    # Any SPIFFE workload-API socket (SPIFFE_ENDPOINT_SOCKET, *_SPIFFE_SOCKET, ...).
+    return "SPIFFE" in name and "SOCKET" in name
+
 
 def patch_pod_spec(spec, path):
     for vol in spec.get("volumes") or []:
@@ -45,10 +58,34 @@ def patch_pod_spec(spec, path):
         vol.pop("csi")
         vol["secret"] = {"secretName": spc}
 
-    # Every container runs a kind-loaded image; never let the node reach for ghcr.
     for key in ("initContainers", "containers"):
         for container in spec.get(key) or []:
+            # Every container runs a kind-loaded image; never reach for ghcr.
             container["imagePullPolicy"] = "IfNotPresent"
+
+            # Strip the env vars that wire this workload to production-only
+            # infrastructure the rig deliberately does not run, so it falls back to
+            # the in-process / plaintext path instead of crash-looping on a dial
+            # that can never succeed here:
+            #
+            #  * SPIFFE workload-API socket (any *SPIFFE*SOCKET*). With it set the
+            #    transport mesh comes up (mesh.Enabled()) and the workload dials NATS
+            #    over mTLS; the rig's NATS is the declared dev-plaintext deviation
+            #    (infra/nats/bootstrap-job-dev-plaintext.yaml), so the dial fails
+            #    "nats: secure connection not available". Dropping the socket leaves
+            #    the mesh disabled (transport.NewMesh("").Enabled() == false) and the
+            #    workload uses the same plaintext bus the other loop services do. SPIRE
+            #    still issues the pod an SVID; it is simply unused until NATS speaks mTLS.
+            #
+            #  * OMS_VENUE_ENDPOINTS. INFRA-M7a made every venue an out-of-process
+            #    adapter (venue-binance/venue-okx), and those are NOT on the rig — they
+            #    need real exchange credentials the rig must never hold. An empty value
+            #    makes the OMS use its in-process simulator on OMS_SIM_VENUE_MIC (XSIM)
+            #    instead of dialing venue-*.svc:9000 and failing "connection refused".
+            #    Orders on the rig target XSIM.
+            env = container.get("env")
+            if env:
+                container["env"] = [e for e in env if not _drop_on_rig(e.get("name", ""))]
 
 
 def main():
