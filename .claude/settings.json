@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(kubectl delete:*)",
+      "Bash(kubectl delete)"
+    ]
+  }
+}
