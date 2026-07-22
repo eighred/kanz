@@ -30,9 +30,11 @@ rules:
   - apiGroups: ["authentication.k8s.io"]
     resources: ["tokenreviews"]
     verbs: ["create"]
-  # Controller-manager workload discovery + SVID DNS-name population.
+  # Controller-manager workload discovery + SVID DNS-name population. It also
+  # watches endpoints; without that watch its informer cache never syncs and no
+  # ClusterSPIFFEID is ever reconciled into a registration entry (0 entries).
   - apiGroups: [""]
-    resources: ["pods", "nodes", "namespaces"]
+    resources: ["pods", "nodes", "namespaces", "endpoints"]
     verbs: ["get", "list", "watch"]
   # Controller-manager reconciles the SPIFFE CRDs and publishes the trust bundle.
   - apiGroups: ["spire.spiffe.io"]
@@ -41,6 +43,13 @@ rules:
   - apiGroups: ["spire.spiffe.io"]
     resources: ["clusterspiffeids/status", "clusterfederatedtrustdomains/status", "clusterstaticentries/status"]
     verbs: ["get", "update", "patch"]
+  # Controller-manager mints its own webhook serving cert on startup and patches
+  # the caBundle into this ValidatingWebhookConfiguration. Without this rule it
+  # fails "failed to mint initial webhook certificate" and crash-loops before the
+  # agent can ever attest — the manifest could not come up on a fresh cluster.
+  - apiGroups: ["admissionregistration.k8s.io"]
+    resources: ["validatingwebhookconfigurations"]
+    verbs: ["get", "list", "watch", "patch"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding

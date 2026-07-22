@@ -80,9 +80,23 @@ spec:
       initContainers:
         # Block until the server is reachable so the agent doesn't crash-loop
         # on a cold start.
+        #
+        # ghcr.io/spiffe/wait-for-it is not anonymously pullable (ghcr 403s the
+        # token request), so a cluster without ghcr credentials could never start
+        # the agent. A pinned busybox does the same TCP wait with an image that
+        # pulls everywhere; the semantics (poll spire-server:8081, give up after
+        # ~120s) are unchanged.
         - name: wait-for-server
-          image: ghcr.io/spiffe/wait-for-it:latest
-          args: ["-t", "120", "spire-server:8081"]
+          image: busybox:1.36
+          command: ["sh", "-c"]
+          args:
+            - |
+              for i in $(seq 1 120); do
+                nc -z spire-server 8081 && exit 0
+                sleep 1
+              done
+              echo "timed out waiting for spire-server:8081" >&2
+              exit 1
       containers:
         - name: spire-agent
           image: ghcr.io/spiffe/spire-agent:1.9.6
@@ -104,7 +118,16 @@ spec:
         # workloads mount it without a hostPath of their own.
         - name: spiffe-csi-driver
           image: ghcr.io/spiffe/spiffe-csi-driver:0.2.6
+          # -node-id is required; the driver refuses to start without it
+          # ("node ID is required"). It comes from the node the DaemonSet pod
+          # landed on, via the downward API.
+          env:
+            - name: MY_NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
           args:
+            - "-node-id=$(MY_NODE_NAME)"
             - "-workload-api-socket-dir=/spire-agent-socket"
             - "-csi-socket-path=/spiffe-csi/csi.sock"
           securityContext:

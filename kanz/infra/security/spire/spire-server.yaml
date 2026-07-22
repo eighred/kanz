@@ -64,19 +64,39 @@ data:
 
       # Server exposes a health endpoint for the probes below.
       Health {}
+
+      # Publish the trust bundle into the spire-bundle ConfigMap on every CA
+      # rotation. Without this the ConfigMap stays empty, the agent cannot read
+      # /run/spire/bundle/bundle.crt to bootstrap trust with the server, and the
+      # whole DaemonSet crash-loops on "could not parse trust bundle". The
+      # spire-bundle-writer Role (rbac.yaml) already grants the get/patch this
+      # needs — it was provisioned for this notifier, which was never wired.
+      Notifier "k8sbundle" {
+        plugin_data {
+          namespace      = "spire-system"
+          config_map     = "spire-bundle"
+          config_map_key = "bundle.crt"
+        }
+      }
     }
 
     health_checks {
       listener_enabled = true
       bind_address     = "0.0.0.0"
-      bind_port        = "8080"
+      # 8085, not 8080: the controller-manager sidecar shares this pod's network
+      # namespace and controller-runtime hardwires its metrics server to :8080
+      # (the metricsBindAddress config field is inert in controller-manager
+      # 0.5.0's controller-runtime). Colliding on 8080 left the server unable to
+      # bind its health listener, so it never went Ready and the spire-server
+      # Service had zero endpoints — no agent could reach it.
+      bind_port        = "8085"
       live_path        = "/live"
       ready_path       = "/ready"
     }
 ---
 # Controller-manager config (sidecar). Reconciles ClusterSPIFFEID CRs into
-# registration entries and writes the trust bundle into the spire-bundle
-# ConfigMap that agents + workloads consume.
+# registration entries. (The trust bundle itself is published to the spire-bundle
+# ConfigMap by the server's k8sbundle Notifier, not by the controller-manager.)
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -92,12 +112,21 @@ data:
       name: spire-controller-manager
     clusterName: kanz
     trustDomain: kanz.internal
+    # Defaults to the ValidatingWebhookConfiguration named
+    # "spire-controller-manager-webhook", declared below. The controller-manager
+    # mints its own serving cert on startup and patches the caBundle into it;
+    # this version treats the webhook as required, so both that object and its
+    # Service must exist or the manager crash-loops before reconciling any SVID.
     # Single-source-of-truth bundle ConfigMap, refreshed on CA rotation.
     entryIDPrefixCleanup: ""
     spireServerSocketPath: "/tmp/spire-server/private/api.sock"
-    metricsBindAddress: "0.0.0.0:8082"
+    # NOTE: controller-manager 0.5.0 runs on a controller-runtime that dropped
+    # componentconfig, so this field is inert — metrics always serve on :8080.
+    # The server's health listener is moved to 8085 to avoid that fixed port.
+    metricsBindAddress: "0.0.0.0:8080"
 ---
-# Empty bundle ConfigMap; the controller-manager populates `bundle.crt`.
+# Empty bundle ConfigMap; the server's k8sbundle Notifier populates `bundle.crt`
+# on each CA rotation (see the Notifier plugin in server.conf above).
 # Workloads in kanz-messaging/kanz-services mount or read this to verify peers.
 apiVersion: v1
 kind: ConfigMap
@@ -150,11 +179,11 @@ spec:
           ports:
             - containerPort: 8081
           livenessProbe:
-            httpGet: { path: /live, port: 8080 }
+            httpGet: { path: /live, port: 8085 }
             initialDelaySeconds: 15
             periodSeconds: 60
           readinessProbe:
-            httpGet: { path: /ready, port: 8080 }
+            httpGet: { path: /ready, port: 8085 }
             initialDelaySeconds: 5
             periodSeconds: 5
           volumeMounts:
@@ -166,7 +195,11 @@ spec:
           image: ghcr.io/spiffe/spire-controller-manager:0.5.0
           args: ["--config=/run/spire/controller-manager/controller-manager-config.yaml"]
           ports:
-            - { name: metrics, containerPort: 8082 }
+            # controller-runtime serves metrics on :8080 in this version (see the
+            # metricsBindAddress note in the config above).
+            - { name: metrics, containerPort: 8080 }
+            # Admission webhook server; the webhook Service below routes to it.
+            - { name: webhook, containerPort: 9443 }
           volumeMounts:
             - { name: spire-controller-manager-config, mountPath: /run/spire/controller-manager, readOnly: true }
             - { name: spire-server-socket, mountPath: /tmp/spire-server/private }
@@ -185,3 +218,64 @@ spec:
         resources:
           requests:
             storage: 1Gi
+---
+# Routes admission traffic to the controller-manager's webhook server (port 9443
+# on the spire-server pod). The controller-manager treats the webhook as required
+# and patches its own serving caBundle into the ValidatingWebhookConfiguration
+# below on startup; without this Service the API server cannot reach the webhook
+# and CR admission would hang under a Fail policy.
+apiVersion: v1
+kind: Service
+metadata:
+  name: spire-controller-manager-webhook-service
+  namespace: spire-system
+  labels:
+    app.kubernetes.io/part-of: kanz
+spec:
+  selector:
+    app: spire-server
+  ports:
+    - port: 443
+      targetPort: 9443
+      protocol: TCP
+---
+# The controller-manager mints a serving cert on startup and patches its caBundle
+# into this object (clientConfig.caBundle is intentionally left unset here). The
+# policy is Ignore so a transient webhook outage never blocks reconciliation or
+# CR writes on the dev rig — the webhook is an admission convenience, not the SVID
+# issuance path, which runs through the reconciler regardless.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingWebhookConfiguration
+metadata:
+  name: spire-controller-manager-webhook
+  labels:
+    app.kubernetes.io/part-of: kanz
+webhooks:
+  - name: vclusterspiffeid.kb.io
+    admissionReviewVersions: ["v1"]
+    sideEffects: None
+    failurePolicy: Ignore
+    clientConfig:
+      service:
+        name: spire-controller-manager-webhook-service
+        namespace: spire-system
+        path: /validate-spire-spiffe-io-v1alpha1-clusterspiffeid
+    rules:
+      - apiGroups: ["spire.spiffe.io"]
+        apiVersions: ["v1alpha1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["clusterspiffeids"]
+  - name: vclusterfederatedtrustdomain.kb.io
+    admissionReviewVersions: ["v1"]
+    sideEffects: None
+    failurePolicy: Ignore
+    clientConfig:
+      service:
+        name: spire-controller-manager-webhook-service
+        namespace: spire-system
+        path: /validate-spire-spiffe-io-v1alpha1-clusterfederatedtrustdomain
+    rules:
+      - apiGroups: ["spire.spiffe.io"]
+        apiVersions: ["v1alpha1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["clusterfederatedtrustdomains"]

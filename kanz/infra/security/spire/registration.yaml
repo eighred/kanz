@@ -30,4 +30,3 @@ spec:
   # Don't hand identities to privileged/host-network infra pods that aren't
   # part of the workload mesh.
   autoPopulateDNSNames: true
-  fallback: false
