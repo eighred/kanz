@@ -178,6 +178,12 @@ metadata:
 spec:
   # SVID is per-pod ephemeral; no persistent volume semantics.
   attachRequired: false
+  # REQUIRED, not cosmetic: kubelet only injects the pod-info volume attributes —
+  # which INCLUDE the csi.storage.k8s.io/ephemeral="true" marker — when this is
+  # true. spiffe-csi-driver rejects any NodePublishVolume lacking that marker with
+  # "only ephemeral volumes are supported", so with podInfoOnMount:false every
+  # workload's `spiffe` mount fails and the pod is stuck ContainerCreating forever.
+  podInfoOnMount: true
   fsGroupPolicy: None
   volumeLifecycleModes:
     - Ephemeral
