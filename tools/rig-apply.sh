@@ -123,16 +123,37 @@ apply_deploy() {
   # second, undeclared deviation from the "one patch path" this stage exists to be.
   python3 tools/rig_dev_patch.py kanz/infra/messaging/redis.yaml | kubectl --context "$KUBECTL_CONTEXT" apply -f -
 
+  # The rig runs a curated subset — the trading loop — not the whole 23-service
+  # estate. This is NOT a glob over *-deploy.yaml, deliberately:
+  #   * The in-repo sim venue lives INSIDE the OMS (NewSimVenue), so venue-binance
+  #     and venue-okx are not part of the loop and must never run here — they mount
+  #     Vault CSI volumes for REAL exchange keys that have no committed dev Secret
+  #     (and rig-dev-secrets.yaml is guarded to forbid one).
+  #   * risk-engine is an Argo Rollout; a Rollout does nothing without the Argo
+  #     Rollouts controller, which the rig does not run.
+  #   * The heavy ML / analytics services are off the loop.
+  # This list is the SAME set that test/arch/rig_dev_posture_test.go pins as
+  # rigWorkloads; that guard asserts this script and it agree, so the two cannot
+  # drift. Infra deps (postgres, redis above; NATS already on the spine) complete
+  # the loop.
+  local RIG_WORKLOADS=(
+    oms-deploy.yaml
+    tv-sync-deploy.yaml
+    api-gateway-deploy.yaml
+    webhook-ingest-deploy.yaml
+    compliance-deploy.yaml
+  )
   local applied=0
-  for f in "$DEPLOY_DIR"/*-deploy.yaml "$DEPLOY_DIR"/*-rollout.yaml; do
-    [ -e "$f" ] || continue
+  for name in "${RIG_WORKLOADS[@]}"; do
+    local f="$DEPLOY_DIR/$name"
+    [ -e "$f" ] || { echo "FATAL: rig workload $f is missing; the loop cannot come up without it" >&2; exit 1; }
     # Swap the Vault CSI volumes for the dev Secret; leave the SPIFFE CSI volumes
     # alone, because after --spire they are real.
     python3 tools/rig_dev_patch.py "$f" | kubectl --context "$KUBECTL_CONTEXT" apply -f -
     applied=$((applied+1))
   done
-  [ "$applied" -gt 0 ] || { echo "FATAL: applied 0 workloads from $DEPLOY_DIR" >&2; exit 1; }
-  echo "==> applied $applied workloads"
+  [ "$applied" -eq "${#RIG_WORKLOADS[@]}" ] || { echo "FATAL: applied $applied of ${#RIG_WORKLOADS[@]} rig workloads" >&2; exit 1; }
+  echo "==> applied $applied rig workloads (trading-loop subset)"
 }
 
 [ $# -gt 0 ] || usage

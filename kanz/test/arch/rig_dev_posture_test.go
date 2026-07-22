@@ -229,3 +229,47 @@ var rigWorkloads = []string{
 	"webhook-ingest-deploy.yaml",
 	"compliance-deploy.yaml",
 }
+
+// tools/rig-apply.sh --deploy must apply EXACTLY rigWorkloads, no more and no
+// fewer. The two once disagreed: the guard above modeled the rig as this curated
+// subset while apply_deploy globbed every *-deploy.yaml, so the rig came up as the
+// whole 23-service estate — venue-binance/venue-okx crash-looping on absent
+// exchange keys, an Argo Rollout that never ran, heavy ML services off the loop.
+// A curated list in one file and a glob in the other is precisely the kind of
+// silent drift this repo exists to make unrepresentable, so this arm pins them to
+// each other: change one and the build fails until the other matches.
+func TestRigApplyDeploysExactlyRigWorkloads(t *testing.T) {
+	repoRoot := filepath.Dir(moduleRoot(t))
+	script := readFile(t, filepath.Join(repoRoot, "tools", "rig-apply.sh"))
+
+	block := regexp.MustCompile(`(?s)RIG_WORKLOADS=\((.*?)\)`).FindStringSubmatch(script)
+	if block == nil {
+		t.Fatal("tools/rig-apply.sh no longer contains a RIG_WORKLOADS=( ... ) array. apply_deploy " +
+			"must enumerate the rig's workloads explicitly (not glob infra/deploy), and this guard " +
+			"reads that array to prove it matches rigWorkloads. If the array was renamed, teach this " +
+			"guard the new name rather than deleting the check.")
+	}
+
+	got := map[string]bool{}
+	for _, m := range regexp.MustCompile(`\S+-(?:deploy|rollout)\.yaml`).FindAllString(block[1], -1) {
+		got[m] = true
+	}
+	want := map[string]bool{}
+	for _, w := range rigWorkloads {
+		want[w] = true
+	}
+
+	for w := range want {
+		if !got[w] {
+			t.Errorf("rigWorkloads lists %q but tools/rig-apply.sh does not apply it. The rig would be "+
+				"missing a workload its loop needs; add it to RIG_WORKLOADS in apply_deploy.", w)
+		}
+	}
+	for g := range got {
+		if !want[g] {
+			t.Errorf("tools/rig-apply.sh applies %q but rigWorkloads does not list it. Either the rig is "+
+				"deploying something the posture guard never vetted for a dev Secret, or the two drifted; "+
+				"reconcile them. (A workload that mounts Vault CSI also needs a declared dev Secret here.)", g)
+		}
+	}
+}

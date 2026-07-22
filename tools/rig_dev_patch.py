@@ -1,9 +1,21 @@
 #!/usr/bin/env python3
-"""Swap Vault CSI volumes for the rig's dev Secret, on stdout.
+"""Adapt a production manifest for the dev rig, on stdout.
 
-Production mounts DSNs and credentials from Vault via secrets-store.csi.k8s.io.
-The dev rig has no Vault (ONBOARD-M6), so each such volume becomes a reference to
-the committed rig-dev-secrets Secret.
+Two rig-only transformations, both because the rig is deliberately unlike prod:
+
+1. Vault CSI -> dev Secret. Production mounts DSNs and credentials from Vault via
+   secrets-store.csi.k8s.io. The dev rig has no Vault (ONBOARD-M6), so each such
+   volume becomes a reference to the committed rig-dev-secrets Secret.
+
+2. imagePullPolicy -> IfNotPresent on every container. The images all carry the
+   :latest tag, which Kubernetes defaults to imagePullPolicy: Always. The rig runs
+   images that tools/rig-images.sh built locally and `kind load`ed into the node;
+   there is no registry to pull ghcr.io/kanz-eng/* from (it is private and the
+   node is unauthenticated), so Always guarantees ImagePullBackOff. Forcing
+   IfNotPresent makes the loaded image authoritative. Production keeps Always so it
+   really does pull from ghcr.io — that is why this belongs in the rig patch and
+   not in the committed manifest. It also retires the hand-patch that did this on
+   the rig on 2026-07-12 and recorded nowhere.
 
 csi.spiffe.io volumes are deliberately LEFT ALONE: after `rig-apply.sh --spire`
 the rig runs real SPIRE, so its SVIDs are genuine and stripping them would
@@ -32,6 +44,11 @@ def patch_pod_spec(spec, path):
         # the convention postgres-dev.yaml already established with `oms-db`.
         vol.pop("csi")
         vol["secret"] = {"secretName": spc}
+
+    # Every container runs a kind-loaded image; never let the node reach for ghcr.
+    for key in ("initContainers", "containers"):
+        for container in spec.get(key) or []:
+            container["imagePullPolicy"] = "IfNotPresent"
 
 
 def main():
