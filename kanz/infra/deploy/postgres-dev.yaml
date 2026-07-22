@@ -60,6 +60,17 @@ data:
     CREATE DATABASE kanzapp OWNER kanzapp;
     \connect kanzapp
     GRANT ALL ON SCHEMA public TO kanzapp;
+  # tv-sync keeps its FACT LOG in a SEPARATE database from the OMS, the same shape
+  # production has: each service holds its own Vault DSN (kv/kanz/tv-sync vs
+  # kv/kanz/oms), i.e. its own database. They MUST NOT share one on the rig either:
+  # kanz-migrate keys schema_migrations by version, and the OMS's 0001_orders and
+  # tv-sync's 0001_fact_log BOTH claim version 1 — in one database tv-sync's migrate
+  # reads the OMS's version-1 row and rejects it as a modified migration, and refuses
+  # to start. Same kanzapp role (it owns this database too, so FORCE RLS still binds).
+  020-tvsync.sql: |
+    CREATE DATABASE tvsync OWNER kanzapp;
+    \connect tvsync
+    GRANT ALL ON SCHEMA public TO kanzapp;
 ---
 apiVersion: v1
 kind: Secret

@@ -168,19 +168,37 @@ func TestRigDevSecretsShadowEverySecretProviderClassTheRigMounts(t *testing.T) {
 			urlPassword[1], authPassword[1])
 	}
 
-	// --- the DSN must be the one convention, not a third copy of it ------------
-	dsn := regexp.MustCompile(`postgres://[^\s"']+`).FindString(pgCfg)
-	if dsn == "" {
-		t.Fatal("postgres-dev.yaml no longer carries a postgres:// DSN. That manifest is the " +
-			"source of truth for the rig's Postgres convention (itself pinned to CI); if it " +
+	// --- every database a dev Secret addresses must be one Postgres actually creates ---
+	//
+	// A DSN naming a database postgres-dev.yaml never CREATEs fails at runtime with an
+	// authentication error that looks like a wrong password and is really a missing
+	// database — the failure that cost a session on 2026-07-20. This checks BOTH files'
+	// DSNs (oms-db in postgres-dev, tv-sync-db + redis in rig-dev-secrets) against the
+	// set of databases the initdb script creates. It is why tv-sync gets its OWN
+	// database (tvsync): kanz-migrate keys schema_migrations by version, so sharing the
+	// OMS's database makes their two 0001 migrations collide, and the guard now proves
+	// the separate database it depends on is actually provisioned.
+	created := map[string]bool{}
+	for _, m := range regexp.MustCompile(`CREATE DATABASE\s+(\w+)`).FindAllStringSubmatch(pgCfg, -1) {
+		created[m[1]] = true
+	}
+	if len(created) == 0 {
+		t.Fatal("postgres-dev.yaml's initdb no longer CREATEs any database. That manifest is the source " +
+			"of truth for which databases the rig's Secrets may address (itself pinned to CI); if it " +
 			"changed shape, teach this guard the new one rather than deleting it.")
 	}
-	if !strings.Contains(devCfg, dsn) {
-		t.Errorf("rig-dev-secrets.yaml does not carry the DSN %q from postgres-dev.yaml.\n"+
-			"A rig whose Secret addresses a different database than the one its Postgres "+
-			"manifest creates fails at runtime with an authentication error that looks like a "+
-			"password problem and is not — which is exactly the failure that cost a session "+
-			"on 2026-07-20.", dsn)
+	pgDSNs := regexp.MustCompile(`postgres://[^/\s"']+/([A-Za-z0-9_]+)`).FindAllStringSubmatch(devCfg+pgCfg, -1)
+	if pgDSNs == nil {
+		t.Fatal("no postgres:// DSN with a database name found in rig-dev-secrets.yaml or postgres-dev.yaml. " +
+			"The rig's workloads reach Postgres through these DSNs; if their shape changed, teach this guard.")
+	}
+	for _, m := range pgDSNs {
+		if db := m[1]; !created[db] {
+			t.Errorf("a dev Secret's DSN addresses database %q, but postgres-dev.yaml's initdb never "+
+				"CREATE DATABASE %s. The pod fails at runtime with an authentication error that looks like a "+
+				"wrong password and is really a missing database — the failure that cost a session on "+
+				"2026-07-20. Point the DSN at a created database, or add the database to the initdb script.", db, db)
+		}
 	}
 
 	// --- posture ---------------------------------------------------------------
