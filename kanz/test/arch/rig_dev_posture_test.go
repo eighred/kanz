@@ -1,10 +1,14 @@
 package arch
 
 import (
+	"errors"
+	"io"
 	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
+
+	"gopkg.in/yaml.v3"
 )
 
 // THE RIG HAS EXACTLY ONE DECLARED DEVIATION FROM PRODUCTION.
@@ -70,6 +74,73 @@ func TestRigDevSecretsShadowEverySecretProviderClassTheRigMounts(t *testing.T) {
 				"CSI volume into secretName: %s — an undeclared Secret mounts empty and Redis's own start script "+
 				"refuses to run rather than come up unauthenticated.", spc, spc)
 		}
+	}
+
+	// --- the redis-url HOST and the redis-auth NAMESPACE must match redis.yaml's own Service ---
+	//
+	// The original Critical-1 bug was exactly a wrong host: redis-url pointed at
+	// redis.kanz-services.svc while Redis's Service is declared in kanz-messaging, so
+	// the DNS name could never resolve. The password-match arm below would not have
+	// caught that — it only compares the two passwords, never the host — so a future
+	// edit that reverted the host (or moved redis-auth back to kanz-services) would
+	// pass every existing arm and silently reintroduce the exact bug.
+	//
+	// Derived, not hardcoded: parsed structurally out of infra/messaging/redis.yaml's
+	// own Service document (gopkg.in/yaml.v3, the same parser and pattern
+	// TestEveryDeclaredVolumeIsMounted uses), so a manifest edit that moves Redis to a
+	// different namespace changes what this guard expects rather than leaving it
+	// checking a copied-and-pasted literal.
+	var redisSvcName, redisSvcNamespace string
+	dec := yaml.NewDecoder(strings.NewReader(redisManifest))
+	for {
+		var doc struct {
+			Kind     string `yaml:"kind"`
+			Metadata struct {
+				Name      string `yaml:"name"`
+				Namespace string `yaml:"namespace"`
+			} `yaml:"metadata"`
+		}
+		err := dec.Decode(&doc)
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			t.Fatalf("infra/messaging/redis.yaml: parse as YAML: %v", err)
+		}
+		if doc.Kind == "Service" {
+			redisSvcName = doc.Metadata.Name
+			redisSvcNamespace = doc.Metadata.Namespace
+			break
+		}
+	}
+	if redisSvcName == "" || redisSvcNamespace == "" {
+		t.Fatal("infra/messaging/redis.yaml: found no Service to derive the redis-url host from. " +
+			"This guard needs a Service document (kind: Service) to know the DNS name Redis actually answers on.")
+	}
+	wantHost := redisSvcName + "." + redisSvcNamespace + ".svc"
+
+	urlHost := regexp.MustCompile(`redis-url:\s*redis://:[^@\s]+@([^\s:]+):`).FindStringSubmatch(devCfg)
+	if urlHost == nil {
+		t.Fatal("rig-dev-secrets.yaml's webhook-ingest-redis Secret no longer carries a redis://:<password>@<host>: DSN " +
+			"this guard can parse a host out of.")
+	}
+	if urlHost[1] != wantHost {
+		t.Errorf("rig-dev-secrets.yaml: webhook-ingest-redis's redis-url points at host %q, but "+
+			"infra/messaging/redis.yaml's Service is %q in namespace %q, which only resolves as %q. "+
+			"A wrong host here is exactly the Critical-1 bug this rig shipped with: the DSN's host cannot "+
+			"resolve, and webhook-ingest never reaches its nonce store.", urlHost[1], redisSvcName, redisSvcNamespace, wantHost)
+	}
+
+	authNamespace := regexp.MustCompile(`(?s)name:\s*redis-auth\b.*?namespace:\s*(\S+)`).FindStringSubmatch(devCfg)
+	if authNamespace == nil {
+		t.Fatal("rig-dev-secrets.yaml declares no redis-auth Secret with a namespace this guard can parse.")
+	}
+	if authNamespace[1] != redisSvcNamespace {
+		t.Errorf("rig-dev-secrets.yaml: the redis-auth Secret declares namespace %q, but "+
+			"infra/security/secrets/secretproviderclass.yaml's redis-auth SecretProviderClass (and the Redis pod "+
+			"that mounts it) live in namespace %q, matching infra/messaging/redis.yaml's own Service. A same-named "+
+			"Secret in the wrong namespace is invisible to the pod that needs it — the mount resolves to nothing "+
+			"and Redis refuses to start unauthenticated.", authNamespace[1], redisSvcNamespace)
 	}
 
 	// --- the redis-auth password and the password embedded in redis-url MUST MATCH ---
