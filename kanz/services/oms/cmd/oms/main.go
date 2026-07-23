@@ -356,6 +356,26 @@ func runConsumers(ctx context.Context, cfg config.Config, readiness *server.Read
 	// replica — a group would arm one OMS pod and leave the other ungoverned.
 	mandateSub := comp.SubjectMandateAll
 
+	// RECONCILE WHAT THE LAST PROCESS LEFT MID-FLIGHT, BEFORE ANYTHING CAN ADD MORE.
+	//
+	// An order saved as ROUTED whose process died before the fill was folded has
+	// NO redelivery coming — its command was acked. Nothing else in this system
+	// will ever mention it again, and it is indistinguishable over the API from a
+	// limit order resting normally at the exchange. This is the only thing that
+	// finds it. It runs before the subscriptions and before readiness, the way
+	// tv-sync rebuilds its book before it serves one.
+	//
+	// A failure here is fatal on purpose. A pod that cannot account for the orders
+	// its predecessor was working does not know what the fund holds, and admitting
+	// new orders on top of that is not degraded operation — it is trading blind.
+	sweepStart := time.Now()
+	swept, err := svc.SweepInterrupted(ctx)
+	if err != nil {
+		logger.Error("could not reconcile the orders left in flight by the previous process — refusing to admit new orders on a book we cannot account for", "err", err, "reconciled_before_failure", swept)
+		return err
+	}
+	logger.Info("in-flight orders reconciled", "count", swept, "took", time.Since(sweepStart).String())
+
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 

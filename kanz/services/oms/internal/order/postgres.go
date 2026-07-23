@@ -130,6 +130,50 @@ func (p *Postgres) List(ctx context.Context) ([]*orderpb.OrderState, error) {
 	return out, rows.Err()
 }
 
+// ListByStatus selects the orders currently in one of the given statuses.
+//
+// It reads the DENORMALIZED status column, which is what orders_status_idx
+// covers, so the startup sweep costs one index scan over the open orders rather
+// than a full scan over every order the fund has ever placed. The authoritative
+// state is still the marshaled proto in `state` — status is the index key, not
+// the truth, and the two are written in the same statement so they cannot drift.
+//
+// Tenant scoping is NOT applied here and must not be: RLS is FORCEd on this
+// table (migrations/0001_orders.sql) and the policy filters on
+// current_setting('app.tenant_id'), exactly as it does for List and Load.
+func (p *Postgres) ListByStatus(ctx context.Context, statuses ...orderpb.OrderStatus) ([]*orderpb.OrderState, error) {
+	if len(statuses) == 0 {
+		return nil, nil
+	}
+	codes := make([]int32, 0, len(statuses))
+	for _, s := range statuses {
+		codes = append(codes, int32(s))
+	}
+	rows, err := p.pool.Query(ctx,
+		`SELECT order_id, state FROM orders WHERE status = ANY($1) ORDER BY order_id`, codes)
+	if err != nil {
+		return nil, fmt.Errorf("list orders by status: %w", err)
+	}
+	defer rows.Close()
+
+	var out []*orderpb.OrderState
+	for rows.Next() {
+		var (
+			id   string
+			blob []byte
+		)
+		if err := rows.Scan(&id, &blob); err != nil {
+			return nil, fmt.Errorf("scan order: %w", err)
+		}
+		st, err := unmarshalState(blob, id)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, st)
+	}
+	return out, rows.Err()
+}
+
 func unmarshalState(blob []byte, orderID string) (*orderpb.OrderState, error) {
 	var st orderpb.OrderState
 	if err := proto.Unmarshal(blob, &st); err != nil {

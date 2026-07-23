@@ -49,6 +49,13 @@ type Store interface {
 	Load(ctx context.Context, orderID string) (*orderpb.OrderState, error)
 	// List returns a snapshot of all known orders, for bootstrap/inspection.
 	List(ctx context.Context) ([]*orderpb.OrderState, error)
+	// ListByStatus returns every order currently in one of the given statuses.
+	// It exists for the startup sweep, which wants the OPEN orders and must not
+	// load every order the fund has ever placed to find them. A durable backend
+	// must answer it with a selection, not a scan — migrations/0001_orders.sql
+	// carries orders_status_idx on (tenant_id, status) for exactly this.
+	// Passing no statuses returns nothing.
+	ListByStatus(ctx context.Context, statuses ...orderpb.OrderStatus) ([]*orderpb.OrderState, error)
 }
 
 // MemoryStore is the in-process Store. Goroutine-safe; stores cloned protos so
@@ -105,6 +112,25 @@ func (m *MemoryStore) List(_ context.Context) ([]*orderpb.OrderState, error) {
 	out := make([]*orderpb.OrderState, 0, len(m.orders))
 	for _, st := range m.orders {
 		out = append(out, proto.Clone(st).(*orderpb.OrderState))
+	}
+	return out, nil
+}
+
+func (m *MemoryStore) ListByStatus(_ context.Context, statuses ...orderpb.OrderStatus) ([]*orderpb.OrderState, error) {
+	if len(statuses) == 0 {
+		return nil, nil
+	}
+	want := make(map[orderpb.OrderStatus]bool, len(statuses))
+	for _, s := range statuses {
+		want[s] = true
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	var out []*orderpb.OrderState
+	for _, st := range m.orders {
+		if want[st.GetStatus()] {
+			out = append(out, proto.Clone(st).(*orderpb.OrderState))
+		}
 	}
 	return out, nil
 }
