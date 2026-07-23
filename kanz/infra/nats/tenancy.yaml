@@ -53,14 +53,87 @@ data:
           # is admitted here before any service has anything to connect to. It
           # lives in kanz-messaging beside the broker, not in kanz-services.
           { user: "spiffe://kanz.internal/ns/kanz-messaging/sa/nats-bootstrap" }
-          # THE OPERATOR PLANE (SEC-M3c, infra/operator/halt-job.yaml). The
-          # kill-switch publishes platform.mode.changed, which lives here in
-          # __system__. It had no identity at all, so on the production broker
-          # nothing could halt the platform — and, because the gate is
-          # deny-by-default, nothing could RESUME it either: the platform could not
-          # be brought live. This SVID admits the brake and nothing else; it grants
-          # no `Trade`, and the OIDC plane cannot reach it (KANZ_BRAIN.md).
-          { user: "spiffe://kanz.internal/ns/kanz-operator/sa/kanz-halt" }
+          # THE OPERATOR PLANE (SEC-M3c, infra/operator/halt-job.yaml). Four
+          # operator CLIs — kanz-halt, kanz-mandate, kanz-altevent,
+          # kanz-household — each get their OWN SVID below, one per tool.
+          #
+          # SEC-M3d: until this change, all four PRESENTED THE SAME SVID
+          # (kanz-halt's), AND — the part that actually mattered — nobody here
+          # had a `permissions` block, at all, of any kind. Every one of these
+          # 17 __system__ users could publish and subscribe on ANY subject in
+          # the account. So the shared identity was never the real exposure:
+          # even with four distinct SVIDs, an identity with no permissions is
+          # exactly as privileged as every other identity in the account. The
+          # claim below — "this SVID admits the brake and nothing else" — was
+          # FALSE as written for as long as it had no permissions block: any
+          # of market-data, archiver, audit, tv-sync, or any other user in
+          # this account could equally publish platform.mode.changed. It
+          # first becomes true with the `permissions` block added here.
+          #
+          # This task deliberately restricts ONLY these four operator users.
+          # The 13 service users below (risk-engine .. webhook-ingest) still
+          # have NO permissions block and can still publish or subscribe on
+          # anything in __system__, including platform.mode.changed. That is
+          # a separate, larger-blast-radius task, tracked, not fixed here.
+          #
+          # Permission sets below were determined by inspecting the actual
+          # publisher (each tool's own subject constant) and PROVEN against a
+          # real nats-server + JetStream broker, not guessed — see
+          # .superpowers/sdd/operator-svid-split-report.md (repo root) for the
+          # transcript. Each publish-only tool needs subscribe access to its own reply inbox
+          # (`_INBOX.>`) to receive the JetStream publish ack; it does NOT
+          # need `$JS.API.>` — these tools only call jetstream.PublishMsg,
+          # which (as of nats.go v1.52.0) publishes directly to the stream
+          # subject and never touches the $JS.API management surface. Granting
+          # $JS.API.> anyway would hand a "publish one FACT" tool the full
+          # JetStream admin API (stream/consumer create, delete, purge) — a
+          # far bigger privilege than the tool needs or than least-privilege
+          # calls for, so it is deliberately withheld.
+          {
+            user: "spiffe://kanz.internal/ns/kanz-operator/sa/kanz-halt"
+            permissions: {
+              publish: { allow: ["platform.mode.changed"] }
+              subscribe: { allow: ["_INBOX.>"] }
+            }
+          }
+          # kanz-mandate arms the compliance gate (COMP-01f) by publishing a
+          # ConfigChanged FACT per (tenant, portfolio) on
+          # compliance.mandate.changed.{tenant}.{portfolio} — see
+          # internal/compliance/mandate_codec.go's SubjectMandateFor /
+          # SubjectMandateAll. No Job manifest of its own yet (see
+          # test/arch/nats_identity_test.go and this file's report); it runs
+          # from an operator's shell against a dev broker or reuses the
+          # kanz-halt SA's socket today, but the SVID + permissions it needs
+          # once it has its own ServiceAccount are declared here now so the
+          # broker side does not have to change again when that manifest
+          # ships.
+          {
+            user: "spiffe://kanz.internal/ns/kanz-operator/sa/kanz-mandate"
+            permissions: {
+              publish: { allow: ["compliance.mandate.changed.>"] }
+              subscribe: { allow: ["_INBOX.>"] }
+            }
+          }
+          # kanz-altevent publishes the commitment-lifecycle journal (ALT-01b)
+          # on alternatives.> — see internal/alternatives/subject.go. Same
+          # no-manifest-yet caveat as kanz-mandate above.
+          {
+            user: "spiffe://kanz.internal/ns/kanz-operator/sa/kanz-altevent"
+            permissions: {
+              publish: { allow: ["alternatives.>"] }
+              subscribe: { allow: ["_INBOX.>"] }
+            }
+          }
+          # kanz-household publishes the household valuation (WEALTH-01b) on
+          # wealth.> — see internal/wealth/subject.go. Same no-manifest-yet
+          # caveat as kanz-mandate above.
+          {
+            user: "spiffe://kanz.internal/ns/kanz-operator/sa/kanz-household"
+            permissions: {
+              publish: { allow: ["wealth.>"] }
+              subscribe: { allow: ["_INBOX.>"] }
+            }
+          }
           { user: "spiffe://kanz.internal/ns/kanz-services/sa/risk-engine" }
           { user: "spiffe://kanz.internal/ns/kanz-services/sa/api-gateway" }
           { user: "spiffe://kanz.internal/ns/kanz-services/sa/accounting" }

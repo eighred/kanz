@@ -53,22 +53,28 @@ func systemAccountUsers(t *testing.T, path string) map[string]bool {
 	}
 	users := map[string]bool{}
 	inSystem := false
+	depth := 0
 	for _, line := range strings.Split(strings.ReplaceAll(string(b), "\r\n", "\n"), "\n") {
 		trimmed := strings.TrimSpace(line)
-		if strings.HasPrefix(trimmed, "__system__") && strings.Contains(trimmed, "{") {
-			inSystem = true
-			continue
-		}
 		if !inSystem {
+			if strings.HasPrefix(trimmed, "__system__") && strings.Contains(trimmed, "{") {
+				inSystem = true
+				depth = strings.Count(line, "{") - strings.Count(line, "}")
+			}
 			continue
 		}
 		if m := userLine.FindStringSubmatch(line); m != nil {
 			users[m[1]] = true
-			continue
 		}
-		// The account block closes on a lone `}`; `users: [ ... ]` lines are
-		// consumed above, so this cannot end the block early.
-		if trimmed == "}" {
+		// SEC-M3d: user entries now carry a nested `permissions: { publish: {
+		// ... }, subscribe: { ... } }` block, so a lone `}` no longer
+		// reliably marks the END of the __system__ account — it just as often
+		// closes a permissions sub-block one line above a user entry's own
+		// closing brace. Track brace depth instead: __system__'s block closes
+		// only when depth returns to 0, however many nested braces it took to
+		// get there.
+		depth += strings.Count(line, "{") - strings.Count(line, "}")
+		if depth <= 0 {
 			inSystem = false
 		}
 	}
@@ -84,30 +90,34 @@ func systemAccountUsers(t *testing.T, path string) map[string]bool {
 // dialed plaintext for the life of the project, and because the halt gate is
 // deny-by-default that meant the production platform could not be RESUMED, let
 // alone stopped. Nothing caught it, because nothing was looking at cmd/.
+// SEC-M3d: these four USED to present ONE shared SVID (kanz-halt's), recorded
+// as a known least-privilege gap — "the broker cannot tell a NAV mark from a
+// platform halt". That framing undersold the real exposure: __system__ had NO
+// permissions blocks at all, on ANY of its 17 users, so splitting the identity
+// alone would have changed nothing — a permission-less user is exactly as
+// privileged as every other permission-less user in the account, whether
+// there are one, four, or seventeen of them.
+//
+// tenancy.yaml now gives each of these four its own SVID AND a restrictive
+// `permissions` block scoped to the one subject space that tool exists to
+// publish (platform.mode.changed / compliance.mandate.changed.> /
+// alternatives.> / wealth.>), proven against a real broker — see
+// .superpowers/sdd/operator-svid-split-report.md. That pairing, identity +
+// permissions, is what makes the split mean something: kanz-mandate can no
+// longer halt the platform, and kanz-halt can no longer forge a mandate.
+//
+// None of the three non-kanz-halt tools has its own Job manifest / ServiceAccount
+// yet (see infra/operator/halt-job.yaml and infra/security/spire/registration.yaml)
+// — SPIRE issues an SVID per (namespace, ServiceAccountName) a pod actually runs
+// as, so today these three still authenticate as kanz-halt's SVID in practice
+// until a manifest exists for each. The tenancy.yaml entries below are the
+// broker-side half of the identity, ready for when that manifest half ships;
+// this map is the code-side half of the same contract.
 var operatorSVIDs = map[string]string{
-	"kanz-halt": "spiffe://kanz.internal/ns/kanz-operator/sa/kanz-halt",
-	// kanz-mandate arms the compliance gate — the same plane, the same broker,
-	// the same requirement. It has no Job manifest yet, so it runs from an
-	// operator's shell against a dev broker or reuses the kanz-halt SA's socket;
-	// either way the code must present the SVID, which is what this asserts.
-	"kanz-mandate": "spiffe://kanz.internal/ns/kanz-operator/sa/kanz-halt",
-	// kanz-altevent publishes the commitment-lifecycle journal (ALT-01b) the
-	// alternatives service folds. Same plane, same broker, same requirement, and
-	// the same caveat as kanz-mandate above: no Job manifest of its own yet, so it
-	// presents the kanz-halt SA's SVID.
-	//
-	// THE SHARED SA IS A KNOWN LEAST-PRIVILEGE GAP, not a design. Three operator
-	// tools now present one identity, so the broker cannot tell a NAV mark from a
-	// platform halt — anything trusted to publish a fund valuation is equally
-	// trusted to stop trading. Splitting them needs a manifest and a tenancy entry
-	// per tool; recorded here rather than silently widened a third time.
-	"kanz-altevent": "spiffe://kanz.internal/ns/kanz-operator/sa/kanz-halt",
-	// kanz-household publishes the household valuation (WEALTH-01b) the wealth
-	// service folds. Same plane, same broker, same requirement, and the same
-	// caveat as kanz-mandate and kanz-altevent above: no Job manifest of its
-	// own yet, so it presents the kanz-halt SA's SVID — now a FOURTH operator
-	// tool sharing the one identity recorded above.
-	"kanz-household": "spiffe://kanz.internal/ns/kanz-operator/sa/kanz-halt",
+	"kanz-halt":      "spiffe://kanz.internal/ns/kanz-operator/sa/kanz-halt",
+	"kanz-mandate":   "spiffe://kanz.internal/ns/kanz-operator/sa/kanz-mandate",
+	"kanz-altevent":  "spiffe://kanz.internal/ns/kanz-operator/sa/kanz-altevent",
+	"kanz-household": "spiffe://kanz.internal/ns/kanz-operator/sa/kanz-household",
 }
 
 // dialsNATSInDir reports whether a directory tree calls bus.DialNATS.
