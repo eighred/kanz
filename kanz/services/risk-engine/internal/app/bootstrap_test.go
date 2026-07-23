@@ -12,6 +12,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"sync"
 	"testing"
 	"time"
 
@@ -22,11 +23,16 @@ import (
 	domainpb "github.com/kanz-eng/kanz-schemas-go/domain/v1"
 	envelopepb "github.com/kanz-eng/kanz-schemas-go/envelope/v1"
 
+	risk "github.com/kanz-eng/kanz/internal/risk"
 	v1 "github.com/kanz-eng/kanz/internal/risk/api/v1"
+	"github.com/kanz-eng/kanz/internal/risk/compute"
 	"github.com/kanz-eng/kanz/internal/risk/domain"
+	"github.com/kanz-eng/kanz/internal/risk/engine"
 	"github.com/kanz-eng/kanz/internal/risk/ingest"
+	"github.com/kanz-eng/kanz/internal/risk/publish"
 	"github.com/kanz-eng/kanz/internal/risk/state"
 	"github.com/kanz-eng/kanz/internal/risk/state/persist"
+	"github.com/kanz-eng/kanz/pkg/bus"
 	"github.com/kanz-eng/kanz/tools/replay"
 )
 
@@ -302,5 +308,106 @@ func TestBootstrap_RestoreDoesNotClobberLiveState(t *testing.T) {
 	pos, _ := p.Position("AAPL")
 	if got := pos.MarketValue.GetAmount().GetCoefficient(); got != 9000 {
 		t.Fatalf("restore clobbered live state: AAPL=%d want 9000", got)
+	}
+}
+
+// --- FINDING 1: post-bootstrap recompute arming ------------------------
+//
+// Bootstrap.Run repopulates STATE (restore + replay) but never triggers a
+// recompute — by design, so replay never emits a per-event storm of
+// superseded risk FACTs (see Bootstrap's doc comment). That means the
+// pushed FACT stream can otherwise go quiet after a crash: the bus already
+// acked the event that led to the lost recompute (Ingestor.Handler returns
+// nil the instant the bare-store apply commits), and nothing regenerates
+// its FACT until the portfolio's next live event. ArmPostBootstrapRecomputes
+// (called by main.go right after boot.Run succeeds) closes that gap.
+
+// capturePublisher is a bus.Client that counts publishes by subject — enough
+// to prove a REAL recompute ran (which emits FACTs), not just that some
+// internal counter was incremented.
+type capturePublisher struct {
+	mu     sync.Mutex
+	counts map[string]int
+}
+
+func newCapturePublisher() *capturePublisher { return &capturePublisher{counts: map[string]int{}} }
+
+func (c *capturePublisher) Publish(_ context.Context, msg bus.Message) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.counts[msg.Subject]++
+	return nil
+}
+func (c *capturePublisher) Subscribe(context.Context, string, string, bus.Handler) error { return nil }
+func (c *capturePublisher) Close() error                                                 { return nil }
+
+func (c *capturePublisher) count(subject string) int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.counts[subject]
+}
+
+// TestArmPostBootstrapRecomputes_FiresOnePerRestoredPortfolio proves the
+// fix: after a bootstrap-shaped restore, arming triggers a real recompute —
+// observed as an emitted exposure FACT — for the restored portfolio. A long
+// debounce plus Drain (rather than a fixed sleep) proves the recompute was
+// actually ARMED by this call, not merely due to fire on its own.
+func TestArmPostBootstrapRecomputes_FiresOnePerRestoredPortfolio(t *testing.T) {
+	store := state.NewStore()
+	sink := &memSink{recs: []persist.PortfolioRecord{recWithPosition(1000, time.Unix(100, 0), nil, 5)}}
+	// No brokers ⇒ replay skipped; this test is about arming after restore,
+	// which is exactly what Bootstrap.Run leaves in the store either way.
+	b := newBoot(t, store, sink, nil, &fakeSource{}, nil)
+	if err := b.Run(context.Background()); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	cc := newCapturePublisher()
+	prod, err := bus.NewProducer(cc, bus.ProducerConfig{Source: "test/bootstrap", ProducerVersion: "v0", Tenant: "acme"})
+	if err != nil {
+		t.Fatalf("NewProducer: %v", err)
+	}
+	pub, err := publish.NewPublisher(prod)
+	if err != nil {
+		t.Fatalf("NewPublisher: %v", err)
+	}
+	// A debounce far longer than this test's lifetime: if arming didn't
+	// really schedule the recompute, nothing would ever fire without Drain.
+	rec := engine.NewRecomputer(context.Background(), store, compute.DefaultRegistry(), risk.NewCache(), pub, 10*time.Second, quiet())
+	defer rec.Close()
+
+	armed := ArmPostBootstrapRecomputes(store, rec, quiet())
+	if armed != 1 {
+		t.Fatalf("armed = %d want 1 (one restored portfolio)", armed)
+	}
+
+	rec.Drain() // flush the armed recompute now, rather than waiting 10s
+
+	if got := cc.count(publish.EventTypeExposureRecomputed); got != 1 {
+		t.Errorf("exposure FACTs = %d want 1 (post-bootstrap arming never fired a recompute)", got)
+	}
+}
+
+// No restored portfolios ⇒ nothing armed, and Drain emits nothing.
+func TestArmPostBootstrapRecomputes_NoPortfoliosArmsNothing(t *testing.T) {
+	store := state.NewStore() // empty — nothing restored
+	cc := newCapturePublisher()
+	prod, err := bus.NewProducer(cc, bus.ProducerConfig{Source: "test/bootstrap", ProducerVersion: "v0", Tenant: "acme"})
+	if err != nil {
+		t.Fatalf("NewProducer: %v", err)
+	}
+	pub, err := publish.NewPublisher(prod)
+	if err != nil {
+		t.Fatalf("NewPublisher: %v", err)
+	}
+	rec := engine.NewRecomputer(context.Background(), store, compute.DefaultRegistry(), risk.NewCache(), pub, 10*time.Second, quiet())
+	defer rec.Close()
+
+	if armed := ArmPostBootstrapRecomputes(store, rec, quiet()); armed != 0 {
+		t.Fatalf("armed = %d want 0 (empty store)", armed)
+	}
+	rec.Drain()
+	if got := cc.count(publish.EventTypeExposureRecomputed); got != 0 {
+		t.Errorf("exposure FACTs = %d want 0 (nothing was restored to arm)", got)
 	}
 }

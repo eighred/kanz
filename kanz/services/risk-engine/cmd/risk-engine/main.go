@@ -243,6 +243,15 @@ func runEngine(ctx context.Context, cfg config.Config, readiness *server.Readine
 		if err := boot.Run(ctx); err != nil {
 			return err
 		}
+		// Restore+replay lands STATE but never triggers a recompute (by design —
+		// see Bootstrap's doc comment). Without this, the pushed risk.* FACT for
+		// whatever changed right before a crash is lost: Ingestor.Handler already
+		// acked that bus delivery when the state mutation committed, and the
+		// debounced recompute that would have emitted its FACT never got to run.
+		// Arm exactly one recompute per restored portfolio now that replay has
+		// settled — see ArmPostBootstrapRecomputes for why this is not the
+		// per-event storm the bare-store replay avoids.
+		app.ArmPostBootstrapRecomputes(store, recomputer, logger)
 
 		snap := engine.NewSnapshotter(store, sink, nil, cfg.SnapshotInterval, logger)
 		go func() { _ = snap.Run(ctx) }()
