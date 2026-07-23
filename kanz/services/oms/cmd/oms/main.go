@@ -248,6 +248,16 @@ func runConsumers(ctx context.Context, cfg config.Config, readiness *server.Read
 	})
 	obs.Registry.MustRegister(sharedCollateral)
 
+	quarantined := prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "kanz_oms_orders_quarantined_total",
+		Help: "Orders frozen because the platform could not establish what the venue did with them — " +
+			"the venue denied an order it had acknowledged, could not be queried at all, or reported " +
+			"a fill the order cannot accept. Each one is a position whose true size nobody knows, and " +
+			"it will not be re-driven, cancelled or mentioned again until a human resolves it. " +
+			"This should be zero; any non-zero value is an incident, not a metric to trend.",
+	})
+	obs.Registry.MustRegister(quarantined)
+
 	// Venue adapters trading an account NOBODY has proved against the exchange
 	// (SOV-02a). The adapter's account is read from its own config, so a mis-declared
 	// deployment looks exactly like a correct one — non-zero means some part of the
@@ -280,7 +290,8 @@ func runConsumers(ctx context.Context, cfg config.Config, readiness *server.Read
 	defer closeVenues()
 	router := execution.NewRouter(venues...)
 	svc, err := order.NewService(store, emitter, gate, router, closeRegistry, logger,
-		order.WithAccountBindings(bindings, cfg.RequireVenueAccount, sharedCollateral))
+		order.WithAccountBindings(bindings, cfg.RequireVenueAccount, sharedCollateral),
+		order.WithQuarantineCounter(quarantined))
 	if err != nil {
 		return err
 	}

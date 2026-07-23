@@ -159,16 +159,20 @@ func TestNoBusConsumerWiresRetryWhileHandlersResumeByAcking(t *testing.T) {
 	}
 	if len(retrying) > 0 {
 		sort.Strings(retrying)
-		t.Fatalf("%s wire bus.WithRetry, and no handler in this estate can safely be re-entered yet.\n\n"+
-			"WithRetry re-runs the SAME handler in-process. The OMS's handleSubmit — and every "+
-			"handler shaped like it — begins by treating an order it can already load as a "+
-			"duplicate and returning nil. So attempt 2 finds the record attempt 1 created before "+
-			"it failed, returns nil, and the consumer marks the command HANDLED. The failure is "+
-			"swallowed in-process and never reaches the DLQ at all: retry here is strictly worse "+
-			"than no retry, because it converts a broker redelivery into an instant silent ack.\n\n"+
-			"Wiring retry safely requires handlers that resume where they stopped rather than "+
-			"acking on sight, which needs a record of whether the venue ever saw the order. "+
-			"Until that exists, MaxAttempts stays 1 and terminal failures go to the DLQ.",
+		t.Fatalf("%s wire bus.WithRetry, and the handlers in this estate are not all "+
+			"safely re-enterable yet.\n\n"+
+			"WithRetry re-runs the SAME handler in-process. A handler that begins by "+
+			"treating an event it can already load as a duplicate and returning nil turns "+
+			"attempt 2 into an instant silent ack: the consumer marks the command HANDLED "+
+			"and the failure never reaches the DLQ at all. Retry there is strictly worse "+
+			"than no retry.\n\n"+
+			"THE OMS's handleSubmit IS NOW AN EXCEPTION — it resumes against venue truth "+
+			"rather than acking on sight, using OrderState.venue_ack_at to tell an order "+
+			"the venue never received from one it acknowledged (see "+
+			"services/oms/internal/order/reconcile.go). The other twelve consumers have had "+
+			"no such change, so this ban stays estate-wide: it is now over-broad rather than "+
+			"load-bearing for the OMS specifically. Narrowing it to the handlers that still "+
+			"ack-on-sight is a real task; deleting it because one handler was fixed is not.",
 			strings.Join(retrying, ", "))
 	}
 }

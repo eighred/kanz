@@ -12,6 +12,7 @@ import (
 	envelopepb "github.com/kanz-eng/kanz-schemas-go/envelope/v1"
 	orderpb "github.com/kanz-eng/kanz-schemas-go/order/v1"
 	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"github.com/kanz-eng/kanz/internal/execution"
 	"github.com/kanz-eng/kanz/services/oms/internal/compliance"
@@ -50,6 +51,10 @@ type Service struct {
 	// See claim().
 	working     sync.Map // order_id → struct{}
 	sharedCount prometheus.Counter
+	// quarantined counts orders frozen because venue truth could not be
+	// established. It is the alertable signal: a quarantine is a position whose
+	// true size nobody knows, and it must not be discoverable only by reading logs.
+	quarantined prometheus.Counter
 }
 
 // ServiceOption customizes the handler.
@@ -73,6 +78,14 @@ func WithAccountBindings(b *execution.AccountBindings, require bool, shared prom
 		s.requireAccount = require
 		s.sharedCount = shared
 	}
+}
+
+// WithQuarantineCounter gives the OMS the counter it increments when an order is
+// frozen because venue truth could not be established. Without it a quarantine
+// is still persisted and logged at ERROR, but nothing is alertable — and an
+// order nobody is watching is exactly what this whole path exists to prevent.
+func WithQuarantineCounter(c prometheus.Counter) ServiceOption {
+	return func(s *Service) { s.quarantined = c }
 }
 
 // NewService wires the handler. gate defaults to deny-nothing (compliance.AllowAll)
@@ -126,13 +139,16 @@ func (s *Service) handleSubmit(ctx context.Context, env *envelopepb.Envelope, pa
 	}
 	now := s.now().UTC()
 
-	// Fast path for an obvious re-submit: skip the compliance gate and validation
-	// for an order we already know. This is an OPTIMIZATION ONLY — it is a
-	// check-then-act and cannot be the guard. Admission is enforced atomically by
-	// store.Create below, which is what actually stands between a duplicated
-	// SubmitOrder and a duplicated venue order.
-	if _, err := s.store.Load(ctx, cmd.GetOrderId()); err == nil {
-		return nil
+	// AN ORDER WE ALREADY KNOW IS NOT AUTOMATICALLY A DUPLICATE.
+	//
+	// This used to return nil on sight, which is right for a genuinely duplicated
+	// command and catastrophic for a redelivery of one whose work was interrupted:
+	// delivery 1 created the order and died at the venue, delivery 2 acked it, and
+	// the order sat at ROUTED forever with nothing working it. resume() establishes
+	// what the venue actually did and acts on that — or freezes the order when it
+	// cannot. Admission itself is still enforced atomically by store.Create below.
+	if existing, err := s.store.Load(ctx, cmd.GetOrderId()); err == nil {
+		return s.resume(ctx, existing)
 	} else if !errors.Is(err, ErrNotFound) {
 		return err // transient store failure
 	}
@@ -191,7 +207,11 @@ func (s *Service) handleSubmit(ctx context.Context, env *envelopepb.Envelope, pa
 	// venue: the state converged (Save upserts) while the fund traded twice.
 	if err := s.store.Create(ctx, st); err != nil {
 		if errors.Is(err, ErrExists) {
-			return nil // lost the admission race — the winner works the order
+			// Lost the admission race — the winner works the order. Deliberately NOT
+			// a resume: the winner is mid-flight by construction, and the interrupted
+			// case is reached through the Load fast path above (on redelivery) or the
+			// startup sweep (after a crash), both of which take the per-order claim.
+			return nil
 		}
 		return err
 	}
@@ -337,6 +357,23 @@ func (s *Service) work(ctx context.Context, st *orderpb.OrderState) (*orderpb.Or
 	if err != nil {
 		return st, err
 	}
+
+	// THE VENUE HAS IT. Record that BEFORE folding any fill.
+	//
+	// This single timestamp is what makes a later resume safe. Without it, an
+	// order stored as ROUTED is indistinguishable from an order the venue never
+	// received — and the recovery action for those two is opposite: work it, or
+	// freeze it. A crash between here and the fold leaves the ack recorded and
+	// the fills unfolded, which reconciliation adopts from venue truth; a crash
+	// before here leaves no ack, which is exactly right, because the venue never
+	// confirmed anything.
+	acked := cloneState(st)
+	acked.VenueAckAt = timestamppb.New(s.now().UTC())
+	if err := s.store.Save(ctx, acked); err != nil {
+		return st, err
+	}
+	st = acked
+
 	for _, fill := range fills {
 		next, aerr := ApplyFill(st, fill, fill.GetExecutedAt().AsTime())
 		if aerr != nil {
@@ -556,4 +593,199 @@ func (s *Service) claim(orderID string) (func(), bool) {
 		return func() {}, false
 	}
 	return func() { s.working.Delete(orderID) }, true
+}
+
+// resume decides what to do with an order that already exists when a SubmitOrder
+// for it arrives again — a broker redelivery, or the startup sweep replaying an
+// order the previous process was working when it died.
+//
+// THIS REPLACES ACKING ON SIGHT. The handler used to load the record, take it
+// for a duplicate, and return nil. That is correct for a genuinely duplicated
+// command and catastrophic for a redelivery of a command whose work was
+// interrupted: the order sits at ROUTED, nothing works it, nothing mentions it
+// again, and over the API it is indistinguishable from a limit order resting
+// normally at the exchange.
+//
+// The one thing it must never do is guess. Every path below either establishes
+// what the venue did, or freezes the order.
+func (s *Service) resume(ctx context.Context, st *orderpb.OrderState) error {
+	// A terminal order is genuinely finished — this really is a duplicate.
+	if IsTerminal(st) {
+		return nil
+	}
+	// An already-quarantined order is frozen and stays frozen. Re-running the
+	// policy on every redelivery would just re-derive the same freeze, and the
+	// venue answer that resolves it is a human's to obtain.
+	if st.GetQuarantine() != nil {
+		return nil
+	}
+	release, ok := s.claim(st.GetOrderId())
+	if !ok {
+		// Another goroutine in this process owns the order right now. It is being
+		// worked; this delivery must not also work it.
+		return nil
+	}
+	defer release()
+
+	// Re-read under the claim: the holder we just raced may have finished and
+	// changed the order between our Load and our claim.
+	fresh, err := s.store.Load(ctx, st.GetOrderId())
+	if err != nil {
+		return err
+	}
+	if IsTerminal(fresh) || fresh.GetQuarantine() != nil {
+		return nil
+	}
+	st = fresh
+
+	// PENDING_NEW: admitted but never routed. Nothing reached a venue, so there
+	// is nothing to reconcile and nothing to be careful about — work it. This sits
+	// UNDER the claim, not before it, because working an order is exactly the
+	// thing two goroutines must not do at once.
+	if st.GetStatus() == orderpb.OrderStatus_ORDER_STATUS_PENDING_NEW {
+		_, err := s.work(ctx, st)
+		return err
+	}
+
+	if s.router == nil {
+		return nil // a paper deployment: the order rests, and nothing routed it
+	}
+	venue, err := s.router.Route(st)
+	if err != nil {
+		// Nothing here can execute this order. It is not resumable and it is not
+		// safely abandonable either — freeze it and say so.
+		return s.quarantine(ctx, st, fmt.Sprintf(
+			"order cannot be routed to any configured venue (%v), so nothing can be asked "+
+				"what happened to it", err))
+	}
+
+	q, ok := venue.(execution.Querier)
+	if !ok {
+		return s.quarantine(ctx, st, fmt.Sprintf(
+			"venue %s implements no Querier, so nothing can establish whether it holds this "+
+				"order. Re-driving might trade the fund twice and abandoning might strand a "+
+				"live exchange order; neither is a guess this platform will make",
+			venue.MIC()))
+	}
+
+	view, qerr := q.QueryOrder(ctx, st)
+	if qerr != nil {
+		// The QUESTION could not be asked — unreachable, rate-limited, timed out.
+		// That is transient: nack and let the broker redeliver. It is emphatically
+		// NOT an UNKNOWN answer, and collapsing the two would turn a network blip
+		// into a re-driven order.
+		return fmt.Errorf("oms: could not query venue %s about order %s: %w",
+			venue.MIC(), st.GetOrderId(), qerr)
+	}
+
+	action, reason := Reconcile(st, view)
+	s.logger.Info("oms reconciling an interrupted order",
+		"order_id", st.GetOrderId(), "venue", venue.MIC(),
+		"venue_view", view.State.String(), "action", action.String())
+
+	switch action {
+	case ActionLeave:
+		// The venue holds a live order. Record the acknowledgement if we did not
+		// already have it — the venue just proved it has the order.
+		if st.GetVenueAckAt() == nil {
+			acked := cloneState(st)
+			acked.VenueAckAt = timestamppb.New(s.now().UTC())
+			return s.store.Save(ctx, acked)
+		}
+		return nil
+	case ActionRedrive:
+		_, err := s.work(ctx, st)
+		return err
+	case ActionAdopt:
+		return s.adopt(ctx, st, view)
+	default:
+		return s.quarantine(ctx, st, reason)
+	}
+}
+
+// adopt takes the venue's truth as ours: its fills, or its rejection.
+//
+// Folding a fill twice is prevented downstream, not here: the position book
+// claims each fill_id in position_fills before folding it, so a fill this
+// adoption re-emits after a crash is counted exactly once. That is why the
+// venue must report its ORIGINAL fill ids on a query — a renamed fill defeats
+// the claim and double-counts the book.
+func (s *Service) adopt(ctx context.Context, st *orderpb.OrderState, view execution.OrderView) error {
+	if view.State == execution.OrderViewRejected {
+		now := s.now().UTC()
+		if err := s.store.Save(ctx, Reject(st, now)); err != nil {
+			return err
+		}
+		reason := view.Reason
+		if reason == "" {
+			reason = "venue reports this order rejected"
+		}
+		return s.refuse(ctx, st.GetOrderId(), "VENUE_REJECTED", reason, now)
+	}
+
+	// The venue confirmed it holds the order, so the ack is established even if
+	// we never recorded one.
+	if st.GetVenueAckAt() == nil {
+		acked := cloneState(st)
+		acked.VenueAckAt = timestamppb.New(s.now().UTC())
+		if err := s.store.Save(ctx, acked); err != nil {
+			return err
+		}
+		st = acked
+	}
+
+	for _, fill := range view.Fills {
+		next, aerr := ApplyFill(st, fill, fill.GetExecutedAt().AsTime())
+		if aerr != nil {
+			// The venue's own fills do not fit the order we hold. That is not a
+			// transient fault and re-driving cannot help; it is a disagreement
+			// about what this order IS, and it freezes.
+			return s.quarantine(ctx, st, fmt.Sprintf(
+				"venue reported a fill this order cannot accept (%v). The venue's record and "+
+					"ours describe different orders under one id", aerr))
+		}
+		if err := s.store.Save(ctx, next); err != nil {
+			return err
+		}
+		if err := s.emitter.EmitFill(ctx, fill, next); err != nil {
+			return err
+		}
+		st = next
+		if IsTerminal(st) {
+			break
+		}
+	}
+	return nil
+}
+
+// quarantine freezes an order whose truth could not be established, and says so
+// where somebody will see it: on the order, in the log at ERROR, and on a
+// counter that can be alerted.
+//
+// It returns nil — the command is ACKED. A quarantine is terminal for this
+// delivery: redelivering it would re-derive the same freeze forever, and the
+// thing that resolves it is a human with venue access, not another attempt.
+func (s *Service) quarantine(ctx context.Context, st *orderpb.OrderState, reason string) error {
+	now := s.now().UTC()
+	next := cloneState(st)
+	next.Quarantine = &orderpb.OrderQuarantine{
+		At:          timestamppb.New(now),
+		Reason:      reason,
+		LastQueryAt: timestamppb.New(now),
+	}
+	if err := s.store.Save(ctx, next); err != nil {
+		return err
+	}
+	if s.quarantined != nil {
+		s.quarantined.Inc()
+	}
+	s.logger.Error("ORDER QUARANTINED — the platform cannot establish what the venue did with this order, so it has stopped rather than guess. It will not be re-driven, cancelled, or mentioned again until a human resolves it against the venue's own order history",
+		"order_id", st.GetOrderId(),
+		"portfolio_id", st.GetPortfolioId(),
+		"instrument_id", st.GetInstrumentId(),
+		"venue", st.GetVenue(),
+		"status", st.GetStatus().String(),
+		"reason", reason,
+	)
+	return nil
 }

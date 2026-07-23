@@ -11,20 +11,34 @@ import (
 	"github.com/kanz-eng/kanz/internal/execution"
 )
 
-// unreachableVenue accepts the route and then fails to execute: a venue call
-// that timed out, a 500, an adapter that lost its connection. By the time this
-// fires the order has already been admitted, routed, and SAVED as ROUTED.
+// unreachableVenue fails its FIRST execute and then recovers — a venue call
+// that timed out, a 500, an adapter that had lost its connection and got it
+// back. By the time the first failure fires the order has already been admitted,
+// routed, and SAVED as ROUTED.
+//
+// The recovery is load-bearing in this test, not incidental. A venue that failed
+// forever could never demonstrate a successful resume; it would only ever prove
+// that the redelivery errored again. The behaviour under test is that delivery 2
+// ASKS and then WORKS the order, so the venue has to be able to work it.
+//
+// QueryOrder is delegated to the embedded SimVenue, which is the honest model:
+// the EXECUTE call failed and recorded nothing, so the venue truthfully answers
+// that it has no such order.
 type unreachableVenue struct {
-	execution.Venue
+	*execution.SimVenue
 	mu sync.Mutex
 	n  int
 }
 
-func (v *unreachableVenue) Execute(context.Context, *orderpb.OrderState) ([]*orderpb.Fill, error) {
+func (v *unreachableVenue) Execute(ctx context.Context, st *orderpb.OrderState) ([]*orderpb.Fill, error) {
 	v.mu.Lock()
 	v.n++
+	first := v.n == 1
 	v.mu.Unlock()
-	return nil, errors.New("venue unreachable")
+	if first {
+		return nil, errors.New("venue unreachable")
+	}
+	return v.SimVenue.Execute(ctx, st)
 }
 
 func (v *unreachableVenue) count() int {
@@ -33,32 +47,22 @@ func (v *unreachableVenue) count() int {
 	return v.n
 }
 
-// This test PINS A KNOWN GAP. It passes today because it asserts what the code
-// currently does, and that is the point: it is the executable evidence for a
-// decision taken elsewhere, in test/arch/bus_dlq_test.go, that bus consumers
-// must NOT be wired with bus.WithRetry.
+// THIS TEST REPLACES TestRedeliveryAfterVenueFailureIsAckedWithoutResuming.
 //
-// The reasoning that decision rests on is: re-running handleSubmit does not
-// resume the work, it ACKS. Delivery 1 creates the order and then fails at the
-// venue. Any second run — a broker redelivery, or an in-handler retry attempt —
-// loads the record delivery 1 left behind, takes it for a duplicate, and returns
-// nil. The consumer reads that nil as success and marks the command handled.
+// That test pinned the gap: delivery 1 created the order and failed at the
+// venue; delivery 2 found the record, took it for a duplicate, returned nil, and
+// left the order at ROUTED with nothing working it and nothing anywhere saying
+// so. Its own doc said "WHEN THIS TEST FAILS, THAT IS THE SIGNAL, NOT A
+// REGRESSION. It means handlers have learned to resume."
 //
-// So wiring retry would be strictly worse than not wiring it: attempt 2 would
-// swallow the failure IN PROCESS, and it would never reach the DLQ that the
-// same change just wired. A comment asserting that would be the kind of claim
-// this repository has been burned by; this is the same claim, fired.
-//
-// WHEN THIS TEST FAILS, THAT IS THE SIGNAL, NOT A REGRESSION. It means handlers
-// have learned to resume, and the retry guard in test/arch/bus_dlq_test.go
-// should be revisited rather than the assertions here relaxed. See the
-// crash-mid-work row on the production readiness board: resuming safely needs a
-// record of whether the venue ever saw the order, because a failed Execute does
-// NOT prove it did not arrive, and re-driving it blind is a double trade.
-func TestRedeliveryAfterVenueFailureIsAckedWithoutResuming(t *testing.T) {
+// This is that signal, inverted into an assertion. The redelivery must now ASK
+// THE VENUE and act on the answer. The venue never received this order — its
+// Execute failed before recording anything — so it answers UNKNOWN, our record
+// carries no venue_ack_at, and the only safe action is to work it. It fills.
+func TestRedeliveryAfterVenueFailureResumesAgainstVenueTruth(t *testing.T) {
 	ctx := context.Background()
 	fb := &fakeBus{}
-	venue := &unreachableVenue{Venue: execution.NewSimVenue("XSIM")}
+	venue := &unreachableVenue{SimVenue: execution.NewSimVenue("XSIM")}
 	store := NewMemoryStore()
 	svc, err := NewService(store, NewEmitter(fb), nil, execution.NewRouter(venue), nil, nil)
 	if err != nil {
@@ -69,45 +73,186 @@ func TestRedeliveryAfterVenueFailureIsAckedWithoutResuming(t *testing.T) {
 	body := mustMarshal(t, cmd)
 
 	// Delivery 1: admitted, routed, stored as ROUTED, then the venue call fails.
-	// The error surfaces, which is what asks the broker for a redelivery.
 	if err := svc.Handle(ctx, submitEnv(), body); err == nil {
-		t.Fatal("delivery 1 returned nil — expected the venue failure to surface. " +
-			"If it no longer does, this test is asserting nothing and the retry guard's " +
-			"rationale must be re-derived from scratch")
+		t.Fatal("delivery 1 returned nil — expected the venue failure to surface")
 	}
-	// NON-VACUITY: the work really was attempted. Without this, an order refused
-	// at admission would produce the same acked-second-delivery below for an
-	// entirely different and harmless reason.
 	if got := venue.count(); got != 1 {
-		t.Fatalf("venue.Execute called %d times on delivery 1, want exactly 1 — "+
-			"the order never reached the venue, so this is not the failure being pinned", got)
+		t.Fatalf("venue.Execute called %d times on delivery 1, want exactly 1", got)
+	}
+	st, err := store.Load(ctx, cmd.GetOrderId())
+	if err != nil {
+		t.Fatalf("Load after delivery 1: %v", err)
+	}
+	if st.GetVenueAckAt() != nil {
+		t.Fatal("venue_ack_at is set after a FAILED Execute — the ack must be stamped " +
+			"only when the venue actually confirmed it holds the order, or the " +
+			"quarantine arm fires on healthy orders")
 	}
 
-	// Delivery 2: the redelivery that error asked for — or, identically, the
-	// second attempt bus.WithRetry would make in-process.
+	// Delivery 2: the redelivery that error asked for. The handler must now ask
+	// the venue rather than ack on sight.
 	if err := svc.Handle(ctx, submitEnv(), body); err != nil {
-		t.Fatalf("delivery 2 returned %v; the gap being pinned is that it returns NIL", err)
-	}
-	if got := venue.count(); got != 1 {
-		t.Fatalf("venue.Execute called %d times after delivery 2, want still 1 — "+
-			"the handler now re-drives the venue, which is the double-trade hazard, "+
-			"not the fix", got)
+		t.Fatalf("delivery 2 returned %v, want nil after a successful resume", err)
 	}
 
-	// The command is now acked as handled, and this is what was actually left
-	// behind: an order sitting at ROUTED that nothing is working and nothing
-	// will mention again. It is indistinguishable, in the store and over the
-	// API, from a limit order resting normally at the exchange.
+	st, err = store.Load(ctx, cmd.GetOrderId())
+	if err != nil {
+		t.Fatalf("Load after delivery 2: %v", err)
+	}
+	if got := st.GetStatus(); got != orderpb.OrderStatus_ORDER_STATUS_FILLED {
+		t.Fatalf("order status is %v, want FILLED — the venue had no record of this "+
+			"order and no ack was ever recorded, so the redelivery had to work it", got)
+	}
+	if st.GetQuarantine() != nil {
+		t.Fatalf("order was quarantined (%q) — the venue affirmatively said UNKNOWN "+
+			"and we held no ack, which is the one combination that is safe to re-drive",
+			st.GetQuarantine().GetReason())
+	}
+}
+
+// THE DOUBLE-TRADE ARM. This is the assertion the whole design exists to make.
+//
+// The venue confirmed it held this order, and now denies it. Exactly one of the
+// two records is wrong and nothing here can tell which. Re-driving trades the
+// fund twice if ours is right; abandoning strands a live exchange order if the
+// venue is right. The order freezes, and it must NOT reach the venue again.
+func TestVenueDenyingAnAcknowledgedOrderQuarantinesAndDoesNotRedrive(t *testing.T) {
+	ctx := context.Background()
+	fb := &fakeBus{}
+	// amnesiacVenue acknowledges an execute (no error) but then has no record of
+	// the order — a venue that lost its order book, or answered from a replica
+	// that never saw the write.
+	venue := &amnesiacVenue{SimVenue: execution.NewSimVenue("XSIM")}
+	store := NewMemoryStore()
+	svc, err := NewService(store, NewEmitter(fb), nil, execution.NewRouter(venue), nil, nil)
+	if err != nil {
+		t.Fatalf("NewService: %v", err)
+	}
+
+	cmd := limitOrder(d(100, 0), d(1025, -2))
+	body := mustMarshal(t, cmd)
+
+	if err := svc.Handle(ctx, submitEnv(), body); err != nil {
+		t.Fatalf("delivery 1: %v", err)
+	}
 	st, err := store.Load(ctx, cmd.GetOrderId())
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if got := st.GetStatus(); got != orderpb.OrderStatus_ORDER_STATUS_ROUTED {
-		t.Fatalf("order status is %v, want ROUTED — the gap being pinned is an order "+
-			"stranded in a WORKING state after its venue call failed", got)
+	if st.GetVenueAckAt() == nil {
+		t.Fatal("venue_ack_at not stamped after a SUCCESSFUL Execute — without it the " +
+			"quarantine arm below can never fire, and this venue's contradiction " +
+			"would be re-driven as if it were a fresh order")
 	}
-	if IsTerminal(st) {
-		t.Fatal("order is terminal — it was resolved somehow, so nothing is stranded " +
-			"and the retry guard's rationale no longer holds")
+	before := venue.executes()
+
+	// The redelivery. The venue now denies the order it acknowledged.
+	if err := svc.Handle(ctx, submitEnv(), body); err != nil {
+		t.Fatalf("delivery 2 returned %v; a quarantine is terminal and must ack", err)
 	}
+
+	st, err = store.Load(ctx, cmd.GetOrderId())
+	if err != nil {
+		t.Fatalf("Load after delivery 2: %v", err)
+	}
+	if st.GetQuarantine() == nil {
+		t.Fatal("order was NOT quarantined. The venue acknowledged it and now reports " +
+			"UNKNOWN — that is two authorities contradicting each other, and acting " +
+			"on either one is a coin flip with the fund's money")
+	}
+	if st.GetQuarantine().GetReason() == "" {
+		t.Error("quarantine carries no reason — an operator sees a frozen order and no account of why")
+	}
+	if got := venue.executes(); got != before {
+		t.Fatalf("venue.Execute called %d more times — the quarantined order was "+
+			"RE-DRIVEN, which is the double trade this whole design exists to prevent",
+			got-before)
+	}
+}
+
+// amnesiacVenue executes successfully but never remembers: every QueryOrder
+// answers UNKNOWN. It models a venue whose order book was lost or whose read
+// replica never saw the write.
+type amnesiacVenue struct {
+	*execution.SimVenue
+	mu sync.Mutex
+	n  int
+}
+
+func (v *amnesiacVenue) Execute(ctx context.Context, st *orderpb.OrderState) ([]*orderpb.Fill, error) {
+	v.mu.Lock()
+	v.n++
+	v.mu.Unlock()
+	// Deliberately does NOT delegate to SimVenue.Execute: this venue must
+	// acknowledge without recording, so the query below can contradict it.
+	return nil, nil
+}
+
+func (v *amnesiacVenue) QueryOrder(context.Context, *orderpb.OrderState) (execution.OrderView, error) {
+	return execution.OrderView{State: execution.OrderViewUnknown}, nil
+}
+
+func (v *amnesiacVenue) executes() int {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	return v.n
+}
+
+// A venue that cannot be asked is not a venue we may guess about. Every real
+// out-of-process adapter is in this state today, because venue.v1's wire
+// contract has no query RPC.
+func TestVenueWithoutQuerierQuarantinesRatherThanGuessing(t *testing.T) {
+	ctx := context.Background()
+	fb := &fakeBus{}
+	venue := &muteVenue{}
+	store := NewMemoryStore()
+	svc, err := NewService(store, NewEmitter(fb), nil, execution.NewRouter(venue), nil, nil)
+	if err != nil {
+		t.Fatalf("NewService: %v", err)
+	}
+
+	cmd := limitOrder(d(100, 0), d(1025, -2))
+	body := mustMarshal(t, cmd)
+
+	if err := svc.Handle(ctx, submitEnv(), body); err == nil {
+		t.Fatal("delivery 1 returned nil — expected the venue failure to surface")
+	}
+	before := venue.executes()
+
+	if err := svc.Handle(ctx, submitEnv(), body); err != nil {
+		t.Fatalf("delivery 2 returned %v; a quarantine is terminal and must ack", err)
+	}
+	st, err := store.Load(ctx, cmd.GetOrderId())
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if st.GetQuarantine() == nil {
+		t.Fatal("an order at a venue that implements no Querier was not quarantined — " +
+			"nothing can establish what that venue did, and the alternative to " +
+			"freezing is guessing")
+	}
+	if got := venue.executes(); got != before {
+		t.Fatalf("venue.Execute called %d more times on a venue nobody can query", got-before)
+	}
+}
+
+// muteVenue implements Venue and nothing else — no Querier. This is every
+// out-of-process GRPCVenue today.
+type muteVenue struct {
+	mu sync.Mutex
+	n  int
+}
+
+func (v *muteVenue) MIC() string     { return "XMUTE" }
+func (v *muteVenue) Account() string { return "acct-mute" }
+func (v *muteVenue) Execute(context.Context, *orderpb.OrderState) ([]*orderpb.Fill, error) {
+	v.mu.Lock()
+	v.n++
+	v.mu.Unlock()
+	return nil, errors.New("venue unreachable")
+}
+func (v *muteVenue) executes() int {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	return v.n
 }
