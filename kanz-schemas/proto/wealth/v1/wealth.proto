@@ -166,3 +166,60 @@ message Proposal {
   // as_of is when the proposal was struck. Required.
   google.protobuf.Timestamp as_of = 6;
 }
+
+// HouseholdValued is a household's VALUATION at a point in time: every account,
+// what it holds, and what those holdings are worth. It is the state the advisory
+// exposure view aggregates over.
+//
+// It is separate from Household and Account, which model the REGISTRY — who owns
+// which account, its type, the household's risk profile. Those carry no holdings
+// and no market value, so they cannot feed a valuation fold; conflating the two
+// is why the wealth service's consumer could not be wired at all.
+//
+// It is published COMPACTED, one retained message per household: this is the
+// current picture, not an event that happened, and a booting pod must arm itself
+// with the latest one. Contrast alternatives, whose journal must keep every event.
+message HouseholdValued {
+  // household_id is the aggregate identity and the compaction key. Required.
+  string household_id = 1;
+
+  // accounts is the full set for this household — a REPLACEMENT, not a delta.
+  // A consumer folds it last-write-wins, so an account omitted here is an account
+  // the household no longer has.
+  repeated ValuedAccount accounts = 2;
+
+  // as_of is the valuation time these market values are marked at. Required.
+  google.protobuf.Timestamp as_of = 3;
+
+  // currency_code is the reporting currency every market value below is expressed
+  // in. Required — a number with no currency is not a value.
+  string currency_code = 4;
+}
+
+// ValuedAccount is one account's holdings and cash at as_of.
+message ValuedAccount {
+  // account_id joins to Account for the registry attributes. Required.
+  string account_id = 1;
+
+  // holdings are the account's positions, marked to the reporting currency.
+  repeated ValuedHolding holdings = 2;
+
+  // cash is the un-invested balance. It carries no instrument and still counts
+  // toward the household's total value.
+  common.v1.Decimal cash = 3;
+}
+
+// ValuedHolding is one position, marked.
+message ValuedHolding {
+  // instrument_id is the Kanz canonical instrument identifier. Required.
+  string instrument_id = 1;
+
+  // asset_class groups holdings for the asset-class exposure view. Required —
+  // the view is the point, and an unclassified holding silently vanishes from it.
+  string asset_class = 2;
+
+  // market_value is the position's value in the parent HouseholdValued's
+  // currency_code. Exact Decimal on the wire; the analytics edge lands it as
+  // float64 (EVT-14).
+  common.v1.Decimal market_value = 3;
+}
