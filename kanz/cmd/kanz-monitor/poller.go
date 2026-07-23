@@ -42,16 +42,23 @@ const pollHTTPTimeout = 5 * time.Second
 // monitor polls forever at a fixed cadence for the life of the program.
 //
 // READ-ONLY, deliberately: every request this file issues is an http.Get
-// (via http.MethodGet). There is no bus.Producer, no http.MethodPost,
-// nothing here can move capital — a monitor scrapes; it does not act.
+// (via http.MethodGet) against one of two distinct read endpoints —
+// cfg.MetricsURL + "/metrics" (the OMS's own registry, for the five
+// incident counters) and cfg.GatewayURL + "/readyz" (gateway health).
+// There is no bus.Producer, no http.MethodPost, nothing here can move
+// capital — a monitor scrapes; it does not act.
 func (m model) pollTick() tea.Cmd {
 	return tea.Tick(m.cfg.PollInterval, func(time.Time) tea.Msg {
 		return m.poll()
 	})
 }
 
-// poll performs one scrape cycle: GET /metrics for the incident counters,
-// GET /readyz for gateway health.
+// poll performs one scrape cycle against two distinct endpoints: GET
+// /metrics on the OMS (its own Prometheus registry, where the five
+// incident counters actually live) and GET /readyz on the api-gateway for
+// gateway health. The gateway's own /metrics only exports its middleware
+// metrics — it never re-exports the OMS counters — so the counter scrape
+// must not be pointed at cfg.GatewayURL.
 //
 // cfg.Token == "" DEGRADES rather than crashes — a missing bearer is the
 // normal local-dev shape (no kanz-devtoken exported), so both routes are
@@ -65,11 +72,18 @@ func (m model) poll() pollMsg {
 
 	msg := pollMsg{health: map[string]bool{}}
 
-	body, err := httpGetBody(ctx, client, m.cfg.GatewayURL+"/metrics", m.cfg.Token)
-	if err != nil {
-		msg.err = fmt.Errorf("metrics: %w", err)
-	} else {
-		msg.counters = parseCounters(body)
+	// cfg.MetricsURL == "" is a deliberate skip, not a failure: an operator
+	// who only wants the bus feed + gateway health hasn't configured an OMS
+	// metrics endpoint, and dialing "/metrics" against an empty host would
+	// produce a spurious dial error every tick. Counters simply stay at
+	// their zero value, same shape as the token=="" degradation below.
+	if m.cfg.MetricsURL != "" {
+		body, err := httpGetBody(ctx, client, m.cfg.MetricsURL+"/metrics", m.cfg.Token)
+		if err != nil {
+			msg.err = fmt.Errorf("metrics: %w", err)
+		} else {
+			msg.counters = parseCounters(body)
+		}
 	}
 
 	ready, rerr := httpGetReady(ctx, client, m.cfg.GatewayURL+"/readyz", m.cfg.Token)

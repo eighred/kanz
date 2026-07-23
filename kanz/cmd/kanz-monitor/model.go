@@ -11,7 +11,8 @@ import (
 // write path anywhere in this struct. A monitor cannot move capital.
 type Config struct {
 	NATSURL      string        // the spine to subscribe to (read-only broadcast)
-	GatewayURL   string        // api-gateway base URL for /v1 read routes + /metrics
+	GatewayURL   string        // api-gateway base URL for /v1 reads + /readyz only
+	MetricsURL   string        // OMS /metrics endpoint for the incident counters (its own registry, NOT the gateway's)
 	Token        string        // HS256 bearer for the gateway (kanz-devtoken locally)
 	Tenant       string        // the tenant whose book to show; poller scopes to it
 	PollInterval time.Duration // how often the poller scrapes; <=0 ⇒ 2s

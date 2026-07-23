@@ -1,6 +1,10 @@
 package main
 
-import "testing"
+import (
+	"net/http"
+	"net/http/httptest"
+	"testing"
+)
 
 // metricsSnippet is a captured-shape /metrics body: the real counter lines
 // this monitor reads, in Prometheus exposition format. It deliberately:
@@ -66,5 +70,55 @@ kanz_oms_orders_quarantined_total 9
 	}
 	if got.Ungoverned != 0 || got.Unpriced != 0 || got.SharedCollateral != 0 || got.UnverifiedVenueAccount != 0 {
 		t.Fatalf("unrelated metric lines leaked into the snapshot: %+v", got)
+	}
+}
+
+// TestPoll_EmptyMetricsURLSkipsScrape proves that cfg.MetricsURL == "" skips
+// the counter scrape entirely rather than dialing "/metrics" against an
+// empty host: counters must stay at their zero value and poll() must not
+// panic, even though cfg.GatewayURL is also unset (so the /readyz leg fails
+// too — that failure is expected and reported via err, only the counter
+// scrape is required to be silently skipped).
+func TestPoll_EmptyMetricsURLSkipsScrape(t *testing.T) {
+	m := newModel(Config{MetricsURL: "", GatewayURL: ""})
+
+	msg := m.poll()
+
+	if msg.counters != (counterSnapshot{}) {
+		t.Fatalf("counters = %+v, want zero value when MetricsURL is unset", msg.counters)
+	}
+	if len(msg.health) != 0 {
+		t.Fatalf("health = %+v, want empty when GatewayURL is unset", msg.health)
+	}
+}
+
+// TestPoll_ScrapesCountersFromMetricsURL proves the counter scrape is
+// pointed at cfg.MetricsURL (the OMS's own registry), not cfg.GatewayURL —
+// the bug this fix corrects. A test server stands in for the OMS /metrics
+// endpoint; cfg.GatewayURL is left unset so the /readyz leg fails (reported
+// via err) without reaching out over the network, isolating the assertion
+// to the counter scrape.
+func TestPoll_ScrapesCountersFromMetricsURL(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/metrics" {
+			http.NotFound(w, r)
+			return
+		}
+		_, _ = w.Write([]byte(metricsSnippet))
+	}))
+	defer srv.Close()
+
+	m := newModel(Config{MetricsURL: srv.URL, GatewayURL: ""})
+
+	msg := m.poll()
+
+	want := counterSnapshot{
+		Quarantined:      3,
+		Ungoverned:       7,
+		Unpriced:         7,
+		SharedCollateral: 1,
+	}
+	if msg.counters != want {
+		t.Fatalf("counters = %+v, want %+v", msg.counters, want)
 	}
 }
