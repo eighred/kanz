@@ -122,6 +122,24 @@ message OrderState {
   // it, nothing cancels it, and clearing it takes a human. Unset on every
   // healthy order.
   OrderQuarantine quarantine = 17;
+
+  // cancel_announced_at is WHEN THE CANCELLATION WAS NOT MERELY PERSISTED BUT
+  // ANNOUNCED — the ORDER_CANCELLED FACT and the command outcome both
+  // published. It plays the same role for cancellation that venue_ack_at plays
+  // for routing: the one fact that separates a recovering OMS from a guessing
+  // one.
+  //
+  // Without it, a redelivery of a cancel whose announcement failed after the
+  // order was already saved CANCELLED is indistinguishable from a genuine
+  // second cancel of an already-cancelled order. The handler would take the
+  // terminal-refusal branch: the ORDER_CANCELLED FACT is never published, so
+  // tv-sync's projection, accounting, and audit never learn the cancel
+  // happened — and the caller is told REJECTED for a cancel that in fact
+  // succeeded. Unset means the store write landed but the announcement did
+  // not; the handler must complete the announcement, not refuse it. Set means
+  // this order's cancellation was already told to the world, and a further
+  // cancel command is a genuine duplicate.
+  google.protobuf.Timestamp cancel_announced_at = 18;
 }
 
 // OrderQuarantine records an order whose true state at the venue could not be

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	commandpb "github.com/kanz-eng/kanz-schemas-go/command/v1"
+	commonpb "github.com/kanz-eng/kanz-schemas-go/common/v1"
 	envelopepb "github.com/kanz-eng/kanz-schemas-go/envelope/v1"
 	orderpb "github.com/kanz-eng/kanz-schemas-go/order/v1"
 	"google.golang.org/protobuf/proto"
@@ -464,6 +465,30 @@ func (s *Service) handleCancel(ctx context.Context, payload []byte) error {
 				"acting on it now would be a guess. It must be resolved against the venue's own "+
 				"order history before it can be cancelled. quarantine reason: %s", q.GetReason()), now)
 	}
+	// AN ALREADY-CANCELLED ORDER IS NOT AUTOMATICALLY A DUPLICATE.
+	//
+	// cancel_announced_at (order_events.proto:18) is what tells the two apart,
+	// exactly as venue_ack_at tells a routed-but-unconfirmed order apart from a
+	// venue's contradiction. Unset means the FIRST cancel got as far as Save but
+	// its announcement (the ORDER_CANCELLED FACT, the outcome, or both) never
+	// went out — a broker blip between the Save and the emit. Without this
+	// branch the code below falls through to Cancel(), whose IsTerminal guard
+	// fires on the already-CANCELLED status, and outcomeReject reports REJECTED
+	// for a cancel that in fact already succeeded — while the FACT it never
+	// published stays never published forever.
+	//
+	// Complete the announcement here instead. Do NOT call closeAtVenue: the
+	// venue withdrawal was already dispatched by the delivery that got this
+	// order to CANCELLED in the first place, and closeAtVenue is not idempotent
+	// from the exchange's point of view — a second CancelOrder call is a second
+	// venue request for an order the exchange may already have closed.
+	// LeavesQuantity is still on the loaded record (Cancel does not zero it —
+	// see aggregate.go), so the announcement carries the same cancelled
+	// quantity the interrupted delivery would have.
+	if st.GetStatus() == orderpb.OrderStatus_ORDER_STATUS_CANCELLED && st.GetCancelAnnouncedAt() == nil {
+		return s.completeCancelAnnouncement(ctx, st, st.GetLeavesQuantity(), now)
+	}
+
 	// Validate the withdrawal against the aggregate first (the terminal guard), so
 	// a cancel the ledger refuses never reaches the exchange.
 	next, cancelledQty, cerr := Cancel(st, now)
@@ -483,11 +508,34 @@ func (s *Service) handleCancel(ctx context.Context, payload []byte) error {
 	if err := s.store.Save(ctx, next); err != nil {
 		return err
 	}
-	if err := s.emitter.EmitCancelled(ctx, next.GetOrderId(), cancelledQty, now); err != nil {
+	return s.completeCancelAnnouncement(ctx, next, cancelledQty, now)
+}
+
+// completeCancelAnnouncement publishes the ORDER_CANCELLED FACT and the
+// EXECUTED command outcome for an order already saved CANCELLED, then stamps
+// cancel_announced_at so a further redelivery hits the terminal-refusal branch
+// instead of resuming again.
+//
+// A DUPLICATE ORDER_CANCELLED FACT IS AN ACCEPTED TRADE-OFF. If EmitCancelled
+// below succeeds and the Save at the end of this function then fails, the next
+// redelivery re-enters here (cancel_announced_at is still unset) and re-emits
+// both EmitCancelled and EmitOutcome. That folds "order X is cancelled" twice,
+// which every downstream projection treats idempotently — versus the
+// alternative this replaces, which lost the FACT entirely and told the caller
+// REJECTED for a cancel that had already succeeded. Do not "fix" this into
+// exactly-once without a fill_id-style dedup on the FACT itself; that is a
+// larger change than this one.
+func (s *Service) completeCancelAnnouncement(ctx context.Context, st *orderpb.OrderState, cancelledQty *commonpb.Decimal, now time.Time) error {
+	if err := s.emitter.EmitCancelled(ctx, st.GetOrderId(), cancelledQty, now); err != nil {
 		return err
 	}
-	return s.emitter.EmitOutcome(ctx, next.GetOrderId(),
-		commandpb.CommandOutcomeStatus_COMMAND_OUTCOME_STATUS_EXECUTED, "order cancelled", "", "", now)
+	if err := s.emitter.EmitOutcome(ctx, st.GetOrderId(),
+		commandpb.CommandOutcomeStatus_COMMAND_OUTCOME_STATUS_EXECUTED, "order cancelled", "", "", now); err != nil {
+		return err
+	}
+	announced := cloneState(st)
+	announced.CancelAnnouncedAt = timestamppb.New(now)
+	return s.store.Save(ctx, announced)
 }
 
 // closeAtVenue withdraws a working order at the exchange holding it, recording

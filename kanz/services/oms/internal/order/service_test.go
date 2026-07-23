@@ -63,9 +63,27 @@ type fakeBus struct {
 	// a detector. Only set this in a test that deliberately exercises the fallback
 	// itself.
 	tenant string
+
+	// failOn, if set, is the EventType whose Publish fails — modeling a broker
+	// outage that interrupts one specific FACT/outcome mid-handler, so a test can
+	// pin exactly which publish a handler's error-handling must survive (e.g. the
+	// ORDER_CANCELLED FACT succeeding but the CommandOutcome after it failing).
+	// The event is NOT recorded when it fails, matching a real Publish that never
+	// reached the broker.
+	failOn  string
+	failErr error
 }
 
 func (f *fakeBus) Publish(ctx context.Context, e bus.Event) error {
+	f.mu.Lock()
+	failOn, failErr := f.failOn, f.failErr
+	f.mu.Unlock()
+	if failOn != "" && e.EventType == failOn {
+		if failErr != nil {
+			return failErr
+		}
+		return errors.New("fakeBus: injected publish failure for " + failOn)
+	}
 	// Rule 1 — producer.go:121-123.
 	if e.Payload == nil {
 		return errors.New("bus: Event.Payload required")
