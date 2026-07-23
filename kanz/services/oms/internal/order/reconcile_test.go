@@ -29,10 +29,10 @@ func TestReconcilePolicy(t *testing.T) {
 	acked := timestamppb.New(time.Unix(1000, 0).UTC())
 
 	for _, tc := range []struct {
-		name  string
-		st    *orderpb.OrderState
-		view  execution.OrderView
-		want  Action
+		name string
+		st   *orderpb.OrderState
+		view execution.OrderView
+		want Action
 	}{
 		{
 			name: "venue never saw it and we never had an ack — work it",
