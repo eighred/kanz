@@ -61,7 +61,7 @@ func (v *unreachableVenue) count() int {
 // Execute failed before recording anything — so it answers UNKNOWN, our record
 // carries no venue_ack_at, and the only safe action is to work it. It fills.
 func TestRedeliveryAfterVenueFailureResumesAgainstVenueTruth(t *testing.T) {
-	ctx := context.Background()
+	ctx := testCtx()
 	fb := &fakeBus{}
 	venue := &unreachableVenue{SimVenue: execution.NewSimVenue("XSIM")}
 	store := NewMemoryStore()
@@ -118,7 +118,7 @@ func TestRedeliveryAfterVenueFailureResumesAgainstVenueTruth(t *testing.T) {
 // fund twice if ours is right; abandoning strands a live exchange order if the
 // venue is right. The order freezes, and it must NOT reach the venue again.
 func TestVenueDenyingAnAcknowledgedOrderQuarantinesAndDoesNotRedrive(t *testing.T) {
-	ctx := context.Background()
+	ctx := testCtx()
 	fb := &fakeBus{}
 	// amnesiacVenue acknowledges an execute (no error) but then has no record of
 	// the order — a venue that lost its order book, or answered from a replica
@@ -203,7 +203,7 @@ func (v *amnesiacVenue) executes() int {
 // out-of-process adapter is in this state today, because venue.v1's wire
 // contract has no query RPC.
 func TestVenueWithoutQuerierQuarantinesRatherThanGuessing(t *testing.T) {
-	ctx := context.Background()
+	ctx := testCtx()
 	fb := &fakeBus{}
 	venue := &muteVenue{}
 	store := NewMemoryStore()
@@ -290,7 +290,7 @@ func (v *twoFillVenue) QueryOrder(context.Context, *orderpb.OrderState) (executi
 // full-leaves fill, but not unreachable forever — must not be silently
 // double-folded. It must quarantine instead.
 func TestAdoptRefusesMultiFillViewAndQuarantinesRatherThanDoubleFold(t *testing.T) {
-	ctx := context.Background()
+	ctx := testCtx()
 	fb := &fakeBus{}
 	fills := []*orderpb.Fill{
 		{FillId: "e1", OrderId: "o1", InstrumentId: "AAPL", Side: orderpb.Side_SIDE_BUY,
@@ -382,7 +382,7 @@ func (v *zeroFillVenue) QueryOrder(context.Context, *orderpb.OrderState) (execut
 // permanently forgotten, precisely the failure this whole design exists to
 // end. The fix quarantines instead of silently acking.
 func TestAdoptQuarantinesFilledViewWithZeroFills(t *testing.T) {
-	ctx := context.Background()
+	ctx := testCtx()
 	fb := &fakeBus{}
 	venue := &zeroFillVenue{SimVenue: execution.NewSimVenue("XSIM")}
 	store := NewMemoryStore()
@@ -445,7 +445,7 @@ func TestAdoptQuarantinesFilledViewWithZeroFills(t *testing.T) {
 // documented interleaving instead: hold the claim exactly as a concurrent
 // resume() would, and prove the admission delivery backs off.
 func TestAdmissionPathHoldsTheClaimWhileWorkingAnOrder(t *testing.T) {
-	ctx := context.Background()
+	ctx := testCtx()
 	fb := &fakeBus{}
 	venue := &amnesiacVenue{SimVenue: execution.NewSimVenue("XSIM")}
 	store := NewMemoryStore()

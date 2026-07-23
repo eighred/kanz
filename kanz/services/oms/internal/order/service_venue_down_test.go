@@ -51,7 +51,7 @@ func TestVenueUnreachable_RefusesToTradeAndFabricatesNothing(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	ctx, cancel := context.WithTimeout(testCtx(), 3*time.Second)
 	defer cancel()
 
 	cmd := limitOrder(d(100, 0), d(1025, -2))
@@ -98,7 +98,7 @@ func TestOrderNamingAnUnconfiguredVenue_IsRejected(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ctx := context.Background()
+	ctx := testCtx()
 
 	cmd := limitOrder(d(100, 0), d(1025, -2))
 	cmd.Venue = "BINANCE"
@@ -140,7 +140,7 @@ func TestOrderWithNoVenuesConfigured_StillRests(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ctx := context.Background()
+	ctx := testCtx()
 
 	cmd := limitOrder(d(100, 0), d(1025, -2))
 	if err := svc.Handle(ctx, submitEnv(), mustMarshal(t, cmd)); err != nil {

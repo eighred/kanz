@@ -2,8 +2,11 @@ package order
 
 import (
 	"context"
+	"errors"
+	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	commandpb "github.com/kanz-eng/kanz-schemas-go/command/v1"
 	envelopepb "github.com/kanz-eng/kanz-schemas-go/envelope/v1"
@@ -15,13 +18,70 @@ import (
 	"github.com/kanz-eng/kanz/services/oms/internal/compliance"
 )
 
-// fakeBus records published events for assertion.
+// testCtx stands in for what bus.Consumer would have stashed onto a handler's
+// ctx from the inbound envelope (pkg/bus/context.go's WithTenantID) before the
+// handler ever runs. A direct svc.Handle(ctx, ...) call in these tests bypasses
+// the Consumer, so the test must supply the tenant a real delivery would have
+// carried — exactly as cmd/oms/main.go does for the real startup sweep.
+func testCtx() context.Context {
+	return bus.WithTenantID(context.Background(), "test-tenant")
+}
+
+// fakeBus records published events for assertion. Publish enforces exactly the
+// caller-facing preconditions the real bus.Producer enforces (pkg/bus/producer.go
+// publish/stamp; pkg/bus/validate.go Validate) — the fields a handler, not the
+// producer, is responsible for getting right. It deliberately does NOT run the
+// full bus.Validate: most envelope fields (event_id, schema_version,
+// publish_time, payload_schema_ref, producer_sequence) are stamped by
+// Producer.stamp deterministically and cannot be wrong from a handler's side,
+// so asserting them here would validate nothing a handler could ever break.
+//
+// This exists because a lenient fake once let a Critical bug reach a live
+// cluster with the entire Go suite green: the OMS startup sweep published with
+// no tenant on the context, the real broker rejected it with "envelope
+// validation: tenant_id required", and because a sweep failure is fatal at
+// startup, the OMS crash-looped forever on exactly the orders the sweep exists
+// to rescue. A double that accepts what the real broker rejects certifies
+// nothing.
 type fakeBus struct {
 	mu     sync.Mutex
 	events []bus.Event
+	// tenant, if set, stands in for ProducerConfig.Tenant — the producer's
+	// last-resort tenant fallback (stamp's precedence: Event.TenantID > ctx >
+	// ProducerConfig.Tenant). The OMS's real producer (services/oms/cmd/oms/main.go)
+	// does NOT set ProducerConfig.Tenant, so the zero value here (no fallback,
+	// tenant must come from the Event or ctx) is the faithful default. Only set
+	// this in a test that deliberately exercises the fallback.
+	tenant string
 }
 
-func (f *fakeBus) Publish(_ context.Context, e bus.Event) error {
+func (f *fakeBus) Publish(ctx context.Context, e bus.Event) error {
+	// Rule 1 — producer.go:121-123.
+	if e.Payload == nil {
+		return errors.New("bus: Event.Payload required")
+	}
+	// Rule 2 — stamp, producer.go:170-172.
+	if e.EventTime.IsZero() {
+		return errors.New("Event.EventTime required")
+	}
+	// Rule 3 — stamp, producer.go:210-213.
+	if e.EventClass == envelopepb.EventClass_EVENT_CLASS_COMMAND && e.IdempotencyKey == "" {
+		return errors.New("idempotency_key required for COMMAND events")
+	}
+	// Rule 4 — tenant precedence mirrors stamp exactly (producer.go:225-231),
+	// then Validate's live-path rejection of an empty tenant (validate.go:35-37,
+	// wrapped by publish() at producer.go:128-130).
+	tenant := e.TenantID
+	if tenant == "" {
+		tenant = bus.TenantIDFromContext(ctx)
+	}
+	if tenant == "" {
+		tenant = f.tenant
+	}
+	if tenant == "" {
+		return errors.New("envelope validation: tenant_id required")
+	}
+
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.events = append(f.events, e)
@@ -47,6 +107,54 @@ func (f *fakeBus) last(eventType string) proto.Message {
 		}
 	}
 	return nil
+}
+
+// Direct tests of fakeBus's own enforcement — one per rule, pinning the
+// double's contract so it cannot silently regress back to accepting anything.
+
+func TestFakeBus_RejectsNilPayload(t *testing.T) {
+	fb := &fakeBus{}
+	err := fb.Publish(testCtx(), bus.Event{EventTime: time.Now(), Payload: nil})
+	if err == nil {
+		t.Fatal("Publish with nil Payload: got nil error, want an error")
+	}
+}
+
+func TestFakeBus_RejectsZeroEventTime(t *testing.T) {
+	fb := &fakeBus{}
+	err := fb.Publish(testCtx(), bus.Event{Payload: &orderpb.OrderAccepted{}})
+	if err == nil {
+		t.Fatal("Publish with zero EventTime: got nil error, want an error")
+	}
+}
+
+func TestFakeBus_RejectsCommandWithoutIdempotencyKey(t *testing.T) {
+	fb := &fakeBus{}
+	err := fb.Publish(testCtx(), bus.Event{
+		EventTime:  time.Now(),
+		EventClass: envelopepb.EventClass_EVENT_CLASS_COMMAND,
+		Payload:    &orderpb.OrderAccepted{},
+	})
+	if err == nil {
+		t.Fatal("Publish of a COMMAND with no IdempotencyKey: got nil error, want an error")
+	}
+}
+
+func TestFakeBus_RejectsMissingTenant(t *testing.T) {
+	fb := &fakeBus{}
+	// No Event.TenantID, no ctx tenant, no fb.tenant fallback: the same
+	// combination that reached the live broker and produced "envelope
+	// validation: tenant_id required".
+	err := fb.Publish(context.Background(), bus.Event{
+		EventTime: time.Now(),
+		Payload:   &orderpb.OrderAccepted{},
+	})
+	if err == nil {
+		t.Fatal("Publish with no tenant anywhere: got nil error, want an error")
+	}
+	if !strings.Contains(err.Error(), "tenant_id") {
+		t.Fatalf("error = %q, want it to mention tenant_id (matching the real broker's rejection text)", err.Error())
+	}
 }
 
 func submitEnv() *envelopepb.Envelope { return &envelopepb.Envelope{EventType: SubjectSubmit} }
@@ -76,7 +184,7 @@ func TestService_SubmitMarketableLimit_FillsAndAcks(t *testing.T) {
 	svc, store := newService(t, fb, nil)
 
 	cmd := limitOrder(d(100, 0), d(1025, -2))
-	if err := svc.Handle(context.Background(), submitEnv(), mustMarshal(t, cmd)); err != nil {
+	if err := svc.Handle(testCtx(), submitEnv(), mustMarshal(t, cmd)); err != nil {
 		t.Fatalf("Handle: %v", err)
 	}
 
@@ -102,11 +210,11 @@ func TestService_IdempotentResubmit(t *testing.T) {
 	svc, _ := newService(t, fb, nil)
 	cmd := limitOrder(d(100, 0), d(1025, -2))
 
-	if err := svc.Handle(context.Background(), submitEnv(), mustMarshal(t, cmd)); err != nil {
+	if err := svc.Handle(testCtx(), submitEnv(), mustMarshal(t, cmd)); err != nil {
 		t.Fatalf("first: %v", err)
 	}
 	n := len(fb.types())
-	if err := svc.Handle(context.Background(), submitEnv(), mustMarshal(t, cmd)); err != nil {
+	if err := svc.Handle(testCtx(), submitEnv(), mustMarshal(t, cmd)); err != nil {
 		t.Fatalf("second: %v", err)
 	}
 	if got := len(fb.types()); got != n {
@@ -125,7 +233,7 @@ func TestService_ComplianceBreach_RejectsBeforeAccept(t *testing.T) {
 	svc, store := newService(t, fb, denyGate{})
 
 	cmd := limitOrder(d(100, 0), d(1025, -2))
-	if err := svc.Handle(context.Background(), submitEnv(), mustMarshal(t, cmd)); err != nil {
+	if err := svc.Handle(testCtx(), submitEnv(), mustMarshal(t, cmd)); err != nil {
 		t.Fatalf("Handle: %v", err)
 	}
 	want := []string{EventTypeRejected, EventTypeOutcome}
@@ -152,7 +260,7 @@ func TestService_CancelUnknownOrder(t *testing.T) {
 		t.Fatalf("NewService: %v", err)
 	}
 	env := &envelopepb.Envelope{EventType: SubjectCancel}
-	if err := svc.Handle(context.Background(), env, mustMarshal(t, &orderpb.CancelOrder{OrderId: "ghost"})); err != nil {
+	if err := svc.Handle(testCtx(), env, mustMarshal(t, &orderpb.CancelOrder{OrderId: "ghost"})); err != nil {
 		t.Fatalf("Handle: %v", err)
 	}
 	oc := fb.last(EventTypeOutcome).(*commandpb.CommandOutcome)
@@ -228,7 +336,7 @@ func TestService_ConcurrentResubmit_RoutesToVenueExactlyOnce(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			if err := svc.Handle(context.Background(), submitEnv(), body); err != nil {
+			if err := svc.Handle(testCtx(), submitEnv(), body); err != nil {
 				errs <- err
 			}
 		}()

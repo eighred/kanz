@@ -41,7 +41,7 @@ func TestSubmit_StampsThePortfoliosBoundAccount(t *testing.T) {
 	cmd.Venue = "XSIM"
 	cmd.PortfolioId = "fund-alpha"
 
-	if err := svc.Handle(context.Background(), submitEnvFor("acme"), mustMarshal(t, cmd)); err != nil {
+	if err := svc.Handle(testCtx(), submitEnvFor("acme"), mustMarshal(t, cmd)); err != nil {
 		t.Fatalf("Handle: %v", err)
 	}
 	st, err := store.Load(context.Background(), cmd.GetOrderId())
@@ -74,7 +74,7 @@ func TestSubmit_UnboundPortfolioIsRefusedWhenAccountsAreRequired(t *testing.T) {
 	cmd.Venue = "XSIM"
 	cmd.PortfolioId = "fund-beta"
 
-	if err := svc.Handle(context.Background(), submitEnvFor("acme"), mustMarshal(t, cmd)); err != nil {
+	if err := svc.Handle(testCtx(), submitEnvFor("acme"), mustMarshal(t, cmd)); err != nil {
 		t.Fatalf("Handle: %v", err)
 	}
 
@@ -120,7 +120,7 @@ func TestSubmit_UnboundPortfolioTradesTheSharedAccountAndSaysSo(t *testing.T) {
 	cmd.Venue = "XSIM"
 	cmd.PortfolioId = "fund-beta"
 
-	if err := svc.Handle(context.Background(), submitEnvFor("acme"), mustMarshal(t, cmd)); err != nil {
+	if err := svc.Handle(testCtx(), submitEnvFor("acme"), mustMarshal(t, cmd)); err != nil {
 		t.Fatalf("Handle: %v", err)
 	}
 	st, err := store.Load(context.Background(), cmd.GetOrderId())
@@ -155,7 +155,7 @@ func TestSubmit_BoundToAnAccountNoAdapterHolds_IsRefused(t *testing.T) {
 	cmd.Venue = "XSIM"
 	cmd.PortfolioId = "fund-alpha"
 
-	if err := svc.Handle(context.Background(), submitEnvFor("acme"), mustMarshal(t, cmd)); err != nil {
+	if err := svc.Handle(testCtx(), submitEnvFor("acme"), mustMarshal(t, cmd)); err != nil {
 		t.Fatalf("Handle: %v", err)
 	}
 	if _, lerr := store.Load(context.Background(), cmd.GetOrderId()); lerr == nil {
@@ -183,7 +183,7 @@ func TestSubmit_FillCarriesTheAccountItSettledAgainst(t *testing.T) {
 	cmd.Venue = "XSIM"
 	cmd.PortfolioId = "fund-alpha"
 
-	if err := svc.Handle(context.Background(), submitEnvFor("acme"), mustMarshal(t, cmd)); err != nil {
+	if err := svc.Handle(testCtx(), submitEnvFor("acme"), mustMarshal(t, cmd)); err != nil {
 		t.Fatalf("Handle: %v", err)
 	}
 	filled, _ := fb.last(EventTypeFilled).(*orderpb.OrderFilled)

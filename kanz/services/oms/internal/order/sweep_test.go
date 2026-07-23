@@ -8,7 +8,6 @@ import (
 	orderpb "github.com/kanz-eng/kanz-schemas-go/order/v1"
 
 	"github.com/kanz-eng/kanz/internal/execution"
-	"github.com/kanz-eng/kanz/pkg/bus"
 )
 
 // AN ORDER STRANDED BY A CRASH HAS NO REDELIVERY COMING.
@@ -19,7 +18,7 @@ import (
 // again. The sweep is the only thing that finds it, and it must run before the
 // consumers do, the way tv-sync rebuilds its book before it serves one.
 func TestSweepResumesAnOrderStrandedAtRouted(t *testing.T) {
-	ctx := bus.WithTenantID(context.Background(), "test-tenant")
+	ctx := testCtx()
 	fb := &fakeBus{}
 	venue := execution.NewSimVenue("XSIM")
 	store := NewMemoryStore()
@@ -114,7 +113,7 @@ func TestSweepRefusesAContextWithNoTenant(t *testing.T) {
 // The sweep must not touch finished orders. Loading the whole book and
 // "resuming" a filled order would re-trade it.
 func TestSweepIgnoresTerminalOrders(t *testing.T) {
-	ctx := bus.WithTenantID(context.Background(), "test-tenant")
+	ctx := testCtx()
 	fb := &fakeBus{}
 	store := NewMemoryStore()
 	svc, err := NewService(store, NewEmitter(fb), nil, execution.NewRouter(execution.NewSimVenue("XSIM")), nil, nil)

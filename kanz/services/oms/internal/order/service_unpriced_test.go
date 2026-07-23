@@ -41,7 +41,7 @@ func TestSubmit_MarketOrderTheSimVenueCannotPriceIsRejected(t *testing.T) {
 	fb := &fakeBus{}
 	svc := simService(t, fb)
 
-	if err := svc.Handle(context.Background(), submitEnv(), mustMarshal(t, marketOrder())); err != nil {
+	if err := svc.Handle(testCtx(), submitEnv(), mustMarshal(t, marketOrder())); err != nil {
 		t.Fatalf("submit returned %v — an unpriceable order must be REFUSED and acked, never nacked: "+
 			"the condition is permanent, so a retry loops forever", err)
 	}
@@ -72,7 +72,7 @@ func TestSubmit_UnpriceableMarketOrderEmitsTheRejectedFact(t *testing.T) {
 	fb := &fakeBus{}
 	svc := simService(t, fb)
 
-	if err := svc.Handle(context.Background(), submitEnv(), mustMarshal(t, marketOrder())); err != nil {
+	if err := svc.Handle(testCtx(), submitEnv(), mustMarshal(t, marketOrder())); err != nil {
 		t.Fatalf("submit: %v", err)
 	}
 	if fb.last(EventTypeRejected) == nil {
@@ -87,7 +87,7 @@ func TestSubmit_LimitOrderStillFillsAtTheSimVenue(t *testing.T) {
 	fb := &fakeBus{}
 	svc := simService(t, fb)
 
-	if err := svc.Handle(context.Background(), submitEnv(),
+	if err := svc.Handle(testCtx(), submitEnv(),
 		mustMarshal(t, limitOrder(d(100, 0), d(1025, -2)))); err != nil {
 		t.Fatalf("submit: %v", err)
 	}

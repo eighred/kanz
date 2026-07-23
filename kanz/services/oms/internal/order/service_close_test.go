@@ -49,7 +49,7 @@ func restingOrderOn(t *testing.T, fb *fakeBus, venue execution.Venue) (*Service,
 		t.Fatalf("NewService: %v", err)
 	}
 	// A limit order the venue does not fill ⇒ it rests and is cancellable.
-	if err := svc.Handle(context.Background(), submitEnv(), mustMarshal(t, limitOrder(d(100, 0), d(1025, -2)))); err != nil {
+	if err := svc.Handle(testCtx(), submitEnv(), mustMarshal(t, limitOrder(d(100, 0), d(1025, -2)))); err != nil {
 		t.Fatalf("submit: %v", err)
 	}
 	return svc, reg
@@ -62,7 +62,7 @@ func TestCancel_DispatchesToVenueAndResolves(t *testing.T) {
 	venue := &closerVenue{mic: "BINANCE"}
 	svc, reg := restingOrderOn(t, fb, venue)
 
-	if err := svc.Handle(context.Background(), cancelEnv(), mustMarshal(t, cancelAs("pf1"))); err != nil {
+	if err := svc.Handle(testCtx(), cancelEnv(), mustMarshal(t, cancelAs("pf1"))); err != nil {
 		t.Fatalf("cancel: %v", err)
 	}
 	if len(venue.cancelled) != 1 || venue.cancelled[0] != "o1" {
@@ -85,7 +85,7 @@ func TestCancel_UnconfirmedVenueLeavesCloseTracked(t *testing.T) {
 	venue := &closerVenue{mic: "BINANCE", err: errors.New("timeout")}
 	svc, reg := restingOrderOn(t, fb, venue)
 
-	if err := svc.Handle(context.Background(), cancelEnv(), mustMarshal(t, cancelAs("pf1"))); err != nil {
+	if err := svc.Handle(testCtx(), cancelEnv(), mustMarshal(t, cancelAs("pf1"))); err != nil {
 		t.Fatalf("cancel returned %v — an unconfirmed venue cancel must not nack the command", err)
 	}
 	if reg.Len() != 1 {
@@ -108,7 +108,7 @@ func TestCancel_TrackedCloseCarriesNoSweep(t *testing.T) {
 	venue := &closerVenue{mic: "BINANCE", err: errors.New("timeout")}
 	svc, reg := restingOrderOn(t, fb, venue)
 
-	if err := svc.Handle(context.Background(), cancelEnv(), mustMarshal(t, cancelAs("pf1"))); err != nil {
+	if err := svc.Handle(testCtx(), cancelEnv(), mustMarshal(t, cancelAs("pf1"))); err != nil {
 		t.Fatalf("cancel: %v", err)
 	}
 	due := reg.DueCloses(time.Now(), 0) // timeout 0 ⇒ every tracked close is due
@@ -136,10 +136,10 @@ func TestCancel_NonCloserVenueIsLedgerOnly(t *testing.T) {
 		t.Fatalf("NewService: %v", err)
 	}
 	// A market order with no price resolver does not fill on SimVenue ⇒ it rests.
-	if err := svc.Handle(context.Background(), submitEnv(), mustMarshal(t, marketOrder())); err != nil {
+	if err := svc.Handle(testCtx(), submitEnv(), mustMarshal(t, marketOrder())); err != nil {
 		t.Fatalf("submit: %v", err)
 	}
-	if err := svc.Handle(context.Background(), cancelEnv(), mustMarshal(t, cancelAs("pf1"))); err != nil {
+	if err := svc.Handle(testCtx(), cancelEnv(), mustMarshal(t, cancelAs("pf1"))); err != nil {
 		t.Fatalf("cancel: %v", err)
 	}
 	if reg.Len() != 0 {
@@ -167,7 +167,7 @@ func TestCancel_RefusesQuarantinedOrder(t *testing.T) {
 		t.Fatalf("quarantine: %v", err)
 	}
 
-	if err := svc.Handle(context.Background(), cancelEnv(), mustMarshal(t, cancelAs("pf1"))); err != nil {
+	if err := svc.Handle(testCtx(), cancelEnv(), mustMarshal(t, cancelAs("pf1"))); err != nil {
 		t.Fatalf("cancel: %v", err)
 	}
 

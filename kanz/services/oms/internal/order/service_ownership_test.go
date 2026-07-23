@@ -47,7 +47,7 @@ func TestCancel_RefusesPrincipalNotEntitledToTheOrdersPortfolio(t *testing.T) {
 	venue := &closerVenue{mic: "BINANCE"}
 	svc, _ := restingOrderOn(t, fb, venue)
 
-	if err := svc.Handle(context.Background(), cancelEnv(), mustMarshal(t, cancelAs("pf2", "pf3"))); err != nil {
+	if err := svc.Handle(testCtx(), cancelEnv(), mustMarshal(t, cancelAs("pf2", "pf3"))); err != nil {
 		t.Fatalf("cancel: %v", err)
 	}
 
@@ -80,7 +80,7 @@ func TestCancel_RefusesWhenPrincipalCarriesNoPortfolioScope(t *testing.T) {
 	venue := &closerVenue{mic: "BINANCE"}
 	svc, _ := restingOrderOn(t, fb, venue)
 
-	if err := svc.Handle(context.Background(), cancelEnv(), mustMarshal(t, cancelAs())); err != nil {
+	if err := svc.Handle(testCtx(), cancelEnv(), mustMarshal(t, cancelAs())); err != nil {
 		t.Fatalf("cancel: %v", err)
 	}
 
@@ -101,7 +101,7 @@ func TestCancel_AllowsPrincipalEntitledToTheOrdersPortfolio(t *testing.T) {
 	venue := &closerVenue{mic: "BINANCE"}
 	svc, _ := restingOrderOn(t, fb, venue)
 
-	if err := svc.Handle(context.Background(), cancelEnv(), mustMarshal(t, cancelAs("pf1"))); err != nil {
+	if err := svc.Handle(testCtx(), cancelEnv(), mustMarshal(t, cancelAs("pf1"))); err != nil {
 		t.Fatalf("cancel: %v", err)
 	}
 
@@ -130,7 +130,7 @@ func TestAmend_RefusesPrincipalNotEntitledToTheOrdersPortfolio(t *testing.T) {
 			Issuer: "user:mallory", TargetId: "o1", PrincipalPortfolios: []string{"pf2"},
 		},
 	}
-	if err := svc.Handle(context.Background(), amendEnv(), mustMarshal(t, amend)); err != nil {
+	if err := svc.Handle(testCtx(), amendEnv(), mustMarshal(t, amend)); err != nil {
 		t.Fatalf("amend: %v", err)
 	}
 
@@ -175,7 +175,7 @@ func TestAmend_RefusesQuarantinedOrder(t *testing.T) {
 			Issuer: "user:owner", TargetId: "o1", PrincipalPortfolios: []string{"pf1"},
 		},
 	}
-	if err := svc.Handle(context.Background(), amendEnv(), mustMarshal(t, amend)); err != nil {
+	if err := svc.Handle(testCtx(), amendEnv(), mustMarshal(t, amend)); err != nil {
 		t.Fatalf("amend: %v", err)
 	}
 
@@ -206,7 +206,7 @@ func TestAmend_AllowsPrincipalEntitledToTheOrdersPortfolio(t *testing.T) {
 			Issuer: "user:owner", TargetId: "o1", PrincipalPortfolios: []string{"pf1"},
 		},
 	}
-	if err := svc.Handle(context.Background(), amendEnv(), mustMarshal(t, amend)); err != nil {
+	if err := svc.Handle(testCtx(), amendEnv(), mustMarshal(t, amend)); err != nil {
 		t.Fatalf("amend: %v", err)
 	}
 
