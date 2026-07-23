@@ -80,9 +80,12 @@ type position struct {
 
 type counterSnapshot struct {
 	Filled, Rejected, Quarantined, Ungoverned, Unpriced, SharedCollateral int
+	UnverifiedVenueAccount                                                int
 }
 
-func (m model) Init() tea.Cmd { return m.startBusReader() } // Task 4 adds the poller's cmd alongside this
+func (m model) Init() tea.Cmd {
+	return tea.Batch(m.startBusReader(), m.pollTick())
+}
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
@@ -116,6 +119,24 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// terminal error); either way Update must keep draining the channel.
 		m.err = msg.err
 		return m, waitForBusMsg(m.busCh)
+
+	case pollMsg:
+		// Full replace: parseCounters always returns every field (0 for a
+		// counter absent from the scrape), so the snapshot is always
+		// complete — never a partial merge over the previous tick.
+		m.counters = msg.counters
+		// health is merged, not replaced: a poll cycle that failed the
+		// /metrics leg but succeeded /readyz (or vice versa) must not erase
+		// the service statuses the OTHER leg just reported.
+		for svc, ok := range msg.health {
+			m.health[svc] = ok
+		}
+		if msg.err != nil {
+			m.err = msg.err
+		}
+		// Re-arm: every pollMsg fires the next tick, so the ticker never
+		// stops for the life of the program.
+		return m, m.pollTick()
 	}
 	return m, nil
 }
