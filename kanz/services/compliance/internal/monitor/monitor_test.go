@@ -2,6 +2,7 @@ package monitor
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -18,9 +19,53 @@ import (
 
 var t0 = time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
 
+// testCtx stands in for what bus.Consumer stashes onto a handler's ctx from the
+// inbound envelope (pkg/bus/context.go's WithTenantID) before the handler ever
+// runs. Monitor.Handle is only ever wired through SubscribeBroadcast in
+// production, so a direct Handle(ctx, ...) call in a test bypasses the one thing
+// that supplies the tenant — and must supply it itself.
+func testCtx() context.Context {
+	return bus.WithTenantID(context.Background(), "test-tenant")
+}
+
+// fakeBus records published events for assertion. Publish enforces the
+// caller-facing preconditions the real bus.Producer enforces (pkg/bus/producer.go
+// publish/stamp; pkg/bus/validate.go Validate) — the fields a handler, not the
+// producer, is responsible for getting right. It deliberately does NOT run the
+// full bus.Validate: event_id, schema_version, publish_time and the rest are
+// stamped by Producer.stamp deterministically and cannot be wrong from a
+// handler's side.
+//
+// The tenant rule is the one that matters here. Emitter.EmitBreach sets no
+// Event.TenantID — it relies entirely on the ctx tenant — and compliance's
+// producer sets no ProducerConfig.Tenant fallback, so an empty tenant is a hard
+// publish failure in production. These tests used to pass a bare
+// context.Background() and go green anyway, purely because this double accepted
+// what the broker would reject. That is exactly how a Critical bug reached a
+// live cluster from the OMS with its whole suite green: a double that accepts
+// what the real broker rejects certifies nothing.
 type fakeBus struct{ events []bus.Event }
 
-func (f *fakeBus) Publish(_ context.Context, e bus.Event) error {
+func (f *fakeBus) Publish(ctx context.Context, e bus.Event) error {
+	if e.Payload == nil {
+		return errors.New("bus: Event.Payload required")
+	}
+	if e.EventTime.IsZero() {
+		return errors.New("Event.EventTime required")
+	}
+	if e.EventClass == envelopepb.EventClass_EVENT_CLASS_COMMAND && e.IdempotencyKey == "" {
+		return errors.New("idempotency_key required for COMMAND events")
+	}
+	// Tenant precedence mirrors stamp (Event.TenantID > ctx), then Validate's
+	// live-path rejection of an empty tenant. compliance configures no
+	// ProducerConfig.Tenant, so there is no third fallback to model.
+	tenant := e.TenantID
+	if tenant == "" {
+		tenant = bus.TenantIDFromContext(ctx)
+	}
+	if tenant == "" {
+		return errors.New("envelope validation: tenant_id required")
+	}
 	f.events = append(f.events, e)
 	return nil
 }
@@ -69,7 +114,7 @@ func TestMonitor_PassiveBreachEmitsAndEscalates(t *testing.T) {
 	fb := &fakeBus{}
 	rec := &recordingRecorder{}
 	m := NewMonitor(comp.NewEngine(nil), concentrationRegistry(), nil, NewEmitter(fb), rec, nil)
-	ctx := context.Background()
+	ctx := testCtx()
 	env := &envelopepb.Envelope{}
 
 	// 1) AAPL alone ⇒ 100% > 60% (seed breach, POSITION_CHANGE).
@@ -122,7 +167,7 @@ func TestMonitor_PassiveBreachEmitsAndEscalates(t *testing.T) {
 func TestMonitor_NoMandateNoEmit(t *testing.T) {
 	fb := &fakeBus{}
 	m := NewMonitor(comp.NewEngine(nil), comp.NewMandateRegistry(), nil, NewEmitter(fb), nil, nil)
-	if err := m.Handle(context.Background(), &envelopepb.Envelope{}, positionEvent(t, "AAPL", 100, 100000, t0.Add(time.Minute))); err != nil {
+	if err := m.Handle(testCtx(), &envelopepb.Envelope{}, positionEvent(t, "AAPL", 100, 100000, t0.Add(time.Minute))); err != nil {
 		t.Fatal(err)
 	}
 	if len(fb.events) != 0 {
