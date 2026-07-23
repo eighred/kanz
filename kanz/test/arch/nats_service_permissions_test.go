@@ -31,15 +31,32 @@ import (
 // SCOPE, HONESTLY (same stance as subject_topology_test.go's own header):
 // this resolves a `bus.Event{Subject: ...}` literal directly, a package-level
 // const/var it names (one or more import hops), simple same-function local
-// variable assignments, and — bounded to exactly one function-call hop, same
-// package only — the argument passed at a small private emit/publish helper's
-// call sites when the helper's own Subject: field names one of its parameters.
-// It does NOT trace through a helper function's OWN internal control flow (a
-// switch that returns one of several literals), interfaces, maps, or anything
-// assembled from concatenation. Where it cannot resolve a Subject: value to one
-// or more literals, it SKIPS that call site rather than guessing — an
+// variable assignments, and two bounded one-function-call hops, same package
+// only: (a) the argument passed at a small private emit/publish helper's call
+// sites, when the helper's own Subject: field names one of its parameters; and
+// (b) a callee's OWN return tuple — `subject, ... := f(...)` — folded through
+// f's return statements, including every branch of a switch/if inside f that
+// returns a different literal (accounting's cashmove.Kind.wire() is exactly
+// this shape: three literals, one per Kind, and ALL three are real, reachable
+// results, not one ambiguous one). Both hops are matched by NAME within the
+// same directory only — no receiver-type tracking, the same accepted
+// collision risk resolveParamAcrossCallSites already took before hop (b)
+// existed.
+//
+// It does NOT chase a SECOND hop (a callee calling another callee in turn),
+// trace through interfaces, maps, or anything assembled from concatenation
+// (market-data's BusSink.eventType is exactly this excluded shape — an
+// fmt.Sprintf over a config-injected field — and this guard correctly
+// resolves it to zero evidence). Where it cannot resolve a Subject: value to
+// one or more literals, it SKIPS that call site rather than guessing — an
 // unresolved subject is a false negative (accepted, and logged at -v), never a
-// false positive that fails the build on correct code.
+// false positive that fails the build on correct code. market-data's wildcard
+// grant is verified separately, by
+// TestMarketDataPublishGrantCoversItsConfigInjectedWildcard below, against the
+// parts of that same excluded Sprintf that ARE fixed (the domain constant and
+// the closed set of variant suffixes) — a code-checked bound rather than a
+// rubber-stamped allow-list, since the middle segment genuinely cannot be
+// folded to a literal.
 func TestServicePublishesOnlySubjectsItsTenancyPermissionsAllow(t *testing.T) {
 	root := moduleRoot(t)
 	perms := servicePublishPermissions(t, filepath.Join(root, "infra", "nats", "tenancy.yaml"))
@@ -445,9 +462,23 @@ func (rc *resolveCache) resolveLocalAssignments(t *testing.T, file *ast.File, di
 		if !ok {
 			return true
 		}
+		// `a, b, c := f(...)`: one call populates every name in Lhs, so a
+		// matching name's position in Lhs is its position in f's RETURN
+		// tuple, not an index into Rhs (Rhs has exactly one element here:
+		// the call itself). cashmove.encode's `subject, entryType, ok :=
+		// m.Kind.wire()` is exactly this shape.
+		tuple := len(assign.Rhs) == 1 && len(assign.Lhs) > 1
 		for i, lhs := range assign.Lhs {
 			id, ok := lhs.(*ast.Ident)
-			if !ok || id.Name != name || i >= len(assign.Rhs) {
+			if !ok || id.Name != name {
+				continue
+			}
+			if tuple {
+				found = true
+				out = append(out, rc.resolveCallTuple(t, file, dir, assign.Rhs[0], i, depth-1)...)
+				continue
+			}
+			if i >= len(assign.Rhs) {
 				continue
 			}
 			found = true
@@ -459,6 +490,80 @@ func (rc *resolveCache) resolveLocalAssignments(t *testing.T, file *ast.File, di
 		return nil
 	}
 	return out
+}
+
+// resolveCallTuple resolves the value that would be assigned to the idx'th
+// name in a tuple assignment (`a, b, c := f(...)`) whose single right-hand
+// side is a function or method call — the return-side counterpart to
+// resolveParamAcrossCallSites' argument-side hop. It finds the function or
+// method the call names — same directory (package) only, matched by NAME,
+// receiver type not tracked (small private helpers like Kind.wire have no
+// name collision in practice; see this file's header) — and folds every
+// return statement's idx'th result expression via foldReturnValues, so a
+// switch/if inside the callee returning several different literals yields
+// ALL of them, not one ambiguous choice.
+func (rc *resolveCache) resolveCallTuple(t *testing.T, file *ast.File, dir string, rhs ast.Expr, idx, depth int) []string {
+	if depth <= 0 {
+		return nil
+	}
+	call, ok := rhs.(*ast.CallExpr)
+	if !ok {
+		return nil
+	}
+	name := ""
+	switch fun := call.Fun.(type) {
+	case *ast.Ident:
+		name = fun.Name
+	case *ast.SelectorExpr:
+		name = fun.Sel.Name
+	default:
+		return nil
+	}
+	calleeFile, calleeFn := rc.findFuncByName(t, dir, name)
+	if calleeFn == nil {
+		return nil
+	}
+	return rc.foldReturnValues(t, calleeFile, dir, calleeFn, idx, depth)
+}
+
+// foldReturnValues folds every literal (or further-resolvable) value fn
+// returns at result position idx. It is the shared core behind
+// resolveCallTuple (reached mid-scan, from an unresolved call site) and
+// TestMarketDataPublishGrantCoversItsConfigInjectedWildcard (reached
+// directly, from a function already known by name — bussink.go's variant()).
+func (rc *resolveCache) foldReturnValues(t *testing.T, file *ast.File, dir string, fn *ast.FuncDecl, idx, depth int) []string {
+	if depth <= 0 || fn.Body == nil {
+		return nil
+	}
+	var out []string
+	ast.Inspect(fn.Body, func(n ast.Node) bool {
+		ret, ok := n.(*ast.ReturnStmt)
+		if !ok || idx >= len(ret.Results) {
+			return true
+		}
+		out = append(out, rc.resolveExpr(t, file, dir, ret.Results[idx], fn, depth-1)...)
+		return true
+	})
+	return out
+}
+
+// findFuncByName finds a top-level function or method declared in dir's
+// package (already-loaded files only — callers reach here via a directory
+// already scanned for this same service) whose name is name — plain function
+// or method, receiver type not checked (see resolveCallTuple's doc). Returns
+// the first match; this package has no same-name collisions among the small
+// private helpers this reaches (cashmove.Kind.wire, bussink.variant).
+func (rc *resolveCache) findFuncByName(t *testing.T, dir, name string) (*ast.File, *ast.FuncDecl) {
+	for _, f := range rc.packageFiles(t, dir) {
+		for _, decl := range f.Decls {
+			fn, ok := decl.(*ast.FuncDecl)
+			if !ok || fn.Name.Name != name || fn.Body == nil {
+				continue
+			}
+			return f, fn
+		}
+	}
+	return nil, nil
 }
 
 // paramIndex reports the index of fn's parameter named name, across a
@@ -667,4 +772,66 @@ func dedupStrings(in []string) []string {
 		}
 	}
 	return out
+}
+
+// TestMarketDataPublishGrantCoversItsConfigInjectedWildcard is this file's
+// other half for market-data. TestServicePublishesOnlySubjectsItsTenancy
+// PermissionsAllow cannot fold BusSink.eventType (services/market-data/
+// internal/feed/bussink.go) to a literal: it's an fmt.Sprintf over
+// s.assetClass, a field NewBusSink sets from a deploy-time config value —
+// genuinely runtime-variable, never a closed set of literals an AST resolver
+// could enumerate. So market-data's publish grant is legitimately a wildcard
+// (market.>), not a list — and this test is the code-checked assertion that
+// the wildcard is honest, not rubber-stamped: it re-derives, from the SAME
+// source the resolver could not fold, the two parts that ARE fixed — the
+// domain constant and the closed set of variant suffixes — and proves
+// tenancy.yaml's market-data grant covers every subject those two fixed parts
+// can combine with ANY middle segment to produce. If bussink.go ever adds a
+// fourth variant, renames the domain, or the grant is ever narrowed below
+// domainMarket+".>", this test — not just the eyeballed comment above the
+// grant — is what catches it.
+func TestMarketDataPublishGrantCoversItsConfigInjectedWildcard(t *testing.T) {
+	root := moduleRoot(t)
+	perms := servicePublishPermissions(t, filepath.Join(root, "infra", "nats", "tenancy.yaml"))
+	svid := systemAccountSVID("market-data")
+	perm, ok := perms[svid]
+	if !ok {
+		t.Fatalf("tenancy.yaml has no permissions block for %s — has the account been renamed?", svid)
+	}
+
+	rc := newResolveCache(root)
+	dir := filepath.Join(root, "services", "market-data", "internal", "feed")
+
+	domains := dedupStrings(rc.resolveIdentInPackage(t, dir, "domainMarket", 3))
+	if len(domains) != 1 {
+		t.Fatalf("resolved %d value(s) for bussink.go's domainMarket constant, want exactly 1 — "+
+			"has BusSink.eventType's subject shape changed?", len(domains))
+	}
+	domain := domains[0]
+
+	variantFile, variantFn := rc.findFuncByName(t, dir, "variant")
+	if variantFn == nil {
+		t.Fatal("bussink.go's variant() function was not found — has BusSink.eventType been restructured?")
+	}
+	variants := dedupStrings(rc.foldReturnValues(t, variantFile, dir, variantFn, 0, 3))
+	if len(variants) == 0 {
+		t.Fatal("resolved zero literal variants from bussink.go's variant() — this test can no longer prove " +
+			"the closed set it bounds the wildcard to, and must not silently pass")
+	}
+
+	// The middle segment (assetClass) is genuinely unbounded — NewBusSink takes
+	// it as a plain config string, not an enum — so any placeholder proves the
+	// point; two different ones guard against a grant that happens to allow one
+	// specific asset class literally instead of covering the wildcard.
+	for _, placeholder := range []string{"equity", "some-configured-asset-class"} {
+		for _, v := range variants {
+			subject := domain + "." + placeholder + "." + v
+			if permDenies(subject, perm) || !covered(subject, perm.allow) {
+				t.Fatalf("market-data's real publish shape is %s.<config-injected assetClass>.%s "+
+					"(bussink.go's BusSink.eventType) but tenancy.yaml's permissions.publish for %s "+
+					"does not cover %q — the wildcard grant no longer bounds what the code can actually produce",
+					domain, v, svid, subject)
+			}
+		}
+	}
 }
