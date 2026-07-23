@@ -58,6 +58,22 @@ func (s *Service) SweepInterrupted(ctx context.Context) (int, error) {
 			"because a sweep failure is fatal at startup, the OMS never starts")
 	}
 
+	// DELIBERATELY NOT FILLED/REJECTED/CANCELLED/EXPIRED, even though a FILLED or
+	// REJECTED order can now be terminal-but-unannounced (outcome_announced_at
+	// unset — see order_events.proto:19 and resume()'s terminal branch). resume()
+	// reaches that case safely because it is only ever invoked for a SPECIFIC
+	// order_id a SubjectSubmit redelivery names, which the broker only redelivers
+	// within its own bounded retry/DLQ window. ListByStatus has no such bound: it
+	// is every order in that status, ever. outcome_announced_at is an ADDITIVE
+	// field, so every order Saved before this field existed reads back with it
+	// unset — indistinguishable, by that column alone, from a genuine
+	// interruption. Selecting FILLED/REJECTED here would treat the fund's entire
+	// pre-migration order history as newly-interrupted and re-announce a
+	// CommandOutcome for all of it on every single startup. That is a much worse
+	// failure than the one this field fixes, so the sweep continues to skip
+	// every terminal status; a terminal-but-unannounced order whose SubmitOrder
+	// command has stopped being redelivered (retries exhausted, past the DLQ
+	// window) is a known, residual gap this fix does not close.
 	open, err := s.store.ListByStatus(ctx,
 		orderpb.OrderStatus_ORDER_STATUS_PENDING_NEW,
 		orderpb.OrderStatus_ORDER_STATUS_ROUTED,

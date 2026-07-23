@@ -140,6 +140,29 @@ message OrderState {
   // this order's cancellation was already told to the world, and a further
   // cancel command is a genuine duplicate.
   google.protobuf.Timestamp cancel_announced_at = 18;
+
+  // outcome_announced_at is WHEN A TERMINAL SUBMIT-FLOW OUTCOME WAS NOT MERELY
+  // PERSISTED BUT ANNOUNCED — the order's final lifecycle FACT (OrderFilled or
+  // OrderRejected) and its CommandOutcome both published. It plays the same
+  // role for the submit flow's terminal transitions that venue_ack_at plays
+  // for routing and cancel_announced_at plays for cancellation: the one fact
+  // that separates a recovering OMS from a guessing one.
+  //
+  // Without it, a redelivery of a SubmitOrder whose terminal announcement was
+  // interrupted — a fill that made the order FILLED, or a permanent reject,
+  // Saved and then never announced because EmitFill/EmitRejected or the
+  // trailing EmitOutcome failed — is indistinguishable from a genuine
+  // duplicate of an order that finished cleanly. resume()'s terminal check
+  // would ack it on sight: the order is FILLED or REJECTED in the store, its
+  // FACT was never published, and nothing ever mentions it again. Unset means
+  // the store write landed but the announcement did not; the handler must
+  // complete the announcement, not treat the redelivery as a duplicate. Set
+  // means this order's terminal outcome was already told to the world.
+  //
+  // It does NOT cover cancellation — cancel_announced_at owns that
+  // transition on its own, because the cancel command's own redelivery path
+  // (handleCancel) is what completes it, not a SubmitOrder redelivery.
+  google.protobuf.Timestamp outcome_announced_at = 19;
 }
 
 // OrderQuarantine records an order whose true state at the venue could not be

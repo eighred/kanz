@@ -263,10 +263,17 @@ func (s *Service) handleSubmit(ctx context.Context, env *envelopepb.Envelope, pa
 		// admission and is stored as ROUTED; leaving it there would have the
 		// ledger say rejected while the OMS's own truth says working, and a
 		// later cancel would act on a live-looking order.
-		if serr := s.store.Save(ctx, Reject(st, rejectedAt)); serr != nil {
+		rejected := Reject(st, rejectedAt)
+		if serr := s.store.Save(ctx, rejected); serr != nil {
 			return serr
 		}
-		return s.refuse(ctx, st.GetOrderId(), "PRICE_UNAVAILABLE", err.Error(), rejectedAt)
+		if rerr := s.refuse(ctx, st.GetOrderId(), "PRICE_UNAVAILABLE", err.Error(), rejectedAt); rerr != nil {
+			return rerr
+		}
+		// The FACT and the outcome are both out — stamp outcome_announced_at so
+		// a redelivery of this SubmitOrder hits resume()'s genuine-duplicate
+		// branch instead of re-entering this path. See order_events.proto:19.
+		return s.markOutcomeAnnounced(ctx, rejected, rejectedAt)
 	}
 	if err != nil {
 		return err
@@ -278,7 +285,17 @@ func (s *Service) handleSubmit(ctx context.Context, env *envelopepb.Envelope, pa
 		status = commandpb.CommandOutcomeStatus_COMMAND_OUTCOME_STATUS_EXECUTED
 		reason = "order filled"
 	}
-	return s.emitter.EmitOutcome(ctx, st.GetOrderId(), status, reason, "", "", now)
+	if err := s.emitter.EmitOutcome(ctx, st.GetOrderId(), status, reason, "", "", now); err != nil {
+		return err
+	}
+	if st.GetStatus() == orderpb.OrderStatus_ORDER_STATUS_FILLED {
+		// The fill's FACT (inside s.work's loop, above) and this trailing
+		// outcome are both out — stamp outcome_announced_at so a redelivery
+		// of this SubmitOrder hits resume()'s genuine-duplicate branch
+		// instead of re-driving or re-announcing a finished order.
+		return s.markOutcomeAnnounced(ctx, st, now)
+	}
+	return nil
 }
 
 // resolveAccount answers: which exchange account may this portfolio spend from at this
@@ -719,14 +736,19 @@ func (s *Service) claim(orderID string) (func(), bool) {
 // The one thing it must never do is guess. Every path below either establishes
 // what the venue did, or freezes the order.
 func (s *Service) resume(ctx context.Context, st *orderpb.OrderState) error {
-	// A terminal order is genuinely finished — this really is a duplicate.
-	if IsTerminal(st) {
+	// A terminal order is genuinely finished — UNLESS its terminal outcome was
+	// persisted but never announced (see outcome_announced_at,
+	// order_events.proto:19): a fill that made the order FILLED, or a permanent
+	// reject, Saved and then interrupted before its FACT/outcome went out.
+	// orderOutcomeAnnounced tells the two apart; only that check may return nil
+	// here without doing anything.
+	if IsTerminal(st) && orderOutcomeAnnounced(st) {
 		return nil
 	}
 	// An already-quarantined order is frozen and stays frozen. Re-running the
 	// policy on every redelivery would just re-derive the same freeze, and the
 	// venue answer that resolves it is a human's to obtain.
-	if st.GetQuarantine() != nil {
+	if !IsTerminal(st) && st.GetQuarantine() != nil {
 		return nil
 	}
 	release, ok := s.claim(st.GetOrderId())
@@ -743,7 +765,18 @@ func (s *Service) resume(ctx context.Context, st *orderpb.OrderState) error {
 	if err != nil {
 		return err
 	}
-	if IsTerminal(fresh) || fresh.GetQuarantine() != nil {
+	// TERMINAL BUT UNANNOUNCED: the state was persisted before the interrupted
+	// delivery could announce it. Complete the announcement rather than ack a
+	// redelivery of an order the world was never told about. This is decided
+	// AGAIN, under the claim, because the goroutine we just raced for it may
+	// have completed the announcement between our first read and this one.
+	if IsTerminal(fresh) {
+		if orderOutcomeAnnounced(fresh) {
+			return nil
+		}
+		return s.completeTerminalOutcome(ctx, fresh)
+	}
+	if fresh.GetQuarantine() != nil {
 		return nil
 	}
 	st = fresh
@@ -813,6 +846,96 @@ func (s *Service) resume(ctx context.Context, st *orderpb.OrderState) error {
 	}
 }
 
+// orderOutcomeAnnounced reports whether a terminal order's outcome has already
+// been told to the world, so resume() can tell a genuine duplicate apart from
+// an interrupted announcement.
+//
+// CANCELLED is handled specially: its announcement is owned entirely by
+// cancel_announced_at and the cancel command's OWN redelivery path
+// (handleCancel/completeCancelAnnouncement), not by outcome_announced_at or by
+// a SubmitOrder redelivery. A SubmitOrder redelivery that finds an order
+// already cancelled has nothing of its own left to announce — the order was
+// validly admitted (that already happened) and whatever became of it since is
+// the cancel command's story to finish, not this one's. Treating it as
+// unannounced here would have resume() invent a FILLED-or-REJECTED-shaped
+// CommandOutcome for an order that is in fact cancelled.
+func orderOutcomeAnnounced(st *orderpb.OrderState) bool {
+	if st.GetStatus() == orderpb.OrderStatus_ORDER_STATUS_CANCELLED {
+		return true
+	}
+	return st.GetOutcomeAnnouncedAt() != nil
+}
+
+// markOutcomeAnnounced stamps outcome_announced_at on a terminal order whose
+// FACT and CommandOutcome have both just been published successfully, so a
+// later redelivery's resume() recognizes a genuine duplicate instead of
+// re-entering the reject/fill path that already completed. Mirrors
+// completeCancelAnnouncement's trailing Save for the cancel transition.
+func (s *Service) markOutcomeAnnounced(ctx context.Context, st *orderpb.OrderState, t time.Time) error {
+	announced := cloneState(st)
+	announced.OutcomeAnnouncedAt = timestamppb.New(t)
+	return s.store.Save(ctx, announced)
+}
+
+// completeTerminalOutcome re-publishes the CommandOutcome for a SubmitOrder
+// whose terminal state (FILLED or REJECTED) was persisted but never
+// announced — a delivery that Saved the terminal OrderState and then failed
+// before EmitFill/EmitRejected or the trailing EmitOutcome went out (see
+// outcome_announced_at, order_events.proto:19). It is resume()'s completion
+// of that interrupted announcement.
+//
+// WHAT IT CANNOT DO, AND WHY. The stored OrderState carries only the order's
+// current AGGREGATE view — status, cumulative filled_quantity, leaves_quantity,
+// average_fill_price (order/v1/order_events.proto:78-85). It has no field for
+// the individual Fill that produced a FILLED state (fill_id, price,
+// venue_execution_id, executed_at — order/v1/order_events.proto:169-211), nor
+// for an OrderRejected's reason/error_code (order/v1/order_events.proto:222-230).
+// Those values lived only in the local variables of the interrupted call —
+// the `fill` loop variable in work() (service.go, the fill-fold loop) or the
+// literal "PRICE_UNAVAILABLE"/err.Error() in handleSubmit's ErrUnpriced
+// branch — and were never persisted anywhere this function, reading only
+// store.Load's result, can recover them from. Re-emitting the exact
+// ORDER_FILLED/ORDER_REJECTED FACT is therefore not possible here without
+// fabricating a fill or a rejection reason, which is worse than the FACT
+// arriving late: it would put invented data on the record.
+//
+// What CAN be reconstructed, honestly, from the terminal OrderState alone is
+// the CommandOutcome for the original SubmitOrder command — its status
+// follows directly from st.status, with no other input needed. That is what
+// this publishes. The missing lifecycle FACT for this specific interruption
+// is a residual, KNOWN LIMIT of this fix: tv-sync, accounting, and audit still
+// never see it. What this fix removes is the worse failure — a completed
+// trade or a permanent rejection whose command outcome the caller was never
+// told, with no recovery path at all.
+func (s *Service) completeTerminalOutcome(ctx context.Context, st *orderpb.OrderState) error {
+	now := s.now().UTC()
+	var status commandpb.CommandOutcomeStatus
+	var reason, code string
+	switch st.GetStatus() {
+	case orderpb.OrderStatus_ORDER_STATUS_FILLED:
+		status = commandpb.CommandOutcomeStatus_COMMAND_OUTCOME_STATUS_EXECUTED
+		reason = "order filled (outcome re-announced after an interrupted delivery)"
+		s.logger.Error("oms: completing an interrupted FILLED announcement WITHOUT its ORDER_FILLED FACT — "+
+			"the original fill is not recoverable from the stored OrderState, so only the command outcome "+
+			"is re-published; tv-sync, accounting, and audit will never see this fill's FACT",
+			"order_id", st.GetOrderId())
+	default:
+		// REJECTED today; EXPIRED is not currently reachable (Expire is never
+		// called from this service), but the same reasoning applies if it ever is.
+		status = commandpb.CommandOutcomeStatus_COMMAND_OUTCOME_STATUS_REJECTED
+		reason = "order rejected (outcome re-announced after an interrupted delivery)"
+		code = "OUTCOME_RECOVERED"
+		s.logger.Error("oms: completing an interrupted REJECTED announcement WITHOUT its ORDER_REJECTED FACT — "+
+			"the original reject reason/code is not recoverable from the stored OrderState, so only a "+
+			"generic command outcome is re-published",
+			"order_id", st.GetOrderId(), "status", st.GetStatus().String())
+	}
+	if err := s.emitter.EmitOutcome(ctx, st.GetOrderId(), status, reason, code, "", now); err != nil {
+		return err
+	}
+	return s.markOutcomeAnnounced(ctx, st, now)
+}
+
 // adopt takes the venue's truth as ours: its fills, or its rejection.
 //
 // Folding a fill twice is prevented downstream, not here: the position book
@@ -823,14 +946,20 @@ func (s *Service) resume(ctx context.Context, st *orderpb.OrderState) error {
 func (s *Service) adopt(ctx context.Context, st *orderpb.OrderState, view execution.OrderView) error {
 	if view.State == execution.OrderViewRejected {
 		now := s.now().UTC()
-		if err := s.store.Save(ctx, Reject(st, now)); err != nil {
+		rejected := Reject(st, now)
+		if err := s.store.Save(ctx, rejected); err != nil {
 			return err
 		}
 		reason := view.Reason
 		if reason == "" {
 			reason = "venue reports this order rejected"
 		}
-		return s.refuse(ctx, st.GetOrderId(), "VENUE_REJECTED", reason, now)
+		if err := s.refuse(ctx, st.GetOrderId(), "VENUE_REJECTED", reason, now); err != nil {
+			return err
+		}
+		// Same marker, same reason as the ErrUnpriced reject in handleSubmit:
+		// see order_events.proto:19.
+		return s.markOutcomeAnnounced(ctx, rejected, now)
 	}
 
 	// The venue confirmed it holds the order, so the ack is established even if
