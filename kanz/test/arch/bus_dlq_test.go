@@ -264,6 +264,32 @@ var retryCertifiedConsumers = map[string]string{
 		"which Puts through book.Postgres.Put (services/wealth/internal/book/postgres.go:30) — an " +
 		"unconditional last-write-wins UPSERT keyed on household_id. Re-running it with the " +
 		"same composition is a no-op change; there is no dedup branch to skip through.",
+
+	"services/oms/cmd/oms/main.go:328": "oms: dispatches handleSubmit, handleCancel, handleAmend " +
+		"(order.Service.Handle) and position.Projector.Handle (fills), re-derived fresh against " +
+		"250fe00 rather than assumed fixed — see .superpowers/sdd/oms-recert-report.md for the " +
+		"full per-failure-point walk. handleSubmit: every failure point after store.Create either " +
+		"redoes unexecuted work (resume's Unknown+no-ack -> ActionRedrive re-drives Route/Save/" +
+		"EmitRouted/Execute, and SimVenue.Execute is idempotent by its own executed-fills record, " +
+		"venue/internal/execution/venue.go:170-221) or completes an interrupted terminal " +
+		"announcement via outcome_announced_at + completeTerminalOutcome (service.go:745,773-778,910-937 " +
+		"— the 250fe00 fix, re-verified to actually fire on a fill-loop EmitFill failure that leaves " +
+		"the order FILLED-but-unannounced). A partial, non-terminal fill interrupted mid-loop is " +
+		"unreachable with SimVenue (single full-leaves fill only) and, for FIXVenue/GRPCVenue, " +
+		"resume's own Querier check quarantines rather than guessing (neither implements " +
+		"execution.Querier) — an alerting freeze, never a silent ack. handleCancel: the " +
+		"cancel_announced_at resume branch (service.go:505-506) completes the announcement without " +
+		"re-dispatching closeAtVenue, confirmed by reading the call graph, not just the comment. " +
+		"handleAmend rewrites absolute values under an IsTerminal guard that a live amend target " +
+		"never trips, so a retry recomputes and re-persists the same result. position.Projector.Handle " +
+		"folds through Postgres.Apply's single-transaction fill_id claim-and-fold (position/postgres.go:105-159) " +
+		"— atomic dedup, not check-then-act. Two completeness gaps found and reported but judged " +
+		"non-blocking because neither skips durably-committed work: resume's PENDING_NEW/ActionRedrive " +
+		"branches and adopt()'s fill loop never (re-)emit the CommandOutcome/EmitAccepted a direct " +
+		"admission would (service.go:788-791,839-841,946-1044), and ActionRedrive does not special-case " +
+		"ErrUnpriced the way handleSubmit's own admission path does (service.go:260-277 vs 839-841) — " +
+		"both fail by never producing an announcement or by nacking loudly toward the DLQ, never by " +
+		"acking work that was never done.",
 }
 
 func TestNoBusConsumerWiresRetryWhileHandlersResumeByAcking(t *testing.T) {
