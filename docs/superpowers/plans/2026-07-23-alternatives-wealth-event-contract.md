@@ -595,7 +595,12 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 
 **Files:**
 - Create: `kanz/internal/wealth/subject.go`
-- Modify: `kanz/infra/nats/bootstrap-job.yaml`, `kanz/infra/nats/bootstrap-job-dev-plaintext.yaml`, `kanz/infra/kafka/topics-job.yaml`
+- Modify: `kanz/infra/nats/bootstrap-job.yaml`, `kanz/infra/kafka/topics-job.yaml`, `kanz/infra/kafka/tenancy.yaml`
+
+**Two provisioning facts learned in Task 1 — they save you a wrong turn:**
+
+1. **`bootstrap-job-dev-plaintext.yaml` needs no edit.** It carries no `ensure_stream` lines of its own; it mounts the same `nats-bootstrap` ConfigMap, so editing `bootstrap-job.yaml` already covers the rig.
+2. **There is a THIRD guard the plan originally missed.** `TestTenantTopicTableMatchesTheSystemTable` requires `infra/kafka/tenancy.yaml`'s per-tenant table to mirror `topics-job.yaml` exactly. Add the identical row to BOTH files or the arch suite fails.
 
 **Interfaces:**
 - Produces: `wealth.Domain`, `wealth.EventTypeHouseholdValued`, `wealth.SubjectHouseholdAll`, `func SubjectHouseholdFor(tenant, householdID string) string`
@@ -657,7 +662,7 @@ Expected: FAIL, naming the wealth subject.
 ensure_stream WEALTH        "wealth.>" 0 --max-msgs-per-subject=1
 ```
 
-`topics-job.yaml`:
+`topics-job.yaml` AND `tenancy.yaml` (the same row in both — see the note above):
 
 ```
 wealth.household 3 compact -1 yes
