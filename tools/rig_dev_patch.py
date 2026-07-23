@@ -23,6 +23,7 @@ csi.spiffe.io volumes are deliberately LEFT ALONE: after `rig-apply.sh --spire`
 the rig runs real SPIRE, so its SVIDs are genuine and stripping them would
 reintroduce the very deviation this replaces.
 """
+import os
 import sys
 import yaml
 
@@ -30,7 +31,23 @@ VAULT_DRIVER = "secrets-store.csi.k8s.io"
 
 # Env vars that point a workload at production-only infrastructure the rig does
 # not run. Removed so the workload takes its in-process / plaintext fallback.
-_DROP_ENV_EXACT = frozenset({"OMS_VENUE_ENDPOINTS"})
+_DROP_ENV_EXACT = frozenset({"OMS_VENUE_ENDPOINTS", "API_GATEWAY_OIDC_ISSUER"})
+
+# Env vars the rig must ADD, keyed by manifest filename. The production manifest
+# has no reason to carry these — they exist only because the rig substitutes a
+# dev mechanism for one it cannot reach.
+_ADD_ENV = {
+    "api-gateway-deploy.yaml": [
+        # The HS256 dev validator's key. api-gateway picks OIDC over HS256 when
+        # API_GATEWAY_OIDC_ISSUER is set (cmd/api-gateway/main.go), which is why
+        # that var is dropped above — the rig cannot reach login.eighred.com, so
+        # with OIDC selected the gateway can authenticate nobody and its order
+        # routes are untestable here. The key is read from the api-gateway-secrets
+        # mount the manifest already declares, so this adds no new volume.
+        {"name": "API_GATEWAY_JWT_SECRET_FILE",
+         "value": "/run/secrets/gateway/jwt-secret"},
+    ],
+}
 
 
 def _drop_on_rig(name):
@@ -86,6 +103,14 @@ def patch_pod_spec(spec, path):
             env = container.get("env")
             if env:
                 container["env"] = [e for e in env if not _drop_on_rig(e.get("name", ""))]
+
+        # Additions apply to the workload's own containers, never its init
+        # containers: an initContainer runs migrations, not the service.
+        for container in spec.get("containers") or []:
+            for add in _ADD_ENV.get(os.path.basename(path), ()):
+                have = {e.get("name") for e in container.get("env") or []}
+                if add["name"] not in have:
+                    container.setdefault("env", []).append(dict(add))
 
 
 def main():
