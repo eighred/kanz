@@ -147,4 +147,14 @@ message NAVMark {
 
   // as_of is the valuation date. Required.
   google.protobuf.Timestamp as_of = 3;
+
+  // mark_id is the canonical id. Required — this is the fold's idempotency
+  // key (alternatives.Event.EventID), exactly as commitment_id, call_id and
+  // distribution_id already are on their own messages above. Without an
+  // explicit id here, a corrected restatement of the same as_of date (GPs
+  // routinely restate a quarter) is indistinguishable from a redelivery of
+  // the original mark, and the fold's ON CONFLICT (tenant_id, event_id) DO
+  // NOTHING silently drops it — reporting success while leaving a stale
+  // valuation in place.
+  string mark_id = 4;
 }

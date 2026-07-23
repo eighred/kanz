@@ -3,7 +3,6 @@ package consume
 import (
 	"fmt"
 	"math/big"
-	"time"
 
 	altpb "github.com/kanz-eng/kanz-schemas-go/alternatives/v1"
 	commonpb "github.com/kanz-eng/kanz-schemas-go/common/v1"
@@ -51,15 +50,8 @@ func DecodeProto(eventType string) Decoder {
 			if err := proto.Unmarshal(payload, &m); err != nil {
 				return nil, fmt.Errorf("consume: %s: %w", eventType, err)
 			}
-			// NAVMark carries no id field of its own (alternatives.proto: it is a
-			// point-in-time mark, not a discrete entity) — synthesize one from the
-			// commitment and the valuation date. That keeps redelivery of the SAME
-			// mark idempotent (Position.Apply dedupes on EventID) while ensuring a
-			// LATER mark on the same commitment is never mistaken for a duplicate
-			// of an earlier one.
-			asOf := m.GetAsOf()
-			id := fmt.Sprintf("%s@%s", m.GetCommitmentId(), asOf.AsTime().UTC().Format(time.RFC3339Nano))
-			return event(id, m.GetCommitmentId(), alt.EventNAVMark, m.GetNav(), asOf)
+			return event(m.GetMarkId(), m.GetCommitmentId(), alt.EventNAVMark,
+				m.GetNav(), m.GetAsOf())
 		default:
 			return nil, fmt.Errorf("consume: no decoder for event type %q — the "+
 				"subject determines the payload type, so a subject this build does "+
