@@ -444,11 +444,22 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 
 **Files:**
 - Modify: `kanz/cmd/kanz-monitor/model.go` (replace `View`)
+- Modify: `kanz/cmd/kanz-monitor/main.go` (wire `-spiffe-socket`; guard the mTLS flag — see Step 0)
 - Create: `kanz/cmd/kanz-monitor/view.go`
 - Test: `kanz/cmd/kanz-monitor/view_test.go`
 
 **Interfaces:**
 - Produces: `func (m model) render() string` — the full frame, composed with Lip Gloss from the model.
+
+- [ ] **Step 0: Close the mTLS-flag safety gap Task 3 exposed (do this first)**
+
+Task 3 left `cfg.SPIFFESocket` permanently `""` because `main.go` never wired the flag — so `--nats-plaintext=false` today builds a DISABLED (nil-TLS) mesh and silently dials PLAINTEXT instead of failing. "Silently plaintext when the operator asked for mTLS" is the wrong direction for a security posture. Fix it in `main.go`:
+
+- Add `fs.StringVar(&cfg.SPIFFESocket, "spiffe-socket", os.Getenv("SPIFFE_ENDPOINT_SOCKET"), "SPIFFE Workload API socket for the mesh SVID (required when --nats-plaintext=false)")`.
+- After `fs.Parse`, if `!cfg.Plaintext && cfg.SPIFFESocket == ""`, return an error: mTLS was requested but there is no workload socket to obtain an SVID from, so the dial would silently degrade to plaintext — refuse rather than mislead. (`transport.NewMesh(ctx, "")` returns a disabled mesh with a nil Client, which is exactly the silent-plaintext path.)
+- Delete the now-false `// -spiffe-socket is read in Task 3` comment left in main.go by Task 1.
+
+Add a test in `main_test.go` (create it) asserting that a `Config{Plaintext:false, SPIFFESocket:""}` is rejected by whatever validation function you factor this into — pull the check into a small `validate(cfg) error` so it is unit-testable without running the TUI.
 
 - [ ] **Step 1: Write the view**
 
