@@ -446,6 +446,24 @@ func (s *Service) handleCancel(ctx context.Context, payload []byte) error {
 		return s.outcomeReject(ctx, cmd.GetOrderId(), ReasonNotEntitled,
 			"principal is not entitled to this order's portfolio", now)
 	}
+	// A QUARANTINED ORDER IS NOT CANCELLABLE. Quarantine means the platform could
+	// not establish what the venue did with this order — that is the whole reason
+	// it froze instead of guessing. IsTerminal does not cover this: a quarantined
+	// order commonly sits at ROUTED or PARTIALLY_FILLED, both non-terminal, so
+	// without this check Cancel() below would happily withdraw it, closeAtVenue
+	// would dispatch a REAL cancel to the exchange, and the order would be saved
+	// CANCELLED — which IS terminal, so resume() and SweepInterrupted skip it
+	// forever after. That converts "we do not know what the venue did with this
+	// order" into a confident, possibly wrong, terminal answer, and silently
+	// undoes the freeze a human was supposed to have to resolve. Refuse instead,
+	// with the stored reason, so the operator does not need a second lookup to
+	// learn what to do next.
+	if q := st.GetQuarantine(); q != nil {
+		return s.outcomeReject(ctx, cmd.GetOrderId(), "ORDER_QUARANTINED", fmt.Sprintf(
+			"order is frozen: the platform could not establish what the venue did with it, so "+
+				"acting on it now would be a guess. It must be resolved against the venue's own "+
+				"order history before it can be cancelled. quarantine reason: %s", q.GetReason()), now)
+	}
 	// Validate the withdrawal against the aggregate first (the terminal guard), so
 	// a cancel the ledger refuses never reaches the exchange.
 	next, cancelledQty, cerr := Cancel(st, now)
@@ -544,6 +562,20 @@ func (s *Service) handleAmend(ctx context.Context, payload []byte) error {
 	if !entitledTo(cmd.GetMetadata().GetPrincipalPortfolios(), st.GetPortfolioId()) {
 		return s.outcomeReject(ctx, cmd.GetOrderId(), ReasonNotEntitled,
 			"principal is not entitled to this order's portfolio", now)
+	}
+	// A QUARANTINED ORDER IS NOT AMENDABLE, for the same reason it is not
+	// cancellable (see handleCancel). Amend rewrites the size or price the
+	// aggregate believes is resting at the venue; if that belief is exactly what
+	// quarantine says cannot be trusted, amending it is a guess dressed up as an
+	// instruction. IsTerminal does not catch this — a quarantined order is
+	// typically non-terminal — so without this check Amend() below would apply
+	// and persist, again with no venue confirmation that the venue agrees an
+	// order even exists to amend. Refuse, with the stored reason inline.
+	if q := st.GetQuarantine(); q != nil {
+		return s.outcomeReject(ctx, cmd.GetOrderId(), "ORDER_QUARANTINED", fmt.Sprintf(
+			"order is frozen: the platform could not establish what the venue did with it, so "+
+				"acting on it now would be a guess. It must be resolved against the venue's own "+
+				"order history before it can be amended. quarantine reason: %s", q.GetReason()), now)
 	}
 	next, aerr := Amend(st, &cmd, now)
 	if aerr != nil {
@@ -792,6 +824,25 @@ func (s *Service) adopt(ctx context.Context, st *orderpb.OrderState, view execut
 			len(view.Fills)))
 	}
 
+	// REFUSE A FILLED/PARTIALLY_FILLED VIEW THAT CARRIES ZERO FILLS. This is the
+	// other direction of the guard above, and it is the more dangerous of the
+	// two because it fails OPEN if left unchecked: view.State says the venue
+	// traded this order, but view.Fills is empty, so the for loop below simply
+	// never executes. Nothing errors. venue_ack_at gets stamped (harmless), the
+	// order is returned nil (success), the order stays at ROUTED, and no fill,
+	// no position, and no ledger entry is ever created for a trade the venue
+	// itself just reported. The next startup sweep re-asks this same venue, gets
+	// this same answer, and does this same nothing — a live position the
+	// platform has permanently forgotten. Quarantine instead: adopting a claim
+	// of "filled" with nothing to fold would leave a traded order looking
+	// untraded, which is exactly the failure this whole path exists to prevent.
+	if (view.State == execution.OrderViewFilled || view.State == execution.OrderViewPartiallyFilled) && len(view.Fills) == 0 {
+		return s.quarantine(ctx, st, fmt.Sprintf(
+			"venue reports this order %s but supplied no fill to fold, so the platform cannot "+
+				"record what traded. Adopting the claim without the fill would leave a traded "+
+				"order looking untraded", view.State.String()))
+	}
+
 	for _, fill := range view.Fills {
 		next, aerr := ApplyFill(st, fill, fill.GetExecutedAt().AsTime())
 		if aerr != nil {
@@ -831,13 +882,19 @@ func (s *Service) quarantine(ctx context.Context, st *orderpb.OrderState, reason
 		Reason:      reason,
 		LastQueryAt: timestamppb.New(now),
 	}
-	if err := s.store.Save(ctx, next); err != nil {
-		return err
-	}
+
+	// LOG AND COUNT BEFORE THE SAVE, NOT AFTER. This used to Save first and log
+	// only on success — so a Save failure (a store outage, a full disk) returned
+	// early and the freeze was never counted and never logged. The command still
+	// nacks and gets redelivered, but until it succeeds, an order this platform
+	// has decided it cannot safely re-drive keeps being re-driven, silently,
+	// because the one signal that should have stopped it never fired. Logging
+	// first means the operator learns an attempt was made either way; the
+	// wording says ATTEMPTING, not DONE, because persistence is not yet known.
 	if s.quarantined != nil {
 		s.quarantined.Inc()
 	}
-	s.logger.Error("ORDER QUARANTINED — the platform cannot establish what the venue did with this order, so it has stopped rather than guess. It will not be re-driven, cancelled, or mentioned again until a human resolves it against the venue's own order history",
+	s.logger.Error("ORDER QUARANTINE ATTEMPTED — the platform cannot establish what the venue did with this order, so it is stopping rather than guess. Once persisted it will not be re-driven, cancelled, or mentioned again until a human resolves it against the venue's own order history",
 		"order_id", st.GetOrderId(),
 		"portfolio_id", st.GetPortfolioId(),
 		"instrument_id", st.GetInstrumentId(),
@@ -845,5 +902,8 @@ func (s *Service) quarantine(ctx context.Context, st *orderpb.OrderState, reason
 		"status", st.GetStatus().String(),
 		"reason", reason,
 	)
+	if err := s.store.Save(ctx, next); err != nil {
+		return err
+	}
 	return nil
 }

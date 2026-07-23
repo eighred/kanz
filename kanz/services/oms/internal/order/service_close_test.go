@@ -147,6 +147,51 @@ func TestCancel_NonCloserVenueIsLedgerOnly(t *testing.T) {
 	}
 }
 
+// A QUARANTINED ORDER MUST REFUSE A CANCEL, and — the point of this test — the
+// refusal must land BEFORE closeAtVenue, not after. quarantine() exists because
+// the platform could not establish what the venue did with this order; a
+// cancel that still reaches the exchange (or still saves CANCELLED, which is
+// terminal and makes the order invisible to resume/SweepInterrupted forever)
+// silently converts that unresolved unknown into a confident, wrong answer —
+// exactly the freeze quarantine was supposed to force a human to resolve.
+func TestCancel_RefusesQuarantinedOrder(t *testing.T) {
+	fb := &fakeBus{}
+	venue := &closerVenue{mic: "BINANCE"}
+	svc, _ := restingOrderOn(t, fb, venue)
+
+	st, err := svc.store.Load(context.Background(), "o1")
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if err := svc.quarantine(context.Background(), st, "test: venue truth could not be established"); err != nil {
+		t.Fatalf("quarantine: %v", err)
+	}
+
+	if err := svc.Handle(context.Background(), cancelEnv(), mustMarshal(t, cancelAs("pf1"))); err != nil {
+		t.Fatalf("cancel: %v", err)
+	}
+
+	if len(venue.cancelled) != 0 {
+		t.Fatalf("venue cancels = %v, want none — a quarantined order must not reach the exchange", venue.cancelled)
+	}
+	st, err = svc.store.Load(context.Background(), "o1")
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if st.GetStatus() == orderpb.OrderStatus_ORDER_STATUS_CANCELLED {
+		t.Fatal("quarantined order was CANCELLED — the freeze was silently converted into a " +
+			"confident terminal answer, and CANCELLED is terminal, so resume/SweepInterrupted " +
+			"will never look at this order again")
+	}
+	if st.GetQuarantine() == nil {
+		t.Fatal("quarantine was cleared by the cancel attempt — it must survive a refused command")
+	}
+	oc := fb.last(EventTypeOutcome).(*commandpb.CommandOutcome)
+	if oc.GetStatus() != commandpb.CommandOutcomeStatus_COMMAND_OUTCOME_STATUS_REJECTED || oc.GetErrorCode() != "ORDER_QUARANTINED" {
+		t.Fatalf("outcome = %v/%q, want REJECTED/ORDER_QUARANTINED", oc.GetStatus(), oc.GetErrorCode())
+	}
+}
+
 func marketOrder() *orderpb.SubmitOrder {
 	return &orderpb.SubmitOrder{
 		OrderId: "o1", PortfolioId: "pf1", InstrumentId: "AAPL",

@@ -149,6 +149,51 @@ func TestAmend_RefusesPrincipalNotEntitledToTheOrdersPortfolio(t *testing.T) {
 	}
 }
 
+// A QUARANTINED ORDER MUST REFUSE AN AMEND, for the same reason it refuses a
+// cancel: quarantine means the platform could not establish what the venue did
+// with this order, and rewriting its size or price is a guess about a state
+// nobody can currently confirm. IsTerminal does not catch a quarantined order
+// (it commonly sits at ROUTED), so without this refusal Amend() would apply
+// and persist the new quantity with no venue agreement that the order — or
+// this version of it — even exists to amend.
+func TestAmend_RefusesQuarantinedOrder(t *testing.T) {
+	fb := &fakeBus{}
+	svc, _ := restingOrderOn(t, fb, &closerVenue{mic: "BINANCE"})
+
+	st, err := svc.store.Load(context.Background(), "o1")
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if err := svc.quarantine(context.Background(), st, "test: venue truth could not be established"); err != nil {
+		t.Fatalf("quarantine: %v", err)
+	}
+
+	amend := &orderpb.AmendOrder{
+		OrderId:     "o1",
+		NewQuantity: d(1, 0),
+		Metadata: &commandpb.CommandMetadata{
+			Issuer: "user:owner", TargetId: "o1", PrincipalPortfolios: []string{"pf1"},
+		},
+	}
+	if err := svc.Handle(context.Background(), amendEnv(), mustMarshal(t, amend)); err != nil {
+		t.Fatalf("amend: %v", err)
+	}
+
+	oc := fb.last(EventTypeOutcome).(*commandpb.CommandOutcome)
+	if oc.GetStatus() != commandpb.CommandOutcomeStatus_COMMAND_OUTCOME_STATUS_REJECTED || oc.GetErrorCode() != "ORDER_QUARANTINED" {
+		t.Fatalf("outcome = %v/%q, want REJECTED/ORDER_QUARANTINED", oc.GetStatus(), oc.GetErrorCode())
+	}
+	// The order's quantity must be untouched — a rejected amend that still
+	// mutated state would be the same breach with a different label.
+	st, err = svc.store.Load(context.Background(), "o1")
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if got := st.GetOrderedQuantity().GetCoefficient(); got != 100 {
+		t.Fatalf("quantity = %d, want 100 — a quarantined order was amended", got)
+	}
+}
+
 // NON-VACUITY for amend: the entitled caller must still be able to amend.
 func TestAmend_AllowsPrincipalEntitledToTheOrdersPortfolio(t *testing.T) {
 	fb := &fakeBus{}

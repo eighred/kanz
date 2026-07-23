@@ -349,6 +349,92 @@ func TestAdoptRefusesMultiFillViewAndQuarantinesRatherThanDoubleFold(t *testing.
 	}
 }
 
+// zeroFillVenue acknowledges an execute (no error, nothing recorded — same
+// shape as amnesiacVenue and twoFillVenue) and then, when queried, reports the
+// order FILLED but supplies NO fill to fold. It models a venue whose answer is
+// truthful about the outcome but omits the fill record — an adapter bug, or a
+// partial/degraded response — which is the failure direction opposite of
+// twoFillVenue's too-many-fills.
+type zeroFillVenue struct {
+	*execution.SimVenue
+}
+
+func (v *zeroFillVenue) Execute(ctx context.Context, st *orderpb.OrderState) ([]*orderpb.Fill, error) {
+	// Deliberately does NOT delegate to SimVenue.Execute or record anything: the
+	// order must reach ROUTED with venue_ack_at set so the redelivery below takes
+	// the Load-found-it path into resume(), exactly as amnesiacVenue's test does.
+	return nil, nil
+}
+
+func (v *zeroFillVenue) QueryOrder(context.Context, *orderpb.OrderState) (execution.OrderView, error) {
+	return execution.OrderView{State: execution.OrderViewFilled}, nil // no Fills
+}
+
+// THE ZERO-FILL ADOPT ARM.
+//
+// adopt() guarded len(view.Fills) > 1 against a double-fold but had nothing
+// guarding the empty case. A venue answering FILLED or PARTIALLY_FILLED with
+// an empty Fills slice used to stamp venue_ack_at, run a for loop whose body
+// never executes, and return nil: the command ACKED, the order stuck at
+// ROUTED forever, no fill folded, no position and no ledger entry created —
+// and every future startup sweep re-asks the same venue, gets the same answer,
+// and repeats exactly nothing. That is a live position the platform has
+// permanently forgotten, precisely the failure this whole design exists to
+// end. The fix quarantines instead of silently acking.
+func TestAdoptQuarantinesFilledViewWithZeroFills(t *testing.T) {
+	ctx := context.Background()
+	fb := &fakeBus{}
+	venue := &zeroFillVenue{SimVenue: execution.NewSimVenue("XSIM")}
+	store := NewMemoryStore()
+	svc, err := NewService(store, NewEmitter(fb), nil, execution.NewRouter(venue), nil, nil)
+	if err != nil {
+		t.Fatalf("NewService: %v", err)
+	}
+
+	cmd := limitOrder(d(100, 0), d(1025, -2))
+	body := mustMarshal(t, cmd)
+
+	// Delivery 1: admitted and routed. The venue acks without recording
+	// anything, so the order is stored ROUTED with venue_ack_at set and NO
+	// fills folded — same setup as the multi-fill test above.
+	if err := svc.Handle(ctx, submitEnv(), body); err != nil {
+		t.Fatalf("delivery 1: %v", err)
+	}
+	st, err := store.Load(ctx, cmd.GetOrderId())
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if st.GetVenueAckAt() == nil {
+		t.Fatal("venue_ack_at not stamped after delivery 1 — the zero-fill arm below needs the " +
+			"order routed and acknowledged before the redelivery queries the venue")
+	}
+	if !dec.IsZero(st.GetFilledQuantity()) {
+		t.Fatalf("filled_quantity = %v after delivery 1, want 0 — nothing was folded yet", st.GetFilledQuantity())
+	}
+
+	// Delivery 2: the redelivery. The venue now reports FILLED with zero fills.
+	if err := svc.Handle(ctx, submitEnv(), body); err != nil {
+		t.Fatalf("delivery 2 returned %v; a quarantine is terminal and must ack", err)
+	}
+
+	st, err = store.Load(ctx, cmd.GetOrderId())
+	if err != nil {
+		t.Fatalf("Load after delivery 2: %v", err)
+	}
+	if st.GetQuarantine() == nil {
+		t.Fatal("order was NOT quarantined. The venue reported FILLED with zero fills, and " +
+			"silently accepting that would leave a traded order stuck at ROUTED with nothing " +
+			"folded, forever")
+	}
+	if st.GetQuarantine().GetReason() == "" {
+		t.Error("quarantine carries no reason — an operator sees a frozen order and no account of why")
+	}
+	if !dec.IsZero(st.GetFilledQuantity()) {
+		t.Fatalf("filled_quantity = %v after the redelivery, want 0 — nothing was ever reported "+
+			"to fold, so nothing should have been folded", st.GetFilledQuantity())
+	}
+}
+
 // TestAdmissionPathHoldsTheClaimWhileWorkingAnOrder asserts FINDING 1's
 // invariant directly rather than trying to win a race: a claim taken for an
 // order_id BEFORE that order_id's SubmitOrder is admitted must block the
