@@ -143,7 +143,5 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m model) View() string {
-	// Task 5 replaces this with the real layout. A minimal non-panicking stub so
-	// Bubble Tea's pre-data View call is safe.
-	return "kanz-monitor — connecting…  (q to quit)\n"
+	return m.render()
 }
