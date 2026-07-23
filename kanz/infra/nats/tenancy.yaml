@@ -70,11 +70,10 @@ data:
           # this account could equally publish platform.mode.changed. It
           # first becomes true with the `permissions` block added here.
           #
-          # This task deliberately restricts ONLY these four operator users.
-          # The 13 service users below (risk-engine .. webhook-ingest) still
-          # have NO permissions block and can still publish or subscribe on
-          # anything in __system__, including platform.mode.changed. That is
-          # a separate, larger-blast-radius task, tracked, not fixed here.
+          # SEC-M3e (below) closed the matching gap on the service users: at
+          # the time of THIS comment they still had no permissions block and
+          # could equally publish platform.mode.changed. That is fixed now —
+          # see the SEC-M3e comment ahead of the risk-engine entry.
           #
           # Permission sets below were determined by inspecting the actual
           # publisher (each tool's own subject constant) and PROVEN against a
@@ -134,32 +133,381 @@ data:
               subscribe: { allow: ["_INBOX.>"] }
             }
           }
-          { user: "spiffe://kanz.internal/ns/kanz-services/sa/risk-engine" }
-          { user: "spiffe://kanz.internal/ns/kanz-services/sa/api-gateway" }
-          { user: "spiffe://kanz.internal/ns/kanz-services/sa/accounting" }
+          # SEC-M3e: the 15 service users below (risk-engine .. webhook-ingest —
+          # the operator-svid-split report and this file's own header called them
+          # "13"; the actual count in this list has been 15 since alternatives and
+          # wealth joined as real dialers, and nobody updated the number) went
+          # through the SAME exposure as the four operator users above: NO
+          # `permissions` block, so any one of them could publish or subscribe on
+          # ANYTHING in __system__ — including platform.mode.changed. Every
+          # publish/subscribe set below was DERIVED FROM CODE (bus.Event{Subject:
+          # ...} literals, Subject*/EventType* constants, consumer.Subscribe /
+          # SubscribeBroadcast(Ready) call sites, and each service's own config
+          # defaults for an env-overridable subject list), not guessed — see
+          # .superpowers/sdd/service-user-permissions-report.md for the full
+          # per-service table and citations.
+          #
+          # TWO SHAPES REPEAT BELOW, factored here instead of in every entry:
+          #
+          # 1. DLQ. bus.WithDLQ makes a consumer PUBLISH to `dlq.<original-
+          #    subject>` on terminal failure (pkg/bus/retry.go's dlqSubject).
+          #    Only plain `consumer.Subscribe` calls route to DLQ —
+          #    SubscribeBroadcast(Ready) explicitly does NOT (pkg/bus/consumer.go:
+          #    a broadcast control signal must nak and hold state, never park
+          #    silently). A service that subscribes via Subscribe but has no
+          #    `dlq.*` publish grant authenticates fine and then fails every
+          #    terminal-failure path at the worst possible moment: the message
+          #    that already exhausted retries also can't be parked, so
+          #    publishDLQ's own error surfaces and the event goes right back on
+          #    the broker for redelivery forever.
+          #
+          # 2. JETSTREAM CONSUMER PERMISSIONS — proven empirically against a real
+          #    nats-server + JetStream broker (.superpowers/sdd/service-user-
+          #    permissions-report.md), because a JS CONSUMER is NOT the same case
+          #    as a JS PUBLISHER (operator-svid-split-report.md proved a publisher
+          #    needs no `$JS.API.>`). A consumer's `StreamNameBySubject` and
+          #    `CreateOrUpdateConsumer`/`CreateConsumer` calls (pkg/bus/nats.go)
+          #    publish under `$JS.API.>`, and — the part that is NOT documented
+          #    anywhere and was found only by running it — `jetstream.Msg.Ack()`
+          #    publishes to a THIRD, separate subject space, `$JS.ACK.>`, that
+          #    `$JS.API.>` does NOT cover. Withholding `$JS.ACK.>` from a consumer
+          #    does not fail loudly: pkg/bus/nats.go's Subscribe calls `_ =
+          #    m.Ack()` and discards the error, so the consumer silently never
+          #    acks, the delivery redelivers after AckWait, and the handler
+          #    re-runs forever — a duplicate-processing bug with no visible
+          #    error anywhere. The proven-minimal set for ANY service that calls
+          #    consumer.Subscribe, SubscribeBroadcast, or SubscribeBroadcastReady
+          #    is `publish: ["$JS.API.>", "$JS.ACK.>"]` / `subscribe:
+          #    ["_INBOX.>"]` — no wider grant is needed, and (the negative
+          #    control that matters) `subscribe` does NOT also need `$JS.API.>`;
+          #    replies to API calls arrive on the caller's own inbox.
+          #
+          # A NATS TRAP FOUND WHILE PROVING THE ABOVE: `permissions: { publish: {
+          # allow: [] } }` — an explicitly present but EMPTY allow list — does
+          # NOT deny publish. It was proven empirically to behave as
+          # UNRESTRICTED, identically to omitting the permissions block
+          # entirely. A service with nothing to publish on NATS (archiver) must
+          # use `publish: { deny: [">"] }` to actually be denied; an empty
+          # `allow` array is not a restriction, it is a no-op that reads as one.
+          { user: "spiffe://kanz.internal/ns/kanz-services/sa/risk-engine"
+            permissions: {
+              # RISK-10's Publisher (internal/risk/publish/publish.go) emits the
+              # engine's own two output FACTs. It subscribes the three RISK-04
+              # state subjects it ingests (internal/risk/app/ingest.go's
+              # stateSubjects: EventTypePortfolioRevalued,
+              # subject.PositionAll wildcard, EventTypePortfolioSnapshot) and,
+              # when calibration is enabled (RISK_ENGINE_CALIBRATION_RATES),
+              # the market quote spine (RISK_ENGINE_MARKET_SUBJECTS, default
+              # market.>) into a live-quote cache. All three subscriptions go
+              # through bus.NewConsumer(..., bus.WithDLQ(client)), so each needs
+              # its own dlq.* grant.
+              publish: {
+                allow: [
+                  "risk.portfolio.exposure_recomputed", "risk.portfolio.measures_computed",
+                  "dlq.risk.portfolio.revalued", "dlq.risk.position.changed.>", "dlq.risk.portfolio.snapshot",
+                  "dlq.market.>", "$JS.API.>", "$JS.ACK.>",
+                ]
+              }
+              subscribe: {
+                allow: [
+                  "risk.portfolio.revalued", "risk.position.changed.>", "risk.portfolio.snapshot",
+                  "market.>", "_INBOX.>",
+                ]
+              }
+            }
+          }
+          # api-gateway's ONLY bus interaction is services/api-gateway/internal/
+          # orders/orders.go: it publishes order.order.submit / order.order.cancel
+          # as COMMANDs (the sole write path onto the order book — OMS-01d) and
+          # never subscribes to anything, so it needs neither a DLQ grant nor
+          # JetStream consumer permissions — only the reply inbox for the
+          # synchronous publish ack.
+          { user: "spiffe://kanz.internal/ns/kanz-services/sa/api-gateway"
+            permissions: {
+              publish: { allow: ["order.order.submit", "order.order.cancel"] }
+              subscribe: { allow: ["_INBOX.>"] }
+            }
+          }
+          # accounting folds order fills (order.order.filled /
+          # .partially_filled, ACCOUNTING_FILL_SUBJECTS) and its own cash-
+          # movement FACTs (accounting.cash.>, ACCOUNTING_CASH_SUBJECTS) into
+          # the ledger, and separately PUBLISHES those same cash-movement FACTs
+          # (internal/cashmove — subscription/redemption/fee) when an operator
+          # records one via the server's HTTP surface — the publish and the
+          # fold are two ends of the same durable journal, not a mistake. It
+          # also folds the FX spine (market.fx.>, ACCOUNTING_FX_SUBJECTS) for
+          # its live-rate cache. All three subscriptions use
+          # bus.NewConsumer(..., bus.WithDLQ(client)).
+          { user: "spiffe://kanz.internal/ns/kanz-services/sa/accounting"
+            permissions: {
+              publish: {
+                allow: [
+                  "accounting.cash.>",
+                  "dlq.order.order.filled", "dlq.order.order.partially_filled",
+                  "dlq.accounting.cash.>", "dlq.market.fx.>",
+                  "$JS.API.>", "$JS.ACK.>",
+                ]
+              }
+              subscribe: {
+                allow: [
+                  "order.order.filled", "order.order.partially_filled",
+                  "accounting.cash.>", "market.fx.>", "_INBOX.>",
+                ]
+              }
+            }
+          }
           # alternatives became a real bus.DialNATS caller when its commitment-
           # journal consumer was wired (ALT-01b): it folds capital-call,
           # distribution and NAV-mark FACTs into fund.Store. SEC-M3b requires
           # every dialer to be admitted here; test/arch/nats_identity_test.go's
           # TestNATSDialersHaveBrokerAccounts caught the gap before it shipped.
-          { user: "spiffe://kanz.internal/ns/kanz-services/sa/alternatives" }
-          { user: "spiffe://kanz.internal/ns/kanz-services/sa/archiver" }
-          { user: "spiffe://kanz.internal/ns/kanz-services/sa/audit" }
-          { user: "spiffe://kanz.internal/ns/kanz-services/sa/compliance" }
-          { user: "spiffe://kanz.internal/ns/kanz-services/sa/market-data" }
-          { user: "spiffe://kanz.internal/ns/kanz-services/sa/market-ingest" }
-          { user: "spiffe://kanz.internal/ns/kanz-services/sa/oms" }
-          { user: "spiffe://kanz.internal/ns/kanz-services/sa/tv-sync" }
-          { user: "spiffe://kanz.internal/ns/kanz-services/sa/venue-binance" }
-          { user: "spiffe://kanz.internal/ns/kanz-services/sa/venue-okx" }
+          #
+          # It only CONSUMES the four internal/alternatives/subject.go subjects
+          # kanz-altevent publishes (alternatives.commitment.>) — no service
+          # code publishes to NATS on its own account (the fund.Store fold is
+          # queried over gRPC). ALTERNATIVES_SUBJECTS defaults to
+          # alternatives.AllSubjects(), consumed via bus.NewConsumer(...,
+          # bus.WithDLQ(client)).
+          { user: "spiffe://kanz.internal/ns/kanz-services/sa/alternatives"
+            permissions: {
+              publish: { allow: ["dlq.alternatives.commitment.>", "$JS.API.>", "$JS.ACK.>"] }
+              subscribe: { allow: ["alternatives.commitment.>", "_INBOX.>"] }
+            }
+          }
+          # archiver drains NATS into KAFKA (DATA-M1) — its "DLQ" (DLQSubject =
+          # "dlq.archiver") is a Kafka topic, published via a.cfg.Kafka.Publish,
+          # never a NATS subject. It calls a.cfg.NATS.Subscribe directly (the
+          # *bus.NATSClient method), not bus.Consumer.Subscribe, so it never
+          # constructs a bus.WithDLQ NATS publisher at all: this service
+          # PUBLISHES NOTHING TO NATS, ever. Its subscribe set
+          # (services/archiver/internal/config/config.go's DefaultSubjects,
+          # ARCHIVER_SUBJECTS) is deliberately broad BY DESIGN — DATA-M1 exists
+          # to archive everything with irreplaceable history — not because it
+          # could not be narrowed: market.> is already excluded (re-fetchable
+          # from the venue) and so is observability.> (ephemeral, no subject
+          # declared on it). See the trap noted above: publish is `deny: [">"]`,
+          # not an empty `allow`, because only `deny` was proven to actually
+          # restrict.
+          { user: "spiffe://kanz.internal/ns/kanz-services/sa/archiver"
+            permissions: {
+              publish: { deny: [">"] }
+              subscribe: {
+                allow: [
+                  "order.>", "strategy.>", "execution.>", "accounting.>", "settlement.>",
+                  "compliance.breach.>", "compliance.mandate.>", "risk.portfolio.>", "risk.exposure.>",
+                  "risk.signal.>", "risk.command.>", "risk.position.>", "inference.>", "platform.>",
+                  "data.>", "_INBOX.>", "$JS.API.>",
+                ]
+              }
+            }
+          }
+          # audit materializes services/audit/internal/config/config.go's
+          # DefaultSubjects = [">"] — EVERY subject in the account,
+          # DELIBERATELY ("audit completeness over economy", narrowed only via
+          # AUDIT_SUBJECTS with a documented reason). This is the one entry
+          # below where `subscribe: [">"]` is the CORRECT, code-derived answer,
+          # not an unnarrowed leftover — it already covers _INBOX.> and $JS.*
+          # as a subset. It publishes nothing itself except dlq.<whatever it
+          # was subscribed to>, which for a ">" subscription is only bounded by
+          # dlq.> in turn.
+          { user: "spiffe://kanz.internal/ns/kanz-services/sa/audit"
+            permissions: {
+              publish: { allow: ["dlq.>", "$JS.API.>", "$JS.ACK.>"] }
+              subscribe: { allow: [">"] }
+            }
+          }
+          # compliance PUBLISHES platform.compliance.decision (the durable
+          # decision-audit FACT, services/compliance/internal/audit/audit.go)
+          # and compliance.breach.detected (internal/compliance's SubjectBreach,
+          # the post-trade monitor's emitter). It SUBSCRIBES the compacted
+          # position stream (subject.PositionAll) and the mandate stream
+          # (comp.SubjectMandateAll) — both via SubscribeBroadcast /
+          # SubscribeBroadcastReady, which never route to DLQ (see above), so
+          # no dlq.* grant is needed here.
+          { user: "spiffe://kanz.internal/ns/kanz-services/sa/compliance"
+            permissions: {
+              publish: {
+                allow: [
+                  "platform.compliance.decision", "compliance.breach.detected",
+                  "$JS.API.>", "$JS.ACK.>",
+                ]
+              }
+              subscribe: { allow: ["risk.position.changed.>", "compliance.mandate.changed.>", "_INBOX.>"] }
+            }
+          }
+          # market-data both PUBLISHES (services/market-data/internal/feed/
+          # bussink.go: market.<assetClass>.<variant>, one deploy per asset
+          # class) and SUBSCRIBES (MARKET_DATA_SUBJECTS, default market.>) —
+          # the subject taxonomy's domain wildcard is the honest boundary for
+          # both directions here, not an unnarrowed guess: assetClass and
+          # variant are runtime-configured per deployment and the ingest
+          # subscription is explicitly the whole market.> wildcard by default.
+          { user: "spiffe://kanz.internal/ns/kanz-services/sa/market-data"
+            permissions: {
+              publish: { allow: ["market.>", "dlq.market.>", "$JS.API.>", "$JS.ACK.>"] }
+              subscribe: { allow: ["market.>", "_INBOX.>"] }
+            }
+          }
+          # market-ingest (services/market-ingest/cmd/market-ingest, the open
+          # binary this image builds — infra/deploy/market-ingest-deploy.yaml)
+          # registers NO alpha engines, so pkg/alpha.Runner never wires
+          # internal/signal/translate's Translator and PUBLISHES ONLY the
+          # bounded book snapshot (internal/marketedge/ingest/engine.go's
+          # SubjectBookSnapshot = market.book.snapshot) via its health-wrapped
+          # producer. It never subscribes to anything. NOTE: the package
+          # comment on pkg/alpha.Runner.New documents a separate "restricted
+          # layer" that imports pkg/alpha and CAN register engines, which would
+          # additionally publish strategy.signal.received / order.order.submit
+          # through the same Translator webhook-ingest uses — that layer is not
+          # in this repository and is not what infra/deploy's image builds, so
+          # it is out of scope for this derivation; if it is ever run under
+          # this SVID, this grant will deny it at publish time and this
+          # comment is the pointer to why.
+          { user: "spiffe://kanz.internal/ns/kanz-services/sa/market-ingest"
+            permissions: {
+              publish: { allow: ["market.book.snapshot"] }
+              subscribe: { allow: ["_INBOX.>"] }
+            }
+          }
+          # oms is the trading core: it CONSUMES order commands
+          # (order.order.submit/.amend/.cancel, config.CommandSubjects) and
+          # fill FACTs (order.order.filled/.partially_filled,
+          # config.FillSubjects) via bus.NewConsumer(..., bus.WithDLQ(client))
+          # — "WithDLQ is load-bearing on this path, not hygiene" per the
+          # service's own main.go comment — plus the price spine
+          # (OMS_PRICE_SUBJECTS, default market.*.trade,market.*.quote) and the
+          # mandate stream (comp.SubjectMandateAll) via SubscribeBroadcast(Ready),
+          # which do not route to DLQ. It PUBLISHES the full order lifecycle
+          # (services/oms/internal/order/events.go's EventType* constants:
+          # accepted/rejected/routed/filled/partially_filled/cancelled/expired/
+          # outcome), the position projections at both grains EXEC-M19a/M20
+          # established (subject.PositionFor → risk.position.changed.>,
+          # subject.VenuePositionFor → risk.position.venue.changed.>), and
+          # settlement failures (posttrade.BusFailSink's
+          # eventTypeSettlementFail = settlement.instruction.fail).
+          { user: "spiffe://kanz.internal/ns/kanz-services/sa/oms"
+            permissions: {
+              publish: {
+                allow: [
+                  "order.order.accepted", "order.order.rejected", "order.order.routed",
+                  "order.order.filled", "order.order.partially_filled", "order.order.cancelled",
+                  "order.order.expired", "order.order.outcome",
+                  "risk.position.changed.>", "risk.position.venue.changed.>",
+                  "settlement.instruction.fail",
+                  "dlq.order.order.submit", "dlq.order.order.amend", "dlq.order.order.cancel",
+                  "dlq.order.order.filled", "dlq.order.order.partially_filled",
+                  "$JS.API.>", "$JS.ACK.>",
+                ]
+              }
+              subscribe: {
+                allow: [
+                  "order.order.submit", "order.order.amend", "order.order.cancel",
+                  "order.order.filled", "order.order.partially_filled",
+                  "market.*.trade", "market.*.quote", "compliance.mandate.changed.>",
+                  "_INBOX.>",
+                ]
+              }
+            }
+          }
+          # tv-sync SUBSCRIBES ONLY — it folds the OMS order/fill FACT stream
+          # (internal/projection.Subjects(): accepted/routed/partially_filled/
+          # filled/rejected/cancelled/expired) and the price spine
+          # (TV_SYNC_PRICE_SUBJECTS, default market.*.trade,market.*.quote)
+          # into its read-only TradingView projection; it never publishes a
+          # FACT of its own. Unlike oms/compliance, ALL of tv-sync's subjects —
+          # including the price spine — go through plain consumer.Subscribe
+          # (bus.NewConsumer(..., bus.WithDLQ(client))), not
+          # SubscribeBroadcast, so every one of them needs a dlq.* grant too.
+          { user: "spiffe://kanz.internal/ns/kanz-services/sa/tv-sync"
+            permissions: {
+              publish: {
+                allow: [
+                  "dlq.order.order.accepted", "dlq.order.order.routed", "dlq.order.order.partially_filled",
+                  "dlq.order.order.filled", "dlq.order.order.rejected", "dlq.order.order.cancelled",
+                  "dlq.order.order.expired", "dlq.market.*.trade", "dlq.market.*.quote",
+                  "$JS.API.>", "$JS.ACK.>",
+                ]
+              }
+              subscribe: {
+                allow: [
+                  "order.order.accepted", "order.order.routed", "order.order.partially_filled",
+                  "order.order.filled", "order.order.rejected", "order.order.cancelled",
+                  "order.order.expired", "market.*.trade", "market.*.quote", "_INBOX.>",
+                ]
+              }
+            }
+          }
+          # venue-binance / venue-okx are venue adapters: they receive order
+          # commands over gRPC directly from OMS (internal/venueadapter/server),
+          # never over NATS, so neither ever calls consumer.Subscribe — no
+          # dlq.* grant and no JetStream consumer permissions. They PUBLISH raw
+          # crypto trade ticks (market.crypto.trade, {binance,okx}_connector.go),
+          # reconciliation healing FACTs (internal/execution's
+          # SubjectStateHealed = order.order.healed, SubjectBalanceRecon =
+          # accounting.balance.reconciled — {binance,okx}_recon.go), and fills
+          # observed on the exchange's own user-data stream
+          # (order.order.partially_filled / .filled — {binance,okx}_userdata.go).
+          { user: "spiffe://kanz.internal/ns/kanz-services/sa/venue-binance"
+            permissions: {
+              publish: {
+                allow: [
+                  "market.crypto.trade", "order.order.healed", "accounting.balance.reconciled",
+                  "order.order.partially_filled", "order.order.filled",
+                ]
+              }
+              subscribe: { allow: ["_INBOX.>"] }
+            }
+          }
+          { user: "spiffe://kanz.internal/ns/kanz-services/sa/venue-okx"
+            permissions: {
+              publish: {
+                allow: [
+                  "market.crypto.trade", "order.order.healed", "accounting.balance.reconciled",
+                  "order.order.partially_filled", "order.order.filled",
+                ]
+              }
+              subscribe: { allow: ["_INBOX.>"] }
+            }
+          }
           # wealth became a real bus.DialNATS caller when its household-valuation
           # consumer was wired (WEALTH-01b): the Folder.Handle fold had been
           # bus-handler-shaped and unreachable since it was written, because
           # nothing in this service ever called bus.NewConsumer. SEC-M3b requires
           # every dialer to be admitted here; test/arch/nats_identity_test.go's
           # TestNATSDialersHaveBrokerAccounts caught the gap before it shipped.
-          { user: "spiffe://kanz.internal/ns/kanz-services/sa/wealth" }
-          { user: "spiffe://kanz.internal/ns/kanz-services/sa/webhook-ingest" }
+          #
+          # It only CONSUMES kanz-household's wealth.household.valued.>
+          # (internal/wealth's SubjectHouseholdAll, WEALTH_SUBJECTS) via
+          # bus.NewConsumer(..., bus.WithDLQ(client)) — no service code
+          # publishes to NATS on this account.
+          { user: "spiffe://kanz.internal/ns/kanz-services/sa/wealth"
+            permissions: {
+              publish: { allow: ["dlq.wealth.household.valued.>", "$JS.API.>", "$JS.ACK.>"] }
+              subscribe: { allow: ["wealth.household.valued.>", "_INBOX.>"] }
+            }
+          }
+          # webhook-ingest PUBLISHES the audit-root signal FACT
+          # (internal/signal/translate's SubjectSignal =
+          # strategy.signal.received) and the order COMMAND its Translator fans
+          # out per venue (SubjectSubmit = order.order.submit) — the second
+          # governed write path onto the order book alongside api-gateway. It
+          # SUBSCRIBES the kill-switch (translate.SubjectModeChanged =
+          # platform.mode.changed) and the per-venue position spine
+          # (subject.VenuePositionAll = risk.position.venue.changed.>, EXEC-
+          # M19a) so its CLOSE path can flatten what is actually held at each
+          # venue — both via SubscribeBroadcast(Ready), never plain Subscribe,
+          # so neither needs a dlq.* grant.
+          { user: "spiffe://kanz.internal/ns/kanz-services/sa/webhook-ingest"
+            permissions: {
+              publish: {
+                allow: [
+                  "strategy.signal.received", "order.order.submit",
+                  "$JS.API.>", "$JS.ACK.>",
+                ]
+              }
+              subscribe: { allow: ["platform.mode.changed", "risk.position.venue.changed.>", "_INBOX.>"] }
+            }
+          }
         ]
       }
 

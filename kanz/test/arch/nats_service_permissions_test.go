@@ -1,0 +1,598 @@
+package arch
+
+import (
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"os"
+	"path/filepath"
+	"regexp"
+	"sort"
+	"strconv"
+	"strings"
+	"testing"
+)
+
+// SEC-M3e: tenancy.yaml's `permissions` blocks are hand-derived from the code —
+// exactly the shape SEC-M3d already warned rots the moment someone adds a
+// publish. This guard is the thing that makes that claim survive a second
+// change: it derives each service's PUBLISH set from code, the same way
+// subject_topology_test.go's declaredSubjects derives the estate-wide set (AST,
+// not a fresh regex scanner), and fails the build if a service's code names a
+// subject its own tenancy.yaml `permissions.publish` does not allow.
+//
+// A service denied at publish time by its OWN broker account authenticates
+// FINE and then fails on every publish with a permissions violation — which
+// reads as a broken feature, not a missing grant, exactly the failure mode
+// this file's header (SEC-M3b) already describes for identity. This is the
+// same failure one layer down, at the subject level instead of the account
+// level.
+//
+// SCOPE, HONESTLY (same stance as subject_topology_test.go's own header):
+// this resolves a `bus.Event{Subject: ...}` literal directly, a package-level
+// const/var it names (one or more import hops), simple same-function local
+// variable assignments, and — bounded to exactly one function-call hop, same
+// package only — the argument passed at a small private emit/publish helper's
+// call sites when the helper's own Subject: field names one of its parameters.
+// It does NOT trace through a helper function's OWN internal control flow (a
+// switch that returns one of several literals), interfaces, maps, or anything
+// assembled from concatenation. Where it cannot resolve a Subject: value to one
+// or more literals, it SKIPS that call site rather than guessing — an
+// unresolved subject is a false negative (accepted, and logged at -v), never a
+// false positive that fails the build on correct code.
+func TestServicePublishesOnlySubjectsItsTenancyPermissionsAllow(t *testing.T) {
+	root := moduleRoot(t)
+	perms := servicePublishPermissions(t, filepath.Join(root, "infra", "nats", "tenancy.yaml"))
+	if len(perms) == 0 {
+		t.Fatal("no __system__ kanz-services permissions parsed from tenancy.yaml — has the format changed?")
+	}
+
+	rc := newResolveCache(root)
+
+	var problems []string
+	checked := 0
+	for _, svc := range servicesWithEntrypoints(t, root) {
+		if _, undeployed := notDeployed[svc]; undeployed {
+			continue
+		}
+		if !dialsNATS(t, root, svc) {
+			continue
+		}
+		svid := systemAccountSVID(svc)
+		perm, ok := perms[svid]
+		if !ok {
+			problems = append(problems, svc+": tenancy.yaml has no `permissions` block for "+svid+
+				" at all — every subject it publishes is unverifiable and, per NATS semantics, "+
+				"UNRESTRICTED within __system__ (the exact SEC-M3e exposure this guard exists to end)")
+			continue
+		}
+		checked++
+
+		subjects := servicePublishedSubjects(t, rc, root, svc)
+		var files sortedSubjects
+		for subj, sites := range subjects {
+			files = append(files, subjectSites{subject: subj, sites: sites})
+		}
+		sort.Sort(files)
+		for _, ss := range files {
+			if permDenies(ss.subject, perm) || !covered(ss.subject, perm.allow) {
+				problems = append(problems, svc+": publishes "+strconv.Quote(ss.subject)+" ("+strings.Join(ss.sites, ", ")+
+					") but tenancy.yaml's permissions.publish for "+svid+" does not allow it — the service will "+
+					"authenticate fine and then be DENIED at publish time (a NATS permissions violation), which "+
+					"looks like a broken feature, not a missing grant")
+			}
+		}
+	}
+
+	// Non-vacuity: this estate definitely has NATS-dialing services with resolvable
+	// literal publishes (venue-binance's "market.crypto.trade" alone guarantees it).
+	// A scan that checked zero services would pass no matter how wrong the tenancy
+	// file was, which is the exact failure this guard exists to prevent.
+	if checked == 0 {
+		t.Fatal("checked zero services against tenancy.yaml permissions — the scanner or the service list is broken")
+	}
+
+	if len(problems) > 0 {
+		sort.Strings(problems)
+		t.Fatalf("%d service(s) publish a subject tenancy.yaml does not permit:\n\n  %s",
+			len(problems), strings.Join(problems, "\n  "))
+	}
+}
+
+type subjectSites struct {
+	subject string
+	sites   []string
+}
+type sortedSubjects []subjectSites
+
+func (s sortedSubjects) Len() int      { return len(s) }
+func (s sortedSubjects) Swap(i, j int) { s[i], s[j] = s[j], s[i] }
+func (s sortedSubjects) Less(i, j int) bool { return s[i].subject < s[j].subject }
+
+// permDenies reports whether perm's deny list blocks subject. archiver's
+// `publish: { deny: [">"] }` is the shape this exists for: an empty `allow`
+// list was PROVEN (service-user-permissions-report.md) not to restrict
+// anything on this nats-server version, so a truly publish-nothing service
+// must use `deny`, and this guard must honor it as authoritative over `allow`.
+func permDenies(subject string, perm publishPerm) bool {
+	return covered(subject, perm.deny)
+}
+
+// ---- tenancy.yaml permissions parsing (plain line/brace scanner, matching the
+// style nats_identity_test.go's systemAccountUsers / operatorServiceAccounts
+// already use for this same hand-written file) --------------------------------
+
+type publishPerm struct {
+	allow []string
+	deny  []string
+}
+
+// servicePublishPermissions returns, for every __system__ user with a
+// `permissions` block, its publish allow/deny lists, keyed by SVID. A user
+// with NO permissions block at all is intentionally OMITTED — callers must
+// treat "absent" as "unverified / unrestricted", never as "denies everything".
+func servicePublishPermissions(t *testing.T, path string) map[string]publishPerm {
+	t.Helper()
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read tenancy.yaml: %v", err)
+	}
+	lines := strings.Split(strings.ReplaceAll(string(b), "\r\n", "\n"), "\n")
+
+	// Isolate __system__ (brace-depth — same technique systemAccountUsers uses).
+	var block []string
+	inSystem := false
+	depth := 0
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if !inSystem {
+			if strings.HasPrefix(trimmed, "__system__") && strings.Contains(trimmed, "{") {
+				inSystem = true
+				depth = strings.Count(line, "{") - strings.Count(line, "}")
+			}
+			continue
+		}
+		block = append(block, line)
+		depth += strings.Count(line, "{") - strings.Count(line, "}")
+		if depth <= 0 {
+			break
+		}
+	}
+
+	out := map[string]publishPerm{}
+	for i := 0; i < len(block); i++ {
+		m := userLine.FindStringSubmatch(block[i])
+		if m == nil {
+			continue
+		}
+		svid := m[1]
+		// Every entry opens `{ user: "..."` on one line (the shape every entry in
+		// this file uses, operator and service alike) — start depth-counting from
+		// THAT line and walk forward until the entry's own brace closes.
+		d := strings.Count(block[i], "{") - strings.Count(block[i], "}")
+		entry := []string{block[i]}
+		j := i
+		for d > 0 && j+1 < len(block) {
+			j++
+			entry = append(entry, block[j])
+			d += strings.Count(block[j], "{") - strings.Count(block[j], "}")
+		}
+		out[svid] = parsePublishPerm(strings.Join(entry, "\n"))
+	}
+	return out
+}
+
+var quotedRe = regexp.MustCompile(`"([^"]+)"`)
+
+// parsePublishPerm extracts the publish allow/deny arrays from one user entry's
+// text. entryText with no `publish:` key returns a zero-value publishPerm
+// (empty allow, empty deny) — the caller distinguishes "no permissions block at
+// all" separately, by testing map membership, not by this return value.
+func parsePublishPerm(entryText string) publishPerm {
+	pubIdx := strings.Index(entryText, "publish:")
+	if pubIdx < 0 {
+		return publishPerm{}
+	}
+	rest := entryText[pubIdx+len("publish:"):]
+	// publish's own block ends at its matching close-brace; `subscribe:` (this
+	// file's only sibling key) always follows it, so bounding the scan there is
+	// exactly as reliable as brace-counting here and far simpler.
+	if subIdx := strings.Index(rest, "subscribe:"); subIdx >= 0 {
+		rest = rest[:subIdx]
+	}
+	return publishPerm{
+		allow: extractQuotedAfter(rest, "allow:"),
+		deny:  extractQuotedAfter(rest, "deny:"),
+	}
+}
+
+func extractQuotedAfter(s, key string) []string {
+	idx := strings.Index(s, key)
+	if idx < 0 {
+		return nil
+	}
+	rest := s[idx+len(key):]
+	end := strings.Index(rest, "]")
+	if end < 0 {
+		return nil
+	}
+	var out []string
+	for _, m := range quotedRe.FindAllStringSubmatch(rest[:end], -1) {
+		out = append(out, m[1])
+	}
+	return out
+}
+
+// ---- code-side: what does a service's tree actually publish? ----------------
+
+// resolveCache memoizes parsed packages (by directory) across the whole run —
+// the same shared package (e.g. internal/execution) is reached from more than
+// one service via an import hop, and re-parsing it per service would be
+// wasted work for no extra precision.
+type resolveCache struct {
+	root  string
+	fset  *token.FileSet
+	files map[string][]*ast.File // dir -> parsed non-test .go files
+}
+
+func newResolveCache(root string) *resolveCache {
+	return &resolveCache{root: root, fset: token.NewFileSet(), files: map[string][]*ast.File{}}
+}
+
+func (rc *resolveCache) packageFiles(t *testing.T, dir string) []*ast.File {
+	if fs, ok := rc.files[dir]; ok {
+		return fs
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		rc.files[dir] = nil
+		return nil
+	}
+	var fs []*ast.File
+	for _, e := range entries {
+		name := e.Name()
+		if e.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		f, perr := parser.ParseFile(rc.fset, filepath.Join(dir, name), nil, 0)
+		if perr != nil {
+			t.Fatalf("parse %s: %v", filepath.Join(dir, name), perr)
+		}
+		fs = append(fs, f)
+	}
+	rc.files[dir] = fs
+	return fs
+}
+
+// importDir resolves an import alias used in file to the on-disk directory it
+// names, if (and only if) it is a package inside this module — an external
+// module's constants are out of scope (this platform's subjects are never
+// declared in a third-party dependency).
+func (rc *resolveCache) importDir(file *ast.File, alias string) (string, bool) {
+	const modulePrefix = "github.com/kanz-eng/kanz/"
+	for _, imp := range file.Imports {
+		path, err := strconv.Unquote(imp.Path.Value)
+		if err != nil {
+			continue
+		}
+		name := ""
+		if imp.Name != nil {
+			name = imp.Name.Name
+		} else {
+			segs := strings.Split(path, "/")
+			name = segs[len(segs)-1]
+		}
+		if name != alias {
+			continue
+		}
+		if !strings.HasPrefix(path, modulePrefix) {
+			return "", false
+		}
+		return filepath.Join(rc.root, filepath.FromSlash(strings.TrimPrefix(path, modulePrefix))), true
+	}
+	return "", false
+}
+
+// resolveIdentInPackage looks up name as a package-level const/var declared in
+// any file already loaded for dir, and folds its value (recursing through
+// further idents/selectors, depth-bounded).
+func (rc *resolveCache) resolveIdentInPackage(t *testing.T, dir, name string, depth int) []string {
+	for _, f := range rc.packageFiles(t, dir) {
+		for _, decl := range f.Decls {
+			gd, ok := decl.(*ast.GenDecl)
+			if !ok || (gd.Tok != token.CONST && gd.Tok != token.VAR) {
+				continue
+			}
+			for _, spec := range gd.Specs {
+				vs, ok := spec.(*ast.ValueSpec)
+				if !ok {
+					continue
+				}
+				for i, n := range vs.Names {
+					if n.Name != name || i >= len(vs.Values) {
+						continue
+					}
+					return rc.resolveExpr(t, f, dir, vs.Values[i], nil, depth-1)
+				}
+			}
+		}
+	}
+	return nil
+}
+
+// resolveExpr folds expr to every literal string it can statically prove —
+// see this file's header for exactly what it does and does not chase.
+func (rc *resolveCache) resolveExpr(t *testing.T, file *ast.File, dir string, expr ast.Expr, fn *ast.FuncDecl, depth int) []string {
+	if depth <= 0 {
+		return nil
+	}
+	switch e := expr.(type) {
+	case *ast.BasicLit:
+		if e.Kind != token.STRING {
+			return nil
+		}
+		s, err := strconv.Unquote(e.Value)
+		if err != nil {
+			return nil
+		}
+		return []string{s}
+
+	case *ast.Ident:
+		// 1) a same-function local: every assignment to this name within fn.
+		if fn != nil {
+			if vals := rc.resolveLocalAssignments(t, file, dir, fn, e.Name, depth); vals != nil {
+				return vals
+			}
+			// 2) a parameter of fn: trace exactly one function-call hop within the
+			// same directory (package) to every call site, same package only.
+			if idx, isParam := paramIndex(fn, e.Name); isParam {
+				return rc.resolveParamAcrossCallSites(t, dir, fn, idx, depth)
+			}
+		}
+		// 3) a package-level const/var in the same directory.
+		return rc.resolveIdentInPackage(t, dir, e.Name, depth)
+
+	case *ast.SelectorExpr:
+		pkgIdent, ok := e.X.(*ast.Ident)
+		if !ok {
+			return nil
+		}
+		targetDir, ok := rc.importDir(file, pkgIdent.Name)
+		if !ok {
+			return nil
+		}
+		return rc.resolveIdentInPackage(t, targetDir, e.Sel.Name, depth)
+	}
+	return nil
+}
+
+// resolveLocalAssignments collects every literal (or further-resolvable) value
+// assigned to name via `:=` or `=` anywhere in fn's body — an if/else assigning
+// two different subjects (venue userdata handlers do exactly this) means BOTH
+// are real, reachable publish subjects, not a single ambiguous one. Returns nil
+// (not found), as opposed to an empty non-nil slice, when name is never
+// assigned in fn — the caller uses nil to mean "try the next resolution path".
+func (rc *resolveCache) resolveLocalAssignments(t *testing.T, file *ast.File, dir string, fn *ast.FuncDecl, name string, depth int) []string {
+	var found bool
+	var out []string
+	ast.Inspect(fn.Body, func(n ast.Node) bool {
+		assign, ok := n.(*ast.AssignStmt)
+		if !ok {
+			return true
+		}
+		for i, lhs := range assign.Lhs {
+			id, ok := lhs.(*ast.Ident)
+			if !ok || id.Name != name || i >= len(assign.Rhs) {
+				continue
+			}
+			found = true
+			out = append(out, rc.resolveExpr(t, file, dir, assign.Rhs[i], fn, depth-1)...)
+		}
+		return true
+	})
+	if !found {
+		return nil
+	}
+	return out
+}
+
+// paramIndex reports the index of fn's parameter named name, across a
+// flattened parameter list (multi-name fields like `a, b string` counted
+// individually, matching Go's own positional argument order).
+func paramIndex(fn *ast.FuncDecl, name string) (int, bool) {
+	if fn.Type.Params == nil {
+		return 0, false
+	}
+	i := 0
+	for _, field := range fn.Type.Params.List {
+		if len(field.Names) == 0 {
+			i++
+			continue
+		}
+		for _, n := range field.Names {
+			if n.Name == name {
+				return i, true
+			}
+			i++
+		}
+	}
+	return 0, false
+}
+
+// resolveParamAcrossCallSites finds every call, anywhere in dir's package,
+// naming fn (by identifier, for a plain function, or by selector, for a
+// method — matched by NAME only, same heuristic style as busConsumerCalls'
+// isSelector; this package has no receiver-type collisions on these small
+// private helpers) and resolves the argument at paramIdx. This is the ONE
+// function-call hop this resolver performs; it does not chase an argument that
+// is itself another function's parameter (depth still bounds recursion, but
+// resolveExpr's *ast.Ident case only re-enters resolveParamAcrossCallSites from
+// within the ORIGINAL fn, not from a callee found here, since callSiteFn below
+// is always fn itself's callers, evaluated with fn set to nil).
+func (rc *resolveCache) resolveParamAcrossCallSites(t *testing.T, dir string, fn *ast.FuncDecl, paramIdx, depth int) []string {
+	var out []string
+	for _, f := range rc.packageFiles(t, dir) {
+		ast.Inspect(f, func(n ast.Node) bool {
+			call, ok := n.(*ast.CallExpr)
+			if !ok || paramIdx >= len(call.Args) {
+				return true
+			}
+			name := ""
+			switch fun := call.Fun.(type) {
+			case *ast.Ident:
+				name = fun.Name
+			case *ast.SelectorExpr:
+				name = fun.Sel.Name
+			}
+			if name != fn.Name.Name {
+				return true
+			}
+			// Evaluated with fn=nil: caller-side arguments are resolved as
+			// literals / package consts only, not chased through a further
+			// parameter — this is the hop bound.
+			out = append(out, rc.resolveExpr(t, f, dir, call.Args[paramIdx], nil, depth)...)
+			return true
+		})
+	}
+	return out
+}
+
+// crossPackagePublishSurfaces names, for a service whose actual bus.Event
+// construction happens in a SHARED package it calls into rather than literally
+// inside services/<name>, which shared package(s) to ALSO scan for that
+// service.
+//
+// This is deliberately a small, hand-maintained, EXPLICIT list — not "every
+// internal/ package this service imports". A service routinely imports a
+// shared package for a type or interface it reads and never calls the
+// PUBLISHING side of: e.g. oms and compliance both import internal/compliance
+// for the mandate types they consume, but internal/compliance/publisher.go's
+// Publish is only ever called by cmd/kanz-mandate. Blanket-including every
+// import would misattribute kanz-mandate's own subject to both oms and
+// compliance, which do not and must not have a compliance.mandate.changed
+// PUBLISH grant (they only subscribe to it). Each entry below was verified by
+// reading the composition root's actual call site — see
+// .superpowers/sdd/service-user-permissions-report.md.
+var crossPackagePublishSurfaces = map[string][]string{
+	// risk-engine's RISK-10 output (EventTypeExposureRecomputed /
+	// EventTypeMeasuresComputed) is emitted by internal/risk/publish.Publisher,
+	// constructed and called from services/risk-engine's composition root.
+	"risk-engine": {"internal/risk/publish"},
+	// market-ingest's book-snapshot publish is internal/marketedge/ingest's
+	// Engine, run by pkg/alpha.Runner — itself wired from
+	// services/market-ingest/cmd/market-ingest/main.go.
+	"market-ingest": {"internal/marketedge/ingest"},
+	// webhook-ingest's signal + order-command publishes are
+	// internal/signal/translate's Translator, constructed and driven from
+	// services/webhook-ingest/internal/ingest (pipeline.go's tr.Emit).
+	"webhook-ingest": {"internal/signal/translate"},
+}
+
+// servicePublishedSubjects walks services/<svc> (recursively — a service is a
+// tree of packages: cmd/, internal/foo, internal/bar, ...) PLUS any directory
+// named for it in crossPackagePublishSurfaces, and finds every literal
+// `bus.Event{Subject: ...}` field, resolving its value via resolveExpr. Only
+// bus.Event is matched (not bus.Message, which archiver's Kafka-bound DLQ path
+// also populates with a Subject field) — every real NATS publish in this
+// estate constructs a bus.Event; bus.Message is the Kafka/wire-receive shape.
+// Restricting to it is what keeps this guard from flagging archiver's Kafka
+// topic name as an unauthorized NATS subject.
+func servicePublishedSubjects(t *testing.T, rc *resolveCache, root, svc string) map[string][]string {
+	t.Helper()
+	out := map[string][]string{}
+
+	dirs := []string{filepath.Join(root, "services", svc)}
+	for _, extra := range crossPackagePublishSurfaces[svc] {
+		dirs = append(dirs, filepath.Join(root, filepath.FromSlash(extra)))
+	}
+
+	for _, scanDir := range dirs {
+		scanDirForPublishedSubjects(t, rc, scanDir, out)
+	}
+	return out
+}
+
+func scanDirForPublishedSubjects(t *testing.T, rc *resolveCache, serviceDir string, out map[string][]string) {
+	t.Helper()
+	err := filepath.WalkDir(serviceDir, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			return nil
+		}
+		if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+			return nil
+		}
+		dir := filepath.Dir(path)
+		var f *ast.File
+		for _, cached := range rc.packageFiles(t, dir) {
+			if rc.fset.Position(cached.Pos()).Filename == path {
+				f = cached
+				break
+			}
+		}
+		if f == nil {
+			return nil
+		}
+		for _, decl := range f.Decls {
+			fn, _ := decl.(*ast.FuncDecl)
+			ast.Inspect(decl, func(n ast.Node) bool {
+				cl, ok := n.(*ast.CompositeLit)
+				if !ok {
+					return true
+				}
+				sel, ok := cl.Type.(*ast.SelectorExpr)
+				if !ok {
+					return true
+				}
+				pkgIdent, ok := sel.X.(*ast.Ident)
+				if !ok || pkgIdent.Name != "bus" || sel.Sel.Name != "Event" {
+					return true
+				}
+				for _, elt := range cl.Elts {
+					kv, ok := elt.(*ast.KeyValueExpr)
+					if !ok {
+						continue
+					}
+					key, ok := kv.Key.(*ast.Ident)
+					if !ok || key.Name != "Subject" {
+						continue
+					}
+					pos := rc.fset.Position(kv.Pos())
+					rel, rerr := filepath.Rel(serviceDir, pos.Filename)
+					if rerr != nil {
+						rel = pos.Filename
+					}
+					site := filepath.ToSlash(rel) + ":" + strconv.Itoa(pos.Line)
+					for _, subj := range dedupStrings(rc.resolveExpr(t, f, dir, kv.Value, fn, 6)) {
+						if !subjectShape.MatchString(subj) || protoTypeRef.MatchString(subj) {
+							continue
+						}
+						out[subj] = append(out[subj], site)
+					}
+				}
+				return true
+			})
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walk %s: %v", serviceDir, err)
+	}
+}
+
+func dedupStrings(in []string) []string {
+	if len(in) < 2 {
+		return in
+	}
+	seen := map[string]bool{}
+	var out []string
+	for _, s := range in {
+		if !seen[s] {
+			seen[s] = true
+			out = append(out, s)
+		}
+	}
+	return out
+}
