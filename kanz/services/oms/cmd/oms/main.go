@@ -115,9 +115,30 @@ func runConsumers(ctx context.Context, cfg config.Config, readiness *server.Read
 	}
 	defer func() { _ = client.Close() }()
 
+	// Tenant is the LAST-RESORT fallback for a publish that has no tenant at all,
+	// and it is what every other producer in this estate already sets (risk-engine,
+	// market-ingest, archiver, venue-binance, venue-okx). The OMS was the only one
+	// without it, and that omission is why a tenantless publish was reachable here
+	// at all: the startup sweep published outside any delivery, envelope validation
+	// rejected it, and because a sweep failure is fatal the OMS crash-looped on
+	// exactly the orders the sweep exists to rescue (fixed in dd4822c).
+	//
+	// WHAT THIS DOES NOT DO: it does not override per-delivery tenancy. Precedence
+	// in Producer.stamp is Event.TenantID > ctx > this, and the Consumer stashes
+	// every inbound envelope's tenant on the ctx — so a FACT derived from a
+	// fund-alpha order still publishes as fund-alpha. This only catches the paths
+	// with no inbound envelope to inherit from, which is precisely the class that
+	// was crashing the service. cfg.Tenant is the owning tenant of THIS deployment
+	// (see config.Tenant), already pinned as app.tenant_id on every DB connection.
+	//
+	// It is a safety net, not a licence to stop being explicit: SweepInterrupted
+	// still demands an explicit tenant and refuses without one, because an order it
+	// re-drives may belong to a tenant this deployment should name deliberately
+	// rather than default.
 	producer, err := bus.NewProducer(client, bus.ProducerConfig{
 		Source:          cfg.Source,
 		ProducerVersion: version(),
+		Tenant:          cfg.Tenant,
 		Metrics:         busMetrics,
 	})
 	if err != nil {

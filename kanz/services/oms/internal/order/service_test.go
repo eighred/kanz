@@ -48,10 +48,20 @@ type fakeBus struct {
 	events []bus.Event
 	// tenant, if set, stands in for ProducerConfig.Tenant — the producer's
 	// last-resort tenant fallback (stamp's precedence: Event.TenantID > ctx >
-	// ProducerConfig.Tenant). The OMS's real producer (services/oms/cmd/oms/main.go)
-	// does NOT set ProducerConfig.Tenant, so the zero value here (no fallback,
-	// tenant must come from the Event or ctx) is the faithful default. Only set
-	// this in a test that deliberately exercises the fallback.
+	// ProducerConfig.Tenant).
+	//
+	// THE ZERO VALUE IS DELIBERATELY STRICTER THAN THE REAL PRODUCER, and that
+	// divergence is the point. The OMS's producer does set ProducerConfig.Tenant
+	// (cmd/oms/main.go), so in production a publish that reaches it with no tenant
+	// no longer fails — it is silently stamped with the deployment's own tenant.
+	// That converts a loud crash into a quiet MISLABEL, which is the worse failure
+	// of the two: a FACT attributed to the wrong tenant is wrong forever, and
+	// nothing downstream can tell. Leaving the fallback unset here keeps that
+	// mislabel visible in tests, where it is still cheap to fix.
+	//
+	// So the fallback exists in production as a safety net and is withheld here as
+	// a detector. Only set this in a test that deliberately exercises the fallback
+	// itself.
 	tenant string
 }
 
