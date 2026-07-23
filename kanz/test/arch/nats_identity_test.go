@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -120,6 +121,28 @@ var operatorSVIDs = map[string]string{
 	"kanz-household": "spiffe://kanz.internal/ns/kanz-operator/sa/kanz-household",
 }
 
+// readOnlyObserverSVIDs is a DISTINCT category from operatorSVIDs, not an entry
+// in it. A read-only observer dials the spine (so it trips the same cmd/-dialer
+// guard operators do — TestOperatorCLIsHaveBrokerAccounts below) and binds an
+// EPHEMERAL JetStream consumer to stream subjects to a terminal, but its
+// tenancy.yaml grant DENIES all business publish: the publish allow-list holds
+// ONLY the JetStream consumer machinery ($JS.API.>/$JS.ACK.>), so with an
+// allow-list present every domain subject (order.*, risk.*, everything) is
+// denied by default. It is admitted to the broker like an operator yet is
+// PROVABLY incapable of moving capital — which is exactly why it must not be an
+// operatorSVIDs entry: operators publish, and operatorSVIDs carries the publish
+// authority the operator plane needs. TestReadOnlyObserversCannotPublish below
+// makes "watches the loop, cannot move it" a guarded fact, not a comment.
+//
+// kanz-monitor is the read-only Bubble Tea TUI (cmd/kanz-monitor): it
+// SubscribeBroadcasts order.> and risk.position.> and publishes NO business
+// subject. Its manifest half (a kanz-operator ServiceAccount) is not yet
+// shipped — like the operator tools, the broker-side half is declared in
+// tenancy.yaml now, ready for when that manifest lands.
+var readOnlyObserverSVIDs = map[string]string{
+	"kanz-monitor": "spiffe://kanz.internal/ns/kanz-operator/sa/kanz-monitor",
+}
+
 // operatorServiceAccountFiles are every manifest that may declare a
 // ServiceAccount in the kanz-operator namespace. kanz-halt's lives in
 // halt-job.yaml (it owns that tool's whole manifest, Job included); the
@@ -196,6 +219,12 @@ func TestOperatorCLIsHaveServiceAccounts(t *testing.T) {
 	serviceAccounts := operatorServiceAccounts(t, operatorDir)
 
 	var problems []string
+	// readOnlyObserverSVIDs is DELIBERATELY not iterated here: a read-only
+	// observer (kanz-monitor) has no operator Job manifest and the plan does not
+	// ask for one, so requiring a ServiceAccount for it would fail the build for
+	// a manifest this task's scope does not ship. The residual — that its
+	// broker-side grant is declared ahead of that manifest — is recorded on the
+	// tenancy.yaml entry itself, so this omission is explicit, not an oversight.
 	for name, svid := range operatorSVIDs {
 		// svid is spiffe://kanz.internal/ns/{namespace}/sa/{serviceAccountName};
 		// registration.yaml's spiffeIDTemplate constructs it from exactly that
@@ -292,10 +321,18 @@ func TestOperatorCLIsHaveBrokerAccounts(t *testing.T) {
 			continue
 		}
 		seen[e.Name()] = true
+		// A cmd/ dialer is acceptable if it declares an SVID in EITHER plane:
+		// operatorSVIDs (operators, which publish) or readOnlyObserverSVIDs
+		// (read-only observers, whose grant denies business publish). Both map
+		// to a __system__ user that must be admitted; a name in NEITHER map is
+		// the real failure this guard exists to catch.
 		svid, declared := operatorSVIDs[e.Name()]
 		if !declared {
-			problems = append(problems, e.Name()+": dials bus.DialNATS but declares no SVID in operatorSVIDs — "+
-				"the production broker requires one, so this tool cannot reach the spine at all")
+			svid, declared = readOnlyObserverSVIDs[e.Name()]
+		}
+		if !declared {
+			problems = append(problems, e.Name()+": dials bus.DialNATS but declares no SVID in operatorSVIDs or "+
+				"readOnlyObserverSVIDs — the production broker requires one, so this tool cannot reach the spine at all")
 			continue
 		}
 		if !users[svid] {
@@ -303,11 +340,17 @@ func TestOperatorCLIsHaveBrokerAccounts(t *testing.T) {
 				"it would authenticate into no account")
 		}
 	}
-	// An entry for a cmd that no longer dials is dead: it would keep an operator
-	// account alive for nothing, and the next reader would believe it load-bearing.
+	// An entry in EITHER plane for a cmd that no longer dials is dead: it would
+	// keep a broker account alive for nothing, and the next reader would believe
+	// it load-bearing.
 	for name := range operatorSVIDs {
 		if !seen[name] {
 			problems = append(problems, name+": is in operatorSVIDs but cmd/"+name+" no longer dials NATS — remove it (dead entry)")
+		}
+	}
+	for name := range readOnlyObserverSVIDs {
+		if !seen[name] {
+			problems = append(problems, name+": is in readOnlyObserverSVIDs but cmd/"+name+" no longer dials NATS — remove it (dead entry)")
 		}
 	}
 
@@ -357,5 +400,89 @@ func TestNATSDialersHaveBrokerAccounts(t *testing.T) {
 	if len(problems) > 0 {
 		sort.Strings(problems)
 		t.Fatalf("NATS dialers without a broker account (SEC-M3b):\n  %s", strings.Join(problems, "\n  "))
+	}
+}
+
+// readOnlyObserverMachinery is the exact, closed set of subjects a read-only
+// observer's tenancy.yaml publish allow-list may name — and nothing else. These
+// are the JetStream consumer machinery its ephemeral consumer binds ($JS.API.>
+// to resolve the stream + create the consumer, $JS.ACK.> to ack) plus the
+// reply-inbox space; none of them is a business/domain subject, so an
+// allow-list drawn only from this set cannot move capital. _INBOX.> is a
+// subscribe-side subject in practice and will not normally appear in a publish
+// allow-list, but is admitted here so the assertion stays about "only
+// machinery" rather than an over-narrow literal match.
+var readOnlyObserverMachinery = map[string]bool{
+	"$JS.API.>": true,
+	"$JS.ACK.>": true,
+	"_INBOX.>":  true,
+}
+
+// TestReadOnlyObserversCannotPublish is the whole point of the read-only
+// observer category, encoded as a guard: every readOnlyObserverSVIDs member's
+// tenancy.yaml publish grant must be PROVABLY incapable of a business publish.
+// It asserts, for each observer, that (1) an allow-list is actually present,
+// (2) every entry in it is one of the JetStream machinery subjects
+// (readOnlyObserverMachinery) — i.e. NO domain/business subject is publishable —
+// and (3) there is no publish.deny shortcut at all, which also rules out the
+// `deny: [">"]` trap that would break the consumer's own $JS.API.>/$JS.ACK.>
+// machinery (see the risk-engine/archiver headers in tenancy.yaml). An
+// allow-list restricts by omission: with these entries present, order.*, risk.*
+// and every other subject is denied by default, which is what makes "watches the
+// loop, cannot move it" a guarded fact.
+func TestReadOnlyObserversCannotPublish(t *testing.T) {
+	root := moduleRoot(t)
+	perms := servicePublishPermissions(t, filepath.Join(root, "infra", "nats", "tenancy.yaml"))
+
+	var problems []string
+	observers := 0
+	allowEntries := 0
+	for name, svid := range readOnlyObserverSVIDs {
+		perm, ok := perms[svid]
+		if !ok {
+			problems = append(problems, name+": tenancy.yaml has no `permissions` block for "+svid+
+				" — an absent block is UNRESTRICTED within __system__ (NATS semantics), the exact opposite of a "+
+				"read-only observer; it must carry a machinery-only publish allow-list")
+			continue
+		}
+		observers++
+		if len(perm.deny) > 0 {
+			problems = append(problems, name+": tenancy.yaml's permissions.publish for "+svid+" carries a `deny` list "+
+				"("+strings.Join(perm.deny, ", ")+") — a read-only observer must restrict by an allow-list ONLY. In "+
+				"particular `deny: [\">\"]` would deny the $JS.API.>/$JS.ACK.> its own ephemeral consumer binds and ack, "+
+				"silently breaking the consumer (every ack denied, infinite redelivery); a deny list also risks masking "+
+				"a broad allow")
+		}
+		if len(perm.allow) == 0 {
+			problems = append(problems, name+": tenancy.yaml's permissions.publish for "+svid+" has no allow entries — an "+
+				"explicitly empty publish allow-list was proven not to restrict anything on this nats-server (see "+
+				"tenancy.yaml's trap note), so an observer with nothing but machinery to publish must still list that "+
+				"machinery explicitly")
+			continue
+		}
+		for _, subj := range perm.allow {
+			allowEntries++
+			if !readOnlyObserverMachinery[subj] {
+				problems = append(problems, name+": tenancy.yaml's permissions.publish for "+svid+" allows "+
+					strconv.Quote(subj)+", which is NOT JetStream consumer machinery — a read-only observer may publish "+
+					"only $JS.API.>/$JS.ACK.> (its own consumer transactions) and provably no business subject, so this "+
+					"grant would let it move capital")
+			}
+		}
+	}
+
+	// Non-vacuity: the estate has at least one observer (kanz-monitor) with a
+	// non-empty machinery allow-list. A scan that parsed zero observers or zero
+	// allow entries proves nothing about what an observer can publish, which is
+	// the one thing this guard exists to prove.
+	if observers == 0 || allowEntries == 0 {
+		t.Fatalf("parsed %d observer(s) and %d publish-allow entr(y/ies) from tenancy.yaml — the scanner or the "+
+			"readOnlyObserverSVIDs list is broken; this assertion cannot vacuously pass", observers, allowEntries)
+	}
+
+	if len(problems) > 0 {
+		sort.Strings(problems)
+		t.Fatalf("%d read-only observer(s) hold a publish grant that is not machinery-only:\n\n  %s",
+			len(problems), strings.Join(problems, "\n  "))
 	}
 }

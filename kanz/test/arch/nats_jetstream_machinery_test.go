@@ -171,6 +171,17 @@ func TestServiceHasJetStreamMachineryItsRoleRequires(t *testing.T) {
 		requireMachinery(name, svid, consumerUnits[name], publishes)
 	}
 
+	// Read-only observers (nats_identity_test.go's readOnlyObserverSVIDs) are
+	// cmd/ dialers too, and consume JetStream via bus.NewConsumer +
+	// SubscribeBroadcast (so consumerUnits already buckets them). They publish NO
+	// business subject — publishes=false — but a consumer STILL needs its own
+	// $JS.API.>/$JS.ACK.>/_INBOX.> machinery, which is exactly what this loop
+	// verifies. TestReadOnlyObserversCannotPublish asserts the OTHER half: that
+	// the publish grant is machinery-only.
+	for name, svid := range readOnlyObserverSVIDs {
+		requireMachinery(name, svid, consumerUnits[name], false)
+	}
+
 	// Non-vacuity: this estate definitely has both roles represented — oms
 	// alone is a bus.NewConsumer caller with its own permissions block, and
 	// kanz-halt alone is a publish-only operator CLI with its own permissions
