@@ -138,6 +138,31 @@ func (h *Handler) principal(w http.ResponseWriter, r *http.Request) (*middleware
 		writeError(w, http.StatusUnauthorized, "authentication required to issue an order")
 		return nil, false
 	}
+	// AN AUTHENTICATED CALLER WITH NO TENANT MAY NOT MOVE CAPITAL.
+	//
+	// Neither authenticator requires the tenant claim: the OIDC path reads
+	// stringClaim(custom[cfg.TenantClaim]) and the dev HS256 path decodes
+	// `tenant`, and both accept a token that omits it, checking only the subject.
+	// This handler then stamps Event.TenantID from that principal, so without
+	// this gate an order command reaches the producer with an empty tenant.
+	//
+	// Refusing is the point, and the alternative was considered and rejected:
+	// giving this service a ProducerConfig.Tenant fallback would make the publish
+	// SUCCEED, silently attributing somebody's order to the gateway's own tenant.
+	// A capital command booked against the wrong tenant is wrong forever and
+	// nothing downstream can tell. On this path the absence of proof is not
+	// proof — it is the absence of entitlement, the same stance the OMS takes in
+	// entitledTo, where an empty portfolio claim denies rather than permits.
+	//
+	// 403, not 401: the caller IS authenticated. The token is valid and simply
+	// does not say whose capital it may spend, which re-authenticating will not
+	// fix — an operator has to correct the claim (or API_GATEWAY_OIDC_TENANT_CLAIM,
+	// if it names a claim the IdP does not populate).
+	if p.Tenant == "" {
+		writeError(w, http.StatusForbidden,
+			"this token carries no tenant, so it cannot say whose capital an order would spend")
+		return nil, false
+	}
 	return p, true
 }
 

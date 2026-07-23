@@ -200,3 +200,52 @@ func TestCancel_IgnoresClientSuppliedPortfolioScope(t *testing.T) {
 		t.Fatalf("principal_portfolios = %v, want [pf1] (the authenticated scope)", got)
 	}
 }
+
+// A TOKEN THAT AUTHENTICATES BUT NAMES NO TENANT MUST NOT MOVE CAPITAL.
+//
+// This is not hypothetical. Neither authenticator requires the tenant claim —
+// pkg/auth/oidc.go reads stringClaim(custom[cfg.TenantClaim]) and the dev HS256
+// path decodes `tenant`, and both accept a token that omits it, gating only on
+// the subject. The handler then stamps Event.TenantID from that principal, so
+// before this guard an order command reached the producer with an empty tenant
+// and bus.Validate rejected it: every submit and cancel failed 502, for every
+// caller, if API_GATEWAY_OIDC_TENANT_CLAIM named a claim the IdP did not
+// populate. Nothing here caught it, because every other test in this file hands
+// authed() a non-empty tenant.
+//
+// The assertion that pub.last stays nil is the load-bearing half: refusing with
+// the right status while still publishing would be the same defect wearing a
+// better error code.
+func TestSubmit_AuthenticatedWithoutTenant_403(t *testing.T) {
+	pub := &fakePub{}
+	h := New(pub)
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/orders", strings.NewReader(`{}`))
+	h.submit(rr, authed(req, "user-1", "")) // authenticated, no tenant claim
+
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403 — an authenticated caller with no tenant cannot say "+
+			"whose capital the order would spend, and must be refused rather than have one guessed", rr.Code)
+	}
+	if pub.last != nil {
+		t.Fatalf("an order was published for a principal with no tenant (%+v). The producer would "+
+			"reject it as tenant_id required, and a producer fallback would be worse still — it would "+
+			"book somebody's order against the gateway's own tenant, permanently", pub.last)
+	}
+}
+
+func TestCancel_AuthenticatedWithoutTenant_403(t *testing.T) {
+	pub := &fakePub{}
+	h := New(pub)
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/orders/o-1/cancel", strings.NewReader(`{}`))
+	h.cancel(rr, authed(req, "user-1", ""))
+
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403 — a cancel withdraws a live order and carries the same "+
+			"authority as placing one", rr.Code)
+	}
+	if pub.last != nil {
+		t.Fatalf("a cancel was published for a principal with no tenant (%+v)", pub.last)
+	}
+}
