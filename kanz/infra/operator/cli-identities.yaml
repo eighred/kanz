@@ -1,0 +1,172 @@
+---
+# THE OTHER THREE OPERATOR CLIs (SEC-M3c/d). Sibling to halt-job.yaml, not an
+# extension of it, on purpose: halt-job.yaml is kanz-halt's manifest end to
+# end (Namespace + ServiceAccount + NetworkPolicy + Job), and kanz-halt is the
+# one tool of the four actually invoked as a Job. kanz-mandate, kanz-altevent
+# and kanz-household are run from an operator's shell — `go run ./cmd/...`
+# against the cluster, exactly how they were exercised on the rig — so a Job
+# manifest for them would be speculative infrastructure nobody runs. What
+# they DO need, the same as kanz-halt, is a real identity: a ServiceAccount
+# to be issued a distinct SPIFFE SVID, and a NetworkPolicy so a compromised
+# operator credential can still reach only the spine.
+#
+# The kanz-operator Namespace is declared exactly once, in halt-job.yaml —
+# not repeated here. It already carries the `kanz.internal/spiffe: enabled`
+# label that opts every ServiceAccount in this namespace into SPIRE issuance
+# (infra/security/spire/registration.yaml's ClusterSPIFFEID). That CR is a
+# NAMESPACE-WIDE TEMPLATE keyed on (namespace, ServiceAccountName) — there is
+# no per-ServiceAccount registration entry to add anywhere; SPIRE mints
+# spiffe://kanz.internal/ns/kanz-operator/sa/{name} for any ServiceAccount
+# that exists in this already-labeled namespace. Declaring the ServiceAccount
+# below is therefore the entire registration step for each of these three
+# tools — see .superpowers/sdd/operator-identity-manifests-report.md for the
+# file:line trace of that mechanism.
+#
+# tenancy.yaml's __system__ account already admits all three SVIDs below with
+# a restrictive `permissions` block scoped to exactly the one subject space
+# each tool exists to publish. Until this file existed, none of the three had
+# a ServiceAccount of its own, so none of them could actually be issued that
+# SVID — a pod (or a `go run` process using the node's SPIRE agent socket)
+# with no ServiceAccount of its own falls back to whatever identity its
+# service account defaults to, which on this rig has been kanz-halt's. That
+# SVID's permissions are the halt subject ALONE, so deploying the tenancy.yaml
+# split without this file would have left these three tools authenticating
+# successfully and then being denied every publish they exist to make. This
+# file closes that gap.
+#
+# test/arch/nats_identity_test.go's TestOperatorCLIsHaveServiceAccounts fails
+# the build if tenancy.yaml ever again names an operator SVID with no
+# matching ServiceAccount here (or in halt-job.yaml).
+
+# kanz-mandate arms the compliance gate (COMP-01f): it publishes a
+# ConfigChanged FACT per (tenant, portfolio) on
+# compliance.mandate.changed.{tenant}.{portfolio} (internal/compliance/mandate_codec.go).
+# This ServiceAccount is issued spiffe://kanz.internal/ns/kanz-operator/sa/kanz-mandate;
+# tenancy.yaml grants that exact SVID publish rights to compliance.mandate.changed.>
+# and nothing else.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: kanz-mandate
+  namespace: kanz-operator
+  labels:
+    app.kubernetes.io/part-of: kanz
+---
+# kanz-mandate reaches the broker and nothing else — same posture as
+# kanz-halt-egress in halt-job.yaml, egress restricted to the NATS spine plus
+# the DNS needed to resolve it.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: kanz-mandate-egress
+  namespace: kanz-operator
+spec:
+  podSelector:
+    matchLabels:
+      app: kanz-mandate
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kanz-messaging
+          podSelector:
+            matchLabels:
+              app: nats
+      ports:
+        - { protocol: TCP, port: 4222 }
+    - to:
+        - namespaceSelector: {}
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - { protocol: UDP, port: 53 }
+        - { protocol: TCP, port: 53 }
+---
+# kanz-altevent publishes the commitment-lifecycle journal (ALT-01b) on
+# alternatives.> (internal/alternatives/subject.go). This ServiceAccount is
+# issued spiffe://kanz.internal/ns/kanz-operator/sa/kanz-altevent;
+# tenancy.yaml grants that exact SVID publish rights to alternatives.> and
+# nothing else.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: kanz-altevent
+  namespace: kanz-operator
+  labels:
+    app.kubernetes.io/part-of: kanz
+---
+# kanz-altevent reaches the broker and nothing else — same posture as
+# kanz-halt-egress in halt-job.yaml.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: kanz-altevent-egress
+  namespace: kanz-operator
+spec:
+  podSelector:
+    matchLabels:
+      app: kanz-altevent
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kanz-messaging
+          podSelector:
+            matchLabels:
+              app: nats
+      ports:
+        - { protocol: TCP, port: 4222 }
+    - to:
+        - namespaceSelector: {}
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - { protocol: UDP, port: 53 }
+        - { protocol: TCP, port: 53 }
+---
+# kanz-household publishes the household valuation (WEALTH-01b) on wealth.>
+# (internal/wealth/subject.go). This ServiceAccount is issued
+# spiffe://kanz.internal/ns/kanz-operator/sa/kanz-household; tenancy.yaml
+# grants that exact SVID publish rights to wealth.> and nothing else.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: kanz-household
+  namespace: kanz-operator
+  labels:
+    app.kubernetes.io/part-of: kanz
+---
+# kanz-household reaches the broker and nothing else — same posture as
+# kanz-halt-egress in halt-job.yaml.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: kanz-household-egress
+  namespace: kanz-operator
+spec:
+  podSelector:
+    matchLabels:
+      app: kanz-household
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kanz-messaging
+          podSelector:
+            matchLabels:
+              app: nats
+      ports:
+        - { protocol: TCP, port: 4222 }
+    - to:
+        - namespaceSelector: {}
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - { protocol: UDP, port: 53 }
+        - { protocol: TCP, port: 53 }

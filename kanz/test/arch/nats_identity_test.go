@@ -120,6 +120,109 @@ var operatorSVIDs = map[string]string{
 	"kanz-household": "spiffe://kanz.internal/ns/kanz-operator/sa/kanz-household",
 }
 
+// operatorServiceAccountFiles are every manifest that may declare a
+// ServiceAccount in the kanz-operator namespace. kanz-halt's lives in
+// halt-job.yaml (it owns that tool's whole manifest, Job included); the
+// other three live in cli-identities.yaml (SEC-M3d — see that file's header
+// for why they are a sibling, not an extension of halt-job.yaml). A new
+// operator identity manifest must be added to this list or the guard below
+// cannot see it and will falsely report the SVID as un-issuable.
+var operatorServiceAccountFiles = []string{"halt-job.yaml", "cli-identities.yaml"}
+
+var (
+	k8sKindLine      = regexp.MustCompile(`^kind:\s*(\S+)\s*$`)
+	k8sNameLine      = regexp.MustCompile(`^\s*name:\s*(\S+)\s*$`)
+	k8sNamespaceLine = regexp.MustCompile(`^\s*namespace:\s*(\S+)\s*$`)
+)
+
+// operatorServiceAccounts parses every YAML document in
+// infra/operator/{operatorServiceAccountFiles} and returns the
+// "namespace/name" of each ServiceAccount object declared. It is a plain
+// line scanner, not a YAML library, matching the style systemAccountUsers
+// above already uses on tenancy.yaml — these manifests are simple and
+// hand-written, and a real parser is not needed to see "this Kind exists
+// with this metadata".
+func operatorServiceAccounts(t *testing.T, operatorDir string) map[string]bool {
+	t.Helper()
+	found := map[string]bool{}
+	for _, fname := range operatorServiceAccountFiles {
+		path := filepath.Join(operatorDir, fname)
+		b, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read %s: %v", path, err)
+		}
+		for _, doc := range strings.Split(strings.ReplaceAll(string(b), "\r\n", "\n"), "\n---\n") {
+			isServiceAccount := false
+			name, namespace := "", ""
+			for _, line := range strings.Split(doc, "\n") {
+				if m := k8sKindLine.FindStringSubmatch(line); m != nil {
+					isServiceAccount = m[1] == "ServiceAccount"
+				}
+				if name == "" {
+					if m := k8sNameLine.FindStringSubmatch(line); m != nil {
+						name = m[1]
+					}
+				}
+				if namespace == "" {
+					if m := k8sNamespaceLine.FindStringSubmatch(line); m != nil {
+						namespace = m[1]
+					}
+				}
+			}
+			if isServiceAccount && name != "" && namespace != "" {
+				found[namespace+"/"+name] = true
+			}
+		}
+	}
+	return found
+}
+
+// TestOperatorCLIsHaveServiceAccounts is the manifest-side half of SEC-M3d.
+// SPIRE issues an SVID for the (namespace, ServiceAccountName) a pod (or a
+// `go run` process reusing the node's SPIRE agent socket) actually runs as —
+// registration.yaml's ClusterSPIFFEID is a namespace-wide template keyed on
+// exactly that pair, with no per-tool registration entry to add. So an
+// operator SVID named in tenancy.yaml's __system__ account with no matching
+// ServiceAccount manifest is not a paperwork gap: it is never issued at all.
+// The tool falls back to whatever ServiceAccount it actually runs as — on
+// this rig, kanz-halt's — and inherits THAT identity's permissions, which is
+// the halt subject alone. The tool authenticates fine and is then denied
+// every publish it exists to make. That failure shows up as "this tool is
+// broken", not "this manifest is missing", which is what makes it dangerous:
+// nothing about it looks like a deploy problem.
+func TestOperatorCLIsHaveServiceAccounts(t *testing.T) {
+	root := moduleRoot(t)
+	operatorDir := filepath.Join(root, "infra", "operator")
+	serviceAccounts := operatorServiceAccounts(t, operatorDir)
+
+	var problems []string
+	for name, svid := range operatorSVIDs {
+		// svid is spiffe://kanz.internal/ns/{namespace}/sa/{serviceAccountName};
+		// registration.yaml's spiffeIDTemplate constructs it from exactly that
+		// pair, so this is the same string reversed, not a guess.
+		const prefix = "spiffe://kanz.internal/ns/"
+		rest := strings.TrimPrefix(svid, prefix)
+		parts := strings.SplitN(rest, "/sa/", 2)
+		if len(parts) != 2 {
+			t.Fatalf("operatorSVIDs[%q] = %q does not match spiffe://kanz.internal/ns/{namespace}/sa/{name}", name, svid)
+		}
+		namespace, saName := parts[0], parts[1]
+		if !serviceAccounts[namespace+"/"+saName] {
+			problems = append(problems, name+": tenancy.yaml's __system__ account admits "+svid+
+				" with its own permissions block, but no ServiceAccount named "+saName+" in namespace "+namespace+
+				" exists under infra/operator/ — SPIRE issues an SVID per (namespace, ServiceAccountName) a workload "+
+				"actually runs as, so without this ServiceAccount the SVID above is never issued. "+name+
+				" falls back to whatever identity it actually runs as instead and is denied every publish it exists "+
+				"to make — it will look like a broken tool, not a missing manifest")
+		}
+	}
+
+	if len(problems) > 0 {
+		sort.Strings(problems)
+		t.Fatalf("operator SVIDs without a ServiceAccount (SEC-M3d):\n  %s", strings.Join(problems, "\n  "))
+	}
+}
+
 // dialsNATSInDir reports whether a directory tree calls bus.DialNATS.
 // AST, not grep: a comment naming DialNATS is not a dial, and this codebase's
 // prose discusses the calls it makes (retiring internal/integrity turned on
