@@ -102,6 +102,12 @@ var operatorSVIDs = map[string]string{
 	// trusted to stop trading. Splitting them needs a manifest and a tenancy entry
 	// per tool; recorded here rather than silently widened a third time.
 	"kanz-altevent": "spiffe://kanz.internal/ns/kanz-operator/sa/kanz-halt",
+	// kanz-household publishes the household valuation (WEALTH-01b) the wealth
+	// service folds. Same plane, same broker, same requirement, and the same
+	// caveat as kanz-mandate and kanz-altevent above: no Job manifest of its
+	// own yet, so it presents the kanz-halt SA's SVID — now a FOURTH operator
+	// tool sharing the one identity recorded above.
+	"kanz-household": "spiffe://kanz.internal/ns/kanz-operator/sa/kanz-halt",
 }
 
 // dialsNATSInDir reports whether a directory tree calls bus.DialNATS.
