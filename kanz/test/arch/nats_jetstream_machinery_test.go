@@ -1,6 +1,11 @@
 package arch
 
 import (
+	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -53,18 +58,31 @@ import (
 //   - A user may be both; the two requirements simply union (a consumer that
 //     also publishes still only needs `_INBOX.>` once).
 //
-// SCOPE, HONESTLY: archiver calls `a.cfg.NATS.Subscribe` — the *NATSClient
-// method — directly, never `bus.NewConsumer`, so it never appears in
-// busConsumerUnits and this guard derives NO requirement for it (it also
-// constructs no bus.Event, so it derives no PUBLISHES requirement either).
-// That mirrors the exact boundary TestEveryBusConsumerWiresADLQ already draws
-// around `bus.NewConsumer` call sites specifically, for the same reason: the
-// task was to reuse that evidence, not to build a second, wider notion of
-// "consumes." Whether archiver's own direct-Subscribe path needs the same
-// machinery is a real question (nats.go's Subscribe method is the same code
-// whoever calls it) but a distinct, not-yet-scoped one — see this file's
-// mutation-proof notes in the task report for why widening it here was left
-// alone rather than guessed at.
+// SCOPE, PREVIOUSLY DISHONEST: archiver calls `a.cfg.NATS.Subscribe` — the
+// *NATSClient method — directly, never `bus.NewConsumer`, so it never
+// appeared in busConsumerUnits and this guard used to derive NO requirement
+// for it. That gap is exactly what let tenancy.yaml's archiver entry ship as
+// `publish: { deny: [">"] }` (SEC-M3e) without this guard ever objecting:
+// pkg/bus/nats.go's Subscribe method runs the identical JetStream
+// consume-and-Ack machinery — `CreateOrUpdateConsumer` under `$JS.API.>`,
+// `Msg.Ack()` under `$JS.ACK.>` — no matter whether the caller reached it via
+// `bus.NewConsumer` or by holding a `*bus.NATSClient` (or an interface/field
+// backed by one, as `Config.NATS` is in services/archiver/internal/archive)
+// and calling `Subscribe` on it directly. A denied `$JS.ACK.>` would have
+// meant archiver acknowledges nothing on a real broker, ever, and every
+// message it archives redelivers forever — the exact silent failure mode
+// this file's header describes, just reached through a call site the guard
+// could not see.
+//
+// busConsumerUnits below now buckets TWO evidence sources, not one:
+// busConsumerCalls (bus_dlq_test.go, unchanged — `bus.NewConsumer` call
+// sites) AND directNATSClientSubscribeCalls (this file — direct
+// `(*bus.NATSClient).Subscribe` / `SubscribeBroadcast` /
+// `SubscribeBroadcastReady` call sites, matched by call SHAPE rather than by
+// resolving the receiver's static type; see that function's own comment for
+// why arity is precise enough here and what it deliberately does NOT match).
+// A service present in either bucket is a JetStream consumer for this
+// guard's purposes; the two evidence sources simply union.
 func TestServiceHasJetStreamMachineryItsRoleRequires(t *testing.T) {
 	root := moduleRoot(t)
 	tenancyPath := filepath.Join(root, "infra", "nats", "tenancy.yaml")
@@ -92,14 +110,16 @@ func TestServiceHasJetStreamMachineryItsRoleRequires(t *testing.T) {
 
 		if consumes {
 			if permDenies("$JS.API.>", perm) || !covered("$JS.API.>", perm.allow) {
-				problems = append(problems, name+": consumes via bus.NewConsumer (JetStream) but tenancy.yaml's "+
+				problems = append(problems, name+": consumes JetStream (via bus.NewConsumer or a direct (*bus.NATSClient) "+
+					"Subscribe/SubscribeBroadcast/SubscribeBroadcastReady call) but tenancy.yaml's "+
 					"permissions.publish for "+svid+" does not allow $JS.API.> — StreamNameBySubject and "+
 					"CreateOrUpdateConsumer/CreateConsumer (pkg/bus/nats.go) publish under $JS.API.> to resolve the "+
 					"stream and bind the consumer; without it the service authenticates fine and then fails every "+
 					"Subscribe call at startup, before a single message is ever delivered")
 			}
 			if permDenies("$JS.ACK.>", perm) || !covered("$JS.ACK.>", perm.allow) {
-				problems = append(problems, name+": consumes via bus.NewConsumer (JetStream) but tenancy.yaml's "+
+				problems = append(problems, name+": consumes JetStream (via bus.NewConsumer or a direct (*bus.NATSClient) "+
+					"Subscribe/SubscribeBroadcast/SubscribeBroadcastReady call) but tenancy.yaml's "+
 					"permissions.publish for "+svid+" does not allow $JS.ACK.> — Msg.Ack() (pkg/bus/nats.go) "+
 					"publishes to $JS.ACK.>, a separate subject space $JS.API.> does not cover, and Subscribe's own "+
 					"error path only LOGS a failed Ack (logAckFailure) rather than surfacing one. The consumer will "+
@@ -117,7 +137,8 @@ func TestServiceHasJetStreamMachineryItsRoleRequires(t *testing.T) {
 			return
 		}
 		if consumes {
-			problems = append(problems, name+": consumes via bus.NewConsumer (JetStream) but tenancy.yaml's "+
+			problems = append(problems, name+": consumes JetStream (via bus.NewConsumer or a direct (*bus.NATSClient) "+
+				"Subscribe/SubscribeBroadcast/SubscribeBroadcastReady call) but tenancy.yaml's "+
 				"permissions.subscribe for "+svid+" does not allow _INBOX.> — every $JS.API.> request "+
 				"(StreamNameBySubject, CreateOrUpdateConsumer) and the Ack itself is a request/reply call that "+
 				"needs its own reply inbox; without one those calls hang until they time out instead of failing "+
@@ -166,18 +187,35 @@ func TestServiceHasJetStreamMachineryItsRoleRequires(t *testing.T) {
 	}
 }
 
-// busConsumerUnits buckets every non-test bus.NewConsumer call site
-// busConsumerCalls (bus_dlq_test.go) already finds into the service or
-// operator-CLI directory tree it belongs to — "services/<name>/..." or
-// "cmd/<name>/...". A name present here calls bus.NewConsumer somewhere in
-// its own tree and therefore rides the JetStream consumer path this guard
-// requires machinery for. This is the reuse the task asked for: no second AST
-// scanner walks the module looking for bus.NewConsumer, this one just buckets
-// the same call sites bus_dlq_test.go already found by directory.
+// busConsumerUnits buckets every non-test JetStream-consumer call site this
+// file knows about into the service or operator-CLI directory tree it
+// belongs to — "services/<name>/..." or "cmd/<name>/...". A name present here
+// rides the JetStream consumer path this guard requires machinery for, via
+// EITHER of two evidence sources: busConsumerCalls (bus_dlq_test.go's
+// `bus.NewConsumer` call sites — the original, and still the primary, path)
+// or directNATSClientSubscribeCalls below (a direct `(*bus.NATSClient)`
+// method call, bypassing `bus.NewConsumer` — the path archiver.go:137 uses
+// and the reason this second source exists at all). Reusing rather than
+// re-deriving: no scanner here walks the module a third time looking for
+// `bus.NewConsumer` sites; bucketSvcOrCmd is the one piece of bucketing logic
+// both sources share.
 func busConsumerUnits(t *testing.T, root string) map[string]bool {
 	t.Helper()
+	units := bucketSvcOrCmd(busConsumerCalls(t, root))
+	for name := range bucketSvcOrCmd(directNATSClientSubscribeCalls(t, root)) {
+		units[name] = true
+	}
+	return units
+}
+
+// bucketSvcOrCmd buckets a set of call sites (file paths relative to the
+// module root) into the service or operator-CLI name owning the directory
+// tree the call site lives in — "services/<name>/..." or "cmd/<name>/...".
+// Shared by busConsumerUnits's two evidence sources so both bucket call
+// sites the exact same way.
+func bucketSvcOrCmd(calls []busConsumerCall) map[string]bool {
 	units := map[string]bool{}
-	for _, c := range busConsumerCalls(t, root) {
+	for _, c := range calls {
 		segs := strings.SplitN(c.file, "/", 3)
 		if len(segs) < 2 {
 			continue
@@ -188,6 +226,122 @@ func busConsumerUnits(t *testing.T, root string) map[string]bool {
 		}
 	}
 	return units
+}
+
+// natsClientSubscribeMethodArity is the exact positional argument count each
+// of bus.NATSClient's three subscribe methods takes (pkg/bus/nats.go):
+//
+//	Subscribe(ctx, subject, group string, h Handler) error                     — 4 args
+//	SubscribeBroadcast(ctx, subject string, h Handler) error                    — 3 args
+//	SubscribeBroadcastReady(ctx, subject string, h Handler, ready func()) error — 4 args
+//
+// directNATSClientSubscribeCalls matches on this arity rather than resolving
+// the receiver's static type, because — like every other scanner in this
+// file and bus_dlq_test.go — it does no go/types checking, only go/ast. See
+// that function's comment for why arity is precise enough to avoid the real
+// false positives this module contains.
+var natsClientSubscribeMethodArity = map[string]int{
+	"Subscribe":               4,
+	"SubscribeBroadcast":      3,
+	"SubscribeBroadcastReady": 4,
+}
+
+// directNATSClientSubscribeCalls finds every non-test call site anywhere in
+// the module that invokes a method named Subscribe, SubscribeBroadcast, or
+// SubscribeBroadcastReady with the exact argument count that method has on
+// *bus.NATSClient — evidence that the caller holds a *bus.NATSClient (or a
+// field/interface holding one, as services/archiver/internal/archive.Config's
+// NATS field is: it's typed as a local `Subscriber` interface but populated
+// with a real *bus.NATSClient at services/archiver/cmd/archiver/main.go's
+// composition root) and is driving its JetStream consume-and-Ack path
+// directly, bypassing bus.NewConsumer.
+//
+// WHY ARITY, AND WHY IT DOES NOT FALSE-POSITIVE ON THE OTHER Subscribe
+// METHODS THIS MODULE ACTUALLY DEFINES (checked by grepping every `func (...)
+// Subscribe` in the module before choosing this rule, not assumed):
+//
+//   - services/tv-sync/internal/projection.Projection.Subscribe(tenant,
+//     accountID string) (<-chan Delta, func()) is an in-process fan-out for
+//     the TradingView delta feed — nothing to do with NATS or JetStream. Its
+//     one non-test call site (services/tv-sync/internal/brokerapi/brokerapi.go)
+//     passes exactly 2 arguments; the 4-arg requirement for "Subscribe" above
+//     excludes it without needing to know anything about its receiver's type.
+//   - services/market-data/internal/feed's fakeBloomberg.Subscribe(ctx,
+//     []string) (<-chan BloombergTick, error) is a test double and lives in a
+//     _test.go file, which this scanner — like busConsumerCalls — skips
+//     entirely regardless of arity.
+//   - bus.KafkaClient also implements Subscribe(ctx, topic, group string, h
+//     Handler) error: identical arity to bus.NATSClient's, and arity alone
+//     cannot tell them apart. This is not a live ambiguity: the one Kafka
+//     subscriber in this estate (lake-sink) reaches it through
+//     bus.NewConsumer, not a direct call, so busConsumerCalls already marks
+//     it a consumer — a KafkaClient.Subscribe match here would only be
+//     REDUNDANT with a bucket that's already true, never a new false
+//     positive. A future service calling (*bus.KafkaClient).Subscribe
+//     directly, the way archiver calls (*bus.NATSClient).Subscribe, would
+//     need its own tenancy.yaml JetStream-machinery grant re-derived at that
+//     time regardless — Kafka and NATS permissions are not interchangeable —
+//     so this scanner erring toward requiring it is the safe direction to be
+//     wrong in, not a silent gap.
+//   - `consumer.Subscribe(...)` / `consumer.SubscribeBroadcast(...)` /
+//     `consumer.SubscribeBroadcastReady(...)` call sites on a *bus.Consumer
+//     (the overwhelming majority of matches in services/ and cmd/) also match
+//     this arity, and are also already true in busConsumerCalls's bucket via
+//     the bus.NewConsumer call site that built that Consumer in the same
+//     tree. Matching them again here is deliberately harmless duplication,
+//     not a bug: bucketSvcOrCmd just ORs two `true` bits together.
+func directNATSClientSubscribeCalls(t *testing.T, root string) []busConsumerCall {
+	t.Helper()
+	var out []busConsumerCall
+	fset := token.NewFileSet()
+
+	err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if info.IsDir() {
+			switch info.Name() {
+			case "vendor", ".git", "gen", "testdata":
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+			return nil
+		}
+		f, perr := parser.ParseFile(fset, path, nil, parser.SkipObjectResolution)
+		if perr != nil {
+			return fmt.Errorf("parse %s: %w", path, perr)
+		}
+		rel, rerr := filepath.Rel(root, path)
+		if rerr != nil {
+			rel = path
+		}
+		ast.Inspect(f, func(n ast.Node) bool {
+			call, ok := n.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			sel, ok := call.Fun.(*ast.SelectorExpr)
+			if !ok {
+				return true
+			}
+			wantArgs, known := natsClientSubscribeMethodArity[sel.Sel.Name]
+			if !known || len(call.Args) != wantArgs {
+				return true
+			}
+			out = append(out, busConsumerCall{
+				file: filepath.ToSlash(rel),
+				line: fset.Position(call.Pos()).Line,
+			})
+			return true
+		})
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("scan %s: %v", root, err)
+	}
+	return out
 }
 
 // operatorCrossPackagePublishSurfaces mirrors crossPackagePublishSurfaces

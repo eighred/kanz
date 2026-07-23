@@ -186,9 +186,16 @@ data:
           # allow: [] } }` — an explicitly present but EMPTY allow list — does
           # NOT deny publish. It was proven empirically to behave as
           # UNRESTRICTED, identically to omitting the permissions block
-          # entirely. A service with nothing to publish on NATS (archiver) must
-          # use `publish: { deny: [">"] }` to actually be denied; an empty
-          # `allow` array is not a restriction, it is a no-op that reads as one.
+          # entirely. A service with genuinely nothing to publish on NATS would
+          # need `publish: { deny: [">"] }` to actually be denied, not an empty
+          # `allow` array (a no-op that reads as one) — but no user below is
+          # actually in that position: every __system__ user that reaches
+          # pkg/bus/nats.go's Subscribe at all (every consumer, not just every
+          # domain publisher) needs $JS.API.>/$JS.ACK.> to run its own
+          # JetStream machinery, so `deny: [">"]` is now a trap to recognize on
+          # sight, not a pattern to reach for. archiver's entry below used to be
+          # exactly this mistake — see its own comment for the failure mode
+          # that produced.
           { user: "spiffe://kanz.internal/ns/kanz-services/sa/risk-engine"
             permissions: {
               # RISK-10's Publisher (internal/risk/publish/publish.go) emits the
@@ -278,19 +285,48 @@ data:
           # "dlq.archiver") is a Kafka topic, published via a.cfg.Kafka.Publish,
           # never a NATS subject. It calls a.cfg.NATS.Subscribe directly (the
           # *bus.NATSClient method), not bus.Consumer.Subscribe, so it never
-          # constructs a bus.WithDLQ NATS publisher at all: this service
-          # PUBLISHES NOTHING TO NATS, ever. Its subscribe set
-          # (services/archiver/internal/config/config.go's DefaultSubjects,
-          # ARCHIVER_SUBJECTS) is deliberately broad BY DESIGN — DATA-M1 exists
-          # to archive everything with irreplaceable history — not because it
-          # could not be narrowed: market.> is already excluded (re-fetchable
-          # from the venue) and so is observability.> (ephemeral, no subject
-          # declared on it). See the trap noted above: publish is `deny: [">"]`,
-          # not an empty `allow`, because only `deny` was proven to actually
-          # restrict.
+          # constructs a bus.WithDLQ NATS publisher and PUBLISHES NO DOMAIN
+          # EVENT of its own, ever.
+          #
+          # THAT IS NOT THE SAME AS PUBLISHING NOTHING, and `publish: { deny:
+          # [">"] }` — this entry's previous value — was wrong for exactly that
+          # conflation. A JetStream CONSUMER publishes to the broker even when
+          # it emits zero domain events: pkg/bus/nats.go's Subscribe resolves
+          # the stream and creates/binds the durable consumer under
+          # `$JS.API.>`, and separately, Msg.Ack() publishes to `$JS.ACK.>` —
+          # a THIRD, undocumented subject space `$JS.API.>` does not cover.
+          # `deny: [">"]` denies both, which means it denies archiver's OWN
+          # ACKNOWLEDGEMENTS. Subscribe's error path only LOGS a failed Ack
+          # (logAckFailure) rather than surfacing it, so this failure is
+          # completely silent: archiver would authenticate fine, subscribe
+          # fine, process every message successfully, have every Ack denied,
+          # and the broker would redeliver the SAME message after AckWait
+          # forever — INFINITE SILENT REDELIVERY, with every health check
+          # archiver exports reporting green throughout, and duplicate Kafka
+          # produces on every redelivery (this consumer's WithDLQ absence and
+          # at-least-once design tolerate duplicates, but not this volume of
+          # them, and the real damage is that lag/pending metrics would show
+          # a permanently stuck consumer with no error anywhere pointing at
+          # tenancy.yaml).
+          #
+          # The correct grant is therefore an ALLOW-LIST of exactly the
+          # JetStream machinery a consumer needs — `$JS.API.>` and
+          # `$JS.ACK.>` — and NOTHING else: archiver's domain events genuinely
+          # do go to Kafka, not NATS, so no domain subject belongs here. (The
+          # trap noted elsewhere in this account still applies in principle —
+          # an explicitly empty `allow: []` was proven not to restrict
+          # anything on this nats-server version — but it is moot here since
+          # this allow-list is non-empty.)
+          #
+          # Its subscribe set (services/archiver/internal/config/config.go's
+          # DefaultSubjects, ARCHIVER_SUBJECTS) is deliberately broad BY DESIGN
+          # — DATA-M1 exists to archive everything with irreplaceable history
+          # — not because it could not be narrowed: market.> is already
+          # excluded (re-fetchable from the venue) and so is observability.>
+          # (ephemeral, no subject declared on it).
           { user: "spiffe://kanz.internal/ns/kanz-services/sa/archiver"
             permissions: {
-              publish: { deny: [">"] }
+              publish: { allow: ["$JS.API.>", "$JS.ACK.>"] }
               subscribe: {
                 allow: [
                   "order.>", "strategy.>", "execution.>", "accounting.>", "settlement.>",
