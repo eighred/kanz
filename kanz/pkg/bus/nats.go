@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -73,6 +74,16 @@ type NATSConfig struct {
 	// halt gate — the wire is back, which is not the same as the book being safe.
 	// Use it for logging and metrics.
 	OnReconnect func()
+
+	// Logger receives diagnostics this client cannot surface any other way — most
+	// importantly a failed Ack/Nak inside the Consume callback (see Subscribe and
+	// SubscribeBroadcastReady), which happens below the wrapped Handler and below
+	// the Consumer layer where BusMetrics lives, so nothing upstream can observe it
+	// otherwise. nil defaults to slog.Default() in DialNATS. Every service already
+	// calls slog.SetDefault(logger) in main (see services/oms/cmd/oms/main.go), so
+	// leaving this unset still routes into the structured log pipeline with no
+	// call-site changes; set it explicitly only if a client needs its own logger.
+	Logger *slog.Logger
 }
 
 type NATSClient struct {
@@ -99,6 +110,9 @@ func DialNATS(_ context.Context, cfg NATSConfig) (*NATSClient, error) {
 	}
 	if cfg.DrainGrace == 0 {
 		cfg.DrainGrace = defaultDrainGrace
+	}
+	if cfg.Logger == nil {
+		cfg.Logger = slog.Default()
 	}
 	opts := []nats.Option{
 		nats.Name(cfg.Name),
@@ -203,10 +217,24 @@ func (c *NATSClient) Subscribe(ctx context.Context, subject, group string, h Han
 	cc, err := cons.Consume(func(m jetstream.Msg) {
 		hctx := *handlerCtx.Load()
 		if err := h(hctx, natsToMessage(m)); err != nil {
-			_ = m.Nak()
+			// Surfaced deliberately (logNakFailure) but never escalated further: the
+			// handler already decided this delivery failed, and a Nak that itself
+			// fails to reach the broker still redelivers — just later, on the
+			// AckWait timeout, instead of immediately. Nothing here should turn
+			// into a panic or a different return; the delivery outcome is already
+			// decided.
+			if nakErr := m.Nak(); nakErr != nil {
+				logNakFailure(c.cfg.Logger, subject, group, nakErr)
+			}
 			return
 		}
-		_ = m.Ack()
+		// Surfaced deliberately (logAckFailure) but MUST NEVER become a Nak or an
+		// early return: the handler already succeeded, the work is done. Nak-ing a
+		// message whose handler succeeded would ask the broker to redeliver work
+		// that already happened — the wrong failure mode in the other direction.
+		if ackErr := m.Ack(); ackErr != nil {
+			logAckFailure(c.cfg.Logger, subject, group, ackErr)
+		}
 	})
 	if err != nil {
 		return fmt.Errorf("nats: start consume: %w", err)
@@ -327,6 +355,55 @@ func natsToMessage(m jetstream.Msg) Message {
 	return out
 }
 
+// logAckFailure reports that JetStream rejected the Ack for a message whose
+// handler already ran to completion. This is NOT data loss and must never be
+// treated as one — the work is done — but the broker was never told, so it
+// will redeliver this exact message forever, and the handler will redo the
+// same work forever, while every health signal this service exports keeps
+// reporting green. The only symptom is load.
+//
+// The most likely cause: Msg.Ack() publishes to $JS.ACK.>, a subject space
+// distinct from the $JS.API.> used to manage the consumer itself. A
+// permissions grant of `publish: ["$JS.API.>"]` alone LOOKS sufficient to run
+// a JetStream consumer — the consumer creates and binds fine — but every Ack
+// silently fails from the first message onward until `$JS.ACK.>` is also
+// granted.
+//
+// logger nil-checked rather than trusted, so a caller that builds a
+// NATSClient by hand (bypassing DialNATS's default) cannot nil-panic here of
+// all places — the one path that exists purely to report a problem must not
+// itself become one.
+func logAckFailure(logger *slog.Logger, subject, group string, err error) {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	logger.Error("jetstream ack failed: handler already completed successfully but the broker was never told, "+
+		"so this message will be redelivered and reprocessed indefinitely while the service reports healthy — "+
+		"check for a missing $JS.ACK.> publish grant on this service's NATS user",
+		"subject", subject,
+		"group", group,
+		"err", err,
+	)
+}
+
+// logNakFailure reports that JetStream rejected the Nak for a message whose
+// handler failed. Less severe than a failed Ack: the message still
+// redelivers once its AckWait timer (30s default) expires — Nak only makes
+// that happen immediately instead. Logged for the same underlying reason
+// (see logAckFailure): a broker-side permission gap that breaks
+// acknowledgement should never be silent.
+func logNakFailure(logger *slog.Logger, subject, group string, err error) {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	logger.Error("jetstream nak failed: redelivery will now wait for the ack-wait timeout instead of retrying "+
+		"immediately — check for a missing $JS.ACK.> publish grant on this service's NATS user",
+		"subject", subject,
+		"group", group,
+		"err", err,
+	)
+}
+
 // durableName builds the JetStream durable for one (group, subject) pair.
 //
 // A durable name may not contain `.`, `*`, `>`, or whitespace, so the subject's
@@ -376,10 +453,19 @@ func (c *NATSClient) SubscribeBroadcastReady(ctx context.Context, subject string
 	}
 	cc, err := cons.Consume(func(m jetstream.Msg) {
 		if err := h(ctx, natsToMessage(m)); err != nil {
-			_ = m.Nak()
+			// See the queue-group Subscribe callback above: surfaced deliberately,
+			// never escalated. A failed Nak still redelivers on the AckWait timeout.
+			if nakErr := m.Nak(); nakErr != nil {
+				logNakFailure(c.cfg.Logger, subject, "", nakErr)
+			}
 			return
 		}
-		_ = m.Ack()
+		// See the queue-group Subscribe callback above: surfaced deliberately, and
+		// MUST NEVER become a Nak or an early return — the handler already
+		// succeeded and the work is done.
+		if ackErr := m.Ack(); ackErr != nil {
+			logAckFailure(c.cfg.Logger, subject, "", ackErr)
+		}
 	})
 	if err != nil {
 		return fmt.Errorf("nats: start broadcast consume: %w", err)
