@@ -191,9 +191,27 @@ func record(seen map[string]bool, s string) {
 }
 
 // covered reports whether a stream pattern carries the subject. NATS patterns are
-// `domain.>` (everything under domain) or a literal subject.
+// a bare `>` (everything, account-wide — audit's subscribe grant and
+// archiver's publish deny both use exactly this shape), `domain.>` (everything
+// under domain), or a literal subject.
+//
+// The bare `>` case used to fall through both branches below: it doesn't end
+// in `.>` (that suffix check needs the dot), and no real subject equals the
+// literal string ">", so covered(anything, []string{">"}) returned false —
+// silently treating "matches everything" as "matches nothing". Nothing
+// exercised it before nats_jetstream_machinery_test.go (no existing publish
+// allow-list or deny-list used a bare ">"; only streamSubjects' `domain.>`
+// patterns reached this function), so it shipped unnoticed. It matters now:
+// audit's subscribe permission is `allow: [">"]` by design (its own comment
+// in tenancy.yaml — "the one entry below where subscribe: [">"] is the
+// CORRECT, code-derived answer"), and a bare-">" bug would make the JetStream
+// machinery guard demand $INBOX.> be listed a second time even though ">"
+// already covers it.
 func covered(subject string, patterns []string) bool {
 	for _, p := range patterns {
+		if p == ">" {
+			return true
+		}
 		if strings.HasSuffix(p, ".>") {
 			if strings.HasPrefix(subject, strings.TrimSuffix(p, ">")) {
 				return true

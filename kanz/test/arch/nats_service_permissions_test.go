@@ -133,51 +133,99 @@ type publishPerm struct {
 // treat "absent" as "unverified / unrestricted", never as "denies everything".
 func servicePublishPermissions(t *testing.T, path string) map[string]publishPerm {
 	t.Helper()
+	out := map[string]publishPerm{}
+	for svid, entry := range systemUserEntries(t, path) {
+		out[svid] = parsePublishPerm(entry)
+	}
+	return out
+}
+
+// serviceSubscribeAllow returns, for every __system__ user with a
+// `permissions` block, its subscribe allow/deny lists, keyed by SVID — the
+// subscribe-side twin of servicePublishPermissions, parsed from the exact same
+// entry text so the two can never see a different shape of the same user.
+// SEC-M3f (nats_jetstream_machinery_test.go) is the first caller: `_INBOX.>`
+// lives here, not in publish.
+func serviceSubscribeAllow(t *testing.T, path string) map[string]publishPerm {
+	t.Helper()
+	out := map[string]publishPerm{}
+	for svid, entry := range systemUserEntries(t, path) {
+		out[svid] = parseSubscribePerm(entry)
+	}
+	return out
+}
+
+// systemUserEntries isolates tenancy.yaml's __system__ account (brace-depth —
+// same technique systemAccountUsers in nats_identity_test.go uses) and
+// returns, per SVID, the raw text of that user's own entry — from its own
+// opening `{` to its own matching closing `}`. servicePublishPermissions and
+// serviceSubscribeAllow both parse from here, so the file is walked and
+// brace-counted exactly once per call site, not reimplemented per permission
+// direction.
+//
+// Whole-line comments (every comment in this file is its own `#`-prefixed
+// line — verified, no trailing inline comments exist here) are dropped before
+// counting braces: several of them quote NATS config shapes for illustration
+// ("`permissions: { publish: { allow: [] } }`" split across two comment
+// lines), and counting those braces as real structure would corrupt the depth
+// tracking below.
+//
+// Entry boundaries are found by absolute brace depth, not by assuming `{` and
+// `user:` share a line: the four operator entries (kanz-halt, kanz-mandate,
+// kanz-altevent, kanz-household) open with a lone `{` on its own line, one
+// line above `user: "..."` — the shape every service entry does NOT use (it
+// opens `{ user: "..."` on one line). A scan keyed off the `user:` line's own
+// brace count misses the operator shape entirely and returns a one-line,
+// permissions-less "entry" for all four — invisible until something actually
+// reads their subscribe block, which is exactly what this file's new
+// $JS.ACK.>/_INBOX.> guard is the first to do.
+func systemUserEntries(t *testing.T, path string) map[string]string {
+	t.Helper()
 	b, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("read tenancy.yaml: %v", err)
 	}
-	lines := strings.Split(strings.ReplaceAll(string(b), "\r\n", "\n"), "\n")
-
-	// Isolate __system__ (brace-depth — same technique systemAccountUsers uses).
-	var block []string
-	inSystem := false
-	depth := 0
-	for _, line := range lines {
-		trimmed := strings.TrimSpace(line)
-		if !inSystem {
-			if strings.HasPrefix(trimmed, "__system__") && strings.Contains(trimmed, "{") {
-				inSystem = true
-				depth = strings.Count(line, "{") - strings.Count(line, "}")
-			}
+	var kept []string
+	for _, line := range strings.Split(strings.ReplaceAll(string(b), "\r\n", "\n"), "\n") {
+		if strings.HasPrefix(strings.TrimSpace(line), "#") {
 			continue
 		}
-		block = append(block, line)
-		depth += strings.Count(line, "{") - strings.Count(line, "}")
-		if depth <= 0 {
-			break
-		}
+		kept = append(kept, line)
+	}
+	text := strings.Join(kept, "\n")
+
+	idx := strings.Index(text, "__system__")
+	if idx < 0 {
+		t.Fatal("tenancy.yaml has no __system__ account — has the format changed?")
+	}
+	open := strings.IndexByte(text[idx:], '{')
+	if open < 0 {
+		t.Fatal("__system__ has no opening brace — has the format changed?")
 	}
 
-	out := map[string]publishPerm{}
-	for i := 0; i < len(block); i++ {
-		m := userLine.FindStringSubmatch(block[i])
-		if m == nil {
-			continue
+	out := map[string]string{}
+	depth := 1 // positioned just past __system__'s own opening brace
+	entryStart := -1
+	for i := idx + open + 1; i < len(text); i++ {
+		switch text[i] {
+		case '{':
+			depth++
+			if depth == 2 {
+				entryStart = i
+			}
+		case '}':
+			depth--
+			if depth == 1 && entryStart >= 0 {
+				entry := text[entryStart : i+1]
+				if m := userLine.FindStringSubmatch(entry); m != nil {
+					out[m[1]] = entry
+				}
+				entryStart = -1
+			}
+			if depth == 0 {
+				return out // __system__'s own closing brace
+			}
 		}
-		svid := m[1]
-		// Every entry opens `{ user: "..."` on one line (the shape every entry in
-		// this file uses, operator and service alike) — start depth-counting from
-		// THAT line and walk forward until the entry's own brace closes.
-		d := strings.Count(block[i], "{") - strings.Count(block[i], "}")
-		entry := []string{block[i]}
-		j := i
-		for d > 0 && j+1 < len(block) {
-			j++
-			entry = append(entry, block[j])
-			d += strings.Count(block[j], "{") - strings.Count(block[j], "}")
-		}
-		out[svid] = parsePublishPerm(strings.Join(entry, "\n"))
 	}
 	return out
 }
@@ -200,6 +248,23 @@ func parsePublishPerm(entryText string) publishPerm {
 	if subIdx := strings.Index(rest, "subscribe:"); subIdx >= 0 {
 		rest = rest[:subIdx]
 	}
+	return publishPerm{
+		allow: extractQuotedAfter(rest, "allow:"),
+		deny:  extractQuotedAfter(rest, "deny:"),
+	}
+}
+
+// parseSubscribePerm extracts the subscribe allow/deny arrays from one user
+// entry's text — the subscribe-side twin of parsePublishPerm. `subscribe:` is
+// always the last key in an entry (publish precedes it, nothing follows it),
+// so unlike parsePublishPerm there is no sibling key to bound the scan at;
+// extractQuotedAfter's own "up to the first ']'" bound is sufficient.
+func parseSubscribePerm(entryText string) publishPerm {
+	subIdx := strings.Index(entryText, "subscribe:")
+	if subIdx < 0 {
+		return publishPerm{}
+	}
+	rest := entryText[subIdx+len("subscribe:"):]
 	return publishPerm{
 		allow: extractQuotedAfter(rest, "allow:"),
 		deny:  extractQuotedAfter(rest, "deny:"),
@@ -499,13 +564,20 @@ var crossPackagePublishSurfaces = map[string][]string{
 // topic name as an unauthorized NATS subject.
 func servicePublishedSubjects(t *testing.T, rc *resolveCache, root, svc string) map[string][]string {
 	t.Helper()
-	out := map[string][]string{}
-
 	dirs := []string{filepath.Join(root, "services", svc)}
 	for _, extra := range crossPackagePublishSurfaces[svc] {
 		dirs = append(dirs, filepath.Join(root, filepath.FromSlash(extra)))
 	}
+	return publishedSubjectsIn(t, rc, dirs)
+}
 
+// publishedSubjectsIn is servicePublishedSubjects's directory-walking core,
+// factored out so nats_jetstream_machinery_test.go's operator-CLI scan (cmd/
+// trees, not services/) can reuse the exact same bus.Event{Subject: ...}
+// resolution instead of a second walker.
+func publishedSubjectsIn(t *testing.T, rc *resolveCache, dirs []string) map[string][]string {
+	t.Helper()
+	out := map[string][]string{}
 	for _, scanDir := range dirs {
 		scanDirForPublishedSubjects(t, rc, scanDir, out)
 	}
