@@ -13,6 +13,19 @@ import (
 	"github.com/kanz-eng/kanz/pkg/transport"
 )
 
+// lifecycleSubject and positionSubject are the two subjects this monitor
+// subscribes on the bus. They are named constants (rather than inline string
+// literals in runBusReader) specifically so busreader_test.go can assert on
+// them directly: dialing a real broker to observe the subscribed subject is
+// not viable from this package's tests, so pinning the constant is the
+// regression guard against positionSubject widening back to risk.position.>
+// (see runBusReader's comment for why that would collide the aggregate and
+// per-venue position grains).
+const (
+	lifecycleSubject = "order.>"
+	positionSubject  = "risk.position.changed.>"
+)
+
 // busEventMsg carries one decoded order-lifecycle row into Update.
 type busEventMsg lifecycleEvent
 
@@ -96,7 +109,7 @@ func (m model) runBusReader(ctx context.Context) {
 		// this read-only monitor. SubscribeBroadcast is an ephemeral,
 		// per-connection consumer that gets its OWN copy of every event, so the
 		// monitor can never divert a delivery the trading system needs.
-		if err := consumer.SubscribeBroadcast(ctx, "order.>", func(_ context.Context, env *envelopepb.Envelope, payload []byte) error {
+		if err := consumer.SubscribeBroadcast(ctx, lifecycleSubject, func(_ context.Context, env *envelopepb.Envelope, payload []byte) error {
 			// decodeLifecycle's ok=false is a DELIBERATE drop for event types
 			// this monitor does not render (see decode.go) as well as for an
 			// unparseable payload — the two are indistinguishable at this
@@ -109,31 +122,49 @@ func (m model) runBusReader(ctx context.Context) {
 			}
 			return nil
 		}); err != nil {
-			m.busCh <- busErrMsg{err: fmt.Errorf("order.>: %w", err)}
+			m.busCh <- busErrMsg{err: fmt.Errorf("%s: %w", lifecycleSubject, err)}
 		}
 	}()
 
 	go func() {
 		defer wg.Done()
-		// SubscribeBroadcast, NEVER Subscribe with a group: risk.position.> is
-		// consumed by the risk engine and tv-sync through their own durable
+		// SubscribeBroadcast, NEVER Subscribe with a group: risk.position.changed.>
+		// is consumed by the risk engine and tv-sync through their own durable
 		// groups, and a monitor joining that group would steal position
 		// updates meant for them. SubscribeBroadcast's DeliverLastPerSubject
 		// start is also what gives this monitor the CURRENT book immediately
 		// on connect, rather than only future changes.
-		if err := consumer.SubscribeBroadcast(ctx, "risk.position.>", func(_ context.Context, env *envelopepb.Envelope, payload []byte) error {
+		//
+		// The subject is narrowed to risk.position.changed.> (the AGGREGATE
+		// grain) rather than the broader risk.position.> the tenancy grant
+		// permits: the OMS position projector publishes TWO grains per fill —
+		// the portfolio-level aggregate on risk.position.changed.> and a
+		// per-venue holding on risk.position.venue.changed.> — and BOTH carry
+		// the same portfolio_id + instrument_id. decodePosition does not
+		// branch on event_type, so both would decode to the same book key
+		// "portfolio/instrument" and collide under this model's last-write-wins
+		// upsert (see model.go), making the Book pane show one venue's subset
+		// or the aggregate non-deterministically for any portfolio holding an
+		// instrument across more than one venue. risk.position.changed.>
+		// requires the subject's 3rd token to be "changed", so it matches the
+		// aggregate subject but NOT risk.position.venue.changed.> (whose 3rd
+		// token is "venue") — the two grains cannot collide once subscribed
+		// this way. The Book pane has no venue dimension (position is
+		// {Portfolio, Instrument, Quantity, AvgPrice}), so the aggregate is
+		// the only grain that is ever correct to render here.
+		if err := consumer.SubscribeBroadcast(ctx, positionSubject, func(_ context.Context, env *envelopepb.Envelope, payload []byte) error {
 			// decodePosition's ok=false means only an unparseable payload (its
 			// doc comment says so explicitly) — a genuine error, so it is
 			// surfaced rather than dropped.
 			row, ok := decodePosition(env, payload)
 			if !ok {
-				m.busCh <- busErrMsg{err: fmt.Errorf("risk.position.>: unparseable payload")}
+				m.busCh <- busErrMsg{err: fmt.Errorf("%s: unparseable payload", positionSubject)}
 				return nil
 			}
 			m.busCh <- busPositionMsg(row)
 			return nil
 		}); err != nil {
-			m.busCh <- busErrMsg{err: fmt.Errorf("risk.position.>: %w", err)}
+			m.busCh <- busErrMsg{err: fmt.Errorf("%s: %w", positionSubject, err)}
 		}
 	}()
 

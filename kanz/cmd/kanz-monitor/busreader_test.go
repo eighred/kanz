@@ -94,6 +94,31 @@ func TestBusErrMsg_SetsErrWithoutPanic(t *testing.T) {
 	_ = got.View()
 }
 
+// TestSubscriptionSubjects_PositionIsAggregateGrainOnly pins runBusReader's
+// two subscribed subjects. It exists because these tests cannot dial a real
+// broker to observe what got subscribed (see this file's header comment), so
+// the named constants runBusReader subscribes on are the only thing a test
+// here can assert against.
+//
+// positionSubject MUST stay risk.position.changed.> — the AGGREGATE grain —
+// and never widen back to risk.position.> (or to
+// risk.position.venue.changed.>): the OMS position projector publishes both
+// an aggregate and a per-venue grain per fill, both carrying the same
+// portfolio_id + instrument_id, and decodePosition does not branch on
+// event_type. Subscribing the wildcard would collide both grains on the same
+// m.book key under this model's last-write-wins upsert, making the Book pane
+// show a venue subset or the aggregate non-deterministically for any
+// portfolio holding an instrument across more than one venue.
+func TestSubscriptionSubjects_PositionIsAggregateGrainOnly(t *testing.T) {
+	if lifecycleSubject != "order.>" {
+		t.Errorf("lifecycleSubject = %q, want %q", lifecycleSubject, "order.>")
+	}
+	if positionSubject != "risk.position.changed.>" {
+		t.Errorf("positionSubject = %q, want %q (the aggregate grain, not the risk.position.> wildcard)",
+			positionSubject, "risk.position.changed.>")
+	}
+}
+
 func orderIDFor(i int) string {
 	// Deterministic, order-preserving id so the cap test can assert exactly
 	// which entries survived.
