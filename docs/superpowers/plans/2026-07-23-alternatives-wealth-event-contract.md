@@ -728,6 +728,8 @@ Money crosses a boundary here and the comment must say so: `internal/wealth` is 
 
 Mirror Task 3 exactly, for wealth: `WEALTH_NATS_URL`, `WEALTH_SOURCE`, `WEALTH_CONSUMER_GROUP`, `WEALTH_SUBJECTS` (default `[]string{wealth.SubjectHouseholdAll}`), `SPIFFE_ENDPOINT_SOCKET`; `runConsumer` following accounting's shape with `bus.WithDLQ`.
 
+**You WILL hit a fourth guard here — Task 3 hit it and this is the same wall.** The moment `wealth` becomes a real `bus.DialNATS` caller, `test/arch/nats_identity_test.go`'s `TestNATSDialersHaveBrokerAccounts` (SEC-M3b) fails, because every dialer must be admitted to a broker account. Add `wealth`'s SVID to the `__system__` block of `kanz/infra/nats/tenancy.yaml`, alongside the existing sibling entries (`{ user: "spiffe://kanz.internal/ns/kanz-services/sa/risk-engine" }` at line 64 and `accounting` at line 66), matching their formatting and ordering. Read `kanz/infra/deploy/wealth-deploy.yaml` for the ServiceAccount name it actually declares rather than assuming it from the service name. That makes this task THREE files, not two.
+
 One Folder suffices here — a single subject, a single message type.
 
 - [ ] **Step 5: Verify**
