@@ -45,7 +45,11 @@ type Service struct {
 	accounts       *execution.AccountBindings
 	requireAccount bool
 	sharedOnce     sync.Map // "tenant/portfolio@MIC" → struct{}, so the warning is said once
-	sharedCount    prometheus.Counter
+	// working claims an order_id for the goroutine currently driving it, so a
+	// resume can never run alongside the delivery that already owns the order.
+	// See claim().
+	working     sync.Map // order_id → struct{}
+	sharedCount prometheus.Counter
 }
 
 // ServiceOption customizes the handler.
@@ -525,4 +529,31 @@ func entitledTo(allowed []string, portfolio string) bool {
 		}
 	}
 	return false
+}
+
+// claim takes exclusive, in-process ownership of one order_id and returns the
+// function that releases it. ok is false when another goroutine in THIS process
+// already holds it, and the caller must then do nothing at all.
+//
+// WHAT THIS IS FOR, AND WHAT IT IS NOT. store.Create is the ADMISSION gate: it
+// decides which of two concurrent first-deliveries owns a new order. It has
+// nothing to say about two deliveries that both find an order that ALREADY
+// exists — which, once the handler resumes interrupted orders instead of acking
+// them, is two goroutines both re-driving one order to a venue. The bus
+// partition key makes that rare; rare is not a posture on the capital path.
+//
+// It is per-order, not global: a single lock would serialize every order in the
+// OMS behind the slowest venue call.
+//
+// It is IN-PROCESS ONLY, and that is a real limit, not an oversight. Two OMS
+// pods resuming the same order are not excluded by this and cannot be — that
+// requires a lease in the store. It is the same single-replica assumption the
+// order and position stores already carry (see the openStores comment in
+// cmd/oms/main.go); this narrows the window that exists WITHIN a pod, which is
+// the window a redelivery actually opens.
+func (s *Service) claim(orderID string) (func(), bool) {
+	if _, loaded := s.working.LoadOrStore(orderID, struct{}{}); loaded {
+		return func() {}, false
+	}
+	return func() { s.working.Delete(orderID) }, true
 }
