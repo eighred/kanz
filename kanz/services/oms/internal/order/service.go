@@ -219,6 +219,36 @@ func (s *Service) handleSubmit(ctx context.Context, env *envelopepb.Envelope, pa
 		return err
 	}
 
+	// TAKE THE PER-ORDER CLAIM before working the order. Admission (this delivery)
+	// and resume() (a redelivery of the same order_id) must never drive one order
+	// concurrently, and until now nothing enforced that: claim() had exactly one
+	// caller, resume, and this path called s.work directly. The break this closes:
+	// delivery A reaches here, Creates the order, and blocks inside venue.Execute
+	// below. Delivery B — a second copy of this same command, redelivered before A
+	// finishes — takes the Load-found-it branch above and calls resume(). Without
+	// this claim, resume finds the claim free, queries the venue, and because the
+	// venue has not yet recorded A's in-flight Execute it truthfully answers
+	// UNKNOWN — so resume re-drives it. That is a concurrent second Execute of one
+	// order: a double trade, and it happens precisely because the order already
+	// existed and looked interrupted, not because anything was malformed. Taking
+	// the claim here, at the same call site resume() takes it for itself, makes
+	// the two mutually exclusive: whichever gets here first drives the order, and
+	// the other finds the claim held and stops. defer release() so every return
+	// below — the ErrUnpriced branch and the final outcome emission — is covered.
+	release, ok := s.claim(st.GetOrderId())
+	if !ok {
+		// Another goroutine in THIS process already holds the claim and is driving
+		// this order. That can only be a resume: store.Create above is the
+		// admission gate, so at most one delivery of a NEW order_id ever reaches
+		// this line, and this order_id was ours to create. The order exists and
+		// its ACCEPTED fact is already emitted, so there is nothing left for this
+		// delivery to do — the claim holder will carry it to completion. This is
+		// the same reasoning as the ErrExists branch above: the order exists and
+		// something in this process already owns it.
+		return nil
+	}
+	defer release()
+
 	// Work the order if a router is wired; otherwise it rests (ACCEPTED).
 	st, err = s.work(ctx, st)
 	// A venue that cannot price this order will NEVER price it, so this is
@@ -732,6 +762,34 @@ func (s *Service) adopt(ctx context.Context, st *orderpb.OrderState, view execut
 			return err
 		}
 		st = acked
+	}
+
+	// REFUSE A MULTI-FILL VIEW. ApplyFill has no fill_id dedup — that is left to
+	// the position book, which claims each fill_id in position_fills before
+	// folding it into the POSITION. The ORDER AGGREGATE folded here has no such
+	// guard, and cancel/amend and the read API consult this aggregate directly.
+	//
+	// The failure this prevents: work() folds fill 1 and Saves it, then fails
+	// before fill 2's Save or EmitFill. The redelivery reaches here, the venue
+	// reports BOTH fills, and folding fill 1 again would refold a fill this order
+	// already contains. If the refold overfills, ApplyFill errors and the order
+	// quarantines below anyway — safe, but a reconcilable order sits frozen for no
+	// reason. If it fits within the remaining leaves, filled_quantity and
+	// average_fill_price are silently double-counted and persisted, and nothing
+	// downstream catches it.
+	//
+	// This is not reachable today — SimVenue is the only Querier and it always
+	// returns exactly one full-leaves fill — but it goes live the moment a
+	// multi-fill venue implements Querier. Fail closed rather than guess: refuse
+	// to adopt more than one fill until ApplyFill (or this fold) gains its own
+	// fill_id dedup. Single-fill adoption, the only case any wired venue can
+	// currently produce, keeps working unchanged.
+	if len(view.Fills) > 1 {
+		return s.quarantine(ctx, st, fmt.Sprintf(
+			"venue reports %d fills for this order, and adopting more than one fill is not "+
+				"yet safe: ApplyFill has no fill_id dedup, so folding a fill this order already "+
+				"contains would silently double-count filled_quantity and average_fill_price",
+			len(view.Fills)))
 	}
 
 	for _, fill := range view.Fills {

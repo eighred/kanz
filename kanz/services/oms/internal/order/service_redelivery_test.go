@@ -8,6 +8,7 @@ import (
 
 	orderpb "github.com/kanz-eng/kanz-schemas-go/order/v1"
 
+	"github.com/kanz-eng/kanz/internal/dec"
 	"github.com/kanz-eng/kanz/internal/execution"
 )
 
@@ -255,4 +256,143 @@ func (v *muteVenue) executes() int {
 	v.mu.Lock()
 	defer v.mu.Unlock()
 	return v.n
+}
+
+// twoFillVenue acknowledges an execute (no error, nothing recorded — same shape
+// as amnesiacVenue) and then, when queried, reports the order FILLED by TWO
+// fills instead of amnesiacVenue's UNKNOWN. It models the first multi-fill
+// venue to implement execution.Querier — none does today; SimVenue always
+// reports exactly one full-leaves fill.
+type twoFillVenue struct {
+	*execution.SimVenue
+	fills []*orderpb.Fill
+}
+
+func (v *twoFillVenue) Execute(ctx context.Context, st *orderpb.OrderState) ([]*orderpb.Fill, error) {
+	// Deliberately does NOT delegate to SimVenue.Execute or record anything: the
+	// order must reach ROUTED with venue_ack_at set so the redelivery below takes
+	// the Load-found-it path into resume(), exactly as amnesiacVenue's test does.
+	return nil, nil
+}
+
+func (v *twoFillVenue) QueryOrder(context.Context, *orderpb.OrderState) (execution.OrderView, error) {
+	return execution.OrderView{State: execution.OrderViewFilled, Fills: v.fills}, nil
+}
+
+// THE ORDER-AGGREGATE DOUBLE-FOLD ARM.
+//
+// adopt() used to fold every fill in view.Fills through ApplyFill with no
+// fill_id dedup. The position book dedups the POSITION BOOK on fill_id
+// (position_fills), but the ORDER AGGREGATE folded here has no equivalent
+// guard, and cancel/amend and the read API consult that aggregate directly. A
+// venue that reports more than one fill on a single query — unreachable today
+// because SimVenue is the only Querier and it always reports exactly one
+// full-leaves fill, but not unreachable forever — must not be silently
+// double-folded. It must quarantine instead.
+func TestAdoptRefusesMultiFillViewAndQuarantinesRatherThanDoubleFold(t *testing.T) {
+	ctx := context.Background()
+	fb := &fakeBus{}
+	fills := []*orderpb.Fill{
+		{FillId: "e1", OrderId: "o1", InstrumentId: "AAPL", Side: orderpb.Side_SIDE_BUY,
+			Quantity: d(50, 0), Price: d(1025, -2), Venue: "XSIM"},
+		{FillId: "e2", OrderId: "o1", InstrumentId: "AAPL", Side: orderpb.Side_SIDE_BUY,
+			Quantity: d(50, 0), Price: d(1025, -2), Venue: "XSIM"},
+	}
+	venue := &twoFillVenue{SimVenue: execution.NewSimVenue("XSIM"), fills: fills}
+	store := NewMemoryStore()
+	svc, err := NewService(store, NewEmitter(fb), nil, execution.NewRouter(venue), nil, nil)
+	if err != nil {
+		t.Fatalf("NewService: %v", err)
+	}
+
+	cmd := limitOrder(d(100, 0), d(1025, -2))
+	body := mustMarshal(t, cmd)
+
+	// Delivery 1: admitted and routed. The venue acks without recording anything,
+	// so the order is stored ROUTED with venue_ack_at set and NO fills folded —
+	// same setup as TestVenueDenyingAnAcknowledgedOrderQuarantinesAndDoesNotRedrive.
+	if err := svc.Handle(ctx, submitEnv(), body); err != nil {
+		t.Fatalf("delivery 1: %v", err)
+	}
+	st, err := store.Load(ctx, cmd.GetOrderId())
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if st.GetVenueAckAt() == nil {
+		t.Fatal("venue_ack_at not stamped after delivery 1 — the double-fold arm below " +
+			"needs the order routed and acknowledged before the redelivery queries the venue")
+	}
+	if !dec.IsZero(st.GetFilledQuantity()) {
+		t.Fatalf("filled_quantity = %v after delivery 1, want 0 — nothing was folded yet", st.GetFilledQuantity())
+	}
+
+	// Delivery 2: the redelivery. The venue now reports BOTH fills at once.
+	if err := svc.Handle(ctx, submitEnv(), body); err != nil {
+		t.Fatalf("delivery 2 returned %v; a quarantine is terminal and must ack", err)
+	}
+
+	st, err = store.Load(ctx, cmd.GetOrderId())
+	if err != nil {
+		t.Fatalf("Load after delivery 2: %v", err)
+	}
+	if st.GetQuarantine() == nil {
+		t.Fatal("order was NOT quarantined. adopt() folded a multi-fill venue view straight " +
+			"through ApplyFill, which has no fill_id dedup — exactly the double-fold this " +
+			"refusal exists to prevent")
+	}
+	if st.GetQuarantine().GetReason() == "" {
+		t.Error("quarantine carries no reason — an operator sees a frozen order and no account of why")
+	}
+	if !dec.IsZero(st.GetFilledQuantity()) {
+		t.Fatalf("filled_quantity = %v after the redelivery, want 0 — the order was refused "+
+			"before any fill was folded, not double-folded and then caught", st.GetFilledQuantity())
+	}
+}
+
+// TestAdmissionPathHoldsTheClaimWhileWorkingAnOrder asserts FINDING 1's
+// invariant directly rather than trying to win a race: a claim taken for an
+// order_id BEFORE that order_id's SubmitOrder is admitted must block the
+// admission path from ever reaching the venue. Before the fix, handleSubmit
+// called s.work without taking the claim at all, so nothing here would have
+// stopped it — this test would have passed for the wrong reason (the venue
+// would run because nothing contended for it). It is written against the
+// documented interleaving instead: hold the claim exactly as a concurrent
+// resume() would, and prove the admission delivery backs off.
+func TestAdmissionPathHoldsTheClaimWhileWorkingAnOrder(t *testing.T) {
+	ctx := context.Background()
+	fb := &fakeBus{}
+	venue := &amnesiacVenue{SimVenue: execution.NewSimVenue("XSIM")}
+	store := NewMemoryStore()
+	svc, err := NewService(store, NewEmitter(fb), nil, execution.NewRouter(venue), nil, nil)
+	if err != nil {
+		t.Fatalf("NewService: %v", err)
+	}
+
+	cmd := limitOrder(d(100, 0), d(1025, -2))
+	body := mustMarshal(t, cmd)
+
+	// Simulate a concurrent claim holder — the same thing resume() would do if it
+	// raced this admission delivery for the order.
+	release, ok := svc.claim(cmd.GetOrderId())
+	if !ok {
+		t.Fatal("claim: order_id was not free at test start")
+	}
+	defer release()
+
+	if err := svc.Handle(ctx, submitEnv(), body); err != nil {
+		t.Fatalf("Handle returned %v, want nil — losing the claim is safe to ack, not an error", err)
+	}
+	if got := venue.executes(); got != 0 {
+		t.Fatalf("venue.Execute called %d times — the admission path worked the order without "+
+			"taking the claim, racing whatever else holds it", got)
+	}
+	st, err := store.Load(ctx, cmd.GetOrderId())
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if st.GetStatus() != orderpb.OrderStatus_ORDER_STATUS_PENDING_NEW {
+		t.Fatalf("stored status = %v, want PENDING_NEW — the order is created and ACCEPTED but "+
+			"never routed, because working it requires the claim this delivery could not get",
+			st.GetStatus())
+	}
 }
