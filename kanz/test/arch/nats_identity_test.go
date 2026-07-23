@@ -486,3 +486,139 @@ func TestReadOnlyObserversCannotPublish(t *testing.T) {
 			len(problems), strings.Join(problems, "\n  "))
 	}
 }
+
+// groupedSubscribeCallsInDir AST-walks dir for grouped-Subscribe call sites.
+// Modeled on dialsNATSInDir above (go/parser + ast.Inspect, skip _test.go
+// files, skip dirs on walk error) — root is threaded through only so the
+// call sites it finds can be reported relative to the module root, the way
+// every other scanner in this package reports them; dialsNATSInDir needs no
+// such parameter because it returns a bool, not paths.
+//
+// It matches a *ast.CallExpr whose Fun is a *ast.SelectorExpr with
+// Sel.Name == "Subscribe" AND len(call.Args) == 4.
+//
+// RATIONALE: the bus grouped subscribe signature is
+// Subscribe(ctx, subject, group string, h EventHandler) = 4 args (both
+// *bus.Consumer.Subscribe and *bus.NATSClient.Subscribe); SubscribeBroadcast
+// is 3 args and SubscribeBroadcastReady is 4 args but named differently, so
+// name=="Subscribe" && arity==4 catches exactly the grouped subscribe and
+// nothing else — this is the same arity-based disambiguation
+// natsClientSubscribeMethodArity/directNATSClientSubscribeCalls
+// (nats_jetstream_machinery_test.go) already relies on to avoid false
+// positives like tv-sync's 2-arg Projection.Subscribe.
+//
+// Returns "file:line" strings, file relative to the module root and
+// forward-slashed, matching the style of the other scanners in this package.
+func groupedSubscribeCallsInDir(t *testing.T, root, dir string) []string {
+	t.Helper()
+	var out []string
+	err := filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
+		if err != nil || d.IsDir() || !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+			return nil
+		}
+		fset := token.NewFileSet()
+		f, perr := parser.ParseFile(fset, path, nil, 0)
+		if perr != nil {
+			t.Fatalf("parse %s: %v", path, perr)
+		}
+		rel := filepath.ToSlash(mustRel(root, path))
+		ast.Inspect(f, func(n ast.Node) bool {
+			call, ok := n.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			sel, ok := call.Fun.(*ast.SelectorExpr)
+			if !ok || sel.Sel.Name != "Subscribe" || len(call.Args) != 4 {
+				return true
+			}
+			out = append(out, rel+":"+strconv.Itoa(fset.Position(call.Pos()).Line))
+			return true
+		})
+		return nil
+	})
+	if err != nil && !os.IsNotExist(err) {
+		t.Fatalf("walk %s: %v", dir, err)
+	}
+	return out
+}
+
+// TestReadOnlyObserversNeverJoinAQueueGroup is the source-level guard for the
+// property readOnlyObserverSVIDs exists to hold: a read-only observer
+// subscribes via consumer.SubscribeBroadcast ONLY — an EPHEMERAL,
+// per-connection JetStream consumer that gets its OWN copy of every event —
+// and NEVER via a grouped consumer.Subscribe(ctx, subject, group, handler).
+// A grouped Subscribe from an observer would JOIN the durable consumer
+// group the real OMS/tv-sync replicas share on that subject and STEAL
+// deliveries meant for them — a capital-path incident, not a UI bug (see
+// busreader.go's own SubscribeBroadcast comments in cmd/kanz-monitor for the
+// same property described at the call site).
+//
+// Before this guard, "SubscribeBroadcast only" was verified by grep alone —
+// a plan-level check, not a build-time one. A regression to a grouped
+// Subscribe would still compile, still dial, still decode, and pass the rest
+// of this test suite, because nothing at the source level distinguished
+// SubscribeBroadcast from Subscribe. This is that source-level guard: it
+// AST-walks every listed observer's cmd/ tree for a grouped-Subscribe call
+// site and fails the build on the first one, naming the file:line.
+//
+// GENERALIZED, not kanz-monitor-specific: this iterates readOnlyObserverSVIDs
+// itself rather than naming kanz-monitor directly, so any future read-only
+// observer added to that map is covered automatically, with no second guard
+// to remember to write.
+func TestReadOnlyObserversNeverJoinAQueueGroup(t *testing.T) {
+	root := moduleRoot(t)
+
+	var problems []string
+	checked := 0
+	for name := range readOnlyObserverSVIDs {
+		dir := filepath.Join(root, "cmd", name)
+
+		// A typo'd observer name (or one whose cmd/ tree was removed/renamed)
+		// must fail loudly here rather than let the scan below run over a
+		// missing or empty directory and vacuously find nothing to complain
+		// about.
+		info, statErr := os.Stat(dir)
+		if statErr != nil || !info.IsDir() {
+			t.Fatalf("readOnlyObserverSVIDs[%q]: cmd/%s does not exist — the observer name or directory is wrong; "+
+				"this guard cannot scan an observer it cannot find", name, name)
+		}
+		goFiles := 0
+		walkErr := filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
+			if err == nil && !d.IsDir() && strings.HasSuffix(path, ".go") {
+				goFiles++
+			}
+			return nil
+		})
+		if walkErr != nil {
+			t.Fatalf("walk cmd/%s: %v", name, walkErr)
+		}
+		if goFiles == 0 {
+			t.Fatalf("readOnlyObserverSVIDs[%q]: cmd/%s contains no .go files — the observer name or directory is "+
+				"wrong; a scanner over an empty tree would pass vacuously", name, name)
+		}
+
+		checked++
+		for _, site := range groupedSubscribeCallsInDir(t, root, dir) {
+			problems = append(problems, name+": "+site+" calls a grouped Subscribe(ctx, subject, group, handler) — "+
+				"this JOINS the durable consumer group the real OMS/tv-sync replicas share on that subject and "+
+				"STEALS deliveries from them. A read-only observer must use SubscribeBroadcast only.")
+		}
+	}
+
+	// NON-VACUITY: a guard that checked zero observers would pass no matter how
+	// wrong an observer's subscribe call was — mirrors the checked==0 pattern
+	// nats_jetstream_machinery_test.go's TestServiceHasJetStreamMachineryItsRoleRequires
+	// already uses for the same reason. The per-observer os.Stat/goFiles==0
+	// checks above cover the OTHER vacuity mode: a listed observer whose
+	// directory exists but contains nothing to scan.
+	if checked == 0 {
+		t.Fatal("checked zero read-only observers for grouped-Subscribe call sites — the scanner or " +
+			"readOnlyObserverSVIDs is broken; this guard cannot vacuously pass")
+	}
+
+	if len(problems) > 0 {
+		sort.Strings(problems)
+		t.Fatalf("%d read-only observer(s) join a queue group (steal-nothing violation):\n\n  %s",
+			len(problems), strings.Join(problems, "\n  "))
+	}
+}
