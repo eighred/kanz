@@ -35,9 +35,14 @@
 // accepts is a value the consumer can actually fold, not one that DLQs at
 // delivery.
 //
-//	kanz-household -tenant acme -file household.json
+//	kanz-household -tenant acme -file household.json -by operator:akif -reason "Q2 custodial statement"
 //
-// The file is the protojson form of wealth.v1.HouseholdValued.
+// The file is the protojson form of wealth.v1.HouseholdValued. -by/-reason are
+// REQUIRED and are stamped onto the published FACT itself (recorded_by/reason),
+// not just printed to stdout — see wealth.proto's HouseholdValued doc for why
+// that matters more here than elsewhere: this stream is compacted, so a
+// household's stated worth can enter the book attributable to nobody while
+// silently discarding whatever valuation it replaced.
 package main
 
 import (
@@ -70,6 +75,8 @@ type options struct {
 	spiffeSocket string
 	tenant       string
 	file         string
+	by           string
+	reason       string
 	dryRun       bool
 }
 
@@ -82,6 +89,12 @@ func run(args []string, out *os.File) error {
 	if err != nil {
 		return err
 	}
+	// The provenance -by/-reason already required by parseFlags, carried onto
+	// the payload itself (wealth.v1.HouseholdValued.recorded_by / .reason) —
+	// not just printed to stdout. Without this, the operator sees PUBLISHED
+	// and reasonably believes an audit trail exists on the household's stated
+	// worth; before this call it did not.
+	hv.RecordedBy, hv.Reason = opt.by, opt.reason
 
 	subject := wealth.SubjectHouseholdFor(opt.tenant, hv.GetHouseholdId())
 	fmt.Fprintf(out, "household %s — %d account(s), %s, as of %s\n",
@@ -89,6 +102,20 @@ func run(args []string, out *os.File) error {
 		hv.GetAsOf().AsTime().UTC().Format(time.RFC3339))
 	fmt.Fprintf(out, "subject: %s\n", subject)
 	if opt.dryRun {
+		// Marshalled, not just the resolved subject: this stream is
+		// COMPACTED to the LAST message per household, so a bad publish does
+		// not sit alongside the good history for comparison — it silently
+		// REPLACES the household's current stated worth, and there is
+		// nothing left to diff against afterwards. A human must be able to
+		// read exactly what is about to overwrite it, recordedBy/reason
+		// included, protojson-rendered the same way the fold's decoder sees
+		// it.
+		body, err := protojson.MarshalOptions{Multiline: true, Indent: "  "}.Marshal(hv)
+		if err != nil {
+			return fmt.Errorf("marshal HouseholdValued for dry-run: %w", err)
+		}
+		fmt.Fprintln(out, "payload:")
+		fmt.Fprintln(out, string(body))
 		fmt.Fprintln(out, "--dry-run: nothing published.")
 		return nil
 	}
@@ -141,8 +168,8 @@ func run(args []string, out *os.File) error {
 		return fmt.Errorf("publish: %w", err)
 	}
 
-	fmt.Fprintf(out, "PUBLISHED — household %s valued as of %s\n",
-		hv.GetHouseholdId(), hv.GetAsOf().AsTime().UTC().Format(time.RFC3339))
+	fmt.Fprintf(out, "PUBLISHED — household %s valued as of %s, by %s: %s\n",
+		hv.GetHouseholdId(), hv.GetAsOf().AsTime().UTC().Format(time.RFC3339), opt.by, opt.reason)
 	fmt.Fprintln(out, "Every wealth consumer arms with it — including one that boots tomorrow.")
 	return nil
 }
@@ -156,6 +183,8 @@ func parseFlags(args []string) (options, error) {
 			"Empty ⇒ a PLAINTEXT dial: fine against a local dev broker, refused by production.")
 	fs.StringVar(&opt.tenant, "tenant", envOr("KANZ_TENANT", ""), "envelope tenant_id — REQUIRED (the bus rejects an untenanted envelope)")
 	fs.StringVar(&opt.file, "file", "", "path to the valuation, as protojson wealth.v1.HouseholdValued — REQUIRED")
+	fs.StringVar(&opt.by, "by", "", `operator principal, "{type}:{id}" (e.g. operator:akif) — REQUIRED`)
+	fs.StringVar(&opt.reason, "reason", "", "why this valuation is being published, e.g. the advisor/custodial feed it transcribes — REQUIRED")
 	fs.BoolVar(&opt.dryRun, "dry-run", false, "validate and print, publish nothing")
 	if err := fs.Parse(args); err != nil {
 		return options{}, err
@@ -164,6 +193,10 @@ func parseFlags(args []string) (options, error) {
 	switch {
 	case opt.tenant == "":
 		return options{}, errors.New("--tenant is required: the bus rejects an envelope with no tenant_id")
+	case opt.by == "":
+		return options{}, errors.New("--by is required: a household valuation is attributed to a named human, or it is not published")
+	case opt.reason == "":
+		return options{}, errors.New("--reason is required: an unexplained overwrite of a household's stated worth is not auditable")
 	case opt.file == "":
 		return options{}, errors.New("--file is required: the valuation to publish (protojson wealth.v1.HouseholdValued)")
 	}

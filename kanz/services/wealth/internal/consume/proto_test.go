@@ -118,6 +118,50 @@ func TestDecodeProto_RefusesUnrepresentableMarketValue(t *testing.T) {
 	}
 }
 
+// wealth.v1.HouseholdValued now carries recorded_by/reason (provenance — see
+// wealth.proto). The fold serves the exposure view, not audit trails:
+// provenance reaches durable storage via the bus, exactly as
+// lifecycle.v1.ConfigChanged.changed_by is never retained by the mandate
+// registry. This is a regression guard proving the decoder still succeeds,
+// and internal/wealth.Household stays unwidened, when a message carries
+// those fields.
+func TestDecodeProto_IgnoresProvenanceFields(t *testing.T) {
+	body, err := proto.Marshal(&wealthpb.HouseholdValued{
+		HouseholdId: "HH-1",
+		Accounts: []*wealthpb.ValuedAccount{
+			{
+				AccountId: "A-1",
+				Holdings: []*wealthpb.ValuedHolding{
+					{
+						InstrumentId: "VTI",
+						AssetClass:   "EQUITY",
+						MarketValue:  &commonpb.Decimal{Coefficient: 9500000, Exponent: -2},
+					},
+				},
+				Cash: &commonpb.Decimal{Coefficient: 500000, Exponent: -2},
+			},
+		},
+		AsOf:         timestamppb.Now(),
+		CurrencyCode: "USD",
+		RecordedBy:   "operator:akif",
+		Reason:       "Q2 custodial statement",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	h, err := DecodeProto(body)
+	if err != nil {
+		t.Fatalf("DecodeProto: %v", err)
+	}
+	if h.HouseholdID != "HH-1" {
+		t.Fatalf("household id = %q, want HH-1", h.HouseholdID)
+	}
+	if len(h.Accounts) != 1 || h.Accounts[0].Cash != 5000 {
+		t.Fatalf("accounts = %+v, want one account with cash 5000", h.Accounts)
+	}
+}
+
 func TestDecodeProto_RefusesUnrepresentableCash(t *testing.T) {
 	body, err := proto.Marshal(&wealthpb.HouseholdValued{
 		HouseholdId: "HH-1",

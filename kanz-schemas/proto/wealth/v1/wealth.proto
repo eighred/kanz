@@ -194,6 +194,29 @@ message HouseholdValued {
   // currency_code is the reporting currency every market value below is expressed
   // in. Required — a number with no currency is not a value.
   string currency_code = 4;
+
+  // recorded_by is the operator principal that transcribed this valuation from
+  // an external source, formatted "{type}:{id}" (e.g. "operator:akif") — the
+  // same convention as lifecycle.v1.ConfigChanged.changed_by. It is named
+  // recorded_by rather than changed_by because this is not a change to a
+  // platform config: it is the record of a valuation performed OUTSIDE this
+  // platform (an advisor's or custodian's feed) and transcribed into it.
+  // Required.
+  //
+  // This matters more here than on the alternatives journal: this stream is
+  // COMPACTED to one message per household, so publishing a new HouseholdValued
+  // discards the previous one — there is no prior record left to compare an
+  // unattributed valuation against. Without recorded_by, a household's stated
+  // worth enters the book attributable to nobody, and once it does, nothing
+  // remains to show what it replaced.
+  string recorded_by = 5;
+
+  // reason is the external source this transcribes — e.g. "Q2 custodial
+  // statement" — retained for audit. Without recorded_by and reason, a
+  // household valuation enters the book attributable to nobody, and because
+  // this stream is compacted, the valuation it silently replaced is gone.
+  // Required.
+  string reason = 6;
 }
 
 // ValuedAccount is one account's holdings and cash at as_of.
