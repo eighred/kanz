@@ -118,6 +118,48 @@ func isSelector(e ast.Expr, pkg, name string) bool {
 	return ok && id.Name == pkg
 }
 
+// dlqExemptBroadcastOnlyConsumers is the default-deny allow-list of
+// bus.NewConsumer call sites certified safe to omit bus.WithDLQ because every
+// subscription they make is SubscribeBroadcast/SubscribeBroadcastReady, never
+// the grouped Subscribe.
+//
+// pkg/bus/consumer.go:262-265 (SubscribeBroadcastReady's shared dispatch path)
+// documents that the broadcast path does NOT route to the DLQ at all — an
+// unreadable or failed broadcast message "is returned as an error, the message
+// is nacked", full stop. c.dlq is never consulted anywhere in that path
+// (consumer.go:266-299). That makes bus.WithDLQ structurally INERT on a
+// consumer used only for broadcast: there is no code path left that would
+// ever read c.dlq, so its absence loses nothing.
+//
+// A listed entry must also be a consumer that CANNOT hold a DLQ publisher: a
+// read-only observer whose tenancy grant denies all business publish (see
+// test/arch/nats_identity_test.go's readOnlyObserverSVIDs) has no dlq.*
+// publish grant to construct bus.WithDLQ from in the first place. Certifying
+// the exemption on inertness alone, without also requiring read-only, would
+// let a capital-path consumer skip the DLQ merely by *also* subscribing to a
+// broadcast subject elsewhere — this list is for consumers with NOTHING but
+// broadcast subscriptions, and specifically ones that could never wire a DLQ
+// even if asked to.
+//
+// This is default-deny like retryCertifiedConsumers below: a NEW
+// bus.NewConsumer call site that lacks WithDLQ still fails
+// TestEveryBusConsumerWiresADLQ until an entry here names it explicitly, with
+// its own justification. Listing cannot silently widen — only enumerating a
+// specific file:line can, and that requires a reviewed edit to this file.
+var dlqExemptBroadcastOnlyConsumers = map[string]string{
+	"cmd/kanz-monitor/busreader.go:81": "kanz-monitor: this Consumer is used " +
+		"SOLELY for two SubscribeBroadcast calls (order.> at busreader.go:99 and " +
+		"risk.position.> at busreader.go:124) — there is no Subscribe call anywhere " +
+		"in this file, so the DLQ-routing branch of consumer.go's Subscribe path " +
+		"(consumer.go:212-221) is unreachable from this call site; per " +
+		"consumer.go:262-265 the broadcast path never consults c.dlq regardless, so " +
+		"WithDLQ would be inert here. The monitor is also a read-only observer " +
+		"(test/arch/nats_identity_test.go's readOnlyObserverSVIDs; its tenancy grant " +
+		"denies all business publish) and physically cannot hold the dlq.* " +
+		"publisher WithDLQ requires — there is no producer anywhere in this file, " +
+		"see busreader.go's own READ-ONLY doc comment.",
+}
+
 func TestEveryBusConsumerWiresADLQ(t *testing.T) {
 	calls := busConsumerCalls(t, moduleRoot(t))
 
@@ -128,11 +170,39 @@ func TestEveryBusConsumerWiresADLQ(t *testing.T) {
 		t.Fatal("found zero bus.NewConsumer call sites — the scanner is broken, not the services")
 	}
 
+	// DEAD-ENTRY CHECK: an allow-list entry naming a call site that no longer
+	// exists (the line moved, the file was refactored, the consumer was
+	// deleted) is a certification that silently protects nothing — the same
+	// failure mode retryCertifiedConsumers guards against below.
+	live := map[string]bool{}
+	for _, c := range calls {
+		live[c.where()] = true
+	}
+	var dead []string
+	for site := range dlqExemptBroadcastOnlyConsumers {
+		if !live[site] {
+			dead = append(dead, site)
+		}
+	}
+	if len(dead) > 0 {
+		sort.Strings(dead)
+		t.Fatalf("dlqExemptBroadcastOnlyConsumers names %d call site(s) that no longer exist as "+
+			"bus.NewConsumer calls: %s\n\n"+
+			"Either the file moved (update the file:line key) or the consumer itself was "+
+			"removed (delete the entry) — a stale exemption protects nothing and must not "+
+			"sit in the allow-list looking load-bearing.",
+			len(dead), strings.Join(dead, ", "))
+	}
+
 	var unwired []string
 	for _, c := range calls {
-		if !c.options["WithDLQ"] {
-			unwired = append(unwired, c.where())
+		if c.options["WithDLQ"] {
+			continue
 		}
+		if _, ok := dlqExemptBroadcastOnlyConsumers[c.where()]; ok {
+			continue
+		}
+		unwired = append(unwired, c.where())
 	}
 	if len(unwired) > 0 {
 		sort.Strings(unwired)
@@ -140,7 +210,10 @@ func TestEveryBusConsumerWiresADLQ(t *testing.T) {
 			"Without a DLQ the consumer has nowhere to park a terminal failure, so it releases the "+
 			"dedup claim and returns the error — asking the broker for a redelivery that any "+
 			"already-handled check will silently ack. The event is then gone with no record. "+
-			"Pass bus.WithDLQ(<publisher>) at the composition root.",
+			"Pass bus.WithDLQ(<publisher>) at the composition root, or — only if every "+
+			"subscription this call site makes is SubscribeBroadcast/SubscribeBroadcastReady and "+
+			"the consumer cannot hold a DLQ publisher at all — add a certified entry to "+
+			"dlqExemptBroadcastOnlyConsumers with the structural proof.",
 			len(unwired), len(calls), strings.Join(unwired, "\n  "))
 	}
 }
