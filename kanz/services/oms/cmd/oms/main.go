@@ -446,7 +446,11 @@ func runConsumers(ctx context.Context, cfg config.Config, readiness *server.Read
 	go func() {
 		defer wg.Done()
 		logger.Info("oms arming the pre-trade mandate registry", "subject", mandateSub)
-		err := consumer.SubscribeBroadcast(ctx, mandateSub, mandateConsumer.Handle)
+		// SubscribeBroadcastReady, not SubscribeBroadcast: mandateReg.Arm fires only once
+		// DeliverLastPerSubject has drained, i.e. once every portfolio's mandate in force
+		// has actually been folded — see the wait loop below for why that distinction is
+		// the whole fix.
+		err := consumer.SubscribeBroadcastReady(ctx, mandateSub, mandateConsumer.Handle, mandateReg.Arm)
 		if err != nil && !errors.Is(err, context.Canceled) {
 			once.Do(func() {
 				firstErr = err
@@ -454,7 +458,48 @@ func runConsumers(ctx context.Context, cfg config.Config, readiness *server.Read
 			})
 		}
 	}()
-	readiness.Set(true)
+
+	// READINESS MUST WAIT ON THE MANDATE REPLAY, NOT ON THE SUBSCRIPTION GOROUTINE HAVING
+	// STARTED (EXEC-M13).
+	//
+	// This used to call readiness.Set(true) immediately after LAUNCHING the goroutine above,
+	// not after its replay had folded. OMS_REQUIRE_MANDATE defaults to false, and the pre-trade
+	// gate's own startup warning says it plainly: "an order for a portfolio with NO MANDATE is
+	// ADMITTED, unconstrained." So in the window between the pod reporting Ready and the mandate
+	// registry actually catching up, every portfolio looked ungoverned and every order was
+	// admitted with no constraint — EXEC-M13 ("a restarted OMS came back with an empty registry
+	// and its gate passed every order"), narrowed here from "only on a broken durable-group
+	// replay" to "a race on every single rolling restart". The control did not fail loudly. It
+	// disarmed silently while the health check said everything was fine.
+	//
+	// This mirrors webhook-ingest's position-cache wait loop
+	// (services/webhook-ingest/cmd/webhook-ingest/main.go) exactly, rather than inventing a new
+	// shape: poll Armed() on a short tick with a <-ctx.Done() escape, so a shutdown signal that
+	// arrives before the replay lands falls through to graceful shutdown WITHOUT ever reporting
+	// ready — a pod that never learned which mandates are in force must not be told it is
+	// healthy. On a fresh install with zero mandates published, SubscribeBroadcastReady's ready()
+	// fires as soon as the (empty) backlog drains, so this does not deadlock a first deployment;
+	// it only closes the race on a populated one.
+	//
+	// This runs concurrently with the OTHER subscriptions already launched into wg above (order
+	// commands, fills, the price spine) — they keep running in their own goroutines regardless of
+	// how long this wait takes, so a slow mandate replay delays only the readiness flip, never the
+	// rest of the subscription group.
+mandateArmWait:
+	for !mandateReg.Armed() {
+		select {
+		case <-ctx.Done():
+			// Shutting down before the replay landed. Fall through to wg.Wait() below
+			// WITHOUT reporting ready: this pod never learned which mandates are in force.
+			break mandateArmWait
+		case <-time.After(50 * time.Millisecond):
+		}
+	}
+	if mandateReg.Armed() {
+		logger.Info("pre-trade mandate registry armed — mandates in force are known", "subject", mandateSub)
+		readiness.Set(true)
+	}
+
 	wg.Wait()
 	readiness.Set(false)
 	return firstErr

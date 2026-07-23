@@ -168,7 +168,11 @@ func runConsumers(ctx context.Context, cfg config.Config, readiness *server.Read
 	go func() {
 		defer wg.Done()
 		logger.Info("compliance arming the mandate registry", "subject", comp.SubjectMandateAll)
-		err := consumer.SubscribeBroadcast(ctx, comp.SubjectMandateAll, mandateConsumer.Handle)
+		// SubscribeBroadcastReady, not SubscribeBroadcast: mandateReg.Arm fires only once
+		// DeliverLastPerSubject has drained, i.e. once every portfolio's mandate in force
+		// has actually been folded — see the wait loop below for why that distinction is
+		// the whole fix.
+		err := consumer.SubscribeBroadcastReady(ctx, comp.SubjectMandateAll, mandateConsumer.Handle, mandateReg.Arm)
 		if err != nil && !errors.Is(err, context.Canceled) {
 			once.Do(func() {
 				firstErr = err
@@ -190,7 +194,50 @@ func runConsumers(ctx context.Context, cfg config.Config, readiness *server.Read
 			}
 		}(s)
 	}
-	readiness.Set(true)
+
+	// READINESS MUST WAIT ON THE MANDATE REPLAY, NOT ON THE SUBSCRIPTION GOROUTINE HAVING
+	// STARTED (EXEC-M13).
+	//
+	// This used to call readiness.Set(true) immediately after LAUNCHING the mandate
+	// subscription goroutine above, not after its replay had folded. The post-trade monitor
+	// resolves every book re-evaluation against this same registry, and OMS_REQUIRE_MANDATE's
+	// fail-open default means the OMS side of this control admits an unmandated portfolio
+	// unconstrained — so in the window between this pod reporting Ready and the mandate
+	// registry actually catching up, this monitor would have re-evaluated positions against
+	// "no mandate in force" for every portfolio, exactly the way a restarted OMS gate did in
+	// EXEC-M13 ("a restarted OMS came back with an empty registry and its gate passed every
+	// order"), narrowed here from "only on a broken durable-group replay" to "a race on every
+	// single rolling restart". The control did not fail loudly. It went blind silently while
+	// the health check said everything was fine.
+	//
+	// This mirrors webhook-ingest's position-cache wait loop
+	// (services/webhook-ingest/cmd/webhook-ingest/main.go) exactly, rather than inventing a new
+	// shape: poll Armed() on a short tick with a <-ctx.Done() escape, so a shutdown signal that
+	// arrives before the replay lands falls through to graceful shutdown WITHOUT ever reporting
+	// ready — a pod that never learned which mandates are in force must not be told it is
+	// healthy. On a fresh install with zero mandates published, SubscribeBroadcastReady's ready()
+	// fires as soon as the (empty) backlog drains, so this does not deadlock a first deployment;
+	// it only closes the race on a populated one.
+	//
+	// This runs concurrently with the post-trade book subscriptions already launched into wg
+	// above — they keep running in their own goroutines regardless of how long this wait takes,
+	// so a slow mandate replay delays only the readiness flip, never the rest of the subscription
+	// group.
+mandateArmWait:
+	for !mandateReg.Armed() {
+		select {
+		case <-ctx.Done():
+			// Shutting down before the replay landed. Fall through to wg.Wait() below
+			// WITHOUT reporting ready: this pod never learned which mandates are in force.
+			break mandateArmWait
+		case <-time.After(50 * time.Millisecond):
+		}
+	}
+	if mandateReg.Armed() {
+		logger.Info("mandate registry armed — mandates in force are known", "subject", comp.SubjectMandateAll)
+		readiness.Set(true)
+	}
+
 	wg.Wait()
 	readiness.Set(false)
 	return firstErr

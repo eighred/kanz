@@ -80,6 +80,30 @@ func TestMandateCodec_RoundTripAndKey(t *testing.T) {
 	}
 }
 
+// TestMandateRegistry_ArmedGating pins the readiness-gating contract Arm/Armed
+// exist for: a fresh registry must report unarmed (so a caller must not treat
+// it as having replayed the mandates in force yet — the fail-open default
+// means an unarmed registry answering as if it were caught up is precisely the
+// EXEC-M13 window: an OMS or compliance pod that reports Ready before the
+// mandate replay has folded admits every order for every portfolio as
+// unconstrained), armed once Arm is called, and idempotent under repeat calls
+// since the bus may invoke the ready callback more than once across
+// resubscribes.
+func TestMandateRegistry_ArmedGating(t *testing.T) {
+	reg := NewMandateRegistry()
+	if reg.Armed() {
+		t.Fatal("a freshly constructed registry must be unarmed — it has not replayed anything yet")
+	}
+	reg.Arm()
+	if !reg.Armed() {
+		t.Fatal("Arm() must make Armed() report true")
+	}
+	reg.Arm() // idempotent: a second call must not panic or change the outcome
+	if !reg.Armed() {
+		t.Fatal("a repeat Arm() call must not un-arm the registry")
+	}
+}
+
 func TestMandateLoader_AppliesOnlyMandateKeys(t *testing.T) {
 	reg := NewMandateRegistry()
 	loader := NewMandateLoader(reg)
