@@ -147,9 +147,9 @@ func isSelector(e ast.Expr, pkg, name string) bool {
 // its own justification. Listing cannot silently widen — only enumerating a
 // specific file:line can, and that requires a reviewed edit to this file.
 var dlqExemptBroadcastOnlyConsumers = map[string]string{
-	"cmd/kanz-monitor/busreader.go:81": "kanz-monitor: this Consumer is used " +
-		"SOLELY for two SubscribeBroadcast calls (order.> at busreader.go:99 and " +
-		"risk.position.> at busreader.go:124) — there is no Subscribe call anywhere " +
+	"cmd/kanz-monitor/busreader.go:94": "kanz-monitor: this Consumer is used " +
+		"SOLELY for two SubscribeBroadcast calls (order.> at busreader.go:112 and " +
+		"risk.position.changed.> at busreader.go:155) — there is no Subscribe call anywhere " +
 		"in this file, so the DLQ-routing branch of consumer.go's Subscribe path " +
 		"(consumer.go:212-221) is unreachable from this call site; per " +
 		"consumer.go:262-265 the broadcast path never consults c.dlq regardless, so " +
