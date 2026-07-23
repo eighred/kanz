@@ -4,6 +4,8 @@ import (
 	"log/slog"
 	"os"
 	"strings"
+
+	"github.com/kanz-eng/kanz/internal/alternatives"
 )
 
 // Config is the alternatives (private-markets) service runtime configuration,
@@ -30,18 +32,65 @@ type Config struct {
 	// Postgres RLS scopes the journal (MT-01d). Defaults to __system__, the
 	// risk-engine convention.
 	Tenant string
+
+	// NATSURL is the live spine the commitment-lifecycle consumer subscribes to
+	// (ALT-01b). Empty ⇒ no consumer (the default; the service serves the read
+	// endpoints on whatever journal openStore selected, without a broker).
+	NATSURL string
+	// Source is the consumer identity (logging / durable consumer name).
+	Source string
+	// ConsumerGroup is the durable consumer name the lifecycle subjects
+	// subscribe under.
+	ConsumerGroup string
+	// Subjects are the commitment-lifecycle FACT subjects folded into the fund
+	// journal. Defaults to alternatives.AllSubjects() — the full lifecycle set
+	// (committed/called/distributed/marked). Comma-separated.
+	//
+	// Dropping a subject from ALTERNATIVES_SUBJECTS silently stops folding that
+	// event type: the position for any commitment still emitting it will simply
+	// stop advancing, with no error anywhere in this service — the gap only
+	// surfaces downstream as a wrong IRR/TVPI or a position stuck at an old NAV
+	// mark. Only narrow this list deliberately.
+	Subjects []string
+
+	// SPIFFESocket is the SPIFFE Workload API socket (SEC-01a CSI mount). When
+	// set, the bus dials the spine over mTLS presenting this workload SVID; empty
+	// means a PLAINTEXT dial, which the production broker refuses at the
+	// handshake (SEC-M3). Reads the go-spiffe standard env, as accounting/oms do,
+	// so one manifest env name serves every service.
+	SPIFFESocket string
 }
 
 // Load reads the configuration from the environment with production-safe
 // defaults.
 func Load() (Config, error) {
+	subjects := splitList(os.Getenv("ALTERNATIVES_SUBJECTS"))
+	if len(subjects) == 0 {
+		subjects = alternatives.AllSubjects()
+	}
 	return Config{
-		Listen:       envOr("ALTERNATIVES_LISTEN", ":8080"),
-		LogLevel:     parseLevel(os.Getenv("ALTERNATIVES_LOG_LEVEL")),
-		OTLPEndpoint: os.Getenv("ALTERNATIVES_OTLP_ENDPOINT"),
-		DatabaseURL:  secret("ALTERNATIVES_DATABASE_URL"),
-		Tenant:       envOr("ALTERNATIVES_TENANT", "__system__"),
+		Listen:        envOr("ALTERNATIVES_LISTEN", ":8080"),
+		LogLevel:      parseLevel(os.Getenv("ALTERNATIVES_LOG_LEVEL")),
+		OTLPEndpoint:  os.Getenv("ALTERNATIVES_OTLP_ENDPOINT"),
+		DatabaseURL:   secret("ALTERNATIVES_DATABASE_URL"),
+		Tenant:        envOr("ALTERNATIVES_TENANT", "__system__"),
+		NATSURL:       os.Getenv("ALTERNATIVES_NATS_URL"),
+		Source:        envOr("ALTERNATIVES_SOURCE", "alternatives"),
+		ConsumerGroup: envOr("ALTERNATIVES_CONSUMER_GROUP", "alternatives"),
+		Subjects:      subjects,
+		SPIFFESocket:  os.Getenv("SPIFFE_ENDPOINT_SOCKET"),
 	}, nil
+}
+
+// splitList parses a comma-separated env value into a trimmed, non-empty slice.
+func splitList(s string) []string {
+	var out []string
+	for _, p := range strings.Split(s, ",") {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 // secret resolves a sensitive value, preferring a CSI/Vault file mount (SEC-01d:

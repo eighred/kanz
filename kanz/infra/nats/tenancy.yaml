@@ -64,6 +64,12 @@ data:
           { user: "spiffe://kanz.internal/ns/kanz-services/sa/risk-engine" }
           { user: "spiffe://kanz.internal/ns/kanz-services/sa/api-gateway" }
           { user: "spiffe://kanz.internal/ns/kanz-services/sa/accounting" }
+          # alternatives became a real bus.DialNATS caller when its commitment-
+          # journal consumer was wired (ALT-01b): it folds capital-call,
+          # distribution and NAV-mark FACTs into fund.Store. SEC-M3b requires
+          # every dialer to be admitted here; test/arch/nats_identity_test.go's
+          # TestNATSDialersHaveBrokerAccounts caught the gap before it shipped.
+          { user: "spiffe://kanz.internal/ns/kanz-services/sa/alternatives" }
           { user: "spiffe://kanz.internal/ns/kanz-services/sa/archiver" }
           { user: "spiffe://kanz.internal/ns/kanz-services/sa/audit" }
           { user: "spiffe://kanz.internal/ns/kanz-services/sa/compliance" }

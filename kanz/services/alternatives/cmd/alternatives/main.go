@@ -15,12 +15,16 @@ import (
 	"os"
 	"os/signal"
 	"runtime/debug"
+	"sync"
 	"syscall"
 	"time"
 
 	"github.com/kanz-eng/kanz/internal/pg"
+	"github.com/kanz-eng/kanz/pkg/bus"
 	"github.com/kanz-eng/kanz/pkg/observability"
+	"github.com/kanz-eng/kanz/pkg/transport"
 	"github.com/kanz-eng/kanz/services/alternatives/internal/config"
+	"github.com/kanz-eng/kanz/services/alternatives/internal/consume"
 	"github.com/kanz-eng/kanz/services/alternatives/internal/fund"
 	"github.com/kanz-eng/kanz/services/alternatives/internal/server"
 )
@@ -54,6 +58,17 @@ func main() {
 		_ = obs.Shutdown(shutCtx)
 	}()
 
+	// SEC-M3: one workload identity for the process, shared by the consumer's
+	// bus dial. The production broker requires a client SVID; a nil TLSConfig is
+	// a plaintext client it refuses at the handshake.
+	mesh, err := transport.NewMesh(ctx, cfg.SPIFFESocket)
+	if err != nil {
+		logger.Error("spiffe source init failed", "err", err)
+		os.Exit(2)
+	}
+	defer func() { _ = mesh.Close() }()
+	logger.Info("bus transport", "mtls", mesh.Enabled())
+
 	store, closeStore, err := openStore(ctx, cfg)
 	if err != nil {
 		logger.Error("store init failed", "err", err)
@@ -74,6 +89,23 @@ func main() {
 			stop()
 		}
 	}()
+
+	// Commitment-lifecycle consumer (ALT-01b): fold live capital-call,
+	// distribution and NAV-mark FACTs into the same fund.Store the server reads,
+	// so position summaries and IRR/TVPI/DPI/RVPI reflect live activity. Runs
+	// concurrently with the server; both share ctx so SIGTERM stops them
+	// together. Empty ALTERNATIVES_NATS_URL ⇒ read-only (default), the same
+	// stance accounting takes for its fill consumer.
+	if cfg.NATSURL != "" {
+		go func() {
+			if err := runConsumer(ctx, cfg, store, mesh, logger, obs); err != nil && !errors.Is(err, context.Canceled) {
+				logger.Error("commitment consumer stopped with error", "err", err)
+				stop()
+			}
+		}()
+	} else {
+		logger.Info("no ALTERNATIVES_NATS_URL set — serving read endpoints only (no lifecycle folding)")
+	}
 	readiness.Set(true)
 
 	<-ctx.Done()
@@ -106,6 +138,68 @@ func openStore(ctx context.Context, cfg config.Config) (fund.Store, func(), erro
 		return nil, nil, err
 	}
 	return fund.NewPostgres(pool), pool.Close, nil
+}
+
+// runConsumer folds the live commitment-lifecycle FACTs into store until ctx is
+// canceled. It mirrors accounting's fill-folding consumer: one bus.Consumer,
+// each subject subscribed on its own goroutine (Subscribe blocks), fail-fast —
+// the first non-cancellation error cancels the siblings and is returned, so a
+// broken subscription brings folding down rather than running silently
+// degraded (a lost capital call or NAV mark must be loud, not a quietly wrong
+// IRR/TVPI). Idempotency is handled below this layer (Folder.Handle dedups on
+// the event id via fund.Store.Append).
+func runConsumer(ctx context.Context, cfg config.Config, store fund.Store, mesh *transport.Mesh, logger *slog.Logger, obs *observability.Provider) error {
+	busMetrics := bus.NewBusMetrics(obs.Registry)
+	client, err := bus.DialNATS(ctx, bus.NATSConfig{URL: cfg.NATSURL, Name: cfg.Source, TLSConfig: mesh.Client})
+	if err != nil {
+		return err
+	}
+	defer func() { _ = client.Close() }()
+
+	// WithDLQ is not optional: test/arch/bus_dlq_test.go fails the build without
+	// it, and for good reason — a malformed lifecycle FACT must land somewhere
+	// inspectable rather than vanish on nack.
+	consumer, err := bus.NewConsumer(client, bus.WithBusMetrics(busMetrics), bus.WithDLQ(client))
+	if err != nil {
+		return err
+	}
+
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	var (
+		wg       sync.WaitGroup
+		once     sync.Once
+		firstErr error
+	)
+	subscribe := func(subject string, handler bus.EventHandler) {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			logger.Info("alternatives subscribing", "subject", subject, "group", cfg.ConsumerGroup)
+			err := consumer.Subscribe(ctx, subject, cfg.ConsumerGroup, handler)
+			if err != nil && !errors.Is(err, context.Canceled) {
+				once.Do(func() {
+					firstErr = err
+					cancel()
+				})
+			}
+		}()
+	}
+	// The journal folder, one per subject: the decoder is bound to the payload
+	// type its subject carries, because nothing in the bytes says which message
+	// they are. A single Folder shared across all four subjects would decode
+	// every message as one type — e.g. every distribution as a capital call —
+	// and silently corrupt the fund position rather than error.
+	for _, subject := range cfg.Subjects {
+		folder, err := consume.NewFolder(store, consume.DecodeProto(subject))
+		if err != nil {
+			return err
+		}
+		subscribe(subject, folder.Handle)
+	}
+	wg.Wait()
+	return firstErr
 }
 
 // version reads the build's VCS revision for the service-version label.
