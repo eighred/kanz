@@ -12,7 +12,8 @@ import (
 	"testing"
 )
 
-// Every bus consumer must wire a DLQ, and none may wire in-handler retry.
+// Every bus consumer must wire a DLQ, and only a certified consumer may wire
+// in-handler retry.
 //
 // A Consumer built without WithDLQ has dlq == nil, so consumer.go's terminal
 // path releases the dedup claim and RETURNS THE ERROR — it asks the broker to
@@ -144,6 +145,127 @@ func TestEveryBusConsumerWiresADLQ(t *testing.T) {
 	}
 }
 
+// retryCertifiedConsumers is the default-deny allow-list of bus.NewConsumer call
+// sites certified safe to wire bus.WithRetry. A call site NOT listed here fails
+// the build the moment it wires WithRetry, regardless of how safe it looks —
+// certification happens HERE, reviewed in, not at the call site.
+//
+// WithRetry re-runs the SAME handler in-process, on the SAME delivery, after a
+// failed attempt. Certification requires that EVERY handler the call site
+// dispatches — a single bus.NewConsumer commonly serves several subjects — is
+// RE-ENTERABLE: a second in-process attempt, resuming from whatever partial
+// work the first attempt left behind, either
+//
+//	(a) redoes the work (it is naturally idempotent, or dedups atomically in
+//	    the same transaction as the persist), or
+//	(b) detects completion and finishes whatever the first attempt left
+//	    unfinished (resumes),
+//
+// and never takes a branch that returns nil (acks) because it mistook
+// in-flight or already-completed work for something to skip. That last shape
+// is what made this ban estate-wide in the first place: the OMS's handleSubmit
+// found the order it had itself just created, on redelivery, and acked without
+// checking whether the venue call that followed had actually finished — the
+// failure never reached the DLQ, and the order sat at ROUTED forever. See
+// services/oms/internal/order/reconcile.go for the fix (venue_ack_at) and
+// .superpowers/sdd/withretry-narrowing-report.md for the per-call-site
+// evidence behind every entry below (and every refusal).
+//
+// Only the consumer.Subscribe path is at stake: SubscribeBroadcast and
+// SubscribeBroadcastReady never retry (consumer.go builds no retry loop around
+// either), so a call site whose every subscription runs through one of those
+// two has nothing here to certify — WithRetry there would be inert, not
+// dangerous, and is deliberately left OFF this list rather than certified for
+// a decision that cannot arise (services/compliance, services/webhook-ingest).
+//
+// Keyed on "file:line" — busConsumerCall.where(), the same identity the guard
+// already reports failures against. An edit that moves the call site
+// un-certifies it until this entry is updated to match; that fails CLOSED,
+// which is the safe direction for a capital-path guard.
+var retryCertifiedConsumers = map[string]string{
+	"services/tv-sync/cmd/tv-sync/main.go:108": "tv-sync: the sole handler is " +
+		"projection.Projection.Handle. Its only error return before the fold is " +
+		"PostgresLog.Append itself failing (services/tv-sync/internal/projection/postgres.go:68), " +
+		"which means nothing committed. fold() never returns an error and Handle " +
+		"unconditionally returns nil once it runs, so there is no error path between a " +
+		"successful Append and the fold that a retry could trigger — a retry can only " +
+		"ever re-attempt an Append that did not durably land, never skip a fold whose " +
+		"Append already committed.",
+
+	"services/audit/cmd/audit/main.go:126": "audit: the sole handler is audit.Projector.Handle, " +
+		"which appends through Postgres.Append (services/audit/internal/audit/postgres.go:32). " +
+		"The event_id dedup check and the insert run inside ONE transaction under an " +
+		"advisory xact lock — atomic claim-and-persist, not check-then-act — so a retry " +
+		"after a failed transaction is a clean redo and a retry after a committed one is " +
+		"a no-op read of the same row, never a skip of unfinished work.",
+
+	"services/accounting/cmd/accounting/main.go:205": "accounting (fills+cash): dispatches " +
+		"consume.Folder.Handle and Folder.HandleCash, both of which resolve to " +
+		"ledger.Postgres.Append (services/accounting/internal/ledger/postgres.go:31) — a single " +
+		"INSERT ... ON CONFLICT (tenant_id, entry_id) DO NOTHING inside one transaction. " +
+		"No read-then-decide gap exists for a retry to land in; it either redoes an " +
+		"uncommitted write or no-ops an already-committed one.",
+
+	"services/accounting/cmd/accounting/main.go:307": "accounting (live FX): the sole handler is " +
+		"fxfeed.LiveFX.Handler (services/accounting/internal/fxfeed/fxfeed.go:65) — an " +
+		"unconditional last-value cache write with no dedup branch at all. Re-running it " +
+		"with the same quote sets the same rate; there is nothing to skip.",
+
+	"services/risk-engine/cmd/risk-engine/main.go:268": "risk-engine (state ingest): dispatches " +
+		"ingest.Ingestor.Handler -> engine.TriggeringApplier -> state.Store.ApplyPortfolioRevalued" +
+		"/ApplyPositionChanged/ApplyPortfolioSnapshot (internal/risk/state/store.go:202,227,246). " +
+		"Each Apply* checks its per-portfolio dedup window and mutates in-memory state with " +
+		"no I/O and no possible error in between — dw.Record always follows the mutation " +
+		"immediately, so an Apply* either runs to completion or (on a deterministic " +
+		"pre-mutation error, e.g. a missing aggregate id) never starts. TriggeringApplier's " +
+		"Trigger (the async debounced recompute) fires only after Apply* returns nil and " +
+		"cannot itself fail the handler, so a retry can never observe a Trigger that ran " +
+		"without its Apply* having actually completed.",
+
+	"services/risk-engine/cmd/risk-engine/main.go:339": "risk-engine (calibration quotes): the " +
+		"sole handler is livequote.LiveQuotes.Handler (internal/risk/pricing/livequote/livequote.go:80) " +
+		"— an unconditional last-value cache write, same shape as accounting's live FX feed. " +
+		"Nothing to skip.",
+
+	"services/market-data/cmd/market-data/main.go:142": "market-data: the sole handler is " +
+		"marketdata.Ingestor.Handler, which writes through Postgres.Put " +
+		"(internal/marketdata/store/postgres.go:49) — INSERT ... ON CONFLICT (instrument_id, " +
+		"observation_time, kind, knowledge_time) DO NOTHING inside one transaction. Same " +
+		"atomic-claim shape as audit/accounting; no check-then-act gap.",
+
+	"services/autopilot/cmd/autopilot/main.go:127": "autopilot: the sole handler is " +
+		"controller.Controller.Handle, which has no dedup-and-skip branch at all — a retry " +
+		"always re-runs Dispatch (match -> runbook -> escalate) from the top. Every " +
+		"runbook.Action is a documented MUST-be-idempotent contract " +
+		"(services/autopilot/internal/runbook/runbook.go:15) precisely because the controller " +
+		"already re-runs runbooks on ordinary at-least-once redelivery; in-process retry adds " +
+		"no new failure shape. A doubled escalation page is a duplicate alert, not lost work.",
+
+	"services/lineage/cmd/lineage/main.go:166": "lineage: the sole handler is harvest.Harvester.Handle. " +
+		"graph.Memory.Observe (services/lineage/internal/graph/graph.go:71) always runs to " +
+		"completion (its own doc comment: 're-observing an event re-counts it but the edges " +
+		"are a set') before the OpenLineage Emit call that can fail — so a retry re-observes " +
+		"(accepted, pre-existing double-count on the Events tally, not a skip) and re-emits; " +
+		"it never skips the observe that a first attempt already made.",
+
+	"services/lake-sink/cmd/lake-sink/main.go:120": "lake-sink: the sole handler is cdc.EventSink.Handle, " +
+		"which has no dedup-and-skip branch — every attempt decodes, writes and flushes from " +
+		"scratch, and the doc comment is explicit that a duplicate row is expected and " +
+		"resolved by downstream compaction (services/lake-sink/internal/cdc/sink.go:49). A retry " +
+		"redoes the row; it cannot skip it.",
+
+	"services/alternatives/cmd/alternatives/main.go:162": "alternatives: the sole handler is " +
+		"consume.Folder.Handle, which appends through fund.Postgres.Append " +
+		"(services/alternatives/internal/fund/postgres.go:30) — a single INSERT ... ON CONFLICT " +
+		"(tenant_id, event_id) DO NOTHING. Same atomic-claim shape as the ledger and audit " +
+		"stores.",
+
+	"services/wealth/cmd/wealth/main.go:170": "wealth: the sole handler is consume.Folder.Handle, " +
+		"which Puts through book.Postgres.Put (services/wealth/internal/book/postgres.go:30) — an " +
+		"unconditional last-write-wins UPSERT keyed on household_id. Re-running it with the " +
+		"same composition is a no-op change; there is no dedup branch to skip through.",
+}
+
 func TestNoBusConsumerWiresRetryWhileHandlersResumeByAcking(t *testing.T) {
 	calls := busConsumerCalls(t, moduleRoot(t))
 
@@ -151,28 +273,60 @@ func TestNoBusConsumerWiresRetryWhileHandlersResumeByAcking(t *testing.T) {
 		t.Fatal("found zero bus.NewConsumer call sites — the scanner is broken, not the services")
 	}
 
-	var retrying []string
+	// DEAD-ENTRY CHECK: an allow-list entry naming a call site that no longer
+	// exists (the line moved, the file was refactored) is a certification that
+	// silently protects nothing — the same failure mode nats_identity_test.go's
+	// operatorSVIDs guards against for SVID entries.
+	live := map[string]bool{}
 	for _, c := range calls {
-		if c.options["WithRetry"] {
-			retrying = append(retrying, c.where())
+		live[c.where()] = true
+	}
+	var dead []string
+	for site := range retryCertifiedConsumers {
+		if !live[site] {
+			dead = append(dead, site)
 		}
 	}
-	if len(retrying) > 0 {
-		sort.Strings(retrying)
-		t.Fatalf("%s wire bus.WithRetry, and the handlers in this estate are not all "+
-			"safely re-enterable yet.\n\n"+
-			"WithRetry re-runs the SAME handler in-process. A handler that begins by "+
-			"treating an event it can already load as a duplicate and returning nil turns "+
-			"attempt 2 into an instant silent ack: the consumer marks the command HANDLED "+
-			"and the failure never reaches the DLQ at all. Retry there is strictly worse "+
-			"than no retry.\n\n"+
-			"THE OMS's handleSubmit IS NOW AN EXCEPTION — it resumes against venue truth "+
-			"rather than acking on sight, using OrderState.venue_ack_at to tell an order "+
-			"the venue never received from one it acknowledged (see "+
-			"services/oms/internal/order/reconcile.go). The other twelve consumers have had "+
-			"no such change, so this ban stays estate-wide: it is now over-broad rather than "+
-			"load-bearing for the OMS specifically. Narrowing it to the handlers that still "+
-			"ack-on-sight is a real task; deleting it because one handler was fixed is not.",
-			strings.Join(retrying, ", "))
+	if len(dead) > 0 {
+		sort.Strings(dead)
+		t.Fatalf("retryCertifiedConsumers names %d call site(s) that no longer exist as "+
+			"bus.NewConsumer calls: %s\n\n"+
+			"Either the file moved (update the file:line key) or the consumer itself was "+
+			"removed (delete the entry) — a stale certification protects nothing and must "+
+			"not sit in the allow-list looking load-bearing.",
+			len(dead), strings.Join(dead, ", "))
+	}
+
+	var uncertified []string
+	for _, c := range calls {
+		if !c.options["WithRetry"] {
+			continue
+		}
+		if _, ok := retryCertifiedConsumers[c.where()]; ok {
+			continue
+		}
+		uncertified = append(uncertified, c.where())
+	}
+	if len(uncertified) > 0 {
+		sort.Strings(uncertified)
+		t.Fatalf("%s wire bus.WithRetry without being in retryCertifiedConsumers.\n\n"+
+			"WithRetry re-runs the SAME handler in-process, on the SAME delivery, after a "+
+			"failed attempt. Certification requires that EVERY handler this call site "+
+			"dispatches is RE-ENTERABLE: a second in-process attempt must either redo the "+
+			"work (it is naturally idempotent, or dedups atomically in the same transaction "+
+			"as the persist) or detect completion and finish what the first attempt left "+
+			"unfinished — and it must never take a branch that returns nil because it "+
+			"mistook in-flight or already-completed work for something to skip.\n\n"+
+			"That last shape is exactly what made this ban estate-wide: the OMS's "+
+			"handleSubmit found the order it had itself just created, on redelivery, and "+
+			"acked without checking whether the venue call that followed had actually "+
+			"finished — the failure never reached the DLQ, and the order sat at ROUTED "+
+			"forever (fixed since; see services/oms/internal/order/reconcile.go).\n\n"+
+			"To wire WithRetry here: read every handler this call site dispatches, add a "+
+			"named entry to retryCertifiedConsumers in this file with the code-evidence "+
+			"justification for each one, and record it in "+
+			".superpowers/sdd/withretry-narrowing-report.md — the same bar every entry "+
+			"already in that map had to clear.",
+			strings.Join(uncertified, ", "))
 	}
 }
