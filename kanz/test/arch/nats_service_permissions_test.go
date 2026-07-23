@@ -105,8 +105,8 @@ type subjectSites struct {
 }
 type sortedSubjects []subjectSites
 
-func (s sortedSubjects) Len() int      { return len(s) }
-func (s sortedSubjects) Swap(i, j int) { s[i], s[j] = s[j], s[i] }
+func (s sortedSubjects) Len() int           { return len(s) }
+func (s sortedSubjects) Swap(i, j int)      { s[i], s[j] = s[j], s[i] }
 func (s sortedSubjects) Less(i, j int) bool { return s[i].subject < s[j].subject }
 
 // permDenies reports whether perm's deny list blocks subject. archiver's
