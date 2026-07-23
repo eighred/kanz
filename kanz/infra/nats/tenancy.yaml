@@ -79,6 +79,13 @@ data:
           { user: "spiffe://kanz.internal/ns/kanz-services/sa/tv-sync" }
           { user: "spiffe://kanz.internal/ns/kanz-services/sa/venue-binance" }
           { user: "spiffe://kanz.internal/ns/kanz-services/sa/venue-okx" }
+          # wealth became a real bus.DialNATS caller when its household-valuation
+          # consumer was wired (WEALTH-01b): the Folder.Handle fold had been
+          # bus-handler-shaped and unreachable since it was written, because
+          # nothing in this service ever called bus.NewConsumer. SEC-M3b requires
+          # every dialer to be admitted here; test/arch/nats_identity_test.go's
+          # TestNATSDialersHaveBrokerAccounts caught the gap before it shipped.
+          { user: "spiffe://kanz.internal/ns/kanz-services/sa/wealth" }
           { user: "spiffe://kanz.internal/ns/kanz-services/sa/webhook-ingest" }
         ]
       }

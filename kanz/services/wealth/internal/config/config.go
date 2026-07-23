@@ -4,6 +4,8 @@ import (
 	"log/slog"
 	"os"
 	"strings"
+
+	"github.com/kanz-eng/kanz/internal/wealth"
 )
 
 // Config is the wealth (advisory) service runtime configuration, sourced from the
@@ -29,18 +31,59 @@ type Config struct {
 	// Postgres RLS scopes the book (MT-01d). Defaults to __system__, the
 	// risk-engine convention.
 	Tenant string
+
+	// NATSURL is the live spine the household-valuation consumer subscribes to
+	// (WEALTH-01b). Empty ⇒ no consumer (the default; the service serves the
+	// read endpoints on whatever store openStore selected, without a broker).
+	NATSURL string
+	// Source is the consumer identity (logging / durable consumer name).
+	Source string
+	// ConsumerGroup is the durable consumer name the household subject
+	// subscribes under.
+	ConsumerGroup string
+	// Subjects are the wealth.v1.HouseholdValued FACT subjects folded into the
+	// book. Defaults to wealth.SubjectHouseholdAll — the compacted wildcard over
+	// every household. Comma-separated.
+	Subjects []string
+
+	// SPIFFESocket is the SPIFFE Workload API socket (SEC-01a CSI mount). When
+	// set, the bus dials the spine over mTLS presenting this workload SVID; empty
+	// means a PLAINTEXT dial, which the production broker refuses at the
+	// handshake (SEC-M3). Reads the go-spiffe standard env, as accounting/
+	// alternatives do, so one manifest env name serves every service.
+	SPIFFESocket string
 }
 
 // Load reads the configuration from the environment with production-safe
 // defaults.
 func Load() (Config, error) {
+	subjects := splitList(os.Getenv("WEALTH_SUBJECTS"))
+	if len(subjects) == 0 {
+		subjects = []string{wealth.SubjectHouseholdAll}
+	}
 	return Config{
-		Listen:       envOr("WEALTH_LISTEN", ":8080"),
-		LogLevel:     parseLevel(os.Getenv("WEALTH_LOG_LEVEL")),
-		OTLPEndpoint: os.Getenv("WEALTH_OTLP_ENDPOINT"),
-		DatabaseURL:  secret("WEALTH_DATABASE_URL"),
-		Tenant:       envOr("WEALTH_TENANT", "__system__"),
+		Listen:        envOr("WEALTH_LISTEN", ":8080"),
+		LogLevel:      parseLevel(os.Getenv("WEALTH_LOG_LEVEL")),
+		OTLPEndpoint:  os.Getenv("WEALTH_OTLP_ENDPOINT"),
+		DatabaseURL:   secret("WEALTH_DATABASE_URL"),
+		Tenant:        envOr("WEALTH_TENANT", "__system__"),
+		NATSURL:       os.Getenv("WEALTH_NATS_URL"),
+		Source:        envOr("WEALTH_SOURCE", "wealth"),
+		ConsumerGroup: envOr("WEALTH_CONSUMER_GROUP", "wealth"),
+		Subjects:      subjects,
+		SPIFFESocket:  os.Getenv("SPIFFE_ENDPOINT_SOCKET"),
 	}, nil
+}
+
+// splitList parses a comma-separated env value into a trimmed, non-empty slice.
+func splitList(s string) []string {
+	var out []string
+	for _, p := range strings.Split(s, ",") {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 // secret resolves a sensitive value, preferring a CSI/Vault file mount (SEC-01d:

@@ -15,13 +15,17 @@ import (
 	"os"
 	"os/signal"
 	"runtime/debug"
+	"sync"
 	"syscall"
 	"time"
 
 	"github.com/kanz-eng/kanz/internal/pg"
+	"github.com/kanz-eng/kanz/pkg/bus"
 	"github.com/kanz-eng/kanz/pkg/observability"
+	"github.com/kanz-eng/kanz/pkg/transport"
 	"github.com/kanz-eng/kanz/services/wealth/internal/book"
 	"github.com/kanz-eng/kanz/services/wealth/internal/config"
+	"github.com/kanz-eng/kanz/services/wealth/internal/consume"
 	"github.com/kanz-eng/kanz/services/wealth/internal/server"
 )
 
@@ -54,6 +58,17 @@ func main() {
 		_ = obs.Shutdown(shutCtx)
 	}()
 
+	// SEC-M3: one workload identity for the process, shared by the consumer's
+	// bus dial. The production broker requires a client SVID; a nil TLSConfig is
+	// a plaintext client it refuses at the handshake.
+	mesh, err := transport.NewMesh(ctx, cfg.SPIFFESocket)
+	if err != nil {
+		logger.Error("spiffe source init failed", "err", err)
+		os.Exit(2)
+	}
+	defer func() { _ = mesh.Close() }()
+	logger.Info("bus transport", "mtls", mesh.Enabled())
+
 	store, closeStore, err := openStore(ctx, cfg)
 	if err != nil {
 		logger.Error("store init failed", "err", err)
@@ -74,6 +89,25 @@ func main() {
 			stop()
 		}
 	}()
+
+	// Household-valuation consumer (WEALTH-01b): fold live HouseholdValued FACTs
+	// into the same book.Store the server reads, so the household exposure view
+	// reflects live valuations. Runs concurrently with the server; both share
+	// ctx so SIGTERM stops them together. Empty WEALTH_NATS_URL ⇒ read-only
+	// (default), the same stance accounting/alternatives take for their
+	// consumers — this is the Folder.Handle seam that had been bus-handler-
+	// shaped and unreachable since it was written, because nothing ever called
+	// bus.NewConsumer in this service.
+	if cfg.NATSURL != "" {
+		go func() {
+			if err := runConsumer(ctx, cfg, store, mesh, logger, obs); err != nil && !errors.Is(err, context.Canceled) {
+				logger.Error("household consumer stopped with error", "err", err)
+				stop()
+			}
+		}()
+	} else {
+		logger.Info("no WEALTH_NATS_URL set — serving read endpoints only (no valuation folding)")
+	}
 	readiness.Set(true)
 
 	<-ctx.Done()
@@ -106,6 +140,62 @@ func openStore(ctx context.Context, cfg config.Config) (book.Store, func(), erro
 		return nil, nil, err
 	}
 	return book.NewPostgres(pool), pool.Close, nil
+}
+
+// runConsumer folds live wealth.v1.HouseholdValued FACTs into store until ctx
+// is canceled. It mirrors accounting's fill-folding consumer: one bus.Consumer,
+// each subject subscribed on its own goroutine (Subscribe blocks), fail-fast —
+// the first non-cancellation error cancels the siblings and is returned, so a
+// broken subscription brings folding down rather than running silently
+// degraded (a stale household valuation must be loud, not a quietly wrong
+// exposure view). Unlike alternatives, wealth carries one message type on one
+// subject, so a single consume.NewFolder(store, consume.DecodeProto) suffices
+// — no per-subject factory is needed.
+func runConsumer(ctx context.Context, cfg config.Config, store book.Store, mesh *transport.Mesh, logger *slog.Logger, obs *observability.Provider) error {
+	folder, err := consume.NewFolder(store, consume.DecodeProto)
+	if err != nil {
+		return err
+	}
+
+	busMetrics := bus.NewBusMetrics(obs.Registry)
+	client, err := bus.DialNATS(ctx, bus.NATSConfig{URL: cfg.NATSURL, Name: cfg.Source, TLSConfig: mesh.Client})
+	if err != nil {
+		return err
+	}
+	defer func() { _ = client.Close() }()
+
+	// WithDLQ is not optional: test/arch/bus_dlq_test.go fails the build without
+	// it, and for good reason — a malformed valuation FACT must land somewhere
+	// inspectable rather than vanish on nack.
+	consumer, err := bus.NewConsumer(client, bus.WithBusMetrics(busMetrics), bus.WithDLQ(client))
+	if err != nil {
+		return err
+	}
+
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	var (
+		wg       sync.WaitGroup
+		once     sync.Once
+		firstErr error
+	)
+	for _, subject := range cfg.Subjects {
+		wg.Add(1)
+		go func(subject string) {
+			defer wg.Done()
+			logger.Info("wealth subscribing", "subject", subject, "group", cfg.ConsumerGroup)
+			err := consumer.Subscribe(ctx, subject, cfg.ConsumerGroup, folder.Handle)
+			if err != nil && !errors.Is(err, context.Canceled) {
+				once.Do(func() {
+					firstErr = err
+					cancel()
+				})
+			}
+		}(subject)
+	}
+	wg.Wait()
+	return firstErr
 }
 
 // version reads the build's VCS revision for the service-version label.
