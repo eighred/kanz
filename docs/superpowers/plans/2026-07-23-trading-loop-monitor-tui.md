@@ -459,13 +459,17 @@ Task 3 left `cfg.SPIFFESocket` permanently `""` because `main.go` never wired th
 - After `fs.Parse`, if `!cfg.Plaintext && cfg.SPIFFESocket == ""`, return an error: mTLS was requested but there is no workload socket to obtain an SVID from, so the dial would silently degrade to plaintext — refuse rather than mislead. (`transport.NewMesh(ctx, "")` returns a disabled mesh with a nil Client, which is exactly the silent-plaintext path.)
 - Delete the now-false `// -spiffe-socket is read in Task 3` comment left in main.go by Task 1.
 
-Add a test in `main_test.go` (create it) asserting that a `Config{Plaintext:false, SPIFFESocket:""}` is rejected by whatever validation function you factor this into — pull the check into a small `validate(cfg) error` so it is unit-testable without running the TUI.
+Also wire the `-metrics-url` flag Task 4's endpoint fix requires: `fs.StringVar(&cfg.MetricsURL, "metrics-url", os.Getenv("KANZ_OMS_METRICS_URL"), "OMS /metrics endpoint for the incident counters (its own registry, distinct from --gateway-url)")`. `Config.MetricsURL` already exists (added in the Task 4 fix); the poller SKIPS the counter scrape when it is empty, so leaving the flag unset is a valid bus-feed-plus-health mode — no guard needed on this one, unlike the mTLS flag. Keep it distinct from `-gateway-url`: the gateway serves `/v1` + `/readyz`, the OMS serves the counters.
+
+Add a test in `main_test.go` (create it) asserting that a `Config{Plaintext:false, SPIFFESocket:""}` is rejected by whatever validation function you factor this into — pull the check into a small `validate(cfg) error` so it is unit-testable without running the TUI. (The empty-`MetricsURL` case is NOT rejected — it is a supported mode; do not add it to `validate`.)
 
 - [ ] **Step 1: Write the view**
 
 Create `kanz/cmd/kanz-monitor/view.go`. Using Lip Gloss, compose a two-column frame that adapts to `m.width/m.height`:
 - LEFT: the EXECUTION feed — the last N `m.events` newest-at-bottom, each a line `HH:MM:SS  event_type  order_id  detail`. Colour by type (filled green, rejected/quarantined red, routed/accepted default) using Lip Gloss styles, but degrade to plain when the terminal is narrow.
-- RIGHT, stacked: a **Book** box (rows from `m.book`, instrument · qty · avg), a **Counters** box (the six numbers; render a non-zero `quarantined`/`ungoverned` in red — those are incidents), and a **Health** box (each service ✓/✗ from `m.health`).
+- RIGHT, stacked: a **Book** box (rows from `m.book`, instrument · qty · avg), a **Counters** box, and a **Health** box.
+  - Counters: `m.counters` carries the five incident counters the poller scrapes — Quarantined, Ungoverned, Unpriced, SharedCollateral, UnverifiedVenueAccount — each rendered in red when non-zero (they are incidents). Filled/Rejected are NOT scraped (they stay 0 in `m.counters`); DERIVE them for display by counting `m.events` whose `Type` is `order.order.filled` / `order.order.rejected` (Task 4 deliberately left them to the live bus feed to avoid two disagreeing sources — see poller.go's header comment).
+  - Health: each service ✓/✗ from `m.health`. Note `m.health` currently holds only the `"gateway"` key (the poller polls `GatewayURL/readyz`; the gateway does not proxy other services' `/readyz`). Render whatever keys are present — do NOT hardcode a fixed service list and show ✗ for services that were simply never polled; that would read as "OMS is down" when it only means "not wired". An empty/one-key health box is correct for this milestone.
 - A status line: the tenant, the spine URL, connection state, and `m.err` if set. `q to quit`.
 
 Wide content must scroll or truncate inside its box, never push the layout wider than `m.width`.
