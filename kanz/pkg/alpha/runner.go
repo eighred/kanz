@@ -55,6 +55,18 @@ type Config struct {
 	// TenantOf maps a fund to its tenant; nil ⇒ the fund is the tenant.
 	TenantOf func(fundID string) string
 
+	// MarketDataTenant is the tenant stamped on BOOK SNAPSHOTS, which are shared
+	// reference data and belong to no fund — every fund sees the same BTC-USD
+	// book — so TenantOf cannot answer for them: there is no fund to ask about.
+	//
+	// It is separate from TenantOf for that reason, not by oversight. Snapshots
+	// publish off a ticker with no inbound envelope, so leaving this empty makes
+	// them depend entirely on the caller's ProducerConfig.Tenant; a caller that
+	// leaves that empty and supplies tenants per-event will have every snapshot
+	// rejected as "tenant_id required" while its fund-scoped signals keep
+	// flowing, because those carry their own tenant.
+	MarketDataTenant string
+
 	// TickInterval is how often the engines are evaluated. <=0 ⇒ 100ms.
 	TickInterval time.Duration
 	// TradeRetention bounds the trade tape. <=0 ⇒ 1m.
@@ -149,7 +161,7 @@ func (r *Runner) Run(ctx context.Context) error {
 		eng := ingest.New(ingest.Config{
 			Book: b, Source: f.Depth, Publisher: r.cfg.Publisher, Logger: r.logger,
 			SnapshotInterval: r.cfg.SnapshotInterval, SnapshotDepth: r.cfg.SnapshotDepth,
-			Now: r.cfg.Now,
+			Now: r.cfg.Now, Tenant: r.cfg.MarketDataTenant,
 		})
 		wg.Add(1)
 		go func(inst, mic string) {

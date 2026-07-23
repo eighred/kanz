@@ -40,6 +40,7 @@ type Engine struct {
 	snapshotInterval time.Duration
 	snapshotDepth    int
 	now              func() time.Time
+	tenant           string
 }
 
 // Config configures an Engine.
@@ -51,6 +52,22 @@ type Config struct {
 	SnapshotInterval time.Duration // <=0 ⇒ 1s
 	SnapshotDepth    int           // <=0 ⇒ 20
 	Now              func() time.Time
+	// Tenant is stamped on every book snapshot this engine publishes.
+	//
+	// SET IT. Snapshots are published off a ticker, outside any bus delivery, so
+	// there is no inbound envelope to inherit a tenant from. Empty is tolerated —
+	// the publish then falls through to the producer's own ProducerConfig.Tenant,
+	// which is what this engine relied on before the field existed — but that
+	// makes this library correct only under callers who set that fallback. A
+	// caller that leaves ProducerConfig.Tenant empty and supplies tenants
+	// per-event (the multi-tenant arrangement pkg/alpha documents) will have
+	// EVERY snapshot rejected as "tenant_id required" unless it sets this.
+	//
+	// Book snapshots are shared reference data — every fund sees the same
+	// BTC-USD book — so this is normally the platform's own tenant, not a
+	// customer's. That is a different question from the fund-scoped signal path,
+	// which resolves its tenant per event via alpha.Config.TenantOf.
+	Tenant string
 }
 
 // New builds an Engine.
@@ -70,6 +87,7 @@ func New(cfg Config) *Engine {
 	return &Engine{
 		book: cfg.Book, source: cfg.Source, pub: cfg.Publisher, logger: cfg.Logger,
 		snapshotInterval: cfg.SnapshotInterval, snapshotDepth: cfg.SnapshotDepth, now: cfg.Now,
+		tenant: cfg.Tenant,
 	}
 }
 
@@ -136,7 +154,14 @@ func (e *Engine) publishSnapshot(ctx context.Context) {
 		Domain:        "market",
 		EventTime:     e.now().UTC(),
 		PartitionKey:  snap.GetInstrumentId(),
-		Payload:       snap,
+		// Stamped explicitly, because nothing else on this path can supply it.
+		// This publish runs off a ticker, not a bus delivery, so there is no
+		// inbound envelope for bus.Consumer to have stashed a tenant from —
+		// ctx carries none. Until this field existed the tenant came solely
+		// from ProducerConfig.Tenant, which made a library's correctness depend
+		// on how each of its callers happened to wire its producer.
+		TenantID: e.tenant,
+		Payload:  snap,
 	}); err != nil {
 		e.logger.Warn("book snapshot publish failed", "instrument", snap.GetInstrumentId(), "err", err)
 	}

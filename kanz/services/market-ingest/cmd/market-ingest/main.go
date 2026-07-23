@@ -134,6 +134,11 @@ func main() {
 		SnapshotInterval: cfg.SnapshotInterval,
 		SnapshotDepth:    cfg.SnapshotDepth,
 		Logger:           logger,
+		// Book snapshots publish off a ticker with no inbound envelope, so they
+		// carry no tenant unless one is stamped here. This is the same value the
+		// producer's own fallback supplies today, made explicit so the snapshot
+		// path stops depending on how this service happens to wire its producer.
+		MarketDataTenant: cfg.Tenant,
 	})
 	if err != nil {
 		logger.Error("alpha runner init failed", "err", err)

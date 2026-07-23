@@ -2,6 +2,7 @@ package ingest
 
 import (
 	"context"
+	"errors"
 	"io"
 	"math/big"
 	"sync"
@@ -22,7 +23,20 @@ type capture struct {
 	events []bus.Event
 }
 
-func (c *capture) Publish(_ context.Context, e bus.Event) error {
+// Publish enforces the tenant rule the real bus.Producer enforces. Snapshots are
+// published off a ticker with no inbound envelope, so nothing supplies a tenant
+// but Config.Tenant (or the caller's ProducerConfig.Tenant, which a library
+// cannot see). A double that accepted an untenanted snapshot would let this
+// engine's correctness silently depend on how each caller wires its producer —
+// which is exactly what it did before Config.Tenant existed.
+func (c *capture) Publish(ctx context.Context, e bus.Event) error {
+	tenant := e.TenantID
+	if tenant == "" {
+		tenant = bus.TenantIDFromContext(ctx)
+	}
+	if tenant == "" {
+		return errors.New("envelope validation: tenant_id required")
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.events = append(c.events, e)
@@ -78,7 +92,7 @@ func TestEngine_FoldsAndPublishesSnapshot(t *testing.T) {
 	cap := &capture{}
 	eng := New(Config{
 		Book: book.New("BTC-USD", "BTCUSDT", "BINANCE"), Source: src, Publisher: cap,
-		SnapshotInterval: 20 * time.Millisecond, SnapshotDepth: 10,
+		SnapshotInterval: 20 * time.Millisecond, SnapshotDepth: 10, Tenant: "test-tenant",
 	})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
@@ -112,7 +126,7 @@ func TestEngine_EmptyBookNotPublished(t *testing.T) {
 	cap := &capture{}
 	eng := New(Config{
 		Book: book.New("ETH-USD", "ETHUSDT", "SIM"), Source: &scriptedSource{}, Publisher: cap,
-		SnapshotInterval: 10 * time.Millisecond, SnapshotDepth: 10,
+		SnapshotInterval: 10 * time.Millisecond, SnapshotDepth: 10, Tenant: "test-tenant",
 	})
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Millisecond)
 	defer cancel()
@@ -125,7 +139,7 @@ func TestEngine_EmptyBookNotPublished(t *testing.T) {
 func TestEngine_SourceErrorStopsRun(t *testing.T) {
 	eng := New(Config{
 		Book: book.New("BTC-USD", "BTCUSDT", "SIM"), Source: &errSource{}, Publisher: &capture{},
-		SnapshotInterval: time.Second,
+		SnapshotInterval: time.Second, Tenant: "test-tenant",
 	})
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
@@ -138,4 +152,45 @@ type errSource struct{}
 
 func (errSource) Recv(context.Context) (depth.Update, error) {
 	return depth.Update{}, io.ErrUnexpectedEOF
+}
+
+// A SNAPSHOT MUST CARRY ITS OWN TENANT, not borrow one from whoever wired the
+// producer.
+//
+// Snapshots publish off a ticker, outside any bus delivery, so bus.Consumer has
+// stashed nothing on ctx. Before Config.Tenant existed the tenant came solely
+// from the caller's ProducerConfig.Tenant — which meant this library was correct
+// under market-ingest's wiring and would have had every snapshot rejected as
+// "tenant_id required" under the multi-tenant arrangement pkg/alpha documents,
+// where callers leave that fallback empty and supply tenants per event.
+//
+// Stamping it here makes the engine correct under ANY caller's wiring, which is
+// the same property the venue adapters already have.
+func TestEngine_SnapshotCarriesTheConfiguredTenant(t *testing.T) {
+	cap := &capture{}
+	src := &scriptedSource{updates: []depth.Update{
+		{Snapshot: &marketpb.OrderBookSnapshot{
+			InstrumentId: "BTC-USD", LastUpdateSequence: 1,
+			Bids: []*marketpb.PriceLevel{lvl("50000", "1")},
+			Asks: []*marketpb.PriceLevel{lvl("50001", "1")},
+		}},
+	}}
+	eng := New(Config{
+		Book: book.New("BTC-USD", "BTCUSDT", "BINANCE"), Source: src, Publisher: cap,
+		SnapshotInterval: 10 * time.Millisecond, SnapshotDepth: 10, Tenant: "acme",
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	go func() { _ = eng.Run(ctx) }()
+	<-ctx.Done()
+
+	got, ok := cap.last()
+	if !ok {
+		t.Fatal("no snapshot published")
+	}
+	if got.TenantID != "acme" {
+		t.Fatalf("snapshot TenantID = %q, want %q — without it the tenant depends "+
+			"entirely on the caller's ProducerConfig.Tenant, and a caller that sets "+
+			"none has every snapshot rejected", got.TenantID, "acme")
+	}
 }
