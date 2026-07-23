@@ -100,6 +100,49 @@ message OrderState {
   // state transition so the account that bore the risk is on the record, not
   // reconstructed later from config that has since changed.
   string venue_account_id = 15;
+
+  // venue_ack_at is WHEN THE VENUE CONFIRMED IT HELD THIS ORDER — the one fact
+  // that separates a recovering OMS from a guessing one.
+  //
+  // It is stamped only after Venue.Execute returns WITHOUT error, which is the
+  // venue saying "I have it". Unset means the OMS saved the order as ROUTED and
+  // never received that confirmation — the venue may hold it, or may never have
+  // seen it, and a FAILED Execute does not tell those apart.
+  //
+  // Reconciliation reads it in exactly ONE place: when the venue answers "I do
+  // not know this order". Unset then means the venue genuinely never got it and
+  // working it now is safe. SET means the venue confirmed it and is now denying
+  // it — not a recoverable state but a contradiction between two authorities —
+  // and the order is quarantined rather than re-driven. Re-driving that case is
+  // a double trade.
+  google.protobuf.Timestamp venue_ack_at = 16;
+
+  // quarantine is set when reconciliation could not safely establish what the
+  // venue did with this order. A quarantined order is FROZEN: nothing re-drives
+  // it, nothing cancels it, and clearing it takes a human. Unset on every
+  // healthy order.
+  OrderQuarantine quarantine = 17;
+}
+
+// OrderQuarantine records an order whose true state at the venue could not be
+// established.
+//
+// It exists because the only alternative to freezing is guessing, and both
+// guesses are unacceptable on the capital path: re-driving may trade the fund
+// twice, and abandoning may leave a live exchange order nobody is watching. The
+// platform states that it does not know, loudly, and stops.
+message OrderQuarantine {
+  // at is when the order was quarantined. Required when quarantine is set.
+  google.protobuf.Timestamp at = 1;
+
+  // reason is the human-readable account of what could not be established, and
+  // it is what an operator reads first. It must name the venue's answer and the
+  // venue_ack_at state that made the pair irreconcilable.
+  string reason = 2;
+
+  // last_query_at is when the venue was last asked about this order — so an
+  // operator can tell a fresh contradiction from a stale one.
+  google.protobuf.Timestamp last_query_at = 3;
 }
 
 // Fill is one atomic execution against an order — the execution-report payload
