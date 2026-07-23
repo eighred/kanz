@@ -368,8 +368,17 @@ func runConsumers(ctx context.Context, cfg config.Config, readiness *server.Read
 	// A failure here is fatal on purpose. A pod that cannot account for the orders
 	// its predecessor was working does not know what the fund holds, and admitting
 	// new orders on top of that is not degraded operation — it is trading blind.
+	// The sweep publishes lifecycle FACTs for the orders it re-drives, but it
+	// runs BEFORE any bus delivery — there is no inbound envelope for it to
+	// inherit a tenant from the way a handler does (bus.Consumer stashes that
+	// on ctx per-delivery; see pkg/bus/context.go). Stamp the OMS's own tenant
+	// here explicitly. This is not a guess: cfg.Tenant is the same tenant the
+	// order store's connection pool is pinned to (pg.NewTenantPool below), so
+	// ListByStatus above only ever returns this tenant's orders. Scoped to this
+	// call only — the outer ctx must stay bare so each subscription's own
+	// consumer loop keeps setting its own tenant per delivery.
 	sweepStart := time.Now()
-	swept, err := svc.SweepInterrupted(ctx)
+	swept, err := svc.SweepInterrupted(bus.WithTenantID(ctx, cfg.Tenant))
 	if err != nil {
 		logger.Error("could not reconcile the orders left in flight by the previous process — refusing to admit new orders on a book we cannot account for", "err", err, "reconciled_before_failure", swept)
 		return err

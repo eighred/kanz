@@ -2,9 +2,12 @@ package order
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	orderpb "github.com/kanz-eng/kanz-schemas-go/order/v1"
+
+	"github.com/kanz-eng/kanz/pkg/bus"
 )
 
 // SweepInterrupted reconciles every order this OMS left mid-flight, and it must
@@ -26,6 +29,35 @@ import (
 // is working them) and orders it freezes both count: they were interrupted, and
 // the number is the operator's first signal about how bad the interruption was.
 func (s *Service) SweepInterrupted(ctx context.Context) (int, error) {
+	// A REDRIVEN ORDER IS PUBLISHED, NOT JUST RESUMED — SO IT NEEDS A TENANT
+	// BEFORE IT NEEDS ANYTHING ELSE.
+	//
+	// Resuming a stranded order re-emits its lifecycle as FACT events (see
+	// resume/work below), and every Publish needs a tenant to stamp on the
+	// envelope. A handler gets its tenant for free — bus.Consumer lifts it off
+	// the inbound envelope onto ctx (pkg/bus/consumer.go) before the handler
+	// ever runs. This function has no such luxury: it is called at startup,
+	// before the process has subscribed to anything, so there is no inbound
+	// envelope to inherit a tenant from. If the caller forgot to supply one,
+	// failing loudly here is the only alternative to a much worse failure
+	// downstream: the first redrive would reach envelope validation, be
+	// rejected for a missing tenant_id, and SweepInterrupted would return that
+	// error to a caller that treats ANY sweep failure as fatal (by design —
+	// see the package doc above and cmd/oms/main.go) — so the OMS would never
+	// start again. The one order it stranded stays stranded forever, and the
+	// operator sees an unexplained crash loop instead of this message.
+	//
+	// The fix at the call site is bus.WithTenantID(ctx, <the OMS's own
+	// tenant>) — cmd/oms/main.go does this for the real startup sweep.
+	if bus.TenantIDFromContext(ctx) == "" {
+		return 0, errors.New("oms: SweepInterrupted requires a tenant on ctx " +
+			"(bus.WithTenantID) — it re-publishes the lifecycle of every order " +
+			"it redrives, and it runs before any bus delivery, so unlike a " +
+			"handler it has no inbound envelope to inherit a tenant from; " +
+			"without one the first redrive fails envelope validation and, " +
+			"because a sweep failure is fatal at startup, the OMS never starts")
+	}
+
 	open, err := s.store.ListByStatus(ctx,
 		orderpb.OrderStatus_ORDER_STATUS_PENDING_NEW,
 		orderpb.OrderStatus_ORDER_STATUS_ROUTED,
