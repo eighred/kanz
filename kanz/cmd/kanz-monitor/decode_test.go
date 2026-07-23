@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	commonpb "github.com/kanz-eng/kanz-schemas-go/common/v1"
 	domainpb "github.com/kanz-eng/kanz-schemas-go/domain/v1"
 	envelopepb "github.com/kanz-eng/kanz-schemas-go/envelope/v1"
 	orderpb "github.com/kanz-eng/kanz-schemas-go/order/v1"
@@ -127,7 +128,16 @@ func TestDecodePosition(t *testing.T) {
 		PortfolioId:  "fund-alpha",
 		InstrumentId: "BTC-USD",
 		Quantity:     dec.ToProto(dec.Rat("1.5")),
-		AveragePrice: dec.ToProto(dec.Rat("48000.25")),
+		// A deliberately ADVERSARIAL average price: 10 integer digits + 8 fractional
+		// = 18 significant digits, built as a raw Decimal because dec.ToProto caps at
+		// 8 fractional places and would never produce it. The point is to make the
+		// no-float guarantee self-enforcing rather than merely code-read: a value like
+		// 48000.25 prints identically whether rendered via dec.Str or a float64, so it
+		// cannot catch a regression to float formatting; this one exceeds float64's
+		// ~16 significant digits (a float64 rounds it to 1234567890.1234567), so the
+		// assertion below only passes if the decoder kept the exact wire value via
+		// dec.Str. It is not a realistic price — it is a precision tripwire.
+		AveragePrice: &commonpb.Decimal{Coefficient: 123456789012345678, Exponent: -8},
 	})
 	env := &envelopepb.Envelope{EventType: "risk.position.changed"}
 
@@ -144,8 +154,9 @@ func TestDecodePosition(t *testing.T) {
 	if got.Quantity != "1.5" {
 		t.Errorf("Quantity = %q, want exact wire string %q", got.Quantity, "1.5")
 	}
-	if got.AvgPrice != "48000.25" {
-		t.Errorf("AvgPrice = %q, want exact wire string %q", got.AvgPrice, "48000.25")
+	if got.AvgPrice != "1234567890.12345678" {
+		t.Errorf("AvgPrice = %q, want exact wire string %q — a float64 would round it to "+
+			"1234567890.1234567, so a mismatch here means the decoder lost precision", got.AvgPrice, "1234567890.12345678")
 	}
 }
 
