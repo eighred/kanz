@@ -75,6 +75,7 @@ data:
     done <<'EOF'
     compliance.mandate         3   compact  -1          yes
     risk.position              6   compact  -1          yes
+    wealth.household            3   compact  -1          yes
     order.order                6   delete   2592000000  yes
     strategy.signal            6   delete   2592000000  yes
     accounting.balance         6   delete   2592000000  yes

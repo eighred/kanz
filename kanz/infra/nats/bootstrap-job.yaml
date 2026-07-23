@@ -155,6 +155,23 @@ data:
     # = the mandate IN FORCE.
     ensure_stream MANDATE       "compliance.mandate.>" 0 --max-msgs-per-subject=1
 
+    # WEALTH — the same shape, for the same reason (WEALTH-01b).
+    #
+    #   A HouseholdValued is the CURRENT PICTURE, NOT AN EVENT THAT HAPPENED. The
+    #   decoder returns a whole Household and the wealth store does Put — last-write-
+    #   wins — so a pod booting tomorrow must arm itself with the latest valuation per
+    #   household in one read, exactly as the OMS arms its mandate registry and the
+    #   compliance monitor arms its position book. This is deliberately the OPPOSITE
+    #   of ALTERNATIVES: alternatives is a JOURNAL whose fold is a dated cashflow
+    #   series (IRR/TVPI need every cashflow, not just the latest), so it stays
+    #   append-only. Compacting it would silently discard every cashflow but the
+    #   last per fund.
+    #
+    #   --max-msgs-per-subject=1 + no max-age makes this stream the CURRENT BOOK: one
+    #   retained message per household, forever, so DeliverLastPerSubject gives a
+    #   booting consumer every household's latest valuation in one read.
+    ensure_stream WEALTH        "wealth.>" 0 --max-msgs-per-subject=1
+
     # POSITION — the same shape, for the same reason (EXEC-M20).
     #
     #   A POSITION IS STATE, NOT AN EVENT. Every position FACT used to ride the flat
