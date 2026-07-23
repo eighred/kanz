@@ -81,6 +81,7 @@ data:
     settlement.instruction     3   delete   2592000000  yes
     compliance.breach          3   delete   2592000000  yes
     risk.portfolio             6   delete   2592000000  yes
+    alternatives.commitment    3   delete   604800000   yes
     platform.authz             3   delete   2592000000  yes
     platform.compliance        3   delete   2592000000  yes
     platform.mode              3   delete   2592000000  yes

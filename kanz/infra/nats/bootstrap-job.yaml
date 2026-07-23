@@ -126,6 +126,7 @@ data:
     ensure_stream ACCOUNTING    "accounting.>"    168h
     ensure_stream COMPLIANCE    "compliance.breach.>" 168h
     ensure_stream SETTLEMENT    "settlement.>"    168h
+    ensure_stream ALTERNATIVES  "alternatives.>"  168h
 
     # THE MANDATE STREAM IS NOT A LOG. IT IS THE CURRENT STATE.
     #

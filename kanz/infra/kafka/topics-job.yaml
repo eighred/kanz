@@ -69,6 +69,7 @@ data:
     settlement.instruction     3   delete   2592000000  yes
     compliance.breach          3   delete   2592000000  yes
     risk.portfolio             6   delete   2592000000  yes
+    alternatives.commitment    3   delete   604800000   yes
 
     # PLATFORM LIFECYCLE -> 30d + a DLQ. Authz/mode/compliance-config changes are
     # the audit trail of who was allowed to do what, and when.
