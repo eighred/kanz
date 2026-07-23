@@ -91,6 +91,17 @@ var operatorSVIDs = map[string]string{
 	// operator's shell against a dev broker or reuses the kanz-halt SA's socket;
 	// either way the code must present the SVID, which is what this asserts.
 	"kanz-mandate": "spiffe://kanz.internal/ns/kanz-operator/sa/kanz-halt",
+	// kanz-altevent publishes the commitment-lifecycle journal (ALT-01b) the
+	// alternatives service folds. Same plane, same broker, same requirement, and
+	// the same caveat as kanz-mandate above: no Job manifest of its own yet, so it
+	// presents the kanz-halt SA's SVID.
+	//
+	// THE SHARED SA IS A KNOWN LEAST-PRIVILEGE GAP, not a design. Three operator
+	// tools now present one identity, so the broker cannot tell a NAV mark from a
+	// platform halt — anything trusted to publish a fund valuation is equally
+	// trusted to stop trading. Splitting them needs a manifest and a tenancy entry
+	// per tool; recorded here rather than silently widened a third time.
+	"kanz-altevent": "spiffe://kanz.internal/ns/kanz-operator/sa/kanz-halt",
 }
 
 // dialsNATSInDir reports whether a directory tree calls bus.DialNATS.
