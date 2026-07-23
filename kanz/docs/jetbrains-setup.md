@@ -88,6 +88,61 @@ are excluded from the build. **That is correct**, not an error.
 The module pins this so a stale generated SDK is regenerated rather than failing
 the build.
 
+## 5. Line endings — when `gofmt -l` flags files you never touched
+
+`.gitattributes` pins `*.go` and `*.proto` to `text eol=lf`, because gofmt emits
+LF: a CRLF working copy makes `gofmt -l` list a file whose *formatting* is
+perfect, and `make fmt` / `make lint` then look broken for a reason that has
+nothing to do with the code.
+
+The attribute only takes effect on files checked out *after* it was added. A
+clone (or a working tree) that predates it keeps CRLF, and the symptom is a
+handful of files that `gofmt -l` reports forever no matter how often you format
+them.
+
+**Diagnose with `git ls-files --eol`, not by grepping for carriage returns.**
+
+```sh
+git ls-files --eol '*.go' | awk '$2 == "w/crlf" {print $NF}'   # worktree is CRLF
+git ls-files --eol '*.go' | awk '$1 != "i/lf"   {print $NF}'   # index is not LF
+```
+
+The two columns answer different questions and only the first is normally the
+problem:
+
+| | meaning | what it means for you |
+|---|---|---|
+| `i/lf` | the **index** (what git stores) is LF | correct — nothing to commit |
+| `w/crlf` | your **working copy** is CRLF | a stale checkout; fix locally, do **not** commit |
+
+If the index is already `i/lf` — which it is for every `.go` file in this repo —
+then **there is nothing to fix in the repository**. Re-checkout the offending
+files so the attribute applies:
+
+```sh
+rm <files> && git checkout -- <files>
+git ls-files --eol '*.go' | awk '$2 == "w/crlf"' | wc -l   # expect 0
+```
+
+`git status` will show nothing modified afterwards, which is the confirmation
+that this was a local artifact and not repository drift.
+
+### Why the obvious check is wrong
+
+The tempting diagnostic is to count carriage returns:
+
+```sh
+git show HEAD:path/to/file.go | grep -c $'\r'      # DO NOT trust this
+```
+
+In Git Bash `$'\r'` does not always survive into `grep` as a literal CR. When it
+degrades to an empty pattern, grep matches **every** line, and the count comes
+back equal to the file's line count — which reads exactly like "every line ends
+CRLF". That misreading turns a local checkout artifact into an apparent
+committed-CRLF problem, and the "fix" is a no-op line-ending churn across files
+nobody touched. `git ls-files --eol` asks git directly and cannot be fooled this
+way.
+
 ## Shared run configurations
 
 `.idea/runConfigurations/` is **tracked** (the root `.gitignore` ignores the rest
