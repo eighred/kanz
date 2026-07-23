@@ -81,6 +81,23 @@ message Commitment {
 
   // commitment_date is when the commitment was made. Required.
   google.protobuf.Timestamp commitment_date = 6;
+
+  // recorded_by is the operator principal that transcribed this event from an
+  // external notice, formatted "{type}:{id}" (e.g. "operator:akif") — the same
+  // convention as lifecycle.v1.ConfigChanged.changed_by. It is named
+  // recorded_by rather than changed_by because this is not a change to a
+  // platform config: it is the record of an event that happened OUTSIDE this
+  // platform (a commitment executed with a GP) and was transcribed into it.
+  // Required.
+  string recorded_by = 7;
+
+  // reason is the external notice this transcribes — e.g. "subscription
+  // agreement, 2026-06-01" — retained for audit. Without recorded_by and
+  // reason, a commitment enters the fund's journal attributable to nobody:
+  // kanz-altevent's -by/-reason flags were REQUIRED yet, before this field
+  // existed, only ever printed to stdout and never carried on the published
+  // FACT — an audit trail the operator believed existed and did not. Required.
+  string reason = 8;
 }
 
 // CapitalCall is a drawdown against a Commitment — the GP calls committed capital.
@@ -102,6 +119,22 @@ message CapitalCall {
   // purpose is a human-readable call purpose (investment, fees, expenses).
   // Optional.
   string purpose = 5;
+
+  // recorded_by is the operator principal that transcribed this event from an
+  // external notice, formatted "{type}:{id}" (e.g. "operator:akif") — the same
+  // convention as lifecycle.v1.ConfigChanged.changed_by. It is named
+  // recorded_by rather than changed_by because this is not a change to a
+  // platform config: it is the record of an event that happened OUTSIDE this
+  // platform (the GP calling capital) and was transcribed into it. Required.
+  string recorded_by = 6;
+
+  // reason is the external notice this transcribes — e.g. "GP notice
+  // 2026-06" — retained for audit. Without recorded_by and reason, a capital
+  // call enters the fund's journal attributable to nobody: kanz-altevent's
+  // -by/-reason flags were REQUIRED yet, before this field existed, only ever
+  // printed to stdout and never carried on the published FACT — an audit
+  // trail the operator believed existed and did not. Required.
+  string reason = 7;
 }
 
 // DistributionKind classifies what a distribution returns.
@@ -132,6 +165,24 @@ message Distribution {
 
   // distribution_date is when it was paid. Required.
   google.protobuf.Timestamp distribution_date = 5;
+
+  // recorded_by is the operator principal that transcribed this event from an
+  // external notice, formatted "{type}:{id}" (e.g. "operator:akif") — the same
+  // convention as lifecycle.v1.ConfigChanged.changed_by. It is named
+  // recorded_by rather than changed_by because this is not a change to a
+  // platform config: it is the record of an event that happened OUTSIDE this
+  // platform (a fund distribution paid by the GP) and was transcribed into
+  // it. Required.
+  string recorded_by = 6;
+
+  // reason is the external notice this transcribes — e.g. "distribution
+  // notice 2026-Q2" — retained for audit. Without recorded_by and reason, a
+  // distribution enters the fund's journal attributable to nobody:
+  // kanz-altevent's -by/-reason flags were REQUIRED yet, before this field
+  // existed, only ever printed to stdout and never carried on the published
+  // FACT — an audit trail the operator believed existed and did not.
+  // Required.
+  string reason = 7;
 }
 
 // NAVMark is an illiquid valuation of a Commitment's residual interest — the GP's
@@ -157,4 +208,22 @@ message NAVMark {
   // NOTHING silently drops it — reporting success while leaving a stale
   // valuation in place.
   string mark_id = 4;
+
+  // recorded_by is the operator principal that transcribed this event from an
+  // external notice, formatted "{type}:{id}" (e.g. "operator:akif") — the same
+  // convention as lifecycle.v1.ConfigChanged.changed_by. It is named
+  // recorded_by rather than changed_by because this is not a change to a
+  // platform config: it is the record of an event that happened OUTSIDE this
+  // platform (the GP's or administrator's reported valuation) and was
+  // transcribed into it. Required.
+  string recorded_by = 5;
+
+  // reason is the external notice this transcribes — e.g. "quarterly NAV
+  // statement, Q2 2026" — retained for audit. Without recorded_by and reason,
+  // a NAV mark enters the fund's journal attributable to nobody:
+  // kanz-altevent's -by/-reason flags were REQUIRED yet, before this field
+  // existed, only ever printed to stdout and never carried on the published
+  // FACT — an audit trail the operator believed existed and did not.
+  // Required.
+  string reason = 6;
 }

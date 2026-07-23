@@ -99,11 +99,30 @@ func run(args []string, out *os.File) error {
 	if err != nil {
 		return err
 	}
+	// The provenance -by/-reason already required by parseFlags, carried onto
+	// the payload itself (alternatives.v1.*.recorded_by / .reason) — not just
+	// printed to stdout. Without this, the operator sees "PUBLISHED — by
+	// operator:akif" and reasonably believes an audit trail exists on the
+	// FACT; before this call it did not.
+	setProvenance(ev.payload, opt.by, opt.reason)
 
 	fmt.Fprintf(out, "%s %s — commitment %s, dated %s\n",
 		opt.kind, ev.eventID, ev.commitmentID, ev.eventTime.Format(time.RFC3339))
 	fmt.Fprintf(out, "subject: %s\n", ev.subject)
 	if opt.dryRun {
+		// Marshalled, not just the subject: this tool's whole job is
+		// publishing something that, once on the append-only journal, cannot
+		// be withdrawn (see the package doc's "Why validation happens before
+		// ANY network I/O") — so before this becomes unrecoverable state, a
+		// human must be able to see exactly what recordedBy/reason (and every
+		// other field) will be on the wire, protojson-rendered the same way
+		// the fold's decoder sees it.
+		body, err := protojson.MarshalOptions{Multiline: true, Indent: "  "}.Marshal(ev.payload)
+		if err != nil {
+			return fmt.Errorf("marshal %s for dry-run: %w", opt.kind, err)
+		}
+		fmt.Fprintln(out, "payload:")
+		fmt.Fprintln(out, string(body))
 		fmt.Fprintln(out, "--dry-run: nothing published.")
 		return nil
 	}
@@ -324,6 +343,28 @@ func loadEvent(kind, path string) (*loadedEvent, error) {
 		commitmentID:     commitID,
 		eventTime:        at.AsTime().UTC(),
 	}, nil
+}
+
+// setProvenance stamps the operator-supplied -by/-reason onto the loaded
+// payload's recorded_by/reason fields. It exists because -by and -reason are
+// REQUIRED flags (see parseFlags) yet, before this function was introduced,
+// were used only to format the stdout success line — nothing on the
+// published FACT recorded who transcribed the event or why. recorded_by is
+// deliberately not named changed_by (contrast lifecycle.v1.ConfigChanged):
+// this is not a change to a platform config, it is the record of an event
+// that happened OUTSIDE this platform (a GP notice, a fund-administrator
+// NAV statement) and was transcribed into it.
+func setProvenance(payload proto.Message, by, reason string) {
+	switch m := payload.(type) {
+	case *altpb.Commitment:
+		m.RecordedBy, m.Reason = by, reason
+	case *altpb.CapitalCall:
+		m.RecordedBy, m.Reason = by, reason
+	case *altpb.Distribution:
+		m.RecordedBy, m.Reason = by, reason
+	case *altpb.NAVMark:
+		m.RecordedBy, m.Reason = by, reason
+	}
 }
 
 func envOr(k, def string) string {

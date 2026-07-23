@@ -61,6 +61,37 @@ func TestDecodeProto_RefusesUnrepresentableAmount(t *testing.T) {
 	}
 }
 
+// alternatives.v1 messages now carry recorded_by/reason (provenance —
+// see alternatives.proto). The fold computes positions, not audit trails:
+// provenance belongs to the event record on the bus (archiver -> Kafka ->
+// lakehouse), exactly as lifecycle.v1.ConfigChanged.changed_by is never
+// retained by the mandate registry. This is a regression guard proving the
+// decoder still succeeds, and internal/alternatives.Event stays unwidened,
+// when a message carries those fields.
+func TestDecodeProto_IgnoresProvenanceFields(t *testing.T) {
+	body, err := proto.Marshal(&altpb.CapitalCall{
+		CallId:       "call-3",
+		CommitmentId: "c-1",
+		Amount:       &commonpb.Decimal{Coefficient: 250000, Exponent: 0},
+		CallDate:     timestamppb.New(t0()),
+		RecordedBy:   "operator:akif",
+		Reason:       "GP notice 2026-06",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	e, err := DecodeProto(alt.SubjectCalled)(body)
+	if err != nil {
+		t.Fatalf("DecodeProto: %v", err)
+	}
+	if e.EventID != "call-3" || e.CommitmentID != "c-1" {
+		t.Fatalf("identity = %q/%q, want call-3/c-1", e.EventID, e.CommitmentID)
+	}
+	if e.Amount.RatString() != "250000" {
+		t.Fatalf("amount = %s, want 250000", e.Amount.RatString())
+	}
+}
+
 func TestDecodeProto_UnknownSubjectIsRefused(t *testing.T) {
 	if _, err := DecodeProto("alternatives.commitment.invented")(nil); err == nil {
 		t.Fatal("an unknown event type produced a decoder instead of an error")
