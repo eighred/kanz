@@ -17,12 +17,39 @@ import (
 // Replay-scoped consumers pass bus.WithValidator(bus.ValidateReplay) so they
 // can accept REPLAYED events; that path REQUIRES the flag (a non-flagged
 // event on a replay subject is a misconfigured publisher and is rejected).
-// SystemTenant is the reserved tenant assigned to pre-tenancy events read from
-// old durable logs on the replay path (MT-01a). Those events predate the
-// envelope tenant_id field and carry the empty string; the replay/consumer path
-// maps them to SystemTenant rather than rejecting, so EVT-20 replay determinism
-// is preserved. Live publishers must NOT use it — Validate rejects an empty
-// tenant on the live path, and a real tenant is always available there.
+// SystemTenant has TWO legitimate meanings, and conflating them has already cost
+// one investigation. Read both before reasoning about tenancy.
+//
+//  1. It is the tenant assigned to PRE-TENANCY events read from old durable logs
+//     on the replay path (MT-01a). Those events predate the envelope tenant_id
+//     field and carry the empty string; the replay/consumer path maps them to
+//     SystemTenant rather than rejecting, so EVT-20 replay determinism is
+//     preserved.
+//
+//  2. It is ALSO the platform's own live tenant, carrying the cross-cutting
+//     FACTs that belong to no single customer (MT-01c). This is not a leak and
+//     not a fallback: it is deliberately configured fleet-wide — OMS_TENANT,
+//     ACCOUNTING_TENANT, ARCHIVER_TENANT, TV_SYNC_TENANT and the rest all set it
+//     explicitly in infra/deploy — and downstream contracts DEPEND on it.
+//     archiver/internal/topic maps SystemTenant events to the UN-PREFIXED legacy
+//     topic names and prefixes every other tenant's, so changing what the
+//     platform publishes under would re-route the entire archive.
+//
+// THIS COMMENT USED TO SAY "Live publishers must NOT use it". That was false —
+// six services publish under it by design, and the archiver's topic mapping is
+// built on their doing so. It is corrected rather than enforced because
+// enforcing it would have rejected every event the fleet emits: a control that
+// takes the platform down is not a control. If you are about to add a guard
+// against SystemTenant on the live path, this paragraph is why it would fire on
+// correctly-configured services.
+//
+// WHAT IS ACTUALLY WRONG, and what to look for instead: a PER-CUSTOMER service
+// left on SystemTenant in a multi-tenant deployment. That silently attributes
+// one customer's orders, fills or ledger entries to the platform, and nothing
+// downstream can tell — the value is valid, merely not theirs. Unlike an
+// exchange account, which venue adapters verify against the venue itself at boot
+// (SOV-02a), a tenant has no such proof, so this is a deployment-review
+// question, not something Validate can answer.
 const SystemTenant = "__system__"
 
 func Validate(env *envelopepb.Envelope) error {
