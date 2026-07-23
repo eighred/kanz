@@ -16,7 +16,12 @@ type Config struct {
 	Tenant       string        // the tenant whose book to show; poller scopes to it
 	PollInterval time.Duration // how often the poller scrapes; <=0 ⇒ 2s
 	Plaintext    bool          // true ⇒ dial NATS without TLS (dev rig); false ⇒ mesh mTLS
+	SPIFFESocket string        // SPIFFE Workload API socket for mesh mTLS; read only when !Plaintext
 }
+
+// maxEvents caps the rolling lifecycle feed so a long monitor session cannot
+// grow m.events unbounded. The oldest entries are dropped, newest last.
+const maxEvents = 200
 
 // model is the whole UI state. It is mutated ONLY by Update, only in response to
 // messages from the bus reader and the poller — never by those goroutines directly,
@@ -38,6 +43,13 @@ type model struct {
 
 	width, height int
 	err           error // last non-fatal error, shown in a status line
+
+	// busCh is the channel the bus reader's background goroutine (busreader.go)
+	// writes tea.Msg values onto. It is a reference type, so every copy of
+	// model Update hands back shares the same channel — the goroutine started
+	// from Init's startBusReader call is the only writer; Update is the only
+	// reader, via the looping waitForBusMsg tea.Cmd.
+	busCh chan tea.Msg
 }
 
 func newModel(cfg Config) model {
@@ -48,6 +60,7 @@ func newModel(cfg Config) model {
 		cfg:    cfg,
 		book:   map[string]position{},
 		health: map[string]bool{},
+		busCh:  make(chan tea.Msg, 64),
 	}
 }
 
@@ -69,7 +82,7 @@ type counterSnapshot struct {
 	Filled, Rejected, Quarantined, Ungoverned, Unpriced, SharedCollateral int
 }
 
-func (m model) Init() tea.Cmd { return nil } // Task 3/4 return the real startup cmds
+func (m model) Init() tea.Cmd { return m.startBusReader() } // Task 4 adds the poller's cmd alongside this
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
@@ -80,6 +93,29 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
+
+	case busEventMsg:
+		// Append, capped at maxEvents with the oldest dropped — a rolling feed,
+		// newest last.
+		m.events = append(m.events, lifecycleEvent(msg))
+		if len(m.events) > maxEvents {
+			m.events = m.events[len(m.events)-maxEvents:]
+		}
+		return m, waitForBusMsg(m.busCh)
+
+	case busPositionMsg:
+		// Upsert, last-write-wins — matches the compacted POSITION stream's own
+		// semantics: the latest message per key IS the current state.
+		key := msg.Portfolio + "/" + msg.Instrument
+		m.book[key] = position(msg)
+		return m, waitForBusMsg(m.busCh)
+
+	case busErrMsg:
+		// Non-fatal: recorded for the status line, never a crash. The reader
+		// goroutine keeps running (or has already returned after this one
+		// terminal error); either way Update must keep draining the channel.
+		m.err = msg.err
+		return m, waitForBusMsg(m.busCh)
 	}
 	return m, nil
 }
