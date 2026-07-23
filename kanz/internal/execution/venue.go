@@ -11,6 +11,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -101,12 +102,27 @@ type PriceFunc func(st *orderpb.OrderState) *commonpb.Decimal
 // SimVenue is the in-process simulation venue. It fills a marketable order in
 // full, in one fill, at the order's limit price (LIMIT/STOP_LIMIT) or the
 // resolved mark price (MARKET). Deterministic given its clock + id generator.
+//
+// IT REMEMBERS WHAT IT EXECUTED, and that is not a convenience. A real exchange
+// dedups a resubmitted clOrdId and can be asked what it did with an order; a
+// simulator that does neither cannot stand in for one on the crash-recovery
+// path, which is precisely the path we use it to prove. Without the record,
+// re-driving an order after a crash mints a SECOND fill_id for the same
+// execution — and position_fills, which dedups on fill_id, folds it twice.
 type SimVenue struct {
 	mic     string
 	account string
 	price   PriceFunc
 	now     func() time.Time
 	newID   func() string
+
+	// mu guards executed. SimVenue is shared by every goroutine handling orders
+	// for this MIC, so the record is concurrent by construction.
+	mu sync.Mutex
+	// executed maps order_id → the fills this venue reported for it. Unbounded
+	// by design: it is a simulator, its lifetime is a process, and forgetting an
+	// order would resurrect the exact bug this record exists to close.
+	executed map[string][]*orderpb.Fill
 }
 
 // SimOption customizes a SimVenue.
@@ -128,7 +144,13 @@ func WithIDGen(f func() string) SimOption { return func(v *SimVenue) { v.newID =
 
 // NewSimVenue returns a simulation venue with the given MIC.
 func NewSimVenue(mic string, opts ...SimOption) *SimVenue {
-	v := &SimVenue{mic: mic, account: "sim:" + mic, now: time.Now, newID: uuid.NewString}
+	v := &SimVenue{
+		mic:      mic,
+		account:  "sim:" + mic,
+		now:      time.Now,
+		newID:    uuid.NewString,
+		executed: make(map[string][]*orderpb.Fill),
+	}
 	for _, opt := range opts {
 		opt(v)
 	}
@@ -141,11 +163,22 @@ func (v *SimVenue) MIC() string { return v.mic }
 // Account returns the simulated exchange account.
 func (v *SimVenue) Account() string { return v.account }
 
-// Execute fills the open quantity in full at the resolved price.
+// Execute fills the open quantity in full at the resolved price. A second call
+// for an order id it has already executed returns THE SAME fills rather than
+// executing again — the behaviour a real exchange's clOrdId dedup gives us, and
+// the behaviour crash recovery depends on.
 func (v *SimVenue) Execute(_ context.Context, st *orderpb.OrderState) ([]*orderpb.Fill, error) {
 	if st == nil {
 		return nil, errors.New("execution: nil order state")
 	}
+
+	v.mu.Lock()
+	if prior, ok := v.executed[st.GetOrderId()]; ok {
+		v.mu.Unlock()
+		return prior, nil
+	}
+	v.mu.Unlock()
+
 	price := v.executionPrice(st)
 	if price == nil || dec.IsZero(price) {
 		// PERMANENT, not transient: this venue has no price source for this order
@@ -154,6 +187,9 @@ func (v *SimVenue) Execute(_ context.Context, st *orderpb.OrderState) ([]*orderp
 		// order RESTING FOREVER and indistinguishable from a working limit order.
 		// A capital-path no-op that looks like normal operation is the wrong
 		// failure direction; the caller must refuse the order, not re-queue it.
+		//
+		// Nothing is recorded here: an order this venue refused to price was
+		// never executed, so a later query must answer UNKNOWN, not FILLED.
 		return nil, fmt.Errorf("%w: %s has no price source for order type %s",
 			ErrUnpriced, v.mic, st.GetOrderType())
 	}
@@ -170,7 +206,37 @@ func (v *SimVenue) Execute(_ context.Context, st *orderpb.OrderState) ([]*orderp
 		VenueAccountId: v.account,
 		ExecutedAt:     timestamppb.New(v.now().UTC()),
 	}
-	return []*orderpb.Fill{fill}, nil
+	fills := []*orderpb.Fill{fill}
+
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	// Re-check under the lock: two concurrent Executes of one order id must
+	// produce ONE execution, and the loser adopts the winner's fills. Returning
+	// its own would be the double trade in miniature.
+	if prior, ok := v.executed[st.GetOrderId()]; ok {
+		return prior, nil
+	}
+	v.executed[st.GetOrderId()] = fills
+	return fills, nil
+}
+
+// QueryOrder answers what this venue did with an order — the Querier capability.
+//
+// SimVenue fills in full or not at all, so an order it remembers is FILLED and
+// an order it does not is UNKNOWN. UNKNOWN here is an AFFIRMATIVE statement:
+// this venue keeps a complete record for its process lifetime, so its silence
+// about an order really does mean it never executed one.
+func (v *SimVenue) QueryOrder(_ context.Context, st *orderpb.OrderState) (OrderView, error) {
+	if st == nil {
+		return OrderView{}, errors.New("execution: nil order state")
+	}
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	fills, ok := v.executed[st.GetOrderId()]
+	if !ok {
+		return OrderView{State: OrderViewUnknown}, nil
+	}
+	return OrderView{State: OrderViewFilled, Fills: fills}, nil
 }
 
 func (v *SimVenue) executionPrice(st *orderpb.OrderState) *commonpb.Decimal {
