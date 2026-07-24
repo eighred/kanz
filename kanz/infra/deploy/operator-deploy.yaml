@@ -79,6 +79,13 @@ spec:
             readOnlyRootFilesystem: true
             runAsNonRoot: true
             capabilities: { drop: ["ALL"] }
+          env:
+            - name: OPERATOR_PROVISIONER_IMAGE
+              value: ghcr.io/kanz-eng/kanz-provisioner:latest
+            - name: OPERATOR_K3S_SERVER_URL
+              valueFrom: { secretKeyRef: { name: operator-k3s-join, key: server_url, optional: true } }
+            - name: OPERATOR_K3S_TOKEN
+              valueFrom: { secretKeyRef: { name: operator-k3s-join, key: token, optional: true } }
 ---
 apiVersion: policy/v1
 kind: PodDisruptionBudget
@@ -89,3 +96,81 @@ spec:
   minAvailable: 1
   selector:
     matchLabels: { app: operator }
+---
+# S2a: the operator service creates one-shot provisioning Jobs + their transient
+# Secrets in its OWN namespace. Namespaced Role (never a ClusterRole) — these are
+# namespaced resources, and the operator must never gain a verb on cluster-scoped
+# nodes (a joining node self-registers).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: operator-provisioner
+  namespace: kanz-operator
+  labels: { app.kubernetes.io/part-of: kanz }
+rules:
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["create", "delete", "get", "list"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["create", "delete", "get", "update"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: operator-provisioner
+  namespace: kanz-operator
+  labels: { app.kubernetes.io/part-of: kanz }
+roleRef: { apiGroup: rbac.authorization.k8s.io, kind: Role, name: operator-provisioner }
+subjects:
+  - { kind: ServiceAccount, name: operator, namespace: kanz-operator }
+---
+# The provisioning Job's identity. It needs NO Kubernetes API access — only outbound
+# SSH — so it is bound to nothing.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: kanz-node-provisioner
+  namespace: kanz-operator
+  labels: { app.kubernetes.io/part-of: kanz }
+automountServiceAccountToken: false
+---
+# Deny-by-default ingress to the operator pod, closing the F0+S1 residual gap: the
+# plaintext gRPC listener (0.0.0.0:9090) was reachable by any in-cluster pod. Only the
+# health port is left ingressable (kubelet probes); gRPC is reached solely via
+# kubeconfig-gated port-forward, which does not traverse a NetworkPolicy.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: operator-ingress
+  namespace: kanz-operator
+  labels: { app.kubernetes.io/part-of: kanz }
+spec:
+  podSelector: { matchLabels: { app: operator } }
+  policyTypes: ["Ingress"]
+  ingress:
+    - ports:
+        - { protocol: TCP, port: 8091 }
+---
+# The provisioner Job egresses to DNS + arbitrary target SSH + the k3s control plane.
+# It is ephemeral; this policy scopes what a compromised provisioning run could reach.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: node-provisioner-egress
+  namespace: kanz-operator
+  labels: { app.kubernetes.io/part-of: kanz }
+spec:
+  podSelector: { matchLabels: { app.kubernetes.io/component: node-provisioner } }
+  policyTypes: ["Egress"]
+  egress:
+    - ports:
+        - { protocol: UDP, port: 53 }
+        - { protocol: TCP, port: 53 }
+    - ports:
+        - { protocol: TCP, port: 22 }
+        - { protocol: TCP, port: 6443 }
+        - { protocol: TCP, port: 443 }

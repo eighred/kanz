@@ -141,6 +141,10 @@ jobs:
           # 5) but no entry here, so nothing built the image the manifest referenced.
           - service: operator
             dockerfile: kanz/services/operator/Dockerfile
+          # S2a: the one-shot node-join Job the operator schedules to bring a bare host
+          # into the cluster over SSH. It had no image, so AddNode had nothing to run.
+          - service: kanz-provisioner
+            dockerfile: kanz/cmd/kanz-provisioner/Dockerfile
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
