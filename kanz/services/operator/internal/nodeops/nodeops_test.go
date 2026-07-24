@@ -11,6 +11,8 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes/fake"
 	k8stesting "k8s.io/client-go/testing"
+
+	"github.com/kanz-eng/kanz/services/operator/internal/estate"
 )
 
 func node(name string, unsched bool) *corev1.Node {
@@ -84,6 +86,34 @@ func TestEvictOnceEvictsOnlyOrdinaryPods(t *testing.T) {
 	}
 	if remaining != 1 {
 		t.Errorf("remaining = %d, want 1 (app-1 was evictable this pass)", remaining)
+	}
+}
+
+func TestSetRegionPatchesLabel(t *testing.T) {
+	cs, o := ops(node("london", false))
+	if err := o.SetRegion(context.Background(), "london", "asia"); err != nil {
+		t.Fatalf("SetRegion: %v", err)
+	}
+	n, _ := cs.CoreV1().Nodes().Get(context.Background(), "london", metav1.GetOptions{})
+	if n.Labels[estate.RegionLabel] != "asia" {
+		t.Errorf("region label = %q, want asia", n.Labels[estate.RegionLabel])
+	}
+}
+
+func TestSetRegionRejectsEmpty(t *testing.T) {
+	_, o := ops(node("london", false))
+	if err := o.SetRegion(context.Background(), "london", ""); err == nil {
+		t.Errorf("empty region should error")
+	}
+	if err := o.SetRegion(context.Background(), "", "asia"); err == nil {
+		t.Errorf("empty name should error")
+	}
+}
+
+func TestSetRegionUnknownNodeNotFound(t *testing.T) {
+	_, o := ops()
+	if err := o.SetRegion(context.Background(), "ghost", "asia"); !apierrors.IsNotFound(err) {
+		t.Fatalf("want NotFound, got %v", err)
 	}
 }
 

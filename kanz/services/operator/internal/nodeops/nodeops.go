@@ -6,6 +6,7 @@ package nodeops
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"time"
@@ -48,6 +49,26 @@ func (o *Ops) setUnschedulable(ctx context.Context, name string, v bool) error {
 	}
 	patch := []byte(fmt.Sprintf(`{"spec":{"unschedulable":%t}}`, v))
 	_, err := o.cs.CoreV1().Nodes().Patch(ctx, name, types.StrategicMergePatchType, patch, metav1.PatchOptions{})
+	return err // apierrors.IsNotFound(err) for an unknown node
+}
+
+// SetRegion relabels a node's topology.kubernetes.io/region (the "Move Node" action).
+// A strategic-merge patch on labels — non-destructive (no cordon, no eviction). The
+// patch is json.Marshal'd so an odd region value cannot break it; Kubernetes validates
+// the label value server-side (an invalid value returns an error).
+func (o *Ops) SetRegion(ctx context.Context, name, region string) error {
+	if name == "" || region == "" {
+		return fmt.Errorf("node name and region are required")
+	}
+	patch, err := json.Marshal(map[string]any{
+		"metadata": map[string]any{
+			"labels": map[string]string{estate.RegionLabel: region},
+		},
+	})
+	if err != nil {
+		return err
+	}
+	_, err = o.cs.CoreV1().Nodes().Patch(ctx, name, types.StrategicMergePatchType, patch, metav1.PatchOptions{})
 	return err // apierrors.IsNotFound(err) for an unknown node
 }
 

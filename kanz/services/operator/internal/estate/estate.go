@@ -28,7 +28,9 @@ const (
 )
 
 const (
-	regionLabel = "topology.kubernetes.io/region"
+	// RegionLabel is the node label the estate read model and the nodeops write
+	// path (SetRegion) share as the single source of truth for a node's region.
+	RegionLabel = "topology.kubernetes.io/region"
 	rolePrefix  = "node-role.kubernetes.io/"
 )
 
@@ -125,7 +127,7 @@ func mapNode(n *corev1.Node, evictable map[string]int) Node {
 		Name:           n.Name,
 		Status:         readyStatus(n),
 		Roles:          roles(n.Labels),
-		Region:         n.Labels[regionLabel],
+		Region:         n.Labels[RegionLabel],
 		KubeletVersion: n.Status.NodeInfo.KubeletVersion,
 		CreatedAt:      n.CreationTimestamp.Time,
 		Schedulable:    !n.Spec.Unschedulable,
