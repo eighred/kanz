@@ -7,7 +7,14 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 )
 
-type stubSource struct{ msg fetchMsg }
+// setRegionCall records one setRegion invocation; stubSource holds a pointer
+// to a slice so calls survive the stub's value-receiver methods.
+type setRegionCall struct{ name, region string }
+
+type stubSource struct {
+	msg            fetchMsg
+	setRegionCalls *[]setRegionCall
+}
 
 func (s stubSource) fetch(context.Context) (fetchMsg, error) { return s.msg, nil }
 
@@ -21,6 +28,13 @@ func (s stubSource) testConnection(context.Context, string, int32) (testConnResu
 func (s stubSource) cordon(context.Context, string) error   { return nil }
 func (s stubSource) uncordon(context.Context, string) error { return nil }
 func (s stubSource) drain(context.Context, string) error    { return nil }
+
+func (s stubSource) setRegion(_ context.Context, name, region string) error {
+	if s.setRegionCalls != nil {
+		*s.setRegionCalls = append(*s.setRegionCalls, setRegionCall{name: name, region: region})
+	}
+	return nil
+}
 
 func TestFetchMsgPopulatesModel(t *testing.T) {
 	m := newModel(Config{}, stubSource{})
@@ -96,6 +110,126 @@ func TestDrainAsksForConfirmation(t *testing.T) {
 	_, cmd2 := u.(model).Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
 	if cmd2 == nil {
 		t.Fatalf("y should fire the drain command")
+	}
+}
+
+func TestMKeyOpensRegionInput(t *testing.T) {
+	m := newModel(Config{}, stubSource{})
+	m.active = paneNodes
+	m.nodes = []nodeRow{{Name: "london", schedulable: true}}
+	u, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'m'}})
+	if cmd != nil {
+		t.Fatalf("m should open the region input, not fire immediately")
+	}
+	got := u.(model)
+	if !got.movingRegion {
+		t.Fatalf("m should enter the move-input state")
+	}
+	if got.moveInput != "" {
+		t.Fatalf("moveInput should start empty, got %q", got.moveInput)
+	}
+}
+
+func TestMKeyWithNoNodesIsNoOp(t *testing.T) {
+	m := newModel(Config{}, stubSource{})
+	m.active = paneNodes
+	m.nodes = nil
+	u, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'m'}})
+	if cmd != nil {
+		t.Fatalf("m with no nodes should not return a command")
+	}
+	if u.(model).movingRegion {
+		t.Fatalf("m with no nodes should not enter the move-input state")
+	}
+}
+
+func TestRegionInputTypesAndBackspaces(t *testing.T) {
+	m := newModel(Config{}, stubSource{})
+	m.active = paneNodes
+	m.nodes = []nodeRow{{Name: "london", schedulable: true}}
+	m.movingRegion = true
+	for _, r := range "asia" {
+		u, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+		m = u.(model)
+	}
+	if m.moveInput != "asia" {
+		t.Fatalf("move input = %q, want asia", m.moveInput)
+	}
+	u, _ := m.Update(tea.KeyMsg{Type: tea.KeyBackspace})
+	m = u.(model)
+	if m.moveInput != "asi" {
+		t.Fatalf("backspace should trim one rune, got %q", m.moveInput)
+	}
+}
+
+func TestRegionInputEnterSubmitsAndRecordsCall(t *testing.T) {
+	var calls []setRegionCall
+	m := newModel(Config{}, stubSource{setRegionCalls: &calls})
+	m.active = paneNodes
+	m.nodes = []nodeRow{{Name: "london", schedulable: true}}
+	m.movingRegion = true
+	m.moveInput = "asia"
+
+	u, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if cmd == nil {
+		t.Fatalf("enter should fire the SetNodeRegion command")
+	}
+	if u.(model).movingRegion {
+		t.Fatalf("enter should close the move-input state")
+	}
+	msg := cmd()
+	am, ok := msg.(nodeActionMsg)
+	if !ok {
+		t.Fatalf("expected nodeActionMsg, got %T", msg)
+	}
+	if am.err != nil {
+		t.Fatalf("unexpected err: %v", am.err)
+	}
+	if len(calls) != 1 || calls[0].name != "london" || calls[0].region != "asia" {
+		t.Fatalf("setRegion calls = %+v", calls)
+	}
+}
+
+func TestRegionInputEnterOnEmptyDoesNothing(t *testing.T) {
+	var calls []setRegionCall
+	m := newModel(Config{}, stubSource{setRegionCalls: &calls})
+	m.active = paneNodes
+	m.nodes = []nodeRow{{Name: "london", schedulable: true}}
+	m.movingRegion = true
+	m.moveInput = ""
+
+	u, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if cmd != nil {
+		t.Fatalf("enter on empty moveInput should not fire a command")
+	}
+	if !u.(model).movingRegion {
+		t.Fatalf("enter on empty moveInput should stay in the move-input state")
+	}
+	if len(calls) != 0 {
+		t.Fatalf("setRegion should not have been called, got %+v", calls)
+	}
+}
+
+func TestRegionInputEscCancels(t *testing.T) {
+	var calls []setRegionCall
+	m := newModel(Config{}, stubSource{setRegionCalls: &calls})
+	m.active = paneNodes
+	m.nodes = []nodeRow{{Name: "london", schedulable: true}}
+	m.movingRegion = true
+	m.moveInput = "asia"
+	u, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	if cmd != nil {
+		t.Fatalf("esc should not return a command")
+	}
+	got := u.(model)
+	if got.movingRegion {
+		t.Fatalf("esc should cancel the move input")
+	}
+	if got.moveInput != "" {
+		t.Fatalf("esc should reset moveInput, got %q", got.moveInput)
+	}
+	if len(calls) != 0 {
+		t.Fatalf("setRegion should not have been called, got %+v", calls)
 	}
 }
 

@@ -46,3 +46,23 @@ func TestRenderErrorShownInStatus(t *testing.T) {
 type errStub struct{}
 
 func (errStub) Error() string { return "boom" }
+
+func TestRenderMoveRegionPromptIsPureAndStable(t *testing.T) {
+	m := model{
+		active: paneNodes,
+		width:  100, height: 30,
+		nodes:        []nodeRow{{Name: "london", Status: "Ready", Region: "europe", schedulable: true}},
+		movingRegion: true,
+		moveInput:    "asia",
+	}
+	out1 := m.render()
+	for _, want := range []string{"london", "asia"} {
+		if !strings.Contains(out1, want) {
+			t.Errorf("render missing %q\n%s", want, out1)
+		}
+	}
+	out2 := m.render()
+	if out1 != out2 {
+		t.Errorf("render is not pure: two calls produced different output\nfirst:\n%s\nsecond:\n%s", out1, out2)
+	}
+}

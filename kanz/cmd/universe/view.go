@@ -82,6 +82,12 @@ func (m model) renderNodes() string {
 			b.WriteString("\n")
 		}
 	}
+	if m.movingRegion {
+		if name, ok := m.selectedNodeName(); ok {
+			b.WriteString("\n" + fmt.Sprintf("Move %s to region: %s_  [enter] move  [esc] cancel", name, m.moveInput))
+			b.WriteString("\n")
+		}
+	}
 	return b.String()
 }
 
@@ -102,7 +108,7 @@ func (m model) renderClusters() string {
 func (m model) renderStatus() string {
 	left := styleDim.Render("[tab] switch pane   [a] add node   [q] quit")
 	if m.active == paneNodes {
-		left += "\n" + styleDim.Render("[↑↓] select  [c]ordon [u]ncordon [d]rain")
+		left += "\n" + styleDim.Render("[↑↓] select  [c]ordon [u]ncordon [d]rain [m]ove")
 	}
 	if p := m.renderProvisions(); p != "" {
 		left += "\n" + p

@@ -22,6 +22,7 @@ type nodeSource interface {
 	cordon(ctx context.Context, name string) error
 	uncordon(ctx context.Context, name string) error
 	drain(ctx context.Context, name string) error
+	setRegion(ctx context.Context, name, region string) error
 }
 
 // testConnResult is the outcome of a pre-flight reachability probe of a
@@ -130,6 +131,11 @@ func (g *grpcSource) uncordon(ctx context.Context, name string) error {
 
 func (g *grpcSource) drain(ctx context.Context, name string) error {
 	_, err := g.client.Drain(ctx, &operatorpb.DrainRequest{Name: name})
+	return err
+}
+
+func (g *grpcSource) setRegion(ctx context.Context, name, region string) error {
+	_, err := g.client.SetNodeRegion(ctx, &operatorpb.SetNodeRegionRequest{Name: name, Region: region})
 	return err
 }
 

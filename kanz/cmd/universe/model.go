@@ -52,6 +52,12 @@ type model struct {
 	confirmingDrain bool
 	actionErr       error
 
+	// movingRegion/moveInput drive the Move Node (region relabel) prompt (S3b).
+	// Unlike drain it fires directly on enter with no y/n confirm — a relabel
+	// is non-destructive.
+	movingRegion bool
+	moveInput    string
+
 	// showForm/form drive the Add Node form (S2a). provisions is the last
 	// polled provisioning strip; formErr surfaces a failed submit without
 	// leaving the form (the operator stays reachable to retry).
@@ -82,6 +88,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if m.active == paneNodes && m.confirmingDrain {
 			return m.updateDrainConfirm(msg)
+		}
+		if m.active == paneNodes && m.movingRegion {
+			return m.updateMoveInput(msg)
 		}
 		switch msg.String() {
 		case "q", "ctrl+c":
@@ -123,6 +132,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.active == paneNodes {
 				if _, ok := m.selectedNodeName(); ok {
 					m.confirmingDrain = true
+				}
+			}
+		case "m":
+			if m.active == paneNodes {
+				if _, ok := m.selectedNodeName(); ok {
+					m.movingRegion = true
+					m.moveInput = ""
 				}
 			}
 		}
@@ -272,6 +288,53 @@ func (m model) updateDrainConfirm(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	return m, nil
+}
+
+// updateMoveInput handles key input while the Move Node (region relabel)
+// prompt is showing. Unlike drain, enter fires setRegion directly with no
+// y/n confirm — a relabel is non-destructive. An empty moveInput is rejected
+// client-side on enter (stays in the input) rather than round-tripping a
+// value the handler would reject anyway. Any other key is swallowed.
+func (m model) updateMoveInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.Type {
+	case tea.KeyEsc:
+		m.movingRegion = false
+		m.moveInput = ""
+		return m, nil
+	case tea.KeyEnter:
+		if m.moveInput == "" {
+			return m, nil
+		}
+		if name, ok := m.selectedNodeName(); ok {
+			region := m.moveInput
+			m.movingRegion = false
+			m.moveInput = ""
+			return m, m.moveNodeCmd(name, region)
+		}
+		return m, nil
+	case tea.KeyBackspace:
+		if r := []rune(m.moveInput); len(r) > 0 {
+			m.moveInput = string(r[:len(r)-1])
+		}
+		return m, nil
+	case tea.KeyRunes:
+		m.moveInput += string(msg.Runes)
+		return m, nil
+	}
+	return m, nil
+}
+
+// moveNodeCmd runs a setRegion call off the UI thread and reports the outcome
+// as a nodeActionMsg — the same result message cordon/drain use, so a failed
+// relabel surfaces via actionErr with no new plumbing. The node's new Region
+// arrives on the next poll rather than being applied optimistically here.
+func (m model) moveNodeCmd(name, region string) tea.Cmd {
+	src := m.src
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), pollTimeout)
+		defer cancel()
+		return nodeActionMsg{err: src.setRegion(ctx, name, region)}
+	}
 }
 
 // selectedNodeName returns the name of the highlighted node, guarding against
