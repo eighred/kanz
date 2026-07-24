@@ -85,3 +85,99 @@ func TestOperatorClusterRoleIsNodeReadOnly(t *testing.T) {
 		t.Fatalf("no ClusterRole named operator-node-reader found in %s", path)
 	}
 }
+
+// roleDoc / saDoc reuse the yaml.v3 multi-doc decode pattern from
+// TestOperatorClusterRoleIsNodeReadOnly.
+type roleDoc struct {
+	Kind     string `yaml:"kind"`
+	Metadata struct {
+		Name      string `yaml:"name"`
+		Namespace string `yaml:"namespace"`
+	} `yaml:"metadata"`
+	AutomountServiceAccountToken *bool `yaml:"automountServiceAccountToken"`
+	Rules                        []struct {
+		APIGroups []string `yaml:"apiGroups"`
+		Resources []string `yaml:"resources"`
+		Verbs     []string `yaml:"verbs"`
+	} `yaml:"rules"`
+}
+
+// TestOperatorProvisionerRoleIsBounded asserts the S2a operator-provisioner
+// Role is namespaced (never cluster-scoped), never grants a verb on nodes,
+// and only ever grants jobs/secrets — the resource set the provisioning
+// workflow actually needs. A drift toward node access or a new resource
+// fails the build.
+func TestOperatorProvisionerRoleIsBounded(t *testing.T) {
+	docs := decodeOperatorManifest(t)
+	allowedResources := map[string]bool{"jobs": true, "secrets": true}
+	var found bool
+	for _, d := range docs {
+		if d.Kind != "Role" || d.Metadata.Name != "operator-provisioner" {
+			continue
+		}
+		found = true
+		if d.Metadata.Namespace != "kanz-operator" {
+			t.Errorf("operator-provisioner Role must be namespaced to kanz-operator, got %q", d.Metadata.Namespace)
+		}
+		for _, r := range d.Rules {
+			for _, res := range r.Resources {
+				if res == "nodes" {
+					t.Errorf("operator-provisioner grants a verb on NODES — the operator must never write node objects")
+				}
+				if !allowedResources[res] {
+					t.Errorf("operator-provisioner grants resource %q; only jobs/secrets are allowed", res)
+				}
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("no namespaced Role operator-provisioner found — S2a RBAC missing")
+	}
+}
+
+// TestProvisionerServiceAccountHasNoToken asserts the kanz-node-provisioner
+// ServiceAccount never automounts a token: the provisioning Job needs no
+// Kubernetes API access at all, only outbound SSH.
+func TestProvisionerServiceAccountHasNoToken(t *testing.T) {
+	docs := decodeOperatorManifest(t)
+	var found bool
+	for _, d := range docs {
+		if d.Kind != "ServiceAccount" || d.Metadata.Name != "kanz-node-provisioner" {
+			continue
+		}
+		found = true
+		if d.AutomountServiceAccountToken == nil || *d.AutomountServiceAccountToken {
+			t.Errorf("kanz-node-provisioner must set automountServiceAccountToken: false — the Job needs no k8s API access")
+		}
+	}
+	if !found {
+		t.Fatalf("no ServiceAccount kanz-node-provisioner found — provisioner isolation missing")
+	}
+}
+
+// decodeOperatorManifest reads infra/deploy/operator-deploy.yaml into typed docs.
+func decodeOperatorManifest(t *testing.T) []roleDoc {
+	t.Helper()
+	path := filepath.Join(moduleRoot(t), "infra", "deploy", "operator-deploy.yaml")
+	body, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	var docs []roleDoc
+	dec := yaml.NewDecoder(strings.NewReader(string(body)))
+	for {
+		var d roleDoc
+		err := dec.Decode(&d)
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			t.Fatalf("parse %s: %v", path, err)
+		}
+		docs = append(docs, d)
+	}
+	if len(docs) == 0 {
+		t.Fatalf("no docs decoded from %s", path)
+	}
+	return docs
+}
