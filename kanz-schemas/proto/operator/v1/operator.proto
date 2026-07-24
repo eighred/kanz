@@ -52,6 +52,12 @@ service OperatorService {
   // Eviction API, honoring PodDisruptionBudgets. Async: returns once cordoned;
   // eviction proceeds in the background. Poll ListNodes for the derived status.
   rpc Drain(DrainRequest) returns (DrainResponse);
+
+  // SetNodeRegion relabels a node's topology.kubernetes.io/region — the "Move Node"
+  // action: it moves the node between the region groupings the Clusters view shows.
+  // Non-destructive (relabel only, no eviction). Poll ListNodes/ListClusters for the
+  // new grouping.
+  rpc SetNodeRegion(SetNodeRegionRequest) returns (SetNodeRegionResponse);
 }
 
 // NodeStatus is the node's readiness. UNSPECIFIED (the zero value) is the
@@ -155,3 +161,9 @@ message UncordonRequest { string name = 1; }
 message UncordonResponse {}
 message DrainRequest { string name = 1; }
 message DrainResponse {}
+
+message SetNodeRegionRequest {
+  string name = 1;
+  string region = 2;
+}
+message SetNodeRegionResponse {}
