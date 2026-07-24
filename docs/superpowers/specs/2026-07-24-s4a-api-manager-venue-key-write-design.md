@@ -145,8 +145,10 @@ fields are a single source of truth in this package:
 
 **k8s-Secret backend (rig/dev).** Server-side-*applies* a Secret named
 `venue-<venue>-keys` in namespace `kanz-services`, `type: Opaque`, with data keys
-`api_key` / `api_secret` / `api_passphrase` (matching the SecretProviderClass
-`secretKey` convention, so a Vault-less venue adapter's file mount lines up). Apply
+`api-key` / `api-secret` / `api-passphrase` (matching the SecretProviderClass
+**objectName**/mounted-filename convention — hyphenated — since the dev rig mounts
+this Secret as a plain volume with no CSI remap; the Vault backend, by contrast,
+writes the Vault `secretKey` convention, underscored). Apply
 (`types.ApplyPatchType`, a fixed field-manager) is create-or-update in one call with
 **no read-back of values**. `ListVenues` reads Secret **metadata only** (existence by
 name) and never surfaces `.Data`. The operator's existing client-go and in-cluster SA

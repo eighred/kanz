@@ -23,7 +23,7 @@ func TestKubeStoreSetVenueKeysAppliesSecret(t *testing.T) {
 	if sec.Type != corev1.SecretTypeOpaque {
 		t.Errorf("type = %v, want Opaque", sec.Type)
 	}
-	for k, want := range map[string]string{"api_key": "k", "api_secret": "s", "api_passphrase": "p"} {
+	for k, want := range map[string]string{"api-key": "k", "api-secret": "s", "api-passphrase": "p"} {
 		if got := string(sec.Data[k]); got != want {
 			t.Errorf("data[%s] = %q, want %q", k, got, want)
 		}
@@ -39,11 +39,11 @@ func TestKubeStoreSetVenueKeysUpdatesInPlace(t *testing.T) {
 		t.Fatalf("re-apply: %v", err)
 	}
 	sec, _ := cs.CoreV1().Secrets("kanz-services").Get(ctx, "venue-binance-keys", metav1.GetOptions{})
-	if got := string(sec.Data["api_key"]); got != "k2" {
-		t.Errorf("api_key = %q, want k2 (updated in place)", got)
+	if got := string(sec.Data["api-key"]); got != "k2" {
+		t.Errorf("api-key = %q, want k2 (updated in place)", got)
 	}
-	if _, ok := sec.Data["api_passphrase"]; ok {
-		t.Errorf("binance secret must carry no api_passphrase")
+	if _, ok := sec.Data["api-passphrase"]; ok {
+		t.Errorf("binance secret must carry no api-passphrase")
 	}
 }
 

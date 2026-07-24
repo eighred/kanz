@@ -16,8 +16,15 @@ import (
 const fieldManager = "kanz-operator-venue-keys"
 
 // KubeStore is the dev/rig backend: it writes each venue's key set into a Kubernetes
-// Secret named venue-<venue>-keys in the configured namespace, with data keys the
-// venue adapter's CSI/file mount expects (api_key / api_secret / api_passphrase). It
+// Secret named venue-<venue>-keys in the configured namespace, with data keys equal
+// to the MOUNTED FILENAMES the venue adapter reads (api-key / api-secret /
+// api-passphrase) — the SecretProviderClass's objectName / *_FILE-basename
+// convention, hyphenated. The dev rig mounts this Secret directly as a plain secret
+// volume with no CSI objectName remap, so a Secret's data key becomes the mounted
+// file's name verbatim; it must therefore match the adapter's file paths, not Vault's
+// secretKey names. Contrast: VaultStore writes the Vault secretKey (underscored,
+// api_key / api_secret / api_passphrase), which the SecretProviderClass CSI driver
+// then maps to these same hyphenated files in production. It
 // reads a Secret's METADATA for presence and never surfaces its Data — the write-only
 // guarantee is the interface (no value-returning method) plus this code plus the
 // namespace bound (k8s Secret RBAC cannot express presence-without-value).
@@ -46,11 +53,11 @@ func secretName(venue string) string { return "venue-" + venue + "-keys" }
 // the old value — this preserves the write-only contract.
 func (s *KubeStore) SetVenueKeys(ctx context.Context, venue string, keys VenueKeys) error {
 	data := map[string][]byte{
-		"api_key":    []byte(keys.APIKey),
-		"api_secret": []byte(keys.APISecret),
+		"api-key":    []byte(keys.APIKey),
+		"api-secret": []byte(keys.APISecret),
 	}
 	if keys.Passphrase != "" {
-		data["api_passphrase"] = []byte(keys.Passphrase)
+		data["api-passphrase"] = []byte(keys.Passphrase)
 	}
 	name := secretName(venue)
 
