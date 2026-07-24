@@ -15,6 +15,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/timestamppb"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 
 	operatorpb "github.com/kanz-eng/kanz-schemas-go/operator/v1"
 
@@ -30,11 +31,20 @@ type Provisioner interface {
 	List(ctx context.Context) ([]provision.Provision, error)
 }
 
+// NodeOps is the node-lifecycle surface the operator gRPC depends on (nodeops.Ops
+// satisfies it). Optional — nil in a deployment without the node-writer RBAC.
+type NodeOps interface {
+	Cordon(ctx context.Context, name string) error
+	Uncordon(ctx context.Context, name string) error
+	Drain(ctx context.Context, name string) error
+}
+
 // Server adapts an estate.Reader to the generated OperatorService interface.
 type Server struct {
 	operatorpb.UnimplementedOperatorServiceServer
-	reader estate.Reader
-	prov   Provisioner
+	reader  estate.Reader
+	prov    Provisioner
+	nodeOps NodeOps
 }
 
 // New returns a read-only Server (no provisioning). Retained for callers/tests that
@@ -45,6 +55,10 @@ func New(r estate.Reader) *Server { return &Server{reader: r} }
 func NewWithProvisioner(r estate.Reader, p Provisioner) *Server {
 	return &Server{reader: r, prov: p}
 }
+
+// WithNodeOps attaches the node-lifecycle surface and returns the server (builder
+// style, so it composes with New / NewWithProvisioner without new constructors).
+func (s *Server) WithNodeOps(ops NodeOps) *Server { s.nodeOps = ops; return s }
 
 // Register binds the server onto a grpc.ServiceRegistrar.
 func (s *Server) Register(r grpc.ServiceRegistrar) {
@@ -65,6 +79,8 @@ func (s *Server) ListNodes(ctx context.Context, _ *operatorpb.ListNodesRequest) 
 			Region:         n.Region,
 			KubeletVersion: n.KubeletVersion,
 			CreatedAt:      nonZeroTimestamp(n.CreatedAt),
+			Schedulable:    n.Schedulable,
+			EvictablePods:  int32(n.EvictablePods),
 		})
 	}
 	return &operatorpb.ListNodesResponse{Nodes: out}, nil
@@ -118,6 +134,44 @@ func (s *Server) ListProvisions(ctx context.Context, _ *operatorpb.ListProvision
 		})
 	}
 	return &operatorpb.ListProvisionsResponse{Provisions: out}, nil
+}
+
+func (s *Server) Cordon(ctx context.Context, req *operatorpb.CordonRequest) (*operatorpb.CordonResponse, error) {
+	if err := s.nodeWrite(ctx, req.GetName(), func() error { return s.nodeOps.Cordon(ctx, req.GetName()) }); err != nil {
+		return nil, err
+	}
+	return &operatorpb.CordonResponse{}, nil
+}
+
+func (s *Server) Uncordon(ctx context.Context, req *operatorpb.UncordonRequest) (*operatorpb.UncordonResponse, error) {
+	if err := s.nodeWrite(ctx, req.GetName(), func() error { return s.nodeOps.Uncordon(ctx, req.GetName()) }); err != nil {
+		return nil, err
+	}
+	return &operatorpb.UncordonResponse{}, nil
+}
+
+func (s *Server) Drain(ctx context.Context, req *operatorpb.DrainRequest) (*operatorpb.DrainResponse, error) {
+	if err := s.nodeWrite(ctx, req.GetName(), func() error { return s.nodeOps.Drain(ctx, req.GetName()) }); err != nil {
+		return nil, err
+	}
+	return &operatorpb.DrainResponse{}, nil
+}
+
+// nodeWrite is the shared guard+error mapping for the three node-write handlers.
+func (s *Server) nodeWrite(_ context.Context, name string, do func() error) error {
+	if s.nodeOps == nil {
+		return status.Error(codes.Unimplemented, "node operations not configured")
+	}
+	if name == "" {
+		return status.Error(codes.InvalidArgument, "node name is required")
+	}
+	if err := do(); err != nil {
+		if apierrors.IsNotFound(err) {
+			return status.Error(codes.NotFound, err.Error())
+		}
+		return status.Error(codes.Internal, err.Error())
+	}
+	return nil
 }
 
 // testDialTimeout bounds the reachability probe.

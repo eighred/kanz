@@ -179,6 +179,68 @@ func TestTestConnectionRejectsEmptyIP(t *testing.T) {
 	}
 }
 
+type stubNodeOps struct {
+	cordoned, uncordoned, drained string
+	err                           error
+}
+
+func (s *stubNodeOps) Cordon(_ context.Context, name string) error { s.cordoned = name; return s.err }
+func (s *stubNodeOps) Uncordon(_ context.Context, name string) error {
+	s.uncordoned = name
+	return s.err
+}
+func (s *stubNodeOps) Drain(_ context.Context, name string) error { s.drained = name; return s.err }
+
+func TestCordonUncordonDrainDelegate(t *testing.T) {
+	sn := &stubNodeOps{}
+	srv := New(stubReader{}).WithNodeOps(sn)
+
+	if _, err := srv.Cordon(context.Background(), &operatorpb.CordonRequest{Name: "london"}); err != nil {
+		t.Fatalf("Cordon: %v", err)
+	}
+	if _, err := srv.Uncordon(context.Background(), &operatorpb.UncordonRequest{Name: "london"}); err != nil {
+		t.Fatalf("Uncordon: %v", err)
+	}
+	if _, err := srv.Drain(context.Background(), &operatorpb.DrainRequest{Name: "london"}); err != nil {
+		t.Fatalf("Drain: %v", err)
+	}
+	if sn.cordoned != "london" || sn.uncordoned != "london" || sn.drained != "london" {
+		t.Errorf("delegation failed: %+v", sn)
+	}
+}
+
+func TestCordonRejectsEmptyName(t *testing.T) {
+	srv := New(stubReader{}).WithNodeOps(&stubNodeOps{})
+	if _, err := srv.Cordon(context.Background(), &operatorpb.CordonRequest{}); status.Code(err) != codes.InvalidArgument {
+		t.Fatalf("want InvalidArgument, got %v", err)
+	}
+}
+
+func TestCordonUnconfiguredIsUnimplemented(t *testing.T) {
+	if _, err := New(stubReader{}).Cordon(context.Background(), &operatorpb.CordonRequest{Name: "x"}); status.Code(err) != codes.Unimplemented {
+		t.Fatalf("want Unimplemented when nodeOps is nil, got %v", err)
+	}
+}
+
+// The ListNodes handler must carry the new estate fields to the proto, or the TUI
+// never sees drain status.
+func TestListNodesSurfacesSchedulableAndEvictable(t *testing.T) {
+	srv := New(stubReader{nodes: []estate.Node{
+		{Name: "london", Status: estate.StatusReady, Schedulable: false, EvictablePods: 3},
+	}})
+	resp, err := srv.ListNodes(context.Background(), &operatorpb.ListNodesRequest{})
+	if err != nil {
+		t.Fatalf("ListNodes: %v", err)
+	}
+	if len(resp.GetNodes()) != 1 {
+		t.Fatalf("want 1 node")
+	}
+	n := resp.GetNodes()[0]
+	if n.GetSchedulable() || n.GetEvictablePods() != 3 {
+		t.Errorf("ListNodes must map schedulable/evictable_pods from estate: schedulable=%v evictable=%d", n.GetSchedulable(), n.GetEvictablePods())
+	}
+}
+
 func TestListProvisionsMapsStatus(t *testing.T) {
 	sp := &stubProvisioner{provisions: []provision.Provision{
 		{ID: "p1", Hostname: "london", Status: provision.StatusJoined},

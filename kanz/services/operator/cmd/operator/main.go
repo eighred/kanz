@@ -24,6 +24,7 @@ import (
 	"github.com/kanz-eng/kanz/services/operator/internal/config"
 	"github.com/kanz-eng/kanz/services/operator/internal/estate"
 	"github.com/kanz-eng/kanz/services/operator/internal/grpcsrv"
+	"github.com/kanz-eng/kanz/services/operator/internal/nodeops"
 	"github.com/kanz-eng/kanz/services/operator/internal/provision"
 )
 
@@ -89,6 +90,7 @@ func main() {
 		srv = grpcsrv.New(reader)
 		logger.Warn("no OPERATOR_PROVISIONER_IMAGE — AddNode disabled (read-only)")
 	}
+	srv = srv.WithNodeOps(nodeops.New(cs, logger))
 	srv.Register(grpcSrv)
 	go func() {
 		logger.Info("operator gRPC listening", "addr", cfg.GRPCListen)
