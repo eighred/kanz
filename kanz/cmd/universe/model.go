@@ -80,6 +80,15 @@ type model struct {
 	venues      []venueRow
 	apiSelected int
 
+	// showKeyForm/keyForm drive the Set API Keys form (S4a write side), scoped
+	// to the venue selected in the API Manager pane when 'k' is pressed.
+	// keyFormErr is unused as a lingering field-level error — a failed submit
+	// surfaces via actionErr instead (see keyFormResultMsg) so the typed secret
+	// never has to survive on the model to keep an error visible.
+	showKeyForm bool
+	keyForm     keyForm
+	keyFormErr  error
+
 	width, height int
 	err           error
 }
@@ -98,6 +107,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyMsg:
 		if m.showForm {
 			return m.updateForm(msg)
+		}
+		if m.showKeyForm {
+			return m.updateKeyForm(msg)
 		}
 		if m.active == paneNodes && m.confirmingDrain {
 			return m.updateDrainConfirm(msg)
@@ -163,6 +175,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.moveInput = ""
 				}
 			}
+		case "k":
+			if m.active == paneAPI {
+				if m.apiSelected >= 0 && m.apiSelected < len(m.venues) {
+					m.showKeyForm = true
+					m.keyForm = newKeyForm(m.venues[m.apiSelected].venue)
+					m.keyFormErr = nil
+				}
+			}
 		}
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
@@ -194,6 +214,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.showForm = false
 			m.formErr = nil
 		}
+	case keyFormResultMsg:
+		// The form closes on ANY result, success or error — the typed secret
+		// must never linger on the model. A failed submit surfaces through
+		// actionErr (the same status-line error cordon/uncordon/drain/setRegion
+		// use) rather than keeping the form open with the secret still resident,
+		// so the operator can see what failed and reopen with 'k' to retry.
+		m.showKeyForm = false
+		m.keyForm = keyForm{}
+		m.actionErr = msg.err
+		return m, nil
 	case testConnResultMsg:
 		switch {
 		case msg.err != nil:
@@ -266,6 +296,54 @@ type addNodeResultMsg struct {
 	id  string
 	err error
 }
+
+// updateKeyForm handles key input while the Set API Keys form is active. It
+// never touches m.venues — only the form's own state and, on submit, a
+// tea.Cmd that calls setVenueKeys off the UI thread.
+func (m model) updateKeyForm(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.Type {
+	case tea.KeyEsc:
+		m.showKeyForm = false
+		m.keyForm = keyForm{}
+		m.keyFormErr = nil
+		return m, nil
+	case tea.KeyTab:
+		m.keyForm = m.keyForm.next()
+		return m, nil
+	case tea.KeyShiftTab:
+		m.keyForm = m.keyForm.prev()
+		return m, nil
+	case tea.KeyBackspace:
+		m.keyForm = m.keyForm.backspace()
+		return m, nil
+	case tea.KeyEnter:
+		return m, m.submitKeyForm()
+	case tea.KeyRunes:
+		m.keyForm = m.keyForm.key(msg)
+		return m, nil
+	}
+	return m, nil
+}
+
+// submitKeyForm fires SetVenueKeys off the UI thread, then the typed secret leaves the
+// model — the form is reset regardless of outcome-in-flight, and the result closes it.
+func (m model) submitKeyForm() tea.Cmd {
+	venue := m.keyForm.venue
+	keys := venueKeys{
+		apiKey:     m.keyForm.value("api_key"),
+		apiSecret:  m.keyForm.value("api_secret"),
+		passphrase: m.keyForm.value("passphrase"),
+	}
+	src := m.src
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), pollTimeout)
+		defer cancel()
+		return keyFormResultMsg{err: src.setVenueKeys(ctx, venue, keys)}
+	}
+}
+
+// keyFormResultMsg carries the outcome of a setVenueKeys call back into Update.
+type keyFormResultMsg struct{ err error }
 
 // testConnCmd probes the form's ip:port off the UI thread.
 func (m model) testConnCmd() tea.Cmd {

@@ -32,6 +32,17 @@ func (m model) render() string {
 		return out
 	}
 
+	if m.showKeyForm {
+		out := m.keyForm.render()
+		if m.keyFormErr != nil {
+			out += "\n" + styleErr.Render("error: "+m.keyFormErr.Error())
+		}
+		if m.actionErr != nil {
+			out += "\n" + styleErr.Render("error: "+m.actionErr.Error())
+		}
+		return out
+	}
+
 	var body string
 	switch m.active {
 	case paneClusters:

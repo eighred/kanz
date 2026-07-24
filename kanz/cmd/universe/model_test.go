@@ -320,6 +320,117 @@ func TestRegionInputEscCancels(t *testing.T) {
 	}
 }
 
+func TestKKeyOpensKeyFormScopedToSelectedVenue(t *testing.T) {
+	m := newModel(Config{}, stubSource{})
+	m.active = paneAPI
+	m.venues = []venueRow{{venue: "binance"}, {venue: "okx"}}
+	m.apiSelected = 1
+
+	u, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'k'}})
+	if cmd != nil {
+		t.Fatalf("k should open the form, not fire immediately")
+	}
+	got := u.(model)
+	if !got.showKeyForm {
+		t.Fatalf("k should enter the key-form state")
+	}
+	if got.keyForm.venue != "okx" {
+		t.Fatalf("keyForm.venue = %q, want okx (scoped to selected row)", got.keyForm.venue)
+	}
+}
+
+func TestKKeyWithNoVenuesIsNoOp(t *testing.T) {
+	m := newModel(Config{}, stubSource{})
+	m.active = paneAPI
+	m.venues = nil
+	u, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'k'}})
+	if cmd != nil {
+		t.Fatalf("k with no venues should not return a command")
+	}
+	if u.(model).showKeyForm {
+		t.Fatalf("k with no venues should not enter the key-form state")
+	}
+}
+
+func TestKeyFormTypingAndBackspaceEditFocusedField(t *testing.T) {
+	m := newModel(Config{}, stubSource{})
+	m.showKeyForm = true
+	m.keyForm = newKeyForm("binance")
+
+	for _, r := range "hé" {
+		u, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+		m = u.(model)
+	}
+	if m.keyForm.value("api_key") != "hé" {
+		t.Fatalf("api_key = %q, want hé", m.keyForm.value("api_key"))
+	}
+	u, _ := m.Update(tea.KeyMsg{Type: tea.KeyBackspace})
+	m = u.(model)
+	if m.keyForm.value("api_key") != "h" {
+		t.Fatalf("api_key after backspace = %q, want h", m.keyForm.value("api_key"))
+	}
+}
+
+func TestKeyFormEnterSubmitsCallsSetVenueKeysClosesAndClearsSecret(t *testing.T) {
+	var calls []setVenueKeysCall
+	m := newModel(Config{}, stubSource{setVenueKeysCall: &calls})
+	m.showKeyForm = true
+	m.keyForm = newKeyForm("okx")
+	m.keyForm.fields[0].value = "key-123"
+	m.keyForm.fields[1].value = "secret-abc"
+	m.keyForm.fields[2].value = "pass-xyz"
+
+	u, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if cmd == nil {
+		t.Fatalf("enter should fire the SetVenueKeys command")
+	}
+	// The form must not stay open with the typed secret while the request is
+	// in flight is not required by this test — what matters is that the
+	// eventual result clears it, asserted below.
+	msg := cmd()
+	rm, ok := msg.(keyFormResultMsg)
+	if !ok {
+		t.Fatalf("expected keyFormResultMsg, got %T", msg)
+	}
+	if rm.err != nil {
+		t.Fatalf("unexpected err: %v", rm.err)
+	}
+	if len(calls) != 1 || calls[0].venue != "okx" {
+		t.Fatalf("setVenueKeys calls = %+v", calls)
+	}
+	if calls[0].keys.apiKey != "key-123" || calls[0].keys.apiSecret != "secret-abc" || calls[0].keys.passphrase != "pass-xyz" {
+		t.Fatalf("setVenueKeys keys = %+v", calls[0].keys)
+	}
+
+	u2, _ := u.(model).Update(rm)
+	final := u2.(model)
+	if final.showKeyForm {
+		t.Fatalf("keyFormResultMsg (success) should close the form")
+	}
+	if final.keyForm.value("api_secret") != "" {
+		t.Fatalf("keyFormResultMsg (success) should leave no typed secret on the model, got %q", final.keyForm.value("api_secret"))
+	}
+}
+
+func TestKeyFormEscCancelsAndClears(t *testing.T) {
+	m := newModel(Config{}, stubSource{})
+	m.showKeyForm = true
+	m.keyForm = newKeyForm("okx")
+	m.keyForm.fields[1].value = "secret-abc"
+
+	u, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	if cmd != nil {
+		t.Fatalf("esc should not return a command")
+	}
+	got := u.(model)
+	if got.showKeyForm {
+		t.Fatalf("esc should close the key form")
+	}
+	if got.keyForm.value("api_secret") != "" {
+		t.Fatalf("esc should clear the typed secret, got %q", got.keyForm.value("api_secret"))
+	}
+}
+
 func TestNodeStatusLabels(t *testing.T) {
 	for _, tc := range []struct {
 		row  nodeRow

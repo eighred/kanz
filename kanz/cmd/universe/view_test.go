@@ -76,6 +76,30 @@ func TestRenderAPIPaneShowsSetKeysHint(t *testing.T) {
 	}
 }
 
+func TestRenderKeyFormShowsMaskedFieldsAndIsPure(t *testing.T) {
+	f := newKeyForm("okx")
+	f.fields[0].value = "key-123"
+	f.fields[1].value = "supersecretvalue"
+	f.fields[2].value = "pass-xyz"
+	m := model{
+		active: paneAPI,
+		width:  100, height: 30,
+		showKeyForm: true,
+		keyForm:     f,
+	}
+	out1 := m.render()
+	if strings.Contains(out1, "supersecretvalue") {
+		t.Errorf("render must never show the raw secret\n%s", out1)
+	}
+	if !strings.Contains(out1, "key-123") {
+		t.Errorf("render should show the plain api_key\n%s", out1)
+	}
+	out2 := m.render()
+	if out1 != out2 {
+		t.Errorf("render is not pure for the key form: two calls produced different output\nfirst:\n%s\nsecond:\n%s", out1, out2)
+	}
+}
+
 type errStub struct{}
 
 func (errStub) Error() string { return "boom" }
