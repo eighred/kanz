@@ -184,7 +184,14 @@ message SetVenueKeysRequest {
   string api_secret = 3;
   string passphrase = 4; // OKX requires it; Binance must leave it empty
 }
-message SetVenueKeysResponse {}
+message SetVenueKeysResponse {
+  // exchange_account_id is the exchange's own id for the account these credentials
+  // spend, as the exchange itself reported it during the pre-write proof (S4b).
+  // Empty when the deployment has no proof configured — the keys were written
+  // unproven. It is a public fact (it is what a venue account label binds TO), never
+  // key material.
+  string exchange_account_id = 1;
+}
 
 message ListVenueKeysRequest {}
 message ListVenueKeysResponse {
