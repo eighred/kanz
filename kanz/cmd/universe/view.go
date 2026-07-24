@@ -21,6 +21,9 @@ var (
 func (m model) render() string {
 	if m.showForm {
 		out := m.form.render()
+		if m.testResult != "" {
+			out += "\n" + m.testResult
+		}
 		if m.formErr != nil {
 			out += "\n" + styleErr.Render("error: "+m.formErr.Error())
 		}

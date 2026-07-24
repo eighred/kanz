@@ -14,6 +14,10 @@ func (s stubSource) fetch(context.Context) (fetchMsg, error) { return s.msg, nil
 func (s stubSource) addNode(context.Context, addNodeInput) (string, error)  { return "p-1", nil }
 func (s stubSource) listProvisions(context.Context) ([]provisionRow, error) { return nil, nil }
 
+func (s stubSource) testConnection(context.Context, string, int32) (testConnResult, error) {
+	return testConnResult{reachable: true, latencyMs: 7}, nil
+}
+
 func TestFetchMsgPopulatesModel(t *testing.T) {
 	m := newModel(Config{}, stubSource{})
 	updated, _ := m.Update(fetchMsg{

@@ -47,6 +47,7 @@ type model struct {
 	form       addForm
 	provisions []provisionRow
 	formErr    error
+	testResult string
 
 	width, height int
 	err           error
@@ -81,6 +82,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.showForm = true
 				m.form = newAddForm()
 				m.formErr = nil
+				m.testResult = ""
 			}
 		}
 	case tea.WindowSizeMsg:
@@ -105,6 +107,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.showForm = false
 			m.formErr = nil
 		}
+	case testConnResultMsg:
+		switch {
+		case msg.err != nil:
+			m.testResult = "✗ test failed: " + msg.err.Error()
+		case msg.res.reachable:
+			m.testResult = fmt.Sprintf("✓ reachable (%dms)", msg.res.latencyMs)
+		default:
+			m.testResult = "✗ unreachable: " + msg.res.message
+		}
+		return m, nil
 	}
 	return m, nil
 }
@@ -129,6 +141,8 @@ func (m model) updateForm(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case tea.KeyEnter:
 		return m, m.submitAddForm()
+	case tea.KeyCtrlT:
+		return m, m.testConnCmd()
 	case tea.KeyRunes:
 		m.form = m.form.key(msg)
 		return m, nil
@@ -163,6 +177,25 @@ func (m model) submitAddForm() tea.Cmd {
 // addNodeResultMsg carries the outcome of an AddNode call back into Update.
 type addNodeResultMsg struct {
 	id  string
+	err error
+}
+
+// testConnCmd probes the form's ip:port off the UI thread.
+func (m model) testConnCmd() tea.Cmd {
+	ip := m.form.value("ip")
+	port := atoi32(m.form.value("ssh_port"))
+	src := m.src
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), pollTimeout)
+		defer cancel()
+		res, err := src.testConnection(ctx, ip, port)
+		return testConnResultMsg{res: res, err: err}
+	}
+}
+
+// testConnResultMsg carries the outcome of a testConnection probe back into Update.
+type testConnResultMsg struct {
+	res testConnResult
 	err error
 }
 

@@ -82,6 +82,6 @@ func (f addForm) render() string {
 		}
 		b.WriteString(line + "\n")
 	}
-	b.WriteString("\n" + styleDim.Render("[tab] next  [enter] save  [esc] cancel"))
+	b.WriteString("\n" + styleDim.Render("[tab] next  [enter] save  [ctrl+t] test  [esc] cancel"))
 	return b.String()
 }

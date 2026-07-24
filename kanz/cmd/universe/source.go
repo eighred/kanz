@@ -18,6 +18,15 @@ type nodeSource interface {
 	fetch(ctx context.Context) (fetchMsg, error)
 	addNode(ctx context.Context, req addNodeInput) (string, error)
 	listProvisions(ctx context.Context) ([]provisionRow, error)
+	testConnection(ctx context.Context, ip string, port int32) (testConnResult, error)
+}
+
+// testConnResult is the outcome of a pre-flight reachability probe of a
+// candidate host's SSH port — reachability only, never authentication.
+type testConnResult struct {
+	reachable bool
+	latencyMs int64
+	message   string
 }
 
 // fetchMsg carries one poll cycle's result into Update.
@@ -96,6 +105,14 @@ func (g *grpcSource) listProvisions(ctx context.Context) ([]provisionRow, error)
 		out = append(out, provisionRow{id: p.GetId(), hostname: p.GetHostname(), status: provLabel(p.GetStatus()), message: p.GetMessage()})
 	}
 	return out, nil
+}
+
+func (g *grpcSource) testConnection(ctx context.Context, ip string, port int32) (testConnResult, error) {
+	resp, err := g.client.TestConnection(ctx, &operatorpb.TestConnectionRequest{Ip: ip, SshPort: port})
+	if err != nil {
+		return testConnResult{}, err
+	}
+	return testConnResult{reachable: resp.GetReachable(), latencyMs: resp.GetLatencyMs(), message: resp.GetMessage()}, nil
 }
 
 func provLabel(s operatorpb.ProvisionStatus) string {

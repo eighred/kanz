@@ -43,3 +43,21 @@ func typeInto(f addForm, s string) addForm {
 	}
 	return f
 }
+
+func TestCtrlTFiresTestConnection(t *testing.T) {
+	m := newModel(Config{}, stubSource{})
+	m.showForm = true
+	m.form = newAddForm()
+	// focus/complete the ip field then press ctrl+t
+	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyCtrlT})
+	if cmd == nil {
+		t.Fatal("ctrl+t should return a test-connection command")
+	}
+}
+
+func TestTestConnResultRenders(t *testing.T) {
+	m := model{showForm: true, form: newAddForm(), testResult: "✓ reachable (7ms)"}
+	if !strings.Contains(m.render(), "reachable (7ms)") {
+		t.Errorf("form render should show the test result:\n%s", m.render())
+	}
+}
