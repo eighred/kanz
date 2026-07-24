@@ -11,18 +11,34 @@ import (
 	operatorpb "github.com/kanz-eng/kanz-schemas-go/operator/v1"
 )
 
-// nodeSource fetches one snapshot of the estate. The gRPC-backed impl dials the
-// operator service; tests use a stub. fetch does the clock read (Age), so
-// render stays a pure function of model.
+// nodeSource fetches estate reads and drives provisioning. The gRPC-backed impl
+// dials the operator service; tests use a stub. fetch does the clock read
+// (Age), so render stays a pure function of model.
 type nodeSource interface {
 	fetch(ctx context.Context) (fetchMsg, error)
+	addNode(ctx context.Context, req addNodeInput) (string, error)
+	listProvisions(ctx context.Context) ([]provisionRow, error)
 }
 
 // fetchMsg carries one poll cycle's result into Update.
 type fetchMsg struct {
-	nodes    []nodeRow
-	clusters []clusterRow
-	err      error
+	nodes      []nodeRow
+	clusters   []clusterRow
+	provisions []provisionRow
+	err        error
+}
+
+// addNodeInput is the write payload for AddNode — sshKey is populated off the
+// UI thread by submitAddForm's file read and never touches a model field.
+type addNodeInput struct {
+	hostname, ip, sshUser string
+	sshPort               int32
+	sshKey                []byte
+}
+
+// provisionRow is one row of the provisioning status strip.
+type provisionRow struct {
+	id, hostname, status, message string
 }
 
 // grpcSource dials the operator.v1 service over a plaintext connection — the
@@ -49,10 +65,50 @@ func (g *grpcSource) fetch(ctx context.Context) (fetchMsg, error) {
 	if err != nil {
 		return fetchMsg{}, err
 	}
+	// Provisioning is a secondary, best-effort read: a transient failure here
+	// degrades only the strip (it goes quiet for one tick), never the whole
+	// poll — nodes/clusters are the read this TUI exists for.
+	provisions, _ := g.listProvisions(ctx)
 	return fetchMsg{
-		nodes:    toNodeRows(nodesResp.GetNodes()),
-		clusters: toClusterRows(clustersResp.GetClusters()),
+		nodes:      toNodeRows(nodesResp.GetNodes()),
+		clusters:   toClusterRows(clustersResp.GetClusters()),
+		provisions: provisions,
 	}, nil
+}
+
+func (g *grpcSource) addNode(ctx context.Context, in addNodeInput) (string, error) {
+	resp, err := g.client.AddNode(ctx, &operatorpb.AddNodeRequest{
+		Hostname: in.hostname, Ip: in.ip, SshPort: in.sshPort, SshUser: in.sshUser, SshPrivateKey: in.sshKey,
+	})
+	if err != nil {
+		return "", err
+	}
+	return resp.GetProvisionId(), nil
+}
+
+func (g *grpcSource) listProvisions(ctx context.Context) ([]provisionRow, error) {
+	resp, err := g.client.ListProvisions(ctx, &operatorpb.ListProvisionsRequest{})
+	if err != nil {
+		return nil, err
+	}
+	out := make([]provisionRow, 0, len(resp.GetProvisions()))
+	for _, p := range resp.GetProvisions() {
+		out = append(out, provisionRow{id: p.GetId(), hostname: p.GetHostname(), status: provLabel(p.GetStatus()), message: p.GetMessage()})
+	}
+	return out, nil
+}
+
+func provLabel(s operatorpb.ProvisionStatus) string {
+	switch s {
+	case operatorpb.ProvisionStatus_PROVISION_STATUS_INSTALLING:
+		return "Installing"
+	case operatorpb.ProvisionStatus_PROVISION_STATUS_JOINED:
+		return "Joined"
+	case operatorpb.ProvisionStatus_PROVISION_STATUS_FAILED:
+		return "Failed"
+	default:
+		return "Pending"
+	}
 }
 
 func toNodeRows(nodes []*operatorpb.Node) []nodeRow {

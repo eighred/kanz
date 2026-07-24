@@ -1,6 +1,7 @@
-// universe is the read-only operator TUI (F0+S1): it lists the Kubernetes
-// estate (nodes, clusters) by dialing the in-cluster operator.v1 service over a
-// kubeconfig-gated `kubectl port-forward`. Read-only — no add/edit/delete/ssh.
+// universe is the operator TUI (F0+S1+S2a): it lists the Kubernetes estate
+// (nodes, clusters) and can provision new nodes (Add Node form) by dialing the
+// in-cluster operator.v1 service over a kubeconfig-gated `kubectl
+// port-forward`. Still no edit/delete/ssh — only estate reads and AddNode.
 package main
 
 import (

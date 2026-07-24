@@ -2,10 +2,11 @@ package main
 
 import "time"
 
-// Config is the universe TUI's read configuration. Every field is a read
-// coordinate — there is no write path, no credential beyond the kubeconfig the
-// operator already holds (used out-of-band by `kubectl port-forward`), and no
-// mutation anywhere. The TUI dials the operator service over that port-forward.
+// Config is the universe TUI's connection configuration. Every field is a
+// connection coordinate — there is no credential beyond the kubeconfig the
+// operator already holds (used out-of-band by `kubectl port-forward`) and the
+// SSH key path the operator reads from the Add Node form. The TUI dials the
+// operator service over that port-forward.
 type Config struct {
 	// OperatorAddr is the operator.v1 gRPC endpoint, typically a local
 	// port-forward target (see the run instructions in Task 8).

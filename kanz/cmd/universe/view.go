@@ -19,6 +19,14 @@ var (
 // no clock (Age is precomputed in the poller), so view_test.go calls it
 // directly against a hand-built model.
 func (m model) render() string {
+	if m.showForm {
+		out := m.form.render()
+		if m.formErr != nil {
+			out += "\n" + styleErr.Render("error: "+m.formErr.Error())
+		}
+		return out
+	}
+
 	var body string
 	switch m.active {
 	case paneClusters:
@@ -72,9 +80,27 @@ func (m model) renderClusters() string {
 }
 
 func (m model) renderStatus() string {
-	left := styleDim.Render("[tab] switch pane   [q] quit")
+	left := styleDim.Render("[tab] switch pane   [a] add node   [q] quit")
+	if p := m.renderProvisions(); p != "" {
+		left += "\n" + p
+	}
 	if m.err != nil {
-		return left + "   " + styleErr.Render("error: "+m.err.Error())
+		return left + "\n" + styleErr.Render("error: "+m.err.Error())
 	}
 	return left
+}
+
+// renderProvisions is a one-line strip summarising in-flight node
+// provisioning (e.g. "provisioning: london=Installing tokyo=Failed"). It is
+// empty when there is nothing in flight, so it adds no blank lines to the
+// steady-state frame.
+func (m model) renderProvisions() string {
+	if len(m.provisions) == 0 {
+		return ""
+	}
+	parts := make([]string, 0, len(m.provisions))
+	for _, p := range m.provisions {
+		parts = append(parts, p.hostname+"="+p.status)
+	}
+	return styleDim.Render("provisioning: " + strings.Join(parts, " "))
 }
