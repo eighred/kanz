@@ -26,9 +26,9 @@ type clusterRoleDoc struct {
 }
 
 // TestOperatorClusterRoleIsNodeReadOnly asserts the operator service's
-// ClusterRole grants exactly get/list on nodes and nothing else. The operator
-// is the first workload with Kubernetes-API RBAC; this guard keeps it
-// least-privilege — a write verb or extra resource fails the build.
+// ClusterRole grants exactly get/list on nodes/pods and nothing else. The
+// operator is the first workload with Kubernetes-API RBAC; this guard keeps
+// it least-privilege — a write verb or extra resource fails the build.
 func TestOperatorClusterRoleIsNodeReadOnly(t *testing.T) {
 	root := moduleRoot(t)
 	path := filepath.Join(root, "infra", "deploy", "operator-deploy.yaml")
@@ -37,6 +37,7 @@ func TestOperatorClusterRoleIsNodeReadOnly(t *testing.T) {
 		t.Fatalf("read %s: %v", path, err)
 	}
 
+	allowedResources := map[string]bool{"nodes": true, "pods": true}
 	allowedVerbs := map[string]bool{"get": true, "list": true}
 	writeVerbs := map[string]bool{
 		"create": true, "update": true, "patch": true,
@@ -63,8 +64,8 @@ func TestOperatorClusterRoleIsNodeReadOnly(t *testing.T) {
 		}
 		for _, r := range doc.Rules {
 			for _, res := range r.Resources {
-				if res != "nodes" {
-					t.Errorf("operator-node-reader grants resource %q; only nodes is allowed", res)
+				if !allowedResources[res] {
+					t.Errorf("operator-node-reader grants resource %q; only nodes/pods (read) are allowed", res)
 				}
 			}
 			for _, v := range r.Verbs {
@@ -83,6 +84,53 @@ func TestOperatorClusterRoleIsNodeReadOnly(t *testing.T) {
 	// forever after the manifest is renamed or the role deleted.
 	if !found {
 		t.Fatalf("no ClusterRole named operator-node-reader found in %s", path)
+	}
+}
+
+// TestOperatorNodeWriterRoleIsBounded asserts the node-writer ClusterRole grants
+// exactly patch-on-nodes + create-on-pods/eviction, and NO node create/delete and NO
+// verbs on the bare pods resource — so drain is eviction-only (PDB-honoring) and the
+// operator can never remove a node object.
+func TestOperatorNodeWriterRoleIsBounded(t *testing.T) {
+	docs := decodeOperatorManifest(t)
+	forbiddenNodeVerbs := map[string]bool{"create": true, "delete": true, "deletecollection": true, "update": true, "*": true}
+
+	var found bool
+	for _, doc := range docs {
+		if doc.Kind != "ClusterRole" || doc.Metadata.Name != "operator-node-writer" {
+			continue
+		}
+		found = true
+		for _, r := range doc.Rules {
+			for _, res := range r.Resources {
+				switch res {
+				case "nodes":
+					for _, v := range r.Verbs {
+						lv := strings.ToLower(v)
+						if forbiddenNodeVerbs[lv] {
+							t.Errorf("operator-node-writer grants %q on nodes — only patch is allowed (no create/delete/update)", v)
+						}
+						if lv != "patch" {
+							t.Errorf("operator-node-writer grants verb %q on nodes; only patch (cordon) is allowed", v)
+						}
+					}
+				case "pods/eviction":
+					for _, v := range r.Verbs {
+						if strings.ToLower(v) != "create" {
+							t.Errorf("operator-node-writer grants %q on pods/eviction; only create is allowed", v)
+						}
+					}
+				case "pods":
+					// A bare "pods: delete" would let drain force-delete, bypassing PDBs.
+					t.Errorf("operator-node-writer must not grant verbs on the bare pods resource (only pods/eviction) — got verbs %v", r.Verbs)
+				default:
+					t.Errorf("operator-node-writer grants resource %q; only nodes + pods/eviction are allowed", res)
+				}
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("no ClusterRole operator-node-writer found — S3a RBAC missing")
 	}
 }
 
