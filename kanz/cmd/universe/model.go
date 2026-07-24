@@ -85,19 +85,29 @@ type model struct {
 
 	// showKeyForm/keyForm drive the Set API Keys form (S4a write side), scoped
 	// to the venue selected in the API Manager pane when 'k' is pressed.
-	// keyFormErr is unused as a lingering field-level error — a failed submit
-	// surfaces via actionErr instead (see keyFormResultMsg) so the typed secret
-	// never has to survive on the model to keep an error visible.
+	// keyFormErr surfaces the sanitized rejection reason when the exchange
+	// declines the submitted credentials (FailedPrecondition, S4b's pre-write
+	// proof): the form is reopened with every field cleared and keyFormErr set,
+	// so the operator sees why without the typed secret ever surviving on the
+	// model. Any other failed submit surfaces via actionErr instead (see
+	// keyFormResultMsg), which leaves keyFormErr nil.
 	showKeyForm bool
 	keyForm     keyForm
 	keyFormErr  error
 
 	// verifiedAccounts records, per venue, the exchange_account_id returned by
 	// the last proved SetVenueKeys submit (S4b's pre-write proof) — session
-	// state only, not sourced from ListVenueKeys (presence only) and not
-	// cleared by a poll tick, the same convention testResult/formErr use. Only
-	// a non-empty exchange_account_id is ever recorded here: an unproven
+	// state only, never sourced from ListVenueKeys (presence only). Only a
+	// non-empty exchange_account_id is ever recorded here: an unproven
 	// deployment (empty id) must not start claiming verification.
+	//
+	// This is a submit OUTCOME, not a standing claim about current state: the
+	// keys backing an entry can be overwritten later by a path that did no
+	// proof at all (proof disabled, another operator session, a direct store
+	// write), and ListVenueKeys can never tell the difference. So every
+	// fetchMsg poll refresh wipes the map — the badge reads "verified" only
+	// until the next poll, then falls back to the value-blind "configured"
+	// wording until another submit proves it again.
 	verifiedAccounts map[string]string
 
 	width, height int
@@ -211,6 +221,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.err = nil
 			m.selected = clampSelected(m.selected, len(m.nodes))
 			m.apiSelected = clampSelected(m.apiSelected, len(m.venues))
+			// A poll refresh invalidates every proved badge: ListVenueKeys is
+			// value-blind and cannot confirm the keys it just reported present
+			// are the same ones a prior submit proved. Wiping the whole map
+			// makes "verified" mean "the last submit was proved," never a
+			// standing claim about what the store holds right now.
+			m.verifiedAccounts = nil
 		}
 		return m, m.pollTick()
 	case nodeActionMsg:

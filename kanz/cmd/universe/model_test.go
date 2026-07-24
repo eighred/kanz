@@ -439,6 +439,30 @@ func TestKeyFormResultProvedRecordsAccountIdAndClosesForm(t *testing.T) {
 	}
 }
 
+func TestPollRefreshClearsVerifiedAccounts(t *testing.T) {
+	// A proved submit records verifiedAccounts["okx"], but the badge it drives
+	// must not outlive the fact it asserts: once the keys behind it could have
+	// been overwritten by an unproven path, the next poll must wipe it. See
+	// the model.verifiedAccounts field comment.
+	m := newModel(Config{}, stubSource{})
+	m.showKeyForm = true
+	m.keyForm = newKeyForm("okx")
+
+	u, _ := m.Update(keyFormResultMsg{venue: "okx", accountID: "acct-789"})
+	afterSubmit := u.(model)
+	if afterSubmit.verifiedAccounts["okx"] != "acct-789" {
+		t.Fatalf("verifiedAccounts[okx] = %q, want acct-789 before the poll", afterSubmit.verifiedAccounts["okx"])
+	}
+
+	u2, _ := afterSubmit.Update(fetchMsg{
+		venues: []venueRow{{venue: "okx", configured: true}},
+	})
+	afterPoll := u2.(model)
+	if id, ok := afterPoll.verifiedAccounts["okx"]; ok {
+		t.Fatalf("a poll refresh must clear verifiedAccounts, got okx=%q", id)
+	}
+}
+
 func TestKeyFormResultUnprovenSuccessRecordsNoAccountId(t *testing.T) {
 	// Empty ExchangeAccountId (no proof configured for this deployment) must
 	// never be treated as verification — see TestRenderAPIPaneUnprovenSuccessStaysConfigured.
