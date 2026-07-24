@@ -200,3 +200,30 @@ metadata:
 roleRef: { apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: operator-node-writer }
 subjects:
   - { kind: ServiceAccount, name: operator, namespace: kanz-operator }
+---
+# operator-venue-secret-writer: the S4a API-Manager write path. The operator writes
+# venue API-key Secrets into kanz-services (where the venue adapters mount them). It is
+# bounded to the secrets resource in this one namespace — never cluster-scoped, never
+# another resource or verb. get/create/update mirror KubeStore.SetVenueKeys's actual
+# Get-then-Create(IsNotFound)-or-Update sequence (no server-side apply, no list, no
+# delete) — the write-only guarantee is the code + this bound.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: operator-venue-secret-writer
+  namespace: kanz-services
+  labels: { app.kubernetes.io/part-of: kanz }
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "create", "update"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: operator-venue-secret-writer
+  namespace: kanz-services
+  labels: { app.kubernetes.io/part-of: kanz }
+roleRef: { apiGroup: rbac.authorization.k8s.io, kind: Role, name: operator-venue-secret-writer }
+subjects:
+  - { kind: ServiceAccount, name: operator, namespace: kanz-operator }
