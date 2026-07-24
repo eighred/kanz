@@ -1,0 +1,74 @@
+syntax = "proto3";
+
+// Operator service — the READ surface over the Kubernetes estate for the
+// root@universe operator plane (F0+S1). Read-only: ListNodes / ListClusters
+// ONLY, no provisioning/mutation RPC. Writes (node join, drain, key material)
+// arrive in later subsystems as their own RPCs.
+//
+// # Consumers
+//
+// The `operator` service implements the server, reading Node objects from the
+// Kubernetes API via client-go under a get/list-nodes ClusterRole. The
+// `universe` TUI is the only client, dialing over a kubeconfig-gated
+// port-forward. No other service dials this.
+//
+// # Versioning
+//
+// operator.v1, additive-only within the version — a removed/retyped field or
+// RPC breaks every client and requires a sibling operator/v2.
+package operator.v1;
+
+import "google/protobuf/timestamp.proto";
+
+// OperatorService is the gRPC read surface over the estate.
+service OperatorService {
+  // ListNodes returns every Node the operator can see, with the status,
+  // roles, region and version the Kubernetes API reports.
+  rpc ListNodes(ListNodesRequest) returns (ListNodesResponse);
+
+  // ListClusters groups those nodes by region into the Europe/Asia/USA view,
+  // with online/offline counts.
+  rpc ListClusters(ListClustersRequest) returns (ListClustersResponse);
+}
+
+// NodeStatus is the node's readiness. UNSPECIFIED (the zero value) is the
+// deny-by-default state: a node whose Ready condition is absent or Unknown
+// maps here and must render as not-ready, never silently as ready.
+enum NodeStatus {
+  NODE_STATUS_UNSPECIFIED = 0;
+  NODE_STATUS_READY = 1;
+  NODE_STATUS_NOT_READY = 2;
+}
+
+message ListNodesRequest {}
+
+message ListNodesResponse {
+  repeated Node nodes = 1;
+}
+
+message Node {
+  string name = 1;
+  NodeStatus status = 2;
+  // roles are the node-role.kubernetes.io/<role> label suffixes.
+  repeated string roles = 3;
+  // region is the topology.kubernetes.io/region label value; empty if unset.
+  string region = 4;
+  string kubelet_version = 5;
+  // created_at is the node's CreationTimestamp. Age is derived client-side —
+  // the server does not render a duration string against its own clock.
+  google.protobuf.Timestamp created_at = 6;
+}
+
+message ListClustersRequest {}
+
+message ListClustersResponse {
+  repeated Cluster clusters = 1;
+}
+
+message Cluster {
+  // region is the grouping key (topology.kubernetes.io/region value); nodes
+  // with no region label group under the empty region.
+  string region = 1;
+  int32 online = 2;
+  int32 offline = 3;
+}
