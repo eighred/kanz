@@ -81,14 +81,18 @@ func binanceAccountServer(t *testing.T, secret string, status int, body string) 
 		raw := r.URL.RawQuery
 		idx := strings.Index(raw, "&signature=")
 		if idx < 0 {
-			t.Fatalf("binance: query %q missing &signature=", raw)
+			t.Errorf("binance: query %q missing &signature=", raw)
+			http.Error(w, "bad request", http.StatusBadRequest)
+			return
 		}
 		query := raw[:idx]
 		sig := raw[idx+len("&signature="):]
 
 		q, err := url.ParseQuery(query)
 		if err != nil {
-			t.Fatalf("binance: bad query %q: %v", query, err)
+			t.Errorf("binance: bad query %q: %v", query, err)
+			http.Error(w, "bad request", http.StatusBadRequest)
+			return
 		}
 		if q.Get("timestamp") == "" {
 			t.Errorf("binance: missing timestamp query param")
