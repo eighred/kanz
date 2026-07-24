@@ -1778,11 +1778,16 @@ git commit -m "feat(universe): main wiring — dial operator.v1 and run the TUI"
 
 This proves the end-to-end spine against the dev kind rig. Run by the operator (needs kubeconfig access to the rig):
 
-1. Build + load the image and apply the manifest:
+1. Build + load the image (tagged as the manifest's fully-qualified `ghcr.io/kanz-eng/operator:latest`) and apply the manifest:
    ```bash
-   docker build -f kanz/services/operator/Dockerfile -t operator:latest .
-   kind load docker-image operator:latest --name kanz-dryrun
+   docker build -f kanz/services/operator/Dockerfile -t ghcr.io/kanz-eng/operator:latest .
+   # confirm the kind cluster name first: kind get clusters
+   kind load docker-image ghcr.io/kanz-eng/operator:latest --name kanz-dryrun
    kubectl apply -f kanz/infra/deploy/operator-deploy.yaml
+   # `:latest` defaults to imagePullPolicy: Always, which would try to pull from ghcr and fail in the
+   # offline rig. For the LOCAL rig only, use the kind-loaded image instead of pulling:
+   kubectl -n kanz-operator patch deploy/operator --type=json \
+     -p='[{"op":"add","path":"/spec/template/spec/containers/0/imagePullPolicy","value":"IfNotPresent"}]'
    kubectl -n kanz-operator rollout status deploy/operator
    ```
 2. Port-forward the gRPC port (this is the kubeconfig-gated tunnel):
