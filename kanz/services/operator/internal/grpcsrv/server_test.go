@@ -57,6 +57,12 @@ func TestListNodesMapsStatusToEnum(t *testing.T) {
 	if got["london"].GetCreatedAt().AsTime().UTC() != created {
 		t.Errorf("london created_at = %v, want %v", got["london"].GetCreatedAt().AsTime(), created)
 	}
+	if got["tokyo"].GetCreatedAt() != nil {
+		t.Errorf("tokyo created_at = %v, want nil (zero CreatedAt must not leak the epoch)", got["tokyo"].GetCreatedAt())
+	}
+	if got["ghost"].GetCreatedAt() != nil {
+		t.Errorf("ghost created_at = %v, want nil (zero CreatedAt must not leak the epoch)", got["ghost"].GetCreatedAt())
+	}
 }
 
 func TestListClustersMapsCounts(t *testing.T) {
