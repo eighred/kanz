@@ -2,9 +2,11 @@ package arch
 
 import (
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"testing"
@@ -19,12 +21,37 @@ type netPolIPBlock struct {
 	Except []string `yaml:"except"`
 }
 
-// netPolPeer is one entry of an egress rule's `to:` list. Only ipBlock is
-// decoded into a typed field — namespaceSelector/podSelector peers are still
-// counted (the slice length is what matters for the empty-`to:` check) but
-// their contents are not asserted on by this guard.
+// netPolSelector captures a namespaceSelector or podSelector peer's
+// matchLabels. A present-but-empty selector (`{}`, matching everything) still
+// decodes to a non-nil *netPolSelector with a nil/empty MatchLabels map, which
+// is distinguishable from the selector being absent altogether (nil pointer).
+type netPolSelector struct {
+	MatchLabels map[string]string `yaml:"matchLabels"`
+}
+
+// netPolPeer is one entry of an egress rule's `to:` list. All three peer
+// kinds NetworkPolicy supports are decoded so the guard can tell exactly what
+// a peer is, not just that a `to:` list is non-empty.
 type netPolPeer struct {
-	IPBlock *netPolIPBlock `yaml:"ipBlock"`
+	IPBlock           *netPolIPBlock  `yaml:"ipBlock"`
+	NamespaceSelector *netPolSelector `yaml:"namespaceSelector"`
+	PodSelector       *netPolSelector `yaml:"podSelector"`
+}
+
+// describe renders a peer for failure messages, naming exactly what was
+// found so an unexpected peer fails loudly instead of being silently
+// skipped.
+func (p netPolPeer) describe() string {
+	switch {
+	case p.IPBlock != nil:
+		return fmt.Sprintf("ipBlock{cidr:%s except:%v}", p.IPBlock.CIDR, p.IPBlock.Except)
+	case p.NamespaceSelector != nil:
+		return fmt.Sprintf("namespaceSelector{matchLabels:%v}", p.NamespaceSelector.MatchLabels)
+	case p.PodSelector != nil:
+		return fmt.Sprintf("podSelector{matchLabels:%v}", p.PodSelector.MatchLabels)
+	default:
+		return "peer{no known selector decoded}"
+	}
 }
 
 type netPolPort struct {
@@ -37,6 +64,18 @@ type netPolRule struct {
 	Ports []netPolPort `yaml:"ports"`
 }
 
+// rulePortKey renders a rule's port set as a stable, order-independent key
+// (e.g. "TCP:53,UDP:53") used to identify which documented rule a decoded
+// rule corresponds to.
+func rulePortKey(rule netPolRule) string {
+	keys := make([]string, 0, len(rule.Ports))
+	for _, p := range rule.Ports {
+		keys = append(keys, strings.ToUpper(p.Protocol)+":"+strconv.Itoa(p.Port))
+	}
+	sort.Strings(keys)
+	return strings.Join(keys, ",")
+}
+
 // networkPolicyDoc captures only the fields this guard inspects from a
 // multi-document manifest.
 type networkPolicyDoc struct {
@@ -46,6 +85,9 @@ type networkPolicyDoc struct {
 		Namespace string `yaml:"namespace"`
 	} `yaml:"metadata"`
 	Spec struct {
+		PodSelector struct {
+			MatchLabels map[string]string `yaml:"matchLabels"`
+		} `yaml:"podSelector"`
 		PolicyTypes []string     `yaml:"policyTypes"`
 		Egress      []netPolRule `yaml:"egress"`
 	} `yaml:"spec"`
@@ -97,17 +139,115 @@ func findOperatorEgressPolicy(docs []networkPolicyDoc) (networkPolicyDoc, bool) 
 	return networkPolicyDoc{}, false
 }
 
+// stringMapEqual reports whether two string maps have exactly the same keys
+// and values — no extras on either side.
+func stringMapEqual(a, b map[string]string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for k, v := range a {
+		if bv, ok := b[k]; !ok || bv != v {
+			return false
+		}
+	}
+	return true
+}
+
+// validateDNSRulePeers asserts the DNS rule's `to:` list is exactly one peer:
+// a namespaceSelector matching kube-system, nothing else. A wildcard
+// `namespaceSelector: {}` or an added second peer must fail here.
+func validateDNSRulePeers(t *testing.T, rule netPolRule) {
+	t.Helper()
+	if len(rule.To) != 1 {
+		descs := make([]string, len(rule.To))
+		for i, p := range rule.To {
+			descs[i] = p.describe()
+		}
+		t.Errorf("operator-egress DNS rule (ports %v) has %d peers %v, want exactly 1 (kube-system namespaceSelector) — an extra peer widens DNS egress beyond kube-system", rule.Ports, len(rule.To), descs)
+		return
+	}
+	peer := rule.To[0]
+	wantLabels := map[string]string{"kubernetes.io/metadata.name": "kube-system"}
+	if peer.NamespaceSelector == nil {
+		t.Errorf("operator-egress DNS rule's peer is %s, want namespaceSelector{matchLabels:%v} scoped to kube-system", peer.describe(), wantLabels)
+		return
+	}
+	if !stringMapEqual(peer.NamespaceSelector.MatchLabels, wantLabels) {
+		t.Errorf("operator-egress DNS rule's namespaceSelector.matchLabels = %v, want exactly %v — a wildcard or mismatched selector reaches more than kube-system", peer.NamespaceSelector.MatchLabels, wantLabels)
+	}
+	if peer.IPBlock != nil || peer.PodSelector != nil {
+		t.Errorf("operator-egress DNS rule's peer unexpectedly sets more than one selector kind: %s", peer.describe())
+	}
+}
+
+// validate443RulePeers asserts the exchange-HTTPS rule's `to:` list is
+// exactly one peer: an ipBlock of 0.0.0.0/0 scoped by the full except: list,
+// nothing else. An added second peer (e.g. namespaceSelector: {}) or a
+// missing/incomplete except: list must fail here.
+func validate443RulePeers(t *testing.T, rule netPolRule) {
+	t.Helper()
+	if len(rule.To) != 1 {
+		descs := make([]string, len(rule.To))
+		for i, p := range rule.To {
+			descs[i] = p.describe()
+		}
+		t.Errorf("operator-egress 443 rule (ports %v) has %d peers %v, want exactly 1 (ipBlock 0.0.0.0/0 with except:) — an extra peer (e.g. a namespaceSelector) reopens exactly the in-cluster/metadata access the except: list exists to forbid", rule.Ports, len(rule.To), descs)
+		return
+	}
+	peer := rule.To[0]
+	if peer.IPBlock == nil {
+		t.Errorf("operator-egress 443 rule's peer is %s, want ipBlock{cidr:0.0.0.0/0}", peer.describe())
+		return
+	}
+	if peer.NamespaceSelector != nil || peer.PodSelector != nil {
+		t.Errorf("operator-egress 443 rule's peer unexpectedly sets more than one selector kind: %s", peer.describe())
+	}
+	if peer.IPBlock.CIDR != "0.0.0.0/0" {
+		t.Errorf("operator-egress 443 rule's ipBlock.cidr = %q, want 0.0.0.0/0", peer.IPBlock.CIDR)
+	}
+
+	wantExcept := map[string]bool{
+		"10.0.0.0/8":     true,
+		"172.16.0.0/12":  true,
+		"192.168.0.0/16": true,
+		"169.254.0.0/16": true,
+	}
+	gotExcept := map[string]bool{}
+	for _, e := range peer.IPBlock.Except {
+		gotExcept[e] = true
+	}
+	for cidr := range wantExcept {
+		if !gotExcept[cidr] {
+			t.Errorf("operator-egress 443 rule's ipBlock.except is missing %s — this permission could reach in-cluster services or the cloud metadata endpoint", cidr)
+		}
+	}
+	for _, e := range peer.IPBlock.Except {
+		if !wantExcept[e] {
+			t.Errorf("operator-egress 443 rule's ipBlock.except has unexpected entry %s — only the RFC1918 ranges and the link-local block should be excluded", e)
+		}
+	}
+}
+
 // TestOperatorEgressIsBounded asserts the S4b operator-egress NetworkPolicy grants
-// exactly DNS (53/UDP+TCP) and exchange HTTPS (443/TCP), nothing else, and that the
-// 443 rule is scoped to the public internet only. This is the operator's first-ever
-// outbound permission (venueproof.Prover's pre-write proof, see venueproof.go); a
-// drift toward a wider port set, an unscoped `to:`, or a shrunken except: list would
-// let this permission reach further than the one exchange call it exists for.
+// exactly DNS (53/UDP+TCP) and exchange HTTPS (443/TCP), nothing else, that the 443
+// rule is scoped to the public internet only, and that neither rule carries any
+// additional peer beyond the one it is documented to have. This is the operator's
+// first-ever outbound permission (venueproof.Prover's pre-write proof, see
+// venueproof.go); a drift toward a wider port set, an extra `to:` peer, an unscoped
+// `to:`, or a shrunken except: list would let this permission reach further than the
+// one exchange call it exists for. Peer content is validated exhaustively — the test
+// must fail on anything the policy permits beyond the documented set, not merely
+// confirm the documented set is present.
 func TestOperatorEgressIsBounded(t *testing.T) {
 	docs := decodeOperatorNetworkPolicies(t)
 	pol, ok := findOperatorEgressPolicy(docs)
 	if !ok {
 		t.Fatal("no NetworkPolicy named operator-egress found in kanz-operator")
+	}
+
+	wantPodSelector := map[string]string{"app": "operator"}
+	if !stringMapEqual(pol.Spec.PodSelector.MatchLabels, wantPodSelector) {
+		t.Errorf("operator-egress podSelector.matchLabels = %v, want exactly %v", pol.Spec.PodSelector.MatchLabels, wantPodSelector)
 	}
 
 	if len(pol.Spec.PolicyTypes) != 1 || pol.Spec.PolicyTypes[0] != "Egress" {
@@ -116,8 +256,10 @@ func TestOperatorEgressIsBounded(t *testing.T) {
 
 	wantPorts := map[string]bool{"UDP:53": true, "TCP:53": true, "TCP:443": true}
 	gotPorts := map[string]bool{}
-	var except443 []string
-	var found443Block bool
+
+	const wantDNSPortKey = "TCP:53,UDP:53"
+	const want443PortKey = "TCP:443"
+	var dnsRules, tcp443Rules []netPolRule
 
 	for _, rule := range pol.Spec.Egress {
 		// A rule with no `to:` peers is unrestricted egress on its ports — the
@@ -128,12 +270,11 @@ func TestOperatorEgressIsBounded(t *testing.T) {
 		for _, p := range rule.Ports {
 			gotPorts[strings.ToUpper(p.Protocol)+":"+strconv.Itoa(p.Port)] = true
 		}
-		for _, peer := range rule.To {
-			if peer.IPBlock == nil || peer.IPBlock.CIDR != "0.0.0.0/0" {
-				continue
-			}
-			found443Block = true
-			except443 = peer.IPBlock.Except
+		switch rulePortKey(rule) {
+		case wantDNSPortKey:
+			dnsRules = append(dnsRules, rule)
+		case want443PortKey:
+			tcp443Rules = append(tcp443Rules, rule)
 		}
 	}
 
@@ -148,22 +289,28 @@ func TestOperatorEgressIsBounded(t *testing.T) {
 		}
 	}
 
-	if !found443Block {
+	// Exactly one rule per port shape — a second rule with the same ports
+	// (e.g. an under-scoped duplicate 443 rule ordered before the correct
+	// one) must fail here regardless of ordering, since every matching rule
+	// is collected rather than only the last one seen.
+	switch len(dnsRules) {
+	case 0:
+		t.Errorf("operator-egress has no rule with ports [TCP:53 UDP:53] — the DNS rule is missing or mis-shaped")
+	case 1:
+		validateDNSRulePeers(t, dnsRules[0])
+	default:
+		t.Errorf("operator-egress has %d rules with ports [TCP:53 UDP:53] (want exactly 1)", len(dnsRules))
+	}
+
+	switch len(tcp443Rules) {
+	case 0:
 		t.Fatal("operator-egress has no ipBlock: {cidr: 0.0.0.0/0} rule — the exchange-egress rule is missing or mis-shaped")
-	}
-	wantExcept := map[string]bool{
-		"10.0.0.0/8":     true,
-		"172.16.0.0/12":  true,
-		"192.168.0.0/16": true,
-		"169.254.0.0/16": true,
-	}
-	gotExcept := map[string]bool{}
-	for _, e := range except443 {
-		gotExcept[e] = true
-	}
-	for cidr := range wantExcept {
-		if !gotExcept[cidr] {
-			t.Errorf("operator-egress 443 rule's ipBlock.except is missing %s — this permission could reach in-cluster services or the cloud metadata endpoint", cidr)
+	case 1:
+		validate443RulePeers(t, tcp443Rules[0])
+	default:
+		t.Errorf("operator-egress has %d rules with ports [TCP:443] (want exactly 1) — a duplicate 443 rule can under-scope the except: list while the correctly-scoped rule masks it", len(tcp443Rules))
+		for _, r := range tcp443Rules {
+			validate443RulePeers(t, r)
 		}
 	}
 }
