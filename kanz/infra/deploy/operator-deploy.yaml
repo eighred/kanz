@@ -61,7 +61,7 @@ spec:
         seccompProfile: { type: RuntimeDefault }
       containers:
         - name: operator
-          image: operator:latest
+          image: ghcr.io/kanz-eng/operator:latest
           args: []
           ports:
             - { name: grpc, containerPort: 9090 }
