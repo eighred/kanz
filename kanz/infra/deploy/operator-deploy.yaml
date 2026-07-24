@@ -215,8 +215,11 @@ spec:
       ports:
         - { protocol: TCP, port: 443 }
 ---
-# The provisioner Job egresses to DNS + arbitrary target SSH + the k3s control plane.
-# It is ephemeral; this policy scopes what a compromised provisioning run could reach.
+# The provisioner Job pod's only outbound connections are DNS (to resolve the
+# operator-supplied target address) and SSH to that target. The k3s join
+# itself (`curl https://get.k3s.io | ... sh -s - agent`, cmd/kanz-provisioner/join.go)
+# runs as the remote command of the SSH session — i.e. on the target node's own
+# network, not in this pod — so this policy grants neither :443 nor :6443.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -227,13 +230,18 @@ spec:
   podSelector: { matchLabels: { app.kubernetes.io/component: node-provisioner } }
   policyTypes: ["Egress"]
   egress:
-    - ports:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
         - { protocol: UDP, port: 53 }
         - { protocol: TCP, port: 53 }
+    # SSH is intentionally destination-open: the provisioner dials an
+    # operator-supplied node IP chosen at run time, so there is no fixed CIDR
+    # to scope `to:` to. Port :22 is the only thing pinned.
     - ports:
         - { protocol: TCP, port: 22 }
-        - { protocol: TCP, port: 6443 }
-        - { protocol: TCP, port: 443 }
 ---
 # S3a: node-lifecycle writes. A ClusterRole (nodes are cluster-scoped). Exactly patch
 # on nodes (cordon/uncordon) + create on the pods/eviction subresource (drain). NO node
