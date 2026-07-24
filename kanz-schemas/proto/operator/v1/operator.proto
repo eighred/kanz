@@ -43,6 +43,15 @@ service OperatorService {
   // TestConnection is a pre-flight TCP reachability probe of a candidate host's
   // SSH port — it does NOT authenticate (the key is validated at provision time).
   rpc TestConnection(TestConnectionRequest) returns (TestConnectionResponse);
+
+  // Cordon marks a node unschedulable (Maintenance Mode). Reversible via Uncordon.
+  rpc Cordon(CordonRequest) returns (CordonResponse);
+  // Uncordon marks a node schedulable again.
+  rpc Uncordon(UncordonRequest) returns (UncordonResponse);
+  // Drain cordons a node and evicts its (non-DaemonSet, non-mirror) pods via the
+  // Eviction API, honoring PodDisruptionBudgets. Async: returns once cordoned;
+  // eviction proceeds in the background. Poll ListNodes for the derived status.
+  rpc Drain(DrainRequest) returns (DrainResponse);
 }
 
 // NodeStatus is the node's readiness. UNSPECIFIED (the zero value) is the
@@ -71,6 +80,11 @@ message Node {
   // created_at is the node's CreationTimestamp. Age is derived client-side —
   // the server does not render a duration string against its own clock.
   google.protobuf.Timestamp created_at = 6;
+  // schedulable is false when the node is cordoned (spec.unschedulable).
+  bool schedulable = 7;
+  // evictable_pods is the count of ordinary (non-DaemonSet, non-mirror,
+  // non-terminating) pods still on the node — the drain-progress signal.
+  int32 evictable_pods = 8;
 }
 
 message ListClustersRequest {}
@@ -134,3 +148,10 @@ message TestConnectionResponse {
   int64 latency_ms = 2;  // dial latency when reachable; 0 otherwise
   string message = 3;    // dial error when unreachable; empty when reachable
 }
+
+message CordonRequest { string name = 1; }
+message CordonResponse {}
+message UncordonRequest { string name = 1; }
+message UncordonResponse {}
+message DrainRequest { string name = 1; }
+message DrainResponse {}
