@@ -123,6 +123,9 @@ func (p *Provisioner) jobSpec(name string, r Request, port int32) *batchv1.Job {
 			BackoffLimit:          &backoff,
 			ActiveDeadlineSeconds: &deadline,
 			Template: corev1.PodTemplateSpec{
+				ObjectMeta: metav1.ObjectMeta{
+					Labels: map[string]string{componentLabel: componentValue},
+				},
 				Spec: corev1.PodSpec{
 					ServiceAccountName: "kanz-node-provisioner",
 					RestartPolicy:      corev1.RestartPolicyNever,

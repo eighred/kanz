@@ -48,6 +48,12 @@ func TestAddNodeCreatesJobAndOwnedSecret(t *testing.T) {
 	if !owned {
 		t.Errorf("secret is not owned by the job — it could orphan")
 	}
+	// The pod TEMPLATE (not just the Job object) must carry the component label, or the
+	// node-provisioner-egress NetworkPolicy selects zero pods and the provisioner pod
+	// (holds the SSH key + k3s token) gets unrestricted egress.
+	if job.Spec.Template.Labels["app.kubernetes.io/component"] != "node-provisioner" {
+		t.Errorf("pod template missing the node-provisioner label — the egress NetworkPolicy would not select it: %v", job.Spec.Template.Labels)
+	}
 	// The key must NOT appear in the Job's pod spec in plaintext (only mounted from the Secret).
 	for _, c := range job.Spec.Template.Spec.Containers {
 		for _, e := range c.Env {
