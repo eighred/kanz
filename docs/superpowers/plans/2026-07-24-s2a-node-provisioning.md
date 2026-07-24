@@ -845,6 +845,7 @@ const (
 	componentValue = "node-provisioner"
 	hostnameAnnot  = "kanz.io/provision-hostname"
 	keySecretKey   = "ssh_key"
+	k3sTokenKey    = "k3s_token"
 	keyMountPath   = "/etc/provision"
 )
 
@@ -923,7 +924,7 @@ func (p *Provisioner) AddNode(ctx context.Context, r Request) (string, error) {
 			Labels:          map[string]string{componentLabel: componentValue},
 			OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(job, batchv1.SchemeGroupVersion.WithKind("Job"))},
 		},
-		Data: map[string][]byte{keySecretKey: r.SSHKey},
+		Data: map[string][]byte{keySecretKey: r.SSHKey, k3sTokenKey: []byte(p.cfg.K3sToken)},
 	}, metav1.CreateOptions{})
 	if err != nil {
 		_ = p.cs.BatchV1().Jobs(p.cfg.Namespace).Delete(ctx, job.Name, metav1.DeleteOptions{})
@@ -965,8 +966,16 @@ func (p *Provisioner) jobSpec(name string, r Request, port int32) *batchv1.Job {
 						Env: []corev1.EnvVar{
 							{Name: "PROVISION_TARGET_ADDR", Value: fmt.Sprintf("%s:%d", r.IP, port)},
 							{Name: "PROVISION_SSH_USER", Value: r.SSHUser},
-							{Name: "K3S_SERVER_URL", Value: p.cfg.K3sServerURL},
-							{Name: "K3S_TOKEN", Value: p.cfg.K3sToken},
+							{Name: "K3S_SERVER_URL", Value: p.cfg.K3sServerURL}, // a URL, not a credential
+							// The k3s join token is a real credential: inject it from the Job-owned
+							// Secret (secretKeyRef) so it never sits in the pod spec / etcd in plaintext,
+							// the same hygiene the SSH key gets. kubelet populates the env at pod start.
+							{Name: "K3S_TOKEN", ValueFrom: &corev1.EnvVarSource{
+								SecretKeyRef: &corev1.SecretKeySelector{
+									LocalObjectReference: corev1.LocalObjectReference{Name: name},
+									Key:                  k3sTokenKey,
+								},
+							}},
 							{Name: "PROVISION_SSH_KEY_FILE", Value: keyMountPath + "/" + keySecretKey},
 						},
 						VolumeMounts: []corev1.VolumeMount{{Name: "bootstrap-key", MountPath: keyMountPath, ReadOnly: true}},
