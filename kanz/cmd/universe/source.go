@@ -58,13 +58,17 @@ func (g *grpcSource) fetch(ctx context.Context) (fetchMsg, error) {
 func toNodeRows(nodes []*operatorpb.Node) []nodeRow {
 	out := make([]nodeRow, 0, len(nodes))
 	for _, n := range nodes {
+		var created time.Time
+		if ts := n.GetCreatedAt(); ts != nil {
+			created = ts.AsTime()
+		}
 		out = append(out, nodeRow{
 			Name:    n.GetName(),
 			Status:  statusLabel(n.GetStatus()),
 			Roles:   joinRoles(n.GetRoles()),
 			Region:  n.GetRegion(),
 			Version: n.GetKubeletVersion(),
-			Age:     age(n.GetCreatedAt().AsTime()),
+			Age:     age(created),
 		})
 	}
 	return out
