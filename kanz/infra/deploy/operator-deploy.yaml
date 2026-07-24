@@ -23,6 +23,9 @@ rules:
   - apiGroups: [""]
     resources: ["nodes"]
     verbs: ["get", "list"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
@@ -171,3 +174,29 @@ spec:
         - { protocol: TCP, port: 22 }
         - { protocol: TCP, port: 6443 }
         - { protocol: TCP, port: 443 }
+---
+# S3a: node-lifecycle writes. A ClusterRole (nodes are cluster-scoped). Exactly patch
+# on nodes (cordon/uncordon) + create on the pods/eviction subresource (drain). NO node
+# create/delete, NO pod delete — drain is eviction-only so PodDisruptionBudgets are
+# always honored. Separate from the read-only operator-node-reader, which stays read-only.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: operator-node-writer
+  labels: { app.kubernetes.io/part-of: kanz }
+rules:
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["patch"]
+  - apiGroups: [""]
+    resources: ["pods/eviction"]
+    verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: operator-node-writer
+  labels: { app.kubernetes.io/part-of: kanz }
+roleRef: { apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: operator-node-writer }
+subjects:
+  - { kind: ServiceAccount, name: operator, namespace: kanz-operator }
