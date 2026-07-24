@@ -21,6 +21,7 @@ import (
 
 	"github.com/kanz-eng/kanz/services/operator/internal/estate"
 	"github.com/kanz-eng/kanz/services/operator/internal/provision"
+	"github.com/kanz-eng/kanz/services/operator/internal/secrets"
 )
 
 // Provisioner is the node-provisioning surface the operator gRPC depends on
@@ -46,6 +47,7 @@ type Server struct {
 	reader  estate.Reader
 	prov    Provisioner
 	nodeOps NodeOps
+	secrets secrets.Store
 }
 
 // New returns a read-only Server (no provisioning). Retained for callers/tests that
@@ -60,6 +62,9 @@ func NewWithProvisioner(r estate.Reader, p Provisioner) *Server {
 // WithNodeOps attaches the node-lifecycle surface and returns the server (builder
 // style, so it composes with New / NewWithProvisioner without new constructors).
 func (s *Server) WithNodeOps(ops NodeOps) *Server { s.nodeOps = ops; return s }
+
+// WithSecrets attaches the write-only venue-credential surface (builder style).
+func (s *Server) WithSecrets(store secrets.Store) *Server { s.secrets = store; return s }
 
 // Register binds the server onto a grpc.ServiceRegistrar.
 func (s *Server) Register(r grpc.ServiceRegistrar) {
@@ -187,6 +192,36 @@ func (s *Server) nodeWrite(_ context.Context, name string, do func() error) erro
 		return status.Error(codes.Internal, err.Error())
 	}
 	return nil
+}
+
+func (s *Server) SetVenueKeys(ctx context.Context, req *operatorpb.SetVenueKeysRequest) (*operatorpb.SetVenueKeysResponse, error) {
+	if s.secrets == nil {
+		return nil, status.Error(codes.Unimplemented, "API management not configured")
+	}
+	keys := secrets.VenueKeys{APIKey: req.GetApiKey(), APISecret: req.GetApiSecret(), Passphrase: req.GetPassphrase()}
+	if err := secrets.ValidateVenueKeys(req.GetVenue(), keys); err != nil {
+		// The error names the venue and the field rule — NEVER the key material.
+		return nil, status.Error(codes.InvalidArgument, err.Error())
+	}
+	if err := s.secrets.SetVenueKeys(ctx, req.GetVenue(), keys); err != nil {
+		return nil, status.Error(codes.Internal, err.Error())
+	}
+	return &operatorpb.SetVenueKeysResponse{}, nil
+}
+
+func (s *Server) ListVenueKeys(ctx context.Context, _ *operatorpb.ListVenueKeysRequest) (*operatorpb.ListVenueKeysResponse, error) {
+	if s.secrets == nil {
+		return nil, status.Error(codes.Unimplemented, "API management not configured")
+	}
+	vs, err := s.secrets.ListVenues(ctx)
+	if err != nil {
+		return nil, status.Error(codes.Internal, err.Error())
+	}
+	out := make([]*operatorpb.VenueKeyStatus, 0, len(vs))
+	for _, v := range vs {
+		out = append(out, &operatorpb.VenueKeyStatus{Venue: v.Venue, Configured: v.Configured})
+	}
+	return &operatorpb.ListVenueKeysResponse{Venues: out}, nil
 }
 
 // testDialTimeout bounds the reachability probe.

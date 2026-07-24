@@ -2,7 +2,9 @@
 // in-cluster ServiceAccount (a get/list-nodes ClusterRole) and serves it over
 // operator.v1 gRPC for the universe TUI. AddNode (node provisioning) is enabled
 // only when OPERATOR_PROVISIONER_IMAGE is set; otherwise the server stays
-// read-only and AddNode returns Unimplemented. No Vault reach in this slice.
+// read-only and AddNode returns Unimplemented. SetVenueKeys/ListVenueKeys (S4a)
+// are enabled only when OPERATOR_SECRET_BACKEND selects a backend ("kube" or
+// "vault"); otherwise SetVenueKeys returns Unimplemented.
 package main
 
 import (
@@ -26,6 +28,7 @@ import (
 	"github.com/kanz-eng/kanz/services/operator/internal/grpcsrv"
 	"github.com/kanz-eng/kanz/services/operator/internal/nodeops"
 	"github.com/kanz-eng/kanz/services/operator/internal/provision"
+	"github.com/kanz-eng/kanz/services/operator/internal/secrets"
 )
 
 func main() {
@@ -91,6 +94,23 @@ func main() {
 		logger.Warn("no OPERATOR_PROVISIONER_IMAGE — AddNode disabled (read-only)")
 	}
 	srv = srv.WithNodeOps(nodeops.New(cs, logger))
+
+	switch cfg.SecretBackend {
+	case "kube":
+		srv = srv.WithSecrets(secrets.NewKubeStore(cs, cfg.VenueSecretNamespace))
+		logger.Info("venue-key backend: kubernetes secrets", "namespace", cfg.VenueSecretNamespace)
+	case "vault":
+		vs, verr := secrets.NewVaultStore(cfg.VaultAddr, cfg.VaultToken)
+		if verr != nil {
+			logger.Error("vault venue-key backend init failed", "err", verr)
+			os.Exit(2)
+		}
+		srv = srv.WithSecrets(vs)
+		logger.Info("venue-key backend: vault", "addr", cfg.VaultAddr)
+	default:
+		logger.Warn("no OPERATOR_SECRET_BACKEND — SetVenueKeys disabled")
+	}
+
 	srv.Register(grpcSrv)
 	go func() {
 		logger.Info("operator gRPC listening", "addr", cfg.GRPCListen)

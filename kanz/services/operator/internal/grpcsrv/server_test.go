@@ -15,6 +15,7 @@ import (
 
 	"github.com/kanz-eng/kanz/services/operator/internal/estate"
 	"github.com/kanz-eng/kanz/services/operator/internal/provision"
+	"github.com/kanz-eng/kanz/services/operator/internal/secrets"
 )
 
 type stubReader struct {
@@ -270,6 +271,88 @@ func TestSetNodeRegionRejectsEmpty(t *testing.T) {
 func TestSetNodeRegionUnconfiguredIsUnimplemented(t *testing.T) {
 	if _, err := New(stubReader{}).SetNodeRegion(context.Background(), &operatorpb.SetNodeRegionRequest{Name: "x", Region: "y"}); status.Code(err) != codes.Unimplemented {
 		t.Fatalf("want Unimplemented, got %v", err)
+	}
+}
+
+type stubSecretStore struct {
+	venue   string
+	keys    secrets.VenueKeys
+	setErr  error
+	listOut []secrets.VenueStatus
+	logged  []string // anything the store "would log" — asserted empty of key material
+}
+
+func (s *stubSecretStore) SetVenueKeys(_ context.Context, venue string, k secrets.VenueKeys) error {
+	s.venue, s.keys = venue, k
+	return s.setErr
+}
+func (s *stubSecretStore) ListVenues(context.Context) ([]secrets.VenueStatus, error) {
+	return s.listOut, nil
+}
+
+func TestSetVenueKeysDelegates(t *testing.T) {
+	st := &stubSecretStore{}
+	srv := New(stubReader{}).WithSecrets(st)
+	_, err := srv.SetVenueKeys(context.Background(), &operatorpb.SetVenueKeysRequest{
+		Venue: "okx", ApiKey: "k", ApiSecret: "s", Passphrase: "p",
+	})
+	if err != nil {
+		t.Fatalf("SetVenueKeys: %v", err)
+	}
+	if st.venue != "okx" || st.keys.APIKey != "k" || st.keys.APISecret != "s" || st.keys.Passphrase != "p" {
+		t.Errorf("store got venue=%q keys=%+v, want the request's values", st.venue, st.keys)
+	}
+	if len(st.logged) != 0 {
+		t.Errorf("store must never be handed anything to log, got %v", st.logged)
+	}
+}
+
+func TestSetVenueKeysNilStoreUnimplemented(t *testing.T) {
+	srv := New(stubReader{}) // no WithSecrets
+	_, err := srv.SetVenueKeys(context.Background(), &operatorpb.SetVenueKeysRequest{Venue: "okx", ApiKey: "k", ApiSecret: "s", Passphrase: "p"})
+	if status.Code(err) != codes.Unimplemented {
+		t.Errorf("code = %v, want Unimplemented", status.Code(err))
+	}
+}
+
+func TestSetVenueKeysValidationInvalidArgument(t *testing.T) {
+	st := &stubSecretStore{}
+	srv := New(stubReader{}).WithSecrets(st)
+	// binance with a passphrase is rejected before the store is touched.
+	_, err := srv.SetVenueKeys(context.Background(), &operatorpb.SetVenueKeysRequest{Venue: "binance", ApiKey: "k", ApiSecret: "s", Passphrase: "p"})
+	if status.Code(err) != codes.InvalidArgument {
+		t.Errorf("code = %v, want InvalidArgument", status.Code(err))
+	}
+	if st.venue != "" {
+		t.Errorf("store must NOT be called on a validation failure")
+	}
+}
+
+func TestSetVenueKeysWriteErrorInternal(t *testing.T) {
+	st := &stubSecretStore{setErr: errors.New("backend down")}
+	srv := New(stubReader{}).WithSecrets(st)
+	_, err := srv.SetVenueKeys(context.Background(), &operatorpb.SetVenueKeysRequest{Venue: "okx", ApiKey: "k", ApiSecret: "s", Passphrase: "p"})
+	if status.Code(err) != codes.Internal {
+		t.Errorf("code = %v, want Internal", status.Code(err))
+	}
+}
+
+func TestListVenueKeysMapsPresence(t *testing.T) {
+	st := &stubSecretStore{listOut: []secrets.VenueStatus{{Venue: "okx", Configured: true}, {Venue: "binance", Configured: false}}}
+	srv := New(stubReader{}).WithSecrets(st)
+	resp, err := srv.ListVenueKeys(context.Background(), &operatorpb.ListVenueKeysRequest{})
+	if err != nil {
+		t.Fatalf("ListVenueKeys: %v", err)
+	}
+	if len(resp.GetVenues()) != 2 || resp.GetVenues()[0].GetVenue() != "okx" || !resp.GetVenues()[0].GetConfigured() {
+		t.Errorf("venues = %+v, want okx configured + binance not", resp.GetVenues())
+	}
+}
+
+func TestListVenueKeysNilStoreUnimplemented(t *testing.T) {
+	_, err := New(stubReader{}).ListVenueKeys(context.Background(), &operatorpb.ListVenueKeysRequest{})
+	if status.Code(err) != codes.Unimplemented {
+		t.Errorf("code = %v, want Unimplemented", status.Code(err))
 	}
 }
 
