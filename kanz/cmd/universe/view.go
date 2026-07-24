@@ -19,11 +19,6 @@ var (
 // no clock (Age is precomputed in the poller), so view_test.go calls it
 // directly against a hand-built model.
 func (m model) render() string {
-	width := m.width
-	if width <= 0 {
-		width = 80
-	}
-
 	var body string
 	switch m.active {
 	case paneClusters:
@@ -32,7 +27,7 @@ func (m model) render() string {
 		body = m.renderNodes()
 	}
 
-	return body + "\n" + m.renderStatus(width)
+	return body + "\n" + m.renderStatus()
 }
 
 func (m model) renderNodes() string {
@@ -45,18 +40,19 @@ func (m model) renderNodes() string {
 		return b.String()
 	}
 	for _, n := range m.nodes {
-		st := n.Status
+		// Pad the status to its column width as plain text, THEN colour the
+		// padded cell and place it directly. Styling a pre-padded cell (rather
+		// than a post-hoc strings.Replace on the formatted row) keeps the columns
+		// aligned — colour escapes have zero display width — and cannot mis-target
+		// a Name/Region cell that happens to contain the status token.
+		statusCell := fmt.Sprintf("%-9s", n.Status)
 		if n.Status == "Ready" {
-			st = styleReady.Render(n.Status)
+			statusCell = styleReady.Render(statusCell)
 		} else {
-			st = styleNotRdy.Render(n.Status)
+			statusCell = styleNotRdy.Render(statusCell)
 		}
-		// Colour escapes occupy no display cells, so pad the raw value and
-		// substitute the coloured span after — keeps the columns aligned.
-		row := fmt.Sprintf("%-16s %-9s %-16s %-10s %-10s %-6s",
-			n.Name, n.Status, n.Roles, n.Region, n.Version, n.Age)
-		row = strings.Replace(row, n.Status, st, 1)
-		b.WriteString(row + "\n")
+		b.WriteString(fmt.Sprintf("%-16s %s %-16s %-10s %-10s %-6s\n",
+			n.Name, statusCell, n.Roles, n.Region, n.Version, n.Age))
 	}
 	return b.String()
 }
@@ -75,7 +71,7 @@ func (m model) renderClusters() string {
 	return b.String()
 }
 
-func (m model) renderStatus(width int) string {
+func (m model) renderStatus() string {
 	left := styleDim.Render("[tab] switch pane   [q] quit")
 	if m.err != nil {
 		return left + "   " + styleErr.Render("error: "+m.err.Error())
