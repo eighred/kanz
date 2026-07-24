@@ -1,9 +1,10 @@
 syntax = "proto3";
 
-// Operator service — the READ surface over the Kubernetes estate for the
-// root@universe operator plane (F0+S1). Read-only: ListNodes / ListClusters
-// ONLY, no provisioning/mutation RPC. Writes (node join, drain, key material)
-// arrive in later subsystems as their own RPCs.
+// Operator service — the control-plane surface over the Kubernetes estate for the
+// root@universe operator plane. Reads: ListNodes / ListClusters. Writes (S2a):
+// AddNode provisions a new host (one-shot k3s-join Job) and ListProvisions reports
+// its status. Further node operations (drain, key material) arrive in later
+// subsystems as their own RPCs.
 //
 // # Consumers
 //
