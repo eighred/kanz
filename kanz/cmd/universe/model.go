@@ -315,16 +315,19 @@ func (m model) nodeActionCmd(action func(context.Context, string) error, name st
 type nodeActionMsg struct{ err error }
 
 // nodeStateLabel derives the Nodes-pane status column from the raw
-// schedulable/evictablePods signals: a cordoned node still running pods reads
-// as actively Draining; once its pods are gone it reads as Drained.
+// schedulable/evictablePods/Status signals: a cordoned node still running pods
+// reads as actively Draining; once its pods are gone it reads as Drained. A
+// schedulable node falls through to its actual readiness (Status) — a
+// schedulable-but-NotReady/Unknown node (e.g. a healthy uncordoned node whose
+// kubelet died) must never render as "Ready".
 func nodeStateLabel(n nodeRow) string {
-	if n.schedulable {
-		return "Ready"
+	if !n.schedulable {
+		if n.evictablePods > 0 {
+			return fmt.Sprintf("Draining (%d)", n.evictablePods)
+		}
+		return "Drained"
 	}
-	if n.evictablePods > 0 {
-		return fmt.Sprintf("Draining (%d)", n.evictablePods)
-	}
-	return "Drained"
+	return n.Status // "Ready" / "NotReady" / "Unknown" — readiness for a schedulable node
 }
 
 func (m model) View() string { return m.render() }

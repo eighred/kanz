@@ -104,7 +104,8 @@ func TestNodeStatusLabels(t *testing.T) {
 		row  nodeRow
 		want string
 	}{
-		{nodeRow{schedulable: true}, "Ready"},
+		{nodeRow{schedulable: true, Status: "Ready"}, "Ready"},
+		{nodeRow{schedulable: true, Status: "NotReady"}, "NotReady"},
 		{nodeRow{schedulable: false, evictablePods: 3}, "Draining (3)"},
 		{nodeRow{schedulable: false, evictablePods: 0}, "Drained"},
 	} {

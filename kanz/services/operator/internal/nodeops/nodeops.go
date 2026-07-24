@@ -60,6 +60,11 @@ func (o *Ops) Drain(ctx context.Context, name string) error {
 	// Background eviction, bound to its own deadline (NOT the request ctx — a drain
 	// outlives the RPC). Re-issuing Drain is safe (cordon is idempotent).
 	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				o.logger.Error("drain goroutine panicked", "node", name, "panic", r)
+			}
+		}()
 		bctx, cancel := context.WithTimeout(context.Background(), drainDeadline)
 		defer cancel()
 		o.evictNode(bctx, name)
@@ -72,17 +77,18 @@ func (o *Ops) Drain(ctx context.Context, name string) error {
 func (o *Ops) evictNode(ctx context.Context, name string) {
 	for {
 		remaining, err := o.evictOnce(ctx, name)
-		if err != nil {
-			o.logger.Error("drain pass failed", "node", name, "err", err)
-			return
-		}
-		if remaining == 0 {
+		switch {
+		case err != nil:
+			// A transient List failure must not abort the whole drain — log and
+			// retry on the next pass; ctx.Done() still bounds the loop below.
+			o.logger.Error("drain pass failed, will retry", "node", name, "err", err)
+		case remaining == 0:
 			o.logger.Info("drain complete", "node", name)
 			return
 		}
 		select {
 		case <-ctx.Done():
-			o.logger.Warn("drain deadline reached with pods remaining", "node", name, "remaining", remaining)
+			o.logger.Warn("drain deadline reached", "node", name)
 			return
 		case <-time.After(drainRetryInterval):
 		}
