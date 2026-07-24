@@ -19,6 +19,9 @@ type nodeSource interface {
 	addNode(ctx context.Context, req addNodeInput) (string, error)
 	listProvisions(ctx context.Context) ([]provisionRow, error)
 	testConnection(ctx context.Context, ip string, port int32) (testConnResult, error)
+	cordon(ctx context.Context, name string) error
+	uncordon(ctx context.Context, name string) error
+	drain(ctx context.Context, name string) error
 }
 
 // testConnResult is the outcome of a pre-flight reachability probe of a
@@ -115,6 +118,21 @@ func (g *grpcSource) testConnection(ctx context.Context, ip string, port int32) 
 	return testConnResult{reachable: resp.GetReachable(), latencyMs: resp.GetLatencyMs(), message: resp.GetMessage()}, nil
 }
 
+func (g *grpcSource) cordon(ctx context.Context, name string) error {
+	_, err := g.client.Cordon(ctx, &operatorpb.CordonRequest{Name: name})
+	return err
+}
+
+func (g *grpcSource) uncordon(ctx context.Context, name string) error {
+	_, err := g.client.Uncordon(ctx, &operatorpb.UncordonRequest{Name: name})
+	return err
+}
+
+func (g *grpcSource) drain(ctx context.Context, name string) error {
+	_, err := g.client.Drain(ctx, &operatorpb.DrainRequest{Name: name})
+	return err
+}
+
 func provLabel(s operatorpb.ProvisionStatus) string {
 	switch s {
 	case operatorpb.ProvisionStatus_PROVISION_STATUS_INSTALLING:
@@ -136,12 +154,14 @@ func toNodeRows(nodes []*operatorpb.Node) []nodeRow {
 			created = ts.AsTime()
 		}
 		out = append(out, nodeRow{
-			Name:    n.GetName(),
-			Status:  statusLabel(n.GetStatus()),
-			Roles:   joinRoles(n.GetRoles()),
-			Region:  n.GetRegion(),
-			Version: n.GetKubeletVersion(),
-			Age:     age(created),
+			Name:          n.GetName(),
+			Status:        statusLabel(n.GetStatus()),
+			Roles:         joinRoles(n.GetRoles()),
+			Region:        n.GetRegion(),
+			Version:       n.GetKubeletVersion(),
+			Age:           age(created),
+			schedulable:   n.GetSchedulable(),
+			evictablePods: int(n.GetEvictablePods()),
 		})
 	}
 	return out

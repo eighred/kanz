@@ -10,12 +10,12 @@ func TestRenderNodesPaneShowsRows(t *testing.T) {
 		active: paneNodes,
 		width:  100, height: 30,
 		nodes: []nodeRow{
-			{Name: "london", Status: "Ready", Roles: "control-plane", Region: "europe", Version: "v1.31.3", Age: "3d"},
-			{Name: "tokyo", Status: "NotReady", Roles: "-", Region: "asia", Version: "v1.31.3", Age: "3d"},
+			{Name: "london", Roles: "control-plane", Region: "europe", Version: "v1.31.3", Age: "3d", schedulable: true},
+			{Name: "tokyo", Roles: "-", Region: "asia", Version: "v1.31.3", Age: "3d", schedulable: false, evictablePods: 2},
 		},
 	}
 	out := m.render()
-	for _, want := range []string{"london", "Ready", "europe", "tokyo", "NotReady"} {
+	for _, want := range []string{"london", "Ready", "europe", "tokyo", "Draining (2)"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("render missing %q\n%s", want, out)
 		}

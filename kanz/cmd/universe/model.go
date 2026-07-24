@@ -10,10 +10,14 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 )
 
-// nodeRow is one row of the Nodes pane — every field is a display string
+// nodeRow is one row of the Nodes pane — every display field is a string
 // (Age is computed in the poller off the clock, keeping render pure).
+// schedulable/evictablePods are the raw signals nodeStateLabel derives the
+// status column from, and that the drain confirm prompt reports pod counts from.
 type nodeRow struct {
 	Name, Status, Roles, Region, Version, Age string
+	schedulable                               bool
+	evictablePods                             int
 }
 
 // clusterRow is one row of the Clusters pane.
@@ -39,6 +43,14 @@ type model struct {
 
 	nodes    []nodeRow
 	clusters []clusterRow
+
+	// selected is the highlighted row in the Nodes pane; c/u/d act on
+	// nodes[selected]. confirmingDrain gates the destructive drain action
+	// behind an explicit y/n; actionErr surfaces a failed cordon/uncordon/drain
+	// call without disturbing nodes/clusters (the next poll reflects reality).
+	selected        int
+	confirmingDrain bool
+	actionErr       error
 
 	// showForm/form drive the Add Node form (S2a). provisions is the last
 	// polled provisioning strip; formErr surfaces a failed submit without
@@ -68,6 +80,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.showForm {
 			return m.updateForm(msg)
 		}
+		if m.active == paneNodes && m.confirmingDrain {
+			return m.updateDrainConfirm(msg)
+		}
 		switch msg.String() {
 		case "q", "ctrl+c":
 			return m, tea.Quit
@@ -84,6 +99,32 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.formErr = nil
 				m.testResult = ""
 			}
+		case "up":
+			if m.active == paneNodes && m.selected > 0 {
+				m.selected--
+			}
+		case "down":
+			if m.active == paneNodes && m.selected < len(m.nodes)-1 {
+				m.selected++
+			}
+		case "c":
+			if m.active == paneNodes {
+				if name, ok := m.selectedNodeName(); ok {
+					return m, m.nodeActionCmd(m.src.cordon, name)
+				}
+			}
+		case "u":
+			if m.active == paneNodes {
+				if name, ok := m.selectedNodeName(); ok {
+					return m, m.nodeActionCmd(m.src.uncordon, name)
+				}
+			}
+		case "d":
+			if m.active == paneNodes {
+				if _, ok := m.selectedNodeName(); ok {
+					m.confirmingDrain = true
+				}
+			}
 		}
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
@@ -98,8 +139,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.clusters = msg.clusters
 			m.provisions = msg.provisions
 			m.err = nil
+			m.selected = clampSelected(m.selected, len(m.nodes))
 		}
 		return m, m.pollTick()
+	case nodeActionMsg:
+		m.actionErr = msg.err
+		// The node's new status arrives on the next poll — no optimistic
+		// mutation of m.nodes here, so a failed action never lies about state.
+		return m, nil
 	case addNodeResultMsg:
 		if msg.err != nil {
 			m.formErr = msg.err
@@ -207,6 +254,77 @@ func atoi32(s string) int32 {
 		return 22
 	}
 	return int32(n)
+}
+
+// updateDrainConfirm handles key input while the drain confirm prompt is
+// showing. Any key other than y/n/esc is swallowed — the prompt blocks all
+// other nodes-pane input until answered.
+func (m model) updateDrainConfirm(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "y":
+		m.confirmingDrain = false
+		if name, ok := m.selectedNodeName(); ok {
+			return m, m.nodeActionCmd(m.src.drain, name)
+		}
+		return m, nil
+	case "n", "esc":
+		m.confirmingDrain = false
+		return m, nil
+	}
+	return m, nil
+}
+
+// selectedNodeName returns the name of the highlighted node, guarding against
+// an empty (or since-shrunk) nodes slice so an action key is a safe no-op
+// rather than an index panic.
+func (m model) selectedNodeName() (string, bool) {
+	if m.selected < 0 || m.selected >= len(m.nodes) {
+		return "", false
+	}
+	return m.nodes[m.selected].Name, true
+}
+
+// clampSelected keeps selected in [0, n-1] (or 0 when n==0) after a fetch
+// replaces m.nodes — a poll that shrinks the estate must never leave a stale
+// index pointing past the end of the new slice.
+func clampSelected(selected, n int) int {
+	if n == 0 {
+		return 0
+	}
+	if selected >= n {
+		return n - 1
+	}
+	if selected < 0 {
+		return 0
+	}
+	return selected
+}
+
+// nodeActionCmd runs a cordon/uncordon/drain call off the UI thread and
+// reports the outcome as a nodeActionMsg; the node's new status arrives on
+// the next poll rather than being applied optimistically here.
+func (m model) nodeActionCmd(action func(context.Context, string) error, name string) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), pollTimeout)
+		defer cancel()
+		return nodeActionMsg{err: action(ctx, name)}
+	}
+}
+
+// nodeActionMsg carries the outcome of a cordon/uncordon/drain call back into Update.
+type nodeActionMsg struct{ err error }
+
+// nodeStateLabel derives the Nodes-pane status column from the raw
+// schedulable/evictablePods signals: a cordoned node still running pods reads
+// as actively Draining; once its pods are gone it reads as Drained.
+func nodeStateLabel(n nodeRow) string {
+	if n.schedulable {
+		return "Ready"
+	}
+	if n.evictablePods > 0 {
+		return fmt.Sprintf("Draining (%d)", n.evictablePods)
+	}
+	return "Drained"
 }
 
 func (m model) View() string { return m.render() }
