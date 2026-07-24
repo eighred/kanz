@@ -14,6 +14,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/kanz-eng/kanz/internal/venueadapter/exchangeauth"
 	"github.com/kanz-eng/kanz/services/operator/internal/secrets"
 )
 
@@ -81,6 +82,9 @@ func TestProveAccountUnsupportedVenue(t *testing.T) {
 	_, err := p.ProveAccount(context.Background(), "kraken", testKeys)
 	if err == nil {
 		t.Fatal("ProveAccount: want error for an unsupported venue, got nil")
+	}
+	if !errors.Is(err, exchangeauth.ErrUnsupportedVenue) {
+		t.Errorf("ProveAccount err = %v, want exchangeauth.ErrUnsupportedVenue", err)
 	}
 }
 

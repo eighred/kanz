@@ -7,6 +7,7 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"strings"
 )
@@ -44,8 +45,22 @@ type Config struct {
 	VenueBaseURLs map[string]string // OPERATOR_OKX_BASE_URL, OPERATOR_BINANCE_BASE_URL
 }
 
+// validVenueProofValues are the only values OPERATOR_VENUE_PROOF accepts. Any
+// other value (a typo, a case variant, a truthy-looking string) must fail
+// startup rather than silently disabling the proof check — see the VenueProof
+// doc comment and I-1 in the S4b review.
+var validVenueProofValues = map[string]bool{"": true, "off": true, "require": true}
+
 // Load reads the configuration from the environment, applying defaults.
 func Load() (Config, error) {
+	venueProof := os.Getenv("OPERATOR_VENUE_PROOF")
+	if !validVenueProofValues[venueProof] {
+		return Config{}, fmt.Errorf(
+			"OPERATOR_VENUE_PROOF=%q is invalid; accepted values are \"\", \"off\", \"require\"",
+			venueProof,
+		)
+	}
+
 	return Config{
 		GRPCListen:   envOr("OPERATOR_GRPC_LISTEN", ":9090"),
 		HealthListen: envOr("OPERATOR_HEALTH_LISTEN", ":8091"),
@@ -59,7 +74,7 @@ func Load() (Config, error) {
 		VaultAddr:            os.Getenv("VAULT_ADDR"),
 		VaultToken:           readTokenOr("VAULT_TOKEN_FILE", "VAULT_TOKEN"),
 
-		VenueProof:    os.Getenv("OPERATOR_VENUE_PROOF"),
+		VenueProof:    venueProof,
 		VenueBaseURLs: venueBaseURLs(),
 	}, nil
 }

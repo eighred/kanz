@@ -1,6 +1,9 @@
 package config
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestLoadDefaults(t *testing.T) {
 	t.Setenv("OPERATOR_GRPC_LISTEN", "")
@@ -61,6 +64,41 @@ func TestLoadVenueProofEnvOnlyIncludesConfiguredVenues(t *testing.T) {
 	}
 	if _, ok := cfg.VenueBaseURLs["binance"]; ok {
 		t.Errorf("VenueBaseURLs must not contain binance when its env var is unset")
+	}
+}
+
+func TestLoadVenueProofAcceptedValues(t *testing.T) {
+	for _, v := range []string{"", "off", "require"} {
+		v := v
+		t.Run("value="+v, func(t *testing.T) {
+			t.Setenv("OPERATOR_VENUE_PROOF", v)
+			cfg, err := Load()
+			if err != nil {
+				t.Fatalf("Load(OPERATOR_VENUE_PROOF=%q): %v", v, err)
+			}
+			if cfg.VenueProof != v {
+				t.Errorf("VenueProof = %q, want %q", cfg.VenueProof, v)
+			}
+		})
+	}
+}
+
+func TestLoadVenueProofRejectsInvalidValues(t *testing.T) {
+	for _, v := range []string{"Require", "true", "required", "1"} {
+		v := v
+		t.Run("value="+v, func(t *testing.T) {
+			t.Setenv("OPERATOR_VENUE_PROOF", v)
+			_, err := Load()
+			if err == nil {
+				t.Fatalf("Load(OPERATOR_VENUE_PROOF=%q): want error, got nil", v)
+			}
+			if !strings.Contains(err.Error(), "OPERATOR_VENUE_PROOF") {
+				t.Errorf("error = %q, want it to name OPERATOR_VENUE_PROOF", err.Error())
+			}
+			if !strings.Contains(err.Error(), v) {
+				t.Errorf("error = %q, want it to name the offending value %q", err.Error(), v)
+			}
+		})
 	}
 }
 

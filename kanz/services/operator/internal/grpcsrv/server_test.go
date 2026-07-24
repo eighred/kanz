@@ -14,9 +14,12 @@ import (
 
 	operatorpb "github.com/kanz-eng/kanz-schemas-go/operator/v1"
 
+	"github.com/kanz-eng/kanz/internal/execution"
+	"github.com/kanz-eng/kanz/internal/venueadapter/exchangeauth"
 	"github.com/kanz-eng/kanz/services/operator/internal/estate"
 	"github.com/kanz-eng/kanz/services/operator/internal/provision"
 	"github.com/kanz-eng/kanz/services/operator/internal/secrets"
+	"github.com/kanz-eng/kanz/services/operator/internal/venueproof"
 )
 
 type stubReader struct {
@@ -391,6 +394,17 @@ func TestSetVenueKeysProvesBeforeWrite(t *testing.T) {
 	if prover.calls != 1 {
 		t.Errorf("prover called %d times, want 1", prover.calls)
 	}
+	wantKeys := secrets.VenueKeys{APIKey: "k", APISecret: "s", Passphrase: "p"}
+	if prover.gotVenue != "okx" {
+		t.Errorf("prover got venue = %q, want okx", prover.gotVenue)
+	}
+	if prover.gotKeys != wantKeys {
+		t.Errorf("prover got keys = %+v, want %+v", prover.gotKeys, wantKeys)
+	}
+	if prover.gotVenue != st.venue || prover.gotKeys != st.keys {
+		t.Errorf("prover was handed venue=%q keys=%+v but the store received venue=%q keys=%+v — prove/write mismatch",
+			prover.gotVenue, prover.gotKeys, st.venue, st.keys)
+	}
 }
 
 func TestSetVenueKeysRefusesWriteWhenProofFails(t *testing.T) {
@@ -430,6 +444,75 @@ func TestSetVenueKeysProofErrorIsSanitized(t *testing.T) {
 	want := "the exchange could not be asked which account these credentials belong to"
 	if msg != want {
 		t.Errorf("message = %q, want fixed reason %q", msg, want)
+	}
+}
+
+// TestSetVenueKeysProofErrorSanitizesAllBranches drives every branch of
+// proofReason (server.go), not just the catch-all. The *execution.APIError
+// branch is the only one that interpolates a field off the exchange's own
+// error object (fmt.Sprintf of apiErr.Code) — a plausible future edit is to
+// also interpolate apiErr.Msg, which is the exchange's own words and must
+// never reach the caller. EXCHANGEMSGSENTINEL below exists to make that
+// regression fail this test by name, not just "some string changed".
+func TestSetVenueKeysProofErrorSanitizesAllBranches(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want string
+	}{
+		{
+			name: "no endpoint configured",
+			err:  venueproof.ErrNoEndpoint,
+			want: "venue key proof is required but no exchange endpoint is configured for this venue",
+		},
+		{
+			name: "egress denied",
+			err:  execution.ErrEgressDenied,
+			want: "the exchange rejected these credentials",
+		},
+		{
+			name: "exchange api error",
+			err:  &execution.APIError{Code: 50113, Msg: "EXCHANGEMSGSENTINEL"},
+			want: "the exchange rejected these credentials (code 50113)",
+		},
+		{
+			name: "unsupported venue",
+			err:  exchangeauth.ErrUnsupportedVenue,
+			want: "this venue cannot be proved",
+		},
+		{
+			name: "unmapped error (catch-all)",
+			err:  errors.New("some unmapped internal detail"),
+			want: "the exchange could not be asked which account these credentials belong to",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			st := &stubSecretStore{}
+			prover := &stubVenueProver{err: tc.err}
+			srv := New(stubReader{}).WithSecrets(st).WithVenueProof(prover)
+
+			_, err := srv.SetVenueKeys(context.Background(), &operatorpb.SetVenueKeysRequest{
+				Venue: "okx", ApiKey: "k", ApiSecret: "s", Passphrase: "p",
+			})
+			if status.Code(err) != codes.FailedPrecondition {
+				t.Fatalf("code = %v, want FailedPrecondition", status.Code(err))
+			}
+			msg := status.Convert(err).Message()
+			if msg != tc.want {
+				t.Errorf("message = %q, want fixed reason %q", msg, tc.want)
+			}
+			if strings.Contains(msg, "KEYSENTINEL") || strings.Contains(msg, "SECSENTINEL") || strings.Contains(msg, "PASSENTINEL") {
+				t.Errorf("gRPC message leaked credential material: %q", msg)
+			}
+			if strings.Contains(msg, "EXCHANGEMSGSENTINEL") {
+				t.Errorf("gRPC message leaked the exchange's own error text: %q", msg)
+			}
+			if st.venue != "" {
+				t.Errorf("store must NOT be called when proof fails, got venue=%q", st.venue)
+			}
+		})
 	}
 }
 
