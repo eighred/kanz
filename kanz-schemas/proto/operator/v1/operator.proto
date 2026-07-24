@@ -29,6 +29,15 @@ service OperatorService {
   // ListClusters groups those nodes by region into the Europe/Asia/USA view,
   // with online/offline counts.
   rpc ListClusters(ListClustersRequest) returns (ListClustersResponse);
+
+  // AddNode provisions a new host into the estate: it creates a one-shot Job
+  // that SSHes to the target once, installs the k3s agent, and joins. Async —
+  // returns a provision_id immediately; poll ListProvisions for progress and
+  // watch ListNodes for the joined node.
+  rpc AddNode(AddNodeRequest) returns (AddNodeResponse);
+
+  // ListProvisions reports in-flight and recent node provisions.
+  rpc ListProvisions(ListProvisionsRequest) returns (ListProvisionsResponse);
 }
 
 // NodeStatus is the node's readiness. UNSPECIFIED (the zero value) is the
@@ -71,4 +80,41 @@ message Cluster {
   string region = 1;
   int32 online = 2;
   int32 offline = 3;
+}
+
+// ProvisionStatus is derived from the provisioning Job's status.
+enum ProvisionStatus {
+  PROVISION_STATUS_UNSPECIFIED = 0;
+  PROVISION_STATUS_PENDING = 1;     // Job created, not yet running
+  PROVISION_STATUS_INSTALLING = 2;  // Job active (SSH + k3s install underway)
+  PROVISION_STATUS_JOINED = 3;      // Job succeeded — node installed k3s and joined
+  PROVISION_STATUS_FAILED = 4;      // Job failed
+}
+
+message AddNodeRequest {
+  string hostname = 1;
+  string ip = 2;
+  int32 ssh_port = 3;   // 0 ⇒ 22
+  string ssh_user = 4;
+  // ssh_private_key is the PEM bootstrap key, used ONCE to install k3s. It is
+  // never stored beyond the Job-owned Secret, never returned, never logged.
+  bytes ssh_private_key = 5;
+}
+
+message AddNodeResponse {
+  string provision_id = 1;
+  ProvisionStatus status = 2;
+}
+
+message ListProvisionsRequest {}
+
+message ListProvisionsResponse {
+  repeated Provision provisions = 1;
+}
+
+message Provision {
+  string id = 1;
+  string hostname = 2;
+  ProvisionStatus status = 3;
+  string message = 4;  // failure reason when FAILED; empty otherwise
 }
