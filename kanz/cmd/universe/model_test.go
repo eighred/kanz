@@ -11,9 +11,17 @@ import (
 // to a slice so calls survive the stub's value-receiver methods.
 type setRegionCall struct{ name, region string }
 
+// setVenueKeysCall records one setVenueKeys invocation.
+type setVenueKeysCall struct {
+	venue string
+	keys  venueKeys
+}
+
 type stubSource struct {
-	msg            fetchMsg
-	setRegionCalls *[]setRegionCall
+	msg              fetchMsg
+	setRegionCalls   *[]setRegionCall
+	setVenueKeysCall *[]setVenueKeysCall
+	venues           []venueRow
 }
 
 func (s stubSource) fetch(context.Context) (fetchMsg, error) { return s.msg, nil }
@@ -35,6 +43,15 @@ func (s stubSource) setRegion(_ context.Context, name, region string) error {
 	}
 	return nil
 }
+
+func (s stubSource) setVenueKeys(_ context.Context, venue string, keys venueKeys) error {
+	if s.setVenueKeysCall != nil {
+		*s.setVenueKeysCall = append(*s.setVenueKeysCall, setVenueKeysCall{venue: venue, keys: keys})
+	}
+	return nil
+}
+
+func (s stubSource) listVenueKeys(context.Context) ([]venueRow, error) { return s.venues, nil }
 
 func TestFetchMsgPopulatesModel(t *testing.T) {
 	m := newModel(Config{}, stubSource{})
@@ -59,6 +76,76 @@ func TestTabSwitchesPane(t *testing.T) {
 	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyTab})
 	if updated.(model).active != paneClusters {
 		t.Fatalf("after tab, pane = %v, want paneClusters", updated.(model).active)
+	}
+}
+
+func TestTabCyclesThroughAPIPaneAndBack(t *testing.T) {
+	m := newModel(Config{}, stubSource{})
+	u, _ := m.Update(tea.KeyMsg{Type: tea.KeyTab})
+	m = u.(model)
+	if m.active != paneClusters {
+		t.Fatalf("after 1 tab, pane = %v, want paneClusters", m.active)
+	}
+	u, _ = m.Update(tea.KeyMsg{Type: tea.KeyTab})
+	m = u.(model)
+	if m.active != paneAPI {
+		t.Fatalf("after 2 tabs, pane = %v, want paneAPI", m.active)
+	}
+	u, _ = m.Update(tea.KeyMsg{Type: tea.KeyTab})
+	m = u.(model)
+	if m.active != paneNodes {
+		t.Fatalf("after 3 tabs, pane = %v, want paneNodes (cycle back)", m.active)
+	}
+}
+
+func TestFetchMsgPopulatesVenuesAndClampsAPISelected(t *testing.T) {
+	m := newModel(Config{}, stubSource{})
+	m.apiSelected = 5
+	updated, _ := m.Update(fetchMsg{
+		venues: []venueRow{{venue: "binance", configured: true}, {venue: "coinbase", configured: false}},
+	})
+	got := updated.(model)
+	if len(got.venues) != 2 || got.venues[0].venue != "binance" {
+		t.Fatalf("venues = %+v", got.venues)
+	}
+	if got.apiSelected != 1 {
+		t.Fatalf("apiSelected = %d, want clamped to 1", got.apiSelected)
+	}
+}
+
+func TestAPIPaneSelectionMovesWithinBounds(t *testing.T) {
+	m := newModel(Config{}, stubSource{})
+	m.active = paneAPI
+	m.venues = []venueRow{{venue: "binance"}, {venue: "coinbase"}}
+
+	u, _ := m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	if u.(model).apiSelected != 1 {
+		t.Fatalf("down should select row 1, got %d", u.(model).apiSelected)
+	}
+	u, _ = u.(model).Update(tea.KeyMsg{Type: tea.KeyDown})
+	if u.(model).apiSelected != 1 {
+		t.Fatalf("down at last row should stay at 1, got %d", u.(model).apiSelected)
+	}
+	u, _ = u.(model).Update(tea.KeyMsg{Type: tea.KeyUp})
+	if u.(model).apiSelected != 0 {
+		t.Fatalf("up should select row 0, got %d", u.(model).apiSelected)
+	}
+	u, _ = u.(model).Update(tea.KeyMsg{Type: tea.KeyUp})
+	if u.(model).apiSelected != 0 {
+		t.Fatalf("up at first row should stay at 0, got %d", u.(model).apiSelected)
+	}
+}
+
+func TestAPIPaneSelectionNoOpWithNoVenues(t *testing.T) {
+	m := newModel(Config{}, stubSource{})
+	m.active = paneAPI
+	m.venues = nil
+	u, cmd := m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	if cmd != nil {
+		t.Fatalf("down with no venues should not return a command")
+	}
+	if u.(model).apiSelected != 0 {
+		t.Fatalf("apiSelected should stay 0 with no venues, got %d", u.(model).apiSelected)
 	}
 }
 

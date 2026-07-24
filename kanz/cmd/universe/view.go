@@ -36,6 +36,8 @@ func (m model) render() string {
 	switch m.active {
 	case paneClusters:
 		body = m.renderClusters()
+	case paneAPI:
+		body = m.renderAPI()
 	default:
 		body = m.renderNodes()
 	}
@@ -105,10 +107,36 @@ func (m model) renderClusters() string {
 	return b.String()
 }
 
+// renderAPI shows the API Manager pane — presence only, never key material.
+func (m model) renderAPI() string {
+	var b strings.Builder
+	b.WriteString(styleTitle.Render("API MANAGER") + "\n")
+	b.WriteString(fmt.Sprintf("   %-12s %-14s\n", "VENUE", "KEYS"))
+	if len(m.venues) == 0 {
+		b.WriteString(styleDim.Render("(no venues)") + "\n")
+		return b.String()
+	}
+	for i, v := range m.venues {
+		state := styleDim.Render("— not set")
+		if v.configured {
+			state = styleReady.Render("✓ configured")
+		}
+		marker := "  "
+		if i == m.apiSelected {
+			marker = styleSelected.Render("▸ ")
+		}
+		b.WriteString(marker + fmt.Sprintf("%-12s %s\n", v.venue, state))
+	}
+	return b.String()
+}
+
 func (m model) renderStatus() string {
 	left := styleDim.Render("[tab] switch pane   [a] add node   [q] quit")
 	if m.active == paneNodes {
 		left += "\n" + styleDim.Render("[↑↓] select  [c]ordon [u]ncordon [d]rain [m]ove")
+	}
+	if m.active == paneAPI {
+		left += "\n" + styleDim.Render("[↑↓] select  [k] set keys")
 	}
 	if p := m.renderProvisions(); p != "" {
 		left += "\n" + p

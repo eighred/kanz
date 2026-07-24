@@ -23,7 +23,14 @@ type nodeSource interface {
 	uncordon(ctx context.Context, name string) error
 	drain(ctx context.Context, name string) error
 	setRegion(ctx context.Context, name, region string) error
+	setVenueKeys(ctx context.Context, venue string, keys venueKeys) error
+	listVenueKeys(ctx context.Context) ([]venueRow, error)
 }
+
+// venueKeys is the write payload for SetVenueKeys — the typed secret is passed
+// through to the RPC and never retained on a model field (the S2a key-bytes
+// discipline).
+type venueKeys struct{ apiKey, apiSecret, passphrase string }
 
 // testConnResult is the outcome of a pre-flight reachability probe of a
 // candidate host's SSH port — reachability only, never authentication.
@@ -38,6 +45,7 @@ type fetchMsg struct {
 	nodes      []nodeRow
 	clusters   []clusterRow
 	provisions []provisionRow
+	venues     []venueRow
 	err        error
 }
 
@@ -82,10 +90,15 @@ func (g *grpcSource) fetch(ctx context.Context) (fetchMsg, error) {
 	// degrades only the strip (it goes quiet for one tick), never the whole
 	// poll — nodes/clusters are the read this TUI exists for.
 	provisions, _ := g.listProvisions(ctx)
+	// Venue-key presence is likewise best-effort: a transient failure here
+	// degrades only the API Manager pane (it goes empty for one tick), never
+	// the whole poll.
+	venues, _ := g.listVenueKeys(ctx)
 	return fetchMsg{
 		nodes:      toNodeRows(nodesResp.GetNodes()),
 		clusters:   toClusterRows(clustersResp.GetClusters()),
 		provisions: provisions,
+		venues:     venues,
 	}, nil
 }
 
@@ -137,6 +150,25 @@ func (g *grpcSource) drain(ctx context.Context, name string) error {
 func (g *grpcSource) setRegion(ctx context.Context, name, region string) error {
 	_, err := g.client.SetNodeRegion(ctx, &operatorpb.SetNodeRegionRequest{Name: name, Region: region})
 	return err
+}
+
+func (g *grpcSource) setVenueKeys(ctx context.Context, venue string, keys venueKeys) error {
+	_, err := g.client.SetVenueKeys(ctx, &operatorpb.SetVenueKeysRequest{
+		Venue: venue, ApiKey: keys.apiKey, ApiSecret: keys.apiSecret, Passphrase: keys.passphrase,
+	})
+	return err
+}
+
+func (g *grpcSource) listVenueKeys(ctx context.Context) ([]venueRow, error) {
+	resp, err := g.client.ListVenueKeys(ctx, &operatorpb.ListVenueKeysRequest{})
+	if err != nil {
+		return nil, err
+	}
+	out := make([]venueRow, 0, len(resp.GetVenues()))
+	for _, v := range resp.GetVenues() {
+		out = append(out, venueRow{venue: v.GetVenue(), configured: v.GetConfigured()})
+	}
+	return out, nil
 }
 
 func provLabel(s operatorpb.ProvisionStatus) string {

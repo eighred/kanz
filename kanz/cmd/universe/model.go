@@ -26,12 +26,20 @@ type clusterRow struct {
 	Online, Offline int
 }
 
+// venueRow is one row of the API Manager pane — presence only, never key
+// material.
+type venueRow struct {
+	venue      string
+	configured bool
+}
+
 // pane selects which read-only view is shown.
 type pane int
 
 const (
 	paneNodes pane = iota
 	paneClusters
+	paneAPI
 )
 
 // model is the whole UI state, mutated ONLY by Update in response to messages —
@@ -67,6 +75,11 @@ type model struct {
 	formErr    error
 	testResult string
 
+	// venues is the last polled API-Manager presence strip; apiSelected is the
+	// highlighted row in the API Manager pane.
+	venues      []venueRow
+	apiSelected int
+
 	width, height int
 	err           error
 }
@@ -96,9 +109,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "q", "ctrl+c":
 			return m, tea.Quit
 		case "tab":
-			if m.active == paneNodes {
+			switch m.active {
+			case paneNodes:
 				m.active = paneClusters
-			} else {
+			case paneClusters:
+				m.active = paneAPI
+			default:
 				m.active = paneNodes
 			}
 		case "a":
@@ -112,9 +128,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.active == paneNodes && m.selected > 0 {
 				m.selected--
 			}
+			if m.active == paneAPI && m.apiSelected > 0 {
+				m.apiSelected--
+			}
 		case "down":
 			if m.active == paneNodes && m.selected < len(m.nodes)-1 {
 				m.selected++
+			}
+			if m.active == paneAPI && m.apiSelected < len(m.venues)-1 {
+				m.apiSelected++
 			}
 		case "c":
 			if m.active == paneNodes {
@@ -154,8 +176,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.nodes = msg.nodes
 			m.clusters = msg.clusters
 			m.provisions = msg.provisions
+			m.venues = msg.venues
 			m.err = nil
 			m.selected = clampSelected(m.selected, len(m.nodes))
+			m.apiSelected = clampSelected(m.apiSelected, len(m.venues))
 		}
 		return m, m.pollTick()
 	case nodeActionMsg:

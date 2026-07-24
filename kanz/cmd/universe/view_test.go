@@ -43,6 +43,39 @@ func TestRenderErrorShownInStatus(t *testing.T) {
 	}
 }
 
+func TestRenderAPIPaneShowsPresenceNeverKeyMaterial(t *testing.T) {
+	m := model{
+		active: paneAPI,
+		width:  100, height: 30,
+		venues: []venueRow{
+			{venue: "binance", configured: true},
+			{venue: "coinbase", configured: false},
+		},
+	}
+	out := m.render()
+	for _, want := range []string{"binance", "configured", "coinbase", "not set"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("render missing %q\n%s", want, out)
+		}
+	}
+	for _, forbidden := range []string{"sk-", "secret", "passphrase"} {
+		if strings.Contains(strings.ToLower(out), strings.ToLower(forbidden)) {
+			t.Errorf("render must never show key material, found %q\n%s", forbidden, out)
+		}
+	}
+	out2 := m.render()
+	if out != out2 {
+		t.Errorf("render is not pure for paneAPI: two calls produced different output\nfirst:\n%s\nsecond:\n%s", out, out2)
+	}
+}
+
+func TestRenderAPIPaneShowsSetKeysHint(t *testing.T) {
+	m := model{active: paneAPI, width: 80, height: 24}
+	if !strings.Contains(m.render(), "set keys") {
+		t.Errorf("render should show the [k] set keys hint for paneAPI\n%s", m.render())
+	}
+}
+
 type errStub struct{}
 
 func (errStub) Error() string { return "boom" }
