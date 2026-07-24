@@ -56,8 +56,22 @@ func sshRun(ctx context.Context, addr, user string, pemKey []byte, cmd string) (
 	var out bytes.Buffer
 	sess.Stdout = &out
 	sess.Stderr = &out
-	if err := sess.Run(cmd); err != nil {
-		return out.String(), fmt.Errorf("run %q: %w", cmd, err)
+
+	// crypto/ssh has no context-aware Run. Run in a goroutine and honor ctx by
+	// closing the client on cancellation, which unblocks sess.Run. The <-done
+	// barrier in both branches means out is read only after the goroutine returns,
+	// so there is no concurrent access to the buffer.
+	done := make(chan error, 1)
+	go func() { done <- sess.Run(cmd) }()
+	select {
+	case <-ctx.Done():
+		_ = client.Close()
+		<-done
+		return out.String(), fmt.Errorf("run %q: %w", cmd, ctx.Err())
+	case err := <-done:
+		if err != nil {
+			return out.String(), fmt.Errorf("run %q: %w", cmd, err)
+		}
+		return out.String(), nil
 	}
-	return out.String(), nil
 }

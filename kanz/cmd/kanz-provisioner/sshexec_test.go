@@ -9,6 +9,7 @@ import (
 	"net"
 	"strings"
 	"testing"
+	"time"
 
 	"golang.org/x/crypto/ssh"
 )
@@ -113,6 +114,91 @@ func startEchoSSHServer(t *testing.T, authorized ssh.PublicKey, reply string) st
 		}
 	}()
 	return ln.Addr().String()
+}
+
+// serveOneHanging handshakes one connection, accepts the session/exec request,
+// replies true, and then blocks forever without ever writing output or an
+// exit-status. It simulates a remote command that never returns.
+func serveOneHanging(c net.Conn, cfg *ssh.ServerConfig) {
+	sc, chans, reqs, err := ssh.NewServerConn(c, cfg)
+	if err != nil {
+		_ = c.Close()
+		return
+	}
+	go ssh.DiscardRequests(reqs)
+	for nc := range chans {
+		if nc.ChannelType() != "session" {
+			_ = nc.Reject(ssh.UnknownChannelType, "only session")
+			continue
+		}
+		ch, chReqs, err := nc.Accept()
+		if err != nil {
+			continue
+		}
+		go func() {
+			for req := range chReqs {
+				if req.Type == "exec" {
+					_ = ch
+					_ = req.Reply(true, nil)
+					// Hang forever: never write output, never send exit-status,
+					// never close the channel.
+					select {}
+				}
+				_ = req.Reply(false, nil)
+			}
+		}()
+		_ = sc
+	}
+}
+
+// startHangingSSHServer runs a minimal SSH server on a random port that accepts
+// the given authorized key and, for any exec request, accepts it but never
+// completes — proving sshRun's ctx-honoring behavior on a truly hung command.
+func startHangingSSHServer(t *testing.T, authorized ssh.PublicKey) string {
+	t.Helper()
+	cfg := &ssh.ServerConfig{
+		PublicKeyCallback: func(_ ssh.ConnMetadata, key ssh.PublicKey) (*ssh.Permissions, error) {
+			if string(key.Marshal()) == string(authorized.Marshal()) {
+				return &ssh.Permissions{}, nil
+			}
+			return nil, errUnauthorized
+		},
+	}
+	cfg.AddHostKey(newHostKey(t))
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go serveOneHanging(c, cfg)
+		}
+	}()
+	return ln.Addr().String()
+}
+
+func TestSSHRunHonorsContextOnHungRun(t *testing.T) {
+	pem, pub := clientKeyPEM(t)
+	addr := startHangingSSHServer(t, pub) // accepts + auths, never completes exec
+
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+
+	start := time.Now()
+	_, err := sshRun(ctx, addr, "root", pem, "hang-forever")
+	if err == nil {
+		t.Fatal("expected a context error from a hung run")
+	}
+	if time.Since(start) > 5*time.Second {
+		t.Fatalf("sshRun did not abort on ctx cancellation (took %s)", time.Since(start))
+	}
 }
 
 func TestSSHRunExecutesCommand(t *testing.T) {
