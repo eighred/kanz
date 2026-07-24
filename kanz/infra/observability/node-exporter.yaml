@@ -1,0 +1,60 @@
+# kanz-observability namespace: not declared elsewhere in this repo (only referenced
+# via kubernetes.io/metadata.name selectors in infra/security/runtime/network-policies.yaml),
+# so it is declared here to keep `kubectl apply -f` self-sufficient for this manifest.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: kanz-observability
+  labels: { app.kubernetes.io/part-of: kanz }
+---
+# Cluster-native node observability (S2b): a Prometheus node-exporter on every node,
+# so a node S2a provisions is scraped automatically — no per-node SSH step. Applied
+# once. Wiring a Prometheus to scrape port 9100 (via the annotations below) is infra
+# and out of this slice's scope.
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: node-exporter
+  namespace: kanz-observability
+  labels: { app.kubernetes.io/part-of: kanz, app: node-exporter }
+spec:
+  selector:
+    matchLabels: { app: node-exporter }
+  template:
+    metadata:
+      labels: { app: node-exporter, app.kubernetes.io/part-of: kanz }
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9100"
+    spec:
+      hostNetwork: true
+      hostPID: true
+      # Run on EVERY node, including tainted/control-plane ones.
+      tolerations:
+        - operator: Exists
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: node-exporter
+          image: quay.io/prometheus/node-exporter:v1.8.2
+          args:
+            - --path.procfs=/host/proc
+            - --path.sysfs=/host/sys
+            - --path.rootfs=/host/root
+            - --web.listen-address=:9100
+          ports:
+            - { name: metrics, containerPort: 9100, hostPort: 9100 }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
+          volumeMounts:
+            - { name: proc, mountPath: /host/proc, readOnly: true }
+            - { name: sys, mountPath: /host/sys, readOnly: true }
+            - { name: root, mountPath: /host/root, mountPropagation: HostToContainer, readOnly: true }
+      volumes:
+        - { name: proc, hostPath: { path: /proc } }
+        - { name: sys, hostPath: { path: /sys } }
+        - { name: root, hostPath: { path: / } }
