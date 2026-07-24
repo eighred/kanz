@@ -37,6 +37,7 @@ type NodeOps interface {
 	Cordon(ctx context.Context, name string) error
 	Uncordon(ctx context.Context, name string) error
 	Drain(ctx context.Context, name string) error
+	SetRegion(ctx context.Context, name, region string) error
 }
 
 // Server adapts an estate.Reader to the generated OperatorService interface.
@@ -157,7 +158,21 @@ func (s *Server) Drain(ctx context.Context, req *operatorpb.DrainRequest) (*oper
 	return &operatorpb.DrainResponse{}, nil
 }
 
-// nodeWrite is the shared guard+error mapping for the three node-write handlers.
+func (s *Server) SetNodeRegion(ctx context.Context, req *operatorpb.SetNodeRegionRequest) (*operatorpb.SetNodeRegionResponse, error) {
+	// The region check only applies once we know ops is configured, so an unconfigured
+	// deployment still returns Unimplemented (via nodeWrite) rather than InvalidArgument.
+	if s.nodeOps != nil && req.GetRegion() == "" {
+		return nil, status.Error(codes.InvalidArgument, "region is required")
+	}
+	if err := s.nodeWrite(ctx, req.GetName(), func() error {
+		return s.nodeOps.SetRegion(ctx, req.GetName(), req.GetRegion())
+	}); err != nil {
+		return nil, err
+	}
+	return &operatorpb.SetNodeRegionResponse{}, nil
+}
+
+// nodeWrite is the shared guard+error mapping for the node-write handlers.
 func (s *Server) nodeWrite(_ context.Context, name string, do func() error) error {
 	if s.nodeOps == nil {
 		return status.Error(codes.Unimplemented, "node operations not configured")

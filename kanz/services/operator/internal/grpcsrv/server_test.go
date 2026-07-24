@@ -181,6 +181,7 @@ func TestTestConnectionRejectsEmptyIP(t *testing.T) {
 
 type stubNodeOps struct {
 	cordoned, uncordoned, drained string
+	regionNode, region            string
 	err                           error
 }
 
@@ -190,6 +191,10 @@ func (s *stubNodeOps) Uncordon(_ context.Context, name string) error {
 	return s.err
 }
 func (s *stubNodeOps) Drain(_ context.Context, name string) error { s.drained = name; return s.err }
+func (s *stubNodeOps) SetRegion(_ context.Context, name, region string) error {
+	s.regionNode, s.region = name, region
+	return s.err
+}
 
 func TestCordonUncordonDrainDelegate(t *testing.T) {
 	sn := &stubNodeOps{}
@@ -238,6 +243,33 @@ func TestListNodesSurfacesSchedulableAndEvictable(t *testing.T) {
 	n := resp.GetNodes()[0]
 	if n.GetSchedulable() || n.GetEvictablePods() != 3 {
 		t.Errorf("ListNodes must map schedulable/evictable_pods from estate: schedulable=%v evictable=%d", n.GetSchedulable(), n.GetEvictablePods())
+	}
+}
+
+func TestSetNodeRegionDelegates(t *testing.T) {
+	sn := &stubNodeOps{}
+	srv := New(stubReader{}).WithNodeOps(sn)
+	if _, err := srv.SetNodeRegion(context.Background(), &operatorpb.SetNodeRegionRequest{Name: "london", Region: "asia"}); err != nil {
+		t.Fatalf("SetNodeRegion: %v", err)
+	}
+	if sn.regionNode != "london" || sn.region != "asia" {
+		t.Errorf("delegation failed: node=%q region=%q", sn.regionNode, sn.region)
+	}
+}
+
+func TestSetNodeRegionRejectsEmpty(t *testing.T) {
+	srv := New(stubReader{}).WithNodeOps(&stubNodeOps{})
+	if _, err := srv.SetNodeRegion(context.Background(), &operatorpb.SetNodeRegionRequest{Region: "asia"}); status.Code(err) != codes.InvalidArgument {
+		t.Fatalf("empty name → want InvalidArgument, got %v", err)
+	}
+	if _, err := srv.SetNodeRegion(context.Background(), &operatorpb.SetNodeRegionRequest{Name: "london"}); status.Code(err) != codes.InvalidArgument {
+		t.Fatalf("empty region → want InvalidArgument, got %v", err)
+	}
+}
+
+func TestSetNodeRegionUnconfiguredIsUnimplemented(t *testing.T) {
+	if _, err := New(stubReader{}).SetNodeRegion(context.Background(), &operatorpb.SetNodeRegionRequest{Name: "x", Region: "y"}); status.Code(err) != codes.Unimplemented {
+		t.Fatalf("want Unimplemented, got %v", err)
 	}
 }
 
