@@ -3,8 +3,7 @@ syntax = "proto3";
 // Operator service — the control-plane surface over the Kubernetes estate for the
 // root@universe operator plane. Reads: ListNodes / ListClusters. Writes (S2a):
 // AddNode provisions a new host (one-shot k3s-join Job) and ListProvisions reports
-// its status. Further node operations (drain, key material) arrive in later
-// subsystems as their own RPCs.
+// its status. Key material is written via SetVenueKeys (S4a, API Manager).
 //
 // # Consumers
 //
@@ -58,6 +57,17 @@ service OperatorService {
   // Non-destructive (relabel only, no eviction). Poll ListNodes/ListClusters for the
   // new grouping.
   rpc SetNodeRegion(SetNodeRegionRequest) returns (SetNodeRegionResponse);
+
+  // SetVenueKeys registers an exchange API key set (api_key, api_secret, and for
+  // OKX a passphrase) into the venue's secret location. Write-only: the operator
+  // can set a venue's keys but can never read them back. The value never appears
+  // in a response, and the platform's venue adapters consume it via their existing
+  // CSI/Vault mount.
+  rpc SetVenueKeys(SetVenueKeysRequest) returns (SetVenueKeysResponse);
+
+  // ListVenueKeys reports which venues have a key set configured — presence ONLY,
+  // never the key material.
+  rpc ListVenueKeys(ListVenueKeysRequest) returns (ListVenueKeysResponse);
 }
 
 // NodeStatus is the node's readiness. UNSPECIFIED (the zero value) is the
@@ -167,3 +177,20 @@ message SetNodeRegionRequest {
   string region = 2;
 }
 message SetNodeRegionResponse {}
+
+message SetVenueKeysRequest {
+  string venue      = 1; // "okx" | "binance"
+  string api_key    = 2;
+  string api_secret = 3;
+  string passphrase = 4; // OKX requires it; Binance must leave it empty
+}
+message SetVenueKeysResponse {}
+
+message ListVenueKeysRequest {}
+message ListVenueKeysResponse {
+  repeated VenueKeyStatus venues = 1;
+}
+message VenueKeyStatus {
+  string venue      = 1;
+  bool   configured = 2; // presence only — NEVER key material
+}
