@@ -3,6 +3,8 @@ package grpcsrv
 import (
 	"context"
 	"errors"
+	"net"
+	"strconv"
 	"testing"
 	"time"
 
@@ -125,6 +127,55 @@ func TestAddNodeRejectsEmptyKey(t *testing.T) {
 	_, err := srv.AddNode(context.Background(), &operatorpb.AddNodeRequest{Ip: "10.0.0.5", SshUser: "root"})
 	if status.Code(err) != codes.InvalidArgument {
 		t.Fatalf("want InvalidArgument for empty key, got %v", err)
+	}
+}
+
+func TestTestConnectionReachable(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = ln.Close() }()
+	host, portStr, _ := net.SplitHostPort(ln.Addr().String())
+	port, _ := strconv.Atoi(portStr)
+
+	srv := New(stubReader{})
+	resp, err := srv.TestConnection(context.Background(), &operatorpb.TestConnectionRequest{Ip: host, SshPort: int32(port)})
+	if err != nil {
+		t.Fatalf("TestConnection: %v", err)
+	}
+	if !resp.GetReachable() {
+		t.Errorf("want reachable, got %+v", resp)
+	}
+	if resp.GetLatencyMs() < 0 {
+		t.Errorf("latency should be non-negative, got %d", resp.GetLatencyMs())
+	}
+}
+
+func TestTestConnectionUnreachable(t *testing.T) {
+	// Bind then immediately close, so the port is (almost certainly) closed.
+	ln, _ := net.Listen("tcp", "127.0.0.1:0")
+	addr := ln.Addr().String()
+	_ = ln.Close()
+	host, portStr, _ := net.SplitHostPort(addr)
+	port, _ := strconv.Atoi(portStr)
+
+	resp, err := New(stubReader{}).TestConnection(context.Background(), &operatorpb.TestConnectionRequest{Ip: host, SshPort: int32(port)})
+	if err != nil {
+		t.Fatalf("TestConnection returned an RPC error for an unreachable host (should be a normal result): %v", err)
+	}
+	if resp.GetReachable() {
+		t.Errorf("want unreachable")
+	}
+	if resp.GetMessage() == "" {
+		t.Errorf("unreachable result should carry a message")
+	}
+}
+
+func TestTestConnectionRejectsEmptyIP(t *testing.T) {
+	_, err := New(stubReader{}).TestConnection(context.Background(), &operatorpb.TestConnectionRequest{})
+	if status.Code(err) != codes.InvalidArgument {
+		t.Fatalf("want InvalidArgument for empty ip, got %v", err)
 	}
 }
 

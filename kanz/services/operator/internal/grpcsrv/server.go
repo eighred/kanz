@@ -6,6 +6,9 @@ package grpcsrv
 
 import (
 	"context"
+	"net"
+	"strconv"
+	"strings"
 	"time"
 
 	"google.golang.org/grpc"
@@ -115,6 +118,47 @@ func (s *Server) ListProvisions(ctx context.Context, _ *operatorpb.ListProvision
 		})
 	}
 	return &operatorpb.ListProvisionsResponse{Provisions: out}, nil
+}
+
+// testDialTimeout bounds the reachability probe.
+const testDialTimeout = 5 * time.Second
+
+// TestConnection is a pre-flight TCP reachability probe. It is a plain net.Dial —
+// deliberately NOT crypto/ssh — so the operator never imports the SSH plane; the
+// key is authenticated at provision time, not here. reachable=false is a normal
+// result, not an RPC error.
+//
+// The caller (root@universe, reaching the operator only via a kubeconfig-gated
+// port-forward) can make the operator dial an arbitrary ip:port. Accepted: the
+// caller could already reach anything a cluster operator can, the probe returns
+// only reachable/latency (never response bytes), and the dial is timeout-bounded.
+func (s *Server) TestConnection(ctx context.Context, req *operatorpb.TestConnectionRequest) (*operatorpb.TestConnectionResponse, error) {
+	if req.GetIp() == "" {
+		return nil, status.Error(codes.InvalidArgument, "ip is required")
+	}
+	port := req.GetSshPort()
+	if port == 0 {
+		port = 22
+	}
+	addr := net.JoinHostPort(req.GetIp(), strconv.Itoa(int(port)))
+
+	start := time.Now()
+	d := net.Dialer{Timeout: testDialTimeout}
+	conn, err := d.DialContext(ctx, "tcp", addr)
+	if err != nil {
+		return &operatorpb.TestConnectionResponse{Reachable: false, Message: dialMessage(err)}, nil
+	}
+	_ = conn.Close()
+	return &operatorpb.TestConnectionResponse{Reachable: true, LatencyMs: time.Since(start).Milliseconds()}, nil
+}
+
+// dialMessage trims a dial error to a short, client-safe reason.
+func dialMessage(err error) string {
+	msg := err.Error()
+	if i := strings.LastIndex(msg, ": "); i >= 0 && i+2 < len(msg) {
+		return msg[i+2:]
+	}
+	return msg
 }
 
 func provStatus(s provision.Status) operatorpb.ProvisionStatus {
