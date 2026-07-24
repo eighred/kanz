@@ -596,7 +596,27 @@ func TestCordonUnconfiguredIsUnimplemented(t *testing.T) {
 		t.Fatalf("want Unimplemented when nodeOps is nil, got %v", err)
 	}
 }
+
+// The ListNodes handler must carry the new estate fields to the proto, or the TUI
+// never sees drain status.
+func TestListNodesSurfacesSchedulableAndEvictable(t *testing.T) {
+	srv := New(stubReader{nodes: []estate.Node{
+		{Name: "london", Status: estate.StatusReady, Schedulable: false, EvictablePods: 3},
+	}})
+	resp, err := srv.ListNodes(context.Background(), &operatorpb.ListNodesRequest{})
+	if err != nil {
+		t.Fatalf("ListNodes: %v", err)
+	}
+	if len(resp.GetNodes()) != 1 {
+		t.Fatalf("want 1 node")
+	}
+	n := resp.GetNodes()[0]
+	if n.GetSchedulable() || n.GetEvictablePods() != 3 {
+		t.Errorf("ListNodes must map schedulable/evictable_pods from estate: schedulable=%v evictable=%d", n.GetSchedulable(), n.GetEvictablePods())
+	}
+}
 ```
+(The grpcsrv `stubReader` already carries a `nodes []estate.Node` field from F0; `estate.Node` gained `Schedulable`/`EvictablePods` in Task 2.)
 
 - [ ] **Step 2: Run — verify it fails**
 
@@ -668,6 +688,15 @@ func (s *Server) nodeWrite(_ context.Context, name string, do func() error) erro
 ```
 
 Add imports: `apierrors "k8s.io/apimachinery/pkg/api/errors"`.
+
+**Also update the existing `ListNodes` handler** (from F0) so the proto Node carries the two new estate fields — otherwise the TUI never sees drain status. In its `operatorpb.Node{...}` construction, add:
+
+```go
+			Schedulable:   n.Schedulable,
+			EvictablePods: int32(n.EvictablePods),
+```
+
+(where `n` is the `estate.Node`; the fields were added in Task 2.)
 
 - [ ] **Step 4: Run — verify it passes**
 
