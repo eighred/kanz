@@ -89,6 +89,16 @@ spec:
               valueFrom: { secretKeyRef: { name: operator-k3s-join, key: server_url, optional: true } }
             - name: OPERATOR_K3S_TOKEN
               valueFrom: { secretKeyRef: { name: operator-k3s-join, key: token, optional: true } }
+            # S4b: pre-write venue-key proof. Unset by default (SetVenueKeys writes
+            # unproven, S4a behaviour). Setting OPERATOR_VENUE_PROOF=require turns proof
+            # on; a venue with no base URL below is then refused, never written unproven.
+            # There is deliberately NO default endpoint here — see config.go.
+            # - name: OPERATOR_VENUE_PROOF
+            #   value: "require"
+            # - name: OPERATOR_OKX_BASE_URL
+            #   value: "https://www.okx.com"
+            # - name: OPERATOR_BINANCE_BASE_URL
+            #   value: "https://api.binance.com"
 ---
 apiVersion: policy/v1
 kind: PodDisruptionBudget

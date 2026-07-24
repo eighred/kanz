@@ -29,6 +29,41 @@ func TestLoadOverrides(t *testing.T) {
 	}
 }
 
+func TestLoadVenueProofEnvDefaultsOff(t *testing.T) {
+	t.Setenv("OPERATOR_VENUE_PROOF", "")
+	t.Setenv("OPERATOR_OKX_BASE_URL", "")
+	t.Setenv("OPERATOR_BINANCE_BASE_URL", "")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.VenueProof != "" {
+		t.Errorf("VenueProof = %q, want empty (off) by default", cfg.VenueProof)
+	}
+	if len(cfg.VenueBaseURLs) != 0 {
+		t.Errorf("VenueBaseURLs = %v, want empty when no base URL env vars are set", cfg.VenueBaseURLs)
+	}
+}
+
+func TestLoadVenueProofEnvOnlyIncludesConfiguredVenues(t *testing.T) {
+	t.Setenv("OPERATOR_VENUE_PROOF", "require")
+	t.Setenv("OPERATOR_OKX_BASE_URL", "https://www.okx.com")
+	t.Setenv("OPERATOR_BINANCE_BASE_URL", "")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.VenueProof != "require" {
+		t.Errorf("VenueProof = %q, want require", cfg.VenueProof)
+	}
+	if got := cfg.VenueBaseURLs; len(got) != 1 || got["okx"] != "https://www.okx.com" {
+		t.Errorf("VenueBaseURLs = %v, want only okx set", got)
+	}
+	if _, ok := cfg.VenueBaseURLs["binance"]; ok {
+		t.Errorf("VenueBaseURLs must not contain binance when its env var is unset")
+	}
+}
+
 func TestLoadProvisioningEnv(t *testing.T) {
 	t.Setenv("OPERATOR_PROVISIONER_IMAGE", "ghcr.io/kanz-eng/kanz-provisioner:latest")
 	t.Setenv("OPERATOR_K3S_SERVER_URL", "https://cp:6443")

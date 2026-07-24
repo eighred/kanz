@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -353,6 +354,120 @@ func TestListVenueKeysNilStoreUnimplemented(t *testing.T) {
 	_, err := New(stubReader{}).ListVenueKeys(context.Background(), &operatorpb.ListVenueKeysRequest{})
 	if status.Code(err) != codes.Unimplemented {
 		t.Errorf("code = %v, want Unimplemented", status.Code(err))
+	}
+}
+
+type stubVenueProver struct {
+	calls    int
+	gotKeys  secrets.VenueKeys
+	gotVenue string
+	uid      string
+	err      error
+}
+
+func (p *stubVenueProver) ProveAccount(_ context.Context, venue string, keys secrets.VenueKeys) (string, error) {
+	p.calls++
+	p.gotVenue, p.gotKeys = venue, keys
+	return p.uid, p.err
+}
+
+func TestSetVenueKeysProvesBeforeWrite(t *testing.T) {
+	st := &stubSecretStore{}
+	prover := &stubVenueProver{uid: "4711"}
+	srv := New(stubReader{}).WithSecrets(st).WithVenueProof(prover)
+
+	resp, err := srv.SetVenueKeys(context.Background(), &operatorpb.SetVenueKeysRequest{
+		Venue: "okx", ApiKey: "k", ApiSecret: "s", Passphrase: "p",
+	})
+	if err != nil {
+		t.Fatalf("SetVenueKeys: %v", err)
+	}
+	if resp.GetExchangeAccountId() != "4711" {
+		t.Errorf("exchange_account_id = %q, want 4711", resp.GetExchangeAccountId())
+	}
+	if st.venue != "okx" || st.keys.APIKey != "k" {
+		t.Errorf("store did not receive the write: %+v", st)
+	}
+	if prover.calls != 1 {
+		t.Errorf("prover called %d times, want 1", prover.calls)
+	}
+}
+
+func TestSetVenueKeysRefusesWriteWhenProofFails(t *testing.T) {
+	st := &stubSecretStore{}
+	prover := &stubVenueProver{err: errors.New("boom")}
+	srv := New(stubReader{}).WithSecrets(st).WithVenueProof(prover)
+
+	_, err := srv.SetVenueKeys(context.Background(), &operatorpb.SetVenueKeysRequest{
+		Venue: "okx", ApiKey: "k", ApiSecret: "s", Passphrase: "p",
+	})
+	if status.Code(err) != codes.FailedPrecondition {
+		t.Errorf("code = %v, want FailedPrecondition", status.Code(err))
+	}
+	if st.venue != "" {
+		t.Errorf("store must NOT be called when proof fails, got venue=%q", st.venue)
+	}
+}
+
+func TestSetVenueKeysProofErrorIsSanitized(t *testing.T) {
+	st := &stubSecretStore{}
+	prover := &stubVenueProver{err: errors.New("credential KEYSENTINEL rejected: exchange body {\"msg\":\"bad key\"}")}
+	srv := New(stubReader{}).WithSecrets(st).WithVenueProof(prover)
+
+	_, err := srv.SetVenueKeys(context.Background(), &operatorpb.SetVenueKeysRequest{
+		Venue: "okx", ApiKey: "k", ApiSecret: "s", Passphrase: "p",
+	})
+	if err == nil {
+		t.Fatal("SetVenueKeys: want error when proof fails")
+	}
+	msg := status.Convert(err).Message()
+	if strings.Contains(msg, "KEYSENTINEL") {
+		t.Errorf("gRPC message leaked credential material: %q", msg)
+	}
+	if strings.Contains(msg, "bad key") || strings.Contains(msg, "exchange body") {
+		t.Errorf("gRPC message leaked the exchange response body: %q", msg)
+	}
+	want := "the exchange could not be asked which account these credentials belong to"
+	if msg != want {
+		t.Errorf("message = %q, want fixed reason %q", msg, want)
+	}
+}
+
+func TestSetVenueKeysWithoutProverWritesUnproven(t *testing.T) {
+	st := &stubSecretStore{}
+	srv := New(stubReader{}).WithSecrets(st) // no WithVenueProof
+
+	resp, err := srv.SetVenueKeys(context.Background(), &operatorpb.SetVenueKeysRequest{
+		Venue: "okx", ApiKey: "k", ApiSecret: "s", Passphrase: "p",
+	})
+	if err != nil {
+		t.Fatalf("SetVenueKeys: %v", err)
+	}
+	if resp.GetExchangeAccountId() != "" {
+		t.Errorf("exchange_account_id = %q, want empty (unproven S4a behaviour)", resp.GetExchangeAccountId())
+	}
+	if st.venue != "okx" {
+		t.Errorf("store did not receive the write: %+v", st)
+	}
+}
+
+func TestSetVenueKeysValidatesBeforeProving(t *testing.T) {
+	st := &stubSecretStore{}
+	prover := &stubVenueProver{uid: "4711"}
+	srv := New(stubReader{}).WithSecrets(st).WithVenueProof(prover)
+
+	// binance with a passphrase is an invalid key set.
+	_, err := srv.SetVenueKeys(context.Background(), &operatorpb.SetVenueKeysRequest{
+		Venue: "binance", ApiKey: "k", ApiSecret: "s", Passphrase: "p",
+	})
+	if status.Code(err) != codes.InvalidArgument {
+		t.Errorf("code = %v, want InvalidArgument", status.Code(err))
+	}
+	if prover.calls != 0 {
+		t.Errorf("prover must NOT be called when validation fails, got %d calls", prover.calls)
+	}
+	if st.venue != "" {
+		t.Errorf("store must NOT be called when validation fails")
 	}
 }
 

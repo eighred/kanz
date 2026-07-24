@@ -6,6 +6,8 @@ package grpcsrv
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"net"
 	"strconv"
 	"strings"
@@ -19,9 +21,12 @@ import (
 
 	operatorpb "github.com/kanz-eng/kanz-schemas-go/operator/v1"
 
+	"github.com/kanz-eng/kanz/internal/execution"
+	"github.com/kanz-eng/kanz/internal/venueadapter/exchangeauth"
 	"github.com/kanz-eng/kanz/services/operator/internal/estate"
 	"github.com/kanz-eng/kanz/services/operator/internal/provision"
 	"github.com/kanz-eng/kanz/services/operator/internal/secrets"
+	"github.com/kanz-eng/kanz/services/operator/internal/venueproof"
 )
 
 // Provisioner is the node-provisioning surface the operator gRPC depends on
@@ -41,13 +46,21 @@ type NodeOps interface {
 	SetRegion(ctx context.Context, name, region string) error
 }
 
+// VenueProver asks the exchange which account a candidate credential belongs
+// to, before it is stored (venueproof.Prover satisfies it). Optional — nil
+// disables pre-write proof (S4a behaviour: the write happens unproven).
+type VenueProver interface {
+	ProveAccount(ctx context.Context, venue string, keys secrets.VenueKeys) (string, error)
+}
+
 // Server adapts an estate.Reader to the generated OperatorService interface.
 type Server struct {
 	operatorpb.UnimplementedOperatorServiceServer
-	reader  estate.Reader
-	prov    Provisioner
-	nodeOps NodeOps
-	secrets secrets.Store
+	reader     estate.Reader
+	prov       Provisioner
+	nodeOps    NodeOps
+	secrets    secrets.Store
+	venueProof VenueProver
 }
 
 // New returns a read-only Server (no provisioning). Retained for callers/tests that
@@ -65,6 +78,11 @@ func (s *Server) WithNodeOps(ops NodeOps) *Server { s.nodeOps = ops; return s }
 
 // WithSecrets attaches the write-only venue-credential surface (builder style).
 func (s *Server) WithSecrets(store secrets.Store) *Server { s.secrets = store; return s }
+
+// WithVenueProof attaches the pre-write venue-key proof surface (builder style).
+// Nil (the zero value) is a valid, supported configuration: SetVenueKeys writes
+// unproven, exactly as in S4a.
+func (s *Server) WithVenueProof(p VenueProver) *Server { s.venueProof = p; return s }
 
 // Register binds the server onto a grpc.ServiceRegistrar.
 func (s *Server) Register(r grpc.ServiceRegistrar) {
@@ -203,10 +221,42 @@ func (s *Server) SetVenueKeys(ctx context.Context, req *operatorpb.SetVenueKeysR
 		// The error names the venue and the field rule — NEVER the key material.
 		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
+	var accountID string
+	if s.venueProof != nil {
+		id, err := s.venueProof.ProveAccount(ctx, req.GetVenue(), keys)
+		if err != nil {
+			// Sanitized: the exchange's own words never reach the caller, and neither
+			// does the credential. No write happens — the stored key set is untouched.
+			return nil, status.Error(codes.FailedPrecondition, proofReason(err))
+		}
+		accountID = id
+	}
 	if err := s.secrets.SetVenueKeys(ctx, req.GetVenue(), keys); err != nil {
 		return nil, status.Error(codes.Internal, err.Error())
 	}
-	return &operatorpb.SetVenueKeysResponse{}, nil
+	return &operatorpb.SetVenueKeysResponse{ExchangeAccountId: accountID}, nil
+}
+
+// proofReason maps a pre-write proof error onto a FIXED, sanitized reason
+// string. The exchange's own response body (err.Error() from exchangeauth)
+// must never reach the client — this is a closed set chosen by errors.Is/As,
+// with a catch-all, not a passthrough of err.Error().
+func proofReason(err error) string {
+	var apiErr *execution.APIError
+	switch {
+	case errors.Is(err, venueproof.ErrNoEndpoint):
+		return "venue key proof is required but no exchange endpoint is configured for this venue"
+	case errors.Is(err, execution.ErrEgressDenied):
+		return "the exchange rejected these credentials"
+	case errors.As(err, &apiErr):
+		// The numeric code only — apiErr.Msg is the exchange's own words and
+		// must never reach the caller.
+		return fmt.Sprintf("the exchange rejected these credentials (code %d)", apiErr.Code)
+	case errors.Is(err, exchangeauth.ErrUnsupportedVenue):
+		return "this venue cannot be proved"
+	default:
+		return "the exchange could not be asked which account these credentials belong to"
+	}
 }
 
 func (s *Server) ListVenueKeys(ctx context.Context, _ *operatorpb.ListVenueKeysRequest) (*operatorpb.ListVenueKeysResponse, error) {

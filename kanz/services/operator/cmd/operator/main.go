@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sort"
 	"strings"
 	"syscall"
 	"time"
@@ -23,12 +24,14 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 
+	"github.com/kanz-eng/kanz/internal/execution"
 	"github.com/kanz-eng/kanz/services/operator/internal/config"
 	"github.com/kanz-eng/kanz/services/operator/internal/estate"
 	"github.com/kanz-eng/kanz/services/operator/internal/grpcsrv"
 	"github.com/kanz-eng/kanz/services/operator/internal/nodeops"
 	"github.com/kanz-eng/kanz/services/operator/internal/provision"
 	"github.com/kanz-eng/kanz/services/operator/internal/secrets"
+	"github.com/kanz-eng/kanz/services/operator/internal/venueproof"
 )
 
 func main() {
@@ -111,6 +114,13 @@ func main() {
 		logger.Warn("no OPERATOR_SECRET_BACKEND — SetVenueKeys disabled")
 	}
 
+	if cfg.VenueProof == "require" {
+		srv = srv.WithVenueProof(venueproof.New(cfg.VenueBaseURLs, execution.NewExchangeHTTPClient(5*time.Minute)))
+		logger.Info("venue-key pre-write proof: require", "venues", provenVenues(cfg.VenueBaseURLs))
+	} else {
+		logger.Info("venue-key pre-write proof: off")
+	}
+
 	srv.Register(grpcSrv)
 	go func() {
 		logger.Info("operator gRPC listening", "addr", cfg.GRPCListen)
@@ -126,6 +136,18 @@ func main() {
 	shutCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	_ = healthSrv.Shutdown(shutCtx)
+}
+
+// provenVenues returns the sorted venue ids proof is configured for — ids
+// only, never the base URLs, so a log line can never carry anything that
+// resembles a deployment secret.
+func provenVenues(baseURLs map[string]string) []string {
+	out := make([]string, 0, len(baseURLs))
+	for v := range baseURLs {
+		out = append(out, v)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // namespaceOr returns the pod's namespace (downward API file) or a default. The
