@@ -69,6 +69,48 @@ func TestRenderAPIPaneShowsPresenceNeverKeyMaterial(t *testing.T) {
 	}
 }
 
+func TestRenderAPIPaneShowsVerifiedAccountId(t *testing.T) {
+	m := model{
+		active: paneAPI,
+		width:  100, height: 30,
+		venues: []venueRow{
+			{venue: "okx", configured: true},
+			{venue: "binance", configured: true},
+		},
+		verifiedAccounts: map[string]string{"okx": "acct-789"},
+	}
+	out := m.render()
+	if !strings.Contains(out, "✓ verified · account acct-789") {
+		t.Errorf("proved venue should render the verified wording with its account id\n%s", out)
+	}
+	if !strings.Contains(out, "✓ configured") {
+		t.Errorf("unproven venue should keep the existing configured wording\n%s", out)
+	}
+	out2 := m.render()
+	if out != out2 {
+		t.Errorf("render is not pure: two calls produced different output\nfirst:\n%s\nsecond:\n%s", out, out2)
+	}
+}
+
+func TestRenderAPIPaneUnprovenSuccessStaysConfigured(t *testing.T) {
+	// Empty exchange_account_id must render the existing "configured" wording,
+	// byte-unchanged — an unproven deployment must not start claiming
+	// verification.
+	m := model{
+		active: paneAPI,
+		width:  100, height: 30,
+		venues:           []venueRow{{venue: "binance", configured: true}},
+		verifiedAccounts: map[string]string{"binance": ""},
+	}
+	out := m.render()
+	if !strings.Contains(out, "✓ configured") {
+		t.Errorf("empty account id must not render as verified\n%s", out)
+	}
+	if strings.Contains(out, "verified") {
+		t.Errorf("empty account id must never render the verified wording\n%s", out)
+	}
+}
+
 func TestRenderAPIPaneShowsSetKeysHint(t *testing.T) {
 	m := model{active: paneAPI, width: 80, height: 24}
 	if !strings.Contains(m.render(), "set keys") {
@@ -97,6 +139,20 @@ func TestRenderKeyFormShowsMaskedFieldsAndIsPure(t *testing.T) {
 	out2 := m.render()
 	if out1 != out2 {
 		t.Errorf("render is not pure for the key form: two calls produced different output\nfirst:\n%s\nsecond:\n%s", out1, out2)
+	}
+}
+
+func TestRenderKeyFormShowsRejectionReasonInline(t *testing.T) {
+	m := model{
+		active: paneAPI,
+		width:  100, height: 30,
+		showKeyForm: true,
+		keyForm:     newKeyForm("okx"),
+		keyFormErr:  errStub{},
+	}
+	out := m.render()
+	if !strings.Contains(out, "boom") {
+		t.Errorf("render should show the rejection reason inline on the form\n%s", out)
 	}
 }
 

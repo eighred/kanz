@@ -132,6 +132,12 @@ func (m model) renderAPI() string {
 		if v.configured {
 			state = styleReady.Render("✓ configured")
 		}
+		// A non-empty exchange_account_id (S4b's pre-write proof) upgrades the
+		// wording to "verified" — an empty id must keep the plain "configured"
+		// wording unchanged, so an unproven deployment never claims verification.
+		if id := m.verifiedAccounts[v.venue]; id != "" {
+			state = styleReady.Render("✓ verified · account " + id)
+		}
 		marker := "  "
 		if i == m.apiSelected {
 			marker = styleSelected.Render("▸ ")

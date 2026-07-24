@@ -23,7 +23,7 @@ type nodeSource interface {
 	uncordon(ctx context.Context, name string) error
 	drain(ctx context.Context, name string) error
 	setRegion(ctx context.Context, name, region string) error
-	setVenueKeys(ctx context.Context, venue string, keys venueKeys) error
+	setVenueKeys(ctx context.Context, venue string, keys venueKeys) (string, error)
 	listVenueKeys(ctx context.Context) ([]venueRow, error)
 }
 
@@ -152,11 +152,18 @@ func (g *grpcSource) setRegion(ctx context.Context, name, region string) error {
 	return err
 }
 
-func (g *grpcSource) setVenueKeys(ctx context.Context, venue string, keys venueKeys) error {
-	_, err := g.client.SetVenueKeys(ctx, &operatorpb.SetVenueKeysRequest{
+// setVenueKeys returns the exchange's own account id for the credentials, as
+// proved server-side before the write (S4b) — empty when the deployment has
+// no proof configured. A FailedPrecondition error means the exchange
+// rejected the credentials; its message is already sanitized server-side.
+func (g *grpcSource) setVenueKeys(ctx context.Context, venue string, keys venueKeys) (string, error) {
+	resp, err := g.client.SetVenueKeys(ctx, &operatorpb.SetVenueKeysRequest{
 		Venue: venue, ApiKey: keys.apiKey, ApiSecret: keys.apiSecret, Passphrase: keys.passphrase,
 	})
-	return err
+	if err != nil {
+		return "", err
+	}
+	return resp.GetExchangeAccountId(), nil
 }
 
 func (g *grpcSource) listVenueKeys(ctx context.Context) ([]venueRow, error) {

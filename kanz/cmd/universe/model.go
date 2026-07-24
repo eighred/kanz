@@ -2,12 +2,15 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"strconv"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 // nodeRow is one row of the Nodes pane — every display field is a string
@@ -88,6 +91,14 @@ type model struct {
 	showKeyForm bool
 	keyForm     keyForm
 	keyFormErr  error
+
+	// verifiedAccounts records, per venue, the exchange_account_id returned by
+	// the last proved SetVenueKeys submit (S4b's pre-write proof) — session
+	// state only, not sourced from ListVenueKeys (presence only) and not
+	// cleared by a poll tick, the same convention testResult/formErr use. Only
+	// a non-empty exchange_account_id is ever recorded here: an unproven
+	// deployment (empty id) must not start claiming verification.
+	verifiedAccounts map[string]string
 
 	width, height int
 	err           error
@@ -215,14 +226,29 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.formErr = nil
 		}
 	case keyFormResultMsg:
-		// The form closes on ANY result, success or error — the typed secret
-		// must never linger on the model. A failed submit surfaces through
-		// actionErr (the same status-line error cordon/uncordon/drain/setRegion
-		// use) rather than keeping the form open with the secret still resident,
-		// so the operator can see what failed and reopen with 'k' to retry.
+		if msg.err != nil && status.Code(msg.err) == codes.FailedPrecondition {
+			// The exchange rejected these credentials (S4b's pre-write proof).
+			// The form stays OPEN so the operator can retype, but every field
+			// is cleared first — a rejected key set is exactly the one that
+			// must not be retained. The server's message is already sanitized
+			// (never key material, never the exchange's own words), so it is
+			// shown verbatim via keyFormErr.
+			m.keyForm = newKeyForm(m.keyForm.venue)
+			m.keyFormErr = errors.New(status.Convert(msg.err).Message())
+			return m, nil
+		}
+		// Any other result closes the form — the typed secret must never
+		// linger on the model. A failed submit surfaces through actionErr (the
+		// same status-line error cordon/uncordon/drain/setRegion use) rather
+		// than keeping the form open with the secret still resident, so the
+		// operator can see what failed and reopen with 'k' to retry.
 		m.showKeyForm = false
 		m.keyForm = keyForm{}
+		m.keyFormErr = nil
 		m.actionErr = msg.err
+		if msg.err == nil && msg.accountID != "" {
+			m.verifiedAccounts = withVerifiedAccount(m.verifiedAccounts, msg.venue, msg.accountID)
+		}
 		return m, nil
 	case testConnResultMsg:
 		switch {
@@ -338,12 +364,31 @@ func (m model) submitKeyForm() tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), pollTimeout)
 		defer cancel()
-		return keyFormResultMsg{err: src.setVenueKeys(ctx, venue, keys)}
+		accountID, err := src.setVenueKeys(ctx, venue, keys)
+		return keyFormResultMsg{venue: venue, accountID: accountID, err: err}
 	}
 }
 
-// keyFormResultMsg carries the outcome of a setVenueKeys call back into Update.
-type keyFormResultMsg struct{ err error }
+// keyFormResultMsg carries the outcome of a setVenueKeys call back into
+// Update — venue identifies which pane row a proved accountID belongs to.
+type keyFormResultMsg struct {
+	venue     string
+	accountID string
+	err       error
+}
+
+// withVerifiedAccount returns a copy of accounts with venue set to id. Model
+// fields are never mutated in place — Update's value receiver copies the map
+// header, not its contents, so mutating a shared map here would leak a write
+// across model copies (e.g. into the pre-Update model a caller still holds).
+func withVerifiedAccount(accounts map[string]string, venue, id string) map[string]string {
+	out := make(map[string]string, len(accounts)+1)
+	for k, v := range accounts {
+		out[k] = v
+	}
+	out[venue] = id
+	return out
+}
 
 // testConnCmd probes the form's ip:port off the UI thread.
 func (m model) testConnCmd() tea.Cmd {

@@ -5,6 +5,8 @@ import (
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 // setRegionCall records one setRegion invocation; stubSource holds a pointer
@@ -22,6 +24,12 @@ type stubSource struct {
 	setRegionCalls   *[]setRegionCall
 	setVenueKeysCall *[]setVenueKeysCall
 	venues           []venueRow
+
+	// setVenueKeysAccountID/setVenueKeysErr let a test script the outcome of
+	// the next setVenueKeys call — a proved submit, a FailedPrecondition
+	// rejection, or any other error.
+	setVenueKeysAccountID string
+	setVenueKeysErr       error
 }
 
 func (s stubSource) fetch(context.Context) (fetchMsg, error) { return s.msg, nil }
@@ -44,11 +52,11 @@ func (s stubSource) setRegion(_ context.Context, name, region string) error {
 	return nil
 }
 
-func (s stubSource) setVenueKeys(_ context.Context, venue string, keys venueKeys) error {
+func (s stubSource) setVenueKeys(_ context.Context, venue string, keys venueKeys) (string, error) {
 	if s.setVenueKeysCall != nil {
 		*s.setVenueKeysCall = append(*s.setVenueKeysCall, setVenueKeysCall{venue: venue, keys: keys})
 	}
-	return nil
+	return s.setVenueKeysAccountID, s.setVenueKeysErr
 }
 
 func (s stubSource) listVenueKeys(context.Context) ([]venueRow, error) { return s.venues, nil }
@@ -409,6 +417,78 @@ func TestKeyFormEnterSubmitsCallsSetVenueKeysClosesAndClearsSecret(t *testing.T)
 	}
 	if final.keyForm.value("api_secret") != "" {
 		t.Fatalf("keyFormResultMsg (success) should leave no typed secret on the model, got %q", final.keyForm.value("api_secret"))
+	}
+}
+
+func TestKeyFormResultProvedRecordsAccountIdAndClosesForm(t *testing.T) {
+	m := newModel(Config{}, stubSource{})
+	m.showKeyForm = true
+	m.keyForm = newKeyForm("okx")
+	m.keyForm.fields[0].value = "key-123"
+
+	u, _ := m.Update(keyFormResultMsg{venue: "okx", accountID: "acct-789"})
+	got := u.(model)
+	if got.showKeyForm {
+		t.Fatalf("a proved submit should close the form")
+	}
+	if got.verifiedAccounts["okx"] != "acct-789" {
+		t.Fatalf("verifiedAccounts[okx] = %q, want acct-789", got.verifiedAccounts["okx"])
+	}
+	if got.keyForm.value("api_key") != "" {
+		t.Fatalf("a proved submit must not leave the typed secret on the model, got %q", got.keyForm.value("api_key"))
+	}
+}
+
+func TestKeyFormResultUnprovenSuccessRecordsNoAccountId(t *testing.T) {
+	// Empty ExchangeAccountId (no proof configured for this deployment) must
+	// never be treated as verification — see TestRenderAPIPaneUnprovenSuccessStaysConfigured.
+	m := newModel(Config{}, stubSource{})
+	m.showKeyForm = true
+	m.keyForm = newKeyForm("binance")
+
+	u, _ := m.Update(keyFormResultMsg{venue: "binance", accountID: ""})
+	got := u.(model)
+	if got.showKeyForm {
+		t.Fatalf("a successful submit should close the form")
+	}
+	if id, ok := got.verifiedAccounts["binance"]; ok {
+		t.Fatalf("empty exchange_account_id must not record a verified account, got %q", id)
+	}
+}
+
+func TestKeyFormResultFailedPreconditionKeepsFormOpenAndClearsSecrets(t *testing.T) {
+	m := newModel(Config{}, stubSource{})
+	m.showKeyForm = true
+	m.keyForm = newKeyForm("okx")
+	m.keyForm.fields[0].value = "key-123"    // api_key
+	m.keyForm.fields[1].value = "secret-abc" // api_secret
+	m.keyForm.fields[2].value = "pass-xyz"   // passphrase
+
+	rejectErr := status.Error(codes.FailedPrecondition, "the exchange rejected these credentials")
+	u, cmd := m.Update(keyFormResultMsg{venue: "okx", err: rejectErr})
+	if cmd != nil {
+		t.Fatalf("a rejection result should not itself return a command")
+	}
+	got := u.(model)
+
+	if !got.showKeyForm {
+		t.Fatalf("a FailedPrecondition rejection must keep the form open")
+	}
+	if got.keyForm.venue != "okx" {
+		t.Fatalf("the reopened form should stay scoped to the same venue, got %q", got.keyForm.venue)
+	}
+	// The MODEL's fields, not the render, must hold no typed secret — a
+	// rejected key set is precisely the one that must not be retained.
+	for _, key := range []string{"api_key", "api_secret", "passphrase"} {
+		if v := got.keyForm.value(key); v != "" {
+			t.Fatalf("rejected submit must clear every field; %s = %q", key, v)
+		}
+	}
+	if got.keyFormErr == nil || got.keyFormErr.Error() == "" {
+		t.Fatalf("rejection should surface the sanitized server reason via keyFormErr")
+	}
+	if got.verifiedAccounts["okx"] != "" {
+		t.Fatalf("a rejected submit must not record a verified account")
 	}
 }
 
