@@ -1,0 +1,91 @@
+# Operator service (F0+S1): reads the Kubernetes node inventory read-only and
+# serves it over operator.v1 gRPC for the universe TUI. Deploys into the
+# SEC-M3c kanz-operator namespace. Its gRPC port is deliberately NOT fronted by
+# a Service — the TUI reaches it via `kubectl port-forward`, so RBAC on
+# pods/portforward is the access gate.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: operator
+  namespace: kanz-operator
+  labels: { app.kubernetes.io/part-of: kanz }
+---
+# nodes are cluster-scoped, so node read access MUST be a ClusterRole (a
+# namespaced Role cannot grant it). Least privilege: get/list on nodes, nothing
+# else. Task 6's arch guard fails the build if a write verb or another resource
+# appears here.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: operator-node-reader
+  labels: { app.kubernetes.io/part-of: kanz }
+rules:
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: operator-node-reader
+  labels: { app.kubernetes.io/part-of: kanz }
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: operator-node-reader
+subjects:
+  - kind: ServiceAccount
+    name: operator
+    namespace: kanz-operator
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: operator
+  namespace: kanz-operator
+  labels: { app.kubernetes.io/part-of: kanz, app: operator }
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: operator }
+  template:
+    metadata:
+      labels: { app: operator, app.kubernetes.io/part-of: kanz }
+    spec:
+      serviceAccountName: operator
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: operator
+          image: operator:latest
+          args: []
+          ports:
+            - { name: grpc, containerPort: 9090 }
+            - { name: health, containerPort: 8091 }
+          livenessProbe:
+            httpGet: { path: /healthz, port: 8091 }
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          readinessProbe:
+            httpGet: { path: /readyz, port: 8091 }
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            capabilities: { drop: ["ALL"] }
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: operator
+  namespace: kanz-operator
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels: { app: operator }

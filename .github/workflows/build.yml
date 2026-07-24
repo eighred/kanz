@@ -135,6 +135,12 @@ jobs:
           # the manifest referenced.
           - service: lake-sink
             dockerfile: kanz/services/lake-sink/Dockerfile
+          # The operator spine (F0+S1, SEC-M3c kanz-operator namespace): reads the
+          # cluster's node inventory read-only and serves it over operator.v1 gRPC
+          # for the universe TUI. It had a Dockerfile and a deploy manifest (Task
+          # 5) but no entry here, so nothing built the image the manifest referenced.
+          - service: operator
+            dockerfile: kanz/services/operator/Dockerfile
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
