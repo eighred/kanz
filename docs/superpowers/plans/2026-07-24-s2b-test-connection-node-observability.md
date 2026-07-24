@@ -407,6 +407,9 @@ spec:
     spec:
       hostNetwork: true
       hostPID: true
+      # Survive node pressure (evicting the metrics agent loses metrics when they
+      # matter most). system-node-critical is a built-in priority class.
+      priorityClassName: system-node-critical
       # Run on EVERY node, including tainted/control-plane ones.
       tolerations:
         - operator: Exists
@@ -428,6 +431,9 @@ spec:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
             capabilities: { drop: ["ALL"] }
+          resources:
+            requests: { cpu: 50m, memory: 30Mi }
+            limits: { memory: 60Mi }
           volumeMounts:
             - { name: proc, mountPath: /host/proc, readOnly: true }
             - { name: sys, mountPath: /host/sys, readOnly: true }
