@@ -2,3 +2,7 @@
 __pycache__/
 *.py[cod]
 .pytest_cache/
+
+# Generated protobuf SDK — published by the codegen pipeline, never committed
+# (mirrors kanz-schemas/.gitignore's /gen/ policy).
+/gen/

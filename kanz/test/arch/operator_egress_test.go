@@ -153,30 +153,30 @@ func stringMapEqual(a, b map[string]string) bool {
 	return true
 }
 
-// validateDNSRulePeers asserts the DNS rule's `to:` list is exactly one peer:
-// a namespaceSelector matching kube-system, nothing else. A wildcard
-// `namespaceSelector: {}` or an added second peer must fail here.
-func validateDNSRulePeers(t *testing.T, rule netPolRule) {
+// validateKubeSystemDNSPeer asserts the DNS rule's `to:` list is exactly one peer:
+// a namespaceSelector matching kube-system, nothing else. An empty `to:`, a
+// wildcard `namespaceSelector: {}`, or an added second peer must fail here.
+func validateKubeSystemDNSPeer(t *testing.T, policyName string, rule netPolRule) {
 	t.Helper()
 	if len(rule.To) != 1 {
 		descs := make([]string, len(rule.To))
 		for i, p := range rule.To {
 			descs[i] = p.describe()
 		}
-		t.Errorf("operator-egress DNS rule (ports %v) has %d peers %v, want exactly 1 (kube-system namespaceSelector) — an extra peer widens DNS egress beyond kube-system", rule.Ports, len(rule.To), descs)
+		t.Errorf("%s DNS rule (ports %v) has %d peers %v, want exactly 1 (kube-system namespaceSelector) — an extra peer widens DNS egress beyond kube-system", policyName, rule.Ports, len(rule.To), descs)
 		return
 	}
 	peer := rule.To[0]
 	wantLabels := map[string]string{"kubernetes.io/metadata.name": "kube-system"}
 	if peer.NamespaceSelector == nil {
-		t.Errorf("operator-egress DNS rule's peer is %s, want namespaceSelector{matchLabels:%v} scoped to kube-system", peer.describe(), wantLabels)
+		t.Errorf("%s DNS rule's peer is %s, want namespaceSelector{matchLabels:%v} scoped to kube-system", policyName, peer.describe(), wantLabels)
 		return
 	}
 	if !stringMapEqual(peer.NamespaceSelector.MatchLabels, wantLabels) {
-		t.Errorf("operator-egress DNS rule's namespaceSelector.matchLabels = %v, want exactly %v — a wildcard or mismatched selector reaches more than kube-system", peer.NamespaceSelector.MatchLabels, wantLabels)
+		t.Errorf("%s DNS rule's namespaceSelector.matchLabels = %v, want exactly %v — a wildcard or mismatched selector reaches more than kube-system", policyName, peer.NamespaceSelector.MatchLabels, wantLabels)
 	}
 	if peer.IPBlock != nil || peer.PodSelector != nil {
-		t.Errorf("operator-egress DNS rule's peer unexpectedly sets more than one selector kind: %s", peer.describe())
+		t.Errorf("%s DNS rule's peer unexpectedly sets more than one selector kind: %s", policyName, peer.describe())
 	}
 }
 
@@ -297,7 +297,7 @@ func TestOperatorEgressIsBounded(t *testing.T) {
 	case 0:
 		t.Errorf("operator-egress has no rule with ports [TCP:53 UDP:53] — the DNS rule is missing or mis-shaped")
 	case 1:
-		validateDNSRulePeers(t, dnsRules[0])
+		validateKubeSystemDNSPeer(t, "operator-egress", dnsRules[0])
 	default:
 		t.Errorf("operator-egress has %d rules with ports [TCP:53 UDP:53] (want exactly 1)", len(dnsRules))
 	}

@@ -183,10 +183,10 @@ spec:
 #
 # DNS is scoped to the kube-dns namespace (kube-system), the same selector shape
 # network-policies.yaml's allow-dns-egress uses for the analogous kanz-services
-# rule. node-provisioner-egress's own DNS rule (below) predates this convention
-# and is untouched — out of scope here — but a NEW rule must not repeat its
-# unscoped shape now that a guard (operator_egress_test.go) forbids an empty
-# `to:` on any rule in this policy.
+# rule. node-provisioner-egress follows this same scoped convention for its DNS
+# rule (SEC-M6 update), though it retains an intentionally open SSH rule to reach
+# arbitrary operator-supplied node IPs — but any NEW rule must not use an empty
+# `to:` now that a guard (operator_egress_test.go) forbids this pattern.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
