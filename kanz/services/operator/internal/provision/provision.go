@@ -68,9 +68,9 @@ type Provisioner struct {
 
 func New(cs kubernetes.Interface, cfg Config) *Provisioner { return &Provisioner{cs: cs, cfg: cfg} }
 
-// AddNode creates the transient Secret and the one-shot Job, then points the Secret's
-// ownerReference at the Job so Kubernetes GCs the key with the Job. Returns the Job name
-// as the provision id.
+// AddNode creates the one-shot Job first, then creates the bootstrap-key Secret already
+// owner-referenced to it — there is never a moment when a credential-bearing Secret
+// exists un-owned. Returns the Job name as the provision id.
 func (p *Provisioner) AddNode(ctx context.Context, r Request) (string, error) {
 	if r.IP == "" || r.SSHUser == "" || len(r.SSHKey) == 0 {
 		return "", fmt.Errorf("ip, ssh_user and ssh_private_key are required")
@@ -81,30 +81,30 @@ func (p *Provisioner) AddNode(ctx context.Context, r Request) (string, error) {
 	}
 	name := "provision-" + sanitize(r.Hostname) + "-" + rand.String(5)
 
-	// 1. Secret with the bootstrap key (no owner yet).
-	sec, err := p.cs.CoreV1().Secrets(p.cfg.Namespace).Create(ctx, &corev1.Secret{
+	// 1. Create the Job FIRST. Its UID is assigned synchronously on Create, so the
+	//    Secret can then be created ALREADY owner-referenced to it — there is never a
+	//    moment when a credential-bearing Secret exists un-owned. A crash after this but
+	//    before the Secret leaves NO key material to orphan; the pod merely fails to
+	//    mount the not-yet-created Secret and the Job self-expires at ActiveDeadlineSeconds.
+	job, err := p.cs.BatchV1().Jobs(p.cfg.Namespace).Create(ctx, p.jobSpec(name, r, port), metav1.CreateOptions{})
+	if err != nil {
+		return "", fmt.Errorf("create provisioning job: %w", err)
+	}
+
+	// 2. Create the bootstrap-key Secret already owned by the Job (Kubernetes GCs it with
+	//    the Job; it can never be orphaned). If this fails, best-effort delete the Job so a
+	//    doomed mount-pending pod does not linger for the full deadline.
+	_, err = p.cs.CoreV1().Secrets(p.cfg.Namespace).Create(ctx, &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: name, Namespace: p.cfg.Namespace,
-			Labels: map[string]string{componentLabel: componentValue},
+			Labels:          map[string]string{componentLabel: componentValue},
+			OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(job, batchv1.SchemeGroupVersion.WithKind("Job"))},
 		},
 		Data: map[string][]byte{keySecretKey: r.SSHKey},
 	}, metav1.CreateOptions{})
 	if err != nil {
+		_ = p.cs.BatchV1().Jobs(p.cfg.Namespace).Delete(ctx, job.Name, metav1.DeleteOptions{})
 		return "", fmt.Errorf("create bootstrap secret: %w", err)
-	}
-
-	// 2. One-shot Job that mounts the Secret and runs the provisioner.
-	job, err := p.cs.BatchV1().Jobs(p.cfg.Namespace).Create(ctx, p.jobSpec(name, r, port), metav1.CreateOptions{})
-	if err != nil {
-		// Best-effort cleanup of the orphaned secret.
-		_ = p.cs.CoreV1().Secrets(p.cfg.Namespace).Delete(ctx, sec.Name, metav1.DeleteOptions{})
-		return "", fmt.Errorf("create provisioning job: %w", err)
-	}
-
-	// 3. Point the Secret's ownerReference at the Job (GC cascades on Job deletion).
-	sec.OwnerReferences = []metav1.OwnerReference{*metav1.NewControllerRef(job, batchv1.SchemeGroupVersion.WithKind("Job"))}
-	if _, err := p.cs.CoreV1().Secrets(p.cfg.Namespace).Update(ctx, sec, metav1.UpdateOptions{}); err != nil {
-		return "", fmt.Errorf("set secret owner: %w", err)
 	}
 	return job.Name, nil
 }

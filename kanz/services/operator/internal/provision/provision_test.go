@@ -2,11 +2,14 @@ package provision
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	batchv1 "k8s.io/api/batch/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes/fake"
+	k8stesting "k8s.io/client-go/testing"
 )
 
 func cfg() Config {
@@ -52,6 +55,22 @@ func TestAddNodeCreatesJobAndOwnedSecret(t *testing.T) {
 				t.Errorf("bootstrap key leaked into Job env in plaintext")
 			}
 		}
+	}
+}
+
+func TestAddNodeDeletesJobIfSecretCreateFails(t *testing.T) {
+	cs := fake.NewSimpleClientset()
+	cs.PrependReactor("create", "secrets", func(k8stesting.Action) (bool, runtime.Object, error) {
+		return true, nil, errors.New("secret create boom")
+	})
+	_, err := New(cs, cfg()).AddNode(context.Background(), Request{
+		Hostname: "london", IP: "10.0.0.5", SSHPort: 22, SSHUser: "root", SSHKey: []byte("PEM")})
+	if err == nil {
+		t.Fatal("expected an error when secret create fails")
+	}
+	jobs, _ := cs.BatchV1().Jobs("kanz-operator").List(context.Background(), metav1.ListOptions{})
+	if len(jobs.Items) != 0 {
+		t.Errorf("job was not cleaned up after secret-create failure: %d jobs remain", len(jobs.Items))
 	}
 }
 
