@@ -933,7 +933,9 @@ func (p *Provisioner) AddNode(ctx context.Context, r Request) (string, error) {
 }
 
 func (p *Provisioner) jobSpec(name string, r Request, port int32) *batchv1.Job {
-	var backoff int32 = 0 // one attempt; a retry would re-SSH, and the operator re-issues AddNode
+	var backoff int32 = 0    // one attempt; a retry would re-SSH, and the operator re-issues AddNode
+	var deadline int64 = 900 // 15m hard cap on a provisioning attempt — a belt to sshRun's ctx, so a
+	//                          wedged Job cannot linger indefinitely holding the bootstrap-key Secret.
 	return &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: name, Namespace: p.cfg.Namespace,
@@ -941,7 +943,8 @@ func (p *Provisioner) jobSpec(name string, r Request, port int32) *batchv1.Job {
 			Annotations: map[string]string{hostnameAnnot: r.Hostname},
 		},
 		Spec: batchv1.JobSpec{
-			BackoffLimit: &backoff,
+			BackoffLimit:          &backoff,
+			ActiveDeadlineSeconds: &deadline,
 			Template: corev1.PodTemplateSpec{
 				Spec: corev1.PodSpec{
 					ServiceAccountName: "kanz-node-provisioner",
