@@ -39,6 +39,9 @@ func TestAddNodeCreatesJobAndOwnedSecret(t *testing.T) {
 	if string(sec.Data["ssh_key"]) != "PEM" {
 		t.Errorf("secret does not carry the bootstrap key")
 	}
+	if string(sec.Data["k3s_token"]) != "tok" {
+		t.Errorf("k3s token not stored in the Job-owned Secret")
+	}
 	owned := false
 	for _, or := range sec.OwnerReferences {
 		if or.Kind == "Job" && or.Name == job.Name {
@@ -55,10 +58,22 @@ func TestAddNodeCreatesJobAndOwnedSecret(t *testing.T) {
 		t.Errorf("pod template missing the node-provisioner label — the egress NetworkPolicy would not select it: %v", job.Spec.Template.Labels)
 	}
 	// The key must NOT appear in the Job's pod spec in plaintext (only mounted from the Secret).
+	// The k3s token must likewise never appear as a plaintext env Value; it must come from
+	// the Job-owned Secret via secretKeyRef.
 	for _, c := range job.Spec.Template.Spec.Containers {
 		for _, e := range c.Env {
 			if e.Value == "PEM" {
 				t.Errorf("bootstrap key leaked into Job env in plaintext")
+			}
+			if e.Value == "tok" {
+				t.Errorf("k3s token leaked into Job env as a plaintext value")
+			}
+			if e.Name == "K3S_TOKEN" {
+				if e.ValueFrom == nil || e.ValueFrom.SecretKeyRef == nil ||
+					e.ValueFrom.SecretKeyRef.Key != "k3s_token" ||
+					e.ValueFrom.SecretKeyRef.Name != job.Name {
+					t.Errorf("K3S_TOKEN must come from a secretKeyRef to the Job-owned secret, got %+v", e)
+				}
 			}
 		}
 	}
