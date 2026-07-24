@@ -10,8 +10,9 @@ import (
 	"k8s.io/client-go/kubernetes"
 )
 
-// fieldManager owns the venue-key Secret fields under server-side apply, so a
-// re-apply updates in place rather than colliding.
+// fieldManager is the name stamped into managedFields on every Create/Update of
+// a venue-key Secret. There is no server-side apply verb here — it is plain
+// Create/Update — so this is purely an audit tag, not an SSA field owner.
 const fieldManager = "kanz-operator-venue-keys"
 
 // KubeStore is the dev/rig backend: it writes each venue's key set into a Kubernetes
@@ -31,19 +32,18 @@ func NewKubeStore(cs kubernetes.Interface, namespace string) *KubeStore {
 
 func secretName(venue string) string { return "venue-" + venue + "-keys" }
 
-// SetVenueKeys is a create-or-update in one call. It does not read back the existing
-// Secret's value: on update, the object's Data is fully replaced by the incoming
-// VenueKeys, never merged with or derived from the old value.
-//
-// Typed server-side Apply (the ergonomic form of this call) is not exercised here
-// because client-go v0.31.3's fake clientset does not honor it for Secrets — Apply
-// on a fake clientset without an existing object fails with:
+// SetVenueKeys is a create-or-update in one call: Get, then Create on IsNotFound
+// or Update otherwise. This Get→Create/Update sequence is the only path, in both
+// tests and production — it is not a fake-clientset workaround. The brief's typed
+// server-side Apply was abandoned because client-go v0.31.3's fake clientset does
+// not create-on-apply for Secrets; Apply against a fake clientset with no existing
+// object fails with:
 //
 //	secrets "venue-<venue>-keys" not found
 //
-// So this uses Get, then Create on IsNotFound or Update otherwise, per the field
-// manager name so a real cluster's server-side apply story is unaffected by this
-// (the fake-only limitation is worked around, not the production path).
+// It does not read back the existing Secret's value: on update, the object's Data
+// is fully replaced by the incoming VenueKeys, never merged with or derived from
+// the old value — this preserves the write-only contract.
 func (s *KubeStore) SetVenueKeys(ctx context.Context, venue string, keys VenueKeys) error {
 	data := map[string][]byte{
 		"api_key":    []byte(keys.APIKey),
