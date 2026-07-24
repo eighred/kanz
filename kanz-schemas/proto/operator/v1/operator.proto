@@ -39,6 +39,10 @@ service OperatorService {
 
   // ListProvisions reports in-flight and recent node provisions.
   rpc ListProvisions(ListProvisionsRequest) returns (ListProvisionsResponse);
+
+  // TestConnection is a pre-flight TCP reachability probe of a candidate host's
+  // SSH port — it does NOT authenticate (the key is validated at provision time).
+  rpc TestConnection(TestConnectionRequest) returns (TestConnectionResponse);
 }
 
 // NodeStatus is the node's readiness. UNSPECIFIED (the zero value) is the
@@ -118,4 +122,15 @@ message Provision {
   string hostname = 2;
   ProvisionStatus status = 3;
   string message = 4;  // failure reason when FAILED; empty otherwise
+}
+
+message TestConnectionRequest {
+  string ip = 1;
+  int32 ssh_port = 2;  // 0 ⇒ 22
+}
+
+message TestConnectionResponse {
+  bool reachable = 1;
+  int64 latency_ms = 2;  // dial latency when reachable; 0 otherwise
+  string message = 3;    // dial error when unreachable; empty when reachable
 }
