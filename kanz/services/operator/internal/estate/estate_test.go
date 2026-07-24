@@ -105,3 +105,51 @@ func TestListNodesEmptyEstateIsNotAnError(t *testing.T) {
 		t.Fatalf("want 0 nodes, got %d", len(got))
 	}
 }
+
+func pod(name, node string, owner string, mirror bool, terminating bool) *corev1.Pod {
+	p := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default"},
+		Spec:       corev1.PodSpec{NodeName: node},
+	}
+	if owner != "" {
+		p.OwnerReferences = []metav1.OwnerReference{{Kind: owner, Name: "x"}}
+	}
+	if mirror {
+		p.Annotations = map[string]string{"kubernetes.io/config.mirror": "abc"}
+	}
+	if terminating {
+		now := metav1.Now()
+		p.DeletionTimestamp = &now
+	}
+	return p
+}
+
+func TestListNodesSurfacesSchedulableAndEvictableCount(t *testing.T) {
+	created := time.Now()
+	london := node("london", corev1.ConditionTrue, "europe", nil, created)
+	london.Spec.Unschedulable = true // cordoned
+	cs := fake.NewSimpleClientset(
+		london,
+		pod("app-1", "london", "", false, false), // ordinary → evictable
+		pod("ds-1", "london", "DaemonSet", false, false), // DaemonSet → not
+		pod("mirror-1", "london", "", true, false),       // mirror → not
+		pod("term-1", "london", "", false, true),         // terminating → not
+		pod("elsewhere", "tokyo", "", false, false),      // other node
+	)
+	got, err := NewK8s(cs).ListNodes(context.Background())
+	if err != nil {
+		t.Fatalf("ListNodes: %v", err)
+	}
+	var ln Node
+	for _, n := range got {
+		if n.Name == "london" {
+			ln = n
+		}
+	}
+	if ln.Schedulable {
+		t.Errorf("london is cordoned → Schedulable should be false")
+	}
+	if ln.EvictablePods != 1 {
+		t.Errorf("london evictable pods = %d, want 1 (only app-1)", ln.EvictablePods)
+	}
+}

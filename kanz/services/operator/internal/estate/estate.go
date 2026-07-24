@@ -40,6 +40,8 @@ type Node struct {
 	Region         string
 	KubeletVersion string
 	CreatedAt      time.Time
+	Schedulable    bool
+	EvictablePods  int
 }
 
 // Cluster is a region grouping with online/offline counts.
@@ -69,9 +71,22 @@ func (k *K8s) ListNodes(ctx context.Context) ([]Node, error) {
 	if err != nil {
 		return nil, err
 	}
+	// Count evictable pods per node in one list (fieldSelector is unnecessary — we
+	// group in-code, which is also what makes the fake clientset test meaningful).
+	pods, err := k.cs.CoreV1().Pods("").List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return nil, err
+	}
+	evictable := map[string]int{}
+	for i := range pods.Items {
+		p := &pods.Items[i]
+		if IsEvictable(p) {
+			evictable[p.Spec.NodeName]++
+		}
+	}
 	out := make([]Node, 0, len(list.Items))
 	for i := range list.Items {
-		out = append(out, mapNode(&list.Items[i]))
+		out = append(out, mapNode(&list.Items[i], evictable))
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 	return out, nil
@@ -105,7 +120,7 @@ func (k *K8s) ListClusters(ctx context.Context) ([]Cluster, error) {
 	return out, nil
 }
 
-func mapNode(n *corev1.Node) Node {
+func mapNode(n *corev1.Node, evictable map[string]int) Node {
 	return Node{
 		Name:           n.Name,
 		Status:         readyStatus(n),
@@ -113,7 +128,26 @@ func mapNode(n *corev1.Node) Node {
 		Region:         n.Labels[regionLabel],
 		KubeletVersion: n.Status.NodeInfo.KubeletVersion,
 		CreatedAt:      n.CreationTimestamp.Time,
+		Schedulable:    !n.Spec.Unschedulable,
+		EvictablePods:  evictable[n.Name],
 	}
+}
+
+// IsEvictable reports whether a drain would evict this pod: not DaemonSet-owned,
+// not a mirror/static pod, and not already terminating. (Shared with nodeops.)
+func IsEvictable(p *corev1.Pod) bool {
+	if p.DeletionTimestamp != nil {
+		return false
+	}
+	if _, mirror := p.Annotations["kubernetes.io/config.mirror"]; mirror {
+		return false
+	}
+	for _, or := range p.OwnerReferences {
+		if or.Kind == "DaemonSet" {
+			return false
+		}
+	}
+	return true
 }
 
 // readyStatus maps the NodeReady condition to a NodeStatus. Absent or Unknown
