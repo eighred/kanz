@@ -946,6 +946,12 @@ func (p *Provisioner) jobSpec(name string, r Request, port int32) *batchv1.Job {
 			BackoffLimit:          &backoff,
 			ActiveDeadlineSeconds: &deadline,
 			Template: corev1.PodTemplateSpec{
+				// The pod (not just the Job) must carry the component label, or the
+				// node-provisioner-egress NetworkPolicy — which selects pods — matches
+				// nothing and the provisioner runs with unrestricted egress.
+				ObjectMeta: metav1.ObjectMeta{
+					Labels: map[string]string{componentLabel: componentValue},
+				},
 				Spec: corev1.PodSpec{
 					ServiceAccountName: "kanz-node-provisioner",
 					RestartPolicy:      corev1.RestartPolicyNever,
@@ -1361,15 +1367,17 @@ metadata:
   namespace: kanz-operator
   labels: { app.kubernetes.io/part-of: kanz }
 rules:
+  # Least-privilege: exactly the verbs the operator uses. Jobs create/delete/list
+  # (List drives ListProvisions); Secrets create/delete only — the operator never
+  # reads or updates a Secret via the API (the k3s token reaches the pod by
+  # secretKeyRef/kubelet, not the operator SA), so it gets no read access to
+  # operator-k3s-join. No `pods` rule: status is derived from Job.Status, not pods.
   - apiGroups: ["batch"]
     resources: ["jobs"]
-    verbs: ["create", "delete", "get", "list"]
+    verbs: ["create", "delete", "list"]
   - apiGroups: [""]
     resources: ["secrets"]
-    verbs: ["create", "delete", "get", "update"]
-  - apiGroups: [""]
-    resources: ["pods"]
-    verbs: ["get", "list"]
+    verbs: ["create", "delete"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
@@ -1535,7 +1543,7 @@ type roleDoc struct {
 
 func TestOperatorProvisionerRoleIsBounded(t *testing.T) {
 	docs := decodeOperatorManifest(t)
-	allowedResources := map[string]bool{"jobs": true, "secrets": true, "pods": true}
+	allowedResources := map[string]bool{"jobs": true, "secrets": true}
 	var found bool
 	for _, d := range docs {
 		if d.Kind != "Role" || d.Metadata.Name != "operator-provisioner" {
@@ -1551,7 +1559,7 @@ func TestOperatorProvisionerRoleIsBounded(t *testing.T) {
 					t.Errorf("operator-provisioner grants a verb on NODES — the operator must never write node objects")
 				}
 				if !allowedResources[res] {
-					t.Errorf("operator-provisioner grants resource %q; only jobs/secrets/pods are allowed", res)
+					t.Errorf("operator-provisioner grants resource %q; only jobs/secrets are allowed", res)
 				}
 			}
 		}
