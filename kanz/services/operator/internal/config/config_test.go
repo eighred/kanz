@@ -28,3 +28,16 @@ func TestLoadOverrides(t *testing.T) {
 		t.Errorf("cfg = %+v", cfg)
 	}
 }
+
+func TestLoadProvisioningEnv(t *testing.T) {
+	t.Setenv("OPERATOR_PROVISIONER_IMAGE", "ghcr.io/kanz-eng/kanz-provisioner:latest")
+	t.Setenv("OPERATOR_K3S_SERVER_URL", "https://cp:6443")
+	t.Setenv("OPERATOR_K3S_TOKEN", "tok")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.ProvisionerImage == "" || cfg.K3sServerURL == "" || cfg.K3sToken == "" {
+		t.Errorf("provisioning env not loaded: %+v", cfg)
+	}
+}

@@ -12,6 +12,7 @@ import (
 	operatorpb "github.com/kanz-eng/kanz-schemas-go/operator/v1"
 
 	"github.com/kanz-eng/kanz/services/operator/internal/estate"
+	"github.com/kanz-eng/kanz/services/operator/internal/provision"
 )
 
 type stubReader struct {
@@ -85,5 +86,65 @@ func TestReaderErrorMapsToInternal(t *testing.T) {
 	_, err := srv.ListNodes(context.Background(), &operatorpb.ListNodesRequest{})
 	if status.Code(err) != codes.Internal {
 		t.Fatalf("want Internal, got %v", err)
+	}
+}
+
+type stubProvisioner struct {
+	gotReq     provision.Request
+	id         string
+	provisions []provision.Provision
+	err        error
+}
+
+func (s *stubProvisioner) AddNode(_ context.Context, r provision.Request) (string, error) {
+	s.gotReq = r
+	return s.id, s.err
+}
+func (s *stubProvisioner) List(context.Context) ([]provision.Provision, error) {
+	return s.provisions, s.err
+}
+
+func TestAddNodeDecodesRequestAndReturnsID(t *testing.T) {
+	sp := &stubProvisioner{id: "provision-london-abcde"}
+	srv := NewWithProvisioner(stubReader{}, sp)
+	resp, err := srv.AddNode(context.Background(), &operatorpb.AddNodeRequest{
+		Hostname: "london", Ip: "10.0.0.5", SshPort: 22, SshUser: "root", SshPrivateKey: []byte("PEM")})
+	if err != nil {
+		t.Fatalf("AddNode: %v", err)
+	}
+	if resp.GetProvisionId() != "provision-london-abcde" {
+		t.Errorf("provision_id = %q", resp.GetProvisionId())
+	}
+	if sp.gotReq.IP != "10.0.0.5" || string(sp.gotReq.SSHKey) != "PEM" {
+		t.Errorf("request not decoded: %+v", sp.gotReq)
+	}
+}
+
+func TestAddNodeRejectsEmptyKey(t *testing.T) {
+	srv := NewWithProvisioner(stubReader{}, &stubProvisioner{})
+	_, err := srv.AddNode(context.Background(), &operatorpb.AddNodeRequest{Ip: "10.0.0.5", SshUser: "root"})
+	if status.Code(err) != codes.InvalidArgument {
+		t.Fatalf("want InvalidArgument for empty key, got %v", err)
+	}
+}
+
+func TestListProvisionsMapsStatus(t *testing.T) {
+	sp := &stubProvisioner{provisions: []provision.Provision{
+		{ID: "p1", Hostname: "london", Status: provision.StatusJoined},
+		{ID: "p2", Hostname: "tokyo", Status: provision.StatusFailed, Message: "dial refused"},
+	}}
+	srv := NewWithProvisioner(stubReader{}, sp)
+	resp, err := srv.ListProvisions(context.Background(), &operatorpb.ListProvisionsRequest{})
+	if err != nil {
+		t.Fatalf("ListProvisions: %v", err)
+	}
+	if len(resp.GetProvisions()) != 2 {
+		t.Fatalf("want 2, got %d", len(resp.GetProvisions()))
+	}
+	if resp.GetProvisions()[0].GetStatus() != operatorpb.ProvisionStatus_PROVISION_STATUS_JOINED {
+		t.Errorf("p1 status = %v", resp.GetProvisions()[0].GetStatus())
+	}
+	if resp.GetProvisions()[1].GetMessage() != "dial refused" {
+		t.Errorf("p2 message not surfaced")
 	}
 }

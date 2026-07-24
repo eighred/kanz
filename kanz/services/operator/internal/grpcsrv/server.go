@@ -16,16 +16,32 @@ import (
 	operatorpb "github.com/kanz-eng/kanz-schemas-go/operator/v1"
 
 	"github.com/kanz-eng/kanz/services/operator/internal/estate"
+	"github.com/kanz-eng/kanz/services/operator/internal/provision"
 )
+
+// Provisioner is the node-provisioning surface the operator gRPC depends on
+// (provision.Provisioner satisfies it). Kept as an interface so the handler is
+// unit-tested against a stub with no Kubernetes client.
+type Provisioner interface {
+	AddNode(ctx context.Context, r provision.Request) (string, error)
+	List(ctx context.Context) ([]provision.Provision, error)
+}
 
 // Server adapts an estate.Reader to the generated OperatorService interface.
 type Server struct {
 	operatorpb.UnimplementedOperatorServiceServer
 	reader estate.Reader
+	prov   Provisioner
 }
 
-// New returns a Server over the given Reader.
+// New returns a read-only Server (no provisioning). Retained for callers/tests that
+// only exercise ListNodes/ListClusters.
 func New(r estate.Reader) *Server { return &Server{reader: r} }
+
+// NewWithProvisioner returns a Server with the write path wired.
+func NewWithProvisioner(r estate.Reader, p Provisioner) *Server {
+	return &Server{reader: r, prov: p}
+}
 
 // Register binds the server onto a grpc.ServiceRegistrar.
 func (s *Server) Register(r grpc.ServiceRegistrar) {
@@ -65,6 +81,53 @@ func (s *Server) ListClusters(ctx context.Context, _ *operatorpb.ListClustersReq
 		})
 	}
 	return &operatorpb.ListClustersResponse{Clusters: out}, nil
+}
+
+func (s *Server) AddNode(ctx context.Context, req *operatorpb.AddNodeRequest) (*operatorpb.AddNodeResponse, error) {
+	if s.prov == nil {
+		return nil, status.Error(codes.Unimplemented, "provisioning not configured")
+	}
+	if req.GetIp() == "" || req.GetSshUser() == "" || len(req.GetSshPrivateKey()) == 0 {
+		return nil, status.Error(codes.InvalidArgument, "ip, ssh_user and ssh_private_key are required")
+	}
+	id, err := s.prov.AddNode(ctx, provision.Request{
+		Hostname: req.GetHostname(), IP: req.GetIp(), SSHPort: req.GetSshPort(),
+		SSHUser: req.GetSshUser(), SSHKey: req.GetSshPrivateKey(),
+	})
+	if err != nil {
+		return nil, status.Error(codes.Internal, err.Error())
+	}
+	return &operatorpb.AddNodeResponse{ProvisionId: id, Status: operatorpb.ProvisionStatus_PROVISION_STATUS_PENDING}, nil
+}
+
+func (s *Server) ListProvisions(ctx context.Context, _ *operatorpb.ListProvisionsRequest) (*operatorpb.ListProvisionsResponse, error) {
+	if s.prov == nil {
+		return &operatorpb.ListProvisionsResponse{}, nil
+	}
+	ps, err := s.prov.List(ctx)
+	if err != nil {
+		return nil, status.Error(codes.Internal, err.Error())
+	}
+	out := make([]*operatorpb.Provision, 0, len(ps))
+	for _, p := range ps {
+		out = append(out, &operatorpb.Provision{
+			Id: p.ID, Hostname: p.Hostname, Status: provStatus(p.Status), Message: p.Message,
+		})
+	}
+	return &operatorpb.ListProvisionsResponse{Provisions: out}, nil
+}
+
+func provStatus(s provision.Status) operatorpb.ProvisionStatus {
+	switch s {
+	case provision.StatusInstalling:
+		return operatorpb.ProvisionStatus_PROVISION_STATUS_INSTALLING
+	case provision.StatusJoined:
+		return operatorpb.ProvisionStatus_PROVISION_STATUS_JOINED
+	case provision.StatusFailed:
+		return operatorpb.ProvisionStatus_PROVISION_STATUS_FAILED
+	default:
+		return operatorpb.ProvisionStatus_PROVISION_STATUS_PENDING
+	}
 }
 
 func protoStatus(s estate.NodeStatus) operatorpb.NodeStatus {
