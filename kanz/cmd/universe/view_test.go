@@ -1,0 +1,48 @@
+package main
+
+import (
+	"strings"
+	"testing"
+)
+
+func TestRenderNodesPaneShowsRows(t *testing.T) {
+	m := model{
+		active: paneNodes,
+		width:  100, height: 30,
+		nodes: []nodeRow{
+			{Name: "london", Status: "Ready", Roles: "control-plane", Region: "europe", Version: "v1.31.3", Age: "3d"},
+			{Name: "tokyo", Status: "NotReady", Roles: "-", Region: "asia", Version: "v1.31.3", Age: "3d"},
+		},
+	}
+	out := m.render()
+	for _, want := range []string{"london", "Ready", "europe", "tokyo", "NotReady"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("render missing %q\n%s", want, out)
+		}
+	}
+}
+
+func TestRenderClustersPaneShowsCounts(t *testing.T) {
+	m := model{
+		active: paneClusters,
+		width:  100, height: 30,
+		clusters: []clusterRow{{Region: "usa", Online: 2, Offline: 1}},
+	}
+	out := m.render()
+	for _, want := range []string{"usa", "2", "1"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("render missing %q\n%s", want, out)
+		}
+	}
+}
+
+func TestRenderErrorShownInStatus(t *testing.T) {
+	m := model{active: paneNodes, width: 80, height: 24, err: errStub{}}
+	if !strings.Contains(m.render(), "boom") {
+		t.Errorf("render should surface the error text\n%s", m.render())
+	}
+}
+
+type errStub struct{}
+
+func (errStub) Error() string { return "boom" }
