@@ -56,14 +56,19 @@ import (
 // blacklist, defeated by printf). Deny-by-default plus a reasoned allowlist is the
 // shape that does not decay.
 
-// sshImportAllowed maps an import path containing "ssh" to the written reason it is
-// NOT the cancelled operator plane arriving. Empty, and it should stay that way: the
-// estate is Kubernetes, so nothing here has a host to push a binary to. An entry is a
-// claim that a future reader will trust — make it say why.
+// sshImportAllowed is now PATH-SCOPED (S2a): golang.org/x/crypto/ssh is permitted
+// ONLY inside cmd/kanz-provisioner/, the one-shot Job that bootstraps a node's k3s
+// join over SSH. SSH returns to the estate at exactly this one point (KANZ_BRAIN.md,
+// "estate is Kubernetes-managed", refined 2026-07-24: the node-join handshake). The
+// same import ANYWHERE ELSE is still the cancelled operator plane arriving and
+// offends. This is a lead decision (the hybrid-k3s substrate) with a BRAIN amendment,
+// per this file's own rule.
 //
-// This is the unbackedByDesign pattern from archiver_topology_test.go: an allowlist
-// that cannot rot, because both directions fail. See TestNoSSHPlane.
-var sshImportAllowed = map[string]string{}
+// Keyed to a (importPath, dirPrefix) pair: the value is the repo-relative directory
+// prefix the import is allowed under.
+var sshImportAllowed = map[string]string{
+	"golang.org/x/crypto/ssh": "cmd/kanz-provisioner/",
+}
 
 func TestNoSSHPlane(t *testing.T) {
 	root := moduleRoot(t)
@@ -113,15 +118,16 @@ func TestNoSSHPlane(t *testing.T) {
 			if !strings.Contains(strings.ToLower(ip), "ssh") {
 				continue
 			}
-			if _, ok := sshImportAllowed[ip]; ok {
-				matched[ip] = true
-				continue
-			}
 			rel, rerr := filepath.Rel(root, path)
 			if rerr != nil {
 				rel = path
 			}
-			offences = append(offences, offence{importPath: ip, file: filepath.ToSlash(rel)})
+			relSlash := filepath.ToSlash(rel)
+			if prefix, ok := sshImportAllowed[ip]; ok && strings.HasPrefix(relSlash, prefix) {
+				matched[ip] = true
+				continue
+			}
+			offences = append(offences, offence{importPath: ip, file: relSlash})
 		}
 		return nil
 	})
