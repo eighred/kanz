@@ -165,6 +165,56 @@ spec:
     - ports:
         - { protocol: TCP, port: 8091 }
 ---
+# S4b: the operator's FIRST outbound call — venueproof.Prover's pre-write proof
+# (SetVenueKeys asks the exchange which account a candidate credential belongs to
+# before it is ever written; see internal/venueadapter/exchangeauth and
+# services/operator/internal/venueproof). Until now the operator pod had no
+# NetworkPolicy egress rules at all (deny-by-default once any policy selects it,
+# per the operator-ingress policy above). This grants exactly what that one call
+# needs and nothing else.
+#
+# The except: list on the 443 rule is the entire point, not an extra hardening
+# step: an ipBlock of 0.0.0.0/0 with no exclusions would let this permission be
+# turned INWARD — a compromised operator pod reaching any in-cluster service, or
+# reading the cloud metadata endpoint (169.254.169.254), both of which are
+# addresses within 0.0.0.0/0. Excluding the RFC1918 ranges and the link-local
+# block makes this rule "public internet only", which is what an exchange call
+# actually is. A 443 rule without this except: list is forbidden.
+#
+# DNS is scoped to the kube-dns namespace (kube-system), the same selector shape
+# network-policies.yaml's allow-dns-egress uses for the analogous kanz-services
+# rule. node-provisioner-egress's own DNS rule (below) predates this convention
+# and is untouched — out of scope here — but a NEW rule must not repeat its
+# unscoped shape now that a guard (operator_egress_test.go) forbids an empty
+# `to:` on any rule in this policy.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: operator-egress
+  namespace: kanz-operator
+  labels: { app.kubernetes.io/part-of: kanz }
+spec:
+  podSelector: { matchLabels: { app: operator } }
+  policyTypes: ["Egress"]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - { protocol: UDP, port: 53 }
+        - { protocol: TCP, port: 53 }
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.0.0.0/8
+              - 172.16.0.0/12
+              - 192.168.0.0/16
+              - 169.254.0.0/16
+      ports:
+        - { protocol: TCP, port: 443 }
+---
 # The provisioner Job egresses to DNS + arbitrary target SSH + the k3s control plane.
 # It is ephemeral; this policy scopes what a compromised provisioning run could reach.
 apiVersion: networking.k8s.io/v1
