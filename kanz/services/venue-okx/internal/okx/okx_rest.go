@@ -3,15 +3,13 @@ package okx
 import (
 	"bytes"
 	"context"
-	"crypto/hmac"
-	"crypto/sha256"
-	"encoding/base64"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"time"
+
+	"github.com/kanz-eng/kanz/internal/venueadapter/exchangeauth"
 )
 
 // okxREST is a minimal, dependency-free OKX v5 REST client. OKX signs with
@@ -222,46 +220,26 @@ func (c *okxREST) balances(ctx context.Context) (map[string]string, error) {
 	return m, nil
 }
 
-// okxAccountConfig is GET /api/v5/account/config — the account behind the credential.
-type okxAccountConfig struct {
-	Code string `json:"code"`
-	Msg  string `json:"msg"`
-	Data []struct {
-		// UID is OKX's own id for the account this API key belongs to. OKX returns it
-		// as a STRING (unlike Binance's numeric uid), so it is kept as one — the value
-		// is an identity to compare, never a number to do arithmetic on.
-		UID string `json:"uid"`
-	} `json:"data"`
-}
-
 // ExchangeAccountID asks OKX which account this API key belongs to (SOV-02a).
 //
 // It implements accountproof.Exchange, and it is called ONCE at startup: the adapter
 // refuses to trade if OKX names an account other than the one the deployment claims.
-// An empty uid is an ERROR, never "" — an empty id would compare equal to nothing and
-// would ride upstream as a verified account, which is exactly how an unproven adapter
-// would boot looking proven.
+// The signature, request, and uid-decode/validation live once in exchangeauth — this
+// method only spends the weight budget and delegates.
 func (c *okxREST) ExchangeAccountID(ctx context.Context) (string, error) {
 	if !c.bucket.Allow(1) {
 		c.onThrottle()
 		return "", ErrRateLimited
 	}
-	raw, err := c.signedRequest(ctx, http.MethodGet, "/api/v5/account/config", nil)
-	if err != nil {
-		return "", err
-	}
-	var out okxAccountConfig
-	if err := json.Unmarshal(raw, &out); err != nil {
-		return "", fmt.Errorf("okx: decode account config: %w", err)
-	}
-	if out.Code != "0" {
-		return "", &APIError{Code: atoiSafe(out.Code), Msg: out.Msg}
-	}
-	if len(out.Data) == 0 || out.Data[0].UID == "" {
-		return "", errors.New("okx: GET /api/v5/account/config carried no uid — the exchange did not say which " +
-			"account this API key belongs to, so it cannot be verified")
-	}
-	return out.Data[0].UID, nil
+	return exchangeauth.AccountID(ctx, "okx", exchangeauth.Credential{
+		APIKey:     c.apiKey,
+		APISecret:  string(c.apiSecret),
+		Passphrase: c.passphrase,
+	}, exchangeauth.Options{
+		BaseURL:    c.baseURL,
+		HTTPClient: c.httpc,
+		Now:        c.now,
+	})
 }
 
 // tickerPrice returns the last price for an instrument (public GET
@@ -315,28 +293,21 @@ func (c *okxREST) do(req *http.Request) ([]byte, error) {
 }
 
 // signedRequest signs and sends. requestPath includes any query string; body is
-// the JSON payload (empty for GET). OK-ACCESS-SIGN =
-// base64(HMAC-SHA256(timestamp + method + requestPath + body)).
+// the JSON payload (empty for GET). The OK-ACCESS-* headers are built by
+// exchangeauth.SignOKX — the one place that knows the OKX signature scheme.
 func (c *okxREST) signedRequest(ctx context.Context, method, requestPath string, body map[string]string) ([]byte, error) {
 	var bodyBytes []byte
 	if body != nil {
 		bodyBytes, _ = json.Marshal(body)
 	}
-	ts := c.now().UTC().Format("2006-01-02T15:04:05.000Z")
-	prehash := ts + method + requestPath + string(bodyBytes)
-	mac := hmac.New(sha256.New, c.apiSecret)
-	mac.Write([]byte(prehash))
-	sign := base64.StdEncoding.EncodeToString(mac.Sum(nil))
+	ts := c.now()
 
 	req, err := http.NewRequestWithContext(ctx, method, c.baseURL+requestPath, bytes.NewReader(bodyBytes))
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("OK-ACCESS-KEY", c.apiKey)
-	req.Header.Set("OK-ACCESS-SIGN", sign)
-	req.Header.Set("OK-ACCESS-TIMESTAMP", ts)
-	req.Header.Set("OK-ACCESS-PASSPHRASE", c.passphrase)
-	req.Header.Set("Content-Type", "application/json")
+	cred := exchangeauth.Credential{APIKey: c.apiKey, APISecret: string(c.apiSecret), Passphrase: c.passphrase}
+	exchangeauth.SignOKX(req.Header, cred, ts, method, requestPath, string(bodyBytes))
 
 	resp, err := c.httpc.Do(req)
 	if err != nil {

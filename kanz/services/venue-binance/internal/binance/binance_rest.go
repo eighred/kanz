@@ -2,17 +2,15 @@ package binance
 
 import (
 	"context"
-	"crypto/hmac"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
 	"strconv"
 	"time"
+
+	"github.com/kanz-eng/kanz/internal/venueadapter/exchangeauth"
 )
 
 // binanceREST is a minimal, dependency-free Binance Spot REST client. It signs
@@ -86,13 +84,10 @@ type orderFill struct {
 	TradeID         int64  `json:"tradeId"`
 }
 
-// accountInfo is GET /api/v3/account (balances for reconciliation, and the uid that
-// says WHOSE account this key is — SOV-02a).
+// accountInfo is GET /api/v3/account — balances for reconciliation. The uid that
+// says WHOSE account this key is (SOV-02a) is decoded once, in exchangeauth,
+// which ExchangeAccountID below delegates to.
 type accountInfo struct {
-	// UID is Binance's own id for the account behind this API key. It is the only
-	// authority on which collateral pool this adapter's fills margin against; every
-	// other layer was believing a string a human typed.
-	UID      int64          `json:"uid"`
 	Balances []balanceEntry `json:"balances"`
 	Code     int            `json:"code"`
 	Msg      string         `json:"msg"`
@@ -128,19 +123,31 @@ func (c *binanceREST) account(ctx context.Context) (*accountInfo, error) {
 //
 // It implements accountproof.Exchange, and it is called ONCE at startup: the adapter
 // refuses to trade if Binance names an account other than the one the deployment says
-// it is. An account response with NO uid is an error, never "" — an empty id would
-// compare equal to nothing and would sail upstream as a verified account, which is
-// precisely how an unproven adapter would boot looking proven.
+// it is. The request, uid-decode, and "no uid is an error, never empty string"
+// validation live once in exchangeauth — this method only spends the weight budget
+// and delegates.
+//
+// NOTE on error mapping: exchangeauth's GET /api/v3/account maps a 401/403 response
+// to execution.ErrEgressDenied, same as OKX. binanceREST.do (used by the TRADING
+// path: orders, cancels, queries) does not map 401/403 specially and never has — it
+// only special-cases >=500. That asymmetry is intentional and pre-existing; it is
+// not widened by this delegation because the trading path's do() is untouched here.
+// The only consumer of ExchangeAccountID is accountproof.Resolve, which treats ANY
+// error as unverifiable (fatal unless AllowUnverified), so this changes no
+// consumer-visible behaviour.
 func (c *binanceREST) ExchangeAccountID(ctx context.Context) (string, error) {
-	info, err := c.account(ctx)
-	if err != nil {
-		return "", err
+	if !c.bucket.Allow(10) {
+		c.onThrottle()
+		return "", ErrRateLimited
 	}
-	if info.UID == 0 {
-		return "", errors.New("binance: GET /api/v3/account carried no uid — the exchange did not say which account " +
-			"this API key belongs to, so it cannot be verified")
-	}
-	return strconv.FormatInt(info.UID, 10), nil
+	return exchangeauth.AccountID(ctx, "binance", exchangeauth.Credential{
+		APIKey:    c.apiKey,
+		APISecret: string(c.apiSecret),
+	}, exchangeauth.Options{
+		BaseURL:    c.baseURL,
+		HTTPClient: c.httpc,
+		Now:        c.now,
+	})
 }
 
 // signedGet performs a signed GET and returns the raw body (weight already
@@ -279,7 +286,5 @@ func (c *binanceREST) do(req *http.Request) ([]byte, error) {
 }
 
 func (c *binanceREST) sign(query string) string {
-	m := hmac.New(sha256.New, c.apiSecret)
-	m.Write([]byte(query))
-	return hex.EncodeToString(m.Sum(nil))
+	return exchangeauth.SignBinance(string(c.apiSecret), query)
 }
