@@ -450,6 +450,12 @@ func (o *Ops) Drain(ctx context.Context, name string) error {
 	// Background eviction, bound to its own deadline (NOT the request ctx — a drain
 	// outlives the RPC). Re-issuing Drain is safe (cordon is idempotent).
 	go func() {
+		// A panic in a detached goroutine crashes the whole operator process — recover.
+		defer func() {
+			if r := recover(); r != nil {
+				o.logger.Error("drain goroutine panicked", "node", name, "panic", r)
+			}
+		}()
 		bctx, cancel := context.WithTimeout(context.Background(), drainDeadline)
 		defer cancel()
 		o.evictNode(bctx, name)
@@ -462,17 +468,18 @@ func (o *Ops) Drain(ctx context.Context, name string) error {
 func (o *Ops) evictNode(ctx context.Context, name string) {
 	for {
 		remaining, err := o.evictOnce(ctx, name)
-		if err != nil {
-			o.logger.Error("drain pass failed", "node", name, "err", err)
-			return
-		}
-		if remaining == 0 {
+		switch {
+		case err != nil:
+			// A transient List error must NOT abort the drain — log and retry after
+			// the backoff. The ctx deadline still bounds the whole loop.
+			o.logger.Error("drain pass failed, will retry", "node", name, "err", err)
+		case remaining == 0:
 			o.logger.Info("drain complete", "node", name)
 			return
 		}
 		select {
 		case <-ctx.Done():
-			o.logger.Warn("drain deadline reached with pods remaining", "node", name, "remaining", remaining)
+			o.logger.Warn("drain deadline reached", "node", name)
 			return
 		case <-time.After(drainRetryInterval):
 		}
@@ -1017,13 +1024,15 @@ Handle `nodeActionMsg` in `Update`: on error set `m.actionErr`; the node's new s
 
 ```go
 func nodeStateLabel(n nodeRow) string {
-	if n.schedulable {
-		return "Ready"
+	if !n.schedulable {
+		if n.evictablePods > 0 {
+			return fmt.Sprintf("Draining (%d)", n.evictablePods)
+		}
+		return "Drained"
 	}
-	if n.evictablePods > 0 {
-		return fmt.Sprintf("Draining (%d)", n.evictablePods)
-	}
-	return "Drained"
+	// Schedulable: fall through to readiness — a schedulable-but-NotReady/Unknown node
+	// (kubelet down) must NOT render as green "Ready".
+	return n.Status // "Ready" / "NotReady" / "Unknown"
 }
 ```
 
