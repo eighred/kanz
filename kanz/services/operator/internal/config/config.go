@@ -14,9 +14,11 @@ import (
 
 // Config is the operator service configuration.
 type Config struct {
-	// GRPCListen is the address the operator.v1 gRPC server binds. It is not
-	// fronted by a Service — the universe TUI reaches it via kubectl
-	// port-forward, so the RBAC on pods/portforward is the access gate.
+	// GRPCListen is the address the operator.v1 gRPC server binds. The listener is
+	// mutually authenticated (OPS-M2a): callers present an SVID and only the
+	// identities in AllowedClients are admitted. It was previously plaintext and
+	// reachable only by `kubectl port-forward`, which was both an unauthenticated
+	// RPC and a routine kubectl dependency for every operator.
 	GRPCListen string
 	// HealthListen is the address the /healthz + /readyz HTTP server binds
 	// (the target of the Deployment's liveness/readiness probes).
@@ -43,6 +45,14 @@ type Config struct {
 	// exchange (mainnet).
 	VenueProof    string            // OPERATOR_VENUE_PROOF: "" | "off" | "require"
 	VenueBaseURLs map[string]string // OPERATOR_OKX_BASE_URL, OPERATOR_BINANCE_BASE_URL
+
+	// Control-plane access (OPS-M2a). Both are REQUIRED at startup — the operator
+	// refuses to serve without them (see cmd/operator/controlplane.go). They are
+	// parsed here but deliberately NOT validated here: Load() is parsing, and the
+	// refusal belongs beside the server it protects, where it is unit-tested with
+	// the rest of the admission rule.
+	SPIFFESocket   string // SPIFFE_ENDPOINT_SOCKET — the workload-API socket
+	AllowedClients string // OPERATOR_ALLOWED_CLIENTS — comma-separated SPIFFE IDs that may call
 }
 
 // validVenueProofValues are the only values OPERATOR_VENUE_PROOF accepts. Any
@@ -76,6 +86,9 @@ func Load() (Config, error) {
 
 		VenueProof:    venueProof,
 		VenueBaseURLs: venueBaseURLs(),
+
+		SPIFFESocket:   os.Getenv("SPIFFE_ENDPOINT_SOCKET"),
+		AllowedClients: os.Getenv("OPERATOR_ALLOWED_CLIENTS"),
 	}, nil
 }
 

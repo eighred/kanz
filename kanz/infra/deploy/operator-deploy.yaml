@@ -82,7 +82,25 @@ spec:
             readOnlyRootFilesystem: true
             runAsNonRoot: true
             capabilities: { drop: ["ALL"] }
+          volumeMounts:
+            - { name: spiffe, mountPath: /run/spiffe, readOnly: true }
           env:
+            # OPS-M2a: the control plane authenticates its caller. This surface
+            # provisions nodes and writes exchange API keys; it was previously a
+            # PLAINTEXT listener with no authentication, reachable only by
+            # `kubectl port-forward` — which was simultaneously an unauthenticated
+            # RPC and a routine kubectl dependency for every operator. The binary
+            # REFUSES TO START without both of these (cmd/operator/controlplane.go).
+            - name: SPIFFE_ENDPOINT_SOCKET
+              value: "unix:///run/spiffe/spire-agent.sock"
+            # WHO MAY CALL. Authentication is not authorization: every workload in
+            # the trust domain holds a valid SVID, so verifying one proves only that
+            # the caller is some Kanz workload. This list is what makes the gateway a
+            # gateway. It names api-gateway alone — the platform's single identity
+            # authority (KANZ_BRAIN) — so an operator authenticates as a PERSON there
+            # and never holds a cluster credential.
+            - name: OPERATOR_ALLOWED_CLIENTS
+              value: "spiffe://kanz.internal/ns/kanz-services/sa/api-gateway"
             - name: OPERATOR_PROVISIONER_IMAGE
               value: ghcr.io/kanz-eng/kanz-provisioner:latest
             - name: OPERATOR_K3S_SERVER_URL
@@ -99,6 +117,29 @@ spec:
             #   value: "https://www.okx.com"
             # - name: OPERATOR_BINANCE_BASE_URL
             #   value: "https://api.binance.com"
+      volumes:
+        # SEC-01a SPIFFE CSI volume — presents the agent Workload API socket the
+        # env above points at.
+        - name: spiffe
+          csi:
+            driver: csi.spiffe.io
+            readOnly: true
+---
+# OPS-M2a: the operator needs a stable address now that a caller other than
+# `kubectl port-forward` reaches it. It is an ordinary ClusterIP — NOT exposed
+# outside the cluster, and NOT the thing that makes it safe to reach. Safety is the
+# mTLS allow-list on the pod plus the ingress policy below; the Service only gives
+# the api-gateway a name to dial.
+apiVersion: v1
+kind: Service
+metadata:
+  name: operator
+  namespace: kanz-operator
+  labels: { app.kubernetes.io/part-of: kanz, app: operator }
+spec:
+  selector: { app: operator }
+  ports:
+    - { name: grpc, port: 9090, targetPort: 9090 }
 ---
 apiVersion: policy/v1
 kind: PodDisruptionBudget
@@ -149,9 +190,21 @@ metadata:
 automountServiceAccountToken: false
 ---
 # Deny-by-default ingress to the operator pod, closing the F0+S1 residual gap: the
-# plaintext gRPC listener (0.0.0.0:9090) was reachable by any in-cluster pod. Only the
-# health port is left ingressable (kubelet probes); gRPC is reached solely via
-# kubeconfig-gated port-forward, which does not traverse a NetworkPolicy.
+# gRPC listener (0.0.0.0:9090) was reachable by any in-cluster pod.
+#
+# OPS-M2a CHANGED WHAT THIS POLICY IS DEFENDING. It used to be the ONLY thing
+# standing in front of an unauthenticated plaintext listener, so it admitted nothing
+# but the health port and gRPC was reached solely by `kubectl port-forward` — which
+# made kubectl a routine operational dependency and put a cluster credential in every
+# operator's hands, while the RPC itself still trusted anything that reached it.
+#
+# The listener now authenticates: it presents an SVID, verifies the peer's, and
+# admits only OPERATOR_ALLOWED_CLIENTS. So this rule is defence in depth rather than
+# the whole defence, and it can safely name the one caller that should ever arrive.
+# BOTH bounds are kept deliberately: the policy stops a compromised pod from even
+# reaching the socket, and the allow-list stops one that does from being trusted.
+# Neither is redundant — a NetworkPolicy is not an identity, and an identity check
+# does not reduce the attack surface of an open port.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -162,8 +215,20 @@ spec:
   podSelector: { matchLabels: { app: operator } }
   policyTypes: ["Ingress"]
   ingress:
+    # Health: kubelet probes originate from the node, which no pod/namespace
+    # selector matches, so this rule stays destination-open on 8091 alone.
     - ports:
         - { protocol: TCP, port: 8091 }
+    # Control plane: the api-gateway, and nothing else in the estate.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kanz-services
+          podSelector:
+            matchLabels:
+              app: api-gateway
+      ports:
+        - { protocol: TCP, port: 9090 }
 ---
 # S4b: the operator's FIRST outbound call — venueproof.Prover's pre-write proof
 # (SetVenueKeys asks the exchange which account a candidate credential belongs to

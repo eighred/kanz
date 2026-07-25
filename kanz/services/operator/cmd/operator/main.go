@@ -74,13 +74,23 @@ func main() {
 		}
 	}()
 
-	// gRPC server: plaintext, reached only via kubeconfig-gated port-forward.
+	// gRPC server: mutually authenticated, restricted to the configured callers
+	// (OPS-M2a). Built BEFORE the listener so a misconfigured control plane fails
+	// without having bound the port — a socket that accepts and then refuses every
+	// caller is harder to diagnose than one that was never opened.
+	srvOpt, allowed, err := controlPlaneServerOption(ctx, cfg.SPIFFESocket, cfg.AllowedClients)
+	if err != nil {
+		logger.Error("control-plane access is not configured; refusing to serve", "err", err)
+		os.Exit(2)
+	}
 	lis, err := net.Listen("tcp", cfg.GRPCListen)
 	if err != nil {
 		logger.Error("grpc listen failed", "addr", cfg.GRPCListen, "err", err)
 		os.Exit(2)
 	}
-	grpcSrv := grpc.NewServer()
+	grpcSrv := grpc.NewServer(srvOpt)
+	logger.Info("control plane authenticated — mTLS, callers restricted",
+		"authorized_clients", spiffeIDStrings(allowed))
 	reader := estate.NewK8s(cs)
 	var srv *grpcsrv.Server
 	if cfg.ProvisionerImage != "" {
