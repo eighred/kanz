@@ -20,9 +20,14 @@ import (
 
 // fixedCols/fixedRows pin the terminal geometry. A test whose result depends on
 // terminal size is a test that fails on somebody else's machine.
+//
+// pollInterval trades responsiveness against wasted wakeups: it only polls the
+// in-memory capture buffer (not the workflow under test), so shortening it just
+// burns CPU on the mutex/Contains check while the child is still producing output.
 const (
-	fixedCols = 120
-	fixedRows = 40
+	fixedCols    = 120
+	fixedRows    = 40
+	pollInterval = 50 * time.Millisecond
 )
 
 // Session is one running program attached to a pty.
@@ -84,7 +89,7 @@ func (s *Session) waitFor(t *testing.T, sub string, timeout time.Duration) {
 		if strings.Contains(s.Frames(), sub) {
 			return
 		}
-		time.Sleep(50 * time.Millisecond) // polling the CAPTURE, not the workflow
+		time.Sleep(pollInterval)
 	}
 	t.Errorf("timed out after %s waiting for %q.\n--- captured output ---\n%s\n--- end ---",
 		timeout, sub, s.Frames())
@@ -104,6 +109,19 @@ func (s *Session) Close() {
 	case <-s.done:
 	case <-time.After(3 * time.Second):
 		_ = s.cmd.Process.Kill()
+		// Kill only requests termination; it does not guarantee the drain
+		// goroutine's blocked Read has returned yet. Re-wait on s.done, bounded,
+		// so we never close the fd out from under a still-running reader and never
+		// hang forever if a platform's poller is slow to notice the fd died.
+		select {
+		case <-s.done:
+		case <-time.After(3 * time.Second):
+		}
 	}
 	_ = s.tty.Close()
+	// Reap the child so it doesn't sit as a zombie for the rest of the test binary's
+	// life: this harness starts a fresh session per proof, and zombies would
+	// accumulate across the suite. The process is confirmed dead or killed above, so
+	// Wait cannot block.
+	_ = s.cmd.Wait()
 }
