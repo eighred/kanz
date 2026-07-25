@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"bytes"
 	"os/exec"
 	"strings"
 	"testing"
@@ -11,11 +12,32 @@ import (
 // goes through here rather than through the TUI's rendering: a UI that shows its
 // optimistic intent instead of observed state must FAIL these proofs, and it can only
 // do that if the oracle is independent of it.
+// kubectl runs one kubectl command and returns its STDOUT only.
+//
+// Stdout and stderr are kept apart deliberately. CombinedOutput() merged them, and every
+// oracle assertion in this file parses the result — so anything kubectl wrote to stderr
+// became part of the value under test. That is not hypothetical: on a k3s host
+// /usr/local/bin/kubectl is the k3s binary, which logs
+//
+//	level=info msg="Acquiring lock file /var/lib/rancher/k3s/data/.lock"
+//	level=info msg="Preparing data dir ..."
+//
+// to stderr on EVERY invocation. Under CombinedOutput, clusterNodeNames' strings.Fields
+// split those two lines into a dozen tokens and reported a one-node cluster as many,
+// silently skipping the live-join proof. The same contamination reaches nodeLabel,
+// secretDataKeys and the rest, where it can just as easily produce a false PASS — an
+// assertion satisfied by a substring of a log line rather than by cluster state.
+//
+// stderr is still captured, and still reported when the command fails, because that is
+// where kubectl explains itself. It simply never reaches a caller as data.
 func kubectl(t *testing.T, args ...string) string {
 	t.Helper()
-	out, err := exec.Command("kubectl", args...).CombinedOutput()
+	cmd := exec.Command("kubectl", args...)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
 	if err != nil {
-		t.Fatalf("kubectl %s: %v\n%s", strings.Join(args, " "), err, out)
+		t.Fatalf("kubectl %s: %v\nstderr: %s", strings.Join(args, " "), err, stderr.String())
 	}
 	return strings.TrimSpace(string(out))
 }
