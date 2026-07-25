@@ -37,6 +37,21 @@ type Session struct {
 	mu   sync.Mutex
 	buf  bytes.Buffer
 	done chan struct{}
+
+	// mark is the capture length at the moment of the most recent Send/SendKey,
+	// guarded by mu. WaitFor searches only capture[mark:], not the whole
+	// buffer. A cumulative search is vacuous whenever the wanted text already
+	// appeared in an earlier frame (e.g. a pane title on screen since
+	// startup): WaitFor returns immediately without having waited for
+	// anything, and the very next Send then races the program, since it may
+	// arrive before the prior keystroke was processed. That is a reproduced,
+	// not theoretical, failure: WaitFor("NODES") after Esc matched the
+	// startup frame in ~121us, so a following "q" was typed into a still-open
+	// form instead of quitting, and the program never exited. mark starts at
+	// 0 and only advances on Send/SendKey, so a WaitFor called before any
+	// input (e.g. right after Start) still searches the entire buffer, which
+	// is required because the startup frame may already have arrived.
+	mark int
 }
 
 // Start launches bin in a pty and begins draining its output.
@@ -67,16 +82,29 @@ func Start(t *testing.T, bin string, args []string, env []string) *Session {
 	return s
 }
 
-// Send writes keystrokes. "\r" is Enter; use SendKey for control bytes.
-func (s *Session) Send(keys string) { _, _ = s.tty.WriteString(keys) }
+// Send writes keystrokes and marks the capture so the next WaitFor searches only
+// output produced from here on. "\r" is Enter; use SendKey for control bytes.
+func (s *Session) Send(keys string) {
+	s.mu.Lock()
+	s.mark = s.buf.Len()
+	s.mu.Unlock()
+	_, _ = s.tty.WriteString(keys)
+}
 
-// SendKey writes one raw byte, for control sequences such as ctrl+t (0x14).
-func (s *Session) SendKey(b byte) { _, _ = s.tty.Write([]byte{b}) }
+// SendKey writes one raw byte, for control sequences such as ctrl+t (0x14), and marks
+// the capture exactly as Send does.
+func (s *Session) SendKey(b byte) {
+	s.mu.Lock()
+	s.mark = s.buf.Len()
+	s.mu.Unlock()
+	_, _ = s.tty.Write([]byte{b})
+}
 
-// WaitFor blocks until the captured output contains sub, or fails the test with the
-// full capture attached. This is the ONLY synchronisation primitive in the harness:
-// a sleep would pass on a fast machine and flake on a slow one, and would hide
-// exactly the missing-feedback defects this slice exists to find.
+// WaitFor blocks until the output captured since the most recent Send/SendKey (or,
+// if nothing has been sent yet, since the start of the program) contains sub, or
+// fails the test with the full capture attached. This is the ONLY synchronisation
+// primitive in the harness: a sleep would pass on a fast machine and flake on a slow
+// one, and would hide exactly the missing-feedback defects this slice exists to find.
 func (s *Session) WaitFor(t *testing.T, sub string, timeout time.Duration) {
 	t.Helper()
 	s.waitFor(t, sub, timeout)
@@ -86,20 +114,38 @@ func (s *Session) waitFor(t *testing.T, sub string, timeout time.Duration) {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
-		if strings.Contains(s.Frames(), sub) {
+		if strings.Contains(s.sinceMark(), sub) {
 			return
 		}
 		time.Sleep(pollInterval)
 	}
-	t.Errorf("timed out after %s waiting for %q.\n--- captured output ---\n%s\n--- end ---",
-		timeout, sub, s.Frames())
+	t.Errorf("timed out after %s waiting for %q in output since the last "+
+		"Send/SendKey (matches against earlier frames don't count — a cumulative "+
+		"search would report success without ever waiting for this response).\n"+
+		"--- output since last keystroke ---\n%s\n--- full captured output ---\n%s\n--- end ---",
+		timeout, sub, s.sinceMark(), s.Frames())
 }
 
-// Frames returns everything the program has written so far, ANSI included.
+// Frames returns everything the program has written so far, ANSI included. Unlike
+// waitFor's search window, Frames is always the whole capture: failure messages need
+// the full history, and a red end-to-end test that cannot show what the program
+// displayed is close to useless.
 func (s *Session) Frames() string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.buf.String()
+}
+
+// sinceMark returns the portion of the capture produced after the most recent
+// Send/SendKey (see the mark field for why this window, not the whole buffer, is
+// what WaitFor must search).
+func (s *Session) sinceMark() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.mark >= s.buf.Len() {
+		return ""
+	}
+	return s.buf.String()[s.mark:]
 }
 
 // Close asks the program to quit, then kills it if it will not.
