@@ -132,7 +132,16 @@ spec:
             - { name: RISK_ENGINE_NATS_URL, value: "nats://nats.kanz-messaging.svc:4222" }
             - { name: RISK_ENGINE_KAFKA_BROKERS, value: "kafka.kanz-messaging.svc:9094" }
             - { name: RISK_ENGINE_SOURCE, value: "risk-engine" }
-            - { name: SPIFFE_ENDPOINT_SOCKET, value: "unix:///run/spiffe/spire-agent.sock" }
+            # RISK_ENGINE_SPIFFE_SOCKET, *not* SPIFFE_ENDPOINT_SOCKET — this service
+            # reads the prefixed name (internal/config), as api-gateway and copilot do.
+            # The manifest set the unprefixed spelling, so cfg.SPIFFESocket was EMPTY
+            # while the variable and the mounted CSI volume both looked correct.
+            #
+            # Two things degraded silently and neither is visible in a pod listing: the
+            # mesh stayed disabled, so this service could not reach the mTLS-only NATS;
+            # and its gRPC query surface would serve PLAINTEXT if it were started — an
+            # unauthenticated read over the fund's risk positions, logged as a warning.
+            - { name: RISK_ENGINE_SPIFFE_SOCKET, value: "unix:///run/spiffe/spire-agent.sock" }
           livenessProbe:
             httpGet: { path: /healthz, port: 8081 }
             initialDelaySeconds: 5
