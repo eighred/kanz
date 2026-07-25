@@ -51,7 +51,9 @@
 
 **Interfaces:**
 - Consumes: nothing.
-- Produces: `type Session struct{}`; `func Start(t *testing.T, bin string, env []string) *Session`; `func (s *Session) Send(keys string)`; `func (s *Session) SendKey(b byte)`; `func (s *Session) WaitFor(sub string, timeout time.Duration)`; `func (s *Session) Frames() string`; `func (s *Session) Close()`.
+- Produces: `type Session struct{}`; `func Start(t *testing.T, bin string, args []string, env []string) *Session`; `func (s *Session) Send(keys string)`; `func (s *Session) SendKey(b byte)`; `func (s *Session) WaitFor(t *testing.T, sub string, timeout time.Duration)`; `func (s *Session) Frames() string`; `func (s *Session) Close()`.
+
+  Note both signatures carefully: `Start` takes `args` **and** `env` as separate slices, and `WaitFor` takes `*testing.T` as its first parameter so it can attach the capture to its own failure. The Step 2 test below calls `s.WaitFor("GOT:hello", …)` without it — that is deliberate: the test is written first and must be corrected to `s.WaitFor(t, "GOT:hello", …)` once the driver exists, which is what Step 3's compile failure will tell you.
 
 - [ ] **Step 1: Add the dependency**
 
@@ -1374,6 +1376,6 @@ and what remains unproven and why."
 
 **Placeholders.** None: `NODE2_NAME` in Task 6 is an explicit substitution with the command to obtain it, and Task 10 Step 3 names the field to confirm and how.
 
-**Type consistency.** `Start(t, bin, args, env)` is used with that signature in Tasks 1, 3. `WaitFor(t, sub, timeout)` consistently takes `t`. `waitForNodeReady` returns the node name, used as such in Tasks 5–9. `nodeSchedulable`/`nodeLabel`/`podsOnNode`/`secretDataKeys`/`kubectlLines`/`waitForSchedulable`/`waitForNoEvictablePods` are each defined once, in Task 2 or where first needed, and reused.
+**Type consistency.** `Start(t, bin, args, env)` is used with that signature in Tasks 1 and 3. **One error found and fixed during this review:** Task 1's Interfaces block had declared `Start(t, bin, env)` and `WaitFor(sub, timeout)`, both missing a parameter the implementation takes. A task's implementer sees only their own task, so a wrong signature there is a wrong signature everywhere downstream — corrected, with a note that Step 2's test deliberately calls the pre-correction form so the compile error teaches it. `WaitFor(t, sub, timeout)` consistently takes `t`. `waitForNodeReady` returns the node name, used as such in Tasks 5–9. `nodeSchedulable`/`nodeLabel`/`podsOnNode`/`secretDataKeys`/`kubectlLines`/`waitForSchedulable`/`waitForNoEvictablePods` are each defined once, in Task 2 or where first needed, and reused.
 
 **Fixed during self-review:** Task 8's secret poll was clumsy (`nodeExists(t, "") || true`). Replaced with `waitForSecret`, defined in Task 8 and added to `oracle.go` — a write driven through a UI is asynchronous, so failing on the first miss would have been a race rather than a proof.
