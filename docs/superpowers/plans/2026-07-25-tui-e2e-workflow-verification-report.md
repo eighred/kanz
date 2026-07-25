@@ -16,7 +16,16 @@ Not the existence of code, and not a working transport path.
 
 ## 1. What was proven
 
-Final full-suite run, one pass, shared cluster: **16 PASS, 1 correct SKIP, 135.6s.**
+Final full-suite run, one pass, shared cluster: **16 PASS, 1 correct SKIP, 134.4s** — re-run after
+the whole-branch review's fixes landed, including the Job pin. The join was re-proven separately at
+**30.7s** from a freshly un-joined node, because the pin changed the provisioning Job spec and only
+that one test exercises it.
+
+The pin was verified by reading the Jobs the operator actually created, not inferred from the suite
+passing — `nodeSelector={"node-role.kubernetes.io/control-plane":"true"}` on both `probe-bw8dqzwh`
+and `provision-e2e-node2-ltfrp`. That distinction matters: a pin that silently failed to apply would
+still pass every test on a two-node cluster, because the control plane is a valid scheduling target
+anyway. Only the Job spec can tell those two worlds apart.
 
 Every assertion below is against **Kubernetes state**, never against what the TUI rendered. That
 is the point of the design: a UI that displays its optimistic intent rather than observed state
@@ -243,6 +252,24 @@ that node now cannot be drained without `--disable-eviction` or scaling the oper
 - **CI.** Unchanged and still halted (OPS-M1). Nothing in this branch has run in CI; every result here is from local and live-cluster execution.
 - **The TUI's visual rendering.** Asserted as text through a PTY at 120×40. Nobody has looked at it.
 - **`kanz-provisioner`'s `TestSSHRunExecutesCommand` is a pre-existing flake** — ~4 failures in 10 runs on a pristine tree, proven unrelated by stashing. It will read as a real CI failure once the billing halt lifts.
+
+**Two harness defects found by the final re-run, left unfixed deliberately.** Changing the harness's
+own authentication path while using it to certify this branch would undermine the run, so both are
+carried:
+
+1. **An expired token presents as seven product-looking regressions.** The suite run immediately
+   after the Job pin returned seven failures, which looked exactly like the placement change having
+   broken everything. It was the e2e token expiring — minted with a 3-hour life. Every
+   gateway-dependent proof then failed with `(no nodes)` and a PTY timeout; only the probe test
+   surfaced the cause, because it happens to render gateway errors inline. `requireEnv` validates
+   that the variables are *set*, never that the token is *valid*. One authenticated probe at
+   startup would turn seven misleading failures into a single accurate skip.
+2. **`mintOperatorToken()` is dead code.** It exists in `env.go`, does exactly the right thing, and
+   nothing calls it — the token is supplied externally via `KANZ_E2E_TOKEN`. This is the third
+   instance on this branch of a correct mechanism wired to nothing (the others: `rig_dev_patch.py`'s
+   `_ADD_ENV` entry for a file `rig-apply.sh` never applies, and spiffe-helper's `cmd` reload that
+   could never resolve its binary). **The pattern is worth more than any of the three:** code that
+   is written, reviewed, and plausible, but whose execution nobody ever observed.
 
 **Known limitation, honestly stated:** `TestAddNodeProbesThenJoinsTheNodeLive` SKIPS when node 2 is
 already joined. That guard is correct — it refuses to re-run a join against an already-joined node
