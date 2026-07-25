@@ -138,6 +138,37 @@ spec:
       ports:
         - { protocol: TCP, port: 8081 }
 ---
+# OPS-M2b: the gateway → operator control-plane egress half. The ingress half lives
+# beside the operator itself (infra/deploy/operator-deploy.yaml's operator-ingress),
+# so both ends name each other and neither is open.
+#
+# CROSS-NAMESPACE, so it needs a namespaceSelector as well as a podSelector — the
+# risk-engine rule above needs neither because that peer shares kanz-services. A
+# podSelector alone here would silently select nothing and the dial would hang until
+# its deadline, which reads like an unhealthy operator rather than a missing rule.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-operator-egress-from-gateway
+  namespace: kanz-services
+  labels:
+    app.kubernetes.io/part-of: kanz
+spec:
+  podSelector:
+    matchLabels:
+      app: api-gateway
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kanz-operator
+          podSelector:
+            matchLabels:
+              app: operator
+      ports:
+        - { protocol: TCP, port: 9090 }
+---
 # External clients reach the gateway through the ingress controller only. Allow
 # ingress to api-gateway:8080 from the ingress-nginx namespace + scrape.
 apiVersion: networking.k8s.io/v1

@@ -53,6 +53,19 @@ type Config struct {
 	// making them the same would hand order entry to everyone who can read.
 	TradeRole string
 
+	// OperatorAddr is the gRPC target of the operator's control plane (OPS-M2b). EMPTY
+	// ⇒ the /v1/control routes are NOT REGISTERED at all and the gateway serves trading
+	// only — the operator surface is absent rather than present-and-forbidden, which is
+	// the same shape the OMS uses for an unconfigured venue and the operator itself uses
+	// for an unconfigured provisioner.
+	OperatorAddr string
+	// OperatorRole is the role a Principal must carry to reach a /v1/control route:
+	// provisioning and draining nodes, and writing the exchange credentials the venue
+	// adapters sign with. REQUIRED once OperatorAddr is set, and it must differ from
+	// BOTH other roles — exposing the control plane without saying who may reach it is
+	// the failure this pairing exists to prevent.
+	OperatorRole string
+
 	// RateLimitPerSec / RateLimitBurst configure the DEFAULT per-tenant token
 	// bucket (API-01d). A non-positive rate disables rate limiting.
 	RateLimitPerSec float64
@@ -105,6 +118,8 @@ func Load() (Config, error) {
 		JWTSecret:       secret("API_GATEWAY_JWT_SECRET"),
 		RequiredRole:    os.Getenv("API_GATEWAY_REQUIRED_ROLE"),
 		TradeRole:       os.Getenv("API_GATEWAY_TRADE_ROLE"),
+		OperatorAddr:    os.Getenv("API_GATEWAY_OPERATOR_ADDR"),
+		OperatorRole:    os.Getenv("API_GATEWAY_OPERATOR_ROLE"),
 		RateLimitPerSec: parseFloat(os.Getenv("API_GATEWAY_RATE_LIMIT_PER_SEC")),
 		RateLimitBurst:  parseInt(os.Getenv("API_GATEWAY_RATE_LIMIT_BURST")),
 		MaxInFlight:     parseInt(os.Getenv("API_GATEWAY_MAX_IN_FLIGHT")),
@@ -157,6 +172,35 @@ func (c Config) validateAuth() error {
 		return errors.New("api-gateway: API_GATEWAY_TRADE_ROLE must differ from API_GATEWAY_REQUIRED_ROLE. " +
 			"EVERY authenticated caller carries the baseline role — making it the trade role hands " +
 			"order entry to everyone who can read, which is the exact failure SEC-M2 exists to end")
+	}
+	// OPS-M2b. Only checked when the control plane is actually exposed: with no
+	// OperatorAddr the /v1/control routes are never registered, so there is nothing to
+	// authorize and demanding a role for it would be config for an absent feature.
+	//
+	// Once it IS exposed, the role is required and must be its own. These routes
+	// provision and drain nodes and write the exchange credentials the venue adapters
+	// sign with; reusing the baseline role would hand that to every authenticated
+	// caller, and reusing the trade role would hand it to every trader.
+	if c.OperatorAddr != "" {
+		if c.OperatorRole == "" {
+			return errors.New("api-gateway: API_GATEWAY_OPERATOR_ADDR is set but " +
+				"API_GATEWAY_OPERATOR_ROLE is not. The control plane provisions and drains nodes " +
+				"and writes exchange API credentials — exposing it without saying who may reach it " +
+				"is not a default, it is an omission (OPS-M2b)")
+		}
+		if c.OperatorRole == c.RequiredRole {
+			return errors.New("api-gateway: API_GATEWAY_OPERATOR_ROLE must differ from " +
+				"API_GATEWAY_REQUIRED_ROLE. EVERY authenticated caller carries the baseline role — " +
+				"making it the operator role hands node provisioning and exchange-credential writes " +
+				"to everyone who can read")
+		}
+		if c.OperatorRole == c.TradeRole {
+			return errors.New("api-gateway: API_GATEWAY_OPERATOR_ROLE must differ from " +
+				"API_GATEWAY_TRADE_ROLE. Operating the estate and moving capital are different " +
+				"authorities in BOTH directions: a trader has no business rotating the credentials " +
+				"their orders are signed with, and an operator draining a node has no business " +
+				"submitting orders")
+		}
 	}
 	return nil
 }

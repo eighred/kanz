@@ -28,6 +28,20 @@ const (
 	Read Capability = "read"
 	// Trade: MOVE CAPITAL. Submit or cancel an order at a live exchange.
 	Trade Capability = "trade"
+	// Operate: RUN THE PLATFORM. Provision, cordon, drain and relabel nodes; write the
+	// exchange API credentials the venue adapters sign with (OPS-M2b).
+	//
+	// A THIRD capability, and only a third: the package comment above is right that a
+	// model nobody can hold in their head gets routed around, so this is not the start of
+	// a taxonomy. It exists because operating the estate is a DIFFERENT authority from
+	// reading it or trading on it, in both directions. An operator who can drain a node
+	// has no business submitting orders; a trader who moves capital all day has no
+	// business rotating the credentials those orders are signed with.
+	//
+	// It is deliberately NOT implied by Trade. Writing a venue key is not "more trading" —
+	// a wrong key posts fills to another fund's ledger while the exchange debits the right
+	// account, which no amount of trade authority is a licence to do.
+	Operate Capability = "operate"
 )
 
 // Grants is the role → capabilities policy: what a principal's roles entitle them to do.

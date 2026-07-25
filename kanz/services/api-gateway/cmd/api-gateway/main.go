@@ -18,9 +18,11 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/spiffe/go-spiffe/v2/spiffeid"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 
+	operatorpb "github.com/kanz-eng/kanz-schemas-go/operator/v1"
 	querypb "github.com/kanz-eng/kanz-schemas-go/query/v1"
 
 	"github.com/kanz-eng/kanz/pkg/auth"
@@ -29,6 +31,7 @@ import (
 	"github.com/kanz-eng/kanz/pkg/transport"
 	"github.com/kanz-eng/kanz/services/api-gateway/internal/authz"
 	"github.com/kanz-eng/kanz/services/api-gateway/internal/config"
+	"github.com/kanz-eng/kanz/services/api-gateway/internal/control"
 	"github.com/kanz-eng/kanz/services/api-gateway/internal/gateway"
 	"github.com/kanz-eng/kanz/services/api-gateway/internal/middleware"
 	"github.com/kanz-eng/kanz/services/api-gateway/internal/orders"
@@ -89,10 +92,28 @@ func main() {
 	// upstream addresses configured the backend is nil and the routes 503.
 	proxyHandler := buildProxy(ctx, cfg, logger)
 
+	// The control plane (OPS-M2b). Absent unless an address is configured, and a
+	// FATAL rather than a degraded start when it is configured and cannot be reached
+	// securely — an operator surface that half-exists is worse than one that does
+	// not, because the TUI would report "no control plane" for a config error.
+	var ctlHandler *control.Handler
+	if cfg.OperatorAddr != "" {
+		opConn, err := dialOperator(ctx, cfg, logger)
+		if err != nil {
+			logger.Error("api-gateway: control plane configured but unusable", "err", err)
+			os.Exit(2)
+		}
+		defer func() { _ = opConn.Close() }()
+		ctlHandler = control.New(operatorpb.NewOperatorServiceClient(opConn), logger)
+		logger.Info("api-gateway: control plane fronted", "addr", cfg.OperatorAddr, "role", cfg.OperatorRole)
+	} else {
+		logger.Info("api-gateway: no API_GATEWAY_OPERATOR_ADDR — /v1/control routes not registered")
+	}
+
 	var ready atomic.Bool
 	srv := &http.Server{
 		Addr:              cfg.Listen,
-		Handler:           buildRouter(cfg, handler, ordersHandler, proxyHandler, obs, &ready, logger),
+		Handler:           buildRouter(cfg, handler, ordersHandler, proxyHandler, ctlHandler, obs, &ready, logger),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
@@ -193,7 +214,7 @@ func buildProxy(ctx context.Context, cfg config.Config, logger *slog.Logger) *pr
 
 // buildRouter wires the public probes/metrics/openapi (un-gated) and the /v1
 // risk + order + Phase-7 read routes behind the edge middleware chain.
-func buildRouter(cfg config.Config, h *gateway.Handler, o *orders.Handler, p *proxy.Handler, obs *observability.Provider, ready *atomic.Bool, logger *slog.Logger) http.Handler {
+func buildRouter(cfg config.Config, h *gateway.Handler, o *orders.Handler, p *proxy.Handler, ctl *control.Handler, obs *observability.Provider, ready *atomic.Bool, logger *slog.Logger) http.Handler {
 	// EVERY /v1 ROUTE DECLARES WHAT IT TAKES TO REACH IT (SEC-M2).
 	//
 	// The gateway used to wrap all of /v1 in ONE role check, so `GET /v1/portfolios/{id}/
@@ -210,10 +231,26 @@ func buildRouter(cfg config.Config, h *gateway.Handler, o *orders.Handler, p *pr
 		// The trade role MOVES CAPITAL. A trader can obviously also read — a control that
 		// made traders carry two tokens would be routed around within a week.
 		cfg.TradeRole: {authz.Read, authz.Trade},
+		// The operator role RUNS THE ESTATE (OPS-M2b): provisioning and draining nodes,
+		// and writing the exchange credentials the venue adapters sign with. It carries
+		// Read for the same reason the trade role does — an operator who cannot see the
+		// system they are operating will be handed a second token within a week.
+		//
+		// It does NOT carry Trade, and Trade does not carry Operate. config.validateAuth
+		// refuses to start if this role collides with either of the others, because a
+		// collision here silently merges two authorities that exist to be separate.
+		cfg.OperatorRole: {authz.Read, authz.Operate},
 	})
 	h.Routes(gwMux)
 	o.Routes(gwMux)
 	p.Routes(gwMux)
+	// Absent when no control plane is configured — the routes are not registered at
+	// all, rather than registered and forbidden. An operator hitting a 404 is being
+	// told the truth (this gateway fronts no control plane); a 403 would say they
+	// lacked a role, and they would go looking for the wrong thing.
+	if ctl != nil {
+		ctl.Routes(gwMux)
+	}
 
 	// One of these two arms always runs: config.Load refuses to return a Config
 	// with neither an OIDC issuer nor a JWT secret, so the gateway cannot reach
@@ -303,6 +340,41 @@ func dialRiskEngine(ctx context.Context, cfg config.Config, logger *slog.Logger)
 		logger.Warn("api-gateway: upstream plaintext (no API_GATEWAY_SPIFFE_SOCKET)")
 	}
 	return grpc.NewClient(cfg.RiskEngineAddr, opt)
+}
+
+// operatorSPIFFEID is the identity the operator's control plane presents. It must
+// match the namespace + ServiceAccount in infra/deploy/operator-deploy.yaml; a
+// mismatch fails CLOSED (the dial is refused), which is the safe direction and is
+// diagnosable from this gateway's own logs.
+var operatorSPIFFEID = func() spiffeid.ID {
+	id, err := transport.ServiceID("kanz-operator", "operator")
+	if err != nil {
+		panic("api-gateway: operator SPIFFE ID is not constructible: " + err.Error())
+	}
+	return id
+}()
+
+// dialOperator creates the connection to the operator's control plane (OPS-M2b).
+//
+// UNLIKE dialRiskEngine THIS REFUSES TO RUN PLAINTEXT, and unlike it the peer is
+// pinned to ONE identity rather than AuthorizeMesh. Both differences are the same
+// argument: this upstream provisions nodes and accepts exchange API keys, so dialing
+// an impostor would mean handing a credential to whatever answered. Any mesh peer is
+// too broad a set to trust with that, and no-TLS is not a degraded mode of it.
+func dialOperator(ctx context.Context, cfg config.Config, logger *slog.Logger) (*grpc.ClientConn, error) {
+	if cfg.SPIFFESocket == "" {
+		return nil, errors.New("API_GATEWAY_OPERATOR_ADDR is set but API_GATEWAY_SPIFFE_SOCKET is " +
+			"not: the control plane accepts exchange API keys and provisions nodes, and this " +
+			"gateway will not carry that traffic unauthenticated")
+	}
+	src, err := transport.NewSource(ctx, cfg.SPIFFESocket)
+	if err != nil {
+		return nil, err
+	}
+	logger.Info("api-gateway: control-plane upstream pinned",
+		"addr", cfg.OperatorAddr, "peer", operatorSPIFFEID.String())
+	return grpc.NewClient(cfg.OperatorAddr,
+		transport.ClientDialOption(src, transport.AuthorizeServices(operatorSPIFFEID)))
 }
 
 func writeJSON(w http.ResponseWriter, code int, body any) {
