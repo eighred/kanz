@@ -171,6 +171,70 @@ func TestAddNodeLeavesImagePullPolicyUnsetByDefault(t *testing.T) {
 	}
 }
 
+// TestAddNodeSetsFSGroupToMatchRunAsUser proves the fix for the permission-denied
+// defect found on a live cluster: `kanz-provisioner: read bootstrap key
+// /etc/provision/ssh_key: permission denied`. Kubernetes owns Secret volume files
+// root:fsGroup; with no fsGroup set, that group is root, and the container (which
+// must run as a non-root uid per RunAsNonRoot) can never read its own credential.
+// FSGroup must equal RunAsUser so the pod's own uid's group can read the mount.
+func TestAddNodeSetsFSGroupToMatchRunAsUser(t *testing.T) {
+	cs := fake.NewSimpleClientset()
+	id, err := New(cs, cfg()).AddNode(context.Background(), Request{
+		Hostname: "london", IP: "10.0.0.5", SSHPort: 22, SSHUser: "root", SSHKey: []byte("PEM")})
+	if err != nil {
+		t.Fatalf("AddNode: %v", err)
+	}
+	job, err := cs.BatchV1().Jobs("kanz-operator").Get(context.Background(), id, metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("job not created: %v", err)
+	}
+	sc := job.Spec.Template.Spec.SecurityContext
+	if sc == nil || sc.RunAsUser == nil || sc.FSGroup == nil {
+		t.Fatalf("pod securityContext must set both RunAsUser and FSGroup, got %+v", sc)
+	}
+	if *sc.FSGroup != *sc.RunAsUser {
+		t.Errorf("FSGroup (%d) must equal RunAsUser (%d) — Secret volume files are owned "+
+			"root:fsGroup, so a mismatched group locks the non-root container out of its "+
+			"own bootstrap-key mount", *sc.FSGroup, *sc.RunAsUser)
+	}
+	if *sc.RunAsUser != 65532 {
+		t.Errorf("RunAsUser = %d, want 65532", *sc.RunAsUser)
+	}
+}
+
+// TestAddNodeBootstrapKeyModeIsGroupReadable proves the other half of the same
+// live-cluster defect: DefaultMode 0400 (owner-only) plus a non-root container
+// is unreadable, not strict — the owning uid is root, not the container's uid,
+// so 0400 never granted the container read access on any run of this path. This
+// is a regression guard: 0440 (root and the pod's fsGroup may read; no world
+// access) must not silently regress back to a mode only root can read.
+func TestAddNodeBootstrapKeyModeIsGroupReadable(t *testing.T) {
+	cs := fake.NewSimpleClientset()
+	id, err := New(cs, cfg()).AddNode(context.Background(), Request{
+		Hostname: "london", IP: "10.0.0.5", SSHPort: 22, SSHUser: "root", SSHKey: []byte("PEM")})
+	if err != nil {
+		t.Fatalf("AddNode: %v", err)
+	}
+	job, err := cs.BatchV1().Jobs("kanz-operator").Get(context.Background(), id, metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("job not created: %v", err)
+	}
+	var mode *int32
+	for _, v := range job.Spec.Template.Spec.Volumes {
+		if v.Name == "bootstrap-key" && v.Secret != nil {
+			mode = v.Secret.DefaultMode
+		}
+	}
+	if mode == nil {
+		t.Fatalf("bootstrap-key secret volume not found")
+	}
+	if *mode != 0o440 {
+		t.Errorf("bootstrap-key DefaultMode = %#o, want 0440 (0400 fails at runtime for a "+
+			"non-root container: the file is owned root:fsGroup, not root:root, so owner-only "+
+			"read excludes the container's own gid)", *mode)
+	}
+}
+
 func provJob(name, host string, st batchv1.JobStatus) *batchv1.Job {
 	return &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{

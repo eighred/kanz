@@ -171,13 +171,31 @@ func (p *Provisioner) jobSpec(name string, r Request, port int32) *batchv1.Job {
 					RestartPolicy:      corev1.RestartPolicyNever,
 					SecurityContext: &corev1.PodSecurityContext{
 						RunAsNonRoot: ptr(true), RunAsUser: ptr64(65532),
+						// FSGroup must match RunAsUser. Kubernetes owns every Secret volume
+						// file root:fsGroup, never root:<container-uid>; leave FSGroup unset
+						// and the group is root, so a non-root container (required by
+						// RunAsNonRoot above) can never read its own mounted credential no
+						// matter how the file mode is set below. This was the live-cluster
+						// defect: "read bootstrap key /etc/provision/ssh_key: permission denied".
+						FSGroup:        ptr64(65532),
 						SeccompProfile: &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault},
 					},
 					Containers: []corev1.Container{container},
 					Volumes: []corev1.Volume{{
 						Name: "bootstrap-key",
 						VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{
-							SecretName: name, DefaultMode: ptr32(0o400)}},
+							SecretName: name,
+							// 0o440 (r--r-----): root and the pod's fsGroup (set above) may
+							// read; no world access. 0o400 looks stricter — and a reviewer
+							// with no cluster reads it as good hygiene — but paired with a
+							// non-root container it is unreadable, not strict: the owning
+							// uid is root, not 65532, so owner-only read excludes the very
+							// process meant to read it. This path had never actually been
+							// exercised before the incident that found it, which is how the
+							// defect survived review. Do NOT widen this to 0o444
+							// (world-readable) or drop RunAsNonRoot/FSGroup instead — those
+							// trade away a real security property this pairing keeps.
+							DefaultMode: ptr32(0o440)}},
 					}},
 				},
 			},
