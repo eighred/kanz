@@ -83,6 +83,18 @@ data:
     # On renewal, reload NATS in the shared process namespace.
     cmd       = "nats-server"
     cmd_args  = "--signal reload"
+    # REQUIRED whenever cmd (or pid_file_name) is set: spiffe-helper 0.9.0 — the tag
+    # pinned on both containers below — validates this at STARTUP, in daemon mode and
+    # init mode alike, and exits 1 with "Must specify renew_signal when using cmd or
+    # pid_file_name". Without it the init container CrashLoopBackOffs and NATS never
+    # starts, so the whole bus is down; the failure is a config rejection and looks
+    # nothing like one from the pod's perspective.
+    #
+    # SIGHUP is what nats-server reloads on. There is no pid_file_name here, so this
+    # signal is not itself delivered to anything — cmd above is what performs the
+    # reload. It is the value the validator demands and the one that is correct if a
+    # pid_file_name is ever added.
+    renew_signal = "SIGHUP"
 ---
 # Headless service: stable per-pod DNS for cluster routes. publishNotReadyAddresses
 # lets peers resolve each other before JetStream reports ready.
@@ -168,9 +180,12 @@ spec:
             - { name: cluster, containerPort: 6222 }
             - { name: monitor, containerPort: 8222 }
           volumeMounts:
+            # Both nats.conf and tenants.conf arrive here from one PROJECTED volume
+            # (see `config` below). They must share a directory: nats.conf resolves
+            # `include "tenants.conf"` relative to its own location, which is the
+            # same shape test/mtls/up.sh reproduces when it extracts the two files
+            # side by side.
             - { name: config, mountPath: /etc/nats }
-            # MT-01c: tenant accounts file, included by nats.conf.
-            - { name: tenants, mountPath: /etc/nats/tenants.conf, subPath: tenants.conf, readOnly: true }
             - { name: data, mountPath: /data }
             - { name: nats-certs, mountPath: /etc/nats-certs, readOnly: true }
           livenessProbe:
@@ -197,12 +212,28 @@ spec:
             - { name: nats-certs, mountPath: /etc/nats-certs }
             - { name: spiffe, mountPath: /run/spiffe, readOnly: true }
       volumes:
+        # PROJECTED, not two volumes. nats.conf does `include "tenants.conf"`, which
+        # NATS resolves relative to nats.conf's own directory — so both files have to
+        # land in /etc/nats.
+        #
+        # The obvious way to do that fails: mounting `config` as a directory at
+        # /etc/nats and then subPath-mounting tenants.conf INSIDE it asks runc to bind
+        # a file onto a path that does not exist in the parent (a read-only ConfigMap
+        # volume projects only its own keys). The kubelet reports
+        #   error mounting ... to rootfs at "/etc/nats/tenants.conf": not a directory
+        # and the nats container CrashLoopBackOffs — a message that describes the
+        # mount machinery rather than the manifest, and reads like a corrupt image.
+        #
+        # A projected volume merges both ConfigMaps into ONE directory, so each file
+        # is a real entry rather than an overlay. tenancy.yaml still owns nats-tenants
+        # (tenant provisioning rewrites it); this only changes how it is delivered.
         - name: config
-          configMap:
-            name: nats-config
-        - name: tenants
-          configMap:
-            name: nats-tenants
+          projected:
+            sources:
+              - configMap:
+                  name: nats-config
+              - configMap:
+                  name: nats-tenants
         - name: spiffe-helper-config
           configMap:
             name: nats-spiffe-helper
