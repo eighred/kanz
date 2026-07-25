@@ -217,6 +217,16 @@ problem; **ordinary workloads are not**. Until this is decided, **adding a node 
 less reliable, not more.** Not fixed here because the choice — supply a pull secret, or pin, or run
 a registry mirror — is an estate-wide decision.
 
+**Everything now runs on one node, and that is a trade, not a free win.** The operator Deployment
+and both Jobs are pinned to the single control-plane node. Draining or upgrading the k3s server —
+which a k3s upgrade requires — makes every Add Node and every Test Connection unschedulable for the
+duration, with the provisioning Job holding a bootstrap-key Secret for up to 900s while Pending and
+the probe reporting healthy hosts unreachable after its 60s wait rather than saying "could not
+schedule". It is the right trade today, because the alternative is cluster-admission credentials on
+arbitrary workers. **The correct long-term shape is a labelled provisioning node pool, not the
+control plane.** Related: pinning the operator moved the drain deadlock rather than removing it —
+that node now cannot be drained without `--disable-eviction` or scaling the operator to zero.
+
 **Two decisions taken without the lead, flagged for review.** Both are one edit to reverse:
 1. Pinning the operator Deployment to the control plane (`bb8ebae`). Judged standard hardening
    rather than an architecture change.
@@ -249,3 +259,26 @@ final code change, so the skip in the last capture is a scheduling artefact, not
 - **A skip is not a pass.** `requireEnv` names the missing variables and says so explicitly.
 - **Non-vacuity was proven by mutation** for every guard that matters — the fix removed, the test observed to fail with its intended message, the fix restored. A guard nobody has watched fail is not a guard.
 - **Individually green ≠ green together.** Running the suite as one pass on a shared cluster found two defects that single-test runs structurally could not: the probe Job's image dependency, and the drain-vs-uncordon loop. Both are now fixed and the full pass is green.
+
+- **This report shipped with a false claim, and the failure is the most instructive thing in it.**
+  The first committed version of §3 and of `KANZ_TASKS.md` stated that the provisioning and probe
+  Jobs were pinned to the control plane. They were not. I had dispatched that work, the dispatch
+  itself failed (the safety classifier was briefly unavailable), and I never re-ran it — then wrote
+  the claim as established fact, in the document whose whole argument is that a Verified status must
+  correspond to an observed test. The final whole-branch review caught it; `497eec3` made it true.
+
+  Two lessons, worth more than the fix:
+
+  **A dispatch that fails is not a task that completed.** Every other delegated change this session
+  reported back and its report was read. That one never started, and nothing in my process noticed
+  the *absence* of a result — only the presence of a bad one.
+
+  **It survived because it was the one claim with no guard behind it.** `operator_placement_test.go`
+  covered the Deployment manifest and nothing covered the Go-built Job specs, so no test could
+  contradict the sentence. Every other claim on this branch is pinned by something that fails when
+  it stops being true. The fix therefore had to be the guard as much as the field —
+  `TestProvisioningJobsArePinnedToControlPlane` now fails, per-spec and uncoupled, if either pin is
+  removed. **An unguarded claim in a verification document is just a sentence**, and this one was
+  load-bearing: it asserted a credential-confinement mitigation for a risk the same paragraph called
+  estate-wide, while the unpinned probe Job was an active intermittent failure of a workflow this
+  report certifies.
