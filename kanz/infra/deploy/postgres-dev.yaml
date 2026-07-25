@@ -71,6 +71,27 @@ data:
     CREATE DATABASE tvsync OWNER kanzapp;
     \connect tvsync
     GRANT ALL ON SCHEMA public TO kanzapp;
+  # venue-binance's ORDER VIEW (INFRA-M7a-2), for the same reason tv-sync has its
+  # own above and with the same collision behind it: the adapter's migrations start
+  # at 0001_venue_orders, the OMS's at 0001_orders, and kanz-migrate keys
+  # schema_migrations by version — sharing kanzapp makes the adapter's migrate read
+  # the OMS's version-1 row, reject it as a modified migration, and refuse to start.
+  #
+  # It is declared HERE rather than created by hand because this Deployment's data
+  # volume is an emptyDir: a database typed into psql survives exactly until the pod
+  # is rescheduled, and then venue-binance CrashLoopBackOffs on a database that
+  # existed an hour ago. Anything the rig needs across a restart belongs in this
+  # ConfigMap.
+  #
+  # The adapter is NOT part of the trading-loop subset tools/rig-apply.sh applies —
+  # it needs real exchange credentials, which rig-dev-secrets.yaml is guarded to
+  # forbid. This database costs nothing when unused, and its absence is what blocks
+  # standing the adapter up against an exchange TESTNET, which is the one way to
+  # exercise the out-of-process venue path at all.
+  030-venuebinance.sql: |
+    CREATE DATABASE venuebinance OWNER kanzapp;
+    \connect venuebinance
+    GRANT ALL ON SCHEMA public TO kanzapp;
 ---
 apiVersion: v1
 kind: Secret
