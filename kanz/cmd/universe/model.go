@@ -78,6 +78,17 @@ type model struct {
 	formErr    error
 	testResult string
 
+	// probing is true from the Test Connection keypress until its result arrives.
+	// It exists because the probe stopped being an in-process dial and became a
+	// Kubernetes Job, so the form now sits for seconds with nothing to show. It does
+	// two jobs: the render draws it where the result will appear, so the TUI is
+	// visibly working rather than apparently hung, and updateForm refuses a second
+	// probe while it is set — otherwise each keypress of an operator who thinks the
+	// TUI is wedged spawns another Job holding :22 egress. It deliberately survives
+	// closing and reopening the form, because the Job does too: clearing it on open
+	// would hand back exactly the second Job it exists to prevent.
+	probing bool
+
 	// venues is the last polled API-Manager presence strip; apiSelected is the
 	// highlighted row in the API Manager pane.
 	venues      []venueRow
@@ -267,6 +278,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case testConnResultMsg:
+		// Cleared before the switch so EVERY outcome — including a failed probe —
+		// releases the in-flight lock. Clearing it per-branch is how a form ends up
+		// permanently refusing to probe again after one error.
+		m.probing = false
 		switch {
 		case msg.err != nil:
 			m.testResult = "✗ test failed: " + msg.err.Error()
@@ -301,6 +316,13 @@ func (m model) updateForm(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case tea.KeyEnter:
 		return m, m.submitAddForm()
 	case tea.KeyCtrlT:
+		// One probe at a time. A probe costs a Job in the operator's namespace, so a
+		// repeated keypress must be ignored rather than queued behind the first.
+		if m.probing {
+			return m, nil
+		}
+		m.probing = true
+		m.testResult = "" // the previous verdict is not this probe's answer
 		return m, m.testConnCmd()
 	case tea.KeyRunes:
 		m.form = m.form.key(msg)
@@ -406,13 +428,15 @@ func withVerifiedAccount(accounts map[string]string, venue, id string) map[strin
 	return out
 }
 
-// testConnCmd probes the form's ip:port off the UI thread.
+// testConnCmd probes the form's ip:port off the UI thread. It is the ONLY call site
+// of testConnTimeout: every other command here is a fast read on pollTimeout, while
+// this one waits on the operator running an ephemeral probe Job.
 func (m model) testConnCmd() tea.Cmd {
 	ip := m.form.value("ip")
 	port := atoi32(m.form.value("ssh_port"))
 	src := m.src
 	return func() tea.Msg {
-		ctx, cancel := context.WithTimeout(context.Background(), pollTimeout)
+		ctx, cancel := context.WithTimeout(context.Background(), testConnTimeout)
 		defer cancel()
 		res, err := src.testConnection(ctx, ip, port)
 		return testConnResultMsg{res: res, err: err}

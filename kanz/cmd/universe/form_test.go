@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"strings"
 	"testing"
 
@@ -59,5 +60,70 @@ func TestTestConnResultRenders(t *testing.T) {
 	m := model{showForm: true, form: newAddForm(), testResult: "✓ reachable (7ms)"}
 	if !strings.Contains(m.render(), "reachable (7ms)") {
 		t.Errorf("form render should show the test result:\n%s", m.render())
+	}
+}
+
+// TestTestConnectionShowsInFlightState covers the whole lifecycle of the in-flight
+// state. The probe stopped being an in-process dial and became a Kubernetes Job, so the
+// form now sits for seconds after the keypress; with nothing on screen an operator reads
+// that as a hung TUI and either kills it mid-provision or mashes the key.
+func TestTestConnectionShowsInFlightState(t *testing.T) {
+	m := newModel(Config{}, stubSource{})
+	m.showForm = true
+	m.form = newAddForm()
+	m.testResult = "✓ reachable (7ms)" // a previous probe's verdict
+
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyCtrlT})
+	m = next.(model)
+	if cmd == nil {
+		t.Fatal("ctrl+t should return a test-connection command")
+	}
+	if !m.probing {
+		t.Error("ctrl+t must set the in-flight state before the command runs — the screen has to " +
+			"change on the keypress, not seconds later when the Job answers")
+	}
+	if m.testResult != "" {
+		t.Errorf("testResult = %q, want it cleared — the last probe's verdict is not this one's",
+			m.testResult)
+	}
+	if out := m.render(); !strings.Contains(out, "probing") {
+		t.Errorf("form render must show the probe is running:\n%s", out)
+	}
+}
+
+// TestTestConnectionResultClearsInFlightState checks BOTH outcomes release the state.
+// Clearing it only on success is how a form ends up permanently refusing to probe again
+// after the first error — the state that most needs a retry.
+func TestTestConnectionResultClearsInFlightState(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		msg  testConnResultMsg
+	}{
+		{"reachable", testConnResultMsg{res: testConnResult{reachable: true, latencyMs: 7}}},
+		{"unreachable", testConnResultMsg{res: testConnResult{message: "i/o timeout"}}},
+		{"probe failed", testConnResultMsg{err: errors.New("probe job did not complete in time")}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := model{showForm: true, form: newAddForm(), probing: true}
+			next, _ := m.Update(tc.msg)
+			if next.(model).probing {
+				t.Error("the in-flight state survived the result — a further probe is now impossible")
+			}
+		})
+	}
+}
+
+// TestSecondTestConnectionWhileProbingIsANoOp is the assertion that matters more than
+// the visual cue: every keypress costs a Job in the operator's namespace, holding :22
+// egress. An operator who believes the TUI is wedged presses the key repeatedly.
+func TestSecondTestConnectionWhileProbingIsANoOp(t *testing.T) {
+	m := model{showForm: true, form: newAddForm(), src: stubSource{}, probing: true}
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyCtrlT})
+	if cmd != nil {
+		t.Error("a second ctrl+t while a probe is in flight must not fire another one — each one " +
+			"is another Job with :22 egress")
+	}
+	if !next.(model).probing {
+		t.Error("the ignored keypress must leave the in-flight state alone")
 	}
 }
