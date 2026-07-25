@@ -366,15 +366,33 @@ func controlPlaneNodeName(t *testing.T) string {
 
 // waitForNodeReady blocks until a second node reports Ready, polling the CLUSTER.
 // The TUI's own strip is not evidence that a node joined.
+//
+// "NOT THE CONTROL PLANE" IS DECIDED BY NAME, NEVER BY ADDRESS. This used to exclude
+// the control plane with `!strings.Contains(name, "172-26-11-140")` — the current k3s
+// server's IP, baked in. A node's identity here is its NAME, and an IP is neither
+// stable nor unique to it: replace, rebuild or renumber the server and that substring
+// matches nothing, so the very first Ready node — the control plane — is returned as
+// "the node that joined". Every caller then acts on the wrong node while still passing:
+// cordon/uncordon would cordon the control plane, move-region would relabel it, and
+// worst, the join proof's count guard would see one node and be handed that same node
+// back as the second one, so A JOIN THAT NEVER HAPPENED REPORTS PASS. controlPlaneNodeName
+// answers the question correctly and portably (it reads the control-plane label, and
+// fails unless exactly one node carries it), and TestDrainConfirmAbortsAndProceeds
+// already cross-checks against it — the other proofs are now consistent with that.
 func waitForNodeReady(t *testing.T, timeout time.Duration) string {
 	t.Helper()
+	// Resolved once, outside the loop: the control plane does not change identity while
+	// we wait for someone else to join, and its own guard should fail immediately rather
+	// than once per poll.
+	controlPlane := controlPlaneNodeName(t)
+
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
 		out := kubectl(t, "get", "nodes",
 			"-o", "jsonpath={range .items[*]}{.metadata.name}={.status.conditions[?(@.type==\"Ready\")].status} {end}")
 		for _, pair := range strings.Fields(out) {
 			name, status, _ := strings.Cut(pair, "=")
-			if status == "True" && !strings.Contains(name, "172-26-11-140") {
+			if status == "True" && name != controlPlane {
 				return name
 			}
 		}
