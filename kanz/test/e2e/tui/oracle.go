@@ -4,6 +4,7 @@ import (
 	"os/exec"
 	"strings"
 	"testing"
+	"time"
 )
 
 // kubectl runs a read-only query against the cluster. Every assertion in this package
@@ -86,4 +87,26 @@ func nodeExists(t *testing.T, node string) bool {
 		return false
 	}
 	return true
+}
+
+// waitForNodeReady blocks until a second node reports Ready, polling the CLUSTER.
+// The TUI's own strip is not evidence that a node joined.
+func waitForNodeReady(t *testing.T, timeout time.Duration) string {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		out := kubectl(t, "get", "nodes",
+			"-o", "jsonpath={range .items[*]}{.metadata.name}={.status.conditions[?(@.type==\"Ready\")].status} {end}")
+		for _, pair := range strings.Fields(out) {
+			name, status, _ := strings.Cut(pair, "=")
+			if status == "True" && !strings.Contains(name, "172-26-11-140") {
+				return name
+			}
+		}
+		time.Sleep(5 * time.Second) // polling the CLUSTER, not a workflow's feedback
+	}
+	t.Fatalf("no second node reached Ready within %s. Check `journalctl -u k3s-agent` on "+
+		"node 2 — on a 414MB host an OOM-killed kubelet presents as a node that never "+
+		"appears, which reads as a join failure and is not one.", timeout)
+	return ""
 }

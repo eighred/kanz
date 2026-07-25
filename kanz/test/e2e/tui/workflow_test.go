@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"strings"
 	"testing"
 	"time"
 )
@@ -120,4 +121,77 @@ func TestCancelledFormThenQuitProvisionsNothingAndExitsCleanly(t *testing.T) {
 		t.Errorf("cancelling the Add Node form and quitting changed the Job count (%d -> %d); "+
 			"abandoning a form must provision nothing", before, after)
 	}
+}
+
+// ctrl+t is byte 0x14. The Add Node form's Test Connection probe is a TCP dial, so a
+// reachable SSH port answers and a closed port does not.
+const ctrlT = byte(0x14)
+
+// closedPort is not :22, the only port the environment's security group and
+// node-provisioner-egress NetworkPolicy are documented to permit toward node 2. A
+// probe against it therefore either gets a fast RST (rendered "✗ unreachable: ...")
+// or the packet is dropped and the gateway's own dial times out (rendered
+// "✗ test failed: ..."). Both render with a leading "✗", so asserting on that glyph
+// proves the probe actually distinguishes reachable from not, regardless of which of
+// those two failure shapes this particular network produces.
+const closedPort = "23"
+
+func TestAddNodeProbesThenJoinsTheNodeLive(t *testing.T) {
+	env := requireEnv(t)
+	// Guard by COUNTING nodes, not by guessing a name. k3s names a node after the
+	// target host's own hostname, which on this provider derives from its PRIVATE ip
+	// (node 2 is ip-172-26-12-47) — never from the public ip the operator types into
+	// the form. A guard built on "ip-"+publicIP could never match, so it would never
+	// skip, and this proof would silently re-run against an already-joined node.
+	if len(clusterNodeNames(t)) > 1 {
+		t.Skip("a second node is already joined; remove it from the cluster to re-prove the join")
+	}
+
+	s := startTUI(t, env)
+	defer s.Close()
+
+	s.Send("a")
+	s.WaitFor(t, "Hostname", 5*time.Second)
+
+	// Fields in order: Hostname, IP, SSH Port (prefilled 22), User, Key Path.
+	s.Send("e2e-node2\t")
+	s.Send(env.Node2IP + "\t") // focus now sits on SSH Port, prefilled "22"
+
+	// S2b, failure path: prove the probe can actually say no, not just that it
+	// always renders "reachable" for whatever ip:port happens to be in the form.
+	// This must run BEFORE the real probe below and the port must be restored
+	// afterward — testConnCmd reads whatever is currently in the SSH Port field,
+	// and the field that gets probed here is also the one Save will submit.
+	s.SendKey(0x7f) // backspace: "22" -> "2"
+	s.SendKey(0x7f) // backspace: "2" -> ""; SSH Port is now empty
+	s.Send(closedPort)
+	s.SendKey(ctrlT)
+	s.WaitFor(t, "✗", 20*time.Second) // "✗" — see closedPort's comment for why
+
+	// Restore the real port. Leaving it at closedPort would make the save below
+	// provision against a port nothing is listening on.
+	s.SendKey(0x7f)
+	s.SendKey(0x7f)
+	s.Send("22\t") // put the real port back, then move on to User
+	s.Send("ubuntu\t")
+	s.Send(env.SSHKeyPath)
+
+	// S2b happy path: probe before committing.
+	s.SendKey(ctrlT)
+	s.WaitFor(t, "reachable", 20*time.Second)
+
+	s.Send("\r") // save
+	// The join installs k3s over SSH on a 414MB host; allow real time for it.
+	s.WaitFor(t, "Installing", 30*time.Second)
+
+	waitForNodeReady(t, 6*time.Minute)
+}
+
+// clusterNodeNames lists every node in the cluster. Used instead of predicting a
+// node's name: the name comes from the remote host's hostname, which this test has
+// no reliable way to derive from the address an operator typed.
+func clusterNodeNames(t *testing.T) []string {
+	t.Helper()
+	return strings.Fields(kubectl(t, "get", "nodes",
+		"-o", "jsonpath={range .items[*]}{.metadata.name} {end}"))
 }
