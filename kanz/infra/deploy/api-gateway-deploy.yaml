@@ -109,6 +109,21 @@ spec:
             # Only a principal holding this role can reach POST /v1/orders or
             # POST /v1/orders/{id}/cancel. Everything else on /v1 is a read.
             - { name: API_GATEWAY_TRADE_ROLE, value: "kanz-trader" }
+            # WHO MAY RUN THE ESTATE (OPS-M2b). These two are a PAIR: with the address
+            # set the /v1/control routes are registered and the role becomes REQUIRED,
+            # and it must differ from both roles above or the gateway refuses to start.
+            # With the address unset the routes are not registered at all, so a gateway
+            # that fronts no control plane answers 404 rather than 403 — telling the
+            # caller the truth instead of sending them to look for a missing role.
+            #
+            # This is the ONLY way to reach the operator: its listener demands an SVID
+            # and admits this gateway alone (OPS-M2a). An operator therefore
+            # authenticates as a PERSON here — OIDC in production — and never holds a
+            # kubeconfig. Node provisioning and exchange-credential writes are the two
+            # most dangerous things this platform can be asked to do, and they are now
+            # behind the same identity authority as everything else.
+            - { name: API_GATEWAY_OPERATOR_ADDR, value: "operator.kanz-operator.svc:9090" }
+            - { name: API_GATEWAY_OPERATOR_ROLE, value: "kanz-operator" }
             # AuthZ over the mesh: the gateway's CLIENTS (risk-engine gRPC, the
             # Phase-7 HTTP upstreams) present this workload's SVID. Note the
             # NON-STANDARD env name — this service does not read SPIFFE_ENDPOINT_SOCKET.
