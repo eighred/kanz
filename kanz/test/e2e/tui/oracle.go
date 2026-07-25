@@ -19,6 +19,16 @@ func kubectl(t *testing.T, args ...string) string {
 	return strings.TrimSpace(string(out))
 }
 
+// kubectlLines splits an oracle query into non-empty lines.
+func kubectlLines(t *testing.T, args ...string) []string {
+	t.Helper()
+	out := kubectl(t, args...)
+	if out == "" {
+		return nil
+	}
+	return strings.Split(out, "\n")
+}
+
 // nodeSchedulable reports whether the node accepts new pods. Absent means schedulable
 // — .spec.unschedulable is only set when cordoned.
 func nodeSchedulable(t *testing.T, node string) bool {
