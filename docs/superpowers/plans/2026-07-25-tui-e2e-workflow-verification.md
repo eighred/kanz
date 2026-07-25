@@ -11,6 +11,16 @@
 ## Global Constraints
 
 - **Go version: 1.26.5**, matching every Dockerfile in the repo. Do not install a different minor.
+- **VERIFIED render strings — do not guess these, and do not "correct" their case.** Captured from a running TUI on the live cluster and cross-read from `view.go`/`form.go`/`keyform.go` on 2026-07-25. The pane titles are UPPERCASE and `strings.Contains` is case-sensitive; waiting for `"Nodes"` matches nothing and would time out every proof, since all seven call `startTUI`.
+  - Pane titles: `NODES`, `CLUSTERS`, `API MANAGER`
+  - Nodes columns: `NAME STATUS ROLES REGION VERSION AGE`; status values `Ready`, `Draining`
+  - Clusters columns: `REGION ONLINE OFFLINE`; API Manager columns: `VENUE KEYS`, values `verified`, `configured`
+  - Add Node form labels: `Hostname`, `IP`, `SSH Port`, `User`, `Key Path` (mixed case)
+  - Venue key form labels: `API Key`, `API Secret`, `Passphrase`
+  - Drain confirm: `Drain <node>? evicts <n> pods  [y/n]`
+  - Move region prompt: `Move <node> to region: _  [enter] move  [esc] cancel` (lowercase "region" here, unlike the column header)
+  - Test Connection result: `✓ reachable (<n>ms)` on success, `✗ test failed: ` on failure
+  - Provisioning strip: `<hostname>=<status>` where status is one of `Pending`, `Installing`, `Joined`, `Failed`
 - **Assertions match domain text, never layout.** No assertion may depend on column position, box-drawing characters, padding, or colour. Slice 2 rewrites every frame; a layout-coupled harness gets deleted and takes the regression net with it.
 - **The oracle is `kubectl` or the cluster API, never the TUI's own rendering.** A UI that renders optimistic intent rather than observed state must fail these tests.
 - **Waiting has three cases, and only one of them is forbidden.** The original single-sentence rule ("no `time.Sleep`, no retry loops") forbade the mechanism `WaitFor` is built out of, so it is split here. Reviewers apply this list, not the old sentence.
@@ -579,7 +589,7 @@ import (
 func startTUI(t *testing.T, env Env) *Session {
 	t.Helper()
 	s := Start(t, env.Binary, nil, env.sessionEnv())
-	s.WaitFor(t, "Nodes", 20*time.Second)
+	s.WaitFor(t, "NODES", 20*time.Second)
 	return s
 }
 
@@ -591,11 +601,11 @@ func TestNavigationReachesEveryPaneAndQuitsCleanly(t *testing.T) {
 	// tab cycles Nodes -> Clusters -> API Manager -> Nodes. Assert on the pane's own
 	// domain text, never on layout.
 	s.Send("\t")
-	s.WaitFor(t, "Clusters", 5*time.Second)
+	s.WaitFor(t, "CLUSTERS", 5*time.Second)
 	s.Send("\t")
-	s.WaitFor(t, "API", 5*time.Second)
+	s.WaitFor(t, "API MANAGER", 5*time.Second)
 	s.Send("\t")
-	s.WaitFor(t, "Nodes", 5*time.Second)
+	s.WaitFor(t, "NODES", 5*time.Second)
 }
 
 // A form must not submit on quit. An operator who opens Add Node, changes their mind
@@ -1006,7 +1016,7 @@ func TestMoveRegionRelabelsTheNode(t *testing.T) {
 	selectNode2(t, s, node2)
 
 	s.Send("m")
-	s.WaitFor(t, "egion", 5*time.Second) // matches Region/region without pinning the label
+	s.WaitFor(t, "to region:", 5*time.Second) // the prompt is "Move <node> to region: _"
 	s.Send(want + "\r")
 
 	deadline := time.Now().Add(30 * time.Second)
@@ -1056,7 +1066,7 @@ func TestVenueKeysWrittenFromTheFormAndNeverLeaked(t *testing.T) {
 	s.Send("\t\t") // to the API Manager pane
 	s.WaitFor(t, "binance", 10*time.Second)
 	s.Send("k")
-	s.WaitFor(t, "Key", 5*time.Second)
+	s.WaitFor(t, "API Secret", 5*time.Second)
 	s.Send("e2e-key\t")
 	s.Send(canary + "\r")
 
