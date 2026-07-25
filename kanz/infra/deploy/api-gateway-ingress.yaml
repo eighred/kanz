@@ -40,6 +40,28 @@ metadata:
     # runs after auth. This one is per-source-IP and runs before a request reaches a
     # pod — it is what an unauthenticated flood hits.
     nginx.ingress.kubernetes.io/limit-rps: "100"
+    # THIS INGRESS IS A DEADLINE ON EVERY CALL, AND IT MUST BE THE LOOSEST ONE.
+    #
+    # A Test Connection is bounded four times in Go, each layer strictly exceeding the
+    # one beneath it so the INNERMOST, most informative bound is the one that fires:
+    # TUI testConnTimeout (100s) > gateway testConnectionTimeout (90s) > operator
+    # probeTimeout (60s) > provisioner probeDialTimeout (10s). test/arch's
+    # TestTestConnectionDeadlinesNestOutward is that ordering, executable.
+    #
+    # In production the TUI reaches the gateway THROUGH THIS INGRESS, so nginx is a
+    # fifth bound on the same call — one no Go constant can see. ingress-nginx defaults
+    # proxy-read-timeout and proxy-send-timeout to 60s, which is at or under three of
+    # the four Go bounds and starts its clock BEFORE the operator's does. A slow probe
+    # would therefore have nginx return 504 first, and the TUI would report a
+    # gateway/network fault while probing a host that may be perfectly healthy — the
+    # exact misdiagnosis the nesting was built to end.
+    #
+    # 120 > the TUI's 100s testConnTimeout (cmd/universe/poller.go), with headroom. IT
+    # MUST STAY ABOVE THAT CONSTANT: raise this before raising testConnTimeout, never
+    # after. Neither may be removed — a missing annotation is the 60s default, i.e. the
+    # bug. test/arch's TestIngressProxyTimeoutsExceedTheTUIBound holds both rules.
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "120"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "120"
 spec:
   ingressClassName: nginx
   tls:

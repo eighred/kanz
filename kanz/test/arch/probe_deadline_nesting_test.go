@@ -1,13 +1,19 @@
 package arch
 
 import (
+	"errors"
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"io"
+	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
+
+	"gopkg.in/yaml.v3"
 )
 
 // DEADLINES ON A TEST CONNECTION MUST NEST OUTWARD. This test is that rule, executable.
@@ -149,6 +155,115 @@ func TestTUIHTTPClientCarriesNoTimeoutOfItsOwn(t *testing.T) {
 		t.Fatalf("%s no longer constructs an http.Client literal, so this guard asserted "+
 			"nothing. If the client moved, point tuiClientFile at its new home; if the TUI now "+
 			"uses a client built elsewhere, that client needs this same rule", tuiClientFile)
+	}
+}
+
+// ingressFile publishes the gateway to the public internet; in production every Test
+// Connection the TUI makes travels through it.
+const ingressFile = "infra/deploy/api-gateway-ingress.yaml"
+
+// ingressProxyTimeoutAnnotations are the two nginx bounds on a proxied request. Both
+// default to 60s when absent, which is why absence — not just a small value — has to
+// fail this test.
+var ingressProxyTimeoutAnnotations = []string{
+	"nginx.ingress.kubernetes.io/proxy-read-timeout",
+	"nginx.ingress.kubernetes.io/proxy-send-timeout",
+}
+
+// ingressDoc projects the one field this guard reads from the Ingress manifest, in the
+// same yaml.v3 style as operator_placement_test.go.
+type ingressDoc struct {
+	Kind     string `yaml:"kind"`
+	Metadata struct {
+		Name        string            `yaml:"name"`
+		Annotations map[string]string `yaml:"annotations"`
+	} `yaml:"metadata"`
+}
+
+// TestIngressProxyTimeoutsExceedTheTUIBound closes the same hole as the test above, one
+// layer further out — and this one is not even written in Go.
+//
+// The ordering test reads four constants; the client test forbids a fifth bound inside
+// the TUI's HTTP client. Neither can see the SIXTH: in production the TUI does not talk
+// to the gateway Service, it talks to this Ingress, and ingress-nginx bounds a proxied
+// request at proxy-read-timeout / proxy-send-timeout — DEFAULT 60s. That is at or under
+// three of the four Go bounds, and nginx starts its clock when IT proxies, before the
+// operator's probeTimeout starts. So on a slow probe nginx answers 504 first and the TUI
+// prints a gateway/network error while probing a host that may be healthy — verbatim the
+// misdiagnosis the nesting exists to prevent, and invisible to every other guard here
+// because the bound lives in YAML.
+//
+// ABSENCE MUST FAIL, NOT JUST A SMALL VALUE. Deleting the annotation does not remove the
+// bound, it restores the 60s default — the bug itself. A guard that only checked the
+// number when present would pass on the one edit most likely to reintroduce it.
+func TestIngressProxyTimeoutsExceedTheTUIBound(t *testing.T) {
+	root := moduleRoot(t)
+
+	// The bound to beat is read from source, not copied: a hardcoded 100s here would go
+	// stale the moment testConnTimeout is tuned, which is exactly when this matters.
+	tuiBound := durationConst(t,
+		filepath.Join(root, filepath.FromSlash("cmd/universe/poller.go")), "testConnTimeout")
+
+	path := filepath.Join(root, filepath.FromSlash(ingressFile))
+	body, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+
+	var found bool
+	dec := yaml.NewDecoder(strings.NewReader(string(body)))
+	for {
+		var d ingressDoc
+		derr := dec.Decode(&d)
+		if errors.Is(derr, io.EOF) {
+			break
+		}
+		if derr != nil {
+			t.Fatalf("parse %s: %v", path, derr)
+		}
+		if d.Kind != "Ingress" || d.Metadata.Name != "api-gateway" {
+			continue
+		}
+		found = true
+
+		for _, key := range ingressProxyTimeoutAnnotations {
+			raw, ok := d.Metadata.Annotations[key]
+			if !ok {
+				t.Errorf("%s carries no %s annotation.\n\n"+
+					"That does NOT mean the request is unbounded at the edge — it means "+
+					"ingress-nginx applies its 60s DEFAULT, which is under testConnTimeout (%s) "+
+					"and under the operator's own probe wait, and whose clock starts before "+
+					"theirs. Every slow Test Connection then dies as a 504 from nginx and the "+
+					"TUI blames the gateway or the network while probing a host that may be "+
+					"perfectly healthy. Restore it above %s.", ingressFile, key, tuiBound, tuiBound)
+				continue
+			}
+			secs, perr := strconv.Atoi(strings.TrimSpace(raw))
+			if perr != nil {
+				t.Errorf("%s sets %s to %q, which is not a whole number of seconds. nginx "+
+					"rejects a malformed value and falls back to its 60s default, so this "+
+					"reads as a bound that is set and is not.", ingressFile, key, raw)
+				continue
+			}
+			if got := time.Duration(secs) * time.Second; got <= tuiBound {
+				t.Errorf("%s sets %s = %s, which does not exceed the TUI's testConnTimeout "+
+					"(%s, cmd/universe/poller.go).\n\n"+
+					"nginx would cut the connection before the TUI's own bound expires, and "+
+					"before that the operator's probeTimeout — so the caller gets a 504 about "+
+					"the edge instead of the probe verdict only the operator can give. Raise "+
+					"this annotation rather than lowering testConnTimeout: the inner bounds are "+
+					"sized to real work (Job create, pod scheduling, image pull, a 10s dial).",
+					ingressFile, key, got, tuiBound)
+			}
+		}
+	}
+
+	// Non-vacuity: a guard that matches no document passes forever once the Ingress is
+	// renamed or the manifest moved.
+	if !found {
+		t.Fatalf("no Ingress named api-gateway found in %s — if it was renamed or split out, "+
+			"point ingressFile at its new home; the edge bound it carries is the outermost "+
+			"deadline on every Test Connection in production", ingressFile)
 	}
 }
 
