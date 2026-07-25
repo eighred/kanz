@@ -566,3 +566,37 @@ func clusterNodeNames(t *testing.T) []string {
 	return strings.Fields(kubectl(t, "get", "nodes",
 		"-o", "jsonpath={range .items[*]}{.metadata.name} {end}"))
 }
+
+// TestMoveRegionRelabelsTheNode proves m reaches Kubernetes: the operator types a
+// region into the prompt cmd/universe/view.go renders ("Move <node> to region:
+// <input>_  [enter] move  [esc] cancel"), and the node's own
+// topology.kubernetes.io/region label — never the TUI's rendering of the move — is the
+// assertion.
+//
+// Both ends are left exactly as found. The setup strips a pre-existing "asia" label so
+// the move always has somewhere to go, and the deferred cleanup below strips whatever
+// this run set, so a re-run never starts from the label the previous run committed.
+// Without that defer, a first run would leave the node labelled "asia" and a second run
+// would have its own setup delete that label out from under it — survivable, but not
+// the standard the other proofs here hold to (see TestDrainConfirmAbortsAndProceeds's
+// defer kubectl(t, "uncordon", node2) for the same pattern). Registered before the TUI
+// starts so it unwinds after s.Close() — cluster restored once the client is gone.
+func TestMoveRegionRelabelsTheNode(t *testing.T) {
+	env := requireEnv(t)
+	node2 := waitForNodeReady(t, 2*time.Minute)
+	const want = "asia"
+	if nodeLabel(t, node2, "topology.kubernetes.io/region") == want {
+		kubectl(t, "label", "node", node2, "topology.kubernetes.io/region-")
+	}
+	defer kubectl(t, "label", "node", node2, "topology.kubernetes.io/region-")
+
+	s := startTUI(t, env)
+	defer s.Close()
+	selectNode2(t, s, node2)
+
+	s.Send("m")
+	s.WaitFor(t, "to region:", 5*time.Second) // the prompt is "Move <node> to region: _"
+	s.Send(want + "\r")
+
+	waitForRegion(t, node2, want, 30*time.Second)
+}

@@ -73,6 +73,23 @@ func waitForSchedulable(t *testing.T, node string, want bool, timeout time.Durat
 		"Kubernetes, whatever the TUI rendered", node, want, timeout)
 }
 
+// waitForRegion polls the CLUSTER until node's topology.kubernetes.io/region label
+// equals want, the same shape as waitForSchedulable above: poll the cluster until X,
+// else t.Fatalf. A test that instead `return`ed from inside its own poll loop on
+// success would skip any deferred cleanup registered after the loop was entered.
+func waitForRegion(t *testing.T, node, want string, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if nodeLabel(t, node, "topology.kubernetes.io/region") == want {
+			return
+		}
+		time.Sleep(time.Second)
+	}
+	t.Fatalf("topology.kubernetes.io/region on %s never became %q within %s — the keypress "+
+		"did not reach Kubernetes, whatever the TUI rendered", node, want, timeout)
+}
+
 func nodeLabel(t *testing.T, node, key string) string {
 	t.Helper()
 	return kubectl(t, "get", "node", node, "-o", "jsonpath={.metadata.labels."+
