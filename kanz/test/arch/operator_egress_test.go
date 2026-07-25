@@ -87,7 +87,12 @@ type networkPolicyDoc struct {
 	} `yaml:"metadata"`
 	Spec struct {
 		PodSelector struct {
-			MatchLabels map[string]string `yaml:"matchLabels"`
+			MatchLabels      map[string]string `yaml:"matchLabels"`
+			MatchExpressions []struct {
+				Key      string   `yaml:"key"`
+				Operator string   `yaml:"operator"`
+				Values   []string `yaml:"values"`
+			} `yaml:"matchExpressions"`
 		} `yaml:"podSelector"`
 		PolicyTypes []string     `yaml:"policyTypes"`
 		Egress      []netPolRule `yaml:"egress"`
