@@ -101,6 +101,21 @@ spec:
             # and never holds a cluster credential.
             - name: OPERATOR_ALLOWED_CLIENTS
               value: "spiffe://kanz.internal/ns/kanz-services/sa/api-gateway"
+            # THE VENUE-KEY WRITE PATH (S4a), ON (OPS-M2d). Unset, SetVenueKeys returns
+            # Unimplemented and the TUI's API Manager can read but never write — which
+            # is what "configure credentials through the TUI rather than kubectl" was
+            # blocked on.
+            #
+            # "kube" writes a Kubernetes Secret named venue-<venue>-keys into
+            # OPERATOR_VENUE_SECRET_NAMESPACE (kanz-services, where the adapters mount
+            # it). The RBAC for that write is already declared below and is bounded to
+            # secrets in that ONE namespace, with get/create/update and no list or
+            # delete — the write-only guarantee is the interface plus that bound.
+            #
+            # Production sets "vault" instead; the same RPC, a different backend, and
+            # nothing else in the path changes.
+            - name: OPERATOR_SECRET_BACKEND
+              value: "kube"
             - name: OPERATOR_PROVISIONER_IMAGE
               value: ghcr.io/kanz-eng/kanz-provisioner:latest
             - name: OPERATOR_K3S_SERVER_URL
