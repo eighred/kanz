@@ -130,6 +130,21 @@ func TestCancelledFormThenQuitProvisionsNothingAndExitsCleanly(t *testing.T) {
 // instead of being probed at all (see TestProbeRefusesAPortItCannotProbe).
 const ctrlT = byte(0x14)
 
+// probeVerdictWait bounds how long a proof waits for Test Connection to render a verdict.
+//
+// It is set ABOVE provision.probeTimeout (60s) on purpose. The probe is an ephemeral Job, and
+// four layers bound the call — a 10s dial inside a 60s operator wait inside a 90s gateway
+// budget inside the TUI's own 100s. Those nest outward so the innermost layer, which is the
+// only one that knows WHY the probe did not answer, is the one that reports. A test bound
+// below 60s throws that away: it would cut the operator off mid-verdict and report a bare PTY
+// timeout naming no cause, which is precisely the misdiagnosis the nesting was built to end.
+//
+// 75s clears 60s with margin while staying under the gateway's 90s, so what lands on screen is
+// the operator's own sentence. Every realistic shape resolves far sooner — an instant refusal,
+// or a dropped packet that fails the dial at 10s — so this bound is only ever paid by a genuine
+// fault, and when it is paid the screen explains itself.
+const probeVerdictWait = 75 * time.Second
+
 // TestAddNodeProbesThenJoinsTheNodeLive is the happy path end to end: probe a reachable
 // host, then commit and watch the node actually join. The two negative outcomes a probe
 // can produce are proven separately below, each against a target chosen to produce that
@@ -185,15 +200,7 @@ func TestAddNodeProbesThenJoinsTheNodeLive(t *testing.T) {
 	// probeDialTimeout (10s, cmd/kanz-provisioner/probe.go) on the dial itself, so 20s
 	// now sits below the floor of a perfectly healthy run on a cold image.
 	//
-	// 45s is picked against the bounds either side of it. It is comfortably above that
-	// expected cost, and above every realistic NEGATIVE shape too (refused instantly,
-	// or dropped and timed out after 10s), so a real failure arrives on screen as the
-	// operator's own verdict rather than as a bare PTY timeout that names no cause. It
-	// stays below provision.probeTimeout (60s), past which there is nothing left to
-	// wait on — the operator has abandoned the probe by then. The one shape this bound
-	// does cut short is a pod that never gets scheduled at all, and that is a cluster
-	// scheduling fault to read out of the namespace, not off this screen.
-	s.WaitFor(t, "✓ reachable", 45*time.Second)
+	s.WaitFor(t, "✓ reachable", probeVerdictWait)
 
 	s.Send("\r") // save
 	// The join installs k3s over SSH on a 414MB host; allow real time for it.
@@ -245,9 +252,9 @@ func TestProbeReportsAClosedPortAsUnreachable(t *testing.T) {
 	// stand in for a working one that said no, which is the same class of false pass
 	// this restructuring exists to remove.
 	//
-	// 45s for the reasons given on the happy path's wait; a refusal is immediate, so
-	// everything spent here is Job creation and pod scheduling.
-	s.WaitFor(t, "✗ unreachable", 45*time.Second)
+	// probeVerdictWait for the reasons given where it is declared; a refusal is
+	// immediate, so everything spent here is Job creation and pod scheduling.
+	s.WaitFor(t, "✗ unreachable", probeVerdictWait)
 
 	// Esc out without saving, asserting what the Esc proof above asserts: control is
 	// back at the NODES pane, not stuck in a form that has just shown an error.
