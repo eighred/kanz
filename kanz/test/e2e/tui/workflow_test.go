@@ -639,6 +639,109 @@ func openKeyForm(t *testing.T, s *Session, venue string) {
 	s.WaitFor(t, "API Secret", 5*time.Second)
 }
 
+// cordonedLabel is the substring this proof waits for, and it is a PREFIX on purpose.
+//
+// A cordoned node has two renderings, and which one appears is not this proof's business
+// to predict. cmd/universe/model.go's nodeStateLabel returns "Draining (%d)" while the
+// node still carries evictable pods and "Drained" once it does not, so the count — and
+// therefore the whole string — depends on what the scheduler happened to have placed on
+// node 2 at that instant. "Drain" is the longest text common to both, so it holds
+// whichever way the cluster falls, and it is what the operator's eye actually catches.
+//
+// Note what it is NOT: "SchedulingDisabled" appears nowhere in this program. That is
+// kubectl's column value, not the TUI's vocabulary, and asserting it here would fail for
+// a reason that has nothing to do with the poller.
+//
+// The other place capital-D "Drain" is rendered is the drain confirm prompt,
+// "Drain <node>? evicts %d pods  [y/n]" (cmd/universe/view.go's renderNodes). It cannot
+// be what satisfies this proof: that line is gated behind m.confirmingDrain, which only
+// the d key sets, and this test sends no keys at all. The footer's "[d]rain" hint is
+// lower-case and does not contain this string either.
+const cordonedLabel = "Drain"
+
+// outOfBandPollBound is how long the TUI gets to notice a change made behind its back.
+//
+// The poll interval is the -poll flag's default, 3s (cmd/universe/main.go; model.go
+// clamps a non-positive value to the same 3s), and the harness starts the binary with no
+// arguments, so 3s is what is actually running. Four intervals: the tick may have fired
+// microseconds BEFORE the cordon landed, costing one whole interval before the fetch that
+// can see it is even armed, then that fetch is a gRPC round trip through the gateway to
+// the API server and a repaint. 12s clears that comfortably while staying short enough
+// that a poller which has stopped ticking fails here in seconds rather than hanging until
+// the package timeout, which is the failure mode this bound exists to convert.
+const outOfBandPollBound = 12 * time.Second
+
+// TestPollerReflectsAnOutOfBandChange proves the TUI is a live view of the cluster rather
+// than a screenshot of whatever was true when it started.
+//
+// Every other proof in this file changes the world THROUGH the TUI, so all of them would
+// still pass against a program that rendered once and never looked again — the keypress
+// reaches Kubernetes either way, and the oracle is kubectl. This one changes the world
+// with kubectl and touches no key, so the only thing that can put the new state on screen
+// is the poller doing its job unprompted. That conflation of a static first render with a
+// live one is what OPS-M2c was reported on.
+//
+// WaitFor's search window is the whole capture here, not output since a keystroke: mark
+// only advances on Send/SendKey (see driver.go) and this test sends nothing, so mark stays
+// at 0. That is the right window — there is no keypress to scope to — but it means a
+// "Drain" already on screen before the cordon would satisfy the assertion without the
+// poller having done anything at all. The precondition below is what forecloses that, and
+// uncordoning node 2 alone does NOT: nodeStateLabel renders the identical label for ANY
+// cordoned node, so a cordoned control plane would sit in the very first frame spelling
+// out the answer. The proof therefore refuses to start unless the whole estate is
+// schedulable, which makes the first frame provably free of the string and turns a TUI
+// that never re-polls into a timeout rather than a pass.
+func TestPollerReflectsAnOutOfBandChange(t *testing.T) {
+	env := requireEnv(t)
+	node2 := waitForNodeReady(t, 2*time.Minute)
+
+	// Start from a known state, and do not merely fire and hope: waitForSchedulable is
+	// what establishes that the API server agrees before the TUI is allowed to look.
+	kubectl(t, "uncordon", node2)
+	waitForSchedulable(t, node2, true, 30*time.Second)
+
+	// Deferred, not trailing, and registered before the TUI starts so it unwinds after
+	// s.Close() — same reasoning as TestDrainConfirmAbortsAndProceeds. A run that dies
+	// between the cordon and its undo would otherwise leave node 2 cordoned, which breaks
+	// this proof's own precondition and every later run's.
+	defer kubectl(t, "uncordon", node2)
+
+	if cordoned := cordonedNodes(t); len(cordoned) > 0 {
+		t.Fatalf("%v are cordoned, so the Nodes pane renders %q for them in its very FIRST "+
+			"frame — before this proof cordons anything. The assertion below would then be "+
+			"satisfied by a TUI that never polled again, which is precisely the defect it "+
+			"exists to catch. Uncordon them and re-run.", cordoned, cordonedLabel)
+	}
+
+	s := startTUI(t, env)
+	defer s.Close()
+	// The node must be on screen before the world changes underneath it, or a later match
+	// could not be attributed to a re-poll of a row that was already being displayed.
+	s.WaitFor(t, node2, 15*time.Second)
+
+	// Change the world WITHOUT touching the TUI. No keypress follows this line.
+	kubectl(t, "cordon", node2)
+	waitForSchedulable(t, node2, false, 30*time.Second)
+
+	// The TUI must notice on its own, with no keypress and no restart.
+	s.WaitFor(t, cordonedLabel, outOfBandPollBound)
+}
+
+// cordonedNodes returns every node in the estate that is currently unschedulable. It
+// exists for the precondition above: the label the poll proof waits for is per-node text
+// that any cordoned node renders, so soundness depends on the whole estate, not just on
+// the node under test.
+func cordonedNodes(t *testing.T) []string {
+	t.Helper()
+	var out []string
+	for _, n := range clusterNodeNames(t) {
+		if !nodeSchedulable(t, n) {
+			out = append(out, n)
+		}
+	}
+	return out
+}
+
 // TestVenueKeysWrittenFromTheFormAndNeverLeaked proves the API Manager's key form reaches
 // Kubernetes, and that the credential it carried never surfaced anywhere it could be read.
 //
