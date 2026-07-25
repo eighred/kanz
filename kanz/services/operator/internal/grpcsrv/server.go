@@ -135,6 +135,20 @@ func (s *Server) AddNode(ctx context.Context, req *operatorpb.AddNodeRequest) (*
 	if req.GetIp() == "" || req.GetSshUser() == "" || len(req.GetSshPrivateKey()) == 0 {
 		return nil, status.Error(codes.InvalidArgument, "ip, ssh_user and ssh_private_key are required")
 	}
+	// The SAME constraint TestConnection enforces, and enforcing it here is what makes
+	// that RPC's promise ("provisioning has the same constraint") true. Without it a
+	// non-22 port is accepted, and the cost is not merely a late failure: AddNode
+	// materialises a Secret holding the SSH bootstrap key and the k3s join token, then
+	// leaves it mounted on a doomed pod for the full 900s ActiveDeadlineSeconds before
+	// the Job fails with a dial error that names nothing the operator typed. Refuse
+	// before any credential exists.
+	port := req.GetSshPort()
+	if port == 0 {
+		port = 22
+	}
+	if err := checkSSHPort(port); err != nil {
+		return nil, err
+	}
 	id, err := s.prov.AddNode(ctx, provision.Request{
 		Hostname: req.GetHostname(), IP: req.GetIp(), SSHPort: req.GetSshPort(),
 		SSHUser: req.GetSshUser(), SSHKey: req.GetSshPrivateKey(),
@@ -276,6 +290,28 @@ func (s *Server) ListVenueKeys(ctx context.Context, _ *operatorpb.ListVenueKeysR
 	return &operatorpb.ListVenueKeysResponse{Venues: out}, nil
 }
 
+// checkSSHPort refuses any port but 22, at the RPC boundary, for BOTH node-facing RPCs.
+//
+// One function rather than a check per handler because it is one constraint, not two:
+// node-provisioner-egress pins TCP:22 for every pod in this namespace, and the probe pod
+// and the provisioner pod are selected by the same label. A port this estate cannot open
+// is therefore the caller's input error on either path — which is why it must be
+// InvalidArgument (the gateway answers 400) and not Internal, which would tell an operator
+// who typed the wrong port that the platform broke. The layers below re-check as defence
+// in depth; refusing here is what keeps the verdict accurate and, for AddNode, what keeps
+// a credential-bearing Secret from being created for a request that cannot succeed.
+//
+// The message names both operations because both are refused by it: an operator who reads
+// it from Test Connection must not conclude that provisioning would have worked.
+func checkSSHPort(port int32) error {
+	if port == 22 {
+		return nil
+	}
+	return status.Errorf(codes.InvalidArgument,
+		"cannot use port %d: only port 22 can be probed or provisioned, because cluster egress "+
+			"policy pins SSH to :22 — a node whose sshd is elsewhere cannot be added from here", port)
+}
+
 // TestConnection is the pre-flight reachability check the Add Node form runs before
 // anything is provisioned. reachable=false is a normal result, not an RPC error — the
 // point of a pre-flight check is to report a bad target, not to fail.
@@ -308,16 +344,8 @@ func (s *Server) TestConnection(ctx context.Context, req *operatorpb.TestConnect
 	if port == 0 {
 		port = 22
 	}
-	// Refuse a port the cluster cannot probe HERE, at the boundary, so it is reported as
-	// the caller's input error it is. node-provisioner-egress pins TCP:22, so a probe of
-	// any other port is dropped by policy and would come back looking like a host that is
-	// down. Probe() re-checks this as defence in depth, but a refusal that only surfaces
-	// from there arrives as Internal — telling an operator the platform broke when what
-	// actually happened is that they typed a port this estate cannot reach.
-	if port != 22 {
-		return nil, status.Errorf(codes.InvalidArgument,
-			"cannot probe port %d: only port 22 can be probed, because cluster egress policy "+
-				"pins SSH to :22; provisioning has the same constraint", port)
+	if err := checkSSHPort(port); err != nil {
+		return nil, err
 	}
 	res, err := s.prov.Probe(ctx, req.GetIp(), port)
 	if err != nil {

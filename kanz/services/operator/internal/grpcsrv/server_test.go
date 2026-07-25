@@ -9,6 +9,8 @@ import (
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/kubernetes/fake"
 
 	operatorpb "github.com/kanz-eng/kanz-schemas-go/operator/v1"
 
@@ -141,6 +143,52 @@ func TestAddNodeRejectsEmptyKey(t *testing.T) {
 	_, err := srv.AddNode(context.Background(), &operatorpb.AddNodeRequest{Ip: "10.0.0.5", SshUser: "root"})
 	if status.Code(err) != codes.InvalidArgument {
 		t.Fatalf("want InvalidArgument for empty key, got %v", err)
+	}
+}
+
+// TestAddNodeRejectsNonSSHPortBeforeCreatingAnything: cluster egress pins TCP:22, so a
+// node whose sshd is elsewhere CANNOT be provisioned from here — TestConnection already
+// says exactly that ("provisioning has the same constraint"), and this is the assertion
+// that makes the claim true rather than aspirational.
+//
+// The refusal must happen at the boundary because of WHAT ELSE AddNode does. Accepted, it
+// creates a Secret holding the SSH bootstrap key and the k3s join token, mounts it on a
+// pod that cannot possibly connect, and leaves it there for the full 900s
+// ActiveDeadlineSeconds before failing with a dial error naming nothing the operator
+// typed. So this test runs the REAL provisioner against a fake cluster rather than a stub:
+// the property under test is that no cluster object — and specifically no credential —
+// is materialised for input that cannot succeed, and a stub cannot show that.
+func TestAddNodeRejectsNonSSHPortBeforeCreatingAnything(t *testing.T) {
+	const ns = "kanz-operator"
+	cs := fake.NewSimpleClientset()
+	srv := NewWithProvisioner(stubReader{}, provision.New(cs, provision.Config{
+		Namespace: ns, ProvisionerImage: "ghcr.io/kanz-eng/kanz-provisioner:latest",
+		K3sServerURL: "https://cp:6443", K3sToken: "join-token",
+	}))
+
+	_, err := srv.AddNode(context.Background(), &operatorpb.AddNodeRequest{
+		Hostname: "london", Ip: "10.0.0.5", SshPort: 2222, SshUser: "root", SshPrivateKey: []byte("PEM")})
+	if status.Code(err) != codes.InvalidArgument {
+		t.Fatalf("want InvalidArgument for port 2222, got %v", err)
+	}
+
+	jobs, jerr := cs.BatchV1().Jobs(ns).List(context.Background(), metav1.ListOptions{})
+	if jerr != nil {
+		t.Fatalf("list jobs: %v", jerr)
+	}
+	if len(jobs.Items) != 0 {
+		t.Errorf("a provisioning Job was created for a port that cannot be reached: %d job(s). "+
+			"It can only fail, and it fails 15 minutes later with a dial error that names no "+
+			"port the operator typed", len(jobs.Items))
+	}
+	secs, serr := cs.CoreV1().Secrets(ns).List(context.Background(), metav1.ListOptions{})
+	if serr != nil {
+		t.Fatalf("list secrets: %v", serr)
+	}
+	if len(secs.Items) != 0 {
+		t.Errorf("the SSH bootstrap key and the k3s join token were written to a Secret for a "+
+			"request that cannot succeed: %d secret(s). Credentials must not be materialised for "+
+			"input the boundary can refuse", len(secs.Items))
 	}
 }
 
