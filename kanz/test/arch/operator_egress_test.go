@@ -61,6 +61,7 @@ type netPolPort struct {
 
 type netPolRule struct {
 	To    []netPolPeer `yaml:"to"`
+	From  []netPolPeer `yaml:"from"`
 	Ports []netPolPort `yaml:"ports"`
 }
 
@@ -90,6 +91,7 @@ type networkPolicyDoc struct {
 		} `yaml:"podSelector"`
 		PolicyTypes []string     `yaml:"policyTypes"`
 		Egress      []netPolRule `yaml:"egress"`
+		Ingress     []netPolRule `yaml:"ingress"`
 	} `yaml:"spec"`
 }
 
