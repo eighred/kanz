@@ -85,6 +85,31 @@ _**Active direction (2026-07): the Automated Fund-Management & Multi-Exchange Ex
 
 _**Two tracks completed 2026-07-15:** the **data-durability foundation** (DATA-M1 archiver + DATA-M2 lake-sink — history now lands permanently in the lakehouse, past the 30-day Kafka retention) and the **optimizer** (RISK-M1 tail measures; RISK-M2a HRP + RISK-M2b Black-Litterman + OPT-HARDEN input validation — spanning mean-variance/min-variance/max-Sharpe/risk-parity/HRP allocation, BL posterior returns, and a PSD/body-cap hardening pass). Both tracks are complete (DATA-M3 closed the archiver consume↔topic contract; see DONE). The next major direction lives in `KANZ_ROADMAP.md` — promote a line from there to a decomposed TODO only after ground-truth verification when its turn comes._
 
+**OPS-M1…M5 · The TUI becomes the operational control plane.** _(Forged 2026-07-25 from the lead's architectural direction, after the first real single-host bring-up. Decision recorded in `KANZ_BRAIN.md` → "Operational control plane".)_
+
+**The target:** an operator adds a node, rotates a venue key, ships a release, rolls one back, and reads health — all from `cmd/universe`. SSH and `kubectl` become disaster-recovery tools, not the daily path. **The mechanism does not change:** signed images, Kubernetes rollouts, GitOps. The TUI drives that loop; it never becomes a second way to deliver software. An SSH binary-copy path is explicitly rejected — it would bypass the scheduler, break the cosign chain, and reintroduce the per-node drift this direction exists to remove.
+
+**Ground truth as of forging (verified, not assumed):** `AddNode`/`ListProvisions` RPCs, the provisioner Job, the TUI Add-Node form and `SetVenueKeys` all exist and work (S2a). `AddNode` joins a k3s **agent** only (`cmd/kanz-provisioner/join.go`: `K3S_URL`/`K3S_TOKEN`, `sh -s - agent`). The operator serving those RPCs runs *inside* the cluster. `SetVenueKeys` writes `venue-<venue>-keys` with hyphenated data keys matching the adapter's mounts.
+
+**OPS-M1 · Restore CI and prove `release.yml` once.** Blocks everything below — the TUI cannot manage images that were never published. `release.yml` has **never executed**, so trivy/cosign/SBOM are unproven claims rather than controls.
+_Verified when:_ a green `release.yml` run; a tagged image in ghcr; `cosign verify` succeeds against it **from a clean machine**; the SBOM is attached and non-empty. Not "the YAML looks right" — that is the mistake this repo has already made three times.
+
+**OPS-M2 · Operator on the rig + venue credentials through the TUI.** `operator-deploy.yaml` is not in the trading-loop subset, so the `SetVenueKeys` path has never been exercised end to end. Makes the TUI the standard workflow for the Binance testnet keys instead of `kubectl create secret`.
+_Verified when:_ keys entered in the TUI form; `venue-binance` reaches Ready with **no hand-made Secret anywhere**; the adapter logs its account PROVEN against the exchange; the Secret's data keys are `api-key`/`api-secret` (hyphens — the CSI `objectName` convention the adapter mounts). Also record what has **no** TUI path yet: `venue-binance-db` is a DSN, not a key, and `SetVenueKeys` does not cover it.
+
+**OPS-M3 · TUI local-bootstrap mode — node #1 as an ordinary target.** Direct SSH from the TUI: install k3s **server**, install SPIRE + the operator, then hand control to it. Reuses `cmd/kanz-provisioner`'s `sshexec.go`/`join.go`; adds a server-install variant beside `k3sInstallCmd`. Same screen and inputs as Add Node — the two mechanisms are an explicit seam, not one discovered at runtime.
+_Verified when:_ from a bare host and an empty cluster list, the TUI alone reaches a Ready node running the operator, and a **second** node then joins through the existing in-cluster `AddNode` path. `DEMO_DEPLOYMENT.md` §2 is **deleted, not annotated** — if the manual procedure still needs to exist, the milestone is not done.
+
+**OPS-M4 · TUI release lifecycle — digests, not binaries.** Show each workload's running image digest, propose a new one, drive the rollout, report status, roll back. Rollback is `kubectl rollout undo`/Argo, already a primitive; this is a legible surface over it and adds **no** delivery mechanism.
+_Verified when:_ a version bumped from the TUI reaches Running on the new digest; the previous digest is restored from the TUI and observed Running; the digest the TUI displays matches `kubectl get deploy -o jsonpath` at every step. A rollback proven by execution, never by the presence of a button.
+
+**OPS-M5 · Remaining operational surfaces.** Health, logs, restart, cluster status, per-service DSNs, cluster configuration. Scoped last deliberately: each is cheap once M1–M4 exist, and none of them is what blocks the estate today.
+_Verified when:_ each surface is exercised against the live rig. **The gate for closing the epic:** one full add-node → configure → deploy → upgrade → roll-back cycle completed with **zero** SSH and **zero** `kubectl`.
+
+**Sequencing is a dependency, not a preference.** M1 first: without published signed images, M4 has nothing to roll forward to and M3 hands off to a cluster that cannot pull. M2 before M3 because it is small and proves the operator RPC path the bootstrap must hand control to.
+
+**The trap this epic must not fall into.** Source code on a production node is a symptom of the CI outage (2026-07-16 billing halt), not a design gap. Building on the node, or shipping binaries over SSH, would make an outage workaround permanent. If M1 stays blocked, **the correct response is to escalate the billing halt, not to route around it.**
+
 **ONBOARD-M6 · The repo gives FIVE answers for its own database names; the truth is in Vault.** _(Forged 2026-07-16 by ONBOARD-M5's review. **Lead decision: resolve from the sealed DSN first — correct, and it is why this is now BLOCKED ON VAULT ACCESS, not on engineering.**)_
 
 **Traced as far as the repo can go (2026-07-16).** The DSNs are mounted by `infra/security/secrets/secretproviderclass.yaml` from Vault: **`secretPath: kv/data/kanz/<service>`, `secretKey: dsn`** (and `migrate_dsn` for the migrate initContainer). The **values live only in Vault** — no seed, no template, no fixture in-repo. **One command, from a box with Vault access, ends this:**
