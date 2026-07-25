@@ -99,6 +99,18 @@ func newGatewaySource(cfg gatewayConfig) (*gatewaySource, error) {
 // call performs one control-plane request. req may be nil for bodiless calls; resp
 // may be nil when the response is not needed.
 func (g *gatewaySource) call(ctx context.Context, method, path string, req, resp proto.Message) error {
+	// The HTTP client deliberately carries no Timeout of its own, so the caller's context is
+	// the ONLY thing bounding this request. A call site that forgets a deadline would
+	// therefore hang the TUI forever on an unresponsive gateway — the worst failure mode in
+	// an operator tool, because it looks like a frozen program rather than an error. Refuse
+	// it instead: this is a programming mistake, and it should be loud and immediate the
+	// first time it is exercised rather than a hang someone has to bisect.
+	if _, ok := ctx.Deadline(); !ok {
+		return fmt.Errorf("internal: %s %s was called with no context deadline; every "+
+			"control-plane call must set one (the HTTP client sets no timeout of its own)",
+			method, path)
+	}
+
 	var body []byte
 	if req != nil {
 		var err error
