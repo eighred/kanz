@@ -27,6 +27,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"strings"
 	"time"
 
 	"google.golang.org/grpc/codes"
@@ -236,7 +237,12 @@ func (h *Handler) forwardWithin(w http.ResponseWriter, r *http.Request, timeout 
 	_, _ = w.Write(out)
 }
 
-// translate maps a gRPC status onto HTTP without leaking the operator's internals.
+// translate maps a gRPC status onto HTTP.
+//
+// EVERY BRANCH THAT CAN CARRY A DIAGNOSIS CARRIES IT. What is withheld is withheld for a
+// reason the branch states — PermissionDenied because the caller must not learn which
+// capability they lack, Unavailable/DeadlineExceeded because the operator never spoke and
+// there is nothing of its to report.
 //
 // Unimplemented is 501 and NOT 500 on purpose: it is what the operator returns when
 // a capability is deliberately unconfigured (no provisioner image ⇒ AddNode off, no
@@ -267,6 +273,26 @@ func translate(err error) (int, string) {
 	case codes.Unavailable:
 		return http.StatusBadGateway, "control plane unavailable"
 	default:
+		// THE MESSAGE SURVIVES. Internal is what the operator returns when work it
+		// attempted failed, and it is the layer that knows the most: "probe job probe-abc
+		// did not complete in time (waited 60s)" tells an operator the probe ran and the
+		// cluster was slow, where a bare "control plane error" tells them nothing at all
+		// and half-nullifies the deadline nesting — the layers fire in the right order,
+		// then the informative payload is discarded one hop out.
+		//
+		// Not redacted, deliberately. An Internal message is not always ours (the gRPC
+		// runtime authors some) and the operator's own wrap infrastructure coordinates —
+		// a namespace, a Secret name, a Vault address. But this route requires
+		// authz.Operate: the caller is the platform's own operator, who provisions the
+		// nodes and holds the venue credentials, not an untrusted end user. Nothing on
+		// this path echoes a credential VALUE, and withholding the estate's own topology
+		// from the person who administers it buys no security and costs every diagnosis.
+		//
+		// The prefix stays so a 500 still reads as a server fault rather than as
+		// something the caller typed wrong.
+		if msg := strings.TrimSpace(st.Message()); msg != "" {
+			return http.StatusInternalServerError, "control plane error: " + msg
+		}
 		return http.StatusInternalServerError, "control plane error"
 	}
 }

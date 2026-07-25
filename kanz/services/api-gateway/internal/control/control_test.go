@@ -27,10 +27,18 @@ import (
 type stubClient struct {
 	operatorpb.OperatorServiceClient
 
-	setRegion  func(*operatorpb.SetNodeRegionRequest) (*operatorpb.SetNodeRegionResponse, error)
-	setVenue   func(*operatorpb.SetVenueKeysRequest) (*operatorpb.SetVenueKeysResponse, error)
-	drainCalls []string
-	addNodeErr error
+	setRegion   func(*operatorpb.SetNodeRegionRequest) (*operatorpb.SetNodeRegionResponse, error)
+	setVenue    func(*operatorpb.SetVenueKeysRequest) (*operatorpb.SetVenueKeysResponse, error)
+	drainCalls  []string
+	addNodeErr  error
+	testConnErr error
+}
+
+func (s *stubClient) TestConnection(_ context.Context, _ *operatorpb.TestConnectionRequest, _ ...grpc.CallOption) (*operatorpb.TestConnectionResponse, error) {
+	if s.testConnErr != nil {
+		return nil, s.testConnErr
+	}
+	return &operatorpb.TestConnectionResponse{Reachable: true}, nil
 }
 
 func (s *stubClient) SetNodeRegion(_ context.Context, in *operatorpb.SetNodeRegionRequest, _ ...grpc.CallOption) (*operatorpb.SetNodeRegionResponse, error) {
@@ -195,6 +203,46 @@ func TestExchangeRejectionReachesTheCaller(t *testing.T) {
 	}
 	if !strings.Contains(out["error"], "exchange rejected") {
 		t.Errorf("the exchange's verdict must reach the operator; got %q", out["error"])
+	}
+}
+
+// AN Internal MESSAGE IS THE INNERMOST LAYER'S VERDICT AND MUST REACH THE CALLER.
+//
+// The four bounds on a Test Connection are ordered so the operator's probe wait fires
+// first, because only it can say the probe Job ran and did not answer. Erasing its message
+// here half-nullifies that: the layers fire in the right order and then the payload of the
+// layer that knows the most is replaced by "control plane error", which teaches an operator
+// staring at the Add Node form precisely nothing.
+func TestAnInternalFaultsExplanationReachesTheCaller(t *testing.T) {
+	const detail = "probe job probe-abc did not complete in time (waited 60s)"
+	c := &stubClient{testConnErr: status.Error(codes.Internal, detail)}
+	rec := serve(t, c, []string{"kanz-operator"},
+		httptest.NewRequest("POST", "/v1/control/test-connection", strings.NewReader(`{"ip":"10.0.0.5"}`)))
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("want 500 for an Internal fault, got %d", rec.Code)
+	}
+	var out map[string]string
+	if err := json.NewDecoder(rec.Body).Decode(&out); err != nil {
+		t.Fatalf("undecodable error body: %v", err)
+	}
+	if !strings.Contains(out["error"], detail) {
+		t.Errorf("the operator's own explanation was dropped; got %q, want it to contain %q",
+			out["error"], detail)
+	}
+}
+
+// An Internal status with no message must still read as a server fault rather than as an
+// empty string the caller has to guess at.
+func TestAnInternalFaultWithNoMessageStillSaysSomething(t *testing.T) {
+	c := &stubClient{testConnErr: status.Error(codes.Internal, "")}
+	rec := serve(t, c, []string{"kanz-operator"},
+		httptest.NewRequest("POST", "/v1/control/test-connection", strings.NewReader(`{"ip":"10.0.0.5"}`)))
+	var out map[string]string
+	if err := json.NewDecoder(rec.Body).Decode(&out); err != nil {
+		t.Fatalf("undecodable error body: %v", err)
+	}
+	if out["error"] != "control plane error" {
+		t.Errorf("got %q, want the bare fallback", out["error"])
 	}
 }
 
