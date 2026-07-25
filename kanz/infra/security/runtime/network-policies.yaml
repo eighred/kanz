@@ -67,6 +67,77 @@ spec:
         # and Kafka — a store every service may reach, none of which is a tenant boundary.
         - { protocol: TCP, port: 6379 } # Redis
 ---
+# THE DATABASE. Without these two policies this file takes the estate DOWN.
+#
+# Postgres runs IN kanz-services, and default-deny-all applies to both directions —
+# so before this rule existed nothing could reach it and Postgres could accept
+# nothing. Every service that stores state (oms, tv-sync, the venue adapters,
+# accounting, wealth, datamaster, regulatory, audit) and EVERY kanz-migrate init
+# container failed at startup:
+#
+#   kanz-migrate: acquire: failed to connect to `user=kanzapp database=kanzapp`:
+#   postgres.kanz-services.svc: dial error: connect: connection refused
+#
+# which presents as a CrashLoopBackOff/Init:Error that looks like a bad password or a
+# sick database, and is neither. Proven by applying this file to a cluster whose CNI
+# enforces policy: oms and tv-sync went straight to Init:Error on their migrations.
+#
+# WHY IT WAS MISSED, and it is the same reason as SEC-M6 and the operator's API rule:
+# the comment on allow-gateway-to-read-upstreams below says it outright — kindnetd
+# does not enforce NetworkPolicy, so NOTHING in this file has ever been enforced on
+# the rig. A policy set that has never been applied to an enforcing CNI is a
+# hypothesis, and this one was wrong in the most basic way available.
+#
+# NAMESPACE-WIDE, deliberately, on the precedent this file already sets for Redis
+# ("spine infrastructure in the same namespace and the same trust class... a store
+# every service may reach, none of which is a tenant boundary"). Postgres is the same
+# shape: the isolation that matters is the PER-SERVICE DSN and FORCE ROW LEVEL
+# SECURITY, not the network. Enumerating a dozen services here would add no isolation
+# the database does not already enforce, and would silently break the next service
+# added — which is exactly how this file came to be missing the database entirely.
+# The bound that IS meaningful is kept: one destination, one port.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-postgres-egress
+  namespace: kanz-services
+  labels:
+    app.kubernetes.io/part-of: kanz
+spec:
+  podSelector: {}
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app: postgres
+      ports:
+        - { protocol: TCP, port: 5432 }
+---
+# The ingress half. Both ends must exist: default-deny-all selects every pod in this
+# namespace for BOTH directions, so an egress rule alone still leaves the database
+# refusing the connection it just permitted the client to open.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-services-to-postgres
+  namespace: kanz-services
+  labels:
+    app.kubernetes.io/part-of: kanz
+spec:
+  podSelector:
+    matchLabels:
+      app: postgres
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        # Pods in THIS namespace only. An empty podSelector selects every pod in the
+        # policy's own namespace — it does NOT admit other namespaces, which would
+        # need a namespaceSelector beside it.
+        - podSelector: {}
+      ports:
+        - { protocol: TCP, port: 5432 }
+---
 # Telemetry: allow egress to the OTLP collector (OBS-01) on 4317. Scoped to the
 # observability namespace.
 apiVersion: networking.k8s.io/v1
