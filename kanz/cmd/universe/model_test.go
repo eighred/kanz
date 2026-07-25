@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"testing"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"google.golang.org/grpc/codes"
@@ -30,6 +31,25 @@ type stubSource struct {
 	// rejection, or any other error.
 	setVenueKeysAccountID string
 	setVenueKeysErr       error
+
+	// budgets records the deadline each call arrived with, keyed by call name. The
+	// context is the only observable the TUI has for WHICH bound a command applied,
+	// and the two bounds must not be interchangeable. Nil records nothing.
+	budgets *map[string]time.Duration
+}
+
+// record stores the remaining budget on ctx, rounded to whole seconds: the deadline is
+// set microseconds before the call sees it, and the assertion is about which bound was
+// chosen, not about scheduling noise.
+func (s stubSource) record(call string, ctx context.Context) {
+	if s.budgets == nil {
+		return
+	}
+	var d time.Duration
+	if dl, ok := ctx.Deadline(); ok {
+		d = time.Until(dl).Round(time.Second)
+	}
+	(*s.budgets)[call] = d
 }
 
 func (s stubSource) fetch(context.Context) (fetchMsg, error) { return s.msg, nil }
@@ -37,11 +57,16 @@ func (s stubSource) fetch(context.Context) (fetchMsg, error) { return s.msg, nil
 func (s stubSource) addNode(context.Context, addNodeInput) (string, error)  { return "p-1", nil }
 func (s stubSource) listProvisions(context.Context) ([]provisionRow, error) { return nil, nil }
 
-func (s stubSource) testConnection(context.Context, string, int32) (testConnResult, error) {
+func (s stubSource) testConnection(ctx context.Context, _ string, _ int32) (testConnResult, error) {
+	s.record("testConnection", ctx)
 	return testConnResult{reachable: true, latencyMs: 7}, nil
 }
 
-func (s stubSource) cordon(context.Context, string) error   { return nil }
+func (s stubSource) cordon(ctx context.Context, _ string) error {
+	s.record("cordon", ctx)
+	return nil
+}
+
 func (s stubSource) uncordon(context.Context, string) error { return nil }
 func (s stubSource) drain(context.Context, string) error    { return nil }
 
@@ -60,6 +85,42 @@ func (s stubSource) setVenueKeys(_ context.Context, venue string, keys venueKeys
 }
 
 func (s stubSource) listVenueKeys(context.Context) ([]venueRow, error) { return s.venues, nil }
+
+// --timeout is sized for the ordinary reads, and it must be UNABLE to reach into Test
+// Connection. Test Connection waits on the operator running an ephemeral probe Job
+// (60s of its own), so a 1s bound applied there would cancel a healthy probe and report
+// a client-side deadline — the exact defect the deadline-nesting work removed, arriving
+// this time through a flag rather than a constant. The ordinary actions, meanwhile, must
+// honour the flag or it does nothing at all.
+func TestTighteningTheCallTimeoutCannotShortenTestConnection(t *testing.T) {
+	budgets := map[string]time.Duration{}
+	m := newModel(Config{CallTimeout: time.Second}, stubSource{budgets: &budgets})
+
+	m.testConnCmd()()
+	m.nodeActionCmd(m.src.cordon, "london")()
+
+	if got := budgets["testConnection"]; got != testConnTimeout {
+		t.Errorf("Test Connection ran with a %s budget, want %s: --timeout must not be able to "+
+			"lower it beneath the operator's own probe wait", got, testConnTimeout)
+	}
+	if got := budgets["cordon"]; got != time.Second {
+		t.Errorf("cordon ran with a %s budget, want the configured 1s — an ordinary action that "+
+			"ignores --timeout leaves the flag doing nothing", got)
+	}
+}
+
+// A zero CallTimeout must NOT become an already-expired deadline: every call would then
+// fail instantly with a deadline error indistinguishable from an unreachable gateway.
+func TestZeroCallTimeoutFallsBackToTheDefault(t *testing.T) {
+	budgets := map[string]time.Duration{}
+	m := newModel(Config{}, stubSource{budgets: &budgets})
+
+	m.nodeActionCmd(m.src.cordon, "london")()
+
+	if got := budgets["cordon"]; got != defaultCallTimeout {
+		t.Errorf("an unset CallTimeout produced a %s budget, want %s", got, defaultCallTimeout)
+	}
+}
 
 func TestFetchMsgPopulatesModel(t *testing.T) {
 	m := newModel(Config{}, stubSource{})

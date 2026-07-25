@@ -81,6 +81,91 @@ func TestTestConnectionDeadlinesNestOutward(t *testing.T) {
 	}
 }
 
+// tuiClientFile builds the TUI's one HTTP client; every Test Connection travels on it.
+const tuiClientFile = "cmd/universe/gatewaysource.go"
+
+// TestTUIHTTPClientCarriesNoTimeoutOfItsOwn closes the hole the test above cannot see.
+//
+// The ordering assertion reads four CONSTANTS. But http.Client.Timeout is enforced
+// independently of the request context, so a client-level timeout is a FIFTH bound on the
+// same call, and the effective limit is min(context deadline, client timeout). It won
+// silently: the TUI's client carried a 30s timeout (a flag default, invisible to a test
+// that parses consts) underneath the operator's 60s probe wait, so probeTimeout could
+// never fire and every slow Test Connection died client-side with "Client.Timeout exceeded
+// while awaiting headers" — a message about the gateway and the network, printed while
+// probing a host that may have been perfectly healthy.
+//
+// So the rule is not "keep the client timeout above the others". It is that this call has
+// exactly ONE bound: the context its caller sets. A second one cannot be ordered against
+// the four consts, because it does not live with them.
+func TestTUIHTTPClientCarriesNoTimeoutOfItsOwn(t *testing.T) {
+	path := filepath.Join(moduleRoot(t), filepath.FromSlash(tuiClientFile))
+
+	f, err := parser.ParseFile(token.NewFileSet(), path, nil, 0)
+	if err != nil {
+		t.Fatalf("parse %s: %v", path, err)
+	}
+
+	var clients int
+	ast.Inspect(f, func(n ast.Node) bool {
+		switch v := n.(type) {
+		case *ast.CompositeLit:
+			if !isHTTPClientType(v.Type) {
+				return true
+			}
+			clients++
+			for _, elt := range v.Elts {
+				kv, ok := elt.(*ast.KeyValueExpr)
+				if !ok {
+					continue
+				}
+				if key, ok := kv.Key.(*ast.Ident); ok && key.Name == "Timeout" {
+					t.Errorf("%s constructs its http.Client with a Timeout field.\n\n"+
+						"That bound is enforced independently of the request context, so every call "+
+						"on this client is bounded by min(context, this) and the SMALLER wins "+
+						"invisibly. If it lands under provision.probeTimeout (60s), Test Connection "+
+						"dies client-side with a message about the gateway while probing a host that "+
+						"may be healthy — and no ordering test over the four consts can see it, "+
+						"because this bound does not live with them. Bound the CALL instead: pass a "+
+						"context deadline (Config.CallTimeout for reads, testConnTimeout for the "+
+						"probe).", tuiClientFile)
+				}
+			}
+		case *ast.AssignStmt:
+			// The same bound, spelled as a later field write rather than in the literal.
+			for _, lhs := range v.Lhs {
+				sel, ok := lhs.(*ast.SelectorExpr)
+				if ok && sel.Sel.Name == "Timeout" {
+					t.Errorf("%s assigns a .Timeout field after construction — see this test's "+
+						"failure text for why the client must carry no bound of its own",
+						tuiClientFile)
+				}
+			}
+		}
+		return true
+	})
+
+	if clients == 0 {
+		t.Fatalf("%s no longer constructs an http.Client literal, so this guard asserted "+
+			"nothing. If the client moved, point tuiClientFile at its new home; if the TUI now "+
+			"uses a client built elsewhere, that client needs this same rule", tuiClientFile)
+	}
+}
+
+// isHTTPClientType reports whether a composite-literal type is http.Client, including
+// through the `&http.Client{...}` the code actually writes.
+func isHTTPClientType(e ast.Expr) bool {
+	if star, ok := e.(*ast.StarExpr); ok {
+		e = star.X
+	}
+	sel, ok := e.(*ast.SelectorExpr)
+	if !ok || sel.Sel.Name != "Client" {
+		return false
+	}
+	pkg, ok := sel.X.(*ast.Ident)
+	return ok && pkg.Name == "http"
+}
+
 // durationConst reads one `const name = N * time.Unit` declaration out of a file.
 //
 // It FAILS rather than returning zero when the const is missing or is not a literal

@@ -129,6 +129,12 @@ func newModel(cfg Config, src nodeSource) model {
 	if cfg.PollInterval <= 0 {
 		cfg.PollInterval = 3 * time.Second
 	}
+	// Normalized HERE rather than at each call site: a zero would make every context
+	// deadline already expired, so every call would fail instantly with a deadline error
+	// that looks like an unreachable gateway.
+	if cfg.CallTimeout <= 0 {
+		cfg.CallTimeout = defaultCallTimeout
+	}
 	return model{cfg: cfg, src: src, active: paneNodes}
 }
 
@@ -342,13 +348,14 @@ func (m model) submitAddForm() tea.Cmd {
 	}
 	keyPath := m.form.value("key_path")
 	src := m.src
+	timeout := m.cfg.CallTimeout
 	return func() tea.Msg {
 		key, err := os.ReadFile(keyPath)
 		if err != nil {
 			return addNodeResultMsg{err: fmt.Errorf("read key %s: %w", keyPath, err)}
 		}
 		in.sshKey = key
-		ctx, cancel := context.WithTimeout(context.Background(), pollTimeout)
+		ctx, cancel := context.WithTimeout(context.Background(), timeout)
 		defer cancel()
 		id, err := src.addNode(ctx, in)
 		return addNodeResultMsg{id: id, err: err}
@@ -399,8 +406,9 @@ func (m model) submitKeyForm() tea.Cmd {
 		passphrase: m.keyForm.value("passphrase"),
 	}
 	src := m.src
+	timeout := m.cfg.CallTimeout
 	return func() tea.Msg {
-		ctx, cancel := context.WithTimeout(context.Background(), pollTimeout)
+		ctx, cancel := context.WithTimeout(context.Background(), timeout)
 		defer cancel()
 		accountID, err := src.setVenueKeys(ctx, venue, keys)
 		return keyFormResultMsg{venue: venue, accountID: accountID, err: err}
@@ -429,14 +437,25 @@ func withVerifiedAccount(accounts map[string]string, venue, id string) map[strin
 }
 
 // testConnCmd probes the form's ip:port off the UI thread. It is the ONLY call site
-// of testConnTimeout: every other command here is a fast read on pollTimeout, while
-// this one waits on the operator running an ephemeral probe Job.
+// of testConnTimeout: every other command here is a fast read on Config.CallTimeout,
+// while this one waits on the operator running an ephemeral probe Job.
+//
+// THE BOUND IS max(testConnTimeout, configured), never the configured value alone.
+// --timeout is sized for the reads, so honouring it here would let an operator who
+// tightened it put the TUI's bound back underneath the operator's 60s probe wait and
+// re-break the deadline chain from the outside — every probe failing client-side with a
+// generic deadline, including against a healthy host. Raising --timeout past 100s is
+// respected, because that only ever gives an inner layer more room to answer.
 func (m model) testConnCmd() tea.Cmd {
 	ip := m.form.value("ip")
 	port := atoi32(m.form.value("ssh_port"))
 	src := m.src
+	timeout := testConnTimeout
+	if m.cfg.CallTimeout > timeout {
+		timeout = m.cfg.CallTimeout
+	}
 	return func() tea.Msg {
-		ctx, cancel := context.WithTimeout(context.Background(), testConnTimeout)
+		ctx, cancel := context.WithTimeout(context.Background(), timeout)
 		defer cancel()
 		res, err := src.testConnection(ctx, ip, port)
 		return testConnResultMsg{res: res, err: err}
@@ -517,8 +536,9 @@ func (m model) updateMoveInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 // arrives on the next poll rather than being applied optimistically here.
 func (m model) moveNodeCmd(name, region string) tea.Cmd {
 	src := m.src
+	timeout := m.cfg.CallTimeout
 	return func() tea.Msg {
-		ctx, cancel := context.WithTimeout(context.Background(), pollTimeout)
+		ctx, cancel := context.WithTimeout(context.Background(), timeout)
 		defer cancel()
 		return nodeActionMsg{err: src.setRegion(ctx, name, region)}
 	}
@@ -554,8 +574,9 @@ func clampSelected(selected, n int) int {
 // reports the outcome as a nodeActionMsg; the node's new status arrives on
 // the next poll rather than being applied optimistically here.
 func (m model) nodeActionCmd(action func(context.Context, string) error, name string) tea.Cmd {
+	timeout := m.cfg.CallTimeout
 	return func() tea.Msg {
-		ctx, cancel := context.WithTimeout(context.Background(), pollTimeout)
+		ctx, cancel := context.WithTimeout(context.Background(), timeout)
 		defer cancel()
 		return nodeActionMsg{err: action(ctx, name)}
 	}

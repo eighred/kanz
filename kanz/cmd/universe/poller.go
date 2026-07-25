@@ -7,14 +7,8 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 )
 
-// pollTimeout bounds each fetch so an unreachable operator degrades the tick
-// (err in the status line) rather than hanging the ticker. Every call site it
-// covers is a cached read the operator answers immediately, so the bound is
-// tight on purpose — see testConnTimeout for the one action that is not.
-const pollTimeout = 5 * time.Second
-
 // testConnTimeout bounds Test Connection ALONE, and is deliberately two orders of
-// magnitude larger than pollTimeout because it is not a read at all: the operator
+// magnitude larger than Config.CallTimeout because it is not a read at all: the operator
 // runs the reachability dial in an ephemeral Kubernetes Job, so this wait covers Job
 // create, pod scheduling, possibly an image pull, and then up to the probe binary's
 // own 10s dial (cmd/kanz-provisioner/probe.go).
@@ -26,6 +20,9 @@ const pollTimeout = 5 * time.Second
 // order and every unreachable target reads as a generic client-side deadline instead,
 // which is the same wrong answer for a black-holed host as for a healthy one.
 // test/arch asserts the ordering, because these three consts live in three packages.
+//
+// It is a CONST and not a flag for that reason: an operator lowering --timeout must not
+// be able to re-break the chain from the outside (see model.testConnCmd).
 const testConnTimeout = 100 * time.Second
 
 // pollTick arms a single tea.Tick that fires after cfg.PollInterval and does
@@ -33,7 +30,7 @@ const testConnTimeout = 100 * time.Second
 // after every fetchMsg, so the TUI polls forever at a fixed cadence.
 func (m model) pollTick() tea.Cmd {
 	return tea.Tick(m.cfg.PollInterval, func(time.Time) tea.Msg {
-		ctx, cancel := context.WithTimeout(context.Background(), pollTimeout)
+		ctx, cancel := context.WithTimeout(context.Background(), m.cfg.CallTimeout)
 		defer cancel()
 		msg, err := m.src.fetch(ctx)
 		if err != nil {

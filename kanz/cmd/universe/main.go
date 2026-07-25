@@ -30,11 +30,10 @@ func main() {
 
 func run() error {
 	var (
-		cfg        Config
-		gwURL      string
-		tokenFile  string
-		signFile   string
-		callTmeout time.Duration
+		cfg       Config
+		gwURL     string
+		tokenFile string
+		signFile  string
 	)
 	fs := flag.NewFlagSet("universe", flag.ContinueOnError)
 	fs.StringVar(&gwURL, "gateway-url", os.Getenv("KANZ_GATEWAY_URL"),
@@ -45,7 +44,10 @@ func run() error {
 		"file holding the gateway's request-signing secret, if the deployment sets one "+
 			"(env KANZ_SIGNING_SECRET_FILE, or KANZ_SIGNING_SECRET directly)")
 	fs.DurationVar(&cfg.PollInterval, "poll", 3*time.Second, "estate refresh interval")
-	fs.DurationVar(&callTmeout, "timeout", 30*time.Second, "per-request timeout")
+	fs.DurationVar(&cfg.CallTimeout, "timeout", defaultCallTimeout,
+		"timeout for one ordinary control-plane call (the estate poll and the "+
+			"cordon/drain/move/add/set-keys actions). Test Connection is NOT bounded by this: "+
+			"it waits on the operator running a probe Job and keeps its own, much longer bound")
 	if err := fs.Parse(os.Args[1:]); err != nil {
 		return err
 	}
@@ -66,7 +68,6 @@ func run() error {
 		BaseURL:       gwURL,
 		Token:         token,
 		SigningSecret: signing,
-		Timeout:       callTmeout,
 	})
 	if err != nil {
 		return err
