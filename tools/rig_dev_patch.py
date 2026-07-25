@@ -50,14 +50,16 @@ _ADD_ENV = {
 }
 
 
-def _drop_on_rig(name):
+def _drop_on_rig(name, keep_spiffe=False):
     if name in _DROP_ENV_EXACT:
         return True
     # Any SPIFFE workload-API socket (SPIFFE_ENDPOINT_SOCKET, *_SPIFFE_SOCKET, ...).
+    if keep_spiffe:
+        return False
     return "SPIFFE" in name and "SOCKET" in name
 
 
-def patch_pod_spec(spec, path):
+def patch_pod_spec(spec, path, keep_spiffe=False):
     for vol in spec.get("volumes") or []:
         csi = vol.get("csi")
         if not (isinstance(csi, dict) and csi.get("driver") == VAULT_DRIVER):
@@ -102,7 +104,9 @@ def patch_pod_spec(spec, path):
             #    Orders on the rig target XSIM.
             env = container.get("env")
             if env:
-                container["env"] = [e for e in env if not _drop_on_rig(e.get("name", ""))]
+                container["env"] = [
+                    e for e in env if not _drop_on_rig(e.get("name", ""), keep_spiffe)
+                ]
 
         # Additions apply to the workload's own containers, never its init
         # containers: an initContainer runs migrations, not the service.
@@ -114,21 +118,37 @@ def patch_pod_spec(spec, path):
 
 
 def main():
-    if len(sys.argv) != 2:
-        sys.exit("usage: rig_dev_patch.py <manifest.yaml>")
+    # --keep-spiffe LEAVES the SPIFFE workload-API socket env in place.
+    #
+    # Dropping it is right only where the bus is the dev-PLAINTEXT deviation: with the
+    # socket set, transport.NewMesh(...).Enabled() is true and the workload dials NATS
+    # over mTLS, which a plaintext server refuses ("secure connection not available").
+    #
+    # But infra/nats/nats.yaml serves `tls { verify: true, verify_and_map: true }` —
+    # mTLS ONLY. On a cluster that runs the in-repo SPIRE (rig-apply.sh --spire) and
+    # that NATS, the drop inverts: the socket is REQUIRED, and stripping it leaves every
+    # workload dialling plaintext at a server that will not answer. The SPIFFE CSI
+    # volumes are already left alone for exactly this reason; this flag lets the env
+    # agree with them.
+    #
+    # Default stays OFF so the existing plaintext rig is unchanged.
+    args = [a for a in sys.argv[1:] if a != "--keep-spiffe"]
+    keep_spiffe = "--keep-spiffe" in sys.argv[1:]
+    if len(args) != 1:
+        sys.exit("usage: rig_dev_patch.py [--keep-spiffe] <manifest.yaml>")
 
-    with open(sys.argv[1]) as fh:
+    with open(args[0]) as fh:
         docs = [d for d in yaml.safe_load_all(fh) if d]
 
     if not docs:
-        sys.exit(f"FATAL: {sys.argv[1]} parsed to no documents")
+        sys.exit(f"FATAL: {args[0]} parsed to no documents")
 
     for doc in docs:
         # Deployment/StatefulSet/DaemonSet/Job and the Argo Rollout all carry the
         # pod spec at the same path.
         tmpl = (doc.get("spec") or {}).get("template") or {}
         if tmpl.get("spec"):
-            patch_pod_spec(tmpl["spec"], sys.argv[1])
+            patch_pod_spec(tmpl["spec"], args[0], keep_spiffe)
 
     yaml.safe_dump_all(docs, sys.stdout, default_flow_style=False)
 

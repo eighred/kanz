@@ -84,7 +84,13 @@ spec:
             # No COPILOT_POLICY_PATH ⇒ fail-closed deny-all until the AUTH-01b
             # policy bundle is mounted; the Claude API key + governed mTLS client
             # wire at the composition root (PARITY-04a/b).
-            - { name: SPIFFE_ENDPOINT_SOCKET, value: "unix:///run/spiffe/spire-agent.sock" }
+            # COPILOT_SPIFFE_SOCKET, *not* SPIFFE_ENDPOINT_SOCKET — this service reads
+            # the prefixed name (internal/config), as api-gateway does. The manifest set
+            # the unprefixed spelling the other services use, so cfg.SPIFFESocket was
+            # EMPTY while the variable and the CSI volume both looked correct to a
+            # reviewer. Present-and-wrong is worse than absent: the mesh silently stayed
+            # disabled rather than failing loudly.
+            - { name: COPILOT_SPIFFE_SOCKET, value: "unix:///run/spiffe/spire-agent.sock" }
           livenessProbe:
             httpGet: { path: /healthz, port: 8080 }
             initialDelaySeconds: 5
