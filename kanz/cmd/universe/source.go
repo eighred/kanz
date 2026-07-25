@@ -5,15 +5,12 @@ import (
 	"fmt"
 	"time"
 
-	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials/insecure"
-
 	operatorpb "github.com/kanz-eng/kanz-schemas-go/operator/v1"
 )
 
-// nodeSource fetches estate reads and drives provisioning. The gRPC-backed impl
-// dials the operator service; tests use a stub. fetch does the clock read
-// (Age), so render stays a pure function of model.
+// nodeSource fetches estate reads and drives provisioning. The real implementation
+// (gatewaySource) goes through the api-gateway's /v1/control routes; tests use a
+// stub. fetch does the clock read (Age), so render stays a pure function of model.
 type nodeSource interface {
 	fetch(ctx context.Context) (fetchMsg, error)
 	addNode(ctx context.Context, req addNodeInput) (string, error)
@@ -60,122 +57,6 @@ type addNodeInput struct {
 // provisionRow is one row of the provisioning status strip.
 type provisionRow struct {
 	id, hostname, status, message string
-}
-
-// grpcSource dials the operator.v1 service over a plaintext connection — the
-// laptop has no SVID; the security boundary is the kubeconfig-gated
-// port-forward the connection runs inside.
-type grpcSource struct {
-	client operatorpb.OperatorServiceClient
-}
-
-func dialOperator(addr string) (*grpcSource, func() error, error) {
-	conn, err := grpc.NewClient(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
-	if err != nil {
-		return nil, nil, err
-	}
-	return &grpcSource{client: operatorpb.NewOperatorServiceClient(conn)}, conn.Close, nil
-}
-
-func (g *grpcSource) fetch(ctx context.Context) (fetchMsg, error) {
-	nodesResp, err := g.client.ListNodes(ctx, &operatorpb.ListNodesRequest{})
-	if err != nil {
-		return fetchMsg{}, err
-	}
-	clustersResp, err := g.client.ListClusters(ctx, &operatorpb.ListClustersRequest{})
-	if err != nil {
-		return fetchMsg{}, err
-	}
-	// Provisioning is a secondary, best-effort read: a transient failure here
-	// degrades only the strip (it goes quiet for one tick), never the whole
-	// poll — nodes/clusters are the read this TUI exists for.
-	provisions, _ := g.listProvisions(ctx)
-	// Venue-key presence is likewise best-effort: a transient failure here
-	// degrades only the API Manager pane (it goes empty for one tick), never
-	// the whole poll.
-	venues, _ := g.listVenueKeys(ctx)
-	return fetchMsg{
-		nodes:      toNodeRows(nodesResp.GetNodes()),
-		clusters:   toClusterRows(clustersResp.GetClusters()),
-		provisions: provisions,
-		venues:     venues,
-	}, nil
-}
-
-func (g *grpcSource) addNode(ctx context.Context, in addNodeInput) (string, error) {
-	resp, err := g.client.AddNode(ctx, &operatorpb.AddNodeRequest{
-		Hostname: in.hostname, Ip: in.ip, SshPort: in.sshPort, SshUser: in.sshUser, SshPrivateKey: in.sshKey,
-	})
-	if err != nil {
-		return "", err
-	}
-	return resp.GetProvisionId(), nil
-}
-
-func (g *grpcSource) listProvisions(ctx context.Context) ([]provisionRow, error) {
-	resp, err := g.client.ListProvisions(ctx, &operatorpb.ListProvisionsRequest{})
-	if err != nil {
-		return nil, err
-	}
-	out := make([]provisionRow, 0, len(resp.GetProvisions()))
-	for _, p := range resp.GetProvisions() {
-		out = append(out, provisionRow{id: p.GetId(), hostname: p.GetHostname(), status: provLabel(p.GetStatus()), message: p.GetMessage()})
-	}
-	return out, nil
-}
-
-func (g *grpcSource) testConnection(ctx context.Context, ip string, port int32) (testConnResult, error) {
-	resp, err := g.client.TestConnection(ctx, &operatorpb.TestConnectionRequest{Ip: ip, SshPort: port})
-	if err != nil {
-		return testConnResult{}, err
-	}
-	return testConnResult{reachable: resp.GetReachable(), latencyMs: resp.GetLatencyMs(), message: resp.GetMessage()}, nil
-}
-
-func (g *grpcSource) cordon(ctx context.Context, name string) error {
-	_, err := g.client.Cordon(ctx, &operatorpb.CordonRequest{Name: name})
-	return err
-}
-
-func (g *grpcSource) uncordon(ctx context.Context, name string) error {
-	_, err := g.client.Uncordon(ctx, &operatorpb.UncordonRequest{Name: name})
-	return err
-}
-
-func (g *grpcSource) drain(ctx context.Context, name string) error {
-	_, err := g.client.Drain(ctx, &operatorpb.DrainRequest{Name: name})
-	return err
-}
-
-func (g *grpcSource) setRegion(ctx context.Context, name, region string) error {
-	_, err := g.client.SetNodeRegion(ctx, &operatorpb.SetNodeRegionRequest{Name: name, Region: region})
-	return err
-}
-
-// setVenueKeys returns the exchange's own account id for the credentials, as
-// proved server-side before the write (S4b) — empty when the deployment has
-// no proof configured. A FailedPrecondition error means the exchange
-// rejected the credentials; its message is already sanitized server-side.
-func (g *grpcSource) setVenueKeys(ctx context.Context, venue string, keys venueKeys) (string, error) {
-	resp, err := g.client.SetVenueKeys(ctx, &operatorpb.SetVenueKeysRequest{
-		Venue: venue, ApiKey: keys.apiKey, ApiSecret: keys.apiSecret, Passphrase: keys.passphrase,
-	})
-	if err != nil {
-		return "", err
-	}
-	return resp.GetExchangeAccountId(), nil
-}
-
-func (g *grpcSource) listVenueKeys(ctx context.Context) ([]venueRow, error) {
-	resp, err := g.client.ListVenueKeys(ctx, &operatorpb.ListVenueKeysRequest{})
-	if err != nil {
-		return nil, err
-	}
-	out := make([]venueRow, 0, len(resp.GetVenues()))
-	for _, v := range resp.GetVenues() {
-		out = append(out, venueRow{venue: v.GetVenue(), configured: v.GetConfigured()})
-	}
-	return out, nil
 }
 
 func provLabel(s operatorpb.ProvisionStatus) string {

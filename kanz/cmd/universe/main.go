@@ -1,13 +1,21 @@
-// universe is the operator TUI (F0+S1+S2a): it lists the Kubernetes estate
-// (nodes, clusters) and can provision new nodes (Add Node form) by dialing the
-// in-cluster operator.v1 service over a kubeconfig-gated `kubectl
-// port-forward`. Still no edit/delete/ssh — only estate reads and AddNode.
+// universe is the operator TUI: it lists the Kubernetes estate (nodes, clusters),
+// provisions new nodes, drives node lifecycle (cordon/drain/region) and manages
+// venue API credentials.
+//
+// IT REACHES THE ESTATE THROUGH THE API GATEWAY, and holds no cluster access of any
+// kind (OPS-M2c). It used to dial operator.v1 directly in plaintext at
+// localhost:9090, which only worked inside a `kubectl port-forward` the human had to
+// start — so an operator rotating a venue key needed a kubeconfig, a cluster
+// credential, and enough Kubernetes knowledge to know that port-forwarding was the
+// missing step. The operator's identity is now their own bearer token, validated by
+// the same authority as every other client of the platform.
 package main
 
 import (
 	"flag"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -21,29 +29,64 @@ func main() {
 }
 
 func run() error {
-	var cfg Config
+	var (
+		cfg        Config
+		gwURL      string
+		tokenFile  string
+		signFile   string
+		callTmeout time.Duration
+	)
 	fs := flag.NewFlagSet("universe", flag.ContinueOnError)
-	fs.StringVar(&cfg.OperatorAddr, "operator-addr", envOr("KANZ_OPERATOR_ADDR", "localhost:9090"),
-		"operator.v1 gRPC address (typically a `kubectl port-forward` target)")
+	fs.StringVar(&gwURL, "gateway-url", os.Getenv("KANZ_GATEWAY_URL"),
+		"api-gateway base URL, e.g. https://api.eighred.com (env KANZ_GATEWAY_URL)")
+	fs.StringVar(&tokenFile, "token-file", os.Getenv("KANZ_TOKEN_FILE"),
+		"file holding the bearer token identifying you (env KANZ_TOKEN_FILE, or KANZ_TOKEN directly)")
+	fs.StringVar(&signFile, "signing-secret-file", os.Getenv("KANZ_SIGNING_SECRET_FILE"),
+		"file holding the gateway's request-signing secret, if the deployment sets one "+
+			"(env KANZ_SIGNING_SECRET_FILE, or KANZ_SIGNING_SECRET directly)")
 	fs.DurationVar(&cfg.PollInterval, "poll", 3*time.Second, "estate refresh interval")
+	fs.DurationVar(&callTmeout, "timeout", 30*time.Second, "per-request timeout")
 	if err := fs.Parse(os.Args[1:]); err != nil {
 		return err
 	}
 
-	src, closeConn, err := dialOperator(cfg.OperatorAddr)
+	// A FILE IS PREFERRED OVER AN ENV VAR for both secrets, the same ordering
+	// pkg-level config uses elsewhere (SEC-01d): an env var is visible in the
+	// process table and inherited by anything this shell spawns.
+	token, err := secretFrom(tokenFile, "KANZ_TOKEN")
 	if err != nil {
 		return err
 	}
-	defer func() { _ = closeConn() }()
+	signing, err := secretFrom(signFile, "KANZ_SIGNING_SECRET")
+	if err != nil {
+		return err
+	}
+
+	src, err := newGatewaySource(gatewayConfig{
+		BaseURL:       gwURL,
+		Token:         token,
+		SigningSecret: signing,
+		Timeout:       callTmeout,
+	})
+	if err != nil {
+		return err
+	}
 
 	p := tea.NewProgram(newModel(cfg, src), tea.WithAltScreen())
 	_, err = p.Run()
 	return err
 }
 
-func envOr(k, def string) string {
-	if v := os.Getenv(k); v != "" {
-		return v
+// secretFrom reads a secret from a file if given, else from env. Returns empty
+// (no error) when neither is set — the caller decides whether that is fatal, since
+// the token is required and the signing secret is not.
+func secretFrom(path, envKey string) (string, error) {
+	if path != "" {
+		b, err := os.ReadFile(path)
+		if err != nil {
+			return "", fmt.Errorf("read %s: %w", path, err)
+		}
+		return strings.TrimSpace(string(b)), nil
 	}
-	return def
+	return strings.TrimSpace(os.Getenv(envKey)), nil
 }
