@@ -39,11 +39,23 @@ import (
 	"github.com/kanz-eng/kanz/services/api-gateway/internal/authz"
 )
 
-// callTimeout bounds every control-plane RPC. AddNode returns as soon as the Job is
-// created (the SSH work is asynchronous), so no route here is long-running — a
-// request that outlives this is a control plane that is not answering, and the
-// caller should be told so rather than left hanging.
+// callTimeout bounds every control-plane RPC except TestConnection. AddNode returns as
+// soon as the Job is created (the SSH work is asynchronous) and the rest are reads, so a
+// request that outlives this is a control plane that is not answering, and the caller
+// should be told so rather than left hanging.
 const callTimeout = 30 * time.Second
+
+// testConnectionTimeout bounds POST /v1/control/test-connection, the ONE long-running
+// route on this surface. The operator does not dial in-process: it runs the reachability
+// probe as an ephemeral Job and waits for it, so the call legitimately costs Job create,
+// pod scheduling, a possible image pull, and then the probe's own 10s dial.
+//
+// It must stay strictly ABOVE the operator's provision.probeTimeout and strictly BELOW
+// the TUI's testConnTimeout. If this budget were the tightest of the three, the caller
+// would always read "control plane did not answer in time" — a statement about the
+// gateway — in place of the operator's far more useful "probe job did not complete in
+// time". test/arch asserts the ordering; a comment alone would drift.
+const testConnectionTimeout = 90 * time.Second
 
 // maxBody caps a control request. These bodies are hostnames, node names and API
 // keys; a megabyte is already absurd for all of them.
@@ -103,12 +115,16 @@ func (h *Handler) listProvisions(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// testConnection is the only route here that waits on work rather than on a read: the
+// operator answers it by running a probe Job and waiting for the pod's verdict. Hence
+// testConnectionTimeout instead of callTimeout — see that const for the ordering the
+// three layers of this call have to keep.
 func (h *Handler) testConnection(w http.ResponseWriter, r *http.Request) {
 	var req operatorpb.TestConnectionRequest
 	if !h.decode(w, r, &req) {
 		return
 	}
-	h.forward(w, r, func(ctx context.Context) (proto.Message, error) {
+	h.forwardWithin(w, r, testConnectionTimeout, func(ctx context.Context) (proto.Message, error) {
 		return h.client.TestConnection(ctx, &req)
 	})
 }
@@ -189,9 +205,18 @@ func (h *Handler) decode(w http.ResponseWriter, r *http.Request, msg proto.Messa
 	return true
 }
 
-// forward runs fn under a bounded context and renders the result.
+// forward runs fn under the standard control-plane budget and renders the result.
+// A route needing a different budget calls forwardWithin directly and says why.
 func (h *Handler) forward(w http.ResponseWriter, r *http.Request, fn func(context.Context) (proto.Message, error)) {
-	ctx, cancel := context.WithTimeout(r.Context(), callTimeout)
+	h.forwardWithin(w, r, callTimeout, fn)
+}
+
+// forwardWithin runs fn under a bounded context and renders the result. The timeout is
+// a parameter rather than a lookup keyed on r.Pattern so the route that needs a longer
+// budget carries it at the call site, next to the comment explaining why — a pattern
+// string in a side table drifts silently the day a route is renamed.
+func (h *Handler) forwardWithin(w http.ResponseWriter, r *http.Request, timeout time.Duration, fn func(context.Context) (proto.Message, error)) {
+	ctx, cancel := context.WithTimeout(r.Context(), timeout)
 	defer cancel()
 
 	resp, err := fn(ctx)

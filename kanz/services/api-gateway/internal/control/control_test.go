@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -215,5 +216,64 @@ func TestEveryControlRouteDemandsOperate(t *testing.T) {
 			t.Errorf("%s is not under /v1/control/ — the control surface must stay one prefix "+
 				"so a policy can be written about it", rt.Pattern)
 		}
+	}
+}
+
+// deadlineSeen records the budget the handler put on the outbound RPC. The gateway is
+// the middle of three layers bounding a Test Connection, and the only observable it has
+// is the context it hands the client.
+type deadlineSeen struct {
+	operatorpb.OperatorServiceClient
+	testConn time.Duration
+	listed   time.Duration
+}
+
+func (d *deadlineSeen) TestConnection(ctx context.Context, _ *operatorpb.TestConnectionRequest, _ ...grpc.CallOption) (*operatorpb.TestConnectionResponse, error) {
+	d.testConn = budgetOf(ctx)
+	return &operatorpb.TestConnectionResponse{Reachable: true, LatencyMs: 3}, nil
+}
+
+func (d *deadlineSeen) ListNodes(ctx context.Context, _ *operatorpb.ListNodesRequest, _ ...grpc.CallOption) (*operatorpb.ListNodesResponse, error) {
+	d.listed = budgetOf(ctx)
+	return &operatorpb.ListNodesResponse{}, nil
+}
+
+// budgetOf rounds the remaining time up to whole seconds: the deadline is set a few
+// microseconds before the client sees it, and the assertion is about which budget was
+// chosen, not about scheduling noise.
+func budgetOf(ctx context.Context) time.Duration {
+	dl, ok := ctx.Deadline()
+	if !ok {
+		return 0
+	}
+	return time.Until(dl).Round(time.Second)
+}
+
+// TestTestConnectionGetsTheLongBudgetAndOtherRoutesDoNot is the executable half of the
+// deadline hierarchy at this layer. The operator answers TestConnection by running a
+// probe Job and waiting for it, so a 30s gateway budget would cancel a healthy probe and
+// report "control plane did not answer in time" — the gateway blaming itself for work it
+// simply did not wait for. The other ten routes must NOT inherit the long budget: they
+// are reads, and a slow read is a control plane that is not answering.
+func TestTestConnectionGetsTheLongBudgetAndOtherRoutesDoNot(t *testing.T) {
+	c := &deadlineSeen{}
+	rec := serve(t, c, []string{"kanz-operator"},
+		httptest.NewRequest("POST", "/v1/control/test-connection", strings.NewReader(`{"ip":"10.0.0.5"}`)))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if c.testConn != testConnectionTimeout {
+		t.Errorf("TestConnection ran with a %s budget, want %s — the operator's own probe wait is %s, "+
+			"and a gateway budget below it makes the operator's verdict unreachable",
+			c.testConn, testConnectionTimeout, 60*time.Second)
+	}
+
+	rec = serve(t, c, []string{"kanz-operator"}, httptest.NewRequest("GET", "/v1/control/nodes", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if c.listed != callTimeout {
+		t.Errorf("ListNodes ran with a %s budget, want %s — only the probing route may wait longer",
+			c.listed, callTimeout)
 	}
 }
