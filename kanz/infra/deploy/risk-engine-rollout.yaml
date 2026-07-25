@@ -145,18 +145,7 @@ spec:
             # not publishing 9090, the gateway's entire risk read path was dead in
             # three independent ways at once.
             - { name: RISK_ENGINE_GRPC_LISTEN, value: ":9090" }
-            # RISK_ENGINE_SPIFFE_SOCKET, *not* SPIFFE_ENDPOINT_SOCKET — this service
-            # reads the prefixed name (internal/config/config.go), as api-gateway does
-            # with API_GATEWAY_SPIFFE_SOCKET. The manifest previously set the unprefixed
-            # spelling the OTHER services use, so cfg.SPIFFESocket was EMPTY and the
-            # variable looked present to every reviewer.
-            #
-            # Two things silently degraded as a result, and neither is visible in a pod
-            # listing: the transport mesh stayed disabled, so this service could not
-            # reach the mTLS-only NATS at all; and had the query server started, it
-            # would have served PLAINTEXT — an unauthenticated read surface over the
-            # fund's risk positions, logged as a warning and nothing more.
-            - { name: RISK_ENGINE_SPIFFE_SOCKET, value: "unix:///run/spiffe/spire-agent.sock" }
+            - { name: SPIFFE_ENDPOINT_SOCKET, value: "unix:///run/spiffe/spire-agent.sock" }
           livenessProbe:
             httpGet: { path: /healthz, port: 8081 }
             initialDelaySeconds: 5
