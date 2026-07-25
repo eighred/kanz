@@ -147,6 +147,11 @@ func TestAddNodeRejectsEmptyKey(t *testing.T) {
 // TestTestConnectionDelegatesToTheProber is the assertion that keeps the dial out of
 // this process: the handler must hand the target to the provisioner (which runs it in
 // an ephemeral Job with the :22 egress) and translate the answer, never dial itself.
+//
+// The port here is 2222 to prove the request's port is FORWARDED rather than defaulted;
+// it does not imply :2222 is probeable. It is not — cluster egress pins :22 and
+// provision.Probe refuses anything else with a message saying so, which is the layer
+// that owns that verdict. This handler's only job is to pass the request through.
 func TestTestConnectionDelegatesToTheProber(t *testing.T) {
 	sp := &stubProvisioner{probe: provision.ProbeResult{Reachable: true, LatencyMS: 4}}
 	resp, err := NewWithProvisioner(stubReader{}, sp).TestConnection(context.Background(),

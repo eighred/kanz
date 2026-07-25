@@ -95,9 +95,17 @@ type ProbeResult struct {
 type Provisioner struct {
 	cs  kubernetes.Interface
 	cfg Config
+	// probeTimeout is how long Probe waits for its Job, defaulted from the const of
+	// the same name. A field rather than the const read directly so a test can drive
+	// Probe — not just awaitProbe — down the timeout path in milliseconds, and so
+	// exercise the deferred Job delete that path depends on. Not exported and not
+	// configuration: production has exactly one correct value for it.
+	probeTimeout time.Duration
 }
 
-func New(cs kubernetes.Interface, cfg Config) *Provisioner { return &Provisioner{cs: cs, cfg: cfg} }
+func New(cs kubernetes.Interface, cfg Config) *Provisioner {
+	return &Provisioner{cs: cs, cfg: cfg, probeTimeout: probeTimeout}
+}
 
 // AddNode creates the one-shot Job first, then creates the bootstrap-key Secret already
 // owner-referenced to it — there is never a moment when a credential-bearing Secret
@@ -228,6 +236,12 @@ func (p *Provisioner) jobSpec(name string, r Request, port int32) *batchv1.Job {
 // probeTimeout bounds how long Probe waits for its Job to answer. Generous next to the
 // binary's own 10s dial, because the wait also covers scheduling and possibly an image
 // pull; the caller is a human waiting on a form, not a control loop.
+//
+// This is the INNERMOST of the three bounds on a Test Connection, and it must stay the
+// smallest: the two layers above it (control.testConnectionTimeout, then the TUI's
+// testConnTimeout) exist to let this one fire first, because only this layer can say
+// "the probe job did not answer" rather than "something upstream timed out". test/arch
+// asserts the ordering across the three packages.
 const probeTimeout = 60 * time.Second
 
 // probePollInterval is how often the probe pod's status is re-read. A poll, not a
@@ -238,6 +252,11 @@ const probePollInterval = 250 * time.Millisecond
 // probeTTL reclaims a finished probe Job even if this process dies before its own
 // delete runs. The explicit delete in Probe is the primary reclaim; this is the belt.
 const probeTTL int32 = 60
+
+// probeDeleteTimeout bounds Probe's deferred cleanup delete. Short because the delete
+// runs after the answer is already known and nothing waits on it, and because probeTTL
+// reclaims the Job anyway if this call is the thing that fails.
+const probeDeleteTimeout = 10 * time.Second
 
 // Probe runs a one-shot reachability probe as an ephemeral Job and returns its result.
 //
@@ -255,6 +274,19 @@ func (p *Provisioner) Probe(ctx context.Context, ip string, sshPort int32) (Prob
 	if port == 0 {
 		port = 22
 	}
+	// A non-22 port CANNOT be probed, and saying so is the whole point of this branch.
+	// node-provisioner-egress pins TCP:22 (infra/deploy/operator-deploy.yaml) — it is the
+	// only port any pod in this namespace may open to an arbitrary destination — so a probe
+	// of :2222 is dropped by policy before it leaves the node and comes back as a dial
+	// error indistinguishable from a firewalled host. Reporting that as Reachable:false
+	// would tell an operator their healthy node is down because of a NetworkPolicy they
+	// cannot see from the Add Node form. This is an ERROR, not a result, for the same
+	// reason parseProbeMessage refuses to decode a broken probe as an unreachable host.
+	if port != 22 {
+		return ProbeResult{}, fmt.Errorf("cannot probe port %d: only port 22 can be probed, because "+
+			"cluster egress policy pins the provisioner's outbound SSH to :22 — provisioning itself "+
+			"has the same constraint, so a node whose sshd is elsewhere cannot be added from here", port)
+	}
 	// Random name with no hostname in it: probes are concurrent (any operator at any
 	// form can fire one) and, unlike AddNode, carry no per-host identity worth
 	// preserving, so a collision must be impossible rather than merely unlikely.
@@ -268,12 +300,21 @@ func (p *Provisioner) Probe(ctx context.Context, ip string, sshPort int32) (Prob
 	// Job per attempt would fill the namespace with pods holding :22 egress. Background
 	// propagation so the pod goes with the Job rather than being orphaned to the TTL,
 	// and WithoutCancel so an abandoned RPC still cleans up after itself.
+	//
+	// WithoutCancel alone would strip the DEADLINE as well as the cancellation, and the
+	// operator's client sets no Timeout of its own (cmd/operator/main.go builds it from
+	// rest.InClusterConfig), so a wedged API server would park this gRPC handler
+	// goroutine in `defer` forever. WithTimeout puts the bound back without reinstating
+	// the caller's cancellation, which is the pairing this needs: cleanup must outlive
+	// the RPC, but not the process.
 	defer func() {
 		bg := metav1.DeletePropagationBackground
-		_ = p.cs.BatchV1().Jobs(p.cfg.Namespace).Delete(context.WithoutCancel(ctx), job.Name,
+		delCtx, delCancel := context.WithTimeout(context.WithoutCancel(ctx), probeDeleteTimeout)
+		defer delCancel()
+		_ = p.cs.BatchV1().Jobs(p.cfg.Namespace).Delete(delCtx, job.Name,
 			metav1.DeleteOptions{PropagationPolicy: &bg})
 	}()
-	return p.awaitProbe(ctx, job.Name, probeTimeout)
+	return p.awaitProbe(ctx, job.Name, p.probeTimeout)
 }
 
 // awaitProbe polls the probe pod until its container terminates, then reads the answer
@@ -285,7 +326,13 @@ func (p *Provisioner) awaitProbe(ctx context.Context, jobName string, timeout ti
 
 	sel := probeJobLabel + "=" + jobName
 	for {
-		pods, err := p.cs.CoreV1().Pods(p.cfg.Namespace).List(ctx, metav1.ListOptions{LabelSelector: sel})
+		// waitCtx, NOT ctx: the select below only bounds the GAPS between polls, so a
+		// List issued on the parent context is outside the deadline this function
+		// advertises. The operator's client has no Timeout of its own (it comes from
+		// rest.InClusterConfig), so one hung List on an unreachable API server would
+		// park this gRPC handler goroutine indefinitely — with the bound in the
+		// signature and in the error message, both lying.
+		pods, err := p.cs.CoreV1().Pods(p.cfg.Namespace).List(waitCtx, metav1.ListOptions{LabelSelector: sel})
 		if err != nil {
 			return ProbeResult{}, fmt.Errorf("list probe pods for %s: %w", jobName, err)
 		}
@@ -333,11 +380,15 @@ func parseProbeMessage(msg string) (ProbeResult, error) {
 		}
 		return ProbeResult{Reachable: true, LatencyMS: ms}, nil
 	case "unreachable":
-		reason := strings.Join(fields[1:], " ")
-		if reason == "" {
-			reason = "unreachable"
+		// Held to the same strictness as the reachable branch, for the same reason: the
+		// probe always writes a trimmed dial reason (cmd/kanz-provisioner/probe.go), so a
+		// bare "unreachable" is a probe that malfunctioned, not a verdict. Defaulting the
+		// message to "unreachable" would launder that into a confident accusation against
+		// the target — the exact substitution this function exists to refuse.
+		if len(fields) < 2 {
+			return ProbeResult{}, fmt.Errorf("probe reported unreachable without a reason (%q)", msg)
 		}
-		return ProbeResult{Reachable: false, Message: reason}, nil
+		return ProbeResult{Reachable: false, Message: strings.Join(fields[1:], " ")}, nil
 	default:
 		return ProbeResult{}, fmt.Errorf("probe wrote an unrecognised termination message %q", msg)
 	}

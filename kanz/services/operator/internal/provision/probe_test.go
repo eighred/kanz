@@ -11,7 +11,9 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/fake"
+	typedcorev1 "k8s.io/client-go/kubernetes/typed/core/v1"
 	k8stesting "k8s.io/client-go/testing"
 )
 
@@ -22,21 +24,41 @@ type jobRecorder struct {
 	deleted []string
 }
 
+// silentProbeCluster records the Jobs Probe creates and deletes but never produces a
+// pod, so nothing ever terminates and Probe must fall through to its timeout. That is
+// the shape the cleanup-on-timeout assertions need: the recorder outlives the Job.
+func silentProbeCluster() (*fake.Clientset, *jobRecorder) {
+	cs := fake.NewSimpleClientset()
+	rec := &jobRecorder{}
+
+	cs.PrependReactor("create", "jobs", func(a k8stesting.Action) (bool, runtime.Object, error) {
+		if job, ok := a.(k8stesting.CreateAction).GetObject().(*batchv1.Job); ok {
+			rec.created = append(rec.created, job.DeepCopy())
+		}
+		return false, nil, nil
+	})
+	cs.PrependReactor("delete", "jobs", func(a k8stesting.Action) (bool, runtime.Object, error) {
+		rec.deleted = append(rec.deleted, a.(k8stesting.DeleteAction).GetName())
+		return false, nil, nil
+	})
+	return cs, rec
+}
+
 // probeCluster returns a fake clientset that stands in for the one behaviour Probe
 // depends on and a bare fake does not have: the Job controller creating the Job's pod.
 // The pod appears already terminated with msg as its termination message, which is the
 // exact seam Probe reads — without it Probe would poll an empty namespace until it
 // timed out, and every test would prove nothing but the timeout path.
 func probeCluster(msg string) (*fake.Clientset, *jobRecorder) {
-	cs := fake.NewSimpleClientset()
-	rec := &jobRecorder{}
+	cs, rec := silentProbeCluster()
 
+	// Prepended AFTER silentProbeCluster's recorder, so it runs FIRST and falls through
+	// to it; the Job is still recorded exactly once.
 	cs.PrependReactor("create", "jobs", func(a k8stesting.Action) (bool, runtime.Object, error) {
 		job, ok := a.(k8stesting.CreateAction).GetObject().(*batchv1.Job)
 		if !ok {
 			return false, nil, nil
 		}
-		rec.created = append(rec.created, job.DeepCopy())
 		pod := &corev1.Pod{
 			ObjectMeta: metav1.ObjectMeta{
 				Name: job.Name + "-pod", Namespace: job.Namespace,
@@ -55,10 +77,6 @@ func probeCluster(msg string) (*fake.Clientset, *jobRecorder) {
 			return true, nil, err
 		}
 		return false, nil, nil // fall through so the Job itself is still stored
-	})
-	cs.PrependReactor("delete", "jobs", func(a k8stesting.Action) (bool, runtime.Object, error) {
-		rec.deleted = append(rec.deleted, a.(k8stesting.DeleteAction).GetName())
-		return false, nil, nil
 	})
 	return cs, rec
 }
@@ -90,7 +108,7 @@ func TestProbePodCarriesComponentLabel(t *testing.T) {
 // through the one channel the operator reads: the terminated container's message.
 func TestProbeReturnsLatencyFromTerminationMessage(t *testing.T) {
 	cs, _ := probeCluster("reachable 7\n")
-	got, err := New(cs, cfg()).Probe(context.Background(), "10.0.0.5", 2222)
+	got, err := New(cs, cfg()).Probe(context.Background(), "10.0.0.5", 22)
 	if err != nil {
 		t.Fatalf("Probe: %v", err)
 	}
@@ -122,7 +140,7 @@ func TestProbeTargetsTheRequestedAddress(t *testing.T) {
 		port     int32
 		wantAddr string
 	}{
-		{"explicit port", "10.0.0.5", 2222, "10.0.0.5:2222"},
+		{"explicit 22", "10.0.0.5", 22, "10.0.0.5:22"},
 		{"zero means 22", "10.0.0.6", 0, "10.0.0.6:22"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -144,6 +162,35 @@ func TestProbeTargetsTheRequestedAddress(t *testing.T) {
 					"pinging it", env["PROVISION_MODE"])
 			}
 		})
+	}
+}
+
+// TestProbeRefusesNonSSHPortRatherThanLyingAboutIt guards the honesty of the one verdict
+// this RPC exists to give. node-provisioner-egress pins TCP:22, so a probe of :2222 never
+// leaves the node and returns a dial error identical to a firewalled host's. This test
+// used to assert :2222 was wired end to end, which read as support the cluster does not
+// provide; what must hold instead is that the operator says WHY it will not probe, and
+// creates no Job it already knows will produce a false answer.
+func TestProbeRefusesNonSSHPortRatherThanLyingAboutIt(t *testing.T) {
+	cs, rec := probeCluster("reachable 1")
+	got, err := New(cs, cfg()).Probe(context.Background(), "10.0.0.5", 2222)
+	if err == nil {
+		t.Fatalf("Probe(:2222) = %+v with no error — egress policy would have dropped that dial, so "+
+			"any verdict here is a guess presented as a measurement", got)
+	}
+	if got.Reachable {
+		t.Error("a refused probe must not also claim Reachable")
+	}
+	// The message must send the operator to the port, not to the host: an operator who
+	// reads "unreachable" goes and debugs a node that is perfectly healthy.
+	for _, want := range []string{"22", "egress"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("err = %v, want it to mention %q so the cause is the port and not the host", err, want)
+		}
+	}
+	if len(rec.created) != 0 {
+		t.Errorf("a refused probe still created %d job(s) — a Job whose answer is known to be wrong "+
+			"must not be run", len(rec.created))
 	}
 }
 
@@ -269,6 +316,13 @@ func TestParseProbeMessageDistinguishesBrokenFromUnreachable(t *testing.T) {
 		{name: "reachable with newline", msg: "reachable 0\n", want: ProbeResult{Reachable: true}},
 		{name: "unreachable", msg: "unreachable i/o timeout\n",
 			want: ProbeResult{Message: "i/o timeout"}},
+		// Symmetric with "reachable without latency": the probe always writes a reason,
+		// so a bare verdict is a malfunction. Defaulting the message would turn it into
+		// an accusation against a host nothing was ever learned about.
+		{name: "unreachable without a reason", msg: "unreachable", wantErr: true,
+			errSubstr: "without a reason"},
+		{name: "unreachable without a reason, newline", msg: "unreachable\n", wantErr: true,
+			errSubstr: "without a reason"},
 		{name: "empty means broken", msg: "", wantErr: true, errSubstr: "without a termination message"},
 		{name: "whitespace means broken", msg: " \n", wantErr: true, errSubstr: "without a termination message"},
 		{name: "reachable without latency", msg: "reachable", wantErr: true, errSubstr: "without a latency"},
@@ -311,6 +365,99 @@ func TestProbeErrorsWhenPodNeverTerminates(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "did not complete in time") {
 		t.Errorf("err = %v, want it to say the probe Job did not complete in time", err)
+	}
+}
+
+// TestProbeDeletesItsJobWhenTheProbeTimesOut is the assertion behind the cleanup path
+// that matters most and was previously unreachable from a test: awaitProbe could be
+// driven directly with a short timeout, but Probe — which owns the deferred delete —
+// always used the 60s const. A probe is triggerable by anyone who can reach the RPC, so
+// a Job leaked per timed-out attempt is a namespace filling with pods that hold :22
+// egress, on exactly the path a broken estate takes every time.
+func TestProbeDeletesItsJobWhenTheProbeTimesOut(t *testing.T) {
+	cs, rec := silentProbeCluster() // the Job is created; no pod ever terminates
+	p := New(cs, cfg())
+	p.probeTimeout = 30 * time.Millisecond
+
+	if _, err := p.Probe(context.Background(), "10.0.0.5", 22); err == nil {
+		t.Fatal("expected a timeout error from a probe whose pod never terminates")
+	}
+	if len(rec.created) != 1 {
+		t.Fatalf("want exactly 1 probe job created, got %d", len(rec.created))
+	}
+	if want := rec.created[0].Name; len(rec.deleted) != 1 || rec.deleted[0] != want {
+		t.Errorf("deleted jobs = %v, want exactly [%s] — the timeout path must clean up after "+
+			"itself, not leave the Job to probeTTL", rec.deleted, want)
+	}
+	jobs, _ := cs.BatchV1().Jobs("kanz-operator").List(context.Background(), metav1.ListOptions{})
+	if len(jobs.Items) != 0 {
+		t.Errorf("%d probe job(s) left behind after a timeout", len(jobs.Items))
+	}
+}
+
+// TestProbeTimeoutDefaultsToTheConst keeps the injectable field from becoming a way for
+// production to run without a bound at all: the zero value of a time.Duration is an
+// immediately-expired context, so a Provisioner built any way but through New would
+// report every target as a timeout.
+func TestProbeTimeoutDefaultsToTheConst(t *testing.T) {
+	cs, _ := probeCluster("reachable 1")
+	if got := New(cs, cfg()).probeTimeout; got != probeTimeout {
+		t.Errorf("New(...).probeTimeout = %s, want the probeTimeout const (%s)", got, probeTimeout)
+	}
+}
+
+// hangingPodList wraps a clientset so Pods().List blocks until ITS OWN context ends.
+// That is the failure this guards: a hung API call, not a hung pod.
+//
+// A reactor cannot express it — client-go v0.31's ReactionFunc receives an Action with no
+// context, and Fake.Invokes holds the Fake's lock while reactors run, so a reactor that
+// blocks deadlocks the clientset rather than the call. Embedding the interfaces means
+// only the one method that matters is written.
+type hangingPodList struct{ kubernetes.Interface }
+
+func (h hangingPodList) CoreV1() typedcorev1.CoreV1Interface {
+	return hangingCoreV1{h.Interface.CoreV1()}
+}
+
+type hangingCoreV1 struct{ typedcorev1.CoreV1Interface }
+
+func (h hangingCoreV1) Pods(ns string) typedcorev1.PodInterface {
+	return hangingPods{h.CoreV1Interface.Pods(ns)}
+}
+
+type hangingPods struct{ typedcorev1.PodInterface }
+
+func (h hangingPods) List(ctx context.Context, _ metav1.ListOptions) (*corev1.PodList, error) {
+	<-ctx.Done() // returns ONLY if the caller bounded this call
+	return nil, ctx.Err()
+}
+
+// TestAwaitProbeHonoursItsBoundWhenTheAPICallHangs is the guard on awaitProbe passing
+// waitCtx — not the parent ctx — to List. The select statement bounds only the GAPS
+// between polls, so a List on the parent context sits outside the deadline the function
+// advertises, and the operator's client sets no Timeout of its own (it is built from
+// rest.InClusterConfig). Under the old code this test hangs until Go's test timeout
+// kills it, which is precisely what the handler goroutine would have done in production.
+func TestAwaitProbeHonoursItsBoundWhenTheAPICallHangs(t *testing.T) {
+	p := New(hangingPodList{fake.NewSimpleClientset()}, cfg())
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := p.awaitProbe(context.Background(), "probe-abcdefgh", 30*time.Millisecond)
+		done <- err
+	}()
+
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("expected an error once the bound expired")
+		}
+	case <-time.After(5 * time.Second):
+		// Deliberately not t.Fatal from here — the goroutine is parked forever, so say
+		// what that means and let the test binary report it.
+		t.Fatal("awaitProbe never returned: the List call is not bounded by waitCtx, so a hung " +
+			"API server parks this gRPC handler goroutine indefinitely — past the deadline both " +
+			"the signature and the error message claim to enforce")
 	}
 }
 

@@ -291,7 +291,11 @@ spec:
 # TestConnection does not dial from this pod at all: it runs an ephemeral Job whose
 # pod carries app.kubernetes.io/component=node-provisioner and therefore gets its :22
 # from node-provisioner-egress below. A probe reporting a false "connection refused"
-# means that label is missing from the probe pod, not that this policy is too tight.
+# means either that the label is missing from the probe pod or that the target's sshd is
+# not on :22 (node-provisioner-egress pins that port, so any other port is dropped by
+# policy and looks identical to a firewalled host). Neither is this policy being too
+# tight. The operator now rejects a non-22 probe up front with a message saying so
+# (provision.Probe), rather than letting egress turn it into a false verdict.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
