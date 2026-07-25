@@ -94,6 +94,12 @@ spec:
           env:
             - { name: ARCHIVER_LISTEN, value: ":8086" }
             - { name: ARCHIVER_NATS_URL, value: "nats://nats.kanz-messaging.svc:4222" }
+            # SEC-01a. This was absent ENTIRELY — no env and no CSI volume — while the
+            # service reads SPIFFE_ENDPOINT_SOCKET and dials the mTLS-only broker above.
+            # The mesh stayed disabled, so the archiver could not reach the bus at all:
+            # "nats: tls error: x509: certificate signed by unknown authority", which
+            # reads as a CA problem and is a missing mount.
+            - { name: SPIFFE_ENDPOINT_SOCKET, value: "unix:///run/spiffe/spire-agent.sock" }
             # The durable log this pod writes into. Plain value, not a CSI secret
             # mount: the platform's Kafka listener is unauthenticated in-cluster
             # (the same broker address risk-engine's feature stream dials), so
@@ -127,6 +133,12 @@ spec:
               drop: ["ALL"]
           volumeMounts:
             - { name: tmp, mountPath: /tmp }
+            - { name: spiffe, mountPath: /run/spiffe, readOnly: true }
       volumes:
         - name: tmp
           emptyDir: {}
+        # The SPIFFE Workload API socket the env above points at.
+        - name: spiffe
+          csi:
+            driver: csi.spiffe.io
+            readOnly: true
