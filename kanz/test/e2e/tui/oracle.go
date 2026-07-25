@@ -3,6 +3,7 @@ package tui
 import (
 	"bytes"
 	"os/exec"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -125,6 +126,79 @@ func secretDataKeys(t *testing.T, ns, name string) []string {
 	out := kubectl(t, "-n", ns, "get", "secret", name,
 		"-o", "go-template={{range $k, $v := .data}}{{$k}} {{end}}")
 	return strings.Fields(out)
+}
+
+// waitForSecret waits for a Secret to exist and returns its data keys. Separate from
+// secretDataKeys because a write driven through a UI is asynchronous: the form returns
+// before the RPC completes, and failing on the first miss would be a race, not a proof.
+//
+// It shells out directly rather than through kubectl() for the existence probe alone,
+// for the same reason nodeExists does — "not there yet" is the expected state on every
+// pass but the last, and kubectl() is fatal on a non-zero exit. Once the object exists,
+// the read of its keys goes back through kubectl(), where a failure IS fatal.
+func waitForSecret(t *testing.T, ns, name string, timeout time.Duration) []string {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if err := exec.Command("kubectl", "-n", ns, "get", "secret", name,
+			"-o", "name").Run(); err == nil {
+			return secretDataKeys(t, ns, name)
+		}
+		time.Sleep(time.Second)
+	}
+	t.Fatalf("secret %s/%s never appeared within %s — the form did not produce it", ns, name, timeout)
+	return nil
+}
+
+// secretValueEncodedLen returns the LENGTH of a Secret value's base64 encoding — never
+// the value, which is never printed, logged or returned by anything in this package.
+//
+// It exists because the presence of a data key proves almost nothing about the write
+// that produced it. services/operator/internal/secrets/kube.go writes api-key and
+// api-secret UNCONDITIONALLY, empty string included, so a form that submitted nothing at
+// all still yields a Secret carrying both names. A leak check then searches for a canary
+// that never entered the credential path in the first place, and reports clean because
+// there was nothing to find. Comparing this length against the canary's own encoded
+// length pins that the exact bytes typed into the masked field are the bytes that landed.
+//
+// go-template, not jsonpath, and index rather than a field selector: the data keys are
+// HYPHENATED (api-secret), which neither expression language can address with a dot.
+func secretValueEncodedLen(t *testing.T, ns, name, key string) int {
+	t.Helper()
+	out := kubectl(t, "-n", ns, "get", "secret", name,
+		"-o", `go-template={{len (index .data "`+key+`")}}`)
+	n, err := strconv.Atoi(out)
+	if err != nil {
+		t.Fatalf("length of %s/%s data key %q: kubectl returned %q, not a number: %v",
+			ns, name, key, out, err)
+	}
+	return n
+}
+
+// deploymentLogs returns the recent logs of EVERY pod behind a deployment, concatenated.
+//
+// `kubectl logs deploy/x` reads ONE pod. api-gateway runs two replicas
+// (infra/deploy/api-gateway-deploy.yaml), and the operator's write goes through whichever
+// one the Service happened to pick — so a leak check written against the deployment
+// searches half the surface and reports the other half clean without having looked at it.
+// Enumerating the pods and reading each by name closes that, and the empty-list Fatal
+// stops the check from passing because it found nothing to read.
+//
+// Both deployments on this path label their pods app=<deployment name>, which is what
+// makes one selector enough here.
+func deploymentLogs(t *testing.T, ns, deployment, since string) string {
+	t.Helper()
+	pods := kubectlLines(t, "-n", ns, "get", "pods", "-l", "app="+deployment, "-o", "name")
+	if len(pods) == 0 {
+		t.Fatalf("no pods matched app=%s in %s, so a leak check against its logs would pass "+
+			"having read nothing at all", deployment, ns)
+	}
+	var b strings.Builder
+	for _, pod := range pods {
+		b.WriteString(kubectl(t, "-n", ns, "logs", pod, "--all-containers", "--since="+since))
+		b.WriteByte('\n')
+	}
+	return b.String()
 }
 
 // nodeExists reports whether the node is present. It shells out directly rather than

@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"encoding/base64"
 	"regexp"
 	"strings"
 	"testing"
@@ -599,4 +600,116 @@ func TestMoveRegionRelabelsTheNode(t *testing.T) {
 	s.Send(want + "\r")
 
 	waitForRegion(t, node2, want, 30*time.Second)
+}
+
+// keyFormVenue is the venue this proof drives the Set API Keys form for, and the choice
+// is load-bearing rather than arbitrary.
+//
+// newKeyForm (cmd/universe/keyform.go) gives binance TWO fields — API Key, API Secret —
+// and okx THREE, appending a Passphrase. The fill below is written for two, so on a
+// three-field form the Enter that saves would instead land one field early and the canary
+// would be typed into a field this proof does not track. openKeyForm therefore asserts
+// WHICH venue the form opened for before a single character is sent.
+const keyFormVenue = "binance"
+
+// leakLogWindow is how far back the log leak check reads. It must cover the whole run,
+// not just the write: the form's submit is the LAST thing this proof does, but a leak can
+// just as easily have been logged when the TUI dialled the gateway at startup.
+const leakLogWindow = "5m"
+
+// openKeyForm presses k from the API Manager pane and does not return until the form ON
+// SCREEN names the venue this proof is about to type a credential into.
+//
+// This mirrors openDrainConfirm: the last checkable moment before an irreversible key is
+// pressed is the TUI stating what it is about to act on. m.apiSelected is an INDEX into a
+// venue list the poll rebuilds (cmd/universe/model.go), so a reordering between the pane
+// appearing and this keypress moves the selection with no keystroke sent. Waiting only for
+// "API Secret" would not catch it — BOTH venues render that label — and the fill would
+// then misalign against okx's extra field and write a credential into the wrong one.
+//
+// Both waits search the output since the k keypress (driver.go's mark), so neither can be
+// satisfied by anything already in the capture.
+func openKeyForm(t *testing.T, s *Session, venue string) {
+	t.Helper()
+	s.Send("k")
+	// "Set API Keys — <venue>", one lipgloss.Render of one short line (keyform.go's
+	// render), so the text is contiguous in the pty stream whether or not the colour
+	// profile wraps it in SGR escapes.
+	s.WaitFor(t, "Set API Keys — "+venue, 5*time.Second)
+	s.WaitFor(t, "API Secret", 5*time.Second)
+}
+
+// TestVenueKeysWrittenFromTheFormAndNeverLeaked proves the API Manager's key form reaches
+// Kubernetes, and that the credential it carried never surfaced anywhere it could be read.
+//
+// OPS-M2d proved this write over HTTP with curl. This proves the FORM that is supposed to
+// call it — the gap the board flagged. The leak check is EXECUTED rather than assumed: a
+// canary is typed into the masked field and then searched for in every captured frame and
+// in every pod log of both services on the path.
+func TestVenueKeysWrittenFromTheFormAndNeverLeaked(t *testing.T) {
+	env := requireEnv(t)
+	const (
+		canary = "E2E-CANARY-SECRET-8f3a"
+		ns     = "kanz-services"
+	)
+	secret := "venue-" + keyFormVenue + "-keys"
+
+	// Start from no Secret at all, so waitForSecret below is watching this run's write
+	// rather than finding a previous one's and calling it proof.
+	kubectl(t, "-n", ns, "delete", "secret", secret, "--ignore-not-found")
+	// Deferred, not trailing: every assertion below is an Errorf or a Fatalf, and a
+	// trailing delete is skipped by both. That would leave a live credential Secret in
+	// the cluster on exactly the runs that went wrong — and leave the next run to find a
+	// pre-existing Secret. Registered before the TUI starts so it unwinds after s.Close().
+	defer kubectl(t, "-n", ns, "delete", "secret", secret, "--ignore-not-found")
+
+	s := startTUI(t, env)
+	defer s.Close()
+
+	s.Send("\t\t") // Nodes -> Clusters -> API Manager
+	s.WaitFor(t, keyFormVenue, 10*time.Second)
+	openKeyForm(t, s, keyFormVenue)
+
+	// Two fields, proven to be two by openKeyForm's title assertion: tab off API Key,
+	// then Enter saves from API Secret.
+	s.Send("e2e-key\t")
+	s.Send(canary + "\r")
+
+	keys := waitForSecret(t, ns, secret, 30*time.Second)
+	if missing := missingFrom([]string{"api-key", "api-secret"}, keys); len(missing) > 0 {
+		t.Errorf("secret data keys are %v, missing %v. HYPHENS matter: the dev rig mounts "+
+			"the Secret as a plain volume with no CSI mapping, so the data key IS the "+
+			"filename the adapter reads.", keys, missing)
+	}
+
+	// The keys above are written unconditionally by the operator, empty values included,
+	// so their presence alone does not establish that the canary ever entered the
+	// credential path — and a leak check for a string that was never written is a check
+	// that cannot fail. Length, compared in base64 so the value itself is never read out
+	// of the cluster, is what makes the search below mean something.
+	wantLen := len(base64.StdEncoding.EncodeToString([]byte(canary)))
+	if got := secretValueEncodedLen(t, ns, secret, "api-secret"); got != wantLen {
+		t.Fatalf("api-secret in %s/%s encodes to %d base64 chars, want %d for the %d-byte "+
+			"canary. The form did not put what was typed into the masked field — so the "+
+			"leak check below would be searching for a string that was never submitted.",
+			ns, secret, got, wantLen, len(canary))
+	}
+
+	// LEAK CHECK, executed rather than assumed.
+	//
+	// ANSI is stripped first. The canary contains no escape bytes, so stripping can only
+	// JOIN a leak that a style sequence had split — it can never hide one, and it can
+	// never manufacture one. A raw search is therefore strictly weaker here.
+	if strings.Contains(stripANSI(s.Frames()), canary) {
+		t.Error("the submitted credential appeared in a rendered frame — a masked field that " +
+			"echoes on any screen is a credential on a shared terminal")
+	}
+	for _, target := range []struct{ ns, deployment string }{
+		{"kanz-services", "api-gateway"},
+		{"kanz-operator", "operator"},
+	} {
+		if strings.Contains(deploymentLogs(t, target.ns, target.deployment, leakLogWindow), canary) {
+			t.Errorf("the credential appeared in %s/%s logs", target.ns, target.deployment)
+		}
+	}
 }
