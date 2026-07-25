@@ -59,6 +59,20 @@ func nodeSchedulable(t *testing.T, node string) bool {
 	return kubectl(t, "get", "node", node, "-o", "jsonpath={.spec.unschedulable}") != "true"
 }
 
+// waitForSchedulable polls the CLUSTER until the node reaches the wanted state.
+func waitForSchedulable(t *testing.T, node string, want bool, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if nodeSchedulable(t, node) == want {
+			return
+		}
+		time.Sleep(time.Second)
+	}
+	t.Fatalf("node %s did not become schedulable=%v within %s — the keypress did not reach "+
+		"Kubernetes, whatever the TUI rendered", node, want, timeout)
+}
+
 func nodeLabel(t *testing.T, node, key string) string {
 	t.Helper()
 	return kubectl(t, "get", "node", node, "-o", "jsonpath={.metadata.labels."+

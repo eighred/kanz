@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -304,6 +305,149 @@ func TestProbeRefusesAPortItCannotProbe(t *testing.T) {
 
 	s.SendKey(0x1b) // Esc, without saving
 	s.WaitFor(t, "NODES", 5*time.Second)
+}
+
+// selectionMarker is the glyph cmd/universe/view.go's renderNodes puts in front of
+// the highlighted row (styleSelected.Render("▸ ")). It appears nowhere else in the
+// Nodes pane, which is what makes the selection machine-readable from the pty stream
+// at all. It IS also used by the two forms, so every helper below assumes the Nodes
+// pane is on screen — which is the only state these cordon proofs ever put it in.
+const selectionMarker = "▸"
+
+// ansiSeq matches the escape sequences Bubble Tea and lipgloss interleave with the
+// text: CSI (colour, erase-line, alt-screen, cursor moves), OSC, and the short
+// charset/keypad forms. Stripping them is not cosmetic — the marker is styled, so in
+// the raw capture the glyph is wrapped in SGR escapes and is NOT textually adjacent
+// to the node name that follows it. Whether those escapes are present at all depends
+// on the colour profile lipgloss infers from the environment, so a matcher that
+// assumed either shape would be a proof that passes or fails on TERM rather than on
+// what the TUI did.
+var ansiSeq = regexp.MustCompile(
+	"\x1b\\[[0-9;?]*[ -/]*[@-~]|\x1b\\][^\x07\x1b]*(?:\x07|\x1b\\\\)|\x1b[()][0-9A-Za-z]|\x1b[=>]")
+
+func stripANSI(s string) string { return ansiSeq.ReplaceAllString(s, "") }
+
+// selectedNodeName reports which node the Nodes pane highlight is on RIGHT NOW, read
+// off the last complete marker line in the capture.
+//
+// "Last", not "any": the capture is cumulative, so a Contains over the whole buffer
+// answers "was this row ever highlighted", which is a different and far more
+// dangerous question — it says yes about a row the selection has already moved past.
+// Bubble Tea's standard renderer rewrites only the lines that changed, top to bottom
+// (the paint loop in standard_renderer.go), so the most recent line still carrying
+// the marker is the row the highlight sits on now. That holds for a move in either
+// direction and for a full repaint on the 3s poll, since exactly one rendered row
+// carries the marker in any frame.
+//
+// The final segment is dropped: the reader goroutine takes 4096-byte chunks and can
+// split a line, and a half-written row must never be read as a selection.
+func selectedNodeName(s *Session) (string, bool) { return selectedNodeIn(s.Frames()) }
+
+// selectedNodeIn is selectedNodeName's parser, split out so it can be proved against
+// hand-built captures (selection_test.go) on a machine with no cluster and no pty.
+func selectedNodeIn(capture string) (string, bool) {
+	lines := strings.Split(stripANSI(capture), "\n")
+	for i := len(lines) - 2; i >= 0; i-- {
+		_, after, found := strings.Cut(lines[i], selectionMarker)
+		if !found {
+			continue
+		}
+		if f := strings.Fields(after); len(f) > 0 {
+			return f[0], true
+		}
+	}
+	return "", false
+}
+
+// navStepTimeout bounds one arrow key: how long the TUI gets to redraw the two rows a
+// selection move changes. It is a keystroke-latency bound of the same class as the 5s
+// form and pane waits above, not a bound on any call — moving the highlight is a local
+// model update with no I/O anywhere in it.
+const navStepTimeout = 5 * time.Second
+
+// maxNavSteps caps the walk. It is belt and braces only: the real termination
+// condition is an arrow key that fails to move the highlight, which means the list has
+// no more rows and is reported as such.
+const maxNavSteps = 64
+
+// selectNode2 moves the Nodes-pane selection onto node 2 and does not return until the
+// pane has REDRAWN with the highlight there. Node ordering is the cluster's, so the
+// helper searches rather than assuming an index.
+//
+// Call it before sending any other key: the WaitFor below relies on the capture mark
+// still being 0 (see driver.go) so that it searches the whole startup frame rather
+// than output since a keystroke.
+//
+// This is a NAVIGATION loop, not a retry loop, and every step waits for the highlight
+// to actually move before pressing again. That synchronisation is the whole point, and
+// it replaces a fixed sleep between keypresses, which races: a redraw slower than the
+// sleep lets the next arrow key overshoot the target, and a Contains over the
+// cumulative capture would then still find node 2 marked — in a frame the selection
+// has already left. The proof would go on to cordon whatever row it overshot onto. On
+// a two-node cluster the only other row is the control plane.
+func selectNode2(t *testing.T, s *Session, node2 string) {
+	t.Helper()
+	s.WaitFor(t, node2, 10*time.Second)
+
+	for step := 0; step < maxNavSteps; step++ {
+		cur, ok := waitForSelection(s, "", navStepTimeout)
+		if !ok {
+			t.Fatalf("the Nodes pane never drew a %q selection marker within %s. If the TUI "+
+				"does not mark the selected row in a machine-readable way, that is the finding: "+
+				"an operator cannot tell which node an action will hit either.\n"+
+				"--- captured output ---\n%s\n--- end ---",
+				selectionMarker, navStepTimeout, s.Frames())
+		}
+		if cur == node2 {
+			return
+		}
+		s.Send("\x1b[B") // down arrow
+		if _, moved := waitForSelection(s, cur, navStepTimeout); !moved {
+			t.Fatalf("the selection stayed on %s after a down arrow, so the Nodes pane's list "+
+				"ends there and %s is not below it. Stopping here rather than pressing on: the "+
+				"next action key would act on %s.", cur, node2, cur)
+		}
+	}
+	t.Fatalf("walked %d rows without reaching %s in the Nodes pane", maxNavSteps, node2)
+}
+
+// waitForSelection polls the capture until the highlighted row is a node other than
+// notName and returns its name; pass "" to wait for any highlighted row at all. It
+// returns false rather than failing the test, because both of its callers have a more
+// specific thing to say about a timeout than "nothing happened".
+func waitForSelection(s *Session, notName string, timeout time.Duration) (string, bool) {
+	deadline := time.Now().Add(timeout)
+	for {
+		if name, ok := selectedNodeName(s); ok && name != notName {
+			return name, true
+		}
+		if time.Now().After(deadline) {
+			return "", false
+		}
+		time.Sleep(pollInterval)
+	}
+}
+
+// TestCordonAndUncordonChangeTheCluster proves c and u reach Kubernetes. Both keys
+// fire directly from the Nodes pane with no confirmation (cmd/universe/model.go —
+// only drain is gated behind y/n), so the keypress is the whole interaction and
+// .spec.unschedulable on the node is the whole assertion.
+func TestCordonAndUncordonChangeTheCluster(t *testing.T) {
+	env := requireEnv(t)
+	node2 := waitForNodeReady(t, 2*time.Minute)
+	if !nodeSchedulable(t, node2) {
+		kubectl(t, "uncordon", node2) // start from a known state
+	}
+
+	s := startTUI(t, env)
+	defer s.Close()
+	selectNode2(t, s, node2)
+
+	s.Send("c")
+	waitForSchedulable(t, node2, false, 30*time.Second)
+
+	s.Send("u")
+	waitForSchedulable(t, node2, true, 30*time.Second)
 }
 
 // clusterNodeNames lists every node in the cluster. Used instead of predicting a
