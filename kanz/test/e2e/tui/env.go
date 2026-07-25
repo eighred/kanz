@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -44,10 +45,24 @@ func requireEnv(t *testing.T) Env {
 		}
 	}
 	if len(missing) > 0 {
+		// Map iteration order is random, so without sorting this message would name the
+		// same missing variables in a different order on every run — nondeterministic
+		// output from a helper whose whole job is to be a reliable, diffable signal.
+		sort.Strings(missing)
 		t.Skipf("SKIPPING a real end-to-end proof — unset: %s. This is NOT a pass: the workflow "+
 			"was not exercised. Set these against a live two-node cluster to run it.",
 			strings.Join(missing, ", "))
 	}
+
+	// A variable that is set but wrong is worse than one that is absent: absent is what
+	// the skip above is for, and a test suite that treats "configured" as "correct" lets
+	// a bad path sail through the gate. Left unchecked, this fails much later inside
+	// whichever proof first tries to SSH, as a confusing provisioning error far removed
+	// from its actual cause — so fail here, loudly and specifically, instead.
+	if _, err := os.Stat(need["KANZ_E2E_SSH_KEY"]); err != nil {
+		t.Fatalf("KANZ_E2E_SSH_KEY=%q does not exist: %v", need["KANZ_E2E_SSH_KEY"], err)
+	}
+
 	return Env{
 		GatewayURL:    need["KANZ_E2E_GATEWAY"],
 		Token:         need["KANZ_E2E_TOKEN"],
