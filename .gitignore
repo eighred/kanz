@@ -13,3 +13,13 @@
 
 # Stripped release binaries (`make release`).
 bin/
+
+# Binaries left in-tree by a bare `go build ./cmd/...`, which writes the
+# executable into the working directory rather than bin/. Named explicitly per
+# command rather than as a blanket rule: `kanz` and `operator` are also directory
+# names in this repo, and a pattern broad enough to catch the binaries would
+# silently ignore the source trees beside them.
+/kanz/universe
+/kanz/universe.exe
+/kanz/kanz-provisioner
+/kanz/kanz-provisioner.exe
