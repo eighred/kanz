@@ -236,15 +236,29 @@ func validate443RulePeers(t *testing.T, rule netPolRule) {
 }
 
 // TestOperatorEgressIsBounded asserts the S4b operator-egress NetworkPolicy grants
-// exactly DNS (53/UDP+TCP) and exchange HTTPS (443/TCP), nothing else, that the 443
-// rule is scoped to the public internet only, and that neither rule carries any
-// additional peer beyond the one it is documented to have. This is the operator's
-// first-ever outbound permission (venueproof.Prover's pre-write proof, see
-// venueproof.go); a drift toward a wider port set, an extra `to:` peer, an unscoped
-// `to:`, or a shrunken except: list would let this permission reach further than the
-// one exchange call it exists for. Peer content is validated exhaustively — the test
-// must fail on anything the policy permits beyond the documented set, not merely
-// confirm the documented set is present.
+// exactly DNS (53/UDP+TCP), exchange HTTPS (443/TCP), the Kubernetes API server
+// (6443/TCP), and TestConnection's SSH probe (22/TCP), nothing else. The 443 rule
+// must be scoped to the public internet only, and the DNS/6443 rules must each carry
+// only the one peer each is documented to have.
+//
+// TCP:22 IS A DELIBERATE, NAMED EXCEPTION to "no rule may have an empty `to:`":
+// operator.v1.TestConnection (S2b, OPS-M2e) dials an operator-supplied target IP
+// chosen by a human at run time, so there is no fixed CIDR to scope it to — the same
+// reason node-provisioner-egress's SSH rule is destination-open. This guard permits
+// exactly ONE such rule, and only on port 22. A future reader must not "tighten" this
+// back to require a `to:` on every rule — that silently breaks TestConnection again,
+// the way its absence did the first time (every dial reported "connection refused"
+// regardless of the target's real state). Every OTHER port must still carry a
+// non-empty, exhaustively-validated `to:` — an empty `to:` anywhere else, or a second
+// :22 rule, must still fail.
+//
+// This is the operator's outbound permission set (venueproof.Prover's pre-write
+// proof, the Kubernetes API client, and the connectivity probe); a drift toward a
+// wider port set, an extra `to:` peer, an unscoped `to:` on a port other than 22, or
+// a shrunken except: list would let a permission reach further than the one call it
+// exists for. Peer content is validated exhaustively — the test must fail on anything
+// the policy permits beyond the documented set, not merely confirm the documented set
+// is present.
 func TestOperatorEgressIsBounded(t *testing.T) {
 	docs := decodeOperatorNetworkPolicies(t)
 	pol, ok := findOperatorEgressPolicy(docs)
@@ -261,7 +275,7 @@ func TestOperatorEgressIsBounded(t *testing.T) {
 		t.Errorf("operator-egress policyTypes = %v, want exactly [Egress]", pol.Spec.PolicyTypes)
 	}
 
-	wantPorts := map[string]bool{"UDP:53": true, "TCP:53": true, "TCP:443": true, "TCP:6443": true}
+	wantPorts := map[string]bool{"UDP:53": true, "TCP:53": true, "TCP:443": true, "TCP:6443": true, "TCP:22": true}
 	gotPorts := map[string]bool{}
 
 	const wantDNSPortKey = "TCP:53,UDP:53"
@@ -271,13 +285,17 @@ func TestOperatorEgressIsBounded(t *testing.T) {
 	// ClusterIP:443 form is DNAT'd before egress policy is evaluated and never
 	// matches), so the two permissions cannot be confused for one another here.
 	const wantAPIPortKey = "TCP:6443"
-	var dnsRules, tcp443Rules, apiRules []netPolRule
+	// TestConnection's SSH probe (OPS-M2e). The ONE port allowed an empty `to:` —
+	// see the doc comment above this test for why.
+	const wantSSHPortKey = "TCP:22"
+	var dnsRules, tcp443Rules, apiRules, sshRules []netPolRule
 
 	for _, rule := range pol.Spec.Egress {
-		// A rule with no `to:` peers is unrestricted egress on its ports — the
-		// one thing this policy exists to forbid.
-		if len(rule.To) == 0 {
-			t.Errorf("operator-egress has an egress rule with an empty `to:` (ports %v) — unrestricted egress is forbidden", rule.Ports)
+		// A rule with no `to:` peers is unrestricted egress on its ports. Forbidden
+		// everywhere EXCEPT the single documented TCP:22 exception (OPS-M2e) — the
+		// operator-supplied probe target has no fixed CIDR to scope `to:` to.
+		if len(rule.To) == 0 && rulePortKey(rule) != wantSSHPortKey {
+			t.Errorf("operator-egress has an egress rule with an empty `to:` (ports %v) — unrestricted egress is forbidden except on the documented TCP:22 probe rule", rule.Ports)
 		}
 		for _, p := range rule.Ports {
 			gotPorts[strings.ToUpper(p.Protocol)+":"+strconv.Itoa(p.Port)] = true
@@ -289,6 +307,8 @@ func TestOperatorEgressIsBounded(t *testing.T) {
 			tcp443Rules = append(tcp443Rules, rule)
 		case wantAPIPortKey:
 			apiRules = append(apiRules, rule)
+		case wantSSHPortKey:
+			sshRules = append(sshRules, rule)
 		}
 	}
 
@@ -341,6 +361,36 @@ func TestOperatorEgressIsBounded(t *testing.T) {
 		for _, r := range apiRules {
 			validateAPIServerRulePeers(t, r)
 		}
+	}
+
+	switch len(sshRules) {
+	case 0:
+		t.Error("operator-egress has no TCP:22 rule — TestConnection (S2b) cannot reach any node's " +
+			"sshd, so it reports \"connection refused\" for every target regardless of the target's " +
+			"real state (OPS-M2e)")
+	case 1:
+		validateSSHRulePeers(t, sshRules[0])
+	default:
+		t.Errorf("operator-egress has %d rules with ports [TCP:22] (want exactly 1) — the empty `to:` "+
+			"exception is permitted for exactly one rule, not a growing set", len(sshRules))
+	}
+}
+
+// validateSSHRulePeers asserts the TestConnection probe rule is destination-open —
+// no `to:` peers at all. This is the ONE rule in operator-egress permitted an empty
+// `to:` (OPS-M2e): the probe target is an operator-supplied IP chosen at run time, so
+// there is no fixed CIDR to scope it to, the same reasoning node-provisioner-egress's
+// SSH rule already uses. A `to:` appearing here would mean the exception is no longer
+// needed and the rule should be scoped like every other one instead.
+func validateSSHRulePeers(t *testing.T, rule netPolRule) {
+	t.Helper()
+	if len(rule.To) != 0 {
+		descs := make([]string, len(rule.To))
+		for i, p := range rule.To {
+			descs[i] = p.describe()
+		}
+		t.Errorf("operator-egress TCP:22 rule has %d `to:` peer(s) %v, want none (destination-open by "+
+			"design) — if this rule can be scoped, it should be, and the empty-`to:` exception removed", len(rule.To), descs)
 	}
 }
 

@@ -281,8 +281,34 @@ spec:
 # network-policies.yaml's allow-dns-egress uses for the analogous kanz-services
 # rule. node-provisioner-egress follows this same scoped convention for its DNS
 # rule (SEC-M6 update), though it retains an intentionally open SSH rule to reach
-# arbitrary operator-supplied node IPs — but any NEW rule must not use an empty
-# `to:` now that a guard (operator_egress_test.go) forbids this pattern.
+# arbitrary operator-supplied node IPs.
+#
+# TCP:22 IS THE ONE NAMED EXCEPTION to "any NEW rule must not use an empty `to:`"
+# (OPS-M2e). operator.v1.TestConnection (S2b) is a pre-flight reachability probe:
+# the operator dials an operator-supplied target IP's SSH port before provisioning
+# it, chosen by a human at run time — there is no fixed CIDR to scope `to:` to,
+# the same reason node-provisioner-egress's SSH rule above is destination-open.
+# Without this rule the probe always reports "connection refused" regardless of
+# the target's real state, because deny-by-default silently ate the dial; proven
+# against a live cluster where the target's own sshd was open and reachable by a
+# different pod (the provisioner Job, covered by node-provisioner-egress) but not
+# by this one.
+#
+# COST, NAMED HONESTLY: the operator pod can now open a TCP connection to port 22
+# on ANY address it is asked to. That is a deliberate widening, not an oversight.
+#
+# WHAT BOUNDS IT: the probe is content-free — it returns only reachability and
+# latency, never any bytes read from the peer — so this is an accepted SSRF-style
+# surface (the operator can be made to probe a port on an address of the caller's
+# choosing), not a data-exfiltration path. And since OPS-M2a/M2b the RPC is
+# reachable only through api-gateway behind the `Operate` capability (see
+# OPERATOR_ALLOWED_CLIENTS and operator-ingress above) — an anonymous in-cluster
+# caller cannot reach it at all, which is strictly narrower than the
+# `kubectl port-forward` access this surface had when S2b was written.
+#
+# Guarded by operator_egress_test.go: exactly one TCP:22 rule, empty `to:`
+# permitted for that rule ONLY. A second :22 rule, or an empty `to:` on any other
+# port, fails the build.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -341,6 +367,10 @@ spec:
               - 169.254.0.0/16
       ports:
         - { protocol: TCP, port: 443 }
+    # TestConnection's target port. Intentionally destination-open — see the
+    # comment above this policy for why, the cost, and what bounds it.
+    - ports:
+        - { protocol: TCP, port: 22 }
 ---
 # The provisioner Job pod's only outbound connections are DNS (to resolve the
 # operator-supplied target address) and SSH to that target. The k3s join
