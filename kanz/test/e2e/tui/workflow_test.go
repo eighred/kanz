@@ -123,19 +123,19 @@ func TestCancelledFormThenQuitProvisionsNothingAndExitsCleanly(t *testing.T) {
 	}
 }
 
-// ctrl+t is byte 0x14. The Add Node form's Test Connection probe is a TCP dial, so a
-// reachable SSH port answers and a closed port does not.
+// ctrl+t is byte 0x14. Test Connection is no longer an in-process dial: the operator
+// creates an ephemeral Job that opens one TCP connection to the form's ip:port and
+// reports what happened. Two consequences shape every proof below — the call now costs
+// seconds rather than milliseconds, and a port other than :22 is refused as INPUT
+// instead of being probed at all (see TestProbeRefusesAPortItCannotProbe).
 const ctrlT = byte(0x14)
 
-// closedPort is not :22, the only port the environment's security group and
-// node-provisioner-egress NetworkPolicy are documented to permit toward node 2. A
-// probe against it therefore either gets a fast RST (rendered "✗ unreachable: ...")
-// or the packet is dropped and the gateway's own dial times out (rendered
-// "✗ test failed: ..."). Both render with a leading "✗", so asserting on that glyph
-// proves the probe actually distinguishes reachable from not, regardless of which of
-// those two failure shapes this particular network produces.
-const closedPort = "23"
-
+// TestAddNodeProbesThenJoinsTheNodeLive is the happy path end to end: probe a reachable
+// host, then commit and watch the node actually join. The two negative outcomes a probe
+// can produce are proven separately below, each against a target chosen to produce that
+// one outcome and nothing else — a single test that pretends to cover all three ends up
+// asserting on whichever glyph they happen to share, which is how the previous version
+// of this proof came to pass for a reason it did not claim.
 func TestAddNodeProbesThenJoinsTheNodeLive(t *testing.T) {
 	env := requireEnv(t)
 	// Guard by COUNTING nodes, not by guessing a name. k3s names a node after the
@@ -153,38 +153,150 @@ func TestAddNodeProbesThenJoinsTheNodeLive(t *testing.T) {
 	s.Send("a")
 	s.WaitFor(t, "Hostname", 5*time.Second)
 
-	// Fields in order: Hostname, IP, SSH Port (prefilled 22), User, Key Path.
+	// Fields in order: Hostname, IP, SSH Port (prefilled 22), User, Key Path. The port
+	// is tabbed past UNTOUCHED: 22 is both the prefilled value and the only port this
+	// estate can probe or provision over, so there is nothing to edit here and — unlike
+	// the previous version of this test — nothing to restore before the save below.
 	s.Send("e2e-node2\t")
 	s.Send(env.Node2IP + "\t") // focus now sits on SSH Port, prefilled "22"
-
-	// S2b, failure path: prove the probe can actually say no, not just that it
-	// always renders "reachable" for whatever ip:port happens to be in the form.
-	// This must run BEFORE the real probe below and the port must be restored
-	// afterward — testConnCmd reads whatever is currently in the SSH Port field,
-	// and the field that gets probed here is also the one Save will submit.
-	s.SendKey(0x7f) // backspace: "22" -> "2"
-	s.SendKey(0x7f) // backspace: "2" -> ""; SSH Port is now empty
-	s.Send(closedPort)
-	s.SendKey(ctrlT)
-	s.WaitFor(t, "✗", 20*time.Second) // "✗" — see closedPort's comment for why
-
-	// Restore the real port. Leaving it at closedPort would make the save below
-	// provision against a port nothing is listening on.
-	s.SendKey(0x7f)
-	s.SendKey(0x7f)
-	s.Send("22\t") // put the real port back, then move on to User
+	s.Send("\t")               // leave "22" exactly as it is; focus moves to User
 	s.Send("ubuntu\t")
 	s.Send(env.SSHKeyPath)
 
 	// S2b happy path: probe before committing.
 	s.SendKey(ctrlT)
-	s.WaitFor(t, "reachable", 20*time.Second)
+
+	// The IN-FLIGHT state must be asserted BEFORE the verdict, or this proof says
+	// nothing about the seconds in between — and those seconds are now where the
+	// operator spends the entire probe. A form that answered a keypress with an
+	// unchanged screen would still satisfy a verdict-only assertion.
+	//
+	// 5s: "probing…" (cmd/universe/view.go) is set in the same Update that handles the
+	// keypress, with no I/O in front of it, so this is a keystroke-latency bound of the
+	// same class as the 5s form and pane waits above — not a probe bound.
+	s.WaitFor(t, "probing", 5*time.Second)
+
+	// "✓ reachable", not the bare word: "✗ unreachable: ..." CONTAINS "reachable", so
+	// matching the word alone would report a refused host as a successful probe and
+	// only fail later, at the join, with a cause that points at the wrong thing.
+	//
+	// 45s, up from the 20s the in-process dial needed. ctrl+t now creates a Job, waits
+	// for a pod to be scheduled and its container to start, and only then spends up to
+	// probeDialTimeout (10s, cmd/kanz-provisioner/probe.go) on the dial itself, so 20s
+	// now sits below the floor of a perfectly healthy run on a cold image.
+	//
+	// 45s is picked against the bounds either side of it. It is comfortably above that
+	// expected cost, and above every realistic NEGATIVE shape too (refused instantly,
+	// or dropped and timed out after 10s), so a real failure arrives on screen as the
+	// operator's own verdict rather than as a bare PTY timeout that names no cause. It
+	// stays below provision.probeTimeout (60s), past which there is nothing left to
+	// wait on — the operator has abandoned the probe by then. The one shape this bound
+	// does cut short is a pod that never gets scheduled at all, and that is a cluster
+	// scheduling fault to read out of the namespace, not off this screen.
+	s.WaitFor(t, "✓ reachable", 45*time.Second)
 
 	s.Send("\r") // save
 	// The join installs k3s over SSH on a 414MB host; allow real time for it.
 	s.WaitFor(t, "Installing", 30*time.Second)
 
 	waitForNodeReady(t, 6*time.Minute)
+}
+
+// TestProbeReportsAClosedPortAsUnreachable proves Test Connection can genuinely answer
+// "no" — that a ✗ verdict is a real observation of a real dial rather than the only
+// thing the form knows how to say.
+//
+// The target is 127.0.0.1 on the prefilled port 22, and both halves are deliberate:
+//
+//   - The ADDRESS is what makes this fail. Nothing listens on :22 inside the distroless
+//     probe pod, so the kernel refuses the connection immediately: a real reachable=false
+//     carrying a real reason ("connection refused"), in milliseconds, with no second host
+//     to arrange and nothing about the environment left to assume. Loopback never leaves
+//     the pod's network namespace, so no NetworkPolicy is in the path either — the
+//     verdict cannot be an artefact of cluster policy the way a probe of a routed
+//     address can be.
+//   - The PORT stays at 22. Forcing the failure with a non-22 port is exactly the trap
+//     this test replaces: that path is now an INPUT rejection at the operator's boundary
+//     (TestProbeRefusesAPortItCannotProbe), so no probe is ever created, and asserting on
+//     ✗ would pass without a dial having happened at all.
+//
+// Nothing is saved, so the cluster is unchanged — this may run at any time, whether or
+// not a second node is joined. The probe Job itself is created and deleted by the
+// operator on every path, including timeout and cancellation.
+func TestProbeReportsAClosedPortAsUnreachable(t *testing.T) {
+	env := requireEnv(t)
+	s := startTUI(t, env)
+	defer s.Close()
+
+	s.Send("a")
+	s.WaitFor(t, "Hostname", 5*time.Second)
+
+	s.Send("probe-only\t") // Hostname; this form is never submitted
+	s.Send("127.0.0.1\t")  // IP; focus now sits on SSH Port, prefilled "22"
+
+	s.SendKey(ctrlT)
+	// 5s, and the same keystroke-latency reasoning as the happy path: the in-flight
+	// state is set synchronously with the keypress, so nothing here waits on the probe.
+	s.WaitFor(t, "probing", 5*time.Second)
+
+	// "✗ unreachable", not a bare "✗". The other ✗ this form can render is
+	// "✗ test failed: ...", which means the probe could not be RUN — the opposite of
+	// what this test claims to prove. Matching the glyph alone would let a broken probe
+	// stand in for a working one that said no, which is the same class of false pass
+	// this restructuring exists to remove.
+	//
+	// 45s for the reasons given on the happy path's wait; a refusal is immediate, so
+	// everything spent here is Job creation and pod scheduling.
+	s.WaitFor(t, "✗ unreachable", 45*time.Second)
+
+	// Esc out without saving, asserting what the Esc proof above asserts: control is
+	// back at the NODES pane, not stuck in a form that has just shown an error.
+	s.SendKey(0x1b) // Esc
+	s.WaitFor(t, "NODES", 5*time.Second)
+}
+
+// TestProbeRefusesAPortItCannotProbe proves a non-22 port is reported as the input
+// error it is, and never disguised as a host that is down.
+//
+// node-provisioner-egress pins the provisioner's outbound SSH to :22, so a probe of any
+// other port is dropped by policy before it leaves the node and would come back as a
+// dial error indistinguishable from a firewalled host. The operator therefore refuses
+// the port at its own boundary with InvalidArgument, which the gateway maps to 400 and
+// the TUI renders as "✗ test failed: gateway returned 400: cannot probe port 23: only
+// port 22 can be probed, ...".
+//
+// The assertion is on "only port 22" — the constraint itself — and deliberately NOT on
+// "✗". A ✗ is precisely what this outcome must not be confused with: an operator who
+// reads "port 23 is unreachable" goes off to debug a healthy host's firewall, while one
+// who reads "only port 22 can be probed" fixes the form. That distinction is also why
+// the closed-port proof above uses a closed ADDRESS rather than a closed port — on this
+// path no probe ever runs, so there is nothing there to observe.
+//
+// Nothing is saved and no probe Job is created, so the cluster is untouched and this may
+// run at any time, joined second node or not.
+func TestProbeRefusesAPortItCannotProbe(t *testing.T) {
+	env := requireEnv(t)
+	s := startTUI(t, env)
+	defer s.Close()
+
+	s.Send("a")
+	s.WaitFor(t, "Hostname", 5*time.Second)
+
+	s.Send("e2e-node2\t")
+	s.Send(env.Node2IP + "\t") // focus now sits on SSH Port, prefilled "22"
+	s.SendKey(0x7f)            // backspace: "22" -> "2"
+	s.SendKey(0x7f)            // backspace: "2" -> ""; SSH Port is now empty
+	s.Send("23")
+
+	s.SendKey(ctrlT)
+	// 15s, NOT the 45s the two probe waits use, and the gap is the point: this answer
+	// costs one gateway round trip to an argument check, with no Job, no scheduling and
+	// no dial anywhere in it. A bound sized like a probe's would also accommodate a
+	// build that quietly went and probed, which is the behaviour being ruled out.
+	s.WaitFor(t, "only port 22", 15*time.Second)
+
+	s.SendKey(0x1b) // Esc, without saving
+	s.WaitFor(t, "NODES", 5*time.Second)
 }
 
 // clusterNodeNames lists every node in the cluster. Used instead of predicting a
