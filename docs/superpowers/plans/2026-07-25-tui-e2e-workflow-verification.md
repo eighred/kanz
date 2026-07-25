@@ -35,7 +35,7 @@
 
 **Environment facts (verified 2026-07-25):**
 - Node 1: `57.180.60.86`, internal `172.26.11.140`, k3s **server**, 2 vCPU / 3.8 GB, runs the estate.
-- Node 2: `52.195.224.210`, user `ubuntu`, Ubuntu 24.04.4, x86_64, 2 vCPU / **414 MB**, k3s absent, reachable with the same key.
+- Node 2: public `52.195.224.210`, **private `172.26.12.47`, hostname `ip-172-26-12-47`** — k3s will name the node from the hostname, NOT from the public ip the operator types. 2 vCPU / 414 MB + 2 GB swap added, Ubuntu 24.04.4, x86_64, k3s absent, reachable with the same key.
 - SSH key: `LightsailDefaultKey-ap-northeast-1.pem`, fingerprint `SHA256:lOvFt9P3Iy72VFK7eQswG949dvGU46oOqpnP4yYdIPg`.
 - Gateway dev secrets: JWT `dev-only-not-a-real-jwt-secret`, signing `dev-only-not-a-real-signing-secret`, roles `kanz-user` + `kanz-operator`.
 
@@ -686,8 +686,13 @@ const ctrlT = byte(0x14)
 
 func TestAddNodeProbesThenJoinsTheNodeLive(t *testing.T) {
 	env := requireEnv(t)
-	if nodeExists(t, "ip-"+dashed(env.Node2IP)) {
-		t.Skip("node 2 is already joined; delete it from the cluster to re-prove the join")
+	// Guard by COUNTING nodes, not by guessing a name. k3s names a node after the
+	// target host's own hostname, which on this provider derives from its PRIVATE ip
+	// (node 2 is ip-172-26-12-47) — never from the public ip the operator types into
+	// the form. A guard built on "ip-"+publicIP could never match, so it would never
+	// skip, and this proof would silently re-run against an already-joined node.
+	if len(clusterNodeNames(t)) > 1 {
+		t.Skip("a second node is already joined; remove it from the cluster to re-prove the join")
 	}
 
 	s := startTUI(t, env)
@@ -714,8 +719,14 @@ func TestAddNodeProbesThenJoinsTheNodeLive(t *testing.T) {
 	waitForNodeReady(t, 6*time.Minute)
 }
 
-// dashed renders an IP the way k3s names a node from its hostname.
-func dashed(ip string) string { return strings.ReplaceAll(ip, ".", "-") }
+// clusterNodeNames lists every node in the cluster. Used instead of predicting a
+// node's name: the name comes from the remote host's hostname, which this test has
+// no reliable way to derive from the address an operator typed.
+func clusterNodeNames(t *testing.T) []string {
+	t.Helper()
+	return strings.Fields(kubectl(t, "get", "nodes",
+		"-o", "jsonpath={range .items[*]}{.metadata.name} {end}"))
+}
 ```
 
 Add to `oracle.go`:
