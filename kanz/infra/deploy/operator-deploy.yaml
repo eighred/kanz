@@ -74,6 +74,17 @@ spec:
       # cluster-management control plane belongs on the control plane, not on the fleet
       # it manages. Fix a scheduling problem by scheduling, never by relaxing a budget.
       #
+      # THE EVICTION WALL MOVED WITH THE POD; IT WAS NOT REMOVED. replicas: 1 plus the
+      # PDB's minAvailable: 1 still means zero allowed disruptions — now on the control
+      # plane. A `kubectl drain` of THIS node, which a k3s server upgrade requires, hits
+      # the identical 429-forever stall, on the one node in the estate that cannot simply
+      # be replaced. Pinning here is still right (draining a worker is routine, draining
+      # the server is a planned maintenance event), but plan for it: drain the server with
+      # --disable-eviction, or scale this Deployment to 0 for the upgrade window and back
+      # to 1 after. Node provisioning and drains are unavailable while it is down, which
+      # is acceptable during a server upgrade and is not acceptable by surprise. Written
+      # here so it is known BEFORE the next upgrade rather than during it.
+      #
       # THE LABEL VALUE IS AN ASSUMPTION, STATED HERE RATHER THAN LEFT SILENT. Nothing
       # in infra/ used this label before, so there was no in-repo precedent to copy.
       # Every existing reader of it is value-agnostic — estate.go's roles() matches the
