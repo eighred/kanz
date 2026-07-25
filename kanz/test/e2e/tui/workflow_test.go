@@ -523,7 +523,9 @@ func TestDrainConfirmAbortsAndProceeds(t *testing.T) {
 			"would pass against a TUI that does not implement drain at all. Apply the e2e-drain " +
 			"workload (task 6, step 1) first.")
 	}
-	before1 := len(podsOnNode(t, node1))
+	// The node-1 baseline is a SET OF NAMES, not a count — see the assertion after the
+	// drain for why a count is wrong here.
+	before1 := podsOnNode(t, node1)
 
 	s := startTUI(t, env)
 	defer s.Close()
@@ -553,9 +555,23 @@ func TestDrainConfirmAbortsAndProceeds(t *testing.T) {
 	// The estate must be untouched: drain is scoped to the selected node. This is also
 	// the backstop for the residual race openDrainConfirm cannot close — if the highlight
 	// had moved to node 1 between the prompt and the y, node 1's pods would be gone.
-	if after1 := len(podsOnNode(t, node1)); after1 != before1 {
-		t.Errorf("draining node 2 changed the pod count on node 1 (%d -> %d) — the trading "+
-			"loop must not be affected by draining another node", before1, after1)
+	//
+	// ASKED AS A SET, NOT A COUNT, AND ONLY IN ONE DIRECTION. Node 2 is cordoned by the
+	// time this runs, so every unpinned pod evicted from it reschedules onto node 1 —
+	// node 1's pod count RISES, and a `before != after` comparison would report a
+	// successful drain as a failure. It holds today only by accident: the e2e-drain
+	// workload is pinned to node 2, so its replacement stays Pending and is never
+	// scheduled anywhere. Put an unpinned pod on node 2 and this proof goes red for the
+	// drain working exactly as designed.
+	//
+	// What must actually be true is that nothing was taken FROM node 1, which is the
+	// same question missingFrom already asks of node 2's baseline above. Arrivals are
+	// the drain succeeding; departures are the drain hitting the wrong node.
+	if gone := missingFrom(before1, podsOnNode(t, node1)); len(gone) > 0 {
+		t.Errorf("draining node 2 removed %v from node 1 — the trading loop must not be "+
+			"affected by draining another node. Pods ARRIVING on node 1 would be the "+
+			"cordoned node's workload rescheduling and are expected; pods leaving it mean "+
+			"the drain reached a node it was never pointed at.", gone)
 	}
 }
 
