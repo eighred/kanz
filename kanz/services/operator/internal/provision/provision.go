@@ -37,6 +37,53 @@ const (
 	// Kubernetes version, and a probe that silently finds no pod is indistinguishable
 	// from a probe that timed out.
 	probeJobLabel = "kanz.io/probe-job"
+	// controlPlaneRoleLabel/Value is the node label marking a control-plane node. The
+	// pair is COPIED FROM infra/deploy/operator-deploy.yaml's nodeSelector on the
+	// operator Deployment and must stay identical to it: a nodeSelector is an exact
+	// string match, k3s labels server nodes with the value "true" (this estate) while
+	// kubeadm and kind use an EMPTY value, so a mismatched value does not schedule
+	// somewhere wrong — it leaves the pod Pending forever. test/arch asserts the two
+	// spellings agree.
+	controlPlaneRoleLabel = "node-role.kubernetes.io/control-plane"
+	controlPlaneRoleValue = "true"
+)
+
+// controlPlaneOnly and tolerateControlPlane are the placement BOTH Jobs below carry.
+// Declared once and shared by jobSpec and probeJobSpec deliberately: this is a
+// security constraint, and two copies of a security constraint drift apart — one gets
+// tuned, the other is forgotten, and the forgotten one is the hole.
+//
+// THE FIRST REASON IS CREDENTIAL CONFINEMENT. The provisioning Job mounts a Job-owned
+// Secret carrying the SSH bootstrap key AND K3S_TOKEN — the cluster-admission token,
+// the single credential that lets any host join this cluster. Unpinned, that pod is
+// scheduled onto an arbitrary worker, including a worker someone provisioned minutes
+// earlier by typing an address into the Add Node form. Landing there copies the
+// credential that admits the fleet onto a member of the fleet it admits. The blast
+// radius of one compromised worker stops being that worker.
+//
+// The second reason is that an unpinned Job does not reliably run at all. The estate
+// holds no registry credentials (ghcr is private; anonymous pulls 403) and nothing in
+// infra/ carries imagePullSecrets, so a Job scheduled onto a node that has not
+// pre-loaded the kanz-provisioner image dies in ErrImagePull. Observed live: a probe
+// Job landed on a freshly joined worker, 403'd, and reported a healthy host
+// unreachable after the full 60s wait — a false verdict about someone's node, caused
+// entirely by where the pod ran.
+//
+// The toleration grants nothing on THIS cluster: the k3s control-plane node carries no
+// taints today, so the selector alone places both pods. It is carried anyway for the
+// same reason operator-deploy.yaml carries it — on a cluster that taints its control
+// plane NoSchedule (kubeadm's default, and any estate that later reserves its control
+// plane) the selector says "only here" while the taint says "not here", and the pin
+// silently becomes an unschedulable Job. Hardening the cluster must not break
+// provisioning.
+var (
+	controlPlaneOnly = map[string]string{controlPlaneRoleLabel: controlPlaneRoleValue}
+
+	tolerateControlPlane = []corev1.Toleration{{
+		Key:      controlPlaneRoleLabel,
+		Operator: corev1.TolerationOpExists,
+		Effect:   corev1.TaintEffectNoSchedule,
+	}}
 )
 
 // Config is the orchestrator's deploy-time configuration.
@@ -199,6 +246,11 @@ func (p *Provisioner) jobSpec(name string, r Request, port int32) *batchv1.Job {
 				Spec: corev1.PodSpec{
 					ServiceAccountName: "kanz-node-provisioner",
 					RestartPolicy:      corev1.RestartPolicyNever,
+					// This pod mounts the bootstrap key and the k3s join token. See
+					// controlPlaneOnly: the pin keeps cluster-admission credentials off
+					// the fleet they admit.
+					NodeSelector: controlPlaneOnly,
+					Tolerations:  tolerateControlPlane,
 					SecurityContext: &corev1.PodSecurityContext{
 						RunAsNonRoot: ptr(true), RunAsUser: ptr64(65532),
 						// FSGroup must match RunAsUser. Kubernetes owns every Secret volume
@@ -455,6 +507,12 @@ func (p *Provisioner) probeJobSpec(name, ip string, port int32) *batchv1.Job {
 				Spec: corev1.PodSpec{
 					ServiceAccountName: "kanz-node-provisioner",
 					RestartPolicy:      corev1.RestartPolicyNever,
+					// Identical placement to jobSpec, from the same shared values. This pod
+					// carries no credential, so the reason here is the second one in
+					// controlPlaneOnly's comment: a probe that lands on a node which cannot
+					// pull the image reports a healthy host unreachable.
+					NodeSelector: controlPlaneOnly,
+					Tolerations:  tolerateControlPlane,
 					SecurityContext: &corev1.PodSecurityContext{
 						RunAsNonRoot: ptr(true), RunAsUser: ptr64(65532),
 						// FSGroup matches RunAsUser as in jobSpec. Nothing here depends on it today
