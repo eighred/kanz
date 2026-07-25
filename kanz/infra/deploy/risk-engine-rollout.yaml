@@ -30,6 +30,11 @@ spec:
     app: risk-engine
   ports:
     - { name: http, port: 8081, targetPort: 8081 }
+    # The risk QUERY surface (API-01b) the api-gateway dials for every read route —
+    # /v1/portfolios/{id}/exposure and the rest. It was never exposed: the gateway is
+    # configured for risk-engine.kanz-services.svc:9090 and this Service published
+    # only 8081, so every one of those routes was dead at the network layer.
+    - { name: grpc, port: 9090, targetPort: 9090 }
 ---
 apiVersion: argoproj.io/v1alpha1
 kind: Rollout
@@ -126,13 +131,32 @@ spec:
           image: ghcr.io/kanz-eng/risk-engine:latest
           ports:
             - { containerPort: 8081, name: http }
+            - { containerPort: 9090, name: grpc }
           env:
             # DSN from the SEC-01d CSI secret file, not a plaintext env.
             - { name: RISK_ENGINE_DATABASE_URL_FILE, value: /run/secrets/db/database-url }
             - { name: RISK_ENGINE_NATS_URL, value: "nats://nats.kanz-messaging.svc:4222" }
             - { name: RISK_ENGINE_KAFKA_BROKERS, value: "kafka.kanz-messaging.svc:9094" }
             - { name: RISK_ENGINE_SOURCE, value: "risk-engine" }
-            - { name: SPIFFE_ENDPOINT_SOCKET, value: "unix:///run/spiffe/spire-agent.sock" }
+            # THE QUERY SERVER STARTS ONLY WHEN THIS IS SET. cfg.GRPCListen has no
+            # default and this manifest never set it, so risk-engine ran "probes +
+            # ingestion only" (its own config comment) — the gRPC read surface the
+            # gateway exists to proxy was never listening. Combined with the Service
+            # not publishing 9090, the gateway's entire risk read path was dead in
+            # three independent ways at once.
+            - { name: RISK_ENGINE_GRPC_LISTEN, value: ":9090" }
+            # RISK_ENGINE_SPIFFE_SOCKET, *not* SPIFFE_ENDPOINT_SOCKET — this service
+            # reads the prefixed name (internal/config/config.go), as api-gateway does
+            # with API_GATEWAY_SPIFFE_SOCKET. The manifest previously set the unprefixed
+            # spelling the OTHER services use, so cfg.SPIFFESocket was EMPTY and the
+            # variable looked present to every reviewer.
+            #
+            # Two things silently degraded as a result, and neither is visible in a pod
+            # listing: the transport mesh stayed disabled, so this service could not
+            # reach the mTLS-only NATS at all; and had the query server started, it
+            # would have served PLAINTEXT — an unauthenticated read surface over the
+            # fund's risk positions, logged as a warning and nothing more.
+            - { name: RISK_ENGINE_SPIFFE_SOCKET, value: "unix:///run/spiffe/spire-agent.sock" }
           livenessProbe:
             httpGet: { path: /healthz, port: 8081 }
             initialDelaySeconds: 5

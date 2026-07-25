@@ -281,8 +281,11 @@ spec:
         - podSelector:
             matchLabels:
               app: api-gateway
+      # :9090, the QUERY port (API-01b) — not 8081, which is health and metrics.
+      # This rule named 8081 while the gateway was configured for 9090, so the
+      # policy permitted a flow nobody makes and denied the one that matters.
       ports:
-        - { protocol: TCP, port: 8081 }
+        - { protocol: TCP, port: 9090 }
     # Prometheus scrape of /metrics (OBS-01) from the observability namespace.
     - from:
         - namespaceSelector:
@@ -310,8 +313,9 @@ spec:
         - podSelector:
             matchLabels:
               app: risk-engine
+      # See the ingress half: the query surface is :9090.
       ports:
-        - { protocol: TCP, port: 8081 }
+        - { protocol: TCP, port: 9090 }
 ---
 # OPS-M2b: the gateway → operator control-plane egress half. The ingress half lives
 # beside the operator itself (infra/deploy/operator-deploy.yaml's operator-ingress),
