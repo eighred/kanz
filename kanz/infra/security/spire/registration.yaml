@@ -24,9 +24,27 @@ spec:
   # SAN DNS names so a peer can also be reached/verified by k8s service DNS
   # (NATS/Kafka clients, SEC-01c, validate the SPIFFE ID; DNS SANs ease any
   # library that still checks hostnames).
+  #
+  # THE `app` LABEL IS NOT UNIVERSAL, AND ITS ABSENCE USED TO REVOKE IDENTITY.
+  # The second template was once an unguarded `{{ index .PodMeta.Labels "app" }}`,
+  # which renders EMPTY for any pod that carries no `app` label — producing the DNS
+  # name ".<namespace>.svc". SPIRE rejects that at the server:
+  #   invalid DNS name: idna error: idna: invalid label ".kanz-messaging.svc"
+  # and it rejects the ENTIRE ENTRY, not merely the bad name. The pod therefore gets
+  # NO SVID — so a workload that never asked for a DNS SAN loses its identity because
+  # of a label it does not set.
+  #
+  # Deployments here all set `app`. JOBS DO NOT: a Job's pod carries only
+  # batch.kubernetes.io/* labels, so nats-bootstrap (the one thing that provisions
+  # every JetStream stream) hung forever in its spiffe-helper init container waiting
+  # for an SVID that the server was refusing ten times a minute. The bus cannot be
+  # provisioned at all, and nothing in the Job's own logs says why.
+  #
+  # `with`/`else` makes the name always valid: the `app` label when it exists, the
+  # pod name otherwise. Pods that set `app` are completely unaffected.
   dnsNameTemplates:
     - "{{ .PodMeta.Name }}"
-    - "{{ index .PodMeta.Labels \"app\" }}.{{ .PodMeta.Namespace }}.svc"
+    - "{{ with index .PodMeta.Labels \"app\" }}{{ . }}{{ else }}{{ $.PodMeta.Name }}{{ end }}.{{ .PodMeta.Namespace }}.svc"
   # Don't hand identities to privileged/host-network infra pods that aren't
   # part of the workload mesh.
   autoPopulateDNSNames: true
