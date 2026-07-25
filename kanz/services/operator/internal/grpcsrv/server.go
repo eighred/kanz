@@ -308,6 +308,17 @@ func (s *Server) TestConnection(ctx context.Context, req *operatorpb.TestConnect
 	if port == 0 {
 		port = 22
 	}
+	// Refuse a port the cluster cannot probe HERE, at the boundary, so it is reported as
+	// the caller's input error it is. node-provisioner-egress pins TCP:22, so a probe of
+	// any other port is dropped by policy and would come back looking like a host that is
+	// down. Probe() re-checks this as defence in depth, but a refusal that only surfaces
+	// from there arrives as Internal — telling an operator the platform broke when what
+	// actually happened is that they typed a port this estate cannot reach.
+	if port != 22 {
+		return nil, status.Errorf(codes.InvalidArgument,
+			"cannot probe port %d: only port 22 can be probed, because cluster egress policy "+
+				"pins SSH to :22; provisioning has the same constraint", port)
+	}
 	res, err := s.prov.Probe(ctx, req.GetIp(), port)
 	if err != nil {
 		// The probe could not be RUN — a different fact from an unreachable host, and one

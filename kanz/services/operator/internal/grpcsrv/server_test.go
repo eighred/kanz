@@ -152,15 +152,24 @@ func TestAddNodeRejectsEmptyKey(t *testing.T) {
 // it does not imply :2222 is probeable. It is not — cluster egress pins :22 and
 // provision.Probe refuses anything else with a message saying so, which is the layer
 // that owns that verdict. This handler's only job is to pass the request through.
+// TestTestConnectionDelegatesToTheProber pins the delegation itself: the request's IP
+// reaches the prober and the prober's answer is what comes back.
+//
+// This used to send port 2222 so the asserted port could not be confused with the 22
+// default. That is no longer expressible — 22 is the only port egress policy permits, so
+// the boundary refuses anything else (see TestTestConnectionRejectsNonSSHPort) and the
+// port has exactly one legal value to pass through. Port behaviour is covered by that
+// test plus TestTestConnectionDefaultsToPort22; what is left to prove here is the IP and
+// the response mapping.
 func TestTestConnectionDelegatesToTheProber(t *testing.T) {
 	sp := &stubProvisioner{probe: provision.ProbeResult{Reachable: true, LatencyMS: 4}}
 	resp, err := NewWithProvisioner(stubReader{}, sp).TestConnection(context.Background(),
-		&operatorpb.TestConnectionRequest{Ip: "10.0.0.5", SshPort: 2222})
+		&operatorpb.TestConnectionRequest{Ip: "10.0.0.5", SshPort: 22})
 	if err != nil {
 		t.Fatalf("TestConnection: %v", err)
 	}
-	if sp.gotProbeIP != "10.0.0.5" || sp.gotProbePort != 2222 {
-		t.Errorf("prober got %s:%d, want 10.0.0.5:2222", sp.gotProbeIP, sp.gotProbePort)
+	if sp.gotProbeIP != "10.0.0.5" || sp.gotProbePort != 22 {
+		t.Errorf("prober got %s:%d, want 10.0.0.5:22", sp.gotProbeIP, sp.gotProbePort)
 	}
 	if !resp.GetReachable() || resp.GetLatencyMs() != 4 {
 		t.Errorf("resp = %+v, want reachable with latency 4", resp)
@@ -210,6 +219,27 @@ func TestTestConnectionRejectsEmptyIP(t *testing.T) {
 		context.Background(), &operatorpb.TestConnectionRequest{})
 	if status.Code(err) != codes.InvalidArgument {
 		t.Fatalf("want InvalidArgument for empty ip, got %v", err)
+	}
+}
+
+// TestTestConnectionRejectsNonSSHPort: cluster egress pins TCP:22, so any other port is
+// dropped by policy and would probe back as an unreachable host. It must be refused as the
+// caller's input error, NOT reported as a dead host and NOT as Internal — an operator who
+// typed the wrong port must not be told either that the host is down or that the platform
+// broke. Asserting the code matters more than the text: InvalidArgument is what makes the
+// gateway answer 400 instead of 500.
+func TestTestConnectionRejectsNonSSHPort(t *testing.T) {
+	prov := &stubProvisioner{}
+	_, err := NewWithProvisioner(stubReader{}, prov).TestConnection(context.Background(),
+		&operatorpb.TestConnectionRequest{Ip: "10.0.0.5", SshPort: 2222})
+	if status.Code(err) != codes.InvalidArgument {
+		t.Fatalf("want InvalidArgument for port 2222, got %v", err)
+	}
+	// And it must be refused BEFORE a Job is created — the point of checking at the
+	// boundary is that no cluster work happens for input that cannot succeed.
+	if prov.gotProbeIP != "" {
+		t.Fatalf("a non-22 port must be refused without running a probe Job, but Probe saw ip %q",
+			prov.gotProbeIP)
 	}
 }
 
