@@ -254,12 +254,17 @@ func TestOperatorEgressIsBounded(t *testing.T) {
 		t.Errorf("operator-egress policyTypes = %v, want exactly [Egress]", pol.Spec.PolicyTypes)
 	}
 
-	wantPorts := map[string]bool{"UDP:53": true, "TCP:53": true, "TCP:443": true}
+	wantPorts := map[string]bool{"UDP:53": true, "TCP:53": true, "TCP:443": true, "TCP:6443": true}
 	gotPorts := map[string]bool{}
 
 	const wantDNSPortKey = "TCP:53,UDP:53"
 	const want443PortKey = "TCP:443"
-	var dnsRules, tcp443Rules []netPolRule
+	// The Kubernetes API server, on the ENDPOINT's port. Deliberately its own port
+	// key rather than a second 443 rule: the API endpoint is reached on 6443 (the
+	// ClusterIP:443 form is DNAT'd before egress policy is evaluated and never
+	// matches), so the two permissions cannot be confused for one another here.
+	const wantAPIPortKey = "TCP:6443"
+	var dnsRules, tcp443Rules, apiRules []netPolRule
 
 	for _, rule := range pol.Spec.Egress {
 		// A rule with no `to:` peers is unrestricted egress on its ports — the
@@ -275,6 +280,8 @@ func TestOperatorEgressIsBounded(t *testing.T) {
 			dnsRules = append(dnsRules, rule)
 		case want443PortKey:
 			tcp443Rules = append(tcp443Rules, rule)
+		case wantAPIPortKey:
+			apiRules = append(apiRules, rule)
 		}
 	}
 
@@ -311,6 +318,58 @@ func TestOperatorEgressIsBounded(t *testing.T) {
 		t.Errorf("operator-egress has %d rules with ports [TCP:443] (want exactly 1) — a duplicate 443 rule can under-scope the except: list while the correctly-scoped rule masks it", len(tcp443Rules))
 		for _, r := range tcp443Rules {
 			validate443RulePeers(t, r)
+		}
+	}
+
+	switch len(apiRules) {
+	case 0:
+		t.Error("operator-egress has no TCP:6443 rule — the operator cannot reach the Kubernetes " +
+			"API server, and EVERY RPC it serves is an API call. This is not a hardening omission; " +
+			"the service does nothing at all without it (OPS-M2b).")
+	case 1:
+		validateAPIServerRulePeers(t, apiRules[0])
+	default:
+		t.Errorf("operator-egress has %d rules with ports [TCP:6443] (want exactly 1) — one rule "+
+			"per control-plane endpoint list, so a widened duplicate cannot hide behind a correct one", len(apiRules))
+		for _, r := range apiRules {
+			validateAPIServerRulePeers(t, r)
+		}
+	}
+}
+
+// validateAPIServerRulePeers asserts the API-server rule names ONLY single hosts.
+//
+// The address is cluster-specific and cannot be pinned by value here — it is a
+// control-plane node's IP, and it changes with the cluster and with node replacement.
+// So this guard pins the SHAPE instead: every peer must be an ipBlock naming exactly
+// one address, with no except: list and no selector. That is what stops the
+// maintenance burden of a per-cluster value from being "solved" by widening the rule
+// to a range, which would hand the operator egress to every address in it.
+func validateAPIServerRulePeers(t *testing.T, rule netPolRule) {
+	t.Helper()
+	if len(rule.To) == 0 {
+		t.Error("operator-egress TCP:6443 rule has an empty `to:` — unrestricted egress on the " +
+			"API-server port is exactly what pinning the endpoint exists to avoid")
+		return
+	}
+	for _, peer := range rule.To {
+		if peer.IPBlock == nil {
+			t.Errorf("operator-egress TCP:6443 peer is %s, want an ipBlock naming one host — a "+
+				"selector here is a range wearing a different shape", peer.describe())
+			continue
+		}
+		if peer.NamespaceSelector != nil || peer.PodSelector != nil {
+			t.Errorf("operator-egress TCP:6443 peer sets more than one selector kind: %s", peer.describe())
+		}
+		if len(peer.IPBlock.Except) != 0 {
+			t.Errorf("operator-egress TCP:6443 peer carries an except: list (%v) — a single-host "+
+				"rule has nothing to exclude, so this means the cidr is not a single host",
+				peer.IPBlock.Except)
+		}
+		if !strings.HasSuffix(peer.IPBlock.CIDR, "/32") && !strings.HasSuffix(peer.IPBlock.CIDR, "/128") {
+			t.Errorf("operator-egress TCP:6443 ipBlock.cidr = %q, want a single host (/32 or /128). "+
+				"Widening this to a range grants the operator egress to every address in it on the "+
+				"API-server port; pin each control-plane endpoint instead.", peer.IPBlock.CIDR)
 		}
 	}
 }

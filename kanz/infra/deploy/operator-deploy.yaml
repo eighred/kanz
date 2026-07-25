@@ -284,6 +284,37 @@ spec:
       ports:
         - { protocol: UDP, port: 53 }
         - { protocol: TCP, port: 53 }
+    # THE KUBERNETES API SERVER — without this rule the operator does nothing at all.
+    #
+    # Every RPC this service serves is a Kubernetes API call: ListNodes, ListClusters,
+    # Cordon, Uncordon, Drain, SetNodeRegion, the provisioning Job, and the kube-backed
+    # venue-key write. Adding the 443 rule below (S4b) turned this policy on for
+    # egress, and deny-by-default then took the operator's own reason for existing with
+    # it. Every call failed:
+    #   Get "https://10.43.0.1:443/api/v1/nodes": dial tcp: connect: connection refused
+    # It was invisible for as long as the operator was never deployed to a cluster that
+    # ran this policy, and surfaced the first time one was (OPS-M2b).
+    #
+    # THE TARGET IS THE ENDPOINT, NOT THE SERVICE — this is the part that is easy to
+    # get wrong, and the first fix got it wrong. Traffic to a ClusterIP is DNAT'd to a
+    # backend BEFORE egress policy is evaluated, so a rule naming the `kubernetes`
+    # Service address (10.43.0.1:443) never matches anything. The policy sees the real
+    # endpoint: a control-plane node's own IP, on 6443. Both the address and the port
+    # differ from what the failing error message names.
+    #
+    # THIS VALUE IS CLUSTER-SPECIFIC AND MUST BE EDITED PER CLUSTER. A NetworkPolicy
+    # cannot name a Service or a Node, so the endpoint is pinned as a /32 — the
+    # narrowest form available. It also changes if the control-plane node is replaced.
+    # Read it from the target cluster before applying, and set every control-plane
+    # endpoint if there is more than one:
+    #   kubectl get endpoints kubernetes -n default -o jsonpath='{.subsets[*].addresses[*].ip}'
+    # A wrong or stale value fails CLOSED and presents exactly as the bug above, so
+    # check it first when the operator reports it cannot reach the API.
+    - to:
+        - ipBlock:
+            cidr: 172.26.11.140/32
+      ports:
+        - { protocol: TCP, port: 6443 }
     - to:
         - ipBlock:
             cidr: 0.0.0.0/0
