@@ -32,6 +32,14 @@ type Config struct {
 	ProvisionerImage string
 	K3sServerURL     string
 	K3sToken         string
+	// ImagePullPolicy is set on the provisioner container ONLY when non-empty
+	// (see jobSpec). Left empty, Kubernetes applies its own default — Always,
+	// for the :latest tag ProvisionerImage normally carries — which is correct
+	// in production but strands a node that cannot reach the registry even
+	// when the image is already present locally (ImagePullBackOff on a real
+	// image: the OPS-M2e incident). Never hardcode a policy here; the operator
+	// must not decide production's default.
+	ImagePullPolicy string
 }
 
 // Request is one AddNode call, decoded from the RPC.
@@ -114,6 +122,37 @@ func (p *Provisioner) jobSpec(name string, r Request, port int32) *batchv1.Job {
 	var backoff int32 = 0    // one attempt; a retry would re-SSH, and the operator re-issues AddNode
 	var deadline int64 = 900 // 15m hard cap on a provisioning attempt — a belt to sshRun's ctx, so a
 	//                          wedged Job cannot linger indefinitely holding the bootstrap-key Secret.
+
+	container := corev1.Container{
+		Name:  "provisioner",
+		Image: p.cfg.ProvisionerImage,
+		Env: []corev1.EnvVar{
+			{Name: "PROVISION_TARGET_ADDR", Value: fmt.Sprintf("%s:%d", r.IP, port)},
+			{Name: "PROVISION_SSH_USER", Value: r.SSHUser},
+			{Name: "K3S_SERVER_URL", Value: p.cfg.K3sServerURL},
+			{Name: "K3S_TOKEN", ValueFrom: &corev1.EnvVarSource{
+				SecretKeyRef: &corev1.SecretKeySelector{
+					LocalObjectReference: corev1.LocalObjectReference{Name: name},
+					Key:                  k3sTokenKey,
+				},
+			}},
+			{Name: "PROVISION_SSH_KEY_FILE", Value: keyMountPath + "/" + keySecretKey},
+		},
+		VolumeMounts: []corev1.VolumeMount{{Name: "bootstrap-key", MountPath: keyMountPath, ReadOnly: true}},
+		SecurityContext: &corev1.SecurityContext{
+			AllowPrivilegeEscalation: ptr(false), ReadOnlyRootFilesystem: ptr(true),
+			RunAsNonRoot: ptr(true), Capabilities: &corev1.Capabilities{Drop: []corev1.Capability{"ALL"}},
+		},
+	}
+	// Only set when configured — an empty ImagePullPolicy field (the zero value)
+	// leaves Kubernetes to apply its own default. Setting corev1.PullPolicy("")
+	// explicitly would be indistinguishable from never having set it in the API,
+	// but the `if` here keeps that equivalence obvious at the call site rather
+	// than relying on the zero-value coincidence.
+	if p.cfg.ImagePullPolicy != "" {
+		container.ImagePullPolicy = corev1.PullPolicy(p.cfg.ImagePullPolicy)
+	}
+
 	return &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: name, Namespace: p.cfg.Namespace,
@@ -134,27 +173,7 @@ func (p *Provisioner) jobSpec(name string, r Request, port int32) *batchv1.Job {
 						RunAsNonRoot: ptr(true), RunAsUser: ptr64(65532),
 						SeccompProfile: &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault},
 					},
-					Containers: []corev1.Container{{
-						Name:  "provisioner",
-						Image: p.cfg.ProvisionerImage,
-						Env: []corev1.EnvVar{
-							{Name: "PROVISION_TARGET_ADDR", Value: fmt.Sprintf("%s:%d", r.IP, port)},
-							{Name: "PROVISION_SSH_USER", Value: r.SSHUser},
-							{Name: "K3S_SERVER_URL", Value: p.cfg.K3sServerURL},
-							{Name: "K3S_TOKEN", ValueFrom: &corev1.EnvVarSource{
-								SecretKeyRef: &corev1.SecretKeySelector{
-									LocalObjectReference: corev1.LocalObjectReference{Name: name},
-									Key:                  k3sTokenKey,
-								},
-							}},
-							{Name: "PROVISION_SSH_KEY_FILE", Value: keyMountPath + "/" + keySecretKey},
-						},
-						VolumeMounts: []corev1.VolumeMount{{Name: "bootstrap-key", MountPath: keyMountPath, ReadOnly: true}},
-						SecurityContext: &corev1.SecurityContext{
-							AllowPrivilegeEscalation: ptr(false), ReadOnlyRootFilesystem: ptr(true),
-							RunAsNonRoot: ptr(true), Capabilities: &corev1.Capabilities{Drop: []corev1.Capability{"ALL"}},
-						},
-					}},
+					Containers: []corev1.Container{container},
 					Volumes: []corev1.Volume{{
 						Name: "bootstrap-key",
 						VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{

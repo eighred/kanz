@@ -47,6 +47,21 @@ _ADD_ENV = {
         {"name": "API_GATEWAY_JWT_SECRET_FILE",
          "value": "/run/secrets/gateway/jwt-secret"},
     ],
+    "operator-deploy.yaml": [
+        # The generic `imagePullPolicy: IfNotPresent` rewrite above (patch_pod_spec)
+        # only touches containers that already appear in a manifest's own pod spec —
+        # the operator Deployment's container gets it for free. But node provisioning
+        # (AddNode) creates a SEPARATE one-shot Job whose container spec is built in
+        # Go (services/operator/internal/provision/provision.go), not YAML, so this
+        # rewrite can never reach it. OPERATOR_PROVISIONER_IMAGE_PULL_POLICY is the one
+        # lever that does: the operator reads it and sets the Job container's
+        # ImagePullPolicy itself. The rig side-loads kanz-provisioner via `kind load`
+        # and has no credentials to pull ghcr.io/kanz-eng/* (private), so without this
+        # the provisioning Job defaults to Always on its :latest tag and sits in
+        # ImagePullBackOff even though the image is already on the node.
+        {"name": "OPERATOR_PROVISIONER_IMAGE_PULL_POLICY",
+         "value": "IfNotPresent"},
+    ],
 }
 
 

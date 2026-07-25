@@ -118,6 +118,22 @@ spec:
               value: "kube"
             - name: OPERATOR_PROVISIONER_IMAGE
               value: ghcr.io/kanz-eng/kanz-provisioner:latest
+            # OPERATOR_PROVISIONER_IMAGE_PULL_POLICY, LEFT UNSET (OPS-M2e). The provisioning
+            # Job's container spec is built in Go (provision.go), not here, so it has no
+            # imagePullPolicy line for tools/rig_dev_patch.py to rewrite — the rig's generic
+            # "IfNotPresent everywhere" pass cannot reach it. This env var is the one lever
+            # that does. Unset, Kubernetes defaults a :latest tag to Always: production MUST
+            # pull, never trust a locally-present image, since that is how a signed image
+            # gets verified rather than assumed. But Always also means a node that cannot
+            # reach the registry gets ImagePullBackOff even when the image was already
+            # side-loaded onto it — observed on a real cluster where containerd already held
+            # the image and the pod still failed with "403 Forbidden from ghcr.io/token".
+            # Side-loading the image is NOT sufficient by itself; only IfNotPresent (or
+            # registry credentials) fixes that. Set this only where nodes cannot pull from
+            # ghcr — air-gapped estates, DR rebuilds with pre-seeded images — never in a
+            # normal production rollout.
+            # - name: OPERATOR_PROVISIONER_IMAGE_PULL_POLICY
+            #   value: "IfNotPresent"
             - name: OPERATOR_K3S_SERVER_URL
               valueFrom: { secretKeyRef: { name: operator-k3s-join, key: server_url, optional: true } }
             - name: OPERATOR_K3S_TOKEN

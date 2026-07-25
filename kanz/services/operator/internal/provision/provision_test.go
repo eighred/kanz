@@ -123,6 +123,54 @@ func TestListMapsJobStatus(t *testing.T) {
 	}
 }
 
+// TestAddNodeSetsImagePullPolicyWhenConfigured proves the fix for the
+// ImagePullBackOff defect: with ImagePullPolicy configured, every provisioner
+// container must carry it explicitly rather than relying on Kubernetes'
+// :latest-tag default of Always, which fails closed on any node that cannot
+// reach ghcr (air-gapped estates, disaster-recovery rebuilds) even when the
+// image is already present locally.
+func TestAddNodeSetsImagePullPolicyWhenConfigured(t *testing.T) {
+	cs := fake.NewSimpleClientset()
+	c := cfg()
+	c.ImagePullPolicy = "IfNotPresent"
+	id, err := New(cs, c).AddNode(context.Background(), Request{
+		Hostname: "london", IP: "10.0.0.5", SSHPort: 22, SSHUser: "root", SSHKey: []byte("PEM")})
+	if err != nil {
+		t.Fatalf("AddNode: %v", err)
+	}
+	job, err := cs.BatchV1().Jobs("kanz-operator").Get(context.Background(), id, metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("job not created: %v", err)
+	}
+	for _, c := range job.Spec.Template.Spec.Containers {
+		if c.ImagePullPolicy != "IfNotPresent" {
+			t.Errorf("container %s ImagePullPolicy = %q, want IfNotPresent", c.Name, c.ImagePullPolicy)
+		}
+	}
+}
+
+// TestAddNodeLeavesImagePullPolicyUnsetByDefault proves the production
+// contract this fix must not disturb: with ImagePullPolicy left empty (the
+// config default), the field must be the zero value so Kubernetes' own
+// defaulting decides — never a hardcoded policy chosen in this package.
+func TestAddNodeLeavesImagePullPolicyUnsetByDefault(t *testing.T) {
+	cs := fake.NewSimpleClientset()
+	id, err := New(cs, cfg()).AddNode(context.Background(), Request{
+		Hostname: "london", IP: "10.0.0.5", SSHPort: 22, SSHUser: "root", SSHKey: []byte("PEM")})
+	if err != nil {
+		t.Fatalf("AddNode: %v", err)
+	}
+	job, err := cs.BatchV1().Jobs("kanz-operator").Get(context.Background(), id, metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("job not created: %v", err)
+	}
+	for _, c := range job.Spec.Template.Spec.Containers {
+		if c.ImagePullPolicy != "" {
+			t.Errorf("container %s ImagePullPolicy = %q, want zero value (Kubernetes decides)", c.Name, c.ImagePullPolicy)
+		}
+	}
+}
+
 func provJob(name, host string, st batchv1.JobStatus) *batchv1.Job {
 	return &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{
