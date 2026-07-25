@@ -8,11 +8,11 @@ import (
 	"time"
 )
 
-// kubectl runs a read-only query against the cluster. Every assertion in this package
-// goes through here rather than through the TUI's rendering: a UI that shows its
-// optimistic intent instead of observed state must FAIL these proofs, and it can only
-// do that if the oracle is independent of it.
-// kubectl runs one kubectl command and returns its STDOUT only.
+// kubectl runs one read-only query against the cluster and returns its STDOUT only.
+//
+// Every assertion in this package goes through here rather than through the TUI's
+// rendering: a UI that shows its optimistic intent instead of observed state must FAIL
+// these proofs, and it can only do that if the oracle is independent of it.
 //
 // Stdout and stderr are kept apart deliberately. CombinedOutput() merged them, and every
 // oracle assertion in this file parses the result — so anything kubectl wrote to stderr
