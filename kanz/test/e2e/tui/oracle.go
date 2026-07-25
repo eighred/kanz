@@ -125,6 +125,154 @@ func nodeExists(t *testing.T, node string) bool {
 	return true
 }
 
+// evictablePodsOnNode lists the pods on a node that a drain is REQUIRED to remove, as
+// "namespace/name" — the same form podsOnNode returns, so the two sets can be compared
+// directly.
+//
+// The rule mirrors services/operator/internal/estate.IsEvictable, which is what the
+// drain loop itself consults: a pod is exempt if it is already terminating, if it is a
+// mirror pod (kubelet gives those an ownerReference of kind Node), or if a DaemonSet
+// owns it. Drain is eviction-only by design and never force-deletes, so those three are
+// exactly what must SURVIVE a drain. Encoding the same rule here rather than asserting
+// "the node has no pods" is what keeps the proof from demanding behaviour the drain is
+// deliberately not allowed to have.
+//
+// The phase filter matches podsOnNode's and deliberately does NOT narrow to
+// status.phase=Running. A pod that is Pending or ContainerCreating but already BOUND to
+// this node (spec.nodeName set) still needs evicting, and a Running-only filter would
+// make it invisible — the drain proof would then report a node as drained while an
+// evictable pod sat on it, which is a false PASS in the one direction that matters.
+func evictablePodsOnNode(t *testing.T, node string) []string {
+	t.Helper()
+	out := kubectl(t, "get", "pods", "-A", "--field-selector",
+		"spec.nodeName="+node+",status.phase!=Succeeded,status.phase!=Failed",
+		"-o", "jsonpath={range .items[*]}{.metadata.namespace}/{.metadata.name}"+
+			":{.metadata.ownerReferences[0].kind}:{.metadata.deletionTimestamp} {end}")
+	var evictable []string
+	for _, rec := range strings.Fields(out) {
+		name, rest, ok := strings.Cut(rec, ":")
+		if !ok {
+			continue
+		}
+		kind, deleting, _ := strings.Cut(rest, ":")
+		if deleting != "" || kind == "DaemonSet" || kind == "Node" {
+			continue
+		}
+		evictable = append(evictable, name)
+	}
+	return evictable
+}
+
+// podSettleWindow is how long a node's evictable pod set must hold still before it is
+// trusted as a baseline, and podSettleTimeout bounds the wait for that to happen.
+const (
+	podSettleWindow  = 6 * time.Second
+	podSettleTimeout = 2 * time.Minute
+)
+
+// waitForStableEvictablePods returns a node's evictable pod set once it has been
+// unchanged for podSettleWindow.
+//
+// This is a precondition, not a retry. A drain's eviction loop runs in the BACKGROUND
+// for up to 15 minutes (drainDeadline, services/operator/internal/nodeops), so a re-run
+// started while a previous drain is still evicting would take a baseline that is
+// already dissolving underneath it — and the abort branch, whose whole claim is that
+// this set is untouched, would then fail for something no keypress did. Refusing to
+// start until the node is quiet turns that into one sentence instead of a mystery, and
+// it is the reason this proof is safely re-runnable.
+func waitForStableEvictablePods(t *testing.T, node string) []string {
+	t.Helper()
+	deadline := time.Now().Add(podSettleTimeout)
+	prev := evictablePodsOnNode(t, node)
+	changedAt := time.Now()
+	for time.Now().Before(deadline) {
+		time.Sleep(2 * time.Second)
+		cur := evictablePodsOnNode(t, node)
+		if len(missingFrom(prev, cur)) > 0 || len(missingFrom(cur, prev)) > 0 {
+			prev, changedAt = cur, time.Now()
+			continue
+		}
+		if time.Since(changedAt) >= podSettleWindow {
+			return cur
+		}
+	}
+	t.Fatalf("the evictable pod set on %s never held still for %s (last seen: %v). A drain "+
+		"evicts in the background for up to 15 minutes, so a previous run's drain is the "+
+		"likely cause — wait for it to finish rather than re-running into it.",
+		node, podSettleWindow, prev)
+	return nil
+}
+
+// waitForPodsEvicted waits until none of want remain on the node.
+//
+// It asserts that the pods that were there are GONE, rather than that the node ends up
+// with no evictable pods at all. Those are different claims, and only the first is
+// about the drain: a controller whose replica is pinned to this node will create a
+// replacement the moment its pod is evicted, and whether that replacement can land here
+// depends on the pod's own tolerations, not on the drain. A proof written as "no
+// evictable pods remain" fails on a workload that tolerates the unschedulable taint
+// even though the drain did precisely its job.
+func waitForPodsEvicted(t *testing.T, node string, want []string, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for {
+		remaining := stillPresent(want, podsOnNode(t, node))
+		if len(remaining) == 0 {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("still on %s after %s: %v. If a PodDisruptionBudget is blocking, that is "+
+				"CORRECT behaviour — check `kubectl get pdb -A` and whether the blocked pod "+
+				"should have been on this node at all.", node, timeout, remaining)
+		}
+		time.Sleep(3 * time.Second)
+	}
+}
+
+// missingFrom returns the members of want that are absent from have, and stillPresent
+// returns those that are not. Both report the offending NAMES rather than a count: a
+// drain assertion that fails with "3 != 4" sends the next reader back to the cluster to
+// work out which pod it meant, and by then the pod is gone.
+func missingFrom(want, have []string) []string { return filterByMembership(want, have, false) }
+
+func stillPresent(want, have []string) []string { return filterByMembership(want, have, true) }
+
+func filterByMembership(want, have []string, keepPresent bool) []string {
+	present := make(map[string]struct{}, len(have))
+	for _, h := range have {
+		present[h] = struct{}{}
+	}
+	var out []string
+	for _, w := range want {
+		if _, ok := present[w]; ok == keepPresent {
+			out = append(out, w)
+		}
+	}
+	return out
+}
+
+// controlPlaneNodeName returns THE control-plane node, failing unless there is exactly
+// one.
+//
+// The count guard is not defensive dressing. The drain proof uses this name to assert
+// the rest of the estate was untouched, and jsonpath answers a filter matching nothing
+// with an EMPTY string and one matching several with a space-separated list. Either
+// would reach podsOnNode as a nodeName no pod carries, so the before and after counts
+// would both be zero and the assertion would hold no matter what the drain did.
+func controlPlaneNodeName(t *testing.T) string {
+	t.Helper()
+	out := kubectl(t, "get", "nodes", "-o",
+		"jsonpath={range .items[?(@.metadata.labels.node-role\\.kubernetes\\.io/control-plane)]}"+
+			"{.metadata.name} {end}")
+	names := strings.Fields(out)
+	if len(names) != 1 {
+		t.Fatalf("expected exactly one node labelled node-role.kubernetes.io/control-plane, "+
+			"got %v — this proof needs an unambiguous name for the node a drain must NOT touch",
+			names)
+	}
+	return names[0]
+}
+
 // waitForNodeReady blocks until a second node reports Ready, polling the CLUSTER.
 // The TUI's own strip is not evidence that a node joined.
 func waitForNodeReady(t *testing.T, timeout time.Duration) string {

@@ -450,6 +450,114 @@ func TestCordonAndUncordonChangeTheCluster(t *testing.T) {
 	waitForSchedulable(t, node2, true, 30*time.Second)
 }
 
+// openDrainConfirm presses d and does not return until the prompt ON SCREEN names the
+// node this proof intends to act on.
+//
+// Waiting for the NAME, not just for "y/n", is what stops this proof from ever
+// answering a prompt armed on the control plane. m.selected is an INDEX into a list the
+// 3s poll rebuilds (cmd/universe/model.go), so a reordering of the node list between
+// selectNode2 and this keypress would move the highlight with no keystroke sent and no
+// way for the harness to notice. The prompt is the TUI stating which node it is about
+// to drain, and it is the last checkable moment before y commits.
+//
+// Both waits search the output since the d keypress (driver.go's mark), so neither can
+// be satisfied by the previous branch's prompt still sitting in the capture.
+func openDrainConfirm(t *testing.T, s *Session, node string) {
+	t.Helper()
+	s.Send("d")
+	// "Drain <name>? evicts %d pods  [y/n]" — cmd/universe/view.go's renderNodes, one
+	// lipgloss.Render of one line, so the text is contiguous in the pty stream whether or
+	// not the colour profile wraps it in SGR escapes.
+	s.WaitFor(t, "Drain "+node+"?", 5*time.Second)
+	s.WaitFor(t, "y/n", 5*time.Second)
+}
+
+// abortSettle is how long the abort branch lets a wrongly-fired drain run before it
+// looks at the cluster.
+//
+// This is the one sleep in the suite that is not a masking sleep, and the distinction is
+// the whole point. Every other wait here polls for something to START existing, where a
+// sleep would pass on a fast machine and flake on a slow one. This branch asserts a
+// NEGATIVE — that nothing happened — and a negative cannot be polled for: checking
+// instantly after n would pass even against a build that fires the drain on every key,
+// because the eviction had not landed yet. The sleep is the window in which a wrong
+// build gets to convict itself. The operator's drain cordons synchronously before it
+// returns and its eviction loop's first pass is immediate, so 3s is several times what a
+// wrongly-fired drain needs to become visible.
+const abortSettle = 3 * time.Second
+
+// TestDrainConfirmAbortsAndProceeds proves the drain confirm dialog in BOTH directions.
+//
+// The n branch is the one that matters and is usually untested: a confirm dialog that
+// acts on the wrong answer is worse than no dialog, because the operator has been taught
+// it is safe to press d and look. The y branch then proves the same dialog is not merely
+// decorative.
+//
+// Every assertion is scoped to node 2 plus one on node 1 — draining one node must not
+// disturb the trading loop on another, which is the reason a second node was provisioned
+// rather than draining the rig.
+func TestDrainConfirmAbortsAndProceeds(t *testing.T) {
+	env := requireEnv(t)
+	node2 := waitForNodeReady(t, 2*time.Minute)
+	node1 := controlPlaneNodeName(t)
+	if node1 == node2 {
+		t.Fatalf("waitForNodeReady returned the control plane (%s), so this proof would drain "+
+			"the node running the trading loop. Refusing.", node1)
+	}
+	if !nodeSchedulable(t, node2) {
+		// A previous run that died between the drain and its uncordon leaves the node
+		// cordoned, which would fail the abort branch for something this run did not do.
+		kubectl(t, "uncordon", node2)
+	}
+	// Deferred, not trailing: if any assertion below fails the node must still be handed
+	// back schedulable, or the next run starts from a cordoned node and the suite decays
+	// into a state where each failure poisons the one after it. Registered before the TUI
+	// starts so it unwinds after s.Close() — cluster restored once the client is gone.
+	defer kubectl(t, "uncordon", node2)
+
+	// The baseline must hold still before it can be trusted; see waitForStableEvictablePods.
+	evictable := waitForStableEvictablePods(t, node2)
+	if len(evictable) == 0 {
+		t.Fatal("node 2 runs no evictable pods, so a drain would prove nothing — both branches " +
+			"would pass against a TUI that does not implement drain at all. Apply the e2e-drain " +
+			"workload (task 6, step 1) first.")
+	}
+	before1 := len(podsOnNode(t, node1))
+
+	s := startTUI(t, env)
+	defer s.Close()
+	selectNode2(t, s, node2)
+
+	// BRANCH 1: n must abort. Nothing evicted, node stays schedulable.
+	openDrainConfirm(t, s, node2)
+	s.Send("n")
+	time.Sleep(abortSettle)
+	if gone := missingFrom(evictable, podsOnNode(t, node2)); len(gone) > 0 {
+		t.Errorf("answering n to the drain confirm evicted %v anyway. A confirm dialog that "+
+			"acts on the wrong answer is worse than no dialog.", gone)
+	}
+	if !nodeSchedulable(t, node2) {
+		t.Error("answering n cordoned the node; abort must change nothing at all. This is the " +
+			"earliest visible half of a drain — Ops.Drain cordons before it evicts — so it " +
+			"fires even when the eviction has not landed yet.")
+	}
+
+	// BRANCH 2: y must drain. Drain cordons first and evicts in the background, so the
+	// cordon is the fast signal and the eviction is the real one; assert both.
+	openDrainConfirm(t, s, node2)
+	s.Send("y")
+	waitForSchedulable(t, node2, false, 60*time.Second)
+	waitForPodsEvicted(t, node2, evictable, 3*time.Minute)
+
+	// The estate must be untouched: drain is scoped to the selected node. This is also
+	// the backstop for the residual race openDrainConfirm cannot close — if the highlight
+	// had moved to node 1 between the prompt and the y, node 1's pods would be gone.
+	if after1 := len(podsOnNode(t, node1)); after1 != before1 {
+		t.Errorf("draining node 2 changed the pod count on node 1 (%d -> %d) — the trading "+
+			"loop must not be affected by draining another node", before1, after1)
+	}
+}
+
 // clusterNodeNames lists every node in the cluster. Used instead of predicting a
 // node's name: the name comes from the remote host's hostname, which this test has
 // no reliable way to derive from the address an operator typed.
