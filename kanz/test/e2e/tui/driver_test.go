@@ -1,14 +1,40 @@
 package tui
 
 import (
+	"runtime"
 	"strings"
 	"testing"
 	"time"
 )
 
+// requirePTY skips a test that needs a real pseudo-terminal and a POSIX shell.
+//
+// Every test in this file drives /bin/sh through github.com/creack/pty, and pty has no
+// Windows backend — its Windows build is a stub whose Start returns "unsupported", so
+// these fail at the first line with `start /bin/sh in pty: unsupported`. That is not a
+// finding about anything under test, but it turned `go test ./...` red on a Windows
+// workstation, and with CI billing-halted since 2026-07-16 that local run is the only
+// gate actually executing. A red suite nobody can get green is a gate everyone learns
+// to ignore.
+//
+// A RUNTIME SKIP RATHER THAN A `//go:build !windows` TAG, DELIBERATELY. A build tag
+// would drop this file from the Windows build entirely, so it would not be compiled,
+// vetted or type-checked there — and Windows is currently the only place the suite runs
+// at all. Skipping keeps every line of it under the compiler on both platforms and
+// costs one call per test. The tests themselves are unchanged and still run in full on
+// Linux CI, which is where they are the real proof.
+func requirePTY(t *testing.T) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("needs a pty and /bin/sh: github.com/creack/pty has no Windows backend " +
+			"(its Start returns \"unsupported\"). Runs in full on Linux.")
+	}
+}
+
 // The driver is proven against a program whose behaviour is not in question, so a
 // driver bug can never be mistaken for a TUI bug later.
 func TestDriverSeesOutputAndSendsInput(t *testing.T) {
+	requirePTY(t)
 	s := Start(t, "/bin/sh", []string{"-c", `read x; echo "GOT:$x"`}, nil)
 	defer s.Close()
 	s.Send("hello\r")
@@ -16,6 +42,7 @@ func TestDriverSeesOutputAndSendsInput(t *testing.T) {
 }
 
 func TestWaitForFailsWithTheLastFrameAttached(t *testing.T) {
+	requirePTY(t)
 	s := Start(t, "/bin/sh", []string{"-c", `echo actual-output; sleep 5`}, nil)
 	defer s.Close()
 	fake := &testing.T{}
@@ -41,6 +68,7 @@ func TestWaitForFailsWithTheLastFrameAttached(t *testing.T) {
 // ahead of the program. This test fails under that behaviour and passes under the
 // mark-relative one.
 func TestWaitForIsRelativeToTheLastSend(t *testing.T) {
+	requirePTY(t)
 	// Print FIRST at startup, then echo a fresh, distinct token for every line of
 	// input received. No TUI and no cluster needed to prove the driver's own
 	// windowing logic.
