@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -320,7 +321,7 @@ func (m model) updateForm(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.form = m.form.backspace()
 		return m, nil
 	case tea.KeyEnter:
-		return m, m.submitAddForm()
+		return m.submitAddForm()
 	case tea.KeyCtrlT:
 		// One probe at a time. A probe costs a Job in the operator's namespace, so a
 		// repeated keypress must be ignored rather than queued behind the first.
@@ -337,9 +338,37 @@ func (m model) updateForm(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// submitAddForm reads the key file named in the form and fires AddNode off the
-// UI thread, returning an addNodeResultMsg. The key bytes never touch the model.
-func (m model) submitAddForm() tea.Cmd {
+// submitAddForm validates the form, then reads the key file it names and fires
+// AddNode off the UI thread, returning an addNodeResultMsg. The key bytes never
+// touch the model.
+//
+// It returns a model as well as a Cmd because validation has to happen on the UI
+// thread: a tea.Cmd can only speak by returning a message, so it cannot set
+// formErr, and routing a rejection through a message would mean issuing the
+// request the rejection exists to prevent. An empty required field therefore
+// returns no command at all — no RPC, and no key-file read either. That ordering
+// is the point: the read used to come first, so a blank Key Path surfaced as
+// "read key : no such file or directory", an error about a path the operator
+// never typed rather than a field they can fix.
+func (m model) submitAddForm() (model, tea.Cmd) {
+	if missing := m.form.missingRequired(); len(missing) > 0 {
+		// EVERY empty field is named, not just the first. The whole value of
+		// validating here is that the operator sees what is wrong without a round
+		// trip; reporting one field at a time would just move the round trip
+		// in-process, one submit per blank field. Listing them costs a Join.
+		verb := "is"
+		if len(missing) > 1 {
+			verb = "are"
+		}
+		m.formErr = fmt.Errorf("%s %s required", strings.Join(missing, ", "), verb)
+		// showForm stays true: the operator fixes the named field in place with
+		// everything else still typed, rather than reopening and retyping.
+		return m, nil
+	}
+	// A prior rejection is not this submit's verdict — clear it, or a form that was
+	// fixed and resubmitted keeps showing the error it was fixed for.
+	m.formErr = nil
+
 	in := addNodeInput{
 		hostname: m.form.value("hostname"),
 		ip:       m.form.value("ip"),
@@ -349,7 +378,7 @@ func (m model) submitAddForm() tea.Cmd {
 	keyPath := m.form.value("key_path")
 	src := m.src
 	timeout := m.cfg.CallTimeout
-	return func() tea.Msg {
+	return m, func() tea.Msg {
 		key, err := os.ReadFile(keyPath)
 		if err != nil {
 			return addNodeResultMsg{err: fmt.Errorf("read key %s: %w", keyPath, err)}
