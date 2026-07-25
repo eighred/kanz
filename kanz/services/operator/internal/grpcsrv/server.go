@@ -8,9 +8,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"net"
-	"strconv"
-	"strings"
 	"time"
 
 	"google.golang.org/grpc"
@@ -32,9 +29,14 @@ import (
 // Provisioner is the node-provisioning surface the operator gRPC depends on
 // (provision.Provisioner satisfies it). Kept as an interface so the handler is
 // unit-tested against a stub with no Kubernetes client.
+//
+// Probe belongs here rather than on its own interface because it has the same
+// prerequisite as AddNode: a configured provisioner image to run a Job from. The two
+// are enabled and disabled together, so one nil check governs both.
 type Provisioner interface {
 	AddNode(ctx context.Context, r provision.Request) (string, error)
 	List(ctx context.Context) ([]provision.Provision, error)
+	Probe(ctx context.Context, ip string, sshPort int32) (provision.ProbeResult, error)
 }
 
 // NodeOps is the node-lifecycle surface the operator gRPC depends on (nodeops.Ops
@@ -274,19 +276,31 @@ func (s *Server) ListVenueKeys(ctx context.Context, _ *operatorpb.ListVenueKeysR
 	return &operatorpb.ListVenueKeysResponse{Venues: out}, nil
 }
 
-// testDialTimeout bounds the reachability probe.
-const testDialTimeout = 5 * time.Second
-
-// TestConnection is a pre-flight TCP reachability probe. It is a plain net.Dial —
-// deliberately NOT crypto/ssh — so the operator never imports the SSH plane; the
-// key is authenticated at provision time, not here. reachable=false is a normal
-// result, not an RPC error.
+// TestConnection is the pre-flight reachability check the Add Node form runs before
+// anything is provisioned. reachable=false is a normal result, not an RPC error — the
+// point of a pre-flight check is to report a bad target, not to fail.
 //
-// The caller (root@universe, reaching the operator only via a kubeconfig-gated
-// port-forward) can make the operator dial an arbitrary ip:port. Accepted: the
-// caller could already reach anything a cluster operator can, the probe returns
-// only reachable/latency (never response bytes), and the dial is timeout-bounded.
+// THE OPERATOR DOES NOT DIAL. It asks the provisioner to run a one-shot Job that dials
+// and reports back (provision.Probe). The target address comes from the caller, so this
+// is an arbitrary-destination TCP connect on someone's behalf; the placement is what
+// bounds it. The dialling pod exists for one dial and then dies, and the operator
+// Deployment's own NetworkPolicy grants no :22 egress at all — so the estate never holds
+// a standing port-22 primitive on a pod that is always running and reachable from
+// api-gateway, which is internet-facing.
+//
+// An earlier version of this comment justified dialling from the operator on the grounds
+// that the caller reached it "only via a kubeconfig-gated port-forward". OPS-M2a made
+// that false — the RPC arrives over mTLS from api-gateway — and the stale premise is
+// exactly what made the surface look acceptable for as long as it did.
+//
+// What crosses back is reachability, latency, and a short trimmed reason. Never a byte
+// read from the peer: the probe does not read the socket at all.
 func (s *Server) TestConnection(ctx context.Context, req *operatorpb.TestConnectionRequest) (*operatorpb.TestConnectionResponse, error) {
+	// Same gate as AddNode: no provisioner image, no Job to run, so there is nothing to
+	// probe with. Reporting every target unreachable would be a lie about the target.
+	if s.prov == nil {
+		return nil, status.Error(codes.Unimplemented, "provisioning not configured")
+	}
 	if req.GetIp() == "" {
 		return nil, status.Error(codes.InvalidArgument, "ip is required")
 	}
@@ -294,25 +308,15 @@ func (s *Server) TestConnection(ctx context.Context, req *operatorpb.TestConnect
 	if port == 0 {
 		port = 22
 	}
-	addr := net.JoinHostPort(req.GetIp(), strconv.Itoa(int(port)))
-
-	start := time.Now()
-	d := net.Dialer{Timeout: testDialTimeout}
-	conn, err := d.DialContext(ctx, "tcp", addr)
+	res, err := s.prov.Probe(ctx, req.GetIp(), port)
 	if err != nil {
-		return &operatorpb.TestConnectionResponse{Reachable: false, Message: dialMessage(err)}, nil
+		// The probe could not be RUN — a different fact from an unreachable host, and one
+		// the caller must not see as reachable=false.
+		return nil, status.Error(codes.Internal, err.Error())
 	}
-	_ = conn.Close()
-	return &operatorpb.TestConnectionResponse{Reachable: true, LatencyMs: time.Since(start).Milliseconds()}, nil
-}
-
-// dialMessage trims a dial error to a short, client-safe reason.
-func dialMessage(err error) string {
-	msg := err.Error()
-	if i := strings.LastIndex(msg, ": "); i >= 0 && i+2 < len(msg) {
-		return msg[i+2:]
-	}
-	return msg
+	return &operatorpb.TestConnectionResponse{
+		Reachable: res.Reachable, LatencyMs: res.LatencyMS, Message: res.Message,
+	}, nil
 }
 
 func provStatus(s provision.Status) operatorpb.ProvisionStatus {

@@ -3,8 +3,6 @@ package grpcsrv
 import (
 	"context"
 	"errors"
-	"net"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -101,6 +99,13 @@ type stubProvisioner struct {
 	id         string
 	provisions []provision.Provision
 	err        error
+
+	// Probe's recorded arguments and canned answer. probeErr is separate from err
+	// because "the probe could not run" and "AddNode failed" are independent faults.
+	gotProbeIP   string
+	gotProbePort int32
+	probe        provision.ProbeResult
+	probeErr     error
 }
 
 func (s *stubProvisioner) AddNode(_ context.Context, r provision.Request) (string, error) {
@@ -109,6 +114,10 @@ func (s *stubProvisioner) AddNode(_ context.Context, r provision.Request) (strin
 }
 func (s *stubProvisioner) List(context.Context) ([]provision.Provision, error) {
 	return s.provisions, s.err
+}
+func (s *stubProvisioner) Probe(_ context.Context, ip string, port int32) (provision.ProbeResult, error) {
+	s.gotProbeIP, s.gotProbePort = ip, port
+	return s.probe, s.probeErr
 }
 
 func TestAddNodeDecodesRequestAndReturnsID(t *testing.T) {
@@ -135,52 +144,78 @@ func TestAddNodeRejectsEmptyKey(t *testing.T) {
 	}
 }
 
-func TestTestConnectionReachable(t *testing.T) {
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = ln.Close() }()
-	host, portStr, _ := net.SplitHostPort(ln.Addr().String())
-	port, _ := strconv.Atoi(portStr)
-
-	srv := New(stubReader{})
-	resp, err := srv.TestConnection(context.Background(), &operatorpb.TestConnectionRequest{Ip: host, SshPort: int32(port)})
+// TestTestConnectionDelegatesToTheProber is the assertion that keeps the dial out of
+// this process: the handler must hand the target to the provisioner (which runs it in
+// an ephemeral Job with the :22 egress) and translate the answer, never dial itself.
+func TestTestConnectionDelegatesToTheProber(t *testing.T) {
+	sp := &stubProvisioner{probe: provision.ProbeResult{Reachable: true, LatencyMS: 4}}
+	resp, err := NewWithProvisioner(stubReader{}, sp).TestConnection(context.Background(),
+		&operatorpb.TestConnectionRequest{Ip: "10.0.0.5", SshPort: 2222})
 	if err != nil {
 		t.Fatalf("TestConnection: %v", err)
 	}
-	if !resp.GetReachable() {
-		t.Errorf("want reachable, got %+v", resp)
+	if sp.gotProbeIP != "10.0.0.5" || sp.gotProbePort != 2222 {
+		t.Errorf("prober got %s:%d, want 10.0.0.5:2222", sp.gotProbeIP, sp.gotProbePort)
 	}
-	if resp.GetLatencyMs() < 0 {
-		t.Errorf("latency should be non-negative, got %d", resp.GetLatencyMs())
+	if !resp.GetReachable() || resp.GetLatencyMs() != 4 {
+		t.Errorf("resp = %+v, want reachable with latency 4", resp)
 	}
 }
 
-func TestTestConnectionUnreachable(t *testing.T) {
-	// Bind then immediately close, so the port is (almost certainly) closed.
-	ln, _ := net.Listen("tcp", "127.0.0.1:0")
-	addr := ln.Addr().String()
-	_ = ln.Close()
-	host, portStr, _ := net.SplitHostPort(addr)
-	port, _ := strconv.Atoi(portStr)
+func TestTestConnectionDefaultsToPort22(t *testing.T) {
+	sp := &stubProvisioner{probe: provision.ProbeResult{Reachable: true}}
+	if _, err := NewWithProvisioner(stubReader{}, sp).TestConnection(context.Background(),
+		&operatorpb.TestConnectionRequest{Ip: "10.0.0.5"}); err != nil {
+		t.Fatalf("TestConnection: %v", err)
+	}
+	if sp.gotProbePort != 22 {
+		t.Errorf("probe port = %d, want the 22 default", sp.gotProbePort)
+	}
+}
 
-	resp, err := New(stubReader{}).TestConnection(context.Background(), &operatorpb.TestConnectionRequest{Ip: host, SshPort: int32(port)})
+func TestTestConnectionUnreachableIsANormalResult(t *testing.T) {
+	sp := &stubProvisioner{probe: provision.ProbeResult{Reachable: false, Message: "connection refused"}}
+	resp, err := NewWithProvisioner(stubReader{}, sp).TestConnection(context.Background(),
+		&operatorpb.TestConnectionRequest{Ip: "10.0.0.5"})
 	if err != nil {
-		t.Fatalf("TestConnection returned an RPC error for an unreachable host (should be a normal result): %v", err)
+		t.Fatalf("an unreachable host must be a normal response, not an RPC error: %v", err)
 	}
 	if resp.GetReachable() {
-		t.Errorf("want unreachable")
+		t.Error("want unreachable")
 	}
-	if resp.GetMessage() == "" {
-		t.Errorf("unreachable result should carry a message")
+	if resp.GetMessage() != "connection refused" {
+		t.Errorf("message = %q, want the prober's trimmed reason", resp.GetMessage())
+	}
+}
+
+// TestTestConnectionProbeFailureIsNotUnreachable: if the probe itself could not run,
+// that is Internal. Reporting it as reachable=false would blame a target that may be
+// perfectly healthy and send the operator to fix the wrong thing.
+func TestTestConnectionProbeFailureIsNotUnreachable(t *testing.T) {
+	sp := &stubProvisioner{probeErr: errors.New("probe job did not complete in time")}
+	resp, err := NewWithProvisioner(stubReader{}, sp).TestConnection(context.Background(),
+		&operatorpb.TestConnectionRequest{Ip: "10.0.0.5"})
+	if status.Code(err) != codes.Internal {
+		t.Fatalf("want Internal when the probe cannot run, got resp=%+v err=%v", resp, err)
 	}
 }
 
 func TestTestConnectionRejectsEmptyIP(t *testing.T) {
-	_, err := New(stubReader{}).TestConnection(context.Background(), &operatorpb.TestConnectionRequest{})
+	_, err := NewWithProvisioner(stubReader{}, &stubProvisioner{}).TestConnection(
+		context.Background(), &operatorpb.TestConnectionRequest{})
 	if status.Code(err) != codes.InvalidArgument {
 		t.Fatalf("want InvalidArgument for empty ip, got %v", err)
+	}
+}
+
+// TestTestConnectionUnimplementedWithoutProvisioner: the read-only deployment has no
+// provisioner image, so there is no Job to probe with. It must say so — the same
+// Unimplemented AddNode returns — rather than answer with a fabricated verdict.
+func TestTestConnectionUnimplementedWithoutProvisioner(t *testing.T) {
+	_, err := New(stubReader{}).TestConnection(context.Background(),
+		&operatorpb.TestConnectionRequest{Ip: "10.0.0.5"})
+	if status.Code(err) != codes.Unimplemented {
+		t.Fatalf("want Unimplemented without a provisioner, got %v", err)
 	}
 }
 

@@ -283,6 +283,15 @@ spec:
 # rule (SEC-M6 update), though it retains an intentionally open SSH rule to reach
 # arbitrary operator-supplied node IPs — but any NEW rule must not use an empty
 # `to:` now that a guard (operator_egress_test.go) forbids this pattern.
+#
+# DO NOT ADD A TCP:22 RULE HERE. If TestConnection reports every target unreachable,
+# the answer is not a :22 rule for the operator — that was tried (4dea5d7) and
+# reverted, because it hands the always-running, api-gateway-reachable operator pod a
+# standing connect-to-any-address-on-22 primitive with a caller-supplied destination.
+# TestConnection does not dial from this pod at all: it runs an ephemeral Job whose
+# pod carries app.kubernetes.io/component=node-provisioner and therefore gets its :22
+# from node-provisioner-egress below. A probe reporting a false "connection refused"
+# means that label is missing from the probe pod, not that this policy is too tight.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
