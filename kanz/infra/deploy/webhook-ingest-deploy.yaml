@@ -131,6 +131,11 @@ spec:
             - { name: WEBHOOK_INGEST_LISTEN, value: ":8090" }
             - { name: WEBHOOK_INGEST_NATS_URL, value: "nats://nats.kanz-messaging.svc:4222" }
             - { name: WEBHOOK_INGEST_SOURCE, value: "webhook-ingest" }
+            # SEC-01a. The bus is mTLS-ONLY (infra/nats/nats.yaml sets tls.verify).
+            # Without this socket the mesh stays disabled and the dial fails with
+            # "x509: certificate signed by unknown authority" — a CA-shaped error
+            # whose actual cause is this missing line. internal/config already reads it.
+            - { name: SPIFFE_ENDPOINT_SOCKET, value: "unix:///run/spiffe/spire-agent.sock" }
             # The nonce replay window. A signal replayed outside it is refused.
             - { name: WEBHOOK_INGEST_REPLAY_WINDOW, value: "5m" }
             # THE REPLAY DEFENCE'S STORE — now CROSS-POD (EXEC-M17 wrote it, EXEC-M22
@@ -193,9 +198,15 @@ spec:
             - { name: webhook-config, mountPath: /run/secrets/webhook, readOnly: true }
             - { name: redis, mountPath: /run/secrets/redis, readOnly: true }
             - { name: tmp, mountPath: /tmp }
+            - { name: spiffe, mountPath: /run/spiffe, readOnly: true }
       volumes:
         - name: tmp
           emptyDir: {}
+        # The SPIFFE Workload API socket the env above points at.
+        - name: spiffe
+          csi:
+            driver: csi.spiffe.io
+            readOnly: true
         # Removing this volume does not degrade the replay defence — it stops the pod from
         # starting, because the binary refuses to run without a nonce store it can reach.
         - name: redis

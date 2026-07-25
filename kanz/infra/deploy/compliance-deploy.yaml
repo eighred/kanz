@@ -102,6 +102,14 @@ spec:
             - { name: COMPLIANCE_NATS_URL, value: "nats://nats.kanz-messaging.svc:4222" }
             - { name: COMPLIANCE_SOURCE, value: "compliance" }
             - { name: COMPLIANCE_CONSUMER_GROUP, value: "compliance" }
+            # SEC-01a. infra/nats/nats.yaml serves `tls { verify: true,
+            # verify_and_map: true }` — the bus is mTLS-ONLY. Without this socket the
+            # mesh is disabled (transport.NewMesh("").Enabled() == false), the client
+            # still meets a TLS server, and every connection dies with
+            #   nats connect: nats: tls error: x509: certificate signed by unknown authority
+            # which reads like a CA distribution problem and is actually this line
+            # missing. internal/config already reads it; only the manifest was silent.
+            - { name: SPIFFE_ENDPOINT_SOCKET, value: "unix:///run/spiffe/spire-agent.sock" }
           livenessProbe:
             httpGet: { path: /healthz, port: 8091 }
             initialDelaySeconds: 5
@@ -118,6 +126,12 @@ spec:
               drop: ["ALL"]
           volumeMounts:
             - { name: tmp, mountPath: /tmp }
+            - { name: spiffe, mountPath: /run/spiffe, readOnly: true }
       volumes:
         - name: tmp
           emptyDir: {}
+        # The SPIFFE Workload API socket the env above points at.
+        - name: spiffe
+          csi:
+            driver: csi.spiffe.io
+            readOnly: true
