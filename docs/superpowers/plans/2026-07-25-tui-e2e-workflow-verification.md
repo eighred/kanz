@@ -13,7 +13,11 @@
 - **Go version: 1.26.5**, matching every Dockerfile in the repo. Do not install a different minor.
 - **Assertions match domain text, never layout.** No assertion may depend on column position, box-drawing characters, padding, or colour. Slice 2 rewrites every frame; a layout-coupled harness gets deleted and takes the regression net with it.
 - **The oracle is `kubectl` or the cluster API, never the TUI's own rendering.** A UI that renders optimistic intent rather than observed state must fail these tests.
-- **No `time.Sleep` as a synchronisation primitive, and no retry loops around assertions.** Use `WaitFor`. If a workflow needs a sleep to be observable, that is a TUI defect to fix, not a test to weaken.
+- **Waiting has three cases, and only one of them is forbidden.** The original single-sentence rule ("no `time.Sleep`, no retry loops") forbade the mechanism `WaitFor` is built out of, so it is split here. Reviewers apply this list, not the old sentence.
+  - **FORBIDDEN — sleeping instead of waiting for an outcome.** `time.Sleep(5*time.Second)` followed by an assertion that a node joined. This is what hides missing feedback: it passes on a fast machine, flakes on a slow one, and never tells you the workflow is unobservable. If a workflow needs this to pass, that is a TUI defect to fix, not a test to weaken.
+  - **REQUIRED — bounded polling of a system with no event channel.** A pty buffer and `kubectl` do not push. Polling them on a deadline *is* the implementation of `WaitFor`, `waitForNodeReady`, `waitForSchedulable`, `waitForNoEvictablePods` and `waitForSecret`. Every such loop must have a deadline and must fail with what it observed.
+  - **PERMITTED to prove a NEGATIVE, and must say so in a comment.** Asserting that nothing happened has no outcome to wait for, so it needs a bounded quiet period — the drain test's 3s pause before checking that answering `n` evicted nothing. The comment must name what the pause is proving; an uncommented sleep is the forbidden case above.
+  - **`selectNode2` is a navigation loop, not a retry loop.** It walks a list to reach a row, bounded at 10 steps, and fails with an explicit message if the selected row is not machine-readable. Do not rewrite it as an event wait: the TUI exposes no selection event, and adding one is slice-2 scope.
 - **PTY tests skip — loudly — when `KANZ_E2E_GATEWAY`, `KANZ_E2E_TOKEN`, `KANZ_E2E_NODE2_IP` or `KANZ_E2E_SSH_KEY` are unset.** A skip is never reported as a pass. Mirrors the existing `TEST_POSTGRES_URL` convention.
 - **Node 2 is the only safe target for cordon/drain/region.** Node 1 runs the estate; draining it evicts the trading loop, NATS and Postgres.
 - **No credential may appear in a captured frame or a service log.** Test 6 asserts this by searching both.
@@ -782,6 +786,8 @@ presents as a node that never appears and reads as a join failure that it is not
 func selectNode2(t *testing.T, s *Session, node2 string) {
 	t.Helper()
 	s.WaitFor(t, node2, 10*time.Second)
+	// A NAVIGATION loop, not a retry loop: it walks the list to reach a row. Bounded,
+	// and it fails loudly rather than silently acting on the wrong node.
 	for i := 0; i < 10; i++ {
 		if strings.Contains(s.Frames(), "> "+node2) || strings.Contains(s.Frames(), node2+" <") {
 			return
