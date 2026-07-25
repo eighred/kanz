@@ -56,6 +56,52 @@ spec:
       labels: { app: operator, app.kubernetes.io/part-of: kanz }
     spec:
       serviceAccountName: operator
+      # PINNED TO THE CONTROL PLANE — DO NOT REMOVE THIS TO "LET THE OPERATOR
+      # SCHEDULE ANYWHERE" (OPS-M2e). Removing it deadlocks node drains.
+      #
+      # THE DEADLOCK. This pod is the thing that performs drains. Unpinned, the
+      # scheduler may land it on a worker; when an operator then drains THAT worker,
+      # the drain must evict this pod to finish. It cannot. replicas: 1 plus the
+      # `operator` PodDisruptionBudget's minAvailable: 1 makes allowed-disruptions 0,
+      # so the Eviction API returns 429 forever, the drain retries for the full
+      # 15-minute drainDeadline (nodeops.go), and the node never drains. Observed on
+      # the two-node k3s estate: operator-7dd454597-kxqkw on worker ip-172-26-12-47,
+      # reported as "still on ip-172-26-12-47 after 3m0s: [kanz-operator/operator-...]".
+      #
+      # THE PDB IS NOT THE BUG AND MUST NOT BE WEAKENED. Refusing to evict the only
+      # replica of the control plane is exactly its job — a drain that took the drainer
+      # down mid-drain would be worse than one that stalls. The PLACEMENT is the bug: a
+      # cluster-management control plane belongs on the control plane, not on the fleet
+      # it manages. Fix a scheduling problem by scheduling, never by relaxing a budget.
+      #
+      # THE LABEL VALUE IS AN ASSUMPTION, STATED HERE RATHER THAN LEFT SILENT. Nothing
+      # in infra/ used this label before, so there was no in-repo precedent to copy.
+      # Every existing reader of it is value-agnostic — estate.go's roles() matches the
+      # KEY prefix, and test/e2e/tui/oracle.go's jsonpath tests key presence — so neither
+      # pins the value. "true" is the k3s convention (k3s labels server nodes
+      # node-role.kubernetes.io/control-plane=true), and this estate is k3s. Note that
+      # kubeadm and kind use an EMPTY value instead, and a nodeSelector is an exact
+      # string match: on such a cluster this pod sits Pending with "0/N nodes are
+      # available: node(s) didn't match Pod's node affinity/selector" rather than
+      # scheduling anywhere wrong. Confirm before porting:
+      #   kubectl get nodes -l node-role.kubernetes.io/control-plane \
+      #     -o jsonpath='{.items[*].metadata.labels.node-role\.kubernetes\.io/control-plane}'
+      # (tools/rig-apply.sh does not deploy this manifest, so the kind dev rig is
+      # unaffected; a hand-apply onto kind needs the empty value.)
+      nodeSelector:
+        node-role.kubernetes.io/control-plane: "true"
+      # THE TOLERATION IS NOT NEEDED ON THIS CLUSTER TODAY, AND IS KEPT ANYWAY. The
+      # k3s control-plane node ip-172-26-11-140 currently carries no taints, so the
+      # nodeSelector alone places this pod. But a control plane that IS tainted
+      # NoSchedule (kubeadm's default, and any estate that later reserves its control
+      # plane) would turn the pin above into an unschedulable pod — the selector says
+      # "only here" and the taint says "not here". Without this, hardening the cluster
+      # would silently take the operator down. It grants nothing on a cluster with no
+      # such taint, so it costs nothing to carry.
+      tolerations:
+        - key: node-role.kubernetes.io/control-plane
+          operator: Exists
+          effect: NoSchedule
       securityContext:
         runAsNonRoot: true
         runAsUser: 65532
