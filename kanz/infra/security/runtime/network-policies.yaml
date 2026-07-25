@@ -138,6 +138,110 @@ spec:
       ports:
         - { protocol: TCP, port: 5432 }
 ---
+# THE ORDER PATH. Without these two policies NO ORDER REACHES ANY EXCHANGE.
+#
+# INFRA-M7a made every venue an out-of-process adapter: the OMS holds no exchange
+# code and reaches venue-binance / venue-okx over venue.v1 gRPC on :9000
+# (OMS_VENUE_ENDPOINTS). That is the last hop of the trading loop and the only way an
+# order leaves this platform — and this file, which default-denies the namespace in
+# both directions, did not mention the venue adapters at all. Nothing could dial
+# them, and they could accept nothing.
+#
+# It fails in the WORST available way. A MIC with no reachable adapter is a hard
+# error at the router, so the OMS refuses to start (it asks each adapter who it is
+# via venue.v1.Describe before registering it, and an adapter it cannot reach is
+# fatal by design). So the symptom is not "orders fail" — it is a CrashLoopBackOff on
+# the order management service, reported as "cannot ask the adapter which exchange
+# account it holds (is it running?)" while the adapter is running perfectly well.
+#
+# Not caught by the loop that runs on the rig: that OMS uses its IN-PROCESS SimVenue
+# (OMS_VENUE_ENDPOINTS empty), which needs no network at all. The gap only appears
+# the moment a real exchange is wired up — which is the one configuration where
+# being wrong costs money.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-oms-to-venue-adapters
+  namespace: kanz-services
+  labels:
+    app.kubernetes.io/part-of: kanz
+spec:
+  podSelector:
+    matchLabels:
+      app: oms
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app: venue-binance
+        - podSelector:
+            matchLabels:
+              app: venue-okx
+      ports:
+        - { protocol: TCP, port: 9000 }
+---
+# The ingress half, on the adapters. matchExpressions rather than two policies: the
+# rule is identical for every venue adapter, and one policy that names the SET keeps
+# a new adapter from being added with its egress half present and its ingress half
+# forgotten — the failure this pair exists to prevent.
+#
+# :9000 ONLY, and only from the OMS. The adapter's other port (8091/8092) is health
+# and metrics, and nothing about order submission should be reachable from anywhere
+# else in the namespace — this process holds the exchange API credentials.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-oms-to-venue-adapters-ingress
+  namespace: kanz-services
+  labels:
+    app.kubernetes.io/part-of: kanz
+spec:
+  podSelector:
+    matchExpressions:
+      - { key: app, operator: In, values: [venue-binance, venue-okx] }
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: oms
+      ports:
+        - { protocol: TCP, port: 9000 }
+---
+# SCRAPE. Prometheus lives in kanz-observability and must reach every service's
+# /metrics, but only eight of the twenty-three workloads had an ingress rule that let
+# it — and the ones that did were the ones whose metrics port happened to be 8080
+# (allow-gateway-to-phase7) or that got a hand-written rule. oms:8090, compliance:8091,
+# audit:8083, regulatory:8083, market-data:8082, market-ingest:8091,
+# venue-binance:8091 and venue-okx:8092 were all silently unscrapable, which takes the
+# SLO rules and the alerting built on them with it.
+#
+# NO PORT LIST, deliberately, and this is the same argument as the database rule
+# above. The peer is a single trusted namespace — the monitoring plane — and naming
+# which ports it may scrape adds no isolation against that peer while guaranteeing
+# that the next service with a new metrics port is silently unmonitored. The bound
+# that means something is WHO may connect, and it is one namespace.
+#
+# The per-service scrape rules elsewhere in this file are now redundant but harmless
+# (NetworkPolicy is additive). They are left alone rather than deleted: each also
+# carries a service-specific peer that is not observability.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-observability-scrape
+  namespace: kanz-services
+  labels:
+    app.kubernetes.io/part-of: kanz
+spec:
+  podSelector: {}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kanz-observability
+---
 # Telemetry: allow egress to the OTLP collector (OBS-01) on 4317. Scoped to the
 # observability namespace.
 apiVersion: networking.k8s.io/v1

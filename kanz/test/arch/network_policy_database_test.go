@@ -82,6 +82,92 @@ func TestNetworkPoliciesReachTheDatabase(t *testing.T) {
 	}
 }
 
+// THE ORDER PATH. INFRA-M7a made every venue an out-of-process adapter, so the OMS
+// reaches venue-binance / venue-okx over venue.v1 gRPC on :9000 — the last hop of the
+// trading loop and the only way an order leaves this platform. The policy set did not
+// mention the venue adapters at all: nothing could dial them and they could accept
+// nothing.
+//
+// It fails in the worst available way. A MIC with no reachable adapter is fatal at
+// the router — the OMS asks each adapter who it is (venue.v1.Describe) before
+// registering it and refuses to start if one will not answer — so the symptom is a
+// CrashLoopBackOff on the ORDER MANAGEMENT SERVICE, reporting "cannot ask the adapter
+// which exchange account it holds (is it running?)" while the adapter runs perfectly.
+//
+// The rig never caught it because its OMS uses the in-process SimVenue, which needs
+// no network. The gap appears only when a real exchange is wired up — the one
+// configuration where being wrong costs money.
+func TestNetworkPoliciesReachTheVenueAdapters(t *testing.T) {
+	path := filepath.Join(moduleRoot(t), "infra", "security", "runtime", "network-policies.yaml")
+	body, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	docs := decodeNetworkPolicyBytes(t, body, path)
+
+	const venuePort = 9000
+	egressTo := map[string]bool{}  // adapter app -> OMS may dial it
+	ingressOn := map[string]bool{} // adapter app -> it accepts :9000
+
+	for _, d := range docs {
+		if d.Kind != "NetworkPolicy" || d.Metadata.Namespace != "kanz-services" {
+			continue
+		}
+		if d.Spec.PodSelector.MatchLabels["app"] == "oms" {
+			for _, r := range d.Spec.Egress {
+				if !rulePermitsPort(r, venuePort) {
+					continue
+				}
+				for _, peer := range r.To {
+					if peer.PodSelector != nil {
+						egressTo[peer.PodSelector.MatchLabels["app"]] = true
+					}
+				}
+			}
+		}
+		// The ingress half may select the adapters by label or by a matchExpressions
+		// set; accept either, and record which apps it covers.
+		for _, r := range d.Spec.Ingress {
+			if !rulePermitsPort(r, venuePort) {
+				continue
+			}
+			fromOMS := false
+			for _, peer := range r.From {
+				if peer.PodSelector != nil && peer.PodSelector.MatchLabels["app"] == "oms" {
+					fromOMS = true
+				}
+			}
+			if !fromOMS {
+				continue
+			}
+			if app := d.Spec.PodSelector.MatchLabels["app"]; app != "" {
+				ingressOn[app] = true
+			}
+			for _, e := range d.Spec.PodSelector.MatchExpressions {
+				if e.Key == "app" && e.Operator == "In" {
+					for _, v := range e.Values {
+						ingressOn[v] = true
+					}
+				}
+			}
+		}
+	}
+
+	for _, adapter := range []string{"venue-binance", "venue-okx"} {
+		if !egressTo[adapter] {
+			t.Errorf("no egress rule lets the OMS dial %s on :%d. The OMS does not merely fail to "+
+				"trade without this — it REFUSES TO START, because an adapter it cannot reach is a "+
+				"fatal error at the router. The symptom is a crash-looping OMS blaming a healthy "+
+				"adapter.", adapter, venuePort)
+		}
+		if !ingressOn[adapter] {
+			t.Errorf("no ingress rule lets %s accept :%d from the OMS. Both halves are required — "+
+				"default-deny-all selects every pod for BOTH directions, so an egress rule alone "+
+				"still leaves the adapter refusing the connection.", adapter, venuePort)
+		}
+	}
+}
+
 // rulePermitsPort reports whether the rule names port p. A rule with NO ports is
 // all-ports, which trivially includes it.
 func rulePermitsPort(r netPolRule, p int) bool {
