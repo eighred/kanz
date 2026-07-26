@@ -32,8 +32,11 @@ Two P0 defects block release. Both are proven by CI evidence, not inferred. This
 | Open PRs | 1 (#10, held) | — |
 | Branch protection on `main` | **NONE** | API returns "Branch not protected" |
 | Dependabot alerts | **0 open** | — |
-| Secret scanning | **DISABLED** | API: "Secret scanning is disabled" |
-| Code scanning | **no analysis ever** | API: "no analysis found" |
+| Secret scanning | **ENABLED** (owner, 2026-07-27) | API `security_and_analysis` |
+| Secret-scanning push protection | **ENABLED** 2026-07-27 | API `security_and_analysis` |
+| Dependabot security updates | **ENABLED** 2026-07-27 | API `automated-security-fixes` |
+| Repository visibility | **PUBLIC — temporary billing workaround** | anonymous API GET = 200; see P2-0 |
+| Code scanning (CodeQL) | **RUNNING, green** (owner added `8879586`; pinned to SHAs) | workflow "CodeQL Advanced" |
 | Board validator | PASS, 62 rows | exit 0 |
 
 **Release status: nothing has ever been released.** `release.yml` triggers on `push: tags: ['v*']` and no tag has ever existed, so the tag path has never fired once. The single historical run was a manual `workflow_dispatch` that died in 5 seconds.
@@ -104,6 +107,24 @@ Zero tags, zero releases. `release.yml`'s only trigger besides manual dispatch i
 ### P1-3 — `release.yml` covers 2 of 25 services
 
 Its matrix is `[risk-engine, schema-registry]`; `build.yml` builds 25. Even a green release run leaves 23 services with no signed image, no SBOM, and no digest to pin.
+
+### P2-0 — Repository is PUBLIC: a deliberate, temporary billing workaround (owner-confirmed 2026-07-27)
+
+`eighred/kanz` is **public** — an anonymous `GET` on the repository API returns 200. Container packages remain **private** (anonymous ghcr probe returns 401).
+
+**This is intentional and temporary.** The owner switched visibility to public to work around the billing-related CI interruption; it was an operational decision, not a misconfiguration. Recorded here because the board still describes this as "this private repo", and because two consequences follow that are easy to miss:
+
+- **It explains the "billing halt ended".** Public repositories get free GitHub Actions minutes. CI did not get fixed — the repository changed visibility, and the runners came back with it.
+- **Therefore restoring private visibility WILL re-break CI** unless the billing/account issue is settled first. Sequence matters: resolve billing, then flip visibility, then confirm a green run. Flipping first reproduces the original outage.
+
+| aspect | state |
+|---|---|
+| Public visibility | Temporary workaround |
+| Security risk | **Accepted temporarily**, by owner decision |
+| Intended long-term state | Repository private; packages private; release and deployment access via authenticated workflows |
+| Follow-up | Restore private visibility once billing is resolved and the workaround is no longer needed — **after** confirming CI can run on a private repo |
+
+While public, treat every secret ever committed as disclosed and rely on push protection (now enabled) to stop new ones.
 
 ### P2-1 — Repository security settings are off
 
