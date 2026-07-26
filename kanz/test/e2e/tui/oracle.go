@@ -133,7 +133,7 @@ func secretDataKeys(t *testing.T, ns, name string) []string {
 // before the RPC completes, and failing on the first miss would be a race, not a proof.
 //
 // It shells out directly rather than through kubectl() for the existence probe alone,
-// for the same reason nodeExists does — "not there yet" is the expected state on every
+// because "not there yet" is the expected state on every
 // pass but the last, and kubectl() is fatal on a non-zero exit. Once the object exists,
 // the read of its keys goes back through kubectl(), where a failure IS fatal.
 func waitForSecret(t *testing.T, ns, name string, timeout time.Duration) []string {
@@ -199,21 +199,6 @@ func deploymentLogs(t *testing.T, ns, deployment, since string) string {
 		b.WriteByte('\n')
 	}
 	return b.String()
-}
-
-// nodeExists reports whether the node is present. It shells out directly rather than
-// through kubectl() because a missing node is an expected outcome here, not a fatal
-// one — but a bool alone can't tell "no such node" apart from an RBAC denial or an
-// unreachable API server, so log kubectl's own words on failure instead of discarding
-// them, the same way every other helper in this file threads output into its failure.
-func nodeExists(t *testing.T, node string) bool {
-	t.Helper()
-	out, err := exec.Command("kubectl", "get", "node", node, "-o", "name").CombinedOutput()
-	if err != nil {
-		t.Logf("nodeExists(%s): %v\n%s", node, err, out)
-		return false
-	}
-	return true
 }
 
 // evictablePodsOnNode lists the pods on a node that a drain is REQUIRED to remove, as
