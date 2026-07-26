@@ -1,6 +1,10 @@
 # Release Readiness Report
 
-**Audited:** 2026-07-27 · **HEAD:** `e0cddf4` · **Verdict: NO-GO**
+**Audited:** 2026-07-27 · **Updated after recovery Phases 1-2** · **Verdict: NO-GO (both P0s addressed; a third defect is now unmasked)**
+
+> **Recovery status.** REL-P0b is **fixed and CI-verified**: the race detector reported two `WARNING: DATA RACE` on `main` and **zero** after the fix. REL-P0a is **implemented** (owner decision: adopt `eighred`) and awaiting its first green `kanz-build` on a push to `main` — the only evidence that counts, and one merging alone can produce.
+>
+> **A third defect surfaced, previously masked.** With the provisioner race gone, `kanz-ci`'s race step still fails — on `TestNATSMTLS_SPIFFEClientConnectsPublishesConsumes` (`pkg/bus`): *"publish over mTLS: nats publish: context deadline exceeded"*. It failed on `main` too, hidden behind the race. **This resolves board item OPS-M2f-c**, which was carried as an unverified ~2-minute check: CI runs it, and it fails. Tracked below as P1-4.
 
 Two P0 defects block release. Both are proven by CI evidence, not inferred. This report is the source of truth for finishing the system; where it contradicts `KANZ_TASKS.md`, this report is newer and the board rows it names are being corrected.
 
@@ -28,8 +32,11 @@ Two P0 defects block release. Both are proven by CI evidence, not inferred. This
 | Open PRs | 1 (#10, held) | — |
 | Branch protection on `main` | **NONE** | API returns "Branch not protected" |
 | Dependabot alerts | **0 open** | — |
-| Secret scanning | **DISABLED** | API: "Secret scanning is disabled" |
-| Code scanning | **no analysis ever** | API: "no analysis found" |
+| Secret scanning | **ENABLED** (owner, 2026-07-27) | API `security_and_analysis` |
+| Secret-scanning push protection | **ENABLED** 2026-07-27 | API `security_and_analysis` |
+| Dependabot security updates | **ENABLED** 2026-07-27 | API `automated-security-fixes` |
+| Repository visibility | **PUBLIC — temporary billing workaround** | anonymous API GET = 200; see P2-0 |
+| Code scanning (CodeQL) | **RUNNING, green** (owner added `8879586`; pinned to SHAs) | workflow "CodeQL Advanced" |
 | Board validator | PASS, 62 rows | exit 0 |
 
 **Release status: nothing has ever been released.** `release.yml` triggers on `push: tags: ['v*']` and no tag has ever existed, so the tag path has never fired once. The single historical run was a manual `workflow_dispatch` that died in 5 seconds.
@@ -73,6 +80,26 @@ Two ways out, and they cost very differently:
 - **Move the repository to a `kanz-eng` org** — makes 747 hardcoded references, the Go module path, and the admission policy correct as written; needs org admin.
 - **Adopt `eighred` as canonical** — revert two workflow lines and rewrite 39 manifests, `preview.yml`, and the policy. **No new credential needed, and CI goes green immediately.**
 
+### P1-4 — NATS mTLS publish times out in CI
+
+`TestNATSMTLS_SPIFFEClientConnectsPublishesConsumes` fails with *"publish over mTLS: nats publish: context deadline exceeded"* (`nats_mtls_integration_test.go:151`). Present on `main` and on every branch checked; it was hidden behind the provisioner data race in the same test step. The client reaches the publish call, so this is not a connect or certificate rejection — it is a publish that never completes.
+
+**ROOT CAUSE, proven from the config (2026-07-27).** The harness client cert carries `spiffe://kanz.internal/ns/kanz-services/sa/risk-engine` (`test/mtls/up.sh:48`), and `verify_and_map: true` maps that SVID to the `risk-engine` NATS user. That user's `publish.allow` (`infra/nats/tenancy.yaml:230-237`) is exactly:
+
+`risk.portfolio.exposure_recomputed`, `risk.portfolio.measures_computed`, four `dlq.*` subjects, `$JS.API.>`, `$JS.ACK.>`.
+
+The test publishes to `test.mtls.<timestamp>` — **not in that list**. `$JS.API.>` is, which is precisely why `CreateStream` succeeds and `Publish` does not: a NATS permission denial on a request subject yields **no reply**, so a JetStream publish awaiting its `PubAck` presents as `context deadline exceeded` rather than as an authorization error.
+
+**The test cannot be fixed by changing its subject alone.** `risk-engine`'s `publish.allow` and `subscribe.allow` (`:238-244`) have an **empty intersection** — by design, since a service emits its outputs and consumes its inputs and never round-trips its own traffic. A single-identity publish-then-consume round trip is therefore impossible under the production permission model the test exists to assert. It has never passed; the billing halt merely meant nobody was told.
+
+**Three ways out, and one is a trap:**
+
+1. **Two identities** — publish as `risk-engine` on `risk.portfolio.measures_computed`, consume as an identity permitted to subscribe it. Keeps the round-trip guarantee and stays inside the production model. Most work.
+2. **Narrow the assertion** — prove mTLS connect, SVID-to-account mapping, and an accepted publish on a permitted subject; drop the consume half. Honest and small, but the test stops proving delivery.
+3. **Grant `test.mtls.>` in `tenancy.conf` — do not do this.** It weakens the deny-by-default permission model in production config so a test can pass, which inverts what the test is for.
+
+This is the same surface board item **OPS-M2f-c** flagged as unverified (the `nats.conf` `pid_file` addition, extracted verbatim by `test/mtls/up.sh`). That item can stop being a "2-minute check somebody should run" — CI runs it every time, and it fails every time.
+
 ### P1-2 — No versioning exists
 
 Zero tags, zero releases. `release.yml`'s only trigger besides manual dispatch is `push: tags: ['v*']`. "Prove `release.yml` once" (OPS-M1) cannot happen until someone cuts a tag, and nothing documents a versioning scheme.
@@ -80,6 +107,24 @@ Zero tags, zero releases. `release.yml`'s only trigger besides manual dispatch i
 ### P1-3 — `release.yml` covers 2 of 25 services
 
 Its matrix is `[risk-engine, schema-registry]`; `build.yml` builds 25. Even a green release run leaves 23 services with no signed image, no SBOM, and no digest to pin.
+
+### P2-0 — Repository is PUBLIC: a deliberate, temporary billing workaround (owner-confirmed 2026-07-27)
+
+`eighred/kanz` is **public** — an anonymous `GET` on the repository API returns 200. Container packages remain **private** (anonymous ghcr probe returns 401).
+
+**This is intentional and temporary.** The owner switched visibility to public to work around the billing-related CI interruption; it was an operational decision, not a misconfiguration. Recorded here because the board still describes this as "this private repo", and because two consequences follow that are easy to miss:
+
+- **It explains the "billing halt ended".** Public repositories get free GitHub Actions minutes. CI did not get fixed — the repository changed visibility, and the runners came back with it.
+- **Therefore restoring private visibility WILL re-break CI** unless the billing/account issue is settled first. Sequence matters: resolve billing, then flip visibility, then confirm a green run. Flipping first reproduces the original outage.
+
+| aspect | state |
+|---|---|
+| Public visibility | Temporary workaround |
+| Security risk | **Accepted temporarily**, by owner decision |
+| Intended long-term state | Repository private; packages private; release and deployment access via authenticated workflows |
+| Follow-up | Restore private visibility once billing is resolved and the workaround is no longer needed — **after** confirming CI can run on a private repo |
+
+While public, treat every secret ever committed as disclosed and rely on push protection (now enabled) to stop new ones.
 
 ### P2-1 — Repository security settings are off
 
