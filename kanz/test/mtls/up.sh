@@ -46,6 +46,15 @@ TRUST_DOMAIN="kanz.internal"
 #   spiffeIDTemplate: spiffe://kanz.internal/ns/{namespace}/sa/{serviceAccountName}
 SERVER_ID="spiffe://${TRUST_DOMAIN}/ns/kanz-messaging/sa/nats"
 CLIENT_ID="spiffe://${TRUST_DOMAIN}/ns/kanz-services/sa/risk-engine"
+# A SECOND client identity, because the production permission model makes one
+# insufficient. tenants.conf grants risk-engine publish on its two output FACTs
+# and subscribe on its three inputs — an EMPTY intersection, deliberately: a
+# service emits what it produces and consumes what it needs, and never round-trips
+# its own traffic. So a publish->consume proof needs two SVIDs, exactly as
+# production does it. archiver is the real consumer of risk.portfolio.> (it holds
+# subscribe on that prefix plus $JS.API.>/$JS.ACK.>), so this pair is a genuine
+# service relationship rather than a test fixture.
+CONSUMER_ID="spiffe://${TRUST_DOMAIN}/ns/kanz-services/sa/archiver"
 
 # Repo root, so this runs from anywhere.
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -95,6 +104,7 @@ mint() { # mint <name> <spiffe-id> [extra-sans]
 }
 mint server "$SERVER_ID" "$SERVER_SANS"
 mint client "$CLIENT_ID"
+mint consumer "$CONSUMER_ID"
 # spiffe-helper writes the broker's SVID under these exact names (see the
 # nats-spiffe-helper ConfigMap); nats.conf reads them by path.
 cp server.pem svid.pem && cp server.key svid_key.pem

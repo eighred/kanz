@@ -1,18 +1,12 @@
 package tui
 
 import (
-	"crypto/hmac"
-	"crypto/sha256"
-	"encoding/base64"
-	"encoding/json"
-	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
 	"testing"
-	"time"
 )
 
 // Env is everything a PTY proof needs to reach the platform.
@@ -115,22 +109,4 @@ func (e Env) sessionEnv() []string {
 		env = append(env, "KANZ_SIGNING_SECRET="+e.SigningSecret)
 	}
 	return env
-}
-
-// mintOperatorToken builds an HS256 token carrying the baseline and operator roles —
-// the dev-validator path. Production authenticates with OIDC and this helper has no
-// equivalent there, which is why slice 4 exists.
-func mintOperatorToken(secret string) string {
-	b64 := func(b []byte) string { return base64.RawURLEncoding.EncodeToString(b) }
-	header := b64([]byte(`{"alg":"HS256","typ":"JWT"}`))
-	claims, _ := json.Marshal(map[string]any{
-		"sub":    "e2e",
-		"tenant": "fund-alpha",
-		"roles":  []string{"kanz-user", "kanz-operator"},
-		"exp":    time.Now().Add(time.Hour).Unix(),
-	})
-	payload := b64(claims)
-	mac := hmac.New(sha256.New, []byte(secret))
-	mac.Write([]byte(header + "." + payload))
-	return fmt.Sprintf("%s.%s.%s", header, payload, b64(mac.Sum(nil)))
 }

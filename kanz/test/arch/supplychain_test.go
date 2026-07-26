@@ -170,7 +170,7 @@ func workflowFiles(t *testing.T, repoRoot string) []string {
 
 // A PRIVATE REGISTRY WITH NO CREDENTIAL IS A NODE THAT CANNOT RUN ANYTHING.
 //
-// Every platform image is ghcr.io/kanz-eng/*, and that repository is private
+// Every platform image is ghcr.io/eighred/*, and those packages are private
 // (anonymous pulls 403). A node joined through the TUI holds none of those
 // images, so a workload scheduled there dies in ErrImagePull. That was observed
 // twice during OPS-M2e — a probe Job and the operator's own rollout — and was
@@ -356,7 +356,8 @@ func TestPrivateImagesHavePullSecrets(t *testing.T) {
 // could never pull, under an identity the admission policy would never
 // accept — and nothing would have said so until someone tried.
 //
-// The owner's decision (2026-07-26) is that kanz-eng is canonical. This test is
+// The owner's decision (REL-P0a, 2026-07-27) is that eighred is canonical — see
+// canonicalImageOrg for why kanz-eng was never available. This test is
 // what keeps the two halves from drifting apart again: publish targets, pull
 // references, and the signing identity are the same string or the build fails.
 //
