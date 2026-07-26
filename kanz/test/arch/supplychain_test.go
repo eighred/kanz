@@ -360,21 +360,26 @@ func TestPrivateImagesHavePullSecrets(t *testing.T) {
 // free text would flag that comment as an image reference under an org called
 // "token". So this walks YAML keys that actually carry image references.
 //
-// THREE INDEPENDENT CHECKS, THREE INDEPENDENT FLOORS. Manifest/workflow image
-// references (the `imageRefKeys` below), the ClusterImagePolicy's `glob`, and
-// the signing identity (`subjectRegExp`) are three unrelated YAML shapes — an
-// `image: ghcr.io/org/svc` field, a `glob: "ghcr.io/org/**"` list entry, and a
-// `subjectRegExp: "^https://github.com/org/repo/..."` string share no key name
-// and no value format. Counting them into one pooled total would let a
-// coverage regression in either of the smaller checks hide behind padding
-// from the largest one: manifest `image:` references alone clear 40
-// comfortably (82 occurrences across 45 files at time of writing), while
-// `glob` and `subjectRegExp` each have exactly ONE occurrence in this repo —
-// if `cluster-image-policy.yaml` were deleted, or `glob`/`subjectRegExp` were
-// renamed by a future sigstore API, the pooled count would barely move and
-// the guard would still pass. Each check gets its own non-vacuity floor
-// instead, so losing either one fails loudly rather than hiding in the noise
-// of the other two.
+// FOUR INDEPENDENT CHECKS, FOUR INDEPENDENT FLOORS. Workflow-side image
+// references, infra-side image references, the ClusterImagePolicy's `glob`,
+// and the signing identity (`subjectRegExp`) are four unrelated populations —
+// an `image: ghcr.io/org/svc` field, a `glob: "ghcr.io/org/**"` list entry,
+// and a `subjectRegExp: "^https://github.com/org/repo/..."` string share no
+// key name and no value format, and the workflow and infra populations, while
+// sharing the same `imageRefKeys` keys, live in files with utterly different
+// counts. Counting any of these into one pooled total lets a coverage
+// regression in the smallest population hide behind padding from the
+// largest: infra `image:` references matched by imageRefKeys clear 40
+// comfortably (53 ghcr matches — 39 kanz-eng + 14 spiffe — across 45 files at
+// time of writing), while the three workflow-side publish targets (build.yml's
+// `images`, preview.yml's `tags`, release.yml's `IMAGE`) total exactly 3, and
+// `glob`/`subjectRegExp` each have exactly ONE occurrence in this repo. Pool
+// any of the small ones into the 53-strong infra count and it can vanish
+// entirely — three publish targets rewritten as `${{ env.REGISTRY }}/...`
+// (no literal `ghcr.io` left to match) still leaves the pooled total at 50,
+// comfortably above 40 — while the guard keeps reporting success. Each
+// population gets its own non-vacuity floor instead, so losing any one of
+// them fails loudly rather than hiding in the noise of the others.
 //
 // BLOCK SCALARS. docker/metadata-action documents a multi-line form,
 // `images: |` followed by indented ghcr.io lines. Both current workflows use
@@ -407,15 +412,28 @@ var thirdPartyImageOrgs = map[string]struct{}{
 // for coverage purposes, inside a pool the other keys fill on their own.
 var imageRefKeys = []string{"image", "images", "tags", "IMAGE"}
 
-// imageRefFloor, globFloor and subjectRegExpFloor are non-vacuity backstops
-// for the three independent checks TestImageOrgIsCanonical runs (see the
-// test's doc comment for why they are not pooled into one count). If any
-// check's real match count ever drops below its floor, the key set, file
-// layout, or value shape changed and that check is silently asserting almost
-// nothing. globFloor and subjectRegExpFloor are 1, not higher, because each
-// field has exactly one legitimate occurrence in this repo today — the point
-// of a floor of 1 is that zero must fail loudly, not that many are expected.
-const imageRefFloor = 40
+// workflowImageRefFloor, infraImageRefFloor, globFloor and subjectRegExpFloor
+// are non-vacuity backstops for the four independent checks
+// TestImageOrgIsCanonical runs (see the test's doc comment for why they are
+// not pooled into one count). If any check's real match count ever drops
+// below its floor, the key set, file layout, or value shape changed and that
+// check is silently asserting almost nothing.
+//
+// workflowImageRefFloor is 3, not higher, because build.yml's `images`,
+// preview.yml's `tags` and release.yml's `IMAGE` are the only three publish
+// targets that exist today — the point of this floor is that losing any of
+// them (e.g. a DRY refactor to `images: ${{ env.REGISTRY }}/...`, which
+// contains no literal `ghcr.io` for the regex to match) must fail loudly, not
+// that more than 3 are expected. It is deliberately its own floor rather than
+// folded into infraImageRefFloor: infra alone clears 40 on its own, so a
+// pooled counter would absorb the workflow side dropping to zero without
+// moving enough to trip a floor of 40.
+//
+// globFloor and subjectRegExpFloor are 1, not higher, because each field has
+// exactly one legitimate occurrence in this repo today — the point of a floor
+// of 1 is that zero must fail loudly, not that many are expected.
+const workflowImageRefFloor = 3
+const infraImageRefFloor = 40
 const globFloor = 1
 const subjectRegExpFloor = 1
 
@@ -534,7 +552,8 @@ func TestImageOrgIsCanonical(t *testing.T) {
 	}
 
 	var problems []string
-	imageRefsChecked := 0
+	workflowImageRefsChecked := 0
+	infraImageRefsChecked := 0
 	globChecked := 0
 	subjectRegExpsChecked := 0
 
@@ -545,6 +564,10 @@ func TestImageOrgIsCanonical(t *testing.T) {
 		}
 		rel, _ := filepath.Rel(repoRoot, path)
 		relSlash := filepath.ToSlash(rel)
+		// The workflow and infra populations get independent counters and
+		// floors (see workflowImageRefFloor's comment) — this is what tells
+		// the two apart as the scan walks both sets of files in one pass.
+		isWorkflowFile := strings.Contains(relSlash, ".github/workflows/")
 
 		// Normalize CRLF for the same reason TestWorkflowActionsArePinnedToSHA
 		// does: a line-anchored scan must behave the same on a Windows checkout
@@ -580,16 +603,28 @@ func TestImageOrgIsCanonical(t *testing.T) {
 			valueText := expandBlockValue(lines, i, indent, value)
 
 			for _, g := range ghcrRe.FindAllStringSubmatch(valueText, -1) {
-				imageRefsChecked++
+				if isWorkflowFile {
+					workflowImageRefsChecked++
+				} else {
+					infraImageRefsChecked++
+				}
 				checkOrg(&problems, relSlash, key, g[1], false)
 			}
 		}
 	}
 
-	if imageRefsChecked < imageRefFloor {
-		t.Fatalf("only %d ghcr.io image references matched across workflows and infra/ — "+
+	if workflowImageRefsChecked < workflowImageRefFloor {
+		t.Fatalf("only %d ghcr.io image references matched across workflow files (build.yml's "+
+			"images:, preview.yml's tags:, release.yml's IMAGE:) — expected at least %d; a "+
+			"publish target was removed, or rewritten to a form (e.g. `images: ${{ env.REGISTRY "+
+			"}}/...`) with no literal ghcr.io for this regex to match — either way this check is "+
+			"now asserting almost nothing about publish targets, even though infra/ coverage "+
+			"alone would still look healthy", workflowImageRefsChecked, workflowImageRefFloor)
+	}
+	if infraImageRefsChecked < infraImageRefFloor {
+		t.Fatalf("only %d ghcr.io image references matched under kanz/infra/ — "+
 			"expected at least %d; the key set or layout changed and this test is now "+
-			"asserting almost nothing about image references", imageRefsChecked, imageRefFloor)
+			"asserting almost nothing about infra image references", infraImageRefsChecked, infraImageRefFloor)
 	}
 	if globChecked < globFloor {
 		t.Fatalf("only %d ClusterImagePolicy glob field(s) matched under infra/ — expected at "+
