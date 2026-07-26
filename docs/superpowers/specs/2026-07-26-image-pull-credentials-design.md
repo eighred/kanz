@@ -76,8 +76,11 @@ workloads.
 
 Not workloads, and therefore exempt from the guard with a stated reason each:
 `infra/security/admission/cluster-image-policy.yaml` (a glob inside a policy CR),
-`infra/gitops/preview-applicationset.yaml` (a template, `argocd` namespace),
-`infra/security/admission/README.md`, `infra/security/test/README.md`,
+`infra/gitops/preview-applicationset.yaml` (the CR itself lives in `argocd`, but it renders
+`infra/deploy` — private-image Deployments included — into on-demand `kanz-preview-{number}`
+namespaces that the three-namespace bootstrap in this document never covers; preview
+environments were already broken this way before this branch, and this branch does not
+make it worse), `infra/security/admission/README.md`, `infra/security/test/README.md`,
 `infra/security/test/verify-admission.sh`.
 
 ## Lifecycle
@@ -128,7 +131,10 @@ justification to replace rather than two.
 `tools/rig_dev_patch.py` rewrites `imagePullPolicy` to `IfNotPresent` for the rig, because
 the rig runs images `kind load`ed from local builds and has no registry access. That seam
 stays and this change does not remove its reason. The patch must not strip the new
-`imagePullSecrets`; that is asserted, not assumed.
+`imagePullSecrets` — verified by inspection, not by a test: `main()` only descends into
+`doc["spec"]["template"]["spec"]`, and a ServiceAccount document has no `spec` key, so the
+top-level `imagePullSecrets` this change adds is never reached by the rewrite. No test
+covers this; if `rig_dev_patch.py`'s traversal changes, re-check by reading it again.
 
 ## Testing
 

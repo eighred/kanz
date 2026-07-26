@@ -155,8 +155,11 @@ makes these imported images authoritative — nothing reaches for the private gh
 The platform images are private (`ghcr.io/kanz-eng/*`, 403 to anonymous pulls) and
 every workload's ServiceAccount references a `ghcr-pull` Secret. That Secret cannot
 be created from inside the cluster, because the operator that would create it runs a
-private image itself. So this is a genuine bootstrap step, not a workaround, and it
-is the only one:
+private image itself. So this is a genuine bootstrap step, not a workaround — this
+document also creates `venue-binance-keys`/`venue-binance-db` (§5) and
+`webhook-ingest-config` (§8) out of band, so it is not the only manual secret, but it
+is the only one that must exist *before* Vault can deliver anything else: without it,
+the workloads that would read those later secrets cannot even pull and start:
 
 ```
 for ns in kanz-services kanz-operator kanz-messaging; do
