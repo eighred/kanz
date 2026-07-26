@@ -219,6 +219,18 @@ jobs:
       # not this step, that catches the two drifting apart. Before that fix the
       # policy pinned a "kanz-eng" org which does not exist on GitHub, and this
       # step passed cheerfully throughout.
+      # Hand this service's digest to the pinning job. An artifact rather than a job
+      # output because matrix jobs cannot each contribute a distinct output key.
+      - name: Record the digest for pinning
+        run: |
+          mkdir -p digests
+          printf '%s' "${{ steps.build.outputs.digest }}" > "digests/${{ matrix.service }}"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: digest-${{ matrix.service }}
+          path: digests/${{ matrix.service }}
+          retention-days: 1
+
       - name: Verify signature
         env:
           DIGEST_REF: ${{ env.IMAGE }}@${{ steps.build.outputs.digest }}
@@ -254,3 +266,67 @@ jobs:
             --title "${GITHUB_REF_NAME}" \
             --generate-notes \
             --verify-tag
+
+  # THE SUPPLY CHAIN USED TO TERMINATE AT THE REGISTRY. Everything above pins to
+  # the immutable digest — trivy, cosign, the SBOM all attest one specific image —
+  # and then every manifest said :latest, so the cluster ran whatever :latest
+  # resolved to at pull time. This job closes that: it rewrites the manifests to
+  # the digests this release just produced.
+  #
+  # It opens a PULL REQUEST rather than pushing to main. main is branch-protected
+  # with required status checks, so a direct push from a workflow is refused — and
+  # a PR is the better shape anyway: a human sees exactly which digests the cluster
+  # is about to run before Argo reconciles them.
+  pin-digests:
+    needs: release
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: kanz/go.mod
+          cache-dependency-path: kanz/go.sum
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: digest-*
+          merge-multiple: true
+          path: digests
+
+      - name: Pin every manifest to the digests this release published
+        working-directory: kanz
+        run: |
+          set -euo pipefail
+          go run ./cmd/kanz-pin-digests -digests ../digests -infra infra | tee /tmp/pin-report.txt
+          # oms-acme.yaml is GENERATED from oms-deploy.yaml and drift-checked by
+          # TestTenantComputeGuard. Re-render it from the now-pinned base rather
+          # than trusting two independent rewrites to agree.
+          go run ./cmd/kanz-tenantgen -tenant acme
+
+      - name: Open the pin pull request
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          branch="release/pin-${GITHUB_REF_NAME}"
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -b "$branch"
+          git add kanz/infra
+          if git diff --cached --quiet; then
+            echo "no manifest changed — every image was already pinned to these digests"
+            exit 0
+          fi
+          git commit -m "chore(release): pin manifests to ${GITHUB_REF_NAME} digests"
+          git push origin "$branch"
+          {
+            echo "Digests published by the ${GITHUB_REF_NAME} release."
+            echo
+            echo "Merging this is what makes the cluster run the images that were signed."
+            echo
+            sed 's/^/    /' /tmp/pin-report.txt
+          } > /tmp/pin-body.md
+          gh pr create --base main --head "$branch"             --title "chore(release): pin manifests to ${GITHUB_REF_NAME} digests"             --body-file /tmp/pin-body.md
