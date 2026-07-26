@@ -664,3 +664,92 @@ func TestImageOrgIsCanonical(t *testing.T) {
 		t.Errorf("image org disagreement (%d):\n  %s", len(problems), strings.Join(problems, "\n  "))
 	}
 }
+
+// A RELEASE THAT SHIPS A SUBSET IS WORSE THAN NO RELEASE.
+//
+// release.yml built 2 services while build.yml built 25. Nothing said so: the
+// release workflow was green, the tag looked cut, and 23 services simply had no
+// signed image, no SBOM and no vuln attestation. The gap is invisible until a
+// cluster pulls one of them and the admission policy — which requires a
+// signature from release.yml — refuses to run it.
+//
+// This test holds the two matrices identical. It compares (service, dockerfile)
+// PAIRS, not just names, because the Dockerfile path is where the old
+// release.yml was actually wrong: it hardcoded kanz/services/<service>/Dockerfile,
+// which is false for inference (kanz-py/) and for kanz-migrate, kanz-halt and
+// kanz-provisioner (kanz/cmd/). A name-only check would have called that correct.
+func TestReleaseMatrixCoversEveryBuiltService(t *testing.T) {
+	repoRoot := filepath.Dir(moduleRoot(t))
+
+	type matrixEntry struct {
+		Service    string `yaml:"service"`
+		Dockerfile string `yaml:"dockerfile"`
+	}
+	type workflow struct {
+		Jobs map[string]struct {
+			Strategy struct {
+				Matrix struct {
+					Include []matrixEntry `yaml:"include"`
+				} `yaml:"matrix"`
+			} `yaml:"strategy"`
+		} `yaml:"jobs"`
+	}
+
+	load := func(file, job string) map[string]string {
+		t.Helper()
+		body, err := os.ReadFile(filepath.Join(repoRoot, ".github", "workflows", file))
+		if err != nil {
+			t.Fatalf("read %s: %v", file, err)
+		}
+		var wf workflow
+		if err := yaml.Unmarshal(body, &wf); err != nil {
+			t.Fatalf("parse %s: %v", file, err)
+		}
+		entries := wf.Jobs[job].Strategy.Matrix.Include
+		if len(entries) == 0 {
+			t.Fatalf("%s: job %q has an empty matrix.include — the workflow shape changed and "+
+				"this test would otherwise pass by comparing nothing", file, job)
+		}
+		out := map[string]string{}
+		for _, e := range entries {
+			if e.Service == "" || e.Dockerfile == "" {
+				t.Fatalf("%s: matrix entry with service=%q dockerfile=%q — both are required",
+					file, e.Service, e.Dockerfile)
+			}
+			out[e.Service] = e.Dockerfile
+		}
+		return out
+	}
+
+	built := load("build.yml", "image")
+	released := load("release.yml", "release")
+
+	var problems []string
+	for svc, dockerfile := range built {
+		relDockerfile, ok := released[svc]
+		if !ok {
+			problems = append(problems, fmt.Sprintf(
+				"%s is built by build.yml but NOT released by release.yml — it would ship with no "+
+					"signature, no SBOM and no vuln attestation, and admission would refuse it", svc))
+			continue
+		}
+		if relDockerfile != dockerfile {
+			problems = append(problems, fmt.Sprintf(
+				"%s: build.yml uses %q, release.yml uses %q — the release would build a different "+
+					"artifact than CI verified", svc, dockerfile, relDockerfile))
+		}
+	}
+	for svc := range released {
+		if _, ok := built[svc]; !ok {
+			problems = append(problems, fmt.Sprintf(
+				"%s is released by release.yml but not built by build.yml — it is released without "+
+					"ever having been built on a pull request", svc))
+		}
+	}
+
+	if len(problems) > 0 {
+		sort.Strings(problems)
+		t.Errorf("release and build matrices disagree (%d):\n  %s",
+			len(problems), strings.Join(problems, "\n  "))
+	}
+}
