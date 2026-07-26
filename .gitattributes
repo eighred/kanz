@@ -11,3 +11,15 @@ kanz/.githooks/* text eol=lf
 # a Windows/JetBrains clone lints clean. See kanz/docs/jetbrains-setup.md.
 *.go text eol=lf
 *.proto text eol=lf
+
+# YAML must keep LF for the same reason, and it bit us. Generated manifests are
+# compared BYTE-FOR-BYTE against their generator's output:
+# test/arch/tenant_compute_test.go re-renders infra/deploy/tenants/<t>/oms-<t>.yaml
+# from the live base and fails on any difference. internal/tenantgen emits LF, so a
+# CRLF checkout (core.autocrlf=true on Windows) makes the guard report DRIFT on a
+# file that is byte-identical in git — 4892 bytes in the object, 5073 on disk,
+# exactly one extra byte per line. The failure names the wrong cause ("re-render
+# and commit"), and re-rendering "fixes" it by writing LF back, which hides the
+# real problem until the next checkout.
+*.yaml text eol=lf
+*.yml text eol=lf
