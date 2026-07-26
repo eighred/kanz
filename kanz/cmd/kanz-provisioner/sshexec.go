@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"sync"
 	"time"
 
 	"golang.org/x/crypto/ssh"
@@ -12,6 +13,44 @@ import (
 
 // dialTimeout bounds both the TCP dial and the SSH handshake.
 const dialTimeout = 30 * time.Second
+
+// syncBuffer is the combined stdout+stderr collector, guarded because
+// crypto/ssh copies the two streams from TWO GOROUTINES.
+//
+// This exists because a plain *bytes.Buffer here was a data race, reported twice
+// by CI's race detector (x/crypto/ssh/session.go:514 and :527 both reaching
+// bytes.Buffer from sshRun). The failure it produced was not a crash: a remote
+// command's output came back EMPTY with a nil error, and occasionally as 16 NUL
+// bytes — so a node that failed to provision was reported with no detail at all.
+// It also made TestSSHRunExecutesCommand fail ~75% of whole-package runs.
+//
+// WHY b IS A FIELD AND NOT AN EMBEDDED bytes.Buffer. io.Copy prefers a
+// destination's ReadFrom over Write, and bytes.Buffer.ReadFrom grows and mutates
+// the buffer REGARDLESS of how many bytes it reads — which is why even the stderr
+// copier, which carries no data here, still raced. Embedding would promote
+// ReadFrom and hand io.Copy the racy path straight back. Keeping the buffer
+// unexported and offering only Write forces io.Copy through the mutex.
+//
+// A mutex rather than two separate buffers, deliberately: the two streams stay
+// interleaved in arrival order, which is how sshRun's output has always read and
+// is what makes a k3s install failure legible — the error line keeps its position
+// relative to the output around it.
+type syncBuffer struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (s *syncBuffer) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.Write(p)
+}
+
+func (s *syncBuffer) String() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.String()
+}
 
 // sshRun dials addr ("host:port") over SSH as user, authenticating with the PEM
 // private key, runs cmd, and returns its combined stdout+stderr.
@@ -53,14 +92,20 @@ func sshRun(ctx context.Context, addr, user string, pemKey []byte, cmd string) (
 	}
 	defer func() { _ = sess.Close() }()
 
-	var out bytes.Buffer
+	var out syncBuffer
 	sess.Stdout = &out
 	sess.Stderr = &out
 
 	// crypto/ssh has no context-aware Run. Run in a goroutine and honor ctx by
 	// closing the client on cancellation, which unblocks sess.Run. The <-done
-	// barrier in both branches means out is read only after the goroutine returns,
-	// so there is no concurrent access to the buffer.
+	// barrier in both branches means out is read only after the goroutine returns.
+	//
+	// THAT BARRIER WAS ONCE MISTAKEN FOR THE WHOLE ARGUMENT, and the sentence that
+	// used to sit here — "so there is no concurrent access to the buffer" — was
+	// false. It reasons only about this goroutine versus the reader. Inside
+	// sess.Run, crypto/ssh copies stdout and stderr from two further goroutines
+	// that write to out concurrently with each other; the barrier says nothing
+	// about them. syncBuffer is what actually makes this safe.
 	done := make(chan error, 1)
 	go func() { done <- sess.Run(cmd) }()
 	select {
