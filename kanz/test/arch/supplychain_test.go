@@ -343,44 +343,91 @@ func TestPrivateImagesHavePullSecrets(t *testing.T) {
 
 // CI PUBLISHED TO ONE NAMESPACE AND THE CLUSTER PULLED FROM ANOTHER.
 //
-// Every manifest, preview.yml, and the sigstore ClusterImagePolicy (both its glob
-// and its keyless subjectRegExp) name ghcr.io/kanz-eng. The two steps that actually
-// PUSH images computed their target from ${{ github.repository_owner }}, which for
-// this repository resolves to "eighred". So a green release.yml would have published
-// images the estate could never pull, under an identity the admission policy would
-// never accept — and nothing would have said so until someone tried.
+// Every manifest, preview.yml, and the sigstore ClusterImagePolicy (both its
+// `images[].glob` and its keyless `subjectRegExp`) name ghcr.io/kanz-eng. The
+// two steps that actually PUSH images computed their target from
+// ${{ github.repository_owner }}, which for this repository resolves to
+// "eighred". So a green release.yml would have published images the estate
+// could never pull, under an identity the admission policy would never
+// accept — and nothing would have said so until someone tried.
 //
-// The owner's decision (2026-07-26) is that kanz-eng is canonical. This test is what
-// keeps the two halves from drifting apart again: publish targets and pull references
-// are the same string or the build fails.
+// The owner's decision (2026-07-26) is that kanz-eng is canonical. This test is
+// what keeps the two halves from drifting apart again: publish targets, pull
+// references, and the signing identity are the same string or the build fails.
 //
 // WHY IT READS POSITIONS, NOT TEXT. A comment at infra/deploy/operator-deploy.yaml
 // quotes the error string "403 Forbidden from ghcr.io/token". A guard that grepped
 // free text would flag that comment as an image reference under an org called
 // "token". So this walks YAML keys that actually carry image references.
+//
+// TWO INDEPENDENT CHECKS, TWO INDEPENDENT FLOORS. Image references (the
+// `imageRefKeys` below, including the ClusterImagePolicy's `glob`) and the
+// signing identity (`subjectRegExp`) are unrelated YAML shapes — a `glob:
+// "ghcr.io/org/**"` list entry and a `subjectRegExp:
+// "^https://github.com/org/repo/..."` string share no key name and no value
+// format. Counting them into one pooled total would let a coverage regression
+// in the smaller check (subjectRegExp has exactly one occurrence in this repo)
+// hide behind padding from the larger one (manifest `image:` references alone
+// clear any combined floor). Each gets its own non-vacuity floor instead.
+//
+// BLOCK SCALARS. docker/metadata-action documents a multi-line form,
+// `images: |` followed by indented ghcr.io lines. Both current workflows use
+// the single-line form (`images: ghcr.io/...`), but a future one could use the
+// block form — so image-reference values are scanned line-by-line and, when a
+// key's inline value is a bare block-scalar indicator (`|`, `|-`, `>`, etc.),
+// the following more-indented lines are pulled in as that key's value too.
 const canonicalImageOrg = "kanz-eng"
 
-// thirdPartyImageOrgs are ghcr namespaces we legitimately consume but do not own.
-// Each entry needs a reason: an unexplained exemption is how a guard rots into
-// a list of things somebody once wanted to skip.
-var thirdPartyImageOrgs = map[string]string{
-	"spiffe":   "SPIRE server/agent, the CSI driver and spiffe-helper — upstream sigstore/spiffe images",
-	"gitleaks": "the secret-scanning image security.yml runs; not built here",
+// thirdPartyImageOrgs are ghcr namespaces we legitimately consume but do not
+// own. Each is a set entry (not a map value) because the reason is documentary
+// for a future reader of this source, not something the test logic branches
+// on — it lives in the comment beside the name, not in a discarded variable.
+//
+//   - spiffe:   SPIRE server/agent, the CSI driver and spiffe-helper — upstream
+//     sigstore/spiffe images.
+//   - gitleaks: the secret-scanning image security.yml runs; not built here.
+var thirdPartyImageOrgs = map[string]struct{}{
+	"spiffe":   {},
+	"gitleaks": {},
 }
 
 // imageRefKeys are the YAML keys whose values carry an image reference.
 // `IMAGE` is release.yml's job-level env var; `images`/`tags` are
-// docker/metadata-action and build-push-action inputs; `image` is Kubernetes.
-var imageRefKeys = []string{"image", "images", "tags", "IMAGE"}
+// docker/metadata-action and build-push-action inputs; `image` is Kubernetes;
+// `glob` is the sigstore ClusterImagePolicy's `images[].glob` image-match
+// pattern.
+var imageRefKeys = []string{"image", "images", "tags", "IMAGE", "glob"}
+
+// imageRefFloor and subjectRegExpFloor are non-vacuity backstops for the two
+// independent checks TestImageOrgIsCanonical runs (see the test's doc comment
+// for why they are not pooled into one count). If either check's real match
+// count ever drops below its floor, the key set, file layout, or value shape
+// changed and the check is silently asserting almost nothing.
+const imageRefFloor = 40
+const subjectRegExpFloor = 1
+
+// blockScalarRe matches a bare YAML block-scalar indicator as a key's entire
+// inline value: `|`, `|-`, `|+`, `|4`, `>`, `>-`, etc., optionally followed by
+// a trailing comment. When a key's inline value is only this, the actual
+// content lives on the following more-indented lines.
+var blockScalarRe = regexp.MustCompile(`^[|>][+\-]?\d*\s*(#.*)?$`)
 
 func TestImageOrgIsCanonical(t *testing.T) {
 	root := moduleRoot(t)
 	repoRoot := filepath.Dir(root)
 
-	// key: value may be "ghcr.io/org/name:tag" or a multi-line block; match each
-	// ghcr.io reference inside the value.
-	keyRe := regexp.MustCompile(`(?m)^\s*(?:-\s*)?(` + strings.Join(imageRefKeys, "|") + `)\s*:\s*(.*)$`)
+	// keyLineRe matches one line: an optional YAML list-item dash, then one of
+	// imageRefKeys, then its inline value (which may be empty or a block-scalar
+	// indicator — see blockScalarRe).
+	keyLineRe := regexp.MustCompile(`^(\s*)(?:-\s*)?(` + strings.Join(imageRefKeys, "|") + `)\s*:\s*(.*)$`)
 	ghcrRe := regexp.MustCompile(`ghcr\.io/([A-Za-z0-9._\-]+|\$\{\{[^}]*\}\})/`)
+
+	// subjectLineRe matches the ClusterImagePolicy's keyless signing identity.
+	// Its value is a regex-as-a-string carrying a
+	// "https://github.com/<org>/<repo>/..." subject, not a ghcr reference, so it
+	// needs its own key pattern and its own org extractor.
+	subjectLineRe := regexp.MustCompile(`^\s*subjectRegExp\s*:\s*(.*)$`)
+	subjectOrgRe := regexp.MustCompile(`https://github\.com/([A-Za-z0-9._\-]+)/`)
 
 	var files []string
 	files = append(files, workflowFiles(t, repoRoot)...)
@@ -401,8 +448,29 @@ func TestImageOrgIsCanonical(t *testing.T) {
 			"(this test would otherwise pass vacuously)")
 	}
 
+	checkOrg := func(problems *[]string, relSlash, fieldDesc, org string) {
+		if org == canonicalImageOrg {
+			return
+		}
+		if _, ok := thirdPartyImageOrgs[org]; ok {
+			return
+		}
+		if strings.HasPrefix(org, "${{") {
+			*problems = append(*problems, fmt.Sprintf(
+				"%s: %s: names a COMPUTED image org %s — it resolves to the GitHub "+
+					"repository owner, not to %q, so images published here cannot be pulled "+
+					"by manifests that name %q", relSlash, fieldDesc, org, canonicalImageOrg, canonicalImageOrg))
+			return
+		}
+		*problems = append(*problems, fmt.Sprintf(
+			"%s: %s: image org %q is neither the canonical %q nor a listed third party",
+			relSlash, fieldDesc, org, canonicalImageOrg))
+	}
+
 	var problems []string
-	checked := 0
+	imageRefsChecked := 0
+	subjectRegExpsChecked := 0
+
 	for _, path := range files {
 		body, err := os.ReadFile(path)
 		if err != nil {
@@ -410,35 +478,67 @@ func TestImageOrgIsCanonical(t *testing.T) {
 		}
 		rel, _ := filepath.Rel(repoRoot, path)
 		relSlash := filepath.ToSlash(rel)
-		for _, m := range keyRe.FindAllStringSubmatch(string(body), -1) {
-			for _, g := range ghcrRe.FindAllStringSubmatch(m[2], -1) {
-				org := g[1]
-				checked++
-				if org == canonicalImageOrg {
-					continue
+
+		// Normalize CRLF for the same reason TestWorkflowActionsArePinnedToSHA
+		// does: a line-anchored scan must behave the same on a Windows checkout
+		// (core.autocrlf=true) as on CI.
+		lines := strings.Split(strings.ReplaceAll(string(body), "\r\n", "\n"), "\n")
+
+		for i := 0; i < len(lines); i++ {
+			line := lines[i]
+
+			if m := subjectLineRe.FindStringSubmatch(line); m != nil {
+				for _, g := range subjectOrgRe.FindAllStringSubmatch(m[1], -1) {
+					subjectRegExpsChecked++
+					checkOrg(&problems, relSlash, "subjectRegExp", g[1])
 				}
-				if reason, ok := thirdPartyImageOrgs[org]; ok {
-					_ = reason
-					continue
+				continue
+			}
+
+			m := keyLineRe.FindStringSubmatch(line)
+			if m == nil {
+				continue
+			}
+			indent, key, value := len(m[1]), m[2], strings.TrimSpace(m[3])
+
+			valueText := value
+			if blockScalarRe.MatchString(value) {
+				// The inline value is only a block-scalar indicator; the real
+				// content is the following lines indented further than this key.
+				// Blank/whitespace-only lines inside the block don't end it.
+				var block []string
+				for j := i + 1; j < len(lines); j++ {
+					next := lines[j]
+					if strings.TrimSpace(next) == "" {
+						block = append(block, next)
+						continue
+					}
+					nextIndent := len(next) - len(strings.TrimLeft(next, " "))
+					if nextIndent <= indent {
+						break
+					}
+					block = append(block, next)
 				}
-				if strings.HasPrefix(org, "${{") {
-					problems = append(problems, fmt.Sprintf(
-						"%s: %s: names a COMPUTED image org %s — it resolves to the GitHub "+
-							"repository owner, not to %q, so images published here cannot be pulled "+
-							"by manifests that name %q", relSlash, m[1], org, canonicalImageOrg, canonicalImageOrg))
-					continue
-				}
-				problems = append(problems, fmt.Sprintf(
-					"%s: %s: image org %q is neither the canonical %q nor a listed third party",
-					relSlash, m[1], org, canonicalImageOrg))
+				valueText = strings.Join(block, "\n")
+			}
+
+			for _, g := range ghcrRe.FindAllStringSubmatch(valueText, -1) {
+				imageRefsChecked++
+				checkOrg(&problems, relSlash, key, g[1])
 			}
 		}
 	}
 
-	if checked < 40 {
+	if imageRefsChecked < imageRefFloor {
 		t.Fatalf("only %d ghcr.io image references matched across workflows and infra/ — "+
-			"expected at least 40; the key set or layout changed and this test is now "+
-			"asserting almost nothing", checked)
+			"expected at least %d; the key set or layout changed and this test is now "+
+			"asserting almost nothing about image references", imageRefsChecked, imageRefFloor)
+	}
+	if subjectRegExpsChecked < subjectRegExpFloor {
+		t.Fatalf("only %d subjectRegExp signing-identity field(s) matched under infra/ — "+
+			"expected at least %d; the ClusterImagePolicy moved, was renamed, or the pattern "+
+			"broke, and this test is now asserting nothing about the signing identity",
+			subjectRegExpsChecked, subjectRegExpFloor)
 	}
 	if len(problems) > 0 {
 		sort.Strings(problems)
