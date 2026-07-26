@@ -143,7 +143,10 @@ type roleDoc struct {
 		Namespace string `yaml:"namespace"`
 	} `yaml:"metadata"`
 	AutomountServiceAccountToken *bool `yaml:"automountServiceAccountToken"`
-	Rules                        []struct {
+	ImagePullSecrets            []struct {
+		Name string `yaml:"name"`
+	} `yaml:"imagePullSecrets"`
+	Rules []struct {
 		APIGroups []string `yaml:"apiGroups"`
 		Resources []string `yaml:"resources"`
 		Verbs     []string `yaml:"verbs"`
@@ -196,6 +199,45 @@ func TestProvisionerServiceAccountHasNoToken(t *testing.T) {
 		found = true
 		if d.AutomountServiceAccountToken == nil || *d.AutomountServiceAccountToken {
 			t.Errorf("kanz-node-provisioner must set automountServiceAccountToken: false — the Job needs no k8s API access")
+		}
+	}
+	if !found {
+		t.Fatalf("no ServiceAccount kanz-node-provisioner found — provisioner isolation missing")
+	}
+}
+
+// TestProvisionerServiceAccountHasPullSecret asserts kanz-node-provisioner carries
+// imagePullSecrets: [{name: ghcr-pull}].
+//
+// WHY THIS SA NEEDS ITS OWN TEST. TestPrivateImagesHavePullSecrets (supplychain_test.go)
+// walks infra/ for pod-bearing manifests that reference a private image and checks the
+// ServiceAccount each one names — but it finds ServiceAccounts by finding the WORKLOAD
+// first. kanz-node-provisioner has no workload manifest to find: the two Jobs that use
+// it (jobSpec, probeJobSpec) are built in Go inside services/operator/internal/provision,
+// not declared anywhere under infra/. That guard's own walk is structurally blind to this
+// ServiceAccount, so deleting its imagePullSecrets block passes the entire arch suite
+// while silently restoring ErrImagePull on every Add Node and Test Connection run.
+func TestProvisionerServiceAccountHasPullSecret(t *testing.T) {
+	docs := decodeOperatorManifest(t)
+	const pullSecretName = "ghcr-pull"
+	var found bool
+	for _, d := range docs {
+		if d.Kind != "ServiceAccount" || d.Metadata.Name != "kanz-node-provisioner" {
+			continue
+		}
+		found = true
+		has := false
+		for _, s := range d.ImagePullSecrets {
+			if s.Name == pullSecretName {
+				has = true
+			}
+		}
+		if !has {
+			t.Errorf("kanz-node-provisioner must carry imagePullSecrets: [{name: %s}] — its two "+
+				"Jobs (jobSpec, probeJobSpec in services/operator/internal/provision/provision.go) "+
+				"are built in Go and have no manifest under infra/, so TestPrivateImagesHavePullSecrets "+
+				"cannot see them; this ServiceAccount is the only thing standing between them and "+
+				"ErrImagePull on a node that has not pre-loaded kanz-provisioner", pullSecretName)
 		}
 	}
 	if !found {
