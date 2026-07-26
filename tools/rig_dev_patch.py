@@ -47,6 +47,42 @@ _ADD_ENV = {
         {"name": "API_GATEWAY_JWT_SECRET_FILE",
          "value": "/run/secrets/gateway/jwt-secret"},
     ],
+    "operator-deploy.yaml": [
+        # PROSPECTIVE — THIS ENTRY IS NOT REACHED BY THE DOCUMENTED RIG FLOW TODAY.
+        # tools/rig-apply.sh's workload list is oms, tv-sync, api-gateway,
+        # webhook-ingest and compliance; it never applies operator-deploy.yaml, so
+        # nothing below fires on a plain `rig-apply.sh` and a fresh rig re-provision
+        # reintroduces the ImagePullBackOff described here.
+        #
+        # DO NOT "FIX" THIS BY ADDING operator-deploy.yaml TO THAT LIST. The manifest is
+        # now pinned with nodeSelector node-role.kubernetes.io/control-plane: "true" (a
+        # nodeSelector is an exact string match, and kind labels its control plane with
+        # an EMPTY value, not "true"), so applying it to the rig unmodified strands the
+        # operator Pending — a worse failure, and one this file has no rule for.
+        #
+        # The operator is HAND-APPLIED to the rig when it is needed there, and this rule
+        # is what makes that hand-apply correct:
+        #   python3 tools/rig_dev_patch.py kanz/infra/deploy/operator-deploy.yaml \
+        #     | sed 's|control-plane: "true"|control-plane: ""|' \
+        #     | kubectl apply -f -
+        # Keep the entry: it is the only place the reason below is written down, and the
+        # cost of carrying it is zero until either rig-apply.sh grows a node-label rewrite
+        # or the pin learns to tolerate both label values.
+        #
+        # The generic `imagePullPolicy: IfNotPresent` rewrite above (patch_pod_spec)
+        # only touches containers that already appear in a manifest's own pod spec —
+        # the operator Deployment's container gets it for free. But node provisioning
+        # (AddNode) creates a SEPARATE one-shot Job whose container spec is built in
+        # Go (services/operator/internal/provision/provision.go), not YAML, so this
+        # rewrite can never reach it. OPERATOR_PROVISIONER_IMAGE_PULL_POLICY is the one
+        # lever that does: the operator reads it and sets the Job container's
+        # ImagePullPolicy itself. The rig side-loads kanz-provisioner via `kind load`
+        # and has no credentials to pull ghcr.io/kanz-eng/* (private), so without this
+        # the provisioning Job defaults to Always on its :latest tag and sits in
+        # ImagePullBackOff even though the image is already on the node.
+        {"name": "OPERATOR_PROVISIONER_IMAGE_PULL_POLICY",
+         "value": "IfNotPresent"},
+    ],
 }
 
 

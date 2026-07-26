@@ -114,3 +114,58 @@ func TestLoadProvisioningEnv(t *testing.T) {
 		t.Errorf("provisioning env not loaded: %+v", cfg)
 	}
 }
+
+// TestLoadProvisionerImagePullPolicyDefaultsUnset proves the "no config means no
+// behaviour change" contract: with the var unset, Load must return "" so
+// provision.go leaves ImagePullPolicy absent and Kubernetes applies its own
+// :latest-tag default (Always) — the exact production behaviour this setting
+// must not disturb.
+func TestLoadProvisionerImagePullPolicyDefaultsUnset(t *testing.T) {
+	t.Setenv("OPERATOR_PROVISIONER_IMAGE_PULL_POLICY", "")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.ProvisionerImagePullPolicy != "" {
+		t.Errorf("ProvisionerImagePullPolicy = %q, want empty (Kubernetes default) by default", cfg.ProvisionerImagePullPolicy)
+	}
+}
+
+func TestLoadProvisionerImagePullPolicyAcceptedValues(t *testing.T) {
+	for _, v := range []string{"", "Always", "IfNotPresent", "Never"} {
+		v := v
+		t.Run("value="+v, func(t *testing.T) {
+			t.Setenv("OPERATOR_PROVISIONER_IMAGE_PULL_POLICY", v)
+			cfg, err := Load()
+			if err != nil {
+				t.Fatalf("Load(OPERATOR_PROVISIONER_IMAGE_PULL_POLICY=%q): %v", v, err)
+			}
+			if cfg.ProvisionerImagePullPolicy != v {
+				t.Errorf("ProvisionerImagePullPolicy = %q, want %q", cfg.ProvisionerImagePullPolicy, v)
+			}
+		})
+	}
+}
+
+// TestLoadProvisionerImagePullPolicyRejectsInvalidValues guards the failure
+// mode a defaulting rule always risks: a typo or wrong-case value (e.g. the
+// lower-camel "ifnotpresent") must fail Load() loudly rather than falling
+// through to the empty default and silently leaving the pull policy unset.
+func TestLoadProvisionerImagePullPolicyRejectsInvalidValues(t *testing.T) {
+	for _, v := range []string{"ifnotpresent", "always", "NEVER", "Sometimes"} {
+		v := v
+		t.Run("value="+v, func(t *testing.T) {
+			t.Setenv("OPERATOR_PROVISIONER_IMAGE_PULL_POLICY", v)
+			_, err := Load()
+			if err == nil {
+				t.Fatalf("Load(OPERATOR_PROVISIONER_IMAGE_PULL_POLICY=%q): want error, got nil", v)
+			}
+			if !strings.Contains(err.Error(), "OPERATOR_PROVISIONER_IMAGE_PULL_POLICY") {
+				t.Errorf("error = %q, want it to name OPERATOR_PROVISIONER_IMAGE_PULL_POLICY", err.Error())
+			}
+			if !strings.Contains(err.Error(), v) {
+				t.Errorf("error = %q, want it to name the offending value %q", err.Error(), v)
+			}
+		})
+	}
+}

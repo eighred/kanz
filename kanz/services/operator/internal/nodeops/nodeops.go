@@ -93,10 +93,63 @@ func (o *Ops) Drain(ctx context.Context, name string) error {
 	return nil
 }
 
-// evictNode loops evictOnce until no evictable pods remain or the deadline passes. A
-// PDB-blocked pod keeps the node Draining until another replica is ready.
+// drainStop is why evictNode should stop before its next eviction pass. The zero
+// value keeps the drain running — an inconclusive check never cancels a drain.
+type drainStop int
+
+const (
+	drainContinue   drainStop = iota // still cordoned, or we could not tell
+	drainUncordoned                  // an operator uncordoned the node: drain cancelled
+	drainNodeGone                    // the node was deleted: nothing left to drain
+)
+
+// checkDrainStop re-reads the node to decide whether the eviction loop should keep
+// going. It goes through the same clientset the cordon patch writes through, and
+// reads the one node rather than the estate's whole-inventory list — this runs on
+// every drainRetryInterval, so it must stay a single cheap Get.
+//
+// A read failure returns drainContinue on purpose: a transient API error must not
+// cancel a legitimate drain, the same way a failed pod List is retried rather than
+// treated as fatal. The deadline remains the backstop for a node we can never read.
+//
+// A deleted node stops the loop instead of retrying: its pods went with it, so every
+// further pass would find nothing and the drain would sit there until the deadline.
+// It is also not "complete" — nothing was drained — so it gets its own outcome.
+func (o *Ops) checkDrainStop(ctx context.Context, name string) drainStop {
+	n, err := o.cs.CoreV1().Nodes().Get(ctx, name, metav1.GetOptions{})
+	switch {
+	case apierrors.IsNotFound(err):
+		return drainNodeGone
+	case err != nil:
+		o.logger.Warn("drain could not re-read node, continuing", "node", name, "err", err)
+		return drainContinue
+	case !n.Spec.Unschedulable:
+		return drainUncordoned
+	default:
+		return drainContinue
+	}
+}
+
+// evictNode loops evictOnce until no evictable pods remain, the drain is cancelled,
+// or the deadline passes. A PDB-blocked pod keeps the node Draining until another
+// replica is ready.
+//
+// The cordon check runs before every pass because uncordon is the operator's cancel:
+// an uncordoned node is accepting new pods again, and evicting whatever the scheduler
+// puts there is not a drain — it is a node that silently kills its workloads every
+// drainRetryInterval until the deadline. Each way out is logged distinctly, so a
+// cancelled drain can never be misread as a completed one.
 func (o *Ops) evictNode(ctx context.Context, name string) {
 	for {
+		switch o.checkDrainStop(ctx, name) {
+		case drainUncordoned:
+			o.logger.Info("drain cancelled: node was uncordoned", "node", name)
+			return
+		case drainNodeGone:
+			o.logger.Info("drain stopped: node no longer exists", "node", name)
+			return
+		}
+
 		remaining, err := o.evictOnce(ctx, name)
 		switch {
 		case err != nil:

@@ -27,6 +27,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"strings"
 	"time"
 
 	"google.golang.org/grpc/codes"
@@ -39,11 +40,23 @@ import (
 	"github.com/kanz-eng/kanz/services/api-gateway/internal/authz"
 )
 
-// callTimeout bounds every control-plane RPC. AddNode returns as soon as the Job is
-// created (the SSH work is asynchronous), so no route here is long-running — a
-// request that outlives this is a control plane that is not answering, and the
-// caller should be told so rather than left hanging.
+// callTimeout bounds every control-plane RPC except TestConnection. AddNode returns as
+// soon as the Job is created (the SSH work is asynchronous) and the rest are reads, so a
+// request that outlives this is a control plane that is not answering, and the caller
+// should be told so rather than left hanging.
 const callTimeout = 30 * time.Second
+
+// testConnectionTimeout bounds POST /v1/control/test-connection, the ONE long-running
+// route on this surface. The operator does not dial in-process: it runs the reachability
+// probe as an ephemeral Job and waits for it, so the call legitimately costs Job create,
+// pod scheduling, a possible image pull, and then the probe's own 10s dial.
+//
+// It must stay strictly ABOVE the operator's provision.probeTimeout and strictly BELOW
+// the TUI's testConnTimeout. If this budget were the tightest of the three, the caller
+// would always read "control plane did not answer in time" — a statement about the
+// gateway — in place of the operator's far more useful "probe job did not complete in
+// time". test/arch asserts the ordering; a comment alone would drift.
+const testConnectionTimeout = 90 * time.Second
 
 // maxBody caps a control request. These bodies are hostnames, node names and API
 // keys; a megabyte is already absurd for all of them.
@@ -103,12 +116,16 @@ func (h *Handler) listProvisions(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// testConnection is the only route here that waits on work rather than on a read: the
+// operator answers it by running a probe Job and waiting for the pod's verdict. Hence
+// testConnectionTimeout instead of callTimeout — see that const for the ordering the
+// three layers of this call have to keep.
 func (h *Handler) testConnection(w http.ResponseWriter, r *http.Request) {
 	var req operatorpb.TestConnectionRequest
 	if !h.decode(w, r, &req) {
 		return
 	}
-	h.forward(w, r, func(ctx context.Context) (proto.Message, error) {
+	h.forwardWithin(w, r, testConnectionTimeout, func(ctx context.Context) (proto.Message, error) {
 		return h.client.TestConnection(ctx, &req)
 	})
 }
@@ -189,9 +206,18 @@ func (h *Handler) decode(w http.ResponseWriter, r *http.Request, msg proto.Messa
 	return true
 }
 
-// forward runs fn under a bounded context and renders the result.
+// forward runs fn under the standard control-plane budget and renders the result.
+// A route needing a different budget calls forwardWithin directly and says why.
 func (h *Handler) forward(w http.ResponseWriter, r *http.Request, fn func(context.Context) (proto.Message, error)) {
-	ctx, cancel := context.WithTimeout(r.Context(), callTimeout)
+	h.forwardWithin(w, r, callTimeout, fn)
+}
+
+// forwardWithin runs fn under a bounded context and renders the result. The timeout is
+// a parameter rather than a lookup keyed on r.Pattern so the route that needs a longer
+// budget carries it at the call site, next to the comment explaining why — a pattern
+// string in a side table drifts silently the day a route is renamed.
+func (h *Handler) forwardWithin(w http.ResponseWriter, r *http.Request, timeout time.Duration, fn func(context.Context) (proto.Message, error)) {
+	ctx, cancel := context.WithTimeout(r.Context(), timeout)
 	defer cancel()
 
 	resp, err := fn(ctx)
@@ -211,7 +237,12 @@ func (h *Handler) forward(w http.ResponseWriter, r *http.Request, fn func(contex
 	_, _ = w.Write(out)
 }
 
-// translate maps a gRPC status onto HTTP without leaking the operator's internals.
+// translate maps a gRPC status onto HTTP.
+//
+// EVERY BRANCH THAT CAN CARRY A DIAGNOSIS CARRIES IT. What is withheld is withheld for a
+// reason the branch states — PermissionDenied because the caller must not learn which
+// capability they lack, Unavailable/DeadlineExceeded because the operator never spoke and
+// there is nothing of its to report.
 //
 // Unimplemented is 501 and NOT 500 on purpose: it is what the operator returns when
 // a capability is deliberately unconfigured (no provisioner image ⇒ AddNode off, no
@@ -242,6 +273,26 @@ func translate(err error) (int, string) {
 	case codes.Unavailable:
 		return http.StatusBadGateway, "control plane unavailable"
 	default:
+		// THE MESSAGE SURVIVES. Internal is what the operator returns when work it
+		// attempted failed, and it is the layer that knows the most: "probe job probe-abc
+		// did not complete in time (waited 60s)" tells an operator the probe ran and the
+		// cluster was slow, where a bare "control plane error" tells them nothing at all
+		// and half-nullifies the deadline nesting — the layers fire in the right order,
+		// then the informative payload is discarded one hop out.
+		//
+		// Not redacted, deliberately. An Internal message is not always ours (the gRPC
+		// runtime authors some) and the operator's own wrap infrastructure coordinates —
+		// a namespace, a Secret name, a Vault address. But this route requires
+		// authz.Operate: the caller is the platform's own operator, who provisions the
+		// nodes and holds the venue credentials, not an untrusted end user. Nothing on
+		// this path echoes a credential VALUE, and withholding the estate's own topology
+		// from the person who administers it buys no security and costs every diagnosis.
+		//
+		// The prefix stays so a 500 still reads as a server fault rather than as
+		// something the caller typed wrong.
+		if msg := strings.TrimSpace(st.Message()); msg != "" {
+			return http.StatusInternalServerError, "control plane error: " + msg
+		}
 		return http.StatusInternalServerError, "control plane error"
 	}
 }

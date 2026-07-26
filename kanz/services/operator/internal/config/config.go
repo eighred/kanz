@@ -29,6 +29,16 @@ type Config struct {
 	ProvisionerImage string
 	K3sServerURL     string
 	K3sToken         string
+	// ProvisionerImagePullPolicy sets the provisioning Job container's
+	// ImagePullPolicy explicitly. Empty (the default) means "do not set the
+	// field" — provision.go leaves it absent and Kubernetes applies its own
+	// default, which is Always for a :latest tag. That default is CORRECT in
+	// production (signed images must be pulled, never assumed present), but it
+	// is exactly what strands provisioning on a node that cannot reach the
+	// registry (air-gapped estate, DR rebuild) even when the image was
+	// side-loaded — see the OPS-M2e incident this field fixes. Only the dev rig
+	// (tools/rig_dev_patch.py) sets this, to IfNotPresent.
+	ProvisionerImagePullPolicy string // OPERATOR_PROVISIONER_IMAGE_PULL_POLICY: "" | "Always" | "IfNotPresent" | "Never"
 
 	// Venue-key write path (S4a). Empty SecretBackend ⇒ SetVenueKeys is unconfigured
 	// (Unimplemented). "kube" writes k8s Secrets; "vault" writes Vault KV-v2.
@@ -61,6 +71,15 @@ type Config struct {
 // doc comment and I-1 in the S4b review.
 var validVenueProofValues = map[string]bool{"": true, "off": true, "require": true}
 
+// validImagePullPolicyValues are the only values OPERATOR_PROVISIONER_IMAGE_PULL_POLICY
+// accepts — the exact set corev1.PullPolicy defines, plus "" for "unset". A typo
+// (wrong case, a misspelling) must fail startup rather than silently falling
+// through to the empty default: since empty and "the value that got mistyped
+// into meaning empty" are indistinguishable at runtime, the failure mode this
+// prevents is a rig-only knob quietly not applying and nobody noticing until
+// the next ImagePullBackOff.
+var validImagePullPolicyValues = map[string]bool{"": true, "Always": true, "IfNotPresent": true, "Never": true}
+
 // Load reads the configuration from the environment, applying defaults.
 func Load() (Config, error) {
 	venueProof := os.Getenv("OPERATOR_VENUE_PROOF")
@@ -71,13 +90,22 @@ func Load() (Config, error) {
 		)
 	}
 
+	imagePullPolicy := os.Getenv("OPERATOR_PROVISIONER_IMAGE_PULL_POLICY")
+	if !validImagePullPolicyValues[imagePullPolicy] {
+		return Config{}, fmt.Errorf(
+			"OPERATOR_PROVISIONER_IMAGE_PULL_POLICY=%q is invalid; accepted values are \"\", \"Always\", \"IfNotPresent\", \"Never\"",
+			imagePullPolicy,
+		)
+	}
+
 	return Config{
 		GRPCListen:   envOr("OPERATOR_GRPC_LISTEN", ":9090"),
 		HealthListen: envOr("OPERATOR_HEALTH_LISTEN", ":8091"),
 
-		ProvisionerImage: os.Getenv("OPERATOR_PROVISIONER_IMAGE"),
-		K3sServerURL:     os.Getenv("OPERATOR_K3S_SERVER_URL"),
-		K3sToken:         os.Getenv("OPERATOR_K3S_TOKEN"),
+		ProvisionerImage:           os.Getenv("OPERATOR_PROVISIONER_IMAGE"),
+		K3sServerURL:               os.Getenv("OPERATOR_K3S_SERVER_URL"),
+		K3sToken:                   os.Getenv("OPERATOR_K3S_TOKEN"),
+		ProvisionerImagePullPolicy: imagePullPolicy,
 
 		SecretBackend:        os.Getenv("OPERATOR_SECRET_BACKEND"),
 		VenueSecretNamespace: envOr("OPERATOR_VENUE_SECRET_NAMESPACE", "kanz-services"),

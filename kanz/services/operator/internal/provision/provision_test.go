@@ -123,6 +123,118 @@ func TestListMapsJobStatus(t *testing.T) {
 	}
 }
 
+// TestAddNodeSetsImagePullPolicyWhenConfigured proves the fix for the
+// ImagePullBackOff defect: with ImagePullPolicy configured, every provisioner
+// container must carry it explicitly rather than relying on Kubernetes'
+// :latest-tag default of Always, which fails closed on any node that cannot
+// reach ghcr (air-gapped estates, disaster-recovery rebuilds) even when the
+// image is already present locally.
+func TestAddNodeSetsImagePullPolicyWhenConfigured(t *testing.T) {
+	cs := fake.NewSimpleClientset()
+	c := cfg()
+	c.ImagePullPolicy = "IfNotPresent"
+	id, err := New(cs, c).AddNode(context.Background(), Request{
+		Hostname: "london", IP: "10.0.0.5", SSHPort: 22, SSHUser: "root", SSHKey: []byte("PEM")})
+	if err != nil {
+		t.Fatalf("AddNode: %v", err)
+	}
+	job, err := cs.BatchV1().Jobs("kanz-operator").Get(context.Background(), id, metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("job not created: %v", err)
+	}
+	for _, c := range job.Spec.Template.Spec.Containers {
+		if c.ImagePullPolicy != "IfNotPresent" {
+			t.Errorf("container %s ImagePullPolicy = %q, want IfNotPresent", c.Name, c.ImagePullPolicy)
+		}
+	}
+}
+
+// TestAddNodeLeavesImagePullPolicyUnsetByDefault proves the production
+// contract this fix must not disturb: with ImagePullPolicy left empty (the
+// config default), the field must be the zero value so Kubernetes' own
+// defaulting decides — never a hardcoded policy chosen in this package.
+func TestAddNodeLeavesImagePullPolicyUnsetByDefault(t *testing.T) {
+	cs := fake.NewSimpleClientset()
+	id, err := New(cs, cfg()).AddNode(context.Background(), Request{
+		Hostname: "london", IP: "10.0.0.5", SSHPort: 22, SSHUser: "root", SSHKey: []byte("PEM")})
+	if err != nil {
+		t.Fatalf("AddNode: %v", err)
+	}
+	job, err := cs.BatchV1().Jobs("kanz-operator").Get(context.Background(), id, metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("job not created: %v", err)
+	}
+	for _, c := range job.Spec.Template.Spec.Containers {
+		if c.ImagePullPolicy != "" {
+			t.Errorf("container %s ImagePullPolicy = %q, want zero value (Kubernetes decides)", c.Name, c.ImagePullPolicy)
+		}
+	}
+}
+
+// TestAddNodeSetsFSGroupToMatchRunAsUser proves the fix for the permission-denied
+// defect found on a live cluster: `kanz-provisioner: read bootstrap key
+// /etc/provision/ssh_key: permission denied`. Kubernetes owns Secret volume files
+// root:fsGroup; with no fsGroup set, that group is root, and the container (which
+// must run as a non-root uid per RunAsNonRoot) can never read its own credential.
+// FSGroup must equal RunAsUser so the pod's own uid's group can read the mount.
+func TestAddNodeSetsFSGroupToMatchRunAsUser(t *testing.T) {
+	cs := fake.NewSimpleClientset()
+	id, err := New(cs, cfg()).AddNode(context.Background(), Request{
+		Hostname: "london", IP: "10.0.0.5", SSHPort: 22, SSHUser: "root", SSHKey: []byte("PEM")})
+	if err != nil {
+		t.Fatalf("AddNode: %v", err)
+	}
+	job, err := cs.BatchV1().Jobs("kanz-operator").Get(context.Background(), id, metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("job not created: %v", err)
+	}
+	sc := job.Spec.Template.Spec.SecurityContext
+	if sc == nil || sc.RunAsUser == nil || sc.FSGroup == nil {
+		t.Fatalf("pod securityContext must set both RunAsUser and FSGroup, got %+v", sc)
+	}
+	if *sc.FSGroup != *sc.RunAsUser {
+		t.Errorf("FSGroup (%d) must equal RunAsUser (%d) — Secret volume files are owned "+
+			"root:fsGroup, so a mismatched group locks the non-root container out of its "+
+			"own bootstrap-key mount", *sc.FSGroup, *sc.RunAsUser)
+	}
+	if *sc.RunAsUser != 65532 {
+		t.Errorf("RunAsUser = %d, want 65532", *sc.RunAsUser)
+	}
+}
+
+// TestAddNodeBootstrapKeyModeIsGroupReadable proves the other half of the same
+// live-cluster defect: DefaultMode 0400 (owner-only) plus a non-root container
+// is unreadable, not strict — the owning uid is root, not the container's uid,
+// so 0400 never granted the container read access on any run of this path. This
+// is a regression guard: 0440 (root and the pod's fsGroup may read; no world
+// access) must not silently regress back to a mode only root can read.
+func TestAddNodeBootstrapKeyModeIsGroupReadable(t *testing.T) {
+	cs := fake.NewSimpleClientset()
+	id, err := New(cs, cfg()).AddNode(context.Background(), Request{
+		Hostname: "london", IP: "10.0.0.5", SSHPort: 22, SSHUser: "root", SSHKey: []byte("PEM")})
+	if err != nil {
+		t.Fatalf("AddNode: %v", err)
+	}
+	job, err := cs.BatchV1().Jobs("kanz-operator").Get(context.Background(), id, metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("job not created: %v", err)
+	}
+	var mode *int32
+	for _, v := range job.Spec.Template.Spec.Volumes {
+		if v.Name == "bootstrap-key" && v.Secret != nil {
+			mode = v.Secret.DefaultMode
+		}
+	}
+	if mode == nil {
+		t.Fatalf("bootstrap-key secret volume not found")
+	}
+	if *mode != 0o440 {
+		t.Errorf("bootstrap-key DefaultMode = %#o, want 0440 (0400 fails at runtime for a "+
+			"non-root container: the file is owned root:fsGroup, not root:root, so owner-only "+
+			"read excludes the container's own gid)", *mode)
+	}
+}
+
 func provJob(name, host string, st batchv1.JobStatus) *batchv1.Job {
 	return &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{

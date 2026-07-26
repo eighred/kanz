@@ -23,6 +23,13 @@ var (
 func (m model) render() string {
 	if m.showForm {
 		out := m.form.render()
+		// Static text, not a spinner: render must stay a pure function of the model,
+		// and an animation would need a tick loop whose only output is reassurance.
+		// The probe takes seconds now (it waits on a Job), so the one thing needed is
+		// that the screen changes at all on the keypress.
+		if m.probing {
+			out += "\n" + styleDim.Render("probing…")
+		}
 		if m.testResult != "" {
 			out += "\n" + m.testResult
 		}

@@ -8,9 +8,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"net"
-	"strconv"
-	"strings"
 	"time"
 
 	"google.golang.org/grpc"
@@ -32,9 +29,14 @@ import (
 // Provisioner is the node-provisioning surface the operator gRPC depends on
 // (provision.Provisioner satisfies it). Kept as an interface so the handler is
 // unit-tested against a stub with no Kubernetes client.
+//
+// Probe belongs here rather than on its own interface because it has the same
+// prerequisite as AddNode: a configured provisioner image to run a Job from. The two
+// are enabled and disabled together, so one nil check governs both.
 type Provisioner interface {
 	AddNode(ctx context.Context, r provision.Request) (string, error)
 	List(ctx context.Context) ([]provision.Provision, error)
+	Probe(ctx context.Context, ip string, sshPort int32) (provision.ProbeResult, error)
 }
 
 // NodeOps is the node-lifecycle surface the operator gRPC depends on (nodeops.Ops
@@ -132,6 +134,20 @@ func (s *Server) AddNode(ctx context.Context, req *operatorpb.AddNodeRequest) (*
 	}
 	if req.GetIp() == "" || req.GetSshUser() == "" || len(req.GetSshPrivateKey()) == 0 {
 		return nil, status.Error(codes.InvalidArgument, "ip, ssh_user and ssh_private_key are required")
+	}
+	// The SAME constraint TestConnection enforces, and enforcing it here is what makes
+	// that RPC's promise ("provisioning has the same constraint") true. Without it a
+	// non-22 port is accepted, and the cost is not merely a late failure: AddNode
+	// materialises a Secret holding the SSH bootstrap key and the k3s join token, then
+	// leaves it mounted on a doomed pod for the full 900s ActiveDeadlineSeconds before
+	// the Job fails with a dial error that names nothing the operator typed. Refuse
+	// before any credential exists.
+	port := req.GetSshPort()
+	if port == 0 {
+		port = 22
+	}
+	if err := checkSSHPort(port); err != nil {
+		return nil, err
 	}
 	id, err := s.prov.AddNode(ctx, provision.Request{
 		Hostname: req.GetHostname(), IP: req.GetIp(), SSHPort: req.GetSshPort(),
@@ -274,19 +290,53 @@ func (s *Server) ListVenueKeys(ctx context.Context, _ *operatorpb.ListVenueKeysR
 	return &operatorpb.ListVenueKeysResponse{Venues: out}, nil
 }
 
-// testDialTimeout bounds the reachability probe.
-const testDialTimeout = 5 * time.Second
-
-// TestConnection is a pre-flight TCP reachability probe. It is a plain net.Dial —
-// deliberately NOT crypto/ssh — so the operator never imports the SSH plane; the
-// key is authenticated at provision time, not here. reachable=false is a normal
-// result, not an RPC error.
+// checkSSHPort refuses any port but 22, at the RPC boundary, for BOTH node-facing RPCs.
 //
-// The caller (root@universe, reaching the operator only via a kubeconfig-gated
-// port-forward) can make the operator dial an arbitrary ip:port. Accepted: the
-// caller could already reach anything a cluster operator can, the probe returns
-// only reachable/latency (never response bytes), and the dial is timeout-bounded.
+// One function rather than a check per handler because it is one constraint, not two:
+// node-provisioner-egress pins TCP:22 for every pod in this namespace, and the probe pod
+// and the provisioner pod are selected by the same label. A port this estate cannot open
+// is therefore the caller's input error on either path — which is why it must be
+// InvalidArgument (the gateway answers 400) and not Internal, which would tell an operator
+// who typed the wrong port that the platform broke. The layers below re-check as defence
+// in depth; refusing here is what keeps the verdict accurate and, for AddNode, what keeps
+// a credential-bearing Secret from being created for a request that cannot succeed.
+//
+// The message names both operations because both are refused by it: an operator who reads
+// it from Test Connection must not conclude that provisioning would have worked.
+func checkSSHPort(port int32) error {
+	if port == 22 {
+		return nil
+	}
+	return status.Errorf(codes.InvalidArgument,
+		"cannot use port %d: only port 22 can be probed or provisioned, because cluster egress "+
+			"policy pins SSH to :22 — a node whose sshd is elsewhere cannot be added from here", port)
+}
+
+// TestConnection is the pre-flight reachability check the Add Node form runs before
+// anything is provisioned. reachable=false is a normal result, not an RPC error — the
+// point of a pre-flight check is to report a bad target, not to fail.
+//
+// THE OPERATOR DOES NOT DIAL. It asks the provisioner to run a one-shot Job that dials
+// and reports back (provision.Probe). The target address comes from the caller, so this
+// is an arbitrary-destination TCP connect on someone's behalf; the placement is what
+// bounds it. The dialling pod exists for one dial and then dies, and the operator
+// Deployment's own NetworkPolicy grants no :22 egress at all — so the estate never holds
+// a standing port-22 primitive on a pod that is always running and reachable from
+// api-gateway, which is internet-facing.
+//
+// An earlier version of this comment justified dialling from the operator on the grounds
+// that the caller reached it "only via a kubeconfig-gated port-forward". OPS-M2a made
+// that false — the RPC arrives over mTLS from api-gateway — and the stale premise is
+// exactly what made the surface look acceptable for as long as it did.
+//
+// What crosses back is reachability, latency, and a short trimmed reason. Never a byte
+// read from the peer: the probe does not read the socket at all.
 func (s *Server) TestConnection(ctx context.Context, req *operatorpb.TestConnectionRequest) (*operatorpb.TestConnectionResponse, error) {
+	// Same gate as AddNode: no provisioner image, no Job to run, so there is nothing to
+	// probe with. Reporting every target unreachable would be a lie about the target.
+	if s.prov == nil {
+		return nil, status.Error(codes.Unimplemented, "provisioning not configured")
+	}
 	if req.GetIp() == "" {
 		return nil, status.Error(codes.InvalidArgument, "ip is required")
 	}
@@ -294,25 +344,18 @@ func (s *Server) TestConnection(ctx context.Context, req *operatorpb.TestConnect
 	if port == 0 {
 		port = 22
 	}
-	addr := net.JoinHostPort(req.GetIp(), strconv.Itoa(int(port)))
-
-	start := time.Now()
-	d := net.Dialer{Timeout: testDialTimeout}
-	conn, err := d.DialContext(ctx, "tcp", addr)
+	if err := checkSSHPort(port); err != nil {
+		return nil, err
+	}
+	res, err := s.prov.Probe(ctx, req.GetIp(), port)
 	if err != nil {
-		return &operatorpb.TestConnectionResponse{Reachable: false, Message: dialMessage(err)}, nil
+		// The probe could not be RUN — a different fact from an unreachable host, and one
+		// the caller must not see as reachable=false.
+		return nil, status.Error(codes.Internal, err.Error())
 	}
-	_ = conn.Close()
-	return &operatorpb.TestConnectionResponse{Reachable: true, LatencyMs: time.Since(start).Milliseconds()}, nil
-}
-
-// dialMessage trims a dial error to a short, client-safe reason.
-func dialMessage(err error) string {
-	msg := err.Error()
-	if i := strings.LastIndex(msg, ": "); i >= 0 && i+2 < len(msg) {
-		return msg[i+2:]
-	}
-	return msg
+	return &operatorpb.TestConnectionResponse{
+		Reachable: res.Reachable, LatencyMs: res.LatencyMS, Message: res.Message,
+	}, nil
 }
 
 func provStatus(s provision.Status) operatorpb.ProvisionStatus {

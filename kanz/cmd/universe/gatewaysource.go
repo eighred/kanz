@@ -12,7 +12,6 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
-	"time"
 
 	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/proto"
@@ -59,8 +58,10 @@ type gatewayConfig struct {
 	// is a no-op when it holds no secret, so a deployment without one needs none
 	// here either.
 	SigningSecret string
-	// Timeout bounds a single call.
-	Timeout time.Duration
+
+	// THERE IS DELIBERATELY NO Timeout HERE. Every call is bounded by the context its
+	// caller passes (Config.CallTimeout for ordinary reads, testConnTimeout for Test
+	// Connection) — see the http.Client construction in newGatewaySource.
 }
 
 func newGatewaySource(cfg gatewayConfig) (*gatewaySource, error) {
@@ -77,21 +78,39 @@ func newGatewaySource(cfg gatewayConfig) (*gatewaySource, error) {
 		return nil, fmt.Errorf("no token: set --token-file or KANZ_TOKEN. The gateway " +
 			"authenticates a PERSON — this tool holds no authority of its own")
 	}
-	timeout := cfg.Timeout
-	if timeout <= 0 {
-		timeout = 30 * time.Second
-	}
 	return &gatewaySource{
 		base:    strings.TrimRight(cfg.BaseURL, "/"),
 		token:   cfg.Token,
 		signKey: []byte(cfg.SigningSecret),
-		hc:      &http.Client{Timeout: timeout},
+		// NO Timeout ON THIS CLIENT, ON PURPOSE. Every call site sets an explicit
+		// context deadline, and http.Client.Timeout is enforced INDEPENDENTLY of the
+		// request context: a client with both bounds is bounded by min(the two), so the
+		// smaller silently wins and the layer ordering can no longer be read off the
+		// constants that declare it. That is not theoretical — a 30s client timeout sat
+		// underneath the 60s the operator needs to run a probe Job, so Test Connection
+		// died client-side reporting "Client.Timeout exceeded while awaiting headers"
+		// and pointed the operator at the gateway and the network instead of the host
+		// they were probing. The per-call context is the single source of truth for how
+		// long a call may take; test/arch asserts this literal stays bare.
+		hc: &http.Client{},
 	}, nil
 }
 
 // call performs one control-plane request. req may be nil for bodiless calls; resp
 // may be nil when the response is not needed.
 func (g *gatewaySource) call(ctx context.Context, method, path string, req, resp proto.Message) error {
+	// The HTTP client deliberately carries no Timeout of its own, so the caller's context is
+	// the ONLY thing bounding this request. A call site that forgets a deadline would
+	// therefore hang the TUI forever on an unresponsive gateway — the worst failure mode in
+	// an operator tool, because it looks like a frozen program rather than an error. Refuse
+	// it instead: this is a programming mistake, and it should be loud and immediate the
+	// first time it is exercised rather than a hang someone has to bisect.
+	if _, ok := ctx.Deadline(); !ok {
+		return fmt.Errorf("internal: %s %s was called with no context deadline; every "+
+			"control-plane call must set one (the HTTP client sets no timeout of its own)",
+			method, path)
+	}
+
 	var body []byte
 	if req != nil {
 		var err error

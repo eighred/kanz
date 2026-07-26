@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -26,10 +27,18 @@ import (
 type stubClient struct {
 	operatorpb.OperatorServiceClient
 
-	setRegion  func(*operatorpb.SetNodeRegionRequest) (*operatorpb.SetNodeRegionResponse, error)
-	setVenue   func(*operatorpb.SetVenueKeysRequest) (*operatorpb.SetVenueKeysResponse, error)
-	drainCalls []string
-	addNodeErr error
+	setRegion   func(*operatorpb.SetNodeRegionRequest) (*operatorpb.SetNodeRegionResponse, error)
+	setVenue    func(*operatorpb.SetVenueKeysRequest) (*operatorpb.SetVenueKeysResponse, error)
+	drainCalls  []string
+	addNodeErr  error
+	testConnErr error
+}
+
+func (s *stubClient) TestConnection(_ context.Context, _ *operatorpb.TestConnectionRequest, _ ...grpc.CallOption) (*operatorpb.TestConnectionResponse, error) {
+	if s.testConnErr != nil {
+		return nil, s.testConnErr
+	}
+	return &operatorpb.TestConnectionResponse{Reachable: true}, nil
 }
 
 func (s *stubClient) SetNodeRegion(_ context.Context, in *operatorpb.SetNodeRegionRequest, _ ...grpc.CallOption) (*operatorpb.SetNodeRegionResponse, error) {
@@ -197,6 +206,46 @@ func TestExchangeRejectionReachesTheCaller(t *testing.T) {
 	}
 }
 
+// AN Internal MESSAGE IS THE INNERMOST LAYER'S VERDICT AND MUST REACH THE CALLER.
+//
+// The four bounds on a Test Connection are ordered so the operator's probe wait fires
+// first, because only it can say the probe Job ran and did not answer. Erasing its message
+// here half-nullifies that: the layers fire in the right order and then the payload of the
+// layer that knows the most is replaced by "control plane error", which teaches an operator
+// staring at the Add Node form precisely nothing.
+func TestAnInternalFaultsExplanationReachesTheCaller(t *testing.T) {
+	const detail = "probe job probe-abc did not complete in time (waited 60s)"
+	c := &stubClient{testConnErr: status.Error(codes.Internal, detail)}
+	rec := serve(t, c, []string{"kanz-operator"},
+		httptest.NewRequest("POST", "/v1/control/test-connection", strings.NewReader(`{"ip":"10.0.0.5"}`)))
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("want 500 for an Internal fault, got %d", rec.Code)
+	}
+	var out map[string]string
+	if err := json.NewDecoder(rec.Body).Decode(&out); err != nil {
+		t.Fatalf("undecodable error body: %v", err)
+	}
+	if !strings.Contains(out["error"], detail) {
+		t.Errorf("the operator's own explanation was dropped; got %q, want it to contain %q",
+			out["error"], detail)
+	}
+}
+
+// An Internal status with no message must still read as a server fault rather than as an
+// empty string the caller has to guess at.
+func TestAnInternalFaultWithNoMessageStillSaysSomething(t *testing.T) {
+	c := &stubClient{testConnErr: status.Error(codes.Internal, "")}
+	rec := serve(t, c, []string{"kanz-operator"},
+		httptest.NewRequest("POST", "/v1/control/test-connection", strings.NewReader(`{"ip":"10.0.0.5"}`)))
+	var out map[string]string
+	if err := json.NewDecoder(rec.Body).Decode(&out); err != nil {
+		t.Fatalf("undecodable error body: %v", err)
+	}
+	if out["error"] != "control plane error" {
+		t.Errorf("got %q, want the bare fallback", out["error"])
+	}
+}
+
 // Every route on this surface is Operate. A future route added without thinking
 // about it should trip this rather than inherit Read by accident.
 func TestEveryControlRouteDemandsOperate(t *testing.T) {
@@ -215,5 +264,64 @@ func TestEveryControlRouteDemandsOperate(t *testing.T) {
 			t.Errorf("%s is not under /v1/control/ — the control surface must stay one prefix "+
 				"so a policy can be written about it", rt.Pattern)
 		}
+	}
+}
+
+// deadlineSeen records the budget the handler put on the outbound RPC. The gateway is
+// the middle of three layers bounding a Test Connection, and the only observable it has
+// is the context it hands the client.
+type deadlineSeen struct {
+	operatorpb.OperatorServiceClient
+	testConn time.Duration
+	listed   time.Duration
+}
+
+func (d *deadlineSeen) TestConnection(ctx context.Context, _ *operatorpb.TestConnectionRequest, _ ...grpc.CallOption) (*operatorpb.TestConnectionResponse, error) {
+	d.testConn = budgetOf(ctx)
+	return &operatorpb.TestConnectionResponse{Reachable: true, LatencyMs: 3}, nil
+}
+
+func (d *deadlineSeen) ListNodes(ctx context.Context, _ *operatorpb.ListNodesRequest, _ ...grpc.CallOption) (*operatorpb.ListNodesResponse, error) {
+	d.listed = budgetOf(ctx)
+	return &operatorpb.ListNodesResponse{}, nil
+}
+
+// budgetOf rounds the remaining time up to whole seconds: the deadline is set a few
+// microseconds before the client sees it, and the assertion is about which budget was
+// chosen, not about scheduling noise.
+func budgetOf(ctx context.Context) time.Duration {
+	dl, ok := ctx.Deadline()
+	if !ok {
+		return 0
+	}
+	return time.Until(dl).Round(time.Second)
+}
+
+// TestTestConnectionGetsTheLongBudgetAndOtherRoutesDoNot is the executable half of the
+// deadline hierarchy at this layer. The operator answers TestConnection by running a
+// probe Job and waiting for it, so a 30s gateway budget would cancel a healthy probe and
+// report "control plane did not answer in time" — the gateway blaming itself for work it
+// simply did not wait for. The other ten routes must NOT inherit the long budget: they
+// are reads, and a slow read is a control plane that is not answering.
+func TestTestConnectionGetsTheLongBudgetAndOtherRoutesDoNot(t *testing.T) {
+	c := &deadlineSeen{}
+	rec := serve(t, c, []string{"kanz-operator"},
+		httptest.NewRequest("POST", "/v1/control/test-connection", strings.NewReader(`{"ip":"10.0.0.5"}`)))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if c.testConn != testConnectionTimeout {
+		t.Errorf("TestConnection ran with a %s budget, want %s — the operator's own probe wait is %s, "+
+			"and a gateway budget below it makes the operator's verdict unreachable",
+			c.testConn, testConnectionTimeout, 60*time.Second)
+	}
+
+	rec = serve(t, c, []string{"kanz-operator"}, httptest.NewRequest("GET", "/v1/control/nodes", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if c.listed != callTimeout {
+		t.Errorf("ListNodes ran with a %s budget, want %s — only the probing route may wait longer",
+			c.listed, callTimeout)
 	}
 }

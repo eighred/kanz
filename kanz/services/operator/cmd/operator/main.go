@@ -99,6 +99,7 @@ func main() {
 			ProvisionerImage: cfg.ProvisionerImage,
 			K3sServerURL:     cfg.K3sServerURL,
 			K3sToken:         cfg.K3sToken,
+			ImagePullPolicy:  cfg.ProvisionerImagePullPolicy,
 		})
 		srv = grpcsrv.NewWithProvisioner(reader, prov)
 		logger.Info("node provisioning enabled", "image", cfg.ProvisionerImage)

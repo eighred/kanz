@@ -119,9 +119,41 @@ grep -q 'verify: true'         nats.conf || { echo "FAIL: tls verify:true absent
 grep -q 'verify_and_map: true' nats.conf || { echo "FAIL: verify_and_map absent — SVIDs would not map to accounts"; exit 1; }
 grep -q 'include "tenants.conf"' nats.conf || { echo "FAIL: accounts include absent"; exit 1; }
 
+# nats.conf sets `pid_file` so the spiffe-helper sidecar can SIGHUP the server on SVID
+# rotation. In-cluster the StatefulSet supplies that directory as an emptyDir volume
+# (nats-run -> /var/run/nats). Here the config arrives with bind-mounted FILES only, so
+# the directory does not exist — and nats-server treats an unwritable PidFile as FATAL,
+# exits immediately, and the readiness loop below then fails after 30s with "did not
+# become ready", pointing at everything except the missing directory.
+#
+# Fixed by supplying the directory rather than by editing the config: the whole premise
+# of this script is that the broker runs PRODUCTION'S nats.conf verbatim, so a tmpfs is
+# the faithful stand-in for the emptyDir and stripping pid_file would be a real
+# divergence in the one file under test. PID_DIR is derived from the config rather than
+# repeated, so moving the path in nats.yaml cannot silently strand the mount.
+PID_DIR=""
+if grep -q '^[[:space:]]*pid_file:' nats.conf; then
+  # awk with `exit` rather than `sed | head -1`: under this script's `set -o pipefail` a
+  # SIGPIPE'd sed would abort the run for no reason. Quotes are stripped so an unquoted
+  # rewrite in nats.yaml keeps working.
+  PID_PATH="$(awk '/^[[:space:]]*pid_file:/{v=$2; gsub(/^"|"$/,"",v); print v; exit}' nats.conf)"
+  PID_DIR="$(dirname "$PID_PATH")"
+  case "$PID_DIR" in
+    /*) ;;
+    # Loud, not best-effort: the pid_file line is present but unreadable, so the mount
+    # below would be silently skipped and the broker would die at boot on a config this
+    # script claims to run verbatim.
+    *) echo "FAIL: nats.conf declares a pid_file this script cannot parse (got '$PID_PATH')."
+       echo "      nats-server treats an unwritable PidFile as fatal, so without a tmpfs at"
+       echo "      its directory the broker exits before it listens and the readiness loop"
+       echo "      below blames the TLS config. Teach this extraction the new shape."; exit 1;;
+  esac
+fi
+
 # --- 3. Run it ---------------------------------------------------------------
 docker rm -f "$CONTAINER" >/dev/null 2>&1 || true
 docker run -d --name "$CONTAINER" -p "${PORT}:4222" -e POD_NAME=nats-0 \
+  ${PID_DIR:+--tmpfs "$PID_DIR:rw,mode=1777"} \
   -v "$(hostpath "$OUT/nats.conf"):/etc/nats/nats.conf:ro" \
   -v "$(hostpath "$OUT/tenants.conf"):/etc/nats/tenants.conf:ro" \
   -v "$(hostpath "$OUT/svid.pem"):/etc/nats-certs/svid.pem:ro" \

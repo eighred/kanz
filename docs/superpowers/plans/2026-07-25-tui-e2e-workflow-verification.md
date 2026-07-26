@@ -11,9 +11,23 @@
 ## Global Constraints
 
 - **Go version: 1.26.5**, matching every Dockerfile in the repo. Do not install a different minor.
+- **VERIFIED render strings — do not guess these, and do not "correct" their case.** Captured from a running TUI on the live cluster and cross-read from `view.go`/`form.go`/`keyform.go` on 2026-07-25. The pane titles are UPPERCASE and `strings.Contains` is case-sensitive; waiting for `"Nodes"` matches nothing and would time out every proof, since all seven call `startTUI`.
+  - Pane titles: `NODES`, `CLUSTERS`, `API MANAGER`
+  - Nodes columns: `NAME STATUS ROLES REGION VERSION AGE`; status values `Ready`, `Draining`
+  - Clusters columns: `REGION ONLINE OFFLINE`; API Manager columns: `VENUE KEYS`, values `verified`, `configured`
+  - Add Node form labels: `Hostname`, `IP`, `SSH Port`, `User`, `Key Path` (mixed case)
+  - Venue key form labels: `API Key`, `API Secret`, `Passphrase`
+  - Drain confirm: `Drain <node>? evicts <n> pods  [y/n]`
+  - Move region prompt: `Move <node> to region: _  [enter] move  [esc] cancel` (lowercase "region" here, unlike the column header)
+  - Test Connection result: `✓ reachable (<n>ms)` on success, `✗ test failed: ` on failure
+  - Provisioning strip: `<hostname>=<status>` where status is one of `Pending`, `Installing`, `Joined`, `Failed`
 - **Assertions match domain text, never layout.** No assertion may depend on column position, box-drawing characters, padding, or colour. Slice 2 rewrites every frame; a layout-coupled harness gets deleted and takes the regression net with it.
 - **The oracle is `kubectl` or the cluster API, never the TUI's own rendering.** A UI that renders optimistic intent rather than observed state must fail these tests.
-- **No `time.Sleep` as a synchronisation primitive, and no retry loops around assertions.** Use `WaitFor`. If a workflow needs a sleep to be observable, that is a TUI defect to fix, not a test to weaken.
+- **Waiting has three cases, and only one of them is forbidden.** The original single-sentence rule ("no `time.Sleep`, no retry loops") forbade the mechanism `WaitFor` is built out of, so it is split here. Reviewers apply this list, not the old sentence.
+  - **FORBIDDEN — sleeping instead of waiting for an outcome.** `time.Sleep(5*time.Second)` followed by an assertion that a node joined. This is what hides missing feedback: it passes on a fast machine, flakes on a slow one, and never tells you the workflow is unobservable. If a workflow needs this to pass, that is a TUI defect to fix, not a test to weaken.
+  - **REQUIRED — bounded polling of a system with no event channel.** A pty buffer and `kubectl` do not push. Polling them on a deadline *is* the implementation of `WaitFor`, `waitForNodeReady`, `waitForSchedulable`, `waitForNoEvictablePods` and `waitForSecret`. Every such loop must have a deadline and must fail with what it observed.
+  - **PERMITTED to prove a NEGATIVE, and must say so in a comment.** Asserting that nothing happened has no outcome to wait for, so it needs a bounded quiet period — the drain test's 3s pause before checking that answering `n` evicted nothing. The comment must name what the pause is proving; an uncommented sleep is the forbidden case above.
+  - **`selectNode2` is a navigation loop, not a retry loop.** It walks a list to reach a row, bounded at 10 steps, and fails with an explicit message if the selected row is not machine-readable. Do not rewrite it as an event wait: the TUI exposes no selection event, and adding one is slice-2 scope.
 - **PTY tests skip — loudly — when `KANZ_E2E_GATEWAY`, `KANZ_E2E_TOKEN`, `KANZ_E2E_NODE2_IP` or `KANZ_E2E_SSH_KEY` are unset.** A skip is never reported as a pass. Mirrors the existing `TEST_POSTGRES_URL` convention.
 - **Node 2 is the only safe target for cordon/drain/region.** Node 1 runs the estate; draining it evicts the trading loop, NATS and Postgres.
 - **No credential may appear in a captured frame or a service log.** Test 6 asserts this by searching both.
@@ -21,7 +35,7 @@
 
 **Environment facts (verified 2026-07-25):**
 - Node 1: `57.180.60.86`, internal `172.26.11.140`, k3s **server**, 2 vCPU / 3.8 GB, runs the estate.
-- Node 2: `52.195.224.210`, user `ubuntu`, Ubuntu 24.04.4, x86_64, 2 vCPU / **414 MB**, k3s absent, reachable with the same key.
+- Node 2: public `52.195.224.210`, **private `172.26.12.47`, hostname `ip-172-26-12-47`** — k3s will name the node from the hostname, NOT from the public ip the operator types. 2 vCPU / 414 MB + 2 GB swap added, Ubuntu 24.04.4, x86_64, k3s absent, reachable with the same key.
 - SSH key: `LightsailDefaultKey-ap-northeast-1.pem`, fingerprint `SHA256:lOvFt9P3Iy72VFK7eQswG949dvGU46oOqpnP4yYdIPg`.
 - Gateway dev secrets: JWT `dev-only-not-a-real-jwt-secret`, signing `dev-only-not-a-real-signing-secret`, roles `kanz-user` + `kanz-operator`.
 
@@ -575,7 +589,7 @@ import (
 func startTUI(t *testing.T, env Env) *Session {
 	t.Helper()
 	s := Start(t, env.Binary, nil, env.sessionEnv())
-	s.WaitFor(t, "Nodes", 20*time.Second)
+	s.WaitFor(t, "NODES", 20*time.Second)
 	return s
 }
 
@@ -587,11 +601,11 @@ func TestNavigationReachesEveryPaneAndQuitsCleanly(t *testing.T) {
 	// tab cycles Nodes -> Clusters -> API Manager -> Nodes. Assert on the pane's own
 	// domain text, never on layout.
 	s.Send("\t")
-	s.WaitFor(t, "Clusters", 5*time.Second)
+	s.WaitFor(t, "CLUSTERS", 5*time.Second)
 	s.Send("\t")
-	s.WaitFor(t, "API", 5*time.Second)
+	s.WaitFor(t, "API MANAGER", 5*time.Second)
 	s.Send("\t")
-	s.WaitFor(t, "Nodes", 5*time.Second)
+	s.WaitFor(t, "NODES", 5*time.Second)
 }
 
 // A form must not submit on quit. An operator who opens Add Node, changes their mind
@@ -672,8 +686,13 @@ const ctrlT = byte(0x14)
 
 func TestAddNodeProbesThenJoinsTheNodeLive(t *testing.T) {
 	env := requireEnv(t)
-	if nodeExists(t, "ip-"+dashed(env.Node2IP)) {
-		t.Skip("node 2 is already joined; delete it from the cluster to re-prove the join")
+	// Guard by COUNTING nodes, not by guessing a name. k3s names a node after the
+	// target host's own hostname, which on this provider derives from its PRIVATE ip
+	// (node 2 is ip-172-26-12-47) — never from the public ip the operator types into
+	// the form. A guard built on "ip-"+publicIP could never match, so it would never
+	// skip, and this proof would silently re-run against an already-joined node.
+	if len(clusterNodeNames(t)) > 1 {
+		t.Skip("a second node is already joined; remove it from the cluster to re-prove the join")
 	}
 
 	s := startTUI(t, env)
@@ -700,8 +719,14 @@ func TestAddNodeProbesThenJoinsTheNodeLive(t *testing.T) {
 	waitForNodeReady(t, 6*time.Minute)
 }
 
-// dashed renders an IP the way k3s names a node from its hostname.
-func dashed(ip string) string { return strings.ReplaceAll(ip, ".", "-") }
+// clusterNodeNames lists every node in the cluster. Used instead of predicting a
+// node's name: the name comes from the remote host's hostname, which this test has
+// no reliable way to derive from the address an operator typed.
+func clusterNodeNames(t *testing.T) []string {
+	t.Helper()
+	return strings.Fields(kubectl(t, "get", "nodes",
+		"-o", "jsonpath={range .items[*]}{.metadata.name} {end}"))
+}
 ```
 
 Add to `oracle.go`:
@@ -782,6 +807,8 @@ presents as a node that never appears and reads as a join failure that it is not
 func selectNode2(t *testing.T, s *Session, node2 string) {
 	t.Helper()
 	s.WaitFor(t, node2, 10*time.Second)
+	// A NAVIGATION loop, not a retry loop: it walks the list to reach a row. Bounded,
+	// and it fails loudly rather than silently acting on the wrong node.
 	for i := 0; i < 10; i++ {
 		if strings.Contains(s.Frames(), "> "+node2) || strings.Contains(s.Frames(), node2+" <") {
 			return
@@ -1000,7 +1027,7 @@ func TestMoveRegionRelabelsTheNode(t *testing.T) {
 	selectNode2(t, s, node2)
 
 	s.Send("m")
-	s.WaitFor(t, "egion", 5*time.Second) // matches Region/region without pinning the label
+	s.WaitFor(t, "to region:", 5*time.Second) // the prompt is "Move <node> to region: _"
 	s.Send(want + "\r")
 
 	deadline := time.Now().Add(30 * time.Second)
@@ -1050,7 +1077,7 @@ func TestVenueKeysWrittenFromTheFormAndNeverLeaked(t *testing.T) {
 	s.Send("\t\t") // to the API Manager pane
 	s.WaitFor(t, "binance", 10*time.Second)
 	s.Send("k")
-	s.WaitFor(t, "Key", 5*time.Second)
+	s.WaitFor(t, "API Secret", 5*time.Second)
 	s.Send("e2e-key\t")
 	s.Send(canary + "\r")
 

@@ -50,6 +50,13 @@ data:
 
     # Drain client connections gracefully on shutdown (see preStop hook).
     lame_duck_duration: 30s
+
+    # The pid the spiffe-helper sidecar signals (SIGHUP) when it rotates the SVID, so
+    # this server reloads its config and with it the TLS material in /etc/nats-certs.
+    # Without this file the helper has no way to reach this process: it does not carry
+    # the nats-server binary, only the shared process namespace. See the long comment
+    # on pid_file_name in the nats-spiffe-helper ConfigMap for the outage this fixes.
+    pid_file: "/var/run/nats/nats.pid"
 ---
 # SEC-01c: dedicated ServiceAccount so the SPIRE ClusterSPIFFEID (SEC-01a)
 # issues NATS its own identity — spiffe://kanz.internal/ns/kanz-messaging/sa/nats.
@@ -80,21 +87,53 @@ data:
     svid_file_name      = "svid.pem"
     svid_key_file_name  = "svid_key.pem"
     svid_bundle_file_name = "bundle.pem"
-    # On renewal, reload NATS in the shared process namespace.
-    cmd       = "nats-server"
-    cmd_args  = "--signal reload"
-    # REQUIRED whenever cmd (or pid_file_name) is set: spiffe-helper 0.9.0 — the tag
+    # On renewal, signal nats-server to reload so it picks up the new cert.
+    #
+    # BY PID, NOT BY BINARY. The previous shape here was cmd = "nats-server" with
+    # cmd_args = "--signal reload", and it could never work in any environment:
+    # `cmd` is exec'd INSIDE THIS CONTAINER, and the nats-server binary lives in the
+    # nats container's filesystem. shareProcessNamespace (set on the pod below) shares
+    # the PROCESS namespace, not the filesystem, so the lookup failed every time with
+    #   Unable to signal process: exec: "nats-server": executable file not found in $PATH
+    # while the line immediately above it cheerfully logged "X.509 certificates updated".
+    #
+    # The consequence was silent and severe: the helper rotated the SVID on disk every
+    # ~28 minutes and nats-server went on serving the cert it loaded at boot. Roughly an
+    # hour after any NATS restart that cert expired, and from then on EVERY NEW mTLS
+    # connection to the bus was rejected while established ones kept working — so the
+    # estate looked healthy and simply stopped being able to admit new workloads. It was
+    # found after ~7 hours in that state, diagnosed from an unrelated-looking
+    # CrashLoopBackOff in a freshly rolled api-gateway.
+    #
+    # pid_file_name needs no binary: the helper reads the pid and sends renew_signal to
+    # it directly, which works across containers precisely BECAUSE the process namespace
+    # is shared. nats-server writes that pid file (pid_file in nats.conf above) into the
+    # nats-run volume, which both containers mount.
+    pid_file_name = "/var/run/nats/nats.pid"
+    # REQUIRED whenever cmd or pid_file_name is set: spiffe-helper 0.9.0 — the tag
     # pinned on both containers below — validates this at STARTUP, in daemon mode and
     # init mode alike, and exits 1 with "Must specify renew_signal when using cmd or
     # pid_file_name". Without it the init container CrashLoopBackOffs and NATS never
     # starts, so the whole bus is down; the failure is a config rejection and looks
     # nothing like one from the pod's perspective.
     #
-    # SIGHUP is what nats-server reloads on. There is no pid_file_name here, so this
-    # signal is not itself delivered to anything — cmd above is what performs the
-    # reload. It is the value the validator demands and the one that is correct if a
-    # pid_file_name is ever added.
+    # SIGHUP is what nats-server reloads its config — and therefore its TLS material —
+    # on. Unlike before, this signal is now actually delivered to something.
     renew_signal = "SIGHUP"
+
+  # The INIT container gets its own config, deliberately WITHOUT pid_file_name.
+  #
+  # It runs once (-daemon-mode=false) to place the first SVID before nats-server starts,
+  # so at that moment there is no pid file and no process to signal. Pointing it at one
+  # would ask it to signal a pid that cannot exist yet — a startup-ordering failure in the
+  # one component whose whole job is to make startup possible. Nothing to reload here: the
+  # cert is being placed, not replaced.
+  helper-init.conf: |
+    agent_address       = "/run/spiffe/spire-agent.sock"
+    cert_dir            = "/etc/nats-certs"
+    svid_file_name      = "svid.pem"
+    svid_key_file_name  = "svid_key.pem"
+    svid_bundle_file_name = "bundle.pem"
 ---
 # Headless service: stable per-pod DNS for cluster routes. publishNotReadyAddresses
 # lets peers resolve each other before JetStream reports ready.
@@ -152,7 +191,9 @@ spec:
         # has certs the moment nats-server boots.
         - name: spiffe-helper-init
           image: ghcr.io/spiffe/spiffe-helper:0.9.0
-          args: ["-config", "/etc/spiffe-helper/helper.conf", "-daemon-mode=false"]
+          # helper-init.conf, not helper.conf: the one-shot fetch must not carry
+          # pid_file_name — see that key's comment in the ConfigMap.
+          args: ["-config", "/etc/spiffe-helper/helper-init.conf", "-daemon-mode=false"]
           volumeMounts:
             - { name: spiffe-helper-config, mountPath: /etc/spiffe-helper, readOnly: true }
             - { name: nats-certs, mountPath: /etc/nats-certs }
@@ -188,6 +229,10 @@ spec:
             - { name: config, mountPath: /etc/nats }
             - { name: data, mountPath: /data }
             - { name: nats-certs, mountPath: /etc/nats-certs, readOnly: true }
+            # Writable: nats-server drops its pid here (pid_file in nats.conf) so the
+            # spiffe-helper sidecar can signal it on cert renewal without needing the
+            # nats-server binary, which it does not have.
+            - { name: nats-run, mountPath: /var/run/nats }
           livenessProbe:
             httpGet: { path: "/healthz", port: 8222 }
             initialDelaySeconds: 10
@@ -211,6 +256,9 @@ spec:
             - { name: spiffe-helper-config, mountPath: /etc/spiffe-helper, readOnly: true }
             - { name: nats-certs, mountPath: /etc/nats-certs }
             - { name: spiffe, mountPath: /run/spiffe, readOnly: true }
+            # Read-only: the helper only needs to READ the pid nats-server wrote, in
+            # order to signal it. It must never write here.
+            - { name: nats-run, mountPath: /var/run/nats, readOnly: true }
       volumes:
         # PROJECTED, not two volumes. nats.conf does `include "tenants.conf"`, which
         # NATS resolves relative to nats.conf's own directory — so both files have to
@@ -240,6 +288,13 @@ spec:
         # Shared cert dir written by spiffe-helper, read by nats. Memory-backed
         # so private keys never touch disk.
         - name: nats-certs
+          emptyDir:
+            medium: Memory
+        # Carries only nats-server's pid file, so the sidecar can signal it across the
+        # shared process namespace. Memory-backed and tiny; a stale pid from a previous
+        # container cannot survive here, which matters because signalling a recycled pid
+        # would be worse than not signalling at all.
+        - name: nats-run
           emptyDir:
             medium: Memory
         # SEC-01a SPIFFE CSI volume — presents the agent Workload API socket.

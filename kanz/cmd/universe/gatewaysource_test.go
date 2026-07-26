@@ -10,7 +10,19 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
+
+// testCtx gives a call the deadline that call() now requires. Production call sites all set
+// one (the HTTP client carries no Timeout of its own), so a test using a bare
+// context.Background() would be exercising a shape that cannot occur — see
+// TestCallRefusesAContextWithNoDeadline, which is the one place that shape is the subject.
+func testCtx(t *testing.T) context.Context {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	t.Cleanup(cancel)
+	return ctx
+}
 
 func newTestSource(t *testing.T, srv *httptest.Server, signing string) *gatewaySource {
 	t.Helper()
@@ -21,6 +33,30 @@ func newTestSource(t *testing.T, srv *httptest.Server, signing string) *gatewayS
 		t.Fatalf("newGatewaySource: %v", err)
 	}
 	return src
+}
+
+// TestCallRefusesAContextWithNoDeadline: the HTTP client carries no Timeout of its own, so
+// the caller's context is the only bound on the request. A call site that forgets a deadline
+// would hang the TUI forever against an unresponsive gateway, which reads to an operator as a
+// frozen program rather than an error. It must fail immediately and name itself instead.
+//
+// The server here hangs deliberately: if the guard regresses, this test blocks rather than
+// reporting a wrong value, which is the honest signal for "the call had no bound".
+func TestCallRefusesAContextWithNoDeadline(t *testing.T) {
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		<-release
+	}))
+	defer func() { close(release); srv.Close() }()
+
+	err := newTestSource(t, srv, "").call(context.Background(), http.MethodGet, "/v1/control/nodes", nil, nil)
+	if err == nil {
+		t.Fatal("call accepted a context with no deadline; with no client timeout that is an " +
+			"unbounded request and the TUI would hang forever")
+	}
+	if !strings.Contains(err.Error(), "no context deadline") {
+		t.Errorf("the error must name the actual mistake so it is fixable on sight; got: %v", err)
+	}
 }
 
 // --- construction refuses to half-work ------------------------------------
@@ -65,7 +101,7 @@ func TestBearerTokenIsSent(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	if _, err := newTestSource(t, srv, "").listVenueKeys(context.Background()); err != nil {
+	if _, err := newTestSource(t, srv, "").listVenueKeys(testCtx(t)); err != nil {
 		t.Fatalf("call failed: %v", err)
 	}
 	if auth != "Bearer test-token" {
@@ -87,7 +123,7 @@ func TestSignatureCoversMethodPathAndBody(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	err := newTestSource(t, srv, secret).setRegion(context.Background(), "node-1", "asia")
+	err := newTestSource(t, srv, secret).setRegion(testCtx(t), "node-1", "asia")
 	if err != nil {
 		t.Fatalf("call failed: %v", err)
 	}
@@ -112,7 +148,7 @@ func TestNoSignatureHeaderWhenNoSecretConfigured(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	if _, err := newTestSource(t, srv, "").listVenueKeys(context.Background()); err != nil {
+	if _, err := newTestSource(t, srv, "").listVenueKeys(testCtx(t)); err != nil {
 		t.Fatalf("call failed: %v", err)
 	}
 	if present {
@@ -132,7 +168,7 @@ func TestNodeIdentityIsInThePathNotTheBody(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	if err := newTestSource(t, srv, "").setRegion(context.Background(), "node-1", "asia"); err != nil {
+	if err := newTestSource(t, srv, "").setRegion(testCtx(t), "node-1", "asia"); err != nil {
 		t.Fatalf("call failed: %v", err)
 	}
 	if path != "/v1/control/nodes/node-1/region" {
@@ -156,7 +192,7 @@ func TestVenueCredentialNeverAppearsInTheURL(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	id, err := newTestSource(t, srv, "").setVenueKeys(context.Background(), "binance",
+	id, err := newTestSource(t, srv, "").setVenueKeys(testCtx(t), "binance",
 		venueKeys{apiKey: "SECRET-KEY", apiSecret: "SECRET-SECRET"})
 	if err != nil {
 		t.Fatalf("call failed: %v", err)
@@ -208,7 +244,7 @@ func TestErrorsExplainWhatToDo(t *testing.T) {
 			}))
 			defer srv.Close()
 
-			_, err := newTestSource(t, srv, "").listVenueKeys(context.Background())
+			_, err := newTestSource(t, srv, "").listVenueKeys(testCtx(t))
 			if err == nil {
 				t.Fatalf("status %d produced no error", tc.status)
 			}
@@ -228,7 +264,7 @@ func TestUnknownResponseFieldsAreTolerated(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	rows, err := newTestSource(t, srv, "").listVenueKeys(context.Background())
+	rows, err := newTestSource(t, srv, "").listVenueKeys(testCtx(t))
 	if err != nil {
 		t.Fatalf("an unknown response field broke decoding: %v", err)
 	}
