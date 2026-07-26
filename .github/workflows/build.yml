@@ -189,7 +189,9 @@ jobs:
         id: meta
         uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5
         with:
-          images: ghcr.io/${{ github.repository_owner }}/${{ matrix.service }}
+          # Canonical org, not the computed owner — see release.yml's IMAGE comment.
+          # Guarded by TestImageOrgIsCanonical.
+          images: ghcr.io/kanz-eng/${{ matrix.service }}
           tags: |
             type=sha
             type=ref,event=branch

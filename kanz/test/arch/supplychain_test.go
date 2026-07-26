@@ -340,3 +340,306 @@ func TestPrivateImagesHavePullSecrets(t *testing.T) {
 			len(problems), strings.Join(problems, "\n  "))
 	}
 }
+
+// CI PUBLISHED TO ONE NAMESPACE AND THE CLUSTER PULLED FROM ANOTHER.
+//
+// Every manifest, preview.yml, and the sigstore ClusterImagePolicy (both its
+// `images[].glob` and its keyless `subjectRegExp`) name ghcr.io/kanz-eng. The
+// two steps that actually PUSH images computed their target from
+// ${{ github.repository_owner }}, which for this repository resolves to
+// "eighred". So a green release.yml would have published images the estate
+// could never pull, under an identity the admission policy would never
+// accept — and nothing would have said so until someone tried.
+//
+// The owner's decision (2026-07-26) is that kanz-eng is canonical. This test is
+// what keeps the two halves from drifting apart again: publish targets, pull
+// references, and the signing identity are the same string or the build fails.
+//
+// WHY IT READS POSITIONS, NOT TEXT. A comment at infra/deploy/operator-deploy.yaml
+// quotes the error string "403 Forbidden from ghcr.io/token". A guard that grepped
+// free text would flag that comment as an image reference under an org called
+// "token". So this walks YAML keys that actually carry image references.
+//
+// FOUR INDEPENDENT CHECKS, FOUR INDEPENDENT FLOORS. Workflow-side image
+// references, infra-side image references, the ClusterImagePolicy's `glob`,
+// and the signing identity (`subjectRegExp`) are four unrelated populations —
+// an `image: ghcr.io/org/svc` field, a `glob: "ghcr.io/org/**"` list entry,
+// and a `subjectRegExp: "^https://github.com/org/repo/..."` string share no
+// key name and no value format, and the workflow and infra populations, while
+// sharing the same `imageRefKeys` keys, live in files with utterly different
+// counts. Counting any of these into one pooled total lets a coverage
+// regression in the smallest population hide behind padding from the
+// largest: infra `image:` references matched by imageRefKeys clear 40
+// comfortably (53 ghcr matches — 39 kanz-eng + 14 spiffe — across 45 files at
+// time of writing), while the three workflow-side publish targets (build.yml's
+// `images`, preview.yml's `tags`, release.yml's `IMAGE`) total exactly 3, and
+// `glob`/`subjectRegExp` each have exactly ONE occurrence in this repo. Pool
+// any of the small ones into the 53-strong infra count and it can vanish
+// entirely — three publish targets rewritten as `${{ env.REGISTRY }}/...`
+// (no literal `ghcr.io` left to match) still leaves the pooled total at 50,
+// comfortably above 40 — while the guard keeps reporting success. Each
+// population gets its own non-vacuity floor instead, so losing any one of
+// them fails loudly rather than hiding in the noise of the others.
+//
+// BLOCK SCALARS. docker/metadata-action documents a multi-line form,
+// `images: |` followed by indented ghcr.io lines. Both current workflows use
+// the single-line form (`images: ghcr.io/...`), but a future one could use the
+// block form — so image-reference values are scanned line-by-line and, when a
+// key's inline value is a bare block-scalar indicator (`|`, `|-`, `>`, etc.),
+// the following more-indented lines are pulled in as that key's value too.
+const canonicalImageOrg = "kanz-eng"
+
+// thirdPartyImageOrgs are ghcr namespaces we legitimately consume but do not
+// own. Each is a set entry (not a map value) because the reason is documentary
+// for a future reader of this source, not something the test logic branches
+// on — it lives in the comment beside the name, not in a discarded variable.
+//
+//   - spiffe:   SPIRE server/agent, the CSI driver and spiffe-helper — upstream
+//     sigstore/spiffe images.
+//   - gitleaks: the secret-scanning image security.yml runs; not built here.
+var thirdPartyImageOrgs = map[string]struct{}{
+	"spiffe":   {},
+	"gitleaks": {},
+}
+
+// imageRefKeys are the YAML keys whose values carry an image reference.
+// `IMAGE` is release.yml's job-level env var; `images`/`tags` are
+// docker/metadata-action and build-push-action inputs; `image` is Kubernetes.
+// `glob` — the sigstore ClusterImagePolicy's `images[].glob` image-match
+// pattern — deliberately is NOT in this list: it is checked and floored
+// separately below (see globLineRe / globChecked / globFloor), because it is
+// the one occurrence in the whole repo and would otherwise hide, uncounted
+// for coverage purposes, inside a pool the other keys fill on their own.
+var imageRefKeys = []string{"image", "images", "tags", "IMAGE"}
+
+// workflowImageRefFloor, infraImageRefFloor, globFloor and subjectRegExpFloor
+// are non-vacuity backstops for the four independent checks
+// TestImageOrgIsCanonical runs (see the test's doc comment for why they are
+// not pooled into one count). If any check's real match count ever drops
+// below its floor, the key set, file layout, or value shape changed and that
+// check is silently asserting almost nothing.
+//
+// workflowImageRefFloor is 3, not higher, because build.yml's `images`,
+// preview.yml's `tags` and release.yml's `IMAGE` are the only three publish
+// targets that exist today — the point of this floor is that losing any of
+// them (e.g. a DRY refactor to `images: ${{ env.REGISTRY }}/...`, which
+// contains no literal `ghcr.io` for the regex to match) must fail loudly, not
+// that more than 3 are expected. It is deliberately its own floor rather than
+// folded into infraImageRefFloor: infra alone clears 40 on its own, so a
+// pooled counter would absorb the workflow side dropping to zero without
+// moving enough to trip a floor of 40.
+//
+// globFloor and subjectRegExpFloor are 1, not higher, because each field has
+// exactly one legitimate occurrence in this repo today — the point of a floor
+// of 1 is that zero must fail loudly, not that many are expected.
+const workflowImageRefFloor = 3
+const infraImageRefFloor = 40
+const globFloor = 1
+const subjectRegExpFloor = 1
+
+// blockScalarRe matches a bare YAML block-scalar indicator as a key's entire
+// inline value: `|`, `|-`, `|+`, `|4`, `>`, `>-`, etc., optionally followed by
+// a trailing comment. When a key's inline value is only this, the actual
+// content lives on the following more-indented lines.
+var blockScalarRe = regexp.MustCompile(`^[|>][+\-]?\d*\s*(#.*)?$`)
+
+func TestImageOrgIsCanonical(t *testing.T) {
+	root := moduleRoot(t)
+	repoRoot := filepath.Dir(root)
+
+	// keyLineRe matches one line: an optional YAML list-item dash, then one of
+	// imageRefKeys, then its inline value (which may be empty or a block-scalar
+	// indicator — see blockScalarRe).
+	keyLineRe := regexp.MustCompile(`^(\s*)(?:-\s*)?(` + strings.Join(imageRefKeys, "|") + `)\s*:\s*(.*)$`)
+	ghcrRe := regexp.MustCompile(`ghcr\.io/([A-Za-z0-9._\-]+|\$\{\{[^}]*\}\})/`)
+
+	// globLineRe matches the ClusterImagePolicy's `images[].glob` image-match
+	// pattern in isolation from imageRefKeys — see globFloor for why it has its
+	// own counter instead of sharing imageRefsChecked.
+	globLineRe := regexp.MustCompile(`^(\s*)(?:-\s*)?(glob)\s*:\s*(.*)$`)
+
+	// subjectLineRe matches the ClusterImagePolicy's keyless signing identity.
+	// Its value is a regex-as-a-string carrying a
+	// "https://github.com/<org>/<repo>/..." subject, not a ghcr reference, so it
+	// needs its own key pattern and its own org extractor.
+	subjectLineRe := regexp.MustCompile(`^\s*subjectRegExp\s*:\s*(.*)$`)
+	subjectOrgRe := regexp.MustCompile(`https://github\.com/([A-Za-z0-9._\-]+)/`)
+
+	// expandBlockValue returns a key's full value text: the inline value as-is,
+	// or — when the inline value is only a block-scalar indicator (`|`, `>`,
+	// etc.) — the following more-indented lines joined, since the real content
+	// lives there instead. Shared by the imageRefKeys and glob line handlers so
+	// both benefit from the same BLOCK SCALARS handling described in this
+	// test's doc comment.
+	expandBlockValue := func(lines []string, i, indent int, value string) string {
+		if !blockScalarRe.MatchString(value) {
+			return value
+		}
+		var block []string
+		for j := i + 1; j < len(lines); j++ {
+			next := lines[j]
+			if strings.TrimSpace(next) == "" {
+				block = append(block, next)
+				continue
+			}
+			nextIndent := len(next) - len(strings.TrimLeft(next, " "))
+			if nextIndent <= indent {
+				break
+			}
+			block = append(block, next)
+		}
+		return strings.Join(block, "\n")
+	}
+
+	var files []string
+	files = append(files, workflowFiles(t, repoRoot)...)
+	err := filepath.WalkDir(filepath.Join(root, "infra"), func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if !d.IsDir() && (strings.HasSuffix(path, ".yaml") || strings.HasSuffix(path, ".yml")) {
+			files = append(files, path)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walking infra/: %v", err)
+	}
+	if len(files) == 0 {
+		t.Fatal("no workflow or infra files found — has the layout changed? " +
+			"(this test would otherwise pass vacuously)")
+	}
+
+	// checkOrg is shared by all three checks. isSigningIdentity distinguishes
+	// subjectRegExp from the image-reference fields: that field carries a
+	// GitHub Actions OIDC signing identity ("who is trusted to sign"), not a
+	// container image reference, and a message that called it an image would
+	// misdirect whoever has to act on it.
+	checkOrg := func(problems *[]string, relSlash, fieldDesc, org string, isSigningIdentity bool) {
+		if org == canonicalImageOrg {
+			return
+		}
+		if _, ok := thirdPartyImageOrgs[org]; ok {
+			return
+		}
+		if strings.HasPrefix(org, "${{") {
+			if isSigningIdentity {
+				*problems = append(*problems, fmt.Sprintf(
+					"%s: %s: names a COMPUTED signing-identity org %s — the OIDC subject this "+
+						"authorizes would resolve to the GitHub repository owner at sign time, not to "+
+						"%q, so a genuine signature from this repo would still fail verification against %q",
+					relSlash, fieldDesc, org, canonicalImageOrg, canonicalImageOrg))
+				return
+			}
+			*problems = append(*problems, fmt.Sprintf(
+				"%s: %s: names a COMPUTED image org %s — it resolves to the GitHub "+
+					"repository owner, not to %q, so images published here cannot be pulled "+
+					"by manifests that name %q", relSlash, fieldDesc, org, canonicalImageOrg, canonicalImageOrg))
+			return
+		}
+		if isSigningIdentity {
+			*problems = append(*problems, fmt.Sprintf(
+				"%s: %s: signing-identity org %q is neither the canonical %q nor a listed third "+
+					"party — this field is the GitHub Actions OIDC subject the ClusterImagePolicy trusts "+
+					"to sign, not a container image reference, so a mismatch here means a genuine "+
+					"signature from the real release workflow would fail verification",
+				relSlash, fieldDesc, org, canonicalImageOrg))
+			return
+		}
+		*problems = append(*problems, fmt.Sprintf(
+			"%s: %s: image org %q is neither the canonical %q nor a listed third party",
+			relSlash, fieldDesc, org, canonicalImageOrg))
+	}
+
+	var problems []string
+	workflowImageRefsChecked := 0
+	infraImageRefsChecked := 0
+	globChecked := 0
+	subjectRegExpsChecked := 0
+
+	for _, path := range files {
+		body, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("reading %s: %v", path, err)
+		}
+		rel, _ := filepath.Rel(repoRoot, path)
+		relSlash := filepath.ToSlash(rel)
+		// The workflow and infra populations get independent counters and
+		// floors (see workflowImageRefFloor's comment) — this is what tells
+		// the two apart as the scan walks both sets of files in one pass.
+		isWorkflowFile := strings.Contains(relSlash, ".github/workflows/")
+
+		// Normalize CRLF for the same reason TestWorkflowActionsArePinnedToSHA
+		// does: a line-anchored scan must behave the same on a Windows checkout
+		// (core.autocrlf=true) as on CI.
+		lines := strings.Split(strings.ReplaceAll(string(body), "\r\n", "\n"), "\n")
+
+		for i := 0; i < len(lines); i++ {
+			line := lines[i]
+
+			if m := subjectLineRe.FindStringSubmatch(line); m != nil {
+				for _, g := range subjectOrgRe.FindAllStringSubmatch(m[1], -1) {
+					subjectRegExpsChecked++
+					checkOrg(&problems, relSlash, "subjectRegExp", g[1], true)
+				}
+				continue
+			}
+
+			if m := globLineRe.FindStringSubmatch(line); m != nil {
+				indent, value := len(m[1]), strings.TrimSpace(m[3])
+				valueText := expandBlockValue(lines, i, indent, value)
+				for _, g := range ghcrRe.FindAllStringSubmatch(valueText, -1) {
+					globChecked++
+					checkOrg(&problems, relSlash, "glob", g[1], false)
+				}
+				continue
+			}
+
+			m := keyLineRe.FindStringSubmatch(line)
+			if m == nil {
+				continue
+			}
+			indent, key, value := len(m[1]), m[2], strings.TrimSpace(m[3])
+			valueText := expandBlockValue(lines, i, indent, value)
+
+			for _, g := range ghcrRe.FindAllStringSubmatch(valueText, -1) {
+				if isWorkflowFile {
+					workflowImageRefsChecked++
+				} else {
+					infraImageRefsChecked++
+				}
+				checkOrg(&problems, relSlash, key, g[1], false)
+			}
+		}
+	}
+
+	if workflowImageRefsChecked < workflowImageRefFloor {
+		t.Fatalf("only %d ghcr.io image references matched across workflow files (build.yml's "+
+			"images:, preview.yml's tags:, release.yml's IMAGE:) — expected at least %d; a "+
+			"publish target was removed, or rewritten to a form (e.g. `images: ${{ env.REGISTRY "+
+			"}}/...`) with no literal ghcr.io for this regex to match — either way this check is "+
+			"now asserting almost nothing about publish targets, even though infra/ coverage "+
+			"alone would still look healthy", workflowImageRefsChecked, workflowImageRefFloor)
+	}
+	if infraImageRefsChecked < infraImageRefFloor {
+		t.Fatalf("only %d ghcr.io image references matched under kanz/infra/ — "+
+			"expected at least %d; the key set or layout changed and this test is now "+
+			"asserting almost nothing about infra image references", infraImageRefsChecked, infraImageRefFloor)
+	}
+	if globChecked < globFloor {
+		t.Fatalf("only %d ClusterImagePolicy glob field(s) matched under infra/ — expected at "+
+			"least %d; the policy was deleted, `glob` was renamed, or the value shape changed, "+
+			"and this test is now asserting nothing about the image-match pattern",
+			globChecked, globFloor)
+	}
+	if subjectRegExpsChecked < subjectRegExpFloor {
+		t.Fatalf("only %d subjectRegExp signing-identity field(s) matched under infra/ — "+
+			"expected at least %d; the ClusterImagePolicy moved, was renamed, or the pattern "+
+			"broke, and this test is now asserting nothing about the signing identity",
+			subjectRegExpsChecked, subjectRegExpFloor)
+	}
+	if len(problems) > 0 {
+		sort.Strings(problems)
+		t.Errorf("image org disagreement (%d):\n  %s", len(problems), strings.Join(problems, "\n  "))
+	}
+}

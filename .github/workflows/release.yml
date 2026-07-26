@@ -28,7 +28,11 @@ jobs:
       matrix:
         service: [risk-engine, schema-registry]
     env:
-      IMAGE: ghcr.io/${{ github.repository_owner }}/${{ matrix.service }}
+      # kanz-eng is canonical and is NOT github.repository_owner: this repository
+      # lives at eighred/kanz, so the computed owner published images no manifest
+      # references and the ClusterImagePolicy's subjectRegExp would never accept.
+      # Guarded by TestImageOrgIsCanonical.
+      IMAGE: ghcr.io/kanz-eng/${{ matrix.service }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
@@ -139,9 +143,22 @@ jobs:
           cosign attest --yes --type spdxjson --predicate sbom.spdx.json "$DIGEST_REF"
           cosign attest --yes --type vuln --predicate vuln.json "$DIGEST_REF"
 
-      # Self-check: prove the signature verifies against this workflow's identity
-      # before the release is considered good (same predicate the cluster admission
-      # policy enforces).
+      # Self-check: prove the signature verifies against THIS run's own OIDC
+      # identity (${{ github.repository }}, i.e. whatever repo this workflow is
+      # currently executing in). That is all it proves. It is NOT the same
+      # predicate the cluster admission policy enforces: the policy
+      # (kanz/infra/security/admission/cluster-image-policy.yaml:36) pins the
+      # literal org "kanz-eng", while this regexp is built from
+      # ${{ github.repository }} — the identity that just signed — so this step
+      # structurally cannot detect an org mismatch between where this workflow
+      # runs and what the policy requires; a signature always matches the
+      # identity that produced it. Today this repository is eighred/kanz, so a
+      # green run here proves nothing about whether the cluster would admit the
+      # image. Deliberately left computed rather than hardcoded to "kanz-eng":
+      # doing that would make this step fail instead of tautologically pass, but
+      # whether release.yml or the policy is "wrong" depends on an unmade
+      # decision — where this repository lives (see KANZ_TASKS.md, OPS-M1) — and
+      # guessing here would hide that decision instead of forcing it.
       - name: Verify signature
         env:
           DIGEST_REF: ${{ env.IMAGE }}@${{ steps.build.outputs.digest }}
