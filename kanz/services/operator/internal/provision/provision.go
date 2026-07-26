@@ -61,13 +61,18 @@ const (
 // credential that admits the fleet onto a member of the fleet it admits. The blast
 // radius of one compromised worker stops being that worker.
 //
-// The second reason is that an unpinned Job does not reliably run at all. The estate
-// holds no registry credentials (ghcr is private; anonymous pulls 403) and nothing in
-// infra/ carries imagePullSecrets, so a Job scheduled onto a node that has not
-// pre-loaded the kanz-provisioner image dies in ErrImagePull. Observed live: a probe
-// Job landed on a freshly joined worker, 403'd, and reported a healthy host
-// unreachable after the full 60s wait — a false verdict about someone's node, caused
-// entirely by where the pod ran.
+// THE SECOND REASON IS RETIRED, AND IS RECORDED HERE BECAUSE ITS ABSENCE IS THE
+// POINT. Until OPS-M2f-b this Job also had to be pinned because the estate held no
+// registry credentials at all: ghcr is private, nothing in infra/ carried
+// imagePullSecrets, and a Job landing on a node that had not pre-loaded the
+// kanz-provisioner image died in ErrImagePull. Observed live — a probe Job landed on
+// a freshly joined worker, 403'd, and reported a healthy host unreachable after the
+// full 60s wait, a false verdict about someone's node caused entirely by where the
+// pod ran. That reason is gone: the kanz-node-provisioner ServiceAccount now carries
+// the ghcr-pull credential, and this Job inherits it (pinned by
+// TestAddNodeJobRunsUnderProvisionerServiceAccount). So credential confinement above
+// is now the ONLY thing holding this pin — which is exactly what OPS-M2f-a has to
+// replace, and it should not have to rediscover that the other half already expired.
 //
 // The toleration grants nothing on THIS cluster: the k3s control-plane node carries no
 // taints today, so the selector alone places both pods. It is carried anyway for the

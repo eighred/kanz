@@ -245,3 +245,29 @@ func provJob(name, host string, st batchv1.JobStatus) *batchv1.Job {
 		Status: st,
 	}
 }
+
+// TestAddNodeJobRunsUnderProvisionerServiceAccount pins the inheritance that
+// OPS-M2f-b relies on. The ghcr-pull credential is attached to the
+// kanz-node-provisioner ServiceAccount in infra/deploy/operator-deploy.yaml,
+// NOT to this Job's pod spec. So the Job can pull its private image only for
+// as long as it keeps naming that ServiceAccount. Renaming it here — or
+// dropping it and falling back to the namespace default SA — silently
+// reintroduces the ErrImagePull this milestone exists to remove, on a code
+// path that has no manifest a reviewer would think to check.
+func TestAddNodeJobRunsUnderProvisionerServiceAccount(t *testing.T) {
+	cs := fake.NewSimpleClientset()
+	id, err := New(cs, cfg()).AddNode(context.Background(), Request{
+		Hostname: "london", IP: "10.0.0.5", SSHPort: 22, SSHUser: "root", SSHKey: []byte("PEM")})
+	if err != nil {
+		t.Fatalf("AddNode: %v", err)
+	}
+	job, err := cs.BatchV1().Jobs("kanz-operator").Get(context.Background(), id, metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("job not created: %v", err)
+	}
+	if got := job.Spec.Template.Spec.ServiceAccountName; got != "kanz-node-provisioner" {
+		t.Errorf("provisioning Job ServiceAccountName = %q, want %q — the ghcr-pull "+
+			"credential is attached to that ServiceAccount, so any other value means "+
+			"this Job cannot pull its own image", got, "kanz-node-provisioner")
+	}
+}
