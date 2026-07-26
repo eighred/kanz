@@ -1,6 +1,10 @@
 # Release Readiness Report
 
-**Audited:** 2026-07-27 · **HEAD:** `e0cddf4` · **Verdict: NO-GO**
+**Audited:** 2026-07-27 · **Updated after recovery Phases 1-2** · **Verdict: NO-GO (both P0s addressed; a third defect is now unmasked)**
+
+> **Recovery status.** REL-P0b is **fixed and CI-verified**: the race detector reported two `WARNING: DATA RACE` on `main` and **zero** after the fix. REL-P0a is **implemented** (owner decision: adopt `eighred`) and awaiting its first green `kanz-build` on a push to `main` — the only evidence that counts, and one merging alone can produce.
+>
+> **A third defect surfaced, previously masked.** With the provisioner race gone, `kanz-ci`'s race step still fails — on `TestNATSMTLS_SPIFFEClientConnectsPublishesConsumes` (`pkg/bus`): *"publish over mTLS: nats publish: context deadline exceeded"*. It failed on `main` too, hidden behind the race. **This resolves board item OPS-M2f-c**, which was carried as an unverified ~2-minute check: CI runs it, and it fails. Tracked below as P1-4.
 
 Two P0 defects block release. Both are proven by CI evidence, not inferred. This report is the source of truth for finishing the system; where it contradicts `KANZ_TASKS.md`, this report is newer and the board rows it names are being corrected.
 
@@ -72,6 +76,12 @@ Three consequences of `eighred/kanz` vs `kanz-eng` remain, and **P0-1 cannot be 
 Two ways out, and they cost very differently:
 - **Move the repository to a `kanz-eng` org** — makes 747 hardcoded references, the Go module path, and the admission policy correct as written; needs org admin.
 - **Adopt `eighred` as canonical** — revert two workflow lines and rewrite 39 manifests, `preview.yml`, and the policy. **No new credential needed, and CI goes green immediately.**
+
+### P1-4 — NATS mTLS publish times out in CI
+
+`TestNATSMTLS_SPIFFEClientConnectsPublishesConsumes` fails with *"publish over mTLS: nats publish: context deadline exceeded"* (`nats_mtls_integration_test.go:151`). Present on `main` and on every branch checked; it was hidden behind the provisioner data race in the same test step. The client reaches the publish call, so this is not a connect or certificate rejection — it is a publish that never completes.
+
+This is the same surface board item **OPS-M2f-c** flagged as unverified (the `nats.conf` `pid_file` addition, extracted verbatim by `test/mtls/up.sh`). That item can stop being a "2-minute check somebody should run" — CI runs it every time, and it fails every time.
 
 ### P1-2 — No versioning exists
 
