@@ -81,6 +81,20 @@ Two ways out, and they cost very differently:
 
 `TestNATSMTLS_SPIFFEClientConnectsPublishesConsumes` fails with *"publish over mTLS: nats publish: context deadline exceeded"* (`nats_mtls_integration_test.go:151`). Present on `main` and on every branch checked; it was hidden behind the provisioner data race in the same test step. The client reaches the publish call, so this is not a connect or certificate rejection — it is a publish that never completes.
 
+**ROOT CAUSE, proven from the config (2026-07-27).** The harness client cert carries `spiffe://kanz.internal/ns/kanz-services/sa/risk-engine` (`test/mtls/up.sh:48`), and `verify_and_map: true` maps that SVID to the `risk-engine` NATS user. That user's `publish.allow` (`infra/nats/tenancy.yaml:230-237`) is exactly:
+
+`risk.portfolio.exposure_recomputed`, `risk.portfolio.measures_computed`, four `dlq.*` subjects, `$JS.API.>`, `$JS.ACK.>`.
+
+The test publishes to `test.mtls.<timestamp>` — **not in that list**. `$JS.API.>` is, which is precisely why `CreateStream` succeeds and `Publish` does not: a NATS permission denial on a request subject yields **no reply**, so a JetStream publish awaiting its `PubAck` presents as `context deadline exceeded` rather than as an authorization error.
+
+**The test cannot be fixed by changing its subject alone.** `risk-engine`'s `publish.allow` and `subscribe.allow` (`:238-244`) have an **empty intersection** — by design, since a service emits its outputs and consumes its inputs and never round-trips its own traffic. A single-identity publish-then-consume round trip is therefore impossible under the production permission model the test exists to assert. It has never passed; the billing halt merely meant nobody was told.
+
+**Three ways out, and one is a trap:**
+
+1. **Two identities** — publish as `risk-engine` on `risk.portfolio.measures_computed`, consume as an identity permitted to subscribe it. Keeps the round-trip guarantee and stays inside the production model. Most work.
+2. **Narrow the assertion** — prove mTLS connect, SVID-to-account mapping, and an accepted publish on a permitted subject; drop the consume half. Honest and small, but the test stops proving delivery.
+3. **Grant `test.mtls.>` in `tenancy.conf` — do not do this.** It weakens the deny-by-default permission model in production config so a test can pass, which inverts what the test is for.
+
 This is the same surface board item **OPS-M2f-c** flagged as unverified (the `nats.conf` `pid_file` addition, extracted verbatim by `test/mtls/up.sh`). That item can stop being a "2-minute check somebody should run" — CI runs it every time, and it fails every time.
 
 ### P1-2 — No versioning exists
