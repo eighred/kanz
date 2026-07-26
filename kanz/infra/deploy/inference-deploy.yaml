@@ -35,6 +35,8 @@ metadata:
   namespace: kanz-services
   labels:
     app.kubernetes.io/part-of: kanz
+imagePullSecrets:
+  - name: ghcr-pull
 ---
 apiVersion: v1
 kind: Service

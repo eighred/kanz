@@ -19,6 +19,8 @@ metadata:
   labels:
     app.kubernetes.io/part-of: kanz
     app.kubernetes.io/component: dr
+imagePullSecrets:
+  - name: ghcr-pull
 ---
 apiVersion: batch/v1
 kind: Job
