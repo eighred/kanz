@@ -13,7 +13,7 @@ metadata:
 spec:
   description: Kanz platform
   sourceRepos:
-    - https://github.com/kanz-eng/kanz.git
+    - https://github.com/eighred/kanz.git
   destinations:
     - { server: "*", namespace: kanz-services }
     - { server: "*", namespace: kanz-messaging }

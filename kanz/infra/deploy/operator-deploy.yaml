@@ -123,7 +123,7 @@ spec:
         seccompProfile: { type: RuntimeDefault }
       containers:
         - name: operator
-          image: ghcr.io/kanz-eng/operator:latest
+          image: ghcr.io/eighred/operator:latest
           args: []
           ports:
             - { name: grpc, containerPort: 9090 }
@@ -176,7 +176,7 @@ spec:
             - name: OPERATOR_SECRET_BACKEND
               value: "kube"
             - name: OPERATOR_PROVISIONER_IMAGE
-              value: ghcr.io/kanz-eng/kanz-provisioner:latest
+              value: ghcr.io/eighred/kanz-provisioner:latest
             # OPERATOR_PROVISIONER_IMAGE_PULL_POLICY, LEFT UNSET (OPS-M2e). The provisioning
             # Job's container spec is built in Go (provision.go), not here, so it has no
             # imagePullPolicy line for tools/rig_dev_patch.py to rewrite — the rig's generic

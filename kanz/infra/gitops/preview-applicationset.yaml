@@ -38,7 +38,7 @@ spec:
     spec:
       project: kanz
       source:
-        repoURL: https://github.com/kanz-eng/kanz.git
+        repoURL: https://github.com/eighred/kanz.git
         # Deploy the PR's code, not main.
         targetRevision: "{{.head_sha}}"
         path: kanz/infra/deploy
@@ -51,8 +51,8 @@ spec:
           # the namePrefix keeps preview objects from colliding cluster-wide.
           namePrefix: "pr-{{.number}}-"
           images:
-            - "ghcr.io/kanz-eng/risk-engine:pr-{{.number}}"
-            - "ghcr.io/kanz-eng/api-gateway:pr-{{.number}}"
+            - "ghcr.io/eighred/risk-engine:pr-{{.number}}"
+            - "ghcr.io/eighred/api-gateway:pr-{{.number}}"
       destination:
         server: https://kubernetes.default.svc
         namespace: "kanz-preview-{{.number}}"

@@ -17,7 +17,7 @@ metadata:
 spec:
   project: default # bootstrap predates the kanz project it installs
   source:
-    repoURL: https://github.com/kanz-eng/kanz.git
+    repoURL: https://github.com/eighred/kanz.git
     targetRevision: main
     path: kanz/infra/gitops
     directory:

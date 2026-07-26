@@ -31,7 +31,7 @@ spec:
       name: Clone repo
       action: fetch:plain
       input:
-        url: https://github.com/kanz-eng/kanz.git
+        url: https://github.com/eighred/kanz.git
 
     # Runs `go run ./tools/scaffold/cmd/scaffold -name <name>` in the checkout —
     # the single source of truth for the skeleton (DEVX-01b).
