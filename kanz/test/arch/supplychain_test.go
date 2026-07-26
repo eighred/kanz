@@ -340,3 +340,108 @@ func TestPrivateImagesHavePullSecrets(t *testing.T) {
 			len(problems), strings.Join(problems, "\n  "))
 	}
 }
+
+// CI PUBLISHED TO ONE NAMESPACE AND THE CLUSTER PULLED FROM ANOTHER.
+//
+// Every manifest, preview.yml, and the sigstore ClusterImagePolicy (both its glob
+// and its keyless subjectRegExp) name ghcr.io/kanz-eng. The two steps that actually
+// PUSH images computed their target from ${{ github.repository_owner }}, which for
+// this repository resolves to "eighred". So a green release.yml would have published
+// images the estate could never pull, under an identity the admission policy would
+// never accept — and nothing would have said so until someone tried.
+//
+// The owner's decision (2026-07-26) is that kanz-eng is canonical. This test is what
+// keeps the two halves from drifting apart again: publish targets and pull references
+// are the same string or the build fails.
+//
+// WHY IT READS POSITIONS, NOT TEXT. A comment at infra/deploy/operator-deploy.yaml
+// quotes the error string "403 Forbidden from ghcr.io/token". A guard that grepped
+// free text would flag that comment as an image reference under an org called
+// "token". So this walks YAML keys that actually carry image references.
+const canonicalImageOrg = "kanz-eng"
+
+// thirdPartyImageOrgs are ghcr namespaces we legitimately consume but do not own.
+// Each entry needs a reason: an unexplained exemption is how a guard rots into
+// a list of things somebody once wanted to skip.
+var thirdPartyImageOrgs = map[string]string{
+	"spiffe":   "SPIRE server/agent, the CSI driver and spiffe-helper — upstream sigstore/spiffe images",
+	"gitleaks": "the secret-scanning image security.yml runs; not built here",
+}
+
+// imageRefKeys are the YAML keys whose values carry an image reference.
+// `IMAGE` is release.yml's job-level env var; `images`/`tags` are
+// docker/metadata-action and build-push-action inputs; `image` is Kubernetes.
+var imageRefKeys = []string{"image", "images", "tags", "IMAGE"}
+
+func TestImageOrgIsCanonical(t *testing.T) {
+	root := moduleRoot(t)
+	repoRoot := filepath.Dir(root)
+
+	// key: value may be "ghcr.io/org/name:tag" or a multi-line block; match each
+	// ghcr.io reference inside the value.
+	keyRe := regexp.MustCompile(`(?m)^\s*(?:-\s*)?(` + strings.Join(imageRefKeys, "|") + `)\s*:\s*(.*)$`)
+	ghcrRe := regexp.MustCompile(`ghcr\.io/([A-Za-z0-9._\-]+|\$\{\{[^}]*\}\})/`)
+
+	var files []string
+	files = append(files, workflowFiles(t, repoRoot)...)
+	err := filepath.WalkDir(filepath.Join(root, "infra"), func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if !d.IsDir() && (strings.HasSuffix(path, ".yaml") || strings.HasSuffix(path, ".yml")) {
+			files = append(files, path)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walking infra/: %v", err)
+	}
+	if len(files) == 0 {
+		t.Fatal("no workflow or infra files found — has the layout changed? " +
+			"(this test would otherwise pass vacuously)")
+	}
+
+	var problems []string
+	checked := 0
+	for _, path := range files {
+		body, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("reading %s: %v", path, err)
+		}
+		rel, _ := filepath.Rel(repoRoot, path)
+		relSlash := filepath.ToSlash(rel)
+		for _, m := range keyRe.FindAllStringSubmatch(string(body), -1) {
+			for _, g := range ghcrRe.FindAllStringSubmatch(m[2], -1) {
+				org := g[1]
+				checked++
+				if org == canonicalImageOrg {
+					continue
+				}
+				if reason, ok := thirdPartyImageOrgs[org]; ok {
+					_ = reason
+					continue
+				}
+				if strings.HasPrefix(org, "${{") {
+					problems = append(problems, fmt.Sprintf(
+						"%s: %s: names a COMPUTED image org %s — it resolves to the GitHub "+
+							"repository owner, not to %q, so images published here cannot be pulled "+
+							"by manifests that name %q", relSlash, m[1], org, canonicalImageOrg, canonicalImageOrg))
+					continue
+				}
+				problems = append(problems, fmt.Sprintf(
+					"%s: %s: image org %q is neither the canonical %q nor a listed third party",
+					relSlash, m[1], org, canonicalImageOrg))
+			}
+		}
+	}
+
+	if checked < 40 {
+		t.Fatalf("only %d ghcr.io image references matched across workflows and infra/ — "+
+			"expected at least 40; the key set or layout changed and this test is now "+
+			"asserting almost nothing", checked)
+	}
+	if len(problems) > 0 {
+		sort.Strings(problems)
+		t.Errorf("image org disagreement (%d):\n  %s", len(problems), strings.Join(problems, "\n  "))
+	}
+}

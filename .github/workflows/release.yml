@@ -28,7 +28,11 @@ jobs:
       matrix:
         service: [risk-engine, schema-registry]
     env:
-      IMAGE: ghcr.io/${{ github.repository_owner }}/${{ matrix.service }}
+      # kanz-eng is canonical and is NOT github.repository_owner: this repository
+      # lives at eighred/kanz, so the computed owner published images no manifest
+      # references and the ClusterImagePolicy's subjectRegExp would never accept.
+      # Guarded by TestImageOrgIsCanonical.
+      IMAGE: ghcr.io/kanz-eng/${{ matrix.service }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
