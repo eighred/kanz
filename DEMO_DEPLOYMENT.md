@@ -150,6 +150,38 @@ sudo k3s ctr images ls -q | grep kanz-eng   # expect 8
 `rig_dev_patch.py` sets `imagePullPolicy: IfNotPresent` on every container, which
 makes these imported images authoritative — nothing reaches for the private ghcr.
 
+### 3b. The registry pull credential (bootstrap — once per cluster)
+
+The platform images are private (`ghcr.io/kanz-eng/*`, 403 to anonymous pulls) and
+every workload's ServiceAccount references a `ghcr-pull` Secret. That Secret cannot
+be created from inside the cluster, because the operator that would create it runs a
+private image itself. So this is a genuine bootstrap step, not a workaround, and it
+is the only one:
+
+```
+for ns in kanz-services kanz-operator kanz-messaging; do
+  kubectl create secret docker-registry ghcr-pull \
+    --namespace "$ns" \
+    --docker-server=ghcr.io \
+    --docker-username="$GHCR_BOT_USER" \
+    --docker-password="$GHCR_BOT_PAT" \
+    --dry-run=client -o yaml | kubectl apply -f -
+done
+```
+
+`GHCR_BOT_PAT` is a machine-account fine-grained PAT scoped to `read:packages` on
+`kanz-eng` only — never a personal token, because the estate's ability to pull images
+must not depend on one person's account surviving.
+
+Rotation is the same command with a new token, and touches no node. If pods start
+reporting `ErrImagePull` on `ghcr.io/kanz-eng/*` across the estate, this Secret
+expiring is the first thing to check.
+
+**On the dev rig this Secret is inert and that is expected.** `tools/rig_dev_patch.py`
+rewrites `imagePullPolicy` to `IfNotPresent` because the rig runs `kind load`ed local
+builds with no registry access, so nothing ever pulls. The patch mutates pod specs in
+place and does not touch `imagePullSecrets`, so the field survives the rewrite unused.
+
 ## 4. SPIRE, the spine, and the data stores
 
 ```bash
