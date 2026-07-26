@@ -8,8 +8,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/nats-io/nats.go"
-	"github.com/nats-io/nats.go/jetstream"
 	"github.com/spiffe/go-spiffe/v2/bundle/x509bundle"
 	"github.com/spiffe/go-spiffe/v2/spiffeid"
 	"github.com/spiffe/go-spiffe/v2/svid/x509svid"
@@ -66,12 +64,14 @@ func (s staticSource) GetX509BundleForTrustDomain(spiffeid.TrustDomain) (*x509bu
 	return s.bundle, nil
 }
 
-// sourceFromDir loads the client SVID + trust bundle the CI step wrote.
-func sourceFromDir(t *testing.T, dir string) transport.Source {
+// sourceFromDir loads one SVID + the trust bundle the CI step wrote. name selects
+// which identity: "client" is risk-engine (the producer) and "consumer" is
+// archiver, both minted by test/mtls/up.sh into the same directory.
+func sourceFromDir(t *testing.T, dir, name string) transport.Source {
 	t.Helper()
-	svid, err := x509svid.Load(filepath.Join(dir, "client.pem"), filepath.Join(dir, "client.key"))
+	svid, err := x509svid.Load(filepath.Join(dir, name+".pem"), filepath.Join(dir, name+".key"))
 	if err != nil {
-		t.Fatalf("load client SVID from %s: %v", dir, err)
+		t.Fatalf("load %s SVID from %s: %v", name, dir, err)
 	}
 	td, err := spiffeid.TrustDomainFromString("kanz.internal")
 	if err != nil {
@@ -93,49 +93,54 @@ func TestNATSMTLS_SPIFFEClientConnectsPublishesConsumes(t *testing.T) {
 	url, certDir := mtlsEnv(t)
 
 	ctx := context.Background()
-	src := sourceFromDir(t, certDir)
-	tlsCfg := transport.ClientTLSConfig(src, transport.AuthorizeMesh())
+
+	// TWO identities, because the production permission model REQUIRES two.
+	// tenants.conf grants risk-engine publish on its own output FACTs and
+	// subscribe on its three inputs — an EMPTY intersection, deliberately: a
+	// service emits what it produces and consumes what it needs, and never
+	// round-trips its own traffic. So a single-identity publish-then-consume is
+	// not merely awkward here, it is FORBIDDEN by the contract this test exists
+	// to prove, and an earlier version of this test failed for exactly that
+	// reason while looking like a broker timeout (see below).
+	//
+	// producer = risk-engine, consumer = archiver. That pairing is a real
+	// service relationship — archiver holds subscribe on risk.portfolio.> and
+	// archives the engine's output — not a fixture invented for the test.
+	producerTLS := transport.ClientTLSConfig(sourceFromDir(t, certDir, "client"), transport.AuthorizeMesh())
+	consumerTLS := transport.ClientTLSConfig(sourceFromDir(t, certDir, "consumer"), transport.AuthorizeMesh())
 
 	suffix := fmt.Sprintf("%d", time.Now().UnixNano())
-	streamName := "TEST_MTLS_" + suffix
-	subject := "test.mtls." + suffix
 
-	// Out-of-band stream provisioning, over the SAME mTLS the client uses: a
-	// plaintext setup connection could not reach this broker either.
-	setupConn, err := nats.Connect(url, nats.Secure(tlsCfg))
-	if err != nil {
-		t.Fatalf("setup connect over mTLS: %v", err)
-	}
-	// Registered BEFORE the stream cleanup so it runs LAST (cleanups run
-	// last-registered-first) — a deferred close here would tear the connection
-	// down before DeleteStream could use it.
-	t.Cleanup(setupConn.Close)
-	setupJS, err := jetstream.New(setupConn)
-	if err != nil {
-		t.Fatalf("setup jetstream: %v", err)
-	}
-	if _, err := setupJS.CreateStream(ctx, jetstream.StreamConfig{
-		Name:      streamName,
-		Subjects:  []string{subject},
-		Storage:   jetstream.MemoryStorage,
-		Retention: jetstream.LimitsPolicy,
-	}); err != nil {
-		t.Fatalf("create stream over mTLS: %v", err)
-	}
-	t.Cleanup(func() { _ = setupJS.DeleteStream(ctx, streamName) })
+	// A REAL production subject on the REAL bootstrap-provisioned stream, and
+	// no stream is created here. infra/nats/bootstrap-job.yaml binds
+	// risk.portfolio.> to the RISK stream, and NATS refuses a second stream
+	// overlapping a bound subject — so a throwaway stream is not available. That
+	// is a better test anyway: it exercises the topology production runs.
+	//
+	// WHY THE OLD SUBJECT FAILED, recorded so it is not reintroduced: this used
+	// to publish to test.mtls.<ts>, which appears in no account's publish
+	// allow-list. $JS.API.> IS allowed, so stream creation succeeded and the
+	// publish did not — and because a NATS permission denial on a request
+	// subject returns NO REPLY, a JetStream publish awaiting its PubAck
+	// presented as "context deadline exceeded" rather than as an authorization
+	// error. The fix is to speak subjects the identities actually hold, never to
+	// widen tenants.conf so a test can pass.
+	const subject = "risk.portfolio.measures_computed"
 
-	// The seam under test: DialNATS with a SPIFFE-derived TLSConfig.
-	client, err := bus.DialNATS(ctx, bus.NATSConfig{URL: url, Name: "bus-mtls-test", TLSConfig: tlsCfg})
+	// Consumer first, so its durable exists before anything is published.
+	consumerClient, err := bus.DialNATS(ctx, bus.NATSConfig{URL: url, Name: "bus-mtls-consumer", TLSConfig: consumerTLS})
 	if err != nil {
-		t.Fatalf("DialNATS with SPIFFE TLSConfig: %v — the production broker refused a client that should be authorized", err)
+		t.Fatalf("DialNATS as archiver: %v — the production broker refused a consumer that should be authorized", err)
 	}
-	t.Cleanup(func() { _ = client.Close() })
+	t.Cleanup(func() { _ = consumerClient.Close() })
 
-	received := make(chan bus.Message, 1)
+	// Buffered well above 1: the RISK stream is SHARED production topology, so
+	// unrelated traffic can arrive and must not wedge the handler or fail the run.
+	received := make(chan bus.Message, 64)
 	subCtx, cancel := context.WithCancel(ctx)
 	t.Cleanup(cancel)
 	go func() {
-		_ = client.Subscribe(subCtx, subject, "mtls-test-group", func(_ context.Context, m bus.Message) error {
+		_ = consumerClient.Subscribe(subCtx, subject, "mtls-test-"+suffix, func(_ context.Context, m bus.Message) error {
 			select {
 			case received <- m:
 			default:
@@ -143,21 +148,35 @@ func TestNATSMTLS_SPIFFEClientConnectsPublishesConsumes(t *testing.T) {
 			return nil
 		})
 	}()
-	// Let the durable bind before publishing.
+	// PERMITTED sleep, and only this one: a quiet period to let the durable bind.
+	// There is no bind-completed event on this seam to wait for, and publishing
+	// into an unbound durable would prove nothing about delivery.
 	time.Sleep(500 * time.Millisecond)
 
+	producerClient, err := bus.DialNATS(ctx, bus.NATSConfig{URL: url, Name: "bus-mtls-producer", TLSConfig: producerTLS})
+	if err != nil {
+		t.Fatalf("DialNATS as risk-engine: %v — the production broker refused a producer that should be authorized", err)
+	}
+	t.Cleanup(func() { _ = producerClient.Close() })
+
 	body := []byte("mtls-round-trip-" + suffix)
-	if err := client.Publish(ctx, bus.Message{Subject: subject, Body: body}); err != nil {
-		t.Fatalf("publish over mTLS: %v", err)
+	if err := producerClient.Publish(ctx, bus.Message{Subject: subject, Body: body}); err != nil {
+		t.Fatalf("publish over mTLS as risk-engine: %v", err)
 	}
 
-	select {
-	case m := <-received:
-		if string(m.Body) != string(body) {
-			t.Fatalf("body = %q, want %q", m.Body, body)
+	// Drain until OUR message arrives. Matching on the unique body rather than
+	// taking the first delivery is what makes this safe on a shared stream.
+	deadline := time.After(15 * time.Second)
+	for {
+		select {
+		case m := <-received:
+			if string(m.Body) == string(body) {
+				return
+			}
+		case <-deadline:
+			t.Fatalf("published %q as risk-engine but archiver never received it within 15s — "+
+				"mTLS and authorization succeeded, so this is a DELIVERY failure", body)
 		}
-	case <-time.After(10 * time.Second):
-		t.Fatal("no message received over mTLS within 10s")
 	}
 }
 
