@@ -28,10 +28,12 @@ jobs:
       matrix:
         service: [risk-engine, schema-registry]
     env:
-      # kanz-eng is canonical and is NOT github.repository_owner: this repository
-      # lives at eighred/kanz, so the computed owner published images no manifest
-      # references and the ClusterImagePolicy's subjectRegExp would never accept.
-      # Guarded by TestImageOrgIsCanonical.
+      # eighred is canonical, written as a LITERAL rather than as
+      # ${{ github.repository_owner }}. It equals the owner today, but a computed
+      # value is exactly what let the publish side and the pull side diverge
+      # silently before REL-P0a — so if this repository ever moves, the literal
+      # makes TestImageOrgIsCanonical fail loudly and forces the manifests, the
+      # admission policy and the workflows to move as one reviewed change.
       IMAGE: ghcr.io/eighred/${{ matrix.service }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
