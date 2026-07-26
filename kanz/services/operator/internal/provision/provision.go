@@ -61,13 +61,25 @@ const (
 // credential that admits the fleet onto a member of the fleet it admits. The blast
 // radius of one compromised worker stops being that worker.
 //
-// The second reason is that an unpinned Job does not reliably run at all. The estate
-// holds no registry credentials (ghcr is private; anonymous pulls 403) and nothing in
-// infra/ carries imagePullSecrets, so a Job scheduled onto a node that has not
-// pre-loaded the kanz-provisioner image dies in ErrImagePull. Observed live: a probe
-// Job landed on a freshly joined worker, 403'd, and reported a healthy host
-// unreachable after the full 60s wait — a false verdict about someone's node, caused
-// entirely by where the pod ran.
+// THE SECOND REASON IS RETIRED, AND IS RECORDED HERE BECAUSE ITS ABSENCE IS THE
+// POINT. Until OPS-M2f-b this Job also had to be pinned because the estate held no
+// registry credentials at all: ghcr is private, nothing in infra/ carried
+// imagePullSecrets, and a Job landing on a node that had not pre-loaded the
+// kanz-provisioner image died in ErrImagePull. Observed live — a probe Job landed on
+// a freshly joined worker, 403'd, and reported a healthy host unreachable after the
+// full 60s wait, a false verdict about someone's node caused entirely by where the
+// pod ran. That reason is gone: the kanz-node-provisioner ServiceAccount now carries
+// the ghcr-pull credential, and this Job inherits it (pinned by
+// TestAddNodeJobRunsUnderProvisionerServiceAccount).
+//
+// Credential confinement above is what still holds THE PROVISIONING JOB'S pin —
+// jobSpec mounts the bootstrap-key Secret, so the first reason still applies to it in
+// full. It does not apply to THE PROBE JOB. probeJobSpec carries no credential of any
+// kind (see its own comment), so the registry reason was the only thing that ever
+// justified pinning it, and that reason is now gone. Nothing in this file currently
+// justifies the probe's pin. It is retained anyway, unchanged, because retiring a
+// placement is OPS-M2f-a's subject and this branch is a credential change only — see
+// the comment at probeJobSpec's NodeSelector for what that means and does not mean.
 //
 // The toleration grants nothing on THIS cluster: the k3s control-plane node carries no
 // taints today, so the selector alone places both pods. It is carried anyway for the
@@ -507,10 +519,18 @@ func (p *Provisioner) probeJobSpec(name, ip string, port int32) *batchv1.Job {
 				Spec: corev1.PodSpec{
 					ServiceAccountName: "kanz-node-provisioner",
 					RestartPolicy:      corev1.RestartPolicyNever,
-					// Identical placement to jobSpec, from the same shared values. This pod
-					// carries no credential, so the reason here is the second one in
-					// controlPlaneOnly's comment: a probe that lands on a node which cannot
-					// pull the image reports a healthy host unreachable.
+					// Identical placement to jobSpec, from the same shared values, but this pod
+					// carries no credential of any kind — no bootstrap-key Secret, no
+					// imagePullSecrets of its own — so credential confinement never justified
+					// pinning it. Its original and only justification was the registry one
+					// recorded in controlPlaneOnly's comment: before OPS-M2f-b the estate held
+					// no registry credential, so a probe landing on a node without the
+					// pre-loaded image died in ErrImagePull and reported a healthy host
+					// unreachable. That reason is now retired — the ServiceAccount carries the
+					// ghcr-pull credential and this pod inherits it too, whether pinned here or
+					// not. So this pin is not earning anything today. It stays only because
+					// removing it is OPS-M2f-a's job, not this branch's; do not read this
+					// selector as still justified.
 					NodeSelector: controlPlaneOnly,
 					Tolerations:  tolerateControlPlane,
 					SecurityContext: &corev1.PodSecurityContext{

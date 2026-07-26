@@ -9,6 +9,8 @@ metadata:
   name: operator
   namespace: kanz-operator
   labels: { app.kubernetes.io/part-of: kanz }
+imagePullSecrets:
+  - name: ghcr-pull
 ---
 # nodes are cluster-scoped, so node read access MUST be a ClusterRole (a
 # namespaced Role cannot grant it). Least privilege: get/list on nodes, nothing
@@ -275,6 +277,8 @@ metadata:
   name: kanz-node-provisioner
   namespace: kanz-operator
   labels: { app.kubernetes.io/part-of: kanz }
+imagePullSecrets:
+  - name: ghcr-pull
 automountServiceAccountToken: false
 ---
 # Deny-by-default ingress to the operator pod, closing the F0+S1 residual gap: the

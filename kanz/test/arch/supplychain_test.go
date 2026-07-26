@@ -1,6 +1,9 @@
 package arch
 
 import (
+	"errors"
+	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -8,6 +11,8 @@ import (
 	"sort"
 	"strings"
 	"testing"
+
+	"gopkg.in/yaml.v3"
 )
 
 // A PIN NOTHING ENFORCES IS NOT A PIN.
@@ -161,4 +166,177 @@ func workflowFiles(t *testing.T, repoRoot string) []string {
 	}
 	sort.Strings(files)
 	return files
+}
+
+// A PRIVATE REGISTRY WITH NO CREDENTIAL IS A NODE THAT CANNOT RUN ANYTHING.
+//
+// Every platform image is ghcr.io/kanz-eng/*, and that repository is private
+// (anonymous pulls 403). A node joined through the TUI holds none of those
+// images, so a workload scheduled there dies in ErrImagePull. That was observed
+// twice during OPS-M2e — a probe Job and the operator's own rollout — and was
+// worked around by hand with ctr export/scp/ctr import across ten images.
+//
+// OPS-M2f-b attaches a `ghcr-pull` dockerconfigjson Secret at the ServiceAccount
+// rather than the pod spec, so the two Go-built provisioning Jobs inherit it via
+// ServiceAccountName with no code change. This test is the enforcement: remove
+// the attachment from any ServiceAccount that owns a pod running a private image
+// and the build fails, instead of the removal surfacing weeks later as an
+// ErrImagePull nobody connects back to this decision.
+//
+// NOTE ON automountServiceAccountToken. kanz-node-provisioner sets it false
+// (TestProvisionerServiceAccountHasNoToken). That governs the projected API
+// token only; kubelet reads imagePullSecrets off the ServiceAccount regardless.
+// The two are not in conflict.
+const pullSecretName = "ghcr-pull"
+
+// privateImagePrefix is the registry path that requires the credential.
+const privateImagePrefix = "ghcr.io/kanz-eng/"
+
+// workloadFloor is a backstop, not the primary defense. The structural filter
+// below (a pod template carrying a private image) is what selects workloads; if
+// a manifest is reshaped so it stops matching, the count drops and this floor
+// catches it. 25 is the number of pod-bearing manifests at the time of writing.
+const workloadFloor = 25
+
+type pullSecretDoc struct {
+	Kind     string `yaml:"kind"`
+	Metadata struct {
+		Name      string `yaml:"name"`
+		Namespace string `yaml:"namespace"`
+	} `yaml:"metadata"`
+	// ServiceAccount carries imagePullSecrets at the top level.
+	ImagePullSecrets []struct {
+		Name string `yaml:"name"`
+	} `yaml:"imagePullSecrets"`
+	// Deployment / Job / Rollout / StatefulSet / DaemonSet all nest the pod
+	// template at spec.template.spec, so one shape reads all of them.
+	Spec struct {
+		Template struct {
+			Spec struct {
+				ServiceAccountName string `yaml:"serviceAccountName"`
+				Containers         []struct {
+					Image string `yaml:"image"`
+				} `yaml:"containers"`
+				InitContainers []struct {
+					Image string `yaml:"image"`
+				} `yaml:"initContainers"`
+			} `yaml:"spec"`
+		} `yaml:"template"`
+	} `yaml:"spec"`
+}
+
+func TestPrivateImagesHavePullSecrets(t *testing.T) {
+	root := moduleRoot(t)
+	infra := filepath.Join(root, "infra")
+
+	// key: namespace/name
+	saHasPull := map[string]bool{}
+	saSeen := map[string]bool{}
+	type workload struct{ file, ns, sa, kind, name string }
+	var workloads []workload
+	var parseErrors []string
+
+	err := filepath.WalkDir(infra, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() || (!strings.HasSuffix(path, ".yaml") && !strings.HasSuffix(path, ".yml")) {
+			return nil
+		}
+		body, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		rel, _ := filepath.Rel(root, path)
+		relSlash := filepath.ToSlash(rel)
+		dec := yaml.NewDecoder(strings.NewReader(string(body)))
+		for {
+			var doc pullSecretDoc
+			if err := dec.Decode(&doc); err != nil {
+				if errors.Is(err, io.EOF) {
+					break
+				}
+				// FAIL LOUD, never skip. A decoder that silently stops on the first
+				// unreadable document would stop reading the REST of that file too,
+				// and this test would then pass by having looked at less than it
+				// claims. If some file legitimately cannot decode into this shape,
+				// add it to a named exemption with a stated reason — do not widen
+				// this catch.
+				parseErrors = append(parseErrors, fmt.Sprintf("%s: %v", relSlash, err))
+				break
+			}
+			if doc.Kind == "ServiceAccount" {
+				key := doc.Metadata.Namespace + "/" + doc.Metadata.Name
+				saSeen[key] = true
+				for _, s := range doc.ImagePullSecrets {
+					if s.Name == pullSecretName {
+						saHasPull[key] = true
+					}
+				}
+				continue
+			}
+			ps := doc.Spec.Template.Spec
+			private := false
+			for _, c := range ps.Containers {
+				if strings.Contains(c.Image, privateImagePrefix) {
+					private = true
+				}
+			}
+			for _, c := range ps.InitContainers {
+				if strings.Contains(c.Image, privateImagePrefix) {
+					private = true
+				}
+			}
+			if !private {
+				continue
+			}
+			workloads = append(workloads, workload{
+				file: relSlash, ns: doc.Metadata.Namespace,
+				sa: ps.ServiceAccountName, kind: doc.Kind, name: doc.Metadata.Name,
+			})
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walking infra/: %v", err)
+	}
+	if len(parseErrors) > 0 {
+		sort.Strings(parseErrors)
+		t.Fatalf("manifests under infra/ failed to decode (%d) — this test cannot assert "+
+			"anything about them:\n  %s", len(parseErrors), strings.Join(parseErrors, "\n  "))
+	}
+
+	if len(workloads) < workloadFloor {
+		t.Fatalf("found %d pod-bearing manifests carrying a %s image, want at least %d — "+
+			"the manifest shape changed and this test is now asserting almost nothing",
+			len(workloads), privateImagePrefix, workloadFloor)
+	}
+
+	var problems []string
+	for _, w := range workloads {
+		if w.sa == "" {
+			problems = append(problems, fmt.Sprintf(
+				"%s: %s/%s runs a private image with NO serviceAccountName — it would use "+
+					"the namespace default SA, which carries no pull secret", w.file, w.kind, w.name))
+			continue
+		}
+		key := w.ns + "/" + w.sa
+		if !saSeen[key] {
+			problems = append(problems, fmt.Sprintf(
+				"%s: %s/%s names ServiceAccount %q in namespace %q, but no such ServiceAccount "+
+					"is declared anywhere under infra/", w.file, w.kind, w.name, w.sa, w.ns))
+			continue
+		}
+		if !saHasPull[key] {
+			problems = append(problems, fmt.Sprintf(
+				"%s: %s/%s runs a private image under ServiceAccount %q (namespace %q), which does "+
+					"not carry imagePullSecrets: [{name: %s}] — this pod cannot pull on any node that "+
+					"has not pre-loaded the image by hand", w.file, w.kind, w.name, w.sa, w.ns, pullSecretName))
+		}
+	}
+	if len(problems) > 0 {
+		sort.Strings(problems)
+		t.Errorf("private images without a pull credential (%d):\n  %s",
+			len(problems), strings.Join(problems, "\n  "))
+	}
 }

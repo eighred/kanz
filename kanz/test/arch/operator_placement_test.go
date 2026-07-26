@@ -167,9 +167,9 @@ var provisionPodSpecs = []struct {
 		"the cluster-admission token. Unpinned it runs on an arbitrary worker, possibly one just " +
 		"provisioned from the Add Node form, which copies the credential that admits the fleet " +
 		"onto a member of that fleet"},
-	{"probeJobSpec", "a probe that lands on a node which cannot pull kanz-provisioner (ghcr is " +
-		"private and nothing in infra/ carries imagePullSecrets) dies in ErrImagePull and reports " +
-		"a healthy host unreachable after the full 60s wait — observed live"},
+	{"probeJobSpec", "where the probe Job may run is OPS-M2f-a's open question, not yet decided; " +
+		"this pin holds the current placement steady against unreviewed drift until that decision " +
+		"is made, not because of any registry credential gap — OPS-M2f-b already closed that one"},
 }
 
 // TestProvisioningJobsArePinnedToControlPlane is the same rule as the Deployment guard

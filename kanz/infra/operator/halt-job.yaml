@@ -41,6 +41,8 @@ metadata:
   namespace: kanz-operator
   labels:
     app.kubernetes.io/part-of: kanz
+imagePullSecrets:
+  - name: ghcr-pull
 ---
 # The brake reaches the broker and NOTHING else. It publishes one FACT on one
 # subject; it has no reason to talk to any service, and a compromised operator
