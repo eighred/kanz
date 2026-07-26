@@ -53,7 +53,7 @@ jobs:
           context: .
           file: kanz/services/${{ matrix.service }}/Dockerfile
           push: true
-          tags: ghcr.io/kanz-eng/${{ matrix.service }}:pr-${{ github.event.pull_request.number }}
+          tags: ghcr.io/eighred/${{ matrix.service }}:pr-${{ github.event.pull_request.number }}
 
   comment:
     needs: build-images

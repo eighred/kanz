@@ -10,7 +10,7 @@ passes everything is worse than none.
 
 ```sh
 sh kanz/infra/security/test/gitleaks-planted-secret.sh
-sh kanz/infra/security/test/verify-admission.sh ghcr.io/kanz-eng/risk-engine@sha256:<digest>
+sh kanz/infra/security/test/verify-admission.sh ghcr.io/eighred/risk-engine@sha256:<digest>
 ```
 
 ## Why these two

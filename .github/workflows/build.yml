@@ -191,7 +191,7 @@ jobs:
         with:
           # Canonical org, not the computed owner — see release.yml's IMAGE comment.
           # Guarded by TestImageOrgIsCanonical.
-          images: ghcr.io/kanz-eng/${{ matrix.service }}
+          images: ghcr.io/eighred/${{ matrix.service }}
           tags: |
             type=sha
             type=ref,event=branch

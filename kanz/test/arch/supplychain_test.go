@@ -189,8 +189,13 @@ func workflowFiles(t *testing.T, repoRoot string) []string {
 // The two are not in conflict.
 const pullSecretName = "ghcr-pull"
 
-// privateImagePrefix is the registry path that requires the credential.
-const privateImagePrefix = "ghcr.io/kanz-eng/"
+// privateImagePrefix is the registry path that requires the credential. It is
+// DERIVED from canonicalImageOrg rather than written out again: when the org
+// changed under REL-P0a, a second hardcoded copy of it here went stale and this
+// guard failed with "found 0 pod-bearing manifests" — correctly, because its
+// floor caught the drift, but the two constants should never have been able to
+// disagree in the first place.
+const privateImagePrefix = "ghcr.io/" + canonicalImageOrg + "/"
 
 // workloadFloor is a backstop, not the primary defense. The structural filter
 // below (a pod template carrying a private image) is what selects workloads; if
@@ -387,7 +392,22 @@ func TestPrivateImagesHavePullSecrets(t *testing.T) {
 // block form — so image-reference values are scanned line-by-line and, when a
 // key's inline value is a bare block-scalar indicator (`|`, `|-`, `>`, etc.),
 // the following more-indented lines are pulled in as that key's value too.
-const canonicalImageOrg = "kanz-eng"
+// canonicalImageOrg is "eighred" because that is where this repository actually
+// lives, and it is the only namespace GITHUB_TOKEN can publish into.
+//
+// It was "kanz-eng" until 2026-07-27, which broke every push to main: all 25
+// images failed at the push step because GITHUB_TOKEN is scoped to the repo's
+// owner and cannot write another org's packages. The investigation found that
+// **kanz-eng does not exist on GitHub at all** — so the value named a namespace
+// nothing could ever publish to, while ghcr.io/eighred/* already held working
+// images. Owner decision (REL-P0a): adopt eighred as canonical.
+//
+// This is deliberately a LITERAL and not ${{ github.repository_owner }}. A
+// computed owner is what let the publish side and the pull side disagree
+// silently in the first place; a literal means that if the repository ever does
+// move to a kanz-eng org, this guard fails loudly and forces the manifests, the
+// admission policy and the workflows to be updated as one reviewed change.
+const canonicalImageOrg = "eighred"
 
 // thirdPartyImageOrgs are ghcr namespaces we legitimately consume but do not
 // own. Each is a set entry (not a map value) because the reason is documentary

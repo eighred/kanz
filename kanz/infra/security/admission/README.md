@@ -11,7 +11,7 @@ deployed even if it reaches the registry.
 
 No signing key exists to store, leak, or rotate. The signature carries a
 short-lived Fulcio certificate bound to the **workflow's OIDC identity**
-(`https://github.com/kanz-eng/kanz/.github/workflows/release.yml@refs/tags/v*`),
+(`https://github.com/eighred/kanz/.github/workflows/release.yml@refs/tags/v*`),
 recorded in the Rekor transparency log. Verification pins both the issuer
 (GitHub Actions) and that exact subject — the same "identity, not a stored
 secret" stance as SEC-01 (SPIRE SVIDs, Vault SPIFFE auth).
@@ -19,7 +19,7 @@ secret" stance as SEC-01 (SPIRE SVIDs, Vault SPIFFE auth).
 ## What's enforced
 
 `cluster-image-policy.yaml` (`ClusterImagePolicy`) requires, for every
-`ghcr.io/kanz-eng/**` image:
+`ghcr.io/eighred/**` image:
 
 1. a cosign signature from the release-workflow identity above,
 2. an SPDX SBOM **attestation** (not just a signature) — an image with no
@@ -59,9 +59,9 @@ The webhook only evaluates pods in namespaces carrying the
 ## Verify a release locally
 
 ```sh
-cosign verify ghcr.io/kanz-eng/risk-engine@<digest> \
+cosign verify ghcr.io/eighred/risk-engine@<digest> \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
-  --certificate-identity-regexp '^https://github.com/kanz-eng/kanz/.github/workflows/release.yml@refs/tags/v.*'
+  --certificate-identity-regexp '^https://github.com/eighred/kanz/.github/workflows/release.yml@refs/tags/v.*'
 ```
 
 ## Follow-ups

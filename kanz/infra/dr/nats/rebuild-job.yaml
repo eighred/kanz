@@ -45,7 +45,7 @@ spec:
         - name: nats-rebuild
           # Built from kanz/tools/natsrebuild/cmd/nats-rebuild; add it to the
           # CICD-01c image matrix + a distroless Dockerfile (follow-up).
-          image: ghcr.io/kanz-eng/nats-rebuild:latest
+          image: ghcr.io/eighred/nats-rebuild:latest
           env:
             - { name: NATS_REBUILD_KAFKA_BROKERS, value: "kafka:9092" }
             - { name: NATS_REBUILD_NATS_URL, value: "nats://nats:4222" }

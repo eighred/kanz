@@ -10,7 +10,7 @@
 #     which is exactly the admission rejection.
 #
 # Needs cosign + registry network access; run against a published digest:
-#   sh verify-admission.sh ghcr.io/kanz-eng/risk-engine@sha256:<digest>
+#   sh verify-admission.sh ghcr.io/eighred/risk-engine@sha256:<digest>
 #
 # The live enforcement is the cluster webhook (mode: enforce, fail-closed); this
 # is the developer/CI smoke that the policy identity + required attestations are
@@ -19,7 +19,7 @@ set -eu
 
 IMAGE="${1:?usage: verify-admission.sh <image@sha256:digest>}"
 ISSUER="https://token.actions.githubusercontent.com"
-IDENTITY='^https://github.com/kanz-eng/kanz/.github/workflows/release.yml@refs/tags/v.*'
+IDENTITY='^https://github.com/eighred/kanz/.github/workflows/release.yml@refs/tags/v.*'
 
 if ! command -v cosign >/dev/null 2>&1; then
   echo "SKIP: cosign not installed (https://docs.sigstore.dev/cosign/installation)" >&2

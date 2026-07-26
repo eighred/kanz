@@ -21,7 +21,7 @@ metadata:
   annotations:
     backstage.io/techdocs-ref: dir:../../docs/runbooks
   links:
-    - { url: https://github.com/kanz-eng/kanz/tree/main/kanz/services/risk-engine, title: source }
+    - { url: https://github.com/eighred/kanz/tree/main/kanz/services/risk-engine, title: source }
 spec:
   type: service
   lifecycle: production

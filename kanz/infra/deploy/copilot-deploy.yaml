@@ -68,7 +68,7 @@ spec:
               app: copilot
       containers:
         - name: copilot
-          image: ghcr.io/kanz-eng/copilot:latest
+          image: ghcr.io/eighred/copilot:latest
           ports:
             - { containerPort: 8080, name: http }
           env:

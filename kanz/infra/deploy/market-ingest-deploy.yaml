@@ -90,7 +90,7 @@ spec:
         - name: market-ingest
           # Pinned to a cosign-signed digest by the GitOps bump (CICD-01d). One
           # image, no variants — the venue build tags are gone.
-          image: ghcr.io/kanz-eng/market-ingest:latest
+          image: ghcr.io/eighred/market-ingest:latest
           ports:
             - { containerPort: 8091, name: http }
           env:

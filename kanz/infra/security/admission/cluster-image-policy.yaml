@@ -24,7 +24,7 @@ spec:
   # Scope to Kanz images only; everything else falls to other policies / the
   # default. Glob over both services (and any future ones under the org).
   images:
-    - glob: "ghcr.io/kanz-eng/**"
+    - glob: "ghcr.io/eighred/**"
   authorities:
     - name: release-workflow-keyless
       keyless:
@@ -33,7 +33,7 @@ spec:
         identities:
           - issuer: https://token.actions.githubusercontent.com
             # Only the release workflow, only on a version tag.
-            subjectRegExp: "^https://github.com/kanz-eng/kanz/.github/workflows/release.yml@refs/tags/v.*$"
+            subjectRegExp: "^https://github.com/eighred/kanz/.github/workflows/release.yml@refs/tags/v.*$"
         ctlog:
           url: https://rekor.sigstore.dev
       # Require BOTH attestations the release workflow attaches, not just the
