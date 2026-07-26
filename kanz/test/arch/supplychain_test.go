@@ -360,15 +360,21 @@ func TestPrivateImagesHavePullSecrets(t *testing.T) {
 // free text would flag that comment as an image reference under an org called
 // "token". So this walks YAML keys that actually carry image references.
 //
-// TWO INDEPENDENT CHECKS, TWO INDEPENDENT FLOORS. Image references (the
-// `imageRefKeys` below, including the ClusterImagePolicy's `glob`) and the
-// signing identity (`subjectRegExp`) are unrelated YAML shapes — a `glob:
-// "ghcr.io/org/**"` list entry and a `subjectRegExp:
-// "^https://github.com/org/repo/..."` string share no key name and no value
-// format. Counting them into one pooled total would let a coverage regression
-// in the smaller check (subjectRegExp has exactly one occurrence in this repo)
-// hide behind padding from the larger one (manifest `image:` references alone
-// clear any combined floor). Each gets its own non-vacuity floor instead.
+// THREE INDEPENDENT CHECKS, THREE INDEPENDENT FLOORS. Manifest/workflow image
+// references (the `imageRefKeys` below), the ClusterImagePolicy's `glob`, and
+// the signing identity (`subjectRegExp`) are three unrelated YAML shapes — an
+// `image: ghcr.io/org/svc` field, a `glob: "ghcr.io/org/**"` list entry, and a
+// `subjectRegExp: "^https://github.com/org/repo/..."` string share no key name
+// and no value format. Counting them into one pooled total would let a
+// coverage regression in either of the smaller checks hide behind padding
+// from the largest one: manifest `image:` references alone clear 40
+// comfortably (82 occurrences across 45 files at time of writing), while
+// `glob` and `subjectRegExp` each have exactly ONE occurrence in this repo —
+// if `cluster-image-policy.yaml` were deleted, or `glob`/`subjectRegExp` were
+// renamed by a future sigstore API, the pooled count would barely move and
+// the guard would still pass. Each check gets its own non-vacuity floor
+// instead, so losing either one fails loudly rather than hiding in the noise
+// of the other two.
 //
 // BLOCK SCALARS. docker/metadata-action documents a multi-line form,
 // `images: |` followed by indented ghcr.io lines. Both current workflows use
@@ -393,17 +399,24 @@ var thirdPartyImageOrgs = map[string]struct{}{
 
 // imageRefKeys are the YAML keys whose values carry an image reference.
 // `IMAGE` is release.yml's job-level env var; `images`/`tags` are
-// docker/metadata-action and build-push-action inputs; `image` is Kubernetes;
-// `glob` is the sigstore ClusterImagePolicy's `images[].glob` image-match
-// pattern.
-var imageRefKeys = []string{"image", "images", "tags", "IMAGE", "glob"}
+// docker/metadata-action and build-push-action inputs; `image` is Kubernetes.
+// `glob` — the sigstore ClusterImagePolicy's `images[].glob` image-match
+// pattern — deliberately is NOT in this list: it is checked and floored
+// separately below (see globLineRe / globChecked / globFloor), because it is
+// the one occurrence in the whole repo and would otherwise hide, uncounted
+// for coverage purposes, inside a pool the other keys fill on their own.
+var imageRefKeys = []string{"image", "images", "tags", "IMAGE"}
 
-// imageRefFloor and subjectRegExpFloor are non-vacuity backstops for the two
-// independent checks TestImageOrgIsCanonical runs (see the test's doc comment
-// for why they are not pooled into one count). If either check's real match
-// count ever drops below its floor, the key set, file layout, or value shape
-// changed and the check is silently asserting almost nothing.
+// imageRefFloor, globFloor and subjectRegExpFloor are non-vacuity backstops
+// for the three independent checks TestImageOrgIsCanonical runs (see the
+// test's doc comment for why they are not pooled into one count). If any
+// check's real match count ever drops below its floor, the key set, file
+// layout, or value shape changed and that check is silently asserting almost
+// nothing. globFloor and subjectRegExpFloor are 1, not higher, because each
+// field has exactly one legitimate occurrence in this repo today — the point
+// of a floor of 1 is that zero must fail loudly, not that many are expected.
 const imageRefFloor = 40
+const globFloor = 1
 const subjectRegExpFloor = 1
 
 // blockScalarRe matches a bare YAML block-scalar indicator as a key's entire
@@ -422,12 +435,43 @@ func TestImageOrgIsCanonical(t *testing.T) {
 	keyLineRe := regexp.MustCompile(`^(\s*)(?:-\s*)?(` + strings.Join(imageRefKeys, "|") + `)\s*:\s*(.*)$`)
 	ghcrRe := regexp.MustCompile(`ghcr\.io/([A-Za-z0-9._\-]+|\$\{\{[^}]*\}\})/`)
 
+	// globLineRe matches the ClusterImagePolicy's `images[].glob` image-match
+	// pattern in isolation from imageRefKeys — see globFloor for why it has its
+	// own counter instead of sharing imageRefsChecked.
+	globLineRe := regexp.MustCompile(`^(\s*)(?:-\s*)?(glob)\s*:\s*(.*)$`)
+
 	// subjectLineRe matches the ClusterImagePolicy's keyless signing identity.
 	// Its value is a regex-as-a-string carrying a
 	// "https://github.com/<org>/<repo>/..." subject, not a ghcr reference, so it
 	// needs its own key pattern and its own org extractor.
 	subjectLineRe := regexp.MustCompile(`^\s*subjectRegExp\s*:\s*(.*)$`)
 	subjectOrgRe := regexp.MustCompile(`https://github\.com/([A-Za-z0-9._\-]+)/`)
+
+	// expandBlockValue returns a key's full value text: the inline value as-is,
+	// or — when the inline value is only a block-scalar indicator (`|`, `>`,
+	// etc.) — the following more-indented lines joined, since the real content
+	// lives there instead. Shared by the imageRefKeys and glob line handlers so
+	// both benefit from the same BLOCK SCALARS handling described in this
+	// test's doc comment.
+	expandBlockValue := func(lines []string, i, indent int, value string) string {
+		if !blockScalarRe.MatchString(value) {
+			return value
+		}
+		var block []string
+		for j := i + 1; j < len(lines); j++ {
+			next := lines[j]
+			if strings.TrimSpace(next) == "" {
+				block = append(block, next)
+				continue
+			}
+			nextIndent := len(next) - len(strings.TrimLeft(next, " "))
+			if nextIndent <= indent {
+				break
+			}
+			block = append(block, next)
+		}
+		return strings.Join(block, "\n")
+	}
 
 	var files []string
 	files = append(files, workflowFiles(t, repoRoot)...)
@@ -448,7 +492,12 @@ func TestImageOrgIsCanonical(t *testing.T) {
 			"(this test would otherwise pass vacuously)")
 	}
 
-	checkOrg := func(problems *[]string, relSlash, fieldDesc, org string) {
+	// checkOrg is shared by all three checks. isSigningIdentity distinguishes
+	// subjectRegExp from the image-reference fields: that field carries a
+	// GitHub Actions OIDC signing identity ("who is trusted to sign"), not a
+	// container image reference, and a message that called it an image would
+	// misdirect whoever has to act on it.
+	checkOrg := func(problems *[]string, relSlash, fieldDesc, org string, isSigningIdentity bool) {
 		if org == canonicalImageOrg {
 			return
 		}
@@ -456,10 +505,27 @@ func TestImageOrgIsCanonical(t *testing.T) {
 			return
 		}
 		if strings.HasPrefix(org, "${{") {
+			if isSigningIdentity {
+				*problems = append(*problems, fmt.Sprintf(
+					"%s: %s: names a COMPUTED signing-identity org %s — the OIDC subject this "+
+						"authorizes would resolve to the GitHub repository owner at sign time, not to "+
+						"%q, so a genuine signature from this repo would still fail verification against %q",
+					relSlash, fieldDesc, org, canonicalImageOrg, canonicalImageOrg))
+				return
+			}
 			*problems = append(*problems, fmt.Sprintf(
 				"%s: %s: names a COMPUTED image org %s — it resolves to the GitHub "+
 					"repository owner, not to %q, so images published here cannot be pulled "+
 					"by manifests that name %q", relSlash, fieldDesc, org, canonicalImageOrg, canonicalImageOrg))
+			return
+		}
+		if isSigningIdentity {
+			*problems = append(*problems, fmt.Sprintf(
+				"%s: %s: signing-identity org %q is neither the canonical %q nor a listed third "+
+					"party — this field is the GitHub Actions OIDC subject the ClusterImagePolicy trusts "+
+					"to sign, not a container image reference, so a mismatch here means a genuine "+
+					"signature from the real release workflow would fail verification",
+				relSlash, fieldDesc, org, canonicalImageOrg))
 			return
 		}
 		*problems = append(*problems, fmt.Sprintf(
@@ -469,6 +535,7 @@ func TestImageOrgIsCanonical(t *testing.T) {
 
 	var problems []string
 	imageRefsChecked := 0
+	globChecked := 0
 	subjectRegExpsChecked := 0
 
 	for _, path := range files {
@@ -490,7 +557,17 @@ func TestImageOrgIsCanonical(t *testing.T) {
 			if m := subjectLineRe.FindStringSubmatch(line); m != nil {
 				for _, g := range subjectOrgRe.FindAllStringSubmatch(m[1], -1) {
 					subjectRegExpsChecked++
-					checkOrg(&problems, relSlash, "subjectRegExp", g[1])
+					checkOrg(&problems, relSlash, "subjectRegExp", g[1], true)
+				}
+				continue
+			}
+
+			if m := globLineRe.FindStringSubmatch(line); m != nil {
+				indent, value := len(m[1]), strings.TrimSpace(m[3])
+				valueText := expandBlockValue(lines, i, indent, value)
+				for _, g := range ghcrRe.FindAllStringSubmatch(valueText, -1) {
+					globChecked++
+					checkOrg(&problems, relSlash, "glob", g[1], false)
 				}
 				continue
 			}
@@ -500,31 +577,11 @@ func TestImageOrgIsCanonical(t *testing.T) {
 				continue
 			}
 			indent, key, value := len(m[1]), m[2], strings.TrimSpace(m[3])
-
-			valueText := value
-			if blockScalarRe.MatchString(value) {
-				// The inline value is only a block-scalar indicator; the real
-				// content is the following lines indented further than this key.
-				// Blank/whitespace-only lines inside the block don't end it.
-				var block []string
-				for j := i + 1; j < len(lines); j++ {
-					next := lines[j]
-					if strings.TrimSpace(next) == "" {
-						block = append(block, next)
-						continue
-					}
-					nextIndent := len(next) - len(strings.TrimLeft(next, " "))
-					if nextIndent <= indent {
-						break
-					}
-					block = append(block, next)
-				}
-				valueText = strings.Join(block, "\n")
-			}
+			valueText := expandBlockValue(lines, i, indent, value)
 
 			for _, g := range ghcrRe.FindAllStringSubmatch(valueText, -1) {
 				imageRefsChecked++
-				checkOrg(&problems, relSlash, key, g[1])
+				checkOrg(&problems, relSlash, key, g[1], false)
 			}
 		}
 	}
@@ -533,6 +590,12 @@ func TestImageOrgIsCanonical(t *testing.T) {
 		t.Fatalf("only %d ghcr.io image references matched across workflows and infra/ — "+
 			"expected at least %d; the key set or layout changed and this test is now "+
 			"asserting almost nothing about image references", imageRefsChecked, imageRefFloor)
+	}
+	if globChecked < globFloor {
+		t.Fatalf("only %d ClusterImagePolicy glob field(s) matched under infra/ — expected at "+
+			"least %d; the policy was deleted, `glob` was renamed, or the value shape changed, "+
+			"and this test is now asserting nothing about the image-match pattern",
+			globChecked, globFloor)
 	}
 	if subjectRegExpsChecked < subjectRegExpFloor {
 		t.Fatalf("only %d subjectRegExp signing-identity field(s) matched under infra/ — "+
