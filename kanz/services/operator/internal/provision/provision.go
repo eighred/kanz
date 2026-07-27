@@ -209,8 +209,27 @@ func (p *Provisioner) AddNode(ctx context.Context, r Request) (string, error) {
 
 func (p *Provisioner) jobSpec(name string, r Request, port int32) *batchv1.Job {
 	var backoff int32 = 0    // one attempt; a retry would re-SSH, and the operator re-issues AddNode
-	var deadline int64 = 900 // 15m hard cap on a provisioning attempt — a belt to sshRun's ctx, so a
-	//                          wedged Job cannot linger indefinitely holding the bootstrap-key Secret.
+	var deadline int64 = 900 // 15m hard cap on how long the POD may RUN — a belt to sshRun's ctx.
+	ttl := provisionTTL      // and a bound on how long the JOB OBJECT may EXIST. See below.
+
+	// THESE TWO BOUND DIFFERENT THINGS, and conflating them is how the bootstrap-key
+	// Secret came to have no lifetime at all.
+	//
+	// ActiveDeadlineSeconds stops a WEDGED RUN: it terminates the pod and marks the
+	// Job Failed/DeadlineExceeded. It does NOT remove the Job. A finished Job — and
+	// the Secret owner-referenced to it, holding the SSH bootstrap key and the
+	// K3S_TOKEN cluster-admission token — persists until something deletes it.
+	//
+	// AddNode deletes this Job explicitly, which covers every path where the operator
+	// survives. TTLSecondsAfterFinished covers the path where it does not: a rollout,
+	// an OOM, or a drain of the control-plane node this operator is pinned to,
+	// landing between Create and Delete. Without it those credentials stay in the
+	// cluster with nothing to reclaim them.
+	//
+	// This comment previously claimed ActiveDeadlineSeconds meant a "wedged Job
+	// cannot linger indefinitely holding the bootstrap-key Secret". That was false —
+	// it bounds the run, not the object — and the probe Job, which carries NO
+	// directly-mounted credential, has had the real protection since it shipped.
 
 	container := corev1.Container{
 		Name:  "provisioner",
@@ -249,8 +268,9 @@ func (p *Provisioner) jobSpec(name string, r Request, port int32) *batchv1.Job {
 			Annotations: map[string]string{hostnameAnnot: r.Hostname},
 		},
 		Spec: batchv1.JobSpec{
-			BackoffLimit:          &backoff,
-			ActiveDeadlineSeconds: &deadline,
+			BackoffLimit:            &backoff,
+			ActiveDeadlineSeconds:   &deadline,
+			TTLSecondsAfterFinished: &ttl,
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
 					Labels: map[string]string{componentLabel: componentValue},
@@ -312,6 +332,18 @@ const probeTimeout = 60 * time.Second
 // watch, deliberately: one pod living a few seconds does not justify an informer, and
 // List with a label selector needs no RBAC the operator does not already have.
 const probePollInterval = 250 * time.Millisecond
+
+// provisionTTL reclaims a finished PROVISIONING Job — and, with it, the
+// owner-referenced Secret holding the SSH bootstrap key and the K3S_TOKEN — even
+// if this process dies before its own explicit Delete runs.
+//
+// 300s, not probeTTL's 60s, is a deliberate trade stated so it can be changed
+// knowingly: a failed node provision is exactly when an operator wants
+// `kubectl logs` on the pod, and 60s is not enough time for a human to react to
+// the TUI reporting a failure. Five minutes is long enough to look, short enough
+// that a cluster-admission token is not left sitting in the cluster. Lower it if
+// credential exposure ever outweighs debuggability; do not remove it.
+const provisionTTL int32 = 300
 
 // probeTTL reclaims a finished probe Job even if this process dies before its own
 // delete runs. The explicit delete in Probe is the primary reclaim; this is the belt.
