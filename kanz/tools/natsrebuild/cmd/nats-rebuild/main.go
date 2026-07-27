@@ -32,6 +32,7 @@ func main() {
 	brokers := splitList(envOr("NATS_REBUILD_KAFKA_BROKERS", "kafka:9092"))
 	natsURL := envOr("NATS_REBUILD_NATS_URL", "nats://nats:4222")
 	topics := splitList(os.Getenv("NATS_REBUILD_TOPICS"))
+	stateTopics := splitList(os.Getenv("NATS_REBUILD_STATE_TOPICS"))
 	socket := os.Getenv("NATS_REBUILD_SPIFFE_SOCKET")
 	since, err := time.ParseDuration(envOr("NATS_REBUILD_SINCE", "24h"))
 	if err != nil {
@@ -41,6 +42,18 @@ func main() {
 	if len(topics) == 0 {
 		logger.Error("NATS_REBUILD_TOPICS is required (the log-of-record topics to rebuild from)")
 		os.Exit(2)
+	}
+	if err := natsrebuild.RequireStateTopics(stateTopics); err != nil {
+		logger.Error("invalid state-topic configuration", "err", err)
+		os.Exit(2)
+	}
+	if err := natsrebuild.ValidateTopicClasses(topics, stateTopics); err != nil {
+		logger.Error("invalid topic classification", "err", err)
+		os.Exit(2)
+	}
+	stateSet := make(map[string]bool, len(stateTopics))
+	for _, s := range stateTopics {
+		stateSet[s] = true
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -67,14 +80,13 @@ func main() {
 	}
 	defer func() { _ = nc.Close() }()
 
-	end := time.Now()
-	startTime := end.Add(-since)
+	now := time.Now()
 	var total uint64
 	for _, topic := range topics {
 		reader, err := replay.NewReader(replay.Config{
 			Brokers: brokers,
 			Topic:   topic,
-			Range:   replay.Range{StartTime: &startTime, EndTime: &end},
+			Range:   natsrebuild.WindowFor(topic, stateSet, since, now),
 		})
 		if err != nil {
 			logger.Error("new reader", "topic", topic, "err", err)
@@ -87,7 +99,8 @@ func main() {
 			logger.Error("rebuild topic failed", "topic", topic, "published", stats.Published, "err", err)
 			os.Exit(1)
 		}
-		logger.Info("rebuilt topic", "topic", topic, "published", stats.Published, "malformed", stats.Malformed)
+		logger.Info("rebuilt topic", "topic", topic, "state", stateSet[topic],
+			"published", stats.Published, "malformed", stats.Malformed)
 		total += stats.Published
 	}
 	logger.Info("nats-rebuild complete", "topics", len(topics), "since", since.String(), "published", total)

@@ -93,7 +93,7 @@ spec:
       containers:
         - name: compliance
           # Pinned to a cosign-signed digest by the GitOps bump (CICD-01d).
-          image: ghcr.io/eighred/compliance@sha256:1f98084ba1a1140da1710bca7945461727b328aaf074d50c0fe09de6f46bd0bb
+          image: ghcr.io/eighred/compliance@sha256:e15b44ed75d049fe76e4c13209e5270772e935abc7ee60511cb9bf22103cdf58
           ports:
             - { containerPort: 8091, name: http }
           env:

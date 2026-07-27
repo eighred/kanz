@@ -43,4 +43,14 @@ kubectl -n kanz-messaging logs job/nats-rebuild -f
 ```
 
 Tune the window/topics via the Job env (`NATS_REBUILD_SINCE`,
-`NATS_REBUILD_TOPICS`). Re-running is safe.
+`NATS_REBUILD_TOPICS`, `NATS_REBUILD_STATE_TOPICS`). Re-running is safe.
+
+`NATS_REBUILD_STATE_TOPICS` matters more than the others: it names the
+COMPACTED topics (`compliance.mandate`, `risk.position`) that must be read IN
+FULL, never through `NATS_REBUILD_SINCE`'s time window. Compaction retains
+the latest record per key regardless of age, so reading a compacted topic
+through a window loses every key not rewritten inside it — a mandate armed
+last week does not come back, and a compliance control that returns
+DISARMED is exactly the failure this list exists to prevent. The binary
+refuses to run with this variable empty; do not clear it to "simplify" the
+Job.
