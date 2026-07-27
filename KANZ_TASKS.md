@@ -182,7 +182,9 @@ _(Deliberately a list, not a table: `tools/validate-board.sh` parses any pipe-de
 
 The artifact-set rule is the load-bearing one: whoever deploys a release needs to know whether the set of things they must run changed, and that is invisible in a patch number.
 
-**Staying pre-1.0 is deliberate, not an accident.** `release.yml` has never completed a job, `infra/dr/failover.sh` has never executed, and the production-readiness P0 is open. **`1.0.0` must mean "deployed and recoverable"** — a claim this estate cannot yet make. The `0.x` is therefore an honest signal.
+**Staying pre-1.0 is deliberate, not an accident.** `infra/dr/failover.sh` has never executed, no cluster has restored from a backup, and the production-readiness P0 is open. **`1.0.0` must mean "deployed and recoverable"** — a claim this estate cannot yet make. The `0.x` is therefore an honest signal.
+
+**CORRECTION, 2026-07-27, and it is the kind this board exists to catch.** This section originally read *"`release.yml` has never completed a job"*, copied from OPS-M1 and readiness row 40. **That is FALSE and was false when written.** `release.yml` run `30227637258` completed for `v0.1.0` at 00:31Z the same day: **27 jobs, all success**, including the trivy CRITICAL gate, `cosign-installer`, `sbom-action` and the vulnerability-attestation predicate — and its `pin-digests` job opened `release/pin-v0.1.0`, merged as `065630c`. **The release pipeline has been proven end to end once.** OPS-M1's row and readiness row 40 are stale on this point and must be corrected. The claim also reached the `v0.2.0` annotated tag message, which is already pushed and cannot be cleanly rewritten mid-release; this row is the correction of record. _Recorded prominently because it was propagated by trusting a board line instead of reading the run list — inside the very policy whose acceptance line is that a green pipeline proves the transport, not the artifact._
 
 **The minimum a tag must produce to count as a release.** All seven, or it is not a release:
 1. All published images built and pushed, tagged `{{version}}` and `sha-<commit>`.
