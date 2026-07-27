@@ -113,8 +113,16 @@ jobs:
           GOFLAGS: -mod=mod
         run: |
           buf generate
-          cd gen/go && go mod init github.com/kanz-eng/kanz-schemas-go || true
-          cd gen/go && go mod tidy
+          # `cd` on its own line, matching build.yml and kanz-ci.yml. This used to
+          # read `cd gen/go && ...` on BOTH lines: the steps share one shell, so the
+          # second cd ran from inside gen/go, tried gen/go/gen/go, and failed the
+          # step. All 25 jobs of the first real release died here, before a single
+          # image was built. No guard could have caught it — the shell is valid, it
+          # is only wrong at runtime — and release.yml had never executed a job, so
+          # nothing had ever run these three lines.
+          cd gen/go
+          go mod init github.com/kanz-eng/kanz-schemas-go || true
+          go mod tidy
 
       - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
       - name: Log in to GHCR
