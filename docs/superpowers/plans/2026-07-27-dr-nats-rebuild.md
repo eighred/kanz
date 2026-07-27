@@ -523,10 +523,178 @@ only in lake-sink's config reader. It is guarded now."
 
 ---
 
-### Task 3: Correct the manifest, turning the guard green
+### Task 3: Declare the unarchived topics, then correct the manifest
 
 **Files:**
+- Modify: `kanz/test/arch/archived_topics_test.go` (exemption map + completeness arm)
 - Modify: `kanz/infra/dr/nats/rebuild-job.yaml:52-56`
+
+**Scope note (owner decision, 2026-07-27):** four provisioned topics are excluded from the derived set because no archiver subject covers them. Two of those — `wealth.household` (compacted, retention −1) and `alternatives.commitment` — are *actively published*, so their exclusion is a real DR scope decision, not an artifact. The owner chose **not** to widen the archiver, and instead to make every exclusion explicit, reasoned and guarded. Absence must never be the mechanism.
+
+- [ ] **Step 0a: Split the provisioned parse out of the derivation**
+
+In `archived_topics_test.go`, extract the table parse so both the derivation and the new completeness arm read one source. Replace the body of `derivedArchivedTopics` (currently lines 105-142) with two functions:
+
+```go
+// provisionedNonDLQTopics returns every {domain}.{entity} row in the
+// provisioned table, mapped to its cleanup policy ("delete" or "compact").
+//
+// dlq.* is a reserved leading segment, not a {domain}.{entity} pair.
+// Republishing a poison message onto the live spine would re-inject the event
+// that already failed, so a DLQ topic is never rebuildable and never archived.
+func provisionedNonDLQTopics(t *testing.T, root string) map[string]string {
+	t.Helper()
+	body, err := os.ReadFile(filepath.Join(root, "infra", "kafka", "topics-job.yaml"))
+	if err != nil {
+		t.Fatalf("read topics-job.yaml: %v", err)
+	}
+	rows := topicRowPolicy.FindAllStringSubmatch(string(body), -1)
+	if len(rows) == 0 {
+		t.Fatal("no topic rows parsed from topics-job.yaml — has the table format changed? " +
+			"(this test would otherwise pass vacuously)")
+	}
+	out := map[string]string{}
+	for _, row := range rows {
+		name, policy := row[1], row[2]
+		if strings.HasPrefix(name, "dlq.") || !strings.Contains(name, ".") {
+			continue
+		}
+		out[name] = policy
+	}
+	if len(out) == 0 {
+		t.Fatal("no non-DLQ topics parsed — the filter is broken")
+	}
+	return out
+}
+
+// derivedArchivedTopics computes the archiver's PRODUCED set — the only set
+// that can be rebuilt from Kafka, because it is the only set that is in Kafka.
+//
+// It is the provisioned table intersected with what the archiver consumes.
+// Neither input is new: topics-job.yaml is already the single source of truth
+// for what topics exist, and DefaultSubjects for what the archiver drains.
+// Deriving means there is no fourth copy of the topic table to drift — which
+// is exactly how the DR Job ended up naming eight topics that do not exist.
+//
+// Returns topic name -> cleanup policy ("delete" or "compact").
+func derivedArchivedTopics(t *testing.T, root string) map[string]string {
+	t.Helper()
+	provisioned := provisionedNonDLQTopics(t, root)
+	subjects := archiverDefaultSubjects(t, root)
+	if !slices.Contains(subjects, "order.>") {
+		t.Fatalf("DefaultSubjects parse looks wrong — expected order.> among %v", subjects)
+	}
+	out := map[string]string{}
+	for name, policy := range provisioned {
+		if coveredBySubject(name, subjects) {
+			out[name] = policy
+		}
+	}
+	if len(out) == 0 {
+		t.Fatal("derived archived set is empty — the intersection logic is broken")
+	}
+	return out
+}
+```
+
+- [ ] **Step 0b: Add the exemption map and the completeness arm — written BEFORE the map, so it goes red**
+
+Add to `archived_topics_test.go`:
+
+```go
+// notArchivedByDesign declares every provisioned topic the archiver
+// deliberately does not drain, with the reason and the owner of that decision.
+//
+// A topic here is absent from Kafka, therefore absent from the lakehouse, and
+// therefore ABSENT FROM DISASTER RECOVERY: after a region failover nothing
+// replays it onto the live spine. That is a scope decision about durability,
+// not a detail — so it is declared, reasoned, and guarded here rather than
+// being implied by a subject nobody added.
+//
+// TestEveryProvisionedTopicIsArchivedOrDeclaredUnarchived fails the build on a
+// provisioned topic that is in neither the derived set nor this map, so a NEW
+// topic cannot quietly inherit "not in DR". It also fails on an entry that has
+// since become archived, or that names a topic no longer provisioned, so an
+// exemption cannot outlive its reason.
+var notArchivedByDesign = map[string]string{
+	"market.book": "DATA-M1 scope: L2 depth is the highest-volume stream in the estate and is " +
+		"re-fetchable from the venue, unlike a fill. Archiving it is its own capacity and cost " +
+		"decision. After a failover the book is cold until the venue feeds refill it.",
+	"market.crypto": "DATA-M1 scope, same as market.book: highest-volume, re-fetchable from the " +
+		"venue, deliberately unarchived.",
+	"wealth.household": "Owner decision 2026-07-27: wealth is durable in its SERVICE POSTGRES STORE, " +
+		"not in Kafka. The archiver subscribes no wealth.> subject, so nothing is written to this " +
+		"topic and nothing can be rebuilt from it. Accepted consequence: a household book is NOT " +
+		"restored by nats-rebuild after a region failover and must be recovered from Postgres " +
+		"(PITR/CNPG), like any other service-owned relational state. Revisit if wealth ever gains " +
+		"an automated publisher — today its only producer is the kanz-household operator CLI.",
+	"alternatives.commitment": "Owner decision 2026-07-27: same posture as wealth.household — the " +
+		"alternatives journal's durable record is the service's Postgres store, not the 7d stream, " +
+		"and no tooling replays that stream. The archiver subscribes no alternatives.> subject. " +
+		"Accepted consequence: commitments and NAV marks are NOT restored by nats-rebuild and are " +
+		"recovered from Postgres. Revisit if an automated administrator feed replaces the " +
+		"kanz-altevent operator CLI.",
+}
+
+// TestEveryProvisionedTopicIsArchivedOrDeclaredUnarchived closes the hole that
+// let this whole class of defect exist: nothing asserted that a provisioned
+// topic was reachable by DR at all.
+//
+// archiver_topology_test.go asserts the CONSUME side (every archiver subject
+// has a backing topic). This is the other direction — every backing topic is
+// either drained by the archiver, or declared undrained on purpose. Without
+// it, adding a Kafka topic silently adds a topic that disaster recovery will
+// never restore, and no test anywhere would notice.
+func TestEveryProvisionedTopicIsArchivedOrDeclaredUnarchived(t *testing.T) {
+	root := moduleRoot(t)
+	provisioned := provisionedNonDLQTopics(t, root)
+	derived := derivedArchivedTopics(t, root)
+
+	var problems []string
+	for name := range provisioned {
+		_, archived := derived[name]
+		reason, declared := notArchivedByDesign[name]
+		switch {
+		case archived && declared:
+			problems = append(problems, fmt.Sprintf(
+				"%s: the archiver DOES drain this topic, but it is still declared in "+
+					"notArchivedByDesign (%q) — stale exemption, remove it", name, reason))
+		case !archived && !declared:
+			problems = append(problems, fmt.Sprintf(
+				"%s: provisioned, but no archiver subject drains it and it is not declared in "+
+					"notArchivedByDesign. Nothing is written to this topic, so DISASTER RECOVERY "+
+					"WILL NOT RESTORE IT. Either add a covering subject to the archiver's "+
+					"DefaultSubjects, or declare it here with the reason and who decided", name))
+		}
+	}
+	// Anti-rot: an exemption for a topic that is no longer provisioned at all.
+	for name := range notArchivedByDesign {
+		if _, ok := provisioned[name]; !ok {
+			problems = append(problems, name+
+				": declared in notArchivedByDesign but not provisioned in topics-job.yaml — "+
+				"dead exemption, remove it")
+		}
+	}
+	// Non-vacuity: an empty reason is a topic-name list, which is what this map
+	// exists NOT to be.
+	for name, reason := range notArchivedByDesign {
+		if strings.TrimSpace(reason) == "" {
+			problems = append(problems, name+": declared with an empty reason — "+
+				"an exemption without a stated reason and owner is just an omission with extra steps")
+		}
+	}
+
+	if len(problems) > 0 {
+		sort.Strings(problems)
+		t.Fatalf("provisioned-topic DR coverage:\n\n  %s\n\n"+
+			"Every provisioned topic must be either drained by the archiver (and therefore "+
+			"restorable after a failover) or explicitly declared as deliberately unarchived.",
+			strings.Join(problems, "\n  "))
+	}
+}
+```
+
+**Evidence required for this arm.** Write the test with `notArchivedByDesign` declared but **empty** (`var notArchivedByDesign = map[string]string{}`), run it, and capture the failure — it must name all four undrained topics (`market.book`, `market.crypto`, `wealth.household`, `alternatives.commitment`) as provisioned-but-undeclared. Then fill in the four entries and capture it passing. That RED is what proves the arm detects an undeclared topic rather than merely tolerating the ones already there.
 
 - [ ] **Step 1: Replace the topic env block**
 
@@ -572,9 +740,9 @@ cd kanz && go test ./test/arch/ -run TestArchivedTopicConsumersMatchTheArchiverP
 
 Expected: PASS.
 
-- [ ] **Step 3: Mutation-test every arm — all five**
+- [ ] **Step 3: Mutation-test every arm — all eight**
 
-Run each mutation, confirm the stated failure, then revert it before the next one.
+Run each mutation, confirm the stated failure, then revert it before the next one. Arms 6-8 cover the new exemption machinery; skipping them would repeat the exact error the board records at row 67, where a guard was certified "mutation-proven" after only its already-working arms were tripped.
 
 | # | Mutation | Expected failure |
 |---|---|---|
@@ -583,6 +751,11 @@ Run each mutation, confirm the stated failure, then revert it before the next on
 | 3 | Delete `risk.position` from `LAKE_SINK_TOPICS` (`infra/deploy/lake-sink-deploy.yaml:138`) | `lake-sink: LAKE_SINK_TOPICS omits "risk.position"` |
 | 4 | Delete `risk.position` from `NATS_REBUILD_STATE_TOPICS` | `NATS_REBUILD_STATE_TOPICS = [compliance.mandate], want exactly the compacted topics [...]` |
 | 5 | In `topics-job.yaml`, change `risk.position`'s cleanup column from `compact` to `delete` | Same state-topic failure, from the other direction — proving the state list is checked against the table, not hardcoded |
+| 6 | Delete the `wealth.household` entry from `notArchivedByDesign` | `wealth.household: provisioned, but no archiver subject drains it and it is not declared ... DISASTER RECOVERY WILL NOT RESTORE IT` |
+| 7 | Add `"order.order": "test"` to `notArchivedByDesign` | `order.order: the archiver DOES drain this topic, but it is still declared ... stale exemption, remove it` |
+| 8 | Add `"no.suchtopic": "test"` to `notArchivedByDesign` | `no.suchtopic: declared in notArchivedByDesign but not provisioned in topics-job.yaml — dead exemption, remove it` |
+
+Arm 9 (optional, cheap): set one entry's reason to `""` and confirm the empty-reason arm fires. The map exists to carry reasoning; a bare topic list would defeat it.
 
 ```bash
 cd kanz && go test ./test/arch/ -run TestArchivedTopicConsumersMatchTheArchiverProducedSet
