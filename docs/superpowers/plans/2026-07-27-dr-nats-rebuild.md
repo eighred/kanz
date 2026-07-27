@@ -1154,6 +1154,14 @@ reasons and both retireable: per-PR preview images, and `nats-rebuild` until
 its first published digest.
 ```
 
+- [ ] **Step 3b: Record the tenant-DR follow-up as its own row**
+
+Owner decision 2026-07-27: this is **not** in P0's scope and must not expand it. Record it so it is tracked rather than rediscovered.
+
+```
+| **`nats-rebuild` has no tenant dimension — tenant-prefixed topics are outside DR** | **OPEN WORK — scope boundary is documented, the capability is not built** | `topic.go:61-64` prefixes every topic with `{tenant}.` for any non-`__system__` tenant, and `infra/kafka/tenancy.yaml` provisions the same 19-row table under that prefix. `NATS_REBUILD_TOPICS` is a **flat, un-prefixed list with no tenant dimension**, so onboarding a tenant creates ~19 archived topics `nats-rebuild` will never read — **and it still exits 0**, which is the same silent-success shape the 2026-07-27 DR work was done to remove. **No guard can see it:** `TestEveryProvisionedTopicIsArchivedOrDeclaredUnarchived` iterates `topics-job.yaml` rows only, and `TestTenantTopicTableMatchesTheSystemTable` compares the two *provisioning* tables to each other, never to a DR consumer. **Latent today** — the sole tenant is `__system__` — but tenant onboarding is **shipped tooling** (`infra/onboarding/provision-tenant.sh` → `infra/tenancy/tenantctl.sh`, both present). The boundary is now stated in `rebuild-job.yaml` so an operator cannot read it as estate-wide coverage. | lead | build per-tenant rebuild (enumerate tenants, drain each prefix) **or** decide tenant state is recovered from Postgres only and guard that decision. Trigger: the first non-`__system__` tenant. |
+```
+
 - [ ] **Step 4: Run the board validator**
 
 ```bash
