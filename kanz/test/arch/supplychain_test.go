@@ -852,11 +852,12 @@ func TestProductionManifestsPinImagesByDigest(t *testing.T) {
 	var problems []string
 	seenFiles := map[string]bool{}
 	refCount := 0
-	// walkedFiles and matchedFiles feed the coverageGapExempt anti-rot loop
-	// below: every infra/ YAML file visited by the walk, and the subset of
-	// those that produced at least one productionImageRef match.
+	// walkedFiles and gapFiles feed the coverageGapExempt anti-rot loop below:
+	// every infra/ YAML file visited by the walk, and the subset of those
+	// whose "ghcr.io/eighred/" prefix count and productionImageRef match count
+	// disagree (see the reference-level coverage floor below).
 	walkedFiles := map[string]bool{}
-	matchedFiles := map[string]bool{}
+	gapFiles := map[string]bool{}
 
 	err := filepath.WalkDir(infra, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
@@ -876,8 +877,9 @@ func TestProductionManifestsPinImagesByDigest(t *testing.T) {
 		scanned := yamlComment.ReplaceAllString(string(body), "")
 		matches := productionImageRef.FindAllString(scanned, -1)
 		refCount += len(matches)
-		if len(matches) > 0 {
-			matchedFiles[relSlash] = true
+		prefixCount := strings.Count(scanned, "ghcr.io/eighred/")
+		if prefixCount != len(matches) {
+			gapFiles[relSlash] = true
 		}
 
 		// Accumulate per file before judging the exemption, then report stale
@@ -915,30 +917,59 @@ func TestProductionManifestsPinImagesByDigest(t *testing.T) {
 				": every image here is digest-pinned but the file is still in mutableTagExempt — stale exemption, remove it")
 		}
 
-		// Per-file coverage floor: refCount==0 below only trips on TOTAL
-		// breakage across every file, and would not have caught version one
-		// of this guard, which saw 39 of 42 references and passed. A file
-		// that contains our own registry prefix but yields not one
-		// productionImageRef match is that same symptom in miniature — the
-		// pattern has narrowed and gone blind to some reference form in THIS
-		// file (a nested repository path, a ${TAG}-interpolated tag, a
-		// malformed digest, kustomize's split newName/newTag — any of these
-		// carries the prefix without matching the shape). coverageGapExempt
-		// names the one file that legitimately has no pinnable reference at
-		// all: the sigstore glob.
+		// Per-file coverage floor: REFERENCE-level, not file-level. refCount==0
+		// below only trips on TOTAL breakage across every file, and would not
+		// have caught version one of this guard, which saw 39 of 42 references
+		// and passed. A naive file-level floor (fire only when a file yields
+		// ZERO matches) is not enough either: sixteen files under infra/ carry
+		// TWO "ghcr.io/eighred/" references apiece (every *-deploy.yaml with a
+		// kanz-migrate initContainer, plus preview-applicationset.yaml), and in
+		// a multi-reference file one reference taking an unmatched form still
+		// leaves the other matching, so a zero-match test stays silent — a
+		// literal `:latest` written as a nested repository path
+		// (`ghcr.io/eighred/kanz/kanz-migrate:latest`) or a `${TAG}`-
+		// interpolated tag (`ghcr.io/eighred/kanz-migrate:${TAG}`) passes the
+		// guard right next to a reference that still matches. The fix is to
+		// count: every "ghcr.io/eighred/" occurrence in the comment-stripped
+		// text must correspond to a parsed productionImageRef match, one for
+		// one. A count mismatch means the pattern has narrowed and gone blind
+		// to some reference form in THIS file (a nested repository path, a
+		// ${TAG}-interpolated tag, a malformed digest, kustomize's split
+		// newName/newTag — any of these carries the prefix without matching
+		// the shape). coverageGapExempt names the one file that legitimately
+		// has no pinnable reference at all: the sigstore glob.
 		//
-		// RAW BODY, NOT scanned. This checks the literal string against `body`
-		// (pre-comment-strip), not against `scanned` (post-yamlComment). That is
-		// deliberate: it doubles as a safety net against yamlComment itself
-		// over-stripping a real reference — if the comment stripper ever ate
-		// part of a genuine image line, scanning `scanned` here would hide that
-		// bug instead of catching it. The consequence is that a file whose ONLY
-		// "ghcr.io/eighred/" occurrence sits inside a YAML comment, with no real
-		// image reference anywhere in the file, will also trip this arm and
-		// demand a coverageGapExempt entry even though nothing is unpinned. No
-		// file in this repo does that today; if one ever does, the correct
-		// response is to add it to coverageGapExempt with a reason saying so —
-		// not to change this check to scan `scanned` instead.
+		// Compare against `scanned`, NOT `body`. `matches` was produced from
+		// `scanned` (post-comment-strip), so the count it is compared to must
+		// come from the same text — comparing against raw `body` would count
+		// prefix occurrences living inside real YAML comments (which
+		// yamlComment is supposed to remove) as if they were unmatched
+		// references, reporting a spurious gap on every file with an ordinary
+		// comment mentioning the prefix.
+		if prefixCount != len(matches) {
+			if _, known := coverageGapExempt[relSlash]; !known {
+				problems = append(problems, fmt.Sprintf(
+					"%s: %d \"ghcr.io/eighred/\" occurrence(s) in the comment-stripped text but "+
+						"productionImageRef matched only %d of them — the pattern has narrowed and is "+
+						"blind to some reference form here", relSlash, prefixCount, len(matches)))
+			}
+		}
+		// Second, independent safety net: RAW BODY, NOT scanned. This checks the
+		// literal string against `body` (pre-comment-strip) for the case where
+		// yamlComment itself over-strips a real reference — if the comment
+		// stripper ever ate part of a genuine image line, both `scanned`'s
+		// prefix count and `matches` would drop together and the check above
+		// would see them agree (both zero) while the reference is genuinely
+		// lost. This arm exists to catch exactly that: total blindness (zero
+		// matches) alongside evidence in the untouched raw text that a
+		// reference was here. The consequence is that a file whose ONLY
+		// "ghcr.io/eighred/" occurrence sits inside a YAML comment, with no
+		// real image reference anywhere in the file, will also trip this arm
+		// and demand a coverageGapExempt entry even though nothing is
+		// unpinned. No file in this repo does that today; if one ever does,
+		// the correct response is to add it to coverageGapExempt with a
+		// reason saying so — not to change this check to scan `scanned`
+		// instead.
 		if len(matches) == 0 && strings.Contains(string(body), "ghcr.io/eighred/") {
 			if _, known := coverageGapExempt[relSlash]; !known {
 				problems = append(problems, relSlash+
@@ -976,17 +1007,23 @@ func TestProductionManifestsPinImagesByDigest(t *testing.T) {
 	// they were carved out of. A coverageGapExempt entry is dead weight, with
 	// nothing else flagging it, in either of two directions — the file it
 	// names was never walked (deleted, renamed, or moved out of infra/), or
-	// the file now produces real productionImageRef matches (the coverage gap
-	// it was excused for no longer exists).
+	// the file's prefix count now equals its match count (no gap left — the
+	// coverage floor above found nothing to complain about, so there is
+	// nothing left to excuse). Keyed to the same reference-level notion as the
+	// floor itself (gapFiles, populated from prefixCount != len(matches)), not
+	// to "the file was matched at all" — a file can have real matches AND
+	// still have a gap (one of two references unmatched), and the old
+	// file-level notion would have called that file's exemption dead while a
+	// genuine gap was still open under it.
 	for file := range coverageGapExempt {
 		if !walkedFiles[file] {
 			problems = append(problems, file+
 				": in coverageGapExempt but was not found under infra/ — dead exemption, remove it")
 			continue
 		}
-		if matchedFiles[file] {
+		if !gapFiles[file] {
 			problems = append(problems, file+
-				": in coverageGapExempt but productionImageRef now matches in it — no coverage gap left, dead exemption, remove it")
+				": in coverageGapExempt but has no coverage gap (prefix count equals match count) — dead exemption, remove it")
 		}
 	}
 
