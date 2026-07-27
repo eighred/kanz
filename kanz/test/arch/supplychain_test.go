@@ -852,6 +852,11 @@ func TestProductionManifestsPinImagesByDigest(t *testing.T) {
 	var problems []string
 	seenFiles := map[string]bool{}
 	refCount := 0
+	// walkedFiles and matchedFiles feed the coverageGapExempt anti-rot loop
+	// below: every infra/ YAML file visited by the walk, and the subset of
+	// those that produced at least one productionImageRef match.
+	walkedFiles := map[string]bool{}
+	matchedFiles := map[string]bool{}
 
 	err := filepath.WalkDir(infra, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
@@ -866,10 +871,14 @@ func TestProductionManifestsPinImagesByDigest(t *testing.T) {
 		}
 		rel, _ := filepath.Rel(root, path)
 		relSlash := filepath.ToSlash(rel)
+		walkedFiles[relSlash] = true
 
 		scanned := yamlComment.ReplaceAllString(string(body), "")
 		matches := productionImageRef.FindAllString(scanned, -1)
 		refCount += len(matches)
+		if len(matches) > 0 {
+			matchedFiles[relSlash] = true
+		}
 
 		// Accumulate per file before judging the exemption, then report stale
 		// only once the file's scan is complete. The old code reported "every
@@ -917,6 +926,19 @@ func TestProductionManifestsPinImagesByDigest(t *testing.T) {
 		// carries the prefix without matching the shape). coverageGapExempt
 		// names the one file that legitimately has no pinnable reference at
 		// all: the sigstore glob.
+		//
+		// RAW BODY, NOT scanned. This checks the literal string against `body`
+		// (pre-comment-strip), not against `scanned` (post-yamlComment). That is
+		// deliberate: it doubles as a safety net against yamlComment itself
+		// over-stripping a real reference — if the comment stripper ever ate
+		// part of a genuine image line, scanning `scanned` here would hide that
+		// bug instead of catching it. The consequence is that a file whose ONLY
+		// "ghcr.io/eighred/" occurrence sits inside a YAML comment, with no real
+		// image reference anywhere in the file, will also trip this arm and
+		// demand a coverageGapExempt entry even though nothing is unpinned. No
+		// file in this repo does that today; if one ever does, the correct
+		// response is to add it to coverageGapExempt with a reason saying so —
+		// not to change this check to scan `scanned` instead.
 		if len(matches) == 0 && strings.Contains(string(body), "ghcr.io/eighred/") {
 			if _, known := coverageGapExempt[relSlash]; !known {
 				problems = append(problems, relSlash+
@@ -945,6 +967,26 @@ func TestProductionManifestsPinImagesByDigest(t *testing.T) {
 		if !seenFiles[file] {
 			problems = append(problems, file+
 				": in mutableTagExempt but has no mutable tag — dead exemption, remove it")
+		}
+	}
+
+	// Anti-rot for coverageGapExempt, same idiom as the mutableTagExempt loop
+	// above: an exemption nobody re-checks is how this repository ends up with
+	// exemptions that outlived their reason and silently disabled the check
+	// they were carved out of. A coverageGapExempt entry is dead weight, with
+	// nothing else flagging it, in either of two directions — the file it
+	// names was never walked (deleted, renamed, or moved out of infra/), or
+	// the file now produces real productionImageRef matches (the coverage gap
+	// it was excused for no longer exists).
+	for file := range coverageGapExempt {
+		if !walkedFiles[file] {
+			problems = append(problems, file+
+				": in coverageGapExempt but was not found under infra/ — dead exemption, remove it")
+			continue
+		}
+		if matchedFiles[file] {
+			problems = append(problems, file+
+				": in coverageGapExempt but productionImageRef now matches in it — no coverage gap left, dead exemption, remove it")
 		}
 	}
 
