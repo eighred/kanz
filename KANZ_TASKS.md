@@ -168,7 +168,36 @@ _Verified when:_ one shared helper distinguishes a declared-but-unreadable `*_FI
 **TUI-STALE-001 · The operator TUI renders arbitrarily stale estate state with no age indicator.** _(Owner decision 2026-07-27: follow-up, **not** a release blocker — operational usability, not correctness.)_ `cmd/universe/model.go:228-240` retains prior nodes/clusters/provisions/venues on a failed poll and sets `m.err`; `view.go:171-172` is the **entire** staleness surface, one error line. The model has no `lastFetch`, no failure counter, no age field. `m.err` self-clears on the next success, so a run of failures can vanish unseen. **The code's own reasoning depends on the poller:** `model.go:62` justifies `actionErr` as safe because *"the next poll reflects reality"* — which is exactly what fails when the poll is what is down. During a control-plane outage the TUI shows a confidently-rendered estate that may not exist, and cordon/drain/move/add fire through a **different** path than the poll. Drain is destructive.
 _Verified when:_ the last successful refresh is timestamped; data age is shown once it exceeds the poll interval; the indication escalates as consecutive failures rise; and stale data is visually distinct from fresh. **Writes are NOT blocked on staleness** (owner decision): during an incident operators may still need to act — the UI communicates confidence, it does not enforce policy.
 
-**RELEASE-VERSIONING-001 · No versioning scheme is documented, and the next tag is now blocked on it.** _(Owner decision 2026-07-27: hold the tag.)_ `v0.1.0` exists (released 2026-07-27T00:37Z, 25 images). `main` now publishes **26** — `nats-rebuild` was added and its image is live at `ghcr.io/eighred/nats-rebuild@sha256:8167a12f…`. Whether growing the published artifact set is a patch or a minor is undecided, and nothing in the repo defines it; `release.yml` keys off `push: tags: ['v*']` with `type=semver`, so the scheme is load-bearing for what gets published. A tag is permanent and its digests enter Rekor, a public transparency log.
+**RELEASE-VERSIONING-001 · The release versioning policy. APPROVED 2026-07-27.** _(Owner-approved; this section IS the policy, not a plan to write one.)_
+
+**What the version describes.** This repository ships **a matrix of service images deployed as one estate**, not a library or an API — so the version describes the *deployable set*. Payload contracts version **separately and already** (envelope `schema_version`, the registry's `payload_schema_ref`, `schema-release.yml`'s own tags); this policy must never duplicate that.
+
+**The convention.**
+
+- **MAJOR** — adoption requires operator action: a breaking payload-schema change reaching deployed services, a non-backward-compatible manifest change, an irreversible migration, or **removal** of a published image.
+- **MINOR** — the published artifact set **grows** (a new service image), or a new operator-visible capability lands.
+- **PATCH** — defect fixes, guard additions, documentation. **The artifact set is unchanged.**
+
+_(Deliberately a list, not a table: `tools/validate-board.sh` parses any pipe-delimited line as a board row and a 2-column table here reads as three MALFORMED 5-column rows. Found by running it — and the validator **prints MALFORMED while exiting 0**, so an `&&`-chained commit lands anyway. That is board row 62's defect, reproduced here in the act of writing this policy.)_
+
+The artifact-set rule is the load-bearing one: whoever deploys a release needs to know whether the set of things they must run changed, and that is invisible in a patch number.
+
+**Staying pre-1.0 is deliberate, not an accident.** `release.yml` has never completed a job, `infra/dr/failover.sh` has never executed, and the production-readiness P0 is open. **`1.0.0` must mean "deployed and recoverable"** — a claim this estate cannot yet make. The `0.x` is therefore an honest signal.
+
+**The minimum a tag must produce to count as a release.** All seven, or it is not a release:
+1. All published images built and pushed, tagged `{{version}}` and `sha-<commit>`.
+2. Trivy passes on every image (fails on CRITICAL).
+3. Cosign **keyless** signature per image digest.
+4. SBOM attached per image and **non-empty**.
+5. `pin-digests` opens its PR; manifests move to the new digests.
+6. GitHub Release created with generated notes.
+7. `release.yml` green end to end, **no job skipped**.
+
+**The acceptance line, earned the hard way:** a release is **not** done when the workflow is green — it is done when **`cosign verify` succeeds from a clean machine against a digest a Deployment actually runs**. A green pipeline proves the transport, not the artifact. This is the same standard the board applies everywhere else and it is not relaxed for releases.
+
+**Accepted knowingly:** cosign keyless records each image digest **and this repository's workflow identity** in **Rekor, a public transparency log**, permanently and irrespective of later repository visibility. That is inherent to the keyless stance already chosen — not new exposure — but the first tagged release is when it becomes true, and it is recorded here as a decision rather than left to be discovered.
+
+**First tag under this policy: `v0.2.0`.** `v0.1.0` shipped 25 images; `main` now publishes **26** (`nats-rebuild`, live at `sha256:8167a12f…`). Growing the set is a MINOR by the rule above.
 _Verified when:_ a versioning policy is written down (what bumps major/minor/patch for a repo that ships a matrix of service images), and the next tag follows it. **This blocks the remaining release evidence** — `release.yml` has still never executed a job, so trivy, cosign keyless signing and SBOM generation remain unproven controls.
 
 **NODE-LIFECYCLE-BOUNDARY · Decommission is deliberately outside TUI scope.** _(Owner decision 2026-07-27: record, do not build.)_ `operator/v1` exposes 11 RPCs and **no node removal**; `operator-node-writer` grants `nodes: [patch]` + `pods/eviction: [create]` only (`operator-deploy.yaml:457-462`), and `operator_rbac_test.go:96` explicitly forbids `create`/`delete`/`deletecollection`/`update`/`*` on nodes. **That bound is a considered security decision, mutation-proven, and is to be preserved** — the long-running operator must not hold standing node-delete. Consequence, recorded so it is a boundary rather than a gap: node provisioning, cordon and drain are **operator-runtime** actions; node **decommission** is a provisioning/administrative operation outside current TUI scope, alongside datastore topology. Draining evicts workloads; it does not remove cluster membership, and a decommissioned host stays a registered Node until someone removes it. Revisit only on a requirement for an audited least-privilege decommission workflow — shape: a one-shot Job with its own bounded role, mirroring how provisioning already works, **never** standing permission on the operator.
