@@ -43,6 +43,10 @@ func main() {
 		logger.Error("NATS_REBUILD_TOPICS is required (the log-of-record topics to rebuild from)")
 		os.Exit(2)
 	}
+	if err := natsrebuild.RequireStateTopics(stateTopics); err != nil {
+		logger.Error("invalid state-topic configuration", "err", err)
+		os.Exit(2)
+	}
 	if err := natsrebuild.ValidateTopicClasses(topics, stateTopics); err != nil {
 		logger.Error("invalid topic classification", "err", err)
 		os.Exit(2)

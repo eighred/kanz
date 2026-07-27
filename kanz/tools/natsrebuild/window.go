@@ -34,6 +34,31 @@ func WindowFor(topic string, state map[string]bool, since time.Duration, now tim
 	return replay.Range{StartTime: &start, EndTime: &end}
 }
 
+// RequireStateTopics refuses an empty state-topic list. Compacted topics
+// (compliance.mandate, risk.position) retain only the latest record per key
+// regardless of age; reading them through NATS_REBUILD_SINCE's bounded window
+// instead of in full loses every key not rewritten inside that window — a
+// mandate armed last week does not come back, and the compliance control it
+// backs returns DISARMED. An empty NATS_REBUILD_STATE_TOPICS has no orphans,
+// so ValidateTopicClasses' subset check alone would pass it; this is the
+// separate, symmetric-in-spirit check that fails closed on the empty case
+// instead. The run still exits 0 and reports a plausible non-zero published
+// count when this is skipped, which is what makes an empty list dangerous
+// rather than merely useless: refuse to start rather than produce a restore
+// that looks complete but silently dropped every compacted key.
+func RequireStateTopics(stateTopics []string) error {
+	if len(stateTopics) == 0 {
+		return fmt.Errorf(
+			"NATS_REBUILD_STATE_TOPICS is required and must not be empty: compacted topics retain " +
+				"only the latest record per key regardless of age, so reading them through " +
+				"NATS_REBUILD_SINCE's time window instead of in full would silently lose any key not " +
+				"rewritten inside that window — e.g. a mandate armed before the window, which would " +
+				"not come back, leaving the compliance control it backs DISARMED while the run still " +
+				"exits 0")
+	}
+	return nil
+}
+
 // ValidateTopicClasses refuses a configuration whose state-topic list is not a
 // subset of the topics being rebuilt. Failing closed matters here: a state
 // topic nobody reads restores nothing, and the run still exits 0, so the

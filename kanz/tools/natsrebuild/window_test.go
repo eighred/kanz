@@ -44,6 +44,39 @@ func TestWindowForEventTopicReadsTheBoundedRecentWindow(t *testing.T) {
 	}
 }
 
+func TestRequireStateTopicsRefusesAnEmptyList(t *testing.T) {
+	// Fail closed: an empty NATS_REBUILD_STATE_TOPICS has no orphans, so
+	// ValidateTopicClasses' subset check alone would pass it — an operator
+	// who drops the state list following the DR runbook gets compacted
+	// topics read through the time window instead of in full, and the run
+	// still exits 0 with a plausible non-zero published count. This check is
+	// what refuses that configuration outright.
+	err := RequireStateTopics(nil)
+	if err == nil {
+		t.Fatal("want an error refusing an empty state-topic list, got nil")
+	}
+	if got := err.Error(); !strings.Contains(got, "NATS_REBUILD_STATE_TOPICS") {
+		t.Fatalf("error %q does not name NATS_REBUILD_STATE_TOPICS", got)
+	}
+}
+
+func TestRequireStateTopicsRefusesAnEmptySliceTooNotJustNil(t *testing.T) {
+	// splitList (main.go) returns an empty, non-nil slice for an empty env
+	// var — make sure the check does not accidentally key off nil-ness.
+	err := RequireStateTopics([]string{})
+	if err == nil {
+		t.Fatal("want an error refusing an empty state-topic list, got nil")
+	}
+}
+
+func TestRequireStateTopicsAcceptsANonEmptyList(t *testing.T) {
+	// Non-vacuity: a check that rejected everything would pass the two
+	// tests above. This proves the accept path still accepts.
+	if err := RequireStateTopics([]string{"compliance.mandate", "risk.position"}); err != nil {
+		t.Fatalf("non-empty state-topic list rejected: %v", err)
+	}
+}
+
 func TestValidateTopicClassesRefusesAStateTopicThatIsNotBeingRebuilt(t *testing.T) {
 	// Fail closed: a state topic nobody reads is a config typo, and silently
 	// ignoring it means the operator believes state is being restored when it
