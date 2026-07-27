@@ -68,7 +68,7 @@ spec:
               app: copilot
       containers:
         - name: copilot
-          image: ghcr.io/eighred/copilot@sha256:3f1d36dc3b3d8206d8e9d68eb136c2f074af198a13f2f9cd988102908321ccce
+          image: ghcr.io/eighred/copilot@sha256:d65759fd162e0fcb303976c4abcd4abc98a22a38f3823eaa3ad72dc7cad62e9b
           ports:
             - { containerPort: 8080, name: http }
           env:
