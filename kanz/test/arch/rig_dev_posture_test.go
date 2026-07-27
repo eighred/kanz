@@ -3,6 +3,7 @@ package arch
 import (
 	"errors"
 	"io"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -290,4 +291,198 @@ func TestRigApplyDeploysExactlyRigWorkloads(t *testing.T) {
 				"reconcile them. (A workload that mounts Vault CSI also needs a declared dev Secret here.)", g)
 		}
 	}
+}
+
+// PRODUCTION MANIFESTS ARE DIGEST-PINNED; THE RIG BUILDS AND LOADS :latest.
+//
+// release.yml's pin-digests job rewrites every production manifest's image to
+// ghcr.io/eighred/<service>@sha256:<digest> — a digest computed from the CI
+// build. tools/rig-images.sh builds images from source and `kind load`s them
+// as ghcr.io/eighred/<service>:latest; a locally built image can never
+// reproduce a CI-computed digest, so a rig applying the manifest unmodified
+// asks the kubelet for a reference no local image can satisfy and every pod
+// ImagePullBackOffs against a private registry the node has no credential for.
+//
+// tools/rig_dev_patch.py is supposed to rewrite each of our own images from
+// the pinned digest form to the :latest tag the rig actually loaded, so that
+// the imagePullPolicy: IfNotPresent it also sets (see
+// TestRigDevSecretsShadowEverySecretProviderClassTheRigMounts's neighbor,
+// patch_pod_spec) makes the kind-loaded image authoritative.
+//
+// This test runs the ACTUAL patcher against the ACTUAL rig manifests and
+// inspects its stdout — not the script's source — because a guard that reads
+// the source and asserts it contains a rewrite would be exactly the "guard
+// that was read rather than fired" pattern this repository has already
+// catalogued (see the board's "guards that could not fire" row, cited
+// elsewhere in this package).
+func TestRigDevPatchRewritesDigestPinnedImagesToLocalTags(t *testing.T) {
+	pythonPath, err := exec.LookPath("python3")
+	if err != nil {
+		// FAIL, do not skip. tools/rig-apply.sh:101-105 already hard-requires
+		// python3 for this exact script and refuses to proceed without it
+		// ("a sed-based substitute would risk silently mangling a manifest");
+		// a skip here would make this suite silently assert less than it
+		// claims, which is the same class of defect the "157 pkgs / 0 fail"
+		// incident already cost this repo credibility over. Install Python 3
+		// (kanz-py already requires a Python toolchain) and PyYAML
+		// (`pip install pyyaml`) and re-run.
+		t.Fatalf("python3 not found on PATH: %v — tools/rig_dev_patch.py needs a real Python "+
+			"interpreter with PyYAML installed (pip install pyyaml); this test refuses to skip "+
+			"rather than silently assert nothing about the patcher's output", err)
+	}
+
+	root := moduleRoot(t)
+	repoRoot := filepath.Dir(root)
+	patcher := filepath.Join(repoRoot, "tools", "rig_dev_patch.py")
+
+	ownImageRe := regexp.MustCompile(
+		`^ghcr\.io/eighred/([a-z0-9][a-z0-9._-]*)(?:@sha256:[a-f0-9]{64}|:[A-Za-z0-9._{}-]+(?:@sha256:[a-f0-9]{64})?)$`)
+
+	manifestsProcessed := 0
+	imagesInspected := 0
+	ownImagesInspected := 0
+	thirdPartyImagesInspected := 0
+
+	for _, svc := range rigWorkloads {
+		manifestPath := filepath.Join(root, "infra", "deploy", svc)
+		origRaw := readFile(t, manifestPath)
+
+		cmd := exec.Command(pythonPath, patcher, manifestPath)
+		cmd.Dir = repoRoot
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("python3 tools/rig_dev_patch.py %s: %v\noutput:\n%s", svc, err, string(out))
+		}
+		patchedRaw := string(out)
+
+		// Coarse, whole-output check: no digest reference of ANY kind may survive
+		// the patch, wherever in the document it lives — not just inside a
+		// container's image: field. This is the arm that would have caught the
+		// unfixed patcher outright: it never touches the image string at all, so
+		// every @sha256: in the source manifest survives verbatim into stdout.
+		if strings.Contains(patchedRaw, "@sha256:") {
+			t.Errorf("%s: patched output still contains a @sha256: digest reference — the rig cannot "+
+				"satisfy a digest with a locally built image, so this pod will ImagePullBackOff. "+
+				"patched output:\n%s", svc, patchedRaw)
+		}
+
+		origImages, err := decodeContainerImages(origRaw)
+		if err != nil {
+			t.Fatalf("%s: parse original manifest as YAML: %v", svc, err)
+		}
+		patchedImages, err := decodeContainerImages(patchedRaw)
+		if err != nil {
+			t.Fatalf("%s: parse patched output as YAML: %v", svc, err)
+		}
+		if len(origImages) != len(patchedImages) {
+			t.Fatalf("%s: original manifest has %d container image(s) but patched output has %d — "+
+				"the patch must never add or remove a container", svc, len(origImages), len(patchedImages))
+		}
+		if len(origImages) == 0 {
+			t.Fatalf("%s: found zero container images in the manifest — this test cannot assert "+
+				"anything about it; has the manifest's shape changed?", svc)
+		}
+
+		manifestsProcessed++
+		for i, orig := range origImages {
+			patched := patchedImages[i]
+			imagesInspected++
+
+			if m := ownImageRe.FindStringSubmatch(orig); m != nil {
+				ownImagesInspected++
+				name := m[1]
+				want := "ghcr.io/eighred/" + name + ":latest"
+				if patched != want {
+					t.Errorf("%s: our own image %q was patched to %q, want %q — the rig loaded "+
+						"ghcr.io/eighred/%s:latest via tools/rig-images.sh, and imagePullPolicy: "+
+						"IfNotPresent only helps if the requested reference actually matches what "+
+						"was kind-loaded", svc, orig, patched, want, name)
+				}
+				continue
+			}
+
+			if strings.HasPrefix(orig, "ghcr.io/eighred/") {
+				// Carries our registry prefix but not a shape ownImageRe understands
+				// (neither a recognized digest nor a recognized tag form) — this is
+				// exactly the "reference shape we do not understand" the patcher
+				// itself must fail loudly on rather than silently leave a digest in
+				// place. If the patcher passed it through unchanged, catch that here
+				// too: the shape is unrecognized either way, so the manifest (or this
+				// test's regex) needs to be taught the new shape.
+				t.Errorf("%s: image %q carries our registry prefix but neither this test's ownImageRe "+
+					"nor (by contract) tools/rig_dev_patch.py should have let it through unrecognized — "+
+					"patched value was %q", svc, orig, patched)
+				continue
+			}
+
+			// Third-party image (gcr.io/distroless/..., ghcr.io/spiffe/..., etc.) —
+			// the rig pulls these normally; the patcher must leave them byte-identical.
+			thirdPartyImagesInspected++
+			if patched != orig {
+				t.Errorf("%s: third-party image %q was rewritten to %q — the patcher must only "+
+					"touch references to our own registry (ghcr.io/eighred/*); rewriting a "+
+					"third-party reference is worse than the bug this patch exists to fix, since "+
+					"the rig has no local build of it to fall back on", svc, orig, patched)
+			}
+		}
+	}
+
+	// Non-vacuity. A test that iterated an empty rigWorkloads set, or found zero
+	// images across every manifest it did walk, would pass having checked
+	// nothing — exactly the failure mode this repository's board already
+	// catalogues under "guards that could not fire."
+	if manifestsProcessed == 0 {
+		t.Fatal("processed zero manifests — rigWorkloads is empty or every iteration failed before " +
+			"incrementing the counter; this test would otherwise pass vacuously")
+	}
+	if imagesInspected == 0 {
+		t.Fatal("inspected zero container images across every rig manifest — this test would " +
+			"otherwise pass vacuously")
+	}
+	if ownImagesInspected == 0 {
+		t.Fatal("found zero of our own (ghcr.io/eighred/*) images across every rig manifest — the " +
+			"digest-to-:latest rewrite this test exists to verify was never exercised")
+	}
+	if thirdPartyImagesInspected == 0 {
+		// Not a failure — an honest statement. None of the five rig workload
+		// manifests (oms, tv-sync, api-gateway, webhook-ingest, compliance) carry
+		// a third-party image: field; their only non-ghcr.io/eighred reference is
+		// the csi.spiffe.io CSI *driver* on the spiffe volume, which is not an
+		// image and patch_pod_spec deliberately leaves it alone (see this file's
+		// TestRigDevSecretsShadowEverySecretProviderClassTheRigMounts doc comment
+		// on csi.spiffe.io volumes). The over-rewrite arm above is still real code
+		// that would fire the moment a rig manifest gains one.
+		t.Log("no third-party container image found in any rig workload manifest — the " +
+			"over-rewrite arm above never had a case to exercise this run; it remains live for " +
+			"the first rig manifest that adds one")
+	}
+}
+
+// decodeContainerImages walks every YAML document in raw and returns every
+// container/initContainer image string it finds, in document order and then
+// containers-before-initContainers within a document. It reuses pullSecretDoc
+// (declared in supplychain_test.go, same package) rather than a second
+// hand-rolled struct shaped identically to it — the two are the same
+// Deployment/StatefulSet/DaemonSet/Job pod-template shape, just read for a
+// different purpose.
+func decodeContainerImages(raw string) ([]string, error) {
+	var images []string
+	dec := yaml.NewDecoder(strings.NewReader(raw))
+	for {
+		var doc pullSecretDoc
+		if err := dec.Decode(&doc); err != nil {
+			if errors.Is(err, io.EOF) {
+				break
+			}
+			return nil, err
+		}
+		ps := doc.Spec.Template.Spec
+		for _, c := range ps.Containers {
+			images = append(images, c.Image)
+		}
+		for _, c := range ps.InitContainers {
+			images = append(images, c.Image)
+		}
+	}
+	return images, nil
 }
