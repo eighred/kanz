@@ -753,3 +753,129 @@ func TestReleaseMatrixCoversEveryBuiltService(t *testing.T) {
 			len(problems), strings.Join(problems, "\n  "))
 	}
 }
+
+// mutableTagExempt records an image reference in infra/ that is deliberately
+// NOT digest-pinned, with a written reason. Every entry must be retired; the
+// dead-exemption arm below fails the build when one outlives its reason.
+var mutableTagExempt = map[string]string{
+	"infra/gitops/preview-applicationset.yaml": "per-PR preview environments build a fresh :pr-N image per pull " +
+		"request; there is no release digest to pin to and the environment is ephemeral",
+
+	// TEMPORARY — retire on the first release that publishes this image.
+	// nats-rebuild joined the build/release matrices in the same branch as this
+	// guard, so no digest exists for it yet. release.yml's pin-digests job
+	// rewrites it on the first tagged run; delete this line then, and the dead-
+	// exemption arm below will fail the build until it is deleted.
+	"infra/dr/nats/rebuild-job.yaml": "image added to the CI matrices in this branch; no published digest exists " +
+		"until the next release. Retire on the first pin-digests run",
+}
+
+// productionImageRef matches an image reference to our own registry, by the
+// SHAPE of the reference rather than by the YAML key that carries it.
+//
+// Keying on `image:` was the first attempt and it was WRONG THREE WAYS, all
+// found by running it:
+//   - kustomize carries a plural `images:` LIST of bare quoted strings
+//     (infra/gitops/preview-applicationset.yaml:53-55), so both preview refs
+//     were invisible — and the exemption declared for that file was therefore
+//     permanently dead, which failed the build on a clean tree;
+//   - infra/deploy/operator-deploy.yaml:179 passes the provisioner image as an
+//     env var `value:`, not an `image:`. That is the image the operator injects
+//     into every provisioning Job spec it builds, so a mutable tag there ships
+//     an unpinned provisioner to every TUI-provisioned node — precisely the
+//     supply chain this guard exists to protect, and it was outside its view;
+//   - it silently defined "production manifest" as "whatever uses the key I
+//     thought of", which is how a guard ends up asserting less than it claims.
+//
+// A reference must carry a tag or a digest, which is what distinguishes it from
+// the sigstore GLOB at infra/security/admission/cluster-image-policy.yaml:27
+// (`ghcr.io/eighred/**`) — a policy pattern, not an image, and not pinnable.
+var productionImageRef = regexp.MustCompile(
+	`ghcr\.io/eighred/[a-z0-9][a-z0-9._-]*(?:@sha256:[a-f0-9]{64}|:[A-Za-z0-9._{}-]+)`)
+
+// yamlComment strips trailing `#` comments so the guard scans CONFIGURATION,
+// not prose. Without this, matching on reference shape would trip on a comment
+// mentioning an example tag. `d34bb7d` fixed this same class of defect in the
+// NATS posture guards, where needles matched the very comments that documented
+// them.
+var yamlComment = regexp.MustCompile(`(?m)#.*$`)
+
+// TestProductionManifestsPinImagesByDigest is OPS-M4a's other half.
+//
+// release.yml already pins everything AFTER the build to the immutable digest —
+// trivy, cosign and the SBOM all attest one specific image — and pin-digests
+// rewrites the manifests to match. But nothing stopped a manifest drifting back
+// to a tag, and one already had: the DR Job ran ghcr.io/eighred/nats-rebuild:latest.
+//
+// A mutable tag breaks the supply chain in two distinct ways, and both are live:
+// :latest defaults imagePullPolicy to Always, so replicas rescheduled at
+// different moments can run DIFFERENT CODE under one Deployment; and there is no
+// previous digest to roll back TO, which is the primitive the TUI's rollback is
+// supposed to wrap.
+func TestProductionManifestsPinImagesByDigest(t *testing.T) {
+	root := moduleRoot(t)
+	infra := filepath.Join(root, "infra")
+
+	var problems []string
+	seenFiles := map[string]bool{}
+	refCount := 0
+
+	err := filepath.WalkDir(infra, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() || (!strings.HasSuffix(path, ".yaml") && !strings.HasSuffix(path, ".yml")) {
+			return nil
+		}
+		body, rErr := os.ReadFile(path)
+		if rErr != nil {
+			return rErr
+		}
+		rel, _ := filepath.Rel(root, path)
+		relSlash := filepath.ToSlash(rel)
+
+		scanned := yamlComment.ReplaceAllString(string(body), "")
+		for _, ref := range productionImageRef.FindAllString(scanned, -1) {
+			refCount++
+			if strings.Contains(ref, "@sha256:") {
+				if _, exempt := mutableTagExempt[relSlash]; exempt {
+					problems = append(problems, relSlash+
+						": every image here is digest-pinned but the file is still in mutableTagExempt — stale exemption, remove it")
+				}
+				continue
+			}
+			seenFiles[relSlash] = true
+			if _, exempt := mutableTagExempt[relSlash]; exempt {
+				continue
+			}
+			problems = append(problems, fmt.Sprintf(
+				"%s: %s is a MUTABLE tag. Production manifests must pin @sha256: — "+
+					"release.yml's pin-digests job writes them. Add a named exemption with a "+
+					"written reason only if the image genuinely has no release digest.", relSlash, ref))
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walk infra: %v", err)
+	}
+
+	// Non-vacuity: if the regex stops matching, this test would pass having
+	// checked nothing.
+	if refCount == 0 {
+		t.Fatal("no ghcr.io/eighred/ image references found under infra/ — the parse is broken, " +
+			"and this test would otherwise pass vacuously")
+	}
+
+	// Anti-rot, direction two: an exemption for a file with no mutable tag left.
+	for file := range mutableTagExempt {
+		if !seenFiles[file] {
+			problems = append(problems, file+
+				": in mutableTagExempt but has no mutable tag — dead exemption, remove it")
+		}
+	}
+
+	if len(problems) > 0 {
+		sort.Strings(problems)
+		t.Fatalf("mutable image tags in production manifests:\n\n  %s", strings.Join(problems, "\n  "))
+	}
+}
