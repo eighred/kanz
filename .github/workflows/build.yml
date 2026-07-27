@@ -145,6 +145,12 @@ jobs:
           # into the cluster over SSH. It had no image, so AddNode had nothing to run.
           - service: kanz-provisioner
             dockerfile: kanz/cmd/kanz-provisioner/Dockerfile
+          # DR-01c. The spine-rebuild Job has referenced this image since it was
+          # written and nothing built it, so infra/dr/failover.sh waited 600s on
+          # an ImagePullBackOff. A disaster-recovery path that cannot pull its
+          # own image is not a disaster-recovery path.
+          - service: nats-rebuild
+            dockerfile: kanz/tools/natsrebuild/cmd/nats-rebuild/Dockerfile
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
 
