@@ -114,7 +114,7 @@ spec:
       # FORCE RLS applies to it (MT-01d), and therefore cannot create tables.
       initContainers:
         - name: migrate
-          image: ghcr.io/eighred/kanz-migrate:latest
+          image: ghcr.io/eighred/kanz-migrate@sha256:32864eab84f8f183b06fa50b77b71b7ebbfea18eedd1b29a15c62db64c3cbd6c
           args: ["--dir", "/migrations/risk-engine"]
           env:
             - { name: KANZ_MIGRATE_DATABASE_URL_FILE, value: /run/secrets/db/migrate-database-url }
@@ -130,7 +130,7 @@ spec:
         - name: risk-engine
           # Pinned to a digest in production (set by the GitOps bump); the
           # CICD-01d admission policy rejects it unless cosign-signed.
-          image: ghcr.io/eighred/risk-engine:latest
+          image: ghcr.io/eighred/risk-engine@sha256:a2aed6e94bc563c19e75083a46dc425dbd9cf738c451b5ae18413170894e12ec
           ports:
             - { containerPort: 8081, name: http }
             - { containerPort: 9090, name: grpc }

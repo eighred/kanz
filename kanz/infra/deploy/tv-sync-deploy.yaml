@@ -86,7 +86,7 @@ spec:
       # makes FORCE RLS apply to it, and it deliberately cannot create tables.
       initContainers:
         - name: migrate
-          image: ghcr.io/eighred/kanz-migrate:latest
+          image: ghcr.io/eighred/kanz-migrate@sha256:32864eab84f8f183b06fa50b77b71b7ebbfea18eedd1b29a15c62db64c3cbd6c
           args: ["--dir", "/migrations/tv-sync"]
           env:
             - { name: KANZ_MIGRATE_DATABASE_URL_FILE, value: /run/secrets/db/migrate-database-url }
@@ -101,7 +101,7 @@ spec:
       containers:
         - name: tv-sync
           # Pinned to a cosign-signed digest by the GitOps bump (CICD-01d).
-          image: ghcr.io/eighred/tv-sync:latest
+          image: ghcr.io/eighred/tv-sync@sha256:850fe1855a7a85405001c9f90f7fe3db026fca7dc7ea1ded9d6baaed2f413a3b
           ports:
             - { containerPort: 8091, name: http }
           env:

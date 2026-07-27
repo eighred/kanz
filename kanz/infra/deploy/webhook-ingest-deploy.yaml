@@ -123,7 +123,7 @@ spec:
       containers:
         - name: webhook-ingest
           # Pinned to a cosign-signed digest by the GitOps bump (CICD-01d).
-          image: ghcr.io/eighred/webhook-ingest:latest
+          image: ghcr.io/eighred/webhook-ingest@sha256:08e9935d162b374291b742c0bf12c3e3f9e95cf18a1afb5c67db08cce48bb0fc
           ports:
             - { containerPort: 8090, name: http }
           env:
