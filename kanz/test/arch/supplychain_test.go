@@ -766,8 +766,17 @@ var mutableTagExempt = map[string]string{
 	// guard, so no digest exists for it yet. release.yml's pin-digests job
 	// rewrites it on the first tagged run; delete this line then, and the dead-
 	// exemption arm below will fail the build until it is deleted.
-	"infra/dr/nats/rebuild-job.yaml": "image added to the CI matrices in this branch; no published digest exists " +
-		"until the next release. Retire on the first pin-digests run",
+	// RETIRED 2026-07-27 by the mechanism that was supposed to retire it.
+	// infra/dr/nats/rebuild-job.yaml carried a temporary entry reading "no
+	// published digest exists until the next release. Retire on the first
+	// pin-digests run". v0.2.0's pin-digests run rewrote it to
+	// @sha256:70d5351a…, and BOTH anti-rot arms then failed kanz-ci on this
+	// branch — "every image here is digest-pinned but the file is still in
+	// mutableTagExempt" and "in mutableTagExempt but has no mutable tag".
+	// The exemption could not be forgotten because the guard would not let the
+	// pin PR merge with it present. That is the whole design, observed working
+	// rather than asserted, so the evidence is recorded here and not only in a
+	// commit message.
 }
 
 // productionImageRef matches an image reference to our own registry, by the
