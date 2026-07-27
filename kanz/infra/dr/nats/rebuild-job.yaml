@@ -43,16 +43,58 @@ spec:
       restartPolicy: Never
       containers:
         - name: nats-rebuild
-          # Built from kanz/tools/natsrebuild/cmd/nats-rebuild; add it to the
-          # CICD-01c image matrix + a distroless Dockerfile (follow-up).
+          # Built from kanz/tools/natsrebuild/cmd/nats-rebuild/Dockerfile
+          # (distroless static), by both build.yml's and release.yml's image
+          # matrices — service: nats-rebuild is present in each. The :latest
+          # tag below and its mutableTagExempt entry in
+          # kanz/test/arch/supplychain_test.go retire together on the first
+          # pin-digests run after a tagged release publishes this image's
+          # digest.
           image: ghcr.io/eighred/nats-rebuild:latest
           env:
             - { name: NATS_REBUILD_KAFKA_BROKERS, value: "kafka:9092" }
             - { name: NATS_REBUILD_NATS_URL, value: "nats://nats:4222" }
-            # The log-of-record topics (infra/kafka/README §Topics). The live
-            # spine needs the recent window, not full history — 24h matches the
-            # longest live-tier max-age (infra/nats/README §Streams).
-            - { name: NATS_REBUILD_TOPICS, value: "market.equity,market.option,risk.portfolio,risk.portfolio.snapshot,execution.order,execution.order.snapshot,inference.feature,inference.prediction,platform.model,platform.config,data.market_stream,data.feature" }
+            # THE ARCHIVER'S PRODUCED SET — what is in Kafka, and therefore the
+            # only thing that can be rebuilt from it. Held to
+            # infra/kafka/topics-job.yaml x the archiver's DefaultSubjects by
+            # TestArchivedTopicConsumersMatchTheArchiverProducedSet; the same
+            # guard holds lake-sink's LAKE_SINK_TOPICS to the same set.
+            #
+            # This list USED to be the pre-36a9ba1 dead table (market.equity,
+            # execution.order, platform.model, data.market_stream, ...): eight
+            # topics that do not exist and NOT ONE of the money path. A DR
+            # rebuild would have restored no orders, no fills, no accounting,
+            # no positions and no mandates, and exited 0.
+            #
+            # Not restored, each deliberately: market.book/market.crypto are
+            # unarchived by design (highest volume, re-fetchable from the
+            # venue), dlq.archiver holds poison messages that must never go
+            # back on the live spine, and wealth/alternatives have no archiver
+            # subscription so nothing was ever written to them.
+            #
+            # TENANT SCOPE: this list is the __system__ tenant's UN-PREFIXED
+            # archived topic set only. topic.go:61-64 prefixes every topic
+            # with "{tenant}." for any non-__system__ tenant, and
+            # infra/kafka/tenancy.yaml provisions the same table under that
+            # prefix — so an onboarded tenant's archived topics land at
+            # {tenant}.{domain}.{entity}, names that do not appear anywhere
+            # in this flat list. THIS JOB DOES NOT READ THEM: a tenant DR run
+            # would drain nothing for that tenant and still exit 0.
+            # Per-tenant DR reconstruction is NOT implemented here — it is a
+            # separate future capability, not an oversight. If you are
+            # onboarding a tenant that needs DR coverage, this Job is not
+            # where that gets solved.
+            - { name: NATS_REBUILD_TOPICS, value: "order.order,strategy.signal,accounting.balance,settlement.instruction,compliance.breach,compliance.mandate,risk.portfolio,risk.position,platform.authz,platform.compliance,platform.mode,inference.feature,inference.prediction,data.feature" }
+            # COMPACTED STATE — read IN FULL, never through the time window.
+            # Compaction keeps the latest record per key regardless of age, so
+            # a mandate armed last week is older than any recent window and
+            # would simply not come back. A mandate that does not come back is
+            # a compliance control that returns DISARMED (topics-job.yaml says
+            # so in writing). Must equal exactly the `compact` rows of the
+            # derived set — the guard asserts it.
+            - { name: NATS_REBUILD_STATE_TOPICS, value: "compliance.mandate,risk.position" }
+            # The recent window for EVENT topics only. 24h matches the longest
+            # live-tier max-age (infra/nats/README §Streams).
             - { name: NATS_REBUILD_SINCE, value: "24h" }
             # SEC-01c: SVID socket so NATS (verify:true) accepts the publisher.
             - { name: NATS_REBUILD_SPIFFE_SOCKET, value: "/run/spiffe/spire-agent.sock" }

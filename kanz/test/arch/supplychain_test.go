@@ -753,3 +753,282 @@ func TestReleaseMatrixCoversEveryBuiltService(t *testing.T) {
 			len(problems), strings.Join(problems, "\n  "))
 	}
 }
+
+// mutableTagExempt records an image reference in infra/ that is deliberately
+// NOT digest-pinned, with a written reason. Every entry must be retired; the
+// dead-exemption arm below fails the build when one outlives its reason.
+var mutableTagExempt = map[string]string{
+	"infra/gitops/preview-applicationset.yaml": "per-PR preview environments build a fresh :pr-N image per pull " +
+		"request; there is no release digest to pin to and the environment is ephemeral",
+
+	// TEMPORARY — retire on the first release that publishes this image.
+	// nats-rebuild joined the build/release matrices in the same branch as this
+	// guard, so no digest exists for it yet. release.yml's pin-digests job
+	// rewrites it on the first tagged run; delete this line then, and the dead-
+	// exemption arm below will fail the build until it is deleted.
+	"infra/dr/nats/rebuild-job.yaml": "image added to the CI matrices in this branch; no published digest exists " +
+		"until the next release. Retire on the first pin-digests run",
+}
+
+// productionImageRef matches an image reference to our own registry, by the
+// SHAPE of the reference rather than by the YAML key that carries it.
+//
+// Keying on `image:` was the first attempt and it was WRONG THREE WAYS, all
+// found by running it:
+//   - kustomize carries a plural `images:` LIST of bare quoted strings
+//     (infra/gitops/preview-applicationset.yaml:53-55), so both preview refs
+//     were invisible — and the exemption declared for that file was therefore
+//     permanently dead, which failed the build on a clean tree;
+//   - infra/deploy/operator-deploy.yaml:179 passes the provisioner image as an
+//     env var `value:`, not an `image:`. That is the image the operator injects
+//     into every provisioning Job spec it builds, so a mutable tag there ships
+//     an unpinned provisioner to every TUI-provisioned node — precisely the
+//     supply chain this guard exists to protect, and it was outside its view;
+//   - it silently defined "production manifest" as "whatever uses the key I
+//     thought of", which is how a guard ends up asserting less than it claims.
+//
+// A reference must carry a tag or a digest, which is what distinguishes it from
+// the sigstore GLOB at infra/security/admission/cluster-image-policy.yaml:27
+// (`ghcr.io/eighred/**`) — a policy pattern, not an image, and not pinnable.
+//
+// TAG-PLUS-DIGEST. The digest branch used to require `@sha256:` to immediately
+// follow the name, so a fully-pinned `name:tag@sha256:digest` fell through to
+// the tag branch, matched only as far as `:tag`, and was reported as a mutable
+// tag — a false failure on a reference that was already fully pinned, printing
+// the truncated `name:tag` while doing it. The tag branch now accepts an
+// optional trailing `@sha256:...` of its own, so `:tag`, `@sha256:...`, and
+// `:tag@sha256:...` all match, while a bare name with neither — e.g. the
+// glob's `ghcr.io/eighred/**` — still does not: at least one of tag or digest
+// is required by the alternation's construction, not by a separate check.
+var productionImageRef = regexp.MustCompile(
+	`ghcr\.io/eighred/[a-z0-9][a-z0-9._-]*(?:@sha256:[a-f0-9]{64}|:[A-Za-z0-9._{}-]+(?:@sha256:[a-f0-9]{64})?)`)
+
+// coverageGapExempt names files that legitimately contain the literal
+// "ghcr.io/eighred/" without carrying any pinnable productionImageRef match —
+// checked by the per-file coverage arm in TestProductionManifestsPinImagesByDigest.
+// This is deliberately a SEPARATE list from mutableTagExempt, not an entry in
+// it: mutableTagExempt excuses a real, matched, mutable reference from
+// failing the build; this one excuses a file from the "the prefix is here but
+// nothing parsed" alarm because the file genuinely has nothing pinnable in it
+// — a policy glob, not an image.
+var coverageGapExempt = map[string]string{
+	"infra/security/admission/cluster-image-policy.yaml": "carries the sigstore glob `ghcr.io/eighred/**`, " +
+		"which has neither tag nor digest and is not a pinnable image reference",
+}
+
+// yamlComment strips trailing `#` comments so the guard scans CONFIGURATION,
+// not prose. Without this, matching on reference shape would trip on a comment
+// mentioning an example tag. `d34bb7d` fixed this same class of defect in the
+// NATS posture guards, where needles matched the very comments that documented
+// them.
+//
+// YAML only opens a comment at the start of a line or after whitespace — a
+// `#` glued to a preceding character (`a#b`) is literal scalar content, not a
+// comment marker. The old `#.*$` stripped from the FIRST `#` on the line
+// regardless of what preceded it, which silently deleted a reference living
+// after a mid-token `#` instead of scanning it — the opposite of the failure
+// direction this guard exists to prevent, so getting this wrong is worse than
+// under-stripping. `(^|\s)#.*$` requires whitespace or line-start immediately
+// before the `#` before treating anything as a comment, which also means a
+// URL fragment sharing a line with a reference survives intact.
+var yamlComment = regexp.MustCompile(`(?m)(^|\s)#.*$`)
+
+// TestProductionManifestsPinImagesByDigest is OPS-M4a's other half.
+//
+// release.yml already pins everything AFTER the build to the immutable digest —
+// trivy, cosign and the SBOM all attest one specific image — and pin-digests
+// rewrites the manifests to match. But nothing stopped a manifest drifting back
+// to a tag, and one already had: the DR Job ran ghcr.io/eighred/nats-rebuild:latest.
+//
+// A mutable tag breaks the supply chain in two distinct ways, and both are live:
+// :latest defaults imagePullPolicy to Always, so replicas rescheduled at
+// different moments can run DIFFERENT CODE under one Deployment; and there is no
+// previous digest to roll back TO, which is the primitive the TUI's rollback is
+// supposed to wrap.
+func TestProductionManifestsPinImagesByDigest(t *testing.T) {
+	root := moduleRoot(t)
+	infra := filepath.Join(root, "infra")
+
+	var problems []string
+	seenFiles := map[string]bool{}
+	refCount := 0
+	// walkedFiles and gapFiles feed the coverageGapExempt anti-rot loop below:
+	// every infra/ YAML file visited by the walk, and the subset of those
+	// whose "ghcr.io/eighred/" prefix count and productionImageRef match count
+	// disagree (see the reference-level coverage floor below).
+	walkedFiles := map[string]bool{}
+	gapFiles := map[string]bool{}
+
+	err := filepath.WalkDir(infra, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() || (!strings.HasSuffix(path, ".yaml") && !strings.HasSuffix(path, ".yml")) {
+			return nil
+		}
+		body, rErr := os.ReadFile(path)
+		if rErr != nil {
+			return rErr
+		}
+		rel, _ := filepath.Rel(root, path)
+		relSlash := filepath.ToSlash(rel)
+		walkedFiles[relSlash] = true
+
+		scanned := yamlComment.ReplaceAllString(string(body), "")
+		matches := productionImageRef.FindAllString(scanned, -1)
+		refCount += len(matches)
+		prefixCount := strings.Count(scanned, "ghcr.io/eighred/")
+		if prefixCount != len(matches) {
+			gapFiles[relSlash] = true
+		}
+
+		// Accumulate per file before judging the exemption, then report stale
+		// only once the file's scan is complete. The old code reported "every
+		// image here is digest-pinned but the file is still in
+		// mutableTagExempt" (stale exemption) the instant it saw ONE pinned
+		// reference in an exempt file, without checking whether that same
+		// file also still had a mutable one left — and once per pinned
+		// reference, not once per file. A file mixing a pinned sidecar with a
+		// genuinely-unpinned preview tag would deadlock: the stale arm says
+		// remove the exemption, the mutable-tag arm (on the same file) says
+		// add it back, and editing the test is the only way out. Report
+		// stale only when the file has at least one pinned reference AND no
+		// mutable reference left — the dead-exemption arm below already
+		// checks its own condition this same accumulate-then-judge way.
+		fileHasPinned := false
+		fileHasMutable := false
+		for _, ref := range matches {
+			if strings.Contains(ref, "@sha256:") {
+				fileHasPinned = true
+				continue
+			}
+			fileHasMutable = true
+			seenFiles[relSlash] = true
+			if _, exempt := mutableTagExempt[relSlash]; exempt {
+				continue
+			}
+			problems = append(problems, fmt.Sprintf(
+				"%s: %s is a MUTABLE tag. Production manifests must pin @sha256: — "+
+					"release.yml's pin-digests job writes them. Add a named exemption with a "+
+					"written reason only if the image genuinely has no release digest.", relSlash, ref))
+		}
+		if _, exempt := mutableTagExempt[relSlash]; exempt && fileHasPinned && !fileHasMutable {
+			problems = append(problems, relSlash+
+				": every image here is digest-pinned but the file is still in mutableTagExempt — stale exemption, remove it")
+		}
+
+		// Per-file coverage floor: REFERENCE-level, not file-level. refCount==0
+		// below only trips on TOTAL breakage across every file, and would not
+		// have caught version one of this guard, which saw 39 of 42 references
+		// and passed. A naive file-level floor (fire only when a file yields
+		// ZERO matches) is not enough either: sixteen files under infra/ carry
+		// TWO "ghcr.io/eighred/" references apiece (every *-deploy.yaml with a
+		// kanz-migrate initContainer, plus preview-applicationset.yaml), and in
+		// a multi-reference file one reference taking an unmatched form still
+		// leaves the other matching, so a zero-match test stays silent — a
+		// literal `:latest` written as a nested repository path
+		// (`ghcr.io/eighred/kanz/kanz-migrate:latest`) or a `${TAG}`-
+		// interpolated tag (`ghcr.io/eighred/kanz-migrate:${TAG}`) passes the
+		// guard right next to a reference that still matches. The fix is to
+		// count: every "ghcr.io/eighred/" occurrence in the comment-stripped
+		// text must correspond to a parsed productionImageRef match, one for
+		// one. A count mismatch means the pattern has narrowed and gone blind
+		// to some reference form in THIS file (a nested repository path, a
+		// ${TAG}-interpolated tag, a malformed digest, kustomize's split
+		// newName/newTag — any of these carries the prefix without matching
+		// the shape). coverageGapExempt names the one file that legitimately
+		// has no pinnable reference at all: the sigstore glob.
+		//
+		// Compare against `scanned`, NOT `body`. `matches` was produced from
+		// `scanned` (post-comment-strip), so the count it is compared to must
+		// come from the same text — comparing against raw `body` would count
+		// prefix occurrences living inside real YAML comments (which
+		// yamlComment is supposed to remove) as if they were unmatched
+		// references, reporting a spurious gap on every file with an ordinary
+		// comment mentioning the prefix.
+		if prefixCount != len(matches) {
+			if _, known := coverageGapExempt[relSlash]; !known {
+				problems = append(problems, fmt.Sprintf(
+					"%s: %d \"ghcr.io/eighred/\" occurrence(s) in the comment-stripped text but "+
+						"productionImageRef matched only %d of them — the pattern has narrowed and is "+
+						"blind to some reference form here", relSlash, prefixCount, len(matches)))
+			}
+		}
+		// Second, independent safety net: RAW BODY, NOT scanned. This checks the
+		// literal string against `body` (pre-comment-strip) for the case where
+		// yamlComment itself over-strips a real reference — if the comment
+		// stripper ever ate part of a genuine image line, both `scanned`'s
+		// prefix count and `matches` would drop together and the check above
+		// would see them agree (both zero) while the reference is genuinely
+		// lost. This arm exists to catch exactly that: total blindness (zero
+		// matches) alongside evidence in the untouched raw text that a
+		// reference was here. The consequence is that a file whose ONLY
+		// "ghcr.io/eighred/" occurrence sits inside a YAML comment, with no
+		// real image reference anywhere in the file, will also trip this arm
+		// and demand a coverageGapExempt entry even though nothing is
+		// unpinned. No file in this repo does that today; if one ever does,
+		// the correct response is to add it to coverageGapExempt with a
+		// reason saying so — not to change this check to scan `scanned`
+		// instead.
+		if len(matches) == 0 && strings.Contains(string(body), "ghcr.io/eighred/") {
+			if _, known := coverageGapExempt[relSlash]; !known {
+				problems = append(problems, relSlash+
+					": contains \"ghcr.io/eighred/\" but productionImageRef matched zero references in it — "+
+					"the pattern has narrowed and is blind to some reference form here")
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walk infra: %v", err)
+	}
+
+	// Non-vacuity, coarse floor: if the regex stops matching ANYTHING, this
+	// test would pass having checked nothing. The per-file coverage check
+	// above is the fine-grained floor that catches losing just one form,
+	// which is how this guard's first version actually failed (39 of 42 seen,
+	// and refCount==0 alone would never have noticed).
+	if refCount == 0 {
+		t.Fatal("no ghcr.io/eighred/ image references found under infra/ — the parse is broken, " +
+			"and this test would otherwise pass vacuously")
+	}
+
+	// Anti-rot, direction two: an exemption for a file with no mutable tag left.
+	for file := range mutableTagExempt {
+		if !seenFiles[file] {
+			problems = append(problems, file+
+				": in mutableTagExempt but has no mutable tag — dead exemption, remove it")
+		}
+	}
+
+	// Anti-rot for coverageGapExempt, same idiom as the mutableTagExempt loop
+	// above: an exemption nobody re-checks is how this repository ends up with
+	// exemptions that outlived their reason and silently disabled the check
+	// they were carved out of. A coverageGapExempt entry is dead weight, with
+	// nothing else flagging it, in either of two directions — the file it
+	// names was never walked (deleted, renamed, or moved out of infra/), or
+	// the file's prefix count now equals its match count (no gap left — the
+	// coverage floor above found nothing to complain about, so there is
+	// nothing left to excuse). Keyed to the same reference-level notion as the
+	// floor itself (gapFiles, populated from prefixCount != len(matches)), not
+	// to "the file was matched at all" — a file can have real matches AND
+	// still have a gap (one of two references unmatched), and the old
+	// file-level notion would have called that file's exemption dead while a
+	// genuine gap was still open under it.
+	for file := range coverageGapExempt {
+		if !walkedFiles[file] {
+			problems = append(problems, file+
+				": in coverageGapExempt but was not found under infra/ — dead exemption, remove it")
+			continue
+		}
+		if !gapFiles[file] {
+			problems = append(problems, file+
+				": in coverageGapExempt but has no coverage gap (prefix count equals match count) — dead exemption, remove it")
+		}
+	}
+
+	if len(problems) > 0 {
+		sort.Strings(problems)
+		t.Fatalf("mutable image tags in production manifests:\n\n  %s", strings.Join(problems, "\n  "))
+	}
+}
