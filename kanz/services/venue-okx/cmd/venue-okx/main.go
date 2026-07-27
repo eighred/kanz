@@ -32,6 +32,7 @@ import (
 	"time"
 
 	venuepb "github.com/kanz-eng/kanz-schemas-go/venue/v1"
+	"github.com/prometheus/client_golang/prometheus"
 	"google.golang.org/grpc"
 
 	"github.com/kanz-eng/kanz/internal/execution"
@@ -45,6 +46,17 @@ import (
 	"github.com/kanz-eng/kanz/services/venue-okx/internal/config"
 	"github.com/kanz-eng/kanz/services/venue-okx/internal/okx"
 )
+
+// orderViewDurable reports whether this adapter's order view survives a
+// restart: 1 when it is backed by Postgres, 0 when it is in-memory. An
+// operator can see the degraded posture on a dashboard without reading
+// logs — the healing watchdog goes blind across a restart exactly when this
+// reads 0 (INFRA-M7a-3).
+var orderViewDurable = prometheus.NewGauge(prometheus.GaugeOpts{
+	Name:        "kanz_venue_orderview_durable",
+	Help:        "1 if the venue adapter's order view is backed by Postgres (survives a restart), 0 if in-memory.",
+	ConstLabels: prometheus.Labels{"venue": "okx"},
+})
 
 func main() {
 	cfg, err := config.Load()
@@ -107,9 +119,11 @@ func run(cfg config.Config) error {
 		_ = httpSrv.Shutdown(shutCtx)
 	}()
 
+	obs.Registry.MustRegister(orderViewDurable)
+
 	// The adapter's own order view — the state its workers read after the process
 	// split cut them off from the OMS store.
-	view, closeView, err := openView(ctx, cfg)
+	view, closeView, err := openView(ctx, cfg, logger)
 	if err != nil {
 		return err
 	}
@@ -250,14 +264,26 @@ func newGRPCServer(ctx context.Context, cfg config.Config, venue execution.Venue
 }
 
 // openView selects the durable order view when a DSN is set, else in-memory.
-func openView(ctx context.Context, cfg config.Config) (orderview.Store, func(), error) {
+//
+// By the time openView runs, config.Load has already refused to start if a
+// _FILE mount was DECLARED but unreadable — that is a deployment fault, and
+// it fails fast in Load, not here. So an empty cfg.DatabaseURL here can only
+// mean "no durable store was ever configured" (dev/test/rig), and that is a
+// real, if degraded, operating posture — not silently acceptable, exactly
+// like the plaintext-gRPC posture warned about above.
+func openView(ctx context.Context, cfg config.Config, logger *slog.Logger) (orderview.Store, func(), error) {
 	if cfg.DatabaseURL == "" {
+		logger.Warn("venue-okx: ORDER VIEW IS IN-MEMORY — no VENUE_OKX_DATABASE_URL (or _FILE mount). " +
+			"It will be lost on restart: the healing watchdog goes blind across the restart, and in-flight " +
+			"orders already live at the exchange cannot be reconciled")
+		orderViewDurable.Set(0)
 		return orderview.NewMemory(), func() {}, nil
 	}
 	pool, err := pg.NewTenantPool(ctx, cfg.DatabaseURL, cfg.Tenant)
 	if err != nil {
 		return nil, nil, err
 	}
+	orderViewDurable.Set(1)
 	return orderview.NewPostgres(pool), pool.Close, nil
 }
 

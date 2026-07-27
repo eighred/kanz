@@ -2,6 +2,7 @@
 package config
 
 import (
+	"fmt"
 	"log/slog"
 	"os"
 	"strings"
@@ -81,6 +82,25 @@ type Config struct {
 
 // Load reads the configuration from the environment.
 func Load() (Config, error) {
+	databaseURL, err := secret("VENUE_OKX_DATABASE_URL")
+	if err != nil {
+		return Config{}, err
+	}
+	// Keys come from a CSI/Vault file mount, never from code and never from a
+	// plaintext env in a manifest.
+	apiKey, err := secret("OKX_API_KEY")
+	if err != nil {
+		return Config{}, err
+	}
+	apiSecret, err := secret("OKX_API_SECRET")
+	if err != nil {
+		return Config{}, err
+	}
+	passphrase, err := secret("OKX_API_PASSPHRASE")
+	if err != nil {
+		return Config{}, err
+	}
+
 	return Config{
 		GRPCListen:   envOr("VENUE_OKX_GRPC_LISTEN", ":9000"),
 		HTTPListen:   envOr("VENUE_OKX_LISTEN", ":8092"),
@@ -88,7 +108,7 @@ func Load() (Config, error) {
 		Source:       envOr("VENUE_OKX_SOURCE", "venue-okx"),
 		OTLPEndpoint: os.Getenv("VENUE_OKX_OTLP_ENDPOINT"),
 		NATSURL:      os.Getenv("VENUE_OKX_NATS_URL"),
-		DatabaseURL:  secret("VENUE_OKX_DATABASE_URL"),
+		DatabaseURL:  databaseURL,
 		Tenant:       envOr("VENUE_OKX_TENANT", "__system__"),
 		SPIFFESocket: os.Getenv("SPIFFE_ENDPOINT_SOCKET"),
 
@@ -98,24 +118,32 @@ func Load() (Config, error) {
 		AllowUnverifiedAccount: os.Getenv("OKX_ALLOW_UNVERIFIED_ACCOUNT") == "true",
 		BaseURL:                envOr("OKX_BASE_URL", "https://www.okx.com"),
 		WSBase:                 envOr("OKX_WS_BASE", "wss://ws.okx.com:8443"),
-		// Keys come from a CSI/Vault file mount, never from code and never from a
-		// plaintext env in a manifest.
-		APIKey:     secret("OKX_API_KEY"),
-		APISecret:  secret("OKX_API_SECRET"),
-		Passphrase: secret("OKX_API_PASSPHRASE"),
-		Symbols:    os.Getenv("OKX_SYMBOLS"),
+		APIKey:                 apiKey,
+		APISecret:              apiSecret,
+		Passphrase:             passphrase,
+		Symbols:                os.Getenv("OKX_SYMBOLS"),
 	}, nil
 }
 
 // secret prefers a CSI/Vault file mount (<k>_FILE) over a plaintext <k> env var
-// (SEC-01d).
-func secret(k string) string {
-	if p := os.Getenv(k + "_FILE"); p != "" {
-		if b, err := os.ReadFile(p); err == nil {
-			return strings.TrimSpace(string(b))
-		}
+// (SEC-01d). Setting <k>_FILE is the deployment's declaration that a durable
+// secret mount was intended (see e.g. venue-okx-deploy.yaml's
+// VENUE_OKX_DATABASE_URL_FILE): if that path is set but unreadable — file
+// missing, wrong permissions, a bad mount — that is a deployment fault, not an
+// absent secret, and must fail loudly rather than fall through to the plaintext
+// env and then to "". A mounted-but-unreadable secret is otherwise
+// indistinguishable from one that was never configured at all. A missing file
+// and a permission error are both deployment faults; neither is special-cased.
+func secret(k string) (string, error) {
+	p := os.Getenv(k + "_FILE")
+	if p == "" {
+		return os.Getenv(k), nil
 	}
-	return os.Getenv(k)
+	b, err := os.ReadFile(p)
+	if err != nil {
+		return "", fmt.Errorf("%s_FILE=%q: declared secret mount is unreadable: %w", k, p, err)
+	}
+	return strings.TrimSpace(string(b)), nil
 }
 
 func envOr(k, def string) string {
