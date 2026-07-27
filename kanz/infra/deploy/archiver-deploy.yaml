@@ -90,7 +90,7 @@ spec:
       containers:
         - name: archiver
           # Pinned to a cosign-signed digest by the GitOps bump (CICD-01d).
-          image: ghcr.io/eighred/archiver:latest
+          image: ghcr.io/eighred/archiver@sha256:1be965c29171f0c86ec336c13decb33d941b98bc7880698c4a95bbd57c2d5a3c
           ports:
             - { containerPort: 8086, name: http }
           env:

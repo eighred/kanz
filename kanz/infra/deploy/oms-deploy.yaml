@@ -134,7 +134,7 @@ spec:
       # it deliberately cannot create tables.
       initContainers:
         - name: migrate
-          image: ghcr.io/eighred/kanz-migrate:latest
+          image: ghcr.io/eighred/kanz-migrate@sha256:32864eab84f8f183b06fa50b77b71b7ebbfea18eedd1b29a15c62db64c3cbd6c
           args: ["--dir", "/migrations/oms"]
           env:
             - { name: KANZ_MIGRATE_DATABASE_URL_FILE, value: /run/secrets/db/migrate-database-url }
@@ -160,7 +160,7 @@ spec:
           # not a compile-time one hidden in a build arg.
           #
           # Pinned to a cosign-signed digest by the GitOps bump (CICD-01d).
-          image: ghcr.io/eighred/oms:latest
+          image: ghcr.io/eighred/oms@sha256:66c8b9b8523adef3c657d8522378a45123344cdc164cf441359556fa3257b66a
           ports:
             - { containerPort: 8090, name: http }
           env:
