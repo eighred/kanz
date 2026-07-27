@@ -18,6 +18,80 @@ import (
 var topicRowPolicy = regexp.MustCompile(
 	`(?m)^\s{4}([a-z][a-z0-9_]*(?:\.[a-z0-9_]+)+)\s+\d+\s+(delete|compact)\s`)
 
+// coveredBySubject reports whether an archiver subject drains this topic.
+//
+// It walks EVERY dot boundary, not just the first and last. topic.For
+// (services/archiver/internal/topic/topic.go:55-59) appends ".snapshot" for
+// STATE_SNAPSHOT events, so a real topic can be {domain}.{entity}.snapshot
+// while the subject that drains it is {domain}.{entity}.> — a rule checking
+// only the first and last segments drops it silently, narrowing a DR restore
+// set with no error at all.
+func coveredBySubject(name string, subjects []string) bool {
+	for i := len(name); i > 0; i = strings.LastIndex(name[:i], ".") {
+		if slices.Contains(subjects, name[:i]+".>") {
+			return true
+		}
+	}
+	return false
+}
+
+// TestCoveredBySubject pins the dot-boundary walk directly, without going
+// through any manifest. The first case is the regression this function
+// exists to fix: under the old first-segment/whole-name-only rule it would
+// have been false, silently dropping a compacted state topic from the DR
+// restore set with no error at all.
+func TestCoveredBySubject(t *testing.T) {
+	tests := []struct {
+		name     string
+		topic    string
+		subjects []string
+		want     bool
+	}{
+		{
+			// topic.For appends ".snapshot" for STATE_SNAPSHOT events
+			// (topic.go:55-59), so this three-segment topic is real, but
+			// DefaultSubjects has no bare "risk.>" — only "risk.position.>"
+			// and its siblings (config.go:19-35). Only a middle-prefix
+			// check catches this; first-segment and whole-name both miss.
+			name:     "middle prefix covers a three-segment snapshot topic",
+			topic:    "risk.position.snapshot",
+			subjects: []string{"risk.position.>", "risk.exposure.>"},
+			want:     true,
+		},
+		{
+			// The old rule's first-segment case: a bare domain wildcard
+			// covering a two-segment topic.
+			name:     "first-segment prefix covers a two-segment topic",
+			topic:    "order.order",
+			subjects: []string{"order.>"},
+			want:     true,
+		},
+		{
+			// The old rule's whole-name case: the subject names the topic
+			// exactly, with ".>" appended.
+			name:     "whole-name prefix covers a two-segment topic",
+			topic:    "compliance.mandate",
+			subjects: []string{"compliance.mandate.>"},
+			want:     true,
+		},
+		{
+			// Proves the walk does not match everything: neither "market.>"
+			// nor "market.book.>" is present, so this must stay false.
+			name:     "no covering subject present",
+			topic:    "market.book",
+			subjects: []string{"risk.position.>", "order.>"},
+			want:     false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := coveredBySubject(tt.topic, tt.subjects); got != tt.want {
+				t.Errorf("coveredBySubject(%q, %v) = %v, want %v", tt.topic, tt.subjects, got, tt.want)
+			}
+		})
+	}
+}
+
 // derivedArchivedTopics computes the archiver's PRODUCED set — the only set
 // that can be rebuilt from Kafka, because it is the only set that is in Kafka.
 //
@@ -54,11 +128,10 @@ func derivedArchivedTopics(t *testing.T, root string) map[string]string {
 		if strings.HasPrefix(name, "dlq.") {
 			continue
 		}
-		domain, _, ok := strings.Cut(name, ".")
-		if !ok {
+		if !strings.Contains(name, ".") {
 			continue
 		}
-		if slices.Contains(subjects, domain+".>") || slices.Contains(subjects, name+".>") {
+		if coveredBySubject(name, subjects) {
 			out[name] = policy
 		}
 	}
