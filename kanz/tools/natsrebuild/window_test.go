@@ -60,6 +60,26 @@ func TestValidateTopicClassesRefusesAStateTopicThatIsNotBeingRebuilt(t *testing.
 	}
 }
 
+func TestValidateTopicClassesReportsEveryOrphanNotJustTheFirst(t *testing.T) {
+	// Fail closed means the operator gets one shot to fix the config before
+	// re-running into the same wall: an error naming only the first of several
+	// misconfigured state topics sends them back to fix one and hit the next.
+	err := ValidateTopicClasses(
+		[]string{"order.order"},
+		[]string{"compliance.mandate", "risk.limit"},
+	)
+	if err == nil {
+		t.Fatal("want an error naming compliance.mandate and risk.limit, got nil")
+	}
+	got := err.Error()
+	if !strings.Contains(got, "compliance.mandate") {
+		t.Fatalf("error %q does not name compliance.mandate", got)
+	}
+	if !strings.Contains(got, "risk.limit") {
+		t.Fatalf("error %q does not name risk.limit", got)
+	}
+}
+
 func TestValidateTopicClassesAcceptsAProperSubset(t *testing.T) {
 	// Non-vacuity: a validator that rejected everything would pass the test
 	// above. This proves the accept path still accepts.
