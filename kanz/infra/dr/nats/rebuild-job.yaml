@@ -43,8 +43,13 @@ spec:
       restartPolicy: Never
       containers:
         - name: nats-rebuild
-          # Built from kanz/tools/natsrebuild/cmd/nats-rebuild; add it to the
-          # CICD-01c image matrix + a distroless Dockerfile (follow-up).
+          # Built from kanz/tools/natsrebuild/cmd/nats-rebuild/Dockerfile
+          # (distroless static), by both build.yml's and release.yml's image
+          # matrices — service: nats-rebuild is present in each. The :latest
+          # tag below and its mutableTagExempt entry in
+          # kanz/test/arch/supplychain_test.go retire together on the first
+          # pin-digests run after a tagged release publishes this image's
+          # digest.
           image: ghcr.io/eighred/nats-rebuild:latest
           env:
             - { name: NATS_REBUILD_KAFKA_BROKERS, value: "kafka:9092" }
