@@ -93,7 +93,7 @@ spec:
       containers:
         - name: inference
           # Pinned to a cosign-signed digest by the GitOps bump (CICD-01d).
-          image: ghcr.io/eighred/inference@sha256:0ed93ab358f86b376d5810bdf03154aebd5e5f5990b8c471f2c9c368770f4b2b
+          image: ghcr.io/eighred/inference@sha256:8573c1568d804d045478a287d8a6ae6cca2b92c6526427f0f486d3d92abac55e
           ports:
             - { containerPort: 50051, name: grpc }
           env:

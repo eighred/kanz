@@ -90,7 +90,7 @@ spec:
       # them, so one applies and the rest exit 0 with nothing to do.
       initContainers:
         - name: migrate
-          image: ghcr.io/eighred/kanz-migrate@sha256:32864eab84f8f183b06fa50b77b71b7ebbfea18eedd1b29a15c62db64c3cbd6c
+          image: ghcr.io/eighred/kanz-migrate@sha256:909865997d2e96fd9898c5c34a6f11ade3cd65b71a18f1424d0bcda118e0e689
           args: ["--dir", "/migrations/accounting"]
           env:
             - { name: KANZ_MIGRATE_DATABASE_URL_FILE, value: /run/secrets/db/migrate-database-url }
@@ -105,7 +105,7 @@ spec:
       containers:
         - name: accounting
           # Pinned to a cosign-signed digest by the GitOps bump (CICD-01d).
-          image: ghcr.io/eighred/accounting@sha256:be9dc0ea540451a152e6b6d55f6e1f6dab27f2c4a947bb3c0e8d13beaec16801
+          image: ghcr.io/eighred/accounting@sha256:cbc5bfebc53eab95c7f618564f4a2477ed4dc4d00bd0dad58be6211c4ead5c6a
           ports:
             - { containerPort: 8080, name: http }
           env:
