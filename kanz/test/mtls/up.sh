@@ -175,10 +175,25 @@ for _ in $(seq 1 30); do
   if docker logs "$CONTAINER" 2>&1 | grep -q "Server is ready"; then
     # Not merely up — up WITH the gate armed. Without this line the broker is
     # accepting plaintext and every test against it is worthless.
-    docker logs "$CONTAINER" 2>&1 | grep -q "TLS required for client connections" || {
-      echo "FAIL: broker is ready but NOT requiring TLS — the config did not take"; exit 1; }
-    echo "NATS up on nats://localhost:${PORT} (mTLS required), certs in $OUT"
-    exit 0
+    #
+    # POLLED, NOT CHECKED ONCE. This used to grep for the TLS line at the instant
+    # "Server is ready" first appeared, which made the result depend on the order
+    # nats-server happened to flush two log lines. It failed spuriously twice —
+    # once on feat/ops-m2f/p1-4 and once on the ci-actions bump — and passed on
+    # rerun both times, which is the signature of a race rather than a config
+    # fault. The ASSERTION IS UNCHANGED: the TLS line must appear, and if it never
+    # does this still fails with the same message. Only the deadline moved, from
+    # "this instant" to a bounded window.
+    for _ in $(seq 1 15); do
+      if docker logs "$CONTAINER" 2>&1 | grep -q "TLS required for client connections"; then
+        echo "NATS up on nats://localhost:${PORT} (mTLS required), certs in $OUT"
+        exit 0
+      fi
+      sleep 1
+    done
+    echo "FAIL: broker is ready but NOT requiring TLS — the config did not take"
+    docker logs "$CONTAINER"
+    exit 1
   fi
   sleep 1
 done
