@@ -63,6 +63,7 @@ Create `kanz/tools/natsrebuild/window_test.go`:
 package natsrebuild
 
 import (
+	"strings"
 	"testing"
 	"time"
 )
@@ -116,7 +117,7 @@ func TestValidateTopicClassesRefusesAStateTopicThatIsNotBeingRebuilt(t *testing.
 	if err == nil {
 		t.Fatal("want an error naming compliance.mandate, got nil")
 	}
-	if got := err.Error(); !contains(got, "compliance.mandate") {
+	if got := err.Error(); !strings.Contains(got, "compliance.mandate") {
 		t.Fatalf("error %q does not name the offending topic", got)
 	}
 }
@@ -130,20 +131,6 @@ func TestValidateTopicClassesAcceptsAProperSubset(t *testing.T) {
 	); err != nil {
 		t.Fatalf("valid subset rejected: %v", err)
 	}
-}
-
-func contains(haystack, needle string) bool {
-	return len(haystack) >= len(needle) && (haystack == needle ||
-		len(needle) == 0 || indexOf(haystack, needle) >= 0)
-}
-
-func indexOf(h, n string) int {
-	for i := 0; i+len(n) <= len(h); i++ {
-		if h[i:i+len(n)] == n {
-			return i
-		}
-	}
-	return -1
 }
 ```
 
@@ -344,12 +331,6 @@ import (
 var topicRowPolicy = regexp.MustCompile(
 	`(?m)^\s{4}([a-z][a-z0-9_]*(?:\.[a-z0-9_]+)+)\s+\d+\s+(delete|compact)\s`)
 
-// pinExemptTopics records a derived topic a consumer deliberately does not
-// carry, with a written reason. Empty today — and it must stay empty unless
-// someone can say why a topic the archiver writes should not be rebuilt after
-// a failover.
-var pinExemptTopics = map[string]string{}
-
 // derivedArchivedTopics computes the archiver's PRODUCED set — the only set
 // that can be rebuilt from Kafka, because it is the only set that is in Kafka.
 //
@@ -472,11 +453,6 @@ func TestArchivedTopicConsumersMatchTheArchiverProducedSet(t *testing.T) {
 		}
 		for topic := range derived {
 			if gotSet[topic] {
-				continue
-			}
-			if reason, ok := pinExemptTopics[topic]; ok {
-				problems = append(problems, fmt.Sprintf(
-					"%s: %q is exempted (%s) — remove the exemption or the topic", c.name, topic, reason))
 				continue
 			}
 			problems = append(problems, fmt.Sprintf(
