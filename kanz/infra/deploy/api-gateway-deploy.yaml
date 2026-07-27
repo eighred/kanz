@@ -89,7 +89,7 @@ spec:
       containers:
         - name: api-gateway
           # Pinned to a cosign-signed digest by the GitOps bump (CICD-01d).
-          image: ghcr.io/eighred/api-gateway:latest
+          image: ghcr.io/eighred/api-gateway@sha256:02892d710c0ff905b7041a82761fcbab89d04f12d7f6aeb785f635c563a068ba
           ports:
             - { containerPort: 8080, name: http }
           env:
