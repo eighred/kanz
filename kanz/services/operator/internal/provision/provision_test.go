@@ -271,3 +271,42 @@ func TestAddNodeJobRunsUnderProvisionerServiceAccount(t *testing.T) {
 			"this Job cannot pull its own image", got, "kanz-node-provisioner")
 	}
 }
+
+// TestAddNodeJobIsReclaimedEvenIfTheOperatorDies is the credential half of the
+// probe's TestProbeIsNotRetriedAndIsReclaimed.
+//
+// AddNode deletes this Job explicitly (provision.go), and that covers every path
+// where the operator survives. It is the path where the operator does NOT survive
+// that this asserts: a rollout, an OOM, or a drain of the control-plane node the
+// operator is pinned to, landing between Create and Delete.
+//
+// ActiveDeadlineSeconds does not cover it. That field bounds how long the POD may
+// RUN; it terminates the pod and marks the Job Failed/DeadlineExceeded, and the
+// Job OBJECT — with the owner-referenced Secret holding the SSH bootstrap key and
+// the K3S_TOKEN cluster-admission token — persists until something deletes it.
+// Only TTLSecondsAfterFinished reclaims a finished Job.
+//
+// The probe Job has carried this since it shipped, and the probe carries no
+// directly-mounted credential. This Job does.
+func TestAddNodeJobIsReclaimedEvenIfTheOperatorDies(t *testing.T) {
+	cs := fake.NewSimpleClientset()
+	id, err := New(cs, cfg()).AddNode(context.Background(), Request{
+		Hostname: "london", IP: "10.0.0.5", SSHPort: 22, SSHUser: "root", SSHKey: []byte("PEM")})
+	if err != nil {
+		t.Fatalf("AddNode: %v", err)
+	}
+	job, err := cs.BatchV1().Jobs("kanz-operator").Get(context.Background(), id, metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("job not created: %v", err)
+	}
+	if job.Spec.TTLSecondsAfterFinished == nil {
+		t.Fatal("provisioning Job has no TTLSecondsAfterFinished — if the operator dies between " +
+			"creating this Job and deleting it, the Job and its owner-referenced Secret persist " +
+			"indefinitely, leaving the SSH bootstrap key and the k3s cluster-admission token in " +
+			"the cluster with nothing to reclaim them. ActiveDeadlineSeconds does not do this: it " +
+			"bounds the pod's RUNTIME, not the Job object's LIFETIME")
+	}
+	if got := *job.Spec.TTLSecondsAfterFinished; got <= 0 {
+		t.Errorf("TTLSecondsAfterFinished = %d, want > 0 — a non-positive TTL is not a bound", got)
+	}
+}
