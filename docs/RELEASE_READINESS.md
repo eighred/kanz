@@ -1,12 +1,46 @@
-# Release Readiness Report
+# Release Readiness Report — POINT-IN-TIME AUDIT, 2026-07-27 morning
 
-**Audited:** 2026-07-27 · **Updated after recovery Phases 1-2** · **Verdict: NO-GO (both P0s addressed; a third defect is now unmasked)**
+> ## ⚠️ THIS IS A HISTORICAL SNAPSHOT. IT IS NOT CURRENT STATUS.
+>
+> **For current status, read `KANZ_TASKS.md`. That board is the single source of truth.**
+>
+> This document was an audit taken on the morning of **2026-07-27**. It is kept
+> because its *reasoning* is still useful — how each defect was proven, and why.
+> Its *facts* are frozen at that moment and several were overtaken the same day.
+>
+> **Known stale by the afternoon of 2026-07-27** (recorded here rather than
+> rewritten, so the snapshot stays a snapshot):
+>
+> - **§A "Git tags — ZERO" and "GitHub releases — ZERO" are both wrong.** `v0.1.0`
+>   was tagged and released at 2026-07-27T00:37Z — before this document's own
+>   "Release status: nothing has ever been released" line was written.
+> - **Both P0s are fixed and merged.** REL-P0a (canonical org) and REL-P0b (the
+>   `sshexec.go` data race) are closed; the NO-GO verdict above refers to a state
+>   that no longer exists.
+> - **P1-3 is closed** — `release.yml`'s matrix reached parity with `build.yml`
+>   at 25, then 26 with `nats-rebuild`.
+> - **P1-4 is fixed** — the NATS mTLS round trip now uses two identities (PR #44).
+> - **§A and §B contradict each other on repository security.** §A says secret
+>   scanning is ENABLED and CodeQL is running green; §P2-1 says secret scanning is
+>   "disabled" and code scanning "has never run"; §E still lists enabling them as
+>   remaining work. **§A was correct**; the later sections were not updated when the
+>   owner enabled them mid-audit.
+> - **§P2-0's visibility note is stale in both directions.** The repository was
+>   public when this was written and is private again as of the afternoon; the
+>   billing halt returned with it, exactly as that section predicted.
+>
+> Do not plan from the tables below. Use them to understand how a finding was
+> established, then check the board for whether it still holds.
+
+**Audited:** 2026-07-27 (morning) · **Superseded:** same day · **Verdict at the time: NO-GO**
 
 > **Recovery status.** REL-P0b is **fixed and CI-verified**: the race detector reported two `WARNING: DATA RACE` on `main` and **zero** after the fix. REL-P0a is **implemented** (owner decision: adopt `eighred`) and awaiting its first green `kanz-build` on a push to `main` — the only evidence that counts, and one merging alone can produce.
 >
 > **A third defect surfaced, previously masked.** With the provisioner race gone, `kanz-ci`'s race step still fails — on `TestNATSMTLS_SPIFFEClientConnectsPublishesConsumes` (`pkg/bus`): *"publish over mTLS: nats publish: context deadline exceeded"*. It failed on `main` too, hidden behind the race. **This resolves board item OPS-M2f-c**, which was carried as an unverified ~2-minute check: CI runs it, and it fails. Tracked below as P1-4.
 
-Two P0 defects block release. Both are proven by CI evidence, not inferred. This report is the source of truth for finishing the system; where it contradicts `KANZ_TASKS.md`, this report is newer and the board rows it names are being corrected.
+Two P0 defects block release. Both are proven by CI evidence, not inferred.
+
+_(Precedence claim removed 2026-07-27 afternoon. This document previously asserted it was "the source of truth for finishing the system" and outranked `KANZ_TASKS.md` where the two disagreed. That was wrong in principle — two competing sources of truth is the duplication this repository consistently eliminates — and wrong in fact: within hours it was the stale one, still reporting zero tags and zero releases after `v0.1.0` shipped. **`KANZ_TASKS.md` is the board; this is an audit.**)_
 
 **The single most important finding: the board's premise is stale.** `KANZ_TASKS.md` rows 39/40 assert that CI is dead from a GitHub **billing halt**, that every run "fails in 3–9 seconds with all `steps=0`", and that the correct response is to escalate billing rather than debug. **That has not been true for at least two days.** Runs now execute for **5–10 minutes**, `security` and `Dependency Graph` **pass**, and `kanz-build` **succeeded on `main`** as recently as commit `e54331f`. Every current failure is a real code or configuration defect. Work planned on the "we are blocked on billing" premise should be re-planned.
 
