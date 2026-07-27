@@ -81,6 +81,8 @@ jobs:
             dockerfile: kanz/services/operator/Dockerfile
           - service: kanz-provisioner
             dockerfile: kanz/cmd/kanz-provisioner/Dockerfile
+          - service: nats-rebuild
+            dockerfile: kanz/tools/natsrebuild/cmd/nats-rebuild/Dockerfile
     env:
       # eighred is canonical, written as a LITERAL rather than as
       # ${{ github.repository_owner }}. It equals the owner today, but a computed
