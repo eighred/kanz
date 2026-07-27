@@ -3,6 +3,7 @@ package arch
 import (
 	"errors"
 	"io"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
@@ -335,6 +336,19 @@ func TestRigDevPatchRewritesDigestPinnedImagesToLocalTags(t *testing.T) {
 	repoRoot := filepath.Dir(root)
 	patcher := filepath.Join(repoRoot, "tools", "rig_dev_patch.py")
 
+	// Matches any recognized own-registry shape: bare-digest, tag-only, or
+	// tag+digest. It intentionally does NOT tell the three apart — the
+	// assertion below does that, by checking for "@sha256:" directly, because
+	// they have different expected outcomes (see Finding 2): a digest, with
+	// or without an accompanying tag, must become :latest; a tag with no
+	// digest must pass through byte-identical. Folding all three into one
+	// "want :latest" here was the review finding — it silently demanded
+	// :latest even for the digest-free, already-tagged shape, contradicting
+	// the patcher's own "leave already-tagged alone" contract. Dormant today
+	// because no rig manifest carries a tag-only or tag+digest own image (see
+	// TestRigDevPatchHandlesSyntheticImageShapes for synthetic coverage of
+	// both), but real production images pass through here too, so the
+	// classification must stay correct even while unexercised.
 	ownImageRe := regexp.MustCompile(
 		`^ghcr\.io/eighred/([a-z0-9][a-z0-9._-]*)(?:@sha256:[a-f0-9]{64}|:[A-Za-z0-9._{}-]+(?:@sha256:[a-f0-9]{64})?)$`)
 
@@ -391,12 +405,28 @@ func TestRigDevPatchRewritesDigestPinnedImagesToLocalTags(t *testing.T) {
 			if m := ownImageRe.FindStringSubmatch(orig); m != nil {
 				ownImagesInspected++
 				name := m[1]
-				want := "ghcr.io/eighred/" + name + ":latest"
-				if patched != want {
-					t.Errorf("%s: our own image %q was patched to %q, want %q — the rig loaded "+
-						"ghcr.io/eighred/%s:latest via tools/rig-images.sh, and imagePullPolicy: "+
-						"IfNotPresent only helps if the requested reference actually matches what "+
-						"was kind-loaded", svc, orig, patched, want, name)
+				if strings.Contains(orig, "@sha256:") {
+					// Digest-bearing — with or without an accompanying tag. Per
+					// OCI reference resolution the digest is authoritative over
+					// any tag also present, so a tag+digest reference is exactly
+					// as unpullable on the rig as a bare digest and must be
+					// rewritten identically (Finding 1's regression case).
+					want := "ghcr.io/eighred/" + name + ":latest"
+					if patched != want {
+						t.Errorf("%s: our own digest-bearing image %q was patched to %q, want %q — "+
+							"the rig loaded ghcr.io/eighred/%s:latest via tools/rig-images.sh, and "+
+							"imagePullPolicy: IfNotPresent only helps if the requested reference "+
+							"actually matches what was kind-loaded", svc, orig, patched, want, name)
+					}
+				} else {
+					// Tag-only, no digest — already what the rig wants, so the
+					// patcher's documented contract is to leave it byte-identical
+					// (Finding 2's contract).
+					if patched != orig {
+						t.Errorf("%s: our own already-tagged image %q (no digest) was rewritten to %q "+
+							"— the patcher's contract is to pass an already-tagged, digest-free own "+
+							"image through unchanged", svc, orig, patched)
+					}
 				}
 				continue
 			}
@@ -456,6 +486,154 @@ func TestRigDevPatchRewritesDigestPinnedImagesToLocalTags(t *testing.T) {
 			"over-rewrite arm above never had a case to exercise this run; it remains live for " +
 			"the first rig manifest that adds one")
 	}
+}
+
+// TestRigDevPatchHandlesSyntheticImageShapes exercises reference shapes that
+// no rig workload manifest currently carries, so
+// TestRigDevPatchRewritesDigestPinnedImagesToLocalTags above never exercises
+// them:
+//
+//   - a tag+digest own image. Per OCI reference resolution, when a reference
+//     carries both a tag and a digest, the digest is authoritative for the
+//     pull — the tag is cosmetic. A locally `kind load`ed :latest image can
+//     no more satisfy this than it can a bare digest, so it must be rewritten
+//     identically to the bare-digest case (see _rig_image's docstring in
+//     tools/rig_dev_patch.py).
+//   - a tag-only own image (no digest), which must pass through
+//     byte-identical — the patcher's "already tagged" contract.
+//   - a third-party image, which must also pass through byte-identical. None
+//     of the five real rig manifests carry one today (see that test's t.Log),
+//     so this is the only place the over-rewrite guard actually fires.
+//   - an own-registry reference in a shape the patcher does not recognize
+//     (here, a nested repository path), which must FATAL rather than silently
+//     pass a possibly-unpullable reference through — naming the offending
+//     reference in stderr.
+//
+// This writes a synthetic manifest to t.TempDir() and runs the ACTUAL patcher
+// against it and inspects its stdout/stderr, for the same reason the
+// real-manifest test above does: a guard that reads the source rather than
+// running it is not a guard that fired.
+func TestRigDevPatchHandlesSyntheticImageShapes(t *testing.T) {
+	pythonPath, err := exec.LookPath("python3")
+	if err != nil {
+		t.Fatalf("python3 not found on PATH: %v — see the identical requirement in "+
+			"TestRigDevPatchRewritesDigestPinnedImagesToLocalTags", err)
+	}
+
+	repoRoot := filepath.Dir(moduleRoot(t))
+	patcher := filepath.Join(repoRoot, "tools", "rig_dev_patch.py")
+
+	digestA := strings.Repeat("a1", 32)
+	digestB := strings.Repeat("b2", 32)
+
+	t.Run("OwnRegistryShapes", func(t *testing.T) {
+		manifest := "apiVersion: apps/v1\n" +
+			"kind: Deployment\n" +
+			"metadata:\n" +
+			"  name: synthetic\n" +
+			"  namespace: kanz-services\n" +
+			"spec:\n" +
+			"  template:\n" +
+			"    spec:\n" +
+			"      containers:\n" +
+			"        - name: bare-digest\n" +
+			"          image: ghcr.io/eighred/svc-a@sha256:" + digestA + "\n" +
+			"        - name: tag-plus-digest\n" +
+			"          image: ghcr.io/eighred/svc-b:v1.2.3@sha256:" + digestB + "\n" +
+			"        - name: tag-only\n" +
+			"          image: ghcr.io/eighred/svc-c:v1.2.3\n" +
+			"        - name: third-party\n" +
+			"          image: gcr.io/distroless/static:nonroot\n"
+
+		path := filepath.Join(t.TempDir(), "synthetic-deploy.yaml")
+		if err := os.WriteFile(path, []byte(manifest), 0o644); err != nil {
+			t.Fatalf("write synthetic manifest: %v", err)
+		}
+
+		cmd := exec.Command(pythonPath, patcher, path)
+		cmd.Dir = repoRoot
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("python3 tools/rig_dev_patch.py %s: %v\noutput:\n%s", path, err, string(out))
+		}
+
+		images, err := decodeContainerImages(string(out))
+		if err != nil {
+			t.Fatalf("parse patched output as YAML: %v\noutput:\n%s", err, string(out))
+		}
+		if len(images) != 4 {
+			t.Fatalf("expected 4 container images in patched output, got %d:\n%s", len(images), string(out))
+		}
+		bareDigest, tagPlusDigest, tagOnly, thirdParty := images[0], images[1], images[2], images[3]
+
+		if want := "ghcr.io/eighred/svc-a:latest"; bareDigest != want {
+			t.Errorf("bare-digest image: got %q, want %q", bareDigest, want)
+		}
+
+		// Finding 1's regression case: a tag+digest reference must be rewritten
+		// exactly like the bare-digest case. The digest, not the tag, is what
+		// the registry actually resolves, so a tag does not make this
+		// reference any more pullable on the rig than the bare digest is;
+		// leaving it in place silently reproduces the exact ImagePullBackOff
+		// this patch exists to eliminate.
+		if want := "ghcr.io/eighred/svc-b:latest"; tagPlusDigest != want {
+			t.Errorf("tag+digest image: got %q, want %q — a tag does not make a "+
+				"digest-bearing reference pullable; the digest is authoritative "+
+				"over any accompanying tag per OCI reference resolution",
+				tagPlusDigest, want)
+		}
+
+		// Finding 2's contract: a tag with NO digest is already what the rig
+		// wants and must pass through byte-identical.
+		if want := "ghcr.io/eighred/svc-c:v1.2.3"; tagOnly != want {
+			t.Errorf("tag-only image: got %q, want %q (byte-identical passthrough)", tagOnly, want)
+		}
+
+		if want := "gcr.io/distroless/static:nonroot"; thirdParty != want {
+			t.Errorf("third-party image: got %q, want %q (byte-identical passthrough)", thirdParty, want)
+		}
+	})
+
+	t.Run("FailLoudOnUnrecognizedOwnRegistryShape", func(t *testing.T) {
+		// A nested repository path: carries OWN_REGISTRY_PREFIX but the
+		// remainder ("team/svc@sha256:...") is neither the bare-digest nor the
+		// tag-only shape _rig_image recognizes (both require a single
+		// slash-free service segment). This must FATAL, not silently pass a
+		// digest-bearing reference through.
+		badRef := "ghcr.io/eighred/team/svc@sha256:" + digestA
+		manifest := "apiVersion: apps/v1\n" +
+			"kind: Deployment\n" +
+			"metadata:\n" +
+			"  name: synthetic-bad\n" +
+			"  namespace: kanz-services\n" +
+			"spec:\n" +
+			"  template:\n" +
+			"    spec:\n" +
+			"      containers:\n" +
+			"        - name: nested-path\n" +
+			"          image: " + badRef + "\n"
+
+		path := filepath.Join(t.TempDir(), "synthetic-bad-deploy.yaml")
+		if err := os.WriteFile(path, []byte(manifest), 0o644); err != nil {
+			t.Fatalf("write synthetic manifest: %v", err)
+		}
+
+		cmd := exec.Command(pythonPath, patcher, path)
+		cmd.Dir = repoRoot
+		out, err := cmd.CombinedOutput()
+		if err == nil {
+			t.Fatalf("expected python3 tools/rig_dev_patch.py to exit non-zero on an "+
+				"unrecognized own-registry reference shape (nested repository path), "+
+				"but it exited 0. output:\n%s", string(out))
+		}
+		if !strings.Contains(string(out), "FATAL") {
+			t.Errorf("expected FATAL in output, got:\n%s", string(out))
+		}
+		if !strings.Contains(string(out), badRef) {
+			t.Errorf("expected the offending reference %q to be named in the FATAL "+
+				"output, got:\n%s", badRef, string(out))
+		}
+	})
 }
 
 // decodeContainerImages walks every YAML document in raw and returns every
