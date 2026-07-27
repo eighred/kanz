@@ -21,7 +21,7 @@ jobs:
   gitleaks:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
         with:
           fetch-depth: 0 # full history so `detect` scans every commit, not just the tip
       - name: gitleaks (secret scan)
@@ -34,7 +34,7 @@ jobs:
     # gitleaks (over-broad allowlist, broken rules) silently passing everything.
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
       - name: planted-secret detection self-test
         run: sh kanz/infra/security/test/gitleaks-planted-secret.sh
 
@@ -45,8 +45,8 @@ jobs:
     env:
       GOFLAGS: -mod=mod
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: kanz/go.mod
           cache-dependency-path: kanz/go.sum
@@ -82,7 +82,7 @@ jobs:
         # advisory's affected range, so this is pinned to v0.36.0's commit.
         # Scanner binary pinned too: the malicious artifacts were binaries,
         # not the action itself.
-        uses: aquasecurity/trivy-action@a9c7b0f06e461e9d4b4d1711f154ee024b8d7ab8 # v0.36.0
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           scan-type: fs
           scan-ref: .
