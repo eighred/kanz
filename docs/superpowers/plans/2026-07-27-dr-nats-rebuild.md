@@ -972,11 +972,35 @@ var mutableTagExempt = map[string]string{
 		"until the next release. Retire on the first pin-digests run",
 }
 
-// productionImageRef matches an image reference to our own registry in a
-// manifest. Anchored on `image:` so a comment mentioning a tag cannot match —
-// prose matching is how three earlier guards in this repo asserted nothing
-// (board row 67).
-var productionImageRef = regexp.MustCompile(`(?m)^\s*(?:-\s+)?image:\s*"?(ghcr\.io/eighred/[^"\s]+)"?`)
+// productionImageRef matches an image reference to our own registry, by the
+// SHAPE of the reference rather than by the YAML key that carries it.
+//
+// Keying on `image:` was the first attempt and it was WRONG THREE WAYS, all
+// found by running it:
+//   - kustomize carries a plural `images:` LIST of bare quoted strings
+//     (infra/gitops/preview-applicationset.yaml:53-55), so both preview refs
+//     were invisible — and the exemption declared for that file was therefore
+//     permanently dead, which failed the build on a clean tree;
+//   - infra/deploy/operator-deploy.yaml:179 passes the provisioner image as an
+//     env var `value:`, not an `image:`. That is the image the operator injects
+//     into every provisioning Job spec it builds, so a mutable tag there ships
+//     an unpinned provisioner to every TUI-provisioned node — precisely the
+//     supply chain this guard exists to protect, and it was outside its view;
+//   - it silently defined "production manifest" as "whatever uses the key I
+//     thought of", which is how a guard ends up asserting less than it claims.
+//
+// A reference must carry a tag or a digest, which is what distinguishes it from
+// the sigstore GLOB at infra/security/admission/cluster-image-policy.yaml:27
+// (`ghcr.io/eighred/**`) — a policy pattern, not an image, and not pinnable.
+var productionImageRef = regexp.MustCompile(
+	`ghcr\.io/eighred/[a-z0-9][a-z0-9._-]*(?:@sha256:[a-f0-9]{64}|:[A-Za-z0-9._{}-]+)`)
+
+// yamlComment strips trailing `#` comments so the guard scans CONFIGURATION,
+// not prose. Without this, matching on reference shape would trip on a comment
+// mentioning an example tag. `d34bb7d` fixed this same class of defect in the
+// NATS posture guards, where needles matched the very comments that documented
+// them.
+var yamlComment = regexp.MustCompile(`(?m)#.*$`)
 
 // TestProductionManifestsPinImagesByDigest is OPS-M4a's other half.
 //
@@ -1012,8 +1036,8 @@ func TestProductionManifestsPinImagesByDigest(t *testing.T) {
 		rel, _ := filepath.Rel(root, path)
 		relSlash := filepath.ToSlash(rel)
 
-		for _, m := range productionImageRef.FindAllStringSubmatch(string(body), -1) {
-			ref := m[1]
+		scanned := yamlComment.ReplaceAllString(string(body), "")
+		for _, ref := range productionImageRef.FindAllString(scanned, -1) {
 			refCount++
 			if strings.Contains(ref, "@sha256:") {
 				if _, exempt := mutableTagExempt[relSlash]; exempt {
@@ -1079,6 +1103,11 @@ Revert each mutation before the next.
 | 2 | Add `"infra/deploy/oms-deploy.yaml": "no reason"` to `mutableTagExempt` with the file unmodified | `...: in mutableTagExempt but has no mutable tag — dead exemption` |
 | 3 | Pin `rebuild-job.yaml` to a fake digest while leaving its exemption in place | `...: every image here is digest-pinned but the file is still in mutableTagExempt — stale exemption` |
 | 4 | Break `productionImageRef` (e.g. change `ghcr` to `gcrX`) | `no ghcr.io/eighred/ image references found under infra/ — the parse is broken` |
+| 5 | Change a `:pr-{{.number}}` ref in `infra/gitops/preview-applicationset.yaml` to `:latest`, and temporarily remove that file's exemption | must fail naming the file — proves the kustomize plural `images:` list is actually scanned, which the first regex could not see |
+| 6 | Change `operator-deploy.yaml:179`'s `value:` digest to `:latest` | must fail naming that file — proves an image passed as an env var is covered, which the first regex could not see |
+| 7 | Add a comment line to any manifest reading `# example: ghcr.io/eighred/oms:latest` | must **still pass** — proves comment stripping works and the guard scans configuration, not prose |
+
+**Expected scan count: 42** — 39 on singular `image:` keys, 2 in the kustomize `images:` list, 1 on `operator-deploy.yaml`'s env-var `value:`. The sigstore glob at `cluster-image-policy.yaml:27` must **not** be counted; it has no tag or digest. If the count is not 42, stop and report rather than adjusting the expectation.
 
 - [ ] **Step 4: Run the whole arch suite**
 
