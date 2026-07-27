@@ -85,7 +85,7 @@ jobs:
           --health-timeout 5s
           --health-retries 5
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
 
       # The suites must connect as a NON-SUPERUSER. Postgres bypasses row-level
       # security for superusers, so the MT-01d tenant-isolation tests detect that
@@ -104,7 +104,7 @@ jobs:
           psql -h localhost -U kanz -d kanzapp -v ON_ERROR_STOP=1 \
             -c "GRANT ALL ON SCHEMA public TO kanzapp;"
 
-      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           # Track the toolchain pinned in go.mod so CI never drifts from local.
           go-version-file: kanz/go.mod
@@ -365,7 +365,7 @@ jobs:
         # v7 is REQUIRED for golangci-lint v2: v6 only knows the v1 module path
         # (.../cmd/golangci-lint), and v2 lives behind .../v2/cmd/golangci-lint. That
         # mismatch is exactly why `version: latest` on v6 silently pinned us to v1.
-        uses: golangci/golangci-lint-action@9fae48acfc02a90574d7c304a1758ef9895495fa # v7
+        uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
         with:
           # goinstall builds golangci-lint with this job's Go 1.26 toolchain, so
           # its parser always understands the module's language version.
@@ -389,9 +389,9 @@ jobs:
   python:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
 
-      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: '3.12'
 
@@ -427,9 +427,9 @@ jobs:
   ts:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
 
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           # Read the version from .nvmrc rather than repeating it here, so CI and
           # a developer's local shell cannot drift apart — the file IS the pin.
@@ -517,7 +517,7 @@ jobs:
   sdk-guard:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
       - name: No committed generated SDK files
         run: |
           set -euo pipefail
@@ -539,7 +539,7 @@ jobs:
   buf-breaking:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
         with:
           # Full history so buf can resolve the main baseline for `breaking`.
           fetch-depth: 0
