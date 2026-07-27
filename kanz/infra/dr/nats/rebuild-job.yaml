@@ -49,10 +49,34 @@ spec:
           env:
             - { name: NATS_REBUILD_KAFKA_BROKERS, value: "kafka:9092" }
             - { name: NATS_REBUILD_NATS_URL, value: "nats://nats:4222" }
-            # The log-of-record topics (infra/kafka/README §Topics). The live
-            # spine needs the recent window, not full history — 24h matches the
-            # longest live-tier max-age (infra/nats/README §Streams).
-            - { name: NATS_REBUILD_TOPICS, value: "market.equity,market.option,risk.portfolio,risk.portfolio.snapshot,execution.order,execution.order.snapshot,inference.feature,inference.prediction,platform.model,platform.config,data.market_stream,data.feature" }
+            # THE ARCHIVER'S PRODUCED SET — what is in Kafka, and therefore the
+            # only thing that can be rebuilt from it. Held to
+            # infra/kafka/topics-job.yaml x the archiver's DefaultSubjects by
+            # TestArchivedTopicConsumersMatchTheArchiverProducedSet; the same
+            # guard holds lake-sink's LAKE_SINK_TOPICS to the same set.
+            #
+            # This list USED to be the pre-36a9ba1 dead table (market.equity,
+            # execution.order, platform.model, data.market_stream, ...): eight
+            # topics that do not exist and NOT ONE of the money path. A DR
+            # rebuild would have restored no orders, no fills, no accounting,
+            # no positions and no mandates, and exited 0.
+            #
+            # Not restored, each deliberately: market.book/market.crypto are
+            # unarchived by design (highest volume, re-fetchable from the
+            # venue), dlq.archiver holds poison messages that must never go
+            # back on the live spine, and wealth/alternatives have no archiver
+            # subscription so nothing was ever written to them.
+            - { name: NATS_REBUILD_TOPICS, value: "order.order,strategy.signal,accounting.balance,settlement.instruction,compliance.breach,compliance.mandate,risk.portfolio,risk.position,platform.authz,platform.compliance,platform.mode,inference.feature,inference.prediction,data.feature" }
+            # COMPACTED STATE — read IN FULL, never through the time window.
+            # Compaction keeps the latest record per key regardless of age, so
+            # a mandate armed last week is older than any recent window and
+            # would simply not come back. A mandate that does not come back is
+            # a compliance control that returns DISARMED (topics-job.yaml says
+            # so in writing). Must equal exactly the `compact` rows of the
+            # derived set — the guard asserts it.
+            - { name: NATS_REBUILD_STATE_TOPICS, value: "compliance.mandate,risk.position" }
+            # The recent window for EVENT topics only. 24h matches the longest
+            # live-tier max-age (infra/nats/README §Streams).
             - { name: NATS_REBUILD_SINCE, value: "24h" }
             # SEC-01c: SVID socket so NATS (verify:true) accepts the publisher.
             - { name: NATS_REBUILD_SPIFFE_SOCKET, value: "/run/spiffe/spire-agent.sock" }
