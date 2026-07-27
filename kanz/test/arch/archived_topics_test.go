@@ -161,11 +161,31 @@ func derivedArchivedTopics(t *testing.T, root string) map[string]string {
 // not a detail — so it is declared, reasoned, and guarded here rather than
 // being implied by a subject nobody added.
 //
+// The "reason and owner" requirement is mechanically enforced, not just
+// requested: TestEveryProvisionedTopicIsArchivedOrDeclaredUnarchived rejects
+// any entry whose reason is shorter than minReasonLength (a placeholder like
+// "TODO" cannot clear it, every real entry does with headroom to spare) or
+// that contains neither an ISO date (YYYY-MM-DD) nor an uppercase decision ID
+// (e.g. DATA-M1) per reasonProvenance — so a reason cannot merely be prose,
+// it has to say who or when decided.
+//
 // TestEveryProvisionedTopicIsArchivedOrDeclaredUnarchived fails the build on a
 // provisioned topic that is in neither the derived set nor this map, so a NEW
 // topic cannot quietly inherit "not in DR". It also fails on an entry that has
 // since become archived, or that names a topic no longer provisioned, so an
 // exemption cannot outlive its reason.
+
+// minReasonLength is a floor a placeholder cannot clear but every real
+// exemption reason clears with headroom — the shortest current entry
+// ("market.crypto"'s) is well over twice this.
+const minReasonLength = 60
+
+// reasonProvenance requires an ISO date (YYYY-MM-DD) or an uppercase decision
+// ID (e.g. DATA-M1, COMP-M2, OPS-M4a) somewhere in the reason, so "who or
+// when decided" is checked mechanically instead of merely asked for in a
+// doc comment.
+var reasonProvenance = regexp.MustCompile(`\d{4}-\d{2}-\d{2}|[A-Z]{3,}-M?\d+[a-z]?`)
+
 var notArchivedByDesign = map[string]string{
 	"market.book": "DATA-M1 scope: L2 depth is the highest-volume stream in the estate and is " +
 		"re-fetchable from the venue, unlike a fill. Archiving it is its own capacity and cost " +
@@ -225,12 +245,21 @@ func TestEveryProvisionedTopicIsArchivedOrDeclaredUnarchived(t *testing.T) {
 				"dead exemption, remove it")
 		}
 	}
-	// Non-vacuity: an empty reason is a topic-name list, which is what this map
-	// exists NOT to be.
+	// Non-vacuity: a reason must be substantive (long enough that a
+	// placeholder like "TODO" cannot pass) AND carry provenance (an ISO date
+	// or a decision ID), not just non-empty. An exemption without a stated
+	// reason and owner is just an omission with extra steps.
 	for name, reason := range notArchivedByDesign {
-		if strings.TrimSpace(reason) == "" {
-			problems = append(problems, name+": declared with an empty reason — "+
-				"an exemption without a stated reason and owner is just an omission with extra steps")
+		trimmed := strings.TrimSpace(reason)
+		switch {
+		case len(trimmed) < minReasonLength:
+			problems = append(problems, fmt.Sprintf(
+				"%s: declared with a %d-character reason, shorter than the %d-character floor — "+
+					"too short to be a substantive account of the decision, not a placeholder",
+				name, len(trimmed), minReasonLength))
+		case !reasonProvenance.MatchString(reason):
+			problems = append(problems, name+": declared with a reason that has no provenance — "+
+				"no ISO date (YYYY-MM-DD) and no decision ID (e.g. DATA-M1) tying it to who or when decided")
 		}
 	}
 

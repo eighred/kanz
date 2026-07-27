@@ -66,6 +66,19 @@ spec:
             # venue), dlq.archiver holds poison messages that must never go
             # back on the live spine, and wealth/alternatives have no archiver
             # subscription so nothing was ever written to them.
+            #
+            # TENANT SCOPE: this list is the __system__ tenant's UN-PREFIXED
+            # archived topic set only. topic.go:61-64 prefixes every topic
+            # with "{tenant}." for any non-__system__ tenant, and
+            # infra/kafka/tenancy.yaml provisions the same table under that
+            # prefix — so an onboarded tenant's archived topics land at
+            # {tenant}.{domain}.{entity}, names that do not appear anywhere
+            # in this flat list. THIS JOB DOES NOT READ THEM: a tenant DR run
+            # would drain nothing for that tenant and still exit 0.
+            # Per-tenant DR reconstruction is NOT implemented here — it is a
+            # separate future capability, not an oversight. If you are
+            # onboarding a tenant that needs DR coverage, this Job is not
+            # where that gets solved.
             - { name: NATS_REBUILD_TOPICS, value: "order.order,strategy.signal,accounting.balance,settlement.instruction,compliance.breach,compliance.mandate,risk.portfolio,risk.position,platform.authz,platform.compliance,platform.mode,inference.feature,inference.prediction,data.feature" }
             # COMPACTED STATE — read IN FULL, never through the time window.
             # Compaction keeps the latest record per key regardless of age, so
