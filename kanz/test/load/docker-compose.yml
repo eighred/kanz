@@ -96,8 +96,15 @@ services:
       # middleware is in the hot path of every request production will ever serve.
       # Mint the TOKEN the k6 script sends (test/load/config.js):
       #
-      #   TOKEN=$(go run ./cmd/kanz-devtoken --secret load-secret --tenant PF1-tenant) \
-      #     k6 run test/load/gateway.js
+      #   TOKEN=$(go run ./cmd/kanz-devtoken --secret load-secret --tenant load-test) \
+      #     k6 run test/load/smoke.js
+      #
+      # THE TENANT IS load-test, not PF1-anything. It must match SEED_TENANT in
+      # test/load/seed and RISK_ENGINE_TENANT above, because the token's tenant
+      # is the RLS scope the query runs under — a mismatched one authenticates
+      # cleanly and then finds nothing, which reads as "the seed did not land".
+      # PF1 is the PORTFOLIO id. This example said `--tenant PF1-tenant` and was
+      # wrong on both counts.
       API_GATEWAY_JWT_SECRET: "load-secret"
       API_GATEWAY_REQUIRED_ROLE: "kanz-user"
       # SEC-M2: only this role reaches POST /v1/orders. It MUST differ from the

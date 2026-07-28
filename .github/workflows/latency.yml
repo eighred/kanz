@@ -88,19 +88,59 @@ jobs:
         working-directory: kanz
         run: go run ./test/load/seed
 
+      # THE GATEWAY REQUIRES A TOKEN, AND THIS JOB NEVER MINTED ONE.
+      #
+      # SEC-M1 stopped the gateway starting unauthenticated, and the compose file
+      # sets API_GATEWAY_JWT_SECRET + API_GATEWAY_REQUIRED_ROLE accordingly — but
+      # neither the readiness poll below nor the k6 step was updated, so every
+      # request to /v1 got a 401 and the job reported "seeded portfolio never
+      # became queryable". It has failed on every recorded run since (#132).
+      #
+      # The tenant is LOAD-TEST, matching SEED_TENANT in test/load/seed and
+      # RISK_ENGINE_TENANT in the compose file. It is not cosmetic: the token's
+      # tenant is the RLS scope the query runs under, so a mismatched one
+      # authenticates fine and then finds nothing — which would look exactly like
+      # the failure this job was already reporting. (The compose comment's
+      # example says `--tenant PF1-tenant`; that is stale, and PF1 is the
+      # PORTFOLIO id, not the tenant.)
+      - name: Mint a gateway token
+        working-directory: kanz
+        run: |
+          set -euo pipefail
+          token="$(go run ./cmd/kanz-devtoken --secret load-secret --tenant load-test --role kanz-user)"
+          if [ -z "$token" ]; then echo "devtoken produced nothing"; exit 1; fi
+          echo "::add-mask::$token"
+          echo "TOKEN=$token" >> "$GITHUB_ENV"
+
       - name: Wait for seeded state to be queryable
         run: |
+          code=000
           for i in $(seq 1 30); do
-            code=$(curl -s -o /dev/null -w '%{http_code}' http://localhost:8080/v1/portfolios/PF1/exposure)
+            code=$(curl -s -o /dev/null -w '%{http_code}' \
+              -H "Authorization: Bearer $TOKEN" \
+              http://localhost:8080/v1/portfolios/PF1/exposure)
             if [ "$code" = "200" ]; then echo "portfolio queryable"; exit 0; fi
             echo "exposure http $code ($i)..."; sleep 2
           done
-          echo "seeded portfolio never became queryable"; exit 1
+          # Say WHICH failure this is. "Never became queryable" describes the
+          # symptom two layers above the cause, and it sent the last several
+          # investigations at the seed and the projection when the request was
+          # simply not authenticated.
+          case "$code" in
+            401) echo "gateway rejected the token (401) — check the secret/tenant/role passed to kanz-devtoken against the compose environment" ;;
+            403) echo "authenticated but forbidden (403) — the token's roles do not include API_GATEWAY_REQUIRED_ROLE" ;;
+            404) echo "authenticated, but PF1 is not there (404) — the seed or the projection did not land" ;;
+            *)   echo "seeded portfolio never became queryable (last http $code)" ;;
+          esac
+          exit 1
 
       - name: Run k6 smoke (p99/error budget gate)
         run: |
+          # TOKEN is read by test/load/config.js, which sets the Authorization
+          # header only when it is non-empty. Without it every request 401s and
+          # the run fails on its error-budget threshold rather than saying why.
           docker run --rm --network host \
-            -e BASE_URL=http://localhost:8080 -e PORTFOLIO=PF1 \
+            -e BASE_URL=http://localhost:8080 -e PORTFOLIO=PF1 -e TOKEN="$TOKEN" \
             -v "$PWD/kanz/test/load:/scripts" \
             grafana/k6:latest run /scripts/smoke.js
 
