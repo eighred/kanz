@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/kanz-eng/kanz/services/lake-sink/internal/sink"
+	"github.com/eighred/kanz/services/lake-sink/internal/sink"
 )
 
 func TestFileSinkHivePartitionAndContent(t *testing.T) {

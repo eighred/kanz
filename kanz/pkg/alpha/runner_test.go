@@ -11,10 +11,10 @@ import (
 	orderpb "github.com/kanz-eng/kanz-schemas-go/order/v1"
 	signalpb "github.com/kanz-eng/kanz-schemas-go/signal/v1"
 
-	"github.com/kanz-eng/kanz/internal/marketedge/depth"
-	"github.com/kanz-eng/kanz/internal/marketedge/trades"
-	"github.com/kanz-eng/kanz/internal/signal/translate"
-	"github.com/kanz-eng/kanz/pkg/bus"
+	"github.com/eighred/kanz/internal/marketedge/depth"
+	"github.com/eighred/kanz/internal/marketedge/trades"
+	"github.com/eighred/kanz/internal/signal/translate"
+	"github.com/eighred/kanz/pkg/bus"
 )
 
 // The native-alpha boundary: an engine's decision must reach the venues as real

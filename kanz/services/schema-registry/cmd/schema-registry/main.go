@@ -14,9 +14,9 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/kanz-eng/kanz/services/schema-registry/internal/config"
-	"github.com/kanz-eng/kanz/services/schema-registry/internal/server"
-	"github.com/kanz-eng/kanz/services/schema-registry/internal/storage"
+	"github.com/eighred/kanz/services/schema-registry/internal/config"
+	"github.com/eighred/kanz/services/schema-registry/internal/server"
+	"github.com/eighred/kanz/services/schema-registry/internal/storage"
 )
 
 func main() {

@@ -1,9 +1,9 @@
 package scenario
 
 import (
-	"github.com/kanz-eng/kanz/internal/risk/compute"
-	"github.com/kanz-eng/kanz/internal/risk/domain"
-	"github.com/kanz-eng/kanz/internal/risk/factormodel"
+	"github.com/eighred/kanz/internal/risk/compute"
+	"github.com/eighred/kanz/internal/risk/domain"
+	"github.com/eighred/kanz/internal/risk/factormodel"
 )
 
 // Factor-shock scenarios (FACTOR-01e). EvaluateFactorShock is the factor-space

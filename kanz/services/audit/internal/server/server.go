@@ -9,10 +9,10 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/kanz-eng/kanz/services/audit/internal/audit"
-	"github.com/kanz-eng/kanz/services/audit/internal/lineage"
-	"github.com/kanz-eng/kanz/services/audit/internal/report"
-	"github.com/kanz-eng/kanz/services/audit/internal/soc2"
+	"github.com/eighred/kanz/services/audit/internal/audit"
+	"github.com/eighred/kanz/services/audit/internal/lineage"
+	"github.com/eighred/kanz/services/audit/internal/report"
+	"github.com/eighred/kanz/services/audit/internal/soc2"
 )
 
 // Readiness gates traffic: starts NOT ready, flips once the store is reachable

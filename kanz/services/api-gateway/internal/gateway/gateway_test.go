@@ -18,9 +18,9 @@ import (
 	domainpb "github.com/kanz-eng/kanz-schemas-go/domain/v1"
 	querypb "github.com/kanz-eng/kanz-schemas-go/query/v1"
 
-	"github.com/kanz-eng/kanz/services/api-gateway/internal/authz"
-	"github.com/kanz-eng/kanz/services/api-gateway/internal/gateway"
-	"github.com/kanz-eng/kanz/services/api-gateway/internal/middleware"
+	"github.com/eighred/kanz/services/api-gateway/internal/authz"
+	"github.com/eighred/kanz/services/api-gateway/internal/gateway"
+	"github.com/eighred/kanz/services/api-gateway/internal/middleware"
 )
 
 // fakeClient is a querypb.RiskQueryServiceClient that records the last request

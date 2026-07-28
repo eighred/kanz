@@ -1,8 +1,8 @@
 package compute
 
 import (
-	"github.com/kanz-eng/kanz/internal/risk/pricing/curve"
-	"github.com/kanz-eng/kanz/internal/risk/pricing/volsurface"
+	"github.com/eighred/kanz/internal/risk/pricing/curve"
+	"github.com/eighred/kanz/internal/risk/pricing/volsurface"
 )
 
 // The PARITY-03a/03b point-in-time stores satisfy the FI-01d / DERIV-01d

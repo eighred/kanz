@@ -46,8 +46,8 @@ import (
 	"sync"
 	"time"
 
-	v1 "github.com/kanz-eng/kanz/internal/risk/api/v1"
-	"github.com/kanz-eng/kanz/internal/risk/domain"
+	v1 "github.com/eighred/kanz/internal/risk/api/v1"
+	"github.com/eighred/kanz/internal/risk/domain"
 )
 
 // Default thresholds — the gap between portfolio.AsOf and now()

@@ -6,8 +6,8 @@ import (
 	"log/slog"
 	"os"
 
-	"github.com/kanz-eng/kanz/services/copilot/internal/config"
-	"github.com/kanz-eng/kanz/services/copilot/internal/llm"
+	"github.com/eighred/kanz/services/copilot/internal/config"
+	"github.com/eighred/kanz/services/copilot/internal/llm"
 )
 
 // newModel returns the dependency-free StubModel in the default build. The real

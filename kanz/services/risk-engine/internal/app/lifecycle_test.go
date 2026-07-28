@@ -7,14 +7,14 @@ import (
 	"testing"
 	"time"
 
-	risk "github.com/kanz-eng/kanz/internal/risk"
-	"github.com/kanz-eng/kanz/internal/risk/compute"
-	"github.com/kanz-eng/kanz/internal/risk/engine"
-	"github.com/kanz-eng/kanz/internal/risk/publish"
-	"github.com/kanz-eng/kanz/internal/risk/state"
-	"github.com/kanz-eng/kanz/pkg/bus"
-	"github.com/kanz-eng/kanz/services/risk-engine/internal/app"
-	"github.com/kanz-eng/kanz/services/risk-engine/internal/server"
+	risk "github.com/eighred/kanz/internal/risk"
+	"github.com/eighred/kanz/internal/risk/compute"
+	"github.com/eighred/kanz/internal/risk/engine"
+	"github.com/eighred/kanz/internal/risk/publish"
+	"github.com/eighred/kanz/internal/risk/state"
+	"github.com/eighred/kanz/pkg/bus"
+	"github.com/eighred/kanz/services/risk-engine/internal/app"
+	"github.com/eighred/kanz/services/risk-engine/internal/server"
 )
 
 // recordingCloser records how many times Close was called.

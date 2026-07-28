@@ -9,7 +9,7 @@ import (
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
-	alt "github.com/kanz-eng/kanz/internal/alternatives"
+	alt "github.com/eighred/kanz/internal/alternatives"
 )
 
 func t0() time.Time { return time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC) }

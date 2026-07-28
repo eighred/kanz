@@ -9,8 +9,8 @@ import (
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
-	alt "github.com/kanz-eng/kanz/internal/alternatives"
-	"github.com/kanz-eng/kanz/internal/dec"
+	alt "github.com/eighred/kanz/internal/alternatives"
+	"github.com/eighred/kanz/internal/dec"
 )
 
 // DecodeProto returns the Decoder for one commitment-lifecycle subject. The

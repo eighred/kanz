@@ -6,9 +6,9 @@ import (
 	"math/rand"
 	"sort"
 
-	v1 "github.com/kanz-eng/kanz/internal/risk/api/v1"
-	"github.com/kanz-eng/kanz/internal/risk/compute"
-	"github.com/kanz-eng/kanz/internal/risk/domain"
+	v1 "github.com/eighred/kanz/internal/risk/api/v1"
+	"github.com/eighred/kanz/internal/risk/compute"
+	"github.com/eighred/kanz/internal/risk/domain"
 )
 
 // MODEL-01e: Monte-Carlo VaR over a correlated factor-shock model. Where

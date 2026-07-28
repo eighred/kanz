@@ -12,8 +12,8 @@ import (
 	"github.com/spiffe/go-spiffe/v2/spiffeid"
 	"github.com/spiffe/go-spiffe/v2/svid/x509svid"
 
-	"github.com/kanz-eng/kanz/pkg/bus"
-	"github.com/kanz-eng/kanz/pkg/transport"
+	"github.com/eighred/kanz/pkg/bus"
+	"github.com/eighred/kanz/pkg/transport"
 )
 
 // SEC-M3a: the production broker contract.

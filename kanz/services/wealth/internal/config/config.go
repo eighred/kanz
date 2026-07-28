@@ -5,8 +5,8 @@ import (
 	"os"
 	"strings"
 
-	"github.com/kanz-eng/kanz/internal/wealth"
-	"github.com/kanz-eng/kanz/pkg/secret"
+	"github.com/eighred/kanz/internal/wealth"
+	"github.com/eighred/kanz/pkg/secret"
 )
 
 // Config is the wealth (advisory) service runtime configuration, sourced from the

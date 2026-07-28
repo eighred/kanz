@@ -30,7 +30,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/kanz-eng/kanz/internal/risk/compute"
+	"github.com/eighred/kanz/internal/risk/compute"
 )
 
 // TestComputeMeasuresP99UnderBurst drives the measures query under a 10×

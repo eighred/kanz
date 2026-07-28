@@ -6,7 +6,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/kanz-eng/kanz/internal/prediction/registry"
+	"github.com/eighred/kanz/internal/prediction/registry"
 )
 
 // memLog is an in-memory platform.model log: an ordered append list with a

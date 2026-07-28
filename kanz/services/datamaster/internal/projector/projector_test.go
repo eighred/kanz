@@ -6,11 +6,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/kanz-eng/kanz/internal/dec"
-	"github.com/kanz-eng/kanz/services/datamaster/internal/feed"
-	"github.com/kanz-eng/kanz/services/datamaster/internal/master"
-	"github.com/kanz-eng/kanz/services/datamaster/internal/pricing"
-	"github.com/kanz-eng/kanz/services/datamaster/internal/store"
+	"github.com/eighred/kanz/internal/dec"
+	"github.com/eighred/kanz/services/datamaster/internal/feed"
+	"github.com/eighred/kanz/services/datamaster/internal/master"
+	"github.com/eighred/kanz/services/datamaster/internal/pricing"
+	"github.com/eighred/kanz/services/datamaster/internal/store"
 )
 
 var now = time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)

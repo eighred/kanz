@@ -17,8 +17,8 @@ import (
 
 	operatorpb "github.com/kanz-eng/kanz-schemas-go/operator/v1"
 
-	"github.com/kanz-eng/kanz/services/api-gateway/internal/authz"
-	"github.com/kanz-eng/kanz/services/api-gateway/internal/middleware"
+	"github.com/eighred/kanz/services/api-gateway/internal/authz"
+	"github.com/eighred/kanz/services/api-gateway/internal/middleware"
 )
 
 // stubClient satisfies OperatorServiceClient by embedding the interface: any method

@@ -13,7 +13,7 @@ import (
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
-	"github.com/kanz-eng/kanz/services/accounting/internal/ledger"
+	"github.com/eighred/kanz/services/accounting/internal/ledger"
 )
 
 func decv(coef int64, exp int32) *commonpb.Decimal {

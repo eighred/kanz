@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/kanz-eng/kanz/services/oms/internal/config"
+	"github.com/eighred/kanz/services/oms/internal/config"
 )
 
 func TestPriceDefaults(t *testing.T) {

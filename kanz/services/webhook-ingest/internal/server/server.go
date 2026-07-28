@@ -13,7 +13,7 @@ import (
 	"net/http"
 	"sync/atomic"
 
-	"github.com/kanz-eng/kanz/services/webhook-ingest/internal/ingest"
+	"github.com/eighred/kanz/services/webhook-ingest/internal/ingest"
 )
 
 const maxBodyBytes = 1 << 20 // 1 MiB

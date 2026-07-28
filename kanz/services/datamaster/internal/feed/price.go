@@ -6,8 +6,8 @@ import (
 	"math/big"
 	"time"
 
-	"github.com/kanz-eng/kanz/services/datamaster/internal/master"
-	"github.com/kanz-eng/kanz/services/datamaster/internal/pricing"
+	"github.com/eighred/kanz/services/datamaster/internal/master"
+	"github.com/eighred/kanz/services/datamaster/internal/pricing"
 )
 
 // The price half of the vendor seam. reference.go already established that a

@@ -1,6 +1,6 @@
 package wealth
 
-import "github.com/kanz-eng/kanz/internal/platform/subject"
+import "github.com/eighred/kanz/internal/platform/subject"
 
 // The household valuation subject (WEALTH-01b).
 //

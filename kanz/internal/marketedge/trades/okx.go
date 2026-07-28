@@ -11,7 +11,7 @@ import (
 
 	"github.com/coder/websocket"
 
-	"github.com/kanz-eng/kanz/internal/exchange/netdial"
+	"github.com/eighred/kanz/internal/exchange/netdial"
 )
 
 // OKXSource is the live OKX v5 trade tape — a TradeSource over the public

@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/kanz-eng/kanz/internal/risk/pricing"
+	"github.com/eighred/kanz/internal/risk/pricing"
 )
 
 // sviQuotes generates listed-option quotes whose smile IS an SVI slice, so the

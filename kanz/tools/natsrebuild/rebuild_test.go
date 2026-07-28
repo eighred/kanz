@@ -8,8 +8,8 @@ import (
 	envelopepb "github.com/kanz-eng/kanz-schemas-go/envelope/v1"
 	"google.golang.org/protobuf/proto"
 
-	"github.com/kanz-eng/kanz/pkg/bus"
-	"github.com/kanz-eng/kanz/tools/replay"
+	"github.com/eighred/kanz/pkg/bus"
+	"github.com/eighred/kanz/tools/replay"
 )
 
 // sliceSource yields a fixed list of events then io.EOF — a replay.Source stub.

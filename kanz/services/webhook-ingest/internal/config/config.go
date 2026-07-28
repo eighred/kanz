@@ -17,9 +17,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/kanz-eng/kanz/internal/dec"
-	"github.com/kanz-eng/kanz/pkg/secret"
-	"github.com/kanz-eng/kanz/services/webhook-ingest/internal/ingest"
+	"github.com/eighred/kanz/internal/dec"
+	"github.com/eighred/kanz/pkg/secret"
+	"github.com/eighred/kanz/services/webhook-ingest/internal/ingest"
 )
 
 // Config is the resolved configuration.

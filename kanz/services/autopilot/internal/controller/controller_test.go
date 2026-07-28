@@ -13,11 +13,11 @@ import (
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
-	"github.com/kanz-eng/kanz/services/autopilot/internal/actuate"
-	"github.com/kanz-eng/kanz/services/autopilot/internal/controller"
-	"github.com/kanz-eng/kanz/services/autopilot/internal/plan"
-	"github.com/kanz-eng/kanz/services/autopilot/internal/remediate"
-	"github.com/kanz-eng/kanz/services/autopilot/internal/signal"
+	"github.com/eighred/kanz/services/autopilot/internal/actuate"
+	"github.com/eighred/kanz/services/autopilot/internal/controller"
+	"github.com/eighred/kanz/services/autopilot/internal/plan"
+	"github.com/eighred/kanz/services/autopilot/internal/remediate"
+	"github.com/eighred/kanz/services/autopilot/internal/signal"
 )
 
 var discard = slog.New(slog.NewTextHandler(io.Discard, nil))

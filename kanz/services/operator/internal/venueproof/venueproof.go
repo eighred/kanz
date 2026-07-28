@@ -12,8 +12,8 @@ import (
 
 	"net/http"
 
-	"github.com/kanz-eng/kanz/internal/venueadapter/exchangeauth"
-	"github.com/kanz-eng/kanz/services/operator/internal/secrets"
+	"github.com/eighred/kanz/internal/venueadapter/exchangeauth"
+	"github.com/eighred/kanz/services/operator/internal/secrets"
 )
 
 // ErrNoEndpoint is returned when proof is enabled but the requested venue has

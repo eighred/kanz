@@ -3,7 +3,7 @@ package library
 import (
 	"sort"
 
-	"github.com/kanz-eng/kanz/internal/risk/pricing/curve"
+	"github.com/eighred/kanz/internal/risk/pricing/curve"
 )
 
 // Curve-shift scenario catalog (FI-01e) — the rate-world counterpart of the

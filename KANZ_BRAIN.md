@@ -57,7 +57,8 @@
 
 ## System shape
 
-- **Modular monolith core (Go) + process-isolated edges.** One Go module rooted at `kanz/` (`github.com/kanz-eng/kanz`, Go 1.23); services are `package main` under `services/<name>/cmd/<name>/`. Market ingestion, AI inference, and batch compute run as isolated edge processes — never folded into one undifferentiated backend. Shared code starts per-service in `internal/`, promoted to top-level `kanz/internal/` or `kanz/pkg/` only when a second consumer appears. Stdlib `net/http` + `log/slog` by default.
+- **Modular monolith core (Go) + process-isolated edges.** One Go module rooted at `kanz/` (`github.com/eighred/kanz`, matching the
+  repository's own location on GitHub); services are `package main` under `services/<name>/cmd/<name>/`. Market ingestion, AI inference, and batch compute run as isolated edge processes — never folded into one undifferentiated backend. Shared code starts per-service in `internal/`, promoted to top-level `kanz/internal/` or `kanz/pkg/` only when a second consumer appears. Stdlib `net/http` + `log/slog` by default.
 - **Prediction layer is hybrid:** async streaming path (default) + a sync gRPC path for interactive calls, with a circuit breaker + degraded fallback. Interactive target <50ms (async path unbounded); the p50/p99 split is a LATENCY-01 concern.
 - **Everything is event-driven.** All state changes flow through events; there is no polling architecture.
 

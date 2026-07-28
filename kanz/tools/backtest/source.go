@@ -6,7 +6,7 @@ import (
 	"io"
 	"sort"
 
-	"github.com/kanz-eng/kanz/tools/replay"
+	"github.com/eighred/kanz/tools/replay"
 )
 
 // Source is the harness upstream — the EVT-20 replay Source (Reader, or an

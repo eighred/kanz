@@ -4,8 +4,8 @@ import (
 	"context"
 	"time"
 
-	v1 "github.com/kanz-eng/kanz/internal/risk/api/v1"
-	"github.com/kanz-eng/kanz/internal/risk/domain"
+	v1 "github.com/eighred/kanz/internal/risk/api/v1"
+	"github.com/eighred/kanz/internal/risk/domain"
 )
 
 // MODEL-01c wires the historical market-data plane (MODEL-01b store) into the

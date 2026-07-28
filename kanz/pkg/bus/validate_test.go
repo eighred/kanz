@@ -6,8 +6,8 @@ import (
 
 	"google.golang.org/protobuf/types/known/timestamppb"
 
+	"github.com/eighred/kanz/pkg/bus"
 	envelopepb "github.com/kanz-eng/kanz-schemas-go/envelope/v1"
-	"github.com/kanz-eng/kanz/pkg/bus"
 )
 
 func validEnvelope() *envelopepb.Envelope {

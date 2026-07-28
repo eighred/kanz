@@ -13,10 +13,10 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/kanz-eng/kanz/cmd/kanz/internal/config"
-	"github.com/kanz-eng/kanz/cmd/kanz/internal/repl"
-	"github.com/kanz-eng/kanz/cmd/kanz/internal/tokenstore"
-	"github.com/kanz-eng/kanz/pkg/deviceauth"
+	"github.com/eighred/kanz/cmd/kanz/internal/config"
+	"github.com/eighred/kanz/cmd/kanz/internal/repl"
+	"github.com/eighred/kanz/cmd/kanz/internal/tokenstore"
+	"github.com/eighred/kanz/pkg/deviceauth"
 )
 
 func main() {

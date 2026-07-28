@@ -15,8 +15,8 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus/testutil"
 
-	"github.com/kanz-eng/kanz/internal/venueadapter/orderview"
-	"github.com/kanz-eng/kanz/services/venue-binance/internal/config"
+	"github.com/eighred/kanz/internal/venueadapter/orderview"
+	"github.com/eighred/kanz/services/venue-binance/internal/config"
 )
 
 // capturingHandler is a minimal slog.Handler that records every emitted

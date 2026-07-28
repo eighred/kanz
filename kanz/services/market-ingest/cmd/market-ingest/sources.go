@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"log/slog"
 
-	"github.com/kanz-eng/kanz/pkg/alpha"
-	"github.com/kanz-eng/kanz/services/market-ingest/internal/config"
+	"github.com/eighred/kanz/pkg/alpha"
+	"github.com/eighred/kanz/services/market-ingest/internal/config"
 )
 
 // feeds is the market-ingest composition root's feed selector. It binds the live

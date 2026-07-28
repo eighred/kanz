@@ -18,15 +18,15 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/kanz-eng/kanz/internal/marketdata/mark"
-	"github.com/kanz-eng/kanz/internal/pg"
-	"github.com/kanz-eng/kanz/pkg/bus"
-	"github.com/kanz-eng/kanz/pkg/observability"
-	"github.com/kanz-eng/kanz/pkg/transport"
-	"github.com/kanz-eng/kanz/services/tv-sync/internal/brokerapi"
-	"github.com/kanz-eng/kanz/services/tv-sync/internal/config"
-	"github.com/kanz-eng/kanz/services/tv-sync/internal/projection"
-	"github.com/kanz-eng/kanz/services/tv-sync/internal/server"
+	"github.com/eighred/kanz/internal/marketdata/mark"
+	"github.com/eighred/kanz/internal/pg"
+	"github.com/eighred/kanz/pkg/bus"
+	"github.com/eighred/kanz/pkg/observability"
+	"github.com/eighred/kanz/pkg/transport"
+	"github.com/eighred/kanz/services/tv-sync/internal/brokerapi"
+	"github.com/eighred/kanz/services/tv-sync/internal/config"
+	"github.com/eighred/kanz/services/tv-sync/internal/projection"
+	"github.com/eighred/kanz/services/tv-sync/internal/server"
 )
 
 func main() {

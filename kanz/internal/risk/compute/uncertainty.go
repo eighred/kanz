@@ -3,7 +3,7 @@ package compute
 import (
 	commonpb "github.com/kanz-eng/kanz-schemas-go/common/v1"
 
-	"github.com/kanz-eng/kanz/internal/risk/domain"
+	"github.com/eighred/kanz/internal/risk/domain"
 )
 
 // RISK-08 — uncertainty propagation through measure computations.

@@ -7,7 +7,7 @@ import (
 
 	commonpb "github.com/kanz-eng/kanz-schemas-go/common/v1"
 
-	"github.com/kanz-eng/kanz/internal/marketdata/store"
+	"github.com/eighred/kanz/internal/marketdata/store"
 )
 
 func px(v int64) *commonpb.Decimal { return &commonpb.Decimal{Coefficient: v, Exponent: 0} }

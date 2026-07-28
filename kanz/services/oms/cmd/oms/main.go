@@ -17,20 +17,20 @@ import (
 	"syscall"
 	"time"
 
-	comp "github.com/kanz-eng/kanz/internal/compliance"
-	"github.com/kanz-eng/kanz/internal/execution"
-	"github.com/kanz-eng/kanz/internal/marketdata/mark"
+	comp "github.com/eighred/kanz/internal/compliance"
+	"github.com/eighred/kanz/internal/execution"
+	"github.com/eighred/kanz/internal/marketdata/mark"
 	"github.com/prometheus/client_golang/prometheus"
 
-	"github.com/kanz-eng/kanz/internal/pg"
-	"github.com/kanz-eng/kanz/pkg/bus"
-	"github.com/kanz-eng/kanz/pkg/observability"
-	"github.com/kanz-eng/kanz/pkg/transport"
-	"github.com/kanz-eng/kanz/services/oms/internal/compliance"
-	"github.com/kanz-eng/kanz/services/oms/internal/config"
-	"github.com/kanz-eng/kanz/services/oms/internal/order"
-	"github.com/kanz-eng/kanz/services/oms/internal/position"
-	"github.com/kanz-eng/kanz/services/oms/internal/server"
+	"github.com/eighred/kanz/internal/pg"
+	"github.com/eighred/kanz/pkg/bus"
+	"github.com/eighred/kanz/pkg/observability"
+	"github.com/eighred/kanz/pkg/transport"
+	"github.com/eighred/kanz/services/oms/internal/compliance"
+	"github.com/eighred/kanz/services/oms/internal/config"
+	"github.com/eighred/kanz/services/oms/internal/order"
+	"github.com/eighred/kanz/services/oms/internal/position"
+	"github.com/eighred/kanz/services/oms/internal/server"
 )
 
 func main() {

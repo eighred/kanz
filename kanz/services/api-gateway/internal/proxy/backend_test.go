@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/kanz-eng/kanz/services/api-gateway/internal/middleware"
+	"github.com/eighred/kanz/services/api-gateway/internal/middleware"
 )
 
 // SVCWIRE-01e — contract test of the concrete mesh backend (01c) + the proxy

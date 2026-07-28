@@ -11,7 +11,7 @@ import (
 	"errors"
 	"sync"
 
-	"github.com/kanz-eng/kanz/internal/wealth"
+	"github.com/eighred/kanz/internal/wealth"
 )
 
 // Store holds household composition. Put is idempotent on HouseholdID (last write

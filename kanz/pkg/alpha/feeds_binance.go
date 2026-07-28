@@ -1,8 +1,8 @@
 package alpha
 
 import (
-	"github.com/kanz-eng/kanz/internal/marketedge/depth"
-	"github.com/kanz-eng/kanz/internal/marketedge/trades"
+	"github.com/eighred/kanz/internal/marketedge/depth"
+	"github.com/eighred/kanz/internal/marketedge/trades"
 )
 
 // BinanceFeed builds the live Binance Spot feed for one instrument: the

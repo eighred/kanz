@@ -6,7 +6,7 @@ import (
 	"os"
 	"strings"
 
-	"github.com/kanz-eng/kanz/pkg/secret"
+	"github.com/eighred/kanz/pkg/secret"
 )
 
 type Config struct {

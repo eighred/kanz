@@ -20,9 +20,9 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/kanz-eng/kanz/pkg/observability"
-	"github.com/kanz-eng/kanz/services/{{.Name}}/internal/config"
-	"github.com/kanz-eng/kanz/services/{{.Name}}/internal/server"
+	"github.com/eighred/kanz/pkg/observability"
+	"github.com/eighred/kanz/services/{{.Name}}/internal/config"
+	"github.com/eighred/kanz/services/{{.Name}}/internal/server"
 )
 
 func main() {

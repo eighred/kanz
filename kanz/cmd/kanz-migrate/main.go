@@ -41,8 +41,8 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/kanz-eng/kanz/internal/migrate"
-	"github.com/kanz-eng/kanz/pkg/secret"
+	"github.com/eighred/kanz/internal/migrate"
+	"github.com/eighred/kanz/pkg/secret"
 )
 
 func main() {

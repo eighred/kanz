@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/kanz-eng/kanz/internal/risk/factormodel"
+	"github.com/eighred/kanz/internal/risk/factormodel"
 )
 
 // trendReturns is a deterministic ReturnsProvider: each instrument gets a

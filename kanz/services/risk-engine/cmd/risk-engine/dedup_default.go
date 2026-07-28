@@ -6,8 +6,8 @@ import (
 	"io"
 	"log/slog"
 
-	"github.com/kanz-eng/kanz/pkg/bus"
-	"github.com/kanz-eng/kanz/services/risk-engine/internal/config"
+	"github.com/eighred/kanz/pkg/bus"
+	"github.com/eighred/kanz/services/risk-engine/internal/config"
 )
 
 // newDeduper is the default (redis-free) build: cross-pod dedup is a wiring

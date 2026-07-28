@@ -10,8 +10,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/kanz-eng/kanz/internal/venueadapter/server"
-	"github.com/kanz-eng/kanz/pkg/bus"
+	"github.com/eighred/kanz/internal/venueadapter/server"
+	"github.com/eighred/kanz/pkg/bus"
 )
 
 // The publish-health control only works if the kubelet actually HITS the endpoint

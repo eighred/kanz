@@ -14,9 +14,9 @@ import (
 
 	querypb "github.com/kanz-eng/kanz-schemas-go/query/v1"
 
-	"github.com/kanz-eng/kanz/services/api-gateway/internal/authz"
-	"github.com/kanz-eng/kanz/services/api-gateway/internal/gateway"
-	"github.com/kanz-eng/kanz/services/api-gateway/internal/middleware"
+	"github.com/eighred/kanz/services/api-gateway/internal/authz"
+	"github.com/eighred/kanz/services/api-gateway/internal/gateway"
+	"github.com/eighred/kanz/services/api-gateway/internal/middleware"
 )
 
 // These are the API-01e gateway contract tests: they wire the full edge

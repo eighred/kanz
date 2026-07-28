@@ -19,7 +19,7 @@ import (
 	"sort"
 	"time"
 
-	"github.com/kanz-eng/kanz/internal/risk/pricing"
+	"github.com/eighred/kanz/internal/risk/pricing"
 )
 
 // OptionQuote is one market option price to imply a vol from. Expiry is in years

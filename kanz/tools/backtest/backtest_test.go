@@ -11,10 +11,10 @@ import (
 	envelopepb "github.com/kanz-eng/kanz-schemas-go/envelope/v1"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
-	"github.com/kanz-eng/kanz/internal/lake/dataset"
-	"github.com/kanz-eng/kanz/internal/marketdata/store"
-	"github.com/kanz-eng/kanz/tools/backtest"
-	"github.com/kanz-eng/kanz/tools/replay"
+	"github.com/eighred/kanz/internal/lake/dataset"
+	"github.com/eighred/kanz/internal/marketdata/store"
+	"github.com/eighred/kanz/tools/backtest"
+	"github.com/eighred/kanz/tools/replay"
 )
 
 var day0 = time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)

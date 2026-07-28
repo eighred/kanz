@@ -3,7 +3,7 @@ package liquidity
 import (
 	"context"
 
-	"github.com/kanz-eng/kanz/internal/risk/domain"
+	"github.com/eighred/kanz/internal/risk/domain"
 )
 
 // Liquidity-adjusted VaR (LIQ-01c). LVaR adds the cost of orderly liquidation to

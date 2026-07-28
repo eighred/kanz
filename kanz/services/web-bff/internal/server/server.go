@@ -16,8 +16,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/kanz-eng/kanz/services/web-bff/internal/oidc"
-	"github.com/kanz-eng/kanz/services/web-bff/internal/session"
+	"github.com/eighred/kanz/services/web-bff/internal/oidc"
+	"github.com/eighred/kanz/services/web-bff/internal/session"
 )
 
 const sessionCookie = "kanz_session"

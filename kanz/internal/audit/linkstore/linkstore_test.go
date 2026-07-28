@@ -4,8 +4,8 @@ import (
 	"context"
 	"testing"
 
-	"github.com/kanz-eng/kanz/internal/audit/chain"
-	"github.com/kanz-eng/kanz/internal/audit/signer"
+	"github.com/eighred/kanz/internal/audit/chain"
+	"github.com/eighred/kanz/internal/audit/signer"
 )
 
 func asChainLinks(ls []signer.Link) []chain.Link {

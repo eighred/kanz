@@ -10,7 +10,7 @@ import (
 	lifecyclepb "github.com/kanz-eng/kanz-schemas-go/lifecycle/v1"
 	"google.golang.org/protobuf/proto"
 
-	"github.com/kanz-eng/kanz/internal/platform/mode"
+	"github.com/eighred/kanz/internal/platform/mode"
 )
 
 // SubjectModeChanged carries the lifecycle.v1.ModeChanged FACT — the halt signal.

@@ -5,8 +5,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/kanz-eng/kanz/internal/risk/domain"
-	"github.com/kanz-eng/kanz/internal/risk/xva"
+	"github.com/eighred/kanz/internal/risk/domain"
+	"github.com/eighred/kanz/internal/risk/xva"
 )
 
 type staticXVA struct{ exp []xva.Adjustments }

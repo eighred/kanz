@@ -34,8 +34,8 @@ import (
 
 	envelopepb "github.com/kanz-eng/kanz-schemas-go/envelope/v1"
 
-	"github.com/kanz-eng/kanz/pkg/auth"
-	"github.com/kanz-eng/kanz/pkg/bus"
+	"github.com/eighred/kanz/pkg/auth"
+	"github.com/eighred/kanz/pkg/bus"
 )
 
 const (

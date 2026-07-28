@@ -4,9 +4,9 @@ import (
 	"context"
 	"time"
 
-	v1 "github.com/kanz-eng/kanz/internal/risk/api/v1"
-	"github.com/kanz-eng/kanz/internal/risk/domain"
-	"github.com/kanz-eng/kanz/internal/risk/xva"
+	v1 "github.com/eighred/kanz/internal/risk/api/v1"
+	"github.com/eighred/kanz/internal/risk/domain"
+	"github.com/eighred/kanz/internal/risk/xva"
 )
 
 // XVA-01e wires counterparty credit risk into the RISK-07 measure registry — the

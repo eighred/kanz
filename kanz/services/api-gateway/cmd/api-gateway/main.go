@@ -25,17 +25,17 @@ import (
 	operatorpb "github.com/kanz-eng/kanz-schemas-go/operator/v1"
 	querypb "github.com/kanz-eng/kanz-schemas-go/query/v1"
 
-	"github.com/kanz-eng/kanz/pkg/auth"
-	"github.com/kanz-eng/kanz/pkg/bus"
-	"github.com/kanz-eng/kanz/pkg/observability"
-	"github.com/kanz-eng/kanz/pkg/transport"
-	"github.com/kanz-eng/kanz/services/api-gateway/internal/authz"
-	"github.com/kanz-eng/kanz/services/api-gateway/internal/config"
-	"github.com/kanz-eng/kanz/services/api-gateway/internal/control"
-	"github.com/kanz-eng/kanz/services/api-gateway/internal/gateway"
-	"github.com/kanz-eng/kanz/services/api-gateway/internal/middleware"
-	"github.com/kanz-eng/kanz/services/api-gateway/internal/orders"
-	"github.com/kanz-eng/kanz/services/api-gateway/internal/proxy"
+	"github.com/eighred/kanz/pkg/auth"
+	"github.com/eighred/kanz/pkg/bus"
+	"github.com/eighred/kanz/pkg/observability"
+	"github.com/eighred/kanz/pkg/transport"
+	"github.com/eighred/kanz/services/api-gateway/internal/authz"
+	"github.com/eighred/kanz/services/api-gateway/internal/config"
+	"github.com/eighred/kanz/services/api-gateway/internal/control"
+	"github.com/eighred/kanz/services/api-gateway/internal/gateway"
+	"github.com/eighred/kanz/services/api-gateway/internal/middleware"
+	"github.com/eighred/kanz/services/api-gateway/internal/orders"
+	"github.com/eighred/kanz/services/api-gateway/internal/proxy"
 )
 
 func main() {

@@ -5,7 +5,7 @@ import (
 	"log/slog"
 	"sync"
 
-	"github.com/kanz-eng/kanz/services/autopilot/internal/signal"
+	"github.com/eighred/kanz/services/autopilot/internal/signal"
 )
 
 // Escalation is one recorded hand-off to a human.

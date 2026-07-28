@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/kanz-eng/kanz/internal/dec"
+	"github.com/eighred/kanz/internal/dec"
 )
 
 func day(d int) time.Time { return time.Date(2026, 1, d, 0, 0, 0, 0, time.UTC) }

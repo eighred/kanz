@@ -7,9 +7,9 @@ import (
 
 	observationpb "github.com/kanz-eng/kanz-schemas-go/observation/v1"
 
-	"github.com/kanz-eng/kanz/pkg/auth"
-	"github.com/kanz-eng/kanz/services/lineage/internal/governance"
-	"github.com/kanz-eng/kanz/services/lineage/internal/graph"
+	"github.com/eighred/kanz/pkg/auth"
+	"github.com/eighred/kanz/services/lineage/internal/governance"
+	"github.com/eighred/kanz/services/lineage/internal/graph"
 )
 
 type recordingRecorder struct {

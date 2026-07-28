@@ -12,10 +12,10 @@ import (
 	commonpb "github.com/kanz-eng/kanz-schemas-go/common/v1"
 	marketpb "github.com/kanz-eng/kanz-schemas-go/market/v1"
 
-	"github.com/kanz-eng/kanz/internal/dec"
-	"github.com/kanz-eng/kanz/internal/marketedge/book"
-	"github.com/kanz-eng/kanz/internal/marketedge/depth"
-	"github.com/kanz-eng/kanz/pkg/bus"
+	"github.com/eighred/kanz/internal/dec"
+	"github.com/eighred/kanz/internal/marketedge/book"
+	"github.com/eighred/kanz/internal/marketedge/depth"
+	"github.com/eighred/kanz/pkg/bus"
 )
 
 type capture struct {

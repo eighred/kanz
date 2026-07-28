@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/kanz-eng/kanz/pkg/bus"
+	"github.com/eighred/kanz/pkg/bus"
 )
 
 func TestDialNATSRejectsEmptyURL(t *testing.T) {

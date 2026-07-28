@@ -12,9 +12,9 @@ import (
 	"log/slog"
 	"sync"
 
-	"github.com/kanz-eng/kanz/internal/platform/subject"
-	"github.com/kanz-eng/kanz/internal/risk/ingest"
-	"github.com/kanz-eng/kanz/pkg/bus"
+	"github.com/eighred/kanz/internal/platform/subject"
+	"github.com/eighred/kanz/internal/risk/ingest"
+	"github.com/eighred/kanz/pkg/bus"
 )
 
 // DefaultConsumerGroup is the durable consumer name the risk-engine

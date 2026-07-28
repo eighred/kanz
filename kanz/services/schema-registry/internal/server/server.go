@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/kanz-eng/kanz/services/schema-registry/internal/storage"
+	"github.com/eighred/kanz/services/schema-registry/internal/storage"
 )
 
 // maxDescriptorBytes caps an inbound FileDescriptorSet subset. 8 MiB is well

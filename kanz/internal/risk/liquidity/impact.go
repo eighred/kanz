@@ -4,7 +4,7 @@ import (
 	"context"
 	"math"
 
-	"github.com/kanz-eng/kanz/internal/risk/domain"
+	"github.com/eighred/kanz/internal/risk/domain"
 )
 
 // Market impact / liquidation cost (LIQ-01c). The cost of unwinding a position is

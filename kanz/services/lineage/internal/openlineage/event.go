@@ -22,7 +22,7 @@ import (
 const SchemaURL = "https://openlineage.io/spec/2-0-2/OpenLineage.json"
 
 // Producer identifies the emitter in every event (OpenLineage `producer`).
-const Producer = "https://github.com/kanz-eng/kanz/services/lineage"
+const Producer = "https://github.com/eighred/kanz/services/lineage"
 
 // Dataset is an OpenLineage dataset reference: a logical table in the lineage
 // graph. Facets carry extra metadata (here the Kanz payload schema ref).

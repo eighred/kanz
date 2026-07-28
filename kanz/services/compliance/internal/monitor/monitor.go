@@ -25,7 +25,7 @@ import (
 	envelopepb "github.com/kanz-eng/kanz-schemas-go/envelope/v1"
 	"google.golang.org/protobuf/proto"
 
-	comp "github.com/kanz-eng/kanz/internal/compliance"
+	comp "github.com/eighred/kanz/internal/compliance"
 )
 
 // Monitor re-evaluates portfolios on every position change. Goroutine-safe.

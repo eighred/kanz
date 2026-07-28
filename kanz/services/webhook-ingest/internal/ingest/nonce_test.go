@@ -22,8 +22,8 @@ import (
 
 	orderpb "github.com/kanz-eng/kanz-schemas-go/order/v1"
 
-	"github.com/kanz-eng/kanz/internal/signal/translate"
-	"github.com/kanz-eng/kanz/pkg/bus"
+	"github.com/eighred/kanz/internal/signal/translate"
+	"github.com/eighred/kanz/pkg/bus"
 )
 
 // brokenPublisher is a broker that is down — the ordinary transient failure.

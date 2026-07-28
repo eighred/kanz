@@ -12,11 +12,11 @@ import (
 	domainpb "github.com/kanz-eng/kanz-schemas-go/domain/v1"
 	envelopepb "github.com/kanz-eng/kanz-schemas-go/envelope/v1"
 
-	risk "github.com/kanz-eng/kanz/internal/risk"
-	v1 "github.com/kanz-eng/kanz/internal/risk/api/v1"
-	"github.com/kanz-eng/kanz/internal/risk/compute"
-	"github.com/kanz-eng/kanz/internal/risk/engine"
-	"github.com/kanz-eng/kanz/internal/risk/state"
+	risk "github.com/eighred/kanz/internal/risk"
+	v1 "github.com/eighred/kanz/internal/risk/api/v1"
+	"github.com/eighred/kanz/internal/risk/compute"
+	"github.com/eighred/kanz/internal/risk/engine"
+	"github.com/eighred/kanz/internal/risk/state"
 )
 
 // The Detector compares state AsOf against the real wall clock and its

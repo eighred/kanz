@@ -11,7 +11,7 @@ import (
 	orderpb "github.com/kanz-eng/kanz-schemas-go/order/v1"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
-	comp "github.com/kanz-eng/kanz/internal/compliance"
+	comp "github.com/eighred/kanz/internal/compliance"
 )
 
 // concentrationMandate is a mandate with one rule — enough to make the gate

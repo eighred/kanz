@@ -3,7 +3,7 @@ package config_test
 import (
 	"testing"
 
-	"github.com/kanz-eng/kanz/services/archiver/internal/config"
+	"github.com/eighred/kanz/services/archiver/internal/config"
 )
 
 func setEnv(t *testing.T, kv map[string]string) {

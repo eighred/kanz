@@ -15,7 +15,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/kanz-eng/kanz/pkg/bus"
+	"github.com/eighred/kanz/pkg/bus"
 )
 
 type failingPub struct{ err error }

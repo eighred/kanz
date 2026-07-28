@@ -12,7 +12,7 @@ import (
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
-	"github.com/kanz-eng/kanz/internal/marketdata/mark"
+	"github.com/eighred/kanz/internal/marketdata/mark"
 )
 
 var base = time.Date(2026, 7, 19, 12, 0, 0, 0, time.UTC)

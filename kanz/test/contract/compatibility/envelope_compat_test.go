@@ -34,8 +34,8 @@ import (
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
+	"github.com/eighred/kanz/pkg/bus"
 	envelopepb "github.com/kanz-eng/kanz-schemas-go/envelope/v1"
-	"github.com/kanz-eng/kanz/pkg/bus"
 )
 
 // canonicalEnvelope is the same shape EVT-21a / EVT-21b use, lifted

@@ -24,8 +24,8 @@ import (
 
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/anthropics/anthropic-sdk-go/option"
-	"github.com/kanz-eng/kanz/services/copilot/internal/config"
-	"github.com/kanz-eng/kanz/services/copilot/internal/llm"
+	"github.com/eighred/kanz/services/copilot/internal/config"
+	"github.com/eighred/kanz/services/copilot/internal/llm"
 )
 
 const (

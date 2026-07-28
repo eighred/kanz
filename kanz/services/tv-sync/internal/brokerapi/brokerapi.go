@@ -22,7 +22,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/kanz-eng/kanz/services/tv-sync/internal/projection"
+	"github.com/eighred/kanz/services/tv-sync/internal/projection"
 )
 
 // Handler serves the Broker-API endpoints over a projection.

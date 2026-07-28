@@ -18,7 +18,7 @@ func messagingEventType(eventType string) attribute.KeyValue {
 // tracer is the bus's OTel tracer. otel.Tracer is late-bound to the global
 // TracerProvider, so spans are no-ops until observability.New installs a real
 // provider — the bus never needs a tracer injected (OBS-01d).
-var tracer = otel.Tracer("github.com/kanz-eng/kanz/pkg/bus")
+var tracer = otel.Tracer("github.com/eighred/kanz/pkg/bus")
 
 // startProducerSpan opens a PRODUCER span around a publish. The span is active
 // on the returned ctx, so the producer's trace_context stamping

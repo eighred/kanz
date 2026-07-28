@@ -18,12 +18,12 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/kanz-eng/kanz/internal/audit/linkstore"
-	"github.com/kanz-eng/kanz/internal/audit/signer"
-	"github.com/kanz-eng/kanz/internal/regulatory"
-	"github.com/kanz-eng/kanz/pkg/observability"
-	"github.com/kanz-eng/kanz/services/regulatory/internal/config"
-	"github.com/kanz-eng/kanz/services/regulatory/internal/server"
+	"github.com/eighred/kanz/internal/audit/linkstore"
+	"github.com/eighred/kanz/internal/audit/signer"
+	"github.com/eighred/kanz/internal/regulatory"
+	"github.com/eighred/kanz/pkg/observability"
+	"github.com/eighred/kanz/services/regulatory/internal/config"
+	"github.com/eighred/kanz/services/regulatory/internal/server"
 )
 
 func main() {

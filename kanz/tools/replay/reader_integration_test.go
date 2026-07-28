@@ -14,8 +14,8 @@ import (
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
+	"github.com/eighred/kanz/tools/replay"
 	envelopepb "github.com/kanz-eng/kanz-schemas-go/envelope/v1"
-	"github.com/kanz-eng/kanz/tools/replay"
 )
 
 // TestReaderRange is an integration test gated on TEST_KAFKA_BROKERS. It

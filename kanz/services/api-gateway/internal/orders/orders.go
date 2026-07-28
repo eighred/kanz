@@ -20,10 +20,10 @@ import (
 	"google.golang.org/protobuf/proto"
 	"time"
 
-	"github.com/kanz-eng/kanz/pkg/auth"
-	"github.com/kanz-eng/kanz/pkg/bus"
-	"github.com/kanz-eng/kanz/services/api-gateway/internal/authz"
-	"github.com/kanz-eng/kanz/services/api-gateway/internal/middleware"
+	"github.com/eighred/kanz/pkg/auth"
+	"github.com/eighred/kanz/pkg/bus"
+	"github.com/eighred/kanz/services/api-gateway/internal/authz"
+	"github.com/eighred/kanz/services/api-gateway/internal/middleware"
 )
 
 // Order command subjects (mirror services/oms/internal/order; kept local so the

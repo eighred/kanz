@@ -6,7 +6,7 @@ import (
 
 	envelopepb "github.com/kanz-eng/kanz-schemas-go/envelope/v1"
 
-	"github.com/kanz-eng/kanz/services/archiver/internal/topic"
+	"github.com/eighred/kanz/services/archiver/internal/topic"
 )
 
 func env(eventType, tenant string, class envelopepb.EventClass) *envelopepb.Envelope {

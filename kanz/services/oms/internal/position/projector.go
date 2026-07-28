@@ -9,8 +9,8 @@ import (
 	orderpb "github.com/kanz-eng/kanz-schemas-go/order/v1"
 	"google.golang.org/protobuf/proto"
 
-	"github.com/kanz-eng/kanz/internal/platform/subject"
-	"github.com/kanz-eng/kanz/pkg/bus"
+	"github.com/eighred/kanz/internal/platform/subject"
+	"github.com/eighred/kanz/pkg/bus"
 )
 
 // Bus is the publish surface — satisfied by *bus.Producer.

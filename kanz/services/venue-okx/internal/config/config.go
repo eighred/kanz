@@ -6,7 +6,7 @@ import (
 	"os"
 	"strings"
 
-	"github.com/kanz-eng/kanz/pkg/secret"
+	"github.com/eighred/kanz/pkg/secret"
 )
 
 // Config is the venue-okx runtime configuration, sourced from the

@@ -23,17 +23,17 @@ import (
 	domainpb "github.com/kanz-eng/kanz-schemas-go/domain/v1"
 	envelopepb "github.com/kanz-eng/kanz-schemas-go/envelope/v1"
 
-	risk "github.com/kanz-eng/kanz/internal/risk"
-	v1 "github.com/kanz-eng/kanz/internal/risk/api/v1"
-	"github.com/kanz-eng/kanz/internal/risk/compute"
-	"github.com/kanz-eng/kanz/internal/risk/domain"
-	"github.com/kanz-eng/kanz/internal/risk/engine"
-	"github.com/kanz-eng/kanz/internal/risk/ingest"
-	"github.com/kanz-eng/kanz/internal/risk/publish"
-	"github.com/kanz-eng/kanz/internal/risk/state"
-	"github.com/kanz-eng/kanz/internal/risk/state/persist"
-	"github.com/kanz-eng/kanz/pkg/bus"
-	"github.com/kanz-eng/kanz/tools/replay"
+	risk "github.com/eighred/kanz/internal/risk"
+	v1 "github.com/eighred/kanz/internal/risk/api/v1"
+	"github.com/eighred/kanz/internal/risk/compute"
+	"github.com/eighred/kanz/internal/risk/domain"
+	"github.com/eighred/kanz/internal/risk/engine"
+	"github.com/eighred/kanz/internal/risk/ingest"
+	"github.com/eighred/kanz/internal/risk/publish"
+	"github.com/eighred/kanz/internal/risk/state"
+	"github.com/eighred/kanz/internal/risk/state/persist"
+	"github.com/eighred/kanz/pkg/bus"
+	"github.com/eighred/kanz/tools/replay"
 )
 
 // --- fakes ------------------------------------------------------------

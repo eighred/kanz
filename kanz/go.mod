@@ -1,4 +1,4 @@
-module github.com/kanz-eng/kanz
+module github.com/eighred/kanz
 
 go 1.26.1
 

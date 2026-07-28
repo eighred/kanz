@@ -13,7 +13,7 @@ import (
 	"math/big"
 	"time"
 
-	"github.com/kanz-eng/kanz/services/accounting/internal/ledger"
+	"github.com/eighred/kanz/services/accounting/internal/ledger"
 )
 
 // Kind is the kind of corporate action.

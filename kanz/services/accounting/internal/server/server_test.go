@@ -10,9 +10,9 @@ import (
 	"testing"
 	"time"
 
-	accounting "github.com/kanz-eng/kanz/services/accounting/internal"
-	"github.com/kanz-eng/kanz/services/accounting/internal/cashmove"
-	"github.com/kanz-eng/kanz/services/accounting/internal/ledger"
+	accounting "github.com/eighred/kanz/services/accounting/internal"
+	"github.com/eighred/kanz/services/accounting/internal/cashmove"
+	"github.com/eighred/kanz/services/accounting/internal/ledger"
 )
 
 func newServer(t *testing.T) (*Server, ledger.Store) {

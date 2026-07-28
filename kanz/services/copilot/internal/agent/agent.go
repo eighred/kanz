@@ -14,10 +14,10 @@ import (
 	"errors"
 	"strings"
 
-	"github.com/kanz-eng/kanz/pkg/auth"
-	"github.com/kanz-eng/kanz/services/copilot/internal/llm"
-	"github.com/kanz-eng/kanz/services/copilot/internal/retrieval"
-	"github.com/kanz-eng/kanz/services/copilot/internal/tools"
+	"github.com/eighred/kanz/pkg/auth"
+	"github.com/eighred/kanz/services/copilot/internal/llm"
+	"github.com/eighred/kanz/services/copilot/internal/retrieval"
+	"github.com/eighred/kanz/services/copilot/internal/tools"
 )
 
 // ErrUnauthenticated is returned when Ask is called without a Principal —

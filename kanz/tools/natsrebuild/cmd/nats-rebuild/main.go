@@ -19,10 +19,10 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/kanz-eng/kanz/pkg/bus"
-	"github.com/kanz-eng/kanz/pkg/transport"
-	"github.com/kanz-eng/kanz/tools/natsrebuild"
-	"github.com/kanz-eng/kanz/tools/replay"
+	"github.com/eighred/kanz/pkg/bus"
+	"github.com/eighred/kanz/pkg/transport"
+	"github.com/eighred/kanz/tools/natsrebuild"
+	"github.com/eighred/kanz/tools/replay"
 )
 
 func main() {

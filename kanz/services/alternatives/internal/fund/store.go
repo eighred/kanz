@@ -12,7 +12,7 @@ import (
 	"errors"
 	"sync"
 
-	"github.com/kanz-eng/kanz/internal/alternatives"
+	"github.com/eighred/kanz/internal/alternatives"
 )
 
 // Store is the durable journal of commitment lifecycle events. Append is

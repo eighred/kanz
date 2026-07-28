@@ -4,7 +4,7 @@ import (
 	"math"
 	"time"
 
-	"github.com/kanz-eng/kanz/internal/risk/pricing/curve"
+	"github.com/eighred/kanz/internal/risk/pricing/curve"
 )
 
 // Bond analytics (FI-01c): price/yield, accrued interest, and the rate-risk

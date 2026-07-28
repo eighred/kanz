@@ -13,9 +13,9 @@ import (
 	orderpb "github.com/kanz-eng/kanz-schemas-go/order/v1"
 	"google.golang.org/protobuf/proto"
 
-	"github.com/kanz-eng/kanz/internal/execution"
-	"github.com/kanz-eng/kanz/pkg/bus"
-	"github.com/kanz-eng/kanz/services/oms/internal/compliance"
+	"github.com/eighred/kanz/internal/execution"
+	"github.com/eighred/kanz/pkg/bus"
+	"github.com/eighred/kanz/services/oms/internal/compliance"
 )
 
 // testCtx stands in for what bus.Consumer would have stashed onto a handler's

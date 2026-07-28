@@ -15,7 +15,7 @@ package gateway
 
 import (
 	"errors"
-	"github.com/kanz-eng/kanz/services/api-gateway/internal/authz"
+	"github.com/eighred/kanz/services/api-gateway/internal/authz"
 	"net/http"
 	"time"
 

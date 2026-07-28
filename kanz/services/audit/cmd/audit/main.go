@@ -20,12 +20,12 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/kanz-eng/kanz/pkg/bus"
-	"github.com/kanz-eng/kanz/pkg/observability"
-	"github.com/kanz-eng/kanz/pkg/transport"
-	"github.com/kanz-eng/kanz/services/audit/internal/audit"
-	"github.com/kanz-eng/kanz/services/audit/internal/config"
-	"github.com/kanz-eng/kanz/services/audit/internal/server"
+	"github.com/eighred/kanz/pkg/bus"
+	"github.com/eighred/kanz/pkg/observability"
+	"github.com/eighred/kanz/pkg/transport"
+	"github.com/eighred/kanz/services/audit/internal/audit"
+	"github.com/eighred/kanz/services/audit/internal/config"
+	"github.com/eighred/kanz/services/audit/internal/server"
 )
 
 func main() {

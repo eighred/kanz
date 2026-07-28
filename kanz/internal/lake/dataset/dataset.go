@@ -19,8 +19,8 @@ import (
 
 	commonpb "github.com/kanz-eng/kanz-schemas-go/common/v1"
 
-	"github.com/kanz-eng/kanz/internal/marketdata/returns"
-	"github.com/kanz-eng/kanz/internal/marketdata/store"
+	"github.com/eighred/kanz/internal/marketdata/returns"
+	"github.com/eighred/kanz/internal/marketdata/store"
 )
 
 // FeatureSource is the MLOPS-01f point-in-time feature-store seam: features

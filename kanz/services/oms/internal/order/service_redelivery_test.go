@@ -8,8 +8,8 @@ import (
 
 	orderpb "github.com/kanz-eng/kanz-schemas-go/order/v1"
 
-	"github.com/kanz-eng/kanz/internal/dec"
-	"github.com/kanz-eng/kanz/internal/execution"
+	"github.com/eighred/kanz/internal/dec"
+	"github.com/eighred/kanz/internal/execution"
 )
 
 // unreachableVenue fails its FIRST execute and then recovers — a venue call

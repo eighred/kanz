@@ -13,8 +13,8 @@ import (
 
 	envelopepb "github.com/kanz-eng/kanz-schemas-go/envelope/v1"
 
-	"github.com/kanz-eng/kanz/services/lake-sink/internal/decode"
-	"github.com/kanz-eng/kanz/services/lake-sink/internal/sink"
+	"github.com/eighred/kanz/services/lake-sink/internal/decode"
+	"github.com/eighred/kanz/services/lake-sink/internal/sink"
 )
 
 // EventSink materializes events into the lakehouse Sink. Its Handle method

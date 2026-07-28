@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/kanz-eng/kanz/internal/pg"
+	"github.com/eighred/kanz/internal/pg"
 )
 
 // A pool with no tenant can read nothing (RLS) and is indistinguishable, at the

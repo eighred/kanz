@@ -11,7 +11,7 @@ import (
 	"net/http"
 	"strconv"
 
-	"github.com/kanz-eng/kanz/internal/execution"
+	"github.com/eighred/kanz/internal/execution"
 )
 
 // SignBinance returns the hex HMAC-SHA256 of query under secret — the value

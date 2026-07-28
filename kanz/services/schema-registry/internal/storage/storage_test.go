@@ -8,7 +8,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/kanz-eng/kanz/services/schema-registry/internal/storage"
+	"github.com/eighred/kanz/services/schema-registry/internal/storage"
 )
 
 func TestParseRef(t *testing.T) {

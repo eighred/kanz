@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/kanz-eng/kanz/internal/dec"
+	"github.com/eighred/kanz/internal/dec"
 )
 
 // largeQty is well past dec.ToProto's ~$92bn wrapping ceiling at the fixed

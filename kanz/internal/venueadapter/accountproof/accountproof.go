@@ -19,7 +19,7 @@ import (
 	"fmt"
 	"log/slog"
 
-	"github.com/kanz-eng/kanz/internal/execution"
+	"github.com/eighred/kanz/internal/execution"
 )
 
 // Exchange reports the exchange's OWN id for the account behind the adapter's API
