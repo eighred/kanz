@@ -62,6 +62,28 @@ func TestIntegration_ConsumerWithDLQParksAFailedEventOnTheWire(t *testing.T) {
 	bustest.EnsureSubjects(t, ctx, js, "KANZTEST_DLQPROBE", []string{probeSubject})
 	bustest.EnsureSubjects(t, ctx, js, "KANZTEST_DLQPROBE_DLQ", []string{dlqProbeSubject})
 
+	// PURGE BOTH STREAMS. The subjects are constants and the streams outlive the
+	// run, so a message parked by a PREVIOUS execution is still sitting on
+	// dlq.kanztest.dlqprobe when this one starts. The fetch below is then
+	// satisfied instantly by that stale message — before this run's handler has
+	// been dispatched even once — and the non-vacuity check further down fires
+	// with "handler never ran".
+	//
+	// That is not a false alarm: the guard is catching exactly what its own
+	// comment predicts ("a message arriving for any other reason (a stale
+	// stream...) would read as proof of DLQ routing"). The guard is right; the
+	// fixture was leaving evidence behind. Observed as an intermittent failure on
+	// main while the same commit passed on its PR.
+	for _, s := range []string{"KANZTEST_DLQPROBE", "KANZTEST_DLQPROBE_DLQ"} {
+		stream, err := js.Stream(ctx, s)
+		if err != nil {
+			t.Fatalf("open stream %s: %v", s, err)
+		}
+		if err := stream.Purge(ctx); err != nil {
+			t.Fatalf("purge stream %s: %v", s, err)
+		}
+	}
+
 	client, err := bus.DialNATS(ctx, bus.NATSConfig{URL: url, Name: "dlq-probe"})
 	if err != nil {
 		t.Fatalf("dial: %v", err)
@@ -106,6 +128,26 @@ func TestIntegration_ConsumerWithDLQParksAFailedEventOnTheWire(t *testing.T) {
 		Payload:          timestamppb.New(et),
 	}); err != nil {
 		t.Fatalf("publish probe: %v", err)
+	}
+
+	// WAIT FOR THIS RUN'S HANDLER TO HAVE FAILED before reading the DLQ. The
+	// subscription runs on its own goroutine, so without this the fetch races it
+	// — and a fetch that returns first proves nothing about routing, because the
+	// message it returns cannot have come from a failure that has not happened
+	// yet.
+	//
+	// This is ordering, not a retry: it waits for the specific precondition the
+	// assertions below depend on, and the deadline is generous because the cost
+	// of waiting is seconds while the cost of racing is a red main branch that
+	// everyone learns to merge past.
+	handlerRan := func() bool { return dispatches.Load() > 0 }
+	for deadline := time.Now().Add(20 * time.Second); !handlerRan() && time.Now().Before(deadline); {
+		time.Sleep(25 * time.Millisecond)
+	}
+	if !handlerRan() {
+		t.Fatalf("the probe handler never ran within 20s — the consumer never received %q, so "+
+			"nothing could have been failed into the DLQ. This is a subscription/delivery "+
+			"problem, not a DLQ-routing one", probeSubject)
 	}
 
 	// Read it back off the DLQ. This is the assertion that could not be made with
