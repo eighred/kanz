@@ -1,7 +1,8 @@
 # kanz
 
-The Eighred institutional trading and risk platform: order management, risk,
-accounting and compliance for a multi-tenant fund estate.
+Eighred is an institutional-grade trading and risk management platform that unifies
+order management, risk analytics, accounting, and compliance within a scalable
+multi-tenant architecture designed for fund managers and investment firms.
 
 ## Stack
 
