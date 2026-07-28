@@ -35,21 +35,33 @@ The market-data freshness SLO in [`../slo/`](../slo/README.md) was compiled from
 the same orphaned `kanz_data_staleness_lag_seconds` gauge and was removed in the
 same change.
 
-## Data quality is still observed — on the event path, not the metrics path
+## Data quality is still RECORDED — but nothing acts on it
 
-This is the part worth not losing. Deleting these rules did **not** leave the
-platform blind to data quality. `observation.v1.DataQualityEvent` still flows on
-the bus and still has live consumers:
+Deleting these rules did not leave the platform blind to data quality.
+`observation.v1.DataQualityEvent` still flows on the bus. What consumes it needs
+stating precisely, because the two consumers are not in the same state:
 
-- `services/audit` classifies and records it (`internal/audit/classify.go`,
-  `record.go`'s `KindDataQuality`), and it surfaces in the `data-quality` audit
-  report template.
-- `services/autopilot` matches gap/staleness/drift signals and runs remediation
-  runbooks against them (`internal/signal`, `internal/controller`).
+- **`services/audit` — deployed, and genuinely live.** It classifies and records
+  the events (`internal/audit/classify.go`, `record.go`'s `KindDataQuality`) and
+  surfaces them in the `data-quality` audit report template. It has a Dockerfile
+  and `infra/deploy/audit-deploy.yaml`.
 
-So the FACT-grade signal survived; what died was its Prometheus export. That
-distinction matters when re-instrumenting: the events are already there, and
-what is missing is a component that observes them and exposes counters/gauges.
+- **`services/autopilot` — NOT DEPLOYED, and currently not deployable.** Its
+  controller matches gap/staleness/drift signals and runs remediation runbooks
+  (`internal/signal`, `internal/controller`), and that code is real. But the
+  service has no Dockerfile, therefore no image and no workload manifest, so it
+  runs in no environment. See issue #124.
+
+This correction matters, and it was got wrong here first. The original version of
+this section cited both consumers as evidence that the signal survived, which
+overstated it: the RECORDING half survived, the REMEDIATION half is code that
+exists and executes nowhere. An operator reading the first version would conclude
+that a data-quality gap still triggers a runbook. It does not.
+
+So: the FACT-grade signal survived and is durably recorded; its Prometheus export
+died with `internal/integrity`; and its automated response has never run. When
+re-instrumenting, the events are already there — what is missing is both a
+component that exposes them as metrics AND a deployable autopilot to act on them.
 
 ## Historical thresholds
 
@@ -94,6 +106,19 @@ Order matters, and it is the order that was violated to produce this state:
    driving page vs. ticket — the same shape `../slo/slo.alerts.rules.yaml` uses
    with `layer="slo"`.
 
-The guard that stops this recurring is tracked as **#63** — an arch test
-asserting every metric named under `alerts/` and `slo/` exists in the Go source.
-Until it lands, nothing prevents a rule outliving its producer again.
+Two things sit outside that order and are worth knowing before starting:
+
+- **An alert with no Prometheus is still nothing.** There is no Prometheus in
+  this estate at all — `infra/observability/` ships rules, dashboards and SLOs,
+  and nothing scrapes or evaluates any of them. That is issue **#61**, and it is
+  part of why an entire orphaned alerting layer survived unnoticed: no evaluator
+  ever tried to run these rules and found their series missing.
+- **An alert nobody acts on is a ticket nobody opens.** Remediation lives in
+  `services/autopilot`, which is not deployable today (issue **#124**).
+
+The guard that stops the rule-outlives-its-producer failure recurring is **#63**
+— an arch test asserting every metric named under `alerts/`, `slo/` and
+`dashboards/` exists in the Go source. It is implemented in
+`kanz/test/arch/observability_metrics_test.go`, and the three dashboards are
+listed in its `metricSurfacesPendingRepair` allow-list until **#123** resolves
+them; the guard's dead-entry check forces those entries out as each is fixed.
