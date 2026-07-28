@@ -84,7 +84,15 @@ func (m *anthropicModel) Complete(ctx context.Context, req llm.Request) (llm.Res
 	}
 	if m.fallback {
 		params.Betas = []anthropic.AnthropicBeta{anthropic.AnthropicBetaServerSideFallback2026_06_01}
-		params.Fallbacks = []anthropic.BetaFallbackParam{{Model: refusalFallbackModel}}
+		// Fallbacks became a UNION in anthropic-sdk-go v1.61.0 — it was a plain
+		// []BetaFallbackParam through v1.60.0. The union's other variant is
+		// OfDefault (the SDK's own default chain), and only one field may be
+		// non-zero, so naming OfBetaFallbackArray explicitly is what keeps this
+		// pinned to OUR fallback model rather than whatever the SDK would pick.
+		// That distinction is the reason this field is set at all.
+		params.Fallbacks = anthropic.BetaFallbacksParamUnion{
+			OfBetaFallbackArray: []anthropic.BetaFallbackParam{{Model: refusalFallbackModel}},
+		}
 	}
 
 	stream := m.client.Beta.Messages.NewStreaming(ctx, params)
