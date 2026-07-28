@@ -47,15 +47,25 @@ type Service struct {
 	accounts       *execution.AccountBindings
 	requireAccount bool
 	sharedOnce     sync.Map // "tenant/portfolio@MIC" → struct{}, so the warning is said once
-	// working claims an order_id for the goroutine currently driving it, so a
-	// resume can never run alongside the delivery that already owns the order.
-	// See claim().
-	working     sync.Map // order_id → struct{}
+	// working is the per-order lock table: it excludes the goroutines that drive
+	// ONE order — the delivery working it, a resume re-driving it, and a cancel
+	// or amend rewriting it. claim() probes it; awaitClaim() waits on it. See
+	// orderlock.go.
+	working orderLocks
+	// claimWait bounds how long a cancel or an amend waits for the in-flight
+	// work on an order to release it. Zero means defaultClaimWait.
+	claimWait   time.Duration
 	sharedCount prometheus.Counter
 	// quarantined counts orders frozen because venue truth could not be
 	// established. It is the alertable signal: a quarantine is a position whose
 	// true size nobody knows, and it must not be discoverable only by reading logs.
 	quarantined prometheus.Counter
+	// claimTimeouts counts cancels and amends abandoned because the goroutine
+	// working the order would not release it in time. Same reasoning as
+	// quarantined: each one is an operator instruction that reached the DLQ
+	// instead of the order, and a stalled venue must not be discoverable only by
+	// reading the DLQ or an ERROR log.
+	claimTimeouts prometheus.Counter
 }
 
 // ServiceOption customizes the handler.
@@ -89,6 +99,40 @@ func WithQuarantineCounter(c prometheus.Counter) ServiceOption {
 	return func(s *Service) { s.quarantined = c }
 }
 
+// WithClaimWait bounds how long a cancel or an amend waits for the goroutine
+// currently working an order before giving up and nacking. It exists to be
+// LOWERED in tests; raising it in production trades a longer stall of the whole
+// cancel subject for a slightly better chance of catching a slow venue, and past
+// JetStream's AckWait it starts deleting cancels outright — see
+// defaultClaimWait, which explains why.
+func WithClaimWait(d time.Duration) ServiceOption {
+	return func(s *Service) { s.claimWait = d }
+}
+
+// WithClaimTimeoutCounter gives the OMS the counter it increments when a cancel
+// or an amend gives up waiting for the goroutine working an order. Without it
+// the timeout is still logged at ERROR and the command still parks in the DLQ,
+// but nothing is alertable — and a cancel sitting unnoticed in a DLQ while the
+// order it was meant to withdraw is live at an exchange is precisely the
+// outcome this path exists to make loud.
+func WithClaimTimeoutCounter(c prometheus.Counter) ServiceOption {
+	return func(s *Service) { s.claimTimeouts = c }
+}
+
+// abandonClaim records a cancel or amend that could not establish exclusivity.
+// It is one function so the cancel and amend paths cannot drift into reporting
+// the same failure two different ways.
+func (s *Service) abandonClaim(command, orderID string, err error) error {
+	if s.claimTimeouts != nil {
+		s.claimTimeouts.Inc()
+	}
+	s.logger.Error("oms: a "+command+" could not take the per-order lock before its deadline — "+
+		"the order is still being worked, so this command is going to the DLQ rather than acting "+
+		"on state it cannot trust. If this repeats, a venue call is hanging",
+		"order_id", orderID, "err", err)
+	return err
+}
+
 // NewService wires the handler. gate defaults to deny-nothing (compliance.AllowAll)
 // when nil; router may be nil to admit orders without working them (they rest).
 // closes is the in-flight-close registry the venue-close dispatch path writes to
@@ -106,7 +150,7 @@ func NewService(store Store, emitter *Emitter, gate compliance.Gate, router *exe
 	}
 	svc := &Service{
 		store: store, gate: gate, emitter: emitter, router: router, closes: closes,
-		now: time.Now, logger: logger,
+		now: time.Now, logger: logger, claimWait: defaultClaimWait,
 	}
 	for _, opt := range opts {
 		opt(svc)
@@ -236,6 +280,12 @@ func (s *Service) handleSubmit(ctx context.Context, env *envelopepb.Envelope, pa
 	// the two mutually exclusive: whichever gets here first drives the order, and
 	// the other finds the claim held and stops. defer release() so every return
 	// below — the ErrUnpriced branch and the final outcome emission — is covered.
+	//
+	// TRY, NOT WAIT, IS DELIBERATE HERE. "Somebody already owns this order" is a
+	// complete answer for a submit or a resume, because the holder carries the
+	// order to completion on this delivery's behalf. Cancel and amend cannot back
+	// off on that reasoning — nobody cancels an order on their behalf — so they
+	// take the same lock through awaitClaim and wait for it. See orderlock.go.
 	release, ok := s.claim(st.GetOrderId())
 	if !ok {
 		// Another goroutine in THIS process already holds the claim and is driving
@@ -422,6 +472,20 @@ func (s *Service) work(ctx context.Context, st *orderpb.OrderState) (*orderpb.Or
 	}
 	st = acked
 
+	// THE FOLD BELOW READS st, NOT THE STORE, AND THAT IS ONLY SAFE BECAUSE OF
+	// THE PER-ORDER LOCK. Every caller of work() holds it (handleSubmit, resume),
+	// and cancel and amend now WAIT for it (awaitClaim), so within this process
+	// nothing can move this order between the read above and the Saves below.
+	// ApplyFill's IsTerminal guard is therefore evaluated against state that is
+	// still current — which is precisely what it was NOT before the per-order
+	// lock reached cancel, and why a cancel landing inside venue.Execute could be
+	// overwritten by a FILLED Save it never saw.
+	//
+	// ACROSS REPLICAS IT IS STILL NOT SAFE, and re-reading here would not make it
+	// so: it would shrink the window between Load and Save, not remove it. A
+	// probabilistic fix on the capital path is how the partition_key
+	// serialization claim got written in the first place. That gap belongs to
+	// Store.Save gaining a version predicate — see postgres.go.
 	for _, fill := range fills {
 		next, aerr := ApplyFill(st, fill, fill.GetExecutedAt().AsTime())
 		if aerr != nil {
@@ -450,6 +514,52 @@ func (s *Service) handleCancel(ctx context.Context, payload []byte) error {
 		s.logger.Error("oms: malformed CancelOrder", "err", err)
 		return nil
 	}
+
+	// TAKE THE PER-ORDER LOCK, AND WAIT FOR IT.
+	//
+	// This handler used to read the order and act on that read with NOTHING
+	// excluding the goroutine that was, at that moment, inside venue.Execute for
+	// the same order. The interleaving that breaks, all of it reachable in
+	// production because submit, amend and cancel are three separate durables
+	// with three cursors and three dispatch goroutines (pkg/bus/nats.go:183,
+	// 202-206) — the partition_key does NOT serialize them, whatever the older
+	// comments in postgres.go and store.go used to claim:
+	//
+	//   work() reads the order, calls the exchange, and blocks there.
+	//   This handler loads the same order, sees it live, dispatches the
+	//   withdrawal to the venue, Saves it CANCELLED and announces the FACT.
+	//   work() returns holding a fill and folds it into the state it captured
+	//   BEFORE the cancel. That snapshot is not terminal, so ApplyFill's
+	//   IsTerminal guard (aggregate.go) — a real guard, evaluated against the
+	//   wrong state — passes. Save is a blind upsert, so FILLED is written over
+	//   CANCELLED and the ledger's last word contradicts the FACT the world was
+	//   already told.
+	//
+	// WAIT, do not skip. claim()'s try semantics are correct for submit and
+	// resume, where the holder finishes the job on the loser's behalf. Nobody
+	// finishes a cancel on this delivery's behalf: giving up here is an
+	// operator's withdrawal silently discarded.
+	//
+	// ACT AFTER, not before. Everything below reads order state, and order state
+	// read alongside a running work() is a guess. `now` is taken after the wait
+	// too — a timestamp captured before a multi-second block would date the
+	// cancellation and its FACTs EARLIER than the fill they follow, inverting
+	// the order of events for every downstream projection.
+	release, err := s.awaitClaim(ctx, cmd.GetOrderId())
+	if err != nil {
+		// Exclusivity could not be established in time, so nothing about this
+		// cancel has been decided — and saying nothing is the only honest
+		// report. Do NOT fall through onto state that is about to change, and do
+		// NOT emit an outcome: a REJECTED here would tell the caller the ledger
+		// refused a cancel the ledger never even looked at. Returning the error
+		// nacks; MaxAttempts is 1 and the DLQ is wired (cmd/oms/main.go), so the
+		// command parks in dlq.order.order.cancel where an operator can see and
+		// replay it, and the counter makes the stall alertable rather than
+		// discoverable only by reading that queue.
+		return s.abandonClaim("cancel", cmd.GetOrderId(), err)
+	}
+	defer release()
+
 	now := s.now().UTC()
 	st, err := s.store.Load(ctx, cmd.GetOrderId())
 	if errors.Is(err, ErrNotFound) {
@@ -542,6 +652,10 @@ func (s *Service) handleCancel(ctx context.Context, payload []byte) error {
 // REJECTED for a cancel that had already succeeded. Do not "fix" this into
 // exactly-once without a fill_id-style dedup on the FACT itself; that is a
 // larger change than this one.
+//
+// It is always called under the per-order lock (handleCancel and resume both
+// hold it), so the duplicate this documents is a REDELIVERY duplicate only —
+// never two goroutines announcing one cancellation concurrently.
 func (s *Service) completeCancelAnnouncement(ctx context.Context, st *orderpb.OrderState, cancelledQty *commonpb.Decimal, now time.Time) error {
 	if err := s.emitter.EmitCancelled(ctx, st.GetOrderId(), cancelledQty, now); err != nil {
 		return err
@@ -614,6 +728,27 @@ func (s *Service) handleAmend(ctx context.Context, payload []byte) error {
 		s.logger.Error("oms: malformed AmendOrder", "err", err)
 		return nil
 	}
+
+	// TAKE THE PER-ORDER LOCK, AND WAIT FOR IT — the same reasoning as
+	// handleCancel, and the same defect pointed the other way. An amend racing a
+	// fill is worse than it looks: Amend() clones the state it was handed and
+	// rewrites ordered/leaves quantity on it, carrying that snapshot's STATUS
+	// along, so an amend built on a pre-fill read Saves ROUTED with a positive
+	// leaves quantity over a FILLED order — a completed trade un-filled in the
+	// ledger, with an open quantity the exchange does not have. Its
+	// "new quantity below filled quantity" guard (aggregate.go) is equally
+	// compromised: it compares against a filled_quantity that a fold in flight
+	// has already moved, so it can also shrink an order below what has actually
+	// traded.
+	release, err := s.awaitClaim(ctx, cmd.GetOrderId())
+	if err != nil {
+		// Same posture as the cancel path: nothing was decided, so nothing is
+		// announced, and the command parks in the DLQ rather than rewriting the
+		// size or price of an order whose true state it cannot read.
+		return s.abandonClaim("amend", cmd.GetOrderId(), err)
+	}
+	defer release()
+
 	now := s.now().UTC()
 	st, err := s.store.Load(ctx, cmd.GetOrderId())
 	if errors.Is(err, ErrNotFound) {
@@ -693,33 +828,6 @@ func entitledTo(allowed []string, portfolio string) bool {
 		}
 	}
 	return false
-}
-
-// claim takes exclusive, in-process ownership of one order_id and returns the
-// function that releases it. ok is false when another goroutine in THIS process
-// already holds it, and the caller must then do nothing at all.
-//
-// WHAT THIS IS FOR, AND WHAT IT IS NOT. store.Create is the ADMISSION gate: it
-// decides which of two concurrent first-deliveries owns a new order. It has
-// nothing to say about two deliveries that both find an order that ALREADY
-// exists — which, once the handler resumes interrupted orders instead of acking
-// them, is two goroutines both re-driving one order to a venue. The bus
-// partition key makes that rare; rare is not a posture on the capital path.
-//
-// It is per-order, not global: a single lock would serialize every order in the
-// OMS behind the slowest venue call.
-//
-// It is IN-PROCESS ONLY, and that is a real limit, not an oversight. Two OMS
-// pods resuming the same order are not excluded by this and cannot be — that
-// requires a lease in the store. It is the same single-replica assumption the
-// order and position stores already carry (see the openStores comment in
-// cmd/oms/main.go); this narrows the window that exists WITHIN a pod, which is
-// the window a redelivery actually opens.
-func (s *Service) claim(orderID string) (func(), bool) {
-	if _, loaded := s.working.LoadOrStore(orderID, struct{}{}); loaded {
-		return func() {}, false
-	}
-	return func() { s.working.Delete(orderID) }, true
 }
 
 // resume decides what to do with an order that already exists when a SubmitOrder

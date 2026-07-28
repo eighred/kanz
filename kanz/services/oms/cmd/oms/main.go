@@ -279,6 +279,19 @@ func runConsumers(ctx context.Context, cfg config.Config, readiness *server.Read
 	})
 	obs.Registry.MustRegister(quarantined)
 
+	// Cancels and amends that gave up waiting for the goroutine working their
+	// order. Non-zero means an operator instruction went to the DLQ instead of
+	// the order it was meant to act on, while the order itself is still live at
+	// an exchange — and the usual cause is a venue call that is not returning.
+	claimTimeouts := prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "kanz_oms_claim_timeouts_total",
+		Help: "Cancels and amends abandoned because the goroutine working the order would not release it " +
+			"in time. Each one is an operator instruction parked in the DLQ rather than applied, for an " +
+			"order that is still working at a venue. Non-zero means a venue call is hanging and somebody's " +
+			"withdrawal did not land; it should be zero.",
+	})
+	obs.Registry.MustRegister(claimTimeouts)
+
 	// Venue adapters trading an account NOBODY has proved against the exchange
 	// (SOV-02a). The adapter's account is read from its own config, so a mis-declared
 	// deployment looks exactly like a correct one — non-zero means some part of the
@@ -312,7 +325,8 @@ func runConsumers(ctx context.Context, cfg config.Config, readiness *server.Read
 	router := execution.NewRouter(venues...)
 	svc, err := order.NewService(store, emitter, gate, router, closeRegistry, logger,
 		order.WithAccountBindings(bindings, cfg.RequireVenueAccount, sharedCollateral),
-		order.WithQuarantineCounter(quarantined))
+		order.WithQuarantineCounter(quarantined),
+		order.WithClaimTimeoutCounter(claimTimeouts))
 	if err != nil {
 		return err
 	}

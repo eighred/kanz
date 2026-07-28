@@ -36,8 +36,14 @@ var ErrExists = errors.New("oms: order already exists")
 //     enforce this at the engine — INSERT ... ON CONFLICT (order_id) DO NOTHING,
 //     or a unique constraint — never a SELECT followed by an INSERT.
 //   - Save is the upsert used for every state transition AFTER admission, where
-//     the order's existence is already established and the bus partition_key
-//     guarantees per-order ordering.
+//     the order's existence is already established. It does NOT arbitrate
+//     between concurrent writers: this used to claim the bus partition_key
+//     guaranteed per-order ordering, and it does not — nothing in the consumer
+//     reads it for ordering, and submit, amend and cancel arrive on three
+//     separate durables with three dispatch goroutines. Exclusion comes from the
+//     service's per-order lock (orderlock.go), which stops at the process
+//     boundary; across replicas the last writer still wins. See the Save comment
+//     in postgres.go.
 type Store interface {
 	// Create inserts the initial state of one order. It returns ErrExists — and
 	// writes nothing — if the order_id is already present. MUST be atomic: two

@@ -64,9 +64,25 @@ func (p *Postgres) Create(ctx context.Context, st *orderpb.OrderState) error {
 	return nil
 }
 
-// Save is the post-admission upsert: every state transition after Create. Safe
-// as an upsert precisely because existence is already established and the bus
-// partition_key serializes transitions per order_id.
+// Save is the post-admission upsert: every state transition after Create.
+//
+// IT IS A BLIND UPSERT, AND THE LAST WRITER WINS. This comment used to say the
+// upsert was safe "because the bus partition_key serializes transitions per
+// order_id". THAT WAS NEVER TRUE. partition_key is stamped by producers
+// (pkg/bus/producer.go) and read by the consumer only to copy onto a DLQ
+// republish (pkg/bus/consumer.go); nothing anywhere serializes deliveries by it,
+// and submit, amend and cancel arrive on three separate durables with three
+// cursors and three dispatch goroutines (pkg/bus/nats.go). The consumer's only
+// exclusion is its dedup claim, keyed on idempotency_key — which differs between
+// a submit and a cancel. Believing that sentence is how a cancel came to be
+// overwritten by a fill that never saw it.
+//
+// What actually excludes concurrent writers today is the per-order lock in the
+// service (internal/order/orderlock.go), and its safety boundary ENDS AT THE
+// PROCESS. Two OMS pods writing one order still race here, and the loser's write
+// is silently discarded rather than rejected. Closing that needs a version
+// column and a CAS predicate on this statement — tracked separately. Do not
+// reintroduce a serialization claim in this comment to paper over it.
 func (p *Postgres) Save(ctx context.Context, st *orderpb.OrderState) error {
 	if st.GetOrderId() == "" {
 		return errors.New("oms: cannot save order with empty order_id")
