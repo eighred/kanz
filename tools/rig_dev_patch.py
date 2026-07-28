@@ -1,33 +1,139 @@
 #!/usr/bin/env python3
 """Adapt a production manifest for the dev rig, on stdout.
 
-Three rig-only transformations, each because the rig is deliberately unlike prod
-(Vault CSI -> dev Secret; :latest -> IfNotPresent; SPIFFE bus mesh -> plaintext,
-since the rig's NATS is dev-plaintext). See the inline comments for each:
+Four rig-only transformations, each because the rig is deliberately unlike prod
+(Vault CSI -> dev Secret; digest -> :latest tag; :latest -> IfNotPresent; SPIFFE
+bus mesh -> plaintext, since the rig's NATS is dev-plaintext). See the inline
+comments for each:
 
 1. Vault CSI -> dev Secret. Production mounts DSNs and credentials from Vault via
    secrets-store.csi.k8s.io. The dev rig has no Vault (ONBOARD-M6), so each such
    volume becomes a reference to the committed rig-dev-secrets Secret.
 
-2. imagePullPolicy -> IfNotPresent on every container. The images all carry the
-   :latest tag, which Kubernetes defaults to imagePullPolicy: Always. The rig runs
-   images that tools/rig-images.sh built locally and `kind load`ed into the node;
-   there is no registry to pull ghcr.io/kanz-eng/* from (it is private and the
-   node is unauthenticated), so Always guarantees ImagePullBackOff. Forcing
-   IfNotPresent makes the loaded image authoritative. Production keeps Always so it
-   really does pull from ghcr.io — that is why this belongs in the rig patch and
-   not in the committed manifest. It also retires the hand-patch that did this on
-   the rig on 2026-07-12 and recorded nowhere.
+2. ghcr.io/eighred/<service>[:tag]@sha256:<digest> -> ghcr.io/eighred/<service>:latest
+   on every container. release.yml's pin-digests job (SUPPLY-M1/OPS-M4a) rewrites
+   every production manifest's image to an immutable digest computed from that
+   CI build. The rig never runs that build: tools/rig-images.sh builds each
+   service from source and `kind load`s it into the node as
+   ghcr.io/eighred/<service>:latest, and a locally built image can never
+   reproduce a CI-computed digest — content-addressing means no local rebuild
+   will ever equal it byte-for-byte. Applying the manifest unmodified asks the
+   kubelet for a reference no image on the node can satisfy, so it falls back to
+   the private ghcr.io registry the node holds no credential for: ImagePullBackOff
+   on every rig pod. Rewriting to the same :latest tag rig-images.sh built makes
+   the transformation below (IfNotPresent) actually able to find a match. Only
+   references to OUR OWN registry are touched; third-party images (gcr.io/
+   distroless/..., ghcr.io/spiffe/..., apache/kafka, ...) the rig pulls normally
+   and are left byte-identical. A reference carrying a DIGEST is rewritten to
+   :latest regardless of whether it also carries a tag: per OCI reference
+   resolution, when a reference carries both a tag and a digest, the digest is
+   authoritative for the pull — the tag is cosmetic — so a tag+digest reference
+   is exactly as unpullable on the rig as a bare digest and must be rewritten
+   the same way. Only a reference carrying a tag and NO digest passes through
+   unchanged, since that is already what the rig wants. A ghcr.io/eighred/*
+   reference in a shape this rewrite does not recognize is a FATAL error, not a
+   silent pass-through: silently leaving a digest in place is exactly the
+   confusing ImagePullBackOff this transformation exists to remove, so guessing
+   wrong here is worse than refusing to guess.
+
+3. imagePullPolicy -> IfNotPresent on every container. Kubernetes defaults
+   imagePullPolicy to Always for a :latest tag — including the :latest tag
+   transformation 2 above just produced — and Always means the kubelet ignores
+   whatever `kind load` already put on the node and dials the private,
+   unauthenticated ghcr.io registry instead: ImagePullBackOff. Forcing
+   IfNotPresent makes the kind-loaded image authoritative. Production keeps
+   Always (moot anyway once the manifest is digest-pinned, since a digest is
+   immutable and Always vs. IfNotPresent make no observable difference) — this
+   belongs in the rig patch, not the committed manifest. It also retires the
+   hand-patch that did this on the rig on 2026-07-12 and recorded nowhere.
+
+4. SPIFFE workload-API socket env, and a couple of production-only endpoint
+   env vars, dropped so the workload falls back to its plaintext / in-process
+   dev path instead of dialling infrastructure the rig does not run. See the
+   detailed per-variable reasoning inline in patch_pod_spec below.
 
 csi.spiffe.io volumes are deliberately LEFT ALONE: after `rig-apply.sh --spire`
 the rig runs real SPIRE, so its SVIDs are genuine and stripping them would
 reintroduce the very deviation this replaces.
 """
 import os
+import re
 import sys
 import yaml
 
 VAULT_DRIVER = "secrets-store.csi.k8s.io"
+
+# Our own registry. Only references under this prefix are ever rewritten;
+# everything else (gcr.io/distroless/*, ghcr.io/spiffe/*, apache/kafka, ...) is
+# a third-party image the rig pulls normally and must be left byte-identical.
+OWN_REGISTRY_PREFIX = "ghcr.io/eighred/"
+
+# Matches ghcr.io/eighred/<service>[:tag]@sha256:<digest> — what release.yml's
+# pin-digests job (SUPPLY-M1/OPS-M4a) writes into every production manifest,
+# WITH OR WITHOUT an accompanying tag. Per OCI reference resolution the digest
+# is authoritative over any tag also present, so a tag+digest reference is
+# handled identically to a bare-digest one — the optional `(?::tag)?` group
+# below is what makes that so. Group 1 is the service name, reused to build
+# the rig's :latest reference.
+_OWN_DIGEST_RE = re.compile(
+    r"^" + re.escape(OWN_REGISTRY_PREFIX) +
+    r"([a-z0-9][a-z0-9._-]*)(?::[A-Za-z0-9._-]+)?@sha256:[a-f0-9]{64}$")
+
+# Matches ghcr.io/eighred/<service>:<tag> — a tag reference carrying NO
+# digest. This is the ONLY own-registry shape the rig passes through
+# unchanged: with no digest present, the tag is what actually resolves the
+# pull, and it is already what the rig wants (see _rig_image below). Any
+# digest-bearing reference — tagged or not — is matched by _OWN_DIGEST_RE
+# above instead, never here.
+_OWN_TAGGED_RE = re.compile(
+    r"^" + re.escape(OWN_REGISTRY_PREFIX) +
+    r"[a-z0-9][a-z0-9._-]*:[A-Za-z0-9._-]+$")
+
+
+def _rig_image(image, path, container_name):
+    """Return the rig-appropriate image reference for `image`.
+
+    Only ghcr.io/eighred/* references are touched — everything else (a
+    third-party image) is returned unchanged. Any ghcr.io/eighred/* reference
+    that carries a digest — whether bare (@sha256:<digest>) or alongside a
+    tag (:<tag>@sha256:<digest>) — is rewritten to :latest, because per OCI
+    reference resolution the digest is what the registry actually resolves;
+    an accompanying tag does not make it any more pullable on the rig. Only a
+    reference carrying a tag and NO digest is already what the rig wants and
+    passes through unchanged. A ghcr.io/eighred/* reference in neither shape
+    is one this function does not understand, and it fails loudly rather than
+    silently leaving a possibly-unpullable reference in place — the same
+    contract as the Vault CSI FATAL below.
+    """
+    if not image.startswith(OWN_REGISTRY_PREFIX):
+        return image
+
+    m = _OWN_DIGEST_RE.match(image)
+    if m:
+        service = m.group(1)
+        # tools/rig-images.sh builds and `kind load`s exactly this reference;
+        # rig_dev_posture_test.go's TestRigDevPatchRewritesDigestPinnedImagesToLocalTags
+        # pins that the two agree.
+        return OWN_REGISTRY_PREFIX + service + ":latest"
+
+    if _OWN_TAGGED_RE.match(image):
+        # A tag reference with NO digest — already what the rig wants, so pass
+        # through unchanged. A digest-bearing reference, even one that also
+        # carries a tag, is matched by _OWN_DIGEST_RE above instead and never
+        # reaches here: the tag is cosmetic once a digest is present, and
+        # leaving the digest in place would still be unpullable on the rig.
+        # This is what lets --keep-spiffe-style local experiments (or a
+        # manifest edited by hand to a tag) round-trip through the patcher
+        # without this rewrite fighting them.
+        return image
+
+    sys.exit(f"FATAL: {path}: container {container_name!r} uses image {image!r}, "
+              f"which carries our own registry prefix ({OWN_REGISTRY_PREFIX}) but is "
+              f"in a reference shape this rewrite does not recognize (neither "
+              f"@sha256:<digest> nor :<tag>). Silently leaving it as-is risks a "
+              f"reference the rig's kind-loaded image cannot satisfy, which is the "
+              f"exact ImagePullBackOff this rewrite exists to prevent — teach this "
+              f"function the new shape rather than let it guess.")
 
 # Env vars that point a workload at production-only infrastructure the rig does
 # not run. Removed so the workload takes its in-process / plaintext fallback.
@@ -115,6 +221,16 @@ def patch_pod_spec(spec, path, keep_spiffe=False):
 
     for key in ("initContainers", "containers"):
         for container in spec.get(key) or []:
+            # Production is digest-pinned (release.yml's pin-digests job); the rig
+            # cannot reproduce that digest from a local build, so rewrite our own
+            # images to the :latest tag tools/rig-images.sh actually built and
+            # `kind load`ed. See _rig_image and this file's module docstring
+            # (transformation 2) for the full reasoning. Third-party images are
+            # returned unchanged.
+            image = container.get("image")
+            if image:
+                container["image"] = _rig_image(image, path, container.get("name"))
+
             # Every container runs a kind-loaded image; never reach for ghcr.
             container["imagePullPolicy"] = "IfNotPresent"
 
