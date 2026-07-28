@@ -45,9 +45,11 @@ var warnOut io.Writer = os.Stderr
 // "this is FIRST CONTACT with a freshly-provisioned host whose key we do not and cannot
 // yet know. The bootstrap trust is the operator-supplied key plus the ephemeral,
 // RBAC-gated, NetworkPolicy-scoped Job this runs in — not TOFU host verification." That
-// text was written in the S2a plan document before any of it ran
-// (docs/superpowers/plans/2026-07-24-s2a-node-provisioning.md:217) and was never
-// re-derived against the code that shipped. Both of its halves are wrong, and they are
+// text was copied verbatim from the S2a node-provisioning plan, written before any of
+// it ran and never re-derived against the code that shipped. (That plan lived under
+// docs/, deleted 2026-07-29; it is in git history, and the fact that a justification
+// outlived the document it came from — and was still wrong — is the reason it is
+// quoted here in full rather than cited.) Both of its halves are wrong, and they are
 // wrong in different ways, so both are recorded here.
 //
 // THE COMPENSATING CONTROLS IT NAMES ARE ALL CLIENT-SIDE. RBAC decides who may ask for a

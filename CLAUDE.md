@@ -6,18 +6,41 @@ Protobuf contracts under `kanz-schemas/`, the Python inference service under
 
 ## Where things live
 
-Four layers. Nothing is tracked in two places.
+Two layers. Nothing is tracked in two places.
 
 | Layer | Home |
 |---|---|
 | **What to do** | **GitHub Issues** on `eighred/kanz` — milestones `M0`…`M6` carry the sequence |
-| **Why it is shaped this way** | `KANZ_BRAIN.md` — durable architectural decisions and anti-decisions |
-| **What happened** | git history and claude-mem |
-| **Specs and plans** | `docs/superpowers/{specs,plans}/` |
+| **Why it is shaped this way, and what happened** | the code (in comments beside what they explain), git history, and claude-mem |
 
-There is no task board in this repository. `KANZ_TASKS.md`, `KANZ_ROADMAP.md` and
-the Phase 0/2/3 documents were deleted on 2026-07-28; five documents each claimed
-to say what to do next and none deferred to the others.
+There is no task board in this repository, and no architecture document. Both
+were tried and both failed the same way.
+
+`KANZ_TASKS.md`, `KANZ_ROADMAP.md` and the Phase 0/2/3 documents went on
+2026-07-28: five documents each claimed to say what to do next and none deferred
+to the others. `docs/` (63 files of plans and specs) and `KANZ_BRAIN.md` went on
+2026-07-29 for the same reason one level up — a plan that outlives its work
+becomes a second answer to "what should we do", and a prose description of the
+system becomes a second answer to "how does it work". Both compete with a source
+that is always right when they are wrong.
+
+**Everything durable lives next to the code or in claude-mem.** That is a
+working conclusion, not a preference. The explanations that survive in this
+repository are the ones sitting beside what they explain — the OMS's incident
+notes, the DLQ retry certifications, the tombstones in `infra/observability/`,
+the arch guards in `test/arch/`. When those drift, a reader finds it, because
+they are read while the code is being changed. A separate document drifts
+unread: `KANZ_BRAIN.md`'s own system-shape section ended up naming a Go version
+and a module path the repository had both moved away from, in one sentence,
+while the code was correct throughout.
+
+**An invariant worth keeping is a guard, not a paragraph.** The strongest form
+of "we deliberately do not do X" is a test in `test/arch/` that fails when
+someone does X — default-deny, with named exemptions that carry the issue
+retiring them, and a dead-entry check so an exemption cannot outlive its repair.
+`bus_dlq_test.go`, `observability_metrics_test.go`, `dr_postgres_coverage_test.go`
+and `baseimage_mirror_test.go` are the pattern. Everything is recoverable from
+git history if it is ever wanted back.
 
 ## Issue conventions
 
