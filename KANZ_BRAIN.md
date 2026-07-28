@@ -1,6 +1,6 @@
 # KANZ BRAIN
 
-> Architectural memory — durable decisions future engineers must know, and the "why" behind them. NOT a changelog: no feature-completion notes, implementation minutiae, routine wiring, or bug fixes (those live in git + `KANZ_TASKS.md`). The codebase is always the ground truth. Last reconciled 2026-07-11.
+> Architectural memory — durable decisions future engineers must know, and the "why" behind them. NOT a changelog: no feature-completion notes, implementation minutiae, routine wiring, or bug fixes (those live in git history and GitHub Issues). The codebase is always the ground truth. Last reconciled 2026-07-11.
 
 ## Strategic direction — automated execution system (repositioned 2026-07)
 
