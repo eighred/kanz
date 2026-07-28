@@ -238,6 +238,7 @@ func (g *gatewaySource) fetch(ctx context.Context) (fetchMsg, error) {
 func (g *gatewaySource) addNode(ctx context.Context, in addNodeInput) (string, error) {
 	req := &operatorpb.AddNodeRequest{
 		Hostname: in.hostname, Ip: in.ip, SshPort: in.sshPort, SshUser: in.sshUser, SshPrivateKey: in.sshKey,
+		SshHostKey: in.sshHostKey,
 	}
 	var resp operatorpb.AddNodeResponse
 	if err := g.call(ctx, http.MethodPost, "/v1/control/nodes", req, &resp); err != nil {

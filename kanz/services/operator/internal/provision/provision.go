@@ -121,6 +121,12 @@ type Request struct {
 	SSHPort  int32
 	SSHUser  string
 	SSHKey   []byte
+	// SSHHostKey is the TARGET's public host key in authorized_keys format. It
+	// authenticates the host to us — the opposite direction from SSHKey — and
+	// the join session will not run without it, because that session pipes
+	// K3S_TOKEN to whatever answers the dial. Public material: no Secret, unlike
+	// SSHKey.
+	SSHHostKey string
 }
 
 // Status is the coarse provisioning status derived from a Job.
@@ -245,6 +251,17 @@ func (p *Provisioner) jobSpec(name string, r Request, port int32) *batchv1.Job {
 				},
 			}},
 			{Name: "PROVISION_SSH_KEY_FILE", Value: keyMountPath + "/" + keySecretKey},
+			// The target's PUBLIC host key, so the provisioner can verify who
+			// answered before it pipes K3S_TOKEN into a shell there. A plain env
+			// value rather than a Secret ref on purpose: it is public material,
+			// and routing it through the Job-owned Secret would imply otherwise
+			// to the next reader — the Secret above exists for the two
+			// credentials that genuinely are secret.
+			//
+			// AddNode refuses an empty host key, so this is never blank in
+			// practice; if it somehow were, the provisioner fails closed before
+			// dialling rather than falling back to trusting anyone.
+			{Name: "PROVISION_HOST_KEY", Value: r.SSHHostKey},
 		},
 		VolumeMounts: []corev1.VolumeMount{{Name: "bootstrap-key", MountPath: keyMountPath, ReadOnly: true}},
 		SecurityContext: &corev1.SecurityContext{

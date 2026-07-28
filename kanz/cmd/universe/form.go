@@ -48,6 +48,18 @@ func newAddForm() addForm {
 		{key: "ssh_port", label: "SSH Port", value: "22"},
 		{key: "ssh_user", label: "User", required: true},
 		{key: "key_path", label: "Key Path", required: true},
+		// The TARGET's PUBLIC host key, which is the opposite direction from Key
+		// Path above: that one proves us to the host, this one proves the host to
+		// us. Required, because the join session pipes K3S_TOKEN — cluster
+		// admission — into a shell on the far end, and without this there is
+		// nothing distinguishing the machine the operator meant from whatever
+		// answered the dial.
+		//
+		// Whoever put the bootstrap key's public half into the target's
+		// authorized_keys can read this off the same box:
+		//   ssh-keyscan -t ed25519 <ip>   (drop the leading host field)
+		// or cat /etc/ssh/ssh_host_ed25519_key.pub on the target itself.
+		{key: "ssh_host_key", label: "Host Key", required: true},
 	}}
 }
 
