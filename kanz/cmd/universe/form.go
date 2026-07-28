@@ -30,11 +30,17 @@ type addForm struct {
 
 // newAddForm builds the empty Add Node form. Every field is required EXCEPT
 // SSH Port: it is prefilled with 22, 22 is the only port this estate probes or
-// provisions over, and atoi32 already answers a cleared or malformed port with
-// that same 22. Demanding it back would make the operator retype the only value
-// the field can hold, and would put a second, contradicting answer next to
-// atoi32's. The port is therefore DEFAULTED, not required — stated here so the
-// choice is readable rather than inferred from an absent flag.
+// provisions over, and parsePort already answers a cleared port with that same
+// 22. Demanding it back would make the operator retype the only value the field
+// can hold, and would put a second, contradicting answer next to parsePort's.
+// The port is therefore DEFAULTED, not required — stated here so the choice is
+// readable rather than inferred from an absent flag.
+//
+// Defaulted is not the same as unchecked. A port that is present but not a port
+// (out of 1..65535, or wide enough to truncate on the way to the int32 wire
+// field) is REFUSED by parsePort rather than quietly replaced with 22 — the
+// operator typed something, and turning it into a different port they never
+// asked for is the one answer worse than an error.
 func newAddForm() addForm {
 	return addForm{fields: []addField{
 		{key: "hostname", label: "Hostname", required: true},
