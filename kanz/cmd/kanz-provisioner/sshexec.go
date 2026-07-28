@@ -55,21 +55,25 @@ func (s *syncBuffer) String() string {
 // sshRun dials addr ("host:port") over SSH as user, authenticating with the PEM
 // private key, runs cmd, and returns its combined stdout+stderr.
 //
-// HostKeyCallback is InsecureIgnoreHostKey BY DESIGN: this is FIRST CONTACT with a
-// freshly-provisioned host whose key we do not and cannot yet know. The bootstrap
-// trust is the operator-supplied key plus the ephemeral, RBAC-gated,
-// NetworkPolicy-scoped Job this runs in — not TOFU host verification. SSH touches
-// this host exactly once (the k3s join); afterward it is Kubernetes-managed and
-// never reached over SSH again.
+// BOTH DIRECTIONS ARE AUTHENTICATED, and the second one is not optional. The signer
+// below proves us to the host; HostKeyCallback proves the host to us. This session is
+// the estate's only SSH session and it carries K3S_TOKEN — see hostkey.go for what
+// answering it without checking who answered actually costs, and for the argument this
+// replaces. hostKeyCallback fails closed, so an unconfigured or misconfigured policy
+// stops the provision HERE, before the dial and long before the token is in flight.
 func sshRun(ctx context.Context, addr, user string, pemKey []byte, cmd string) (string, error) {
 	signer, err := ssh.ParsePrivateKey(pemKey)
 	if err != nil {
 		return "", fmt.Errorf("parse private key: %w", err)
 	}
+	hostKeys, err := hostKeyCallback()
+	if err != nil {
+		return "", fmt.Errorf("ssh host key policy: %w", err)
+	}
 	cfg := &ssh.ClientConfig{
 		User:            user,
 		Auth:            []ssh.AuthMethod{ssh.PublicKeys(signer)},
-		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
+		HostKeyCallback: hostKeys,
 		Timeout:         dialTimeout,
 	}
 
