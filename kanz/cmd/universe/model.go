@@ -380,10 +380,11 @@ func (m model) submitAddForm() (model, tea.Cmd) {
 	}
 
 	in := addNodeInput{
-		hostname: m.form.value("hostname"),
-		ip:       m.form.value("ip"),
-		sshUser:  m.form.value("ssh_user"),
-		sshPort:  port,
+		hostname:   m.form.value("hostname"),
+		ip:         m.form.value("ip"),
+		sshUser:    m.form.value("ssh_user"),
+		sshPort:    port,
+		sshHostKey: strings.TrimSpace(m.form.value("ssh_host_key")),
 	}
 	keyPath := m.form.value("key_path")
 	src := m.src

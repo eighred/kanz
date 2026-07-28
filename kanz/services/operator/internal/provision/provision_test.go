@@ -17,11 +17,16 @@ func cfg() Config {
 		K3sServerURL: "https://cp:6443", K3sToken: "tok"}
 }
 
+// testHostKey is the target's public host key as an AddNode would carry it —
+// authorized_keys format, public material, never secret.
+const testHostKey = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestHostKeyForProvisionerJobEnvXX"
+
 func TestAddNodeCreatesJobAndOwnedSecret(t *testing.T) {
 	cs := fake.NewSimpleClientset()
 	p := New(cs, cfg())
 	id, err := p.AddNode(context.Background(), Request{
-		Hostname: "london", IP: "10.0.0.5", SSHPort: 22, SSHUser: "root", SSHKey: []byte("PEM")})
+		Hostname: "london", IP: "10.0.0.5", SSHPort: 22, SSHUser: "root", SSHKey: []byte("PEM"),
+		SSHHostKey: testHostKey})
 	if err != nil {
 		t.Fatalf("AddNode: %v", err)
 	}
@@ -76,6 +81,27 @@ func TestAddNodeCreatesJobAndOwnedSecret(t *testing.T) {
 				}
 			}
 		}
+	}
+
+	// THE HOST KEY MUST REACH THE POD, or the provisioner fails closed on every
+	// join and the whole plumbing is decorative. It is deliberately a plaintext
+	// env Value and not a secretKeyRef: it is the target's PUBLIC key, and
+	// routing it through the Job-owned Secret would tell the next reader it is
+	// confidential when the two entries beside it genuinely are.
+	var gotHostKey string
+	for _, c := range job.Spec.Template.Spec.Containers {
+		for _, e := range c.Env {
+			if e.Name == "PROVISION_HOST_KEY" {
+				gotHostKey = e.Value
+				if e.ValueFrom != nil {
+					t.Errorf("PROVISION_HOST_KEY should be a plain value — it is public material: %+v", e)
+				}
+			}
+		}
+	}
+	if gotHostKey != testHostKey {
+		t.Errorf("PROVISION_HOST_KEY = %q, want %q — without it sshRun refuses to dial and the "+
+			"join never runs", gotHostKey, testHostKey)
 	}
 }
 

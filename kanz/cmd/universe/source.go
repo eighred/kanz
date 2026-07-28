@@ -52,6 +52,10 @@ type addNodeInput struct {
 	hostname, ip, sshUser string
 	sshPort               int32
 	sshKey                []byte
+	// sshHostKey is the target's PUBLIC host key (authorized_keys format), which
+	// authenticates the host to us. sshKey above authenticates us to the host —
+	// the two are not interchangeable and both are required.
+	sshHostKey string
 }
 
 // provisionRow is one row of the provisioning status strip.

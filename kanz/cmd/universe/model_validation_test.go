@@ -119,11 +119,12 @@ func TestAddFormWithAClearedPortStillSubmits(t *testing.T) {
 	m := newModel(Config{}, stubSource{})
 	m.showForm = true
 	m.form = addFormWith(t, map[string]string{
-		"hostname": "london",
-		"ip":       "10.0.0.5",
-		"ssh_port": "", // cleared by the operator
-		"ssh_user": "ubuntu",
-		"key_path": keyPath,
+		"hostname":     "london",
+		"ip":           "10.0.0.5",
+		"ssh_port":     "", // cleared by the operator
+		"ssh_user":     "ubuntu",
+		"key_path":     keyPath,
+		"ssh_host_key": stubHostKey,
 	})
 
 	u, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
@@ -206,11 +207,12 @@ func TestAddFormRefusesAnOutOfRangePortWithoutCallingTheServer(t *testing.T) {
 	m := newModel(Config{}, stubSource{})
 	m.showForm = true
 	m.form = addFormWith(t, map[string]string{
-		"hostname": "london",
-		"ip":       "10.0.0.5",
-		"ssh_port": wrapsToPort22,
-		"ssh_user": "ubuntu",
-		"key_path": keyPath,
+		"hostname":     "london",
+		"ip":           "10.0.0.5",
+		"ssh_port":     wrapsToPort22,
+		"ssh_user":     "ubuntu",
+		"key_path":     keyPath,
+		"ssh_host_key": stubHostKey,
 	})
 
 	u, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
@@ -285,10 +287,11 @@ func TestAFullyPopulatedAddFormReachesTheServer(t *testing.T) {
 	m := newModel(Config{}, stubSource{})
 	m.showForm = true
 	m.form = addFormWith(t, map[string]string{
-		"hostname": "e2e-node2",
-		"ip":       "10.0.0.5",
-		"ssh_user": "ubuntu",
-		"key_path": keyPath,
+		"hostname":     "e2e-node2",
+		"ip":           "10.0.0.5",
+		"ssh_user":     "ubuntu",
+		"key_path":     keyPath,
+		"ssh_host_key": stubHostKey,
 	})
 
 	u, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
@@ -323,10 +326,11 @@ func TestAFixedFormClearsThePriorRejection(t *testing.T) {
 	}
 
 	m.form = addFormWith(t, map[string]string{
-		"hostname": "london",
-		"ip":       "10.0.0.5",
-		"ssh_user": "ubuntu",
-		"key_path": keyPath,
+		"hostname":     "london",
+		"ip":           "10.0.0.5",
+		"ssh_user":     "ubuntu",
+		"key_path":     keyPath,
+		"ssh_host_key": stubHostKey,
 	})
 	u2, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	if cmd == nil {
@@ -383,6 +387,12 @@ func TestASucceedingActionClearsThePriorError(t *testing.T) {
 			"that did not happen", got)
 	}
 }
+
+// stubHostKey is a syntactically valid authorized_keys line for the Host Key
+// field. The TUI does not parse it — the provisioner does, at dial time — so a
+// well-formed placeholder is enough here, and using one keeps these tests about
+// form validation rather than key formats.
+const stubHostKey = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExampleExampleExampleExampleExampleXX"
 
 // addFormWith returns a fresh Add Node form with the named fields set. Keys are
 // checked against the real form so a renamed field fails here rather than

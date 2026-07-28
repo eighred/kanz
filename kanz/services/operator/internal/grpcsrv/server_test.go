@@ -126,7 +126,8 @@ func TestAddNodeDecodesRequestAndReturnsID(t *testing.T) {
 	sp := &stubProvisioner{id: "provision-london-abcde"}
 	srv := NewWithProvisioner(stubReader{}, sp)
 	resp, err := srv.AddNode(context.Background(), &operatorpb.AddNodeRequest{
-		Hostname: "london", Ip: "10.0.0.5", SshPort: 22, SshUser: "root", SshPrivateKey: []byte("PEM")})
+		Hostname: "london", Ip: "10.0.0.5", SshPort: 22, SshUser: "root", SshPrivateKey: []byte("PEM"),
+		SshHostKey: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExample"})
 	if err != nil {
 		t.Fatalf("AddNode: %v", err)
 	}
@@ -135,6 +136,35 @@ func TestAddNodeDecodesRequestAndReturnsID(t *testing.T) {
 	}
 	if sp.gotReq.IP != "10.0.0.5" || string(sp.gotReq.SSHKey) != "PEM" {
 		t.Errorf("request not decoded: %+v", sp.gotReq)
+	}
+	// The host key must reach the provisioner, not merely pass validation. It is
+	// what the Job turns into PROVISION_HOST_KEY, so a decode that dropped it
+	// would leave the provisioner failing closed on every join while this test
+	// stayed green.
+	if sp.gotReq.SSHHostKey != "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExample" {
+		t.Errorf("ssh_host_key not decoded: %q", sp.gotReq.SSHHostKey)
+	}
+}
+
+// A missing host key is refused HERE, before any credential exists.
+//
+// The provisioner fails closed without one, so such an AddNode is doomed either
+// way — but accepted, it first materialises a Secret holding the SSH bootstrap
+// key and the k3s join token and mounts it on a pod that will spend its
+// ActiveDeadlineSeconds failing. Same reasoning as the port check: refuse at the
+// boundary, where the operator can still act on the message.
+func TestAddNodeRejectsMissingHostKey(t *testing.T) {
+	sp := &stubProvisioner{id: "should-not-be-reached"}
+	srv := NewWithProvisioner(stubReader{}, sp)
+	_, err := srv.AddNode(context.Background(), &operatorpb.AddNodeRequest{
+		Hostname: "london", Ip: "10.0.0.5", SshPort: 22, SshUser: "root", SshPrivateKey: []byte("PEM")})
+	if status.Code(err) != codes.InvalidArgument {
+		t.Fatalf("want InvalidArgument for a missing ssh_host_key, got %v", err)
+	}
+	// Nothing may have reached the provisioner — that is the whole point of
+	// refusing at the boundary rather than letting the Job fail.
+	if sp.gotReq.IP != "" {
+		t.Errorf("provisioner was called despite the rejection: %+v", sp.gotReq)
 	}
 }
 

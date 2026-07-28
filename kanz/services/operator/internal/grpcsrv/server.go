@@ -135,6 +135,20 @@ func (s *Server) AddNode(ctx context.Context, req *operatorpb.AddNodeRequest) (*
 	if req.GetIp() == "" || req.GetSshUser() == "" || len(req.GetSshPrivateKey()) == 0 {
 		return nil, status.Error(codes.InvalidArgument, "ip, ssh_user and ssh_private_key are required")
 	}
+	// REFUSED HERE, not left to the Job. The provisioner fails closed without a
+	// host key, so an AddNode missing one is doomed either way — but refusing at
+	// this boundary is the difference between an operator seeing "you must
+	// supply the target's host key" immediately and a Secret being materialised
+	// with the bootstrap key and the k3s join token, mounted on a pod that will
+	// spend its ActiveDeadlineSeconds failing. That is exactly the reasoning the
+	// port check below already applies: refuse before any credential exists.
+	if req.GetSshHostKey() == "" {
+		return nil, status.Error(codes.InvalidArgument,
+			"ssh_host_key is required: it is the TARGET's public host key (authorized_keys format, "+
+				"e.g. the contents of /etc/ssh/ssh_host_ed25519_key.pub, or `ssh-keyscan <ip>` output "+
+				"with the leading host field removed). Without it the join session cannot tell the "+
+				"host you meant from whatever answers the dial, and it carries K3S_TOKEN")
+	}
 	// The SAME constraint TestConnection enforces, and enforcing it here is what makes
 	// that RPC's promise ("provisioning has the same constraint") true. Without it a
 	// non-22 port is accepted, and the cost is not merely a late failure: AddNode
@@ -152,6 +166,7 @@ func (s *Server) AddNode(ctx context.Context, req *operatorpb.AddNodeRequest) (*
 	id, err := s.prov.AddNode(ctx, provision.Request{
 		Hostname: req.GetHostname(), IP: req.GetIp(), SSHPort: req.GetSshPort(),
 		SSHUser: req.GetSshUser(), SSHKey: req.GetSshPrivateKey(),
+		SSHHostKey: req.GetSshHostKey(),
 	})
 	if err != nil {
 		return nil, status.Error(codes.Internal, err.Error())
