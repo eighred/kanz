@@ -16,10 +16,20 @@ the [CICD-01e canary template](../../deploy/analysis-template.yaml).
 | risk-engine | recompute success | 99.5% | `kanz_risk_recompute_total{status}` (OBS-01c) |
 | risk-engine | recompute latency < 500ms | 99% | `kanz_risk_recompute_duration_seconds` |
 | event-bus | delivery success | 99.9% | `kanz_bus_consume_total{result}` (OBS-01c) |
-| market-data | freshness ≤ 10s | 99% | `kanz_data_staleness_lag_seconds` (DATA-02) |
 
 Every SLI binds to a series that already exists, so no new instrumentation is
 required — only the recording/alert rules SRE-01b generates from this file.
+
+That claim used to be printed here while it was false. A **market-data
+freshness ≤ 10s / 99%** row sat in this table bound to
+`kanz_data_staleness_lag_seconds`, a DATA-02 gauge emitted by
+`internal/integrity` — a package deleted in DATA-M4. The row was removed rather
+than re-pointed because `services/market-data` registers no domain metric at
+all, so there was nothing to re-point at. Freshness is currently **not
+measured**, which is a smaller lie than an objective computed over an empty
+vector: the windowed ratios were empty, the generic burn-rate alerts could
+never fire for that pair, and the dashboard showed an objective with no
+breaches. Restoring it means instrumenting market-data first.
 
 ### Why these objectives
 

@@ -1,18 +1,31 @@
 # SLO recording rules (SRE-01b) — compiled from slo.yaml (SRE-01a).
 #
 # Two layers:
-#   slo_meta         — per-SLO error budget (1 − objective) as a labeled series,
-#                      plus the freshness base ratio. Alerts join against these
-#                      so the burn threshold lives in ONE place per SLO.
+#   slo_meta         — per-SLO error budget (1 − objective) as a labeled series.
+#                      Alerts join against these so the burn threshold lives in
+#                      ONE place per SLO.
 #   slo_sli_error    — the SLI ERROR ratio (1 − good/total) per SLO over each of
 #                      the seven burn-rate windows. One metric name,
 #                      `slo:sli_error:ratio_rate<window>`, labeled {service,slo},
 #                      so slo.alerts.rules.yaml stays generic (one alert per
 #                      burn pair covers every SLO via on(service,slo) matching).
 #
-# Series are the OBS-01 RED contract (kanz_gateway_/kanz_risk_/kanz_bus_*) +
-# the DATA-02 freshness gauge — the exact names slo.yaml binds. Windows match
-# slo.yaml defaults.burn_rates: pairs (1h,5m) (6h,30m) (1d,2h) (3d,6h).
+# Series are the OBS-01 RED contract (kanz_gateway_/kanz_risk_/kanz_bus_*) —
+# the exact names slo.yaml binds. Windows match slo.yaml defaults.burn_rates:
+# pairs (1h,5m) (6h,30m) (1d,2h) (3d,6h).
+#
+# THE MARKET-DATA FRESHNESS SLO WAS REMOVED, NOT SUSPENDED. It was compiled
+# from kanz_data_staleness_lag_seconds, a DATA-02 gauge emitted by
+# internal/integrity — a package deleted in DATA-M4. Nothing in the Go source
+# has emitted that series since, and services/market-data registers no
+# domain metric at all (only the generic bus metrics), so the SLO could not be
+# re-pointed at a renamed series either. Left in place it computed over an
+# empty vector: every windowed ratio was empty, so the generic burn-rate alerts
+# in slo.alerts.rules.yaml could never fire for market-data/freshness and the
+# gap was invisible on the dashboards. A freshness objective nobody measures
+# reads as a freshness objective being met. Re-introducing it means
+# instrumenting market-data FIRST, then compiling the SLO from the series that
+# actually exists.
 #
 # No-traffic note: with zero denominator rate() yields 0/0 = NaN; the error
 # ratio is NaN and burn-rate alerts (NaN > x is false) simply don't fire — a
@@ -40,19 +53,9 @@ groups:
       - record: slo:error_budget:ratio
         expr: vector(0.001)
         labels: { service: event-bus, slo: delivery-success }
-      - record: slo:error_budget:ratio
-        expr: vector(0.01)
-        labels: { service: market-data, slo: freshness }
 
   - name: slo_sli_error
     rules:
-      # Freshness base: instantaneous fraction of ingestion subjects past the
-      # DATA-02 10s warn budget. Recorded once per cycle so the windowed
-      # freshness rules below are a cheap avg_over_time, not a [w:1m] subquery.
-      - record: slo:data_unfresh:ratio
-        expr: avg(max by (subject) (kanz_data_staleness_lag_seconds) > bool 10)
-        labels: { service: market-data, slo: freshness }
-
       # --- 5m ---
       - record: slo:sli_error:ratio_rate5m
         expr: 1 - (sum(rate(kanz_gateway_requests_total{code!~"5.."}[5m])) / sum(rate(kanz_gateway_requests_total[5m])))
@@ -69,10 +72,6 @@ groups:
       - record: slo:sli_error:ratio_rate5m
         expr: 1 - (sum(rate(kanz_bus_consume_total{result="ok"}[5m])) / sum(rate(kanz_bus_consume_total[5m])))
         labels: { service: event-bus, slo: delivery-success }
-      - record: slo:sli_error:ratio_rate5m
-        expr: avg_over_time(slo:data_unfresh:ratio[5m])
-        labels: { service: market-data, slo: freshness }
-
       # --- 30m ---
       - record: slo:sli_error:ratio_rate30m
         expr: 1 - (sum(rate(kanz_gateway_requests_total{code!~"5.."}[30m])) / sum(rate(kanz_gateway_requests_total[30m])))
@@ -89,10 +88,6 @@ groups:
       - record: slo:sli_error:ratio_rate30m
         expr: 1 - (sum(rate(kanz_bus_consume_total{result="ok"}[30m])) / sum(rate(kanz_bus_consume_total[30m])))
         labels: { service: event-bus, slo: delivery-success }
-      - record: slo:sli_error:ratio_rate30m
-        expr: avg_over_time(slo:data_unfresh:ratio[30m])
-        labels: { service: market-data, slo: freshness }
-
       # --- 1h ---
       - record: slo:sli_error:ratio_rate1h
         expr: 1 - (sum(rate(kanz_gateway_requests_total{code!~"5.."}[1h])) / sum(rate(kanz_gateway_requests_total[1h])))
@@ -109,10 +104,6 @@ groups:
       - record: slo:sli_error:ratio_rate1h
         expr: 1 - (sum(rate(kanz_bus_consume_total{result="ok"}[1h])) / sum(rate(kanz_bus_consume_total[1h])))
         labels: { service: event-bus, slo: delivery-success }
-      - record: slo:sli_error:ratio_rate1h
-        expr: avg_over_time(slo:data_unfresh:ratio[1h])
-        labels: { service: market-data, slo: freshness }
-
       # --- 2h ---
       - record: slo:sli_error:ratio_rate2h
         expr: 1 - (sum(rate(kanz_gateway_requests_total{code!~"5.."}[2h])) / sum(rate(kanz_gateway_requests_total[2h])))
@@ -129,10 +120,6 @@ groups:
       - record: slo:sli_error:ratio_rate2h
         expr: 1 - (sum(rate(kanz_bus_consume_total{result="ok"}[2h])) / sum(rate(kanz_bus_consume_total[2h])))
         labels: { service: event-bus, slo: delivery-success }
-      - record: slo:sli_error:ratio_rate2h
-        expr: avg_over_time(slo:data_unfresh:ratio[2h])
-        labels: { service: market-data, slo: freshness }
-
       # --- 6h ---
       - record: slo:sli_error:ratio_rate6h
         expr: 1 - (sum(rate(kanz_gateway_requests_total{code!~"5.."}[6h])) / sum(rate(kanz_gateway_requests_total[6h])))
@@ -149,10 +136,6 @@ groups:
       - record: slo:sli_error:ratio_rate6h
         expr: 1 - (sum(rate(kanz_bus_consume_total{result="ok"}[6h])) / sum(rate(kanz_bus_consume_total[6h])))
         labels: { service: event-bus, slo: delivery-success }
-      - record: slo:sli_error:ratio_rate6h
-        expr: avg_over_time(slo:data_unfresh:ratio[6h])
-        labels: { service: market-data, slo: freshness }
-
       # --- 1d ---
       - record: slo:sli_error:ratio_rate1d
         expr: 1 - (sum(rate(kanz_gateway_requests_total{code!~"5.."}[1d])) / sum(rate(kanz_gateway_requests_total[1d])))
@@ -169,10 +152,6 @@ groups:
       - record: slo:sli_error:ratio_rate1d
         expr: 1 - (sum(rate(kanz_bus_consume_total{result="ok"}[1d])) / sum(rate(kanz_bus_consume_total[1d])))
         labels: { service: event-bus, slo: delivery-success }
-      - record: slo:sli_error:ratio_rate1d
-        expr: avg_over_time(slo:data_unfresh:ratio[1d])
-        labels: { service: market-data, slo: freshness }
-
       # --- 3d ---
       - record: slo:sli_error:ratio_rate3d
         expr: 1 - (sum(rate(kanz_gateway_requests_total{code!~"5.."}[3d])) / sum(rate(kanz_gateway_requests_total[3d])))
@@ -189,6 +168,3 @@ groups:
       - record: slo:sli_error:ratio_rate3d
         expr: 1 - (sum(rate(kanz_bus_consume_total{result="ok"}[3d])) / sum(rate(kanz_bus_consume_total[3d])))
         labels: { service: event-bus, slo: delivery-success }
-      - record: slo:sli_error:ratio_rate3d
-        expr: avg_over_time(slo:data_unfresh:ratio[3d])
-        labels: { service: market-data, slo: freshness }
