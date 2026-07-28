@@ -23,7 +23,10 @@ import (
 )
 
 // TestCrash_UnflushedRowsAreLostAndOffsetsAreCommitted is the DATA-M5 crash
-// reproduction (docs/superpowers/plans/2026-07-17-data-m5-lake-sink-durability.md).
+// reproduction. (It cited a plan under docs/, deleted 2026-07-29 and available
+// in git history — but the reproduction below is the durable artifact, which is
+// the point: a test that demonstrates the failure outlives any document
+// describing it.)
 //
 // It models a hard pod crash faithfully: after EventSink.Handle returns nil for
 // each of 10 delivered messages — which makes pkg/bus/kafka.go's Subscribe loop
