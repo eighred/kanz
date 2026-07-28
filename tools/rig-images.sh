@@ -30,7 +30,7 @@
 set -euo pipefail
 
 WORKFLOW="${WORKFLOW:-.github/workflows/build.yml}"
-REGISTRY="${REGISTRY:-ghcr.io/kanz-eng}"
+REGISTRY="${REGISTRY:-ghcr.io/eighred}"
 CLUSTER="${CLUSTER:-kanz-dryrun}"
 MIN_SERVICES=20   # fail-closed floor; the matrix had 23 entries on 2026-07-20
 

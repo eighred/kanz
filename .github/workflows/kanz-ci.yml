@@ -307,6 +307,23 @@ jobs:
             -e NATS_CERT=/c/client.pem -e NATS_KEY=/c/client.key -e NATS_CA=/c/bundle.pem \
             natsio/nats-box:0.14.5 sh -s < /tmp/bootstrap-mtls.sh
 
+      # test/arch/rig_dev_posture_test.go shells out to `python3
+      # tools/rig_dev_patch.py <manifest>` and parses its stdout as YAML — it
+      # proves the digest -> :latest rewrite by running the real patcher, not
+      # by reading its source. The patcher needs a real Python 3 with PyYAML;
+      # this runner has neither by default (only the separate `python` job
+      # below sets one up), and tools/rig-apply.sh already hard-requires
+      # python3 for the same script, so the test refuses to skip when it is
+      # missing — it would rather fail loudly here than pass having asserted
+      # nothing.
+      - name: Set up Python (PyYAML for tools/rig_dev_patch.py, exercised by test/arch)
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12'
+
+      - name: Install PyYAML
+        run: pip install pyyaml
+
       - name: Test (race) — incl. arch + contract + Postgres + real-bus + M1 loop
         working-directory: kanz
         env:
