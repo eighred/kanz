@@ -146,11 +146,42 @@ func TestNATSBootstrapKeepsItsMTLSPosture(t *testing.T) {
 // exemption was permanently satisfied and ALL FOUR needles below were dead. A
 // guard silenced by the very comment explaining what it guards is worse than no
 // guard: it reports success. Strip the prose, keep the check.
+//
+// IT IS QUOTE-AWARE, and that is not decoration. A '#' inside a quoted scalar
+// is CONTENT, not a comment — a PromQL label matcher, a colour, a URL fragment.
+// The original implementation cut at the first '#' on the line regardless, so
+// such a line was truncated and everything after the quote vanished from the
+// scan. That direction fails OPEN: the guard stops seeing text it is supposed
+// to be checking and reports success. TestEveryObservabilityMetricExistsInGo
+// scans PromQL expressions with quoted matchers, where a metric name can sit
+// after a quoted '#', so it needs the distinction; the NATS needles below are
+// unaffected either way, because stripping less can only ever reveal more.
 func stripYAMLComments(s string) string {
 	var b strings.Builder
 	for _, line := range strings.Split(s, "\n") {
-		if i := strings.Index(line, "#"); i >= 0 {
-			line = line[:i]
+		var inSingle, inDouble bool
+		cut := -1
+		for i, r := range line {
+			switch r {
+			case '\'':
+				if !inDouble {
+					inSingle = !inSingle
+				}
+			case '"':
+				if !inSingle {
+					inDouble = !inDouble
+				}
+			case '#':
+				if !inSingle && !inDouble {
+					cut = i
+				}
+			}
+			if cut >= 0 {
+				break
+			}
+		}
+		if cut >= 0 {
+			line = line[:cut]
 		}
 		b.WriteString(line)
 		b.WriteString("\n")
