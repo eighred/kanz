@@ -17,9 +17,9 @@ import (
 
 	envelopepb "github.com/kanz-eng/kanz-schemas-go/envelope/v1"
 
-	"github.com/kanz-eng/kanz/internal/marketedge/book"
-	"github.com/kanz-eng/kanz/internal/marketedge/depth"
-	"github.com/kanz-eng/kanz/pkg/bus"
+	"github.com/eighred/kanz/internal/marketedge/book"
+	"github.com/eighred/kanz/internal/marketedge/depth"
+	"github.com/eighred/kanz/pkg/bus"
 )
 
 // SubjectBookSnapshot is the subject bounded L2 snapshots publish on. Partition

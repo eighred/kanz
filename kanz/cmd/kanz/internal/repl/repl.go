@@ -16,10 +16,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/kanz-eng/kanz/cmd/kanz/internal/config"
-	"github.com/kanz-eng/kanz/cmd/kanz/internal/gateway"
-	"github.com/kanz-eng/kanz/cmd/kanz/internal/tokenstore"
-	"github.com/kanz-eng/kanz/pkg/deviceauth"
+	"github.com/eighred/kanz/cmd/kanz/internal/config"
+	"github.com/eighred/kanz/cmd/kanz/internal/gateway"
+	"github.com/eighred/kanz/cmd/kanz/internal/tokenstore"
+	"github.com/eighred/kanz/pkg/deviceauth"
 )
 
 // Authenticator runs the Eighred SSO device flow and returns a token. It is an

@@ -7,7 +7,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/kanz-eng/kanz/services/risk-engine/internal/server"
+	"github.com/eighred/kanz/services/risk-engine/internal/server"
 )
 
 func newTestServer(t *testing.T) (*server.Readiness, *httptest.Server) {

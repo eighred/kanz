@@ -7,7 +7,7 @@ import (
 
 	accountingpb "github.com/kanz-eng/kanz-schemas-go/accounting/v1"
 
-	"github.com/kanz-eng/kanz/internal/dec"
+	"github.com/eighred/kanz/internal/dec"
 )
 
 func mv(kind Kind, amount string) CashMovement {

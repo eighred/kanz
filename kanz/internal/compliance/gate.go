@@ -15,7 +15,7 @@ import (
 	// helper (engine_test.go), so the platform decimal package is aliased here to
 	// avoid the name clash rather than renaming a helper used across every test
 	// file in the package.
-	decutil "github.com/kanz-eng/kanz/internal/dec"
+	decutil "github.com/eighred/kanz/internal/dec"
 )
 
 // PreTradeGate is the COMP-01c pre-trade enforcement point — the engine wired to

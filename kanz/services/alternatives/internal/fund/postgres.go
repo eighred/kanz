@@ -8,7 +8,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/kanz-eng/kanz/internal/alternatives"
+	"github.com/eighred/kanz/internal/alternatives"
 )
 
 // Postgres is the durable Store backed by the 0001_fund.sql schema — the

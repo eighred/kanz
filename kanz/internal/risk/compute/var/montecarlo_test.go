@@ -5,9 +5,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/kanz-eng/kanz/internal/risk/compute"
-	varmodel "github.com/kanz-eng/kanz/internal/risk/compute/var"
-	"github.com/kanz-eng/kanz/internal/risk/domain"
+	"github.com/eighred/kanz/internal/risk/compute"
+	varmodel "github.com/eighred/kanz/internal/risk/compute/var"
+	"github.com/eighred/kanz/internal/risk/domain"
 )
 
 // mapProvider returns a distinct series per instrument (the fixedProvider in

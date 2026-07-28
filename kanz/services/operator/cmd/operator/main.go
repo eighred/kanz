@@ -24,14 +24,14 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 
-	"github.com/kanz-eng/kanz/internal/execution"
-	"github.com/kanz-eng/kanz/services/operator/internal/config"
-	"github.com/kanz-eng/kanz/services/operator/internal/estate"
-	"github.com/kanz-eng/kanz/services/operator/internal/grpcsrv"
-	"github.com/kanz-eng/kanz/services/operator/internal/nodeops"
-	"github.com/kanz-eng/kanz/services/operator/internal/provision"
-	"github.com/kanz-eng/kanz/services/operator/internal/secrets"
-	"github.com/kanz-eng/kanz/services/operator/internal/venueproof"
+	"github.com/eighred/kanz/internal/execution"
+	"github.com/eighred/kanz/services/operator/internal/config"
+	"github.com/eighred/kanz/services/operator/internal/estate"
+	"github.com/eighred/kanz/services/operator/internal/grpcsrv"
+	"github.com/eighred/kanz/services/operator/internal/nodeops"
+	"github.com/eighred/kanz/services/operator/internal/provision"
+	"github.com/eighred/kanz/services/operator/internal/secrets"
+	"github.com/eighred/kanz/services/operator/internal/venueproof"
 )
 
 func main() {

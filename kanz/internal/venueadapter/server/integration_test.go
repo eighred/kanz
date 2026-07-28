@@ -38,8 +38,8 @@ import (
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 
-	"github.com/kanz-eng/kanz/internal/venueadapter/server"
-	"github.com/kanz-eng/kanz/pkg/bus"
+	"github.com/eighred/kanz/internal/venueadapter/server"
+	"github.com/eighred/kanz/pkg/bus"
 )
 
 const itStream = "EXECUTION_VENUE_IT"

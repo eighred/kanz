@@ -9,8 +9,8 @@ import (
 	accountingpb "github.com/kanz-eng/kanz-schemas-go/accounting/v1"
 	orderpb "github.com/kanz-eng/kanz-schemas-go/order/v1"
 
-	"github.com/kanz-eng/kanz/internal/dec"
-	"github.com/kanz-eng/kanz/pkg/bus"
+	"github.com/eighred/kanz/internal/dec"
+	"github.com/eighred/kanz/pkg/bus"
 )
 
 type reconCapture struct{ events []bus.Event }

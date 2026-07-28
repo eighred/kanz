@@ -9,7 +9,7 @@ import (
 	observationpb "github.com/kanz-eng/kanz-schemas-go/observation/v1"
 	"google.golang.org/protobuf/proto"
 
-	"github.com/kanz-eng/kanz/pkg/auth"
+	"github.com/eighred/kanz/pkg/auth"
 )
 
 // classification is the projected interpretation of one event: its audit Kind, a

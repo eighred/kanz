@@ -3,7 +3,7 @@ package library
 import (
 	"sort"
 
-	"github.com/kanz-eng/kanz/internal/risk/liquidity"
+	"github.com/eighred/kanz/internal/risk/liquidity"
 )
 
 // Liquidity-stress scenario catalog (LIQ-01d) — the liquidity-axis counterpart of

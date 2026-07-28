@@ -5,8 +5,8 @@ import (
 	"os"
 	"strings"
 
-	"github.com/kanz-eng/kanz/internal/alternatives"
-	"github.com/kanz-eng/kanz/pkg/secret"
+	"github.com/eighred/kanz/internal/alternatives"
+	"github.com/eighred/kanz/pkg/secret"
 )
 
 // Config is the alternatives (private-markets) service runtime configuration,

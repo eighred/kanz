@@ -14,7 +14,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	perf "github.com/kanz-eng/kanz/internal/performance"
+	perf "github.com/eighred/kanz/internal/performance"
 )
 
 // Readiness gates traffic: the analytics endpoints are pure compute, so the

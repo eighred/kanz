@@ -11,7 +11,7 @@ import (
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
-	"github.com/kanz-eng/kanz/internal/marketdata/mark"
+	"github.com/eighred/kanz/internal/marketdata/mark"
 )
 
 // bookSnapshotBytes marshals a market.v1.OrderBookSnapshot — the message

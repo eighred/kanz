@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/kanz-eng/kanz/internal/devtoken"
+	"github.com/eighred/kanz/internal/devtoken"
 )
 
 // TestDevTokenAcceptedByGateway is the contract that matters: the gateway now

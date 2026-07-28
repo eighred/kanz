@@ -7,8 +7,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/kanz-eng/kanz/services/api-gateway/internal/authz"
-	"github.com/kanz-eng/kanz/services/api-gateway/internal/middleware"
+	"github.com/eighred/kanz/services/api-gateway/internal/authz"
+	"github.com/eighred/kanz/services/api-gateway/internal/middleware"
 )
 
 // fakeBackend records the last forwarded request and returns a scripted reply.

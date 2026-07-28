@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/kanz-eng/kanz/pkg/bus"
+	"github.com/eighred/kanz/pkg/bus"
 )
 
 // fakeRedis is an in-memory bus.RedisClient for testing RedisDedup without a

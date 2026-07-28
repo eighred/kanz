@@ -39,7 +39,7 @@ import (
 )
 
 const (
-	modulePath = "github.com/kanz-eng/kanz"
+	modulePath = "github.com/eighred/kanz"
 	// riskRoot is the risk module's root package itself (package risk —
 	// RISK-11 degraded.go, the cross-cutting home). It has no trailing
 	// slash, so the riskModulePrefix check below misses it; it is

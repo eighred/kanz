@@ -6,7 +6,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/kanz-eng/kanz/pkg/secret"
+	"github.com/eighred/kanz/pkg/secret"
 )
 
 // Config is the risk-engine runtime configuration. Sourced from the

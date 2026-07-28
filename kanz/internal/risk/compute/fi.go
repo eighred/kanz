@@ -4,10 +4,10 @@ import (
 	"context"
 	"time"
 
-	v1 "github.com/kanz-eng/kanz/internal/risk/api/v1"
-	"github.com/kanz-eng/kanz/internal/risk/domain"
-	"github.com/kanz-eng/kanz/internal/risk/pricing"
-	"github.com/kanz-eng/kanz/internal/risk/pricing/curve"
+	v1 "github.com/eighred/kanz/internal/risk/api/v1"
+	"github.com/eighred/kanz/internal/risk/domain"
+	"github.com/eighred/kanz/internal/risk/pricing"
+	"github.com/eighred/kanz/internal/risk/pricing/curve"
 )
 
 // FI-01d wires real fixed-income rate risk into the RISK-07 measure registry —

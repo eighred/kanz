@@ -17,9 +17,9 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/kanz-eng/kanz/internal/dec"
-	"github.com/kanz-eng/kanz/internal/regulatory"
-	"github.com/kanz-eng/kanz/internal/sustainability"
+	"github.com/eighred/kanz/internal/dec"
+	"github.com/eighred/kanz/internal/regulatory"
+	"github.com/eighred/kanz/internal/sustainability"
 )
 
 // Signer signs a filing's canonical bytes. It is the one-method seam both

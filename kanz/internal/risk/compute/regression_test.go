@@ -3,7 +3,7 @@ package compute_test
 import (
 	"testing"
 
-	"github.com/kanz-eng/kanz/internal/risk/compute"
+	"github.com/eighred/kanz/internal/risk/compute"
 )
 
 // LATENCY-01d — the in-process regression guard for the LATENCY-01c compute

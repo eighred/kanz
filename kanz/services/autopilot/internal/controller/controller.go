@@ -12,8 +12,8 @@ import (
 
 	envelopepb "github.com/kanz-eng/kanz-schemas-go/envelope/v1"
 
-	"github.com/kanz-eng/kanz/services/autopilot/internal/runbook"
-	"github.com/kanz-eng/kanz/services/autopilot/internal/signal"
+	"github.com/eighred/kanz/services/autopilot/internal/runbook"
+	"github.com/eighred/kanz/services/autopilot/internal/signal"
 )
 
 // Escalator hands a condition to a human (page/ticket) — the AUTO-01d

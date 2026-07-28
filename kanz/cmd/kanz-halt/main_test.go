@@ -6,8 +6,8 @@ import (
 
 	lifecyclepb "github.com/kanz-eng/kanz-schemas-go/lifecycle/v1"
 
-	"github.com/kanz-eng/kanz/internal/platform/mode"
-	"github.com/kanz-eng/kanz/internal/signal/translate"
+	"github.com/eighred/kanz/internal/platform/mode"
+	"github.com/eighred/kanz/internal/signal/translate"
 )
 
 func baseArgs(extra ...string) []string {

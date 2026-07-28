@@ -8,14 +8,14 @@ import (
 	orderpb "github.com/kanz-eng/kanz-schemas-go/order/v1"
 	"google.golang.org/protobuf/proto"
 
-	"github.com/kanz-eng/kanz/internal/dec"
+	"github.com/eighred/kanz/internal/dec"
 )
 
 // The order.order.* event_type wire values this monitor renders, copied
 // verbatim from services/oms/internal/order/events.go:20-35.
 //
 // They are copied, not imported: that package is Go-internal to
-// services/oms (github.com/kanz-eng/kanz/services/oms/internal/order), and
+// services/oms (github.com/eighred/kanz/services/oms/internal/order), and
 // the Go compiler forbids any importer outside services/oms/... from using
 // it — confirmed with `go vet ./cmd/kanz-monitor/...` against a scratch
 // import, which failed with "use of internal package ... not allowed". This

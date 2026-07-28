@@ -6,9 +6,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/kanz-eng/kanz/internal/marketdata/returns"
-	"github.com/kanz-eng/kanz/internal/risk/compute"
-	"github.com/kanz-eng/kanz/internal/risk/domain"
+	"github.com/eighred/kanz/internal/marketdata/returns"
+	"github.com/eighred/kanz/internal/risk/compute"
+	"github.com/eighred/kanz/internal/risk/domain"
 )
 
 // volStubProvider returns a fixed series for every instrument and records the

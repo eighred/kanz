@@ -9,9 +9,9 @@ import (
 
 	commonpb "github.com/kanz-eng/kanz-schemas-go/common/v1"
 
-	v1 "github.com/kanz-eng/kanz/internal/risk/api/v1"
-	"github.com/kanz-eng/kanz/internal/risk/state"
-	"github.com/kanz-eng/kanz/internal/risk/state/persist"
+	v1 "github.com/eighred/kanz/internal/risk/api/v1"
+	"github.com/eighred/kanz/internal/risk/state"
+	"github.com/eighred/kanz/internal/risk/state/persist"
 )
 
 // DefaultSnapshotInterval bounds how much of the durable log a restart has

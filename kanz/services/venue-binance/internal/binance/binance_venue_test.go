@@ -11,7 +11,7 @@ import (
 	commonpb "github.com/kanz-eng/kanz-schemas-go/common/v1"
 	orderpb "github.com/kanz-eng/kanz-schemas-go/order/v1"
 
-	"github.com/kanz-eng/kanz/internal/dec"
+	"github.com/eighred/kanz/internal/dec"
 )
 
 // fakeBinance is a minimal stand-in for the Binance Spot REST surface — the

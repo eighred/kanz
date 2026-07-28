@@ -13,8 +13,8 @@ import (
 	"log/slog"
 	"sync"
 
-	"github.com/kanz-eng/kanz/services/autopilot/internal/runbook"
-	"github.com/kanz-eng/kanz/services/autopilot/internal/signal"
+	"github.com/eighred/kanz/services/autopilot/internal/runbook"
+	"github.com/eighred/kanz/services/autopilot/internal/signal"
 )
 
 // Scaler nudges a target's capacity out in response to one signal.

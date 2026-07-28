@@ -21,8 +21,8 @@ import (
 	orderpb "github.com/kanz-eng/kanz-schemas-go/order/v1"
 	"google.golang.org/protobuf/proto"
 
-	"github.com/kanz-eng/kanz/internal/dec"
-	"github.com/kanz-eng/kanz/services/accounting/internal/ledger"
+	"github.com/eighred/kanz/internal/dec"
+	"github.com/eighred/kanz/services/accounting/internal/ledger"
 )
 
 // Order fill FACT event types (mirror order.EventType* without importing the OMS

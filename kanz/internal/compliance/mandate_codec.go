@@ -11,7 +11,7 @@ import (
 	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/proto"
 
-	"github.com/kanz-eng/kanz/internal/platform/subject"
+	"github.com/eighred/kanz/internal/platform/subject"
 )
 
 // Compliance-domain subjects and event types. A mandate change is carried as a

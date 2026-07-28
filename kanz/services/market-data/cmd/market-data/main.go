@@ -18,14 +18,14 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/kanz-eng/kanz/internal/marketdata"
-	"github.com/kanz-eng/kanz/internal/marketdata/store"
-	"github.com/kanz-eng/kanz/pkg/bus"
-	"github.com/kanz-eng/kanz/pkg/observability"
-	"github.com/kanz-eng/kanz/pkg/transport"
-	"github.com/kanz-eng/kanz/services/market-data/internal/config"
-	"github.com/kanz-eng/kanz/services/market-data/internal/feed"
-	"github.com/kanz-eng/kanz/services/market-data/internal/server"
+	"github.com/eighred/kanz/internal/marketdata"
+	"github.com/eighred/kanz/internal/marketdata/store"
+	"github.com/eighred/kanz/pkg/bus"
+	"github.com/eighred/kanz/pkg/observability"
+	"github.com/eighred/kanz/pkg/transport"
+	"github.com/eighred/kanz/services/market-data/internal/config"
+	"github.com/eighred/kanz/services/market-data/internal/feed"
+	"github.com/eighred/kanz/services/market-data/internal/server"
 )
 
 func main() {

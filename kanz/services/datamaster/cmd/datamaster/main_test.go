@@ -5,8 +5,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/kanz-eng/kanz/services/datamaster/internal/config"
-	"github.com/kanz-eng/kanz/services/datamaster/internal/feed"
+	"github.com/eighred/kanz/services/datamaster/internal/config"
+	"github.com/eighred/kanz/services/datamaster/internal/feed"
 )
 
 // The fabrication guard. A SimFeed's canned records, once resolved and written to

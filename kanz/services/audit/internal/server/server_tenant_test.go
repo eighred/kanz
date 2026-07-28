@@ -22,7 +22,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/kanz-eng/kanz/services/audit/internal/audit"
+	"github.com/eighred/kanz/services/audit/internal/audit"
 )
 
 // filterSpy is an audit.Store that records the Filter it was queried with.

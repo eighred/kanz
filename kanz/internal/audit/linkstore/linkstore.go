@@ -20,8 +20,8 @@ import (
 	"errors"
 	"sync"
 
-	"github.com/kanz-eng/kanz/internal/audit/chain"
-	"github.com/kanz-eng/kanz/internal/audit/signer"
+	"github.com/eighred/kanz/internal/audit/chain"
+	"github.com/eighred/kanz/internal/audit/signer"
 )
 
 // Store durably records the hash-chain links a ChainSigner emits and recovers

@@ -17,8 +17,8 @@ import (
 
 	venuepb "github.com/kanz-eng/kanz-schemas-go/venue/v1"
 
-	"github.com/kanz-eng/kanz/internal/execution"
-	"github.com/kanz-eng/kanz/internal/venueadapter/orderview"
+	"github.com/eighred/kanz/internal/execution"
+	"github.com/eighred/kanz/internal/venueadapter/orderview"
 )
 
 func newServerWithProof(t *testing.T, v *fakeVenue, proof execution.AccountProof) *Server {

@@ -9,9 +9,9 @@ import (
 
 	"github.com/redis/go-redis/v9"
 
-	"github.com/kanz-eng/kanz/pkg/bus"
-	"github.com/kanz-eng/kanz/pkg/redisadapter"
-	"github.com/kanz-eng/kanz/services/risk-engine/internal/config"
+	"github.com/eighred/kanz/pkg/bus"
+	"github.com/eighred/kanz/pkg/redisadapter"
+	"github.com/eighred/kanz/services/risk-engine/internal/config"
 )
 
 // newDeduper is the `redis` build: when RISK_ENGINE_REDIS_URL is set it builds

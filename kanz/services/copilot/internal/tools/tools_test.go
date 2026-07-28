@@ -9,10 +9,10 @@ import (
 
 	observationpb "github.com/kanz-eng/kanz-schemas-go/observation/v1"
 
-	"github.com/kanz-eng/kanz/pkg/auth"
-	"github.com/kanz-eng/kanz/services/copilot/internal/governed"
-	"github.com/kanz-eng/kanz/services/copilot/internal/llm"
-	"github.com/kanz-eng/kanz/services/copilot/internal/retrieval"
+	"github.com/eighred/kanz/pkg/auth"
+	"github.com/eighred/kanz/services/copilot/internal/governed"
+	"github.com/eighred/kanz/services/copilot/internal/llm"
+	"github.com/eighred/kanz/services/copilot/internal/retrieval"
 )
 
 // capRecorder captures the authz DecisionLogs so a test can assert a decision

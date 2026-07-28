@@ -12,8 +12,8 @@ import (
 	signalpb "github.com/kanz-eng/kanz-schemas-go/signal/v1"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
-	"github.com/kanz-eng/kanz/internal/dec"
-	"github.com/kanz-eng/kanz/internal/signal/translate"
+	"github.com/eighred/kanz/internal/dec"
+	"github.com/eighred/kanz/internal/signal/translate"
 )
 
 // Options configures a Pipeline. The seams default to deny-by-default / error

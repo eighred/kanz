@@ -7,8 +7,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/kanz-eng/kanz/pkg/secret"
-	"github.com/kanz-eng/kanz/services/oms/internal/order"
+	"github.com/eighred/kanz/pkg/secret"
+	"github.com/eighred/kanz/services/oms/internal/order"
 )
 
 // Config is the oms runtime configuration, sourced from the environment so it

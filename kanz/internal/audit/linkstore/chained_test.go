@@ -21,8 +21,8 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/kanz-eng/kanz/internal/audit/chain"
-	"github.com/kanz-eng/kanz/internal/audit/signer"
+	"github.com/eighred/kanz/internal/audit/chain"
+	"github.com/eighred/kanz/internal/audit/signer"
 )
 
 func chainPool(t *testing.T) *pgxpool.Pool {

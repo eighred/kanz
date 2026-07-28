@@ -12,8 +12,8 @@ import (
 	"net/http"
 	"sync/atomic"
 
-	"github.com/kanz-eng/kanz/internal/alternatives"
-	"github.com/kanz-eng/kanz/services/alternatives/internal/fund"
+	"github.com/eighred/kanz/internal/alternatives"
+	"github.com/eighred/kanz/services/alternatives/internal/fund"
 )
 
 // Readiness gates traffic; the read endpoints are pure over the store, so the

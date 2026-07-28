@@ -30,15 +30,15 @@ import (
 
 	querypb "github.com/kanz-eng/kanz-schemas-go/query/v1"
 
-	"github.com/kanz-eng/kanz/pkg/auth"
-	"github.com/kanz-eng/kanz/pkg/observability"
-	"github.com/kanz-eng/kanz/pkg/transport"
-	"github.com/kanz-eng/kanz/services/copilot/internal/agent"
-	"github.com/kanz-eng/kanz/services/copilot/internal/config"
-	"github.com/kanz-eng/kanz/services/copilot/internal/governed"
-	"github.com/kanz-eng/kanz/services/copilot/internal/retrieval"
-	"github.com/kanz-eng/kanz/services/copilot/internal/server"
-	"github.com/kanz-eng/kanz/services/copilot/internal/tools"
+	"github.com/eighred/kanz/pkg/auth"
+	"github.com/eighred/kanz/pkg/observability"
+	"github.com/eighred/kanz/pkg/transport"
+	"github.com/eighred/kanz/services/copilot/internal/agent"
+	"github.com/eighred/kanz/services/copilot/internal/config"
+	"github.com/eighred/kanz/services/copilot/internal/governed"
+	"github.com/eighred/kanz/services/copilot/internal/retrieval"
+	"github.com/eighred/kanz/services/copilot/internal/server"
+	"github.com/eighred/kanz/services/copilot/internal/tools"
 )
 
 func main() {

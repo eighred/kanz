@@ -37,7 +37,7 @@ import (
 
 	operatorpb "github.com/kanz-eng/kanz-schemas-go/operator/v1"
 
-	"github.com/kanz-eng/kanz/services/api-gateway/internal/authz"
+	"github.com/eighred/kanz/services/api-gateway/internal/authz"
 )
 
 // callTimeout bounds every control-plane RPC except TestConnection. AddNode returns as

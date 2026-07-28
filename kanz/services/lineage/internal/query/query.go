@@ -9,9 +9,9 @@ import (
 	"context"
 	"errors"
 
-	"github.com/kanz-eng/kanz/pkg/auth"
-	"github.com/kanz-eng/kanz/services/lineage/internal/governance"
-	"github.com/kanz-eng/kanz/services/lineage/internal/graph"
+	"github.com/eighred/kanz/pkg/auth"
+	"github.com/eighred/kanz/services/lineage/internal/governance"
+	"github.com/eighred/kanz/services/lineage/internal/graph"
 )
 
 // ErrForbidden is returned when the principal may not read the queried dataset's

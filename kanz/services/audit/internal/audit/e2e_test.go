@@ -17,9 +17,9 @@ import (
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
-	"github.com/kanz-eng/kanz/services/audit/internal/audit"
-	"github.com/kanz-eng/kanz/services/audit/internal/lineage"
-	"github.com/kanz-eng/kanz/services/audit/internal/report"
+	"github.com/eighred/kanz/services/audit/internal/audit"
+	"github.com/eighred/kanz/services/audit/internal/lineage"
+	"github.com/eighred/kanz/services/audit/internal/report"
 )
 
 func ev(id, etype, domain, caus, ref string, class envelopepb.EventClass) *envelopepb.Envelope {

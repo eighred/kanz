@@ -11,7 +11,7 @@ import (
 	"context"
 	"errors"
 
-	"github.com/kanz-eng/kanz/services/audit/internal/audit"
+	"github.com/eighred/kanz/services/audit/internal/audit"
 )
 
 // ErrNotFound is returned when the requested event_id is not in the audit log.

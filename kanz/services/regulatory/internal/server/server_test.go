@@ -7,10 +7,10 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/kanz-eng/kanz/internal/audit/signer"
-	"github.com/kanz-eng/kanz/internal/regulatory"
-	"github.com/kanz-eng/kanz/internal/regulatory/frtb"
-	"github.com/kanz-eng/kanz/internal/sustainability"
+	"github.com/eighred/kanz/internal/audit/signer"
+	"github.com/eighred/kanz/internal/regulatory"
+	"github.com/eighred/kanz/internal/regulatory/frtb"
+	"github.com/eighred/kanz/internal/sustainability"
 )
 
 func newServer(t *testing.T) *Server {

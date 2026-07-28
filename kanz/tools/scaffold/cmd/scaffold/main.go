@@ -10,7 +10,7 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/kanz-eng/kanz/tools/scaffold"
+	"github.com/eighred/kanz/tools/scaffold"
 )
 
 func main() {

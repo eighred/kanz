@@ -5,7 +5,7 @@ import (
 	"math/big"
 	"time"
 
-	"github.com/kanz-eng/kanz/internal/regulatory/frtb"
+	"github.com/eighred/kanz/internal/regulatory/frtb"
 )
 
 // FRTB capital filing end-to-end (PARITY-06a). The frtb package ships the SBM

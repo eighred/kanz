@@ -8,8 +8,8 @@ import (
 
 	commonpb "github.com/kanz-eng/kanz-schemas-go/common/v1"
 
-	"github.com/kanz-eng/kanz/internal/lake/dataset"
-	"github.com/kanz-eng/kanz/internal/marketdata/store"
+	"github.com/eighred/kanz/internal/lake/dataset"
+	"github.com/eighred/kanz/internal/marketdata/store"
 )
 
 var day0 = time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)

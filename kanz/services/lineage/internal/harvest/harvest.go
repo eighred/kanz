@@ -11,8 +11,8 @@ import (
 
 	envelopepb "github.com/kanz-eng/kanz-schemas-go/envelope/v1"
 
-	"github.com/kanz-eng/kanz/services/lineage/internal/graph"
-	"github.com/kanz-eng/kanz/services/lineage/internal/openlineage"
+	"github.com/eighred/kanz/services/lineage/internal/graph"
+	"github.com/eighred/kanz/services/lineage/internal/openlineage"
 )
 
 // Harvester maps envelopes into the graph + an OpenLineage emitter.

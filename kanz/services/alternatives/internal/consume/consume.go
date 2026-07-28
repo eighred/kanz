@@ -23,8 +23,8 @@ import (
 
 	envelopepb "github.com/kanz-eng/kanz-schemas-go/envelope/v1"
 
-	"github.com/kanz-eng/kanz/internal/alternatives"
-	"github.com/kanz-eng/kanz/services/alternatives/internal/fund"
+	"github.com/eighred/kanz/internal/alternatives"
+	"github.com/eighred/kanz/services/alternatives/internal/fund"
 )
 
 // Decoder turns a FACT payload into a commitment lifecycle Event. The default is

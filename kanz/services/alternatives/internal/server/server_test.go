@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/kanz-eng/kanz/internal/alternatives"
-	"github.com/kanz-eng/kanz/services/alternatives/internal/fund"
+	"github.com/eighred/kanz/internal/alternatives"
+	"github.com/eighred/kanz/services/alternatives/internal/fund"
 )
 
 func day(y, m, d int) time.Time { return time.Date(y, time.Month(m), d, 0, 0, 0, 0, time.UTC) }

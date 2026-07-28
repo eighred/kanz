@@ -10,8 +10,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/kanz-eng/kanz/services/schema-registry/internal/server"
-	"github.com/kanz-eng/kanz/services/schema-registry/internal/storage"
+	"github.com/eighred/kanz/services/schema-registry/internal/server"
+	"github.com/eighred/kanz/services/schema-registry/internal/storage"
 )
 
 func TestRegisterEndpoint(t *testing.T) {

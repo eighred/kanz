@@ -9,7 +9,7 @@ import (
 
 	envelopepb "github.com/kanz-eng/kanz-schemas-go/envelope/v1"
 
-	"github.com/kanz-eng/kanz/pkg/bus"
+	"github.com/eighred/kanz/pkg/bus"
 )
 
 // Bus-backed FailSink (PARITY-04g): the concrete emitter that maps a settlement

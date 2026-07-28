@@ -16,13 +16,13 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/kanz-eng/kanz/pkg/bus"
-	"github.com/kanz-eng/kanz/pkg/observability"
-	"github.com/kanz-eng/kanz/services/lake-sink/internal/cdc"
-	"github.com/kanz-eng/kanz/services/lake-sink/internal/config"
-	"github.com/kanz-eng/kanz/services/lake-sink/internal/decode"
-	"github.com/kanz-eng/kanz/services/lake-sink/internal/server"
-	"github.com/kanz-eng/kanz/services/lake-sink/internal/sink"
+	"github.com/eighred/kanz/pkg/bus"
+	"github.com/eighred/kanz/pkg/observability"
+	"github.com/eighred/kanz/services/lake-sink/internal/cdc"
+	"github.com/eighred/kanz/services/lake-sink/internal/config"
+	"github.com/eighred/kanz/services/lake-sink/internal/decode"
+	"github.com/eighred/kanz/services/lake-sink/internal/server"
+	"github.com/eighred/kanz/services/lake-sink/internal/sink"
 )
 
 func main() {

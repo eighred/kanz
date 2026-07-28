@@ -1,7 +1,7 @@
 package sustainability
 
 import (
-	"github.com/kanz-eng/kanz/internal/dec"
+	"github.com/eighred/kanz/internal/dec"
 	"math/big"
 	"testing"
 	"time"

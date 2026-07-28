@@ -3,8 +3,8 @@ package app
 import (
 	"log/slog"
 
-	"github.com/kanz-eng/kanz/internal/risk/engine"
-	"github.com/kanz-eng/kanz/internal/risk/state"
+	"github.com/eighred/kanz/internal/risk/engine"
+	"github.com/eighred/kanz/internal/risk/state"
 )
 
 // ArmPostBootstrapRecomputes triggers exactly one debounced recompute per

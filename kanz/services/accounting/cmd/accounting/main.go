@@ -19,17 +19,17 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/kanz-eng/kanz/internal/pg"
-	"github.com/kanz-eng/kanz/pkg/bus"
-	"github.com/kanz-eng/kanz/pkg/observability"
-	"github.com/kanz-eng/kanz/pkg/transport"
-	accounting "github.com/kanz-eng/kanz/services/accounting/internal"
-	"github.com/kanz-eng/kanz/services/accounting/internal/cashmove"
-	"github.com/kanz-eng/kanz/services/accounting/internal/config"
-	"github.com/kanz-eng/kanz/services/accounting/internal/consume"
-	"github.com/kanz-eng/kanz/services/accounting/internal/fxfeed"
-	"github.com/kanz-eng/kanz/services/accounting/internal/ledger"
-	"github.com/kanz-eng/kanz/services/accounting/internal/server"
+	"github.com/eighred/kanz/internal/pg"
+	"github.com/eighred/kanz/pkg/bus"
+	"github.com/eighred/kanz/pkg/observability"
+	"github.com/eighred/kanz/pkg/transport"
+	accounting "github.com/eighred/kanz/services/accounting/internal"
+	"github.com/eighred/kanz/services/accounting/internal/cashmove"
+	"github.com/eighred/kanz/services/accounting/internal/config"
+	"github.com/eighred/kanz/services/accounting/internal/consume"
+	"github.com/eighred/kanz/services/accounting/internal/fxfeed"
+	"github.com/eighred/kanz/services/accounting/internal/ledger"
+	"github.com/eighred/kanz/services/accounting/internal/server"
 )
 
 func main() {

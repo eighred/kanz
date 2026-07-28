@@ -16,11 +16,11 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/kanz-eng/kanz/pkg/observability"
-	"github.com/kanz-eng/kanz/services/web-bff/internal/config"
-	"github.com/kanz-eng/kanz/services/web-bff/internal/oidc"
-	"github.com/kanz-eng/kanz/services/web-bff/internal/server"
-	"github.com/kanz-eng/kanz/services/web-bff/internal/session"
+	"github.com/eighred/kanz/pkg/observability"
+	"github.com/eighred/kanz/services/web-bff/internal/config"
+	"github.com/eighred/kanz/services/web-bff/internal/oidc"
+	"github.com/eighred/kanz/services/web-bff/internal/server"
+	"github.com/eighred/kanz/services/web-bff/internal/session"
 )
 
 func main() {

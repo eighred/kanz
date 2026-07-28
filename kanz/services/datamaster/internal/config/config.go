@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/kanz-eng/kanz/pkg/secret"
+	"github.com/eighred/kanz/pkg/secret"
 )
 
 // Config is the datamaster (golden-source) service runtime configuration, sourced

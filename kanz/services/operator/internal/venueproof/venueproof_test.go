@@ -14,8 +14,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/kanz-eng/kanz/internal/venueadapter/exchangeauth"
-	"github.com/kanz-eng/kanz/services/operator/internal/secrets"
+	"github.com/eighred/kanz/internal/venueadapter/exchangeauth"
+	"github.com/eighred/kanz/services/operator/internal/secrets"
 )
 
 // testKeys uses distinctive sentinel values so the auth-failure test can prove

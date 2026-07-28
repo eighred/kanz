@@ -10,8 +10,8 @@ import (
 	envelopepb "github.com/kanz-eng/kanz-schemas-go/envelope/v1"
 	"google.golang.org/protobuf/proto"
 
-	"github.com/kanz-eng/kanz/internal/dec"
-	"github.com/kanz-eng/kanz/internal/signal/translate"
+	"github.com/eighred/kanz/internal/dec"
+	"github.com/eighred/kanz/internal/signal/translate"
 )
 
 // ErrPositionsNotArmed: the position book has not been learned yet.

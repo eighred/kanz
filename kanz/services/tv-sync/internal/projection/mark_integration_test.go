@@ -12,8 +12,8 @@ import (
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
-	"github.com/kanz-eng/kanz/internal/marketdata/mark"
-	"github.com/kanz-eng/kanz/services/tv-sync/internal/projection"
+	"github.com/eighred/kanz/internal/marketdata/mark"
+	"github.com/eighred/kanz/services/tv-sync/internal/projection"
 )
 
 func d(n int64) *commonpb.Decimal { return &commonpb.Decimal{Coefficient: n} }

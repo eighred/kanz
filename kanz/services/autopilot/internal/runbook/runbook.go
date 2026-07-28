@@ -9,7 +9,7 @@ package runbook
 import (
 	"context"
 
-	"github.com/kanz-eng/kanz/services/autopilot/internal/signal"
+	"github.com/eighred/kanz/services/autopilot/internal/signal"
 )
 
 // Action is one remediation step. It MUST be idempotent — a runbook can be

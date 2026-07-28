@@ -5,7 +5,7 @@ import (
 	"sort"
 	"time"
 
-	"github.com/kanz-eng/kanz/internal/optimization"
+	"github.com/eighred/kanz/internal/optimization"
 )
 
 // Model portfolios + proposals (WEALTH-01d): map a household's risk profile to a

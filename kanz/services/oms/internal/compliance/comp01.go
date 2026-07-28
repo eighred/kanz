@@ -10,8 +10,8 @@ import (
 	compliancepb "github.com/kanz-eng/kanz-schemas-go/compliance/v1"
 	orderpb "github.com/kanz-eng/kanz-schemas-go/order/v1"
 
-	comp "github.com/kanz-eng/kanz/internal/compliance"
-	"github.com/kanz-eng/kanz/internal/dec"
+	comp "github.com/eighred/kanz/internal/compliance"
+	"github.com/eighred/kanz/internal/dec"
 )
 
 // COMP01Gate adapts the COMP-01 pre-trade engine to the OMS-01f Gate seam: it

@@ -7,8 +7,8 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/kanz-eng/kanz/internal/wealth"
-	"github.com/kanz-eng/kanz/services/wealth/internal/book"
+	"github.com/eighred/kanz/internal/wealth"
+	"github.com/eighred/kanz/services/wealth/internal/book"
 )
 
 func newServer(t *testing.T) (*Server, book.Store) {

@@ -8,7 +8,7 @@ import (
 
 	commonpb "github.com/kanz-eng/kanz-schemas-go/common/v1"
 
-	"github.com/kanz-eng/kanz/internal/marketdata/store"
+	"github.com/eighred/kanz/internal/marketdata/store"
 )
 
 // Point-in-time portfolio valuation (PERF-01b). Returns are computed over a

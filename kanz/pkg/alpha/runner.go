@@ -11,11 +11,11 @@ import (
 
 	signalpb "github.com/kanz-eng/kanz-schemas-go/signal/v1"
 
-	"github.com/kanz-eng/kanz/internal/marketedge/book"
-	"github.com/kanz-eng/kanz/internal/marketedge/depth"
-	"github.com/kanz-eng/kanz/internal/marketedge/ingest"
-	"github.com/kanz-eng/kanz/internal/marketedge/trades"
-	"github.com/kanz-eng/kanz/internal/signal/translate"
+	"github.com/eighred/kanz/internal/marketedge/book"
+	"github.com/eighred/kanz/internal/marketedge/depth"
+	"github.com/eighred/kanz/internal/marketedge/ingest"
+	"github.com/eighred/kanz/internal/marketedge/trades"
+	"github.com/eighred/kanz/internal/signal/translate"
 )
 
 // Feed is one (instrument, venue) pair's live inputs: the L2 depth stream and the

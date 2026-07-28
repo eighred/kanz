@@ -13,8 +13,8 @@ import (
 	"log/slog"
 	"sync"
 
-	"github.com/kanz-eng/kanz/services/autopilot/internal/runbook"
-	"github.com/kanz-eng/kanz/services/autopilot/internal/signal"
+	"github.com/eighred/kanz/services/autopilot/internal/runbook"
+	"github.com/eighred/kanz/services/autopilot/internal/signal"
 )
 
 // Quarantiner halts processing of a data subject so divergent/bad data stops

@@ -7,8 +7,8 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/kanz-eng/kanz/internal/risk/engine"
-	"github.com/kanz-eng/kanz/services/risk-engine/internal/server"
+	"github.com/eighred/kanz/internal/risk/engine"
+	"github.com/eighred/kanz/services/risk-engine/internal/server"
 )
 
 // DefaultShutdownTimeout bounds the graceful-shutdown sequence so a wedged

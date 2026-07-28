@@ -1,7 +1,7 @@
 package ingest
 
 import (
-	"github.com/kanz-eng/kanz/internal/signal/translate"
+	"github.com/eighred/kanz/internal/signal/translate"
 )
 
 // The live-state seams and the signal→orders fan-out moved to

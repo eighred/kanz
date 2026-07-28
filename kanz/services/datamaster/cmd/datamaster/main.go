@@ -27,16 +27,16 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/kanz-eng/kanz/internal/dec"
-	"github.com/kanz-eng/kanz/internal/pg"
-	"github.com/kanz-eng/kanz/pkg/observability"
-	"github.com/kanz-eng/kanz/services/datamaster/internal/config"
-	"github.com/kanz-eng/kanz/services/datamaster/internal/feed"
-	"github.com/kanz-eng/kanz/services/datamaster/internal/master"
-	"github.com/kanz-eng/kanz/services/datamaster/internal/pricing"
-	"github.com/kanz-eng/kanz/services/datamaster/internal/projector"
-	"github.com/kanz-eng/kanz/services/datamaster/internal/server"
-	"github.com/kanz-eng/kanz/services/datamaster/internal/store"
+	"github.com/eighred/kanz/internal/dec"
+	"github.com/eighred/kanz/internal/pg"
+	"github.com/eighred/kanz/pkg/observability"
+	"github.com/eighred/kanz/services/datamaster/internal/config"
+	"github.com/eighred/kanz/services/datamaster/internal/feed"
+	"github.com/eighred/kanz/services/datamaster/internal/master"
+	"github.com/eighred/kanz/services/datamaster/internal/pricing"
+	"github.com/eighred/kanz/services/datamaster/internal/projector"
+	"github.com/eighred/kanz/services/datamaster/internal/server"
+	"github.com/eighred/kanz/services/datamaster/internal/store"
 )
 
 func main() {

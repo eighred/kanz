@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/kanz-eng/kanz/services/audit/internal/audit"
+	"github.com/eighred/kanz/services/audit/internal/audit"
 )
 
 func seedStore(t *testing.T) *audit.Memory {

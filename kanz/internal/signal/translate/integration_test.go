@@ -28,9 +28,9 @@ import (
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 
-	"github.com/kanz-eng/kanz/internal/bustest"
-	"github.com/kanz-eng/kanz/internal/signal/translate"
-	"github.com/kanz-eng/kanz/pkg/bus"
+	"github.com/eighred/kanz/internal/bustest"
+	"github.com/eighred/kanz/internal/signal/translate"
+	"github.com/eighred/kanz/pkg/bus"
 )
 
 func TestIntegration_EmitReachesTheWire(t *testing.T) {

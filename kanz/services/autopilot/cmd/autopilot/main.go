@@ -17,15 +17,15 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/kanz-eng/kanz/pkg/bus"
-	"github.com/kanz-eng/kanz/pkg/observability"
-	"github.com/kanz-eng/kanz/pkg/transport"
-	"github.com/kanz-eng/kanz/services/autopilot/internal/actuate"
-	"github.com/kanz-eng/kanz/services/autopilot/internal/config"
-	"github.com/kanz-eng/kanz/services/autopilot/internal/controller"
-	"github.com/kanz-eng/kanz/services/autopilot/internal/plan"
-	"github.com/kanz-eng/kanz/services/autopilot/internal/remediate"
-	"github.com/kanz-eng/kanz/services/autopilot/internal/server"
+	"github.com/eighred/kanz/pkg/bus"
+	"github.com/eighred/kanz/pkg/observability"
+	"github.com/eighred/kanz/pkg/transport"
+	"github.com/eighred/kanz/services/autopilot/internal/actuate"
+	"github.com/eighred/kanz/services/autopilot/internal/config"
+	"github.com/eighred/kanz/services/autopilot/internal/controller"
+	"github.com/eighred/kanz/services/autopilot/internal/plan"
+	"github.com/eighred/kanz/services/autopilot/internal/remediate"
+	"github.com/eighred/kanz/services/autopilot/internal/server"
 )
 
 func main() {

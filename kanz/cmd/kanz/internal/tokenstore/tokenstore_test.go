@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/kanz-eng/kanz/pkg/deviceauth"
+	"github.com/eighred/kanz/pkg/deviceauth"
 )
 
 func TestSaveLoadRoundTrip(t *testing.T) {

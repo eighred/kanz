@@ -16,17 +16,17 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/kanz-eng/kanz/pkg/auth"
-	"github.com/kanz-eng/kanz/pkg/bus"
-	"github.com/kanz-eng/kanz/pkg/observability"
-	"github.com/kanz-eng/kanz/pkg/transport"
-	"github.com/kanz-eng/kanz/services/lineage/internal/config"
-	"github.com/kanz-eng/kanz/services/lineage/internal/governance"
-	"github.com/kanz-eng/kanz/services/lineage/internal/graph"
-	"github.com/kanz-eng/kanz/services/lineage/internal/harvest"
-	"github.com/kanz-eng/kanz/services/lineage/internal/openlineage"
-	"github.com/kanz-eng/kanz/services/lineage/internal/query"
-	"github.com/kanz-eng/kanz/services/lineage/internal/server"
+	"github.com/eighred/kanz/pkg/auth"
+	"github.com/eighred/kanz/pkg/bus"
+	"github.com/eighred/kanz/pkg/observability"
+	"github.com/eighred/kanz/pkg/transport"
+	"github.com/eighred/kanz/services/lineage/internal/config"
+	"github.com/eighred/kanz/services/lineage/internal/governance"
+	"github.com/eighred/kanz/services/lineage/internal/graph"
+	"github.com/eighred/kanz/services/lineage/internal/harvest"
+	"github.com/eighred/kanz/services/lineage/internal/openlineage"
+	"github.com/eighred/kanz/services/lineage/internal/query"
+	"github.com/eighred/kanz/services/lineage/internal/server"
 )
 
 func main() {

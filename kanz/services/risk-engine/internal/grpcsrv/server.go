@@ -37,9 +37,9 @@ import (
 	domainpb "github.com/kanz-eng/kanz-schemas-go/domain/v1"
 	querypb "github.com/kanz-eng/kanz-schemas-go/query/v1"
 
-	v1 "github.com/kanz-eng/kanz/internal/risk/api/v1"
-	"github.com/kanz-eng/kanz/internal/risk/domain"
-	"github.com/kanz-eng/kanz/internal/risk/publish"
+	v1 "github.com/eighred/kanz/internal/risk/api/v1"
+	"github.com/eighred/kanz/internal/risk/domain"
+	"github.com/eighred/kanz/internal/risk/publish"
 )
 
 // Server adapts the api/v1.Engine to the generated RiskQueryService gRPC

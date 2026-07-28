@@ -7,7 +7,7 @@ import (
 	"net/url"
 	"strings"
 
-	"github.com/kanz-eng/kanz/pkg/auth"
+	"github.com/eighred/kanz/pkg/auth"
 )
 
 // Mesh identity headers — the SVCWIRE-01c trusted-header contract. Duplicated

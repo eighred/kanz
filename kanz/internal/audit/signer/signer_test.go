@@ -5,8 +5,8 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/kanz-eng/kanz/internal/audit/chain"
-	"github.com/kanz-eng/kanz/internal/audit/signer"
+	"github.com/eighred/kanz/internal/audit/chain"
+	"github.com/eighred/kanz/internal/audit/signer"
 )
 
 // The signed reports form a valid audit chain: each signature chains from the

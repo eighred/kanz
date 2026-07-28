@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/kanz-eng/kanz/services/tv-sync/internal/config"
+	"github.com/eighred/kanz/services/tv-sync/internal/config"
 )
 
 // requireBook sets the two env vars validateBook demands, so these tests

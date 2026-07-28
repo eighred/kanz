@@ -6,7 +6,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/kanz-eng/kanz/internal/risk/factormodel"
+	"github.com/eighred/kanz/internal/risk/factormodel"
 )
 
 // Live factor-model estimation (PARITY-03d). FACTOR-01 delivered the

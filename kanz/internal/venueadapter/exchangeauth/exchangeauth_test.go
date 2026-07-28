@@ -24,7 +24,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/kanz-eng/kanz/internal/execution"
+	"github.com/eighred/kanz/internal/execution"
 )
 
 // testCred uses distinctive sentinel values so TestNoCredentialInErrors can prove

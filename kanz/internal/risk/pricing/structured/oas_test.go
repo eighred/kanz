@@ -4,7 +4,7 @@ import (
 	"math"
 	"testing"
 
-	"github.com/kanz-eng/kanz/internal/risk/pricing/curve"
+	"github.com/eighred/kanz/internal/risk/pricing/curve"
 )
 
 func testEnv(t *testing.T) RateEnv {

@@ -19,14 +19,14 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/kanz-eng/kanz/internal/pg"
-	"github.com/kanz-eng/kanz/pkg/bus"
-	"github.com/kanz-eng/kanz/pkg/observability"
-	"github.com/kanz-eng/kanz/pkg/transport"
-	"github.com/kanz-eng/kanz/services/alternatives/internal/config"
-	"github.com/kanz-eng/kanz/services/alternatives/internal/consume"
-	"github.com/kanz-eng/kanz/services/alternatives/internal/fund"
-	"github.com/kanz-eng/kanz/services/alternatives/internal/server"
+	"github.com/eighred/kanz/internal/pg"
+	"github.com/eighred/kanz/pkg/bus"
+	"github.com/eighred/kanz/pkg/observability"
+	"github.com/eighred/kanz/pkg/transport"
+	"github.com/eighred/kanz/services/alternatives/internal/config"
+	"github.com/eighred/kanz/services/alternatives/internal/consume"
+	"github.com/eighred/kanz/services/alternatives/internal/fund"
+	"github.com/eighred/kanz/services/alternatives/internal/server"
 )
 
 func main() {

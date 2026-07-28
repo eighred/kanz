@@ -4,8 +4,8 @@ import (
 	"context"
 	"sort"
 
-	"github.com/kanz-eng/kanz/internal/risk/compute"
-	"github.com/kanz-eng/kanz/internal/risk/domain"
+	"github.com/eighred/kanz/internal/risk/compute"
+	"github.com/eighred/kanz/internal/risk/domain"
 )
 
 // UnclassifiedSector is the catch-all bucket for positions whose instrument has

@@ -1,6 +1,6 @@
 package xva
 
-import "github.com/kanz-eng/kanz/internal/risk/pricing"
+import "github.com/eighred/kanz/internal/risk/pricing"
 
 // Concrete Pricer implementations for the exposure simulation. These reprice a
 // trade as the simulated risk factors evolve — the DERIV-01 / FI-01 pricers

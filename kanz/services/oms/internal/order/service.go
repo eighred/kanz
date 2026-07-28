@@ -15,8 +15,8 @@ import (
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
-	"github.com/kanz-eng/kanz/internal/execution"
-	"github.com/kanz-eng/kanz/services/oms/internal/compliance"
+	"github.com/eighred/kanz/internal/execution"
+	"github.com/eighred/kanz/services/oms/internal/compliance"
 
 	"github.com/prometheus/client_golang/prometheus"
 )

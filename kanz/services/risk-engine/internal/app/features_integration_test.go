@@ -31,9 +31,9 @@ import (
 	inferencepb "github.com/kanz-eng/kanz-schemas-go/inference/v1"
 	"google.golang.org/protobuf/proto"
 
-	"github.com/kanz-eng/kanz/internal/prediction"
-	"github.com/kanz-eng/kanz/pkg/bus"
-	"github.com/kanz-eng/kanz/services/risk-engine/internal/app"
+	"github.com/eighred/kanz/internal/prediction"
+	"github.com/eighred/kanz/pkg/bus"
+	"github.com/eighred/kanz/services/risk-engine/internal/app"
 )
 
 // SubjectPredictionScored is what the Python publisher emits (kanz_inference/publish.py).

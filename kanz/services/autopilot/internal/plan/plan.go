@@ -6,10 +6,10 @@
 package plan
 
 import (
-	"github.com/kanz-eng/kanz/services/autopilot/internal/actuate"
-	"github.com/kanz-eng/kanz/services/autopilot/internal/remediate"
-	"github.com/kanz-eng/kanz/services/autopilot/internal/runbook"
-	"github.com/kanz-eng/kanz/services/autopilot/internal/signal"
+	"github.com/eighred/kanz/services/autopilot/internal/actuate"
+	"github.com/eighred/kanz/services/autopilot/internal/remediate"
+	"github.com/eighred/kanz/services/autopilot/internal/runbook"
+	"github.com/eighred/kanz/services/autopilot/internal/signal"
 )
 
 // Conditions the default policy recognizes.

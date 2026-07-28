@@ -8,7 +8,7 @@ import (
 
 	envelopepb "github.com/kanz-eng/kanz-schemas-go/envelope/v1"
 
-	"github.com/kanz-eng/kanz/pkg/observability"
+	"github.com/eighred/kanz/pkg/observability"
 )
 
 // EventHandler processes one inbound envelope-framed event. The ctx carries

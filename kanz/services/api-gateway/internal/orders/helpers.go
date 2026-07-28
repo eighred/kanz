@@ -5,8 +5,8 @@ import (
 	"errors"
 	"net/http"
 
-	"github.com/kanz-eng/kanz/pkg/auth"
-	"github.com/kanz-eng/kanz/pkg/bus"
+	"github.com/eighred/kanz/pkg/auth"
+	"github.com/eighred/kanz/pkg/bus"
 )
 
 // errWritesDisabled is returned when no publisher is wired (read-only gateway).

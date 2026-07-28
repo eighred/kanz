@@ -9,7 +9,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/kanz-eng/kanz/internal/wealth"
+	"github.com/eighred/kanz/internal/wealth"
 )
 
 // Postgres is the durable Store backed by the 0001_book.sql schema — household

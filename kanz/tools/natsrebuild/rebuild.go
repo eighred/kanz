@@ -24,8 +24,8 @@ import (
 	envelopepb "github.com/kanz-eng/kanz-schemas-go/envelope/v1"
 	"google.golang.org/protobuf/proto"
 
-	"github.com/kanz-eng/kanz/pkg/bus"
-	"github.com/kanz-eng/kanz/tools/replay"
+	"github.com/eighred/kanz/pkg/bus"
+	"github.com/eighred/kanz/tools/replay"
 )
 
 // Stats summarizes a Run.

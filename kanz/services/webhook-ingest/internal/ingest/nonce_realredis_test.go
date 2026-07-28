@@ -25,7 +25,7 @@ import (
 
 	"github.com/redis/go-redis/v9"
 
-	"github.com/kanz-eng/kanz/pkg/redisadapter"
+	"github.com/eighred/kanz/pkg/redisadapter"
 )
 
 const (

@@ -24,8 +24,8 @@ import (
 	envelopepb "github.com/kanz-eng/kanz-schemas-go/envelope/v1"
 	marketpb "github.com/kanz-eng/kanz-schemas-go/market/v1"
 
-	"github.com/kanz-eng/kanz/internal/dec"
-	accounting "github.com/kanz-eng/kanz/services/accounting/internal"
+	"github.com/eighred/kanz/internal/dec"
+	accounting "github.com/eighred/kanz/services/accounting/internal"
 )
 
 // LiveFX is the latest-rate cache: for each configured FX instrument it records

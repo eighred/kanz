@@ -13,8 +13,8 @@ import (
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
-	comp "github.com/kanz-eng/kanz/internal/compliance"
-	"github.com/kanz-eng/kanz/internal/marketdata/mark"
+	comp "github.com/eighred/kanz/internal/compliance"
+	"github.com/eighred/kanz/internal/marketdata/mark"
 )
 
 // stubMarks is a MarkSource returning a fixed price for one instrument.

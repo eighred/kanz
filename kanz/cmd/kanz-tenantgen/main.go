@@ -25,7 +25,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/kanz-eng/kanz/internal/tenantgen"
+	"github.com/eighred/kanz/internal/tenantgen"
 )
 
 func main() {

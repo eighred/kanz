@@ -12,10 +12,10 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 
-	"github.com/kanz-eng/kanz/internal/execution"
-	"github.com/kanz-eng/kanz/pkg/transport"
-	"github.com/kanz-eng/kanz/services/oms/internal/config"
-	"github.com/kanz-eng/kanz/services/oms/internal/order"
+	"github.com/eighred/kanz/internal/execution"
+	"github.com/eighred/kanz/pkg/transport"
+	"github.com/eighred/kanz/services/oms/internal/config"
+	"github.com/eighred/kanz/services/oms/internal/order"
 )
 
 // venueDescribeTimeout bounds the startup ask ("which account do you hold?") against

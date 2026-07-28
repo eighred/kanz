@@ -19,10 +19,10 @@ import (
 	"context"
 	"log/slog"
 
-	"github.com/kanz-eng/kanz/internal/dec"
-	"github.com/kanz-eng/kanz/internal/prediction"
-	v1 "github.com/kanz-eng/kanz/internal/risk/api/v1"
-	"github.com/kanz-eng/kanz/internal/risk/domain"
+	"github.com/eighred/kanz/internal/dec"
+	"github.com/eighred/kanz/internal/prediction"
+	v1 "github.com/eighred/kanz/internal/risk/api/v1"
+	"github.com/eighred/kanz/internal/risk/domain"
 )
 
 // FeatureSetPortfolioRisk is the ROUTING KEY.

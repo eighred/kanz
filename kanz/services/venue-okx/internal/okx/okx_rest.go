@@ -9,7 +9,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/kanz-eng/kanz/internal/venueadapter/exchangeauth"
+	"github.com/eighred/kanz/internal/venueadapter/exchangeauth"
 )
 
 // okxREST is a minimal, dependency-free OKX v5 REST client. OKX signs with

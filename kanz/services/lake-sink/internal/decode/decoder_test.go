@@ -14,7 +14,7 @@ import (
 	"google.golang.org/protobuf/reflect/protodesc"
 	"google.golang.org/protobuf/types/descriptorpb"
 
-	"github.com/kanz-eng/kanz/services/lake-sink/internal/decode"
+	"github.com/eighred/kanz/services/lake-sink/internal/decode"
 )
 
 // decimalFDS builds the self-contained FileDescriptorSet the registry would

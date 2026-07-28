@@ -20,7 +20,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/kanz-eng/kanz/internal/audit/chain"
+	"github.com/eighred/kanz/internal/audit/chain"
 )
 
 // Link is one signed report's view as the audit chain sees it: the predecessor

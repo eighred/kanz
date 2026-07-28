@@ -6,7 +6,7 @@ import (
 
 	compliancepb "github.com/kanz-eng/kanz-schemas-go/compliance/v1"
 
-	"github.com/kanz-eng/kanz/internal/compliance"
+	"github.com/eighred/kanz/internal/compliance"
 )
 
 // ALT/CLIMATE-01b exclusion screening — GENUINE COMP-01 reuse, not a re-coded

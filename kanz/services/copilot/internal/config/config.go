@@ -5,8 +5,8 @@ import (
 	"os"
 	"strings"
 
-	"github.com/kanz-eng/kanz/pkg/secret"
-	"github.com/kanz-eng/kanz/services/copilot/internal/llm"
+	"github.com/eighred/kanz/pkg/secret"
+	"github.com/eighred/kanz/services/copilot/internal/llm"
 )
 
 // Config is the copilot service runtime configuration. The copilot is an

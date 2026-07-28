@@ -7,9 +7,9 @@ import (
 
 	referencepb "github.com/kanz-eng/kanz-schemas-go/reference/v1"
 
-	"github.com/kanz-eng/kanz/internal/dec"
-	"github.com/kanz-eng/kanz/services/datamaster/internal/master"
-	"github.com/kanz-eng/kanz/services/datamaster/internal/pricing"
+	"github.com/eighred/kanz/internal/dec"
+	"github.com/eighred/kanz/services/datamaster/internal/master"
+	"github.com/eighred/kanz/services/datamaster/internal/pricing"
 )
 
 func TestSimFeed(t *testing.T) {

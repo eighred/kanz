@@ -3,7 +3,7 @@ package report
 import (
 	"time"
 
-	"github.com/kanz-eng/kanz/services/audit/internal/audit"
+	"github.com/eighred/kanz/services/audit/internal/audit"
 )
 
 // RetentionPolicy is the audit-log retention rule. Retain is the minimum age a

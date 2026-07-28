@@ -57,10 +57,10 @@ import (
 	wealthpb "github.com/kanz-eng/kanz-schemas-go/wealth/v1"
 	"google.golang.org/protobuf/encoding/protojson"
 
-	"github.com/kanz-eng/kanz/internal/dec"
-	"github.com/kanz-eng/kanz/internal/wealth"
-	"github.com/kanz-eng/kanz/pkg/bus"
-	"github.com/kanz-eng/kanz/pkg/transport"
+	"github.com/eighred/kanz/internal/dec"
+	"github.com/eighred/kanz/internal/wealth"
+	"github.com/eighred/kanz/pkg/bus"
+	"github.com/eighred/kanz/pkg/transport"
 )
 
 func main() {
