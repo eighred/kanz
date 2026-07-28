@@ -114,28 +114,17 @@ func TestEveryObservabilityMetricExistsInGo(t *testing.T) {
 // cannot silently widen the exemption — only enumerating a specific path can,
 // and that requires a reviewed edit to this file. The dead-entry check above
 // then forces each entry out again the moment its repair lands.
-var metricSurfacesPendingRepair = map[string]string{
-	"dashboards/completeness.json": "issue #123: renders kanz_data_gap_missing_total, " +
-		"kanz_data_reconcile_discrepancies_total, kanz_data_reconcile_match_latency_seconds and " +
-		"kanz_data_reconcile_pending — all exported by internal/integrity, deleted in DATA-M4. " +
-		"ZERO live metrics on this dashboard. #123 decides whether the three data-quality " +
-		"dashboards are deleted or kept as the target contract for re-instrumenting the exporter; " +
-		"it must not be resolved by quietly deleting them, because the DataQualityEvent stream " +
-		"they would render still flows and still has live consumers (services/audit classifies it " +
-		"as KindDataQuality, services/autopilot remediates gap/staleness/drift).",
-
-	"dashboards/drift.json": "issue #123: renders kanz_data_drift_score, kanz_data_drift_threshold " +
-		"and kanz_data_quality_events_total — same DATA-M4 deletion, zero live metrics. Worth " +
-		"preserving from this one when it is repaired: the drift panels compared the score against " +
-		"the EXPORTED threshold rather than a duplicated literal, so the alarm point tracked each " +
-		"detector's own configuration automatically.",
-
-	"dashboards/freshness.json": "issue #123: renders kanz_data_last_event_age_seconds, " +
-		"kanz_data_quality_events_total and kanz_data_staleness_lag_seconds — same DATA-M4 " +
-		"deletion, zero live metrics. Note kanz_data_last_event_age_seconds appeared in NO alert " +
-		"rule, so issue #62's inventory of the orphaned contract missed it; it is only visible " +
-		"because this guard reads the dashboards too.",
-}
+// IT IS CURRENTLY EMPTY, AND THAT IS THE POINT. It held the three Grafana
+// data-quality dashboards until #123 deleted them; when they went, the
+// dead-entry check above failed the build naming all three, and these entries
+// came out in the same change. That is the intended lifecycle — an exemption
+// here is a debt with an issue number on it, not a permanent carve-out.
+//
+// Leave it empty rather than deleting the map. An empty default-deny list is a
+// working guard with nothing exempted; removing it would mean the next person
+// needing a temporary exemption has to reinvent the mechanism, and would most
+// likely reach for weakening the check instead.
+var metricSurfacesPendingRepair = map[string]string{}
 
 // referencedMetrics maps each config file (path relative to obsRoot, with
 // forward slashes so the allow-list keys are platform-independent) to the
