@@ -62,25 +62,37 @@ func TestIntegration_ConsumerWithDLQParksAFailedEventOnTheWire(t *testing.T) {
 	bustest.EnsureSubjects(t, ctx, js, "KANZTEST_DLQPROBE", []string{probeSubject})
 	bustest.EnsureSubjects(t, ctx, js, "KANZTEST_DLQPROBE_DLQ", []string{dlqProbeSubject})
 
-	// PURGE BOTH STREAMS. The subjects are constants and the streams outlive the
-	// run, so a message parked by a PREVIOUS execution is still sitting on
+	// PURGE THIS TEST'S TWO SUBJECTS. They are constants and the streams outlive
+	// the run, so a message parked by a PREVIOUS execution is still sitting on
 	// dlq.kanztest.dlqprobe when this one starts. The fetch below is then
 	// satisfied instantly by that stale message — before this run's handler has
 	// been dispatched even once — and the non-vacuity check further down fires
 	// with "handler never ran".
 	//
-	// That is not a false alarm: the guard is catching exactly what its own
-	// comment predicts ("a message arriving for any other reason (a stale
-	// stream...) would read as proof of DLQ routing"). The guard is right; the
-	// fixture was leaving evidence behind. Observed as an intermittent failure on
-	// main while the same commit passed on its PR.
-	for _, s := range []string{"KANZTEST_DLQPROBE", "KANZTEST_DLQPROBE_DLQ"} {
-		stream, err := js.Stream(ctx, s)
+	// That is not a false alarm: the guard catches exactly what its own comment
+	// predicts ("a message arriving for any other reason (a stale stream...)
+	// would read as proof of DLQ routing"). The guard is right; the fixture was
+	// leaving evidence behind between runs.
+	//
+	// BY SUBJECT, AND VIA StreamNameBySubject — never by an assumed stream name,
+	// and never the whole stream. Per the EnsureSubjects note above, on a
+	// bootstrapped spine dlqProbeSubject is carried by the REAL `dlq.>` stream
+	// from infra/nats/bootstrap-job.yaml, so there is no KANZTEST_DLQPROBE_DLQ to
+	// open (404) and a whole-stream purge would delete every other service's
+	// parked DLQ messages. Which stream backs a subject is a property of the
+	// topology this runs against, so it has to be asked rather than assumed —
+	// the same reason the DLQ read below already resolves it this way.
+	for _, subj := range []string{probeSubject, dlqProbeSubject} {
+		name, err := js.StreamNameBySubject(ctx, subj)
 		if err != nil {
-			t.Fatalf("open stream %s: %v", s, err)
+			t.Fatalf("no stream carries %q: %v", subj, err)
 		}
-		if err := stream.Purge(ctx); err != nil {
-			t.Fatalf("purge stream %s: %v", s, err)
+		stream, err := js.Stream(ctx, name)
+		if err != nil {
+			t.Fatalf("open stream %s (carries %q): %v", name, subj, err)
+		}
+		if err := stream.Purge(ctx, jetstream.WithPurgeSubject(subj)); err != nil {
+			t.Fatalf("purge %q from stream %s: %v", subj, name, err)
 		}
 	}
 
