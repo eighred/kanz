@@ -48,9 +48,20 @@ producing contradictory next-actions.
    `DONE` section makes claude-mem *more* load-bearing, not less — it and git
    history become the only searchable record of the ~96 completed epics. Reduce
    its session injection instead.
-4. **Land on a branch behind one PR; close PRs #50–#54.** Branch protection is
-   active on this repository (it blocked PR #46 on 2026-07-28), and a ~400 KB
-   deletion should be reviewable before it lands.
+4. **Land on a branch behind one PR; close PRs #50–#54.** A ~400 KB deletion
+   should be reviewable before it lands, and the repository has run a PR workflow
+   by convention since roughly 2026-07-26 — PRs #40, #45, #46, #47 and #48 all
+   landed as merge commits.
+
+   **Correction, 2026-07-28.** An earlier draft of this decision said branch
+   protection was active and had blocked PR #46. That is false, and the error is
+   worth recording rather than quietly deleting: `gh api
+   repos/eighred/kanz/branches/main/protection` and `.../rulesets` both return
+   **403 — "Upgrade to GitHub Pro or make this repository public to enable this
+   feature."** There is no protection rule and no ruleset; PR #46 merged normally
+   on 2026-07-27. The claim came from a claude-mem observation that was never
+   checked against the API — a document asserting a control that does not
+   operate, which is the exact defect class this consolidation exists to remove.
 
 ## Architecture — four layers, no fifth
 
