@@ -1,0 +1,128 @@
+# Base-image mirror (M0.1). Copies the estate's base images into a registry it
+# OWNS, so a build no longer depends on a third party answering.
+#
+# WHY THIS EXISTS. Every one of the 25 Dockerfiles pulled its base from Docker
+# Hub or gcr.io. On 2026-07-27 that produced seven registry-1.docker.io
+# timeouts, three of them on consecutive PRs (#46, #48, #49) each needing a
+# manual re-run. A build system that cannot build unless someone else's registry
+# answers is not a build system; it is a dependency with a queue in front of it.
+#
+# WHAT IT DOES NOT DO. It does not rewrite any FROM. Populating the mirror and
+# pointing the Dockerfiles at it are SEPARATE changes and must land in that
+# order — rewriting first would repoint 25 builds at tags that do not exist yet
+# and break every one of them. Run this, confirm the packages are there, and
+# only then rewrite. That is the same instrument-first discipline the data-quality
+# layer got wrong (it wrote dashboards against metrics no exporter emitted, and
+# nobody noticed for months).
+name: base-image-mirror
+
+on:
+  # MANUAL BY DEFAULT. Mirroring is not something a PR should trigger — it
+  # publishes to a registry namespace and there is no reason for it to run on
+  # code changes. The scheduled refresh that keeps the mirror current with
+  # upstream patch releases is issue #56 and adds a `schedule:` trigger here;
+  # it is deliberately not bundled in, because "copy these images once" and
+  # "keep copying them forever" have different failure modes and want separate
+  # review.
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Resolve and print digests without pushing'
+        type: boolean
+        default: false
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/base-image-mirror.yml'
+
+permissions:
+  contents: read
+  packages: write   # push to ghcr.io/eighred/base/*
+
+jobs:
+  mirror:
+    runs-on: ubuntu-latest
+    strategy:
+      # NOT fail-fast. One upstream registry being unavailable is precisely the
+      # condition this mirror exists to survive, and it must not stop the other
+      # images being copied — a partial mirror is strictly better than none, and
+      # the failed entry is obvious in the run.
+      fail-fast: false
+      matrix:
+        include:
+          # SOURCE AND TARGET ARE BOTH EXPLICIT, and the target name is not
+          # derived from the source. Deriving it would put a string-manipulation
+          # step between "what we meant to mirror" and "what we pushed", and the
+          # failure mode of getting that wrong is an image silently mirrored to
+          # the wrong name — which looks identical to a successful run until a
+          # build cannot find its base.
+          #
+          # The tag is part of the target on purpose: the mirror is not "latest
+          # golang", it is the exact version the estate builds on. A bump means
+          # a new entry here AND a Dockerfile change, together.
+          - source: docker.io/library/golang:1.26.5
+            target: ghcr.io/eighred/base/golang:1.26.5
+          - source: gcr.io/distroless/static:nonroot
+            target: ghcr.io/eighred/base/distroless-static:nonroot
+          # kanz-py's base. OUTSIDE issue #55's original scope — its acceptance
+          # grep is `grep -rE '^FROM ' kanz`, which never reaches
+          # kanz-py/Dockerfile — but ghcr.io/eighred/inference is built and
+          # deployed like any other image and carries exactly the same Docker Hub
+          # exposure. Mirroring it here rather than leaving it to be noticed
+          # later. See test/arch/baseimage_mirror_test.go, which flags it.
+          - source: docker.io/library/python:3.12-slim
+            target: ghcr.io/eighred/base/python:3.12-slim
+
+    steps:
+      - name: Log in to ghcr.io
+        uses: docker/login-action@371161bbe7024a29a25c5e19bfcbc0804fe9ad2c # v4.5.2
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # crane copies MANIFESTS, not layers-through-a-daemon. That matters for
+      # more than speed: `docker pull && docker tag && docker push` on a
+      # multi-arch base silently keeps only the runner's own architecture, so
+      # the mirror would serve amd64 to an arm64 builder and fail in a way that
+      # looks like a corrupt image. crane copy preserves the full index.
+      - name: Install crane
+        uses: imjasonh/setup-crane@31b88efe9de28ae0ffa220711af4b60be9435f6e # v0.4
+
+      - name: Resolve the upstream digest
+        id: resolve
+        run: |
+          set -euo pipefail
+          digest="$(crane digest '${{ matrix.source }}')"
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+          echo "::notice title=Mirroring::${{ matrix.source }} @ $digest -> ${{ matrix.target }}"
+
+      - name: Copy to the mirror
+        if: ${{ !inputs.dry_run }}
+        run: |
+          set -euo pipefail
+          crane copy '${{ matrix.source }}' '${{ matrix.target }}'
+
+      # PROVE THE COPY, do not assume it. crane copy exiting 0 says the push was
+      # accepted; it does not say the mirror now serves the same bytes. A digest
+      # comparison does, and it is the only check here that would catch a copy
+      # that silently landed on the wrong tag or lost its multi-arch index.
+      #
+      # This repository has been bitten by exactly this shape before — a green
+      # step standing in for a property nobody measured — so the verification is
+      # a distinct step with its own failure message rather than a flag on the
+      # copy.
+      - name: Verify the mirrored digest matches upstream
+        if: ${{ !inputs.dry_run }}
+        run: |
+          set -euo pipefail
+          want='${{ steps.resolve.outputs.digest }}'
+          got="$(crane digest '${{ matrix.target }}')"
+          if [ "$want" != "$got" ]; then
+            echo "::error title=Mirror mismatch::${{ matrix.target }} is $got, upstream ${{ matrix.source }} is $want"
+            echo "The push reported success but the mirror does not serve the same image."
+            echo "Do NOT point any Dockerfile at this tag until it does — a build would"
+            echo "silently use different bytes from the ones that were reviewed."
+            exit 1
+          fi
+          echo "::notice title=Verified::${{ matrix.target }} == $want"
