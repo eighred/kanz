@@ -1053,6 +1053,12 @@ EOF
 
 ### Task 9: Clear the agent scratch and reduce the memory injection
 
+> **RUNS LAST — after Task 12.** (Owner decision, 2026-07-28, from the pre-flight
+> scan.) `.superpowers/sdd/` is where this plan's own task briefs, reports, review
+> diffs and progress ledger are written. Deleting it at position 9 would destroy
+> Tasks 10–12's inputs mid-execution. Execution order is
+> **1 → 8, 10, 11, 12, then 9.**
+
 **Files:**
 - Delete: `.superpowers/sdd/**` (236 files, gitignored)
 - Modify: `~/.claude-mem/settings.json`
@@ -1070,7 +1076,10 @@ git ls-files .superpowers | wc -l
 ls .superpowers/sdd | wc -l
 ```
 
-Expected: `0` tracked files, and `236` present.
+Expected: `0` tracked files. The second number is **at least 236** — this task
+runs last, so it also sees this plan's own briefs, reports and review diffs.
+`git ls-files .superpowers` returning `0` is the safety gate; the file count is
+informational and must NOT be asserted as an exact value.
 
 - [ ] **Step 2: Delete the scratch, keeping the .gitignore**
 
