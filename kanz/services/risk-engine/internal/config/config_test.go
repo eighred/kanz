@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -25,10 +26,13 @@ func TestParseDuration(t *testing.T) {
 	}
 }
 
-// secret() is the SEC-01d seam that keeps the DSN out of plaintext env: a
-// CSI-mounted file must win over a plaintext env var, with a clean fall-back.
-func TestSecret(t *testing.T) {
-	const key = "RISK_ENGINE_TEST_SECRET"
+// DSN resolution is the SEC-01d seam that keeps the DSN out of plaintext env: a
+// CSI-mounted file must win over a plaintext env var. This exercises it through
+// Load rather than through a local helper, because there no longer is one —
+// pkg/secret owns the mechanism and tests it directly; what belongs here is that
+// the risk-engine's own DSN is wired to it.
+func TestLoadDatabaseURL(t *testing.T) {
+	const key = "RISK_ENGINE_DATABASE_URL"
 
 	t.Run("file wins over plaintext env and is trimmed", func(t *testing.T) {
 		p := filepath.Join(t.TempDir(), "dsn")
@@ -37,24 +41,43 @@ func TestSecret(t *testing.T) {
 		}
 		t.Setenv(key, "postgres://from-env")
 		t.Setenv(key+"_FILE", p)
-		if got := secret(key); got != "postgres://from-file" {
-			t.Fatalf("got %q, want the trimmed file value", got)
+		cfg, err := Load()
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if cfg.DatabaseURL != "postgres://from-file" {
+			t.Fatalf("got %q, want the trimmed file value", cfg.DatabaseURL)
 		}
 	})
 
 	t.Run("falls back to env when no file is set", func(t *testing.T) {
 		t.Setenv(key, "postgres://from-env")
 		os.Unsetenv(key + "_FILE")
-		if got := secret(key); got != "postgres://from-env" {
-			t.Fatalf("got %q, want the env value", got)
+		cfg, err := Load()
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if cfg.DatabaseURL != "postgres://from-env" {
+			t.Fatalf("got %q, want the env value", cfg.DatabaseURL)
 		}
 	})
 
-	t.Run("unreadable file path falls through to env", func(t *testing.T) {
+	// This case used to assert the OPPOSITE — that an unreadable mount falls
+	// through to the plaintext env — and that assertion is why the defect
+	// survived: it pinned the fall-through in place as intended behaviour. An
+	// empty DatabaseURL puts the engine in memory-only state with no bootstrap
+	// restore, which is a legitimate configuration, so nothing downstream could
+	// ever have told a failed Vault mount from a deliberate one.
+	t.Run("declared but unreadable mount refuses to load", func(t *testing.T) {
+		missing := filepath.Join(t.TempDir(), "does-not-exist")
 		t.Setenv(key, "postgres://from-env")
-		t.Setenv(key+"_FILE", filepath.Join(t.TempDir(), "does-not-exist"))
-		if got := secret(key); got != "postgres://from-env" {
-			t.Fatalf("got %q, want the env fallback", got)
+		t.Setenv(key+"_FILE", missing)
+		cfg, err := Load()
+		if err == nil {
+			t.Fatalf("Load returned DatabaseURL=%q and no error for an unreadable mount", cfg.DatabaseURL)
+		}
+		if !strings.Contains(err.Error(), missing) {
+			t.Errorf("error %q must name the unreadable path", err)
 		}
 	})
 }

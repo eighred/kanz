@@ -4,6 +4,8 @@ import (
 	"log/slog"
 	"os"
 	"strings"
+
+	"github.com/kanz-eng/kanz/pkg/secret"
 )
 
 // Config is the audit service runtime configuration, sourced from the
@@ -51,6 +53,15 @@ func Load() (Config, error) {
 	if len(subjects) == 0 {
 		subjects = DefaultSubjects
 	}
+	// Resolved before the literal so a declared-but-unreadable mount stops Load
+	// here. An empty DSN is a LEGAL value for this service — it selects the
+	// in-memory store — so a broken Vault mount used to produce an audit
+	// service that started clean, served queries, and lost the entire tamper-
+	// evidence log on restart. Nothing downstream would have reported it.
+	databaseURL, err := secret.Read("AUDIT_DATABASE_URL")
+	if err != nil {
+		return Config{}, err
+	}
 	return Config{
 		Listen:        envOr("AUDIT_LISTEN", ":8083"),
 		LogLevel:      parseLevel(envOr("AUDIT_LOG_LEVEL", "info")),
@@ -58,7 +69,7 @@ func Load() (Config, error) {
 		Source:        envOr("AUDIT_SOURCE", "audit"),
 		ConsumerGroup: envOr("AUDIT_CONSUMER_GROUP", "audit"),
 		Subjects:      subjects,
-		DatabaseURL:   secret("AUDIT_DATABASE_URL"),
+		DatabaseURL:   databaseURL,
 		OTLPEndpoint:  os.Getenv("AUDIT_OTLP_ENDPOINT"),
 		SPIFFESocket:  os.Getenv("SPIFFE_ENDPOINT_SOCKET"),
 	}, nil
@@ -72,16 +83,6 @@ func splitList(s string) []string {
 		}
 	}
 	return out
-}
-
-// secret prefers a CSI/Vault file mount (<k>_FILE) over a plaintext <k> env var.
-func secret(k string) string {
-	if p := os.Getenv(k + "_FILE"); p != "" {
-		if b, err := os.ReadFile(p); err == nil {
-			return strings.TrimSpace(string(b))
-		}
-	}
-	return os.Getenv(k)
 }
 
 func envOr(k, def string) string {

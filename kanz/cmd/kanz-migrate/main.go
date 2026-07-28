@@ -37,12 +37,12 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
-	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/kanz-eng/kanz/internal/migrate"
+	"github.com/kanz-eng/kanz/pkg/secret"
 )
 
 func main() {
@@ -60,7 +60,16 @@ func run(args []string) error {
 		return err
 	}
 
-	dsn := secret("KANZ_MIGRATE_DATABASE_URL")
+	// An unreadable _FILE mount and an unset DSN are two different faults and both
+	// are reported. The local helper this replaces collapsed them: a failed CSI
+	// mount fell through to the plaintext env and then to "", so the initContainer
+	// exited saying nobody had configured a DSN — sending whoever read that log
+	// line to check the deployment's env block, which was correct, instead of the
+	// mount, which was not. See pkg/secret.
+	dsn, err := secret.Read("KANZ_MIGRATE_DATABASE_URL")
+	if err != nil {
+		return err
+	}
 	if dsn == "" {
 		return errors.New("no DSN: set KANZ_MIGRATE_DATABASE_URL_FILE (preferred) or KANZ_MIGRATE_DATABASE_URL")
 	}
@@ -101,16 +110,4 @@ func run(args []string) error {
 	}
 	logger.Info("schema up to date", "applied", len(applied), "total", len(migs))
 	return nil
-}
-
-// secret resolves a sensitive value, preferring a CSI/Vault file mount (SEC-01d:
-// the path in <k>_FILE) over a plaintext <k> env var — the convention the seven
-// service configs already use.
-func secret(k string) string {
-	if p := os.Getenv(k + "_FILE"); p != "" {
-		if b, err := os.ReadFile(p); err == nil {
-			return strings.TrimSpace(string(b))
-		}
-	}
-	return os.Getenv(k)
 }

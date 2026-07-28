@@ -9,6 +9,8 @@ import (
 	"log/slog"
 	"os"
 	"strings"
+
+	"github.com/kanz-eng/kanz/pkg/secret"
 )
 
 // Config is the resolved configuration.
@@ -64,6 +66,18 @@ type Config struct {
 
 // Load reads TV_SYNC_* environment variables with production-safe defaults.
 func Load() (Config, error) {
+	// The DSN carries database credentials and must never ride in a pod's env
+	// block, so a CSI/Vault file mount (SEC-01d) wins over the plaintext var.
+	// Resolved before the literal so an unreadable mount stops Load HERE rather
+	// than resolving to "": that empty value reaches validateBook below, which
+	// refuses the boot with "TV_SYNC_DATABASE_URL is required" — the wrong
+	// diagnosis for a DSN that WAS configured, and one that points an operator at
+	// the manifest instead of at the mount that failed. See pkg/secret.
+	databaseURL, err := secret.Read("TV_SYNC_DATABASE_URL")
+	if err != nil {
+		return Config{}, err
+	}
+
 	cfg := Config{
 		Listen:        envOr("TV_SYNC_LISTEN", ":8091"),
 		LogLevel:      parseLevel(os.Getenv("TV_SYNC_LOG_LEVEL")),
@@ -73,7 +87,7 @@ func Load() (Config, error) {
 		Source:        envOr("TV_SYNC_SOURCE", "tv-sync"),
 		ConsumerGroup: envOr("TV_SYNC_CONSUMER_GROUP", "tv-sync"),
 		PriceSubjects: splitSubjects(priceSubjectsEnv()),
-		DatabaseURL:   secret("TV_SYNC_DATABASE_URL"),
+		DatabaseURL:   databaseURL,
 		Tenant:        os.Getenv("TV_SYNC_TENANT"),
 	}
 	if len(cfg.PriceSubjects) == 0 {
@@ -104,18 +118,6 @@ func (c Config) validateBook() error {
 		return errors.New("tv-sync: TV_SYNC_TENANT is required — the fact log is tenant-scoped, and an unscoped session cannot read or write it")
 	}
 	return nil
-}
-
-// secret resolves a sensitive value, preferring a CSI/Vault file mount (SEC-01d: the path in
-// <k>_FILE) over a plaintext <k> env var. The DSN carries database credentials and must never
-// ride in a pod's env block.
-func secret(k string) string {
-	if p := os.Getenv(k + "_FILE"); p != "" {
-		if b, err := os.ReadFile(p); err == nil {
-			return strings.TrimSpace(string(b))
-		}
-	}
-	return os.Getenv(k)
 }
 
 // priceSubjectsEnv reads TV_SYNC_PRICE_SUBJECTS WITHOUT trimming first,

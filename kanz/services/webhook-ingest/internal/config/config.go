@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/kanz-eng/kanz/internal/dec"
+	"github.com/kanz-eng/kanz/pkg/secret"
 	"github.com/kanz-eng/kanz/services/webhook-ingest/internal/ingest"
 )
 
@@ -92,6 +93,20 @@ type venueWeight struct {
 
 // Load reads env + the bootstrap file (WEBHOOK_INGEST_CONFIG) and validates it.
 func Load() (Config, error) {
+	// Resolved before the literal so a DECLARED-but-unreadable secret mount stops
+	// Load here. The local helper this replaces answered a failed mount with the
+	// plaintext env var and then with "", and "" here selects the IN-PROCESS nonce
+	// store — see RedisURL above. A deployment that mounts a Redis URL and also
+	// carries AllowInProcessNonce (a leftover from its single-replica days) would
+	// therefore survive a broken Vault mount by silently falling back to a per-pod
+	// replay defence, on N replicas, at the internet-facing perimeter — the exact
+	// state that admits a re-delivered alert twice and fans out a second set of
+	// orders. See pkg/secret.
+	redisURL, err := secret.Read("WEBHOOK_INGEST_REDIS_URL")
+	if err != nil {
+		return Config{}, err
+	}
+
 	cfg := Config{
 		Listen:         envOr("WEBHOOK_INGEST_LISTEN", ":8090"),
 		LogLevel:       parseLevel(os.Getenv("WEBHOOK_INGEST_LOG_LEVEL")),
@@ -102,7 +117,7 @@ func Load() (Config, error) {
 		ReplayWindow:   parseDuration(os.Getenv("WEBHOOK_INGEST_REPLAY_WINDOW"), 5*time.Minute),
 		CloudflareOnly: os.Getenv("WEBHOOK_INGEST_CLOUDFLARE_ONLY") == "1",
 
-		RedisURL:            secret("WEBHOOK_INGEST_REDIS_URL"),
+		RedisURL:            redisURL,
 		AllowInProcessNonce: os.Getenv("WEBHOOK_INGEST_ALLOW_INPROCESS_NONCE") == "true",
 	}
 	allow, err := parseAllowlist(os.Getenv("WEBHOOK_INGEST_IP_ALLOWLIST"))
@@ -207,17 +222,6 @@ func parseAllowlist(s string) ([]*net.IPNet, error) {
 		out = append(out, n)
 	}
 	return out, nil
-}
-
-// secret prefers a CSI/Vault file mount (<k>_FILE) over a plaintext <k> env var
-// (SEC-01d). The Redis URL carries a password.
-func secret(k string) string {
-	if p := os.Getenv(k + "_FILE"); p != "" {
-		if b, err := os.ReadFile(p); err == nil {
-			return strings.TrimSpace(string(b))
-		}
-	}
-	return os.Getenv(k)
 }
 
 func envOr(key, def string) string {

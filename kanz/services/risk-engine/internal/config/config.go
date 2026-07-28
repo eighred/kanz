@@ -5,6 +5,8 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	"github.com/kanz-eng/kanz/pkg/secret"
 )
 
 // Config is the risk-engine runtime configuration. Sourced from the
@@ -122,19 +124,45 @@ func Load() (Config, error) {
 	if len(marketSubjects) == 0 {
 		marketSubjects = DefaultMarketSubjects
 	}
+
+	// All three are resolved before the literal so a DECLARED-but-unreadable
+	// secret mount stops Load here. The local helper this replaces answered a
+	// failed mount with the plaintext env var and then with "", and for every one
+	// of these three "" is a DOCUMENTED, LEGITIMATE degraded mode — see the field
+	// comments above: in-memory state with no restore, VaR99 back to the 1%×gross
+	// placeholder, per-instance dedup instead of cross-pod. So a broken Vault
+	// mount downgraded the engine into a posture that reads as deliberate, on a
+	// clean start, with nothing to distinguish it from a deployment that meant it.
+	//
+	// That helper's own doc comment claimed the fall-through let "the downstream
+	// required-field check surface the misconfiguration". There is no such check
+	// here; none of the three is required. See pkg/secret.
+	databaseURL, err := secret.Read("RISK_ENGINE_DATABASE_URL")
+	if err != nil {
+		return Config{}, err
+	}
+	marketDataURL, err := secret.Read("RISK_ENGINE_MARKETDATA_DATABASE_URL")
+	if err != nil {
+		return Config{}, err
+	}
+	redisURL, err := secret.Read("RISK_ENGINE_REDIS_URL")
+	if err != nil {
+		return Config{}, err
+	}
+
 	return Config{
 		Listen:           envOr("RISK_ENGINE_LISTEN", ":8081"),
 		LogLevel:         parseLevel(envOr("RISK_ENGINE_LOG_LEVEL", "info")),
 		NATSURL:          os.Getenv("RISK_ENGINE_NATS_URL"),
 		Source:           envOr("RISK_ENGINE_SOURCE", "risk-engine"),
 		Tenant:           envOr("RISK_ENGINE_TENANT", "__system__"),
-		DatabaseURL:      secret("RISK_ENGINE_DATABASE_URL"),
+		DatabaseURL:      databaseURL,
 		SnapshotInterval: parseDuration(os.Getenv("RISK_ENGINE_SNAPSHOT_INTERVAL")),
 		KafkaBrokers:     splitList(os.Getenv("RISK_ENGINE_KAFKA_BROKERS")),
-		MarketDataURL:    secret("RISK_ENGINE_MARKETDATA_DATABASE_URL"),
+		MarketDataURL:    marketDataURL,
 		ShardMembers:     splitList(os.Getenv("RISK_ENGINE_SHARD_MEMBERS")),
 		ShardSelf:        os.Getenv("RISK_ENGINE_SHARD_SELF"),
-		RedisURL:         secret("RISK_ENGINE_REDIS_URL"),
+		RedisURL:         redisURL,
 		OTLPEndpoint:     os.Getenv("RISK_ENGINE_OTLP_ENDPOINT"),
 		GRPCListen:       os.Getenv("RISK_ENGINE_GRPC_LISTEN"),
 		SPIFFESocket:     os.Getenv("RISK_ENGINE_SPIFFE_SOCKET"),
@@ -156,20 +184,6 @@ func splitList(s string) []string {
 		}
 	}
 	return out
-}
-
-// secret resolves a sensitive value, preferring a CSI/Vault file mount
-// (SEC-01d: the path in <k>_FILE) over a plaintext <k> env var. The DSN is
-// thus never a plaintext value in the pod spec or etcd. Empty when neither is
-// set; a file path that fails to read falls through to the env var so the
-// downstream required-field check surfaces the misconfiguration.
-func secret(k string) string {
-	if p := os.Getenv(k + "_FILE"); p != "" {
-		if b, err := os.ReadFile(p); err == nil {
-			return strings.TrimSpace(string(b))
-		}
-	}
-	return os.Getenv(k)
 }
 
 // parseDuration parses a Go duration (e.g. "30s", "2m"); an empty or malformed

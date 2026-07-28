@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/kanz-eng/kanz/internal/alternatives"
+	"github.com/kanz-eng/kanz/pkg/secret"
 )
 
 // Config is the alternatives (private-markets) service runtime configuration,
@@ -64,6 +65,17 @@ type Config struct {
 // Load reads the configuration from the environment with production-safe
 // defaults.
 func Load() (Config, error) {
+	// Resolved before the literal so a declared-but-unreadable ALTERNATIVES_DATABASE_URL_FILE
+	// stops Load HERE rather than falling through to the plaintext env and then to ""
+	// the way the local helper this replaces did. Empty is a real setting in this
+	// service — it selects the in-memory fund journal — so a failed CSI mount would
+	// have come up healthy while every capital call and distribution it folded was
+	// discarded on the next restart. See pkg/secret.
+	databaseURL, err := secret.Read("ALTERNATIVES_DATABASE_URL")
+	if err != nil {
+		return Config{}, err
+	}
+
 	subjects := splitList(os.Getenv("ALTERNATIVES_SUBJECTS"))
 	if len(subjects) == 0 {
 		subjects = alternatives.AllSubjects()
@@ -72,7 +84,7 @@ func Load() (Config, error) {
 		Listen:        envOr("ALTERNATIVES_LISTEN", ":8080"),
 		LogLevel:      parseLevel(os.Getenv("ALTERNATIVES_LOG_LEVEL")),
 		OTLPEndpoint:  os.Getenv("ALTERNATIVES_OTLP_ENDPOINT"),
-		DatabaseURL:   secret("ALTERNATIVES_DATABASE_URL"),
+		DatabaseURL:   databaseURL,
 		Tenant:        envOr("ALTERNATIVES_TENANT", "__system__"),
 		NATSURL:       os.Getenv("ALTERNATIVES_NATS_URL"),
 		Source:        envOr("ALTERNATIVES_SOURCE", "alternatives"),
@@ -91,19 +103,6 @@ func splitList(s string) []string {
 		}
 	}
 	return out
-}
-
-// secret resolves a sensitive value, preferring a CSI/Vault file mount (SEC-01d:
-// the path in <k>_FILE) over a plaintext <k> env var — the convention the other
-// service configs use. A DSN carries database credentials and must never ride in
-// a pod's env block.
-func secret(k string) string {
-	if p := os.Getenv(k + "_FILE"); p != "" {
-		if b, err := os.ReadFile(p); err == nil {
-			return strings.TrimSpace(string(b))
-		}
-	}
-	return os.Getenv(k)
 }
 
 func envOr(key, def string) string {

@@ -4,6 +4,8 @@ import (
 	"log/slog"
 	"os"
 	"strings"
+
+	"github.com/kanz-eng/kanz/pkg/secret"
 )
 
 // Config is the regulatory filing service runtime configuration, sourced from
@@ -34,24 +36,24 @@ type Config struct {
 
 // Load reads the configuration from the environment with production-safe defaults.
 func Load() (Config, error) {
+	// Resolved before the literal so a declared-but-unreadable mount stops Load
+	// HERE. The local helper this replaces answered an unreadable file with the
+	// plaintext env and then with "", and "" is this service's in-memory-chain
+	// default: a broken CSI mount would have quietly demoted the durable audit
+	// hash chain (REG-02) to one lost on the next restart, which is precisely the
+	// tamper-evidence the filings are signed to carry. See pkg/secret.
+	databaseURL, err := secret.Read("REGULATORY_DATABASE_URL")
+	if err != nil {
+		return Config{}, err
+	}
+
 	return Config{
 		Listen:       envOr("REGULATORY_LISTEN", ":8083"),
 		LogLevel:     parseLevel(os.Getenv("REGULATORY_LOG_LEVEL")),
 		Signer:       strings.ToLower(envOr("REGULATORY_SIGNER", "chain")),
-		DatabaseURL:  secret("REGULATORY_DATABASE_URL"),
+		DatabaseURL:  databaseURL,
 		OTLPEndpoint: os.Getenv("REGULATORY_OTLP_ENDPOINT"),
 	}, nil
-}
-
-// secret resolves a sensitive value, preferring a CSI/Vault file mount
-// (SEC-01d: the path in <k>_FILE) over a plaintext <k> env var.
-func secret(k string) string {
-	if p := os.Getenv(k + "_FILE"); p != "" {
-		if b, err := os.ReadFile(p); err == nil {
-			return strings.TrimSpace(string(b))
-		}
-	}
-	return os.Getenv(k)
 }
 
 func envOr(key, def string) string {

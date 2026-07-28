@@ -4,6 +4,8 @@ import (
 	"log/slog"
 	"os"
 	"strings"
+
+	"github.com/kanz-eng/kanz/pkg/secret"
 )
 
 // Config is the market-data service runtime configuration. Sourced from the
@@ -63,6 +65,18 @@ func Load() (Config, error) {
 	if len(subjects) == 0 {
 		subjects = DefaultSubjects
 	}
+
+	// Resolved before the literal so a declared-but-unreadable mount stops Load
+	// HERE. The local helper this replaces fell through to the plaintext env and
+	// then to "", and an empty DSN is not an error in this service — it selects
+	// the in-memory store. A broken CSI mount would therefore have downgraded a
+	// durable price history to one that vanishes on restart, reporting a clean
+	// start the whole way. See pkg/secret.
+	databaseURL, err := secret.Read("MARKET_DATA_DATABASE_URL")
+	if err != nil {
+		return Config{}, err
+	}
+
 	return Config{
 		Listen:        envOr("MARKET_DATA_LISTEN", ":8082"),
 		LogLevel:      parseLevel(envOr("MARKET_DATA_LOG_LEVEL", "info")),
@@ -70,7 +84,7 @@ func Load() (Config, error) {
 		Source:        envOr("MARKET_DATA_SOURCE", "market-data"),
 		ConsumerGroup: envOr("MARKET_DATA_CONSUMER_GROUP", "market-data"),
 		Subjects:      subjects,
-		DatabaseURL:   secret("MARKET_DATA_DATABASE_URL"),
+		DatabaseURL:   databaseURL,
 		OTLPEndpoint:  os.Getenv("MARKET_DATA_OTLP_ENDPOINT"),
 		SPIFFESocket:  os.Getenv("SPIFFE_ENDPOINT_SOCKET"),
 
@@ -90,17 +104,6 @@ func splitList(s string) []string {
 		}
 	}
 	return out
-}
-
-// secret resolves a sensitive value, preferring a CSI/Vault file mount
-// (SEC-01d: the path in <k>_FILE) over a plaintext <k> env var.
-func secret(k string) string {
-	if p := os.Getenv(k + "_FILE"); p != "" {
-		if b, err := os.ReadFile(p); err == nil {
-			return strings.TrimSpace(string(b))
-		}
-	}
-	return os.Getenv(k)
 }
 
 func envOr(k, def string) string {

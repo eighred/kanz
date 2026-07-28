@@ -7,6 +7,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/kanz-eng/kanz/pkg/secret"
 )
 
 // Config is the datamaster (golden-source) service runtime configuration, sourced
@@ -65,18 +67,29 @@ type Config struct {
 // boots with half its vendors quietly unwired would master the book from whoever
 // happened to parse.
 func Load() (Config, error) {
+	// Resolved before the literal so a declared-but-unreadable
+	// DATAMASTER_DATABASE_URL_FILE stops Load HERE, on the same principle as the
+	// vendor specs below: a half-wired boot is worse than no boot. The local helper
+	// this replaces answered a failed mount with the plaintext env and then with "",
+	// and "" selects the in-memory golden store and exception queue — so a broken
+	// CSI mount would master the book into memory and throw away every operator
+	// override at the next restart. See pkg/secret.
+	databaseURL, err := secret.Read("DATAMASTER_DATABASE_URL")
+	if err != nil {
+		return Config{}, err
+	}
+
 	cfg := Config{
 		Listen:          envOr("DATAMASTER_LISTEN", ":8080"),
 		LogLevel:        parseLevel(os.Getenv("DATAMASTER_LOG_LEVEL")),
 		OTLPEndpoint:    os.Getenv("DATAMASTER_OTLP_ENDPOINT"),
-		DatabaseURL:     secret("DATAMASTER_DATABASE_URL"),
+		DatabaseURL:     databaseURL,
 		Tenant:          envOr("DATAMASTER_TENANT", "__system__"),
 		RefreshInterval: durationOr("DATAMASTER_REFRESH_INTERVAL", 5*time.Minute),
 		AllowSim:        boolOr("DATAMASTER_ALLOW_SIM", false),
 		RefFiles:        parseVendorMap(os.Getenv("DATAMASTER_REF_FILES")),
 		PriceFiles:      parseVendorMap(os.Getenv("DATAMASTER_PRICE_FILES")),
 	}
-	var err error
 	if cfg.VendorPriority, err = parsePriorities(os.Getenv("DATAMASTER_VENDOR_PRIORITY")); err != nil {
 		return Config{}, err
 	}
@@ -124,19 +137,6 @@ func parsePriorities(s string) (map[string]int, error) {
 		out[strings.TrimSpace(k)] = rank
 	}
 	return out, nil
-}
-
-// secret resolves a sensitive value, preferring a CSI/Vault file mount (SEC-01d:
-// the path in <k>_FILE) over a plaintext <k> env var — the convention the other
-// service configs use. A DSN carries database credentials and must never ride in
-// a pod's env block.
-func secret(k string) string {
-	if p := os.Getenv(k + "_FILE"); p != "" {
-		if b, err := os.ReadFile(p); err == nil {
-			return strings.TrimSpace(string(b))
-		}
-	}
-	return os.Getenv(k)
 }
 
 func envOr(key, def string) string {

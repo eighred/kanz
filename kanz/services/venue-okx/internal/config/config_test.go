@@ -85,58 +85,10 @@ func TestNoDatabaseConfiguredLeavesDSNEmptyWithoutError(t *testing.T) {
 	}
 }
 
-// secret() backs APIKey/APISecret/Passphrase too — verify the fail-fast and
-// precedence rules hold generically, not just for the DSN.
-func TestSecretTableDriven(t *testing.T) {
-	t.Run("file set and readable wins over plaintext env", func(t *testing.T) {
-		dir := t.TempDir()
-		path := filepath.Join(dir, "v")
-		if err := os.WriteFile(path, []byte(" from-file \n"), 0o600); err != nil {
-			t.Fatalf("write: %v", err)
-		}
-		t.Setenv("TEST_SECRET_K_FILE", path)
-		t.Setenv("TEST_SECRET_K", "from-env")
-
-		got, err := secret("TEST_SECRET_K")
-		if err != nil {
-			t.Fatalf("secret() error = %v, want nil", err)
-		}
-		if got != "from-file" {
-			t.Fatalf("secret() = %q, want trimmed file contents %q", got, "from-file")
-		}
-	})
-
-	t.Run("file set and unreadable is an error naming var and path", func(t *testing.T) {
-		path := filepath.Join(t.TempDir(), "missing")
-		t.Setenv("TEST_SECRET_K_FILE", path)
-
-		_, err := secret("TEST_SECRET_K")
-		if err == nil {
-			t.Fatalf("secret() error = nil, want an error for an unreadable declared file")
-		}
-		if !strings.Contains(err.Error(), "TEST_SECRET_K_FILE") || !strings.Contains(err.Error(), path) {
-			t.Fatalf("error = %q, want it to name TEST_SECRET_K_FILE and %q", err.Error(), path)
-		}
-	})
-
-	t.Run("file unset, env set uses env", func(t *testing.T) {
-		t.Setenv("TEST_SECRET_K", "from-env")
-		got, err := secret("TEST_SECRET_K")
-		if err != nil {
-			t.Fatalf("secret() error = %v, want nil", err)
-		}
-		if got != "from-env" {
-			t.Fatalf("secret() = %q, want %q", got, "from-env")
-		}
-	})
-
-	t.Run("file unset, env unset returns empty, no error", func(t *testing.T) {
-		got, err := secret("TEST_SECRET_K")
-		if err != nil {
-			t.Fatalf("secret() error = %v, want nil", err)
-		}
-		if got != "" {
-			t.Fatalf("secret() = %q, want empty", got)
-		}
-	})
-}
+// The generic <K>_FILE / <K> precedence and fail-fast rules used to be tested
+// here, against this package's own copy of secret(). That copy is gone and the
+// rules now live in pkg/secret, tested once in pkg/secret/secret_test.go —
+// including the case this file was written for, a declared-but-unreadable mount
+// erroring with the var and path named. The DSN-level tests above stay, because
+// they assert what THIS service does with the resolved value, which is a
+// different question from how the value is resolved.
