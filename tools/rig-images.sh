@@ -24,8 +24,7 @@
 # anything, (2) extracts by splitting on the key name rather than by position,
 # so key order within an entry is irrelevant, and (3) tracks entry boundaries
 # explicitly and treats a `service:` with no `dockerfile:` (or vice versa) as a
-# hard parse failure naming the offending entry — the same fail-loud contract
-# tools/validate-board.sh uses for malformed board rows. The row-count floor
+# hard parse failure naming the offending entry. The row-count floor
 # below is kept as a backstop, not the primary defense.
 set -euo pipefail
 
@@ -101,8 +100,8 @@ matrix() {
 require_matrix() {
   matrix >/dev/null
   # Count rows with awk's own numeric coercion (END {print c+0}) rather than
-  # piping through external wc -l and string-comparing — the same idiom
-  # tools/validate-board.sh uses, immune to whitespace padding by construction.
+  # piping through external wc -l and string-comparing — immune to whitespace
+  # padding by construction.
   local n
   n=$(printf '%s' "$MATRIX_CACHE" | awk 'NF { c++ } END { print c+0 }')
   if [ "$n" -lt "$MIN_SERVICES" ]; then

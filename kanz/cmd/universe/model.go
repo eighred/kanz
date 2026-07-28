@@ -369,11 +369,21 @@ func (m model) submitAddForm() (model, tea.Cmd) {
 	// fixed and resubmitted keeps showing the error it was fixed for.
 	m.formErr = nil
 
+	port, err := parsePort(m.form.value("ssh_port"))
+	if err != nil {
+		// Same shape as the missingRequired rejection above, and for the same
+		// reason: no key-file read, no RPC, form stays open on the row the
+		// operator has to fix. A bad port is caught here rather than sent, so it
+		// can never reach the estate as a truncated one (see parsePort).
+		m.formErr = err
+		return m, nil
+	}
+
 	in := addNodeInput{
 		hostname: m.form.value("hostname"),
 		ip:       m.form.value("ip"),
 		sshUser:  m.form.value("ssh_user"),
-		sshPort:  atoi32(m.form.value("ssh_port")),
+		sshPort:  port,
 	}
 	keyPath := m.form.value("key_path")
 	src := m.src
@@ -477,7 +487,14 @@ func withVerifiedAccount(accounts map[string]string, venue, id string) map[strin
 // respected, because that only ever gives an inner layer more room to answer.
 func (m model) testConnCmd() tea.Cmd {
 	ip := m.form.value("ip")
-	port := atoi32(m.form.value("ssh_port"))
+	port, err := parsePort(m.form.value("ssh_port"))
+	if err != nil {
+		// The probe is refused without spawning the Job, but it still ANSWERS with a
+		// testConnResultMsg: updateForm sets probing before calling this, and only
+		// that message clears it. Returning nil here would leave the form stuck
+		// in-flight, refusing every further ctrl+t for the rest of the session.
+		return func() tea.Msg { return testConnResultMsg{err: err} }
+	}
 	src := m.src
 	timeout := testConnTimeout
 	if m.cfg.CallTimeout > timeout {
@@ -497,14 +514,41 @@ type testConnResultMsg struct {
 	err error
 }
 
-// atoi32 parses an int32 from a form field; a malformed SSH port falls back to
-// 22 rather than failing the whole submit on a stray keystroke.
-func atoi32(s string) int32 {
-	n, err := strconv.Atoi(s)
-	if err != nil {
-		return 22
+// defaultSSHPort is what an omitted SSH Port field means. The field is prefilled
+// with it and 22 is the only port this estate probes or provisions over, so a
+// cleared field is an omission rather than a choice (see newAddForm).
+const defaultSSHPort int32 = 22
+
+// parsePort reads the SSH Port field. An empty or whitespace-only field is the
+// documented omission and yields 22; anything else must be a real port, or the
+// action that called this is refused with an error naming the field.
+//
+// It parses with ParseInt(_, 10, 32) rather than Atoi followed by an int32 cast
+// because Atoi returns a platform-width int, and on a 64-bit build that cast
+// TRUNCATES instead of failing: "4294967318" (2³²+22) parses cleanly and arrives
+// at addNodeInput.sshPort / TestConnectionRequest.SshPort as 22, and "2147483670"
+// as -2147483626. Neither is anything the operator sees.
+//
+// The truncation to a still-valid port is the dangerous one, and it is why this
+// is not a cosmetic parse: Test Connection would report "✓ reachable" for a port
+// nobody typed, and the AddNode that follows would provision a trading node over
+// that same unintended port — so the estate's record of how the box is reached is
+// wrong from the moment it joins, and it looks confirmed. ParseInt refuses both
+// values at the boundary instead.
+//
+// The 1..65535 check is here rather than left to the server for the reason the
+// required-field check is: a port no kernel can dial is worth saying next to the
+// field, not after a round trip.
+func parsePort(s string) (int32, error) {
+	t := strings.TrimSpace(s)
+	if t == "" {
+		return defaultSSHPort, nil
 	}
-	return int32(n)
+	n, err := strconv.ParseInt(t, 10, 32)
+	if err != nil || n < 1 || n > 65535 {
+		return 0, fmt.Errorf("SSH Port %q is not a port number (1-65535)", s)
+	}
+	return int32(n), nil
 }
 
 // updateDrainConfirm handles key input while the drain confirm prompt is

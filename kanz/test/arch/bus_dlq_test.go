@@ -338,7 +338,7 @@ var retryCertifiedConsumers = map[string]string{
 		"unconditional last-write-wins UPSERT keyed on household_id. Re-running it with the " +
 		"same composition is a no-op change; there is no dedup branch to skip through.",
 
-	"services/oms/cmd/oms/main.go:328": "oms: dispatches handleSubmit, handleCancel, handleAmend " +
+	"services/oms/cmd/oms/main.go:342": "oms: dispatches handleSubmit, handleCancel, handleAmend " +
 		"(order.Service.Handle) and position.Projector.Handle (fills), re-derived fresh against " +
 		"250fe00 rather than assumed fixed — see .superpowers/sdd/oms-recert-report.md for the " +
 		"full per-failure-point walk. handleSubmit: every failure point after store.Create either " +
@@ -362,7 +362,21 @@ var retryCertifiedConsumers = map[string]string{
 		"admission would (service.go:788-791,839-841,946-1044), and ActionRedrive does not special-case " +
 		"ErrUnpriced the way handleSubmit's own admission path does (service.go:260-277 vs 839-841) — " +
 		"both fail by never producing an announcement or by nacking loudly toward the DLQ, never by " +
-		"acking work that was never done.",
+		"acking work that was never done. RE-CERTIFIED for the per-order lock: handleCancel and " +
+		"handleAmend now take awaitClaim before reading (service.go), which adds ONE new failure " +
+		"point to each — the acquisition timing out. It is the most trivially re-enterable failure " +
+		"point in the file: on that branch nothing is read, nothing is persisted, nothing is " +
+		"emitted and no venue call is made, so a second in-process attempt simply re-attempts the " +
+		"acquisition against unchanged state — category (a), a clean redo with no partial work to " +
+		"resume. It notably does NOT introduce the banned shape: the timeout returns the error " +
+		"(nack), it does not return nil. Taking the try-lock instead and acking when the lock is " +
+		"held WOULD be exactly the forbidden branch — mistaking in-flight work for something to " +
+		"skip, and silently discarding an operator's cancel — which is why cancel and amend wait " +
+		"on the lock rather than probing it. One caveat if WithRetry is ever actually wired here " +
+		"(it is not today): an in-process retry of a timed-out cancel re-attempts against a lock " +
+		"the SAME process still holds inside work(), so it will burn another full claimWait before " +
+		"failing again. That is a latency and head-of-line cost, not a correctness break — the " +
+		"retry still cannot ack undone work.",
 }
 
 func TestNoBusConsumerWiresRetryWhileHandlersResumeByAcking(t *testing.T) {

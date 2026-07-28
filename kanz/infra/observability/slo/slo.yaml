@@ -8,9 +8,13 @@
 # contract (dashboards/README.md) and the CICD-01e canary template follow.
 #
 # Every SLI is expressed against the OBS-01 RED series that already exist
-# (kanz_gateway_* MT-01e, kanz_risk_* / kanz_bus_* OBS-01c) or the DATA-08
-# freshness contract (kanz_data_* DATA-02). Renaming any of those series breaks
-# both these SLOs and the canary gate — they share one metric vocabulary.
+# (kanz_gateway_* MT-01e, kanz_risk_* / kanz_bus_* OBS-01c). Renaming any of
+# those series breaks both these SLOs and the canary gate — they share one
+# metric vocabulary.
+#
+# "That already exist" is the load-bearing half of that sentence: this file
+# previously also bound the kanz_data_* DATA-02 freshness contract, and that
+# contract had stopped existing. See the market-data note below.
 #
 # SLI kinds:
 #   ratio     — good/total over counters (the standard event-based SLI).
@@ -100,20 +104,14 @@ services:
           good: 'sum(rate(kanz_bus_consume_total{result="ok"}[{window}]))'
           total: 'sum(rate(kanz_bus_consume_total[{window}]))'
 
-  - service: market-data
-    layer: ingestion
-    slos:
-      - name: freshness
-        description: >-
-          Fraction of time the ingestion frontier stays within the DATA-02
-          warn budget (10s, DefaultStalenessConfig.WarnAfter). Scope to the
-          ingestion subjects; per-subject budgets (a tick feed vs. an EOD
-          batch) are a deployment override, same stance as the DATA-09 rules.
-        objective: 0.99
-        budget_seconds: 10
-        sli:
-          kind: freshness
-          # SRE-01b realizes good/total over a 1m-step subquery of the gauge:
-          #   good  = sum_over_time((<metric> <= bool <budget>)[{window}:1m])
-          #   total = count_over_time(<metric>[{window}:1m])
-          metric: 'max(kanz_data_staleness_lag_seconds) by (subject)'
+  # THE MARKET-DATA FRESHNESS SLO WAS REMOVED HERE, NOT SUSPENDED. It bound
+  # kanz_data_staleness_lag_seconds, a DATA-02 gauge emitted by
+  # internal/integrity — deleted in DATA-M4. No Go source has emitted that
+  # series since, and services/market-data registers no domain metric at all
+  # (only the generic bus metrics), so there was no renamed series to re-point
+  # at. An objective compiled from a series nobody emits is not a weak
+  # measurement, it is the absence of one wearing a measurement's label: the
+  # windowed ratios were empty, the generic burn-rate alerts could never fire
+  # for this pair, and a dashboard reader saw a freshness objective with no
+  # breaches. Re-introducing it means instrumenting market-data FIRST and then
+  # binding the series that actually exists.

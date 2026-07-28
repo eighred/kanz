@@ -171,7 +171,7 @@ func (s *Server) handleVerify(w http.ResponseWriter, r *http.Request) {
 	// nothing about the chain — it would break the tamper-evidence this
 	// endpoint exists to provide. What is removed here is ANONYMOUS access.
 	// Restricting it further, to an operator capability, is an open decision
-	// (see KANZ_TASKS.md) and must not be guessed at by narrowing the scan.
+	// and must not be guessed at by narrowing the scan.
 	if _, ok := tenantOf(w, r); !ok {
 		return
 	}

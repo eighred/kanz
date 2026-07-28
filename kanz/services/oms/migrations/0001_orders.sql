@@ -15,9 +15,14 @@
 --     it; 0 ⇒ it lost the race and must not touch the venue. It is ONE statement.
 --     A SELECT-then-INSERT would reintroduce the check-then-act window this
 --     migration exists to close.
---   * Save → the same INSERT with DO UPDATE, the post-admission upsert. Safe
---     precisely because existence is already established and the bus
---     partition_key serializes transitions per order.
+--   * Save → the same INSERT with DO UPDATE, the post-admission upsert. It does
+--     NOT arbitrate between concurrent writers. This used to claim safety came
+--     from "the bus partition_key serializes transitions per order"; that was
+--     never true — nothing in the consumer reads partition_key for ordering, and
+--     submit, amend and cancel arrive on three separate durables. Concurrent
+--     writers are excluded by the service's per-order lock, which stops at the
+--     process boundary; across replicas the last writer silently wins. Closing
+--     that needs a version column and a CAS predicate on the UPDATE.
 --
 -- # Exact decimals
 --

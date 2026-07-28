@@ -66,8 +66,22 @@ import (
 //
 // Keyed to a (importPath, dirPrefix) pair: the value is the repo-relative directory
 // prefix the import is allowed under.
+//
+// knownhosts is a SUBPACKAGE of the entry above, allowed under the same prefix and for
+// the opposite of the reason this test exists: it is what makes the one permitted SSH
+// session verify WHO it is talking to. That session used to run with
+// ssh.InsecureIgnoreHostKey, so it piped K3S_TOKEN — cluster admission — to whatever
+// answered the dial (see cmd/kanz-provisioner/hostkey.go for the full account). This
+// entry does not widen the plane by a single call site; it narrows the one that exists.
+//
+// It needs its own entry only because this map is keyed on the EXACT import path, which
+// is deliberate — prefix-matching "golang.org/x/crypto/ssh" would silently admit every
+// future subpackage under it, and admitting them one at a time with a reason is the
+// deny-by-default shape this file argues for. Removing the insecure callback without
+// this line leaves the build red, so the two changes belong together.
 var sshImportAllowed = map[string]string{
-	"golang.org/x/crypto/ssh": "cmd/kanz-provisioner/",
+	"golang.org/x/crypto/ssh":            "cmd/kanz-provisioner/",
+	"golang.org/x/crypto/ssh/knownhosts": "cmd/kanz-provisioner/",
 }
 
 func TestNoSSHPlane(t *testing.T) {

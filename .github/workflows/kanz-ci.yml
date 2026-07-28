@@ -28,7 +28,7 @@ on:
     # DOCS DO NOT BUILD IMAGES.
     #
     # The pull_request trigger above is already path-filtered; this one was not, so a
-    # commit touching only KANZ_TASKS.md ran the full matrix — for kanz-build, that is 19
+    # commit touching only markdown ran the full matrix — for kanz-build, that is 19
     # Docker image builds to record that a board item moved. On a private repo billing per
     # minute, that is real money for zero signal.
     #
@@ -335,7 +335,30 @@ jobs:
           # would FAIL rather than skip when the other went missing.
           TEST_NATS_MTLS_URL: nats://localhost:4223
           TEST_NATS_MTLS_CERT_DIR: /tmp/kanz-mtls
-        run: go test -race ./...
+        # -p 1 IS REQUIRED, NOT A THROUGHPUT PREFERENCE. Every Postgres-gated
+        # package shares ONE database (TEST_POSTGRES_URL above, a single
+        # `kanzapp`), and Go's default -p runs packages in parallel. CLAUDE.md
+        # has said "run go test -p 1 ./..." for exactly this reason; this step
+        # did not, and the failure it produced is a good illustration of why the
+        # collision is not obvious:
+        #
+        #   services/alternatives/migrations/0002_tenant_scope_required.sql does
+        #   not name the tables it hardens. It DISCOVERS them —
+        #   `pg_class WHERE c.relrowsecurity AND n.nspname = current_schema()` —
+        #   so run against a shared schema it reaches straight across service
+        #   boundaries and starts applying policies to accounting's tables. When
+        #   accounting's own test tore down `ledger_snapshots` between that
+        #   SELECT and the CREATE POLICY, alternatives failed with
+        #   `relation "ledger_snapshots" does not exist`, naming a table it has
+        #   nothing to do with.
+        #
+        # The symptom is therefore both cross-service and INTERMITTENT — it
+        # depends on which packages happen to overlap — which is the worst shape
+        # for a signal people are supposed to trust. Do not remove -p 1 to make
+        # this step faster; the correct way to buy back that time is to give
+        # each package its own database, and until that exists this flag is the
+        # only thing keeping the suite deterministic.
+        run: go test -race -p 1 ./...
 
       # THE `redis` BUILD (EXEC-M22). This tag is what webhook-ingest's production image is
       # built with, and it is the ONLY thing that makes `replicas: 2` on the platform's

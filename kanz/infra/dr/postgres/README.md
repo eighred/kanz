@@ -11,6 +11,53 @@ Disaster recovery for the stateful databases:
 (The market-data history and the audit log are append-only/WORM stores with
 their own retention; the *transactional* state that DR must restore is these.)
 
+## Coverage of every migration-owning service
+
+Thirteen services under `services/*/migrations/` own a Postgres schema. **All
+thirteen are listed here, including the ones that are not covered** — a service
+absent from this table is a service whose DR posture nobody has decided, and
+that absence is invisible. `test/arch/dr_postgres_coverage_test.go` enforces
+that this table and the Go classification beside it stay in step with the
+filesystem, so a new migration directory cannot appear without a decision.
+
+| Service | DR status | Cluster / reason |
+|---|---|---|
+| `risk-engine` | covered | `kanz-risk` |
+| `schema-registry` | covered | `kanz-registry` |
+| `accounting` | covered | `kanz-books` (IBOR ledger journal + snapshots) |
+| `alternatives` | covered | `kanz-books` (fund journal) |
+| `wealth` | covered | `kanz-books` (household book) |
+| `datamaster` | covered | `kanz-books` (golden records + exception queue) |
+| `market-data` | excluded | append-only history with its own retention; re-ingestable from the feed |
+| `audit` | excluded | WORM store with its own tamper-resistant retention (AUDIT-01b) |
+| `oms` | **NOT COVERED** | `orders`, `positions`, `position_fills`. See the warning below. |
+| `venue-binance` | **NOT COVERED** | `venue_orders` — the exchange-order ↔ kanz-order mapping reconciliation depends on |
+| `venue-okx` | **NOT COVERED** | `venue_orders` — same |
+| `regulatory` | **NOT COVERED** | `audit_chain_links` — the tamper-evidence chain |
+| `tv-sync` | **NOT COVERED** | `tv_facts` — a projection, rebuildable from the event log, so the weakest exposure of the five |
+
+### The five uncovered stores
+
+They hold real transactional state, they are named in no cluster and no
+exclusion, and until this is resolved a region failover starts them empty.
+
+**The OMS is the one that matters most.** After a failover it would come up
+against an empty order store, and `SweepInterrupted` would log `count=0` — the
+*same line a healthy clean start produces*. There is no signal distinguishing
+"no interrupted orders" from "no orders at all, because the store is gone",
+so the platform would report normal startup while holding positions at an
+exchange that it has no record of.
+
+This is why `CLAUDE.md` sequences **M3 after this issue**: placing real orders
+against a store that may not be backed up is the one ordering error with an
+unrecoverable failure mode.
+
+Resolving it requires deciding which cluster each belongs to (or that it is
+genuinely excludable) and adding the database to that cluster — tracked by
+**#60**. Note that database naming across the deploy manifests, the DSN
+secrets and this document has been reported as inconsistent, so the mapping
+should be settled against the running config rather than any single document.
+
 The `kanz-books` cluster hosts one database per service; each service's schema is
 defined by its `services/<svc>/migrations/*.sql` (applied in lexical order at
 deploy). The stores are event-sourced (ledger, fund) or replace-on-write
