@@ -20,8 +20,8 @@ import (
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
 
-	"github.com/kanz-eng/kanz/internal/execution"
-	"github.com/kanz-eng/kanz/internal/venueadapter/orderview"
+	"github.com/eighred/kanz/internal/execution"
+	"github.com/eighred/kanz/internal/venueadapter/orderview"
 )
 
 // Server implements venue.v1.VenueAdapterService over one exchange connector.

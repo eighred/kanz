@@ -8,9 +8,9 @@ import (
 	envelopepb "github.com/kanz-eng/kanz-schemas-go/envelope/v1"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
-	"github.com/kanz-eng/kanz/services/lineage/internal/graph"
-	"github.com/kanz-eng/kanz/services/lineage/internal/harvest"
-	"github.com/kanz-eng/kanz/services/lineage/internal/openlineage"
+	"github.com/eighred/kanz/services/lineage/internal/graph"
+	"github.com/eighred/kanz/services/lineage/internal/harvest"
+	"github.com/eighred/kanz/services/lineage/internal/openlineage"
 )
 
 type fakeEmitter struct{ evs []openlineage.RunEvent }

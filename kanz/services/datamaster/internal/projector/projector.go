@@ -32,10 +32,10 @@ import (
 	"sort"
 	"time"
 
-	"github.com/kanz-eng/kanz/services/datamaster/internal/feed"
-	"github.com/kanz-eng/kanz/services/datamaster/internal/master"
-	"github.com/kanz-eng/kanz/services/datamaster/internal/pricing"
-	"github.com/kanz-eng/kanz/services/datamaster/internal/store"
+	"github.com/eighred/kanz/services/datamaster/internal/feed"
+	"github.com/eighred/kanz/services/datamaster/internal/master"
+	"github.com/eighred/kanz/services/datamaster/internal/pricing"
+	"github.com/eighred/kanz/services/datamaster/internal/store"
 )
 
 // Projector folds the vendor feeds into the golden store and the exception queue.

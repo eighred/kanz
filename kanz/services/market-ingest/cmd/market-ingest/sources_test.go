@@ -19,8 +19,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/kanz-eng/kanz/pkg/bus"
-	"github.com/kanz-eng/kanz/services/market-ingest/internal/config"
+	"github.com/eighred/kanz/pkg/bus"
+	"github.com/eighred/kanz/services/market-ingest/internal/config"
 )
 
 func quietLogger() *slog.Logger {

@@ -4,7 +4,7 @@ import (
 	"math"
 	"testing"
 
-	"github.com/kanz-eng/kanz/internal/risk/pricing"
+	"github.com/eighred/kanz/internal/risk/pricing"
 )
 
 func approx(t *testing.T, name string, got, want, eps float64) {

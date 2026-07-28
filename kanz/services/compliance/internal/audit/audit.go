@@ -23,8 +23,8 @@ import (
 	envelopepb "github.com/kanz-eng/kanz-schemas-go/envelope/v1"
 	observationpb "github.com/kanz-eng/kanz-schemas-go/observation/v1"
 
-	comp "github.com/kanz-eng/kanz/internal/compliance"
-	"github.com/kanz-eng/kanz/pkg/bus"
+	comp "github.com/eighred/kanz/internal/compliance"
+	"github.com/eighred/kanz/pkg/bus"
 )
 
 const (

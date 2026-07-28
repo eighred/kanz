@@ -4,8 +4,8 @@ import (
 	"math/big"
 	"testing"
 
-	"github.com/kanz-eng/kanz/internal/dec"
-	"github.com/kanz-eng/kanz/services/accounting/internal/ledger"
+	"github.com/eighred/kanz/internal/dec"
+	"github.com/eighred/kanz/services/accounting/internal/ledger"
 )
 
 // A EUR cash entry: signed cash leg in EUR (mirrors nav_test's cash() but foreign).

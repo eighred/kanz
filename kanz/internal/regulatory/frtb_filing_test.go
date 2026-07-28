@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/kanz-eng/kanz/internal/regulatory/frtb"
+	"github.com/eighred/kanz/internal/regulatory/frtb"
 )
 
 // sampleInputs is a small but non-degenerate trading book: an equity delta, an

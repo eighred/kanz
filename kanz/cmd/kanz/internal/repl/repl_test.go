@@ -9,9 +9,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/kanz-eng/kanz/cmd/kanz/internal/config"
-	"github.com/kanz-eng/kanz/cmd/kanz/internal/tokenstore"
-	"github.com/kanz-eng/kanz/pkg/deviceauth"
+	"github.com/eighred/kanz/cmd/kanz/internal/config"
+	"github.com/eighred/kanz/cmd/kanz/internal/tokenstore"
+	"github.com/eighred/kanz/pkg/deviceauth"
 )
 
 // fakeAuth is a stand-in Authenticator: it hands back a scripted token and

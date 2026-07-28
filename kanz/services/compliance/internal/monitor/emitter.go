@@ -8,8 +8,8 @@ import (
 	envelopepb "github.com/kanz-eng/kanz-schemas-go/envelope/v1"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
-	comp "github.com/kanz-eng/kanz/internal/compliance"
-	"github.com/kanz-eng/kanz/pkg/bus"
+	comp "github.com/eighred/kanz/internal/compliance"
+	"github.com/eighred/kanz/pkg/bus"
 )
 
 // Bus is the publish surface — satisfied by *bus.Producer. Narrow so the monitor

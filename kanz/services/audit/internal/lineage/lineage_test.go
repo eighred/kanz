@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/kanz-eng/kanz/services/audit/internal/audit"
+	"github.com/eighred/kanz/services/audit/internal/audit"
 )
 
 // seed appends a small correlated cascade:

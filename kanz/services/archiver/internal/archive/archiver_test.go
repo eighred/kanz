@@ -15,8 +15,8 @@ import (
 	envelopepb "github.com/kanz-eng/kanz-schemas-go/envelope/v1"
 	"google.golang.org/protobuf/proto"
 
-	"github.com/kanz-eng/kanz/pkg/bus"
-	"github.com/kanz-eng/kanz/services/archiver/internal/archive"
+	"github.com/eighred/kanz/pkg/bus"
+	"github.com/eighred/kanz/services/archiver/internal/archive"
 )
 
 type fakeKafka struct {

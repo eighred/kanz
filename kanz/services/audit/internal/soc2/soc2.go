@@ -17,7 +17,7 @@ import (
 	"context"
 	"time"
 
-	"github.com/kanz-eng/kanz/services/audit/internal/audit"
+	"github.com/eighred/kanz/services/audit/internal/audit"
 )
 
 // Control is one SOC 2 Trust Services Criteria point of focus evidenced from the

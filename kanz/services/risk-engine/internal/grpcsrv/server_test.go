@@ -13,9 +13,9 @@ import (
 	domainpb "github.com/kanz-eng/kanz-schemas-go/domain/v1"
 	querypb "github.com/kanz-eng/kanz-schemas-go/query/v1"
 
-	v1 "github.com/kanz-eng/kanz/internal/risk/api/v1"
-	"github.com/kanz-eng/kanz/internal/risk/domain"
-	"github.com/kanz-eng/kanz/services/risk-engine/internal/grpcsrv"
+	v1 "github.com/eighred/kanz/internal/risk/api/v1"
+	"github.com/eighred/kanz/internal/risk/domain"
+	"github.com/eighred/kanz/services/risk-engine/internal/grpcsrv"
 )
 
 // fakeEngine is a hand-rolled v1.Engine returning the concrete domain types

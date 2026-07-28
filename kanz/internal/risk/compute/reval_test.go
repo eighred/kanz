@@ -8,7 +8,7 @@ import (
 
 	commonpb "github.com/kanz-eng/kanz-schemas-go/common/v1"
 
-	"github.com/kanz-eng/kanz/internal/risk/pricing"
+	"github.com/eighred/kanz/internal/risk/pricing"
 )
 
 func TestRevaluer_RepricesNonlinearly(t *testing.T) {

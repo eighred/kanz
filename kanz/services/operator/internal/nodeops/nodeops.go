@@ -18,7 +18,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
 
-	"github.com/kanz-eng/kanz/services/operator/internal/estate"
+	"github.com/eighred/kanz/services/operator/internal/estate"
 )
 
 const (

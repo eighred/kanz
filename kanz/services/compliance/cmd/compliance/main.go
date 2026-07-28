@@ -17,14 +17,14 @@ import (
 	"syscall"
 	"time"
 
-	comp "github.com/kanz-eng/kanz/internal/compliance"
-	"github.com/kanz-eng/kanz/pkg/bus"
-	"github.com/kanz-eng/kanz/pkg/observability"
-	"github.com/kanz-eng/kanz/pkg/transport"
-	"github.com/kanz-eng/kanz/services/compliance/internal/audit"
-	"github.com/kanz-eng/kanz/services/compliance/internal/config"
-	"github.com/kanz-eng/kanz/services/compliance/internal/monitor"
-	"github.com/kanz-eng/kanz/services/compliance/internal/server"
+	comp "github.com/eighred/kanz/internal/compliance"
+	"github.com/eighred/kanz/pkg/bus"
+	"github.com/eighred/kanz/pkg/observability"
+	"github.com/eighred/kanz/pkg/transport"
+	"github.com/eighred/kanz/services/compliance/internal/audit"
+	"github.com/eighred/kanz/services/compliance/internal/config"
+	"github.com/eighred/kanz/services/compliance/internal/monitor"
+	"github.com/eighred/kanz/services/compliance/internal/server"
 )
 
 func main() {

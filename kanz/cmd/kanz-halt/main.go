@@ -36,9 +36,9 @@ import (
 	envelopepb "github.com/kanz-eng/kanz-schemas-go/envelope/v1"
 	lifecyclepb "github.com/kanz-eng/kanz-schemas-go/lifecycle/v1"
 
-	"github.com/kanz-eng/kanz/internal/platform/mode"
-	"github.com/kanz-eng/kanz/pkg/bus"
-	"github.com/kanz-eng/kanz/pkg/transport"
+	"github.com/eighred/kanz/internal/platform/mode"
+	"github.com/eighred/kanz/pkg/bus"
+	"github.com/eighred/kanz/pkg/transport"
 )
 
 // schemaRefModeChanged identifies the payload on the wire, "{package}.{Message}:{version}".

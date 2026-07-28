@@ -7,8 +7,8 @@ import (
 
 	orderpb "github.com/kanz-eng/kanz-schemas-go/order/v1"
 
-	"github.com/kanz-eng/kanz/internal/compliance"
-	"github.com/kanz-eng/kanz/internal/optimization"
+	"github.com/eighred/kanz/internal/compliance"
+	"github.com/eighred/kanz/internal/optimization"
 )
 
 func sampleProposal() optimization.RebalanceProposal {

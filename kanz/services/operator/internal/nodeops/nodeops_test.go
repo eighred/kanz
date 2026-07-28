@@ -15,7 +15,7 @@ import (
 	"k8s.io/client-go/kubernetes/fake"
 	k8stesting "k8s.io/client-go/testing"
 
-	"github.com/kanz-eng/kanz/services/operator/internal/estate"
+	"github.com/eighred/kanz/services/operator/internal/estate"
 )
 
 func node(name string, unsched bool) *corev1.Node {

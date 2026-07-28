@@ -5,8 +5,8 @@ import (
 	"os"
 	"strings"
 
-	comp "github.com/kanz-eng/kanz/internal/compliance"
-	"github.com/kanz-eng/kanz/internal/platform/subject"
+	comp "github.com/eighred/kanz/internal/compliance"
+	"github.com/eighred/kanz/internal/platform/subject"
 )
 
 // Config is the compliance service runtime configuration, sourced from the

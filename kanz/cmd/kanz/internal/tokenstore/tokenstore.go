@@ -12,7 +12,7 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/kanz-eng/kanz/pkg/deviceauth"
+	"github.com/eighred/kanz/pkg/deviceauth"
 )
 
 // Store reads and writes the persisted token at a fixed path.

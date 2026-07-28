@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/kanz-eng/kanz/internal/risk/pricing/curve"
+	"github.com/eighred/kanz/internal/risk/pricing/curve"
 )
 
 // RateInstrument binds one cached instrument to its role in a currency's rate-

@@ -22,7 +22,7 @@ import (
 	marketpb "github.com/kanz-eng/kanz-schemas-go/market/v1"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
-	"github.com/kanz-eng/kanz/internal/dec"
+	"github.com/eighred/kanz/internal/dec"
 )
 
 // ErrSequenceGap is returned by ApplyDelta when a delta does not chain onto the

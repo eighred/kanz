@@ -11,7 +11,7 @@ import (
 
 	"github.com/segmentio/kafka-go"
 
-	"github.com/kanz-eng/kanz/pkg/bus"
+	"github.com/eighred/kanz/pkg/bus"
 )
 
 func TestKafkaPublishSubscribe(t *testing.T) {

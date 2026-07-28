@@ -7,8 +7,8 @@ import (
 
 	envelopepb "github.com/kanz-eng/kanz-schemas-go/envelope/v1"
 
-	"github.com/kanz-eng/kanz/internal/wealth"
-	"github.com/kanz-eng/kanz/services/wealth/internal/book"
+	"github.com/eighred/kanz/internal/wealth"
+	"github.com/eighred/kanz/services/wealth/internal/book"
 )
 
 func payload(t *testing.T, h wealth.Household) []byte {

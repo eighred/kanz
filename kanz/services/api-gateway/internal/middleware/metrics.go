@@ -7,7 +7,7 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 
-	"github.com/kanz-eng/kanz/pkg/observability"
+	"github.com/eighred/kanz/pkg/observability"
 )
 
 // GatewayMetrics is the api-gateway RED + per-tenant quota exporter (MT-01e).

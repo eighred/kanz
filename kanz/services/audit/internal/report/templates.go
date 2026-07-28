@@ -1,6 +1,6 @@
 package report
 
-import "github.com/kanz-eng/kanz/services/audit/internal/audit"
+import "github.com/eighred/kanz/services/audit/internal/audit"
 
 // BuiltIns are the shipped regulatory report templates. Deployments add their
 // own as data (JSON → Template), but these cover the common asks: the authz

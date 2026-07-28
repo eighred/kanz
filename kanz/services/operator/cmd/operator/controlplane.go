@@ -8,7 +8,7 @@ import (
 	"github.com/spiffe/go-spiffe/v2/spiffeid"
 	"google.golang.org/grpc"
 
-	"github.com/kanz-eng/kanz/pkg/transport"
+	"github.com/eighred/kanz/pkg/transport"
 )
 
 // THE CONTROL PLANE AUTHENTICATES ITS CALLER (OPS-M2a).

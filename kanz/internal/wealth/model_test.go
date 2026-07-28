@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/kanz-eng/kanz/internal/optimization"
+	"github.com/eighred/kanz/internal/optimization"
 )
 
 func modelCatalog() []ModelPortfolio {

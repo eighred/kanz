@@ -4,8 +4,8 @@ import (
 	"context"
 	"time"
 
-	comp "github.com/kanz-eng/kanz/internal/compliance"
-	"github.com/kanz-eng/kanz/services/oms/internal/position"
+	comp "github.com/eighred/kanz/internal/compliance"
+	"github.com/eighred/kanz/services/oms/internal/position"
 )
 
 // BookSource adapts the OMS position book (OMS-01e) to the COMP-01 gate's

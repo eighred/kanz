@@ -35,13 +35,13 @@ import (
 
 	commonpb "github.com/kanz-eng/kanz-schemas-go/common/v1"
 
-	risk "github.com/kanz-eng/kanz/internal/risk"
-	v1 "github.com/kanz-eng/kanz/internal/risk/api/v1"
-	"github.com/kanz-eng/kanz/internal/risk/compute"
-	"github.com/kanz-eng/kanz/internal/risk/compute/factor"
-	"github.com/kanz-eng/kanz/internal/risk/domain"
-	"github.com/kanz-eng/kanz/internal/risk/scenario"
-	"github.com/kanz-eng/kanz/internal/risk/state"
+	risk "github.com/eighred/kanz/internal/risk"
+	v1 "github.com/eighred/kanz/internal/risk/api/v1"
+	"github.com/eighred/kanz/internal/risk/compute"
+	"github.com/eighred/kanz/internal/risk/compute/factor"
+	"github.com/eighred/kanz/internal/risk/domain"
+	"github.com/eighred/kanz/internal/risk/scenario"
+	"github.com/eighred/kanz/internal/risk/state"
 )
 
 // EngineImpl is the production v1.Engine. Safe for concurrent use:

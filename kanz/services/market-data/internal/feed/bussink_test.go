@@ -10,8 +10,8 @@ import (
 	marketpb "github.com/kanz-eng/kanz-schemas-go/market/v1"
 	"google.golang.org/protobuf/proto"
 
-	"github.com/kanz-eng/kanz/pkg/bus"
-	"github.com/kanz-eng/kanz/services/market-data/internal/feed"
+	"github.com/eighred/kanz/pkg/bus"
+	"github.com/eighred/kanz/services/market-data/internal/feed"
 )
 
 // captureClient is a bus.Client that records every framed message.

@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/kanz-eng/kanz/internal/marketdata/store"
+	"github.com/eighred/kanz/internal/marketdata/store"
 )
 
 func TestBenchmark_WeightedReturn(t *testing.T) {

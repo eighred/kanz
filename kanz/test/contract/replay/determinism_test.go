@@ -31,9 +31,9 @@ import (
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
+	"github.com/eighred/kanz/pkg/bus"
+	"github.com/eighred/kanz/tools/replay"
 	envelopepb "github.com/kanz-eng/kanz-schemas-go/envelope/v1"
-	"github.com/kanz-eng/kanz/pkg/bus"
-	"github.com/kanz-eng/kanz/tools/replay"
 )
 
 // fixedTime pins every fixture timestamp so the wire bytes of two

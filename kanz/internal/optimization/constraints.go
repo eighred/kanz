@@ -8,7 +8,7 @@ import (
 	commonpb "github.com/kanz-eng/kanz-schemas-go/common/v1"
 	compliancepb "github.com/kanz-eng/kanz-schemas-go/compliance/v1"
 
-	"github.com/kanz-eng/kanz/internal/compliance"
+	"github.com/eighred/kanz/internal/compliance"
 )
 
 // Constraint engine (OPT-01c): the optimizer's feasible region, plus the

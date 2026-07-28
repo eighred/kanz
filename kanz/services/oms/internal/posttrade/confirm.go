@@ -17,7 +17,7 @@ import (
 
 	orderpb "github.com/kanz-eng/kanz-schemas-go/order/v1"
 
-	"github.com/kanz-eng/kanz/internal/dec"
+	"github.com/eighred/kanz/internal/dec"
 )
 
 // Confirmation is a counterparty's trade confirmation — the working shape behind

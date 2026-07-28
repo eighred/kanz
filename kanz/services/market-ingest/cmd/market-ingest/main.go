@@ -23,11 +23,11 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/kanz-eng/kanz/pkg/alpha"
-	"github.com/kanz-eng/kanz/pkg/bus"
-	"github.com/kanz-eng/kanz/pkg/observability"
-	"github.com/kanz-eng/kanz/pkg/transport"
-	"github.com/kanz-eng/kanz/services/market-ingest/internal/config"
+	"github.com/eighred/kanz/pkg/alpha"
+	"github.com/eighred/kanz/pkg/bus"
+	"github.com/eighred/kanz/pkg/observability"
+	"github.com/eighred/kanz/pkg/transport"
+	"github.com/eighred/kanz/services/market-ingest/internal/config"
 )
 
 func main() {

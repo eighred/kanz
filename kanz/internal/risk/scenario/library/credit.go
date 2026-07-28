@@ -3,7 +3,7 @@ package library
 import (
 	"sort"
 
-	"github.com/kanz-eng/kanz/internal/risk/xva"
+	"github.com/eighred/kanz/internal/risk/xva"
 )
 
 // Credit-stress scenario catalog (XVA-01e) — the credit-axis counterpart of the

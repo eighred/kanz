@@ -17,10 +17,10 @@ import (
 	"sync/atomic"
 	"time"
 
-	accounting "github.com/kanz-eng/kanz/services/accounting/internal"
-	"github.com/kanz-eng/kanz/services/accounting/internal/cashmove"
-	"github.com/kanz-eng/kanz/services/accounting/internal/ledger"
-	"github.com/kanz-eng/kanz/services/accounting/internal/recon"
+	accounting "github.com/eighred/kanz/services/accounting/internal"
+	"github.com/eighred/kanz/services/accounting/internal/cashmove"
+	"github.com/eighred/kanz/services/accounting/internal/ledger"
+	"github.com/eighred/kanz/services/accounting/internal/recon"
 )
 
 // Readiness gates traffic; the read endpoints are pure over the store, so the

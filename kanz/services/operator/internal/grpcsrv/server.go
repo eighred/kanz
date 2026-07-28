@@ -18,12 +18,12 @@ import (
 
 	operatorpb "github.com/kanz-eng/kanz-schemas-go/operator/v1"
 
-	"github.com/kanz-eng/kanz/internal/execution"
-	"github.com/kanz-eng/kanz/internal/venueadapter/exchangeauth"
-	"github.com/kanz-eng/kanz/services/operator/internal/estate"
-	"github.com/kanz-eng/kanz/services/operator/internal/provision"
-	"github.com/kanz-eng/kanz/services/operator/internal/secrets"
-	"github.com/kanz-eng/kanz/services/operator/internal/venueproof"
+	"github.com/eighred/kanz/internal/execution"
+	"github.com/eighred/kanz/internal/venueadapter/exchangeauth"
+	"github.com/eighred/kanz/services/operator/internal/estate"
+	"github.com/eighred/kanz/services/operator/internal/provision"
+	"github.com/eighred/kanz/services/operator/internal/secrets"
+	"github.com/eighred/kanz/services/operator/internal/venueproof"
 )
 
 // Provisioner is the node-provisioning surface the operator gRPC depends on

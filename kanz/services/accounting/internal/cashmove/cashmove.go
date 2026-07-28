@@ -23,8 +23,8 @@ import (
 	accountingpb "github.com/kanz-eng/kanz-schemas-go/accounting/v1"
 	envelopepb "github.com/kanz-eng/kanz-schemas-go/envelope/v1"
 
-	"github.com/kanz-eng/kanz/internal/dec"
-	"github.com/kanz-eng/kanz/pkg/bus"
+	"github.com/eighred/kanz/internal/dec"
+	"github.com/eighred/kanz/pkg/bus"
 )
 
 // Kind is the sort of cash movement, which fixes both the journal entry type and

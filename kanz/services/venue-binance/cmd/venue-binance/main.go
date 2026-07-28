@@ -35,16 +35,16 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"google.golang.org/grpc"
 
-	"github.com/kanz-eng/kanz/internal/execution"
-	"github.com/kanz-eng/kanz/internal/pg"
-	"github.com/kanz-eng/kanz/internal/venueadapter/accountproof"
-	"github.com/kanz-eng/kanz/internal/venueadapter/orderview"
-	"github.com/kanz-eng/kanz/internal/venueadapter/server"
-	"github.com/kanz-eng/kanz/pkg/bus"
-	"github.com/kanz-eng/kanz/pkg/observability"
-	"github.com/kanz-eng/kanz/pkg/transport"
-	"github.com/kanz-eng/kanz/services/venue-binance/internal/binance"
-	"github.com/kanz-eng/kanz/services/venue-binance/internal/config"
+	"github.com/eighred/kanz/internal/execution"
+	"github.com/eighred/kanz/internal/pg"
+	"github.com/eighred/kanz/internal/venueadapter/accountproof"
+	"github.com/eighred/kanz/internal/venueadapter/orderview"
+	"github.com/eighred/kanz/internal/venueadapter/server"
+	"github.com/eighred/kanz/pkg/bus"
+	"github.com/eighred/kanz/pkg/observability"
+	"github.com/eighred/kanz/pkg/transport"
+	"github.com/eighred/kanz/services/venue-binance/internal/binance"
+	"github.com/eighred/kanz/services/venue-binance/internal/config"
 )
 
 // orderViewDurable reports whether this adapter's order view survives a

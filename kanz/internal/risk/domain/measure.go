@@ -4,7 +4,7 @@ import (
 	"sort"
 	"time"
 
-	v1 "github.com/kanz-eng/kanz/internal/risk/api/v1"
+	v1 "github.com/eighred/kanz/internal/risk/api/v1"
 )
 
 // MeasureSet is the concrete v1.MeasureSet — owned by RISK-07's

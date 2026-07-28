@@ -3,7 +3,7 @@ package compute
 import (
 	"sort"
 
-	"github.com/kanz-eng/kanz/internal/risk/domain"
+	"github.com/eighred/kanz/internal/risk/domain"
 )
 
 // ComputeExposure builds the canonical ExposureSet for a portfolio.

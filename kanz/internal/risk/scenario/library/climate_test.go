@@ -3,7 +3,7 @@ package library
 import (
 	"testing"
 
-	v1 "github.com/kanz-eng/kanz/internal/risk/api/v1"
+	v1 "github.com/eighred/kanz/internal/risk/api/v1"
 )
 
 func TestNamedClimateScenarioDispatch(t *testing.T) {

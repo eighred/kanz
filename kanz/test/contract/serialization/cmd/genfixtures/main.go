@@ -24,7 +24,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/kanz-eng/kanz/test/contract/serialization"
+	"github.com/eighred/kanz/test/contract/serialization"
 )
 
 func main() {

@@ -14,8 +14,8 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/kanz-eng/kanz/internal/audit/chain"
-	"github.com/kanz-eng/kanz/services/audit/internal/audit"
+	"github.com/eighred/kanz/internal/audit/chain"
+	"github.com/eighred/kanz/services/audit/internal/audit"
 )
 
 // Format is a report rendering.

@@ -10,7 +10,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 
-	"github.com/kanz-eng/kanz/internal/execution"
+	"github.com/eighred/kanz/internal/execution"
 )
 
 // EXEC-M8 — what the OMS does when a venue adapter is not there.

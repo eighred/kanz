@@ -14,7 +14,7 @@ package okx
 // satisfies Publisher and the FACTs this connector publishes are the same FACTs
 // the OMS already consumes.
 
-import "github.com/kanz-eng/kanz/internal/execution"
+import "github.com/eighred/kanz/internal/execution"
 
 // Worker seams — supplied by the venue-okx composition root.
 type (

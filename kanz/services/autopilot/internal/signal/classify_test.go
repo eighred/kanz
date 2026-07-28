@@ -9,7 +9,7 @@ import (
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
-	"github.com/kanz-eng/kanz/services/autopilot/internal/signal"
+	"github.com/eighred/kanz/services/autopilot/internal/signal"
 )
 
 func dqeEnvelope(t *testing.T, dqe *observationpb.DataQualityEvent) (*envelopepb.Envelope, []byte) {

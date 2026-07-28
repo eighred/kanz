@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/kanz-eng/kanz/services/datamaster/internal/master"
+	"github.com/eighred/kanz/services/datamaster/internal/master"
 )
 
 type fakeRefSource struct {

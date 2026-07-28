@@ -3,9 +3,9 @@ package varmodel
 import (
 	"context"
 
-	v1 "github.com/kanz-eng/kanz/internal/risk/api/v1"
-	"github.com/kanz-eng/kanz/internal/risk/compute"
-	"github.com/kanz-eng/kanz/internal/risk/domain"
+	v1 "github.com/eighred/kanz/internal/risk/api/v1"
+	"github.com/eighred/kanz/internal/risk/compute"
+	"github.com/eighred/kanz/internal/risk/domain"
 )
 
 // drawdownExponent is the Decimal scale of the FRACTION drawdown: a ratio in

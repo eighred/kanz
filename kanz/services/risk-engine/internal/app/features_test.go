@@ -19,11 +19,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/kanz-eng/kanz/internal/dec"
-	"github.com/kanz-eng/kanz/internal/prediction"
-	v1 "github.com/kanz-eng/kanz/internal/risk/api/v1"
-	"github.com/kanz-eng/kanz/internal/risk/domain"
-	"github.com/kanz-eng/kanz/services/risk-engine/internal/app"
+	"github.com/eighred/kanz/internal/dec"
+	"github.com/eighred/kanz/internal/prediction"
+	v1 "github.com/eighred/kanz/internal/risk/api/v1"
+	"github.com/eighred/kanz/internal/risk/domain"
+	"github.com/eighred/kanz/services/risk-engine/internal/app"
 )
 
 func measures(t *testing.T, vals map[v1.MeasureName]string) *domain.MeasureSet {

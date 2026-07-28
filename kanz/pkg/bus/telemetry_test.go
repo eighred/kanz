@@ -13,7 +13,7 @@ import (
 	"go.opentelemetry.io/otel/trace"
 	"go.opentelemetry.io/otel/trace/noop"
 
-	"github.com/kanz-eng/kanz/pkg/bus"
+	"github.com/eighred/kanz/pkg/bus"
 )
 
 // installTracing sets a real (in-memory) tracer + the W3C propagator for the

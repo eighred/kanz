@@ -10,7 +10,7 @@ import (
 	"math/big"
 	"time"
 
-	"github.com/kanz-eng/kanz/services/accounting/internal/ledger"
+	"github.com/eighred/kanz/services/accounting/internal/ledger"
 )
 
 // NAV is a point-in-time valuation of a book: the headline total and its cash /

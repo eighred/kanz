@@ -6,8 +6,8 @@ import (
 	domainpb "github.com/kanz-eng/kanz-schemas-go/domain/v1"
 	envelopepb "github.com/kanz-eng/kanz-schemas-go/envelope/v1"
 
-	"github.com/kanz-eng/kanz/internal/risk/ingest"
-	"github.com/kanz-eng/kanz/services/risk-engine/internal/shard"
+	"github.com/eighred/kanz/internal/risk/ingest"
+	"github.com/eighred/kanz/services/risk-engine/internal/shard"
 )
 
 // ShardFilter decorates an ingest.Applier so a replica only applies (and

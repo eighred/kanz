@@ -27,7 +27,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/kanz-eng/kanz/internal/devtoken"
+	"github.com/eighred/kanz/internal/devtoken"
 )
 
 func main() {

@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/kanz-eng/kanz/tools/scaffold"
+	"github.com/eighred/kanz/tools/scaffold"
 )
 
 func TestGenerateProducesValidOnConventionService(t *testing.T) {
@@ -48,7 +48,7 @@ func TestGenerateProducesValidOnConventionService(t *testing.T) {
 
 	// Name substitution reached the env prefix + import paths.
 	main, _ := os.ReadFile(filepath.Join(root, "services/widget-svc/cmd/widget-svc/main.go"))
-	if !strings.Contains(string(main), "github.com/kanz-eng/kanz/services/widget-svc/internal/config") {
+	if !strings.Contains(string(main), "github.com/eighred/kanz/services/widget-svc/internal/config") {
 		t.Error("main.go missing the service's internal import path")
 	}
 	cfg, _ := os.ReadFile(filepath.Join(root, "services/widget-svc/internal/config/config.go"))

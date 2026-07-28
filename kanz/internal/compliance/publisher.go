@@ -15,7 +15,7 @@ import (
 	envelopepb "github.com/kanz-eng/kanz-schemas-go/envelope/v1"
 	lifecyclepb "github.com/kanz-eng/kanz-schemas-go/lifecycle/v1"
 
-	"github.com/kanz-eng/kanz/pkg/bus"
+	"github.com/eighred/kanz/pkg/bus"
 )
 
 // Bus is the publish surface — satisfied by *bus.Producer.

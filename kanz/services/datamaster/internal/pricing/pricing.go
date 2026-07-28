@@ -34,7 +34,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/kanz-eng/kanz/internal/dec"
+	"github.com/eighred/kanz/internal/dec"
 )
 
 // Candidate is one source's price for an instrument — an arbitration input.

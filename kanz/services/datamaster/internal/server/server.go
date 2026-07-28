@@ -26,10 +26,10 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/kanz-eng/kanz/internal/dec"
-	"github.com/kanz-eng/kanz/services/datamaster/internal/feed"
-	"github.com/kanz-eng/kanz/services/datamaster/internal/pricing"
-	"github.com/kanz-eng/kanz/services/datamaster/internal/store"
+	"github.com/eighred/kanz/internal/dec"
+	"github.com/eighred/kanz/services/datamaster/internal/feed"
+	"github.com/eighred/kanz/services/datamaster/internal/pricing"
+	"github.com/eighred/kanz/services/datamaster/internal/store"
 )
 
 // Readiness gates traffic. The composition root holds it down until the first

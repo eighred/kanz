@@ -18,7 +18,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/kanz-eng/kanz/internal/alternatives"
+	"github.com/eighred/kanz/internal/alternatives"
 )
 
 func newPool(t *testing.T) *pgxpool.Pool {

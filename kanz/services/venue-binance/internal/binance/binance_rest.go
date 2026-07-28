@@ -10,7 +10,7 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/kanz-eng/kanz/internal/venueadapter/exchangeauth"
+	"github.com/eighred/kanz/internal/venueadapter/exchangeauth"
 )
 
 // binanceREST is a minimal, dependency-free Binance Spot REST client. It signs

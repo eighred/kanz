@@ -11,8 +11,8 @@ import (
 	envelopepb "github.com/kanz-eng/kanz-schemas-go/envelope/v1"
 	observationpb "github.com/kanz-eng/kanz-schemas-go/observation/v1"
 
-	"github.com/kanz-eng/kanz/pkg/bus"
-	"github.com/kanz-eng/kanz/services/oms/internal/posttrade"
+	"github.com/eighred/kanz/pkg/bus"
+	"github.com/eighred/kanz/services/oms/internal/posttrade"
 )
 
 // captureClient records every Publish (the EVT-17 / integrity test seam).

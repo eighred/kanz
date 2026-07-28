@@ -12,8 +12,8 @@ import (
 	orderpb "github.com/kanz-eng/kanz-schemas-go/order/v1"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
-	"github.com/kanz-eng/kanz/internal/dec"
-	"github.com/kanz-eng/kanz/pkg/bus"
+	"github.com/eighred/kanz/internal/dec"
+	"github.com/eighred/kanz/pkg/bus"
 )
 
 // Reconciler is the secondary audit layer (M3.3/3.4): it periodically polls

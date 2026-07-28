@@ -8,7 +8,7 @@ import (
 
 	orderpb "github.com/kanz-eng/kanz-schemas-go/order/v1"
 
-	"github.com/kanz-eng/kanz/internal/dec"
+	"github.com/eighred/kanz/internal/dec"
 )
 
 // fillAtMark is a minimal venue double: it fills a SubmitOrder in full at the

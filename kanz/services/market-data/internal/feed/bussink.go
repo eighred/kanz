@@ -8,7 +8,7 @@ import (
 	envelopepb "github.com/kanz-eng/kanz-schemas-go/envelope/v1"
 	marketpb "github.com/kanz-eng/kanz-schemas-go/market/v1"
 
-	"github.com/kanz-eng/kanz/pkg/bus"
+	"github.com/eighred/kanz/pkg/bus"
 )
 
 // Bus-backed Sink (WIRE-01a): the concrete Sink that stamps + publishes each

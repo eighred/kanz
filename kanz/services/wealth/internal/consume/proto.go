@@ -6,8 +6,8 @@ import (
 	wealthpb "github.com/kanz-eng/kanz-schemas-go/wealth/v1"
 	"google.golang.org/protobuf/proto"
 
-	"github.com/kanz-eng/kanz/internal/dec"
-	"github.com/kanz-eng/kanz/internal/wealth"
+	"github.com/eighred/kanz/internal/dec"
+	"github.com/eighred/kanz/internal/wealth"
 )
 
 // DecodeProto is the wealth.v1.HouseholdValued Decoder. Unlike alternatives,

@@ -12,7 +12,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
-	"github.com/kanz-eng/kanz/internal/tenantgen"
+	"github.com/eighred/kanz/internal/tenantgen"
 )
 
 // MT-02 Task 3/4 — the tenant compute guard.

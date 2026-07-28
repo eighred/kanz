@@ -6,8 +6,8 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/kanz-eng/kanz/pkg/auth"
-	"github.com/kanz-eng/kanz/services/copilot/internal/retrieval"
+	"github.com/eighred/kanz/pkg/auth"
+	"github.com/eighred/kanz/services/copilot/internal/retrieval"
 )
 
 func TestLineageCatalogResolvesDatasetNode(t *testing.T) {

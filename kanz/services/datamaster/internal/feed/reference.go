@@ -4,8 +4,8 @@ import (
 	"context"
 	"time"
 
-	"github.com/kanz-eng/kanz/services/datamaster/internal/master"
-	"github.com/kanz-eng/kanz/services/datamaster/internal/pricing"
+	"github.com/eighred/kanz/services/datamaster/internal/master"
+	"github.com/eighred/kanz/services/datamaster/internal/pricing"
 )
 
 // PARITY-01e — reference-data vendor adapter. The MASTER service resolves a

@@ -7,7 +7,7 @@ import (
 
 	commonpb "github.com/kanz-eng/kanz-schemas-go/common/v1"
 
-	"github.com/kanz-eng/kanz/internal/risk/domain"
+	"github.com/eighred/kanz/internal/risk/domain"
 )
 
 // MODEL-01g wires a real volatility model into the RISK-08 uncertainty path.

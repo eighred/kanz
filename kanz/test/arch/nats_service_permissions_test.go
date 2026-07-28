@@ -351,7 +351,7 @@ func (rc *resolveCache) packageFiles(t *testing.T, dir string) []*ast.File {
 // module's constants are out of scope (this platform's subjects are never
 // declared in a third-party dependency).
 func (rc *resolveCache) importDir(file *ast.File, alias string) (string, bool) {
-	const modulePrefix = "github.com/kanz-eng/kanz/"
+	const modulePrefix = "github.com/eighred/kanz/"
 	for _, imp := range file.Imports {
 		path, err := strconv.Unquote(imp.Path.Value)
 		if err != nil {

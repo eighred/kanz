@@ -7,7 +7,7 @@ import (
 	"net/http"
 	"sync/atomic"
 
-	"github.com/kanz-eng/kanz/services/tv-sync/internal/brokerapi"
+	"github.com/eighred/kanz/services/tv-sync/internal/brokerapi"
 )
 
 // Readiness gates traffic.

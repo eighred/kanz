@@ -5,7 +5,7 @@ import (
 	"os"
 	"strings"
 
-	"github.com/kanz-eng/kanz/pkg/secret"
+	"github.com/eighred/kanz/pkg/secret"
 )
 
 // Config is the audit service runtime configuration, sourced from the

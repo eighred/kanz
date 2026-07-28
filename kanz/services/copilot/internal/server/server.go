@@ -11,8 +11,8 @@ import (
 	"net/http"
 	"sync/atomic"
 
-	"github.com/kanz-eng/kanz/pkg/auth"
-	"github.com/kanz-eng/kanz/services/copilot/internal/agent"
+	"github.com/eighred/kanz/pkg/auth"
+	"github.com/eighred/kanz/services/copilot/internal/agent"
 )
 
 // Readiness gates traffic.

@@ -7,7 +7,7 @@ import (
 
 	orderpb "github.com/kanz-eng/kanz-schemas-go/order/v1"
 
-	"github.com/kanz-eng/kanz/pkg/bus"
+	"github.com/eighred/kanz/pkg/bus"
 )
 
 // SweepInterrupted reconciles every order this OMS left mid-flight, and it must

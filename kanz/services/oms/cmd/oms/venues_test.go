@@ -23,8 +23,8 @@ import (
 
 	venuepb "github.com/kanz-eng/kanz-schemas-go/venue/v1"
 
-	"github.com/kanz-eng/kanz/internal/execution"
-	"github.com/kanz-eng/kanz/services/oms/internal/config"
+	"github.com/eighred/kanz/internal/execution"
+	"github.com/eighred/kanz/services/oms/internal/config"
 )
 
 // adapter is an out-of-process venue adapter that reports the identity it is given.

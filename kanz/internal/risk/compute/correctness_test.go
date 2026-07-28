@@ -9,9 +9,9 @@ import (
 
 	commonpb "github.com/kanz-eng/kanz-schemas-go/common/v1"
 
-	v1 "github.com/kanz-eng/kanz/internal/risk/api/v1"
-	"github.com/kanz-eng/kanz/internal/risk/compute"
-	"github.com/kanz-eng/kanz/internal/risk/domain"
+	v1 "github.com/eighred/kanz/internal/risk/api/v1"
+	"github.com/eighred/kanz/internal/risk/compute"
+	"github.com/eighred/kanz/internal/risk/domain"
 )
 
 // RISK-12 — mathematical-property tests on top of RISK-06/07/08's

@@ -11,8 +11,8 @@ import (
 	envelopepb "github.com/kanz-eng/kanz-schemas-go/envelope/v1"
 	inferencepb "github.com/kanz-eng/kanz-schemas-go/inference/v1"
 
-	"github.com/kanz-eng/kanz/internal/prediction"
-	"github.com/kanz-eng/kanz/pkg/bus"
+	"github.com/eighred/kanz/internal/prediction"
+	"github.com/eighred/kanz/pkg/bus"
 )
 
 var baseTime = time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)

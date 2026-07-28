@@ -7,9 +7,9 @@ import (
 	"net/http"
 	"sync/atomic"
 
-	"github.com/kanz-eng/kanz/pkg/auth"
-	"github.com/kanz-eng/kanz/services/lineage/internal/graph"
-	"github.com/kanz-eng/kanz/services/lineage/internal/query"
+	"github.com/eighred/kanz/pkg/auth"
+	"github.com/eighred/kanz/services/lineage/internal/graph"
+	"github.com/eighred/kanz/services/lineage/internal/query"
 )
 
 // Readiness gates traffic: starts NOT ready, flips once the graph is built and

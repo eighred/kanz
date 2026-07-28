@@ -22,9 +22,9 @@ import (
 	envelopepb "github.com/kanz-eng/kanz-schemas-go/envelope/v1"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
-	"github.com/kanz-eng/kanz/internal/dec"
-	"github.com/kanz-eng/kanz/internal/platform/subject"
-	"github.com/kanz-eng/kanz/pkg/bus"
+	"github.com/eighred/kanz/internal/dec"
+	"github.com/eighred/kanz/internal/platform/subject"
+	"github.com/eighred/kanz/pkg/bus"
 )
 
 func TestIntegration_ABootingPodLearnsTheBookFromTheCompactedStream(t *testing.T) {

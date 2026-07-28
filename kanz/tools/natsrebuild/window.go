@@ -6,7 +6,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/kanz-eng/kanz/tools/replay"
+	"github.com/eighred/kanz/tools/replay"
 )
 
 // WindowFor returns the read range for one topic.

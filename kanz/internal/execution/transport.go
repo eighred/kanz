@@ -4,7 +4,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/kanz-eng/kanz/internal/exchange/netdial"
+	"github.com/eighred/kanz/internal/exchange/netdial"
 )
 
 // The DNS-bypass dialer moved to internal/exchange/netdial when market-ingest's

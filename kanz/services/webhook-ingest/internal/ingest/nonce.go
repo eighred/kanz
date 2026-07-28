@@ -5,7 +5,7 @@ import (
 	"errors"
 	"time"
 
-	"github.com/kanz-eng/kanz/pkg/bus"
+	"github.com/eighred/kanz/pkg/bus"
 )
 
 // ErrNonceStoreUnavailable: the replay defence could not be consulted.

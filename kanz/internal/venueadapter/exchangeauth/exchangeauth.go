@@ -19,7 +19,7 @@ import (
 	"sort"
 	"time"
 
-	"github.com/kanz-eng/kanz/internal/execution"
+	"github.com/eighred/kanz/internal/execution"
 )
 
 // Credential is a candidate exchange API key set. It is an input only: no

@@ -24,7 +24,7 @@ import (
 	envelopepb "github.com/kanz-eng/kanz-schemas-go/envelope/v1"
 	marketpb "github.com/kanz-eng/kanz-schemas-go/market/v1"
 
-	"github.com/kanz-eng/kanz/internal/marketdata/store"
+	"github.com/eighred/kanz/internal/marketdata/store"
 )
 
 // Writer is the store boundary the Ingestor depends on — just the write side,

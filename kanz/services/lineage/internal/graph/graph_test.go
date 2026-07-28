@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/kanz-eng/kanz/services/lineage/internal/graph"
+	"github.com/eighred/kanz/services/lineage/internal/graph"
 )
 
 func ds(ns, name string) graph.DatasetID { return graph.DatasetID{Namespace: ns, Name: name} }

@@ -3,7 +3,7 @@ package agent
 import (
 	"strings"
 
-	"github.com/kanz-eng/kanz/services/copilot/internal/retrieval"
+	"github.com/eighred/kanz/services/copilot/internal/retrieval"
 )
 
 // Guardrails (COPILOT-01d): two checks bracketing the model.

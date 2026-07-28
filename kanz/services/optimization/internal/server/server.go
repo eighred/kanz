@@ -14,8 +14,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/kanz-eng/kanz/internal/optimization"
-	"github.com/kanz-eng/kanz/services/optimization/internal/bridge"
+	"github.com/eighred/kanz/internal/optimization"
+	"github.com/eighred/kanz/services/optimization/internal/bridge"
 )
 
 // maxRequestBytes bounds a /v1 request body. A dense covariance for a several-

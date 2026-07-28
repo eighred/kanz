@@ -1,8 +1,8 @@
 package alpha
 
 import (
-	"github.com/kanz-eng/kanz/internal/marketedge/depth"
-	"github.com/kanz-eng/kanz/internal/marketedge/trades"
+	"github.com/eighred/kanz/internal/marketedge/depth"
+	"github.com/eighred/kanz/internal/marketedge/trades"
 )
 
 // OKXFeed builds the live OKX v5 feed for one instrument: the public `books` L2

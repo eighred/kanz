@@ -26,7 +26,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/kanz-eng/kanz/pkg/bus"
+	"github.com/eighred/kanz/pkg/bus"
 )
 
 // fakeRedis is one in-memory server standing in for the shared Redis: it

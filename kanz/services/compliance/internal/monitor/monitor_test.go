@@ -13,8 +13,8 @@ import (
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
-	comp "github.com/kanz-eng/kanz/internal/compliance"
-	"github.com/kanz-eng/kanz/pkg/bus"
+	comp "github.com/eighred/kanz/internal/compliance"
+	"github.com/eighred/kanz/pkg/bus"
 )
 
 var t0 = time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)

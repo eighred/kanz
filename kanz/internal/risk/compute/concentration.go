@@ -3,8 +3,8 @@ package compute
 import (
 	"math"
 
-	v1 "github.com/kanz-eng/kanz/internal/risk/api/v1"
-	"github.com/kanz-eng/kanz/internal/risk/domain"
+	v1 "github.com/eighred/kanz/internal/risk/api/v1"
+	"github.com/eighred/kanz/internal/risk/domain"
 )
 
 // hhiExponent is the Decimal scale of the emitted HHI: a dimensionless ratio in

@@ -20,7 +20,7 @@ import (
 
 	envelopepb "github.com/kanz-eng/kanz-schemas-go/envelope/v1"
 
-	"github.com/kanz-eng/kanz/internal/lake/dataset"
+	"github.com/eighred/kanz/internal/lake/dataset"
 )
 
 // Decision is one strategy output. It is the unit of the reproduction contract:

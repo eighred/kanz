@@ -16,10 +16,10 @@ import (
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
-	"github.com/kanz-eng/kanz/pkg/bus"
-	"github.com/kanz-eng/kanz/services/lake-sink/internal/cdc"
-	"github.com/kanz-eng/kanz/services/lake-sink/internal/decode"
-	"github.com/kanz-eng/kanz/services/lake-sink/internal/sink"
+	"github.com/eighred/kanz/pkg/bus"
+	"github.com/eighred/kanz/services/lake-sink/internal/cdc"
+	"github.com/eighred/kanz/services/lake-sink/internal/decode"
+	"github.com/eighred/kanz/services/lake-sink/internal/sink"
 )
 
 // TestCrash_UnflushedRowsAreLostAndOffsetsAreCommitted is the DATA-M5 crash

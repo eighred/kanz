@@ -15,10 +15,10 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/kanz-eng/kanz/pkg/auth"
-	"github.com/kanz-eng/kanz/services/copilot/internal/governed"
-	"github.com/kanz-eng/kanz/services/copilot/internal/llm"
-	"github.com/kanz-eng/kanz/services/copilot/internal/retrieval"
+	"github.com/eighred/kanz/pkg/auth"
+	"github.com/eighred/kanz/services/copilot/internal/governed"
+	"github.com/eighred/kanz/services/copilot/internal/llm"
+	"github.com/eighred/kanz/services/copilot/internal/retrieval"
 )
 
 // Result is a tool invocation's outcome: the text the model reads, the citations

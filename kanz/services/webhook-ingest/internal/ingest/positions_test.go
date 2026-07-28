@@ -25,7 +25,7 @@ import (
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
-	"github.com/kanz-eng/kanz/internal/dec"
+	"github.com/eighred/kanz/internal/dec"
 )
 
 // feed folds one per-venue PositionState FACT into the cache, as the bus would.

@@ -8,10 +8,10 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/kanz-eng/kanz/internal/risk/ingest"
-	"github.com/kanz-eng/kanz/internal/risk/state"
-	"github.com/kanz-eng/kanz/internal/risk/state/persist"
-	"github.com/kanz-eng/kanz/tools/replay"
+	"github.com/eighred/kanz/internal/risk/ingest"
+	"github.com/eighred/kanz/internal/risk/state"
+	"github.com/eighred/kanz/internal/risk/state/persist"
+	"github.com/eighred/kanz/tools/replay"
 )
 
 // Bootstrap is the restart-recovery path (PERS-01d): load the latest durable

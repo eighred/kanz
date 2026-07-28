@@ -21,8 +21,8 @@ import (
 	"net/url"
 	"strings"
 
-	"github.com/kanz-eng/kanz/services/api-gateway/internal/authz"
-	"github.com/kanz-eng/kanz/services/api-gateway/internal/middleware"
+	"github.com/eighred/kanz/services/api-gateway/internal/authz"
+	"github.com/eighred/kanz/services/api-gateway/internal/middleware"
 )
 
 // Service identifies the upstream a route targets. The Backend resolves it to a

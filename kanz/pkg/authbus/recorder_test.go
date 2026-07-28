@@ -12,9 +12,9 @@ import (
 	envelopepb "github.com/kanz-eng/kanz-schemas-go/envelope/v1"
 	observationpb "github.com/kanz-eng/kanz-schemas-go/observation/v1"
 
-	"github.com/kanz-eng/kanz/pkg/auth"
-	"github.com/kanz-eng/kanz/pkg/authbus"
-	"github.com/kanz-eng/kanz/pkg/bus"
+	"github.com/eighred/kanz/pkg/auth"
+	"github.com/eighred/kanz/pkg/authbus"
+	"github.com/eighred/kanz/pkg/bus"
 )
 
 var recClock = time.Date(2026, 1, 2, 10, 0, 0, 0, time.UTC)

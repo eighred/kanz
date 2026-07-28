@@ -16,7 +16,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/kanz-eng/kanz/internal/audit/signer"
+	"github.com/eighred/kanz/internal/audit/signer"
 )
 
 const migrationDir = "../../../services/regulatory/migrations"

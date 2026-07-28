@@ -11,8 +11,8 @@ import (
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
-	"github.com/kanz-eng/kanz/internal/audit/chain"
-	"github.com/kanz-eng/kanz/pkg/auth"
+	"github.com/eighred/kanz/internal/audit/chain"
+	"github.com/eighred/kanz/pkg/auth"
 )
 
 func env(id, etype, domain string, class envelopepb.EventClass) *envelopepb.Envelope {

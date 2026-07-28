@@ -7,7 +7,7 @@ import (
 
 	commonpb "github.com/kanz-eng/kanz-schemas-go/common/v1"
 
-	decutil "github.com/kanz-eng/kanz/internal/dec"
+	decutil "github.com/eighred/kanz/internal/dec"
 )
 
 // TestMulDecimal_ExactInTheNormalRange pins that every product which fits an

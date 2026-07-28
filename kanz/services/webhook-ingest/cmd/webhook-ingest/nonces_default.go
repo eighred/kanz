@@ -7,8 +7,8 @@ import (
 	"io"
 	"log/slog"
 
-	"github.com/kanz-eng/kanz/services/webhook-ingest/internal/config"
-	"github.com/kanz-eng/kanz/services/webhook-ingest/internal/ingest"
+	"github.com/eighred/kanz/services/webhook-ingest/internal/config"
+	"github.com/eighred/kanz/services/webhook-ingest/internal/ingest"
 )
 
 // newNonceStore is the DEFAULT (vendor-free) build: there is no Redis client linked

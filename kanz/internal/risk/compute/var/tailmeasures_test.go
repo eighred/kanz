@@ -5,9 +5,9 @@ import (
 	"math"
 	"testing"
 
-	"github.com/kanz-eng/kanz/internal/risk/compute"
-	varmodel "github.com/kanz-eng/kanz/internal/risk/compute/var"
-	"github.com/kanz-eng/kanz/internal/risk/domain"
+	"github.com/eighred/kanz/internal/risk/compute"
+	varmodel "github.com/eighred/kanz/internal/risk/compute/var"
+	"github.com/eighred/kanz/internal/risk/domain"
 )
 
 // $1000 under returns {-10,-5,0,+5,+10}% ⇒ P&L {-100,-50,0,50,100}. n=5, α=0.99,

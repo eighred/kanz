@@ -11,8 +11,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/kanz-eng/kanz/services/datamaster/internal/master"
-	"github.com/kanz-eng/kanz/services/datamaster/internal/pricing"
+	"github.com/eighred/kanz/services/datamaster/internal/master"
+	"github.com/eighred/kanz/services/datamaster/internal/pricing"
 )
 
 // GoldenStore persists resolved golden records — replace-on-write on the

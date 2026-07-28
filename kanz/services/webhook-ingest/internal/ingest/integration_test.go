@@ -29,10 +29,10 @@ import (
 	orderpb "github.com/kanz-eng/kanz-schemas-go/order/v1"
 	"google.golang.org/protobuf/proto"
 
-	"github.com/kanz-eng/kanz/internal/signal/translate"
+	"github.com/eighred/kanz/internal/signal/translate"
 
-	"github.com/kanz-eng/kanz/internal/dec"
-	"github.com/kanz-eng/kanz/pkg/bus"
+	"github.com/eighred/kanz/internal/dec"
+	"github.com/eighred/kanz/pkg/bus"
 )
 
 func TestIntegration_LoopOverNATS(t *testing.T) {

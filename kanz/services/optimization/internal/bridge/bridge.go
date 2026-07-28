@@ -17,8 +17,8 @@ import (
 	commonpb "github.com/kanz-eng/kanz-schemas-go/common/v1"
 	orderpb "github.com/kanz-eng/kanz-schemas-go/order/v1"
 
-	"github.com/kanz-eng/kanz/internal/compliance"
-	"github.com/kanz-eng/kanz/internal/optimization"
+	"github.com/eighred/kanz/internal/compliance"
+	"github.com/eighred/kanz/internal/optimization"
 )
 
 // Gate is the COMP-01 pre-trade check the bridge re-runs per order.

@@ -11,7 +11,7 @@ import (
 
 	inferencepb "github.com/kanz-eng/kanz-schemas-go/inference/v1"
 
-	"github.com/kanz-eng/kanz/internal/prediction"
+	"github.com/eighred/kanz/internal/prediction"
 )
 
 // fakeStub satisfies inferencepb.InferenceServiceClient. Tests

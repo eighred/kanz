@@ -9,8 +9,8 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	envelopepb "github.com/kanz-eng/kanz-schemas-go/envelope/v1"
 
-	"github.com/kanz-eng/kanz/pkg/bus"
-	"github.com/kanz-eng/kanz/pkg/transport"
+	"github.com/eighred/kanz/pkg/bus"
+	"github.com/eighred/kanz/pkg/transport"
 )
 
 // lifecycleSubject and positionSubject are the two subjects this monitor

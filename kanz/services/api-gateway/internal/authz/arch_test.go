@@ -15,10 +15,10 @@ import (
 	"net/http"
 	"testing"
 
-	"github.com/kanz-eng/kanz/services/api-gateway/internal/authz"
-	"github.com/kanz-eng/kanz/services/api-gateway/internal/gateway"
-	"github.com/kanz-eng/kanz/services/api-gateway/internal/orders"
-	"github.com/kanz-eng/kanz/services/api-gateway/internal/proxy"
+	"github.com/eighred/kanz/services/api-gateway/internal/authz"
+	"github.com/eighred/kanz/services/api-gateway/internal/gateway"
+	"github.com/eighred/kanz/services/api-gateway/internal/orders"
+	"github.com/eighred/kanz/services/api-gateway/internal/proxy"
 )
 
 // TestEveryRouteOnTheCapitalPathRequiresTRADE.

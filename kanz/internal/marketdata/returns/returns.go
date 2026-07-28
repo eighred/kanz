@@ -30,7 +30,7 @@ import (
 
 	commonpb "github.com/kanz-eng/kanz-schemas-go/common/v1"
 
-	"github.com/kanz-eng/kanz/internal/marketdata/store"
+	"github.com/eighred/kanz/internal/marketdata/store"
 )
 
 // ReturnMethod is the return-computation convention. Mirrors

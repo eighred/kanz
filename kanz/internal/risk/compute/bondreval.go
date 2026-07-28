@@ -6,8 +6,8 @@ import (
 
 	commonpb "github.com/kanz-eng/kanz-schemas-go/common/v1"
 
-	"github.com/kanz-eng/kanz/internal/risk/pricing"
-	"github.com/kanz-eng/kanz/internal/risk/pricing/curve"
+	"github.com/eighred/kanz/internal/risk/pricing"
+	"github.com/eighred/kanz/internal/risk/pricing/curve"
 )
 
 // Full-revaluation of bond positions under a yield-curve shift (FI-01e) — the

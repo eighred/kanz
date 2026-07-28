@@ -11,9 +11,9 @@ import (
 
 	"github.com/redis/go-redis/v9"
 
-	"github.com/kanz-eng/kanz/pkg/redisadapter"
-	"github.com/kanz-eng/kanz/services/webhook-ingest/internal/config"
-	"github.com/kanz-eng/kanz/services/webhook-ingest/internal/ingest"
+	"github.com/eighred/kanz/pkg/redisadapter"
+	"github.com/eighred/kanz/services/webhook-ingest/internal/config"
+	"github.com/eighred/kanz/services/webhook-ingest/internal/ingest"
 )
 
 // newNonceStore is the `redis` build: the nonce cache becomes CROSS-POD (EXEC-M17), so a

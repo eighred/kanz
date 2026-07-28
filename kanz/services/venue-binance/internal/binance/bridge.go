@@ -15,7 +15,7 @@ package binance
 // Aliases, not wrappers: these are the same types, so a *bus.Producer still
 // satisfies Publisher and the FACTs this connector publishes are the same FACTs.
 
-import "github.com/kanz-eng/kanz/internal/execution"
+import "github.com/eighred/kanz/internal/execution"
 
 // Worker seams — supplied by the venue-binance composition root.
 type (

@@ -6,7 +6,7 @@ import (
 
 	orderpb "github.com/kanz-eng/kanz-schemas-go/order/v1"
 
-	"github.com/kanz-eng/kanz/internal/dec"
+	"github.com/eighred/kanz/internal/dec"
 )
 
 // FromFill builds the TRADE journal entry for an OMS-01 Fill FACT — the seam

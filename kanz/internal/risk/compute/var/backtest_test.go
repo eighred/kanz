@@ -9,10 +9,10 @@ import (
 
 	commonpb "github.com/kanz-eng/kanz-schemas-go/common/v1"
 
-	"github.com/kanz-eng/kanz/internal/marketdata/returns"
-	"github.com/kanz-eng/kanz/internal/marketdata/store"
-	varmodel "github.com/kanz-eng/kanz/internal/risk/compute/var"
-	"github.com/kanz-eng/kanz/internal/risk/domain"
+	"github.com/eighred/kanz/internal/marketdata/returns"
+	"github.com/eighred/kanz/internal/marketdata/store"
+	varmodel "github.com/eighred/kanz/internal/risk/compute/var"
+	"github.com/eighred/kanz/internal/risk/domain"
 )
 
 // MODEL-01i — the verification subtask that closes the MODEL-01 epic. Three

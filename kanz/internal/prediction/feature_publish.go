@@ -33,7 +33,7 @@ import (
 	envelopepb "github.com/kanz-eng/kanz-schemas-go/envelope/v1"
 	inferencepb "github.com/kanz-eng/kanz-schemas-go/inference/v1"
 
-	"github.com/kanz-eng/kanz/pkg/bus"
+	"github.com/eighred/kanz/pkg/bus"
 )
 
 // Event-type + schema-ref constants for the feature-published

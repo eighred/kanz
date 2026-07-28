@@ -15,9 +15,9 @@ import (
 	referencepb "github.com/kanz-eng/kanz-schemas-go/reference/v1"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
-	"github.com/kanz-eng/kanz/internal/dec"
-	"github.com/kanz-eng/kanz/services/datamaster/internal/master"
-	"github.com/kanz-eng/kanz/services/datamaster/internal/pricing"
+	"github.com/eighred/kanz/internal/dec"
+	"github.com/eighred/kanz/services/datamaster/internal/master"
+	"github.com/eighred/kanz/services/datamaster/internal/pricing"
 )
 
 // VendorFeed is a pluggable vendor data source. The SimFeed default serves canned

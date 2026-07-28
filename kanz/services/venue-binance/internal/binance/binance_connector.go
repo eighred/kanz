@@ -9,8 +9,8 @@ import (
 	marketpb "github.com/kanz-eng/kanz-schemas-go/market/v1"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
-	"github.com/kanz-eng/kanz/internal/venueadapter/accountproof"
-	"github.com/kanz-eng/kanz/pkg/bus"
+	"github.com/eighred/kanz/internal/venueadapter/accountproof"
+	"github.com/eighred/kanz/pkg/bus"
 )
 
 // BinanceConnector bundles the venue with its background workers (M3.6): the

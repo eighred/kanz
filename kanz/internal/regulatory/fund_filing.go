@@ -4,7 +4,7 @@ import (
 	"math/big"
 
 	"fmt"
-	"github.com/kanz-eng/kanz/internal/dec"
+	"github.com/eighred/kanz/internal/dec"
 	"time"
 )
 

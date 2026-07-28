@@ -11,7 +11,7 @@ import (
 	"math/big"
 	"sort"
 
-	"github.com/kanz-eng/kanz/services/accounting/internal/ledger"
+	"github.com/eighred/kanz/services/accounting/internal/ledger"
 )
 
 // BreakKind classifies a reconciliation break.

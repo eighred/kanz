@@ -13,7 +13,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/kanz-eng/kanz/internal/platform/subject"
+	"github.com/eighred/kanz/internal/platform/subject"
 )
 
 func TestTokenNeutralizesSubjectSyntax(t *testing.T) {

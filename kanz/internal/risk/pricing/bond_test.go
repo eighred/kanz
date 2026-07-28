@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/kanz-eng/kanz/internal/risk/pricing/curve"
+	"github.com/eighred/kanz/internal/risk/pricing/curve"
 )
 
 func bondApprox(t *testing.T, name string, got, want, tol float64) {

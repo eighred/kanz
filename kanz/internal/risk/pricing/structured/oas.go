@@ -3,7 +3,7 @@ package structured
 import (
 	"math"
 
-	"github.com/kanz-eng/kanz/internal/risk/pricing/curve"
+	"github.com/eighred/kanz/internal/risk/pricing/curve"
 )
 
 // STRUCT-01d — OAS and rate risk. PriceTranche discounts a tranche's projected
