@@ -69,8 +69,13 @@ platform account.
 
 ## Deploy
 
+`tenancy.yaml` must be applied **before** `nats.yaml`: it declares the
+`nats-tenants` ConfigMap that `nats.yaml` projects into `/etc/nats`. Apply
+`nats.yaml` first and every NATS pod sits in `ContainerCreating` on
+`configmap "nats-tenants" not found`.
+
 ```sh
-kubectl apply -f namespace.yaml -f nats.yaml
+kubectl apply -f namespace.yaml -f tenancy.yaml -f nats.yaml
 kubectl -n kanz-messaging rollout status statefulset/nats   # wait for ready
 kubectl apply -f bootstrap-job.yaml
 kubectl -n kanz-messaging wait --for=condition=complete job/nats-bootstrap
@@ -86,3 +91,26 @@ NATS_URL=nats://localhost:4222 ./smoke-test.sh
 Expects the `nats` CLI locally (or run inside `natsio/nats-box`). Publishes
 under `market.smoketest.>`, asserts live delivery + JetStream persistence, then
 purges the test subject.
+
+### Reading stream contents on an mTLS-only cluster
+
+A bare `kubectl run nats-box` cannot connect: the pod carries no SPIFFE volume
+and no identity `verify_and_map` can map, so it is refused at the handshake.
+`bootstrap-job.yaml` already carries the SPIFFE mount, ServiceAccount and
+NetworkPolicy an ad-hoc diagnostic pod needs — reuse its shape and swap only
+the container command:
+
+```sh
+python3 - <<'PY' > /tmp/nats-diag.yaml
+import yaml
+docs=[d for d in yaml.safe_load_all(open("bootstrap-job.yaml")) if d]
+job=[d for d in docs if d.get("kind")=="Job"][0]
+job["metadata"]["name"]="nats-diag"
+job["spec"]["template"]["spec"]["containers"][0]["command"]=["sh","-c",
+  "nats --server $NATS_URL stream subjects EXECUTION"]
+print(yaml.safe_dump(job))
+PY
+kubectl delete job -n kanz-messaging nats-diag --ignore-not-found
+kubectl apply -f /tmp/nats-diag.yaml
+kubectl -n kanz-messaging logs job/nats-diag -c bootstrap
+```
