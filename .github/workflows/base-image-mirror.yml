@@ -17,13 +17,21 @@
 name: base-image-mirror
 
 on:
-  # MANUAL BY DEFAULT. Mirroring is not something a PR should trigger — it
-  # publishes to a registry namespace and there is no reason for it to run on
-  # code changes. The scheduled refresh that keeps the mirror current with
-  # upstream patch releases is issue #56 and adds a `schedule:` trigger here;
-  # it is deliberately not bundled in, because "copy these images once" and
-  # "keep copying them forever" have different failure modes and want separate
-  # review.
+  # A MIRROR WITHOUT A REFRESH PATH SILENTLY AGES, and that is worse than not
+  # mirroring at all. `golang:1.26.5` is a MUTABLE tag: upstream rebuilds it
+  # with OS security patches under the same name. Copy it once and the estate
+  # stops receiving those patches while every Dockerfile still points at the
+  # tag, believing it current — so the mirror converts a supply-chain
+  # dependency into a supply-chain freeze, and nothing anywhere says so.
+  #
+  # Weekly rather than daily. The upstream cadence for base-image patch
+  # rebuilds is roughly that, and a daily run that almost always finds nothing
+  # trains its reader to ignore it — which matters here because the ONE thing
+  # this workflow needs someone to notice is the run where a digest moved.
+  schedule:
+    - cron: '17 4 * * 1'   # Mondays 04:17 UTC; off the hour to avoid the stampede
+  # Manual trigger for the first population and for an out-of-band refresh
+  # (a CVE that cannot wait for Monday).
   workflow_dispatch:
     inputs:
       dry_run:
@@ -97,6 +105,26 @@ jobs:
           echo "digest=$digest" >> "$GITHUB_OUTPUT"
           echo "::notice title=Mirroring::${{ matrix.source }} @ $digest -> ${{ matrix.target }}"
 
+      # WHAT THE MIRROR SERVES RIGHT NOW, read BEFORE the copy overwrites it.
+      #
+      # This is the whole reason the refresh is not just a cron. A scheduled
+      # copy silently changes the bytes behind `FROM ghcr.io/eighred/base/...`
+      # for every build in the estate — which is exactly what you want for a
+      # security patch, and exactly what you do not want to happen unannounced.
+      # Production manifests are digest-pinned (test/arch enforces it); base
+      # images are tag-pinned, so this is the one place where what a build
+      # compiles against can move without a commit.
+      #
+      # An absent tag is not an error here: on the first population there is
+      # nothing to compare against, so `|| true` and an empty value mean "new",
+      # not "broken".
+      - name: Read what the mirror currently serves
+        id: before
+        run: |
+          set -uo pipefail
+          current="$(crane digest '${{ matrix.target }}' 2>/dev/null || true)"
+          echo "digest=$current" >> "$GITHUB_OUTPUT"
+
       - name: Copy to the mirror
         if: ${{ !inputs.dry_run }}
         run: |
@@ -126,3 +154,33 @@ jobs:
             exit 1
           fi
           echo "::notice title=Verified::${{ matrix.target }} == $want"
+
+      # SAY WHEN THE BASE MOVED. A refresh that changes what every build
+      # compiles against, and reports the same "success" as one that changed
+      # nothing, is a silent supply-chain event. This is the line someone
+      # should be able to find after the fact when a build starts behaving
+      # differently and no commit explains it.
+      #
+      # It writes to the job summary rather than only the log, because a
+      # scheduled run nobody opened is precisely the case this exists for.
+      - name: Report whether the base image moved
+        if: ${{ !inputs.dry_run }}
+        run: |
+          set -euo pipefail
+          before='${{ steps.before.outputs.digest }}'
+          after='${{ steps.resolve.outputs.digest }}'
+          if [ -z "$before" ]; then
+            echo "::notice title=New in mirror::${{ matrix.target }} first published at $after"
+            echo "- 🆕 \`${{ matrix.target }}\` — first published, \`$after\`" >> "$GITHUB_STEP_SUMMARY"
+          elif [ "$before" != "$after" ]; then
+            echo "::warning title=Base image MOVED::${{ matrix.target }} $before -> $after. Every build using this base now compiles against different bytes."
+            {
+              echo "- ⚠️ **\`${{ matrix.target }}\` MOVED**"
+              echo "    - was: \`$before\`"
+              echo "    - now: \`$after\`"
+              echo "    - Upstream \`${{ matrix.source }}\` was rebuilt. Every image built from this base now differs, with no commit explaining it — which is the point of mirroring, and worth knowing on the day it happens rather than during an incident."
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "::notice title=Unchanged::${{ matrix.target }} still $after"
+            echo "- ✅ \`${{ matrix.target }}\` unchanged (\`$after\`)" >> "$GITHUB_STEP_SUMMARY"
+          fi
