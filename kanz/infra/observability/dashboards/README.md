@@ -1,27 +1,46 @@
-# Data-observability dashboards
+# Data-observability dashboards — REMOVED, and the metric contract they defined
 
-Grafana dashboards for the data-integrity layer (`kanz/internal/integrity`,
-DATA-01..07). Three views, one per integrity dimension:
+There are no dashboards in this directory. `freshness.json`, `completeness.json`
+and `drift.json` were deleted (issue #123). The metric contract below is kept,
+because it is the specification anyone re-instrumenting this layer needs and it
+exists nowhere else.
 
-| File | Dashboard | Covers |
-|---|---|---|
-| `freshness.json` | Data Freshness | staleness lag + stale-frontier age (DATA-02) |
-| `completeness.json` | Data Completeness | sequence gaps (DATA-01) + NATS↔Kafka reconciliation (DATA-05) |
-| `drift.json` | Input Drift | distribution-drift scores vs threshold (DATA-04) |
+## What happened, and the part that is easy to get wrong
 
-All three query a Prometheus datasource (selected via the `datasource`
-dashboard variable) and a free-text `subject` regex variable for filtering to
-one stream.
+The obvious story is that `internal/integrity` was deleted in DATA-M4 and these
+dashboards were left behind. That is true but incomplete, and the fuller version
+matters more.
 
-## Metric contract
+**These dashboards never rendered anything.** The previous version of this file
+said so plainly: the detectors were *"pure in-memory classifiers today"*, and
+exposing these gauges and counters — *"a thin Prometheus exporter wrapping the
+detectors, or derived by a consumer of the DATA-07 `DataQualityEvent` stream"* —
+was *"wired separately"*. Defining the names first was a deliberate choice, the
+*"detection-lands-before-wiring discipline"* the layer followed.
 
-The dashboards depend on the metric names below. **This is the contract the
-integrity layer's instrumentation must satisfy** — the detectors (DATA-01..05)
-are pure in-memory classifiers today; exposing these gauges/counters (a thin
-Prometheus exporter wrapping the detectors, or derived by a consumer of the
-DATA-07 `DataQualityEvent` stream) is wired separately. Defining the names here
-first lets the dashboards and the DATA-09 alert rules target a stable surface,
-the same detection-lands-before-wiring discipline the rest of the layer follows.
+The exporter never landed. Then the detectors it would have wrapped were deleted
+too. So there was never a moment when a single one of these panels had data
+behind it, and every one of the nine metrics below is absent from the Go source
+today — verified by matching the way `TestEveryObservabilityMetricExistsInGo`
+matches, against quoted string literals rather than any mention.
+
+That is why they were deleted rather than kept as a target: a dashboard is not a
+specification. It is a rendering of a specification, and a rendering that has
+never once rendered is a liability — a human opens it during an incident and
+reads empty panels as *quiet*, not as *this was never connected*. The
+specification itself is worth keeping, so it is kept here, as text, where it
+cannot be mistaken for a working view.
+
+There is also nothing to render into: no Prometheus exists in this estate at all
+(issue #61). Nothing scrapes, nothing evaluates.
+
+## The metric contract (specification, NOT current state)
+
+**None of these are emitted today.** This table is what an exporter must satisfy
+for the DATA-01..07 layer to become observable. Names, types and labels are
+preserved exactly as the layer defined them, so a future implementation lands on
+the surface the alert rules and SLOs were written against rather than inventing a
+second vocabulary.
 
 | Metric | Type | Labels | Meaning |
 |---|---|---|---|
@@ -39,22 +58,42 @@ Label values reuse the detector vocabulary: `subject` = the upstream stream
 (`market.equity.trade`), `kind` ∈ {`gap`,`staleness`,`drift`}, `severity` ∈
 {`warning`,`critical`}, `transport`/`seen_on`/`missing_on` ∈ {`nats`,`kafka`}.
 
-## Provision
+Two design decisions in that table are load-bearing and should survive any
+rewrite:
 
-The JSON models are Grafana provisioning artifacts. Mount this directory into
-Grafana via a dashboard provider:
+- **`kanz_data_drift_threshold` is exported alongside `kanz_data_drift_score`.**
+  The deleted drift rules compared the two with `> on (feature, metric)`, so the
+  alarm point tracked each detector's own configured threshold and no threshold
+  was ever duplicated between detector and rule. Re-instrumenting without the
+  threshold gauge forces that duplication back.
+- **The three dimensions are separate metrics, not one metric with a `kind`
+  label** — except `kanz_data_quality_events_total`, which is deliberately the
+  cross-cutting count. Freshness, completeness and drift have different types
+  (gauge vs counter vs histogram) and different label sets; collapsing them
+  loses that.
 
-```yaml
-# /etc/grafana/provisioning/dashboards/kanz-data.yaml
-apiVersion: 1
-providers:
-  - name: kanz-data-integrity
-    folder: Data Integrity
-    type: file
-    options:
-      path: /var/lib/grafana/dashboards/kanz-data
-```
+## What still exists
 
-…and ship the three JSON files to that `path` (ConfigMap mount in-cluster, or
-the Grafana Helm chart's `dashboards` values). They are also importable by hand
-via **Dashboards → Import**.
+Deleting these removed a rendering, not the signal.
+`observation.v1.DataQualityEvent` still flows on the bus and `services/audit`
+still classifies and records it (`KindDataQuality`, and the `data-quality` audit
+report template). `services/autopilot` would remediate it, but is not deployable
+— see issue #124.
+
+So the recording path is live, the metrics path has no producer, and the
+remediation path has no deployment.
+
+## Rebuilding this
+
+Order matters, and it is the order that was inverted to produce this state:
+
+1. Build the exporter first — most naturally a consumer of the
+   `DataQualityEvent` stream that already exists — emitting the contract above.
+2. Deploy a Prometheus that scrapes it (#61).
+3. Then write dashboards and alert rules against series that exist, and the SLO
+   in [`../slo/`](../slo/README.md) against the staleness gauge that exists.
+
+`TestEveryObservabilityMetricExistsInGo`
+(`kanz/test/arch/observability_metrics_test.go`) enforces step 3 against steps 1
+and 2: a dashboard or rule naming a metric the Go source does not emit fails the
+build. It is what makes re-adding these safe.
