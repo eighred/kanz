@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/kanz-eng/kanz/pkg/secret"
 	"github.com/kanz-eng/kanz/services/oms/internal/order"
 )
 
@@ -152,6 +153,15 @@ func (Config) FillSubjects() []string {
 }
 
 func Load() (Config, error) {
+	// Resolved before the literal so a declared-but-unreadable secret mount
+	// stops Load HERE. The local helper this replaces answered that case with
+	// the plaintext env var and then with "", so a failed Vault mount and an
+	// unconfigured DSN produced the identical clean start. See pkg/secret.
+	databaseURL, err := secret.Read("OMS_DATABASE_URL")
+	if err != nil {
+		return Config{}, err
+	}
+
 	cfg := Config{
 		Listen:                 envOr("OMS_LISTEN", ":8090"),
 		LogLevel:               parseLevel(envOr("OMS_LOG_LEVEL", "info")),
@@ -159,7 +169,7 @@ func Load() (Config, error) {
 		OTLPEndpoint:           os.Getenv("OMS_OTLP_ENDPOINT"),
 		NATSURL:                os.Getenv("OMS_NATS_URL"),
 		ConsumerGroup:          envOr("OMS_CONSUMER_GROUP", "oms"),
-		DatabaseURL:            secret("OMS_DATABASE_URL"),
+		DatabaseURL:            databaseURL,
 		Tenant:                 envOr("OMS_TENANT", "__system__"),
 		RequireMandate:         os.Getenv("OMS_REQUIRE_MANDATE") == "true",
 		VenueAccounts:          os.Getenv("OMS_VENUE_ACCOUNTS"),
@@ -187,18 +197,6 @@ func Load() (Config, error) {
 	cfg.PriceMaxAge = maxAge
 
 	return cfg, nil
-}
-
-// secret resolves a sensitive value, preferring a CSI/Vault file mount
-// (SEC-01d: the path in <k>_FILE) over a plaintext <k> env var. The DSN carries
-// database credentials and must never ride in a pod's env block.
-func secret(k string) string {
-	if p := os.Getenv(k + "_FILE"); p != "" {
-		if b, err := os.ReadFile(p); err == nil {
-			return strings.TrimSpace(string(b))
-		}
-	}
-	return os.Getenv(k)
 }
 
 func envOr(k, def string) string {

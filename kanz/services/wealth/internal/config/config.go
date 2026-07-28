@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/kanz-eng/kanz/internal/wealth"
+	"github.com/kanz-eng/kanz/pkg/secret"
 )
 
 // Config is the wealth (advisory) service runtime configuration, sourced from the
@@ -61,11 +62,23 @@ func Load() (Config, error) {
 	if len(subjects) == 0 {
 		subjects = []string{wealth.SubjectHouseholdAll}
 	}
+
+	// The DSN carries database credentials and rides a CSI/Vault file mount
+	// (SEC-01d), never a pod's env block. Resolved before the literal so an
+	// unreadable mount stops Load HERE: nothing downstream would have caught it,
+	// because "" is a legal value that selects the in-memory book — a failed mount
+	// would have started a wealth service that serves households correctly until
+	// the first restart drops every one of them. See pkg/secret.
+	databaseURL, err := secret.Read("WEALTH_DATABASE_URL")
+	if err != nil {
+		return Config{}, err
+	}
+
 	return Config{
 		Listen:        envOr("WEALTH_LISTEN", ":8080"),
 		LogLevel:      parseLevel(os.Getenv("WEALTH_LOG_LEVEL")),
 		OTLPEndpoint:  os.Getenv("WEALTH_OTLP_ENDPOINT"),
-		DatabaseURL:   secret("WEALTH_DATABASE_URL"),
+		DatabaseURL:   databaseURL,
 		Tenant:        envOr("WEALTH_TENANT", "__system__"),
 		NATSURL:       os.Getenv("WEALTH_NATS_URL"),
 		Source:        envOr("WEALTH_SOURCE", "wealth"),
@@ -84,19 +97,6 @@ func splitList(s string) []string {
 		}
 	}
 	return out
-}
-
-// secret resolves a sensitive value, preferring a CSI/Vault file mount (SEC-01d:
-// the path in <k>_FILE) over a plaintext <k> env var — the convention the other
-// service configs use. A DSN carries database credentials and must never ride in
-// a pod's env block.
-func secret(k string) string {
-	if p := os.Getenv(k + "_FILE"); p != "" {
-		if b, err := os.ReadFile(p); err == nil {
-			return strings.TrimSpace(string(b))
-		}
-	}
-	return os.Getenv(k)
 }
 
 func envOr(key, def string) string {

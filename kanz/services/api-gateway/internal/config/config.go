@@ -6,6 +6,8 @@ import (
 	"os"
 	"strconv"
 	"strings"
+
+	"github.com/kanz-eng/kanz/pkg/secret"
 )
 
 // Config is the api-gateway runtime configuration, sourced from the
@@ -103,6 +105,28 @@ type Config struct {
 }
 
 func Load() (Config, error) {
+	// Both are resolved before the literal so a DECLARED-but-unreadable secret
+	// mount stops Load here, rather than resolving to "". The local helper this
+	// replaces answered a failed mount with the plaintext env var and then with
+	// "", and "" means something different for each of these:
+	//
+	//   - JWTSecret "" is caught by validateAuth, but reported as "no
+	//     authentication configured" — a broken Vault mount misdescribed as a
+	//     deployment that never set one.
+	//   - SigningSecret "" is caught by NOTHING: empty means request signing is
+	//     not enforced, so a failed mount silently disarms it and the gateway
+	//     reports a clean start.
+	//
+	// See pkg/secret.
+	jwtSecret, err := secret.Read("API_GATEWAY_JWT_SECRET")
+	if err != nil {
+		return Config{}, err
+	}
+	signingSecret, err := secret.Read("API_GATEWAY_SIGNING_SECRET")
+	if err != nil {
+		return Config{}, err
+	}
+
 	cfg := Config{
 		Listen:          envOr("API_GATEWAY_LISTEN", ":8080"),
 		LogLevel:        parseLevel(envOr("API_GATEWAY_LOG_LEVEL", "info")),
@@ -115,7 +139,7 @@ func Load() (Config, error) {
 		OIDCJWKSURI:     os.Getenv("API_GATEWAY_OIDC_JWKS_URI"),
 		OIDCTenantClaim: os.Getenv("API_GATEWAY_OIDC_TENANT_CLAIM"),
 		OIDCRolesClaim:  os.Getenv("API_GATEWAY_OIDC_ROLES_CLAIM"),
-		JWTSecret:       secret("API_GATEWAY_JWT_SECRET"),
+		JWTSecret:       jwtSecret,
 		RequiredRole:    os.Getenv("API_GATEWAY_REQUIRED_ROLE"),
 		TradeRole:       os.Getenv("API_GATEWAY_TRADE_ROLE"),
 		OperatorAddr:    os.Getenv("API_GATEWAY_OPERATOR_ADDR"),
@@ -124,7 +148,7 @@ func Load() (Config, error) {
 		RateLimitBurst:  parseInt(os.Getenv("API_GATEWAY_RATE_LIMIT_BURST")),
 		MaxInFlight:     parseInt(os.Getenv("API_GATEWAY_MAX_IN_FLIGHT")),
 		QuotasFile:      os.Getenv("API_GATEWAY_QUOTAS_FILE"),
-		SigningSecret:   secret("API_GATEWAY_SIGNING_SECRET"),
+		SigningSecret:   signingSecret,
 		NATSURL:         os.Getenv("API_GATEWAY_NATS_URL"),
 		WealthAddr:      os.Getenv("API_GATEWAY_WEALTH_ADDR"),
 		DataMasterAddr:  os.Getenv("API_GATEWAY_DATAMASTER_ADDR"),
@@ -203,17 +227,6 @@ func (c Config) validateAuth() error {
 		}
 	}
 	return nil
-}
-
-// secret prefers a CSI/Vault file mount (<k>_FILE) over a plaintext <k> env
-// var (SEC-01d), so secrets are never plaintext in the pod spec.
-func secret(k string) string {
-	if p := os.Getenv(k + "_FILE"); p != "" {
-		if b, err := os.ReadFile(p); err == nil {
-			return strings.TrimSpace(string(b))
-		}
-	}
-	return os.Getenv(k)
 }
 
 func envOr(k, def string) string {

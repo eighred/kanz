@@ -5,6 +5,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/kanz-eng/kanz/pkg/secret"
 	"github.com/kanz-eng/kanz/services/copilot/internal/llm"
 )
 
@@ -67,11 +68,22 @@ type Config struct {
 // Load reads the configuration from the environment with production-safe
 // defaults.
 func Load() (Config, error) {
+	// Resolved before the literal so an unreadable COPILOT_ANTHROPIC_API_KEY_FILE
+	// stops Load HERE. The local helper this replaces fell through to "" on a bad
+	// mount, and an empty API key does not fail where it can be seen: the process
+	// starts clean and the deploy goes green, then the first analyst question comes
+	// back as an auth error from Anthropic with nothing pointing at the mount that
+	// never landed. See pkg/secret.
+	anthropicAPIKey, err := secret.Read("COPILOT_ANTHROPIC_API_KEY")
+	if err != nil {
+		return Config{}, err
+	}
+
 	return Config{
 		Listen:          envOr("COPILOT_LISTEN", ":8080"),
 		LogLevel:        parseLevel(os.Getenv("COPILOT_LOG_LEVEL")),
 		ModelID:         envOr("COPILOT_MODEL_ID", llm.DefaultModelID),
-		AnthropicAPIKey: secret("COPILOT_ANTHROPIC_API_KEY"),
+		AnthropicAPIKey: anthropicAPIKey,
 		AllowStub:       os.Getenv("COPILOT_ALLOW_STUB") == "true",
 		PolicyPath:      os.Getenv("COPILOT_POLICY_PATH"),
 		LineageAddr:     os.Getenv("COPILOT_LINEAGE_ADDR"),
@@ -99,15 +111,4 @@ func parseLevel(s string) slog.Level {
 	default:
 		return slog.LevelInfo
 	}
-}
-
-// secret resolves a sensitive value, preferring a CSI/Vault file mount (SEC-01d:
-// the path in <k>_FILE) over a plaintext <k> env var.
-func secret(k string) string {
-	if p := os.Getenv(k + "_FILE"); p != "" {
-		if b, err := os.ReadFile(p); err == nil {
-			return strings.TrimSpace(string(b))
-		}
-	}
-	return os.Getenv(k)
 }

@@ -2,10 +2,11 @@
 package config
 
 import (
-	"fmt"
 	"log/slog"
 	"os"
 	"strings"
+
+	"github.com/kanz-eng/kanz/pkg/secret"
 )
 
 // Config is the venue-binance runtime configuration, sourced from the
@@ -78,17 +79,17 @@ type Config struct {
 
 // Load reads the configuration from the environment.
 func Load() (Config, error) {
-	databaseURL, err := secret("VENUE_BINANCE_DATABASE_URL")
+	databaseURL, err := secret.Read("VENUE_BINANCE_DATABASE_URL")
 	if err != nil {
 		return Config{}, err
 	}
 	// Keys come from a CSI/Vault file mount, never from code and never from a
 	// plaintext env in a manifest.
-	apiKey, err := secret("BINANCE_API_KEY")
+	apiKey, err := secret.Read("BINANCE_API_KEY")
 	if err != nil {
 		return Config{}, err
 	}
-	apiSecret, err := secret("BINANCE_API_SECRET")
+	apiSecret, err := secret.Read("BINANCE_API_SECRET")
 	if err != nil {
 		return Config{}, err
 	}
@@ -114,27 +115,6 @@ func Load() (Config, error) {
 		APISecret:              apiSecret,
 		Symbols:                os.Getenv("BINANCE_SYMBOLS"),
 	}, nil
-}
-
-// secret prefers a CSI/Vault file mount (<k>_FILE) over a plaintext <k> env var
-// (SEC-01d). Setting <k>_FILE is the deployment's declaration that a durable
-// secret mount was intended (see e.g. venue-binance-deploy.yaml's
-// VENUE_BINANCE_DATABASE_URL_FILE): if that path is set but unreadable — file
-// missing, wrong permissions, a bad mount — that is a deployment fault, not an
-// absent secret, and must fail loudly rather than fall through to the plaintext
-// env and then to "". A mounted-but-unreadable secret is otherwise
-// indistinguishable from one that was never configured at all. A missing file
-// and a permission error are both deployment faults; neither is special-cased.
-func secret(k string) (string, error) {
-	p := os.Getenv(k + "_FILE")
-	if p == "" {
-		return os.Getenv(k), nil
-	}
-	b, err := os.ReadFile(p)
-	if err != nil {
-		return "", fmt.Errorf("%s_FILE=%q: declared secret mount is unreadable: %w", k, p, err)
-	}
-	return strings.TrimSpace(string(b)), nil
 }
 
 func envOr(k, def string) string {

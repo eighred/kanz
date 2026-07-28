@@ -4,6 +4,8 @@ import (
 	"log/slog"
 	"os"
 	"strings"
+
+	"github.com/kanz-eng/kanz/pkg/secret"
 )
 
 // Config is the accounting (IBOR) service runtime configuration, sourced from the
@@ -93,6 +95,17 @@ var DefaultCashSubjects = []string{"accounting.cash.>"}
 // Load reads the configuration from the environment with production-safe
 // defaults.
 func Load() (Config, error) {
+	// Resolved before the literal so an ACCOUNTING_DATABASE_URL_FILE that will not
+	// read stops Load HERE. The local helper this replaces answered an unreadable
+	// mount with the plaintext env and then with "", and an empty DSN is not inert
+	// in this service: it SELECTS the in-memory journal. A broken Vault mount would
+	// therefore have booked the fund's book-of-record into a map that dies with the
+	// pod, and reported a clean start doing it. See pkg/secret.
+	databaseURL, err := secret.Read("ACCOUNTING_DATABASE_URL")
+	if err != nil {
+		return Config{}, err
+	}
+
 	subjects := splitList(os.Getenv("ACCOUNTING_FILL_SUBJECTS"))
 	if len(subjects) == 0 {
 		subjects = DefaultFillSubjects
@@ -114,7 +127,7 @@ func Load() (Config, error) {
 		ConsumerGroup: envOr("ACCOUNTING_CONSUMER_GROUP", "accounting"),
 		FillSubjects:  subjects,
 		CashSubjects:  cashSubjects,
-		DatabaseURL:   secret("ACCOUNTING_DATABASE_URL"),
+		DatabaseURL:   databaseURL,
 		Tenant:        envOr("ACCOUNTING_TENANT", "__system__"),
 		OTLPEndpoint:  os.Getenv("ACCOUNTING_OTLP_ENDPOINT"),
 		SPIFFESocket:  os.Getenv("SPIFFE_ENDPOINT_SOCKET"),
@@ -134,17 +147,6 @@ func splitList(s string) []string {
 		}
 	}
 	return out
-}
-
-// secret resolves a sensitive value, preferring a CSI/Vault file mount
-// (SEC-01d: the path in <k>_FILE) over a plaintext <k> env var.
-func secret(k string) string {
-	if p := os.Getenv(k + "_FILE"); p != "" {
-		if b, err := os.ReadFile(p); err == nil {
-			return strings.TrimSpace(string(b))
-		}
-	}
-	return os.Getenv(k)
 }
 
 func envOr(key, def string) string {
