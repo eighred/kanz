@@ -9,10 +9,10 @@ Get from a fresh clone to a running, tested platform. The `make` targets
 - Go (see `go.mod` for the version), Docker, and [buf](https://buf.build/docs/installation).
 - The repo expects `kanz/` and `kanz-schemas/` as sibling directories (the Go
   module `replace`s the schema SDK to `../kanz-schemas/gen/go`, EVT-15a).
-- **On JetBrains and/or Windows, read [`jetbrains-setup.md`](jetbrains-setup.md)
-  first.** Build tags, `GOFLAGS`, and a `GOTMPDIR` workaround for the Windows
-  Application Control policy (which blocks freshly built test binaries in
-  `%TEMP%`) are required there, and `make`/`buf` need workarounds.
+- **On Windows, read [`windows-go-setup.md`](windows-go-setup.md) first.** Build
+  tags, `GOFLAGS`, and a `GOTMPDIR` workaround for the Windows Application
+  Control policy (which blocks freshly built test binaries in `%TEMP%`) are
+  required there, and `make`/`buf` need workarounds.
 
 ## First run
 
