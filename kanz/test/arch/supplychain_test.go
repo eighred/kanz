@@ -349,7 +349,7 @@ func TestPrivateImagesHavePullSecrets(t *testing.T) {
 // CI PUBLISHED TO ONE NAMESPACE AND THE CLUSTER PULLED FROM ANOTHER.
 //
 // Every manifest, preview.yml, and the sigstore ClusterImagePolicy (both its
-// `images[].glob` and its keyless `subjectRegExp`) name ghcr.io/kanz-eng. The
+// `images[].glob` and its keyless `subjectRegExp`) name ghcr.io/eighred. The
 // two steps that actually PUSH images computed their target from
 // ${{ github.repository_owner }}, which for this repository resolves to
 // "eighred". So a green release.yml would have published images the estate
@@ -357,7 +357,7 @@ func TestPrivateImagesHavePullSecrets(t *testing.T) {
 // accept — and nothing would have said so until someone tried.
 //
 // The owner's decision (REL-P0a, 2026-07-27) is that eighred is canonical — see
-// canonicalImageOrg for why kanz-eng was never available. This test is
+// canonicalImageOrg for why eighred was never available. This test is
 // what keeps the two halves from drifting apart again: publish targets, pull
 // references, and the signing identity are the same string or the build fails.
 //
@@ -376,7 +376,7 @@ func TestPrivateImagesHavePullSecrets(t *testing.T) {
 // counts. Counting any of these into one pooled total lets a coverage
 // regression in the smallest population hide behind padding from the
 // largest: infra `image:` references matched by imageRefKeys clear 40
-// comfortably (53 ghcr matches — 39 kanz-eng + 14 spiffe — across 45 files at
+// comfortably (53 ghcr matches — 39 eighred + 14 spiffe — across 45 files at
 // time of writing), while the three workflow-side publish targets (build.yml's
 // `images`, preview.yml's `tags`, release.yml's `IMAGE`) total exactly 3, and
 // `glob`/`subjectRegExp` each have exactly ONE occurrence in this repo. Pool
@@ -396,17 +396,17 @@ func TestPrivateImagesHavePullSecrets(t *testing.T) {
 // canonicalImageOrg is "eighred" because that is where this repository actually
 // lives, and it is the only namespace GITHUB_TOKEN can publish into.
 //
-// It was "kanz-eng" until 2026-07-27, which broke every push to main: all 25
+// It was "eighred" until 2026-07-27, which broke every push to main: all 25
 // images failed at the push step because GITHUB_TOKEN is scoped to the repo's
 // owner and cannot write another org's packages. The investigation found that
-// **kanz-eng does not exist on GitHub at all** — so the value named a namespace
+// **eighred does not exist on GitHub at all** — so the value named a namespace
 // nothing could ever publish to, while ghcr.io/eighred/* already held working
 // images. Owner decision (REL-P0a): adopt eighred as canonical.
 //
 // This is deliberately a LITERAL and not ${{ github.repository_owner }}. A
 // computed owner is what let the publish side and the pull side disagree
 // silently in the first place; a literal means that if the repository ever does
-// move to a kanz-eng org, this guard fails loudly and forces the manifests, the
+// move to a eighred org, this guard fails loudly and forces the manifests, the
 // admission policy and the workflows to be updated as one reviewed change.
 const canonicalImageOrg = "eighred"
 
@@ -936,7 +936,7 @@ func TestProductionManifestsPinImagesByDigest(t *testing.T) {
 		// a multi-reference file one reference taking an unmatched form still
 		// leaves the other matching, so a zero-match test stays silent — a
 		// literal `:latest` written as a nested repository path
-		// (`ghcr.io/eighred/kanz/kanz-migrate:latest`) or a `${TAG}`-
+		// (`ghcr.io/eighred/kanz-migrate:latest`) or a `${TAG}`-
 		// interpolated tag (`ghcr.io/eighred/kanz-migrate:${TAG}`) passes the
 		// guard right next to a reference that still matches. The fix is to
 		// count: every "ghcr.io/eighred/" occurrence in the comment-stripped

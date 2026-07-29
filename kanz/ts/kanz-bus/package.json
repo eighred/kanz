@@ -1,5 +1,5 @@
 {
-  "name": "@kanz-eng/kanz-bus",
+  "name": "@eighred/kanz-bus",
   "version": "0.0.0",
   "description": "TypeScript bus client for the Kanz event backbone (NATS JetStream + Kafka)",
   "license": "UNLICENSED",
@@ -24,7 +24,7 @@
   },
   "dependencies": {
     "@bufbuild/protobuf": "^2.2.3",
-    "@kanz-eng/kanz-schemas": "^0.1.0",
+    "@eighred/kanz-schemas": "^0.1.0",
     "kafkajs": "^2.2.4",
     "kafkajs-snappy": "^1.1.0",
     "nats": "^2.28.0"

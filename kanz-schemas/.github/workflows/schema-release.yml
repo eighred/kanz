@@ -55,7 +55,7 @@ jobs:
           rsync -a --delete --exclude .git gen/go/ out/
           cd out
           git config user.name kanz-schemas-ci
-          git config user.email ci@kanz-eng.invalid
+          git config user.email ci@eighred.invalid
           git add -A
           git commit -m "Generated from kanz-schemas ${tag}" || echo "no changes"
           git tag "${tag}"

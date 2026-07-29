@@ -62,7 +62,7 @@ Every change to `envelope.proto` requires:
 
 1. A written proposal stating which §2 test the field passes and why §3 does
    not exclude it.
-2. Approval from `@kanz-eng/architecture` (enforced by CODEOWNERS on
+2. Approval from `@eighred/architecture` (enforced by CODEOWNERS on
    `/proto/envelope/`).
 3. A passing `buf breaking` check (EVT-07) — which mechanically blocks any
    non-additive change.

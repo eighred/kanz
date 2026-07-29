@@ -22,7 +22,7 @@ syntax = "proto3";
 // proto3 cannot enforce field presence; the "Required" notes are invariants the
 // ingest service and the bus client library enforce on publish. Sizes and
 // leverage are exact common.v1.Decimal — double is banned for anything that
-// moves capital. CODEOWNERS: @kanz-eng/execution.
+// moves capital. CODEOWNERS: @eighred/execution.
 package signal.v1;
 
 import "google/protobuf/timestamp.proto";

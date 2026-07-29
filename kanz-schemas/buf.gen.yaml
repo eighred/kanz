@@ -5,7 +5,7 @@
 # each language's SDK as its own module/package — for Go, the companion module
 # repo github.com/eighred/kanz/kanz-schemas-go (EVT-15a); for Python, the
 # `kanz-schemas` package on PyPI (EVT-15b); for TypeScript, the
-# `@kanz-eng/kanz-schemas` package on npm (EVT-15c).
+# `@eighred/kanz-schemas` package on npm (EVT-15c).
 #
 # The .proto files carry no `option go_package`; managed mode supplies it,
 # appending each file's module-relative directory to the prefix below.

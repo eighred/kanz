@@ -1,8 +1,8 @@
 /** Wire frame helper — `unframe` for consumer-side decoding. */
 
 import { fromBinary } from "@bufbuild/protobuf";
-import type { Envelope } from "@kanz-eng/kanz-schemas/envelope/v1/envelope_pb.js";
-import { EventFrameSchema } from "@kanz-eng/kanz-schemas/envelope/v1/event_frame_pb.js";
+import type { Envelope } from "@eighred/kanz-schemas/envelope/v1/envelope_pb.js";
+import { EventFrameSchema } from "@eighred/kanz-schemas/envelope/v1/event_frame_pb.js";
 
 export interface Unframed {
   envelope: Envelope;

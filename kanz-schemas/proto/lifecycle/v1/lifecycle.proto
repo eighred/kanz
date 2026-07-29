@@ -3,7 +3,7 @@ syntax = "proto3";
 // Package lifecycle.v1 defines the payload schemas for platform lifecycle
 // FACTs — model deployments, configuration changes, and operating-mode
 // transitions — carried on platform.* subjects (CODEOWNERS:
-// @kanz-eng/platform). These are immutable, past-tense FACTs; the envelope
+// @eighred/platform). These are immutable, past-tense FACTs; the envelope
 // event_time is when the change took effect.
 //
 // Per the project anti-decisions ("no silent failure handling", "all state
