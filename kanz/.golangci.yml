@@ -55,3 +55,15 @@ issues:
   # Every round trip costs a full CI run. Show everything, once.
   max-issues-per-linter: 0
   max-same-issues: 0
+
+# `linters:` above enables errcheck/govet/ineffassign/staticcheck/unused — NO
+# formatter. v2 split formatting out of `linters` entirely, so `default: standard`
+# was never going to catch it, and nothing else in this repo did either: CI's
+# golangci-lint step was the only formatting-adjacent gate, and under this config
+# it does not check formatting. A misaligned struct field
+# (kanz/test/arch/operator_rbac_test.go:146) reached main because of exactly this
+# gap (#141). gofmt here, not gofumpt: the latter is a stricter, opinionated
+# superset nobody opted into — same story as ST*/QF* above.
+formatters:
+  enable:
+    - gofmt
