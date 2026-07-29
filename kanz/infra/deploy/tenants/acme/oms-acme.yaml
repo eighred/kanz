@@ -51,6 +51,9 @@ spec:
       tenant: acme
   template:
     metadata:
+      annotations:
+        prometheus.io/port: "8090"
+        prometheus.io/scrape: "true"
       labels:
         app: oms
         app.kubernetes.io/part-of: kanz

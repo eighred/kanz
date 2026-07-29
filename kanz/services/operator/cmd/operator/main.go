@@ -25,6 +25,7 @@ import (
 	"k8s.io/client-go/rest"
 
 	"github.com/eighred/kanz/internal/execution"
+	"github.com/eighred/kanz/pkg/observability"
 	"github.com/eighred/kanz/services/operator/internal/config"
 	"github.com/eighred/kanz/services/operator/internal/estate"
 	"github.com/eighred/kanz/services/operator/internal/grpcsrv"
@@ -61,10 +62,35 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	// Health server: liveness/readiness targets for the Deployment probes.
+	// Telemetry (#61). The operator ran with NO metrics surface at all: it is the
+	// control plane the TUI drives — it provisions nodes and writes venue keys —
+	// and nothing about its health was observable beyond a 200 from /healthz.
+	// OTLPEndpoint is deliberately empty: spans are still created and trace
+	// context still propagates, and startup never blocks on a collector being
+	// reachable, which a control plane must not do.
+	obs, err := observability.New(ctx, observability.Config{
+		ServiceName:    "operator",
+		ServiceVersion: version(),
+		SampleRatio:    1,
+	}, slog.NewJSONHandler(os.Stdout, nil))
+	if err != nil {
+		logger.Error("telemetry init failed", "err", err)
+		os.Exit(2)
+	}
+	defer func() {
+		if err := obs.Shutdown(context.Background()); err != nil {
+			logger.Error("telemetry shutdown failed", "err", err)
+		}
+	}()
+
+	// Health server: liveness/readiness targets for the Deployment probes, and
+	// the Prometheus surface. /metrics rides the HEALTH port, not the gRPC one —
+	// a scrape against gRPC cannot succeed, and operator-deploy.yaml's
+	// prometheus.io/port names 8091 for exactly this reason.
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
 	mux.HandleFunc("/readyz", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
+	mux.Handle("GET /metrics", obs.MetricsHandler())
 	healthSrv := &http.Server{Addr: cfg.HealthListen, Handler: mux, ReadHeaderTimeout: 5 * time.Second}
 	go func() {
 		logger.Info("operator health listening", "addr", cfg.HealthListen)
@@ -171,3 +197,12 @@ func namespaceOr(def string) string {
 	}
 	return def
 }
+
+// version is the ServiceVersion stamped on this process's OTel resource.
+//
+// This is the 26th copy of this function in the repository, and the copies do
+// not agree — most return "dev", archiver returns "0.1.0". It is written here to
+// match the surrounding convention rather than to endorse it; a single
+// build-stamped version belongs in one place, and consolidating 26 call sites is
+// its own change, not a rider on #61.
+func version() string { return "dev" }

@@ -143,7 +143,7 @@ type roleDoc struct {
 		Namespace string `yaml:"namespace"`
 	} `yaml:"metadata"`
 	AutomountServiceAccountToken *bool `yaml:"automountServiceAccountToken"`
-	ImagePullSecrets            []struct {
+	ImagePullSecrets             []struct {
 		Name string `yaml:"name"`
 	} `yaml:"imagePullSecrets"`
 	Rules []struct {
