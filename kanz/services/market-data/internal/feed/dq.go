@@ -6,7 +6,7 @@ import (
 	"sync"
 	"time"
 
-	marketpb "github.com/kanz-eng/kanz-schemas-go/market/v1"
+	marketpb "github.com/eighred/kanz/kanz-schemas-go/market/v1"
 )
 
 // Live data-quality gate (PARITY-01g). The Gate decorates a Sink and enforces

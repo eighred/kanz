@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	envelopepb "github.com/kanz-eng/kanz-schemas-go/envelope/v1"
+	envelopepb "github.com/eighred/kanz/kanz-schemas-go/envelope/v1"
 
 	"github.com/eighred/kanz/internal/alternatives"
 	"github.com/eighred/kanz/services/alternatives/internal/fund"

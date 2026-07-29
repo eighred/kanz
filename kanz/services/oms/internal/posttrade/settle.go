@@ -7,7 +7,7 @@ import (
 	"math/big"
 	"time"
 
-	orderpb "github.com/kanz-eng/kanz-schemas-go/order/v1"
+	orderpb "github.com/eighred/kanz/kanz-schemas-go/order/v1"
 
 	"github.com/eighred/kanz/internal/dec"
 )

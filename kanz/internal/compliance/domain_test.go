@@ -4,8 +4,8 @@ import (
 	"context"
 	"testing"
 
-	commonpb "github.com/kanz-eng/kanz-schemas-go/common/v1"
-	compliancepb "github.com/kanz-eng/kanz-schemas-go/compliance/v1"
+	commonpb "github.com/eighred/kanz/kanz-schemas-go/common/v1"
+	compliancepb "github.com/eighred/kanz/kanz-schemas-go/compliance/v1"
 )
 
 // concentrationRule builds a bare RULE_TYPE_CONCENTRATION rule capped at

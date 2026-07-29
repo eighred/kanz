@@ -11,9 +11,9 @@ import (
 	"context"
 	"errors"
 
-	compliancepb "github.com/kanz-eng/kanz-schemas-go/compliance/v1"
-	envelopepb "github.com/kanz-eng/kanz-schemas-go/envelope/v1"
-	lifecyclepb "github.com/kanz-eng/kanz-schemas-go/lifecycle/v1"
+	compliancepb "github.com/eighred/kanz/kanz-schemas-go/compliance/v1"
+	envelopepb "github.com/eighred/kanz/kanz-schemas-go/envelope/v1"
+	lifecyclepb "github.com/eighred/kanz/kanz-schemas-go/lifecycle/v1"
 
 	"github.com/eighred/kanz/pkg/bus"
 )

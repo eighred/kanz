@@ -22,9 +22,9 @@ import (
 	"testing"
 	"time"
 
+	orderpb "github.com/eighred/kanz/kanz-schemas-go/order/v1"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
-	orderpb "github.com/kanz-eng/kanz-schemas-go/order/v1"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"github.com/eighred/kanz/internal/dec"

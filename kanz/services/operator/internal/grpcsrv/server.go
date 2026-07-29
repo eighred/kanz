@@ -16,7 +16,7 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 
-	operatorpb "github.com/kanz-eng/kanz-schemas-go/operator/v1"
+	operatorpb "github.com/eighred/kanz/kanz-schemas-go/operator/v1"
 
 	"github.com/eighred/kanz/internal/execution"
 	"github.com/eighred/kanz/internal/venueadapter/exchangeauth"

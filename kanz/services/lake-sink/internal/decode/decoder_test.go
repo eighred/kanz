@@ -9,7 +9,7 @@ import (
 	"sync/atomic"
 	"testing"
 
-	commonv1 "github.com/kanz-eng/kanz-schemas-go/common/v1"
+	commonv1 "github.com/eighred/kanz/kanz-schemas-go/common/v1"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/reflect/protodesc"
 	"google.golang.org/protobuf/types/descriptorpb"

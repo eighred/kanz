@@ -21,8 +21,8 @@ import (
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
+	envelopepb "github.com/eighred/kanz/kanz-schemas-go/envelope/v1"
 	"github.com/eighred/kanz/pkg/bus"
-	envelopepb "github.com/kanz-eng/kanz-schemas-go/envelope/v1"
 )
 
 // captureClient is the bus.Client analog from kanz/pkg/bus tests, lifted

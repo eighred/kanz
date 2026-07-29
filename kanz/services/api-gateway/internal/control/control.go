@@ -35,7 +35,7 @@ import (
 	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/proto"
 
-	operatorpb "github.com/kanz-eng/kanz-schemas-go/operator/v1"
+	operatorpb "github.com/eighred/kanz/kanz-schemas-go/operator/v1"
 
 	"github.com/eighred/kanz/services/api-gateway/internal/authz"
 )

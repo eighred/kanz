@@ -23,7 +23,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
-	inferencepb "github.com/kanz-eng/kanz-schemas-go/inference/v1"
+	inferencepb "github.com/eighred/kanz/kanz-schemas-go/inference/v1"
 )
 
 // stubClient satisfies inferencepb.InferenceServiceClient with a

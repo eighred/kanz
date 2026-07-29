@@ -21,7 +21,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	"google.golang.org/grpc"
 
-	venuepb "github.com/kanz-eng/kanz-schemas-go/venue/v1"
+	venuepb "github.com/eighred/kanz/kanz-schemas-go/venue/v1"
 
 	"github.com/eighred/kanz/internal/execution"
 	"github.com/eighred/kanz/services/oms/internal/config"

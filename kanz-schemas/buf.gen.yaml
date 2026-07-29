@@ -3,7 +3,7 @@
 # Generated code is never committed to this repo (see .gitignore). The
 # schema-release workflow runs `buf generate` on a version tag and publishes
 # each language's SDK as its own module/package — for Go, the companion module
-# repo github.com/kanz-eng/kanz-schemas-go (EVT-15a); for Python, the
+# repo github.com/eighred/kanz/kanz-schemas-go (EVT-15a); for Python, the
 # `kanz-schemas` package on PyPI (EVT-15b); for TypeScript, the
 # `@kanz-eng/kanz-schemas` package on npm (EVT-15c).
 #
@@ -14,7 +14,7 @@ managed:
   enabled: true
   override:
     - file_option: go_package_prefix
-      value: github.com/kanz-eng/kanz-schemas-go
+      value: github.com/eighred/kanz/kanz-schemas-go
 plugins:
   - local: protoc-gen-go
     out: gen/go

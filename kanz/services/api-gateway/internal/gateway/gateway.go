@@ -25,7 +25,7 @@ import (
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
-	querypb "github.com/kanz-eng/kanz-schemas-go/query/v1"
+	querypb "github.com/eighred/kanz/kanz-schemas-go/query/v1"
 )
 
 // Handler serves the REST surface by forwarding to a RiskQueryServiceClient.

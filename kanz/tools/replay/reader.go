@@ -11,8 +11,8 @@ import (
 
 	"github.com/segmentio/kafka-go"
 
+	envelopepb "github.com/eighred/kanz/kanz-schemas-go/envelope/v1"
 	"github.com/eighred/kanz/pkg/bus"
-	envelopepb "github.com/kanz-eng/kanz-schemas-go/envelope/v1"
 )
 
 // Range bounds a per-partition read. Exactly one of StartOffset / StartTime

@@ -7,7 +7,7 @@ import (
 	"sync"
 	"testing"
 
-	marketpb "github.com/kanz-eng/kanz-schemas-go/market/v1"
+	marketpb "github.com/eighred/kanz/kanz-schemas-go/market/v1"
 )
 
 // orderSink records, per instrument, the event_time seconds in arrival order,

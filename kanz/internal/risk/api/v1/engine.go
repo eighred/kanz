@@ -39,7 +39,7 @@ import (
 	"errors"
 	"time"
 
-	commonpb "github.com/kanz-eng/kanz-schemas-go/common/v1"
+	commonpb "github.com/eighred/kanz/kanz-schemas-go/common/v1"
 )
 
 // Engine is the risk module's external surface. Implementations are

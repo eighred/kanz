@@ -4,7 +4,7 @@ import (
 	"sort"
 	"time"
 
-	commonpb "github.com/kanz-eng/kanz-schemas-go/common/v1"
+	commonpb "github.com/eighred/kanz/kanz-schemas-go/common/v1"
 
 	v1 "github.com/eighred/kanz/internal/risk/api/v1"
 )

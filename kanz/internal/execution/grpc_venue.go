@@ -5,8 +5,8 @@ import (
 	"errors"
 	"fmt"
 
-	orderpb "github.com/kanz-eng/kanz-schemas-go/order/v1"
-	venuepb "github.com/kanz-eng/kanz-schemas-go/venue/v1"
+	orderpb "github.com/eighred/kanz/kanz-schemas-go/order/v1"
+	venuepb "github.com/eighred/kanz/kanz-schemas-go/venue/v1"
 	"google.golang.org/grpc"
 )
 

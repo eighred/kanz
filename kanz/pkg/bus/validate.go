@@ -4,7 +4,7 @@ import (
 	"errors"
 	"fmt"
 
-	envelopepb "github.com/kanz-eng/kanz-schemas-go/envelope/v1"
+	envelopepb "github.com/eighred/kanz/kanz-schemas-go/envelope/v1"
 )
 
 // Validate enforces the publish-side envelope invariants from

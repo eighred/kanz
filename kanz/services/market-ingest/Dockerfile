@@ -13,7 +13,7 @@
 # read rather than a build arg you cannot.
 #
 # Build context is the repo ROOT, not kanz/: the module's go.mod replaces
-# github.com/kanz-eng/kanz-schemas-go => ../kanz-schemas/gen/go, which is
+# github.com/eighred/kanz/kanz-schemas-go => ../kanz-schemas/gen/go, which is
 # generated-not-committed (EVT-15a). Build with:
 #   docker build -f kanz/services/market-ingest/Dockerfile .
 FROM golang:1.26.5 AS build

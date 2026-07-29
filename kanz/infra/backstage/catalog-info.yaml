@@ -109,4 +109,4 @@ spec:
   owner: risk-platform
   system: kanz
   definition:
-    $text: https://github.com/kanz-eng/kanz-schemas/blob/main/proto/query/v1/risk_query.proto
+    $text: https://github.com/eighred/kanz/kanz-schemas/blob/main/proto/query/v1/risk_query.proto

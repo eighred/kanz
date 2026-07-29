@@ -5,7 +5,7 @@ import (
 	"sort"
 	"sync"
 
-	marketpb "github.com/kanz-eng/kanz-schemas-go/market/v1"
+	marketpb "github.com/eighred/kanz/kanz-schemas-go/market/v1"
 )
 
 // Latest-quote snapshot (PARITY-01h). A calibration model (PARITY-03: the rate

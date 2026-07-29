@@ -5,8 +5,8 @@ import (
 	"testing"
 	"time"
 
-	commandpb "github.com/kanz-eng/kanz-schemas-go/command/v1"
-	orderpb "github.com/kanz-eng/kanz-schemas-go/order/v1"
+	commandpb "github.com/eighred/kanz/kanz-schemas-go/command/v1"
+	orderpb "github.com/eighred/kanz/kanz-schemas-go/order/v1"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 

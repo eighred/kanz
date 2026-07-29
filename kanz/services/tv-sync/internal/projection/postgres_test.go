@@ -25,10 +25,10 @@ import (
 	"testing"
 	"time"
 
+	envelopepb "github.com/eighred/kanz/kanz-schemas-go/envelope/v1"
+	orderpb "github.com/eighred/kanz/kanz-schemas-go/order/v1"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
-	envelopepb "github.com/kanz-eng/kanz-schemas-go/envelope/v1"
-	orderpb "github.com/kanz-eng/kanz-schemas-go/order/v1"
 	"google.golang.org/protobuf/proto"
 )
 

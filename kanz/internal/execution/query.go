@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 
-	orderpb "github.com/kanz-eng/kanz-schemas-go/order/v1"
+	orderpb "github.com/eighred/kanz/kanz-schemas-go/order/v1"
 )
 
 // OrderViewState is what a venue says it knows about one order.

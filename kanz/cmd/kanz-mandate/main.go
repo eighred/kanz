@@ -37,7 +37,7 @@ import (
 	"os"
 	"time"
 
-	compliancepb "github.com/kanz-eng/kanz-schemas-go/compliance/v1"
+	compliancepb "github.com/eighred/kanz/kanz-schemas-go/compliance/v1"
 	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/types/known/timestamppb"
 

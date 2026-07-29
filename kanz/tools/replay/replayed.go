@@ -1,6 +1,6 @@
 package replay
 
-import envelopepb "github.com/kanz-eng/kanz-schemas-go/envelope/v1"
+import envelopepb "github.com/eighred/kanz/kanz-schemas-go/envelope/v1"
 
 // StampReplayed sets QUALITY_FLAG_REPLAYED on the envelope's QualityFlags
 // slice if it is not already present. Idempotent: a Pipeline that re-runs

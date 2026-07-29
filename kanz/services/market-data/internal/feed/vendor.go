@@ -5,8 +5,8 @@ import (
 	"errors"
 	"time"
 
-	commonpb "github.com/kanz-eng/kanz-schemas-go/common/v1"
-	marketpb "github.com/kanz-eng/kanz-schemas-go/market/v1"
+	commonpb "github.com/eighred/kanz/kanz-schemas-go/common/v1"
+	marketpb "github.com/eighred/kanz/kanz-schemas-go/market/v1"
 )
 
 // Vendor-adapter engine (PARITY-01b–d). The three vendor adapters

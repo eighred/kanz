@@ -5,7 +5,7 @@ import (
 	"errors"
 	"fmt"
 
-	venuepb "github.com/kanz-eng/kanz-schemas-go/venue/v1"
+	venuepb "github.com/eighred/kanz/kanz-schemas-go/venue/v1"
 )
 
 // VenueIdentity is what an adapter says it is when the OMS asks (venue.v1.Describe):

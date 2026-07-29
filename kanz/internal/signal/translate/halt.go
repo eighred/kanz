@@ -6,8 +6,8 @@ import (
 	"sync"
 	"time"
 
-	envelopepb "github.com/kanz-eng/kanz-schemas-go/envelope/v1"
-	lifecyclepb "github.com/kanz-eng/kanz-schemas-go/lifecycle/v1"
+	envelopepb "github.com/eighred/kanz/kanz-schemas-go/envelope/v1"
+	lifecyclepb "github.com/eighred/kanz/kanz-schemas-go/lifecycle/v1"
 	"google.golang.org/protobuf/proto"
 
 	"github.com/eighred/kanz/internal/platform/mode"

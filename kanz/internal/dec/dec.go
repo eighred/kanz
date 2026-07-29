@@ -20,7 +20,7 @@ import (
 	"math/big"
 	"strings"
 
-	commonpb "github.com/kanz-eng/kanz-schemas-go/common/v1"
+	commonpb "github.com/eighred/kanz/kanz-schemas-go/common/v1"
 )
 
 // scale is the fixed decimal scale ToProto rounds to.

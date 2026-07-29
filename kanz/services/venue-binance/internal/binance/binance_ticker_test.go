@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	marketpb "github.com/kanz-eng/kanz-schemas-go/market/v1"
+	marketpb "github.com/eighred/kanz/kanz-schemas-go/market/v1"
 
 	"github.com/eighred/kanz/internal/dec"
 )

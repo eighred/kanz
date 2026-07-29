@@ -6,8 +6,8 @@ import (
 	"sync"
 	"time"
 
-	domainpb "github.com/kanz-eng/kanz-schemas-go/domain/v1"
-	envelopepb "github.com/kanz-eng/kanz-schemas-go/envelope/v1"
+	domainpb "github.com/eighred/kanz/kanz-schemas-go/domain/v1"
+	envelopepb "github.com/eighred/kanz/kanz-schemas-go/envelope/v1"
 
 	risk "github.com/eighred/kanz/internal/risk"
 	v1 "github.com/eighred/kanz/internal/risk/api/v1"

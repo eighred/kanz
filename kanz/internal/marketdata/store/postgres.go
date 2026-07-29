@@ -10,7 +10,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"google.golang.org/protobuf/proto"
 
-	commonpb "github.com/kanz-eng/kanz-schemas-go/common/v1"
+	commonpb "github.com/eighred/kanz/kanz-schemas-go/common/v1"
 )
 
 // Postgres is the durable Store backed by the 0001_price_history.sql schema.

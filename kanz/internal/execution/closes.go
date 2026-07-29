@@ -5,7 +5,7 @@ import (
 	"sync"
 	"time"
 
-	orderpb "github.com/kanz-eng/kanz-schemas-go/order/v1"
+	orderpb "github.com/eighred/kanz/kanz-schemas-go/order/v1"
 )
 
 // The in-flight-close healing seam (the "In-Flight Certainty" mandate). A close

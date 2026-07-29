@@ -3,8 +3,8 @@ package app
 import (
 	"context"
 
-	domainpb "github.com/kanz-eng/kanz-schemas-go/domain/v1"
-	envelopepb "github.com/kanz-eng/kanz-schemas-go/envelope/v1"
+	domainpb "github.com/eighred/kanz/kanz-schemas-go/domain/v1"
+	envelopepb "github.com/eighred/kanz/kanz-schemas-go/envelope/v1"
 
 	"github.com/eighred/kanz/internal/risk/ingest"
 	"github.com/eighred/kanz/services/risk-engine/internal/shard"

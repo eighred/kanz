@@ -6,7 +6,7 @@ import (
 	"sync"
 	"time"
 
-	marketpb "github.com/kanz-eng/kanz-schemas-go/market/v1"
+	marketpb "github.com/eighred/kanz/kanz-schemas-go/market/v1"
 )
 
 // Conform runs an adapter against a subscription and checks the emitted stream

@@ -9,7 +9,7 @@ package compliance
 import (
 	"context"
 
-	orderpb "github.com/kanz-eng/kanz-schemas-go/order/v1"
+	orderpb "github.com/eighred/kanz/kanz-schemas-go/order/v1"
 )
 
 // Breach is a refused pre-trade check: a stable Code (e.g. "CONCENTRATION",

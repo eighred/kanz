@@ -4,7 +4,7 @@ import (
 	"errors"
 	"fmt"
 
-	orderpb "github.com/kanz-eng/kanz-schemas-go/order/v1"
+	orderpb "github.com/eighred/kanz/kanz-schemas-go/order/v1"
 )
 
 // ErrNoVenue is returned when the router has NO venue at all. An OMS with no

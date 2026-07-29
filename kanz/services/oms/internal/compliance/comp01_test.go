@@ -5,10 +5,10 @@ import (
 	"testing"
 	"time"
 
-	commandpb "github.com/kanz-eng/kanz-schemas-go/command/v1"
-	commonpb "github.com/kanz-eng/kanz-schemas-go/common/v1"
-	compliancepb "github.com/kanz-eng/kanz-schemas-go/compliance/v1"
-	orderpb "github.com/kanz-eng/kanz-schemas-go/order/v1"
+	commandpb "github.com/eighred/kanz/kanz-schemas-go/command/v1"
+	commonpb "github.com/eighred/kanz/kanz-schemas-go/common/v1"
+	compliancepb "github.com/eighred/kanz/kanz-schemas-go/compliance/v1"
+	orderpb "github.com/eighred/kanz/kanz-schemas-go/order/v1"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	comp "github.com/eighred/kanz/internal/compliance"

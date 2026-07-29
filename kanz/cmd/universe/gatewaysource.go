@@ -16,7 +16,7 @@ import (
 	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/proto"
 
-	operatorpb "github.com/kanz-eng/kanz-schemas-go/operator/v1"
+	operatorpb "github.com/eighred/kanz/kanz-schemas-go/operator/v1"
 )
 
 // gatewaySource drives the estate through the api-gateway's /v1/control routes

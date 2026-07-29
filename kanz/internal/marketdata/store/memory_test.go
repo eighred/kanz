@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	commonpb "github.com/kanz-eng/kanz-schemas-go/common/v1"
+	commonpb "github.com/eighred/kanz/kanz-schemas-go/common/v1"
 )
 
 var day0 = time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)

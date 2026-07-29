@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	observationpb "github.com/kanz-eng/kanz-schemas-go/observation/v1"
+	observationpb "github.com/eighred/kanz/kanz-schemas-go/observation/v1"
 )
 
 type captureRecorder struct {

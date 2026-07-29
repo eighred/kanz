@@ -4,10 +4,10 @@ import (
 	"context"
 	"time"
 
-	commandpb "github.com/kanz-eng/kanz-schemas-go/command/v1"
-	commonpb "github.com/kanz-eng/kanz-schemas-go/common/v1"
-	envelopepb "github.com/kanz-eng/kanz-schemas-go/envelope/v1"
-	orderpb "github.com/kanz-eng/kanz-schemas-go/order/v1"
+	commandpb "github.com/eighred/kanz/kanz-schemas-go/command/v1"
+	commonpb "github.com/eighred/kanz/kanz-schemas-go/common/v1"
+	envelopepb "github.com/eighred/kanz/kanz-schemas-go/envelope/v1"
+	orderpb "github.com/eighred/kanz/kanz-schemas-go/order/v1"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 

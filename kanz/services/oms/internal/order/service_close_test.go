@@ -6,9 +6,9 @@ import (
 	"testing"
 	"time"
 
-	commandpb "github.com/kanz-eng/kanz-schemas-go/command/v1"
-	envelopepb "github.com/kanz-eng/kanz-schemas-go/envelope/v1"
-	orderpb "github.com/kanz-eng/kanz-schemas-go/order/v1"
+	commandpb "github.com/eighred/kanz/kanz-schemas-go/command/v1"
+	envelopepb "github.com/eighred/kanz/kanz-schemas-go/envelope/v1"
+	orderpb "github.com/eighred/kanz/kanz-schemas-go/order/v1"
 
 	"github.com/eighred/kanz/internal/execution"
 )

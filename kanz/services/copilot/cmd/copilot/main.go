@@ -28,7 +28,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 
-	querypb "github.com/kanz-eng/kanz-schemas-go/query/v1"
+	querypb "github.com/eighred/kanz/kanz-schemas-go/query/v1"
 
 	"github.com/eighred/kanz/pkg/auth"
 	"github.com/eighred/kanz/pkg/observability"

@@ -9,7 +9,7 @@ import (
 	"context"
 	"strings"
 
-	envelopepb "github.com/kanz-eng/kanz-schemas-go/envelope/v1"
+	envelopepb "github.com/eighred/kanz/kanz-schemas-go/envelope/v1"
 
 	"github.com/eighred/kanz/services/lineage/internal/graph"
 	"github.com/eighred/kanz/services/lineage/internal/openlineage"

@@ -15,8 +15,8 @@ import (
 	"google.golang.org/protobuf/types/dynamicpb"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
-	commandpb "github.com/kanz-eng/kanz-schemas-go/command/v1"
-	envelopepb "github.com/kanz-eng/kanz-schemas-go/envelope/v1"
+	commandpb "github.com/eighred/kanz/kanz-schemas-go/command/v1"
+	envelopepb "github.com/eighred/kanz/kanz-schemas-go/envelope/v1"
 )
 
 // syntheticCommand builds a stand-in concrete command — a message embedding

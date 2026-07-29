@@ -3,7 +3,7 @@ package consume
 import (
 	"fmt"
 
-	wealthpb "github.com/kanz-eng/kanz-schemas-go/wealth/v1"
+	wealthpb "github.com/eighred/kanz/kanz-schemas-go/wealth/v1"
 	"google.golang.org/protobuf/proto"
 
 	"github.com/eighred/kanz/internal/dec"

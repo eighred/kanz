@@ -6,7 +6,7 @@ import (
 	"log/slog"
 	"strings"
 
-	observationpb "github.com/kanz-eng/kanz-schemas-go/observation/v1"
+	observationpb "github.com/eighred/kanz/kanz-schemas-go/observation/v1"
 )
 
 // Authorization-decision audit (AUTH-01d). Every allow AND deny is recorded as

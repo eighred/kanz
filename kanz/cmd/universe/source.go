@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"time"
 
-	operatorpb "github.com/kanz-eng/kanz-schemas-go/operator/v1"
+	operatorpb "github.com/eighred/kanz/kanz-schemas-go/operator/v1"
 )
 
 // nodeSource fetches estate reads and drives provisioning. The real implementation

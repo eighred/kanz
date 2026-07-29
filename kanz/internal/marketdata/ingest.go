@@ -20,9 +20,9 @@ import (
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
-	commonpb "github.com/kanz-eng/kanz-schemas-go/common/v1"
-	envelopepb "github.com/kanz-eng/kanz-schemas-go/envelope/v1"
-	marketpb "github.com/kanz-eng/kanz-schemas-go/market/v1"
+	commonpb "github.com/eighred/kanz/kanz-schemas-go/common/v1"
+	envelopepb "github.com/eighred/kanz/kanz-schemas-go/envelope/v1"
+	marketpb "github.com/eighred/kanz/kanz-schemas-go/market/v1"
 
 	"github.com/eighred/kanz/internal/marketdata/store"
 )

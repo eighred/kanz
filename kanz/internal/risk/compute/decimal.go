@@ -16,7 +16,7 @@ package compute
 import (
 	"math"
 
-	commonpb "github.com/kanz-eng/kanz-schemas-go/common/v1"
+	commonpb "github.com/eighred/kanz/kanz-schemas-go/common/v1"
 )
 
 // zeroDecimal returns a Decimal whose value is exact 0.

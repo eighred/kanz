@@ -3,7 +3,7 @@ package compliance
 import (
 	"context"
 
-	compliancepb "github.com/kanz-eng/kanz-schemas-go/compliance/v1"
+	compliancepb "github.com/eighred/kanz/kanz-schemas-go/compliance/v1"
 )
 
 // Decision phases — the enforcement point a decision was made at.

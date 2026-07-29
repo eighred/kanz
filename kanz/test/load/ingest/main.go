@@ -30,9 +30,9 @@ import (
 
 	"google.golang.org/protobuf/types/known/timestamppb"
 
-	commonpb "github.com/kanz-eng/kanz-schemas-go/common/v1"
-	domainpb "github.com/kanz-eng/kanz-schemas-go/domain/v1"
-	envelopepb "github.com/kanz-eng/kanz-schemas-go/envelope/v1"
+	commonpb "github.com/eighred/kanz/kanz-schemas-go/common/v1"
+	domainpb "github.com/eighred/kanz/kanz-schemas-go/domain/v1"
+	envelopepb "github.com/eighred/kanz/kanz-schemas-go/envelope/v1"
 
 	"github.com/eighred/kanz/internal/platform/subject"
 	"github.com/eighred/kanz/pkg/bus"

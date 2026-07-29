@@ -12,10 +12,10 @@ import (
 	"io"
 	"net/http"
 
+	commandpb "github.com/eighred/kanz/kanz-schemas-go/command/v1"
+	envelopepb "github.com/eighred/kanz/kanz-schemas-go/envelope/v1"
+	orderpb "github.com/eighred/kanz/kanz-schemas-go/order/v1"
 	"github.com/google/uuid"
-	commandpb "github.com/kanz-eng/kanz-schemas-go/command/v1"
-	envelopepb "github.com/kanz-eng/kanz-schemas-go/envelope/v1"
-	orderpb "github.com/kanz-eng/kanz-schemas-go/order/v1"
 	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/proto"
 	"time"

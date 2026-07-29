@@ -8,7 +8,7 @@ import (
 	"google.golang.org/protobuf/encoding/protowire"
 	"google.golang.org/protobuf/proto"
 
-	commandpb "github.com/kanz-eng/kanz-schemas-go/command/v1"
+	commandpb "github.com/eighred/kanz/kanz-schemas-go/command/v1"
 )
 
 // CommandIssuerFunc verifies that a command's declared issuer is one the caller

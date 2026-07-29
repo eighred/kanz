@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
+	envelopepb "github.com/eighred/kanz/kanz-schemas-go/envelope/v1"
 	"github.com/eighred/kanz/pkg/bus"
-	envelopepb "github.com/kanz-eng/kanz-schemas-go/envelope/v1"
 )
 
 // DEBT-02d — an N-replica consumer group under redelivery chaos produces no

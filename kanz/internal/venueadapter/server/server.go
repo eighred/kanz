@@ -14,8 +14,8 @@ import (
 	"context"
 	"log/slog"
 
-	orderpb "github.com/kanz-eng/kanz-schemas-go/order/v1"
-	venuepb "github.com/kanz-eng/kanz-schemas-go/venue/v1"
+	orderpb "github.com/eighred/kanz/kanz-schemas-go/order/v1"
+	venuepb "github.com/eighred/kanz/kanz-schemas-go/venue/v1"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"

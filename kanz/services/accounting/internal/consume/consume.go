@@ -16,9 +16,9 @@ import (
 	"fmt"
 	"time"
 
-	accountingpb "github.com/kanz-eng/kanz-schemas-go/accounting/v1"
-	envelopepb "github.com/kanz-eng/kanz-schemas-go/envelope/v1"
-	orderpb "github.com/kanz-eng/kanz-schemas-go/order/v1"
+	accountingpb "github.com/eighred/kanz/kanz-schemas-go/accounting/v1"
+	envelopepb "github.com/eighred/kanz/kanz-schemas-go/envelope/v1"
+	orderpb "github.com/eighred/kanz/kanz-schemas-go/order/v1"
 	"google.golang.org/protobuf/proto"
 
 	"github.com/eighred/kanz/internal/dec"

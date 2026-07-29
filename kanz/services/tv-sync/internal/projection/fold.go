@@ -3,7 +3,7 @@ package projection
 import (
 	"math/big"
 
-	orderpb "github.com/kanz-eng/kanz-schemas-go/order/v1"
+	orderpb "github.com/eighred/kanz/kanz-schemas-go/order/v1"
 )
 
 // posState is the folded state of one instrument's position: signed net
