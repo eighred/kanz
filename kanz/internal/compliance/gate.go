@@ -8,8 +8,8 @@ import (
 	"sync"
 	"time"
 
-	commonpb "github.com/kanz-eng/kanz-schemas-go/common/v1"
-	compliancepb "github.com/kanz-eng/kanz-schemas-go/compliance/v1"
+	commonpb "github.com/eighred/kanz/kanz-schemas-go/common/v1"
+	compliancepb "github.com/eighred/kanz/kanz-schemas-go/compliance/v1"
 
 	// decutil: this package's own tests declare a local `dec(...)` Decimal-literal
 	// helper (engine_test.go), so the platform decimal package is aliased here to

@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	marketpb "github.com/kanz-eng/kanz-schemas-go/market/v1"
+	marketpb "github.com/eighred/kanz/kanz-schemas-go/market/v1"
 )
 
 func trade(t *testing.T, id string, sec int64, seq uint64) *marketpb.MarketDataEvent {

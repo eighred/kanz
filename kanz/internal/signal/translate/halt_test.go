@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	lifecyclepb "github.com/kanz-eng/kanz-schemas-go/lifecycle/v1"
+	lifecyclepb "github.com/eighred/kanz/kanz-schemas-go/lifecycle/v1"
 	"google.golang.org/protobuf/proto"
 )
 

@@ -59,9 +59,9 @@ import (
 	"os"
 	"time"
 
-	altpb "github.com/kanz-eng/kanz-schemas-go/alternatives/v1"
-	commonpb "github.com/kanz-eng/kanz-schemas-go/common/v1"
-	envelopepb "github.com/kanz-eng/kanz-schemas-go/envelope/v1"
+	altpb "github.com/eighred/kanz/kanz-schemas-go/alternatives/v1"
+	commonpb "github.com/eighred/kanz/kanz-schemas-go/common/v1"
+	envelopepb "github.com/eighred/kanz/kanz-schemas-go/envelope/v1"
 	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"

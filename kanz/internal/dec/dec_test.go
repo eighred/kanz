@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	commonpb "github.com/kanz-eng/kanz-schemas-go/common/v1"
+	commonpb "github.com/eighred/kanz/kanz-schemas-go/common/v1"
 )
 
 func TestToProtoScaled_NormalValueIsUnchangedAtScale8(t *testing.T) {

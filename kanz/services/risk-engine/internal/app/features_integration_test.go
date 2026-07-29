@@ -27,8 +27,8 @@ import (
 	"testing"
 	"time"
 
-	envelopepb "github.com/kanz-eng/kanz-schemas-go/envelope/v1"
-	inferencepb "github.com/kanz-eng/kanz-schemas-go/inference/v1"
+	envelopepb "github.com/eighred/kanz/kanz-schemas-go/envelope/v1"
+	inferencepb "github.com/eighred/kanz/kanz-schemas-go/inference/v1"
 	"google.golang.org/protobuf/proto"
 
 	"github.com/eighred/kanz/internal/prediction"

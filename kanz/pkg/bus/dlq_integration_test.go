@@ -21,7 +21,7 @@ import (
 	"testing"
 	"time"
 
-	envelopepb "github.com/kanz-eng/kanz-schemas-go/envelope/v1"
+	envelopepb "github.com/eighred/kanz/kanz-schemas-go/envelope/v1"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 	"google.golang.org/protobuf/types/known/timestamppb"

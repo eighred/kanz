@@ -33,7 +33,7 @@ import (
 	"errors"
 	"time"
 
-	commonpb "github.com/kanz-eng/kanz-schemas-go/common/v1"
+	commonpb "github.com/eighred/kanz/kanz-schemas-go/common/v1"
 )
 
 // PriceKind mirrors reference.v1.PriceKind — which mark an Observation carries.

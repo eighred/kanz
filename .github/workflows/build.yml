@@ -178,7 +178,7 @@ jobs:
         run: |
           buf generate
           cd gen/go
-          go mod init github.com/kanz-eng/kanz-schemas-go || true
+          go mod init github.com/eighred/kanz/kanz-schemas-go || true
           go mod tidy
 
       - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0

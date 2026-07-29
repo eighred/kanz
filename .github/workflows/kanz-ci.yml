@@ -126,7 +126,7 @@ jobs:
         run: |
           buf generate
           cd gen/go
-          go mod init github.com/kanz-eng/kanz-schemas-go || true
+          go mod init github.com/eighred/kanz/kanz-schemas-go || true
           # PIN the generated module's `go` directive to the CONSUMER's, instead
           # of letting `go mod init` stamp whatever toolchain happens to be
           # installed. Without this, a newer runner Go silently deletes kanz's

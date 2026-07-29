@@ -12,7 +12,7 @@ import (
 	"math/big"
 	"time"
 
-	orderpb "github.com/kanz-eng/kanz-schemas-go/order/v1"
+	orderpb "github.com/eighred/kanz/kanz-schemas-go/order/v1"
 )
 
 // execution is one folded Fill. Effective = venue execution time; knowledge =

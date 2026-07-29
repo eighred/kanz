@@ -17,7 +17,7 @@ import (
 	"fmt"
 	"strings"
 
-	envelopepb "github.com/kanz-eng/kanz-schemas-go/envelope/v1"
+	envelopepb "github.com/eighred/kanz/kanz-schemas-go/envelope/v1"
 )
 
 // SystemTenant carries cross-cutting platform events and pre-tenancy events. Its

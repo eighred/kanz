@@ -8,9 +8,9 @@ import (
 
 	"google.golang.org/protobuf/proto"
 
-	commonpb "github.com/kanz-eng/kanz-schemas-go/common/v1"
-	domainpb "github.com/kanz-eng/kanz-schemas-go/domain/v1"
-	envelopepb "github.com/kanz-eng/kanz-schemas-go/envelope/v1"
+	commonpb "github.com/eighred/kanz/kanz-schemas-go/common/v1"
+	domainpb "github.com/eighred/kanz/kanz-schemas-go/domain/v1"
+	envelopepb "github.com/eighred/kanz/kanz-schemas-go/envelope/v1"
 
 	v1 "github.com/eighred/kanz/internal/risk/api/v1"
 	"github.com/eighred/kanz/internal/risk/domain"

@@ -7,11 +7,11 @@ import (
 	"math/big"
 	"time"
 
+	commonpb "github.com/eighred/kanz/kanz-schemas-go/common/v1"
+	domainpb "github.com/eighred/kanz/kanz-schemas-go/domain/v1"
+	orderpb "github.com/eighred/kanz/kanz-schemas-go/order/v1"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
-	commonpb "github.com/kanz-eng/kanz-schemas-go/common/v1"
-	domainpb "github.com/kanz-eng/kanz-schemas-go/domain/v1"
-	orderpb "github.com/kanz-eng/kanz-schemas-go/order/v1"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"github.com/eighred/kanz/internal/dec"

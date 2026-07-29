@@ -3,7 +3,7 @@
 # nats-rebuild container (DR-01c). Distroless + static binary.
 #
 # Build context is the repo ROOT, not kanz/ — same as every other image here:
-# the module's go.mod replaces github.com/kanz-eng/kanz-schemas-go =>
+# the module's go.mod replaces github.com/eighred/kanz/kanz-schemas-go =>
 # ../kanz-schemas/gen/go, which is generated-not-committed (EVT-15a). Build with:
 #   docker build -f kanz/tools/natsrebuild/cmd/nats-rebuild/Dockerfile .
 #

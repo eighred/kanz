@@ -17,7 +17,7 @@ import (
 	"syscall"
 	"time"
 
-	lifecyclepb "github.com/kanz-eng/kanz-schemas-go/lifecycle/v1"
+	lifecyclepb "github.com/eighred/kanz/kanz-schemas-go/lifecycle/v1"
 
 	"github.com/eighred/kanz/internal/platform/subject"
 	"github.com/eighred/kanz/internal/signal/translate"

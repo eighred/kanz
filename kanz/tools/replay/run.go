@@ -13,8 +13,8 @@ import (
 	"github.com/google/uuid"
 	"google.golang.org/protobuf/proto"
 
+	envelopepb "github.com/eighred/kanz/kanz-schemas-go/envelope/v1"
 	"github.com/eighred/kanz/pkg/bus"
-	envelopepb "github.com/kanz-eng/kanz-schemas-go/envelope/v1"
 )
 
 // ReplayPrefix is the reserved top-level subject prefix from

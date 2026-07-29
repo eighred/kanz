@@ -3,7 +3,7 @@ package v1
 import (
 	"fmt"
 
-	commonpb "github.com/kanz-eng/kanz-schemas-go/common/v1"
+	commonpb "github.com/eighred/kanz/kanz-schemas-go/common/v1"
 )
 
 // Concrete ScenarioShock types — the baseline taxonomy external

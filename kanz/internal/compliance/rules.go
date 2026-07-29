@@ -5,7 +5,7 @@ import (
 	"math/big"
 	"sort"
 
-	compliancepb "github.com/kanz-eng/kanz-schemas-go/compliance/v1"
+	compliancepb "github.com/eighred/kanz/kanz-schemas-go/compliance/v1"
 )
 
 // The COMP-01 baseline rule set. Each function is a pure RuleFunc: it returns

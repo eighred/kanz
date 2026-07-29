@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	marketpb "github.com/kanz-eng/kanz-schemas-go/market/v1"
+	marketpb "github.com/eighred/kanz/kanz-schemas-go/market/v1"
 )
 
 // --- shared driver lifecycle (generic over a synthetic native tick) ---

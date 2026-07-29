@@ -5,9 +5,9 @@ import (
 	"log/slog"
 	"strings"
 
-	compliancepb "github.com/kanz-eng/kanz-schemas-go/compliance/v1"
-	envelopepb "github.com/kanz-eng/kanz-schemas-go/envelope/v1"
-	lifecyclepb "github.com/kanz-eng/kanz-schemas-go/lifecycle/v1"
+	compliancepb "github.com/eighred/kanz/kanz-schemas-go/compliance/v1"
+	envelopepb "github.com/eighred/kanz/kanz-schemas-go/envelope/v1"
+	lifecyclepb "github.com/eighred/kanz/kanz-schemas-go/lifecycle/v1"
 	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/proto"
 

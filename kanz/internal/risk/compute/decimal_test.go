@@ -3,7 +3,7 @@ package compute
 import (
 	"testing"
 
-	commonpb "github.com/kanz-eng/kanz-schemas-go/common/v1"
+	commonpb "github.com/eighred/kanz/kanz-schemas-go/common/v1"
 )
 
 func dec(c int64, e int32) *commonpb.Decimal {

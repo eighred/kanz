@@ -3,9 +3,9 @@ package main
 import (
 	"fmt"
 
-	domainpb "github.com/kanz-eng/kanz-schemas-go/domain/v1"
-	envelopepb "github.com/kanz-eng/kanz-schemas-go/envelope/v1"
-	orderpb "github.com/kanz-eng/kanz-schemas-go/order/v1"
+	domainpb "github.com/eighred/kanz/kanz-schemas-go/domain/v1"
+	envelopepb "github.com/eighred/kanz/kanz-schemas-go/envelope/v1"
+	orderpb "github.com/eighred/kanz/kanz-schemas-go/order/v1"
 	"google.golang.org/protobuf/proto"
 
 	"github.com/eighred/kanz/internal/dec"

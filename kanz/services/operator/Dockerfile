@@ -2,7 +2,7 @@
 #
 # operator service (F0+S1). Distroless + static binary. Build context is the
 # repo ROOT, not kanz/ — the module replaces
-# github.com/kanz-eng/kanz-schemas-go => ../kanz-schemas/gen/go, generated
+# github.com/eighred/kanz/kanz-schemas-go => ../kanz-schemas/gen/go, generated
 # (not committed). Build with:
 #   docker build -f kanz/services/operator/Dockerfile .
 FROM golang:1.26.5 AS build

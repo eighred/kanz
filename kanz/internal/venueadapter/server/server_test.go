@@ -16,8 +16,8 @@ import (
 	"log/slog"
 	"testing"
 
-	orderpb "github.com/kanz-eng/kanz-schemas-go/order/v1"
-	venuepb "github.com/kanz-eng/kanz-schemas-go/venue/v1"
+	orderpb "github.com/eighred/kanz/kanz-schemas-go/order/v1"
+	venuepb "github.com/eighred/kanz/kanz-schemas-go/venue/v1"
 
 	"github.com/eighred/kanz/internal/execution"
 	"github.com/eighred/kanz/internal/venueadapter/orderview"

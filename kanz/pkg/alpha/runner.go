@@ -9,7 +9,7 @@ import (
 	"sync"
 	"time"
 
-	signalpb "github.com/kanz-eng/kanz-schemas-go/signal/v1"
+	signalpb "github.com/eighred/kanz/kanz-schemas-go/signal/v1"
 
 	"github.com/eighred/kanz/internal/marketedge/book"
 	"github.com/eighred/kanz/internal/marketedge/depth"

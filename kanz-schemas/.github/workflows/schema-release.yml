@@ -41,7 +41,7 @@ jobs:
       - name: Assemble and verify module
         working-directory: gen/go
         run: |
-          go mod init github.com/kanz-eng/kanz-schemas-go || true
+          go mod init github.com/eighred/kanz/kanz-schemas-go || true
           go mod tidy
           go build ./...
       - name: Publish to companion module repo
@@ -51,7 +51,7 @@ jobs:
           set -euo pipefail
           tag="${GITHUB_REF_NAME}"
           git clone --depth 1 \
-            "https://x-access-token:${PUBLISH_TOKEN}@github.com/kanz-eng/kanz-schemas-go.git" out
+            "https://x-access-token:${PUBLISH_TOKEN}@github.com/eighred/kanz/kanz-schemas-go.git" out
           rsync -a --delete --exclude .git gen/go/ out/
           cd out
           git config user.name kanz-schemas-ci

@@ -1,7 +1,7 @@
 package compute
 
 import (
-	commonpb "github.com/kanz-eng/kanz-schemas-go/common/v1"
+	commonpb "github.com/eighred/kanz/kanz-schemas-go/common/v1"
 
 	"github.com/eighred/kanz/internal/risk/domain"
 )

@@ -7,7 +7,7 @@
 # variants — it holds no credentials and links no vendor SDK.
 #
 # Build context is the repo ROOT, not kanz/: the module's go.mod replaces
-# github.com/kanz-eng/kanz-schemas-go => ../kanz-schemas/gen/go, which is
+# github.com/eighred/kanz/kanz-schemas-go => ../kanz-schemas/gen/go, which is
 # generated-not-committed (EVT-15a). The build workflow runs `buf generate`
 # first, so both trees sit side by side in the context. Build with:
 #   docker build -f kanz/services/market-data/Dockerfile .

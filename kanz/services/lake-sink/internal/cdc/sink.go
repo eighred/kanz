@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	envelopepb "github.com/kanz-eng/kanz-schemas-go/envelope/v1"
+	envelopepb "github.com/eighred/kanz/kanz-schemas-go/envelope/v1"
 
 	"github.com/eighred/kanz/services/lake-sink/internal/decode"
 	"github.com/eighred/kanz/services/lake-sink/internal/sink"

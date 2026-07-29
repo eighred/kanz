@@ -15,7 +15,7 @@ import (
 	"strings"
 	"testing"
 
-	venuepb "github.com/kanz-eng/kanz-schemas-go/venue/v1"
+	venuepb "github.com/eighred/kanz/kanz-schemas-go/venue/v1"
 )
 
 // describingAdapter answers Describe with whatever identity it was given — the

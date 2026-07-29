@@ -1,4 +1,4 @@
-module github.com/kanz-eng/kanz-schemas/tools/registry-ingest
+module github.com/eighred/kanz/kanz-schemas/tools/registry-ingest
 
 go 1.23
 

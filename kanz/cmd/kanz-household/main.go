@@ -53,8 +53,8 @@ import (
 	"os"
 	"time"
 
-	envelopepb "github.com/kanz-eng/kanz-schemas-go/envelope/v1"
-	wealthpb "github.com/kanz-eng/kanz-schemas-go/wealth/v1"
+	envelopepb "github.com/eighred/kanz/kanz-schemas-go/envelope/v1"
+	wealthpb "github.com/eighred/kanz/kanz-schemas-go/wealth/v1"
 	"google.golang.org/protobuf/encoding/protojson"
 
 	"github.com/eighred/kanz/internal/dec"

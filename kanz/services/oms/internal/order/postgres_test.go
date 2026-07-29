@@ -18,9 +18,9 @@ import (
 	"sync"
 	"testing"
 
+	orderpb "github.com/eighred/kanz/kanz-schemas-go/order/v1"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
-	orderpb "github.com/kanz-eng/kanz-schemas-go/order/v1"
 )
 
 func newPool(t *testing.T) *pgxpool.Pool {

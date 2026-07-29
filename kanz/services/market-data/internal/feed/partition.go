@@ -5,7 +5,7 @@ import (
 	"hash/fnv"
 	"sync"
 
-	marketpb "github.com/kanz-eng/kanz-schemas-go/market/v1"
+	marketpb "github.com/eighred/kanz/kanz-schemas-go/market/v1"
 )
 
 // Market-data hot-path throughput (PARITY-05a → PARITY-05b). The base Sink

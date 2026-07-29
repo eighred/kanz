@@ -17,7 +17,7 @@ import (
 	"math"
 	"time"
 
-	commonpb "github.com/kanz-eng/kanz-schemas-go/common/v1"
+	commonpb "github.com/eighred/kanz/kanz-schemas-go/common/v1"
 
 	"github.com/eighred/kanz/internal/marketdata/returns"
 	"github.com/eighred/kanz/internal/marketdata/store"

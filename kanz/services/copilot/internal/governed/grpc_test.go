@@ -10,9 +10,9 @@ import (
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
-	commonpb "github.com/kanz-eng/kanz-schemas-go/common/v1"
-	domainpb "github.com/kanz-eng/kanz-schemas-go/domain/v1"
-	querypb "github.com/kanz-eng/kanz-schemas-go/query/v1"
+	commonpb "github.com/eighred/kanz/kanz-schemas-go/common/v1"
+	domainpb "github.com/eighred/kanz/kanz-schemas-go/domain/v1"
+	querypb "github.com/eighred/kanz/kanz-schemas-go/query/v1"
 )
 
 // fakeQuery is a hand-rolled querypb.RiskQueryServiceClient for the mapping tests.

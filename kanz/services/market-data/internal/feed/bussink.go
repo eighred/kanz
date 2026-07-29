@@ -5,8 +5,8 @@ import (
 	"errors"
 	"fmt"
 
-	envelopepb "github.com/kanz-eng/kanz-schemas-go/envelope/v1"
-	marketpb "github.com/kanz-eng/kanz-schemas-go/market/v1"
+	envelopepb "github.com/eighred/kanz/kanz-schemas-go/envelope/v1"
+	marketpb "github.com/eighred/kanz/kanz-schemas-go/market/v1"
 
 	"github.com/eighred/kanz/pkg/bus"
 )

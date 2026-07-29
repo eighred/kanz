@@ -3,7 +3,7 @@ package feed
 import (
 	"time"
 
-	marketpb "github.com/kanz-eng/kanz-schemas-go/market/v1"
+	marketpb "github.com/eighred/kanz/kanz-schemas-go/market/v1"
 )
 
 // SyntheticSession builds a deterministic, gap-free Session for the given

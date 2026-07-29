@@ -31,7 +31,7 @@ import (
 	"syscall"
 	"time"
 
-	venuepb "github.com/kanz-eng/kanz-schemas-go/venue/v1"
+	venuepb "github.com/eighred/kanz/kanz-schemas-go/venue/v1"
 	"github.com/prometheus/client_golang/prometheus"
 	"google.golang.org/grpc"
 

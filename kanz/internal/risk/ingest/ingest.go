@@ -38,8 +38,8 @@ import (
 
 	"google.golang.org/protobuf/proto"
 
-	domainpb "github.com/kanz-eng/kanz-schemas-go/domain/v1"
-	envelopepb "github.com/kanz-eng/kanz-schemas-go/envelope/v1"
+	domainpb "github.com/eighred/kanz/kanz-schemas-go/domain/v1"
+	envelopepb "github.com/eighred/kanz/kanz-schemas-go/envelope/v1"
 )
 
 // Event-type names follow kanz-schemas/docs/subject-taxonomy.md §1

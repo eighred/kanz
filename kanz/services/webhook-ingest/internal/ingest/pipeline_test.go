@@ -11,8 +11,8 @@ import (
 	"testing"
 	"time"
 
-	orderpb "github.com/kanz-eng/kanz-schemas-go/order/v1"
-	signalpb "github.com/kanz-eng/kanz-schemas-go/signal/v1"
+	orderpb "github.com/eighred/kanz/kanz-schemas-go/order/v1"
+	signalpb "github.com/eighred/kanz/kanz-schemas-go/signal/v1"
 
 	"github.com/eighred/kanz/internal/dec"
 	"github.com/eighred/kanz/internal/signal/translate"

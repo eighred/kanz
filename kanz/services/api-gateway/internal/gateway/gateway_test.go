@@ -14,9 +14,9 @@ import (
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
-	commonpb "github.com/kanz-eng/kanz-schemas-go/common/v1"
-	domainpb "github.com/kanz-eng/kanz-schemas-go/domain/v1"
-	querypb "github.com/kanz-eng/kanz-schemas-go/query/v1"
+	commonpb "github.com/eighred/kanz/kanz-schemas-go/common/v1"
+	domainpb "github.com/eighred/kanz/kanz-schemas-go/domain/v1"
+	querypb "github.com/eighred/kanz/kanz-schemas-go/query/v1"
 
 	"github.com/eighred/kanz/services/api-gateway/internal/authz"
 	"github.com/eighred/kanz/services/api-gateway/internal/gateway"

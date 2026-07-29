@@ -6,7 +6,7 @@ import (
 	"sync"
 	"time"
 
-	commonpb "github.com/kanz-eng/kanz-schemas-go/common/v1"
+	commonpb "github.com/eighred/kanz/kanz-schemas-go/common/v1"
 )
 
 // Memory is an in-memory Store for tests and local runs. It implements the full

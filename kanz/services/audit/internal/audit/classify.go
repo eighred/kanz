@@ -4,9 +4,9 @@ import (
 	"fmt"
 	"strings"
 
-	commandpb "github.com/kanz-eng/kanz-schemas-go/command/v1"
-	envelopepb "github.com/kanz-eng/kanz-schemas-go/envelope/v1"
-	observationpb "github.com/kanz-eng/kanz-schemas-go/observation/v1"
+	commandpb "github.com/eighred/kanz/kanz-schemas-go/command/v1"
+	envelopepb "github.com/eighred/kanz/kanz-schemas-go/envelope/v1"
+	observationpb "github.com/eighred/kanz/kanz-schemas-go/observation/v1"
 	"google.golang.org/protobuf/proto"
 
 	"github.com/eighred/kanz/pkg/auth"

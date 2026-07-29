@@ -12,7 +12,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes/fake"
 
-	operatorpb "github.com/kanz-eng/kanz-schemas-go/operator/v1"
+	operatorpb "github.com/eighred/kanz/kanz-schemas-go/operator/v1"
 
 	"github.com/eighred/kanz/internal/execution"
 	"github.com/eighred/kanz/internal/venueadapter/exchangeauth"

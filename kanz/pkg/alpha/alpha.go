@@ -35,8 +35,8 @@ import (
 	"math/big"
 	"time"
 
-	orderpb "github.com/kanz-eng/kanz-schemas-go/order/v1"
-	signalpb "github.com/kanz-eng/kanz-schemas-go/signal/v1"
+	orderpb "github.com/eighred/kanz/kanz-schemas-go/order/v1"
+	signalpb "github.com/eighred/kanz/kanz-schemas-go/signal/v1"
 )
 
 // Level is one aggregated L2 price level. Exact — no float ever touches depth a

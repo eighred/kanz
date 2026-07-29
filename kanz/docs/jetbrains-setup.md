@@ -27,7 +27,7 @@ inside the IDE.
 
 ## 1. Generate the schema SDK *before* opening the project
 
-`kanz/go.mod` has `replace github.com/kanz-eng/kanz-schemas-go =>
+`kanz/go.mod` has `replace github.com/eighred/kanz/kanz-schemas-go =>
 ../kanz-schemas/gen/go`, and `gen/` is gitignored (generated code is never
 committed, EVT-15a). **Open the project without generating it and GoLand shows
 thousands of unresolved imports** — the project is not broken, the SDK is just

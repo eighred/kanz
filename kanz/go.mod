@@ -13,7 +13,7 @@ require (
 	github.com/go-jose/go-jose/v4 v4.1.4
 	github.com/google/uuid v1.6.0
 	github.com/jackc/pgx/v5 v5.10.0
-	github.com/kanz-eng/kanz-schemas-go v0.0.0-00010101000000-000000000000
+	github.com/eighred/kanz/kanz-schemas-go v0.0.0-00010101000000-000000000000
 	github.com/nats-io/nats.go v1.52.0
 	github.com/prometheus/client_golang v1.24.1
 	github.com/prometheus/client_model v0.6.2
@@ -120,6 +120,6 @@ require (
 
 // Local replace until the first kanz-schemas release. After `cd
 // ../kanz-schemas && buf generate && (cd gen/go && go mod init
-// github.com/kanz-eng/kanz-schemas-go && go mod tidy)`, this resolves
+// github.com/eighred/kanz/kanz-schemas-go && go mod tidy)`, this resolves
 // against the locally-generated SDK. Removed once a tagged release exists.
-replace github.com/kanz-eng/kanz-schemas-go => ../kanz-schemas/gen/go
+replace github.com/eighred/kanz/kanz-schemas-go => ../kanz-schemas/gen/go

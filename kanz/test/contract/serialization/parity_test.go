@@ -26,9 +26,9 @@ import (
 
 	"google.golang.org/protobuf/types/known/timestamppb"
 
+	envelopepb "github.com/eighred/kanz/kanz-schemas-go/envelope/v1"
 	"github.com/eighred/kanz/pkg/bus"
 	"github.com/eighred/kanz/test/contract/serialization"
-	envelopepb "github.com/kanz-eng/kanz-schemas-go/envelope/v1"
 )
 
 const fixturesDir = "fixtures"

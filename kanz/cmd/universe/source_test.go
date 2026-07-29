@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	operatorpb "github.com/kanz-eng/kanz-schemas-go/operator/v1"
+	operatorpb "github.com/eighred/kanz/kanz-schemas-go/operator/v1"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 

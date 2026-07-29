@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	referencepb "github.com/kanz-eng/kanz-schemas-go/reference/v1"
+	referencepb "github.com/eighred/kanz/kanz-schemas-go/reference/v1"
 
 	"github.com/eighred/kanz/internal/dec"
 	"github.com/eighred/kanz/services/datamaster/internal/master"

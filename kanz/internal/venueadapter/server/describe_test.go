@@ -15,7 +15,7 @@ import (
 	"log/slog"
 	"testing"
 
-	venuepb "github.com/kanz-eng/kanz-schemas-go/venue/v1"
+	venuepb "github.com/eighred/kanz/kanz-schemas-go/venue/v1"
 
 	"github.com/eighred/kanz/internal/execution"
 	"github.com/eighred/kanz/internal/venueadapter/orderview"

@@ -3,8 +3,8 @@ package consume
 import (
 	"testing"
 
-	commonpb "github.com/kanz-eng/kanz-schemas-go/common/v1"
-	wealthpb "github.com/kanz-eng/kanz-schemas-go/wealth/v1"
+	commonpb "github.com/eighred/kanz/kanz-schemas-go/common/v1"
+	wealthpb "github.com/eighred/kanz/kanz-schemas-go/wealth/v1"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )

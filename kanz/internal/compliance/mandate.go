@@ -6,7 +6,7 @@ import (
 	"sync"
 	"time"
 
-	compliancepb "github.com/kanz-eng/kanz-schemas-go/compliance/v1"
+	compliancepb "github.com/eighred/kanz/kanz-schemas-go/compliance/v1"
 )
 
 // MandateRegistry is an in-memory, point-in-time store of mandate versions per

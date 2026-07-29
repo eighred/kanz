@@ -38,7 +38,7 @@ import (
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
-	inferencepb "github.com/kanz-eng/kanz-schemas-go/inference/v1"
+	inferencepb "github.com/eighred/kanz/kanz-schemas-go/inference/v1"
 )
 
 // Degraded-reason identifiers matching PRED-02 §2 + kanz-py's

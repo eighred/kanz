@@ -20,8 +20,8 @@ import (
 
 	"google.golang.org/protobuf/types/known/timestamppb"
 
-	accountingpb "github.com/kanz-eng/kanz-schemas-go/accounting/v1"
-	envelopepb "github.com/kanz-eng/kanz-schemas-go/envelope/v1"
+	accountingpb "github.com/eighred/kanz/kanz-schemas-go/accounting/v1"
+	envelopepb "github.com/eighred/kanz/kanz-schemas-go/envelope/v1"
 
 	"github.com/eighred/kanz/internal/dec"
 	"github.com/eighred/kanz/pkg/bus"

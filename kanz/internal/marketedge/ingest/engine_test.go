@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
-	commonpb "github.com/kanz-eng/kanz-schemas-go/common/v1"
-	marketpb "github.com/kanz-eng/kanz-schemas-go/market/v1"
+	commonpb "github.com/eighred/kanz/kanz-schemas-go/common/v1"
+	marketpb "github.com/eighred/kanz/kanz-schemas-go/market/v1"
 
 	"github.com/eighred/kanz/internal/dec"
 	"github.com/eighred/kanz/internal/marketedge/book"

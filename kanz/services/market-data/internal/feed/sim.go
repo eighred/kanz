@@ -4,7 +4,7 @@ import (
 	"context"
 	"time"
 
-	marketpb "github.com/kanz-eng/kanz-schemas-go/market/v1"
+	marketpb "github.com/eighred/kanz/kanz-schemas-go/market/v1"
 )
 
 // Session is a recorded, ordered run of market events — a "golden session" the

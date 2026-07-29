@@ -4,7 +4,7 @@ import (
 	"context"
 	"time"
 
-	compliancepb "github.com/kanz-eng/kanz-schemas-go/compliance/v1"
+	compliancepb "github.com/eighred/kanz/kanz-schemas-go/compliance/v1"
 
 	"github.com/eighred/kanz/internal/compliance"
 )

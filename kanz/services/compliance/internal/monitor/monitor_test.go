@@ -6,10 +6,10 @@ import (
 	"testing"
 	"time"
 
-	commonpb "github.com/kanz-eng/kanz-schemas-go/common/v1"
-	compliancepb "github.com/kanz-eng/kanz-schemas-go/compliance/v1"
-	domainpb "github.com/kanz-eng/kanz-schemas-go/domain/v1"
-	envelopepb "github.com/kanz-eng/kanz-schemas-go/envelope/v1"
+	commonpb "github.com/eighred/kanz/kanz-schemas-go/common/v1"
+	compliancepb "github.com/eighred/kanz/kanz-schemas-go/compliance/v1"
+	domainpb "github.com/eighred/kanz/kanz-schemas-go/domain/v1"
+	envelopepb "github.com/eighred/kanz/kanz-schemas-go/envelope/v1"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 

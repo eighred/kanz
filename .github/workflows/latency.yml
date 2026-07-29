@@ -8,7 +8,7 @@
 # kanz/test/load/README.md). The in-process micro-benchmark guard is LATENCY-01d.
 #
 # Both jobs reuse the kanz-ci buf-generate prelude: the kanz module replaces
-# github.com/kanz-eng/kanz-schemas-go => ../kanz-schemas/gen/go, which is
+# github.com/eighred/kanz/kanz-schemas-go => ../kanz-schemas/gen/go, which is
 # generated-not-committed (EVT-15a), so the SDK is generated before the service
 # images build (Dockerfiles COPY kanz-schemas/gen/go) and before `go run`.
 name: latency
@@ -68,7 +68,7 @@ jobs:
         run: |
           buf generate
           cd gen/go
-          go mod init github.com/kanz-eng/kanz-schemas-go || true
+          go mod init github.com/eighred/kanz/kanz-schemas-go || true
           go mod tidy
 
       - name: Build + start load stack
@@ -181,7 +181,7 @@ jobs:
         run: |
           buf generate
           cd gen/go
-          go mod init github.com/kanz-eng/kanz-schemas-go || true
+          go mod init github.com/eighred/kanz/kanz-schemas-go || true
           go mod tidy
       - name: Run compute benchmarks
         working-directory: kanz

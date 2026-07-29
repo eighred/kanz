@@ -11,7 +11,7 @@ import (
 	"fmt"
 	"strings"
 
-	signalpb "github.com/kanz-eng/kanz-schemas-go/signal/v1"
+	signalpb "github.com/eighred/kanz/kanz-schemas-go/signal/v1"
 )
 
 // Webhook is the JSON body a TradingView Pine alert posts. Every numeric field

@@ -4,7 +4,7 @@ import (
 	"math/big"
 	"testing"
 
-	orderpb "github.com/kanz-eng/kanz-schemas-go/order/v1"
+	orderpb "github.com/eighred/kanz/kanz-schemas-go/order/v1"
 )
 
 func ex(side orderpb.Side, qty, price int64, instrument string) execution {
