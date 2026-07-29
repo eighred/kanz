@@ -2,6 +2,7 @@
 package config
 
 import (
+	"fmt"
 	"log/slog"
 	"os"
 	"strings"
@@ -102,6 +103,32 @@ func Load() (Config, error) {
 		return Config{}, err
 	}
 
+	// THE ENDPOINT HAS NO SAFE DEFAULT, SO IT HAS NO DEFAULT (#147).
+	//
+	// Binance can default to testnet.binance.vision and fail safe: that is a
+	// physically separate exchange, and a key valid there is rejected by
+	// api.binance.com, so a misdirected order fails rather than fills. OKX has no
+	// such host. Demo trading is selected per-request by `x-simulated-trading: 1`,
+	// a header this adapter does not send, so the ONLY thing standing between this
+	// process and the live order book is which URL it was handed.
+	//
+	// These used to default to https://www.okx.com / wss://ws.okx.com:8443 — which
+	// made "nobody configured this" and "somebody chose production" the same state,
+	// on the one code path where that distinction is measured in real money. Deleting
+	// the env var did not degrade the adapter, it promoted it to live.
+	//
+	// An adapter that refuses to boot is recoverable in a way one that quietly went
+	// live is not, so this fails closed. Whoever runs it must SAY which exchange
+	// they mean, and that statement is then visible in the manifest and in `env`.
+	baseURL, err := requiredEnv("OKX_BASE_URL")
+	if err != nil {
+		return Config{}, err
+	}
+	wsBase, err := requiredEnv("OKX_WS_BASE")
+	if err != nil {
+		return Config{}, err
+	}
+
 	return Config{
 		GRPCListen:   envOr("VENUE_OKX_GRPC_LISTEN", ":9000"),
 		HTTPListen:   envOr("VENUE_OKX_LISTEN", ":8092"),
@@ -117,13 +144,25 @@ func Load() (Config, error) {
 		Account:                envOr("OKX_VENUE_ACCOUNT", envOr("OKX_MIC", "OKX")),
 		AccountUID:             os.Getenv("OKX_VENUE_ACCOUNT_UID"),
 		AllowUnverifiedAccount: os.Getenv("OKX_ALLOW_UNVERIFIED_ACCOUNT") == "true",
-		BaseURL:                envOr("OKX_BASE_URL", "https://www.okx.com"),
-		WSBase:                 envOr("OKX_WS_BASE", "wss://ws.okx.com:8443"),
+		BaseURL:                baseURL,
+		WSBase:                 wsBase,
 		APIKey:                 apiKey,
 		APISecret:              apiSecret,
 		Passphrase:             passphrase,
 		Symbols:                os.Getenv("OKX_SYMBOLS"),
 	}, nil
+}
+
+// requiredEnv is envOr's counterpart for settings whose wrong value is worse
+// than no value. The error names the variable, because a pod that will not start
+// is only actionable if the log says which line of the manifest is missing.
+func requiredEnv(k string) (string, error) {
+	if v := strings.TrimSpace(os.Getenv(k)); v != "" {
+		return v, nil
+	}
+	return "", fmt.Errorf("%s is required and has no default: OKX exposes no demo hostname, "+
+		"so defaulting it would silently select the LIVE exchange (see #147). Set it explicitly "+
+		"to the endpoint you intend to trade against", k)
 }
 
 func envOr(k, def string) string {

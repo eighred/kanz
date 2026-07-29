@@ -24,12 +24,21 @@ import (
 // or explicitly recorded as unresolved — and that the classification, the
 // cluster manifests and the README cannot drift apart.
 //
-// It does NOT assert that every store is backed up, because five are not. A
-// guard that claimed otherwise would be the exact failure this repository keeps
-// paying for: a green check standing in for a property that does not hold. The
-// unresolved five are listed below with their real exposure, this test logs
-// them loudly on every run, and #60 is not closed by this file — only its
-// classification half is.
+// It does NOT assert that every store is backed up. It asserts that every store
+// is DECIDED. As of the commit that placed the last of #60's five, no service is
+// drUnresolved — but that is a fact about drPosture today, not a property of
+// this guard, and the assertion is deliberately not tightened to "everything is
+// covered". A future service may legitimately be excluded, and one may sit
+// unresolved while its placement is argued; a guard that forbade that would be
+// answered by inventing an exclusion, which is the failure this repository keeps
+// paying for wearing a green check. Assertion 5 logs any unresolved store loudly
+// on every run instead.
+//
+// It also does NOT assert that a covered service CONNECTS to the cluster it is
+// mapped to. Every DSN is read from Vault at kv/kanz/<service> and no file in
+// this module sets it, so "covered" here means the cluster, the standby and the
+// promotion exist — declared wiring, checked against three manifests. Whether
+// the running service opens that database is settled by #59.
 func TestEveryMigrationOwningServiceHasADecidedDRPosture(t *testing.T) {
 	root := moduleRoot(t)
 
@@ -183,9 +192,10 @@ func TestEveryMigrationOwningServiceHasADecidedDRPosture(t *testing.T) {
 		}
 	}
 
-	// 5. Say the exposure out loud on every run. These are not passing because
-	//    they are fine; they are passing because the gap is now recorded rather
-	//    than invisible, which is a strictly smaller claim.
+	// 5. Say the exposure out loud on every run, if there is any. Silence here is
+	//    the only correct silence in this test: an unresolved store is a store
+	//    with no backup and no exclusion, and it must never be able to reach a
+	//    green run without printing itself.
 	var unresolved []string
 	for svc, p := range drPosture {
 		if p.status == drUnresolved {
@@ -212,12 +222,12 @@ func TestEveryMigrationOwningServiceHasADecidedDRPosture(t *testing.T) {
 // failover.sh never promotes, produces that outcome exactly: the services start,
 // they reach a database, and it is not theirs.
 //
-// This matters most for the work that is still OPEN on #60. Placing the five
-// unresolved stores means adding a cluster, and the three places that must learn
-// about it — cluster.yaml, replica.yaml, failover.sh — are three separate files
-// that no compiler relates. This guard relates them, so the next cluster cannot
-// be half-added: it fails until a standby exists and the failover script
-// promotes it.
+// This is what made #60's placements safe to do at all. Placing a store means
+// either adding a cluster or joining one, and the three places that must learn
+// about a cluster — cluster.yaml, replica.yaml, failover.sh — are three files
+// that no compiler relates. This guard relates them, so a cluster cannot be
+// half-added: it fails until a standby exists and the failover script promotes
+// it. kanz-compliance was added under exactly that constraint.
 //
 // WHAT IT DELIBERATELY DOES NOT ASSERT. That any of this has ever been executed.
 // The DR drill (docs/runbooks/dr-drill.md) is the only thing that proves a
@@ -318,26 +328,68 @@ var drPosture = map[string]drClassification{
 		"retention — object-locked, and deliberately not restorable-to-an-earlier-instant, which is " +
 		"the point of an audit log"},
 
-	"oms": {status: drUnresolved, reason: "holds orders, positions and position_fills — the order " +
-		"store and position book, the money path itself. THE MOST SERIOUS OF THE FIVE: after a " +
-		"failover the OMS starts against an empty store and SweepInterrupted logs count=0, the " +
-		"identical line a healthy clean start produces. Nothing distinguishes 'no interrupted " +
-		"orders' from 'no orders at all', so the platform reports a normal startup while holding " +
-		"positions at an exchange it has no record of. This is why CLAUDE.md sequences M3 after " +
-		"this issue. Tracked by #60"},
-	"venue-binance": {status: drUnresolved, reason: "holds venue_orders — the exchange-order to " +
-		"kanz-order mapping that reconciliation and the idempotency/recovery path depend on. " +
-		"Losing it means an exchange order cannot be tied back to the order that placed it. " +
-		"Tracked by #60"},
-	"venue-okx": {status: drUnresolved, reason: "holds venue_orders — same exposure as " +
-		"venue-binance. Tracked by #60"},
-	"regulatory": {status: drUnresolved, reason: "holds audit_chain_links — the tamper-evidence " +
-		"chain. Losing it does not corrupt the chain, it makes the chain unverifiable, which for a " +
-		"tamper-evidence structure is most of its value. Tracked by #60"},
-	"tv-sync": {status: drUnresolved, reason: "holds tv_facts, a projection of the event log. The " +
-		"weakest exposure of the five because it is rebuildable from the events, but 'rebuildable' " +
-		"is a claim nobody has exercised — it is listed rather than excluded for that reason. " +
-		"Tracked by #60"},
+	"oms": {status: drCovered, cluster: "kanz-orders", reason: "holds orders, positions and " +
+		"position_fills — the order store and position book, the money path itself. Its OWN " +
+		"cluster rather than a database in kanz-books because PITR is per-cluster: rewinding the " +
+		"order book to an instant before a bad sweep would otherwise rewind the IBOR ledger, the " +
+		"fund journal, the household book and the golden records with it. Losing it is the " +
+		"quietest failure in the estate — the OMS starts against an empty store and " +
+		"SweepInterrupted logs count=0, the identical line a healthy clean start produces. NOTE: " +
+		"this records that the DR wiring is DECLARED (cluster + standby + promotion). The DSN the " +
+		"OMS actually opens comes from Vault at kv/kanz/oms, which no file in this repo sets, so " +
+		"binding it to kanz-orders-rw.kanz-data.svc is confirmed by #59, not by this entry"},
+	"venue-binance": {status: drCovered, cluster: "kanz-orders", reason: "holds venue_orders — the " +
+		"exchange-order to kanz-order mapping that reconciliation and the idempotency/recovery path " +
+		"depend on. Losing it means an exchange order cannot be tied back to the order that placed " +
+		"it. IN kanz-orders, a database beside the OMS's, and that is the whole point rather than " +
+		"convenience: the OMS admits an order at its own primary key and only then calls this " +
+		"adapter, which writes the mapping row — one logical transaction on the order path. PITR is " +
+		"per-cluster, so a cluster of its own would be a SEPARATE RESTORE TIMELINE: restore orders " +
+		"to T while venue_orders sits at T' and you get orphan venue mappings, or orders with no " +
+		"mapping back to the exchange order at all, which is exactly what recovery needs to read. " +
+		"One cluster is one timeline, so the order path restores coherently or not at all. NOTE: " +
+		"this records that the DR wiring is DECLARED. The DSN comes from Vault at " +
+		"kv/kanz/venue-binance, which no file in this repo sets, so binding it to " +
+		"kanz-orders-rw.kanz-data.svc is confirmed by #59, not by this entry"},
+	"venue-okx": {status: drCovered, cluster: "kanz-orders", reason: "holds venue_orders — same " +
+		"schema and same exposure as venue-binance, and in the same cluster for the same reason: " +
+		"the venue mapping and the OMS order it maps must share one restore timeline, because PITR " +
+		"is per-cluster and a mapping restored to a different instant than the order is worse than " +
+		"no mapping — it is a wrong answer to the question reconciliation asks. NOTE: the DSN comes " +
+		"from Vault at kv/kanz/venue-okx and is confirmed by #59, not by this entry"},
+	"regulatory": {status: drCovered, cluster: "kanz-compliance", reason: "holds audit_chain_links — " +
+		"the tamper-evidence chain. Losing it does not corrupt the chain, it makes the chain " +
+		"unverifiable, which for a tamper-evidence structure is most of its value, and the canonical " +
+		"signed bytes exist nowhere else so there is nothing to re-derive them from. Its OWN " +
+		"cluster, kanz-compliance, deliberately NOT co-located with the order path or the books: " +
+		"this chain is evidence ABOUT those stores, PITR is per-cluster, and evidence that gets " +
+		"rewound whenever the thing it attests to gets rewound is not evidence — a restore of the " +
+		"books would silently take the links covering that window with it, leaving a chain that " +
+		"cannot distinguish 'those filings never happened' from 'the record of them was rolled " +
+		"back'. Independence is the reason it is separate, not blast radius. NOTE: the DSN comes " +
+		"from Vault at kv/kanz/regulatory and is confirmed by #59, not by this entry"},
+	"tv-sync": {status: drCovered, cluster: "kanz-books", reason: "holds tv_facts, a projection of " +
+		"the order FACT log. COVERED RATHER THAN EXCLUDED, and the rebuild story is why: it was " +
+		"chased to the config and it does not hold. The 24h figure in tv-sync's own comments is " +
+		"real (infra/nats/bootstrap-job.yaml:100 — the EXECUTION stream carrying order.> has " +
+		"max_age 24h), and Kafka does retain order.order for 30d " +
+		"(infra/kafka/topics-job.yaml:67, retention.ms=2592000000) — but the DR rebuild reads only " +
+		"a bounded recent window of it: infra/dr/nats/rebuild-job.yaml:97 sets " +
+		"NATS_REBUILD_SINCE=24h, and order.order is not in NATS_REBUILD_STATE_TOPICS, so it takes " +
+		"the time window rather than offset 0. So at most 24h of the 30d log ever returns to the " +
+		"spine. Worse, the rebuild's only sink is the bus (tools/natsrebuild/rebuild.go) — it " +
+		"restores the SPINE, and nothing anywhere re-drives this projection: the sole path that " +
+		"writes tv_facts is the running service, and its Rehydrate reads tv_facts itself " +
+		"(services/tv-sync/internal/projection/postgres.go), which is circular when the table is " +
+		"empty. Per-tenant it is worse still — infra/dr/nats/rebuild-job.yaml drains only the " +
+		"un-prefixed __system__ topics and exits 0 having replayed nothing for any onboarded " +
+		"tenant. And no fill is persisted anywhere else, so what is lost is not a cache of " +
+		"something durable. IN kanz-books rather than kanz-orders: that cluster's contents are " +
+		"already 'event-sourced or replace-on-write projections whose source of truth is the " +
+		"append-only journal', which is exactly what this is, and nothing on the order path READS " +
+		"tv_facts — it is the read side, so it has no transactional coupling to orders and must " +
+		"not share the money path's restore timeline in either direction. NOTE: the DSN comes from " +
+		"Vault at kv/kanz/tv-sync and is confirmed by #59, not by this entry"},
 }
 
 // readmeRow is one parsed row of the README's coverage table.

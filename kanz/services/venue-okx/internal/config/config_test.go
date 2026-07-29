@@ -16,6 +16,16 @@ import (
 	"testing"
 )
 
+// setVenueEndpoints supplies the two settings that have no default (#147) so a
+// test about something else can reach the code it is actually testing. It
+// deliberately uses a non-live host: a fixture that names www.okx.com would be
+// copied into a manifest sooner or later.
+func setVenueEndpoints(t *testing.T) {
+	t.Helper()
+	t.Setenv("OKX_BASE_URL", "https://okx.invalid")
+	t.Setenv("OKX_WS_BASE", "wss://okx.invalid")
+}
+
 func TestUnreadableDatabaseURLFileFailsFast(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "does-not-exist")
@@ -43,6 +53,7 @@ func TestDatabaseURLFromSecretFile(t *testing.T) {
 		t.Fatalf("write secret file: %v", err)
 	}
 	t.Setenv("VENUE_OKX_DATABASE_URL_FILE", path)
+	setVenueEndpoints(t)
 
 	cfg, err := Load()
 	if err != nil {
@@ -61,6 +72,7 @@ func TestDatabaseURLFileWinsOverPlaintextEnv(t *testing.T) {
 	}
 	t.Setenv("VENUE_OKX_DATABASE_URL_FILE", path)
 	t.Setenv("VENUE_OKX_DATABASE_URL", "postgres://from-env/venue")
+	setVenueEndpoints(t)
 
 	cfg, err := Load()
 	if err != nil {
@@ -76,6 +88,7 @@ func TestNoDatabaseConfiguredLeavesDSNEmptyWithoutError(t *testing.T) {
 	// The dev/rig default: neither _FILE nor the plaintext env set ⇒ empty DSN,
 	// no error. openView's caller is responsible for warning about the
 	// in-memory consequence; Load() itself must not refuse to start.
+	setVenueEndpoints(t)
 	cfg, err := Load()
 	if err != nil {
 		t.Fatalf("load: %v", err)
@@ -92,3 +105,50 @@ func TestNoDatabaseConfiguredLeavesDSNEmptyWithoutError(t *testing.T) {
 // erroring with the var and path named. The DSN-level tests above stay, because
 // they assert what THIS service does with the resolved value, which is a
 // different question from how the value is resolved.
+
+// THE ENDPOINT MUST BE STATED, NEVER ASSUMED (#147).
+//
+// OKX_BASE_URL and OKX_WS_BASE used to default to https://www.okx.com and
+// wss://ws.okx.com:8443. OKX has no demo hostname — demo is the per-request
+// `x-simulated-trading: 1` header, which this adapter does not send — so that
+// default meant deleting a line from the manifest promoted the adapter to the
+// LIVE order book instead of degrading it. These two tests are the difference
+// between "nobody configured this" and "somebody chose production", on the one
+// path where that distinction is denominated in money.
+func TestVenueEndpointsHaveNoDefaultAndFailClosed(t *testing.T) {
+	for _, missing := range []string{"OKX_BASE_URL", "OKX_WS_BASE"} {
+		t.Run("missing="+missing, func(t *testing.T) {
+			setVenueEndpoints(t)
+			t.Setenv(missing, "") // the variable the deployment forgot
+
+			_, err := Load()
+			if err == nil {
+				t.Fatalf("Load() with %s unset = nil error, want a refusal — an unset venue "+
+					"endpoint must not resolve to the live exchange", missing)
+			}
+			if !strings.Contains(err.Error(), missing) {
+				t.Errorf("error = %q, want it to name %s — a pod that will not start is only "+
+					"actionable if the log says which setting is missing", err.Error(), missing)
+			}
+		})
+	}
+}
+
+// The counterpart: an endpoint that IS stated is used verbatim. A fail-closed
+// check that also mangled the configured value would trade one silent wrong
+// destination for another.
+func TestVenueEndpointsAreUsedAsConfigured(t *testing.T) {
+	t.Setenv("OKX_BASE_URL", "https://sandbox.example.invalid")
+	t.Setenv("OKX_WS_BASE", "wss://sandbox.example.invalid/ws")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if cfg.BaseURL != "https://sandbox.example.invalid" {
+		t.Errorf("BaseURL = %q, want the configured value verbatim", cfg.BaseURL)
+	}
+	if cfg.WSBase != "wss://sandbox.example.invalid/ws" {
+		t.Errorf("WSBase = %q, want the configured value verbatim", cfg.WSBase)
+	}
+}
