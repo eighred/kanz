@@ -1,0 +1,37 @@
+-- 0005: orders carry a VERSION, so a write can be refused (#122).
+--
+-- TWO REPLICAS COULD SILENTLY OVERWRITE EACH OTHER'S ORDER STATE.
+--
+-- Store.Save was a blind upsert: INSERT ... ON CONFLICT DO UPDATE SET status, state,
+-- updated_at. It discarded the result tag, so whichever statement executed last simply
+-- won. A CANCELLED order came back as FILLED with no error returned to anybody, no
+-- conflict recorded and no metric moved. The loser's write was not rejected — it was
+-- applied over the winner's and forgotten.
+--
+-- The comment on Save used to justify this by claiming "the bus partition_key serializes
+-- transitions per order_id". THAT WAS NEVER TRUE. partition_key is stamped by producers
+-- and read by the consumer only to copy onto a DLQ republish; nothing serializes
+-- deliveries by it, and submit, amend and cancel arrive on three separate durables with
+-- three cursors and three dispatch goroutines. Do not reintroduce that claim here or
+-- anywhere else.
+--
+-- #117 closed the in-pod half with a per-order lock. That lock is in-process BY
+-- CONSTRUCTION, so it ends at the pod boundary — and oms-deploy.yaml runs replicas: 2. A
+-- submit delivered to pod A and a cancel delivered to pod B were excluded by nothing.
+--
+-- # Why a column and not a lock
+--
+-- The exclusion has to live where both pods can see it, and the only thing both pods
+-- share is the database. This is the same move EXEC-M7c made for admission: Create stopped
+-- being a SELECT-then-INSERT and became ON CONFLICT DO NOTHING, with RowsAffected as the
+-- verdict. Save now uses the same shape — the engine decides, the caller is told.
+--
+-- # Why DEFAULT 0 is safe here
+--
+-- Every existing row starts at 0 and the first CAS write moves it to 1. There is no
+-- backfill to get wrong: a version is only ever compared against one this process just
+-- read, never against a value that had to be reconstructed.
+--
+-- The default STAYS, unlike 0004's venue. A row is inserted by Create, which does not know
+-- or care about versions — the column must have a value without Create naming one.
+ALTER TABLE orders ADD COLUMN version BIGINT NOT NULL DEFAULT 0;

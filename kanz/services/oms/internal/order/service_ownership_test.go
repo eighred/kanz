@@ -62,7 +62,7 @@ func TestCancel_RefusesPrincipalNotEntitledToTheOrdersPortfolio(t *testing.T) {
 		t.Fatalf("outcome = %v, want REJECTED", oc.GetStatus())
 	}
 	// The order must still be live and cancellable by someone who IS entitled.
-	st, err := svc.store.Load(context.Background(), "o1")
+	st, _, err := svc.store.Load(context.Background(), "o1")
 	if err != nil {
 		t.Fatalf("load: %v", err)
 	}
@@ -140,7 +140,7 @@ func TestAmend_RefusesPrincipalNotEntitledToTheOrdersPortfolio(t *testing.T) {
 	}
 	// The order's quantity must be untouched — a rejected amend that still
 	// mutated state would be the same breach with a different label.
-	st, err := svc.store.Load(context.Background(), "o1")
+	st, _, err := svc.store.Load(context.Background(), "o1")
 	if err != nil {
 		t.Fatalf("load: %v", err)
 	}
@@ -160,11 +160,11 @@ func TestAmend_RefusesQuarantinedOrder(t *testing.T) {
 	fb := &fakeBus{}
 	svc, _ := restingOrderOn(t, fb, &closerVenue{mic: "BINANCE"})
 
-	st, err := svc.store.Load(context.Background(), "o1")
+	st, ver, err := svc.store.Load(context.Background(), "o1")
 	if err != nil {
 		t.Fatalf("load: %v", err)
 	}
-	if err := svc.quarantine(context.Background(), st, "test: venue truth could not be established"); err != nil {
+	if err := svc.quarantine(context.Background(), st, ver, "test: venue truth could not be established"); err != nil {
 		t.Fatalf("quarantine: %v", err)
 	}
 
@@ -185,7 +185,7 @@ func TestAmend_RefusesQuarantinedOrder(t *testing.T) {
 	}
 	// The order's quantity must be untouched — a rejected amend that still
 	// mutated state would be the same breach with a different label.
-	st, err = svc.store.Load(context.Background(), "o1")
+	st, _, err = svc.store.Load(context.Background(), "o1")
 	if err != nil {
 		t.Fatalf("load: %v", err)
 	}
@@ -214,7 +214,7 @@ func TestAmend_AllowsPrincipalEntitledToTheOrdersPortfolio(t *testing.T) {
 	if oc.GetStatus() != commandpb.CommandOutcomeStatus_COMMAND_OUTCOME_STATUS_EXECUTED {
 		t.Fatalf("outcome = %v, want EXECUTED", oc.GetStatus())
 	}
-	st, err := svc.store.Load(context.Background(), "o1")
+	st, _, err := svc.store.Load(context.Background(), "o1")
 	if err != nil {
 		t.Fatalf("load: %v", err)
 	}

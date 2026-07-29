@@ -149,7 +149,7 @@ func TestPostgresCreateThenSaveThenLoad(t *testing.T) {
 	st := NewPostgres(pool)
 	ctx := context.Background()
 
-	if _, err := st.Load(ctx, "missing"); !errors.Is(err, ErrNotFound) {
+	if _, _, err := st.Load(ctx, "missing"); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("load missing: want ErrNotFound, got %v", err)
 	}
 	if err := st.Create(ctx, state("ORD-1", orderpb.OrderStatus_ORDER_STATUS_PENDING_NEW)); err != nil {
@@ -159,7 +159,7 @@ func TestPostgresCreateThenSaveThenLoad(t *testing.T) {
 	if err := st.Create(ctx, state("ORD-1", orderpb.OrderStatus_ORDER_STATUS_FILLED)); !errors.Is(err, ErrExists) {
 		t.Fatalf("duplicate create: want ErrExists, got %v", err)
 	}
-	got, err := st.Load(ctx, "ORD-1")
+	got, ver, err := st.Load(ctx, "ORD-1")
 	if err != nil {
 		t.Fatalf("load: %v", err)
 	}
@@ -167,11 +167,12 @@ func TestPostgresCreateThenSaveThenLoad(t *testing.T) {
 		t.Fatalf("losing Create overwrote state: status=%v, want PENDING_NEW", got.GetStatus())
 	}
 
-	// Save is the post-admission upsert: the transition lands.
-	if err := st.Save(ctx, state("ORD-1", orderpb.OrderStatus_ORDER_STATUS_ROUTED)); err != nil {
+	// Save is the post-admission compare-and-swap: the transition lands when the
+	// caller still holds the version it loaded.
+	if err := st.Save(ctx, state("ORD-1", orderpb.OrderStatus_ORDER_STATUS_ROUTED), ver); err != nil {
 		t.Fatalf("save: %v", err)
 	}
-	if got, err = st.Load(ctx, "ORD-1"); err != nil || got.GetStatus() != orderpb.OrderStatus_ORDER_STATUS_ROUTED {
+	if got, _, err = st.Load(ctx, "ORD-1"); err != nil || got.GetStatus() != orderpb.OrderStatus_ORDER_STATUS_ROUTED {
 		t.Fatalf("save not applied: status=%v err=%v", got.GetStatus(), err)
 	}
 }

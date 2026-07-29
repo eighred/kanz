@@ -55,7 +55,7 @@ func TestSubmit_MarketOrderTheSimVenueCannotPriceIsRejected(t *testing.T) {
 		t.Fatalf("reason code = %q, want PRICE_UNAVAILABLE (the code COMP-M1 already uses)", oc.GetErrorCode())
 	}
 	// And it must be terminal in the store, not resting.
-	st, err := svc.store.Load(context.Background(), "o1")
+	st, _, err := svc.store.Load(context.Background(), "o1")
 	if err != nil {
 		t.Fatalf("load: %v", err)
 	}

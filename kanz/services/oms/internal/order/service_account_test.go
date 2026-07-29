@@ -44,7 +44,7 @@ func TestSubmit_StampsThePortfoliosBoundAccount(t *testing.T) {
 	if err := svc.Handle(testCtx(), submitEnvFor("acme"), mustMarshal(t, cmd)); err != nil {
 		t.Fatalf("Handle: %v", err)
 	}
-	st, err := store.Load(context.Background(), cmd.GetOrderId())
+	st, _, err := store.Load(context.Background(), cmd.GetOrderId())
 	if err != nil {
 		t.Fatalf("the order was not admitted: %v", err)
 	}
@@ -81,7 +81,7 @@ func TestSubmit_UnboundPortfolioIsRefusedWhenAccountsAreRequired(t *testing.T) {
 	// Refused at ADMISSION: no order exists, and nothing was routed or filled. Had it
 	// been admitted, it would have executed on okx-alpha — fund-alpha's collateral —
 	// because that is the only adapter at XSIM.
-	if _, lerr := store.Load(context.Background(), cmd.GetOrderId()); lerr == nil {
+	if _, _, lerr := store.Load(context.Background(), cmd.GetOrderId()); lerr == nil {
 		t.Fatal("an order for a portfolio bound to NO account was admitted. It can only execute " +
 			"against somebody else's collateral, and the ledger would report both funds' cash intact")
 	}
@@ -123,7 +123,7 @@ func TestSubmit_UnboundPortfolioTradesTheSharedAccountAndSaysSo(t *testing.T) {
 	if err := svc.Handle(testCtx(), submitEnvFor("acme"), mustMarshal(t, cmd)); err != nil {
 		t.Fatalf("Handle: %v", err)
 	}
-	st, err := store.Load(context.Background(), cmd.GetOrderId())
+	st, _, err := store.Load(context.Background(), cmd.GetOrderId())
 	if err != nil {
 		t.Fatalf("the order was refused in ADVISORY mode: %v", err)
 	}
@@ -158,7 +158,7 @@ func TestSubmit_BoundToAnAccountNoAdapterHolds_IsRefused(t *testing.T) {
 	if err := svc.Handle(testCtx(), submitEnvFor("acme"), mustMarshal(t, cmd)); err != nil {
 		t.Fatalf("Handle: %v", err)
 	}
-	if _, lerr := store.Load(context.Background(), cmd.GetOrderId()); lerr == nil {
+	if _, _, lerr := store.Load(context.Background(), cmd.GetOrderId()); lerr == nil {
 		t.Fatal("the order was admitted although the only adapter at its venue holds a DIFFERENT " +
 			"account — it could only ever have executed on the wrong collateral")
 	}

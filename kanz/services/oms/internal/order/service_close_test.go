@@ -159,11 +159,11 @@ func TestCancel_RefusesQuarantinedOrder(t *testing.T) {
 	venue := &closerVenue{mic: "BINANCE"}
 	svc, _ := restingOrderOn(t, fb, venue)
 
-	st, err := svc.store.Load(context.Background(), "o1")
+	st, ver, err := svc.store.Load(context.Background(), "o1")
 	if err != nil {
 		t.Fatalf("load: %v", err)
 	}
-	if err := svc.quarantine(context.Background(), st, "test: venue truth could not be established"); err != nil {
+	if err := svc.quarantine(context.Background(), st, ver, "test: venue truth could not be established"); err != nil {
 		t.Fatalf("quarantine: %v", err)
 	}
 
@@ -174,7 +174,7 @@ func TestCancel_RefusesQuarantinedOrder(t *testing.T) {
 	if len(venue.cancelled) != 0 {
 		t.Fatalf("venue cancels = %v, want none — a quarantined order must not reach the exchange", venue.cancelled)
 	}
-	st, err = svc.store.Load(context.Background(), "o1")
+	st, _, err = svc.store.Load(context.Background(), "o1")
 	if err != nil {
 		t.Fatalf("load: %v", err)
 	}

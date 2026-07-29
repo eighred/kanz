@@ -192,7 +192,7 @@ func (s *Service) handleSubmit(ctx context.Context, env *envelopepb.Envelope, pa
 	// the order sat at ROUTED forever with nothing working it. resume() establishes
 	// what the venue actually did and acts on that — or freezes the order when it
 	// cannot. Admission itself is still enforced atomically by store.Create below.
-	if existing, err := s.store.Load(ctx, cmd.GetOrderId()); err == nil {
+	if existing, _, err := s.store.Load(ctx, cmd.GetOrderId()); err == nil {
 		return s.resume(ctx, existing)
 	} else if !errors.Is(err, ErrNotFound) {
 		return err // transient store failure
@@ -301,7 +301,12 @@ func (s *Service) handleSubmit(ctx context.Context, env *envelopepb.Envelope, pa
 	defer release()
 
 	// Work the order if a router is wired; otherwise it rests (ACCEPTED).
-	st, err = s.work(ctx, st)
+	//
+	// store.Create landed this order at version 0 (migrations/0005 default), and
+	// this delivery won the admission gate, so 0 is the version nobody else can
+	// have written past yet.
+	var ver int64
+	st, ver, err = s.work(ctx, st, ver)
 	// A venue that cannot price this order will NEVER price it, so this is
 	// terminal, not transient. Returning the error here would nack the command
 	// and retry it forever; refuse() emits the FACT + outcome and acks. Same
@@ -314,16 +319,17 @@ func (s *Service) handleSubmit(ctx context.Context, env *envelopepb.Envelope, pa
 		// ledger say rejected while the OMS's own truth says working, and a
 		// later cancel would act on a live-looking order.
 		rejected := Reject(st, rejectedAt)
-		if serr := s.store.Save(ctx, rejected); serr != nil {
+		if serr := s.store.Save(ctx, rejected, ver); serr != nil {
 			return serr
 		}
+		ver++
 		if rerr := s.refuse(ctx, st.GetOrderId(), "PRICE_UNAVAILABLE", err.Error(), rejectedAt); rerr != nil {
 			return rerr
 		}
 		// The FACT and the outcome are both out — stamp outcome_announced_at so
 		// a redelivery of this SubmitOrder hits resume()'s genuine-duplicate
 		// branch instead of re-entering this path. See order_events.proto:19.
-		return s.markOutcomeAnnounced(ctx, rejected, rejectedAt)
+		return s.markOutcomeAnnounced(ctx, rejected, ver, rejectedAt)
 	}
 	if err != nil {
 		return err
@@ -343,7 +349,7 @@ func (s *Service) handleSubmit(ctx context.Context, env *envelopepb.Envelope, pa
 		// outcome are both out — stamp outcome_announced_at so a redelivery
 		// of this SubmitOrder hits resume()'s genuine-duplicate branch
 		// instead of re-driving or re-announcing a finished order.
-		return s.markOutcomeAnnounced(ctx, st, now)
+		return s.markOutcomeAnnounced(ctx, st, ver, now)
 	}
 	return nil
 }
@@ -428,32 +434,36 @@ func (s *Service) noteShared(tenant, portfolio, mic, account string) {
 // work routes an admitted order to a venue and folds the resulting fills. A nil
 // router leaves the order resting. Transient routing/publish errors are
 // returned (retry); a venue that returns no fills leaves the order working.
-func (s *Service) work(ctx context.Context, st *orderpb.OrderState) (*orderpb.OrderState, error) {
+func (s *Service) work(ctx context.Context, st *orderpb.OrderState, ver int64) (*orderpb.OrderState, int64, error) {
 	if s.router == nil {
-		return st, nil
+		return st, ver, nil
 	}
 	venue, err := s.router.Route(st)
 	if errors.Is(err, execution.ErrNoVenue) {
-		return st, nil // nothing wired at all ⇒ rest (a paper deployment)
+		return st, ver, nil // nothing wired at all ⇒ rest (a paper deployment)
 	}
 	// A named-but-unconfigured venue is refused at admission and cannot reach here.
 	// If it ever does, it is an error — never a silent rest. An order nobody can
 	// execute must not look like an order that is working.
 	if err != nil {
-		return st, err
+		return st, ver, err
 	}
 	routed := Route(st, s.now().UTC())
-	if err := s.store.Save(ctx, routed); err != nil {
-		return st, err
+	// A conflict HERE is safe to abort on: nothing has reached the venue yet, so
+	// another replica winning the race means it is working this order and this
+	// delivery has nothing to contribute. Returning the error redelivers.
+	if err := s.store.Save(ctx, routed, ver); err != nil {
+		return st, ver, err
 	}
+	ver++
 	if err := s.emitter.EmitRouted(ctx, routed.GetOrderId(), venue.MIC(), "", routed.GetAsOf().AsTime()); err != nil {
-		return st, err
+		return st, ver, err
 	}
 	st = routed
 
 	fills, err := venue.Execute(ctx, st)
 	if err != nil {
-		return st, err
+		return st, ver, err
 	}
 
 	// THE VENUE HAS IT. Record that BEFORE folding any fill.
@@ -467,9 +477,19 @@ func (s *Service) work(ctx context.Context, st *orderpb.OrderState) (*orderpb.Or
 	// confirmed anything.
 	acked := cloneState(st)
 	acked.VenueAckAt = timestamppb.New(s.now().UTC())
-	if err := s.store.Save(ctx, acked); err != nil {
-		return st, err
+	// THE VENUE ALREADY HAS THE ORDER. A conflict here is not a benign loss: this
+	// process holds the only record that the venue acknowledged, and another
+	// replica has moved the order without it. Quarantine rather than return —
+	// a redelivery would re-Execute against a venue that already has it.
+	if err := s.store.Save(ctx, acked, ver); err != nil {
+		if errors.Is(err, ErrConflict) {
+			return st, ver, s.quarantine(ctx, st, ver,
+				"another replica moved this order while this delivery held an unrecorded venue ack; "+
+					"the venue has the order and the store does not say so")
+		}
+		return st, ver, err
 	}
+	ver++
 	st = acked
 
 	// THE FOLD BELOW READS st, NOT THE STORE, AND THAT IS ONLY SAFE BECAUSE OF
@@ -481,11 +501,12 @@ func (s *Service) work(ctx context.Context, st *orderpb.OrderState) (*orderpb.Or
 	// lock reached cancel, and why a cancel landing inside venue.Execute could be
 	// overwritten by a FILLED Save it never saw.
 	//
-	// ACROSS REPLICAS IT IS STILL NOT SAFE, and re-reading here would not make it
-	// so: it would shrink the window between Load and Save, not remove it. A
-	// probabilistic fix on the capital path is how the partition_key
-	// serialization claim got written in the first place. That gap belongs to
-	// Store.Save gaining a version predicate — see postgres.go.
+	// ACROSS REPLICAS the version predicate on Store.Save now arbitrates (#122).
+	// It does not make the fold's read of st current — it makes a stale write
+	// REFUSED instead of silently applied, which is the honest half. Re-reading
+	// here would only shrink the window, and a probabilistic fix on the capital
+	// path is how the partition_key serialization claim got written in the first
+	// place.
 	for _, fill := range fills {
 		next, aerr := ApplyFill(st, fill, fill.GetExecutedAt().AsTime())
 		if aerr != nil {
@@ -494,18 +515,33 @@ func (s *Service) work(ctx context.Context, st *orderpb.OrderState) (*orderpb.Or
 			s.logger.Error("oms: venue fill rejected by aggregate", "order_id", st.GetOrderId(), "err", aerr)
 			break
 		}
-		if err := s.store.Save(ctx, next); err != nil {
-			return st, err
+		if err := s.store.Save(ctx, next, ver); err != nil {
+			// A CONFLICT HERE IS THE ONE THAT MATTERS, and quarantine is the only
+			// honest action (#122, and the decision #117 declined to invent
+			// without CAS to make it meaningful).
+			//
+			// This process holds a REAL FILL from the venue — the fund's money has
+			// moved — and another replica has advanced the order without seeing
+			// it. Retrying would fold the fill onto state we have not read;
+			// dropping it would lose an execution that actually happened. Neither
+			// is defensible, so the order is frozen and a human is told.
+			if errors.Is(err, ErrConflict) {
+				return st, ver, s.quarantine(ctx, st, ver, fmt.Sprintf(
+					"another replica moved order %s while this delivery held an unfolded venue fill; "+
+						"the fill is real and this process cannot safely apply it", st.GetOrderId()))
+			}
+			return st, ver, err
 		}
+		ver++
 		if err := s.emitter.EmitFill(ctx, fill, next); err != nil {
-			return st, err
+			return st, ver, err
 		}
 		st = next
 		if IsTerminal(st) {
 			break
 		}
 	}
-	return st, nil
+	return st, ver, nil
 }
 
 func (s *Service) handleCancel(ctx context.Context, payload []byte) error {
@@ -561,7 +597,7 @@ func (s *Service) handleCancel(ctx context.Context, payload []byte) error {
 	defer release()
 
 	now := s.now().UTC()
-	st, err := s.store.Load(ctx, cmd.GetOrderId())
+	st, ver, err := s.store.Load(ctx, cmd.GetOrderId())
 	if errors.Is(err, ErrNotFound) {
 		return s.outcomeReject(ctx, cmd.GetOrderId(), "UNKNOWN_ORDER", "no such order", now)
 	}
@@ -613,7 +649,7 @@ func (s *Service) handleCancel(ctx context.Context, payload []byte) error {
 	// see aggregate.go), so the announcement carries the same cancelled
 	// quantity the interrupted delivery would have.
 	if st.GetStatus() == orderpb.OrderStatus_ORDER_STATUS_CANCELLED && st.GetCancelAnnouncedAt() == nil {
-		return s.completeCancelAnnouncement(ctx, st, st.GetLeavesQuantity(), now)
+		return s.completeCancelAnnouncement(ctx, st, ver, st.GetLeavesQuantity(), now)
 	}
 
 	// Validate the withdrawal against the aggregate first (the terminal guard), so
@@ -632,10 +668,11 @@ func (s *Service) handleCancel(ctx context.Context, payload []byte) error {
 	// quantities the close intent is built from.
 	s.closeAtVenue(ctx, st, now)
 
-	if err := s.store.Save(ctx, next); err != nil {
+	if err := s.store.Save(ctx, next, ver); err != nil {
 		return err
 	}
-	return s.completeCancelAnnouncement(ctx, next, cancelledQty, now)
+	ver++
+	return s.completeCancelAnnouncement(ctx, next, ver, cancelledQty, now)
 }
 
 // completeCancelAnnouncement publishes the ORDER_CANCELLED FACT and the
@@ -656,7 +693,7 @@ func (s *Service) handleCancel(ctx context.Context, payload []byte) error {
 // It is always called under the per-order lock (handleCancel and resume both
 // hold it), so the duplicate this documents is a REDELIVERY duplicate only —
 // never two goroutines announcing one cancellation concurrently.
-func (s *Service) completeCancelAnnouncement(ctx context.Context, st *orderpb.OrderState, cancelledQty *commonpb.Decimal, now time.Time) error {
+func (s *Service) completeCancelAnnouncement(ctx context.Context, st *orderpb.OrderState, ver int64, cancelledQty *commonpb.Decimal, now time.Time) error {
 	if err := s.emitter.EmitCancelled(ctx, st.GetOrderId(), cancelledQty, now); err != nil {
 		return err
 	}
@@ -666,7 +703,7 @@ func (s *Service) completeCancelAnnouncement(ctx context.Context, st *orderpb.Or
 	}
 	announced := cloneState(st)
 	announced.CancelAnnouncedAt = timestamppb.New(now)
-	return s.store.Save(ctx, announced)
+	return s.store.Save(ctx, announced, ver)
 }
 
 // closeAtVenue withdraws a working order at the exchange holding it, recording
@@ -680,6 +717,8 @@ func (s *Service) completeCancelAnnouncement(ctx context.Context, st *orderpb.Or
 // force-resolves it against venue truth. Returning it as a transient fault would
 // instead nack the command and redeliver a cancel the venue may already have
 // applied.
+// It takes no version: it dispatches to the venue and writes nothing to the
+// store, so there is no CAS for a version to govern.
 func (s *Service) closeAtVenue(ctx context.Context, st *orderpb.OrderState, now time.Time) {
 	if s.router == nil || s.closes == nil {
 		return
@@ -750,7 +789,7 @@ func (s *Service) handleAmend(ctx context.Context, payload []byte) error {
 	defer release()
 
 	now := s.now().UTC()
-	st, err := s.store.Load(ctx, cmd.GetOrderId())
+	st, ver, err := s.store.Load(ctx, cmd.GetOrderId())
 	if errors.Is(err, ErrNotFound) {
 		return s.outcomeReject(ctx, cmd.GetOrderId(), "UNKNOWN_ORDER", "no such order", now)
 	}
@@ -785,7 +824,7 @@ func (s *Service) handleAmend(ctx context.Context, payload []byte) error {
 		}
 		return aerr
 	}
-	if err := s.store.Save(ctx, next); err != nil {
+	if err := s.store.Save(ctx, next, ver); err != nil {
 		return err
 	}
 	return s.emitter.EmitOutcome(ctx, next.GetOrderId(),
@@ -843,6 +882,12 @@ func entitledTo(allowed []string, portfolio string) bool {
 //
 // The one thing it must never do is guess. Every path below either establishes
 // what the venue did, or freezes the order.
+//
+// IT TAKES NO VERSION, DELIBERATELY. st is only read here — the terminal and
+// quarantine checks — and every write below derives from the re-read under the
+// claim. Accepting the caller's version would imply it governs those writes when
+// it does not, and the first person to thread it through would be threading a
+// value guaranteed to be stale.
 func (s *Service) resume(ctx context.Context, st *orderpb.OrderState) error {
 	// A terminal order is genuinely finished — UNLESS its terminal outcome was
 	// persisted but never announced (see outcome_announced_at,
@@ -869,7 +914,7 @@ func (s *Service) resume(ctx context.Context, st *orderpb.OrderState) error {
 
 	// Re-read under the claim: the holder we just raced may have finished and
 	// changed the order between our Load and our claim.
-	fresh, err := s.store.Load(ctx, st.GetOrderId())
+	fresh, ver, err := s.store.Load(ctx, st.GetOrderId())
 	if err != nil {
 		return err
 	}
@@ -882,7 +927,7 @@ func (s *Service) resume(ctx context.Context, st *orderpb.OrderState) error {
 		if orderOutcomeAnnounced(fresh) {
 			return nil
 		}
-		return s.completeTerminalOutcome(ctx, fresh)
+		return s.completeTerminalOutcome(ctx, fresh, ver)
 	}
 	if fresh.GetQuarantine() != nil {
 		return nil
@@ -894,7 +939,7 @@ func (s *Service) resume(ctx context.Context, st *orderpb.OrderState) error {
 	// UNDER the claim, not before it, because working an order is exactly the
 	// thing two goroutines must not do at once.
 	if st.GetStatus() == orderpb.OrderStatus_ORDER_STATUS_PENDING_NEW {
-		_, err := s.work(ctx, st)
+		_, _, err := s.work(ctx, st, ver)
 		return err
 	}
 
@@ -905,14 +950,14 @@ func (s *Service) resume(ctx context.Context, st *orderpb.OrderState) error {
 	if err != nil {
 		// Nothing here can execute this order. It is not resumable and it is not
 		// safely abandonable either — freeze it and say so.
-		return s.quarantine(ctx, st, fmt.Sprintf(
+		return s.quarantine(ctx, st, ver, fmt.Sprintf(
 			"order cannot be routed to any configured venue (%v), so nothing can be asked "+
 				"what happened to it", err))
 	}
 
 	q, ok := venue.(execution.Querier)
 	if !ok {
-		return s.quarantine(ctx, st, fmt.Sprintf(
+		return s.quarantine(ctx, st, ver, fmt.Sprintf(
 			"venue %s implements no Querier, so nothing can establish whether it holds this "+
 				"order. Re-driving might trade the fund twice and abandoning might strand a "+
 				"live exchange order; neither is a guess this platform will make",
@@ -941,16 +986,16 @@ func (s *Service) resume(ctx context.Context, st *orderpb.OrderState) error {
 		if st.GetVenueAckAt() == nil {
 			acked := cloneState(st)
 			acked.VenueAckAt = timestamppb.New(s.now().UTC())
-			return s.store.Save(ctx, acked)
+			return s.store.Save(ctx, acked, ver)
 		}
 		return nil
 	case ActionRedrive:
-		_, err := s.work(ctx, st)
+		_, _, err := s.work(ctx, st, ver)
 		return err
 	case ActionAdopt:
-		return s.adopt(ctx, st, view)
+		return s.adopt(ctx, st, ver, view)
 	default:
-		return s.quarantine(ctx, st, reason)
+		return s.quarantine(ctx, st, ver, reason)
 	}
 }
 
@@ -979,10 +1024,10 @@ func orderOutcomeAnnounced(st *orderpb.OrderState) bool {
 // later redelivery's resume() recognizes a genuine duplicate instead of
 // re-entering the reject/fill path that already completed. Mirrors
 // completeCancelAnnouncement's trailing Save for the cancel transition.
-func (s *Service) markOutcomeAnnounced(ctx context.Context, st *orderpb.OrderState, t time.Time) error {
+func (s *Service) markOutcomeAnnounced(ctx context.Context, st *orderpb.OrderState, ver int64, t time.Time) error {
 	announced := cloneState(st)
 	announced.OutcomeAnnouncedAt = timestamppb.New(t)
-	return s.store.Save(ctx, announced)
+	return s.store.Save(ctx, announced, ver)
 }
 
 // completeTerminalOutcome re-publishes the CommandOutcome for a SubmitOrder
@@ -1015,7 +1060,7 @@ func (s *Service) markOutcomeAnnounced(ctx context.Context, st *orderpb.OrderSta
 // never see it. What this fix removes is the worse failure — a completed
 // trade or a permanent rejection whose command outcome the caller was never
 // told, with no recovery path at all.
-func (s *Service) completeTerminalOutcome(ctx context.Context, st *orderpb.OrderState) error {
+func (s *Service) completeTerminalOutcome(ctx context.Context, st *orderpb.OrderState, ver int64) error {
 	now := s.now().UTC()
 	var status commandpb.CommandOutcomeStatus
 	var reason, code string
@@ -1041,7 +1086,7 @@ func (s *Service) completeTerminalOutcome(ctx context.Context, st *orderpb.Order
 	if err := s.emitter.EmitOutcome(ctx, st.GetOrderId(), status, reason, code, "", now); err != nil {
 		return err
 	}
-	return s.markOutcomeAnnounced(ctx, st, now)
+	return s.markOutcomeAnnounced(ctx, st, ver, now)
 }
 
 // adopt takes the venue's truth as ours: its fills, or its rejection.
@@ -1051,13 +1096,14 @@ func (s *Service) completeTerminalOutcome(ctx context.Context, st *orderpb.Order
 // adoption re-emits after a crash is counted exactly once. That is why the
 // venue must report its ORIGINAL fill ids on a query — a renamed fill defeats
 // the claim and double-counts the book.
-func (s *Service) adopt(ctx context.Context, st *orderpb.OrderState, view execution.OrderView) error {
+func (s *Service) adopt(ctx context.Context, st *orderpb.OrderState, ver int64, view execution.OrderView) error {
 	if view.State == execution.OrderViewRejected {
 		now := s.now().UTC()
 		rejected := Reject(st, now)
-		if err := s.store.Save(ctx, rejected); err != nil {
+		if err := s.store.Save(ctx, rejected, ver); err != nil {
 			return err
 		}
+		ver++
 		reason := view.Reason
 		if reason == "" {
 			reason = "venue reports this order rejected"
@@ -1067,7 +1113,7 @@ func (s *Service) adopt(ctx context.Context, st *orderpb.OrderState, view execut
 		}
 		// Same marker, same reason as the ErrUnpriced reject in handleSubmit:
 		// see order_events.proto:19.
-		return s.markOutcomeAnnounced(ctx, rejected, now)
+		return s.markOutcomeAnnounced(ctx, rejected, ver, now)
 	}
 
 	// The venue confirmed it holds the order, so the ack is established even if
@@ -1075,9 +1121,10 @@ func (s *Service) adopt(ctx context.Context, st *orderpb.OrderState, view execut
 	if st.GetVenueAckAt() == nil {
 		acked := cloneState(st)
 		acked.VenueAckAt = timestamppb.New(s.now().UTC())
-		if err := s.store.Save(ctx, acked); err != nil {
+		if err := s.store.Save(ctx, acked, ver); err != nil {
 			return err
 		}
+		ver++
 		st = acked
 	}
 
@@ -1102,7 +1149,7 @@ func (s *Service) adopt(ctx context.Context, st *orderpb.OrderState, view execut
 	// fill_id dedup. Single-fill adoption, the only case any wired venue can
 	// currently produce, keeps working unchanged.
 	if len(view.Fills) > 1 {
-		return s.quarantine(ctx, st, fmt.Sprintf(
+		return s.quarantine(ctx, st, ver, fmt.Sprintf(
 			"venue reports %d fills for this order, and adopting more than one fill is not "+
 				"yet safe: ApplyFill has no fill_id dedup, so folding a fill this order already "+
 				"contains would silently double-count filled_quantity and average_fill_price",
@@ -1122,7 +1169,7 @@ func (s *Service) adopt(ctx context.Context, st *orderpb.OrderState, view execut
 	// of "filled" with nothing to fold would leave a traded order looking
 	// untraded, which is exactly the failure this whole path exists to prevent.
 	if (view.State == execution.OrderViewFilled || view.State == execution.OrderViewPartiallyFilled) && len(view.Fills) == 0 {
-		return s.quarantine(ctx, st, fmt.Sprintf(
+		return s.quarantine(ctx, st, ver, fmt.Sprintf(
 			"venue reports this order %s but supplied no fill to fold, so the platform cannot "+
 				"record what traded. Adopting the claim without the fill would leave a traded "+
 				"order looking untraded", view.State.String()))
@@ -1134,13 +1181,14 @@ func (s *Service) adopt(ctx context.Context, st *orderpb.OrderState, view execut
 			// The venue's own fills do not fit the order we hold. That is not a
 			// transient fault and re-driving cannot help; it is a disagreement
 			// about what this order IS, and it freezes.
-			return s.quarantine(ctx, st, fmt.Sprintf(
+			return s.quarantine(ctx, st, ver, fmt.Sprintf(
 				"venue reported a fill this order cannot accept (%v). The venue's record and "+
 					"ours describe different orders under one id", aerr))
 		}
-		if err := s.store.Save(ctx, next); err != nil {
+		if err := s.store.Save(ctx, next, ver); err != nil {
 			return err
 		}
+		ver++
 		if err := s.emitter.EmitFill(ctx, fill, next); err != nil {
 			return err
 		}
@@ -1159,7 +1207,10 @@ func (s *Service) adopt(ctx context.Context, st *orderpb.OrderState, view execut
 // It returns nil — the command is ACKED. A quarantine is terminal for this
 // delivery: redelivering it would re-derive the same freeze forever, and the
 // thing that resolves it is a human with venue access, not another attempt.
-func (s *Service) quarantine(ctx context.Context, st *orderpb.OrderState, reason string) error {
+// ver is the version this caller loaded st at. A quarantine is itself a write,
+// so it can lose the same race it is often reporting; see the ErrConflict branch
+// on the Save below for why that is left to fail loudly rather than forced.
+func (s *Service) quarantine(ctx context.Context, st *orderpb.OrderState, ver int64, reason string) error {
 	now := s.now().UTC()
 	next := cloneState(st)
 	next.Quarantine = &orderpb.OrderQuarantine{
@@ -1187,7 +1238,12 @@ func (s *Service) quarantine(ctx context.Context, st *orderpb.OrderState, reason
 		"status", st.GetStatus().String(),
 		"reason", reason,
 	)
-	if err := s.store.Save(ctx, next); err != nil {
+	// A CONFLICT ON THE QUARANTINE WRITE IS NOT SWALLOWED. It means the order
+	// moved again between the decision to freeze and the freeze itself, so this
+	// state is stale and forcing it would overwrite whatever the winner recorded
+	// — the very defect quarantine exists to report. Returning the error nacks
+	// the command, and the redelivery re-derives the freeze against fresh state.
+	if err := s.store.Save(ctx, next, ver); err != nil {
 		return err
 	}
 	return nil
