@@ -67,7 +67,10 @@ spec:
         wal: { compression: gzip }
 ---
 # PARITY-02 durable book-of-record stores (accounting / alternatives / wealth /
-# datamaster) — warm standby replaying the kanz-books WAL.
+# datamaster) plus the tv-sync fact log — warm standby replaying the kanz-books
+# WAL. tv_facts is here because the DR rebuild restores the SPINE, not this
+# projection, and only a 24h window of it at that (see cluster.yaml): promoting
+# this standby is the only thing that gives tv-sync back the fills it folded.
 apiVersion: postgresql.cnpg.io/v1
 kind: Cluster
 metadata:
@@ -78,7 +81,7 @@ spec:
   instances: 2
   primaryUpdateStrategy: unsupervised
   storage:
-    size: 50Gi
+    size: 75Gi              # tracks the primary (cluster.yaml) — tv_facts is append-only
   replica:
     enabled: true
     source: kanz-books-origin
@@ -95,11 +98,14 @@ spec:
           secretAccessKey: { name: kanz-dr-s3, key: SECRET_ACCESS_KEY }
         wal: { compression: gzip }
 ---
-# The OMS order store (orders / positions / position_fills) — warm standby
-# replaying the kanz-orders WAL. Separate from kanz-books on purpose: promoting
-# the order book must not carry the books of record with it (see cluster.yaml).
-# This is the standby whose absence produces the #60 failure directly — the OMS
-# starts, finds a database, and it is empty.
+# The order path — the OMS order store (orders / positions / position_fills) and
+# both venue adapters' venue_orders views — warm standby replaying the
+# kanz-orders WAL. Separate from kanz-books on purpose: promoting the order book
+# must not carry the books of record with it (see cluster.yaml). This is the
+# standby whose absence produces the #60 failure directly — the OMS starts, finds
+# a database, and it is empty. Promoting it promotes the whole order path as one
+# timeline: an order and the venue mapping that ties it to the exchange come back
+# together, or reconciliation has an exchange order it cannot attribute.
 apiVersion: postgresql.cnpg.io/v1
 kind: Cluster
 metadata:
@@ -122,6 +128,41 @@ spec:
       barmanObjectStore:
         serverName: kanz-orders
         destinationPath: s3://kanz-dr-backups/orders
+        s3Credentials:
+          accessKeyId: { name: kanz-dr-s3, key: ACCESS_KEY_ID }
+          secretAccessKey: { name: kanz-dr-s3, key: SECRET_ACCESS_KEY }
+        wal: { compression: gzip }
+---
+# REG-02 compliance evidence (regulatory / audit_chain_links) — warm standby
+# replaying the kanz-compliance WAL. Its own standby for the same reason it is
+# its own primary: the chain must survive, and be promotable, independently of
+# the stores it attests to (see cluster.yaml). A DR region that promotes the
+# order path and the books but not this one comes up able to trade and unable to
+# prove anything about it — and the head recovered at startup would be whatever
+# link the last surviving copy held, which is a chain with a silent gap rather
+# than a chain that is visibly short.
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: kanz-compliance
+  namespace: kanz-data
+  labels: { app.kubernetes.io/part-of: kanz, app.kubernetes.io/component: dr }
+spec:
+  instances: 2
+  primaryUpdateStrategy: unsupervised
+  storage:
+    size: 20Gi
+  replica:
+    enabled: true
+    source: kanz-compliance-origin
+  bootstrap:
+    recovery:
+      source: kanz-compliance-origin
+  externalClusters:
+    - name: kanz-compliance-origin
+      barmanObjectStore:
+        serverName: kanz-compliance
+        destinationPath: s3://kanz-dr-backups/compliance
         s3Credentials:
           accessKeyId: { name: kanz-dr-s3, key: ACCESS_KEY_ID }
           secretAccessKey: { name: kanz-dr-s3, key: SECRET_ACCESS_KEY }

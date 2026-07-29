@@ -33,15 +33,22 @@ echo "== DR failover → $DR_CTX (step=$STEP) =="
 #    ledger, alternatives fund book, wealth household book, datamaster golden
 #    records + exception queue), so a DR cutover that omits it leaves those
 #    services read-only — it MUST be promoted alongside risk + registry (PARITY-05e).
-#    kanz-orders carries the OMS order store (orders / positions / position_fills)
-#    and is the one whose omission is SILENT rather than read-only: the OMS starts
+#    kanz-orders carries the whole ORDER PATH — the OMS order store (orders /
+#    positions / position_fills) and both venue adapters' venue_orders views — and
+#    is the one whose omission is SILENT rather than read-only: the OMS starts
 #    against an unpromoted-or-empty store and logs SweepInterrupted count=0, the
-#    same line a healthy clean start produces (#60). Every cluster named in
-#    postgres/cluster.yaml belongs in this list — test/arch/dr_postgres_coverage_test.go
-#    fails if a mapped cluster is missing from it.
+#    same line a healthy clean start produces (#60). Promoting it promotes the
+#    order and the exchange mapping as ONE timeline; a half-promoted order path
+#    leaves the reconciler holding exchange orders it cannot attribute.
+#    kanz-compliance carries the REG-02 evidence chain (audit_chain_links). Its
+#    omission is the quietest of all: nothing fails, the platform simply comes up
+#    able to trade and unable to prove anything about it.
+#    Every cluster named in postgres/cluster.yaml belongs in this list —
+#    test/arch/dr_postgres_coverage_test.go fails if a mapped cluster is missing
+#    from it.
 if step postgres; then
   echo "-- [1/5] promote Postgres replicas"
-  for c in kanz-risk kanz-registry kanz-books kanz-orders; do
+  for c in kanz-risk kanz-registry kanz-books kanz-orders kanz-compliance; do
     k cnpg promote "$c" -n "$DATA_NS" || true   # no-op if already promoted
     k cnpg status   "$c" -n "$DATA_NS" | head -3
   done
@@ -79,8 +86,25 @@ if step services; then
   # missing from this list looks exactly like a name in it that failed: nothing is
   # printed either way. Every covered service belongs here. `oms` is the money path
   # (kanz-orders); `alternatives` was covered by kanz-books but absent from this
-  # list, so its readiness was never waited on and the omission was masked.
-  for d in risk-engine api-gateway accounting alternatives wealth datamaster oms market-data; do
+  # list, so its readiness was never waited on and the omission was masked. The
+  # venue adapters share kanz-orders with the OMS, and an OMS that is ready while
+  # its adapters are not is an OMS that can admit an order it cannot work —
+  # waiting on them is what makes the promoted order path usable rather than
+  # merely present. `regulatory` (kanz-compliance) is here for the opposite
+  # reason: nothing downstream blocks on it, so if it never becomes ready that is
+  # visible only if something waited.
+  #
+  # !! `tv-sync` IS WAITED ON HERE AND STEP 4's OWN `scale --all --replicas=2`
+  #    ABOVE BREAKS IT. infra/deploy/tv-sync-deploy.yaml pins replicas: 1 and
+  #    states it is a CORRECTNESS bound, not a capacity one: two pods split the
+  #    fact stream, so each folds part of it and every pod's book is wrong. The
+  #    blanket scale overrides that pin on every failover. This wait line does not
+  #    cause it — the scale does — but tv-sync is listed rather than quietly
+  #    omitted precisely so the conflict is visible instead of being an absence
+  #    nobody reads. Left as-is deliberately: narrowing `--all` is a change to
+  #    every service's failover behaviour and belongs to its own issue, not to
+  #    #60's store placement.
+  for d in risk-engine api-gateway accounting alternatives wealth datamaster oms venue-binance venue-okx regulatory tv-sync market-data; do
     k -n "$SVC_NS" rollout status deploy/"$d" --timeout=300s || true
   done
 fi

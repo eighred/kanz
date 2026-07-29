@@ -6,11 +6,20 @@ Disaster recovery for the stateful databases:
 |---|---|---|
 | risk state (PERS-01) | portfolio positions, risk state | `kanz-risk` |
 | schema registry (EVT-16) | registered payload schemas | `kanz-registry` |
-| book-of-record (PARITY-02) | IBOR ledger journal+snapshots, alternatives fund journal, wealth household book, datamaster golden records + exception queue | `kanz-books` |
-| order store (OMS) | orders, positions, position_fills | `kanz-orders` |
+| book-of-record (PARITY-02) | IBOR ledger journal+snapshots, alternatives fund journal, wealth household book, datamaster golden records + exception queue, tv-sync fact log | `kanz-books` |
+| order path (OMS + venues) | orders, positions, position_fills, and both adapters' venue_orders | `kanz-orders` |
+| compliance evidence (REG-02) | audit_chain_links — the filing hash chain | `kanz-compliance` |
 
 (The market-data history and the audit log are append-only/WORM stores with
 their own retention; the *transactional* state that DR must restore is these.)
+
+**A cluster boundary here is a restore-timeline boundary.** PITR rewinds every
+database in a cluster together, so the grouping answers one question: *what must
+restore to the same instant, and what must be able to restore independently?*
+The order path shares a cluster because an order and the venue mapping that ties
+it to the exchange must come back together. The compliance chain is alone
+because it is evidence *about* the other stores and must not be rewound with
+them. Nothing here is grouped for tidiness.
 
 ## Coverage of every migration-owning service
 
@@ -38,81 +47,133 @@ what gets read, so it is not allowed to be the stale copy.
 | `datamaster` | covered | `kanz-books` (golden records + exception queue) |
 | `market-data` | excluded | append-only history with its own retention; re-ingestable from the feed |
 | `audit` | excluded | WORM store with its own tamper-resistant retention (AUDIT-01b) |
-| `oms` | covered | `kanz-orders` — its own cluster (`orders`, `positions`, `position_fills`). **Read "What `covered` does not mean" below before relying on this row.** |
-| `venue-binance` | **NOT COVERED** | `venue_orders` — the exchange-order ↔ kanz-order mapping reconciliation depends on |
-| `venue-okx` | **NOT COVERED** | `venue_orders` — same |
-| `regulatory` | **NOT COVERED** | `audit_chain_links` — the tamper-evidence chain |
-| `tv-sync` | **NOT COVERED** | `tv_facts` — a projection, rebuildable from the event log, so the weakest exposure of the four |
+| `oms` | covered | `kanz-orders` (`orders`, `positions`, `position_fills`). **Read "What `covered` does not mean" below before relying on this row.** |
+| `venue-binance` | covered | `kanz-orders` (`venue_orders`) — same cluster as the OMS *on purpose*: one restore timeline for the order path |
+| `venue-okx` | covered | `kanz-orders` (`venue_orders`) — same |
+| `regulatory` | covered | `kanz-compliance` — its own cluster (`audit_chain_links`), deliberately not co-located with anything it attests to |
+| `tv-sync` | covered | `kanz-books` (`tv_facts`) — covered rather than excluded; the rebuild story does not survive the config (see below) |
 
-### ⚠ What `covered` does not mean — read this before acting on the `oms` row
+### ⚠ What `covered` does not mean — read this before acting on ANY row above
 
 **`covered` means the DR wiring is DECLARED, not that the running service is
-bound to it.** Every service reads its DSN from Vault at `kv/kanz/<service>` (the
-OMS via the `oms-db` SecretProviderClass → `OMS_DATABASE_URL_FILE`), and **no
+bound to it.** Every service reads its DSN from Vault at `kv/kanz/<service>` (via
+its `<service>-db` SecretProviderClass → `<SERVICE>_DATABASE_URL_FILE`), and **no
 file in this repository sets that value.** The guard checks three manifests
 agree; it cannot see which database a pod actually opens.
 
-**Action required for `oms`:** the Vault entry at **`kv/kanz/oms`** must point at
-the `kanz-orders` read-write service —
+So for every service placed by **#60**, the cluster could be faithfully backing
+up and promoting an **empty** database while the real store sits on a host with
+no PITR — which is #60's own failure mode wearing a green check. Each Vault entry
+must name its cluster's read-write service (CNPG convention:
+`<cluster>-rw.<namespace>.svc`):
 
-```
-kanz-orders-rw.kanz-data.svc      # CNPG convention: <cluster>-rw.<namespace>.svc
-```
+| Vault path | must resolve to |
+|---|---|
+| `kv/kanz/oms` | `kanz-orders-rw.kanz-data.svc` |
+| `kv/kanz/venue-binance` | `kanz-orders-rw.kanz-data.svc` |
+| `kv/kanz/venue-okx` | `kanz-orders-rw.kanz-data.svc` |
+| `kv/kanz/regulatory` | `kanz-compliance-rw.kanz-data.svc` |
+| `kv/kanz/tv-sync` | `kanz-books-rw.kanz-data.svc` |
 
-Until **#59** confirms that, the OMS may still be writing to whatever host that
-DSN names today, and `kanz-orders` would be backing up and promoting an empty
-database while the real order book sits somewhere with no PITR. Verify the live
-DSN before you trust the `covered` row mid-incident:
+Until **#59** confirms these, each service may still be writing to whatever host
+its DSN names today. Verify the live DSN before you trust a `covered` row
+mid-incident (password-redacted):
 
 ```sh
 kubectl -n kanz-services exec deploy/oms -- sh -c 'cat "$OMS_DATABASE_URL_FILE"' | sed 's#://[^@]*@#://***@#'
 ```
 
-The same caveat applies in principle to every `covered` row above; it is stated
-here because `oms` is the row where being wrong is unrecoverable.
+Three of these five were given **NEW, empty clusters** (`kanz-orders`,
+`kanz-compliance`), so the row asserts nothing about where their data lives
+today — which is precisely why the repoint is still outstanding. The two placed
+into existing clusters (`venue-*` into `kanz-orders`, `tv-sync` into
+`kanz-books`) additionally assert that a database for them exists *in* that
+cluster; if it does not, creating it is part of the same repoint.
 
-### The four uncovered stores
+`oms` is the row where being wrong is unrecoverable, but the caveat is not an
+`oms` caveat — it applies to every `covered` row in the table, including the six
+that predate #60.
 
-They hold real transactional state. They are now CLASSIFIED — the rows above say
-so, and the guard says so on every run — but classified is not covered: they are
-in no cluster and carry no exclusion, so until this is resolved a region failover
-starts them empty. The gap is recorded, not closed, and the difference matters
-because a table that lists them is not a backup that restores them.
+### Why each store sits where it does
 
-**Why the OMS was the one placed first.** After a failover against an empty order
-store, `SweepInterrupted` logs `count=0` — the *same line a healthy clean start
-produces*. There is no signal distinguishing "no interrupted orders" from "no
-orders at all, because the store is gone", so the platform reports normal startup
-while holding positions at an exchange it has no record of. That is why
-`CLAUDE.md` sequences **M3 after this issue**: placing real orders against a
-store that may not be backed up is the one ordering error with an unrecoverable
-failure mode. `kanz-orders` closes the declared-wiring half of that; the Vault
-binding above is the other half.
+**`oms` → `kanz-orders`, its own cluster and not a database in `kanz-books`.**
+PITR is per-cluster. Restoring the order book to an instant before a bad sweep
+rewinds *every* database in that cluster to the same instant — so sharing
+`kanz-books` would make a correction on the trading path silently roll back the
+IBOR ledger, the fund journal, the household book and the golden records.
+Isolated, the blast radius of an order-store restore is the order store.
 
-**Why `kanz-orders` is its own cluster and not a database in `kanz-books`.** PITR
-is per-cluster. Restoring the order book to an instant before a bad sweep rewinds
-*every* database in that cluster to the same instant — so sharing `kanz-books`
-would make a correction on the trading path silently roll back the IBOR ledger,
-the fund journal, the household book and the golden records. Isolated, the blast
-radius of an order-store restore is the order store.
+It was placed first because its absence is the *silent* one: after a failover
+against an empty order store, `SweepInterrupted` logs `count=0` — the *same line
+a healthy clean start produces*. Nothing distinguishes "no interrupted orders"
+from "no orders at all", so the platform reports normal startup while holding
+positions at an exchange it has no record of. That is why `CLAUDE.md` sequences
+**M3 after this issue**.
 
-Resolving the remaining four requires deciding which cluster each belongs to (or
-that it is genuinely excludable) and adding the database to that cluster —
-tracked by **#60**. Note that database naming across the deploy manifests, the
-DSN secrets and this document has been reported as inconsistent, so each mapping
-should be settled against the running config rather than any single document
-(**#59**).
+**`venue-binance` + `venue-okx` → `kanz-orders`, beside the OMS.** The same
+per-cluster PITR property that isolates the order store is the reason these join
+it rather than getting clusters of their own. `venue_orders` is not an
+independent store: the OMS admits an order at its own primary key and only *then*
+calls the adapter, which writes the row tying the exchange order back to it — one
+logical transaction on the order path. Separate clusters would mean **separate
+restore timelines**: restore `orders` to T while `venue_orders` sits at T′ and
+you get orphan venue mappings, or — worse — orders with no mapping back to the
+exchange order at all. That mapping is exactly what the idempotency and recovery
+path reads: the user-data websocket delivers an execution report carrying only a
+`clOrdId`, and without the row there is nothing to enrich it from and nothing to
+tell the reconciler what should be open. **One cluster is one timeline, so the
+order path restores coherently or not at all.**
 
-**Why the four cannot simply be added here.** Each of them reads its DSN from
-Vault at `kv/kanz/<service>` (see `infra/security/secrets/secretproviderclass.yaml`);
-nothing in this repository says which Postgres host that DSN points at. Placing
-one in an existing cluster would assert that its data already lives there — an
-assertion only the running config can settle. Recording them as uncovered is the
-smaller, true claim; guessing a cluster would produce a table that reads as
-coverage while the failover promoted a database the service does not use. The
-OMS is the exception only because it was given a NEW, empty cluster: nothing is
-asserted about where its data lives today, which is exactly why the Vault
-repoint above is still outstanding.
+**`regulatory` → `kanz-compliance`, alone.** The only placement here argued from
+*independence* rather than coherence. `audit_chain_links` is evidence **about**
+the trading path and the books — each row is a filing's signature folded into its
+predecessor plus the exact canonical bytes that were signed. Because PITR is
+per-cluster, co-locating it would mean any point-in-time restore of the thing
+being attested to *also rewinds the attestation*. Evidence that gets rewound
+whenever the thing it attests to gets rewound is not evidence: the chain could
+not then distinguish "those filings never happened" from "the record of them was
+rolled back", which is the one discrimination a tamper-evidence structure exists
+to make. Independent, the chain outlives the restore and the gap is visible in
+it. It is also not excludable at any price — losing it does not corrupt the
+chain, it makes the chain unverifiable, and the canonical signed bytes exist
+nowhere else to re-derive them from.
+
+**`tv-sync` → `kanz-books`, covered rather than excluded.** Its own comments call
+`tv_facts` "rebuildable from the event log". Chased to the configuration, that
+does not hold after a region loss — and it is the kind of claim that only fails
+when it is needed:
+
+| Where | Setting | What it means |
+|---|---|---|
+| `infra/nats/bootstrap-job.yaml` | `EXECUTION` stream (`execution.>,strategy.>,order.>`) `max_age` **24h** | the live spine holds at most a day of the FACTs tv-sync folds |
+| `infra/kafka/topics-job.yaml` | `order.order` → `delete`, `retention.ms=2592000000` | Kafka, the archival path, *does* keep 30 days |
+| `infra/dr/nats/rebuild-job.yaml` | `NATS_REBUILD_SINCE=24h`, and `order.order` is **not** in `NATS_REBUILD_STATE_TOPICS` | the DR rebuild reads a 24h window of that 30-day log, not offset 0 |
+
+So the 30-day Kafka log is real, and the rebuild does not use it. Two further
+facts settle it: the rebuild's only sink is the **bus** — it restores the spine,
+and nothing anywhere re-drives this projection (the sole writer of `tv_facts` is
+the running service, whose `Rehydrate` reads `tv_facts` itself, which is circular
+when the table is empty) — and the rebuild job drains only the un-prefixed
+`__system__` topics, so for any onboarded tenant it replays nothing and **exits
+0**. No fill is persisted anywhere else, so what would be lost is not a cache of
+something durable.
+
+It is in `kanz-books` rather than `kanz-orders` because it is the **read** side:
+nothing on the order path reads `tv_facts`, so it has no transactional coupling
+to `orders` and must not share the money path's restore timeline in either
+direction. `kanz-books` already holds exactly this class — projections whose
+source of truth is the append-only journal.
+
+The general rule this settles: **covering something unnecessarily is cheap;
+excluding it on a rebuild story nobody has exercised is how #60 happened.** The
+two standing exclusions (`market-data`, `audit`) are not of that shape — each has
+an independently documented mechanism (`docs/runbooks/dr-drill.md` for
+market-data; object-lock/WORM for audit), not an inference.
+
+Database naming across the deploy manifests, the DSN secrets and this document
+has been reported as inconsistent, so every mapping above should still be settled
+against the running config rather than any single document (**#59**) — see the
+Vault table in the call-out above.
 
 ### Adding a cluster (what "placing" a service actually costs)
 
@@ -129,11 +190,36 @@ That last one is the same silent failure this issue is about, reached by a
 different route: not a missing backup, but a backup nobody promotes. The
 services come up, reach a database, and it is not theirs.
 
-The `kanz-books` cluster hosts one database per service; each service's schema is
-defined by its `services/<svc>/migrations/*.sql` (applied in lexical order at
-deploy). The stores are event-sourced (ledger, fund) or replace-on-write
-projections (book, golden records) — the journal/blob is the source of truth, so
-the continuous-WAL + daily-base-backup PITR contract below applies unchanged.
+`failover.sh` step 4's `rollout status` wait list is a **fourth** place, and it
+is *not* machine-checked: a covered service missing from it is never waited on
+during promotion, and because the loop tolerates a missing deploy with `|| true`,
+an absent name and a present-but-failing name print exactly the same thing —
+nothing. Add every covered service there too.
+
+`kanz-books` and `kanz-orders` each host one database per service; each service's
+schema is defined by its `services/<svc>/migrations/*.sql` (applied in lexical
+order at deploy). `kanz-books`'s stores are event-sourced (ledger, fund) or
+replace-on-write projections (book, golden records, `tv_facts`) — the
+journal/blob is the source of truth, so the continuous-WAL + daily-base-backup
+PITR contract below applies unchanged.
+
+Base-backup slots are 30 minutes apart so they do not contend for the same
+object-store bandwidth: `kanz-risk` 02:00, `kanz-registry` 02:30, `kanz-books`
+03:00, `kanz-orders` 03:30, `kanz-compliance` 04:00. The last is also the right
+*order*: the evidence chain is backed up after the stores it attests to, so its
+snapshot covers at least everything already captured in theirs.
+
+### Known gap in this procedure (not introduced by the coverage work)
+
+`failover.sh` step 4 runs `kubectl scale deploy --all --replicas=2`.
+`infra/deploy/tv-sync-deploy.yaml` pins `replicas: 1` and states it is a
+**correctness** bound, not a capacity one — two pods split the fact stream, so
+each folds only part of it and every pod's book is wrong. The blanket scale
+overrides that pin on every failover, so a DR cutover as written brings `tv-sync`
+up in the one configuration its own manifest forbids. Backing up `tv_facts` does
+not fix that; it is a separate defect in the failover procedure, recorded here
+and in a comment at the wait list rather than repaired in passing, because
+narrowing `--all` changes every service's failover behaviour.
 
 | File | Where | Purpose |
 |---|---|---|

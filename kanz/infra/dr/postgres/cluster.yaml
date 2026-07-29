@@ -2,9 +2,15 @@
 #
 # The stateful Postgres databases as CloudNativePG clusters with continuous WAL
 # archiving to a cross-region object store: PERS-01 risk state, the EVT-16 schema
-# registry, the PARITY-02 books, and the OMS order store. Continuous WAL =
-# point-in-time recovery (restore to any instant in the retention window), and it
-# is the source the DR-region replica clusters (replica.yaml) replay from.
+# registry, the PARITY-02 books, the order path (OMS + the venue adapters), and
+# the REG-02 compliance evidence chain. Continuous WAL = point-in-time recovery
+# (restore to any instant in the retention window), and it is the source the
+# DR-region replica clusters (replica.yaml) replay from.
+#
+# A cluster boundary here is a RESTORE-TIMELINE boundary, not a tidiness one:
+# PITR rewinds every database in a cluster together. So things that must restore
+# to the SAME instant share a cluster (the order path), and things that must be
+# able to restore INDEPENDENTLY of each other do not (compliance evidence).
 #
 # This sentence said "the two stateful Postgres databases" while defining four.
 # It was already wrong when kanz-books landed. The count is deliberately gone
@@ -97,13 +103,36 @@ spec:
   backupOwnerReference: self
   cluster: { name: kanz-registry }
 ---
-# PARITY-02 durable book-of-record stores. One cluster hosts a database per
-# service (accounting/IBOR ledger, alternatives/fund journal, wealth/household
-# book, datamaster/golden records + exception queue) — all event-sourced or
-# replace-on-write projections whose source of truth is the append-only journal,
-# so the same continuous-WAL + daily-base-backup PITR contract the risk state
-# uses applies unchanged. Migrations live in each service's migrations/ dir and
-# are applied in lexical order at deploy (see services/*/migrations + the README).
+# PARITY-02 durable book-of-record stores, plus the TradingView fact log. One
+# cluster hosts a database per service (accounting/IBOR ledger, alternatives/fund
+# journal, wealth/household book, datamaster/golden records + exception queue,
+# tv-sync/tv_facts) — all event-sourced or replace-on-write projections whose
+# source of truth is the append-only journal, so the same continuous-WAL +
+# daily-base-backup PITR contract the risk state uses applies unchanged.
+# Migrations live in each service's migrations/ dir and are applied in lexical
+# order at deploy (see services/*/migrations + the README).
+#
+# WHY tv-sync IS HERE AND NOT EXCLUDED. Its own comments call tv_facts
+# rebuildable from the event log; the config does not support that after a region
+# loss, and the difference only shows up when it is needed. Three settings decide
+# it. The NATS EXECUTION stream carrying order.> has max_age 24h
+# (infra/nats/bootstrap-job.yaml). Kafka DOES retain order.order for 30d
+# (infra/kafka/topics-job.yaml, retention.ms=2592000000) — but the DR rebuild
+# reads a bounded recent window of it: infra/dr/nats/rebuild-job.yaml sets
+# NATS_REBUILD_SINCE=24h and order.order is not a STATE topic, so it takes the
+# window rather than offset 0. At most 24h of the 30d log returns. And the
+# rebuild's only sink is the BUS — it restores the spine; nothing re-drives this
+# projection, and tv-sync's own Rehydrate reads tv_facts, which is circular when
+# the table is empty. Per tenant it is worse: the rebuild job drains only the
+# un-prefixed __system__ topics and exits 0 having replayed nothing for anyone
+# else. No fill is persisted anywhere but here.
+#
+# WHY HERE AND NOT kanz-orders. tv_facts is the READ side: nothing on the order
+# path reads it, so it has no transactional coupling to `orders` and must not
+# share the money path's restore timeline in either direction — neither should a
+# bad-sweep rewind of the order book drag the trader's view back, nor should a
+# display-side correction touch the order book. It belongs with the other
+# journal-derived projections, which is what this cluster already is.
 apiVersion: postgresql.cnpg.io/v1
 kind: Cluster
 metadata:
@@ -117,7 +146,15 @@ spec:
     parameters:
       archive_timeout: "30s"   # RPO bound for the archived-WAL path
   storage:
-    size: 50Gi
+    # 75Gi — 50Gi was sized for the four book-of-record databases, whose tables
+    # are ledgers and replace-on-write projections: they grow per business event
+    # and the projections rewrite in place. tv_facts is different in kind — one
+    # append-only row per order FACT (seven subjects are folded), carrying the
+    # marshaled payload, with no delete path — so it is the first table here that
+    # only ever grows. Adding it without moving the number would be the silent
+    # kind of change this file exists to prevent. The figure is a growth budget,
+    # not a measurement: revisit it when real fact volume exists.
+    size: 75Gi
   backup:
     retentionPolicy: "30d"
     barmanObjectStore:
@@ -139,7 +176,11 @@ spec:
   backupOwnerReference: self
   cluster: { name: kanz-books }
 ---
-# The OMS order store — `orders`, `positions`, `position_fills`: the money path.
+# THE ORDER PATH. One database per service, as kanz-books does:
+#
+#   oms            — `orders`, `positions`, `position_fills` (the money path)
+#   venue-binance  — `venue_orders` (the adapter's own order view)
+#   venue-okx      — `venue_orders` (same schema, separate database)
 #
 # Its own cluster, NOT a database inside kanz-books, and the reason is the
 # restore, not the write volume. PITR is per-cluster: recovering an order book to
@@ -150,13 +191,28 @@ spec:
 # of record it feeds. Isolated, the blast radius of an order-store restore is the
 # order store, and the ledger keeps whatever it had already recorded.
 #
+# THE SAME PROPERTY IS WHY THE VENUE ADAPTERS BELONG *IN* HERE RATHER THAN IN
+# CLUSTERS OF THEIR OWN. `venue_orders` is not an independent store: the OMS
+# admits an order at its own primary key and only THEN calls the adapter, which
+# writes the row that ties the exchange order back to it (see
+# services/venue-*/migrations/0001_venue_orders.sql). The two writes are one
+# logical transaction on the order path. Because PITR is per-cluster, separate
+# clusters would mean separate restore timelines — restore `orders` to T while
+# `venue_orders` sits at T' and you get orphan venue mappings, or, worse, orders
+# with no mapping back to the exchange order at all. That mapping is exactly what
+# the idempotency and recovery path reads: the user-data websocket delivers an
+# execution report carrying only a clOrdId, and without the row there is nothing
+# to enrich it from and nothing to tell the reconciler what should be open. One
+# cluster is one timeline, so the order path restores coherently or not at all.
+#
 # It is also the store whose absence is silent: after a failover against an empty
 # order store the OMS logs SweepInterrupted count=0, the same line a healthy
 # clean start produces (#60). Backup here is what keeps that line honest.
 #
-# The DSN this cluster must serve is NOT set anywhere in this repository — it
-# comes from Vault at kv/kanz/oms. See the README: declaring this cluster is not
-# the same as the running OMS being bound to it (#59).
+# The DSNs this cluster must serve are NOT set anywhere in this repository — they
+# come from Vault at kv/kanz/oms, kv/kanz/venue-binance and kv/kanz/venue-okx.
+# See the README: declaring this cluster is not the same as the running services
+# being bound to it (#59).
 apiVersion: postgresql.cnpg.io/v1
 kind: Cluster
 metadata:
@@ -175,6 +231,10 @@ spec:
     # estate and it is append-only: no update path reclaims the space. Sizing it at
     # the ledger's 50Gi would put the highest-write store on the tightest headroom,
     # and a full volume on the order path stalls order acceptance, not a report.
+    # The two venue_orders databases add one replace-on-write row per order (their
+    # PK is (tenant_id, order_id) and `state` is updated in place), so they add
+    # roughly the order count, not the execution count — a second-order term next
+    # to position_fills, which is why the figure is unchanged.
     size: 100Gi
   backup:
     retentionPolicy: "30d"
@@ -196,3 +256,93 @@ spec:
   schedule: "0 30 3 * * *"     # 03:30 daily base backup; WAL fills the gaps (PITR)
   backupOwnerReference: self
   cluster: { name: kanz-orders }
+---
+# REG-02 compliance evidence — the regulatory service's `audit_chain_links`: the
+# durable AUDIT-01 hash chain each filing signature is a position in.
+#
+# ITS OWN CLUSTER, AND DELIBERATELY NOT CO-LOCATED WITH ANYTHING IT ATTESTS TO.
+# This is the one placement in this file argued from INDEPENDENCE rather than
+# from coherence. Every other boundary here asks "what must restore together";
+# this one asks "what must be able to restore SEPARATELY".
+#
+# audit_chain_links is evidence ABOUT the trading path and the books — each row
+# is a filing's signature folded into its predecessor, plus the exact canonical
+# bytes that were signed, so the chain is independently walk-verifiable
+# (services/regulatory/migrations/0001_audit_links.sql). PITR is per-cluster, so
+# putting it in kanz-orders or kanz-books would mean any point-in-time restore of
+# the thing being attested to ALSO rewinds the attestation. Evidence that gets
+# rewound whenever the thing it attests to gets rewound is not evidence: a chain
+# that silently loses the links covering the rewound window cannot distinguish
+# "those filings never happened" from "the record of them was rolled back", which
+# is precisely the discrimination a tamper-evidence structure exists to make.
+# Independent, the chain outlives the restore and the gap is visible in it.
+#
+# The same reason it must not be excluded: losing it does not corrupt the chain,
+# it makes the chain UNVERIFIABLE, and the canonical signed bytes exist nowhere
+# else — there is no upstream to re-derive them from, so this store is not
+# rebuildable at any price.
+#
+# The DSN this cluster must serve is NOT set anywhere in this repository — it
+# comes from Vault at kv/kanz/regulatory (#59). See the README.
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: kanz-compliance
+  namespace: kanz-data
+  labels: { app.kubernetes.io/part-of: kanz, app.kubernetes.io/component: dr }
+spec:
+  instances: 3
+  primaryUpdateStrategy: unsupervised
+  postgresql:
+    parameters:
+      archive_timeout: "30s"   # RPO bound for the archived-WAL path
+  storage:
+    # 20Gi — the registry's size, not the order path's, because the write RATE is
+    # per FILING: FRTB, Form PF, AIFMD, TCFD and SFDR are periodic per-fund
+    # submissions (services/regulatory/internal/server/server.go), orders of
+    # magnitude below anything driven by executions or events.
+    #
+    # It is a GROWTH BUDGET rather than a steady state, and that is the part to
+    # revisit: the table is append-only with no delete path by construction (a
+    # deleted link breaks the chain), and each row carries the filing's full
+    # canonical bytes, so it only ever grows. Revisit this number when real filing
+    # volume exists; the estate has none yet, so a larger figure here would be a
+    # guess wearing more digits.
+    size: 20Gi
+  backup:
+    # 30d, unchanged from every other cluster here — and NOT a regulatory
+    # record-retention window. This is how far back PITR can restore TO. The
+    # long-horizon regulatory retention window is explicitly the lakehouse's job,
+    # not a retention setting on the operational plane: see
+    # infra/deploy/lake-sink-deploy.yaml:9-14 ("P&L-since-inception, the
+    # regulatory retention window ... read the LAKEHOUSE, not the Kafka log's
+    # retention window"). Nothing in this repository states a years-scale number,
+    # so inventing one here would put a figure an auditor may act on into a file
+    # whose author could not source it.
+    retentionPolicy: "30d"
+    barmanObjectStore:
+      destinationPath: s3://kanz-dr-backups/compliance
+      s3Credentials:
+        accessKeyId: { name: kanz-dr-s3, key: ACCESS_KEY_ID }
+        secretAccessKey: { name: kanz-dr-s3, key: SECRET_ACCESS_KEY }
+      wal: { compression: gzip }
+      data: { compression: gzip }
+---
+apiVersion: postgresql.cnpg.io/v1
+kind: ScheduledBackup
+metadata:
+  name: kanz-compliance-daily
+  namespace: kanz-data
+  labels: { app.kubernetes.io/part-of: kanz }
+spec:
+  # 04:00, the next free slot after risk 02:00 / registry 02:30 / books 03:00 /
+  # orders 03:30 — the 30-minute spacing keeps base backups from contending for
+  # the same object-store bandwidth, which is why the slot is picked rather than
+  # shared. LAST is also the right ORDER for this one specifically: the evidence
+  # chain is backed up AFTER the stores it attests to, so its snapshot covers at
+  # least everything already captured in theirs. Backing it up first would produce
+  # the one combination worth avoiding — books restored to a state the chain has
+  # no link for.
+  schedule: "0 0 4 * * *"      # 04:00 daily base backup; WAL fills the gaps (PITR)
+  backupOwnerReference: self
+  cluster: { name: kanz-compliance }

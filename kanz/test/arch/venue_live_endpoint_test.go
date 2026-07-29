@@ -285,21 +285,22 @@ type liveVenueExemption struct {
 // accepted, and the guard checks on every run that the accepted shape is still
 // the deployed shape (host set unchanged) and that the exposure still exists at
 // all (dead-entry check).
-var liveVenueUnbackedExemptions = map[string]liveVenueExemption{
-	"venue-okx": {
-		issue:     "#147",
-		liveHosts: []string{"ws.okx.com", "www.okx.com"},
-		reason: "OKX publishes NO separate demo hostname. Demo trading is selected per-request " +
-			"by the `x-simulated-trading: 1` header, which appears nowhere in this repository — so " +
-			"unlike Binance there is no sandbox host to point at, and the adapter's safety rests " +
-			"entirely on which credentials are mounted. That makes the endpoint indistinguishable " +
-			"from production BY CONFIGURATION, which is exactly why it is recorded here rather " +
-			"than silently tolerated. Retiring this needs the header wired and asserted (#147), or " +
-			"the venue_orders + OMS stores brought under WAL+PITR (#60). Changing the manifest or " +
-			"the Go default to something else is NOT the fix: an order-placing adapter pointed at " +
-			"a host its credentials do not belong to fails at the exchange, it does not become safe.",
-	},
-}
+// EMPTY, AND THAT IS THE POINT — see TestEveryOrderPlacingVenueCanSelectANonLiveEndpoint.
+//
+// venue-okx was exempted here while venue_orders and the OMS store were
+// drUnresolved. #60 brought both under WAL+PITR, which removed the second half of
+// this guard's condition, so the dead-entry check fired and the entry was
+// deleted. That is correct: the DR objection really was resolved.
+//
+// It is also the trap. Nothing about the OKX adapter changed — it still points at
+// the live exchange and still has no demo path — yet the interlock that had been
+// holding it disappeared BECAUSE A DIFFERENT PROBLEM WAS FIXED. Deleting the
+// entry and stopping there would have quietly converted "blocked by a guard" into
+// "blocked by nothing", with a green suite either way.
+//
+// So the exposure moved rather than evaporated: it now lives against the
+// invariant it always belonged to, which is #147's, not #60's.
+var liveVenueUnbackedExemptions = map[string]liveVenueExemption{}
 
 // nonOrderPlacingExchangeClients records services that configure LIVE exchange
 // hosts legitimately, because they cannot place an order.
@@ -502,4 +503,182 @@ func hostOf(rawURL string) string {
 // the form an editor and `git grep` both accept.
 func relLine(rel string, line int) string {
 	return rel + ":" + strconv.Itoa(line)
+}
+
+// AN ADAPTER THAT CAN PLACE AN ORDER MUST BE ABLE TO BE POINTED SOMEWHERE THAT IS
+// NOT THE LIVE EXCHANGE.
+//
+// TestNoOrderPlacingVenueRunsLiveWhileItsStoreIsUnbacked is DR-scoped: it fires on
+// live host AND unbacked store. Bringing venue_orders and the OMS store under
+// WAL+PITR (#60) removed the second half and legitimately retired it — a real
+// problem was really fixed.
+//
+// That is exactly why this guard exists separately. The OKX adapter did not
+// change: it still names the live exchange, and OKX selects demo by the
+// `x-simulated-trading: 1` request header rather than by hostname, so there is no
+// sandbox host to point it at. Had the DR fix simply deleted the exemption, the
+// only thing standing between this platform and the live order book would have
+// stopped standing there — and the suite would have gone green at that moment.
+// A safety property that disappears when an unrelated property is repaired was
+// never being enforced; it was being inferred.
+//
+// The question here is capability, not configuration: CAN this adapter be run
+// against something that is not real money? Binance can (testnet.binance.vision).
+// OKX cannot, until the header exists.
+func TestEveryOrderPlacingVenueCanSelectANonLiveEndpoint(t *testing.T) {
+	root := moduleRoot(t)
+	adapters := orderPlacingVenueAdapters(t, root)
+	if len(adapters) == 0 {
+		t.Fatal("found no order-placing venue adapters — the discovery scan is broken, " +
+			"and a guard that examines nothing passes for the wrong reason")
+	}
+
+	seen := map[string]bool{}
+	for _, svc := range adapters {
+		live := map[string]string{} // host -> where
+		for _, ep := range configuredExchangeEndpoints(t, root, svc) {
+			if _, ok := nonLiveExchangeHosts[ep.host]; !ok {
+				live[ep.host] = ep.where
+			}
+		}
+		if len(live) == 0 {
+			continue // every configured host is a sandbox: it can be run without real money
+		}
+		if tok, ok := demoModeSelectors[svc]; ok && serviceMentions(t, root, svc, tok) {
+			continue // a demo path exists in the code, so the live host is a choice, not a cage
+		}
+
+		ex, exempted := noDemoPathExemptions[svc]
+		if !exempted {
+			t.Errorf("%s can place orders and is configured against live exchange host(s) %s, "+
+				"with no way to select a non-live endpoint\n\n"+
+				"Evidence: %s\n\n"+
+				"Every order this adapter accepts settles against real money, and no configuration "+
+				"change available today makes that untrue. Either give it a sandbox host and record "+
+				"that host in nonLiveExchangeHosts, or wire the venue's demo-selection mechanism and "+
+				"register its marker in demoModeSelectors. If it must stay this way, add a named "+
+				"entry to noDemoPathExemptions citing the issue that retires it — which is a "+
+				"live-money decision for a human, not for whoever is making this test green.",
+				svc, strings.Join(sortedKeys(live), ", "), whereList(live))
+			continue
+		}
+		seen[svc] = true
+		if got, want := sortedKeys(live), append([]string(nil), ex.liveHosts...); !equalStrings(got, want) {
+			sort.Strings(want)
+			t.Errorf("%s's exemption was reviewed for live host(s) %s but it now configures %s\n\n"+
+				"A new live endpoint is a new decision. Re-review it and update the entry, or remove "+
+				"the endpoint.", svc, strings.Join(want, ", "), strings.Join(got, ", "))
+		}
+		t.Logf("ACCEPTED NO-DEMO-PATH EXPOSURE: %s runs against %s and cannot be pointed elsewhere. "+
+			"Tracked by %s. %s", svc, strings.Join(sortedKeys(live), ", "), ex.issue, ex.reason)
+	}
+
+	for _, svc := range sortedKeys(noDemoPathExemptions) {
+		if !seen[svc] {
+			t.Errorf("exemption for %q is DEAD — it can now select a non-live endpoint, or it no "+
+				"longer places orders.\n\nDelete the entry from noDemoPathExemptions and close or "+
+				"update issue %s. An exemption that outlives its repair is how the next real one "+
+				"gets ignored.", svc, noDemoPathExemptions[svc].issue)
+		}
+	}
+}
+
+// demoModeSelectors maps a service to the source marker that proves it can run
+// against the venue's demo environment. It exists because not every exchange
+// separates demo by hostname: OKX shares www.okx.com between demo and production
+// and switches on the `x-simulated-trading: 1` request header, so for OKX the
+// hostname genuinely cannot answer the question and only the code can.
+//
+// This is the EXIT CONDITION for the exemption below. Wiring the header — and it
+// must actually be sent, not merely named in a comment — is what turns this guard
+// green, which is why the marker is checked in source rather than assumed.
+var demoModeSelectors = map[string]string{
+	"venue-okx": "x-simulated-trading",
+}
+
+// noDemoPathExemptions records adapters that can place live orders and have no
+// way to be pointed at anything else.
+var noDemoPathExemptions = map[string]liveVenueExemption{
+	"venue-okx": {
+		issue:     "#147",
+		liveHosts: []string{"ws.okx.com", "www.okx.com"},
+		reason: "OKX publishes NO separate demo hostname — demo is selected per-request by the " +
+			"`x-simulated-trading: 1` header, which appears nowhere in this repository. So the " +
+			"endpoint is indistinguishable from production BY CONFIGURATION, and safety rests " +
+			"entirely on which credentials happen to be mounted. Repointing the manifest is NOT " +
+			"the fix: an adapter aimed at a host its credentials do not belong to fails at the " +
+			"exchange, it does not become safe. The fix is the header, asserted here via " +
+			"demoModeSelectors. Note this exposure is INDEPENDENT of #60 — it survived that " +
+			"issue's DR coverage landing, which is the reason this guard is separate from the one " +
+			"above.",
+	},
+}
+
+// goStringLiteralRe matches double-quoted Go string literals, handling escapes.
+var goStringLiteralRe = regexp.MustCompile(`"(?:[^"\\]|\\.)*"`)
+
+// serviceMentions reports whether a service's non-test Go source contains a
+// marker INSIDE A STRING LITERAL. Non-test only, and the shared venueadapter
+// package is included because the header would be set where the request is
+// signed, not in the service's own tree.
+//
+// STRING LITERALS, NOT RAW TEXT — and this guard learned that the hard way. The
+// first version matched anywhere in the file, and passed venue-okx immediately:
+// the fix for #147 had added a comment to its config.go EXPLAINING that
+// `x-simulated-trading: 1` is absent. Prose describing a control's absence read
+// as the control's presence, and the exemption below was declared dead by a
+// guard whose whole subject is the difference between the two.
+//
+// A header that is actually sent appears as an argument to Header.Set — that is,
+// as a literal. A header that is only discussed appears in a comment. Reading
+// only literals is what makes the check about behaviour rather than about
+// whether anyone has written the words down.
+func serviceMentions(t *testing.T, root, svc, marker string) bool {
+	t.Helper()
+	found := false
+	marker = strings.ToLower(marker)
+	for _, dir := range []string{
+		filepath.Join(root, "services", svc),
+		filepath.Join(root, "internal", "venueadapter"),
+	} {
+		if err := filepath.WalkDir(dir, func(p string, d fs.DirEntry, err error) error {
+			if err != nil || d.IsDir() || !strings.HasSuffix(p, ".go") || strings.HasSuffix(p, "_test.go") {
+				return nil //nolint:nilerr // a missing optional dir is not a failure
+			}
+			b, err := os.ReadFile(p)
+			if err != nil {
+				return err
+			}
+			for _, lit := range goStringLiteralRe.FindAllString(string(b), -1) {
+				if strings.Contains(strings.ToLower(lit), marker) {
+					found = true
+				}
+			}
+			return nil
+		}); err != nil && !os.IsNotExist(err) {
+			t.Fatalf("scan %s for %q: %v", dir, marker, err)
+		}
+	}
+	return found
+}
+
+func whereList(live map[string]string) string {
+	parts := make([]string, 0, len(live))
+	for _, h := range sortedKeys(live) {
+		parts = append(parts, h+" ("+live[h]+")")
+	}
+	return strings.Join(parts, ", ")
+}
+
+func equalStrings(a, b []string) bool {
+	sort.Strings(b)
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
