@@ -39,11 +39,28 @@ Reconstruction is part of the **RTO ≤ 15min** target (validated live by DR-01e
 kubectl apply -f ../../nats/             # cluster + streams (bootstrap-job)
 kubectl apply -f rebuild-job.yaml
 kubectl -n kanz-messaging logs job/nats-rebuild -f
-# "nats-rebuild complete topics=… published=…" ⇒ spine restored.
+# "nats-rebuild complete tenants=… topics=… published=…" ⇒ the run finished.
 ```
 
-Tune the window/topics via the Job env (`NATS_REBUILD_SINCE`,
-`NATS_REBUILD_TOPICS`, `NATS_REBUILD_STATE_TOPICS`). Re-running is safe.
+**A completed run is not the same as a restored spine.** Read the per-tenant
+summary, not just the last line: a tenant whose topics exist but held nothing in
+the window is reported `empty=N` and named as barren, and the Job still exits 0
+— because "the topic is there and had no traffic" is a legitimate outcome, while
+looking identical to a real restore is not. A topic that does NOT exist is a
+hard failure (exit 1), on the reasoning that a DR run reading a name nothing was
+ever written to has no honest success to report.
+
+Tune the window/topics/tenants via the Job env (`NATS_REBUILD_SINCE`,
+`NATS_REBUILD_TOPICS`, `NATS_REBUILD_STATE_TOPICS`, `NATS_REBUILD_TENANTS`).
+Re-running is safe.
+
+`NATS_REBUILD_TENANTS` decides WHOSE data comes back. Unset ⇒ `__system__`
+only, which is the historical behaviour and keeps the un-prefixed legacy
+topics. Every other tenant's archived topics live under its own `{tenant}.`
+prefix (MT-01c), so **a tenant absent from this list is a tenant with no DR** —
+its history is not restored and, before this variable existed, nothing said so.
+Set-but-empty is refused rather than defaulted: it means a value failed to
+survive templating, and that run would restore nothing for anyone.
 
 `NATS_REBUILD_STATE_TOPICS` matters more than the others: it names the
 COMPACTED topics (`compliance.mandate`, `risk.position`) that must be read IN

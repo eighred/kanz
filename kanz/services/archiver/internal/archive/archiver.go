@@ -42,8 +42,8 @@ import (
 	"log/slog"
 	"sync"
 
+	"github.com/eighred/kanz/internal/topic"
 	"github.com/eighred/kanz/pkg/bus"
-	"github.com/eighred/kanz/services/archiver/internal/topic"
 )
 
 // HeaderEventID carries the envelope's event_id so a downstream consumer can dedup
