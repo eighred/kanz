@@ -52,7 +52,21 @@ spec:
           recurse: true
           # Templated/instructional manifests are applied by their own tooling
           # (tenantctl, smoke tests), not raw-synced.
-          exclude: "{tenancy.yaml,smoke-test.sh,*-job.yaml}"
+          #
+          # EXCLUDE BY NAME, NEVER BY `*-job.yaml` (#92). That glob was here, and it
+          # selected exactly the wrong files. `bootstrap-job.yaml` — the SPIFFE
+          # bootstrap that CREATES EVERY JETSTREAM STREAM — ends in `-job.yaml`, so
+          # GitOps never applied it: the spine's provisioning was a command a human
+          # had to remember, which is the "no re-provisioning path" half of #92.
+          # Meanwhile `bootstrap-job-dev-plaintext.yaml` does NOT end in `-job.yaml`,
+          # so the glob let it through — and it is the one file here whose own header
+          # says "NEVER apply this to a cluster that has SPIRE". The pattern excluded
+          # the manifest that must be applied and admitted the one that must not.
+          #
+          # A name-shaped rule cannot express "is this safe to sync"; only the list
+          # can. test/arch asserts every Job in a synced path is either a re-runnable
+          # hook or named here, so a new one cannot inherit the old silence.
+          exclude: "{tenancy.yaml,smoke-test.sh,bootstrap-job-dev-plaintext.yaml}"
       destination:
         server: "{{.server}}"
         namespace: "{{.namespace}}"
