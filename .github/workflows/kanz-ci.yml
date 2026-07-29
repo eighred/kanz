@@ -503,7 +503,7 @@ jobs:
               opt: target=js+dts
           EOF
           buf generate --template /tmp/buf.gen.ts.yaml
-          # Make gen/ts an installable @kanz-eng/kanz-schemas package.
+          # Make gen/ts an installable @eighred/kanz-schemas package.
           cp packaging/ts/package.json gen/ts/package.json
           node -e "const fs=require('fs');const p='gen/ts/package.json';const j=JSON.parse(fs.readFileSync(p));j.version='0.1.0';fs.writeFileSync(p,JSON.stringify(j,null,2));"
 
@@ -524,13 +524,13 @@ jobs:
         working-directory: kanz-schemas/gen/ts
         run: npm install --omit=dev --no-audit --no-fund
 
-      # The @kanz-eng/kanz-schemas dep isn't published (DEBT-01b); repoint it at
+      # The @eighred/kanz-schemas dep isn't published (DEBT-01b); repoint it at
       # the freshly generated local package so npm resolves it from disk, not the
       # registry. The package.json edit is ephemeral (CI only).
       - name: Install
         working-directory: kanz/ts/kanz-bus
         run: |
-          npm pkg set dependencies.@kanz-eng/kanz-schemas="file:../../../kanz-schemas/gen/ts"
+          npm pkg set dependencies.@eighred/kanz-schemas="file:../../../kanz-schemas/gen/ts"
           npm install
 
       # Typecheck, and it must run BEFORE the tests rather than instead of them.

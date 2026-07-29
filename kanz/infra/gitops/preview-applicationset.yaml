@@ -19,7 +19,7 @@ spec:
   generators:
     - pullRequest:
         github:
-          owner: kanz-eng
+          owner: eighred
           repo: kanz
           tokenRef:
             secretName: argocd-github-token

@@ -183,7 +183,7 @@ _ADD_ENV = {
         # rewrite can never reach it. OPERATOR_PROVISIONER_IMAGE_PULL_POLICY is the one
         # lever that does: the operator reads it and sets the Job container's
         # ImagePullPolicy itself. The rig side-loads kanz-provisioner via `kind load`
-        # and has no credentials to pull ghcr.io/kanz-eng/* (private), so without this
+        # and has no credentials to pull ghcr.io/eighred/* (private), so without this
         # the provisioning Job defaults to Always on its :latest tag and sits in
         # ImagePullBackOff even though the image is already on the node.
         {"name": "OPERATOR_PROVISIONER_IMAGE_PULL_POLICY",

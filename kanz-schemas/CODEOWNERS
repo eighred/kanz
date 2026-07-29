@@ -1,34 +1,34 @@
 # kanz-schemas ownership — every proto subtree maps to an owning team.
-# Replace placeholder @kanz-eng/* handles with real GitHub teams before
+# Replace placeholder @eighred/* handles with real GitHub teams before
 # enabling branch protection (EVT-07).
 #
 # GitHub CODEOWNERS: the last matching pattern wins outright (owners do not
 # merge across lines), so multi-owner paths list all owners on one line.
 
-/proto/envelope/      @kanz-eng/event-platform @kanz-eng/architecture
-/proto/common/        @kanz-eng/event-platform @kanz-eng/architecture
-/proto/market/        @kanz-eng/market-data
-/proto/domain/        @kanz-eng/risk-engine
-/proto/command/       @kanz-eng/execution
-/proto/order/         @kanz-eng/execution
-/proto/lifecycle/     @kanz-eng/platform
-/proto/observation/   @kanz-eng/observability
-/proto/inference/     @kanz-eng/quant-ml
-/proto/query/         @kanz-eng/risk-engine @kanz-eng/architecture
-/proto/reference/     @kanz-eng/market-data @kanz-eng/quant-ml @kanz-eng/architecture
-/proto/performance/   @kanz-eng/risk-engine @kanz-eng/quant-ml
-/proto/optimization/  @kanz-eng/risk-engine @kanz-eng/quant-ml @kanz-eng/execution
-/proto/factor/        @kanz-eng/risk-engine @kanz-eng/quant-ml
-/proto/xva/           @kanz-eng/risk-engine @kanz-eng/quant-ml
-/proto/collateral/    @kanz-eng/risk-engine @kanz-eng/execution
-/proto/regulatory/    @kanz-eng/risk-engine @kanz-eng/architecture
-/proto/accounting/    @kanz-eng/risk-engine @kanz-eng/architecture
-/proto/settlement/    @kanz-eng/execution
-/proto/alternatives/  @kanz-eng/risk-engine @kanz-eng/quant-ml
-/proto/sustainability/ @kanz-eng/risk-engine @kanz-eng/quant-ml
-/proto/master/        @kanz-eng/market-data @kanz-eng/architecture
-/proto/wealth/        @kanz-eng/quant-ml @kanz-eng/architecture
+/proto/envelope/      @eighred/event-platform @eighred/architecture
+/proto/common/        @eighred/event-platform @eighred/architecture
+/proto/market/        @eighred/market-data
+/proto/domain/        @eighred/risk-engine
+/proto/command/       @eighred/execution
+/proto/order/         @eighred/execution
+/proto/lifecycle/     @eighred/platform
+/proto/observation/   @eighred/observability
+/proto/inference/     @eighred/quant-ml
+/proto/query/         @eighred/risk-engine @eighred/architecture
+/proto/reference/     @eighred/market-data @eighred/quant-ml @eighred/architecture
+/proto/performance/   @eighred/risk-engine @eighred/quant-ml
+/proto/optimization/  @eighred/risk-engine @eighred/quant-ml @eighred/execution
+/proto/factor/        @eighred/risk-engine @eighred/quant-ml
+/proto/xva/           @eighred/risk-engine @eighred/quant-ml
+/proto/collateral/    @eighred/risk-engine @eighred/execution
+/proto/regulatory/    @eighred/risk-engine @eighred/architecture
+/proto/accounting/    @eighred/risk-engine @eighred/architecture
+/proto/settlement/    @eighred/execution
+/proto/alternatives/  @eighred/risk-engine @eighred/quant-ml
+/proto/sustainability/ @eighred/risk-engine @eighred/quant-ml
+/proto/master/        @eighred/market-data @eighred/architecture
+/proto/wealth/        @eighred/quant-ml @eighred/architecture
 
 # Constitution-level files — require architecture review.
-/buf.yaml             @kanz-eng/architecture
-/CODEOWNERS           @kanz-eng/architecture
+/buf.yaml             @eighred/architecture
+/CODEOWNERS           @eighred/architecture

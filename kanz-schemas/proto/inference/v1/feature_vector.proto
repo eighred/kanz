@@ -12,7 +12,7 @@ syntax = "proto3";
 //
 // proto3 cannot enforce field presence; "Required" invariants are
 // enforced by the prediction-layer client libraries on publish/call.
-// CODEOWNERS: @kanz-eng/quant-ml owns this subtree.
+// CODEOWNERS: @eighred/quant-ml owns this subtree.
 package inference.v1;
 
 import "google/protobuf/timestamp.proto";

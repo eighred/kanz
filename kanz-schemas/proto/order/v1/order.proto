@@ -12,7 +12,7 @@ syntax = "proto3";
 //
 // The order aggregate identity is order_id; it is the metadata.target_id of
 // every command and the envelope partition_key, so all commands and lifecycle
-// FACTs for one order are totally ordered. CODEOWNERS: @kanz-eng/execution.
+// FACTs for one order are totally ordered. CODEOWNERS: @eighred/execution.
 //
 // proto3 cannot enforce field presence; the "Required" notes are invariants the
 // bus client library and the OMS command handlers enforce on publish.

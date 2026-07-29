@@ -52,13 +52,13 @@ review (it implies a new bounded context).
 
 | Domain | Bounded context | CODEOWNERS team |
 |---|---|---|
-| `market` | Market data ingestion | `@kanz-eng/market-data` |
-| `risk` | Risk engine | `@kanz-eng/risk-engine` |
-| `execution` | Command / order execution | `@kanz-eng/execution` |
-| `inference` | Prediction layer (features, predictions) | `@kanz-eng/quant-ml` |
-| `platform` | System lifecycle, config, mode | `@kanz-eng/platform` |
-| `data` | Data-integrity signals | `@kanz-eng/observability` |
-| `observability` | Metrics, traces, decision logs | `@kanz-eng/observability` |
+| `market` | Market data ingestion | `@eighred/market-data` |
+| `risk` | Risk engine | `@eighred/risk-engine` |
+| `execution` | Command / order execution | `@eighred/execution` |
+| `inference` | Prediction layer (features, predictions) | `@eighred/quant-ml` |
+| `platform` | System lifecycle, config, mode | `@eighred/platform` |
+| `data` | Data-integrity signals | `@eighred/observability` |
+| `observability` | Metrics, traces, decision logs | `@eighred/observability` |
 
 ## 3. Relationship to the Envelope
 
