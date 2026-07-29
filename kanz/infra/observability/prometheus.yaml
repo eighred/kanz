@@ -1,0 +1,251 @@
+# Prometheus (#61) — the thing that was missing.
+#
+# WHY THIS FILE EXISTS. infra/observability/ shipped alerts/, dashboards/ and
+# slo/ for months while NOTHING scraped. There was no kind: Prometheus, no
+# prometheus image, and exactly one prometheus.io/scrape annotation in the
+# repository — on node-exporter, which is not one of the services. The SLO
+# recording rules computed over series no collector gathered, the burn-rate
+# alerts fired on those recordings, and every degraded mode the platform has was
+# unobservable. None of it looked broken: the files were present, reviewed and
+# tested by promtool. Configuration that is complete and unconnected is the
+# hardest kind of gap to see.
+#
+# WHAT THIS IS NOT. It is not a metrics platform. Storage is an emptyDir (see
+# THE RETENTION LIMIT below), there is no remote_write, no HA pair and no
+# Alertmanager — so alerts are EVALUATED here and delivered nowhere. Deploying
+# this makes the platform observable; it does not make it alertable. Do not read
+# a running Prometheus as "on-call works".
+#
+# PLAIN PROMETHEUS, NOT THE OPERATOR, and the reason is the rule files. slo/
+# ships slo.recording.rules.yaml and slo.alerts.rules.yaml as ordinary rule
+# files with a promtool test harness in slo_test.yaml. The Operator would
+# require restating both as PrometheusRule CRDs, which orphans that harness and
+# leaves the tests validating a copy nothing loads. Mounting the files unchanged
+# keeps one source of truth for the rules and keeps them tested.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: prometheus
+  namespace: kanz-observability
+  labels:
+    app.kubernetes.io/part-of: kanz
+---
+# Pod discovery only. Prometheus needs to LIST pods to find scrape targets and
+# nothing else: it does not read secrets, it does not read configmaps, and it
+# does not need nodes (node-exporter is discovered as an ordinary annotated pod,
+# the same way every service is). A monitoring plane with cluster-wide read is a
+# credential-harvesting surface waiting for a Prometheus CVE; this is the
+# smallest grant that makes role: pod work.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: prometheus-pod-discovery
+  labels:
+    app.kubernetes.io/part-of: kanz
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: prometheus-pod-discovery
+  labels:
+    app.kubernetes.io/part-of: kanz
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: prometheus-pod-discovery
+subjects:
+  - kind: ServiceAccount
+    name: prometheus
+    namespace: kanz-observability
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: prometheus-config
+  namespace: kanz-observability
+  labels:
+    app.kubernetes.io/part-of: kanz
+data:
+  prometheus.yml: |
+    global:
+      scrape_interval: 30s
+      evaluation_interval: 30s
+
+    # The SLO rules, mounted from the slo-rules ConfigMap. They are NOT restated
+    # here: infra/observability/slo/ is the one copy, slo_test.yaml tests that
+    # copy with promtool, and a second inlined copy would drift from the tested
+    # one silently — Prometheus would load rules nobody had tested and promtool
+    # would pass against rules nobody ran.
+    rule_files:
+      - /etc/prometheus/rules/*.rules.yaml
+
+    scrape_configs:
+      # ANNOTATION-DRIVEN DISCOVERY, not a static target list. A hardcoded list
+      # goes stale the moment a service is added or a notDeployed exemption is
+      # retired, and it goes stale SILENTLY — the new service is simply absent,
+      # and absent targets appear on no dashboard and fire no alert.
+      # test/arch/prometheus_scrape_test.go enforces the other half: every
+      # deployable service must carry these annotations.
+      - job_name: kanz-pods
+        kubernetes_sd_configs:
+          - role: pod
+        relabel_configs:
+          # Opt-in. A pod without the annotation is not scraped.
+          - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_scrape]
+            action: keep
+            regex: "true"
+
+          # THE PORT COMES FROM THE ANNOTATION, and it must, because it is not
+          # guessable. Ports in this estate run 8080-9090 and several workloads
+          # open more than one: venue-binance is grpc 9000 + http 8091,
+          # venue-okx is grpc 9000 + http 8092, operator is grpc 9090 + health
+          # 8091. Defaulting to the first declared port would aim the scrape at
+          # gRPC, which cannot answer GET /metrics — and that failure surfaces
+          # as a DOWN row, not an error.
+          - source_labels: [__address__, __meta_kubernetes_pod_annotation_prometheus_io_port]
+            action: replace
+            regex: ([^:]+)(?::\d+)?;(\d+)
+            replacement: $1:$2
+            target_label: __address__
+
+          # No prometheus.io/path handling, deliberately. Every service in this
+          # estate serves /metrics and the arch guard asserts it, so a path
+          # annotation would be a configuration surface with no user and one
+          # more thing to get wrong.
+
+          - source_labels: [__meta_kubernetes_namespace]
+            action: replace
+            target_label: namespace
+          - source_labels: [__meta_kubernetes_pod_name]
+            action: replace
+            target_label: pod
+          # `service` is the label the SLO rules in slo/ join on. It comes from
+          # the app label every workload in this estate already sets; without
+          # this the recording rules produce series the alerts cannot match.
+          - source_labels: [__meta_kubernetes_pod_label_app]
+            action: replace
+            target_label: service
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: prometheus
+  namespace: kanz-observability
+  labels:
+    app.kubernetes.io/part-of: kanz
+    app: prometheus
+spec:
+  # ONE REPLICA, AND NOT AS AN OVERSIGHT. Two plain Prometheus pods do not form
+  # a cluster: they scrape independently, store independently, and disagree.
+  # Highly-available Prometheus means a deliberate pair with deduplication in
+  # front (Thanos/Mimir), which is a different change. Raising this number
+  # without that gives two half-truths instead of one.
+  replicas: 1
+  revisionHistoryLimit: 5
+  strategy:
+    # Recreate, not RollingUpdate: the emptyDir below is owned by one pod, and a
+    # rolling update would briefly run two scrapers against the same targets.
+    type: Recreate
+  selector:
+    matchLabels:
+      app: prometheus
+  template:
+    metadata:
+      labels:
+        app: prometheus
+        app.kubernetes.io/part-of: kanz
+      annotations:
+        # Prometheus scrapes itself: up{service="prometheus"} is how you learn
+        # the scraper is alive from the same surface as everything else.
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9090"
+    spec:
+      serviceAccountName: prometheus
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        runAsGroup: 65534
+        fsGroup: 65534
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: prometheus
+          # quay.io, matching node-exporter.yaml, rather than Docker Hub: same
+          # registry as the sibling component and no Hub rate limit.
+          #
+          # PINNED BY DIGEST, and the tag is retained only so a human can read
+          # which version this is. v3.1.0 is a MUTABLE tag upstream — the digest
+          # is what actually determines what runs.
+          #
+          # THIS IS AN UNMIRRORED THIRD-PARTY BASE. base-image-mirror.yml exists
+          # precisely to remove dependencies like this one, and it does not yet
+          # cover the observability images (node-exporter has the same gap).
+          # Populating the mirror and repointing are deliberately separate
+          # changes in that workflow's own comment, and in that order.
+          image: quay.io/prometheus/prometheus:v3.1.0@sha256:6559acbd5d770b15bb3c954629ce190ac3cbbdb2b7f1c30f0385c4e05104e218
+          args:
+            - --config.file=/etc/prometheus/prometheus.yml
+            - --storage.tsdb.path=/prometheus
+            # THE RETENTION LIMIT. 15 days of LOCAL, EPHEMERAL storage: the
+            # volume below is an emptyDir, so a pod restart loses every sample.
+            # That is acceptable for making the platform observable and NOT
+            # acceptable as a metrics history — an incident review the week after
+            # a restart has nothing to read. A PVC or remote_write is the fix and
+            # is deliberately not smuggled in here.
+            - --storage.tsdb.retention.time=15d
+            - --web.listen-address=:9090
+          ports:
+            - { name: http, containerPort: 9090 }
+          readinessProbe:
+            httpGet: { path: /-/ready, port: 9090 }
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: { path: /-/healthy, port: 9090 }
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
+          resources:
+            requests: { cpu: 200m, memory: 512Mi }
+            limits: { memory: 2Gi }
+          volumeMounts:
+            - { name: config, mountPath: /etc/prometheus, readOnly: true }
+            - { name: rules, mountPath: /etc/prometheus/rules, readOnly: true }
+            - { name: data, mountPath: /prometheus }
+      volumes:
+        - name: config
+          configMap: { name: prometheus-config }
+        # NOT optional. If the slo-rules ConfigMap is absent the pod stays in
+        # ContainerCreating and says so, which is the whole point: with
+        # `optional: true` Prometheus would start clean, load zero rules, serve a
+        # green /-/ready, and every SLO alert would simply never fire. "Nothing
+        # configured" must not look like "checked, and fine".
+        #
+        # Create it from the one copy of the rules:
+        #   kubectl -n kanz-observability create configmap slo-rules \
+        #     --from-file=kanz/infra/observability/slo/slo.recording.rules.yaml \
+        #     --from-file=kanz/infra/observability/slo/slo.alerts.rules.yaml
+        - name: rules
+          configMap: { name: slo-rules }
+        - name: data
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: prometheus
+  namespace: kanz-observability
+  labels:
+    app.kubernetes.io/part-of: kanz
+spec:
+  selector:
+    app: prometheus
+  ports:
+    - { name: http, port: 9090, targetPort: 9090 }
