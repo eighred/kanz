@@ -54,6 +54,48 @@ func TestEveryMigrationOwningServiceHasADecidedDRPosture(t *testing.T) {
 		}
 	}
 
+	// 1b. Every classification must SAY SOMETHING. Assertion 1 only proves a key
+	//     exists, and a key is not a decision: `{status: drExcluded}` with no
+	//     reason, or `{status: drCovered}` with no cluster, both satisfy it while
+	//     recording nothing. The empty cluster is the worse of the two, because
+	//     assertion 3 below skips entries with `cluster == ""` — a covered service
+	//     naming no cluster was checked against no cluster and reported green.
+	//     That is "nothing configured" and "checked, and fine" looking the same,
+	//     inside the very guard that exists to tell them apart.
+	for _, svc := range sortedKeys(drPosture) {
+		p := drPosture[svc]
+		if strings.TrimSpace(p.reason) == "" {
+			t.Errorf("service %q is classified in drPosture with no written reason\n\n"+
+				"The classification is the decision record. Without the reason, the next operator "+
+				"cannot tell a considered exclusion from an oversight that happened to be typed in.", svc)
+		}
+		switch p.status {
+		case drCovered:
+			if p.cluster == "" {
+				t.Errorf("service %q is classified drCovered but names no CNPG cluster\n\n"+
+					"Assertion 3 checks the WAL+PITR contract of the cluster a service is mapped to, "+
+					"and skips entries that name none — so this entry claims coverage while being "+
+					"checked against nothing. Name the cluster, or classify it drExcluded/drUnresolved.", svc)
+			}
+		case drExcluded, drUnresolved:
+			if p.cluster != "" {
+				t.Errorf("service %q is classified as not covered yet names cluster %q\n\n"+
+					"A service is in a cluster or it is not. Naming one here reads as coverage in "+
+					"every listing of this map while the status says the opposite.", svc, p.cluster)
+			}
+		}
+		// An unresolved entry is an OPEN GAP, not an exclusion, and the thing that
+		// distinguishes the two is that a gap has an owner. Without an issue number
+		// it is indistinguishable from an exclusion whose author ran out of words —
+		// and it would sit here forever, because nothing would ever come back to it.
+		if p.status == drUnresolved && !issueRefPattern.MatchString(p.reason) {
+			t.Errorf("service %q is classified drUnresolved but its reason names no issue\n\n"+
+				"An unresolved store has no backup and no exclusion. That is a tracked gap or it is "+
+				"an abandoned one; the issue number is the only difference. Cite the issue that "+
+				"retires it (e.g. \"Tracked by #60\").", svc)
+		}
+	}
+
 	// 2. DEAD-ENTRY CHECK. A classification naming a service that no longer owns
 	//    migrations is stale: it protects nothing and makes the table read as
 	//    more complete than it is. Same shape as retryCertifiedConsumers.
@@ -103,16 +145,41 @@ func TestEveryMigrationOwningServiceHasADecidedDRPosture(t *testing.T) {
 		}
 	}
 
-	// 4. The README must name every service, including the uncovered ones. A
-	//    service missing from the human-readable table is exactly how these five
-	//    stayed invisible: the Go map alone is not where an operator looks
-	//    during a failover.
+	// 4. The README must carry a row for every service, including the uncovered
+	//    ones, AND that row must AGREE with the classification. A service missing
+	//    from the human-readable table is exactly how these five stayed invisible:
+	//    the Go map alone is not where an operator looks during a failover.
+	//
+	//    Agreement, not mere mention, is the assertion. A README that says
+	//    "covered" beside a service the Go map calls unresolved is worse than a
+	//    README that omits it: the omission is a hole an operator may notice,
+	//    while the wrong row is an answer they will act on. Reading the table
+	//    mid-incident is the one moment nobody re-derives it from the code.
 	readme := readFile(t, filepath.Join(root, "infra", "dr", "postgres", "README.md"))
+	rows := readmeCoverageRows(readme)
 	for _, svc := range onDisk {
-		if !strings.Contains(readme, "`"+svc+"`") {
-			t.Errorf("infra/dr/postgres/README.md does not mention service %q\n\n"+
+		row, ok := rows[svc]
+		if !ok {
+			t.Errorf("infra/dr/postgres/README.md has no coverage-table row for service %q\n\n"+
 				"The classification exists in Go but not in the document an operator reads while "+
 				"deciding what to restore. Add its row to the coverage table.", svc)
+			continue
+		}
+		p, classified := drPosture[svc]
+		if !classified {
+			continue // assertion 1 already reported it; the zero value is not a claim
+		}
+		want := readmeStatusWord[p.status]
+		if !strings.EqualFold(row.status, want) {
+			t.Errorf("infra/dr/postgres/README.md says service %q is %q; drPosture says %q\n\n"+
+				"The table and the classification disagree, so one of them is wrong and an operator "+
+				"restoring during an incident reads the table. Make them say the same thing.",
+				svc, row.status, want)
+		}
+		if p.status == drCovered && !strings.Contains(row.detail, "`"+p.cluster+"`") {
+			t.Errorf("infra/dr/postgres/README.md's row for %q does not name cluster `%s`\n\n"+
+				"drPosture maps it there. A covered row that names no cluster, or names a different "+
+				"one, tells the operator to promote and repoint at the wrong database.", svc, p.cluster)
 		}
 	}
 
@@ -134,6 +201,75 @@ func TestEveryMigrationOwningServiceHasADecidedDRPosture(t *testing.T) {
 	}
 }
 
+// EVERY CLUSTER A SERVICE IS MAPPED TO MUST HAVE SOMEWHERE TO FAIL OVER TO, AND
+// SOMETHING THAT PROMOTES IT.
+//
+// TestEveryMigrationOwningServiceHasADecidedDRPosture proves the PRIMARY carries
+// the WAL+PITR contract. That is backup, and backup is not failover. The failure
+// #60 describes is not "the backup was missing" — it is "the service came up
+// against an empty store and said nothing". A cluster that archives WAL
+// perfectly, but has no DR-region standby replaying it, or has one that
+// failover.sh never promotes, produces that outcome exactly: the services start,
+// they reach a database, and it is not theirs.
+//
+// This matters most for the work that is still OPEN on #60. Placing the five
+// unresolved stores means adding a cluster, and the three places that must learn
+// about it — cluster.yaml, replica.yaml, failover.sh — are three separate files
+// that no compiler relates. This guard relates them, so the next cluster cannot
+// be half-added: it fails until a standby exists and the failover script
+// promotes it.
+//
+// WHAT IT DELIBERATELY DOES NOT ASSERT. That any of this has ever been executed.
+// The DR drill (docs/runbooks/dr-drill.md) is the only thing that proves a
+// promotion works, it needs two regions, and this box has neither. Green here
+// means the three files agree — not that a failover has been rehearsed.
+func TestEveryMappedDRClusterHasAStandbyAndIsPromotedOnFailover(t *testing.T) {
+	root := moduleRoot(t)
+
+	var mapped []string
+	for _, svc := range sortedKeys(drPosture) {
+		if c := drPosture[svc].cluster; c != "" {
+			mapped = append(mapped, c)
+		}
+	}
+	// NON-VACUITY. With no mapped clusters every loop below is empty and the test
+	// passes while asserting nothing about anything.
+	if len(mapped) == 0 {
+		t.Fatal("drPosture maps no service to any cluster — the classification is broken, not the estate")
+	}
+
+	standbys := replicaClusters(t, root)
+	if len(standbys) == 0 {
+		t.Fatal("parsed zero replica clusters from infra/dr/postgres/replica.yaml — the parser is broken, not the manifest")
+	}
+	promoted := failoverPromotedClusters(t, root)
+	if len(promoted) == 0 {
+		t.Fatal("parsed no promote loop from infra/dr/failover.sh — the parser is broken, not the script")
+	}
+
+	seen := map[string]bool{}
+	for _, c := range mapped {
+		if seen[c] {
+			continue
+		}
+		seen[c] = true
+
+		if !standbys[c] {
+			t.Errorf("CNPG cluster %q holds mapped service data but replica.yaml defines no standby for it\n\n"+
+				"Its WAL is archived to the object store and nothing in the DR region is replaying it. "+
+				"A failover has nothing to promote, so recovery means restoring from scratch inside the "+
+				"RTO — which is the DR-01e target this cluster is counted against.", c)
+		}
+		if !promoted[c] {
+			t.Errorf("CNPG cluster %q holds mapped service data but infra/dr/failover.sh never promotes it\n\n"+
+				"failover.sh promotes a hardcoded list and then scales the services up. A cluster left "+
+				"out of that list is not promoted, so its standby stays read-only while the services "+
+				"that depend on it start anyway — the silent-empty-store failure mode in #60, reached "+
+				"by a different route than a missing backup.", c)
+		}
+	}
+}
+
 type drStatus int
 
 const (
@@ -141,6 +277,18 @@ const (
 	drExcluded
 	drUnresolved
 )
+
+// readmeStatusWord is the exact token the README coverage table must use for
+// each status, so the document and the classification cannot drift into saying
+// different things about the same service.
+var readmeStatusWord = map[drStatus]string{
+	drCovered:    "covered",
+	drExcluded:   "excluded",
+	drUnresolved: "NOT COVERED",
+}
+
+// issueRefPattern matches the "#123" an unresolved classification must cite.
+var issueRefPattern = regexp.MustCompile(`#\d+`)
 
 type drClassification struct {
 	status  drStatus
@@ -190,6 +338,90 @@ var drPosture = map[string]drClassification{
 		"weakest exposure of the five because it is rebuildable from the events, but 'rebuildable' " +
 		"is a claim nobody has exercised — it is listed rather than excluded for that reason. " +
 		"Tracked by #60"},
+}
+
+// readmeRow is one parsed row of the README's coverage table.
+type readmeRow struct {
+	status string // the status cell, ** stripped
+	detail string // the cluster/reason cell
+}
+
+// readmeCoverageRows parses the coverage table out of infra/dr/postgres/README.md,
+// keyed by the service named in backticks in the first column.
+//
+// It keys on `service` in backticks specifically so the other tables in that file
+// (the DB-level summary at the top, the file manifest at the bottom) cannot be
+// mistaken for coverage rows — neither names a service that way.
+func readmeCoverageRows(readme string) map[string]readmeRow {
+	out := map[string]readmeRow{}
+	for _, line := range strings.Split(readme, "\n") {
+		cells := strings.Split(line, "|")
+		if len(cells) < 4 {
+			continue
+		}
+		name := strings.TrimSpace(cells[1])
+		if !strings.HasPrefix(name, "`") || !strings.HasSuffix(name, "`") {
+			continue
+		}
+		svc := strings.Trim(name, "`")
+		out[svc] = readmeRow{
+			status: strings.TrimSpace(strings.ReplaceAll(cells[2], "*", "")),
+			detail: strings.TrimSpace(cells[3]),
+		}
+	}
+	return out
+}
+
+// replicaClusters returns the DR-region standby clusters defined in replica.yaml
+// — the things a failover has to promote.
+//
+// A Cluster document only counts if it actually declares `replica:`; a plain
+// Cluster in that file would be a second primary, not a standby, and promoting
+// it is meaningless.
+func replicaClusters(t *testing.T, root string) map[string]bool {
+	t.Helper()
+
+	body := stripYAMLComments(readFile(t, filepath.Join(root, "infra", "dr", "postgres", "replica.yaml")))
+	nameRe := regexp.MustCompile(`(?m)^\s*name:\s*(\S+)`)
+	// Anchored to the start of a key, not a substring search: `strings.Contains`
+	// on "replica:" also matches "xreplica:" and "readReplica:", so a stanza that
+	// had been renamed out of effect still counted as a standby. Found by a
+	// mutation that this guard was supposed to fail and did not.
+	replicaRe := regexp.MustCompile(`(?m)^\s+replica:\s*$`)
+
+	out := map[string]bool{}
+	for _, doc := range strings.Split(body, "\n---") {
+		if !strings.Contains(doc, "kind: Cluster") || !replicaRe.MatchString(doc) {
+			continue
+		}
+		if m := nameRe.FindStringSubmatch(doc); m != nil {
+			out[m[1]] = true
+		}
+	}
+	return out
+}
+
+// failoverPromotedClusters returns the clusters infra/dr/failover.sh promotes in
+// its postgres step.
+//
+// The script iterates a HARDCODED list (`for c in kanz-risk kanz-registry
+// kanz-books`), which is why this is read at all: adding a cluster to
+// cluster.yaml and replica.yaml leaves that list untouched and nothing in the
+// build relates the three files. Same reason onboarding_test.go reads
+// provision-tenant.sh rather than trusting that someone updated it.
+func failoverPromotedClusters(t *testing.T, root string) map[string]bool {
+	t.Helper()
+
+	script := readFile(t, filepath.Join(root, "infra", "dr", "failover.sh"))
+	m := regexp.MustCompile(`(?m)^\s*for\s+c\s+in\s+([^;]+);\s*do`).FindStringSubmatch(script)
+	if m == nil {
+		return nil
+	}
+	out := map[string]bool{}
+	for _, f := range strings.Fields(m[1]) {
+		out[f] = true
+	}
+	return out
 }
 
 // migrationOwningServices returns every service directory containing a
