@@ -69,7 +69,41 @@ if step rebuild; then
   echo "-- [3/5] rebuild NATS spine from the Kafka log"
   k -n "$MSG_NS" delete job/nats-rebuild --ignore-not-found
   k apply -f nats/rebuild-job.yaml
-  k -n "$MSG_NS" wait --for=condition=complete job/nats-rebuild --timeout=600s
+
+  # WAIT ON EITHER OUTCOME, NOT JUST THE GOOD ONE.
+  #
+  # This was `wait --for=condition=complete --timeout=600s`. A Job that FAILS never
+  # satisfies that condition, so a fast refusal became ten minutes of silence and
+  # then "timed out waiting for condition" — a message naming no cause, during a
+  # region failover, with the actual reason buried in a log nobody had reached yet.
+  #
+  # That mattered little when the rebuild could only exit 0. It matters now: the
+  # rebuild REFUSES on a Kafka topic that does not exist (#93), which is the
+  # likeliest real failure here — a tenant onboarded without its topics — and it is
+  # precisely the answer the operator needs in the first minute, not the tenth.
+  deadline=$(( $(date +%s) + 600 ))
+  while :; do
+    done_st=$(k -n "$MSG_NS" get job/nats-rebuild \
+      -o jsonpath='{.status.conditions[?(@.type=="Complete")].status}' 2>/dev/null || echo "")
+    fail_st=$(k -n "$MSG_NS" get job/nats-rebuild \
+      -o jsonpath='{.status.conditions[?(@.type=="Failed")].status}' 2>/dev/null || echo "")
+    [ "$done_st" = "True" ] && break
+    if [ "$fail_st" = "True" ]; then
+      echo "FATAL: nats-rebuild FAILED — the spine was not reconstructed. Full log:"
+      k -n "$MSG_NS" logs job/nats-rebuild --tail=100 || true
+      echo "FATAL: a 'missing topic' refusal means the topic was never provisioned for that"
+      echo "       tenant (infra/kafka/tenancy.yaml). Do NOT proceed to step 4: the services"
+      echo "       would come up against a spine holding none of that tenant's history."
+      exit 1
+    fi
+    if [ "$(date +%s)" -ge "$deadline" ]; then
+      echo "FATAL: nats-rebuild neither completed nor failed within 600s — it is stuck, which is"
+      echo "       a different fault from a refusal. Check the pod, not the topic list:"
+      k -n "$MSG_NS" logs job/nats-rebuild --tail=100 || true
+      exit 1
+    fi
+    sleep 5
+  done
   k -n "$MSG_NS" logs job/nats-rebuild --tail=5
 fi
 
@@ -78,7 +112,62 @@ fi
 #    spine. Scale up + wait for readiness.
 if step services; then
   echo "-- [4/5] start services"
-  k -n "$SVC_NS" scale deploy --all --replicas=2
+  # SCALE BY SELECTOR, NEVER `--all` (#149).
+  #
+  # `scale deploy --all --replicas=2` used to stand here, and it overrode every
+  # manifest's own replica pin. Eight Deployments in this namespace pin
+  # `replicas: 1` as a CORRECTNESS bound, not a cost one, and each failure it
+  # causes OUTLIVES the scale-down that "fixes" it:
+  #
+  #   venue-binance / venue-okx  two pods sign with the SAME exchange API key, so
+  #                              the request weight doubles and the account can be
+  #                              BANNED — mid-incident, on the money path.
+  #   archiver                   single writer to the durable log of record; a
+  #                              second pod can INVERT per-key order in the log
+  #                              every later rebuild and audit reads.
+  #   market-ingest / tv-sync    each folds a partitioned stream; two pods fold two
+  #                              competing books, so BOTH replicas' state is wrong.
+  #   compliance                 same fold, on the evidence chain.
+  #   lake-sink                  holds a ReadWriteOnce PVC; pod two cannot mount it
+  #                              and never schedules — the only one that surfaces.
+  #   postgres (dev rig)         two emptyDir replicas are two unrelated databases
+  #                              behind one Service name.
+  #
+  # A banned key, an inverted log and a corrupted book are not recovered by scaling
+  # back to 1. So "we'd have noticed and fixed it" is not a defence: by the time it
+  # is visible the damage is already durable.
+  #
+  # The label `kanz.io/singleton: "true"` on the Deployment's own metadata is the
+  # SINGLE copy of that fact — it lives in the manifest, beside the pin it
+  # describes, so a NEW singleton service is protected the day it is added rather
+  # than the day someone remembers to edit this script. A hardcoded list here would
+  # be the second copy, and the second copy is the one that drifts.
+  # test/arch/dr_singleton_replicas_test.go fails if a Deployment pins replicas: 1
+  # without the label, if the label sits on a Deployment that does not pin 1, or if
+  # an unqualified `scale deploy --all` returns to this file.
+  #
+  # Both lines are idempotent WITH RESPECT TO INTENT: re-running a partial failover
+  # now restores each Deployment to the count its manifest asks for, where the old
+  # blanket scale re-inflated to 2 anything an operator had manually corrected to 1.
+  #
+  # UNDER GITOPS THIS SCALING IS USUALLY REDUNDANT — AND THAT IS NOT A REASON TO
+  # LEAVE IT WRONG. infra/gitops/applicationset.yaml syncs kanz/infra/deploy with
+  # `automated: {prune: true, selfHeal: true}`, and spec.replicas is part of that
+  # desired state, so on a cluster Argo CD is still reconciling this drift is
+  # reverted within a reconcile interval and the Deployments were already at their
+  # manifest counts to begin with. The drift window is exactly long enough to burn
+  # an exchange weight budget or interleave a log write, and Argo undoing the pod
+  # count does not undo either. The scaling stays because the case it exists for is
+  # the one where reconciliation is NOT running — Argo CD in the failed region, or
+  # the `dr` destination never pointed at a real cluster (both env entries in that
+  # ApplicationSet still resolve to kubernetes.default.svc). If a future DR drill
+  # proves Argo reconciles the DR cluster during a region loss, the honest form of
+  # this step is `argocd app sync kanz-dr-workloads` / `kubectl apply -f`, which
+  # takes the replica count from the manifest by construction rather than by
+  # selector. That is a change to the runbook, so it is the team's call, not this
+  # fix's.
+  k -n "$SVC_NS" scale deploy -l '!kanz.io/singleton' --replicas=2
+  k -n "$SVC_NS" scale deploy -l 'kanz.io/singleton'  --replicas=1
   # Wait on every service the DR drill exercises a synthetic transaction against
   # (PARITY-05e), not just risk + gateway — an unready book-of-record service is a
   # store that promoted but does not serve. A missing deploy is tolerated (|| true)
@@ -94,16 +183,11 @@ if step services; then
   # reason: nothing downstream blocks on it, so if it never becomes ready that is
   # visible only if something waited.
   #
-  # !! `tv-sync` IS WAITED ON HERE AND STEP 4's OWN `scale --all --replicas=2`
-  #    ABOVE BREAKS IT. infra/deploy/tv-sync-deploy.yaml pins replicas: 1 and
-  #    states it is a CORRECTNESS bound, not a capacity one: two pods split the
-  #    fact stream, so each folds part of it and every pod's book is wrong. The
-  #    blanket scale overrides that pin on every failover. This wait line does not
-  #    cause it — the scale does — but tv-sync is listed rather than quietly
-  #    omitted precisely so the conflict is visible instead of being an absence
-  #    nobody reads. Left as-is deliberately: narrowing `--all` is a change to
-  #    every service's failover behaviour and belongs to its own issue, not to
-  #    #60's store placement.
+  # `tv-sync` and the venue adapters are singletons (`replicas: 1`), and the scale
+  # above now respects that pin instead of overriding it (#149) — so waiting on
+  # them here is a wait for ONE ready pod, which is what their manifests define as
+  # healthy. `rollout status` is satisfied by the manifest's own count, so nothing
+  # in this list needs to know which entries are singletons.
   for d in risk-engine api-gateway accounting alternatives wealth datamaster oms venue-binance venue-okx regulatory tv-sync market-data; do
     k -n "$SVC_NS" rollout status deploy/"$d" --timeout=300s || true
   done

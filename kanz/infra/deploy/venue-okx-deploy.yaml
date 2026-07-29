@@ -54,6 +54,8 @@ metadata:
   namespace: kanz-services
   labels:
     app.kubernetes.io/part-of: kanz
+    # DR scales by this label, never `--all` (#149) — see infra/dr/failover.sh step 4.
+    kanz.io/singleton: "true"
 spec:
   # See THE SCALE INVARIANT above. Raising this without sharding the API key
   # exhausts the exchange weight budget and can get the account banned.

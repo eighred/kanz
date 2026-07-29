@@ -61,6 +61,8 @@ metadata:
   namespace: kanz-services
   labels:
     app.kubernetes.io/part-of: kanz
+    # DR scales by this label, never `--all` (#149) — see infra/dr/failover.sh step 4.
+    kanz.io/singleton: "true"
 spec:
   # See THE SCALE INVARIANT above. Two pods fold two competing books.
   replicas: 1

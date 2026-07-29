@@ -48,7 +48,10 @@ kind: Deployment
 metadata:
   name: operator
   namespace: kanz-operator
-  labels: { app.kubernetes.io/part-of: kanz, app: operator }
+  # DR scales by this label, never `--all` (#149) — see infra/dr/failover.sh step 4.
+  # kanz-operator is not $SVC_NS, so today's step 4 never reaches this one; the label is
+  # what keeps that an accident of namespace rather than the only thing protecting it.
+  labels: { app.kubernetes.io/part-of: kanz, app: operator, kanz.io/singleton: "true" }
 spec:
   replicas: 1
   selector:
