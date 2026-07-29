@@ -94,3 +94,35 @@ spec:
           accessKeyId: { name: kanz-dr-s3, key: ACCESS_KEY_ID }
           secretAccessKey: { name: kanz-dr-s3, key: SECRET_ACCESS_KEY }
         wal: { compression: gzip }
+---
+# The OMS order store (orders / positions / position_fills) — warm standby
+# replaying the kanz-orders WAL. Separate from kanz-books on purpose: promoting
+# the order book must not carry the books of record with it (see cluster.yaml).
+# This is the standby whose absence produces the #60 failure directly — the OMS
+# starts, finds a database, and it is empty.
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: kanz-orders
+  namespace: kanz-data
+  labels: { app.kubernetes.io/part-of: kanz, app.kubernetes.io/component: dr }
+spec:
+  instances: 2
+  primaryUpdateStrategy: unsupervised
+  storage:
+    size: 100Gi
+  replica:
+    enabled: true
+    source: kanz-orders-origin
+  bootstrap:
+    recovery:
+      source: kanz-orders-origin
+  externalClusters:
+    - name: kanz-orders-origin
+      barmanObjectStore:
+        serverName: kanz-orders
+        destinationPath: s3://kanz-dr-backups/orders
+        s3Credentials:
+          accessKeyId: { name: kanz-dr-s3, key: ACCESS_KEY_ID }
+          secretAccessKey: { name: kanz-dr-s3, key: SECRET_ACCESS_KEY }
+        wal: { compression: gzip }

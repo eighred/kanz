@@ -1,10 +1,17 @@
 # DR-01b — Postgres primary clusters with continuous backup + PITR.
 #
-# The two stateful Postgres databases — PERS-01 risk state and the EVT-16 schema
-# registry — as CloudNativePG clusters with continuous WAL archiving to a
-# cross-region object store. Continuous WAL = point-in-time recovery (restore to
-# any instant in the retention window), and it is the source the DR-region
-# replica clusters (replica.yaml) replay from.
+# The stateful Postgres databases as CloudNativePG clusters with continuous WAL
+# archiving to a cross-region object store: PERS-01 risk state, the EVT-16 schema
+# registry, the PARITY-02 books, and the OMS order store. Continuous WAL =
+# point-in-time recovery (restore to any instant in the retention window), and it
+# is the source the DR-region replica clusters (replica.yaml) replay from.
+#
+# This sentence said "the two stateful Postgres databases" while defining four.
+# It was already wrong when kanz-books landed. The count is deliberately gone
+# rather than corrected: the guard in test/arch/dr_postgres_coverage_test.go
+# derives coverage from services/*/migrations on every run, so a number written
+# here is a second answer that can only drift from it — and a DR document that
+# disagrees with the estate is read during an incident, when nobody re-derives it.
 #
 # Why CloudNativePG: a K8s-native operator with built-in barman WAL archiving,
 # PITR, and replica-cluster DR — no bespoke backup cron, and the same SVID/CSI
@@ -131,3 +138,61 @@ spec:
   schedule: "0 0 3 * * *"      # 03:00 daily base backup; WAL fills the gaps (PITR)
   backupOwnerReference: self
   cluster: { name: kanz-books }
+---
+# The OMS order store — `orders`, `positions`, `position_fills`: the money path.
+#
+# Its own cluster, NOT a database inside kanz-books, and the reason is the
+# restore, not the write volume. PITR is per-cluster: recovering an order book to
+# an instant before a bad sweep rewinds EVERY database in the cluster to that
+# instant. Sharing kanz-books would make "roll the order book back ten minutes"
+# also roll back the IBOR ledger, the fund journal, the household book and the
+# golden records — a correction to the trading path silently rewriting the books
+# of record it feeds. Isolated, the blast radius of an order-store restore is the
+# order store, and the ledger keeps whatever it had already recorded.
+#
+# It is also the store whose absence is silent: after a failover against an empty
+# order store the OMS logs SweepInterrupted count=0, the same line a healthy
+# clean start produces (#60). Backup here is what keeps that line honest.
+#
+# The DSN this cluster must serve is NOT set anywhere in this repository — it
+# comes from Vault at kv/kanz/oms. See the README: declaring this cluster is not
+# the same as the running OMS being bound to it (#59).
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: kanz-orders
+  namespace: kanz-data
+  labels: { app.kubernetes.io/part-of: kanz, app.kubernetes.io/component: dr }
+spec:
+  instances: 3
+  primaryUpdateStrategy: unsupervised
+  postgresql:
+    parameters:
+      archive_timeout: "30s"   # RPO bound for the archived-WAL path
+  storage:
+    # 100Gi — twice kanz-books, and kanz-books holds four databases. position_fills
+    # grows per execution, not per order, so it is the fastest-growing table in the
+    # estate and it is append-only: no update path reclaims the space. Sizing it at
+    # the ledger's 50Gi would put the highest-write store on the tightest headroom,
+    # and a full volume on the order path stalls order acceptance, not a report.
+    size: 100Gi
+  backup:
+    retentionPolicy: "30d"
+    barmanObjectStore:
+      destinationPath: s3://kanz-dr-backups/orders
+      s3Credentials:
+        accessKeyId: { name: kanz-dr-s3, key: ACCESS_KEY_ID }
+        secretAccessKey: { name: kanz-dr-s3, key: SECRET_ACCESS_KEY }
+      wal: { compression: gzip }
+      data: { compression: gzip }
+---
+apiVersion: postgresql.cnpg.io/v1
+kind: ScheduledBackup
+metadata:
+  name: kanz-orders-daily
+  namespace: kanz-data
+  labels: { app.kubernetes.io/part-of: kanz }
+spec:
+  schedule: "0 30 3 * * *"     # 03:30 daily base backup; WAL fills the gaps (PITR)
+  backupOwnerReference: self
+  cluster: { name: kanz-orders }

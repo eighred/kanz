@@ -24,12 +24,18 @@ import (
 // or explicitly recorded as unresolved — and that the classification, the
 // cluster manifests and the README cannot drift apart.
 //
-// It does NOT assert that every store is backed up, because five are not. A
+// It does NOT assert that every store is backed up, because four are not. A
 // guard that claimed otherwise would be the exact failure this repository keeps
 // paying for: a green check standing in for a property that does not hold. The
-// unresolved five are listed below with their real exposure, this test logs
+// unresolved four are listed below with their real exposure, this test logs
 // them loudly on every run, and #60 is not closed by this file — only its
 // classification half is.
+//
+// It also does NOT assert that a covered service CONNECTS to the cluster it is
+// mapped to. Every DSN is read from Vault at kv/kanz/<service> and no file in
+// this module sets it, so "covered" here means the cluster, the standby and the
+// promotion exist — declared wiring, checked against three manifests. Whether
+// the running service opens that database is settled by #59.
 func TestEveryMigrationOwningServiceHasADecidedDRPosture(t *testing.T) {
 	root := moduleRoot(t)
 
@@ -212,9 +218,9 @@ func TestEveryMigrationOwningServiceHasADecidedDRPosture(t *testing.T) {
 // failover.sh never promotes, produces that outcome exactly: the services start,
 // they reach a database, and it is not theirs.
 //
-// This matters most for the work that is still OPEN on #60. Placing the five
-// unresolved stores means adding a cluster, and the three places that must learn
-// about it — cluster.yaml, replica.yaml, failover.sh — are three separate files
+// This matters most for the work that is still OPEN on #60. Placing the four
+// remaining unresolved stores means adding a cluster, and the three places that
+// must learn about it — cluster.yaml, replica.yaml, failover.sh — are three files
 // that no compiler relates. This guard relates them, so the next cluster cannot
 // be half-added: it fails until a standby exists and the failover script
 // promotes it.
@@ -318,13 +324,16 @@ var drPosture = map[string]drClassification{
 		"retention — object-locked, and deliberately not restorable-to-an-earlier-instant, which is " +
 		"the point of an audit log"},
 
-	"oms": {status: drUnresolved, reason: "holds orders, positions and position_fills — the order " +
-		"store and position book, the money path itself. THE MOST SERIOUS OF THE FIVE: after a " +
-		"failover the OMS starts against an empty store and SweepInterrupted logs count=0, the " +
-		"identical line a healthy clean start produces. Nothing distinguishes 'no interrupted " +
-		"orders' from 'no orders at all', so the platform reports a normal startup while holding " +
-		"positions at an exchange it has no record of. This is why CLAUDE.md sequences M3 after " +
-		"this issue. Tracked by #60"},
+	"oms": {status: drCovered, cluster: "kanz-orders", reason: "holds orders, positions and " +
+		"position_fills — the order store and position book, the money path itself. Its OWN " +
+		"cluster rather than a database in kanz-books because PITR is per-cluster: rewinding the " +
+		"order book to an instant before a bad sweep would otherwise rewind the IBOR ledger, the " +
+		"fund journal, the household book and the golden records with it. Losing it is the " +
+		"quietest failure in the estate — the OMS starts against an empty store and " +
+		"SweepInterrupted logs count=0, the identical line a healthy clean start produces. NOTE: " +
+		"this records that the DR wiring is DECLARED (cluster + standby + promotion). The DSN the " +
+		"OMS actually opens comes from Vault at kv/kanz/oms, which no file in this repo sets, so " +
+		"binding it to kanz-orders-rw.kanz-data.svc is confirmed by #59, not by this entry"},
 	"venue-binance": {status: drUnresolved, reason: "holds venue_orders — the exchange-order to " +
 		"kanz-order mapping that reconciliation and the idempotency/recovery path depend on. " +
 		"Losing it means an exchange order cannot be tied back to the order that placed it. " +

@@ -33,9 +33,15 @@ echo "== DR failover → $DR_CTX (step=$STEP) =="
 #    ledger, alternatives fund book, wealth household book, datamaster golden
 #    records + exception queue), so a DR cutover that omits it leaves those
 #    services read-only — it MUST be promoted alongside risk + registry (PARITY-05e).
+#    kanz-orders carries the OMS order store (orders / positions / position_fills)
+#    and is the one whose omission is SILENT rather than read-only: the OMS starts
+#    against an unpromoted-or-empty store and logs SweepInterrupted count=0, the
+#    same line a healthy clean start produces (#60). Every cluster named in
+#    postgres/cluster.yaml belongs in this list — test/arch/dr_postgres_coverage_test.go
+#    fails if a mapped cluster is missing from it.
 if step postgres; then
   echo "-- [1/5] promote Postgres replicas"
-  for c in kanz-risk kanz-registry kanz-books; do
+  for c in kanz-risk kanz-registry kanz-books kanz-orders; do
     k cnpg promote "$c" -n "$DATA_NS" || true   # no-op if already promoted
     k cnpg status   "$c" -n "$DATA_NS" | head -3
   done
@@ -69,8 +75,12 @@ if step services; then
   # Wait on every service the DR drill exercises a synthetic transaction against
   # (PARITY-05e), not just risk + gateway — an unready book-of-record service is a
   # store that promoted but does not serve. A missing deploy is tolerated (|| true)
-  # so a partial topology doesn't wedge the failover.
-  for d in risk-engine api-gateway accounting wealth datamaster market-data; do
+  # so a partial topology doesn't wedge the failover — which also means a name
+  # missing from this list looks exactly like a name in it that failed: nothing is
+  # printed either way. Every covered service belongs here. `oms` is the money path
+  # (kanz-orders); `alternatives` was covered by kanz-books but absent from this
+  # list, so its readiness was never waited on and the omission was masked.
+  for d in risk-engine api-gateway accounting alternatives wealth datamaster oms market-data; do
     k -n "$SVC_NS" rollout status deploy/"$d" --timeout=300s || true
   done
 fi

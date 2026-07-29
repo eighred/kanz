@@ -7,6 +7,7 @@ Disaster recovery for the stateful databases:
 | risk state (PERS-01) | portfolio positions, risk state | `kanz-risk` |
 | schema registry (EVT-16) | registered payload schemas | `kanz-registry` |
 | book-of-record (PARITY-02) | IBOR ledger journal+snapshots, alternatives fund journal, wealth household book, datamaster golden records + exception queue | `kanz-books` |
+| order store (OMS) | orders, positions, position_fills | `kanz-orders` |
 
 (The market-data history and the audit log are append-only/WORM stores with
 their own retention; the *transactional* state that DR must restore is these.)
@@ -37,13 +38,40 @@ what gets read, so it is not allowed to be the stale copy.
 | `datamaster` | covered | `kanz-books` (golden records + exception queue) |
 | `market-data` | excluded | append-only history with its own retention; re-ingestable from the feed |
 | `audit` | excluded | WORM store with its own tamper-resistant retention (AUDIT-01b) |
-| `oms` | **NOT COVERED** | `orders`, `positions`, `position_fills`. See the warning below. |
+| `oms` | covered | `kanz-orders` — its own cluster (`orders`, `positions`, `position_fills`). **Read "What `covered` does not mean" below before relying on this row.** |
 | `venue-binance` | **NOT COVERED** | `venue_orders` — the exchange-order ↔ kanz-order mapping reconciliation depends on |
 | `venue-okx` | **NOT COVERED** | `venue_orders` — same |
 | `regulatory` | **NOT COVERED** | `audit_chain_links` — the tamper-evidence chain |
-| `tv-sync` | **NOT COVERED** | `tv_facts` — a projection, rebuildable from the event log, so the weakest exposure of the five |
+| `tv-sync` | **NOT COVERED** | `tv_facts` — a projection, rebuildable from the event log, so the weakest exposure of the four |
 
-### The five uncovered stores
+### ⚠ What `covered` does not mean — read this before acting on the `oms` row
+
+**`covered` means the DR wiring is DECLARED, not that the running service is
+bound to it.** Every service reads its DSN from Vault at `kv/kanz/<service>` (the
+OMS via the `oms-db` SecretProviderClass → `OMS_DATABASE_URL_FILE`), and **no
+file in this repository sets that value.** The guard checks three manifests
+agree; it cannot see which database a pod actually opens.
+
+**Action required for `oms`:** the Vault entry at **`kv/kanz/oms`** must point at
+the `kanz-orders` read-write service —
+
+```
+kanz-orders-rw.kanz-data.svc      # CNPG convention: <cluster>-rw.<namespace>.svc
+```
+
+Until **#59** confirms that, the OMS may still be writing to whatever host that
+DSN names today, and `kanz-orders` would be backing up and promoting an empty
+database while the real order book sits somewhere with no PITR. Verify the live
+DSN before you trust the `covered` row mid-incident:
+
+```sh
+kubectl -n kanz-services exec deploy/oms -- sh -c 'cat "$OMS_DATABASE_URL_FILE"' | sed 's#://[^@]*@#://***@#'
+```
+
+The same caveat applies in principle to every `covered` row above; it is stated
+here because `oms` is the row where being wrong is unrecoverable.
+
+### The four uncovered stores
 
 They hold real transactional state. They are now CLASSIFIED — the rows above say
 so, and the guard says so on every run — but classified is not covered: they are
@@ -51,32 +79,40 @@ in no cluster and carry no exclusion, so until this is resolved a region failove
 starts them empty. The gap is recorded, not closed, and the difference matters
 because a table that lists them is not a backup that restores them.
 
-**The OMS is the one that matters most.** After a failover it would come up
-against an empty order store, and `SweepInterrupted` would log `count=0` — the
-*same line a healthy clean start produces*. There is no signal distinguishing
-"no interrupted orders" from "no orders at all, because the store is gone",
-so the platform would report normal startup while holding positions at an
-exchange that it has no record of.
+**Why the OMS was the one placed first.** After a failover against an empty order
+store, `SweepInterrupted` logs `count=0` — the *same line a healthy clean start
+produces*. There is no signal distinguishing "no interrupted orders" from "no
+orders at all, because the store is gone", so the platform reports normal startup
+while holding positions at an exchange it has no record of. That is why
+`CLAUDE.md` sequences **M3 after this issue**: placing real orders against a
+store that may not be backed up is the one ordering error with an unrecoverable
+failure mode. `kanz-orders` closes the declared-wiring half of that; the Vault
+binding above is the other half.
 
-This is why `CLAUDE.md` sequences **M3 after this issue**: placing real orders
-against a store that may not be backed up is the one ordering error with an
-unrecoverable failure mode.
+**Why `kanz-orders` is its own cluster and not a database in `kanz-books`.** PITR
+is per-cluster. Restoring the order book to an instant before a bad sweep rewinds
+*every* database in that cluster to the same instant — so sharing `kanz-books`
+would make a correction on the trading path silently roll back the IBOR ledger,
+the fund journal, the household book and the golden records. Isolated, the blast
+radius of an order-store restore is the order store.
 
-Resolving it requires deciding which cluster each belongs to (or that it is
-genuinely excludable) and adding the database to that cluster — tracked by
-**#60**. Note that database naming across the deploy manifests, the DSN
-secrets and this document has been reported as inconsistent, so the mapping
+Resolving the remaining four requires deciding which cluster each belongs to (or
+that it is genuinely excludable) and adding the database to that cluster —
+tracked by **#60**. Note that database naming across the deploy manifests, the
+DSN secrets and this document has been reported as inconsistent, so each mapping
 should be settled against the running config rather than any single document
 (**#59**).
 
-**Why the five cannot simply be added here.** Each of them reads its DSN from
+**Why the four cannot simply be added here.** Each of them reads its DSN from
 Vault at `kv/kanz/<service>` (see `infra/security/secrets/secretproviderclass.yaml`);
 nothing in this repository says which Postgres host that DSN points at. Placing
-a service in `kanz-books` would assert that its data already lives in that
-cluster — an assertion only the running config can settle. Recording them as
-uncovered is the smaller, true claim; guessing a cluster would produce a table
-that reads as coverage while the failover promoted a database the service does
-not use.
+one in an existing cluster would assert that its data already lives there — an
+assertion only the running config can settle. Recording them as uncovered is the
+smaller, true claim; guessing a cluster would produce a table that reads as
+coverage while the failover promoted a database the service does not use. The
+OMS is the exception only because it was given a NEW, empty cluster: nothing is
+asserted about where its data lives today, which is exactly why the Vault
+repoint above is still outstanding.
 
 ### Adding a cluster (what "placing" a service actually costs)
 
