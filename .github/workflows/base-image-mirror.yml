@@ -81,6 +81,43 @@ jobs:
           - source: docker.io/library/python:3.12-slim
             target: ghcr.io/eighred/base/python:3.12-slim
 
+          # --- CI SERVICE IMAGES -------------------------------------------
+          #
+          # A SECOND DOCKER HUB DEPENDENCY, ON THE SAME CRITICAL PATH, THAT THE
+          # DOCKERFILE MIRROR DOES NOT COVER. These are pulled by `services:`
+          # blocks and `docker run` steps in kanz-ci.yml and latency.yml, not by
+          # any FROM, so #55's acceptance grep never sees them and
+          # test/arch/baseimage_mirror_test.go does not either.
+          #
+          # It is not theoretical. On 2026-07-29 `kanz-ci` failed on main at step
+          # 12 of 28 with
+          #
+          #   docker: Error response from daemon: Head
+          #   "https://registry-1.docker.io/v2/apache/kafka/manifests/3.9.0":
+          #   received unexpected HTTP status: 502 Bad Gateway
+          #
+          # The job died before running a single test, on a commit whose PR had
+          # been fully green. Mirroring the Dockerfile bases would not have saved
+          # it, because none of these is a base image.
+          - source: docker.io/library/postgres:16-alpine
+            target: ghcr.io/eighred/base/postgres:16-alpine
+          - source: docker.io/library/redis:7-alpine
+            target: ghcr.io/eighred/base/redis:7-alpine
+          - source: docker.io/library/nats:2
+            target: ghcr.io/eighred/base/nats:2
+          - source: docker.io/apache/kafka:3.9.0
+            target: ghcr.io/eighred/base/kafka:3.9.0
+          - source: docker.io/natsio/nats-box:0.14.5
+            target: ghcr.io/eighred/base/nats-box:0.14.5
+          # k6 is pulled as :latest by both latency.yml steps. Mirroring a moving
+          # tag is a compromise, not an oversight: pinning it belongs with the
+          # cutover, and until then the mirror should carry what the workflows
+          # actually ask for. The weekly refresh reports when a digest moves (see
+          # the report step), so a k6 that changes under us is visible rather
+          # than silent — which is more than is true today.
+          - source: docker.io/grafana/k6:latest
+            target: ghcr.io/eighred/base/k6:latest
+
     steps:
       - name: Log in to ghcr.io
         uses: docker/login-action@371161bbe7024a29a25c5e19bfcbc0804fe9ad2c # v4.5.2
