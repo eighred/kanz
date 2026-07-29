@@ -20,7 +20,7 @@
  * `trace_context`. Same idiom as the Python client (EVT-18c).
  */
 
-import type { Envelope } from "@kanz-eng/kanz-schemas/envelope/v1/envelope_pb.js";
+import type { Envelope } from "@eighred/kanz-schemas/envelope/v1/envelope_pb.js";
 
 import type { Handler, Subscriber } from "./bus.js";
 import { unframe } from "./frame.js";

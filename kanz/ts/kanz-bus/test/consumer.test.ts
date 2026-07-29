@@ -4,10 +4,10 @@ import { test } from "node:test";
 import { create, toBinary } from "@bufbuild/protobuf";
 import { TimestampSchema, timestampFromDate } from "@bufbuild/protobuf/wkt";
 
-import type { Envelope } from "@kanz-eng/kanz-schemas/envelope/v1/envelope_pb.js";
-import { EnvelopeSchema } from "@kanz-eng/kanz-schemas/envelope/v1/envelope_pb.js";
-import { EventClass } from "@kanz-eng/kanz-schemas/envelope/v1/event_class_pb.js";
-import { EventFrameSchema } from "@kanz-eng/kanz-schemas/envelope/v1/event_frame_pb.js";
+import type { Envelope } from "@eighred/kanz-schemas/envelope/v1/envelope_pb.js";
+import { EnvelopeSchema } from "@eighred/kanz-schemas/envelope/v1/envelope_pb.js";
+import { EventClass } from "@eighred/kanz-schemas/envelope/v1/event_class_pb.js";
+import { EventFrameSchema } from "@eighred/kanz-schemas/envelope/v1/event_frame_pb.js";
 
 import {
   Consumer,

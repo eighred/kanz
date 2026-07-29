@@ -3,7 +3,7 @@ import { test } from "node:test";
 
 import { TimestampSchema, timestampFromDate } from "@bufbuild/protobuf/wkt";
 
-import { EventClass } from "@kanz-eng/kanz-schemas/envelope/v1/event_class_pb.js";
+import { EventClass } from "@eighred/kanz-schemas/envelope/v1/event_class_pb.js";
 
 import {
   type Client,

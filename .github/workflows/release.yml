@@ -227,7 +227,7 @@ jobs:
       # TestImageOrgIsCanonical, which checks the policy's subjectRegExp against
       # the same canonical org as every image reference — so it is that test,
       # not this step, that catches the two drifting apart. Before that fix the
-      # policy pinned a "kanz-eng" org which does not exist on GitHub, and this
+      # policy pinned a "eighred" org which does not exist on GitHub, and this
       # step passed cheerfully throughout.
       # Hand this service's digest to the pinning job. An artifact rather than a job
       # output because matrix jobs cannot each contribute a distinct output key.

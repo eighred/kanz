@@ -25,8 +25,8 @@ import { fileURLToPath } from "node:url";
 // envelope/v1/event_class.proto, and protobuf-es emits one module per .proto file.
 // Importing it from envelope_pb threw at load time ("does not provide an export named
 // 'EventClass'") — which every other file in this package already got right.
-import { EventClass } from "@kanz-eng/kanz-schemas/envelope/v1/event_class_pb.js";
-import { QualityFlag } from "@kanz-eng/kanz-schemas/envelope/v1/envelope_pb.js";
+import { EventClass } from "@eighred/kanz-schemas/envelope/v1/event_class_pb.js";
+import { QualityFlag } from "@eighred/kanz-schemas/envelope/v1/envelope_pb.js";
 
 import { unframe, validate } from "../src/index.js";
 
