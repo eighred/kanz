@@ -1,5 +1,5 @@
 {
-  "name": "@kanz-eng/kanz-schemas",
+  "name": "@eighred/kanz-schemas",
   "version": "0.0.0",
   "description": "Generated TypeScript SDK for the Kanz event schemas",
   "license": "UNLICENSED",

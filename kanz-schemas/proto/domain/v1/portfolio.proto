@@ -2,7 +2,7 @@ syntax = "proto3";
 
 // Package domain.v1 defines the payload schemas for Kanz's core domain-state
 // aggregates — portfolios, positions, and exposures. These are the state model
-// the risk engine consumes (CODEOWNERS: @kanz-eng/risk-engine).
+// the risk engine consumes (CODEOWNERS: @eighred/risk-engine).
 //
 // "domain" here is the bounded-context state model, not a subject-taxonomy
 // domain segment; the subjects these events flow on are a client-library

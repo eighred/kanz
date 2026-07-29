@@ -8,9 +8,9 @@
  * defensive check is cheap.
  */
 
-import type { Envelope } from "@kanz-eng/kanz-schemas/envelope/v1/envelope_pb.js";
-import { QualityFlag } from "@kanz-eng/kanz-schemas/envelope/v1/envelope_pb.js";
-import { EventClass } from "@kanz-eng/kanz-schemas/envelope/v1/event_class_pb.js";
+import type { Envelope } from "@eighred/kanz-schemas/envelope/v1/envelope_pb.js";
+import { QualityFlag } from "@eighred/kanz-schemas/envelope/v1/envelope_pb.js";
+import { EventClass } from "@eighred/kanz-schemas/envelope/v1/event_class_pb.js";
 
 /** Throw on any envelope-policy violation. */
 export function validate(env: Envelope | null | undefined): void {

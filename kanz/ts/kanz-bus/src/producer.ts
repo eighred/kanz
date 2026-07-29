@@ -15,9 +15,9 @@ import {
   type Envelope,
   EnvelopeSchema,
   type QualityFlag,
-} from "@kanz-eng/kanz-schemas/envelope/v1/envelope_pb.js";
-import { EventClass } from "@kanz-eng/kanz-schemas/envelope/v1/event_class_pb.js";
-import { EventFrameSchema } from "@kanz-eng/kanz-schemas/envelope/v1/event_frame_pb.js";
+} from "@eighred/kanz-schemas/envelope/v1/envelope_pb.js";
+import { EventClass } from "@eighred/kanz-schemas/envelope/v1/event_class_pb.js";
+import { EventFrameSchema } from "@eighred/kanz-schemas/envelope/v1/event_frame_pb.js";
 
 import type { Client } from "./bus.js";
 import {
