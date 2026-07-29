@@ -13,7 +13,7 @@ import (
 )
 
 func cfg() Config {
-	return Config{Namespace: "kanz-operator", ProvisionerImage: "ghcr.io/kanz-eng/kanz-provisioner:latest",
+	return Config{Namespace: "kanz-operator", ProvisionerImage: "ghcr.io/eighred/kanz-provisioner:latest",
 		K3sServerURL: "https://cp:6443", K3sToken: "tok"}
 }
 

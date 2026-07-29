@@ -192,7 +192,7 @@ func TestAddNodeRejectsNonSSHPortBeforeCreatingAnything(t *testing.T) {
 	const ns = "kanz-operator"
 	cs := fake.NewSimpleClientset()
 	srv := NewWithProvisioner(stubReader{}, provision.New(cs, provision.Config{
-		Namespace: ns, ProvisionerImage: "ghcr.io/kanz-eng/kanz-provisioner:latest",
+		Namespace: ns, ProvisionerImage: "ghcr.io/eighred/kanz-provisioner:latest",
 		K3sServerURL: "https://cp:6443", K3sToken: "join-token",
 	}))
 
