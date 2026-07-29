@@ -103,7 +103,7 @@ func TestLoadVenueProofRejectsInvalidValues(t *testing.T) {
 }
 
 func TestLoadProvisioningEnv(t *testing.T) {
-	t.Setenv("OPERATOR_PROVISIONER_IMAGE", "ghcr.io/kanz-eng/kanz-provisioner:latest")
+	t.Setenv("OPERATOR_PROVISIONER_IMAGE", "ghcr.io/eighred/kanz-provisioner:latest")
 	t.Setenv("OPERATOR_K3S_SERVER_URL", "https://cp:6443")
 	t.Setenv("OPERATOR_K3S_TOKEN", "tok")
 	cfg, err := Load()

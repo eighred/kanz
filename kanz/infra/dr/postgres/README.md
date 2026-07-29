@@ -13,12 +13,19 @@ their own retention; the *transactional* state that DR must restore is these.)
 
 ## Coverage of every migration-owning service
 
-Thirteen services under `services/*/migrations/` own a Postgres schema. **All
-thirteen are listed here, including the ones that are not covered** — a service
+Every service under `services/*/migrations/` owns a Postgres schema, and **all of
+them are listed here, including the ones that are not covered** — a service
 absent from this table is a service whose DR posture nobody has decided, and
-that absence is invisible. `test/arch/dr_postgres_coverage_test.go` enforces
-that this table and the Go classification beside it stay in step with the
-filesystem, so a new migration directory cannot appear without a decision.
+that absence is invisible. Thirteen own one today; the count is deliberately not
+the invariant, because a number in prose goes stale silently.
+`test/arch/dr_postgres_coverage_test.go` derives the list from the filesystem, so
+a fourteenth migrations directory cannot appear without a decision and a row
+here.
+
+The **DR status** column is machine-checked against that Go classification: the
+words `covered`, `excluded` and `NOT COVERED` are load-bearing, and a row that
+disagrees with the classification fails the build. Mid-incident this table is
+what gets read, so it is not allowed to be the stale copy.
 
 | Service | DR status | Cluster / reason |
 |---|---|---|
@@ -38,8 +45,11 @@ filesystem, so a new migration directory cannot appear without a decision.
 
 ### The five uncovered stores
 
-They hold real transactional state, they are named in no cluster and no
-exclusion, and until this is resolved a region failover starts them empty.
+They hold real transactional state. They are now CLASSIFIED — the rows above say
+so, and the guard says so on every run — but classified is not covered: they are
+in no cluster and carry no exclusion, so until this is resolved a region failover
+starts them empty. The gap is recorded, not closed, and the difference matters
+because a table that lists them is not a backup that restores them.
 
 **The OMS is the one that matters most.** After a failover it would come up
 against an empty order store, and `SweepInterrupted` would log `count=0` — the
@@ -56,7 +66,32 @@ Resolving it requires deciding which cluster each belongs to (or that it is
 genuinely excludable) and adding the database to that cluster — tracked by
 **#60**. Note that database naming across the deploy manifests, the DSN
 secrets and this document has been reported as inconsistent, so the mapping
-should be settled against the running config rather than any single document.
+should be settled against the running config rather than any single document
+(**#59**).
+
+**Why the five cannot simply be added here.** Each of them reads its DSN from
+Vault at `kv/kanz/<service>` (see `infra/security/secrets/secretproviderclass.yaml`);
+nothing in this repository says which Postgres host that DSN points at. Placing
+a service in `kanz-books` would assert that its data already lives in that
+cluster — an assertion only the running config can settle. Recording them as
+uncovered is the smaller, true claim; guessing a cluster would produce a table
+that reads as coverage while the failover promoted a database the service does
+not use.
+
+### Adding a cluster (what "placing" a service actually costs)
+
+A store is not covered because a `Cluster` exists. Three files must agree, and
+`test/arch/dr_postgres_coverage_test.go` fails until they do:
+
+| File | What it adds | What its absence costs |
+|---|---|---|
+| `cluster.yaml` | the primary + `barmanObjectStore` + `archive_timeout` + `retentionPolicy` + a `ScheduledBackup` | WAL with no base backup is not PITR |
+| `replica.yaml` | the DR-region standby replaying that WAL | a failover has nothing to promote; recovery becomes a restore-from-scratch inside the RTO |
+| `failover.sh` | the cluster name in the `for c in …` promote loop | the standby stays read-only while the services depending on it start anyway |
+
+That last one is the same silent failure this issue is about, reached by a
+different route: not a missing backup, but a backup nobody promotes. The
+services come up, reach a database, and it is not theirs.
 
 The `kanz-books` cluster hosts one database per service; each service's schema is
 defined by its `services/<svc>/migrations/*.sql` (applied in lexical order at

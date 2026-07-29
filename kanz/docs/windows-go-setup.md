@@ -45,23 +45,42 @@ go env -w GOTMPDIR="$HOME/.go-tmp"     # undo with: go env -u GOTMPDIR
 This is the single most effective fix. The `Makefile` exports `GOTMPDIR` too,
 pointing at `kanz/.gotmp`, for CI.
 
-## 3. Build tags — otherwise the connectors look broken
+`kanz/.gotmp` is *inside* the module and gitignored, so after any `go test` run
+it fills the tree with generated `_testmain.go` files that a naive `gofmt -l .`
+would list as violations, indistinguishable from real ones. That is why
+CLAUDE.md's fmt check asks git for the file list (`git ls-files -z '*.go' |
+xargs -0 gofmt -l`) instead of walking the tree — moving `GOTMPDIR` back
+outside the module would reintroduce the Application Control block above, so
+the command is the fix, not the temp-dir location.
 
-The exchange connectors are behind `//go:build binance` / `//go:build okx`; the
-default build is deliberately vendor-free. Without tags configured, every venue
-file shows as greyed out with errors.
+## 3. Build tags — which files gopls greys out
+
+There are no `binance` / `okx` build tags, and there never were. The venue
+connectors are hand-rolled over `github.com/coder/websocket` and compile in the
+default build; `go build ./services/venue-binance/... ./services/venue-okx/...`
+with no tags succeeds. Setting `binance`/`okx` anywhere is a no-op — see #100,
+which retired that claim.
+
+The three tags that do exist, and the files they gate:
+
+| Tag | Selects | Default (`!tag`) |
+|---|---|---|
+| `redis` | `pkg/redisadapter/goredis.go`, `risk-engine/dedup_redis.go`, `webhook-ingest/nonces_redis.go` | `dedup_default.go`, `nonces_default.go` |
+| `anthropic` | `copilot/model_anthropic.go` | `copilot/model_stub.go` |
+| `perf` | `internal/risk/compute/latency_budget_test.go` | — |
+
+So the default build *is* deliberately vendor-free, but of go-redis and the
+Anthropic SDK — not of any venue. Those are the bindings #104 tracks.
 
 The tags have to reach `gopls`, which is a per-editor setting. In VS Code, in
 `.vscode/settings.json` (untracked — see `.gitignore`):
 
 ```json
-{ "go.buildTags": "binance okx" }
+{ "go.buildTags": "redis anthropic" }
 ```
 
-On the command line, pass them explicitly: `go build -tags "binance okx" ./...`.
-
-Note: with both tags on, the `!binance` / `!okx` stub files (`venues_*_off.go`)
-are excluded from the build. **That is correct**, not an error.
+Without them the `redis`/`anthropic` files grey out with errors — the
+`!tag` defaults beside them are what the untagged build compiles, not an error.
 
 ## 4. Go modules environment
 

@@ -35,7 +35,8 @@ commands ──▶ api-gateway ──▶ NATS ──▶ services ──▶ Postg
 cd kanz
 go build ./...
 go test -p 1 ./...          # -p 1 is REQUIRED — see Constraints
-go vet ./... && gofmt -l .
+go vet ./...
+git ls-files -z '*.go' | xargs -0 gofmt -l   # not `gofmt -l .` — GOTMPDIR is in-module (windows-go-setup.md #2), so a tree walk lists _testmain.go build artifacts as violations
 
 cd kanz-schemas && buf generate    # regenerate the Go/Python SDKs
 ```
