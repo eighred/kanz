@@ -1,14 +1,11 @@
-# JetBrains IDEs (GoLand / IntelliJ IDEA).
-# User-specific IDE state is ignored; the shared run configurations under
-# .idea/runConfigurations/ ARE tracked, so everyone gets the correct build tags
-# and GOTMPDIR without rediscovering them. See kanz/docs/jetbrains-setup.md.
-.idea/*
-!.idea/runConfigurations/
-*.iml
+# Editor state. Nothing editor-specific is tracked in this repo: the build tags,
+# GOFLAGS and GOTMPDIR that a working setup needs live in kanz/docs/
+# windows-go-setup.md, so a clone carries no launch/run configuration and none
+# should be committed.
+.vscode/
 
 # Project-local Go temp dir. Windows Application Control intermittently blocks
-# freshly built test binaries in %TEMP%, so the Makefile and the shared run
-# configurations point GOTMPDIR here instead.
+# freshly built test binaries in %TEMP%, so the Makefile points GOTMPDIR here.
 .gotmp/
 
 # Stripped release binaries (`make release`).
