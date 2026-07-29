@@ -124,16 +124,28 @@ func servicesWithEntrypoints(t *testing.T, root string) []string {
 	return out
 }
 
-// manifestExists reports whether the service has a workload manifest. risk-engine
-// ships an Argo Rollout rather than a Deployment; both are workloads.
-func manifestExists(root, svc string) bool {
+// manifestPath returns the path to the service's workload manifest, or "" if it
+// has none. risk-engine ships an Argo Rollout rather than a Deployment; both are
+// workloads, and a caller that checked only for -deploy.yaml would report the one
+// service running a progressive rollout as undeployable.
+//
+// This is the single answer to "where does this service's workload live".
+// TestEveryDeployableServiceIsScrapable reads the manifest body and must look in
+// the same place this guard checks for existence — two copies of the naming rule
+// would drift, and the drift would show up as a guard passing against a file the
+// other guard never saw.
+func manifestPath(root, svc string) string {
 	for _, name := range []string{svc + "-deploy.yaml", svc + "-rollout.yaml"} {
-		if _, err := os.Stat(filepath.Join(root, "infra", "deploy", name)); err == nil {
-			return true
+		p := filepath.Join(root, "infra", "deploy", name)
+		if _, err := os.Stat(p); err == nil {
+			return p
 		}
 	}
-	return false
+	return ""
 }
+
+// manifestExists reports whether the service has a workload manifest.
+func manifestExists(root, svc string) bool { return manifestPath(root, svc) != "" }
 
 // A PROBE MUST POINT AT A PATH THE SERVICE ACTUALLY SERVES.
 //

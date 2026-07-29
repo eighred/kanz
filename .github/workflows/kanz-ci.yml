@@ -576,6 +576,103 @@ jobs:
             exit 1
           fi
 
+  # THE SLO RULES HAD NEVER BEEN EXECUTED BY ANYTHING (#61).
+  #
+  # slo/ ships slo.recording.rules.yaml, slo.alerts.rules.yaml and a promtool
+  # unit-test harness in slo_test.yaml that pins the burn-rate wiring — and every
+  # reference to promtool in this repository was a COMMENT telling a human to run
+  # it. Nothing in this workflow and nothing in the Makefile did. So the tests
+  # that prove the error ratio is computed right and the budget join points at
+  # the correct threshold had never run, in exactly the same way the metrics they
+  # compute over had never been gathered.
+  #
+  # A test harness nobody executes is not a weaker test. It is a claim of
+  # coverage with nothing behind it.
+  observability:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
+
+      # PINNED BY VERSION AND SHA256. promtool ships as a release tarball, not an
+      # action, so the SHA-pinning this workflow applies to actions does not
+      # reach it — the checksum is the only thing making this download
+      # reproducible, and a tarball fetched by tag alone is a supply-chain hole
+      # of the same shape the mirror (#55) exists to close.
+      #
+      # The version matches the image infra/observability/prometheus.yaml
+      # deploys, deliberately: the parser that validates the config here is then
+      # the parser that loads it in the cluster. Validating with a different
+      # version proves the config parses somewhere, not that it parses where it
+      # runs. Bump both together.
+      - name: Install promtool
+        env:
+          PROM_VERSION: 3.1.0
+          PROM_SHA256: 9a9d1e115d1745826b13aec3f1409780b9fcf1d4206746cb4faee46ca5add70c
+        run: |
+          set -euo pipefail
+          tarball="prometheus-${PROM_VERSION}.linux-amd64.tar.gz"
+          curl -fsSLO "https://github.com/prometheus/prometheus/releases/download/v${PROM_VERSION}/${tarball}"
+          echo "${PROM_SHA256}  ${tarball}" | sha256sum -c -
+          tar -xzf "${tarball}" --strip-components=1 "prometheus-${PROM_VERSION}.linux-amd64/promtool"
+          sudo install -m 0755 promtool /usr/local/bin/promtool
+          promtool --version
+
+      # The scrape config lives INSIDE the ConfigMap so that `kubectl apply -f`
+      # is self-sufficient for the whole manifest. Validating it means lifting it
+      # back out. The extractor fails loudly if there is not exactly one such
+      # ConfigMap: silently picking the first of several would validate a file
+      # that is not the one deployed.
+      # setup-python rather than the runner's system python: `pip install` into
+      # the system interpreter is refused under PEP 668 on current runners. This
+      # is the same pair of steps the `go` job already uses for PyYAML.
+      - name: Set up Python (PyYAML, to lift the config out of the ConfigMap)
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12'
+
+      - name: Install PyYAML
+        run: pip install pyyaml
+
+      - name: Extract the embedded prometheus.yml
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import yaml
+          docs = list(yaml.safe_load_all(open('kanz/infra/observability/prometheus.yaml')))
+          cms = [d for d in docs
+                 if d and d.get('kind') == 'ConfigMap' and 'prometheus.yml' in (d.get('data') or {})]
+          if len(cms) != 1:
+              raise SystemExit(
+                  f'expected exactly one ConfigMap carrying prometheus.yml, found {len(cms)}')
+          open('/tmp/prometheus.yml', 'w').write(cms[0]['data']['prometheus.yml'])
+          PY
+
+      # The rules are staged at the path the manifest mounts them on, so this
+      # checks the config AS WRITTEN — including that the rules it loads parse —
+      # rather than a copy with the paths rewritten to suit CI.
+      #
+      # NOTE what this does NOT catch: promtool accepts a rule_files glob that
+      # matches nothing, so a renamed rule file would pass here while loading
+      # zero rules in the cluster. That case is covered by
+      # TestPrometheusConfigMatchesTheEstate in kanz/test/arch/, which compares
+      # the glob against the files actually on disk. Neither check subsumes the
+      # other.
+      - name: promtool check config
+        run: |
+          set -euo pipefail
+          sudo mkdir -p /etc/prometheus/rules
+          sudo cp kanz/infra/observability/slo/*.rules.yaml /etc/prometheus/rules/
+          promtool check config /tmp/prometheus.yml
+
+      # Run FROM the slo directory: slo_test.yaml names its rule_files by
+      # relative path, so this fails to find them from anywhere else.
+      - name: promtool check and test the SLO rules
+        working-directory: kanz/infra/observability/slo
+        run: |
+          set -euo pipefail
+          promtool check rules slo.recording.rules.yaml slo.alerts.rules.yaml
+          promtool test rules slo_test.yaml
+
   buf-breaking:
     runs-on: ubuntu-latest
     steps:

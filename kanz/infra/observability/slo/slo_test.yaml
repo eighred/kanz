@@ -19,10 +19,18 @@ tests:
       - series: 'kanz_gateway_requests_total{code="500"}'
         values: '0+5x80'
     promql_expr_test:
-      - expr: slo:sli_error:ratio_rate1h{service="api-gateway", slo="availability"}
+      # ROUNDED, and not as a fudge. rate() extrapolates in floating point, so
+      # 5/(95+5) comes back as 4.999999999999993e-02, not 0.05 — and promtool
+      # compares exp_samples EXACTLY. Asserting the raw value pins the last bits
+      # of a float across Prometheus versions, which is not what this test is
+      # for: the claim is "the error ratio is computed right", i.e. 5%.
+      # round() to the nearest 0.001 states that claim and survives the noise.
+      #
+      # round() drops __name__, so the expected labels carry no metric name.
+      - expr: round(slo:sli_error:ratio_rate1h{service="api-gateway", slo="availability"}, 0.001)
         eval_time: 75m
         exp_samples:
-          - labels: 'slo:sli_error:ratio_rate1h{service="api-gateway", slo="availability"}'
+          - labels: '{service="api-gateway", slo="availability"}'
             value: 0.05
     alert_rule_test:
       - eval_time: 75m
@@ -34,6 +42,13 @@ tests:
               burn_rate: fast
               service: api-gateway
               slo: availability
+            # The annotations are part of the alert's contract: they are what a
+            # responder reads at 3am. They were absent here because this harness
+            # had never been executed — the rules gained summary/description and
+            # nothing re-ran the test that would have caught the divergence.
+            exp_annotations:
+              summary: "Fast error-budget burn on api-gateway/availability"
+              description: "api-gateway/availability is burning budget at >14.4× (1h+5m windows) — current 1h error ratio 5%. At this rate the 28d budget is gone in hours."
 
   # Healthy gateway (no 5xx) ⇒ zero error ratio, no burn-rate alert.
   - interval: 1m

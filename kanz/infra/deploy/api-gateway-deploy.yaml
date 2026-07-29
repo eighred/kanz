@@ -70,6 +70,12 @@ spec:
       labels:
         app: api-gateway
         app.kubernetes.io/part-of: kanz
+      annotations:
+        # Scraped by infra/observability/prometheus.yaml (role: pod discovery).
+        # The port is the HTTP surface, NOT the gRPC one: a scrape against gRPC
+        # cannot succeed, and the result is a DOWN target rather than an error.
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8080"
     spec:
       serviceAccountName: api-gateway
       securityContext:
