@@ -46,7 +46,7 @@ func TestSweepResumesAnOrderStrandedAtRouted(t *testing.T) {
 		t.Fatalf("swept %d orders, want 1", swept)
 	}
 
-	st, err := store.Load(ctx, stranded.GetOrderId())
+	st, _, err := store.Load(ctx, stranded.GetOrderId())
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
@@ -97,7 +97,7 @@ func TestSweepRefusesAContextWithNoTenant(t *testing.T) {
 
 	// Must not have touched the venue: the order is exactly as it was left,
 	// still ROUTED, not resumed/filled/frozen.
-	st, err := store.Load(context.Background(), stranded.GetOrderId())
+	st, _, err := store.Load(context.Background(), stranded.GetOrderId())
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}

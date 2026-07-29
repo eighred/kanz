@@ -224,7 +224,7 @@ func TestService_SubmitMarketableLimit_FillsAndAcks(t *testing.T) {
 	if oc.GetStatus() != commandpb.CommandOutcomeStatus_COMMAND_OUTCOME_STATUS_EXECUTED {
 		t.Fatalf("outcome = %v, want EXECUTED", oc.GetStatus())
 	}
-	st, err := store.Load(context.Background(), "o1")
+	st, _, err := store.Load(context.Background(), "o1")
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
@@ -275,7 +275,7 @@ func TestService_ComplianceBreach_RejectsBeforeAccept(t *testing.T) {
 	if oc.GetErrorCode() != "COMPLIANCE_CONCENTRATION" {
 		t.Fatalf("error_code = %q, want COMPLIANCE_CONCENTRATION", oc.GetErrorCode())
 	}
-	if _, err := store.Load(context.Background(), "o1"); err == nil {
+	if _, _, err := store.Load(context.Background(), "o1"); err == nil {
 		t.Fatal("order persisted despite compliance breach")
 	}
 }

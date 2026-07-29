@@ -66,7 +66,7 @@ func TestVenueUnreachable_RefusesToTradeAndFabricatesNothing(t *testing.T) {
 			t.Fatal("the OMS emitted a Fill for an order no exchange ever saw")
 		}
 	}
-	st, lerr := store.Load(ctx, cmd.GetOrderId())
+	st, _, lerr := store.Load(ctx, cmd.GetOrderId())
 	if lerr != nil {
 		t.Fatalf("the order vanished: %v", lerr)
 	}
@@ -109,7 +109,7 @@ func TestOrderNamingAnUnconfiguredVenue_IsRejected(t *testing.T) {
 	// It is refused at ADMISSION — the same treatment a compliance breach or a
 	// malformed order gets, and for the same reason: this OMS cannot work it. So
 	// there is no admitted order, exactly as there is none for any other rejection.
-	if _, lerr := store.Load(ctx, cmd.GetOrderId()); lerr == nil {
+	if _, _, lerr := store.Load(ctx, cmd.GetOrderId()); lerr == nil {
 		t.Fatal("the order was ADMITTED against a venue this OMS has no adapter for.\n" +
 			"It can never be executed — not now, not on a retry, not ever — but it rests as if it were working, " +
 			"the command is acked, and the only way anyone finds out is by noticing the fill never came.")
@@ -146,7 +146,7 @@ func TestOrderWithNoVenuesConfigured_StillRests(t *testing.T) {
 	if err := svc.Handle(ctx, submitEnv(), mustMarshal(t, cmd)); err != nil {
 		t.Fatalf("Handle: %v", err)
 	}
-	st, lerr := store.Load(ctx, cmd.GetOrderId())
+	st, _, lerr := store.Load(ctx, cmd.GetOrderId())
 	if lerr != nil || st.GetStatus() != orderpb.OrderStatus_ORDER_STATUS_PENDING_NEW {
 		t.Fatalf("status = %v (err=%v), want PENDING_NEW — an OMS with no execution wired rests its orders", st.GetStatus(), lerr)
 	}

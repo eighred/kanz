@@ -80,7 +80,7 @@ func TestRedeliveryAfterVenueFailureResumesAgainstVenueTruth(t *testing.T) {
 	if got := venue.count(); got != 1 {
 		t.Fatalf("venue.Execute called %d times on delivery 1, want exactly 1", got)
 	}
-	st, err := store.Load(ctx, cmd.GetOrderId())
+	st, _, err := store.Load(ctx, cmd.GetOrderId())
 	if err != nil {
 		t.Fatalf("Load after delivery 1: %v", err)
 	}
@@ -96,7 +96,7 @@ func TestRedeliveryAfterVenueFailureResumesAgainstVenueTruth(t *testing.T) {
 		t.Fatalf("delivery 2 returned %v, want nil after a successful resume", err)
 	}
 
-	st, err = store.Load(ctx, cmd.GetOrderId())
+	st, _, err = store.Load(ctx, cmd.GetOrderId())
 	if err != nil {
 		t.Fatalf("Load after delivery 2: %v", err)
 	}
@@ -136,7 +136,7 @@ func TestVenueDenyingAnAcknowledgedOrderQuarantinesAndDoesNotRedrive(t *testing.
 	if err := svc.Handle(ctx, submitEnv(), body); err != nil {
 		t.Fatalf("delivery 1: %v", err)
 	}
-	st, err := store.Load(ctx, cmd.GetOrderId())
+	st, _, err := store.Load(ctx, cmd.GetOrderId())
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
@@ -152,7 +152,7 @@ func TestVenueDenyingAnAcknowledgedOrderQuarantinesAndDoesNotRedrive(t *testing.
 		t.Fatalf("delivery 2 returned %v; a quarantine is terminal and must ack", err)
 	}
 
-	st, err = store.Load(ctx, cmd.GetOrderId())
+	st, _, err = store.Load(ctx, cmd.GetOrderId())
 	if err != nil {
 		t.Fatalf("Load after delivery 2: %v", err)
 	}
@@ -223,7 +223,7 @@ func TestVenueWithoutQuerierQuarantinesRatherThanGuessing(t *testing.T) {
 	if err := svc.Handle(ctx, submitEnv(), body); err != nil {
 		t.Fatalf("delivery 2 returned %v; a quarantine is terminal and must ack", err)
 	}
-	st, err := store.Load(ctx, cmd.GetOrderId())
+	st, _, err := store.Load(ctx, cmd.GetOrderId())
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
@@ -314,7 +314,7 @@ func TestAdoptRefusesMultiFillViewAndQuarantinesRatherThanDoubleFold(t *testing.
 	if err := svc.Handle(ctx, submitEnv(), body); err != nil {
 		t.Fatalf("delivery 1: %v", err)
 	}
-	st, err := store.Load(ctx, cmd.GetOrderId())
+	st, _, err := store.Load(ctx, cmd.GetOrderId())
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
@@ -331,7 +331,7 @@ func TestAdoptRefusesMultiFillViewAndQuarantinesRatherThanDoubleFold(t *testing.
 		t.Fatalf("delivery 2 returned %v; a quarantine is terminal and must ack", err)
 	}
 
-	st, err = store.Load(ctx, cmd.GetOrderId())
+	st, _, err = store.Load(ctx, cmd.GetOrderId())
 	if err != nil {
 		t.Fatalf("Load after delivery 2: %v", err)
 	}
@@ -400,7 +400,7 @@ func TestAdoptQuarantinesFilledViewWithZeroFills(t *testing.T) {
 	if err := svc.Handle(ctx, submitEnv(), body); err != nil {
 		t.Fatalf("delivery 1: %v", err)
 	}
-	st, err := store.Load(ctx, cmd.GetOrderId())
+	st, _, err := store.Load(ctx, cmd.GetOrderId())
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
@@ -417,7 +417,7 @@ func TestAdoptQuarantinesFilledViewWithZeroFills(t *testing.T) {
 		t.Fatalf("delivery 2 returned %v; a quarantine is terminal and must ack", err)
 	}
 
-	st, err = store.Load(ctx, cmd.GetOrderId())
+	st, _, err = store.Load(ctx, cmd.GetOrderId())
 	if err != nil {
 		t.Fatalf("Load after delivery 2: %v", err)
 	}
@@ -472,7 +472,7 @@ func TestAdmissionPathHoldsTheClaimWhileWorkingAnOrder(t *testing.T) {
 		t.Fatalf("venue.Execute called %d times — the admission path worked the order without "+
 			"taking the claim, racing whatever else holds it", got)
 	}
-	st, err := store.Load(ctx, cmd.GetOrderId())
+	st, _, err := store.Load(ctx, cmd.GetOrderId())
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
