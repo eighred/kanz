@@ -44,7 +44,18 @@ spec:
         path: kanz/infra/deploy
         directory:
           recurse: true
-          # Same exclusions as the main app-of-apps (templated/job manifests).
+          # NOT the same list as the main app-of-apps any more, and it does not need
+          # to be: this Application syncs only kanz/infra/deploy, which contains no
+          # Job, no tenancy.yaml and no smoke-test.sh — every pattern here matches
+          # nothing. It is kept as a floor in case one arrives.
+          #
+          # The main app-of-apps dropped `*-job.yaml` because that glob excluded
+          # bootstrap-job.yaml (which creates every JetStream stream) while admitting
+          # bootstrap-job-dev-plaintext.yaml (#92). Neither file is under this path,
+          # so the same glob is inert here rather than dangerous. The old comment
+          # claimed these lists were identical, which stopped being true the moment
+          # the main one was fixed — a preview environment is exactly where nobody
+          # would notice a stale claim.
           exclude: "{tenancy.yaml,smoke-test.sh,*-job.yaml}"
         kustomize:
           # Pin every image to the PR build (preview.yml pushes :pr-{number});
