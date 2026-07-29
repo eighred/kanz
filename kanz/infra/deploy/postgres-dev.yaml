@@ -137,6 +137,8 @@ metadata:
   labels:
     app.kubernetes.io/part-of: kanz
     kanz.eighred.com/posture: dev-only
+    # DR scales by this label, never `--all` (#149) — see infra/dr/failover.sh step 4.
+    kanz.io/singleton: "true"
 spec:
   # One. Two replicas over one emptyDir each are two unrelated databases behind a
   # single Service name, handing out different answers per connection.

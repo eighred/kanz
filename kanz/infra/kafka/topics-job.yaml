@@ -107,6 +107,20 @@ kind: Job
 metadata:
   name: kafka-topics
   namespace: kanz-messaging
+  annotations:
+    # Same one-shot defect as nats-bootstrap (#92), and it matters more here:
+    # Kafka is the DURABLE LOG OF RECORD, the thing nats-rebuild replays the spine
+    # back from. A missing NATS stream is loud — services crash-loop on "stream not
+    # found". A missing Kafka topic is quiet: the archiver simply has nowhere to
+    # write, and the loss only surfaces at the moment of a DR rebuild, which is the
+    # worst possible time to discover the log of record was never provisioned.
+    #
+    # Idempotent by construction — ensure_topic uses `--create --if-not-exists`
+    # and `--alter`, so re-running converges configuration rather than duplicating
+    # it, which also means a retention or partition change in git now reaches the
+    # cluster instead of waiting for someone to delete the Job.
+    argocd.argoproj.io/hook: PostSync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
 spec:
   backoffLimit: 4
   template:

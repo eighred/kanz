@@ -21,7 +21,7 @@ var topicRowPolicy = regexp.MustCompile(
 // coveredBySubject reports whether an archiver subject drains this topic.
 //
 // It walks EVERY dot boundary, not just the first and last. topic.For
-// (services/archiver/internal/topic/topic.go:55-59) appends ".snapshot" for
+// (internal/topic/topic.go) appends ".snapshot" for
 // STATE_SNAPSHOT events, so a real topic can be {domain}.{entity}.snapshot
 // while the subject that drains it is {domain}.{entity}.> — a rule checking
 // only the first and last segments drops it silently, narrowing a DR restore

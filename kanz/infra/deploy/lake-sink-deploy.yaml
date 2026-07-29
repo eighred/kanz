@@ -88,6 +88,8 @@ metadata:
   namespace: kanz-services
   labels:
     app.kubernetes.io/part-of: kanz
+    # DR scales by this label, never `--all` (#149) — see infra/dr/failover.sh step 4.
+    kanz.io/singleton: "true"
 spec:
   # ONE. See the single-writer note above: pinned by the ReadWriteOnce PVC, not
   # by ordering. The scaling path is object storage, not a second replica here.

@@ -5,6 +5,19 @@
 // subjects, then exits. Idempotent re-runs are safe (the stream dedup window +
 // idempotent handlers), so a partial rebuild can simply be re-run.
 //
+// TENANCY: NATS_REBUILD_TOPICS is the archiver's UN-PREFIXED produced set;
+// NATS_REBUILD_TENANTS names the tenants to restore and the prefixed Kafka
+// topic names are DERIVED from the two (natsrebuild.Qualify, the archiver's own
+// rule). Unset ⇒ __system__ only, which is the historical single-tenant run
+// unchanged. NATS SUBJECTS ARE NOT PREFIXED — tenancy rides in the envelope,
+// not the subject (infra/nats/bootstrap-job.yaml binds market.>, order.> …), so
+// a tenant's events republish onto the same live subjects with the envelope's
+// tenant_id intact, and no publish-path change is needed.
+//
+// Exit codes: 2 configuration refused before any I/O; 1 a target failed (a
+// topic that does not exist in Kafka is one — see natsrebuild.OutcomeMissing);
+// 0 every requested topic existed and was drained.
+//
 // Kafka is read plaintext over the in-cluster listener (kafka:9092), like the
 // provisioning Jobs; NATS publish goes over SEC-01c mTLS when a SPIFFE socket is
 // set (required against a verify:true cluster), plaintext otherwise (dev).
@@ -22,7 +35,6 @@ import (
 	"github.com/eighred/kanz/pkg/bus"
 	"github.com/eighred/kanz/pkg/transport"
 	"github.com/eighred/kanz/tools/natsrebuild"
-	"github.com/eighred/kanz/tools/replay"
 )
 
 func main() {
@@ -51,10 +63,18 @@ func main() {
 		logger.Error("invalid topic classification", "err", err)
 		os.Exit(2)
 	}
-	stateSet := make(map[string]bool, len(stateTopics))
-	for _, s := range stateTopics {
-		stateSet[s] = true
+	rawTenants, tenantsSet := os.LookupEnv("NATS_REBUILD_TENANTS")
+	tenants, err := natsrebuild.ParseTenants(rawTenants, tenantsSet)
+	if err != nil {
+		logger.Error("invalid tenant configuration", "err", err)
+		os.Exit(2)
 	}
+	targets, err := natsrebuild.ResolveTargets(tenants, topics, stateTopics)
+	if err != nil {
+		logger.Error("cannot resolve the topics to rebuild", "err", err)
+		os.Exit(2)
+	}
+	logger.Info("nats-rebuild plan", "tenants", tenants, "base_topics", len(topics), "targets", len(targets))
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
@@ -80,30 +100,36 @@ func main() {
 	}
 	defer func() { _ = nc.Close() }()
 
-	now := time.Now()
-	var total uint64
-	for _, topic := range topics {
-		reader, err := replay.NewReader(replay.Config{
-			Brokers: brokers,
-			Topic:   topic,
-			Range:   natsrebuild.WindowFor(topic, stateSet, since, now),
-		})
-		if err != nil {
-			logger.Error("new reader", "topic", topic, "err", err)
-			os.Exit(1)
-		}
-		p := &natsrebuild.Pipeline{Source: reader, Publisher: nc, Logger: logger}
-		stats, err := p.Run(ctx)
-		_ = reader.Close()
-		if err != nil {
-			logger.Error("rebuild topic failed", "topic", topic, "published", stats.Published, "err", err)
-			os.Exit(1)
-		}
-		logger.Info("rebuilt topic", "topic", topic, "state", stateSet[topic],
-			"published", stats.Published, "malformed", stats.Malformed)
-		total += stats.Published
+	runner := &natsrebuild.Runner{
+		Targets:   targets,
+		Requested: tenants,
+		Checker:   natsrebuild.KafkaTopicChecker{Brokers: brokers},
+		Open:      natsrebuild.KafkaOpen(brokers),
+		Publisher: nc,
+		Since:     since,
+		Now:       time.Now(),
+		Logger:    logger,
 	}
-	logger.Info("nats-rebuild complete", "topics", len(topics), "since", since.String(), "published", total)
+	report, runErr := runner.Run(ctx)
+
+	// The summary is emitted on BOTH paths, before the exit decision: a failed
+	// run's partial account is the operator's only record of what was already
+	// republished before the abort, and a re-run needs it.
+	logger.Info("nats-rebuild summary",
+		"tenants", len(report.Requested), "targets", len(targets), "attempted", len(report.Results),
+		"since", since.String(), "published", report.Published(), "per_tenant", report.Summary())
+	if barren := report.BarrenTenants(); len(barren) > 0 {
+		logger.Warn("tenants that replayed no event at all",
+			"tenants", barren,
+			"note", "every topic existed but held nothing in the window — check NATS_REBUILD_SINCE "+
+				"and that the tenant's archiver has been running")
+	}
+	if runErr != nil {
+		logger.Error("nats-rebuild FAILED — the spine is NOT rebuilt", "err", runErr)
+		os.Exit(1)
+	}
+	logger.Info("nats-rebuild complete", "tenants", report.Requested, "topics", len(targets),
+		"since", since.String(), "published", report.Published())
 }
 
 func splitList(s string) []string {

@@ -10,6 +10,10 @@
 # Order in the DR cutover (DR-01d): (1) NATS up + streams provisioned
 # (bootstrap-job), (2) THIS Job, (3) start consumers. Kafka is read plaintext
 # in-cluster (kafka:9092); NATS publish is SEC-01c mTLS (the rebuild's SVID).
+#
+# Scope is TENANT x TOPIC: NATS_REBUILD_TENANTS crossed with NATS_REBUILD_TOPICS
+# (issue #93). A requested tenant whose topics are not in Kafka fails the Job
+# rather than draining nothing and exiting 0.
 ---
 apiVersion: v1
 kind: ServiceAccount
@@ -72,19 +76,44 @@ spec:
             # back on the live spine, and wealth/alternatives have no archiver
             # subscription so nothing was ever written to them.
             #
-            # TENANT SCOPE: this list is the __system__ tenant's UN-PREFIXED
-            # archived topic set only. topic.go:61-64 prefixes every topic
-            # with "{tenant}." for any non-__system__ tenant, and
-            # infra/kafka/tenancy.yaml provisions the same table under that
-            # prefix — so an onboarded tenant's archived topics land at
-            # {tenant}.{domain}.{entity}, names that do not appear anywhere
-            # in this flat list. THIS JOB DOES NOT READ THEM: a tenant DR run
-            # would drain nothing for that tenant and still exit 0.
-            # Per-tenant DR reconstruction is NOT implemented here — it is a
-            # separate future capability, not an oversight. If you are
-            # onboarding a tenant that needs DR coverage, this Job is not
-            # where that gets solved.
+            # TENANT SCOPE: this list stays UN-PREFIXED. It is the archiver's
+            # produced set as {domain}.{entity}, and the per-tenant Kafka topic
+            # names are DERIVED from it x NATS_REBUILD_TENANTS below, using the
+            # archiver's own rule (topic.go:61-64 — __system__ un-prefixed,
+            # every other tenant "{tenant}.{domain}.{entity}"). A hand-written
+            # prefixed list here would be a second copy of this table, which is
+            # exactly how the pre-36a9ba1 dead table survived unnoticed.
             - { name: NATS_REBUILD_TOPICS, value: "order.order,strategy.signal,accounting.balance,settlement.instruction,compliance.breach,compliance.mandate,risk.portfolio,risk.position,platform.authz,platform.compliance,platform.mode,inference.feature,inference.prediction,data.feature" }
+            # WHICH TENANTS TO RESTORE (issue #93). Each name is crossed with
+            # the topic list above to produce the topics actually read:
+            # __system__ -> order.order, acme -> acme.order.order, and so on,
+            # matching what infra/kafka/tenancy.yaml provisions per tenant.
+            #
+            # This value is the DR SCOPE OF THE ESTATE, not a tuning knob. A
+            # tenant absent from this list is a tenant whose archived topics
+            # nothing replays after a region failover. Add an onboarded tenant
+            # here as part of onboarding it, not after the failover.
+            #
+            # The un-prefixed __system__ default keeps the historical
+            # single-tenant run byte-identical, so the DR runbook is unchanged
+            # for the estate as it stands today.
+            #
+            # A tenant named here whose topics do not exist in Kafka now FAILS
+            # the Job (exit 1, outcome=missing per topic). That is the fix: the
+            # previous version of this comment said per-tenant reconstruction
+            # was "a separate future capability" and the Job drained nothing for
+            # a tenant while still exiting 0 — a rebuild that restored nothing
+            # was indistinguishable from one that restored everything. A topic
+            # that exists but held nothing in the window is a distinct,
+            # non-fatal outcome=empty, logged at WARN per topic and rolled up
+            # per tenant, so "quiet tenant" and "wrong NATS_REBUILD_SINCE" are
+            # visible instead of hiding inside a zero.
+            #
+            # NATS subjects are NOT tenant-prefixed (infra/nats/bootstrap-job
+            # binds order.>, market.>, …): tenancy rides in the envelope, so a
+            # tenant's events republish onto the same live subjects with their
+            # tenant_id intact.
+            - { name: NATS_REBUILD_TENANTS, value: "__system__" }
             # COMPACTED STATE — read IN FULL, never through the time window.
             # Compaction keeps the latest record per key regardless of age, so
             # a mandate armed last week is older than any recent window and

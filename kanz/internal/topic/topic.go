@@ -58,8 +58,28 @@ func For(env *envelopepb.Envelope, tenant string) (string, error) {
 		// time-retention. One topic cannot be both.
 		name += ".snapshot"
 	}
+	return Qualify(tenant, name), nil
+}
+
+// Qualify applies the tenant prefix to an already-derived topic name.
+//
+// Split out of For because the DR rebuild needs the PREFIX rule without an
+// envelope to derive a name from: it works backwards, from the un-prefixed topic
+// list in the rebuild Job to the per-tenant topics that actually hold the data
+// (tools/natsrebuild). It had to reimplement this while the package lived under
+// services/archiver/internal/, where Go's internal scoping put it out of reach —
+// and a second copy of the rule that decides WHICH TENANT'S DATA a DR run reads
+// is the kind of copy that gets discovered during a failover.
+//
+//	Qualify("__system__", "order.order") -> "order.order"
+//	Qualify("acme", "order.order")       -> "acme.order.order"
+//
+// __system__ stays un-prefixed so the legacy topics and their running consumers
+// are untouched (MT-01a); every other tenant is confined to its own `{tenant}.`
+// prefix, which is the handle the MT-01c ACL binds to.
+func Qualify(tenant, name string) string {
 	if tenant == SystemTenant {
-		return name, nil
+		return name
 	}
-	return tenant + "." + name, nil
+	return tenant + "." + name
 }

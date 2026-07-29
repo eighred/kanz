@@ -31,7 +31,7 @@ import (
 //     not a fallback: it is deliberately configured fleet-wide — OMS_TENANT,
 //     ACCOUNTING_TENANT, ARCHIVER_TENANT, TV_SYNC_TENANT and the rest all set it
 //     explicitly in infra/deploy — and downstream contracts DEPEND on it.
-//     archiver/internal/topic maps SystemTenant events to the UN-PREFIXED legacy
+//     internal/topic maps SystemTenant events to the UN-PREFIXED legacy
 //     topic names and prefixes every other tenant's, so changing what the
 //     platform publishes under would re-route the entire archive.
 //

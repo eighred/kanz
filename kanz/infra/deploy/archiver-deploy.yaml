@@ -63,6 +63,8 @@ metadata:
   namespace: kanz-services
   labels:
     app.kubernetes.io/part-of: kanz
+    # DR scales by this label, never `--all` (#149) — see infra/dr/failover.sh step 4.
+    kanz.io/singleton: "true"
 spec:
   # ONE. See the single-writer note above: a second replica does not add
   # throughput, it risks inverting per-key order in the durable log of record.

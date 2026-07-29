@@ -213,6 +213,27 @@ kind: Job
 metadata:
   name: nats-bootstrap
   namespace: kanz-messaging
+  annotations:
+    # RE-PROVISIONING WITHOUT A HAND-RUN COMMAND (#92).
+    #
+    # A plain Job provisions the spine EXACTLY ONCE. Argo CD will not re-run one
+    # that has already completed — the object matches git, so a sync is a no-op —
+    # so a broker that loses its streams stays broken until a human remembers
+    # `kubectl delete job nats-bootstrap`. That is not a theoretical recovery gap:
+    # the kind rig reached ~495 restarts on compliance and tv-sync after a host
+    # reboot dropped JetStream state, because nothing re-created the streams and
+    # every stream-dependent service crash-loops on "stream not found".
+    #
+    # PostSync + BeforeHookCreation re-asserts the whole stream set on every sync,
+    # after the broker StatefulSet reports healthy — which is the ordering this
+    # needs, since streams cannot be created against a broker that is not up.
+    #
+    # Safe to run every time because ensure_stream is idempotent BY CONSTRUCTION:
+    # it edits when the stream exists and creates when it does not, and every
+    # stream goes through that one function. Re-running is the cheap half of the
+    # trade; the expensive half was a spine nobody could rebuild.
+    argocd.argoproj.io/hook: PostSync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
 spec:
   backoffLimit: 4
   template:
