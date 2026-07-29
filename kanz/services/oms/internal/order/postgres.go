@@ -64,26 +64,36 @@ func (p *Postgres) Create(ctx context.Context, st *orderpb.OrderState) error {
 	return nil
 }
 
-// Save is the post-admission upsert: every state transition after Create.
+// Save is the post-admission compare-and-swap: every state transition after
+// Create, applied only if the order is still at the version the caller loaded.
 //
-// IT IS A BLIND UPSERT, AND THE LAST WRITER WINS. This comment used to say the
-// upsert was safe "because the bus partition_key serializes transitions per
-// order_id". THAT WAS NEVER TRUE. partition_key is stamped by producers
-// (pkg/bus/producer.go) and read by the consumer only to copy onto a DLQ
-// republish (pkg/bus/consumer.go); nothing anywhere serializes deliveries by it,
-// and submit, amend and cancel arrive on three separate durables with three
-// cursors and three dispatch goroutines (pkg/bus/nats.go). The consumer's only
-// exclusion is its dedup claim, keyed on idempotency_key — which differs between
-// a submit and a cancel. Believing that sentence is how a cancel came to be
-// overwritten by a fill that never saw it.
+// THE PREDICATE IS THE WHOLE POINT, AND RowsAffected IS THE VERDICT — the same
+// shape Create uses two functions above. 1 ⇒ this writer won and the version
+// advanced; 0 ⇒ somebody else moved the order since this caller read it, and
+// applying this write would DISCARD their transition, so it is refused with
+// ErrConflict.
 //
-// What actually excludes concurrent writers today is the per-order lock in the
-// service (internal/order/orderlock.go), and its safety boundary ENDS AT THE
-// PROCESS. Two OMS pods writing one order still race here, and the loser's write
-// is silently discarded rather than rejected. Closing that needs a version
-// column and a CAS predicate on this statement — tracked separately. Do not
-// reintroduce a serialization claim in this comment to paper over it.
-func (p *Postgres) Save(ctx context.Context, st *orderpb.OrderState) error {
+// This used to be a blind upsert, justified by the claim that "the bus
+// partition_key serializes transitions per order_id". THAT WAS NEVER TRUE.
+// partition_key is stamped by producers (pkg/bus/producer.go) and read by the
+// consumer only to copy onto a DLQ republish (pkg/bus/consumer.go); nothing
+// anywhere serializes deliveries by it, and submit, amend and cancel arrive on
+// three separate durables with three cursors and three dispatch goroutines
+// (pkg/bus/nats.go). The consumer's only exclusion is its dedup claim, keyed on
+// idempotency_key — which differs between a submit and a cancel. Believing that
+// sentence is how a cancel came to be overwritten by a fill that never saw it.
+// Do not reintroduce a serialization claim here.
+//
+// The service's per-order lock (internal/order/orderlock.go) excludes writers
+// within one process. It cannot reach across pods by construction, and
+// oms-deploy.yaml runs replicas: 2 — so the version is what makes a multi-replica
+// OMS safe, exactly as the ON CONFLICT DO NOTHING in Create is what makes
+// admission safe (#122).
+//
+// The INSERT arm still exists because Save must remain callable for an order
+// this process created; on the insert path the row lands at version 0 and no
+// predicate applies, because there is nothing yet to conflict with.
+func (p *Postgres) Save(ctx context.Context, st *orderpb.OrderState, expectedVersion int64) error {
 	if st.GetOrderId() == "" {
 		return errors.New("oms: cannot save order with empty order_id")
 	}
@@ -91,33 +101,49 @@ func (p *Postgres) Save(ctx context.Context, st *orderpb.OrderState) error {
 	if err != nil {
 		return fmt.Errorf("marshal order %s: %w", st.GetOrderId(), err)
 	}
-	_, err = p.pool.Exec(ctx, `
+	tag, err := p.pool.Exec(ctx, `
 		INSERT INTO orders (tenant_id, order_id, status, state)
 		VALUES (current_setting('app.tenant_id'), $1, $2, $3)
 		ON CONFLICT (tenant_id, order_id) DO UPDATE SET
 			status     = EXCLUDED.status,
 			state      = EXCLUDED.state,
+			version    = orders.version + 1,
 			updated_at = now()
-	`, st.GetOrderId(), int32(st.GetStatus()), blob)
+		WHERE orders.version = $4
+	`, st.GetOrderId(), int32(st.GetStatus()), blob, expectedVersion)
 	if err != nil {
 		return fmt.Errorf("save order %s: %w", st.GetOrderId(), err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrConflict
 	}
 	return nil
 }
 
-// Load returns the current state of one order, or ErrNotFound.
-func (p *Postgres) Load(ctx context.Context, orderID string) (*orderpb.OrderState, error) {
-	var blob []byte
+// Load returns the current state of one order and its version, or ErrNotFound.
+//
+// The state and the version come from ONE row read, so they cannot disagree.
+// Reading them in two queries would hand the caller a version that had already
+// moved, and its next Save would be refused for no reason a reader could see.
+func (p *Postgres) Load(ctx context.Context, orderID string) (*orderpb.OrderState, int64, error) {
+	var (
+		blob    []byte
+		version int64
+	)
 	err := p.pool.QueryRow(ctx,
-		`SELECT state FROM orders WHERE order_id = $1`, orderID,
-	).Scan(&blob)
+		`SELECT state, version FROM orders WHERE order_id = $1`, orderID,
+	).Scan(&blob, &version)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, ErrNotFound
+		return nil, 0, ErrNotFound
 	}
 	if err != nil {
-		return nil, fmt.Errorf("load order %s: %w", orderID, err)
+		return nil, 0, fmt.Errorf("load order %s: %w", orderID, err)
 	}
-	return unmarshalState(blob, orderID)
+	st, err := unmarshalState(blob, orderID)
+	if err != nil {
+		return nil, 0, err
+	}
+	return st, version, nil
 }
 
 // List returns a snapshot of all known orders, for bootstrap/inspection.

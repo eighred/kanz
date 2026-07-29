@@ -54,7 +54,7 @@ func TestSubmit_ResumesInterruptedFillAnnouncement_FillFactFails(t *testing.T) {
 	}
 	fb.failOn = ""
 
-	st, err := store.Load(context.Background(), "o1")
+	st, _, err := store.Load(context.Background(), "o1")
 	if err != nil {
 		t.Fatalf("load after delivery 1: %v", err)
 	}
@@ -94,7 +94,7 @@ func TestSubmit_ResumesInterruptedFillAnnouncement_FillFactFails(t *testing.T) {
 			"fabricated fill was invented")
 	}
 
-	st, err = store.Load(context.Background(), "o1")
+	st, _, err = store.Load(context.Background(), "o1")
 	if err != nil {
 		t.Fatalf("load after delivery 2: %v", err)
 	}
@@ -126,7 +126,7 @@ func TestSubmit_ResumesInterruptedFillAnnouncement_OutcomeFails(t *testing.T) {
 		t.Fatal("ORDER_FILLED FACT missing after delivery 1 — expected EmitFill to have succeeded " +
 			"before the injected outcome failure")
 	}
-	st, err := store.Load(context.Background(), "o1")
+	st, _, err := store.Load(context.Background(), "o1")
 	if err != nil {
 		t.Fatalf("load after delivery 1: %v", err)
 	}
@@ -159,7 +159,7 @@ func TestSubmit_ResumesInterruptedFillAnnouncement_OutcomeFails(t *testing.T) {
 			"that already succeeded", filledFactsBefore, filledFactsAfter)
 	}
 
-	st, err = store.Load(context.Background(), "o1")
+	st, _, err = store.Load(context.Background(), "o1")
 	if err != nil {
 		t.Fatalf("load after delivery 2: %v", err)
 	}
@@ -180,7 +180,7 @@ func TestSubmit_DuplicateAfterFillAnnouncedStaysTerminal(t *testing.T) {
 	if err := svc.Handle(testCtx(), submitEnv(), mustMarshal(t, cmd)); err != nil {
 		t.Fatalf("first delivery: %v", err)
 	}
-	st, err := store.Load(context.Background(), "o1")
+	st, _, err := store.Load(context.Background(), "o1")
 	if err != nil {
 		t.Fatalf("load: %v", err)
 	}
@@ -214,7 +214,7 @@ func TestSubmit_ResumesInterruptedRejectAnnouncement(t *testing.T) {
 	}
 	fb.failOn = ""
 
-	st, err := svc.store.Load(context.Background(), "o1")
+	st, _, err := svc.store.Load(context.Background(), "o1")
 	if err != nil {
 		t.Fatalf("load after delivery 1: %v", err)
 	}
@@ -250,7 +250,7 @@ func TestSubmit_ResumesInterruptedRejectAnnouncement(t *testing.T) {
 			"recoverable from stored OrderState, so this must NOT happen")
 	}
 
-	st, err = svc.store.Load(context.Background(), "o1")
+	st, _, err = svc.store.Load(context.Background(), "o1")
 	if err != nil {
 		t.Fatalf("load after delivery 2: %v", err)
 	}
@@ -277,7 +277,7 @@ func TestSubmit_ResumesInterruptedRejectAnnouncement_OutcomeFails(t *testing.T) 
 		t.Fatal("ORDER_REJECTED FACT missing after delivery 1 — expected EmitRejected to have succeeded " +
 			"before the injected outcome failure")
 	}
-	st, err := svc.store.Load(context.Background(), "o1")
+	st, _, err := svc.store.Load(context.Background(), "o1")
 	if err != nil {
 		t.Fatalf("load after delivery 1: %v", err)
 	}
@@ -293,7 +293,7 @@ func TestSubmit_ResumesInterruptedRejectAnnouncement_OutcomeFails(t *testing.T) 
 		t.Fatalf("outcome after resume = %v, want REJECTED", oc.GetStatus())
 	}
 
-	st, err = svc.store.Load(context.Background(), "o1")
+	st, _, err = svc.store.Load(context.Background(), "o1")
 	if err != nil {
 		t.Fatalf("load after delivery 2: %v", err)
 	}

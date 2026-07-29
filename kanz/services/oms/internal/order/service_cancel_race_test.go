@@ -205,7 +205,7 @@ func TestCancel_ArrivingMidExecutionCannotResurrectACancelledOrder(t *testing.T)
 			"for an order it had already filled", got)
 	}
 
-	st, err := svc.store.Load(testCtx(), "o1")
+	st, _, err := svc.store.Load(testCtx(), "o1")
 	if err != nil {
 		t.Fatalf("load: %v", err)
 	}
@@ -293,7 +293,7 @@ func TestAmend_ArrivingMidExecutionCannotUnfillAFilledOrder(t *testing.T) {
 		if svc.waiters("o1") >= 2 {
 			break
 		}
-		if cur, err := svc.store.Load(testCtx(), "o1"); err == nil &&
+		if cur, _, err := svc.store.Load(testCtx(), "o1"); err == nil &&
 			dec.Cmp(cur.GetOrderedQuantity(), d(100, 0)) != 0 {
 			break // the amend already applied — the defect, caught in the act
 		}
@@ -314,7 +314,7 @@ func TestAmend_ArrivingMidExecutionCannotUnfillAFilledOrder(t *testing.T) {
 		t.Fatalf("amend: %v", err)
 	}
 
-	st, err := svc.store.Load(testCtx(), "o1")
+	st, _, err := svc.store.Load(testCtx(), "o1")
 	if err != nil {
 		t.Fatalf("load: %v", err)
 	}

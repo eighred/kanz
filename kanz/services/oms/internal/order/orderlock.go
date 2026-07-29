@@ -144,14 +144,20 @@ func (t *orderLocks) releaser(orderID string, l *orderLock) func() {
 // It is per-order, not global: a single lock would serialize every order in the
 // OMS behind the slowest venue call.
 //
-// It is IN-PROCESS ONLY, and that is a real limit, not an oversight. Two OMS
-// pods acting on one order are not excluded by this and cannot be — that needs a
-// version predicate on Store.Save so the losing writer is REJECTED rather than
-// silently overwriting the winner (see the Save comment in postgres.go). What
-// this closes is the window WITHIN a pod, which is the window the bus actually
-// opens: submit, amend and cancel are three separate durables with three cursors
-// and three dispatch goroutines (pkg/bus/nats.go:183, 202-206), concurrent by
+// It is IN-PROCESS ONLY, and that is a boundary, not a gap. What this closes is
+// the window WITHIN a pod, which is the window the bus actually opens: submit,
+// amend and cancel are three separate durables with three cursors and three
+// dispatch goroutines (pkg/bus/nats.go:183, 202-206), concurrent by
 // construction.
+//
+// ACROSS PODS, Store.Save's version predicate closes it (#122): two OMS pods
+// acting on one order are arbitrated by the engine, and the losing writer is
+// REJECTED with ErrConflict rather than silently overwriting the winner. This
+// comment used to say that predicate was still needed. It exists now — see the
+// Save comment in postgres.go — so the two mechanisms together cover both
+// windows, and neither is a substitute for the other: the lock keeps one pod's
+// goroutines from interleaving mid-execution, and the version keeps two pods
+// from discarding each other's transitions.
 func (s *Service) claim(orderID string) (func(), bool) {
 	l := s.working.ref(orderID)
 	select {

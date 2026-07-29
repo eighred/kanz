@@ -42,7 +42,7 @@ func TestCancel_ResumesInterruptedAnnouncement(t *testing.T) {
 	}
 	fb.failOn = ""
 
-	st, err := svc.store.Load(context.Background(), "o1")
+	st, _, err := svc.store.Load(context.Background(), "o1")
 	if err != nil {
 		t.Fatalf("load after delivery 1: %v", err)
 	}
@@ -79,7 +79,7 @@ func TestCancel_ResumesInterruptedAnnouncement(t *testing.T) {
 			"be told otherwise", oc.GetStatus())
 	}
 
-	st, err = svc.store.Load(context.Background(), "o1")
+	st, _, err = svc.store.Load(context.Background(), "o1")
 	if err != nil {
 		t.Fatalf("load after delivery 2: %v", err)
 	}
@@ -113,7 +113,7 @@ func TestCancel_DuplicateAfterAnnouncedStaysTerminal(t *testing.T) {
 	if err := svc.Handle(testCtx(), cancelEnv(), mustMarshal(t, cancelAs("pf1"))); err != nil {
 		t.Fatalf("first cancel: %v", err)
 	}
-	st, err := svc.store.Load(context.Background(), "o1")
+	st, _, err := svc.store.Load(context.Background(), "o1")
 	if err != nil {
 		t.Fatalf("load: %v", err)
 	}
