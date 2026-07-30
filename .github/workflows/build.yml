@@ -183,8 +183,37 @@ jobs:
 
       - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
 
+      # A FORK PR CANNOT PULL A PRIVATE BASE, AND MUST SAY SO IN ITS FIRST STEP.
+      #
+      # Since #161 every FROM resolves to ghcr.io/eighred/base/*, which is
+      # PRIVATE by policy. GITHUB_TOKEN on a pull_request from a FORK carries no
+      # read access to this org's packages, so the base pull 403s. Without this
+      # check that surfaces as a docker error twelve steps in, naming a registry
+      # path and not a cause — which is the shape that sends people looking at
+      # the Dockerfile.
+      #
+      # Same-repo branches (the normal workflow here) are unaffected: they get a
+      # full GITHUB_TOKEN and authenticate below.
+      - name: Fork PRs cannot pull the private base images
+        if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository
+        run: |
+          echo "::error title=Fork PR cannot build images::Base images live in the PRIVATE" \
+               "package namespace ghcr.io/eighred/base/* (#161). A pull_request from a fork" \
+               "receives a GITHUB_TOKEN with no read access to this organisation's packages," \
+               "so every FROM would fail with a 403 during the build." \
+               "Push the branch to eighred/kanz and open the PR from there."
+          exit 1
+
+      # NOT `if: github.event_name == 'push'` ANY MORE (#161).
+      #
+      # That condition was correct while every FROM came from Docker Hub and
+      # gcr.io anonymously — login was needed only to PUSH the built image, which
+      # happens on push. Now the base images are pulled from a private namespace,
+      # so authentication is required to BUILD at all. Leaving the condition
+      # would have produced the worst available failure shape: main green because
+      # pushes authenticate, every pull_request red on a base pull, and the cause
+      # one layer below where anyone reads.
       - name: Log in to GHCR
-        if: github.event_name == 'push'
         uses: docker/login-action@371161bbe7024a29a25c5e19bfcbc0804fe9ad2c # v4.5.2
         with:
           registry: ghcr.io

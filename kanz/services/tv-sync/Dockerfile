@@ -10,7 +10,7 @@
 #
 # The last hop: the Broker-API feedback projection TradingView reads. Like
 # webhook-ingest, it had neither an image nor a manifest.
-FROM golang:1.26.5 AS build
+FROM ghcr.io/eighred/base/golang:1.26.5 AS build
 WORKDIR /src
 ENV GOFLAGS=-mod=mod
 
@@ -27,7 +27,7 @@ RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w"       -o /out/tv-sync ./se
 
 # Distroless static: no shell, no libc, no package manager. :nonroot runs as uid
 # 65532, matching the pod's runAsUser.
-FROM gcr.io/distroless/static:nonroot
+FROM ghcr.io/eighred/base/distroless-static:nonroot
 COPY --from=build /out/tv-sync /tv-sync
 USER nonroot:nonroot
 EXPOSE 8091

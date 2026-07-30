@@ -107,8 +107,8 @@ func TestEveryDockerfileBaseImageComesFromTheMirror(t *testing.T) {
 		sort.Strings(still)
 		t.Logf("BASE-IMAGE SPOF: %d base image(s) still pulled from outside the mirror: %s. "+
 			"Every build depends on a registry this estate does not own. This test passing means "+
-			"the exposure is RECORDED, not removed — see issue #161 (the images ARE mirrored; "+
-			"the rewrite is blocked on ghcr.io/eighred/base/* being anonymously pullable).",
+			"the exposure is RECORDED, not removed — mirror the image, point the FROM at it, and "+
+			"delete the entry. This map was empty as of #161; anything here is a regression.",
 			len(still), strings.Join(still, ", "))
 	}
 }
@@ -119,48 +119,32 @@ func TestEveryDockerfileBaseImageComesFromTheMirror(t *testing.T) {
 // It is keyed on the EXACT image reference, tag included, and that is the point.
 // Keying on the repository (`golang`) would let a version bump to an unmirrored
 // tag pass silently, which is the same class of hole as exempting a whole
-// registry. Two entries cover 50 FROMs across 25 Dockerfiles precisely because
-// the estate is disciplined about using one base — so the cutover retires two
-// lines here, not fifty.
+// registry.
 //
-// THESE ENTRIES NAMED #55, AND #55 IS CLOSED. That is the failure this comment
-// now exists to prevent someone repeating. #55 mirrored the images and was
-// closed with the Dockerfile rewrite unshipped, which left three exemptions
-// pointing at a finished issue: default-deny still held, but nothing would ever
-// retire them, and the dead-entry check below cannot see that — it only fires
-// when an exempt image STOPS being pulled, not when the issue that was meant to
-// remove it stops existing.
+// IT IS EMPTY, AND THAT IS THE POINT (#161). Every FROM in the repository now
+// resolves under mirrorPrefix: 52 of them across 26 Dockerfiles. The three
+// entries that used to live here — golang:1.26.5, gcr.io/distroless/static
+// :nonroot and python:3.12-slim — are gone because the thing they documented is
+// gone, not because anyone decided to stop tracking it.
 //
-// So the exposure went on being "recorded" indefinitely, which reads at a glance
-// exactly like being managed. They now name #161, which is open and carries the
-// blocker: the mirror is populated and digest-verified, but
-// ghcr.io/eighred/base/* is PRIVATE (anonymous manifest GET returns 403, same as
-// the platform images) while build.yml only logs in to ghcr on `push`. Rewriting
-// the FROMs before that is settled turns every pull_request build red and leaves
-// main green.
+// The dead-entry check above is what keeps this map honest in the other
+// direction: an entry added here for an image no Dockerfile pulls fails the
+// build, so an exemption cannot outlive its repair.
 //
-// An exemption is only honest while the issue named in it can still retire it.
-// If #161 closes without the FROMs moving, repoint these — do not leave them.
-var baseImagesPendingMirror = map[string]string{
-	"golang:1.26.5": "issue #161: the Docker Hub builder base, used by all 25 Go Dockerfiles. " +
-		"THIS IS THE ONE THAT ALREADY COST US — seven registry-1.docker.io timeouts on " +
-		"2026-07-27, three on consecutive PRs each needing a manual re-run. Already mirrored to " +
-		"ghcr.io/eighred/base/golang:1.26.5 and digest-verified weekly; this entry goes when the " +
-		"FROMs point at it, which is blocked on that package being anonymously pullable.",
-
-	"gcr.io/distroless/static:nonroot": "issue #161: the runtime base for all 25 images. Not " +
-		"Docker Hub, so it did not appear in the 2026-07-27 outage, but it is equally a registry " +
-		"the estate does not own and cannot serve if Google withdraws or rate-limits it. Mirrored " +
-		"under a DIFFERENT NAME — ghcr.io/eighred/base/distroless-static:nonroot — so the cutover " +
-		"is not a find-and-replace on the registry prefix.",
-
-	"python:3.12-slim": "issue #161: kanz-py's base, for the ghcr.io/eighred/inference image. " +
-		"OUTSIDE #55's STATED SCOPE — its acceptance grep was `grep -rE '^FROM ' kanz`, which " +
-		"never reaches kanz-py/Dockerfile. Recorded here so widening the mirror to cover it is a " +
-		"decision somebody takes rather than an omission nobody notices; the deployed inference " +
-		"service has exactly the same Docker Hub exposure as the Go images did. Mirrored; same " +
-		"visibility blocker as the other two.",
-}
+// TWO THINGS THIS MAP LEARNED THE HARD WAY, worth keeping written down:
+//
+//   - These entries used to name #55, and #55 was CLOSED with the rewrite
+//     unshipped. Default-deny still held, but nothing would ever retire them,
+//     and the dead-entry check cannot detect that — it fires when an exempt
+//     image stops being PULLED, never when the issue meant to remove it stops
+//     EXISTING. The exposure went on being "recorded" indefinitely, which reads
+//     at a glance exactly like being managed. If an entry is ever added back,
+//     name an OPEN issue and check it is still open.
+//   - The mirrored name is not always the source name. distroless/static is
+//     mirrored as distroless-static, so the cutover was not a find-and-replace
+//     on the registry prefix — doing it that way would have produced a tag that
+//     does not exist and failed 25 builds identically.
+var baseImagesPendingMirror = map[string]string{}
 
 // dockerfileFrom is one FROM instruction: where it is, and what it pulls.
 type dockerfileFrom struct {

@@ -5,7 +5,7 @@
 # github.com/eighred/kanz/kanz-schemas-go => ../kanz-schemas/gen/go, generated
 # (not committed). Build with:
 #   docker build -f kanz/services/operator/Dockerfile .
-FROM golang:1.26.5 AS build
+FROM ghcr.io/eighred/base/golang:1.26.5 AS build
 WORKDIR /src
 ENV GOFLAGS=-mod=mod
 
@@ -18,7 +18,7 @@ COPY kanz/ ./
 RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" \
       -o /out/operator ./services/operator/cmd/operator
 
-FROM gcr.io/distroless/static:nonroot
+FROM ghcr.io/eighred/base/distroless-static:nonroot
 COPY --from=build /out/operator /operator
 USER nonroot:nonroot
 ENTRYPOINT ["/operator"]
