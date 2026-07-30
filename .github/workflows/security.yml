@@ -87,10 +87,30 @@ jobs:
           go mod tidy
       # govulncheck is reachability-aware (flags a CVE only if the vulnerable
       # symbol is actually called) — the right Go gate, low false positives.
+      #
+      # PINNED (#155's argument, applied to the last unpinned tool in CI). This
+      # said `@latest`, which is the same defect the container images had and one
+      # the rest of this repository had already rejected: every other `go install`
+      # across all seven workflows names an explicit version (protoc-gen-go
+      # @v1.36.11, protoc-gen-go-grpc @v1.5.1), and #141 pinned golangci-lint for
+      # exactly this reason — "latest is not a version, it is a promise that the
+      # gate can change without a commit". 14 pinned installs, 1 floating, and the
+      # floating one was a SECURITY gate.
+      #
+      # The failure mode is the vulnerability-scanner version of the gitleaks one:
+      # a govulncheck that changes its database schema, its reachability analysis
+      # or its exit-code behaviour under us either breaks the build loudly (fine)
+      # or reports clean on something it no longer inspects (not fine, and
+      # indistinguishable from a genuine pass).
+      #
+      # Moving this is now a reviewable commit. Bumping it deliberately is the
+      # supported way to pick up new advisories — the vulnerability DATABASE is
+      # fetched at run time and is not pinned by this, so pinning the binary does
+      # not freeze the advisories it checks against.
       - name: govulncheck (Go)
         working-directory: kanz
         run: |
-          go install golang.org/x/vuln/cmd/govulncheck@latest
+          go install golang.org/x/vuln/cmd/govulncheck@v1.6.0
           "$(go env GOPATH)/bin/govulncheck" ./...
       # trivy fs covers the other ecosystems' lockfiles (npm, pip, go.sum) in one
       # pass. Fail on HIGH/CRITICAL with a fix available (the SECURITY.md SLA tiers).
