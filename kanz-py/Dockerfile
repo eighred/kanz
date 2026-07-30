@@ -12,7 +12,7 @@
 # Build context is the repo ROOT, not kanz-py/ — the Python schema SDK is GENERATED, NOT
 # COMMITTED (EVT-15a), the same rule the Go images live under, so the build needs both trees:
 #   docker build -f kanz-py/Dockerfile .
-FROM python:3.12-slim AS build
+FROM ghcr.io/eighred/base/python:3.12-slim AS build
 
 # buf generates the Python SDK (protocolbuffers/python + pyi + grpc stubs). It is not in git,
 # so it is generated here rather than copied — an image that COPYs a generated tree silently
@@ -28,7 +28,7 @@ RUN mkdir -p /out/gen && \
       --grpc_python_out=/out/gen \
       $(find proto -name '*.proto')
 
-FROM python:3.12-slim
+FROM ghcr.io/eighred/base/python:3.12-slim
 WORKDIR /app
 
 # Runtime deps only. The ML stack is deliberately absent: the explainer is a hand-rolled

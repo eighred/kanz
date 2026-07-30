@@ -7,7 +7,7 @@
 # generated-not-committed (EVT-15a). The build workflow runs `buf generate`
 # first, so both trees sit side by side in the context. Build with:
 #   docker build -f kanz/services/archiver/Dockerfile .
-FROM golang:1.26.5 AS build
+FROM ghcr.io/eighred/base/golang:1.26.5 AS build
 WORKDIR /src
 ENV GOFLAGS=-mod=mod
 
@@ -27,7 +27,7 @@ RUN CGO_ENABLED=0 go build -tags "${GOTAGS}" -trimpath -ldflags="-s -w" \
 
 # Distroless static: no shell, no libc, no package manager — minimal attack
 # surface. :nonroot runs as uid 65532, matching the pod's runAsUser.
-FROM gcr.io/distroless/static:nonroot
+FROM ghcr.io/eighred/base/distroless-static:nonroot
 COPY --from=build /out/archiver /archiver
 USER nonroot:nonroot
 EXPOSE 8086

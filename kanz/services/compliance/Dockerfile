@@ -11,7 +11,7 @@
 # The pre-trade mandate authority. It publishes compliance.mandate.changed, which
 # THE OMS CONSUMES — and a consumer on a subject nothing ever publishes to is a
 # mandate set that never changes.
-FROM golang:1.26.5 AS build
+FROM ghcr.io/eighred/base/golang:1.26.5 AS build
 WORKDIR /src
 ENV GOFLAGS=-mod=mod
 
@@ -28,7 +28,7 @@ RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w"       -o /out/compliance .
 
 # Distroless static: no shell, no libc, no package manager. :nonroot runs as uid
 # 65532, matching the pod's runAsUser.
-FROM gcr.io/distroless/static:nonroot
+FROM ghcr.io/eighred/base/distroless-static:nonroot
 COPY --from=build /out/compliance /compliance
 USER nonroot:nonroot
 EXPOSE 8091

@@ -18,7 +18,7 @@
 # The Job also needs an IDENTITY, not just a binary: it publishes to a
 # verify:true NATS cluster over mTLS, and SPIRE issues an SVID to a POD from
 # its ServiceAccount. Same reason kanz-halt needs an image (SEC-M3c).
-FROM golang:1.26.5 AS build
+FROM ghcr.io/eighred/base/golang:1.26.5 AS build
 WORKDIR /src
 ENV GOFLAGS=-mod=mod
 
@@ -35,7 +35,7 @@ RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" \
 
 # Distroless static: no shell, no libc, no package manager. :nonroot runs as uid
 # 65532.
-FROM gcr.io/distroless/static:nonroot
+FROM ghcr.io/eighred/base/distroless-static:nonroot
 COPY --from=build /out/nats-rebuild /nats-rebuild
 USER nonroot:nonroot
 ENTRYPOINT ["/nats-rebuild"]

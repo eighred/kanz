@@ -28,7 +28,7 @@
 # identity layer — not the pipeline). The one tool that must work while the system
 # is on fire is not coupled to the system that is on fire, and this image carries
 # nothing but it.
-FROM golang:1.26.5 AS build
+FROM ghcr.io/eighred/base/golang:1.26.5 AS build
 WORKDIR /src
 ENV GOFLAGS=-mod=mod
 
@@ -45,7 +45,7 @@ RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" \
 
 # Distroless static: no shell, no libc, no package manager. :nonroot runs as uid
 # 65532, matching the Job's runAsUser.
-FROM gcr.io/distroless/static:nonroot
+FROM ghcr.io/eighred/base/distroless-static:nonroot
 COPY --from=build /out/kanz-halt /kanz-halt
 USER nonroot:nonroot
 ENTRYPOINT ["/kanz-halt"]

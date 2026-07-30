@@ -14,7 +14,7 @@
 # and selecting with `--dir /migrations/<service>` means one image to build, sign,
 # and pin — instead of ten near-identical ones that can drift apart. The
 # initContainer in each Deployment points at its own subdirectory.
-FROM golang:1.26.5 AS build
+FROM ghcr.io/eighred/base/golang:1.26.5 AS build
 WORKDIR /src
 ENV GOFLAGS=-mod=mod
 
@@ -40,7 +40,7 @@ RUN set -eu; \
 
 # Distroless static: no shell, no libc, no package manager. :nonroot is uid 65532,
 # which matches the runAsUser the pods set.
-FROM gcr.io/distroless/static:nonroot
+FROM ghcr.io/eighred/base/distroless-static:nonroot
 COPY --from=build /out/kanz-migrate /kanz-migrate
 COPY --from=build /out/migrations /migrations
 USER nonroot:nonroot

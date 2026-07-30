@@ -35,6 +35,11 @@ on:
 
 permissions:
   contents: read
+  # READ, NOT WRITE (#161). This workflow builds images but never publishes one —
+  # the load stack is ephemeral. It needs the scope only because every Dockerfile
+  # FROM now resolves to the private ghcr.io/eighred/base/* namespace, so the
+  # compose build below cannot pull its base without a credential.
+  packages: read
 
 env:
   GOFLAGS: -mod=mod
@@ -70,6 +75,23 @@ jobs:
           cd gen/go
           go mod init github.com/eighred/kanz/kanz-schemas-go || true
           go mod tidy
+
+      # THIS WORKFLOW BUILDS IMAGES TOO, and had no ghcr login at all (#161).
+      #
+      # Easy to miss: there is no build-push-action here, just `compose up
+      # --build`, so it does not look like an image-building workflow — but it
+      # builds risk-engine and api-gateway from the same Dockerfiles, whose bases
+      # are now private. Without this the load stack fails on a base pull and
+      # reports itself as "gateway did not become ready", two layers from the
+      # cause. See build.yml for why fork PRs cannot work here either;
+      # test/arch/supplychain_test.go enforces that every workflow building a
+      # mirror-based image authenticates first.
+      - name: Log in to GHCR
+        uses: docker/login-action@371161bbe7024a29a25c5e19bfcbc0804fe9ad2c # v4.5.2
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build + start load stack
         run: docker compose -f kanz/test/load/docker-compose.yml up -d --build
