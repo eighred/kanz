@@ -84,8 +84,23 @@ func New(now func() time.Time, marks MarkSource, opts ...Option) *Projection {
 //
 // It replays the FACTs this tenant folded, in the order it folded them, through the SAME
 // fold — so the rebuilt book is the book the dead pod had, not an approximation of it.
-// Nothing else can rebuild it: the EXECUTION stream ages off at 24h, nothing archives it,
-// and no other table persists a fill.
+//
+// WHY THIS LOG IS REQUIRED, stated accurately. The EXECUTION stream ages off at 24h
+// (infra/nats/bootstrap-job.yaml: `ensure_stream EXECUTION "execution.>,strategy.>,order.>"
+// 24h`), and no other table persists a fill — so after a day the bus cannot rebuild this.
+//
+// This comment used to add "nothing archives it". That was FALSE, and false in the
+// direction that matters: the archiver mirrors execution.>, strategy.> AND order.> to
+// Kafka, retained 30d (services/archiver/internal/config/config.go DefaultSubjects;
+// infra/kafka/topics-job.yaml `order.order ... 2592000000`). A comment UNDERSTATING
+// durability is not a harmless slip here — DR classification decisions read this file, and
+// "nothing archives it" argues for treating the loss as unrecoverable when a 30-day copy
+// exists (#149).
+//
+// The log is still required, for the honest reason rather than the dramatic one: that
+// archive is the DR and audit path, not a rehydration source. It carries raw estate-wide
+// FACTs, not this tenant's folded book, and nothing in this service reads it. "No reader is
+// wired to the archive" is the argument; "no copy exists" was never true.
 //
 // Deltas are discarded: rehydration happens BEFORE the pod reports ready, so there is no
 // subscriber to stream them to, and replaying a month of history to a live TradingView
