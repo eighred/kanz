@@ -10,10 +10,28 @@
 # WHAT IT DOES NOT DO. It does not rewrite any FROM. Populating the mirror and
 # pointing the Dockerfiles at it are SEPARATE changes and must land in that
 # order — rewriting first would repoint 25 builds at tags that do not exist yet
-# and break every one of them. Run this, confirm the packages are there, and
-# only then rewrite. That is the same instrument-first discipline the data-quality
-# layer got wrong (it wrote dashboards against metrics no exporter emitted, and
-# nobody noticed for months).
+# and break every one of them. That is the same instrument-first discipline the
+# data-quality layer got wrong (it wrote dashboards against metrics no exporter
+# emitted, and nobody noticed for months).
+#
+# "CONFIRM THE PACKAGES ARE THERE" IS NOT THE WHOLE PRECONDITION, and this
+# comment used to say it was (#161). Being there is necessary and not
+# sufficient: the packages must also be PULLABLE BY EVERY CONTEXT THAT BUILDS AN
+# IMAGE. They are not. ghcr.io/eighred/base/* is private — an anonymous manifest
+# GET returns 403, the same as the platform images — while build.yml logs in to
+# ghcr only `if: github.event_name == 'push'`.
+#
+# Rewriting the FROMs against that produces the worst available failure shape:
+# main stays green (pushes authenticate) and every pull_request build goes red on
+# a base-image pull, one layer below where anyone reads. Fork PRs cannot be fixed
+# by ungating the login either — GITHUB_TOKEN carries no package read there.
+#
+# So the real gate on the rewrite is a package-visibility decision, tracked in
+# #161. These are byte-identical mirrors of already-public upstream images, so
+# making them public discloses nothing Docker Hub and gcr.io do not already
+# serve — it restores exactly today's anonymous-pull semantics with the estate
+# owning the path, which is the whole point. Do not rewrite a single FROM until
+# that is settled.
 name: base-image-mirror
 
 on:
