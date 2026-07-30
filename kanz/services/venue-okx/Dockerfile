@@ -11,7 +11,7 @@
 # github.com/eighred/kanz/kanz-schemas-go => ../kanz-schemas/gen/go, which is
 # generated-not-committed (EVT-15a). Build with:
 #   docker build -f kanz/services/venue-okx/Dockerfile .
-FROM golang:1.26.5 AS build
+FROM ghcr.io/eighred/base/golang:1.26.5 AS build
 WORKDIR /src
 ENV GOFLAGS=-mod=mod
 
@@ -27,7 +27,7 @@ RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" \
 
 # Distroless static: no shell, no libc, no package manager. This process holds
 # exchange API credentials and can move money — the attack surface is the point.
-FROM gcr.io/distroless/static:nonroot
+FROM ghcr.io/eighred/base/distroless-static:nonroot
 COPY --from=build /out/venue-okx /venue-okx
 USER nonroot:nonroot
 EXPOSE 9000 8092

@@ -7,31 +7,38 @@
 # manual re-run. A build system that cannot build unless someone else's registry
 # answers is not a build system; it is a dependency with a queue in front of it.
 #
-# WHAT IT DOES NOT DO. It does not rewrite any FROM. Populating the mirror and
-# pointing the Dockerfiles at it are SEPARATE changes and must land in that
-# order — rewriting first would repoint 25 builds at tags that do not exist yet
-# and break every one of them. That is the same instrument-first discipline the
-# data-quality layer got wrong (it wrote dashboards against metrics no exporter
-# emitted, and nobody noticed for months).
+# THE CUTOVER HAS HAPPENED (#161). Every FROM in the repository — 52 of them
+# across 26 Dockerfiles — now resolves under ghcr.io/eighred/base/*. This
+# workflow is no longer an instrument nobody reads: it is on the critical path of
+# every image build, and a failure here means the next build has no base.
 #
-# "CONFIRM THE PACKAGES ARE THERE" IS NOT THE WHOLE PRECONDITION, and this
-# comment used to say it was (#161). Being there is necessary and not
-# sufficient: the packages must also be PULLABLE BY EVERY CONTEXT THAT BUILDS AN
-# IMAGE. They are not. ghcr.io/eighred/base/* is private — an anonymous manifest
-# GET returns 403, the same as the platform images — while build.yml logs in to
-# ghcr only `if: github.event_name == 'push'`.
+# Populating the mirror and pointing the Dockerfiles at it were SEPARATE changes,
+# in that order, on purpose — rewriting first would have repointed 26 builds at
+# tags that did not exist yet.
 #
-# Rewriting the FROMs against that produces the worst available failure shape:
-# main stays green (pushes authenticate) and every pull_request build goes red on
-# a base-image pull, one layer below where anyone reads. Fork PRs cannot be fixed
-# by ungating the login either — GITHUB_TOKEN carries no package read there.
+# "CONFIRM THE PACKAGES ARE THERE" WAS NOT THE WHOLE PRECONDITION, and this
+# comment used to say it was. Being there is necessary and not sufficient: the
+# packages must also be PULLABLE BY EVERY CONTEXT THAT BUILDS AN IMAGE.
+# ghcr.io/eighred/base/* is PRIVATE and stays private — company policy forbids
+# publishing internal packages or mirrors — so the resolution was to
+# authenticate, not to expose:
 #
-# So the real gate on the rewrite is a package-visibility decision, tracked in
-# #161. These are byte-identical mirrors of already-public upstream images, so
-# making them public discloses nothing Docker Hub and gcr.io do not already
-# serve — it restores exactly today's anonymous-pull semantics with the estate
-# owning the path, which is the whole point. Do not rewrite a single FROM until
-# that is settled.
+#   build.yml    login was `if: github.event_name == 'push'`; now unconditional,
+#                because the credential is needed to BUILD, not only to publish.
+#   latency.yml  had no login at all and `compose up --build`s two services.
+#   preview.yml  already logged in unconditionally; unchanged.
+#
+# THE COST OF STAYING PRIVATE, recorded rather than discovered later: a
+# pull_request from a FORK cannot build an image, because its GITHUB_TOKEN has no
+# read access to this org's packages. build.yml fails such a PR in its first step
+# with a message naming that cause. Same-repo branches — the workflow this team
+# actually uses — are unaffected.
+#
+# A DEVELOPER BUILDING LOCALLY MUST `docker login ghcr.io` FIRST. `make dev-up`
+# and the load stack both build from these Dockerfiles. See kanz/infra/README.md.
+#
+# test/arch/supplychain_test.go enforces the invariant this all rests on: no
+# workflow may build a mirror-based image without authenticating first.
 name: base-image-mirror
 
 on:

@@ -11,7 +11,7 @@
 # THE FIRST HOP OF THE TRADING LOOP. It had no image and no manifest, so nothing
 # on this platform could accept a TradingView signal at all — the loop had no
 # entry point in production (EXEC-M10, found by deploying to a real cluster).
-FROM golang:1.26.5 AS build
+FROM ghcr.io/eighred/base/golang:1.26.5 AS build
 WORKDIR /src
 ENV GOFLAGS=-mod=mod
 
@@ -42,7 +42,7 @@ RUN CGO_ENABLED=0 go build -tags redis -trimpath -ldflags="-s -w"       -o /out/
 
 # Distroless static: no shell, no libc, no package manager. :nonroot runs as uid
 # 65532, matching the pod's runAsUser.
-FROM gcr.io/distroless/static:nonroot
+FROM ghcr.io/eighred/base/distroless-static:nonroot
 COPY --from=build /out/webhook-ingest /webhook-ingest
 USER nonroot:nonroot
 EXPOSE 8090

@@ -21,7 +21,7 @@
 # Binance, OKX, both, or nothing. What it trades is a deployment decision, not a
 # compile-time one, and a MIC with no adapter is a hard error at the router rather
 # than a quiet simulation.
-FROM golang:1.26.5 AS build
+FROM ghcr.io/eighred/base/golang:1.26.5 AS build
 WORKDIR /src
 ENV GOFLAGS=-mod=mod
 
@@ -41,7 +41,7 @@ RUN CGO_ENABLED=0 go build -tags "${GOTAGS}" -trimpath -ldflags="-s -w" \
 
 # Distroless static: no shell, no libc, no package manager — minimal attack
 # surface. :nonroot runs as uid 65532, matching the pod's runAsUser.
-FROM gcr.io/distroless/static:nonroot
+FROM ghcr.io/eighred/base/distroless-static:nonroot
 COPY --from=build /out/oms /oms
 USER nonroot:nonroot
 EXPOSE 8090
