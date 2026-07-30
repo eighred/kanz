@@ -1079,27 +1079,7 @@ func TestCIContainerImagesAreNotLatest(t *testing.T) {
 	root := moduleRoot(t)
 	repoRoot := filepath.Dir(root)
 
-	// Files CI executes: the workflows, plus the scripts they shell out to.
-	// The second half is not optional — the fourth `:latest` was in a .sh file,
-	// and a workflows-only guard would have reported the repo clean while the
-	// control proving the secret gate still floated.
-	scanned := workflowFiles(t, repoRoot)
-	shellDir := filepath.Join(root, "infra", "security", "test")
-	shellEntries, err := os.ReadDir(shellDir)
-	if err != nil {
-		t.Fatalf("read %s: %v — has the security test layout moved? "+
-			"(this guard would otherwise silently stop covering shell scripts)", shellDir, err)
-	}
-	for _, e := range shellEntries {
-		if !e.IsDir() && strings.HasSuffix(e.Name(), ".sh") {
-			scanned = append(scanned, filepath.Join(shellDir, e.Name()))
-		}
-	}
-
-	if len(scanned) == 0 {
-		t.Fatal("no workflow or CI shell files found — has the layout changed? " +
-			"(this test would otherwise pass vacuously)")
-	}
+	scanned := ciExecutedFiles(t, root, repoRoot)
 
 	// An image reference, not a bare mention: at least one path character must
 	// precede the colon, so prose like "said :latest" cannot match even if a
@@ -1169,4 +1149,119 @@ func dedupeStrings(in []string) []string {
 		}
 	}
 	return out
+}
+
+// ciExecutedFiles is everything CI actually runs: the workflows, plus the shell
+// scripts they invoke. The second half is not optional — the fourth unpinned
+// `:latest` in #155 was in a .sh file, and a workflows-only scan reported the
+// repository clean while the control proving the secret gate still floated.
+func ciExecutedFiles(t *testing.T, root, repoRoot string) []string {
+	t.Helper()
+	files := workflowFiles(t, repoRoot)
+	shellDir := filepath.Join(root, "infra", "security", "test")
+	entries, err := os.ReadDir(shellDir)
+	if err != nil {
+		t.Fatalf("read %s: %v — has the security test layout moved? "+
+			"(this guard would otherwise silently stop covering shell scripts)", shellDir, err)
+	}
+	for _, e := range entries {
+		if !e.IsDir() && strings.HasSuffix(e.Name(), ".sh") {
+			files = append(files, filepath.Join(shellDir, e.Name()))
+		}
+	}
+	if len(files) == 0 {
+		t.Fatal("no workflow or CI shell files found — has the layout changed? " +
+			"(this test would otherwise pass vacuously)")
+	}
+	return files
+}
+
+// A `go install` IS A CONTAINER IMAGE BY ANOTHER SPELLING.
+//
+// TestCIContainerImagesAreNotLatest closed `:latest` on images CI runs. It could
+// not see this one, because the same defect wears different syntax here:
+//
+//	go install golang.org/x/vuln/cmd/govulncheck@latest
+//
+// That was govulncheck — the vulnerability gate — floating, while every other
+// `go install` in all seven workflows named an explicit version
+// (protoc-gen-go@v1.36.11, protoc-gen-go-grpc@v1.5.1). Fourteen pinned, one
+// floating, and the floating one decided whether known CVEs fail the build.
+//
+// The argument is #141's, unchanged: "latest is not a version; it is a promise
+// that the gate can change without a commit." A tool that can fail a build must
+// move by reviewable commit, whichever registry it comes from.
+//
+// `@main` and `@master` are rejected for the same reason and are worse — a
+// branch tip is not even a release. A commit SHA or a semver tag both pass: what
+// is required is immutability, not a particular spelling of it.
+func TestCIToolInstallsArePinned(t *testing.T) {
+	root := moduleRoot(t)
+	repoRoot := filepath.Dir(root)
+	scanned := ciExecutedFiles(t, root, repoRoot)
+
+	// Capture the module path so the failure names WHICH tool floats, and the
+	// version so a pinned one can be reported as such.
+	installRe := regexp.MustCompile(`go\s+install\s+(\S+?)@(\S+)`)
+	floating := map[string]bool{"latest": true, "main": true, "master": true, "HEAD": true}
+
+	// Default-deny with a named-exemption escape hatch, same shape as the rest of
+	// this file. Empty today: every install in the repository is pinned.
+	exempt := map[string]string{}
+	used := map[string]bool{}
+
+	var problems []string
+	pinned := 0
+	for _, path := range scanned {
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read %s: %v", path, err)
+		}
+		body := strings.ReplaceAll(string(raw), "\r\n", "\n")
+		body = yamlComment.ReplaceAllString(body, "")
+
+		rel, _ := filepath.Rel(repoRoot, path)
+		relSlash := filepath.ToSlash(rel)
+
+		for _, m := range installRe.FindAllStringSubmatch(body, -1) {
+			pkg, ver := m[1], strings.Trim(m[2], `"'`)
+			if !floating[ver] {
+				pinned++
+				continue
+			}
+			key := relSlash + " " + pkg
+			if reason, ok := exempt[key]; ok {
+				used[key] = true
+				t.Logf("exempt: %s (%s)", key, reason)
+				continue
+			}
+			problems = append(problems, fmt.Sprintf(
+				"%s: `go install %s@%s` — %q is not a version, it is a promise the gate can "+
+					"change with no commit; name an explicit version (or a commit SHA) so moving "+
+					"it is reviewable",
+				relSlash, pkg, ver, ver))
+		}
+	}
+
+	// NON-VACUITY. If the regex stops matching — a syntax change, a layout move —
+	// this test would report every workflow clean while nothing was checked. The
+	// repository has many pinned installs; zero matches means the scanner broke.
+	if pinned == 0 && len(problems) == 0 {
+		t.Fatal("matched no `go install <pkg>@<version>` lines at all across the CI files — " +
+			"the scanner is broken, not the estate (this test would otherwise pass vacuously)")
+	}
+
+	for key, reason := range exempt {
+		if !used[key] {
+			problems = append(problems, fmt.Sprintf(
+				"stale exemption: %s (%s) is no longer a floating install — delete the entry, "+
+					"an exemption that outlives its repair re-opens the hole silently", key, reason))
+		}
+	}
+
+	if len(problems) > 0 {
+		sort.Strings(problems)
+		t.Fatalf("unpinned tool installs in CI:\n\n  %s", strings.Join(problems, "\n  "))
+	}
+	t.Logf("%d pinned `go install` reference(s) checked", pinned)
 }
