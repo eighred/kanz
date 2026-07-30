@@ -139,10 +139,15 @@ jobs:
           # TOKEN is read by test/load/config.js, which sets the Authorization
           # header only when it is non-empty. Without it every request 401s and
           # the run fails on its error-budget threshold rather than saying why.
+          # PINNED (#155). k6 crossed a MAJOR while this said `:latest` — v2.0.0
+          # shipped 2026-05-11 — so this gate has already changed engine major
+          # underneath a p99/error-budget threshold with no commit to review.
+          # A perf gate that silently changes its own runtime cannot distinguish
+          # "the code regressed" from "the tool did".
           docker run --rm --network host \
             -e BASE_URL=http://localhost:8080 -e PORTFOLIO=PF1 -e TOKEN="$TOKEN" \
             -v "$PWD/kanz/test/load:/scripts" \
-            grafana/k6:latest run /scripts/smoke.js
+            grafana/k6:2.1.0 run /scripts/smoke.js
 
       - name: Stack logs (on failure)
         if: failure()
@@ -206,8 +211,11 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
       - name: Run k6 baseline against ${{ github.event.inputs.base_url }}
         run: |
+          # PINNED (#155) — keep in step with the smoke step above. This is also
+          # the image that receives LOAD_TEST_TOKEN, so "whatever :latest is
+          # today" was an unreviewed third party handling a live credential.
           docker run --rm \
             -e BASE_URL='${{ github.event.inputs.base_url }}' -e PORTFOLIO=PF1 \
             -e TOKEN='${{ secrets.LOAD_TEST_TOKEN }}' \
             -v "$PWD/kanz/test/load:/scripts" \
-            grafana/k6:latest run /scripts/baseline.js
+            grafana/k6:2.1.0 run /scripts/baseline.js

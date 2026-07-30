@@ -15,17 +15,31 @@ mkdir -p "$planted_dir"
 # A canonical, NON-allowlisted secret (no example/test/dummy token in it).
 printf 'github_pat=ghp_a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6q7r8\n' > "$planted_dir/planted.txt"
 
+# The container tag MUST match security.yml's (#155). This self-test's whole
+# claim is "the gate works", and it can only make that claim about the build the
+# gate actually runs — proving a planted secret against some other version is a
+# different, weaker statement wearing the same green tick. Both were `:latest`,
+# so they moved together by accident; pinned, they move together on purpose.
+GITLEAKS_IMAGE='ghcr.io/gitleaks/gitleaks:v8.30.1'
+
+# `dir` (not `detect --no-git`): at v8.30.1 `detect` is Hidden, and upstream's
+# own migration note is `detect --no-git --source={dir}` -> `dir {dir}`. The
+# path is positional here; `--source` does not exist on this subcommand.
+#
 # Resolve a runner: native gitleaks, else its container, else skip.
 run_gitleaks() {
   if command -v gitleaks >/dev/null 2>&1; then
-    gitleaks detect --no-git --source "$planted_dir" \
+    # A native binary is whatever the developer has installed — it is NOT the
+    # pinned version, so a local pass is weaker evidence than CI's. CI always
+    # takes the container path (no gitleaks on the runner image).
+    gitleaks dir "$planted_dir" \
       --config "$repo_root/.gitleaks.toml" --redact --no-banner
   elif command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
     # Daemon must be live: a down daemon makes `docker run` exit 1, which is
     # indistinguishable from gitleaks' "leaks found" exit 1 — so skip rather than
     # risk a false pass.
-    docker run --rm -v "$repo_root:/repo" ghcr.io/gitleaks/gitleaks:latest \
-      detect --no-git --source=/repo/.sec-selftest \
+    docker run --rm -v "$repo_root:/repo" "$GITLEAKS_IMAGE" \
+      dir /repo/.sec-selftest \
       --config=/repo/.gitleaks.toml --redact --no-banner
   else
     return 99 # no usable gitleaks (native binary or running docker daemon)

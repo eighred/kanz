@@ -1041,3 +1041,132 @@ func TestProductionManifestsPinImagesByDigest(t *testing.T) {
 		t.Fatalf("mutable image tags in production manifests:\n\n  %s", strings.Join(problems, "\n  "))
 	}
 }
+
+// THE CI TOOLCHAIN IS PART OF THE SUPPLY CHAIN, AND NOTHING PINNED IT.
+//
+// TestProductionManifestsPinImagesByDigest covers what the estate DEPLOYS.
+// TestWorkflowActionsArePinnedToSHA covers what the estate USES as actions.
+// Between them sat a third category with no guard at all: container images that
+// workflows `docker run` directly, and the scripts those workflows invoke. #141
+// pinned golangci-lint and wrote the reasoning down —
+//
+//	"latest is not a version; it is a promise that the gate can change
+//	 without a commit."
+//
+// — then fixed one workflow. Four references were left (#155), and the argument
+// applies hardest to the two that were missed:
+//
+//   - security.yml's gitleaks IS THE SECRET GATE. It is the one job whose silent
+//     success is indistinguishable from a real pass — a scanner that stops
+//     matching still exits 0. An upstream change to default rules or allowlist
+//     semantics turns it quietly permissive with no commit to review.
+//   - gitleaks-planted-secret.sh is the SEC-02e control that proves that gate
+//     works. It ran `:latest` too, so the gate and its proof could drift
+//     independently — a self-test that validates a different build than the one
+//     in service is a green tick making a weaker claim than it appears to.
+//
+// k6 is the demonstration that this is not theoretical: it shipped v2.0.0 on
+// 2026-05-11, so the p99/error-budget gate crossed an engine MAJOR under a
+// `:latest` tag with no commit anywhere in this repository.
+//
+// Scope note: this guard reads workflow YAML and the shell scripts those
+// workflows invoke. It does not scan Go source, so it does not match itself —
+// but the `:latest` spellings in the prose above would match, which is why
+// comments are stripped before scanning (yamlComment, shared with the digest
+// guard). Match the OPERATION, not a mention of it: a guard that fires on a
+// sentence describing the rule gets deleted rather than fixed.
+func TestCIContainerImagesAreNotLatest(t *testing.T) {
+	root := moduleRoot(t)
+	repoRoot := filepath.Dir(root)
+
+	// Files CI executes: the workflows, plus the scripts they shell out to.
+	// The second half is not optional — the fourth `:latest` was in a .sh file,
+	// and a workflows-only guard would have reported the repo clean while the
+	// control proving the secret gate still floated.
+	scanned := workflowFiles(t, repoRoot)
+	shellDir := filepath.Join(root, "infra", "security", "test")
+	shellEntries, err := os.ReadDir(shellDir)
+	if err != nil {
+		t.Fatalf("read %s: %v — has the security test layout moved? "+
+			"(this guard would otherwise silently stop covering shell scripts)", shellDir, err)
+	}
+	for _, e := range shellEntries {
+		if !e.IsDir() && strings.HasSuffix(e.Name(), ".sh") {
+			scanned = append(scanned, filepath.Join(shellDir, e.Name()))
+		}
+	}
+
+	if len(scanned) == 0 {
+		t.Fatal("no workflow or CI shell files found — has the layout changed? " +
+			"(this test would otherwise pass vacuously)")
+	}
+
+	// An image reference, not a bare mention: at least one path character must
+	// precede the colon, so prose like "said :latest" cannot match even if a
+	// comment survives stripping.
+	latestRef := regexp.MustCompile(`[A-Za-z0-9][A-Za-z0-9._/-]*:latest\b`)
+
+	// Default-deny. A genuinely unpinnable image goes here WITH the issue that
+	// retires it; the dead-entry check below stops an exemption outliving its
+	// repair. Empty today, and that is the point — every reference is pinned.
+	exempt := map[string]string{}
+	used := map[string]bool{}
+
+	var problems []string
+	for _, path := range scanned {
+		raw, rErr := os.ReadFile(path)
+		if rErr != nil {
+			t.Fatalf("read %s: %v", path, rErr)
+		}
+		// Normalize CRLF for the same reason TestWorkflowActionsArePinnedToSHA
+		// does: a Windows checkout hands these over with CRLF and a line-anchored
+		// regex would behave differently here than on CI.
+		body := strings.ReplaceAll(string(raw), "\r\n", "\n")
+		body = yamlComment.ReplaceAllString(body, "")
+
+		rel, _ := filepath.Rel(repoRoot, path)
+		relSlash := filepath.ToSlash(rel)
+
+		hits := latestRef.FindAllString(body, -1)
+		if len(hits) == 0 {
+			continue
+		}
+		if reason, ok := exempt[relSlash]; ok {
+			used[relSlash] = true
+			t.Logf("exempt: %s (%s)", relSlash, reason)
+			continue
+		}
+		sort.Strings(hits)
+		problems = append(problems, fmt.Sprintf(
+			"%s: %s — `latest` is not a version, it is a promise the gate can change with no commit; "+
+				"pin an explicit tag (or digest) so moving it is reviewable",
+			relSlash, strings.Join(dedupeStrings(hits), ", ")))
+	}
+
+	for file, reason := range exempt {
+		if !used[file] {
+			problems = append(problems, fmt.Sprintf(
+				"stale exemption: %s (%s) no longer references a :latest image — delete the entry, "+
+					"an exemption that outlives its repair re-opens the hole silently", file, reason))
+		}
+	}
+
+	if len(problems) > 0 {
+		sort.Strings(problems)
+		t.Fatalf("unpinned container images in CI:\n\n  %s", strings.Join(problems, "\n  "))
+	}
+}
+
+// dedupeStrings keeps the failure message readable when one file names the same
+// unpinned image more than once (latency.yml had two k6 steps).
+func dedupeStrings(in []string) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, s := range in {
+		if !seen[s] {
+			seen[s] = true
+			out = append(out, s)
+		}
+	}
+	return out
+}

@@ -23,11 +23,30 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
         with:
-          fetch-depth: 0 # full history so `detect` scans every commit, not just the tip
+          fetch-depth: 0 # full history so `git` scans every commit, not just the tip
       - name: gitleaks (secret scan)
+        # PINNED, AND ON THE NON-DEPRECATED SUBCOMMAND (#155).
+        #
+        # This said `:latest` with `detect --source=/repo`. Both halves were a
+        # problem, and the second is why the first mattered here more than
+        # anywhere else. This is the one job whose SILENT SUCCESS IS
+        # INDISTINGUISHABLE FROM A REAL PASS: a scanner that stops matching
+        # still exits 0. An upstream release that removed `detect` would be
+        # loud; one that changed default rules or allowlist semantics would be
+        # quiet and permissive, and nothing in the repo would have moved.
+        #
+        # `detect` is not gone at v8.30.1 — it is `Hidden: true`, and its own
+        # source file carries the migration table upstream wants read:
+        #   OLD: gitleaks detect --source={repo}   NEW: gitleaks git {repo}
+        # `--source` does NOT exist on `git`; the repo is positional. Staying on
+        # a hidden alias means the gate's invocation and the tool's supported
+        # surface drift apart silently, which is the same failure one level up.
+        #
+        # Moving this version is now a reviewable commit. Keep it in step with
+        # gitleaks-planted-secret.sh, which must run the SAME build to prove it.
         run: |
-          docker run --rm -v "$PWD:/repo" ghcr.io/gitleaks/gitleaks:latest \
-            detect --source=/repo --config=/repo/.gitleaks.toml --redact --no-banner --verbose
+          docker run --rm -v "$PWD:/repo" ghcr.io/gitleaks/gitleaks:v8.30.1 \
+            git /repo --config=/repo/.gitleaks.toml --redact --no-banner --verbose
 
   secret-scan-selftest:
     # SEC-02e: a planted secret must be detected. Guards against a misconfigured

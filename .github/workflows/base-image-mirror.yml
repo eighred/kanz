@@ -109,14 +109,19 @@ jobs:
             target: ghcr.io/eighred/base/kafka:3.9.0
           - source: docker.io/natsio/nats-box:0.14.5
             target: ghcr.io/eighred/base/nats-box:0.14.5
-          # k6 is pulled as :latest by both latency.yml steps. Mirroring a moving
-          # tag is a compromise, not an oversight: pinning it belongs with the
-          # cutover, and until then the mirror should carry what the workflows
-          # actually ask for. The weekly refresh reports when a digest moves (see
-          # the report step), so a k6 that changes under us is visible rather
-          # than silent — which is more than is true today.
-          - source: docker.io/grafana/k6:latest
-            target: ghcr.io/eighred/base/k6:latest
+          # THE CUTOVER THIS ENTRY WAS WAITING FOR HAS HAPPENED (#155). This
+          # read "mirroring a moving tag is a compromise, not an oversight:
+          # pinning it belongs with the cutover" — both latency.yml steps now
+          # pin 2.1.0, so the compromise has no remaining premise. Mirroring
+          # `:latest` past that point would reintroduce the moving tag on the
+          # mirror side while the workflows believed themselves pinned, which is
+          # worse than the original: the drift would arrive through the registry
+          # the estate OWNS and therefore trusts.
+          #
+          # Bumping k6 is now two edits in one commit — here and latency.yml —
+          # exactly like golang above.
+          - source: docker.io/grafana/k6:2.1.0
+            target: ghcr.io/eighred/base/k6:2.1.0
 
     steps:
       - name: Log in to ghcr.io
