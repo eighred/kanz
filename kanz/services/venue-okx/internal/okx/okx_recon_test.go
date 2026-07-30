@@ -2,6 +2,7 @@ package okx
 
 import (
 	"context"
+	"github.com/eighred/kanz/internal/venueadapter/exchangeauth"
 	"math/big"
 	"testing"
 	"time"
@@ -22,7 +23,7 @@ func (b okxStaticBalances) Balance(asset string) *big.Rat { return b[asset] }
 
 func okxReconOver(f *fakeOKX, cap *okxCapture, exp okxStaticOrders, bal okxStaticBalances) *OKXReconciler {
 	bucket := NewWeightBucket(60, time.Minute, nil)
-	rest := newOKXREST(okxRestConfig{BaseURL: f.srv.URL, APIKey: "k", APISecret: "s", Passphrase: "p", Bucket: bucket})
+	rest := newOKXREST(okxRestConfig{BaseURL: f.srv.URL, APIKey: "k", APISecret: "s", Passphrase: "p", Bucket: bucket, Mode: exchangeauth.OKXDemo})
 	var balances ExpectedBalances // true nil interface when no balances configured
 	if bal != nil {
 		balances = bal

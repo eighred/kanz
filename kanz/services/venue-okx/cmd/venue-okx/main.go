@@ -38,6 +38,7 @@ import (
 	"github.com/eighred/kanz/internal/execution"
 	"github.com/eighred/kanz/internal/pg"
 	"github.com/eighred/kanz/internal/venueadapter/accountproof"
+	"github.com/eighred/kanz/internal/venueadapter/exchangeauth"
 	"github.com/eighred/kanz/internal/venueadapter/orderview"
 	"github.com/eighred/kanz/internal/venueadapter/server"
 	"github.com/eighred/kanz/pkg/bus"
@@ -187,7 +188,7 @@ func run(cfg config.Config) error {
 		OnThrottle: func() {
 			logger.Error("okx: REST weight budget exhausted — backing off (structural alert)")
 		},
-	}, cfg.WSBase)
+	}, cfg.WSBase, cfg.TradingMode)
 
 	seam := orderview.NewSeam(view, func(err error) {
 		// A blind order view makes the healing watchdog blind. Never silent.
@@ -227,7 +228,18 @@ func run(cfg config.Config) error {
 		return err
 	}
 	go func() {
-		logger.Info("venue-okx venue.v1 listening", "addr", cfg.GRPCListen, "mic", cfg.MIC, "base_url", cfg.BaseURL)
+		// trading_mode IS THE LINE TO READ, not base_url (#147). Both demo and
+		// production are https://www.okx.com, so base_url alone has never been able
+		// to answer "are these orders real?" — an operator scanning startup logs for
+		// the answer was reading a field that could not carry it. It is logged at
+		// WARN for live so the one state that spends money is not a line among lines.
+		if cfg.TradingMode == exchangeauth.OKXLive {
+			logger.Warn("venue-okx venue.v1 listening — LIVE TRADING: orders placed here settle in real money",
+				"addr", cfg.GRPCListen, "mic", cfg.MIC, "base_url", cfg.BaseURL, "trading_mode", string(cfg.TradingMode))
+		} else {
+			logger.Info("venue-okx venue.v1 listening", "addr", cfg.GRPCListen, "mic", cfg.MIC,
+				"base_url", cfg.BaseURL, "trading_mode", string(cfg.TradingMode))
+		}
 		if err := grpcSrv.Serve(lis); err != nil {
 			logger.Error("grpc server failed", "err", err)
 			stop()

@@ -158,7 +158,17 @@ spec:
             # OKX has no separate testnet host — this IS the live exchange, and the
             # credentials decide whether the account is a demo one. Treat a change
             # to the key mount as a change to what this pod can spend.
+            # DEMO UNTIL SOMEONE DECIDES OTHERWISE (#147). OKX serves demo and
+            # production from this SAME host and separates them by the
+            # `x-simulated-trading: 1` header the adapter now sends, so this URL
+            # is NOT evidence of either mode — OKX_TRADING_MODE below is.
+            #
+            # Changing that value to "live" is the entire act of going live. It
+            # is one line, it is reviewable, and it is the line to look at in a
+            # diff; before this the same decision was invisible because there
+            # was no demo to be in.
             - { name: OKX_BASE_URL, value: "https://www.okx.com" }
+            - { name: OKX_TRADING_MODE, value: "demo" }
             - { name: OKX_WS_BASE, value: "wss://ws.okx.com:8443" }
             - { name: OKX_SYMBOLS, value: "BTC-USD=BTC-USDT,ETH-USD=ETH-USDT" }
             - { name: SPIFFE_ENDPOINT_SOCKET, value: "unix:///run/spiffe/spire-agent.sock" }

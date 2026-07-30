@@ -25,6 +25,7 @@ import (
 	"k8s.io/client-go/rest"
 
 	"github.com/eighred/kanz/internal/execution"
+	"github.com/eighred/kanz/internal/venueadapter/exchangeauth"
 	"github.com/eighred/kanz/pkg/observability"
 	"github.com/eighred/kanz/services/operator/internal/config"
 	"github.com/eighred/kanz/services/operator/internal/estate"
@@ -152,7 +153,7 @@ func main() {
 	}
 
 	if cfg.VenueProof == "require" {
-		srv = srv.WithVenueProof(venueproof.New(cfg.VenueBaseURLs, execution.NewExchangeHTTPClient(5*time.Minute)))
+		srv = srv.WithVenueProof(venueproof.New(cfg.VenueBaseURLs, exchangeauth.OKXTradingMode(cfg.OKXTradingMode), execution.NewExchangeHTTPClient(5*time.Minute)))
 		logger.Info("venue-key pre-write proof: require", "venues", provenVenues(cfg.VenueBaseURLs))
 	} else {
 		logger.Info("venue-key pre-write proof: off")

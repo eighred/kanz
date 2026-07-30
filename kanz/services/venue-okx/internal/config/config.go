@@ -7,6 +7,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/eighred/kanz/internal/venueadapter/exchangeauth"
 	"github.com/eighred/kanz/pkg/secret"
 )
 
@@ -71,8 +72,15 @@ type Config struct {
 	AllowUnverifiedAccount bool
 	BaseURL                string
 	WSBase                 string
-	APIKey                 string
-	APISecret              string
+
+	// TradingMode says which OKX book this adapter reaches (#147). It is a
+	// SEPARATE field from BaseURL and cannot be derived from it: OKX serves demo
+	// and production from the same www.okx.com and switches on the
+	// `x-simulated-trading: 1` request header. Set from OKX_TRADING_MODE, which
+	// is required and has no default.
+	TradingMode exchangeauth.OKXTradingMode
+	APIKey      string
+	APISecret   string
 	// Passphrase is OKX's THIRD credential. Binance signs with key+secret; OKX
 	// additionally requires the passphrase chosen when the API key was created,
 	// sent as an OK-ACCESS-PASSPHRASE header. Without it every signed request is
@@ -108,9 +116,18 @@ func Load() (Config, error) {
 	// Binance can default to testnet.binance.vision and fail safe: that is a
 	// physically separate exchange, and a key valid there is rejected by
 	// api.binance.com, so a misdirected order fails rather than fills. OKX has no
-	// such host. Demo trading is selected per-request by `x-simulated-trading: 1`,
-	// a header this adapter does not send, so the ONLY thing standing between this
-	// process and the live order book is which URL it was handed.
+	// such host. Demo trading is selected per-request by `x-simulated-trading: 1`.
+	//
+	// This comment used to end "a header this adapter does not send, so the ONLY
+	// thing standing between this process and the live order book is which URL it
+	// was handed." That is no longer true: the header IS sent now, driven by
+	// OKX_TRADING_MODE below. Left unedited it would have been a comment asserting
+	// the absence of the very control the next block configures — the dated-evidence
+	// trap CLAUDE.md names, and one this file has already sprung once (an arch guard
+	// read this paragraph's mention of the header as proof the header existed).
+	//
+	// The endpoint still has no default, for its own reason: it decides which
+	// exchange is reached at all.
 	//
 	// These used to default to https://www.okx.com / wss://ws.okx.com:8443 — which
 	// made "nobody configured this" and "somebody chose production" the same state,
@@ -125,6 +142,25 @@ func Load() (Config, error) {
 		return Config{}, err
 	}
 	wsBase, err := requiredEnv("OKX_WS_BASE")
+	if err != nil {
+		return Config{}, err
+	}
+
+	// THE ENDPOINT IS NOT THE MODE, AND THIS IS THE HALF THE COMMENT ABOVE COULD
+	// ONLY DESCRIBE (#147).
+	//
+	// Removing the OKX_BASE_URL default stopped "nobody configured this" from
+	// meaning live. It could not make demo REACHABLE, because no URL reaches
+	// OKX's demo book — the adapter sent no `x-simulated-trading: 1` header, so
+	// every authenticated order went to production regardless of the host.
+	//
+	// OKX_TRADING_MODE is that missing axis, stated rather than inferred, and
+	// required for the same reason the endpoint is: a default here is a default
+	// about whether orders are real. Note that `demo` with BaseURL
+	// https://www.okx.com is CORRECT and expected — that pairing is what demo
+	// trading looks like at OKX, which is exactly why the URL cannot be read as
+	// evidence of safety by this config, by a reviewer, or by an arch guard.
+	tradingMode, err := requiredOKXTradingMode()
 	if err != nil {
 		return Config{}, err
 	}
@@ -146,6 +182,7 @@ func Load() (Config, error) {
 		AllowUnverifiedAccount: os.Getenv("OKX_ALLOW_UNVERIFIED_ACCOUNT") == "true",
 		BaseURL:                baseURL,
 		WSBase:                 wsBase,
+		TradingMode:            tradingMode,
 		APIKey:                 apiKey,
 		APISecret:              apiSecret,
 		Passphrase:             passphrase,
@@ -182,5 +219,32 @@ func parseLevel(s string) slog.Level {
 		return slog.LevelError
 	default:
 		return slog.LevelInfo
+	}
+}
+
+// requiredOKXTradingMode reads OKX_TRADING_MODE and accepts only the two values
+// that mean something. An unset or unrecognised value is an error, never a
+// fallback (#147).
+//
+// The rejected-value message lists both options rather than saying "invalid",
+// because the person hitting this at 3am during a cutover needs to know that
+// `demo` exists at all — the adapter could not reach demo for its whole life
+// before this, so nobody's muscle memory includes it.
+func requiredOKXTradingMode() (exchangeauth.OKXTradingMode, error) {
+	raw := strings.TrimSpace(os.Getenv("OKX_TRADING_MODE"))
+	switch exchangeauth.OKXTradingMode(raw) {
+	case exchangeauth.OKXLive:
+		return exchangeauth.OKXLive, nil
+	case exchangeauth.OKXDemo:
+		return exchangeauth.OKXDemo, nil
+	case "":
+		return "", fmt.Errorf("OKX_TRADING_MODE is required and has no default: OKX serves demo and "+
+			"production from the SAME host and distinguishes them by the `x-simulated-trading: 1` "+
+			"request header, so the endpoint cannot say which book you meant (see #147). Set it to "+
+			"%q or %q", string(exchangeauth.OKXDemo), string(exchangeauth.OKXLive))
+	default:
+		return "", fmt.Errorf("OKX_TRADING_MODE=%q is not a mode: set it to %q (orders reach OKX's "+
+			"demo book, requires a demo API key) or %q (orders settle in real money)",
+			raw, string(exchangeauth.OKXDemo), string(exchangeauth.OKXLive))
 	}
 }

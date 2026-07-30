@@ -12,6 +12,7 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"github.com/eighred/kanz/internal/dec"
+	"github.com/eighred/kanz/internal/venueadapter/exchangeauth"
 )
 
 // OKXVenue implements the execution.Venue seam against OKX v5 spot (compiled
@@ -30,7 +31,14 @@ type OKXVenue struct {
 }
 
 // NewOKXVenueFromSettings assembles the rate bucket + signed REST client + venue.
-func NewOKXVenueFromSettings(s VenueSettings) *OKXVenue {
+//
+// mode is an explicit ARGUMENT rather than a VenueSettings field because
+// VenueSettings lives in internal/execution, which exchangeauth imports — putting
+// a typed OKXTradingMode there would be an import cycle, and putting an untyped
+// string there would move the "is this a real mode?" check away from the compiler
+// and back into a runtime string comparison. Passing it here keeps the type, and
+// keeps the decision visible at the composition root where it belongs (#147).
+func NewOKXVenueFromSettings(s VenueSettings, mode exchangeauth.OKXTradingMode) *OKXVenue {
 	budget := s.WeightBudget
 	if budget <= 0 {
 		budget = 60 // OKX place-order default: 60 requests / 2s per instrument family
@@ -40,6 +48,7 @@ func NewOKXVenueFromSettings(s VenueSettings) *OKXVenue {
 		BaseURL: s.BaseURL, APIKey: s.APIKey, APISecret: s.APISecret, Passphrase: s.Passphrase,
 		Bucket: bucket, OnThrottle: s.OnThrottle,
 		HTTPClient: NewExchangeHTTPClient(s.DNSTTL),
+		Mode:       mode,
 	})
 	mic := s.MIC
 	if mic == "" {

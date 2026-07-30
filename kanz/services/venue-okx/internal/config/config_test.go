@@ -10,6 +10,7 @@ package config
 // readyz green. These tests pin the fail-fast behaviour that closes that gap.
 
 import (
+	"github.com/eighred/kanz/internal/venueadapter/exchangeauth"
 	"os"
 	"path/filepath"
 	"strings"
@@ -23,6 +24,7 @@ import (
 func setVenueEndpoints(t *testing.T) {
 	t.Helper()
 	t.Setenv("OKX_BASE_URL", "https://okx.invalid")
+	t.Setenv("OKX_TRADING_MODE", "demo")
 	t.Setenv("OKX_WS_BASE", "wss://okx.invalid")
 }
 
@@ -110,11 +112,17 @@ func TestNoDatabaseConfiguredLeavesDSNEmptyWithoutError(t *testing.T) {
 //
 // OKX_BASE_URL and OKX_WS_BASE used to default to https://www.okx.com and
 // wss://ws.okx.com:8443. OKX has no demo hostname — demo is the per-request
-// `x-simulated-trading: 1` header, which this adapter does not send — so that
-// default meant deleting a line from the manifest promoted the adapter to the
-// LIVE order book instead of degrading it. These two tests are the difference
-// between "nobody configured this" and "somebody chose production", on the one
-// path where that distinction is denominated in money.
+// `x-simulated-trading: 1` header, which the adapter now sends under
+// OKX_TRADING_MODE (#147) — so that default meant deleting a line from the
+// manifest promoted the adapter to the LIVE order book instead of degrading it.
+// These two tests are the difference between "nobody configured this" and
+// "somebody chose production", on the one path where that distinction is
+// denominated in money.
+//
+// The endpoint and the mode are SEPARATE fail-closed checks because they answer
+// separate questions: the endpoint decides which exchange is reached at all, the
+// mode decides which book at that exchange. Neither can substitute for the other,
+// which is why TestTradingModeHasNoDefaultAndFailsClosed exists alongside this.
 func TestVenueEndpointsHaveNoDefaultAndFailClosed(t *testing.T) {
 	for _, missing := range []string{"OKX_BASE_URL", "OKX_WS_BASE"} {
 		t.Run("missing="+missing, func(t *testing.T) {
@@ -139,6 +147,7 @@ func TestVenueEndpointsHaveNoDefaultAndFailClosed(t *testing.T) {
 // destination for another.
 func TestVenueEndpointsAreUsedAsConfigured(t *testing.T) {
 	t.Setenv("OKX_BASE_URL", "https://sandbox.example.invalid")
+	t.Setenv("OKX_TRADING_MODE", "demo")
 	t.Setenv("OKX_WS_BASE", "wss://sandbox.example.invalid/ws")
 
 	cfg, err := Load()
@@ -150,5 +159,61 @@ func TestVenueEndpointsAreUsedAsConfigured(t *testing.T) {
 	}
 	if cfg.WSBase != "wss://sandbox.example.invalid/ws" {
 		t.Errorf("WSBase = %q, want the configured value verbatim", cfg.WSBase)
+	}
+}
+
+// THE MODE MUST BE STATED, NEVER ASSUMED (#147) — the same rule as the endpoint,
+// on the axis the endpoint cannot express.
+//
+// Removing the OKX_BASE_URL default made "nobody configured this" stop meaning
+// live. It could not make demo REACHABLE: no URL reaches OKX's demo book, so
+// until the header existed every authenticated order went to production whatever
+// the endpoint said. OKX_TRADING_MODE is that missing axis, and it fails closed
+// for the same reason — a default here is a default about whether orders are real.
+func TestTradingModeHasNoDefaultAndFailsClosed(t *testing.T) {
+	t.Run("unset is refused", func(t *testing.T) {
+		setVenueEndpoints(t)
+		t.Setenv("OKX_TRADING_MODE", "")
+
+		_, err := Load()
+		if err == nil {
+			t.Fatal("Load() with OKX_TRADING_MODE unset = nil error, want a refusal — an unstated " +
+				"mode must not resolve to live trading")
+		}
+		if !strings.Contains(err.Error(), "OKX_TRADING_MODE") {
+			t.Errorf("error = %q, want it to name OKX_TRADING_MODE", err.Error())
+		}
+	})
+
+	// A TYPO MUST NOT BE A MODE. "testnet" and "sandbox" are the words a reader
+	// would reach for from other exchanges, and both are wrong here — accepting
+	// anything non-empty as "not live" would make a misspelling place real orders.
+	for _, bad := range []string{"testnet", "sandbox", "simulated", "true", "1", "Live", "DEMO"} {
+		t.Run("rejected="+bad, func(t *testing.T) {
+			setVenueEndpoints(t)
+			t.Setenv("OKX_TRADING_MODE", bad)
+
+			if _, err := Load(); err == nil {
+				t.Fatalf("Load() accepted OKX_TRADING_MODE=%q — only \"demo\" and \"live\" mean "+
+					"anything, and a near-miss that resolved to live would spend real money", bad)
+			}
+		})
+	}
+
+	// Both accepted values must survive verbatim onto the Config the adapter runs
+	// with: a mode that is validated and then dropped is not a mode.
+	for _, want := range []exchangeauth.OKXTradingMode{exchangeauth.OKXDemo, exchangeauth.OKXLive} {
+		t.Run("accepted="+string(want), func(t *testing.T) {
+			setVenueEndpoints(t)
+			t.Setenv("OKX_TRADING_MODE", string(want))
+
+			cfg, err := Load()
+			if err != nil {
+				t.Fatalf("Load(): %v", err)
+			}
+			if cfg.TradingMode != want {
+				t.Errorf("TradingMode = %q, want %q", string(cfg.TradingMode), string(want))
+			}
+		})
 	}
 }

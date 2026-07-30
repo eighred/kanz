@@ -10,6 +10,7 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"github.com/eighred/kanz/internal/venueadapter/accountproof"
+	"github.com/eighred/kanz/internal/venueadapter/exchangeauth"
 	"github.com/eighred/kanz/pkg/bus"
 )
 
@@ -25,8 +26,8 @@ type OKXConnector struct {
 
 // NewOKXConnector assembles the venue + shared REST client. wsURL is the private
 // websocket origin (e.g. wss://ws.okx.com:8443/ws/v5/private).
-func NewOKXConnector(settings VenueSettings, wsURL string) *OKXConnector {
-	venue := NewOKXVenueFromSettings(settings)
+func NewOKXConnector(settings VenueSettings, wsURL string, mode exchangeauth.OKXTradingMode) *OKXConnector {
+	venue := NewOKXVenueFromSettings(settings, mode)
 	return &OKXConnector{settings: settings, rest: venue.rest, venue: venue, wsURL: wsURL}
 }
 
