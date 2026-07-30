@@ -27,6 +27,11 @@ type okxREST struct {
 	bucket     *WeightBucket
 	now        func() time.Time
 	onThrottle func()
+	// mode decides which OKX book every signed request from this client reaches
+	// (#147). Held on the client rather than passed per call: a per-call argument
+	// would be one more thing to get right at each of the order, cancel, amend and
+	// reconcile sites, and getting it wrong at exactly one of them is the bug.
+	mode exchangeauth.OKXTradingMode
 }
 
 type okxRestConfig struct {
@@ -38,6 +43,7 @@ type okxRestConfig struct {
 	Bucket     *WeightBucket
 	Now        func() time.Time
 	OnThrottle func()
+	Mode       exchangeauth.OKXTradingMode
 }
 
 func newOKXREST(cfg okxRestConfig) *okxREST {
@@ -53,7 +59,7 @@ func newOKXREST(cfg okxRestConfig) *okxREST {
 	return &okxREST{
 		baseURL: cfg.BaseURL, apiKey: cfg.APIKey, apiSecret: []byte(cfg.APISecret),
 		passphrase: cfg.Passphrase, httpc: cfg.HTTPClient, bucket: cfg.Bucket,
-		now: cfg.Now, onThrottle: cfg.OnThrottle,
+		now: cfg.Now, onThrottle: cfg.OnThrottle, mode: cfg.Mode,
 	}
 }
 
@@ -239,6 +245,13 @@ func (c *okxREST) ExchangeAccountID(ctx context.Context) (string, error) {
 		BaseURL:    c.baseURL,
 		HTTPClient: c.httpc,
 		Now:        c.now,
+		// THE SAME MODE THE ORDERS USE, and it has to be (#147). This call is the
+		// account proof: it asks OKX which account the key belongs to and the
+		// adapter refuses to trade if the answer is not the configured one. Demo
+		// and live are SEPARATE accounts with separate uids, so proving against
+		// the wrong book would either fail outright or — worse — verify a uid the
+		// orders will never touch, turning the proof into a formality.
+		OKXTrading: c.mode,
 	})
 }
 
@@ -307,7 +320,12 @@ func (c *okxREST) signedRequest(ctx context.Context, method, requestPath string,
 		return nil, err
 	}
 	cred := exchangeauth.Credential{APIKey: c.apiKey, APISecret: string(c.apiSecret), Passphrase: c.passphrase}
-	exchangeauth.SignOKX(req.Header, cred, ts, method, requestPath, string(bodyBytes))
+	if err := exchangeauth.SignOKX(req.Header, cred, ts, method, requestPath, string(bodyBytes), c.mode); err != nil {
+		// Refuse to send rather than send unmarked. An unmarked request is a LIVE
+		// request at OKX, so "we could not tell which book this was for" must never
+		// resolve to the one that spends real money.
+		return nil, err
+	}
 
 	resp, err := c.httpc.Do(req)
 	if err != nil {

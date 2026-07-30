@@ -598,21 +598,20 @@ var demoModeSelectors = map[string]string{
 
 // noDemoPathExemptions records adapters that can place live orders and have no
 // way to be pointed at anything else.
-var noDemoPathExemptions = map[string]liveVenueExemption{
-	"venue-okx": {
-		issue:     "#147",
-		liveHosts: []string{"ws.okx.com", "www.okx.com"},
-		reason: "OKX publishes NO separate demo hostname — demo is selected per-request by the " +
-			"`x-simulated-trading: 1` header, which appears nowhere in this repository. So the " +
-			"endpoint is indistinguishable from production BY CONFIGURATION, and safety rests " +
-			"entirely on which credentials happen to be mounted. Repointing the manifest is NOT " +
-			"the fix: an adapter aimed at a host its credentials do not belong to fails at the " +
-			"exchange, it does not become safe. The fix is the header, asserted here via " +
-			"demoModeSelectors. Note this exposure is INDEPENDENT of #60 — it survived that " +
-			"issue's DR coverage landing, which is the reason this guard is separate from the one " +
-			"above.",
-	},
-}
+//
+// IT IS EMPTY (#147). venue-okx was the only entry, and it is gone because the
+// thing it documented is gone: `x-simulated-trading: 1` is now sent by
+// exchangeauth.SignOKX, driven by an explicit OKX_TRADING_MODE, so the adapter
+// CAN be run against something that is not real money. demoModeSelectors above
+// is what proves that — it looks for the header as a string literal in shipped
+// source, so this entry could not have been deleted by writing a comment.
+//
+// The dead-entry check below is what keeps this honest in the other direction:
+// re-adding an entry for an adapter that can already select a non-live endpoint
+// fails the build. An exemption here is a live-money decision by a human, and the
+// only reason to add one back is that a NEW adapter genuinely cannot be pointed
+// anywhere safe.
+var noDemoPathExemptions = map[string]liveVenueExemption{}
 
 // goStringLiteralRe matches double-quoted Go string literals, handling escapes.
 var goStringLiteralRe = regexp.MustCompile(`"(?:[^"\\]|\\.)*"`)
@@ -635,8 +634,9 @@ var goStringLiteralRe = regexp.MustCompile(`"(?:[^"\\]|\\.)*"`)
 // whether anyone has written the words down.
 func serviceMentions(t *testing.T, root, svc, marker string) bool {
 	t.Helper()
-	found := false
 	marker = strings.ToLower(marker)
+
+	var sources []string
 	for _, dir := range []string{
 		filepath.Join(root, "services", svc),
 		filepath.Join(root, "internal", "venueadapter"),
@@ -649,17 +649,57 @@ func serviceMentions(t *testing.T, root, svc, marker string) bool {
 			if err != nil {
 				return err
 			}
-			for _, lit := range goStringLiteralRe.FindAllString(string(b), -1) {
-				if strings.Contains(strings.ToLower(lit), marker) {
-					found = true
-				}
-			}
+			sources = append(sources, string(b))
 			return nil
 		}); err != nil && !os.IsNotExist(err) {
 			t.Fatalf("scan %s for %q: %v", dir, marker, err)
 		}
 	}
-	return found
+
+	// A DECLARED CONSTANT IS NOT A SENT HEADER, and this is the second time this
+	// helper has had to learn that the evidence it reads is not the property it
+	// claims.
+	//
+	// Round one: it matched raw file text, so a COMMENT explaining that
+	// `x-simulated-trading` was absent read as proof it was present. Fixed by
+	// reading only string literals.
+	//
+	// Round two (found by mutation-proving #147): deleting the h.Set() call while
+	// leaving `const simulatedTradingHeader = "x-simulated-trading"` in place still
+	// passed — the literal survived in the declaration. The adapter would have gone
+	// back to placing every order on the LIVE book with this guard green, which is
+	// the precise failure it exists to prevent.
+	//
+	// So a bare literal is no longer enough: the marker must reach a Header.Set
+	// call, either written inline or through the identifier it is bound to. That
+	// is still textual and still approximate — it cannot follow a value through a
+	// helper — but it is the difference between "somebody wrote the words down"
+	// and "a request carries the header", and every regression seen so far lives in
+	// exactly that gap. The exact wire assertion is
+	// exchangeauth.TestSignOKXSendsSimulatedTradingHeaderOnlyInDemo; this guard is
+	// the estate-wide net that notices when an adapter has no demo path at all.
+	bindingRe := regexp.MustCompile(`(?i)(\w+)\s*(?::=|=)\s*"[^"]*` + regexp.QuoteMeta(marker) + `[^"]*"`)
+	idents := map[string]bool{}
+	for _, src := range sources {
+		for _, m := range bindingRe.FindAllStringSubmatch(src, -1) {
+			idents[m[1]] = true
+		}
+	}
+
+	// Inline: h.Set("x-simulated-trading", "1")
+	inline := regexp.MustCompile(`(?i)\.Set\(\s*"[^"]*` + regexp.QuoteMeta(marker) + `[^"]*"`)
+	for _, src := range sources {
+		if inline.MatchString(src) {
+			return true
+		}
+		for ident := range idents {
+			// Via the bound identifier: h.Set(simulatedTradingHeader, "1")
+			if regexp.MustCompile(`\.Set\(\s*` + regexp.QuoteMeta(ident) + `\b`).MatchString(src) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func whereList(live map[string]string) string {

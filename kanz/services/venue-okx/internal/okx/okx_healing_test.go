@@ -3,6 +3,7 @@ package okx
 import (
 	"context"
 	"errors"
+	"github.com/eighred/kanz/internal/venueadapter/exchangeauth"
 	"math/big"
 	"net/http"
 	"net/http/httptest"
@@ -23,7 +24,7 @@ func TestTransport_EgressDeniedClassified(t *testing.T) {
 	}))
 	defer srv.Close()
 	bucket := NewWeightBucket(60, time.Minute, nil)
-	rest := newOKXREST(okxRestConfig{BaseURL: srv.URL, APIKey: "k", APISecret: "s", Passphrase: "p", Bucket: bucket})
+	rest := newOKXREST(okxRestConfig{BaseURL: srv.URL, APIKey: "k", APISecret: "s", Passphrase: "p", Bucket: bucket, Mode: exchangeauth.OKXDemo})
 
 	_, err := rest.queryOrder(context.Background(), "BTC-USDT", "o1")
 	if !errors.Is(err, ErrEgressDenied) {
@@ -33,7 +34,7 @@ func TestTransport_EgressDeniedClassified(t *testing.T) {
 
 func healReconOver(f *fakeOKX, cap *okxCapture, reg PendingCloses) *OKXReconciler {
 	bucket := NewWeightBucket(60, time.Minute, nil)
-	rest := newOKXREST(okxRestConfig{BaseURL: f.srv.URL, APIKey: "k", APISecret: "s", Passphrase: "p", Bucket: bucket})
+	rest := newOKXREST(okxRestConfig{BaseURL: f.srv.URL, APIKey: "k", APISecret: "s", Passphrase: "p", Bucket: bucket, Mode: exchangeauth.OKXDemo})
 	return newOKXReconciler(OKXReconcilerConfig{
 		REST: rest, Symbols: StaticSymbolMap{"BTC-USD": "BTC-USDT"},
 		Closes: reg, CloseTimeout: 1500 * time.Millisecond,

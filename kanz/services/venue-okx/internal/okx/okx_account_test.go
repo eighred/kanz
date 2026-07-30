@@ -7,6 +7,7 @@ package okx
 
 import (
 	"context"
+	"github.com/eighred/kanz/internal/venueadapter/exchangeauth"
 	"testing"
 	"time"
 )
@@ -18,6 +19,7 @@ func okxRESTOver(f *fakeOKX) *okxREST {
 		APISecret:  "s",
 		Passphrase: "p",
 		Bucket:     NewWeightBucket(60, 2*time.Second, nil),
+		Mode:       exchangeauth.OKXDemo,
 	})
 }
 

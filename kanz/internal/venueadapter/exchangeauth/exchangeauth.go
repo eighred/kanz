@@ -35,6 +35,16 @@ type Options struct {
 	BaseURL    string           // e.g. "https://www.okx.com" — required
 	HTTPClient *http.Client     // default: &http.Client{Timeout: 10 * time.Second}
 	Now        func() time.Time // default: time.Now
+
+	// OKXTrading states which OKX book a request reaches. REQUIRED for venue
+	// "okx" and ignored for every other venue (#147).
+	//
+	// It lives here rather than being derived from BaseURL because for OKX it
+	// CANNOT be derived: demo and production share www.okx.com and differ only by
+	// the `x-simulated-trading: 1` header. There is deliberately no default —
+	// resolve() below does not fill this in, because the safe value depends on
+	// what the caller meant, and guessing is what #147 was.
+	OKXTrading OKXTradingMode
 }
 
 // resolve applies Options defaults, returning a copy that is safe to use without

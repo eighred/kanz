@@ -56,6 +56,16 @@ type Config struct {
 	VenueProof    string            // OPERATOR_VENUE_PROOF: "" | "off" | "require"
 	VenueBaseURLs map[string]string // OPERATOR_OKX_BASE_URL, OPERATOR_BINANCE_BASE_URL
 
+	// OKXTradingMode is the axis OPERATOR_OKX_BASE_URL cannot express (#147).
+	// OKX serves demo and production from the same host, separating them by the
+	// `x-simulated-trading: 1` request header, so proving an OKX key requires
+	// stating which book it belongs to. Empty is allowed HERE and refused at
+	// proof time (venueproof.ErrNoOKXTradingMode) — an operator that never proves
+	// OKX keys should not need to configure this, and one that does must not be
+	// given a guess. Same shape as the deliberate absence of a default endpoint
+	// documented above.
+	OKXTradingMode string // OPERATOR_OKX_TRADING_MODE: "" | "demo" | "live"
+
 	// Control-plane access (OPS-M2a). Both are REQUIRED at startup — the operator
 	// refuses to serve without them (see cmd/operator/controlplane.go). They are
 	// parsed here but deliberately NOT validated here: Load() is parsing, and the
@@ -112,8 +122,9 @@ func Load() (Config, error) {
 		VaultAddr:            os.Getenv("VAULT_ADDR"),
 		VaultToken:           readTokenOr("VAULT_TOKEN_FILE", "VAULT_TOKEN"),
 
-		VenueProof:    venueProof,
-		VenueBaseURLs: venueBaseURLs(),
+		VenueProof:     venueProof,
+		VenueBaseURLs:  venueBaseURLs(),
+		OKXTradingMode: strings.TrimSpace(os.Getenv("OPERATOR_OKX_TRADING_MODE")),
 
 		SPIFFESocket:   os.Getenv("SPIFFE_ENDPOINT_SOCKET"),
 		AllowedClients: os.Getenv("OPERATOR_ALLOWED_CLIENTS"),

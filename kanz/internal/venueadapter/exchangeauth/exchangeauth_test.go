@@ -116,7 +116,7 @@ func TestAccountIDOKX(t *testing.T) {
 	srv := okxAccountServer(t, testCred.APISecret, http.StatusOK, `{"code":"0","data":[{"uid":"4711"}]}`)
 	defer srv.Close()
 
-	got, err := AccountID(context.Background(), "okx", testCred, Options{BaseURL: srv.URL})
+	got, err := AccountID(context.Background(), "okx", testCred, Options{BaseURL: srv.URL, OKXTrading: OKXDemo})
 	if err != nil {
 		t.Fatalf("AccountID: %v", err)
 	}
@@ -129,7 +129,7 @@ func TestAccountIDBinance(t *testing.T) {
 	srv := binanceAccountServer(t, testCred.APISecret, http.StatusOK, `{"uid":8822}`)
 	defer srv.Close()
 
-	got, err := AccountID(context.Background(), "binance", testCred, Options{BaseURL: srv.URL})
+	got, err := AccountID(context.Background(), "binance", testCred, Options{BaseURL: srv.URL, OKXTrading: OKXDemo})
 	if err != nil {
 		t.Fatalf("AccountID: %v", err)
 	}
@@ -158,7 +158,7 @@ func TestAccountIDRejectsMissingUID(t *testing.T) {
 			}
 			defer srv.Close()
 
-			got, err := AccountID(context.Background(), tc.venue, testCred, Options{BaseURL: srv.URL})
+			got, err := AccountID(context.Background(), tc.venue, testCred, Options{BaseURL: srv.URL, OKXTrading: OKXDemo})
 			if err == nil {
 				t.Fatal("AccountID: want error for a response carrying no account id, got nil")
 			}
@@ -181,7 +181,7 @@ func TestAccountIDMapsAuthFailure(t *testing.T) {
 				}
 				defer srv.Close()
 
-				_, err := AccountID(context.Background(), venue, testCred, Options{BaseURL: srv.URL})
+				_, err := AccountID(context.Background(), venue, testCred, Options{BaseURL: srv.URL, OKXTrading: OKXDemo})
 				if !errors.Is(err, execution.ErrEgressDenied) {
 					t.Errorf("AccountID err = %v, want wrapping execution.ErrEgressDenied", err)
 				}
@@ -207,7 +207,7 @@ func TestAccountIDTypedError(t *testing.T) {
 			}
 			defer srv.Close()
 
-			_, err := AccountID(context.Background(), tc.venue, testCred, Options{BaseURL: srv.URL})
+			_, err := AccountID(context.Background(), tc.venue, testCred, Options{BaseURL: srv.URL, OKXTrading: OKXDemo})
 			var apiErr *execution.APIError
 			if !errors.As(err, &apiErr) {
 				t.Fatalf("AccountID err = %v, want *execution.APIError via errors.As", err)
@@ -240,7 +240,7 @@ func TestNoCredentialInErrors(t *testing.T) {
 		} else {
 			srv = binanceAccountServer(t, testCred.APISecret, http.StatusOK, tc.body)
 		}
-		_, err := AccountID(context.Background(), tc.venue, testCred, Options{BaseURL: srv.URL})
+		_, err := AccountID(context.Background(), tc.venue, testCred, Options{BaseURL: srv.URL, OKXTrading: OKXDemo})
 		errs = append(errs, err)
 		srv.Close()
 	}
@@ -253,7 +253,7 @@ func TestNoCredentialInErrors(t *testing.T) {
 			} else {
 				srv = binanceAccountServer(t, testCred.APISecret, status, `{}`)
 			}
-			_, err := AccountID(context.Background(), venue, testCred, Options{BaseURL: srv.URL})
+			_, err := AccountID(context.Background(), venue, testCred, Options{BaseURL: srv.URL, OKXTrading: OKXDemo})
 			errs = append(errs, err)
 			srv.Close()
 		}
@@ -269,7 +269,7 @@ func TestNoCredentialInErrors(t *testing.T) {
 		} else {
 			srv = binanceAccountServer(t, testCred.APISecret, http.StatusOK, tc.body)
 		}
-		_, err := AccountID(context.Background(), tc.venue, testCred, Options{BaseURL: srv.URL})
+		_, err := AccountID(context.Background(), tc.venue, testCred, Options{BaseURL: srv.URL, OKXTrading: OKXDemo})
 		errs = append(errs, err)
 		srv.Close()
 	}

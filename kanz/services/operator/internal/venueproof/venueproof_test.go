@@ -48,7 +48,7 @@ func TestProveAccountReturnsUID(t *testing.T) {
 	binance := binanceServer(t, http.StatusOK, `{"uid":8822}`)
 	defer binance.Close()
 
-	p := New(map[string]string{"okx": okx.URL, "binance": binance.URL}, nil)
+	p := New(map[string]string{"okx": okx.URL, "binance": binance.URL}, exchangeauth.OKXDemo, nil)
 
 	got, err := p.ProveAccount(context.Background(), "okx", testKeys)
 	if err != nil {
@@ -68,7 +68,7 @@ func TestProveAccountReturnsUID(t *testing.T) {
 }
 
 func TestProveAccountNoEndpoint(t *testing.T) {
-	p := New(map[string]string{"okx": "http://example.invalid"}, nil)
+	p := New(map[string]string{"okx": "http://example.invalid"}, exchangeauth.OKXDemo, nil)
 
 	_, err := p.ProveAccount(context.Background(), "binance", testKeys)
 	if !errors.Is(err, ErrNoEndpoint) {
@@ -77,7 +77,7 @@ func TestProveAccountNoEndpoint(t *testing.T) {
 }
 
 func TestProveAccountUnsupportedVenue(t *testing.T) {
-	p := New(map[string]string{"kraken": "http://example.invalid"}, nil)
+	p := New(map[string]string{"kraken": "http://example.invalid"}, exchangeauth.OKXDemo, nil)
 
 	_, err := p.ProveAccount(context.Background(), "kraken", testKeys)
 	if err == nil {
@@ -92,7 +92,7 @@ func TestProveAccountPropagatesAuthFailure(t *testing.T) {
 	okx := okxServer(t, http.StatusUnauthorized, `{}`)
 	defer okx.Close()
 
-	p := New(map[string]string{"okx": okx.URL}, nil)
+	p := New(map[string]string{"okx": okx.URL}, exchangeauth.OKXDemo, nil)
 
 	_, err := p.ProveAccount(context.Background(), "okx", testKeys)
 	if err == nil {
