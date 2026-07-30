@@ -38,7 +38,22 @@ import (
 // level up: the next bump moves one and not the other, and every gate —
 // including this one, unextended — stays green. go.mod's toolchain version
 // now participates in the same agreement check as every Dockerfile.
-var fromGolangLine = regexp.MustCompile(`(?m)^FROM\s+golang:(\S+)`)
+// The registry prefix is OPTIONAL because the base moved (#161). Every
+// Dockerfile now reads `FROM ghcr.io/eighred/base/golang:1.26.5`, and this
+// pattern matched only a bare `FROM golang:` — so at the cutover it found zero
+// lines across 25 Dockerfiles.
+//
+// It did not go quietly green, and that is the whole reason the check survives:
+// the non-vacuity Fatal below caught it on the first run. Had this guard simply
+// reported "all agree" over an empty set, the version-agreement invariant SEC-M4
+// exists for would have been silently switched off by a change that had nothing
+// to do with versions — and the next Dependabot bump moving 3 of 25 would have
+// passed exactly as it did before SEC-M4.
+//
+// Matching the version rather than the registry is also the right shape: this
+// guard asks whether every Dockerfile agrees on a golang VERSION, and that
+// question is unchanged by where the image is served from.
+var fromGolangLine = regexp.MustCompile(`(?m)^FROM\s+(?:\S+/)?golang:(\S+)`)
 
 // toolchainLine matches go.mod's `toolchain goX.Y.Z` directive, capturing the
 // version WITHOUT the leading "go" — go.mod spells the version "go1.26.5"

@@ -1170,3 +1170,109 @@ func dedupeStrings(in []string) []string {
 	}
 	return out
 }
+
+// A PRIVATE BASE IMAGE MEANS AUTHENTICATION IS A BUILD DEPENDENCY, NOT A
+// PUBLISH DEPENDENCY.
+//
+// Before #161 every Dockerfile FROM was anonymous (Docker Hub, gcr.io), so a
+// ghcr login was needed only to PUSH the built image. build.yml encoded exactly
+// that: `if: github.event_name == 'push'`. Correct at the time.
+//
+// The cutover inverted it. Bases now come from ghcr.io/eighred/base/*, which is
+// private by policy, so a workflow that builds an image cannot even START
+// without a credential. Left as it was, build.yml would have gone green on main
+// (pushes authenticate) and red on every pull_request, with the cause a 403 in a
+// docker layer twelve steps down — the failure shape that costs an afternoon.
+//
+// latency.yml is the one that shows why this needs a guard rather than care: it
+// has no build-push-action and does not look like an image-building workflow at
+// all, just `docker compose up --build`. It had no ghcr login, and nothing would
+// have reported that until the load stack failed as "gateway did not become
+// ready", two layers from the truth.
+//
+// So the invariant is: if any Dockerfile pulls from the mirror, then every
+// workflow that builds an image must log in to ghcr FIRST, unconditionally. The
+// guard reads the FROM lines to decide whether it applies — it turns itself on
+// from the state of the tree, rather than being a rule someone has to remember
+// to keep in step with the Dockerfiles.
+func TestWorkflowsBuildingMirrorImagesAuthenticateFirst(t *testing.T) {
+	root := moduleRoot(t)
+	repoRoot := filepath.Dir(root)
+
+	// Does the invariant apply at all? If no FROM uses the mirror, bases are
+	// anonymous and a build needs no credential — say so and stop, rather than
+	// asserting a rule the tree has not opted into.
+	froms := dockerfileFroms(t, repoRoot)
+	if len(froms) == 0 {
+		t.Fatal("found zero Dockerfiles — the scanner is broken, not the estate")
+	}
+	usesMirror := false
+	for _, f := range froms {
+		if strings.HasPrefix(f.image, mirrorPrefix) {
+			usesMirror = true
+			break
+		}
+	}
+	if !usesMirror {
+		t.Skipf("no Dockerfile pulls from %s — bases are anonymous, so a build needs no "+
+			"registry credential and this guard does not apply", mirrorPrefix)
+	}
+
+	// A workflow builds an image if it runs docker build, a build-push-action, or
+	// a compose build. The last is the one that hid: it names no image and no
+	// action, so a check written against `build-push-action` alone would have
+	// reported latency.yml clean.
+	buildsImage := regexp.MustCompile(`docker/build-push-action|docker\s+build|compose[^\n]*\s--build|docker\s+compose\s+build`)
+	loginAction := regexp.MustCompile(`docker/login-action`)
+	// A login guarded by `if:` is not a login — it is a login on some events. The
+	// whole defect was a conditional one, so a conditional login must not satisfy
+	// this. Matches an `if:` on the same step block as the login (the two lines
+	// before it, which is where docker/login-action carries its condition).
+	conditionalLogin := regexp.MustCompile(`(?m)^\s*if:.*\n(?:\s*(?:-\s*)?name:.*\n)?\s*(?:-\s*)?uses:\s*docker/login-action`)
+
+	var problems []string
+	checked := 0
+	for _, path := range workflowFiles(t, repoRoot) {
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read %s: %v", path, err)
+		}
+		body := strings.ReplaceAll(string(raw), "\r\n", "\n")
+		scan := yamlComment.ReplaceAllString(body, "")
+
+		rel, _ := filepath.Rel(repoRoot, path)
+		relSlash := filepath.ToSlash(rel)
+
+		if !buildsImage.MatchString(scan) {
+			continue
+		}
+		checked++
+
+		switch {
+		case !loginAction.MatchString(scan):
+			problems = append(problems, fmt.Sprintf(
+				"%s builds an image but never logs in to ghcr.io — every Dockerfile FROM now "+
+					"resolves to %s, which is private, so the base pull will 403 before any "+
+					"build step runs (#161)", relSlash, mirrorPrefix))
+		case conditionalLogin.MatchString(scan):
+			problems = append(problems, fmt.Sprintf(
+				"%s guards its docker/login-action with an `if:` — authentication is now a BUILD "+
+					"dependency, not a publish one, so a conditional login means the events it "+
+					"excludes cannot build at all. This is exactly the `if: github.event_name == "+
+					"'push'` that made main green and every pull_request red (#161)", relSlash))
+		}
+	}
+
+	// NON-VACUITY. The estate builds 26 images; if this matched no workflow the
+	// regex is wrong, and reporting "all clear" would be worse than saying so.
+	if checked == 0 {
+		t.Fatal("matched no image-building workflow at all — the scanner is broken, not the " +
+			"estate (this test would otherwise pass vacuously while every build was unauthenticated)")
+	}
+
+	if len(problems) > 0 {
+		sort.Strings(problems)
+		t.Fatalf("image builds without a registry credential:\n\n  %s", strings.Join(problems, "\n  "))
+	}
+	t.Logf("%d image-building workflow(s) checked, all authenticate unconditionally", checked)
+}
