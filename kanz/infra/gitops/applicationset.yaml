@@ -1,13 +1,24 @@
 # INFRA-01b — app-of-apps via a matrix ApplicationSet: one Application per
-# (environment × component). The environment list is the per-environment overlay
-# dimension — each env carries its own destination cluster and a `valuesEnv` the
-# component path can branch on (e.g. DR Postgres = replicas, not primaries).
-# Adding a component = one list entry; adding an environment = one list entry.
+# (environment × component). Adding a component = one list entry; adding an
+# environment = one list entry.
 #
 # Components are the in-cluster k8s workloads (the data planes + delivery). The
 # Terraform foundation (INFRA-01a) is NOT here, and Prometheus-rule/Grafana
 # artifacts (infra/observability) ship as their own PrometheusRule/ConfigMap
-# wrapping, not raw-synced. The DR Postgres split is handled by the env branch.
+# wrapping, not raw-synced.
+#
+# TWO SENTENCES WERE REMOVED FROM THIS HEADER BECAUSE THEY DESCRIBED A
+# MECHANISM THAT WAS NEVER BUILT (#153). They said each env "carries its own
+# destination cluster and a `valuesEnv` the component path can branch on (e.g.
+# DR Postgres = replicas, not primaries)", and "The DR Postgres split is handled
+# by the env branch."
+#
+# `valuesEnv` appeared nowhere in this file except that sentence. `{{.env}}`
+# reaches only the Application's NAME and a LABEL — nothing functional branches
+# on it — and infra/dr/ is not in the component list at all, so the DR Postgres
+# split is applied by the runbook, by hand. The header was describing intent as
+# though it were behaviour, which is the more expensive kind of wrong: it reads
+# like a mechanism someone can rely on.
 apiVersion: argoproj.io/v1alpha1
 kind: ApplicationSet
 metadata:
@@ -22,9 +33,44 @@ spec:
         generators:
           - list:
               elements:
-                # Register these cluster names in Argo CD (argocd cluster add).
+                # ONE ENVIRONMENT, BECAUSE THERE IS ONE CLUSTER (#153).
+                #
+                # A second entry lived here — `{ env: dr, server:
+                # "https://kubernetes.default.svc" }` — and that URL is the
+                # cluster Argo CD is RUNNING IN. It was not a DR region; it was
+                # the primary under a second name.
+                #
+                # The matrix crosses every env with every component, so it
+                # produced kanz-primary-<component> AND kanz-dr-<component> from
+                # the same `path` into the same `namespace`, both with
+                # automated{prune,selfHeal}. Every workload in kanz-services,
+                # kanz-messaging and the security tree was claimed by two
+                # auto-syncing, auto-pruning Applications at once — each
+                # entitled to prune what the other had just reconciled.
+                #
+                # Deleting it is the honest interim state, not a downgrade in
+                # coverage. The `dr` Application never reconciled a DR region,
+                # so nothing that exists stops existing; what stops is this file
+                # asserting a topology the estate does not have. Per #98 the
+                # only estate is a kind rig, so the entry could not yet have
+                # been true.
+                #
+                # RESTORING IT TAKES THREE THINGS, NOT ONE: a real DR cluster
+                # (#106); that cluster registered via `argocd cluster add` so
+                # its API server URL is genuinely distinct from this one; and an
+                # Argo CD IN the DR region to do the reconciling — a DR entry
+                # reconciled from the primary's Argo is worth nothing during the
+                # region loss it exists for. Until all three, failover.sh keeps
+                # the explicit `kubectl scale` #149 left it: manual scaling is
+                # load-bearing precisely because no reconciler runs in the
+                # failed region.
+                #
+                # Removal is safe to apply: the template sets no
+                # `resources-finalizer.argocd.argoproj.io`, so deleting the
+                # kanz-dr-* Applications does not cascade to their resources.
+                # kanz-primary-* already manages those same objects and keeps
+                # doing so.
                 - { env: primary, server: "https://kubernetes.default.svc" }
-                - { env: dr, server: "https://kubernetes.default.svc" }
           - list:
               elements:
                 - { component: messaging-nats, path: kanz/infra/nats, namespace: kanz-messaging }

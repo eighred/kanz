@@ -158,14 +158,26 @@ if step services; then
   # manifest counts to begin with. The drift window is exactly long enough to burn
   # an exchange weight budget or interleave a log write, and Argo undoing the pod
   # count does not undo either. The scaling stays because the case it exists for is
-  # the one where reconciliation is NOT running — Argo CD in the failed region, or
-  # the `dr` destination never pointed at a real cluster (both env entries in that
-  # ApplicationSet still resolve to kubernetes.default.svc). If a future DR drill
-  # proves Argo reconciles the DR cluster during a region loss, the honest form of
-  # this step is `argocd app sync kanz-dr-workloads` / `kubectl apply -f`, which
-  # takes the replica count from the manifest by construction rather than by
-  # selector. That is a change to the runbook, so it is the team's call, not this
-  # fix's.
+  # the one where reconciliation is NOT running — Argo CD in the failed region,
+  # or no reconciler pointed at the DR cluster at all.
+  #
+  # THAT SECOND CASE IS NOW THE ONLY CASE, and this file no longer has to hedge
+  # about it. This comment used to read "the `dr` destination never pointed at a
+  # real cluster (both env entries in that ApplicationSet still resolve to
+  # kubernetes.default.svc)" — true when written, and #153 acted on it: the `dr`
+  # entry was a duplicate Application managing the PRIMARY, so it was removed
+  # rather than left asserting a topology that does not exist. There is one env
+  # entry now, and nothing whatsoever reconciles a DR region.
+  #
+  # So the scaling below is not "usually redundant, kept for an edge case". It is
+  # the only thing that sets these replica counts during a cutover, and it stays
+  # until a DR cluster (#106) and an Argo CD inside it both exist. When they do,
+  # the honest form of this step becomes `argocd app sync <the DR Application>` /
+  # `kubectl apply -f`, taking the replica count from the manifest by
+  # construction rather than by selector. Do not write that command here before
+  # the Application it names exists — the previous version of this comment named
+  # `kanz-dr-workloads`, which by then was already an Application that only
+  # duplicated the primary, and #153 deleted it.
   k -n "$SVC_NS" scale deploy -l '!kanz.io/singleton' --replicas=2
   k -n "$SVC_NS" scale deploy -l 'kanz.io/singleton'  --replicas=1
   # Wait on every service the DR drill exercises a synthetic transaction against
