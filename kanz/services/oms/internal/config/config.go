@@ -65,6 +65,13 @@ type Config struct {
 	//
 	// Empty ⇒ nothing is bound: every portfolio trades whatever account its adapter
 	// holds, sharing one pool per venue. The OMS says so, loudly, at startup.
+	//
+	// A BASKET CHANGE IS A DEPLOYMENT, not an API call (#68, owner ruling
+	// 2026-07-27). Edit this value and redeploy; the whole set is re-read and
+	// re-checked at startup. There is no runtime endpoint that rebinds a
+	// portfolio, and that absence is the feature — see internal/execution's
+	// account.go for why, and test/arch/basket_contract_test.go for the guard
+	// that keeps it true.
 	VenueAccounts string
 	// RequireVenueAccount REFUSES an order whose portfolio is bound to no account at
 	// its target venue (VENUE_ACCOUNT_UNBOUND), instead of executing it against a

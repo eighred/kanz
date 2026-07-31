@@ -27,6 +27,31 @@ import (
 // credential and therefore IS one exchange account. It was simply never NAMED, so
 // nothing could be bound to it and nothing could be refused.
 //
+// # The bindings are a DEPLOY-TIME contract. There is no runtime CRUD (#68)
+//
+// Owner ruling, 2026-07-27: a basket change is a deployment. Edit
+// OMS_VENUE_ACCOUNTS, redeploy, and the OMS re-reads the whole set at startup.
+// There is deliberately no endpoint that rebinds a portfolio in a running
+// process, and adding one is not a feature this is missing.
+//
+// THE REASON IS THE REFUSAL BELOW. ParseBindings rejects an account with two
+// owners and the OMS exits 2 rather than starting (services/oms/cmd/oms:257).
+// That check is only worth something while the binding set is FIXED for the life
+// of the process. A runtime rebind moves it to a moment nobody is watching: the
+// process is already up, already holding orders, and the configuration it was
+// checked against at boot no longer exists. The window between "rebound" and
+// "noticed" is one where the platform reports segregated books over a shared
+// collateral pool — which is the exact state this whole file exists to make
+// impossible.
+//
+// Changing a binding by redeploying is not a workaround for a missing API. It is
+// what makes the guarantee checkable: every binding set that has ever been live
+// passed the same refusal, at a moment when refusing cost nothing.
+//
+// test/arch/basket_contract_test.go enforces it against the SCHEMA — the gateway
+// is grpc-gateway, so a runtime CRUD surface would arrive as a proto RPC, and it
+// fails there before an implementation exists to argue about.
+//
 // AccountBindings is the control. Its one hard invariant is exclusivity: an account
 // belongs to AT MOST ONE portfolio. Bind two portfolios to one account and their
 // collateral is shared — the exact thing this type exists to prevent — so that is not
