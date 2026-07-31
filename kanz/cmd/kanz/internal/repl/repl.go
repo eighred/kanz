@@ -80,15 +80,28 @@ func (r *REPL) Run(ctx context.Context) error {
 		if line == "" {
 			continue
 		}
-		if stop := r.dispatch(ctx, line); stop {
+		if stop := r.Dispatch(ctx, line); stop {
 			break
 		}
 	}
 	return r.in.Err()
 }
 
-// dispatch handles one input line, returning true when the loop should stop.
-func (r *REPL) dispatch(ctx context.Context, line string) (stop bool) {
+// Dispatch handles one input line, returning true when the session should stop.
+//
+// EXPORTED SO THE TUI SHELL CAN DRIVE IT (#65). Run owns a blocking read loop on
+// stdin, which a bubbletea pane cannot host — bubbletea owns the terminal and
+// delivers keys as messages. Dispatch is the half that does the work, and it is
+// already independent of where the line came from: it reads a string and writes
+// to r.out.
+//
+// So the shell reuses the REPL rather than reimplementing its commands. A second
+// copy of this switch is the failure CLAUDE.md names — the one where a fix lands
+// in one of them.
+//
+// It BLOCKS: /ask reaches the gateway. A caller inside a bubbletea Update must
+// run it in a tea.Cmd, or the whole shell freezes for the length of the request.
+func (r *REPL) Dispatch(ctx context.Context, line string) (stop bool) {
 	if !strings.HasPrefix(line, "/") {
 		r.ask(ctx, line)
 		return false
