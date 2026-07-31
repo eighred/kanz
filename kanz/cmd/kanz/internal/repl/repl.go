@@ -11,6 +11,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"strings"
@@ -38,6 +39,12 @@ type REPL struct {
 	now   func() time.Time
 
 	token *deviceauth.Token // current session token; nil ⇒ not logged in
+
+	// devSession marks a session held by a pre-minted KANZ_TOKEN rather than an
+	// SSO sign-in. It changes what /login, /logout and /whoami can honestly say,
+	// and it is printed in the header — a static bearer that nobody can see they
+	// are using is the only genuinely dangerous version of this feature.
+	devSession bool
 }
 
 // New builds a REPL over the config, token store, authenticator, and I/O. It
@@ -54,6 +61,23 @@ func New(cfg config.Config, store *tokenstore.Store, auth Authenticator, in io.R
 	// The gateway client reads the bearer through a closure so a mid-session
 	// /login is picked up without rebuilding the client.
 	r.gw = gateway.New(cfg.GatewayURL, r.accessToken)
+
+	// A PRE-MINTED TOKEN IS ADOPTED, NEVER PERSISTED. config.Load has already
+	// refused the case where both this and an SSO issuer are set, so reaching
+	// here with a DevToken means there is no issuer to sign in against.
+	//
+	// It is deliberately NOT written to the token store: the store is where an
+	// SSO session lives across runs, and a bearer from the environment that
+	// outlived the environment is exactly the stale-credential surprise this
+	// feature must not create. Unset KANZ_TOKEN and the session is gone.
+	if cfg.DevToken != "" {
+		// Zero Expiry: tokenstore.Valid treats that as non-expiring, which is
+		// right — the gateway is the authority on this token's lifetime, and
+		// inventing one here would refuse a perfectly good bearer.
+		r.token = &deviceauth.Token{AccessToken: cfg.DevToken}
+		r.devSession = true
+		return r
+	}
 	if tok, err := store.Load(); err == nil {
 		r.token = tok
 	}
@@ -205,6 +229,10 @@ func (r *REPL) ensureAuth(ctx context.Context) bool {
 // login runs the device flow, persists the token, and adopts it for the
 // session.
 func (r *REPL) login(ctx context.Context) error {
+	if r.devSession {
+		return errors.New("this session uses the pre-minted KANZ_TOKEN, and there is no KANZ_SSO_ISSUER " +
+			"to sign in against. Unset KANZ_TOKEN and set KANZ_SSO_ISSUER to use SSO")
+	}
 	tok, err := r.auth.Login(ctx)
 	if err != nil {
 		return err
@@ -220,6 +248,14 @@ func (r *REPL) login(ctx context.Context) error {
 }
 
 func (r *REPL) logout() {
+	if r.devSession {
+		// Clearing r.token would be a lie: the next New reads KANZ_TOKEN again,
+		// so the session would come back on restart while /whoami claimed it was
+		// gone. Say where the credential actually lives.
+		r.errf("this session comes from KANZ_TOKEN in the environment, not a stored sign-in — " +
+			"unset that variable to end it")
+		return
+	}
 	r.token = nil
 	if err := r.store.Delete(); err != nil {
 		r.errf("logout: %v", err)
@@ -235,6 +271,9 @@ func (r *REPL) whoami() {
 	if r.token == nil {
 		fmt.Fprintln(r.out, "not signed in — a question or command will start the device flow")
 		return
+	}
+	if r.devSession {
+		fmt.Fprintln(r.out, "session: KANZ_TOKEN from the environment (no SSO sign-in)")
 	}
 	claims := decodeClaims(r.token.AccessToken)
 	sub, _ := claims["sub"].(string)
@@ -268,6 +307,12 @@ func (r *REPL) header() {
 	fmt.Fprintln(r.out, "│   institutional risk & portfolio copilot      │")
 	fmt.Fprintln(r.out, "╰───────────────────────────────────────────────╯")
 	fmt.Fprintln(r.out, "Ask a question in plain language, or use a slash command. /help for commands, /quit to exit.")
+	if r.devSession {
+		// VISIBLE EVERY SESSION, not once. The failure mode of a static bearer is
+		// forgetting you are on one, so this is printed where it cannot be
+		// scrolled past before the first command.
+		fmt.Fprintln(r.out, "⚠ using KANZ_TOKEN from the environment — not an SSO sign-in. /login is unavailable.")
+	}
 }
 
 func (r *REPL) help() {

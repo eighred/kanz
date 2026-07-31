@@ -47,14 +47,6 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	dev, err := deviceauth.New(deviceauth.Config{
-		Issuer:   cfg.Issuer,
-		ClientID: cfg.ClientID,
-		Scope:    cfg.Scope,
-	})
-	if err != nil {
-		return err
-	}
 
 	// The signal context cancels an in-flight login poll or gateway request on
 	// Ctrl-C, so the terminal exits promptly rather than hanging on the network.
@@ -71,7 +63,10 @@ func run() error {
 	// keeps this binary usable in a pipeline — a TUI that cannot be scripted is
 	// a worse tool, not a better one.
 	if !stdinIsTerminal() {
-		auth := &deviceLogin{client: dev, out: os.Stdout}
+		auth, aerr := newAuthenticator(cfg, os.Stdout)
+		if aerr != nil {
+			return aerr
+		}
 		return repl.New(cfg, store, auth, os.Stdin, os.Stdout).Run(ctx)
 	}
 
@@ -79,7 +74,10 @@ func run() error {
 	// from it. Two writers here would render an always-empty pane while the
 	// output went to the terminal underneath the frame.
 	out := copilot.NewBuffer()
-	auth := &deviceLogin{client: dev, out: out}
+	auth, err := newAuthenticator(cfg, out)
+	if err != nil {
+		return err
+	}
 	// stdin is unused by the shell — bubbletea owns the keyboard and the pane
 	// feeds lines to Dispatch — so the REPL is given an empty reader rather than
 	// os.Stdin, which would otherwise be read from two places at once.
@@ -183,26 +181,36 @@ func newEstateBuilder(cfg config.Config, store *tokenstore.Store) func() (univer
 			return universe.Model{}, fmt.Errorf("could not read the saved session: %w", err)
 		}
 
-		// "NOT SIGNED IN" IS NOT AN ERROR FROM Load, AND THAT IS THE BUG THIS
-		// LINE FIXES. tokenstore.Load returns (nil, nil) for a missing file AND
-		// for a corrupt one — deliberately, so the CLI re-authenticates instead
-		// of wedging. The first version here checked only the error and then read
-		// tok.AccessToken, so the common case (never signed in) dereferenced nil
-		// and took the shell down on the first Tab.
+		// "NOT SIGNED IN" IS NOT AN ERROR FROM Load. tokenstore.Load returns
+		// (nil, nil) for a missing file AND for a corrupt one — deliberately, so
+		// the CLI re-authenticates instead of wedging. An earlier version checked
+		// only the error and then read tok.AccessToken, so the common case (never
+		// signed in) dereferenced nil and took the shell down on the first Tab.
 		//
 		// tokenstore.Valid is the existing answer to all three ways there is no
 		// usable session — nil, empty, and expired — so it is called rather than
 		// re-derived. The expiry half matters on its own: without it an expired
 		// token reaches the gateway and comes back 401, which tells the operator
 		// far less than "your session expired".
-		if !tokenstore.Valid(tok, time.Now()) {
+		bearer := ""
+		switch {
+		case cfg.DevToken != "":
+			// THE ESTATE MUST SEE THE SAME SESSION THE COPILOT PANE DOES. The
+			// REPL adopts KANZ_TOKEN and never persists it (deliberately), so a
+			// store-only lookup here would leave the estate reporting "not signed
+			// in" while the Copilot pane beside it was answering questions — one
+			// shell disagreeing with itself about whether there is a session.
+			bearer = cfg.DevToken
+		case tokenstore.Valid(tok, time.Now()):
+			bearer = tok.AccessToken
+		default:
 			return universe.Model{}, errors.New(
 				"not signed in (or the session expired) — run /login on the Copilot pane, then return here")
 		}
 
 		src, err := universe.NewGatewaySource(universe.GatewayConfig{
 			BaseURL: cfg.GatewayURL,
-			Token:   tok.AccessToken,
+			Token:   bearer,
 			// The signing secret is a deployment concern, not a session one: the
 			// gateway's Signing middleware is a no-op when it holds no secret, so
 			// an unset value here is valid rather than missing.
@@ -216,4 +224,43 @@ func newEstateBuilder(cfg config.Config, store *tokenstore.Store) func() (univer
 			CallTimeout:  universe.DefaultCallTimeout,
 		}, src), nil
 	}
+}
+
+// newAuthenticator builds the sign-in path, or a placeholder when there is none.
+//
+// deviceauth.New REFUSES an empty issuer ("deviceauth: issuer is required"), and
+// a KANZ_TOKEN session has no issuer by construction — config.Load rejects
+// configuring both. Building it unconditionally is why the first version of the
+// dev-token path could not start at all:
+//
+//	$ KANZ_GATEWAY_URL=... KANZ_TOKEN=... kanz
+//	kanz: deviceauth: issuer is required
+//
+// The unit tests missed it because they construct the REPL directly and never
+// run this wiring — the same gap that hid the estate builder's nil dereference.
+// Extracted so it has a test of its own.
+func newAuthenticator(cfg config.Config, out io.Writer) (repl.Authenticator, error) {
+	if cfg.DevToken != "" {
+		// Never called: repl.login refuses before reaching the Authenticator in a
+		// dev session. It is a real value rather than nil so that if that ever
+		// stops being true, the result is an error naming the cause instead of a
+		// nil-pointer panic in the middle of a turn.
+		return unavailableAuth{}, nil
+	}
+	client, err := deviceauth.New(deviceauth.Config{
+		Issuer:   cfg.Issuer,
+		ClientID: cfg.ClientID,
+		Scope:    cfg.Scope,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &deviceLogin{client: client, out: out}, nil
+}
+
+// unavailableAuth stands in where there is no issuer to sign in against.
+type unavailableAuth struct{}
+
+func (unavailableAuth) Login(context.Context) (*deviceauth.Token, error) {
+	return nil, errors.New("this session uses KANZ_TOKEN and has no KANZ_SSO_ISSUER to sign in against")
 }

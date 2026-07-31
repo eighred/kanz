@@ -8,6 +8,44 @@ for a single-node **k3s** cluster stood up by hand — used when standing up
 the full manifest set (SPIRE + NATS + the trading loop) outside both of
 those paths.
 
+## Driving `kanz` against a local gateway (no SSO)
+
+`kanz` authenticates through the Eighred SSO device flow. Until that service
+ships, `/login` against a local stack returns
+
+```
+status 404 on http://localhost:8080/.well-known/openid-configuration
+```
+
+which is correct rather than broken: the load stack's gateway validates **HS256
+JWTs** (`API_GATEWAY_JWT_SECRET`) and is not an OpenID provider, so there is no
+discovery document to fetch.
+
+Set `KANZ_TOKEN` to a pre-minted bearer instead, and leave `KANZ_SSO_ISSUER`
+unset:
+
+```sh
+export KANZ_GATEWAY_URL=http://localhost:8080
+export KANZ_TOKEN="$(go run ./cmd/kanz-devtoken --secret load-secret --tenant load-test --role kanz-user)"
+unset KANZ_SSO_ISSUER
+kanz
+```
+
+**Setting both is refused**, deliberately, rather than resolved by precedence. A
+rule like "SSO wins" would let a `KANZ_TOKEN` exported for one experiment sit
+forgotten in a shell profile and then silently take over the day an issuer is
+briefly unset. The refusal is loud and impossible to be on the wrong side of by
+accident.
+
+The session is marked in the header every run (`using KANZ_TOKEN from the
+environment`) and by `/whoami`, because the failure mode of a static bearer is
+forgetting you are on one. It is **never written to the token store**: unset the
+variable and the session is gone.
+
+`/login` is unavailable in that mode — there is no issuer to sign in against —
+and `/logout` says where the credential actually lives rather than pretending to
+clear it.
+
 ## Building any image requires `docker login ghcr.io` first
 
 Every Dockerfile's base now comes from `ghcr.io/eighred/base/*` (#161), and
