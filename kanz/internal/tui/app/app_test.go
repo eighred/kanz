@@ -1,6 +1,7 @@
 package app
 
 import (
+	"os/exec"
 	"strings"
 	"testing"
 
@@ -145,7 +146,7 @@ func TestSelectingABusPaneDoesNotChangeTheActiveTab(t *testing.T) {
 // mistyped binary looking exactly like a clean, instant exit.
 func TestChildProcessErrorIsSurfacedInTheStatusBar(t *testing.T) {
 	m := newModel(t, &fake{id: "a", title: "A"})
-	got, _ := m.Update(execFinishedMsg{err: errFake{}})
+	got, _ := m.Update(pane.ExecFinished{Err: errFake{}})
 	m = got.(Model)
 
 	if m.lastErr == nil {
@@ -298,5 +299,54 @@ func TestANonTextPaneKeepsTheVimBindings(t *testing.T) {
 	m = got.(Model)
 	if m.active != 1 {
 		t.Errorf("l did not move panes on a read-only pane (active=%d)", m.active)
+	}
+}
+
+// confirmingPane is a Bus pane that must gather input first, like the kill
+// switch (#171).
+type confirmingPane struct {
+	fake
+	launched bool
+}
+
+func (c *confirmingPane) Plane() pane.Plane { return pane.Bus }
+func (c *confirmingPane) ConfirmBeforeRun() {}
+func (c *confirmingPane) Command() *exec.Cmd {
+	c.launched = true
+	return exec.Command("kanz-halt")
+}
+
+func (c *confirmingPane) Update(msg tea.Msg) (pane.Pane, tea.Cmd) {
+	if k, ok := msg.(tea.KeyMsg); ok {
+		c.gotKeys = append(c.gotKeys, k.String())
+	}
+	return c, nil
+}
+
+// A CONFIRMING BUS PANE IS SHOWN, NEVER LAUNCHED ON SELECTION.
+//
+// This is the safety interlock, and without this test it was not enforced:
+// making the router ignore pane.Confirming left every existing test green while
+// the platform kill switch ran on arrival, one `tab` from the Copilot prompt.
+//
+// TestSelectingABusPaneDoesNotChangeTheActiveTab covers the OTHER bus shape (a
+// plain ExecPane, which SHOULD launch immediately), so it cannot cover this one.
+func TestAConfirmingBusPaneIsShownRatherThanLaunched(t *testing.T) {
+	halt := &confirmingPane{fake: fake{id: "halt", title: "Halt"}}
+	m := newModel(t, &fake{id: "copilot", title: "Copilot"}, halt)
+
+	got, cmd := m.Update(key("tab")) // tab onto the kill switch
+	m = got.(Model)
+
+	if cmd != nil {
+		t.Error("selecting a confirming pane produced a command — the kill switch would run on a " +
+			"keystroke, with none of the arguments it requires")
+	}
+	if halt.launched {
+		t.Error("Command() was called on selection — kanz-halt would have been executed by navigation")
+	}
+	if m.active != 1 {
+		t.Errorf("active = %d, want 1 — a confirming pane must become visible so it can collect input",
+			m.active)
 	}
 }
