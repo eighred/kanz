@@ -598,7 +598,23 @@ func TestReadOnlyObserversNeverJoinAQueueGroup(t *testing.T) {
 		}
 
 		checked++
-		for _, site := range groupedSubscribeCallsInDir(t, root, dir) {
+		// SCAN THE OBSERVER'S WHOLE CODE, NOT ITS DIRECTORY (#67).
+		//
+		// This used to walk cmd/<name>/ alone, which silently stopped covering
+		// the observer the moment any of its code moved out — and #67 is exactly
+		// that move: "fold kanz-monitor in". Demonstrated before the fix: a
+		// grouped Subscribe planted in internal/tui/monitor/ (where a fold would
+		// naturally put the bus reader) PASSED this guard, because cmd/kanz-monitor/
+		// still existed, still held .go files, and no longer held the subscribe.
+		//
+		// All three vacuity checks above kept passing while the property they
+		// protect had left the building. The guard #67 calls "the acceptance
+		// criteria, not a formality" would have become a formality on the first
+		// commit that implemented #67.
+		//
+		// So the scan follows first-party imports transitively from the binary.
+		// Moving the code no longer moves it out of view.
+		for _, site := range groupedSubscribeCallsInPackages(t, root, observerPackageDirs(t, root, dir)) {
 			problems = append(problems, name+": "+site+" calls a grouped Subscribe(ctx, subject, group, handler) — "+
 				"this JOINS the durable consumer group the real OMS/tv-sync replicas share on that subject and "+
 				"STEALS deliveries from them. A read-only observer must use SubscribeBroadcast only.")
@@ -621,4 +637,100 @@ func TestReadOnlyObserversNeverJoinAQueueGroup(t *testing.T) {
 		t.Fatalf("%d read-only observer(s) join a queue group (steal-nothing violation):\n\n  %s",
 			len(problems), strings.Join(problems, "\n  "))
 	}
+}
+
+// subscribePrimitivePackages DEFINE Subscribe and SubscribeBroadcast rather than
+// choosing between them.
+//
+// pkg/bus is the library: Consumer.Subscribe's body (consumer.go:148) delegates
+// to c.subscriber.Subscribe, which is the grouped primitive existing so that
+// SERVICES can join a durable consumer group — that is its job. Flagging it
+// would report the bus for providing the call every real consumer needs, and the
+// only way to make the guard green again would be to weaken it.
+//
+// The property this guard protects is the OBSERVER'S CHOICE: kanz-monitor must
+// call SubscribeBroadcast and never Subscribe. That choice is made in the
+// observer's own packages, which are still walked in full.
+var subscribePrimitivePackages = map[string]bool{
+	modulePath + "/pkg/bus": true,
+}
+
+// observerPackageDirs returns the observer's own package directory plus every
+// FIRST-PARTY package it reaches, transitively.
+//
+// This is what makes the read-only guarantee follow the code instead of a path
+// (#67). A read-only observer that subscribes through a helper package is still
+// a read-only observer, and a fold that relocates that helper must not relocate
+// it out of the guard's sight.
+//
+// modulePath (risk_boundary_test.go) is this module's import prefix; reusing it
+// rather than declaring a second copy, which is how the two would drift apart on
+// the next module rename.
+//
+// Third-party imports are deliberately not followed: pkg/bus's own definition of
+// Subscribe is not a call site, and walking the module cache would make this
+// guard slow and noisy for no added safety.
+func observerPackageDirs(t *testing.T, root, start string) []string {
+	t.Helper()
+
+	seen := map[string]bool{}
+	var order []string
+	queue := []string{start}
+
+	for len(queue) > 0 {
+		dir := queue[0]
+		queue = queue[1:]
+		if seen[dir] {
+			continue
+		}
+		seen[dir] = true
+		order = append(order, dir)
+
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			// A package that cannot be read is not silently skipped: the whole
+			// point of this guard is that it never scans less than it claims.
+			t.Fatalf("read %s while resolving the observer's packages: %v", dir, err)
+		}
+		for _, e := range entries {
+			if e.IsDir() || !strings.HasSuffix(e.Name(), ".go") || strings.HasSuffix(e.Name(), "_test.go") {
+				continue
+			}
+			path := filepath.Join(dir, e.Name())
+			f, perr := parser.ParseFile(token.NewFileSet(), path, nil, parser.ImportsOnly)
+			if perr != nil {
+				t.Fatalf("parse %s: %v", path, perr)
+			}
+			for _, spec := range f.Imports {
+				imp, uerr := strconv.Unquote(spec.Path.Value)
+				if uerr != nil || !strings.HasPrefix(imp, modulePath+"/") {
+					continue
+				}
+				if subscribePrimitivePackages[imp] {
+					continue
+				}
+				next := filepath.Join(root, filepath.FromSlash(strings.TrimPrefix(imp, modulePath+"/")))
+				if info, serr := os.Stat(next); serr == nil && info.IsDir() && !seen[next] {
+					queue = append(queue, next)
+				}
+			}
+		}
+	}
+	return order
+}
+
+// groupedSubscribeCallsInPackages runs the existing per-directory scan over each
+// package, non-recursively — observerPackageDirs already enumerated them, and
+// recursing again would pull in unrelated sibling packages that merely sit
+// beneath one the observer imports.
+func groupedSubscribeCallsInPackages(t *testing.T, root string, dirs []string) []string {
+	t.Helper()
+	if len(dirs) == 0 {
+		t.Fatal("resolved zero packages for a read-only observer — a scan over nothing passes vacuously")
+	}
+	var out []string
+	for _, dir := range dirs {
+		out = append(out, groupedSubscribeCallsInDir(t, root, dir)...)
+	}
+	return out
 }
