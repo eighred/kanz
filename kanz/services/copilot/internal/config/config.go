@@ -9,6 +9,9 @@ import (
 	"github.com/eighred/kanz/services/copilot/internal/llm"
 )
 
+// DefaultOpenRouterBaseURL is OpenRouter's OpenAI-compatible endpoint.
+const DefaultOpenRouterBaseURL = "https://openrouter.ai/api/v1"
+
 // Config is the copilot service runtime configuration. The copilot is an
 // AI-analytics agent over the governed read surface, powered by Claude. The
 // Claude version is NOT pinned in code — it is selected by ModelID
@@ -37,6 +40,20 @@ type Config struct {
 	// Vault/CSI secret FILE (COPILOT_ANTHROPIC_API_KEY_FILE), never a plaintext env
 	// var — it is a billable credential.
 	AnthropicAPIKey string
+
+	// OpenRouterAPIKey authenticates the OpenRouter client (#179). Same SEC-01d
+	// file-mount rule as the Anthropic key: it is a billable credential, so it
+	// arrives as COPILOT_OPENROUTER_API_KEY_FILE, never a plaintext env var.
+	OpenRouterAPIKey string
+
+	// OpenRouterBaseURL overrides the OpenRouter endpoint
+	// (COPILOT_OPENROUTER_BASE_URL). Defaults to the real API.
+	//
+	// IT EXISTS SO THE ADAPTER IS TESTABLE WITHOUT A KEY OR A NETWORK. Every
+	// mapping test points it at an httptest server; CI must never depend on a
+	// live API being reachable or a key being present. That it also allows a
+	// proxy or a self-hosted gateway is a side benefit, not the reason.
+	OpenRouterBaseURL string
 
 	// AllowStub permits the StubModel to serve. OFF by default; must be set
 	// deliberately.
@@ -86,6 +103,15 @@ func Load() (Config, error) {
 		return Config{}, err
 	}
 
+	// The OpenRouter key is optional at LOAD time: a binary that never selects
+	// that provider must not be forced to mount a credential for it. The adapter
+	// refuses at build time when it is selected without one — which is where the
+	// requirement actually is.
+	openRouterAPIKey, err := secret.Read("COPILOT_OPENROUTER_API_KEY")
+	if err != nil {
+		return Config{}, err
+	}
+
 	return Config{
 		Listen:          envOr("COPILOT_LISTEN", ":8080"),
 		LogLevel:        parseLevel(os.Getenv("COPILOT_LOG_LEVEL")),
@@ -93,11 +119,14 @@ func Load() (Config, error) {
 		AnthropicAPIKey: anthropicAPIKey,
 		Provider:        strings.TrimSpace(os.Getenv("COPILOT_PROVIDER")),
 		AllowStub:       os.Getenv("COPILOT_ALLOW_STUB") == "true",
-		PolicyPath:      os.Getenv("COPILOT_POLICY_PATH"),
-		LineageAddr:     os.Getenv("COPILOT_LINEAGE_ADDR"),
-		RiskQueryAddr:   os.Getenv("COPILOT_RISK_QUERY_ADDR"),
-		SPIFFESocket:    os.Getenv("COPILOT_SPIFFE_SOCKET"),
-		OTLPEndpoint:    os.Getenv("COPILOT_OTLP_ENDPOINT"),
+
+		OpenRouterAPIKey:  openRouterAPIKey,
+		OpenRouterBaseURL: envOr("COPILOT_OPENROUTER_BASE_URL", DefaultOpenRouterBaseURL),
+		PolicyPath:        os.Getenv("COPILOT_POLICY_PATH"),
+		LineageAddr:       os.Getenv("COPILOT_LINEAGE_ADDR"),
+		RiskQueryAddr:     os.Getenv("COPILOT_RISK_QUERY_ADDR"),
+		SPIFFESocket:      os.Getenv("COPILOT_SPIFFE_SOCKET"),
+		OTLPEndpoint:      os.Getenv("COPILOT_OTLP_ENDPOINT"),
 	}, nil
 }
 

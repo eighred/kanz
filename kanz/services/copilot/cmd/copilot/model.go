@@ -5,6 +5,8 @@ import (
 	"log/slog"
 	"sort"
 
+	"github.com/prometheus/client_golang/prometheus"
+
 	"github.com/eighred/kanz/services/copilot/internal/config"
 	"github.com/eighred/kanz/services/copilot/internal/llm"
 )
@@ -43,7 +45,12 @@ import (
 // It returns an error rather than exiting so the failure is testable and so the
 // composition root reports it with everything else — a library that calls
 // os.Exit cannot be exercised by a test that asserts the refusal.
-type providerBuilder func(cfg config.Config, logger *slog.Logger) (llm.Model, error)
+//
+// reg is the Prometheus registerer an adapter records provider behaviour on. It
+// is a PARAMETER rather than a package global because the counters are about
+// what a specific provider did, and a global would make two adapters in one
+// binary share one set of numbers.
+type providerBuilder func(cfg config.Config, logger *slog.Logger, reg prometheus.Registerer) (llm.Model, error)
 
 // providerBuilders holds what THIS BINARY was linked with. Populated by each
 // adapter's init(), so the map's contents are a fact about the build rather than
@@ -73,7 +80,7 @@ func linkedProviders() []string {
 }
 
 // newModel resolves COPILOT_PROVIDER against what this binary was linked with.
-func newModel(cfg config.Config, logger *slog.Logger) (llm.Model, error) {
+func newModel(cfg config.Config, logger *slog.Logger, reg prometheus.Registerer) (llm.Model, error) {
 	linked := linkedProviders()
 
 	if cfg.Provider == "" {
@@ -91,5 +98,5 @@ func newModel(cfg config.Config, logger *slog.Logger) (llm.Model, error) {
 			"Either set one of those, or build the image with the matching tag "+
 			"(go build -tags %s)", cfg.Provider, linked, cfg.Provider)
 	}
-	return build(cfg, logger)
+	return build(cfg, logger, reg)
 }

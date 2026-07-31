@@ -88,7 +88,7 @@ func main() {
 	// Seams: newModel resolves COPILOT_PROVIDER against the adapters this binary
 	// was linked with (#179). It FAILS rather than falling back — an unset or
 	// unlinked provider is a refusal to start, not a quiet substitution.
-	model, err := newModel(cfg, logger)
+	model, err := newModel(cfg, logger, obs.Registry)
 	if err != nil {
 		logger.Error("copilot cannot start", "err", err)
 		os.Exit(2)
