@@ -15,6 +15,7 @@ import (
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
+	"github.com/eighred/kanz/internal/dec"
 	"github.com/eighred/kanz/internal/execution"
 	"github.com/eighred/kanz/services/oms/internal/compliance"
 
@@ -180,6 +181,17 @@ func (s *Service) handleSubmit(ctx context.Context, env *envelopepb.Envelope, pa
 		// A malformed command body is a permanent defect; reject-and-ack rather
 		// than redeliver forever. order_id is unknown, so nothing to correlate.
 		s.logger.Error("oms: malformed SubmitOrder", "err", err)
+		return nil
+	}
+	// The command's quantity and prices reach the order aggregate and the position
+	// book, which convert them with the unbounded dec.FromProto (#95). An
+	// unvalidated wire exponent there does not misprice an order — it never
+	// returns, and the OMS stops consuming commands entirely. Same class of
+	// permanent defect as a malformed body, so reject-and-ack rather than
+	// redeliver forever.
+	if field, in := dec.InDomainDeep(&cmd); !in {
+		s.logger.Error("oms: SubmitOrder carries an out-of-domain exponent — refusing",
+			"field", field, "portfolio_id", cmd.GetPortfolioId())
 		return nil
 	}
 	now := s.now().UTC()

@@ -29,12 +29,18 @@ func DecodeProto(eventType string) Decoder {
 			if err := proto.Unmarshal(payload, &m); err != nil {
 				return nil, fmt.Errorf("consume: %s: %w", eventType, err)
 			}
+			if field, in := dec.InDomainDeep(&m); !in {
+				return nil, fmt.Errorf("consume: %s: out-of-domain exponent at %s", eventType, field)
+			}
 			return event(m.GetCommitmentId(), m.GetCommitmentId(), alt.EventCommit,
 				m.GetCommittedAmount(), m.GetCommitmentDate())
 		case alt.SubjectCalled:
 			var m altpb.CapitalCall
 			if err := proto.Unmarshal(payload, &m); err != nil {
 				return nil, fmt.Errorf("consume: %s: %w", eventType, err)
+			}
+			if field, in := dec.InDomainDeep(&m); !in {
+				return nil, fmt.Errorf("consume: %s: out-of-domain exponent at %s", eventType, field)
 			}
 			return event(m.GetCallId(), m.GetCommitmentId(), alt.EventCall,
 				m.GetAmount(), m.GetCallDate())
@@ -43,12 +49,18 @@ func DecodeProto(eventType string) Decoder {
 			if err := proto.Unmarshal(payload, &m); err != nil {
 				return nil, fmt.Errorf("consume: %s: %w", eventType, err)
 			}
+			if field, in := dec.InDomainDeep(&m); !in {
+				return nil, fmt.Errorf("consume: %s: out-of-domain exponent at %s", eventType, field)
+			}
 			return event(m.GetDistributionId(), m.GetCommitmentId(), alt.EventDistribution,
 				m.GetAmount(), m.GetDistributionDate())
 		case alt.SubjectMarked:
 			var m altpb.NAVMark
 			if err := proto.Unmarshal(payload, &m); err != nil {
 				return nil, fmt.Errorf("consume: %s: %w", eventType, err)
+			}
+			if field, in := dec.InDomainDeep(&m); !in {
+				return nil, fmt.Errorf("consume: %s: out-of-domain exponent at %s", eventType, field)
 			}
 			return event(m.GetMarkId(), m.GetCommitmentId(), alt.EventNAVMark,
 				m.GetNav(), m.GetAsOf())

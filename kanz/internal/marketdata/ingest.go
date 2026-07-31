@@ -24,6 +24,7 @@ import (
 	envelopepb "github.com/eighred/kanz/kanz-schemas-go/envelope/v1"
 	marketpb "github.com/eighred/kanz/kanz-schemas-go/market/v1"
 
+	"github.com/eighred/kanz/internal/dec"
 	"github.com/eighred/kanz/internal/marketdata/store"
 )
 
@@ -62,6 +63,13 @@ func (i *Ingestor) Handler(ctx context.Context, env *envelopepb.Envelope, payloa
 	var ev marketpb.MarketDataEvent
 	if err := proto.Unmarshal(payload, &ev); err != nil {
 		return fmt.Errorf("marketdata: %s unmarshal: %w", env.GetEventType(), err)
+	}
+	// Prices off market.> are the platform's least trusted numbers, and this is the
+	// store-writing path rather than the mark fold that was bounded first (#95).
+	// TranslateEvent hands the event's Decimals on undecoded, so this is the last
+	// point the whole message is in one place to refuse it.
+	if field, in := dec.InDomainDeep(&ev); !in {
+		return fmt.Errorf("marketdata: %s carries an out-of-domain exponent at %s", env.GetEventType(), field)
 	}
 	obs, err := TranslateEvent(env, &ev)
 	if err != nil {

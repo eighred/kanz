@@ -29,7 +29,7 @@ func env(eventType string) *envelopepb.Envelope {
 	}
 }
 
-func dec(coef int64, exp int32) *commonpb.Decimal {
+func decv(coef int64, exp int32) *commonpb.Decimal {
 	return &commonpb.Decimal{Coefficient: coef, Exponent: exp}
 }
 
@@ -40,7 +40,7 @@ func TestTranslateEvent_Bar(t *testing.T) {
 		EventTime:    timestamppb.New(evtTime),
 		Data: &marketpb.MarketDataEvent_Bar{Bar: &marketpb.Bar{
 			CloseTime: timestamppb.New(closeTime),
-			Close:     dec(15012, -2), // 150.12
+			Close:     decv(15012, -2), // 150.12
 		}},
 	}
 	o, err := TranslateEvent(env("market.equity.bar"), ev)
@@ -66,7 +66,7 @@ func TestTranslateEvent_Trade(t *testing.T) {
 	ev := &marketpb.MarketDataEvent{
 		InstrumentId: "AAPL",
 		EventTime:    timestamppb.New(evtTime),
-		Data:         &marketpb.MarketDataEvent_Trade{Trade: &marketpb.Trade{Price: dec(15000, -2)}},
+		Data:         &marketpb.MarketDataEvent_Trade{Trade: &marketpb.Trade{Price: decv(15000, -2)}},
 	}
 	o, err := TranslateEvent(env("market.equity.trade"), ev)
 	if err != nil {
@@ -85,8 +85,8 @@ func TestTranslateEvent_QuoteMid(t *testing.T) {
 		InstrumentId: "AAPL",
 		EventTime:    timestamppb.New(evtTime),
 		Data: &marketpb.MarketDataEvent_Quote{Quote: &marketpb.Quote{
-			BidPrice: dec(15000, -2), // 150.00
-			AskPrice: dec(15010, -2), // 150.10  → mid 150.05
+			BidPrice: decv(15000, -2), // 150.00
+			AskPrice: decv(15010, -2), // 150.10  → mid 150.05
 		}},
 	}
 	o, err := TranslateEvent(env("market.equity.quote"), ev)
@@ -121,7 +121,7 @@ func TestTranslateEvent_Errors(t *testing.T) {
 func TestTranslateEvent_InstrumentFallbackToPartitionKey(t *testing.T) {
 	ev := &marketpb.MarketDataEvent{ // no InstrumentId
 		EventTime: timestamppb.New(evtTime),
-		Data:      &marketpb.MarketDataEvent_Trade{Trade: &marketpb.Trade{Price: dec(1, 0)}},
+		Data:      &marketpb.MarketDataEvent_Trade{Trade: &marketpb.Trade{Price: decv(1, 0)}},
 	}
 	o, err := TranslateEvent(env("market.equity.trade"), ev)
 	if err != nil {
@@ -149,7 +149,7 @@ func TestIngestor_Handler_WritesObservation(t *testing.T) {
 	payload, err := proto.Marshal(&marketpb.MarketDataEvent{
 		InstrumentId: "AAPL",
 		EventTime:    timestamppb.New(evtTime),
-		Data:         &marketpb.MarketDataEvent_Trade{Trade: &marketpb.Trade{Price: dec(15000, -2)}},
+		Data:         &marketpb.MarketDataEvent_Trade{Trade: &marketpb.Trade{Price: decv(15000, -2)}},
 	})
 	if err != nil {
 		t.Fatal(err)

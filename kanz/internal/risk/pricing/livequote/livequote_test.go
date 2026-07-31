@@ -14,7 +14,7 @@ import (
 	"github.com/eighred/kanz/internal/risk/pricing/curve"
 )
 
-func dec(coeff int64, exp int32) *commonpb.Decimal {
+func decv(coeff int64, exp int32) *commonpb.Decimal {
 	return &commonpb.Decimal{Coefficient: coeff, Exponent: exp}
 }
 
@@ -29,7 +29,7 @@ func quoteEvent(id string, bid, ask *commonpb.Decimal) *marketpb.MarketDataEvent
 // so a subsequent Latest sees it — the risk-engine subscribe path.
 func TestHandlerFoldsIntoCache(t *testing.T) {
 	q := New()
-	ev := quoteEvent("USD-DEP-3M", dec(44, -3), dec(46, -3))
+	ev := quoteEvent("USD-DEP-3M", decv(44, -3), decv(46, -3))
 	payload, err := proto.Marshal(ev)
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
@@ -55,8 +55,8 @@ func TestHandlerRejectsMalformedPayload(t *testing.T) {
 // carrying the reference role and the cached mid.
 func TestSnapshotRateSourceEmitsStrip(t *testing.T) {
 	q := New()
-	q.Update(quoteEvent("USD-DEP-3M", dec(44, -3), dec(46, -3))) // mid 0.045
-	q.Update(quoteEvent("USD-SWAP-5Y", dec(40, -3), dec(40, -3)))
+	q.Update(quoteEvent("USD-DEP-3M", decv(44, -3), decv(46, -3))) // mid 0.045
+	q.Update(quoteEvent("USD-SWAP-5Y", decv(40, -3), decv(40, -3)))
 
 	src := NewSnapshotRateSource(q, []RateInstrument{
 		{InstrumentID: "USD-DEP-3M", Currency: "USD", Kind: curve.Deposit, Tenor: 0.25},
@@ -77,7 +77,7 @@ func TestSnapshotRateSourceEmitsStrip(t *testing.T) {
 // Missing ticks are skipped; other-currency instruments are filtered.
 func TestSnapshotRateSourceSkipsAndFilters(t *testing.T) {
 	q := New()
-	q.Update(quoteEvent("USD-DEP-3M", dec(44, -3), dec(46, -3)))
+	q.Update(quoteEvent("USD-DEP-3M", decv(44, -3), decv(46, -3)))
 
 	src := NewSnapshotRateSource(q, []RateInstrument{
 		{InstrumentID: "USD-DEP-3M", Currency: "USD", Kind: curve.Deposit, Tenor: 0.25},
@@ -109,9 +109,9 @@ func TestCurrencies(t *testing.T) {
 // and publishes a usable discount factor.
 func TestCalibratesUsableCurve(t *testing.T) {
 	q := New()
-	q.Update(quoteEvent("USD-DEP-1Y", dec(40, -3), dec(40, -3)))
-	q.Update(quoteEvent("USD-SWAP-2Y", dec(42, -3), dec(42, -3)))
-	q.Update(quoteEvent("USD-SWAP-5Y", dec(45, -3), dec(45, -3)))
+	q.Update(quoteEvent("USD-DEP-1Y", decv(40, -3), decv(40, -3)))
+	q.Update(quoteEvent("USD-SWAP-2Y", decv(42, -3), decv(42, -3)))
+	q.Update(quoteEvent("USD-SWAP-5Y", decv(45, -3), decv(45, -3)))
 
 	src := NewSnapshotRateSource(q, []RateInstrument{
 		{InstrumentID: "USD-DEP-1Y", Currency: "USD", Kind: curve.Deposit, Tenor: 1},

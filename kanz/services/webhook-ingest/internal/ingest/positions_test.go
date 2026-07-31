@@ -19,6 +19,7 @@ import (
 	"testing"
 	"time"
 
+	commonpb "github.com/eighred/kanz/kanz-schemas-go/common/v1"
 	domainpb "github.com/eighred/kanz/kanz-schemas-go/domain/v1"
 	envelopepb "github.com/eighred/kanz/kanz-schemas-go/envelope/v1"
 	orderpb "github.com/eighred/kanz/kanz-schemas-go/order/v1"
@@ -162,5 +163,56 @@ func TestACloseSignalActuallyCloses(t *testing.T) {
 	// would over-sell at each exchange and flip a flat position into a naked short.
 	if got["BINANCE"] != "3/5" || got["OKX"] != "2/5" {
 		t.Errorf("flatten sizes = %v, want BINANCE 3/5 and OKX 2/5", got)
+	}
+}
+
+// THE POSITION CACHE REFUSES AN OUT-OF-DOMAIN QUANTITY (#95).
+//
+// This cache is what a CLOSE is sized from, and its input is a PositionState off
+// the bus whose Decimal.exponent is unvalidated. Before the domain check,
+// dec.FromProto would materialise 10^abs(exponent) and Handle would never
+// return — the position subscription stalls, and every later CLOSE is sized from
+// a cache that stopped updating. The timeout is what separates "refused" from
+// "still computing".
+func TestPositionCacheRefusesAnOutOfDomainQuantity(t *testing.T) {
+	c := NewPositionCache()
+	c.Arm()
+	feed(t, c, "FUND", "XBIN", "BTC-USD", 1) // a known-good holding first
+
+	st := &domainpb.PositionState{
+		PortfolioId:  "FUND",
+		Venue:        "XBIN",
+		InstrumentId: "BTC-USD",
+		Quantity:     &commonpb.Decimal{Coefficient: 1, Exponent: 2000000000},
+		AsOf:         timestamppb.New(time.Now().UTC()),
+	}
+	payload, err := proto.Marshal(st)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	done := make(chan error, 1)
+	go func() { done <- c.Handle(context.Background(), &envelopepb.Envelope{}, payload) }()
+
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("an out-of-domain quantity was ACKED — a holding this cache cannot read " +
+				"must nack, exactly as a malformed payload does")
+		}
+	case <-time.After(4 * time.Second):
+		t.Fatal("Handle did not return within 4s — the domain check is not in front of the conversion")
+	}
+
+	// AND THE OLD HOLDING SURVIVES. The refusal must not half-apply: this cache
+	// SETS rather than adds, so a partial fold would leave the fund's size at
+	// whatever the refused message implied — and zero here reads as "flat", which
+	// is the value a CLOSE would size from.
+	got, err := c.Position(context.Background(), "FUND", "XBIN", "BTC-USD")
+	if err != nil {
+		t.Fatalf("Position after a refused update: %v", err)
+	}
+	if got.Cmp(big.NewRat(1, 1)) != 0 {
+		t.Fatalf("holding is now %s, want 1 — the refused update overwrote a known-good position", got)
 	}
 }

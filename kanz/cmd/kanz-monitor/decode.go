@@ -40,6 +40,21 @@ const (
 // else is simply unknown to this build) — the caller drops it silently
 // rather than showing "unknown event" noise that would teach the operator to
 // ignore the feed.
+// decodeInDomain unmarshals a FACT payload and reports whether it can be
+// rendered. An out-of-domain Decimal is refused exactly like an unparseable
+// payload (#95): dec.Str(dec.FromProto(…)) below materialises 10^abs(exponent),
+// so a FACT carrying {1, 2000000000} would not print a wrong quantity — it would
+// wedge the monitor's render loop on a value it was only ever going to display.
+// The exponent is an unvalidated wire field, and this tool reads whatever the
+// stream hands it.
+func decodeInDomain(payload []byte, ev proto.Message) bool {
+	if proto.Unmarshal(payload, ev) != nil {
+		return false
+	}
+	_, in := dec.InDomainDeep(ev)
+	return in
+}
+
 func decodeLifecycle(env *envelopepb.Envelope, payload []byte) (lifecycleEvent, bool) {
 	row := lifecycleEvent{Type: env.GetEventType()}
 	if t := env.GetEventTime(); t != nil {
@@ -49,7 +64,7 @@ func decodeLifecycle(env *envelopepb.Envelope, payload []byte) (lifecycleEvent, 
 	switch env.GetEventType() {
 	case eventTypeRejected:
 		var ev orderpb.OrderRejected
-		if err := proto.Unmarshal(payload, &ev); err != nil {
+		if !decodeInDomain(payload, &ev) {
 			return lifecycleEvent{}, false
 		}
 		row.OrderID = ev.GetOrderId()
@@ -58,7 +73,7 @@ func decodeLifecycle(env *envelopepb.Envelope, payload []byte) (lifecycleEvent, 
 
 	case eventTypeRouted:
 		var ev orderpb.OrderRouted
-		if err := proto.Unmarshal(payload, &ev); err != nil {
+		if !decodeInDomain(payload, &ev) {
 			return lifecycleEvent{}, false
 		}
 		row.OrderID = ev.GetOrderId()
@@ -67,7 +82,7 @@ func decodeLifecycle(env *envelopepb.Envelope, payload []byte) (lifecycleEvent, 
 
 	case eventTypePartiallyFilled:
 		var ev orderpb.OrderPartiallyFilled
-		if err := proto.Unmarshal(payload, &ev); err != nil {
+		if !decodeInDomain(payload, &ev) {
 			return lifecycleEvent{}, false
 		}
 		row.OrderID = ev.GetOrderId()
@@ -76,7 +91,7 @@ func decodeLifecycle(env *envelopepb.Envelope, payload []byte) (lifecycleEvent, 
 
 	case eventTypeFilled:
 		var ev orderpb.OrderFilled
-		if err := proto.Unmarshal(payload, &ev); err != nil {
+		if !decodeInDomain(payload, &ev) {
 			return lifecycleEvent{}, false
 		}
 		row.OrderID = ev.GetOrderId()
@@ -85,7 +100,7 @@ func decodeLifecycle(env *envelopepb.Envelope, payload []byte) (lifecycleEvent, 
 
 	case eventTypeCancelled:
 		var ev orderpb.OrderCancelled
-		if err := proto.Unmarshal(payload, &ev); err != nil {
+		if !decodeInDomain(payload, &ev) {
 			return lifecycleEvent{}, false
 		}
 		row.OrderID = ev.GetOrderId()
@@ -94,7 +109,7 @@ func decodeLifecycle(env *envelopepb.Envelope, payload []byte) (lifecycleEvent, 
 
 	case eventTypeExpired:
 		var ev orderpb.OrderExpired
-		if err := proto.Unmarshal(payload, &ev); err != nil {
+		if !decodeInDomain(payload, &ev) {
 			return lifecycleEvent{}, false
 		}
 		row.OrderID = ev.GetOrderId()
@@ -131,7 +146,7 @@ func decodePosition(env *envelopepb.Envelope, payload []byte) (position, bool) {
 	// subscription scopes this call to the position stream, where a
 	// PositionState is the only payload shape.
 	var ev domainpb.PositionState
-	if err := proto.Unmarshal(payload, &ev); err != nil {
+	if !decodeInDomain(payload, &ev) {
 		return position{}, false
 	}
 	return position{

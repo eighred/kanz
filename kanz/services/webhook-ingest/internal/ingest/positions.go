@@ -3,6 +3,7 @@ package ingest
 import (
 	"context"
 	"errors"
+	"fmt"
 	"math/big"
 	"sync"
 
@@ -83,6 +84,14 @@ func (c *PositionCache) Handle(_ context.Context, _ *envelopepb.Envelope, payloa
 	var ps domainpb.PositionState
 	if err := proto.Unmarshal(payload, &ps); err != nil {
 		return err // malformed control state: nack rather than fold a position we cannot read
+	}
+	// Same reason as the nack above, one layer in (#95): a quantity whose exponent is
+	// out of domain is a holding this cache cannot read. Folding it is strictly worse
+	// than nacking — dec.FromProto would materialise 10^abs(exponent) and never return,
+	// stalling the position subscription every CLOSE is sized from.
+	if field, in := dec.InDomainDeep(&ps); !in {
+		return fmt.Errorf("position %s/%s/%s carries an out-of-domain exponent at %s",
+			ps.GetPortfolioId(), ps.GetVenue(), ps.GetInstrumentId(), field)
 	}
 	if ps.GetPortfolioId() == "" || ps.GetVenue() == "" || ps.GetInstrumentId() == "" {
 		// A holding that cannot say whose it is, where it sits, or what it is, is not a
