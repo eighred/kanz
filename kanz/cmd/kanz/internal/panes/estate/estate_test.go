@@ -152,3 +152,36 @@ func TestEachPaneAssertsItsOwnScreenBeforeDelegating(t *testing.T) {
 		}
 	}
 }
+
+// A PANIC IN ONE PANE MUST NOT KILL THE SHELL.
+//
+// Defence in depth, deliberately not the fix for the nil token that caused it —
+// that is fixed at the read, in cmd/kanz's builder. This asserts the blast
+// radius: a build func that panics leaves the estate showing the panic and every
+// OTHER pane working, including Copilot, which is where /login lives. Before
+// this, the operator lost the shell and the message with it.
+func TestAPanicWhileConnectingIsContainedToTheEstatePane(t *testing.T) {
+	shared := NewShared(func() (universe.Model, error) {
+		var nilToken *struct{ AccessToken string }
+		_ = nilToken.AccessToken // the original defect, reproduced exactly
+		return universe.Model{}, nil
+	})
+	p := All(shared)[0].(*Pane)
+
+	// Must not panic out of Init.
+	if cmd := p.Init(); cmd != nil {
+		t.Error("a panicking build returned a command")
+	}
+	if shared.Ready() {
+		t.Error("Ready() is true after the build panicked")
+	}
+	if shared.Err() == nil {
+		t.Fatal("the panic was swallowed — the pane would render blank with no reason")
+	}
+	if !strings.Contains(shared.Err().Error(), "panicked") {
+		t.Errorf("err = %q, want it to say the pane panicked", shared.Err())
+	}
+	if v := p.View(60, 10); !strings.Contains(v, "unreachable") {
+		t.Errorf("View = %q, want the estate rendered as unreachable", v)
+	}
+}

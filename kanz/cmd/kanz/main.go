@@ -8,6 +8,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -89,30 +90,7 @@ func run() error {
 	// opens before the operator has signed in — building here would mean a
 	// signed-out operator cannot open kanz at all, losing the Copilot pane that
 	// /login lives on.
-	shared := estate.NewShared(func() (universe.Model, error) {
-		// Read the token from the STORE, not from the REPL. The REPL persists on
-		// /login, so the store is current — and it is the only source both halves
-		// of the shell agree on, rather than a second copy that can go stale.
-		tok, terr := store.Load()
-		if terr != nil {
-			return universe.Model{}, fmt.Errorf("not signed in: %w", terr)
-		}
-		src, serr := universe.NewGatewaySource(universe.GatewayConfig{
-			BaseURL: cfg.GatewayURL,
-			Token:   tok.AccessToken,
-			// The signing secret is a deployment concern, not a session one: the
-			// gateway's Signing middleware is a no-op when it holds no secret, so
-			// an unset value here is valid rather than missing.
-			SigningSecret: os.Getenv("KANZ_SIGNING_SECRET"),
-		})
-		if serr != nil {
-			return universe.Model{}, serr
-		}
-		return universe.NewModel(universe.Config{
-			PollInterval: 3 * time.Second,
-			CallTimeout:  universe.DefaultCallTimeout,
-		}, src), nil
-	})
+	shared := estate.NewShared(newEstateBuilder(cfg, store))
 
 	panes := []pane.Pane{copilot.New(r, out)}
 	panes = append(panes, estate.All(shared)...)
@@ -186,4 +164,56 @@ func (d *deviceLogin) Login(ctx context.Context) (*deviceauth.Token, error) {
 		}
 		fmt.Fprintf(d.out, "  code: %s\n\nWaiting for approval…\n", p.UserCode)
 	})
+}
+
+// newEstateBuilder returns the lazy constructor the estate panes call on their
+// first visit (#66).
+//
+// EXTRACTED FROM main SO IT CAN BE TESTED. As an inline closure it shipped a nil
+// dereference that panicked the whole shell on the first Tab to the Nodes tab,
+// and nothing could reach it: main's wiring had no test, and the estate tests
+// supply their own build func.
+func newEstateBuilder(cfg config.Config, store *tokenstore.Store) func() (universe.Model, error) {
+	return func() (universe.Model, error) {
+		// Read the token from the STORE, not from the REPL. The REPL persists on
+		// /login, so the store is current — and it is the only source both halves
+		// of the shell agree on, rather than a second copy that can go stale.
+		tok, err := store.Load()
+		if err != nil {
+			return universe.Model{}, fmt.Errorf("could not read the saved session: %w", err)
+		}
+
+		// "NOT SIGNED IN" IS NOT AN ERROR FROM Load, AND THAT IS THE BUG THIS
+		// LINE FIXES. tokenstore.Load returns (nil, nil) for a missing file AND
+		// for a corrupt one — deliberately, so the CLI re-authenticates instead
+		// of wedging. The first version here checked only the error and then read
+		// tok.AccessToken, so the common case (never signed in) dereferenced nil
+		// and took the shell down on the first Tab.
+		//
+		// tokenstore.Valid is the existing answer to all three ways there is no
+		// usable session — nil, empty, and expired — so it is called rather than
+		// re-derived. The expiry half matters on its own: without it an expired
+		// token reaches the gateway and comes back 401, which tells the operator
+		// far less than "your session expired".
+		if !tokenstore.Valid(tok, time.Now()) {
+			return universe.Model{}, errors.New(
+				"not signed in (or the session expired) — run /login on the Copilot pane, then return here")
+		}
+
+		src, err := universe.NewGatewaySource(universe.GatewayConfig{
+			BaseURL: cfg.GatewayURL,
+			Token:   tok.AccessToken,
+			// The signing secret is a deployment concern, not a session one: the
+			// gateway's Signing middleware is a no-op when it holds no secret, so
+			// an unset value here is valid rather than missing.
+			SigningSecret: os.Getenv("KANZ_SIGNING_SECRET"),
+		})
+		if err != nil {
+			return universe.Model{}, err
+		}
+		return universe.NewModel(universe.Config{
+			PollInterval: 3 * time.Second,
+			CallTimeout:  universe.DefaultCallTimeout,
+		}, src), nil
+	}
 }
