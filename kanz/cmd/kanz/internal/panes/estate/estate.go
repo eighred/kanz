@@ -66,10 +66,32 @@ func (s *Shared) Apply(m universe.Model) { s.m = m }
 
 // ensure builds the model if it is not built yet, returning the Init command for
 // the poller on the transition. Retries after a failure — see NewShared.
-func (s *Shared) ensure() tea.Cmd {
+func (s *Shared) ensure() (cmd tea.Cmd) {
 	if s.ready || s.build == nil {
 		return nil
 	}
+
+	// DEFENCE IN DEPTH, NOT THE FIX. The nil dereference that panicked here came
+	// from the build func reading a nil token, and it is fixed at that read
+	// (cmd/kanz newEstateBuilder) — recovering instead would have hidden it and
+	// left the estate silently unconnected.
+	//
+	// This exists for a different reason: a panic in ONE pane's Init killed the
+	// WHOLE shell, including the Copilot pane, which is where /login lives. So
+	// the operator lost the thing they needed to fix the problem, and lost the
+	// message with it — a raw terminal shows a stack trace, then nothing.
+	//
+	// The panic is not swallowed. It becomes this pane's error and is rendered
+	// where the failure happened, which is louder than a dead process, not
+	// quieter: every other pane keeps working and the text stays on screen.
+	defer func() {
+		if r := recover(); r != nil {
+			s.err = fmt.Errorf("the estate pane panicked while connecting: %v", r)
+			s.ready = false
+			cmd = nil
+		}
+	}()
+
 	m, err := s.build()
 	if err != nil {
 		s.err = err
