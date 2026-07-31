@@ -140,7 +140,12 @@ func okxWSFee(fee, ccy string) *commonpb.Money {
 	}
 	amt := ParseDec(fee)
 	if r := dec.FromProto(amt); r.Sign() < 0 {
-		amt = dec.ToProto(r.Neg(r))
+		// SCALED, NOT WRAPPING (#94). amt came from ParseDec (fixed scale), so
+		// negating it cannot overflow in practice; on the impossible failure keep
+		// the signed original rather than substitute a fabricated magnitude.
+		if neg, ok := dec.ToProtoScaled(r.Neg(r)); ok {
+			amt = neg
+		}
 	}
 	return &commonpb.Money{Amount: amt, CurrencyCode: ccy}
 }

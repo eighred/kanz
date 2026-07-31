@@ -110,3 +110,34 @@ func TestEncodeEffectiveFallback(t *testing.T) {
 		t.Fatalf("effective = %v, want knowledge fallback %v", entry.GetEffectiveTime().AsTime(), know)
 	}
 }
+
+// A LARGE SUBSCRIPTION POSTS ITS ACTUAL AMOUNT (#94).
+//
+// The cash leg went through the WRAPPING dec.ToProto, which overflows once the
+// scaled coefficient exceeds an int64 — about $92.2bn at scale 8. Above that the
+// book of record did not round the figure, it carried a different one: a $100bn
+// subscription posted as roughly $7.7bn, and every NAV and every report derived
+// from it agreed with each other and with nothing real.
+func TestEncodeDoesNotWrapALargeSubscription(t *testing.T) {
+	const amount = "100000000000" // $100bn — above the wrap threshold, below absurd
+
+	entry, _, err := encode(mv(Subscription, amount), time.Now())
+	if err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+	if got := dec.Str(dec.FromProto(entry.GetCash())); got != amount {
+		t.Fatalf("posted cash = %s, want %s — the ledger recorded an amount nobody moved", got, amount)
+	}
+}
+
+// NON-VACUITY: an ordinary amount is unchanged, so the guard above is not met by
+// an encoder that refuses or mangles everything.
+func TestEncodeStillPostsAnOrdinaryAmountExactly(t *testing.T) {
+	entry, _, err := encode(mv(Subscription, "1234.56"), time.Now())
+	if err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+	if got := dec.Str(dec.FromProto(entry.GetCash())); got != "1234.56" {
+		t.Fatalf("posted cash = %s, want 1234.56", got)
+	}
+}

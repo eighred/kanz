@@ -23,6 +23,7 @@ type fakeOKX struct {
 	sawPass     bool
 	sawClOrd    string
 	sawPostCl   string
+	sawPostSz   string // the size actually sent to the venue (#94)
 	posts       int
 	placeBody   string
 	queryBody   string
@@ -43,9 +44,11 @@ func newFakeOKX(t *testing.T) *fakeOKX {
 			f.posts++
 			var body struct {
 				ClOrdID string `json:"clOrdId"`
+				Sz      string `json:"sz"`
 			}
 			_ = json.NewDecoder(r.Body).Decode(&body)
 			f.sawPostCl = body.ClOrdID
+			f.sawPostSz = body.Sz
 			_, _ = w.Write([]byte(f.placeBody))
 			return
 		}

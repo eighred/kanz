@@ -167,3 +167,60 @@ func TestCloseRegistry_TrackPreservesRequestedAt(t *testing.T) {
 		t.Fatalf("re-track should update Leaves, got %s", got.RatString())
 	}
 }
+
+// THE SWEEP MUST SEND THE RESIDUAL IT WAS GIVEN, NOT A WRAPPED ONE (#94).
+//
+// forceSweep places a live MARKET order to flatten what a stuck close left open.
+// It sized that order through dec.ToProto, which wraps once the scaled
+// coefficient exceeds an int64 — about 92.2 billion units at scale 8. That is
+// $92bn in money terms but an ordinary position in tokens, and OKX lists assets
+// that trade in the trillions.
+//
+// A residual of 1e12 rendered as 77662796314.5224192: the sweep meant to flatten
+// the book would have market-sold about 7.8% of it and reported success, leaving
+// 92% of the exposure open with the close resolved and nothing failing.
+func TestHeal_SweepSizeIsNotWrappedForALargeResidual(t *testing.T) {
+	const residual = "1000000000000" // 1e12 units — a normal meme-coin position
+
+	f := newFakeOKX(t)
+	f.queryBody = `{"code":"0","msg":"","data":[{"ordId":"9","clOrdId":"o1","state":"live","accFillSz":"0"}]}`
+	f.placeBody = `{"code":"0","msg":"","data":[{"ordId":"sweep1","clOrdId":"heal-o1","sCode":"0","sMsg":""}]}`
+	f.balanceBody = `{"code":"0","msg":"","data":[{"details":[{"ccy":"BTC","cashBal":"0"}]}]}`
+	cap := &okxCapture{}
+	reg := NewCloseRegistry()
+	reg.Track(CloseIntent{
+		OrderID: "o1", InstrumentID: "BTC-USD",
+		SweepSide: orderpb.Side_SIDE_SELL, Leaves: dec.Rat(residual),
+		RequestedAt: time.Now().Add(-2 * time.Second).UTC(),
+	})
+
+	if err := healReconOver(f, cap, reg).HealClosures(context.Background()); err != nil {
+		t.Fatalf("HealClosures: %v", err)
+	}
+	if f.posts != 1 {
+		t.Fatalf("posts = %d, want 1 (a sweep market order)", f.posts)
+	}
+	if f.sawPostSz != residual {
+		t.Fatalf("swept size = %q, want %q — the venue was sent a quantity the platform "+
+			"invented, and a market order is immediate and irreversible", f.sawPostSz, residual)
+	}
+}
+
+// NON-VACUITY: an ordinary residual still sweeps at its exact size, so the guard
+// above is not satisfied by a sweep that refuses everything.
+func TestHeal_SweepSizeIsExactForAnOrdinaryResidual(t *testing.T) {
+	f := newFakeOKX(t)
+	f.queryBody = `{"code":"0","msg":"","data":[{"ordId":"9","clOrdId":"o1","state":"live","accFillSz":"0"}]}`
+	f.placeBody = `{"code":"0","msg":"","data":[{"ordId":"sweep1","clOrdId":"heal-o1","sCode":"0","sMsg":""}]}`
+	f.balanceBody = `{"code":"0","msg":"","data":[{"details":[{"ccy":"BTC","cashBal":"0"}]}]}`
+	cap := &okxCapture{}
+	reg := NewCloseRegistry()
+	trackedClose(reg, "o1", 2*time.Second)
+
+	if err := healReconOver(f, cap, reg).HealClosures(context.Background()); err != nil {
+		t.Fatalf("HealClosures: %v", err)
+	}
+	if f.sawPostSz != "1" {
+		t.Fatalf("swept size = %q, want \"1\"", f.sawPostSz)
+	}
+}
