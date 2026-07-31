@@ -4,6 +4,8 @@ import (
 	"errors"
 	"log/slog"
 
+	"github.com/prometheus/client_golang/prometheus"
+
 	"github.com/eighred/kanz/services/copilot/internal/config"
 	"github.com/eighred/kanz/services/copilot/internal/llm"
 )
@@ -31,7 +33,7 @@ func init() { registerProvider(ProviderStub, newStubModel) }
 // removed the OKX endpoint default (#147) and the SimVenue/SimFeed fallbacks:
 // fabrication must never be reachable by omission — and now not by a forgotten
 // build flag either, since selecting it takes naming it twice.
-func newStubModel(cfg config.Config, logger *slog.Logger) (llm.Model, error) {
+func newStubModel(cfg config.Config, logger *slog.Logger, _ prometheus.Registerer) (llm.Model, error) {
 	if !cfg.AllowStub {
 		return nil, errors.New("COPILOT_PROVIDER=stub, but the stub does not answer questions — it " +
 			"FABRICATES them. Set COPILOT_ALLOW_STUB=true if fabricated analysis is genuinely what " +

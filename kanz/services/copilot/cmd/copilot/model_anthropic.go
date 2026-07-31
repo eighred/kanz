@@ -24,6 +24,8 @@ import (
 
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/anthropics/anthropic-sdk-go/option"
+	"github.com/prometheus/client_golang/prometheus"
+
 	"github.com/eighred/kanz/services/copilot/internal/config"
 	"github.com/eighred/kanz/services/copilot/internal/llm"
 )
@@ -55,7 +57,7 @@ func init() { registerProvider(ProviderAnthropic, newAnthropicModel) }
 // It no longer defines newModel: with a second provider linked, two files
 // defining that function would not compile, and which one won would have been
 // decided by build tags rather than by the deployment (#179).
-func newAnthropicModel(cfg config.Config, logger *slog.Logger) (llm.Model, error) {
+func newAnthropicModel(cfg config.Config, logger *slog.Logger, _ prometheus.Registerer) (llm.Model, error) {
 	fb := isRefusalFallbackModel(cfg.ModelID)
 	logger.Info("copilot llm: anthropic client", "model", cfg.ModelID, "refusal_fallback", fb)
 	// SEC-01d: the key arrives as a Vault/CSI file, not a plaintext env var. Falling

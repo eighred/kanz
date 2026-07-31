@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/prometheus/client_golang/prometheus"
+
 	"github.com/eighred/kanz/services/copilot/internal/config"
 	"github.com/eighred/kanz/services/copilot/internal/llm"
 )
@@ -31,10 +33,12 @@ func withProviders(t *testing.T, m map[string]providerBuilder) {
 // of decision.
 func TestAnUnsetProviderRefusesToStart(t *testing.T) {
 	withProviders(t, map[string]providerBuilder{
-		"anthropic": func(config.Config, *slog.Logger) (llm.Model, error) { return llm.NewStubModel(), nil },
+		"anthropic": func(config.Config, *slog.Logger, prometheus.Registerer) (llm.Model, error) {
+			return llm.NewStubModel(), nil
+		},
 	})
 
-	_, err := newModel(config.Config{}, testLogger())
+	_, err := newModel(config.Config{}, testLogger(), nil)
 	if err == nil {
 		t.Fatal("an unset COPILOT_PROVIDER started the copilot — the provider would be chosen by omission")
 	}
@@ -66,11 +70,15 @@ func TestAnUnsetProviderRefusesToStart(t *testing.T) {
 // "unknown provider" does not.
 func TestAnUnlinkedProviderNamesWhatIsLinked(t *testing.T) {
 	withProviders(t, map[string]providerBuilder{
-		"anthropic": func(config.Config, *slog.Logger) (llm.Model, error) { return llm.NewStubModel(), nil },
-		"stub":      func(config.Config, *slog.Logger) (llm.Model, error) { return llm.NewStubModel(), nil },
+		"anthropic": func(config.Config, *slog.Logger, prometheus.Registerer) (llm.Model, error) {
+			return llm.NewStubModel(), nil
+		},
+		"stub": func(config.Config, *slog.Logger, prometheus.Registerer) (llm.Model, error) {
+			return llm.NewStubModel(), nil
+		},
 	})
 
-	_, err := newModel(config.Config{Provider: "openrouter"}, testLogger())
+	_, err := newModel(config.Config{Provider: "openrouter"}, testLogger(), nil)
 	if err == nil {
 		t.Fatal("an unlinked provider was accepted")
 	}
@@ -87,12 +95,12 @@ func TestAnUnlinkedProviderNamesWhatIsLinked(t *testing.T) {
 func TestALinkedProviderIsBuiltAndItsErrorSurfaces(t *testing.T) {
 	built := false
 	withProviders(t, map[string]providerBuilder{
-		"anthropic": func(config.Config, *slog.Logger) (llm.Model, error) {
+		"anthropic": func(config.Config, *slog.Logger, prometheus.Registerer) (llm.Model, error) {
 			built = true
 			return llm.NewStubModel(), nil
 		},
 	})
-	if _, err := newModel(config.Config{Provider: "anthropic"}, testLogger()); err != nil {
+	if _, err := newModel(config.Config{Provider: "anthropic"}, testLogger(), nil); err != nil {
 		t.Fatalf("a linked provider failed to build: %v", err)
 	}
 	if !built {
@@ -100,11 +108,11 @@ func TestALinkedProviderIsBuiltAndItsErrorSurfaces(t *testing.T) {
 	}
 
 	withProviders(t, map[string]providerBuilder{
-		"broken": func(config.Config, *slog.Logger) (llm.Model, error) {
+		"broken": func(config.Config, *slog.Logger, prometheus.Registerer) (llm.Model, error) {
 			return nil, errNotToday
 		},
 	})
-	if _, err := newModel(config.Config{Provider: "broken"}, testLogger()); err == nil {
+	if _, err := newModel(config.Config{Provider: "broken"}, testLogger(), nil); err == nil {
 		t.Error("a builder's error was swallowed — the copilot would start with a nil model")
 	}
 }
@@ -122,7 +130,7 @@ func (e errStr) Error() string { return string(e) }
 // its answers reach a portfolio manager as analysis and read exactly like real
 // ones.
 func TestTheStubRequiresAnExplicitOptInEvenWhenSelected(t *testing.T) {
-	_, err := newStubModel(config.Config{Provider: ProviderStub}, testLogger())
+	_, err := newStubModel(config.Config{Provider: ProviderStub}, testLogger(), nil)
 	if err == nil {
 		t.Fatal("the stub was served without COPILOT_ALLOW_STUB — fabricated analysis reachable by " +
 			"selecting a provider is the same defect as reaching it by forgetting a build flag")
@@ -131,7 +139,7 @@ func TestTheStubRequiresAnExplicitOptInEvenWhenSelected(t *testing.T) {
 		t.Errorf("error %q does not say what the stub actually does", err)
 	}
 
-	m, err := newStubModel(config.Config{Provider: ProviderStub, AllowStub: true}, testLogger())
+	m, err := newStubModel(config.Config{Provider: ProviderStub, AllowStub: true}, testLogger(), nil)
 	if err != nil {
 		t.Fatalf("the stub refused an explicit opt-in: %v", err)
 	}
@@ -152,7 +160,7 @@ func TestTheStubIsLinkedInEveryBuild(t *testing.T) {
 // order. That is a composition-root bug, so it panics rather than picking.
 func TestRegisteringADuplicateProviderPanics(t *testing.T) {
 	withProviders(t, map[string]providerBuilder{})
-	registerProvider("dup", func(config.Config, *slog.Logger) (llm.Model, error) { return nil, nil })
+	registerProvider("dup", func(config.Config, *slog.Logger, prometheus.Registerer) (llm.Model, error) { return nil, nil })
 
 	defer func() {
 		if recover() == nil {
@@ -160,5 +168,5 @@ func TestRegisteringADuplicateProviderPanics(t *testing.T) {
 				"depend on which file init() ran first")
 		}
 	}()
-	registerProvider("dup", func(config.Config, *slog.Logger) (llm.Model, error) { return nil, nil })
+	registerProvider("dup", func(config.Config, *slog.Logger, prometheus.Registerer) (llm.Model, error) { return nil, nil })
 }
