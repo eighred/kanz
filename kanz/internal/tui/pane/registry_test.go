@@ -1,7 +1,10 @@
 package pane
 
 import (
+	"os"
 	"os/exec"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -134,4 +137,86 @@ func TestExecPaneInheritsTheTerminal(t *testing.T) {
 			"cannot paint")
 	}
 	var _ *exec.Cmd = c
+}
+
+// A SIBLING OF THE RUNNING BINARY IS FOUND AND RUNS.
+//
+// This is the case that was broken on Windows: a developer running ./kanz from
+// the build output has kanz-monitor right beside it and nothing on PATH, and
+// exec.Command with a bare name refused it (exec.ErrDot).
+//
+// Proven by actually EXECUTING it, not by inspecting a path — the report was a
+// launch failure, so an assertion that stops short of launching would not have
+// caught it.
+func TestToolCommandFindsAndRunsASiblingOfTheRunningBinary(t *testing.T) {
+	self, err := os.Executable()
+	if err != nil {
+		t.Skipf("cannot locate the test binary: %v", err)
+	}
+	dir := filepath.Dir(self)
+
+	// Build a tiny tool INTO the test binary's own directory, which is what
+	// resolveTool searches first.
+	name := "kanz-tooltest"
+	src := filepath.Join(t.TempDir(), "main.go")
+	if werr := os.WriteFile(src, []byte(
+		"package main\nimport \"fmt\"\nfunc main(){ fmt.Print(\"ran\") }\n"), 0o600); werr != nil {
+		t.Fatalf("write source: %v", werr)
+	}
+	out := filepath.Join(dir, name)
+	if runtime.GOOS == "windows" {
+		out += ".exe"
+	}
+	build := exec.Command("go", "build", "-o", out, src)
+	if bout, berr := build.CombinedOutput(); berr != nil {
+		t.Skipf("cannot build the probe tool (no toolchain here?): %v: %s", berr, bout)
+	}
+	defer func() { _ = os.Remove(out) }()
+
+	cmd := ToolCommand(name)
+	if cmd.Err != nil {
+		t.Fatalf("ToolCommand(%q) failed to resolve a sibling of the running binary: %v", name, cmd.Err)
+	}
+	if !filepath.IsAbs(cmd.Path) {
+		t.Errorf("resolved to a relative path %q — this is exactly what Go refuses to run", cmd.Path)
+	}
+	// Run it. Stdout is redirected because ToolCommand wires the real terminal.
+	cmd.Stdout, cmd.Stderr, cmd.Stdin = nil, nil, nil
+	got, rerr := cmd.Output()
+	if rerr != nil {
+		t.Fatalf("running the resolved sibling failed: %v", rerr)
+	}
+	if string(got) != "ran" {
+		t.Errorf("sibling produced %q, want %q", got, "ran")
+	}
+}
+
+// A TOOL THAT IS NOWHERE MUST FAIL WITH A MESSAGE THAT SAYS WHERE IT LOOKED.
+//
+// The command is still fully formed — argv and stdio — because the halt pane
+// renders its own argv, and a bare {Path, Err} made Args()[1:] a panic waiting
+// for the first machine without the tool installed.
+func TestToolCommandCarriesAUsableErrorWhenTheToolIsMissing(t *testing.T) {
+	cmd := ToolCommand("kanz-definitely-not-installed", "--by", "operator:akif")
+
+	if cmd.Err == nil {
+		t.Fatal("a missing tool produced no error — the shell would report a clean, instant exit")
+	}
+	msg := cmd.Err.Error()
+	for _, want := range []string{"kanz-definitely-not-installed", "PATH"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("error %q does not mention %q — the operator cannot tell where it looked", msg, want)
+		}
+	}
+	if len(cmd.Args) != 3 {
+		t.Errorf("Args = %v, want the argv preserved so callers can still render it", cmd.Args)
+	}
+	if cmd.Stdin == nil || cmd.Stdout == nil || cmd.Stderr == nil {
+		t.Error("stdio left unset on the error command — callers see a different shape depending on " +
+			"whether the tool happened to be installed")
+	}
+	// Run must surface the error rather than doing anything.
+	if err := cmd.Run(); err == nil {
+		t.Error("Run() on an unresolvable command returned nil")
+	}
 }
