@@ -85,9 +85,14 @@ func main() {
 	}
 	authz := auth.NewAuditedAuthorizer(inner, auth.NewSlogRecorder(logger), "copilot", logger)
 
-	// Seams: newModel selects the Claude client — the real anthropic-sdk-go
-	// adapter under `-tags anthropic`, the dependency-free StubModel otherwise.
-	model := newModel(cfg, logger)
+	// Seams: newModel resolves COPILOT_PROVIDER against the adapters this binary
+	// was linked with (#179). It FAILS rather than falling back — an unset or
+	// unlinked provider is a refusal to start, not a quiet substitution.
+	model, err := newModel(cfg, logger)
+	if err != nil {
+		logger.Error("copilot cannot start", "err", err)
+		os.Exit(2)
+	}
 
 	// Governed query client (WIRE-02b): the real query.v1 gRPC client when a
 	// risk-engine address is configured, else the dependency-free StubClient

@@ -1,38 +1,42 @@
-//go:build !anthropic
-
 package main
 
 import (
+	"errors"
 	"log/slog"
-	"os"
 
 	"github.com/eighred/kanz/services/copilot/internal/config"
 	"github.com/eighred/kanz/services/copilot/internal/llm"
 )
 
-// newModel returns the dependency-free StubModel in the default build. The real
-// anthropic-sdk-go client is compiled in ONLY under the `anthropic` build tag
-// (model_anthropic.go), so the default module build — and every `go build/vet`
-// + test run — pulls no LLM SDK dependency (the CLAUDE.md no-bloat rule + the
-// EVT-15a build-without-external-regen stance). Production images build the
-// binary with `-tags anthropic`.
-func newModel(cfg config.Config, logger *slog.Logger) llm.Model {
-	// THE STUB DOES NOT ANSWER QUESTIONS — IT FABRICATES ANSWERS.
-	//
-	// This binary was built without -tags anthropic, so no Claude client is linked
-	// and every reply comes from llm.StubModel. Those replies reach a portfolio
-	// manager as ANALYSIS, and they read exactly like real ones — there is no
-	// dashboard on which this looks wrong.
-	//
-	// It used to log this at Info and serve. That is the same defect as the OMS
-	// silently routing to SimVenue and market-ingest silently publishing SimFeed
-	// prices: fabrication reachable by forgetting a build flag. It is now an
-	// explicit opt-in and a hard failure otherwise.
+// ProviderStub is the fabricating model's COPILOT_PROVIDER value.
+const ProviderStub = "stub"
+
+// NO BUILD TAG ANY MORE (#179). This file used to be `//go:build !anthropic` and
+// define newModel, which made "the stub" mean "whatever you get when you forget
+// a flag". It is now a provider like any other: always linked, because it costs
+// nothing and the test suite needs it, and reachable only by ASKING for it.
+//
+// That is a strictly stronger guarantee than the build tag gave. A default build
+// asked for COPILOT_PROVIDER=anthropic now fails saying anthropic is not linked,
+// where before it silently fell through to this.
+func init() { registerProvider(ProviderStub, newStubModel) }
+
+// newStubModel returns the dependency-free StubModel.
+//
+// THE STUB DOES NOT ANSWER QUESTIONS — IT FABRICATES ANSWERS. Its replies reach
+// a portfolio manager as ANALYSIS and read exactly like real ones; there is no
+// dashboard on which this looks wrong.
+//
+// So it stays an explicit, affirmative opt-in. This is the same rule that
+// removed the OKX endpoint default (#147) and the SimVenue/SimFeed fallbacks:
+// fabrication must never be reachable by omission — and now not by a forgotten
+// build flag either, since selecting it takes naming it twice.
+func newStubModel(cfg config.Config, logger *slog.Logger) (llm.Model, error) {
 	if !cfg.AllowStub {
-		logger.Error("copilot cannot start: built WITHOUT -tags anthropic, so the only model available is the STUB — it does not answer questions, it FABRICATES them. " +
-			"Build the production image (-tags anthropic), or set COPILOT_ALLOW_STUB=true if fabricated analysis is genuinely what you want")
-		os.Exit(2)
+		return nil, errors.New("COPILOT_PROVIDER=stub, but the stub does not answer questions — it " +
+			"FABRICATES them. Set COPILOT_ALLOW_STUB=true if fabricated analysis is genuinely what " +
+			"you want, or choose a real provider")
 	}
 	logger.Warn("SERVING FABRICATED ANALYSIS — the copilot is running the StubModel. Every answer is invented, not derived from the portfolio")
-	return llm.NewStubModel()
+	return llm.NewStubModel(), nil
 }

@@ -43,9 +43,19 @@ type anthropicModel struct {
 	fallback bool // Fable/Mythos family: attach the server-side refusal fallback
 }
 
-// newModel builds the real Claude client. anthropic.NewClient() resolves
-// credentials the standard way (ANTHROPIC_API_KEY / OAuth profile / WIF).
-func newModel(cfg config.Config, logger *slog.Logger) llm.Model {
+// ProviderAnthropic is this adapter's COPILOT_PROVIDER value.
+const ProviderAnthropic = "anthropic"
+
+func init() { registerProvider(ProviderAnthropic, newAnthropicModel) }
+
+// newAnthropicModel builds the real Claude client. anthropic.NewClient()
+// resolves credentials the standard way (ANTHROPIC_API_KEY / OAuth profile /
+// WIF).
+//
+// It no longer defines newModel: with a second provider linked, two files
+// defining that function would not compile, and which one won would have been
+// decided by build tags rather than by the deployment (#179).
+func newAnthropicModel(cfg config.Config, logger *slog.Logger) (llm.Model, error) {
 	fb := isRefusalFallbackModel(cfg.ModelID)
 	logger.Info("copilot llm: anthropic client", "model", cfg.ModelID, "refusal_fallback", fb)
 	// SEC-01d: the key arrives as a Vault/CSI file, not a plaintext env var. Falling
@@ -59,7 +69,7 @@ func newModel(cfg config.Config, logger *slog.Logger) llm.Model {
 		client:   anthropic.NewClient(opts...),
 		modelID:  cfg.ModelID,
 		fallback: fb,
-	}
+	}, nil
 }
 
 // isRefusalFallbackModel reports whether the configured model needs the
