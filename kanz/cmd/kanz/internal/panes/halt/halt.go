@@ -24,7 +24,6 @@ package halt
 
 import (
 	"fmt"
-	"os"
 	"os/exec"
 	"strings"
 
@@ -100,9 +99,13 @@ func (p *Pane) Command() *exec.Cmd {
 	if p.resume {
 		args = append(args, "--resume")
 	}
-	c := exec.Command(binary, args...) //nolint:gosec // binary is a fixed literal, never user input
-	c.Stdin, c.Stdout, c.Stderr = os.Stdin, os.Stdout, os.Stderr
-	return c
+	// Resolved through pane.ToolCommand, not exec.Command: on Windows a bare
+	// name is refused when it is only reachable from the working directory
+	// (exec.ErrDot), and for the KILL SWITCH specifically that refusal is not an
+	// inconvenience — it is what stops a kanz-halt.exe dropped in whatever
+	// directory the operator happened to be in from becoming the platform's
+	// halt.
+	return pane.ToolCommand(binary, args...)
 }
 
 // Args is the argv this pane would run, for tests and for the status line. It
