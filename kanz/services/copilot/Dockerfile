@@ -2,7 +2,7 @@
 #
 # copilot container (CICD-01c). Distroless + static binary.
 #
-# BUILT WITH `-tags anthropic` ON PURPOSE.
+# BUILT WITH `-tags anthropic,openrouter` ON PURPOSE.
 #
 # The LLM adapter is build-tag split. WITHOUT the tag, no Claude client is linked
 # and the binary serves llm.StubModel — which does not answer a portfolio
@@ -37,7 +37,11 @@ COPY kanz/ ./
 # CGO off ⇒ a fully static binary (every dep — pgx, nats, kafka-go, go-spiffe —
 # is pure Go), which is what distroless/static requires. -trimpath strips local
 # paths; -s -w drop the symbol/debug tables.
-RUN CGO_ENABLED=0 go build -tags anthropic -trimpath -ldflags="-s -w" \
+# BOTH PROVIDERS ARE LINKED; COPILOT_PROVIDER PICKS ONE AT RUNTIME (#179).
+# Linking is a build decision, selection is a deployment one — an image that
+# linked only what its author happened to want would make provider choice
+# somebody else's, which is exactly what that change removed.
+RUN CGO_ENABLED=0 go build -tags anthropic,openrouter -trimpath -ldflags="-s -w" \
       -o /out/copilot ./services/copilot/cmd/copilot
 
 # Distroless static: no shell, no libc, no package manager — minimal attack

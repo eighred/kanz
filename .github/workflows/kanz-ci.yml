@@ -374,14 +374,28 @@ jobs:
       # `-tags redis` sat in until EXEC-M22, and the same hole that let the entire AI layer
       # rot: code that ships but is never exercised by any check on this repository.
       #
-      # There is no Anthropic credential here and there does not need to be: compiling and
-      # vetting the tag is what catches the break. A model call is not what rots — the
+      # There is no provider credential here and there does not need to be: compiling and
+      # vetting the tags is what catches the break. A model call is not what rots — the
       # adapter around it is.
-      - name: Build + vet the `anthropic` tag
+      #
+      # NOW BOTH TAGS, AND NOW WITH `go test` (#179). Two changes, each for its own
+      # reason:
+      #
+      #   openrouter joined because the production image links it (copilot/Dockerfile)
+      #   and a tag that ships without being compiled here is precisely the hole this
+      #   step exists to close — the one the anthropic adapter already rotted in once.
+      #
+      #   `go test` joined because the openrouter adapter HAS tests behind its tag and
+      #   build+vet would never run them. They are fully mocked — httptest fixtures, no
+      #   key, no network — so unlike the redis step below this needs no service, and
+      #   there is no reason not to run them. The anthropic tag has no tests of its own;
+      #   including it here costs nothing and means adding one later is enough.
+      - name: Build + vet + test the `anthropic,openrouter` tags
         working-directory: kanz
         run: |
-          go build -tags anthropic ./...
-          go vet -tags anthropic ./services/copilot/...
+          go build -tags anthropic,openrouter ./...
+          go vet -tags anthropic,openrouter ./services/copilot/...
+          go test -tags anthropic,openrouter ./services/copilot/...
 
       - name: Build + vet + test the `redis` tag (real Redis)
         working-directory: kanz
