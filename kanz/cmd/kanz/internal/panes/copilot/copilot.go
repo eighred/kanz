@@ -88,6 +88,10 @@ func (p *Pane) Title() string     { return "Copilot" }
 func (p *Pane) Plane() pane.Plane { return pane.Gateway }
 func (p *Pane) Init() tea.Cmd     { return nil }
 
+// AcceptsTypedText marks this pane as taking typed input: it hosts the REPL
+// prompt, so the global key table must not take printable characters from it.
+func (p *Pane) AcceptsTypedText() {}
+
 func (p *Pane) Update(msg tea.Msg) (pane.Pane, tea.Cmd) {
 	switch msg := msg.(type) {
 	case doneMsg:

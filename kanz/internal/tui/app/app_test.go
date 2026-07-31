@@ -218,3 +218,85 @@ func (p *sizePane) Update(msg tea.Msg) (pane.Pane, tea.Cmd) {
 	}
 	return p, nil
 }
+
+// textPane accepts typed characters, like the Copilot pane.
+type textPane struct{ fake }
+
+func (t *textPane) AcceptsTypedText() {}
+
+// Update must return the textPane ITSELF, not the embedded fake. The promoted
+// fake.Update returns *fake, and the registry would accept that swap — the ids
+// match — leaving a pane that no longer implements TextInput after one
+// keystroke. That is a real property of Registry.Replace worth knowing: it
+// verifies the id, not the type.
+func (t *textPane) Update(msg tea.Msg) (pane.Pane, tea.Cmd) {
+	if k, ok := msg.(tea.KeyMsg); ok {
+		t.gotKeys = append(t.gotKeys, k.String())
+	}
+	return t, nil
+}
+
+// A PANE TAKING TYPED TEXT MUST RECEIVE THE CHARACTERS SOMEBODY TYPES.
+//
+// This is the defect #65 shipped and this test did not catch: the routing test
+// above probes with "x" and "z", which happen to be unbound, so it proved the
+// mechanism and said nothing about the table. Meanwhile `h`, `l`, `q` and `?`
+// were global — typing "help" into the Copilot prompt sent h to prev-pane, l to
+// next-pane, and q quit the shell mid-sentence.
+//
+// The letters asserted here are the ACTUAL bindings, not arbitrary ones.
+func TestATextPaneReceivesTheLettersThatAreAlsoBindings(t *testing.T) {
+	p := &textPane{fake{id: "copilot", title: "Copilot"}}
+	m := newModel(t, p, &fake{id: "b", title: "B"})
+
+	for _, k := range []string{"h", "l", "q", "?"} {
+		got, _ := m.Update(key(k))
+		m = got.(Model)
+	}
+
+	active, _ := m.panes.At(m.active)
+	tp := active.(*textPane)
+	for _, want := range []string{"h", "l", "q", "?"} {
+		found := false
+		for _, got := range tp.gotKeys {
+			if got == want {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("%q never reached the text pane — the global table swallowed a character "+
+				"somebody was typing; pane saw %v", want, tp.gotKeys)
+		}
+	}
+	if m.active != 0 {
+		t.Errorf("typing moved the active pane to %d — h/l navigated instead of being typed", m.active)
+	}
+	if m.quitting {
+		t.Error("typing \"q\" quit the shell")
+	}
+}
+
+// The keys a text field never produces must still work, or a text pane becomes a
+// trap with no way out.
+func TestATextPaneStillHonoursModifierAndTabBindings(t *testing.T) {
+	m := newModel(t,
+		&textPane{fake{id: "copilot", title: "Copilot"}},
+		&fake{id: "b", title: "B"},
+	)
+	got, _ := m.Update(key("tab"))
+	m = got.(Model)
+	if m.active != 1 {
+		t.Errorf("tab did not move panes from a text pane (active=%d) — the pane would be a trap", m.active)
+	}
+}
+
+// A read-only pane keeps the full table, including the vim-style keys that make
+// it pleasant to drive. The fix must not cost every pane its bindings.
+func TestANonTextPaneKeepsTheVimBindings(t *testing.T) {
+	m := newModel(t, &fake{id: "a", title: "A"}, &fake{id: "b", title: "B"})
+	got, _ := m.Update(key("l"))
+	m = got.(Model)
+	if m.active != 1 {
+		t.Errorf("l did not move panes on a read-only pane (active=%d)", m.active)
+	}
+}

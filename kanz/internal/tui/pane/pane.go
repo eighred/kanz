@@ -83,3 +83,22 @@ type Runner interface {
 	// break the second launch: an exec.Cmd cannot be reused after Run.
 	Command() *exec.Cmd
 }
+
+// TextInput is implemented by a pane that takes typed characters.
+//
+// The shell asks before consuming a keystroke as a global binding: a pane that
+// is taking text must receive the letters somebody types, or the binding table
+// silently steals them. That is not hypothetical — `h`, `l`, `q` and `?` were
+// global in #65, which made typing "help" into the Copilot prompt navigate two
+// panes and quit the shell (#171's sibling defect).
+//
+// It is a MARKER, with no behaviour, because the question is about the pane's
+// nature rather than its state. A pane that reported "I am taking text right
+// now" would move the decision into a mutable flag, and the shell would consume
+// or forward the same key differently depending on when it arrived.
+type TextInput interface {
+	Pane
+	// AcceptsTypedText marks this pane as one the global key table must not
+	// take printable characters from.
+	AcceptsTypedText()
+}
