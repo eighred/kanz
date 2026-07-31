@@ -29,6 +29,11 @@ const (
 	Help
 	// Quit leaves the shell.
 	Quit
+	// EnterInput focuses the active pane's text entry. Only meaningful in
+	// Navigate mode, on a pane that takes typed text.
+	EnterInput
+	// LeaveInput returns to Navigate mode. Only meaningful in Input mode.
+	LeaveInput
 )
 
 // Binding is one row of the table: the key, what it does, and how it is
@@ -55,6 +60,8 @@ var Global = []Binding{
 		Act: SelectPane, Label: "alt+N: jump", Help: "jump to pane N"},
 	{Keys: []string{"?"}, Act: Help, Label: "?: help", Help: "toggle this help"},
 	{Keys: []string{"q", "ctrl+d"}, Act: Quit, Label: "q: quit", Help: "quit kanz"},
+	{Keys: []string{"i", "enter"}, Act: EnterInput, Label: "i: type", Help: "start typing in this pane"},
+	{Keys: []string{"esc"}, Act: LeaveInput, Label: "esc: navigate", Help: "stop typing, navigate"},
 }
 
 // Lookup maps a pressed key to its global action.
@@ -109,20 +116,45 @@ func StatusHints() []string {
 // So a pane that accepts typed text (pane.TextInput) is asked FIRST, and the
 // shell keeps only the keys a text field would never produce.
 
-// TextSafe reports whether the shell may keep key even while the active pane is
-// taking typed input.
+// Mode is what a keystroke MEANS right now.
 //
-// The rule is derived from the key itself rather than a per-binding flag, so a
-// new binding cannot forget to declare it — and it is deliberately conservative:
+// THE PROBLEM THIS SOLVES IS NOT KEY THEFT, IT IS AMBIGUITY. The first fix made
+// text panes keep printable characters, which stopped the Copilot prompt eating
+// its own input — but it left `l` navigating on the Nodes tab and typing on the
+// Copilot tab. One key, two meanings, decided by which tab you were on. That is
+// not learnable, and no amount of care makes it so.
+//
+// A mode makes the answer uniform: in Navigate every binding is live everywhere,
+// in Input the pane gets the characters and only keys a text field cannot
+// produce stay global.
+type Mode int
+
+const (
+	// Navigate is the read-only posture: the whole table is live.
+	Navigate Mode = iota
+	// Input means the active pane is taking typed characters.
+	Input
+)
+
+func (m Mode) String() string {
+	if m == Input {
+		return "INPUT"
+	}
+	return "NAV"
+}
+
+// TextSafe reports whether the shell may keep key while a pane is taking typed
+// input.
+//
+// Derived from the key itself rather than a per-binding flag, so a new binding
+// cannot forget to declare it, and deliberately conservative:
 //
 //   - anything with a modifier (alt+1, shift+tab, ctrl+d) — a text field does
 //     not receive these as characters
-//   - tab and esc — named keys, not characters
+//   - tab, and esc, which is how Input mode is left
 //
 // Everything else is refused, which covers bare letters AND the arrows. Arrows
-// matter because a text field wants left/right for the cursor: the Copilot pane
-// does not implement cursor movement yet, and binding them globally is exactly
-// how it would be prevented from ever doing so.
+// matter because a text field wants left/right for the cursor.
 func TextSafe(key string) bool {
 	if strings.Contains(key, "+") {
 		return true
@@ -134,14 +166,37 @@ func TextSafe(key string) bool {
 	return false
 }
 
-// LookupFor resolves key for the active pane, honouring whether that pane is
-// taking typed input.
+// LookupIn resolves key for the current mode.
 //
-// acceptsText false behaves exactly like Lookup — a read-only pane keeps the
-// full table, including the vim-style h/l that make it pleasant to drive.
-func LookupFor(key string, acceptsText bool) Action {
-	if acceptsText && !TextSafe(key) {
+// In Input mode only text-safe keys resolve, so the pane receives everything a
+// person could type. In Navigate mode the full table is live — including the
+// vim-style keys, which is the posture they were written for.
+func LookupIn(key string, mode Mode) Action {
+	if mode == Input && !TextSafe(key) {
 		return None
 	}
-	return Lookup(key)
+	act := Lookup(key)
+	// EnterInput and LeaveInput are each meaningful in exactly one mode. Letting
+	// them resolve in the other is how `i` would stop being typeable, and how esc
+	// would silently do nothing that anybody could see.
+	switch {
+	case act == EnterInput && mode != Navigate:
+		return None
+	case act == LeaveInput && mode != Input:
+		return None
+	}
+	return act
+}
+
+// StatusHintsIn is the compact summary for the current mode: bindings that
+// cannot fire are not advertised.
+func StatusHintsIn(mode Mode) []string {
+	out := make([]string, 0, len(Global))
+	for _, b := range Global {
+		if LookupIn(b.Keys[0], mode) == None {
+			continue
+		}
+		out = append(out, b.Label)
+	}
+	return out
 }

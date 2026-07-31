@@ -71,11 +71,13 @@ func Rule(width int) string {
 // width. When the two cannot both fit, the HINTS are dropped and the state is
 // kept: the state is what the operator cannot reconstruct, and the hints are
 // one "?" away.
-func StatusBar(state string, width int) string {
+func StatusBar(state string, mode keymap.Mode, width int) string {
 	if width <= 0 {
 		return ""
 	}
-	hints := strings.Join(keymap.StatusHints(), "  ")
+	// Hints follow the mode: advertising a binding that cannot fire is worse
+	// than showing none, because it teaches a key that does nothing.
+	hints := strings.Join(keymap.StatusHintsIn(mode), "  ")
 	left := theme.StatusBar.Render(state)
 	right := theme.StatusBar.Render(hints)
 

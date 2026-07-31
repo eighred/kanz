@@ -156,6 +156,10 @@ func TestViewAlwaysKeepsThePromptVisible(t *testing.T) {
 		_, _ = out.Write([]byte("scrollback line\n"))
 	}
 	p := New(&fakeREPL{}, out)
+	// The shell focuses a text pane on entry; without it the prompt correctly
+	// renders "press i to type" instead of the input, which is a different
+	// assertion from the one this test makes.
+	p.SetFocused(true)
 	p = typeLine(p, "/whoami")
 
 	v := p.View(40, 5)
@@ -165,5 +169,35 @@ func TestViewAlwaysKeepsThePromptVisible(t *testing.T) {
 	}
 	if !strings.Contains(v, "/whoami") {
 		t.Error("the prompt was scrolled off by history — the operator cannot see what they are typing")
+	}
+}
+
+// AN UNFOCUSED PROMPT SAYS SO. A prompt that looks identical whether or not it
+// will receive keys is the reason the mode has to be visible at all.
+func TestAnUnfocusedPromptSaysHowToType(t *testing.T) {
+	p := New(&fakeREPL{}, NewBuffer())
+
+	if v := p.View(40, 5); !strings.Contains(v, "press i to type") {
+		t.Errorf("View = %q, want it to say how to start typing", v)
+	}
+	p.SetFocused(true)
+	if v := p.View(40, 5); strings.Contains(v, "press i to type") {
+		t.Errorf("View = %q, still says 'press i' while focused", v)
+	}
+}
+
+// THE PROMPT IS PINNED TO THE BOTTOM. ui.Frame pads AFTER a pane's lines, so a
+// short scrollback used to leave the prompt at the top of an empty pane,
+// walking downwards as output arrived.
+func TestThePromptSitsAtTheBottomWithLittleScrollback(t *testing.T) {
+	out := NewBuffer()
+	_, _ = out.Write([]byte("one line\n"))
+	p := New(&fakeREPL{}, out)
+	p.SetFocused(true)
+
+	lines := strings.Split(p.View(40, 6), "\n")
+	last := lines[len(lines)-1]
+	if !strings.Contains(last, "kanz›") {
+		t.Errorf("last rendered line is %q, want the prompt — it floats up when scrollback is short", last)
 	}
 }
