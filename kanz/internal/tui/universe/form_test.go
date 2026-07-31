@@ -1,4 +1,4 @@
-package main
+package universe
 
 import (
 	"errors"
@@ -46,7 +46,7 @@ func typeInto(f addForm, s string) addForm {
 }
 
 func TestCtrlTFiresTestConnection(t *testing.T) {
-	m := newModel(Config{}, stubSource{})
+	m := NewModel(Config{}, stubSource{})
 	m.showForm = true
 	m.form = newAddForm()
 	// focus/complete the ip field then press ctrl+t
@@ -57,7 +57,7 @@ func TestCtrlTFiresTestConnection(t *testing.T) {
 }
 
 func TestTestConnResultRenders(t *testing.T) {
-	m := model{showForm: true, form: newAddForm(), testResult: "✓ reachable (7ms)"}
+	m := Model{showForm: true, form: newAddForm(), testResult: "✓ reachable (7ms)"}
 	if !strings.Contains(m.render(), "reachable (7ms)") {
 		t.Errorf("form render should show the test result:\n%s", m.render())
 	}
@@ -68,13 +68,13 @@ func TestTestConnResultRenders(t *testing.T) {
 // form now sits for seconds after the keypress; with nothing on screen an operator reads
 // that as a hung TUI and either kills it mid-provision or mashes the key.
 func TestTestConnectionShowsInFlightState(t *testing.T) {
-	m := newModel(Config{}, stubSource{})
+	m := NewModel(Config{}, stubSource{})
 	m.showForm = true
 	m.form = newAddForm()
 	m.testResult = "✓ reachable (7ms)" // a previous probe's verdict
 
 	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyCtrlT})
-	m = next.(model)
+	m = next.(Model)
 	if cmd == nil {
 		t.Fatal("ctrl+t should return a test-connection command")
 	}
@@ -104,9 +104,9 @@ func TestTestConnectionResultClearsInFlightState(t *testing.T) {
 		{"probe failed", testConnResultMsg{err: errors.New("probe job did not complete in time")}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			m := model{showForm: true, form: newAddForm(), probing: true}
+			m := Model{showForm: true, form: newAddForm(), probing: true}
 			next, _ := m.Update(tc.msg)
-			if next.(model).probing {
+			if next.(Model).probing {
 				t.Error("the in-flight state survived the result — a further probe is now impossible")
 			}
 		})
@@ -117,13 +117,13 @@ func TestTestConnectionResultClearsInFlightState(t *testing.T) {
 // the visual cue: every keypress costs a Job in the operator's namespace, holding :22
 // egress. An operator who believes the TUI is wedged presses the key repeatedly.
 func TestSecondTestConnectionWhileProbingIsANoOp(t *testing.T) {
-	m := model{showForm: true, form: newAddForm(), src: stubSource{}, probing: true}
+	m := Model{showForm: true, form: newAddForm(), src: stubSource{}, probing: true}
 	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyCtrlT})
 	if cmd != nil {
 		t.Error("a second ctrl+t while a probe is in flight must not fire another one — each one " +
 			"is another Job with :22 egress")
 	}
-	if !next.(model).probing {
+	if !next.(Model).probing {
 		t.Error("the ignored keypress must leave the in-flight state alone")
 	}
 }

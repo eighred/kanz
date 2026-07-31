@@ -1,4 +1,4 @@
-package main
+package universe
 
 import (
 	"strings"
@@ -6,8 +6,8 @@ import (
 )
 
 func TestRenderNodesPaneShowsRows(t *testing.T) {
-	m := model{
-		active: paneNodes,
+	m := Model{
+		active: ScreenNodes,
 		width:  100, height: 30,
 		nodes: []nodeRow{
 			{Name: "london", Status: "Ready", Roles: "control-plane", Region: "europe", Version: "v1.31.3", Age: "3d", schedulable: true},
@@ -23,8 +23,8 @@ func TestRenderNodesPaneShowsRows(t *testing.T) {
 }
 
 func TestRenderClustersPaneShowsCounts(t *testing.T) {
-	m := model{
-		active: paneClusters,
+	m := Model{
+		active: ScreenClusters,
 		width:  100, height: 30,
 		clusters: []clusterRow{{Region: "usa", Online: 2, Offline: 1}},
 	}
@@ -37,15 +37,15 @@ func TestRenderClustersPaneShowsCounts(t *testing.T) {
 }
 
 func TestRenderErrorShownInStatus(t *testing.T) {
-	m := model{active: paneNodes, width: 80, height: 24, err: errStub{}}
+	m := Model{active: ScreenNodes, width: 80, height: 24, err: errStub{}}
 	if !strings.Contains(m.render(), "boom") {
 		t.Errorf("render should surface the error text\n%s", m.render())
 	}
 }
 
 func TestRenderAPIPaneShowsPresenceNeverKeyMaterial(t *testing.T) {
-	m := model{
-		active: paneAPI,
+	m := Model{
+		active: ScreenAPI,
 		width:  100, height: 30,
 		venues: []venueRow{
 			{venue: "binance", configured: true},
@@ -65,13 +65,13 @@ func TestRenderAPIPaneShowsPresenceNeverKeyMaterial(t *testing.T) {
 	}
 	out2 := m.render()
 	if out != out2 {
-		t.Errorf("render is not pure for paneAPI: two calls produced different output\nfirst:\n%s\nsecond:\n%s", out, out2)
+		t.Errorf("render is not pure for ScreenAPI: two calls produced different output\nfirst:\n%s\nsecond:\n%s", out, out2)
 	}
 }
 
 func TestRenderAPIPaneShowsVerifiedAccountId(t *testing.T) {
-	m := model{
-		active: paneAPI,
+	m := Model{
+		active: ScreenAPI,
 		width:  100, height: 30,
 		venues: []venueRow{
 			{venue: "okx", configured: true},
@@ -95,10 +95,10 @@ func TestRenderAPIPaneShowsVerifiedAccountId(t *testing.T) {
 func TestRenderAPIPaneAfterPollRefreshFallsBackToConfigured(t *testing.T) {
 	// A proved submit renders "verified", but that badge must not survive a
 	// poll refresh — the poll is the point at which the keys behind it could
-	// already have been overwritten by an unproven path (see model.go's
+	// already have been overwritten by an unproven path (see Model.go's
 	// fetchMsg handler and the verifiedAccounts field comment).
-	m := model{
-		active: paneAPI,
+	m := Model{
+		active: ScreenAPI,
 		width:  100, height: 30,
 		venues:           []venueRow{{venue: "okx", configured: true}},
 		verifiedAccounts: map[string]string{"okx": "acct-789"},
@@ -109,7 +109,7 @@ func TestRenderAPIPaneAfterPollRefreshFallsBackToConfigured(t *testing.T) {
 	}
 
 	u, _ := m.Update(fetchMsg{venues: []venueRow{{venue: "okx", configured: true}}})
-	got := u.(model)
+	got := u.(Model)
 	if id, ok := got.verifiedAccounts["okx"]; ok {
 		t.Fatalf("a poll refresh must clear verifiedAccounts, got okx=%q", id)
 	}
@@ -130,8 +130,8 @@ func TestRenderAPIPaneUnprovenSuccessStaysConfigured(t *testing.T) {
 	// Empty exchange_account_id must render the existing "configured" wording,
 	// byte-unchanged — an unproven deployment must not start claiming
 	// verification.
-	m := model{
-		active: paneAPI,
+	m := Model{
+		active: ScreenAPI,
 		width:  100, height: 30,
 		venues:           []venueRow{{venue: "binance", configured: true}},
 		verifiedAccounts: map[string]string{"binance": ""},
@@ -146,9 +146,9 @@ func TestRenderAPIPaneUnprovenSuccessStaysConfigured(t *testing.T) {
 }
 
 func TestRenderAPIPaneShowsSetKeysHint(t *testing.T) {
-	m := model{active: paneAPI, width: 80, height: 24}
+	m := Model{active: ScreenAPI, width: 80, height: 24}
 	if !strings.Contains(m.render(), "set keys") {
-		t.Errorf("render should show the [k] set keys hint for paneAPI\n%s", m.render())
+		t.Errorf("render should show the [k] set keys hint for ScreenAPI\n%s", m.render())
 	}
 }
 
@@ -157,8 +157,8 @@ func TestRenderKeyFormShowsMaskedFieldsAndIsPure(t *testing.T) {
 	f.fields[0].value = "key-123"
 	f.fields[1].value = "supersecretvalue"
 	f.fields[2].value = "pass-xyz"
-	m := model{
-		active: paneAPI,
+	m := Model{
+		active: ScreenAPI,
 		width:  100, height: 30,
 		showKeyForm: true,
 		keyForm:     f,
@@ -177,8 +177,8 @@ func TestRenderKeyFormShowsMaskedFieldsAndIsPure(t *testing.T) {
 }
 
 func TestRenderKeyFormShowsRejectionReasonInline(t *testing.T) {
-	m := model{
-		active: paneAPI,
+	m := Model{
+		active: ScreenAPI,
 		width:  100, height: 30,
 		showKeyForm: true,
 		keyForm:     newKeyForm("okx"),
@@ -195,8 +195,8 @@ type errStub struct{}
 func (errStub) Error() string { return "boom" }
 
 func TestRenderMoveRegionPromptIsPureAndStable(t *testing.T) {
-	m := model{
-		active: paneNodes,
+	m := Model{
+		active: ScreenNodes,
 		width:  100, height: 30,
 		nodes:        []nodeRow{{Name: "london", Status: "Ready", Region: "europe", schedulable: true}},
 		movingRegion: true,

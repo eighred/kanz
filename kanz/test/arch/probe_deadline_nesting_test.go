@@ -21,7 +21,7 @@ import (
 // One Add Node "Test Connection" is bounded four times over, by four constants living in
 // four packages that do not import each other:
 //
-//	universe TUI          testConnTimeout        cmd/universe/poller.go
+//	universe TUI          testConnTimeout        internal/tui/universe/poller.go
 //	api-gateway route     testConnectionTimeout  services/api-gateway/internal/control
 //	operator probe wait   probeTimeout           services/operator/internal/provision
 //	provisioner dial      probeDialTimeout       cmd/kanz-provisioner/probe.go
@@ -56,7 +56,7 @@ type deadlineLayer struct {
 }
 
 var testConnDeadlineChain = []deadlineLayer{
-	{"testConnTimeout", "cmd/universe/poller.go", "the TUI's wait on the gateway"},
+	{"testConnTimeout", "internal/tui/universe/poller.go", "the TUI's wait on the gateway"},
 	{"testConnectionTimeout", "services/api-gateway/internal/control/control.go",
 		"the gateway's wait on the operator"},
 	{"probeTimeout", "services/operator/internal/provision/provision.go",
@@ -88,7 +88,7 @@ func TestTestConnectionDeadlinesNestOutward(t *testing.T) {
 }
 
 // tuiClientFile builds the TUI's one HTTP client; every Test Connection travels on it.
-const tuiClientFile = "cmd/universe/gatewaysource.go"
+const tuiClientFile = "internal/tui/universe/gatewaysource.go"
 
 // TestTUIHTTPClientCarriesNoTimeoutOfItsOwn closes the hole the test above cannot see.
 //
@@ -202,7 +202,7 @@ func TestIngressProxyTimeoutsExceedTheTUIBound(t *testing.T) {
 	// The bound to beat is read from source, not copied: a hardcoded 100s here would go
 	// stale the moment testConnTimeout is tuned, which is exactly when this matters.
 	tuiBound := durationConst(t,
-		filepath.Join(root, filepath.FromSlash("cmd/universe/poller.go")), "testConnTimeout")
+		filepath.Join(root, filepath.FromSlash("internal/tui/universe/poller.go")), "testConnTimeout")
 
 	path := filepath.Join(root, filepath.FromSlash(ingressFile))
 	body, err := os.ReadFile(path)
@@ -247,7 +247,7 @@ func TestIngressProxyTimeoutsExceedTheTUIBound(t *testing.T) {
 			}
 			if got := time.Duration(secs) * time.Second; got <= tuiBound {
 				t.Errorf("%s sets %s = %s, which does not exceed the TUI's testConnTimeout "+
-					"(%s, cmd/universe/poller.go).\n\n"+
+					"(%s, internal/tui/universe/poller.go).\n\n"+
 					"nginx would cut the connection before the TUI's own bound expires, and "+
 					"before that the operator's probeTimeout — so the caller gets a 504 about "+
 					"the edge instead of the probe verdict only the operator can give. Raise "+
