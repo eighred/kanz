@@ -40,8 +40,26 @@ generate: ## Regenerate the kanz-schemas SDKs (buf generate)
 	cd $(SCHEMAS_DIR) && buf generate
 
 .PHONY: build
-build: ## Build every package
-	go build ./...
+# THE BINARIES HAVE TO LAND IN ONE DIRECTORY, TOGETHER.
+#
+# This was `go build ./...`, which compiles every package and writes NOTHING:
+# with several main packages, go build discards the executables. "Build every
+# package" was true and produced nothing to run.
+#
+# That is not a tidiness problem. The kanz shell reaches kanz-monitor and
+# kanz-halt by executing them, resolved NEXT TO THE RUNNING BINARY (#161/#175) —
+# because Go refuses a bare name found via the working directory, and rightly:
+# a kanz-halt dropped in whatever directory you happened to be in would
+# otherwise become the platform kill switch. So the tools must ship together,
+# and until now no target made them do so. `make release` does not cover cmd/
+# at all; it builds ./services/... only.
+#
+# -o with a DIRECTORY writes one executable per main package and ignores the
+# rest, so `./...` stays honest: it still compiles everything, and now the
+# things that can be run can be found. bin/ is already gitignored.
+build: ## Build every package, emitting the binaries into bin/
+	@mkdir -p bin
+	go build -o bin/ ./...
 
 # Production release build (IP-security mandate). -ldflags="-s -w" strips the
 # symbol table (-s) and DWARF debug info (-w) so the shipped binary resists
