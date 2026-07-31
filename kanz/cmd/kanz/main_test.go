@@ -1,6 +1,8 @@
 package main
 
 import (
+	"context"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -93,5 +95,83 @@ func TestEstateBuilderSucceedsWithAValidSession(t *testing.T) {
 
 	if _, err := build(); err != nil {
 		t.Fatalf("a valid session failed to build the estate: %v", err)
+	}
+}
+
+// ONE SHELL, ONE ANSWER ABOUT WHETHER THERE IS A SESSION.
+//
+// The REPL adopts KANZ_TOKEN and deliberately never persists it, so a
+// store-only lookup here would leave the estate reporting "not signed in" while
+// the Copilot pane beside it answered questions — the shell disagreeing with
+// itself, which is worse than either behaviour alone.
+func TestEstateBuilderUsesTheDevTokenWhenThereIsNoStoredSession(t *testing.T) {
+	store := tokenstore.NewAt(filepath.Join(t.TempDir(), "no-such-token.json"))
+	build := newEstateBuilder(
+		config.Config{GatewayURL: "https://gw.invalid", DevToken: "pre-minted"}, store)
+
+	if _, err := build(); err != nil {
+		t.Fatalf("the estate refused to build on a KANZ_TOKEN session: %v — the Copilot pane would "+
+			"be working while the estate said 'not signed in'", err)
+	}
+}
+
+// With neither a dev token nor a stored session it still refuses, and still
+// says what to do. The dev-token path must not have removed that.
+func TestEstateBuilderStillRefusesWithNoSessionAtAll(t *testing.T) {
+	store := tokenstore.NewAt(filepath.Join(t.TempDir(), "no-such-token.json"))
+	build := newEstateBuilder(config.Config{GatewayURL: "https://gw.invalid"}, store)
+
+	_, err := build()
+	if err == nil {
+		t.Fatal("the estate built with no session at all")
+	}
+	if !strings.Contains(err.Error(), "/login") {
+		t.Errorf("error = %q, want it to still name the fix", err)
+	}
+}
+
+// THE WIRING GAP THE UNIT TESTS COULD NOT SEE.
+//
+// deviceauth.New refuses an empty issuer, and a KANZ_TOKEN session has none by
+// construction. Building it unconditionally meant the dev-token path could not
+// start at all — `kanz: deviceauth: issuer is required` before a single frame.
+//
+// Every REPL test passed: they construct the REPL directly and never run main's
+// wiring. Same blind spot that hid the estate builder's nil dereference, which
+// is why this is tested here rather than assumed.
+func TestAuthenticatorIsNotBuiltWhenThereIsNoIssuer(t *testing.T) {
+	auth, err := newAuthenticator(
+		config.Config{GatewayURL: "https://gw.invalid", DevToken: "pre-minted"}, io.Discard)
+	if err != nil {
+		t.Fatalf("newAuthenticator refused a KANZ_TOKEN session: %v — kanz would not start at all", err)
+	}
+	if auth == nil {
+		t.Fatal("returned a nil Authenticator — repl.login would panic instead of refusing")
+	}
+
+	// It must never succeed silently: if login ever reaches it, the result is an
+	// error naming the cause, not a nil token treated as a session.
+	tok, lerr := auth.Login(context.Background())
+	if lerr == nil {
+		t.Error("the placeholder authenticator returned success")
+	}
+	if tok != nil {
+		t.Error("the placeholder authenticator returned a token")
+	}
+}
+
+// The SSO path is unchanged: a configured issuer still builds a real device-flow
+// client. A fix that returned the placeholder for everyone would pass the test
+// above and quietly disable sign-in.
+func TestAuthenticatorIsBuiltNormallyWhenAnIssuerIsConfigured(t *testing.T) {
+	auth, err := newAuthenticator(
+		config.Config{GatewayURL: "https://gw.invalid", Issuer: "https://sso.invalid", ClientID: "kanz-cli"},
+		io.Discard)
+	if err != nil {
+		t.Fatalf("newAuthenticator failed for a normal SSO configuration: %v", err)
+	}
+	if _, isPlaceholder := auth.(unavailableAuth); isPlaceholder {
+		t.Error("an SSO-configured client got the placeholder authenticator — /login would refuse " +
+			"on a deployment that has a real issuer")
 	}
 }

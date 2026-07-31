@@ -182,3 +182,110 @@ func TestSplitFirst(t *testing.T) {
 		}
 	}
 }
+
+// devREPL builds a REPL holding a pre-minted KANZ_TOKEN, with a token store
+// pointed at an empty temp dir so persistence can be observed.
+func devREPL(t *testing.T, token string) (*REPL, *tokenstore.Store, *strings.Builder) {
+	t.Helper()
+	store := tokenstore.NewAt(filepath.Join(t.TempDir(), "token.json"))
+	out := &strings.Builder{}
+	r := New(
+		config.Config{GatewayURL: "https://gw.invalid", DevToken: token},
+		store, &fakeAuth{}, strings.NewReader(""), out,
+	)
+	return r, store, out
+}
+
+// A PRE-MINTED TOKEN IS ADOPTED WITHOUT SIGNING IN. This is the whole feature:
+// until Eighred SSO ships there is no issuer to authenticate against, so the
+// client must be drivable against a local gateway.
+func TestDevTokenIsAdoptedAsTheSession(t *testing.T) {
+	r, _, _ := devREPL(t, "pre-minted")
+
+	if r.accessToken() != "pre-minted" {
+		t.Fatalf("accessToken() = %q, want the pre-minted token", r.accessToken())
+	}
+	if !r.devSession {
+		t.Error("devSession is false — /login, /logout and /whoami would misreport the session")
+	}
+	// tokenstore.Valid must accept it, or every command would try to sign in.
+	if !tokenstore.Valid(r.token, time.Now()) {
+		t.Error("the adopted token is not Valid — a zero Expiry must mean non-expiring, since the " +
+			"gateway is the authority on this bearer's lifetime")
+	}
+}
+
+// IT IS NEVER PERSISTED. The store is where an SSO session lives across runs; a
+// bearer from the environment that outlived the environment is exactly the
+// stale-credential surprise this must not create.
+func TestDevTokenIsNotWrittenToTheTokenStore(t *testing.T) {
+	_, store, _ := devREPL(t, "pre-minted")
+
+	tok, err := store.Load()
+	if err != nil {
+		t.Fatalf("store.Load: %v", err)
+	}
+	if tok != nil {
+		t.Errorf("the dev token was persisted (%q) — unsetting KANZ_TOKEN would no longer end the "+
+			"session, and the bearer would outlive the environment that supplied it", tok.AccessToken)
+	}
+}
+
+// THE OPERATOR MUST BE ABLE TO SEE IT. The failure mode of a static bearer is
+// forgetting you are on one, so the header says so every session.
+func TestTheHeaderSaysTheSessionIsAKanzToken(t *testing.T) {
+	r, _, out := devREPL(t, "pre-minted")
+	r.header()
+
+	if !strings.Contains(out.String(), "KANZ_TOKEN") {
+		t.Errorf("header = %q, want it to name KANZ_TOKEN — a static bearer nobody can see they are "+
+			"using is the only genuinely dangerous version of this", out.String())
+	}
+}
+
+// /login cannot work: there is no issuer. Saying so beats a device flow that
+// fails against nothing.
+func TestLoginIsRefusedInADevSession(t *testing.T) {
+	r, _, _ := devREPL(t, "pre-minted")
+
+	err := r.login(context.Background())
+	if err == nil {
+		t.Fatal("/login attempted a device flow with no KANZ_SSO_ISSUER configured")
+	}
+	if !strings.Contains(err.Error(), "KANZ_TOKEN") {
+		t.Errorf("error %q does not explain that the session comes from KANZ_TOKEN", err)
+	}
+}
+
+// /logout would be a lie: the next start reads KANZ_TOKEN again, so the session
+// returns while /whoami claimed it was gone. Point at where the credential is.
+func TestLogoutExplainsWhereTheDevCredentialLives(t *testing.T) {
+	r, _, out := devREPL(t, "pre-minted")
+	r.logout()
+
+	if r.token == nil {
+		t.Error("/logout cleared a token that comes back on the next start — the session would " +
+			"appear to end and then silently return")
+	}
+	if !strings.Contains(out.String(), "KANZ_TOKEN") {
+		t.Errorf("output %q does not say where the credential actually lives", out.String())
+	}
+}
+
+// A normal SSO session is untouched by any of this.
+func TestAnSSOSessionIsNotMarkedAsADevSession(t *testing.T) {
+	store := tokenstore.NewAt(filepath.Join(t.TempDir(), "token.json"))
+	r := New(
+		config.Config{GatewayURL: "https://gw.invalid", Issuer: "https://sso.invalid"},
+		store, &fakeAuth{tok: &deviceauth.Token{AccessToken: "sso"}}, strings.NewReader(""), &strings.Builder{},
+	)
+	if r.devSession {
+		t.Error("an SSO-configured REPL was marked as a dev session")
+	}
+	if err := r.login(context.Background()); err != nil {
+		t.Fatalf("login on a normal session failed: %v", err)
+	}
+	if tok, _ := store.Load(); tok == nil {
+		t.Error("a real SSO login was not persisted — the dev-token path must not have disabled it")
+	}
+}
