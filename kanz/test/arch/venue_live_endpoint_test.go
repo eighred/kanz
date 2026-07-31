@@ -613,9 +613,6 @@ var demoModeSelectors = map[string]string{
 // anywhere safe.
 var noDemoPathExemptions = map[string]liveVenueExemption{}
 
-// goStringLiteralRe matches double-quoted Go string literals, handling escapes.
-var goStringLiteralRe = regexp.MustCompile(`"(?:[^"\\]|\\.)*"`)
-
 // serviceMentions reports whether a service's non-test Go source contains a
 // marker INSIDE A STRING LITERAL. Non-test only, and the shared venueadapter
 // package is included because the header would be set where the request is
