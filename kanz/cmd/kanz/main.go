@@ -117,7 +117,22 @@ func run() error {
 	panes = append(panes, estate.All(shared)...)
 	panes = append(panes,
 		// Bus plane: their own SPIFFE identity, so their own process (#65).
-		pane.NewExecPane("monitor", "Monitor", "kanz-monitor"),
+		//
+		// --gateway is passed so the child follows the SHELL'S resolved endpoint
+		// rather than independently re-reading KANZ_GATEWAY_URL and hoping the two
+		// agree (#67). Both read the same env var today, so this changes nothing
+		// now — it is what keeps them agreeing when kanz gains a flag or a config
+		// file and the child does not.
+		//
+		// THE TOKEN IS NOT PASSED ON argv, deliberately. Command lines are
+		// world-readable in the process table; the child inherits the environment
+		// and resolves KANZ_TOKEN there, which is the same path it uses standalone.
+		pane.NewExecPane("monitor", "Monitor", "kanz-monitor", "--gateway", cfg.GatewayURL),
+		// kanz-halt REQUIRES --by, --reason and --tenant (a mode change must be
+		// attributable), so launching it with no arguments exits immediately with
+		// "--by is required". Collecting that attribution needs a confirmation
+		// form this shell does not have yet — tracked separately; the tab is left
+		// in place because removing it would hide the gap rather than close it.
 		pane.NewExecPane("halt", "Halt", "kanz-halt"),
 	)
 	reg, err := pane.NewRegistry(panes...)
