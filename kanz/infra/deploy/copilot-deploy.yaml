@@ -80,6 +80,15 @@ spec:
           env:
             - { name: COPILOT_LISTEN, value: ":8080" }
             # The version knob — seam is version-agnostic, switch without a rebuild.
+            # WHICH PROVIDER ANSWERS, stated rather than inherited from the build
+            # (#179). The image links its adapters by build tag; this chooses
+            # among them at runtime, and there is deliberately NO default — an
+            # unset value refuses to start rather than picking one, the same rule
+            # that removed the OKX endpoint default (#147).
+            #
+            # Changing this line is the whole act of changing model vendor. It is
+            # one line, it is reviewable, and it is the line to look at in a diff.
+            - { name: COPILOT_PROVIDER, value: "anthropic" }
             - { name: COPILOT_MODEL_ID, value: "claude-fable-5" }
             # SEC-01d: a BILLABLE credential — it arrives as a Vault/CSI secret FILE,
             # never a plaintext env var.

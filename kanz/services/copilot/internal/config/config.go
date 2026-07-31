@@ -24,6 +24,13 @@ type Config struct {
 	// ModelID selects the Claude version the production client calls — the seam
 	// is version-agnostic, so this is the one knob that switches versions.
 	// Defaults to the MAX / most-capable model (llm.DefaultModelID).
+	// Provider selects which linked LLM adapter answers (#179), from
+	// COPILOT_PROVIDER. Required, with no default: which model answers a
+	// portfolio manager's question is not a decision to make by omission, and
+	// what is available depends on the build tags this binary was compiled with.
+	// See cmd/copilot/model.go for the resolution and the fail-closed rule.
+	Provider string
+
 	ModelID string
 
 	// AnthropicAPIKey authenticates the Claude client. Sourced from a SEC-01d
@@ -84,6 +91,7 @@ func Load() (Config, error) {
 		LogLevel:        parseLevel(os.Getenv("COPILOT_LOG_LEVEL")),
 		ModelID:         envOr("COPILOT_MODEL_ID", llm.DefaultModelID),
 		AnthropicAPIKey: anthropicAPIKey,
+		Provider:        strings.TrimSpace(os.Getenv("COPILOT_PROVIDER")),
 		AllowStub:       os.Getenv("COPILOT_ALLOW_STUB") == "true",
 		PolicyPath:      os.Getenv("COPILOT_POLICY_PATH"),
 		LineageAddr:     os.Getenv("COPILOT_LINEAGE_ADDR"),
