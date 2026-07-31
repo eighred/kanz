@@ -12,6 +12,8 @@
 // deliberately small.
 package keymap
 
+import "strings"
+
 // Action is what a global key does.
 type Action int
 
@@ -91,4 +93,55 @@ func StatusHints() []string {
 		out = append(out, b.Label)
 	}
 	return out
+}
+
+// A GLOBAL BINDING MUST NOT SWALLOW A CHARACTER SOMEBODY IS TYPING.
+//
+// The table above binds `h`, `l`, `q` and `?`. That is ordinary for a TUI made
+// of read-only panes, and it made the shell's DEFAULT pane unusable: typing
+// "help" into the Copilot prompt sent `h` to prev-pane, `e` to the pane, `l` to
+// next-pane, `p` to the pane — and `q` quit the shell mid-sentence.
+//
+// It shipped in #65 because the routing test probed with `x` and `z`, which
+// happen to be unbound. A test that picks its own keys proves the mechanism, not
+// the table.
+//
+// So a pane that accepts typed text (pane.TextInput) is asked FIRST, and the
+// shell keeps only the keys a text field would never produce.
+
+// TextSafe reports whether the shell may keep key even while the active pane is
+// taking typed input.
+//
+// The rule is derived from the key itself rather than a per-binding flag, so a
+// new binding cannot forget to declare it — and it is deliberately conservative:
+//
+//   - anything with a modifier (alt+1, shift+tab, ctrl+d) — a text field does
+//     not receive these as characters
+//   - tab and esc — named keys, not characters
+//
+// Everything else is refused, which covers bare letters AND the arrows. Arrows
+// matter because a text field wants left/right for the cursor: the Copilot pane
+// does not implement cursor movement yet, and binding them globally is exactly
+// how it would be prevented from ever doing so.
+func TextSafe(key string) bool {
+	if strings.Contains(key, "+") {
+		return true
+	}
+	switch key {
+	case "tab", "esc":
+		return true
+	}
+	return false
+}
+
+// LookupFor resolves key for the active pane, honouring whether that pane is
+// taking typed input.
+//
+// acceptsText false behaves exactly like Lookup — a read-only pane keeps the
+// full table, including the vim-style h/l that make it pleasant to drive.
+func LookupFor(key string, acceptsText bool) Action {
+	if acceptsText && !TextSafe(key) {
+		return None
+	}
+	return Lookup(key)
 }

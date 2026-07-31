@@ -102,7 +102,10 @@ func (m *Model) globalKey(key string) (tea.Cmd, bool) {
 		return nil, true
 	}
 
-	switch keymap.Lookup(key) {
+	// ASK THE PANE FIRST. A pane taking typed text must receive the characters
+	// somebody types; consuming them as bindings makes it unusable, which is what
+	// `h`/`l`/`q`/`?` did to the Copilot prompt in #65.
+	switch keymap.LookupFor(key, m.activeAcceptsText()) {
 	case keymap.Quit:
 		m.quitting = true
 		return tea.Quit, true
@@ -127,6 +130,16 @@ func (m *Model) globalKey(key string) (tea.Cmd, bool) {
 		return nil, true
 	}
 	return nil, false
+}
+
+// activeAcceptsText reports whether the active pane takes typed characters.
+func (m *Model) activeAcceptsText() bool {
+	p, ok := m.panes.At(m.active)
+	if !ok {
+		return false
+	}
+	_, isText := p.(pane.TextInput)
+	return isText
 }
 
 // selectPane switches tabs, and is where the two planes diverge.
