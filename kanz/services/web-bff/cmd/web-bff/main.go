@@ -12,10 +12,10 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"runtime/debug"
 	"syscall"
 	"time"
 
+	"github.com/eighred/kanz/internal/version"
 	"github.com/eighred/kanz/pkg/observability"
 	"github.com/eighred/kanz/services/web-bff/internal/config"
 	"github.com/eighred/kanz/services/web-bff/internal/oidc"
@@ -36,7 +36,7 @@ func main() {
 	base := slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: cfg.LogLevel})
 	obs, err := observability.New(ctx, observability.Config{
 		ServiceName:    "web-bff",
-		ServiceVersion: version(),
+		ServiceVersion: version.String(),
 		OTLPEndpoint:   cfg.OTLPEndpoint,
 		SampleRatio:    1,
 	}, base)
@@ -117,15 +117,4 @@ func sweepLoop(ctx context.Context, m *session.Manager) {
 			m.Sweep()
 		}
 	}
-}
-
-func version() string {
-	if info, ok := debug.ReadBuildInfo(); ok {
-		for _, s := range info.Settings {
-			if s.Key == "vcs.revision" {
-				return s.Value
-			}
-		}
-	}
-	return "dev"
 }

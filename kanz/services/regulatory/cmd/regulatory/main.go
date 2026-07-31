@@ -12,7 +12,6 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"runtime/debug"
 	"syscall"
 	"time"
 
@@ -21,6 +20,7 @@ import (
 	"github.com/eighred/kanz/internal/audit/linkstore"
 	"github.com/eighred/kanz/internal/audit/signer"
 	"github.com/eighred/kanz/internal/regulatory"
+	"github.com/eighred/kanz/internal/version"
 	"github.com/eighred/kanz/pkg/observability"
 	"github.com/eighred/kanz/services/regulatory/internal/config"
 	"github.com/eighred/kanz/services/regulatory/internal/server"
@@ -39,7 +39,7 @@ func main() {
 	base := slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: cfg.LogLevel})
 	obs, err := observability.New(ctx, observability.Config{
 		ServiceName:    "regulatory",
-		ServiceVersion: version(),
+		ServiceVersion: version.String(),
 		OTLPEndpoint:   cfg.OTLPEndpoint,
 		SampleRatio:    1,
 	}, base)
@@ -142,16 +142,4 @@ func openLinkStore(ctx context.Context, cfg config.Config) (linkstore.Store, fun
 		return nil, nil, err
 	}
 	return store, pool.Close, nil
-}
-
-// version reads the build's VCS revision for the service-version label.
-func version() string {
-	if info, ok := debug.ReadBuildInfo(); ok {
-		for _, s := range info.Settings {
-			if s.Key == "vcs.revision" {
-				return s.Value
-			}
-		}
-	}
-	return "dev"
 }

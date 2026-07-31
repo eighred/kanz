@@ -14,6 +14,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/eighred/kanz/internal/version"
 	"github.com/eighred/kanz/pkg/observability"
 	"github.com/eighred/kanz/services/schema-registry/internal/config"
 	"github.com/eighred/kanz/services/schema-registry/internal/server"
@@ -46,7 +47,7 @@ func main() {
 	// context still propagates, and startup never blocks on a collector.
 	obs, err := observability.New(ctx, observability.Config{
 		ServiceName:    "schema-registry",
-		ServiceVersion: version(),
+		ServiceVersion: version.String(),
 		SampleRatio:    1,
 	}, slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: cfg.LogLevel}))
 	if err != nil {
@@ -93,8 +94,3 @@ func main() {
 		logger.Error("http shutdown error", "err", err)
 	}
 }
-
-// version is the ServiceVersion stamped on this process's OTel resource. See the
-// note on the identical function in services/operator: these copies are numerous
-// and do not agree, and unifying them is its own change.
-func version() string { return "dev" }

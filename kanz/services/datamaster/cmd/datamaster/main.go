@@ -22,13 +22,13 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"runtime/debug"
 	"sort"
 	"syscall"
 	"time"
 
 	"github.com/eighred/kanz/internal/dec"
 	"github.com/eighred/kanz/internal/pg"
+	"github.com/eighred/kanz/internal/version"
 	"github.com/eighred/kanz/pkg/observability"
 	"github.com/eighred/kanz/services/datamaster/internal/config"
 	"github.com/eighred/kanz/services/datamaster/internal/feed"
@@ -52,7 +52,7 @@ func main() {
 	base := slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: cfg.LogLevel})
 	obs, err := observability.New(ctx, observability.Config{
 		ServiceName:    "datamaster",
-		ServiceVersion: version(),
+		ServiceVersion: version.String(),
 		OTLPEndpoint:   cfg.OTLPEndpoint,
 		SampleRatio:    1,
 	}, base)
@@ -267,16 +267,4 @@ func guardSim(feeds []feed.VendorFeed, allowSim bool) error {
 		}
 	}
 	return nil
-}
-
-// version reads the build's VCS revision for the service-version label.
-func version() string {
-	if info, ok := debug.ReadBuildInfo(); ok {
-		for _, s := range info.Settings {
-			if s.Key == "vcs.revision" {
-				return s.Value
-			}
-		}
-	}
-	return "dev"
 }

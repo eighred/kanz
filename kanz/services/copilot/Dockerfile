@@ -41,7 +41,10 @@ COPY kanz/ ./
 # Linking is a build decision, selection is a deployment one — an image that
 # linked only what its author happened to want would make provider choice
 # somebody else's, which is exactly what that change removed.
-RUN CGO_ENABLED=0 go build -tags anthropic,openrouter -trimpath -ldflags="-s -w" \
+# VERSION is stamped into the binary (internal/version, #143). Unset here means
+# the image reports "unstamped" rather than a plausible-looking "dev".
+ARG VERSION=
+RUN CGO_ENABLED=0 go build -tags anthropic,openrouter -trimpath -ldflags="-s -w -X github.com/eighred/kanz/internal/version.stamped=${VERSION}" \
       -o /out/copilot ./services/copilot/cmd/copilot
 
 # Distroless static: no shell, no libc, no package manager — minimal attack

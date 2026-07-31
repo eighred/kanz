@@ -21,7 +21,6 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"runtime/debug"
 	"syscall"
 	"time"
 
@@ -30,6 +29,7 @@ import (
 
 	querypb "github.com/eighred/kanz/kanz-schemas-go/query/v1"
 
+	"github.com/eighred/kanz/internal/version"
 	"github.com/eighred/kanz/pkg/auth"
 	"github.com/eighred/kanz/pkg/observability"
 	"github.com/eighred/kanz/pkg/transport"
@@ -54,7 +54,7 @@ func main() {
 	base := slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: cfg.LogLevel})
 	obs, err := observability.New(ctx, observability.Config{
 		ServiceName:    "copilot",
-		ServiceVersion: version(),
+		ServiceVersion: version.String(),
 		OTLPEndpoint:   cfg.OTLPEndpoint,
 		SampleRatio:    1,
 	}, base)
@@ -175,16 +175,4 @@ type denyAll struct{}
 
 func (denyAll) Authorize(_ context.Context, _ auth.Request) auth.Decision {
 	return auth.Decision{Allow: false, Reason: "no policy bundle configured"}
-}
-
-// version reads the build's VCS revision for the service-version label.
-func version() string {
-	if info, ok := debug.ReadBuildInfo(); ok {
-		for _, s := range info.Settings {
-			if s.Key == "vcs.revision" {
-				return s.Value
-			}
-		}
-	}
-	return "dev"
 }

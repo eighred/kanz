@@ -40,6 +40,7 @@ import (
 	"github.com/eighred/kanz/internal/venueadapter/accountproof"
 	"github.com/eighred/kanz/internal/venueadapter/orderview"
 	"github.com/eighred/kanz/internal/venueadapter/server"
+	"github.com/eighred/kanz/internal/version"
 	"github.com/eighred/kanz/pkg/bus"
 	"github.com/eighred/kanz/pkg/observability"
 	"github.com/eighred/kanz/pkg/transport"
@@ -77,7 +78,7 @@ func run(cfg config.Config) error {
 	base := slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: cfg.LogLevel})
 	obs, err := observability.New(ctx, observability.Config{
 		ServiceName:    "venue-binance",
-		ServiceVersion: version(),
+		ServiceVersion: version.String(),
 		OTLPEndpoint:   cfg.OTLPEndpoint,
 		SampleRatio:    1,
 	}, base)
@@ -151,7 +152,7 @@ func run(cfg config.Config) error {
 
 	rawProducer, err := bus.NewProducer(client, bus.ProducerConfig{
 		Source:          cfg.Source,
-		ProducerVersion: version(),
+		ProducerVersion: version.String(),
 		Metrics:         busMetrics,
 	})
 	if err != nil {
@@ -301,5 +302,3 @@ func parseSymbolMap(s string) map[string]string {
 	}
 	return out
 }
-
-func version() string { return "dev" }

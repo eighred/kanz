@@ -26,6 +26,7 @@ import (
 
 	"github.com/eighred/kanz/internal/execution"
 	"github.com/eighred/kanz/internal/venueadapter/exchangeauth"
+	"github.com/eighred/kanz/internal/version"
 	"github.com/eighred/kanz/pkg/observability"
 	"github.com/eighred/kanz/services/operator/internal/config"
 	"github.com/eighred/kanz/services/operator/internal/estate"
@@ -71,7 +72,7 @@ func main() {
 	// reachable, which a control plane must not do.
 	obs, err := observability.New(ctx, observability.Config{
 		ServiceName:    "operator",
-		ServiceVersion: version(),
+		ServiceVersion: version.String(),
 		SampleRatio:    1,
 	}, slog.NewJSONHandler(os.Stdout, nil))
 	if err != nil {
@@ -198,12 +199,3 @@ func namespaceOr(def string) string {
 	}
 	return def
 }
-
-// version is the ServiceVersion stamped on this process's OTel resource.
-//
-// This is the 26th copy of this function in the repository, and the copies do
-// not agree — most return "dev", archiver returns "0.1.0". It is written here to
-// match the surrounding convention rather than to endorse it; a single
-// build-stamped version belongs in one place, and consolidating 26 call sites is
-// its own change, not a rider on #61.
-func version() string { return "dev" }

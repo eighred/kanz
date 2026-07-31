@@ -59,7 +59,7 @@ generate: ## Regenerate the kanz-schemas SDKs (buf generate)
 # things that can be run can be found. bin/ is already gitignored.
 build: ## Build every package, emitting the binaries into bin/
 	@mkdir -p bin
-	go build -o bin/ ./...
+	go build -ldflags="$(VERSION_LDFLAGS)" -o bin/ ./...
 
 # Production release build (IP-security mandate). -ldflags="-s -w" strips the
 # symbol table (-s) and DWARF debug info (-w) so the shipped binary resists
@@ -68,7 +68,21 @@ build: ## Build every package, emitting the binaries into bin/
 # (e.g. `make release TAGS="binance okx"`); the default binary stays vendor-free.
 # Secrets never enter the binary — keys are fetched at runtime into RAM via the
 # env / mock-Vault (`*_FILE`) boundary, never hardcoded or committed.
-GO_RELEASE_LDFLAGS := -s -w
+# VERSION is what the binary reports as its own version — on every OTel span
+# (ServiceVersion) and in envelope field 14 (producer_version, REQUIRED, and the
+# first thing read when debugging a bad event). See internal/version.
+#
+# It MUST be stamped at link time here, because the fallback cannot work in the
+# artifact that ships: .dockerignore excludes .git, so a container build carries
+# no VCS metadata and debug.ReadBuildInfo finds no revision. That is exactly how
+# 26 binaries came to report "dev" from images built at a signed release tag.
+#
+# Defined BEFORE GO_RELEASE_LDFLAGS: both use := (immediate expansion), so a
+# reference to a variable defined later expands to nothing, silently.
+VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null)
+VERSION_LDFLAGS := $(if $(VERSION),-X github.com/eighred/kanz/internal/version.stamped=$(VERSION),)
+
+GO_RELEASE_LDFLAGS := -s -w $(VERSION_LDFLAGS)
 TAGS ?=
 
 .PHONY: release

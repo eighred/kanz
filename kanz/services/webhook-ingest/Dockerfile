@@ -38,7 +38,10 @@ COPY kanz/ ./
 # The tag and the manifest move TOGETHER: this binary refuses to start if
 # WEBHOOK_INGEST_REDIS_URL is unset, and the untagged one refuses if it is SET — so the image
 # and the deployment cannot silently disagree about which defence is in force.
-RUN CGO_ENABLED=0 go build -tags redis -trimpath -ldflags="-s -w"       -o /out/webhook-ingest ./services/webhook-ingest/cmd/webhook-ingest
+# VERSION is stamped into the binary (internal/version, #143). Unset here means
+# the image reports "unstamped" rather than a plausible-looking "dev".
+ARG VERSION=
+RUN CGO_ENABLED=0 go build -tags redis -trimpath -ldflags="-s -w -X github.com/eighred/kanz/internal/version.stamped=${VERSION}"       -o /out/webhook-ingest ./services/webhook-ingest/cmd/webhook-ingest
 
 # Distroless static: no shell, no libc, no package manager. :nonroot runs as uid
 # 65532, matching the pod's runAsUser.

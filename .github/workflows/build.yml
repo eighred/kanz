@@ -239,6 +239,9 @@ jobs:
           # not the git context which would omit the uncommitted SDK.
           context: .
           file: ${{ matrix.dockerfile }}
+          # Not a release, so the commit SHA is the honest version (#143).
+          build-args: |
+            VERSION=${{ github.sha }}
           push: ${{ github.event_name == 'push' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}

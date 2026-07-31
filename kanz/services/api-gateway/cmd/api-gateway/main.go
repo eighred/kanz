@@ -25,6 +25,7 @@ import (
 	operatorpb "github.com/eighred/kanz/kanz-schemas-go/operator/v1"
 	querypb "github.com/eighred/kanz/kanz-schemas-go/query/v1"
 
+	"github.com/eighred/kanz/internal/version"
 	"github.com/eighred/kanz/pkg/auth"
 	"github.com/eighred/kanz/pkg/bus"
 	"github.com/eighred/kanz/pkg/observability"
@@ -50,7 +51,7 @@ func main() {
 
 	base := slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: cfg.LogLevel})
 	obs, err := observability.New(ctx, observability.Config{
-		ServiceName: cfg.Source, ServiceVersion: version(), OTLPEndpoint: cfg.OTLPEndpoint, SampleRatio: 1,
+		ServiceName: cfg.Source, ServiceVersion: version.String(), OTLPEndpoint: cfg.OTLPEndpoint, SampleRatio: 1,
 	}, base)
 	if err != nil {
 		slog.Default().Error("observability init failed", "err", err)
@@ -158,7 +159,7 @@ func buildOrders(ctx context.Context, cfg config.Config, logger *slog.Logger) (*
 	}
 	producer, err := bus.NewProducer(client, bus.ProducerConfig{
 		Source:              cfg.Source,
-		ProducerVersion:     version(),
+		ProducerVersion:     version.String(),
 		VerifyCommandIssuer: auth.VerifyCommandIssuer,
 	})
 	if err != nil {
@@ -400,7 +401,3 @@ func (o oidcAuthenticator) Authenticate(token string) (*middleware.Principal, er
 	}
 	return &middleware.Principal{Subject: p.Subject, Tenant: p.Tenant, Roles: p.Roles}, nil
 }
-
-// version is the service version stamped on telemetry. Hardcoded until the
-// build injects a git SHA / semver (CICD-01a/c ldflags).
-func version() string { return "dev" }

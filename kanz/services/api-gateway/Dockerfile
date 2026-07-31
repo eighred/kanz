@@ -23,7 +23,10 @@ COPY kanz/ ./
 # CGO off ⇒ a fully static binary (every dep is pure Go), which is what
 # distroless/static requires. -trimpath strips local paths; -s -w drop the
 # symbol/debug tables.
-RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" \
+# VERSION is stamped into the binary (internal/version, #143). Unset here means
+# the image reports "unstamped" rather than a plausible-looking "dev".
+ARG VERSION=
+RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X github.com/eighred/kanz/internal/version.stamped=${VERSION}" \
       -o /out/api-gateway ./services/api-gateway/cmd/api-gateway
 
 # Distroless static: no shell, no libc, no package manager — minimal attack

@@ -24,7 +24,10 @@ RUN go mod download
 
 COPY kanz/ ./
 # CGO off ⇒ a fully static binary, which is what distroless/static requires.
-RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w"       -o /out/compliance ./services/compliance/cmd/compliance
+# VERSION is stamped into the binary (internal/version, #143). Unset here means
+# the image reports "unstamped" rather than a plausible-looking "dev".
+ARG VERSION=
+RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X github.com/eighred/kanz/internal/version.stamped=${VERSION}"       -o /out/compliance ./services/compliance/cmd/compliance
 
 # Distroless static: no shell, no libc, no package manager. :nonroot runs as uid
 # 65532, matching the pod's runAsUser.
