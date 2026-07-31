@@ -2,6 +2,12 @@
 // provisions new nodes, drives node lifecycle (cordon/drain/region) and manages
 // venue API credentials.
 //
+// THE PANES THEMSELVES NOW LIVE IN internal/tui/universe, so the kanz shell can
+// mount them too (#66). This binary is the standalone entry point and stays
+// until the shell is proven: flags, secret loading, and a bubbletea program
+// around the same Model the shell embeds. Nothing here is duplicated — if this
+// file and the shell ever disagree about what a pane does, the pane moved.
+//
 // IT REACHES THE ESTATE THROUGH THE API GATEWAY, and holds no cluster access of any
 // kind (OPS-M2c). It used to dial operator.v1 directly in plaintext at
 // localhost:9090, which only worked inside a `kubectl port-forward` the human had to
@@ -19,6 +25,8 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+
+	"github.com/eighred/kanz/internal/tui/universe"
 )
 
 func main() {
@@ -30,7 +38,7 @@ func main() {
 
 func run() error {
 	var (
-		cfg       Config
+		cfg       universe.Config
 		gwURL     string
 		tokenFile string
 		signFile  string
@@ -44,7 +52,7 @@ func run() error {
 		"file holding the gateway's request-signing secret, if the deployment sets one "+
 			"(env KANZ_SIGNING_SECRET_FILE, or KANZ_SIGNING_SECRET directly)")
 	fs.DurationVar(&cfg.PollInterval, "poll", 3*time.Second, "estate refresh interval")
-	fs.DurationVar(&cfg.CallTimeout, "timeout", defaultCallTimeout,
+	fs.DurationVar(&cfg.CallTimeout, "timeout", universe.DefaultCallTimeout,
 		"timeout for one ordinary control-plane call (the estate poll and the "+
 			"cordon/drain/move/add/set-keys actions). Test Connection is NOT bounded by this: "+
 			"it waits on the operator running a probe Job and keeps its own, much longer bound")
@@ -64,7 +72,7 @@ func run() error {
 		return err
 	}
 
-	src, err := newGatewaySource(gatewayConfig{
+	src, err := universe.NewGatewaySource(universe.GatewayConfig{
 		BaseURL:       gwURL,
 		Token:         token,
 		SigningSecret: signing,
@@ -73,7 +81,7 @@ func run() error {
 		return err
 	}
 
-	p := tea.NewProgram(newModel(cfg, src), tea.WithAltScreen())
+	p := tea.NewProgram(universe.NewModel(cfg, src), tea.WithAltScreen())
 	_, err = p.Run()
 	return err
 }

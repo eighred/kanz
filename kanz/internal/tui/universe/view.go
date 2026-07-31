@@ -1,4 +1,4 @@
-package main
+package universe
 
 import (
 	"fmt"
@@ -17,13 +17,13 @@ var (
 	styleSelected = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("6"))
 )
 
-// render is the pure function of model that produces the whole frame — no I/O,
+// render is the pure function of Model that produces the whole frame — no I/O,
 // no clock (Age is precomputed in the poller), so view_test.go calls it
-// directly against a hand-built model.
-func (m model) render() string {
+// directly against a hand-built Model.
+func (m Model) render() string {
 	if m.showForm {
 		out := m.form.render()
-		// Static text, not a spinner: render must stay a pure function of the model,
+		// Static text, not a spinner: render must stay a pure function of the Model,
 		// and an animation would need a tick loop whose only output is reassurance.
 		// The probe takes seconds now (it waits on a Job), so the one thing needed is
 		// that the screen changes at all on the keypress.
@@ -52,9 +52,9 @@ func (m model) render() string {
 
 	var body string
 	switch m.active {
-	case paneClusters:
+	case ScreenClusters:
 		body = m.renderClusters()
-	case paneAPI:
+	case ScreenAPI:
 		body = m.renderAPI()
 	default:
 		body = m.renderNodes()
@@ -63,7 +63,7 @@ func (m model) render() string {
 	return body + "\n" + m.renderStatus()
 }
 
-func (m model) renderNodes() string {
+func (m Model) renderNodes() string {
 	var b strings.Builder
 	b.WriteString(styleTitle.Render("NODES") + "\n")
 	b.WriteString(fmt.Sprintf("   %-16s %-14s %-16s %-10s %-10s %-6s\n",
@@ -111,7 +111,7 @@ func (m model) renderNodes() string {
 	return b.String()
 }
 
-func (m model) renderClusters() string {
+func (m Model) renderClusters() string {
 	var b strings.Builder
 	b.WriteString(styleTitle.Render("CLUSTERS") + "\n")
 	b.WriteString(fmt.Sprintf("%-14s %-8s %-8s\n", "REGION", "ONLINE", "OFFLINE"))
@@ -126,7 +126,7 @@ func (m model) renderClusters() string {
 }
 
 // renderAPI shows the API Manager pane — presence only, never key material.
-func (m model) renderAPI() string {
+func (m Model) renderAPI() string {
 	var b strings.Builder
 	b.WriteString(styleTitle.Render("API MANAGER") + "\n")
 	b.WriteString(fmt.Sprintf("   %-12s %-14s\n", "VENUE", "KEYS"))
@@ -154,12 +154,12 @@ func (m model) renderAPI() string {
 	return b.String()
 }
 
-func (m model) renderStatus() string {
+func (m Model) renderStatus() string {
 	left := styleDim.Render("[tab] switch pane   [a] add node   [q] quit")
-	if m.active == paneNodes {
+	if m.active == ScreenNodes {
 		left += "\n" + styleDim.Render("[↑↓] select  [c]ordon [u]ncordon [d]rain [m]ove")
 	}
-	if m.active == paneAPI {
+	if m.active == ScreenAPI {
 		left += "\n" + styleDim.Render("[↑↓] select  [k] set keys")
 	}
 	if p := m.renderProvisions(); p != "" {
@@ -178,7 +178,7 @@ func (m model) renderStatus() string {
 // provisioning (e.g. "provisioning: london=Installing tokyo=Failed"). It is
 // empty when there is nothing in flight, so it adds no blank lines to the
 // steady-state frame.
-func (m model) renderProvisions() string {
+func (m Model) renderProvisions() string {
 	if len(m.provisions) == 0 {
 		return ""
 	}

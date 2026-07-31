@@ -1,4 +1,4 @@
-package main
+package universe
 
 import (
 	"os"
@@ -16,16 +16,16 @@ import (
 // key file first, so a blank Key Path came back as "read key : no such file or
 // directory" — an error about a path nobody typed.
 func TestAddFormRefusesAnEmptyRequiredFieldWithoutCallingTheServer(t *testing.T) {
-	m := newModel(Config{}, stubSource{})
+	m := NewModel(Config{}, stubSource{})
 	u, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("a")})
-	m = u.(model)
+	m = u.(Model)
 	if !m.showForm {
 		t.Fatal("pressing a did not open the Add Node form")
 	}
 
 	// Submit with every field empty except the prefilled port.
 	u2, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
-	m2 := u2.(model)
+	m2 := u2.(Model)
 
 	if cmd != nil {
 		t.Error("the form issued a request with an empty hostname and IP. Validate inline: " +
@@ -50,7 +50,7 @@ func TestAddFormRefusesAnEmptyRequiredFieldWithoutCallingTheServer(t *testing.T)
 				"say which field is wrong saves no round trip", got, label)
 		}
 	}
-	// The rejection must reach the screen, not just the model.
+	// The rejection must reach the screen, not just the Model.
 	if !strings.Contains(m2.render(), got) {
 		t.Errorf("the validation error never rendered; frame was:\n%s", m2.render())
 	}
@@ -60,7 +60,7 @@ func TestAddFormRefusesAnEmptyRequiredFieldWithoutCallingTheServer(t *testing.T)
 // rather than being one canned string. A message that always lists all four
 // fields would send an operator to re-check three they already filled.
 func TestAddFormNamesOnlyTheFieldStillEmpty(t *testing.T) {
-	m := newModel(Config{}, stubSource{})
+	m := NewModel(Config{}, stubSource{})
 	m.showForm = true
 	m.form = addFormWith(t, map[string]string{
 		"hostname": "london",
@@ -73,7 +73,7 @@ func TestAddFormNamesOnlyTheFieldStillEmpty(t *testing.T) {
 	if cmd != nil {
 		t.Fatal("a form with an empty Key Path still issued a request")
 	}
-	got := u.(model).formErr
+	got := u.(Model).formErr
 	if got == nil {
 		t.Fatal("a form with an empty Key Path submitted without an error")
 	}
@@ -91,7 +91,7 @@ func TestAddFormNamesOnlyTheFieldStillEmpty(t *testing.T) {
 // with a stray space. The server would reject it too, but only after the wait
 // this validation exists to remove.
 func TestAddFormRejectsWhitespaceOnlyValues(t *testing.T) {
-	m := newModel(Config{}, stubSource{})
+	m := NewModel(Config{}, stubSource{})
 	m.showForm = true
 	m.form = addFormWith(t, map[string]string{
 		"hostname": "   ",
@@ -104,7 +104,7 @@ func TestAddFormRejectsWhitespaceOnlyValues(t *testing.T) {
 	if cmd != nil {
 		t.Fatal("a whitespace-only Hostname was accepted as filled in")
 	}
-	if got := u.(model).formErr; got == nil || !strings.Contains(got.Error(), "Hostname") {
+	if got := u.(Model).formErr; got == nil || !strings.Contains(got.Error(), "Hostname") {
 		t.Errorf("formErr = %v, want an error naming Hostname", got)
 	}
 }
@@ -116,7 +116,7 @@ func TestAddFormRejectsWhitespaceOnlyValues(t *testing.T) {
 // lives; if it ever flips to a required field, this is what says so.
 func TestAddFormWithAClearedPortStillSubmits(t *testing.T) {
 	keyPath := writeStubKey(t)
-	m := newModel(Config{}, stubSource{})
+	m := NewModel(Config{}, stubSource{})
 	m.showForm = true
 	m.form = addFormWith(t, map[string]string{
 		"hostname":     "london",
@@ -131,7 +131,7 @@ func TestAddFormWithAClearedPortStillSubmits(t *testing.T) {
 	if cmd == nil {
 		t.Fatal("a cleared SSH Port blocked the submit; it is prefilled and defaulted, not required")
 	}
-	if got := u.(model).formErr; got != nil {
+	if got := u.(Model).formErr; got != nil {
 		t.Errorf("formErr = %v, want nil for a cleared port", got)
 	}
 	if msg, ok := cmd().(addNodeResultMsg); !ok || msg.err != nil {
@@ -204,7 +204,7 @@ func TestParsePortRefusesValuesThatWouldTruncate(t *testing.T) {
 // provisions the node, and no later error undoes a joined host.
 func TestAddFormRefusesAnOutOfRangePortWithoutCallingTheServer(t *testing.T) {
 	keyPath := writeStubKey(t)
-	m := newModel(Config{}, stubSource{})
+	m := NewModel(Config{}, stubSource{})
 	m.showForm = true
 	m.form = addFormWith(t, map[string]string{
 		"hostname":     "london",
@@ -216,7 +216,7 @@ func TestAddFormRefusesAnOutOfRangePortWithoutCallingTheServer(t *testing.T) {
 	})
 
 	u, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
-	m2 := u.(model)
+	m2 := u.(Model)
 	if cmd != nil {
 		t.Fatal("a port of " + wrapsToPort22 + " was submitted; it truncates to 22 on the wire, so " +
 			"the node would join over a port the operator never typed")
@@ -243,12 +243,12 @@ func TestAddFormRefusesAnOutOfRangePortWithoutCallingTheServer(t *testing.T) {
 // testConnResultMsg clears it. A nil command here would wedge the form.
 func TestTestConnectionRefusesAnOutOfRangePortWithoutProbing(t *testing.T) {
 	budgets := map[string]time.Duration{}
-	m := newModel(Config{}, stubSource{budgets: &budgets})
+	m := NewModel(Config{}, stubSource{budgets: &budgets})
 	m.showForm = true
 	m.form = addFormWith(t, map[string]string{"ip": "10.0.0.5", "ssh_port": wrapsNegative})
 
 	u, cmd := m.Update(tea.KeyMsg{Type: tea.KeyCtrlT})
-	m = u.(model) // the post-keypress model: probing is already set on it
+	m = u.(Model) // the post-keypress Model: probing is already set on it
 	if cmd == nil {
 		t.Fatal("ctrl+t returned no command with a bad port, but probing is already set — the form " +
 			"would refuse every further probe for the rest of the session")
@@ -269,7 +269,7 @@ func TestTestConnectionRefusesAnOutOfRangePortWithoutProbing(t *testing.T) {
 
 	// The refusal must release the in-flight lock and reach the screen.
 	next, _ := m.Update(msg)
-	m2 := next.(model)
+	m2 := next.(Model)
 	if m2.probing {
 		t.Error("the refusal left the form in-flight; no further probe would ever be accepted")
 	}
@@ -284,7 +284,7 @@ func TestTestConnectionRefusesAnOutOfRangePortWithoutProbing(t *testing.T) {
 // would break a proof that needs a cluster to notice.
 func TestAFullyPopulatedAddFormReachesTheServer(t *testing.T) {
 	keyPath := writeStubKey(t)
-	m := newModel(Config{}, stubSource{})
+	m := NewModel(Config{}, stubSource{})
 	m.showForm = true
 	m.form = addFormWith(t, map[string]string{
 		"hostname":     "e2e-node2",
@@ -298,7 +298,7 @@ func TestAFullyPopulatedAddFormReachesTheServer(t *testing.T) {
 	if cmd == nil {
 		t.Fatal("a fully populated form was rejected — validation must not block the happy path")
 	}
-	if got := u.(model).formErr; got != nil {
+	if got := u.(Model).formErr; got != nil {
 		t.Errorf("formErr = %v, want nil for a complete form", got)
 	}
 	msg, ok := cmd().(addNodeResultMsg)
@@ -312,15 +312,15 @@ func TestAFullyPopulatedAddFormReachesTheServer(t *testing.T) {
 
 // TestAFixedFormClearsThePriorRejection covers the second half of the loop the
 // operator is kept in: fix the named field, press enter again. A stale error
-// left on the model would render underneath a form that is now correct.
+// left on the Model would render underneath a form that is now correct.
 func TestAFixedFormClearsThePriorRejection(t *testing.T) {
 	keyPath := writeStubKey(t)
-	m := newModel(Config{}, stubSource{})
+	m := NewModel(Config{}, stubSource{})
 	m.showForm = true
 	m.form = newAddForm()
 
 	u, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
-	m = u.(model)
+	m = u.(Model)
 	if m.formErr == nil {
 		t.Fatal("the empty submit was not rejected")
 	}
@@ -336,7 +336,7 @@ func TestAFixedFormClearsThePriorRejection(t *testing.T) {
 	if cmd == nil {
 		t.Fatal("the corrected form was rejected")
 	}
-	if got := u2.(model).formErr; got != nil {
+	if got := u2.(Model).formErr; got != nil {
 		t.Errorf("formErr = %v after a corrected submit; the operator would still be reading "+
 			"the error they just fixed", got)
 	}
@@ -348,12 +348,12 @@ func TestAFixedFormClearsThePriorRejection(t *testing.T) {
 // the source of truth — but the operator must see that the key did not take.
 func TestAFailedActionSurfacesAndLeavesTheEstateAlone(t *testing.T) {
 	rows := []nodeRow{{Name: "n1", Status: "Ready", schedulable: true}}
-	m := newModel(Config{}, stubSource{msg: fetchMsg{nodes: rows}})
+	m := NewModel(Config{}, stubSource{msg: fetchMsg{nodes: rows}})
 	u, _ := m.Update(fetchMsg{nodes: rows})
-	m = u.(model)
+	m = u.(Model)
 
 	u2, cmd := m.Update(nodeActionMsg{err: errStub{}})
-	m2 := u2.(model)
+	m2 := u2.(Model)
 	if cmd != nil {
 		t.Error("a failed action scheduled more work; the next poll already reports reality")
 	}
@@ -377,12 +377,12 @@ func TestAFailedActionSurfacesAndLeavesTheEstateAlone(t *testing.T) {
 // error that outlives the action it described tells the operator a cordon that
 // worked did not.
 func TestASucceedingActionClearsThePriorError(t *testing.T) {
-	m := newModel(Config{}, stubSource{})
+	m := NewModel(Config{}, stubSource{})
 	m.nodes = []nodeRow{{Name: "n1", schedulable: true}}
 	m.actionErr = errStub{}
 
 	u, _ := m.Update(nodeActionMsg{err: nil})
-	if got := u.(model).actionErr; got != nil {
+	if got := u.(Model).actionErr; got != nil {
 		t.Errorf("actionErr = %v after a successful action; a stale error reports a failure "+
 			"that did not happen", got)
 	}

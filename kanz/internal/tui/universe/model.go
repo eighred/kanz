@@ -1,4 +1,4 @@
-package main
+package universe
 
 import (
 	"context"
@@ -37,21 +37,23 @@ type venueRow struct {
 	configured bool
 }
 
-// pane selects which read-only view is shown.
-type pane int
+// Screen selects which read-only view is shown. Exported so the kanz shell can
+// mount each one as its own top-level pane (#66) rather than nesting a second
+// tab bar inside one.
+type Screen int
 
 const (
-	paneNodes pane = iota
-	paneClusters
-	paneAPI
+	ScreenNodes Screen = iota
+	ScreenClusters
+	ScreenAPI
 )
 
-// model is the whole UI state, mutated ONLY by Update in response to messages —
+// Model is the whole UI state, mutated ONLY by Update in response to messages —
 // never by the poller goroutine directly (Bubble Tea's concurrency contract).
-type model struct {
+type Model struct {
 	cfg    Config
 	src    nodeSource
-	active pane
+	active Screen
 
 	nodes    []nodeRow
 	clusters []clusterRow
@@ -101,7 +103,7 @@ type model struct {
 	// declines the submitted credentials (FailedPrecondition, S4b's pre-write
 	// proof): the form is reopened with every field cleared and keyFormErr set,
 	// so the operator sees why without the typed secret ever surviving on the
-	// model. Any other failed submit surfaces via actionErr instead (see
+	// Model. Any other failed submit surfaces via actionErr instead (see
 	// keyFormResultMsg), which leaves keyFormErr nil.
 	showKeyForm bool
 	keyForm     keyForm
@@ -126,7 +128,7 @@ type model struct {
 	err           error
 }
 
-func newModel(cfg Config, src nodeSource) model {
+func NewModel(cfg Config, src nodeSource) Model {
 	if cfg.PollInterval <= 0 {
 		cfg.PollInterval = 3 * time.Second
 	}
@@ -134,14 +136,14 @@ func newModel(cfg Config, src nodeSource) model {
 	// deadline already expired, so every call would fail instantly with a deadline error
 	// that looks like an unreachable gateway.
 	if cfg.CallTimeout <= 0 {
-		cfg.CallTimeout = defaultCallTimeout
+		cfg.CallTimeout = DefaultCallTimeout
 	}
-	return model{cfg: cfg, src: src, active: paneNodes}
+	return Model{cfg: cfg, src: src, active: ScreenNodes}
 }
 
-func (m model) Init() tea.Cmd { return m.pollTick() }
+func (m Model) Init() tea.Cmd { return m.pollTick() }
 
-func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
 		if m.showForm {
@@ -150,10 +152,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.showKeyForm {
 			return m.updateKeyForm(msg)
 		}
-		if m.active == paneNodes && m.confirmingDrain {
+		if m.active == ScreenNodes && m.confirmingDrain {
 			return m.updateDrainConfirm(msg)
 		}
-		if m.active == paneNodes && m.movingRegion {
+		if m.active == ScreenNodes && m.movingRegion {
 			return m.updateMoveInput(msg)
 		}
 		switch msg.String() {
@@ -161,61 +163,61 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Quit
 		case "tab":
 			switch m.active {
-			case paneNodes:
-				m.active = paneClusters
-			case paneClusters:
-				m.active = paneAPI
+			case ScreenNodes:
+				m.active = ScreenClusters
+			case ScreenClusters:
+				m.active = ScreenAPI
 			default:
-				m.active = paneNodes
+				m.active = ScreenNodes
 			}
 		case "a":
-			if m.active == paneNodes {
+			if m.active == ScreenNodes {
 				m.showForm = true
 				m.form = newAddForm()
 				m.formErr = nil
 				m.testResult = ""
 			}
 		case "up":
-			if m.active == paneNodes && m.selected > 0 {
+			if m.active == ScreenNodes && m.selected > 0 {
 				m.selected--
 			}
-			if m.active == paneAPI && m.apiSelected > 0 {
+			if m.active == ScreenAPI && m.apiSelected > 0 {
 				m.apiSelected--
 			}
 		case "down":
-			if m.active == paneNodes && m.selected < len(m.nodes)-1 {
+			if m.active == ScreenNodes && m.selected < len(m.nodes)-1 {
 				m.selected++
 			}
-			if m.active == paneAPI && m.apiSelected < len(m.venues)-1 {
+			if m.active == ScreenAPI && m.apiSelected < len(m.venues)-1 {
 				m.apiSelected++
 			}
 		case "c":
-			if m.active == paneNodes {
+			if m.active == ScreenNodes {
 				if name, ok := m.selectedNodeName(); ok {
 					return m, m.nodeActionCmd(m.src.cordon, name)
 				}
 			}
 		case "u":
-			if m.active == paneNodes {
+			if m.active == ScreenNodes {
 				if name, ok := m.selectedNodeName(); ok {
 					return m, m.nodeActionCmd(m.src.uncordon, name)
 				}
 			}
 		case "d":
-			if m.active == paneNodes {
+			if m.active == ScreenNodes {
 				if _, ok := m.selectedNodeName(); ok {
 					m.confirmingDrain = true
 				}
 			}
 		case "m":
-			if m.active == paneNodes {
+			if m.active == ScreenNodes {
 				if _, ok := m.selectedNodeName(); ok {
 					m.movingRegion = true
 					m.moveInput = ""
 				}
 			}
 		case "k":
-			if m.active == paneAPI {
+			if m.active == ScreenAPI {
 				if m.apiSelected >= 0 && m.apiSelected < len(m.venues) {
 					m.showKeyForm = true
 					m.keyForm = newKeyForm(m.venues[m.apiSelected].venue)
@@ -272,7 +274,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		// Any other result closes the form — the typed secret must never
-		// linger on the model. A failed submit surfaces through actionErr (the
+		// linger on the Model. A failed submit surfaces through actionErr (the
 		// same status-line error cordon/uncordon/drain/setRegion use) rather
 		// than keeping the form open with the secret still resident, so the
 		// operator can see what failed and reopen with 'k' to retry.
@@ -305,7 +307,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 // updateForm handles key input while the Add Node form is active. It never
 // touches m.nodes/m.clusters — only the form's own state and, on submit, a
 // tea.Cmd that reads the key file and calls addNode off the UI thread.
-func (m model) updateForm(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+func (m Model) updateForm(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.Type {
 	case tea.KeyEsc:
 		m.showForm = false
@@ -340,9 +342,9 @@ func (m model) updateForm(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 // submitAddForm validates the form, then reads the key file it names and fires
 // AddNode off the UI thread, returning an addNodeResultMsg. The key bytes never
-// touch the model.
+// touch the Model.
 //
-// It returns a model as well as a Cmd because validation has to happen on the UI
+// It returns a Model as well as a Cmd because validation has to happen on the UI
 // thread: a tea.Cmd can only speak by returning a message, so it cannot set
 // formErr, and routing a rejection through a message would mean issuing the
 // request the rejection exists to prevent. An empty required field therefore
@@ -350,7 +352,7 @@ func (m model) updateForm(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 // is the point: the read used to come first, so a blank Key Path surfaced as
 // "read key : no such file or directory", an error about a path the operator
 // never typed rather than a field they can fix.
-func (m model) submitAddForm() (model, tea.Cmd) {
+func (m Model) submitAddForm() (Model, tea.Cmd) {
 	if missing := m.form.missingRequired(); len(missing) > 0 {
 		// EVERY empty field is named, not just the first. The whole value of
 		// validating here is that the operator sees what is wrong without a round
@@ -411,7 +413,7 @@ type addNodeResultMsg struct {
 // updateKeyForm handles key input while the Set API Keys form is active. It
 // never touches m.venues — only the form's own state and, on submit, a
 // tea.Cmd that calls setVenueKeys off the UI thread.
-func (m model) updateKeyForm(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+func (m Model) updateKeyForm(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.Type {
 	case tea.KeyEsc:
 		m.showKeyForm = false
@@ -437,8 +439,8 @@ func (m model) updateKeyForm(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 // submitKeyForm fires SetVenueKeys off the UI thread, then the typed secret leaves the
-// model — the form is reset regardless of outcome-in-flight, and the result closes it.
-func (m model) submitKeyForm() tea.Cmd {
+// Model — the form is reset regardless of outcome-in-flight, and the result closes it.
+func (m Model) submitKeyForm() tea.Cmd {
 	venue := m.keyForm.venue
 	keys := venueKeys{
 		apiKey:     m.keyForm.value("api_key"),
@@ -466,7 +468,7 @@ type keyFormResultMsg struct {
 // withVerifiedAccount returns a copy of accounts with venue set to id. Model
 // fields are never mutated in place — Update's value receiver copies the map
 // header, not its contents, so mutating a shared map here would leak a write
-// across model copies (e.g. into the pre-Update model a caller still holds).
+// across Model copies (e.g. into the pre-Update Model a caller still holds).
 func withVerifiedAccount(accounts map[string]string, venue, id string) map[string]string {
 	out := make(map[string]string, len(accounts)+1)
 	for k, v := range accounts {
@@ -486,7 +488,7 @@ func withVerifiedAccount(accounts map[string]string, venue, id string) map[strin
 // re-break the deadline chain from the outside — every probe failing client-side with a
 // generic deadline, including against a healthy host. Raising --timeout past 100s is
 // respected, because that only ever gives an inner layer more room to answer.
-func (m model) testConnCmd() tea.Cmd {
+func (m Model) testConnCmd() tea.Cmd {
 	ip := m.form.value("ip")
 	port, err := parsePort(m.form.value("ssh_port"))
 	if err != nil {
@@ -555,7 +557,7 @@ func parsePort(s string) (int32, error) {
 // updateDrainConfirm handles key input while the drain confirm prompt is
 // showing. Any key other than y/n/esc is swallowed — the prompt blocks all
 // other nodes-pane input until answered.
-func (m model) updateDrainConfirm(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+func (m Model) updateDrainConfirm(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "y":
 		m.confirmingDrain = false
@@ -575,7 +577,7 @@ func (m model) updateDrainConfirm(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 // y/n confirm — a relabel is non-destructive. An empty moveInput is rejected
 // client-side on enter (stays in the input) rather than round-tripping a
 // value the handler would reject anyway. Any other key is swallowed.
-func (m model) updateMoveInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+func (m Model) updateMoveInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.Type {
 	case tea.KeyEsc:
 		m.movingRegion = false
@@ -608,7 +610,7 @@ func (m model) updateMoveInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 // as a nodeActionMsg — the same result message cordon/drain use, so a failed
 // relabel surfaces via actionErr with no new plumbing. The node's new Region
 // arrives on the next poll rather than being applied optimistically here.
-func (m model) moveNodeCmd(name, region string) tea.Cmd {
+func (m Model) moveNodeCmd(name, region string) tea.Cmd {
 	src := m.src
 	timeout := m.cfg.CallTimeout
 	return func() tea.Msg {
@@ -621,7 +623,7 @@ func (m model) moveNodeCmd(name, region string) tea.Cmd {
 // selectedNodeName returns the name of the highlighted node, guarding against
 // an empty (or since-shrunk) nodes slice so an action key is a safe no-op
 // rather than an index panic.
-func (m model) selectedNodeName() (string, bool) {
+func (m Model) selectedNodeName() (string, bool) {
 	if m.selected < 0 || m.selected >= len(m.nodes) {
 		return "", false
 	}
@@ -647,7 +649,7 @@ func clampSelected(selected, n int) int {
 // nodeActionCmd runs a cordon/uncordon/drain call off the UI thread and
 // reports the outcome as a nodeActionMsg; the node's new status arrives on
 // the next poll rather than being applied optimistically here.
-func (m model) nodeActionCmd(action func(context.Context, string) error, name string) tea.Cmd {
+func (m Model) nodeActionCmd(action func(context.Context, string) error, name string) tea.Cmd {
 	timeout := m.cfg.CallTimeout
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), timeout)
@@ -675,4 +677,26 @@ func nodeStateLabel(n nodeRow) string {
 	return n.Status // "Ready" / "NotReady" / "Unknown" — readiness for a schedulable node
 }
 
-func (m model) View() string { return m.render() }
+func (m Model) View() string { return m.render() }
+
+// WithScreen returns a copy of m showing s.
+//
+// IT EXISTS SO THE kanz SHELL CAN MOUNT EACH SCREEN AS ITS OWN TAB (#66).
+// Standalone, universe cycles its three screens with `tab`. Inside the shell
+// that key is already taken — the shell consumes `tab` to move between ITS
+// panes, so universe's internal cycling would never receive it and two of the
+// three screens would be unreachable, which is precisely what #66 asks to fix.
+//
+// Mounting them as three top-level panes resolves the collision instead of
+// remapping around it, and avoids a second tab bar nested inside the first.
+//
+// A copy, not a mutation: Model is a value type with value receivers, following
+// bubbletea's convention, and handing out a pointer here would let a caller
+// change state behind Update's back — the one thing that contract forbids.
+func (m Model) WithScreen(s Screen) Model {
+	m.active = s
+	return m
+}
+
+// Screen reports which screen m is showing.
+func (m Model) Screen() Screen { return m.active }

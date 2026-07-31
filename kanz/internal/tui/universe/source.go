@@ -1,4 +1,4 @@
-package main
+package universe
 
 import (
 	"context"
@@ -10,7 +10,7 @@ import (
 
 // nodeSource fetches estate reads and drives provisioning. The real implementation
 // (gatewaySource) goes through the api-gateway's /v1/control routes; tests use a
-// stub. fetch does the clock read (Age), so render stays a pure function of model.
+// stub. fetch does the clock read (Age), so render stays a pure function of Model.
 type nodeSource interface {
 	fetch(ctx context.Context) (fetchMsg, error)
 	addNode(ctx context.Context, req addNodeInput) (string, error)
@@ -25,7 +25,7 @@ type nodeSource interface {
 }
 
 // venueKeys is the write payload for SetVenueKeys — the typed secret is passed
-// through to the RPC and never retained on a model field (the S2a key-bytes
+// through to the RPC and never retained on a Model field (the S2a key-bytes
 // discipline).
 type venueKeys struct{ apiKey, apiSecret, passphrase string }
 
@@ -47,7 +47,7 @@ type fetchMsg struct {
 }
 
 // addNodeInput is the write payload for AddNode — sshKey is populated off the
-// UI thread by submitAddForm's file read and never touches a model field.
+// UI thread by submitAddForm's file read and never touches a Model field.
 type addNodeInput struct {
 	hostname, ip, sshUser string
 	sshPort               int32

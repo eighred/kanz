@@ -1,4 +1,4 @@
-package main
+package universe
 
 import (
 	"context"
@@ -22,13 +22,13 @@ import (
 // test/arch asserts the ordering, because these three consts live in three packages.
 //
 // It is a CONST and not a flag for that reason: an operator lowering --timeout must not
-// be able to re-break the chain from the outside (see model.testConnCmd).
+// be able to re-break the chain from the outside (see Model.testConnCmd).
 const testConnTimeout = 100 * time.Second
 
 // pollTick arms a single tea.Tick that fires after cfg.PollInterval and does
 // the gRPC fetch off the UI thread, returning a fetchMsg. Update re-arms it
 // after every fetchMsg, so the TUI polls forever at a fixed cadence.
-func (m model) pollTick() tea.Cmd {
+func (m Model) pollTick() tea.Cmd {
 	return tea.Tick(m.cfg.PollInterval, func(time.Time) tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), m.cfg.CallTimeout)
 		defer cancel()

@@ -1,4 +1,4 @@
-package main
+package universe
 
 import (
 	"context"
@@ -94,7 +94,7 @@ func (s stubSource) listVenueKeys(context.Context) ([]venueRow, error) { return 
 // honour the flag or it does nothing at all.
 func TestTighteningTheCallTimeoutCannotShortenTestConnection(t *testing.T) {
 	budgets := map[string]time.Duration{}
-	m := newModel(Config{CallTimeout: time.Second}, stubSource{budgets: &budgets})
+	m := NewModel(Config{CallTimeout: time.Second}, stubSource{budgets: &budgets})
 
 	m.testConnCmd()()
 	m.nodeActionCmd(m.src.cordon, "london")()
@@ -113,22 +113,22 @@ func TestTighteningTheCallTimeoutCannotShortenTestConnection(t *testing.T) {
 // fail instantly with a deadline error indistinguishable from an unreachable gateway.
 func TestZeroCallTimeoutFallsBackToTheDefault(t *testing.T) {
 	budgets := map[string]time.Duration{}
-	m := newModel(Config{}, stubSource{budgets: &budgets})
+	m := NewModel(Config{}, stubSource{budgets: &budgets})
 
 	m.nodeActionCmd(m.src.cordon, "london")()
 
-	if got := budgets["cordon"]; got != defaultCallTimeout {
-		t.Errorf("an unset CallTimeout produced a %s budget, want %s", got, defaultCallTimeout)
+	if got := budgets["cordon"]; got != DefaultCallTimeout {
+		t.Errorf("an unset CallTimeout produced a %s budget, want %s", got, DefaultCallTimeout)
 	}
 }
 
 func TestFetchMsgPopulatesModel(t *testing.T) {
-	m := newModel(Config{}, stubSource{})
+	m := NewModel(Config{}, stubSource{})
 	updated, _ := m.Update(fetchMsg{
 		nodes:    []nodeRow{{Name: "london", Status: "Ready", Region: "europe"}},
 		clusters: []clusterRow{{Region: "europe", Online: 1}},
 	})
-	got := updated.(model)
+	got := updated.(Model)
 	if len(got.nodes) != 1 || got.nodes[0].Name != "london" {
 		t.Fatalf("nodes = %+v", got.nodes)
 	}
@@ -138,42 +138,42 @@ func TestFetchMsgPopulatesModel(t *testing.T) {
 }
 
 func TestTabSwitchesPane(t *testing.T) {
-	m := newModel(Config{}, stubSource{})
-	if m.active != paneNodes {
-		t.Fatalf("initial pane = %v, want paneNodes", m.active)
+	m := NewModel(Config{}, stubSource{})
+	if m.active != ScreenNodes {
+		t.Fatalf("initial pane = %v, want ScreenNodes", m.active)
 	}
 	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyTab})
-	if updated.(model).active != paneClusters {
-		t.Fatalf("after tab, pane = %v, want paneClusters", updated.(model).active)
+	if updated.(Model).active != ScreenClusters {
+		t.Fatalf("after tab, pane = %v, want ScreenClusters", updated.(Model).active)
 	}
 }
 
 func TestTabCyclesThroughAPIPaneAndBack(t *testing.T) {
-	m := newModel(Config{}, stubSource{})
+	m := NewModel(Config{}, stubSource{})
 	u, _ := m.Update(tea.KeyMsg{Type: tea.KeyTab})
-	m = u.(model)
-	if m.active != paneClusters {
-		t.Fatalf("after 1 tab, pane = %v, want paneClusters", m.active)
+	m = u.(Model)
+	if m.active != ScreenClusters {
+		t.Fatalf("after 1 tab, pane = %v, want ScreenClusters", m.active)
 	}
 	u, _ = m.Update(tea.KeyMsg{Type: tea.KeyTab})
-	m = u.(model)
-	if m.active != paneAPI {
-		t.Fatalf("after 2 tabs, pane = %v, want paneAPI", m.active)
+	m = u.(Model)
+	if m.active != ScreenAPI {
+		t.Fatalf("after 2 tabs, pane = %v, want ScreenAPI", m.active)
 	}
 	u, _ = m.Update(tea.KeyMsg{Type: tea.KeyTab})
-	m = u.(model)
-	if m.active != paneNodes {
-		t.Fatalf("after 3 tabs, pane = %v, want paneNodes (cycle back)", m.active)
+	m = u.(Model)
+	if m.active != ScreenNodes {
+		t.Fatalf("after 3 tabs, pane = %v, want ScreenNodes (cycle back)", m.active)
 	}
 }
 
 func TestFetchMsgPopulatesVenuesAndClampsAPISelected(t *testing.T) {
-	m := newModel(Config{}, stubSource{})
+	m := NewModel(Config{}, stubSource{})
 	m.apiSelected = 5
 	updated, _ := m.Update(fetchMsg{
 		venues: []venueRow{{venue: "binance", configured: true}, {venue: "coinbase", configured: false}},
 	})
-	got := updated.(model)
+	got := updated.(Model)
 	if len(got.venues) != 2 || got.venues[0].venue != "binance" {
 		t.Fatalf("venues = %+v", got.venues)
 	}
@@ -183,51 +183,51 @@ func TestFetchMsgPopulatesVenuesAndClampsAPISelected(t *testing.T) {
 }
 
 func TestAPIPaneSelectionMovesWithinBounds(t *testing.T) {
-	m := newModel(Config{}, stubSource{})
-	m.active = paneAPI
+	m := NewModel(Config{}, stubSource{})
+	m.active = ScreenAPI
 	m.venues = []venueRow{{venue: "binance"}, {venue: "coinbase"}}
 
 	u, _ := m.Update(tea.KeyMsg{Type: tea.KeyDown})
-	if u.(model).apiSelected != 1 {
-		t.Fatalf("down should select row 1, got %d", u.(model).apiSelected)
+	if u.(Model).apiSelected != 1 {
+		t.Fatalf("down should select row 1, got %d", u.(Model).apiSelected)
 	}
-	u, _ = u.(model).Update(tea.KeyMsg{Type: tea.KeyDown})
-	if u.(model).apiSelected != 1 {
-		t.Fatalf("down at last row should stay at 1, got %d", u.(model).apiSelected)
+	u, _ = u.(Model).Update(tea.KeyMsg{Type: tea.KeyDown})
+	if u.(Model).apiSelected != 1 {
+		t.Fatalf("down at last row should stay at 1, got %d", u.(Model).apiSelected)
 	}
-	u, _ = u.(model).Update(tea.KeyMsg{Type: tea.KeyUp})
-	if u.(model).apiSelected != 0 {
-		t.Fatalf("up should select row 0, got %d", u.(model).apiSelected)
+	u, _ = u.(Model).Update(tea.KeyMsg{Type: tea.KeyUp})
+	if u.(Model).apiSelected != 0 {
+		t.Fatalf("up should select row 0, got %d", u.(Model).apiSelected)
 	}
-	u, _ = u.(model).Update(tea.KeyMsg{Type: tea.KeyUp})
-	if u.(model).apiSelected != 0 {
-		t.Fatalf("up at first row should stay at 0, got %d", u.(model).apiSelected)
+	u, _ = u.(Model).Update(tea.KeyMsg{Type: tea.KeyUp})
+	if u.(Model).apiSelected != 0 {
+		t.Fatalf("up at first row should stay at 0, got %d", u.(Model).apiSelected)
 	}
 }
 
 func TestAPIPaneSelectionNoOpWithNoVenues(t *testing.T) {
-	m := newModel(Config{}, stubSource{})
-	m.active = paneAPI
+	m := NewModel(Config{}, stubSource{})
+	m.active = ScreenAPI
 	m.venues = nil
 	u, cmd := m.Update(tea.KeyMsg{Type: tea.KeyDown})
 	if cmd != nil {
 		t.Fatalf("down with no venues should not return a command")
 	}
-	if u.(model).apiSelected != 0 {
-		t.Fatalf("apiSelected should stay 0 with no venues, got %d", u.(model).apiSelected)
+	if u.(Model).apiSelected != 0 {
+		t.Fatalf("apiSelected should stay 0 with no venues, got %d", u.(Model).apiSelected)
 	}
 }
 
 func TestFetchErrorGoesToStatusNotCrash(t *testing.T) {
-	m := newModel(Config{}, stubSource{})
+	m := NewModel(Config{}, stubSource{})
 	updated, _ := m.Update(fetchMsg{err: context.DeadlineExceeded})
-	if updated.(model).err == nil {
-		t.Fatalf("expected err recorded on model")
+	if updated.(Model).err == nil {
+		t.Fatalf("expected err recorded on Model")
 	}
 }
 
 func TestQuitKey(t *testing.T) {
-	m := newModel(Config{}, stubSource{})
+	m := NewModel(Config{}, stubSource{})
 	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'q'}})
 	if cmd == nil {
 		t.Fatalf("expected tea.Quit command on q")
@@ -235,16 +235,16 @@ func TestQuitKey(t *testing.T) {
 }
 
 func TestNodeSelectionMovesAndActionsFire(t *testing.T) {
-	m := newModel(Config{}, stubSource{})
-	m.active = paneNodes
+	m := NewModel(Config{}, stubSource{})
+	m.active = ScreenNodes
 	m.nodes = []nodeRow{{Name: "a", schedulable: true}, {Name: "b", schedulable: true}}
 	// down moves selection
 	u, _ := m.Update(tea.KeyMsg{Type: tea.KeyDown})
-	if u.(model).selected != 1 {
-		t.Fatalf("down should select row 1, got %d", u.(model).selected)
+	if u.(Model).selected != 1 {
+		t.Fatalf("down should select row 1, got %d", u.(Model).selected)
 	}
 	// 'c' on the selected node returns a command
-	u2, cmd := u.(model).Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'c'}})
+	u2, cmd := u.(Model).Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'c'}})
 	if cmd == nil {
 		t.Fatalf("c (cordon) should return a command")
 	}
@@ -252,32 +252,32 @@ func TestNodeSelectionMovesAndActionsFire(t *testing.T) {
 }
 
 func TestDrainAsksForConfirmation(t *testing.T) {
-	m := newModel(Config{}, stubSource{})
-	m.active = paneNodes
+	m := NewModel(Config{}, stubSource{})
+	m.active = ScreenNodes
 	m.nodes = []nodeRow{{Name: "a", schedulable: true, evictablePods: 3}}
 	u, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'d'}})
 	if cmd != nil {
 		t.Fatalf("d should NOT fire drain immediately — it opens a confirm")
 	}
-	if !u.(model).confirmingDrain {
+	if !u.(Model).confirmingDrain {
 		t.Fatalf("d should enter the confirm state")
 	}
 	// 'y' confirms and fires
-	_, cmd2 := u.(model).Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
+	_, cmd2 := u.(Model).Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
 	if cmd2 == nil {
 		t.Fatalf("y should fire the drain command")
 	}
 }
 
 func TestMKeyOpensRegionInput(t *testing.T) {
-	m := newModel(Config{}, stubSource{})
-	m.active = paneNodes
+	m := NewModel(Config{}, stubSource{})
+	m.active = ScreenNodes
 	m.nodes = []nodeRow{{Name: "london", schedulable: true}}
 	u, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'m'}})
 	if cmd != nil {
 		t.Fatalf("m should open the region input, not fire immediately")
 	}
-	got := u.(model)
+	got := u.(Model)
 	if !got.movingRegion {
 		t.Fatalf("m should enter the move-input state")
 	}
@@ -287,32 +287,32 @@ func TestMKeyOpensRegionInput(t *testing.T) {
 }
 
 func TestMKeyWithNoNodesIsNoOp(t *testing.T) {
-	m := newModel(Config{}, stubSource{})
-	m.active = paneNodes
+	m := NewModel(Config{}, stubSource{})
+	m.active = ScreenNodes
 	m.nodes = nil
 	u, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'m'}})
 	if cmd != nil {
 		t.Fatalf("m with no nodes should not return a command")
 	}
-	if u.(model).movingRegion {
+	if u.(Model).movingRegion {
 		t.Fatalf("m with no nodes should not enter the move-input state")
 	}
 }
 
 func TestRegionInputTypesAndBackspaces(t *testing.T) {
-	m := newModel(Config{}, stubSource{})
-	m.active = paneNodes
+	m := NewModel(Config{}, stubSource{})
+	m.active = ScreenNodes
 	m.nodes = []nodeRow{{Name: "london", schedulable: true}}
 	m.movingRegion = true
 	for _, r := range "asia" {
 		u, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
-		m = u.(model)
+		m = u.(Model)
 	}
 	if m.moveInput != "asia" {
 		t.Fatalf("move input = %q, want asia", m.moveInput)
 	}
 	u, _ := m.Update(tea.KeyMsg{Type: tea.KeyBackspace})
-	m = u.(model)
+	m = u.(Model)
 	if m.moveInput != "asi" {
 		t.Fatalf("backspace should trim one rune, got %q", m.moveInput)
 	}
@@ -320,8 +320,8 @@ func TestRegionInputTypesAndBackspaces(t *testing.T) {
 
 func TestRegionInputEnterSubmitsAndRecordsCall(t *testing.T) {
 	var calls []setRegionCall
-	m := newModel(Config{}, stubSource{setRegionCalls: &calls})
-	m.active = paneNodes
+	m := NewModel(Config{}, stubSource{setRegionCalls: &calls})
+	m.active = ScreenNodes
 	m.nodes = []nodeRow{{Name: "london", schedulable: true}}
 	m.movingRegion = true
 	m.moveInput = "asia"
@@ -330,7 +330,7 @@ func TestRegionInputEnterSubmitsAndRecordsCall(t *testing.T) {
 	if cmd == nil {
 		t.Fatalf("enter should fire the SetNodeRegion command")
 	}
-	if u.(model).movingRegion {
+	if u.(Model).movingRegion {
 		t.Fatalf("enter should close the move-input state")
 	}
 	msg := cmd()
@@ -348,8 +348,8 @@ func TestRegionInputEnterSubmitsAndRecordsCall(t *testing.T) {
 
 func TestRegionInputEnterOnEmptyDoesNothing(t *testing.T) {
 	var calls []setRegionCall
-	m := newModel(Config{}, stubSource{setRegionCalls: &calls})
-	m.active = paneNodes
+	m := NewModel(Config{}, stubSource{setRegionCalls: &calls})
+	m.active = ScreenNodes
 	m.nodes = []nodeRow{{Name: "london", schedulable: true}}
 	m.movingRegion = true
 	m.moveInput = ""
@@ -358,7 +358,7 @@ func TestRegionInputEnterOnEmptyDoesNothing(t *testing.T) {
 	if cmd != nil {
 		t.Fatalf("enter on empty moveInput should not fire a command")
 	}
-	if !u.(model).movingRegion {
+	if !u.(Model).movingRegion {
 		t.Fatalf("enter on empty moveInput should stay in the move-input state")
 	}
 	if len(calls) != 0 {
@@ -368,8 +368,8 @@ func TestRegionInputEnterOnEmptyDoesNothing(t *testing.T) {
 
 func TestRegionInputEscCancels(t *testing.T) {
 	var calls []setRegionCall
-	m := newModel(Config{}, stubSource{setRegionCalls: &calls})
-	m.active = paneNodes
+	m := NewModel(Config{}, stubSource{setRegionCalls: &calls})
+	m.active = ScreenNodes
 	m.nodes = []nodeRow{{Name: "london", schedulable: true}}
 	m.movingRegion = true
 	m.moveInput = "asia"
@@ -377,7 +377,7 @@ func TestRegionInputEscCancels(t *testing.T) {
 	if cmd != nil {
 		t.Fatalf("esc should not return a command")
 	}
-	got := u.(model)
+	got := u.(Model)
 	if got.movingRegion {
 		t.Fatalf("esc should cancel the move input")
 	}
@@ -390,8 +390,8 @@ func TestRegionInputEscCancels(t *testing.T) {
 }
 
 func TestKKeyOpensKeyFormScopedToSelectedVenue(t *testing.T) {
-	m := newModel(Config{}, stubSource{})
-	m.active = paneAPI
+	m := NewModel(Config{}, stubSource{})
+	m.active = ScreenAPI
 	m.venues = []venueRow{{venue: "binance"}, {venue: "okx"}}
 	m.apiSelected = 1
 
@@ -399,7 +399,7 @@ func TestKKeyOpensKeyFormScopedToSelectedVenue(t *testing.T) {
 	if cmd != nil {
 		t.Fatalf("k should open the form, not fire immediately")
 	}
-	got := u.(model)
+	got := u.(Model)
 	if !got.showKeyForm {
 		t.Fatalf("k should enter the key-form state")
 	}
@@ -409,32 +409,32 @@ func TestKKeyOpensKeyFormScopedToSelectedVenue(t *testing.T) {
 }
 
 func TestKKeyWithNoVenuesIsNoOp(t *testing.T) {
-	m := newModel(Config{}, stubSource{})
-	m.active = paneAPI
+	m := NewModel(Config{}, stubSource{})
+	m.active = ScreenAPI
 	m.venues = nil
 	u, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'k'}})
 	if cmd != nil {
 		t.Fatalf("k with no venues should not return a command")
 	}
-	if u.(model).showKeyForm {
+	if u.(Model).showKeyForm {
 		t.Fatalf("k with no venues should not enter the key-form state")
 	}
 }
 
 func TestKeyFormTypingAndBackspaceEditFocusedField(t *testing.T) {
-	m := newModel(Config{}, stubSource{})
+	m := NewModel(Config{}, stubSource{})
 	m.showKeyForm = true
 	m.keyForm = newKeyForm("binance")
 
 	for _, r := range "hé" {
 		u, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
-		m = u.(model)
+		m = u.(Model)
 	}
 	if m.keyForm.value("api_key") != "hé" {
 		t.Fatalf("api_key = %q, want hé", m.keyForm.value("api_key"))
 	}
 	u, _ := m.Update(tea.KeyMsg{Type: tea.KeyBackspace})
-	m = u.(model)
+	m = u.(Model)
 	if m.keyForm.value("api_key") != "h" {
 		t.Fatalf("api_key after backspace = %q, want h", m.keyForm.value("api_key"))
 	}
@@ -442,7 +442,7 @@ func TestKeyFormTypingAndBackspaceEditFocusedField(t *testing.T) {
 
 func TestKeyFormEnterSubmitsCallsSetVenueKeysClosesAndClearsSecret(t *testing.T) {
 	var calls []setVenueKeysCall
-	m := newModel(Config{}, stubSource{setVenueKeysCall: &calls})
+	m := NewModel(Config{}, stubSource{setVenueKeysCall: &calls})
 	m.showKeyForm = true
 	m.keyForm = newKeyForm("okx")
 	m.keyForm.fields[0].value = "key-123"
@@ -471,24 +471,24 @@ func TestKeyFormEnterSubmitsCallsSetVenueKeysClosesAndClearsSecret(t *testing.T)
 		t.Fatalf("setVenueKeys keys = %+v", calls[0].keys)
 	}
 
-	u2, _ := u.(model).Update(rm)
-	final := u2.(model)
+	u2, _ := u.(Model).Update(rm)
+	final := u2.(Model)
 	if final.showKeyForm {
 		t.Fatalf("keyFormResultMsg (success) should close the form")
 	}
 	if final.keyForm.value("api_secret") != "" {
-		t.Fatalf("keyFormResultMsg (success) should leave no typed secret on the model, got %q", final.keyForm.value("api_secret"))
+		t.Fatalf("keyFormResultMsg (success) should leave no typed secret on the Model, got %q", final.keyForm.value("api_secret"))
 	}
 }
 
 func TestKeyFormResultProvedRecordsAccountIdAndClosesForm(t *testing.T) {
-	m := newModel(Config{}, stubSource{})
+	m := NewModel(Config{}, stubSource{})
 	m.showKeyForm = true
 	m.keyForm = newKeyForm("okx")
 	m.keyForm.fields[0].value = "key-123"
 
 	u, _ := m.Update(keyFormResultMsg{venue: "okx", accountID: "acct-789"})
-	got := u.(model)
+	got := u.(Model)
 	if got.showKeyForm {
 		t.Fatalf("a proved submit should close the form")
 	}
@@ -496,7 +496,7 @@ func TestKeyFormResultProvedRecordsAccountIdAndClosesForm(t *testing.T) {
 		t.Fatalf("verifiedAccounts[okx] = %q, want acct-789", got.verifiedAccounts["okx"])
 	}
 	if got.keyForm.value("api_key") != "" {
-		t.Fatalf("a proved submit must not leave the typed secret on the model, got %q", got.keyForm.value("api_key"))
+		t.Fatalf("a proved submit must not leave the typed secret on the Model, got %q", got.keyForm.value("api_key"))
 	}
 }
 
@@ -504,13 +504,13 @@ func TestPollRefreshClearsVerifiedAccounts(t *testing.T) {
 	// A proved submit records verifiedAccounts["okx"], but the badge it drives
 	// must not outlive the fact it asserts: once the keys behind it could have
 	// been overwritten by an unproven path, the next poll must wipe it. See
-	// the model.verifiedAccounts field comment.
-	m := newModel(Config{}, stubSource{})
+	// the Model.verifiedAccounts field comment.
+	m := NewModel(Config{}, stubSource{})
 	m.showKeyForm = true
 	m.keyForm = newKeyForm("okx")
 
 	u, _ := m.Update(keyFormResultMsg{venue: "okx", accountID: "acct-789"})
-	afterSubmit := u.(model)
+	afterSubmit := u.(Model)
 	if afterSubmit.verifiedAccounts["okx"] != "acct-789" {
 		t.Fatalf("verifiedAccounts[okx] = %q, want acct-789 before the poll", afterSubmit.verifiedAccounts["okx"])
 	}
@@ -518,7 +518,7 @@ func TestPollRefreshClearsVerifiedAccounts(t *testing.T) {
 	u2, _ := afterSubmit.Update(fetchMsg{
 		venues: []venueRow{{venue: "okx", configured: true}},
 	})
-	afterPoll := u2.(model)
+	afterPoll := u2.(Model)
 	if id, ok := afterPoll.verifiedAccounts["okx"]; ok {
 		t.Fatalf("a poll refresh must clear verifiedAccounts, got okx=%q", id)
 	}
@@ -527,12 +527,12 @@ func TestPollRefreshClearsVerifiedAccounts(t *testing.T) {
 func TestKeyFormResultUnprovenSuccessRecordsNoAccountId(t *testing.T) {
 	// Empty ExchangeAccountId (no proof configured for this deployment) must
 	// never be treated as verification — see TestRenderAPIPaneUnprovenSuccessStaysConfigured.
-	m := newModel(Config{}, stubSource{})
+	m := NewModel(Config{}, stubSource{})
 	m.showKeyForm = true
 	m.keyForm = newKeyForm("binance")
 
 	u, _ := m.Update(keyFormResultMsg{venue: "binance", accountID: ""})
-	got := u.(model)
+	got := u.(Model)
 	if got.showKeyForm {
 		t.Fatalf("a successful submit should close the form")
 	}
@@ -542,7 +542,7 @@ func TestKeyFormResultUnprovenSuccessRecordsNoAccountId(t *testing.T) {
 }
 
 func TestKeyFormResultFailedPreconditionKeepsFormOpenAndClearsSecrets(t *testing.T) {
-	m := newModel(Config{}, stubSource{})
+	m := NewModel(Config{}, stubSource{})
 	m.showKeyForm = true
 	m.keyForm = newKeyForm("okx")
 	m.keyForm.fields[0].value = "key-123"    // api_key
@@ -554,7 +554,7 @@ func TestKeyFormResultFailedPreconditionKeepsFormOpenAndClearsSecrets(t *testing
 	if cmd != nil {
 		t.Fatalf("a rejection result should not itself return a command")
 	}
-	got := u.(model)
+	got := u.(Model)
 
 	if !got.showKeyForm {
 		t.Fatalf("a FailedPrecondition rejection must keep the form open")
@@ -578,7 +578,7 @@ func TestKeyFormResultFailedPreconditionKeepsFormOpenAndClearsSecrets(t *testing
 }
 
 func TestKeyFormEscCancelsAndClears(t *testing.T) {
-	m := newModel(Config{}, stubSource{})
+	m := NewModel(Config{}, stubSource{})
 	m.showKeyForm = true
 	m.keyForm = newKeyForm("okx")
 	m.keyForm.fields[1].value = "secret-abc"
@@ -587,7 +587,7 @@ func TestKeyFormEscCancelsAndClears(t *testing.T) {
 	if cmd != nil {
 		t.Fatalf("esc should not return a command")
 	}
-	got := u.(model)
+	got := u.(Model)
 	if got.showKeyForm {
 		t.Fatalf("esc should close the key form")
 	}

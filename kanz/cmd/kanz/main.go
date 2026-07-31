@@ -14,15 +14,18 @@ import (
 	"os/signal"
 	"strings"
 	"syscall"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/eighred/kanz/cmd/kanz/internal/config"
 	"github.com/eighred/kanz/cmd/kanz/internal/panes/copilot"
+	"github.com/eighred/kanz/cmd/kanz/internal/panes/estate"
 	"github.com/eighred/kanz/cmd/kanz/internal/repl"
 	"github.com/eighred/kanz/cmd/kanz/internal/tokenstore"
 	"github.com/eighred/kanz/internal/tui/app"
 	"github.com/eighred/kanz/internal/tui/pane"
+	"github.com/eighred/kanz/internal/tui/universe"
 	"github.com/eighred/kanz/pkg/deviceauth"
 )
 
@@ -80,12 +83,44 @@ func run() error {
 	// os.Stdin, which would otherwise be read from two places at once.
 	r := repl.New(cfg, store, auth, strings.NewReader(""), out)
 
-	reg, err := pane.NewRegistry(
-		copilot.New(r, out),
+	// The estate panes (#66) connect LAZILY, on first visit, with whatever token
+	// exists then. universe.NewGatewaySource refuses an empty one, and the shell
+	// opens before the operator has signed in — building here would mean a
+	// signed-out operator cannot open kanz at all, losing the Copilot pane that
+	// /login lives on.
+	shared := estate.NewShared(func() (universe.Model, error) {
+		// Read the token from the STORE, not from the REPL. The REPL persists on
+		// /login, so the store is current — and it is the only source both halves
+		// of the shell agree on, rather than a second copy that can go stale.
+		tok, terr := store.Load()
+		if terr != nil {
+			return universe.Model{}, fmt.Errorf("not signed in: %w", terr)
+		}
+		src, serr := universe.NewGatewaySource(universe.GatewayConfig{
+			BaseURL: cfg.GatewayURL,
+			Token:   tok.AccessToken,
+			// The signing secret is a deployment concern, not a session one: the
+			// gateway's Signing middleware is a no-op when it holds no secret, so
+			// an unset value here is valid rather than missing.
+			SigningSecret: os.Getenv("KANZ_SIGNING_SECRET"),
+		})
+		if serr != nil {
+			return universe.Model{}, serr
+		}
+		return universe.NewModel(universe.Config{
+			PollInterval: 3 * time.Second,
+			CallTimeout:  universe.DefaultCallTimeout,
+		}, src), nil
+	})
+
+	panes := []pane.Pane{copilot.New(r, out)}
+	panes = append(panes, estate.All(shared)...)
+	panes = append(panes,
 		// Bus plane: their own SPIFFE identity, so their own process (#65).
 		pane.NewExecPane("monitor", "Monitor", "kanz-monitor"),
 		pane.NewExecPane("halt", "Halt", "kanz-halt"),
 	)
+	reg, err := pane.NewRegistry(panes...)
 	if err != nil {
 		return err
 	}

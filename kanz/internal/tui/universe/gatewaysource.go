@@ -1,4 +1,4 @@
-package main
+package universe
 
 import (
 	"bytes"
@@ -44,9 +44,9 @@ type gatewaySource struct {
 	hc      *http.Client
 }
 
-// gatewayConfig is what the TUI needs to reach the control plane. All three come
+// GatewayConfig is what the TUI needs to reach the control plane. All three come
 // from flags/env in main.go — none of them is a kubeconfig.
-type gatewayConfig struct {
+type GatewayConfig struct {
 	// BaseURL of the gateway, e.g. https://api.eighred.com.
 	BaseURL string
 	// Token is the bearer credential identifying the HUMAN. The gateway decides
@@ -61,10 +61,10 @@ type gatewayConfig struct {
 
 	// THERE IS DELIBERATELY NO Timeout HERE. Every call is bounded by the context its
 	// caller passes (Config.CallTimeout for ordinary reads, testConnTimeout for Test
-	// Connection) — see the http.Client construction in newGatewaySource.
+	// Connection) — see the http.Client construction in NewGatewaySource.
 }
 
-func newGatewaySource(cfg gatewayConfig) (*gatewaySource, error) {
+func NewGatewaySource(cfg GatewayConfig) (*gatewaySource, error) {
 	if strings.TrimSpace(cfg.BaseURL) == "" {
 		return nil, fmt.Errorf("no gateway URL: set --gateway-url or KANZ_GATEWAY_URL " +
 			"(e.g. https://api.eighred.com). The TUI reaches the estate through the API " +

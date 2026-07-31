@@ -1,4 +1,4 @@
-package main
+package universe
 
 import (
 	"context"
@@ -26,11 +26,11 @@ func testCtx(t *testing.T) context.Context {
 
 func newTestSource(t *testing.T, srv *httptest.Server, signing string) *gatewaySource {
 	t.Helper()
-	src, err := newGatewaySource(gatewayConfig{
+	src, err := NewGatewaySource(GatewayConfig{
 		BaseURL: srv.URL, Token: "test-token", SigningSecret: signing,
 	})
 	if err != nil {
-		t.Fatalf("newGatewaySource: %v", err)
+		t.Fatalf("NewGatewaySource: %v", err)
 	}
 	return src
 }
@@ -62,7 +62,7 @@ func TestCallRefusesAContextWithNoDeadline(t *testing.T) {
 // --- construction refuses to half-work ------------------------------------
 
 func TestGatewaySourceRequiresAURL(t *testing.T) {
-	_, err := newGatewaySource(gatewayConfig{Token: "t"})
+	_, err := NewGatewaySource(GatewayConfig{Token: "t"})
 	if err == nil {
 		t.Fatal("a source with no gateway URL was accepted; it could only fail later, at the " +
 			"first poll, as a confusing connection error")
@@ -73,7 +73,7 @@ func TestGatewaySourceRequiresAURL(t *testing.T) {
 }
 
 func TestGatewaySourceRequiresAToken(t *testing.T) {
-	_, err := newGatewaySource(gatewayConfig{BaseURL: "https://api.example.com"})
+	_, err := NewGatewaySource(GatewayConfig{BaseURL: "https://api.example.com"})
 	if err == nil {
 		t.Fatal("a source with no token was accepted. The gateway authenticates a PERSON; " +
 			"there is no anonymous mode to fall back to.")
@@ -84,7 +84,7 @@ func TestGatewaySourceRequiresAToken(t *testing.T) {
 }
 
 func TestGatewaySourceRejectsANonAbsoluteURL(t *testing.T) {
-	_, err := newGatewaySource(gatewayConfig{BaseURL: "api.example.com", Token: "t"})
+	_, err := NewGatewaySource(GatewayConfig{BaseURL: "api.example.com", Token: "t"})
 	if err == nil {
 		t.Fatal("a scheme-less URL was accepted; http.NewRequest would fail later with a " +
 			"message about an unsupported protocol scheme rather than about configuration")
