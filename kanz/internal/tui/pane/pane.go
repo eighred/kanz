@@ -102,3 +102,39 @@ type TextInput interface {
 	// take printable characters from.
 	AcceptsTypedText()
 }
+
+// Confirming is a Bus pane the shell must SHOW rather than launch on selection.
+//
+// THE KILL SWITCH IS WHY THIS EXISTS (#171). kanz-halt requires --by, --reason
+// and --tenant: a mode change must be attributable to a principal, and
+// lifecycle.v1 refuses an unexplained transition. Launched on a keystroke with
+// no arguments it could only ever fail, which is exactly what the Halt tab did
+// from #65 until now.
+//
+// Those flags cannot be defaulted. `--by operator:unknown` is WORSE than the
+// error: it produces an attributable-looking record that attributes nothing, in
+// the append-only log a halt exists to be provable in.
+//
+// It is the right shape for a second, independent reason. A pane that runs on
+// selection puts the platform kill switch one `tab` from the Copilot prompt,
+// where a stray keystroke reaches it. A Confirming pane cannot be triggered by
+// navigation at all — it is shown, and it acts only once it has what it needs.
+type Confirming interface {
+	Pane
+	// ConfirmBeforeRun marks this pane as one that gathers input first. A
+	// marker, not a predicate: whether a tool needs confirmation is a property
+	// of the tool, and a runtime flag would invite "temporarily" clearing it.
+	ConfirmBeforeRun()
+}
+
+// ExecFinished reports a child process's outcome back to the shell.
+//
+// It lives here rather than in the router because BOTH produce it: the router
+// when it launches a plain ExecPane, and a Confirming pane when it launches
+// itself. A second copy in the pane package would mean the shell recognised one
+// and silently ignored the other — the child would fail and the operator would
+// see a shell that simply came back.
+type ExecFinished struct {
+	ID  ID
+	Err error
+}

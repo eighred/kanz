@@ -55,9 +55,6 @@ func (m Model) Init() tea.Cmd {
 	return nil
 }
 
-// execFinishedMsg carries the result of a child process back into the shell.
-type execFinishedMsg struct{ err error }
-
 // Update routes. Global keys are consumed here; everything else goes to the
 // active pane.
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -73,10 +70,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, cmd
 		}
 
-	case execFinishedMsg:
+	case pane.ExecFinished:
 		// A child that failed must say so. Before this, a mistyped binary name
 		// looked identical to a clean, instant exit.
-		m.lastErr = msg.err
+		//
+		// Handled here for BOTH launch paths — the router's own ExecPane and a
+		// Confirming pane that launched itself (#171) — because a message type
+		// per path is how one of them ends up unhandled.
+		m.lastErr = msg.Err
 		return m, nil
 	}
 
@@ -159,7 +160,12 @@ func (m *Model) selectPane(i int) tea.Cmd {
 		return nil
 	}
 	if p.Plane() == pane.Bus {
-		return m.runBusPane(p)
+		// A Confirming bus pane is SHOWN, not launched: it has to gather what
+		// its tool requires before there is anything to run (#171). Falling
+		// through to the normal activation below is what makes it a real pane.
+		if _, confirms := p.(pane.Confirming); !confirms {
+			return m.runBusPane(p)
+		}
 	}
 	m.active = i
 	m.lastErr = nil
@@ -182,7 +188,7 @@ func (m *Model) runBusPane(p pane.Pane) tea.Cmd {
 		return nil
 	}
 	return tea.ExecProcess(cmd, func(err error) tea.Msg {
-		return execFinishedMsg{err: wrapExecErr(p.ID(), cmd, err)}
+		return pane.ExecFinished{ID: p.ID(), Err: wrapExecErr(p.ID(), cmd, err)}
 	})
 }
 
