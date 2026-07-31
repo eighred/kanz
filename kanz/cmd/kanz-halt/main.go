@@ -37,6 +37,7 @@ import (
 	lifecyclepb "github.com/eighred/kanz/kanz-schemas-go/lifecycle/v1"
 
 	"github.com/eighred/kanz/internal/platform/mode"
+	"github.com/eighred/kanz/internal/version"
 	"github.com/eighred/kanz/pkg/bus"
 	"github.com/eighred/kanz/pkg/transport"
 )
@@ -120,7 +121,7 @@ func run(args []string, out *os.File) error {
 
 	producer, err := bus.NewProducer(client, bus.ProducerConfig{
 		Source:          "kanz-halt",
-		ProducerVersion: version(),
+		ProducerVersion: version.String(),
 	})
 	if err != nil {
 		return err
@@ -247,11 +248,4 @@ func envOr(key, def string) string {
 		return v
 	}
 	return def
-}
-
-func version() string {
-	if v := os.Getenv("KANZ_VERSION"); v != "" {
-		return v
-	}
-	return "dev"
 }

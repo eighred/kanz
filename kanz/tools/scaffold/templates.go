@@ -20,6 +20,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/eighred/kanz/internal/version"
 	"github.com/eighred/kanz/pkg/observability"
 	"github.com/eighred/kanz/services/{{.Name}}/internal/config"
 	"github.com/eighred/kanz/services/{{.Name}}/internal/server"
@@ -38,7 +39,7 @@ func main() {
 	base := slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: cfg.LogLevel})
 	obs, err := observability.New(ctx, observability.Config{
 		ServiceName:    cfg.Source,
-		ServiceVersion: version(),
+		ServiceVersion: version.String(),
 		OTLPEndpoint:   cfg.OTLPEndpoint,
 		SampleRatio:    1,
 	}, base)
@@ -80,9 +81,6 @@ func main() {
 	}
 }
 
-// version is the service version stamped on telemetry. Hardcoded until the build
-// injects a git SHA / semver (CICD-01a/c ldflags).
-func version() string { return "dev" }
 `
 
 const configTmpl = `package config

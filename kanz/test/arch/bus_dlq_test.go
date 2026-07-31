@@ -265,7 +265,7 @@ var retryCertifiedConsumers = map[string]string{
 		"ever re-attempt an Append that did not durably land, never skip a fold whose " +
 		"Append already committed.",
 
-	"services/audit/cmd/audit/main.go:126": "audit: the sole handler is audit.Projector.Handle, " +
+	"services/audit/cmd/audit/main.go:127": "audit: the sole handler is audit.Projector.Handle, " +
 		"which appends through Postgres.Append (services/audit/internal/audit/postgres.go:32). " +
 		"The event_id dedup check and the insert run inside ONE transaction under an " +
 		"advisory xact lock — atomic claim-and-persist, not check-then-act — so a retry " +
@@ -284,7 +284,7 @@ var retryCertifiedConsumers = map[string]string{
 		"unconditional last-value cache write with no dedup branch at all. Re-running it " +
 		"with the same quote sets the same rate; there is nothing to skip.",
 
-	"services/risk-engine/cmd/risk-engine/main.go:268": "risk-engine (state ingest): dispatches " +
+	"services/risk-engine/cmd/risk-engine/main.go:269": "risk-engine (state ingest): dispatches " +
 		"ingest.Ingestor.Handler -> engine.TriggeringApplier -> state.Store.ApplyPortfolioRevalued" +
 		"/ApplyPositionChanged/ApplyPortfolioSnapshot (internal/risk/state/store.go:202,227,246). " +
 		"Each Apply* checks its per-portfolio dedup window and mutates in-memory state with " +
@@ -295,18 +295,18 @@ var retryCertifiedConsumers = map[string]string{
 		"cannot itself fail the handler, so a retry can never observe a Trigger that ran " +
 		"without its Apply* having actually completed.",
 
-	"services/risk-engine/cmd/risk-engine/main.go:339": "risk-engine (calibration quotes): the " +
+	"services/risk-engine/cmd/risk-engine/main.go:340": "risk-engine (calibration quotes): the " +
 		"sole handler is livequote.LiveQuotes.Handler (internal/risk/pricing/livequote/livequote.go:80) " +
 		"— an unconditional last-value cache write, same shape as accounting's live FX feed. " +
 		"Nothing to skip.",
 
-	"services/market-data/cmd/market-data/main.go:142": "market-data: the sole handler is " +
+	"services/market-data/cmd/market-data/main.go:143": "market-data: the sole handler is " +
 		"marketdata.Ingestor.Handler, which writes through Postgres.Put " +
 		"(internal/marketdata/store/postgres.go:49) — INSERT ... ON CONFLICT (instrument_id, " +
 		"observation_time, kind, knowledge_time) DO NOTHING inside one transaction. Same " +
 		"atomic-claim shape as audit/accounting; no check-then-act gap.",
 
-	"services/autopilot/cmd/autopilot/main.go:127": "autopilot: the sole handler is " +
+	"services/autopilot/cmd/autopilot/main.go:128": "autopilot: the sole handler is " +
 		"controller.Controller.Handle, which has no dedup-and-skip branch at all — a retry " +
 		"always re-runs Dispatch (match -> runbook -> escalate) from the top. Every " +
 		"runbook.Action is a documented MUST-be-idempotent contract " +
@@ -314,14 +314,14 @@ var retryCertifiedConsumers = map[string]string{
 		"already re-runs runbooks on ordinary at-least-once redelivery; in-process retry adds " +
 		"no new failure shape. A doubled escalation page is a duplicate alert, not lost work.",
 
-	"services/lineage/cmd/lineage/main.go:166": "lineage: the sole handler is harvest.Harvester.Handle. " +
+	"services/lineage/cmd/lineage/main.go:167": "lineage: the sole handler is harvest.Harvester.Handle. " +
 		"graph.Memory.Observe (services/lineage/internal/graph/graph.go:71) always runs to " +
 		"completion (its own doc comment: 're-observing an event re-counts it but the edges " +
 		"are a set') before the OpenLineage Emit call that can fail — so a retry re-observes " +
 		"(accepted, pre-existing double-count on the Events tally, not a skip) and re-emits; " +
 		"it never skips the observe that a first attempt already made.",
 
-	"services/lake-sink/cmd/lake-sink/main.go:120": "lake-sink: the sole handler is cdc.EventSink.Handle, " +
+	"services/lake-sink/cmd/lake-sink/main.go:121": "lake-sink: the sole handler is cdc.EventSink.Handle, " +
 		"which has no dedup-and-skip branch — every attempt decodes, writes and flushes from " +
 		"scratch, and the doc comment is explicit that a duplicate row is expected and " +
 		"resolved by downstream compaction (services/lake-sink/internal/cdc/sink.go:49). A retry " +
@@ -338,7 +338,7 @@ var retryCertifiedConsumers = map[string]string{
 		"unconditional last-write-wins UPSERT keyed on household_id. Re-running it with the " +
 		"same composition is a no-op change; there is no dedup branch to skip through.",
 
-	"services/oms/cmd/oms/main.go:342": "oms: dispatches handleSubmit, handleCancel, handleAmend " +
+	"services/oms/cmd/oms/main.go:343": "oms: dispatches handleSubmit, handleCancel, handleAmend " +
 		"(order.Service.Handle) and position.Projector.Handle (fills), re-derived fresh against " +
 		"250fe00 rather than assumed fixed — see .superpowers/sdd/oms-recert-report.md for the " +
 		"full per-failure-point walk. handleSubmit: every failure point after store.Create either " +

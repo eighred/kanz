@@ -13,7 +13,10 @@ WORKDIR /src/kanz
 RUN go mod download
 
 COPY kanz/ ./
-RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" \
+# VERSION is stamped into the binary (internal/version, #143). Unset here means
+# the image reports "unstamped" rather than a plausible-looking "dev".
+ARG VERSION=
+RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X github.com/eighred/kanz/internal/version.stamped=${VERSION}" \
       -o /out/kanz-provisioner ./cmd/kanz-provisioner
 
 FROM ghcr.io/eighred/base/distroless-static:nonroot

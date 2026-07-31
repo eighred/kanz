@@ -13,7 +13,6 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"runtime/debug"
 	"syscall"
 	"time"
 
@@ -21,6 +20,7 @@ import (
 
 	"github.com/eighred/kanz/internal/platform/subject"
 	"github.com/eighred/kanz/internal/signal/translate"
+	"github.com/eighred/kanz/internal/version"
 	"github.com/eighred/kanz/pkg/bus"
 	"github.com/eighred/kanz/pkg/observability"
 	"github.com/eighred/kanz/pkg/transport"
@@ -42,7 +42,7 @@ func main() {
 	base := slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: cfg.LogLevel})
 	obs, err := observability.New(ctx, observability.Config{
 		ServiceName:    "webhook-ingest",
-		ServiceVersion: version(),
+		ServiceVersion: version.String(),
 		OTLPEndpoint:   cfg.OTLPEndpoint,
 		SampleRatio:    1,
 	}, base)
@@ -106,7 +106,7 @@ func main() {
 	// concern for end-user commands). The bus still enforces a non-empty issuer.
 	producer, err := bus.NewProducer(client, bus.ProducerConfig{
 		Source:          cfg.Source,
-		ProducerVersion: version(),
+		ProducerVersion: version.String(),
 		Metrics:         busMetrics,
 	})
 	if err != nil {
@@ -235,15 +235,4 @@ waitForBook:
 	if err := httpSrv.Shutdown(shutdownCtx); err != nil {
 		logger.Error("http shutdown error", "err", err)
 	}
-}
-
-func version() string {
-	if info, ok := debug.ReadBuildInfo(); ok {
-		for _, s := range info.Settings {
-			if s.Key == "vcs.revision" {
-				return s.Value
-			}
-		}
-	}
-	return "dev"
 }

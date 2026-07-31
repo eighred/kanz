@@ -20,6 +20,7 @@ import (
 	comp "github.com/eighred/kanz/internal/compliance"
 	"github.com/eighred/kanz/internal/execution"
 	"github.com/eighred/kanz/internal/marketdata/mark"
+	"github.com/eighred/kanz/internal/version"
 	"github.com/prometheus/client_golang/prometheus"
 
 	"github.com/eighred/kanz/internal/pg"
@@ -46,7 +47,7 @@ func main() {
 	base := slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: cfg.LogLevel})
 	obs, err := observability.New(ctx, observability.Config{
 		ServiceName:    cfg.Source,
-		ServiceVersion: version(),
+		ServiceVersion: version.String(),
 		OTLPEndpoint:   cfg.OTLPEndpoint,
 		SampleRatio:    1,
 	}, base)
@@ -137,7 +138,7 @@ func runConsumers(ctx context.Context, cfg config.Config, readiness *server.Read
 	// rather than default.
 	producer, err := bus.NewProducer(client, bus.ProducerConfig{
 		Source:          cfg.Source,
-		ProducerVersion: version(),
+		ProducerVersion: version.String(),
 		Tenant:          cfg.Tenant,
 		Metrics:         busMetrics,
 	})
@@ -561,7 +562,3 @@ func openStores(ctx context.Context, cfg config.Config, logger *slog.Logger) (or
 	}
 	return order.NewPostgres(pool), position.NewPostgres(pool, cfg.BaseCurrency), pool.Close, nil
 }
-
-// version is the service version stamped on telemetry. Hardcoded until the build
-// injects a git SHA / semver (CICD-01a/c ldflags).
-func version() string { return "dev" }

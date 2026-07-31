@@ -20,6 +20,7 @@ import (
 
 	"github.com/eighred/kanz/internal/marketdata"
 	"github.com/eighred/kanz/internal/marketdata/store"
+	"github.com/eighred/kanz/internal/version"
 	"github.com/eighred/kanz/pkg/bus"
 	"github.com/eighred/kanz/pkg/observability"
 	"github.com/eighred/kanz/pkg/transport"
@@ -41,7 +42,7 @@ func main() {
 	base := slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: cfg.LogLevel})
 	obs, err := observability.New(ctx, observability.Config{
 		ServiceName:    cfg.Source,
-		ServiceVersion: version(),
+		ServiceVersion: version.String(),
 		OTLPEndpoint:   cfg.OTLPEndpoint,
 		SampleRatio:    1,
 	}, base)
@@ -203,7 +204,7 @@ func runFeed(ctx context.Context, cfg config.Config, logger *slog.Logger, obs *o
 	defer func() { _ = client.Close() }()
 
 	producer, err := bus.NewProducer(client, bus.ProducerConfig{
-		Source: cfg.Source + "-feed", ProducerVersion: version(), Metrics: busMetrics,
+		Source: cfg.Source + "-feed", ProducerVersion: version.String(), Metrics: busMetrics,
 	})
 	if err != nil {
 		return err
@@ -247,7 +248,3 @@ func openStore(ctx context.Context, cfg config.Config) (store.Store, func(), err
 	}
 	return store.NewPostgres(pool), pool.Close, nil
 }
-
-// version is the service version stamped on telemetry. Hardcoded until the
-// build injects a git SHA / semver (CICD-01a/c ldflags).
-func version() string { return "dev" }

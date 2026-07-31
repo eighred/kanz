@@ -36,6 +36,7 @@ import (
 	"github.com/eighred/kanz/internal/risk/publish"
 	"github.com/eighred/kanz/internal/risk/state"
 	"github.com/eighred/kanz/internal/risk/state/persist"
+	"github.com/eighred/kanz/internal/version"
 	"github.com/eighred/kanz/pkg/bus"
 	"github.com/eighred/kanz/pkg/observability"
 	"github.com/eighred/kanz/pkg/transport"
@@ -62,7 +63,7 @@ func main() {
 	base := slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: cfg.LogLevel})
 	obs, err := observability.New(ctx, observability.Config{
 		ServiceName:    cfg.Source,
-		ServiceVersion: version(),
+		ServiceVersion: version.String(),
 		OTLPEndpoint:   cfg.OTLPEndpoint,
 		SampleRatio:    1,
 	}, base)
@@ -136,7 +137,7 @@ func runEngine(ctx context.Context, cfg config.Config, readiness *server.Readine
 		return err
 	}
 
-	producer, err := bus.NewProducer(client, bus.ProducerConfig{Source: cfg.Source, ProducerVersion: version(), Tenant: cfg.Tenant, Metrics: busMetrics})
+	producer, err := bus.NewProducer(client, bus.ProducerConfig{Source: cfg.Source, ProducerVersion: version.String(), Tenant: cfg.Tenant, Metrics: busMetrics})
 	if err != nil {
 		return err
 	}
@@ -409,7 +410,3 @@ func serveQueryGRPC(ctx context.Context, cfg config.Config, src transport.Source
 	}()
 	return grpcSrv.GracefulStop, nil
 }
-
-// version is the producer_version stamped on emitted events. Hardcoded
-// until the build injects a git SHA / semver (CICD-01a/c ldflags).
-func version() string { return "dev" }

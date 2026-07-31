@@ -18,11 +18,11 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"runtime/debug"
 	"sync"
 	"syscall"
 	"time"
 
+	"github.com/eighred/kanz/internal/version"
 	"github.com/eighred/kanz/pkg/alpha"
 	"github.com/eighred/kanz/pkg/bus"
 	"github.com/eighred/kanz/pkg/observability"
@@ -39,7 +39,7 @@ func main() {
 	base := slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: cfg.LogLevel})
 	obs, err := observability.New(ctx, observability.Config{
 		ServiceName:    "market-ingest",
-		ServiceVersion: version(),
+		ServiceVersion: version.String(),
 		OTLPEndpoint:   cfg.OTLPEndpoint,
 		SampleRatio:    1,
 	}, base)
@@ -73,7 +73,7 @@ func main() {
 
 	rawProducer, err := bus.NewProducer(client, bus.ProducerConfig{
 		Source:          cfg.Source,
-		ProducerVersion: version(),
+		ProducerVersion: version.String(),
 		// MT-01b: without this, bus.Validate rejects every envelope
 		// ("tenant_id required") and the service publishes NOTHING while still
 		// reporting ready. The book folds; nothing leaves.
@@ -214,15 +214,4 @@ func healthMux(ready *readiness, health *bus.HealthPublisher, metrics http.Handl
 		mux.Handle("/metrics", metrics)
 	}
 	return mux
-}
-
-func version() string {
-	if info, ok := debug.ReadBuildInfo(); ok {
-		for _, s := range info.Settings {
-			if s.Key == "vcs.revision" {
-				return s.Value
-			}
-		}
-	}
-	return "dev"
 }

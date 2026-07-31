@@ -52,6 +52,10 @@ jobs:
         with:
           context: .
           file: kanz/services/${{ matrix.service }}/Dockerfile
+          # A preview image must not claim to be a release. The SHA is what it is
+          # (#143) — an unstamped preview would report "unstamped" instead.
+          build-args: |
+            VERSION=${{ github.sha }}
           push: true
           tags: ghcr.io/eighred/${{ matrix.service }}:pr-${{ github.event.pull_request.number }}
 

@@ -153,6 +153,11 @@ jobs:
           # so the old hardcoded path could only ever have worked for the two services
           # the matrix used to list.
           file: ${{ matrix.dockerfile }}
+          # Stamps internal/version into the binary, so telemetry and every FACT this
+          # image publishes name the RELEASE TAG (#143). Without it a container build
+          # has no .git to fall back on and reports "unstamped".
+          build-args: |
+            VERSION=${{ github.ref_name }}
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
