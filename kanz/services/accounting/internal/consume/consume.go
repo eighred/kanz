@@ -116,6 +116,16 @@ func decodeCash(eventType string, payload []byte, envKnowledge time.Time) (*ledg
 	if err := proto.Unmarshal(payload, &le); err != nil {
 		return nil, err
 	}
+	// DOMAIN-CHECK THE WHOLE ENTRY BEFORE READING ANY NUMBER OFF IT (#95).
+	//
+	// Decimal.exponent is an unvalidated wire field and dec.FromProto materialises
+	// 10^abs(exponent). An entry carrying {1, 2000000000} does not post a wrong
+	// balance — it never returns, and the consumer grinding it stops acking, so
+	// the cash subscription stalls behind that one message. Refusing here DLQs it
+	// and leaves the ledger consuming.
+	if field, in := dec.InDomainDeep(&le); !in {
+		return nil, fmt.Errorf("cash entry %q carries an out-of-domain exponent at %s", le.GetEntryId(), field)
+	}
 	if le.GetEntryId() == "" || le.GetPortfolioId() == "" {
 		return nil, fmt.Errorf("cash entry missing id or portfolio")
 	}
@@ -164,11 +174,17 @@ func decodeFill(eventType string, payload []byte) (*orderpb.Fill, string, error)
 		if err := proto.Unmarshal(payload, &ev); err != nil {
 			return nil, "", err
 		}
+		if field, in := dec.InDomainDeep(&ev); !in {
+			return nil, "", fmt.Errorf("fill carries an out-of-domain exponent at %s", field)
+		}
 		return ev.GetFill(), ev.GetState().GetPortfolioId(), nil
 	case orderEventPartiallyFilled:
 		var ev orderpb.OrderPartiallyFilled
 		if err := proto.Unmarshal(payload, &ev); err != nil {
 			return nil, "", err
+		}
+		if field, in := dec.InDomainDeep(&ev); !in {
+			return nil, "", fmt.Errorf("fill carries an out-of-domain exponent at %s", field)
 		}
 		return ev.GetFill(), ev.GetState().GetPortfolioId(), nil
 	default:

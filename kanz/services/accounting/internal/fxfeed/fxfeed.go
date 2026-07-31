@@ -118,11 +118,17 @@ func midRat(ev *marketpb.MarketDataEvent) (*big.Rat, bool) {
 }
 
 // ratOf converts a common.v1.Decimal to an exact rational; ok=false for nil.
+//
+// CHECKED, because every caller reads a MarketDataEvent off the wire and
+// Decimal.exponent is unvalidated there (#95). An out-of-domain rate is treated
+// exactly like an absent one — ok=false, and the quote is not used — which is
+// already the contract every caller here handles. It must never become zero: a
+// zero FX rate revalues a whole book to nothing.
 func ratOf(d *commonpb.Decimal) (*big.Rat, bool) {
 	if d == nil {
 		return nil, false
 	}
-	return dec.FromProto(d), true
+	return dec.FromProtoChecked(d)
 }
 
 // ParsePairs parses the FX-pair reference spec — comma-separated

@@ -172,3 +172,76 @@ func TestFolderRejectsMalformedFill(t *testing.T) {
 		t.Fatal("malformed fill should surface an error (DLQ), not ack")
 	}
 }
+
+// THE LEDGER REFUSES AN OUT-OF-DOMAIN CASH LEG RATHER THAN GRINDING ON IT (#95).
+//
+// Decimal.exponent is an unvalidated wire field, and dec.FromProto materialises
+// 10^abs(exponent). Before the domain check this did not post a wrong balance —
+// HandleCash never returned, so the consumer stopped acking and the whole cash
+// subscription stalled behind one message while the service still reported
+// healthy. The timeout is what distinguishes "refused" from "still computing".
+func TestHandleCashRefusesAnOutOfDomainExponent(t *testing.T) {
+	st := ledger.NewMemoryStore()
+	f, _ := NewFolder(st, "USD")
+	env := &envelopepb.Envelope{EventType: cashEventSubscription}
+	payload := cashPayload(t, "cash:absurd", "PORT-1", accountingpb.EntryType_ENTRY_TYPE_CASH,
+		decv(1, 2000000000), "USD", time.Unix(1, 0))
+
+	done := make(chan error, 1)
+	go func() { done <- f.HandleCash(context.Background(), env, payload) }()
+
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("an out-of-domain cash entry was ACKED — it must nack to the DLQ, " +
+				"because a cash movement dropped in silence is book-of-record loss")
+		}
+	case <-time.After(4 * time.Second):
+		t.Fatal("HandleCash did not return within 4s — the domain check is not in front of the conversion")
+	}
+
+	if j, _ := st.Journal(context.Background(), "PORT-1"); len(j) != 0 {
+		t.Fatalf("a refused cash entry still wrote %d journal entries — refusing must not "+
+			"half-apply, and it must never substitute zero", len(j))
+	}
+}
+
+// The same for the FILL path, which decodes through a different function.
+func TestFolderRefusesAnOutOfDomainFill(t *testing.T) {
+	st := ledger.NewMemoryStore()
+	f, _ := NewFolder(st, "USD")
+	env := &envelopepb.Envelope{EventType: orderEventFilled}
+	payload := filledPayload(t, "PORT-1", "fill-absurd", "BTC-USD", orderpb.Side_SIDE_BUY,
+		decv(1, 2000000000), decv(50000, 0), time.Unix(1, 0))
+
+	done := make(chan error, 1)
+	go func() { done <- f.Handle(context.Background(), env, payload) }()
+
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("an out-of-domain fill quantity was ACKED rather than sent to the DLQ")
+		}
+	case <-time.After(4 * time.Second):
+		t.Fatal("Handle did not return within 4s — the fill path is still converting unbounded")
+	}
+	if j, _ := st.Journal(context.Background(), "PORT-1"); len(j) != 0 {
+		t.Fatalf("a refused fill still wrote %d journal entries", len(j))
+	}
+}
+
+// NON-VACUITY: an ordinary cash entry at the SAME code path still folds. A folder
+// that refused everything would satisfy both tests above.
+func TestHandleCashStillFoldsAnOrdinaryEntry(t *testing.T) {
+	st := ledger.NewMemoryStore()
+	f, _ := NewFolder(st, "USD")
+	env := &envelopepb.Envelope{EventType: cashEventSubscription}
+	payload := cashPayload(t, "cash:ok", "PORT-2", accountingpb.EntryType_ENTRY_TYPE_CASH,
+		decv(100000, -2), "USD", time.Unix(1, 0))
+	if err := f.HandleCash(context.Background(), env, payload); err != nil {
+		t.Fatalf("an ordinary cash entry was refused: %v", err)
+	}
+	if j, _ := st.Journal(context.Background(), "PORT-2"); len(j) != 1 {
+		t.Fatalf("ordinary cash entry wrote %d journal entries, want 1", len(j))
+	}
+}

@@ -214,3 +214,134 @@ func TestToProto_LiteralOutput(t *testing.T) {
 		})
 	}
 }
+
+// ---------------------------------------------------------------------------
+// The predicates (#95). These used to answer via FromProto and therefore
+// inherited its hang on an unvalidated wire exponent.
+// ---------------------------------------------------------------------------
+
+// THE REGRESSION THIS EXISTS FOR. dec.IsPositive(cmd.GetQuantity()) on an order
+// carrying {1, 2000000000} did not return, and that call sits in the OMS order
+// aggregate with no domain gate in front of it.
+//
+// Structurally guarded, like TestFromProtoChecked_AbsurdExponentRefusesPromptly:
+// if this regresses the call never returns and CI fails on its own panic
+// timeout. The real protection is that none of these three reads the exponent
+// in a way that can materialise it.
+func TestPredicatesAreTotalOnAbsurdExponents(t *testing.T) {
+	huge := &commonpb.Decimal{Coefficient: 1, Exponent: 2000000000}
+	hugeNeg := &commonpb.Decimal{Coefficient: -1, Exponent: -2000000000}
+
+	for _, tc := range []struct {
+		name string
+		call func() bool
+		want bool
+	}{
+		{"IsPositive(+1e2000000000)", func() bool { return IsPositive(huge) }, true},
+		{"IsPositive(-1e-2000000000)", func() bool { return IsPositive(hugeNeg) }, false},
+		{"IsZero(+1e2000000000)", func() bool { return IsZero(huge) }, false},
+		{"Cmp is signed by coefficient", func() bool { return Cmp(huge, hugeNeg) > 0 }, true},
+		{"Cmp of two absurd exponents", func() bool { return Cmp(huge, huge) == 0 }, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			done := make(chan bool, 1)
+			go func() { done <- tc.call() }()
+			select {
+			case got := <-done:
+				if got != tc.want {
+					t.Fatalf("got %v, want %v", got, tc.want)
+				}
+			case <-time.After(4 * time.Second):
+				t.Fatalf("%s did not return within 4s — the predicate is materialising 10^exponent again", tc.name)
+			}
+		})
+	}
+}
+
+// NOT A NEW IMPLEMENTATION — THE SAME ANSWERS, ARRIVED AT WITHOUT EXPANDING.
+//
+// This is the non-vacuity guard for the three above: a version that answered
+// "false, false, 0" for everything would pass the totality test. Every pair in
+// the in-domain cross-product must give byte-identical results to the expanding
+// definition these functions used to have, or the fix silently changed what an
+// order comparison means.
+func TestPredicatesAgreeWithTheExpandingDefinition(t *testing.T) {
+	coeffs := []int64{0, 1, -1, 5, -5, 999, -999, 1000, 123456789, -123456789}
+	exps := []int32{-8, -3, -1, 0, 1, 3, 8, 64, -64}
+
+	var vals []*commonpb.Decimal
+	for _, c := range coeffs {
+		for _, e := range exps {
+			vals = append(vals, &commonpb.Decimal{Coefficient: c, Exponent: e})
+		}
+	}
+	vals = append(vals, nil)
+
+	for _, a := range vals {
+		// The expanding definitions, written out: what these functions were.
+		if got, want := IsPositive(a), FromProto(a).Sign() > 0; got != want {
+			t.Fatalf("IsPositive(%v) = %v, want %v", a, got, want)
+		}
+		if got, want := IsZero(a), FromProto(a).Sign() == 0; got != want {
+			t.Fatalf("IsZero(%v) = %v, want %v", a, got, want)
+		}
+		for _, b := range vals {
+			if got, want := Cmp(a, b), FromProto(a).Cmp(FromProto(b)); got != want {
+				t.Fatalf("Cmp(%v, %v) = %d, want %d", a, b, got, want)
+			}
+		}
+	}
+}
+
+// The alignment branch of cmpMagnitude is the only one that multiplies, and it
+// is reached only on a tie in decimal order. The cross-product above covers it
+// incidentally; these name the cases so a regression says WHICH property broke.
+func TestCmpAlignsOnlyWhenDecimalOrdersTie(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		a, b *commonpb.Decimal
+		want int
+	}{
+		// 1e3 = 1000 vs 999e1 = 9990. Orders tie at 4; alignment decides.
+		{"tie in order, alignment decides", &commonpb.Decimal{Coefficient: 1, Exponent: 3},
+			&commonpb.Decimal{Coefficient: 999, Exponent: 1}, -1},
+		// 1e5 = 100000 (order 6) vs 999e1 = 9990 (order 4). No alignment needed.
+		{"order alone decides", &commonpb.Decimal{Coefficient: 1, Exponent: 5},
+			&commonpb.Decimal{Coefficient: 999, Exponent: 1}, 1},
+		// Same value, different representations: 1.5 as 15e-1 and 150e-2.
+		{"equal values written differently", &commonpb.Decimal{Coefficient: 15, Exponent: -1},
+			&commonpb.Decimal{Coefficient: 150, Exponent: -2}, 0},
+		// Negatives invert the magnitude comparison.
+		{"more negative is smaller", &commonpb.Decimal{Coefficient: -999, Exponent: 1},
+			&commonpb.Decimal{Coefficient: -1, Exponent: 3}, -1},
+		// Zero compares equal whatever exponent it carries.
+		{"zero equals zero across exponents", &commonpb.Decimal{Coefficient: 0, Exponent: 64},
+			&commonpb.Decimal{Coefficient: 0, Exponent: -64}, 0},
+		// A sign difference short-circuits before magnitude is looked at.
+		{"sign decides before magnitude", &commonpb.Decimal{Coefficient: -1, Exponent: 60},
+			&commonpb.Decimal{Coefficient: 1, Exponent: -60}, -1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := Cmp(tc.a, tc.b); got != tc.want {
+				t.Fatalf("Cmp = %d, want %d", got, tc.want)
+			}
+			if got := Cmp(tc.b, tc.a); got != -tc.want {
+				t.Fatalf("Cmp reversed = %d, want %d — the comparison is not antisymmetric", got, -tc.want)
+			}
+		})
+	}
+}
+
+// InDomain is the predicate FromProtoChecked answers with; they must not drift.
+func TestInDomainMatchesFromProtoChecked(t *testing.T) {
+	for _, exp := range []int32{-65, -64, -1, 0, 1, 64, 65} {
+		d := &commonpb.Decimal{Coefficient: 1, Exponent: exp}
+		_, ok := FromProtoChecked(d)
+		if InDomain(d) != ok {
+			t.Fatalf("exponent %d: InDomain = %v but FromProtoChecked ok = %v", exp, InDomain(d), ok)
+		}
+	}
+	if !InDomain(nil) {
+		t.Error("a nil Decimal is absent, not out of range — InDomain(nil) must be true")
+	}
+}

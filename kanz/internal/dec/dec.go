@@ -95,14 +95,26 @@ const maxSafeExponent = 64
 // safe fallback anywhere on this platform: it can be silently treated as
 // "flat" and dropped from downstream checks (see mark.Handle's callers).
 func FromProtoChecked(d *commonpb.Decimal) (*big.Rat, bool) {
-	if d == nil {
-		return new(big.Rat), true
-	}
-	exp := d.GetExponent()
-	if exp > maxSafeExponent || exp < -maxSafeExponent {
+	if !InDomain(d) {
 		return nil, false
 	}
 	return FromProto(d), true
+}
+
+// InDomain reports whether a Decimal can be converted without materialising an
+// exponent large enough to be the incident itself. A nil Decimal is in-domain —
+// absent is not out-of-range, and whatever owns "this field is required" owns
+// that case.
+//
+// This is the predicate FromProtoChecked answers with; it is exported so a caller
+// that must refuse a whole MESSAGE before decoding any of it can ask the question
+// without converting field by field.
+func InDomain(d *commonpb.Decimal) bool {
+	if d == nil {
+		return true
+	}
+	exp := d.GetExponent()
+	return exp >= -maxSafeExponent && exp <= maxSafeExponent
 }
 
 // scaledCoefficient rounds a rational to the fixed scale (half-up) and returns
@@ -190,11 +202,92 @@ func Str(r *big.Rat) string {
 	return s
 }
 
+// THE PREDICATES BELOW NEVER MATERIALISE 10^abs(exponent).
+//
+// They used to answer via FromProto, which meant every one of them inherited its
+// hang: dec.IsPositive(cmd.GetQuantity()) on an order carrying
+// {Coefficient:1, Exponent:2000000000} did not return, and Decimal.exponent is an
+// unvalidated wire field. That reached the OMS order aggregate, the venue
+// adapters' limit-price checks and the execution router — paths with no domain
+// gate in front of them (#95).
+//
+// They are answered arithmetically instead. This is not an approximation and not
+// a bounded domain: the results are IDENTICAL to the expanding versions for every
+// input, including the ones that used to hang, because 10^exponent is strictly
+// positive and therefore cannot change a sign or a zero. A caller needing the
+// VALUE still has to use FromProtoChecked and handle the refusal — only the
+// questions answerable without the value are answered here.
+
+// sign reports the sign of a Decimal: -1, 0 or +1. A nil Decimal is zero.
+//
+// sign(coefficient × 10^exponent) == sign(coefficient), because 10^exponent is
+// positive for every exponent. The exponent is therefore not read at all, which
+// is what makes this total.
+func sign(d *commonpb.Decimal) int {
+	switch c := d.GetCoefficient(); {
+	case c > 0:
+		return 1
+	case c < 0:
+		return -1
+	default:
+		return 0
+	}
+}
+
 // IsPositive reports whether d > 0.
-func IsPositive(d *commonpb.Decimal) bool { return FromProto(d).Sign() > 0 }
+func IsPositive(d *commonpb.Decimal) bool { return sign(d) > 0 }
 
 // IsZero reports whether d == 0.
-func IsZero(d *commonpb.Decimal) bool { return FromProto(d).Sign() == 0 }
+func IsZero(d *commonpb.Decimal) bool { return sign(d) == 0 }
 
 // Cmp compares two Decimals exactly: -1 if a < b, 0 if equal, +1 if a > b.
-func Cmp(a, b *commonpb.Decimal) int { return FromProto(a).Cmp(FromProto(b)) }
+func Cmp(a, b *commonpb.Decimal) int {
+	sa, sb := sign(a), sign(b)
+	if sa != sb {
+		if sa < sb {
+			return -1
+		}
+		return 1
+	}
+	if sa == 0 {
+		return 0 // both zero, whatever their exponents
+	}
+	if sa < 0 {
+		return -cmpMagnitude(a, b) // more negative is smaller
+	}
+	return cmpMagnitude(a, b)
+}
+
+// cmpMagnitude compares |a| against |b|. Both must be non-zero.
+//
+// It compares DECIMAL ORDER first — digits(coefficient) + exponent, the position
+// of the leading digit — because a value with more digits before the point is
+// larger outright: |v| lies in [10^(order-1), 10^order), so a strictly greater
+// order is a strictly greater magnitude and no alignment is needed.
+//
+// Alignment is reached only when the orders TIE, and that is what bounds the
+// arithmetic: equal orders mean the exponent gap equals the digit-count gap,
+// which is at most 18 for an int64 coefficient. The largest power this can ever
+// raise is 10^18 — instant — no matter how extreme the exponents themselves are.
+func cmpMagnitude(a, b *commonpb.Decimal) int {
+	ca := new(big.Int).Abs(big.NewInt(a.GetCoefficient()))
+	cb := new(big.Int).Abs(big.NewInt(b.GetCoefficient()))
+	ea, eb := int64(a.GetExponent()), int64(b.GetExponent())
+
+	orderA := int64(len(ca.String())) + ea
+	orderB := int64(len(cb.String())) + eb
+	if orderA != orderB {
+		if orderA < orderB {
+			return -1
+		}
+		return 1
+	}
+
+	switch {
+	case ea > eb:
+		ca.Mul(ca, new(big.Int).Exp(big.NewInt(10), big.NewInt(ea-eb), nil))
+	case eb > ea:
+		cb.Mul(cb, new(big.Int).Exp(big.NewInt(10), big.NewInt(eb-ea), nil))
+	}
+	return ca.Cmp(cb)
+}

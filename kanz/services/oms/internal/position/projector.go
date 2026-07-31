@@ -3,12 +3,14 @@ package position
 import (
 	"context"
 	"errors"
+	"fmt"
 
 	domainpb "github.com/eighred/kanz/kanz-schemas-go/domain/v1"
 	envelopepb "github.com/eighred/kanz/kanz-schemas-go/envelope/v1"
 	orderpb "github.com/eighred/kanz/kanz-schemas-go/order/v1"
 	"google.golang.org/protobuf/proto"
 
+	"github.com/eighred/kanz/internal/dec"
 	"github.com/eighred/kanz/internal/platform/subject"
 	"github.com/eighred/kanz/pkg/bus"
 )
@@ -107,6 +109,14 @@ func (p *Projector) publish(ctx context.Context, subj, eventType string, st *dom
 }
 
 // decodeFill extracts the Fill and its portfolio from a fill-bearing FACT.
+//
+// IT BOUNDS THE DECIMAL DOMAIN HERE, WHERE THE MESSAGE IS STILL WHOLE (#95).
+// The Fill this returns is folded by book.go and postgres.go, which convert its
+// price and quantity with the unbounded dec.FromProto. Decimal.exponent is an
+// unvalidated wire field, so a fill carrying {1, 2000000000} would not book a
+// wrong position — it would never return, holding the projector, and the
+// execution book would stop advancing while the service still reported healthy.
+// This is the last point at which the whole message is in one place to refuse.
 func decodeFill(eventType string, payload []byte) (*orderpb.Fill, string, error) {
 	switch eventType {
 	case orderEventFilled:
@@ -114,11 +124,17 @@ func decodeFill(eventType string, payload []byte) (*orderpb.Fill, string, error)
 		if err := proto.Unmarshal(payload, &ev); err != nil {
 			return nil, "", err
 		}
+		if field, in := dec.InDomainDeep(&ev); !in {
+			return nil, "", fmt.Errorf("fill carries an out-of-domain exponent at %s", field)
+		}
 		return ev.GetFill(), ev.GetState().GetPortfolioId(), nil
 	case orderEventPartiallyFilled:
 		var ev orderpb.OrderPartiallyFilled
 		if err := proto.Unmarshal(payload, &ev); err != nil {
 			return nil, "", err
+		}
+		if field, in := dec.InDomainDeep(&ev); !in {
+			return nil, "", fmt.Errorf("fill carries an out-of-domain exponent at %s", field)
 		}
 		return ev.GetFill(), ev.GetState().GetPortfolioId(), nil
 	default:

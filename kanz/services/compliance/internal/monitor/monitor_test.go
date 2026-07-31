@@ -77,15 +77,15 @@ func (r *recordingRecorder) Record(_ context.Context, rec comp.DecisionRecord) e
 	return nil
 }
 
-func dec(c int64, e int32) *commonpb.Decimal { return &commonpb.Decimal{Coefficient: c, Exponent: e} }
+func decv(c int64, e int32) *commonpb.Decimal { return &commonpb.Decimal{Coefficient: c, Exponent: e} }
 
 func positionEvent(t *testing.T, inst string, qty, mv int64, asOf time.Time) []byte {
 	t.Helper()
 	b, err := proto.Marshal(&domainpb.PositionState{
 		PortfolioId:  "p1",
 		InstrumentId: inst,
-		Quantity:     dec(qty, 0),
-		MarketValue:  &commonpb.Money{Amount: dec(mv, 0), CurrencyCode: "USD"},
+		Quantity:     decv(qty, 0),
+		MarketValue:  &commonpb.Money{Amount: decv(mv, 0), CurrencyCode: "USD"},
 		AsOf:         timestamppb.New(asOf),
 	})
 	if err != nil {
@@ -103,7 +103,7 @@ func concentrationRegistry() *comp.MandateRegistry {
 			RuleId: "c1", Type: compliancepb.RuleType_RULE_TYPE_CONCENTRATION,
 			Params: &compliancepb.Rule_Concentration{Concentration: &compliancepb.ConcentrationLimit{
 				Dimension: compliancepb.Dimension_DIMENSION_INSTRUMENT,
-				MaxWeight: dec(60, -2), // 60%
+				MaxWeight: decv(60, -2), // 60%
 			}},
 		}},
 	})

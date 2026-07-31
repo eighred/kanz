@@ -26,6 +26,7 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	comp "github.com/eighred/kanz/internal/compliance"
+	"github.com/eighred/kanz/internal/dec"
 )
 
 // Monitor re-evaluates portfolios on every position change. Goroutine-safe.
@@ -77,6 +78,15 @@ func (m *Monitor) Handle(ctx context.Context, _ *envelopepb.Envelope, payload []
 	var ps domainpb.PositionState
 	if err := proto.Unmarshal(payload, &ps); err != nil {
 		m.logger.ErrorContext(ctx, "compliance monitor: malformed PositionState", "err", err)
+		return nil
+	}
+	// An out-of-domain exponent is refused exactly like a malformed payload (#95):
+	// the position's quantity and value are converted downstream with the unbounded
+	// dec.FromProto, and a breach check that never returns is a breach check that
+	// never fires — the monitor would look healthy while evaluating nothing.
+	if field, in := dec.InDomainDeep(&ps); !in {
+		m.logger.ErrorContext(ctx, "compliance monitor: PositionState carries an out-of-domain exponent — refusing",
+			"field", field, "portfolio_id", ps.GetPortfolioId())
 		return nil
 	}
 	pid := ps.GetPortfolioId()

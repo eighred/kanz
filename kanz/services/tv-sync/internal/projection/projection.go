@@ -170,50 +170,76 @@ func (p *Projection) Handle(ctx context.Context, env *envelopepb.Envelope, paylo
 	return nil
 }
 
+// decodeFact unmarshals a FACT payload and reports whether it is safe to fold.
+//
+// IT REFUSES AN OUT-OF-DOMAIN DECIMAL EXACTLY AS IT REFUSES A MALFORMED
+// PAYLOAD (#95), and for a stronger reason than wrongness. Decimal.exponent is
+// an unvalidated wire field; this projection reads it through orderDTOAsOf and
+// feeRat, which return bare strings and rationals with nowhere to put an error,
+// and dec.FromProto materialises 10^abs(exponent). A fill carrying
+// {1, 2000000000} would not render a wrong quantity in the Broker API — it
+// would never return, holding p.mu, and every subsequent fold and every reader
+// blocks behind it. The projection stops, permanently, on one message.
+//
+// dec.InDomainDeep walks the WHOLE decoded FACT rather than the fields this
+// file happens to read today, so a Decimal added to the schema later is covered
+// without anyone remembering to come back here.
+//
+// The refused FACT is not lost: Handle appended it to the durable log before
+// folding, so it remains auditable and the drop is recoverable — which is why
+// matching the malformed path is safe here rather than merely convenient.
+func decodeFact(payload []byte, ev proto.Message) bool {
+	if proto.Unmarshal(payload, ev) != nil {
+		return false
+	}
+	_, in := dec.InDomainDeep(ev)
+	return in
+}
+
 // fold applies one FACT under p.mu and returns the deltas to stream.
 func (p *Projection) fold(tenant, eventType string, payload []byte, know time.Time) []Delta {
 	switch eventType {
 	case evtAccepted:
 		var ev orderpb.OrderAccepted
-		if proto.Unmarshal(payload, &ev) != nil {
+		if !decodeFact(payload, &ev) {
 			return nil
 		}
 		return p.upsertOrder(tenant, ev.GetState(), ev.GetState().GetStatus(), "", know)
 	case evtPartiallyFilled:
 		var ev orderpb.OrderPartiallyFilled
-		if proto.Unmarshal(payload, &ev) != nil {
+		if !decodeFact(payload, &ev) {
 			return nil
 		}
 		d := p.upsertOrder(tenant, ev.GetState(), ev.GetState().GetStatus(), "", know)
 		return append(d, p.appendFill(tenant, ev.GetState().GetPortfolioId(), ev.GetFill(), know)...)
 	case evtFilled:
 		var ev orderpb.OrderFilled
-		if proto.Unmarshal(payload, &ev) != nil {
+		if !decodeFact(payload, &ev) {
 			return nil
 		}
 		d := p.upsertOrder(tenant, ev.GetState(), ev.GetState().GetStatus(), "", know)
 		return append(d, p.appendFill(tenant, ev.GetState().GetPortfolioId(), ev.GetFill(), know)...)
 	case evtRouted:
 		var ev orderpb.OrderRouted
-		if proto.Unmarshal(payload, &ev) != nil {
+		if !decodeFact(payload, &ev) {
 			return nil
 		}
 		return p.transition(tenant, ev.GetOrderId(), orderpb.OrderStatus_ORDER_STATUS_ROUTED, ev.GetVenue(), "", know)
 	case evtRejected:
 		var ev orderpb.OrderRejected
-		if proto.Unmarshal(payload, &ev) != nil {
+		if !decodeFact(payload, &ev) {
 			return nil
 		}
 		return p.transition(tenant, ev.GetOrderId(), orderpb.OrderStatus_ORDER_STATUS_REJECTED, "", ev.GetReason(), know)
 	case evtCancelled:
 		var ev orderpb.OrderCancelled
-		if proto.Unmarshal(payload, &ev) != nil {
+		if !decodeFact(payload, &ev) {
 			return nil
 		}
 		return p.transition(tenant, ev.GetOrderId(), orderpb.OrderStatus_ORDER_STATUS_CANCELLED, "", "", know)
 	case evtExpired:
 		var ev orderpb.OrderExpired
-		if proto.Unmarshal(payload, &ev) != nil {
+		if !decodeFact(payload, &ev) {
 			return nil
 		}
 		return p.transition(tenant, ev.GetOrderId(), orderpb.OrderStatus_ORDER_STATUS_EXPIRED, "", "", know)

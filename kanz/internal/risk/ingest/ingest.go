@@ -40,6 +40,8 @@ import (
 
 	domainpb "github.com/eighred/kanz/kanz-schemas-go/domain/v1"
 	envelopepb "github.com/eighred/kanz/kanz-schemas-go/envelope/v1"
+
+	"github.com/eighred/kanz/internal/dec"
 )
 
 // Event-type names follow kanz-schemas/docs/subject-taxonomy.md §1
@@ -101,6 +103,9 @@ func (i *Ingestor) Handler(ctx context.Context, env *envelopepb.Envelope, payloa
 		if err := proto.Unmarshal(payload, &p); err != nil {
 			return fmt.Errorf("ingest: %s unmarshal: %w", env.EventType, err)
 		}
+		if field, in := dec.InDomainDeep(&p); !in {
+			return fmt.Errorf("ingest: %s carries an out-of-domain exponent at %s", env.EventType, field)
+		}
 		return i.applier.ApplyPortfolioRevalued(ctx, env, &p)
 
 	case EventTypePositionChanged:
@@ -108,12 +113,18 @@ func (i *Ingestor) Handler(ctx context.Context, env *envelopepb.Envelope, payloa
 		if err := proto.Unmarshal(payload, &p); err != nil {
 			return fmt.Errorf("ingest: %s unmarshal: %w", env.EventType, err)
 		}
+		if field, in := dec.InDomainDeep(&p); !in {
+			return fmt.Errorf("ingest: %s carries an out-of-domain exponent at %s", env.EventType, field)
+		}
 		return i.applier.ApplyPositionChanged(ctx, env, &p)
 
 	case EventTypePortfolioSnapshot:
 		var p domainpb.PortfolioSnapshot
 		if err := proto.Unmarshal(payload, &p); err != nil {
 			return fmt.Errorf("ingest: %s unmarshal: %w", env.EventType, err)
+		}
+		if field, in := dec.InDomainDeep(&p); !in {
+			return fmt.Errorf("ingest: %s carries an out-of-domain exponent at %s", env.EventType, field)
 		}
 		return i.applier.ApplyPortfolioSnapshot(ctx, env, &p)
 

@@ -24,6 +24,8 @@ import (
 	commonpb "github.com/eighred/kanz/kanz-schemas-go/common/v1"
 	envelopepb "github.com/eighred/kanz/kanz-schemas-go/envelope/v1"
 	marketpb "github.com/eighred/kanz/kanz-schemas-go/market/v1"
+
+	"github.com/eighred/kanz/internal/dec"
 )
 
 // LiveQuotes is a concurrency-safe last-value cache: the most-recent market
@@ -81,6 +83,12 @@ func (q *LiveQuotes) Handler(_ context.Context, env *envelopepb.Envelope, payloa
 	var ev marketpb.MarketDataEvent
 	if err := proto.Unmarshal(payload, &ev); err != nil {
 		return fmt.Errorf("livequote: %s unmarshal: %w", env.GetEventType(), err)
+	}
+	// Refused before Update caches it (#95): a quote held in the live cache is read
+	// by every revaluation that follows, so an out-of-domain exponent admitted here
+	// is not one bad message, it is every subsequent valuation of that instrument.
+	if field, in := dec.InDomainDeep(&ev); !in {
+		return fmt.Errorf("livequote: %s carries an out-of-domain exponent at %s", env.GetEventType(), field)
 	}
 	q.Update(&ev)
 	return nil
