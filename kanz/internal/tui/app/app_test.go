@@ -7,6 +7,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
+	"github.com/eighred/kanz/internal/tui/keymap"
 	"github.com/eighred/kanz/internal/tui/pane"
 )
 
@@ -221,9 +222,13 @@ func (p *sizePane) Update(msg tea.Msg) (pane.Pane, tea.Cmd) {
 }
 
 // textPane accepts typed characters, like the Copilot pane.
-type textPane struct{ fake }
+type textPane struct {
+	fake
+	focused bool
+}
 
 func (t *textPane) AcceptsTypedText() {}
+func (t *textPane) SetFocused(v bool) { t.focused = v }
 
 // Update must return the textPane ITSELF, not the embedded fake. The promoted
 // fake.Update returns *fake, and the registry would accept that swap — the ids
@@ -247,7 +252,7 @@ func (t *textPane) Update(msg tea.Msg) (pane.Pane, tea.Cmd) {
 //
 // The letters asserted here are the ACTUAL bindings, not arbitrary ones.
 func TestATextPaneReceivesTheLettersThatAreAlsoBindings(t *testing.T) {
-	p := &textPane{fake{id: "copilot", title: "Copilot"}}
+	p := &textPane{fake: fake{id: "copilot", title: "Copilot"}}
 	m := newModel(t, p, &fake{id: "b", title: "B"})
 
 	for _, k := range []string{"h", "l", "q", "?"} {
@@ -281,7 +286,7 @@ func TestATextPaneReceivesTheLettersThatAreAlsoBindings(t *testing.T) {
 // trap with no way out.
 func TestATextPaneStillHonoursModifierAndTabBindings(t *testing.T) {
 	m := newModel(t,
-		&textPane{fake{id: "copilot", title: "Copilot"}},
+		&textPane{fake: fake{id: "copilot", title: "Copilot"}},
 		&fake{id: "b", title: "B"},
 	)
 	got, _ := m.Update(key("tab"))
@@ -348,5 +353,105 @@ func TestAConfirmingBusPaneIsShownRatherThanLaunched(t *testing.T) {
 	if m.active != 1 {
 		t.Errorf("active = %d, want 1 — a confirming pane must become visible so it can collect input",
 			m.active)
+	}
+}
+
+// THE SHELL OPENS READY TO TYPE. The first pane is the Copilot prompt, and
+// asking for a keystroke before the product's primary action is friction with
+// nothing bought by it.
+func TestTheShellOpensInInputModeOnATextPane(t *testing.T) {
+	p := &textPane{fake: fake{id: "copilot", title: "Copilot"}}
+	m := newModel(t, p, &fake{id: "nodes", title: "Nodes"})
+
+	if m.mode != keymap.Input {
+		t.Errorf("mode = %v on open, want Input — the Copilot prompt would need a keystroke first", m.mode)
+	}
+	if !p.focused {
+		t.Error("the pane was not told it has focus, so its prompt cannot say whether keys land")
+	}
+}
+
+// A READ-ONLY PANE IS NEVER IN INPUT MODE, so the whole binding table is live
+// there — including the vim keys it was written for.
+func TestSwitchingToAReadOnlyPaneReturnsToNavigate(t *testing.T) {
+	m := newModel(t,
+		&textPane{fake: fake{id: "copilot", title: "Copilot"}},
+		&fake{id: "nodes", title: "Nodes"},
+	)
+	got, _ := m.Update(key("tab"))
+	m = got.(Model)
+
+	if m.mode != keymap.Navigate {
+		t.Errorf("mode = %v on a read-only pane, want Navigate", m.mode)
+	}
+	// And `l` navigates again rather than being swallowed.
+	got, _ = m.Update(key("l"))
+	m = got.(Model)
+	if m.active != 0 {
+		t.Errorf("l did not navigate in Navigate mode (active=%d)", m.active)
+	}
+}
+
+// ONE KEY, ONE MEANING PER MODE. This is the property the whole change exists
+// for: `l` types in Input and navigates in Navigate, and which one is in force
+// is a mode the operator can see — not a function of which tab is open.
+func TestTheSameKeyTypesInInputAndNavigatesInNavigate(t *testing.T) {
+	p := &textPane{fake: fake{id: "copilot", title: "Copilot"}}
+	m := newModel(t, p, &fake{id: "nodes", title: "Nodes"})
+
+	// Input mode (the shell opens here): the letter reaches the pane.
+	got, _ := m.Update(key("l"))
+	m = got.(Model)
+	if m.active != 0 {
+		t.Fatal("l navigated while in Input mode — the prompt would lose the character")
+	}
+	if len(p.gotKeys) == 0 || p.gotKeys[len(p.gotKeys)-1] != "l" {
+		t.Fatalf("the pane did not receive l; saw %v", p.gotKeys)
+	}
+
+	// esc to Navigate: the same letter now navigates.
+	got, _ = m.Update(key("esc"))
+	m = got.(Model)
+	if m.mode != keymap.Navigate {
+		t.Fatalf("esc did not leave Input mode (mode=%v)", m.mode)
+	}
+	got, _ = m.Update(key("l"))
+	m = got.(Model)
+	if m.active != 1 {
+		t.Errorf("l did not navigate after esc (active=%d)", m.active)
+	}
+}
+
+// i returns to Input, and the pane is told so it can render the difference.
+func TestIReturnsToInputModeAndFocusesThePane(t *testing.T) {
+	p := &textPane{fake: fake{id: "copilot", title: "Copilot"}}
+	m := newModel(t, p, &fake{id: "nodes", title: "Nodes"})
+
+	got, _ := m.Update(key("esc"))
+	m = got.(Model)
+	if p.focused {
+		t.Error("the pane still reports focus after esc")
+	}
+	got, _ = m.Update(key("i"))
+	m = got.(Model)
+	if m.mode != keymap.Input {
+		t.Fatalf("i did not enter Input mode (mode=%v)", m.mode)
+	}
+	if !p.focused {
+		t.Error("the pane was not refocused, so its prompt would still say 'press i to type'")
+	}
+}
+
+// THE MODE MUST BE VISIBLE. A shell where one key does two things has to say
+// which posture it is in, or it has swapped one unlearnable rule for another.
+func TestTheStatusBarNamesTheMode(t *testing.T) {
+	m := newModel(t, &textPane{fake: fake{id: "copilot", title: "Copilot"}})
+	if !strings.Contains(m.status(), "INPUT") {
+		t.Errorf("status = %q, want it to name INPUT mode", m.status())
+	}
+	got, _ := m.Update(key("esc"))
+	m = got.(Model)
+	if !strings.Contains(m.status(), "NAV") {
+		t.Errorf("status = %q, want it to name NAV mode", m.status())
 	}
 }

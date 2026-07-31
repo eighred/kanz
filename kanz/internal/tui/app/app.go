@@ -27,6 +27,10 @@ type Model struct {
 	width, height int
 	showHelp      bool
 
+	// mode decides what a keystroke means. See keymap.Mode — it exists so one
+	// key does not mean two things depending on which tab is open.
+	mode keymap.Mode
+
 	// lastErr is surfaced in the status bar rather than logged and lost. A TUI
 	// has no stderr an operator can see — anything written there is painted over
 	// by the next frame — so an error that is not rendered did not happen.
@@ -40,7 +44,40 @@ func New(reg *pane.Registry) (Model, error) {
 	if reg == nil || reg.Len() == 0 {
 		return Model{}, fmt.Errorf("app: shell needs at least one pane")
 	}
-	return Model{panes: reg}, nil
+	m := Model{panes: reg}
+	// OPENS READY TO TYPE. The first pane is the Copilot prompt, and asking for a
+	// keystroke before the primary action of the product is friction with nothing
+	// bought by it — the mode is visible in the status bar either way.
+	// Through setMode, not by assigning the field: the pane has to be told, or it
+	// renders 'press i to type' while the shell is already in Input mode. One
+	// writer is the only way the two cannot disagree.
+	m.setMode(m.modeFor(0))
+	return m, nil
+}
+
+// setMode changes the posture and tells the active pane, so the pane can render
+// whether it is taking input. One writer, so the two cannot disagree.
+func (m *Model) setMode(mode keymap.Mode) {
+	m.mode = mode
+	if p, ok := m.panes.At(m.active); ok {
+		if tp, isText := p.(pane.TextInput); isText {
+			tp.SetFocused(mode == keymap.Input)
+		}
+	}
+}
+
+// modeFor is the mode a pane is entered in: Input if it takes typed text,
+// Navigate otherwise. A read-only pane is never in Input mode, so the full
+// binding table is always live there.
+func (m Model) modeFor(i int) keymap.Mode {
+	p, ok := m.panes.At(i)
+	if !ok {
+		return keymap.Navigate
+	}
+	if _, isText := p.(pane.TextInput); isText {
+		return keymap.Input
+	}
+	return keymap.Navigate
 }
 
 // Init starts the active pane only.
@@ -103,16 +140,21 @@ func (m *Model) globalKey(key string) (tea.Cmd, bool) {
 		return nil, true
 	}
 
-	// ASK THE PANE FIRST. A pane taking typed text must receive the characters
-	// somebody types; consuming them as bindings makes it unusable, which is what
-	// `h`/`l`/`q`/`?` did to the Copilot prompt in #65.
-	switch keymap.LookupFor(key, m.activeAcceptsText()) {
+	switch keymap.LookupIn(key, m.mode) {
 	case keymap.Quit:
 		m.quitting = true
 		return tea.Quit, true
 
 	case keymap.Help:
 		m.showHelp = true
+		return nil, true
+
+	case keymap.EnterInput:
+		m.setMode(keymap.Input)
+		return nil, true
+
+	case keymap.LeaveInput:
+		m.setMode(keymap.Navigate)
 		return nil, true
 
 	case keymap.NextPane:
@@ -131,16 +173,6 @@ func (m *Model) globalKey(key string) (tea.Cmd, bool) {
 		return nil, true
 	}
 	return nil, false
-}
-
-// activeAcceptsText reports whether the active pane takes typed characters.
-func (m *Model) activeAcceptsText() bool {
-	p, ok := m.panes.At(m.active)
-	if !ok {
-		return false
-	}
-	_, isText := p.(pane.TextInput)
-	return isText
 }
 
 // selectPane switches tabs, and is where the two planes diverge.
@@ -168,6 +200,7 @@ func (m *Model) selectPane(i int) tea.Cmd {
 		}
 	}
 	m.active = i
+	m.setMode(m.modeFor(i))
 	m.lastErr = nil
 	return p.Init()
 }
@@ -228,7 +261,7 @@ func (m Model) View() string {
 	}
 
 	body := m.body()
-	return ui.Frame(ui.TabBar(tabs, m.width), body, ui.StatusBar(m.status(), m.width), m.width, m.height)
+	return ui.Frame(ui.TabBar(tabs, m.width), body, ui.StatusBar(m.status(), m.mode, m.width), m.width, m.height)
 }
 
 func (m Model) body() string {
@@ -268,5 +301,8 @@ func (m Model) status() string {
 	if !ok {
 		return ""
 	}
-	return fmt.Sprintf("%s  [%s]", p.Title(), p.Plane())
+	// THE MODE IS PART OF THE STATE, not decoration. A shell where the same key
+	// does different things must say which posture it is in, or it has traded one
+	// unlearnable rule for another.
+	return fmt.Sprintf("%s  [%s]  %s", p.Title(), p.Plane(), m.mode)
 }

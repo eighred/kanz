@@ -67,6 +67,11 @@ type Pane struct {
 	// keystroke to ignore.
 	busy bool
 	done bool
+
+	// focused mirrors the shell's Input mode for THIS pane, so the prompt can say
+	// whether it will receive what you type. The shell owns the mode; this is a
+	// render hint, not a second source of truth.
+	focused bool
 }
 
 // doneMsg reports that a dispatch finished; stop carries the REPL's /quit.
@@ -91,6 +96,9 @@ func (p *Pane) Init() tea.Cmd     { return nil }
 // AcceptsTypedText marks this pane as taking typed input: it hosts the REPL
 // prompt, so the global key table must not take printable characters from it.
 func (p *Pane) AcceptsTypedText() {}
+
+// SetFocused is how the shell tells this pane whether it is taking input.
+func (p *Pane) SetFocused(v bool) { p.focused = v }
 
 func (p *Pane) Update(msg tea.Msg) (pane.Pane, tea.Cmd) {
 	switch msg := msg.(type) {
@@ -162,11 +170,28 @@ func (p *Pane) View(w, h int) string {
 		lines = lines[len(lines)-visible:]
 	}
 
-	body := strings.Join(lines, "\n")
-	prompt := theme.Prompt.Render("kanz› ") + p.input
-	if p.busy {
-		prompt = theme.StatusBar.Render("kanz› working…")
+	// THE PROMPT IS PINNED TO THE BOTTOM. ui.Frame pads the body AFTER a pane's
+	// lines, so a short scrollback left the prompt floating at the top of an
+	// empty pane and walking downwards as output arrived — the one element whose
+	// position should never move.
+	//
+	// Padded here rather than in Frame because it is this pane's choice: a form
+	// is top-aligned and would be wrong pinned to the bottom.
+	if pad := visible - len(lines); pad > 0 {
+		lines = append(make([]string, pad), lines...)
 	}
+
+	prompt := theme.Prompt.Render("kanz› ") + p.input
+	switch {
+	case p.busy:
+		prompt = theme.StatusBar.Render("kanz› working…")
+	case !p.focused:
+		// Say why typing does nothing. A prompt that looks identical whether or
+		// not it will receive keys is the whole reason the mode has to be visible.
+		prompt = theme.StatusBar.Render("kanz› press i to type")
+	}
+
+	body := strings.Join(lines, "\n")
 	if body != "" {
 		body += "\n"
 	}

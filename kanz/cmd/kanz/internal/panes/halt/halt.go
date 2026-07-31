@@ -61,6 +61,8 @@ type Pane struct {
 	resume bool
 
 	focus int
+	// focused mirrors the shell's Input mode — see SetFocused.
+	focused bool
 	// err is the last refusal, shown until the operator fixes it. Cleared on any
 	// edit so a stale complaint does not sit under a field that now has a value.
 	err error
@@ -85,6 +87,11 @@ func (p *Pane) ConfirmBeforeRun() {}
 // typing a reason containing "h", "l" or "q" would navigate panes and quit the
 // shell mid-sentence.
 func (p *Pane) AcceptsTypedText() {}
+
+// SetFocused mirrors the shell's Input mode. The form shows it on the hint line
+// rather than the fields: a half-lit field is harder to read than one sentence
+// saying whether keys are landing.
+func (p *Pane) SetFocused(v bool) { p.focused = v }
 
 func (p *Pane) Init() tea.Cmd { return nil }
 
@@ -228,13 +235,22 @@ func (p *Pane) View(w, h int) string {
 		lines = append(lines, "  "+theme.Error.Render(p.err.Error()), "")
 	}
 	lines = append(lines,
-		"  "+theme.StatusBar.Render("↑/↓ field · ←/→ or space toggles mode · enter runs · nothing happens until then"))
+		"  "+theme.StatusBar.Render(p.hint()))
 
 	out := make([]string, 0, len(lines))
 	for _, l := range lines {
 		out = append(out, ui.Clip(l, w))
 	}
 	return strings.Join(out, "\n")
+}
+
+// hint says what the keys do right now, which differs by mode: in Navigate the
+// form is inert and the shell's bindings are live.
+func (p *Pane) hint() string {
+	if !p.focused {
+		return "press i to fill this in · nothing runs until then"
+	}
+	return "↑/↓ field · ←/→ or space toggles mode · enter runs · esc to navigate"
 }
 
 func (p *Pane) field(label, value string, idx int, placeholder string) string {

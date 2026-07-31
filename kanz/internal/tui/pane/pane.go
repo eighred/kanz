@@ -101,6 +101,10 @@ type TextInput interface {
 	// AcceptsTypedText marks this pane as one the global key table must not
 	// take printable characters from.
 	AcceptsTypedText()
+	// SetFocused tells the pane whether the shell is currently in Input mode on
+	// it, so it can render the difference. A prompt that looks the same whether
+	// or not it will receive keys is the reason a mode has to be visible.
+	SetFocused(bool)
 }
 
 // Confirming is a Bus pane the shell must SHOW rather than launch on selection.
