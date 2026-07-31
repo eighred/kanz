@@ -204,6 +204,12 @@ func (t *Translator) publishSignal(ctx context.Context, in Intent, tenant string
 	if leverage == nil {
 		leverage = big.NewRat(1, 1) // spot / unlevered
 	}
+	size, sizeOK := toDec(in.Size)
+	lev, levOK := toDec(leverage)
+	if !sizeOK || !levOK {
+		return fmt.Errorf("translate: signal %s size or leverage is not representable as a Decimal "+
+			"— refusing to record an audit root carrying a number the platform invented", in.SignalID)
+	}
 	sig := &signalpb.StrategySignal{
 		SignalId:     in.SignalID,
 		StrategyId:   in.StrategyID,
@@ -211,8 +217,8 @@ func (t *Translator) publishSignal(ctx context.Context, in Intent, tenant string
 		InstrumentId: in.InstrumentID,
 		SourceSymbol: in.SourceSymbol,
 		Action:       in.Action,
-		Size:         toDec(in.Size),
-		Leverage:     toDec(leverage),
+		Size:         size,
+		Leverage:     lev,
 		MarginMode:   in.MarginMode,
 		SizeType:     in.SizeType,
 		Source:       in.Source,
@@ -263,15 +269,21 @@ func (t *Translator) fanOut(ctx context.Context, in Intent, tenant string) ([]st
 			continue // nothing to do at this venue (e.g. CLOSE with no position)
 		}
 		orderID := DeterministicID(in.SignalID, v.Venue)
+		qtyD, qtyOK := toDec(qty)
+		limitD, limitOK := toDec(in.LimitPrice)
+		if !qtyOK || !limitOK {
+			return nil, fmt.Errorf("translate: order %s quantity or limit price is not representable "+
+				"as a Decimal — refusing to submit an order for a size the platform invented", orderID)
+		}
 		cmd := &orderpb.SubmitOrder{
 			Metadata:     &commandpb.CommandMetadata{Issuer: "strategy:" + in.StrategyID, TargetId: orderID},
 			OrderId:      orderID,
 			PortfolioId:  in.FundID,
 			InstrumentId: in.InstrumentID,
 			Side:         side,
-			Quantity:     toDec(qty),
+			Quantity:     qtyD,
 			OrderType:    in.OrderType,
-			LimitPrice:   toDec(in.LimitPrice),
+			LimitPrice:   limitD,
 			TimeInForce:  tif,
 			Venue:        v.Venue, // route this leg to its allocated venue
 		}
@@ -377,11 +389,22 @@ func DeterministicID(parts ...string) string {
 
 // toDec converts an exact rational to a common.v1.Decimal; nil stays nil so an
 // absent limit price is absent, not zero.
-func toDec(r *big.Rat) *commonpb.Decimal {
+// toDec converts a rational to a Decimal PRESERVING MAGNITUDE (#94).
+//
+// It fed SubmitOrder.Quantity and LimitPrice — an order actually placed at a
+// venue — and the StrategySignal FACT that is the audit root for it, through the
+// WRAPPING dec.ToProto. Above roughly 92.2 billion units at scale 8 the
+// coefficient wraps, so a size of 1e12 became 77662796314.5224192: an order
+// submitted for a quantity nobody asked for, with a signal FACT recording the
+// same fabricated number as its justification.
+//
+// ok=false means the value cannot be represented at all. A nil rational is
+// ABSENT, not unrepresentable, and stays nil — LimitPrice is genuinely optional.
+func toDec(r *big.Rat) (*commonpb.Decimal, bool) {
 	if r == nil {
-		return nil
+		return nil, true
 	}
-	return dec.ToProto(r)
+	return dec.ToProtoScaled(r)
 }
 
 // Translator error sentinels.

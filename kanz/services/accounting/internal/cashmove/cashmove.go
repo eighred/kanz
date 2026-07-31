@@ -145,11 +145,21 @@ func encode(m CashMovement, knowledge time.Time) (*accountingpb.LedgerEntry, str
 	if eff.IsZero() {
 		eff = knowledge
 	}
+	// SCALED, NOT WRAPPING (#94). This is the cash leg posted to the BOOK OF
+	// RECORD. dec.ToProto wraps above ~$92bn at scale 8 and the ledger would then
+	// carry, and report, a figure the platform invented — a subscription or a
+	// redemption for an amount nobody moved. A fund large enough to reach that
+	// threshold is exactly the fund whose NAV nobody can afford to be wrong.
+	cash, ok := dec.ToProtoScaled(m.Kind.signedCash(m.Amount))
+	if !ok {
+		return nil, "", fmt.Errorf("cashmove: movement %q amount is not representable as a Decimal "+
+			"— refusing to post a cash entry the ledger cannot hold exactly", m.MovementID)
+	}
 	entry := &accountingpb.LedgerEntry{
 		EntryId:       "cash:" + m.MovementID,
 		PortfolioId:   m.PortfolioID,
 		EntryType:     entryType,
-		Cash:          dec.ToProto(m.Kind.signedCash(m.Amount)),
+		Cash:          cash,
 		CashCurrency:  m.Currency,
 		EffectiveTime: timestamp(eff),
 		KnowledgeTime: timestamp(knowledge),

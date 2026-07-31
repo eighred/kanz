@@ -22,9 +22,34 @@ import (
 // paths on it. ToProto is not banned outright — ~30 reporting and analytics
 // callers use it and are unaffected by the ceiling — so the rule is scoped to
 // the packages where a wrong number moves money.
+// THIS LIST WAS TOO SHORT, AND THE GUARD PASSED ANYWAY (#94).
+//
+// It named the two OMS packages the rule was written for, so it reported green
+// while genuine capital paths kept the wrapping conversion — a guard scoped
+// narrower than its own premise is worse than none, because it reads as coverage.
+// #94's evidence line said "Every capital path is already off it"; that was
+// false when written and stayed false for as long as this list did not move.
+//
+// What was still wrapping, found by asking what actually spends money rather
+// than which package the guard already covered:
+//
+//	the venue sweep       a live MARKET order to flatten a residual
+//	the order submission  SubmitOrder.Quantity, straight to a venue
+//	the ledger cash leg   a subscription or redemption in the book of record
+//	the balance break     the Expected/Actual/Delta an operator acts on
+//	the healed FACTs      the filled size the journal folds as venue truth
+//
+// The threshold is not exotic. dec.ToProto wraps once the scaled coefficient
+// exceeds an int64 — about 92.2 BILLION units at scale 8 — which is $92bn in
+// money terms but an ordinary position size in tokens: 1e12 units renders as
+// 77662796314.5224192. Both venues here list assets that trade in the trillions.
 var capitalPathPackages = []string{
 	"services/oms/internal/position",
 	"services/oms/internal/order",
+	"services/venue-okx/internal/okx",
+	"services/venue-binance/internal/binance",
+	"services/accounting/internal/cashmove",
+	"internal/signal/translate",
 }
 
 // pendingErrorThreading are capital-path call sites that still use the wrapping

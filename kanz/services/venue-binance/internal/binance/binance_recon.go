@@ -143,7 +143,11 @@ func (r *Reconciler) HealClosures(ctx context.Context) error {
 		truth, qErr := r.rest.queryOrder(ctx, symbol, ci.OrderID)
 		if qErr == nil && binanceTerminal(truth.Status) {
 			// Venue confirms the close landed — adopt its truth and stop.
-			if err := r.emitStateHealed(ctx, binanceHealedFromQuery(ci, truth, r.venue, r.now()),
+			healed, hErr := binanceHealedFromQuery(ci, truth, r.venue, r.now())
+			if hErr != nil {
+				return hErr
+			}
+			if err := r.emitStateHealed(ctx, healed,
 				"in-flight close confirmed terminal on venue query"); err != nil {
 				return err
 			}
@@ -175,11 +179,22 @@ func (r *Reconciler) forceSweep(ctx context.Context, ci CloseIntent, symbol stri
 	if ci.Leaves != nil && ci.Leaves.Sign() > 0 && ci.SweepSide != orderpb.Side_SIDE_UNSPECIFIED {
 		side, sErr := binanceSide(ci.SweepSide)
 		if sErr == nil {
-			qty := formatDec(dec.ToProto(ci.Leaves))
-			if _, err := r.rest.sweepMarket(ctx, symbol, side, qty, "heal-"+ci.OrderID); err != nil {
-				reason += "; sweep error: " + err.Error()
-			} else {
-				reason += "; swept residual " + ci.Leaves.FloatString(8) + " via market " + side
+			// SCALED, NOT WRAPPING (#94) — the same reasoning as the OKX sweep. This
+			// quantity becomes a live MARKET order; dec.ToProto wraps above ~92.2
+			// billion units at scale 8, which a meme-coin residual reaches, and the
+			// order would be placed for a size the platform fabricated.
+			scaled, ok := dec.ToProtoScaled(ci.Leaves)
+			switch {
+			case !ok:
+				reason += "; sweep REFUSED: residual " + ci.Leaves.FloatString(8) +
+					" cannot be represented as a Decimal, and this platform does not send an order size it invented"
+			default:
+				qty := formatDec(scaled)
+				if _, err := r.rest.sweepMarket(ctx, symbol, side, qty, "heal-"+ci.OrderID); err != nil {
+					reason += "; sweep error: " + err.Error()
+				} else {
+					reason += "; swept residual " + ci.Leaves.FloatString(8) + " via market " + side
+				}
 			}
 		}
 	}
@@ -203,16 +218,24 @@ func binanceTerminal(status string) bool {
 
 // binanceHealedFromQuery builds the venue-truth state for a close the venue
 // confirms terminal.
-func binanceHealedFromQuery(ci CloseIntent, truth *orderResponse, venue string, now time.Time) *orderpb.OrderState {
+// The error return was added for the Decimal conversion (#94): ExecutedQty is an
+// exchange string, and a token filled quantity in the trillions wraps through
+// dec.ToProto — healing the order to a filled size that never traded.
+func binanceHealedFromQuery(ci CloseIntent, truth *orderResponse, venue string, now time.Time) (*orderpb.OrderState, error) {
 	filled, _ := new(big.Rat).SetString(truth.ExecutedQty)
 	if filled == nil {
 		filled = new(big.Rat)
 	}
+	filledD, ok := dec.ToProtoScaled(filled)
+	if !ok {
+		return nil, fmt.Errorf("binance: order %s filled quantity %q is not representable as a Decimal",
+			ci.OrderID, truth.ExecutedQty)
+	}
 	return &orderpb.OrderState{
 		OrderId: ci.OrderID, InstrumentId: ci.InstrumentID,
-		Status: binanceStatusToProto(truth.Status), FilledQuantity: dec.ToProto(filled),
+		Status: binanceStatusToProto(truth.Status), FilledQuantity: filledD,
 		Venue: venue, AsOf: timestamppb.New(now.UTC()),
-	}
+	}, nil
 }
 
 func (r *Reconciler) reconcileOrders(ctx context.Context) error {
@@ -228,7 +251,11 @@ func (r *Reconciler) reconcileOrders(ctx context.Context) error {
 			}
 			continue // transient / not-found: leave it for the next pass
 		}
-		if healed, drift := healedState(exp, truth, r.now()); drift {
+		healed, drift, hErr := healedState(exp, truth, r.now())
+		if hErr != nil {
+			return hErr
+		}
+		if drift {
 			if err := r.emitStateHealed(ctx, healed, driftReason(exp, truth)); err != nil {
 				return err
 			}
@@ -272,7 +299,10 @@ func (r *Reconciler) reconcileBalances(ctx context.Context) error {
 // healedState builds the venue-truth OrderState (Kanz static fields + exchange
 // dynamic fields) and reports whether it drifted from the expected state. truth
 // is the Binance order response; exp is Kanz's believed state.
-func healedState(exp *orderpb.OrderState, truth *orderResponse, now time.Time) (*orderpb.OrderState, bool) {
+// healedState compares venue truth against expected state. The error return
+// carries only the Decimal-representation failure (#94); the bool means "there is
+// drift worth emitting" and reusing it would drop a correction silently.
+func healedState(exp *orderpb.OrderState, truth *orderResponse, now time.Time) (*orderpb.OrderState, bool, error) {
 	exFilled, _ := new(big.Rat).SetString(truth.ExecutedQty)
 	if exFilled == nil {
 		exFilled = new(big.Rat)
@@ -280,18 +310,26 @@ func healedState(exp *orderpb.OrderState, truth *orderResponse, now time.Time) (
 	status := binanceStatusToProto(truth.Status)
 	kanzFilled := dec.FromProto(exp.GetFilledQuantity())
 	if exFilled.Cmp(kanzFilled) == 0 && status == exp.GetStatus() {
-		return nil, false // in parity
+		return nil, false, nil // in parity
 	}
 	ordered := dec.FromProto(exp.GetOrderedQuantity())
 	leaves := new(big.Rat).Sub(ordered, exFilled)
+	// SCALED, NOT WRAPPING: these become the healed order's sizes in the FACT the
+	// journal folds, so a wrapped value corrects the book to a size nothing traded.
+	filledD, fok := dec.ToProtoScaled(exFilled)
+	leavesD, lok := dec.ToProtoScaled(leaves)
+	if !fok || !lok {
+		return nil, false, fmt.Errorf("binance: order %s healed quantities are not representable as a Decimal "+
+			"(filled=%s leaves=%s)", exp.GetOrderId(), exFilled.FloatString(8), leaves.FloatString(8))
+	}
 	healed := &orderpb.OrderState{
 		OrderId: exp.GetOrderId(), PortfolioId: exp.GetPortfolioId(), InstrumentId: exp.GetInstrumentId(),
 		Side: exp.GetSide(), OrderType: exp.GetOrderType(), TimeInForce: exp.GetTimeInForce(),
 		OrderedQuantity: exp.GetOrderedQuantity(), LimitPrice: exp.GetLimitPrice(),
-		Status: status, FilledQuantity: dec.ToProto(exFilled), LeavesQuantity: dec.ToProto(leaves),
+		Status: status, FilledQuantity: filledD, LeavesQuantity: leavesD,
 		AsOf: timestamppb.New(now.UTC()),
 	}
-	return healed, true
+	return healed, true, nil
 }
 
 func (r *Reconciler) emitStateHealed(ctx context.Context, state *orderpb.OrderState, reason string) error {
@@ -310,6 +348,18 @@ func (r *Reconciler) emitStateHealed(ctx context.Context, state *orderpb.OrderSt
 
 func (r *Reconciler) emitBalanceReconciled(ctx context.Context, asset string, expected, actual *big.Rat) error {
 	delta := new(big.Rat).Sub(actual, expected)
+	// SCALED, NOT WRAPPING (#94) — the same reasoning as the OKX reconciler. These
+	// three numbers ARE the balance break; a wrapped Delta does not understate it,
+	// it reports a different break entirely, and can make a real one look like a
+	// match. Refusing to publish is the only safe failure.
+	expectedD, eok := dec.ToProtoScaled(expected)
+	actualD, aok := dec.ToProtoScaled(actual)
+	deltaD, dok := dec.ToProtoScaled(delta)
+	if !eok || !aok || !dok {
+		return fmt.Errorf("binance: %s balance reconciliation is not representable as a Decimal "+
+			"(expected=%s actual=%s) — refusing to publish a break with fabricated figures",
+			asset, expected.FloatString(8), actual.FloatString(8))
+	}
 	return r.pub.Publish(ctx, bus.Event{
 		Subject: subjectBalanceRecon, EventType: subjectBalanceRecon,
 		EventClass: envelopepb.EventClass_EVENT_CLASS_FACT, SchemaVersion: 1, Domain: "accounting",
@@ -317,7 +367,7 @@ func (r *Reconciler) emitBalanceReconciled(ctx context.Context, asset string, ex
 		QualityFlags: []envelopepb.QualityFlag{envelopepb.QualityFlag_QUALITY_FLAG_REVISED},
 		Payload: &accountingpb.BalanceReconciled{
 			PortfolioId: r.tenant, Venue: r.venue, Asset: asset,
-			Expected: dec.ToProto(expected), Actual: dec.ToProto(actual), Delta: dec.ToProto(delta),
+			Expected: expectedD, Actual: actualD, Delta: deltaD,
 			DetectedAt: timestamppb.New(r.now().UTC()),
 		},
 	})

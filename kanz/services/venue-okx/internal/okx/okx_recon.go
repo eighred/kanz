@@ -136,7 +136,11 @@ func (r *OKXReconciler) HealClosures(ctx context.Context) error {
 		o, qErr := r.rest.queryOrder(ctx, instID, ci.OrderID)
 		if qErr == nil && okxTerminal(o.State) {
 			// Venue confirms the close landed — adopt its truth and stop.
-			if healed, drift := okxHealedFromQuery(ci, o, r.now()); drift {
+			healed, drift, hErr := okxHealedFromQuery(ci, o, r.now())
+			if hErr != nil {
+				return hErr
+			}
+			if drift {
 				if err := r.emitStateHealed(ctx, healed, "in-flight close confirmed terminal on venue query"); err != nil {
 					return err
 				}
@@ -168,11 +172,27 @@ func (r *OKXReconciler) forceSweep(ctx context.Context, ci CloseIntent, instID s
 	if ci.Leaves != nil && ci.Leaves.Sign() > 0 && ci.SweepSide != orderpb.Side_SIDE_UNSPECIFIED {
 		side, sErr := okxSide(ci.SweepSide)
 		if sErr == nil {
-			sz := dec.ToProto(ci.Leaves)
-			if _, err := r.rest.sweepMarket(ctx, instID, side, FormatDec(sz), "heal-"+ci.OrderID); err != nil {
-				reason += "; sweep error: " + err.Error()
-			} else {
-				reason += "; swept residual " + ci.Leaves.FloatString(8) + " via market " + side
+			// SCALED, NOT WRAPPING (#94). This size becomes a live MARKET order at OKX.
+			// dec.ToProto wraps once the scaled coefficient exceeds an int64 — about
+			// 92.2 billion units at scale 8 — and a residual past that is not
+			// hypothetical here: a meme-coin position trades in the trillions on this
+			// venue. A residual of 1e12 renders through ToProto as 77662796314.5224192,
+			// so the sweep meant to flatten the book would instead market-buy a
+			// fabricated size, immediately and irreversibly.
+			sz, ok := dec.ToProtoScaled(ci.Leaves)
+			switch {
+			case !ok:
+				// Refusing leaves a residual open, which is bad. Sending a number the
+				// platform made up is worse, and unrecoverable. The force-clear below
+				// still runs and the break is still raised, so this surfaces.
+				reason += "; sweep REFUSED: residual " + ci.Leaves.FloatString(8) +
+					" cannot be represented as a Decimal, and this platform does not send an order size it invented"
+			default:
+				if _, err := r.rest.sweepMarket(ctx, instID, side, FormatDec(sz), "heal-"+ci.OrderID); err != nil {
+					reason += "; sweep error: " + err.Error()
+				} else {
+					reason += "; swept residual " + ci.Leaves.FloatString(8) + " via market " + side
+				}
 			}
 		}
 	}
@@ -191,16 +211,30 @@ func okxTerminal(state string) bool {
 
 // okxHealedFromQuery builds the venue-truth state for a close the venue confirms
 // terminal.
-func okxHealedFromQuery(ci CloseIntent, o *okxOrder, now time.Time) (*orderpb.OrderState, bool) {
+//
+// The error return exists for the Decimal conversion alone (#94): the bool means
+// "there is drift worth emitting", so it cannot also carry "this number could not
+// be represented" — reusing it would report a healed order as no-drift and drop
+// the correction silently, which is the failure this whole reconciler exists to
+// catch.
+func okxHealedFromQuery(ci CloseIntent, o *okxOrder, now time.Time) (*orderpb.OrderState, bool, error) {
 	filled, _ := new(big.Rat).SetString(o.AccFillSz)
 	if filled == nil {
 		filled = new(big.Rat)
 	}
+	// SCALED, NOT WRAPPING. AccFillSz is an exchange string; a token filled
+	// quantity in the trillions wraps through dec.ToProto and this FACT would
+	// then heal the order to a filled size that never traded.
+	filledD, ok := dec.ToProtoScaled(filled)
+	if !ok {
+		return nil, false, fmt.Errorf("okx: order %s filled quantity %q is not representable as a Decimal",
+			ci.OrderID, o.AccFillSz)
+	}
 	return &orderpb.OrderState{
 		OrderId: ci.OrderID, InstrumentId: ci.InstrumentID,
-		Status: okxStateToProto(o.State), FilledQuantity: dec.ToProto(filled),
+		Status: okxStateToProto(o.State), FilledQuantity: filledD,
 		Venue: "OKX", AsOf: timestamppb.New(now.UTC()),
-	}, true
+	}, true, nil
 }
 
 func (r *OKXReconciler) reconcileOrders(ctx context.Context) error {
@@ -216,7 +250,11 @@ func (r *OKXReconciler) reconcileOrders(ctx context.Context) error {
 			}
 			continue
 		}
-		if healed, drift := okxHealedState(exp, o, r.now()); drift {
+		healed, drift, hErr := okxHealedState(exp, o, r.now())
+		if hErr != nil {
+			return hErr
+		}
+		if drift {
 			if err := r.emitStateHealed(ctx, healed, okxDriftReason(exp, o)); err != nil {
 				return err
 			}
@@ -252,24 +290,36 @@ func (r *OKXReconciler) reconcileBalances(ctx context.Context) error {
 	return nil
 }
 
-func okxHealedState(exp *orderpb.OrderState, o *okxOrder, now time.Time) (*orderpb.OrderState, bool) {
+// okxHealedState compares venue truth against expected state. The error return
+// carries only the Decimal-representation failure (#94) — see okxHealedFromQuery
+// for why it cannot share the drift bool.
+func okxHealedState(exp *orderpb.OrderState, o *okxOrder, now time.Time) (*orderpb.OrderState, bool, error) {
 	exFilled, _ := new(big.Rat).SetString(o.AccFillSz)
 	if exFilled == nil {
 		exFilled = new(big.Rat)
 	}
 	status := okxStateToProto(o.State)
 	if exFilled.Cmp(dec.FromProto(exp.GetFilledQuantity())) == 0 && status == exp.GetStatus() {
-		return nil, false
+		return nil, false, nil
 	}
 	ordered := dec.FromProto(exp.GetOrderedQuantity())
 	leaves := new(big.Rat).Sub(ordered, exFilled)
+	// SCALED, NOT WRAPPING. These two become the order's filled and leaves sizes
+	// in the healed FACT the journal folds; a wrapped value corrects the book to a
+	// size that never traded, which is worse than the drift being healed.
+	filledD, fok := dec.ToProtoScaled(exFilled)
+	leavesD, lok := dec.ToProtoScaled(leaves)
+	if !fok || !lok {
+		return nil, false, fmt.Errorf("okx: order %s healed quantities are not representable as a Decimal "+
+			"(filled=%s leaves=%s)", exp.GetOrderId(), exFilled.FloatString(8), leaves.FloatString(8))
+	}
 	return &orderpb.OrderState{
 		OrderId: exp.GetOrderId(), PortfolioId: exp.GetPortfolioId(), InstrumentId: exp.GetInstrumentId(),
 		Side: exp.GetSide(), OrderType: exp.GetOrderType(), TimeInForce: exp.GetTimeInForce(),
 		OrderedQuantity: exp.GetOrderedQuantity(), LimitPrice: exp.GetLimitPrice(),
-		Status: status, FilledQuantity: dec.ToProto(exFilled), LeavesQuantity: dec.ToProto(leaves),
+		Status: status, FilledQuantity: filledD, LeavesQuantity: leavesD,
 		Venue: "OKX", AsOf: timestamppb.New(now.UTC()),
-	}, true
+	}, true, nil
 }
 
 func (r *OKXReconciler) emitStateHealed(ctx context.Context, state *orderpb.OrderState, reason string) error {
@@ -288,6 +338,20 @@ func (r *OKXReconciler) emitStateHealed(ctx context.Context, state *orderpb.Orde
 
 func (r *OKXReconciler) emitBalanceReconciled(ctx context.Context, asset string, expected, actual *big.Rat) error {
 	delta := new(big.Rat).Sub(actual, expected)
+	// SCALED, NOT WRAPPING (#94). These three numbers ARE the balance break — the
+	// figures an operator reads to decide whether the book or the exchange is
+	// wrong. dec.ToProto wraps above ~92.2 billion units at scale 8, which a
+	// token balance reaches, and a wrapped Delta does not report a smaller break:
+	// it reports a DIFFERENT one, and can turn a real break into an apparent
+	// match. Refusing to publish is the only safe failure here.
+	expectedD, eok := dec.ToProtoScaled(expected)
+	actualD, aok := dec.ToProtoScaled(actual)
+	deltaD, dok := dec.ToProtoScaled(delta)
+	if !eok || !aok || !dok {
+		return fmt.Errorf("okx: %s balance reconciliation is not representable as a Decimal "+
+			"(expected=%s actual=%s) — refusing to publish a break with fabricated figures",
+			asset, expected.FloatString(8), actual.FloatString(8))
+	}
 	return r.pub.Publish(ctx, bus.Event{
 		Subject: SubjectBalanceRecon, EventType: SubjectBalanceRecon,
 		EventClass: envelopepb.EventClass_EVENT_CLASS_FACT, SchemaVersion: 1, Domain: "accounting",
@@ -295,7 +359,7 @@ func (r *OKXReconciler) emitBalanceReconciled(ctx context.Context, asset string,
 		QualityFlags: []envelopepb.QualityFlag{envelopepb.QualityFlag_QUALITY_FLAG_REVISED},
 		Payload: &accountingpb.BalanceReconciled{
 			PortfolioId: r.tenant, Venue: r.venue, Asset: asset,
-			Expected: dec.ToProto(expected), Actual: dec.ToProto(actual), Delta: dec.ToProto(delta),
+			Expected: expectedD, Actual: actualD, Delta: deltaD,
 			DetectedAt: timestamppb.New(r.now().UTC()),
 		},
 	})
