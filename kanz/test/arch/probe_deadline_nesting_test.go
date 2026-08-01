@@ -378,3 +378,47 @@ var timeUnits = map[string]time.Duration{
 	"Minute":      time.Minute,
 	"Hour":        time.Hour,
 }
+
+// delegatingClientFiles must construct NO http.Client of their own.
+//
+// TestTUIHTTPClientCarriesNoTimeoutOfItsOwn pins the ONE client this binary is
+// allowed to build. That rule was scoped to a single file path, and a second
+// client sat outside it: cmd/kanz/internal/gateway carried
+// http.Client{Timeout: 60 * time.Second}, so the Copilot REPL's calls were
+// bounded by min(context deadline, 60s) with the smaller winning invisibly —
+// exactly the pattern the guard above exists to forbid. It also sent no request
+// signature, so a gateway enforcing them 401'd every REPL call (#198).
+//
+// Both are gone by construction: that package now delegates to
+// internal/tui/gateway. This guard keeps it that way, because "delegates to the
+// shared transport" is a property that decays the first time someone needs
+// "just one" direct request.
+var delegatingClientFiles = []string{
+	"cmd/kanz/internal/gateway/client.go",
+}
+
+func TestDelegatingClientsBuildNoHTTPClientOfTheirOwn(t *testing.T) {
+	root := moduleRoot(t)
+	for _, rel := range delegatingClientFiles {
+		path := filepath.Join(root, filepath.FromSlash(rel))
+		f, err := parser.ParseFile(token.NewFileSet(), path, nil, 0)
+		if err != nil {
+			t.Fatalf("parse %s: %v", rel, err)
+		}
+		found := 0
+		ast.Inspect(f, func(n ast.Node) bool {
+			lit, ok := n.(*ast.CompositeLit)
+			if ok && isHTTPClientType(lit.Type) {
+				found++
+			}
+			return true
+		})
+		if found > 0 {
+			t.Errorf("%s constructs %d http.Client literal(s). It must delegate to "+
+				"internal/tui/gateway instead: a second client is a second place for the "+
+				"request signature and the deadline rule to drift, and both have already "+
+				"drifted here once (#198) — the signature was absent entirely, and a 60s "+
+				"client timeout silently won over the caller's context.", rel, found)
+		}
+	}
+}

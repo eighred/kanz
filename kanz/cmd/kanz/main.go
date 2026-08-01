@@ -228,10 +228,10 @@ func newBookBuilder(cfg config.Config, store *tokenstore.Store) func() (*portfol
 		}
 		c, err := gateway.New(gateway.Config{
 			BaseURL: cfg.GatewayURL,
-			Token:   bearer,
+			Token:   gateway.StaticToken(bearer),
 			// A deployment concern, not a session one — the gateway's Signing
 			// middleware is a no-op when it holds no secret.
-			SigningSecret: os.Getenv("KANZ_SIGNING_SECRET"),
+			SigningSecret: cfg.SigningSecret,
 		})
 		if err != nil {
 			return nil, err
@@ -272,7 +272,7 @@ func newEstateBuilder(cfg config.Config, store *tokenstore.Store) func() (univer
 			// The signing secret is a deployment concern, not a session one: the
 			// gateway's Signing middleware is a no-op when it holds no secret, so
 			// an unset value here is valid rather than missing.
-			SigningSecret: os.Getenv("KANZ_SIGNING_SECRET"),
+			SigningSecret: cfg.SigningSecret,
 		})
 		if err != nil {
 			return universe.Model{}, err

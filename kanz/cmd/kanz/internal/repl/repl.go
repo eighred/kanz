@@ -60,7 +60,11 @@ func New(cfg config.Config, store *tokenstore.Store, auth Authenticator, in io.R
 	r.in.Buffer(make([]byte, 0, 64*1024), 1<<20)
 	// The gateway client reads the bearer through a closure so a mid-session
 	// /login is picked up without rebuilding the client.
-	r.gw = gateway.New(cfg.GatewayURL, r.accessToken)
+	//
+	// The signing secret is passed too (#198): without it every call to a gateway
+	// that enforces signatures came back 401, which reads as an expired session
+	// and sent the operator to /login — which could not fix it.
+	r.gw = gateway.New(cfg.GatewayURL, r.accessToken, cfg.SigningSecret)
 
 	// A PRE-MINTED TOKEN IS ADOPTED, NEVER PERSISTED. config.Load has already
 	// refused the case where both this and an SSO issuer are set, so reaching

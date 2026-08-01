@@ -51,6 +51,15 @@ type Config struct {
 	// unset rather than guessing a default and reading somebody else's book.
 	BookAccount   string
 	BookPortfolio string
+	// SigningSecret is the shared HMAC key when the deployment sets
+	// API_GATEWAY_SIGNING_SECRET on the gateway. Empty is valid — the gateway's
+	// Signing middleware is a no-op when it holds no secret.
+	//
+	// Read HERE rather than by each surface that needs it. It was os.Getenv'd at
+	// two separate call sites and missing entirely from a third (the Copilot
+	// REPL), which is how that surface came to send unsigned requests and collect
+	// 401s that read as an expired token (#198).
+	SigningSecret string
 }
 
 // Load reads the configuration from KANZ_* environment variables, applying
@@ -62,6 +71,7 @@ func Load() (Config, error) {
 		ClientID:      os.Getenv("KANZ_CLIENT_ID"),
 		Scope:         os.Getenv("KANZ_SCOPE"),
 		DevToken:      strings.TrimSpace(os.Getenv("KANZ_TOKEN")),
+		SigningSecret: os.Getenv("KANZ_SIGNING_SECRET"),
 		BookAccount:   strings.TrimSpace(os.Getenv("KANZ_BOOK_ACCOUNT")),
 		BookPortfolio: strings.TrimSpace(os.Getenv("KANZ_BOOK_PORTFOLIO")),
 	}
