@@ -41,17 +41,29 @@ type Config struct {
 	// kanz-monitor already accepts the same variable (--token / KANZ_TOKEN), so
 	// this is the existing spelling rather than a new one.
 	DevToken string
+	// BookAccount is the broker account the Book pane shows positions and PnL
+	// for; BookPortfolio is the portfolio it shows risk measures for (#84).
+	//
+	// They are SEPARATE ids because the two services key on different things —
+	// tv-sync's projection by account, the risk engine by portfolio — and
+	// assuming one string serves both is how one fund's risk ends up rendered
+	// beside another fund's book. Empty is valid: the pane says which one is
+	// unset rather than guessing a default and reading somebody else's book.
+	BookAccount   string
+	BookPortfolio string
 }
 
 // Load reads the configuration from KANZ_* environment variables, applying
 // defaults, and validates that the required values are present.
 func Load() (Config, error) {
 	cfg := Config{
-		GatewayURL: strings.TrimRight(os.Getenv("KANZ_GATEWAY_URL"), "/"),
-		Issuer:     strings.TrimRight(os.Getenv("KANZ_SSO_ISSUER"), "/"),
-		ClientID:   os.Getenv("KANZ_CLIENT_ID"),
-		Scope:      os.Getenv("KANZ_SCOPE"),
-		DevToken:   strings.TrimSpace(os.Getenv("KANZ_TOKEN")),
+		GatewayURL:    strings.TrimRight(os.Getenv("KANZ_GATEWAY_URL"), "/"),
+		Issuer:        strings.TrimRight(os.Getenv("KANZ_SSO_ISSUER"), "/"),
+		ClientID:      os.Getenv("KANZ_CLIENT_ID"),
+		Scope:         os.Getenv("KANZ_SCOPE"),
+		DevToken:      strings.TrimSpace(os.Getenv("KANZ_TOKEN")),
+		BookAccount:   strings.TrimSpace(os.Getenv("KANZ_BOOK_ACCOUNT")),
+		BookPortfolio: strings.TrimSpace(os.Getenv("KANZ_BOOK_PORTFOLIO")),
 	}
 	if cfg.ClientID == "" {
 		cfg.ClientID = "kanz-cli"

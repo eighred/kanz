@@ -26,7 +26,9 @@ import (
 	"github.com/eighred/kanz/cmd/kanz/internal/repl"
 	"github.com/eighred/kanz/cmd/kanz/internal/tokenstore"
 	"github.com/eighred/kanz/internal/tui/app"
+	"github.com/eighred/kanz/internal/tui/gateway"
 	"github.com/eighred/kanz/internal/tui/pane"
+	"github.com/eighred/kanz/internal/tui/portfolio"
 	"github.com/eighred/kanz/internal/tui/universe"
 	"github.com/eighred/kanz/pkg/deviceauth"
 )
@@ -92,6 +94,14 @@ func run() error {
 
 	panes := []pane.Pane{copilot.New(r, out)}
 	panes = append(panes, estate.All(shared)...)
+	// The book: positions, PnL and risk (#84). A GATEWAY pane, so it runs in this
+	// process on the operator's own token — it reads two services (tv-sync's
+	// projection for the book, the risk engine for the measures) and degrades to
+	// whichever one is answering rather than blanking on either.
+	panes = append(panes, portfolio.New(newBookBuilder(cfg, store), portfolio.Config{
+		Account:   cfg.BookAccount,
+		Portfolio: cfg.BookPortfolio,
+	}))
 	panes = append(panes,
 		// Bus plane: their own SPIFFE identity, so their own process (#65).
 		//
@@ -171,6 +181,56 @@ func (d *deviceLogin) Login(ctx context.Context) (*deviceauth.Token, error) {
 // dereference that panicked the whole shell on the first Tab to the Nodes tab,
 // and nothing could reach it: main's wiring had no test, and the estate tests
 // supply their own build func.
+// bearerFor picks the session token the panes present to the gateway.
+//
+// ONE IMPLEMENTATION, because two panes must never disagree about whether there
+// is a session. The REPL adopts KANZ_TOKEN and never persists it (deliberately),
+// so a store-only lookup would leave a pane reporting "not signed in" while the
+// Copilot pane beside it was answering questions — one shell disagreeing with
+// itself.
+//
+// tokenstore.Valid is the existing answer to all three ways there is no usable
+// session — nil, empty, and expired — so it is called rather than re-derived.
+// The expiry half matters on its own: without it an expired token reaches the
+// gateway and comes back 401, which tells the operator far less than "your
+// session expired".
+func bearerFor(cfg config.Config, tok *deviceauth.Token) (string, error) {
+	switch {
+	case cfg.DevToken != "":
+		return cfg.DevToken, nil
+	case tokenstore.Valid(tok, time.Now()):
+		return tok.AccessToken, nil
+	}
+	return "", errors.New(
+		"not signed in (or the session expired) — run /login on the Copilot pane, then return here")
+}
+
+// newBookBuilder defers the book pane's source until first use, for the same
+// reason the estate builder does: the shell opens before anyone has signed in.
+func newBookBuilder(cfg config.Config, store *tokenstore.Store) func() (*portfolio.Source, error) {
+	return func() (*portfolio.Source, error) {
+		tok, err := store.Load()
+		if err != nil {
+			return nil, fmt.Errorf("could not read the saved session: %w", err)
+		}
+		bearer, err := bearerFor(cfg, tok)
+		if err != nil {
+			return nil, err
+		}
+		c, err := gateway.New(gateway.Config{
+			BaseURL: cfg.GatewayURL,
+			Token:   bearer,
+			// A deployment concern, not a session one — the gateway's Signing
+			// middleware is a no-op when it holds no secret.
+			SigningSecret: os.Getenv("KANZ_SIGNING_SECRET"),
+		})
+		if err != nil {
+			return nil, err
+		}
+		return portfolio.NewSource(c), nil
+	}
+}
+
 func newEstateBuilder(cfg config.Config, store *tokenstore.Store) func() (universe.Model, error) {
 	return func() (universe.Model, error) {
 		// Read the token from the STORE, not from the REPL. The REPL persists on
@@ -192,20 +252,9 @@ func newEstateBuilder(cfg config.Config, store *tokenstore.Store) func() (univer
 		// re-derived. The expiry half matters on its own: without it an expired
 		// token reaches the gateway and comes back 401, which tells the operator
 		// far less than "your session expired".
-		bearer := ""
-		switch {
-		case cfg.DevToken != "":
-			// THE ESTATE MUST SEE THE SAME SESSION THE COPILOT PANE DOES. The
-			// REPL adopts KANZ_TOKEN and never persists it (deliberately), so a
-			// store-only lookup here would leave the estate reporting "not signed
-			// in" while the Copilot pane beside it was answering questions — one
-			// shell disagreeing with itself about whether there is a session.
-			bearer = cfg.DevToken
-		case tokenstore.Valid(tok, time.Now()):
-			bearer = tok.AccessToken
-		default:
-			return universe.Model{}, errors.New(
-				"not signed in (or the session expired) — run /login on the Copilot pane, then return here")
+		bearer, err := bearerFor(cfg, tok)
+		if err != nil {
+			return universe.Model{}, err
 		}
 
 		src, err := universe.NewGatewaySource(universe.GatewayConfig{
