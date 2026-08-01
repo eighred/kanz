@@ -47,14 +47,26 @@ import (
 // exchange string becomes a number this platform acts on — a fill quantity, a
 // fill price, a commission — so it is the highest-leverage entry on this list:
 // venue-binance does not have its own copy, it aliases these (bridge.go).
+// services/datamaster/internal/server IS DELIBERATELY ABSENT.
+//
+// It calls dec.ToProto on purpose, and the call is not a conversion: the
+// operator-override handler asks `FromProto(ToProto(price)).Cmp(price) != 0`,
+// which is an ASSERTION that a chosen price survives the platform's fixed scale
+// exactly. ToProtoScaled raises the exponent rather than failing, so it would
+// accept the over-precise input the check exists to refuse. Adding the package
+// here would turn a correct validation into a guard violation and invite someone
+// to "fix" it (#189). The reasoning also lives beside the call, because a rule
+// recorded only in the guard is a rule the next reader does not see.
 var capitalPathPackages = []string{
 	"services/oms/internal/position",
 	"services/oms/internal/order",
 	"services/venue-okx/internal/okx",
 	"services/venue-binance/internal/binance",
 	"services/accounting/internal/cashmove",
+	"services/datamaster/internal/feed",
 	"internal/signal/translate",
 	"internal/execution",
+	"internal/marketedge",
 }
 
 // pendingErrorThreading are capital-path call sites that still use the wrapping
