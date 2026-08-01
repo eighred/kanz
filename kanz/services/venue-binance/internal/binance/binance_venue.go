@@ -108,7 +108,7 @@ func (v *BinanceVenue) Execute(ctx context.Context, st *orderpb.OrderState) ([]*
 		}
 		resp = q
 	}
-	return v.fills(resp, st), nil
+	return v.fills(resp, st)
 }
 
 // binanceUnknownOrder is Binance's -2011 "Unknown order sent". For a CANCEL this
@@ -173,30 +173,52 @@ func orderParams(st *orderpb.OrderState, symbol string) (url.Values, error) {
 }
 
 // fills converts a Binance order response's fills into order.v1.Fills.
-func (v *BinanceVenue) fills(resp *orderResponse, st *orderpb.OrderState) []*orderpb.Fill {
+//
+// The error return is for the Decimal conversions (#94). An empty slice already
+// means "this order filled nothing", so it cannot also mean "a fill could not be
+// read" — reporting an unreadable execution as no execution is how a real trade
+// goes unbooked while the request looks successful.
+func (v *BinanceVenue) fills(resp *orderResponse, st *orderpb.OrderState) ([]*orderpb.Fill, error) {
 	out := make([]*orderpb.Fill, 0, len(resp.Fills))
 	for _, f := range resp.Fills {
+		qty, qok := parseDec(f.Qty)
+		px, pok := parseDec(f.Price)
+		if !qok || !pok {
+			return nil, fmt.Errorf("binance: order %s fill %d is not representable as a Decimal (qty=%q price=%q)",
+				st.GetOrderId(), f.TradeID, f.Qty, f.Price)
+		}
+		feeMoney, feeOK := fee(f)
+		if !feeOK {
+			return nil, fmt.Errorf("binance: order %s fill %d commission %q %s is not representable as a Decimal",
+				st.GetOrderId(), f.TradeID, f.Commission, f.CommissionAsset)
+		}
 		out = append(out, &orderpb.Fill{
 			FillId:           fmt.Sprintf("%s-%d", resp.Symbol, f.TradeID),
 			OrderId:          st.GetOrderId(),
 			InstrumentId:     st.GetInstrumentId(),
 			Side:             st.GetSide(),
-			Quantity:         parseDec(f.Qty),
-			Price:            parseDec(f.Price),
-			Fee:              fee(f),
+			Quantity:         qty,
+			Price:            px,
+			Fee:              feeMoney,
 			Venue:            v.mic,
 			VenueExecutionId: strconv.FormatInt(f.TradeID, 10),
 			ExecutedAt:       timestamppb.New(v.now().UTC()),
 		})
 	}
-	return out
+	return out, nil
 }
 
-func fee(f orderFill) *commonpb.Money {
+// fee reads the commission on one fill. nil Money means NO FEE, so ok=false is a
+// separate answer for "there is a commission and it could not be read" (#94).
+func fee(f orderFill) (*commonpb.Money, bool) {
 	if f.Commission == "" {
-		return nil
+		return nil, true
 	}
-	return &commonpb.Money{Amount: parseDec(f.Commission), CurrencyCode: f.CommissionAsset}
+	amt, ok := parseDec(f.Commission)
+	if !ok {
+		return nil, false
+	}
+	return &commonpb.Money{Amount: amt, CurrencyCode: f.CommissionAsset}, true
 }
 
 func binanceSide(s orderpb.Side) (string, error) {

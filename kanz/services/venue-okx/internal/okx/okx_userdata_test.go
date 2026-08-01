@@ -165,3 +165,72 @@ func containsOp(raw []byte, op string) bool {
 	}
 	return json.Unmarshal(raw, &m) == nil && m.Op == op
 }
+
+// A GARBLED PRICE MUST NOT PUBLISH A FILL AT ZERO (#94).
+//
+// ParseDec answered anything big.Rat could not read with the ZERO Decimal, so a
+// fillPx of "" or "null" — an OKX field the platform does not control — became an
+// order.order.filled FACT carrying price 0. The ledger folds that, and a zero
+// execution price does not look wrong anywhere downstream: it looks free.
+//
+// The correct outcome is a refusal. The message is nacked, the reconciler
+// re-reads venue truth from REST, and nothing fabricated reaches the book.
+func TestOKXUserData_AGarbledFillNumberIsRefusedNotZeroed(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		frame string
+	}{
+		{"unparseable price", `{"arg":{"channel":"orders"},"data":[{"instId":"BTC-USDT","clOrdId":"o1","state":"filled","fillSz":"1","fillPx":"","accFillSz":"1","tradeId":"7","uTime":"1700000000000"}]}`},
+		{"garbage price", `{"arg":{"channel":"orders"},"data":[{"instId":"BTC-USDT","clOrdId":"o1","state":"filled","fillSz":"1","fillPx":"null","accFillSz":"1","tradeId":"7","uTime":"1700000000000"}]}`},
+		{"garbage accFillSz", `{"arg":{"channel":"orders"},"data":[{"instId":"BTC-USDT","clOrdId":"o1","state":"filled","fillSz":"1","fillPx":"50000","accFillSz":"n/a","tradeId":"7","uTime":"1700000000000"}]}`},
+		{"garbage fee", `{"arg":{"channel":"orders"},"data":[{"instId":"BTC-USDT","clOrdId":"o1","state":"filled","fillSz":"1","fillPx":"50000","accFillSz":"1","tradeId":"7","fillFee":"??","fillFeeCcy":"USDT","uTime":"1700000000000"}]}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cap := &okxCapture{}
+			_ = okxIngesterOver([][]byte{[]byte(tc.frame)}, cap).Run(context.Background())
+
+			for _, e := range cap.events {
+				switch p := e.Payload.(type) {
+				case *orderpb.OrderFilled:
+					t.Fatalf("published a fill built from an unreadable number: qty=%s price=%s — "+
+						"a zero here reads as a free execution, not as an error",
+						dec.Str(dec.FromProto(p.GetFill().GetQuantity())),
+						dec.Str(dec.FromProto(p.GetFill().GetPrice())))
+				case *orderpb.OrderPartiallyFilled:
+					t.Fatalf("published a partial fill built from an unreadable number: price=%s",
+						dec.Str(dec.FromProto(p.GetFill().GetPrice())))
+				}
+			}
+		})
+	}
+}
+
+// A LARGE FILL PUBLISHES ITS ACTUAL SIZE (#94).
+//
+// ParseDec wrapped above ~92.2 billion units at scale 8, so a trillion-unit fill
+// on a token OKX lists published as 77662796314.5224192 — the ledger would book
+// about 7.8% of a real execution and the position book would agree with it.
+func TestOKXUserData_ALargeFillIsNotWrapped(t *testing.T) {
+	const qty = "1000000000000" // 1e12 units — an ordinary meme-coin fill
+
+	cap := &okxCapture{}
+	frame := `{"arg":{"channel":"orders"},"data":[{"instId":"BTC-USDT","ordId":"312","clOrdId":"o1","state":"filled","fillSz":"` +
+		qty + `","fillPx":"0.00001","accFillSz":"` + qty + `","tradeId":"7","uTime":"1700000000000"}]}`
+	_ = okxIngesterOver([][]byte{[]byte(frame)}, cap).Run(context.Background())
+
+	var ev *orderpb.OrderFilled
+	for _, e := range cap.events {
+		if f, ok := e.Payload.(*orderpb.OrderFilled); ok {
+			ev = f
+		}
+	}
+	if ev == nil {
+		t.Fatal("no OrderFilled emitted — a large but representable fill must still publish")
+	}
+	if got := dec.Str(dec.FromProto(ev.GetFill().GetQuantity())); got != qty {
+		t.Fatalf("published fill quantity = %s, want %s — the ledger would book a size nobody traded", got, qty)
+	}
+	if got := dec.Str(dec.FromProto(ev.GetState().GetFilledQuantity())); got != qty {
+		t.Fatalf("healed filled quantity = %s, want %s", got, qty)
+	}
+}

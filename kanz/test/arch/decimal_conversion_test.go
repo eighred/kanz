@@ -43,6 +43,10 @@ import (
 // exceeds an int64 — about 92.2 BILLION units at scale 8 — which is $92bn in
 // money terms but an ordinary position size in tokens: 1e12 units renders as
 // 77662796314.5224192. Both venues here list assets that trade in the trillions.
+// internal/execution is the one both venues share. Its ParseDec is where every
+// exchange string becomes a number this platform acts on — a fill quantity, a
+// fill price, a commission — so it is the highest-leverage entry on this list:
+// venue-binance does not have its own copy, it aliases these (bridge.go).
 var capitalPathPackages = []string{
 	"services/oms/internal/position",
 	"services/oms/internal/order",
@@ -50,6 +54,7 @@ var capitalPathPackages = []string{
 	"services/venue-binance/internal/binance",
 	"services/accounting/internal/cashmove",
 	"internal/signal/translate",
+	"internal/execution",
 }
 
 // pendingErrorThreading are capital-path call sites that still use the wrapping

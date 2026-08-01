@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"math/big"
 	"strconv"
 	"time"
@@ -94,14 +95,37 @@ func (i *OKXUserDataIngester) handle(ctx context.Context, raw []byte) error {
 		if !ok {
 			continue
 		}
+		// EVERY NUMBER ON THIS FILL IS CONVERTED BEFORE ANY OF IT IS PUBLISHED (#94).
+		//
+		// These become an order.order.filled FACT the ledger and the position book
+		// fold. ParseDec used to answer an unparseable string with ZERO and to wrap
+		// a large one, so a garbled FillPx published a fill at price 0 and a
+		// trillion-unit AccFillSz published 77662796314.5224192. Returning the error
+		// nacks the websocket message instead; the reconciler re-reads venue truth.
+		qty, qok := ParseDec(d.FillSz)
+		px, pok := ParseDec(d.FillPx)
+		accFilled, aok := ParseDec(d.AccFillSz)
+		if !qok || !pok || !aok {
+			return fmt.Errorf("okx: order %s fill is not representable as a Decimal "+
+				"(fillSz=%q fillPx=%q accFillSz=%q)", d.ClOrdID, d.FillSz, d.FillPx, d.AccFillSz)
+		}
+		leaves, lok := SubDec(st.GetOrderedQuantity(), accFilled)
+		if !lok {
+			return fmt.Errorf("okx: order %s leaves quantity is not representable as a Decimal", d.ClOrdID)
+		}
+		feeMoney, feeOK := okxWSFee(d.FillFee, d.FillFeeCcy)
+		if !feeOK {
+			return fmt.Errorf("okx: order %s fee %q %s is not representable as a Decimal",
+				d.ClOrdID, d.FillFee, d.FillFeeCcy)
+		}
 		fill := &orderpb.Fill{
 			FillId:           d.InstID + "-" + d.TradeID,
 			OrderId:          d.ClOrdID,
 			InstrumentId:     st.GetInstrumentId(),
 			Side:             st.GetSide(),
-			Quantity:         ParseDec(d.FillSz),
-			Price:            ParseDec(d.FillPx),
-			Fee:              okxWSFee(d.FillFee, d.FillFeeCcy),
+			Quantity:         qty,
+			Price:            px,
+			Fee:              feeMoney,
 			Venue:            i.venue,
 			VenueExecutionId: d.TradeID,
 			ExecutedAt:       timestamppb.New(uTime(d.UTime)),
@@ -111,8 +135,8 @@ func (i *OKXUserDataIngester) handle(ctx context.Context, raw []byte) error {
 			Side: st.GetSide(), OrderType: st.GetOrderType(), TimeInForce: st.GetTimeInForce(),
 			OrderedQuantity: st.GetOrderedQuantity(), LimitPrice: st.GetLimitPrice(),
 			Status:         okxStateToProto(d.State),
-			FilledQuantity: ParseDec(d.AccFillSz),
-			LeavesQuantity: SubDec(st.GetOrderedQuantity(), ParseDec(d.AccFillSz)),
+			FilledQuantity: accFilled,
+			LeavesQuantity: leaves,
 			Venue:          i.venue,
 			AsOf:           timestamppb.New(uTime(d.UTime)),
 		}
@@ -134,20 +158,25 @@ func (i *OKXUserDataIngester) handle(ctx context.Context, raw []byte) error {
 	return nil
 }
 
-func okxWSFee(fee, ccy string) *commonpb.Money {
+// okxWSFee reads the fee off a user-data fill. nil Money means NO FEE, so
+// ok=false is a separate answer for "there is a fee and it could not be read"
+// (#94) — collapsing them would silently drop a real cost.
+func okxWSFee(fee, ccy string) (*commonpb.Money, bool) {
 	if fee == "" || fee == "0" {
-		return nil
+		return nil, true
 	}
-	amt := ParseDec(fee)
+	amt, ok := ParseDec(fee)
+	if !ok {
+		return nil, false
+	}
 	if r := dec.FromProto(amt); r.Sign() < 0 {
-		// SCALED, NOT WRAPPING (#94). amt came from ParseDec (fixed scale), so
-		// negating it cannot overflow in practice; on the impossible failure keep
-		// the signed original rather than substitute a fabricated magnitude.
-		if neg, ok := dec.ToProtoScaled(r.Neg(r)); ok {
-			amt = neg
+		neg, nok := dec.ToProtoScaled(r.Neg(r))
+		if !nok {
+			return nil, false
 		}
+		amt = neg
 	}
-	return &commonpb.Money{Amount: amt, CurrencyCode: ccy}
+	return &commonpb.Money{Amount: amt, CurrencyCode: ccy}, true
 }
 
 func okxStateToProto(s string) orderpb.OrderStatus {

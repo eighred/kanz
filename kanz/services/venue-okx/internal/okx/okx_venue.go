@@ -123,7 +123,7 @@ func (v *OKXVenue) Execute(ctx context.Context, st *orderpb.OrderState) ([]*orde
 		// Idempotency recovery: a duplicate clOrdId / ambiguous timeout may mean
 		// the order landed. Query by clOrdId; if present, adopt its state.
 		if o, qErr := v.rest.queryOrder(ctx, instID, st.GetOrderId()); qErr == nil {
-			return v.fills(o, st, instID), nil
+			return v.fills(o, st, instID)
 		}
 		return nil, err
 	}
@@ -133,7 +133,7 @@ func (v *OKXVenue) Execute(ctx context.Context, st *orderpb.OrderState) ([]*orde
 		return nil, nil // accepted but not yet queryable — treat as resting; the
 		// user-data stream / reconciliation heals the fill (never fabricate).
 	}
-	return v.fills(o, st, instID), nil
+	return v.fills(o, st, instID)
 }
 
 func okxOrderBody(st *orderpb.OrderState, instID string) (map[string]string, error) {
@@ -166,44 +166,64 @@ func okxOrderBody(st *orderpb.OrderState, instID string) (map[string]string, err
 
 // fills builds the aggregate fill from an OKX order's cumulative filled size and
 // average price. A zero accFillSz (a resting limit) yields no fills.
-func (v *OKXVenue) fills(o *okxOrder, st *orderpb.OrderState, instID string) []*orderpb.Fill {
+//
+// The error return is for the Decimal conversions (#94). A nil slice already
+// means "no fill happened", so it cannot also mean "the fill could not be read" —
+// reporting an unreadable fill as no fill is how a real execution goes unbooked.
+func (v *OKXVenue) fills(o *okxOrder, st *orderpb.OrderState, instID string) ([]*orderpb.Fill, error) {
 	acc, ok := new(big.Rat).SetString(o.AccFillSz)
 	if !ok || acc.Sign() <= 0 {
-		return nil
+		return nil, nil
 	}
 	execID := o.OrdID
 	if execID == "" {
 		execID = st.GetOrderId()
+	}
+	qty, qok := ParseDec(o.AccFillSz)
+	px, pok := ParseDec(o.AvgPx)
+	if !qok || !pok {
+		return nil, fmt.Errorf("okx: order %s fill is not representable as a Decimal (accFillSz=%q avgPx=%q)",
+			st.GetOrderId(), o.AccFillSz, o.AvgPx)
+	}
+	fee, feeOK := okxFee(o)
+	if !feeOK {
+		return nil, fmt.Errorf("okx: order %s fee %q %s is not representable as a Decimal",
+			st.GetOrderId(), o.Fee, o.FeeCcy)
 	}
 	return []*orderpb.Fill{{
 		FillId:           instID + "-" + execID,
 		OrderId:          st.GetOrderId(),
 		InstrumentId:     st.GetInstrumentId(),
 		Side:             st.GetSide(),
-		Quantity:         ParseDec(o.AccFillSz),
-		Price:            ParseDec(o.AvgPx),
-		Fee:              okxFee(o),
+		Quantity:         qty,
+		Price:            px,
+		Fee:              fee,
 		Venue:            v.mic,
 		VenueExecutionId: execID,
 		ExecutedAt:       timestamppb.New(v.now().UTC()),
-	}}
+	}}, nil
 }
 
-func okxFee(o *okxOrder) *commonpb.Money {
+// okxFee reads the fee OKX charged. A nil Money means NO FEE — so ok=false is a
+// separate answer for "there is a fee and it could not be read" (#94). Collapsing
+// the two would drop a real cost silently, which understates what the trade cost.
+func okxFee(o *okxOrder) (*commonpb.Money, bool) {
 	if o.Fee == "" || o.Fee == "0" {
-		return nil
+		return nil, true
+	}
+	amt, ok := ParseDec(o.Fee)
+	if !ok {
+		return nil, false
 	}
 	// OKX reports fee as a negative number when charged; store its magnitude.
-	amt := ParseDec(o.Fee)
 	if r := dec.FromProto(amt); r.Sign() < 0 {
-		// SCALED, NOT WRAPPING (#94). amt came from ParseDec (fixed scale), so
-		// negating it cannot overflow in practice; on the impossible failure keep
-		// the signed original rather than substitute a fabricated magnitude.
-		if neg, ok := dec.ToProtoScaled(r.Neg(r)); ok {
-			amt = neg
+		neg, nok := dec.ToProtoScaled(r.Neg(r))
+		if !nok {
+			return nil, false
 		}
+		amt = neg
 	}
-	return &commonpb.Money{Amount: amt, CurrencyCode: o.FeeCcy}
+	return &commonpb.Money{Amount: amt, CurrencyCode: o.FeeCcy}, true
 }
 
 func okxSide(s orderpb.Side) (string, error) {

@@ -114,10 +114,18 @@ func (c *OKXConnector) pollTicker(ctx context.Context, pub Publisher) {
 		if err != nil {
 			continue
 		}
+		// Skipped, not published, when the price will not convert (#94) — the same
+		// stance as the fetch error just above. ParseDec answered an unparseable
+		// price with ZERO before, and a zero mark does not look wrong downstream,
+		// it looks free. One missed tick is recoverable; a fabricated one is folded.
+		price, ok := ParseDec(px)
+		if !ok {
+			continue
+		}
 		ev := &marketpb.MarketDataEvent{
 			InstrumentId: instrument, Symbol: instID, Mic: c.settings.MIC,
 			EventTime: timestamppb.Now(),
-			Data:      &marketpb.MarketDataEvent_Trade{Trade: &marketpb.Trade{Price: ParseDec(px)}},
+			Data:      &marketpb.MarketDataEvent_Trade{Trade: &marketpb.Trade{Price: price}},
 		}
 		_ = pub.Publish(ctx, bus.Event{
 			Subject: "market.crypto.trade", EventType: "market.crypto.trade",
