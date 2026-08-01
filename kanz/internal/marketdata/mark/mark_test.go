@@ -153,9 +153,18 @@ func TestLookupSeparatesNeverSeenFromExpired(t *testing.T) {
 		t.Fatal("Lookup reported an expired-but-seen instrument as never seen — " +
 			"a stalled feed would be indistinguishable from a cold map")
 	}
-	if price == nil || !asOf.Equal(base) {
-		t.Fatalf("Lookup = (%v, %v), want the stored price at its original event time", price, asOf)
+	// asOf is the load-bearing half and must survive: the OMS reads
+	// `_, asOf, seen` to tell a stalled feed from a cold instrument.
+	//
+	// The PRICE is not asserted here any more. Since #96 an expired entry may be
+	// TOMBSTONED — its value released, its asOf kept — so price is nil once a
+	// sweep has run and non-nil before one has. Pinning it either way would make
+	// this test assert sweep timing rather than the distinction it exists for.
+	// TestAnExpiredMarkIsTombstoned covers the release explicitly.
+	if !asOf.Equal(base) {
+		t.Fatalf("Lookup asOf = %v, want the original event time %v", asOf, base)
 	}
+	_ = price
 	// And Mark still refuses it: Lookup is diagnostic, Mark is the safe accessor.
 	if got := s.Mark("BTC-USD"); got != nil {
 		t.Fatalf("Mark = %v, want nil — Lookup must not soften Mark", got)

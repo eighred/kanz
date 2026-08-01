@@ -41,6 +41,27 @@ import (
 // like an incident.
 const maxForwardSkew = 5 * time.Second
 
+// sweepInterval bounds how often Handle walks the map to tombstone expired
+// entries. The sweep is O(instruments) and runs under the write lock Handle
+// already holds, so it is amortised across folds rather than paid per tick: a
+// price spine delivering thousands of ticks a second must not walk the whole map
+// on each one. Memory is therefore held for at most maxAge + sweepInterval,
+// which is the bound this buys.
+const sweepInterval = 30 * time.Second
+
+// entry is the latest mark for one instrument.
+//
+// price == nil is a TOMBSTONE: the mark expired, its value was released, and the
+// fact that this instrument was once seen was deliberately kept (#96).
+//
+// That distinction is not bookkeeping. Lookup exists so a caller can tell "never
+// seen" from "seen but expired" — a cold or thin instrument versus a feed that
+// stalled — and the OMS branches on exactly that to emit two different metrics
+// and two different operator messages (services/oms/cmd/oms/main.go). Deleting
+// the entry outright would have bounded memory by silently reporting every
+// stalled feed as a cold instrument, converting an outage signal into a warm-up
+// signal. Releasing the *big.Rat while keeping asOf bounds the heavy part and
+// keeps the diagnosis.
 type entry struct {
 	price *big.Rat
 	asOf  time.Time
@@ -53,6 +74,8 @@ type Source struct {
 	prices map[string]entry
 	now    func() time.Time
 	maxAge time.Duration
+	// lastSweep is when the expired-entry sweep last ran. Guarded by mu.
+	lastSweep time.Time
 }
 
 // New returns an empty mark source.
@@ -76,7 +99,7 @@ func (s *Source) Mark(instrument string) *big.Rat {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	e, ok := s.prices[instrument]
-	if !ok || s.expired(e) {
+	if !ok || e.price == nil || s.expired(e) {
 		return nil
 	}
 	return new(big.Rat).Set(e.price)
@@ -89,6 +112,11 @@ func (s *Source) Mark(instrument string) *big.Rat {
 //
 // This is the DIAGNOSTIC accessor. Mark is the safe one. Nothing on a decision
 // path may call Lookup, or the expiry bound is one `if` away from being lost.
+// A TOMBSTONED entry returns seen == true with a real asOf and a NIL price: the
+// mark expired and its value was released (#96). That is the correct answer for
+// every caller of this accessor — it is the diagnostic one, and an expired price
+// is not a price anything may act on. Callers that need a usable value must use
+// Mark, which is the safe accessor and already refuses expired marks.
 func (s *Source) Lookup(instrument string) (price *big.Rat, asOf time.Time, seen bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -96,7 +124,33 @@ func (s *Source) Lookup(instrument string) (price *big.Rat, asOf time.Time, seen
 	if !ok {
 		return nil, time.Time{}, false
 	}
+	if e.price == nil {
+		return nil, e.asOf, true
+	}
 	return new(big.Rat).Set(e.price), e.asOf, true
+}
+
+// Stats reports how many instruments this fold is holding and how many of those
+// still carry a usable price.
+//
+// held is the map's cardinality — every instrument ever folded, including
+// tombstones. live is the subset with a price that has not expired. The gap
+// between them is the tombstone population.
+//
+// It exists because "the fold's volume is unbounded" (#96) was an assertion
+// nobody could check: nothing reported how many instruments were being held, so
+// the choice between accepting the growth and bounding it by an instrument
+// allowlist — which would refuse live orders on a config omission — had no
+// measurement behind it. A gauge is smaller than either answer.
+func (s *Source) Stats() (held, live int) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, e := range s.prices {
+		if e.price != nil && !s.expired(e) {
+			live++
+		}
+	}
+	return len(s.prices), live
 }
 
 func (s *Source) expired(e entry) bool {
@@ -159,8 +213,31 @@ func (s *Source) Handle(_ context.Context, env *envelopepb.Envelope, payload []b
 	}
 	s.mu.Lock()
 	s.prices[ev.GetInstrumentId()] = entry{price: price, asOf: s.clampSkew(eventTime(env, &ev))}
+	s.sweepLocked()
 	s.mu.Unlock()
 	return nil
+}
+
+// sweepLocked releases the price of every expired entry, keeping its asOf. The
+// caller holds the write lock.
+//
+// It is a no-op when maxAge <= 0, because that caller (tv-sync) chose marks that
+// never expire — there is nothing to tombstone, and sweeping would be a walk
+// that can never free anything.
+func (s *Source) sweepLocked() {
+	if s.maxAge <= 0 {
+		return
+	}
+	now := s.now()
+	if !s.lastSweep.IsZero() && now.Sub(s.lastSweep) < sweepInterval {
+		return
+	}
+	s.lastSweep = now
+	for id, e := range s.prices {
+		if e.price != nil && s.expired(e) {
+			s.prices[id] = entry{price: nil, asOf: e.asOf}
+		}
+	}
 }
 
 // isMarkBearingEventType reports whether eventType announces a payload this
