@@ -129,10 +129,18 @@ func (f *binanceTickerFeed) pollOnce(ctx context.Context) {
 		if err != nil {
 			continue // transient / rate-limited — skip this tick, don't fabricate
 		}
+		// Skipped, not published, when the price will not convert (#94) — the same
+		// stance as the fetch error above, and for the same reason: parseDec used to
+		// answer an unparseable price with ZERO, and a zero mark does not read as
+		// wrong downstream, it reads as free.
+		price, ok := parseDec(px)
+		if !ok {
+			continue
+		}
 		ev := &marketpb.MarketDataEvent{
 			InstrumentId: instrument, Symbol: symbol, Mic: f.mic,
 			EventTime: timestamppb.Now(),
-			Data:      &marketpb.MarketDataEvent_Trade{Trade: &marketpb.Trade{Price: parseDec(px)}},
+			Data:      &marketpb.MarketDataEvent_Trade{Trade: &marketpb.Trade{Price: price}},
 		}
 		_ = f.pub.Publish(ctx, bus.Event{
 			Subject: "market.crypto.trade", EventType: "market.crypto.trade",

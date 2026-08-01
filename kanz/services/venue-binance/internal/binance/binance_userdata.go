@@ -96,20 +96,40 @@ func (i *UserDataIngester) handle(ctx context.Context, raw []byte) error {
 	if !ok {
 		return nil // unknown order (not ours / not yet admitted) — skip
 	}
+	// EVERY NUMBER ON THIS FILL CONVERTS BEFORE ANY OF IT IS PUBLISHED (#94).
+	//
+	// These become an order.order.filled FACT the ledger and position book fold.
+	// parseDec answered an unparseable string with ZERO and wrapped a large one,
+	// so a garbled LastPrice published a fill at price 0. Returning the error nacks
+	// the report instead; the reconciler re-reads venue truth.
+	qty, qok := parseDec(rep.LastQty)
+	px, pok := parseDec(rep.LastPrice)
+	if !qok || !pok {
+		return fmt.Errorf("binance: order %s fill is not representable as a Decimal (lastQty=%q lastPrice=%q)",
+			rep.ClientOrderID, rep.LastQty, rep.LastPrice)
+	}
+	feeMoney, feeOK := reportFee(rep)
+	if !feeOK {
+		return fmt.Errorf("binance: order %s commission %q %s is not representable as a Decimal",
+			rep.ClientOrderID, rep.Commission, rep.CommissionAst)
+	}
+	healed, hok := applyFillToState(st, rep)
+	if !hok {
+		return fmt.Errorf("binance: order %s healed quantities are not representable as a Decimal (cumQty=%q)",
+			rep.ClientOrderID, rep.CumQty)
+	}
 	fill := &orderpb.Fill{
 		FillId:           fmt.Sprintf("%s-%d", rep.Symbol, rep.TradeID),
 		OrderId:          rep.ClientOrderID,
 		InstrumentId:     st.GetInstrumentId(),
 		Side:             st.GetSide(),
-		Quantity:         parseDec(rep.LastQty),
-		Price:            parseDec(rep.LastPrice),
-		Fee:              reportFee(rep),
+		Quantity:         qty,
+		Price:            px,
+		Fee:              feeMoney,
 		Venue:            i.venue,
 		VenueExecutionId: strconv.FormatInt(rep.TradeID, 10),
 		ExecutedAt:       timestamppb.New(time.UnixMilli(rep.TransactTime).UTC()),
 	}
-	healed := applyFillToState(st, rep)
-
 	subject := "order.order.partially_filled"
 	var payload proto.Message = &orderpb.OrderPartiallyFilled{OrderId: rep.ClientOrderID, Fill: fill, State: healed}
 	if rep.OrderStatus == "FILLED" {
@@ -126,25 +146,41 @@ func (i *UserDataIngester) handle(ctx context.Context, raw []byte) error {
 }
 
 // applyFillToState folds the report's cumulative fill into a fresh OrderState
-// (Kanz static terms + exchange dynamic fields).
-func applyFillToState(st *orderpb.OrderState, rep executionReport) *orderpb.OrderState {
-	cum := parseDec(rep.CumQty)
+// (Kanz static terms + exchange dynamic fields). ok=false when a quantity will
+// not convert (#94) — the caller refuses the whole report rather than healing the
+// order to a size nothing traded.
+func applyFillToState(st *orderpb.OrderState, rep executionReport) (*orderpb.OrderState, bool) {
+	cum, cok := parseDec(rep.CumQty)
+	if !cok {
+		return nil, false
+	}
 	ordered := st.GetOrderedQuantity()
+	leaves, lok := subDec(ordered, cum)
+	if !lok {
+		return nil, false
+	}
 	return &orderpb.OrderState{
 		OrderId: st.GetOrderId(), PortfolioId: st.GetPortfolioId(), InstrumentId: st.GetInstrumentId(),
 		Side: st.GetSide(), OrderType: st.GetOrderType(), TimeInForce: st.GetTimeInForce(),
 		OrderedQuantity: ordered, LimitPrice: st.GetLimitPrice(),
 		Status:         binanceStatusToProto(rep.OrderStatus),
-		FilledQuantity: cum, LeavesQuantity: subDec(ordered, cum),
+		FilledQuantity: cum, LeavesQuantity: leaves,
 		AsOf: timestamppb.New(time.UnixMilli(rep.TransactTime).UTC()),
-	}
+	}, true
 }
 
-func reportFee(rep executionReport) *commonpb.Money {
+// reportFee reads the commission off a fill report. nil Money means NO FEE, so
+// ok=false is a separate answer for "there is a commission and it could not be
+// read" (#94) — collapsing them would silently drop a real cost.
+func reportFee(rep executionReport) (*commonpb.Money, bool) {
 	if rep.Commission == "" || rep.Commission == "0" {
-		return nil
+		return nil, true
 	}
-	return &commonpb.Money{Amount: parseDec(rep.Commission), CurrencyCode: rep.CommissionAst}
+	amt, ok := parseDec(rep.Commission)
+	if !ok {
+		return nil, false
+	}
+	return &commonpb.Money{Amount: amt, CurrencyCode: rep.CommissionAst}, true
 }
 
 // --- concrete Binance user-data websocket transport (coder/websocket) ---

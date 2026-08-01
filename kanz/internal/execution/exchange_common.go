@@ -116,18 +116,37 @@ func FormatDec(d *commonpb.Decimal) string {
 	return s
 }
 
-// parseDec parses an exchange decimal string into an exact common.v1.Decimal.
-// ParseDec parses an exchange decimal string into common.v1.Decimal.
-func ParseDec(s string) *commonpb.Decimal {
+// ParseDec parses an exchange decimal string into an exact common.v1.Decimal.
+//
+// ok=false means the string was not a number, or the value cannot be represented
+// as a Decimal at all. It is NOT a value — the caller must refuse the message it
+// came from and must never substitute the zero Decimal.
+//
+// BOTH HALVES OF THAT CONTRACT ARE REPAIRS (#94). This function used to return
+// dec.ToProto(r), and &commonpb.Decimal{} — ZERO — for a string it could not
+// parse:
+//
+//   - The zero return is the never-substitute-zero rule broken in the venue
+//     parser itself. A garbled FillSz became a fill of quantity 0, a garbled
+//     AvgPx became a fill at price 0, and both are FACTs the ledger folds. A
+//     zero price does not look wrong on a dashboard; it looks free.
+//   - dec.ToProto WRAPS once the scaled coefficient exceeds an int64, around 92.2
+//     billion units at scale 8. That is $92bn in money terms and an ordinary
+//     position in tokens: OKX lists assets that trade in the trillions, and an
+//     accFillSz of 1e12 came back through here as 77662796314.5224192.
+//
+// dec.ToProtoScaled preserves magnitude and reports when it cannot, so a real
+// large fill converts exactly and only a genuinely unrepresentable one refuses.
+func ParseDec(s string) (*commonpb.Decimal, bool) {
 	r, ok := new(big.Rat).SetString(s)
 	if !ok {
-		return &commonpb.Decimal{}
+		return nil, false
 	}
-	return dec.ToProto(r)
+	return dec.ToProtoScaled(r)
 }
 
-// subDec returns a − b as an exact common.v1.Decimal.
-// SubDec subtracts two exact decimals.
-func SubDec(a, b *commonpb.Decimal) *commonpb.Decimal {
-	return dec.ToProto(new(big.Rat).Sub(dec.FromProto(a), dec.FromProto(b)))
+// SubDec returns a − b as an exact common.v1.Decimal. ok=false when the result
+// cannot be represented; see ParseDec for why that is a refusal and not a zero.
+func SubDec(a, b *commonpb.Decimal) (*commonpb.Decimal, bool) {
+	return dec.ToProtoScaled(new(big.Rat).Sub(dec.FromProto(a), dec.FromProto(b)))
 }
