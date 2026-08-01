@@ -369,7 +369,15 @@ SYSTEM
 	// #199 and Bus panes are marked with reverse video. The previous wording
 	// named a colour that no longer exists, which is the exact shape of stale
 	// text this repository keeps paying for.
-	const footer = "Highlighted panes run as isolated bus processes. Click or press any key to close.\n"
+	//
+	// THE COPY TIP IS HERE BECAUSE THE FEATURE TOOK SOMETHING AWAY (#201). Mouse
+	// reporting (#200) means the terminal no longer handles drag-to-select, so
+	// selecting text needs the terminal's own modifier. Without this line an
+	// operator reads that as "I cannot copy from kanz" — a support question
+	// caused by a feature, and the only place they will look for the answer is
+	// the help overlay.
+	const footer = "Highlighted panes run as isolated bus processes. Click or press any key to close.\n" +
+		"(Tip: Hold Shift or Option to select/copy text.)\n"
 
 	return controls + theme.Rule.Render("─────────") + "\n" + footer
 }
