@@ -124,14 +124,34 @@ func TestIntegration_LoopOverNATS(t *testing.T) {
 		t.Fatalf("fanned out %d orders, want 2", len(res.OrderIDs))
 	}
 
-	// Wait for both fills to come back from the OMS.
+	// Wait for THIS RUN'S fills, matched by order id.
+	//
+	// It used to count any two deliveries on order.order.filled and then look up
+	// its own ids, which is only correct on a broker whose EXECUTION stream is
+	// empty. It is not: the durable replays earlier runs, and any other test that
+	// legitimately fills an order — the domain-boundary proof beside this one
+	// does — contributes deliveries too. Two of someone else's fills satisfied the
+	// counter, the lookup then found nothing, and the failure read as "the OMS did
+	// not fill my order" when the OMS had filled it perfectly well. Same shared-
+	// stream reasoning as the RISK-stream note above; this loop had not applied it.
 	deadline := time.After(15 * time.Second)
-	for got := 0; got < 2; {
+	for {
+		mu.Lock()
+		have := 0
+		for _, id := range res.OrderIDs {
+			if _, ok := filled[id]; ok {
+				have++
+			}
+		}
+		mu.Unlock()
+		if have == len(res.OrderIDs) {
+			break
+		}
 		select {
 		case <-fills:
-			got++
 		case <-deadline:
-			t.Fatalf("timed out waiting for OMS fills; got %d/2 (is the OMS running on %s?)", got, url)
+			t.Fatalf("timed out waiting for this run's OMS fills; have %d/%d of %v (is the OMS running on %s?)",
+				have, len(res.OrderIDs), res.OrderIDs, url)
 		}
 	}
 	mu.Lock()
