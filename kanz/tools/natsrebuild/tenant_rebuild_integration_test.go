@@ -190,17 +190,44 @@ func createTopic(t *testing.T, broker, name string) {
 	// how a race presents: the first create had the next create's round-trip as
 	// accidental slack, the second had none. Auto-create is off on this broker
 	// (KAFKA_AUTO_CREATE_TOPICS_ENABLE=false), so waiting is the only option.
+	//
+	// The readiness condition is "present AND led", not merely "present": a
+	// partition can be published to metadata before a leader is elected, and a
+	// produce to a leaderless partition fails with the SAME error code. The doc on
+	// Partition.Leader is the authority that a zero Host means no broker is known
+	// to be serving it.
+	//
+	// BE CLEAR ABOUT WHAT THIS DID NOT FIX. This wait was NOT the cause of the
+	// PR #215 CI failure, and strengthening it here would not have stopped it.
+	// Measured against a local single-node broker over 5 fresh topics, the
+	// leaderless window was never observed at all — partitions came back already
+	// led in 2.6–11.8ms. The actual cause was kafka-go's shared DefaultTransport
+	// metadata cache on the produce side; see writeFrame. This check is kept
+	// because it is the correct condition on a multi-broker cluster, where leader
+	// election is not instant — not because it is load-bearing today.
 	deadline := time.Now().Add(30 * time.Second)
 	for {
 		parts, perr := conn.ReadPartitions(name)
-		if perr == nil && len(parts) > 0 {
+		if perr == nil && len(parts) > 0 && allPartitionsLed(parts) {
 			return
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("topic %s did not become visible in broker metadata within 30s: %v", name, perr)
+			t.Fatalf("topic %s did not become writable within 30s (err=%v partitions=%+v)", name, perr, parts)
 		}
 		time.Sleep(250 * time.Millisecond)
 	}
+}
+
+// allPartitionsLed reports whether every partition has a leader backed by a real
+// host. A partition carrying its own Error, or whose Leader has a zero Host, is
+// present in metadata but cannot accept a produce yet.
+func allPartitionsLed(parts []kafka.Partition) bool {
+	for _, p := range parts {
+		if p.Error != nil || p.Leader.Host == "" {
+			return false
+		}
+	}
+	return true
 }
 
 // writeFrame puts one EventFrame on the tenant's prefixed topic — the shape the
@@ -244,9 +271,49 @@ func writeFrame(t *testing.T, ctx context.Context, broker, kafkaTopic, tenant, e
 	if err != nil {
 		t.Fatalf("marshal frame: %v", err)
 	}
-	w := &kafka.Writer{Addr: kafka.TCP(broker), Topic: kafkaTopic, BatchTimeout: 100 * time.Millisecond}
-	defer func() { _ = w.Close() }()
-	if err := w.WriteMessages(ctx, kafka.Message{Key: []byte(eventID), Value: body, Time: now}); err != nil {
-		t.Fatalf("write to %s: %v", kafkaTopic, err)
+	// A Writer with a nil Transport uses kafka-go's PACKAGE-LEVEL DefaultTransport
+	// (writer.go:197, transport.go:126) whose metadata TTL is 6s
+	// (transport.go:205-210). Every Writer in the process therefore shares one
+	// metadata cache: the first tenant's produce populates cluster metadata that
+	// predates the second tenant's topic, and the second produce reads that stale
+	// entry and fails UnknownTopicOrPartition for up to 6s. THAT is why this was
+	// "observed on the second tenant only" — not leader election, and not anything
+	// about how the topic was created. Measured on a local single-node broker:
+	// 7 of 8 fresh topics failed their first produce despite a confirmed leader.
+	// A private Transport with a short TTL removes the shared stale cache.
+	tr := &kafka.Transport{MetadataTTL: 100 * time.Millisecond}
+	defer tr.CloseIdleConnections()
+	w := &kafka.Writer{
+		Addr:         kafka.TCP(broker),
+		Topic:        kafkaTopic,
+		BatchTimeout: 100 * time.Millisecond,
+		Transport:    tr,
 	}
+	defer func() { _ = w.Close() }()
+
+	// Backstop for genuine propagation delay on a slower or multi-broker cluster.
+	// Bounded, and only for UnknownTopicOrPartition: any other produce error is a
+	// real failure and must stay loud on the first occurrence.
+	const attempts = 10
+	backoff := 250 * time.Millisecond
+	var lastErr error
+	for range attempts {
+		lastErr = w.WriteMessages(ctx, kafka.Message{Key: []byte(eventID), Value: body, Time: now})
+		if lastErr == nil {
+			return
+		}
+		if !errors.Is(lastErr, kafka.UnknownTopicOrPartition) {
+			t.Fatalf("write to %s: %v", kafkaTopic, lastErr)
+		}
+		select {
+		case <-ctx.Done():
+			t.Fatalf("write to %s: %v (ctx: %v)", kafkaTopic, lastErr, ctx.Err())
+		case <-time.After(backoff):
+		}
+		if backoff < 2*time.Second {
+			backoff *= 2
+		}
+	}
+	t.Fatalf("write to %s: still UnknownTopicOrPartition after %d attempts: %v — the topic was "+
+		"created and led, so this is the Writer's metadata view, not a missing topic", kafkaTopic, attempts, lastErr)
 }
