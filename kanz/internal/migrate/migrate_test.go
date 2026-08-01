@@ -15,6 +15,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 
@@ -211,5 +212,96 @@ func TestUpRejectsAnEditedAppliedMigration(t *testing.T) {
 	_, err = New(pool).Up(ctx, migs2)
 	if !errors.Is(err, ErrChecksumMismatch) {
 		t.Fatalf("up on edited migration: want ErrChecksumMismatch, got %v", err)
+	}
+}
+
+// A DIFFERENT FILE AT AN APPLIED VERSION IS NOT AN EDIT.
+//
+// This is the failure a shared test database actually produces, and it is worth
+// pinning because the two conditions have OPPOSITE remedies. An edited migration
+// is fixed by adding a new one. A version recorded by a different file means two
+// migration sets are sharing a database — the integration fixtures here and a
+// service's real migrations are the pair that collide in practice — and adding a
+// migration fixes nothing while burying the reason.
+//
+// Found by running `kanz-migrate --dir services/oms/migrations` against the
+// database the suite had just used: it reported "applied migration was modified:
+// 0001_orders.sql", a file that had never been applied to it. The row belonged
+// to 0001_widgets.sql, written by the fixtures above. The reader was sent to
+// inspect a blameless file and told to add a migration, which would have been
+// the wrong action.
+func TestADifferentFileAtAnAppliedVersionIsNotReportedAsAnEdit(t *testing.T) {
+	pool := newPool(t)
+	ctx := context.Background()
+
+	first := writeMigrations(t, map[string]string{
+		"0001_widgets.sql": `CREATE TABLE widgets (id TEXT PRIMARY KEY);`,
+	})
+	migs, err := Load(first)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if _, err := New(pool).Up(ctx, migs); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	// A DIFFERENT directory, reusing version 1 under another name — exactly what
+	// a second service's migrations look like to a database that already carries
+	// someone else's.
+	second := writeMigrations(t, map[string]string{
+		"0001_gadgets.sql": `CREATE TABLE gadgets (id TEXT PRIMARY KEY);`,
+	})
+	other, err := Load(second)
+	if err != nil {
+		t.Fatalf("load other: %v", err)
+	}
+	_, err = New(pool).Up(ctx, other)
+	if err == nil {
+		t.Fatal("applying a different file at an already-applied version succeeded — the collision went unnoticed")
+	}
+	if !errors.Is(err, ErrVersionCollision) {
+		t.Errorf("error is not ErrVersionCollision: %v", err)
+	}
+	if errors.Is(err, ErrChecksumMismatch) {
+		t.Error("a version collision is reported as a checksum mismatch — the remedies are opposites, " +
+			"and this one tells the reader to add a migration, which makes it worse")
+	}
+	// The message must name the file that WAS applied, not only the one on disk.
+	if !strings.Contains(err.Error(), "0001_widgets.sql") {
+		t.Errorf("error does not name the recorded file, so the reader cannot tell what put it there: %v", err)
+	}
+}
+
+// NON-VACUITY for the test above: the SAME file with changed content must still
+// be a checksum mismatch, so the new branch cannot swallow the case it sits in
+// front of.
+func TestTheSameFileWithChangedContentIsStillAChecksumMismatch(t *testing.T) {
+	pool := newPool(t)
+	ctx := context.Background()
+
+	before := writeMigrations(t, map[string]string{
+		"0001_widgets.sql": `CREATE TABLE widgets (id TEXT PRIMARY KEY);`,
+	})
+	migs, err := Load(before)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if _, err := New(pool).Up(ctx, migs); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	after := writeMigrations(t, map[string]string{
+		"0001_widgets.sql": `CREATE TABLE widgets (id TEXT PRIMARY KEY, extra TEXT);`,
+	})
+	edited, err := Load(after)
+	if err != nil {
+		t.Fatalf("load edited: %v", err)
+	}
+	_, err = New(pool).Up(ctx, edited)
+	if !errors.Is(err, ErrChecksumMismatch) {
+		t.Fatalf("an edited applied migration is not reported as a checksum mismatch: %v", err)
+	}
+	if errors.Is(err, ErrVersionCollision) {
+		t.Error("an edit is reported as a version collision — the name is identical, nothing collided")
 	}
 }

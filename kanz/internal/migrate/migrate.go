@@ -49,6 +49,13 @@ import (
 // silently diverge — the fix is a NEW migration, never an edit to an old one.
 var ErrChecksumMismatch = errors.New("migrate: applied migration was modified")
 
+// ErrVersionCollision means the version is already recorded under a DIFFERENT
+// file name. Distinct from ErrChecksumMismatch because the remedies are
+// opposites: a mismatch is fixed by adding a new migration, a collision is made
+// worse by it — the database is carrying migrations from somewhere else, and
+// stacking another one on top buries the reason.
+var ErrVersionCollision = errors.New("migrate: version already applied by a different migration")
+
 // advisoryLockKey namespaces this runner's lock. Any constant works; it only has
 // to be the same across every process that migrates this database.
 const advisoryLockKey int64 = 0x6b616e7a4d494752 // "kanzMIGR"
@@ -158,10 +165,30 @@ func (r *Runner) Up(ctx context.Context, migs []Migration) ([]Migration, error) 
 
 	var done []Migration
 	for _, m := range migs {
-		if sum, ok := applied[m.Version]; ok {
-			if sum != m.Checksum {
+		if rec, ok := applied[m.Version]; ok {
+			// A DIFFERENT FILE AT THIS VERSION IS NOT AN EDIT, and conflating the
+			// two hands the operator the wrong instruction. "Add a new migration
+			// instead of editing an applied one" is right when someone changed a
+			// migration that already ran; it is actively misleading when the
+			// version was recorded by a different file, because nothing was
+			// edited and adding a migration fixes nothing. That case means two
+			// migration sets share one database — the integration suite's own
+			// fixtures and a service's real migrations, most often — and the
+			// answer is to look at the database, not at the file.
+			//
+			// The old message reported both as the first, and named the file on
+			// disk as the one that "was modified" even when the row belonged to
+			// another file entirely, sending the reader to inspect something
+			// blameless.
+			if rec.Name != m.Name {
+				return done, fmt.Errorf("%w: version %d is recorded as %q but this directory supplies %q — "+
+					"nothing was edited: two migration sets are sharing one database, or a version number was reused. "+
+					"Do NOT add a new migration to get past this; check what applied %q to this database first",
+					ErrVersionCollision, m.Version, rec.Name, m.Name, rec.Name)
+			}
+			if rec.Checksum != m.Checksum {
 				return done, fmt.Errorf("%w: %s (applied checksum %s, file is now %s) — add a new migration instead of editing an applied one",
-					ErrChecksumMismatch, m.Name, short(sum), short(m.Checksum))
+					ErrChecksumMismatch, m.Name, short(rec.Checksum), short(m.Checksum))
 			}
 			continue // already applied, unchanged
 		}
@@ -214,23 +241,36 @@ func ensureVersionTable(ctx context.Context, conn *pgx.Conn) error {
 	return nil
 }
 
-func appliedChecksums(ctx context.Context, conn *pgx.Conn) (map[int64]string, error) {
-	rows, err := conn.Query(ctx, `SELECT version, checksum FROM schema_migrations`)
+// appliedRecord is one row of schema_migrations.
+//
+// THE NAME IS READ, NOT JUST THE CHECKSUM, and that is the whole point of this
+// type. The table has always stored the name; this function used to discard it
+// and return version -> checksum alone, so a version recorded under a DIFFERENT
+// FILE was indistinguishable from the same file edited — and the caller reported
+// it as the latter, naming a file that had never been applied.
+type appliedRecord struct {
+	Name     string
+	Checksum string
+}
+
+func appliedChecksums(ctx context.Context, conn *pgx.Conn) (map[int64]appliedRecord, error) {
+	rows, err := conn.Query(ctx, `SELECT version, name, checksum FROM schema_migrations`)
 	if err != nil {
 		return nil, fmt.Errorf("read schema_migrations: %w", err)
 	}
 	defer rows.Close()
 
-	out := make(map[int64]string)
+	out := make(map[int64]appliedRecord)
 	for rows.Next() {
 		var (
-			v   int64
-			sum string
+			v    int64
+			name string
+			sum  string
 		)
-		if err := rows.Scan(&v, &sum); err != nil {
+		if err := rows.Scan(&v, &name, &sum); err != nil {
 			return nil, fmt.Errorf("scan schema_migrations: %w", err)
 		}
-		out[v] = sum
+		out[v] = appliedRecord{Name: name, Checksum: sum}
 	}
 	return out, rows.Err()
 }
