@@ -206,6 +206,35 @@ func runConsumers(ctx context.Context, cfg config.Config, readiness *server.Read
 	}, []string{"reason"})
 	obs.Registry.MustRegister(unpriced)
 
+	// HOW MANY INSTRUMENTS IS THE FOLD ACTUALLY HOLDING? (#96)
+	//
+	// The price spine is a broadcast, so every replica folds every trade and
+	// quote the estate publishes — deliberately, because a consumer group made
+	// admission depend on which pod received the tick (see the subscription
+	// below). The open question was whether that volume needs bounding by an
+	// instrument allowlist, and it could not be answered: nothing reported the
+	// fold's size, so the choice sat between accepting unmeasured growth and
+	// adding config whose omission would refuse live orders.
+	//
+	// GaugeFuncs rather than a counter, because this is a level and not an event,
+	// and they read through mark.Source.Stats so the metric cannot drift from the
+	// map it describes.
+	//
+	// held − live is the tombstone population: instruments seen once whose marks
+	// have expired and whose prices have been released. A held that climbs while
+	// live stays flat is an estate publishing instruments this OMS never trades —
+	// which is the measurement that would justify an allowlist.
+	obs.Registry.MustRegister(prometheus.NewGaugeFunc(prometheus.GaugeOpts{
+		Name: "kanz_oms_mark_instruments_held",
+		Help: "Instruments held by the reference-mark fold, including expired tombstones. " +
+			"Growth here is the price spine's instrument cardinality, not this OMS's trading universe.",
+	}, func() float64 { held, _ := marks.Stats(); return float64(held) }))
+	obs.Registry.MustRegister(prometheus.NewGaugeFunc(prometheus.GaugeOpts{
+		Name: "kanz_oms_mark_instruments_live",
+		Help: "Instruments whose reference mark is present and within OMS_PRICE_MAX_AGE — the marks the " +
+			"pre-trade gate can actually value an order from. A fall here with held flat is a stalling feed.",
+	}, func() float64 { _, live := marks.Stats(); return float64(live) }))
+
 	preTrade := comp.NewPreTradeGate(
 		comp.NewEngine(nil), compliance.NewBookSource(book), mandateReg, nil, nil, logger,
 		comp.WithRequireMandate(cfg.RequireMandate),
