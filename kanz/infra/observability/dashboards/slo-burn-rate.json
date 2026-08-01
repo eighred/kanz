@@ -1,0 +1,309 @@
+{
+  "uid": "kanz-slo-burn",
+  "title": "SLO — error-budget burn",
+  "description": "Renders the SLO burn rates slo.recording.rules.yaml computes (#85). Every panel is LABEL-GENERIC: no service or SLO name appears anywhere in this file, so an SLO added to slo.yaml and compiled into the rules appears here on its own. Panels show BURN RATE (error ratio ÷ error budget), the same quantity slo.alerts.rules.yaml thresholds at 14.4/6/3/1 — so the number on the board is the number that pages. Three states are deliberately distinguishable: a burn multiple, IDLE (scraped, no traffic — NaN), and NOT MEASURED (no series at all). Absence must never render as health.",
+  "tags": ["kanz", "slo", "sre"],
+  "timezone": "utc",
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": true,
+  "refresh": "1m",
+  "time": { "from": "now-6h", "to": "now" },
+  "templating": { "list": [] },
+  "annotations": { "list": [] },
+  "panels": [
+    {
+      "id": 1,
+      "type": "text",
+      "title": "How to read this board",
+      "gridPos": { "h": 4, "w": 24, "x": 0, "y": 0 },
+      "options": {
+        "mode": "markdown",
+        "content": "**Values are burn rates — multiples of the error budget, not error ratios.** `1×` spends the whole 28d budget exactly over 28d. The alert rules page at `14.4×` (1h+5m) and `6×` (6h+30m), and ticket at `3×` (1d+2h) and `1×` (3d+6h); the thresholds here are those same numbers.\n\n**An empty panel is not a healthy panel.** `NOT MEASURED` means the SLI series does not exist — nothing is scraping it, and its burn-rate alerts cannot fire. `IDLE` means the series exists but the denominator is zero, so the ratio is NaN: a silent service burns no budget, which is correct, but silence is not success. Neither state is green."
+      }
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "Error-budget burn rate, per SLO (1h window)",
+      "description": "burn = slo:sli_error:ratio_rate1h ÷ slo:error_budget:ratio, joined on (service, slo).\n\nThe `or on(service, slo) (slo:error_budget:ratio * 0 - 1)` tail is load-bearing, not a trick. slo:error_budget:ratio is a vector() literal, so it exists for EVERY SLO in the catalog whether or not anything measures it. The join alone would silently drop an SLO whose SLI series is absent, and a dropped SLO looks exactly like an SLO with nothing wrong. The tail substitutes -1 for those, mapped below to NOT MEASURED, so the catalog is always fully enumerated.",
+      "gridPos": { "h": 7, "w": 24, "x": 0, "y": 4 },
+      "datasource": { "type": "prometheus", "uid": "kanz-prometheus" },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "kanz-prometheus" },
+          "editorMode": "code",
+          "expr": "(slo:sli_error:ratio_rate1h / on(service, slo) slo:error_budget:ratio) or on(service, slo) (slo:error_budget:ratio * 0 - 1)",
+          "instant": true,
+          "range": false,
+          "legendFormat": "{{service}} / {{slo}}"
+        }
+      ],
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "decimals": 2,
+          "noValue": "NOT MEASURED",
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "-1": { "text": "NOT MEASURED", "color": "purple", "index": 0 }
+              }
+            },
+            {
+              "type": "special",
+              "options": {
+                "match": "nan",
+                "result": { "text": "IDLE — no traffic", "color": "blue", "index": 1 }
+              }
+            },
+            {
+              "type": "special",
+              "options": {
+                "match": "null",
+                "result": { "text": "NOT MEASURED", "color": "purple", "index": 2 }
+              }
+            }
+          ],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 1 },
+              { "color": "orange", "value": 6 },
+              { "color": "red", "value": 14.4 }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "Fast-burn pair — 1h and 5m (pages at 14.4×)",
+      "description": "Both windows of the SLOFastBurn pair. The alert fires only when BOTH exceed 14.4×; the 5m window is the reset guard that stops a stale 1h window paging long after the incident ended. Plotting both is what makes a firing — or a non-firing — alert legible.\n\nTHIS CHART SHOWS ONLY MEASURED SLOs. A time series cannot plot 'no series exists', so an unmeasured SLO is simply absent from the lines below — verified: with one SLI absent this panel returns 4 series where the catalog holds 5. The table at the bottom of the board is the authority on coverage; do not read this panel as a roster.",
+      "gridPos": { "h": 9, "w": 12, "x": 0, "y": 11 },
+      "datasource": { "type": "prometheus", "uid": "kanz-prometheus" },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "kanz-prometheus" },
+          "editorMode": "code",
+          "expr": "slo:sli_error:ratio_rate1h / on(service, slo) slo:error_budget:ratio",
+          "legendFormat": "1h — {{service}}/{{slo}}"
+        },
+        {
+          "refId": "B",
+          "datasource": { "type": "prometheus", "uid": "kanz-prometheus" },
+          "editorMode": "code",
+          "expr": "slo:sli_error:ratio_rate5m / on(service, slo) slo:error_budget:ratio",
+          "legendFormat": "5m — {{service}}/{{slo}}"
+        }
+      ],
+      "options": {
+        "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["lastNotNull", "max"], "showLegend": true },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "decimals": 2,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 0,
+            "showPoints": "never",
+            "spanNulls": false,
+            "thresholdsStyle": { "mode": "line" }
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "red", "value": 14.4 }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "Slower windows — 6h, 1d, 3d (page at 6×, ticket at 3× and 1×)",
+      "description": "The three slower burn pairs' long windows. 1× is not a safe idle level — it is the rate that spends the entire 28d budget exactly over the 28d window, which is why the chronic 3d+6h pair tickets there. A line sitting just under 1× for a month ends the window with nothing left.\n\nTHIS CHART SHOWS ONLY MEASURED SLOs, for the same reason as the fast-burn panel beside it. The table at the bottom of the board is the authority on coverage.",
+      "gridPos": { "h": 9, "w": 12, "x": 12, "y": 11 },
+      "datasource": { "type": "prometheus", "uid": "kanz-prometheus" },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "kanz-prometheus" },
+          "editorMode": "code",
+          "expr": "slo:sli_error:ratio_rate6h / on(service, slo) slo:error_budget:ratio",
+          "legendFormat": "6h — {{service}}/{{slo}}"
+        },
+        {
+          "refId": "B",
+          "datasource": { "type": "prometheus", "uid": "kanz-prometheus" },
+          "editorMode": "code",
+          "expr": "slo:sli_error:ratio_rate1d / on(service, slo) slo:error_budget:ratio",
+          "legendFormat": "1d — {{service}}/{{slo}}"
+        },
+        {
+          "refId": "C",
+          "datasource": { "type": "prometheus", "uid": "kanz-prometheus" },
+          "editorMode": "code",
+          "expr": "slo:sli_error:ratio_rate3d / on(service, slo) slo:error_budget:ratio",
+          "legendFormat": "3d — {{service}}/{{slo}}"
+        }
+      ],
+      "options": {
+        "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["lastNotNull", "max"], "showLegend": true },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "decimals": 2,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 0,
+            "showPoints": "never",
+            "spanNulls": false,
+            "thresholdsStyle": { "mode": "line" }
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 1 },
+              { "color": "orange", "value": 3 },
+              { "color": "red", "value": 6 }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 5,
+      "type": "table",
+      "title": "The SLO catalog, and whether each one is actually measured",
+      "description": "Every SLO the recording rules declare a budget for, with its 1h and 5m burn. Driven from slo:error_budget:ratio — the vector() catalog — so an SLO whose SLI has no producer still appears, as NOT MEASURED. This is the panel that answers 'is this board showing me everything?', which an all-green board otherwise cannot.",
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 20 },
+      "datasource": { "type": "prometheus", "uid": "kanz-prometheus" },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "kanz-prometheus" },
+          "editorMode": "code",
+          "expr": "(slo:sli_error:ratio_rate1h / on(service, slo) slo:error_budget:ratio) or on(service, slo) (slo:error_budget:ratio * 0 - 1)",
+          "instant": true,
+          "range": false,
+          "format": "table"
+        },
+        {
+          "refId": "B",
+          "datasource": { "type": "prometheus", "uid": "kanz-prometheus" },
+          "editorMode": "code",
+          "expr": "(slo:sli_error:ratio_rate5m / on(service, slo) slo:error_budget:ratio) or on(service, slo) (slo:error_budget:ratio * 0 - 1)",
+          "instant": true,
+          "range": false,
+          "format": "table"
+        },
+        {
+          "refId": "C",
+          "datasource": { "type": "prometheus", "uid": "kanz-prometheus" },
+          "editorMode": "code",
+          "expr": "slo:error_budget:ratio",
+          "instant": true,
+          "range": false,
+          "format": "table"
+        }
+      ],
+      "transformations": [
+        { "id": "joinByField", "options": { "byField": "slo", "mode": "outer" } },
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": { "Time": true, "Time 1": true, "Time 2": true, "Time 3": true, "service 2": true, "service 3": true },
+            "renameByName": {
+              "service 1": "service",
+              "Value #A": "burn 1h",
+              "Value #B": "burn 5m",
+              "Value #C": "error budget"
+            }
+          }
+        }
+      ],
+      "options": { "showHeader": true, "cellHeight": "sm" },
+      "fieldConfig": {
+        "defaults": {
+          "custom": { "align": "auto", "cellOptions": { "type": "auto" } },
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "-1": { "text": "NOT MEASURED", "color": "purple", "index": 0 }
+              }
+            },
+            {
+              "type": "special",
+              "options": {
+                "match": "nan",
+                "result": { "text": "IDLE — no traffic", "color": "blue", "index": 1 }
+              }
+            }
+          ]
+        },
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "burn 1h" },
+            "properties": [
+              { "id": "custom.cellOptions", "value": { "type": "color-text" } },
+              { "id": "decimals", "value": 2 },
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    { "color": "green", "value": null },
+                    { "color": "yellow", "value": 1 },
+                    { "color": "orange", "value": 6 },
+                    { "color": "red", "value": 14.4 }
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "matcher": { "id": "byName", "options": "burn 5m" },
+            "properties": [
+              { "id": "custom.cellOptions", "value": { "type": "color-text" } },
+              { "id": "decimals", "value": 2 }
+            ]
+          },
+          {
+            "matcher": { "id": "byName", "options": "error budget" },
+            "properties": [
+              { "id": "unit", "value": "percentunit" },
+              { "id": "decimals", "value": 3 }
+            ]
+          }
+        ]
+      }
+    }
+  ]
+}

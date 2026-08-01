@@ -1,0 +1,213 @@
+# Grafana — the rendering half of the SLO layer (#85).
+#
+# The recording rules in slo/ have computed burn rates since SRE-01b and nothing
+# has ever displayed them. This is what displays them, and it is deliberately the
+# LAST piece: the order that produced the dashboards/README.md wreckage was
+# dashboard-first, and every panel there rendered empty for months because the
+# exporter underneath was never built. Here the series exist (kanz_gateway_*,
+# kanz_risk_*, kanz_bus_* — TestEveryObservabilityMetricExistsInGo asserts it),
+# a Prometheus scrapes them (#61, proven on the rig), and the rules evaluate.
+# Only then this.
+#
+# Read-only by construction: provisioned datasource and dashboards are
+# `editable: false` / `allowUiUpdates: false`, so the file in git is the board.
+# A panel edited in the UI and lost on the next pod restart is how a dashboard
+# quietly stops matching the alerts it is supposed to explain.
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-datasources
+  namespace: kanz-observability
+  labels:
+    app.kubernetes.io/part-of: kanz
+data:
+  datasources.yaml: |
+    apiVersion: 1
+    datasources:
+      # The UID is FIXED and referenced by every panel in dashboards/*.json.
+      # Grafana otherwise assigns a random UID per install, which would make the
+      # committed dashboards render "Datasource not found" on a fresh cluster —
+      # an error a reader is as likely to read as "no data" as "misconfigured".
+      - name: Prometheus
+        uid: kanz-prometheus
+        type: prometheus
+        access: proxy
+        url: http://prometheus.kanz-observability.svc:9090
+        isDefault: true
+        # Not editable in the UI: this file is the definition. See the header.
+        editable: false
+        jsonData:
+          # Must not exceed the rule evaluation interval, or the burn-rate panels
+          # step past samples the rules only produce every 30s.
+          timeInterval: 30s
+          httpMethod: POST
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-dashboard-provider
+  namespace: kanz-observability
+  labels:
+    app.kubernetes.io/part-of: kanz
+data:
+  dashboards.yaml: |
+    apiVersion: 1
+    providers:
+      - name: kanz
+        orgId: 1
+        folder: kanz
+        type: file
+        # A dashboard deleted from the UI must come back, and a dashboard edited
+        # in the UI must not win over the file. The board an operator reads
+        # during an incident has to be the board that was reviewed.
+        disableDeletion: true
+        allowUiUpdates: false
+        updateIntervalSeconds: 30
+        options:
+          path: /var/lib/grafana/dashboards
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: grafana
+  namespace: kanz-observability
+  labels:
+    app: grafana
+    app.kubernetes.io/part-of: kanz
+spec:
+  # ONE replica, deliberately. Grafana's default backing store is a SQLite file
+  # on the emptyDir below; two replicas would each keep their own, and a user
+  # would get a different one per request. Scaling this out means an external
+  # database first, not a replica count.
+  replicas: 1
+  selector:
+    matchLabels:
+      app: grafana
+  template:
+    metadata:
+      labels:
+        app: grafana
+        app.kubernetes.io/part-of: kanz
+      annotations:
+        # Grafana exposes its own /metrics. Scraping it is how "the board is
+        # down" becomes visible from the same surface as everything else,
+        # instead of being discovered by a human who opens a blank page.
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "3000"
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        # 472 is Grafana's own uid/gid in the upstream image; the emptyDirs below
+        # are chowned to it by fsGroup so a read-only root filesystem still has
+        # somewhere to write.
+        runAsUser: 472
+        runAsGroup: 472
+        fsGroup: 472
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: grafana
+          # Docker Hub, NOT quay.io as prometheus.yaml and node-exporter.yaml
+          # use: Grafana publishes no quay mirror, so matching the siblings is
+          # not available here. Same unmirrored-third-party-base gap those two
+          # already carry (base-image-mirror.yml does not cover observability
+          # images), and it is worth removing for all three at once rather than
+          # pretending this one is different.
+          #
+          # PINNED BY DIGEST; the tag is retained only so a human can read the
+          # version. 12.4.6 is a MUTABLE tag upstream — the digest is what runs.
+          image: docker.io/grafana/grafana:12.4.6@sha256:c2cd7057f6116f708b6ab11dc36089f4b34bcf5065c4457ca6b55daa42a9eb8c
+          env:
+            # NO DEFAULT PASSWORD, AND NO ANONYMOUS ACCESS. Grafana ships with
+            # admin/admin and will happily start with it; a monitoring plane
+            # reachable with the documented default is a credential, not a
+            # control. The Secret below is NOT optional — absent it the pod stays
+            # in ContainerCreating and says so, which is the intended failure:
+            # "nothing configured" must not look like "checked, and fine".
+            #
+            #   kubectl -n kanz-observability create secret generic grafana-admin \
+            #     --from-literal=admin-password="$(openssl rand -base64 24)"
+            - { name: GF_SECURITY_ADMIN_USER, value: admin }
+            - { name: GF_SECURITY_ADMIN_PASSWORD__FILE, value: /etc/grafana/secrets/admin-password }
+            - { name: GF_AUTH_ANONYMOUS_ENABLED, value: "false" }
+            - { name: GF_USERS_ALLOW_SIGN_UP, value: "false" }
+            # No outbound calls from the estate: version checks and usage
+            # reporting are egress from a network whose egress is the thing being
+            # controlled, in exchange for nothing an operator needs.
+            - { name: GF_ANALYTICS_REPORTING_ENABLED, value: "false" }
+            - { name: GF_ANALYTICS_CHECK_FOR_UPDATES, value: "false" }
+            - { name: GF_NEWS_NEWS_FEED_ENABLED, value: "false" }
+            - { name: GF_PATHS_PROVISIONING, value: /etc/grafana/provisioning }
+          ports:
+            - { name: http, containerPort: 3000 }
+          readinessProbe:
+            # /api/health reports database and provisioning state, unlike / which
+            # returns the login page whether or not the datasource resolved.
+            httpGet: { path: /api/health, port: 3000 }
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: { path: /api/health, port: 3000 }
+            initialDelaySeconds: 20
+            periodSeconds: 20
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
+          resources:
+            requests: { cpu: 100m, memory: 256Mi }
+            limits: { memory: 512Mi }
+          volumeMounts:
+            - { name: datasources, mountPath: /etc/grafana/provisioning/datasources, readOnly: true }
+            - { name: dashboard-provider, mountPath: /etc/grafana/provisioning/dashboards, readOnly: true }
+            - { name: dashboards, mountPath: /var/lib/grafana/dashboards, readOnly: true }
+            - { name: admin, mountPath: /etc/grafana/secrets, readOnly: true }
+            # readOnlyRootFilesystem means Grafana's SQLite, plugin cache and
+            # temp space all need a writable mount or it will not start.
+            - { name: data, mountPath: /var/lib/grafana }
+            - { name: tmp, mountPath: /tmp }
+      volumes:
+        - name: datasources
+          configMap: { name: grafana-datasources }
+        - name: dashboard-provider
+          configMap: { name: grafana-dashboard-provider }
+        # NOT optional, for the same reason as prometheus.yaml's slo-rules mount:
+        # with `optional: true` Grafana would start clean, provision zero
+        # dashboards, serve a green /api/health, and an operator would find an
+        # empty folder and no indication that anything was missing.
+        #
+        #   kubectl -n kanz-observability create configmap grafana-dashboards \
+        #     --from-file=kanz/infra/observability/dashboards/slo-burn-rate.json
+        - name: dashboards
+          configMap: { name: grafana-dashboards }
+        - name: admin
+          secret: { secretName: grafana-admin, items: [{ key: admin-password, path: admin-password }] }
+        # EPHEMERAL, and that is a real limitation rather than an oversight: a
+        # pod restart loses Grafana's SQLite — users, API keys, starred boards
+        # and annotations. Nothing an operator needs to READ is stored here (the
+        # dashboards are provisioned from the ConfigMap and the data is in
+        # Prometheus), which is what makes it acceptable today. It stops being
+        # acceptable the moment someone creates a user or an annotation they
+        # expect to survive; that is the point to attach a PVC.
+        - name: data
+          emptyDir: {}
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: grafana
+  namespace: kanz-observability
+  labels:
+    app.kubernetes.io/part-of: kanz
+spec:
+  # ClusterIP, NOT a LoadBalancer or NodePort. Reaching this is `kubectl
+  # port-forward` until there is an authenticating ingress in front of it —
+  # publishing a monitoring plane that holds every service's error rates is an
+  # exposure decision, and it is not one this file gets to make quietly.
+  selector:
+    app: grafana
+  ports:
+    - { name: http, port: 3000, targetPort: 3000 }
