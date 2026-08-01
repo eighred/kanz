@@ -53,15 +53,25 @@ type Binding struct {
 // KeyMsg like any other, so binding it would make the shell swallow the
 // interrupt an operator expects to reach a running child process. The shell
 // exits on "q" and ctrl+d; ctrl+c is left to mean interrupt.
+// NAVIGATION IS ARROWS AND TAB, NOT h/l. The vim pair was removed with this
+// table's move to `h` for help: `h` and `l` are printable characters, and a
+// printable character bound globally is one the pane taking text never receives.
+// That is not hypothetical — `h`, `l`, `q` and `?` were all global in #65, which
+// made typing "help" into the Copilot prompt navigate two panes and quit the
+// shell. Modal input (Mode, below) fixed the symptom; removing the two bindings
+// that had no non-printable alternative removes the cause.
+//
+// `q` stays printable and global because Navigate mode is where it applies and
+// TextSafe excludes it from Input mode. `h` is the same trade, now for help.
 var Global = []Binding{
-	{Keys: []string{"tab", "right", "l"}, Act: NextPane, Label: "tab: next", Help: "next pane"},
-	{Keys: []string{"shift+tab", "left", "h"}, Act: PrevPane, Label: "shift+tab: prev", Help: "previous pane"},
+	{Keys: []string{"tab", "right"}, Act: NextPane, Label: "tab: next", Help: "change pane"},
+	{Keys: []string{"shift+tab", "left"}, Act: PrevPane, Label: "shift+tab: prev", Help: "change pane"},
 	{Keys: []string{"alt+1", "alt+2", "alt+3", "alt+4", "alt+5", "alt+6", "alt+7", "alt+8", "alt+9"},
 		Act: SelectPane, Label: "alt+N: jump", Help: "jump to pane N"},
-	{Keys: []string{"?"}, Act: Help, Label: "?: help", Help: "toggle this help"},
+	{Keys: []string{"h"}, Act: Help, Label: "h: help", Help: "toggle help"},
 	{Keys: []string{"q", "ctrl+d"}, Act: Quit, Label: "q: quit", Help: "quit kanz"},
-	{Keys: []string{"i", "enter"}, Act: EnterInput, Label: "i: type", Help: "start typing in this pane"},
-	{Keys: []string{"esc"}, Act: LeaveInput, Label: "esc: navigate", Help: "stop typing, navigate"},
+	{Keys: []string{"i", "enter"}, Act: EnterInput, Label: "i: type", Help: "focus input field"},
+	{Keys: []string{"esc"}, Act: LeaveInput, Label: "esc: navigate", Help: "unfocus input field"},
 }
 
 // Lookup maps a pressed key to its global action.

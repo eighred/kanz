@@ -1,23 +1,38 @@
 // Package ui is the shell's own rendering primitives: tab bar, status bar, and
 // the clipping every pane's output passes through.
 //
-// HAND-ROLLED, AND THAT IS THE EXISTING CONVENTION HERE RATHER THAN A NEW ONE.
-// `bubbles` is not a dependency of this module, and cmd/universe/form.go
-// already records the same choice for its form widget ("a minimal hand-rolled
-// form (no bubbles dependency)"). This package turns that per-file habit into
-// structure, so the next widget has somewhere to go other than the pane that
-// needed it first — which is how the copies start.
+// MOSTLY HAND-ROLLED, AND THE EXCEPTIONS ARE NAMED.
 //
-// bubbletea and lipgloss stay: they are the event loop and the styling, the
-// layer opencode's packages/tui gets from OpenTUI. What is written here is
-// everything ABOVE that line.
+// This package used to state flatly that `bubbles` is not a dependency of this
+// module. That is no longer true, and leaving it would have been the stale
+// comment this repository keeps paying for — so here is the current line.
+//
+// Taken from upstream, by owner decision (2026-08-01):
+//
+//	bubbles/textinput   the Copilot prompt. The hand-rolled version handled two
+//	                    keys, so cursor movement, word delete and paste all did
+//	                    nothing — a mistyped URL had to be erased one character
+//	                    at a time.
+//	bubblezone          mouse hit-testing. It is coordinate bookkeeping around
+//	                    lipgloss's own layout, which is precisely the arithmetic
+//	                    a hand-rolled version gets subtly wrong and nobody
+//	                    notices until a click lands one tab over.
+//
+// Still written here: the tab bar, the status bar, the frame, the clipping and
+// the wrapping below. These are layout decisions specific to this shell rather
+// than general widgets, and importing a component for them would buy nothing.
+//
+// bubbletea and lipgloss remain what they always were — the event loop and the
+// styling, the layer opencode's packages/tui gets from OpenTUI.
 package ui
 
 import (
+	"strconv"
 	"strings"
 	"unicode/utf8"
 
 	"github.com/charmbracelet/lipgloss"
+	zone "github.com/lrstanley/bubblezone"
 
 	"github.com/eighred/kanz/internal/tui/keymap"
 	"github.com/eighred/kanz/internal/tui/pane"
@@ -29,7 +44,17 @@ type Tab struct {
 	Title  string
 	Plane  pane.Plane
 	Active bool
+	// ZoneID is the bubblezone id this tab is marked with, so a click can be
+	// resolved back to it. Empty leaves the tab unmarked, which is what the
+	// tests that render a bar without a zone manager rely on.
+	ZoneID string
 }
+
+// TabZoneID is the zone id for the tab at index i. One function so the marker
+// written in the view and the lookup done on a click cannot drift into two
+// spellings of the same id — a mismatch there is a click that silently does
+// nothing, which is indistinguishable from a dead terminal.
+func TabZoneID(i int) string { return "tab:" + strconv.Itoa(i) }
 
 // TabBar renders the pane tabs, clipped to width.
 //
@@ -53,6 +78,12 @@ func TabBar(tabs []Tab, width int) string {
 		}
 		if i > 0 {
 			parts = append(parts, theme.Rule.Render("│"))
+		}
+		// Marked so a click anywhere on the tab selects it. The marker is
+		// zero-width and is stripped by zone.Scan at the root view, so it does not
+		// affect the width Clip measures below.
+		if t.ZoneID != "" {
+			label = zone.Mark(t.ZoneID, label)
 		}
 		parts = append(parts, label)
 	}

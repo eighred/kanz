@@ -296,14 +296,18 @@ func TestATextPaneStillHonoursModifierAndTabBindings(t *testing.T) {
 	}
 }
 
-// A read-only pane keeps the full table, including the vim-style keys that make
-// it pleasant to drive. The fix must not cost every pane its bindings.
-func TestANonTextPaneKeepsTheVimBindings(t *testing.T) {
+// A read-only pane keeps the full table, including the PRINTABLE global. The
+// modal fix must not cost every pane its bindings.
+//
+// The exemplar used to be `l` (vim-style next-pane). Navigation moved to arrows
+// and tab, and `h` became help, so `h` is now the printable global this asserts
+// with — the property is unchanged, only the key that carries it.
+func TestANonTextPaneKeepsThePrintableGlobal(t *testing.T) {
 	m := newModel(t, &fake{id: "a", title: "A"}, &fake{id: "b", title: "B"})
-	got, _ := m.Update(key("l"))
+	got, _ := m.Update(key("h"))
 	m = got.(Model)
-	if m.active != 1 {
-		t.Errorf("l did not move panes on a read-only pane (active=%d)", m.active)
+	if !m.showHelp {
+		t.Error("h did not open help on a read-only pane — the printable global was swallowed")
 	}
 }
 
@@ -384,41 +388,46 @@ func TestSwitchingToAReadOnlyPaneReturnsToNavigate(t *testing.T) {
 	if m.mode != keymap.Navigate {
 		t.Errorf("mode = %v on a read-only pane, want Navigate", m.mode)
 	}
-	// And `l` navigates again rather than being swallowed.
-	got, _ = m.Update(key("l"))
+	// And the printable global acts again rather than being swallowed.
+	got, _ = m.Update(key("h"))
 	m = got.(Model)
-	if m.active != 0 {
-		t.Errorf("l did not navigate in Navigate mode (active=%d)", m.active)
+	if !m.showHelp {
+		t.Error("h did not open help in Navigate mode — the printable global was swallowed")
 	}
 }
 
-// ONE KEY, ONE MEANING PER MODE. This is the property the whole change exists
-// for: `l` types in Input and navigates in Navigate, and which one is in force
-// is a mode the operator can see — not a function of which tab is open.
-func TestTheSameKeyTypesInInputAndNavigatesInNavigate(t *testing.T) {
+// ONE KEY, ONE MEANING PER MODE. This is the property the whole modal change
+// exists for: the same printable character types in Input and acts globally in
+// Navigate, and which one is in force is a mode the operator can see — not a
+// function of which tab is open.
+//
+// Asserted with `h` since navigation moved to arrows and tab (#65's `l` is no
+// longer bound at all). `h` is now the only printable global besides `q`, which
+// makes it the sharpest test of this property rather than merely a surviving one.
+func TestTheSamePrintableKeyTypesInInputAndActsInNavigate(t *testing.T) {
 	p := &textPane{fake: fake{id: "copilot", title: "Copilot"}}
 	m := newModel(t, p, &fake{id: "nodes", title: "Nodes"})
 
 	// Input mode (the shell opens here): the letter reaches the pane.
-	got, _ := m.Update(key("l"))
+	got, _ := m.Update(key("h"))
 	m = got.(Model)
-	if m.active != 0 {
-		t.Fatal("l navigated while in Input mode — the prompt would lose the character")
+	if m.showHelp {
+		t.Fatal("h opened help while in Input mode — the prompt would lose the character")
 	}
-	if len(p.gotKeys) == 0 || p.gotKeys[len(p.gotKeys)-1] != "l" {
-		t.Fatalf("the pane did not receive l; saw %v", p.gotKeys)
+	if len(p.gotKeys) == 0 || p.gotKeys[len(p.gotKeys)-1] != "h" {
+		t.Fatalf("the pane did not receive h; saw %v", p.gotKeys)
 	}
 
-	// esc to Navigate: the same letter now navigates.
+	// esc to Navigate: the same letter now acts globally.
 	got, _ = m.Update(key("esc"))
 	m = got.(Model)
 	if m.mode != keymap.Navigate {
 		t.Fatalf("esc did not leave Input mode (mode=%v)", m.mode)
 	}
-	got, _ = m.Update(key("l"))
+	got, _ = m.Update(key("h"))
 	m = got.(Model)
-	if m.active != 1 {
-		t.Errorf("l did not navigate after esc (active=%d)", m.active)
+	if !m.showHelp {
+		t.Error("h did not open help after esc")
 	}
 }
 

@@ -12,6 +12,7 @@ import (
 	"os/exec"
 
 	tea "github.com/charmbracelet/bubbletea"
+	zone "github.com/lrstanley/bubblezone"
 
 	"github.com/eighred/kanz/internal/tui/keymap"
 	"github.com/eighred/kanz/internal/tui/pane"
@@ -41,6 +42,15 @@ type Model struct {
 
 // New builds the shell over a registry. The first pane is active.
 func New(reg *pane.Registry) (Model, error) {
+	// THE ZONE MANAGER IS INITIALISED HERE, NOT IN main.
+	//
+	// zone.Scan panics with "manager not initialized" if it was never called, and
+	// Scan runs in View — so the panic would surface on the first paint rather
+	// than at wiring time, in whichever binding or test built a Model without
+	// knowing it had to. NewGlobal is idempotent (it returns early when the
+	// manager exists), so calling it from every constructor costs one goroutine
+	// for the process and removes the ordering requirement entirely.
+	zone.NewGlobal()
 	if reg == nil || reg.Len() == 0 {
 		return Model{}, fmt.Errorf("app: shell needs at least one pane")
 	}
@@ -102,6 +112,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// out needs the size, and swallowing the resize here is why a pane
 		// renders at the wrong width until the next keystroke.
 
+	case tea.MouseMsg:
+		if cmd, handled := m.mouse(msg); handled {
+			return m, cmd
+		}
+
 	case tea.KeyMsg:
 		if cmd, handled := m.globalKey(msg.String()); handled {
 			return m, cmd
@@ -127,6 +142,47 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.panes.Replace(m.active, updated)
 	}
 	return m, cmd
+}
+
+// mouse resolves a click against the zones the view marked. The bool says
+// whether the shell consumed it — an unconsumed mouse event reaches the active
+// pane, exactly as an unbound key does.
+//
+// ONLY A PRESS ACTS. bubbletea delivers motion and release too, and treating
+// every event as a click makes a drag across the tab bar select four panes.
+//
+// Clicking a tab both selects it AND leaves Input mode, because the click is a
+// navigation gesture: an operator who clicks another tab is not typing any more,
+// and landing there still in Input mode would send their next keystroke to a
+// pane they were not looking at when they pressed it.
+func (m *Model) mouse(msg tea.MouseMsg) (tea.Cmd, bool) {
+	if msg.Action != tea.MouseActionPress || msg.Button != tea.MouseButtonLeft {
+		return nil, false
+	}
+	// The overlay is modal: a click dismisses it and does nothing else, matching
+	// the key behaviour rather than acting on whatever is underneath.
+	if m.showHelp {
+		m.showHelp = false
+		return nil, true
+	}
+	for i := 0; i < m.panes.Len(); i++ {
+		if zone.Get(ui.TabZoneID(i)).InBounds(msg) {
+			if i == m.active {
+				return nil, true // already here; consumed so it does not reach the pane
+			}
+			return m.selectPane(i), true
+		}
+	}
+	// A click inside the body focuses the pane for typing, if it takes text.
+	// This is the mouse spelling of `i`, and it goes through the same setMode so
+	// the two cannot drift into different states.
+	if p, ok := m.panes.At(m.active); ok {
+		if _, takesText := p.(pane.TextInput); takesText && m.mode != keymap.Input {
+			m.setMode(keymap.Input)
+			return nil, true
+		}
+	}
+	return nil, false
 }
 
 // globalKey handles the shell's own bindings. The bool says whether the key was
@@ -257,11 +313,22 @@ func (m Model) View() string {
 		if !ok {
 			continue
 		}
-		tabs = append(tabs, ui.Tab{Title: p.Title(), Plane: p.Plane(), Active: i == m.active})
+		tabs = append(tabs, ui.Tab{Title: p.Title(), Plane: p.Plane(), Active: i == m.active, ZoneID: ui.TabZoneID(i)})
 	}
 
 	body := m.body()
-	return ui.Frame(ui.TabBar(tabs, m.width), body, ui.StatusBar(m.status(), m.mode, m.width), m.width, m.height)
+	frame := ui.Frame(ui.TabBar(tabs, m.width), body, ui.StatusBar(m.status(), m.mode, m.width), m.width, m.height)
+
+	// zone.Scan BELONGS AT THE ROOT VIEW, not in Update. It takes the RENDERED
+	// STRING, records where each marked region landed, and returns the string
+	// with the (zero-width) markers stripped — so the terminal never sees them
+	// and the widths measured upstream are unaffected. Update then answers
+	// "was this click inside that region?" with zone.Get(id).InBounds(msg).
+	//
+	// Scanning anywhere else means the coordinates describe a frame that is no
+	// longer on screen, which is a click that lands on the wrong tab rather than
+	// a click that does nothing — the harder failure to notice.
+	return zone.Scan(frame)
 }
 
 func (m Model) body() string {
@@ -276,21 +343,35 @@ func (m Model) body() string {
 	return p.View(m.width, m.height-3)
 }
 
+// helpView is the overlay. The copy is the owner-approved layout, and it is
+// written out rather than generated from keymap.Global on purpose: the table
+// groups by ACTION, while an operator reads by TASK ("how do I change pane?"),
+// and the mouse gestures below have no binding in the table at all.
+//
+// The consequence is that this text can drift from the bindings. TestHelpMatchesTheBindings
+// closes that: it asserts every key named here is actually bound, and that the
+// printable globals are all mentioned.
 func (m Model) helpView() string {
-	out := "  keys\n\n"
-	for _, b := range keymap.Global {
-		keys := ""
-		for i, k := range b.Keys {
-			if i > 0 {
-				keys += ", "
-			}
-			keys += k
-		}
-		out += fmt.Sprintf("  %-28s %s\n", keys, b.Help)
-	}
-	out += "\n  bus panes (shown in red) leave this shell and run as their own\n"
-	out += "  process, keeping their own identity. press any key to close.\n"
-	return out
+	// A raw literal so the layout in the source is the layout on screen. The
+	// column alignment is part of the copy, and an escaped version would let it
+	// drift without looking wrong in the diff.
+	const controls = `CONTROLS
+  Arrow Keys / Tab    Change pane (or click with mouse)
+  Enter / i / Click   Focus input field
+  Esc                 Unfocus input field
+
+SYSTEM
+  h                   Toggle help
+  q                   Quit kanz
+
+`
+	// "Highlighted" rather than "shown in red": the shell is monochrome since
+	// #199 and Bus panes are marked with reverse video. The previous wording
+	// named a colour that no longer exists, which is the exact shape of stale
+	// text this repository keeps paying for.
+	const footer = "Highlighted panes run as isolated bus processes. Click or press any key to close.\n"
+
+	return controls + theme.Rule.Render("─────────") + "\n" + footer
 }
 
 func (m Model) status() string {

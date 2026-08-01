@@ -34,6 +34,19 @@ func (f *fakeREPL) got() []string {
 	return append([]string(nil), f.lines...)
 }
 
+// newFocused builds the pane the way the SHELL does: app.New enters this pane in
+// Input mode, which calls SetFocused(true) and focuses the text component.
+//
+// It matters because bubbles/textinput ignores keys while blurred — deliberately,
+// per the owner's spec that the field is Blur()red by default and focused only on
+// i/enter/click. A test that typed into an unfocused pane would be asserting
+// against a state the shell never presents.
+func newFocused(f Dispatcher, out *Buffer) *Pane {
+	p := New(f, out)
+	p.SetFocused(true)
+	return p
+}
+
 func typeLine(p *Pane, s string) *Pane {
 	for _, r := range s {
 		next, _ := p.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
@@ -51,7 +64,7 @@ func press(p *Pane, t tea.KeyType) (*Pane, tea.Cmd) {
 // any command. /help, /login and the rest exist once, in repl.Dispatch.
 func TestEnterDispatchesTheTypedLineToTheREPL(t *testing.T) {
 	f := &fakeREPL{}
-	p := New(f, NewBuffer())
+	p := newFocused(f, NewBuffer())
 
 	p = typeLine(p, "/whoami")
 	p, cmd := press(p, tea.KeyEnter)
@@ -64,8 +77,8 @@ func TestEnterDispatchesTheTypedLineToTheREPL(t *testing.T) {
 	if len(got) != 1 || got[0] != "/whoami" {
 		t.Fatalf("REPL saw %v, want [/whoami]", got)
 	}
-	if p.input != "" {
-		t.Errorf("input = %q after enter, want it cleared", p.input)
+	if p.input.Value() != "" {
+		t.Errorf("input = %q after enter, want it cleared", p.input.Value())
 	}
 }
 
@@ -73,7 +86,7 @@ func TestEnterDispatchesTheTypedLineToTheREPL(t *testing.T) {
 // operator clears their thinking, not a command.
 func TestEnterOnAnEmptyLineDispatchesNothing(t *testing.T) {
 	f := &fakeREPL{}
-	p := New(f, NewBuffer())
+	p := newFocused(f, NewBuffer())
 
 	p, cmd := press(p, tea.KeyEnter)
 	if cmd != nil {
@@ -92,7 +105,7 @@ func TestEnterOnAnEmptyLineDispatchesNothing(t *testing.T) {
 // session whose token the in-flight /login is about to replace.
 func TestInputIsIgnoredWhileARequestIsInFlight(t *testing.T) {
 	f := &fakeREPL{release: make(chan struct{})}
-	p := New(f, NewBuffer())
+	p := newFocused(f, NewBuffer())
 
 	p = typeLine(p, "/exposure PF1")
 	p, cmd := press(p, tea.KeyEnter)
@@ -106,8 +119,8 @@ func TestInputIsIgnoredWhileARequestIsInFlight(t *testing.T) {
 	if second != nil {
 		t.Error("a second command was dispatched while one was in flight")
 	}
-	if p.input != "" {
-		t.Errorf("keystrokes during a request landed in the input buffer: %q", p.input)
+	if p.input.Value() != "" {
+		t.Errorf("keystrokes during a request landed in the input buffer: %q", p.input.Value())
 	}
 
 	close(f.release)
@@ -122,7 +135,7 @@ func TestInputIsIgnoredWhileARequestIsInFlight(t *testing.T) {
 // signal is the only thing that knows the operator asked to leave.
 func TestREPLStopQuitsTheShell(t *testing.T) {
 	f := &fakeREPL{stop: true}
-	p := New(f, NewBuffer())
+	p := newFocused(f, NewBuffer())
 
 	next, _ := p.Update(doneMsg{stop: true})
 	p = next.(*Pane)
@@ -134,17 +147,17 @@ func TestREPLStopQuitsTheShell(t *testing.T) {
 // Backspace must remove a whole rune. Trimming a byte at a time leaves invalid
 // UTF-8 on screen the moment anyone types a non-ASCII character.
 func TestBackspaceRemovesAWholeRune(t *testing.T) {
-	p := New(&fakeREPL{}, NewBuffer())
+	p := newFocused(&fakeREPL{}, NewBuffer())
 	p = typeLine(p, "né")
 
 	p, _ = press(p, tea.KeyBackspace)
-	if p.input != "n" {
-		t.Errorf("input = %q after backspace over a multi-byte rune, want %q", p.input, "n")
+	if p.input.Value() != "n" {
+		t.Errorf("input = %q after backspace over a multi-byte rune, want %q", p.input.Value(), "n")
 	}
 	p, _ = press(p, tea.KeyBackspace)
 	p, _ = press(p, tea.KeyBackspace) // past empty must not panic
-	if p.input != "" {
-		t.Errorf("input = %q, want empty", p.input)
+	if p.input.Value() != "" {
+		t.Errorf("input = %q, want empty", p.input.Value())
 	}
 }
 
