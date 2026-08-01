@@ -282,30 +282,20 @@ jobs:
       # neither substitutes for the other. The script refuses to report success
       # unless the broker logs "TLS required for client connections" — a gate that
       # comes up without its gate armed proves nothing.
-      - name: Start NATS (mTLS — the broker config production applies)
+      # This also PROVISIONS THE TOPOLOGY, by running the bootstrap script
+      # production applies (SEC-M3b) over mTLS as the bootstrap Job's own SVID.
+      # That used to be a second step here, duplicating up.sh's extraction — two
+      # copies of one procedure, and the CI copy provisioned as risk-engine's
+      # SVID rather than nats-bootstrap's, so it proved that *a* client can create
+      # streams rather than that the bootstrap identity can. The script now owns
+      # it, which also means a laptop and CI stand up the SAME broker: a harness
+      # that only produces a working spine under CI is a harness nobody can
+      # reproduce a failure with. It refuses to report success unless every stream
+      # the script declares is present, and unless the broker logged "TLS required
+      # for client connections" — a broker that comes up without its gate armed
+      # proves nothing.
+      - name: Start NATS (mTLS — the broker config production applies, and its topology)
         run: kanz/test/mtls/up.sh /tmp/kanz-mtls 4223
-
-      # SEC-M3b — CAN THE TOPOLOGY EVEN BE PROVISIONED? infra/nats/bootstrap-job.yaml
-      # is the Job that creates every stream, and it dialed nats://nats:4222 with no
-      # certs — so against the production broker it was refused exactly like the
-      # services, and the cluster could not create the streams those services then
-      # fail to find. It is not a Go client, so the M3a wire does not apply: it runs
-      # the `nats` CLI, which is not SPIFFE-aware and does ordinary DNS hostname
-      # verification (against a URI-SAN-only cert it fails outright). It needs a
-      # client SVID via NATS_CERT/KEY/CA and a URL that MATCHES a DNS SAN.
-      #
-      # This runs THE SCRIPT PRODUCTION APPLIES against the mTLS broker, so the
-      # bootstrap path is proven by execution rather than by reading the manifest —
-      # which is the only reason any of this was ever wrong.
-      - name: Bootstrap the topology over mTLS (the script production applies)
-        run: |
-          awk '/^  bootstrap\.sh: \|/{f=1;next} f&&/^---/{exit} f{sub(/^    /,"");print}' \
-            kanz/infra/nats/bootstrap-job.yaml > /tmp/bootstrap-mtls.sh
-          test -s /tmp/bootstrap-mtls.sh || { echo "could not extract bootstrap.sh"; exit 1; }
-          docker run --rm -i --network host -v /tmp/kanz-mtls:/c:ro \
-            -e NATS_URL=nats://localhost:4223 -e NATS_REPLICAS=1 \
-            -e NATS_CERT=/c/client.pem -e NATS_KEY=/c/client.key -e NATS_CA=/c/bundle.pem \
-            natsio/nats-box:0.14.5 sh -s < /tmp/bootstrap-mtls.sh
 
       # test/arch/rig_dev_posture_test.go shells out to `python3
       # tools/rig_dev_patch.py <manifest>` and parses its stdout as YAML — it

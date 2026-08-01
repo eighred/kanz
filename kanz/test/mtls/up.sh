@@ -15,6 +15,16 @@
 # from infra/nats/bootstrap-job.yaml. A copy here would drift from the real thing,
 # and the drift would be invisible until a service met a real broker.
 #
+# THE BROKER ALONE IS NOT ENOUGH, which is what this script used to stop at. A
+# JetStream broker with no streams accepts a connection, authorizes the publish,
+# and then answers "no response from stream" — so the mTLS round-trip test failed
+# in a way that reads like a transport fault and is not one. Step 4 therefore runs
+# PRODUCTION'S OWN bootstrap script, extracted from bootstrap-job.yaml, over mTLS.
+# That was always the intent: the DNS SANs minted below exist precisely so the
+# non-SPIFFE-aware `nats` CLI can verify the broker, and NATS_REPLICAS exists in
+# that script precisely so CI can run it against one node. Only the wiring was
+# missing.
+#
 # WHAT IS OVERRIDDEN, AND WHY (the honest list — everything else is verbatim):
 #   1. The `cluster {}` block is stripped. It routes to nats-0/1/2.nats-headless
 #      and puts JetStream in CLUSTERED mode, which needs a 3-node quorum. On one
@@ -25,13 +35,16 @@
 #      issues differ in provenance, not in shape: same trust domain, same URI SAN,
 #      same SPIFFE-conformant key usage. This mints no production credential and
 #      is built into no image — the cmd/kanz-devtoken stance.
+#   4. NATS_REPLICAS=1 for the bootstrap. Every stream production creates is
+#      replicas=3; a single-node JetStream refuses that outright. The script
+#      already parameterises it for exactly this reason — see its own comment.
 #
 # The TLS block and the accounts (tenants.conf) — the two things under test — are
-# used exactly as shipped.
+# used exactly as shipped, and so is the bootstrap script.
 #
 # Usage: test/mtls/up.sh [outdir] [port]   (defaults /tmp/kanz-mtls, 4222)
 #   Then: TEST_NATS_MTLS_URL=nats://localhost:<port> TEST_NATS_MTLS_CERT_DIR=<outdir> go test ./pkg/bus/
-#   Tear down: docker rm -f kanz-mtls-nats
+#   Tear down: docker rm -f kanz-mtls-nats && docker network rm kanz-mtls-net
 #
 # The port is a parameter because CI runs this BESIDE the plaintext broker the
 # rest of the suite uses: the TEST_NATS_URL tests prove bus semantics, these prove
@@ -41,6 +54,7 @@ set -euo pipefail
 OUT="${1:-/tmp/kanz-mtls}"
 PORT="${2:-4222}"
 CONTAINER="kanz-mtls-nats"
+NETWORK="kanz-mtls-net"
 TRUST_DOMAIN="kanz.internal"
 # The SPIFFE IDs infra/security/spire/registration.yaml would issue these pods:
 #   spiffeIDTemplate: spiffe://kanz.internal/ns/{namespace}/sa/{serviceAccountName}
@@ -55,6 +69,12 @@ CLIENT_ID="spiffe://${TRUST_DOMAIN}/ns/kanz-services/sa/risk-engine"
 # subscribe on that prefix plus $JS.API.>/$JS.ACK.>), so this pair is a genuine
 # service relationship rather than a test fixture.
 CONSUMER_ID="spiffe://${TRUST_DOMAIN}/ns/kanz-services/sa/archiver"
+# A THIRD identity: the bootstrap Job's. tenancy.yaml maps this SVID to the one
+# account permitted to create streams ("it CREATES the streams, so it..."), and
+# no service identity holds that. Provisioning the topology as risk-engine would
+# either fail or — worse, if tenants.conf were ever widened to let it through —
+# prove that a service can rewrite the spine's shape.
+BOOTSTRAP_ID="spiffe://${TRUST_DOMAIN}/ns/kanz-messaging/sa/nats-bootstrap"
 
 # Repo root, so this runs from anywhere.
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -105,6 +125,7 @@ mint() { # mint <name> <spiffe-id> [extra-sans]
 mint server "$SERVER_ID" "$SERVER_SANS"
 mint client "$CLIENT_ID"
 mint consumer "$CONSUMER_ID"
+mint bootstrap "$BOOTSTRAP_ID"
 # spiffe-helper writes the broker's SVID under these exact names (see the
 # nats-spiffe-helper ConfigMap); nats.conf reads them by path.
 cp server.pem svid.pem && cp server.key svid_key.pem
@@ -114,8 +135,19 @@ awk '/^  nats\.conf: \|/{f=1;next} f&&/^---/{exit} f{sub(/^    /,"");print}' \
   "$ROOT/infra/nats/nats.yaml" > nats.conf.orig
 awk '/^  tenants\.conf: \|/{f=1;next} f&&/^---/{exit} f{sub(/^    /,"");print}' \
   "$ROOT/infra/nats/tenancy.yaml" > tenants.conf
+awk '/^  bootstrap\.sh: \|/{f=1;next} f&&/^---/{exit} f{sub(/^    /,"");print}' \
+  "$ROOT/infra/nats/bootstrap-job.yaml" > bootstrap.sh
 test -s nats.conf.orig || { echo "FAIL: could not extract nats.conf from infra/nats/nats.yaml"; exit 1; }
 test -s tenants.conf   || { echo "FAIL: could not extract tenants.conf from infra/nats/tenancy.yaml"; exit 1; }
+test -s bootstrap.sh   || { echo "FAIL: could not extract bootstrap.sh from infra/nats/bootstrap-job.yaml"; exit 1; }
+
+# The nats-box image is READ from the Job, not repeated here, for the same reason
+# the scripts are extracted: a pinned version duplicated in a test harness drifts
+# from the one production runs, and the drift is invisible until the CLI's
+# behaviour differs on something that matters.
+NATS_BOX_IMAGE="$(awk '/image: *natsio\/nats-box/{sub(/^[[:space:]]*image:[[:space:]]*/,"");print;exit}' \
+  "$ROOT/infra/nats/bootstrap-job.yaml")"
+test -n "$NATS_BOX_IMAGE" || { echo "FAIL: could not read the nats-box image from infra/nats/bootstrap-job.yaml"; exit 1; }
 
 # Override 1: strip cluster{} (see the header). Fail loudly if the block's shape
 # changed — a silent no-op strip would hang the broker on quorum, and the cause
@@ -162,7 +194,16 @@ fi
 
 # --- 3. Run it ---------------------------------------------------------------
 docker rm -f "$CONTAINER" >/dev/null 2>&1 || true
-docker run -d --name "$CONTAINER" -p "${PORT}:4222" -e POD_NAME=nats-0 \
+# A user-defined network, and the alias is NOT arbitrary. The bootstrap container
+# in step 4 runs the `nats` CLI, which is not SPIFFE-aware and does ordinary DNS
+# hostname verification — so the host it dials must appear in the server SVID's
+# DNS SANs. `nats-0` is one that production's SPIRE registration also mints, so
+# the CLI verifies the broker exactly as it does in-cluster rather than against a
+# name invented for this script. The published port stays for the Go tests, which
+# dial localhost and are SPIFFE-aware.
+docker network create "$NETWORK" >/dev/null 2>&1 || true
+docker run -d --name "$CONTAINER" --network "$NETWORK" --network-alias nats-0 \
+  -p "${PORT}:4222" -e POD_NAME=nats-0 \
   ${PID_DIR:+--tmpfs "$PID_DIR:rw,mode=1777"} \
   -v "$(hostpath "$OUT/nats.conf"):/etc/nats/nats.conf:ro" \
   -v "$(hostpath "$OUT/tenants.conf"):/etc/nats/tenants.conf:ro" \
@@ -186,15 +227,93 @@ for _ in $(seq 1 30); do
     # "this instant" to a bounded window.
     for _ in $(seq 1 15); do
       if docker logs "$CONTAINER" 2>&1 | grep -q "TLS required for client connections"; then
-        echo "NATS up on nats://localhost:${PORT} (mTLS required), certs in $OUT"
-        exit 0
+        READY=1
+        break
       fi
       sleep 1
     done
-    echo "FAIL: broker is ready but NOT requiring TLS — the config did not take"
-    docker logs "$CONTAINER"
-    exit 1
+    if [ -z "${READY:-}" ]; then
+      echo "FAIL: broker is ready but NOT requiring TLS — the config did not take"
+      docker logs "$CONTAINER"
+      exit 1
+    fi
+    break
   fi
   sleep 1
 done
-echo "FAIL: NATS did not become ready"; docker logs "$CONTAINER"; exit 1
+[ -n "${READY:-}" ] || { echo "FAIL: NATS did not become ready"; docker logs "$CONTAINER"; exit 1; }
+
+# --- 4. Provision the topology by running PRODUCTION'S bootstrap script ------
+#
+# SEC-M3b — CAN THE TOPOLOGY EVEN BE PROVISIONED? bootstrap-job.yaml is the Job
+# that creates every stream, and it once dialed nats://nats:4222 with no certs:
+# against the production broker it was refused exactly like the services, so the
+# cluster could not create the streams those services then fail to find. It is
+# not a Go client, so the M3a wire does not apply — it runs the `nats` CLI, which
+# is not SPIFFE-aware and does ordinary DNS hostname verification (against a
+# URI-SAN-only cert it fails outright). It needs a client SVID via
+# NATS_CERT/KEY/CA and a URL that MATCHES a DNS SAN.
+#
+# RUN AS THE BOOTSTRAP SVID, which is the part worth being exact about. This step
+# lived in kanz-ci.yml and passed `client.pem` — risk-engine's SVID. That works,
+# but only incidentally: every service holds `$JS.API.>` because a JetStream
+# CONSUMER cannot function without it (see tenancy.yaml's SEC-M3e note), and
+# stream creation rides the same prefix. So the check proved that SOME client can
+# create streams, not that the bootstrap Job's identity can — and if
+# nats-bootstrap were dropped from __system__, it would have stayed green while
+# production could no longer provision anything. Using the real identity is the
+# difference between proving the path and proving a path.
+#
+# A broker without streams is also not a stand-in for the spine: JetStream
+# authorizes the publish and then answers "no response from stream", which reads
+# as a transport fault and is not one.
+docker run --rm --network "$NETWORK" \
+  -e NATS_URL="nats://nats-0:4222" \
+  -e NATS_CERT=/etc/nats-certs/svid.pem \
+  -e NATS_KEY=/etc/nats-certs/svid_key.pem \
+  -e NATS_CA=/etc/nats-certs/bundle.pem \
+  -e NATS_REPLICAS=1 \
+  -v "$(hostpath "$OUT/bootstrap.sh"):/scripts/bootstrap.sh:ro" \
+  -v "$(hostpath "$OUT/bootstrap.pem"):/etc/nats-certs/svid.pem:ro" \
+  -v "$(hostpath "$OUT/bootstrap.key"):/etc/nats-certs/svid_key.pem:ro" \
+  -v "$(hostpath "$OUT/bundle.pem"):/etc/nats-certs/bundle.pem:ro" \
+  "$NATS_BOX_IMAGE" sh /scripts/bootstrap.sh > bootstrap.log 2>&1 || {
+    echo "FAIL: production's bootstrap script did not complete over mTLS"
+    cat bootstrap.log
+    exit 1
+  }
+
+# THE EXPECTED STREAMS ARE DERIVED FROM THE SCRIPT, NEVER LISTED HERE. A copy of
+# the stream names in this harness is the same drift the extraction above exists
+# to prevent: a stream added to bootstrap-job.yaml would be provisioned and go
+# unchecked, and the first thing to notice would be a service finding its subject
+# unbound. Deriving it means a new stream is required here the moment it is added
+# there.
+EXPECTED="$(awk '/^[[:space:]]*ensure_stream[[:space:]]+[A-Z]/{print $2}' bootstrap.sh | sort -u)"
+# Non-vacuity: an extraction that yields no stream names would make every check
+# below trivially true, and the harness would report success having proven none.
+test -n "$EXPECTED" || { echo "FAIL: parsed no stream names out of bootstrap.sh — the check would be vacuous"; exit 1; }
+
+docker run --rm --network "$NETWORK" \
+  -e NATS_CERT=/etc/nats-certs/svid.pem \
+  -e NATS_KEY=/etc/nats-certs/svid_key.pem \
+  -e NATS_CA=/etc/nats-certs/bundle.pem \
+  -v "$(hostpath "$OUT/bootstrap.pem"):/etc/nats-certs/svid.pem:ro" \
+  -v "$(hostpath "$OUT/bootstrap.key"):/etc/nats-certs/svid_key.pem:ro" \
+  -v "$(hostpath "$OUT/bundle.pem"):/etc/nats-certs/bundle.pem:ro" \
+  "$NATS_BOX_IMAGE" nats --server nats://nats-0:4222 stream ls > streams.txt 2>&1 || {
+    echo "FAIL: could not list streams over mTLS after bootstrap"; cat streams.txt; exit 1; }
+
+MISSING=""
+for s in $EXPECTED; do
+  grep -qw "$s" streams.txt || MISSING="$MISSING $s"
+done
+[ -z "$MISSING" ] || {
+  echo "FAIL: bootstrap ran but these streams are absent:$MISSING"
+  echo "--- stream ls ---"; cat streams.txt
+  echo "--- bootstrap log ---"; cat bootstrap.log
+  exit 1
+}
+
+echo "NATS up on nats://localhost:${PORT} (mTLS required), certs in $OUT"
+echo "Topology provisioned over mTLS by production's bootstrap script: $(echo $EXPECTED | wc -w) streams"
