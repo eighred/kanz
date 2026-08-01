@@ -88,7 +88,13 @@ func TestTestConnectionDeadlinesNestOutward(t *testing.T) {
 }
 
 // tuiClientFile builds the TUI's one HTTP client; every Test Connection travels on it.
-const tuiClientFile = "internal/tui/universe/gatewaysource.go"
+//
+// It moved from internal/tui/universe/gatewaysource.go when the gateway transport
+// was promoted to its own package for a second TUI surface (#84). The guard below
+// caught the move by failing on a file that no longer constructs a client, which
+// is what its non-vacuity arm is for — the client did not stop existing, it
+// relocated, and a guard pointed at the old address would have gone quietly green.
+const tuiClientFile = "internal/tui/gateway/client.go"
 
 // TestTUIHTTPClientCarriesNoTimeoutOfItsOwn closes the hole the test above cannot see.
 //

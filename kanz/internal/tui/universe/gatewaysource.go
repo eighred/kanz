@@ -1,14 +1,10 @@
 package universe
 
 import (
-	"bytes"
 	"context"
-	"crypto/hmac"
-	"crypto/sha256"
-	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"net/url"
 	"strings"
@@ -17,6 +13,8 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	operatorpb "github.com/eighred/kanz/kanz-schemas-go/operator/v1"
+
+	"github.com/eighred/kanz/internal/tui/gateway"
 )
 
 // gatewaySource drives the estate through the api-gateway's /v1/control routes
@@ -37,12 +35,7 @@ import (
 // RESPONSES ARE protojson INTO THE GENERATED TYPES, not into hand-written structs.
 // The gateway forwards the operator's own messages, so decoding them into anything
 // else would be a second definition of the same contract, free to drift.
-type gatewaySource struct {
-	base    string
-	token   string
-	signKey []byte
-	hc      *http.Client
-}
+type gatewaySource struct{ c *gateway.Client }
 
 // GatewayConfig is what the TUI needs to reach the control plane. All three come
 // from flags/env in main.go — none of them is a kubeconfig.
@@ -65,52 +58,20 @@ type GatewayConfig struct {
 }
 
 func NewGatewaySource(cfg GatewayConfig) (*gatewaySource, error) {
-	if strings.TrimSpace(cfg.BaseURL) == "" {
-		return nil, fmt.Errorf("no gateway URL: set --gateway-url or KANZ_GATEWAY_URL " +
-			"(e.g. https://api.eighred.com). The TUI reaches the estate through the API " +
-			"gateway; it does not talk to the cluster directly")
+	c, err := gateway.New(gateway.Config{
+		BaseURL:       cfg.BaseURL,
+		Token:         cfg.Token,
+		SigningSecret: cfg.SigningSecret,
+	})
+	if err != nil {
+		return nil, err
 	}
-	u, err := url.Parse(cfg.BaseURL)
-	if err != nil || u.Scheme == "" || u.Host == "" {
-		return nil, fmt.Errorf("gateway URL %q is not a valid absolute URL (want scheme://host)", cfg.BaseURL)
-	}
-	if strings.TrimSpace(cfg.Token) == "" {
-		return nil, fmt.Errorf("no token: set --token-file or KANZ_TOKEN. The gateway " +
-			"authenticates a PERSON — this tool holds no authority of its own")
-	}
-	return &gatewaySource{
-		base:    strings.TrimRight(cfg.BaseURL, "/"),
-		token:   cfg.Token,
-		signKey: []byte(cfg.SigningSecret),
-		// NO Timeout ON THIS CLIENT, ON PURPOSE. Every call site sets an explicit
-		// context deadline, and http.Client.Timeout is enforced INDEPENDENTLY of the
-		// request context: a client with both bounds is bounded by min(the two), so the
-		// smaller silently wins and the layer ordering can no longer be read off the
-		// constants that declare it. That is not theoretical — a 30s client timeout sat
-		// underneath the 60s the operator needs to run a probe Job, so Test Connection
-		// died client-side reporting "Client.Timeout exceeded while awaiting headers"
-		// and pointed the operator at the gateway and the network instead of the host
-		// they were probing. The per-call context is the single source of truth for how
-		// long a call may take; test/arch asserts this literal stays bare.
-		hc: &http.Client{},
-	}, nil
+	return &gatewaySource{c: c}, nil
 }
 
 // call performs one control-plane request. req may be nil for bodiless calls; resp
 // may be nil when the response is not needed.
 func (g *gatewaySource) call(ctx context.Context, method, path string, req, resp proto.Message) error {
-	// The HTTP client deliberately carries no Timeout of its own, so the caller's context is
-	// the ONLY thing bounding this request. A call site that forgets a deadline would
-	// therefore hang the TUI forever on an unresponsive gateway — the worst failure mode in
-	// an operator tool, because it looks like a frozen program rather than an error. Refuse
-	// it instead: this is a programming mistake, and it should be loud and immediate the
-	// first time it is exercised rather than a hang someone has to bisect.
-	if _, ok := ctx.Deadline(); !ok {
-		return fmt.Errorf("internal: %s %s was called with no context deadline; every "+
-			"control-plane call must set one (the HTTP client sets no timeout of its own)",
-			method, path)
-	}
-
 	var body []byte
 	if req != nil {
 		var err error
@@ -120,34 +81,19 @@ func (g *gatewaySource) call(ctx context.Context, method, path string, req, resp
 		}
 	}
 
-	httpReq, err := http.NewRequestWithContext(ctx, method, g.base+path, bytes.NewReader(body))
+	// Transport, auth, signing and the deadline rule live in internal/tui/gateway
+	// so a second TUI surface cannot arrive with its own copy of them. What stays
+	// here is what is genuinely the CONTROL PLANE's: the protojson codec over the
+	// operator's generated types, and the wording below — a 404 here means the
+	// gateway was started without API_GATEWAY_OPERATOR_ADDR, which is true of no
+	// other surface.
+	payload, err := g.c.Do(ctx, method, path, body)
 	if err != nil {
+		var se *gateway.StatusError
+		if errors.As(err, &se) {
+			return gatewayError(se.Status, se.Body)
+		}
 		return err
-	}
-	httpReq.Header.Set("Authorization", "Bearer "+g.token)
-	if body != nil {
-		httpReq.Header.Set("Content-Type", "application/json")
-	}
-	// X-API-Version is deliberately NOT sent. The gateway validates it only when
-	// present, and the constant lives in an internal/ package this binary cannot
-	// import — sending a hardcoded copy would be a second spelling of the version,
-	// free to drift into a 406 that looks like an outage.
-	if len(g.signKey) > 0 {
-		httpReq.Header.Set("X-Signature", sign(g.signKey, method, path, body))
-	}
-
-	res, err := g.hc.Do(httpReq)
-	if err != nil {
-		return fmt.Errorf("gateway unreachable at %s: %w", g.base, err)
-	}
-	defer func() { _ = res.Body.Close() }()
-
-	payload, err := io.ReadAll(io.LimitReader(res.Body, 1<<20))
-	if err != nil {
-		return fmt.Errorf("read response: %w", err)
-	}
-	if res.StatusCode < 200 || res.StatusCode > 299 {
-		return gatewayError(res.StatusCode, payload)
 	}
 	if resp == nil || len(payload) == 0 {
 		return nil
@@ -159,15 +105,6 @@ func (g *gatewaySource) call(ctx context.Context, method, path string, req, resp
 		return fmt.Errorf("decode response: %w", err)
 	}
 	return nil
-}
-
-// sign reproduces the gateway's Signing middleware: HMAC-SHA256 over
-// method \n path \n body, base64 raw-url encoded.
-func sign(key []byte, method, path string, body []byte) string {
-	mac := hmac.New(sha256.New, key)
-	mac.Write([]byte(method + "\n" + path + "\n"))
-	mac.Write(body)
-	return base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
 }
 
 // gatewayError turns a non-2xx into a message an operator can act on WITHOUT
