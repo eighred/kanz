@@ -213,6 +213,31 @@ spec:
             # adapter — which holds the API credential — names a different account than
             # this line does. A typo here used to post fills to one fund's ledger rows
             # while the exchange debited another's, and nothing could see it.
+            #
+            # EVERY MIC LISTED HERE MUST HAVE ITS ADAPTER DEPLOYED. STRIP THE ONES
+            # YOU ARE NOT RUNNING.
+            #
+            # This line is a two-way contract, and the comment above only states one
+            # direction. The other: at startup the OMS DIALS every endpoint listed
+            # here and calls venue.v1 Describe on it (services/oms/cmd/oms/venues.go).
+            # An adapter that is not deployed cannot answer, so the OMS REFUSES TO
+            # START — after a bounded 30s per venue — with
+            #
+            #   venue XOKX at venue-okx.kanz-services.svc:9000: cannot ask the adapter
+            #   which exchange account it holds (is it running?)
+            #
+            # and the pod crash-loops until the entry is removed or the adapter is
+            # deployed. That is deliberate and correct: an endpoint the OMS cannot
+            # reach is an account it cannot confirm, and booting without it would
+            # route those orders nowhere. It is loud, not silent — but it is only
+            # obvious to someone who already knows, which is why it is written here
+            # rather than in a runbook. The runbook that used to carry this
+            # instruction was deleted, and the instruction went with it (#119).
+            #
+            # There is no arch guard for this because there is nothing static to
+            # check: which adapters a given environment runs is a deployment fact,
+            # not a repository one. The startup Describe IS the guard, and it fails
+            # closed.
             - { name: OMS_VENUE_ENDPOINTS, value: "XBIN/binance-main=venue-binance.kanz-services.svc:9000,XOKX/okx-sub-1=venue-okx.kanz-services.svc:9000" }
             # Deny-by-default for the adapter's account CLAIM. true ⇒ the OMS refuses to
             # start on any adapter that has not PROVED its account against the exchange
