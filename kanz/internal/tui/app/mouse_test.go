@@ -162,6 +162,15 @@ func TestHelpTextOnlyNamesKeysThatAreBound(t *testing.T) {
 	if strings.Contains(strings.ToLower(help), "red") {
 		t.Error("the help overlay still describes bus panes by colour — the shell is black and white")
 	}
+
+	// MOUSE REPORTING TOOK DRAG-TO-SELECT AWAY (#200), SO THE OVERLAY SAYS SO
+	// (#201). Without it an operator reads the missing selection as "I cannot
+	// copy from kanz", and the help overlay is the only place they will look.
+	// Asserted here rather than trusted to survive an edit of the copy.
+	if !strings.Contains(help, "Shift") {
+		t.Error("the help overlay does not say how to select text — mouse reporting means the " +
+			"terminal no longer handles drag-to-select, and nothing else tells the operator")
+	}
 }
 
 // h and l are NOT bound any more: they are printable, and a printable global is
