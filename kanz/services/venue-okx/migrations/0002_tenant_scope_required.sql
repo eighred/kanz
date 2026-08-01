@@ -40,42 +40,58 @@ BEGIN
   RETURN t;
 END $fn$;
 
--- Rewrite every RLS policy in this database to use it, and re-point the tenant_id
--- DEFAULT at it so an INSERT with no scope errors with the same message instead of
--- tripping a NOT NULL violation nobody can read.
+-- THIS MIGRATION TOUCHES VENUE-OKX'S OWN TABLES AND NOTHING ELSE (#227).
 --
--- It drops EVERY policy on each table first, not just one by name: a leftover
+-- It used to discover its targets: `SELECT relname FROM pg_class WHERE relrowsecurity
+-- AND relnamespace = current_schema()`, then drop and recreate every policy it found.
+-- Eight services shipped a byte-identical copy of that loop. In a schema holding more
+-- than one service's tables, whichever copy ran LAST rewrote all of them — including
+-- policies that were deliberately STRONGER than the generic one below.
+--
+-- Reproduced against Postgres 16 with the real migration files: after accounting/0003
+-- installed
+--
+--     WITH CHECK (tenant_id = app_current_tenant()
+--             AND venue_account_id = app_current_venue_account())
+--
+-- wealth's copy of this loop reduced it to `WITH CHECK (tenant_id = app_current_tenant())`.
+-- Both wealth migrations reported success. No error, no warning, no notice. The
+-- collateral-segregation guard that accounting/0003 exists to enforce — the one keeping
+-- one portfolio's margin from being liquidated for another's drawdown — was gone, and
+-- the only way to notice was to go looking in pg_policies afterwards.
+--
+-- A migration cannot know that a policy it did not write is weaker than its own. So it
+-- does not get to decide: the table list is explicit, it is this service's, and a table
+-- another service owns is not in it. Same FOREACH-over-a-literal-array shape the
+-- CREATE TABLE migrations here already use.
+--
+-- Policies on THESE tables are still dropped wholesale rather than by name: a leftover
 -- permissive policy would be OR'd with this one and would quietly restore the silent
--- empty read.
+-- empty read. That enumeration is scoped to a named table and is not discovery.
 DO $$
 DECLARE
-  t record;
+  t text;
   p record;
 BEGIN
-  FOR t IN
-    SELECT c.relname AS tbl
-    FROM pg_class c
-    JOIN pg_namespace n ON n.oid = c.relnamespace
-    WHERE c.relrowsecurity AND n.nspname = current_schema()
-  LOOP
+  FOREACH t IN ARRAY ARRAY['venue_orders'] LOOP
     FOR p IN
       SELECT policyname FROM pg_policies
-      WHERE schemaname = current_schema() AND tablename = t.tbl
+      WHERE schemaname = current_schema() AND tablename = t
     LOOP
-      EXECUTE format('DROP POLICY %I ON %I', p.policyname, t.tbl);
+      EXECUTE format('DROP POLICY %I ON %I', p.policyname, t);
     END LOOP;
 
     EXECUTE format($f$
       CREATE POLICY tenant_isolation ON %I
         USING (tenant_id = app_current_tenant())
         WITH CHECK (tenant_id = app_current_tenant())
-    $f$, t.tbl);
+    $f$, t);
 
     IF EXISTS (
       SELECT 1 FROM information_schema.columns
-      WHERE table_schema = current_schema() AND table_name = t.tbl AND column_name = 'tenant_id'
+      WHERE table_schema = current_schema() AND table_name = t AND column_name = 'tenant_id'
     ) THEN
-      EXECUTE format('ALTER TABLE %I ALTER COLUMN tenant_id SET DEFAULT app_current_tenant()', t.tbl);
+      EXECUTE format('ALTER TABLE %I ALTER COLUMN tenant_id SET DEFAULT app_current_tenant()', t);
     END IF;
   END LOOP;
 END $$;
