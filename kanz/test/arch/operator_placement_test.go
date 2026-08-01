@@ -158,8 +158,16 @@ func decodeOperatorPlacement(t *testing.T) []placementDoc {
 // provisionSpecFile builds, in Go, the two Jobs the operator creates at runtime.
 const provisionSpecFile = "services/operator/internal/provision/provision.go"
 
-// provisionPodSpecs are the pod specs that file builds, and why each must be pinned.
-var provisionPodSpecs = []struct {
+// pinnedPodSpecs are the pod specs that MUST carry the control-plane pin, and why.
+//
+// ONE ENTRY, AND THAT IS THE RULING RATHER THAN AN OVERSIGHT (OPS-M2f-a, #76).
+// probeJobSpec used to be here with a note saying its placement was "OPS-M2f-a's open
+// question, not yet decided". It is decided: the Job holding the fleet-admission
+// credential stays pinned, the Job holding nothing is unpinned so Test Connection does
+// not become unschedulable the moment the k3s server is drained.
+// TestProbeJobIsNotPinned below asserts the other half, so unpinning is a property with
+// a guard of its own rather than merely the absence of one.
+var pinnedPodSpecs = []struct {
 	fn  string
 	why string
 }{
@@ -167,9 +175,6 @@ var provisionPodSpecs = []struct {
 		"the cluster-admission token. Unpinned it runs on an arbitrary worker, possibly one just " +
 		"provisioned from the Add Node form, which copies the credential that admits the fleet " +
 		"onto a member of that fleet"},
-	{"probeJobSpec", "where the probe Job may run is OPS-M2f-a's open question, not yet decided; " +
-		"this pin holds the current placement steady against unreviewed drift until that decision " +
-		"is made, not because of any registry credential gap — OPS-M2f-b already closed that one"},
 }
 
 // TestProvisioningJobsArePinnedToControlPlane is the same rule as the Deployment guard
@@ -232,8 +237,8 @@ func TestProvisioningJobsArePinnedToControlPlane(t *testing.T) {
 			provisionSpecFile, tol, controlPlaneRoleLabel)
 	}
 
-	// --- both pod specs must actually USE them ---
-	for _, spec := range provisionPodSpecs {
+	// --- the credential-carrying pod spec must actually USE them ---
+	for _, spec := range pinnedPodSpecs {
 		t.Run(spec.fn, func(t *testing.T) {
 			fields := podSpecFields(t, fset, f, spec.fn)
 			if fields["NodeSelector"] != "controlPlaneOnly" {
@@ -437,4 +442,45 @@ func exprText(t *testing.T, fset *token.FileSet, e ast.Expr) string {
 		t.Fatalf("render expression: %v", err)
 	}
 	return b.String()
+}
+
+// TestProbeJobIsNotPinned is the other half of OPS-M2f-a's ruling (#76), and it exists
+// because "unpinned" is otherwise the ABSENCE of a line — which no test can notice
+// being added back.
+//
+// The probe Job carries no credential of any kind, so credential confinement never
+// applied to it, and its only other justification (the registry gap) was retired by
+// OPS-M2f-b. Pinned, it made Test Connection unschedulable the moment the k3s server
+// was drained: a reachability probe that cannot run while you drain a node is
+// unavailable exactly when an operator needs it.
+//
+// THE TOLERATION MUST STAY, and that is the subtle half. It is not a pin — it grants
+// permission, never preference. Without it, an estate whose control plane is tainted
+// and which has no other node (a single-node k3s rig, kubeadm's default posture) could
+// not schedule the probe at all: removing the selector would widen placement in
+// principle and narrow it to nothing in practice.
+func TestProbeJobIsNotPinned(t *testing.T) {
+	path := filepath.Join(moduleRoot(t), filepath.FromSlash(provisionSpecFile))
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, path, nil, 0)
+	if err != nil {
+		t.Fatalf("parse %s: %v", path, err)
+	}
+	fields := podSpecFields(t, fset, f, "probeJobSpec")
+
+	if sel, ok := fields["NodeSelector"]; ok {
+		t.Errorf("the corev1.PodSpec built by probeJobSpec sets NodeSelector to %q.\n\n"+
+			"The probe Job is deliberately UNPINNED (#76): it carries no credential, so "+
+			"confinement never applied to it, and pinning it made Test Connection "+
+			"unschedulable the moment the k3s server was drained — the eviction deadlock this "+
+			"was supposed to remove. If a placement constraint is genuinely needed here again, "+
+			"the reason belongs in provision.go beside it and in this test.", sel)
+	}
+	if fields["Tolerations"] != "tolerateControlPlane" {
+		t.Errorf("the corev1.PodSpec built by probeJobSpec sets Tolerations to %q, want the "+
+			"shared tolerateControlPlane.\n\nThe toleration is NOT the pin and must survive "+
+			"unpinning: it grants permission rather than preference. Without it, a tainted "+
+			"control plane with no other node cannot schedule the probe at all — which turns "+
+			"widening its placement into eliminating it.", fields["Tolerations"])
+	}
 }

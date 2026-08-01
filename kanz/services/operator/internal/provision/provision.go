@@ -74,12 +74,16 @@ const (
 //
 // Credential confinement above is what still holds THE PROVISIONING JOB'S pin —
 // jobSpec mounts the bootstrap-key Secret, so the first reason still applies to it in
-// full. It does not apply to THE PROBE JOB. probeJobSpec carries no credential of any
-// kind (see its own comment), so the registry reason was the only thing that ever
-// justified pinning it, and that reason is now gone. Nothing in this file currently
-// justifies the probe's pin. It is retained anyway, unchanged, because retiring a
-// placement is OPS-M2f-a's subject and this branch is a credential change only — see
-// the comment at probeJobSpec's NodeSelector for what that means and does not mean.
+// full, and controlPlaneOnly is ONLY used by jobSpec now.
+//
+// IT NEVER APPLIED TO THE PROBE JOB, AND THAT PIN IS GONE (OPS-M2f-a, #76).
+// probeJobSpec carries no credential of any kind, so the registry reason was the only
+// thing that ever justified pinning it, and OPS-M2f-b retired that. Pinned, Test
+// Connection became unschedulable the moment the k3s server was drained — the eviction
+// deadlock OPS-M2e moved rather than removed. The owner's ruling: the Job holding
+// K3S_TOKEN stays pinned, because the fleet-admission credential must not be copied
+// onto a member of the fleet it admits; the Job holding nothing does not. See
+// probeJobSpec for the whole reasoning, including why its toleration stays.
 //
 // The toleration grants nothing on THIS cluster: the k3s control-plane node carries no
 // taints today, so the selector alone places both pods. It is carried anyway for the
@@ -568,20 +572,33 @@ func (p *Provisioner) probeJobSpec(name, ip string, port int32) *batchv1.Job {
 				Spec: corev1.PodSpec{
 					ServiceAccountName: "kanz-node-provisioner",
 					RestartPolicy:      corev1.RestartPolicyNever,
-					// Identical placement to jobSpec, from the same shared values, but this pod
-					// carries no credential of any kind — no bootstrap-key Secret, no
-					// imagePullSecrets of its own — so credential confinement never justified
-					// pinning it. Its original and only justification was the registry one
-					// recorded in controlPlaneOnly's comment: before OPS-M2f-b the estate held
-					// no registry credential, so a probe landing on a node without the
+					// NOT PINNED — DELIBERATELY, AND THIS IS OPS-M2f-a's RULING (#76).
+					//
+					// This pod carries NO CREDENTIAL of any kind: no bootstrap-key Secret, no
+					// K3S_TOKEN, no imagePullSecrets of its own. So the credential-confinement
+					// reason that pins jobSpec — see controlPlaneOnly — never applied to it.
+					//
+					// Its only justification was the registry one: before OPS-M2f-b the estate
+					// held no registry credential, so a probe landing on a node without the
 					// pre-loaded image died in ErrImagePull and reported a healthy host
-					// unreachable. That reason is now retired — the ServiceAccount carries the
-					// ghcr-pull credential and this pod inherits it too, whether pinned here or
-					// not. So this pin is not earning anything today. It stays only because
-					// removing it is OPS-M2f-a's job, not this branch's; do not read this
-					// selector as still justified.
-					NodeSelector: controlPlaneOnly,
-					Tolerations:  tolerateControlPlane,
+					// unreachable — a false verdict about someone's node caused entirely by
+					// where the pod ran. That reason is retired: the kanz-node-provisioner
+					// ServiceAccount carries the ghcr-pull credential and this pod inherits it
+					// wherever it lands.
+					//
+					// Unpinning is the POINT rather than a tidy-up. Pinned, Test Connection
+					// became unschedulable the moment the k3s server was drained — the eviction
+					// deadlock OPS-M2e moved rather than removed. A reachability probe that
+					// cannot run while you are draining a node is unavailable exactly when an
+					// operator is most likely to need it.
+					//
+					// THE TOLERATION STAYS, and dropping it would be the subtle mistake here. It
+					// is not a pin — it grants permission, never preference. Without it, an
+					// estate whose control plane is tainted and which has no other node (a
+					// single-node k3s rig, kubeadm's default posture) could not schedule the
+					// probe at all: removing the selector would have widened placement in
+					// principle and narrowed it to nothing in practice.
+					Tolerations: tolerateControlPlane,
 					SecurityContext: &corev1.PodSecurityContext{
 						RunAsNonRoot: ptr(true), RunAsUser: ptr64(65532),
 						// FSGroup matches RunAsUser as in jobSpec. Nothing here depends on it today
