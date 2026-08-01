@@ -181,9 +181,23 @@ func sortedLevels(side map[string]*big.Rat, descending bool, depth int) []*marke
 	if depth > 0 && len(all) > depth {
 		all = all[:depth]
 	}
-	out := make([]*marketpb.PriceLevel, len(all))
-	for i, l := range all {
-		out[i] = &marketpb.PriceLevel{Price: dec.ToProto(l.price), Size: dec.ToProto(l.size)}
+	// Same rule as the venue ingress that feeds this book (#94/#189): scaled, and
+	// a level that still will not convert is dropped rather than carried wrong.
+	//
+	// This path is narrower than that one — it builds the published
+	// OrderBookSnapshot FACT, not the exact read seam pkg/alpha sizes against — so
+	// a wrapped level here misinforms whoever consumes the snapshot rather than
+	// pricing an order. It takes the same action anyway: two conversions of the
+	// same book that disagreed about which levels exist would be worse than either
+	// rule alone, because the published book would stop matching the traded one.
+	out := make([]*marketpb.PriceLevel, 0, len(all))
+	for _, l := range all {
+		price, okP := dec.ToProtoScaled(l.price)
+		size, okS := dec.ToProtoScaled(l.size)
+		if !okP || !okS {
+			continue
+		}
+		out = append(out, &marketpb.PriceLevel{Price: price, Size: size})
 	}
 	return out
 }

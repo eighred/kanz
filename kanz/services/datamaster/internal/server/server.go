@@ -227,6 +227,18 @@ func (s *Server) handleOverride(w http.ResponseWriter, r *http.Request) {
 	// exactly here and then rounded by every surface that shows or publishes it —
 	// an audit record whose value nobody would ever see. Refuse it rather than keep
 	// a number that disagrees with itself.
+	//
+	// THIS IS AN ASSERTION, NOT A CONVERSION — DO NOT "FIX" IT TO ToProtoScaled
+	// (#94/#189). The fixed-scale round trip IS the question being asked: does this
+	// operator-chosen price survive the platform's scale exactly? ToProtoScaled
+	// raises the exponent instead of failing, so an over-precise price would round
+	// to something representable and PASS — the precise input this check exists to
+	// refuse. The sweep that moved the capital paths off the wrapping ToProto left
+	// this site alone deliberately; changing it deletes a validation while looking
+	// like consistency.
+	//
+	// It is fail-closed against the wrap too, incidentally: a value large enough to
+	// wrap fails this comparison and is refused.
 	if dec.FromProto(dec.ToProto(price)).Cmp(price) != 0 {
 		writeJSON(w, http.StatusBadRequest, map[string]string{
 			"error": "chosen_price carries more precision than the platform's decimal scale and cannot be represented exactly",

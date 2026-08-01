@@ -276,7 +276,29 @@ func binanceLevels(raw [][]string) []*marketpb.PriceLevel {
 		if !okP || !okS {
 			continue // unparseable level — drop it rather than guess a price
 		}
-		out = append(out, &marketpb.PriceLevel{Price: dec.ToProto(price), Size: dec.ToProto(size)})
+		// SCALED, AND A LEVEL THAT STILL WILL NOT CONVERT IS DROPPED (#94/#189).
+		//
+		// This is the venue INGRESS, upstream of the book, and the book's read seam
+		// hands exact rationals to pkg/alpha — so a wrong number here is not an
+		// observability problem, it prices and sizes a real order. dec.ToProto
+		// wrapped above roughly 92.2 billion units at scale 8: implausible for a
+		// price, ORDINARY for a size, since a depth level holding trillions of
+		// tokens is normal on this venue. A wrapped size is worse than a missing
+		// one because it is perfectly representable — the refusal added to
+		// translate.toDec (#187) cannot catch it, and nothing downstream can tell
+		// it from real liquidity.
+		//
+		// ToProtoScaled converts those levels correctly, so the drop below is only
+		// the genuinely unrepresentable residual, and it takes the SAME action as
+		// the unparseable case above: a level this code cannot read is a level the
+		// book must not carry. That understates depth, which sizes orders small —
+		// the safe direction.
+		priceD, okPD := dec.ToProtoScaled(price)
+		sizeD, okSD := dec.ToProtoScaled(size)
+		if !okPD || !okSD {
+			continue
+		}
+		out = append(out, &marketpb.PriceLevel{Price: priceD, Size: sizeD})
 	}
 	return out
 }

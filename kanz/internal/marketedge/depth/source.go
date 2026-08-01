@@ -102,8 +102,8 @@ func (s *SimSource) Recv(ctx context.Context) (Update, error) {
 			Mic:                "SIM",
 			EventTime:          timestamppb.New(time.Now().UTC()),
 			LastUpdateSequence: s.seq,
-			Bids:               []*marketpb.PriceLevel{s.level(s.bidPx(1), 2), s.level(s.bidPx(2), 3)},
-			Asks:               []*marketpb.PriceLevel{s.level(s.askPx(1), 2), s.level(s.askPx(2), 3)},
+			Bids:               levels(s.level(s.bidPx(1), 2), s.level(s.bidPx(2), 3)),
+			Asks:               levels(s.level(s.askPx(1), 2), s.level(s.askPx(2), 3)),
 		}}, nil
 	}
 
@@ -116,9 +116,9 @@ func (s *SimSource) Recv(ctx context.Context) (Update, error) {
 	prev := s.seq
 	s.seq++
 	side := s.bidPx(1)
-	bids, asks := []*marketpb.PriceLevel{s.level(side, int64(1+s.next()%5))}, []*marketpb.PriceLevel(nil)
+	bids, asks := levels(s.level(side, int64(1+s.next()%5))), []*marketpb.PriceLevel(nil)
 	if s.next()%2 == 0 {
-		bids, asks = nil, []*marketpb.PriceLevel{s.level(s.askPx(1), int64(1+s.next()%5))}
+		bids, asks = nil, levels(s.level(s.askPx(1), int64(1+s.next()%5)))
 	}
 	return Update{Delta: &marketpb.OrderBookDelta{
 		InstrumentId:        s.instrumentID,
@@ -136,8 +136,30 @@ func (s *SimSource) Recv(ctx context.Context) (Update, error) {
 func (s *SimSource) bidPx(n int64) *big.Rat { return new(big.Rat).Sub(s.mid, big.NewRat(n, 1)) }
 func (s *SimSource) askPx(n int64) *big.Rat { return new(big.Rat).Add(s.mid, big.NewRat(n, 1)) }
 
+// level builds one synthetic depth level. ok=false is unreachable in practice —
+// prices are derived from a mid and sizes are small int64s — but this uses the
+// same magnitude-preserving conversion as the real venue sources (#94/#189) so
+// the sim cannot become the one place a wrapped level is still possible, and so
+// a reader comparing the three sources finds one rule rather than two.
 func (s *SimSource) level(price *big.Rat, size int64) *marketpb.PriceLevel {
-	return &marketpb.PriceLevel{Price: dec.ToProto(price), Size: dec.ToProto(big.NewRat(size, 1))}
+	p, okP := dec.ToProtoScaled(price)
+	sz, okS := dec.ToProtoScaled(big.NewRat(size, 1))
+	if !okP || !okS {
+		return nil // unreachable for synthetic values; levels() drops it
+	}
+	return &marketpb.PriceLevel{Price: p, Size: sz}
+}
+
+// levels drops any level that would not convert, so the sim takes the same
+// action as binanceLevels and okxLevels rather than emitting a nil entry.
+func levels(ls ...*marketpb.PriceLevel) []*marketpb.PriceLevel {
+	out := make([]*marketpb.PriceLevel, 0, len(ls))
+	for _, l := range ls {
+		if l != nil {
+			out = append(out, l)
+		}
+	}
+	return out
 }
 
 var _ DepthSource = (*SimSource)(nil)

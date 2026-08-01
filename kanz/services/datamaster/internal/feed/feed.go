@@ -93,7 +93,20 @@ func NormalizePrice(a pricing.Arbitration, asOf time.Time) *marketpb.MarketDataE
 	if !a.HasPrice {
 		return nil
 	}
-	p := dec.ToProto(a.Chosen)
+	// Magnitude-preserving, and nil when it will not convert (#94/#189). The
+	// fixed-scale ROUNDING described above is deliberate and unchanged —
+	// ToProtoScaled emits at that same scale for every value that fits it, so this
+	// is behaviour-identical for any real price. It differs only where ToProto
+	// wrapped, and a wrapped mark is not a rounded one: it is a different price,
+	// published as consensus on the market plane.
+	//
+	// nil is the established "no price this tick" answer (the !HasPrice case above)
+	// and every caller already handles it. It must not become zero — a zero mark
+	// reads as free, not as missing.
+	p, ok := dec.ToProtoScaled(a.Chosen)
+	if !ok {
+		return nil
+	}
 	ev := &marketpb.MarketDataEvent{
 		InstrumentId: a.InstrumentID,
 		Mic:          "COMPOSITE",
