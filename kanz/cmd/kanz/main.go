@@ -130,7 +130,16 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	_, err = tea.NewProgram(model, tea.WithAltScreen(), tea.WithContext(ctx)).Run()
+	// WithMouseCellMotion turns on click reporting, which is what the tab bar and
+	// the input field resolve through bubblezone.
+	//
+	// THE COST IS REAL AND WORTH STATING: with mouse reporting on, the terminal
+	// stops handling drag-to-select itself, so copying text out of the shell needs
+	// the terminal's own modifier (shift in most, option in iTerm2). An operator
+	// who does not know that reads it as "I cannot copy from kanz". The help
+	// overlay names click as a gesture, which is the closest this gets to telling
+	// them; a fuller answer belongs wherever the shell documents its keys.
+	_, err = tea.NewProgram(model, tea.WithAltScreen(), tea.WithMouseCellMotion(), tea.WithContext(ctx)).Run()
 	return err
 }
 

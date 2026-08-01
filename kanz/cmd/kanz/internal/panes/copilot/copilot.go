@@ -15,6 +15,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/eighred/kanz/internal/tui/pane"
@@ -60,7 +61,19 @@ type Pane struct {
 	repl Dispatcher
 	out  *Buffer
 
-	input string
+	// input is bubbles/textinput rather than a hand-rolled string.
+	//
+	// The hand-rolled version handled exactly two keys — enter and backspace —
+	// and appended anything else that was a single rune. That is fine until an
+	// operator uses a cursor: left/right, home/end, ctrl+w, ctrl+u and paste all
+	// did nothing, and a mistyped URL in a /login had to be deleted one character
+	// at a time. It also trimmed runes correctly only because someone remembered
+	// to; the component does it by construction.
+	//
+	// It is Blur()red by default and Focus()ed only through SetFocused, so the
+	// shell's mode stays the single source of truth for whether this pane is
+	// taking text (see SetFocused).
+	input textinput.Model
 	// busy gates a second Dispatch while one is in flight. The REPL holds a
 	// session token and a gateway client and is not safe for concurrent use, and
 	// an operator pressing enter twice is not an error to report — it is a
@@ -80,7 +93,12 @@ type doneMsg struct{ stop bool }
 // New builds the pane. out is the writer the REPL was constructed with, so this
 // pane renders exactly what the REPL printed.
 func New(repl Dispatcher, out *Buffer) *Pane {
-	return &Pane{repl: repl, out: out}
+	ti := textinput.New()
+	ti.Prompt = "" // the pane draws its own "kanz› ", so the component adds none
+	// No Placeholder: the unfocused state already says "press i to type", and two
+	// hints in one line is how a prompt starts looking like output.
+	ti.Blur()
+	return &Pane{repl: repl, out: out, input: ti}
 }
 
 // NewBuffer returns the sink to hand to repl.New and then to New. It exists so
@@ -97,8 +115,22 @@ func (p *Pane) Init() tea.Cmd     { return nil }
 // prompt, so the global key table must not take printable characters from it.
 func (p *Pane) AcceptsTypedText() {}
 
-// SetFocused is how the shell tells this pane whether it is taking input.
-func (p *Pane) SetFocused(v bool) { p.focused = v }
+// SetFocused is how the shell tells this pane whether it is taking input, and it
+// is the ONLY thing that focuses or blurs the component.
+//
+// The shell owns the mode — through i/enter, esc, a tab change, or a click
+// resolved by bubblezone — and routing every one of those through setMode means
+// the component cannot end up focused while the shell believes it is in
+// Navigate. That split is what made the prompt render "press i to type" while
+// already receiving keys (#65).
+func (p *Pane) SetFocused(v bool) {
+	p.focused = v
+	if v {
+		p.input.Focus()
+		return
+	}
+	p.input.Blur()
+}
 
 func (p *Pane) Update(msg tea.Msg) (pane.Pane, tea.Cmd) {
 	switch msg := msg.(type) {
@@ -117,29 +149,22 @@ func (p *Pane) Update(msg tea.Msg) (pane.Pane, tea.Cmd) {
 			// replaced by the /login they just typed.
 			return p, nil
 		}
-		switch msg.String() {
-		case "enter":
-			line := strings.TrimSpace(p.input)
-			p.input = ""
+		if msg.String() == "enter" {
+			line := strings.TrimSpace(p.input.Value())
+			p.input.SetValue("")
 			if line == "" {
 				return p, nil
 			}
 			p.busy = true
 			return p, p.dispatch(line)
-		case "backspace":
-			if n := len(p.input); n > 0 {
-				// Trim a whole rune, not a byte: a multi-byte character deleted
-				// one byte at a time leaves invalid UTF-8 on screen.
-				r := []rune(p.input)
-				p.input = string(r[:len(r)-1])
-			}
-			return p, nil
-		default:
-			if k := msg.String(); len(k) > 0 && !strings.Contains(k, "+") && len([]rune(k)) == 1 {
-				p.input += k
-			}
-			return p, nil
 		}
+		// Everything else is the component's: cursor movement, word delete, paste.
+		// Nothing is filtered here — the shell already decided this keystroke is
+		// text by being in Input mode, and a second opinion at this layer is how
+		// the two disagree.
+		var cmd tea.Cmd
+		p.input, cmd = p.input.Update(msg)
+		return p, cmd
 	}
 	return p, nil
 }
@@ -181,7 +206,7 @@ func (p *Pane) View(w, h int) string {
 		lines = append(make([]string, pad), lines...)
 	}
 
-	prompt := theme.Prompt.Render("kanz› ") + p.input
+	prompt := theme.Prompt.Render("kanz› ") + p.input.View()
 	switch {
 	case p.busy:
 		prompt = theme.StatusBar.Render("kanz› working…")

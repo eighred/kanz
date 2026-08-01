@@ -20,7 +20,7 @@ type addField struct {
 	required bool
 }
 
-// addForm is a minimal hand-rolled form (no bubbles dependency): a fixed list of
+// addForm is a minimal hand-rolled form: a fixed list of
 // single-line text fields with a focused index. Pure state — render() is a pure
 // function so form_test can drive it with no TTY.
 type addForm struct {
