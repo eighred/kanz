@@ -289,3 +289,50 @@ func TestAnSSOSessionIsNotMarkedAsADevSession(t *testing.T) {
 		t.Error("a real SSO login was not persisted — the dev-token path must not have disabled it")
 	}
 }
+
+// THE REPL MUST ACTUALLY PASS THE SIGNING SECRET TO ITS CLIENT (#198).
+//
+// The client can sign — that is tested in the gateway package. What is tested
+// HERE is the wiring, and only here: removing cfg.SigningSecret from the
+// gateway.New call in repl.go leaves every client-level test green while every
+// real request goes out unsigned. Composition-root wiring escapes unit tests
+// unless something exercises the composition root, and this defect WAS that
+// exact shape — a client that could sign, never told to.
+func TestTheREPLSignsItsRequestsWhenASecretIsConfigured(t *testing.T) {
+	var gotSig string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotSig = r.Header.Get("X-Signature")
+		_, _ = w.Write([]byte(`{"answer":"ok","grounded":true}`))
+	}))
+	defer srv.Close()
+
+	auth := &fakeAuth{tok: &deviceauth.Token{AccessToken: signedToken(), Expiry: time.Now().Add(time.Hour)}}
+	store := tokenstore.NewAt(filepath.Join(t.TempDir(), "token.json"))
+	out := &strings.Builder{}
+	r := New(
+		config.Config{GatewayURL: srv.URL, SigningSecret: "s3cret"},
+		store, auth, strings.NewReader("how is my risk?\n/quit\n"), out,
+	)
+	if err := r.Run(context.Background()); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if gotSig == "" {
+		t.Fatal("the REPL sent an UNSIGNED request while KANZ_SIGNING_SECRET was configured — " +
+			"a gateway enforcing signatures would 401 it, which reads as an expired session and " +
+			"sends the operator to /login, which cannot fix it")
+	}
+}
+
+// And with no secret configured, nothing is sent — the gateway's middleware is a
+// no-op then, so a signature would be noise.
+func TestTheREPLSendsNoSignatureWithoutASecret(t *testing.T) {
+	present := true
+	h := newHarness(t, "how is my risk?\n/quit\n", func(w http.ResponseWriter, r *http.Request) {
+		_, present = r.Header["X-Signature"]
+		_, _ = w.Write([]byte(`{"answer":"ok","grounded":true}`))
+	})
+	h.run(t)
+	if present {
+		t.Error("the REPL sent an X-Signature with no signing secret configured")
+	}
+}

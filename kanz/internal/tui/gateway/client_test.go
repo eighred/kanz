@@ -8,6 +8,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -15,7 +16,7 @@ import (
 
 func testClient(t *testing.T, base, secret string) *Client {
 	t.Helper()
-	c, err := New(Config{BaseURL: base, Token: "tok", SigningSecret: secret})
+	c, err := New(Config{BaseURL: base, Token: StaticToken("tok"), SigningSecret: secret})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -85,7 +86,7 @@ func TestDoSendsTheTokenAndSignature(t *testing.T) {
 	defer srv.Close()
 
 	body := []byte(`{"a":1}`)
-	if _, err := testClient(t, srv.URL, "secret").Do(withDeadline(t), "POST", "/v1/x", body); err != nil {
+	if _, err := testClient(t, srv.URL, "secret").Do(withDeadline(t), "POST", "/v1/x", nil, body); err != nil {
 		t.Fatalf("Do: %v", err)
 	}
 	if gotAuth != "Bearer tok" {
@@ -108,7 +109,7 @@ func TestDoOmitsTheSignatureWhenNoSecretIsConfigured(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	if _, err := testClient(t, srv.URL, "").Do(withDeadline(t), "GET", "/v1/x", nil); err != nil {
+	if _, err := testClient(t, srv.URL, "").Do(withDeadline(t), "GET", "/v1/x", nil, nil); err != nil {
 		t.Fatalf("Do: %v", err)
 	}
 	if present {
@@ -126,7 +127,7 @@ func TestDoDoesNotSendAnAPIVersionHeader(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	if _, err := testClient(t, srv.URL, "").Do(withDeadline(t), "GET", "/v1/x", nil); err != nil {
+	if _, err := testClient(t, srv.URL, "").Do(withDeadline(t), "GET", "/v1/x", nil, nil); err != nil {
 		t.Fatalf("Do: %v", err)
 	}
 	if present {
@@ -144,7 +145,7 @@ func TestDoRefusesACallWithNoDeadline(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
 	defer srv.Close()
 
-	_, err := testClient(t, srv.URL, "").Do(context.Background(), "GET", "/v1/x", nil)
+	_, err := testClient(t, srv.URL, "").Do(context.Background(), "GET", "/v1/x", nil, nil)
 	if err == nil {
 		t.Fatal("a call with no context deadline was performed — an unresponsive gateway would hang the TUI")
 	}
@@ -162,7 +163,7 @@ func TestDoReturnsATypedStatusErrorCarryingTheDetail(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	_, err := testClient(t, srv.URL, "").Do(withDeadline(t), "GET", "/v1/x", nil)
+	_, err := testClient(t, srv.URL, "").Do(withDeadline(t), "GET", "/v1/x", nil, nil)
 	var se *StatusError
 	if !errors.As(err, &se) {
 		t.Fatalf("err = %v (%T), want *StatusError so callers can map the status themselves", err, err)
@@ -187,7 +188,7 @@ func TestStatusErrorFallsBackToTheRawBody(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	_, err := testClient(t, srv.URL, "").Do(withDeadline(t), "GET", "/v1/x", nil)
+	_, err := testClient(t, srv.URL, "").Do(withDeadline(t), "GET", "/v1/x", nil, nil)
 	var se *StatusError
 	if !errors.As(err, &se) {
 		t.Fatalf("err = %v, want *StatusError", err)
@@ -206,9 +207,10 @@ func TestNewRefusesUnusableConfig(t *testing.T) {
 		cfg  Config
 		want string
 	}{
-		{"no url", Config{Token: "t"}, "no gateway URL"},
-		{"relative url", Config{BaseURL: "api.eighred.com", Token: "t"}, "not a valid absolute URL"},
+		{"no url", Config{Token: StaticToken("t")}, "no gateway URL"},
+		{"relative url", Config{BaseURL: "api.eighred.com", Token: StaticToken("t")}, "not a valid absolute URL"},
 		{"no token", Config{BaseURL: "https://api.eighred.com"}, "no token"},
+		{"empty token", Config{BaseURL: "https://api.eighred.com", Token: StaticToken("")}, "no token"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			_, err := New(tc.cfg)
@@ -232,10 +234,88 @@ func TestNewAcceptsAGoodConfigAndTrimsTheBaseURL(t *testing.T) {
 	defer srv.Close()
 
 	c := testClient(t, srv.URL+"/", "")
-	if _, err := c.Do(withDeadline(t), "GET", "/v1/x", nil); err != nil {
+	if _, err := c.Do(withDeadline(t), "GET", "/v1/x", nil, nil); err != nil {
 		t.Fatalf("Do: %v", err)
 	}
 	if gotPath != "/v1/x" {
 		t.Errorf("path = %q, want /v1/x (the trailing slash on the base URL must be trimmed)", gotPath)
+	}
+}
+
+// THE QUERY IS SENT BUT NOT SIGNED.
+//
+// The gateway signs METHOD, r.URL.Path and the body — and r.URL.Path excludes
+// the query string. A client that folded "?as_of=..." into the signed path would
+// compute a signature the gateway cannot reproduce, and the rejection is a 401
+// that reads as a bad token. This is why Do takes query as its own argument.
+func TestTheQueryIsSentButNotSigned(t *testing.T) {
+	var gotSig, gotPath, gotQuery string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotSig, gotPath, gotQuery = r.Header.Get("X-Signature"), r.URL.Path, r.URL.RawQuery
+	}))
+	defer srv.Close()
+
+	q := url.Values{"as_of": {"2026-08-01T00:00:00Z"}, "measure": {"VaR99", "Delta"}}
+	if _, err := testClient(t, srv.URL, "secret").Do(withDeadline(t), "GET", "/v1/x", q, nil); err != nil {
+		t.Fatalf("Do: %v", err)
+	}
+	if gotQuery == "" {
+		t.Fatal("the query never reached the server")
+	}
+	if gotPath != "/v1/x" {
+		t.Errorf("path = %q, want /v1/x with the query kept out of it", gotPath)
+	}
+	if want := Sign([]byte("secret"), "GET", "/v1/x", nil); gotSig != want {
+		t.Errorf("X-Signature = %q, want %q — signed over the PATH ONLY", gotSig, want)
+	}
+}
+
+// THE TOKEN IS READ FRESH ON EVERY REQUEST, so a re-login mid-session is picked
+// up without rebuilding the client. A captured string goes stale the moment
+// somebody signs in again, and the symptom is a 401 that looks like an expired
+// session because it is one — just not the one they think.
+func TestTheTokenIsReadOnEveryRequest(t *testing.T) {
+	var seen []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seen = append(seen, r.Header.Get("Authorization"))
+	}))
+	defer srv.Close()
+
+	tok := "first"
+	c, err := New(Config{BaseURL: srv.URL, Token: func() string { return tok }})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if _, err := c.Do(withDeadline(t), "GET", "/v1/x", nil, nil); err != nil {
+		t.Fatalf("Do: %v", err)
+	}
+	tok = "second" // a /login lands mid-session
+	if _, err := c.Do(withDeadline(t), "GET", "/v1/x", nil, nil); err != nil {
+		t.Fatalf("Do: %v", err)
+	}
+	if len(seen) != 2 || seen[0] != "Bearer first" || seen[1] != "Bearer second" {
+		t.Errorf("authorization headers = %v, want the second call to carry the NEW token", seen)
+	}
+}
+
+// The read limit is per-caller because the surfaces differ by an order of
+// magnitude: a control-plane response is small, a copilot answer with citations
+// is not. A shared default that truncated one would corrupt it silently.
+func TestTheReadLimitIsRespected(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write(make([]byte, 4096))
+	}))
+	defer srv.Close()
+
+	c, err := New(Config{BaseURL: srv.URL, Token: StaticToken("t"), MaxResponseBytes: 100})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	got, err := c.Do(withDeadline(t), "GET", "/v1/x", nil, nil)
+	if err != nil {
+		t.Fatalf("Do: %v", err)
+	}
+	if len(got) != 100 {
+		t.Errorf("read %d bytes, want the configured limit of 100", len(got))
 	}
 }

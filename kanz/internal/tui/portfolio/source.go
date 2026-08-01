@@ -68,7 +68,7 @@ func NewSource(c *gateway.Client) *Source { return &Source{c: c} }
 // PnL, as of now.
 func (s *Source) Positions(ctx context.Context, account string) ([]Position, error) {
 	path := "/v1/broker/accounts/" + url.PathEscape(account) + "/positions"
-	payload, err := s.c.Do(ctx, http.MethodGet, path, nil)
+	payload, err := s.c.Do(ctx, http.MethodGet, path, nil, nil)
 	if err != nil {
 		return nil, brokerError(err, account)
 	}
@@ -86,7 +86,7 @@ func (s *Source) Positions(ctx context.Context, account string) ([]Position, err
 // Measures returns the portfolio's latest risk measures.
 func (s *Source) Measures(ctx context.Context, portfolio string) ([]Measure, error) {
 	path := "/v1/portfolios/" + url.PathEscape(portfolio) + "/measures"
-	payload, err := s.c.Do(ctx, http.MethodGet, path, nil)
+	payload, err := s.c.Do(ctx, http.MethodGet, path, nil, nil)
 	if err != nil {
 		return nil, riskError(err, portfolio)
 	}

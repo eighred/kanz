@@ -41,9 +41,24 @@ import (
 type Config struct {
 	// BaseURL of the gateway, e.g. https://api.eighred.com.
 	BaseURL string
-	// Token is the bearer credential identifying the HUMAN. The gateway decides
-	// what it may do; this tool asserts nothing about its own authority.
-	Token string
+	// Token returns the bearer credential identifying the HUMAN, read fresh on
+	// EVERY request. The gateway decides what it may do; this tool asserts
+	// nothing about its own authority.
+	//
+	// A FUNCTION RATHER THAN A STRING so a re-login mid-session is picked up
+	// without rebuilding the client. That shape came from the Copilot REPL's own
+	// client, which had it right (#198) — a captured string goes stale the moment
+	// somebody runs /login, and the symptom is a 401 that looks like an expired
+	// session because it IS one, just not the one they think.
+	//
+	// Use StaticToken for a caller that genuinely holds a fixed credential.
+	Token func() string
+	// MaxResponseBytes bounds one response body. Zero ⇒ defaultMaxResponse.
+	//
+	// Configurable because the surfaces differ by an order of magnitude: a
+	// control-plane response is small and a bound near it is a useful sanity
+	// check, while a copilot answer with citations is not.
+	MaxResponseBytes int64
 	// SigningSecret is the shared HMAC key when the deployment sets
 	// API_GATEWAY_SIGNING_SECRET. Empty is valid — the gateway's Signing
 	// middleware is a no-op when it holds no secret, so a deployment without one
@@ -52,10 +67,20 @@ type Config struct {
 }
 
 // Client performs signed, authenticated requests against the gateway.
+// defaultMaxResponse bounds a response body when the caller names no limit. It
+// is a guard against a hostile or broken upstream streaming forever, not a
+// statement about how big a legitimate answer is.
+const defaultMaxResponse = 1 << 20
+
+// StaticToken adapts a fixed credential to Config.Token, for a caller that holds
+// one rather than a session that can be renewed.
+func StaticToken(tok string) func() string { return func() string { return tok } }
+
 type Client struct {
 	base    string
-	token   string
+	token   func() string
 	signKey []byte
+	maxBody int64
 	hc      *http.Client
 }
 
@@ -71,14 +96,22 @@ func New(cfg Config) (*Client, error) {
 	if err != nil || u.Scheme == "" || u.Host == "" {
 		return nil, fmt.Errorf("gateway URL %q is not a valid absolute URL (want scheme://host)", cfg.BaseURL)
 	}
-	if strings.TrimSpace(cfg.Token) == "" {
+	// Called once here so a caller with no session still fails at construction
+	// with the message below, rather than per-request with a 401 — the token is
+	// re-read on every request regardless.
+	if cfg.Token == nil || strings.TrimSpace(cfg.Token()) == "" {
 		return nil, fmt.Errorf("no token: set --token-file or KANZ_TOKEN. The gateway " +
 			"authenticates a PERSON — this tool holds no authority of its own")
+	}
+	maxBody := cfg.MaxResponseBytes
+	if maxBody <= 0 {
+		maxBody = defaultMaxResponse
 	}
 	return &Client{
 		base:    strings.TrimRight(cfg.BaseURL, "/"),
 		token:   cfg.Token,
 		signKey: []byte(cfg.SigningSecret),
+		maxBody: maxBody,
 		// NO Timeout ON THIS CLIENT, ON PURPOSE. Every call site sets an explicit
 		// context deadline, and http.Client.Timeout is enforced INDEPENDENTLY of the
 		// request context: a client with both bounds is bounded by min(the two), so the
@@ -118,11 +151,19 @@ func (e *StatusError) Error() string {
 	return fmt.Sprintf("gateway returned %d", e.Status)
 }
 
-// Do performs one request and returns the response body. body may be nil.
+// Do performs one request and returns the response body. query and body may be
+// nil.
+//
+// QUERY IS SEPARATE FROM PATH BECAUSE THE SIGNATURE IS OVER THE PATH ALONE. The
+// gateway's Signing middleware computes HMAC over METHOD, then r.URL.Path, then
+// the body, newline-separated (services/api-gateway/internal/middleware).
+// r.URL.Path EXCLUDES the query string, so a caller that folded "?as_of=..."
+// into path would sign more than the gateway does, and get a 401 that reads as
+// an expired token. The two cannot be one argument.
 //
 // A non-2xx yields a *StatusError. A missing context deadline is refused rather
 // than performed — see below.
-func (c *Client) Do(ctx context.Context, method, path string, body []byte) ([]byte, error) {
+func (c *Client) Do(ctx context.Context, method, path string, query url.Values, body []byte) ([]byte, error) {
 	// The HTTP client deliberately carries no Timeout of its own, so the caller's context is
 	// the ONLY thing bounding this request. A call site that forgets a deadline would
 	// therefore hang the TUI forever on an unresponsive gateway — the worst failure mode in
@@ -135,11 +176,17 @@ func (c *Client) Do(ctx context.Context, method, path string, body []byte) ([]by
 			method, path)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, method, c.base+path, bytes.NewReader(body))
+	u := c.base + path
+	if len(query) > 0 {
+		u += "?" + query.Encode()
+	}
+	req, err := http.NewRequestWithContext(ctx, method, u, bytes.NewReader(body))
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("Authorization", "Bearer "+c.token)
+	// Read fresh, so a /login during the session is picked up on the next call.
+	req.Header.Set("Authorization", "Bearer "+c.token())
+	req.Header.Set("Accept", "application/json")
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
@@ -157,7 +204,7 @@ func (c *Client) Do(ctx context.Context, method, path string, body []byte) ([]by
 	}
 	defer func() { _ = res.Body.Close() }()
 
-	payload, err := io.ReadAll(io.LimitReader(res.Body, 1<<20))
+	payload, err := io.ReadAll(io.LimitReader(res.Body, c.maxBody))
 	if err != nil {
 		return nil, fmt.Errorf("read response: %w", err)
 	}

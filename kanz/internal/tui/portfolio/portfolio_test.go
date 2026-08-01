@@ -20,7 +20,7 @@ var _ pane.Pane = Model{}
 func srcOver(t *testing.T, h http.HandlerFunc) (*Source, func()) {
 	t.Helper()
 	srv := httptest.NewServer(h)
-	c, err := gateway.New(gateway.Config{BaseURL: srv.URL, Token: "tok"})
+	c, err := gateway.New(gateway.Config{BaseURL: srv.URL, Token: gateway.StaticToken("tok")})
 	if err != nil {
 		t.Fatalf("gateway.New: %v", err)
 	}

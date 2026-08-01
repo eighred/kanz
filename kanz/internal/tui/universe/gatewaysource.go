@@ -60,7 +60,7 @@ type GatewayConfig struct {
 func NewGatewaySource(cfg GatewayConfig) (*gatewaySource, error) {
 	c, err := gateway.New(gateway.Config{
 		BaseURL:       cfg.BaseURL,
-		Token:         cfg.Token,
+		Token:         gateway.StaticToken(cfg.Token),
 		SigningSecret: cfg.SigningSecret,
 	})
 	if err != nil {
@@ -87,7 +87,7 @@ func (g *gatewaySource) call(ctx context.Context, method, path string, req, resp
 	// operator's generated types, and the wording below — a 404 here means the
 	// gateway was started without API_GATEWAY_OPERATOR_ADDR, which is true of no
 	// other surface.
-	payload, err := g.c.Do(ctx, method, path, body)
+	payload, err := g.c.Do(ctx, method, path, nil, body)
 	if err != nil {
 		var se *gateway.StatusError
 		if errors.As(err, &se) {
