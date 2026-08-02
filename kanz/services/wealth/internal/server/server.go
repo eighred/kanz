@@ -29,6 +29,7 @@ func (r *Readiness) Ready() bool    { return r.ready.Load() }
 type Server struct {
 	logger    *slog.Logger
 	readiness *Readiness
+	tenant    string
 	store     book.Store
 	metrics   http.Handler
 	mux       *http.ServeMux
@@ -41,8 +42,14 @@ type Option func(*Server)
 func WithMetrics(h http.Handler) Option { return func(s *Server) { s.metrics = h } }
 
 // New builds the server over a household composition store.
-func New(readiness *Readiness, logger *slog.Logger, store book.Store, opts ...Option) *Server {
-	s := &Server{logger: logger, readiness: readiness, store: store, mux: http.NewServeMux()}
+//
+// tenant is the tenant THIS INSTANCE serves, and it is a required positional
+// parameter rather than an Option on purpose: it is the input to the only
+// cross-tenant control on this surface, and an Option can be forgotten. Same
+// stance as pg.NewTenantPool, which refuses an empty tenant outright rather than
+// serving something that looks healthy and is scoped to nothing.
+func New(readiness *Readiness, logger *slog.Logger, tenant string, store book.Store, opts ...Option) *Server {
+	s := &Server{logger: logger, readiness: readiness, tenant: tenant, store: store, mux: http.NewServeMux()}
 	for _, opt := range opts {
 		opt(s)
 	}
@@ -61,6 +68,42 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /v1/households/{id}", s.handleHousehold)
 }
 
+// HeaderPrincipalTenant is the tenant the api-gateway authenticated, injected on
+// every forwarded request (services/api-gateway/internal/proxy/backend.go).
+//
+// Upstreams may trust it ONLY because a NetworkPolicy makes the gateway their
+// sole reachable caller. That premise is doing real work here — see #232, which
+// tracks the namespaces where it is not yet enforced.
+const HeaderPrincipalTenant = "X-Kanz-Principal-Tenant"
+
+// callerOwnsThisInstance reports whether the authenticated caller may read this
+// instance's data, and writes the refusal if not.
+//
+// THIS SURFACE HAD NO TENANT CHECK AT ALL (#222). handleHousehold read
+// r.PathValue("id") and returned the household — the gateway injected the
+// caller's tenant on every request and the handler never called r.Header.Get.
+// Anyone who could reach it could enumerate household ids and read total value,
+// holdings, weights and asset-class exposure for whichever tenant owned them.
+//
+// Under the #97 ruling each instance serves exactly ONE tenant (WEALTH_TENANT,
+// and the RLS pool is pinned to it), so the check is an equality against this
+// instance's tenant rather than a per-row lookup: a caller from another tenant
+// has no business here whatever the database holds.
+//
+// Fails CLOSED on an absent header and on an unset instance tenant — both mean
+// nobody established who is asking, and neither is permission.
+//
+// 404, not 403, and the same body a genuine miss returns: distinguishing "not
+// yours" from "not there" turns id enumeration into a cross-tenant directory.
+func (s *Server) callerOwnsThisInstance(w http.ResponseWriter, r *http.Request) bool {
+	caller := r.Header.Get(HeaderPrincipalTenant)
+	if caller == "" || s.tenant == "" || caller != s.tenant {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "household not found"})
+		return false
+	}
+	return true
+}
+
 func (s *Server) handleHealthz(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
@@ -76,6 +119,9 @@ func (s *Server) handleReadyz(w http.ResponseWriter, _ *http.Request) {
 // handleHousehold aggregates a household's accounts into a virtual portfolio and
 // returns its total value, instrument weights, and asset-class exposure.
 func (s *Server) handleHousehold(w http.ResponseWriter, r *http.Request) {
+	if !s.callerOwnsThisInstance(w, r) {
+		return
+	}
 	id := r.PathValue("id")
 	h, ok, err := s.store.Get(r.Context(), id)
 	if err != nil {

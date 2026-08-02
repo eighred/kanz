@@ -136,8 +136,17 @@ func (s *Server) EvaluateScenario(ctx context.Context, req *querypb.EvaluateScen
 		return nil, err
 	}
 	return &querypb.EvaluateScenarioResponse{
-		PortfolioId:  string(resp.PortfolioID),
-		Projected:    ms,
+		PortfolioId: string(resp.PortfolioID),
+		Projected:   ms,
+		// Stamped for the same reason Exposure and Measures stamp it: a governed
+		// client cannot enforce cross-tenant isolation without an ownership signal
+		// on the reply, and empty must read as a denial. This reply went without it
+		// until #222 — so a gate written over all three routes would have refused
+		// every scenario, and one written only where the field existed would have
+		// left this route open while looking covered. A what-if projection discloses
+		// the same portfolio risk as the exposure it is derived from; moving no
+		// capital is not the same as disclosing nothing.
+		OwnerTenant:  s.ownerTenant,
 		QualityFlags: protoFlags(resp.QualityFlags),
 	}, nil
 }

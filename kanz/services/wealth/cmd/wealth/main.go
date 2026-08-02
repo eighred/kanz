@@ -79,7 +79,7 @@ func main() {
 	readiness := &server.Readiness{}
 	httpSrv := &http.Server{
 		Addr:              cfg.Listen,
-		Handler:           server.New(readiness, logger, store, server.WithMetrics(obs.MetricsHandler())),
+		Handler:           server.New(readiness, logger, cfg.Tenant, store, server.WithMetrics(obs.MetricsHandler())),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 	go func() {

@@ -23,6 +23,17 @@ import (
 	"github.com/eighred/kanz/services/api-gateway/internal/middleware"
 )
 
+// testTenant is the tenant the harness authenticates as, AND the tenant every
+// canned portfolio reply must claim to be owned by.
+//
+// The two are one value on purpose. writeOwned refuses any reply whose
+// owner_tenant does not equal the caller's tenant (#222), so a fixture that
+// omits it gets a 404 and the test reads as a transcoding failure. Before this
+// gate existed all seven of these tests passed with no owner_tenant at all —
+// which is exactly the hole: the responses were served to a caller whose tenant
+// nobody had compared them against.
+const testTenant = "t1"
+
 // fakeClient is a querypb.RiskQueryServiceClient that records the last request
 // and returns canned responses/errors.
 type fakeClient struct {
@@ -62,7 +73,7 @@ func serve(t *testing.T, fc *fakeClient) *httptest.Server {
 	mux := authz.NewMux(authz.Grants{"analyst": {authz.Read}})
 	gateway.New(fc).Routes(mux)
 	authed := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		p := &middleware.Principal{Subject: "u1", Tenant: "t1", Roles: []string{"analyst"}}
+		p := &middleware.Principal{Subject: "u1", Tenant: testTenant, Roles: []string{"analyst"}}
 		mux.ServeHTTP(w, r.WithContext(middleware.WithPrincipal(r.Context(), p)))
 	})
 	ts := httptest.NewServer(authed)
@@ -73,6 +84,7 @@ func serve(t *testing.T, fc *fakeClient) *httptest.Server {
 func TestExposureTranscodingParity(t *testing.T) {
 	canned := &querypb.ExposureResponse{
 		PortfolioId: "PF1",
+		OwnerTenant: testTenant,
 		AsOf:        timestamppb.New(mustTime("2026-05-20T12:00:00Z")),
 		Set: &domainpb.ExposureSet{
 			PortfolioId: "PF1",
@@ -112,7 +124,7 @@ func TestExposureTranscodingParity(t *testing.T) {
 }
 
 func TestMeasuresForwardsAsOfAndFilter(t *testing.T) {
-	fc := &fakeClient{measuresResp: &querypb.MeasuresResponse{PortfolioId: "PF1"}}
+	fc := &fakeClient{measuresResp: &querypb.MeasuresResponse{PortfolioId: "PF1", OwnerTenant: testTenant}}
 	ts := serve(t, fc)
 
 	resp, err := http.Get(ts.URL + "/v1/portfolios/PF1/measures?as_of=2026-05-20T12:00:00Z&measure=VaR99&measure=Delta")
@@ -132,7 +144,7 @@ func TestMeasuresForwardsAsOfAndFilter(t *testing.T) {
 }
 
 func TestScenarioDecodesBodyAndPathWins(t *testing.T) {
-	fc := &fakeClient{scenarioResp: &querypb.EvaluateScenarioResponse{PortfolioId: "PF1"}}
+	fc := &fakeClient{scenarioResp: &querypb.EvaluateScenarioResponse{PortfolioId: "PF1", OwnerTenant: testTenant}}
 	ts := serve(t, fc)
 
 	body := `{"portfolio_id":"IGNORED","shocks":[{"parallelShift":{"pct":{"coefficient":"-5","exponent":-2}}}]}`

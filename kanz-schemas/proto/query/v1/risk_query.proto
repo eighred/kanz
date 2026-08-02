@@ -159,6 +159,23 @@ message EvaluateScenarioResponse {
   string portfolio_id = 1;
   domain.v1.RiskMeasureSet projected = 2;
   repeated QualityFlag quality_flags = 3;
+
+  // owner_tenant is the tenant that owns the queried portfolio (WIRE-02a) —
+  // the authz-gate input; see ExposureResponse.owner_tenant.
+  //
+  // ADDED LATE, AND THAT IS THE POINT. Exposure and Measures have carried this
+  // since WIRE-02a; the scenario reply did not, so the gate the field exists to
+  // feed could not be applied uniformly. A gate written against all three routes
+  // would have 404'd every scenario call, and one written only where the field
+  // existed would have left POST /v1/portfolios/{id}/scenario silently ungated
+  // while the route table looked fully covered — the worse of the two, because a
+  // what-if projection discloses the same portfolio risk as the exposure it is
+  // derived from. Moving no capital is not the same as disclosing nothing.
+  //
+  // Field 4 rather than 5: 4 is the next free number here. Numbers need not
+  // match across messages, and renumbering the siblings would be a wire break
+  // for the sake of symmetry nobody reads.
+  string owner_tenant = 4;
 }
 
 // ScenarioShock is one perturbation. The oneof is the proto mirror of the

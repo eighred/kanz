@@ -63,13 +63,36 @@ func newServer(t *testing.T) (*Server, store.ExceptionStore) {
 	}
 	r := &Readiness{}
 	r.Set(true)
-	return New(r, nil, golden, exceptions, feeds, WithClock(func() time.Time { return now })), exceptions
+	return New(r, nil, testTenant, golden, exceptions, feeds, WithClock(func() time.Time { return now })), exceptions
+}
+
+// testTenant is the tenant these instances serve. Every request must carry it in
+// X-Kanz-Principal-Tenant or callerOwnsThisInstance refuses (#222).
+const testTenant = "acme"
+
+// asTenant builds a request the way the gateway forwards one: authenticated,
+// with the caller's tenant injected.
+func asTenant(method, path, tenant string) *http.Request {
+	req := httptest.NewRequest(method, path, nil)
+	if tenant != "" {
+		req.Header.Set(HeaderPrincipalTenant, tenant)
+	}
+	return req
+}
+
+// postAsTenant is asTenant for a request with a body.
+func postAsTenant(path, tenant, body string) *http.Request {
+	req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(body))
+	if tenant != "" {
+		req.Header.Set(HeaderPrincipalTenant, tenant)
+	}
+	return req
 }
 
 func get(t *testing.T, s *Server, path string) *httptest.ResponseRecorder {
 	t.Helper()
 	rec := httptest.NewRecorder()
-	s.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
+	s.ServeHTTP(rec, asTenant(http.MethodGet, path, testTenant))
 	return rec
 }
 
@@ -130,7 +153,7 @@ func TestSecurityIsServedFromTheStore(t *testing.T) {
 	}
 	r := &Readiness{}
 	r.Set(true)
-	s := New(r, nil, golden, store.NewQueueStore(nil), []feed.VendorFeed{errFeed{}})
+	s := New(r, nil, testTenant, golden, store.NewQueueStore(nil), []feed.VendorFeed{errFeed{}})
 
 	rec := get(t, s, "/v1/securities/INST1")
 	if rec.Code != http.StatusOK {
@@ -193,7 +216,7 @@ func TestPriceAndOverrideFlow(t *testing.T) {
 	// Override it through the HTTP surface.
 	body := `{"actor":"alice@kanz","reason":"corp action confirmed","chosen_price":"130"}`
 	rec := httptest.NewRecorder()
-	s.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/exceptions/"+id+"/override", strings.NewReader(body)))
+	s.ServeHTTP(rec, postAsTenant("/v1/exceptions/"+id+"/override", testTenant, body))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("override: want 200 got %d (%s)", rec.Code, rec.Body.String())
 	}
@@ -210,7 +233,7 @@ func TestPriceAndOverrideFlow(t *testing.T) {
 
 	// A bad override (missing actor) is rejected.
 	rec = httptest.NewRecorder()
-	s.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/exceptions/"+id+"/override", strings.NewReader(`{"reason":"x"}`)))
+	s.ServeHTTP(rec, postAsTenant("/v1/exceptions/"+id+"/override", testTenant, `{"reason":"x"}`))
 	if rec.Code != http.StatusBadRequest {
 		t.Errorf("bad override: want 400 got %d", rec.Code)
 	}
@@ -232,16 +255,14 @@ func TestOverrideRefusesAJSONFloat(t *testing.T) {
 	id := open[0].ID
 
 	rec := httptest.NewRecorder()
-	s.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/exceptions/"+id+"/override",
-		strings.NewReader(`{"actor":"alice@kanz","reason":"x","chosen_price":130.1}`)))
+	s.ServeHTTP(rec, postAsTenant("/v1/exceptions/"+id+"/override", testTenant, `{"actor":"alice@kanz","reason":"x","chosen_price":130.1}`))
 	if rec.Code == http.StatusOK {
 		t.Fatal("the API accepted a JSON float for the overridden price — a human's decision would be rounded into the audit trail")
 	}
 
 	// And a non-numeric string is not a price either.
 	rec = httptest.NewRecorder()
-	s.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/exceptions/"+id+"/override",
-		strings.NewReader(`{"actor":"alice@kanz","reason":"x","chosen_price":"about a hundred"}`)))
+	s.ServeHTTP(rec, postAsTenant("/v1/exceptions/"+id+"/override", testTenant, `{"actor":"alice@kanz","reason":"x","chosen_price":"about a hundred"}`))
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("want 400 for an unparseable price, got %d", rec.Code)
 	}
@@ -260,8 +281,7 @@ func TestOverrideRefusesUnrepresentablePrecision(t *testing.T) {
 
 	post := func(price string) int {
 		rec := httptest.NewRecorder()
-		s.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/exceptions/"+id+"/override",
-			strings.NewReader(`{"actor":"alice@kanz","reason":"x","chosen_price":"`+price+`"}`)))
+		s.ServeHTTP(rec, postAsTenant("/v1/exceptions/"+id+"/override", testTenant, `{"actor":"alice@kanz","reason":"x","chosen_price":"`+price+`"}`))
 		return rec.Code
 	}
 	if code := post("130.123456789012345"); code != http.StatusBadRequest {

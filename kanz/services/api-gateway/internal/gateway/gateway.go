@@ -15,7 +15,6 @@ package gateway
 
 import (
 	"errors"
-	"github.com/eighred/kanz/services/api-gateway/internal/authz"
 	"net/http"
 	"time"
 
@@ -26,6 +25,8 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	querypb "github.com/eighred/kanz/kanz-schemas-go/query/v1"
+	"github.com/eighred/kanz/services/api-gateway/internal/authz"
+	"github.com/eighred/kanz/services/api-gateway/internal/middleware"
 )
 
 // Handler serves the REST surface by forwarding to a RiskQueryServiceClient.
@@ -71,7 +72,7 @@ func (h *Handler) exposure(w http.ResponseWriter, r *http.Request) {
 		PortfolioId: r.PathValue("id"),
 		AsOf:        asOf,
 	})
-	h.write(w, resp, err)
+	h.writeOwned(w, r, resp, err)
 }
 
 func (h *Handler) measures(w http.ResponseWriter, r *http.Request) {
@@ -85,7 +86,7 @@ func (h *Handler) measures(w http.ResponseWriter, r *http.Request) {
 		AsOf:        asOf,
 		Measures:    r.URL.Query()["measure"], // repeatable ?measure=VaR99&measure=Delta
 	})
-	h.write(w, resp, err)
+	h.writeOwned(w, r, resp, err)
 }
 
 func (h *Handler) scenario(w http.ResponseWriter, r *http.Request) {
@@ -96,7 +97,7 @@ func (h *Handler) scenario(w http.ResponseWriter, r *http.Request) {
 	}
 	req.PortfolioId = r.PathValue("id") // path wins over body
 	resp, err := h.client.EvaluateScenario(r.Context(), &req)
-	h.write(w, resp, err)
+	h.writeOwned(w, r, resp, err)
 }
 
 func (h *Handler) health(w http.ResponseWriter, r *http.Request) {
@@ -118,9 +119,79 @@ func parseAsOf(r *http.Request) (*timestamppb.Timestamp, error) {
 	return timestamppb.New(t), nil
 }
 
+// ownedResponse is any upstream reply that names the tenant owning the
+// portfolio it describes. All three portfolio-scoped replies satisfy it —
+// query.v1 declares owner_tenant on ExposureResponse, MeasuresResponse and
+// EvaluateScenarioResponse — so writeOwned takes the interface rather than a
+// concrete type: a NEW portfolio-scoped RPC either carries the field and is
+// gated, or does not compile against this path.
+type ownedResponse interface {
+	proto.Message
+	GetOwnerTenant() string
+}
+
+// writeOwned is write() plus the cross-tenant check, and it is the only way a
+// portfolio-scoped reply reaches a client.
+//
+// AUTHORIZATION ON THESE ROUTES WAS ROLE-ONLY. authz.Mux checks that the caller
+// holds the capability; it has no notion of which RESOURCE the capability
+// applies to. Every authenticated caller holds Read (API_GATEWAY_REQUIRED_ROLE
+// is kanz-user), so any of them could read any portfolio's exposure, measures
+// or scenario by naming its id in the path — the id came straight from
+// r.PathValue and the principal was never consulted (#222). The risk engine has
+// stamped the answer on the reply since WIRE-02a and nothing read it.
+//
+// EMPTY OWNER DENIES. query.v1's own contract: "Empty ⇒ the engine has no
+// ownership record for the portfolio, which a deny-by-default gate must treat
+// as a denial, not an allow." A missing signal is not permission.
+//
+// That clause is DELIBERATELY REDUNDANT and cannot be mutation-killed on its
+// own: with p.Tenant already proven non-empty, an empty owner_tenant fails the
+// inequality anyway. It is kept because it states the contract at the point the
+// contract is applied, and because it is what still denies if the p.Tenant guard
+// is ever weakened. Saying so here so the next reader does not mistake belt for
+// braces, or delete it believing a test covers it.
+//
+// 404, NOT 403, on a mismatch — and the SAME 404 the engine returns for a
+// portfolio that does not exist. 403 would make this route an oracle: iterate
+// ids, and the status code alone enumerates which portfolios exist in other
+// tenants. Distinguishing "not yours" from "not there" leaks precisely the
+// thing isolation exists to hide, which is why copilot's equivalent gate is
+// careful to answer the same "regardless of tenant (no oracle)".
+func (h *Handler) writeOwned(w http.ResponseWriter, r *http.Request, resp ownedResponse, err error) {
+	if err != nil {
+		code, msg := httpStatus(err)
+		// A 404 from the engine is normalised to the SAME body the gate emits.
+		// Status parity alone is not enough: if the engine's own wording came
+		// through here, comparing response BODIES would still separate "exists,
+		// not yours" from "does not exist" and the oracle survives in the one
+		// place it is easiest to miss. Only this path is normalised — routes that
+		// are not portfolio-scoped keep upstream detail.
+		if code == http.StatusNotFound {
+			msg = notFoundMsg
+		}
+		writeError(w, code, msg)
+		return
+	}
+	p := middleware.PrincipalFromContext(r.Context())
+	if p == nil || p.Tenant == "" || resp.GetOwnerTenant() == "" || resp.GetOwnerTenant() != p.Tenant {
+		writeError(w, http.StatusNotFound, notFoundMsg)
+		return
+	}
+	h.write(w, resp, nil)
+}
+
+// notFoundMsg is the single body a portfolio-scoped route returns for BOTH
+// "no such portfolio" and "not yours". One constant, so the two cannot drift
+// apart into an oracle by a later edit to either branch.
+const notFoundMsg = "portfolio not found"
+
 // write maps an upstream gRPC error to an HTTP status, or marshals the proto
 // response as JSON. The gRPC code→HTTP mapping mirrors the standard
 // grpc-gateway table so REST clients see conventional statuses.
+//
+// Not for portfolio-scoped replies — those go through writeOwned, which gates
+// on ownership first. test/arch enforces that split.
 func (h *Handler) write(w http.ResponseWriter, resp proto.Message, err error) {
 	if err != nil {
 		code, msg := httpStatus(err)
