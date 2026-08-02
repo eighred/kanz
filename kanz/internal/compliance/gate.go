@@ -3,8 +3,6 @@ package compliance
 import (
 	"context"
 	"log/slog"
-	"math"
-	"math/big"
 	"sync"
 	"time"
 
@@ -426,193 +424,31 @@ func project(book *Book, d OrderDelta) (*Book, bool) {
 	return proj, true
 }
 
-// addDecimal sums two Decimals exactly, or refuses.
+// addDecimal and mulDecimal MOVED to internal/dec (arith.go) for #216.
 //
-// It aligns to the SMALLER exponent, which means scaling one operand up by
-// 10^gap — and that is where it used to wrap: pow10 returns an int64 and
-// overflows at a gap of 19, so `addDecimal(100e0, 1e-19)` returned 0.3875…,
-// and at a gap of 25 the alignment went NEGATIVE, turning the sum of two
-// positive quantities into a negative position. The sum itself could overflow
-// independently even when both aligned operands fit.
+// They were written here, for the pre-trade gate, and then hand-copied into
+// internal/risk/compute — where the copy was never repaired. A -20% stress on a
+// $200,000 position came back as +$160,000's opposite, -$24,467, because that
+// copy still multiplied raw int64 coefficients. One implementation per concept
+// is not a style preference here: it is the difference between fixing the wrap
+// once and fixing it once per package that noticed.
 //
-// This is the same failure `mulDecimal` had and is fixed the same way, because
-// it is the same question: compute in math/big, rescale to a coarser exponent
-// to keep the MAGNITUDE when the coefficient will not fit an int64, and refuse
-// only when the exponent cannot move.
+// The whole analysis — why math/big, why the exponent is RAISED rather than
+// wrapped, why the alignment window is clamped, and what ok=false obliges the
+// caller to do — travelled with the code and now lives on dec.Add / dec.Mul.
 //
-// The caller is project(), whose result values every compliance rule. A wrong
-// quantity here is not a rounding error — it is a position the rules never see
-// the true size of.
-//
-// THE ALIGNMENT EXPONENT IS CLAMPED, and that is load-bearing. Both exponents
-// come off the wire (SubmitOrder.Quantity → OrderDelta.SignedQuantity) and
-// nothing upstream constrains their range — the gate runs BEFORE Accept
-// validates the order. Aligning unconditionally to min(expA, expB) therefore
-// lets a crafted order ask math/big for 10^4300000000, a multi-billion-digit
-// bignum that hangs or OOMs the process long before the rescale loop below can
-// refuse anything. Exact-but-unbounded is worse than the int64 wrap it
-// replaced: that at least returned in O(1).
-//
-// It is also unnecessary work. A gap that large MEANS the smaller operand sits
-// billions of orders of magnitude below the larger; no int64 coefficient can
-// hold a difference of even forty. So the alignment exponent is clamped to
-// alignWindow digits below the LARGER exponent. Both scale factors are then
-// bounded by 10^alignWindow and Exp is O(1) in the gap. Inside the window
-// (every ordinary input) nothing changes: the clamp is inert and results stay
-// bit-identical.
-//
-// Refusing large gaps instead would be the wrong answer: 10^9 + 10^-9 is
-// perfectly representable, and NOTIONAL_UNREPRESENTABLE on a legitimate order
-// is a trading outage dressed as a control. We compute it; we just decline to
-// compute digits that cannot survive the return type.
-//
-// ROUNDING: digits pushed out of the window are DROPPED (truncated toward
-// zero), not carried as a rounding nudge. With alignWindow at 40 the larger
-// operand aligns to at least 10^40, which the loop below must then rescale by
-// ~22 exponent steps to fit an int64 — so everything the clamp discards lies
-// below 10^-22 of the last digit the result can express. A nudge there could
-// not move a representable digit; it would only add machinery pretending to a
-// precision *commonpb.Decimal does not have.
+// These two names stay as one-line wrappers on purpose. project() reads in the
+// gate's own vocabulary, and — the reason that matters — mul_test.go and
+// arithmetic_sweep_test.go call them by these names. Leaving those entry points
+// untouched means the COMP-01 test suite, written against the original, is what
+// proves the move changed no behaviour. Rewriting the tests alongside the code
+// would have proved only that they agree with each other.
 
-// alignWindow is how many decimal digits below the larger operand's exponent
-// addDecimal bothers to align. An int64 coefficient carries ~19 significant
-// digits; 40 is comfortably past double that, so every digit inside the
-// window that could ever reach the result is kept, with room to spare.
-const alignWindow = 40
+// addDecimal sums two Decimals exactly, or refuses. ok=false obliges project()
+// to refuse the order rather than value it at a fabricated quantity.
+func addDecimal(a, b *commonpb.Decimal) (*commonpb.Decimal, bool) { return decutil.Add(a, b) }
 
-// alignExponent returns the exponent addDecimal aligns both operands to,
-// given their (zero-coefficient-adjusted) exponents. It is the smaller of the
-// two, but never lower than the larger minus alignWindow — see "THE ALIGNMENT
-// EXPONENT IS CLAMPED" above addDecimal for why an unclamped min(expA, expB)
-// is a DoS and why alignWindow is the right bound.
-func alignExponent(expA, expB int64) int64 {
-	lo, hi := expA, expB
-	if hi < lo {
-		lo, hi = hi, lo
-	}
-	exp := lo
-	if hi-alignWindow > exp {
-		exp = hi - alignWindow
-	}
-	return exp
-}
-
-func addDecimal(a, b *commonpb.Decimal) (*commonpb.Decimal, bool) {
-	if a == nil {
-		a = &commonpb.Decimal{}
-	}
-	if b == nil {
-		b = &commonpb.Decimal{}
-	}
-	expA, expB := int64(a.GetExponent()), int64(b.GetExponent())
-	// A zero coefficient has no magnitude, so its exponent must not drag the
-	// alignment window: {0, e} + {c, f} is {c, f} for any e. Left in, a zero
-	// operand carrying a wild exponent would clamp the real one away.
-	if a.GetCoefficient() == 0 {
-		expA = expB
-	} else if b.GetCoefficient() == 0 {
-		expB = expA
-	}
-	exp := alignExponent(expA, expB)
-	ten := big.NewInt(10)
-	scale := func(d *commonpb.Decimal, dexp int64) *big.Int {
-		c := big.NewInt(d.GetCoefficient())
-		gap := dexp - exp // ≤ alignWindow by construction; negative only when clamped
-		switch {
-		case gap == 0:
-			return c
-		case gap > 0:
-			return c.Mul(c, new(big.Int).Exp(ten, big.NewInt(gap), nil))
-		default:
-			// Clamped away: truncate toward zero. An int64 coefficient is
-			// under 10^19, so anything shifted nineteen or more places right
-			// IS zero — computing the divisor for a gap of billions would
-			// reintroduce the very bignum this clamp exists to avoid.
-			if -gap >= 19 {
-				return big.NewInt(0)
-			}
-			// Quo truncates toward zero, which is the conservative reading of
-			// a digit we are about to discard: it never grows the operand's
-			// magnitude. Div (floor) would be observationally identical here —
-			// the two differ only in the last unit of the truncated operand,
-			// and by construction that operand sits at least twenty-one orders
-			// of magnitude below the last digit the result can express. The
-			// choice is stated for intent, not because a rule can see it.
-			return c.Quo(c, new(big.Int).Exp(ten, big.NewInt(-gap), nil))
-		}
-	}
-	coeff := new(big.Int).Add(scale(a, expA), scale(b, expB))
-
-	five := big.NewInt(5)
-	rem := new(big.Int)
-	for !coeff.IsInt64() || exp > math.MaxInt32 {
-		if exp >= math.MaxInt32 {
-			return nil, false // cannot raise the exponent any further
-		}
-		coeff.QuoRem(coeff, ten, rem)
-		if rem.CmpAbs(five) >= 0 { // half-up, away from zero
-			if rem.Sign() < 0 {
-				coeff.Sub(coeff, big.NewInt(1))
-			} else {
-				coeff.Add(coeff, big.NewInt(1))
-			}
-		}
-		exp++
-	}
-	return &commonpb.Decimal{Coefficient: coeff.Int64(), Exponent: int32(exp)}, true
-}
-
-// mulDecimal returns a×b and whether the product is representable. nil is
-// treated as zero.
-//
-// This computes the ORDER'S NOTIONAL (project, above), which every
-// concentration/exposure rule then evaluates, so a wrapped product is an
-// admission bypass, not a rounding nit: the old body multiplied the
-// coefficients as raw int64s, and a large-enough quantity wrapped that product
-// into a small — often negative — number. The rules saw a tiny position and
-// ADMITTED an order worth billions. The mark-priced path made this reachable
-// at plausible sizes, because dec.ToProtoScaled emits exponent -8 whenever that
-// fits and so spends eight digits of int64 headroom before the multiply even
-// happens.
-//
-// The product is therefore taken in math/big, exactly. Three outcomes:
-//
-//   - it fits int64 at its natural exponent — returned as-is, so every input
-//     that never wrapped keeps bit-identical behaviour;
-//   - it does not fit — the exponent is RAISED (the coefficient divided by ten,
-//     half-up away from zero) until it does. This drops digits that cannot
-//     matter at that magnitude and keeps the one thing a compliance rule needs:
-//     the MAGNITUDE. A $184bn notional fits an int64 comfortably at a coarser
-//     exponent;
-//   - the exponent itself cannot be represented — the order is genuinely
-//     unvaluable, and ok=false makes the gate REFUSE it. Never a wrapped number.
-func mulDecimal(a, b *commonpb.Decimal) (*commonpb.Decimal, bool) {
-	if a == nil || b == nil {
-		return &commonpb.Decimal{}, true
-	}
-	coeff := new(big.Int).Mul(big.NewInt(a.GetCoefficient()), big.NewInt(b.GetCoefficient()))
-	// int64 accumulator: two int32 exponents can sum past int32 range.
-	exp := int64(a.GetExponent()) + int64(b.GetExponent())
-	if exp < math.MinInt32 {
-		// Rescaling only ever RAISES the exponent; there is no way back from
-		// here, and no realistic input reaches it. Refuse rather than guess.
-		return nil, false
-	}
-	ten, five := big.NewInt(10), big.NewInt(5)
-	rem := new(big.Int)
-	for !coeff.IsInt64() || exp > math.MaxInt32 {
-		if exp >= math.MaxInt32 {
-			return nil, false // cannot raise the exponent any further
-		}
-		coeff.QuoRem(coeff, ten, rem)
-		if rem.CmpAbs(five) >= 0 { // half-up, away from zero
-			if rem.Sign() < 0 {
-				coeff.Sub(coeff, big.NewInt(1))
-			} else {
-				coeff.Add(coeff, big.NewInt(1))
-			}
-		}
-		exp++
-	}
-	return &commonpb.Decimal{Coefficient: coeff.Int64(), Exponent: int32(exp)}, true
-}
+// mulDecimal returns the order's notional, or refuses. ok=false means the
+// notional is genuinely unrepresentable and the gate must REFUSE — never a
+// wrapped product, which the concentration rules would read as a tiny position.
+func mulDecimal(a, b *commonpb.Decimal) (*commonpb.Decimal, bool) { return decutil.Mul(a, b) }

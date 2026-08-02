@@ -31,12 +31,14 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/durationpb"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	domainpb "github.com/eighred/kanz/kanz-schemas-go/domain/v1"
 	querypb "github.com/eighred/kanz/kanz-schemas-go/query/v1"
 
+	"github.com/eighred/kanz/internal/dec"
 	v1 "github.com/eighred/kanz/internal/risk/api/v1"
 	"github.com/eighred/kanz/internal/risk/domain"
 	"github.com/eighred/kanz/internal/risk/publish"
@@ -70,7 +72,51 @@ func (s *Server) Register(r grpc.ServiceRegistrar) {
 	querypb.RegisterRiskQueryServiceServer(r, s)
 }
 
+// requireDecimalDomain refuses a request carrying an out-of-domain Decimal
+// (#246). It is the FIRST thing every method does, before the Engine is touched.
+//
+// # Why this ingress had no check when every other one did
+//
+// The #95 sweep bounded the bus consumers, and its arch guard
+// (test/arch/decimal_wire_domain_test.go) keys on files that DECODE A BUS
+// PAYLOAD — proto.Unmarshal(payload, …). A gRPC method argument is already
+// decoded by the transport, so this file is outside that guard by construction,
+// not exempted from it; the guard's own comment at :44-57 names that blind spot.
+// The follow-up that enumerated the non-bus residue, #185, listed three sites
+// and grpcsrv was not one of them. So the one Decimal ingress a caller reaches
+// DIRECTLY was the one nothing looked at.
+//
+// # What it prevents
+//
+// EvaluateScenario took a caller-supplied ScenarioShock.Pct and handed it
+// straight to the compute layer. Decimal.exponent is a plain int32 on the wire:
+// {coefficient: 1, exponent: -2000000000} drove an unbounded pow10 loop two
+// billion times PER POSITION, PER SHOCK. The engine stops answering and keeps
+// reporting healthy — the failure shape this platform treats as the worst one.
+// compute's own arithmetic is bounded now too (#216), so this is the outer of
+// two independent belts, and it is the one that produces a diagnosable answer
+// instead of a slow one.
+//
+// InDomainDeep walks the WHOLE message rather than the fields this adapter reads,
+// so a Decimal added to a query schema later is covered without anyone returning
+// here. That is also why the cheap-looking methods call it: Exposure and Measures
+// carry no Decimal today, and "today" is exactly the assumption that expired here
+// once already.
+func requireDecimalDomain(req proto.Message) error {
+	path, ok := dec.InDomainDeep(req)
+	if ok {
+		return nil
+	}
+	// The path is named so the caller can fix the field rather than bisect the
+	// request. The value is not echoed: it is attacker-supplied.
+	return status.Errorf(codes.InvalidArgument,
+		"risk: %s carries a Decimal whose exponent is outside the computable domain (|exponent| > 64)", path)
+}
+
 func (s *Server) Exposure(ctx context.Context, req *querypb.ExposureRequest) (*querypb.ExposureResponse, error) {
+	if err := requireDecimalDomain(req); err != nil {
+		return nil, err
+	}
 	resp, err := s.engine.Exposure(ctx, v1.ExposureRequest{
 		PortfolioID: v1.PortfolioID(req.GetPortfolioId()),
 		AsOf:        asOfTime(req.GetAsOf()),
@@ -97,6 +143,9 @@ func (s *Server) Exposure(ctx context.Context, req *querypb.ExposureRequest) (*q
 }
 
 func (s *Server) Measures(ctx context.Context, req *querypb.MeasuresRequest) (*querypb.MeasuresResponse, error) {
+	if err := requireDecimalDomain(req); err != nil {
+		return nil, err
+	}
 	resp, err := s.engine.Measures(ctx, v1.MeasuresRequest{
 		PortfolioID: v1.PortfolioID(req.GetPortfolioId()),
 		AsOf:        asOfTime(req.GetAsOf()),
@@ -120,6 +169,11 @@ func (s *Server) Measures(ctx context.Context, req *querypb.MeasuresRequest) (*q
 }
 
 func (s *Server) EvaluateScenario(ctx context.Context, req *querypb.EvaluateScenarioRequest) (*querypb.EvaluateScenarioResponse, error) {
+	// The one method that carries caller-supplied Decimals today: every shock's
+	// Pct. See requireDecimalDomain.
+	if err := requireDecimalDomain(req); err != nil {
+		return nil, err
+	}
 	shocks, err := apiShocks(req.GetShocks())
 	if err != nil {
 		return nil, err

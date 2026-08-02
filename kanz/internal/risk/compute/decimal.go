@@ -17,7 +17,37 @@ import (
 	"math"
 
 	commonpb "github.com/eighred/kanz/kanz-schemas-go/common/v1"
+
+	// decutil: this package's own tests declare a local `dec(...)` Decimal-literal
+	// helper (decimal_test.go), so the platform decimal package is aliased here
+	// to avoid the name clash — the same alias internal/compliance uses.
+	decutil "github.com/eighred/kanz/internal/dec"
 )
+
+// THE ARITHMETIC BELOW IS dec.Add / dec.Mul / dec.Abs, NOT A LOCAL COPY (#216).
+//
+// It used to be a local copy, and the copy was the bug. The identical int64
+// coefficient arithmetic was written three times — the compliance gate, the
+// platform dec package, and here — and repaired twice. A -20% stress on a
+// $200,000 position returned -$24,467 instead of +$160,000: 2e13 × 8e5 = 1.6e19
+// clears MaxInt64 and wraps NEGATIVE, so the scenario engine reported that a 20%
+// crash makes the desk money. The wrap point for a -20% shock is a position of
+// $115,292.15.
+//
+// It survived two repairs because a copied helper does not receive fixes; it
+// receives them only where somebody remembers to look. The wrappers here are
+// thin on purpose — enough to name the operation in the compute layer's
+// vocabulary and to state what a refusal means, and no arithmetic of their own.
+//
+// A REFUSAL SURFACES AS nil, never as a number. dec.Add/dec.Mul refuse only when
+// the exponent itself cannot move, which for in-domain inputs (|exponent| ≤ 64,
+// enforced at every ingress — dec.InDomainDeep on the bus, dec.InDomainDeep on
+// the gRPC query surface since #246) cannot happen — internal/dec's
+// TestArithmeticIsTotalOnInDomainInputs pins exactly that, by sweeping every
+// extreme in-domain exponent/coefficient pair and asserting no refusal is
+// possible. Reaching nil therefore means an ingress guard was
+// removed, and the honest answer is an ABSENT measure, not a wrapped one and
+// never a zero — a zero exposure reads as flat and passes every limit check.
 
 // zeroDecimal returns a Decimal whose value is exact 0.
 func zeroDecimal() *commonpb.Decimal {
@@ -26,32 +56,34 @@ func zeroDecimal() *commonpb.Decimal {
 
 // addDecimal returns a+b, aligning exponents to the more precise of
 // the two. nil operands are treated as 0 — convenient for
-// initializing accumulators with a single nil sentinel.
+// initializing accumulators with a single nil sentinel. nil result ⇒
+// unrepresentable; see the file header.
 func addDecimal(a, b *commonpb.Decimal) *commonpb.Decimal {
-	if a == nil {
-		a = zeroDecimal()
+	out, ok := decutil.Add(a, b)
+	if !ok {
+		return nil
 	}
-	if b == nil {
-		b = zeroDecimal()
-	}
-	targetExp := a.Exponent
-	if b.Exponent < targetExp {
-		targetExp = b.Exponent
-	}
-	coefA := a.Coefficient * pow10(int32(a.Exponent-targetExp))
-	coefB := b.Coefficient * pow10(int32(b.Exponent-targetExp))
-	return &commonpb.Decimal{
-		Coefficient: coefA + coefB,
-		Exponent:    targetExp,
-	}
+	return out
 }
 
 // negateDecimal returns -a. nil → 0.
+//
+// MinInt64 is the case that is not arithmetic-as-usual: Go's -MinInt64 is
+// MinInt64, so the naive negation returns the SAME negative number. Through
+// absDecimal that means |x| comes back negative and a gross exposure SUBTRACTS
+// the position it should have enlarged. dec.Abs raises the exponent instead.
 func negateDecimal(a *commonpb.Decimal) *commonpb.Decimal {
 	if a == nil {
 		return zeroDecimal()
 	}
-	return &commonpb.Decimal{Coefficient: -a.Coefficient, Exponent: a.Exponent}
+	if a.GetCoefficient() != math.MinInt64 {
+		return &commonpb.Decimal{Coefficient: -a.Coefficient, Exponent: a.Exponent}
+	}
+	out, ok := decutil.Abs(a)
+	if !ok {
+		return nil
+	}
+	return out
 }
 
 // absDecimal returns |a|. nil → 0.
@@ -65,36 +97,73 @@ func absDecimal(a *commonpb.Decimal) *commonpb.Decimal {
 	return &commonpb.Decimal{Coefficient: a.Coefficient, Exponent: a.Exponent}
 }
 
-// pow10 returns 10^n for small non-negative n. Used for exponent
-// alignment in addDecimal. n is bounded by the difference between
-// two Decimal exponents — financial data rarely exceeds 8 fractional
-// digits, so an overflow guard would be ceremonial; if it ever
-// matters (RISK-07 / RISK-08 on extreme scales) switch the helpers
-// to math/big.
-func pow10(n int32) int64 {
+// maxPow10 is the largest n for which 10^n is an int64: 10^18 fits,
+// 10^19 is above MaxInt64.
+const maxPow10 = 18
+
+// pow10 returns 10^n for non-negative n, and whether it fits an int64.
+//
+// It is BOUNDED, and the bound is the point (#246). This was an unbounded
+// `for i := 0; i < n; i++` loop justified by a comment saying "n is bounded by
+// the difference between two Decimal exponents … an overflow guard would be
+// ceremonial". Nothing bounded that difference: Decimal.exponent is a wire
+// field, and the risk engine's gRPC query surface passed a caller-supplied shock
+// Pct straight through with no domain check. exponent -2000000000 meant two
+// billion iterations PER POSITION, PER SHOCK — the engine stops answering while
+// still reporting healthy, which is the worst shape of failure this platform
+// has. It also produced a silently wrong scale factor for any n ≥ 19.
+//
+// Refusing past 10^18 costs a correct caller nothing: there is no int64 to
+// return there. decAccum's fast path reads false as "spill to the exact
+// math/big path", so the bound degrades precision-of-representation, never the
+// answer.
+func pow10(n int64) (int64, bool) {
 	if n <= 0 {
-		return 1
+		return 1, true
+	}
+	if n > maxPow10 {
+		return 0, false
 	}
 	out := int64(1)
-	for i := int32(0); i < n; i++ {
+	for i := int64(0); i < n; i++ {
 		out *= 10
 	}
-	return out
+	return out, true
 }
 
-// mulDecimal returns a*b. coefficient = a.coef × b.coef; exponent =
-// a.exp + b.exp. nil → 0. Overflow on the coefficient product is
-// possible at extreme scales — see pow10's comment on the math/big
-// upgrade path; for the RISK-07 placeholder formulas the int64
-// product comfortably holds typical portfolio scales.
+// mulInt64 returns x*y and whether it stayed inside int64.
+func mulInt64(x, y int64) (int64, bool) {
+	if x == 0 || y == 0 {
+		return 0, true
+	}
+	if x == math.MinInt64 || y == math.MinInt64 {
+		return 0, false // the division check below cannot see this one
+	}
+	z := x * y
+	if z/y != x {
+		return 0, false
+	}
+	return z, true
+}
+
+// addInt64 returns x+y and whether it stayed inside int64.
+func addInt64(x, y int64) (int64, bool) {
+	z := x + y
+	if (y > 0 && z < x) || (y < 0 && z > x) {
+		return 0, false
+	}
+	return z, true
+}
+
+// mulDecimal returns a*b. nil → 0. nil result ⇒ unrepresentable; see the file
+// header. This is the function #216 was filed against — it multiplied raw int64
+// coefficients and wrapped, sign and all.
 func mulDecimal(a, b *commonpb.Decimal) *commonpb.Decimal {
-	if a == nil || b == nil {
-		return zeroDecimal()
+	out, ok := decutil.Mul(a, b)
+	if !ok {
+		return nil
 	}
-	return &commonpb.Decimal{
-		Coefficient: a.Coefficient * b.Coefficient,
-		Exponent:    a.Exponent + b.Exponent,
-	}
+	return out
 }
 
 // decimalToFloat converts d to float64 for operations (sqrt, log, ...)
@@ -154,9 +223,25 @@ const uncertaintyExp int32 = -6
 // the old addDecimal fold started from — so a sum built with decAccum is
 // byte-identical (coefficient AND exponent) to the same sum built with
 // addDecimal, not merely numerically equal.
+//
+// THAT IDENTITY IS WHY IT SPILLS (#216). The int64 fast path is kept — it is
+// what the LATENCY-01c allocation guard measures, and every realistic book
+// stays on it — but it now DETECTS the overflow it used to commit and hands the
+// running sum to dec.Add from there. Detection matters most where no multiply
+// is involved at all: after a scenario shock the shocked positions carry a
+// coarser exponent than the untouched ones, so aligning an unshocked $10,000,000
+// (1e15 at -8) to a shocked -13 multiplies it by 1e5 and leaves int64 range on
+// its own. Gross exposure is what a limit is checked against, so a wrapped sum
+// there is a limit that passes on a book that breached it.
 type decAccum struct {
 	coef int64
 	exp  int32
+	// spilled is the running sum once the int64 fast path could no longer hold
+	// it. nil while the fast path holds, which is the allocation-free case.
+	spilled *commonpb.Decimal
+	// refused latches a sum dec.Add could not represent at all. The accumulator
+	// then yields nil forever: a partial sum is a WRONG total, not a smaller one.
+	refused bool
 }
 
 // add folds d into the accumulator, aligning exponents to the more precise
@@ -164,27 +249,107 @@ type decAccum struct {
 // true the term's magnitude is taken first (the gross-exposure case), matching
 // addDecimal(sum, absDecimal(d)).
 func (a *decAccum) add(d *commonpb.Decimal, abs bool) {
-	if d == nil {
+	if d == nil || a.refused {
 		return
 	}
-	c, e := d.Coefficient, d.Exponent
-	if abs && c < 0 {
+	c, e := d.GetCoefficient(), int64(d.GetExponent())
+	// |MinInt64| has no int64 coefficient at this exponent, so the fast path
+	// cannot take this magnitude — negating it would leave the term NEGATIVE in
+	// a gross sum. negateDecimal raises the exponent instead.
+	viaExact := abs && c == math.MinInt64
+	if abs && c < 0 && !viaExact {
 		c = -c
 	}
-	if e < a.exp {
-		a.coef = a.coef*pow10(a.exp-e) + c
-		a.exp = e
-	} else {
-		a.coef += c * pow10(e-a.exp)
+	if !viaExact && a.spilled == nil && a.addFast(c, e) {
+		return
 	}
+
+	term := &commonpb.Decimal{Coefficient: c, Exponent: int32(e)}
+	if viaExact {
+		if term = negateDecimal(term); term == nil {
+			a.refused = true
+			return
+		}
+	}
+	if a.spilled == nil {
+		a.spilled = &commonpb.Decimal{Coefficient: a.coef, Exponent: a.exp}
+	}
+	sum, ok := decutil.Add(a.spilled, term)
+	if !ok {
+		a.refused, a.spilled = true, nil
+		return
+	}
+	a.spilled = sum
 }
 
-// decimal materializes the accumulated value as a fresh *Decimal.
+// addFast folds (c, e) into the int64 accumulator, applying exactly the
+// alignment rule dec.Add applies. It reports false — WITHOUT having mutated the
+// accumulator — when any step would leave int64 range; that is the spill
+// signal, and it is the difference between a coarser answer and a wrong one.
+//
+// Allocation-free by construction: no *Decimal is built and nothing reaches
+// math/big. TestComputeMeasures_AllocsConstantInN pins that this stays the path
+// an ordinary book takes.
+func (a *decAccum) addFast(c, e int64) bool {
+	// A zero operand has no magnitude, so its exponent must not drag the
+	// alignment — the same rule dec.Add applies, and what keeps this
+	// accumulator byte-identical to an addDecimal fold rather than merely equal
+	// in value.
+	if c == 0 {
+		return true
+	}
+	if a.coef == 0 {
+		a.coef, a.exp = c, int32(e)
+		return true
+	}
+	gap := int64(a.exp) - e // both operands came from int32; cannot overflow
+	if gap > 0 {            // the incoming term is more precise: rescale the accumulator
+		p, ok := pow10(gap)
+		if !ok {
+			return false
+		}
+		scaled, ok := mulInt64(a.coef, p)
+		if !ok {
+			return false
+		}
+		sum, ok := addInt64(scaled, c)
+		if !ok {
+			return false
+		}
+		a.coef, a.exp = sum, int32(e)
+		return true
+	}
+	p, ok := pow10(-gap)
+	if !ok {
+		return false
+	}
+	scaled, ok := mulInt64(c, p)
+	if !ok {
+		return false
+	}
+	sum, ok := addInt64(a.coef, scaled)
+	if !ok {
+		return false
+	}
+	a.coef = sum
+	return true
+}
+
+// decimal materializes the accumulated value as a fresh *Decimal, or nil when
+// the sum was refused (see decAccum.refused).
 func (a *decAccum) decimal() *commonpb.Decimal {
+	if a.refused {
+		return nil
+	}
+	if a.spilled != nil {
+		return &commonpb.Decimal{Coefficient: a.spilled.GetCoefficient(), Exponent: a.spilled.GetExponent()}
+	}
 	return &commonpb.Decimal{Coefficient: a.coef, Exponent: a.exp}
 }
 
-// money materializes the accumulated value as Money in the given currency.
+// money materializes the accumulated value as Money in the given currency. A
+// refused sum yields a Money with a nil Amount — absent, which every reader of
+// a Money already handles, and which cannot be mistaken for a flat book.
 func (a *decAccum) money(currency string) *commonpb.Money {
 	return &commonpb.Money{Amount: a.decimal(), CurrencyCode: currency}
 }

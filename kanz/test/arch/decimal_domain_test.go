@@ -16,11 +16,18 @@ import (
 //	internal/compliance  maxDecimalExponent — guards PreTradeGate.Evaluate, which
 //	                                          the OMS calls on wire-derived orders
 //
-// They are duplicated deliberately: the two packages must not import each other,
-// and neither is the natural owner of a constant the other needs. Each doc
-// comment names its sibling. But a comment is not a check, and this repository
-// has spent a lot of effort on exactly that distinction — a claim that was true
-// when written and quietly false later.
+// They are duplicated, and each doc comment names its sibling. But a comment is
+// not a check, and this repository has spent a lot of effort on exactly that
+// distinction — a claim that was true when written and quietly false later.
+//
+// This comment was itself an example (#216). It used to say the duplication was
+// deliberate because "the two packages must not import each other". They can:
+// internal/compliance imports internal/dec as decutil, and since #216 it gets
+// its Decimal arithmetic from there. Only dec→compliance is impossible, and the
+// cycle forbids that without needing a rule. So the duplication is now a
+// LEFTOVER, not a design: exporting maxSafeExponent and deleting
+// maxDecimalExponent is a real option, and doing it means rewriting this guard
+// (it reads both literals out of the source) in the same change.
 //
 // Both bounds exist to stop the same thing: an unbounded 10^abs(exponent) on a
 // path reachable from outside. Both were verified to hang before they were
