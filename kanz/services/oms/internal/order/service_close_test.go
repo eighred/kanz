@@ -44,7 +44,7 @@ func cancelEnv() *envelopepb.Envelope { return &envelopepb.Envelope{EventType: S
 func restingOrderOn(t *testing.T, fb *fakeBus, venue execution.Venue) (*Service, *execution.CloseRegistry) {
 	t.Helper()
 	reg := execution.NewCloseRegistry()
-	svc, err := NewService(NewMemoryStore(), NewEmitter(fb), nil, execution.NewRouter(venue), reg, nil)
+	svc, err := NewService(testTenant, NewMemoryStore(), NewEmitter(fb), nil, execution.NewRouter(venue), reg, nil)
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
 	}
@@ -130,7 +130,7 @@ func TestCancel_TrackedCloseCarriesNoSweep(t *testing.T) {
 func TestCancel_NonCloserVenueIsLedgerOnly(t *testing.T) {
 	fb := &fakeBus{}
 	reg := execution.NewCloseRegistry()
-	svc, err := NewService(NewMemoryStore(), NewEmitter(fb), nil,
+	svc, err := NewService(testTenant, NewMemoryStore(), NewEmitter(fb), nil,
 		execution.NewRouter(execution.NewSimVenue("XSIM")), reg, nil)
 	if err != nil {
 		t.Fatalf("NewService: %v", err)

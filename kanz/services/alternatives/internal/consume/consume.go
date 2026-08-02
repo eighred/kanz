@@ -23,6 +23,8 @@ import (
 
 	envelopepb "github.com/eighred/kanz/kanz-schemas-go/envelope/v1"
 
+	"github.com/eighred/kanz/pkg/bus"
+
 	"github.com/eighred/kanz/internal/alternatives"
 	"github.com/eighred/kanz/services/alternatives/internal/fund"
 )
@@ -44,26 +46,33 @@ func DecodeJSON(payload []byte) (*alternatives.Event, error) {
 // Folder is the bus.EventHandler that folds lifecycle FACTs into the fund
 // journal. Construct once and pass Handle to bus.Consumer.Subscribe.
 type Folder struct {
+	// tenant is the tenant this folder serves; Handle refuses any other (#223).
+	tenant string
 	store  fund.Store
 	decode Decoder
 }
 
 // NewFolder wires a Folder to a durable fund.Store. A nil decoder defaults to
 // DecodeJSON.
-func NewFolder(store fund.Store, decode Decoder) (*Folder, error) {
+func NewFolder(tenant string, store fund.Store, decode Decoder) (*Folder, error) {
 	if store == nil {
 		return nil, errors.New("consume: fund store is nil")
 	}
 	if decode == nil {
 		decode = DecodeJSON
 	}
-	return &Folder{store: store, decode: decode}, nil
+	return &Folder{tenant: tenant, store: store, decode: decode}, nil
 }
 
 // Handle decodes one lifecycle FACT and appends it to the journal (idempotent on
 // the event id). A non-nil return nacks/DLQs the delivery — a malformed or
 // unappendable lifecycle event surfaces rather than being silently dropped.
 func (f *Folder) Handle(ctx context.Context, env *envelopepb.Envelope, payload []byte) error {
+	// This folder writes through an RLS pool pinned to f.tenant, so an envelope
+	// from another tenant would be folded into this tenant's book (#223).
+	if err := bus.RequireTenantScope(env.GetTenantId(), f.tenant); err != nil {
+		return err
+	}
 	e, err := f.decode(payload)
 	if err != nil {
 		return fmt.Errorf("consume: %s decode: %w", env.GetEventType(), err)

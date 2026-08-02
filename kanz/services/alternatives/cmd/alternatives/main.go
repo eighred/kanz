@@ -192,7 +192,7 @@ func runConsumer(ctx context.Context, cfg config.Config, store fund.Store, mesh 
 	// every message as one type — e.g. every distribution as a capital call —
 	// and silently corrupt the fund position rather than error.
 	for _, subject := range cfg.Subjects {
-		folder, err := consume.NewFolder(store, consume.DecodeProto(subject))
+		folder, err := consume.NewFolder(cfg.Tenant, store, consume.DecodeProto(subject))
 		if err != nil {
 			return err
 		}

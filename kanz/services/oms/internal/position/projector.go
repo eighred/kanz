@@ -50,6 +50,13 @@ func NewProjector(book Store, b Bus, tenant string) (*Projector, error) {
 
 // Handle is the bus.EventHandler for fill FACTs.
 func (p *Projector) Handle(ctx context.Context, env *envelopepb.Envelope, payload []byte) error {
+	// The projector is the SECOND consumer of order.order.filled, and it folds into
+	// a book scoped to p.tenant while publishing on subjects built from p.tenant —
+	// so an envelope from another tenant would be folded into, and published as,
+	// this tenant's position (#223).
+	if err := bus.RequireTenantScope(env.GetTenantId(), p.tenant); err != nil {
+		return err
+	}
 	fill, portfolioID, err := decodeFill(env.GetEventType(), payload)
 	if err != nil {
 		return err

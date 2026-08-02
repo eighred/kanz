@@ -190,7 +190,7 @@ func openStore(ctx context.Context, cfg config.Config) (ledger.Store, func(), er
 // degraded (book-of-record data loss must be loud). Idempotency is handled below
 // this layer (consumer dedup + ledger.Store.Append on the entry id).
 func runConsumer(ctx context.Context, cfg config.Config, store ledger.Store, mesh *transport.Mesh, logger *slog.Logger, obs *observability.Provider) error {
-	folder, err := consume.NewFolder(store, cfg.BaseCurrency)
+	folder, err := consume.NewFolder(cfg.Tenant, store, cfg.BaseCurrency)
 	if err != nil {
 		return err
 	}

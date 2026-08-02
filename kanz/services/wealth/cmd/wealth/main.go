@@ -149,10 +149,10 @@ func openStore(ctx context.Context, cfg config.Config) (book.Store, func(), erro
 // broken subscription brings folding down rather than running silently
 // degraded (a stale household valuation must be loud, not a quietly wrong
 // exposure view). Unlike alternatives, wealth carries one message type on one
-// subject, so a single consume.NewFolder(store, consume.DecodeProto) suffices
+// subject, so a single consume.NewFolder(cfg.Tenant, store, consume.DecodeProto) suffices
 // — no per-subject factory is needed.
 func runConsumer(ctx context.Context, cfg config.Config, store book.Store, mesh *transport.Mesh, logger *slog.Logger, obs *observability.Provider) error {
-	folder, err := consume.NewFolder(store, consume.DecodeProto)
+	folder, err := consume.NewFolder(cfg.Tenant, store, consume.DecodeProto)
 	if err != nil {
 		return err
 	}

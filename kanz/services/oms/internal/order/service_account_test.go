@@ -32,7 +32,7 @@ func TestSubmit_StampsThePortfoliosBoundAccount(t *testing.T) {
 	bindings := mustBind(t, "acme/fund-alpha@XSIM=okx-alpha")
 	router := execution.NewRouter(execution.NewSimVenue("XSIM", execution.WithAccount("okx-alpha")))
 
-	svc, err := NewService(store, NewEmitter(fb), nil, router, nil, nil,
+	svc, err := NewService(testTenant, store, NewEmitter(fb), nil, router, nil, nil,
 		WithAccountBindings(bindings, true, nil))
 	if err != nil {
 		t.Fatal(err)
@@ -65,7 +65,7 @@ func TestSubmit_UnboundPortfolioIsRefusedWhenAccountsAreRequired(t *testing.T) {
 	bindings := mustBind(t, "acme/fund-alpha@XSIM=okx-alpha") // fund-beta is bound to NOTHING
 	router := execution.NewRouter(execution.NewSimVenue("XSIM", execution.WithAccount("okx-alpha")))
 
-	svc, err := NewService(store, NewEmitter(fb), nil, router, nil, nil,
+	svc, err := NewService(testTenant, store, NewEmitter(fb), nil, router, nil, nil,
 		WithAccountBindings(bindings, true, nil))
 	if err != nil {
 		t.Fatal(err)
@@ -111,7 +111,7 @@ func TestSubmit_UnboundPortfolioTradesTheSharedAccountAndSaysSo(t *testing.T) {
 	store := NewMemoryStore()
 	router := execution.NewRouter(execution.NewSimVenue("XSIM", execution.WithAccount("shared-pool")))
 
-	svc, err := NewService(store, NewEmitter(fb), nil, router, nil, nil,
+	svc, err := NewService(testTenant, store, NewEmitter(fb), nil, router, nil, nil,
 		WithAccountBindings(mustBind(t, ""), false, nil)) // nothing bound, advisory
 	if err != nil {
 		t.Fatal(err)
@@ -146,7 +146,7 @@ func TestSubmit_BoundToAnAccountNoAdapterHolds_IsRefused(t *testing.T) {
 	// The only adapter at XSIM holds a DIFFERENT account.
 	router := execution.NewRouter(execution.NewSimVenue("XSIM", execution.WithAccount("okx-beta")))
 
-	svc, err := NewService(store, NewEmitter(fb), nil, router, nil, nil,
+	svc, err := NewService(testTenant, store, NewEmitter(fb), nil, router, nil, nil,
 		WithAccountBindings(bindings, true, nil))
 	if err != nil {
 		t.Fatal(err)
@@ -174,7 +174,7 @@ func TestSubmit_FillCarriesTheAccountItSettledAgainst(t *testing.T) {
 	store := NewMemoryStore()
 	router := execution.NewRouter(execution.NewSimVenue("XSIM", execution.WithAccount("okx-alpha")))
 
-	svc, err := NewService(store, NewEmitter(fb), nil, router, nil, nil,
+	svc, err := NewService(testTenant, store, NewEmitter(fb), nil, router, nil, nil,
 		WithAccountBindings(mustBind(t, "acme/fund-alpha@XSIM=okx-alpha"), true, nil))
 	if err != nil {
 		t.Fatal(err)

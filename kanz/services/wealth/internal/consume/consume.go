@@ -21,6 +21,8 @@ import (
 
 	envelopepb "github.com/eighred/kanz/kanz-schemas-go/envelope/v1"
 
+	"github.com/eighred/kanz/pkg/bus"
+
 	"github.com/eighred/kanz/internal/wealth"
 	"github.com/eighred/kanz/services/wealth/internal/book"
 )
@@ -42,25 +44,32 @@ func DecodeJSON(payload []byte) (wealth.Household, error) {
 // Folder is the bus.EventHandler that folds household composition FACTs into the
 // book. Construct once and pass Handle to bus.Consumer.Subscribe.
 type Folder struct {
+	// tenant is the tenant this folder serves; Handle refuses any other (#223).
+	tenant string
 	store  book.Store
 	decode Decoder
 }
 
 // NewFolder wires a Folder to a durable book.Store. A nil decoder defaults to
 // DecodeJSON.
-func NewFolder(store book.Store, decode Decoder) (*Folder, error) {
+func NewFolder(tenant string, store book.Store, decode Decoder) (*Folder, error) {
 	if store == nil {
 		return nil, errors.New("consume: book store is nil")
 	}
 	if decode == nil {
 		decode = DecodeJSON
 	}
-	return &Folder{store: store, decode: decode}, nil
+	return &Folder{tenant: tenant, store: store, decode: decode}, nil
 }
 
 // Handle decodes one composition FACT and Puts it into the book (last-write-wins
 // on household id). A non-nil return nacks/DLQs the delivery.
 func (f *Folder) Handle(ctx context.Context, env *envelopepb.Envelope, payload []byte) error {
+	// This folder writes through an RLS pool pinned to f.tenant, so an envelope
+	// from another tenant would be folded into this tenant's book (#223).
+	if err := bus.RequireTenantScope(env.GetTenantId(), f.tenant); err != nil {
+		return err
+	}
 	h, err := f.decode(payload)
 	if err != nil {
 		return fmt.Errorf("consume: %s decode: %w", env.GetEventType(), err)

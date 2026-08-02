@@ -11,7 +11,9 @@ import (
 	commandpb "github.com/eighred/kanz/kanz-schemas-go/command/v1"
 	commonpb "github.com/eighred/kanz/kanz-schemas-go/common/v1"
 	envelopepb "github.com/eighred/kanz/kanz-schemas-go/envelope/v1"
+
 	orderpb "github.com/eighred/kanz/kanz-schemas-go/order/v1"
+	"github.com/eighred/kanz/pkg/bus"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
@@ -34,6 +36,9 @@ import (
 // validation or compliance rejection — is terminal: it is acked (nil) after a
 // REJECTED outcome, so a poison command never blocks the partition.
 type Service struct {
+	// tenant is the tenant this OMS serves; Handle's cross-tenant refusal
+	// compares the inbound envelope against it (#223).
+	tenant  string
 	store   Store
 	gate    compliance.Gate
 	emitter *Emitter
@@ -139,9 +144,17 @@ func (s *Service) abandonClaim(command, orderID string, err error) error {
 // closes is the in-flight-close registry the venue-close dispatch path writes to
 // and the reconcilers' healing watchdogs drain; nil disables venue-side cancel
 // dispatch (the cancel stays ledger-only).
-func NewService(store Store, emitter *Emitter, gate compliance.Gate, router *execution.Router, closes execution.CloseTracker, logger *slog.Logger, opts ...ServiceOption) (*Service, error) {
+// tenant is the tenant THIS OMS serves. Required, and refused when empty for the
+// same reason pg.NewTenantPool refuses one: a service that cannot say whose book
+// it is writing must not write. It is the input to the cross-tenant refusal in
+// Handle (#223).
+func NewService(tenant string, store Store, emitter *Emitter, gate compliance.Gate, router *execution.Router, closes execution.CloseTracker, logger *slog.Logger, opts ...ServiceOption) (*Service, error) {
 	if store == nil || emitter == nil {
 		return nil, errors.New("oms: store and emitter required")
+	}
+	if tenant == "" {
+		return nil, errors.New("oms: empty tenant — this service could not tell its own " +
+			"events from another tenant's, and every order it stored would be scoped to nothing")
 	}
 	if gate == nil {
 		gate = compliance.AllowAll{}
@@ -150,7 +163,8 @@ func NewService(store Store, emitter *Emitter, gate compliance.Gate, router *exe
 		logger = slog.Default()
 	}
 	svc := &Service{
-		store: store, gate: gate, emitter: emitter, router: router, closes: closes,
+		tenant: tenant,
+		store:  store, gate: gate, emitter: emitter, router: router, closes: closes,
 		now: time.Now, logger: logger, claimWait: defaultClaimWait,
 	}
 	for _, opt := range opts {
@@ -161,6 +175,17 @@ func NewService(store Store, emitter *Emitter, gate compliance.Gate, router *exe
 
 // Handle is the bus.EventHandler. It dispatches by the command subject/type.
 func (s *Service) Handle(ctx context.Context, env *envelopepb.Envelope, payload []byte) error {
+	// ONE CHECK FOR ALL THREE COMMANDS. handleSubmit resolves the venue account
+	// from env.GetTenantId() while the store writes
+	// current_setting('app.tenant_id') — the GUC pinned to THIS service's tenant.
+	// Nothing compared them, so an acme order was admitted from an acme envelope
+	// and stored as __system__ (#223). Checking at the dispatch point rather than
+	// in each handler is deliberate: handleCancel and handleAmend do not even
+	// receive the envelope, so a per-handler check would have to thread it and
+	// would be forgotten by the next command added here.
+	if err := bus.RequireTenantScope(env.GetTenantId(), s.tenant); err != nil {
+		return err
+	}
 	switch env.GetEventType() {
 	case SubjectSubmit:
 		return s.handleSubmit(ctx, env, payload)

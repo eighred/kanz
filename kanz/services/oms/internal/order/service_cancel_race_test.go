@@ -158,7 +158,7 @@ func TestCancel_ArrivingMidExecutionCannotResurrectACancelledOrder(t *testing.T)
 	fb := &fakeBus{}
 	venue := newGatedVenue(fullFill())
 	reg := execution.NewCloseRegistry()
-	svc, err := NewService(NewMemoryStore(), NewEmitter(fb), nil, execution.NewRouter(venue), reg, nil)
+	svc, err := NewService(testTenant, NewMemoryStore(), NewEmitter(fb), nil, execution.NewRouter(venue), reg, nil)
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
 	}
@@ -254,7 +254,7 @@ func TestCancel_ArrivingMidExecutionCannotResurrectACancelledOrder(t *testing.T)
 func TestAmend_ArrivingMidExecutionCannotUnfillAFilledOrder(t *testing.T) {
 	fb := &fakeBus{}
 	venue := newGatedVenue(fullFill())
-	svc, err := NewService(NewMemoryStore(), NewEmitter(fb), nil, execution.NewRouter(venue), nil, nil)
+	svc, err := NewService(testTenant, NewMemoryStore(), NewEmitter(fb), nil, execution.NewRouter(venue), nil, nil)
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
 	}
@@ -360,7 +360,7 @@ func TestCancel_DoesNotWaitForeverOnAHungVenue(t *testing.T) {
 	venue := newGatedVenue() // never released until cleanup
 	t.Cleanup(func() { close(venue.release) })
 
-	svc, err := NewService(NewMemoryStore(), NewEmitter(fb), nil, execution.NewRouter(venue), nil, nil,
+	svc, err := NewService(testTenant, NewMemoryStore(), NewEmitter(fb), nil, execution.NewRouter(venue), nil, nil,
 		WithClaimWait(50*time.Millisecond))
 	if err != nil {
 		t.Fatalf("NewService: %v", err)

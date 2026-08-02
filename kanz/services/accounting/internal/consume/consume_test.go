@@ -16,6 +16,12 @@ import (
 	"github.com/eighred/kanz/services/accounting/internal/ledger"
 )
 
+// testTenant is the tenant these folders serve. It is the SYSTEM tenant, so
+// RequireTenantScope's shared-bucket branch applies and these tests exercise the
+// folding logic exactly as they did before #223. The cross-tenant refusal itself
+// is proven in cross_tenant_test.go, which uses a real tenant.
+const testTenant = "__system__"
+
 func decv(coef int64, exp int32) *commonpb.Decimal {
 	return &commonpb.Decimal{Coefficient: coef, Exponent: exp}
 }
@@ -42,7 +48,7 @@ func filledPayload(t *testing.T, portfolioID, fillID, instrument string, side or
 
 func TestFolderFoldsFillIntoLedger(t *testing.T) {
 	st := ledger.NewMemoryStore()
-	f, err := NewFolder(st, "USD")
+	f, err := NewFolder(testTenant, st, "USD")
 	if err != nil {
 		t.Fatalf("new folder: %v", err)
 	}
@@ -97,7 +103,7 @@ func cashPayload(t *testing.T, entryID, portfolioID string, entryType accounting
 // cash, a fee removes it — and the fold is idempotent on the entry id.
 func TestFolderFoldsCashMovements(t *testing.T) {
 	st := ledger.NewMemoryStore()
-	f, _ := NewFolder(st, "USD")
+	f, _ := NewFolder(testTenant, st, "USD")
 	ctx := context.Background()
 	t0 := time.Unix(1_700_000_000, 0).UTC()
 
@@ -130,7 +136,7 @@ func TestFolderFoldsCashMovements(t *testing.T) {
 // A non-cash event is acked and ignored by the cash handler.
 func TestHandleCashIgnoresNonCashEvent(t *testing.T) {
 	st := ledger.NewMemoryStore()
-	f, _ := NewFolder(st, "USD")
+	f, _ := NewFolder(testTenant, st, "USD")
 	env := &envelopepb.Envelope{EventType: orderEventFilled}
 	if err := f.HandleCash(context.Background(), env, []byte("ignored")); err != nil {
 		t.Fatalf("want ack (nil) for non-cash event, got %v", err)
@@ -140,7 +146,7 @@ func TestHandleCashIgnoresNonCashEvent(t *testing.T) {
 // A malformed cash payload (or one missing the cash leg) is returned (nack/DLQ).
 func TestHandleCashRejectsMalformed(t *testing.T) {
 	st := ledger.NewMemoryStore()
-	f, _ := NewFolder(st, "USD")
+	f, _ := NewFolder(testTenant, st, "USD")
 	env := &envelopepb.Envelope{EventType: cashEventSubscription}
 	if err := f.HandleCash(context.Background(), env, []byte("not a proto")); err == nil {
 		t.Fatal("expected decode error for a malformed cash payload")
@@ -154,7 +160,7 @@ func TestHandleCashRejectsMalformed(t *testing.T) {
 
 func TestFolderIgnoresNonFillEvent(t *testing.T) {
 	st := ledger.NewMemoryStore()
-	f, _ := NewFolder(st, "USD")
+	f, _ := NewFolder(testTenant, st, "USD")
 	env := &envelopepb.Envelope{EventType: "order.order.created"}
 	if err := f.Handle(context.Background(), env, []byte("anything")); err != nil {
 		t.Fatalf("non-fill event should ack: %v", err)
@@ -166,7 +172,7 @@ func TestFolderIgnoresNonFillEvent(t *testing.T) {
 
 func TestFolderRejectsMalformedFill(t *testing.T) {
 	st := ledger.NewMemoryStore()
-	f, _ := NewFolder(st, "USD")
+	f, _ := NewFolder(testTenant, st, "USD")
 	env := &envelopepb.Envelope{EventType: orderEventFilled}
 	if err := f.Handle(context.Background(), env, []byte("not-a-proto")); err == nil {
 		t.Fatal("malformed fill should surface an error (DLQ), not ack")
@@ -182,7 +188,7 @@ func TestFolderRejectsMalformedFill(t *testing.T) {
 // healthy. The timeout is what distinguishes "refused" from "still computing".
 func TestHandleCashRefusesAnOutOfDomainExponent(t *testing.T) {
 	st := ledger.NewMemoryStore()
-	f, _ := NewFolder(st, "USD")
+	f, _ := NewFolder(testTenant, st, "USD")
 	env := &envelopepb.Envelope{EventType: cashEventSubscription}
 	payload := cashPayload(t, "cash:absurd", "PORT-1", accountingpb.EntryType_ENTRY_TYPE_CASH,
 		decv(1, 2000000000), "USD", time.Unix(1, 0))
@@ -209,7 +215,7 @@ func TestHandleCashRefusesAnOutOfDomainExponent(t *testing.T) {
 // The same for the FILL path, which decodes through a different function.
 func TestFolderRefusesAnOutOfDomainFill(t *testing.T) {
 	st := ledger.NewMemoryStore()
-	f, _ := NewFolder(st, "USD")
+	f, _ := NewFolder(testTenant, st, "USD")
 	env := &envelopepb.Envelope{EventType: orderEventFilled}
 	payload := filledPayload(t, "PORT-1", "fill-absurd", "BTC-USD", orderpb.Side_SIDE_BUY,
 		decv(1, 2000000000), decv(50000, 0), time.Unix(1, 0))
@@ -234,7 +240,7 @@ func TestFolderRefusesAnOutOfDomainFill(t *testing.T) {
 // that refused everything would satisfy both tests above.
 func TestHandleCashStillFoldsAnOrdinaryEntry(t *testing.T) {
 	st := ledger.NewMemoryStore()
-	f, _ := NewFolder(st, "USD")
+	f, _ := NewFolder(testTenant, st, "USD")
 	env := &envelopepb.Envelope{EventType: cashEventSubscription}
 	payload := cashPayload(t, "cash:ok", "PORT-2", accountingpb.EntryType_ENTRY_TYPE_CASH,
 		decv(100000, -2), "USD", time.Unix(1, 0))

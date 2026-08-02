@@ -353,7 +353,7 @@ func runConsumers(ctx context.Context, cfg config.Config, readiness *server.Read
 	venues, closeVenues := configuredVenues(ctx, cfg, store, producer, unverifiedAccounts, logger)
 	defer closeVenues()
 	router := execution.NewRouter(venues...)
-	svc, err := order.NewService(store, emitter, gate, router, closeRegistry, logger,
+	svc, err := order.NewService(cfg.Tenant, store, emitter, gate, router, closeRegistry, logger,
 		order.WithAccountBindings(bindings, cfg.RequireVenueAccount, sharedCollateral),
 		order.WithQuarantineCounter(quarantined),
 		order.WithClaimTimeoutCounter(claimTimeouts))
