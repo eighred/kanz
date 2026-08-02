@@ -33,7 +33,7 @@ func TestCheck_OversizedMarketOrderCannotWrapIntoAdmission(t *testing.T) {
 		g := NewCOMP01Gate(bookedTestGate(t), "USD",
 			WithMarkSource(stubMarks{instrument: "AAPL", price: big.NewRat(100, 1)}))
 
-		breach, err := g.Check(context.Background(), qtyOrder(orderpb.OrderType_ORDER_TYPE_MARKET, qty, 0))
+		breach, err := g.Check(context.Background(), "t1", qtyOrder(orderpb.OrderType_ORDER_TYPE_MARKET, qty, 0))
 		if err != nil {
 			t.Fatalf("qty=%d Check: %v", qty, err)
 		}
@@ -57,7 +57,7 @@ func TestCheck_OversizedLimitOrderCannotWrapIntoAdmission(t *testing.T) {
 
 	g := NewCOMP01Gate(bookedTestGate(t), "USD")
 
-	breach, err := g.Check(context.Background(), cmd)
+	breach, err := g.Check(context.Background(), "t1", cmd)
 	if err != nil {
 		t.Fatalf("Check: %v", err)
 	}
@@ -77,7 +77,7 @@ func TestCheck_NeighbouringQuantitiesStillBreachConcentration(t *testing.T) {
 		g := NewCOMP01Gate(bookedTestGate(t), "USD",
 			WithMarkSource(stubMarks{instrument: "AAPL", price: big.NewRat(100, 1)}))
 
-		breach, err := g.Check(context.Background(), qtyOrder(orderpb.OrderType_ORDER_TYPE_MARKET, qty, 0))
+		breach, err := g.Check(context.Background(), "t1", qtyOrder(orderpb.OrderType_ORDER_TYPE_MARKET, qty, 0))
 		if err != nil {
 			t.Fatalf("qty=%d Check: %v", qty, err)
 		}
@@ -89,7 +89,7 @@ func TestCheck_NeighbouringQuantitiesStillBreachConcentration(t *testing.T) {
 
 	g := NewCOMP01Gate(bookedTestGate(t), "USD",
 		WithMarkSource(stubMarks{instrument: "AAPL", price: big.NewRat(100, 1)}))
-	breach, err := g.Check(context.Background(), qtyOrder(orderpb.OrderType_ORDER_TYPE_MARKET, 10, 0))
+	breach, err := g.Check(context.Background(), "t1", qtyOrder(orderpb.OrderType_ORDER_TYPE_MARKET, 10, 0))
 	if err != nil {
 		t.Fatalf("Check: %v", err)
 	}

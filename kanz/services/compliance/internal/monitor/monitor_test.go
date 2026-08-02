@@ -94,9 +94,10 @@ func positionEvent(t *testing.T, inst string, qty, mv int64, asOf time.Time) []b
 	return b
 }
 
-func concentrationRegistry() *comp.MandateRegistry {
+func concentrationRegistry(t *testing.T) *comp.MandateRegistry {
+	t.Helper()
 	reg := comp.NewMandateRegistry()
-	reg.Put(&compliancepb.Mandate{
+	if err := reg.Put(&compliancepb.Mandate{
 		MandateId: "m1", TenantId: "t1", PortfolioId: "p1", Version: 1,
 		EffectiveAt: timestamppb.New(t0),
 		Rules: []*compliancepb.Rule{{
@@ -106,16 +107,20 @@ func concentrationRegistry() *comp.MandateRegistry {
 				MaxWeight: decv(60, -2), // 60%
 			}},
 		}},
-	})
+	}); err != nil {
+		t.Fatalf("registry refused a well-formed mandate: %v", err)
+	}
 	return reg
 }
 
 func TestMonitor_PassiveBreachEmitsAndEscalates(t *testing.T) {
 	fb := &fakeBus{}
 	rec := &recordingRecorder{}
-	m := NewMonitor(comp.NewEngine(nil), concentrationRegistry(), nil, NewEmitter(fb), rec, nil)
+	m := NewMonitor(comp.NewEngine(nil), concentrationRegistry(t), nil, NewEmitter(fb), rec, nil)
 	ctx := testCtx()
-	env := &envelopepb.Envelope{}
+	// The position FACT carries no tenant of its own — the monitor takes it off
+	// the envelope, and "t1" is the tenant concentrationRegistry files under (#243).
+	env := &envelopepb.Envelope{TenantId: "t1"}
 
 	// 1) AAPL alone ⇒ 100% > 60% (seed breach, POSITION_CHANGE).
 	if err := m.Handle(ctx, env, positionEvent(t, "AAPL", 100, 100000, t0.Add(time.Minute))); err != nil {
@@ -167,7 +172,7 @@ func TestMonitor_PassiveBreachEmitsAndEscalates(t *testing.T) {
 func TestMonitor_NoMandateNoEmit(t *testing.T) {
 	fb := &fakeBus{}
 	m := NewMonitor(comp.NewEngine(nil), comp.NewMandateRegistry(), nil, NewEmitter(fb), nil, nil)
-	if err := m.Handle(testCtx(), &envelopepb.Envelope{}, positionEvent(t, "AAPL", 100, 100000, t0.Add(time.Minute))); err != nil {
+	if err := m.Handle(testCtx(), &envelopepb.Envelope{TenantId: "t1"}, positionEvent(t, "AAPL", 100, 100000, t0.Add(time.Minute))); err != nil {
 		t.Fatal(err)
 	}
 	if len(fb.events) != 0 {

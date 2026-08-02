@@ -111,7 +111,14 @@ func (l *MandateLoader) Apply(cc *lifecyclepb.ConfigChanged) (*compliancepb.Mand
 	if err != nil {
 		return nil, err
 	}
-	l.reg.Put(m)
+	// Put's refusal is PROPAGATED, not swallowed. A mandate that names no tenant
+	// cannot be filed under (tenant, portfolio) at all, and a registry that
+	// dropped it quietly would leave the portfolio reading UNGOVERNED — which
+	// under OMS_REQUIRE_MANDATE=false is admitted with no constraints, not
+	// refused (#243).
+	if err := l.reg.Put(m); err != nil {
+		return nil, err
+	}
 	return m, nil
 }
 

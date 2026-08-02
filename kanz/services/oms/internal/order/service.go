@@ -236,7 +236,15 @@ func (s *Service) handleSubmit(ctx context.Context, env *envelopepb.Envelope, pa
 	}
 
 	// Pre-trade compliance gate (OMS-01f).
-	breach, err := s.gate.Check(ctx, &cmd)
+	//
+	// THE ENVELOPE'S TENANT, NOT s.tenant. SubmitOrder carries no tenant of its
+	// own and portfolio_id is a caller-chosen string, so the mandate registry used
+	// to key on "growth" alone and hand tenant B's order tenant A's concentration
+	// limits (#243). env.GetTenantId() is the authenticated caller's tenant — the
+	// api-gateway stamps it and bus.Validate requires it non-empty on the live
+	// path. s.tenant is this OMS's serving tenant, which ships as __system__ and
+	// would ask for the platform's mandate rather than the customer's.
+	breach, err := s.gate.Check(ctx, env.GetTenantId(), &cmd)
 	if err != nil {
 		return err // transient gate failure ⇒ retry
 	}

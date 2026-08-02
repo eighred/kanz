@@ -50,7 +50,7 @@ func ratOf(n int64) *big.Rat { return big.NewRat(n, 1) }
 // oneMandate is a MandateSource that governs every portfolio with the same mandate.
 type oneMandate struct{ m *compliancepb.Mandate }
 
-func (o oneMandate) Mandate(context.Context, string, time.Time) (*compliancepb.Mandate, bool, error) {
+func (o oneMandate) Mandate(context.Context, string, string, time.Time) (*compliancepb.Mandate, bool, error) {
 	return o.m, true, nil
 }
 

@@ -113,7 +113,7 @@ func TestARestartedGateArmsItselfWithEveryMandateInForce(t *testing.T) {
 					mu.Lock()
 					defer mu.Unlock()
 					for _, pf := range []string{alpha, beta} {
-						if _, ok, _ := registry.Mandate(ctx, pf, time.Now()); ok {
+						if _, ok, _ := registry.Mandate(ctx, "acme", pf, time.Now()); ok {
 							armed[pf] = true
 						}
 					}

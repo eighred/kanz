@@ -196,6 +196,16 @@ spec:
             #
             # If the counter above is non-zero, part of your book is trading with no
             # compliance constraints at all. That is the number to watch.
+            #
+            # THIS SWITCH DOES NOT GOVERN ONE REFUSAL (#243). An order whose mandate
+            # cannot be ATTRIBUTED — two tenants have published a mandate for the same
+            # portfolio name, and this OMS is asking as the shared __system__ bucket —
+            # is rejected (MANDATE_TENANT_UNRESOLVED) whatever this is set to. "Nobody
+            # wrote a mandate" is a posture an operator may knowingly trade through;
+            # "a mandate exists and we cannot tell whose" is not, because admitting it
+            # means clearing one fund's order against another fund's limits. It cannot
+            # fire while one tenant uses a given portfolio name; it starts mattering
+            # when per-tenant compute (#97) provisions the second.
             - { name: OMS_REQUIRE_MANDATE, value: "false" }
             - { name: OMS_LISTEN, value: ":8090" }
             - { name: OMS_NATS_URL, value: "nats://nats.kanz-messaging.svc:4222" }

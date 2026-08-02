@@ -14,6 +14,7 @@ package monitor
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"math/big"
 	"sync"
@@ -29,11 +30,21 @@ import (
 	"github.com/eighred/kanz/internal/dec"
 )
 
+// bookKey identifies a book by (tenant, portfolio).
+//
+// portfolio_id alone was the key, and it is a CALLER-CHOSEN string: two tenants
+// each running a portfolio called "growth" shared one book here, so their
+// positions summed into one NAV and each breach transition suppressed the
+// other's (#243). The mandate lookup is tenant-scoped now, and a book keyed
+// more loosely than the mandate it is evaluated against would put the collision
+// back one layer down.
+type bookKey struct{ tenant, portfolio string }
+
 // Monitor re-evaluates portfolios on every position change. Goroutine-safe.
 type Monitor struct {
-	// warnedUngoverned names each ungoverned portfolio once (guarded by mu, which
-	// already protects the books below).
-	warnedUngoverned map[string]bool
+	// warnedUngoverned names each ungoverned (tenant, portfolio) once (guarded by
+	// mu, which already protects the books below).
+	warnedUngoverned map[bookKey]bool
 
 	engine     *comp.Engine
 	mandates   comp.MandateSource
@@ -44,8 +55,8 @@ type Monitor struct {
 	logger     *slog.Logger
 
 	mu         sync.Mutex
-	books      map[string]map[string]comp.Position // portfolio → instrument → position
-	lastStatus map[string]compliancepb.ComplianceStatus
+	books      map[bookKey]map[string]comp.Position // (tenant, portfolio) → instrument → position
+	lastStatus map[bookKey]compliancepb.ComplianceStatus
 }
 
 // NewMonitor wires the monitor. A nil engine defaults to comp.NewEngine(nil); a
@@ -65,16 +76,16 @@ func NewMonitor(engine *comp.Engine, mandates comp.MandateSource, classifier com
 		recorder:         recorder,
 		now:              time.Now,
 		logger:           logger,
-		books:            make(map[string]map[string]comp.Position),
-		lastStatus:       make(map[string]compliancepb.ComplianceStatus),
-		warnedUngoverned: make(map[string]bool),
+		books:            make(map[bookKey]map[string]comp.Position),
+		lastStatus:       make(map[bookKey]compliancepb.ComplianceStatus),
+		warnedUngoverned: make(map[bookKey]bool),
 	}
 }
 
 // Handle is the bus.EventHandler for position-changed FACTs. A malformed payload
 // is a permanent defect (acked); a transient emit/record failure is returned so
 // the FACT is redelivered (the breach must not be lost).
-func (m *Monitor) Handle(ctx context.Context, _ *envelopepb.Envelope, payload []byte) error {
+func (m *Monitor) Handle(ctx context.Context, env *envelopepb.Envelope, payload []byte) error {
 	var ps domainpb.PositionState
 	if err := proto.Unmarshal(payload, &ps); err != nil {
 		m.logger.ErrorContext(ctx, "compliance monitor: malformed PositionState", "err", err)
@@ -93,26 +104,42 @@ func (m *Monitor) Handle(ctx context.Context, _ *envelopepb.Envelope, payload []
 	if pid == "" {
 		return nil
 	}
+	// WHOSE position is this? The FACT itself carries no tenant, so it comes off
+	// the envelope — the OMS position projector stamps its own OMS_TENANT on
+	// every one (services/oms/internal/position/projector.go). Today that is
+	// __system__ for the whole estate, which the registry resolves through its
+	// shared-bucket branch; see comp.MandateRegistry.Mandate.
+	key := bookKey{tenant: env.GetTenantId(), portfolio: pid}
 
-	trigger, book, asOf := m.applyAndSnapshot(pid, &ps)
+	trigger, book, asOf := m.applyAndSnapshot(key, &ps)
 
-	mandate, ok, err := m.mandates.Mandate(ctx, pid, asOf)
+	mandate, ok, err := m.mandates.Mandate(ctx, key.tenant, pid, asOf)
 	if err != nil {
+		// A tenant the registry cannot resolve is TERMINAL — retrying re-reads the
+		// same ambiguous data forever, and a redelivery loop on a position FACT is
+		// how a monitor stops monitoring everything else. Refuse to evaluate,
+		// loudly, and ack. Nothing is silently declared clean: the portfolio's
+		// last status is left where it was, so the next unambiguous evaluation
+		// still sees the transition.
+		if errors.Is(err, comp.ErrMandateTenantUnresolved) {
+			if m.firstUngoverned(key) {
+				m.logger.ErrorContext(ctx, "NOT CHECKING this portfolio: cannot determine whose mandate governs it",
+					"tenant_id", key.tenant, "portfolio_id", pid, "err", err)
+			}
+			return nil
+		}
 		return err // transient mandate lookup ⇒ retry
 	}
 	// The same two states the pre-trade gate distinguishes (EXEC-M14): a portfolio
 	// with NO MANDATE is a gap nobody decided on, and it must not look identical to a
-	// portfolio somebody deliberately left unconstrained. Said ONCE per portfolio —
-	// this handler runs on every position change, and a monitor that floods its own
-	// log is a monitor nobody reads.
+	// portfolio somebody deliberately left unconstrained. Said ONCE per (tenant,
+	// portfolio) — this handler runs on every position change, and a monitor that
+	// floods its own log is a monitor nobody reads.
 	if !ok {
-		m.mu.Lock()
-		first := !m.warnedUngoverned[pid]
-		m.warnedUngoverned[pid] = true
-		m.mu.Unlock()
-		if first {
+		if m.firstUngoverned(key) {
 			m.logger.Warn("UNGOVERNED: no mandate governs this portfolio — nothing is being checked against it",
-				"portfolio_id", pid, "fix", "put it under mandate with kanz-mandate")
+				"tenant_id", key.tenant, "portfolio_id", pid,
+				"fix", "put it under mandate with `kanz-mandate --tenant "+key.tenant+"`")
 		}
 		return nil
 	}
@@ -122,7 +149,7 @@ func (m *Monitor) Handle(ctx context.Context, _ *envelopepb.Envelope, payload []
 
 	res := m.engine.Evaluate(ctx, &comp.Candidate{Book: book, Classifier: m.classifier, AsOf: asOf}, mandate)
 
-	entered := m.recordStatus(pid, res.GetStatus())
+	entered := m.recordStatus(key, res.GetStatus())
 	if res.GetStatus() != compliancepb.ComplianceStatus_COMPLIANCE_STATUS_BREACH || !entered {
 		return nil // not a new breach
 	}
@@ -140,7 +167,7 @@ func (m *Monitor) Handle(ctx context.Context, _ *envelopepb.Envelope, payload []
 		if err := m.emitter.EmitBreach(ctx, res, trigger, asOf); err != nil {
 			// Roll back the status so the next delivery re-emits — a dropped
 			// breach FACT is worse than a duplicate.
-			m.resetStatus(pid)
+			m.resetStatus(key)
 			return err
 		}
 	}
@@ -150,14 +177,14 @@ func (m *Monitor) Handle(ctx context.Context, _ *envelopepb.Envelope, payload []
 // applyAndSnapshot folds the position update into the portfolio book and returns
 // the breach trigger (POSITION_CHANGE when the quantity moved, else MARKET_MOVE),
 // a candidate Book snapshot, and the event's as-of time.
-func (m *Monitor) applyAndSnapshot(pid string, ps *domainpb.PositionState) (compliancepb.BreachTrigger, *comp.Book, time.Time) {
+func (m *Monitor) applyAndSnapshot(key bookKey, ps *domainpb.PositionState) (compliancepb.BreachTrigger, *comp.Book, time.Time) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	insts := m.books[pid]
+	insts := m.books[key]
 	if insts == nil {
 		insts = make(map[string]comp.Position)
-		m.books[pid] = insts
+		m.books[key] = insts
 	}
 	prev, had := insts[ps.GetInstrumentId()]
 	trigger := compliancepb.BreachTrigger_BREACH_TRIGGER_MARKET_MOVE
@@ -173,7 +200,7 @@ func (m *Monitor) applyAndSnapshot(pid string, ps *domainpb.PositionState) (comp
 	// Build the candidate book. NAV is the net market value of the holdings — a
 	// funded-book proxy, since position FACTs carry no portfolio equity (the
 	// same proxy the OMS book source uses). Summed with exact decimal addition.
-	book := &comp.Book{PortfolioID: pid}
+	book := &comp.Book{PortfolioID: key.portfolio}
 	var nav *commonpb.Decimal
 	for _, p := range insts {
 		book.Positions = append(book.Positions, p)
@@ -185,23 +212,35 @@ func (m *Monitor) applyAndSnapshot(pid string, ps *domainpb.PositionState) (comp
 	return trigger, book, ps.GetAsOf().AsTime()
 }
 
-// recordStatus updates the portfolio's last status and reports whether this is a
+// recordStatus updates the book's last status and reports whether this is a
 // fresh entry into BREACH (transition from non-breach).
-func (m *Monitor) recordStatus(pid string, status compliancepb.ComplianceStatus) bool {
+func (m *Monitor) recordStatus(key bookKey, status compliancepb.ComplianceStatus) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	prev := m.lastStatus[pid]
-	m.lastStatus[pid] = status
+	prev := m.lastStatus[key]
+	m.lastStatus[key] = status
 	return status == compliancepb.ComplianceStatus_COMPLIANCE_STATUS_BREACH &&
 		prev != compliancepb.ComplianceStatus_COMPLIANCE_STATUS_BREACH
 }
 
-// resetStatus clears a portfolio's recorded status so the next evaluation
-// re-emits — used when an emit fails after the status was advanced.
-func (m *Monitor) resetStatus(pid string) {
+// resetStatus clears a book's recorded status so the next evaluation re-emits —
+// used when an emit fails after the status was advanced.
+func (m *Monitor) resetStatus(key bookKey) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	delete(m.lastStatus, pid)
+	delete(m.lastStatus, key)
+}
+
+// firstUngoverned reports whether this book has not yet been named in a
+// "not being checked" message, and records that it now has.
+func (m *Monitor) firstUngoverned(key bookKey) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.warnedUngoverned[key] {
+		return false
+	}
+	m.warnedUngoverned[key] = true
+	return true
 }
 
 func sameQuantity(a, b *commonpb.Decimal) bool {
