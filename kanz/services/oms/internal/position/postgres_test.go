@@ -34,10 +34,15 @@ import (
 //
 // `go test ./...` runs packages IN PARALLEL, and the order-store suite drops and
 // re-applies the very same migrations against the very same database. Sharing the public
-// schema means two packages racing to DROP and CREATE `orders` — and migration 0002's
-// DO-block, which rewrites the RLS policy on every table in current_schema(), racing
-// itself ("tuple concurrently updated"). Each suite owns a schema; nobody trips over
-// anybody.
+// schema means two packages racing to DROP and CREATE `orders`. Each suite owns a
+// schema; nobody trips over anybody.
+//
+// This used to name a second reason — migration 0002's DO-block rewriting the RLS
+// policy on every table in current_schema(), and racing itself with "tuple
+// concurrently updated". That is no longer true: #227 scoped every
+// *_tenant_scope_required.sql to a literal list of its OWN service's tables, and
+// test/arch/migration_table_discovery_test.go fails the build if catalog discovery
+// comes back. The schema isolation above still earns its keep on the first reason.
 const testSchema = "oms_position_test"
 
 func newPool(t *testing.T, tenant string) *pgxpool.Pool {

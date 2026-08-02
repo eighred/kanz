@@ -254,6 +254,26 @@ func (b *Book) foldPosition(instrument string, signed, price *big.Rat) {
 		addAbs := new(big.Rat).Abs(signed)
 		newQty := new(big.Rat).Add(l.Qty, signed)
 		newAbs := new(big.Rat).Abs(newQty)
+		// Zero divisor ⇒ big.Rat.Quo PANICS. DEFENSE IN DEPTH, NOT A LIVE BUG:
+		// unlike the OMS position fold this mirrors, every caller here already
+		// screens a zero quantity out — Apply at `e.Quantity.Sign() != 0`, and
+		// foldContribution at `qty.Sign() == 0`. In the same-direction arm newAbs
+		// can only be zero when BOTH the existing lot and the incoming quantity are
+		// zero, so today this is unreachable.
+		//
+		// It is guarded anyway because the divisor is derived rather than validated
+		// here, the failure mode is a panic rather than a wrong number, and this
+		// function is a hand-copy of the OMS fold — where the same line WAS
+		// reachable and did crash-loop the estate (#217). Two copies of one
+		// calculation is the standing risk; the next edit to either should not have
+		// to rediscover which one had the guard.
+		//
+		// Flat is a real state: a holding that nets to zero has no basis.
+		if newAbs.Sign() == 0 {
+			l.AvgCost = new(big.Rat)
+			l.Qty = newQty
+			return
+		}
 		cost := new(big.Rat).Mul(oldAbs, l.AvgCost)
 		cost.Add(cost, new(big.Rat).Mul(addAbs, price))
 		l.AvgCost = new(big.Rat).Quo(cost, newAbs)

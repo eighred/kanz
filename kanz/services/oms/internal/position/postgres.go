@@ -69,6 +69,27 @@ var ErrFillNotIdentified = errors.New("position: fill has no fill_id and cannot 
 // that no CLOSE could ever reach.
 var ErrFillHasNoVenue = errors.New("position: fill has no venue — a holding that belongs to no exchange cannot be closed")
 
+// ErrFillQuantityNotPositive: a fill that moved nothing is a producer defect, and
+// folding it PANICS.
+//
+// foldLot's re-average divides by the new absolute quantity. For a lot this pod has
+// not folded before (cur == 0) a zero-quantity fill leaves that divisor at zero, and
+// big.Rat.Quo panics `division by zero` — reproduced, and it is where #217 came from.
+// Nothing recovered it, the delivery was never acked, and the broker redelivered it
+// into the replacement pod: one malformed fill FACT, and the OMS crash-looped
+// estate-wide until someone removed the message by hand.
+//
+// The order aggregate has always rejected this input — aggregate.go's
+// `fill quantity must be > 0`. The projector is a SECOND consumer of the same
+// order.order.filled subject and did not, so the two disagreed about what a valid
+// fill is. This is that guard, on the other path. dec.FromProto(nil) yields zero, so
+// this also covers an ABSENT quantity, not just a literal 0.
+//
+// Refusing is right rather than skipping: a fill that moves no quantity carries no
+// information a position book can use, and silently ignoring it would hide a
+// misbehaving producer behind a healthy-looking consumer.
+var ErrFillQuantityNotPositive = errors.New("position: fill quantity must be > 0 — a fill that moves nothing cannot be folded into a holding")
+
 // Postgres is the durable, cross-pod position book.
 type Postgres struct {
 	pool    *pgxpool.Pool
@@ -108,6 +129,9 @@ func (p *Postgres) Apply(ctx context.Context, portfolioID string, fill *orderpb.
 	}
 	if fill.GetVenue() == "" {
 		return nil, ErrFillHasNoVenue
+	}
+	if !dec.IsPositive(fill.GetQuantity()) {
+		return nil, ErrFillQuantityNotPositive
 	}
 	venue, instrument := fill.GetVenue(), fill.GetInstrumentId()
 	price := dec.FromProto(fill.GetPrice())
