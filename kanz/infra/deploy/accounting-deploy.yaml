@@ -75,6 +75,10 @@ spec:
         prometheus.io/scrape: "true"
         prometheus.io/port: "8080"
     spec:
+      # Drain budget: 7s bus drain + 15s HTTP shutdown + 5s OTLP flush, run
+      # SEQUENTIALLY after SIGTERM = 27s. The k8s default of 30 leaves three
+      # seconds and SIGKILLs mid-drain. See availability.yaml for the derivation.
+      terminationGracePeriodSeconds: 45
       serviceAccountName: accounting
       securityContext:
         runAsNonRoot: true
@@ -153,3 +157,20 @@ spec:
           csi:
             driver: csi.spiffe.io
             readOnly: true
+---
+# INFRA-01d / #234 — accounting had no disruption budget at all.
+# A drain must not take both pods: fills then queue on the durable consumer group
+# while the IBOR stands still, and NAV is computed from a ledger that is behind the
+# book with nothing saying by how much.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: accounting
+  namespace: kanz-services
+  labels:
+    app.kubernetes.io/part-of: kanz
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      app: accounting

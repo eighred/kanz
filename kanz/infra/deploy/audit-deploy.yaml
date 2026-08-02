@@ -68,6 +68,10 @@ spec:
         prometheus.io/scrape: "true"
         prometheus.io/port: "8083"
     spec:
+      # Drain budget: 7s bus drain + 15s HTTP shutdown + 5s OTLP flush, run
+      # SEQUENTIALLY after SIGTERM = 27s. The k8s default of 30 leaves three
+      # seconds and SIGKILLs mid-drain. See availability.yaml for the derivation.
+      terminationGracePeriodSeconds: 45
       serviceAccountName: audit
       securityContext:
         runAsNonRoot: true
@@ -144,3 +148,21 @@ spec:
           csi:
             driver: csi.spiffe.io
             readOnly: true
+---
+# INFRA-01d / #234 — audit had no disruption budget at all.
+# The hash chain is serialized at the DATABASE, so losing one pod is safe; losing
+# both stops the chain advancing. An audit window holding no records is
+# indistinguishable from a window in which nothing happened — the one outcome this
+# service exists to rule out.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: audit
+  namespace: kanz-services
+  labels:
+    app.kubernetes.io/part-of: kanz
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      app: audit

@@ -90,6 +90,10 @@ spec:
         prometheus.io/scrape: "true"
         prometheus.io/port: "8091"
     spec:
+      # Drain budget: 7s bus drain + 15s HTTP shutdown + 5s OTLP flush, run
+      # SEQUENTIALLY after SIGTERM = 27s. The k8s default of 30 leaves three
+      # seconds and SIGKILLs mid-drain. See availability.yaml for the derivation.
+      terminationGracePeriodSeconds: 45
       serviceAccountName: compliance
       securityContext:
         runAsNonRoot: true
@@ -145,3 +149,22 @@ spec:
           csi:
             driver: csi.spiffe.io
             readOnly: true
+---
+# INFRA-01d / #234 — compliance had no disruption budget at all.
+# SINGLETON — zero allowed voluntary disruptions, deliberately (availability.yaml).
+# This is the pre-trade mandate authority and it holds each portfolio's whole book in
+# memory. While it is gone, orders are governed by nothing — and the engine's "no
+# mandate governs this portfolio" branch returns nil, so a control that is ABSENT and
+# a control that PASSED look identical.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: compliance
+  namespace: kanz-services
+  labels:
+    app.kubernetes.io/part-of: kanz
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: compliance

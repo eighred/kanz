@@ -87,6 +87,10 @@ spec:
         prometheus.io/scrape: "true"
         prometheus.io/port: "8086"
     spec:
+      # Drain budget: 7s bus drain + 15s HTTP shutdown + 5s OTLP flush, run
+      # SEQUENTIALLY after SIGTERM = 27s. The k8s default of 30 leaves three
+      # seconds and SIGKILLs mid-drain. See availability.yaml for the derivation.
+      terminationGracePeriodSeconds: 45
       serviceAccountName: archiver
       securityContext:
         runAsNonRoot: true
@@ -152,3 +156,21 @@ spec:
           csi:
             driver: csi.spiffe.io
             readOnly: true
+---
+# INFRA-01d / #234 — archiver had no disruption budget at all.
+# SINGLETON — zero allowed voluntary disruptions, deliberately (availability.yaml).
+# archiver is the single writer to the durable log of record and its per-key ordering
+# holds inside ONE process. An unattended eviction is how that log acquires a gap
+# nothing downstream detects. Draining its node must be a decision a human takes.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: archiver
+  namespace: kanz-services
+  labels:
+    app.kubernetes.io/part-of: kanz
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: archiver

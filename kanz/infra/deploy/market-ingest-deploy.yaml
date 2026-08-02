@@ -86,6 +86,10 @@ spec:
         prometheus.io/scrape: "true"
         prometheus.io/port: "8091"
     spec:
+      # Drain budget: 7s bus drain + 15s HTTP shutdown + 5s OTLP flush, run
+      # SEQUENTIALLY after SIGTERM = 27s. The k8s default of 30 leaves three
+      # seconds and SIGKILLs mid-drain. See availability.yaml for the derivation.
+      terminationGracePeriodSeconds: 45
       serviceAccountName: market-ingest
       securityContext:
         runAsNonRoot: true
@@ -152,3 +156,21 @@ spec:
           csi:
             driver: csi.spiffe.io
             readOnly: true
+---
+# INFRA-01d / #234 — market-ingest had no disruption budget at all.
+# SINGLETON — zero allowed voluntary disruptions, deliberately (availability.yaml).
+# It folds a partitioned stream into one book, and `strategy: Recreate` above means
+# nothing takes over while it is away: marks simply stop advancing, and a stale mark
+# does not look stale.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: market-ingest
+  namespace: kanz-services
+  labels:
+    app.kubernetes.io/part-of: kanz
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: market-ingest

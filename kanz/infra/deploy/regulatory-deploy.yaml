@@ -74,6 +74,10 @@ spec:
         prometheus.io/scrape: "true"
         prometheus.io/port: "8083"
     spec:
+      # Drain budget: 7s bus drain + 15s HTTP shutdown + 5s OTLP flush, run
+      # SEQUENTIALLY after SIGTERM = 27s. The k8s default of 30 leaves three
+      # seconds and SIGKILLs mid-drain. See availability.yaml for the derivation.
+      terminationGracePeriodSeconds: 45
       serviceAccountName: regulatory
       securityContext:
         runAsNonRoot: true
@@ -149,3 +153,20 @@ spec:
           csi:
             driver: csi.spiffe.io
             readOnly: true
+---
+# INFRA-01d / #234 — regulatory had no disruption budget at all.
+# Two replicas are legal only because linkstore.AppendChained keeps the chain head in
+# the database; a drain to zero is not a correctness failure but a DEADLINE one, and
+# a missed regulatory window is not recovered by restarting the pod.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: regulatory
+  namespace: kanz-services
+  labels:
+    app.kubernetes.io/part-of: kanz
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      app: regulatory

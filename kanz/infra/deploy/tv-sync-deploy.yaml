@@ -80,6 +80,10 @@ spec:
         prometheus.io/scrape: "true"
         prometheus.io/port: "8091"
     spec:
+      # Drain budget: 7s bus drain + 15s HTTP shutdown + 5s OTLP flush, run
+      # SEQUENTIALLY after SIGTERM = 27s. The k8s default of 30 leaves three
+      # seconds and SIGKILLs mid-drain. See availability.yaml for the derivation.
+      terminationGracePeriodSeconds: 45
       serviceAccountName: tv-sync
       securityContext:
         runAsNonRoot: true
@@ -187,3 +191,22 @@ spec:
             readOnly: true
             volumeAttributes:
               secretProviderClass: tv-sync-db
+---
+# INFRA-01d / #234 — tv-sync had no disruption budget at all.
+# SINGLETON — zero allowed voluntary disruptions, deliberately (availability.yaml).
+# The projection is an in-process map with NO replay-to-current gate: a fresh pod
+# reports Ready while serving an EMPTY book (see the COLD BOOK note at the top of this
+# file). An unattended eviction therefore hands a trader a confidently wrong positions
+# answer rather than an error.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: tv-sync
+  namespace: kanz-services
+  labels:
+    app.kubernetes.io/part-of: kanz
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: tv-sync
