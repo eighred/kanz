@@ -26,6 +26,13 @@ import (
 
 const contractSecret = "contract-secret"
 
+// contractTenant is the tenant these contract tokens are minted for, AND the
+// tenant the canned replies must claim to be owned by — writeOwned compares the
+// two and 404s a mismatch (#222). Named rather than repeated so the coupling is
+// visible: change the token's tenant without changing the fixture and every
+// contract test fails as a 404, which reads like a routing bug and is not one.
+const contractTenant = "acme"
+
 // chainedServer builds the production-shaped chain: version → auth → rate
 // limit → idempotency, wrapping the gateway routes.
 func chainedServer(t *testing.T, fc *fakeClient, perSec float64, burst int, requiredRole string) *httptest.Server {
@@ -62,7 +69,7 @@ func get(t *testing.T, url, token, version string) *http.Response {
 }
 
 func TestContract_AuthzRequired(t *testing.T) {
-	fc := &fakeClient{exposureResp: &querypb.ExposureResponse{PortfolioId: "PF1"}}
+	fc := &fakeClient{exposureResp: &querypb.ExposureResponse{PortfolioId: "PF1", OwnerTenant: contractTenant}}
 	ts := chainedServer(t, fc, 0, 0, "risk.read")
 	url := ts.URL + "/v1/portfolios/PF1/exposure"
 
@@ -71,22 +78,22 @@ func TestContract_AuthzRequired(t *testing.T) {
 		t.Errorf("no token ⇒ %d, want 401", r.StatusCode)
 	}
 	// Token without the required role ⇒ 403.
-	noRole := mintContractJWT(t, "u", "acme", nil)
+	noRole := mintContractJWT(t, "u", contractTenant, nil)
 	if r := get(t, url, noRole, ""); r.StatusCode != http.StatusForbidden {
 		t.Errorf("missing role ⇒ %d, want 403", r.StatusCode)
 	}
 	// Token with the role ⇒ 200.
-	withRole := mintContractJWT(t, "u", "acme", []string{"risk.read"})
+	withRole := mintContractJWT(t, "u", contractTenant, []string{"risk.read"})
 	if r := get(t, url, withRole, ""); r.StatusCode != http.StatusOK {
 		t.Errorf("with role ⇒ %d, want 200", r.StatusCode)
 	}
 }
 
 func TestContract_RateLimit429(t *testing.T) {
-	fc := &fakeClient{exposureResp: &querypb.ExposureResponse{PortfolioId: "PF1"}}
+	fc := &fakeClient{exposureResp: &querypb.ExposureResponse{PortfolioId: "PF1", OwnerTenant: contractTenant}}
 	ts := chainedServer(t, fc, 1, 1, "risk.read") // 1 token, no refill in-test
 	url := ts.URL + "/v1/portfolios/PF1/exposure"
-	tok := mintContractJWT(t, "u", "acme", []string{"risk.read"})
+	tok := mintContractJWT(t, "u", contractTenant, []string{"risk.read"})
 
 	if r := get(t, url, tok, ""); r.StatusCode != http.StatusOK {
 		t.Fatalf("first ⇒ %d, want 200", r.StatusCode)
@@ -97,10 +104,10 @@ func TestContract_RateLimit429(t *testing.T) {
 }
 
 func TestContract_VersionMatrix(t *testing.T) {
-	fc := &fakeClient{exposureResp: &querypb.ExposureResponse{PortfolioId: "PF1"}}
+	fc := &fakeClient{exposureResp: &querypb.ExposureResponse{PortfolioId: "PF1", OwnerTenant: contractTenant}}
 	ts := chainedServer(t, fc, 0, 0, "risk.read")
 	url := ts.URL + "/v1/portfolios/PF1/exposure"
-	tok := mintContractJWT(t, "u", "acme", []string{"risk.read"})
+	tok := mintContractJWT(t, "u", contractTenant, []string{"risk.read"})
 
 	cases := map[string]int{"": http.StatusOK, "v1": http.StatusOK, "v2": http.StatusNotAcceptable}
 	for ver, want := range cases {
@@ -115,10 +122,10 @@ func TestContract_VersionMatrix(t *testing.T) {
 // gateway's budget. (In-process with a fake upstream this is microseconds; the
 // test fails loudly if a regression adds a blocking call to the hot path.)
 func TestContract_QueryLatencyBudget(t *testing.T) {
-	fc := &fakeClient{exposureResp: &querypb.ExposureResponse{PortfolioId: "PF1"}}
+	fc := &fakeClient{exposureResp: &querypb.ExposureResponse{PortfolioId: "PF1", OwnerTenant: contractTenant}}
 	ts := chainedServer(t, fc, 0, 0, "risk.read") // rate limit disabled
 	url := ts.URL + "/v1/portfolios/PF1/exposure"
-	tok := mintContractJWT(t, "u", "acme", []string{"risk.read"})
+	tok := mintContractJWT(t, "u", contractTenant, []string{"risk.read"})
 
 	const n = 200
 	lat := make([]time.Duration, n)

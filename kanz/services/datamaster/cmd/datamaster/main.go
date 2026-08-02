@@ -91,7 +91,7 @@ func main() {
 	readiness := &server.Readiness{}
 	httpSrv := &http.Server{
 		Addr:              cfg.Listen,
-		Handler:           server.New(readiness, logger, golden, exceptions, feeds, server.WithMetrics(obs.MetricsHandler())),
+		Handler:           server.New(readiness, logger, cfg.Tenant, golden, exceptions, feeds, server.WithMetrics(obs.MetricsHandler())),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 	go func() {

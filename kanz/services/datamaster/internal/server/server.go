@@ -44,6 +44,7 @@ func (r *Readiness) Ready() bool    { return r.ready.Load() }
 type Server struct {
 	logger     *slog.Logger
 	readiness  *Readiness
+	tenant     string
 	golden     store.GoldenStore
 	exceptions store.ExceptionStore
 	feeds      []feed.VendorFeed
@@ -63,10 +64,14 @@ func WithClock(now func() time.Time) Option { return func(s *Server) { s.now = n
 
 // New builds the server over the golden store, the exception store, and the vendor
 // feeds the price path arbitrates.
-func New(readiness *Readiness, logger *slog.Logger, golden store.GoldenStore, exceptions store.ExceptionStore, feeds []feed.VendorFeed, opts ...Option) *Server {
+// tenant is the tenant THIS INSTANCE serves — a required positional parameter,
+// not an Option, because it is the input to the only cross-tenant control on
+// this surface and an Option can be forgotten. Same stance as pg.NewTenantPool.
+func New(readiness *Readiness, logger *slog.Logger, tenant string, golden store.GoldenStore, exceptions store.ExceptionStore, feeds []feed.VendorFeed, opts ...Option) *Server {
 	s := &Server{
 		logger:     logger,
 		readiness:  readiness,
+		tenant:     tenant,
 		golden:     golden,
 		exceptions: exceptions,
 		feeds:      feeds,
@@ -129,7 +134,39 @@ func (s *Server) candidates(ctx context.Context, instrumentID string) ([]pricing
 }
 
 // handleSecurity returns the projected golden record for an instrument.
+// HeaderPrincipalTenant is the tenant the api-gateway authenticated, injected on
+// every forwarded request (services/api-gateway/internal/proxy/backend.go).
+// Upstreams may trust it ONLY because a NetworkPolicy makes the gateway their
+// sole reachable caller — see #232 for where that is not yet enforced.
+const HeaderPrincipalTenant = "X-Kanz-Principal-Tenant"
+
+// callerOwnsThisInstance reports whether the authenticated caller may touch this
+// instance's data, and writes the refusal if not.
+//
+// ALL FOUR ROUTES HERE WERE UNSCOPED (#222) — including the WRITE,
+// POST /v1/exceptions/{id}/override. golden_records, exceptions and
+// exception_overrides are all tenant-scoped tables with RLS, and every handler
+// went straight from r.PathValue to the store without reading the tenant the
+// gateway had already injected.
+//
+// Under the #97 ruling each instance serves exactly ONE tenant, so this is an
+// equality against the instance's tenant rather than a per-row lookup. Fails
+// CLOSED on an absent header or an unset instance tenant. 404 rather than 403,
+// with the same body a genuine miss returns, so id enumeration cannot be used
+// as a cross-tenant directory.
+func (s *Server) callerOwnsThisInstance(w http.ResponseWriter, r *http.Request) bool {
+	caller := r.Header.Get(HeaderPrincipalTenant)
+	if caller == "" || s.tenant == "" || caller != s.tenant {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
+		return false
+	}
+	return true
+}
+
 func (s *Server) handleSecurity(w http.ResponseWriter, r *http.Request) {
+	if !s.callerOwnsThisInstance(w, r) {
+		return
+	}
 	id := r.PathValue("id")
 	sm, ok, err := s.golden.Get(r.Context(), id)
 	if err != nil {
@@ -156,6 +193,9 @@ func (s *Server) handleSecurity(w http.ResponseWriter, r *http.Request) {
 
 // handlePrice arbitrates an instrument's price candidates and files any breaks.
 func (s *Server) handlePrice(w http.ResponseWriter, r *http.Request) {
+	if !s.callerOwnsThisInstance(w, r) {
+		return
+	}
 	id := r.PathValue("id")
 	cands, err := s.candidates(r.Context(), id)
 	if err != nil {
@@ -187,6 +227,9 @@ func (s *Server) handlePrice(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleExceptions(w http.ResponseWriter, r *http.Request) {
+	if !s.callerOwnsThisInstance(w, r) {
+		return
+	}
 	open, err := s.exceptions.Open(r.Context())
 	if err != nil {
 		s.logger.Error("exception queue read failed", "err", err)
@@ -200,6 +243,9 @@ func (s *Server) handleExceptions(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleOverride(w http.ResponseWriter, r *http.Request) {
+	if !s.callerOwnsThisInstance(w, r) {
+		return
+	}
 	id := r.PathValue("id")
 	// chosen_price is an exact decimal STRING. A JSON number is an IEEE-754 double
 	// by definition, so accepting one would round the price a human chose on its
