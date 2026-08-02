@@ -193,6 +193,80 @@ func TestScenarioShockWithNoKindIsInvalidArgument(t *testing.T) {
 	}
 }
 
+// TestScenarioShockOutOfDomainIsInvalidArgument is #246.
+//
+// ScenarioShock.Pct was the one Decimal on this platform that reached arithmetic
+// with no domain check anywhere in front of it: every BUS ingress calls
+// dec.InDomainDeep, and this is a gRPC method argument, which the #95 arch guard
+// does not look at because it keys on proto.Unmarshal(payload, …).
+//
+// exponent -2000000000 drove an unbounded pow10 loop two billion times per
+// position per shock. The assertion is therefore BOTH halves — the right code AND
+// promptly, because a correct-but-eventual InvalidArgument is still the outage.
+// The engine must not be reached at all: a request refused after the compute
+// started is a request that already spent the CPU.
+func TestScenarioShockOutOfDomainIsInvalidArgument(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		shock *querypb.ScenarioShock
+	}{
+		{"parallel shift", &querypb.ScenarioShock{Shock: &querypb.ScenarioShock_ParallelShift{
+			ParallelShift: &querypb.ParallelShift{Pct: &commonpb.Decimal{Coefficient: 1, Exponent: -2_000_000_000}}}}},
+		{"price shock", &querypb.ScenarioShock{Shock: &querypb.ScenarioShock_Price{
+			Price: &querypb.PriceShock{InstrumentId: "AAPL", Pct: &commonpb.Decimal{Coefficient: 1, Exponent: 2_000_000_000}}}}},
+		{"just outside the bound", &querypb.ScenarioShock{Shock: &querypb.ScenarioShock_ParallelShift{
+			ParallelShift: &querypb.ParallelShift{Pct: &commonpb.Decimal{Coefficient: 1, Exponent: -65}}}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			reached := false
+			srv := grpcsrv.New(fakeEngine{scenario: func(v1.ScenarioRequest) (v1.ScenarioResponse, error) {
+				reached = true
+				return v1.ScenarioResponse{}, nil
+			}}, "acme")
+
+			done := make(chan error, 1)
+			go func() {
+				_, err := srv.EvaluateScenario(context.Background(), &querypb.EvaluateScenarioRequest{
+					PortfolioId: "PF1",
+					Shocks:      []*querypb.ScenarioShock{tc.shock},
+				})
+				done <- err
+			}()
+			select {
+			case err := <-done:
+				if status.Code(err) != codes.InvalidArgument {
+					t.Fatalf("want InvalidArgument for an out-of-domain shock exponent, got %v", err)
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatal("EvaluateScenario did not return within 5s — the domain check is gone and one " +
+					"crafted shock stalls the risk engine while it still reports healthy")
+			}
+			if reached {
+				t.Error("the Engine was called with an out-of-domain shock — the refusal must precede the compute")
+			}
+		})
+	}
+}
+
+// TestInDomainShockStillEvaluates is the non-vacuity half: the bound must not
+// refuse a real shock. -65 above and -8 here bracket it — anything a mark or a
+// stress actually carries sits inside |exponent| ≤ 64 by thirty orders of
+// magnitude.
+func TestInDomainShockStillEvaluates(t *testing.T) {
+	ms := domain.NewMeasureSet("PF1", asOf, map[v1.MeasureName]v1.Measure{})
+	srv := grpcsrv.New(fakeEngine{scenario: func(v1.ScenarioRequest) (v1.ScenarioResponse, error) {
+		return v1.ScenarioResponse{PortfolioID: "PF1", Projected: ms}, nil
+	}}, "acme")
+	_, err := srv.EvaluateScenario(context.Background(), &querypb.EvaluateScenarioRequest{
+		PortfolioId: "PF1",
+		Shocks: []*querypb.ScenarioShock{{Shock: &querypb.ScenarioShock_ParallelShift{
+			ParallelShift: &querypb.ParallelShift{Pct: &commonpb.Decimal{Coefficient: -20_000_000, Exponent: -8}}}}},
+	})
+	if err != nil {
+		t.Fatalf("an ordinary -20%% shock at exponent -8 was refused: %v", err)
+	}
+}
+
 func TestHealthMapsMode(t *testing.T) {
 	srv := grpcsrv.New(fakeEngine{health: func() (v1.Health, error) {
 		return v1.Health{Mode: v1.ModeDegraded, AsOf: asOf, Staleness: 90 * time.Second}, nil

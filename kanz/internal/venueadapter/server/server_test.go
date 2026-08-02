@@ -15,7 +15,12 @@ import (
 	"io"
 	"log/slog"
 	"testing"
+	"time"
 
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
+
+	commonpb "github.com/eighred/kanz/kanz-schemas-go/common/v1"
 	orderpb "github.com/eighred/kanz/kanz-schemas-go/order/v1"
 	venuepb "github.com/eighred/kanz/kanz-schemas-go/venue/v1"
 
@@ -130,6 +135,71 @@ func TestExecuteNeverReturnsFillsWhenTheVenueFails(t *testing.T) {
 	}
 	if len(resp.GetFills()) != 0 {
 		t.Fatalf("fabricated %d fills on a failed execute — that books a trade that never happened", len(resp.GetFills()))
+	}
+}
+
+// TestOutOfDomainDecimalIsRefusedBeforeTheOrderIsTouched is #246, found here by
+// the widened arch guard rather than by hand.
+//
+// OrderState.limit_price is a common.v1.Decimal whose exponent is a plain int32
+// on the wire, and internal/execution renders it with the UNBOUNDED
+// dec.FromProto. {1, -2000000000} does not place a wrong trade — it materialises
+// a two-billion-digit number and the adapter stops answering while its probes
+// stay green.
+//
+// The order must not be RECORDED either: a view entry for an order that was
+// never worked is a phantom the reconciler has to explain.
+func TestOutOfDomainDecimalIsRefusedBeforeTheOrderIsTouched(t *testing.T) {
+	wild := func() *orderpb.OrderState {
+		st := order()
+		st.LimitPrice = &commonpb.Decimal{Coefficient: 1, Exponent: -2_000_000_000}
+		return st
+	}
+
+	t.Run("execute", func(t *testing.T) {
+		v := &fakeVenue{}
+		s, _, view := newServer(t, v)
+		done := make(chan error, 1)
+		go func() {
+			_, err := s.Execute(context.Background(), &venuepb.ExecuteRequest{State: wild()})
+			done <- err
+		}()
+		select {
+		case err := <-done:
+			if status.Code(err) != codes.InvalidArgument {
+				t.Fatalf("want InvalidArgument for an out-of-domain limit price, got %v", err)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("Execute did not return within 5s — the domain check is gone and one crafted order " +
+				"stalls the adapter while its probes stay green")
+		}
+		if _, ok, _ := view.Get(context.Background(), "ORD-1"); ok {
+			t.Error("a refused order was recorded in the adapter's view — the refusal must precede the record")
+		}
+	})
+
+	t.Run("cancel", func(t *testing.T) {
+		v := &fakeVenue{}
+		s, closes, _ := newServer(t, v)
+		_, err := s.CancelOrder(context.Background(), &venuepb.CancelOrderRequest{State: wild()})
+		if status.Code(err) != codes.InvalidArgument {
+			t.Fatalf("want InvalidArgument for an out-of-domain limit price, got %v", err)
+		}
+		if closes.Len() != 0 {
+			t.Error("a refused cancel was tracked as in-flight — the watchdog would chase an order nobody cancelled")
+		}
+	})
+}
+
+// TestOrdinaryDecimalStillExecutes is the non-vacuity half: the bound must not
+// refuse a real order. Exponent -8 is what dec.ToProtoScaled emits.
+func TestOrdinaryDecimalStillExecutes(t *testing.T) {
+	v := &fakeVenue{}
+	s, _, _ := newServer(t, v)
+	st := order()
+	st.LimitPrice = &commonpb.Decimal{Coefficient: 6_500_000_000_000, Exponent: -8} // 65,000.00
+	if _, err := s.Execute(context.Background(), &venuepb.ExecuteRequest{State: st}); err != nil {
+		t.Fatalf("an ordinary limit price at exponent -8 was refused: %v", err)
 	}
 }
 

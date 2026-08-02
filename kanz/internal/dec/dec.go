@@ -17,7 +17,6 @@ package dec
 import (
 	"errors"
 	"fmt"
-	"math"
 	"math/big"
 	"strings"
 
@@ -74,11 +73,20 @@ func FromProto(d *commonpb.Decimal) *big.Rat {
 // The number mirrors internal/compliance's maxDecimalExponent (gate.go),
 // deliberately: it is the same question — how far can 10^abs(exponent) be
 // materialised before the computation itself becomes the incident — asked
-// at a different boundary. dec and compliance must not import each other,
-// so the value is duplicated here as a number rather than shared as a
-// constant; keeping it numerically identical is what keeps the platform
-// coherent. FromProto({Coefficient:1, Exponent:2000000000}) does not return
-// within seconds; {Coefficient:1, Exponent:64} is instant.
+// at a different boundary. It is duplicated as a number rather than shared
+// as a constant, and test/arch/decimal_domain_test.go is what keeps the two
+// literals equal; a comment naming a sibling is not a check.
+//
+// CORRECTED (#216): this used to say "dec and compliance must not import
+// each other", which was not true in the direction that mattered —
+// internal/compliance has imported this package (as decutil) for some time,
+// so the constant COULD be shared today. Only the reverse edge is
+// forbidden, and it is forbidden by the cycle, not by a rule. Unifying the
+// two is a separate change: the arch guard reads both literals out of the
+// source, so retiring one means rewriting the guard at the same time.
+//
+// FromProto({Coefficient:1, Exponent:2000000000}) does not return within
+// seconds; {Coefficient:1, Exponent:64} is instant.
 const maxSafeExponent = 64
 
 // FromProtoChecked is FromProto with a bounded domain: it refuses an
@@ -183,9 +191,10 @@ func ToProto(r *big.Rat) *commonpb.Decimal {
 //
 // It emits at the fixed scale when the coefficient fits an int64; otherwise it
 // raises the exponent (half-up, away from zero) until it does, and refuses only
-// when the exponent itself cannot move. This is the same shape as
-// internal/compliance's mulDecimal, deliberately: it is the same question asked
-// of a different operator.
+// when the exponent itself cannot move — the shared `fit` rule in arith.go, the
+// same one Add, Mul and Abs end on. It has to be the same one: a value rounded
+// differently depending on which operator produced it is a reconciliation break
+// nobody would think to look for.
 //
 // Use this on any capital path. ToProto wraps at roughly $92bn at scale -8, and
 // a wrapped coefficient is a fabricated number the system will then act on. The
@@ -196,25 +205,7 @@ func ToProtoScaled(r *big.Rat) (*commonpb.Decimal, bool) {
 	if r == nil {
 		return &commonpb.Decimal{}, true
 	}
-	q := scaledCoefficient(r)
-	exp := int64(-scale)
-	ten, five := big.NewInt(10), big.NewInt(5)
-	rem := new(big.Int)
-	for !q.IsInt64() {
-		if exp >= math.MaxInt32 {
-			return nil, false // cannot raise the exponent any further
-		}
-		q.QuoRem(q, ten, rem)
-		if rem.CmpAbs(five) >= 0 { // half-up, away from zero
-			if rem.Sign() < 0 {
-				q.Sub(q, big.NewInt(1))
-			} else {
-				q.Add(q, big.NewInt(1))
-			}
-		}
-		exp++
-	}
-	return &commonpb.Decimal{Coefficient: q.Int64(), Exponent: int32(exp)}, true
+	return fit(scaledCoefficient(r), -scale)
 }
 
 // Str renders a rational as a trimmed plain-decimal string.

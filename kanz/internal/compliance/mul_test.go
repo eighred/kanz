@@ -533,14 +533,14 @@ func TestAlignExponent_GapNeverExceedsWindow(t *testing.T) {
 	}
 	for _, a := range values {
 		for _, b := range values {
-			exp := alignExponent(a, b)
+			exp := decutil.AlignExponent(a, b)
 			hi := a
 			if b > hi {
 				hi = b
 			}
 			gap := hi - exp
 			if gap < 0 || gap > wantMaxGap {
-				t.Fatalf("alignExponent(%d, %d) = %d: hi-exp = %d, want in [0, %d]",
+				t.Fatalf("decutil.AlignExponent(%d, %d) = %d: hi-exp = %d, want in [0, %d]",
 					a, b, exp, gap, wantMaxGap)
 			}
 		}
@@ -587,9 +587,9 @@ func TestAlignExponent_WindowBoundary(t *testing.T) {
 	}
 	for _, tc := range cases {
 		expA, expB := int64(0), -tc.gap
-		exp := alignExponent(expA, expB)
+		exp := decutil.AlignExponent(expA, expB)
 		if exp != tc.wantExp {
-			t.Fatalf("gap %d: alignExponent(0, %d) = %d, want %d", tc.gap, expB, exp, tc.wantExp)
+			t.Fatalf("gap %d: decutil.AlignExponent(0, %d) = %d, want %d", tc.gap, expB, exp, tc.wantExp)
 		}
 		if participationGap := expB - exp; participationGap != tc.wantParticipationGap {
 			t.Fatalf("gap %d: smaller operand's scale gap = %d, want %d",

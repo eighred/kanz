@@ -20,9 +20,34 @@ import (
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
 
+	"github.com/eighred/kanz/internal/dec"
 	"github.com/eighred/kanz/internal/execution"
 	"github.com/eighred/kanz/internal/venueadapter/orderview"
 )
+
+// requireDecimalDomain refuses a request carrying an out-of-domain Decimal
+// (#246), before the order is recorded or worked.
+//
+// Found by the widened arch guard, not by hand: the OrderState on these two
+// requests carries quantity, limit_price, filled_quantity and average_fill_price
+// as common.v1.Decimal, and Decimal.exponent is a plain int32 on the wire.
+// internal/execution/exchange_common.go renders those with the UNBOUNDED
+// dec.FromProto, which materialises 10^abs(exponent) — an order carrying
+// {1, -2000000000} does not place a wrong trade, it stops the adapter answering
+// while it still reports healthy.
+//
+// The OMS is the only caller a NetworkPolicy lets through, which bounds WHO can
+// send this, not WHAT they can send: the OrderState originates in a user command
+// and reaches here through the OMS unchanged. "Only an internal caller" has
+// never been a domain check.
+func requireDecimalDomain(req proto.Message) error {
+	path, ok := dec.InDomainDeep(req)
+	if ok {
+		return nil
+	}
+	return status.Errorf(codes.InvalidArgument,
+		"venue: %s carries a Decimal whose exponent is outside the computable domain (|exponent| > 64)", path)
+}
 
 // Server implements venue.v1.VenueAdapterService over one exchange connector.
 type Server struct {
@@ -63,6 +88,9 @@ func New(venue execution.Venue, view orderview.Store, closes execution.CloseTrac
 // before this RPC even returns, and the ingester enriches it by reading exactly
 // this view. Record after, and the first fill of a fast order finds nothing.
 func (s *Server) Execute(ctx context.Context, req *venuepb.ExecuteRequest) (*venuepb.ExecuteResponse, error) {
+	if err := requireDecimalDomain(req); err != nil {
+		return nil, err
+	}
 	st := req.GetState()
 	if st.GetOrderId() == "" {
 		return nil, status.Error(codes.InvalidArgument, "venue: order_id is required")
@@ -99,6 +127,9 @@ func (s *Server) Execute(ctx context.Context, req *venuepb.ExecuteRequest) (*ven
 // close is still in flight. There is no third answer, which is why
 // CancelOrderResponse has no fields.
 func (s *Server) CancelOrder(ctx context.Context, req *venuepb.CancelOrderRequest) (*venuepb.CancelOrderResponse, error) {
+	if err := requireDecimalDomain(req); err != nil {
+		return nil, err
+	}
 	st := req.GetState()
 	if st.GetOrderId() == "" {
 		return nil, status.Error(codes.InvalidArgument, "venue: order_id is required")
