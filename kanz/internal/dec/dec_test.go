@@ -1,7 +1,9 @@
 package dec
 
 import (
+	"errors"
 	"math/big"
+	"strings"
 	"testing"
 	"time"
 
@@ -343,5 +345,66 @@ func TestInDomainMatchesFromProtoChecked(t *testing.T) {
 	}
 	if !InDomain(nil) {
 		t.Error("a nil Decimal is absent, not out of range — InDomain(nil) must be true")
+	}
+}
+
+// MoneyIn is the ONE guard on netting a Money against a balance (#221). The
+// arithmetic cannot see a currency, so nothing else stops a BTC fee being
+// subtracted from a USD cash leg — a number that is not imprecise but wrong, in
+// an append-only book.
+func TestMoneyIn(t *testing.T) {
+	money := func(coeff int64, exp int32, ccy string) *commonpb.Money {
+		return &commonpb.Money{Amount: &commonpb.Decimal{Coefficient: coeff, Exponent: exp}, CurrencyCode: ccy}
+	}
+	cases := []struct {
+		name     string
+		m        *commonpb.Money
+		currency string
+		want     *big.Rat // nil ⇒ must refuse
+	}{
+		{"matching currency", money(5, 0, "USD"), "USD", big.NewRat(5, 1)},
+		{"other currency", money(8, -4, "BTC"), "USD", nil},
+		{"unstamped non-zero", money(5, 0, ""), "USD", nil},
+		{"nil money", nil, "USD", new(big.Rat)},
+		{"zero in another currency", money(0, 0, "BTC"), "USD", new(big.Rat)},
+		{"negative in currency", money(-250, -2, "USD"), "USD", big.NewRat(-250, 100)},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := MoneyIn(tc.m, tc.currency)
+			if tc.want == nil {
+				if err == nil {
+					t.Fatalf("want refusal, got %s", got.RatString())
+				}
+				if !errors.Is(err, ErrCurrencyMismatch) {
+					t.Fatalf("want ErrCurrencyMismatch, got %v", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected refusal: %v", err)
+			}
+			if got.Cmp(tc.want) != 0 {
+				t.Fatalf("got %s want %s", got.RatString(), tc.want.RatString())
+			}
+		})
+	}
+}
+
+// The refusal must name the two currencies and the amount: an operator reading a
+// DLQ has only this string to decide whether to re-drive or to correct the venue
+// mapping.
+func TestMoneyInRefusalNamesTheCurrencies(t *testing.T) {
+	_, err := MoneyIn(&commonpb.Money{
+		Amount:       &commonpb.Decimal{Coefficient: 8, Exponent: -4},
+		CurrencyCode: "BTC",
+	}, "USD")
+	if err == nil {
+		t.Fatal("expected a refusal")
+	}
+	for _, want := range []string{"0.0008", `"BTC"`, `"USD"`} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("refusal %q must name %s", err, want)
+		}
 	}
 }

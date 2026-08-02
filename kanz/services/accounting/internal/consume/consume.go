@@ -58,6 +58,10 @@ type Folder struct {
 // cash leg a fill produces (the portfolio reporting currency until a
 // per-instrument reference-data join lands — the FromFill carried-forward seam);
 // empty defaults to "USD".
+//
+// It is also the currency a fill's FEE must be denominated in: FromFill refuses
+// any other, so a venue that charges in the base asset DLQs rather than posting a
+// fee against a currency it was not charged in (#221).
 func NewFolder(tenant string, store ledger.Store, cashCurrency string) (*Folder, error) {
 	if store == nil {
 		return nil, errors.New("consume: ledger store is nil")
@@ -86,7 +90,14 @@ func (f *Folder) Handle(ctx context.Context, env *envelopepb.Envelope, payload [
 	if fill == nil {
 		return nil // not a fill-bearing event; ack
 	}
-	entry := ledger.FromFill(portfolioID, fill, f.cashCurrency, knowledgeTime(env))
+	entry, err := ledger.FromFill(portfolioID, fill, f.cashCurrency, knowledgeTime(env))
+	if err != nil {
+		// A fee the cash leg cannot represent (a BTC fee against a USD book, #221)
+		// DLQs the fill. The journal is append-only, so a wrong entry is permanent
+		// and a held message is not: the operator re-drives it once the book can
+		// carry the fee's own asset.
+		return fmt.Errorf("consume: %s: %w", env.GetEventType(), err)
+	}
 	return f.store.Append(ctx, entry)
 }
 

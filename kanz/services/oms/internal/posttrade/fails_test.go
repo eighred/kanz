@@ -7,8 +7,12 @@ import (
 	"time"
 )
 
-func instructed(id string, settleDate time.Time) *Settlement {
-	s := NewInstruction(id, fillFixture("F-"+id), "CP1", "", "USD", settleDate)
+func instructed(t *testing.T, id string, settleDate time.Time) *Settlement {
+	t.Helper()
+	s, err := NewInstruction(id, fillFixture("F-"+id), "CP1", "", "USD", settleDate)
+	if err != nil {
+		t.Fatalf("new instruction %s: %v", id, err)
+	}
 	_ = s.Instruct()
 	return s
 }
@@ -18,7 +22,7 @@ func plusDays(base time.Time, n int) time.Time { return base.Add(time.Duration(n
 
 func TestDetectFailsAging(t *testing.T) {
 	base := settleDate()
-	s := instructed("I1", base)
+	s := instructed(t, "I1", base)
 	settlements := []*Settlement{s}
 
 	// Within grace (1 day) ⇒ no fail.
@@ -42,7 +46,7 @@ func TestDetectFailsAging(t *testing.T) {
 
 func TestDetectFailsSettledNeverFails(t *testing.T) {
 	base := settleDate()
-	s := instructed("I1", base)
+	s := instructed(t, "I1", base)
 	_ = s.Settle()
 	if fails := DetectFails([]*Settlement{s}, DefaultAgingPolicy, plusDays(base, 10)); len(fails) != 0 {
 		t.Fatalf("settled should never fail, got %+v", fails)
@@ -51,7 +55,7 @@ func TestDetectFailsSettledNeverFails(t *testing.T) {
 
 func TestDetectFailsExplicitFailAlwaysReported(t *testing.T) {
 	base := settleDate()
-	s := instructed("I1", base)
+	s := instructed(t, "I1", base)
 	_ = s.Fail("counterparty rejected")
 	// Detected the same day (within grace) — an explicit fail is still reported.
 	fails := DetectFails([]*Settlement{s}, DefaultAgingPolicy, base)
@@ -62,8 +66,8 @@ func TestDetectFailsExplicitFailAlwaysReported(t *testing.T) {
 
 func TestDetectFailsOrderedBySeverity(t *testing.T) {
 	base := settleDate()
-	warn := instructed("I-warn", plusDays(base, 4)) // 2 days aged at +6 ⇒ warning
-	escalate := instructed("I-escalate", base)      // 6 days aged at +6 ⇒ escalated
+	warn := instructed(t, "I-warn", plusDays(base, 4)) // 2 days aged at +6 ⇒ warning
+	escalate := instructed(t, "I-escalate", base)      // 6 days aged at +6 ⇒ escalated
 	fails := DetectFails([]*Settlement{warn, escalate}, DefaultAgingPolicy, plusDays(base, 6))
 	if len(fails) != 2 {
 		t.Fatalf("want 2 fails, got %d (%+v)", len(fails), fails)
