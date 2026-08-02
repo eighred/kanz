@@ -16,6 +16,7 @@ package dec
 
 import (
 	"errors"
+	"fmt"
 	"math"
 	"math/big"
 	"strings"
@@ -115,6 +116,36 @@ func InDomain(d *commonpb.Decimal) bool {
 	}
 	exp := d.GetExponent()
 	return exp >= -maxSafeExponent && exp <= maxSafeExponent
+}
+
+// ErrCurrencyMismatch is what MoneyIn refuses with. Callers that must keep
+// consuming past one bad message (a bus handler) match on it with errors.Is.
+var ErrCurrencyMismatch = errors.New("dec: money is not in the expected currency")
+
+// MoneyIn returns m's amount as an exact rational, but ONLY if m is denominated
+// in currency; otherwise it refuses with ErrCurrencyMismatch.
+//
+// THIS IS THE GUARD ON NETTING A Money AGAINST A BALANCE. common.v1.Money carries
+// a currency_code and the arithmetic does not: subtracting a BTC fee from a USD
+// cash leg compiles, runs, and produces a number that is economically nonsense —
+// it debits cash that never moved and leaves the asset that DID move unrecorded.
+// Books are append-only, so such an entry is permanent and compounds per event;
+// refusing at the seam stops one message instead of corrupting NAV forever.
+//
+// A zero (or nil) Money is zero in every currency and has no cash effect, so it
+// is accepted whatever its currency_code says — a fill with no fee must keep
+// working. A NON-ZERO Money with an EMPTY currency_code is refused: "nobody
+// stamped this" and "stamped with the right currency" must not look the same.
+func MoneyIn(m *commonpb.Money, currency string) (*big.Rat, error) {
+	amt := FromProto(m.GetAmount())
+	if amt.Sign() == 0 {
+		return amt, nil
+	}
+	if got := m.GetCurrencyCode(); got != currency {
+		return nil, fmt.Errorf("%w: %s in %q cannot net against a %q balance",
+			ErrCurrencyMismatch, Str(amt), got, currency)
+	}
+	return amt, nil
 }
 
 // scaledCoefficient rounds a rational to the fixed scale (half-up) and returns

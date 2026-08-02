@@ -49,11 +49,14 @@ var ErrIllegalTransition = errors.New("posttrade: illegal settlement transition"
 // settlement.v1.SettlementInstruction. It moves MATCHED → AFFIRMED → INSTRUCTED →
 // SETTLED, or to the terminal FAILED. Quantity/Amount are exact (*big.Rat).
 type Settlement struct {
-	InstructionID  string
-	FillID         string
-	InstrumentID   string
-	Side           orderpb.Side
-	Quantity       *big.Rat
+	InstructionID string
+	FillID        string
+	InstrumentID  string
+	Side          orderpb.Side
+	Quantity      *big.Rat
+	// Amount is the UNSIGNED cash that changes hands in Currency, fee included on
+	// the side that bears it (buyer pays notional+fee, seller receives
+	// notional−fee). Side, not the sign, says which way it moves.
 	Amount         *big.Rat
 	Currency       string
 	Counterparty   string
@@ -64,14 +67,38 @@ type Settlement struct {
 }
 
 // NewInstruction builds the settlement instruction for an affirmed fill: it
-// computes the cash leg (quantity × price + fee) and starts in AFFIRMED, ready to
-// be instructed to the settlement venue. The settlement date is the agreed T+N
-// date (from the matched confirmation).
-func NewInstruction(instructionID string, fill *orderpb.Fill, counterparty, custodian, currency string, settlementDate time.Time) *Settlement {
+// computes the cash leg and starts in AFFIRMED, ready to be instructed to the
+// settlement venue. The settlement date is the agreed T+N date (from the matched
+// confirmation).
+//
+// Amount is the CASH THAT CHANGES HANDS, unsigned; Side says which way. A buyer
+// pays the notional PLUS the fee, a seller nets the fee OUT of the proceeds — so
+// the fee's sign follows the side. It used to be added on both sides, which for a
+// SELL of 100 @ 150 with a 7.50 fee instructed 15007.50 while the ledger booked
+// +14992.50: a 15.00 disagreement between the settlement instruction and the book
+// of record, i.e. a break the custodian raises and nobody can reconcile.
+//
+// A FEE NOT DENOMINATED IN currency IS REFUSED (#221). currency is the settlement
+// currency; order.v1.Fill.fee carries its own, and a crypto venue charges in the
+// base asset (OKX) or a discount token (Binance BNB). Netting those into a USD
+// instruction would instruct a cash amount the counterparty never agreed to.
+// Settling the fee in its own asset needs a second cash leg on the instruction —
+// settlement.v1.SettlementInstruction has one Amount/Currency pair, so that is a
+// schema change, not a code change.
+func NewInstruction(instructionID string, fill *orderpb.Fill, counterparty, custodian, currency string, settlementDate time.Time) (*Settlement, error) {
 	qty := dec.FromProto(fill.GetQuantity())
 	price := dec.FromProto(fill.GetPrice())
-	fee := dec.FromProto(fill.GetFee().GetAmount())
-	amount := new(big.Rat).Add(new(big.Rat).Mul(qty, price), fee)
+	fee, err := dec.MoneyIn(fill.GetFee(), currency)
+	if err != nil {
+		return nil, fmt.Errorf("posttrade: fill %s fee is not in the settlement currency, so it cannot be netted into the instruction: %w",
+			fill.GetFillId(), err)
+	}
+	amount := new(big.Rat).Mul(qty, price)
+	if fill.GetSide() == orderpb.Side_SIDE_SELL {
+		amount.Sub(amount, fee) // seller receives the notional net of the fee
+	} else {
+		amount.Add(amount, fee) // buyer pays the notional plus the fee
+	}
 	return &Settlement{
 		InstructionID:  instructionID,
 		FillID:         fill.GetFillId(),
@@ -84,7 +111,7 @@ func NewInstruction(instructionID string, fill *orderpb.Fill, counterparty, cust
 		Custodian:      custodian,
 		SettlementDate: settlementDate,
 		Status:         StatusAffirmed,
-	}
+	}, nil
 }
 
 // Affirm moves a MATCHED settlement to AFFIRMED.

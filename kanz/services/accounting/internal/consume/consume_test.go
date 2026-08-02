@@ -179,6 +179,43 @@ func TestFolderRejectsMalformedFill(t *testing.T) {
 	}
 }
 
+// A FEE THE CASH LEG CANNOT REPRESENT DLQs — IT DOES NOT POST A CLOSE-ENOUGH
+// NUMBER (#221).
+//
+// OKX charges a spot BUY's fee in the base asset. Netting 0.0008 BTC off a USD
+// cash leg posts +1.0 BTC where 0.9992 arrived and −50000.0008 USD where 50000.00
+// moved: $40 of phantom NAV per BTC, and the journal is append-only so it is
+// permanent and compounds per fill. Held in a DLQ, one fill is re-drivable; posted
+// wrong, it is a correcting entry someone has to notice first.
+func TestFolderRefusesAFeeInAnotherCurrency(t *testing.T) {
+	st := ledger.NewMemoryStore()
+	f, _ := NewFolder(testTenant, st, "USD")
+	ctx := context.Background()
+	t0 := time.Unix(1_700_000_000, 0).UTC()
+	env := &envelopepb.Envelope{EventType: orderEventFilled, IngestionTime: timestamppb.New(t0)}
+
+	ev := &orderpb.OrderFilled{
+		State: &orderpb.OrderState{PortfolioId: "PORT-1"},
+		Fill: &orderpb.Fill{
+			FillId: "F-BTCFEE", InstrumentId: "BTC-USDT", Side: orderpb.Side_SIDE_BUY,
+			Quantity: decv(1, 0), Price: decv(50000, 0),
+			Fee:        &commonpb.Money{Amount: decv(8, -4), CurrencyCode: "BTC"},
+			ExecutedAt: timestamppb.New(t0),
+		},
+	}
+	payload, err := proto.Marshal(ev)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if err := f.Handle(ctx, env, payload); err == nil {
+		t.Fatal("a BTC fee on a USD book was ACKED — it must nack to the DLQ, " +
+			"because a fee netted against a currency it was not charged in is permanent phantom NAV")
+	}
+	if j, _ := st.Journal(ctx, "PORT-1"); len(j) != 0 {
+		t.Fatalf("refused fill still wrote %d journal entries, want 0", len(j))
+	}
+}
+
 // THE LEDGER REFUSES AN OUT-OF-DOMAIN CASH LEG RATHER THAN GRINDING ON IT (#95).
 //
 // Decimal.exponent is an unvalidated wire field, and dec.FromProto materialises

@@ -1,6 +1,7 @@
 package ledger
 
 import (
+	"fmt"
 	"math/big"
 	"time"
 
@@ -12,16 +13,35 @@ import (
 // FromFill builds the TRADE journal entry for an OMS-01 Fill FACT — the seam
 // where the execution book feeds the accounting book. It computes the double
 // entry: the signed position leg (BUY +, SELL −) and the offsetting cash leg
-// (BUY pays cash out, SELL takes cash in), net of fees which always reduce cash.
+// (BUY pays cash out, SELL takes cash in), net of the fee.
 //
-// A fill carries no currency, so cashCurrency stamps the cash leg (the portfolio
-// reporting currency until a per-instrument reference-data join lands — the same
-// carried-forward seam the OMS position projector notes). The effective time is
-// the venue execution time; knowledge is when the book ingests the fill.
-func FromFill(portfolioID string, fill *orderpb.Fill, cashCurrency string, knowledge time.Time) *Event {
+// The fill's PRICE carries no currency, so cashCurrency stamps the cash leg (the
+// portfolio reporting currency until a per-instrument reference-data join lands).
+// The FEE does carry one — order.v1.Fill.fee is a common.v1.Money "in the
+// execution currency", and both crypto venue adapters populate it faithfully
+// (OKX fillFeeCcy, Binance commission ASSET) — so it is read, not assumed.
+//
+// A FEE IN ANY OTHER CURRENCY IS REFUSED, NOT NETTED (#221). OKX charges a spot
+// BUY's fee in the BASE asset: 1 BTC @ 50000 with fee 0.0008 BTC actually
+// delivered 0.9992 BTC for exactly 50000 USD, but subtracting 0.0008 from the USD
+// cash leg books +1.0 BTC and −50000.0008 USD — phantom BTC in NAV plus a USD
+// debit that never happened, permanently, because the journal is append-only.
+// Booking the fee against the asset it was charged in is the complete fix and
+// needs two things this package does not have: an Event that can carry a second
+// leg, and an instrument_id → base/quote-asset join (datamaster carries ONE
+// currency_code per instrument, which is the quote currency, not the pair legs).
+// Until both land, the fill DLQs and an operator sees it.
+//
+// The effective time is the venue execution time; knowledge is when the book
+// ingests the fill.
+func FromFill(portfolioID string, fill *orderpb.Fill, cashCurrency string, knowledge time.Time) (*Event, error) {
 	qty := dec.FromProto(fill.GetQuantity())
 	price := dec.FromProto(fill.GetPrice())
-	fee := dec.FromProto(fill.GetFee().GetAmount())
+	fee, err := dec.MoneyIn(fill.GetFee(), cashCurrency)
+	if err != nil {
+		return nil, fmt.Errorf("ledger: fill %s fee is not in the cash currency, so it cannot be netted against the cash leg: %w",
+			fill.GetFillId(), err)
+	}
 
 	signedQty := new(big.Rat).Set(qty)
 	gross := new(big.Rat).Mul(qty, price) // |qty|·price, the cash notional
@@ -32,7 +52,7 @@ func FromFill(portfolioID string, fill *orderpb.Fill, cashCurrency string, knowl
 	} else {
 		cash.Neg(gross) // buy: cash out
 	}
-	cash.Sub(cash, fee) // fees always reduce cash
+	cash.Sub(cash, fee) // the fee reduces cash on both sides (checked above to be IN cashCurrency)
 
 	eff := fill.GetExecutedAt().AsTime()
 	if eff.IsZero() {
@@ -54,5 +74,5 @@ func FromFill(portfolioID string, fill *orderpb.Fill, cashCurrency string, knowl
 		Effective:      eff,
 		Knowledge:      knowledge,
 		SourceRef:      fill.GetFillId(),
-	}
+	}, nil
 }
