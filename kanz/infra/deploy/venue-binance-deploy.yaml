@@ -80,6 +80,10 @@ spec:
         prometheus.io/scrape: "true"
         prometheus.io/port: "8091"
     spec:
+      # Drain budget: 7s bus drain + 15s HTTP shutdown + 5s OTLP flush, run
+      # SEQUENTIALLY after SIGTERM = 27s. The k8s default of 30 leaves three
+      # seconds and SIGKILLs mid-drain. See availability.yaml for the derivation.
+      terminationGracePeriodSeconds: 45
       serviceAccountName: venue-binance
       securityContext:
         runAsNonRoot: true
@@ -198,3 +202,22 @@ spec:
           csi:
             driver: csi.spiffe.io
             readOnly: true
+---
+# INFRA-01d / #234 — venue-binance had no disruption budget at all.
+# SINGLETON — zero allowed voluntary disruptions, and this is the sharpest case on the
+# estate (availability.yaml). Binance's user-data WebSocket carries NO replay: fills
+# arriving while this pod reschedules are never delivered to the OMS, order state
+# diverges from exchange state, and NOTHING reports the divergence. A `kubectl drain`
+# at 03:00 must stall here and wait for a human, not proceed.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: venue-binance
+  namespace: kanz-services
+  labels:
+    app.kubernetes.io/part-of: kanz
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: venue-binance

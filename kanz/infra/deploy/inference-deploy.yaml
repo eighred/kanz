@@ -82,6 +82,10 @@ spec:
         app: inference
         app.kubernetes.io/part-of: kanz
     spec:
+      # Drain budget: 7s bus drain + 15s HTTP shutdown + 5s OTLP flush, run
+      # SEQUENTIALLY after SIGTERM = 27s. The k8s default of 30 leaves three
+      # seconds and SIGKILLs mid-drain. See availability.yaml for the derivation.
+      terminationGracePeriodSeconds: 45
       serviceAccountName: inference
       securityContext:
         runAsNonRoot: true
@@ -161,3 +165,21 @@ spec:
             name: inference-models
         - name: tmp
           emptyDir: {}
+---
+# INFRA-01d / #234 — inference had no disruption budget at all.
+# The rollout above already refuses to drop below two live pods (maxUnavailable: 0),
+# but that governs a ROLLOUT only — a voluntary drain bypassed it entirely. A
+# prediction is an observation and never an order, so this is availability rather
+# than correctness; it is still how a shadow model quietly stops being evaluated.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: inference
+  namespace: kanz-services
+  labels:
+    app.kubernetes.io/part-of: kanz
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      app: inference

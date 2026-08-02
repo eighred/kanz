@@ -66,6 +66,10 @@ spec:
         prometheus.io/scrape: "true"
         prometheus.io/port: "8091"
     spec:
+      # 45s, matching the estate (availability.yaml). This pod's own shutdown is
+      # short, but it is the thing that PERFORMS drains: SIGKILLing it mid-eviction
+      # leaves a half-drained node and no controller to finish or report it.
+      terminationGracePeriodSeconds: 45
       serviceAccountName: operator
       # PINNED TO THE CONTROL PLANE — DO NOT REMOVE THIS TO "LET THE OPERATOR
       # SCHEDULE ANYWHERE" (OPS-M2e). Removing it deadlocks node drains.
@@ -150,6 +154,27 @@ spec:
             readOnlyRootFilesystem: true
             runAsNonRoot: true
             capabilities: { drop: ["ALL"] }
+          # DECLARED HERE BECAUSE NOTHING ELSE DECLARES IT FOR THIS POD (#231).
+          #
+          # availability.yaml's LimitRange covers kanz-services and this pod is in
+          # kanz-operator, which has no LimitRange — so with no `resources:` block
+          # this container had NO request at all. That is QoS class BestEffort: the
+          # first thing the kubelet evicts under node pressure, and it evicts the
+          # control plane that performs drains, on the node that is already in
+          # trouble. Every kanz-services workload is sized by the LimitRange default
+          # instead; a second copy of that number here would be the duplication that
+          # stops a fix from spreading, so this is the ONE workload that carries its
+          # own block, and it carries it because it must.
+          #
+          # THE NUMBERS ARE A FLOOR, NOT A MEASUREMENT. This is a watch-and-reconcile
+          # controller with no hot path: it lists nodes, creates one-shot Jobs, and
+          # serves a low-rate gRPC surface. 100m/128Mi is sized so it is schedulable
+          # and non-BestEffort; the limits are 5x/4x that so a leak fails loudly here
+          # rather than taking the node down. Replace with observed values when there
+          # is an estate to observe — #231 tracks that for the whole platform.
+          resources:
+            requests: { cpu: 100m, memory: 128Mi }
+            limits: { cpu: 500m, memory: 512Mi }
           volumeMounts:
             - { name: spiffe, mountPath: /run/spiffe, readOnly: true }
           env:

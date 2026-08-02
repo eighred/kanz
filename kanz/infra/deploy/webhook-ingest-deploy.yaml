@@ -118,6 +118,10 @@ spec:
         prometheus.io/scrape: "true"
         prometheus.io/port: "8090"
     spec:
+      # Drain budget: 7s bus drain + 15s HTTP shutdown + 5s OTLP flush, run
+      # SEQUENTIALLY after SIGTERM = 27s. The k8s default of 30 leaves three
+      # seconds and SIGKILLs mid-drain. See availability.yaml for the derivation.
+      terminationGracePeriodSeconds: 45
       serviceAccountName: webhook-ingest
       securityContext:
         runAsNonRoot: true
@@ -229,3 +233,22 @@ spec:
             readOnly: true
             volumeAttributes:
               secretProviderClass: webhook-ingest-config
+---
+# INFRA-01d / #234 — webhook-ingest had no disruption budget at all.
+# The RollingUpdate above sets maxUnavailable: 0 so that "there is no instant at which
+# nothing is listening for an alert" — but that sentence only ever governed a rollout.
+# A node drain evicts outside it, TradingView does not reliably retry, and an alert
+# arriving in the gap is a trade the fund silently did not make. This budget is what
+# makes that sentence true for drains too.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: webhook-ingest
+  namespace: kanz-services
+  labels:
+    app.kubernetes.io/part-of: kanz
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      app: webhook-ingest

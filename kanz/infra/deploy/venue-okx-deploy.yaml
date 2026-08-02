@@ -80,6 +80,10 @@ spec:
         prometheus.io/scrape: "true"
         prometheus.io/port: "8092"
     spec:
+      # Drain budget: 7s bus drain + 15s HTTP shutdown + 5s OTLP flush, run
+      # SEQUENTIALLY after SIGTERM = 27s. The k8s default of 30 leaves three
+      # seconds and SIGKILLs mid-drain. See availability.yaml for the derivation.
+      terminationGracePeriodSeconds: 45
       serviceAccountName: venue-okx
       securityContext:
         runAsNonRoot: true
@@ -213,3 +217,21 @@ spec:
           csi:
             driver: csi.spiffe.io
             readOnly: true
+---
+# INFRA-01d / #234 — venue-okx had no disruption budget at all.
+# SINGLETON — zero allowed voluntary disruptions, deliberately (availability.yaml).
+# Same failure as venue-binance: this pod holds the only session for the OKX account,
+# and fills that land during a reschedule are not replayed to the OMS afterwards.
+# Order state diverges silently, which no restart repairs.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: venue-okx
+  namespace: kanz-services
+  labels:
+    app.kubernetes.io/part-of: kanz
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: venue-okx

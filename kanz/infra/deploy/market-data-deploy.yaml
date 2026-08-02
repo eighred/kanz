@@ -74,6 +74,10 @@ spec:
         prometheus.io/scrape: "true"
         prometheus.io/port: "8082"
     spec:
+      # Drain budget: 7s bus drain + 15s HTTP shutdown + 5s OTLP flush, run
+      # SEQUENTIALLY after SIGTERM = 27s. The k8s default of 30 leaves three
+      # seconds and SIGKILLs mid-drain. See availability.yaml for the derivation.
+      terminationGracePeriodSeconds: 45
       serviceAccountName: market-data
       securityContext:
         runAsNonRoot: true
@@ -155,3 +159,21 @@ spec:
           csi:
             driver: csi.spiffe.io
             readOnly: true
+---
+# INFRA-01d / #234 — market-data had no disruption budget at all.
+# maxUnavailable, NOT minAvailable: 1. KEDA runs this 2..16 on bus backpressure, and
+# minAvailable: 1 would let a drain evict fifteen of sixteen pods at once — during
+# exactly the backlog that caused the scale-up. The risk engine marks positions
+# against this store, so a price feed falling behind moves risk numbers.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: market-data
+  namespace: kanz-services
+  labels:
+    app.kubernetes.io/part-of: kanz
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      app: market-data
