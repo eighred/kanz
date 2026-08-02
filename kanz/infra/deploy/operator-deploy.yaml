@@ -315,6 +315,41 @@ imagePullSecrets:
   - name: ghcr-pull
 automountServiceAccountToken: false
 ---
+# THE NAMESPACE DEFAULT-DENY (#232). kanz-operator carried seven NetworkPolicies and
+# not one of them selected the namespace — every policy named a single workload
+# (app: operator, app: kanz-mandate, app: kanz-altevent, app: kanz-household,
+# app: kanz-halt, the node-provisioner). A NetworkPolicy only makes a pod
+# deny-by-default for the DIRECTIONS its own policies declare, so the effect was:
+#
+#   - the operator pod: ingress-denied (operator-ingress) and egress-denied
+#     (operator-egress) — the intended posture.
+#   - every OTHER pod in this namespace: egress-bounded by its own rule, and
+#     INGRESS WIDE OPEN. Nothing declared Ingress for them, so any pod anywhere in
+#     the cluster could reach them.
+#   - any pod added here in future: open in BOTH directions, by omission.
+#
+# That last one is the reason this exists rather than a per-workload ingress rule.
+# kanz-services has had a namespace-wide default-deny since SEC-02a and this
+# namespace — the one holding the halt brake and the venue-credential writer — did
+# not. The asymmetry was not a decision; it was never noticed.
+#
+# SAFE TO ADD, and checked rather than assumed: every workload in this namespace
+# already carries its own egress policy (all six named above), so this adds no new
+# egress denial to anything that runs today. It adds ingress deny to five workloads
+# that are pure clients — the CLI pods and the two Jobs dial out and accept nothing —
+# and the one workload that does accept ingress keeps it via operator-ingress below,
+# including the destination-open kubelet probe rule on 8091.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+  namespace: kanz-operator
+  labels: { app.kubernetes.io/part-of: kanz }
+spec:
+  podSelector: {} # every pod
+  policyTypes: [Ingress, Egress]
+  # No ingress/egress rules ⇒ deny all in both directions until a policy allows.
+---
 # Deny-by-default ingress to the operator pod, closing the F0+S1 residual gap: the
 # gRPC listener (0.0.0.0:9090) was reachable by any in-cluster pod.
 #

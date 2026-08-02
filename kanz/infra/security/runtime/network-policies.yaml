@@ -217,11 +217,42 @@ spec:
 # venue-binance:8091 and venue-okx:8092 were all silently unscrapable, which takes the
 # SLO rules and the alerting built on them with it.
 #
-# NO PORT LIST, deliberately, and this is the same argument as the database rule
-# above. The peer is a single trusted namespace — the monitoring plane — and naming
-# which ports it may scrape adds no isolation against that peer while guaranteeing
-# that the next service with a new metrics port is silently unmonitored. The bound
-# that means something is WHO may connect, and it is one namespace.
+# THE PORT LIST IS LOAD-BEARING (#232). This rule shipped with NO ports:, on the
+# argument that "naming which ports it may scrape adds no isolation against that
+# peer while guaranteeing that the next service with a new metrics port is silently
+# unmonitored". Both halves were wrong.
+#
+# NetworkPolicy is ADDITIVE, and podSelector: {} selects EVERY pod. A rule with no
+# ports: therefore did not grant "the monitoring plane may scrape /metrics" — it
+# granted "any pod in kanz-observability may open any TCP port on any pod in
+# kanz-services", and it silently widened every narrower rule in this file:
+#
+#   postgres:5432        — the database itself. Every tenant's rows, reachable
+#                          from the monitoring namespace with no DSN in sight.
+#   venue-*:9000         — order submission on the processes that hold the
+#                          exchange API credentials. allow-oms-to-venue-adapters-ingress
+#                          says ":9000 ONLY, and only from the OMS"; this rule
+#                          made that comment false while it stood.
+#   risk-engine:9090     — the query surface allow-gateway-to-risk-engine
+#                          restricts to the api-gateway.
+#   inference:50051      — the prediction surface allow-risk-engine-to-inference
+#                          admits exactly one caller to.
+#
+# The "silently unmonitored" objection is real and is answered by a GUARD rather
+# than by leaving the rule open: test/arch/network_policy_coverage_test.go derives
+# this list from the prometheus.io/port annotations in infra/deploy/ and fails when
+# the two disagree in either direction. A new service with a new metrics port now
+# turns a test red instead of vanishing from the dashboards.
+#
+# WHAT THIS DOES NOT FIX, and cannot. audit (:8083) and tv-sync (:8091) serve their
+# TENANT-SCOPED READ APIs on the same plaintext mux and port as /metrics, and both
+# trust X-Kanz-Principal-Tenant — the header the api-gateway injects, sound only
+# because the gateway is their only reachable caller. A port list cannot separate
+# two surfaces that share a port, so a pod in kanz-observability can still send a
+# self-chosen tenant header to /v1/audit/events or /broker/accounts. Closing that
+# needs a SECOND LISTENER (metrics on its own port), which is a code change in each
+# service, not a manifest one. Tracked by #232; the guard named above pins the set
+# of services with a co-located surface so a third cannot be added unnoticed.
 #
 # The per-service scrape rules elsewhere in this file are now redundant but harmless
 # (NetworkPolicy is additive). They are left alone rather than deleted: each also
@@ -241,6 +272,19 @@ spec:
         - namespaceSelector:
             matchLabels:
               kubernetes.io/metadata.name: kanz-observability
+      # Every distinct prometheus.io/port in infra/deploy/, and nothing else.
+      # Do not edit by hand without the annotation that justifies the entry —
+      # network_policy_coverage_test.go compares the two sets exactly.
+      ports:
+        - { protocol: TCP, port: 8080 } # api-gateway, accounting, alternatives, copilot, datamaster, schema-registry, wealth
+        - { protocol: TCP, port: 8081 } # risk-engine
+        - { protocol: TCP, port: 8082 } # market-data
+        - { protocol: TCP, port: 8083 } # audit, regulatory
+        - { protocol: TCP, port: 8085 } # lake-sink
+        - { protocol: TCP, port: 8086 } # archiver
+        - { protocol: TCP, port: 8090 } # oms, webhook-ingest
+        - { protocol: TCP, port: 8091 } # compliance, market-ingest, tv-sync, venue-binance
+        - { protocol: TCP, port: 8092 } # venue-okx
 ---
 # Telemetry: allow egress to the OTLP collector (OBS-01) on 4317. Scoped to the
 # observability namespace.
@@ -680,3 +724,112 @@ spec:
               kubernetes.io/metadata.name: kanz-observability
       ports:
         - { protocol: TCP, port: 8085 }
+---
+# THE PUBLIC INTERNET (#232). Without these two policies NO PRICE ARRIVES, NO ORDER
+# REACHES AN EXCHANGE, AND NOBODY CAN LOG IN.
+#
+# default-deny-all denies egress for every pod in this namespace, and until now the
+# only destinations ever allowed were in-cluster: kube-dns, kanz-messaging, postgres,
+# the OTLP collector, and named pod-to-pod pairs. There was no ipBlock rule in
+# kanz-services AT ALL. Every workload that dials a public host was cut off:
+#
+#   api-gateway    login.eighred.com:443       OIDC/JWKS. The gateway is the sole
+#                                              identity authority; with no route to
+#                                              its issuer NOTHING authenticates.
+#   market-ingest  api.binance.com:443,        the market data feed
+#                  stream.binance.com:9443,
+#                  ws.okx.com:8443
+#   venue-binance  testnet.binance.vision:443  order submission
+#   venue-okx      www.okx.com:443,            order submission
+#                  ws.okx.com:8443
+#   copilot        the model API:443           COPILOT_PROVIDER=anthropic
+#
+# THE SYMPTOM IS NOT AN OUTAGE, WHICH IS WHY IT SURVIVED. The venue connectors retry
+# with backoff, so a policy denial presents forever as "connect failed; backing off"
+# — indistinguishable from an exchange having a bad afternoon. Readiness is bus
+# health, not venue health, so the pods stay Ready the whole time. A platform that
+# reports itself healthy while unable to reach any exchange is worse than one that
+# crashes, and it is what this namespace does today on any CNI that enforces policy.
+# Not seen on the rig for the same reason as every other gap in this file: kindnetd
+# does not enforce NetworkPolicy.
+#
+# THE except: LIST IS THE POINT, not extra hardening — the same rule
+# infra/deploy/operator-deploy.yaml's operator-egress states. An ipBlock of
+# 0.0.0.0/0 with no exclusions turns "may call an exchange" INWARD: every in-cluster
+# ClusterIP and the cloud metadata endpoint (169.254.169.254) are addresses inside
+# 0.0.0.0/0, so an unexcluded rule would hand the pods holding exchange credentials a
+# route to the rest of the estate and to the node's IAM credentials. Excluding the
+# RFC1918 ranges and the link-local block makes this "public internet only", which is
+# what an exchange call actually is. A rule here without this except: list is
+# forbidden, and network_policy_coverage_test.go fails on one.
+#
+# THE SET IS DERIVED, NOT CURATED. Every app named below has an https:// or wss://
+# destination in its deploy manifest or in its internal/config defaults, and the
+# guard re-derives that set from those two sources on every run — so a new
+# internet-facing service that is not listed here fails a test instead of failing
+# silently at 03:00 in a backoff loop.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-external-https-egress
+  namespace: kanz-services
+  labels:
+    app.kubernetes.io/part-of: kanz
+spec:
+  podSelector:
+    matchExpressions:
+      - key: app
+        operator: In
+        values: [api-gateway, copilot, market-ingest, venue-binance, venue-okx]
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.0.0.0/8
+              - 172.16.0.0/12
+              - 192.168.0.0/16
+              - 169.254.0.0/16
+      ports:
+        - { protocol: TCP, port: 443 }
+---
+# The exchange STREAM ports. Binance and OKX do not publish their WebSocket feeds on
+# 443: stream.binance.com is :9443 and ws.okx.com is :8443, and a rule that granted
+# only 443 would leave the price feed dead while the REST calls worked — the hardest
+# version of this failure to read, because the service comes up, authenticates, and
+# then simply never receives a tick.
+#
+# venue-binance is included even though BINANCE_WS_BASE currently points at
+# wss://testnet.binance.vision (which IS 443). Production is
+# wss://stream.binance.com:9443, so promoting that one env var off testnet would
+# otherwise re-open this hole — and it would re-open it as a silent backoff loop on
+# the live order path. The grant is to a public-internet-only ipBlock on two ports
+# an exchange publishes streams on; pre-granting it costs nothing and removes a trap
+# from the one change most likely to be made under time pressure.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-exchange-stream-egress
+  namespace: kanz-services
+  labels:
+    app.kubernetes.io/part-of: kanz
+spec:
+  podSelector:
+    matchExpressions:
+      - key: app
+        operator: In
+        values: [market-ingest, venue-binance, venue-okx]
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.0.0.0/8
+              - 172.16.0.0/12
+              - 192.168.0.0/16
+              - 169.254.0.0/16
+      ports:
+        - { protocol: TCP, port: 8443 } # ws.okx.com
+        - { protocol: TCP, port: 9443 } # stream.binance.com
