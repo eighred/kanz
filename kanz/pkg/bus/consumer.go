@@ -184,15 +184,29 @@ func (c *Consumer) Subscribe(ctx context.Context, subject, group string, h Event
 		ctx, span := startConsumerSpan(ctx, env.EventType)
 		start := time.Now()
 
+		// attemptsMade, not c.retry.MaxAttempts, is what Kanz-DLQ-Attempts reports.
+		// The two were the same while every failure ran the loop to exhaustion; the
+		// panic short-circuit below breaks early, and a header claiming 3 attempts
+		// on a delivery that got 1 would misdirect whoever reads the parked message.
 		var lastErr error
+		attemptsMade := 0
 		for attempt := 1; attempt <= c.retry.MaxAttempts; attempt++ {
-			if err := h(ctx, env, payload); err == nil {
+			attemptsMade = attempt
+			if err := dispatchEvent(ctx, h, env, payload); err == nil {
 				c.dedup.Commit(env.IdempotencyKey) // done — hold for the full window
 				endSpan(span, nil)
 				c.metrics.observeConsume(subject, group, time.Since(start), nil)
 				return nil
 			} else {
 				lastErr = err
+			}
+			// A panic is TERMINAL, not retryable. Re-entering a handler that just
+			// panicked re-runs the same deterministic defect on the same bytes, on
+			// top of whatever partial state the first attempt left behind. Break to
+			// the DLQ path instead of spending the remaining attempts on it.
+			var panicked *HandlerPanicError
+			if errors.As(lastErr, &panicked) {
+				break
 			}
 			if attempt < c.retry.MaxAttempts {
 				if err := sleepWithCtx(ctx, c.retry.Backoff(attempt)); err != nil {
@@ -210,7 +224,7 @@ func (c *Consumer) Subscribe(ctx context.Context, subject, group string, h Event
 		endSpan(span, lastErr)
 		c.metrics.observeConsume(subject, group, time.Since(start), lastErr)
 		if c.dlq != nil {
-			if err := c.publishDLQ(ctx, subject, msg, c.retry.MaxAttempts, lastErr); err != nil {
+			if err := c.publishDLQ(ctx, subject, msg, attemptsMade, lastErr); err != nil {
 				// The DLQ publish itself failed, so this event is neither handled nor
 				// parked. Release so the broker's redelivery gets a real second chance.
 				c.dedup.Release(env.IdempotencyKey)
@@ -294,6 +308,12 @@ func (c *Consumer) SubscribeBroadcastReady(ctx context.Context, subject string, 
 			ctx = WithTraceContext(ctx, env.TraceContext)
 			ctx = observability.ContextWithTraceparent(ctx, env.TraceContext)
 		}
-		return h(ctx, env, payload)
+		// Recovered for the same reason as Subscribe, resolving differently: a
+		// broadcast has no DLQ by design, so the panic surfaces as an error, the
+		// message is nacked, and the process stays in whatever state it was already
+		// in. For the halt gate that state is CLOSED — "I could not read the brake
+		// signal" must not resolve to "keep trading", and it must not resolve to
+		// "the pod is gone" either.
+		return dispatchEvent(ctx, h, env, payload)
 	}, ready)
 }

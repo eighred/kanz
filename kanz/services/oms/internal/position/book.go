@@ -71,6 +71,9 @@ func (b *Book) Apply(_ context.Context, portfolioID string, fill *orderpb.Fill, 
 	if fill.GetVenue() == "" {
 		return nil, ErrFillHasNoVenue
 	}
+	if !dec.IsPositive(fill.GetQuantity()) {
+		return nil, ErrFillQuantityNotPositive
+	}
 	k := key{portfolioID, fill.GetVenue(), fill.GetInstrumentId()}
 	l := b.lots[k]
 	if l == nil {
@@ -172,6 +175,23 @@ func foldLot(l *lot, signed, price *big.Rat) {
 		addAbs := new(big.Rat).Abs(signed)
 		newQty := new(big.Rat).Add(l.qty, signed)
 		newAbs := new(big.Rat).Abs(newQty)
+		// A ZERO DIVISOR HERE IS A PANIC, NOT A WRONG NUMBER (#217). Both callers
+		// now refuse a non-positive fill before reaching this (ErrFillQuantityNotPositive),
+		// so this is unreachable through Apply — it stays because this function is the
+		// ONE fold shared by the in-memory and durable books, the divisor is derived
+		// rather than validated here, and big.Rat.Quo's failure mode is to take the
+		// process down. Both sibling folds already guard the same division
+		// (postgres.go's aggregate, tv-sync's fold); this one did not, and that
+		// asymmetry is exactly what shipped.
+		//
+		// Flat is a real state, not an error: a lot that nets to zero has no basis
+		// and reports none, which is what the aggregate does for a fund that has
+		// closed every venue.
+		if newAbs.Sign() == 0 {
+			l.avg = new(big.Rat)
+			l.qty = newQty
+			return
+		}
 		// new avg = (oldAbs*avg + addAbs*price) / newAbs
 		cost := new(big.Rat).Mul(oldAbs, l.avg)
 		cost.Add(cost, new(big.Rat).Mul(addAbs, price))

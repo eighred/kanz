@@ -216,7 +216,12 @@ func (c *NATSClient) Subscribe(ctx context.Context, subject, group string, h Han
 
 	cc, err := cons.Consume(func(m jetstream.Msg) {
 		hctx := *handlerCtx.Load()
-		if err := h(hctx, natsToMessage(m)); err != nil {
+		// dispatchMessage, not h: a panic in a direct Subscribe caller's handler
+		// would otherwise unwind through this callback and kill the process, taking
+		// every other subscription in it down too. Consumer recovers above this, so
+		// for a Consumer-backed subscription the recover here never fires; this is
+		// the net for direct callers (today: the archiver).
+		if err := dispatchMessage(hctx, h, natsToMessage(m)); err != nil {
 			// Surfaced deliberately (logNakFailure) but never escalated further: the
 			// handler already decided this delivery failed, and a Nak that itself
 			// fails to reach the broker still redelivers — just later, on the
