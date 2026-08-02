@@ -4,8 +4,11 @@ import (
 	"context"
 	"errors"
 	"os"
+	"path/filepath"
+	"sort"
 	"testing"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/eighred/kanz/services/schema-registry/internal/storage"
@@ -139,22 +142,78 @@ func TestRegister(t *testing.T) {
 	}
 }
 
+// testSchema isolates this suite's `schemas` table in its OWN Postgres schema.
+//
+// `schemas` is about as generic a table name as this tree contains, and CI runs every
+// package against ONE database. Owning a schema means the suite can DROP and rebuild
+// its table from the migration on every run without deciding whether some other
+// package put that name in `public` first — and nothing it creates is visible to
+// anybody else's migration. Same stance as services/oms/internal/order.
+const testSchema = "schema_registry_storage_test"
+
+const migrationDir = "../../migrations"
+
+// newPostgres builds the store against the SAME variable every other DB-gated suite
+// reads, and CI sets: TEST_POSTGRES_URL.
+//
+// This gate used to read TEST_POSTGRES_DSN, which is set by no workflow and no script
+// — so the postgres arm of TestStorage and the whole of TestRegister's versioning and
+// idempotency contract had never executed anywhere, while the suite reported green off
+// the in-memory arm alone. storage.NewPostgres is schema-registry's ONLY production
+// store (cmd/schema-registry/main.go:63), so "green" meant nothing about what ships.
 func newPostgres(t *testing.T) storage.Storage {
 	t.Helper()
-	dsn := os.Getenv("TEST_POSTGRES_DSN")
-	if dsn == "" {
-		t.Skip("TEST_POSTGRES_DSN not set")
+	url := os.Getenv("TEST_POSTGRES_URL")
+	if url == "" {
+		t.Skip("set TEST_POSTGRES_URL to run schema-registry storage Postgres integration tests")
 	}
-	pool, err := pgxpool.New(context.Background(), dsn)
+	cfg, err := pgxpool.ParseConfig(url)
+	if err != nil {
+		t.Fatalf("parse config: %v", err)
+	}
+	cfg.AfterConnect = func(ctx context.Context, conn *pgx.Conn) error {
+		_, err := conn.Exec(ctx, "SET search_path TO "+testSchema)
+		return err
+	}
+
+	// The pool's connections already point at the schema, so it must exist before any
+	// of them is used — create it on a connection of our own.
+	ctx := context.Background()
+	admin, err := pgxpool.New(ctx, url)
+	if err != nil {
+		t.Fatalf("admin connect: %v", err)
+	}
+	defer admin.Close()
+	if _, err := admin.Exec(ctx, `DROP SCHEMA IF EXISTS `+testSchema+` CASCADE`); err != nil {
+		t.Fatalf("drop schema: %v", err)
+	}
+	if _, err := admin.Exec(ctx, `CREATE SCHEMA `+testSchema); err != nil {
+		t.Fatalf("create schema: %v", err)
+	}
+
+	pool, err := pgxpool.NewWithConfig(ctx, cfg)
 	if err != nil {
 		t.Fatalf("postgres connect: %v", err)
 	}
-	if _, err := pool.Exec(context.Background(), "TRUNCATE schemas"); err != nil {
-		t.Fatalf("truncate: %v", err)
+	t.Cleanup(pool.Close)
+
+	// CI migrates only services/oms (kanz-ci.yml), so `schemas` does not exist until
+	// this suite creates it. Replaying the service's real migration files is also what
+	// makes 0001_init.sql itself covered — a DDL typo there fails here rather than in a
+	// deployment.
+	files, err := filepath.Glob(filepath.Join(migrationDir, "*.sql"))
+	if err != nil || len(files) == 0 {
+		t.Fatalf("glob migrations %s: %v (found %d)", migrationDir, err, len(files))
 	}
-	t.Cleanup(func() {
-		_, _ = pool.Exec(context.Background(), "TRUNCATE schemas")
-		pool.Close()
-	})
+	sort.Strings(files)
+	for _, f := range files {
+		ddl, rerr := os.ReadFile(f)
+		if rerr != nil {
+			t.Fatalf("read migration %s: %v", f, rerr)
+		}
+		if _, err := pool.Exec(ctx, string(ddl)); err != nil {
+			t.Fatalf("apply migration %s: %v", f, err)
+		}
+	}
 	return storage.NewPostgres(pool)
 }
