@@ -61,8 +61,9 @@ var _ Gate = (*COMP01Gate)(nil)
 // Check implements Gate. A transient engine error (book/mandate load) is
 // returned so the handler retries; a BREACH returns a *Breach (terminal
 // rejection); PASS/WARN return nil (admit).
-func (g *COMP01Gate) Check(ctx context.Context, cmd *orderpb.SubmitOrder) (*Breach, error) {
+func (g *COMP01Gate) Check(ctx context.Context, tenantID string, cmd *orderpb.SubmitOrder) (*Breach, error) {
 	decision, err := g.gate.Evaluate(ctx, comp.OrderDelta{
+		TenantID:       tenantID,
 		PortfolioID:    cmd.GetPortfolioId(),
 		InstrumentID:   cmd.GetInstrumentId(),
 		SignedQuantity: signedQuantity(cmd.GetSide(), cmd.GetQuantity()),
@@ -108,6 +109,22 @@ func (g *COMP01Gate) Check(ctx context.Context, cmd *orderpb.SubmitOrder) (*Brea
 		return &Breach{
 			Code:   "NOTIONAL_UNREPRESENTABLE",
 			Reason: "order notional (quantity × price) cannot be represented for instrument " + cmd.GetInstrumentId(),
+		}, nil
+	}
+	// The platform could not say WHOSE mandate governs this portfolio, so it
+	// evaluated none (#243). Its own code, because the operator action is neither
+	// "write a mandate" (MANDATE_MISSING) nor "look for the rule that fired" — it
+	// is "two tenants share this portfolio name, disambiguate them".
+	//
+	// The Reason deliberately does NOT name the other tenants. This string is
+	// returned to the submitting client on the ORDER_REJECTED FACT; the tenants
+	// involved belong in the OMS's log, which is where the gate puts them, not in
+	// another customer's rejection message.
+	if decision.Unscoped {
+		return &Breach{
+			Code: "MANDATE_TENANT_UNRESOLVED",
+			Reason: "cannot determine which tenant's mandate governs portfolio " + cmd.GetPortfolioId() +
+				" — the order was not evaluated against any rule",
 		}, nil
 	}
 	return breachFromResult(decision.Result), nil

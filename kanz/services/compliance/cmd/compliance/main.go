@@ -120,7 +120,7 @@ func runConsumers(ctx context.Context, cfg config.Config, readiness *server.Read
 
 	// COMP-01f: mandate registry fed from the shared ConfigChanged stream, the
 	// point-in-time source the monitor resolves against.
-	mandateReg := comp.NewMandateRegistry()
+	mandateReg := comp.NewMandateRegistry(comp.WithMandateLogger(logger))
 	mandateConsumer := comp.NewMandateConsumer(mandateReg, logger)
 
 	// COMP-01e: decisions to the audit stream. COMP-01d: the post-trade monitor.

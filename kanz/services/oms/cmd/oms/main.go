@@ -164,7 +164,7 @@ func runConsumers(ctx context.Context, cfg config.Config, readiness *server.Read
 	// OMS-01f + COMP-01c: the pre-trade gate is the COMP-01 engine resolving
 	// against the mandate stream (a MandateConsumer feeds the registry from the
 	// shared ConfigChanged subject) and projecting onto the live position book.
-	mandateReg := comp.NewMandateRegistry()
+	mandateReg := comp.NewMandateRegistry(comp.WithMandateLogger(logger))
 	mandateConsumer := comp.NewMandateConsumer(mandateReg, logger)
 
 	// COMP-M2: the reference-mark source the pre-trade gate values MARKET/STOP
@@ -238,7 +238,7 @@ func runConsumers(ctx context.Context, cfg config.Config, readiness *server.Read
 	preTrade := comp.NewPreTradeGate(
 		comp.NewEngine(nil), compliance.NewBookSource(book), mandateReg, nil, nil, logger,
 		comp.WithRequireMandate(cfg.RequireMandate),
-		comp.WithUngovernedObserver(func(string) { ungoverned.Inc() }),
+		comp.WithUngovernedObserver(func(string, string) { ungoverned.Inc() }),
 		comp.WithUnpricedObserver(func(portfolioID, instrumentID string) {
 			// Two very different incidents arrive at the same refusal, and an
 			// operator needs to tell them apart: a mark we have NEVER seen means a

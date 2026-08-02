@@ -37,7 +37,7 @@ func (s stubMarks) Mark(instrument string) *big.Rat {
 func bookedTestGate(t *testing.T) *comp.PreTradeGate {
 	t.Helper()
 	reg := comp.NewMandateRegistry()
-	reg.Put(concentrationMandate(60))
+	mustPut(t, reg, concentrationMandate(60))
 	books := comp.MapBookSource{"p1": &comp.Book{
 		PortfolioID: "p1", BaseCurrency: "USD",
 		Positions: []comp.Position{
@@ -60,7 +60,7 @@ func TestCheck_MarketOrderIsValuedFromTheMark(t *testing.T) {
 	g := NewCOMP01Gate(bookedTestGate(t), "USD",
 		WithMarkSource(stubMarks{instrument: "AAPL", price: big.NewRat(100, 1)}))
 
-	breach, err := g.Check(context.Background(), unpricedOrder(orderpb.OrderType_ORDER_TYPE_MARKET))
+	breach, err := g.Check(context.Background(), "t1", unpricedOrder(orderpb.OrderType_ORDER_TYPE_MARKET))
 	if err != nil {
 		t.Fatalf("Check: %v", err)
 	}
@@ -75,7 +75,7 @@ func TestCheck_MarketOrderIsValuedFromTheMark(t *testing.T) {
 	// case above and pass silently.
 	gBig := NewCOMP01Gate(bookedTestGate(t), "USD",
 		WithMarkSource(stubMarks{instrument: "AAPL", price: big.NewRat(1000000, 1)}))
-	breach, err = gBig.Check(context.Background(), unpricedOrder(orderpb.OrderType_ORDER_TYPE_MARKET))
+	breach, err = gBig.Check(context.Background(), "t1", unpricedOrder(orderpb.OrderType_ORDER_TYPE_MARKET))
 	if err != nil {
 		t.Fatalf("Check: %v", err)
 	}
@@ -102,7 +102,7 @@ func TestCheck_MarketOrderWithVeryLargeMarkIsRescaledNotWrapped(t *testing.T) {
 	g := NewCOMP01Gate(bookedTestGate(t), "USD",
 		WithMarkSource(stubMarks{instrument: "AAPL", price: big.NewRat(184467440738, 1)}))
 
-	breach, err := g.Check(context.Background(), unpricedOrder(orderpb.OrderType_ORDER_TYPE_MARKET))
+	breach, err := g.Check(context.Background(), "t1", unpricedOrder(orderpb.OrderType_ORDER_TYPE_MARKET))
 	if err != nil {
 		t.Fatalf("Check: %v", err)
 	}
@@ -123,7 +123,7 @@ func TestCheck_MarketOrderWithZeroMarkIsRefused(t *testing.T) {
 	g := NewCOMP01Gate(bookedTestGate(t), "USD",
 		WithMarkSource(stubMarks{instrument: "AAPL", price: big.NewRat(0, 1)}))
 
-	breach, err := g.Check(context.Background(), unpricedOrder(orderpb.OrderType_ORDER_TYPE_MARKET))
+	breach, err := g.Check(context.Background(), "t1", unpricedOrder(orderpb.OrderType_ORDER_TYPE_MARKET))
 	if err != nil {
 		t.Fatalf("Check: %v", err)
 	}
@@ -136,7 +136,7 @@ func TestCheck_MarketOrderWithNegativeMarkIsRefused(t *testing.T) {
 	g := NewCOMP01Gate(bookedTestGate(t), "USD",
 		WithMarkSource(stubMarks{instrument: "AAPL", price: big.NewRat(-100, 1)}))
 
-	breach, err := g.Check(context.Background(), unpricedOrder(orderpb.OrderType_ORDER_TYPE_MARKET))
+	breach, err := g.Check(context.Background(), "t1", unpricedOrder(orderpb.OrderType_ORDER_TYPE_MARKET))
 	if err != nil {
 		t.Fatalf("Check: %v", err)
 	}
@@ -152,7 +152,7 @@ func TestCheck_StopOrderIsValuedFromTheMark(t *testing.T) {
 	g := NewCOMP01Gate(bookedTestGate(t), "USD",
 		WithMarkSource(stubMarks{instrument: "AAPL", price: big.NewRat(100, 1)}))
 
-	breach, err := g.Check(context.Background(), unpricedOrder(orderpb.OrderType_ORDER_TYPE_STOP))
+	breach, err := g.Check(context.Background(), "t1", unpricedOrder(orderpb.OrderType_ORDER_TYPE_STOP))
 	if err != nil {
 		t.Fatalf("Check: %v", err)
 	}
@@ -173,7 +173,7 @@ func TestCheck_StopLimitOrderIgnoresTheMark(t *testing.T) {
 	g := NewCOMP01Gate(bookedTestGate(t), "USD",
 		WithMarkSource(stubMarks{instrument: "AAPL", price: big.NewRat(1000000, 1)}))
 
-	breach, err := g.Check(context.Background(), cmd)
+	breach, err := g.Check(context.Background(), "t1", cmd)
 	if err != nil {
 		t.Fatalf("Check: %v", err)
 	}
@@ -192,7 +192,7 @@ func TestCheck_UnspecifiedOrderTypeIsRefused(t *testing.T) {
 	g := NewCOMP01Gate(bookedTestGate(t), "USD",
 		WithMarkSource(stubMarks{instrument: "AAPL", price: big.NewRat(100, 1)}))
 
-	breach, err := g.Check(context.Background(), unpricedOrder(orderpb.OrderType_ORDER_TYPE_UNSPECIFIED))
+	breach, err := g.Check(context.Background(), "t1", unpricedOrder(orderpb.OrderType_ORDER_TYPE_UNSPECIFIED))
 	if err != nil {
 		t.Fatalf("Check: %v", err)
 	}
@@ -206,7 +206,7 @@ func TestCheck_MarketOrderWithNoMarkIsStillRefused(t *testing.T) {
 	g := NewCOMP01Gate(bookedTestGate(t), "USD",
 		WithMarkSource(stubMarks{instrument: "SOMETHING-ELSE", price: big.NewRat(100, 1)}))
 
-	breach, err := g.Check(context.Background(), unpricedOrder(orderpb.OrderType_ORDER_TYPE_MARKET))
+	breach, err := g.Check(context.Background(), "t1", unpricedOrder(orderpb.OrderType_ORDER_TYPE_MARKET))
 	if err != nil {
 		t.Fatalf("Check: %v", err)
 	}
@@ -219,7 +219,7 @@ func TestCheck_MarketOrderWithNoMarkIsStillRefused(t *testing.T) {
 func TestCheck_MarketOrderWithNoSourceWiredIsRefusedAsBefore(t *testing.T) {
 	g := NewCOMP01Gate(bookedTestGate(t), "USD") // no WithMarkSource
 
-	breach, err := g.Check(context.Background(), unpricedOrder(orderpb.OrderType_ORDER_TYPE_MARKET))
+	breach, err := g.Check(context.Background(), "t1", unpricedOrder(orderpb.OrderType_ORDER_TYPE_MARKET))
 	if err != nil {
 		t.Fatalf("Check: %v", err)
 	}
@@ -243,7 +243,7 @@ func TestCheck_LimitOrderIgnoresTheMark(t *testing.T) {
 	g := NewCOMP01Gate(bookedTestGate(t), "USD",
 		WithMarkSource(stubMarks{instrument: "AAPL", price: big.NewRat(1000000, 1)}))
 
-	breach, err := g.Check(context.Background(), cmd)
+	breach, err := g.Check(context.Background(), "t1", cmd)
 	if err != nil {
 		t.Fatalf("Check: %v", err)
 	}
@@ -293,7 +293,7 @@ func TestCheck_ExpiredRealMarkIsRefused(t *testing.T) {
 	g := NewCOMP01Gate(bookedTestGate(t), "USD", WithMarkSource(src))
 	cmd := unpricedOrder(orderpb.OrderType_ORDER_TYPE_MARKET)
 
-	breach, err := g.Check(context.Background(), cmd)
+	breach, err := g.Check(context.Background(), "t1", cmd)
 	if err != nil {
 		t.Fatalf("Check: %v", err)
 	}
@@ -304,7 +304,7 @@ func TestCheck_ExpiredRealMarkIsRefused(t *testing.T) {
 	// No new tick; only local time moves.
 	now = base.Add(maxAge + time.Second)
 
-	breach, err = g.Check(context.Background(), cmd)
+	breach, err = g.Check(context.Background(), "t1", cmd)
 	if err != nil {
 		t.Fatalf("Check: %v", err)
 	}

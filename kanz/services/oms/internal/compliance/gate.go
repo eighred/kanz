@@ -24,12 +24,22 @@ type Breach struct {
 // allow; a non-nil *Breach to reject. The candidate is the SubmitOrder so the
 // real gate (COMP-01) can project the post-trade book and run the portfolio's
 // mandate rules.
+//
+// tenantID is WHOSE order it is, off the command envelope — SubmitOrder itself
+// carries no tenant, and portfolio_id is a caller-chosen string, so without this
+// parameter the mandate lookup had nothing but "growth" to go on and tenant B's
+// order was cleared against tenant A's limits (#243). It is a parameter rather
+// than something the adapter reads off its own config precisely so that every
+// implementation is forced to be given one; the OMS's own configured tenant is
+// __system__ and is the wrong answer here.
 type Gate interface {
-	Check(ctx context.Context, cmd *orderpb.SubmitOrder) (*Breach, error)
+	Check(ctx context.Context, tenantID string, cmd *orderpb.SubmitOrder) (*Breach, error)
 }
 
 // AllowAll admits every order. The placeholder until COMP-01 is wired.
 type AllowAll struct{}
 
 // Check always allows.
-func (AllowAll) Check(context.Context, *orderpb.SubmitOrder) (*Breach, error) { return nil, nil }
+func (AllowAll) Check(context.Context, string, *orderpb.SubmitOrder) (*Breach, error) {
+	return nil, nil
+}

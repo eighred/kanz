@@ -35,7 +35,7 @@ func concentrationRule(maxPct int64) *compliancepb.Rule {
 func domainGate(t *testing.T) *PreTradeGate {
 	t.Helper()
 	reg := NewMandateRegistry()
-	reg.Put(mandate(concentrationRule(60)))
+	mustPut(t, reg, mandate(concentrationRule(60)))
 	books := MapBookSource{"p1": &Book{
 		PortfolioID:  "p1",
 		BaseCurrency: "USD",
@@ -58,6 +58,7 @@ func domainGate(t *testing.T) *PreTradeGate {
 
 func domainDelta(qty *commonpb.Decimal) OrderDelta {
 	return OrderDelta{
+		TenantID:       "t1",
 		PortfolioID:    "p1",
 		InstrumentID:   "AAPL",
 		SignedQuantity: qty,
@@ -145,7 +146,7 @@ func TestEvaluate_DomainBoundaryInBothSigns(t *testing.T) {
 // Quantity alone would not reproduce the hang this test guards against.
 func TestEvaluate_OutOfDomainBookPositionIsRefused(t *testing.T) {
 	reg := NewMandateRegistry()
-	reg.Put(mandate(concentrationRule(60)))
+	mustPut(t, reg, mandate(concentrationRule(60)))
 	books := MapBookSource{"p1": &Book{
 		PortfolioID:  "p1",
 		BaseCurrency: "USD",

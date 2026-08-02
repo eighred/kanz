@@ -37,7 +37,7 @@ func newGate(t *testing.T, m *compliancepb.Mandate) *PreTradeGate {
 	t.Helper()
 	reg := NewMandateRegistry()
 	if m != nil {
-		reg.Put(m)
+		mustPut(t, reg, m)
 	}
 	return NewPreTradeGate(NewEngine(nil), MapBookSource{"p1": currentBook()}, reg, nil, nil, nil)
 }
@@ -46,6 +46,7 @@ func TestPreTradeGate_RejectsBreachingOrder(t *testing.T) {
 	g := newGate(t, concentrationMandate(60)) // 60% cap
 	// Buy 100 more AAPL @ 1000 ⇒ AAPL 200k of 300k = 66.7% > 60%.
 	dec1 := OrderDelta{
+		TenantID:    "t1",
 		PortfolioID: "p1", InstrumentID: "AAPL",
 		SignedQuantity: dec(100, 0), Price: dec(1000, 0), Currency: "USD",
 		OrderID: "o1", AsOf: t0,
@@ -66,6 +67,7 @@ func TestPreTradeGate_AdmitsCompliantOrder(t *testing.T) {
 	g := newGate(t, concentrationMandate(60))
 	// Buy 10 AAPL ⇒ AAPL 110k of 210k ≈ 52% < 60%.
 	got, err := g.Evaluate(context.Background(), OrderDelta{
+		TenantID:    "t1",
 		PortfolioID: "p1", InstrumentID: "AAPL",
 		SignedQuantity: dec(10, 0), Price: dec(1000, 0), Currency: "USD", OrderID: "o2", AsOf: t0,
 	})
@@ -80,6 +82,7 @@ func TestPreTradeGate_AdmitsCompliantOrder(t *testing.T) {
 func TestPreTradeGate_NoMandateAdmits(t *testing.T) {
 	g := newGate(t, nil) // no mandate for p1
 	got, err := g.Evaluate(context.Background(), OrderDelta{
+		TenantID:    "t1",
 		PortfolioID: "p1", InstrumentID: "AAPL", SignedQuantity: dec(1000, 0), Price: dec(1000, 0), Currency: "USD", AsOf: t0,
 	})
 	if err != nil {
@@ -100,10 +103,11 @@ func (r *recordingRecorder) Record(_ context.Context, rec DecisionRecord) error 
 
 func TestPreTradeGate_RecordsDecision(t *testing.T) {
 	reg := NewMandateRegistry()
-	reg.Put(concentrationMandate(60))
+	mustPut(t, reg, concentrationMandate(60))
 	rec := &recordingRecorder{}
 	g := NewPreTradeGate(NewEngine(nil), MapBookSource{"p1": currentBook()}, reg, nil, rec, nil)
 	if _, err := g.Evaluate(context.Background(), OrderDelta{
+		TenantID:    "t1",
 		PortfolioID: "p1", InstrumentID: "AAPL", SignedQuantity: dec(100, 0), Price: dec(1000, 0), Currency: "USD", OrderID: "o1", AsOf: t0,
 	}); err != nil {
 		t.Fatal(err)
@@ -122,9 +126,9 @@ func TestPreTradeGate_RecordsDecision(t *testing.T) {
 func TestAnUngovernedPortfolioIsNotSilent(t *testing.T) {
 	var counted []string
 	g := NewPreTradeGate(NewEngine(nil), MapBookSource{"p1": currentBook()}, NewMandateRegistry(), nil, nil, nil,
-		WithUngovernedObserver(func(pf string) { counted = append(counted, pf) }))
+		WithUngovernedObserver(func(_, pf string) { counted = append(counted, pf) }))
 
-	dec, err := g.Evaluate(context.Background(), OrderDelta{PortfolioID: "unmandated", AsOf: time.Now()})
+	dec, err := g.Evaluate(context.Background(), OrderDelta{TenantID: "t1", PortfolioID: "unmandated", AsOf: time.Now()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -144,16 +148,16 @@ func TestAnUngovernedPortfolioIsNotSilent(t *testing.T) {
 // gap: that is how a real signal gets buried under noise nobody can action.
 func TestAMandateWithNoRulesIsGovernedNotUngoverned(t *testing.T) {
 	reg := NewMandateRegistry()
-	reg.Put(&compliancepb.Mandate{
-		MandateId: "m1", TenantId: "acme", PortfolioId: "p1", Version: 1,
+	mustPut(t, reg, &compliancepb.Mandate{
+		MandateId: "m1", TenantId: "t1", PortfolioId: "p1", Version: 1,
 		EffectiveAt: timestamppb.New(time.Now().Add(-time.Hour)),
 		// no rules, on purpose
 	})
 	var counted int
 	g := NewPreTradeGate(NewEngine(nil), MapBookSource{"p1": currentBook()}, reg, nil, nil, nil,
-		WithUngovernedObserver(func(string) { counted++ }))
+		WithUngovernedObserver(func(string, string) { counted++ }))
 
-	dec, err := g.Evaluate(context.Background(), OrderDelta{PortfolioID: "p1", AsOf: time.Now()})
+	dec, err := g.Evaluate(context.Background(), OrderDelta{TenantID: "t1", PortfolioID: "p1", AsOf: time.Now()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -174,7 +178,7 @@ func TestRequireMandateRefusesAnUngovernedPortfolio(t *testing.T) {
 	g := NewPreTradeGate(NewEngine(nil), MapBookSource{"p1": currentBook()}, NewMandateRegistry(), nil, nil, nil,
 		WithRequireMandate(true))
 
-	dec, err := g.Evaluate(context.Background(), OrderDelta{PortfolioID: "unmandated", AsOf: time.Now()})
+	dec, err := g.Evaluate(context.Background(), OrderDelta{TenantID: "t1", PortfolioID: "unmandated", AsOf: time.Now()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -215,6 +219,7 @@ func restrictAAPLMandate() *compliancepb.Mandate {
 func TestPreTradeGate_MarketOrderCannotEraseAnExistingBreach(t *testing.T) {
 	g := newGate(t, restrictAAPLMandate())
 	got, err := g.Evaluate(context.Background(), OrderDelta{
+		TenantID:    "t1",
 		PortfolioID: "p1", InstrumentID: "AAPL",
 		SignedQuantity: dec(10, 0), Price: nil, // MARKET order: no limit price
 		Currency: "USD", OrderID: "o-market", AsOf: t0,
@@ -240,6 +245,7 @@ func TestPreTradeGate_MarketOrderCannotEraseAnExistingBreach(t *testing.T) {
 func TestPreTradeGate_NilPriceRefusedWithNoViolation(t *testing.T) {
 	g := newGate(t, concentrationMandate(60))
 	got, err := g.Evaluate(context.Background(), OrderDelta{
+		TenantID:    "t1",
 		PortfolioID: "p1", InstrumentID: "AAPL",
 		SignedQuantity: dec(10, 0), Price: nil, Currency: "USD", OrderID: "o1", AsOf: t0,
 	})
@@ -270,6 +276,7 @@ func TestPreTradeGate_ZeroAndNegativePriceRefused(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			g := newGate(t, concentrationMandate(60))
 			got, err := g.Evaluate(context.Background(), OrderDelta{
+				TenantID:    "t1",
 				PortfolioID: "p1", InstrumentID: "AAPL",
 				SignedQuantity: dec(10, 0), Price: tc.price, Currency: "USD", OrderID: "o1", AsOf: t0,
 			})
@@ -288,13 +295,14 @@ func TestPreTradeGate_ZeroAndNegativePriceRefused(t *testing.T) {
 // blocking it would be a behaviour change with zero safety benefit.
 func TestPreTradeGate_NilPriceZeroRulesStillAdmits(t *testing.T) {
 	reg := NewMandateRegistry()
-	reg.Put(&compliancepb.Mandate{
-		MandateId: "m1", TenantId: "acme", PortfolioId: "p1", Version: 1,
+	mustPut(t, reg, &compliancepb.Mandate{
+		MandateId: "m1", TenantId: "t1", PortfolioId: "p1", Version: 1,
 		EffectiveAt: timestamppb.New(t0),
 		// no rules, on purpose
 	})
 	g := NewPreTradeGate(NewEngine(nil), MapBookSource{"p1": currentBook()}, reg, nil, nil, nil)
 	got, err := g.Evaluate(context.Background(), OrderDelta{
+		TenantID:    "t1",
 		PortfolioID: "p1", InstrumentID: "AAPL", Price: nil, AsOf: t0,
 	})
 	if err != nil {
@@ -313,6 +321,7 @@ func TestPreTradeGate_NilPriceZeroRulesStillAdmits(t *testing.T) {
 func TestPreTradeGate_NilPriceNoMandateStillUngoverned(t *testing.T) {
 	g := newGate(t, nil) // no mandate for p1
 	got, err := g.Evaluate(context.Background(), OrderDelta{
+		TenantID:    "t1",
 		PortfolioID: "p1", InstrumentID: "AAPL", Price: nil, AsOf: t0,
 	})
 	if err != nil {
@@ -333,6 +342,7 @@ func TestPreTradeGate_NilPriceNoMandateStillUngoverned(t *testing.T) {
 func TestPreTradeGate_PositivePriceLimitOrderUnaffected(t *testing.T) {
 	g := newGate(t, concentrationMandate(60))
 	got, err := g.Evaluate(context.Background(), OrderDelta{
+		TenantID:    "t1",
 		PortfolioID: "p1", InstrumentID: "AAPL",
 		SignedQuantity: dec(100, 0), Price: dec(1000, 0), Currency: "USD", OrderID: "o1", AsOf: t0,
 	})
@@ -376,17 +386,17 @@ func (s *candidateSpy) Register() *Registry {
 func TestNoCandidateHasAZeroValueNonZeroQuantityPosition(t *testing.T) {
 	spy := &candidateSpy{}
 	reg := NewMandateRegistry()
-	reg.Put(mandate(&compliancepb.Rule{RuleId: "r1", Type: compliancepb.RuleType_RULE_TYPE_RESTRICTION,
+	mustPut(t, reg, mandate(&compliancepb.Rule{RuleId: "r1", Type: compliancepb.RuleType_RULE_TYPE_RESTRICTION,
 		Params: &compliancepb.Rule_Restriction{Restriction: &compliancepb.RestrictionList{
 			Dimension: compliancepb.Dimension_DIMENSION_INSTRUMENT, Mode: compliancepb.RestrictionMode_RESTRICTION_MODE_ALLOW_ONLY,
 		}}}))
 	g := NewPreTradeGate(NewEngine(spy.Register()), MapBookSource{"p1": currentBook()}, reg, nil, nil, nil)
 
 	cases := []OrderDelta{
-		{PortfolioID: "p1", InstrumentID: "AAPL", SignedQuantity: dec(10, 0), Price: nil, AsOf: t0},            // nil price
-		{PortfolioID: "p1", InstrumentID: "AAPL", SignedQuantity: dec(10, 0), Price: dec(0, 0), AsOf: t0},      // zero price
-		{PortfolioID: "p1", InstrumentID: "AAPL", SignedQuantity: dec(10, 0), Price: dec(-5, 0), AsOf: t0},     // negative price
-		{PortfolioID: "p1", InstrumentID: "AAPL", SignedQuantity: dec(-100, 0), Price: dec(1000, 0), AsOf: t0}, // legitimate sell-to-flat
+		{TenantID: "t1", PortfolioID: "p1", InstrumentID: "AAPL", SignedQuantity: dec(10, 0), Price: nil, AsOf: t0},            // nil price
+		{TenantID: "t1", PortfolioID: "p1", InstrumentID: "AAPL", SignedQuantity: dec(10, 0), Price: dec(0, 0), AsOf: t0},      // zero price
+		{TenantID: "t1", PortfolioID: "p1", InstrumentID: "AAPL", SignedQuantity: dec(10, 0), Price: dec(-5, 0), AsOf: t0},     // negative price
+		{TenantID: "t1", PortfolioID: "p1", InstrumentID: "AAPL", SignedQuantity: dec(-100, 0), Price: dec(1000, 0), AsOf: t0}, // legitimate sell-to-flat
 	}
 	for _, d := range cases {
 		if _, err := g.Evaluate(context.Background(), d); err != nil {
@@ -412,6 +422,7 @@ func TestNoCandidateHasAZeroValueNonZeroQuantityPosition(t *testing.T) {
 	// The legitimate sell-to-flat must still be ALLOWED — a genuinely flat
 	// position IS zero-value, and heldPositions is correct to skip it.
 	got, err := g.Evaluate(context.Background(), OrderDelta{
+		TenantID:    "t1",
 		PortfolioID: "p1", InstrumentID: "AAPL", SignedQuantity: dec(-100, 0), Price: dec(1000, 0), Currency: "USD", AsOf: t0,
 	})
 	if err != nil {

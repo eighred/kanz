@@ -10,6 +10,17 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
+// mustPut files a mandate and fails the test if the registry refuses it. Put
+// returns an error now: a mandate missing tenant_id or portfolio_id cannot be
+// keyed by (tenant, portfolio) and dropping it silently would read downstream as
+// "this portfolio is ungoverned" (#243).
+func mustPut(t *testing.T, reg *MandateRegistry, m *compliancepb.Mandate) {
+	t.Helper()
+	if err := reg.Put(m); err != nil {
+		t.Fatalf("registry refused a well-formed mandate: %v", err)
+	}
+}
+
 func versioned(version uint64, effective time.Time) *compliancepb.Mandate {
 	return &compliancepb.Mandate{
 		MandateId: "m1", TenantId: "t1", PortfolioId: "p1", Version: version,
@@ -21,8 +32,8 @@ func TestMandateRegistry_PointInTimeResolution(t *testing.T) {
 	reg := NewMandateRegistry()
 	v1Eff := t0
 	v2Eff := t0.Add(10 * 24 * time.Hour)
-	reg.Put(versioned(1, v1Eff))
-	reg.Put(versioned(2, v2Eff))
+	mustPut(t, reg, versioned(1, v1Eff))
+	mustPut(t, reg, versioned(2, v2Eff))
 
 	cases := []struct {
 		name    string
@@ -38,7 +49,7 @@ func TestMandateRegistry_PointInTimeResolution(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			m, ok, err := reg.Mandate(context.Background(), "p1", tc.asOf)
+			m, ok, err := reg.Mandate(context.Background(), "t1", "p1", tc.asOf)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -54,9 +65,9 @@ func TestMandateRegistry_PointInTimeResolution(t *testing.T) {
 
 func TestMandateRegistry_IdempotentReplay(t *testing.T) {
 	reg := NewMandateRegistry()
-	reg.Put(versioned(1, t0))
-	reg.Put(versioned(1, t0)) // replay same version
-	m, ok, _ := reg.Mandate(context.Background(), "p1", t0)
+	mustPut(t, reg, versioned(1, t0))
+	mustPut(t, reg, versioned(1, t0)) // replay same version
+	m, ok, _ := reg.Mandate(context.Background(), "t1", "p1", t0)
 	if !ok || m.GetVersion() != 1 {
 		t.Fatalf("idempotent replay broke resolution: ok=%v m=%v", ok, m)
 	}
@@ -121,7 +132,7 @@ func TestMandateLoader_AppliesOnlyMandateKeys(t *testing.T) {
 	if err != nil || applied == nil {
 		t.Fatalf("mandate key should apply: m=%v err=%v", applied, err)
 	}
-	if _, ok, _ := reg.Mandate(context.Background(), "p1", t0); !ok {
+	if _, ok, _ := reg.Mandate(context.Background(), "t1", "p1", t0); !ok {
 		t.Fatalf("applied mandate not resolvable")
 	}
 }

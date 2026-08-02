@@ -321,7 +321,7 @@ func TestArithmeticSweep_ProjectedQuantityDrivesEveryRule(t *testing.T) {
 	for _, arm := range sweepArms() {
 		t.Run(arm.name, func(t *testing.T) {
 			reg := NewMandateRegistry()
-			reg.Put(mandate(arm.rule))
+			mustPut(t, reg, mandate(arm.rule))
 			g := NewPreTradeGate(nil, MapBookSource{"p1": sweepBook()}, reg, sweepClassifier, nil, nil)
 
 			threshold := thresholdFor(arm)
@@ -342,6 +342,7 @@ func TestArithmeticSweep_ProjectedQuantityDrivesEveryRule(t *testing.T) {
 					}
 
 					d := OrderDelta{
+						TenantID:       "t1",
 						PortfolioID:    "p1",
 						InstrumentID:   "AAPL",
 						SignedQuantity: &commonpb.Decimal{Coefficient: coeff, Exponent: exp},
@@ -425,10 +426,11 @@ func TestArithmeticSweep_CorrectValuationIsWhatBreaches(t *testing.T) {
 		}
 		t.Run(arm.name, func(t *testing.T) {
 			reg := NewMandateRegistry()
-			reg.Put(mandate(arm.rule))
+			mustPut(t, reg, mandate(arm.rule))
 			g := NewPreTradeGate(nil, MapBookSource{"p1": sweepBook()}, reg, sweepClassifier, nil, nil)
 			for _, tc := range cases {
 				verdict, err := g.Evaluate(ctx, OrderDelta{
+					TenantID:       "t1",
 					PortfolioID:    "p1",
 					InstrumentID:   "AAPL",
 					SignedQuantity: tc.qty,
@@ -505,10 +507,11 @@ func TestArithmeticSweep_ShrinkingTheStandingPositionCannotAdmit(t *testing.T) {
 	for _, arm := range arms {
 		t.Run(arm.name, func(t *testing.T) {
 			reg := NewMandateRegistry()
-			reg.Put(mandate(arm.rule))
+			mustPut(t, reg, mandate(arm.rule))
 			g := NewPreTradeGate(nil, MapBookSource{"p1": sweepBook()}, reg, sweepClassifier, nil, nil)
 			for _, qty := range negligible {
 				verdict, err := g.Evaluate(ctx, OrderDelta{
+					TenantID:       "t1",
 					PortfolioID:    "p1",
 					InstrumentID:   "AAPL",
 					SignedQuantity: qty,
@@ -553,7 +556,7 @@ func TestPreTradeGate_ZeroCoefficientCannotEraseTheBook(t *testing.T) {
 	for _, arm := range sweepArms() {
 		t.Run(arm.name, func(t *testing.T) {
 			reg := NewMandateRegistry()
-			reg.Put(mandate(arm.rule))
+			mustPut(t, reg, mandate(arm.rule))
 			g := NewPreTradeGate(nil, MapBookSource{"p1": sweepBook()}, reg, sweepClassifier, nil, nil)
 
 			// Exponents comfortably past alignWindow (40) in both directions —
@@ -578,6 +581,7 @@ func TestPreTradeGate_ZeroCoefficientCannotEraseTheBook(t *testing.T) {
 			// order reaches the rules engine instead of being refused first.
 			for _, exp := range []int32{50, 60, -50, -60} {
 				verdict, err := g.Evaluate(ctx, OrderDelta{
+					TenantID:       "t1",
 					PortfolioID:    "p1",
 					InstrumentID:   "AAPL",
 					SignedQuantity: &commonpb.Decimal{Coefficient: 0, Exponent: exp},

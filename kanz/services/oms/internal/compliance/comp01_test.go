@@ -32,10 +32,21 @@ func concentrationMandate(maxPct int64) *compliancepb.Mandate {
 	}
 }
 
+// mustPut files a mandate and fails the test if the registry refuses it. Put
+// returns an error now: a mandate missing tenant_id or portfolio_id cannot be
+// keyed by (tenant, portfolio), and dropping it silently would read downstream
+// as "this portfolio is ungoverned" (#243).
+func mustPut(t *testing.T, reg *comp.MandateRegistry, m *compliancepb.Mandate) {
+	t.Helper()
+	if err := reg.Put(m); err != nil {
+		t.Fatalf("registry refused a well-formed mandate: %v", err)
+	}
+}
+
 func newTestGate(t *testing.T) *comp.PreTradeGate {
 	t.Helper()
 	reg := comp.NewMandateRegistry()
-	reg.Put(concentrationMandate(60))
+	mustPut(t, reg, concentrationMandate(60))
 	return comp.NewPreTradeGate(nil, comp.MapBookSource{}, reg, nil, nil, nil)
 }
 
@@ -60,7 +71,7 @@ func unpricedOrder(orderType orderpb.OrderType) *orderpb.SubmitOrder {
 // never appear on retry).
 func TestCheck_UnpricedMarketOrderMapsToPriceUnavailableBreach(t *testing.T) {
 	g := NewCOMP01Gate(newTestGate(t), "USD")
-	breach, err := g.Check(context.Background(), unpricedOrder(orderpb.OrderType_ORDER_TYPE_MARKET))
+	breach, err := g.Check(context.Background(), "t1", unpricedOrder(orderpb.OrderType_ORDER_TYPE_MARKET))
 	if err != nil {
 		t.Fatalf("an unpriced order must be a terminal Breach, not an error (a retry can never add a price): %v", err)
 	}
@@ -80,7 +91,7 @@ func TestCheck_UnpricedMarketOrderMapsToPriceUnavailableBreach(t *testing.T) {
 // a positive stop_price, not a limit_price).
 func TestCheck_UnpricedStopOrderMapsToPriceUnavailableBreach(t *testing.T) {
 	g := NewCOMP01Gate(newTestGate(t), "USD")
-	breach, err := g.Check(context.Background(), unpricedOrder(orderpb.OrderType_ORDER_TYPE_STOP))
+	breach, err := g.Check(context.Background(), "t1", unpricedOrder(orderpb.OrderType_ORDER_TYPE_STOP))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -95,7 +106,7 @@ func TestCheck_UnpricedStopOrderMapsToPriceUnavailableBreach(t *testing.T) {
 // a small AAPL buy stays comfortably under the 60% concentration cap.
 func TestCheck_PricedLimitOrderUnaffected(t *testing.T) {
 	reg := comp.NewMandateRegistry()
-	reg.Put(concentrationMandate(60))
+	mustPut(t, reg, concentrationMandate(60))
 	books := comp.MapBookSource{"p1": &comp.Book{
 		PortfolioID: "p1", BaseCurrency: "USD",
 		Positions: []comp.Position{
@@ -115,7 +126,7 @@ func TestCheck_PricedLimitOrderUnaffected(t *testing.T) {
 
 	cmd := unpricedOrder(orderpb.OrderType_ORDER_TYPE_LIMIT)
 	cmd.LimitPrice = &commonpb.Decimal{Coefficient: 100, Exponent: 0} // 10 units @ 100 = 1,000
-	breach, err := g.Check(context.Background(), cmd)
+	breach, err := g.Check(context.Background(), "t1", cmd)
 	if err != nil {
 		t.Fatal(err)
 	}

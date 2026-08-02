@@ -256,7 +256,7 @@ func TestService_IdempotentResubmit(t *testing.T) {
 
 type denyGate struct{}
 
-func (denyGate) Check(context.Context, *orderpb.SubmitOrder) (*compliance.Breach, error) {
+func (denyGate) Check(context.Context, string, *orderpb.SubmitOrder) (*compliance.Breach, error) {
 	return &compliance.Breach{Code: "CONCENTRATION", Reason: "over sector cap"}, nil
 }
 

@@ -84,11 +84,16 @@ func ToOrders(p optimization.RebalanceProposal, issuer string) []*orderpb.Submit
 // caller (and audit) sees exactly what went to the OMS and what the gate
 // refused. A nil gate skips the re-check (the optimizer's CheckMandate already
 // ran); a nil publisher dry-runs (mapping + gate only).
-func Materialize(ctx context.Context, p optimization.RebalanceProposal, issuer, currency string, prices map[string]float64, gate Gate, pub Publisher) (MaterializeResult, error) {
+// tenantID is WHOSE proposal this is. It is a parameter and not something read
+// off the proposal because RebalanceProposal carries no tenant: without it the
+// gate's mandate lookup had only the portfolio name to go on, and two tenants
+// calling a portfolio "growth" got each other's limits (#243). An empty one is
+// refused by the gate rather than resolved to a guess.
+func Materialize(ctx context.Context, p optimization.RebalanceProposal, tenantID, issuer, currency string, prices map[string]float64, gate Gate, pub Publisher) (MaterializeResult, error) {
 	var res MaterializeResult
 	for _, cmd := range ToOrders(p, issuer) {
 		if gate != nil {
-			decision, err := gate.Evaluate(ctx, orderDelta(cmd, currency, prices))
+			decision, err := gate.Evaluate(ctx, orderDelta(cmd, tenantID, currency, prices))
 			if err != nil {
 				res.Rejected = append(res.Rejected, RejectedOrder{Command: cmd, Reason: "gate error: " + err.Error()})
 				continue
@@ -110,7 +115,7 @@ func Materialize(ctx context.Context, p optimization.RebalanceProposal, issuer, 
 
 // orderDelta projects a SubmitOrder into the compliance OrderDelta the gate
 // evaluates: signed quantity (negative for a sell) at the instrument's price.
-func orderDelta(cmd *orderpb.SubmitOrder, currency string, prices map[string]float64) compliance.OrderDelta {
+func orderDelta(cmd *orderpb.SubmitOrder, tenantID, currency string, prices map[string]float64) compliance.OrderDelta {
 	q := cmd.GetQuantity()
 	signed := q
 	if cmd.GetSide() == orderpb.Side_SIDE_SELL && q != nil {
@@ -121,6 +126,7 @@ func orderDelta(cmd *orderpb.SubmitOrder, currency string, prices map[string]flo
 		price = &commonpb.Decimal{Coefficient: int64(math.Round(p * 100)), Exponent: -2}
 	}
 	return compliance.OrderDelta{
+		TenantID:       tenantID,
 		PortfolioID:    cmd.GetPortfolioId(),
 		InstrumentID:   cmd.GetInstrumentId(),
 		SignedQuantity: signed,
@@ -146,6 +152,9 @@ func gateReason(d compliance.Decision) string {
 	}
 	if d.Unvaluable {
 		return "order notional cannot be represented — the order was not evaluated"
+	}
+	if d.Unscoped {
+		return "cannot determine which tenant's mandate governs this portfolio — the order was not evaluated"
 	}
 	if d.Result != nil && len(d.Result.GetViolations()) > 0 {
 		return d.Result.GetViolations()[0].GetMessage()

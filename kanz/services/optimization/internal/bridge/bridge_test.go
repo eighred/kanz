@@ -81,7 +81,7 @@ func (g rejectGate) Evaluate(_ context.Context, d compliance.OrderDelta) (compli
 
 func TestMaterialize_GateRejectsAreNotPublished(t *testing.T) {
 	pub := &recordingPublisher{}
-	res, err := Materialize(context.Background(), sampleProposal(), "alice", "USD",
+	res, err := Materialize(context.Background(), sampleProposal(), "t1", "alice", "USD",
 		map[string]float64{"AAA": 10, "BBB": 20}, rejectGate{rejectInstrument: "BBB"}, pub)
 	if err != nil {
 		t.Fatal(err)
@@ -119,7 +119,7 @@ func (ungovernedGate) Evaluate(_ context.Context, _ compliance.OrderDelta) (comp
 // misleading (COMP-M1 Task 2).
 func TestMaterialize_UnpricedInstrumentRejectsWithoutClaimingABreach(t *testing.T) {
 	pub := &recordingPublisher{}
-	res, err := Materialize(context.Background(), sampleProposal(), "alice", "USD",
+	res, err := Materialize(context.Background(), sampleProposal(), "t1", "alice", "USD",
 		map[string]float64{"AAA": 10}, // BBB is absent ⇒ nil price ⇒ Unpriced
 		unpricedGate{}, pub)
 	if err != nil {
@@ -139,7 +139,7 @@ func TestMaterialize_UnpricedInstrumentRejectsWithoutClaimingABreach(t *testing.
 // since it is the identical principle in the same function.
 func TestMaterialize_UngovernedInstrumentRejectsWithoutClaimingABreach(t *testing.T) {
 	pub := &recordingPublisher{}
-	res, err := Materialize(context.Background(), sampleProposal(), "alice", "USD",
+	res, err := Materialize(context.Background(), sampleProposal(), "t1", "alice", "USD",
 		map[string]float64{"AAA": 10, "BBB": 20}, ungovernedGate{}, pub)
 	if err != nil {
 		t.Fatal(err)
@@ -154,7 +154,7 @@ func TestMaterialize_UngovernedInstrumentRejectsWithoutClaimingABreach(t *testin
 }
 
 func TestMaterialize_PublishErrorPropagates(t *testing.T) {
-	_, err := Materialize(context.Background(), sampleProposal(), "alice", "USD", nil, nil, errPublisher{})
+	_, err := Materialize(context.Background(), sampleProposal(), "t1", "alice", "USD", nil, nil, errPublisher{})
 	if err == nil {
 		t.Fatal("a publish error must propagate")
 	}

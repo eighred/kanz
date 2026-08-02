@@ -2,6 +2,7 @@ package compliance
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"sync"
 	"time"
@@ -35,11 +36,15 @@ type PreTradeGate struct {
 	logger     *slog.Logger
 
 	requireMandate bool
-	onUngoverned   func(portfolioID string)
+	onUngoverned   func(tenantID, portfolioID string)
 	onUnpriced     func(portfolioID, instrumentID string)
 
-	mu     sync.Mutex
-	warned map[string]bool // portfolios already named in a WARN — say it once, count always
+	mu sync.Mutex
+	// warned holds (tenant, portfolio[, instrument]) keys already named in a WARN
+	// — say it once, count always. The tenant is IN the key: keyed by portfolio
+	// alone, tenant A's "growth" warning silenced tenant B's, so the second
+	// tenant's ungoverned book was the one nobody was told about (#243).
+	warned map[string]bool
 }
 
 // PreTradeOption customizes the gate.
@@ -61,7 +66,7 @@ func WithRequireMandate(require bool) PreTradeOption {
 // WithUngovernedObserver is called for EVERY order against a portfolio no mandate
 // governs — the composition root wires it to a counter, so "how much of the book is
 // ungoverned" is a number on a dashboard rather than a thing nobody has asked.
-func WithUngovernedObserver(fn func(portfolioID string)) PreTradeOption {
+func WithUngovernedObserver(fn func(tenantID, portfolioID string)) PreTradeOption {
 	return func(g *PreTradeGate) { g.onUngoverned = fn }
 }
 
@@ -80,11 +85,23 @@ type BookSource interface {
 	Book(ctx context.Context, portfolioID string) (*Book, error)
 }
 
-// MandateSource resolves the mandate version in effect for a portfolio at a
-// point in time (the COMP-01f point-in-time resolution). ok=false ⇒ no mandate
-// governs the portfolio, which admits the order (no constraints declared).
+// MandateSource resolves the mandate version in effect for one TENANT'S
+// portfolio at a point in time (the COMP-01f point-in-time resolution).
+// ok=false ⇒ no mandate governs it, which admits the order (no constraints
+// declared).
+//
+// tenantID is in the signature, and not merely in the implementation's map key,
+// so that no caller can reach a mandate without saying whose. portfolio_id is a
+// caller-chosen string off SubmitOrder; keyed by it alone, tenant B's "growth"
+// order was evaluated against tenant A's "growth" limits (#243). A composite key
+// behind an interface that cannot carry a tenant would have left every caller
+// unable to supply one, which is not a fix.
+//
+// An error wrapping ErrMandateTenantUnresolved is TERMINAL — the source could
+// not say whose rules apply, so none were evaluated and the order must be
+// refused. Any other error is transient and the caller should retry.
 type MandateSource interface {
-	Mandate(ctx context.Context, portfolioID string, asOf time.Time) (*compliancepb.Mandate, bool, error)
+	Mandate(ctx context.Context, tenantID, portfolioID string, asOf time.Time) (*compliancepb.Mandate, bool, error)
 }
 
 // OrderDelta is the order's effect on a book, in terms compliance understands —
@@ -93,6 +110,13 @@ type MandateSource interface {
 // Price values the order (limit price, or a reference/last price for a market
 // order — the adapter resolves it).
 type OrderDelta struct {
+	// TenantID is WHOSE order this is — the envelope's tenant, which the
+	// api-gateway stamps from the authenticated principal and bus.Validate
+	// requires to be non-empty on the live path. It is NOT the OMS's own
+	// configured tenant: the shipped OMS serves __system__, and scoping the
+	// mandate lookup to that would ask for the platform's mandate rather than
+	// the customer's.
+	TenantID       string
 	PortfolioID    string
 	InstrumentID   string
 	SignedQuantity *commonpb.Decimal
@@ -140,6 +164,20 @@ type Decision struct {
 	// replaced: an int64 multiply that wrapped a billion-dollar notional into
 	// a small number and ADMITTED the order.
 	Unvaluable bool
+
+	// Unscoped means the mandate source could not say WHOSE mandate governs this
+	// portfolio, so — a third time — NO RULE WAS EVALUATED. Either the order
+	// reached the gate with no tenant, or the lookup landed on the shared
+	// __system__ bucket where more than one tenant has published a mandate for
+	// this portfolio name.
+	//
+	// It is refused REGARDLESS of requireMandate, unlike Ungoverned. Ungoverned
+	// is a policy question — "nobody has written a mandate yet" is a state an
+	// operator may knowingly trade through. This is not: a mandate exists, and
+	// the platform cannot tell whether it is this order's. Admitting on that is
+	// exactly #243 — tenant B's order cleared against tenant A's concentration
+	// limits — and refusing is the only answer that is not a guess.
+	Unscoped bool
 }
 
 // NewPreTradeGate wires the gate. engine defaults to NewEngine(nil); a nil
@@ -171,26 +209,50 @@ func NewPreTradeGate(engine *Engine, books BookSource, mandates MandateSource, c
 // The counter fires on EVERY such order (that is the number that belongs on a
 // dashboard). The WARN fires ONCE PER PORTFOLIO — loud enough to be seen in a log,
 // quiet enough that it does not drown the log for a fund that trades all day.
-func (g *PreTradeGate) noteUngoverned(portfolioID string) {
+func (g *PreTradeGate) noteUngoverned(tenantID, portfolioID string) {
 	if g.onUngoverned != nil {
-		g.onUngoverned(portfolioID)
+		g.onUngoverned(tenantID, portfolioID)
 	}
-	g.mu.Lock()
-	first := !g.warned[portfolioID]
-	g.warned[portfolioID] = true
-	g.mu.Unlock()
-	if !first {
+	if !g.firstTime("ungoverned:" + tenantID + ":" + portfolioID) {
 		return
 	}
 	if g.requireMandate {
 		g.logger.Warn("REFUSING orders: no mandate governs this portfolio",
+			"tenant_id", tenantID,
 			"portfolio_id", portfolioID,
-			"fix", "put it under mandate with kanz-mandate, or unset OMS_REQUIRE_MANDATE")
+			"fix", "put it under mandate with `kanz-mandate --tenant "+tenantID+"`, or unset OMS_REQUIRE_MANDATE")
 		return
 	}
 	g.logger.Warn("UNGOVERNED: no mandate governs this portfolio — its orders are being ADMITTED WITH NO COMPLIANCE CONSTRAINTS",
+		"tenant_id", tenantID,
 		"portfolio_id", portfolioID,
-		"fix", "put it under mandate with kanz-mandate, or set OMS_REQUIRE_MANDATE=true to refuse instead")
+		"fix", "put it under mandate with `kanz-mandate --tenant "+tenantID+"`, or set OMS_REQUIRE_MANDATE=true to refuse instead")
+}
+
+// noteUnscoped makes the unresolvable-tenant refusal audible. It is separate
+// from noteUngoverned because the operator action is different: nothing needs
+// writing, something needs DISAMBIGUATING — the registry's error names the
+// tenants involved. Once per (tenant, portfolio), same as the rest.
+func (g *PreTradeGate) noteUnscoped(tenantID, portfolioID string, err error) {
+	if !g.firstTime("unscoped:" + tenantID + ":" + portfolioID) {
+		return
+	}
+	g.logger.Warn("REFUSING order: cannot determine WHOSE mandate governs this portfolio — no rule was evaluated",
+		"tenant_id", tenantID,
+		"portfolio_id", portfolioID,
+		"err", err,
+		"fix", "two tenants share this portfolio name, or the lookup lost its tenant; see the error")
+}
+
+// firstTime reports whether key has not been warned about yet, and records it.
+func (g *PreTradeGate) firstTime(key string) bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.warned[key] {
+		return false
+	}
+	g.warned[key] = true
+	return true
 }
 
 // noteUnpriced makes the unpriced-refusal case AUDIBLE, mirroring noteUngoverned
@@ -202,19 +264,15 @@ func (g *PreTradeGate) noteUngoverned(portfolioID string) {
 // once per (portfolio, instrument) pair — loud enough to be seen, quiet enough
 // not to drown the log for an instrument that trades all day with no reference
 // price wired.
-func (g *PreTradeGate) noteUnpriced(portfolioID, instrumentID string) {
+func (g *PreTradeGate) noteUnpriced(tenantID, portfolioID, instrumentID string) {
 	if g.onUnpriced != nil {
 		g.onUnpriced(portfolioID, instrumentID)
 	}
-	key := "unpriced:" + portfolioID + ":" + instrumentID
-	g.mu.Lock()
-	first := !g.warned[key]
-	g.warned[key] = true
-	g.mu.Unlock()
-	if !first {
+	if !g.firstTime("unpriced:" + tenantID + ":" + portfolioID + ":" + instrumentID) {
 		return
 	}
 	g.logger.Warn("REFUSING order: no usable price to evaluate compliance against",
+		"tenant_id", tenantID,
 		"portfolio_id", portfolioID,
 		"instrument_id", instrumentID,
 		"fix", "wire a reference-price source for market/stop orders (COMP-M2)")
@@ -225,16 +283,12 @@ func (g *PreTradeGate) noteUnpriced(portfolioID, instrumentID string) {
 // should never fire in practice — it takes a notional beyond any representable
 // Decimal — so if it does, somebody needs to look at the order, not the price
 // feed.
-func (g *PreTradeGate) noteUnvaluable(portfolioID, instrumentID string) {
-	key := "unvaluable:" + portfolioID + ":" + instrumentID
-	g.mu.Lock()
-	first := !g.warned[key]
-	g.warned[key] = true
-	g.mu.Unlock()
-	if !first {
+func (g *PreTradeGate) noteUnvaluable(tenantID, portfolioID, instrumentID string) {
+	if !g.firstTime("unvaluable:" + tenantID + ":" + portfolioID + ":" + instrumentID) {
 		return
 	}
 	g.logger.Warn("REFUSING order: its notional (quantity × price) cannot be represented — the order was NOT evaluated",
+		"tenant_id", tenantID,
 		"portfolio_id", portfolioID,
 		"instrument_id", instrumentID,
 		"fix", "check the submitted quantity; the price is not the problem")
@@ -308,11 +362,21 @@ func (g *PreTradeGate) Evaluate(ctx context.Context, d OrderDelta) (Decision, er
 	// portfolio is refused rather than admitted. That is deliberate: a malformed
 	// exponent is not a compliance question.
 	if !deltaInDomain(d) {
-		g.noteUnvaluable(d.PortfolioID, d.InstrumentID)
+		g.noteUnvaluable(d.TenantID, d.PortfolioID, d.InstrumentID)
 		return Decision{Allowed: false, Unvaluable: true}, nil
 	}
-	mandate, ok, err := g.mandates.Mandate(ctx, d.PortfolioID, d.AsOf)
+	mandate, ok, err := g.mandates.Mandate(ctx, d.TenantID, d.PortfolioID, d.AsOf)
 	if err != nil {
+		// TERMINAL vs TRANSIENT, and getting this backwards is why the
+		// distinction is spelled out. A transient load failure is returned so the
+		// command is redelivered. ErrMandateTenantUnresolved never resolves on a
+		// retry — the ambiguity is in the mandate data, not in the read — so
+		// returning it would redeliver the order forever while the trader waits.
+		// Refuse it, once, under its own flag.
+		if errors.Is(err, ErrMandateTenantUnresolved) {
+			g.noteUnscoped(d.TenantID, d.PortfolioID, err)
+			return Decision{Allowed: false, Unscoped: true}, nil
+		}
 		return Decision{}, err
 	}
 	// TWO DIFFERENT STATES, and collapsing them is what made this silent.
@@ -323,7 +387,7 @@ func (g *PreTradeGate) Evaluate(ctx context.Context, d OrderDelta) (Decision, er
 	// The second is a choice and needs no noise. The first is a GAP, and it must not
 	// be indistinguishable from passing compliance (EXEC-M14).
 	if !ok {
-		g.noteUngoverned(d.PortfolioID)
+		g.noteUngoverned(d.TenantID, d.PortfolioID)
 		if g.requireMandate {
 			return Decision{Allowed: false, Ungoverned: true}, nil
 		}
@@ -339,7 +403,7 @@ func (g *PreTradeGate) Evaluate(ctx context.Context, d OrderDelta) (Decision, er
 	// I/O, so a market/stop order can never silently erase an existing breach on
 	// the same instrument from the check.
 	if !decutil.IsPositive(d.Price) {
-		g.noteUnpriced(d.PortfolioID, d.InstrumentID)
+		g.noteUnpriced(d.TenantID, d.PortfolioID, d.InstrumentID)
 		return Decision{Allowed: false, Unpriced: true}, nil
 	}
 	book, err := g.books.Book(ctx, d.PortfolioID)
@@ -347,7 +411,7 @@ func (g *PreTradeGate) Evaluate(ctx context.Context, d OrderDelta) (Decision, er
 		return Decision{}, err
 	}
 	if !bookInDomain(book) {
-		g.noteUnvaluable(d.PortfolioID, d.InstrumentID)
+		g.noteUnvaluable(d.TenantID, d.PortfolioID, d.InstrumentID)
 		return Decision{Allowed: false, Unvaluable: true}, nil
 	}
 	// The price was fine; the VALUATION did not fit. Refusing under its own
@@ -355,7 +419,7 @@ func (g *PreTradeGate) Evaluate(ctx context.Context, d OrderDelta) (Decision, er
 	// source, which would be a wild goose chase here.
 	proj, ok := project(book, d)
 	if !ok {
-		g.noteUnvaluable(d.PortfolioID, d.InstrumentID)
+		g.noteUnvaluable(d.TenantID, d.PortfolioID, d.InstrumentID)
 		return Decision{Allowed: false, Unvaluable: true}, nil
 	}
 	res := g.engine.Evaluate(ctx, &Candidate{Book: proj, Classifier: g.classifier, AsOf: d.AsOf}, mandate)
