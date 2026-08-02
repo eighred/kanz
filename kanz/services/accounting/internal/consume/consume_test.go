@@ -189,7 +189,7 @@ func TestFolderRejectsMalformedFill(t *testing.T) {
 // wrong, it is a correcting entry someone has to notice first.
 func TestFolderRefusesAFeeInAnotherCurrency(t *testing.T) {
 	st := ledger.NewMemoryStore()
-	f, _ := NewFolder(st, "USD")
+	f, _ := NewFolder(testTenant, st, "USD")
 	ctx := context.Background()
 	t0 := time.Unix(1_700_000_000, 0).UTC()
 	env := &envelopepb.Envelope{EventType: orderEventFilled, IngestionTime: timestamppb.New(t0)}
