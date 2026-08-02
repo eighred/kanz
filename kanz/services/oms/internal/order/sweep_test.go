@@ -22,7 +22,7 @@ func TestSweepResumesAnOrderStrandedAtRouted(t *testing.T) {
 	fb := &fakeBus{}
 	venue := execution.NewSimVenue("XSIM")
 	store := NewMemoryStore()
-	svc, err := NewService(store, NewEmitter(fb), nil, execution.NewRouter(venue), nil, nil)
+	svc, err := NewService(testTenant, store, NewEmitter(fb), nil, execution.NewRouter(venue), nil, nil)
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
 	}
@@ -70,7 +70,7 @@ func TestSweepRefusesAContextWithNoTenant(t *testing.T) {
 	fb := &fakeBus{}
 	venue := execution.NewSimVenue("XSIM")
 	store := NewMemoryStore()
-	svc, err := NewService(store, NewEmitter(fb), nil, execution.NewRouter(venue), nil, nil)
+	svc, err := NewService(testTenant, store, NewEmitter(fb), nil, execution.NewRouter(venue), nil, nil)
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
 	}
@@ -116,7 +116,7 @@ func TestSweepIgnoresTerminalOrders(t *testing.T) {
 	ctx := testCtx()
 	fb := &fakeBus{}
 	store := NewMemoryStore()
-	svc, err := NewService(store, NewEmitter(fb), nil, execution.NewRouter(execution.NewSimVenue("XSIM")), nil, nil)
+	svc, err := NewService(testTenant, store, NewEmitter(fb), nil, execution.NewRouter(execution.NewSimVenue("XSIM")), nil, nil)
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
 	}

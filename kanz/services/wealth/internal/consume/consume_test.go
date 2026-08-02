@@ -11,6 +11,12 @@ import (
 	"github.com/eighred/kanz/services/wealth/internal/book"
 )
 
+// testTenant is the tenant these folders serve. It is the SYSTEM tenant, so
+// RequireTenantScope's shared-bucket branch applies and these tests exercise the
+// folding logic exactly as they did before #223. The cross-tenant refusal itself
+// is proven in cross_tenant_test.go, which uses a real tenant.
+const testTenant = "__system__"
+
 func payload(t *testing.T, h wealth.Household) []byte {
 	t.Helper()
 	b, err := json.Marshal(h)
@@ -22,7 +28,7 @@ func payload(t *testing.T, h wealth.Household) []byte {
 
 func TestFolderFoldsCompositionIntoBook(t *testing.T) {
 	st := book.NewMemoryStore()
-	f, err := NewFolder(st, nil)
+	f, err := NewFolder(testTenant, st, nil)
 	if err != nil {
 		t.Fatalf("new folder: %v", err)
 	}
@@ -63,7 +69,7 @@ func TestFolderFoldsCompositionIntoBook(t *testing.T) {
 
 func TestFolderRejectsMissingHouseholdID(t *testing.T) {
 	st := book.NewMemoryStore()
-	f, _ := NewFolder(st, nil)
+	f, _ := NewFolder(testTenant, st, nil)
 	env := &envelopepb.Envelope{EventType: "wealth.household.updated"}
 	if err := f.Handle(context.Background(), env, payload(t, wealth.Household{})); err == nil {
 		t.Fatal("missing household_id should surface an error")

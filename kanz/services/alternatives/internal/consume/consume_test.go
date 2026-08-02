@@ -13,6 +13,12 @@ import (
 	"github.com/eighred/kanz/services/alternatives/internal/fund"
 )
 
+// testTenant is the tenant these folders serve. It is the SYSTEM tenant, so
+// RequireTenantScope's shared-bucket branch applies and these tests exercise the
+// folding logic exactly as they did before #223. The cross-tenant refusal itself
+// is proven in cross_tenant_test.go, which uses a real tenant.
+const testTenant = "__system__"
+
 func payload(t *testing.T, e alternatives.Event) []byte {
 	t.Helper()
 	b, err := json.Marshal(e)
@@ -24,7 +30,7 @@ func payload(t *testing.T, e alternatives.Event) []byte {
 
 func TestFolderFoldsLifecycleIntoFund(t *testing.T) {
 	st := fund.NewMemoryStore()
-	f, err := NewFolder(st, nil)
+	f, err := NewFolder(testTenant, st, nil)
 	if err != nil {
 		t.Fatalf("new folder: %v", err)
 	}
@@ -57,7 +63,7 @@ func TestFolderFoldsLifecycleIntoFund(t *testing.T) {
 
 func TestFolderRejectsMissingEventID(t *testing.T) {
 	st := fund.NewMemoryStore()
-	f, _ := NewFolder(st, nil)
+	f, _ := NewFolder(testTenant, st, nil)
 	env := &envelopepb.Envelope{EventType: "alternatives.commitment.called"}
 	if err := f.Handle(context.Background(), env, payload(t, alternatives.Event{CommitmentID: "CMT-1"})); err == nil {
 		t.Fatal("missing event_id should surface an error")
@@ -66,7 +72,7 @@ func TestFolderRejectsMissingEventID(t *testing.T) {
 
 func TestFolderRejectsMalformed(t *testing.T) {
 	st := fund.NewMemoryStore()
-	f, _ := NewFolder(st, nil)
+	f, _ := NewFolder(testTenant, st, nil)
 	env := &envelopepb.Envelope{EventType: "alternatives.commitment.called"}
 	if err := f.Handle(context.Background(), env, []byte("not-json")); err == nil {
 		t.Fatal("malformed payload should surface an error (DLQ)")

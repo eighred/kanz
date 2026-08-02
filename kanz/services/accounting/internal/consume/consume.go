@@ -18,7 +18,9 @@ import (
 
 	accountingpb "github.com/eighred/kanz/kanz-schemas-go/accounting/v1"
 	envelopepb "github.com/eighred/kanz/kanz-schemas-go/envelope/v1"
+
 	orderpb "github.com/eighred/kanz/kanz-schemas-go/order/v1"
+	"github.com/eighred/kanz/pkg/bus"
 	"google.golang.org/protobuf/proto"
 
 	"github.com/eighred/kanz/internal/dec"
@@ -46,6 +48,8 @@ const (
 // Folder is the bus.EventHandler that folds fill FACTs into the ledger journal.
 // Construct once and pass Handle to bus.Consumer.Subscribe for each fill subject.
 type Folder struct {
+	// tenant is the tenant this folder serves; Handle refuses any other (#223).
+	tenant       string
 	store        ledger.Store
 	cashCurrency string
 }
@@ -54,14 +58,14 @@ type Folder struct {
 // cash leg a fill produces (the portfolio reporting currency until a
 // per-instrument reference-data join lands — the FromFill carried-forward seam);
 // empty defaults to "USD".
-func NewFolder(store ledger.Store, cashCurrency string) (*Folder, error) {
+func NewFolder(tenant string, store ledger.Store, cashCurrency string) (*Folder, error) {
 	if store == nil {
 		return nil, errors.New("consume: ledger store is nil")
 	}
 	if cashCurrency == "" {
 		cashCurrency = "USD"
 	}
-	return &Folder{store: store, cashCurrency: cashCurrency}, nil
+	return &Folder{tenant: tenant, store: store, cashCurrency: cashCurrency}, nil
 }
 
 // Handle is the bus.EventHandler value wired into bus.Consumer.Subscribe. It
@@ -70,6 +74,11 @@ func NewFolder(store ledger.Store, cashCurrency string) (*Folder, error) {
 // surfaces to the operator rather than being silently dropped (book-of-record
 // data loss must be loud).
 func (f *Folder) Handle(ctx context.Context, env *envelopepb.Envelope, payload []byte) error {
+	// This folder writes through an RLS pool pinned to f.tenant, so an envelope
+	// from another tenant would be folded into this tenant's book (#223).
+	if err := bus.RequireTenantScope(env.GetTenantId(), f.tenant); err != nil {
+		return err
+	}
 	fill, portfolioID, err := decodeFill(env.GetEventType(), payload)
 	if err != nil {
 		return fmt.Errorf("consume: %s decode: %w", env.GetEventType(), err)
@@ -89,6 +98,11 @@ func (f *Folder) Handle(ctx context.Context, env *envelopepb.Envelope, payload [
 // Idempotency rides the entry id (the producer's "cash:"+MovementID), so a
 // redelivery is a no-op via Store.Append.
 func (f *Folder) HandleCash(ctx context.Context, env *envelopepb.Envelope, payload []byte) error {
+	// This folder writes through an RLS pool pinned to f.tenant, so an envelope
+	// from another tenant would be folded into this tenant's book (#223).
+	if err := bus.RequireTenantScope(env.GetTenantId(), f.tenant); err != nil {
+		return err
+	}
 	entry, err := decodeCash(env.GetEventType(), payload, knowledgeTime(env))
 	if err != nil {
 		return fmt.Errorf("consume: %s decode: %w", env.GetEventType(), err)

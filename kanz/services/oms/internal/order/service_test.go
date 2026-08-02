@@ -18,6 +18,10 @@ import (
 	"github.com/eighred/kanz/services/oms/internal/compliance"
 )
 
+// testTenant is the tenant these OMS instances serve. Handle refuses an envelope
+// from any other tenant (#223), so the fixtures below publish as this one.
+const testTenant = "__system__"
+
 // testCtx stands in for what bus.Consumer would have stashed onto a handler's
 // ctx from the inbound envelope (pkg/bus/context.go's WithTenantID) before the
 // handler ever runs. A direct svc.Handle(ctx, ...) call in these tests bypasses
@@ -200,7 +204,7 @@ func newService(t *testing.T, fb *fakeBus, gate compliance.Gate) (*Service, *Mem
 	t.Helper()
 	store := NewMemoryStore()
 	router := execution.NewRouter(execution.NewSimVenue("XSIM"))
-	svc, err := NewService(store, NewEmitter(fb), gate, router, nil, nil)
+	svc, err := NewService(testTenant, store, NewEmitter(fb), gate, router, nil, nil)
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
 	}
@@ -283,7 +287,7 @@ func TestService_ComplianceBreach_RejectsBeforeAccept(t *testing.T) {
 func TestService_CancelUnknownOrder(t *testing.T) {
 	fb := &fakeBus{}
 	store := NewMemoryStore()
-	svc, err := NewService(store, NewEmitter(fb), nil, nil, nil, nil)
+	svc, err := NewService(testTenant, store, NewEmitter(fb), nil, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
 	}
@@ -348,7 +352,7 @@ func TestService_ConcurrentResubmit_RoutesToVenueExactlyOnce(t *testing.T) {
 	fb := &fakeBus{}
 	venue := &countingVenue{Venue: execution.NewSimVenue("XSIM")}
 	store := NewMemoryStore()
-	svc, err := NewService(store, NewEmitter(fb), nil, execution.NewRouter(venue), nil, nil)
+	svc, err := NewService(testTenant, store, NewEmitter(fb), nil, execution.NewRouter(venue), nil, nil)
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
 	}
