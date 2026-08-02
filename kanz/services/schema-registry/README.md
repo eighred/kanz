@@ -48,5 +48,8 @@ go run ./cmd/schema-registry
 ## Tests
 
 `go test ./...` runs the in-memory backend tests by default. The Postgres
-backend tests run only when `TEST_POSTGRES_DSN` is set against a database
-with `migrations/0001_init.sql` already applied.
+backend tests run only when `TEST_POSTGRES_URL` is set — the same variable
+every other DB-gated suite in this repository reads, and the one CI sets. The
+suite creates its own Postgres schema and replays `migrations/*.sql` into it,
+so the database needs no prior setup beyond the role being able to
+`CREATE SCHEMA`.

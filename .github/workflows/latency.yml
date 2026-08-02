@@ -212,7 +212,7 @@ jobs:
           go mod tidy
       - name: Run compute benchmarks
         working-directory: kanz
-        run: go test -run '^$' -bench . -benchmem -benchtime=10x ./internal/risk/compute/...
+        run: go test -run '^$' -bench . -benchmem -benchtime=10x -p 1 ./internal/risk/compute/...
 
       # The wall-clock p99 budget (`-tags perf`). It lives HERE and not in the kanz-ci
       # `go test -race ./...` gate because a latency budget under the race detector
@@ -222,7 +222,7 @@ jobs:
       # and unraced, which is the only condition under which its number means anything.
       - name: Run the compute latency budget
         working-directory: kanz
-        run: go test -tags perf -run TestComputeMeasuresP99UnderBurst ./internal/risk/compute/...
+        run: go test -tags perf -run TestComputeMeasuresP99UnderBurst -p 1 ./internal/risk/compute/...
 
   capacity-baseline:
     # Manual only. The multi-minute ramp to the capacity knee — against a real
