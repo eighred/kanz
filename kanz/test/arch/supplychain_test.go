@@ -150,6 +150,23 @@ func workflowFiles(t *testing.T, repoRoot string) []string {
 		if d.IsDir() && d.Name() == ".git" {
 			return filepath.SkipDir
 		}
+		// SKIP NESTED CHECKOUTS. A git worktree carries its own .github/workflows,
+		// so a recursive walk from the repo root reads OTHER checkouts' copies as if
+		// they were ours — and reports failures against paths that are not in this
+		// repository. Agent worktrees under .claude/ made TestEveryWorkflowGoTestIsSerialised
+		// fail naming four invocations in two sibling checkouts, none of which this
+		// branch can fix.
+		//
+		// It would have passed in CI, where no worktree exists — a guard that is red
+		// locally and green in CI teaches people to ignore it, which is worse than not
+		// having it. Keyed on the presence of a .git entry (a worktree's is a FILE
+		// pointing at the parent, not a directory) rather than on ".claude", so any
+		// nested checkout is excluded, not just today's tooling.
+		if d.IsDir() && path != repoRoot {
+			if _, err := os.Stat(filepath.Join(path, ".git")); err == nil {
+				return filepath.SkipDir
+			}
+		}
 		if d.IsDir() || filepath.Base(filepath.Dir(path)) != "workflows" {
 			return nil
 		}
