@@ -85,7 +85,7 @@ func TestProjectorAppendsAndChains(t *testing.T) {
 		}
 	}
 
-	all, _ := store.All(ctx)
+	all := collectAll(t, store)
 	if len(all) != 2 {
 		t.Fatalf("len=%d want 2", len(all))
 	}
@@ -109,7 +109,7 @@ func TestProjectorIdempotent(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	all, _ := store.All(ctx)
+	all := collectAll(t, store)
 	if len(all) != 1 {
 		t.Fatalf("redelivery duplicated: len=%d want 1", len(all))
 	}
@@ -127,4 +127,18 @@ func TestMemoryQueryFilters(t *testing.T) {
 	if len(got) != 1 || got[0].EventID != "a" {
 		t.Fatalf("kind filter got %d records", len(got))
 	}
+}
+
+// collectAll drains Store.Scan into a slice. Tests want the whole log to assert
+// on; production does not, which is why Scan streams (#229).
+func collectAll(t *testing.T, store *Memory) []*Record {
+	t.Helper()
+	var out []*Record
+	if err := store.Scan(context.Background(), func(r *Record) error {
+		out = append(out, r)
+		return nil
+	}); err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	return out
 }

@@ -1,9 +1,12 @@
 package config
 
 import (
+	"fmt"
 	"log/slog"
 	"os"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/eighred/kanz/pkg/secret"
 )
@@ -51,6 +54,24 @@ type Config struct {
 	// main.go never did. That is why this was invisible.
 	Tenant string
 
+	// SnapshotInterval is how often the ledger checkpoint job runs (#229).
+	//
+	// It is what keeps NAV bounded: without a checkpoint, materializing a book
+	// reads the portfolio's ENTIRE lifetime journal on every request, so the
+	// service degrades with AGE rather than with load. The job only runs with a
+	// durable store — the in-memory journal dies with the pod, so checkpointing
+	// it buys nothing.
+	//
+	// ACCOUNTING_SNAPSHOT_INTERVAL, a Go duration. A zero or negative value
+	// DISABLES the job, which Load refuses to infer from a malformed setting: a
+	// typo must not silently reinstate the unbounded read.
+	SnapshotInterval time.Duration
+	// SnapshotBatch caps the portfolios one checkpoint pass will fold
+	// (ACCOUNTING_SNAPSHOT_BATCH). Each is a full journal read, so an unbounded
+	// pass against a large estate would hold a pool connection for as long as it
+	// took — the shape of problem the job exists to remove.
+	SnapshotBatch int
+
 	// Live FX for multi-currency NAV (WIRE-01d): a latest-rate cache folded from
 	// the market.v1 FX spine, so the NAV endpoint values a multi-currency book
 	// with no `fx` in the request. Off unless FXPairs is configured AND a broker
@@ -92,6 +113,18 @@ var DefaultFillSubjects = []string{"order.order.filled", "order.order.partially_
 // consumer folds (WIRE-01f) — the wildcard over the cashmove.Publisher subjects.
 var DefaultCashSubjects = []string{"accounting.cash.>"}
 
+// DefaultSnapshotInterval is how often the ledger checkpoint job runs when
+// ACCOUNTING_SNAPSHOT_INTERVAL is unset. Five minutes bounds the worst-case
+// tail a NAV request folds to five minutes of fills for one portfolio, at a
+// cost of one full journal fold per stale portfolio per five minutes on a
+// background goroutine. It is ON by default deliberately: the read path is
+// unbounded without it, and an operator who never heard of this setting should
+// get the bounded behaviour.
+const DefaultSnapshotInterval = 5 * time.Minute
+
+// DefaultSnapshotBatch is the most portfolios one checkpoint pass folds.
+const DefaultSnapshotBatch = 64
+
 // Load reads the configuration from the environment with production-safe
 // defaults.
 func Load() (Config, error) {
@@ -118,6 +151,16 @@ func Load() (Config, error) {
 	if len(cashSubjects) == 0 {
 		cashSubjects = DefaultCashSubjects
 	}
+
+	snapshotInterval, err := durationOr("ACCOUNTING_SNAPSHOT_INTERVAL", DefaultSnapshotInterval)
+	if err != nil {
+		return Config{}, err
+	}
+	snapshotBatch, err := intOr("ACCOUNTING_SNAPSHOT_BATCH", DefaultSnapshotBatch)
+	if err != nil {
+		return Config{}, err
+	}
+
 	return Config{
 		Listen:        envOr("ACCOUNTING_LISTEN", ":8080"),
 		LogLevel:      parseLevel(os.Getenv("ACCOUNTING_LOG_LEVEL")),
@@ -129,8 +172,12 @@ func Load() (Config, error) {
 		CashSubjects:  cashSubjects,
 		DatabaseURL:   databaseURL,
 		Tenant:        envOr("ACCOUNTING_TENANT", "__system__"),
-		OTLPEndpoint:  os.Getenv("ACCOUNTING_OTLP_ENDPOINT"),
-		SPIFFESocket:  os.Getenv("SPIFFE_ENDPOINT_SOCKET"),
+
+		SnapshotInterval: snapshotInterval,
+		SnapshotBatch:    snapshotBatch,
+
+		OTLPEndpoint: os.Getenv("ACCOUNTING_OTLP_ENDPOINT"),
+		SPIFFESocket: os.Getenv("SPIFFE_ENDPOINT_SOCKET"),
 
 		FXPairs:            os.Getenv("ACCOUNTING_FX_PAIRS"),
 		FXSubjects:         fxSubjects,
@@ -147,6 +194,36 @@ func splitList(s string) []string {
 		}
 	}
 	return out
+}
+
+// durationOr parses a Go duration from the environment, or returns def when
+// unset. A MALFORMED value is an error, never the default: silently falling
+// back would leave the checkpoint job on a schedule the operator did not choose
+// while the deployment reported a clean start.
+func durationOr(key string, def time.Duration) (time.Duration, error) {
+	raw := strings.TrimSpace(os.Getenv(key))
+	if raw == "" {
+		return def, nil
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil {
+		return 0, fmt.Errorf("config: %s=%q is not a duration: %w", key, raw, err)
+	}
+	return d, nil
+}
+
+// intOr parses an int from the environment, or returns def when unset. A
+// malformed value is an error, for the same reason as durationOr.
+func intOr(key string, def int) (int, error) {
+	raw := strings.TrimSpace(os.Getenv(key))
+	if raw == "" {
+		return def, nil
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil {
+		return 0, fmt.Errorf("config: %s=%q is not an integer: %w", key, raw, err)
+	}
+	return n, nil
 }
 
 func envOr(key, def string) string {

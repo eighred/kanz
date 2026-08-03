@@ -69,7 +69,7 @@ func TestFolderFoldsFillIntoLedger(t *testing.T) {
 		t.Fatalf("handle redelivery: %v", err)
 	}
 
-	book, err := ledger.MaterializeCurrent(ctx, st, "PORT-1")
+	book, _, err := ledger.MaterializeCurrent(ctx, st, "PORT-1")
 	if err != nil {
 		t.Fatalf("materialize: %v", err)
 	}
@@ -123,7 +123,7 @@ func TestFolderFoldsCashMovements(t *testing.T) {
 		t.Fatalf("handle fee: %v", err)
 	}
 
-	book, err := ledger.MaterializeCurrent(ctx, st, "PORT-1")
+	book, _, err := ledger.MaterializeCurrent(ctx, st, "PORT-1")
 	if err != nil {
 		t.Fatalf("materialize: %v", err)
 	}

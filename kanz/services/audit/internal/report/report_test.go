@@ -44,7 +44,13 @@ func TestGenerateWithAttestation(t *testing.T) {
 func TestGenerateAttestationFailsOnTamper(t *testing.T) {
 	st := seedStore(t)
 	// Tamper: mutate a stored record's summary so its hash no longer matches.
-	all, _ := st.All(context.Background())
+	var all []*audit.Record
+	if err := st.Scan(context.Background(), func(r *audit.Record) error {
+		all = append(all, r)
+		return nil
+	}); err != nil {
+		t.Fatalf("scan: %v", err)
+	}
 	all[0].Summary = "FORGED"
 
 	rep, err := Generate(context.Background(), st, BuiltIns()["full-log"], time.Now)

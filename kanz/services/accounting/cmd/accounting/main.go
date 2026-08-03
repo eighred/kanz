@@ -87,7 +87,14 @@ func main() {
 	// the default instrument→currency join from config, and hand the server a
 	// live FX provider so NAV values a multi-currency book with no `fx` in the
 	// request. A bad reference spec fails loud at startup. Off when unconfigured.
-	opts := []server.Option{server.WithMetrics(obs.MetricsHandler())}
+	// Ledger checkpoints (#229). Registered before the server is built so the
+	// read path can count the materializations that could NOT be served from a
+	// checkpoint — the only signal that this job has stopped working.
+	snapMetrics := ledger.NewSnapshotMetrics(obs.Registry)
+	opts := []server.Option{
+		server.WithMetrics(obs.MetricsHandler()),
+		server.WithSnapshotMetrics(snapMetrics),
+	}
 	liveFX, err := buildLiveFX(cfg, &opts)
 	if err != nil {
 		logger.Error("FX config invalid", "err", err)
@@ -155,6 +162,45 @@ func main() {
 	} else {
 		logger.Info("no ACCOUNTING_NATS_URL set — serving read/reconcile only (no fill folding)")
 	}
+
+	// Ledger checkpoint job (#229). Without it, materializing a book reads the
+	// portfolio's ENTIRE lifetime journal on every NAV and reconcile request:
+	// ledger_snapshots stays empty, MaterializeCurrent takes its no-checkpoint
+	// fallback forever, and the service degrades with AGE rather than with load.
+	// It joins the same WaitGroup as the bus consumers so SIGTERM stops it with
+	// them; a pass in flight holds one pool connection and closeStore must not
+	// run underneath it.
+	//
+	// Durable store only: the in-memory journal dies with the pod, so
+	// checkpointing it buys nothing. Both branches SAY which one they took —
+	// "nothing configured" and "checked, and fine" must not look the same, and a
+	// checkpoint job silently not running is the defect this fixes.
+	switch {
+	case cfg.DatabaseURL == "":
+		logger.Info("in-memory journal — no ledger snapshotter (reads fold the whole in-process journal)")
+	case cfg.SnapshotInterval <= 0:
+		logger.Warn("ACCOUNTING_SNAPSHOT_INTERVAL is not positive — ledger checkpointing is DISABLED; "+
+			"every NAV and reconcile request will scan the portfolio's entire journal (#229)",
+			"interval", cfg.SnapshotInterval)
+	default:
+		snapshotter, err := ledger.NewSnapshotter(store, logger, ledger.SnapshotterConfig{
+			Interval: cfg.SnapshotInterval,
+			Batch:    cfg.SnapshotBatch,
+			Metrics:  snapMetrics,
+		})
+		if err != nil {
+			logger.Error("ledger snapshotter init failed", "err", err)
+			os.Exit(2)
+		}
+		consumers.Add(1)
+		go func() {
+			defer consumers.Done()
+			if err := snapshotter.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
+				logger.Error("ledger snapshotter stopped with error", "err", err)
+			}
+		}()
+	}
+
 	readiness.Set(true)
 
 	<-ctx.Done()

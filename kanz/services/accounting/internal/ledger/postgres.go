@@ -78,11 +78,29 @@ func (p *Postgres) Append(ctx context.Context, e *Event) error {
 	return nil
 }
 
-// Journal returns a portfolio's entries in the canonical fold order
+// Journal returns a portfolio's ENTIRE journal in the canonical fold order
 // (effective, knowledge, entry_id) — served by ledger_entries_bitemporal_idx,
 // so Replay over the result reproduces the in-memory book exactly.
+//
+// UNBOUNDED BY CONSTRUCTION: no time bounds, no LIMIT, every entry the
+// portfolio has ever had. That is correct for the two callers that need a whole
+// fold — the Snapshotter, and MaterializeCurrent's no-checkpoint fallback — and
+// it is the query that made #229 a request-path liability. Reach for
+// JournalSince instead unless you genuinely need the whole book from empty.
 func (p *Postgres) Journal(ctx context.Context, portfolioID string) ([]*Event, error) {
-	return p.journal(ctx, portfolioID, time.Time{}, time.Time{})
+	return p.journal(ctx, portfolioID, time.Time{}, time.Time{}, time.Time{})
+}
+
+// JournalSince returns the entries known strictly after the given watermark —
+// the snapshot tail (#229), and the read on the NAV/reconcile path.
+//
+// Served as a range scan by ledger_entries_knowledge_idx
+// (0005_ledger_snapshot_tail.sql). Without that index this predicate is an
+// in-index FILTER over the whole portfolio: heap fetches and *big.Rat
+// allocations would still be bounded to the tail, but the scan would not be —
+// which is why the index ships in the same change as this method.
+func (p *Postgres) JournalSince(ctx context.Context, portfolioID string, after time.Time) ([]*Event, error) {
+	return p.journal(ctx, portfolioID, time.Time{}, time.Time{}, after)
 }
 
 // JournalAsOf returns the entries economically effective at or before
@@ -90,11 +108,53 @@ func (p *Postgres) Journal(ctx context.Context, portfolioID string) ([]*Event, e
 // point-in-time read pushed into Postgres as an indexed range scan. A zero time
 // on either axis means "no bound on that axis". Replay over the result equals
 // the in-memory ReplayAsOf.
+//
+// This is the HEAD read (at or before a bound), NOT the snapshot tail — #229
+// proposed reusing it for MaterializeCurrent, which would have bounded the
+// wrong side. Use JournalSince for the tail. It still has no production caller;
+// the bitemporal restatement API that will use it is not built yet, and its
+// Postgres-gated test is what keeps the range scan honest until then.
 func (p *Postgres) JournalAsOf(ctx context.Context, portfolioID string, effectiveAsOf, knowledgeAsOf time.Time) ([]*Event, error) {
-	return p.journal(ctx, portfolioID, effectiveAsOf, knowledgeAsOf)
+	return p.journal(ctx, portfolioID, effectiveAsOf, knowledgeAsOf, time.Time{})
 }
 
-func (p *Postgres) journal(ctx context.Context, portfolioID string, effBound, knowBound time.Time) ([]*Event, error) {
+// StalePortfolios returns up to limit portfolios whose journal has entries past
+// their snapshot watermark, oldest watermark first — the Snapshotter's queue.
+//
+// This aggregate does scan the journal index. It runs on a background ticker at
+// a bounded concurrency of one, NOT on a request path, and it is what stops
+// every request path from doing the same thing. LIMIT bounds the work handed to
+// one pass, not the scan; a cheaper queue needs a written-side watermark table,
+// which is a larger change than #229 and would be its own decision.
+func (p *Postgres) StalePortfolios(ctx context.Context, limit int) ([]string, error) {
+	if limit <= 0 {
+		return nil, errors.New("ledger: StalePortfolios needs a positive limit")
+	}
+	rows, err := p.pool.Query(ctx, `
+		SELECT e.portfolio_id
+		FROM ledger_entries e
+		LEFT JOIN ledger_snapshots s ON s.portfolio_id = e.portfolio_id
+		GROUP BY e.portfolio_id, s.through_time
+		HAVING s.through_time IS NULL OR max(e.knowledge_time) > s.through_time
+		ORDER BY s.through_time ASC NULLS FIRST, e.portfolio_id
+		LIMIT $1
+	`, limit)
+	if err != nil {
+		return nil, fmt.Errorf("query stale portfolios: %w", err)
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("scan stale portfolio: %w", err)
+		}
+		out = append(out, id)
+	}
+	return out, rows.Err()
+}
+
+func (p *Postgres) journal(ctx context.Context, portfolioID string, effBound, knowBound, knowAfter time.Time) ([]*Event, error) {
 	rows, err := p.pool.Query(ctx, `
 		SELECT entry_id, portfolio_id, entry_type, instrument_id,
 		       quantity, price, cash, cash_currency, action,
@@ -103,8 +163,9 @@ func (p *Postgres) journal(ctx context.Context, portfolioID string, effBound, kn
 		WHERE portfolio_id = $1
 		  AND ($2::timestamptz IS NULL OR effective_time <= $2)
 		  AND ($3::timestamptz IS NULL OR knowledge_time <= $3)
+		  AND ($4::timestamptz IS NULL OR knowledge_time > $4)
 		ORDER BY effective_time, knowledge_time, entry_id
-	`, portfolioID, nullTime(effBound), nullTime(knowBound))
+	`, portfolioID, nullTime(effBound), nullTime(knowBound), nullTime(knowAfter))
 	if err != nil {
 		return nil, fmt.Errorf("query journal %s: %w", portfolioID, err)
 	}
@@ -141,9 +202,22 @@ func (p *Postgres) journal(ctx context.Context, portfolioID string, effBound, kn
 }
 
 // SaveSnapshot upserts a portfolio's latest book snapshot (full replace).
+//
+// ledger_snapshots is deliberately OUTSIDE the WORM trigger 0004 puts on
+// ledger_entries, and this UPSERT is why. The journal is the book of record and
+// must never be rewritten; a snapshot is a DERIVED CACHE of a prefix of it,
+// reproducible from the journal alone and carrying no fact the journal does
+// not. Extending WORM here would forbid the only write shape a checkpoint has.
+// Nothing is lost: an UPDATE cannot destroy history that lives in the journal.
 func (p *Postgres) SaveSnapshot(ctx context.Context, snap *Snapshot) error {
 	if snap == nil || snap.PortfolioID == "" {
 		return errors.New("ledger: cannot save snapshot with empty portfolio_id")
+	}
+	if snap.MaxEffective.IsZero() {
+		// See MemoryStore.SaveSnapshot: a fenceless checkpoint is one
+		// MaterializeCurrent refuses, so writing it would buy a permanent
+		// silent full scan and a row that looks like a working cache.
+		return errors.New("ledger: cannot save snapshot with no MaxEffective fence")
 	}
 	positions, err := json.Marshal(encodePositions(snap.Positions))
 	if err != nil {
@@ -159,15 +233,25 @@ func (p *Postgres) SaveSnapshot(ctx context.Context, snap *Snapshot) error {
 	}
 	_, err = p.pool.Exec(ctx, `
 		INSERT INTO ledger_snapshots
-			(tenant_id, portfolio_id, positions, cash, accrued, through_time, updated_at)
-		VALUES (current_setting('app.tenant_id'), $1, $2, $3, $4, $5, now())
+			(tenant_id, portfolio_id, positions, cash, accrued, through_time,
+			 max_effective_time, updated_at)
+		VALUES (current_setting('app.tenant_id'), $1, $2, $3, $4, $5, $6, now())
 		ON CONFLICT (tenant_id, portfolio_id) DO UPDATE SET
-			positions    = EXCLUDED.positions,
-			cash         = EXCLUDED.cash,
-			accrued      = EXCLUDED.accrued,
-			through_time = EXCLUDED.through_time,
-			updated_at   = now()
-	`, snap.PortfolioID, positions, cash, accrued, snap.Through)
+			positions          = EXCLUDED.positions,
+			cash               = EXCLUDED.cash,
+			accrued            = EXCLUDED.accrued,
+			through_time       = EXCLUDED.through_time,
+			max_effective_time = EXCLUDED.max_effective_time,
+			updated_at         = now()
+		-- MONOTONIC WATERMARK. Two Snapshotter replicas, or one restarting mid-
+		-- pass, can present checkpoints out of order; a full-replace upsert would
+		-- let the older one win and silently move the watermark BACKWARDS. That is
+		-- not a wrong book (a shorter watermark just means more tail to fold) but
+		-- it is an unbounded read that no longer converges. Declining the stale
+		-- write is a no-op, not a failure: the store already holds a checkpoint at
+		-- least as new as the one offered.
+		WHERE EXCLUDED.through_time >= ledger_snapshots.through_time
+	`, snap.PortfolioID, positions, cash, accrued, snap.Through, snap.MaxEffective)
 	if err != nil {
 		return fmt.Errorf("save snapshot %s: %w", snap.PortfolioID, err)
 	}
@@ -180,10 +264,16 @@ func (p *Postgres) LoadSnapshot(ctx context.Context, portfolioID string) (*Snaps
 		positions, cash, accrued []byte
 		through                  time.Time
 	)
+	// max_effective_time is nullable: NULL is "this checkpoint does not state
+	// its backdating fence", which MaterializeCurrent refuses to resume from.
+	// Scanning through *time.Time keeps that absence as the Go zero time, so
+	// "unrecorded" is one value on both sides rather than a sentinel timestamp
+	// whose comparison could be written backwards.
+	var maxEffective *time.Time
 	err := p.pool.QueryRow(ctx, `
-		SELECT positions, cash, accrued, through_time
+		SELECT positions, cash, accrued, through_time, max_effective_time
 		FROM ledger_snapshots WHERE portfolio_id = $1
-	`, portfolioID).Scan(&positions, &cash, &accrued, &through)
+	`, portfolioID).Scan(&positions, &cash, &accrued, &through, &maxEffective)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrNoSnapshot
 	}
@@ -191,6 +281,9 @@ func (p *Postgres) LoadSnapshot(ctx context.Context, portfolioID string) (*Snaps
 		return nil, fmt.Errorf("load snapshot %s: %w", portfolioID, err)
 	}
 	snap := &Snapshot{PortfolioID: portfolioID, Through: through}
+	if maxEffective != nil {
+		snap.MaxEffective = *maxEffective
+	}
 	if snap.Positions, err = decodePositions(positions); err != nil {
 		return nil, fmt.Errorf("decode positions %s: %w", portfolioID, err)
 	}

@@ -38,9 +38,9 @@ func (s *filterSpy) Query(_ context.Context, f audit.Filter) ([]*audit.Record, e
 	s.got = f
 	return nil, nil
 }
-func (s *filterSpy) All(context.Context) ([]*audit.Record, error) { return nil, nil }
-func (s *filterSpy) Head(context.Context) (audit.Head, error)     { return audit.Head{}, nil }
-func (s *filterSpy) Ping(context.Context) error                   { return nil }
+func (s *filterSpy) Scan(context.Context, func(*audit.Record) error) error { return nil }
+func (s *filterSpy) Head(context.Context) (audit.Head, error)              { return audit.Head{}, nil }
+func (s *filterSpy) Ping(context.Context) error                            { return nil }
 
 func newAuditServer(st audit.Store) *Server {
 	r := &Readiness{}

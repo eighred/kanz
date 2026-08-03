@@ -85,21 +85,36 @@ func Generate(ctx context.Context, store audit.Store, tmpl Template, now func() 
 // Verify verifies the AUDIT-01b hash chain over the entire log and summarizes
 // it. Exported because it is both the report's integrity attestation and the
 // standalone tamper-check the /verify API and AUDIT-01e tests run.
+// It STREAMS the log rather than loading it (#229). It used to call
+// store.All(ctx) — every record in the compliance log into a slice, plus a
+// parallel slice of chain.Link over them — on a GET request with no bound and
+// no LIMIT, which is the endpoint a regulator's request hits. The chain walk is
+// a left fold, so the working set is now one record however long the log is.
+//
+// WHAT THIS DOES NOT FIX, deliberately: the SCAN is still whole-log, and one
+// pool connection is held for its duration. That is not a refactor away — a
+// hash chain cannot be verified from a suffix without a trusted anchor for
+// everything before it, so bounding this read means periodically signed
+// checkpoints, which is a security design and not a query change.
 func Verify(ctx context.Context, store audit.Store) (Attestation, error) {
-	all, err := store.All(ctx)
-	if err != nil {
-		return Attestation{}, err
-	}
 	head, err := store.Head(ctx)
 	if err != nil {
 		return Attestation{}, err
 	}
-	links := make([]chain.Link, len(all))
-	for i := range all {
-		links[i] = all[i]
+	v := chain.NewVerifier()
+	// The verifier records the FIRST break and tolerates everything after it, so
+	// yield never returns an error and the scan runs to completion. That is on
+	// purpose: Attestation.Records is the log's length, and stopping early would
+	// report a broken chain as a SHORT one — understating how much of the log
+	// exists is the wrong way to fail a tamper check.
+	if err := store.Scan(ctx, func(r *audit.Record) error {
+		_ = v.Push(r)
+		return nil
+	}); err != nil {
+		return Attestation{}, err
 	}
-	att := Attestation{Records: len(all), Head: head.Hash}
-	if idx, verr := chain.Verify(links); verr != nil {
+	att := Attestation{Records: v.Count(), Head: head.Hash}
+	if idx, verr := v.Result(); verr != nil {
 		att.Verified = false
 		att.Detail = fmt.Sprintf("chain broken at index %d: %v", idx, verr)
 	} else {

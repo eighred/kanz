@@ -37,9 +37,32 @@ type Store interface {
 	Get(ctx context.Context, eventID string) (*Record, bool, error)
 	// Query returns records matching f, ordered by Seq ascending.
 	Query(ctx context.Context, f Filter) ([]*Record, error)
-	// All returns every record ordered by Seq — the input to chain verification
-	// (AUDIT-01b) and lineage walks (AUDIT-01c).
-	All(ctx context.Context) ([]*Record, error)
+	// Scan STREAMS every record ordered by Seq to yield — the input to chain
+	// verification (AUDIT-01b). It stops and returns yield's error at the first
+	// non-nil one.
+	//
+	// THE RECORD IS ONLY VALID FOR THE DURATION OF THE CALL. yield must fold it
+	// and let it go; a caller that keeps the pointer must copy first. This is
+	// what makes the streaming guarantee enforceable rather than aspirational —
+	// an implementation is free to reuse one buffer, so a caller that
+	// accumulates gets a deliberate, immediate failure instead of quietly
+	// reintroducing the whole-log slice this method exists to remove. (The
+	// shipped implementations do allocate per row; the contract is the point.)
+	//
+	// It replaces an All() that returned every record as a slice (#229).
+	// Verification is inherently whole-chain — a suffix cannot be verified
+	// without a trusted anchor for what precedes it — so unlike the accounting
+	// ledger this read cannot be BOUNDED. What it must not do is materialise the
+	// entire compliance log in memory to walk it once: the chain walk is a left
+	// fold, so the caller's working set is one record regardless of log size.
+	// Streaming is the half of the problem that is soluble here.
+	//
+	// The read still holds one pool connection for the whole scan and its
+	// duration still grows with the log. Fixing THAT needs periodically signed
+	// chain checkpoints to anchor a partial verification, which is a security
+	// design (who signs, where the anchor lives, what stops it being rewritten
+	// alongside the log) and not a refactor.
+	Scan(ctx context.Context, yield func(*Record) error) error
 	// Head returns the current chain tip (Genesis-derived for an empty log).
 	Head(ctx context.Context) (Head, error)
 	// Ping checks store liveness for readiness.
