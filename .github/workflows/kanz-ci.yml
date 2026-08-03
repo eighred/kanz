@@ -668,11 +668,37 @@ jobs:
       # TestPrometheusConfigMatchesTheEstate in kanz/test/arch/, which compares
       # the glob against the files actually on disk. Neither check subsumes the
       # other.
-      - name: promtool check config
+      # Staged via apply-rules.sh --list, NOT a second glob. The cluster's rule
+      # set comes from that script; a `cp slo/*.rules.yaml` here would validate a
+      # DIFFERENT set, so a rule file outside slo/ would deploy unchecked while
+      # this step stayed green (#230). One list, two consumers.
+      - name: promtool check config and every rule file
         run: |
           set -euo pipefail
           sudo mkdir -p /etc/prometheus/rules
-          sudo cp kanz/infra/observability/slo/*.rules.yaml /etc/prometheus/rules/
+          # `bash <script>`, not the script directly: the exec bit is a property of
+          # the index, and a contributor on a filesystem that does not carry one
+          # commits 100644 without noticing. That is not a hypothetical — the first
+          # push of this step did exactly that.
+          #
+          # And the count is checked EXPLICITLY because `set -e` does not see a
+          # failure inside a process substitution: when the script could not run,
+          # mapfile simply produced an empty array and the step reported "staging 0
+          # rule file(s)" and carried on. An empty rule set must be fatal here for
+          # the same reason apply-rules.sh refuses to build an empty ConfigMap —
+          # zero rules validate perfectly.
+          mapfile -t rules < <(bash kanz/infra/observability/apply-rules.sh --list)
+          if [ "${#rules[@]}" -eq 0 ]; then
+            echo "::error::apply-rules.sh listed no rule files — nothing would be validated" >&2
+            exit 1
+          fi
+          printf 'staging %d rule file(s)\n' "${#rules[@]}"
+          printf '  %s\n' "${rules[@]}"
+          sudo cp "${rules[@]}" /etc/prometheus/rules/
+          # check rules on each file directly as well as through the config: the
+          # config check loads them via the mount glob, which passes over a file
+          # that failed to stage at all.
+          promtool check rules "${rules[@]}"
           promtool check config /tmp/prometheus.yml
 
       # Run FROM the slo directory: slo_test.yaml names its rule_files by
