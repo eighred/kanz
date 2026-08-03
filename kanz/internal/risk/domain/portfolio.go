@@ -284,3 +284,91 @@ type Position struct {
 	// position version.
 	AsOf time.Time
 }
+
+// --- The base-currency filter: ONE rule, one implementation ------------
+//
+// The risk engine has no FX layer (RISK-06), so every base-currency
+// aggregate — exposure sums, HHI, factor decomposition, historical and
+// Monte-Carlo VaR, uncertainty propagation, liquidation horizon and cost
+// — can only include positions already denominated in the portfolio's
+// base currency. That rule was copy-pasted into ten loops across four
+// packages; each copy silently dropped positions and none recorded it,
+// so a USD-base book holding only EUR reported GrossExposure = 0 and was
+// indistinguishable from an empty book (#257).
+//
+// The rule now lives here, in the package every one of those call sites
+// already imports, for two reasons a helper in `compute` could not give:
+// `internal/risk/liquidity` cannot import `compute` (compute imports it —
+// an import cycle), and putting the predicate beside the data lets the
+// SAME predicate enumerate what it drops. Portfolio.CurrencyExclusions
+// below is defined in terms of moneyInBase, so the reported exclusions
+// cannot drift from the exclusions actually performed — the two can only
+// disagree if someone edits one function.
+//
+// test/arch/risk_currency_filter_test.go enforces that this stays the
+// only copy.
+
+// moneyInBase reports whether m is present and denominated in base. The
+// single source of truth for "counts as base currency"; a future change
+// (accepting USD-cents as USD, say) edits this one function.
+func moneyInBase(m *commonpb.Money, base CurrencyCode) bool {
+	return m != nil && m.GetCurrencyCode() == string(base)
+}
+
+// InBaseCurrency reports whether the position's MarketValue can be folded
+// into a base-currency aggregate. False for an unmarked position (nil
+// MarketValue) as well as a foreign-currency one: both are equally absent
+// from the resulting number, so both are equally worth reporting.
+func (pos Position) InBaseCurrency(base CurrencyCode) bool {
+	return moneyInBase(pos.MarketValue, base)
+}
+
+// UncertaintyInBaseCurrency reports whether the position's RISK-08
+// uncertainty band can be propagated into a base-currency aggregate. It
+// is a strictly narrower condition than InBaseCurrency — a position can
+// be marked in base currency yet carry no band, or a band in another
+// currency — so uncertainty propagation checks both.
+func (pos Position) UncertaintyInBaseCurrency(base CurrencyCode) bool {
+	return moneyInBase(pos.MarketValueUncertainty, base)
+}
+
+// CurrencyExclusions lists, in stable instrument-ID order, every position
+// that InBaseCurrency rejects — the holdings absent from every
+// base-currency measure computed over this portfolio. Empty ⇒ the whole
+// book is measurable, which is why an empty result and a partial result
+// cannot look the same to a caller.
+//
+// # Allocation
+//
+// Counted first, then allocated exactly once, rather than appended into
+// a growing slice. The count of allocations must not scale with the
+// position count: LATENCY-01c made the whole measures query O(1) allocs
+// and TestComputeMeasures_AllocsConstantInN guards it — an append-grown
+// slice costs O(log n) allocations and fails that guard (it did, on the
+// first version of this). A single-currency book returns nil having
+// allocated nothing, so the common case pays only the extra pass over
+// the already-memoized Positions() view.
+func (p *Portfolio) CurrencyExclusions() []v1.CurrencyExclusion {
+	base := p.BaseCurrency()
+	positions := p.Positions()
+	n := 0
+	for _, pos := range positions {
+		if !pos.InBaseCurrency(base) {
+			n++
+		}
+	}
+	if n == 0 {
+		return nil
+	}
+	out := make([]v1.CurrencyExclusion, 0, n)
+	for _, pos := range positions {
+		if pos.InBaseCurrency(base) {
+			continue
+		}
+		out = append(out, v1.CurrencyExclusion{
+			InstrumentID: pos.InstrumentID,
+			Currency:     pos.MarketValue.GetCurrencyCode(),
+		})
+	}
+	return out
+}

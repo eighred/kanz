@@ -131,7 +131,7 @@ func (e *EngineImpl) Measures(ctx context.Context, req v1.MeasuresRequest) (v1.M
 		PortfolioID:    req.PortfolioID,
 		AsOf:           full.AsOf(),
 		Set:            filterMeasures(full, req.Measures),
-		QualityFlags:   flags,
+		QualityFlags:   withCoverageFlags(flags, full),
 		SourcePosition: pos,
 	}, nil
 }
@@ -164,8 +164,21 @@ func (e *EngineImpl) EvaluateScenario(ctx context.Context, req v1.ScenarioReques
 	return v1.ScenarioResponse{
 		PortfolioID:  req.PortfolioID,
 		Projected:    projected,
-		QualityFlags: flags,
+		QualityFlags: withCoverageFlags(flags, projected),
 	}, nil
+}
+
+// withCoverageFlags appends the coverage signal the Detector cannot
+// produce. Detector.Assess sees only a time.Time, so it can report that
+// a number is OLD but never that it is PARTIAL — the gap that let
+// currency-excluded positions vanish silently (#257). The set itself
+// carries the exclusions, so this works identically on the live path and
+// on a degraded cache read where the portfolio is no longer in hand.
+func withCoverageFlags(flags []v1.QualityFlag, ms *domain.MeasureSet) []v1.QualityFlag {
+	if ms == nil || len(ms.CurrencyExclusions()) == 0 {
+		return flags
+	}
+	return append(flags, v1.QualityFlagCurrencyExcluded)
 }
 
 // Health implements v1.Engine. The engine's AsOf is the latest applied
@@ -224,6 +237,11 @@ func (e *EngineImpl) latestAsOf() time.Time {
 // names ⇒ the full set unchanged. Unknown names are dropped, matching
 // compute.ComputeMeasures' filter semantics and v1.MeasureSet.Lookup's
 // miss contract.
+//
+// The currency exclusions carry over to the subset: narrowing WHICH
+// measures are returned does not change which positions went into them,
+// and a subset that lost the coverage record would be a partial number
+// that no longer says so (#257).
 func filterMeasures(full *domain.MeasureSet, names []v1.MeasureName) *domain.MeasureSet {
 	if len(names) == 0 {
 		return full
@@ -234,7 +252,8 @@ func filterMeasures(full *domain.MeasureSet, names []v1.MeasureName) *domain.Mea
 			subset[n] = m
 		}
 	}
-	return domain.NewMeasureSet(full.PortfolioID(), full.AsOf(), subset)
+	return domain.NewMeasureSet(full.PortfolioID(), full.AsOf(), subset,
+		domain.WithCurrencyExclusions(full.CurrencyExclusions()))
 }
 
 // Compile-time assertion that EngineImpl satisfies the api/v1 contract.

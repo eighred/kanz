@@ -49,12 +49,12 @@ func MonteCarlo(cfg Config) compute.ReturnsMeasure {
 		seed = DefaultSeed
 	}
 	return func(ctx context.Context, p *domain.Portfolio, rp compute.ReturnsProvider) v1.Measure {
-		base := string(p.BaseCurrency())
+		base := p.BaseCurrency()
 		var values []float64 // position value per instrument
 		var series [][]float64
 		minLen := -1
 		for _, pos := range p.Positions() {
-			if pos.MarketValue == nil || pos.MarketValue.CurrencyCode != base {
+			if !pos.InBaseCurrency(base) {
 				continue
 			}
 			r, err := rp.Returns(ctx, string(pos.InstrumentID), p.AsOf(), window)

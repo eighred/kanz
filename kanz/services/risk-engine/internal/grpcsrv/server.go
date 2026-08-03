@@ -293,6 +293,15 @@ func protoMeasureSet(set v1.MeasureSet) (*domainpb.RiskMeasureSet, error) {
 	return publish.ToProtoMeasureSet(ms, nil), nil
 }
 
+// protoFlags maps api/v1 quality flags onto the query.v1 wire enum.
+//
+// A flag with no case here would be dropped, and the caller would see a
+// clean response for a number the engine had already marked untrustworthy
+// — the same silence #257 was about, reintroduced one layer out. The
+// mapping is therefore proven exhaustive over v1.QualityFlags by
+// TestProtoFlags_EveryAPIFlagMaps, and an unmapped flag degrades LOUDLY
+// (to QUALITY_FLAG_UNSPECIFIED, which a caller must not read as "fine")
+// rather than disappearing.
 func protoFlags(flags []v1.QualityFlag) []querypb.QualityFlag {
 	if len(flags) == 0 {
 		return nil
@@ -304,6 +313,10 @@ func protoFlags(flags []v1.QualityFlag) []querypb.QualityFlag {
 			out = append(out, querypb.QualityFlag_QUALITY_FLAG_DEGRADED)
 		case v1.QualityFlagStale:
 			out = append(out, querypb.QualityFlag_QUALITY_FLAG_STALE)
+		case v1.QualityFlagCurrencyExcluded:
+			out = append(out, querypb.QualityFlag_QUALITY_FLAG_CURRENCY_EXCLUDED)
+		default:
+			out = append(out, querypb.QualityFlag_QUALITY_FLAG_UNSPECIFIED)
 		}
 	}
 	return out

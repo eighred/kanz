@@ -80,12 +80,14 @@ func factorMeasure(ctx context.Context, provider ModelProvider, name v1.MeasureN
 
 // baseCurrencyValues folds the portfolio's base-currency positions into the
 // instrument→signed-market-value map the factor model decomposes (the RISK-07
-// same-currency convention; other-currency positions are skipped).
+// same-currency convention). Other-currency positions are excluded via the one
+// shared rule (domain.Position.InBaseCurrency) and reported to the caller as
+// v1.QualityFlagCurrencyExcluded (#257).
 func baseCurrencyValues(p *domain.Portfolio) map[string]float64 {
-	base := string(p.BaseCurrency())
+	base := p.BaseCurrency()
 	values := make(map[string]float64)
 	for _, pos := range p.Positions() {
-		if pos.MarketValue == nil || pos.MarketValue.CurrencyCode != base {
+		if !pos.InBaseCurrency(base) {
 			continue
 		}
 		values[string(pos.InstrumentID)] = decimalToFloat(pos.MarketValue.GetAmount())

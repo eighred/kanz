@@ -31,11 +31,26 @@ import (
 //
 // Measure values are dimensionless `*common.v1.Decimal` — the api/v1
 // `Measure` type carries no currency field. Money-valued measures
-// (GrossExposure, NetExposure, VaR99, Delta) are documented to be in
-// the portfolio's BaseCurrency, and only positions whose
-// MarketValue.CurrencyCode matches BaseCurrency are summed. Positions
-// in other currencies are skipped — surfacing them as a quality flag
-// is RISK-11's degraded-mode concern, not this layer's.
+// (GrossExposure, NetExposure, VaR99, Delta) are in the portfolio's
+// BaseCurrency, and only positions whose MarketValue is denominated in
+// BaseCurrency are summed (there is no FX layer in compute, RISK-06).
+//
+// Positions in other currencies are therefore excluded, and
+// ComputeMeasures records exactly which ones on the returned MeasureSet
+// (domain.WithCurrencyExclusions), which the engine turns into
+// v1.QualityFlagCurrencyExcluded on the response and the publisher into
+// an envelope DEGRADED flag on the FACT.
+//
+// This used to read "surfacing them as a quality flag is RISK-11's
+// degraded-mode concern, not this layer's". That was false and the
+// falsehood was load-bearing: RISK-11's Detector.Assess takes only a
+// time.Time (internal/risk/degraded.go), so it never sees a position and
+// is structurally incapable of noticing one was dropped. Nothing
+// surfaced the exclusion anywhere, and a USD-base portfolio holding only
+// EUR reported GrossExposure = 0 in ModeNormal with no flags — identical
+// to an empty book, and low in the direction that makes a concentration
+// limit pass when the full book would breach (#257). The exclusion is
+// recorded HERE, at the only layer that can see it.
 //
 // # Measure naming
 //
@@ -126,7 +141,12 @@ func ComputeMeasures(p *domain.Portfolio, r *Registry, filter []v1.MeasureName) 
 		}
 		results[name] = fn(p)
 	}
-	return domain.NewMeasureSet(p.ID(), p.AsOf(), results)
+	// Every registered measure aggregates over base-currency positions
+	// only, so the exclusion set is a property of the PORTFOLIO, not of
+	// any one measure — computed once here and attached to the whole set
+	// rather than per measure.
+	return domain.NewMeasureSet(p.ID(), p.AsOf(), results,
+		domain.WithCurrencyExclusions(p.CurrencyExclusions()))
 }
 
 // --- Concrete measures (RISK-07 baseline) ------------------------------
@@ -205,17 +225,19 @@ func Delta(p *domain.Portfolio) v1.Measure {
 	}
 }
 
-// sumInBaseCurrency walks positions whose MarketValue currency
-// matches the portfolio's BaseCurrency and sums them, optionally
-// taking absolute values. Single helper backing every baseline
-// measure — keeps the per-position filter rule in one place so a
-// future "what counts as same-currency" change (e.g. accept USD-
-// equivalent currencies USD-cents) edits one function, not four.
+// sumInBaseCurrency walks positions whose MarketValue is denominated in
+// the portfolio's BaseCurrency and sums them, optionally taking absolute
+// values. Single helper backing every baseline measure.
+//
+// The filter rule itself is domain.Position.InBaseCurrency — one
+// function for all ten sites that had a copy of it, and the same
+// function Portfolio.CurrencyExclusions uses to report what it drops,
+// so what is excluded here and what is reported excluded cannot diverge.
 func sumInBaseCurrency(p *domain.Portfolio, abs bool) *commonpb.Decimal {
-	base := string(p.BaseCurrency())
+	base := p.BaseCurrency()
 	var sum decAccum // O(1) allocs — see decAccum (LATENCY-01c)
 	for _, pos := range p.Positions() {
-		if pos.MarketValue == nil || pos.MarketValue.CurrencyCode != base {
+		if !pos.InBaseCurrency(base) {
 			continue
 		}
 		sum.add(pos.MarketValue.Amount, abs)

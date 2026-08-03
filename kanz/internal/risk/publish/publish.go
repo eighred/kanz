@@ -125,7 +125,26 @@ func (p *Publisher) EmitMeasures(ctx context.Context, measures *domain.MeasureSe
 		PartitionKey:     string(measures.PortfolioID()),
 		PayloadSchemaRef: schemaRefMeasureSet,
 		Payload:          payload,
+		QualityFlags:     measureQualityFlags(measures),
 	})
+}
+
+// measureQualityFlags stamps the envelope's data-integrity flags for a
+// measures FACT.
+//
+// domain.v1.RiskMeasureSet has no field for "this is partial", so a
+// currency-excluded measure set would otherwise reach every bus consumer
+// — the compliance monitor, the archiver, the TUI — as a complete-looking
+// number (#257). envelope.v1.QUALITY_FLAG_DEGRADED is defined as
+// "produced from a degraded or PARTIAL source", which is exactly this
+// case, so the coverage signal rides the envelope rather than waiting on
+// a payload schema change. A consumer that gates on risk numbers must
+// check envelope quality_flags, not just the payload.
+func measureQualityFlags(measures *domain.MeasureSet) []envelopepb.QualityFlag {
+	if len(measures.CurrencyExclusions()) == 0 {
+		return nil
+	}
+	return []envelopepb.QualityFlag{envelopepb.QualityFlag_QUALITY_FLAG_DEGRADED}
 }
 
 // --- Translation: domain → proto --------------------------------------

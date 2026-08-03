@@ -96,24 +96,27 @@ func PropagateScalar(scalar, uncertainty *commonpb.Decimal) *commonpb.Decimal {
 // sumUncertaintyInBaseCurrency walks positions whose MarketValue
 // currency matches BaseCurrency and propagates their
 // MarketValueUncertainty values under the independent assumption.
-// Same skip rules as sumInBaseCurrency: positions in other
-// currencies, with nil MarketValue, or with a MarketValueUncertainty
-// in a different currency than BaseCurrency are excluded.
+// Same skip rule as sumInBaseCurrency (domain.Position.InBaseCurrency)
+// plus the band's own currency check — a position marked in base
+// currency can still carry a band in another, and UncertaintyAbs must
+// not silently mix units.
+//
+// Positions dropped by the FIRST condition appear in the set's
+// CurrencyExclusions (#257); ones dropped only by the second do not,
+// because the measure VALUE still includes them — only its error bar is
+// narrower than the truth. That is understatement of uncertainty, which
+// the flag on the set does not cover; it is tracked as its own concern
+// rather than folded in here, where it would make the flag mean two
+// different things.
 //
 // Returns nil when no propagation happened (no positions, or all
 // positions have nil MarketValueUncertainty) so the measure layer
 // can leave v1.Measure.UncertaintyAbs nil.
 func sumUncertaintyInBaseCurrency(p *domain.Portfolio) *commonpb.Decimal {
-	base := string(p.BaseCurrency())
+	base := p.BaseCurrency()
 	var inputs []*commonpb.Decimal
 	for _, pos := range p.Positions() {
-		if pos.MarketValue == nil || pos.MarketValue.CurrencyCode != base {
-			continue
-		}
-		if pos.MarketValueUncertainty == nil {
-			continue
-		}
-		if pos.MarketValueUncertainty.CurrencyCode != base {
+		if !pos.InBaseCurrency(base) || !pos.UncertaintyInBaseCurrency(base) {
 			continue
 		}
 		inputs = append(inputs, pos.MarketValueUncertainty.Amount)

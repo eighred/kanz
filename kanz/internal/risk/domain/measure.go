@@ -18,16 +18,46 @@ type MeasureSet struct {
 	portfolioID v1.PortfolioID
 	asOf        time.Time
 	measures    map[v1.MeasureName]v1.Measure
+	// excluded are the positions no measure in this set includes,
+	// because their currency is not the portfolio's base (#257). It
+	// rides with the values rather than being recomputed by each reader
+	// so that a set served from the degraded cache — where the portfolio
+	// is long gone — still reports honestly what it left out, exactly as
+	// it carries its own asOf.
+	excluded []v1.CurrencyExclusion
+}
+
+// MeasureSetOption customizes a MeasureSet at construction.
+type MeasureSetOption func(*MeasureSet)
+
+// WithCurrencyExclusions records the positions excluded from every
+// measure in the set (Portfolio.CurrencyExclusions). Omitting it means
+// "the whole book was measured" — correct for a hand-built set in a test
+// and for any set built from a single-currency portfolio.
+func WithCurrencyExclusions(ex []v1.CurrencyExclusion) MeasureSetOption {
+	return func(s *MeasureSet) {
+		if len(ex) == 0 {
+			// Nothing excluded is the overwhelmingly common case (a
+			// single-currency book). Keep it allocation-free.
+			s.excluded = nil
+			return
+		}
+		s.excluded = append([]v1.CurrencyExclusion(nil), ex...)
+	}
 }
 
 // NewMeasureSet copies the input map so callers cannot mutate the
 // internal storage after construction.
-func NewMeasureSet(id v1.PortfolioID, asOf time.Time, measures map[v1.MeasureName]v1.Measure) *MeasureSet {
+func NewMeasureSet(id v1.PortfolioID, asOf time.Time, measures map[v1.MeasureName]v1.Measure, opts ...MeasureSetOption) *MeasureSet {
 	cp := make(map[v1.MeasureName]v1.Measure, len(measures))
 	for k, v := range measures {
 		cp[k] = v
 	}
-	return &MeasureSet{portfolioID: id, asOf: asOf, measures: cp}
+	s := &MeasureSet{portfolioID: id, asOf: asOf, measures: cp}
+	for _, opt := range opts {
+		opt(s)
+	}
+	return s
 }
 
 // AsOf satisfies v1.MeasureSet.
@@ -41,6 +71,20 @@ func (s *MeasureSet) PortfolioID() v1.PortfolioID { return s.portfolioID }
 func (s *MeasureSet) Lookup(name v1.MeasureName) (v1.Measure, bool) {
 	m, ok := s.measures[name]
 	return m, ok
+}
+
+// CurrencyExclusions satisfies v1.MeasureSet — the positions absent
+// from every measure in this set.
+//
+// The result is a read-only VIEW, not a copy: callers must not mutate or
+// re-order it. Same contract as Portfolio.Positions, and for the same
+// reason — the engine calls this on every measures query just to ask
+// whether the set is partial, and a defensive copy there would put a
+// per-query allocation on the hot path that LATENCY-01c cleared. The
+// constructor already copied the caller's slice, so the storage is the
+// set's own.
+func (s *MeasureSet) CurrencyExclusions() []v1.CurrencyExclusion {
+	return s.excluded
 }
 
 // Names returns the measure names in stable lexicographic order so
