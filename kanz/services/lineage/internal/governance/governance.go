@@ -112,21 +112,33 @@ func NewGovernor(classifier *Classifier, authz auth.Authorizer) *Governor {
 
 // CheckAccess decides whether principal p may read dataset ds. It returns the
 // dataset's sensitivity alongside the decision so callers can redact vs. expose.
-// A nil principal is denied on PII (no identity, no access); public is always
-// allowed.
+//
+// A NIL PRINCIPAL IS DENIED OUTRIGHT, PUBLIC DATASET OR NOT (#268). It used to be
+// denied only on PII — the non-PII branch short-circuited to "allow" before it
+// ever looked at p — and for two years nothing on the upstream side reconstructed
+// the gateway's principal headers, so EVERY proxied read arrived here with p ==
+// nil and was served the full provenance of every non-PII dataset in the graph,
+// unauthenticated and unscoped by tenant. "Public" classifies the DATA, not the
+// caller: it means this dataset carries no PII, not that anyone at all may read
+// the lineage of a fund's risk pipeline.
+//
+// auth.RequirePrincipal on the server's mux is the primary refusal and makes this
+// branch unreachable in the deployed shape. It is here anyway because the branch
+// above it is precisely where "nobody is asking" and "somebody with no grants is
+// asking" stopped being distinguishable, and a check that treats nobody as
+// allowed is worse than no check, because it looks like one.
 func (g *Governor) CheckAccess(ctx context.Context, p *auth.Principal, ds graph.DatasetID, schemaRef string) (auth.Decision, Sensitivity) {
 	sens := g.classifier.Classify(ds, schemaRef)
+	if p == nil {
+		return auth.Decision{Allow: false, Reason: "no authenticated principal"}, sens
+	}
 	if sens != SensitivityPII {
 		return auth.Decision{Allow: true, Reason: "public dataset"}, sens
-	}
-	tenant := ""
-	if p != nil {
-		tenant = p.Tenant
 	}
 	d := g.authz.Authorize(ctx, auth.Request{
 		Principal: p,
 		Action:    ActionPIIRead,
-		Resource:  auth.Resource{Type: ResourceDataset, ID: ds.String(), Tenant: tenant},
+		Resource:  auth.Resource{Type: ResourceDataset, ID: ds.String(), Tenant: p.Tenant},
 	})
 	return d, sens
 }

@@ -53,6 +53,137 @@ func SetPrincipalHeaders(h http.Header, subject, tenant string, roles []string) 
 	}
 }
 
+// PrincipalFromHeaders is the READING half of SetPrincipalHeaders — the seam
+// that turns the gateway's injected headers back into the auth.Principal every
+// authorization decision keys on (#268).
+//
+// It existed nowhere for as long as the writing half did. auth.WithPrincipal was
+// called in exactly one non-test place, INSIDE the gateway process, so a proxied
+// request reached lineage's governance check and copilot's tool authorizer with a
+// nil principal — no error, no missing import, no compile failure. Roles were
+// forwarded on the wire on every request and read by nobody.
+//
+// ok IS FALSE UNLESS BOTH SUBJECT AND TENANT ARE PRESENT, and a false ok yields a
+// nil principal rather than a zero-value one. A principal with no tenant is not a
+// weaker principal, it is a principal PolicyAuthorizer denies outright ("principal
+// has no tenant") while governance.CheckAccess would still serve it every
+// non-PII dataset — the two are not the same answer, and handing a caller a
+// non-nil Principal{} is how that divergence gets exercised. Prefer
+// RequirePrincipal, which cannot be installed without the refusal.
+//
+// Roles round-trip through SetPrincipalHeaders exactly: joined on ",", split on
+// ",", empties dropped, and nil in ⇒ nil out (the writer omits the header rather
+// than sending ""). A ROLE NAME CONTAINING A COMMA DOES NOT SURVIVE THIS
+// ENCODING — it arrives as two roles, and if either half names a real policy role
+// that is an escalation. No IdP-issued role on this platform contains one; the
+// day one might, the encoding has to change, not this reader.
+//
+// WHAT IT CANNOT RECONSTRUCT. The wire carries subject, tenant and roles only, so
+// Claims is always nil — including ClaimPortfolios, the ABAC portfolio allow-list
+// PolicyAuthorizer reads at authz.go:137 and copilot's tool gate relies on
+// (services/copilot/internal/tools/tools.go:121). An absent allow-list means "every
+// portfolio within the caller's own tenant". That gap does NOT start here: the
+// gateway's own OIDC bridge already drops it
+// (services/api-gateway/cmd/api-gateway/main.go:450 maps auth.Principal onto
+// middleware.Principal without Portfolios), so on the production path the value is
+// empty before it reaches the wire. Putting a fourth header on the mesh would
+// forward an empty list and look like a fix. Tenant isolation and RBAC ARE
+// enforced upstream; portfolio sub-scope within a tenant is not.
+func PrincipalFromHeaders(h http.Header) (*Principal, bool) {
+	subject := h.Get(HeaderPrincipalSubject)
+	tenant := h.Get(HeaderPrincipalTenant)
+	if subject == "" || tenant == "" {
+		return nil, false
+	}
+	return &Principal{Subject: subject, Tenant: tenant, Roles: splitRoles(h.Get(HeaderPrincipalRoles))}, true
+}
+
+// splitRoles is the inverse of the strings.Join in SetPrincipalHeaders. Returns
+// nil rather than []string{""} for an absent or blank header, so HasRole and the
+// policy lookup never see an empty role name.
+func splitRoles(v string) []string {
+	if v == "" {
+		return nil
+	}
+	parts := strings.Split(v, ",")
+	roles := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if p = strings.TrimSpace(p); p != "" {
+			roles = append(roles, p)
+		}
+	}
+	if len(roles) == 0 {
+		return nil
+	}
+	return roles
+}
+
+// RequirePrincipal is the UPSTREAM half of the trusted-header seam: middleware
+// that reconstructs the gateway-authenticated principal onto the request context
+// and REFUSES the request when there is none (#268).
+//
+// WHY 401 AND NOT "attach nothing, let the handler decide". Letting it through
+// is what the platform did, and the two services that read
+// auth.PrincipalFromContext both proceed on nil in the widening direction:
+// lineage's governance.CheckAccess short-circuits every non-PII dataset to
+// "public dataset — allow" before it ever looks at the principal, and
+// lineage's catalog listing never asks for one at all. So an unauthenticated
+// caller and an authorized steward got the same 200, which is exactly the state
+// CLAUDE.md forbids — "nothing configured" and "checked, and fine" looking the
+// same. It also failed in the OTHER direction at the same time: a real steward
+// proxied through the gateway was denied their own PII lineage, because the
+// principal that would have granted it never arrived.
+//
+// DEFAULT-DENY WITH FOUR NAMED EXEMPTIONS. Every path is refused except the
+// infrastructure probes below, which are called by the kubelet and by Prometheus
+// and carry no principal by construction. A route registered on a wrapped mux is
+// therefore protected the day it is added, not the day someone remembers — which
+// is the whole reason this attaches to the mux rather than to each handler.
+//
+// WHAT BREAKS IF THIS IS WRONG. Any legitimate non-gateway HTTP caller of a
+// wrapped service now gets a 401 naming the cause. There are none today: the
+// gateway proxies copilot's /v1/ask, copilot forwards the end user's principal to
+// lineage, and nothing else calls either over HTTP. The refusal is loud, so a
+// caller added later fails visibly on its first request rather than silently
+// authorizing as nobody.
+//
+// THIS IS NOT AUTHENTICATION. It trusts the headers, and that trust holds only
+// while a NetworkPolicy makes the gateway the sole reachable caller (#232, still
+// unenforced in three namespaces). Direct exposure of a wrapped service lets any
+// caller name any subject, tenant and role set — the header block above says the
+// same thing and it is no less true on the reading side.
+func RequirePrincipal(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if unauthenticatedPaths[r.URL.Path] {
+			next.ServeHTTP(w, r)
+			return
+		}
+		p, ok := PrincipalFromHeaders(r.Header)
+		if !ok {
+			writeErrorJSON(w, http.StatusUnauthorized,
+				"missing authenticated principal: this surface is reachable only through the "+
+					"api-gateway, which injects the caller's subject, tenant and roles")
+			return
+		}
+		next.ServeHTTP(w, r.WithContext(WithPrincipal(r.Context(), p)))
+	})
+}
+
+// unauthenticatedPaths are the only routes RequirePrincipal lets through without
+// a principal: the liveness/readiness probes the kubelet calls and the metrics
+// endpoint Prometheus scrapes, neither of which goes through the gateway. Exact
+// paths, not prefixes — "/metrics" is exempt, "/metrics/../v1/anything" is not.
+//
+// Adding to this map exempts a route from the platform's only upstream identity
+// check. The three probe names are the ones every service in this module
+// registers; /startupz is deliberately absent because nothing registers it.
+var unauthenticatedPaths = map[string]bool{
+	"/healthz": true,
+	"/readyz":  true,
+	"/livez":   true,
+	"/metrics": true,
+}
+
 // CallerTenant returns the tenant the gateway authenticated for this inbound
 // request, or "" when the request carries no principal.
 //
