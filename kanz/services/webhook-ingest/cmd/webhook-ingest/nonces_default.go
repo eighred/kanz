@@ -3,6 +3,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"io"
 	"log/slog"
@@ -24,7 +25,13 @@ import (
 // replay defence. A defence that degrades to per-pod by FORGETTING to configure Redis is
 // indistinguishable from a correct one, and the deployment that forgot is exactly the one
 // that will be scaled to N replicas by an autoscaler nobody consulted.
-func newNonceStore(cfg config.Config, logger *slog.Logger) (ingest.NonceStore, io.Closer, error) {
+//
+// The store this build returns does NOT implement server.NonceStoreHealth, and that is
+// correct rather than an omission: a map in this address space cannot be unreachable, so
+// there is nothing for /readyz to check. The reachability that CAN fail belongs to the
+// `redis` build, and lives there (nonces_redis.go). ctx is unused here for the same
+// reason — the signature is shared so main does not need to know which build it is.
+func newNonceStore(_ context.Context, cfg config.Config, logger *slog.Logger) (ingest.NonceStore, io.Closer, error) {
 	if cfg.RedisURL != "" {
 		return nil, nil, errors.New("WEBHOOK_INGEST_REDIS_URL is set but this binary was built WITHOUT -tags redis, " +
 			"so it cannot reach it. Rebuild with -tags redis, or the replay defence would silently be per-pod")

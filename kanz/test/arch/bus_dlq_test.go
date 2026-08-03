@@ -265,7 +265,7 @@ var retryCertifiedConsumers = map[string]string{
 		"ever re-attempt an Append that did not durably land, never skip a fold whose " +
 		"Append already committed.",
 
-	"services/audit/cmd/audit/main.go:127": "audit: the sole handler is audit.Projector.Handle, " +
+	"services/audit/cmd/audit/main.go:150": "audit: the sole handler is audit.Projector.Handle, " +
 		"which appends through Postgres.Append (services/audit/internal/audit/postgres.go:32). " +
 		"The event_id dedup check and the insert run inside ONE transaction under an " +
 		"advisory xact lock — atomic claim-and-persist, not check-then-act — so a retry " +
