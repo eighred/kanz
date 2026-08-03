@@ -34,6 +34,24 @@ GET /v1/lineage/dataset/{namespace}/{name}        # provenance for a dataset (go
 GET /healthz /readyz /metrics
 ```
 
+### A miss has two meanings, and they are different status codes (#244)
+
+The event index is bounded (`LINEAGE_EVENT_INDEX_MAX`, default 250,000) and the
+consumer is durable — it resumes at last ack rather than replaying — so this
+service usually **cannot** know whether an event it does not hold was ever
+observed. It does not guess:
+
+| code | `status` | means |
+|---|---|---|
+| `200` | `retained` | found. `coverage` rides along; `coverage.unlinked_causes > 0` means some derived-from edges were never drawn and `upstream` may be short. |
+| `410` | `unknown` | **not an answer.** Outside the retained window, or before this pod started. NOT evidence the event never existed. |
+| `404` | `never_observed` | a finding: the index covers the whole history and evicted nothing. Only a graph built `WithCompleteHistory` — which the deployed wiring deliberately does not claim — reaches this. |
+
+`410` is the normal answer for old events on a running deployment. Every
+response carries `coverage` (`retained`/`capacity`/`evicted`/`horizon`/`since`),
+and the same numbers are exported as `kanz_lineage_event_index_*` and
+`kanz_lineage_unlinked_causes_total`.
+
 Provenance over a PII dataset is deny-by-default (403 unless the principal holds
 `lineage.pii.read`); upstream PII a requester can't read is returned redacted.
 Every PII access decision — allow or deny — is logged into the observation stream
@@ -53,7 +71,9 @@ Config (env): `LINEAGE_LISTEN` (`:8086`), `LINEAGE_NATS_URL` (unset ⇒ read API
 only), `LINEAGE_SUBJECTS` (default `>` — lineage is comprehensive), `LINEAGE_POLICY_FILE`
 (unset ⇒ all PII access denied), `LINEAGE_GOVERNANCE_FILE` (unset ⇒ nothing PII),
 `LINEAGE_OPENLINEAGE_URL` (unset ⇒ log emitter), `LINEAGE_CONSUMER_GROUP`,
-`LINEAGE_SOURCE`, `LINEAGE_OTLP_ENDPOINT`.
+`LINEAGE_SOURCE`, `LINEAGE_OTLP_ENDPOINT`, `LINEAGE_EVENT_INDEX_MAX` (250,000 —
+hard cap on indexed event ids, ~50MB; **no value means unbounded**, 0 or a
+negative refuses to start).
 
 ## Tests (LIN-01e)
 

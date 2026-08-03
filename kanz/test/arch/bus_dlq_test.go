@@ -314,7 +314,7 @@ var retryCertifiedConsumers = map[string]string{
 		"already re-runs runbooks on ordinary at-least-once redelivery; in-process retry adds " +
 		"no new failure shape. A doubled escalation page is a duplicate alert, not lost work.",
 
-	"services/lineage/cmd/lineage/main.go:167": "lineage: the sole handler is harvest.Harvester.Handle. " +
+	"services/lineage/cmd/lineage/main.go:215": "lineage: the sole handler is harvest.Harvester.Handle. " +
 		"graph.Memory.Observe (services/lineage/internal/graph/graph.go:71) always runs to " +
 		"completion (its own doc comment: 're-observing an event re-counts it but the edges " +
 		"are a set') before the OpenLineage Emit call that can fail — so a retry re-observes " +

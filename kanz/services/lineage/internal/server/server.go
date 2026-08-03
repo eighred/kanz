@@ -87,9 +87,13 @@ func (s *Server) handleReadyz(w http.ResponseWriter, _ *http.Request) {
 // handleDatasets serves the catalog listing — dataset metadata (schema ref,
 // domain, last-seen). Topology metadata, not record contents, so it is not PII-
 // governed; the per-dataset PII gate applies on the provenance reads below.
+// The catalog carries coverage too: an empty or short catalog after a restart is
+// this pod's index, not the estate's data model, and the two must not read alike.
 func (s *Server) handleDatasets(w http.ResponseWriter, _ *http.Request) {
 	ds := s.graph.Datasets()
-	writeJSON(w, http.StatusOK, map[string]any{"count": len(ds), "datasets": ds})
+	writeJSON(w, http.StatusOK, map[string]any{
+		"count": len(ds), "datasets": ds, "coverage": s.graph.Coverage(),
+	})
 }
 
 func (s *Server) handleEventLineage(w http.ResponseWriter, r *http.Request) {
@@ -129,10 +133,22 @@ func (s *Server) principal(w http.ResponseWriter, r *http.Request) (*auth.Princi
 	return p, true
 }
 
+// writeProvenance maps the three provenance outcomes onto three status codes.
+//
+// 410 AND NOT 404 FOR AN UNRETAINED LOOKUP (#244). 404 asserts the resource does
+// not exist, which is precisely the claim a bounded index has no standing to
+// make, and a caller that reads only the status code — a dashboard, an alert
+// rule, `curl -f` — would take it as one. Distinguishing the two in the body
+// alone leaves them looking the same to every such caller, which is the defect,
+// not the fix. 410 is the closest honest code: this origin no longer serves an
+// answer for that identifier, and the condition will not clear on retry (503
+// would promise that it might). The body says what 410 does NOT assert.
 func (s *Server) writeProvenance(w http.ResponseWriter, r *http.Request, prov *query.Provenance, err error) {
 	switch {
+	case errors.Is(err, query.ErrNotRetained):
+		writeJSON(w, http.StatusGone, s.query.Explain(graph.LookupUnknown))
 	case errors.Is(err, query.ErrNotFound):
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
+		writeJSON(w, http.StatusNotFound, s.query.Explain(graph.LookupNotObserved))
 	case errors.Is(err, query.ErrForbidden):
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": "access to PII lineage denied"})
 	case err != nil:

@@ -37,10 +37,12 @@ func (h *Harvester) Handle(ctx context.Context, env *envelopepb.Envelope, _ []by
 		Facets:    schemaFacet(env.GetPayloadSchemaRef()),
 	}
 
-	// Resolve the input dataset(s) from the cause, if the graph has seen it.
+	// Resolve the input dataset(s) from the cause, if the graph still retains it.
+	// An unknown cause emits no input rather than a guessed one; the graph counts
+	// it (Coverage.UnlinkedCauses) so the missing edge is visible (#244).
 	var inputs []openlineage.Dataset
 	if cause := env.GetCausationId(); cause != "" {
-		if parentDS, ok := h.graph.DatasetOf(cause); ok && parentDS != ds {
+		if parentDS, look := h.graph.DatasetOf(cause); look == graph.LookupRetained && parentDS != ds {
 			inputs = append(inputs, openlineage.Dataset{Namespace: parentDS.Namespace, Name: parentDS.Name})
 		}
 	}

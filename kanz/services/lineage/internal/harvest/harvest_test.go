@@ -46,9 +46,9 @@ func TestHarvestBuildsQueryableLineage(t *testing.T) {
 	must(t, h.Handle(ctx, env("e2", "e1", "risk", "risk.v1.ExposureSet:1", "risk-engine"), nil))
 	must(t, h.Handle(ctx, env("e3", "e2", "risk", "risk.v1.Measures:1", "risk-engine"), nil))
 
-	leaf, ok := g.DatasetOf("e3")
-	if !ok {
-		t.Fatal("leaf event not in graph")
+	leaf, look := g.DatasetOf("e3")
+	if look != graph.LookupRetained {
+		t.Fatalf("leaf event not in graph: %q", look)
 	}
 	up := g.Upstream(leaf)
 	if len(up) != 2 {

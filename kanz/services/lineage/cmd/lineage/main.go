@@ -16,6 +16,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+
 	"github.com/eighred/kanz/internal/version"
 	"github.com/eighred/kanz/pkg/auth"
 	"github.com/eighred/kanz/pkg/bus"
@@ -59,7 +61,23 @@ func main() {
 		_ = obs.Shutdown(shutCtx)
 	}()
 
-	g := graph.NewMemory()
+	// THE EVENT INDEX IS BOUNDED, AND THE ANSWERS SAY SO (#244).
+	//
+	// This subscribes to ">", so the event_id → dataset index grew with the whole
+	// estate's event rate and nothing ever removed an entry: tens of millions of
+	// map entries a day, then an OOMKill, then a pod back in its Service in
+	// milliseconds with an empty graph that the durable consumer will never
+	// rebuild — answering "no provenance" for every trade that preceded it.
+	//
+	// WithCompleteHistory is deliberately NOT set. The consumer below resumes at
+	// last ack, so this index covers "since this pod started", and every miss must
+	// come back as unknown rather than as a finding. Setting it here would restore
+	// exactly the lie the cap would otherwise have made worse.
+	g := graph.NewMemory(graph.WithEventIndexCapacity(cfg.EventIndexMax))
+	logger.Info("lineage event index bounded", "capacity", cfg.EventIndexMax,
+		"note", "misses outside the retained window answer 410 unknown, not 404 not-found")
+	registerCoverageMetrics(obs.Registry, g)
+
 	gov, err := buildGovernor(cfg, logger)
 	if err != nil {
 		logger.Error("governance init failed", "err", err)
@@ -99,6 +117,36 @@ func main() {
 	if err := httpSrv.Shutdown(shutdownCtx); err != nil {
 		logger.Error("http shutdown error", "err", err)
 	}
+}
+
+// registerCoverageMetrics exposes what the bounded index is holding and losing.
+//
+// GaugeFuncs reading through graph.Coverage, the same stance as the OMS mark
+// fold (#96): a level, not an event, and read from the structure it describes so
+// the metric cannot drift from it. Without these, "is the cap right for this
+// estate" is answerable only by watching RSS, which is the measurement that was
+// missing when the map was unbounded.
+func registerCoverageMetrics(reg prometheus.Registerer, g graph.Graph) {
+	reg.MustRegister(prometheus.NewGaugeFunc(prometheus.GaugeOpts{
+		Name: "kanz_lineage_event_index_retained",
+		Help: "Event ids currently indexed. Sitting at kanz_lineage_event_index_capacity means " +
+			"eviction is live and provenance older than the retained window answers unknown.",
+	}, func() float64 { return float64(g.Coverage().Retained) }))
+	reg.MustRegister(prometheus.NewGaugeFunc(prometheus.GaugeOpts{
+		Name: "kanz_lineage_event_index_capacity",
+		Help: "Hard ceiling on indexed event ids (LINEAGE_EVENT_INDEX_MAX).",
+	}, func() float64 { return float64(g.Coverage().Capacity) }))
+	reg.MustRegister(prometheus.NewCounterFunc(prometheus.CounterOpts{
+		Name: "kanz_lineage_event_index_evicted_total",
+		Help: "Event ids dropped to stay under the cap, for this process. Non-zero means no miss " +
+			"on this pod is evidence that an event was never observed.",
+	}, func() float64 { return float64(g.Coverage().Evicted) }))
+	reg.MustRegister(prometheus.NewCounterFunc(prometheus.CounterOpts{
+		Name: "kanz_lineage_unlinked_causes_total",
+		Help: "Events whose causation id was not indexed when they arrived, so the derived-from edge " +
+			"was never drawn. Sustained growth once the index is full means the cap is below the " +
+			"estate's causation latency and upstream answers are silently short.",
+	}, func() float64 { return float64(g.Coverage().UnlinkedCauses) }))
 }
 
 // buildGovernor wires the PII classifier + the AUTH-01b authorizer, decorated so
