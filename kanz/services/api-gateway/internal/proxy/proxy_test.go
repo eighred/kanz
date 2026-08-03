@@ -6,20 +6,32 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/eighred/kanz/services/api-gateway/internal/authz"
 	"github.com/eighred/kanz/services/api-gateway/internal/middleware"
 )
 
-// fakeBackend records the last forwarded request and returns a scripted reply.
+// fakeBackend records the last forwarded request and returns a scripted reply. It also
+// records the CONTEXT's deadline, which is the only place a test can observe the bound
+// the handler put on the call.
 type fakeBackend struct {
-	last Request
-	resp Response
-	err  error
+	last     Request
+	resp     Response
+	err      error
+	deadline time.Time
+	hadDL    bool
+	// onForward runs while the call is "in flight", which is the only moment a test can
+	// observe the upstream context alive — handle cancels it the instant it returns.
+	onForward func(ctx context.Context)
 }
 
-func (f *fakeBackend) Forward(_ context.Context, req Request) (Response, error) {
+func (f *fakeBackend) Forward(ctx context.Context, req Request) (Response, error) {
 	f.last = req
+	f.deadline, f.hadDL = ctx.Deadline()
+	if f.onForward != nil {
+		f.onForward(ctx)
+	}
 	return f.resp, f.err
 }
 
@@ -145,6 +157,117 @@ func TestForward_UpstreamFault_502(t *testing.T) {
 	mux.ServeHTTP(rr, req)
 	if rr.Code != http.StatusBadGateway {
 		t.Fatalf("status = %d, want 502", rr.Code)
+	}
+}
+
+// TestForward_EveryRouteIsBounded is the regression test for the leak in #235.
+//
+// A proxied call used to inherit r.Context() unchanged, and that context has NO deadline —
+// net/http cancels it when the CLIENT goes away, never when the UPSTREAM stops answering.
+// So a wedged wealth or datamaster pod that stopped writing without closing its socket held
+// a gateway goroutine and an fd forever, and the gateway that is the sole ingress for
+// ORDERS would eventually stop accepting connections because a READ surface was sick.
+//
+// The assertion is on ctx.Deadline() rather than on elapsed time, deliberately: it proves
+// the exact budget for the exact route in microseconds, where a test that actually waited
+// out a 30s bound would be the slowest test in the suite and would still only prove that
+// SOME bound existed.
+func TestForward_EveryRouteIsBounded(t *testing.T) {
+	for _, tc := range []struct {
+		name, method, path string
+		body               string
+		want               time.Duration
+	}{
+		{"wealth read", http.MethodGet, "/v1/households/h1", "", readForwardTimeout},
+		{"datamaster read", http.MethodGet, "/v1/prices/AAPL", "", readForwardTimeout},
+		{"tv-sync broker read", http.MethodGet, "/v1/broker/accounts", "", readForwardTimeout},
+		// /v1/ask is not a read: the copilot runs a tool-use turn against a model, so it
+		// gets a budget of its own. If this ever collapses to readForwardTimeout, a long
+		// ask starts failing at the gateway while the copilot is working correctly.
+		{"copilot ask", http.MethodPost, "/v1/ask", `{"question":"q"}`, copilotForwardTimeout},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			be := &fakeBackend{resp: Response{Status: 200, Body: []byte(`{}`)}}
+			mux := testMux()
+			New(be).Routes(mux)
+
+			var body *strings.Reader
+			if tc.body != "" {
+				body = strings.NewReader(tc.body)
+			} else {
+				body = strings.NewReader("")
+			}
+			req := authed(httptest.NewRequest(tc.method, tc.path, body), "u1", "t1")
+			start := time.Now()
+			mux.ServeHTTP(httptest.NewRecorder(), req)
+
+			if be.last.Service == "" {
+				t.Fatalf("the backend was never called — this test asserted nothing about the bound")
+			}
+			if !be.hadDL {
+				t.Fatalf("%s %s reached the backend with NO deadline on its context. A wedged "+
+					"upstream then holds this gateway's goroutine and socket until it recovers, "+
+					"and the gateway is the only path an order has to the spine (#235).",
+					tc.method, tc.path)
+			}
+			// A window, not an equality: the deadline is stamped a little AFTER start, so
+			// the measured budget is want plus however long routing took. A second of
+			// slack is orders of magnitude more than that, and still far tighter than the
+			// gap between the two budgets.
+			budget := be.deadline.Sub(start)
+			if budget < tc.want || budget > tc.want+time.Second {
+				t.Fatalf("%s %s was bounded at ~%s, want ~%s. The per-upstream budgets are "+
+					"sized in proxy.forwardBudget and ordered against the server's own "+
+					"WriteTimeout by test/arch/probe_deadline_nesting_test.go — changing one "+
+					"without the other makes the connection bound the real limit, and that one "+
+					"fires by severing the socket with no status and no log line.",
+					tc.method, tc.path, budget, tc.want)
+			}
+		})
+	}
+}
+
+// TestForward_ClientHangupCancelsTheUpstreamCall pins the OTHER half of the deadline: it
+// is derived from r.Context(), not from context.Background().
+//
+// A budget built on Background would survive the caller. The client hangs up, net/http
+// cancels the request context, and the gateway goes on holding an upstream call — and the
+// goroutine and fd behind it — for the rest of the budget. That is the same leak the
+// deadline was added to close, just slower.
+// It has to be asserted from INSIDE Forward. handle cancels its context on return, so
+// once ServeHTTP is back every upstream context is cancelled and the check would pass
+// whatever the parent was.
+func TestForward_ClientHangupCancelsTheUpstreamCall(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var cancelled bool
+	be := &fakeBackend{
+		resp: Response{Status: 200, Body: []byte(`{}`)},
+		onForward: func(upstream context.Context) {
+			cancel() // the client hangs up while the upstream call is in flight
+			select {
+			case <-upstream.Done():
+				cancelled = true
+			case <-time.After(time.Second):
+				cancelled = false
+			}
+		},
+	}
+	mux := testMux()
+	New(be).Routes(mux)
+
+	req := authed(httptest.NewRequest(http.MethodGet, "/v1/households/h1", nil).WithContext(ctx), "u1", "t1")
+	mux.ServeHTTP(httptest.NewRecorder(), req)
+
+	if be.last.Service == "" {
+		t.Fatalf("the backend was never called — this test asserted nothing")
+	}
+	if !cancelled {
+		t.Fatalf("cancelling the inbound request did NOT cancel the upstream call's context. " +
+			"The budget is built on context.Background() somewhere instead of on r.Context(), " +
+			"so a caller that hangs up leaves the gateway holding a goroutine and a socket for " +
+			"the remainder of the budget — the leak of #235, slowed down rather than fixed.")
 	}
 }
 

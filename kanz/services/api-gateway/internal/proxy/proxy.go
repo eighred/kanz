@@ -20,10 +20,71 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 
 	"github.com/eighred/kanz/services/api-gateway/internal/authz"
 	"github.com/eighred/kanz/services/api-gateway/internal/middleware"
 )
+
+// EVERY PROXIED CALL CARRIES A DEADLINE, AND THAT DEADLINE IS ITS ONLY BOUND.
+//
+// Forward used to inherit r.Context() unchanged, and an inbound request context carries
+// NO deadline: net/http cancels it when the CLIENT disconnects, never when the UPSTREAM
+// stops answering. So a wealth or datamaster pod that wedged mid-response — a GC pause, a
+// blocked connection-pool acquire — and stopped writing WITHOUT closing the socket held a
+// gateway goroutine and a file descriptor for as long as it stayed wedged.
+// kanz_gateway_inflight_requests then climbs to the fd ceiling and the gateway, which is
+// the sole ingress for ORDERS, stops accepting connections at all: a hung read surface
+// takes down the write path.
+//
+// THE BOUND IS ON THE CALL, NOT ON THE CLIENT. http.Client.Timeout is enforced
+// independently of the request context, so a client-level bound is a second limit on the
+// same call and the effective one is min(context, client) — the smaller winning silently,
+// with a message ("Client.Timeout exceeded while awaiting headers") that blames the
+// network while the upstream may be fine. That failure has already been paid for once in
+// the TUI; test/arch/probe_deadline_nesting_test.go is the standing rule, and it now
+// covers this gateway's proxy client too.
+//
+// WHY THE VALUES ARE WHAT THEY ARE. A deadline shorter than a legitimate slow read turns a
+// working system into a failing one, so neither of these is a round number picked for
+// tidiness:
+//
+//   - readForwardTimeout is not a NEW bound. Since SVCWIRE-01c the mTLS proxy client has
+//     carried Timeout: 30s, so on the production path 30s has been the live limit on these
+//     reads all along. Moving it onto the call changes no request that works today; it
+//     extends the same limit to the plaintext/dev path, which had none, and makes it a
+//     limit an upstream error can be attributed to.
+//   - copilotForwardTimeout is far longer because /v1/ask is not a read: the copilot runs
+//     a tool-use turn against a model, and its own completion budget (openRouterTimeout,
+//     services/copilot/cmd/copilot/model_openrouter.go) is FIVE MINUTES. The gateway
+//     cannot honour that and does not pretend to — the public edge cuts at 120s
+//     (proxy-read-timeout, infra/deploy/api-gateway-ingress.yaml), so no answer past two
+//     minutes has ever been deliverable through here regardless of what this const says.
+//     90s is the largest budget that still nests strictly inside the gateway's own
+//     WriteTimeout and inside that edge bound, so a slow ask fails with the gateway's 502
+//     and a log line naming the upstream, rather than nginx's anonymous 504. Closing the
+//     remaining gap to the copilot's five minutes needs streaming (this proxy buffers with
+//     io.ReadAll) and a looser edge — a different change, not a bigger number here.
+const (
+	readForwardTimeout    = 30 * time.Second
+	copilotForwardTimeout = 90 * time.Second
+)
+
+// forwardBudget is the deadline for one proxied call, chosen by upstream.
+//
+// Keyed on the Service CONSTANT rather than on a route pattern: renaming a route is then
+// invisible to this decision, and a mistyped service is a compile error rather than a
+// silent fallthrough. A Service added without a case here inherits the read budget, which
+// is the conservative direction — a new surface is bounded from its first request instead
+// of being unbounded until someone remembers.
+func forwardBudget(svc Service) time.Duration {
+	switch svc {
+	case ServiceCopilot:
+		return copilotForwardTimeout
+	default:
+		return readForwardTimeout
+	}
+}
 
 // Service identifies the upstream a route targets. The Backend resolves it to a
 // per-service mTLS client (SVCWIRE-01c).
@@ -142,7 +203,13 @@ func (h *Handler) handle(svc Service, requirePrincipal bool, rewrite func(string
 		if rewrite != nil {
 			path = rewrite(path)
 		}
-		resp, err := h.backend.Forward(r.Context(), Request{
+		// Derived from r.Context(), not from Background: a client that hangs up must
+		// still cancel the upstream call immediately rather than leaving it to run out
+		// the budget. See forwardBudget for why the budget differs per upstream.
+		ctx, cancel := context.WithTimeout(r.Context(), forwardBudget(svc))
+		defer cancel()
+
+		resp, err := h.backend.Forward(ctx, Request{
 			Service:   svc,
 			Method:    r.Method,
 			Path:      path,

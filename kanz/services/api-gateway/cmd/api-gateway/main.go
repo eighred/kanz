@@ -39,6 +39,44 @@ import (
 	"github.com/eighred/kanz/services/api-gateway/internal/proxy"
 )
 
+// THE SERVER'S OWN BACKSTOPS, FOR THE TWO LEAKS A REQUEST DEADLINE CANNOT REACH.
+//
+// Every handler budget on this gateway bounds an UPSTREAM call. Neither covers the
+// connection itself, and until these two fields were set this server had no bound on it
+// at all: ReadHeaderTimeout was the only one, and it stops timing the moment the last
+// header byte arrives.
+//
+//   - WriteTimeout is the slow-CLIENT case. A caller that reads the response one byte a
+//     minute — or a wedged intermediary that stops reading entirely — pins a goroutine and
+//     a file descriptor for as long as it likes. With the gateway as the sole ingress for
+//     orders, enough of those and no order can be submitted at all.
+//   - IdleTimeout is the keep-alive case, and its ABSENCE is the trap: with both it and
+//     ReadTimeout at zero, net/http applies NO idle bound, so every keep-alive connection
+//     ever opened is held until the peer closes it. That is not a slow leak under a
+//     pooling proxy; it is the steady state.
+//
+// WHERE THESE SIT IN THE NESTING. WriteTimeout is a bound on EVERY route this server
+// serves, so it has to clear the LONGEST handler budget among them or it silently becomes
+// the real limit — and the way it fires is the worst of all of them: a severed connection,
+// no status, no body, nothing logged upstream. The longest are control's
+// testConnectionTimeout (90s) and proxy.copilotForwardTimeout (90s), so:
+//
+//	nginx proxy-read-timeout (120s) > gatewayWriteTimeout (105s) > handler budgets (≤90s)
+//
+// Above 90s so the handler's own 502/504 and its log line are what the caller gets; below
+// the edge's 120s so the gateway is the layer that gives up first and can say so, rather
+// than waiting to be cut by nginx. test/arch/probe_deadline_nesting_test.go holds both
+// halves — including that removing either field fails, since absence is the bug.
+const gatewayWriteTimeout = 105 * time.Second
+
+// gatewayIdleTimeout must EXCEED the keep-alive idle timeout of whatever pools connections
+// in front of this server, not merely be small. ingress-nginx defaults
+// upstream-keepalive-timeout to 60s; set this below that and the gateway closes idle
+// connections nginx still believes it may reuse, and the race shows up as intermittent
+// 502s under no load at all — a harder fault to read than the leak this closes. 120s is
+// twice that default.
+const gatewayIdleTimeout = 120 * time.Second
+
 func main() {
 	cfg, err := config.Load()
 	if err != nil {
@@ -116,6 +154,8 @@ func main() {
 		Addr:              cfg.Listen,
 		Handler:           buildRouter(cfg, handler, ordersHandler, proxyHandler, ctlHandler, obs, &ready, logger),
 		ReadHeaderTimeout: 5 * time.Second,
+		WriteTimeout:      gatewayWriteTimeout,
+		IdleTimeout:       gatewayIdleTimeout,
 	}
 
 	go func() {
@@ -202,9 +242,17 @@ func buildProxy(ctx context.Context, cfg config.Config, logger *slog.Logger) *pr
 			logger.Error("api-gateway: proxy SPIFFE source failed", "err", err)
 			os.Exit(1)
 		}
+		// NO Timeout FIELD, DELIBERATELY — it used to carry 30s and that was a bug of
+		// the exact kind the TUI already paid for. http.Client.Timeout is enforced
+		// independently of the request context, so it was a SECOND bound on the same
+		// call and min(context, 30s) won invisibly: it capped /v1/ask at 30s underneath
+		// the copilot's own five-minute completion budget, and it applied only on the
+		// mTLS path, so dev and production were bounded differently for reasons nothing
+		// stated. The one bound now lives on the call (proxy.forwardBudget), where the
+		// route that needs a different budget can say so and a test can read it.
+		// test/arch/probe_deadline_nesting_test.go fails the build if it comes back.
 		client = &http.Client{
 			Transport: &http.Transport{TLSClientConfig: transport.ClientTLSConfig(src, transport.AuthorizeMesh())},
-			Timeout:   30 * time.Second,
 		}
 		logger.Info("api-gateway: Phase-7 upstreams mTLS enabled", "services", len(bases))
 	} else {
