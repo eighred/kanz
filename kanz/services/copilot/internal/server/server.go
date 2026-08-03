@@ -1,8 +1,16 @@
 // Package server is the copilot service's HTTP surface (COPILOT-01a): a single
 // governed Q&A endpoint. The authenticated AUTH-01 Principal is read from the
-// request context (placed there by the AUTH-01a authentication middleware on the
-// real edge); an unauthenticated request is rejected — the copilot is never
-// anonymous, and every answer is tenant- and permission-scoped to the caller.
+// request context, put there by auth.RequirePrincipal from the mesh identity
+// headers the api-gateway injects; an unauthenticated request is rejected — the
+// copilot is never anonymous, and every answer is tenant- and permission-scoped
+// to the caller.
+//
+// This comment used to say the principal was placed on the context "by the
+// AUTH-01a authentication middleware on the real edge". No such middleware ran in
+// this process: cmd/copilot mounted this Server bare, so /v1/ask answered 401 to
+// every request that ever reached it, and the principal copilot forwards to
+// lineage for PII governance was never there to forward. Dated evidence, and it
+// was wrong — #268.
 package server
 
 import (
@@ -28,6 +36,14 @@ type Server struct {
 	agent     *agent.Agent
 	metrics   http.Handler
 	mux       *http.ServeMux
+	// handler is mux wrapped in auth.RequirePrincipal — the middleware the
+	// package comment above has always claimed was on "the real edge". It was
+	// not: cmd/copilot mounted this Server directly as the http.Server Handler,
+	// nothing populated the context, and handleAsk's own unauthenticated check
+	// therefore refused EVERY request that reached the service (#268). Built in
+	// New so it cannot be forgotten by a composition root again, and so the
+	// package's own tests exercise it.
+	handler http.Handler
 }
 
 // Option customizes the server.
@@ -43,10 +59,11 @@ func New(readiness *Readiness, logger *slog.Logger, a *agent.Agent, opts ...Opti
 		opt(s)
 	}
 	s.routes()
+	s.handler = auth.RequirePrincipal(s.mux)
 	return s
 }
 
-func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) { s.mux.ServeHTTP(w, r) }
+func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) { s.handler.ServeHTTP(w, r) }
 
 func (s *Server) routes() {
 	s.mux.HandleFunc("GET /healthz", s.handleHealthz)

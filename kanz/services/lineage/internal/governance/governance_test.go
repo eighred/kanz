@@ -58,6 +58,22 @@ func TestPublicDatasetAllowedWithoutAuthOrLog(t *testing.T) {
 	}
 }
 
+// "Public" classifies the DATA, not the caller (#268). The non-PII branch used
+// to return allow before it ever looked at the principal, so for as long as
+// nothing on the upstream side reconstructed the gateway's headers, EVERY proxied
+// read arrived with p == nil and was served the full provenance of every non-PII
+// dataset in the graph — unauthenticated, and unscoped by tenant.
+func TestNilPrincipalDeniedEvenOnAPublicDataset(t *testing.T) {
+	g, _ := newGovernor(t)
+	for name, ds := range map[string]graph.DatasetID{"public": publicDS, "pii": piiDS} {
+		d, _ := g.CheckAccess(context.Background(), nil, ds, "risk.v1.ExposureSet:1")
+		if d.Allow {
+			t.Errorf("%s dataset served to a nil principal (%q) — nobody is not a caller with "+
+				"no grants, and the two must not get the same answer", name, d.Reason)
+		}
+	}
+}
+
 func TestPIIAccessGovernedAndLogged(t *testing.T) {
 	g, rec := newGovernor(t)
 	ctx := context.Background()

@@ -53,12 +53,20 @@ func TestAsk_Unauthenticated401(t *testing.T) {
 	}
 }
 
+// TestAsk_Authorized drives the server the way the mesh does — with the identity
+// headers the api-gateway injects, and nothing on the context.
+//
+// It used to call auth.WithPrincipal on the request context directly, which is a
+// shape no request has ever had in this process: nothing in cmd/copilot populated
+// the context, so /v1/ask answered 401 to every real caller while this test was
+// green (#268). Going through SetPrincipalHeaders is what makes it a proof — the
+// injector's own encoding has to survive the reader for the ask to be authorized.
 func TestAsk_Authorized(t *testing.T) {
 	s := newServer(t)
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/v1/ask", strings.NewReader(`{"question":"what is PF-T1 VaR?"}`))
-	ctx := auth.WithPrincipal(req.Context(), &auth.Principal{Subject: "alice", Tenant: "t1", Roles: []string{"analyst"}})
-	s.ServeHTTP(rec, req.WithContext(ctx))
+	auth.SetPrincipalHeaders(req.Header, "alice", "t1", []string{"analyst"})
+	s.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("authorized ask: want 200 got %d (%s)", rec.Code, rec.Body.String())
 	}
@@ -70,5 +78,42 @@ func TestAsk_Authorized(t *testing.T) {
 	cites, _ := out["citations"].([]any)
 	if len(cites) != 1 {
 		t.Errorf("expected 1 citation, got %v", out["citations"])
+	}
+}
+
+// The kubelet and Prometheus reach this service directly, not through the
+// gateway, and carry no principal. If auth.RequirePrincipal refuses them the pod
+// never becomes ready and the service is scraped as down — a 401 on /readyz is a
+// deployment outage, not a security posture.
+func TestProbesAndMetricsDoNotRequireAPrincipal(t *testing.T) {
+	s := newServer(t)
+	for _, path := range []string{"/healthz", "/readyz"} {
+		rec := httptest.NewRecorder()
+		s.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
+		if rec.Code != http.StatusOK {
+			t.Errorf("%s without a principal: want 200 got %d (%s)", path, rec.Code, rec.Body.String())
+		}
+	}
+}
+
+// A tenant with no subject is not a partially-identified caller, it is an
+// unidentified one. Admitting it would build a Principal that PolicyAuthorizer
+// denies everything to but that governance.CheckAccess would still serve every
+// non-PII dataset — the divergence #268 is about.
+func TestAsk_PartialIdentityHeadersRefused(t *testing.T) {
+	for name, set := range map[string]func(h http.Header){
+		"tenant only":  func(h http.Header) { auth.SetPrincipalHeaders(h, "", "t1", []string{"analyst"}) },
+		"subject only": func(h http.Header) { auth.SetPrincipalHeaders(h, "alice", "", []string{"analyst"}) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			s := newServer(t)
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodPost, "/v1/ask", strings.NewReader(`{"question":"q"}`))
+			set(req.Header)
+			s.ServeHTTP(rec, req)
+			if rec.Code != http.StatusUnauthorized {
+				t.Fatalf("%s: want 401 got %d (%s)", name, rec.Code, rec.Body.String())
+			}
+		})
 	}
 }

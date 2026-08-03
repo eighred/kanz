@@ -26,6 +26,12 @@ type Server struct {
 	graph     graph.Graph
 	query     *query.Service
 	mux       *http.ServeMux
+	// handler is mux wrapped in auth.RequirePrincipal. It is built in New rather
+	// than in cmd/lineage on purpose: identity reconstruction that lives only in a
+	// composition root is wiring no test in this package exercises, and this
+	// service shipped for two years with that half of the seam simply absent
+	// (#268). Built here, every httptest against a Server runs it.
+	handler http.Handler
 }
 
 type Option func(*Server)
@@ -45,10 +51,11 @@ func New(readiness *Readiness, logger *slog.Logger, opts ...Option) *Server {
 		opt(s)
 	}
 	s.routes()
+	s.handler = auth.RequirePrincipal(s.mux)
 	return s
 }
 
-func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) { s.mux.ServeHTTP(w, r) }
+func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) { s.handler.ServeHTTP(w, r) }
 
 func (s *Server) routes() {
 	s.mux.HandleFunc("GET /healthz", s.handleHealthz)
@@ -86,16 +93,40 @@ func (s *Server) handleDatasets(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (s *Server) handleEventLineage(w http.ResponseWriter, r *http.Request) {
-	p, _ := auth.PrincipalFromContext(r.Context())
+	p, ok := s.principal(w, r)
+	if !ok {
+		return
+	}
 	prov, err := s.query.ForEvent(r.Context(), p, r.PathValue("event_id"))
 	s.writeProvenance(w, r, prov, err)
 }
 
 func (s *Server) handleDatasetLineage(w http.ResponseWriter, r *http.Request) {
-	p, _ := auth.PrincipalFromContext(r.Context())
+	p, ok := s.principal(w, r)
+	if !ok {
+		return
+	}
 	ds := graph.DatasetID{Namespace: r.PathValue("namespace"), Name: r.PathValue("name")}
 	prov, err := s.query.ForDataset(r.Context(), p, ds)
 	s.writeProvenance(w, r, prov, err)
+}
+
+// principal reads the caller auth.RequirePrincipal put on the context.
+//
+// The middleware has already refused a request without one, so this cannot fire
+// through ServeHTTP — it fires if a handler is ever mounted on a mux that is not
+// wrapped. It is kept because `p, _ := auth.PrincipalFromContext(...)` and a
+// governance call on the nil result is the exact code that shipped, and reading
+// past the ok is what made it invisible (#268).
+func (s *Server) principal(w http.ResponseWriter, r *http.Request) (*auth.Principal, bool) {
+	p, ok := auth.PrincipalFromContext(r.Context())
+	if !ok {
+		s.logger.ErrorContext(r.Context(), "lineage handler reached without a principal — "+
+			"auth.RequirePrincipal is not installed on this mux", "path", r.URL.Path)
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthenticated"})
+		return nil, false
+	}
+	return p, true
 }
 
 func (s *Server) writeProvenance(w http.ResponseWriter, r *http.Request, prov *query.Provenance, err error) {
