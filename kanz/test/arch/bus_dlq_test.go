@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -216,6 +217,171 @@ func TestEveryBusConsumerWiresADLQ(t *testing.T) {
 			"dlqExemptBroadcastOnlyConsumers with the structural proof.",
 			len(unwired), len(calls), strings.Join(unwired, "\n  "))
 	}
+}
+
+// THE DLQ MUST HAVE A READER (#220).
+//
+// TestEveryBusConsumerWiresADLQ above makes every consumer PARK its terminal
+// failures. On its own that is only half a guarantee, and the missing half cost
+// exactly what the guard was built to prevent: for the whole life of the DLQ
+// subsystem, NOTHING IN THE ESTATE SUBSCRIBED TO `dlq.>`. Parking worked
+// perfectly and the messages were unreachable.
+//
+// It was invisible because every signal read healthy. The park succeeds, the
+// original delivery is acked, kanz_bus_consume_total records the failed
+// dispatch, and the DLQ stream accrues messages on 720h retention that no
+// consumer, tool or alert ever looks at. tools/replay REFUSES a `dlq.` subject
+// by design (it republishes into the isolated replay namespace, which is the
+// wrong destination for a redrive), so the one piece of tooling an operator
+// would reach for declines the job. A 200ms Postgres blip therefore parked a
+// SubmitOrder whose client already held a 202, and recovery meant a human
+// hand-writing a republisher.
+//
+// "A drain exists" is the kind of claim that is true on the day it is written
+// and quietly false a year later, when the tool is renamed, moved under a build
+// tag, or deleted as unused because nothing imports it. So it is a guard: the
+// module must contain a non-test subscription to a subject in the `dlq.`
+// namespace. Deleting cmd/kanz-redrive fails this test.
+//
+// It checks TWO things, because either alone is satisfiable by something an
+// operator cannot actually use:
+//
+//  1. An ENGINE — a Subscribe-shaped call that reads the dlq. namespace.
+//  2. An ENTRY POINT — a `package main` that reaches it. A drain library with no
+//     binary is the exact shape that gets deleted as unused, and it is no more
+//     reachable during an incident than no drain at all.
+//
+// Neither half names a file. What matters is that the namespace is drainable
+// from this module, not which binary does it — a future service that drains the
+// DLQ automatically would satisfy this without editing an allow-list.
+func TestTheDLQNamespaceHasAReader(t *testing.T) {
+	root := moduleRoot(t)
+	engines, entryPoints := dlqDrainSites(t, root)
+
+	const why = "\n\nEvery consumer is required to wire bus.WithDLQ (TestEveryBusConsumerWiresADLQ), so " +
+		"terminal failures on the capital path — a SubmitOrder that hit a Postgres failover, an " +
+		"execution FACT that hit a slow venue gate — are parked on dlq.<subject> and ACKED. A DLQ " +
+		"with no drain is not a dead-letter queue, it is a deletion with a 720h delay: the client " +
+		"holds its 202, no ORDER_REJECTED FACT is emitted, kanz-replay refuses dlq. subjects by " +
+		"design (it republishes into the isolated replay namespace, which is the wrong " +
+		"destination), and recovery needs a human to hand-write a republisher.\n\n" +
+		"pkg/bus.Redriver is the engine and cmd/kanz-redrive is the entry point (#220). If one " +
+		"was removed, restore it or replace it with something that reads the namespace."
+
+	if len(engines) == 0 {
+		t.Fatal("NOTHING in this module subscribes to a dlq.* subject." + why)
+	}
+	if len(entryPoints) == 0 {
+		t.Fatalf("the DLQ drain engine exists (%s) but NO `package main` reaches it, so there is "+
+			"no command an operator can run.%s", strings.Join(engines, ", "), why)
+	}
+}
+
+// dlqDrainSites returns the files that implement the drain engine and the
+// `package main` files that reach it.
+//
+// An ENGINE is a Subscribe-shaped call whose subject is either a string literal
+// starting "dlq.", or operator-supplied and guarded by IsDLQSubject. The second
+// form is how the real drain is written — its subject comes from a flag, so it
+// cannot carry a literal, and it proves the same property at runtime by
+// REFUSING anything outside the namespace.
+//
+// Scope is honest and deliberately narrow. A drain that assembled its subject
+// some third way, or reached JetStream directly instead of through a
+// Subscribe-named method, would slip past this; extend the scanner rather than
+// routing around it.
+func dlqDrainSites(t *testing.T, root string) (engines, entryPoints []string) {
+	t.Helper()
+	fset := token.NewFileSet()
+
+	err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if info.IsDir() {
+			switch info.Name() {
+			case "vendor", ".git", "gen", "testdata":
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+			return nil
+		}
+		f, perr := parser.ParseFile(fset, path, nil, parser.SkipObjectResolution)
+		if perr != nil {
+			return fmt.Errorf("parse %s: %w", path, perr)
+		}
+		rel, rerr := filepath.Rel(root, path)
+		if rerr != nil {
+			rel = path
+		}
+		var literalDLQ, guards, subscribes bool
+		ast.Inspect(f, func(n ast.Node) bool {
+			call, ok := n.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			// The namespace guard, qualified (bus.IsDLQSubject, from another
+			// package) or bare (IsDLQSubject, from inside pkg/bus itself). Missing
+			// the bare form would make this guard blind to a drain that lives in the
+			// bus package — which is where the engine actually is.
+			if isSelector(call.Fun, "bus", "IsDLQSubject") {
+				guards = true
+			}
+			if id, ok := call.Fun.(*ast.Ident); ok && id.Name == "IsDLQSubject" {
+				guards = true
+			}
+			sel, ok := call.Fun.(*ast.SelectorExpr)
+			if !ok || !strings.HasPrefix(sel.Sel.Name, "Subscribe") {
+				return true
+			}
+			subscribes = true
+			for _, arg := range call.Args {
+				lit, ok := arg.(*ast.BasicLit)
+				if ok && lit.Kind == token.STRING {
+					if v, uerr := strconv.Unquote(lit.Value); uerr == nil && strings.HasPrefix(v, dlqNamespace) {
+						literalDLQ = true
+					}
+				}
+			}
+			return true
+		})
+		if literalDLQ || (guards && subscribes) {
+			engines = append(engines, filepath.ToSlash(rel))
+		}
+		// An entry point is a `package main` that reaches the drain: it either
+		// applies the namespace guard itself (the flag-validating CLI) or
+		// constructs the engine type.
+		if f.Name != nil && f.Name.Name == "main" && (guards || usesRedriver(f)) {
+			entryPoints = append(entryPoints, filepath.ToSlash(rel))
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("scan %s: %v", root, err)
+	}
+	return engines, entryPoints
+}
+
+// dlqNamespace is the reserved DLQ subject prefix (bus.dlqSubjectPrefix, and
+// kanz-schemas/docs/subject-taxonomy.md §6). Spelled here rather than imported
+// because test/arch is deliberately dependency-free over the module it scans.
+const dlqNamespace = "dlq."
+
+// usesRedriver reports whether f mentions bus.Redriver — a main package wiring
+// the drain engine up to a real transport.
+func usesRedriver(f *ast.File) bool {
+	var found bool
+	ast.Inspect(f, func(n ast.Node) bool {
+		if sel, ok := n.(*ast.SelectorExpr); ok && sel.Sel.Name == "Redriver" {
+			if id, ok := sel.X.(*ast.Ident); ok && id.Name == "bus" {
+				found = true
+			}
+		}
+		return true
+	})
+	return found
 }
 
 // retryCertifiedConsumers is the default-deny allow-list of bus.NewConsumer call

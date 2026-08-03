@@ -133,6 +133,51 @@ data:
               subscribe: { allow: ["_INBOX.>"] }
             }
           }
+          # kanz-redrive is the DLQ DRAIN (#220, cmd/kanz-redrive): it reads
+          # messages parked on `dlq.<subject>` and republishes them, byte for
+          # byte, onto the subject named in their Kanz-DLQ-Original-Subject
+          # header. Without it the DLQ is write-only — a transient Postgres
+          # failover parks a SubmitOrder the client already holds a 202 for and
+          # nothing can ever get it back.
+          #
+          # ITS GRANT IS THE BROADEST IN THE OPERATOR PLANE, AND THAT IS
+          # INHERENT, NOT AN OVERSIGHT. The other four operator tools publish one
+          # subject space each, so their allow-list is that space. This one
+          # republishes whatever was parked, and anything with a work-queue
+          # consumer can park — so the allow-list is the union of the domains
+          # that have one. It is enumerated rather than written `>` so the
+          # exposure is reviewable, and so a domain nobody expected to be
+          # drainable fails LOUDLY (the publish is denied, Redriver halts and
+          # names the subject) instead of being quietly republishable.
+          #
+          # platform.> IS DELIBERATELY ABSENT, and it is the one exclusion that
+          # matters. platform.mode.changed is the kill switch, and kanz-halt's
+          # entry above claims that SVID "admits the brake and nothing else" —
+          # granting platform.> here would silently make that claim false again
+          # and hand a second identity the ability to halt or RESUME trading. It
+          # is also unnecessary: the mode FACT is consumed through
+          # SubscribeBroadcast, and pkg/bus/consumer.go's broadcast path never
+          # routes to the DLQ at all (see dlqExemptBroadcastOnlyConsumers in
+          # test/arch/bus_dlq_test.go), so `dlq.platform.mode.changed` cannot
+          # exist to be drained.
+          #
+          # $JS.API.> + $JS.ACK.> because the drain binds a DURABLE consumer on
+          # the dlq.> stream — the cursor is what stops a redriven message being
+          # redriven twice — and must ack what it has successfully republished.
+          { user: "spiffe://kanz.internal/ns/kanz-operator/sa/kanz-redrive"
+            permissions: {
+              publish: {
+                allow: [
+                  "$JS.API.>", "$JS.ACK.>",
+                  "order.>", "execution.>", "strategy.>",
+                  "risk.>", "market.>", "inference.>",
+                  "accounting.>", "compliance.>", "settlement.>",
+                  "alternatives.>", "wealth.>", "data.>"
+                ]
+              }
+              subscribe: { allow: ["dlq.>", "_INBOX.>"] }
+            }
+          }
           # READ-ONLY OBSERVER (kanz-monitor, test/arch/nats_identity_test.go's
           # readOnlyObserverSVIDs). It streams order.> and risk.position.> to a
           # terminal via SubscribeBroadcast and publishes NO business subject.

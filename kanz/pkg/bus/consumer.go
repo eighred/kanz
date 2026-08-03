@@ -110,6 +110,14 @@ func WithValidator(fn func(*envelopepb.Envelope) error) ConsumerOption {
 // is picked up again by the next subscription on the group. It is never acked
 // or committed past — an event that reached neither its handler nor the DLQ is
 // silent permanent loss, which is exactly what #219 found the Kafka loop doing.
+//
+// PARKED IS NOT LOST, AND THAT IS ONLY TRUE BECAUSE OF THE DRAIN. Parking acks
+// the original delivery, so the DLQ copy is the ONLY copy. Redriver /
+// cmd/kanz-redrive (#220) is what reads it back onto the original subject; for
+// the first several years of this subsystem nothing did, and a transient
+// failure on a capital-path command was therefore unrecoverable by any supplied
+// tool. test/arch/bus_dlq_test.go's TestTheDLQNamespaceHasAReader is what keeps
+// that from silently becoming true again.
 func WithDLQ(p Publisher) ConsumerOption {
 	return func(o *consumerOptions) { o.dlq = p }
 }
@@ -157,14 +165,20 @@ func NewConsumer(s Subscriber, opts ...ConsumerOption) (*Consumer, error) {
 // canceled.
 func (c *Consumer) Subscribe(ctx context.Context, subject, group string, h EventHandler) error {
 	return c.subscriber.Subscribe(ctx, subject, group, func(ctx context.Context, msg Message) error {
+		// Terminal(), on both: these two failures are about the BYTES, and no
+		// amount of later retrying or redriving turns unframeable bytes into a
+		// valid envelope. Marking them here rather than trusting a handler to is
+		// what keeps IsTerminal's transient-by-default from becoming a way for a
+		// poison message to be redriven forever — the provably-unprocessable cases
+		// never reach the default at all. See HeaderDLQClass.
 		env, payload, err := Unframe(msg.Body)
 		if err != nil {
 			c.metrics.observeConsume(subject, group, 0, err)
-			return c.routeToDLQ(ctx, subject, msg, 0, fmt.Errorf("unframe: %w", err))
+			return c.routeToDLQ(ctx, subject, msg, 0, Terminal(fmt.Errorf("unframe: %w", err)))
 		}
 		if err := c.validate(env); err != nil {
 			c.metrics.observeConsume(subject, group, 0, err)
-			return c.routeToDLQ(ctx, subject, msg, 0, fmt.Errorf("envelope validation: %w", err))
+			return c.routeToDLQ(ctx, subject, msg, 0, Terminal(fmt.Errorf("envelope validation: %w", err)))
 		}
 		// Atomically claim the key. A false claim means another delivery of this
 		// same event either holds it right now or already completed it — either way
@@ -267,7 +281,7 @@ func (c *Consumer) publishDLQ(ctx context.Context, origSubject string, msg Messa
 		Subject: dlqSubject(origSubject),
 		Key:     msg.Key,
 		Body:    msg.Body,
-		Headers: dlqHeaders(msg.Headers, origSubject, attempts, dispatchErr),
+		Headers: dlqHeaders(msg.Headers, origSubject, attempts, dispatchErr, time.Now()),
 	}
 	if err := c.dlq.Publish(ctx, dlqMsg); err != nil {
 		return fmt.Errorf("dlq publish: %w (original: %v)", err, dispatchErr)

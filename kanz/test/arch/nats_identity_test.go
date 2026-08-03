@@ -119,6 +119,12 @@ var operatorSVIDs = map[string]string{
 	"kanz-mandate":   "spiffe://kanz.internal/ns/kanz-operator/sa/kanz-mandate",
 	"kanz-altevent":  "spiffe://kanz.internal/ns/kanz-operator/sa/kanz-altevent",
 	"kanz-household": "spiffe://kanz.internal/ns/kanz-operator/sa/kanz-household",
+	// kanz-redrive is the DLQ drain (#220). It is an OPERATOR, not a read-only
+	// observer, and the distinction is the whole point of the two maps: it
+	// republishes parked commands onto live subjects, so it moves capital by
+	// construction. See tenancy.yaml for why its publish allow-list is the widest
+	// in this plane and why platform.> is excluded from it.
+	"kanz-redrive": "spiffe://kanz.internal/ns/kanz-operator/sa/kanz-redrive",
 }
 
 // readOnlyObserverSVIDs is a DISTINCT category from operatorSVIDs, not an entry

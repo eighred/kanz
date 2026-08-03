@@ -18,6 +18,7 @@ type BusMetrics struct {
 	consumeTotal   *prometheus.CounterVec   // subject, group, result
 	consumeLatency *prometheus.HistogramVec // subject, group
 	consumeHalted  *prometheus.CounterVec   // subject, group
+	dlqRedrive     *prometheus.CounterVec   // subject, result
 	consumerLag    *prometheus.GaugeVec     // subject, group, partition
 	pending        *prometheus.GaugeVec     // subject, group
 }
@@ -56,6 +57,18 @@ func NewBusMetrics(reg prometheus.Registerer) *BusMetrics {
 			Name: "kanz_bus_consume_halted_total",
 			Help: "subscriptions halted without committing because a delivery could neither be handled nor dead-lettered — the dead-letter path is down and the consumer is holding the offset rather than skipping the event.",
 		}, []string{"subject", "group"}),
+		// THE DRAIN'S OWN RED SIGNAL (#220). Labelled by DESTINATION subject and
+		// result (ok|refused|error), because the three outcomes need different
+		// human responses: `ok` is recovery, `error` is a broken drain, and
+		// `refused` is the drain WORKING — a loop bound or an age gate holding on
+		// a specific message that now needs a decision. Folding refusals into
+		// errors would make a functioning safety limit look like an outage; the
+		// same split archiver makes between a routing failure and a failed DLQ
+		// produce.
+		dlqRedrive: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "kanz_bus_dlq_redrive_total",
+			Help: "parked messages a redrive run moved back onto their original subject, by destination subject and result (ok|refused|error).",
+		}, []string{"subject", "result"}),
 		consumerLag: prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Name: "kanz_bus_consumer_lag",
 			Help: "Kafka consumer lag (high-water offset - committed) — the KEDA scale signal.",
@@ -67,7 +80,7 @@ func NewBusMetrics(reg prometheus.Registerer) *BusMetrics {
 	}
 	reg.MustRegister(
 		m.publishTotal, m.publishLatency,
-		m.consumeTotal, m.consumeLatency, m.consumeHalted,
+		m.consumeTotal, m.consumeLatency, m.consumeHalted, m.dlqRedrive,
 		m.consumerLag, m.pending,
 	)
 	return m
@@ -108,6 +121,16 @@ func (m *BusMetrics) observeConsumeHalt(subject, group string) {
 		return
 	}
 	m.consumeHalted.WithLabelValues(subject, group).Inc()
+}
+
+// observeRedrive records one parked message the drain acted on. result is
+// "ok", "refused" or "error"; see the collector's comment for why those three
+// are not collapsed.
+func (m *BusMetrics) observeRedrive(subject, result string) {
+	if m == nil {
+		return
+	}
+	m.dlqRedrive.WithLabelValues(subject, result).Inc()
 }
 
 // SetConsumerLag publishes the Kafka lag for one (subject, group, partition).

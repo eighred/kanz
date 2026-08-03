@@ -170,3 +170,53 @@ spec:
       ports:
         - { protocol: UDP, port: 53 }
         - { protocol: TCP, port: 53 }
+---
+# kanz-redrive is the DLQ drain (#220): it reads messages parked on
+# `dlq.<subject>` and republishes them onto the subject named in their
+# Kanz-DLQ-Original-Subject header. This ServiceAccount is issued
+# spiffe://kanz.internal/ns/kanz-operator/sa/kanz-redrive.
+#
+# Unlike the three above, tenancy.yaml grants this SVID a WIDE publish
+# allow-list — the union of every domain that can park a message — because
+# republishing whatever was parked is the whole job. That grant deliberately
+# excludes platform.> so the kill switch stays kanz-halt's alone; see
+# tenancy.yaml for the reasoning. Treat this credential as CAPITAL-MOVING:
+# whatever holds it can re-submit a parked order.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: kanz-redrive
+  namespace: kanz-operator
+  labels:
+    app.kubernetes.io/part-of: kanz
+---
+# kanz-redrive reaches the broker and nothing else — same posture as
+# kanz-halt-egress in halt-job.yaml.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: kanz-redrive-egress
+  namespace: kanz-operator
+spec:
+  podSelector:
+    matchLabels:
+      app: kanz-redrive
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kanz-messaging
+          podSelector:
+            matchLabels:
+              app: nats
+      ports:
+        - { protocol: TCP, port: 4222 }
+    - to:
+        - namespaceSelector: {}
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - { protocol: UDP, port: 53 }
+        - { protocol: TCP, port: 53 }
