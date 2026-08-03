@@ -21,6 +21,12 @@ import (
 // kanz-schemas/docs/envelope-policy.md §6). v2 added tenant_id (MT-01a).
 const envelopeVersion uint32 = 2
 
+// headerNatsMsgID is the header NATS JetStream keys its broker-side dedup
+// window on. The name is RESERVED by the broker — a typo does not error, it
+// simply stops the message being deduplicated — which is why both the write
+// site here and the re-stamp in redriveMsgID spell it through this constant.
+const headerNatsMsgID = "Nats-Msg-Id"
+
 // Event is the producer-facing form: caller-known envelope fields plus the
 // domain payload. Auto fields (event_id, publish_time, source,
 // producer_version, producer_sequence, envelope_version, correlation_id for
@@ -161,8 +167,11 @@ func (p *Producer) publish(ctx context.Context, e Event) error {
 		// NATS JetStream keys its broker-side dedup window on Nats-Msg-Id
 		// (EVT-08); Kafka treats this as an ordinary user header (harmless).
 		// One header serves both transports because NATS reserves the name
-		// and Kafka is name-agnostic.
-		Headers: map[string]string{"Nats-Msg-Id": env.IdempotencyKey},
+		// and Kafka is name-agnostic. A constant, not a literal, because the
+		// redrive path has to RE-STAMP it (see redriveMsgID) and a second
+		// spelling of a reserved name fails silently — the publish succeeds and
+		// simply stops being deduplicated.
+		Headers: map[string]string{headerNatsMsgID: env.IdempotencyKey},
 	})
 }
 

@@ -2,7 +2,6 @@ package bus
 
 import (
 	"context"
-	"strconv"
 	"time"
 )
 
@@ -72,23 +71,7 @@ func sleepWithCtx(ctx context.Context, d time.Duration) error {
 	}
 }
 
-// DLQ subject convention: `dlq.<original-subject>`. The NATS dlq.> stream
-// (kanz/infra/nats/) and the per-topic `dlq.{name}` Kafka topics
-// (kanz/infra/kafka/) are provisioned to receive these.
-const dlqSubjectPrefix = "dlq."
-
-func dlqSubject(orig string) string { return dlqSubjectPrefix + orig }
-
-// dlqHeaders attaches failure metadata to a DLQ'd message. Original wire
-// headers (incl. Nats-Msg-Id) are preserved so a DLQ consumer can still
-// dedup by idempotency_key if it chooses.
-func dlqHeaders(orig map[string]string, origSubject string, attempts int, err error) map[string]string {
-	h := make(map[string]string, len(orig)+3)
-	for k, v := range orig {
-		h[k] = v
-	}
-	h["Kanz-DLQ-Original-Subject"] = origSubject
-	h["Kanz-DLQ-Attempts"] = strconv.Itoa(attempts)
-	h["Kanz-DLQ-Error"] = err.Error()
-	return h
-}
+// The DLQ subject convention, header contract and terminal-error signal moved
+// to dlq.go when #220 gave the DLQ a drain path: they are the wire contract
+// between the side that PARKS a message and the side that DRAINS one, and that
+// is a different concept from the in-handler retry budget this file bounds.
