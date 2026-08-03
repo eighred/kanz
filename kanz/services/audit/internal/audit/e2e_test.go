@@ -107,7 +107,13 @@ func TestAuditEndToEnd(t *testing.T) {
 	}
 
 	// (2) Tamper: silently rewrite a stored record. Chain verification catches it.
-	all, _ := store.All(ctx)
+	var all []*audit.Record
+	if err := store.Scan(ctx, func(r *audit.Record) error {
+		all = append(all, r)
+		return nil
+	}); err != nil {
+		t.Fatalf("scan: %v", err)
+	}
 	all[1].Summary = "score 0.10 -> SELL" // forge the decision after the fact
 	att, err := report.Verify(ctx, store)
 	if err != nil {

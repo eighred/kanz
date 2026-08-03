@@ -47,7 +47,9 @@ type Server struct {
 	fxProvider    func() accounting.FXConverter
 	instrumentCcy accounting.InstrumentCurrency
 	cashPublisher CashPublisher
-	mux           *http.ServeMux
+	// snapshotMetrics counts unbounded materializations. nil is inert.
+	snapshotMetrics *ledger.SnapshotMetrics
+	mux             *http.ServeMux
 }
 
 // Option customizes the server.
@@ -70,6 +72,14 @@ func WithInstrumentCurrency(m accounting.InstrumentCurrency) Option {
 	return func(s *Server) { s.instrumentCcy = m }
 }
 
+// WithSnapshotMetrics shares the checkpoint job's collectors with the read
+// path, so a materialization that had to scan the whole journal increments
+// kanz_accounting_ledger_full_scans_total. Absent ⇒ the reads are still
+// bounded, but nothing counts the ones that were not.
+func WithSnapshotMetrics(m *ledger.SnapshotMetrics) Option {
+	return func(s *Server) { s.snapshotMetrics = m }
+}
+
 // WithCashPublisher wires the cash-movement FACT producer (WIRE-01f) and mounts
 // the POST /v1/portfolios/{id}/cash-movements endpoint. Absent ⇒ the endpoint is
 // not mounted (no broker configured).
@@ -79,6 +89,12 @@ func WithCashPublisher(p CashPublisher) Option {
 
 // New builds the server over a journal store and base currency.
 func New(readiness *Readiness, logger *slog.Logger, store ledger.Store, baseCcy string, opts ...Option) *Server {
+	if logger == nil {
+		// The read path LOGS now (materialize warns on an unbounded fold), so a
+		// nil logger is a nil-deref in a handler rather than the harmless
+		// unused field it used to be. Default it rather than panic per request.
+		logger = slog.Default()
+	}
 	s := &Server{logger: logger, readiness: readiness, store: store, baseCcy: baseCcy, mux: http.NewServeMux()}
 	for _, opt := range opts {
 		opt(s)
@@ -114,6 +130,29 @@ func (s *Server) handleReadyz(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ready"})
 }
 
+// materialize folds the current-knowledge book for a portfolio and RECORDS
+// whether it could be served from a checkpoint (#229).
+//
+// Both read endpoints go through here rather than calling
+// ledger.MaterializeCurrent directly, because the reason a read was unbounded is
+// the only warning this service gets that its snapshot job has stopped working.
+// Before #229 there was no snapshot job at all and every request took the
+// unbounded path in silence for the life of the deployment. A full scan is
+// logged at Warn and counted; it is not an error — the answer is correct, it
+// just cost the whole journal to produce.
+func (s *Server) materialize(ctx context.Context, portfolioID string) (*ledger.Book, error) {
+	book, reason, err := ledger.MaterializeCurrent(ctx, s.store, portfolioID)
+	if err != nil {
+		return nil, err
+	}
+	if reason != "" {
+		s.snapshotMetrics.ObserveFullScan(reason)
+		s.logger.Warn("materialized a book by scanning the ENTIRE journal",
+			"portfolio_id", portfolioID, "reason", reason)
+	}
+	return book, nil
+}
+
 // --- NAV ---------------------------------------------------------------------
 
 type navRequest struct {
@@ -140,7 +179,7 @@ func (s *Server) handleNAV(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
-	book, err := ledger.MaterializeCurrent(r.Context(), s.store, id)
+	book, err := s.materialize(r.Context(), id)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
@@ -228,7 +267,7 @@ func (s *Server) handleReconcile(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	book, err := ledger.MaterializeCurrent(r.Context(), s.store, id)
+	book, err := s.materialize(r.Context(), id)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return

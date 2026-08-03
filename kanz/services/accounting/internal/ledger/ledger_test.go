@@ -72,9 +72,16 @@ func TestReplayDeterministicNAV(t *testing.T) {
 	mid := Replay("PF", events[:2])
 	snap := mid.Snapshot(day(2))
 	_ = st.SaveSnapshot(context.Background(), snap)
-	got, err := MaterializeCurrent(context.Background(), st, "PF")
+	got, reason, err := MaterializeCurrent(context.Background(), st, "PF")
 	if err != nil {
 		t.Fatal(err)
+	}
+	// NON-VACUITY (#229): the equality below is trivially true if the read fell
+	// back to a full replay, which is exactly what it did for the whole life of
+	// this test before the snapshot was ever written. Assert the checkpoint was
+	// USED, not merely present.
+	if reason != "" {
+		t.Fatalf("materialize fell back to a full journal scan (%s) — the snapshot was not used, so the NAV equality below proves nothing", reason)
 	}
 	if nav(got, prices).Cmp(n1) != 0 {
 		t.Fatalf("snapshot+tail NAV %s != full replay %s", nav(got, prices).FloatString(2), n1.FloatString(2))

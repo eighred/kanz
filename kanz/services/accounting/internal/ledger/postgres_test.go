@@ -9,10 +9,12 @@ package ledger
 
 import (
 	"context"
+	"fmt"
 	"math/big"
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"testing"
 	"time"
 
@@ -169,9 +171,14 @@ func TestPostgresSnapshotTailEqualsFullReplay(t *testing.T) {
 		t.Fatalf("append e2: %v", err)
 	}
 
-	fromSnapshot, err := MaterializeCurrent(ctx, st, "PORT-1")
+	fromSnapshot, reason, err := MaterializeCurrent(ctx, st, "PORT-1")
 	if err != nil {
 		t.Fatalf("materialize: %v", err)
+	}
+	// NON-VACUITY (#229): a full-replay fallback satisfies every equality below
+	// while proving nothing about the checkpoint. Assert the bounded path ran.
+	if reason != "" {
+		t.Fatalf("materialize fell back to a full journal scan (%s) — the durable snapshot was not used", reason)
 	}
 	full := Replay("PORT-1", []*Event{first, tail})
 	if fromSnapshot.Positions["AAPL"].Qty.Cmp(full.Positions["AAPL"].Qty) != 0 {
@@ -206,11 +213,11 @@ func TestPostgresCrossReplicaConsistency(t *testing.T) {
 		}
 	}
 
-	a, err := MaterializeCurrent(ctx, writer, "PORT-1")
+	a, _, err := MaterializeCurrent(ctx, writer, "PORT-1")
 	if err != nil {
 		t.Fatalf("writer materialize: %v", err)
 	}
-	b, err := MaterializeCurrent(ctx, reader, "PORT-1")
+	b, _, err := MaterializeCurrent(ctx, reader, "PORT-1")
 	if err != nil {
 		t.Fatalf("reader materialize: %v", err)
 	}
@@ -222,6 +229,119 @@ func TestPostgresCrossReplicaConsistency(t *testing.T) {
 	}
 	if a.CashBalance("USD").Cmp(b.CashBalance("USD")) != 0 {
 		t.Fatalf("cross-replica cash divergence: %v vs %v", a.CashBalance("USD"), b.CashBalance("USD"))
+	}
+}
+
+// THE SQL HALF OF #229, WHICH ONLY POSTGRES CAN ANSWER.
+//
+// snapshot_test.go proves MaterializeCurrent asks for the tail. It cannot prove
+// the tail read is CHEAP — that is a property of the query plan, and the
+// in-memory store has no plan. These two tests are the ones that fail if
+// 0005_ledger_snapshot_tail.sql is reverted or its index is renamed.
+func TestPostgresJournalSinceReturnsOnlyTheTail(t *testing.T) {
+	pool := newPool(t)
+	st := NewPostgres(pool)
+	ctx := context.Background()
+
+	t0 := time.Unix(1_700_000_000, 0).UTC()
+	for i := range 20 {
+		at := t0.Add(time.Duration(i) * time.Hour)
+		if err := st.Append(ctx, tradeEvent(fmt.Sprintf("e%02d", i), "AAPL", 10, 100, -1000, at, at)); err != nil {
+			t.Fatalf("append %d: %v", i, err)
+		}
+	}
+
+	watermark := t0.Add(14 * time.Hour) // entries e00..e14 are at or before it
+	tail, err := st.JournalSince(ctx, "PORT-1", watermark)
+	if err != nil {
+		t.Fatalf("journal since: %v", err)
+	}
+	if len(tail) != 5 {
+		t.Fatalf("tail = %d rows (%v), want 5 — JournalSince must return only what the "+
+			"checkpoint has NOT absorbed, not the whole 20-entry journal", len(tail), ids(tail))
+	}
+	for _, e := range tail {
+		if !e.Knowledge.After(watermark) {
+			t.Fatalf("tail contains %s at knowledge %s, which is not after the watermark %s",
+				e.EntryID, e.Knowledge, watermark)
+		}
+	}
+	// The bound is STRICT: an entry known exactly at the watermark is already in
+	// the snapshot, and returning it would double-count were Book.Apply not
+	// idempotent. Assert the boundary rather than trusting the operator.
+	for _, e := range tail {
+		if e.EntryID == "e14" {
+			t.Fatal("tail included e14, the entry AT the watermark — the bound must be > not >=")
+		}
+	}
+}
+
+// The tail read must be a RANGE SCAN over ledger_entries_knowledge_idx, not a
+// filtered scan of the portfolio's whole journal.
+//
+// This is the assertion the issue's own "verified when" reaches for and that no
+// amount of in-memory testing can supply: with only 0001's bitemporal index
+// (tenant, portfolio, effective, knowledge, entry), knowledge_time has no
+// bounded column ahead of it, so Postgres can only seek on (tenant, portfolio)
+// and filters the rest — the scan stays proportional to the LIFETIME journal
+// even though the result is proportional to the tail. That is the shape of
+// #229 surviving its own fix, and it looks identical from Go.
+func TestPostgresJournalSinceUsesTheKnowledgeIndex(t *testing.T) {
+	pool := newPool(t)
+	st := NewPostgres(pool)
+	ctx := context.Background()
+
+	// Enough rows that the planner prefers an index over a sequential scan;
+	// 10^6 (the issue's figure) is a CI-hostile seed and the plan shape is the
+	// same. Disabling seqscan would force the answer, so it is left enabled.
+	t0 := time.Unix(1_700_000_000, 0).UTC()
+	for i := range 2000 {
+		at := t0.Add(time.Duration(i) * time.Minute)
+		if err := st.Append(ctx, tradeEvent(fmt.Sprintf("e%05d", i), "AAPL", 1, 100, -100, at, at)); err != nil {
+			t.Fatalf("append %d: %v", i, err)
+		}
+	}
+	if _, err := pool.Exec(ctx, `ANALYZE ledger_entries`); err != nil {
+		t.Fatalf("analyze: %v", err)
+	}
+
+	watermark := t0.Add(1990 * time.Minute) // 9 rows in the tail
+	rows, err := pool.Query(ctx, `
+		EXPLAIN (ANALYZE, FORMAT TEXT)
+		SELECT entry_id FROM ledger_entries
+		WHERE portfolio_id = $1 AND knowledge_time > $2
+		ORDER BY effective_time, knowledge_time, entry_id
+	`, "PORT-1", watermark)
+	if err != nil {
+		t.Fatalf("explain: %v", err)
+	}
+	var plan strings.Builder
+	for rows.Next() {
+		var line string
+		if err := rows.Scan(&line); err != nil {
+			rows.Close()
+			t.Fatalf("scan plan: %v", err)
+		}
+		plan.WriteString(line)
+		plan.WriteByte('\n')
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		t.Fatalf("plan rows: %v", err)
+	}
+
+	got := plan.String()
+	if !strings.Contains(got, "ledger_entries_knowledge_idx") {
+		t.Fatalf("the tail read did not use ledger_entries_knowledge_idx — it is scanning more "+
+			"than the tail, which is #229 with a bounded RESULT and an unbounded READ.\nplan:\n%s", got)
+	}
+	// NON-VACUITY: naming the index is not enough — a bitmap scan over the whole
+	// portfolio also names an index. Assert the planner only EXPECTED the tail.
+	if !strings.Contains(got, "Index Scan") && !strings.Contains(got, "Index Only Scan") {
+		t.Fatalf("plan names the index but is not an index scan:\n%s", got)
+	}
+	if strings.Contains(got, "Seq Scan on ledger_entries") {
+		t.Fatalf("the tail read fell back to a sequential scan:\n%s", got)
 	}
 }
 

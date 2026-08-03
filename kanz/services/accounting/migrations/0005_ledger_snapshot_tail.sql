@@ -1,0 +1,67 @@
+-- 0005: make the checkpoint real (#229) — the tail index, and the fence that
+-- says when a checkpoint may be resumed from.
+--
+-- 0001 shipped ledger_snapshots and described it as the thing that "bounds
+-- replay to the journal tail". Nothing wrote it: SaveSnapshot had no caller
+-- anywhere in the tree, so the table was permanently empty and every NAV
+-- request folded the entire lifetime journal instead. This migration is the
+-- durable half of turning that on.
+--
+-- # 1. The tail read needs its own index
+--
+-- ledger_entries_bitemporal_idx is (tenant_id, portfolio_id, effective_time,
+-- knowledge_time, entry_id). That serves the bitemporal HEAD read
+-- (JournalAsOf), because effective_time is the leading bounded column. It does
+-- NOT serve the TAIL read (JournalSince: knowledge_time > watermark) as a range
+-- scan — with no bound on effective_time, Postgres can only use
+-- (tenant_id, portfolio_id) as the scan prefix and applies knowledge_time as an
+-- in-index filter, so the scan still touches every entry the portfolio ever had.
+-- The heap fetches and the *big.Rat allocations would be bounded to the tail;
+-- the scan would not. This index makes the whole read proportional to the tail.
+--
+-- # 2. max_effective_time: the fence
+--
+-- The fold is ORDER-SENSITIVE — weighted-average cost realizes P&L in sequence,
+-- in (effective, knowledge, entry_id) order — but a checkpoint is ordered by
+-- KNOWLEDGE alone. So resuming from one is only equal to a full replay while
+-- every entry that arrives afterwards is effective at or after everything
+-- already folded in. A backdated entry (a late-reported fill, a restated
+-- corporate action) breaks that: a replay would fold it in the middle, a resume
+-- folds it last, and the two books disagree on realized P&L and therefore on
+-- NAV. Recording the latest effective_time a checkpoint absorbed lets the read
+-- path DETECT that case and fall back to a full replay rather than serve a
+-- wrong number quietly.
+--
+-- The column is NULLABLE WITH NO DEFAULT, deliberately, and that is the whole
+-- safety argument. NULL means "this checkpoint does not state its fence", which
+-- MaterializeCurrent treats as not-resumable — it decodes to the Go zero time,
+-- so "unrecorded" has exactly ONE representation on both sides of the wire and
+-- there is no sentinel timestamp to get the comparison backwards against. An
+-- un-fenced checkpoint costs a slow read; a wrongly-trusted one costs a wrong
+-- NAV. SaveSnapshot refuses to write a snapshot without a fence, so no live
+-- writer can produce a NULL; the column is nullable for the shape of the
+-- absence, not to permit it. (The table is empty today — 0001 shipped it and
+-- nothing ever wrote a row — so nothing is being back-filled here.)
+--
+-- # 3. Why this is not WORM, and why that is not a gap
+--
+-- 0004 makes ledger_entries append-only at the engine. ledger_snapshots is
+-- deliberately left mutable: it is a DERIVED CACHE of a prefix of the journal,
+-- reproducible from the journal alone, carrying no fact the journal does not.
+-- Its only write shape is an upsert-in-place. Extending the WORM trigger here
+-- would forbid the checkpoint's own write path while protecting nothing — you
+-- cannot destroy history that lives in another table.
+--
+-- # 4. CREATE INDEX, not CONCURRENTLY
+--
+-- internal/migrate runs each file in ONE TRANSACTION, and CREATE INDEX
+-- CONCURRENTLY cannot run inside one. This therefore takes a lock that blocks
+-- writes to ledger_entries for the build. It runs in the migrate initContainer
+-- before the service accepts traffic, and the table is small today; when it is
+-- not, this index wants building out-of-band ahead of the deploy.
+
+CREATE INDEX IF NOT EXISTS ledger_entries_knowledge_idx
+    ON ledger_entries (tenant_id, portfolio_id, knowledge_time);
+
+ALTER TABLE ledger_snapshots
+    ADD COLUMN IF NOT EXISTS max_effective_time TIMESTAMPTZ;

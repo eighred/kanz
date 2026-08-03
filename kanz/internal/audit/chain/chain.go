@@ -41,23 +41,83 @@ type Link interface {
 	Canonical() []byte
 }
 
+// Verifier walks a chain INCREMENTALLY, one link at a time, holding only the
+// previous hash and a counter.
+//
+// Verification is inherently whole-chain — a suffix cannot be verified without
+// a trusted anchor for what precedes it — but it does not need the whole chain
+// IN MEMORY. It is a left fold over a stream. Push exists so a caller reading
+// from a database can verify as rows arrive instead of materialising every
+// record first, which is what /v1/audit/verify used to do to the entire
+// compliance log (#229).
+//
+// The zero Verifier is ready: it chains from Genesis.
+type Verifier struct {
+	prev  string
+	count int
+	// failed records the first break so Push stays cheap afterwards and the
+	// caller gets the same "index of first failure" answer Verify gives.
+	failed *VerifyError
+}
+
+// NewVerifier returns a Verifier anchored at Genesis.
+func NewVerifier() *Verifier { return &Verifier{} }
+
+// Push folds the next link in sequence. It returns the error at the FIRST break
+// and nil for every link after it — the chain is already known broken, and the
+// index of the first failure is the diagnostic that matters. A caller may stop
+// on the first error or keep streaming to learn the total length; both give the
+// same Result.
+func (v *Verifier) Push(l Link) error {
+	if v.prev == "" {
+		v.prev = Genesis
+	}
+	i := v.count
+	v.count++
+	if v.failed != nil {
+		return nil
+	}
+	if l.PrevHash() != v.prev {
+		v.failed = &VerifyError{Index: i, Kind: "prev-hash mismatch", Want: v.prev, Got: l.PrevHash()}
+		return v.failed
+	}
+	want := Next(v.prev, l.Canonical())
+	if l.Hash() != want {
+		v.failed = &VerifyError{Index: i, Kind: "content hash mismatch", Want: want, Got: l.Hash()}
+		return v.failed
+	}
+	v.prev = l.Hash()
+	return nil
+}
+
+// Count is how many links have been pushed.
+func (v *Verifier) Count() int { return v.count }
+
+// Result reports the index of the first link that failed the chain (with a
+// non-nil error), or -1 and nil if everything pushed so far is intact.
+func (v *Verifier) Result() (int, error) {
+	if v.failed != nil {
+		return v.failed.Index, v.failed
+	}
+	return -1, nil
+}
+
 // Verify walks links in sequence and returns the index of the first record that
 // fails the chain (with a non-nil error), or -1 and nil if the chain is intact.
 // The first link must chain from Genesis. A failure means the log was tampered
 // with at or before that index — recomputing from a forged record diverges here.
+//
+// It is the slice-shaped convenience over Verifier, not a second implementation:
+// the walk lives in Push and nowhere else, so a fix to one cannot miss the
+// other.
 func Verify(links []Link) (int, error) {
-	prev := Genesis
-	for i, l := range links {
-		if l.PrevHash() != prev {
-			return i, &VerifyError{Index: i, Kind: "prev-hash mismatch", Want: prev, Got: l.PrevHash()}
+	v := NewVerifier()
+	for _, l := range links {
+		if err := v.Push(l); err != nil {
+			return v.Result()
 		}
-		want := Next(prev, l.Canonical())
-		if l.Hash() != want {
-			return i, &VerifyError{Index: i, Kind: "content hash mismatch", Want: want, Got: l.Hash()}
-		}
-		prev = l.Hash()
 	}
-	return -1, nil
+	return v.Result()
 }
 
 // VerifyError pinpoints where and how the chain broke.

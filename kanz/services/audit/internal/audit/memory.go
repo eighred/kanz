@@ -65,12 +65,21 @@ func (m *Memory) Query(_ context.Context, f Filter) ([]*Record, error) {
 	return out, nil
 }
 
-func (m *Memory) All(_ context.Context) ([]*Record, error) {
+// Scan streams the log in Seq order. It snapshots the slice header under the
+// lock and yields OUTSIDE it: yield is caller code (the chain verifier), and
+// holding a read lock across it would let a slow or blocking caller stall every
+// append to the audit log.
+func (m *Memory) Scan(_ context.Context, yield func(*Record) error) error {
 	m.mu.RLock()
-	defer m.mu.RUnlock()
-	out := make([]*Record, len(m.records))
-	copy(out, m.records)
-	return out, nil
+	recs := make([]*Record, len(m.records))
+	copy(recs, m.records)
+	m.mu.RUnlock()
+	for _, r := range recs {
+		if err := yield(r); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (m *Memory) Head(_ context.Context) (Head, error) {

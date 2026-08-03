@@ -138,6 +138,13 @@ type Book struct {
 	Cash        map[string]*big.Rat
 	Accrued     map[string]*big.Rat
 	seen        map[string]bool
+	// maxEffective is the latest effective_time this book has folded. It is the
+	// fence a snapshot carries into Snapshot.MaxEffective: the fold is
+	// order-sensitive (weighted-average cost realizes P&L in sequence), so
+	// resuming from a checkpoint is only equal to a full replay while every
+	// entry appended afterwards is effective at or after everything already in
+	// it. See MaterializeCurrent, which refuses the checkpoint otherwise.
+	maxEffective time.Time
 }
 
 // NewBook returns an empty book for a portfolio.
@@ -162,6 +169,9 @@ func (b *Book) Apply(e *Event) {
 		return
 	}
 	b.seen[e.EntryID] = true
+	if e.Effective.After(b.maxEffective) {
+		b.maxEffective = e.Effective
+	}
 
 	if e.Type == EntryCorporateAction && e.Action != nil {
 		b.foldCorpAct(e.InstrumentID, e.Action)

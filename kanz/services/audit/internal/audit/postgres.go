@@ -141,8 +141,26 @@ func (p *Postgres) Query(ctx context.Context, f Filter) ([]*Record, error) {
 	return p.queryRows(ctx, sql, args...)
 }
 
-func (p *Postgres) All(ctx context.Context) ([]*Record, error) {
-	return p.queryRows(ctx, selectCols+" ORDER BY seq ASC")
+// Scan streams the whole log to yield in Seq order, decoding one record at a
+// time (#229). It deliberately does NOT go through queryRows: the point is that
+// no slice of every record is ever built, so the verifier's working set is one
+// record whatever the log's size.
+func (p *Postgres) Scan(ctx context.Context, yield func(*Record) error) error {
+	rows, err := p.pool.Query(ctx, selectCols+" ORDER BY seq ASC")
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		r, err := scanRecord(rows)
+		if err != nil {
+			return err
+		}
+		if err := yield(r); err != nil {
+			return err
+		}
+	}
+	return rows.Err()
 }
 
 func (p *Postgres) Head(ctx context.Context) (Head, error) {
