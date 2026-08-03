@@ -321,7 +321,7 @@ var retryCertifiedConsumers = map[string]string{
 		"(accepted, pre-existing double-count on the Events tally, not a skip) and re-emits; " +
 		"it never skips the observe that a first attempt already made.",
 
-	"services/lake-sink/cmd/lake-sink/main.go:121": "lake-sink: the sole handler is cdc.EventSink.Handle, " +
+	"services/lake-sink/cmd/lake-sink/main.go:125": "lake-sink: the sole handler is cdc.EventSink.Handle, " +
 		"which has no dedup-and-skip branch — every attempt decodes, writes and flushes from " +
 		"scratch, and the doc comment is explicit that a duplicate row is expected and " +
 		"resolved by downstream compaction (services/lake-sink/internal/cdc/sink.go:49). A retry " +

@@ -54,10 +54,22 @@ data:
     # not symmetric with them: the topic holds state, the DLQ holds the poison
     # message that could not be turned into state. lake-sink consumes both, and
     # a consumer wired with WithDLQ has nowhere to park a failure on a topic with
-    # no `dlq.` sibling — Kafka auto-create is disabled, so the publish fails, the
-    # error surfaces, and the event goes back to the broker for the redelivery
-    # loop the DLQ exists to end. The DLQ itself stays delete/30d: a poison
-    # message is an incident to investigate, not state to retain forever.
+    # no `dlq.` sibling — Kafka auto-create is disabled, so the publish fails and
+    # the error surfaces.
+    #
+    # THIS COMMENT USED TO SAY the event then "goes back to the broker for the
+    # redelivery loop the DLQ exists to end". It does not: Kafka has no
+    # per-message nack, and #219 reproduced what the code actually did — skip the
+    # message and commit past it on the next success, losing it permanently and
+    # silently. pkg/bus/kafka.go now HALTS the subscription at that offset
+    # instead, so the sink stops (kanz_bus_consume_halted_total, and a non-nil
+    # error out of runSink) rather than deleting what it could not park. A
+    # missing `dlq.` sibling in this table is therefore an outage, not a leak —
+    # which is the failure mode we want, but it is why every `yes` below must
+    # stay a `yes`.
+    #
+    # The DLQ itself stays delete/30d: a poison message is an incident to
+    # investigate, not state to retain forever.
     compliance.mandate         3   compact  -1          yes
     risk.position              6   compact  -1          yes
     wealth.household            3   compact  -1          yes

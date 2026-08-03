@@ -26,8 +26,13 @@ type EventHandler func(ctx context.Context, env *envelopepb.Envelope, payload []
 //
 // DLQ (`WithDLQ`) and retry (`WithRetry`) are independent — either can be
 // configured on its own. Without DLQ, terminal failures surface to the
-// underlying Subscribe loop (broker redelivery). Without retry, the first
-// failure is terminal.
+// underlying Subscribe loop, and what that loop does with them is
+// TRANSPORT-SPECIFIC: NATS naks and redelivers; Kafka stops the subscription
+// without committing, because it has no per-message nack and the only way to
+// keep the message reachable is to leave the group offset below it. Either way
+// nothing here parks the event — which is why test/arch/bus_dlq_test.go
+// requires WithDLQ on every consumer. Without retry, the first failure is
+// terminal.
 type Consumer struct {
 	subscriber Subscriber
 	dlq        Publisher
@@ -97,8 +102,14 @@ func WithValidator(fn func(*envelopepb.Envelope) error) ConsumerOption {
 // WithDLQ enables DLQ routing. Terminal failures (retries exhausted, or
 // unframe / validate failure before dispatch) republish the original
 // `bus.Message` to `dlq.<original-subject>` with failure metadata in
-// `Kanz-DLQ-*` headers, then ack the original delivery. If the DLQ publish
-// itself fails, the error surfaces and the broker redelivers.
+// `Kanz-DLQ-*` headers, then ack the original delivery.
+//
+// If the DLQ publish ITSELF fails the error surfaces to the Subscribe loop, and
+// the outcome is transport-specific: NATS naks and the broker redelivers; Kafka
+// halts the subscription at that offset (KafkaClient.Subscribe) and the message
+// is picked up again by the next subscription on the group. It is never acked
+// or committed past — an event that reached neither its handler nor the DLQ is
+// silent permanent loss, which is exactly what #219 found the Kafka loop doing.
 func WithDLQ(p Publisher) ConsumerOption {
 	return func(o *consumerOptions) { o.dlq = p }
 }

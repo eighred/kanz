@@ -17,6 +17,7 @@ type BusMetrics struct {
 	publishLatency *prometheus.HistogramVec // subject
 	consumeTotal   *prometheus.CounterVec   // subject, group, result
 	consumeLatency *prometheus.HistogramVec // subject, group
+	consumeHalted  *prometheus.CounterVec   // subject, group
 	consumerLag    *prometheus.GaugeVec     // subject, group, partition
 	pending        *prometheus.GaugeVec     // subject, group
 }
@@ -42,6 +43,19 @@ func NewBusMetrics(reg prometheus.Registerer) *BusMetrics {
 			Help:    "handler dispatch latency (including retries).",
 			Buckets: prometheus.DefBuckets,
 		}, []string{"subject", "group"}),
+		// THE ONLY SIGNAL THAT A KAFKA SUBSCRIPTION STOPPED TO AVOID LOSING AN
+		// EVENT. Incremented by KafkaClient.Subscribe when a delivery could
+		// neither be handled nor dead-lettered, so the loop returns without
+		// committing (EVT-17e / #219). Every other bus series reads NORMAL in
+		// that state — kanz_bus_consume_total records the failed dispatch and
+		// then stops moving, and kanz_bus_consumer_lag is computed from the
+		// COMMITTED offset, which by construction did not advance, so lag grows
+		// the way an idle topic's does. This counter is what distinguishes
+		// "quiet" from "stopped, on purpose, with a message it refused to skip".
+		consumeHalted: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "kanz_bus_consume_halted_total",
+			Help: "subscriptions halted without committing because a delivery could neither be handled nor dead-lettered — the dead-letter path is down and the consumer is holding the offset rather than skipping the event.",
+		}, []string{"subject", "group"}),
 		consumerLag: prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Name: "kanz_bus_consumer_lag",
 			Help: "Kafka consumer lag (high-water offset - committed) — the KEDA scale signal.",
@@ -53,7 +67,7 @@ func NewBusMetrics(reg prometheus.Registerer) *BusMetrics {
 	}
 	reg.MustRegister(
 		m.publishTotal, m.publishLatency,
-		m.consumeTotal, m.consumeLatency,
+		m.consumeTotal, m.consumeLatency, m.consumeHalted,
 		m.consumerLag, m.pending,
 	)
 	return m
@@ -80,6 +94,20 @@ func (m *BusMetrics) observeConsume(subject, group string, d time.Duration, err 
 	}
 	m.consumeTotal.WithLabelValues(subject, group, result(err)).Inc()
 	m.consumeLatency.WithLabelValues(subject, group).Observe(d.Seconds())
+}
+
+// observeConsumeHalt records that a subscription stopped rather than commit
+// past a delivery it could neither handle nor dead-letter. It is NOT paired
+// with observeConsume: that one has already counted the dispatch failure, and
+// this one counts the separate, more severe outcome — the same split the
+// archiver makes between a routing failure and a failed DLQ produce
+// (services/archiver/internal/archive/archiver.go, observeFail(DLQSubject,
+// "dlq_publish")).
+func (m *BusMetrics) observeConsumeHalt(subject, group string) {
+	if m == nil {
+		return
+	}
+	m.consumeHalted.WithLabelValues(subject, group).Inc()
 }
 
 // SetConsumerLag publishes the Kafka lag for one (subject, group, partition).

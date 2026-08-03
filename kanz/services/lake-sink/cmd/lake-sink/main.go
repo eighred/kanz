@@ -112,7 +112,11 @@ func runSink(ctx context.Context, cfg config.Config, fileSink sink.Sink, readine
 	}
 	eventSink := cdc.NewEventSink(decode.NewDecoder(resolver), fileSink, time.Now, logger, metrics)
 
-	client, err := bus.DialKafka(bus.KafkaConfig{Brokers: cfg.Brokers, ClientID: cfg.Source})
+	// Metrics on the CLIENT, not just the Consumer: kanz_bus_consume_halted_total
+	// is raised by KafkaClient.Subscribe, below bus.Consumer, and it is the only
+	// series that says this sink stopped rather than skip an event it could not
+	// dead-letter (#219). Without it the halt is a single log line on the way out.
+	client, err := bus.DialKafka(bus.KafkaConfig{Brokers: cfg.Brokers, ClientID: cfg.Source, Metrics: busMetrics})
 	if err != nil {
 		return err
 	}
