@@ -31,8 +31,22 @@ type Config struct {
 
 	// DatabaseURL is the Postgres DSN for the durable, WORM audit log. Empty ⇒
 	// the in-memory store (local/dev; the log is lost on restart, so NOT for
-	// production — an audit log that doesn't survive a restart isn't one).
+	// production — an audit log that doesn't survive a restart isn't one), and
+	// the composition root REFUSES to start on it unless AllowEphemeralLog says
+	// out loud that the deployment accepts that.
 	DatabaseURL string
+
+	// AllowEphemeralLog is the EXPLICIT admission that the tamper-evidence log is
+	// held in RAM and dies with the process — AUDIT_ALLOW_EPHEMERAL_LOG=true.
+	//
+	// It exists because an empty DSN and a configured one produced the SAME clean
+	// start, and this is the compliance service: the deployment that FORGOT the
+	// DSN is indistinguishable from the dev box that meant it, right up to the
+	// restart that discards the whole hash chain and the regulator's request that
+	// cannot be answered. Unlike the OMS's or a venue adapter's in-memory
+	// fallback, there is no replica count at which this one is correct in
+	// production — so it is opt-in, not warn-and-carry-on.
+	AllowEphemeralLog bool
 
 	// OTLPEndpoint is the OTel collector for span export (OBS-01).
 	OTLPEndpoint string
@@ -63,15 +77,16 @@ func Load() (Config, error) {
 		return Config{}, err
 	}
 	return Config{
-		Listen:        envOr("AUDIT_LISTEN", ":8083"),
-		LogLevel:      parseLevel(envOr("AUDIT_LOG_LEVEL", "info")),
-		NATSURL:       os.Getenv("AUDIT_NATS_URL"),
-		Source:        envOr("AUDIT_SOURCE", "audit"),
-		ConsumerGroup: envOr("AUDIT_CONSUMER_GROUP", "audit"),
-		Subjects:      subjects,
-		DatabaseURL:   databaseURL,
-		OTLPEndpoint:  os.Getenv("AUDIT_OTLP_ENDPOINT"),
-		SPIFFESocket:  os.Getenv("SPIFFE_ENDPOINT_SOCKET"),
+		Listen:            envOr("AUDIT_LISTEN", ":8083"),
+		LogLevel:          parseLevel(envOr("AUDIT_LOG_LEVEL", "info")),
+		NATSURL:           os.Getenv("AUDIT_NATS_URL"),
+		Source:            envOr("AUDIT_SOURCE", "audit"),
+		ConsumerGroup:     envOr("AUDIT_CONSUMER_GROUP", "audit"),
+		Subjects:          subjects,
+		DatabaseURL:       databaseURL,
+		AllowEphemeralLog: os.Getenv("AUDIT_ALLOW_EPHEMERAL_LOG") == "true",
+		OTLPEndpoint:      os.Getenv("AUDIT_OTLP_ENDPOINT"),
+		SPIFFESocket:      os.Getenv("SPIFFE_ENDPOINT_SOCKET"),
 	}, nil
 }
 

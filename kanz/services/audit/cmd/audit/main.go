@@ -4,7 +4,8 @@
 // (AUDIT-01a/b), and serves the lineage (AUDIT-01c) + reporting (AUDIT-01d) API.
 // With AUDIT_DATABASE_URL set the store is the durable WORM Postgres log;
 // without it the store is in-memory (local/dev only — an audit log that doesn't
-// survive a restart is not an audit log).
+// survive a restart is not an audit log), and openStore REFUSES TO START unless
+// AUDIT_ALLOW_EPHEMERAL_LOG=true says the deployment accepts that.
 package main
 
 import (
@@ -19,6 +20,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/prometheus/client_golang/prometheus"
 
 	"github.com/eighred/kanz/internal/version"
 	"github.com/eighred/kanz/pkg/bus"
@@ -28,6 +30,22 @@ import (
 	"github.com/eighred/kanz/services/audit/internal/config"
 	"github.com/eighred/kanz/services/audit/internal/server"
 )
+
+// auditLogDurable reports whether the tamper-evidence log survives a restart:
+// 1 when it is the WORM Postgres store, 0 when it is the in-memory one an
+// operator opted into with AUDIT_ALLOW_EPHEMERAL_LOG.
+//
+// The gauge is what makes the degraded posture ALERTABLE rather than merely
+// readable. A start-up WARN scrolls off; `kanz_audit_log_durable == 0` can be
+// alerted on for as long as it is true, which matters here more than anywhere
+// else in the estate: nothing downstream of audit ever notices that the log is
+// ephemeral, so the first symptom is a restart that has already happened and a
+// hash chain that is already gone. Same shape, and deliberately the same
+// contract, as kanz_venue_orderview_durable (INFRA-M7a-2).
+var auditLogDurable = prometheus.NewGauge(prometheus.GaugeOpts{
+	Name: "kanz_audit_log_durable",
+	Help: "1 if the audit log is backed by the WORM Postgres store (survives a restart), 0 if in-memory.",
+})
 
 func main() {
 	cfg, err := config.Load()
@@ -58,7 +76,12 @@ func main() {
 		_ = obs.Shutdown(shutCtx)
 	}()
 
-	store, closeStore, err := openStore(ctx, cfg)
+	// Registered before openStore so the posture is on /metrics from the first
+	// scrape, including the degraded one. A gauge nobody registered is a Set
+	// call into the void — exactly the silence this whole branch is about.
+	obs.Registry.MustRegister(auditLogDurable)
+
+	store, closeStore, err := openStore(ctx, cfg, logger)
 	if err != nil {
 		logger.Error("store open failed", "err", err)
 		os.Exit(2)
@@ -157,15 +180,56 @@ func runProjection(ctx context.Context, cfg config.Config, store audit.Store, re
 	return firstErr
 }
 
-// openStore selects the durable Postgres WORM store when a DSN is set, otherwise
-// the in-memory store. Returns a close func (a no-op for in-memory).
-func openStore(ctx context.Context, cfg config.Config) (audit.Store, func(), error) {
+// openStore selects the durable Postgres WORM store when a DSN is set, and
+// otherwise REFUSES TO START unless the deployment has said out loud that it
+// accepts an ephemeral log. Returns a close func (a no-op for in-memory).
+//
+// This branch used to return audit.NewMemory() with no log, no metric and no
+// gauge. The package doc has always stated the consequence — "an audit log that
+// doesn't survive a restart is not an audit log" — and the running process said
+// nothing at all: a clean start, /readyz 200, queries answered, and the entire
+// hash-chained tamper-evidence record discarded by the next rollout. Nothing
+// downstream of audit consumes the audit log, so there is no second observer to
+// notice; the first symptom is a compliance request that cannot be answered
+// about a window nobody knew was missing.
+//
+// WHY THIS ONE REFUSES WHERE ITS PEERS WARN. The OMS and the venue adapters warn
+// and carry on because their in-memory fallback is CORRECT at exactly one
+// replica — a real, if degraded, operating posture with a stated precondition.
+// There is no equivalent for this store: no replica count, no traffic level and
+// no deployment shape makes a RAM-resident audit log acceptable in production.
+// A degradation that is never right is an opt-in, not a default — the same call
+// webhook-ingest's nonce store makes for the same reason (nonces_default.go).
+//
+// By the time openStore runs, config.Load has already refused to start if the
+// _FILE mount was DECLARED but unreadable (secret.Read), so an empty DSN here
+// can only mean no DSN was ever configured — which is precisely the case that
+// must not be silent. The shipped manifest always mounts one
+// (infra/deploy/audit-deploy.yaml), so this refusal does not change the
+// deployed posture; it changes what happens to the deployment that forgot.
+func openStore(ctx context.Context, cfg config.Config, logger *slog.Logger) (audit.Store, func(), error) {
 	if cfg.DatabaseURL == "" {
+		if !cfg.AllowEphemeralLog {
+			return nil, nil, errors.New("no AUDIT_DATABASE_URL (or _FILE mount): the audit log would be " +
+				"IN-MEMORY and would be DISCARDED on the next restart, rollout or eviction — hash chain, " +
+				"lineage and every AUTH-01d authz decision with it. This is the compliance record, and " +
+				"nothing downstream of it would report the loss. Set AUDIT_DATABASE_URL, or set " +
+				"AUDIT_ALLOW_EPHEMERAL_LOG=true to accept an audit log that does not survive a restart " +
+				"— in which case this deployment is NOT a system of record")
+		}
+		logger.Warn("AUDIT LOG IS IN-MEMORY — AUDIT_ALLOW_EPHEMERAL_LOG accepted an ephemeral compliance "+
+			"record. The hash chain, the lineage and every recorded authz decision are DISCARDED on the "+
+			"next restart, rollout or eviction, and nothing downstream reports the loss: this deployment "+
+			"is not a system of record",
+			"fix", "set AUDIT_DATABASE_URL (or its _FILE mount)",
+			"gauge", "kanz_audit_log_durable=0")
+		auditLogDurable.Set(0)
 		return audit.NewMemory(), func() {}, nil
 	}
 	pool, err := pgxpool.New(ctx, cfg.DatabaseURL)
 	if err != nil {
 		return nil, nil, err
 	}
+	auditLogDurable.Set(1)
 	return audit.NewPostgres(pool), pool.Close, nil
 }

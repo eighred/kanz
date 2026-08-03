@@ -53,13 +53,16 @@ GET /healthz /readyz /metrics
 psql "$AUDIT_DATABASE_URL" -f migrations/0001_audit_log.sql
 AUDIT_DATABASE_URL=... AUDIT_NATS_URL=nats://... go run ./cmd/audit
 
-# Local/dev: in-memory store (lost on restart — not an audit log in anger).
-AUDIT_NATS_URL=nats://localhost:4222 go run ./cmd/audit
+# Local/dev: in-memory store. It is DISCARDED on restart, so the service refuses
+# to start on it unless you say out loud that you accept an ephemeral compliance
+# record — and then warns and reports kanz_audit_log_durable=0 for as long as it runs.
+AUDIT_ALLOW_EPHEMERAL_LOG=true AUDIT_NATS_URL=nats://localhost:4222 go run ./cmd/audit
 ```
 
 Config (env, `_FILE` secret variant for the DSN): `AUDIT_LISTEN` (`:8083`),
 `AUDIT_NATS_URL`, `AUDIT_SUBJECTS` (default `>` — audit everything),
-`AUDIT_DATABASE_URL`, `AUDIT_OTLP_ENDPOINT`.
+`AUDIT_DATABASE_URL`, `AUDIT_ALLOW_EPHEMERAL_LOG` (default false — see above),
+`AUDIT_OTLP_ENDPOINT`.
 
 ## Tests (AUDIT-01e)
 

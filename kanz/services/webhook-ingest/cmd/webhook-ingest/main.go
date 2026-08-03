@@ -142,7 +142,7 @@ func main() {
 	// The replay defence (EXEC-M17). Cross-pod against Redis, or in-process — and
 	// in-process is an EXPLICIT admission, not a default, because a per-pod nonce cache
 	// silently makes every extra replica a double-trade machine.
-	nonces, closeNonces, err := newNonceStore(cfg, logger)
+	nonces, closeNonces, err := newNonceStore(ctx, cfg, logger)
 	if err != nil {
 		logger.Error("replay defence is not safe to run", "err", err)
 		os.Exit(2)
@@ -198,6 +198,17 @@ func main() {
 	}()
 
 	readiness := &server.Readiness{}
+	// READINESS MUST REPRESENT THE REPLAY DEFENCE, not just the position book.
+	//
+	// Both of this pod's preconditions can fail, and until now only one of them was
+	// probed. A pod whose nonce store is unreachable refuses every alert with a 503 —
+	// correctly, it fails closed — while /readyz answers 200 and the pod stays in its
+	// Service. That is a total ingest outage that every health signal calls healthy, on
+	// the platform's public entrance. The in-process store cannot be unreachable and
+	// implements nothing here, so this is a no-op on the default build.
+	if probe, ok := nonces.(server.NonceStoreHealth); ok {
+		readiness.TrackNonceStore(probe)
+	}
 	httpSrv := &http.Server{
 		Addr:              cfg.Listen,
 		Handler:           server.New(readiness, logger, pipeline, server.WithMetrics(obs.MetricsHandler()), server.WithCloudflareOnly(cfg.CloudflareOnly)),
