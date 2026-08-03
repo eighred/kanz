@@ -135,11 +135,17 @@ func TestIntegration_RedriveReturnsAParkedCommandToItsOriginalSubject(t *testing
 	if err := prod.Publish(ctx, bus.Event{
 		Subject:          liveSubj,
 		EventType:        liveSubj,
-		EventClass:       envelopepb.EventClass_EVENT_CLASS_COMMAND,
-		SchemaVersion:    1,
-		Domain:           "kanztest",
-		EventTime:        et,
-		PartitionKey:     "probe",
+		EventClass:    envelopepb.EventClass_EVENT_CLASS_COMMAND,
+		SchemaVersion: 1,
+		Domain:        "kanztest",
+		EventTime:     et,
+		PartitionKey:  "probe",
+		// Required for COMMAND, and load-bearing here rather than boilerplate:
+		// Publish maps it onto Nats-Msg-Id, which is the header the redrive
+		// deliberately re-stamps per attempt so the destination stream's dupe
+		// window cannot swallow a replay with a successful PubAck. A probe with
+		// no key would not exercise that path at all.
+		IdempotencyKey:   "redrive-probe-1",
 		PayloadSchemaRef: "kanztest.redriveprobe.v1:1",
 		Payload:          timestamppb.New(et),
 	}); err != nil {
@@ -279,6 +285,10 @@ func TestIntegration_RedriveRefusesAPoisonMessageRatherThanLoopingForever(t *tes
 		Subject: liveSubj, EventType: liveSubj,
 		EventClass: envelopepb.EventClass_EVENT_CLASS_COMMAND, SchemaVersion: 1,
 		Domain: "kanztest", EventTime: et, PartitionKey: "probe",
+		// Required for COMMAND; see the note in the sibling test. Distinct from
+		// it so the two probes cannot collide on Nats-Msg-Id if a stream outlives
+		// one of them.
+		IdempotencyKey:   "poison-probe-1",
 		PayloadSchemaRef: "kanztest.poisonprobe.v1:1", Payload: timestamppb.New(et),
 	}); err != nil {
 		t.Fatalf("publish: %v", err)
