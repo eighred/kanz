@@ -15,6 +15,7 @@ import (
 	"sync/atomic"
 
 	"github.com/eighred/kanz/internal/wealth"
+	"github.com/eighred/kanz/pkg/auth"
 	"github.com/eighred/kanz/services/wealth/internal/book"
 )
 
@@ -68,40 +69,31 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /v1/households/{id}", s.handleHousehold)
 }
 
-// HeaderPrincipalTenant is the tenant the api-gateway authenticated, injected on
-// every forwarded request (services/api-gateway/internal/proxy/backend.go).
-//
-// Upstreams may trust it ONLY because a NetworkPolicy makes the gateway their
-// sole reachable caller. That premise is doing real work here — see #232, which
-// tracks the namespaces where it is not yet enforced.
-const HeaderPrincipalTenant = "X-Kanz-Principal-Tenant"
+// notFoundBody is the ONE body this surface returns for "no such household",
+// whether the household does not exist or belongs to another tenant. The two
+// must be indistinguishable — see auth.RequireCallerTenantIs.
+const notFoundBody = "household not found"
 
 // callerOwnsThisInstance reports whether the authenticated caller may read this
 // instance's data, and writes the refusal if not.
 //
 // THIS SURFACE HAD NO TENANT CHECK AT ALL (#222). handleHousehold read
 // r.PathValue("id") and returned the household — the gateway injected the
-// caller's tenant on every request and the handler never called r.Header.Get.
-// Anyone who could reach it could enumerate household ids and read total value,
-// holdings, weights and asset-class exposure for whichever tenant owned them.
+// caller's tenant on every request and the handler never read it. Anyone who
+// could reach it could enumerate household ids and read total value, holdings,
+// weights and asset-class exposure for whichever tenant owned them.
 //
-// Under the #97 ruling each instance serves exactly ONE tenant (WEALTH_TENANT,
-// and the RLS pool is pinned to it), so the check is an equality against this
-// instance's tenant rather than a per-row lookup: a caller from another tenant
-// has no business here whatever the database holds.
+// The check itself, the header name, and the no-oracle 404 are
+// auth.RequireCallerTenantIs (#258) — the same three lines lived in four
+// services and the gateway, so a change to any of them had to be made five
+// times. What stays here is the only part that is this service's: the body a
+// genuine miss returns, which the refusal must be identical to.
 //
-// Fails CLOSED on an absent header and on an unset instance tenant — both mean
-// nobody established who is asking, and neither is permission.
-//
-// 404, not 403, and the same body a genuine miss returns: distinguishing "not
-// yours" from "not there" turns id enumeration into a cross-tenant directory.
+// Upstreams may trust that header ONLY because a NetworkPolicy makes the gateway
+// their sole reachable caller. That premise is doing real work here — see #232,
+// which tracks the namespaces where it is not yet enforced.
 func (s *Server) callerOwnsThisInstance(w http.ResponseWriter, r *http.Request) bool {
-	caller := r.Header.Get(HeaderPrincipalTenant)
-	if caller == "" || s.tenant == "" || caller != s.tenant {
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": "household not found"})
-		return false
-	}
-	return true
+	return auth.RequireCallerTenantIs(w, r, s.tenant, notFoundBody)
 }
 
 func (s *Server) handleHealthz(w http.ResponseWriter, _ *http.Request) {
@@ -129,7 +121,7 @@ func (s *Server) handleHousehold(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !ok {
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": "household not found"})
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": notFoundBody})
 		return
 	}
 	vp := wealth.Aggregate(h)

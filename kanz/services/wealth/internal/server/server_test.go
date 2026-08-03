@@ -9,6 +9,8 @@ import (
 
 	"github.com/eighred/kanz/internal/wealth"
 	"github.com/eighred/kanz/services/wealth/internal/book"
+
+	"github.com/eighred/kanz/pkg/auth"
 )
 
 // testTenant is the tenant this instance serves. Every request below must carry
@@ -30,7 +32,7 @@ func newServer(t *testing.T) (*Server, book.Store) {
 func asTenant(method, path, tenant string) *http.Request {
 	req := httptest.NewRequest(method, path, nil)
 	if tenant != "" {
-		req.Header.Set(HeaderPrincipalTenant, tenant)
+		req.Header.Set(auth.HeaderPrincipalTenant, tenant)
 	}
 	return req
 }

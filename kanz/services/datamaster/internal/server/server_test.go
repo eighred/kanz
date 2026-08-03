@@ -16,6 +16,8 @@ import (
 	"github.com/eighred/kanz/services/datamaster/internal/pricing"
 	"github.com/eighred/kanz/services/datamaster/internal/projector"
 	"github.com/eighred/kanz/services/datamaster/internal/store"
+
+	"github.com/eighred/kanz/pkg/auth"
 )
 
 func day(y, m, d int) time.Time { return time.Date(y, time.Month(m), d, 0, 0, 0, 0, time.UTC) }
@@ -75,7 +77,7 @@ const testTenant = "acme"
 func asTenant(method, path, tenant string) *http.Request {
 	req := httptest.NewRequest(method, path, nil)
 	if tenant != "" {
-		req.Header.Set(HeaderPrincipalTenant, tenant)
+		req.Header.Set(auth.HeaderPrincipalTenant, tenant)
 	}
 	return req
 }
@@ -84,7 +86,7 @@ func asTenant(method, path, tenant string) *http.Request {
 func postAsTenant(path, tenant, body string) *http.Request {
 	req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(body))
 	if tenant != "" {
-		req.Header.Set(HeaderPrincipalTenant, tenant)
+		req.Header.Set(auth.HeaderPrincipalTenant, tenant)
 	}
 	return req
 }

@@ -23,6 +23,8 @@ import (
 	"testing"
 
 	"github.com/eighred/kanz/services/audit/internal/audit"
+
+	"github.com/eighred/kanz/pkg/auth"
 )
 
 // filterSpy is an audit.Store that records the Filter it was queried with.
@@ -53,7 +55,7 @@ func TestQuery_ScopesToThePrincipalsTenantNotTheQueryString(t *testing.T) {
 	srv := newAuditServer(spy)
 
 	req := httptest.NewRequest(http.MethodGet, "/v1/audit/events?tenant=victim-corp", nil)
-	req.Header.Set(HeaderPrincipalTenant, "acme")
+	req.Header.Set(auth.HeaderPrincipalTenant, "acme")
 	rr := httptest.NewRecorder()
 	srv.ServeHTTP(rr, req)
 
@@ -95,7 +97,7 @@ func TestQuery_ScopedRequestStillQueriesWithItsOtherFilters(t *testing.T) {
 	srv := newAuditServer(spy)
 
 	req := httptest.NewRequest(http.MethodGet, "/v1/audit/events?kind=authz&event_type=order.submitted&limit=7", nil)
-	req.Header.Set(HeaderPrincipalTenant, "acme")
+	req.Header.Set(auth.HeaderPrincipalTenant, "acme")
 	rr := httptest.NewRecorder()
 	srv.ServeHTTP(rr, req)
 
@@ -133,7 +135,7 @@ func TestGet_RefusesARecordBelongingToAnotherTenant(t *testing.T) {
 	srv := newAuditServer(st)
 
 	req := httptest.NewRequest(http.MethodGet, "/v1/audit/events/e1", nil)
-	req.Header.Set(HeaderPrincipalTenant, "acme")
+	req.Header.Set(auth.HeaderPrincipalTenant, "acme")
 	rr := httptest.NewRecorder()
 	srv.ServeHTTP(rr, req)
 
@@ -152,7 +154,7 @@ func TestGet_ReturnsTheCallersOwnRecord(t *testing.T) {
 	srv := newAuditServer(st)
 
 	req := httptest.NewRequest(http.MethodGet, "/v1/audit/events/e1", nil)
-	req.Header.Set(HeaderPrincipalTenant, "acme")
+	req.Header.Set(auth.HeaderPrincipalTenant, "acme")
 	rr := httptest.NewRecorder()
 	srv.ServeHTTP(rr, req)
 
@@ -185,7 +187,7 @@ func TestLineage_RefusesAnEventBelongingToAnotherTenant(t *testing.T) {
 	srv := newAuditServer(st)
 
 	req := httptest.NewRequest(http.MethodGet, "/v1/audit/lineage/e1", nil)
-	req.Header.Set(HeaderPrincipalTenant, "acme")
+	req.Header.Set(auth.HeaderPrincipalTenant, "acme")
 	rr := httptest.NewRecorder()
 	srv.ServeHTTP(rr, req)
 
@@ -216,7 +218,7 @@ func TestReport_ScopesTheTemplateFilterToThePrincipalsTenant(t *testing.T) {
 	srv := newAuditServer(spy)
 
 	req := httptest.NewRequest(http.MethodGet, "/v1/audit/reports/authz-decisions", nil)
-	req.Header.Set(HeaderPrincipalTenant, "acme")
+	req.Header.Set(auth.HeaderPrincipalTenant, "acme")
 	rr := httptest.NewRecorder()
 	srv.ServeHTTP(rr, req)
 
@@ -269,7 +271,7 @@ func TestVerify_AuthenticatedCallerStillGetsAGlobalAttestation(t *testing.T) {
 	srv := newAuditServer(spy)
 
 	req := httptest.NewRequest(http.MethodGet, "/v1/audit/verify", nil)
-	req.Header.Set(HeaderPrincipalTenant, "acme")
+	req.Header.Set(auth.HeaderPrincipalTenant, "acme")
 	rr := httptest.NewRecorder()
 	srv.ServeHTTP(rr, req)
 
@@ -292,7 +294,7 @@ func TestSOC2Evidence_ScopesToThePrincipalsTenant(t *testing.T) {
 	srv := newAuditServer(spy)
 
 	req := httptest.NewRequest(http.MethodGet, "/v1/soc2/evidence", nil)
-	req.Header.Set(HeaderPrincipalTenant, "acme")
+	req.Header.Set(auth.HeaderPrincipalTenant, "acme")
 	rr := httptest.NewRecorder()
 	srv.ServeHTTP(rr, req)
 
