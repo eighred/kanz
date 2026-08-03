@@ -172,7 +172,7 @@ spec:
           configMap: { name: grafana-datasources }
         - name: dashboard-provider
           configMap: { name: grafana-dashboard-provider }
-        # NOT optional, for the same reason as prometheus.yaml's slo-rules mount:
+        # NOT optional, for the same reason as prometheus.yaml's prometheus-rules mount:
         # with `optional: true` Grafana would start clean, provision zero
         # dashboards, serve a green /api/health, and an operator would find an
         # empty folder and no indication that anything was missing.

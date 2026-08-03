@@ -75,7 +75,10 @@ data:
       scrape_interval: 30s
       evaluation_interval: 30s
 
-    # The SLO rules, mounted from the slo-rules ConfigMap. They are NOT restated
+    # Every rule file, mounted from the prometheus-rules ConfigMap that
+    # apply-rules.sh builds from the tree. This glob matches the MOUNT, so it
+    # cannot detect a rule file the ConfigMap omitted — the script is what makes
+    # the set complete (#230). They are NOT restated
     # here: infra/observability/slo/ is the one copy, slo_test.yaml tests that
     # copy with promtool, and a second inlined copy would drift from the tested
     # one silently — Prometheus would load rules nobody had tested and promtool
@@ -222,18 +225,24 @@ spec:
       volumes:
         - name: config
           configMap: { name: prometheus-config }
-        # NOT optional. If the slo-rules ConfigMap is absent the pod stays in
-        # ContainerCreating and says so, which is the whole point: with
+        # NOT optional. If the prometheus-rules ConfigMap is absent the pod stays
+        # in ContainerCreating and says so, which is the whole point: with
         # `optional: true` Prometheus would start clean, load zero rules, serve a
-        # green /-/ready, and every SLO alert would simply never fire. "Nothing
+        # green /-/ready, and every alert would simply never fire. "Nothing
         # configured" must not look like "checked, and fine".
         #
-        # Create it from the one copy of the rules:
-        #   kubectl -n kanz-observability create configmap slo-rules \
-        #     --from-file=kanz/infra/observability/slo/slo.recording.rules.yaml \
-        #     --from-file=kanz/infra/observability/slo/slo.alerts.rules.yaml
+        # Create it with the script, which is the ONLY list of what loads:
+        #   kanz/infra/observability/apply-rules.sh
+        #
+        # It was two hand-written --from-file lines here until #230. That is a
+        # deployment contract written in prose: a rule file added outside slo/ was
+        # not in the ConfigMap, and since `rule_files` below globs the MOUNT it
+        # matched whatever the ConfigMap happened to hold — so an incomplete rule
+        # set was indistinguishable from a complete one. The script derives the
+        # list from the tree; test/arch/observability_rules_reachable_test.go
+        # fails the build if CI stages a different set than the script would.
         - name: rules
-          configMap: { name: slo-rules }
+          configMap: { name: prometheus-rules }
         - name: data
           emptyDir: {}
 ---
