@@ -272,14 +272,14 @@ var retryCertifiedConsumers = map[string]string{
 		"after a failed transaction is a clean redo and a retry after a committed one is " +
 		"a no-op read of the same row, never a skip of unfinished work.",
 
-	"services/accounting/cmd/accounting/main.go:205": "accounting (fills+cash): dispatches " +
+	"services/accounting/cmd/accounting/main.go:267": "accounting (fills+cash): dispatches " +
 		"consume.Folder.Handle and Folder.HandleCash, both of which resolve to " +
 		"ledger.Postgres.Append (services/accounting/internal/ledger/postgres.go:31) — a single " +
 		"INSERT ... ON CONFLICT (tenant_id, entry_id) DO NOTHING inside one transaction. " +
 		"No read-then-decide gap exists for a retry to land in; it either redoes an " +
 		"uncommitted write or no-ops an already-committed one.",
 
-	"services/accounting/cmd/accounting/main.go:307": "accounting (live FX): the sole handler is " +
+	"services/accounting/cmd/accounting/main.go:369": "accounting (live FX): the sole handler is " +
 		"fxfeed.LiveFX.Handler (services/accounting/internal/fxfeed/fxfeed.go:65) — an " +
 		"unconditional last-value cache write with no dedup branch at all. Re-running it " +
 		"with the same quote sets the same rate; there is nothing to skip.",
@@ -327,13 +327,13 @@ var retryCertifiedConsumers = map[string]string{
 		"resolved by downstream compaction (services/lake-sink/internal/cdc/sink.go:49). A retry " +
 		"redoes the row; it cannot skip it.",
 
-	"services/alternatives/cmd/alternatives/main.go:162": "alternatives: the sole handler is " +
+	"services/alternatives/cmd/alternatives/main.go:221": "alternatives: the sole handler is " +
 		"consume.Folder.Handle, which appends through fund.Postgres.Append " +
 		"(services/alternatives/internal/fund/postgres.go:30) — a single INSERT ... ON CONFLICT " +
 		"(tenant_id, event_id) DO NOTHING. Same atomic-claim shape as the ledger and audit " +
 		"stores.",
 
-	"services/wealth/cmd/wealth/main.go:170": "wealth: the sole handler is consume.Folder.Handle, " +
+	"services/wealth/cmd/wealth/main.go:228": "wealth: the sole handler is consume.Folder.Handle, " +
 		"which Puts through book.Postgres.Put (services/wealth/internal/book/postgres.go:30) — an " +
 		"unconditional last-write-wins UPSERT keyed on household_id. Re-running it with the " +
 		"same composition is a no-op change; there is no dedup branch to skip through.",

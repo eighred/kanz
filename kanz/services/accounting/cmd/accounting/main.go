@@ -126,9 +126,14 @@ func main() {
 	// Fill-folding consumer (WIRE-01b): fold live order.v1 fill FACTs into the
 	// same journal the server reads, so NAV/positions reflect live execution.
 	// Runs concurrently with the server; both share ctx so SIGTERM stops them
-	// together. Empty ACCOUNTING_NATS_URL ⇒ read/reconcile only (default).
+	// together, and both are JOINED before this function returns (see the
+	// shutdown block below — the WaitGroup is not decoration). Empty
+	// ACCOUNTING_NATS_URL ⇒ read/reconcile only (default).
+	var consumers sync.WaitGroup
 	if cfg.NATSURL != "" {
+		consumers.Add(1)
 		go func() {
+			defer consumers.Done()
 			if err := runConsumer(ctx, cfg, store, mesh, logger, obs); err != nil && !errors.Is(err, context.Canceled) {
 				logger.Error("fill consumer stopped with error", "err", err)
 				stop()
@@ -139,7 +144,9 @@ func main() {
 		// currency NAV (a stale/missing rate fails that valuation loudly) rather
 		// than bringing the service down, so it does not stop() on error.
 		if liveFX != nil {
+			consumers.Add(1)
 			go func() {
+				defer consumers.Done()
 				if err := runFXFeed(ctx, cfg, liveFX, mesh, logger, obs); err != nil && !errors.Is(err, context.Canceled) {
 					logger.Error("FX feed stopped with error", "err", err)
 				}
@@ -157,6 +164,61 @@ func main() {
 	defer cancel()
 	if err := httpSrv.Shutdown(shutdownCtx); err != nil {
 		logger.Error("http shutdown error", "err", err)
+	}
+
+	awaitConsumers(&consumers, logger)
+}
+
+// awaitConsumers blocks until the bus consumer goroutines have finished
+// draining. It is the LAST statement in main for a reason: everything that
+// tears this process down — closePub, closeStore (pool.Close), mesh.Close,
+// obs.Shutdown — is deferred, so it runs after main's body and cannot be
+// reordered ahead of this wait.
+//
+// #233: without it, main returned from <-ctx.Done(), ran a near-instant
+// httpSrv.Shutdown, and fired those defers while the consumer was still
+// folding. pkg/bus does not STOP a cancelled consumer, it DRAINS one —
+// Subscribe deliberately spends up to DrainGrace + drainStopSlack (5s + 2s,
+// pkg/bus/nats.go) after ctx.Done() handing buffered messages to the handler,
+// because Stop() would abandon them and reorder the replayed log on every
+// rolling deploy. Those handler calls landed on a closed pool, ledger Append
+// failed, and bus.WithDLQ republished each fill to dlq.order.order.filled and
+// ACKED it. tools/replay refuses dlq. subjects, so the fills were gone from the
+// book of record with no supplied way back — on every deploy.
+//
+// THE BOUND IS A context.WithTimeout(context.Background(), N*time.Second) ON
+// PURPOSE, not a bare time.After: that is the exact spelling
+// test/arch/pod_disruption_and_drain_test.go's worstServiceShutdownSeconds
+// greps for to derive every manifest's terminationGracePeriodSeconds from the
+// source. Rewriting it as a timer would drop 10s out of the derived drain
+// budget while the process still spends it, and nothing would say so.
+//
+// 10s against a 7s bus drain: enough headroom for the drain plus the consumer's
+// own teardown, short enough that 5s (obs flush) + 15s (HTTP) + 10s here stays
+// inside the 45s terminationGracePeriodSeconds every deploy manifest sets. When
+// it expires we close anyway and say so loudly — a handler that ignores context
+// cancellation must not hold the pod until the kubelet SIGKILLs it, which would
+// abandon strictly more than this timeout does.
+//
+// Copied, not shared: services/risk-engine/internal/app/lifecycle.go is the
+// reference implementation of this ordering and the right home for it once it
+// is promoted to a package all three composition roots can import.
+func awaitConsumers(consumers *sync.WaitGroup, logger *slog.Logger) {
+	joinCtx, joinCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer joinCancel()
+
+	drained := make(chan struct{})
+	go func() {
+		consumers.Wait()
+		close(drained)
+	}()
+	select {
+	case <-drained:
+		logger.Info("bus consumers drained")
+	case <-joinCtx.Done():
+		logger.Error("bus consumers did not finish draining within the join budget — closing the " +
+			"journal pool and bus clients anyway; any event still in a handler will fail its " +
+			"Append and be routed to dlq.<subject>")
 	}
 }
 
