@@ -29,6 +29,13 @@ type KafkaConfig struct {
 	// mTLS alone authenticates in the SPIFFE mesh, SASL is for brokers that
 	// require credential-based auth (managed Kafka, cross-trust-domain).
 	SASL sasl.Mechanism
+
+	// Metrics is the optional RED/USE exporter (OBS-01c). Subscribe uses it for
+	// kanz_bus_consume_halted_total — the only series that distinguishes a
+	// subscription that STOPPED to avoid skipping an event from one with nothing
+	// to do. Nil ⇒ no instrumentation, and the halt is then visible only as the
+	// error Subscribe returns.
+	Metrics *BusMetrics
 }
 
 type KafkaClient struct {
@@ -99,6 +106,15 @@ func (k *KafkaClient) Publish(ctx context.Context, msg Message) error {
 	return nil
 }
 
+// Subscribe drains topic into h on the consumer group, committing each offset
+// only after h has returned nil.
+//
+// A HANDLER ERROR ENDS THE SUBSCRIPTION. It does not skip the message and does
+// not read past it — see the handler-error branch below for why the alternative
+// loses events permanently. The caller gets a non-nil error naming the topic,
+// partition and offset it stopped on; both Kafka callers already treat that as
+// fatal to the process (services/lake-sink/cmd/lake-sink/main.go runSink,
+// which cancels its sibling subscriptions and returns).
 func (k *KafkaClient) Subscribe(ctx context.Context, topic, group string, h Handler) error {
 	r := kafka.NewReader(kafka.ReaderConfig{
 		Brokers:        k.cfg.Brokers,
@@ -131,9 +147,49 @@ func (k *KafkaClient) Subscribe(ctx context.Context, topic, group string, h Hand
 			out.Headers = headers
 		}
 		if err := h(ctx, out); err != nil {
-			// No commit — message is redelivered on next fetch. Bounded retry
-			// + DLQ routing land in EVT-17e.
-			continue
+			// STOP. Do not commit, and do not read past this message.
+			//
+			// This branch used to `continue` on the claim that the message would be
+			// "redelivered on next fetch". It is not, and #219 reproduced the loss
+			// against a real broker: FetchMessage has ALREADY advanced the reader's
+			// own position, so `continue` skips the message in-process, and the very
+			// next successful CommitMessages writes a group offset PAST it. A
+			// committed at offset 0, B skipped, C committed at offset 2 ⇒ group
+			// offset 3. Re-subscribing on the same group saw only later messages; B
+			// was unreachable forever — not on the next fetch, not after a rebalance,
+			// not after a restart. On the archival/CDC path that is silent permanent
+			// loss, and it is invisible: nothing logged, and lag reads normal because
+			// the offset advanced.
+			//
+			// Kafka has no per-message nack. The only way to keep a message reachable
+			// is to leave the group offset below it and stop consuming forward, which
+			// is what returning here does — r.Close() (deferred) leaves the group, and
+			// the next subscription resumes from the last COMMITTED offset, which is
+			// this message. That is the same answer the NATS side already gives
+			// (nats.go Nak) and the same one the archiver gives when its dead-letter
+			// produce fails (archive.deadLetter NAKs rather than acking an event that
+			// reached neither its topic nor the DLQ).
+			//
+			// WHAT ACTUALLY GETS HERE. Every bus.Consumer in the estate wires WithDLQ
+			// — test/arch/bus_dlq_test.go makes that true rather than merely available
+			// — so an ordinary handler failure resolves to a dead-letter publish and
+			// returns nil. An error reaching this line therefore means the DEAD-LETTER
+			// PATH ITSELF failed. There is nowhere left to put the event.
+			//
+			// CHOSEN OVER RETRYING THE DLQ PUBLISH HERE, deliberately. A bounded retry
+			// only postpones this decision — when the bound is spent the same choice
+			// returns — and it would be the THIRD retry layer over one publish:
+			// kafka-go's Writer already retries internally, and bus.WithRetry already
+			// bounds the handler above. Its cost is worse than the delay: a partition
+			// stalled behind a retry loop is stalled either way, but it stalls SILENTLY
+			// (no error returned, no restart, no counter) against a broker that is not
+			// answering. The trade this makes is throughput for reachability — a
+			// sustained dead-letter outage stops the sink, loudly, instead of quietly
+			// deleting whatever it could not park.
+			k.cfg.Metrics.observeConsumeHalt(m.Topic, group)
+			return fmt.Errorf(
+				"kafka: halting %s/%s at partition %d offset %d without committing — the handler failed and the dead-letter path did not accept it; the offset is held so the message stays reachable: %w",
+				m.Topic, group, m.Partition, m.Offset, err)
 		}
 		if err := r.CommitMessages(ctx, m); err != nil {
 			return fmt.Errorf("kafka commit: %w", err)
