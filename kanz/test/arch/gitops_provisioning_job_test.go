@@ -37,52 +37,57 @@ import (
 func TestEveryGitOpsSyncedJobIsRerunnableOrNamed(t *testing.T) {
 	root := moduleRoot(t)
 
-	paths, excluded := applicationSetSyncConfig(t, root)
-	if len(paths) == 0 {
-		t.Fatal("parsed no component paths from infra/gitops/applicationset.yaml — the scanner is " +
-			"broken, not the estate. A guard that examines nothing passes for the wrong reason")
+	// Every ApplicationSet, not just the app-of-apps: a one-shot Job under the
+	// preview generator's path is exactly as un-rerunnable as one under the main
+	// app's. The sync surface is modelled once in gitops_sync_surface_test.go, so
+	// there is one parser of directory.exclude rather than one per guard.
+	sources := gitOpsSyncSources(t, root)
+	if len(sources) == 0 {
+		t.Fatal("found no ApplicationSet under infra/gitops — the scanner is broken, not the " +
+			"estate. A guard that examines nothing passes for the wrong reason")
 	}
 
-	seenExcluded := map[string]bool{}
 	checked := 0
 
-	for _, rel := range paths {
-		dir := filepath.Join(root, filepath.FromSlash(strings.TrimPrefix(rel, "kanz/")))
-		manifests, err := filepath.Glob(filepath.Join(dir, "*.yaml"))
-		if err != nil {
-			t.Fatalf("glob %s: %v", dir, err)
+	for _, src := range sources {
+		if len(src.paths) == 0 {
+			t.Fatalf("%s (%s) declares no sync path this guard can resolve — it would then be "+
+				"exempt from every question below without saying so", src.manifest, src.name)
 		}
-		for _, m := range manifests {
-			base := filepath.Base(m)
-			body, err := os.ReadFile(m)
-			if err != nil {
-				t.Fatalf("read %s: %v", m, err)
-			}
-			if !manifestDeclaresJob(t, string(body)) {
-				continue
-			}
-			checked++
+		for _, p := range src.paths {
+			for rel, abs := range syncedFiles(t, root, src, p) {
+				if ext := strings.ToLower(filepath.Ext(rel)); ext != ".yaml" && ext != ".yml" {
+					continue
+				}
+				body, err := os.ReadFile(abs)
+				if err != nil {
+					t.Fatalf("read %s: %v", abs, err)
+				}
+				if !manifestDeclaresJob(t, string(body)) {
+					continue
+				}
+				checked++
 
-			if excluded[base] {
-				// Named as not-synced. It is then applied by its own tooling, and
-				// the one-shot property is somebody else's contract to keep.
-				seenExcluded[base] = true
-				continue
+				if src.excluded[rel] {
+					// Named as not-synced. It is then applied by its own tooling, and
+					// the one-shot property is somebody else's contract to keep.
+					continue
+				}
+				if jobHasArgoHook(t, string(body)) {
+					continue
+				}
+				t.Errorf("%s declares a Job in GitOps-synced path %q, but it is neither a re-runnable "+
+					"sync hook nor excluded from syncing\n\n"+
+					"Argo CD does not re-run a completed Job, so whatever this provisions is created "+
+					"once and never repaired. When it is lost the cluster keeps reporting Synced and "+
+					"Healthy, and recovery becomes a command someone has to remember during an "+
+					"incident.\n\n"+
+					"Either add, if the Job is idempotent:\n"+
+					"    argocd.argoproj.io/hook: PostSync\n"+
+					"    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation\n"+
+					"or add %q to %s's directory.exclude list, which says in writing that something "+
+					"else applies it.", rel, p, rel, src.manifest)
 			}
-			if jobHasArgoHook(t, string(body)) {
-				continue
-			}
-			t.Errorf("%s declares a Job in GitOps-synced path %q, but it is neither a re-runnable "+
-				"sync hook nor excluded from syncing\n\n"+
-				"Argo CD does not re-run a completed Job, so whatever this provisions is created "+
-				"once and never repaired. When it is lost the cluster keeps reporting Synced and "+
-				"Healthy, and recovery becomes a command someone has to remember during an "+
-				"incident.\n\n"+
-				"Either add, if the Job is idempotent:\n"+
-				"    argocd.argoproj.io/hook: PostSync\n"+
-				"    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation\n"+
-				"or add %q to the ApplicationSet's directory.exclude list, which says in writing "+
-				"that something else applies it.", base, rel, base)
 		}
 	}
 
@@ -91,92 +96,11 @@ func TestEveryGitOpsSyncedJobIsRerunnableOrNamed(t *testing.T) {
 			"detection broke. Both mean this guard stopped guarding")
 	}
 
-	// DEAD-ENTRY CHECK. An exclusion naming a file that no longer declares a Job
-	// in a synced path is a claim nobody exercises: it reads as a considered
-	// decision while protecting nothing, and it is the entry a future reader
-	// trusts when adding the next one.
-	for name := range excluded {
-		if seenExcluded[name] {
-			continue
-		}
-		if fileExistsInSyncedPaths(t, root, paths, name) {
-			continue // present, but declares no Job — excluded for another reason
-		}
-		t.Errorf("ApplicationSet directory.exclude names %q, but no file by that name exists in any "+
-			"synced component path\n\n"+
-			"Either it was renamed or removed. An exclusion that outlives its subject makes the "+
-			"list look considered while it is stale — delete the entry.", name)
-	}
-}
-
-// applicationSetSyncConfig reads the component paths and the exclude list from
-// the ApplicationSet itself rather than restating them here. A second copy of
-// this list is the failure it exists to prevent: it would keep passing after
-// someone adds a component, which is the moment a new unhooked Job appears.
-func applicationSetSyncConfig(t *testing.T, root string) (paths []string, excluded map[string]bool) {
-	t.Helper()
-	body := readFile(t, filepath.Join(root, "infra", "gitops", "applicationset.yaml"))
-
-	var doc struct {
-		Spec struct {
-			Generators []struct {
-				Matrix struct {
-					Generators []struct {
-						List struct {
-							Elements []map[string]string `yaml:"elements"`
-						} `yaml:"list"`
-					} `yaml:"generators"`
-				} `yaml:"matrix"`
-			} `yaml:"generators"`
-			Template struct {
-				Spec struct {
-					Source struct {
-						Directory struct {
-							Exclude string `yaml:"exclude"`
-						} `yaml:"directory"`
-					} `yaml:"source"`
-				} `yaml:"spec"`
-			} `yaml:"template"`
-		} `yaml:"spec"`
-	}
-	if err := yaml.Unmarshal([]byte(body), &doc); err != nil {
-		t.Fatalf("parse applicationset.yaml: %v", err)
-	}
-
-	for _, g := range doc.Spec.Generators {
-		for _, inner := range g.Matrix.Generators {
-			for _, el := range inner.List.Elements {
-				if p := el["path"]; p != "" {
-					paths = append(paths, p)
-				}
-			}
-		}
-	}
-
-	// exclude is a brace-list glob: "{a.yaml,b.sh,c.yaml}". Only literal names are
-	// treated as exclusions — a wildcard entry is rejected outright, because a
-	// pattern is what got this wrong before: `*-job.yaml` dropped the bootstrap
-	// that creates the spine and admitted the dev-plaintext one that must never
-	// run against SPIRE. Excluding by shape cannot express "safe to sync".
-	excluded = map[string]bool{}
-	raw := strings.Trim(strings.TrimSpace(doc.Spec.Template.Spec.Source.Directory.Exclude), "{}")
-	for _, e := range strings.Split(raw, ",") {
-		e = strings.TrimSpace(e)
-		if e == "" {
-			continue
-		}
-		if strings.ContainsAny(e, "*?[") {
-			t.Errorf("ApplicationSet directory.exclude contains the pattern %q\n\n"+
-				"Exclusions must be literal filenames. A glob selects by NAME SHAPE, and the "+
-				"shape does not correlate with whether a manifest is safe to sync: `*-job.yaml` "+
-				"excluded bootstrap-job.yaml (which creates every JetStream stream) while "+
-				"admitting bootstrap-job-dev-plaintext.yaml (whose header says never to apply it "+
-				"to a cluster with SPIRE). Name the files.", e)
-			continue
-		}
-		excluded[e] = true
-	}
-	return paths, excluded
+	// The dead-entry check that used to live here now covers every ApplicationSet
+	// rather than this one guard's view of the app-of-apps: see
+	// TestNoGitOpsExclusionOutlivesItsFile in gitops_sync_surface_test.go. Its
+	// question — does this exclusion still name a file? — was never specific to
+	// Jobs, and two copies of it would drift.
 }
 
 // manifestDeclaresJob reports whether any document in a multi-document manifest
@@ -225,15 +149,4 @@ func jobHasArgoHook(t *testing.T, body string) bool {
 		}
 	}
 	return jobs > 0 && jobs == hooked
-}
-
-func fileExistsInSyncedPaths(t *testing.T, root string, paths []string, name string) bool {
-	t.Helper()
-	for _, rel := range paths {
-		dir := filepath.Join(root, filepath.FromSlash(strings.TrimPrefix(rel, "kanz/")))
-		if _, err := os.Stat(filepath.Join(dir, name)); err == nil {
-			return true
-		}
-	}
-	return false
 }
