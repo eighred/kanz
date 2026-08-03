@@ -111,36 +111,115 @@ const tuiClientFile = "internal/tui/gateway/client.go"
 // exactly ONE bound: the context its caller sets. A second one cannot be ordered against
 // the four consts, because it does not live with them.
 func TestTUIHTTPClientCarriesNoTimeoutOfItsOwn(t *testing.T) {
-	path := filepath.Join(moduleRoot(t), filepath.FromSlash(tuiClientFile))
+	sites := httpClientTimeoutSites(t, filepath.Join(moduleRoot(t), filepath.FromSlash(tuiClientFile)))
+
+	if sites.inLiteral > 0 {
+		t.Errorf("%s constructs its http.Client with a Timeout field.\n\n"+
+			"That bound is enforced independently of the request context, so every call "+
+			"on this client is bounded by min(context, this) and the SMALLER wins "+
+			"invisibly. If it lands under provision.probeTimeout (60s), Test Connection "+
+			"dies client-side with a message about the gateway while probing a host that "+
+			"may be healthy — and no ordering test over the four consts can see it, "+
+			"because this bound does not live with them. Bound the CALL instead: pass a "+
+			"context deadline (Config.CallTimeout for reads, testConnTimeout for the "+
+			"probe).", tuiClientFile)
+	}
+	if sites.byAssignment > 0 {
+		t.Errorf("%s assigns a .Timeout field after construction — see this test's "+
+			"failure text for why the client must carry no bound of its own",
+			tuiClientFile)
+	}
+
+	if sites.clients == 0 {
+		t.Fatalf("%s no longer constructs an http.Client literal, so this guard asserted "+
+			"nothing. If the client moved, point tuiClientFile at its new home; if the TUI now "+
+			"uses a client built elsewhere, that client needs this same rule", tuiClientFile)
+	}
+}
+
+// gatewayProxyClientFile builds the client every PROXIED request travels on: the
+// api-gateway's forwarder to wealth, datamaster, tv-sync and copilot.
+const gatewayProxyClientFile = "services/api-gateway/cmd/api-gateway/main.go"
+
+// TestGatewayProxyClientCarriesNoTimeoutOfItsOwn is the rule above, applied where it had
+// ALREADY been broken.
+//
+// The TUI guard was written for one file, and it was read as being about the TUI. It is
+// not — it is about http.Client.Timeout, and this file carried one: the mTLS proxy client
+// was built with Timeout: 30s. Every consequence the TUI comment predicts had come true
+// here, unobserved:
+//
+//   - It capped POST /v1/ask at 30s while the copilot's own completion budget is FIVE
+//     minutes (openRouterTimeout), so a long tool-use turn died at the gateway with
+//     "Client.Timeout exceeded while awaiting headers" — a message about the network,
+//     printed about a copilot that was working.
+//   - It applied ONLY on the mTLS branch. With no SPIFFE socket the client was
+//     http.DefaultClient and the same call was unbounded, so dev and production had
+//     different limits for no stated reason and the dev path could hang forever.
+//
+// The bound now lives on the call (proxy.forwardBudget), which is per-upstream, readable
+// by a test, and cancelled when the caller hangs up. A Timeout field here would silently
+// take it back.
+func TestGatewayProxyClientCarriesNoTimeoutOfItsOwn(t *testing.T) {
+	sites := httpClientTimeoutSites(t, filepath.Join(moduleRoot(t), filepath.FromSlash(gatewayProxyClientFile)))
+
+	if sites.inLiteral > 0 || sites.byAssignment > 0 {
+		t.Errorf("%s gives its proxy http.Client a Timeout.\n\n"+
+			"That bound is enforced independently of the request context, so every proxied "+
+			"call becomes min(proxy.forwardBudget, this) with the smaller winning invisibly "+
+			"— and it cannot be ordered against the per-upstream budgets because it does not "+
+			"live with them. It is also unreachable from the plaintext branch, so it bounds "+
+			"production and not dev. This is the 30s that capped /v1/ask under the copilot's "+
+			"own five-minute budget. Change proxy.forwardBudget instead: it is per-upstream, "+
+			"it is read by this file's other guards, and it dies with the caller.",
+			gatewayProxyClientFile)
+	}
+
+	if sites.clients == 0 {
+		t.Fatalf("%s no longer constructs an http.Client literal, so this guard asserted "+
+			"nothing. The proxy transport did not stop existing — find where it moved and "+
+			"point gatewayProxyClientFile there, or the no-client-timeout rule is now "+
+			"unenforced on the path every wealth/datamaster/tv-sync/copilot read takes",
+			gatewayProxyClientFile)
+	}
+}
+
+// clientTimeoutSites counts what httpClientTimeoutSites found in one file.
+type clientTimeoutSites struct {
+	clients      int // http.Client composite literals
+	inLiteral    int // ... of which set Timeout in the literal
+	byAssignment int // `x.Timeout = ...` writes, which the literal scan cannot see
+}
+
+// httpClientTimeoutSites is the mechanics behind every no-client-timeout guard here.
+//
+// It carries NO failure text on purpose. Each caller says what a Timeout costs on ITS
+// path — the TUI's is a misdiagnosed Test Connection, the gateway's is a truncated
+// copilot answer — and those two sentences are the whole value of the guard. A shared
+// message would be true of both and useful to neither.
+func httpClientTimeoutSites(t *testing.T, path string) clientTimeoutSites {
+	t.Helper()
 
 	f, err := parser.ParseFile(token.NewFileSet(), path, nil, 0)
 	if err != nil {
 		t.Fatalf("parse %s: %v", path, err)
 	}
 
-	var clients int
+	var out clientTimeoutSites
 	ast.Inspect(f, func(n ast.Node) bool {
 		switch v := n.(type) {
 		case *ast.CompositeLit:
 			if !isHTTPClientType(v.Type) {
 				return true
 			}
-			clients++
+			out.clients++
 			for _, elt := range v.Elts {
 				kv, ok := elt.(*ast.KeyValueExpr)
 				if !ok {
 					continue
 				}
 				if key, ok := kv.Key.(*ast.Ident); ok && key.Name == "Timeout" {
-					t.Errorf("%s constructs its http.Client with a Timeout field.\n\n"+
-						"That bound is enforced independently of the request context, so every call "+
-						"on this client is bounded by min(context, this) and the SMALLER wins "+
-						"invisibly. If it lands under provision.probeTimeout (60s), Test Connection "+
-						"dies client-side with a message about the gateway while probing a host that "+
-						"may be healthy — and no ordering test over the four consts can see it, "+
-						"because this bound does not live with them. Bound the CALL instead: pass a "+
-						"context deadline (Config.CallTimeout for reads, testConnTimeout for the "+
-						"probe).", tuiClientFile)
+					out.inLiteral++
 				}
 			}
 		case *ast.AssignStmt:
@@ -148,20 +227,13 @@ func TestTUIHTTPClientCarriesNoTimeoutOfItsOwn(t *testing.T) {
 			for _, lhs := range v.Lhs {
 				sel, ok := lhs.(*ast.SelectorExpr)
 				if ok && sel.Sel.Name == "Timeout" {
-					t.Errorf("%s assigns a .Timeout field after construction — see this test's "+
-						"failure text for why the client must carry no bound of its own",
-						tuiClientFile)
+					out.byAssignment++
 				}
 			}
 		}
 		return true
 	})
-
-	if clients == 0 {
-		t.Fatalf("%s no longer constructs an http.Client literal, so this guard asserted "+
-			"nothing. If the client moved, point tuiClientFile at its new home; if the TUI now "+
-			"uses a client built elsewhere, that client needs this same rule", tuiClientFile)
-	}
+	return out
 }
 
 // ingressFile publishes the gateway to the public internet; in production every Test
@@ -210,13 +282,54 @@ func TestIngressProxyTimeoutsExceedTheTUIBound(t *testing.T) {
 	tuiBound := durationConst(t,
 		filepath.Join(root, filepath.FromSlash("internal/tui/universe/poller.go")), "testConnTimeout")
 
+	annotations := apiGatewayIngressAnnotations(t, root)
+
+	for _, key := range ingressProxyTimeoutAnnotations {
+		raw, ok := annotations[key]
+		if !ok {
+			t.Errorf("%s carries no %s annotation.\n\n"+
+				"That does NOT mean the request is unbounded at the edge — it means "+
+				"ingress-nginx applies its 60s DEFAULT, which is under testConnTimeout (%s) "+
+				"and under the operator's own probe wait, and whose clock starts before "+
+				"theirs. Every slow Test Connection then dies as a 504 from nginx and the "+
+				"TUI blames the gateway or the network while probing a host that may be "+
+				"perfectly healthy. Restore it above %s.", ingressFile, key, tuiBound, tuiBound)
+			continue
+		}
+		secs, perr := strconv.Atoi(strings.TrimSpace(raw))
+		if perr != nil {
+			t.Errorf("%s sets %s to %q, which is not a whole number of seconds. nginx "+
+				"rejects a malformed value and falls back to its 60s default, so this "+
+				"reads as a bound that is set and is not.", ingressFile, key, raw)
+			continue
+		}
+		if got := time.Duration(secs) * time.Second; got <= tuiBound {
+			t.Errorf("%s sets %s = %s, which does not exceed the TUI's testConnTimeout "+
+				"(%s, internal/tui/universe/poller.go).\n\n"+
+				"nginx would cut the connection before the TUI's own bound expires, and "+
+				"before that the operator's probeTimeout — so the caller gets a 504 about "+
+				"the edge instead of the probe verdict only the operator can give. Raise "+
+				"this annotation rather than lowering testConnTimeout: the inner bounds are "+
+				"sized to real work (Job create, pod scheduling, image pull, a 10s dial).",
+				ingressFile, key, got, tuiBound)
+		}
+	}
+}
+
+// apiGatewayIngressAnnotations returns the annotations on the api-gateway Ingress.
+//
+// It FAILS rather than returning an empty map when the document is absent: a guard that
+// matches no document passes forever once the Ingress is renamed or the manifest moved,
+// and every bound read out of this file is the outermost one on a real call.
+func apiGatewayIngressAnnotations(t *testing.T, root string) map[string]string {
+	t.Helper()
+
 	path := filepath.Join(root, filepath.FromSlash(ingressFile))
 	body, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("read %s: %v", path, err)
 	}
 
-	var found bool
 	dec := yaml.NewDecoder(strings.NewReader(string(body)))
 	for {
 		var d ingressDoc
@@ -227,50 +340,209 @@ func TestIngressProxyTimeoutsExceedTheTUIBound(t *testing.T) {
 		if derr != nil {
 			t.Fatalf("parse %s: %v", path, derr)
 		}
-		if d.Kind != "Ingress" || d.Metadata.Name != "api-gateway" {
+		if d.Kind == "Ingress" && d.Metadata.Name == "api-gateway" {
+			return d.Metadata.Annotations
+		}
+	}
+
+	t.Fatalf("no Ingress named api-gateway found in %s — if it was renamed or split out, "+
+		"point ingressFile at its new home; the edge bound it carries is the outermost "+
+		"deadline on every request this gateway serves", ingressFile)
+	return nil
+}
+
+// gatewayServerFile builds the one http.Server the api-gateway listens on.
+const gatewayServerFile = "services/api-gateway/cmd/api-gateway/main.go"
+
+// gatewayHandlerBudgets are every per-request deadline a handler on that server can set.
+// WriteTimeout is a bound on ALL of them at once, so it has to clear the largest.
+var gatewayHandlerBudgets = []deadlineLayer{
+	{"testConnectionTimeout", "services/api-gateway/internal/control/control.go",
+		"POST /v1/control/test-connection"},
+	{"callTimeout", "services/api-gateway/internal/control/control.go",
+		"every other control-plane RPC"},
+	{"copilotForwardTimeout", "services/api-gateway/internal/proxy/proxy.go",
+		"a proxied POST /v1/ask"},
+	{"readForwardTimeout", "services/api-gateway/internal/proxy/proxy.go",
+		"a proxied wealth/datamaster/tv-sync read"},
+}
+
+// nginxUpstreamKeepaliveDefault is ingress-nginx's `upstream-keepalive-timeout` default:
+// how long IT keeps an idle connection to this gateway pooled for reuse. The gateway's
+// IdleTimeout has to outlast it — see the test below.
+const nginxUpstreamKeepaliveDefault = 60 * time.Second
+
+// TestGatewayServerBoundsTheConnectionItself covers the two leaks NO request deadline can
+// reach, and the ordering that decides whether the request deadline is ever heard from.
+//
+// Every other bound in this file is on an outbound CALL. None of them bounds the inbound
+// connection, and until #235 this server set only ReadHeaderTimeout — which stops timing
+// at the last header byte. Two consequences, both on the gateway that is the sole ingress
+// for ORDERS:
+//
+//   - no WriteTimeout: a client that never finishes reading the response, or an
+//     intermediary that stops reading, pins a goroutine and an fd indefinitely;
+//   - no IdleTimeout: net/http falls back to ReadTimeout, which is ALSO unset, so there is
+//     NO idle bound and every keep-alive connection is held until the peer closes it.
+//
+// ABSENCE MUST FAIL, NOT JUST A BAD VALUE — for IdleTimeout especially, since deleting it
+// does not loosen the bound, it removes the bound. That is the bug, and a guard that only
+// checked the number when present would pass on the one edit most likely to restore it.
+//
+// AND WriteTimeout IS ITSELF IN THE NESTING. It applies to every route, so if it falls
+// below the longest handler budget it silently becomes the real limit — and it is the
+// worst-behaved limit on the box: the connection is severed with no status, no body and
+// nothing said about which upstream was slow. It must exceed all of them and stay under
+// the edge's proxy-read-timeout, so the gateway gives up before nginx does and is the
+// layer that reports it.
+func TestGatewayServerBoundsTheConnectionItself(t *testing.T) {
+	root := moduleRoot(t)
+	fields := httpServerFields(t, filepath.Join(root, filepath.FromSlash(gatewayServerFile)))
+
+	consequences := map[string]string{
+		"WriteTimeout": "a caller that stops reading the response — or a wedged intermediary " +
+			"— pins a goroutine and a file descriptor for as long as it likes, and this " +
+			"gateway is the only way an order reaches the spine",
+		"IdleTimeout": "net/http then falls back to ReadTimeout, which is unset too, so there " +
+			"is NO idle bound at all and every keep-alive connection is held until the peer " +
+			"closes it. Under a pooling proxy that is the steady state, not a slow leak",
+	}
+
+	got := map[string]time.Duration{}
+	for _, field := range []string{"WriteTimeout", "IdleTimeout"} {
+		ident, present := fields[field]
+		if !present {
+			t.Errorf("%s builds its http.Server without %s.\n\n"+
+				"Absence is not a looser bound, it is NO bound: %s.",
+				gatewayServerFile, field, consequences[field])
 			continue
 		}
-		found = true
+		if ident == "" {
+			t.Errorf("%s sets %s to something other than a named const, so no test can read "+
+				"it and order it against the handler budgets it has to clear. Give it a const "+
+				"in this file, as gatewayWriteTimeout/gatewayIdleTimeout were.",
+				gatewayServerFile, field)
+			continue
+		}
+		got[field] = durationConst(t, filepath.Join(root, filepath.FromSlash(gatewayServerFile)), ident)
+	}
+	if len(got) != 2 {
+		return // the failures above say everything; the orderings below would only repeat them
+	}
 
-		for _, key := range ingressProxyTimeoutAnnotations {
-			raw, ok := d.Metadata.Annotations[key]
-			if !ok {
-				t.Errorf("%s carries no %s annotation.\n\n"+
-					"That does NOT mean the request is unbounded at the edge — it means "+
-					"ingress-nginx applies its 60s DEFAULT, which is under testConnTimeout (%s) "+
-					"and under the operator's own probe wait, and whose clock starts before "+
-					"theirs. Every slow Test Connection then dies as a 504 from nginx and the "+
-					"TUI blames the gateway or the network while probing a host that may be "+
-					"perfectly healthy. Restore it above %s.", ingressFile, key, tuiBound, tuiBound)
-				continue
-			}
-			secs, perr := strconv.Atoi(strings.TrimSpace(raw))
-			if perr != nil {
-				t.Errorf("%s sets %s to %q, which is not a whole number of seconds. nginx "+
-					"rejects a malformed value and falls back to its 60s default, so this "+
-					"reads as a bound that is set and is not.", ingressFile, key, raw)
-				continue
-			}
-			if got := time.Duration(secs) * time.Second; got <= tuiBound {
-				t.Errorf("%s sets %s = %s, which does not exceed the TUI's testConnTimeout "+
-					"(%s, internal/tui/universe/poller.go).\n\n"+
-					"nginx would cut the connection before the TUI's own bound expires, and "+
-					"before that the operator's probeTimeout — so the caller gets a 504 about "+
-					"the edge instead of the probe verdict only the operator can give. Raise "+
-					"this annotation rather than lowering testConnTimeout: the inner bounds are "+
-					"sized to real work (Job create, pod scheduling, image pull, a 10s dial).",
-					ingressFile, key, got, tuiBound)
-			}
+	// WriteTimeout against every handler budget on this server.
+	for _, budget := range gatewayHandlerBudgets {
+		inner := durationConst(t, filepath.Join(root, filepath.FromSlash(budget.file)), budget.name)
+		if got["WriteTimeout"] <= inner {
+			t.Errorf("gatewayWriteTimeout (%s, %s) does not exceed %s (%s, %s) = %s, the budget "+
+				"for %s.\n\n"+
+				"WriteTimeout applies to EVERY route, so it becomes the real limit on that one — "+
+				"and it fires by severing the connection: no status, no body, nothing naming the "+
+				"upstream that was slow, where the handler's own deadline produces a 502/504 and "+
+				"a log line. Raise gatewayWriteTimeout rather than cutting %s, which is sized to "+
+				"real work.",
+				got["WriteTimeout"], gatewayServerFile, budget.name, budget.file, budget.label,
+				inner, budget.label, budget.name)
 		}
 	}
 
-	// Non-vacuity: a guard that matches no document passes forever once the Ingress is
-	// renamed or the manifest moved.
-	if !found {
-		t.Fatalf("no Ingress named api-gateway found in %s — if it was renamed or split out, "+
-			"point ingressFile at its new home; the edge bound it carries is the outermost "+
-			"deadline on every Test Connection in production", ingressFile)
+	// WriteTimeout against the edge. Both nginx bounds are read, because either one
+	// firing first takes the diagnosis out of the gateway's hands.
+	annotations := apiGatewayIngressAnnotations(t, root)
+	for _, key := range ingressProxyTimeoutAnnotations {
+		raw, ok := annotations[key]
+		if !ok {
+			continue // TestIngressProxyTimeoutsExceedTheTUIBound owns the absence case
+		}
+		secs, err := strconv.Atoi(strings.TrimSpace(raw))
+		if err != nil {
+			continue // and the malformed case
+		}
+		if edge := time.Duration(secs) * time.Second; got["WriteTimeout"] >= edge {
+			t.Errorf("gatewayWriteTimeout (%s) is not below the edge's %s = %s (%s).\n\n"+
+				"nginx would cut first, and the caller would get its anonymous 504 instead of "+
+				"anything this gateway could tell them — while the gateway went on holding the "+
+				"goroutine and the socket, which is the leak WriteTimeout exists to stop. The "+
+				"gateway must be the layer that gives up first.",
+				got["WriteTimeout"], key, edge, ingressFile)
+		}
 	}
+
+	// IdleTimeout against the proxy that pools connections to this server.
+	if got["IdleTimeout"] <= nginxUpstreamKeepaliveDefault {
+		t.Errorf("gatewayIdleTimeout (%s) does not exceed ingress-nginx's "+
+			"upstream-keepalive-timeout default (%s).\n\n"+
+			"Too SHORT is its own fault, not a safer one: the gateway closes idle connections "+
+			"nginx still believes it may reuse, and the race surfaces as intermittent 502s "+
+			"under no load at all — harder to read than the leak this field closes. If the "+
+			"edge's keepalive is retuned, retune this above it.",
+			got["IdleTimeout"], nginxUpstreamKeepaliveDefault)
+	}
+}
+
+// httpServerFields returns each keyed field of the one http.Server literal in path,
+// mapped to the identifier it is set to — or "" when it is set to anything other than a
+// bare identifier (an inline `105 * time.Second` cannot be ordered against anything,
+// because durationConst has no const to read).
+//
+// It insists on exactly ONE http.Server literal. Two would mean this binary listens on
+// two servers and the caller is asserting about whichever the AST reached first, which is
+// how a guard goes green while the served port is unbounded.
+func httpServerFields(t *testing.T, path string) map[string]string {
+	t.Helper()
+
+	f, err := parser.ParseFile(token.NewFileSet(), path, nil, 0)
+	if err != nil {
+		t.Fatalf("parse %s: %v", path, err)
+	}
+
+	var servers int
+	out := map[string]string{}
+	ast.Inspect(f, func(n ast.Node) bool {
+		lit, ok := n.(*ast.CompositeLit)
+		if !ok || !isHTTPServerType(lit.Type) {
+			return true
+		}
+		servers++
+		for _, elt := range lit.Elts {
+			kv, ok := elt.(*ast.KeyValueExpr)
+			if !ok {
+				continue
+			}
+			key, ok := kv.Key.(*ast.Ident)
+			if !ok {
+				continue
+			}
+			name := ""
+			if id, ok := kv.Value.(*ast.Ident); ok {
+				name = id.Name
+			}
+			out[key.Name] = name
+		}
+		return true
+	})
+
+	if servers != 1 {
+		t.Fatalf("%s constructs %d http.Server literals, want exactly 1. This guard reads the "+
+			"connection bounds off THE server this binary listens on; with none it asserts "+
+			"nothing, and with several it asserts about an arbitrary one while another port "+
+			"may be unbounded", path, servers)
+	}
+	return out
+}
+
+// isHTTPServerType reports whether a composite-literal type is http.Server, including
+// through the `&http.Server{...}` the code actually writes.
+func isHTTPServerType(e ast.Expr) bool {
+	if star, ok := e.(*ast.StarExpr); ok {
+		e = star.X
+	}
+	sel, ok := e.(*ast.SelectorExpr)
+	if !ok || sel.Sel.Name != "Server" {
+		return false
+	}
+	pkg, ok := sel.X.(*ast.Ident)
+	return ok && pkg.Name == "http"
 }
 
 // isHTTPClientType reports whether a composite-literal type is http.Client, including
