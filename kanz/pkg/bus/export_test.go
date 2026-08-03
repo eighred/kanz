@@ -30,6 +30,11 @@ const MinTunedAckWait = minTunedAckWait
 // RedisClaimLease is the cross-pod claim lease.
 const RedisClaimLease = redisClaimLease
 
+// DefaultDedupTTL is how long a committed idempotency_key keeps suppressing
+// dispatches. Exposed so the redrive tests can assert the ordering that makes
+// the DLQ drain work at all — see DefaultMinAge.
+const DefaultDedupTTL = defaultDedupTTL
+
 // ExportedDLQHeaders is dlqHeaders — the exact header set Consumer.publishDLQ
 // stamps when it parks a message.
 //

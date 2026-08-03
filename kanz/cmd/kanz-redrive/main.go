@@ -133,6 +133,19 @@ func run(args []string, out io.Writer) error {
 	// error does not know that.
 	fmt.Fprintf(out, "%s: inspected %d, redriven %d\n", opt.subject, stats.Inspected, stats.Redriven)
 
+	// NOT a footnote. Lowering --min-age is the one way this tool can report
+	// "redriven N" for messages the receiving consumer silently skipped as
+	// duplicates, and it acked the parked copy on the way past. An operator who
+	// scrolls past this line will believe orders were recovered that were not.
+	if stats.SuppressionRisk > 0 {
+		fmt.Fprintf(out, "\nWARNING — %d of those were younger than the consumer's dedup window.\n"+
+			"A copy arriving inside that window is skipped and acked WITHOUT the handler running,\n"+
+			"and this tool runs in a different process so it cannot tell which happened.\n"+
+			"Confirm downstream that the work actually occurred. Redriving at the default\n"+
+			"--min-age (%s) avoids the ambiguity entirely.\n",
+			stats.SuppressionRisk, bus.DefaultMinAge)
+	}
+
 	if runErr != nil {
 		var refusal *bus.RedriveRefusal
 		if errors.As(runErr, &refusal) {
