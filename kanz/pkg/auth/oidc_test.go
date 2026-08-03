@@ -8,6 +8,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -97,6 +98,15 @@ func (f *oidcFixture) auth(t *testing.T, mut func(*OIDCConfig)) *OIDCAuthenticat
 		t.Fatal(err)
 	}
 	return a
+}
+
+// pinClock freezes the authenticator's clock and returns an advance function,
+// so key-cache ages can be crossed without sleeping.
+func pinClock(a *OIDCAuthenticator) func(time.Duration) {
+	var mu sync.Mutex
+	at := time.Now()
+	a.now = func() time.Time { mu.Lock(); defer mu.Unlock(); return at }
+	return func(d time.Duration) { mu.Lock(); defer mu.Unlock(); at = at.Add(d) }
 }
 
 func baseClaims(iss string) jwt.Claims {
@@ -222,11 +232,98 @@ func TestOIDCAuthenticate_KeyRotation(t *testing.T) {
 	}
 }
 
+// A key WITHDRAWN at the provider must stop verifying without a restart. This
+// is revocation, and it is a different path from rotation: after an overlap
+// rollout the revoked key is one we already hold, so no unknown kid will ever
+// force the cache miss that TestOIDCAuthenticate_KeyRotation relies on. Only
+// the MaxKeyAge ceiling evicts it.
+func TestOIDCAuthenticate_RevokedKeyStopsVerifying(t *testing.T) {
+	f := newOIDCFixture(t)
+	k1, k2 := newSigner(t, "k1"), newSigner(t, "k2")
+	f.publish(k1.jwk(), k2.jwk()) // overlap rollout: both keys live
+	a := f.auth(t, func(c *OIDCConfig) {
+		c.MinRefreshInterval = time.Minute
+		c.MaxKeyAge = 5 * time.Minute
+	})
+	advance := pinClock(a)
+
+	k1tok := k1.sign(t, baseClaims(f.srv.URL), nil)
+	if _, err := a.Authenticate(context.Background(), k1tok); err != nil {
+		t.Fatalf("pre-revocation authenticate: %v", err)
+	}
+
+	// The provider revokes the compromised k1; only k2 stays published.
+	f.publish(k2.jwk())
+
+	// Inside MaxKeyAge the cache is still trusted and must NOT be refetched —
+	// a refetch per request would turn every token check into load on the IdP.
+	advance(4 * time.Minute)
+	if _, err := a.Authenticate(context.Background(), k1tok); err != nil {
+		t.Fatalf("within MaxKeyAge: %v", err)
+	}
+	if got := atomic.LoadInt32(f.jwksHits); got != 1 {
+		t.Fatalf("jwks fetched %d times inside MaxKeyAge, want 1 (cached)", got)
+	}
+
+	// Past MaxKeyAge the withdrawn key must be gone.
+	advance(2 * time.Minute)
+	if _, err := a.Authenticate(context.Background(), k1tok); !errors.Is(err, ErrUnauthenticated) {
+		t.Fatalf("revoked k1 still authenticates past MaxKeyAge (%v): revocation does not take effect", err)
+	}
+	// ...and the surviving key still verifies, off that same refetch.
+	if _, err := a.Authenticate(context.Background(), k2.sign(t, baseClaims(f.srv.URL), nil)); err != nil {
+		t.Fatalf("k2 after eviction: %v", err)
+	}
+	if got := atomic.LoadInt32(f.jwksHits); got != 2 {
+		t.Fatalf("jwks fetched %d times, want 2 (one warm-up, one expiry)", got)
+	}
+}
+
+// A cache past MaxKeyAge that cannot be refreshed fails CLOSED, and says why:
+// trusting keys we can no longer vouch for would let an attacker who keeps the
+// JWKS endpoint unreachable extend a revoked key indefinitely.
+func TestOIDCAuthenticate_StaleCacheProviderDown(t *testing.T) {
+	f := newOIDCFixture(t)
+	k1 := newSigner(t, "k1")
+	f.publish(k1.jwk())
+	a := f.auth(t, func(c *OIDCConfig) {
+		c.MinRefreshInterval = time.Minute
+		c.MaxKeyAge = 5 * time.Minute
+	})
+	advance := pinClock(a)
+
+	tok := k1.sign(t, baseClaims(f.srv.URL), nil)
+	if _, err := a.Authenticate(context.Background(), tok); err != nil {
+		t.Fatal(err)
+	}
+
+	f.srv.Close() // provider goes down with a warm cache
+	advance(6 * time.Minute)
+
+	// The first request past the ceiling attempts a refetch and reports the
+	// backend problem — a 503 condition, not a rejected credential.
+	_, err := a.Authenticate(context.Background(), tok)
+	if err == nil || errors.Is(err, ErrUnauthenticated) {
+		t.Fatalf("got %v, want a provider error distinct from ErrUnauthenticated", err)
+	}
+	// Later requests inside MinRefreshInterval must still refuse, and must not
+	// re-hammer the dead provider. ErrKeysStale is the proof of both: a fetch
+	// that had been attempted would have surfaced a transport error instead.
+	for i := 0; i < 5; i++ {
+		if _, err := a.Authenticate(context.Background(), tok); !errors.Is(err, ErrKeysStale) {
+			t.Fatalf("got %v, want ErrKeysStale", err)
+		}
+	}
+}
+
 func TestOIDCAuthenticate_UnknownKidRateLimited(t *testing.T) {
 	f := newOIDCFixture(t)
 	k1 := newSigner(t, "k1")
 	f.publish(k1.jwk())
-	a := f.auth(t, func(c *OIDCConfig) { c.MinRefreshInterval = time.Hour })
+	a := f.auth(t, func(c *OIDCConfig) {
+		c.MinRefreshInterval = time.Hour
+		c.MaxKeyAge = 2 * time.Hour // ceiling must clear the floor
+	})
 
 	if _, err := a.Authenticate(context.Background(), k1.sign(t, baseClaims(f.srv.URL), nil)); err != nil {
 		t.Fatal(err)
@@ -263,6 +360,23 @@ func TestNewOIDCAuthenticator_Validation(t *testing.T) {
 	}
 	if _, err := NewOIDCAuthenticator(OIDCConfig{Issuer: "i"}); err == nil {
 		t.Fatal("want error for missing audience")
+	}
+	// A staleness ceiling at or below the refresh floor is refused at
+	// construction: keys would expire before a refetch is permitted, so every
+	// request past the ceiling would fail on a refresh already rate-limited away.
+	if _, err := NewOIDCAuthenticator(OIDCConfig{Issuer: "i", Audience: "a", MinRefreshInterval: time.Hour}); err == nil {
+		t.Fatal("want error for default MaxKeyAge below MinRefreshInterval=1h")
+	}
+	if _, err := NewOIDCAuthenticator(OIDCConfig{Issuer: "i", Audience: "a", MinRefreshInterval: time.Minute, MaxKeyAge: time.Minute}); err == nil {
+		t.Fatal("want error for MaxKeyAge equal to MinRefreshInterval")
+	}
+	// The defaults must not themselves be in that state.
+	a, err := NewOIDCAuthenticator(OIDCConfig{Issuer: "i", Audience: "a"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a.cfg.MaxKeyAge <= a.cfg.MinRefreshInterval {
+		t.Fatalf("default MaxKeyAge %s must exceed default MinRefreshInterval %s", a.cfg.MaxKeyAge, a.cfg.MinRefreshInterval)
 	}
 }
 

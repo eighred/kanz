@@ -20,6 +20,18 @@ import (
 // boundary should not leak why verification failed to the client.
 var ErrUnauthenticated = errors.New("auth: unauthenticated")
 
+// ErrKeysStale is returned when the cached JWKS has outlived MaxKeyAge and the
+// provider could not be reached to refetch it. It is deliberately NOT
+// ErrUnauthenticated: the token itself may be perfectly good, so the caller
+// should surface an auth-backend outage (503), not a credential rejection.
+//
+// Failing closed here is the deliberate trade: an IdP unreachable for longer
+// than MaxKeyAge becomes an authentication outage. The alternative — keep
+// trusting key material we can no longer vouch for — hands an attacker who can
+// keep the JWKS endpoint unreachable an unbounded extension on a revoked key,
+// which is exactly the control this cache exists to preserve.
+var ErrKeysStale = errors.New("auth: cached signing keys are past MaxKeyAge and the provider is unreachable")
+
 // Authenticator validates a bearer token and returns the caller's Principal.
 // It takes a context because verification may need to fetch signing keys from
 // the OIDC provider (on a cold cache or after key rotation).
@@ -58,25 +70,41 @@ type OIDCConfig struct {
 	Leeway time.Duration
 	// MinRefreshInterval rate-limits forced JWKS refetches triggered by an
 	// unknown key id, so a stream of bogus `kid`s can't hammer the provider
-	// (default 1m).
+	// (default 1m). It is a FLOOR on how often we may refetch.
 	MinRefreshInterval time.Duration
+	// MaxKeyAge is the CEILING on how long cached key material may be trusted
+	// without refetching (default 5m). It is what makes revocation work: a key
+	// withdrawn at the provider stops verifying within one MaxKeyAge window
+	// even though no unknown `kid` is ever presented to force a cache miss.
+	//
+	// It must exceed MinRefreshInterval, and NewOIDCAuthenticator refuses a
+	// config where it does not: a ceiling below the floor would expire the keys
+	// before a refetch is permitted, so every request past the ceiling would be
+	// refused by a refresh that the rate limiter has already suppressed.
+	MaxKeyAge time.Duration
 	// HTTPClient fetches discovery + JWKS documents (default: a 10s client).
 	HTTPClient *http.Client
 }
 
 // OIDCAuthenticator validates JWTs against the asymmetric signing keys an OIDC
 // provider publishes via JWKS. Keys are cached and refetched lazily on an
-// unknown `kid` (rate-limited), so steady-state verification is fully offline
-// and key rotation needs no restart.
+// unknown `kid` (rate-limited) and unconditionally once the cache passes
+// MaxKeyAge, so steady-state verification is fully offline, key rotation needs
+// no restart, and key REVOCATION takes effect without one.
 type OIDCAuthenticator struct {
 	cfg   OIDCConfig
 	httpc *http.Client
 	now   func() time.Time
 
-	mu          sync.RWMutex
-	jwksURI     string // resolved (possibly via discovery)
-	keys        jose.JSONWebKeySet
+	mu      sync.RWMutex
+	jwksURI string // resolved (possibly via discovery)
+	keys    jose.JSONWebKeySet
+	// lastRefresh is the last SUCCESSFUL fetch — it drives staleness, so a
+	// failed fetch cannot pass off old keys as fresh. lastAttempt is every
+	// fetch, success or not — it drives the rate limit, so a provider that is
+	// down is retried once per MinRefreshInterval rather than once per request.
 	lastRefresh time.Time
+	lastAttempt time.Time
 }
 
 var _ Authenticator = (*OIDCAuthenticator)(nil)
@@ -104,6 +132,16 @@ func NewOIDCAuthenticator(cfg OIDCConfig) (*OIDCAuthenticator, error) {
 	if cfg.MinRefreshInterval == 0 {
 		cfg.MinRefreshInterval = time.Minute
 	}
+	if cfg.MaxKeyAge == 0 {
+		cfg.MaxKeyAge = 5 * time.Minute
+	}
+	// The ceiling must sit above the floor or the two fight: keys would expire
+	// before the rate limiter permits the refetch that would renew them, and
+	// every request past the ceiling would fail ErrKeysStale until the interval
+	// elapsed. Refuse at construction rather than thrash in production.
+	if cfg.MaxKeyAge <= cfg.MinRefreshInterval {
+		return nil, fmt.Errorf("auth: OIDC MaxKeyAge (%s) must exceed MinRefreshInterval (%s)", cfg.MaxKeyAge, cfg.MinRefreshInterval)
+	}
 	httpc := cfg.HTTPClient
 	if httpc == nil {
 		httpc = &http.Client{Timeout: 10 * time.Second}
@@ -113,9 +151,9 @@ func NewOIDCAuthenticator(cfg OIDCConfig) (*OIDCAuthenticator, error) {
 
 // Authenticate verifies the compact JWS, checks iss/aud/exp/nbf, and maps the
 // claims to a Principal. Any verification failure collapses to
-// ErrUnauthenticated; transport/provider errors (discovery or JWKS fetch) are
-// returned distinctly so the caller can tell "bad token" (401) from "auth
-// backend unavailable" (503).
+// ErrUnauthenticated; transport/provider errors (discovery or JWKS fetch, and
+// ErrKeysStale) are returned distinctly so the caller can tell "bad token"
+// (401) from "auth backend unavailable" (503).
 func (a *OIDCAuthenticator) Authenticate(ctx context.Context, token string) (*Principal, error) {
 	tok, err := jwt.ParseSigned(token, asymmetricAlgs)
 	if err != nil || len(tok.Headers) != 1 {
@@ -154,11 +192,29 @@ func (a *OIDCAuthenticator) Authenticate(ctx context.Context, token string) (*Pr
 	}, nil
 }
 
-// keyFor returns the verification key for kid, refetching the JWKS once (rate-
-// limited) if it isn't cached — so a key rotated in after startup is picked up
-// without a restart. An empty kid is accepted only when the set holds exactly
-// one key (the unambiguous single-key case).
+// keyFor returns the verification key for kid.
+//
+// Two things force a refetch. An unknown kid (rate-limited) picks up a key
+// rotated IN after startup. Cache age past MaxKeyAge drops a key withdrawn at
+// the provider — revocation cannot depend on an unknown kid, because after an
+// overlap rollout the withdrawn key is one we already hold and no cache miss
+// will ever occur. Within the window verification stays fully offline: a
+// refetch per request would turn every token check into load on the IdP.
+//
+// An empty kid is accepted only when the set holds exactly one key (the
+// unambiguous single-key case).
 func (a *OIDCAuthenticator) keyFor(ctx context.Context, kid string) (any, error) {
+	if a.expired() {
+		if err := a.refresh(ctx); err != nil {
+			return nil, err // provider unavailable — distinct from a bad token
+		}
+		if a.expired() {
+			// The refetch was rate-limited away behind an earlier failure, so
+			// the cache is still past its ceiling. Refuse rather than fall back
+			// on key material we can no longer vouch for.
+			return nil, ErrKeysStale
+		}
+	}
 	if k, ok := a.lookup(kid); ok {
 		return k, nil
 	}
@@ -169,6 +225,15 @@ func (a *OIDCAuthenticator) keyFor(ctx context.Context, kid string) (any, error)
 		return k, nil
 	}
 	return nil, ErrUnauthenticated
+}
+
+// expired reports whether the cached key set has outlived MaxKeyAge. A cold
+// cache is not "expired" — it is empty, and keyFor's lookup miss already forces
+// the first fetch on the path that handles a provider that has never answered.
+func (a *OIDCAuthenticator) expired() bool {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return len(a.keys.Keys) > 0 && a.now().Sub(a.lastRefresh) >= a.cfg.MaxKeyAge
 }
 
 func (a *OIDCAuthenticator) lookup(kid string) (any, bool) {
@@ -187,15 +252,22 @@ func (a *OIDCAuthenticator) lookup(kid string) (any, bool) {
 }
 
 // refresh resolves the JWKS URI (via discovery on first use) and refetches the
-// key set. It is rate-limited: once keys are cached, refetches triggered by an
-// unknown kid happen at most once per MinRefreshInterval, bounding the load a
-// stream of bogus kids can put on the provider.
+// key set. It is rate-limited: once keys are cached, refetches happen at most
+// once per MinRefreshInterval, bounding the load a stream of bogus kids — or a
+// provider that is down and re-tried by every expired-cache request — can put
+// on the provider.
+//
+// Returning nil when suppressed is not "refreshed": callers that need fresh
+// keys must re-check (see keyFor's second expired() test), because the whole
+// point of the limiter is that it sometimes declines to fetch.
 func (a *OIDCAuthenticator) refresh(ctx context.Context) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if len(a.keys.Keys) > 0 && a.now().Sub(a.lastRefresh) < a.cfg.MinRefreshInterval {
-		return nil // recently refreshed by us or a racing caller; kid is just unknown
+	if len(a.keys.Keys) > 0 && a.now().Sub(a.lastAttempt) < a.cfg.MinRefreshInterval {
+		return nil // recently attempted by us or a racing caller; kid is just unknown
 	}
+	// Recorded before the fetch so a failure still counts against the limiter.
+	a.lastAttempt = a.now()
 	if a.jwksURI == "" {
 		uri, err := a.discover(ctx)
 		if err != nil {
