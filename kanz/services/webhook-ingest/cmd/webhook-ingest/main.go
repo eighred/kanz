@@ -177,7 +177,7 @@ func main() {
 		Alloc:        cfg.Alloc,
 		Publisher:    producer,
 		Gate:         gate,
-		MaxSize:      cfg.MaxSize,
+		MaxQuantity:  cfg.MaxQuantity,
 		MaxLeverage:  cfg.MaxLeverage,
 		ReplayWindow: cfg.ReplayWindow,
 	})
