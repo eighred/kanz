@@ -112,7 +112,23 @@ spec:
           # A name-shaped rule cannot express "is this safe to sync"; only the list
           # can. test/arch asserts every Job in a synced path is either a re-runnable
           # hook or named here, so a new one cannot inherit the old silence.
-          exclude: "{tenancy.yaml,smoke-test.sh,bootstrap-job-dev-plaintext.yaml}"
+          #
+          # postgres-dev.yaml and rig-dev-secrets.yaml are the rig's two DEV-ONLY
+          # manifests (#224). Their headers already said "do not apply to any cluster
+          # that trades real money" and test/arch already pinned that they carry
+          # kanz.eighred.com/posture: dev-only — but nothing connected the label to
+          # this list, so both were inside a recursive sync with prune + selfHeal.
+          # The moment a real cluster is registered (#98) that sync stands up a
+          # postgres/postgres database in the TRADING namespace, labelled
+          # app: postgres — which is exactly the selector allow-postgres-egress and
+          # allow-services-to-postgres grant every pod in that namespace — and
+          # applies the gateway's committed HS256 signing secret beside the gateway,
+          # self-healing both back if anyone deletes them.
+          #
+          # TestEveryDevOnlyManifestIsExcludedFromGitOpsSync now derives this
+          # requirement from the label itself, for every ApplicationSet and every
+          # path, so a third dev-only manifest cannot be added without appearing here.
+          exclude: "{tenancy.yaml,smoke-test.sh,bootstrap-job-dev-plaintext.yaml,postgres-dev.yaml,rig-dev-secrets.yaml}"
       destination:
         server: "{{.server}}"
         namespace: "{{.namespace}}"

@@ -44,19 +44,28 @@ spec:
         path: kanz/infra/deploy
         directory:
           recurse: true
-          # NOT the same list as the main app-of-apps any more, and it does not need
-          # to be: this Application syncs only kanz/infra/deploy, which contains no
-          # Job, no tenancy.yaml and no smoke-test.sh — every pattern here matches
-          # nothing. It is kept as a floor in case one arrives.
+          # NOT the same list as the main app-of-apps, and it does not need to be:
+          # this Application syncs only kanz/infra/deploy. Every entry here names a
+          # file that is actually under that path, because an exclusion that names
+          # nothing protects nothing while making the list look considered — and this
+          # list was entirely that. `tenancy.yaml`, `smoke-test.sh` and `*-job.yaml`
+          # matched no file under kanz/infra/deploy; they were kept as "a floor in
+          # case one arrives", which is a claim nobody exercises and a preview
+          # environment is exactly where nobody notices it went stale (#224).
           #
-          # The main app-of-apps dropped `*-job.yaml` because that glob excluded
-          # bootstrap-job.yaml (which creates every JetStream stream) while admitting
-          # bootstrap-job-dev-plaintext.yaml (#92). Neither file is under this path,
-          # so the same glob is inert here rather than dangerous. The old comment
-          # claimed these lists were identical, which stopped being true the moment
-          # the main one was fixed — a preview environment is exactly where nobody
-          # would notice a stale claim.
-          exclude: "{tenancy.yaml,smoke-test.sh,*-job.yaml}"
+          # `*-job.yaml` was also the one shape #92 forbids outright: that glob
+          # excluded bootstrap-job.yaml (which creates every JetStream stream) while
+          # admitting bootstrap-job-dev-plaintext.yaml, whose header says never to
+          # apply it to a cluster with SPIRE. It was inert here only by accident of
+          # which files happen to live under this path — the main app-of-apps names
+          # files, and so does this one now.
+          #
+          # What DOES need excluding are the rig's two DEV-ONLY manifests. Both pin
+          # `namespace: kanz-services` in their own metadata, so a preview sync does
+          # not put them in kanz-preview-<n> at all — it writes a postgres/postgres
+          # database and the gateway's committed HS256 signing secret into the
+          # TRADING namespace, from a per-PR Application with prune + selfHeal.
+          exclude: "{postgres-dev.yaml,rig-dev-secrets.yaml}"
         kustomize:
           # Pin every image to the PR build (preview.yml pushes :pr-{number});
           # the namePrefix keeps preview objects from colliding cluster-wide.
