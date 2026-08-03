@@ -4,6 +4,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+
+	"github.com/eighred/kanz/pkg/auth"
 )
 
 // All four routes on this surface were unscoped (#222).
@@ -57,7 +59,7 @@ func TestEveryRouteRefusesWhenTheTenantHeaderIsAbsent(t *testing.T) {
 
 	for route, rec := range everyRoute(s, "") {
 		if rec.Code != http.StatusNotFound {
-			t.Errorf("%s: status = %d, want 404 on a missing %s", route, rec.Code, HeaderPrincipalTenant)
+			t.Errorf("%s: status = %d, want 404 on a missing %s", route, rec.Code, auth.HeaderPrincipalTenant)
 		}
 	}
 }

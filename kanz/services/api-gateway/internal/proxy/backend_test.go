@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/eighred/kanz/pkg/auth"
 	"github.com/eighred/kanz/services/api-gateway/internal/middleware"
 )
 
@@ -48,11 +49,11 @@ func TestMeshBackend_ForwardsRequestAndPrincipal(t *testing.T) {
 		t.Fatalf("upstream got path=%q body=%q", got.URL.Path, gotBody)
 	}
 	// The gateway-verified principal is propagated as trusted mesh identity.
-	if got.Header.Get(HeaderPrincipalSubject) != "u1" || got.Header.Get(HeaderPrincipalTenant) != "t1" {
+	if got.Header.Get(auth.HeaderPrincipalSubject) != "u1" || got.Header.Get(auth.HeaderPrincipalTenant) != "t1" {
 		t.Fatalf("principal headers not forwarded: %v", got.Header)
 	}
-	if got.Header.Get(HeaderPrincipalRoles) != "analyst,pm" {
-		t.Fatalf("roles header = %q, want analyst,pm", got.Header.Get(HeaderPrincipalRoles))
+	if got.Header.Get(auth.HeaderPrincipalRoles) != "analyst,pm" {
+		t.Fatalf("roles header = %q, want analyst,pm", got.Header.Get(auth.HeaderPrincipalRoles))
 	}
 }
 
@@ -99,7 +100,7 @@ func TestEndToEnd_AskForwardedAndCrossTenantDenied(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// The fake copilot serves tenant "t1" only; a forwarded principal from
 		// another tenant is denied (the downstream tenant boundary).
-		if r.Header.Get(HeaderPrincipalTenant) != "t1" {
+		if r.Header.Get(auth.HeaderPrincipalTenant) != "t1" {
 			w.WriteHeader(http.StatusForbidden)
 			_, _ = w.Write([]byte(`{"error":"cross-tenant denied"}`))
 			return

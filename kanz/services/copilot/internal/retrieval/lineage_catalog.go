@@ -10,16 +10,6 @@ import (
 	"github.com/eighred/kanz/pkg/auth"
 )
 
-// Mesh identity headers — the SVCWIRE-01c trusted-header contract. Duplicated
-// here (not imported) because the gateway's proxy package that defines them is
-// service-internal to api-gateway; these three strings are a wire contract, not
-// a shared type.
-const (
-	headerPrincipalSubject = "X-Kanz-Principal-Subject"
-	headerPrincipalTenant  = "X-Kanz-Principal-Tenant"
-	headerPrincipalRoles   = "X-Kanz-Principal-Roles" // comma-separated
-)
-
 // LineageCatalog is the production Catalog (PARITY-04b): it resolves a governed
 // source event id to its LIN-01 lineage dataset node by querying the lineage
 // service's `GET /v1/lineage/event/{id}` endpoint, propagating the calling
@@ -62,12 +52,12 @@ func (c *LineageCatalog) Resolve(ctx context.Context, sourceEventID string) (str
 	if err != nil {
 		return "", false
 	}
+	// The SVCWIRE-01c trusted-header contract, minted in exactly one place
+	// (#258): copilot is not the identity authority, it FORWARDS the end user's
+	// principal so lineage applies PII governance to the human rather than to
+	// copilot's SVID.
 	if p, ok := auth.PrincipalFromContext(ctx); ok && p != nil {
-		req.Header.Set(headerPrincipalSubject, p.Subject)
-		req.Header.Set(headerPrincipalTenant, p.Tenant)
-		if len(p.Roles) > 0 {
-			req.Header.Set(headerPrincipalRoles, strings.Join(p.Roles, ","))
-		}
+		auth.SetPrincipalHeaders(req.Header, p.Subject, p.Tenant, p.Roles)
 	}
 	resp, err := c.client.Do(req)
 	if err != nil {

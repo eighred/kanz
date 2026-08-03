@@ -9,6 +9,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/eighred/kanz/pkg/auth"
 	"github.com/eighred/kanz/services/audit/internal/audit"
 	"github.com/eighred/kanz/services/audit/internal/lineage"
 	"github.com/eighred/kanz/services/audit/internal/report"
@@ -22,18 +23,18 @@ type Readiness struct{ ready atomic.Bool }
 func (r *Readiness) Set(ready bool) { r.ready.Store(ready) }
 func (r *Readiness) Ready() bool    { return r.ready.Load() }
 
-// HeaderPrincipalTenant is the tenant of the AUTHENTICATED caller, injected by
-// the api-gateway — the platform's sole identity authority — from the verified
-// token. The same header every other service reads
-// (proxy.HeaderPrincipalTenant, tv-sync/brokerapi), deliberately: there is
-// exactly one thing on this platform that decides who you are.
+// THE TENANT OF EVERY READ ON THIS SURFACE COMES FROM auth.RequireCallerTenant,
+// never from this package and never from the query string.
 //
 // This service authenticates NOTHING, and that is only safe behind the gateway.
 // It is reachable only in-cluster over the SVID-authorized mesh, with no
 // Ingress. EXPOSE IT DIRECTLY AND ANY CALLER READS EVERY TENANT'S AUDIT HISTORY
 // — audit_log is deliberately not RLS'd (it is the cross-tenant compliance
 // record), so the database will not save you here; this handler is the boundary.
-const HeaderPrincipalTenant = "X-Kanz-Principal-Tenant"
+//
+// The header name and the refusal used to be declared here, and in three other
+// services, and in the gateway (#258). They are now in pkg/auth so a change to
+// how the platform's one identity header is validated is made once.
 
 type Server struct {
 	logger    *slog.Logger
@@ -98,7 +99,7 @@ func (s *Server) handleQuery(w http.ResponseWriter, r *http.Request) {
 	// deliberately not RLS'd, so naming another tenant read their entire audit
 	// history. Refused before the store is reached: an empty filter here does
 	// not mean "no records", it means EVERY tenant's records.
-	tenant, ok := tenantOf(w, r)
+	tenant, ok := auth.RequireCallerTenant(w, r)
 	if !ok {
 		return
 	}
@@ -125,7 +126,7 @@ func (s *Server) handleQuery(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleGet(w http.ResponseWriter, r *http.Request) {
-	tenant, ok := tenantOf(w, r)
+	tenant, ok := auth.RequireCallerTenant(w, r)
 	if !ok {
 		return
 	}
@@ -147,7 +148,7 @@ func (s *Server) handleGet(w http.ResponseWriter, r *http.Request) {
 
 // handleLineage serves the AUDIT-01c causal reconstruction for an event.
 func (s *Server) handleLineage(w http.ResponseWriter, r *http.Request) {
-	tenant, ok := tenantOf(w, r)
+	tenant, ok := auth.RequireCallerTenant(w, r)
 	if !ok {
 		return
 	}
@@ -172,7 +173,7 @@ func (s *Server) handleVerify(w http.ResponseWriter, r *http.Request) {
 	// endpoint exists to provide. What is removed here is ANONYMOUS access.
 	// Restricting it further, to an operator capability, is an open decision
 	// and must not be guessed at by narrowing the scan.
-	if _, ok := tenantOf(w, r); !ok {
+	if _, ok := auth.RequireCallerTenant(w, r); !ok {
 		return
 	}
 	att, err := report.Verify(r.Context(), s.store)
@@ -189,7 +190,7 @@ func (s *Server) handleVerify(w http.ResponseWriter, r *http.Request) {
 
 // handleReport generates a built-in template; ?format=csv overrides the default.
 func (s *Server) handleReport(w http.ResponseWriter, r *http.Request) {
-	tenant, authed := tenantOf(w, r)
+	tenant, authed := auth.RequireCallerTenant(w, r)
 	if !authed {
 		return
 	}
@@ -243,7 +244,7 @@ func (s *Server) handleSOC2Evidence(w http.ResponseWriter, r *http.Request) {
 	// evidence is compiled from audit records and handed to an AUDITOR, so an
 	// unscoped collection puts other tenants' history into a document that
 	// leaves the building.
-	tenant, authed := tenantOf(w, r)
+	tenant, authed := auth.RequireCallerTenant(w, r)
 	if !authed {
 		return
 	}
@@ -288,21 +289,6 @@ func parseTime(s string) (time.Time, bool) {
 	}
 	t, err := time.Parse(time.RFC3339, s)
 	return t, err == nil
-}
-
-// tenantOf reads the tenant of the authenticated caller, rejecting an unscoped
-// request (deny-by-default). Mirrors tv-sync/brokerapi.tenantOf — the same
-// header, the same refusal, because this is the same boundary.
-func tenantOf(w http.ResponseWriter, r *http.Request) (string, bool) {
-	tenant := r.Header.Get(HeaderPrincipalTenant)
-	if tenant == "" {
-		writeJSON(w, http.StatusUnauthorized, map[string]string{
-			"error": "missing tenant scope: this surface is reachable only through the api-gateway, " +
-				"which injects the authenticated principal",
-		})
-		return "", false
-	}
-	return tenant, true
 }
 
 func writeJSON(w http.ResponseWriter, code int, body any) {

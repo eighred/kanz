@@ -27,6 +27,7 @@ import (
 	"time"
 
 	"github.com/eighred/kanz/internal/dec"
+	"github.com/eighred/kanz/pkg/auth"
 	"github.com/eighred/kanz/services/datamaster/internal/feed"
 	"github.com/eighred/kanz/services/datamaster/internal/pricing"
 	"github.com/eighred/kanz/services/datamaster/internal/store"
@@ -133,12 +134,10 @@ func (s *Server) candidates(ctx context.Context, instrumentID string) ([]pricing
 	return out, nil
 }
 
-// handleSecurity returns the projected golden record for an instrument.
-// HeaderPrincipalTenant is the tenant the api-gateway authenticated, injected on
-// every forwarded request (services/api-gateway/internal/proxy/backend.go).
-// Upstreams may trust it ONLY because a NetworkPolicy makes the gateway their
-// sole reachable caller — see #232 for where that is not yet enforced.
-const HeaderPrincipalTenant = "X-Kanz-Principal-Tenant"
+// notFoundBody is the ONE body this surface returns for "no such thing",
+// whether the row does not exist or belongs to another tenant. The two must be
+// indistinguishable — see auth.RequireCallerTenantIs.
+const notFoundBody = "not found"
 
 // callerOwnsThisInstance reports whether the authenticated caller may touch this
 // instance's data, and writes the refusal if not.
@@ -149,20 +148,16 @@ const HeaderPrincipalTenant = "X-Kanz-Principal-Tenant"
 // went straight from r.PathValue to the store without reading the tenant the
 // gateway had already injected.
 //
-// Under the #97 ruling each instance serves exactly ONE tenant, so this is an
-// equality against the instance's tenant rather than a per-row lookup. Fails
-// CLOSED on an absent header or an unset instance tenant. 404 rather than 403,
-// with the same body a genuine miss returns, so id enumeration cannot be used
-// as a cross-tenant directory.
+// The check itself, the header name, and the no-oracle 404 are
+// auth.RequireCallerTenantIs (#258) — the same three lines lived in four
+// services and the gateway. Upstreams may trust that header ONLY because a
+// NetworkPolicy makes the gateway their sole reachable caller; see #232 for
+// where that is not yet enforced.
 func (s *Server) callerOwnsThisInstance(w http.ResponseWriter, r *http.Request) bool {
-	caller := r.Header.Get(HeaderPrincipalTenant)
-	if caller == "" || s.tenant == "" || caller != s.tenant {
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
-		return false
-	}
-	return true
+	return auth.RequireCallerTenantIs(w, r, s.tenant, notFoundBody)
 }
 
+// handleSecurity returns the projected golden record for an instrument.
 func (s *Server) handleSecurity(w http.ResponseWriter, r *http.Request) {
 	if !s.callerOwnsThisInstance(w, r) {
 		return

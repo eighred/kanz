@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+
+	"github.com/eighred/kanz/pkg/auth"
 )
 
 // SVCWIRE-01c — the concrete mesh Backend: a per-service HTTP client that
@@ -19,17 +21,14 @@ import (
 // in; tests pass a plain client against an httptest upstream.
 //
 // Identity propagation: the gateway is the sole identity authority, so it
-// forwards the verified principal over the mesh in these headers. The upstream
-// trusts them BECAUSE the connection is mutually authenticated to the gateway's
-// SVID (a non-mesh caller cannot reach the service). The upstream-side
-// middleware that reads these headers back into an auth.Principal is the
-// carried-forward half of this seam (one small trust-the-mesh-identity
-// middleware per Phase-7 service, at their composition roots).
-const (
-	HeaderPrincipalSubject = "X-Kanz-Principal-Subject"
-	HeaderPrincipalTenant  = "X-Kanz-Principal-Tenant"
-	HeaderPrincipalRoles   = "X-Kanz-Principal-Roles" // comma-separated
-)
+// forwards the verified principal over the mesh in auth.HeaderPrincipal*. The
+// upstream trusts them BECAUSE the connection is mutually authenticated to the
+// gateway's SVID (a non-mesh caller cannot reach the service).
+//
+// The header names and the upstream-side enforcement live in pkg/auth, NOT here
+// (#258): this package is services/api-gateway/internal, so the four services
+// that must read what this function writes could not import it and each grew its
+// own copy of the constant and its own check.
 
 // maxRespBytes bounds an upstream response body the gateway buffers before
 // writing it back — generous for these read surfaces, a guard against an
@@ -93,11 +92,7 @@ func (b *MeshBackend) Forward(ctx context.Context, req Request) (Response, error
 		hreq.Header.Set("Content-Type", "application/json")
 	}
 	if p := req.Principal; p != nil {
-		hreq.Header.Set(HeaderPrincipalSubject, p.Subject)
-		hreq.Header.Set(HeaderPrincipalTenant, p.Tenant)
-		if len(p.Roles) > 0 {
-			hreq.Header.Set(HeaderPrincipalRoles, strings.Join(p.Roles, ","))
-		}
+		auth.SetPrincipalHeaders(hreq.Header, p.Subject, p.Tenant, p.Roles)
 	}
 
 	hresp, err := b.client.Do(hreq)

@@ -901,9 +901,10 @@ func TestObservabilityScrapePortsMatchTheAnnotations(t *testing.T) {
 // THE SET IS FOUR, NOT TWO. audit and tv-sync were the known pair; #222 added the
 // same trust to wealth and datamaster, and the guard below found them. Setting
 // the header is a different act and is deliberately NOT in scope: api-gateway
-// (proxy/backend.go:97) injects it as the identity authority, and copilot
-// (retrieval/lineage_catalog.go:67) forwards the caller's principal onward to
-// lineage. Neither serves a route whose authorization is a header it received.
+// (proxy/backend.go:95) injects it as the identity authority, and copilot
+// (retrieval/lineage_catalog.go:60) forwards the caller's principal onward to
+// lineage — both now through auth.SetPrincipalHeaders. Neither serves a route
+// whose authorization is a header it received.
 //
 // EVERY ONE SERVES THAT SURFACE ON THE SAME PORT AS /metrics, so
 // allow-observability-scrape's port list — the fix for every other overreach in
@@ -929,9 +930,20 @@ var tenantHeaderTrustingServices = map[string]int{
 
 // tenantHeaderRead matches a READ of the tenant principal header — the act that
 // makes a service depend on the gateway being its only caller. It deliberately
-// does not match Header.Set: injecting or forwarding the header is what the
-// gateway and copilot do, and neither takes on the network obligation.
-var tenantHeaderRead = regexp.MustCompile(`Header\.Get\(\s*(?:[A-Za-z0-9_.]*[Hh]eaderPrincipalTenant|"X-Kanz-Principal-Tenant")\s*\)`)
+// does not match the WRITE side (auth.SetPrincipalHeaders, formerly Header.Set):
+// injecting or forwarding the header is what the gateway and copilot do, and
+// neither takes on the network obligation.
+//
+// THE FIRST ALTERNATIVE IS THE ONE THAT MATTERS TODAY. #258 moved the constant
+// and both enforcement policies into pkg/auth, so no service performs the
+// Header.Get itself any more — and the moment it landed, the non-vacuity floor
+// below fired with "only 0 service(s)", which is the guard doing exactly its job:
+// the read moved and it had stopped watching. The Header.Get arm is kept because
+// it is what a NEW service would write before it discovers pkg/auth, and that is
+// precisely the case this guard exists to catch.
+var tenantHeaderRead = regexp.MustCompile(
+	`auth\.(?:RequireCallerTenantIs|RequireCallerTenant|CallerTenant)\(` +
+		`|Header\.Get\(\s*(?:[A-Za-z0-9_.]*[Hh]eaderPrincipalTenant|"X-Kanz-Principal-Tenant")\s*\)`)
 
 // TestTenantHeaderTrustingServicesAreEnumerated fails when a service reads
 // X-Kanz-Principal-Tenant and is not in the map above.

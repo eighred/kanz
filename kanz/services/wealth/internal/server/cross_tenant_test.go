@@ -5,6 +5,8 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/eighred/kanz/pkg/auth"
 )
 
 // This surface had NO tenant check at all (#222).
@@ -49,7 +51,7 @@ func TestHouseholdRefusesWhenTheTenantHeaderIsAbsent(t *testing.T) {
 
 	if rec.Code != http.StatusNotFound {
 		t.Errorf("status = %d, want 404 on a missing %s — a request with no established "+
-			"caller must not be served", rec.Code, HeaderPrincipalTenant)
+			"caller must not be served", rec.Code, auth.HeaderPrincipalTenant)
 	}
 }
 
