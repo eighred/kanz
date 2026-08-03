@@ -112,6 +112,21 @@ type Options struct {
 	// lets the lifecycle stream open it.
 	Gate *Gate
 
+	// MaxQuantity bounds the RESOLVED base-asset quantity of one signal, checked
+	// after SizeType has been applied and BEFORE the venue split. The unset Qty ⇒
+	// no bound.
+	//
+	// It lives here, not at the webhook perimeter, because the perimeter does not
+	// know the unit: it holds a bare `size` whose meaning resolveQuantity decides.
+	// The bound webhook-ingest used to apply to that bare number let a
+	// percent-of-equity signal walk straight past a quantity cap (#240). Both
+	// brains size through this function, so one bound now covers both.
+	//
+	// A CLOSE is deliberately NOT bounded: it flattens an existing position, and a
+	// cap that can refuse a flatten is a cap that can trap a fund in a position it
+	// asked to exit.
+	MaxQuantity Qty
+
 	// TenantOf maps a fund to its tenant_id; nil ⇒ the fund_id is the tenant.
 	TenantOf func(fundID string) string
 	Now      func() time.Time
@@ -132,6 +147,24 @@ func New(opt Options) (*Translator, error) {
 	}
 	if opt.Gate == nil {
 		return nil, errors.New("translate: gate is required (use NewGate for production, OpenGate for tests/dev)")
+	}
+	// AUDIT THE VENUE WEIGHTS AT STARTUP, not per signal (#240). An allocation whose
+	// weights do not sum to 1 is a multiplier on every trade the fund ever makes:
+	// legs written as whole percents (60 / 40 — the natural mistake, since every
+	// other percentage on this surface is whole-percent) fan a 2 BTC signal out as
+	// 120 + 80 BTC, and a duplicated leg (0.6 / 0.6) quietly adds 20% exposure
+	// forever. Neither the policy nor fanOut noticed; the multiply was unconditional.
+	//
+	// A policy that can enumerate its funds is audited here, which covers the static
+	// map every binary and test actually wires. A future dynamic policy cannot be
+	// audited at startup and MUST validate its own rows with ValidateAllocation
+	// before returning them.
+	if set, ok := opt.Alloc.(AllocationSet); ok {
+		for fundID, legs := range set.Allocations() {
+			if err := ValidateAllocation(fundID, legs); err != nil {
+				return nil, err
+			}
+		}
 	}
 	if opt.TenantOf == nil {
 		opt.TenantOf = func(fundID string) string { return fundID }
@@ -162,14 +195,57 @@ func (t *Translator) Emit(ctx context.Context, in Intent) (*Result, error) {
 	tenant := t.opt.TenantOf(in.FundID)
 	ctx = bus.WithCorrelationID(ctx, in.SignalID)
 
+	// RESOLVE AND BOUND BEFORE THE FACT IS RECORDED.
+	//
+	// The size bound can only be applied in the resolved unit (#240), which means it
+	// cannot run at the perimeter — it has to run here. Running it here after
+	// publishSignal would leave a StrategySignal FACT with no orders chained to it and
+	// no explanation on the bus, which reads exactly like a lost fan-out. So
+	// everything that can REFUSE the signal now runs first, and the audit root is
+	// written only for signals the platform is actually going to act on.
+	venues, err := t.opt.Alloc.VenuesFor(in.FundID)
+	if err != nil {
+		return nil, err // ErrNoAllocation — deny-by-default
+	}
+	var baseQty Qty
+	if in.Action != signalpb.SignalAction_SIGNAL_ACTION_CLOSE {
+		baseQty, err = t.resolveQuantity(ctx, in)
+		if err != nil {
+			return nil, err
+		}
+		if err := t.enforceMaxQuantity(in, baseQty); err != nil {
+			return nil, err
+		}
+	}
+
 	if err := t.publishSignal(ctx, in, tenant); err != nil {
 		return nil, fmt.Errorf("publish signal: %w", err)
 	}
-	orderIDs, err := t.fanOut(ctx, in, tenant)
+	orderIDs, err := t.fanOut(ctx, in, tenant, venues, baseQty)
 	if err != nil {
 		return nil, err
 	}
 	return &Result{SignalID: in.SignalID, OrderIDs: orderIDs}, nil
+}
+
+// enforceMaxQuantity applies the configured bound to the RESOLVED quantity — the
+// only unit in which the comparison means anything.
+func (t *Translator) enforceMaxQuantity(in Intent, q Qty) error {
+	if !t.opt.MaxQuantity.IsSet() || !q.IsSet() || q.Cmp(t.opt.MaxQuantity) <= 0 {
+		return nil
+	}
+	return fmt.Errorf("%w: signal %s resolves to %s %s — above the configured maximum of %s. "+
+		"The raw size was %s interpreted as %s; the bound is applied to the RESOLVED "+
+		"base-asset quantity, never to the raw size",
+		ErrSizeExceedsMax, in.SignalID, q.RatString(), in.InstrumentID,
+		t.opt.MaxQuantity.RatString(), ratString(in.Size), in.SizeType)
+}
+
+func ratString(r *big.Rat) string {
+	if r == nil {
+		return "unset"
+	}
+	return r.RatString()
 }
 
 // validate is the deny-by-default gate: an intent missing an identity, a
@@ -195,8 +271,35 @@ func (in Intent) validate() error {
 	if in.OrderType == orderpb.OrderType_ORDER_TYPE_LIMIT && (in.LimitPrice == nil || in.LimitPrice.Sign() <= 0) {
 		return fmt.Errorf("%w: a limit order requires a positive limit price", ErrInvalidIntent)
 	}
+	// LEVERAGE IS REFUSED, NOT DROPPED (#240).
+	//
+	// It used to be parsed, bounds-checked against max_leverage, and written onto the
+	// StrategySignal FACT — the immutable audit root — after which fanOut built an
+	// order.v1.SubmitOrder that carries neither leverage nor margin_mode, because the
+	// proto has neither field. A strategy asking for 10x got an UNLEVERED SPOT ORDER
+	// while the audit trail permanently asserted a 10x position the fund never held.
+	//
+	// Refusing is not the end state; plumbing leverage to the venue adapters is (a
+	// proto change, two adapters, and margin semantics). It is what stops the audit
+	// trail lying TODAY, and it is reversible: delete this block when SubmitOrder can
+	// actually carry it. A nil Leverage is ABSENT, which publishSignal already records
+	// as 1 — unlevered — so it is accepted.
+	if in.Leverage != nil && in.Leverage.Cmp(oneRat) != 0 {
+		return fmt.Errorf("%w: leverage %s is not executable — this platform submits UNLEVERED "+
+			"orders only (order.v1.SubmitOrder carries no leverage field), and accepting it would "+
+			"record a levered position on the audit root that no venue was ever asked for. Send "+
+			"leverage=1 and size the exposure yourself", ErrInvalidIntent, in.Leverage.RatString())
+	}
+	if in.MarginMode != signalpb.MarginMode_MARGIN_MODE_UNSPECIFIED {
+		return fmt.Errorf("%w: margin_mode %s is not executable — same reason as leverage: "+
+			"order.v1.SubmitOrder carries no margin mode, so the order placed would be spot "+
+			"while the audit root claimed margin", ErrInvalidIntent, in.MarginMode)
+	}
 	return nil
 }
+
+// oneRat is unlevered — the only leverage this platform can actually execute.
+var oneRat = big.NewRat(1, 1)
 
 // publishSignal records the immutable StrategySignal FACT — the audit root.
 func (t *Translator) publishSignal(ctx context.Context, in Intent, tenant string) error {
@@ -238,22 +341,10 @@ func (t *Translator) publishSignal(ctx context.Context, in Intent, tenant string
 	})
 }
 
-// fanOut resolves the absolute quantity and emits one SubmitOrder per venue in
-// the fund's allocation policy.
-func (t *Translator) fanOut(ctx context.Context, in Intent, tenant string) ([]string, error) {
-	venues, err := t.opt.Alloc.VenuesFor(in.FundID)
-	if err != nil {
-		return nil, err // ErrNoAllocation — deny-by-default
-	}
-
-	var baseQty *big.Rat
-	if in.Action != signalpb.SignalAction_SIGNAL_ACTION_CLOSE {
-		baseQty, err = t.resolveQuantity(ctx, in)
-		if err != nil {
-			return nil, err
-		}
-	}
-
+// fanOut emits one SubmitOrder per venue in the fund's allocation policy. The
+// venues and the resolved base quantity are resolved by Emit — everything that can
+// REFUSE the signal runs before the audit FACT is written.
+func (t *Translator) fanOut(ctx context.Context, in Intent, tenant string, venues []VenueAllocation, baseQty Qty) ([]string, error) {
 	tif := in.TimeInForce
 	if tif == orderpb.TimeInForce_TIME_IN_FORCE_UNSPECIFIED {
 		tif = orderpb.TimeInForce_TIME_IN_FORCE_DAY
@@ -265,11 +356,11 @@ func (t *Translator) fanOut(ctx context.Context, in Intent, tenant string) ([]st
 		if err != nil {
 			return nil, err
 		}
-		if qty == nil || qty.Sign() <= 0 {
+		if !qty.IsSet() || qty.Sign() <= 0 {
 			continue // nothing to do at this venue (e.g. CLOSE with no position)
 		}
 		orderID := DeterministicID(in.SignalID, v.Venue)
-		qtyD, qtyOK := toDec(qty)
+		qtyD, qtyOK := toDec(qty.Rat())
 		limitD, limitOK := toDec(in.LimitPrice)
 		if !qtyOK || !limitOK {
 			return nil, fmt.Errorf("translate: order %s quantity or limit price is not representable "+
@@ -310,33 +401,37 @@ func (t *Translator) publishCommand(ctx context.Context, cmd *orderpb.SubmitOrde
 	})
 }
 
-// resolveQuantity turns a sized intent into an absolute quantity against live
-// fund state, exactly (big.Rat, no float).
-func (t *Translator) resolveQuantity(ctx context.Context, in Intent) (*big.Rat, error) {
+// resolveQuantity turns a sized intent into an absolute base-asset quantity
+// against live fund state, exactly (big.Rat, no float).
+//
+// This is the ONLY function that knows what Intent.Size means, and therefore the
+// only place a Qty can come from. Any bound on the size has to be applied to what
+// this returns — see Options.MaxQuantity.
+func (t *Translator) resolveQuantity(ctx context.Context, in Intent) (Qty, error) {
 	switch in.SizeType {
 	case signalpb.SizeType_SIZE_TYPE_ABSOLUTE_QTY:
-		return new(big.Rat).Set(in.Size), nil
+		return NewQty(in.Size), nil
 	case signalpb.SizeType_SIZE_TYPE_QUOTE_NOTIONAL:
 		price, err := t.price(ctx, in.InstrumentID)
 		if err != nil {
-			return nil, err
+			return Qty{}, err
 		}
-		return new(big.Rat).Quo(in.Size, price), nil // notional / price
+		return NewQty(new(big.Rat).Quo(in.Size, price)), nil // notional / price
 	case signalpb.SizeType_SIZE_TYPE_PCT_OF_EQUITY:
 		nav, err := t.opt.Equity.Equity(ctx, in.FundID)
 		if err != nil {
-			return nil, err
+			return Qty{}, err
 		}
 		price, err := t.price(ctx, in.InstrumentID)
 		if err != nil {
-			return nil, err
+			return Qty{}, err
 		}
 		// (pct/100 × NAV) / price
 		frac := new(big.Rat).Quo(in.Size, big.NewRat(100, 1))
 		notional := new(big.Rat).Mul(frac, nav)
-		return new(big.Rat).Quo(notional, price), nil
+		return NewQty(new(big.Rat).Quo(notional, price)), nil
 	default:
-		return nil, fmt.Errorf("%w: unspecified size_type", ErrInvalidIntent)
+		return Qty{}, fmt.Errorf("%w: unspecified size_type", ErrInvalidIntent)
 	}
 }
 
@@ -354,25 +449,28 @@ func (t *Translator) price(ctx context.Context, instrumentID string) (*big.Rat, 
 // legSizeAndSide computes one venue leg's side and quantity. BUY/SELL scale the
 // base quantity by the venue weight; CLOSE flattens the venue's current position
 // (opposite side, full size).
-func (t *Translator) legSizeAndSide(ctx context.Context, in Intent, baseQty *big.Rat, v VenueAllocation) (orderpb.Side, *big.Rat, error) {
+func (t *Translator) legSizeAndSide(ctx context.Context, in Intent, baseQty Qty, v VenueAllocation) (orderpb.Side, Qty, error) {
 	if in.Action == signalpb.SignalAction_SIGNAL_ACTION_CLOSE {
 		pos, err := t.opt.Positions.Position(ctx, in.FundID, v.Venue, in.InstrumentID)
 		if err != nil {
-			return orderpb.Side_SIDE_UNSPECIFIED, nil, err
+			return orderpb.Side_SIDE_UNSPECIFIED, Qty{}, err
 		}
 		if pos.Sign() == 0 {
-			return orderpb.Side_SIDE_UNSPECIFIED, nil, nil // flat — skip
+			return orderpb.Side_SIDE_UNSPECIFIED, Qty{}, nil // flat — skip
 		}
 		if pos.Sign() > 0 {
-			return orderpb.Side_SIDE_SELL, pos, nil // long → sell to flatten
+			return orderpb.Side_SIDE_SELL, NewQty(pos), nil // long → sell to flatten
 		}
-		return orderpb.Side_SIDE_BUY, new(big.Rat).Abs(pos), nil // short → buy to flatten
+		return orderpb.Side_SIDE_BUY, NewQty(new(big.Rat).Abs(pos)), nil // short → buy to flatten
 	}
 	side := orderpb.Side_SIDE_BUY
 	if in.Action == signalpb.SignalAction_SIGNAL_ACTION_SELL {
 		side = orderpb.Side_SIDE_SELL
 	}
-	return side, new(big.Rat).Mul(baseQty, v.Weight), nil
+	// The weight is dimensionless and was audited at startup to sum to 1 across the
+	// fund's legs (ValidateAllocation) — this multiply is a SPLIT, not a scale, and
+	// unvalidated weights turned it into one (#240).
+	return side, baseQty.Scale(v.Weight), nil
 }
 
 // DeterministicID derives a stable id from its parts (strategy+nonce → signal id;
@@ -411,6 +509,11 @@ func toDec(r *big.Rat) (*commonpb.Decimal, bool) {
 var (
 	ErrInvalidIntent = errors.New("translate: invalid intent")
 	ErrUnresolvable  = errors.New("translate: could not resolve order size")
+	// ErrSizeExceedsMax is returned when the RESOLVED quantity is above
+	// Options.MaxQuantity. Distinct from ErrInvalidIntent because the intent is
+	// well-formed — it is the platform that refuses to act on it at that size; the
+	// webhook perimeter still maps both to 400.
+	ErrSizeExceedsMax = errors.New("translate: resolved size exceeds the configured maximum")
 	// ErrHalted is returned when the kill-switch is closed. Both front ends map it
 	// to their own surface (the webhook perimeter answers 423 Locked).
 	ErrHalted = errors.New("translate: trading halted")

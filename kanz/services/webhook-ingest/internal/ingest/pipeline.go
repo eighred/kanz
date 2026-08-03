@@ -34,8 +34,22 @@ type Options struct {
 	// `func(fundID) bool` seam this replaced defaulted to constant false and was
 	// never wired in cmd/, which left the brake disconnected in production.
 	Gate *translate.Gate
-	// MaxSize / MaxLeverage bound the sanity gate; nil ⇒ no bound.
-	MaxSize     *big.Rat
+	// MaxQuantity bounds the RESOLVED base-asset quantity of one alert. It is handed
+	// straight to the translator because THIS LAYER CANNOT APPLY IT: the perimeter
+	// holds a bare `size` whose unit SizeType has not yet decided.
+	//
+	// It replaced a `MaxSize *big.Rat` compared against that bare size, which is why
+	// a cap of 10 meaning "10 BTC" admitted {"size":"9","size_type":"pct_of_equity"}
+	// and fanned out 1,800 BTC (#240). The type change is the point: translate.Qty
+	// cannot be compared against Intent.Size, so the old check no longer compiles.
+	MaxQuantity translate.Qty
+	// MaxLeverage bounds the leverage a signal may ask for; nil ⇒ no bound.
+	//
+	// SUBORDINATE to a hard refusal: translate rejects ANY leverage != 1, because
+	// order.v1.SubmitOrder cannot carry leverage and accepting it wrote a levered
+	// position onto the audit root that no venue was asked for (#240). So a
+	// max_leverage above 1 currently binds on nothing. It stays because it is the
+	// bound that becomes live again the day leverage reaches the venue adapters.
 	MaxLeverage *big.Rat
 	// ReplayWindow bounds the nonce cache; 0 ⇒ 5m.
 	ReplayWindow time.Duration
@@ -70,7 +84,8 @@ func NewPipeline(opt Options) (*Pipeline, error) {
 	tr, err := translate.New(translate.Options{
 		Prices: opt.Prices, Equity: opt.Equity, Positions: opt.Positions,
 		Alloc: opt.Alloc, Publisher: opt.Publisher, Gate: opt.Gate,
-		TenantOf: opt.TenantOf, Now: opt.Now,
+		MaxQuantity: opt.MaxQuantity,
+		TenantOf:    opt.TenantOf, Now: opt.Now,
 	})
 	if err != nil {
 		return nil, err
@@ -169,7 +184,9 @@ func (p *Pipeline) decide(ctx context.Context, wh *Webhook) (*Result, error) {
 	if err != nil || leverageRat.Sign() <= 0 {
 		return nil, fmt.Errorf("%w: leverage must be a positive decimal", ErrBadRequest)
 	}
-	if err := p.sanity(sizeRat, leverageRat); err != nil {
+	// Only the leverage bound is applied here. The SIZE bound moved into the
+	// translator, where the unit is known — see Options.MaxQuantity (#240).
+	if err := p.sanity(leverageRat); err != nil {
 		return nil, err
 	}
 	orderType, limitPrice, err := p.orderPricing(wh)
@@ -204,7 +221,9 @@ func (p *Pipeline) decide(ctx context.Context, wh *Webhook) (*Result, error) {
 // the HTTP server maps to status codes.
 func mapTranslateErr(err error) error {
 	switch {
-	case errors.Is(err, translate.ErrInvalidIntent):
+	case errors.Is(err, translate.ErrInvalidIntent), errors.Is(err, translate.ErrSizeExceedsMax):
+		// Both are a VERDICT on the alert — the caller sent something this platform
+		// will not act on — so both answer 400 and both BURN the nonce (see decided).
 		return fmt.Errorf("%w: %v", ErrBadRequest, err)
 	case errors.Is(err, translate.ErrUnresolvable):
 		return fmt.Errorf("%w: %v", ErrUnresolvable, err)
@@ -228,10 +247,10 @@ func (p *Pipeline) orderPricing(wh *Webhook) (orderpb.OrderType, *big.Rat, error
 	}
 }
 
-func (p *Pipeline) sanity(size, leverage *big.Rat) error {
-	if p.opt.MaxSize != nil && size.Cmp(p.opt.MaxSize) > 0 {
-		return fmt.Errorf("%w: size exceeds the configured maximum", ErrBadRequest)
-	}
+// sanity applies the bounds this layer can apply. There is no size bound here:
+// `size` at the perimeter is a bare number whose unit SizeType has not yet
+// decided, and bounding it was the defect (#240).
+func (p *Pipeline) sanity(leverage *big.Rat) error {
 	if p.opt.MaxLeverage != nil && leverage.Cmp(p.opt.MaxLeverage) > 0 {
 		return fmt.Errorf("%w: leverage exceeds the configured maximum", ErrBadRequest)
 	}

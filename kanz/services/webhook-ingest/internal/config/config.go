@@ -70,20 +70,31 @@ type Config struct {
 	Prices  ingest.StaticPrices
 	Equity  ingest.StaticEquity
 
-	MaxSize     *big.Rat
+	// MaxQuantity bounds the RESOLVED base-asset quantity of one alert — units of
+	// the instrument, after size_type has been applied. See translate.Qty.
+	MaxQuantity ingest.Qty
+	// MaxLeverage is currently subordinate to a hard refusal of any leverage != 1;
+	// see ingest.Options.MaxLeverage (#240).
 	MaxLeverage *big.Rat
 }
 
 // bootstrap is the JSON shape of the trading config file. All decimals are
 // strings (exact; no float).
 type bootstrap struct {
-	Strategies  map[string]string        `json:"strategies"` // strategy_id -> hmac secret
-	Symbols     map[string]string        `json:"symbols"`    // tv symbol -> instrument_id
-	Funds       map[string][]venueWeight `json:"funds"`      // fund_id -> allocation
-	Prices      map[string]string        `json:"prices"`     // instrument_id -> price
-	Equity      map[string]string        `json:"equity"`     // fund_id -> NAV
-	MaxSize     string                   `json:"max_size"`
-	MaxLeverage string                   `json:"max_leverage"`
+	Strategies map[string]string        `json:"strategies"` // strategy_id -> hmac secret
+	Symbols    map[string]string        `json:"symbols"`    // tv symbol -> instrument_id
+	Funds      map[string][]venueWeight `json:"funds"`      // fund_id -> allocation
+	Prices     map[string]string        `json:"prices"`     // instrument_id -> price
+	Equity     map[string]string        `json:"equity"`     // fund_id -> NAV
+	// MaxQuantity is a bound on the RESOLVED base-asset quantity — "never more than
+	// N units of the instrument per alert", checked after size_type is applied.
+	MaxQuantity string `json:"max_quantity"`
+	// LegacyMaxSize captures the RETIRED `max_size` key so its presence is an ERROR
+	// rather than a silently ignored field. json.Unmarshal drops unknown keys, so
+	// renaming the key without this would take a deployment that HAD a bound and
+	// leave it with NONE — a worse outcome than the defect being fixed (#240).
+	LegacyMaxSize string `json:"max_size"`
+	MaxLeverage   string `json:"max_leverage"`
 }
 
 type venueWeight struct {
@@ -182,14 +193,39 @@ func (cfg *Config) applyBootstrap(b *bootstrap) error {
 			}
 			out = append(out, ingest.VenueAllocation{Venue: l.Venue, Weight: w})
 		}
+		// REFUSE TO START on a split that is not a split. Weights were parsed here and
+		// never summed, so a fund written 60/40 instead of 0.6/0.4 loaded clean and
+		// multiplied every order it ever placed by 100 (#240).
+		if err := ingest.ValidateAllocation(fund, out); err != nil {
+			return err
+		}
 		cfg.Alloc[fund] = out
 	}
-	if b.MaxSize != "" {
-		r, err := dec.ParseRat(b.MaxSize)
+	// The retired key. `max_size` bounded the RAW size before size_type was applied,
+	// which made it three different units at once; the replacement bounds the
+	// resolved base-asset quantity. Reinterpreting an operator's old number silently
+	// would change what their cap means without telling them — a `max_size` meant as
+	// a $1,000,000 notional cap becomes 1,000,000 UNITS, effectively no cap at all.
+	// So it is an error, and the operator re-expresses it.
+	if b.LegacyMaxSize != "" {
+		return fmt.Errorf("bootstrap config: `max_size` is retired and MUST be re-expressed as "+
+			"`max_quantity` (#240). It bounded the raw `size` BEFORE size_type was applied, so it "+
+			"was a quantity, a notional and a percentage at once — a cap of 10 meaning 10 units "+
+			"admitted {\"size\":\"9\",\"size_type\":\"pct_of_equity\"} and fanned out 1800. "+
+			"`max_quantity` bounds the RESOLVED quantity, in units of the instrument. The old "+
+			"value %q is NOT carried over: decide what it should mean in units and set it",
+			b.LegacyMaxSize)
+	}
+	if b.MaxQuantity != "" {
+		r, err := dec.ParseRat(b.MaxQuantity)
 		if err != nil {
-			return fmt.Errorf("max_size: %w", err)
+			return fmt.Errorf("max_quantity: %w", err)
 		}
-		cfg.MaxSize = r
+		if r.Sign() <= 0 {
+			return fmt.Errorf("max_quantity: %s is not positive — a non-positive cap refuses every "+
+				"order; omit the key to run unbounded", r.RatString())
+		}
+		cfg.MaxQuantity = ingest.NewQty(r)
 	}
 	if b.MaxLeverage != "" {
 		r, err := dec.ParseRat(b.MaxLeverage)

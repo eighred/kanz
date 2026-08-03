@@ -36,11 +36,24 @@ type (
 	StaticPositions = translate.StaticPositions
 	// StaticAllocation is a fixed fund→venues map.
 	StaticAllocation = translate.StaticAllocation
+
+	// Qty is a RESOLVED base-asset quantity — the only unit a size bound may be
+	// expressed in. See translate.Qty.
+	Qty = translate.Qty
 )
 
 // ErrNoAllocation is returned when a fund has no configured venue allocation —
 // deny-by-default: an unmapped fund cannot trade.
 var ErrNoAllocation = translate.ErrNoAllocation
+
+// ErrBadAllocation is a startup failure: a fund's venue weights are not a split.
+var ErrBadAllocation = translate.ErrBadAllocation
+
+// NewQty wraps an exact rational as a resolved base-asset quantity; nil ⇒ unset.
+var NewQty = translate.NewQty
+
+// ValidateAllocation is the one venue-weight check, shared with the translator.
+var ValidateAllocation = translate.ValidateAllocation
 
 // SymbolResolver maps a raw TradingView ticker to a canonical Kanz instrument.
 // This one stays here: it is webhook-shaped. A native alpha engine already works
