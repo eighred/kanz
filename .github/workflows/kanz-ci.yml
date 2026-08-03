@@ -676,7 +676,22 @@ jobs:
         run: |
           set -euo pipefail
           sudo mkdir -p /etc/prometheus/rules
-          mapfile -t rules < <(kanz/infra/observability/apply-rules.sh --list)
+          # `bash <script>`, not the script directly: the exec bit is a property of
+          # the index, and a contributor on a filesystem that does not carry one
+          # commits 100644 without noticing. That is not a hypothetical — the first
+          # push of this step did exactly that.
+          #
+          # And the count is checked EXPLICITLY because `set -e` does not see a
+          # failure inside a process substitution: when the script could not run,
+          # mapfile simply produced an empty array and the step reported "staging 0
+          # rule file(s)" and carried on. An empty rule set must be fatal here for
+          # the same reason apply-rules.sh refuses to build an empty ConfigMap —
+          # zero rules validate perfectly.
+          mapfile -t rules < <(bash kanz/infra/observability/apply-rules.sh --list)
+          if [ "${#rules[@]}" -eq 0 ]; then
+            echo "::error::apply-rules.sh listed no rule files — nothing would be validated" >&2
+            exit 1
+          fi
           printf 'staging %d rule file(s)\n' "${#rules[@]}"
           printf '  %s\n' "${rules[@]}"
           sudo cp "${rules[@]}" /etc/prometheus/rules/
