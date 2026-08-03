@@ -62,31 +62,64 @@ const (
 	// refusal is how it gets one.
 	DefaultMaxRedrives = 3
 
+	// redriveDedupMargin is the headroom DefaultMinAge keeps ABOVE the consumer
+	// dedup TTL. It exists so the suppressing entry is long GONE when the redrive
+	// lands, not so it is "about" to expire — the same reasoning, and the same
+	// shape, as claimLeaseMargin in dedup.go.
+	redriveDedupMargin = 3 * time.Minute
+
 	// DefaultMinAge is how old a parked message must be before it may be
 	// redriven, and it exists because a redrive that is TOO EARLY does not fail
-	// — it silently does nothing. Two independent dedup windows swallow it:
+	// — it silently does nothing. Two independent dedup windows can swallow it,
+	// and only one of them is addressable from this side:
 	//
 	//  1. The destination stream's `--dupe-window=2m` (every stream in
 	//     infra/nats/bootstrap-job.yaml). JetStream answers a duplicate
 	//     Nats-Msg-Id with a successful PubAck carrying Duplicate=true, so the
 	//     publish reports success and the message is discarded. redriveMsgID
-	//     below removes this one.
-	//  2. The CONSUMER's dedup window, which redriveMsgID cannot touch: parking
-	//     calls dedup.Commit(env.IdempotencyKey), holding the key for the full
-	//     window (NewConsumer's default 2m, floored at dedupClaimLease = 75s).
-	//     A redrive inside it is claimed as a duplicate, skipped, and acked —
-	//     the handler never runs and nothing anywhere says so.
+	//     below removes this one outright, by re-stamping the id — MEASURED
+	//     against a real broker: the redriven copy lands on the stream.
+	//  2. The CONSUMER's dedup window, which redriveMsgID CANNOT touch, because
+	//     it is keyed on the envelope's idempotency_key rather than on any
+	//     header. Parking calls dedup.Commit(env.IdempotencyKey), holding the key
+	//     for defaultDedupTTL. A redrive inside that window is refused by Claim,
+	//     skipped, and ACKED: the handler never runs, the drain reports
+	//     "redriven 1", and its durable cursor has moved past the parked copy.
+	//     That is the precise shape CLAUDE.md forbids — nothing configured and
+	//     checked-and-fine must not look the same.
 	//
-	// Five minutes clears both with margin. "Redrove 40 orders" that actually
-	// redrove none is the precise shape CLAUDE.md forbids: nothing configured
-	// and checked-and-fine must not look the same.
-	DefaultMinAge = 5 * time.Minute
+	// SO IT IS DERIVED FROM defaultDedupTTL, NOT CHOSEN. It was 5 minutes against
+	// a 2-minute TTL, which was correct and was also a COINCIDENCE: two unrelated
+	// literals in two files, with nothing tying them and no test that would fail
+	// if someone raised the TTL to ten minutes. The drain would then silently
+	// stop working — every run reporting success, every message skipped. This is
+	// the #237 treatment applied to the same class of bug: one number is derived
+	// from the other, and the ordering is asserted BY THE COMPILER below.
+	DefaultMinAge = defaultDedupTTL + redriveDedupMargin
 
 	// DefaultIdleTimeout is how long Run waits for another message before
 	// deciding the DLQ subject is drained. A redrive is a bounded operator
 	// action with a summary at the end, not a daemon.
 	DefaultIdleTimeout = 5 * time.Second
 )
+
+// Compile-time assertion: the default minimum age must OUTLAST the consumer
+// dedup TTL, or the default drain redrives messages straight into a suppression
+// window that skips and acks them — a drain that reports success and recovers
+// nothing.
+//
+// WHAT THIS DOES AND DOES NOT CATCH, because the two are easy to conflate and a
+// guard believed to cover more than it does is worse than none. The DERIVATION
+// above is what makes raising defaultDedupTTL safe: DefaultMinAge moves with it,
+// so the ordering cannot be broken from that direction and this expression stays
+// exactly redriveDedupMargin no matter what the TTL becomes. Verified by
+// mutation — setting the TTL to 10m compiles and behaves correctly.
+//
+// What it catches is the OTHER edit, and the likelier one: someone replacing the
+// derivation with a literal ("5m is what it has always been") while the TTL is
+// larger, or making the margin negative. Verified by mutation the same way —
+// DefaultMinAge = 1 * time.Minute fails the build with "constant overflows uint".
+const _ = uint(DefaultMinAge - defaultDedupTTL - 1)
 
 // RedriveOptions bounds one redrive run.
 type RedriveOptions struct {
@@ -133,6 +166,25 @@ var ErrRedriveRefused = errors.New("redrive refused")
 // Redriver.Limit was reached. Internal and never returned from Run: hitting the
 // limit is the operator getting what they asked for, not a failure.
 var errRedriveLimit = errors.New("redrive: limit reached")
+
+// errRedrivenThisRun NAKs a message this run already sent once, which then
+// failed and came straight back. Internal, and not a failure.
+//
+// ONE ATTEMPT PER MESSAGE PER RUN, AND THE BUDGET DEPENDS ON IT. The drain stays
+// subscribed to dlq.> while it works, so a redriven message whose handler fails
+// immediately is re-parked and re-offered to the SAME run within milliseconds.
+// Left alone, one run walks a message through its entire MaxRedrives budget
+// against a dependency that is still down — measured against a real broker, a
+// single run took a poison message from 0 to 2 redrives inside 200ms.
+//
+// That makes the loop bound meaningless as the human checkpoint it is documented
+// to be: "three attempts that all fail is a message that needs a person" is only
+// true if the three attempts are three DECISIONS. It is the same pathology #237
+// found one layer down, where a bare Nak() exhausted MaxDeliver in under a
+// millisecond and turned a delivery budget into no budget at all — there the fix
+// was backoff, here it is that a run gets one attempt and the operator decides
+// whether there is another.
+var errRedrivenThisRun = errors.New("redrive: already attempted in this run")
 
 func (r *RedriveRefusal) Is(target error) bool { return target == ErrRedriveRefused }
 
@@ -258,6 +310,27 @@ func redriveMsgID(original string, redrives int) string {
 	return original + "-redrive-" + strconv.Itoa(redrives)
 }
 
+// MayBeSuppressed reports whether a parked message is young enough that the
+// receiving consumer's dedup window may skip the redriven copy as a duplicate.
+//
+// It is a WARNING, not a verdict. The drain runs in a different process from
+// the consumer and cannot observe whether a dispatch happened; all it can do is
+// compare the message's age against the dedup TTL every consumer in this estate
+// runs on. A false alarm is possible (a consumer with dedup disabled, or one
+// that restarted since the park, has no entry to collide with) and is the right
+// direction to be wrong in.
+//
+// An age that cannot be established returns false: PlanRedrive already refuses
+// that case unless MinAge is 0, and under MinAge 0 the operator has explicitly
+// taken the age question off the table.
+func MayBeSuppressed(parked Message, now time.Time) bool {
+	parkedAt, err := parkedAtOf(parked.Headers)
+	if err != nil {
+		return false
+	}
+	return now.Sub(parkedAt) < defaultDedupTTL
+}
+
 func redriveCount(h map[string]string) (int, error) {
 	raw, ok := h[HeaderDLQRedrives]
 	if !ok || raw == "" {
@@ -324,6 +397,24 @@ type RedriveStats struct {
 	Inspected int
 	// Redriven counts messages republished AND acked.
 	Redriven int
+	// ReturnedThisRun counts messages this run redrove that FAILED AGAIN and came
+	// back to the DLQ before the run ended. They are left unacked for a later
+	// run — see errRedrivenThisRun. A non-zero value is the useful early signal
+	// that whatever broke is still broken.
+	ReturnedThisRun int
+	// SuppressionRisk counts redriven messages that were younger than
+	// defaultDedupTTL when they were sent — i.e. ones the receiving consumer may
+	// silently skip as duplicates. It is only ever non-zero when MinAge was
+	// lowered below the default, and it exists so that case cannot pass for a
+	// clean run. See MayBeSuppressed.
+	//
+	// A COUNT AND NOT A REFUSAL. Lowering MinAge is a deliberate operator act
+	// with a legitimate use (draining messages parked before Kanz-DLQ-Parked-At
+	// existed, which carry no age at all), so the drain does it. What it must not
+	// do is let "redriven 1" mean "and nothing happened" — the drain cannot see
+	// the consumer's dedup window from another process, so it reports the risk
+	// instead of claiming an outcome it did not observe.
+	SuppressionRisk int
 }
 
 // Run drains dlqSubj until it goes idle, ctx is cancelled, or a message is
@@ -403,7 +494,34 @@ func (r *Redriver) Run(ctx context.Context, dlqSubj, group string) (RedriveStats
 	// returning).
 	var halt error
 
+	// sentThisRun holds the Nats-Msg-Id of every copy this run published. A
+	// re-parked message carries that id back verbatim (redriveHeaders stamps it,
+	// dlqHeaders copies inbound headers forward), so it is a stable identity for
+	// "I already tried this one".
+	sentThisRun := map[string]bool{}
+	returnedThisRun := map[string]bool{}
+
 	subErr := r.Source.Subscribe(runCtx, dlqSubj, group, func(ctx context.Context, msg Message) error {
+		// BEFORE the activity signal, deliberately. A message this run already
+		// attempted is NAK'd, and NAK means redelivery — so counting it as
+		// activity would keep resetting the idle watchdog and the run would never
+		// end while a fast-failing message bounced against it.
+		if id := msg.Headers[headerNatsMsgID]; id != "" && sentThisRun[id] {
+			// Counted and logged ONCE per message, not once per delivery. It is
+			// NAK'd, so the broker keeps re-offering it on nakDelay's backoff until
+			// the run ends — without this the stat would report one returned
+			// message as three or four, and the log would repeat itself.
+			if !returnedThisRun[id] {
+				returnedThisRun[id] = true
+				stats.ReturnedThisRun++
+				log.Warn("a message this run redrove has already failed again and returned",
+					"subject", msg.Subject, "redrives", msg.Headers[HeaderDLQRedrives],
+					"parked_error", msg.Headers[HeaderDLQError],
+					"detail", "left parked for a later run: the loop budget is a sequence of "+
+						"operator decisions, not attempts a single run may spend on its own")
+			}
+			return errRedrivenThisRun // NAK — stays parked, first in line next run
+		}
 		select {
 		case activity <- struct{}{}:
 		default:
@@ -437,12 +555,25 @@ func (r *Redriver) Run(ctx context.Context, dlqSubj, group string) (RedriveStats
 			cancel()
 			return halt
 		}
+		if id := out.Headers[headerNatsMsgID]; id != "" {
+			sentThisRun[id] = true
+		}
 		stats.Redriven++
 		r.Metrics.observeRedrive(out.Subject, "ok")
 		log.Info("redrove parked message",
 			"from", msg.Subject, "to", out.Subject,
 			"redrives", out.Headers[HeaderDLQRedrives],
 			"parked_error", msg.Headers[HeaderDLQError])
+		if MayBeSuppressed(msg, time.Now().UTC()) {
+			stats.SuppressionRisk++
+			r.Metrics.observeRedrive(out.Subject, "suppression_risk")
+			log.Warn("redriven inside the consumer dedup window — the handler may never see it",
+				"to", out.Subject, "dedup_ttl", defaultDedupTTL,
+				"detail", "the parking consumer committed this event's idempotency_key for "+
+					"the full dedup TTL, so a copy arriving inside that window is skipped and "+
+					"acked without dispatching. This run cannot tell which happened. Confirm the "+
+					"handler actually ran, or re-drive after the window with the default --min-age")
+		}
 		// Limit reached: cancel AFTER the ack return below, so this message is
 		// settled. Cancelling before returning nil would still ack (the return
 		// value is what settles it), but the ordering here is explicit because

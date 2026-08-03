@@ -223,6 +223,84 @@ func TestPlanRedriveRefusesAnUnparseableLoopCount(t *testing.T) {
 	}
 }
 
+// THE ORDERING THAT MAKES THE DRAIN WORK AT ALL.
+//
+// Parking commits the event's idempotency_key for defaultDedupTTL, so a redrive
+// arriving inside that window is refused by Claim, skipped, and ACKED — the
+// handler never runs, the drain reports success, and its cursor has moved past
+// the parked copy. DefaultMinAge is what keeps the redrive outside that window.
+//
+// Measured, not assumed: against a real broker the redriven copy lands on the
+// destination stream and the handler is still not invoked, and a FRESH consumer
+// instance (no dedup entry) dispatches the same copy immediately. The blocker is
+// this window and nothing else.
+//
+// The DERIVATION in redrive.go is the primary guard — DefaultMinAge moves with
+// the TTL, so the ordering cannot break from that direction, and the
+// compile-time assertion there covers a literal replacing the derivation. This
+// test is the readable third layer: it survives someone deleting either, and it
+// names the consequence, which "constant overflows uint" cannot.
+func TestDefaultMinAgeOutlastsTheConsumerDedupWindow(t *testing.T) {
+	if bus.DefaultMinAge <= bus.DefaultDedupTTL {
+		t.Fatalf("DefaultMinAge (%s) does not exceed the consumer dedup TTL (%s).\n\n"+
+			"Parking Commits the idempotency_key for the full TTL, so at this setting the "+
+			"DEFAULT drain redrives messages straight into a window that skips and acks them. "+
+			"Every run would report success and recover nothing — the drain silently stops "+
+			"working with no test failing and no error anywhere.",
+			bus.DefaultMinAge, bus.DefaultDedupTTL)
+	}
+}
+
+// The risk predicate is what stops a lowered --min-age from passing for a clean
+// run. It must fire for a young message and stay quiet for an old one.
+func TestMayBeSuppressedFlagsARedriveInsideTheDedupWindow(t *testing.T) {
+	now := time.Now().UTC()
+	young := parkedMsg(withHeader(bus.HeaderDLQParkedAt,
+		now.Add(-10*time.Second).Format(time.RFC3339Nano)))
+	if !bus.MayBeSuppressed(young, now) {
+		t.Error("a 10s-old message was not flagged. Redriven at --min-age=0 it may be skipped " +
+			"and acked without dispatching, and the run would read as a clean recovery")
+	}
+
+	old := parkedMsg(withHeader(bus.HeaderDLQParkedAt,
+		now.Add(-bus.DefaultDedupTTL-time.Minute).Format(time.RFC3339Nano)))
+	if bus.MayBeSuppressed(old, now) {
+		t.Error("a message older than the dedup TTL was flagged — a warning that fires on every " +
+			"ordinary drain is one operators learn to ignore")
+	}
+
+	// No timestamp ⇒ no claim either way. PlanRedrive already refuses that case
+	// unless MinAge is 0, and under MinAge 0 the operator took the age question
+	// off the table deliberately.
+	noStamp := parkedMsg(func(h map[string]string) { delete(h, bus.HeaderDLQParkedAt) })
+	if bus.MayBeSuppressed(noStamp, now) {
+		t.Error("a message with no Parked-At was flagged; its age is unknown, not known-young")
+	}
+}
+
+func TestRedriverCountsSuppressionRiskInsteadOfClaimingSuccess(t *testing.T) {
+	now := time.Now().UTC()
+	src := &fakeDLQ{msgs: []bus.Message{
+		parkedMsg(withHeader(bus.HeaderDLQParkedAt, now.Add(-5*time.Second).Format(time.RFC3339Nano))),
+	}}
+	dst := &recordingPublisher{}
+	r := &bus.Redriver{Source: src, Dest: dst, Options: bus.RedriveOptions{MinAge: 0}, IdleTimeout: 100 * time.Millisecond}
+
+	stats, err := r.Run(context.Background(), parkedSubject, "kanz-redrive")
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if stats.Redriven != 1 {
+		t.Fatalf("redriven = %d, want 1 — lowering MinAge must still DO the redrive; it is a "+
+			"deliberate operator act with a legitimate use", stats.Redriven)
+	}
+	if stats.SuppressionRisk != 1 {
+		t.Errorf("SuppressionRisk = %d, want 1. Without it this run reports a clean "+
+			"'redriven 1' for a message the consumer may have silently skipped — and the parked "+
+			"copy has already been acked past", stats.SuppressionRisk)
+	}
+}
+
 // ---- the driver ----------------------------------------------------------
 
 // fakeDLQ replays a fixed set of parked messages through the Subscriber
@@ -381,6 +459,54 @@ func TestRedriverStopsAtTheLimitWithoutDrainingTheRest(t *testing.T) {
 	}
 	if len(src.acked) != 1 {
 		t.Errorf("acked %d, want 1 — the messages past the limit must stay parked for the next run", len(src.acked))
+	}
+}
+
+// ONE ATTEMPT PER MESSAGE PER RUN.
+//
+// The drain stays subscribed while it works, so a redriven message whose handler
+// fails immediately is re-parked and re-offered to the SAME run. Found against a
+// real broker: one run took a poison message from 0 to 2 redrives in under 200ms,
+// spending the whole budget automatically. The second message here is what a
+// re-park actually looks like — it carries the Nats-Msg-Id the redrive stamped
+// (redriveMsgID) plus the incremented count, because dlqHeaders copies inbound
+// headers forward.
+func TestRedriverGivesEachMessageOneAttemptPerRun(t *testing.T) {
+	returned := parkedMsg(
+		withHeader("Nats-Msg-Id", "idem-key-1-redrive-1"),
+		withHeader(bus.HeaderDLQRedrives, "1"),
+		withHeader(bus.HeaderDLQError, "came-back"),
+	)
+	src := &fakeDLQ{msgs: []bus.Message{
+		parkedMsg(withHeader(bus.HeaderDLQError, "first")),
+		returned,
+	}}
+	dst := &recordingPublisher{}
+	r := &bus.Redriver{Source: src, Dest: dst, Options: bus.RedriveOptions{MaxRedrives: 5}, IdleTimeout: 150 * time.Millisecond}
+
+	stats, err := r.Run(context.Background(), parkedSubject, "kanz-redrive")
+	if err != nil {
+		t.Fatalf("Run: %v — a message coming back is expected, not a failure", err)
+	}
+	if stats.Redriven != 1 {
+		t.Fatalf("redriven = %d, want 1. The run re-sent a message it had already attempted, so "+
+			"MaxRedrives is spent inside one operator action instead of across the decisions it "+
+			"is documented to represent", stats.Redriven)
+	}
+	if stats.ReturnedThisRun != 1 {
+		t.Errorf("ReturnedThisRun = %d, want 1 — a redrive that failed and came back is the "+
+			"earliest signal the dependency is still broken, and it must be reported",
+			stats.ReturnedThisRun)
+	}
+	if len(dst.sent) != 1 {
+		t.Errorf("published %d, want 1", len(dst.sent))
+	}
+	// NAK'd, not acked: it must stay parked and be first in line for the next run.
+	for _, e := range src.acked {
+		if e == "came-back" {
+			t.Error("the returned message was ACKED — the drain's cursor has moved past a still-" +
+				"parked message, so no later run will see it")
+		}
 	}
 }
 

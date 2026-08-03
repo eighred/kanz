@@ -133,7 +133,7 @@ func NewConsumer(s Subscriber, opts ...ConsumerOption) (*Consumer, error) {
 		return nil, errors.New("bus: subscriber is nil")
 	}
 	o := consumerOptions{
-		dedupTTL:  2 * time.Minute,
+		dedupTTL:  defaultDedupTTL,
 		dedupMax:  10_000,
 		validator: Validate,
 	}

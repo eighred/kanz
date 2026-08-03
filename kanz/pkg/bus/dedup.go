@@ -49,6 +49,25 @@ const claimLeaseMargin = 15 * time.Second
 // redisClaimLease for the opposite conclusion and its reasoning.
 const dedupClaimLease = maxTunedAckWait + claimLeaseMargin
 
+// defaultDedupTTL is how long a COMMITTED key keeps suppressing dispatches —
+// NewConsumer's default, and the value every consumer in this estate runs on
+// (nothing calls WithDedupWindow, and risk-engine's RedisDedup is constructed
+// with the same 2m). It matches the NATS JetStream broker-side dedup window
+// (EVT-08, `--dupe-window=2m` in infra/nats/bootstrap-job.yaml) so the two
+// layers reinforce rather than disagree.
+//
+// IT IS A NAMED CONSTANT BECAUSE A SECOND THING NOW DEPENDS ON IT (#220).
+// Parking a message calls Commit, which holds its idempotency_key for this full
+// duration — so a REDRIVE arriving inside the window is refused by Claim,
+// skipped, and acked. The drain would report success having done nothing.
+//
+// The DLQ drain's DefaultMinAge is DERIVED from this constant (redrive.go), so
+// raising this TTL raises the drain's minimum age with it and cannot silently
+// break the drain the way it would have while the two were unrelated literals in
+// different files. Measured, not assumed: against a real broker a redrive inside
+// this window lands on the destination stream and is still never dispatched.
+const defaultDedupTTL = 2 * time.Minute
+
 // Compile-time assertion: the in-process claim lease must OUTLAST the longest
 // AckWait, or a redelivery arrives to find the key free and dispatches a second
 // concurrent copy of an event whose first copy is still running. Inverting the
