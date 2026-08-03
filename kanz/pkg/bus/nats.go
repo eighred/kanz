@@ -47,6 +47,21 @@ type NATSConfig struct {
 	// Subscribe for why shutdown drains rather than stops.
 	DrainGrace time.Duration
 
+	// ConsumerTuning overrides the per-subject delivery contract
+	// (tuningForSubject) for EVERY durable this client creates. Leave it nil —
+	// the built-in classes are the answer for production, and the reason they
+	// live in tuning.go instead of at twenty composition roots is that twenty
+	// copies of three numbers is how a fix stops spreading.
+	//
+	// It exists for the cases that genuinely cannot use them: an integration test
+	// that needs a 2s AckWait to observe a redelivery inside a test's lifetime,
+	// or a future service that can SHOW its handler does not fit a class. DialNATS
+	// validates it (ConsumerTuning.validate) and refuses to dial on a bad one,
+	// including one whose AckWait would reach the dedup claim lease and re-invert
+	// the duplicate-dispatch guard — a misconfiguration here must surface as a
+	// process that will not start, not as a delivery pathology in production.
+	ConsumerTuning *ConsumerTuning
+
 	// TLSConfig enables TLS (SEC-01c). For the zero-trust mesh the caller
 	// builds it from the workload SVID via transport.ClientTLSConfig
 	// (SEC-01b) so the connection is mutually authenticated and the NATS
@@ -113,6 +128,11 @@ func DialNATS(_ context.Context, cfg NATSConfig) (*NATSClient, error) {
 	}
 	if cfg.Logger == nil {
 		cfg.Logger = slog.Default()
+	}
+	if cfg.ConsumerTuning != nil {
+		if err := cfg.ConsumerTuning.validate(); err != nil {
+			return nil, fmt.Errorf("nats: ConsumerTuning: %w", err)
+		}
 	}
 	opts := []nats.Option{
 		nats.Name(cfg.Name),
@@ -199,11 +219,47 @@ func (c *NATSClient) Subscribe(ctx context.Context, subject, group string, h Han
 	// The durable name carries the subject so each subscription gets its own
 	// consumer. Group semantics are unchanged: every pod of a service still shares
 	// one durable PER SUBJECT, so a message goes to exactly one of them.
-	cons, err := c.js.CreateOrUpdateConsumer(ctx, stream, jetstream.ConsumerConfig{
+	//
+	// CREATE-OR-UPDATE STAYS AN OVERWRITE, AND THAT IS THE DECISION (#237).
+	//
+	// The alternative was to detect drift and refuse to start, treating a
+	// hand-edited consumer as authoritative. It was rejected: the durable's
+	// delivery contract has to match the code that handles the deliveries, and a
+	// pod that will not boot because someone ran `nats consumer edit` during an
+	// incident turns a tuning experiment into an outage. The contract is
+	// config-as-code — tuning.go plus a deploy — and an operator edit is
+	// transient BY DESIGN.
+	//
+	// What was NOT acceptable was that the revert was silent: a responder who
+	// raised AckWait to 120s mid-incident got it reset by the next rolling deploy
+	// with no error and no log line, and nothing anywhere said so. logTuningDrift
+	// below reads the existing consumer first and logs a WARN naming each field it
+	// is about to overwrite and its old value. Transient by design is fine;
+	// transient and invisible is how the same incident gets diagnosed twice.
+	//
+	// AckWait / MaxDeliver / MaxAckPending are set EXPLICITLY, from
+	// tuningForSubject (see tuning.go for each number and the reasoning behind
+	// it). Leaving them unset — which is what this call did until #237 — is not
+	// "the defaults are fine", it is three JetStream server defaults nobody chose:
+	// unbounded redelivery of a poison message, an AckWait shorter than a slow
+	// venue round-trip, and 1000 messages queued in front of a single dispatch
+	// goroutine whose ack clock is already running. test/arch's
+	// TestJetStreamConsumersAreExplicitlyTuned fails the build if they go missing
+	// again.
+	tuning := tuningForSubject(subject)
+	if c.cfg.ConsumerTuning != nil {
+		tuning = *c.cfg.ConsumerTuning
+	}
+	want := jetstream.ConsumerConfig{
 		Durable:       durableName(group, subject),
 		AckPolicy:     jetstream.AckExplicitPolicy,
 		FilterSubject: subject,
-	})
+		AckWait:       tuning.AckWait,
+		MaxDeliver:    tuning.MaxDeliver,
+		MaxAckPending: tuning.MaxAckPending,
+	}
+	c.logTuningDrift(ctx, stream, want)
+	cons, err := c.js.CreateOrUpdateConsumer(ctx, stream, want)
 	if err != nil {
 		return fmt.Errorf("nats: consumer %q on stream %q: %w", durableName(group, subject), stream, err)
 	}
@@ -225,10 +281,16 @@ func (c *NATSClient) Subscribe(ctx context.Context, subject, group string, h Han
 			// Surfaced deliberately (logNakFailure) but never escalated further: the
 			// handler already decided this delivery failed, and a Nak that itself
 			// fails to reach the broker still redelivers — just later, on the
-			// AckWait timeout, instead of immediately. Nothing here should turn
+			// AckWait timeout, instead of on the backoff. Nothing here should turn
 			// into a panic or a different return; the delivery outcome is already
 			// decided.
-			if nakErr := m.Nak(); nakErr != nil {
+			//
+			// NakWithDelay, NOT Nak. See nakDelay in tuning.go: a bare Nak triggers
+			// INSTANT redelivery — it honours neither AckWait nor a consumer BackOff
+			// — so a handler failing fast against a downed dependency spins the
+			// message thousands of times a second and burns a finite MaxDeliver in
+			// under a millisecond, while the outage is still in its first second.
+			if nakErr := m.NakWithDelay(nakDelayFor(m)); nakErr != nil {
 				logNakFailure(c.cfg.Logger, subject, group, nakErr)
 			}
 			return
@@ -249,10 +311,12 @@ func (c *NATSClient) Subscribe(ctx context.Context, subject, group string, h Han
 	// Shut down via Drain, not Stop. jetstream.ConsumeContext documents the
 	// difference explicitly: Stop "discards" whatever is already in the client's
 	// local delivery buffer; Drain "processes" it through the callback. JetStream
-	// marks a message delivered — starting its AckWait timer (30s default) — at
+	// marks a message delivered — starting its AckWait timer (tuning.go: 60s for work
+	// subjects, 15s for market.>) — at
 	// FETCH time, not callback time, so a message Stop() abandons in the buffer
 	// is neither acked nor nacked: the server sits on it for the full AckWait
-	// while its cleanly-NACKed siblings redeliver instantly and get reprocessed
+	// while its cleanly-NACKed siblings redeliver on nakDelay's backoff (2s for a
+	// first failure) and get reprocessed
 	// first. For a per-key-ordered consumer (the archiver, tv-sync's cost-basis
 	// fold) that reorders the replayed log on every restart — including an
 	// ordinary rolling deploy.
@@ -265,8 +329,9 @@ func (c *NATSClient) Subscribe(ctx context.Context, subject, group string, h Han
 	// own deadline lets a handler that's mid-flight finish real work if it can;
 	// anything still running when the deadline hits observes cancellation the
 	// same way it would observe any other downstream failure, returns an error,
-	// and gets NAK'd through the existing error path above — an EXPLICIT
-	// immediate-redelivery NAK, not a silent 30s wait.
+	// and gets NAK'd through the existing error path above — an EXPLICIT NAK on
+	// nakDelay's backoff (2s for a first failure), not a silent wait for the full
+	// AckWait.
 	grace := c.cfg.DrainGrace
 	if grace <= 0 {
 		grace = defaultDrainGrace
@@ -393,8 +458,9 @@ func logAckFailure(logger *slog.Logger, subject, group string, err error) {
 
 // logNakFailure reports that JetStream rejected the Nak for a message whose
 // handler failed. Less severe than a failed Ack: the message still
-// redelivers once its AckWait timer (30s default) expires — Nak only makes
-// that happen immediately instead. Logged for the same underlying reason
+// redelivers once its AckWait timer expires (tuning.go: 60s for work subjects,
+// 15s for market.>) — the Nak only makes
+// that happen sooner, on nakDelay's backoff. Logged for the same underlying reason
 // (see logAckFailure): a broker-side permission gap that breaks
 // acknowledgement should never be silent.
 func logNakFailure(logger *slog.Logger, subject, group string, err error) {
@@ -407,6 +473,69 @@ func logNakFailure(logger *slog.Logger, subject, group string, err error) {
 		"group", group,
 		"err", err,
 	)
+}
+
+// logTuningDrift reports, BEFORE CreateOrUpdateConsumer overwrites it, every
+// delivery-contract field on an existing durable that differs from what this
+// process is about to write.
+//
+// It exists because the overwrite is deliberate (see Subscribe) but used to be
+// invisible. An operator who raises AckWait on a consumer during an incident is
+// making a temporary change to a value this code owns; the next pod restart
+// silently reverts it, and the only trace was the incident recurring. One WARN
+// naming the field, the old value and the new one turns that into something a
+// responder can find in the log of the pod that did it.
+//
+// Everything here is best-effort and non-fatal. A consumer that does not exist
+// yet (the common case on a fresh spine) returns an error from js.Consumer and
+// there is nothing to report; an Info call that fails costs a log line, never a
+// subscription. It adds one $JS.API round-trip per Subscribe at startup — paid
+// once per (service, subject), not per message.
+func (c *NATSClient) logTuningDrift(ctx context.Context, stream string, want jetstream.ConsumerConfig) {
+	existing, err := c.js.Consumer(ctx, stream, want.Durable)
+	if err != nil {
+		return // not provisioned yet — nothing is being overwritten
+	}
+	info, err := existing.Info(ctx)
+	if err != nil {
+		return
+	}
+	var drift []any
+	if info.Config.AckWait != want.AckWait {
+		drift = append(drift, "ack_wait_was", info.Config.AckWait, "ack_wait_now", want.AckWait)
+	}
+	if info.Config.MaxDeliver != want.MaxDeliver {
+		drift = append(drift, "max_deliver_was", info.Config.MaxDeliver, "max_deliver_now", want.MaxDeliver)
+	}
+	if info.Config.MaxAckPending != want.MaxAckPending {
+		drift = append(drift, "max_ack_pending_was", info.Config.MaxAckPending, "max_ack_pending_now", want.MaxAckPending)
+	}
+	if len(drift) == 0 {
+		return
+	}
+	logger := c.cfg.Logger
+	if logger == nil {
+		logger = slog.Default()
+	}
+	logger.Warn("jetstream consumer tuning is being OVERWRITTEN by this process: the durable's delivery contract "+
+		"is config-as-code (pkg/bus/tuning.go) and CreateOrUpdateConsumer reasserts it on every start, so any "+
+		"value set out-of-band with `nats consumer edit` is transient by design — if one of these was an "+
+		"incident mitigation it has just been reverted, and the durable fix is a code change plus a deploy",
+		append([]any{"stream", stream, "durable", want.Durable}, drift...)...)
+}
+
+// nakDelayFor reads the broker's own delivery count for m and returns the
+// backoff to NAK with. Metadata() fails only for a message that did not come
+// from JetStream, which cannot happen on these callbacks; the fallback is the
+// FIRST-delivery delay rather than zero, because zero is instant redelivery —
+// the behaviour nakDelay exists to remove — and an error here must not silently
+// restore it.
+func nakDelayFor(m jetstream.Msg) time.Duration {
+	md, err := m.Metadata()
+	if err != nil || md == nil {
+		return nakDelay(1)
+	}
+	return nakDelay(md.NumDelivered)
 }
 
 // durableName builds the JetStream durable for one (group, subject) pair.
@@ -446,10 +575,23 @@ func (c *NATSClient) SubscribeBroadcastReady(ctx context.Context, subject string
 	if err != nil {
 		return fmt.Errorf("nats: stream for subject %q: %w", subject, err)
 	}
+	// controlTuning, NOT tuningForSubject: a broadcast carries the halt FACT and
+	// the trading mode, and its MaxDeliver is deliberately unbounded where every
+	// queue-group durable's is finite. See controlTuning in tuning.go — a bounded
+	// MaxDeliver here would let "I could not read the brake signal" stop being
+	// re-offered, which resolves to "carry on trading". A NATSConfig override
+	// still wins, so a test can shorten the AckWait.
+	tuning := controlTuning
+	if c.cfg.ConsumerTuning != nil {
+		tuning = *c.cfg.ConsumerTuning
+	}
 	cons, err := c.js.CreateConsumer(ctx, stream, jetstream.ConsumerConfig{
 		AckPolicy:     jetstream.AckExplicitPolicy,
 		FilterSubject: subject,
 		DeliverPolicy: jetstream.DeliverLastPerSubjectPolicy,
+		AckWait:       tuning.AckWait,
+		MaxDeliver:    tuning.MaxDeliver,
+		MaxAckPending: tuning.MaxAckPending,
 		// The server reaps the ephemeral consumer once the pod is gone.
 		InactiveThreshold: 5 * time.Minute,
 	})
@@ -460,7 +602,10 @@ func (c *NATSClient) SubscribeBroadcastReady(ctx context.Context, subject string
 		if err := h(ctx, natsToMessage(m)); err != nil {
 			// See the queue-group Subscribe callback above: surfaced deliberately,
 			// never escalated. A failed Nak still redelivers on the AckWait timeout.
-			if nakErr := m.Nak(); nakErr != nil {
+			// NakWithDelay for the same reason as the queue-group path above: a bare
+			// Nak is instant redelivery, which against a persistently unreadable
+			// control message is a hot loop rather than a retry.
+			if nakErr := m.NakWithDelay(nakDelayFor(m)); nakErr != nil {
 				logNakFailure(c.cfg.Logger, subject, "", nakErr)
 			}
 			return

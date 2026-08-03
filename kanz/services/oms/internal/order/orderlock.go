@@ -12,15 +12,29 @@ import (
 //
 // IT IS A CEILING ON HEAD-OF-LINE BLOCKING, NOT A TUNING KNOB. work() holds the
 // per-order lock across venue.Execute — a real call to an exchange — and one bus
-// subject is dispatched by ONE goroutine (pkg/bus/nats.go:217, and no
-// MaxAckPending or MaxConcurrent is configured anywhere), so while a cancel
-// waits here, every OTHER order's cancel queued behind it on that subject waits
-// too. It must also stay comfortably under JetStream's 30s AckWait: past that
-// the broker redelivers this same command while the first copy is still blocked,
-// the consumer's dedup window is still holding its idempotency key
-// (pkg/bus/consumer.go:164), and the redelivery is ACKED AND DISCARDED as a
-// duplicate — a cancel deleted by a timeout arithmetic error. 5s leaves 6×
-// headroom.
+// subject is dispatched by ONE goroutine, so while a cancel waits here, every
+// OTHER order's cancel queued behind it on that subject waits too. JetStream now
+// bounds how deep that queue can get: MaxAckPending is 32 on work subjects
+// (pkg/bus/tuning.go), where it was previously the 1000 server default.
+//
+// It must also stay comfortably under JetStream's AckWait, which is 60s for
+// order subjects (workAckWait, pkg/bus/tuning.go). Past AckWait the broker
+// redelivers this same command while the first copy is still blocked. 5s leaves
+// 12× headroom.
+//
+// WHAT THIS COMMENT USED TO SAY, AND WHY IT WAS WRONG (#237). It claimed that at
+// the redelivery "the consumer's dedup window is still holding its idempotency
+// key, and the redelivery is ACKED AND DISCARDED as a duplicate — a cancel
+// deleted by a timeout arithmetic error". The window was NOT holding it. An
+// in-flight dispatch holds only the claim LEASE; the full TTL is held only after
+// Commit (pkg/bus/dedup.go). The lease was 5s against a 30s AckWait, so at the
+// redelivery it had been expired for 25s and Claim returned TRUE — the opposite
+// failure from the one described: not a cancel silently deleted, but a SECOND
+// COPY of it dispatched concurrently with the first. The lease is now derived as
+// maxTunedAckWait + margin (75s) and outlasts every AckWait, so the suppression
+// this comment always assumed finally exists — but note it is the IN-PROCESS
+// window that provides it. Across pods the arbiter is still Store.Save's version
+// predicate (#122); see claim's doc below.
 const defaultClaimWait = 5 * time.Second
 
 // orderLocks is the per-order mutual-exclusion table: one lock per order_id,
@@ -147,8 +161,10 @@ func (t *orderLocks) releaser(orderID string, l *orderLock) func() {
 // It is IN-PROCESS ONLY, and that is a boundary, not a gap. What this closes is
 // the window WITHIN a pod, which is the window the bus actually opens: submit,
 // amend and cancel are three separate durables with three cursors and three
-// dispatch goroutines (pkg/bus/nats.go:183, 202-206), concurrent by
-// construction.
+// dispatch goroutines (see Subscribe's durable-per-(group,subject) comment in
+// pkg/bus/nats.go), concurrent by construction — and the consumer dedup claim
+// does not close it, because those are three DIFFERENT events with three
+// different idempotency keys.
 //
 // ACROSS PODS, Store.Save's version predicate closes it (#122): two OMS pods
 // acting on one order are arbitrated by the engine, and the losing writer is
