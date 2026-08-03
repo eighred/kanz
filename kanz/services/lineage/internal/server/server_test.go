@@ -139,6 +139,95 @@ func TestAuthenticatedCallerReadsPublicLineage(t *testing.T) {
 	}
 }
 
+// #244 AT THE TRANSPORT, WHICH IS WHERE IT HAS TO HOLD.
+//
+// The distinction is worthless if it lives only in the body: a dashboard, an
+// alert rule or `curl -f` reads the status code and nothing else, and a 404 tells
+// all of them the event does not exist. This service's index is bounded and
+// starts empty after every restart, so it has no standing to say that — it gets
+// 410, and only a graph that covers the whole history gets 404.
+func TestABoundedIndexAnswers410NotFound404(t *testing.T) {
+	s := newServer(t)
+	w := get(t, s, "/v1/lineage/event/never-seen", func(h http.Header) {
+		auth.SetPrincipalHeaders(h, "s1", "acme", []string{"steward"})
+	})
+	if w.Code == http.StatusNotFound {
+		t.Fatalf("a miss on a bounded, restart-emptied index came back 404 — " +
+			"'I have no record' served as 'there is no record'")
+	}
+	if w.Code != http.StatusGone {
+		t.Fatalf("want 410, got %d (%s)", w.Code, w.Body.String())
+	}
+
+	var u query.Unresolved
+	if err := json.Unmarshal(w.Body.Bytes(), &u); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if u.Status != graph.LookupUnknown {
+		t.Errorf("status = %q, want %q", u.Status, graph.LookupUnknown)
+	}
+	if u.Detail == "" {
+		t.Error("the refusal must say what it does NOT establish")
+	}
+	if u.Coverage.Capacity <= 0 {
+		t.Errorf("coverage absent from the refusal: %+v", u.Coverage)
+	}
+	if u.Coverage.Complete {
+		t.Error("coverage.complete true on a graph nothing declared complete")
+	}
+}
+
+// The mirror image, or 410 would just be the new 404. A graph that has observed
+// all of history and evicted nothing answers conclusively — a caller CAN still
+// get a definite "no such event", when one is warranted.
+func TestACompleteIndexStillAnswers404(t *testing.T) {
+	g := graph.NewMemory(graph.WithCompleteHistory())
+	g.Observe("e1", piiDS, "customer", "customer.v1.PersonProfile:1", time.Now(), "")
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	gov := governance.NewGovernor(governance.NewClassifier(nil),
+		auth.NewPolicyAuthorizer(&auth.Policy{}))
+	readiness := &server.Readiness{}
+	readiness.Set(true)
+	s := server.New(readiness, logger, server.WithLineage(g, query.NewService(g, gov)))
+
+	w := get(t, s, "/v1/lineage/event/never-seen", func(h http.Header) {
+		auth.SetPrincipalHeaders(h, "s1", "acme", []string{"steward"})
+	})
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("want 404 from a complete index, got %d (%s)", w.Code, w.Body.String())
+	}
+	var u query.Unresolved
+	if err := json.Unmarshal(w.Body.Bytes(), &u); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if u.Status != graph.LookupNotObserved {
+		t.Errorf("status = %q, want %q", u.Status, graph.LookupNotObserved)
+	}
+}
+
+// The catalog declares its coverage too: an empty catalog after a restart is
+// this pod's index, not the estate's data model.
+func TestCatalogDeclaresItsCoverage(t *testing.T) {
+	s := newServer(t)
+	w := get(t, s, "/v1/catalog/datasets", func(h http.Header) {
+		auth.SetPrincipalHeaders(h, "v1", "acme", []string{"viewer"})
+	})
+	if w.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d", w.Code)
+	}
+	var body struct {
+		Count    int            `json:"count"`
+		Coverage graph.Coverage `json:"coverage"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if body.Coverage.Capacity <= 0 || body.Coverage.Complete {
+		t.Errorf("catalog coverage = %+v", body.Coverage)
+	}
+}
+
 // The kubelet does not go through the gateway. A 401 here is a pod that never
 // becomes ready.
 func TestProbesAreReachableWithoutAPrincipal(t *testing.T) {

@@ -33,8 +33,8 @@ func TestDatasetOfAndSelfLoopSkipped(t *testing.T) {
 	// loop, not provenance.
 	g.Observe("s2", ds("kanz.risk", "PortfolioState"), "risk", "risk.v1.PortfolioState:1", now, "s1")
 
-	if got, ok := g.DatasetOf("s2"); !ok || got != ds("kanz.risk", "PortfolioState") {
-		t.Errorf("DatasetOf(s2) = %v,%v", got, ok)
+	if got, look := g.DatasetOf("s2"); look != graph.LookupRetained || got != ds("kanz.risk", "PortfolioState") {
+		t.Errorf("DatasetOf(s2) = %v,%v", got, look)
 	}
 	if up := g.Upstream(ds("kanz.risk", "PortfolioState")); len(up) != 0 {
 		t.Errorf("self-loop should not be provenance, got upstream %v", up)

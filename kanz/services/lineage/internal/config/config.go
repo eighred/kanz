@@ -1,9 +1,13 @@
 package config
 
 import (
+	"fmt"
 	"log/slog"
 	"os"
+	"strconv"
 	"strings"
+
+	"github.com/eighred/kanz/services/lineage/internal/graph"
 )
 
 // Config is the lineage service runtime configuration, sourced from the
@@ -24,6 +28,12 @@ type Config struct {
 	// Subjects to harvest. Default ">" — the lineage graph is comprehensive by
 	// design, like the audit log.
 	Subjects []string
+	// EventIndexMax is the hard ceiling on indexed event ids (#244). A ">"
+	// subscription means this is the one structure that grows with the estate's
+	// whole event rate rather than with its schema count, so it is the one that
+	// has to be capped. There is no value meaning "unbounded": 0 or a negative is
+	// a config error and refuses to start.
+	EventIndexMax int
 
 	// PolicyFile is the AUTH-01b policy bundle governing PII lineage access.
 	// Empty ⇒ a deny-all authorizer (no role can read PII until a bundle is
@@ -56,6 +66,15 @@ func Load() (Config, error) {
 	if len(subjects) == 0 {
 		subjects = DefaultSubjects
 	}
+	indexMax := graph.DefaultEventIndexCapacity
+	if v := os.Getenv("LINEAGE_EVENT_INDEX_MAX"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n <= 0 {
+			return Config{}, fmt.Errorf("config: LINEAGE_EVENT_INDEX_MAX=%q must be a positive "+
+				"integer (there is no unbounded setting — see #244)", v)
+		}
+		indexMax = n
+	}
 	return Config{
 		Listen:         envOr("LINEAGE_LISTEN", ":8086"),
 		LogLevel:       parseLevel(envOr("LINEAGE_LOG_LEVEL", "info")),
@@ -63,6 +82,7 @@ func Load() (Config, error) {
 		Source:         envOr("LINEAGE_SOURCE", "lineage"),
 		ConsumerGroup:  envOr("LINEAGE_CONSUMER_GROUP", "lineage"),
 		Subjects:       subjects,
+		EventIndexMax:  indexMax,
 		PolicyFile:     os.Getenv("LINEAGE_POLICY_FILE"),
 		GovernanceFile: os.Getenv("LINEAGE_GOVERNANCE_FILE"),
 		OpenLineageURL: strings.TrimRight(os.Getenv("LINEAGE_OPENLINEAGE_URL"), "/"),
