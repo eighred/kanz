@@ -166,6 +166,17 @@ type MeasureSet interface {
 	// Lookup returns the named measure and true, or zero Measure and
 	// false when the measure is not in the set.
 	Lookup(MeasureName) (Measure, bool)
+	// CurrencyExclusions lists the positions that contributed to NO
+	// measure in this set because their currency is not the portfolio's
+	// base (see QualityFlagCurrencyExcluded). Empty ⇒ the whole book was
+	// measured.
+	//
+	// This is on the interface rather than only on the response so the
+	// coverage travels WITH the values. A MeasureSet served from the
+	// degraded cache, narrowed by a measure filter, or projected through
+	// a scenario carries its own exclusions, so no path can hand a
+	// caller a partial number stripped of the fact that it is partial.
+	CurrencyExclusions() []CurrencyExclusion
 }
 
 // Measure is one named risk-measure value plus its propagated
@@ -252,7 +263,46 @@ const (
 	// freshness budget (request AsOf vs response AsOf gap), but the
 	// engine itself is not degraded.
 	QualityFlagStale QualityFlag = "STALE"
+	// QualityFlagCurrencyExcluded: the measures were computed over a
+	// SUBSET of the portfolio. The engine has no FX layer (RISK-06), so
+	// positions whose MarketValue is not denominated in the portfolio's
+	// BaseCurrency contribute to no base-currency measure. The excluded
+	// positions are enumerated by MeasureSet.CurrencyExclusions.
+	//
+	// The error direction is one-way: dropping positions makes gross
+	// exposure, net exposure, VaR and Delta SMALLER, never larger. A
+	// limit check against a flagged response can therefore pass when the
+	// whole book would breach. Any caller that gates on a money measure
+	// (pre-trade check, concentration limit, margin call) must treat this
+	// flag as a refusal to answer, not as an annotation on a good number.
+	QualityFlagCurrencyExcluded QualityFlag = "CURRENCY_EXCLUDED"
 )
+
+// QualityFlags is every flag the engine can attach to a response. It
+// exists so translation layers (the query.v1 gRPC mapping in
+// services/risk-engine/internal/grpcsrv) can be proven exhaustive by a
+// test rather than silently dropping a flag they were never taught —
+// which would restore exactly the silence QualityFlagCurrencyExcluded
+// was added to break. Append here when adding a flag above.
+var QualityFlags = []QualityFlag{
+	QualityFlagDegraded,
+	QualityFlagStale,
+	QualityFlagCurrencyExcluded,
+}
+
+// CurrencyExclusion names one position left out of every base-currency
+// measure because its MarketValue is denominated in something other than
+// the portfolio's BaseCurrency (or carries no MarketValue at all). It is
+// the evidence behind QualityFlagCurrencyExcluded: a caller can see
+// exactly which holdings the number does not include.
+type CurrencyExclusion struct {
+	// InstrumentID is the excluded holding.
+	InstrumentID InstrumentID
+	// Currency is the currency its MarketValue was denominated in, or
+	// "" when the position had no MarketValue to read (unmarked — the
+	// engine cannot express its exposure until a mark arrives).
+	Currency string
+}
 
 // --- Sentinel errors ---------------------------------------------------
 

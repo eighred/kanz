@@ -25,13 +25,14 @@ const UnclassifiedSector = "UNCLASSIFIED"
 // MarketValue are skipped (matching ComputeExposure). Output is sorted by bucket
 // key for deterministic iteration.
 func SectorExposure(ctx context.Context, p *domain.Portfolio, c Classifier) []domain.Exposure {
-	base := string(p.BaseCurrency())
+	base := p.BaseCurrency()
+	baseStr := string(base)
 	bySector := make(map[string]*domain.Exposure)
 	for _, pos := range p.Positions() {
-		mv := pos.MarketValue
-		if mv == nil || mv.CurrencyCode != base {
+		if !pos.InBaseCurrency(base) {
 			continue
 		}
+		mv := pos.MarketValue
 		key := UnclassifiedSector
 		if cl, ok := c.Classify(ctx, string(pos.InstrumentID), p.AsOf()); ok && !cl.Sector.IsZero() {
 			key = cl.Sector.Key()
@@ -41,8 +42,8 @@ func SectorExposure(ctx context.Context, p *domain.Portfolio, c Classifier) []do
 			bucket = &domain.Exposure{
 				Dimension: domain.ExposureBySector,
 				Key:       key,
-				Gross:     compute.ZeroMoney(base),
-				Net:       compute.ZeroMoney(base),
+				Gross:     compute.ZeroMoney(baseStr),
+				Net:       compute.ZeroMoney(baseStr),
 			}
 			bySector[key] = bucket
 		}

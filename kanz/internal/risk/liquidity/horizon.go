@@ -129,12 +129,12 @@ type Profile struct {
 // data is skipped entirely; one with zero ADV is flagged illiquid (counted in
 // IlliquidNotional, excluded from the weighted/max horizon over liquid names).
 func (m Model) LiquidationProfile(ctx context.Context, p *domain.Portfolio, provider Provider) Profile {
-	base := string(p.BaseCurrency())
+	base := p.BaseCurrency()
 	asOf := p.AsOf()
 	var prof Profile
 	var wSum, nSum float64
 	for _, pos := range p.Positions() {
-		if pos.MarketValue == nil || pos.MarketValue.CurrencyCode != base {
+		if !pos.InBaseCurrency(base) {
 			continue
 		}
 		spec, ok := provider.Liquidity(ctx, string(pos.InstrumentID), asOf)

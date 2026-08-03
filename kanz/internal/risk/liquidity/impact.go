@@ -50,11 +50,11 @@ func (m Model) CostFraction(days, spread float64) float64 {
 // (ADV≤0) position contributes its full notional (cost fraction caps at 1).
 // Always ≥ 0, so a VaR widened by it is never below the unadjusted VaR.
 func (m Model) LiquidationCost(ctx context.Context, p *domain.Portfolio, provider Provider) float64 {
-	base := string(p.BaseCurrency())
+	base := p.BaseCurrency()
 	asOf := p.AsOf()
 	var cost float64
 	for _, pos := range p.Positions() {
-		if pos.MarketValue == nil || pos.MarketValue.CurrencyCode != base {
+		if !pos.InBaseCurrency(base) {
 			continue
 		}
 		spec, ok := provider.Liquidity(ctx, string(pos.InstrumentID), asOf)

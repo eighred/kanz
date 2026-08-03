@@ -80,6 +80,16 @@ enum QualityFlag {
   // STALE: the data is older than the request's as_of budget, though the
   // engine itself is not degraded.
   QUALITY_FLAG_STALE = 2;
+
+  // CURRENCY_EXCLUDED: the response was computed over a SUBSET of the
+  // portfolio. The risk engine has no FX layer (RISK-06), so positions whose
+  // market value is not denominated in the portfolio's base currency are left
+  // out of every base-currency measure. Money-valued measures on a response
+  // carrying this flag are therefore understated — never overstated — so a
+  // concentration or exposure limit checked against them can pass when the
+  // full book would breach. A gate that must not under-report MUST refuse to
+  // act on a response carrying this flag rather than treat it as a number.
+  QUALITY_FLAG_CURRENCY_EXCLUDED = 3;
 }
 
 // ExposureRequest scopes an exposure query.

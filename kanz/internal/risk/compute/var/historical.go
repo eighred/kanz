@@ -110,7 +110,7 @@ func Historical(cfg Config) compute.ReturnsMeasure {
 // the common window < 2), matching Historical's original guard. The series is
 // NOT sorted: VaR/ES sort a copy, drawdown walks it in time order.
 func portfolioPnL(ctx context.Context, p *domain.Portfolio, rp compute.ReturnsProvider, window int) (pnl []float64, v0 float64, ok bool) {
-	base := string(p.BaseCurrency())
+	base := p.BaseCurrency()
 	type leg struct {
 		value   float64
 		returns []float64
@@ -118,7 +118,7 @@ func portfolioPnL(ctx context.Context, p *domain.Portfolio, rp compute.ReturnsPr
 	var legs []leg
 	minLen := -1
 	for _, pos := range p.Positions() {
-		if pos.MarketValue == nil || pos.MarketValue.CurrencyCode != base {
+		if !pos.InBaseCurrency(base) {
 			continue
 		}
 		r, err := rp.Returns(ctx, string(pos.InstrumentID), p.AsOf(), window)
