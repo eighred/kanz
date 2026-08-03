@@ -109,8 +109,9 @@ func WithQuarantineCounter(c prometheus.Counter) ServiceOption {
 // currently working an order before giving up and nacking. It exists to be
 // LOWERED in tests; raising it in production trades a longer stall of the whole
 // cancel subject for a slightly better chance of catching a slow venue, and past
-// JetStream's AckWait it starts deleting cancels outright — see
-// defaultClaimWait, which explains why.
+// JetStream's AckWait (60s on order subjects, pkg/bus/tuning.go) the broker
+// starts redelivering the cancel while the first copy is still blocked here —
+// see defaultClaimWait, which explains what that costs.
 func WithClaimWait(d time.Duration) ServiceOption {
 	return func(s *Service) { s.claimWait = d }
 }

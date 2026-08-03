@@ -98,7 +98,10 @@ func TestRedisDedup_LeaseExpiryRecoversAbandonedClaim(t *testing.T) {
 	fake := newFakeRedis()
 	clk := time.Unix(1000, 0)
 	fake.now = func() time.Time { return clk }
-	d := bus.NewRedisDedup(fake, time.Minute, bus.WithRedisDedupLease(5*time.Second))
+	// No lease option: redisClaimLease (5s) is fixed by construction and is
+	// pinned below the shortest AckWait precisely so this recovery works — see
+	// its comment in dedup_redis.go.
+	d := bus.NewRedisDedup(fake, time.Minute)
 
 	if !d.Claim("k") {
 		t.Fatal("first Claim should succeed")

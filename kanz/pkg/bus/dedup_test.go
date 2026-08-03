@@ -41,16 +41,27 @@ func TestDedupWindowReleaseAllowsRetry(t *testing.T) {
 // A worker that claims and dies never commits or releases. The lease must expire
 // so the event is reprocessed rather than silently dropped.
 func TestDedupWindowLeaseExpiryRecoversAbandonedClaim(t *testing.T) {
-	// ttl below the default 5s lease clamps the lease to the ttl, so a 50ms window
-	// gives a 50ms lease.
-	w := bus.NewDedupWindow(50*time.Millisecond, 100)
+	// Driven off an injected clock, not a sleep. The lease is dedupClaimLease
+	// (maxTunedAckWait + margin) and is deliberately longer than any AckWait —
+	// there is no longer a legal way to build a 50ms window with a 50ms lease,
+	// because clamping the lease down to a short TTL is the inversion #237
+	// removed.
+	w := bus.NewDedupWindow(2*bus.DedupClaimLease, 100)
+	clk := time.Unix(1000, 0)
+	bus.SetDedupWindowClock(w, func() time.Time { return clk })
+
 	if !w.Claim("k") {
 		t.Fatal("first Claim should succeed")
 	}
 	if w.Claim("k") {
 		t.Fatal("claim must be held inside its lease")
 	}
-	time.Sleep(80 * time.Millisecond)
+	clk = clk.Add(bus.DedupClaimLease - time.Second)
+	if w.Claim("k") {
+		t.Fatal("claim must still be held one second before its lease expires — this is the whole " +
+			"point of the lease outlasting AckWait: the redelivery arrives while the first copy is running")
+	}
+	clk = clk.Add(2 * time.Second) // now past the lease
 	if !w.Claim("k") {
 		t.Error("an abandoned claim must expire with its lease")
 	}
@@ -70,15 +81,21 @@ func TestDedupWindowEmptyKey(t *testing.T) {
 }
 
 func TestDedupWindowCommitTTLExpiry(t *testing.T) {
-	w := bus.NewDedupWindow(50*time.Millisecond, 100)
+	const ttl = 5 * time.Minute
+	w := bus.NewDedupWindow(ttl, 100)
+	clk := time.Unix(1000, 0)
+	bus.SetDedupWindowClock(w, func() time.Time { return clk })
+
 	if !w.Claim("k") {
 		t.Fatal("Claim should succeed")
 	}
 	w.Commit("k")
+	clk = clk.Add(bus.DedupClaimLease + time.Second)
 	if w.Claim("k") {
-		t.Fatal("a committed key must be held inside its TTL")
+		t.Fatal("a committed key must be held for the full TTL, not merely for the claim lease — " +
+			"Commit is what promotes a lease to the suppression window")
 	}
-	time.Sleep(80 * time.Millisecond)
+	clk = clk.Add(ttl)
 	if !w.Claim("k") {
 		t.Error("a key past its dedup window must be claimable again")
 	}

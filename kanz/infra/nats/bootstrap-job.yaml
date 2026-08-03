@@ -196,14 +196,33 @@ data:
     # Dead-letter: poison events need investigation runway.
     ensure_stream DLQ           "dlq.>"           720h
 
-    # Representative durable pull consumer. Per-service consumers are provisioned
-    # by their owning service's deploy, following this pattern.
-    if ! nats --server "$NATS_URL" consumer info MARKET risk-engine >/dev/null 2>&1; then
-      echo "consumer MARKET/risk-engine — creating"
-      nats --server "$NATS_URL" consumer add MARKET risk-engine --defaults \
-        --pull --filter="market.>" --ack=explicit --deliver=all \
-        --max-deliver=5 --max-pending=1000 --replay=instant
-    fi
+    # NO CONSUMERS ARE PROVISIONED HERE, AND THAT IS DELIBERATE (#237).
+    #
+    # This block used to create one durable, MARKET/risk-engine, above a comment
+    # calling it a "representative durable pull consumer" whose pattern
+    # "per-service consumers are provisioned by their owning service's deploy"
+    # followed. Both halves were false, and the second is the expensive kind of
+    # false — a documented pattern nobody implements:
+    #
+    #   · `grep -rn "consumer add" infra/ services/` returned this line and
+    #     nothing else. No deploy provisioned a consumer. There was no pattern.
+    #   · the durable it created was named `risk-engine`, but bus.Subscribe binds
+    #     one durable per (group, SUBJECT) — `risk-engine-market_>` (durableName,
+    #     pkg/bus/nats.go). No service ever bound the consumer this created. It
+    #     sat on MARKET accruing pending messages nobody read.
+    #   · its --max-deliver=5 --max-pending=1000 read as the platform's answer to
+    #     redelivery limits while every real durable in the estate ran on the
+    #     server defaults. It was the only place those numbers appeared, and it
+    #     applied to nothing.
+    #
+    # Consumers are created by the services themselves, from code, on first
+    # Subscribe: pkg/bus/nats.go calls CreateOrUpdateConsumer with the delivery
+    # contract resolved from pkg/bus/tuning.go (AckWait, MaxDeliver,
+    # MaxAckPending, per subject class). Provisioning one here would fight that
+    # call rather than complement it — CreateOrUpdate is a silent overwrite, so
+    # whichever ran last would win and the loser would be invisible. Streams are
+    # bootstrapped because a service cannot create the stream it subscribes to;
+    # consumers are not, because it can and does.
 
     echo "bootstrap complete"
     nats --server "$NATS_URL" stream ls

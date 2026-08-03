@@ -283,7 +283,7 @@ func TestArchiver_KafkaOutageLosesNothing(t *testing.T) {
 	// buffer when ctx is canceled is now handed to the handler — through a
 	// bounded, freshly-deadlined context — before shutdown completes, instead of
 	// being silently abandoned to redeliver only after the consumer's AckWait
-	// (30s default) elapses. That eliminates the LOSS-BY-DELAY failure mode Task 5
+	// (60s, pkg/bus/tuning.go) elapses. That eliminates the LOSS-BY-DELAY failure mode Task 5
 	// found: this run no longer needs a 35s window to clear AckWait, because
 	// nothing is left "delivered, awaiting ack" past the drain window.
 	//

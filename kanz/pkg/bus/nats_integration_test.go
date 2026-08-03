@@ -271,11 +271,12 @@ func TestBroadcastReachesEveryPodAndSurvivesRestart(t *testing.T) {
 // brokers (2 of 4 runs, reproduced before this fix): Subscribe used to end a
 // subscription with cc.Stop(), which jetstream.ConsumeContext documents as
 // DISCARDING whatever is already in the client's local delivery buffer. JetStream
-// marks a message delivered — starting its AckWait timer (30s default) — at FETCH
+// marks a message delivered — starting its AckWait timer (60s for these subjects,
+// pkg/bus/tuning.go) — at FETCH
 // time, not callback time, so a message sitting in that buffer when the process
 // stopped was neither acked nor nacked: the server held it for the full AckWait
 // while its cleanly-handled siblings moved on. Worse, a sibling NAK'd by a failed
-// in-flight handler redelivers INSTANTLY, so it can land AHEAD of the AckWait
+// in-flight handler redelivers on nakDelay's 2s backoff, so it can land AHEAD of the AckWait
 // straggler on restart — inverting per-key order for exactly the kind of
 // order-dependent fold the archiver and tv-sync's cost-basis calculation do.
 //
@@ -288,7 +289,7 @@ func TestBroadcastReachesEveryPodAndSurvivesRestart(t *testing.T) {
 //
 // The assertion: a FRESH subscriber restarted on the SAME durable must see every
 // message that the first run didn't successfully ack, well within a window far
-// shorter than the 30s AckWait — proving nothing was left stranded for the server
+// far shorter than the AckWait — proving nothing was left stranded for the server
 // timeout to rediscover.
 func TestSubscribeDrainsBufferedMessagesOnShutdown(t *testing.T) {
 	url := os.Getenv("TEST_NATS_URL")
@@ -390,7 +391,7 @@ func TestSubscribeDrainsBufferedMessagesOnShutdown(t *testing.T) {
 
 	// RESTART: a fresh client, fresh Subscribe call, same durable (same group +
 	// subject). Whatever the first run didn't ack must show up here — and quickly,
-	// not after the 30s AckWait.
+	// not after the AckWait.
 	client2, err := bus.DialNATS(ctx, bus.NATSConfig{URL: url, Name: "drain-it-restart"})
 	if err != nil {
 		t.Fatalf("dial (restart): %v", err)
@@ -411,7 +412,7 @@ func TestSubscribeDrainsBufferedMessagesOnShutdown(t *testing.T) {
 	for k := range firstRunAcked {
 		seen[k] = true
 	}
-	// A window far short of the 30s AckWait: if anything was stranded by an
+	// A window far short of the AckWait (60s on these subjects): if anything was stranded by an
 	// abrupt Stop() rather than drained, it will NOT show up in this window.
 	deadline := time.After(8 * time.Second)
 loop:
@@ -432,6 +433,6 @@ loop:
 			}
 		}
 		t.Fatalf("only %d of %d messages were observed within 8s of restart (%d missing, presumably stranded "+
-			"server-side awaiting the 30s AckWait): %v", len(seen), n, missing, seen)
+			"server-side awaiting the 60s AckWait): %v", len(seen), n, missing, seen)
 	}
 }
