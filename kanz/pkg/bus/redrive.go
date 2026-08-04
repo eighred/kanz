@@ -210,10 +210,9 @@ func PlanRedrive(parked Message, opt RedriveOptions, now time.Time) (Message, er
 	dest := parked.Headers[HeaderDLQOriginalSubject]
 	if dest == "" {
 		return refuse("no %s header, so there is no address to send it back to. This package "+
-			"stamps that header on every message it parks; a message without one was parked by "+
-			"something else — services/archiver writes its own near-miss spelling, Kanz-DLQ-Subject, "+
-			"onto the Kafka dlq.archiver topic. Redrive REFUSES rather than guessing a destination "+
-			"for a capital-path command", HeaderDLQOriginalSubject)
+			"stamps that header on every message it parks, so a message without one was parked by "+
+			"something that does not share this contract at all. Redrive REFUSES rather than "+
+			"guessing a destination for a capital-path command", HeaderDLQOriginalSubject)
 	}
 	if IsDLQSubject(dest) {
 		return refuse("%s is %q, which is itself a DLQ subject — publishing there would bury the "+
@@ -224,6 +223,14 @@ func PlanRedrive(parked Message, opt RedriveOptions, now time.Time) (Message, er
 	// the header was rewritten somewhere. Refusing is what stops a corrupt or
 	// forged header on a harmless `dlq.market.…` message from injecting a payload
 	// onto `order.order.submit`.
+	//
+	// IT IS ALSO WHAT NOW REFUSES AN ARCHIVER-PARKED MESSAGE. Since #285 the
+	// archiver stamps this package's header names, so the "no header" arm above no
+	// longer catches it — but it parks everything onto ONE Kafka topic,
+	// `dlq.archiver`, rather than `dlq.<original>`, so the derived subject cannot
+	// agree and this arm refuses. That is still the right answer: those messages
+	// are all ClassTerminal, they are on Kafka rather than NATS, and a drain for
+	// them is a separate decision (#285 item 3) — not something to infer here.
 	if want := dlqSubject(dest); want != parked.Subject {
 		return refuse("%s is %q, which implies it was parked on %q — not the %q it was read from. "+
 			"A rewritten destination header is the one way a redrive could put a payload on a "+

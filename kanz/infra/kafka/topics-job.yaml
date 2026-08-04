@@ -108,6 +108,16 @@ data:
     # {domain}.{entity} to derive a per-topic DLQ name from. Named directly, not via
     # the `dlq` column above: that column pairs a DLQ with a real topic, and
     # dlq.archiver has no real-topic sibling.
+    #
+    # NOTHING DRAINS THIS TOPIC (#285). cmd/kanz-redrive is NATS-only, and no
+    # consumer subscribes here, so the 30 days below is the window in which a
+    # HUMAN can extract a parked event — after that it is deleted, and an event
+    # parked here has no other copy once its NATS stream ages out. The retention
+    # is deliberately NOT shortened to match the absent reader: every message here
+    # is a TERMINAL failure whose recovery needs the defect fixed first (a schema
+    # rollback, a corrected ARCHIVER_TENANT), and that is measured in days.
+    # Shortening it would convert a recoverable hole into a guaranteed one. What is
+    # missing is the reader, not less time — #285 item 3.
     dlq.archiver                3   delete   2592000000  no
     EOF
 
