@@ -273,8 +273,13 @@ func (a *OIDCAuthenticator) Authenticate(ctx context.Context, token string) (*Pr
 	return &Principal{
 		Subject: std.Subject,
 		Tenant:  stringClaim(custom[a.cfg.TenantClaim]),
-		Roles:   rolesClaim(custom[a.cfg.RolesClaim]),
-		Claims:  custom,
+		Roles:   stringListClaim(custom[a.cfg.RolesClaim]),
+		// NORMALIZED HERE AND NOWHERE ELSE (#225). The claim is absent from
+		// every token this estate's IdP issues today (#99), so this is an empty
+		// list on the production path — which the capital path reads as "no
+		// entitlement" and refuses, loudly, on the first order command.
+		Portfolios: stringListClaim(custom[ClaimPortfolios]),
+		Claims:     custom,
 	}, nil
 }
 
@@ -482,10 +487,12 @@ func stringClaim(v any) string {
 	return s
 }
 
-// rolesClaim normalizes the roles claim, which providers encode either as a
-// JSON array of strings or a single space-delimited string (the OAuth `scope`
-// convention).
-func rolesClaim(v any) []string {
+// stringListClaim normalizes a list-valued claim, which providers encode either
+// as a JSON array of strings or a single space-delimited string (the OAuth
+// `scope` convention). Roles, command issuers and portfolios all arrive this
+// way; it was called rolesClaim while serving all three, which read as three
+// claims sharing an accident rather than one decoding rule.
+func stringListClaim(v any) []string {
 	switch t := v.(type) {
 	case []any:
 		out := make([]string, 0, len(t))

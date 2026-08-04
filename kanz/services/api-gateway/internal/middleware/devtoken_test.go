@@ -17,10 +17,11 @@ func TestDevTokenAcceptedByGateway(t *testing.T) {
 	const secret = "dev-secret"
 
 	tok, err := devtoken.Mint(secret, devtoken.Claims{
-		Subject: "dev-user",
-		Tenant:  "acme",
-		Roles:   []string{"kanz-user"},
-		TTL:     time.Hour,
+		Subject:    "dev-user",
+		Tenant:     "acme",
+		Roles:      []string{"kanz-user"},
+		Portfolios: []string{"PF1", "PF2"},
+		TTL:        time.Hour,
 	})
 	if err != nil {
 		t.Fatalf("Mint() = %v", err)
@@ -35,6 +36,36 @@ func TestDevTokenAcceptedByGateway(t *testing.T) {
 	}
 	if !p.HasRole("kanz-user") {
 		t.Error("principal does not carry the role the gateway requires; every /v1 route would 403")
+	}
+	// THE ORDER PATH, NOT JUST THE READ PATH (#225). The minter had no way to
+	// assert a portfolio entitlement at all, so every dev token authenticated
+	// perfectly and could not place or pull a single order — the OMS denies an
+	// empty allow-list. The claim name is spelled in two places (devtoken's
+	// struct tag and the gateway's), which is exactly why this round-trip runs
+	// through the real validator instead of asserting on the JSON.
+	if len(p.Portfolios) != 2 || p.Portfolios[0] != "PF1" || p.Portfolios[1] != "PF2" {
+		t.Fatalf("portfolios = %v, want [PF1 PF2] — a dev token that cannot carry an "+
+			"entitlement cannot trade, and the local proof loop stops working", p.Portfolios)
+	}
+}
+
+// A token minted with no --portfolio must still authenticate, and must still be
+// unable to trade. Both halves matter: refusing to mint it would break every read
+// harness, and widening the absence to "all portfolios" would make the dev
+// credential more powerful than a production one.
+func TestDevTokenWithoutPortfolioAuthenticatesButCarriesNoEntitlement(t *testing.T) {
+	const secret = "dev-secret"
+
+	tok, err := devtoken.Mint(secret, devtoken.Claims{Subject: "dev", Tenant: "acme", TTL: time.Hour})
+	if err != nil {
+		t.Fatalf("Mint() = %v", err)
+	}
+	p, err := NewJWTAuthenticator(secret).Authenticate(tok)
+	if err != nil {
+		t.Fatalf("a portfolio-less dev token must still authenticate: %v", err)
+	}
+	if len(p.Portfolios) != 0 {
+		t.Fatalf("portfolios = %v, want empty", p.Portfolios)
 	}
 }
 

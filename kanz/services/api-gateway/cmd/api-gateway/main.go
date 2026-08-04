@@ -481,5 +481,31 @@ func (o oidcAuthenticator) Authenticate(token string) (*middleware.Principal, er
 	if err != nil {
 		return nil, err
 	}
-	return &middleware.Principal{Subject: p.Subject, Tenant: p.Tenant, Roles: p.Roles}, nil
+	return edgePrincipal(p), nil
+}
+
+// edgePrincipal maps the shared auth.Principal onto the gateway's edge type. It
+// MUST populate every field of middleware.Principal, and test/arch's
+// TestEveryAuthenticatorPopulatesTheWholePrincipal is what enforces that.
+//
+// THE FIELD IT USED TO OMIT WAS Portfolios, AND THAT WAS #225. This is the
+// production authenticator — infra/deploy/api-gateway-deploy.yaml sets
+// API_GATEWAY_OIDC_ISSUER, so every deployed request comes through here — and it
+// dropped the caller's portfolio entitlement on the floor. The dev HS256 arm
+// carried it and had a test; this arm had neither, so deleting the field from the
+// dev arm failed a test while this arm shipped permanently in the deleted state.
+// Downstream that meant the OMS refused every cancel and amend NOT_ENTITLED while
+// admitting a submit into any portfolio in the tenant.
+//
+// A field-by-field copy rather than a struct embed or a shared type: the two
+// Principals are deliberately different (the edge one carries no raw Claims bag
+// and is reached by a different context accessor), and the guard can only read a
+// literal.
+func edgePrincipal(p *auth.Principal) *middleware.Principal {
+	return &middleware.Principal{
+		Subject:    p.Subject,
+		Tenant:     p.Tenant,
+		Roles:      p.Roles,
+		Portfolios: p.Portfolios,
+	}
 }

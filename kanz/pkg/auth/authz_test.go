@@ -42,15 +42,29 @@ type matrixCase struct {
 }
 
 func (tc matrixCase) request() Request {
-	p := &Principal{Subject: "akif", Tenant: "acme", Roles: tc.roles}
-	if tc.portfolios != nil {
-		ids := make([]any, len(tc.portfolios))
-		for i, s := range tc.portfolios {
-			ids[i] = s
-		}
-		p.Claims = map[string]any{ClaimPortfolios: ids}
-	}
+	// The scope is the TYPED field. It used to be planted as an untyped
+	// Claims["portfolios"] here, mirroring an authorizer that re-decoded the map
+	// on every call — the second representation of one fact that let the
+	// gateway's OIDC bridge drop it in silence (#225). A Claims entry now scopes
+	// nothing, deliberately.
+	p := &Principal{Subject: "akif", Tenant: "acme", Roles: tc.roles, Portfolios: tc.portfolios}
 	return Request{Principal: p, Action: tc.action, Resource: Resource{Type: ResourcePortfolio, ID: tc.resID, Tenant: tc.resTenant}}
+}
+
+// A leftover Claims["portfolios"] must not scope anything, or the two
+// representations are back and the map is the one nobody maintains.
+func TestPolicyAuthorize_ScopeComesFromTheFieldNotTheClaimsBag(t *testing.T) {
+	az := NewPolicyAuthorizer(testPolicy(t))
+	p := &Principal{Subject: "akif", Tenant: "acme", Roles: []string{"risk.reader"},
+		Claims: map[string]any{ClaimPortfolios: []any{"pf-1"}}} // no typed field
+	d := az.Authorize(context.Background(), Request{
+		Principal: p, Action: ActionRiskRead,
+		Resource: Resource{Type: ResourcePortfolio, ID: "pf-9", Tenant: "acme"},
+	})
+	if !d.Allow {
+		t.Fatalf("a Claims-only portfolio list scoped the decision (%s) — there must be exactly "+
+			"one reader of this fact, and it is Principal.Portfolios", d.Reason)
+	}
 }
 
 // authMatrix is the full role×action×scope contract against the shipped policy

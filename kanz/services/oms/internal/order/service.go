@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"sync"
 	"time"
 
@@ -13,6 +14,7 @@ import (
 	envelopepb "github.com/eighred/kanz/kanz-schemas-go/envelope/v1"
 
 	orderpb "github.com/eighred/kanz/kanz-schemas-go/order/v1"
+	"github.com/eighred/kanz/pkg/auth"
 	"github.com/eighred/kanz/pkg/bus"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
@@ -222,6 +224,21 @@ func (s *Service) handleSubmit(ctx context.Context, env *envelopepb.Envelope, pa
 	}
 	now := s.now().UTC()
 
+	// ENTITLEMENT, BEFORE ANY SIDE EFFECT — the same rule handleCancel and
+	// handleAmend run, and its absence here was the open half of #225. Cancel and
+	// amend checked it; submit did not, so a caller scoped to `research` could
+	// OPEN a position in `flagship` and then be refused when they tried to close
+	// it. It sits above the resume fast path deliberately: resume queries the
+	// venue, and an unentitled command must not reach a venue.
+	//
+	// refuse, not outcomeReject: no order exists yet, the portfolio id is the
+	// caller's own, and every other admission refusal on this path emits
+	// ORDER_REJECTED. Nothing is disclosed that the caller did not send.
+	if !delegatedAndEntitled(cmd.GetMetadata(), cmd.GetPortfolioId()) {
+		return s.refuse(ctx, cmd.GetOrderId(), ReasonNotEntitled,
+			"principal is not entitled to this order's portfolio", now)
+	}
+
 	// AN ORDER WE ALREADY KNOW IS NOT AUTOMATICALLY A DUPLICATE.
 	//
 	// This used to return nil on sight, which is right for a genuinely duplicated
@@ -231,6 +248,20 @@ func (s *Service) handleSubmit(ctx context.Context, env *envelopepb.Envelope, pa
 	// what the venue actually did and acts on that — or freezes the order when it
 	// cannot. Admission itself is still enforced atomically by store.Create below.
 	if existing, _, err := s.store.Load(ctx, cmd.GetOrderId()); err == nil {
+		// The check above cleared the portfolio the COMMAND named; this clears
+		// the one the STORED order belongs to, and they are not the same
+		// question. A submit naming an order_id that already exists is how an
+		// unentitled caller would otherwise reach resume() — and resume queries
+		// the venue and can re-drive or close somebody else's live order. A
+		// genuine redelivery carries identical bytes and cannot fail this.
+		//
+		// outcomeReject, not refuse: this order exists and may be working at a
+		// venue. Emitting ORDER_REJECTED for it would tell every downstream fold
+		// that a live order was refused.
+		if !delegatedAndEntitled(cmd.GetMetadata(), existing.GetPortfolioId()) {
+			return s.outcomeReject(ctx, cmd.GetOrderId(), ReasonNotEntitled,
+				"principal is not entitled to this order's portfolio", now)
+		}
 		return s.resume(ctx, existing)
 	} else if !errors.Is(err, ErrNotFound) {
 		return err // transient store failure
@@ -898,21 +929,61 @@ const ReasonNotEntitled = "NOT_ENTITLED"
 // entitledTo reports whether a principal scoped to allowed may act on an order
 // belonging to portfolio.
 //
-// EMPTY DENIES. This is deliberately the opposite of pkg/auth's PolicyAuthorizer,
-// which treats an absent portfolio claim as unrestricted — a sane default for a
-// read path and the wrong one here, where a dropped claim would silently
-// authorize a caller against every portfolio in the tenant. On the capital path
-// the absence of proof is not proof; it is the absence of entitlement.
+// EMPTY DENIES, and the rule now lives in pkg/auth beside the READ-path rule it
+// deliberately contradicts (#225). It is one line here so that the two cannot be
+// "unified" by someone who has only read one of them: the shortest fix for a
+// NOT_ENTITLED outage is to make this permissive on empty, and that converts a
+// trading-control outage into an authorization bypass across every portfolio in
+// the tenant. auth.PortfolioEntitled carries the argument.
 func entitledTo(allowed []string, portfolio string) bool {
-	if portfolio == "" {
-		return false // an order that cannot say whose it is cannot be authorized
+	return auth.PortfolioEntitled(allowed, portfolio)
+}
+
+// delegatedIssuerPrefix marks a command the api-gateway minted on behalf of an
+// authenticated human. bindMetadata stamps Issuer AND PrincipalPortfolios from
+// the same verified principal, overriding whatever the client sent, so the two
+// fields cannot disagree on anything that came through the gateway.
+const delegatedIssuerPrefix = "user:"
+
+// delegatedAndEntitled is the entitlement gate for SubmitOrder, and it is NOT
+// simply entitledTo — because not every order on this bus has a human behind it.
+//
+// TWO SERVICES PUBLISH order.order.submit BESIDES THE GATEWAY, and neither has a
+// portfolio claim to carry: webhook-ingest fans a strategy signal out per venue
+// (internal/signal/translate, Issuer "strategy:{id}") and optimization
+// materializes a rebalance proposal (services/optimization/internal/bridge,
+// Issuer from the caller). Both are admitted to the subject by name in
+// infra/nats/tenancy.yaml. Running the human rule over them would refuse every
+// automated order on the platform NOT_ENTITLED — a bigger outage than the one
+// #225 reports, and one no operator could clear, because there is no claim to
+// populate. Their authorization is the SPIFFE identity that let them publish at
+// all, plus the pre-trade compliance gate below; portfolio entitlement is a
+// statement about a person's token and they have none.
+//
+// SO THE DISCRIMINATOR IS THE ISSUER, AND IT IS AN ALLOW-LIST, NOT A
+// FALLTHROUGH: only a "user:" issuer is entitlement-checked, and for it an empty
+// list denies. A client cannot reach the non-delegated branch — the gateway
+// overwrites Issuer on every command it publishes — so the only way to take it
+// is to already hold a NATS publish grant for this subject, which is a caller
+// that could equally have written any allow-list it liked into the metadata. The
+// check is therefore exactly as strong against the callers it is meant for, and
+// no weaker against the ones it is not.
+//
+// IF A SERVICE EVER NEEDS TO ACT FOR A NAMED HUMAN, it must issue "user:{sub}"
+// and carry that person's real allow-list. Self-stamping the portfolio it is
+// about to trade would make this check pass by construction — "nothing
+// configured" and "checked, and fine" looking the same, which is the one thing
+// CLAUDE.md forbids outright.
+//
+// handleCancel AND handleAmend STAY ON THE STRICT RULE (plain entitledTo) and
+// should: the api-gateway is the only producer of those two subjects, and
+// kanz-redrive replays a parked one with its original metadata intact. A machine
+// issuer on a cancel would be a command from nowhere against a live order.
+func delegatedAndEntitled(md *commandpb.CommandMetadata, portfolio string) bool {
+	if !strings.HasPrefix(md.GetIssuer(), delegatedIssuerPrefix) {
+		return true
 	}
-	for _, p := range allowed {
-		if p == portfolio {
-			return true
-		}
-	}
-	return false
+	return entitledTo(md.GetPrincipalPortfolios(), portfolio)
 }
 
 // resume decides what to do with an order that already exists when a SubmitOrder

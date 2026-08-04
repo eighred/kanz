@@ -21,9 +21,13 @@ const (
 	ResourcePortfolio = "portfolio"
 )
 
-// ClaimPortfolios is the principal claim carrying the portfolio-id allow-list
-// for ABAC portfolio scoping. Absent/empty ⇒ the principal may reach every
-// portfolio within its own tenant (the tenant boundary still applies).
+// ClaimPortfolios is the token claim carrying the portfolio-id allow-list for
+// ABAC portfolio scoping. It is decoded ONCE, by the authenticator, into
+// Principal.Portfolios; read that field, never this key (#225).
+//
+// WHAT ABSENT MEANS DEPENDS ON THE PATH and is not stated here on purpose — see
+// PortfolioInScope and PortfolioEntitled in portfolio.go, which disagree
+// deliberately and carry the argument.
 const ClaimPortfolios = "portfolios"
 
 // Resource is the thing being acted upon, carrying the attributes the decision
@@ -133,10 +137,13 @@ func (a *PolicyAuthorizer) Authorize(_ context.Context, req Request) Decision {
 	}
 	// Portfolio scope (ABAC): if the principal is restricted to an explicit
 	// portfolio allow-list, the target portfolio must be on it.
-	if req.Resource.Type == ResourcePortfolio {
-		if allowed := rolesClaim(p.Claims[ClaimPortfolios]); len(allowed) > 0 && !contains(allowed, req.Resource.ID) {
-			return deny(fmt.Sprintf("portfolio %q not in principal scope", req.Resource.ID))
-		}
+	//
+	// AN EMPTY ALLOW-LIST PERMITS HERE AND DENIES ON THE CAPITAL PATH. That is a
+	// decision, not a drift — PortfolioInScope and PortfolioEntitled sit beside
+	// each other in portfolio.go with the argument for each, and this call site
+	// must not be "unified" with the OMS's without reading it (#225).
+	if req.Resource.Type == ResourcePortfolio && !PortfolioInScope(p.Portfolios, req.Resource.ID) {
+		return deny(fmt.Sprintf("portfolio %q not in principal scope", req.Resource.ID))
 	}
 	// RBAC: some role the principal holds must grant the action.
 	for _, role := range p.Roles {
@@ -150,12 +157,3 @@ func (a *PolicyAuthorizer) Authorize(_ context.Context, req Request) Decision {
 }
 
 func deny(reason string) Decision { return Decision{Allow: false, Reason: reason} }
-
-func contains(ss []string, s string) bool {
-	for _, v := range ss {
-		if v == s {
-			return true
-		}
-	}
-	return false
-}
