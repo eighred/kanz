@@ -504,7 +504,7 @@ var retryCertifiedConsumers = map[string]string{
 		"unconditional last-write-wins UPSERT keyed on household_id. Re-running it with the " +
 		"same composition is a no-op change; there is no dedup branch to skip through.",
 
-	"services/oms/cmd/oms/main.go:420": "oms: dispatches handleSubmit, handleCancel, handleAmend " +
+	"services/oms/cmd/oms/main.go:451": "oms: dispatches handleSubmit, handleCancel, handleAmend " +
 		"(order.Service.Handle) and position.Projector.Handle (fills), re-derived fresh against " +
 		"250fe00 rather than assumed fixed — see .superpowers/sdd/oms-recert-report.md for the " +
 		"full per-failure-point walk. handleSubmit: every failure point after store.Create either " +
@@ -525,7 +525,12 @@ var retryCertifiedConsumers = map[string]string{
 		"— atomic dedup, not check-then-act. Two completeness gaps found and reported but judged " +
 		"non-blocking because neither skips durably-committed work: resume's PENDING_NEW/ActionRedrive " +
 		"branches and adopt()'s fill loop never (re-)emit the CommandOutcome/EmitAccepted a direct " +
-		"admission would (service.go:788-791,839-841,946-1044), and ActionRedrive does not special-case " +
+		"admission would — HALF OF THAT IS NOW CLOSED (#238): resume's PENDING_NEW branch re-emits " +
+		"EmitAccepted whenever accepted_announced_at is unset, so a redelivery or a kanz-redrive " +
+		"replay of a SubmitOrder whose store.Create committed and whose ORDER_ACCEPTED publish did " +
+		"not now repairs the announcement instead of silently working the order for an estate that " +
+		"never heard of it. The CommandOutcome half of the gap, and adopt()'s fill loop, remain open. " +
+		"ActionRedrive still does not special-case " +
 		"ErrUnpriced the way handleSubmit's own admission path does (service.go:260-277 vs 839-841) — " +
 		"both fail by never producing an announcement or by nacking loudly toward the DLQ, never by " +
 		"acking work that was never done. RE-CERTIFIED for the per-order lock: handleCancel and " +

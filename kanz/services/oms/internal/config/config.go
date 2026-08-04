@@ -147,6 +147,36 @@ type Config struct {
 	// what someone reaching for an off switch would set, and accepting it would
 	// disable the bound in silence. There is no off switch.
 	PriceMaxAge time.Duration
+
+	// SweepInterval is how often the OMS re-runs its in-flight reconciliation
+	// WHILE RUNNING, on top of the mandatory one at startup (#238).
+	//
+	// It is the recovery latency for an order the store committed and the bus
+	// never heard about: admission is store.Create followed by EmitAccepted with
+	// no outbox between them, and when the publish fails the row is durable while
+	// risk, compliance and the audit log carry nothing for it. Before this, the
+	// only compensator ran at startup, so that window closed "whenever this pod
+	// next restarts" — days on a healthy deployment. This bounds it at
+	// SweepMinAge + SweepInterval.
+	//
+	// It is NOT free, and the cost is what an operator tunes against: one index
+	// scan over the open orders per tick, plus one store.Load per order older
+	// than SweepMinAge. A book with many orders RESTING at PENDING_NEW (a
+	// deployment with no venue wired) pays that on every tick forever.
+	//
+	// Zero DISABLES the periodic sweep and is a deliberate, stated choice — the
+	// startup sweep still runs, and the OMS says so at boot rather than leaving
+	// "off" and "on" looking identical in the logs.
+	SweepInterval time.Duration
+
+	// SweepMinAge is how old an order must be before the PERIODIC sweep will
+	// touch it. It is a safety bound, not a tuning knob: handleSubmit holds no
+	// per-order claim between store.Create and the claim it takes after
+	// EmitAccepted, so a sweep with no age floor can drive an order a live
+	// delivery is still admitting. See order.SweepOlderThan, which refuses a
+	// non-positive value outright, for what it must clear (the 75s claim lease,
+	// the 60s order-subject AckWait, and the 2m consumer dedup TTL).
+	SweepMinAge time.Duration
 }
 
 // CommandSubjects are the order command subjects the OMS consumes.
@@ -202,6 +232,40 @@ func Load() (Config, error) {
 		return Config{}, fmt.Errorf("OMS_PRICE_MAX_AGE: must be positive (got %v); a non-positive value would disable the staleness bound and admit orders against arbitrarily old prices", maxAge)
 	}
 	cfg.PriceMaxAge = maxAge
+
+	// OMS_SWEEP_INTERVAL: 60s. The exposure this bounds is an admitted order that
+	// no downstream service has heard of, so the window is measured against the
+	// fund's risk being wrong, not against a scrape budget. A minute plus the 2m
+	// floor below puts the worst case at three minutes, where it was previously
+	// bounded only by the next pod restart. "0" turns it off, and is the value an
+	// operator with a very large resting book sets deliberately after reading
+	// what a tick costs (see Config.SweepInterval).
+	sweepInterval, err := time.ParseDuration(envOr("OMS_SWEEP_INTERVAL", "60s"))
+	if err != nil {
+		return Config{}, fmt.Errorf("OMS_SWEEP_INTERVAL: %w", err)
+	}
+	if sweepInterval < 0 {
+		return Config{}, fmt.Errorf("OMS_SWEEP_INTERVAL: must not be negative (got %v); "+
+			"use 0 to disable the periodic sweep", sweepInterval)
+	}
+	cfg.SweepInterval = sweepInterval
+
+	// OMS_SWEEP_MIN_AGE: 2m. Longer than every recovery already in flight for a
+	// young order — the 60s AckWait on order subjects and the 75s in-process
+	// dedup claim lease derived from it — so the periodic sweep never competes
+	// with the broker's own redelivery or with a live admission that has not yet
+	// taken its claim. Lowering it below those does not make recovery faster; it
+	// makes the compensator race the thing already recovering.
+	sweepMinAge, err := time.ParseDuration(envOr("OMS_SWEEP_MIN_AGE", "2m"))
+	if err != nil {
+		return Config{}, fmt.Errorf("OMS_SWEEP_MIN_AGE: %w", err)
+	}
+	if cfg.SweepInterval > 0 && sweepMinAge <= 0 {
+		return Config{}, fmt.Errorf("OMS_SWEEP_MIN_AGE: must be positive (got %v) while "+
+			"OMS_SWEEP_INTERVAL is set; a periodic sweep with no age floor can claim an order a "+
+			"live delivery is still admitting, and both would announce it", sweepMinAge)
+	}
+	cfg.SweepMinAge = sweepMinAge
 
 	return cfg, nil
 }
