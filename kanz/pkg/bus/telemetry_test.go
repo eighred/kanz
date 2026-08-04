@@ -2,6 +2,7 @@ package bus_test
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 
@@ -164,4 +165,118 @@ func labelValue(m *dto.Metric, name string) string {
 		}
 	}
 	return ""
+}
+
+// counterByLabels sums a counter family's samples whose labels all match want.
+// The second return distinguishes "the series exists" from "no series was
+// exported at all", which is the distinction
+// TestDLQParkIsCountedOnlyWhenTheParkSucceeded turns on — a CounterVec with no
+// WithLabelValues call exports nothing, and `absent` and `zero` are different
+// claims about whether a message was parked.
+func counterByLabels(t *testing.T, reg *prometheus.Registry, name string, want map[string]string) (float64, bool) {
+	t.Helper()
+	mfs, err := reg.Gather()
+	if err != nil {
+		t.Fatalf("gather: %v", err)
+	}
+	var total float64
+	var present bool
+	for _, mf := range mfs {
+		if mf.GetName() != name {
+			continue
+		}
+		for _, met := range mf.Metric {
+			match := true
+			for k, v := range want {
+				if labelValue(met, k) != v {
+					match = false
+					break
+				}
+			}
+			if match {
+				present = true
+				total += met.GetCounter().GetValue()
+			}
+		}
+	}
+	return total, present
+}
+
+// TestDLQParkIsCountedByClass: a park counts once, against the ORIGINAL
+// subject, the consuming group, and the class the parked message carries in
+// Kanz-DLQ-Class. The class split is the point — a redrive returns a transient
+// park to its subject and REFUSES a terminal one, so an operator reading the
+// series has to be able to tell which incident they are in without opening the
+// DLQ.
+func TestDLQParkIsCountedByClass(t *testing.T) {
+	t.Run("handler failure is transient", func(t *testing.T) {
+		reg := prometheus.NewRegistry()
+		m := bus.NewBusMetrics(reg)
+		sub := &oneShotSub{msg: bus.Message{Body: frame(t, validEnvelope(), nil)}}
+		c, _ := bus.NewConsumer(sub, fastRetry(1), bus.WithDLQ(&captureClient{}), bus.WithBusMetrics(m))
+
+		fh := &flakyHandler{failures: 999}
+		if err := c.Subscribe(context.Background(), "market.equity.trade", "g", fh.handle); err != nil {
+			t.Fatalf("expected the delivery to be parked and acked, got %v", err)
+		}
+
+		got, ok := counterByLabels(t, reg, "kanz_bus_dlq_parked_total", map[string]string{
+			"subject": "market.equity.trade", "group": "g", "class": bus.ClassTransient,
+		})
+		if !ok || got != 1 {
+			t.Errorf("kanz_bus_dlq_parked_total{subject=market.equity.trade,group=g,class=transient} = %v (present=%v), want 1",
+				got, ok)
+		}
+	})
+
+	t.Run("unframeable bytes are terminal", func(t *testing.T) {
+		reg := prometheus.NewRegistry()
+		m := bus.NewBusMetrics(reg)
+		sub := &oneShotSub{msg: bus.Message{Body: []byte("this is not an envelope frame")}}
+		c, _ := bus.NewConsumer(sub, bus.WithDLQ(&captureClient{}), bus.WithBusMetrics(m))
+
+		if err := c.Subscribe(context.Background(), "order.order.submit", "oms", nil); err != nil {
+			t.Fatalf("expected the delivery to be parked and acked, got %v", err)
+		}
+
+		got, ok := counterByLabels(t, reg, "kanz_bus_dlq_parked_total", map[string]string{
+			"subject": "order.order.submit", "group": "oms", "class": bus.ClassTerminal,
+		})
+		if !ok || got != 1 {
+			t.Errorf("kanz_bus_dlq_parked_total{...,class=terminal} = %v (present=%v), want 1", got, ok)
+		}
+	})
+}
+
+// TestDLQParkIsCountedOnlyWhenTheParkSucceeded is the reason this metric is not
+// kanz_bus_consume_total{result="error"} under another name.
+//
+// When the DLQ publish fails, the dispatch failed AND nothing was parked: on
+// Kafka the subscription halts holding the offset, on NATS the broker
+// redelivers. consume_total{result="error"} moves in both cases and cannot tell
+// them apart. If kanz_bus_dlq_parked_total moved here too it would report a
+// recoverable copy on dlq.<subject> that was never written, and send whoever
+// read it to kanz-redrive to look for a message that is not there.
+func TestDLQParkIsCountedOnlyWhenTheParkSucceeded(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	m := bus.NewBusMetrics(reg)
+	sub := &oneShotSub{msg: bus.Message{Body: frame(t, validEnvelope(), nil)}}
+	c, _ := bus.NewConsumer(sub, fastRetry(1),
+		bus.WithDLQ(&errPublisher{err: errors.New("dlq down")}), bus.WithBusMetrics(m))
+
+	fh := &flakyHandler{failures: 999}
+	if err := c.Subscribe(context.Background(), "order.order.submit", "oms", fh.handle); err == nil {
+		t.Fatal("expected the failed park to surface as an error")
+	}
+
+	if _, ok := counterByLabels(t, reg, "kanz_bus_dlq_parked_total", nil); ok {
+		t.Error("kanz_bus_dlq_parked_total exported a series for a park that FAILED — " +
+			"the message is not on dlq.order.order.submit and no redrive will find it")
+	}
+	// The dispatch failure itself is still counted, which is the series that
+	// conflates the two outcomes and the reason the park needs its own.
+	got, ok := counterByLabels(t, reg, "kanz_bus_consume_total", map[string]string{"result": "error"})
+	if !ok || got != 1 {
+		t.Errorf("kanz_bus_consume_total{result=error} = %v (present=%v), want 1", got, ok)
+	}
 }

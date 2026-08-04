@@ -174,11 +174,11 @@ func (c *Consumer) Subscribe(ctx context.Context, subject, group string, h Event
 		env, payload, err := Unframe(msg.Body)
 		if err != nil {
 			c.metrics.observeConsume(subject, group, 0, err)
-			return c.routeToDLQ(ctx, subject, msg, 0, Terminal(fmt.Errorf("unframe: %w", err)))
+			return c.routeToDLQ(ctx, subject, group, msg, 0, Terminal(fmt.Errorf("unframe: %w", err)))
 		}
 		if err := c.validate(env); err != nil {
 			c.metrics.observeConsume(subject, group, 0, err)
-			return c.routeToDLQ(ctx, subject, msg, 0, Terminal(fmt.Errorf("envelope validation: %w", err)))
+			return c.routeToDLQ(ctx, subject, group, msg, 0, Terminal(fmt.Errorf("envelope validation: %w", err)))
 		}
 		// Atomically claim the key. A false claim means another delivery of this
 		// same event either holds it right now or already completed it — either way
@@ -249,7 +249,7 @@ func (c *Consumer) Subscribe(ctx context.Context, subject, group string, h Event
 		endSpan(span, lastErr)
 		c.metrics.observeConsume(subject, group, time.Since(start), lastErr)
 		if c.dlq != nil {
-			if err := c.publishDLQ(ctx, subject, msg, attemptsMade, lastErr); err != nil {
+			if err := c.publishDLQ(ctx, subject, group, msg, attemptsMade, lastErr); err != nil {
 				// The DLQ publish itself failed, so this event is neither handled nor
 				// parked. Release so the broker's redelivery gets a real second chance.
 				c.dedup.Release(env.IdempotencyKey)
@@ -269,23 +269,31 @@ func (c *Consumer) Subscribe(ctx context.Context, subject, group string, h Event
 // routeToDLQ is the pre-dispatch failure path (unframe/validate). attempts
 // is 0 because the handler never ran. Falls through to publishDLQ when DLQ
 // is configured; otherwise surfaces the error.
-func (c *Consumer) routeToDLQ(ctx context.Context, origSubject string, msg Message, attempts int, dispatchErr error) error {
+func (c *Consumer) routeToDLQ(ctx context.Context, origSubject, group string, msg Message, attempts int, dispatchErr error) error {
 	if c.dlq == nil {
 		return dispatchErr
 	}
-	return c.publishDLQ(ctx, origSubject, msg, attempts, dispatchErr)
+	return c.publishDLQ(ctx, origSubject, group, msg, attempts, dispatchErr)
 }
 
-func (c *Consumer) publishDLQ(ctx context.Context, origSubject string, msg Message, attempts int, dispatchErr error) error {
+func (c *Consumer) publishDLQ(ctx context.Context, origSubject, group string, msg Message, attempts int, dispatchErr error) error {
+	headers := dlqHeaders(msg.Headers, origSubject, attempts, dispatchErr, time.Now())
 	dlqMsg := Message{
 		Subject: dlqSubject(origSubject),
 		Key:     msg.Key,
 		Body:    msg.Body,
-		Headers: dlqHeaders(msg.Headers, origSubject, attempts, dispatchErr, time.Now()),
+		Headers: headers,
 	}
 	if err := c.dlq.Publish(ctx, dlqMsg); err != nil {
 		return fmt.Errorf("dlq publish: %w (original: %v)", err, dispatchErr)
 	}
+	// AFTER the publish, and only on success — see observeDLQPark. Until #230
+	// added this line a successful park was the one bus outcome nothing counted:
+	// the event left the live subject, landed on a 720h write-only stream, and
+	// no series moved that distinguished it from a delivery that simply failed
+	// and was retried. The class comes out of the headers rather than being
+	// re-derived so the metric and the parked message cannot disagree.
+	c.metrics.observeDLQPark(origSubject, group, headers[HeaderDLQClass])
 	return nil
 }
 

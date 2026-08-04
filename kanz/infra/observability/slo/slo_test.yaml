@@ -62,3 +62,42 @@ tests:
       - eval_time: 75m
         alertname: SLOSlowBurn
         exp_alerts: []
+
+  # SLOSlowBurn HAD NEVER BEEN FIRED BY ANYTHING (#230).
+  #
+  # The two cases above assert it stays QUIET — a healthy gateway, and a 5%
+  # burst that SLOFastBurn owns. Neither proves it can fire, which is the
+  # opposite claim and the one that matters: an alert that cannot fire is
+  # indistinguishable from a platform that is fine. It was found by
+  # TestEveryAlertRuleIsProvenToFire in kanz/test/arch/, added with this case.
+  #
+  # 1% errors against a 0.1% budget is chosen to land between the two top rungs:
+  #
+  #   fast  14.4 × 0.001 = 0.0144  → 0.01 is BELOW it, must stay silent
+  #   slow   6.0 × 0.001 = 0.006   → 0.01 is ABOVE it, must page
+  #
+  # so the assertion that SLOFastBurn stays quiet is what makes this a test of
+  # the 6× threshold rather than of "something fired". 6h of samples, because
+  # ratio_rate6h is the long window and a shorter run would leave it empty.
+  - interval: 1m
+    input_series:
+      - series: 'kanz_gateway_requests_total{code="200"}'
+        values: '0+990x440'
+      - series: 'kanz_gateway_requests_total{code="500"}'
+        values: '0+10x440'
+    alert_rule_test:
+      - eval_time: 7h
+        alertname: SLOSlowBurn
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              layer: slo
+              burn_rate: slow
+              service: api-gateway
+              slo: availability
+            exp_annotations:
+              summary: "Sustained error-budget burn on api-gateway/availability"
+              description: "api-gateway/availability is burning at >6× (6h+30m windows) — current 6h error ratio 1%."
+      - eval_time: 7h
+        alertname: SLOFastBurn
+        exp_alerts: []

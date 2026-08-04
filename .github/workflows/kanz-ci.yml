@@ -701,14 +701,42 @@ jobs:
           promtool check rules "${rules[@]}"
           promtool check config /tmp/prometheus.yml
 
-      # Run FROM the slo directory: slo_test.yaml names its rule_files by
-      # relative path, so this fails to find them from anywhere else.
-      - name: promtool check and test the SLO rules
-        working-directory: kanz/infra/observability/slo
+      # EVERY promtool HARNESS IN THE TREE, DISCOVERED — not named (#230).
+      #
+      # This step used to be `promtool test rules slo_test.yaml` with
+      # working-directory pinned to slo/. That is the same shape as the rule-file
+      # glob one step above: a hand-written list of what gets executed, which
+      # silently omits anything added anywhere else. A second harness written
+      # beside a new rules file would sit in the repository unrun, and an unrun
+      # harness is a claim of coverage with nothing behind it — the defect #61
+      # fixed here, which the #230 rules would have reproduced.
+      #
+      # So the harnesses are found, and each is run FROM ITS OWN DIRECTORY,
+      # because a test file names its rule_files by RELATIVE path (both do) and
+      # cannot resolve them from anywhere else.
+      #
+      # `promtool check rules` is not repeated here: the step above already
+      # checks every *.rules.yaml apply-rules.sh lists, which is all of them.
+      # This step is only about executing the tests.
+      #
+      # The count is fatal for the same reason it is fatal above — a `find` that
+      # matches nothing produces a step that passes having tested nothing, which
+      # is precisely the state this is here to end.
+      # test/arch/observability_rules_reachable_test.go fails the build if this
+      # goes back to naming files.
+      - name: promtool test every rule harness
         run: |
           set -euo pipefail
-          promtool check rules slo.recording.rules.yaml slo.alerts.rules.yaml
-          promtool test rules slo_test.yaml
+          mapfile -t harnesses < <(find kanz/infra/observability -type f -name '*_test.yaml' | sort)
+          if [ "${#harnesses[@]}" -eq 0 ]; then
+            echo "::error::found no *_test.yaml under kanz/infra/observability — no alert rule is proven to fire" >&2
+            exit 1
+          fi
+          printf 'running %d promtool harness(es)\n' "${#harnesses[@]}"
+          for h in "${harnesses[@]}"; do
+            printf '  %s\n' "$h"
+            ( cd "$(dirname "$h")" && promtool test rules "$(basename "$h")" )
+          done
 
   buf-breaking:
     runs-on: ubuntu-latest
