@@ -22,6 +22,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/eighred/kanz/internal/lifecycle"
 	"github.com/eighred/kanz/internal/version"
 	"github.com/eighred/kanz/pkg/alpha"
 	"github.com/eighred/kanz/pkg/bus"
@@ -31,10 +32,23 @@ import (
 )
 
 func main() {
+	// The lifecycle lives in run() because os.Exit skips defers: every defer
+	// run() registers fires before this line. The non-zero code is what makes a
+	// fatal halt distinguishable from a graceful SIGTERM — both otherwise exit 0
+	// with reason "Completed" in the pod's termination record (#266).
+	// 2 = startup failure, 1 = run loop died after startup, 0 = clean shutdown.
+	os.Exit(run())
+}
+
+func run() int {
 	cfg := config.Load()
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+	// Records WHY we are stopping so the exit code can say so. Every
+	// fatal.Raise call below already brought the process down via stop(); the
+	// only thing added is that the reason survives to the exit status (#266).
+	fatal := lifecycle.NewFatal(stop)
 
 	base := slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: cfg.LogLevel})
 	obs, err := observability.New(ctx, observability.Config{
@@ -45,7 +59,7 @@ func main() {
 	}, base)
 	if err != nil {
 		slog.Default().Error("observability init failed", "err", err)
-		os.Exit(2)
+		return 2
 	}
 	logger := obs.Logger
 	slog.SetDefault(logger)
@@ -60,14 +74,14 @@ func main() {
 	mesh, err := transport.NewMesh(ctx, cfg.SPIFFESocket)
 	if err != nil {
 		logger.Error("spiffe source init failed", "err", err)
-		os.Exit(2)
+		return 2
 	}
 	defer func() { _ = mesh.Close() }()
 	logger.Info("bus transport", "mtls", mesh.Enabled())
 	client, err := bus.DialNATS(ctx, bus.NATSConfig{URL: cfg.NATSURL, Name: cfg.Source, TLSConfig: mesh.Client})
 	if err != nil {
 		logger.Error("bus dial failed", "err", err)
-		os.Exit(2)
+		return 2
 	}
 	defer func() { _ = client.Close() }()
 
@@ -82,7 +96,7 @@ func main() {
 	})
 	if err != nil {
 		logger.Error("producer init failed", "err", err)
-		os.Exit(2)
+		return 2
 	}
 
 	// Every FACT this service emits goes through here, so this is what /readyz
@@ -101,7 +115,7 @@ func main() {
 		logger.Info("market-ingest health listening", "addr", cfg.Listen)
 		if err := httpSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			logger.Error("http server failed", "err", err)
-			stop()
+			fatal.Raise(err)
 		}
 	}()
 
@@ -125,7 +139,7 @@ func main() {
 		// Refusing to start beats starting and publishing invented prices that
 		// risk, NAV and pricing will all mark against.
 		logger.Error("market-ingest cannot start", "err", err)
-		os.Exit(2)
+		return 2
 	}
 	runner, err := alpha.New(alpha.Config{
 		Feeds:            srcs,
@@ -142,7 +156,7 @@ func main() {
 	})
 	if err != nil {
 		logger.Error("alpha runner init failed", "err", err)
-		os.Exit(2)
+		return 2
 	}
 
 	var wg sync.WaitGroup
@@ -151,7 +165,7 @@ func main() {
 		defer wg.Done()
 		if err := runner.Run(ctx); err != nil {
 			logger.Error("market edge stopped", "err", err)
-			stop()
+			fatal.Raise(err)
 		}
 	}()
 	ready.set(true)
@@ -165,6 +179,11 @@ func main() {
 		logger.Error("http shutdown error", "err", err)
 	}
 	wg.Wait()
+
+	// The run loop's own error and any fatal raised from a goroutine answer the
+	// same question — why is this process stopping — so they meet here, after
+	// every shutdown step above has run. Raise(nil) is a no-op mark.
+	return fatal.Code()
 }
 
 type readiness struct {

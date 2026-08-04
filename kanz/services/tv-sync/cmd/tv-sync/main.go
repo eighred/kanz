@@ -17,6 +17,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/eighred/kanz/internal/lifecycle"
 	"github.com/eighred/kanz/internal/marketdata/mark"
 	"github.com/eighred/kanz/internal/pg"
 	"github.com/eighred/kanz/internal/version"
@@ -30,14 +31,27 @@ import (
 )
 
 func main() {
+	// The lifecycle lives in run() because os.Exit skips defers: every defer
+	// run() registers fires before this line. The non-zero code is what makes a
+	// fatal halt distinguishable from a graceful SIGTERM — both otherwise exit 0
+	// with reason "Completed" in the pod's termination record (#266).
+	// 2 = startup failure, 1 = run loop died after startup, 0 = clean shutdown.
+	os.Exit(run())
+}
+
+func run() int {
 	cfg, err := config.Load()
 	if err != nil {
 		slog.Default().Error("config load failed", "err", err)
-		os.Exit(2)
+		return 2
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+	// Records WHY we are stopping so the exit code can say so. Every
+	// fatal.Raise call below already brought the process down via stop(); the
+	// only thing added is that the reason survives to the exit status (#266).
+	fatal := lifecycle.NewFatal(stop)
 
 	base := slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: cfg.LogLevel})
 	obs, err := observability.New(ctx, observability.Config{
@@ -48,7 +62,7 @@ func main() {
 	}, base)
 	if err != nil {
 		slog.Default().Error("observability init failed", "err", err)
-		os.Exit(2)
+		return 2
 	}
 	logger := obs.Logger
 	slog.SetDefault(logger)
@@ -73,7 +87,7 @@ func main() {
 	pool, err := pg.NewTenantPool(ctx, cfg.DatabaseURL, cfg.Tenant)
 	if err != nil {
 		logger.Error("fact log unavailable — tv-sync would lose the fund's book on the next restart", "err", err)
-		os.Exit(2)
+		return 2
 	}
 	defer pool.Close()
 
@@ -94,21 +108,21 @@ func main() {
 	mesh, err := transport.NewMesh(ctx, cfg.SPIFFESocket)
 	if err != nil {
 		logger.Error("spiffe source init failed", "err", err)
-		os.Exit(2)
+		return 2
 	}
 	defer func() { _ = mesh.Close() }()
 	logger.Info("bus transport", "mtls", mesh.Enabled())
 	client, err := bus.DialNATS(ctx, bus.NATSConfig{URL: cfg.NATSURL, Name: cfg.Source, TLSConfig: mesh.Client})
 	if err != nil {
 		logger.Error("bus dial failed", "err", err)
-		os.Exit(2)
+		return 2
 	}
 	defer func() { _ = client.Close() }()
 
 	consumer, err := bus.NewConsumer(client, bus.WithDLQ(client))
 	if err != nil {
 		logger.Error("consumer init failed", "err", err)
-		os.Exit(2)
+		return 2
 	}
 
 	// REBUILD THE BOOK BEFORE ANYTHING CAN READ IT OR ADD TO IT (EXEC-M21).
@@ -124,7 +138,7 @@ func main() {
 	rehydrateStart := time.Now()
 	if err := proj.Rehydrate(ctx); err != nil {
 		logger.Error("could not rebuild the book from the fact log — refusing to serve an account we cannot vouch for", "err", err)
-		os.Exit(2)
+		return 2
 	}
 	logger.Info("book rebuilt from the fact log", "took", time.Since(rehydrateStart).String(), "tenant", cfg.Tenant)
 
@@ -139,7 +153,7 @@ func main() {
 		logger.Info("tv-sync listening", "addr", cfg.Listen, "nats", cfg.NATSURL)
 		if err := httpSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			logger.Error("http server failed", "err", err)
-			stop()
+			fatal.Raise(err)
 		}
 	}()
 
@@ -157,7 +171,7 @@ func main() {
 	go func() {
 		if err := runConsumers(ctx, consumer, subs, cfg.ConsumerGroup); err != nil && ctx.Err() == nil {
 			logger.Error("fact consumer failed", "err", err)
-			stop()
+			fatal.Raise(err)
 		}
 	}()
 	readiness.Set(true)
@@ -170,6 +184,11 @@ func main() {
 	if err := httpSrv.Shutdown(shutdownCtx); err != nil {
 		logger.Error("http shutdown error", "err", err)
 	}
+
+	// The run loop's own error and any fatal raised from a goroutine answer the
+	// same question — why is this process stopping — so they meet here, after
+	// every shutdown step above has run. Raise(nil) is a no-op mark.
+	return fatal.Code()
 }
 
 func runConsumers(ctx context.Context, consumer *bus.Consumer, subs map[string]bus.EventHandler, group string) error {

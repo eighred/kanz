@@ -25,6 +25,7 @@ import (
 	"k8s.io/client-go/rest"
 
 	"github.com/eighred/kanz/internal/execution"
+	"github.com/eighred/kanz/internal/lifecycle"
 	"github.com/eighred/kanz/internal/venueadapter/exchangeauth"
 	"github.com/eighred/kanz/internal/version"
 	"github.com/eighred/kanz/pkg/observability"
@@ -38,13 +39,22 @@ import (
 )
 
 func main() {
+	// The lifecycle lives in run() because os.Exit skips defers: every defer
+	// run() registers fires before this line. The non-zero code is what makes a
+	// fatal halt distinguishable from a graceful SIGTERM — both otherwise exit 0
+	// with reason "Completed" in the pod's termination record (#266).
+	// 2 = startup failure, 1 = run loop died after startup, 0 = clean shutdown.
+	os.Exit(run())
+}
+
+func run() int {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	slog.SetDefault(logger)
 
 	cfg, err := config.Load()
 	if err != nil {
 		logger.Error("config load failed", "err", err)
-		os.Exit(2)
+		return 2
 	}
 
 	// In-cluster REST config: the pod's ServiceAccount token + the API server
@@ -53,16 +63,20 @@ func main() {
 	restCfg, err := rest.InClusterConfig()
 	if err != nil {
 		logger.Error("in-cluster config failed (operator runs as a pod)", "err", err)
-		os.Exit(2)
+		return 2
 	}
 	cs, err := kubernetes.NewForConfig(restCfg)
 	if err != nil {
 		logger.Error("kubernetes client init failed", "err", err)
-		os.Exit(2)
+		return 2
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+	// Records WHY we are stopping so the exit code can say so. Every site that
+	// calls fatal.Raise below already brought the process down with stop(); the
+	// only thing added is that the reason survives to the exit status (#266).
+	fatal := lifecycle.NewFatal(stop)
 
 	// Telemetry (#61). The operator ran with NO metrics surface at all: it is the
 	// control plane the TUI drives — it provisions nodes and writes venue keys —
@@ -77,7 +91,7 @@ func main() {
 	}, slog.NewJSONHandler(os.Stdout, nil))
 	if err != nil {
 		logger.Error("telemetry init failed", "err", err)
-		os.Exit(2)
+		return 2
 	}
 	defer func() {
 		if err := obs.Shutdown(context.Background()); err != nil {
@@ -98,7 +112,7 @@ func main() {
 		logger.Info("operator health listening", "addr", cfg.HealthListen)
 		if err := healthSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			logger.Error("health server failed", "err", err)
-			stop()
+			fatal.Raise(err)
 		}
 	}()
 
@@ -109,12 +123,12 @@ func main() {
 	srvOpt, allowed, err := controlPlaneServerOption(ctx, cfg.SPIFFESocket, cfg.AllowedClients)
 	if err != nil {
 		logger.Error("control-plane access is not configured; refusing to serve", "err", err)
-		os.Exit(2)
+		return 2
 	}
 	lis, err := net.Listen("tcp", cfg.GRPCListen)
 	if err != nil {
 		logger.Error("grpc listen failed", "addr", cfg.GRPCListen, "err", err)
-		os.Exit(2)
+		return 2
 	}
 	grpcSrv := grpc.NewServer(srvOpt)
 	logger.Info("control plane authenticated — mTLS, callers restricted",
@@ -145,7 +159,7 @@ func main() {
 		vs, verr := secrets.NewVaultStore(cfg.VaultAddr, cfg.VaultToken)
 		if verr != nil {
 			logger.Error("vault venue-key backend init failed", "err", verr)
-			os.Exit(2)
+			return 2
 		}
 		srv = srv.WithSecrets(vs)
 		logger.Info("venue-key backend: vault", "addr", cfg.VaultAddr)
@@ -165,7 +179,7 @@ func main() {
 		logger.Info("operator gRPC listening", "addr", cfg.GRPCListen)
 		if err := grpcSrv.Serve(lis); err != nil {
 			logger.Error("grpc server failed", "err", err)
-			stop()
+			fatal.Raise(err)
 		}
 	}()
 
@@ -175,6 +189,8 @@ func main() {
 	shutCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	_ = healthSrv.Shutdown(shutCtx)
+
+	return fatal.Code()
 }
 
 // provenVenues returns the sorted venue ids proof is configured for — ids

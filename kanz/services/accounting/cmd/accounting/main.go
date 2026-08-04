@@ -18,6 +18,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/eighred/kanz/internal/lifecycle"
 	"github.com/eighred/kanz/internal/pg"
 	"github.com/eighred/kanz/internal/version"
 	"github.com/eighred/kanz/pkg/bus"
@@ -33,14 +34,27 @@ import (
 )
 
 func main() {
+	// The lifecycle lives in run() because os.Exit skips defers: every defer
+	// run() registers fires before this line. The non-zero code is what makes a
+	// fatal halt distinguishable from a graceful SIGTERM — both otherwise exit 0
+	// with reason "Completed" in the pod's termination record (#266).
+	// 2 = startup failure, 1 = run loop died after startup, 0 = clean shutdown.
+	os.Exit(run())
+}
+
+func run() int {
 	cfg, err := config.Load()
 	if err != nil {
 		slog.Default().Error("config load failed", "err", err)
-		os.Exit(2)
+		return 2
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+	// Records WHY we are stopping so the exit code can say so. Every site that
+	// calls fatal.Raise below already brought the process down with stop(); the
+	// only thing added is that the reason survives to the exit status (#266).
+	fatal := lifecycle.NewFatal(stop)
 
 	base := slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: cfg.LogLevel})
 	obs, err := observability.New(ctx, observability.Config{
@@ -51,7 +65,7 @@ func main() {
 	}, base)
 	if err != nil {
 		slog.Default().Error("observability init failed", "err", err)
-		os.Exit(2)
+		return 2
 	}
 	logger := obs.Logger
 	slog.SetDefault(logger)
@@ -65,7 +79,7 @@ func main() {
 	mesh, err := transport.NewMesh(ctx, cfg.SPIFFESocket)
 	if err != nil {
 		logger.Error("spiffe source init failed", "err", err)
-		os.Exit(2)
+		return 2
 	}
 	defer func() { _ = mesh.Close() }()
 	logger.Info("bus transport", "mtls", mesh.Enabled())
@@ -79,7 +93,7 @@ func main() {
 	store, closeStore, err := openStore(ctx, cfg)
 	if err != nil {
 		logger.Error("store init failed", "err", err)
-		os.Exit(2)
+		return 2
 	}
 	defer closeStore()
 
@@ -98,7 +112,7 @@ func main() {
 	liveFX, err := buildLiveFX(cfg, &opts)
 	if err != nil {
 		logger.Error("FX config invalid", "err", err)
-		os.Exit(2)
+		return 2
 	}
 
 	// Cash-movement producer (WIRE-01f): with a broker configured, mount the
@@ -110,7 +124,7 @@ func main() {
 		pub, closePub, err := buildCashPublisher(ctx, cfg, mesh)
 		if err != nil {
 			logger.Error("cash publisher init failed", "err", err)
-			os.Exit(2)
+			return 2
 		}
 		defer closePub()
 		opts = append(opts, server.WithCashPublisher(pub))
@@ -126,9 +140,13 @@ func main() {
 		logger.Info("accounting listening", "addr", cfg.Listen)
 		if err := httpSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			logger.Error("http server failed", "err", err)
-			stop()
+			fatal.Raise(err)
 		}
 	}()
+
+	// Fatal runtime errors surface through fatal, raised only by the fill
+	// consumer below (the fatal path) and read after consumers.Wait() joins in
+	// awaitConsumers — the join is what makes the write happen-before the read.
 
 	// Fill-folding consumer (WIRE-01b): fold live order.v1 fill FACTs into the
 	// same journal the server reads, so NAV/positions reflect live execution.
@@ -143,7 +161,7 @@ func main() {
 			defer consumers.Done()
 			if err := runConsumer(ctx, cfg, store, mesh, logger, obs); err != nil && !errors.Is(err, context.Canceled) {
 				logger.Error("fill consumer stopped with error", "err", err)
-				stop()
+				fatal.Raise(err)
 			}
 		}()
 		// Live FX feed (WIRE-01d): fold market.v1 FX quotes into the rate cache.
@@ -190,7 +208,7 @@ func main() {
 		})
 		if err != nil {
 			logger.Error("ledger snapshotter init failed", "err", err)
-			os.Exit(2)
+			return 2
 		}
 		consumers.Add(1)
 		go func() {
@@ -213,6 +231,8 @@ func main() {
 	}
 
 	awaitConsumers(&consumers, logger)
+
+	return fatal.Code()
 }
 
 // awaitConsumers blocks until the bus consumer goroutines have finished

@@ -21,6 +21,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"google.golang.org/grpc"
 
+	"github.com/eighred/kanz/internal/lifecycle"
 	"github.com/eighred/kanz/internal/marketdata/returns"
 	mdstore "github.com/eighred/kanz/internal/marketdata/store"
 	"github.com/eighred/kanz/internal/pg"
@@ -48,14 +49,27 @@ import (
 )
 
 func main() {
+	// The lifecycle lives in run() because os.Exit skips defers: every defer
+	// run() registers fires before this line. The non-zero code is what makes a
+	// fatal halt distinguishable from a graceful SIGTERM — both otherwise exit 0
+	// with reason "Completed" in the pod's termination record (#266).
+	// 2 = startup failure, 1 = run loop died after startup, 0 = clean shutdown.
+	os.Exit(run())
+}
+
+func run() int {
 	cfg, err := config.Load()
 	if err != nil {
 		slog.Default().Error("config load failed", "err", err)
-		os.Exit(2)
+		return 2
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+	// Records WHY we are stopping so the exit code can say so. Every site that
+	// calls fatal.Raise below already brought the process down with stop(); the
+	// only thing added is that the reason survives to the exit status (#266).
+	fatal := lifecycle.NewFatal(stop)
 
 	// Telemetry foundation (OBS-01a): Prometheus registry + OTel tracer +
 	// trace-correlated logger. Spans export to RISK_ENGINE_OTLP_ENDPOINT when
@@ -69,7 +83,7 @@ func main() {
 	}, base)
 	if err != nil {
 		slog.Default().Error("observability init failed", "err", err)
-		os.Exit(2)
+		return 2
 	}
 	logger := obs.Logger
 	slog.SetDefault(logger)
@@ -89,13 +103,15 @@ func main() {
 		logger.Info("risk-engine listening", "addr", cfg.Listen)
 		if err := httpSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			logger.Error("http server failed", "err", err)
-			stop()
+			fatal.Raise(err)
 		}
 	}()
 
+	var runErr error
 	if cfg.NATSURL != "" {
 		if err := runEngine(ctx, cfg, readiness, logger, obs); err != nil {
 			logger.Error("engine stopped with error", "err", err)
+			runErr = err
 		}
 	} else {
 		// No broker configured — serve probes only.
@@ -110,6 +126,12 @@ func main() {
 	if err := httpSrv.Shutdown(shutdownCtx); err != nil {
 		logger.Error("http shutdown error", "err", err)
 	}
+
+	// The run loop's own error and any fatal raised from a goroutine answer the
+	// same question — why is this process stopping — so they meet here, after
+	// every shutdown step above has run. Raise(nil) is a no-op mark.
+	fatal.Raise(runErr)
+	return fatal.Code()
 }
 
 // runEngine builds the ingestion→recompute→publish pipeline over the live

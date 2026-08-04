@@ -36,6 +36,7 @@ import (
 	"google.golang.org/grpc"
 
 	"github.com/eighred/kanz/internal/execution"
+	"github.com/eighred/kanz/internal/lifecycle"
 	"github.com/eighred/kanz/internal/pg"
 	"github.com/eighred/kanz/internal/venueadapter/accountproof"
 	"github.com/eighred/kanz/internal/venueadapter/orderview"
@@ -60,20 +61,34 @@ var orderViewDurable = prometheus.NewGauge(prometheus.GaugeOpts{
 })
 
 func main() {
+	// The lifecycle lives in run() because os.Exit skips defers: every defer
+	// run() registers fires before this line. The non-zero code is what makes a
+	// fatal halt distinguishable from a graceful SIGTERM — both otherwise exit 0
+	// with reason "Completed" in the pod's termination record (#266).
+	// 2 = startup failure, 1 = run loop died after startup, 0 = clean shutdown.
+	os.Exit(run())
+}
+
+func run() int {
 	cfg, err := config.Load()
 	if err != nil {
 		slog.Default().Error("config load failed", "err", err)
-		os.Exit(2)
+		return 2
 	}
-	if err := run(cfg); err != nil {
+	if err := serve(cfg); err != nil {
 		slog.Default().Error("venue-binance stopped with error", "err", err)
-		os.Exit(1)
+		return 1
 	}
+	return 0
 }
 
-func run(cfg config.Config) error {
+func serve(cfg config.Config) error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+	// Records WHY we are stopping so the exit code can say so. Every site that
+	// calls fatal.Raise below already brought the process down with stop(); the
+	// only thing added is that the reason survives to the exit status (#266).
+	fatal := lifecycle.NewFatal(stop)
 
 	base := slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: cfg.LogLevel})
 	obs, err := observability.New(ctx, observability.Config{
@@ -111,7 +126,7 @@ func run(cfg config.Config) error {
 		logger.Info("venue-binance probes listening", "addr", cfg.HTTPListen)
 		if err := httpSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			logger.Error("probe server failed", "err", err)
-			stop()
+			fatal.Raise(err)
 		}
 	}()
 	defer func() {
@@ -231,7 +246,7 @@ func run(cfg config.Config) error {
 		logger.Info("venue-binance venue.v1 listening", "addr", cfg.GRPCListen, "mic", cfg.MIC, "base_url", cfg.BaseURL)
 		if err := grpcSrv.Serve(lis); err != nil {
 			logger.Error("grpc server failed", "err", err)
-			stop()
+			fatal.Raise(err)
 		}
 	}()
 	defer grpcSrv.GracefulStop()
@@ -239,7 +254,11 @@ func run(cfg config.Config) error {
 	readiness.Set(true)
 	<-ctx.Done()
 	readiness.Set(false)
-	return nil
+	// A goroutine above may have already raised a fatal (stop()'d ctx AND
+	// recorded why); fatal.Err() surfaces that reason here, after every
+	// shutdown step above has run, so run() can turn it into exit code 1. A
+	// clean SIGTERM never raised anything, so this is nil.
+	return fatal.Err()
 }
 
 // newGRPCServer serves venue.v1 over mTLS when a SPIFFE socket is configured.

@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"os"
 	"strings"
 	"time"
 
@@ -47,7 +46,7 @@ var closeRegistry = execution.NewCloseRegistry()
 // is ever reached in production the OMS is filling orders against nothing, so it
 // says so at WARN in as many words, and the router hard-errors on any MIC it has
 // no venue for rather than quietly routing there.
-func configuredVenues(ctx context.Context, cfg config.Config, store order.Store, producer execution.Publisher, unverified prometheus.Counter, logger *slog.Logger) ([]execution.Venue, func()) {
+func configuredVenues(ctx context.Context, cfg config.Config, store order.Store, producer execution.Publisher, unverified prometheus.Counter, logger *slog.Logger) ([]execution.Venue, func(), error) {
 	var venues []execution.Venue
 
 	// INFRA-M7a: out-of-process adapters. These need no build tag and link no
@@ -59,7 +58,7 @@ func configuredVenues(ctx context.Context, cfg config.Config, store order.Store,
 		// alternative is booting without it and silently routing its orders
 		// nowhere — or worse, to the simulator below.
 		logger.Error("venue adapter dial failed", "err", err)
-		os.Exit(2)
+		return nil, nil, err
 	}
 	venues = append(venues, grpcVenues...)
 
@@ -85,9 +84,9 @@ func configuredVenues(ctx context.Context, cfg config.Config, store order.Store,
 		for _, mic := range mics {
 			sims = append(sims, execution.NewSimVenue(mic))
 		}
-		return sims, closeConns
+		return sims, closeConns, nil
 	}
-	return venues, closeConns
+	return venues, closeConns, nil
 }
 
 // parseMICs splits the sim-venue MIC list ("XNAS,XLON"). An empty setting yields
