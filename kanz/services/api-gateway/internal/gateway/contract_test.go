@@ -1,10 +1,6 @@
 package gateway_test
 
 import (
-	"crypto/hmac"
-	"crypto/sha256"
-	"encoding/base64"
-	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -14,6 +10,7 @@ import (
 
 	querypb "github.com/eighred/kanz/kanz-schemas-go/query/v1"
 
+	"github.com/eighred/kanz/internal/devtoken"
 	"github.com/eighred/kanz/services/api-gateway/internal/authz"
 	"github.com/eighred/kanz/services/api-gateway/internal/gateway"
 	"github.com/eighred/kanz/services/api-gateway/internal/middleware"
@@ -148,17 +145,31 @@ func TestContract_QueryLatencyBudget(t *testing.T) {
 
 // --- helpers (shared with gateway_test.go in this package) -------------
 
+// mintContractJWT builds the bearer token these contract cases authenticate
+// with, through the ESTATE'S ONE MINTER rather than a local copy of the wire
+// format.
+//
+// It used to assemble the JWS by hand, and #242 is why that stopped. The
+// hand-rolled payload was `{sub, tenant, roles}` — no exp, no iss, no aud — and
+// it authenticated, because the validator treated all three as optional. So the
+// contract suite was pinning a token shape nothing else in the estate mints and
+// asserting it worked, which is the strongest form of the defect: a second
+// implementation of a security-relevant format, green, describing something no
+// real caller does. Routing through devtoken.Mint means a claim the gateway
+// starts requiring breaks the minter and the suite together, in the same
+// change, instead of one of them quietly certifying the other.
 func mintContractJWT(t *testing.T, sub, tenant string, roles []string) string {
 	t.Helper()
-	enc := func(v any) string {
-		b, _ := json.Marshal(v)
-		return base64.RawURLEncoding.EncodeToString(b)
+	tok, err := devtoken.Mint(contractSecret, devtoken.Claims{
+		Subject: sub,
+		Tenant:  tenant,
+		Roles:   roles,
+		TTL:     time.Hour,
+	})
+	if err != nil {
+		t.Fatalf("devtoken.Mint: %v", err)
 	}
-	header := enc(map[string]string{"alg": "HS256", "typ": "JWT"})
-	payload := enc(map[string]any{"sub": sub, "tenant": tenant, "roles": roles})
-	mac := hmac.New(sha256.New, []byte(contractSecret))
-	mac.Write([]byte(header + "." + payload))
-	return header + "." + payload + "." + base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
+	return tok
 }
 
 func mustTime(s string) time.Time {

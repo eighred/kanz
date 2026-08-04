@@ -12,11 +12,17 @@ import (
 // configured, and once it is present the role becomes mandatory and must be its own.
 // "Exposed but unauthorized" and "authorized but unexposed" are both refused.
 
+// baseValid is a config that passes validateAuth for reasons that have nothing
+// to do with the operator plane, so a failure below is attributable to the
+// operator plane. AllowDevHS256 is part of that baseline since #242: the HS256
+// arm is not a valid configuration without the explicit opt-in, and leaving it
+// out here would make every case in this file fail on the wrong error.
 func baseValid() Config {
 	return Config{
-		JWTSecret:    "dev-secret",
-		RequiredRole: "kanz-user",
-		TradeRole:    "kanz-trader",
+		JWTSecret:     "dev-secret",
+		AllowDevHS256: true,
+		RequiredRole:  "kanz-user",
+		TradeRole:     "kanz-trader",
 	}
 }
 

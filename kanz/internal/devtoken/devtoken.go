@@ -7,6 +7,12 @@
 // stack, the k6 load harness and the in-cluster proof all need a real token. They
 // were minting them by hand, or not at all.
 //
+// The tokens it mints carry a fixed `iss` and `aud` (pkg/auth.DevHS256Issuer /
+// DevHS256Audience) that the gateway REQUIRES, so a token-shaped blob signed
+// with the same shared secret for some other purpose does not authenticate a
+// caller (#242). Both sides read the two values from pkg/auth rather than
+// spelling them twice.
+//
 // This is NOT a production credential path. Production identity is OIDC/JWKS
 // against Eighred SSO (pkg/auth), where kanz holds no signing key and mints
 // nothing; a shared HMAC secret is a symmetric credential every holder can forge
@@ -21,6 +27,8 @@ import (
 	"encoding/json"
 	"errors"
 	"time"
+
+	"github.com/eighred/kanz/pkg/auth"
 )
 
 // Claims is the identity a dev token asserts. Tenant is the RLS scope every
@@ -37,11 +45,17 @@ type Claims struct {
 // middleware.jwtClaims), which is unexported and unimportable from here. The
 // contract is pinned by TestDevTokenAcceptedByGateway, which drives the real
 // validator rather than a copy of it.
+//
+// iss/aud are FIXED, not caller-supplied: the gateway requires exactly these
+// two values (#242), and both sides read them from pkg/auth so the minter and
+// the validator cannot drift into a dev estate where nothing authenticates.
 type claims struct {
-	Subject string   `json:"sub"`
-	Tenant  string   `json:"tenant"`
-	Roles   []string `json:"roles"`
-	Expiry  int64    `json:"exp"`
+	Subject  string   `json:"sub"`
+	Tenant   string   `json:"tenant"`
+	Roles    []string `json:"roles"`
+	Issuer   string   `json:"iss"`
+	Audience string   `json:"aud"`
+	Expiry   int64    `json:"exp"`
 }
 
 // Mint returns a compact JWS (header.payload.signature) the gateway's HS256
@@ -70,10 +84,12 @@ func Mint(secret string, c Claims) (string, error) {
 		return "", err
 	}
 	payload, err := enc(claims{
-		Subject: c.Subject,
-		Tenant:  c.Tenant,
-		Roles:   c.Roles,
-		Expiry:  time.Now().Add(c.TTL).Unix(),
+		Subject:  c.Subject,
+		Tenant:   c.Tenant,
+		Roles:    c.Roles,
+		Issuer:   auth.DevHS256Issuer,
+		Audience: auth.DevHS256Audience,
+		Expiry:   time.Now().Add(c.TTL).Unix(),
 	})
 	if err != nil {
 		return "", err

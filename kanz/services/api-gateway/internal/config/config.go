@@ -2,6 +2,7 @@ package config
 
 import (
 	"errors"
+	"fmt"
 	"log/slog"
 	"os"
 	"strconv"
@@ -43,6 +44,12 @@ type Config struct {
 	// REQUIRED: with neither, Load refuses and the gateway does not start
 	// (SEC-M1).
 	JWTSecret string
+	// AllowDevHS256 (API_GATEWAY_ALLOW_DEV_HS256) is the EXPLICIT opt-in without
+	// which the HS256 arm is not a valid configuration at all (#242). A shared
+	// symmetric secret is a credential every holder can forge with and has no
+	// revocation path; reaching it must be a decision somebody wrote down, not
+	// the consequence of leaving API_GATEWAY_OIDC_ISSUER unset.
+	AllowDevHS256 bool
 	// RequiredRole is the role a Principal must carry to reach any /v1 route
 	// (deny-by-default). REQUIRED: without it, authentication admits every token
 	// the issuer ever minted to every route, POST /v1/orders included, so Load
@@ -126,6 +133,10 @@ func Load() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	allowDevHS256, err := parseBool("API_GATEWAY_ALLOW_DEV_HS256")
+	if err != nil {
+		return Config{}, err
+	}
 
 	cfg := Config{
 		Listen:          envOr("API_GATEWAY_LISTEN", ":8080"),
@@ -140,6 +151,7 @@ func Load() (Config, error) {
 		OIDCTenantClaim: os.Getenv("API_GATEWAY_OIDC_TENANT_CLAIM"),
 		OIDCRolesClaim:  os.Getenv("API_GATEWAY_OIDC_ROLES_CLAIM"),
 		JWTSecret:       jwtSecret,
+		AllowDevHS256:   allowDevHS256,
 		RequiredRole:    os.Getenv("API_GATEWAY_REQUIRED_ROLE"),
 		TradeRole:       os.Getenv("API_GATEWAY_TRADE_ROLE"),
 		OperatorAddr:    os.Getenv("API_GATEWAY_OPERATOR_ADDR"),
@@ -172,8 +184,37 @@ func Load() (Config, error) {
 func (c Config) validateAuth() error {
 	if c.OIDCIssuer == "" && c.JWTSecret == "" {
 		return errors.New("api-gateway: no authentication configured — set API_GATEWAY_OIDC_ISSUER " +
-			"(production, OIDC/JWKS) or API_GATEWAY_JWT_SECRET (dev, HS256). The gateway will not " +
-			"serve /v1/* — including POST /v1/orders — to unauthenticated callers")
+			"(production, OIDC/JWKS) or API_GATEWAY_JWT_SECRET with API_GATEWAY_ALLOW_DEV_HS256=true " +
+			"(dev, HS256). The gateway will not serve /v1/* — including POST /v1/orders — to " +
+			"unauthenticated callers")
+	}
+	// #242. THE DEV CREDENTIAL MUST BE REACHED ON PURPOSE, NEVER BY OMISSION.
+	//
+	// Until this check existed, API_GATEWAY_JWT_SECRET alone was a complete and
+	// silent authentication configuration: a staging or DR gateway brought up
+	// from a partial copy of the production environment — one where the OIDC
+	// issuer had been dropped and the dev secret had not — started, logged a
+	// WARN nobody reads, and authenticated the whole estate against a symmetric
+	// HMAC key. Nothing in the config distinguished that from a deployment that
+	// meant it, which is this repository's standing rule violated exactly:
+	// "nothing configured" and "checked, and fine" must never look the same.
+	//
+	// The secret is the wrong thing to gate on. A secret is a value, and a value
+	// arrives by inheritance, by a copied ConfigMap, by a Vault path that still
+	// resolves; a SEPARATE, purpose-named boolean has to be typed by somebody
+	// who read what it turns on. That is the whole difference between a dev
+	// credential in a dev estate and a dev credential in a real one.
+	//
+	// Refusing to start rather than warning is the same stance as every other
+	// gate in this function, and for the same reason: a WARN at 03:00 in a
+	// rollout log is discovered by the incident, and a refusal is discovered by
+	// whoever deployed it, immediately.
+	if c.OIDCIssuer == "" && !c.AllowDevHS256 {
+		return errors.New("api-gateway: API_GATEWAY_JWT_SECRET is set but API_GATEWAY_ALLOW_DEV_HS256 " +
+			"is not true. The HS256 validator is a DEV credential: a shared symmetric secret every " +
+			"holder can forge tokens with, with no revocation path and no identity provider behind " +
+			"it. It must be switched on deliberately, not reached by leaving API_GATEWAY_OIDC_ISSUER " +
+			"unset. For anything real, configure OIDC/JWKS instead (#242)")
 	}
 	if c.RequiredRole == "" {
 		return errors.New("api-gateway: no authorization configured — set API_GATEWAY_REQUIRED_ROLE. " +
@@ -257,4 +298,24 @@ func parseFloat(s string) float64 {
 func parseInt(s string) int {
 	n, _ := strconv.Atoi(s)
 	return n
+}
+
+// parseBool reads a boolean env var. Unset or empty is false; anything
+// strconv.ParseBool cannot read is an ERROR rather than a silent false.
+//
+// The silent-false version is what makes an opt-in useless. An operator who
+// writes API_GATEWAY_ALLOW_DEV_HS256=yes has stated an intent as clearly as one
+// who writes true; swallowing the parse failure would refuse the gateway with a
+// message telling them to set a variable they can see they have already set,
+// and the next attempt is usually to delete the check.
+func parseBool(key string) (bool, error) {
+	raw := strings.TrimSpace(os.Getenv(key))
+	if raw == "" {
+		return false, nil
+	}
+	v, err := strconv.ParseBool(raw)
+	if err != nil {
+		return false, fmt.Errorf("api-gateway: %s=%q is not a boolean (use true or false)", key, raw)
+	}
+	return v, nil
 }

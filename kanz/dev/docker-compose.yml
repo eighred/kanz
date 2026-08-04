@@ -116,6 +116,13 @@ services:
       # The secret is symmetric and public — it is fine here and NOWHERE ELSE.
       # Production authenticates against Eighred SSO over OIDC/JWKS.
       API_GATEWAY_JWT_SECRET: "dev-secret"
+      # THE OPT-IN IS NOT CEREMONY (#242). Until it existed, the secret ALONE was
+      # a complete authentication configuration, so a staging or DR gateway built
+      # from a partial copy of this file — OIDC issuer dropped, secret kept —
+      # came up on a symmetric HMAC key and looked healthy. A value arrives by
+      # inheritance; a variable named ALLOW_DEV_HS256 has to be typed by somebody
+      # who read what it turns on. The gateway now refuses to start without it.
+      API_GATEWAY_ALLOW_DEV_HS256: "true"
       API_GATEWAY_REQUIRED_ROLE: "kanz-user"
       # SEC-M2: only this role reaches POST /v1/orders. It MUST differ from the
       # baseline role above — the gateway refuses to start if they match, because

@@ -18,8 +18,9 @@ status 404 on http://localhost:8080/.well-known/openid-configuration
 ```
 
 which is correct rather than broken: the load stack's gateway validates **HS256
-JWTs** (`API_GATEWAY_JWT_SECRET`) and is not an OpenID provider, so there is no
-discovery document to fetch.
+JWTs** (`API_GATEWAY_JWT_SECRET`, together with the explicit
+`API_GATEWAY_ALLOW_DEV_HS256=true` that arm now requires) and is not an OpenID
+provider, so there is no discovery document to fetch.
 
 Set `KANZ_TOKEN` to a pre-minted bearer instead, and leave `KANZ_SSO_ISSUER`
 unset:

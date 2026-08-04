@@ -54,6 +54,45 @@ func NewGatewayMetrics(reg prometheus.Registerer) *GatewayMetrics {
 	return m
 }
 
+// RegisterOIDCKeyGauge exports kanz_gateway_oidc_keys_unrevalidated on reg: 1
+// while the gateway is verifying bearer tokens against OIDC signing keys it is
+// past MaxKeyAge on and could not refetch, 0 otherwise (#242).
+//
+// WHY THE GAUGE EXISTS AT ALL. pkg/auth now survives an unreachable IdP for a
+// bounded KeyGracePeriod instead of failing every request the moment a 5-minute
+// key cache expires — which deliberately widens the revocation window from 5
+// minutes to 20. A widening bought on purpose is defensible only if the estate
+// can SEE when it is being spent, so this is the other half of that trade, not
+// a nice-to-have: without it the degraded posture is inferable only from the
+// absence of something, and fifteen minutes later authentication stops.
+//
+// A GAUGE, NOT A COUNTER, AND A GaugeFunc RATHER THAN A PUSHED ONE. A counter
+// incremented on entering the grace answers "did this happen", and the question
+// with a deadline running is "is it happening NOW". A gauge pushed from the
+// request path answers that only while requests keep arriving: an IdP outage
+// that also stops traffic would freeze the last value written, which is the
+// exact reading an operator must not be given. The closure is evaluated at
+// SCRAPE time against live authenticator state, so it cannot go stale and it is
+// its own writer (test/arch/metric_writer_test.go).
+//
+// SEPARATE FROM NewGatewayMetrics ON PURPOSE. Every other kanz_gateway_* series
+// is per-tenant RED/quota data; this one is a process-wide posture with no
+// tenant to label it by, and it exists only on the OIDC arm. The HS256 dev arm
+// has no identity provider to be unreachable, so no series is exported there at
+// all — GatewayOIDCKeysUnrevalidated compares against an empty vector and stays
+// quiet, which is the truth rather than a reassuring zero.
+func RegisterOIDCKeyGauge(reg prometheus.Registerer, unrevalidated func() bool) {
+	reg.MustRegister(prometheus.NewGaugeFunc(prometheus.GaugeOpts{
+		Name: "kanz_gateway_oidc_keys_unrevalidated",
+		Help: "1 while the gateway is verifying tokens against OIDC signing keys past MaxKeyAge that it could not refetch (grace window, then fail-closed).",
+	}, func() float64 {
+		if unrevalidated() {
+			return 1
+		}
+		return 0
+	}))
+}
+
 // Measure wraps the chain to record per-tenant request count + latency,
 // including requests the Quota middleware rejects (their 429/503 codes). Place
 // it just after Auth (tenant known) and outside Quota. A nil receiver is a

@@ -279,9 +279,10 @@ func TestOIDCAuthenticate_RevokedKeyStopsVerifying(t *testing.T) {
 	}
 }
 
-// A cache past MaxKeyAge that cannot be refreshed fails CLOSED, and says why:
-// trusting keys we can no longer vouch for would let an attacker who keeps the
-// JWKS endpoint unreachable extend a revoked key indefinitely.
+// A cache past MaxKeyAge + KeyGracePeriod that cannot be refreshed fails
+// CLOSED, and says why: continuing to trust keys we can no longer vouch for,
+// with no bound, would let an attacker who keeps the JWKS endpoint unreachable
+// extend a revoked key indefinitely. The grace is a BOUND, not a fallback.
 func TestOIDCAuthenticate_StaleCacheProviderDown(t *testing.T) {
 	f := newOIDCFixture(t)
 	k1 := newSigner(t, "k1")
@@ -289,6 +290,7 @@ func TestOIDCAuthenticate_StaleCacheProviderDown(t *testing.T) {
 	a := f.auth(t, func(c *OIDCConfig) {
 		c.MinRefreshInterval = time.Minute
 		c.MaxKeyAge = 5 * time.Minute
+		c.KeyGracePeriod = 15 * time.Minute
 	})
 	advance := pinClock(a)
 
@@ -298,10 +300,10 @@ func TestOIDCAuthenticate_StaleCacheProviderDown(t *testing.T) {
 	}
 
 	f.srv.Close() // provider goes down with a warm cache
-	advance(6 * time.Minute)
+	advance(21 * time.Minute)
 
-	// The first request past the ceiling attempts a refetch and reports the
-	// backend problem — a 503 condition, not a rejected credential.
+	// The first request past MaxKeyAge + grace attempts a refetch and reports
+	// the backend problem — a 503 condition, not a rejected credential.
 	_, err := a.Authenticate(context.Background(), tok)
 	if err == nil || errors.Is(err, ErrUnauthenticated) {
 		t.Fatalf("got %v, want a provider error distinct from ErrUnauthenticated", err)
@@ -316,13 +318,180 @@ func TestOIDCAuthenticate_StaleCacheProviderDown(t *testing.T) {
 	}
 }
 
+// THE GRACE WINDOW, END TO END (#242's ruling).
+//
+// Three claims in one timeline, because they are one behaviour and asserting
+// them apart would let a change satisfy each in isolation and none together:
+//
+//  1. Past MaxKeyAge with the provider down, a good token STILL VERIFIES. This
+//     is the ruling's whole subject — a brief IdP outage must not become an
+//     authentication outage on the platform's sole ingress for orders.
+//  2. While that is true the gauge READS 1, and it reads 1 continuously rather
+//     than pulsing once on entry. A counter cannot answer "are we degraded right
+//     now", which is the only question worth asking with a 15-minute deadline
+//     running, so the assertion is repeated across the window.
+//  3. Past MaxKeyAge + KeyGracePeriod it fails closed. The widening is bounded
+//     at 20 minutes of total trust; that bound is the reason the widening is
+//     defensible at all.
+func TestOIDCAuthenticate_GraceWindowSurvivesAnUnreachableIdP(t *testing.T) {
+	f := newOIDCFixture(t)
+	k1 := newSigner(t, "k1")
+	f.publish(k1.jwk())
+	a := f.auth(t, func(c *OIDCConfig) {
+		c.MinRefreshInterval = time.Minute
+		c.MaxKeyAge = 5 * time.Minute
+		c.KeyGracePeriod = 15 * time.Minute
+	})
+	advance := pinClock(a)
+
+	tok := k1.sign(t, baseClaims(f.srv.URL), nil)
+	if _, err := a.Authenticate(context.Background(), tok); err != nil {
+		t.Fatalf("warm-up authenticate: %v", err)
+	}
+	if a.KeysUnrevalidated() {
+		t.Fatal("gauge reads 1 on a fresh cache with a healthy provider")
+	}
+
+	f.srv.Close() // the IdP becomes unreachable with a warm cache
+
+	// Inside MaxKeyAge nothing is even attempted: not degraded, gauge 0.
+	advance(4 * time.Minute)
+	if _, err := a.Authenticate(context.Background(), tok); err != nil {
+		t.Fatalf("inside MaxKeyAge with the IdP down: %v", err)
+	}
+	if a.KeysUnrevalidated() {
+		t.Fatal("gauge reads 1 inside MaxKeyAge — the keys are still ones we vouched for")
+	}
+
+	// Past MaxKeyAge, inside the grace. Walked at three separate points across
+	// the window (t = 6m, 12m, 19m) rather than sampled once, because "the gauge
+	// is 1 WHILE we are degraded" is a different claim from "the gauge went to 1
+	// when we became degraded", and only the first one is useful. `advance` is
+	// relative, so the steps are deltas from t = 4m.
+	for i, step := range []time.Duration{2 * time.Minute, 6 * time.Minute, 7 * time.Minute} {
+		advance(step)
+		if _, err := a.Authenticate(context.Background(), tok); err != nil {
+			t.Fatalf("step %d inside the grace window: %v — the IdP being unreachable "+
+				"must not refuse a good token before MaxKeyAge+KeyGracePeriod", i, err)
+		}
+		if !a.KeysUnrevalidated() {
+			t.Fatalf("step %d: gauge reads 0 while verifying on keys that could not be revalidated — "+
+				"the degraded posture is invisible, which is the half of the trade that makes the "+
+				"widened revocation window defensible", i)
+		}
+	}
+
+	// t = 19m. Two more minutes takes it past MaxKeyAge(5m) + grace(15m) = 20m.
+	advance(2 * time.Minute)
+	if _, err := a.Authenticate(context.Background(), tok); err == nil || errors.Is(err, ErrUnauthenticated) {
+		t.Fatalf("got %v past MaxKeyAge+KeyGracePeriod, want a provider/stale error — the grace "+
+			"must be BOUNDED, or an attacker holding the JWKS endpoint down extends a revoked key forever", err)
+	}
+	// Still degraded, and the gauge must say so. It does NOT fall back to 0 when
+	// the grace runs out: that is the moment the degradation becomes an outage,
+	// and a gauge that cleared its own alert there would go quiet at the worst
+	// possible time.
+	if !a.KeysUnrevalidated() {
+		t.Fatal("gauge fell to 0 past the grace window — it must stay 1 while the keys are unrevalidated")
+	}
+}
+
+// A REFETCH THAT LANDS ENDS THE GRACE AND LOWERS THE GAUGE. The ruling is
+// explicit that the posture clears only on a successful fetch, so this drives
+// the provider back up and asserts both halves — fresh keys and a gauge at 0.
+func TestOIDCAuthenticate_GraceClearsOnASuccessfulRefetch(t *testing.T) {
+	f := newOIDCFixture(t)
+	k1 := newSigner(t, "k1")
+	f.publish(k1.jwk())
+
+	// A switchable transport standing in for an IdP that goes away and comes
+	// back: closing the httptest server cannot be undone.
+	var down atomic.Bool
+	client := &http.Client{Transport: gatedTransport{inner: f.srv.Client().Transport, down: &down}}
+	a := f.auth(t, func(c *OIDCConfig) {
+		c.MinRefreshInterval = time.Minute
+		c.MaxKeyAge = 5 * time.Minute
+		c.KeyGracePeriod = 15 * time.Minute
+		c.HTTPClient = client
+	})
+	advance := pinClock(a)
+
+	tok := k1.sign(t, baseClaims(f.srv.URL), nil)
+	if _, err := a.Authenticate(context.Background(), tok); err != nil {
+		t.Fatalf("warm-up: %v", err)
+	}
+
+	down.Store(true)
+	advance(6 * time.Minute)
+	if _, err := a.Authenticate(context.Background(), tok); err != nil {
+		t.Fatalf("inside the grace window: %v", err)
+	}
+	if !a.KeysUnrevalidated() {
+		t.Fatal("gauge reads 0 inside the grace window")
+	}
+
+	// The IdP comes back. The next request past MinRefreshInterval refetches.
+	down.Store(false)
+	advance(2 * time.Minute)
+	if _, err := a.Authenticate(context.Background(), tok); err != nil {
+		t.Fatalf("after the IdP recovered: %v", err)
+	}
+	if a.KeysUnrevalidated() {
+		t.Fatal("gauge still reads 1 after a successful refetch — the posture never clears, so the " +
+			"alert it feeds would fire forever and be muted")
+	}
+}
+
+// A QUIET GATEWAY IS NOT A DEGRADED ONE. The cache ages past MaxKeyAge with no
+// traffic and a perfectly healthy provider; nothing has been attempted, so
+// nothing has failed, and the gauge must stay at 0.
+//
+// This is the false-page case, and it is the reason the gauge is not a plain
+// age comparison: a critical alert that fires at 03:00 on an idle estate with
+// nothing wrong is how an alerting layer gets muted (alerts/README.md).
+func TestOIDCKeysUnrevalidated_QuietGatewayIsNotDegraded(t *testing.T) {
+	f := newOIDCFixture(t)
+	k1 := newSigner(t, "k1")
+	f.publish(k1.jwk())
+	a := f.auth(t, func(c *OIDCConfig) {
+		c.MinRefreshInterval = time.Minute
+		c.MaxKeyAge = 5 * time.Minute
+	})
+	advance := pinClock(a)
+
+	if _, err := a.Authenticate(context.Background(), k1.sign(t, baseClaims(f.srv.URL), nil)); err != nil {
+		t.Fatal(err)
+	}
+	advance(90 * time.Minute) // no requests at all across the window
+
+	if a.KeysUnrevalidated() {
+		t.Fatal("gauge reads 1 on an idle gateway whose provider is fine — \"we have not tried\" is " +
+			"not \"we tried and could not\", and paging for the first is how the alert gets deleted")
+	}
+}
+
+// gatedTransport fails every request while down is set, so a test can take an
+// IdP away and bring it back. httptest.Server.Close is one-way.
+type gatedTransport struct {
+	inner http.RoundTripper
+	down  *atomic.Bool
+}
+
+func (g gatedTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	if g.down.Load() {
+		return nil, errors.New("idp unreachable (test)")
+	}
+	return g.inner.RoundTrip(r)
+}
+
 func TestOIDCAuthenticate_UnknownKidRateLimited(t *testing.T) {
 	f := newOIDCFixture(t)
 	k1 := newSigner(t, "k1")
 	f.publish(k1.jwk())
 	a := f.auth(t, func(c *OIDCConfig) {
 		c.MinRefreshInterval = time.Hour
-		c.MaxKeyAge = 2 * time.Hour // ceiling must clear the floor
+		c.MaxKeyAge = 2 * time.Hour      // ceiling must clear the floor
+		c.KeyGracePeriod = 2 * time.Hour // and so must the grace
 	})
 
 	if _, err := a.Authenticate(context.Background(), k1.sign(t, baseClaims(f.srv.URL), nil)); err != nil {
@@ -370,13 +539,39 @@ func TestNewOIDCAuthenticator_Validation(t *testing.T) {
 	if _, err := NewOIDCAuthenticator(OIDCConfig{Issuer: "i", Audience: "a", MinRefreshInterval: time.Minute, MaxKeyAge: time.Minute}); err == nil {
 		t.Fatal("want error for MaxKeyAge equal to MinRefreshInterval")
 	}
-	// The defaults must not themselves be in that state.
+	// The SAME relation for the third interval (#242). A grace window shorter
+	// than the refresh floor is a window nothing can be done in: the retry that
+	// would end it is rate-limited away until after the grace has expired, so
+	// the setting reads as tolerance and delivers none.
+	if _, err := NewOIDCAuthenticator(OIDCConfig{
+		Issuer: "i", Audience: "a",
+		MinRefreshInterval: 5 * time.Minute,
+		MaxKeyAge:          10 * time.Minute,
+		KeyGracePeriod:     time.Minute,
+	}); err == nil {
+		t.Fatal("want error for KeyGracePeriod below MinRefreshInterval")
+	}
+	if _, err := NewOIDCAuthenticator(OIDCConfig{
+		Issuer: "i", Audience: "a",
+		MinRefreshInterval: 5 * time.Minute,
+		MaxKeyAge:          10 * time.Minute,
+		KeyGracePeriod:     5 * time.Minute,
+	}); err == nil {
+		t.Fatal("want error for KeyGracePeriod equal to MinRefreshInterval")
+	}
+	// The defaults must not themselves be in that state. The compile-time
+	// assertions in oidc.go already fail the BUILD if the default constants
+	// invert; this is the runtime half, over the values a zero-config
+	// authenticator actually ends up holding.
 	a, err := NewOIDCAuthenticator(OIDCConfig{Issuer: "i", Audience: "a"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if a.cfg.MaxKeyAge <= a.cfg.MinRefreshInterval {
 		t.Fatalf("default MaxKeyAge %s must exceed default MinRefreshInterval %s", a.cfg.MaxKeyAge, a.cfg.MinRefreshInterval)
+	}
+	if a.cfg.KeyGracePeriod <= a.cfg.MinRefreshInterval {
+		t.Fatalf("default KeyGracePeriod %s must exceed default MinRefreshInterval %s", a.cfg.KeyGracePeriod, a.cfg.MinRefreshInterval)
 	}
 }
 
