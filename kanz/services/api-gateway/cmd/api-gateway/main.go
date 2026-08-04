@@ -346,10 +346,18 @@ func buildRouter(cfg config.Config, h *gateway.Handler, o *orders.Handler, p *pr
 			return nil, err
 		}
 		authn = oidcAuthenticator{oidc}
+		// The degraded-key posture, exported for as long as it lasts (#242).
+		// Registered here rather than inside NewGatewayMetrics because it only
+		// exists on this arm: the HS256 validator has no provider to lose.
+		middleware.RegisterOIDCKeyGauge(obs.Registry, oidc.KeysUnrevalidated)
 		logger.Info("api-gateway: OIDC authentication enabled", "issuer", cfg.OIDCIssuer)
 	case cfg.JWTSecret != "":
+		// Reachable only with API_GATEWAY_ALLOW_DEV_HS256=true — config.Load
+		// refuses the arm otherwise, so this WARN now describes a deliberate
+		// choice rather than an omission nobody noticed (#242).
 		authn = middleware.NewJWTAuthenticator(cfg.JWTSecret)
-		logger.Warn("api-gateway: using dev HS256 validator (set API_GATEWAY_OIDC_ISSUER for production)")
+		logger.Warn("api-gateway: using dev HS256 validator — a shared symmetric secret with no " +
+			"revocation path (API_GATEWAY_ALLOW_DEV_HS256=true). Set API_GATEWAY_OIDC_ISSUER for production")
 	}
 	// Per-tenant quota policy (MT-01e): default budget + optional per-tenant
 	// JSON overrides; metrics carry the tenant label.

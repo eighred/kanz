@@ -106,6 +106,10 @@ services:
       # PF1 is the PORTFOLIO id. This example said `--tenant PF1-tenant` and was
       # wrong on both counts.
       API_GATEWAY_JWT_SECRET: "load-secret"
+      # Required since #242: the dev HS256 arm is not a valid configuration
+      # without an explicit opt-in, so it cannot be reached by omitting the OIDC
+      # issuer. See dev/docker-compose.yml for the failure that motivated it.
+      API_GATEWAY_ALLOW_DEV_HS256: "true"
       API_GATEWAY_REQUIRED_ROLE: "kanz-user"
       # SEC-M2: only this role reaches POST /v1/orders. It MUST differ from the
       # baseline role above — the gateway refuses to start if they match, because

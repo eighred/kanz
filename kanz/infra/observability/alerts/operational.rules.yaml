@@ -487,6 +487,54 @@ groups:
           description: "Every 5-minute window for the last half hour has contained 429s for this tenant. A burst is expected and fine; half an hour is a quota mis-sized for the tenant's entitlement, or a client stuck in a retry loop. Confirm which before raising the limit."
 
   # ---------------------------------------------------------------------------
+  # GATEWAY IDENTITY — the front door is authenticating on keys it cannot check
+  # ---------------------------------------------------------------------------
+  - name: gateway_identity
+    rules:
+      # THE OTHER HALF OF #242'S TRADE, AND THE REASON THAT TRADE IS DEFENSIBLE.
+      #
+      # pkg/auth deliberately keeps verifying tokens for a bounded 15-minute
+      # grace past MaxKeyAge when the IdP cannot be reached, rather than turning
+      # a provider blip into an authentication outage on the platform's sole
+      # ingress for orders. That WIDENS THE REVOCATION WINDOW FROM 5 MINUTES TO
+      # 20 — a key revoked at the provider keeps verifying here for up to twenty
+      # minutes after the last successful JWKS fetch. Buying that on purpose is
+      # only honest if the estate can see when it is being spent, which is this
+      # rule. Delete it and the widening becomes a silent one.
+      #
+      # A DEADLINE, NOT A TREND, WHICH IS WHY THE THRESHOLD IS ONE AND THE
+      # SEVERITY IS CRITICAL. This does not describe degraded performance. It
+      # says: in at most fifteen minutes from when it started, EVERY request to
+      # this gateway begins failing 503 — no orders, no cancels, no queries —
+      # and it will not self-heal, because the thing that would clear it is the
+      # IdP coming back. There is nothing to trend and no volume at which it
+      # becomes interesting.
+      #
+      # for: 2m, and the number comes from the window it is racing. The grace is
+      # 15 minutes; scrape_interval is 30s. Two minutes rides out a single
+      # failed refetch during an IdP rolling restart (the common false positive)
+      # while still leaving thirteen of the fifteen minutes to act in. A longer
+      # hold would spend the deadline it exists to announce.
+      #
+      # NO absent() PARTNER, DELIBERATELY. The gauge is registered only on the
+      # OIDC arm — the dev HS256 validator has no provider to lose — so a gateway
+      # running HS256 exports no series and this stays quiet, which is the truth.
+      # An absent() rule would fire permanently on every dev rig, which is
+      # exactly the DataQualityMetricsMissing anti-pattern alerts/README.md
+      # records deleting.
+      #
+      # by (namespace, pod): the key cache is per-process. One replica that has
+      # lost its IdP path while its siblings are fine is still a real fault and
+      # must not be averaged away — and it is the shape that says which pod.
+      - alert: GatewayOIDCKeysUnrevalidated
+        expr: max by (namespace, pod) (kanz_gateway_oidc_keys_unrevalidated) == 1
+        for: 2m
+        labels: { severity: critical, layer: operational }
+        annotations:
+          summary: "Gateway {{ $labels.pod }} is authenticating on OIDC keys it cannot revalidate — authentication fails within 15 minutes"
+          description: "This gateway's cached JWKS is past MaxKeyAge (5m) and the identity provider could not be refetched, so it is verifying bearer tokens on key material it can no longer vouch for. This is a deliberate, BOUNDED grace: it buys 15 minutes, and then every request to this pod fails 503 (ErrKeysStale) until the provider answers — no orders, no cancels, no queries. It also means a key REVOKED at the provider is still being honoured here, for up to 20 minutes from the last successful fetch. Restore reachability to the IdP's JWKS endpoint (check egress, DNS and the provider itself); the gauge clears by itself on the first successful refetch."
+
+  # ---------------------------------------------------------------------------
   # LAKEHOUSE — rows that will never land
   # ---------------------------------------------------------------------------
   - name: lakehouse_ingest

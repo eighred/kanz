@@ -14,6 +14,7 @@ func clearAuthEnv(t *testing.T) {
 		"API_GATEWAY_OIDC_ISSUER",
 		"API_GATEWAY_JWT_SECRET",
 		"API_GATEWAY_JWT_SECRET_FILE",
+		"API_GATEWAY_ALLOW_DEV_HS256",
 		"API_GATEWAY_REQUIRED_ROLE",
 		"API_GATEWAY_TRADE_ROLE",
 	} {
@@ -74,9 +75,10 @@ func TestLoadAcceptsConfiguredAuth(t *testing.T) {
 		}
 	})
 
-	t.Run("dev hs256 secret", func(t *testing.T) {
+	t.Run("dev hs256 secret with the explicit opt-in", func(t *testing.T) {
 		clearAuthEnv(t)
 		t.Setenv("API_GATEWAY_JWT_SECRET", "dev-secret")
+		t.Setenv("API_GATEWAY_ALLOW_DEV_HS256", "true")
 		t.Setenv("API_GATEWAY_REQUIRED_ROLE", "kanz-user")
 		t.Setenv("API_GATEWAY_TRADE_ROLE", "kanz-trader")
 
@@ -84,10 +86,94 @@ func TestLoadAcceptsConfiguredAuth(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Load() = %v; want a configured gateway to start", err)
 		}
-		if cfg.JWTSecret != "dev-secret" {
+		if cfg.JWTSecret != "dev-secret" || !cfg.AllowDevHS256 {
 			t.Errorf("cfg = %+v", cfg)
 		}
 	})
+}
+
+// THE DEV CREDENTIAL MUST NOT BE REACHABLE BY OMISSION (#242).
+//
+// API_GATEWAY_JWT_SECRET alone used to be a complete and silent authentication
+// configuration. That is how a staging or DR gateway comes up on a symmetric
+// HMAC key: not because anyone chose it, but because a partial copy of the
+// production environment dropped the OIDC issuer and kept the secret, and
+// nothing in the config could tell the two apart.
+//
+// Gating on a SEPARATE, purpose-named boolean rather than on the secret is the
+// point. A secret arrives by inheritance — a copied ConfigMap, a Vault path that
+// still resolves; a variable named ALLOW_DEV_HS256 has to be typed by somebody
+// who read what it turns on.
+func TestLoadRefusesDevHS256WithoutTheOptIn(t *testing.T) {
+	clearAuthEnv(t)
+	t.Setenv("API_GATEWAY_JWT_SECRET", "dev-secret")
+	t.Setenv("API_GATEWAY_REQUIRED_ROLE", "kanz-user")
+	t.Setenv("API_GATEWAY_TRADE_ROLE", "kanz-trader")
+
+	_, err := Load()
+	if err == nil {
+		t.Fatal("Load() = nil error with a JWT secret and no API_GATEWAY_ALLOW_DEV_HS256 — " +
+			"the dev HS256 credential is reachable by omission, which is the #242 defect")
+	}
+	if !strings.Contains(err.Error(), "API_GATEWAY_ALLOW_DEV_HS256") {
+		t.Errorf("error does not name API_GATEWAY_ALLOW_DEV_HS256 (the operator reading the crash "+
+			"must know what to set): %v", err)
+	}
+}
+
+// The opt-in is a real boolean, not a presence check: setting it to false is a
+// deliberate NO and must refuse exactly as omitting it does. A presence check
+// would turn `API_GATEWAY_ALLOW_DEV_HS256=false` — which is what an operator
+// writes to turn something OFF — into an enable.
+func TestLoadRefusesDevHS256WhenTheOptInIsFalse(t *testing.T) {
+	clearAuthEnv(t)
+	t.Setenv("API_GATEWAY_JWT_SECRET", "dev-secret")
+	t.Setenv("API_GATEWAY_ALLOW_DEV_HS256", "false")
+	t.Setenv("API_GATEWAY_REQUIRED_ROLE", "kanz-user")
+	t.Setenv("API_GATEWAY_TRADE_ROLE", "kanz-trader")
+
+	if _, err := Load(); err == nil {
+		t.Fatal("Load() accepted the HS256 arm with API_GATEWAY_ALLOW_DEV_HS256=false")
+	}
+}
+
+// An unreadable value is an ERROR, not a silent false. An operator who wrote
+// `=yes` stated an intent as clearly as one who wrote `=true`; answering that
+// with "set API_GATEWAY_ALLOW_DEV_HS256" — a variable they can see they already
+// set — is the message that gets the check deleted rather than the value fixed.
+func TestLoadRefusesAnUnparseableOptIn(t *testing.T) {
+	clearAuthEnv(t)
+	t.Setenv("API_GATEWAY_JWT_SECRET", "dev-secret")
+	t.Setenv("API_GATEWAY_ALLOW_DEV_HS256", "yes")
+	t.Setenv("API_GATEWAY_REQUIRED_ROLE", "kanz-user")
+	t.Setenv("API_GATEWAY_TRADE_ROLE", "kanz-trader")
+
+	_, err := Load()
+	if err == nil {
+		t.Fatal("Load() accepted API_GATEWAY_ALLOW_DEV_HS256=yes")
+	}
+	if !strings.Contains(err.Error(), "not a boolean") {
+		t.Errorf("error does not say the value is unreadable, so the operator will re-read the "+
+			"variable name instead of the value: %v", err)
+	}
+}
+
+// The opt-in gates the HS256 ARM, not the gateway. With OIDC configured the
+// HS256 validator is never constructed (main.go's switch takes the OIDC arm
+// first), so demanding the flag there would be config for a code path that
+// cannot run — and this repository's rule is that a control must describe
+// something real or it gets routed around.
+func TestLoadDoesNotRequireTheOptInWhenOIDCIsConfigured(t *testing.T) {
+	clearAuthEnv(t)
+	t.Setenv("API_GATEWAY_OIDC_ISSUER", "https://login.eighred.com")
+	t.Setenv("API_GATEWAY_JWT_SECRET", "left-over-dev-secret")
+	t.Setenv("API_GATEWAY_REQUIRED_ROLE", "kanz-user")
+	t.Setenv("API_GATEWAY_TRADE_ROLE", "kanz-trader")
+
+	if _, err := Load(); err != nil {
+		t.Fatalf("Load() = %v; an OIDC gateway that still carries a stale JWT secret must start — "+
+			"the HS256 arm is unreachable, so there is nothing to opt into", err)
+	}
 }
 
 // TestLoadRefusesWithoutATradeRole (SEC-M2): one role for everything meant any principal who

@@ -397,6 +397,47 @@ tests:
               description: "Every 5-minute window for the last half hour has contained 429s for this tenant. A burst is expected and fine; half an hour is a quota mis-sized for the tenant's entitlement, or a client stuck in a retry loop. Confirm which before raising the limit."
 
   # ===========================================================================
+  # GatewayOIDCKeysUnrevalidated — #242's grace window, seen from outside.
+  # ===========================================================================
+  # The IdP becomes unreachable at t=10m and the gateway raises the gauge. It
+  # must page: in fifteen minutes this pod stops authenticating anything, and a
+  # revoked key is being honoured in the meantime.
+  - interval: 1m
+    name: a gateway running on keys it cannot revalidate
+    input_series:
+      - series: 'kanz_gateway_oidc_keys_unrevalidated{namespace="kanz-services", pod="api-gateway-7c9f-abcde"}'
+        values: '0x10 1x20'
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: GatewayOIDCKeysUnrevalidated
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              layer: operational
+              namespace: kanz-services
+              pod: api-gateway-7c9f-abcde
+            exp_annotations:
+              summary: "Gateway api-gateway-7c9f-abcde is authenticating on OIDC keys it cannot revalidate — authentication fails within 15 minutes"
+              description: "This gateway's cached JWKS is past MaxKeyAge (5m) and the identity provider could not be refetched, so it is verifying bearer tokens on key material it can no longer vouch for. This is a deliberate, BOUNDED grace: it buys 15 minutes, and then every request to this pod fails 503 (ErrKeysStale) until the provider answers — no orders, no cancels, no queries. It also means a key REVOKED at the provider is still being honoured here, for up to 20 minutes from the last successful fetch. Restore reachability to the IdP's JWKS endpoint (check egress, DNS and the provider itself); the gauge clears by itself on the first successful refetch."
+
+  # THE for: 2m, EXECUTED — and the reason it is not zero. A single failed
+  # refetch during an IdP rolling restart raises the gauge for one scrape and it
+  # clears on the next; paging for that would page on every provider deploy. The
+  # blip below is one minute long and must stay silent, and the healthy gateway
+  # beside it must too.
+  - interval: 1m
+    name: a one-minute refetch blip and a healthy gateway both stay silent
+    input_series:
+      - series: 'kanz_gateway_oidc_keys_unrevalidated{namespace="kanz-services", pod="api-gateway-blip"}'
+        values: '0x10 1 0x19'
+      - series: 'kanz_gateway_oidc_keys_unrevalidated{namespace="kanz-services", pod="api-gateway-healthy"}'
+        values: '0x30'
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: GatewayOIDCKeysUnrevalidated
+        exp_alerts: []
+
+  # ===========================================================================
   # lake-sink — permanent is the first one, transient is the thirtieth minute.
   # ===========================================================================
   - interval: 1m

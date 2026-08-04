@@ -12,10 +12,17 @@
 #   DISABLED" and serve /v1/* — POST /v1/orders included — to anyone, and all that
 #   stood between that and production was a warning nobody was obliged to read.
 #   It now REFUSES TO START (exit 2) without a credential (API_GATEWAY_OIDC_ISSUER,
-#   or API_GATEWAY_JWT_SECRET for dev), without API_GATEWAY_TRADE_ROLE (SEC-M2:
-#   who may move capital), and without API_GATEWAY_REQUIRED_ROLE — auth
-#   alone would admit every token the issuer ever minted to the order path. Clearing
-#   either below does not open a staging hole; it CrashLoopBackOffs, by design.
+#   or API_GATEWAY_JWT_SECRET **plus API_GATEWAY_ALLOW_DEV_HS256=true** for dev),
+#   without API_GATEWAY_TRADE_ROLE (SEC-M2: who may move capital), and without
+#   API_GATEWAY_REQUIRED_ROLE — auth alone would admit every token the issuer ever
+#   minted to the order path. Clearing either below does not open a staging hole;
+#   it CrashLoopBackOffs, by design.
+#
+#   The HS256 opt-in is separate from the secret ON PURPOSE (#242). Deleting the
+#   OIDC issuer from this manifest while a jwt-secret happened to be mounted used
+#   to leave a running, healthy-looking gateway authenticating the whole estate
+#   against a symmetric HMAC key. It now refuses, because a secret arrives by
+#   inheritance and a boolean named ALLOW_DEV_HS256 does not.
 #
 # THE SCALE INVARIANT: safe to scale, and the RATE LIMITS DIVIDE.
 #

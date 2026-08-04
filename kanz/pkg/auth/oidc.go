@@ -20,17 +20,21 @@ import (
 // boundary should not leak why verification failed to the client.
 var ErrUnauthenticated = errors.New("auth: unauthenticated")
 
-// ErrKeysStale is returned when the cached JWKS has outlived MaxKeyAge and the
-// provider could not be reached to refetch it. It is deliberately NOT
-// ErrUnauthenticated: the token itself may be perfectly good, so the caller
-// should surface an auth-backend outage (503), not a credential rejection.
+// ErrKeysStale is returned when the cached JWKS has outlived MaxKeyAge PLUS
+// KeyGracePeriod and the provider could not be reached to refetch it. It is
+// deliberately NOT ErrUnauthenticated: the token itself may be perfectly good,
+// so the caller should surface an auth-backend outage (503), not a credential
+// rejection.
 //
-// Failing closed here is the deliberate trade: an IdP unreachable for longer
-// than MaxKeyAge becomes an authentication outage. The alternative — keep
-// trusting key material we can no longer vouch for — hands an attacker who can
-// keep the JWKS endpoint unreachable an unbounded extension on a revoked key,
-// which is exactly the control this cache exists to preserve.
-var ErrKeysStale = errors.New("auth: cached signing keys are past MaxKeyAge and the provider is unreachable")
+// Failing closed EVENTUALLY is the deliberate trade. Continuing to trust key
+// material we can no longer vouch for, with no bound, would hand an attacker who
+// can keep the JWKS endpoint unreachable an unlimited extension on a revoked key
+// — exactly the control this cache exists to preserve. Failing closed the
+// INSTANT the ceiling passes is the opposite error, and it is the one this
+// platform would notice first: the gateway is the sole ingress for orders, so a
+// two-minute IdP blip would become a trading outage. KeyGracePeriod is where
+// those two meet; see its doc for the window the trade buys an attacker.
+var ErrKeysStale = errors.New("auth: cached signing keys are past MaxKeyAge + KeyGracePeriod and the provider is unreachable")
 
 // Authenticator validates a bearer token and returns the caller's Principal.
 // It takes a context because verification may need to fetch signing keys from
@@ -73,24 +77,84 @@ type OIDCConfig struct {
 	// (default 1m). It is a FLOOR on how often we may refetch.
 	MinRefreshInterval time.Duration
 	// MaxKeyAge is the CEILING on how long cached key material may be trusted
-	// without refetching (default 5m). It is what makes revocation work: a key
-	// withdrawn at the provider stops verifying within one MaxKeyAge window
-	// even though no unknown `kid` is ever presented to force a cache miss.
+	// WITHOUT ATTEMPTING a refetch (default 5m). It is what makes revocation
+	// work: a key withdrawn at the provider stops verifying within one MaxKeyAge
+	// window even though no unknown `kid` is ever presented to force a cache
+	// miss.
 	//
 	// It must exceed MinRefreshInterval, and NewOIDCAuthenticator refuses a
 	// config where it does not: a ceiling below the floor would expire the keys
 	// before a refetch is permitted, so every request past the ceiling would be
 	// refused by a refresh that the rate limiter has already suppressed.
 	MaxKeyAge time.Duration
+	// KeyGracePeriod is how much longer past MaxKeyAge the cached keys keep
+	// VERIFYING when the refetch could not be made (default 15m). Past
+	// MaxKeyAge + KeyGracePeriod, verification fails closed with ErrKeysStale.
+	//
+	// THIS WIDENS THE REVOCATION WINDOW ON PURPOSE, FROM 5 MINUTES TO 20, AND
+	// THAT IS THE WHOLE POINT OF THE SETTING — do not "tidy" it away. A key
+	// revoked at the provider is trusted here for at most MaxKeyAge +
+	// KeyGracePeriod after the last successful fetch. Bought with those extra
+	// fifteen minutes: an IdP that is briefly unreachable stops being an
+	// authentication outage on the platform's sole ingress for orders. Refusing
+	// every token the moment a 5-minute cache expires means a provider blip, a
+	// DNS wobble or an IdP rolling restart halts trading; that failure is far
+	// more likely than a key revocation landing inside the same window, and it
+	// is not any less severe.
+	//
+	// THE WINDOW IS BOUNDED AND IT IS VISIBLE. Bounded, because past it this
+	// still fails closed — an attacker who can hold the JWKS endpoint down does
+	// NOT get an indefinite extension, which was the whole objection to a plain
+	// fallback. Visible, because KeysUnrevalidated reports the degraded posture
+	// for as long as it lasts and the gateway exports it as
+	// kanz_gateway_oidc_keys_unrevalidated, alerted by
+	// GatewayOIDCKeysUnrevalidated. A silent widening would be indefensible; an
+	// alerted one is a fifteen-minute deadline somebody is told about.
+	//
+	// Like MaxKeyAge it must exceed MinRefreshInterval, for the same reason one
+	// level out: a grace shorter than the refresh floor would elapse before the
+	// rate limiter ever permitted the retry that could end it, so the window
+	// would exist on paper and never be usable.
+	KeyGracePeriod time.Duration
 	// HTTPClient fetches discovery + JWKS documents (default: a 10s client).
 	HTTPClient *http.Client
 }
+
+// The three intervals form ONE ordering, not three independent knobs:
+//
+//	MinRefreshInterval  <  MaxKeyAge          (the ceiling must clear the floor)
+//	MinRefreshInterval  <  KeyGracePeriod     (the grace must outlast the floor)
+//
+// The defaults are named constants so the relationship can be asserted at
+// COMPILE TIME rather than described in a comment somebody edits around — the
+// same stance pkg/bus takes for dedupClaimLease vs maxTunedAckWait (#237), and
+// the same reason: the pair that must not invert lived in two files as
+// unrelated literals, and it inverted.
+const (
+	defaultMinRefreshInterval = time.Minute
+	defaultMaxKeyAge          = 5 * time.Minute
+	defaultKeyGracePeriod     = 15 * time.Minute
+)
+
+// Compile-time assertions on the DEFAULT ordering. Editing any of the three
+// constants into an inverted pair makes one of these expressions negative and
+// the package stops compiling. NewOIDCAuthenticator enforces the same two
+// relations for CALLER-SUPPLIED values, which a constant cannot see.
+const (
+	_ = uint(defaultMaxKeyAge - defaultMinRefreshInterval - 1)
+	_ = uint(defaultKeyGracePeriod - defaultMinRefreshInterval - 1)
+)
 
 // OIDCAuthenticator validates JWTs against the asymmetric signing keys an OIDC
 // provider publishes via JWKS. Keys are cached and refetched lazily on an
 // unknown `kid` (rate-limited) and unconditionally once the cache passes
 // MaxKeyAge, so steady-state verification is fully offline, key rotation needs
 // no restart, and key REVOCATION takes effect without one.
+//
+// When that refetch cannot be made, verification continues on the cached set
+// for a bounded KeyGracePeriod and then fails closed (ErrKeysStale), so a brief
+// IdP outage is survived rather than turned into an authentication outage on
+// the platform's sole ingress. KeysUnrevalidated exports that posture.
 type OIDCAuthenticator struct {
 	cfg   OIDCConfig
 	httpc *http.Client
@@ -105,6 +169,14 @@ type OIDCAuthenticator struct {
 	// down is retried once per MinRefreshInterval rather than once per request.
 	lastRefresh time.Time
 	lastAttempt time.Time
+	// refreshFailed records the OUTCOME of the last attempt that actually went
+	// out (an attempt the rate limiter suppressed leaves it alone, because the
+	// last thing we learned about the provider is still the last thing we know).
+	// It exists so the degraded-posture gauge means "we tried and could not"
+	// rather than "we have not tried" — a gateway with no traffic since
+	// MaxKeyAge has an old cache and a perfectly healthy IdP, and paging for
+	// that at 03:00 is how an alert gets deleted.
+	refreshFailed bool
 }
 
 var _ Authenticator = (*OIDCAuthenticator)(nil)
@@ -130,10 +202,13 @@ func NewOIDCAuthenticator(cfg OIDCConfig) (*OIDCAuthenticator, error) {
 		cfg.Leeway = time.Minute
 	}
 	if cfg.MinRefreshInterval == 0 {
-		cfg.MinRefreshInterval = time.Minute
+		cfg.MinRefreshInterval = defaultMinRefreshInterval
 	}
 	if cfg.MaxKeyAge == 0 {
-		cfg.MaxKeyAge = 5 * time.Minute
+		cfg.MaxKeyAge = defaultMaxKeyAge
+	}
+	if cfg.KeyGracePeriod == 0 {
+		cfg.KeyGracePeriod = defaultKeyGracePeriod
 	}
 	// The ceiling must sit above the floor or the two fight: keys would expire
 	// before the rate limiter permits the refetch that would renew them, and
@@ -141,6 +216,17 @@ func NewOIDCAuthenticator(cfg OIDCConfig) (*OIDCAuthenticator, error) {
 	// elapsed. Refuse at construction rather than thrash in production.
 	if cfg.MaxKeyAge <= cfg.MinRefreshInterval {
 		return nil, fmt.Errorf("auth: OIDC MaxKeyAge (%s) must exceed MinRefreshInterval (%s)", cfg.MaxKeyAge, cfg.MinRefreshInterval)
+	}
+	// Same relation, one interval out. A grace window shorter than the refresh
+	// floor is a window nothing can ever be done in: the first request past
+	// MaxKeyAge attempts the refetch, and every request after it is suppressed
+	// by the rate limiter until MinRefreshInterval elapses — by which time the
+	// grace has already run out. The setting would read as fifteen minutes of
+	// tolerance and deliver none, which is worse than not having it.
+	if cfg.KeyGracePeriod <= cfg.MinRefreshInterval {
+		return nil, fmt.Errorf("auth: OIDC KeyGracePeriod (%s) must exceed MinRefreshInterval (%s) — "+
+			"a grace shorter than the refresh floor elapses before a retry is ever permitted",
+			cfg.KeyGracePeriod, cfg.MinRefreshInterval)
 	}
 	httpc := cfg.HTTPClient
 	if httpc == nil {
@@ -201,18 +287,34 @@ func (a *OIDCAuthenticator) Authenticate(ctx context.Context, token string) (*Pr
 // will ever occur. Within the window verification stays fully offline: a
 // refetch per request would turn every token check into load on the IdP.
 //
+// THE THIRD STATE IS THE GRACE WINDOW. Past MaxKeyAge with a refetch that did
+// not happen — the provider is unreachable, or the rate limiter suppressed the
+// retry behind an earlier failure — verification CONTINUES on the cached set
+// until MaxKeyAge + KeyGracePeriod, and only then fails closed. That is a
+// deliberate widening of the revocation window from 5 minutes to 20; the trade
+// and its bound are argued at KeyGracePeriod, and the posture is exported for
+// as long as it lasts (KeysUnrevalidated).
+//
 // An empty kid is accepted only when the set holds exactly one key (the
 // unambiguous single-key case).
 func (a *OIDCAuthenticator) keyFor(ctx context.Context, kid string) (any, error) {
-	if a.expired() {
-		if err := a.refresh(ctx); err != nil {
-			return nil, err // provider unavailable — distinct from a bad token
-		}
-		if a.expired() {
-			// The refetch was rate-limited away behind an earlier failure, so
-			// the cache is still past its ceiling. Refuse rather than fall back
-			// on key material we can no longer vouch for.
-			return nil, ErrKeysStale
+	if a.pastMaxKeyAge() {
+		err := a.refresh(ctx)
+		switch {
+		case err == nil && !a.pastMaxKeyAge():
+			// Refetched. The keys are ours to vouch for again.
+		case a.pastGrace():
+			// The grace is spent. Refuse rather than keep leaning on key
+			// material we have now failed to revalidate for twenty minutes.
+			if err != nil {
+				return nil, err // provider unavailable — distinct from a bad token
+			}
+			return nil, ErrKeysStale // the retry was rate-limited away
+		default:
+			// INSIDE THE GRACE WINDOW. Fall through and verify on the cached
+			// set. Do NOT collapse this branch into the one above: an
+			// authentication outage on the first unreachable-IdP request is
+			// what the grace exists to prevent.
 		}
 	}
 	if k, ok := a.lookup(kid); ok {
@@ -227,13 +329,51 @@ func (a *OIDCAuthenticator) keyFor(ctx context.Context, kid string) (any, error)
 	return nil, ErrUnauthenticated
 }
 
-// expired reports whether the cached key set has outlived MaxKeyAge. A cold
-// cache is not "expired" — it is empty, and keyFor's lookup miss already forces
-// the first fetch on the path that handles a provider that has never answered.
-func (a *OIDCAuthenticator) expired() bool {
+// pastMaxKeyAge reports whether the cached key set has outlived MaxKeyAge, i.e.
+// a refetch is now due. A cold cache is not "past" anything — it is empty, and
+// keyFor's lookup miss already forces the first fetch on the path that handles
+// a provider that has never answered.
+func (a *OIDCAuthenticator) pastMaxKeyAge() bool {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
 	return len(a.keys.Keys) > 0 && a.now().Sub(a.lastRefresh) >= a.cfg.MaxKeyAge
+}
+
+// pastGrace reports whether the cached key set has outlived MaxKeyAge PLUS
+// KeyGracePeriod — the point at which verification fails closed.
+func (a *OIDCAuthenticator) pastGrace() bool {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return len(a.keys.Keys) > 0 && a.now().Sub(a.lastRefresh) >= a.cfg.MaxKeyAge+a.cfg.KeyGracePeriod
+}
+
+// KeysUnrevalidated reports whether this authenticator is RIGHT NOW leaning on
+// key material it could not revalidate: the cache is past MaxKeyAge and the
+// last fetch that actually went out failed. It is the read behind the gateway's
+// kanz_gateway_oidc_keys_unrevalidated gauge.
+//
+// IT IS A LEVEL, NOT AN EVENT, AND THAT IS THE REQUIREMENT. A counter
+// incremented on entering the grace window cannot answer "are we degraded now",
+// which is the only question worth asking with a fifteen-minute deadline
+// running. A scrape-time read of the live state can, and cannot go stale the
+// way a value pushed from the request path does — an IdP outage that also stops
+// traffic would freeze a pushed gauge at whatever it last held.
+//
+// IT STAYS TRUE PAST THE GRACE WINDOW, deliberately. Once MaxKeyAge +
+// KeyGracePeriod is spent the gateway is refusing tokens instead of stretching
+// them, which is WORSE, not resolved — a gauge that fell back to 0 there would
+// clear its own alert at the exact moment the degradation became an outage.
+//
+// Both conditions are required. Past MaxKeyAge with no failed attempt is a
+// quiet gateway whose cache simply aged, not a degraded one; a failed attempt
+// inside MaxKeyAge (an unknown-kid refetch that could not reach the provider)
+// is not degraded either, because the keys in hand are still ones we vouched
+// for inside the ceiling.
+func (a *OIDCAuthenticator) KeysUnrevalidated() bool {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return len(a.keys.Keys) > 0 && a.refreshFailed &&
+		a.now().Sub(a.lastRefresh) >= a.cfg.MaxKeyAge
 }
 
 func (a *OIDCAuthenticator) lookup(kid string) (any, bool) {
@@ -271,16 +411,22 @@ func (a *OIDCAuthenticator) refresh(ctx context.Context) error {
 	if a.jwksURI == "" {
 		uri, err := a.discover(ctx)
 		if err != nil {
+			a.refreshFailed = true
 			return err
 		}
 		a.jwksURI = uri
 	}
 	ks, err := a.fetchJWKS(ctx, a.jwksURI)
 	if err != nil {
+		a.refreshFailed = true
 		return err
 	}
 	a.keys = ks
 	a.lastRefresh = a.now()
+	// Cleared only on a fetch that actually landed — which is what lowers the
+	// degraded-posture gauge, per the ruling: "lower the gauge only when a
+	// refetch succeeds".
+	a.refreshFailed = false
 	return nil
 }
 

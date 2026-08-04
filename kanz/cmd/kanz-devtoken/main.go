@@ -3,7 +3,10 @@
 // The gateway refuses to start unauthenticated (SEC-M1): with no OIDC issuer and
 // no JWT secret it exits 2 rather than serving /v1/* — POST /v1/orders included —
 // to anyone. So a local gateway runs the bundled dev validator against a shared
-// secret (API_GATEWAY_JWT_SECRET), and every caller needs a token it will accept:
+// secret (API_GATEWAY_JWT_SECRET, plus API_GATEWAY_ALLOW_DEV_HS256=true — since
+// #242 that arm is not a valid configuration without the explicit opt-in, so it
+// cannot be reached merely by leaving the OIDC issuer unset), and every caller
+// needs a token it will accept:
 //
 //	export TOKEN=$(kanz-devtoken --secret dev-secret --tenant acme --role kanz-user)
 //	curl -H "Authorization: Bearer $TOKEN" localhost:8080/v1/exposure?portfolio=PF1

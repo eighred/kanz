@@ -14,6 +14,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/eighred/kanz/pkg/auth"
 )
 
 // Principal is the authenticated caller (API-01d). It is a MINIMAL, gateway-
@@ -117,9 +119,11 @@ func bearerToken(r *http.Request) (string, bool) {
 
 // JWTAuthenticator is a minimal HS256 JWT validator — the bundled stand-in for
 // AUTH-01's OIDC/JWKS integration. It verifies the signature against a shared
-// secret and decodes sub/tenant/roles/exp. Deliberately stdlib-only (no JWT
-// dep): AUTH-01a swaps in real asymmetric OIDC validation behind the same
-// Authenticator interface. NOT for production identity on its own.
+// secret and decodes sub/tenant/roles/portfolios, requiring the same claim set
+// its OIDC sibling does. Deliberately stdlib-only (no JWT dep): AUTH-01a swaps
+// in real asymmetric OIDC validation behind the same Authenticator interface.
+// NOT for production identity on its own, and since #242 it is reachable only
+// with API_GATEWAY_ALLOW_DEV_HS256=true.
 type JWTAuthenticator struct {
 	secret []byte
 	now    func() time.Time
@@ -130,17 +134,92 @@ func NewJWTAuthenticator(secret string) *JWTAuthenticator {
 	return &JWTAuthenticator{secret: []byte(secret), now: time.Now}
 }
 
+// jwtLeeway absorbs clock skew on the exp/nbf comparisons, matching the default
+// pkg/auth applies to the OIDC path (OIDCConfig.Leeway). A dev token minted on a
+// laptop and checked in a container is exactly where a few seconds of drift
+// turns into an unexplainable 401.
+const jwtLeeway = time.Minute
+
+// hs256Alg is the ONLY value accepted in the JWS header's `alg`.
+//
+// This is belt-and-braces, and it is worth saying which part is load-bearing.
+// The alg-confusion attack does NOT work against this validator without it: the
+// HMAC is computed unconditionally over header.payload, so `alg: none` yields a
+// token whose empty signature simply fails hmac.Equal (proven by
+// TestJWTAuthenticator_AlgNoneRefused). The check is here so that the refusal is
+// a STATED rule rather than an emergent property of the code's shape — the next
+// person to add an algorithm branch, a key-id lookup, or an early return for an
+// unsigned token has to delete a line that says no, instead of quietly removing
+// the accident that was protecting them. Its OIDC sibling states the same rule
+// as an allow-list (pkg/auth.asymmetricAlgs).
+const hs256Alg = "HS256"
+
+type jwtHeader struct {
+	Alg string `json:"alg"`
+}
+
 type jwtClaims struct {
 	Subject string   `json:"sub"`
 	Tenant  string   `json:"tenant"`
 	Roles   []string `json:"roles"`
-	Expiry  int64    `json:"exp"`
+	Issuer  string   `json:"iss"`
+	// Audience is RFC 7519's `aud`, which is a string OR an array of strings;
+	// see jwtAudience.
+	Audience jwtAudience `json:"aud"`
+	// Expiry is `exp`, and it is REQUIRED — see Authenticate.
+	Expiry int64 `json:"exp"`
+	// NotBefore is `nbf`, optional (RFC 7519 §4.1.5) but honoured when present.
+	NotBefore int64 `json:"nbf"`
 	// Portfolios is auth.ClaimPortfolios — the caller's portfolio entitlement.
 	Portfolios []string `json:"portfolios"`
 }
 
+// jwtAudience decodes `aud` in both RFC 7519 shapes — a bare string and an
+// array of strings. Accepting only the shape this estate's own minter emits
+// would make a spec-legal token from any other tool fail with the same opaque
+// "unauthenticated" as a forged one, which is the kind of refusal that gets a
+// check deleted rather than debugged.
+type jwtAudience []string
+
+func (a *jwtAudience) UnmarshalJSON(b []byte) error {
+	var one string
+	if err := json.Unmarshal(b, &one); err == nil {
+		*a = jwtAudience{one}
+		return nil
+	}
+	var many []string
+	if err := json.Unmarshal(b, &many); err != nil {
+		return err
+	}
+	*a = many
+	return nil
+}
+
+func (a jwtAudience) has(want string) bool {
+	for _, v := range a {
+		if v == want {
+			return true
+		}
+	}
+	return false
+}
+
 // Authenticate verifies a compact JWS (header.payload.signature), checks the
-// HS256 signature + expiry, and maps the claims to a Principal.
+// HS256 signature and the same claim set the OIDC path checks — alg, iss, aud,
+// exp, nbf, sub — and maps the claims to a Principal.
+//
+// EVERY REJECTION COLLAPSES TO ErrUnauthenticated, deliberately: an
+// authentication boundary must not tell a caller which check it failed. Same
+// stance, and the same reasoning, as pkg/auth.ErrUnauthenticated.
+//
+// `exp` IS MANDATORY, AND THAT IS THE #242 FIX. This read `c.Expiry != 0 &&
+// …expired`, so a token that simply omitted the claim skipped the check and was
+// valid FOREVER — against a symmetric secret with no revocation path, on the
+// platform's sole identity authority. Absence must never be the permissive
+// case: "no expiry stated" and "expiry checked, and fine" looked identical, and
+// the more dangerous of the two was the one that cost nothing to mint. The OIDC
+// sibling gets this right for free (jwt.Expected.Time makes exp mandatory);
+// this arm had to be told.
 func (a *JWTAuthenticator) Authenticate(token string) (*Principal, error) {
 	parts := strings.Split(token, ".")
 	if len(parts) != 3 {
@@ -154,6 +233,17 @@ func (a *JWTAuthenticator) Authenticate(token string) (*Principal, error) {
 	if !hmac.Equal([]byte(want), []byte(parts[2])) {
 		return nil, ErrUnauthenticated
 	}
+	rawHeader, err := base64.RawURLEncoding.DecodeString(parts[0])
+	if err != nil {
+		return nil, ErrUnauthenticated
+	}
+	var h jwtHeader
+	if err := json.Unmarshal(rawHeader, &h); err != nil {
+		return nil, ErrUnauthenticated
+	}
+	if h.Alg != hs256Alg {
+		return nil, ErrUnauthenticated
+	}
 	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
 	if err != nil {
 		return nil, ErrUnauthenticated
@@ -162,7 +252,38 @@ func (a *JWTAuthenticator) Authenticate(token string) (*Principal, error) {
 	if err := json.Unmarshal(payload, &c); err != nil {
 		return nil, ErrUnauthenticated
 	}
-	if c.Expiry != 0 && a.now().After(time.Unix(c.Expiry, 0)) {
+	// A token with no expiry is a permanent credential. Refuse it before
+	// anything else about the claims is considered.
+	//
+	// It IS belt-and-braces and the honest version of that is worth writing
+	// down: the real repair is one line below, where the old `c.Expiry != 0 &&`
+	// guard came off the comparison — an absent claim now decodes to 0, which is
+	// 1970, which is expired. Removing THIS line alone does not reopen the hole
+	// (verified by mutation). It stays because a validator whose handling of a
+	// missing claim depends on the epoch happening to be in the past is one
+	// refactor from being wrong again, and because the intent should be readable
+	// without deriving it.
+	if c.Expiry == 0 {
+		return nil, ErrUnauthenticated
+	}
+	now := a.now()
+	if now.After(time.Unix(c.Expiry, 0).Add(jwtLeeway)) {
+		return nil, ErrUnauthenticated
+	}
+	// nbf stays OPTIONAL — RFC 7519 makes it so, and unlike a missing exp an
+	// absent nbf widens nothing (a token with no not-before is valid from when
+	// it was minted, which is what every token here is). Honoured when present:
+	// a minter that post-dates a token means it, and accepting it early would
+	// silently discard the only forward-dated control this format has.
+	if c.NotBefore != 0 && now.Before(time.Unix(c.NotBefore, 0).Add(-jwtLeeway)) {
+		return nil, ErrUnauthenticated
+	}
+	// iss/aud bind the token to THIS credential path. See pkg/auth.DevHS256Issuer
+	// for what that does and does not buy against a shared symmetric secret.
+	if c.Issuer != auth.DevHS256Issuer {
+		return nil, ErrUnauthenticated
+	}
+	if !c.Audience.has(auth.DevHS256Audience) {
 		return nil, ErrUnauthenticated
 	}
 	if c.Subject == "" {
