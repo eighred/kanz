@@ -111,18 +111,22 @@ var (
 
 // Apply folds one fill in a single transaction.
 //
-//  1. Claim the fill (INSERT ... ON CONFLICT DO NOTHING). RowsAffected 0 ⇒ somebody
+//  1. Take the (tenant, portfolio, instrument) advisory lock — FIRST, before any row
+//     lock. It is what makes step 5's cross-venue SUM true; see lockInstrument, which
+//     also explains why the FOR UPDATE in step 3 cannot do that job.
+//  2. Claim the fill (INSERT ... ON CONFLICT DO NOTHING). RowsAffected 0 ⇒ somebody
 //     already folded it — another pod, or an earlier delivery of the same event — so
 //     the fold is SKIPPED and the current book returned. This is the same engine-side
 //     exactly-once stance the order store's admission gate takes, and for the same reason:
 //     a SELECT-then-INSERT is a check-then-act, and the window between them is where a
 //     trade gets counted twice.
-//  2. Lock the (portfolio, venue, instrument) lot FOR UPDATE, so two pods folding the same
-//     holding serialize at the engine instead of racing in two address spaces.
-//  3. Apply the SAME weighted-average-cost fold the in-memory book uses.
-//  4. Upsert, then SUM the venues into the fund-level position — in the same transaction
-//     that just changed one of them, so the aggregate can never disagree with the rows it
-//     came from.
+//  3. Lock the (portfolio, venue, instrument) lot FOR UPDATE. This is now a BACKSTOP for
+//     any writer that reaches the positions table without step 1's lock, not the thing
+//     the aggregate rests on.
+//  4. Apply the SAME weighted-average-cost fold the in-memory book uses.
+//  5. Upsert, then SUM the venues into the fund-level position — in the same transaction
+//     that just changed one of them, and under the lock from step 1, so the aggregate
+//     cannot disagree with the rows it came from.
 func (p *Postgres) Apply(ctx context.Context, portfolioID string, fill *orderpb.Fill, asOf time.Time) (*Applied, error) {
 	if fill.GetFillId() == "" {
 		return nil, ErrFillNotIdentified
@@ -141,6 +145,10 @@ func (p *Postgres) Apply(ctx context.Context, portfolioID string, fill *orderpb.
 		return nil, fmt.Errorf("position: begin: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }() // no-op after a successful Commit
+
+	if err := lockInstrument(ctx, tx, portfolioID, instrument); err != nil {
+		return nil, err
+	}
 
 	claim, err := tx.Exec(ctx,
 		`INSERT INTO position_fills (fill_id) VALUES ($1) ON CONFLICT DO NOTHING`, fill.GetFillId())
@@ -193,7 +201,82 @@ func (p *Postgres) Apply(ctx context.Context, portfolioID string, fill *orderpb.
 	return &Applied{Venue: venueState, Aggregate: aggState}, nil
 }
 
+// lockInstrument serializes every fold that can move one instrument's FUND-LEVEL
+// aggregate: the whole of (tenant, portfolio, instrument), ACROSS VENUES and across pods.
+//
+// # Why the row lock is not enough (#226)
+//
+// loadLot takes FOR UPDATE on ONE VENUE'S ROW. aggregateLot then SUMs EVERY VENUE'S ROW —
+// rows that lock does not cover. Under READ COMMITTED, two fills at two venues folding at
+// once each upsert their own row and then sum the other venue at its PRE-FILL value: both
+// published aggregates are short by the other fill. oms-deploy.yaml runs `replicas: 2` and
+// order/service.go dispatches from three goroutines, so this is the normal path.
+//
+// It is the worst shape a discrepancy can take here, because nothing reconciles it. The
+// positions rows stay CORRECT — only the published number is wrong — and projector.go
+// publishes the aggregate as an ABSOLUTE PositionState on a COMPACTED subject, so the short
+// value is RETAINED. The risk engine, the compliance monitor and tv-sync then read a fund
+// exposure short by one fill until the next fill in that instrument happens to arrive.
+//
+// # Why an advisory lock rather than a wider FOR UPDATE
+//
+// Widening the FOR UPDATE to the portfolio+instrument predicate does NOT close it. FOR
+// UPDATE can only lock rows that ALREADY EXIST, and the first fill at a second venue has no
+// row yet — two brand-new venue holdings would lock nothing and race exactly as before.
+// Below SERIALIZABLE, Postgres has no predicate lock; an advisory lock is the only mutual
+// exclusion that also covers a row that is about to be created.
+//
+// # Why not raise the isolation level
+//
+// Two reasons, and the second is fatal. A 40001 has to be RETRIED by somebody: no bus
+// consumer in this estate wires bus.WithRetry, MaxAttempts is 1 (pkg/bus/retry.go), so a
+// serialization failure escaping Projector.Handle DLQs the fill. #220 gave the DLQ a drain;
+// routine write contention is not what a drain is for. And REPEATABLE READ would break THIS
+// design outright — it pins the transaction snapshot at the FIRST statement, which is this
+// lock, so the loser would acquire the lock and then still read the pre-commit snapshot.
+// READ COMMITTED's per-statement snapshot is what lets the loser see the winner's committed
+// rows. It is load-bearing: do not "harden" the isolation level without re-reading this.
+//
+// # Lock ordering
+//
+// This is the FIRST lock Apply takes — before the position_fills claim, before any FOR
+// UPDATE — and the only one taken outside the (tenant, portfolio, instrument) class it
+// names. Every transaction therefore acquires in the same order, and two transactions
+// holding different advisory locks never contend for the same positions row, so widening
+// the lock cannot deadlock. Taking any lock ABOVE this one would end that.
+//
+// The key is hashed, so two unrelated instruments can collide and serialize with each
+// other. That costs throughput and nothing else — a hash collision can over-lock, never
+// under-lock. The TWO-INT form occupies a lock space distinct from the int8 form, so these
+// can never collide with internal/migrate's runner lock or linkstore's chain lock.
+//
+// The tenant is in the key because an advisory lock is CLUSTER-GLOBAL — it knows nothing
+// about RLS — and two tenants owning a portfolio of the same name must not serialize against
+// each other. app_current_tenant() RAISES on an unscoped session (MT-01e), so a connection
+// that never set the GUC fails HERE, loudly, rather than taking a lock silently shared by
+// every tenant.
+//
+// Unlike the DEFAULT on positions.tenant_id — whose function OID is resolved once at CREATE
+// TABLE — this is a RUNTIME call and so resolves through the session's search_path. Nothing
+// in this estate sets one (internal/pg.NewTenantPool leaves the DSN default), which is why
+// it finds the function migration 0002 installs. A DSN that pinned a search_path excluding
+// that schema would break this on the FIRST fill, loudly and immediately, which is the
+// failure direction this repo asks for — but it is a coupling, so it is written down.
+func lockInstrument(ctx context.Context, tx pgx.Tx, portfolioID, instrument string) error {
+	if _, err := tx.Exec(ctx,
+		`SELECT pg_advisory_xact_lock(hashtext(app_current_tenant() || '/' || $1), hashtext($2))`,
+		portfolioID, instrument); err != nil {
+		return fmt.Errorf("position: lock %s/%s: %w", portfolioID, instrument, err)
+	}
+	return nil
+}
+
 // loadLot reads one venue's lot FOR UPDATE, returning a zero lot when the holding is new.
+//
+// The FOR UPDATE is a BACKSTOP, not the guarantee the fund-level aggregate rests on — it
+// covers one venue's row, and lockInstrument covers the set aggregateLot actually reads.
+// It is kept because it still serializes any future writer to this table that reaches it
+// without taking the advisory lock; it earns nothing against Apply, which always holds it.
 func loadLot(ctx context.Context, tx pgx.Tx, portfolioID, venue, instrument string) (*lot, error) {
 	var qty, avg, realized string
 	err := tx.QueryRow(ctx, `
