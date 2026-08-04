@@ -367,6 +367,36 @@ func runConsumers(ctx context.Context, cfg config.Config, readiness *server.Read
 	})
 	obs.Registry.MustRegister(claimTimeouts)
 
+	// Orders the store committed at admission whose ORDER_ACCEPTED FACT never
+	// reached the bus, and which a compensator had to announce afterwards (#238).
+	// Every increment is a period during which risk, compliance and the audit log
+	// were all short one order and nothing was in an error state.
+	acceptedReannounced := prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "kanz_oms_orders_accepted_reannounced_total",
+		Help: "Orders whose ORDER_ACCEPTED FACT was committed to the store but never published, and which " +
+			"a compensator re-announced later. Admission is two writes with no outbox between them, so a " +
+			"failed publish leaves a durable order that no downstream service has heard of: risk carries no " +
+			"exposure for it and the projection drops every later FACT about it. Non-zero means that " +
+			"happened and was repaired late; it should be zero.",
+	})
+	obs.Registry.MustRegister(acceptedReannounced)
+
+	// Periodic sweeps that ended in an error. Unlike the startup sweep, a failure
+	// here CANNOT be fatal — killing a pod that is currently working live orders
+	// is worse than the unreconciled order it would be reacting to — so this
+	// counter and the ERROR log beside it are the only way the failure is visible.
+	// A sweep that has been failing every tick means the compensator is not
+	// compensating, which is indistinguishable from no defect at all if nothing
+	// counts it.
+	sweepFailures := prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "kanz_oms_sweep_failures_total",
+		Help: "Periodic in-flight reconciliation passes that ended in an error. The pod keeps trading — a " +
+			"failed sweep is not a reason to kill a process working live orders — so nothing else surfaces " +
+			"this. Sustained non-zero means orders left mid-flight are NOT being recovered and the only " +
+			"remaining compensator is the next restart.",
+	})
+	obs.Registry.MustRegister(sweepFailures)
+
 	// Venue adapters trading an account NOBODY has proved against the exchange
 	// (SOV-02a). The adapter's account is read from its own config, so a mis-declared
 	// deployment looks exactly like a correct one — non-zero means some part of the
@@ -404,7 +434,8 @@ func runConsumers(ctx context.Context, cfg config.Config, readiness *server.Read
 	svc, err := order.NewService(cfg.Tenant, store, emitter, gate, router, closeRegistry, logger,
 		order.WithAccountBindings(bindings, cfg.RequireVenueAccount, sharedCollateral),
 		order.WithQuarantineCounter(quarantined),
-		order.WithClaimTimeoutCounter(claimTimeouts))
+		order.WithClaimTimeoutCounter(claimTimeouts),
+		order.WithAcceptedReannounceCounter(acceptedReannounced))
 	if err != nil {
 		return false, err
 	}
@@ -550,6 +581,77 @@ func runConsumers(ctx context.Context, cfg config.Config, readiness *server.Read
 			})
 		}
 	}()
+
+	// THE SAME RECONCILIATION, ON A TICKER, WHILE THE POD IS SERVING (#238).
+	//
+	// The startup sweep above is mandatory and fatal on failure; this one is
+	// neither, and the difference is the point. Admission commits the order and
+	// then publishes its FACT, with no outbox between the two, so a failed
+	// publish leaves a durable order the rest of the estate has never heard of.
+	// The startup sweep is the compensator for that, which made the recovery
+	// latency "whenever this pod next restarts" — days, on a deployment that is
+	// behaving. This bounds it at OMS_SWEEP_MIN_AGE + OMS_SWEEP_INTERVAL.
+	//
+	// IT IS SAFE TO RUN CONCURRENTLY WITH THE SUBSCRIPTIONS ABOVE, and not by
+	// assumption: resume() takes the SAME per-order claim every live handler
+	// takes (orderlock.go) and re-reads the order under it, so it cannot
+	// interleave with a delivery working the same order; across pods Store.Save's
+	// version predicate refuses the loser (#122); and SweepOlderThan skips orders
+	// young enough that a live admission might still be between store.Create and
+	// the claim it takes afterwards. SweepInterrupted's "must run BEFORE the
+	// consumers subscribe" is a completeness rule for STARTUP — do not admit onto
+	// a book you cannot account for — not an exclusion mechanism this violates.
+	//
+	// A FAILURE HERE MUST NOT KILL THE POD. The startup sweep is fatal because a
+	// process that cannot account for its predecessor's orders must not begin
+	// trading. This one runs in a process that is ALREADY trading, holding live
+	// orders at venues, and terminating it would strand exactly what the sweep
+	// exists to protect. So it logs at ERROR, counts, and tries again next tick —
+	// and the counter is what makes a sweep that has been failing all day
+	// distinguishable from one that has found nothing to do.
+	if cfg.SweepInterval > 0 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			logger.Info("oms periodic in-flight reconciliation armed",
+				"interval", cfg.SweepInterval.String(), "min_age", cfg.SweepMinAge.String())
+			ticker := time.NewTicker(cfg.SweepInterval)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+					// Same explicit tenant as the startup sweep, and for the same
+					// reason: this runs outside any inbound delivery, so there is no
+					// envelope for bus.Consumer to have stashed a tenant from, and a
+					// re-announced FACT would fail envelope validation without one.
+					swept, err := svc.SweepOlderThan(bus.WithTenantID(ctx, cfg.Tenant), cfg.SweepMinAge)
+					if err != nil {
+						sweepFailures.Inc()
+						// reconciled_despite_failures, not "…before_failure": unlike the
+						// startup sweep this pass does NOT stop at the first order it
+						// cannot reconcile, so this count is the orders it DID finish
+						// while err records the ones it could not.
+						logger.Error("oms: the periodic in-flight reconciliation reported failures — some orders "+
+							"left mid-flight are not being recovered, and the pod is still admitting new ones",
+							"err", err, "reconciled_despite_failures", swept)
+						continue
+					}
+					if swept > 0 {
+						logger.Info("oms periodic reconciliation pass", "orders_examined", swept)
+					}
+				}
+			}
+		}()
+	} else {
+		// SAID OUT LOUD, because off and on must not look the same in a log. With
+		// the periodic sweep disabled, an order whose ACCEPTED FACT failed to
+		// publish stays unknown to the estate until this pod restarts.
+		logger.Warn("oms periodic in-flight reconciliation is DISABLED (OMS_SWEEP_INTERVAL=0) — an order " +
+			"whose ORDER_ACCEPTED FACT fails to publish will stay invisible to risk, compliance and the " +
+			"audit log until this pod next restarts")
+	}
 
 	// READINESS MUST WAIT ON THE MANDATE REPLAY, NOT ON THE SUBSCRIPTION GOROUTINE HAVING
 	// STARTED (EXEC-M13).

@@ -74,6 +74,14 @@ type Service struct {
 	// instead of the order, and a stalled venue must not be discoverable only by
 	// reading the DLQ or an ERROR log.
 	claimTimeouts prometheus.Counter
+	// acceptedReannounced counts orders whose ORDER_ACCEPTED FACT a compensator
+	// had to publish because admission committed the row and the original
+	// publish did not land (#238). Same reasoning as the two counters above, and
+	// it is the ONLY signal for this failure: every increment is a window in
+	// which the store held an order the rest of the estate had never heard of,
+	// and nothing else — not a log line, not an error return, not a DLQ entry
+	// once kanz-redrive has drained it — records that the window happened.
+	acceptedReannounced prometheus.Counter
 }
 
 // ServiceOption customizes the handler.
@@ -126,6 +134,20 @@ func WithClaimWait(d time.Duration) ServiceOption {
 // outcome this path exists to make loud.
 func WithClaimTimeoutCounter(c prometheus.Counter) ServiceOption {
 	return func(s *Service) { s.claimTimeouts = c }
+}
+
+// WithAcceptedReannounceCounter gives the OMS the counter it increments when a
+// compensator has to publish an ORDER_ACCEPTED FACT that admission committed
+// but never announced (#238).
+//
+// Without it the repair happens silently, and silence is the wrong outcome
+// twice over: the repair is proof that a publish failed, and the interval
+// between the failed publish and the repair is an interval in which risk,
+// compliance and the audit log were all short one order. A counter is the only
+// place that interval is recorded — the store shows the finished order and the
+// bus shows the late FACT, and neither says the gap existed.
+func WithAcceptedReannounceCounter(c prometheus.Counter) ServiceOption {
+	return func(s *Service) { s.acceptedReannounced = c }
 }
 
 // abandonClaim records a cancel or amend that could not establish exclusivity.
@@ -377,12 +399,32 @@ func (s *Service) handleSubmit(ctx context.Context, env *envelopepb.Envelope, pa
 	}
 	defer release()
 
-	// Work the order if a router is wired; otherwise it rests (ACCEPTED).
+	// THE FACT IS OUT — RECORD THAT, BEFORE ANYTHING ELSE HAPPENS TO THE ORDER.
 	//
 	// store.Create landed this order at version 0 (migrations/0005 default), and
 	// this delivery won the admission gate, so 0 is the version nobody else can
-	// have written past yet.
+	// have written past yet. This is the first write after it.
+	//
+	// It costs one UPDATE on the admission path, and that is the price of the
+	// two states being distinguishable at all (#238). An order sitting at
+	// PENDING_NEW is either resting normally — no venue wired, which is a
+	// supported deployment — or an order whose ACCEPTED FACT never reached the
+	// bus. Nothing else on the row separates them, so a compensator that
+	// re-announced on status alone would republish every resting order on every
+	// pass, forever. cancel_announced_at and outcome_announced_at already pay
+	// exactly this cost for their own transitions; admission was the one
+	// transition with no marker.
 	var ver int64
+	if st, ver, err = s.markAcceptedAnnounced(ctx, st, ver, now); err != nil {
+		// The FACT went out and the marker did not. Returning nacks, and the
+		// worst case downstream is a compensator later re-announcing an order the
+		// world already heard about — a duplicate ACCEPTED carrying the same
+		// state, which is the harmless direction. Swallowing it would leave the
+		// row permanently indistinguishable from an unannounced one.
+		return err
+	}
+
+	// Work the order if a router is wired; otherwise it rests at PENDING_NEW.
 	st, ver, err = s.work(ctx, st, ver)
 	// A venue that cannot price this order will NEVER price it, so this is
 	// terminal, not transient. Returning the error here would nack the command
@@ -1056,6 +1098,28 @@ func (s *Service) resume(ctx context.Context, st *orderpb.OrderState) error {
 	// UNDER the claim, not before it, because working an order is exactly the
 	// thing two goroutines must not do at once.
 	if st.GetStatus() == orderpb.OrderStatus_ORDER_STATUS_PENDING_NEW {
+		// FIRST, SAY THE ORDER EXISTS — before working it (#238).
+		//
+		// An unset marker here means admission committed the row and the
+		// ORDER_ACCEPTED FACT never reached the bus, so no downstream service
+		// knows this order. Working it now would emit ORDER_ROUTED for an order
+		// tv-sync never admitted, and transition() DROPS that: the projection
+		// would stay blind to a live order while the OMS believed it had
+		// announced everything. Ordering matters for the same reason — accepted
+		// before routed, so a consumer folds them in the sequence the lifecycle
+		// actually happened in.
+		//
+		// This is the single repair point for BOTH recovery paths. A SubmitOrder
+		// redelivered by the broker and one redriven off the DLQ by kanz-redrive
+		// (#220) both land in handleSubmit, find the row already present, and
+		// arrive HERE through resume(); so does the sweep. Putting the repair in
+		// resume rather than in any one caller is what keeps them from drifting.
+		if st.GetAcceptedAnnouncedAt() == nil {
+			var rerr error
+			if st, ver, rerr = s.reannounceAccepted(ctx, st, ver); rerr != nil {
+				return rerr
+			}
+		}
 		_, _, err := s.work(ctx, st, ver)
 		return err
 	}
@@ -1134,6 +1198,75 @@ func orderOutcomeAnnounced(st *orderpb.OrderState) bool {
 		return true
 	}
 	return st.GetOutcomeAnnouncedAt() != nil
+}
+
+// markAcceptedAnnounced stamps accepted_announced_at on an order whose
+// ORDER_ACCEPTED FACT has just been published successfully, and returns the
+// stamped state with the version the caller must use for its next write.
+//
+// It is the admission-time sibling of markOutcomeAnnounced. ONE function, called
+// from both the live path and the compensator, so the two cannot drift into
+// disagreeing about what "announced" means — which is the whole basis on which a
+// compensator decides whether to republish.
+func (s *Service) markAcceptedAnnounced(ctx context.Context, st *orderpb.OrderState, ver int64, t time.Time) (*orderpb.OrderState, int64, error) {
+	announced := cloneState(st)
+	announced.AcceptedAnnouncedAt = timestamppb.New(t.UTC())
+	if err := s.store.Save(ctx, announced, ver); err != nil {
+		return st, ver, err
+	}
+	return announced, ver + 1, nil
+}
+
+// reannounceAccepted republishes the ORDER_ACCEPTED FACT for an order that was
+// admitted and committed but whose acceptance the world was never told about,
+// and records that it did.
+//
+// THIS IS THE REPAIR FOR THE ADMISSION-SIDE DIVERGENCE (#238). store.Create and
+// EmitAccepted are two independent writes with no outbox between them: when the
+// publish fails, Postgres holds a durable PENDING_NEW order that no downstream
+// service has heard of. Risk carries no exposure for it. tv-sync never admits it,
+// so it also DROPS the ORDER_ROUTED that a later re-drive emits — transition()
+// ignores a FACT for an order the projection never saw — which is why re-driving
+// the order alone does not repair the estate's view of it. The accepted FACT
+// itself has to go out.
+//
+// PENDING_NEW ONLY, AND THE CALLER MUST ENFORCE IT. accepted_announced_at is an
+// ADDITIVE field, so every order written before it existed reads back unset. For
+// PENDING_NEW that is safe: the FACT carries the order's CURRENT state, whose
+// status is PENDING_NEW, so a consumer that already saw the original folds an
+// identical snapshot and a consumer that never saw it finally learns the order
+// exists. For ROUTED or PARTIALLY_FILLED it is not: the same re-announcement
+// would hand tv-sync a fresh revision at a pre-routing status and walk its view
+// of a working order BACKWARDS. This is the same trap SweepInterrupted's status
+// list documents for FILLED/REJECTED, in the same shape, and the answer is the
+// same — do not select those states.
+//
+// The duplicate case is deliberately tolerated rather than eliminated: an order
+// whose EmitAccepted succeeded and whose process then died before the marker
+// Save is indistinguishable from one whose publish failed, and republishing an
+// identical snapshot is the harmless half of that pair. tv-sync's upsertOrder
+// appends a revision with the same state and the same status, so the current
+// view it serves is unchanged.
+func (s *Service) reannounceAccepted(ctx context.Context, st *orderpb.OrderState, ver int64) (*orderpb.OrderState, int64, error) {
+	if err := s.emitter.EmitAccepted(ctx, st); err != nil {
+		return st, ver, err
+	}
+	st, ver, err := s.markAcceptedAnnounced(ctx, st, ver, s.now().UTC())
+	if err != nil {
+		return st, ver, err
+	}
+	if s.acceptedReannounced != nil {
+		s.acceptedReannounced.Inc()
+	}
+	// ERROR, not Info. The order is repaired, but the repair is evidence that a
+	// FACT the estate depends on was lost, and for however long this order sat
+	// unannounced every downstream calculation was short one order's worth of
+	// risk. That is an incident with a resolved symptom, not a routine event.
+	s.logger.Error("oms: re-announced an order whose ORDER_ACCEPTED FACT was committed to the store "+
+		"but never published — until now no downstream service knew this order existed",
+		"order_id", st.GetOrderId(), "portfolio_id", st.GetPortfolioId(),
+		"admitted_at", st.GetAsOf().AsTime().UTC().Format(time.RFC3339))
+	return st, ver, nil
 }
 
 // markOutcomeAnnounced stamps outcome_announced_at on a terminal order whose

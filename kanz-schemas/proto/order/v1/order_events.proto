@@ -163,6 +163,31 @@ message OrderState {
   // transition on its own, because the cancel command's own redelivery path
   // (handleCancel) is what completes it, not a SubmitOrder redelivery.
   google.protobuf.Timestamp outcome_announced_at = 19;
+
+  // accepted_announced_at is WHEN THE ADMISSION ITSELF WAS NOT MERELY COMMITTED
+  // BUT ANNOUNCED — the ORDER_ACCEPTED FACT published. It is the same fact
+  // cancel_announced_at and outcome_announced_at record for their own
+  // transitions, applied to the FIRST one, which had no marker at all (#238).
+  //
+  // Admission is two independent writes with no outbox between them: the store
+  // commits the order, then the FACT is published. When the publish fails the
+  // row is durable at PENDING_NEW and NOTHING downstream has heard of the order
+  // — risk carries no exposure for it, and tv-sync's projection drops the
+  // ORDER_ROUTED that follows, because transition() ignores a FACT for an order
+  // it never admitted. Without this field that order is INDISTINGUISHABLE from
+  // an order resting normally at PENDING_NEW in a deployment with no venue
+  // wired, so no compensator can re-announce the one without re-announcing the
+  // other on every pass. Unset means the world may never have been told this
+  // order exists and a compensator must say so; set means it was told.
+  //
+  // It is stamped only after EmitAccepted returns without error, and only for
+  // an order whose acceptance THIS process announced. It is deliberately NOT
+  // consulted for any status other than PENDING_NEW: it is an ADDITIVE field, so
+  // every order written before it existed reads back unset, and re-announcing
+  // ACCEPTED for an order that has since moved to ROUTED or PARTIALLY_FILLED
+  // would push a consumer's view of it BACKWARDS to a pre-routing snapshot. See
+  // resume() for where that restriction is enforced.
+  google.protobuf.Timestamp accepted_announced_at = 20;
 }
 
 // OrderQuarantine records an order whose true state at the venue could not be

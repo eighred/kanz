@@ -319,6 +319,49 @@ groups:
           summary: "An OMS cancel or amend was abandoned — the instruction went to the DLQ, the order is still live"
           description: "A cancel or amend gave up waiting for the goroutine working its order and was dead-lettered, while the order itself is still working at a venue. The usual cause is a venue call that is not returning. Somebody asked to withdraw an order and it did not happen. Check venue adapter latency, then re-issue the instruction."
 
+      # ZERO AGAIN, AND FOR THE SHARPEST REASON OF THE THREE. This counter only
+      # moves when a compensator finds an order the store committed and the bus
+      # never heard about (#238): admission is store.Create followed by
+      # EmitAccepted with no outbox between them, so a failed publish leaves a
+      # durable order that risk carries no exposure for, that compliance's book
+      # excludes, and that the audit log has no record of. The projection is
+      # worse than blind — tv-sync ignores every LATER fact about the order too,
+      # because it never admitted it.
+      #
+      # The increment says the repair HAPPENED, which means the gap happened
+      # first. Nothing else records the gap: the store shows a finished order and
+      # the bus shows a late FACT, and neither says the fund was mispriced in
+      # between. If this fires, find out what the publish path was doing then —
+      # the fix is a transactional outbox, and this alert is what says it is
+      # still needed.
+      - alert: OMSAcceptedFactLostAndRecovered
+        expr: sum(increase(kanz_oms_orders_accepted_reannounced_total[15m])) > 0
+        for: 0m
+        labels: { severity: critical, layer: operational }
+        annotations:
+          summary: "An OMS order was committed without its ORDER_ACCEPTED FACT — risk was short one order until a sweep repaired it"
+          description: "The OMS committed an order to Postgres and its ORDER_ACCEPTED FACT never reached the bus, so for the interval before the compensating sweep ran, no downstream service knew the order existed: risk carried no exposure, compliance's book excluded it, and the audit log had no record. The order has been re-announced, but the gap was real and every calculation made during it was wrong. Investigate the broker or the publish path at the time of the increment."
+
+      # A COMPENSATOR THAT IS NOT COMPENSATING LOOKS EXACTLY LIKE NO DEFECT.
+      #
+      # The periodic sweep deliberately does NOT kill the pod when it fails —
+      # terminating a process that is holding live orders at venues is worse than
+      # the unreconciled order it would be reacting to — so a failing sweep is
+      # silent everywhere except here and one ERROR log. Sustained failures mean
+      # the only remaining compensator is the next restart, which is the state
+      # #238 exists to end.
+      #
+      # for: 15m, not 0m: one failed pass is a blip the next tick retries, and
+      # the ticker's default interval is 60s, so 15m is fifteen consecutive
+      # chances to succeed.
+      - alert: OMSSweepFailing
+        expr: sum(increase(kanz_oms_sweep_failures_total[15m])) > 0
+        for: 15m
+        labels: { severity: warning, layer: operational }
+        annotations:
+          summary: "The OMS periodic reconciliation has been failing — orders left mid-flight are not being recovered"
+          description: "The OMS's periodic in-flight reconciliation has failed on every pass for fifteen minutes. It is the compensator for an order committed without its FACT and for an order stranded mid-flight by a crash; while it fails, the only remaining recovery is the next pod restart. The pod keeps admitting new orders throughout. Check the order store's reachability and the ERROR log line beside this counter for the order it stopped on."
+
       # THE PRICE FEED, SEEN FROM THE FOLD RATHER THAN FROM THE REFUSALS.
       #
       # ComplianceUnpricedOrdersExpired below only fires when an order ARRIVES,
