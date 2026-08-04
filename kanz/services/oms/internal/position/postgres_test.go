@@ -47,6 +47,16 @@ const testSchema = "oms_position_test"
 
 func newPool(t *testing.T, tenant string) *pgxpool.Pool {
 	t.Helper()
+	return newTracedPool(t, tenant, nil)
+}
+
+// newTracedPool is newPool with a pgx QueryTracer attached. The tracer is how
+// concurrent_venues_test.go pins an interleaving that would otherwise depend on the
+// scheduler: a concurrency test that has never been seen to fail proves nothing, and one
+// that reproduces by luck fails to reproduce on the machine that needs it. A nil tracer is
+// the ordinary pool.
+func newTracedPool(t *testing.T, tenant string, tracer pgx.QueryTracer) *pgxpool.Pool {
+	t.Helper()
 	url := os.Getenv("TEST_POSTGRES_URL")
 	if url == "" {
 		t.Skip("set TEST_POSTGRES_URL to run position Postgres integration tests")
@@ -55,6 +65,7 @@ func newPool(t *testing.T, tenant string) *pgxpool.Pool {
 	if err != nil {
 		t.Fatalf("parse config: %v", err)
 	}
+	cfg.ConnConfig.Tracer = tracer
 	// Every connection lands in this package's schema and carries the tenant GUC — the
 	// same authenticated-session-GUC posture the services run under (internal/pg).
 	cfg.AfterConnect = func(ctx context.Context, conn *pgx.Conn) error {
