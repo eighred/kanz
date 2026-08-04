@@ -150,7 +150,7 @@ jobs:
 
     steps:
       - name: Log in to ghcr.io
-        uses: docker/login-action@371161bbe7024a29a25c5e19bfcbc0804fe9ad2c # v4.5.2
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -162,7 +162,7 @@ jobs:
       # the mirror would serve amd64 to an arm64 builder and fail in a way that
       # looks like a corrupt image. crane copy preserves the full index.
       - name: Install crane
-        uses: imjasonh/setup-crane@31b88efe9de28ae0ffa220711af4b60be9435f6e # v0.4
+        uses: imjasonh/setup-crane@feee3b6bb0d4c68370f256a4502498c9227e5c6b # v0.7
 
       - name: Resolve the upstream digest
         id: resolve
