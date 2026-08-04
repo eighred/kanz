@@ -79,16 +79,21 @@ func SetPrincipalHeaders(h http.Header, subject, tenant string, roles []string) 
 // day one might, the encoding has to change, not this reader.
 //
 // WHAT IT CANNOT RECONSTRUCT. The wire carries subject, tenant and roles only, so
-// Claims is always nil — including ClaimPortfolios, the ABAC portfolio allow-list
-// PolicyAuthorizer reads at authz.go:137 and copilot's tool gate relies on
-// (services/copilot/internal/tools/tools.go:121). An absent allow-list means "every
-// portfolio within the caller's own tenant". That gap does NOT start here: the
-// gateway's own OIDC bridge already drops it
-// (services/api-gateway/cmd/api-gateway/main.go:450 maps auth.Principal onto
-// middleware.Principal without Portfolios), so on the production path the value is
-// empty before it reaches the wire. Putting a fourth header on the mesh would
-// forward an empty list and look like a fix. Tenant isolation and RBAC ARE
-// enforced upstream; portfolio sub-scope within a tenant is not.
+// both Claims and Portfolios are always empty — including the ABAC portfolio
+// allow-list PolicyAuthorizer reads through PortfolioInScope and copilot's tool
+// gate relies on (services/copilot/internal/tools/tools.go's Registry.authorize).
+// On a READ path an absent allow-list means "every portfolio within the caller's
+// own tenant", so copilot's portfolio sub-scope is inert by construction, and
+// portfolio.go argues why making it deny-on-empty would refuse every governed
+// tool call rather than tighten anything.
+//
+// Putting a fourth header on the mesh would forward an empty list and look like a
+// fix. #225 repaired the gateway's OIDC bridge, which used to drop the claim
+// before it ever reached the wire, so the list is now real INSIDE the gateway —
+// and the OMS reads it off the command envelope, not off these headers. Nothing
+// downstream of this seam has a use for it that an empty header would satisfy.
+// Tenant isolation and RBAC ARE enforced upstream; portfolio sub-scope within a
+// tenant is not.
 func PrincipalFromHeaders(h http.Header) (*Principal, bool) {
 	subject := h.Get(HeaderPrincipalSubject)
 	tenant := h.Get(HeaderPrincipalTenant)

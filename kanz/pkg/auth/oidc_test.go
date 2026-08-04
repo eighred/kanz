@@ -169,6 +169,68 @@ func TestOIDCAuthenticate_RolesAsScopeString(t *testing.T) {
 	}
 }
 
+// THE OIDC PATH IS THE PRODUCTION PATH, AND IT MUST CARRY THE PORTFOLIO SCOPE
+// (#225). It decoded roles and tenant and left `portfolios` in the untyped
+// Claims bag, so the api-gateway's bridge to its edge Principal dropped the
+// caller's entitlement without a compile error or a failing test — while the
+// dev HS256 arm carried it and had one.
+func TestOIDCAuthenticate_CarriesPortfolioScope(t *testing.T) {
+	f := newOIDCFixture(t)
+	s := newSigner(t, "k1")
+	f.publish(s.jwk())
+	a := f.auth(t, nil)
+
+	tok := s.sign(t, baseClaims(f.srv.URL), map[string]any{
+		"tenant":     "acme",
+		"roles":      []any{"trader"},
+		"portfolios": []any{"flagship", "research"},
+	})
+	p, err := a.Authenticate(context.Background(), tok)
+	if err != nil {
+		t.Fatalf("Authenticate: %v", err)
+	}
+	if len(p.Portfolios) != 2 || p.Portfolios[0] != "flagship" || p.Portfolios[1] != "research" {
+		t.Fatalf("portfolios = %v, want [flagship research] — without this the OMS refuses "+
+			"every cancel and amend this caller issues", p.Portfolios)
+	}
+
+	// Same claim in the space-delimited shape some IdPs emit; one decoder, both
+	// shapes, so a provider swap does not silently produce an empty scope.
+	tok = s.sign(t, baseClaims(f.srv.URL), map[string]any{
+		"tenant":     "acme",
+		"portfolios": "flagship research",
+	})
+	if p, err = a.Authenticate(context.Background(), tok); err != nil {
+		t.Fatal(err)
+	}
+	if len(p.Portfolios) != 2 {
+		t.Fatalf("space-delimited portfolios = %v, want two entries", p.Portfolios)
+	}
+}
+
+// ABSENT IS EMPTY, NEVER UNRESTRICTED — the sibling of the dev arm's
+// TestJWTAuthenticator_AbsentPortfolioClaimIsEmptyNotUnrestricted. This is the
+// live production shape until Eighred SSO issues the claim (#99): a valid token
+// with no `portfolios`, which the capital path must read as no entitlement.
+func TestOIDCAuthenticate_AbsentPortfolioClaimIsEmptyNotUnrestricted(t *testing.T) {
+	f := newOIDCFixture(t)
+	s := newSigner(t, "k1")
+	f.publish(s.jwk())
+	a := f.auth(t, nil)
+
+	tok := s.sign(t, baseClaims(f.srv.URL), map[string]any{"tenant": "acme", "roles": []any{"trader"}})
+	p, err := a.Authenticate(context.Background(), tok)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(p.Portfolios) != 0 {
+		t.Fatalf("portfolios = %v, want empty — absence must not be widened", p.Portfolios)
+	}
+	if PortfolioEntitled(p.Portfolios, "flagship") {
+		t.Fatal("an absent claim entitled the caller to a portfolio on the capital path")
+	}
+}
+
 func TestOIDCAuthenticate_Rejections(t *testing.T) {
 	f := newOIDCFixture(t)
 	s := newSigner(t, "k1")

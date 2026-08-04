@@ -38,7 +38,7 @@ func VerifyIssuer(p *Principal, issuer string) error {
 	if p.Subject != "" && issuerID(issuer) == p.Subject {
 		return nil
 	}
-	for _, allowed := range rolesClaim(p.Claims[ClaimIssuers]) {
+	for _, allowed := range stringListClaim(p.Claims[ClaimIssuers]) {
 		if allowed == issuer {
 			return nil
 		}

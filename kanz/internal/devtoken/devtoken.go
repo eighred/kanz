@@ -38,7 +38,17 @@ type Claims struct {
 	Subject string
 	Tenant  string
 	Roles   []string
-	TTL     time.Duration
+	// Portfolios is the caller's portfolio entitlement, and on the ORDER path it
+	// is not optional either (#225). Roles get a caller past the gateway; this is
+	// what the OMS checks before it moves capital, and an EMPTY list DENIES —
+	// submit, cancel and amend alike. A dev token minted without it authenticates
+	// fine, reads fine, and cannot place or pull a single order.
+	//
+	// There is deliberately no "all portfolios" value. Widening absence to
+	// unrestricted here would make the dev credential strictly more powerful than
+	// a production one on the exact dimension production has no way to express.
+	Portfolios []string
+	TTL        time.Duration
 }
 
 // claims mirrors the gateway's wire shape (services/api-gateway/internal/
@@ -50,12 +60,17 @@ type Claims struct {
 // two values (#242), and both sides read them from pkg/auth so the minter and
 // the validator cannot drift into a dev estate where nothing authenticates.
 type claims struct {
-	Subject  string   `json:"sub"`
-	Tenant   string   `json:"tenant"`
-	Roles    []string `json:"roles"`
-	Issuer   string   `json:"iss"`
-	Audience string   `json:"aud"`
-	Expiry   int64    `json:"exp"`
+	Subject string   `json:"sub"`
+	Tenant  string   `json:"tenant"`
+	Roles   []string `json:"roles"`
+	// The claim name is auth.ClaimPortfolios; it is spelled here because the
+	// struct tag must be a constant. TestDevTokenAcceptedByGateway pins the
+	// round-trip against the real validator, so a rename that missed this file
+	// fails rather than silently minting an unscoped token.
+	Portfolios []string `json:"portfolios,omitempty"`
+	Issuer     string   `json:"iss"`
+	Audience   string   `json:"aud"`
+	Expiry     int64    `json:"exp"`
 }
 
 // Mint returns a compact JWS (header.payload.signature) the gateway's HS256
@@ -84,12 +99,13 @@ func Mint(secret string, c Claims) (string, error) {
 		return "", err
 	}
 	payload, err := enc(claims{
-		Subject:  c.Subject,
-		Tenant:   c.Tenant,
-		Roles:    c.Roles,
-		Issuer:   auth.DevHS256Issuer,
-		Audience: auth.DevHS256Audience,
-		Expiry:   time.Now().Add(c.TTL).Unix(),
+		Subject:    c.Subject,
+		Tenant:     c.Tenant,
+		Roles:      c.Roles,
+		Portfolios: c.Portfolios,
+		Issuer:     auth.DevHS256Issuer,
+		Audience:   auth.DevHS256Audience,
+		Expiry:     time.Now().Add(c.TTL).Unix(),
 	})
 	if err != nil {
 		return "", err

@@ -102,8 +102,13 @@ func TestInvoke_CrossTenantDeniedAndLogged(t *testing.T) {
 func TestInvoke_PortfolioScopeDenied(t *testing.T) {
 	reg, _ := harness(t)
 	// Same tenant, but the principal is scoped to a different portfolio allow-list.
+	// The scope is the TYPED field, not a Claims entry: #225 collapsed the two
+	// shapes of this one fact into Principal.Portfolios, decoded once by the
+	// authenticator. A Claims["portfolios"] here would now be ignored — which is
+	// the point, and is why this test would fail loudly rather than silently
+	// widen if someone re-introduced the map read.
 	scoped := &auth.Principal{Subject: "bob", Tenant: "t1", Roles: []string{"analyst"},
-		Claims: map[string]any{auth.ClaimPortfolios: []any{"PF-OTHER"}}}
+		Portfolios: []string{"PF-OTHER"}}
 	out := reg.Invoke(context.Background(), scoped, llm.ToolCall{Name: "get_risk_measures", Input: map[string]any{"portfolio_id": "PF-T1"}})
 	if !out.IsError || !strings.Contains(out.Content, "not authorized") {
 		t.Fatalf("out-of-scope portfolio must be denied, got: %+v", out)

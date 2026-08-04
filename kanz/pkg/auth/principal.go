@@ -18,8 +18,27 @@ type Principal struct {
 	Tenant string
 	// Roles are the coarse RBAC roles asserted by the token.
 	Roles []string
+	// Portfolios is the ABAC portfolio allow-list from the ClaimPortfolios
+	// claim, normalized once by the authenticator. Roles say WHAT a caller may
+	// do; this says WHICH portfolios they may do it to.
+	//
+	// IT IS A FIELD AND NOT A Claims LOOKUP, AND THAT IS THE #225 REPAIR. The
+	// same fact had two shapes — this list, and Claims["portfolios"] holding an
+	// untyped []any that each reader re-normalized — so the api-gateway's OIDC
+	// bridge could map "the principal" onto its edge type, satisfy the compiler,
+	// and silently drop the entitlement. A field is dropped visibly: the
+	// completeness guard in test/arch reads the struct literal.
+	//
+	// EMPTY IS NOT "ALL", AND IT IS NOT "NONE" EITHER — the two consumers answer
+	// it differently and deliberately. Never test it by hand; call
+	// PortfolioInScope (read path) or PortfolioEntitled (capital path), which
+	// carry the argument for each.
+	Portfolios []string
 	// Claims is the full decoded custom claim set, so authorization policy
 	// (AUTH-01b) can read attributes beyond roles/tenant without re-parsing.
+	// Promoted claims (Roles, Tenant, Portfolios) have a typed field and MUST be
+	// read from it — a second reader keyed on the map is how the two
+	// representations drifted apart in the first place.
 	Claims map[string]any
 }
 

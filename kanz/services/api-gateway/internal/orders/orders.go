@@ -117,7 +117,15 @@ func (h *Handler) publish(ctx context.Context, p *middleware.Principal, subject,
 	if h.pub == nil {
 		return errWritesDisabled
 	}
-	ctx = auth.WithPrincipal(ctx, &auth.Principal{Subject: p.Subject, Tenant: p.Tenant, Roles: p.Roles})
+	// The REVERSE of cmd/api-gateway's edgePrincipal, and it carries the
+	// portfolio scope for the same reason that one does (#225): a principal
+	// stripped of a dimension on the way back is the same defect facing the other
+	// way. Claims cannot be reconstructed from the edge type and is deliberately
+	// left nil — the producer's VerifyCommandIssuer falls back to the subject
+	// match, which is the branch a gateway-minted "user:{sub}" issuer takes.
+	ctx = auth.WithPrincipal(ctx, &auth.Principal{
+		Subject: p.Subject, Tenant: p.Tenant, Roles: p.Roles, Portfolios: p.Portfolios,
+	})
 	return h.pub.Publish(ctx, bus.Event{
 		Subject:        subject,
 		EventType:      subject,
