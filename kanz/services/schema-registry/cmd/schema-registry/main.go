@@ -14,6 +14,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/eighred/kanz/internal/lifecycle"
 	"github.com/eighred/kanz/internal/version"
 	"github.com/eighred/kanz/pkg/observability"
 	"github.com/eighred/kanz/services/schema-registry/internal/config"
@@ -22,10 +23,19 @@ import (
 )
 
 func main() {
+	// The lifecycle lives in run() because os.Exit skips defers: every defer
+	// run() registers fires before this line. The non-zero code is what makes a
+	// fatal halt distinguishable from a graceful SIGTERM — both otherwise exit 0
+	// with reason "Completed" in the pod's termination record (#266).
+	// 2 = startup failure, 1 = run loop died after startup, 0 = clean shutdown.
+	os.Exit(run())
+}
+
+func run() int {
 	cfg, err := config.Load()
 	if err != nil {
 		slog.Default().Error("config load failed", "err", err)
-		os.Exit(2)
+		return 2
 	}
 
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: cfg.LogLevel}))
@@ -33,11 +43,15 @@ func main() {
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+	// Records WHY we are stopping so the exit code can say so. Every site that
+	// calls fatal.Raise below already brought the process down with stop(); the
+	// only thing added is that the reason survives to the exit status (#266).
+	fatal := lifecycle.NewFatal(stop)
 
 	pool, err := pgxpool.New(ctx, cfg.DatabaseURL)
 	if err != nil {
 		logger.Error("postgres connect failed", "err", err)
-		os.Exit(1)
+		return 2
 	}
 	defer pool.Close()
 
@@ -52,7 +66,7 @@ func main() {
 	}, slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: cfg.LogLevel}))
 	if err != nil {
 		logger.Error("telemetry init failed", "err", err)
-		os.Exit(2)
+		return 2
 	}
 	defer func() {
 		if err := obs.Shutdown(context.Background()); err != nil {
@@ -81,7 +95,7 @@ func main() {
 		logger.Info("schema-registry listening", "addr", cfg.Listen)
 		if err := httpSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			logger.Error("http server failed", "err", err)
-			stop()
+			fatal.Raise(err)
 		}
 	}()
 
@@ -93,4 +107,6 @@ func main() {
 	if err := httpSrv.Shutdown(shutdownCtx); err != nil {
 		logger.Error("http shutdown error", "err", err)
 	}
+
+	return fatal.Code()
 }

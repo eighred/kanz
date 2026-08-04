@@ -27,6 +27,7 @@ import (
 	"time"
 
 	"github.com/eighred/kanz/internal/dec"
+	"github.com/eighred/kanz/internal/lifecycle"
 	"github.com/eighred/kanz/internal/pg"
 	"github.com/eighred/kanz/internal/version"
 	"github.com/eighred/kanz/pkg/observability"
@@ -40,14 +41,27 @@ import (
 )
 
 func main() {
+	// The lifecycle lives in run() because os.Exit skips defers: every defer
+	// run() registers fires before this line. The non-zero code is what makes a
+	// fatal halt distinguishable from a graceful SIGTERM — both otherwise exit 0
+	// with reason "Completed" in the pod's termination record (#266).
+	// 2 = startup failure, 1 = run loop died after startup, 0 = clean shutdown.
+	os.Exit(run())
+}
+
+func run() int {
 	cfg, err := config.Load()
 	if err != nil {
 		slog.Default().Error("config load failed", "err", err)
-		os.Exit(2)
+		return 2
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+	// Records WHY we are stopping so the exit code can say so. Every site that
+	// calls fatal.Raise below already brought the process down with stop(); the
+	// only thing added is that the reason survives to the exit status (#266).
+	fatal := lifecycle.NewFatal(stop)
 
 	base := slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: cfg.LogLevel})
 	obs, err := observability.New(ctx, observability.Config{
@@ -58,7 +72,7 @@ func main() {
 	}, base)
 	if err != nil {
 		slog.Default().Error("observability init failed", "err", err)
-		os.Exit(2)
+		return 2
 	}
 	logger := obs.Logger
 	slog.SetDefault(logger)
@@ -71,11 +85,11 @@ func main() {
 	feeds, err := buildFeeds(cfg)
 	if err != nil {
 		logger.Error("vendor feed configuration is invalid", "err", err)
-		os.Exit(2)
+		return 2
 	}
 	if err := guardSim(feeds, cfg.AllowSim); err != nil {
 		logger.Error("refusing to start", "err", err)
-		os.Exit(2)
+		return 2
 	}
 	for _, f := range feeds {
 		logger.Info("vendor feed wired", "vendor", f.Vendor())
@@ -84,7 +98,7 @@ func main() {
 	golden, exceptions, cycleLock, closeStores, err := openStores(ctx, cfg)
 	if err != nil {
 		logger.Error("store init failed", "err", err)
-		os.Exit(2)
+		return 2
 	}
 	defer closeStores()
 
@@ -98,7 +112,7 @@ func main() {
 		logger.Info("datamaster listening", "addr", cfg.Listen)
 		if err := httpSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			logger.Error("http server failed", "err", err)
-			stop()
+			fatal.Raise(err)
 		}
 	}()
 
@@ -134,6 +148,8 @@ func main() {
 	if err := httpSrv.Shutdown(shutdownCtx); err != nil {
 		logger.Error("http shutdown error", "err", err)
 	}
+
+	return fatal.Code()
 }
 
 // openStores selects the durable Postgres golden store + exception queue when a

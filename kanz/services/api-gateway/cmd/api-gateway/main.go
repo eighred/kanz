@@ -25,6 +25,7 @@ import (
 	operatorpb "github.com/eighred/kanz/kanz-schemas-go/operator/v1"
 	querypb "github.com/eighred/kanz/kanz-schemas-go/query/v1"
 
+	"github.com/eighred/kanz/internal/lifecycle"
 	"github.com/eighred/kanz/internal/version"
 	"github.com/eighred/kanz/pkg/auth"
 	"github.com/eighred/kanz/pkg/bus"
@@ -78,10 +79,19 @@ const gatewayWriteTimeout = 105 * time.Second
 const gatewayIdleTimeout = 120 * time.Second
 
 func main() {
+	// The lifecycle lives in run() because os.Exit skips defers: every defer
+	// run() registers fires before this line. The non-zero code is what makes a
+	// fatal halt distinguishable from a graceful SIGTERM — both otherwise exit 0
+	// with reason "Completed" in the pod's termination record (#266).
+	// 2 = startup failure, 1 = run loop died after startup, 0 = clean shutdown.
+	os.Exit(run())
+}
+
+func run() int {
 	cfg, err := config.Load()
 	if err != nil {
 		slog.Default().Error("config load failed", "err", err)
-		os.Exit(2)
+		return 2
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -93,7 +103,7 @@ func main() {
 	}, base)
 	if err != nil {
 		slog.Default().Error("observability init failed", "err", err)
-		os.Exit(2)
+		return 2
 	}
 	logger := obs.Logger
 	slog.SetDefault(logger)
@@ -105,12 +115,12 @@ func main() {
 
 	if cfg.RiskEngineAddr == "" {
 		logger.Error("API_GATEWAY_RISK_ENGINE_ADDR is required")
-		os.Exit(2)
+		return 2
 	}
 	conn, err := dialRiskEngine(ctx, cfg, logger)
 	if err != nil {
 		logger.Error("risk-engine dial failed", "err", err)
-		os.Exit(1)
+		return 2
 	}
 	defer func() { _ = conn.Close() }()
 
@@ -122,14 +132,17 @@ func main() {
 	ordersHandler, closeBus, err := buildOrders(ctx, cfg, logger)
 	if err != nil {
 		logger.Error("order write surface init failed", "err", err)
-		os.Exit(1)
+		return 2
 	}
 	defer closeBus()
 
 	// Phase-7 read surfaces (SVCWIRE-01b/c): wealth/datamaster/copilot routes
 	// behind the same edge chain, forwarded over the SEC-01b mTLS mesh. With no
 	// upstream addresses configured the backend is nil and the routes 503.
-	proxyHandler := buildProxy(ctx, cfg, logger)
+	proxyHandler, err := buildProxy(ctx, cfg, logger)
+	if err != nil {
+		return 2
+	}
 
 	// The control plane (OPS-M2b). Absent unless an address is configured, and a
 	// FATAL rather than a degraded start when it is configured and cannot be reached
@@ -140,7 +153,7 @@ func main() {
 		opConn, err := dialOperator(ctx, cfg, logger)
 		if err != nil {
 			logger.Error("api-gateway: control plane configured but unusable", "err", err)
-			os.Exit(2)
+			return 2
 		}
 		defer func() { _ = opConn.Close() }()
 		ctlHandler = control.New(operatorpb.NewOperatorServiceClient(opConn), logger)
@@ -150,20 +163,31 @@ func main() {
 	}
 
 	var ready atomic.Bool
+	router, err := buildRouter(cfg, handler, ordersHandler, proxyHandler, ctlHandler, obs, &ready, logger)
+	if err != nil {
+		return 2
+	}
 	srv := &http.Server{
 		Addr:              cfg.Listen,
-		Handler:           buildRouter(cfg, handler, ordersHandler, proxyHandler, ctlHandler, obs, &ready, logger),
+		Handler:           router,
 		ReadHeaderTimeout: 5 * time.Second,
 		WriteTimeout:      gatewayWriteTimeout,
 		IdleTimeout:       gatewayIdleTimeout,
 	}
+
+	// The serve loop is the only thing that can die AFTER startup has completed
+	// (rule 6, #266): lifecycle.Fatal lets the goroutine that observes the
+	// failure hand it to run() without an os.Exit of its own, and stop()
+	// cancelling ctx is what makes <-ctx.Done() below the join that guarantees
+	// the write happens-before the read.
+	fatal := lifecycle.NewFatal(stop)
 
 	go func() {
 		ready.Store(true)
 		logger.Info("api-gateway listening", "addr", cfg.Listen, "upstream", cfg.RiskEngineAddr)
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			logger.Error("http server failed", "err", err)
-			stop()
+			fatal.Raise(err)
 		}
 	}()
 
@@ -174,6 +198,8 @@ func main() {
 	if err := srv.Shutdown(sctx); err != nil {
 		logger.Error("http shutdown error", "err", err)
 	}
+
+	return fatal.Code()
 }
 
 // buildOrders wires the OMS-01d write surface. With a NATS URL it dials the
@@ -216,7 +242,7 @@ func buildOrders(ctx context.Context, cfg config.Config, logger *slog.Logger) (*
 // client (SEC-01b) when a SPIFFE socket is set, plaintext for local/dev. With no
 // upstreams configured it returns a nil-backed handler whose routes 503 — the
 // same disabled-surface shape as the order write surface.
-func buildProxy(ctx context.Context, cfg config.Config, logger *slog.Logger) *proxy.Handler {
+func buildProxy(ctx context.Context, cfg config.Config, logger *slog.Logger) (*proxy.Handler, error) {
 	bases := map[proxy.Service]string{}
 	if cfg.WealthAddr != "" {
 		bases[proxy.ServiceWealth] = cfg.WealthAddr
@@ -232,7 +258,7 @@ func buildProxy(ctx context.Context, cfg config.Config, logger *slog.Logger) *pr
 	}
 	if len(bases) == 0 {
 		logger.Warn("api-gateway: Phase-7 read surfaces disabled (no upstream addresses)")
-		return proxy.New(nil)
+		return proxy.New(nil), nil
 	}
 
 	client := http.DefaultClient
@@ -240,7 +266,7 @@ func buildProxy(ctx context.Context, cfg config.Config, logger *slog.Logger) *pr
 		src, err := transport.NewSource(ctx, cfg.SPIFFESocket)
 		if err != nil {
 			logger.Error("api-gateway: proxy SPIFFE source failed", "err", err)
-			os.Exit(1)
+			return nil, err
 		}
 		// NO Timeout FIELD, DELIBERATELY — it used to carry 30s and that was a bug of
 		// the exact kind the TUI already paid for. http.Client.Timeout is enforced
@@ -258,12 +284,12 @@ func buildProxy(ctx context.Context, cfg config.Config, logger *slog.Logger) *pr
 	} else {
 		logger.Warn("api-gateway: Phase-7 upstreams plaintext (no API_GATEWAY_SPIFFE_SOCKET)")
 	}
-	return proxy.New(proxy.NewMeshBackend(bases, client))
+	return proxy.New(proxy.NewMeshBackend(bases, client)), nil
 }
 
 // buildRouter wires the public probes/metrics/openapi (un-gated) and the /v1
 // risk + order + Phase-7 read routes behind the edge middleware chain.
-func buildRouter(cfg config.Config, h *gateway.Handler, o *orders.Handler, p *proxy.Handler, ctl *control.Handler, obs *observability.Provider, ready *atomic.Bool, logger *slog.Logger) http.Handler {
+func buildRouter(cfg config.Config, h *gateway.Handler, o *orders.Handler, p *proxy.Handler, ctl *control.Handler, obs *observability.Provider, ready *atomic.Bool, logger *slog.Logger) (http.Handler, error) {
 	// EVERY /v1 ROUTE DECLARES WHAT IT TAKES TO REACH IT (SEC-M2).
 	//
 	// The gateway used to wrap all of /v1 in ONE role check, so `GET /v1/portfolios/{id}/
@@ -317,7 +343,7 @@ func buildRouter(cfg config.Config, h *gateway.Handler, o *orders.Handler, p *pr
 		})
 		if err != nil {
 			logger.Error("api-gateway: OIDC config invalid", "err", err)
-			os.Exit(2)
+			return nil, err
 		}
 		authn = oidcAuthenticator{oidc}
 		logger.Info("api-gateway: OIDC authentication enabled", "issuer", cfg.OIDCIssuer)
@@ -330,7 +356,7 @@ func buildRouter(cfg config.Config, h *gateway.Handler, o *orders.Handler, p *pr
 	overrides, err := middleware.LoadQuotaOverrides(cfg.QuotasFile)
 	if err != nil {
 		logger.Error("api-gateway: quota overrides load failed", "err", err, "path", cfg.QuotasFile)
-		os.Exit(2)
+		return nil, err
 	}
 	limits := middleware.TenantLimits{
 		Default: middleware.Limits{
@@ -368,7 +394,7 @@ func buildRouter(cfg config.Config, h *gateway.Handler, o *orders.Handler, p *pr
 		}
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 	})
-	return mux
+	return mux, nil
 }
 
 // dialRiskEngine creates the gRPC client connection to the risk-engine query

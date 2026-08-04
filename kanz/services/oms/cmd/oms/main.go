@@ -19,6 +19,7 @@ import (
 
 	comp "github.com/eighred/kanz/internal/compliance"
 	"github.com/eighred/kanz/internal/execution"
+	"github.com/eighred/kanz/internal/lifecycle"
 	"github.com/eighred/kanz/internal/marketdata/mark"
 	"github.com/eighred/kanz/internal/version"
 	"github.com/prometheus/client_golang/prometheus"
@@ -35,10 +36,19 @@ import (
 )
 
 func main() {
+	// The lifecycle lives in run() because os.Exit skips defers: every defer
+	// run() registers fires before this line. The non-zero code is what makes a
+	// fatal halt distinguishable from a graceful SIGTERM — both otherwise exit 0
+	// with reason "Completed" in the pod's termination record (#266).
+	// 2 = startup failure, 1 = run loop died after startup, 0 = clean shutdown.
+	os.Exit(run())
+}
+
+func run() int {
 	cfg, err := config.Load()
 	if err != nil {
 		slog.Default().Error("config load failed", "err", err)
-		os.Exit(2)
+		return 2
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -53,7 +63,7 @@ func main() {
 	}, base)
 	if err != nil {
 		slog.Default().Error("observability init failed", "err", err)
-		os.Exit(2)
+		return 2
 	}
 	logger := obs.Logger
 	slog.SetDefault(logger)
@@ -69,17 +79,33 @@ func main() {
 		Handler:           server.New(readiness, logger, server.WithMetrics(obs.MetricsHandler())),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
+
+	// Two independent things can turn fatal after startup has completed: the
+	// probes/metrics server dying, and runConsumers() surfacing a
+	// post-subscription error (see its own doc comment for the started/!started
+	// split). lifecycle.Fatal records both through one seam without an os.Exit
+	// of its own (rule 6, #266); stop() cancelling ctx is what makes the joins
+	// below (runConsumers returning, or <-ctx.Done()) the point where the write
+	// is guaranteed to happen-before the read. startupFailed is a separate,
+	// plain bool: it answers "which exit code", not "was there a fatal at all",
+	// and only runConsumers's own return value can tell those apart.
+	fatal := lifecycle.NewFatal(stop)
+	var startupFailed bool
+
 	go func() {
 		logger.Info("oms listening", "addr", cfg.Listen)
 		if err := httpSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			logger.Error("http server failed", "err", err)
-			stop()
+			fatal.Raise(err)
 		}
 	}()
 
 	if cfg.NATSURL != "" {
-		if err := runConsumers(ctx, cfg, readiness, logger, obs); err != nil {
+		started, err := runConsumers(ctx, cfg, readiness, logger, obs)
+		if err != nil {
 			logger.Error("oms consumers stopped with error", "err", err)
+			fatal.Raise(err)
+			startupFailed = !started
 		}
 	} else {
 		readiness.Set(true)
@@ -93,26 +119,45 @@ func main() {
 	if err := httpSrv.Shutdown(shutdownCtx); err != nil {
 		logger.Error("http shutdown error", "err", err)
 	}
+
+	// oms is the only composition root whose startup wiring happens inside the
+	// same helper that then runs the consumers, so "never became ready" and
+	// "died after running" are only distinguishable from that helper's return
+	// value — lifecycle.Fatal has no notion of that distinction, which is why
+	// this service overrides fatal.Code() here instead of calling it directly.
+	if fatal.Err() != nil {
+		if startupFailed {
+			return 2
+		}
+		return 1
+	}
+	return 0
 }
 
 // runConsumers wires the bus producer + consumers and subscribes the command
 // and fill subjects. Each subscription runs in its own goroutine; the first
 // non-cancel error fails the group.
-func runConsumers(ctx context.Context, cfg config.Config, readiness *server.Readiness, logger *slog.Logger, obs *observability.Provider) error {
+//
+// Returns (started, err): started reports whether the subscription goroutines
+// were launched before err occurred. Everything up to that point is startup
+// wiring — a dial, a store, a bad OMS_VENUE_ACCOUNTS — and the caller maps
+// !started to exit 2; started (a failure surfacing after the group is
+// running, i.e. firstErr below) maps to exit 1 (#266).
+func runConsumers(ctx context.Context, cfg config.Config, readiness *server.Readiness, logger *slog.Logger, obs *observability.Provider) (bool, error) {
 	busMetrics := bus.NewBusMetrics(obs.Registry)
 
 	// SEC-M3: the production broker requires a client SVID; a nil TLSConfig is a
 	// plaintext client it refuses at the handshake.
 	mesh, err := transport.NewMesh(ctx, cfg.SPIFFESocket)
 	if err != nil {
-		return err
+		return false, err
 	}
 	defer func() { _ = mesh.Close() }()
 	logger.Info("bus transport", "mtls", mesh.Enabled())
 
 	client, err := bus.DialNATS(ctx, bus.NATSConfig{URL: cfg.NATSURL, Name: cfg.Source, TLSConfig: mesh.Client})
 	if err != nil {
-		return err
+		return false, err
 	}
 	defer func() { _ = client.Close() }()
 
@@ -143,7 +188,7 @@ func runConsumers(ctx context.Context, cfg config.Config, readiness *server.Read
 		Metrics:         busMetrics,
 	})
 	if err != nil {
-		return err
+		return false, err
 	}
 
 	// The two durable stores, over ONE pool: the order store (the admission gate,
@@ -151,14 +196,14 @@ func runConsumers(ctx context.Context, cfg config.Config, readiness *server.Read
 	// persistence ones, and both stop being safe the moment there is a second pod.
 	store, book, closeStores, err := openStores(ctx, cfg, logger)
 	if err != nil {
-		return err
+		return false, err
 	}
 	defer closeStores()
 
 	// OMS-01e: fill→position projector over the shared book.
 	projector, err := position.NewProjector(book, producer, cfg.Tenant)
 	if err != nil {
-		return err
+		return false, err
 	}
 
 	// OMS-01f + COMP-01c: the pre-trade gate is the COMP-01 engine resolving
@@ -287,7 +332,7 @@ func runConsumers(ctx context.Context, cfg config.Config, readiness *server.Read
 	bindings, err := execution.ParseBindings(cfg.VenueAccounts)
 	if err != nil {
 		logger.Error("OMS_VENUE_ACCOUNTS is not safe to trade on", "err", err)
-		os.Exit(2)
+		return false, err
 	}
 	// Orders that margin against an account nobody bound to their portfolio. Non-zero
 	// means some part of the book is sharing collateral with the rest of it.
@@ -350,7 +395,10 @@ func runConsumers(ctx context.Context, cfg config.Config, readiness *server.Read
 	// Venue set is composition-root-selected: SimVenue by default; Binance Spot +
 	// its user-data/reconciliation/ticker workers under -tags binance
 	// (configuredVenues is build-tag split, wired to the shared order store).
-	venues, closeVenues := configuredVenues(ctx, cfg, store, producer, unverifiedAccounts, logger)
+	venues, closeVenues, err := configuredVenues(ctx, cfg, store, producer, unverifiedAccounts, logger)
+	if err != nil {
+		return false, err
+	}
 	defer closeVenues()
 	router := execution.NewRouter(venues...)
 	svc, err := order.NewService(cfg.Tenant, store, emitter, gate, router, closeRegistry, logger,
@@ -358,7 +406,7 @@ func runConsumers(ctx context.Context, cfg config.Config, readiness *server.Read
 		order.WithQuarantineCounter(quarantined),
 		order.WithClaimTimeoutCounter(claimTimeouts))
 	if err != nil {
-		return err
+		return false, err
 	}
 
 	// WithDLQ is load-bearing on this path, not hygiene. Without it a SubmitOrder
@@ -371,7 +419,7 @@ func runConsumers(ctx context.Context, cfg config.Config, readiness *server.Read
 	// here; see test/arch/bus_dlq_test.go for why it would make this worse.
 	consumer, err := bus.NewConsumer(client, bus.WithBusMetrics(busMetrics), bus.WithDLQ(client))
 	if err != nil {
-		return err
+		return false, err
 	}
 
 	type sub struct {
@@ -446,7 +494,7 @@ func runConsumers(ctx context.Context, cfg config.Config, readiness *server.Read
 	swept, err := svc.SweepInterrupted(bus.WithTenantID(ctx, cfg.Tenant))
 	if err != nil {
 		logger.Error("could not reconcile the orders left in flight by the previous process — refusing to admit new orders on a book we cannot account for", "err", err, "reconciled_before_failure", swept)
-		return err
+		return false, err
 	}
 	logger.Info("in-flight orders reconciled", "count", swept, "took", time.Since(sweepStart).String())
 
@@ -546,7 +594,7 @@ mandateArmWait:
 
 	wg.Wait()
 	readiness.Set(false)
-	return firstErr
+	return true, firstErr
 }
 
 // openStore selects the durable Postgres order store when a DSN is set

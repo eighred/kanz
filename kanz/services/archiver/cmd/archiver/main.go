@@ -14,6 +14,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/eighred/kanz/internal/lifecycle"
 	"github.com/eighred/kanz/internal/version"
 	"github.com/eighred/kanz/pkg/bus"
 	"github.com/eighred/kanz/pkg/observability"
@@ -24,18 +25,25 @@ import (
 )
 
 func main() {
-	// os.Exit skips deferred functions, so it must never run while any resource
-	// defer (kafka.Close / nc.Close / obs.Shutdown) is still on the stack — that
-	// would mean the crash reason is never flushed via OTel and connections leak.
-	// run() owns the whole defer chain and returns a plain exit code; this is the
-	// ONLY os.Exit call reachable after a resource has been opened.
+	// The lifecycle lives in run() because os.Exit skips defers: every defer
+	// run() registers fires before this line. The non-zero code is what makes a
+	// fatal halt distinguishable from a graceful SIGTERM — both otherwise exit 0
+	// with reason "Completed" in the pod's termination record (#266).
+	// 2 = startup failure, 1 = run loop died after startup, 0 = clean shutdown.
 	os.Exit(run())
 }
 
 // run performs the full archiver lifecycle and returns the process exit code.
-// Every defer registered inside it fires before run returns, and only then does
-// main call os.Exit — mirroring lake-sink's cmd/lake-sink/main.go, which never
-// os.Exits after opening a resource either.
+// Every defer registered inside it (kafka.Close / mesh.Close / nc.Close, and the
+// obs.Shutdown that flushes the crash reason via OTel) fires before run returns,
+// and only then does main call os.Exit.
+//
+// This comment used to justify the shape by saying it mirrored lake-sink, "which
+// never os.Exits after opening a resource either." That premise was never true in
+// the sense it implied: lake-sink did not os.Exit after opening a resource because
+// it never exited non-zero AT ALL — the property being cited was the #266 bug, not
+// a pattern. Both are now the same shape for the reason above, and
+// test/arch/exit_code_delegation_test.go is what keeps them there.
 func run() int {
 	cfg, err := config.Load()
 	if err != nil {
@@ -45,6 +53,10 @@ func run() int {
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+	// Records WHY we are stopping so the exit code can say so. Every site that
+	// calls fatal.Raise below already brought the process down with stop(); the
+	// only thing added is that the reason survives to the exit status (#266).
+	fatal := lifecycle.NewFatal(stop)
 
 	base := slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: cfg.LogLevel})
 	obs, err := observability.New(ctx, observability.Config{
@@ -99,7 +111,7 @@ func run() int {
 		logger.Info("archiver listening", "addr", cfg.Listen)
 		if err := httpSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			logger.Error("http server failed", "err", err)
-			stop()
+			fatal.Raise(err)
 		}
 	}()
 
@@ -157,8 +169,9 @@ func run() int {
 		logger.Error("http shutdown error", "err", err)
 	}
 
-	if runErr != nil {
-		return 1
-	}
-	return 0
+	// The run loop's own error and any fatal raised from a goroutine answer the
+	// same question — why is this process stopping — so they meet here, after
+	// every shutdown step above has run. Raise(nil) is a no-op mark.
+	fatal.Raise(runErr)
+	return fatal.Code()
 }

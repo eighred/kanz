@@ -39,10 +39,21 @@ import (
 // SCOPE AND LIMITS, stated plainly so nobody reads more assurance into a green
 // run than it carries:
 //
-//   - Only `go` statements lexically inside `func main` are checked. A goroutine
-//     launched by a helper is that helper's problem to join, and the specific
-//     failure this guard exists to prevent — deferred closers firing under a
-//     draining handler — is a property of main's stack frame.
+//   - Only `go` statements lexically inside the COMPOSITION-ROOT FRAME are
+//     checked. A goroutine launched by a helper is that helper's problem to
+//     join, and the specific failure this guard exists to prevent — deferred
+//     closers firing under a draining handler — is a property of the one frame
+//     that registers them.
+//
+//     That frame is no longer `func main`. #266 moved every service's lifecycle
+//     into a `run() int` so the process can exit non-zero WITHOUT skipping those
+//     same deferred closers (os.Exit does skip them), leaving main as nothing but
+//     `os.Exit(run())`. The defers, the goroutines and the joins all moved
+//     together, so the invariant is unchanged — but a guard still reading
+//     `func main` would have found an empty body and passed on every service at
+//     once. See entryDecl below: the frame is located by its signal.NotifyContext
+//     call, which is what makes it the frame whose defers unwind on SIGTERM,
+//     whatever it ends up being named.
 //   - A goroutine counts as a CONSUMER goroutine when its body reaches a
 //     bus.NewConsumer call, directly or through a function declared in the same
 //     main package. Reachability is syntactic: a consumer reached through a
@@ -62,11 +73,21 @@ import (
 // not one file: services/risk-engine/cmd/risk-engine spreads across several,
 // and a helper that reaches bus.NewConsumer may live in any of them).
 type mainPkg struct {
-	dir             string // module-relative, e.g. "services/accounting/cmd/accounting"
-	fset            *token.FileSet
-	files           []*ast.File
-	funcs           map[string]*ast.FuncDecl
-	mainDecl        *ast.FuncDecl
+	dir      string // module-relative, e.g. "services/accounting/cmd/accounting"
+	fset     *token.FileSet
+	files    []*ast.File
+	funcs    map[string]*ast.FuncDecl
+	mainDecl *ast.FuncDecl
+	// entryDecl is the COMPOSITION-ROOT FRAME: the function that installs the
+	// signal context and therefore owns the defer chain that unwinds on SIGTERM.
+	// Since #266 that is `run()`, not `main` — main is only `os.Exit(run())` — and
+	// in the venue adapters it is `serve()`, one level deeper still. Locating it
+	// by its signal.NotifyContext call rather than by name is what keeps this
+	// guard pointed at the right frame across those renames.
+	//
+	// Falls back to mainDecl when no signal context is found, so a binary that
+	// installs none is still analysed rather than silently skipped.
+	entryDecl       *ast.FuncDecl
 	hasConsumerCall bool
 }
 
@@ -148,9 +169,38 @@ func mainPackages(t *testing.T, root string) []*mainPkg {
 				return true
 			})
 		}
+		p.entryDecl = p.resolveEntry()
 		out = append(out, p)
 	}
 	return out
+}
+
+// resolveEntry finds the composition-root frame: the same-package function whose
+// body installs the signal context (signal.NotifyContext). That call is what
+// makes a frame the one whose defers unwind on SIGTERM, which is exactly the
+// ordering this guard is about — so it identifies the frame far more robustly
+// than the name `main` did, and survived #266 renaming it to run()/serve().
+//
+// When more than one function matches, the OUTERMOST by source position wins;
+// when none does, main stands in.
+func (p *mainPkg) resolveEntry() *ast.FuncDecl {
+	var best *ast.FuncDecl
+	for _, fd := range p.funcs {
+		found := false
+		ast.Inspect(fd.Body, func(n ast.Node) bool {
+			if call, ok := n.(*ast.CallExpr); ok && isSelector(call.Fun, "signal", "NotifyContext") {
+				found = true
+			}
+			return !found
+		})
+		if found && (best == nil || fd.Pos() < best.Pos()) {
+			best = fd
+		}
+	}
+	if best == nil {
+		return p.mainDecl
+	}
+	return best
 }
 
 // reachesNewConsumer reports whether n contains a bus.NewConsumer call, either
@@ -340,7 +390,7 @@ func (a joinAnalysis) directlyWaitsAfter(s joinPoint, pos token.Pos) bool {
 // passed — a helper waiting on its own local is waiting on its own goroutines,
 // not main's.
 func (p *mainPkg) analyseMain() joinAnalysis {
-	a := analyseFunc(p.mainDecl.Body)
+	a := analyseFunc(p.entryDecl.Body)
 
 	for _, call := range p.helperCallsIn(a) {
 		id, ok := call.Fun.(*ast.Ident)
@@ -380,13 +430,13 @@ func (p *mainPkg) analyseMain() joinAnalysis {
 // block main, so whatever they wait on is not a join of main's.
 func (p *mainPkg) helperCallsIn(a joinAnalysis) []*ast.CallExpr {
 	var out []*ast.CallExpr
-	ast.Inspect(p.mainDecl.Body, func(n ast.Node) bool {
+	ast.Inspect(p.entryDecl.Body, func(n ast.Node) bool {
 		call, ok := n.(*ast.CallExpr)
 		if !ok {
 			return true
 		}
 		id, ok := call.Fun.(*ast.Ident)
-		if !ok || id.Name == "main" || p.funcs[id.Name] == nil {
+		if !ok || id.Name == p.entryDecl.Name.Name || p.funcs[id.Name] == nil {
 			return true
 		}
 		for _, g := range a.goStmts {
@@ -473,7 +523,7 @@ func TestEveryConsumerGoroutineInMainIsJoined(t *testing.T) {
 		}
 		analysis := p.analyseMain()
 		for _, g := range analysis.goStmts {
-			if !p.reachesNewConsumer(g, map[string]bool{"main": true}) {
+			if !p.reachesNewConsumer(g, map[string]bool{p.entryDecl.Name.Name: true}) {
 				continue
 			}
 			site := p.where(g.Pos(), root)
