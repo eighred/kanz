@@ -1,8 +1,28 @@
-# Data-quality alerting — REMOVED, and why
+# `alerts/`
 
-There are no alerting rules in this directory. `data-quality.rules.yaml` was
-deleted, not disabled, and this file records what it was and what bringing it
-back requires.
+Two things live here, and they must not be confused with each other:
+
+- **`operational.rules.yaml`** — 19 live alerts over metrics the platform
+  actually emits (#230). Every one has a promtool case in `operational_test.yaml`
+  that makes it FIRE; `kanz/test/arch/observability_rules_reachable_test.go`
+  fails the build for an alert that has none. Each threshold and `for:` duration
+  states in a comment where its number comes from, because a rule nobody can
+  justify is silenced on its first false page.
+- **The record below of `data-quality.rules.yaml`, which was DELETED** — the
+  cautionary half of this directory, and the reason `operational.rules.yaml` is
+  shaped and tested the way it is.
+
+**None of it is delivered anywhere yet.** There is no Alertmanager (#98), so
+these alerts are evaluated and reach nobody. That is not left to a comment:
+`prometheus.yaml` discovers an Alertmanager by pod label rather than naming an
+address, so `prometheus_notifications_alertmanagers_discovered` reads 0, and
+`AlertDeliveryNotDelivering` fires permanently on Prometheus's own `/alerts`
+page saying exactly that. It clears by itself when an Alertmanager appears.
+
+## Data-quality alerting — REMOVED, and why
+
+`data-quality.rules.yaml` was deleted, not disabled, and the rest of this file
+records what it was and what bringing it back requires.
 
 ## What happened
 
@@ -108,11 +128,12 @@ Order matters, and it is the order that was violated to produce this state:
 
 Two things sit outside that order and are worth knowing before starting:
 
-- **An alert with no Prometheus is still nothing.** There is no Prometheus in
-  this estate at all — `infra/observability/` ships rules, dashboards and SLOs,
-  and nothing scrapes or evaluates any of them. That is issue **#61**, and it is
-  part of why an entire orphaned alerting layer survived unnoticed: no evaluator
-  ever tried to run these rules and found their series missing.
+- **An alert with no Prometheus is still nothing.** ~~There is no Prometheus in
+  this estate at all~~ — resolved by **#61**, which added
+  `infra/observability/prometheus.yaml`. It remains part of why an entire
+  orphaned alerting layer survived unnoticed: for as long as no evaluator ran
+  these rules, nothing found their series missing. There is still no
+  Alertmanager, so what is evaluated is delivered nowhere (**#98**).
 - **An alert nobody acts on is a ticket nobody opens.** Remediation lives in
   `services/autopilot`, which is not deployable today (issue **#124**).
 

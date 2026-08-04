@@ -8,6 +8,8 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+
+	"gopkg.in/yaml.v3"
 )
 
 // A PROMETHEUS RULE FILE MUST BE REACHABLE BY EXACTLY ONE LIST (#230).
@@ -180,4 +182,211 @@ func contains(hay []string, needle string) bool {
 		}
 	}
 	return false
+}
+
+// EVERY ALERT MUST HAVE A TEST THAT MAKES IT FIRE (#230).
+//
+// `promtool check rules` proves an expression PARSES. It does not evaluate it,
+// so it cannot tell a working alert from one that will never produce a sample —
+// and this repository has already shipped the second kind at scale. #62 deleted
+// ten data-quality rules that parsed, deployed, and could not fire, because the
+// series they compared against had no producer; the layer read as healthy for
+// months precisely BECAUSE nothing in it worked (alerts/README.md).
+//
+// #63's guard (observability_metrics_test.go) closes the specific case where the
+// metric name does not exist in Go. It cannot close the general one: an alert
+// over real metrics can still be unfireable through a label selector that
+// matches nothing, an `and` between two vectors whose label sets never join, a
+// unit error, or an aggregation that drops the label the join needs. Every one
+// of those parses. The only thing that distinguishes a working alert from a
+// decorative one is running it against a series, which is what promtool test
+// rules does and what this guard makes non-optional.
+//
+// A FIRING CASE, NOT MERELY A MENTION. An alert named only inside an
+// `exp_alerts: []` assertion is proven to stay QUIET, which is the opposite
+// claim. Coverage here means at least one alert_rule_test entry for that name
+// with a non-empty exp_alerts.
+func TestEveryAlertRuleIsProvenToFire(t *testing.T) {
+	obsDir := filepath.Join(moduleRoot(t), "infra", "observability")
+
+	declared := map[string]string{} // alert name -> file it is declared in
+	proven := map[string]bool{}     // alert name -> some harness makes it fire
+	var harnesses []string
+
+	err := filepath.Walk(obsDir, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if info.IsDir() {
+			return nil
+		}
+		rel, _ := filepath.Rel(obsDir, path)
+		rel = filepath.ToSlash(rel)
+
+		switch {
+		case strings.HasSuffix(info.Name(), ".rules.yaml"):
+			var doc struct {
+				Groups []struct {
+					Rules []struct {
+						Alert string `yaml:"alert"`
+					} `yaml:"rules"`
+				} `yaml:"groups"`
+			}
+			if uerr := yaml.Unmarshal([]byte(readFile(t, path)), &doc); uerr != nil {
+				t.Fatalf("parse %s: %v", rel, uerr)
+			}
+			for _, g := range doc.Groups {
+				for _, r := range g.Rules {
+					if r.Alert != "" {
+						declared[r.Alert] = rel
+					}
+				}
+			}
+		case strings.HasSuffix(info.Name(), "_test.yaml"):
+			harnesses = append(harnesses, rel)
+			var doc struct {
+				Tests []struct {
+					AlertRuleTests []struct {
+						Alertname string                   `yaml:"alertname"`
+						ExpAlerts []map[string]interface{} `yaml:"exp_alerts"`
+					} `yaml:"alert_rule_test"`
+				} `yaml:"tests"`
+			}
+			if uerr := yaml.Unmarshal([]byte(readFile(t, path)), &doc); uerr != nil {
+				t.Fatalf("parse %s: %v", rel, uerr)
+			}
+			for _, tc := range doc.Tests {
+				for _, art := range tc.AlertRuleTests {
+					// The non-empty check is the whole point — see the doc comment.
+					if art.Alertname != "" && len(art.ExpAlerts) > 0 {
+						proven[art.Alertname] = true
+					}
+				}
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walk %s: %v", obsDir, err)
+	}
+
+	// NON-VACUITY, both halves. A parser that stopped finding alerts, or a walk
+	// that stopped finding harnesses, would make every assertion below trivially
+	// true — and this guard's whole subject is checks that pass while asserting
+	// nothing.
+	if len(declared) == 0 {
+		t.Fatal("found zero `- alert:` declarations under infra/observability — the rules " +
+			"parser is broken, not the rules")
+	}
+	if len(harnesses) == 0 {
+		t.Fatal("found zero *_test.yaml harnesses under infra/observability — the walk is " +
+			"broken, or every alert in the estate is now unproven")
+	}
+
+	var unproven []string
+	for name, file := range declared {
+		if !proven[name] {
+			unproven = append(unproven, name+" ("+file+")")
+		}
+	}
+	if len(unproven) > 0 {
+		sort.Strings(unproven)
+		t.Errorf("%d alert(s) have no promtool test that makes them FIRE:\n\n  %s\n\n"+
+			"Add an alert_rule_test with a non-empty exp_alerts to a *_test.yaml beside the "+
+			"rules file. A rule that parses but cannot fire is indistinguishable from a healthy "+
+			"platform: the expression returns an empty vector, the alert never appears, and the "+
+			"absence reads as quiet. That is how ten data-quality rules survived for months "+
+			"(#62), and it is what #230 exists to stop repeating.\n\n"+
+			"Naming the alert only in an `exp_alerts: []` case does NOT count — that proves it "+
+			"stays silent, which is the opposite claim.",
+			len(unproven), strings.Join(unproven, "\n  "))
+	}
+
+	t.Logf("%d alert(s) across %d harness(es), all with a firing case", len(declared), len(harnesses))
+}
+
+// A promtool HARNESS MUST BE RUN BY DISCOVERY, NOT BY NAME (#230).
+//
+// Sibling of TestPrometheusRulesHaveExactlyOneSourceOfTruth above, one layer
+// out: that guard is about which rule files DEPLOY, this one is about which
+// test harnesses EXECUTE. Both failures look the same from a green pipeline —
+// a file in the repository that nothing reads.
+//
+// It has happened here. #61 found slo_test.yaml had never been executed by
+// anything: every reference to promtool in the repository was a comment telling
+// a human to run it. The step that fixed it named `slo_test.yaml` with
+// working-directory pinned to slo/, which is the same list-written-by-hand
+// shape, and a second harness written beside a new rules file would have sat
+// unrun exactly as the first one did.
+func TestPromtoolHarnessesAreRunByDiscovery(t *testing.T) {
+	repoRoot := filepath.Dir(moduleRoot(t))
+	obsDir := filepath.Join(moduleRoot(t), "infra", "observability")
+
+	var harnessNames []string
+	err := filepath.Walk(obsDir, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if !info.IsDir() && strings.HasSuffix(info.Name(), "_test.yaml") {
+			harnessNames = append(harnessNames, info.Name())
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walk %s: %v", obsDir, err)
+	}
+	// NON-VACUITY (1/2).
+	if len(harnessNames) == 0 {
+		t.Fatal("found no *_test.yaml under infra/observability — nothing to check, which " +
+			"means this guard is asserting nothing")
+	}
+	sort.Strings(harnessNames)
+
+	discovers := regexp.MustCompile(`-name\s+'\*_test\.yaml'|-name\s+"\*_test\.yaml"`)
+
+	var discovered bool
+	var offenders []string
+	for _, path := range workflowFiles(t, repoRoot) {
+		body, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read %s: %v", path, err)
+		}
+		rel, _ := filepath.Rel(repoRoot, path)
+		for i, raw := range strings.Split(strings.ReplaceAll(string(body), "\r\n", "\n"), "\n") {
+			line := strings.TrimSpace(raw)
+			// Comments explain why the enumeration is gone; matching prose would
+			// flag a workflow for documenting itself. Same exemption, and same
+			// reason, as the guard above.
+			if strings.HasPrefix(line, "#") {
+				continue
+			}
+			if discovers.MatchString(line) {
+				discovered = true
+			}
+			for _, name := range harnessNames {
+				if strings.Contains(line, name) {
+					offenders = append(offenders,
+						filepath.ToSlash(rel)+":"+strconv.Itoa(i+1)+"\n      "+line)
+					break
+				}
+			}
+		}
+	}
+
+	// NON-VACUITY (2/2).
+	if !discovered {
+		t.Fatalf("no workflow discovers promtool harnesses with `find ... -name '*_test.yaml'`.\n\n" +
+			"Every harness in the tree must be executed. When CI named slo_test.yaml directly, a " +
+			"second harness added anywhere else would have been a test file nobody ran — a claim " +
+			"of coverage with nothing behind it, which is the defect #61 fixed (#230).")
+	}
+	if len(offenders) > 0 {
+		sort.Strings(offenders)
+		t.Fatalf("these workflow lines name a promtool harness by filename instead of "+
+			"discovering it:\n\n  %s\n\nA named list omits the next harness silently: it sits in "+
+			"the repository looking like coverage and is never executed.", strings.Join(offenders, "\n\n  "))
+	}
+
+	t.Logf("%d promtool harness(es) under infra/observability, all executed by discovery: %s",
+		len(harnessNames), strings.Join(harnessNames, ", "))
 }

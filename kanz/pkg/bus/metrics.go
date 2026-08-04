@@ -18,6 +18,7 @@ type BusMetrics struct {
 	consumeTotal   *prometheus.CounterVec   // subject, group, result
 	consumeLatency *prometheus.HistogramVec // subject, group
 	consumeHalted  *prometheus.CounterVec   // subject, group
+	dlqParked      *prometheus.CounterVec   // subject, group, class
 	dlqRedrive     *prometheus.CounterVec   // subject, result
 	consumerLag    *prometheus.GaugeVec     // subject, group, partition
 	pending        *prometheus.GaugeVec     // subject, group
@@ -57,6 +58,44 @@ func NewBusMetrics(reg prometheus.Registerer) *BusMetrics {
 			Name: "kanz_bus_consume_halted_total",
 			Help: "subscriptions halted without committing because a delivery could neither be handled nor dead-lettered — the dead-letter path is down and the consumer is holding the offset rather than skipping the event.",
 		}, []string{"subject", "group"}),
+		// THE INFLOW SIDE OF THE DEAD-LETTER QUEUE (#230). Incremented ONLY when
+		// Consumer.publishDLQ has actually parked the message — the DLQ publish
+		// returned nil, so a recoverable copy exists on `dlq.<subject>` for
+		// cmd/kanz-redrive to find.
+		//
+		// WHY NOT kanz_bus_consume_total{result="error"}, WHICH ALREADY MOVES ON
+		// EVERY ONE OF THESE. Because it moves on more than these, and the
+		// difference is the whole question a responder is asking:
+		//
+		//   - It counts a dispatch failure whether or not a DLQ is configured. A
+		//     consumer built without WithDLQ returns the error to the broker and
+		//     the event is redelivered or dropped; a consumer with one has a
+		//     durable copy. "Parked" and "gone" must not share a series.
+		//   - It counts the failure BEFORE the park is attempted. When the park
+		//     itself fails, consume_total{result="error"} still increments while
+		//     nothing was parked at all — on Kafka that is the halt case
+		//     (kanz_bus_consume_halted_total), and on NATS the event goes back to
+		//     the broker. Counting it as a park would report a recoverable message
+		//     that does not exist.
+		//   - It carries no CLASS, and class is what decides whether the message is
+		//     recoverable. A redrive returns a `transient` park to its subject; it
+		//     REFUSES a `terminal` one, because re-running unframeable bytes just
+		//     parks them again (see IsTerminal). Those are two different incidents
+		//     with two different responses and they must be separable in a rule.
+		//
+		// THIS IS INFLOW, NOT DEPTH, AND THAT IS DELIBERATE. A depth gauge would
+		// have to be fed by a poller over JetStream ConsumerInfo/StreamInfo, and
+		// this package has already shipped two poller-fed gauges whose poller was
+		// never written — consumerLag and pending below, both of which export no
+		// series at all and are why alerts/operational.rules.yaml has no rule over
+		// either. Adding a third of the same shape would look like DLQ depth was
+		// now measured while measuring nothing. Inflow is on the message path, so
+		// it is real the moment this line runs; paired with dlqRedrive (outflow) it
+		// makes the dead-letter queue a two-sided, observable thing.
+		dlqParked: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "kanz_bus_dlq_parked_total",
+			Help: "messages parked on dlq.<subject> after a delivery failed, by ORIGINAL subject, consumer group and failure class (transient|terminal). Counted only once the DLQ publish succeeded, so every increment is a message a redrive can still find.",
+		}, []string{"subject", "group", "class"}),
 		// THE DRAIN'S OWN RED SIGNAL (#220). Labelled by DESTINATION subject and
 		// result (ok|refused|error), because the three outcomes need different
 		// human responses: `ok` is recovery, `error` is a broken drain, and
@@ -80,7 +119,8 @@ func NewBusMetrics(reg prometheus.Registerer) *BusMetrics {
 	}
 	reg.MustRegister(
 		m.publishTotal, m.publishLatency,
-		m.consumeTotal, m.consumeLatency, m.consumeHalted, m.dlqRedrive,
+		m.consumeTotal, m.consumeLatency, m.consumeHalted,
+		m.dlqParked, m.dlqRedrive,
 		m.consumerLag, m.pending,
 	)
 	return m
@@ -121,6 +161,21 @@ func (m *BusMetrics) observeConsumeHalt(subject, group string) {
 		return
 	}
 	m.consumeHalted.WithLabelValues(subject, group).Inc()
+}
+
+// observeDLQPark records one message that reached the dead-letter queue. class
+// is ClassTransient or ClassTerminal — the same value written to
+// HeaderDLQClass, taken from the same classOf() call, so the series and the
+// parked message's own header can never disagree about what happened.
+//
+// Call it AFTER the DLQ publish succeeds and never before: a park that failed
+// left no message anywhere, and counting it here would tell a responder to go
+// looking for a copy that was never written.
+func (m *BusMetrics) observeDLQPark(subject, group, class string) {
+	if m == nil {
+		return
+	}
+	m.dlqParked.WithLabelValues(subject, group, class).Inc()
 }
 
 // observeRedrive records one parked message the drain acted on. result is

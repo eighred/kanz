@@ -16,6 +16,15 @@
 # this makes the platform observable; it does not make it alertable. Do not read
 # a running Prometheus as "on-call works".
 #
+# THAT LAST SENTENCE IS NO LONGER LEFT TO A COMMENT (#230). A comment is read
+# once, by whoever deploys; the operator looking at /alerts at 03:00 six months
+# later is not reading this file. So the `alerting:` block below DISCOVERS an
+# Alertmanager rather than naming one, which makes
+# prometheus_notifications_alertmanagers_discovered read 0 while none exists,
+# and alerts/operational.rules.yaml's AlertDeliveryNotDelivering fires
+# permanently on the /alerts page itself saying so. It clears with no config
+# change when #98 provides somewhere to run one.
+#
 # PLAIN PROMETHEUS, NOT THE OPERATOR, and the reason is the rule files. slo/
 # ships slo.recording.rules.yaml and slo.alerts.rules.yaml as ordinary rule
 # files with a promtool test harness in slo_test.yaml. The Operator would
@@ -85,6 +94,53 @@ data:
     # would pass against rules nobody ran.
     rule_files:
       - /etc/prometheus/rules/*.rules.yaml
+
+    # WHERE ALERTS GO — DISCOVERED, NOT NAMED, AND TODAY IT FINDS NOTHING (#230).
+    #
+    # THERE IS NO ALERTMANAGER IN THIS ESTATE. That is issue #98's problem, not
+    # this file's: nothing has anywhere to run and no receiver has a real
+    # destination. What this block does is make the ABSENCE a discoverable fact
+    # instead of a sentence in a comment.
+    #
+    # It is deliberately NOT a static_config naming
+    # `alertmanager.kanz-observability.svc:9093`. Writing down an address for a
+    # service that does not exist is the failure this whole issue is about in
+    # miniature: the config would read as complete, promtool would pass it, and
+    # `prometheus_notifications_alertmanagers_discovered` would report 1 — a
+    # configured Alertmanager — for a name that resolves to nothing. Delivery
+    # would fail silently into prometheus_notifications_errors_total, which no
+    # one is watching, and the estate would look alertable.
+    #
+    # Kubernetes discovery cannot lie in that direction. With no Alertmanager pod
+    # it finds zero, the discovered gauge reads 0, and the AlertDeliveryNotDelivering
+    # rule in alerts/operational.rules.yaml fires and STAYS firing on Prometheus's
+    # own /alerts page — the one surface a human opens. "Not deployed" is then
+    # loud, and cannot be mistaken for "deployed and quiet".
+    #
+    # AND IT SELF-HEALS. When #98 lands an Alertmanager pod labelled
+    # app=alertmanager in this namespace, discovery finds it, delivery starts and
+    # that alert resolves — with no edit here. There is no second step to forget.
+    #
+    # RBAC: role: pod only, which the prometheus-pod-discovery ClusterRole above
+    # already grants. No new permission.
+    alerting:
+      alertmanagers:
+        - kubernetes_sd_configs:
+            - role: pod
+              namespaces: { names: [kanz-observability] }
+          relabel_configs:
+            - source_labels: [__meta_kubernetes_pod_label_app]
+              action: keep
+              regex: alertmanager
+            # The port is fixed rather than annotation-driven, unlike the scrape
+            # job below: 9093 is Alertmanager's own default and there is exactly
+            # one such workload, so an annotation here would be a configuration
+            # surface with no user.
+            - source_labels: [__address__]
+              action: replace
+              regex: ([^:]+)(?::\d+)?
+              replacement: $1:9093
+              target_label: __address__
 
     scrape_configs:
       # ANNOTATION-DRIVEN DISCOVERY, not a static target list. A hardcoded list

@@ -1,0 +1,127 @@
+# promtool unit tests for the two SLOW rungs of the burn-rate ladder —
+# SLOBudgetBurnTicket (1d + 2h) and SLOBudgetBurnChronic (3d + 6h).
+#
+# WHY A SECOND FILE RATHER THAN MORE CASES IN slo_test.yaml. promtool's
+# `evaluation_interval` is per FILE, and these two alerts need days of samples.
+# At slo_test.yaml's 1m evaluation interval, 3.3 days is ~4800 evaluations of 40
+# recording rules for every case in the file — minutes of CI for two alerts. At
+# 1h it is 80. The windows these rules use are 2h and up, so hourly resolution
+# loses nothing they can see.
+#
+# WHY IT EXISTS AT ALL. Until #230 these two rules had never been executed by
+# anything. slo_test.yaml covers SLOFastBurn and SLOSlowBurn; the ticket-grade
+# pair was written, reviewed and deployed on the assumption that rules of the
+# same shape work. test/arch/observability_rules_reachable_test.go's
+# TestEveryAlertRuleIsProvenToFire now fails the build for an alert with no
+# firing case, and this file is what that guard demanded.
+#
+#   cd kanz/infra/observability/slo && promtool test rules slo_longwindow_test.yaml
+rule_files:
+  - slo.recording.rules.yaml
+  - slo.alerts.rules.yaml
+
+evaluation_interval: 1h
+
+# GROUP ORDER IS LOAD-BEARING HERE, AND ITS ABSENCE MADE THIS FILE FLAKY —
+# 3 passes and 2 failures out of 5 runs before it was added.
+#
+# promtool sorts rule groups with sort.Slice on their group_eval_order index,
+# and sort.Slice is NOT STABLE. With no order declared every group gets index 0,
+# so the sort permutes them arbitrarily per run. When slo_burn_rate happened to
+# be evaluated before slo_sli_error on a tick, the alerts read the recording
+# series from the PREVIOUS tick — 1h old, past the 5m query lookback-delta — got
+# an empty vector, and resolved.
+#
+# slo_test.yaml has the same dependency and does not need this, which is why the
+# hazard is easy to miss: at its 1m evaluation interval the previous tick's
+# recording sample is 1m old and still inside the lookback window, so the order
+# cannot matter. The bug appears only once the evaluation interval exceeds the
+# lookback delta — i.e. exactly when someone does what this file does to make a
+# multi-day window affordable. Declaring the order is the fix that does not
+# depend on the interval.
+group_eval_order:
+  - slo_meta
+  - slo_sli_error
+  - slo_burn_rate
+
+tests:
+  # A STEADY 0.5% ERROR RATE ON api-gateway/availability, WHOSE BUDGET IS 0.1%.
+  #
+  # That single number is chosen to sit inside exactly one rung of the ladder,
+  # which is what makes this a test of the LADDER and not of one rule:
+  #
+  #   fast    14.4 × 0.001 = 0.0144  → 0.005 is below it, must NOT page
+  #   slow     6.0 × 0.001 = 0.006   → 0.005 is below it, must NOT page
+  #   ticket   3.0 × 0.001 = 0.003   → 0.005 is above it, MUST ticket
+  #   chronic  1.0 × 0.001 = 0.001   → 0.005 is above it, MUST ticket
+  #
+  # A chronic low-grade drain that no page catches is precisely what the bottom
+  # two rungs were added for, so an assertion that the top two stay quiet is the
+  # substance of the test rather than a formality.
+  - interval: 1h
+    name: a chronic 0.5% error rate tickets twice and pages never
+    input_series:
+      - series: 'kanz_gateway_requests_total{code="200"}'
+        values: '0+995x80'
+      - series: 'kanz_gateway_requests_total{code="500"}'
+        values: '0+5x80'
+    promql_expr_test:
+      # ROUNDED for the same reason slo_test.yaml rounds: rate() extrapolates in
+      # floating point and promtool compares exp_samples exactly. The claim is
+      # "the 3d error ratio is 0.5%", not the last bits of a float.
+      - expr: round(slo:sli_error:ratio_rate3d{service="api-gateway", slo="availability"}, 0.0001)
+        eval_time: 76h
+        exp_samples:
+          - labels: '{service="api-gateway", slo="availability"}'
+            value: 0.005
+    alert_rule_test:
+      - eval_time: 76h
+        alertname: SLOBudgetBurnTicket
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              layer: slo
+              burn_rate: elevated
+              service: api-gateway
+              slo: availability
+            exp_annotations:
+              summary: "Elevated error-budget burn on api-gateway/availability"
+              description: "api-gateway/availability is burning at >3× (1d+2h windows) — current 1d error ratio 0.5%. File a reliability ticket before it pages."
+      - eval_time: 76h
+        alertname: SLOBudgetBurnChronic
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              layer: slo
+              burn_rate: chronic
+              service: api-gateway
+              slo: availability
+            exp_annotations:
+              summary: "Chronic error-budget drain on api-gateway/availability"
+              description: "api-gateway/availability has burned >1× budget over 3d (3d+6h windows) — current 3d error ratio 0.5%. The 28d budget will not survive the window at this rate."
+      # THE TWO RUNGS ABOVE MUST STAY SILENT. If they did not, the ladder would
+      # be four alerts for one condition and the ticket grades would be noise.
+      - eval_time: 76h
+        alertname: SLOFastBurn
+        exp_alerts: []
+      - eval_time: 76h
+        alertname: SLOSlowBurn
+        exp_alerts: []
+
+  # AND THE BOTTOM RUNG HAS A FLOOR. At 0.05% — half the budget rate — nothing
+  # fires at all. Without this, `> 1 × budget` on the chronic rule could be any
+  # comparison at all and the test above would not notice.
+  - interval: 1h
+    name: an error rate inside the budget fires nothing
+    input_series:
+      - series: 'kanz_gateway_requests_total{code="200"}'
+        values: '0+9995x80'
+      - series: 'kanz_gateway_requests_total{code="500"}'
+        values: '0+5x80'
+    alert_rule_test:
+      - eval_time: 76h
+        alertname: SLOBudgetBurnChronic
+        exp_alerts: []
+      - eval_time: 76h
+        alertname: SLOBudgetBurnTicket
+        exp_alerts: []
