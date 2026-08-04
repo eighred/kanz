@@ -41,6 +41,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sync"
+	"time"
 
 	"github.com/eighred/kanz/internal/topic"
 	"github.com/eighred/kanz/pkg/bus"
@@ -56,12 +57,24 @@ const HeaderEventID = "Kanz-Event-Id"
 // to derive a per-topic DLQ name from in the first place.
 const DLQSubject = "dlq.archiver"
 
-// Headers naming the cause of a dead-lettered event, for the human who has to
-// look at dlq.archiver and decide what to do with it.
+// Why Handle did not land an event on its real topic. ONE VOCABULARY, TWO
+// SURFACES: these are the "reason" label on kanz_archiver_failed_total (see
+// NewMetrics) and the prefix of the parked message's bus.HeaderDLQError, so the
+// metric an operator alerts on and the header they read next agree by
+// construction rather than by care.
+//
+// They used to ALSO be a wire header of this package's own, `Kanz-DLQ-Reason`,
+// declared beside hand-rolled `Kanz-DLQ-Subject` and `Kanz-DLQ-Error` constants
+// — three spellings of pkg/bus's DLQ contract, one of them (`Kanz-DLQ-Subject`
+// vs `Kanz-DLQ-Original-Subject`) a near-miss of the single field a drain routes
+// on. #285 removed all three. The header is gone rather than renamed because
+// both of its values are bus.ClassTerminal, so it answered the same question
+// bus.HeaderDLQClass answers, one level finer — see deadLetter.
 const (
-	HeaderDLQReason  = "Kanz-DLQ-Reason"  // "unframe" | "route"
-	HeaderDLQError   = "Kanz-DLQ-Error"   // the error string
-	HeaderDLQSubject = "Kanz-DLQ-Subject" // the NATS subject the event arrived on
+	reasonUnframe    = "unframe"
+	reasonRoute      = "route"
+	reasonPublish    = "publish"
+	reasonDLQPublish = "dlq_publish"
 )
 
 // Publisher is the Kafka side. Satisfied by *bus.KafkaClient.
@@ -160,8 +173,8 @@ func (a *Archiver) Handle(ctx context.Context, msg bus.Message) error {
 	if err != nil {
 		// Not decodable ⇒ it will NEVER decode differently on redelivery. Terminal.
 		a.cfg.Logger.Error("archiver: undecodable envelope", "subject", msg.Subject, "err", err)
-		a.observeFail("", "unframe")
-		return a.deadLetter(ctx, msg, "unframe", err, "")
+		a.observeFail("", reasonUnframe)
+		return a.deadLetter(ctx, msg, reasonUnframe, err, "")
 	}
 
 	name, err := topic.For(env, a.cfg.Tenant)
@@ -170,8 +183,8 @@ func (a *Archiver) Handle(ctx context.Context, msg bus.Message) error {
 		// on redelivery. Terminal.
 		a.cfg.Logger.Error("archiver: refusing to route event",
 			"subject", msg.Subject, "event_id", env.GetEventId(), "event_type", env.GetEventType(), "err", err)
-		a.observeFail("", "route")
-		return a.deadLetter(ctx, msg, "route", err, env.GetEventId())
+		a.observeFail("", reasonRoute)
+		return a.deadLetter(ctx, msg, reasonRoute, err, env.GetEventId())
 	}
 
 	// Body VERBATIM. Key = partition_key, so events sharing a key land on one
@@ -187,7 +200,7 @@ func (a *Archiver) Handle(ctx context.Context, msg bus.Message) error {
 		// event we failed to archive.
 		a.cfg.Logger.Error("archiver: kafka produce failed — NACKing",
 			"topic", name, "event_id", env.GetEventId(), "err", err)
-		a.observeFail(name, "publish")
+		a.observeFail(name, reasonPublish)
 		return fmt.Errorf("archiver: publish to %q: %w", name, err)
 	}
 	if a.cfg.Metrics != nil {
@@ -212,11 +225,49 @@ func (a *Archiver) observeFail(topic, reason string) {
 // TRANSIENT — so this returns a non-nil error (NACK) instead. An event must never
 // be acked having reached neither its real topic nor the DLQ; "terminal" describes
 // the routing decision, not a license to drop the event on a second failure.
+//
+// THE HEADERS ARE pkg/bus's, NOT THIS PACKAGE'S (#285). The DLQ header names are
+// one wire contract with one home, and this package had grown its own near-miss
+// spelling of the field a drain routes on — `Kanz-DLQ-Subject` where pkg/bus
+// writes `Kanz-DLQ-Original-Subject`. Nothing caught it because until #220 built
+// the drain, nothing read either name. test/arch/dlq_header_test.go now fails the
+// build on a `Kanz-DLQ-*` literal outside pkg/bus.
+//
+// BOTH PARK REASONS ARE ClassTerminal, and that is a decision, not a default.
+// Every path into here is a pure function of the bytes and this archiver's static
+// config: bus.Unframe on a body that will never decode, or topic.For on an
+// event_type/tenant that will never map. Nothing in the WORLD changes to make
+// either succeed — which is exactly pkg/bus's terminal/transient line, and the
+// same call metrics.go's "reason" documentation already makes. Marking `route`
+// transient because a routing table could be corrected would invite an automatic
+// drain to replay it immediately, fail identically and re-park: the loop the class
+// exists to prevent. Recovery after a config fix is what --include-terminal is
+// for.
+//
+// NO DRAIN READS THIS TOPIC, AND THAT IS THE STANDING GAP (#285 item 3).
+// cmd/kanz-redrive is NATS-only; dlq.archiver is Kafka, has no consumer, and
+// infra/kafka/topics-job.yaml deletes it after 30 days. The headers below are what
+// a drain needs — where to send it back (bus.HeaderDLQOriginalSubject), how old it
+// is (bus.HeaderDLQParkedAt, the min-age gate) and whether it may be replayed at
+// all (bus.HeaderDLQClass) — so that drain does not have to guess. Until it
+// exists, recovering a parked event means an operator reading the topic by hand.
+//
+// bus.HeaderDLQAttempts is deliberately ABSENT rather than fabricated: bus.Message
+// carries no delivery counter, so this cannot know whether NATS redelivered the
+// event once or ten times, and a hardcoded "1" would read as fact. It is
+// diagnostic only — no redrive decision reads it. bus.HeaderDLQRedrives is absent
+// for the same honesty: nothing redrives these yet, and redriveCount already reads
+// an absent header as zero.
 func (a *Archiver) deadLetter(ctx context.Context, msg bus.Message, reason string, cause error, eventID string) error {
 	headers := map[string]string{
-		HeaderDLQReason:  reason,
-		HeaderDLQError:   cause.Error(),
-		HeaderDLQSubject: msg.Subject,
+		bus.HeaderDLQOriginalSubject: msg.Subject,
+		// The reason prefix is what `Kanz-DLQ-Reason` used to carry. It rides in
+		// the error rather than a seventh header because two fields answering
+		// "why did this park" is the divergence this change removed, and the
+		// machine-readable copy already exists as the metric's reason label.
+		bus.HeaderDLQError:    reason + ": " + cause.Error(),
+		bus.HeaderDLQParkedAt: time.Now().UTC().Format(time.RFC3339Nano),
+		bus.HeaderDLQClass:    bus.ClassTerminal,
 	}
 	if eventID != "" {
 		headers[HeaderEventID] = eventID
@@ -232,7 +283,7 @@ func (a *Archiver) deadLetter(ctx context.Context, msg bus.Message, reason strin
 		// The underlying cause (reason: "unframe"/"route") was already counted by
 		// the caller — this is the SEPARATE, more severe outcome: the event
 		// reached neither its real topic nor the DLQ.
-		a.observeFail(DLQSubject, "dlq_publish")
+		a.observeFail(DLQSubject, reasonDLQPublish)
 		return fmt.Errorf("archiver: dlq publish: %w", err)
 	}
 	a.cfg.Logger.Warn("archiver: terminal failure — dead-lettered and acked",

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -123,17 +124,61 @@ func TestHandle_UnroutableEventIsDeadLetteredAndAcked(t *testing.T) {
 	if string(m.Body) != string(raw) {
 		t.Error("DLQ body was not the raw envelope verbatim")
 	}
-	if m.Headers["Kanz-DLQ-Reason"] != "route" {
-		t.Errorf("Kanz-DLQ-Reason = %q, want route", m.Headers["Kanz-DLQ-Reason"])
-	}
-	if m.Headers["Kanz-DLQ-Subject"] != "order.order.submitted" {
-		t.Errorf("Kanz-DLQ-Subject = %q, want order.order.submitted", m.Headers["Kanz-DLQ-Subject"])
-	}
-	if m.Headers["Kanz-DLQ-Error"] == "" {
-		t.Error("Kanz-DLQ-Error is empty, want the routing error")
-	}
+	assertParkContract(t, m, "route", "order.order.submitted")
 	if m.Headers["Kanz-Event-Id"] != "evt-1" {
 		t.Errorf("Kanz-Event-Id = %q, want evt-1 (readable even though routing failed)", m.Headers["Kanz-Event-Id"])
+	}
+	// The archiver's own near-miss spelling of the originating subject is gone
+	// (#285). It is asserted by NAME rather than by the constant, because the
+	// whole defect was that the constant and the wire disagreed.
+	if _, ok := m.Headers["Kanz-DLQ-Subject"]; ok {
+		t.Error("Kanz-DLQ-Subject is back. It is a second name for Kanz-DLQ-Original-Subject, " +
+			"and a drain keyed on the canonical one finds nothing and reports success")
+	}
+	if _, ok := m.Headers["Kanz-DLQ-Reason"]; ok {
+		t.Error("Kanz-DLQ-Reason is back. Both of its values are ClassTerminal, so it duplicates " +
+			"Kanz-DLQ-Class; the reason rides in Kanz-DLQ-Error and in the metric's reason label")
+	}
+}
+
+// assertParkContract checks a parked message against pkg/bus's DLQ wire contract
+// (#285): the archiver must carry what a drain reads, under the shared names.
+//
+// The header names are spelled out as LITERALS here on purpose. Asserting through
+// bus.HeaderDLQClass would pass even if that constant's value changed, which is
+// exactly the silent break — the constant and the wire have to be pinned to each
+// other somewhere, and a test is the only place that can be done.
+func assertParkContract(t *testing.T, m bus.Message, wantReason, wantOrigin string) {
+	t.Helper()
+
+	if got := m.Headers["Kanz-DLQ-Original-Subject"]; got != wantOrigin {
+		t.Errorf("Kanz-DLQ-Original-Subject = %q, want %q — without it a drain has no address to "+
+			"send the event back to and refuses", got, wantOrigin)
+	}
+	// The reason it failed is the prefix of the error, not a header of its own,
+	// and it is the same token as the kanz_archiver_failed_total reason label.
+	if got := m.Headers["Kanz-DLQ-Error"]; !strings.HasPrefix(got, wantReason+": ") {
+		t.Errorf("Kanz-DLQ-Error = %q, want it to begin %q — that prefix is what Kanz-DLQ-Reason "+
+			"used to carry, and the operator reading the topic needs it", got, wantReason+": ")
+	}
+	// BOTH park reasons are terminal: unframe and route are pure functions of the
+	// bytes and this archiver's static config, so nothing in the world changes to
+	// make either succeed. Transient here would invite a drain to replay it,
+	// fail identically and re-park — the loop the class exists to prevent.
+	if got := m.Headers["Kanz-DLQ-Class"]; got != "terminal" {
+		t.Errorf("Kanz-DLQ-Class = %q, want terminal", got)
+	}
+	parkedAt := m.Headers["Kanz-DLQ-Parked-At"]
+	if parkedAt == "" {
+		t.Fatal("Kanz-DLQ-Parked-At is absent — a drain's min-age gate cannot establish the " +
+			"message's age and refuses it")
+	}
+	// RFC3339Nano specifically: pkg/bus.parkedAtOf parses it with that layout and
+	// refuses anything else, so a differently-formatted timestamp is the same as
+	// no timestamp.
+	if _, err := time.Parse(time.RFC3339Nano, parkedAt); err != nil {
+		t.Errorf("Kanz-DLQ-Parked-At = %q does not parse as RFC3339Nano (%v) — pkg/bus.parkedAtOf "+
+			"refuses it, so the age gate is unusable", parkedAt, err)
 	}
 }
 
@@ -158,9 +203,7 @@ func TestHandle_UndecodableBodyIsDeadLetteredAndAcked(t *testing.T) {
 	if string(m.Body) != string(raw) {
 		t.Error("DLQ body was not the raw body verbatim")
 	}
-	if m.Headers["Kanz-DLQ-Reason"] != "unframe" {
-		t.Errorf("Kanz-DLQ-Reason = %q, want unframe", m.Headers["Kanz-DLQ-Reason"])
-	}
+	assertParkContract(t, m, "unframe", "order.order.submitted")
 	if _, ok := m.Headers["Kanz-Event-Id"]; ok {
 		t.Error("Kanz-Event-Id was set for an undecodable body — no event_id could ever be read")
 	}

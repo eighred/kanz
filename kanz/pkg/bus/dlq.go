@@ -34,12 +34,20 @@ func IsDLQSubject(subject string) bool { return strings.HasPrefix(subject, dlqSu
 // idea — `Kanz-DLQ-Subject` where this package writes
 // `Kanz-DLQ-Original-Subject`. Nothing caught it because nothing read either
 // one. That is the `secret()` shape from CLAUDE.md, caught one consumer earlier
-// than usual.
+// than usual. #285 migrated the archiver onto these constants and deleted its
+// third field, `Kanz-DLQ-Reason`, whose two values were both ClassTerminal.
 //
 // They are constants here so the parker and the drainer cannot disagree about
 // them without a compile error. A drain path keyed on a header the parker
 // stopped writing does not fail loudly — it finds nothing, reports "0 messages
 // redriven", and reads exactly like a DLQ that is legitimately empty.
+//
+// THIS PACKAGE IS THE ONLY PLACE THEY MAY BE SPELLED. A `Kanz-DLQ-*` string
+// literal in non-test Go anywhere else fails test/arch/dlq_header_test.go, as
+// does writing a bare "terminal"/"transient" into HeaderDLQClass instead of the
+// ClassTerminal/ClassTransient constants below — adopting the name while
+// re-deriving the vocabulary is the same divergence one level down, and it ends
+// with a poison message the drain no longer recognises as poison.
 const (
 	// HeaderDLQOriginalSubject is the subject the message was published to
 	// before it failed — the address a redrive sends it back to. Without it a
