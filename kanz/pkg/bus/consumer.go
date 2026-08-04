@@ -163,7 +163,17 @@ func NewConsumer(s Subscriber, opts ...ConsumerOption) (*Consumer, error) {
 
 // Subscribe binds an EventHandler to (subject, group). Blocks until ctx is
 // canceled.
+//
+// It also starts this subscription's BACKLOG POLLER (#283) for its whole
+// lifetime — the thing that makes kanz_bus_pending_messages /
+// kanz_bus_consumer_lag exist at all, and therefore the thing the two KEDA
+// ScaledObjects scale on. It lives here rather than at each composition root
+// for the same reason tuningForSubject does: a service gets the signal by
+// subscribing, with nothing to wire and nothing to forget. See backlog.go for
+// the failure policy, which is the part that matters.
 func (c *Consumer) Subscribe(ctx context.Context, subject, group string, h EventHandler) error {
+	stopBacklogPoll := c.startBacklogPoll(ctx, subject, group)
+	defer stopBacklogPoll()
 	return c.subscriber.Subscribe(ctx, subject, group, func(ctx context.Context, msg Message) error {
 		// Terminal(), on both: these two failures are about the BYTES, and no
 		// amount of later retrying or redriving turns unframeable bytes into a

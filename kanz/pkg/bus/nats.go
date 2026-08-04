@@ -395,6 +395,27 @@ func (c *NATSClient) Pending(ctx context.Context, subject, group string) (int64,
 	return int64(info.NumPending), nil
 }
 
+// BacklogKind reports that this transport's backlog lands in
+// kanz_bus_pending_messages. See backlog.go.
+func (c *NATSClient) BacklogKind() BacklogKind { return BacklogPending }
+
+// Backlog implements BacklogSource over Pending. JetStream has no partitions,
+// so it is always exactly one reading with an empty Partition.
+//
+// The error is returned rather than folded into a zero on purpose: Pending fails
+// when the stream lookup, the consumer lookup or ConsumerInfo fails, and every
+// one of those means the broker did not answer — not that there is nothing
+// waiting. pollBacklog turns that into a DELETED series.
+func (c *NATSClient) Backlog(ctx context.Context, subject, group string) ([]PartitionBacklog, error) {
+	n, err := c.Pending(ctx, subject, group)
+	if err != nil {
+		return nil, err
+	}
+	return []PartitionBacklog{{Messages: n}}, nil
+}
+
+var _ BacklogSource = (*NATSClient)(nil)
+
 func (c *NATSClient) Close() error {
 	if c.conn != nil {
 		c.conn.Close()

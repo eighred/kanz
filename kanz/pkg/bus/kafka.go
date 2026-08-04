@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"errors"
 	"fmt"
+	"strconv"
 	"sync"
 	"time"
 
@@ -39,11 +40,16 @@ type KafkaConfig struct {
 }
 
 type KafkaClient struct {
-	cfg     KafkaConfig
-	dialer  *kafka.Dialer // shared by readers; carries TLS + SASL
-	writer  *kafka.Writer
-	mu      sync.Mutex
-	readers []*kafka.Reader
+	cfg    KafkaConfig
+	dialer *kafka.Dialer // shared by readers; carries TLS + SASL
+	writer *kafka.Writer
+	// admin issues the metadata / offset requests Backlog needs. It shares the
+	// writer's Transport — one connection pool, one TLS+SASL configuration, so a
+	// broker reachable for a produce is reachable for a lag poll by construction.
+	admin     *kafka.Client
+	transport *kafka.Transport
+	mu        sync.Mutex
+	readers   []*kafka.Reader
 }
 
 func DialKafka(cfg KafkaConfig) (*KafkaClient, error) {
@@ -53,20 +59,31 @@ func DialKafka(cfg KafkaConfig) (*KafkaClient, error) {
 	if cfg.PublishTimeout == 0 {
 		cfg.PublishTimeout = 5 * time.Second
 	}
+	transport := &kafka.Transport{
+		TLS:  cfg.TLSConfig, // nil ⇒ plaintext, kafka-go's default
+		SASL: cfg.SASL,
+	}
+	addr := kafka.TCP(cfg.Brokers...)
 	return &KafkaClient{
-		cfg:    cfg,
-		dialer: readerDialer(cfg),
+		cfg:       cfg,
+		dialer:    readerDialer(cfg),
+		transport: transport,
+		admin: &kafka.Client{
+			Addr:      addr,
+			Transport: transport,
+			// No Timeout: every Backlog call arrives with a ctx deadline from
+			// pollBacklog (backlogPollTimeout). A second, independent timeout here
+			// would be a number nobody chose that could silently outlive the
+			// poller's own slot.
+		},
 		writer: &kafka.Writer{
-			Addr:                   kafka.TCP(cfg.Brokers...),
+			Addr:                   addr,
 			Balancer:               &kafka.Hash{}, // partition by Message.Key
 			RequiredAcks:           kafka.RequireAll,
 			Async:                  false,
 			Compression:            kafka.Snappy,
 			AllowAutoTopicCreation: false, // EVT-09: topics provisioned explicitly
-			Transport: &kafka.Transport{
-				TLS:  cfg.TLSConfig, // nil ⇒ plaintext, kafka-go's default
-				SASL: cfg.SASL,
-			},
+			Transport:              transport,
 		},
 	}, nil
 }
@@ -197,6 +214,112 @@ func (k *KafkaClient) Subscribe(ctx context.Context, topic, group string, h Hand
 	}
 }
 
+// BacklogKind reports that this transport's backlog lands in
+// kanz_bus_consumer_lag. See backlog.go.
+func (k *KafkaClient) BacklogKind() BacklogKind { return BacklogLag }
+
+// Backlog implements BacklogSource: per-partition lag for one (topic, group),
+// computed from BROKER state — the partition high-water mark from ListOffsets
+// minus the group's committed offset from OffsetFetch.
+//
+// IT DOES NOT USE Reader.Stats().Lag, which is what the metric's doc comment
+// claimed for years and which cannot carry this signal at all; the three reasons
+// are enumerated at BusMetrics.SetConsumerLag and each is independently fatal.
+// Asking the broker instead means the lag keeps growing correctly while this
+// pod's subscription is HALTED (Subscribe's uncommitted-offset branch) — the one
+// state where a reader-derived number is guaranteed to be frozen and wrong, and
+// the one where an operator most needs the truth.
+//
+// EVERY PARTITION OR NONE. A per-partition error fails the whole call rather
+// than yielding a partial answer. A sum over the partitions that happened to
+// respond UNDERSTATES the backlog, and understating it is the direction that
+// scales the service in.
+func (k *KafkaClient) Backlog(ctx context.Context, topic, group string) ([]PartitionBacklog, error) {
+	md, err := k.admin.Metadata(ctx, &kafka.MetadataRequest{Topics: []string{topic}})
+	if err != nil {
+		return nil, fmt.Errorf("kafka backlog: metadata for %q: %w", topic, err)
+	}
+	var partitions []int
+	for _, t := range md.Topics {
+		if t.Name != topic {
+			continue
+		}
+		if t.Error != nil {
+			return nil, fmt.Errorf("kafka backlog: topic %q: %w", topic, t.Error)
+		}
+		for _, p := range t.Partitions {
+			if p.Error != nil {
+				return nil, fmt.Errorf("kafka backlog: topic %q partition %d: %w", topic, p.ID, p.Error)
+			}
+			partitions = append(partitions, p.ID)
+		}
+	}
+	if len(partitions) == 0 {
+		return nil, fmt.Errorf("kafka backlog: topic %q has no partitions in cluster metadata", topic)
+	}
+
+	committed, err := k.admin.OffsetFetch(ctx, &kafka.OffsetFetchRequest{
+		GroupID: group,
+		Topics:  map[string][]int{topic: partitions},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("kafka backlog: offset fetch for group %q: %w", group, err)
+	}
+	if committed.Error != nil {
+		return nil, fmt.Errorf("kafka backlog: offset fetch for group %q: %w", group, committed.Error)
+	}
+	committedBy := make(map[int]int64, len(partitions))
+	for _, p := range committed.Topics[topic] {
+		if p.Error != nil {
+			return nil, fmt.Errorf("kafka backlog: offset fetch %q/%s partition %d: %w", topic, group, p.Partition, p.Error)
+		}
+		committedBy[p.Partition] = p.CommittedOffset
+	}
+
+	// FirstOffsetOf as well as LastOffsetOf, for the not-yet-committed case
+	// below. It is one extra entry in the same round-trip, not a second call.
+	offsetReqs := make([]kafka.OffsetRequest, 0, 2*len(partitions))
+	for _, p := range partitions {
+		offsetReqs = append(offsetReqs, kafka.FirstOffsetOf(p), kafka.LastOffsetOf(p))
+	}
+	bounds, err := k.admin.ListOffsets(ctx, &kafka.ListOffsetsRequest{
+		Topics: map[string][]kafka.OffsetRequest{topic: offsetReqs},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("kafka backlog: list offsets for %q: %w", topic, err)
+	}
+
+	out := make([]PartitionBacklog, 0, len(partitions))
+	for _, po := range bounds.Topics[topic] {
+		if po.Error != nil {
+			return nil, fmt.Errorf("kafka backlog: list offsets %q partition %d: %w", topic, po.Partition, po.Error)
+		}
+		// A group with NO committed offset on a partition reports -1. That is not
+		// zero lag — it is a group that has never acknowledged anything here, and
+		// every reader this package builds starts at FirstOffset (kafka-go's
+		// ReaderConfig default, and Subscribe does not override it), so what it is
+		// about to read is the WHOLE retained partition. Reporting 0 for a
+		// cold-started group would tell KEDA to stay at minReplicaCount for
+		// precisely the backlog it exists to absorb.
+		from, ok := committedBy[po.Partition]
+		if !ok || from < 0 {
+			from = po.FirstOffset
+		}
+		lag := po.LastOffset - from
+		if lag < 0 {
+			lag = 0 // a commit that raced ahead of the watermark read; not a negative backlog
+		}
+		out = append(out, PartitionBacklog{Partition: strconv.Itoa(po.Partition), Messages: lag})
+	}
+	if len(out) != len(partitions) {
+		return nil, fmt.Errorf("kafka backlog: topic %q returned offsets for %d of %d partitions — a partial "+
+			"answer understates the backlog, which is the direction that scales the consumer in", topic, len(out), len(partitions))
+	}
+	return out, nil
+}
+
+var _ BacklogSource = (*KafkaClient)(nil)
+
 func (k *KafkaClient) Close() error {
 	var firstErr error
 	if err := k.writer.Close(); err != nil {
@@ -209,5 +332,8 @@ func (k *KafkaClient) Close() error {
 			firstErr = err
 		}
 	}
+	// The Transport is ours (DialKafka built it) and is shared by the writer and
+	// the admin client, so neither of their Closes reclaims it.
+	k.transport.CloseIdleConnections()
 	return firstErr
 }
