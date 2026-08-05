@@ -31,6 +31,7 @@ import (
 	"github.com/eighred/kanz/services/oms/internal/compliance"
 	"github.com/eighred/kanz/services/oms/internal/config"
 	"github.com/eighred/kanz/services/oms/internal/order"
+	"github.com/eighred/kanz/services/oms/internal/outbox"
 	"github.com/eighred/kanz/services/oms/internal/position"
 	"github.com/eighred/kanz/services/oms/internal/server"
 )
@@ -374,10 +375,12 @@ func runConsumers(ctx context.Context, cfg config.Config, readiness *server.Read
 	acceptedReannounced := prometheus.NewCounter(prometheus.CounterOpts{
 		Name: "kanz_oms_orders_accepted_reannounced_total",
 		Help: "Orders whose ORDER_ACCEPTED FACT was committed to the store but never published, and which " +
-			"a compensator re-announced later. Admission is two writes with no outbox between them, so a " +
-			"failed publish leaves a durable order that no downstream service has heard of: risk carries no " +
-			"exposure for it and the projection drops every later FACT about it. Non-zero means that " +
-			"happened and was repaired late; it should be zero.",
+			"a compensator re-announced later: a durable order no downstream service had heard of, so risk " +
+			"carried no exposure for it and the projection dropped every later FACT about it. Since #292 " +
+			"admission commits that FACT in the SAME transaction as the order, so the only rows that can " +
+			"reach the compensator are ones admitted before migration 0006. Non-zero therefore means either " +
+			"a pre-outbox row was repaired late, or admission has stopped committing the record " +
+			"transactionally; it should be zero.",
 	})
 	obs.Registry.MustRegister(acceptedReannounced)
 
@@ -420,6 +423,35 @@ func runConsumers(ctx context.Context, cfg config.Config, readiness *server.Read
 			"bindings", bindings.Len(), "accounts", bindings.Accounts())
 	}
 
+	// THE OUTBOX RELAY'S INSTRUMENTATION (#292). The relay itself is built by
+	// order.NewService, from the store's own queue and the emitter's own bus, so
+	// that a composition holding a Service always holds a drain — there is no
+	// wiring step here that could be omitted. What this composition root still
+	// owns is running it (below) and measuring it.
+	//
+	// There is no switch to turn the relay off, deliberately. A disabled relay
+	// is an OMS that admits orders, commits their ACCEPTED FACTs to a table and
+	// tells nobody — the exact invisible-order failure #238 was filed for, made
+	// permanent. "Nothing configured" and "checked, and fine" must not look the
+	// same, and the cheapest way to guarantee that is for the off position not
+	// to exist.
+	outboxPublished := prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "kanz_oms_outbox_published_total",
+		Help: "Order FACTs published from the transactional outbox. Every lifecycle FACT the OMS commits " +
+			"transactionally is counted here exactly once per successful publish; a relay that has stopped " +
+			"shows as a flat line while orders keep being admitted.",
+	})
+	obs.Registry.MustRegister(outboxPublished)
+
+	outboxFailures := prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "kanz_oms_outbox_publish_failures_total",
+		Help: "Attempts to publish an outbox record that did not reach the broker. The record stays at the " +
+			"head of its order's queue and every FACT behind it is held back — publishing past it would hand " +
+			"consumers that order's history out of sequence. Nothing else surfaces this: the command that " +
+			"enqueued the record was acked successfully long before.",
+	})
+	obs.Registry.MustRegister(outboxFailures)
+
 	// OMS-01b/c: order command handler over the order store + a sim venue.
 	emitter := order.NewEmitter(producer)
 	// Venue set is composition-root-selected: SimVenue by default; Binance Spot +
@@ -435,10 +467,26 @@ func runConsumers(ctx context.Context, cfg config.Config, readiness *server.Read
 		order.WithAccountBindings(bindings, cfg.RequireVenueAccount, sharedCollateral),
 		order.WithQuarantineCounter(quarantined),
 		order.WithClaimTimeoutCounter(claimTimeouts),
-		order.WithAcceptedReannounceCounter(acceptedReannounced))
+		order.WithAcceptedReannounceCounter(acceptedReannounced),
+		order.WithOutboxRelay(
+			outbox.WithInterval(cfg.OutboxInterval),
+			outbox.WithCounters(outboxPublished, outboxFailures)))
 	if err != nil {
 		return false, err
 	}
+	relay := svc.Outbox()
+
+	// THE AGE OF THE OLDEST UNPUBLISHED RECORD IS THE ALERTABLE SIGNAL, and it is
+	// a GaugeFunc because it must be true even when nothing is happening. An
+	// empty outbox and a relay that died both produce zero errors, zero failed
+	// publishes and a silent log; the only number that separates them is how long
+	// the front of the queue has been waiting.
+	obs.Registry.MustRegister(prometheus.NewGaugeFunc(prometheus.GaugeOpts{
+		Name: "kanz_oms_outbox_oldest_pending_seconds",
+		Help: "Age of the oldest order FACT committed to the outbox and not yet published. Zero means the " +
+			"outbox is drained. A value that keeps climbing means FACTs the estate depends on are sitting in " +
+			"Postgres: risk, compliance and the audit log are behind by that much.",
+	}, func() float64 { return relay.OldestPendingAge(ctx) }))
 
 	// WithDLQ is load-bearing on this path, not hygiene. Without it a SubmitOrder
 	// whose venue call fails AFTER admission returns an error with nowhere to go:
@@ -521,6 +569,26 @@ func runConsumers(ctx context.Context, cfg config.Config, readiness *server.Read
 	// ListByStatus above only ever returns this tenant's orders. Scoped to this
 	// call only — the outer ctx must stay bare so each subscription's own
 	// consumer loop keeps setting its own tenant per delivery.
+	// DRAIN THE OUTBOX FIRST — the same completeness rule as the sweep below, one
+	// layer earlier (#292). A pod that starts holding records its predecessor
+	// committed and died before publishing is holding FACTs the estate is
+	// currently missing, and it should say them before it admits anything new.
+	//
+	// A FAILURE HERE IS NOT FATAL, unlike the sweep. The records are durable and
+	// the relay goroutine retries them on its tick; refusing to start would take
+	// away the only thing that can publish them. That is the opposite trade to
+	// the sweep, whose failure means the pod cannot ACCOUNT for its predecessor's
+	// orders at all.
+	if drained, derr := relay.DrainOnce(ctx); derr != nil {
+		logger.Error("oms: could not drain the outbox at startup — order FACTs committed by the previous "+
+			"process are not yet published; the relay will keep retrying them",
+			"err", derr, "published_before_failure", drained)
+	} else if drained > 0 {
+		logger.Warn("oms: published order FACTs the previous process committed and never announced — "+
+			"until now no downstream service had heard them",
+			"count", drained)
+	}
+
 	sweepStart := time.Now()
 	swept, err := svc.SweepInterrupted(bus.WithTenantID(ctx, cfg.Tenant))
 	if err != nil {
@@ -537,6 +605,35 @@ func runConsumers(ctx context.Context, cfg config.Config, readiness *server.Read
 		once     sync.Once
 		firstErr error
 	)
+
+	// THE OUTBOX RELAY (#292). It is JOINED INTO wg, and that is not tidiness:
+	// closeStores() — deferred above, so it runs AFTER wg.Wait() returns — closes
+	// the pool this relay reads and writes. An unjoined drainer would still be
+	// mid-UPDATE against a closing pool, and its per-key advisory lock would be
+	// released by a connection teardown rather than by the unlock it expects.
+	// Same hazard test/arch/consumer_goroutine_join_test.go exists for on the
+	// subscription goroutines; that guard does not classify this one (it only
+	// looks for bus.NewConsumer), so the join is here by argument rather than by
+	// enforcement.
+	//
+	// A relay error IS terminal for the process, unlike a failed sweep pass. Run
+	// returns only on a fault that makes draining impossible at all, and an OMS
+	// that admits orders while nothing can publish their FACTs is trading
+	// invisibly — which is precisely the state this whole change exists to make
+	// impossible. Take the pod down and let the other replica carry it.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		logger.Info("oms outbox relay armed — order FACTs are published from the store, in the same "+
+			"transaction that committed them", "interval", cfg.OutboxInterval.String())
+		if err := relay.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
+			once.Do(func() {
+				firstErr = err
+				cancel()
+			})
+		}
+	}()
+
 	for _, s := range subs {
 		wg.Add(1)
 		go func(s sub) {
@@ -585,12 +682,18 @@ func runConsumers(ctx context.Context, cfg config.Config, readiness *server.Read
 	// THE SAME RECONCILIATION, ON A TICKER, WHILE THE POD IS SERVING (#238).
 	//
 	// The startup sweep above is mandatory and fatal on failure; this one is
-	// neither, and the difference is the point. Admission commits the order and
-	// then publishes its FACT, with no outbox between the two, so a failed
-	// publish leaves a durable order the rest of the estate has never heard of.
-	// The startup sweep is the compensator for that, which made the recovery
+	// neither, and the difference is the point. Admission USED to commit the
+	// order and then publish its FACT with no outbox between the two, so a failed
+	// publish left a durable order the rest of the estate had never heard of.
+	// The startup sweep was the compensator for that, which made the recovery
 	// latency "whenever this pod next restarts" — days, on a deployment that is
 	// behaving. This bounds it at OMS_SWEEP_MIN_AGE + OMS_SWEEP_INTERVAL.
+	//
+	// #292 MOVED THE ADMISSION HALF TO THE OUTBOX, so what this ticker now
+	// recovers is an order left mid-flight at a VENUE, plus the pre-outbox rows
+	// that predate migration 0006. It is deliberately kept and deliberately still
+	// armed: the outbox is new, this has run, and a compensator is retired after
+	// its replacement is proven rather than alongside it.
 	//
 	// IT IS SAFE TO RUN CONCURRENTLY WITH THE SUBSCRIPTIONS ABOVE, and not by
 	// assumption: resume() takes the SAME per-order claim every live handler
@@ -723,11 +826,28 @@ mandateArmWait:
 //
 // So both stores come from ONE pool and one DSN, and both degrade together: no
 // OMS_DATABASE_URL ⇒ in-memory ⇒ EXACTLY ONE REPLICA, said out loud.
+// THE OUTBOX IS THE THIRD STORE, AND IT DEGRADES WITH THE OTHER TWO (#292).
+//
+// It comes from the same pool for the same reason the position book does — one
+// DSN, one tenant scope, one failure domain — and with no DSN it is the
+// in-process queue that order.MemoryStore already owns. That is coherent rather
+// than convenient: in a memory deployment a crash loses the orders AND the FACTs
+// announcing them, together, so the two halves cannot come back disagreeing.
+// The single-replica warning below already covers it.
+//
+// THE RELAY'S TENANT SCOPE COMES FROM THIS POOL AND NOWHERE ELSE. It reads the
+// outbox through the same pg.NewTenantPool connections the order store uses, so
+// RLS constrains it to exactly the tenant whose orders it is announcing. That is
+// the reason the relay is in-process rather than one estate-wide binary: there
+// is no unscoped pool on this platform to build such a binary on, and the app
+// role is NOSUPERUSER so it could not bypass RLS to read the other tenants
+// either. See outbox.Relay.
 func openStores(ctx context.Context, cfg config.Config, logger *slog.Logger) (order.Store, position.Store, func(), error) {
 	if cfg.DatabaseURL == "" {
-		logger.Warn("NO OMS_DATABASE_URL — the order store AND the position book are IN-PROCESS. This deployment "+
+		logger.Warn("NO OMS_DATABASE_URL — the order store, the position book AND the outbox are IN-PROCESS. This deployment "+
 			"MUST run exactly ONE replica: two pods would each admit the same order (double trade) and each publish "+
-			"an ABSOLUTE position folded from only the fills it happened to receive",
+			"an ABSOLUTE position folded from only the fills it happened to receive. A crash loses any order FACT "+
+			"committed and not yet published",
 			"fix", "set OMS_DATABASE_URL; the shipped manifest runs replicas: 2")
 		return order.NewMemoryStore(), position.NewBook(cfg.BaseCurrency), func() {}, nil
 	}

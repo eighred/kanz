@@ -12,6 +12,7 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"github.com/eighred/kanz/pkg/bus"
+	"github.com/eighred/kanz/services/oms/internal/outbox"
 )
 
 // Subjects follow the {domain}.{entity}.{event_type} taxonomy. Commands are
@@ -55,9 +56,24 @@ type Emitter struct{ b Bus }
 // NewEmitter wraps a Bus.
 func NewEmitter(b Bus) *Emitter { return &Emitter{b: b} }
 
-// emit publishes one FACT for order orderID at event-time t.
-func (e *Emitter) emit(ctx context.Context, eventType, message, orderID string, t time.Time, payload proto.Message) error {
-	return e.b.Publish(ctx, bus.Event{
+// publisher hands the outbox relay the SAME bus this emitter publishes through
+// (#292). One bus, so a FACT that goes out through the relay and one that goes
+// out directly cannot end up on different clients — and so a test that injects a
+// fake bus into the emitter is injecting it into the relay too, rather than
+// leaving the relay pointed at something the test never sees.
+func (e *Emitter) publisher() outbox.Publisher { return e.b }
+
+// event builds one FACT for order orderID at event-time t.
+//
+// IT IS SEPARATE FROM PUBLISHING, AND THAT SEPARATION IS THE #292 SEAM. A FACT
+// now has two possible sinks: the broker, right now (every transition that has
+// not yet been converted), and the outbox, inside the transaction that caused it
+// (admission). Those are two DESTINATIONS for ONE event definition, not two
+// definitions — which is why this function exists and why nothing below builds a
+// bus.Event of its own. A second builder is how the enqueued FACT and the
+// published FACT would come to differ in a field nobody compares.
+func (e *Emitter) event(eventType, message, orderID string, t time.Time, payload proto.Message) bus.Event {
+	return bus.Event{
 		Subject:          eventType,
 		EventType:        eventType,
 		EventClass:       envelopepb.EventClass_EVENT_CLASS_FACT,
@@ -67,13 +83,45 @@ func (e *Emitter) emit(ctx context.Context, eventType, message, orderID string, 
 		PartitionKey:     orderID,
 		PayloadSchemaRef: payloadSchemaRef(message),
 		Payload:          payload,
-	})
+	}
+}
+
+// emit publishes one FACT for order orderID at event-time t.
+func (e *Emitter) emit(ctx context.Context, eventType, message, orderID string, t time.Time, payload proto.Message) error {
+	return e.b.Publish(ctx, e.event(eventType, message, orderID, t, payload))
+}
+
+// acceptedEvent is the ORDER_ACCEPTED FACT for an admitted order. One function
+// so the enqueued form and the compensator's published form cannot drift.
+func (e *Emitter) acceptedEvent(st *orderpb.OrderState) bus.Event {
+	return e.event(EventTypeAccepted, "OrderAccepted", st.GetOrderId(), st.GetAsOf().AsTime(),
+		&orderpb.OrderAccepted{OrderId: st.GetOrderId(), State: st})
 }
 
 // EmitAccepted publishes OrderAccepted with the admitted state.
+//
+// THE LIVE ADMISSION PATH NO LONGER CALLS THIS (#292) — it calls AcceptedFact
+// and hands the record to store.Create. What still calls it is
+// reannounceAccepted, #238's compensator, which repairs an order admitted BEFORE
+// the outbox existed: those rows carry accepted_announced_at unset with no
+// outbox record behind them, so the only thing that can announce them is a
+// direct publish. It stays until that population cannot exist; see
+// reannounceAccepted for the retirement condition.
 func (e *Emitter) EmitAccepted(ctx context.Context, st *orderpb.OrderState) error {
-	return e.emit(ctx, EventTypeAccepted, "OrderAccepted", st.GetOrderId(), st.GetAsOf().AsTime(),
-		&orderpb.OrderAccepted{OrderId: st.GetOrderId(), State: st})
+	return e.b.Publish(ctx, e.acceptedEvent(st))
+}
+
+// AcceptedFact captures the ORDER_ACCEPTED FACT as an outbox record instead of
+// publishing it, so admission can commit the order and its announcement in one
+// transaction.
+//
+// It takes ctx because the record has to carry the lineage the synchronous
+// publish would have inherited from it — correlation, causation, trace and the
+// tenant — and the relay that eventually sends this has none of them. See
+// outbox.From, which refuses a record with no tenant rather than enqueueing one
+// that can never be published.
+func (e *Emitter) AcceptedFact(ctx context.Context, st *orderpb.OrderState) (outbox.Record, error) {
+	return outbox.From(ctx, e.acceptedEvent(st))
 }
 
 // EmitRejected publishes OrderRejected (no state changed; order terminal).

@@ -34,7 +34,7 @@ func TestSweepResumesAnOrderStrandedAtRouted(t *testing.T) {
 		t.Fatalf("Accept: %v", err)
 	}
 	stranded := Route(admitted, t0)
-	if err := store.Create(ctx, stranded); err != nil {
+	if err := store.Create(ctx, stranded, nil); err != nil {
 		t.Fatalf("Create: %v", err)
 	}
 
@@ -80,7 +80,7 @@ func TestSweepRefusesAContextWithNoTenant(t *testing.T) {
 		t.Fatalf("Accept: %v", err)
 	}
 	stranded := Route(admitted, t0)
-	if err := store.Create(context.Background(), stranded); err != nil {
+	if err := store.Create(context.Background(), stranded, nil); err != nil {
 		t.Fatalf("Create: %v", err)
 	}
 
@@ -126,7 +126,7 @@ func TestSweepIgnoresTerminalOrders(t *testing.T) {
 		t.Fatalf("Accept: %v", err)
 	}
 	done.Status = orderpb.OrderStatus_ORDER_STATUS_FILLED
-	if err := store.Create(ctx, done); err != nil {
+	if err := store.Create(ctx, done, nil); err != nil {
 		t.Fatalf("Create: %v", err)
 	}
 
@@ -149,7 +149,7 @@ func TestListByStatusReturnsOnlyTheRequestedStatuses(t *testing.T) {
 	filled := &orderpb.OrderState{OrderId: "filled", Status: orderpb.OrderStatus_ORDER_STATUS_FILLED}
 	pending := &orderpb.OrderState{OrderId: "pending", Status: orderpb.OrderStatus_ORDER_STATUS_PENDING_NEW}
 	for _, st := range []*orderpb.OrderState{routed, filled, pending} {
-		if err := store.Create(ctx, st); err != nil {
+		if err := store.Create(ctx, st, nil); err != nil {
 			t.Fatalf("Create %s: %v", st.GetOrderId(), err)
 		}
 	}
