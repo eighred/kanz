@@ -1,7 +1,9 @@
 // market-data binary entrypoint (MODEL-01b). Consumes market.v1 events off the
 // live NATS spine and folds them into the bitemporal price-history store. With
 // MARKET_DATA_DATABASE_URL set the store is Postgres/Timescale (durable);
-// without it the store is in-memory (local/dev — history is lost on restart).
+// without it the store is in-memory, which openStore WARNS about and reports as
+// kanz_market_data_price_history_durable=0 — correct on a one-replica dev rig
+// and wrong on the shipped manifest, which runs two pods or more (#261).
 package main
 
 import (
@@ -17,6 +19,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/prometheus/client_golang/prometheus"
 
 	"github.com/eighred/kanz/internal/lifecycle"
 	"github.com/eighred/kanz/internal/marketdata"
@@ -29,6 +32,20 @@ import (
 	"github.com/eighred/kanz/services/market-data/internal/feed"
 	"github.com/eighred/kanz/services/market-data/internal/server"
 )
+
+// priceHistoryDurable reports whether the price history survives a restart: 1
+// when it is the Postgres/Timescale store, 0 when it is the in-memory one.
+//
+// The gauge is what makes the degraded posture ALERTABLE rather than merely
+// readable — the start-up WARN in openStore scrolls off, while
+// `kanz_market_data_price_history_durable == 0` stays true for as long as it is
+// true. Deliberately the same contract as kanz_venue_orderview_durable
+// (INFRA-M7a-2) and kanz_audit_log_durable (#236), because it is the same
+// question asked of a third store.
+var priceHistoryDurable = prometheus.NewGauge(prometheus.GaugeOpts{
+	Name: "kanz_market_data_price_history_durable",
+	Help: "1 if the price history is backed by Postgres/Timescale (survives a restart), 0 if in-memory.",
+})
 
 func main() {
 	// The lifecycle lives in run() because os.Exit skips defers: every defer
@@ -71,6 +88,11 @@ func run() int {
 		defer cancel()
 		_ = obs.Shutdown(shutCtx)
 	}()
+
+	// Registered before openStore so the posture is on /metrics from the first
+	// scrape, including the degraded one. A gauge nobody registered is a Set call
+	// into the void — exactly the silence openStore's warning is about.
+	obs.Registry.MustRegister(priceHistoryDurable)
 
 	readiness := &server.Readiness{}
 	httpSrv := &http.Server{
@@ -134,7 +156,7 @@ func run() int {
 func runIngest(ctx context.Context, cfg config.Config, readiness *server.Readiness, logger *slog.Logger, obs *observability.Provider) error {
 	busMetrics := bus.NewBusMetrics(obs.Registry)
 
-	st, closeStore, err := openStore(ctx, cfg)
+	st, closeStore, err := openStore(ctx, cfg, logger)
 	if err != nil {
 		return err
 	}
@@ -278,13 +300,55 @@ func feedProducerConfig(cfg config.Config, metrics *bus.BusMetrics) bus.Producer
 // openStore selects the durable Postgres/Timescale store when a DSN is set,
 // otherwise the in-memory store. Returns a close func that tears down the pool
 // (a no-op for the in-memory store).
-func openStore(ctx context.Context, cfg config.Config) (store.Store, func(), error) {
+//
+// THIS ONE WARNS WHERE ITS PEERS REFUSE, and the difference is worth stating
+// because five sibling services took the other decision in the same change
+// (#261). accounting, alternatives, datamaster, regulatory and wealth all
+// REFUSE an unasked-for in-memory store, because each of them holds something
+// that exists NOWHERE ELSE — a ledger entry, a capital call, a named human's
+// signed override, a hash-chain link, a household book — folded off a stream
+// that ages out and read by a durable consumer that resumes at its last ack and
+// never replays. Losing that store loses the only copy.
+//
+// This store is not that. Every price_observation in it arrived as a market.v1
+// FACT off the spine, and the same FACT is archived to Kafka (EVT-09), which is
+// the log of record. The in-memory store therefore loses HISTORY, not the only
+// copy, and the live feed refills current marks within one tick of a restart. A
+// single pod holding every observation since process start is a real, if
+// degraded, operating posture — the same call the OMS makes (openStores) and for
+// the same reason.
+//
+// THE PRECONDITION IS EXACTLY ONE REPLICA, AND THE SHIPPED MANIFEST BREAKS IT.
+// All pods share one durable consumer group, so a FACT is delivered to ONE of
+// them. With a durable store that is the whole point — the idempotent upsert
+// makes any pod's fold equivalent. With a map per pod it means each replica
+// holds a DISJOINT SLICE of the history, and a query is answered by whichever
+// pod the Service happened to pick: not stale, WRONG, and differently wrong on
+// each retry. infra/deploy/market-data-deploy.yaml sets replicas: 2 as a floor
+// and market-data-scaledobject.yaml scales it 2..16, so the degraded posture is
+// only ever correct on a dev rig. That is what the warning has to say, and why
+// the gauge matters more than the log line: the risk engine marks positions
+// against this store.
+//
+// By the time openStore runs, config.Load has already refused to start if the
+// _FILE mount was DECLARED but unreadable (secret.Read), so an empty DSN here
+// can only mean no DSN was ever configured.
+func openStore(ctx context.Context, cfg config.Config, logger *slog.Logger) (store.Store, func(), error) {
 	if cfg.DatabaseURL == "" {
+		logger.Warn("PRICE HISTORY IS IN-MEMORY — no MARKET_DATA_DATABASE_URL (or _FILE mount). Everything "+
+			"folded so far is DISCARDED on the next restart, rollout or eviction, and the risk engine marks "+
+			"positions against this store. This deployment MUST run exactly ONE replica: pods share one "+
+			"durable consumer group, so N pods hold N DISJOINT slices of the history and a query is answered "+
+			"by whichever one the Service picked",
+			"fix", "set MARKET_DATA_DATABASE_URL; the shipped manifest runs replicas: 2 and KEDA scales it to 16",
+			"gauge", "kanz_market_data_price_history_durable=0")
+		priceHistoryDurable.Set(0)
 		return store.NewMemory(), func() {}, nil
 	}
 	pool, err := pgxpool.New(ctx, cfg.DatabaseURL)
 	if err != nil {
 		return nil, nil, err
 	}
+	priceHistoryDurable.Set(1)
 	return store.NewPostgres(pool), pool.Close, nil
 }

@@ -1,9 +1,10 @@
 ---
 # SVCWIRE-01a — deployable workload for the wealth (advisory) service. Unlike
 # risk-engine (a NATS consumer + gRPC query service, hence a canary Rollout), the
-# Phase-7 read services are stateless HTTP surfaces on :8080 that boot on their
-# in-memory/Stub defaults (no broker, no DB) — so a plain Deployment is the right
-# shape here. The progressive-delivery Rollout + PDB + KEDA scaling come in
+# Phase-7 read services are HTTP surfaces on :8080 — so a plain Deployment is the
+# right shape here. They are NOT stateless and no longer boot on an in-memory
+# default: this one requires WEALTH_DATABASE_URL and refuses to start without it
+# (#261), which is why the db CSI volume below is not optional. The progressive-delivery Rollout + PDB + KEDA scaling come in
 # SVCWIRE-01d. The pod keeps the SEC-02a hardening + the SEC-01a SPIFFE SVID
 # (the gateway reaches it over mTLS, SVCWIRE-01c) from risk-engine-rollout.yaml,
 # dropping only the DB CSI volume + broker env this service doesn't use.
@@ -100,9 +101,14 @@ spec:
           ports:
             - { containerPort: 8080, name: http }
           env:
-            # DSN from the SEC-01d CSI secret file, not a plaintext env. Without
-            # it this service silently falls back to the in-memory store and
-            # loses all state on restart.
+            # DSN from the SEC-01d CSI secret file, not a plaintext env. It is
+            # REQUIRED: without it the pod REFUSES TO START (exit 2) rather than
+            # falling back to a map, because an in-memory book is lost on restart
+            # and the pod then serves the EMPTY book as an exposure view -- the
+            # durable consumer group resumes at its last ack and never re-reads.
+            # This used to be a silent fallback (#261). WEALTH_ALLOW_EPHEMERAL_BOOK
+            # =true opts back in for a laptop; it is deliberately not set here, and
+            # a deployment that sets it must drop replicas below to 1.
             - { name: WEALTH_DATABASE_URL_FILE, value: /run/secrets/db/database-url }
             # MT-01d: scopes every row via the app.tenant_id GUC (RLS).
             - { name: WEALTH_TENANT, value: "__system__" }

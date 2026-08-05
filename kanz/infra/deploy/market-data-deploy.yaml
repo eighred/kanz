@@ -119,7 +119,14 @@ spec:
             - { containerPort: 8082, name: http }
           env:
             # DSN from the SEC-01d CSI secret file, not a plaintext env. Without it
-            # the service holds prices in memory and loses the history on restart.
+            # the service holds prices in memory and loses the history on restart —
+            # and, because the pods share one durable consumer group, EACH REPLICA
+            # HOLDS A DISJOINT SLICE, so a query is answered by whichever pod the
+            # Service picked. It is the one store on this board that warns rather
+            # than refuses (the feed republishes and Kafka archives, so it is a
+            # cache, not the only copy) — but the warning's precondition is ONE
+            # replica, which the count above and the ScaledObject both break.
+            # Alert on kanz_market_data_price_history_durable == 0 (#261).
             - { name: MARKET_DATA_DATABASE_URL_FILE, value: /run/secrets/db/database-url }
             - { name: MARKET_DATA_LISTEN, value: ":8082" }
             - { name: MARKET_DATA_SOURCE, value: "market-data" }

@@ -26,6 +26,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+
 	"github.com/eighred/kanz/internal/dec"
 	"github.com/eighred/kanz/internal/lifecycle"
 	"github.com/eighred/kanz/internal/pg"
@@ -39,6 +41,20 @@ import (
 	"github.com/eighred/kanz/services/datamaster/internal/server"
 	"github.com/eighred/kanz/services/datamaster/internal/store"
 )
+
+// masterDurable reports whether the golden master and its pricing-oversight
+// exception queue survive a restart: 1 when they are the Postgres stores, 0 when
+// they are the in-memory pair an operator opted into with
+// DATAMASTER_ALLOW_EPHEMERAL_MASTER.
+//
+// The gauge is what makes the degraded posture ALERTABLE rather than merely
+// readable, and it carries a second fact besides durability: the in-memory path
+// also has no per-tenant cycle lock, so 0 here means every replica is refreshing
+// against a metered vendor API. Same contract as kanz_audit_log_durable (#236).
+var masterDurable = prometheus.NewGauge(prometheus.GaugeOpts{
+	Name: "kanz_datamaster_master_durable",
+	Help: "1 if the golden master and exception queue are backed by Postgres (survive a restart), 0 if in-memory.",
+})
 
 func main() {
 	// The lifecycle lives in run() because os.Exit skips defers: every defer
@@ -95,7 +111,11 @@ func run() int {
 		logger.Info("vendor feed wired", "vendor", f.Vendor())
 	}
 
-	golden, exceptions, cycleLock, closeStores, err := openStores(ctx, cfg)
+	// Registered before openStores so the posture is on /metrics from the first
+	// scrape, including the degraded one.
+	obs.Registry.MustRegister(masterDurable)
+
+	golden, exceptions, cycleLock, closeStores, err := openStores(ctx, cfg, logger)
 	if err != nil {
 		logger.Error("store init failed", "err", err)
 		return 2
@@ -153,16 +173,58 @@ func run() int {
 }
 
 // openStores selects the durable Postgres golden store + exception queue when a
-// DSN is set, otherwise the in-memory pair. Returns a close func that tears down
-// the pool (a no-op in memory). Both satisfy the store seams, so the projector and
-// the server are identical either way.
+// DSN is set, and otherwise REFUSES TO START unless the deployment has said out
+// loud that it accepts an ephemeral master. Returns a close func that tears down
+// the pool (a no-op in memory). Both satisfy the store seams, so the projector
+// and the server are identical either way.
 //
 // store.PostgresGolden and store.PostgresExceptions have existed, tested, since
 // MASTER-01: nothing ever constructed them. Until now every operator override — a
 // named human's signed decision to accept a price the system flagged — lived in a
-// map and vanished on the next restart.
-func openStores(ctx context.Context, cfg config.Config) (store.GoldenStore, store.ExceptionStore, projector.CycleLock, func(), error) {
+// map and vanished on the next restart, silently (#261).
+//
+// WHY THIS ONE REFUSES. The deploy manifest already gives the reason and had no
+// way to enforce it — infra/deploy/datamaster-deploy.yaml's own header says the
+// exception queue "is an audit surface", that an override without a DSN "is GONE
+// on the next restart — a compliance record silently deleted by a rolling
+// update", and that "the in-memory store is a laptop convenience, never a
+// deployment". That last sentence was a comment; this is the same sentence as
+// code. Unlike the folded stores in accounting and wealth, an override does not
+// even arrive on the bus: it originates at this service's own API, so there is
+// no stream to rebuild it from, ever.
+//
+// AND THE CYCLE LOCK DISAPPEARS WITH IT, which is the part no log line would
+// have shown. This function returns a nil CycleLock on the in-memory path, so
+// run() never applies projector.WithCycleLock and EVERY replica runs EVERY
+// vendor refresh. The manifest is explicit that concurrent projection was never
+// a data hazard but a BILLING and RATE-LIMIT one — "vendor reference data is
+// metered per call, and N pods made N rounds of API requests for one cycle's
+// worth of information" — and it runs replicas: 2. So a forgotten DSN quietly
+// doubles a metered vendor bill on top of discarding the audit surface.
+//
+// config.Load has already refused to start if the _FILE mount was DECLARED but
+// unreadable (secret.Read), so an empty DSN here can only mean none was ever
+// configured.
+func openStores(ctx context.Context, cfg config.Config, logger *slog.Logger) (store.GoldenStore, store.ExceptionStore, projector.CycleLock, func(), error) {
 	if cfg.DatabaseURL == "" {
+		if !cfg.AllowEphemeralMaster {
+			return nil, nil, nil, nil, errors.New("no DATAMASTER_DATABASE_URL (or _FILE mount): the golden " +
+				"master and the pricing-oversight EXCEPTION QUEUE would be IN-MEMORY. Every operator " +
+				"override — a named human's signed decision to accept a price the system flagged — would be " +
+				"DISCARDED by the next restart or rolling update, and it originates here rather than on the " +
+				"bus, so nothing can rebuild it. The per-tenant cycle lock would also be absent, so every " +
+				"replica would run every refresh against a vendor API metered per call. Set " +
+				"DATAMASTER_DATABASE_URL, or set DATAMASTER_ALLOW_EPHEMERAL_MASTER=true to accept it — in " +
+				"which case this deployment MUST run exactly one replica and is not an audit surface")
+		}
+		logger.Warn("GOLDEN MASTER AND EXCEPTION QUEUE ARE IN-MEMORY — DATAMASTER_ALLOW_EPHEMERAL_MASTER "+
+			"accepted an ephemeral audit surface. Every operator override is DISCARDED on the next restart "+
+			"and cannot be rebuilt. The per-tenant cycle lock is ABSENT on this path, so this deployment "+
+			"MUST run exactly ONE replica: every pod would otherwise run every refresh against a vendor API "+
+			"that bills per call",
+			"fix", "set DATAMASTER_DATABASE_URL (or its _FILE mount); the shipped manifest runs replicas: 2",
+			"gauge", "kanz_datamaster_master_durable=0")
+		masterDurable.Set(0)
 		return store.NewMemoryGoldenStore(), store.NewQueueStore(pricing.NewQueue()), nil, func() {}, nil
 	}
 	// MT-01d: every connection carries this deployment's tenant as the
@@ -174,6 +236,7 @@ func openStores(ctx context.Context, cfg config.Config) (store.GoldenStore, stor
 	}
 	// The cycle lock is keyed on the TENANT: a shared key would let one tenant's
 	// deployment starve every other tenant's projector forever.
+	masterDurable.Set(1)
 	return store.NewPostgresGolden(pool), store.NewPostgresExceptions(pool),
 		store.NewPostgresCycleLock(pool, cfg.Tenant), pool.Close, nil
 }

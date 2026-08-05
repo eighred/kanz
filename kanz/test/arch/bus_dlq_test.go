@@ -438,14 +438,14 @@ var retryCertifiedConsumers = map[string]string{
 		"after a failed transaction is a clean redo and a retry after a committed one is " +
 		"a no-op read of the same row, never a skip of unfinished work.",
 
-	"services/accounting/cmd/accounting/main.go:333": "accounting (fills+cash): dispatches " +
+	"services/accounting/cmd/accounting/main.go:404": "accounting (fills+cash): dispatches " +
 		"consume.Folder.Handle and Folder.HandleCash, both of which resolve to " +
 		"ledger.Postgres.Append (services/accounting/internal/ledger/postgres.go:31) — a single " +
 		"INSERT ... ON CONFLICT (tenant_id, entry_id) DO NOTHING inside one transaction. " +
 		"No read-then-decide gap exists for a retry to land in; it either redoes an " +
 		"uncommitted write or no-ops an already-committed one.",
 
-	"services/accounting/cmd/accounting/main.go:455": "accounting (live FX): the sole handler is " +
+	"services/accounting/cmd/accounting/main.go:526": "accounting (live FX): the sole handler is " +
 		"fxfeed.LiveFX.Handler (services/accounting/internal/fxfeed/fxfeed.go:65) — an " +
 		"unconditional last-value cache write with no dedup branch at all. Re-running it " +
 		"with the same quote sets the same rate; there is nothing to skip.",
@@ -466,7 +466,7 @@ var retryCertifiedConsumers = map[string]string{
 		"— an unconditional last-value cache write, same shape as accounting's live FX feed. " +
 		"Nothing to skip.",
 
-	"services/market-data/cmd/market-data/main.go:165": "market-data: the sole handler is " +
+	"services/market-data/cmd/market-data/main.go:187": "market-data: the sole handler is " +
 		"marketdata.Ingestor.Handler, which writes through Postgres.Put " +
 		"(internal/marketdata/store/postgres.go:49) — INSERT ... ON CONFLICT (instrument_id, " +
 		"observation_time, kind, knowledge_time) DO NOTHING inside one transaction. Same " +
@@ -493,13 +493,13 @@ var retryCertifiedConsumers = map[string]string{
 		"resolved by downstream compaction (services/lake-sink/internal/cdc/sink.go:49). A retry " +
 		"redoes the row; it cannot skip it.",
 
-	"services/alternatives/cmd/alternatives/main.go:237": "alternatives: the sole handler is " +
+	"services/alternatives/cmd/alternatives/main.go:293": "alternatives: the sole handler is " +
 		"consume.Folder.Handle, which appends through fund.Postgres.Append " +
 		"(services/alternatives/internal/fund/postgres.go:30) — a single INSERT ... ON CONFLICT " +
 		"(tenant_id, event_id) DO NOTHING. Same atomic-claim shape as the ledger and audit " +
 		"stores.",
 
-	"services/wealth/cmd/wealth/main.go:244": "wealth: the sole handler is consume.Folder.Handle, " +
+	"services/wealth/cmd/wealth/main.go:309": "wealth: the sole handler is consume.Folder.Handle, " +
 		"which Puts through book.Postgres.Put (services/wealth/internal/book/postgres.go:30) — an " +
 		"unconditional last-write-wins UPSERT keyed on household_id. Re-running it with the " +
 		"same composition is a no-op change; there is no dedup branch to skip through.",

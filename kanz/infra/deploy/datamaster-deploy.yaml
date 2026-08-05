@@ -137,9 +137,15 @@ spec:
           ports:
             - { containerPort: 8080, name: http }
           env:
-            # DSN from the SEC-01d CSI secret file, not a plaintext env. Without it
-            # the golden records and every operator override live in a map and die
-            # with the pod.
+            # DSN from the SEC-01d CSI secret file, not a plaintext env. It is
+            # REQUIRED: without it the pod REFUSES TO START (exit 2) rather than
+            # writing the golden records and every operator override into a map
+            # that dies with it -- and rather than dropping the per-tenant cycle
+            # lock, which would put every replica on the metered vendor API (see
+            # both invariants at the top of this file). The "laptop convenience,
+            # never a deployment" sentence above is now code (#261).
+            # DATAMASTER_ALLOW_EPHEMERAL_MASTER=true is that laptop; it is
+            # deliberately not set here, and setting it requires replicas: 1.
             - { name: DATAMASTER_DATABASE_URL_FILE, value: /run/secrets/db/database-url }
             # MT-01d: carried as the app.tenant_id GUC on every connection. The
             # tables are FORCE RLS; a wrong or missing tenant does not error, it

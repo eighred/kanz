@@ -1,7 +1,8 @@
 ---
 # SVCWIRE-01a — deployable workload for the alternatives (private-markets)
-# service. A stateless HTTP read surface on :8080 that boots on its in-memory
-# fund.Store / Sim defaults (no broker, no DB). Same shape + SEC-02a hardening +
+# service. An HTTP read surface on :8080 over the durable fund.Store — NOT
+# stateless, and it no longer boots without a DB: ALTERNATIVES_DATABASE_URL is
+# required and the pod refuses to start without it (#261). Same shape + SEC-02a hardening +
 # SEC-01a SPIFFE SVID as wealth-deploy.yaml; the Rollout/PDB/KEDA come in
 # SVCWIRE-01d.
 apiVersion: v1
@@ -94,9 +95,15 @@ spec:
           ports:
             - { containerPort: 8080, name: http }
           env:
-            # DSN from the SEC-01d CSI secret file, not a plaintext env. Without
-            # it this service silently falls back to the in-memory store and
-            # loses all state on restart.
+            # DSN from the SEC-01d CSI secret file, not a plaintext env. It is
+            # REQUIRED: without it the pod REFUSES TO START (exit 2) rather than
+            # falling back to a map. The journal is append-only because IRR/TVPI
+            # need every dated cashflow, and an in-memory one loses all of them on
+            # restart with no way to rebuild (the consumer group resumes at its
+            # last ack; the ALTERNATIVES stream ages out at 168h). This used to be
+            # a silent fallback (#261). ALTERNATIVES_ALLOW_EPHEMERAL_JOURNAL=true
+            # opts back in for a laptop; it is deliberately not set here, and a
+            # deployment that sets it must drop replicas below to 1.
             - { name: ALTERNATIVES_DATABASE_URL_FILE, value: /run/secrets/db/database-url }
             # MT-01d: scopes every row via the app.tenant_id GUC (RLS).
             - { name: ALTERNATIVES_TENANT, value: "__system__" }

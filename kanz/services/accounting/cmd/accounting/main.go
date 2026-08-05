@@ -1,10 +1,10 @@
 // accounting (IBOR) binary entrypoint (IBOR-01). It folds OMS-01 fills and
 // cash/corporate-action events into the investment book-of-record and serves
 // point-in-time NAV and custodian reconciliation — the system-of-record beneath
-// every number (ROI #36). The journal store is in-memory by default; a durable,
-// replayable backend and the bus consumer that feeds the journal are wired behind
-// the ledger.Store seam at the composition root (PERS-01/DEBT-02), so the default
-// boot serves the read/reconcile endpoints without a broker.
+// every number (ROI #36). With ACCOUNTING_DATABASE_URL set the journal is the
+// durable Postgres store; without it openStore REFUSES TO START unless
+// ACCOUNTING_ALLOW_EPHEMERAL_LEDGER=true says the deployment accepts a book of
+// record that does not survive a restart (#261).
 package main
 
 import (
@@ -17,6 +17,8 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"github.com/prometheus/client_golang/prometheus"
 
 	"github.com/eighred/kanz/internal/lifecycle"
 	"github.com/eighred/kanz/internal/pg"
@@ -32,6 +34,19 @@ import (
 	"github.com/eighred/kanz/services/accounting/internal/ledger"
 	"github.com/eighred/kanz/services/accounting/internal/server"
 )
+
+// ledgerDurable reports whether the IBOR journal survives a restart: 1 when it
+// is the Postgres store, 0 when it is the in-memory one an operator opted into
+// with ACCOUNTING_ALLOW_EPHEMERAL_LEDGER.
+//
+// The gauge is what makes the degraded posture ALERTABLE rather than merely
+// readable — the start-up WARN scrolls off, while `kanz_accounting_ledger_durable
+// == 0` can be alerted on for as long as it is true. Same contract as
+// kanz_audit_log_durable (#236) and kanz_venue_orderview_durable (INFRA-M7a-2).
+var ledgerDurable = prometheus.NewGauge(prometheus.GaugeOpts{
+	Name: "kanz_accounting_ledger_durable",
+	Help: "1 if the IBOR journal is backed by Postgres (survives a restart), 0 if in-memory.",
+})
 
 func main() {
 	// The lifecycle lives in run() because os.Exit skips defers: every defer
@@ -90,7 +105,12 @@ func run() int {
 		_ = obs.Shutdown(shutCtx)
 	}()
 
-	store, closeStore, err := openStore(ctx, cfg)
+	// Registered before openStore so the posture is on /metrics from the first
+	// scrape, including the degraded one. A gauge nobody registered is a Set call
+	// into the void — exactly the silence this branch is about.
+	obs.Registry.MustRegister(ledgerDurable)
+
+	store, closeStore, err := openStore(ctx, cfg, logger)
 	if err != nil {
 		logger.Error("store init failed", "err", err)
 		return 2
@@ -289,11 +309,61 @@ func awaitConsumers(consumers *sync.WaitGroup, logger *slog.Logger) {
 }
 
 // openStore selects the durable Postgres journal when a DSN is set (PARITY-02a),
-// otherwise the in-memory store. Returns a close func that tears down the pool
-// (a no-op for the in-memory store). Both satisfy ledger.Store, so the server
-// and the fill consumer share one journal regardless of backend.
-func openStore(ctx context.Context, cfg config.Config) (ledger.Store, func(), error) {
+// and otherwise REFUSES TO START unless the deployment has said out loud that it
+// accepts an ephemeral book of record. Returns a close func that tears down the
+// pool (a no-op for the in-memory store). Both satisfy ledger.Store, so the
+// server and the fill consumer share one journal regardless of backend.
+//
+// This branch used to return ledger.NewMemoryStore() with no log, no gauge and
+// no error (#261). THIS STORE IS THE FUND'S BOOK OF RECORD. The process started
+// clean, /readyz answered 200, NAV materialized from a journal that looked
+// right, and every entry in it was discarded by the next rolling update — with
+// nothing in the deployment that forgot its DSN to distinguish it from one that
+// was configured correctly.
+//
+// WHY THIS ONE REFUSES WHERE market-data WARNS. The distinction is whether the
+// store holds the only copy. market-data's price history is a fold of a feed
+// that keeps publishing and is archived to Kafka besides, so an in-memory pod
+// loses history and refills; this journal is fed by a durable consumer group
+// that resumes at its last ack and NEVER REPLAYS, off an ACCOUNTING stream that
+// ages out at 168h. A restart does not come back short, it comes back EMPTY, and
+// no amount of running time repairs it. That is tv-sync's argument
+// (services/tv-sync/internal/config/config.go validateBook) applied to the
+// ledger: an ephemeral book is not a degraded mode, it is a lie with a delay
+// on it.
+//
+// And no replica count rescues it. infra/deploy/accounting-deploy.yaml runs
+// replicas: 2, which is safe ONLY because ledger.Postgres.Append is idempotent
+// at the engine — ON CONFLICT (tenant_id, entry_id) DO NOTHING — so a fill folds
+// once whichever pod receives it. Two maps have no such conflict to detect:
+// each pod folds the subset of fills it happened to get, and a NAV query is
+// answered by whichever pod the Service picked. There is no deployment shape
+// that makes this acceptable, so it is an opt-in rather than a default — the
+// same call audit's WORM log and webhook-ingest's nonce store make.
+//
+// By the time openStore runs, config.Load has already refused to start if the
+// _FILE mount was DECLARED but unreadable (secret.Read), so an empty DSN here
+// can only mean no DSN was ever configured — precisely the case that must not be
+// silent. Every shipped manifest mounts one, so this refusal does not change the
+// deployed posture; it changes what happens to the deployment that forgot.
+func openStore(ctx context.Context, cfg config.Config, logger *slog.Logger) (ledger.Store, func(), error) {
 	if cfg.DatabaseURL == "" {
+		if !cfg.AllowEphemeralLedger {
+			return nil, nil, errors.New("no ACCOUNTING_DATABASE_URL (or _FILE mount): the IBOR journal " +
+				"would be IN-MEMORY and the fund's BOOK OF RECORD would be DISCARDED on the next restart, " +
+				"rollout or eviction — every fill, cash movement and FX revaluation with it, and the fold " +
+				"cannot be rebuilt because the consumer group resumes at its last ack and the ACCOUNTING " +
+				"stream ages out at 168h. Set ACCOUNTING_DATABASE_URL, or set " +
+				"ACCOUNTING_ALLOW_EPHEMERAL_LEDGER=true to accept a ledger that does not survive a restart " +
+				"— in which case this deployment is NOT a book of record and MUST run exactly one replica")
+		}
+		logger.Warn("IBOR JOURNAL IS IN-MEMORY — ACCOUNTING_ALLOW_EPHEMERAL_LEDGER accepted an ephemeral "+
+			"book of record. Every entry is DISCARDED on the next restart, rollout or eviction, and nothing "+
+			"downstream reports the loss. This deployment MUST run exactly ONE replica: two pods would each "+
+			"fold only the fills they received and answer NAV from a different partial journal",
+			"fix", "set ACCOUNTING_DATABASE_URL (or its _FILE mount); the shipped manifest runs replicas: 2",
+			"gauge", "kanz_accounting_ledger_durable=0")
+		ledgerDurable.Set(0)
 		return ledger.NewMemoryStore(), func() {}, nil
 	}
 	// MT-01d: every connection carries this deployment's tenant as the
@@ -307,6 +377,7 @@ func openStore(ctx context.Context, cfg config.Config) (ledger.Store, func(), er
 	if err != nil {
 		return nil, nil, err
 	}
+	ledgerDurable.Set(1)
 	return ledger.NewPostgres(pool), pool.Close, nil
 }
 
