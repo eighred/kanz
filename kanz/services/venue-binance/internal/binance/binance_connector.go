@@ -114,7 +114,17 @@ func (c *BinanceConnector) runTicker(ctx context.Context, deps WorkerDeps) {
 
 // binanceTickerFeed polls the last price per instrument and publishes a
 // market.v1.MarketDataEvent (a Trade), which tv-sync's MarkSource folds into
-// live unrealized P&L. Price is universal market fact — not tenant-scoped.
+// live unrealized P&L.
+//
+// This used to say "Price is universal market fact — not tenant-scoped", and
+// that reading of the domain is defensible but it was not a description of the
+// wire: bus.Validate REQUIRES tenant_id on every envelope, so a mark that named
+// no tenant was not published as universal, it was refused. Nothing here stamps
+// Event.TenantID and a time.Ticker loop has no inbound delivery to inherit one
+// from, which left ProducerConfig.Tenant as the only source — and it was empty.
+// It is now cfg.Tenant (venueProducerConfig in cmd/venue-binance), i.e. the
+// tenant this dedicated adapter serves, which is also what
+// bus.RequireTenantScope needs a tenant-dedicated consumer to see.
 type binanceTickerFeed struct {
 	rest    *binanceREST
 	symbols map[string]string // instrument_id -> exchange symbol

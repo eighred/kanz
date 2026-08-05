@@ -166,11 +166,7 @@ func serve(cfg config.Config) error {
 	}
 	defer func() { _ = client.Close() }()
 
-	rawProducer, err := bus.NewProducer(client, bus.ProducerConfig{
-		Source:          cfg.Source,
-		ProducerVersion: version.String(),
-		Metrics:         busMetrics,
-	})
+	rawProducer, err := bus.NewProducer(client, venueProducerConfig(cfg, busMetrics))
 	if err != nil {
 		return err
 	}
@@ -317,6 +313,34 @@ func openView(ctx context.Context, cfg config.Config, logger *slog.Logger) (orde
 	}
 	orderViewDurable.Set(1)
 	return orderview.NewPostgres(pool), pool.Close, nil
+}
+
+// venueProducerConfig is this adapter's producer identity. Extracted from serve
+// so the one line that carries the tenant has a seam a test can reach — serve
+// dials an exchange and a broker before it builds anything (#245).
+//
+// TENANT IS NOT REDUNDANT HERE, which is what made it easy to omit. The fill and
+// StateHealed emitters stamp Event.TenantID themselves (okx_userdata.go:152,
+// okx_recon.go:329/358), so three of this adapter's four publishers never touch
+// this fallback. The FOURTH is the ticker feed (okx_connector.go:130), which
+// publishes marks from a time.Ticker loop — no inbound delivery to inherit a
+// tenant from, no per-event TenantID, and it DISCARDS its publish error.
+// Without this field every tick was refused "tenant_id required" and tv-sync's
+// MarkSource got nothing.
+//
+// And it did not stay quiet: the same producer is wrapped in the HealthPublisher
+// that feeds readiness (see serve), which counts a failure the ticker's `_ =`
+// threw away. Three instruments is one poll, DefaultPublishFailureThreshold is
+// 3, so a single 5-second tick marked this adapter NOT READY — dropping it out
+// of its Service and hard-erroring the OMS router on this MIC. Order execution
+// was working perfectly; the mark feed took it down.
+func venueProducerConfig(cfg config.Config, metrics *bus.BusMetrics) bus.ProducerConfig {
+	return bus.ProducerConfig{
+		Source:          cfg.Source,
+		ProducerVersion: version.String(),
+		Tenant:          cfg.Tenant,
+		Metrics:         metrics,
+	}
 }
 
 // parseSymbolMap parses "BTC-USD=BTCUSDT,ETH-USD=ETHUSDT".

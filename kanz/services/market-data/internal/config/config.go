@@ -45,6 +45,17 @@ type Config struct {
 	// FeedAssetClass is the middle segment of the emitted event_type
 	// (market.<assetClass>.<variant>); default "equity".
 	FeedAssetClass string
+	// Tenant is stamped on every market.v1 FACT the FEED publishes (MT-01b), and
+	// it is the only source of one: runFeed's producer publishes from a
+	// time.Ticker loop, not from an inbound delivery, so there is no ctx tenant
+	// to inherit and BusSink stamps no per-event Event.TenantID.
+	//
+	// Without it bus.Validate refuses every tick with "tenant_id required" and
+	// the publisher emits NOTHING while the service reports ready — the failure
+	// market-ingest documents at its own producer and accounting's cash producer
+	// shipped with (#245). Mirrors MARKET_INGEST_TENANT, which stamps the same
+	// market.v1 event type.
+	Tenant string
 
 	// OTLPEndpoint is the OTel collector (host:port) for span export (OBS-01).
 	OTLPEndpoint string
@@ -91,6 +102,7 @@ func Load() (Config, error) {
 		Feed:            os.Getenv("MARKET_DATA_FEED"),
 		FeedInstruments: splitList(os.Getenv("MARKET_DATA_FEED_INSTRUMENTS")),
 		FeedAssetClass:  envOr("MARKET_DATA_FEED_ASSET_CLASS", "equity"),
+		Tenant:          envOr("MARKET_DATA_TENANT", "__system__"),
 	}, nil
 }
 
