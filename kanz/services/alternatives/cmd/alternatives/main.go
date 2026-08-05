@@ -2,9 +2,10 @@
 // lifecycle events — capital calls, distributions, NAV marks — into an
 // event-sourced fund position and serves position summaries + private-asset
 // metrics (IRR/TVPI/DPI/RVPI), the alternative-assets sleeve a whole-portfolio
-// view requires (ROI #38). The journal store is in-memory by default; a durable,
-// replayable backend and the bus consumer that feeds the journal are wired behind
-// the fund.Store seam at the composition root (PERS-01/DEBT-02).
+// view requires (ROI #38). With ALTERNATIVES_DATABASE_URL set the journal is the
+// durable Postgres store; without it openStore REFUSES TO START unless
+// ALTERNATIVES_ALLOW_EPHEMERAL_JOURNAL=true says the deployment accepts losing
+// every cashflow on restart (#261).
 package main
 
 import (
@@ -18,6 +19,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+
 	"github.com/eighred/kanz/internal/lifecycle"
 	"github.com/eighred/kanz/internal/pg"
 	"github.com/eighred/kanz/internal/version"
@@ -29,6 +32,16 @@ import (
 	"github.com/eighred/kanz/services/alternatives/internal/fund"
 	"github.com/eighred/kanz/services/alternatives/internal/server"
 )
+
+// journalDurable reports whether the commitment journal survives a restart: 1
+// when it is the Postgres store, 0 when it is the in-memory one an operator
+// opted into with ALTERNATIVES_ALLOW_EPHEMERAL_JOURNAL. The gauge outlives the
+// start-up WARN, which is what makes the degraded posture alertable. Same
+// contract as kanz_audit_log_durable (#236).
+var journalDurable = prometheus.NewGauge(prometheus.GaugeOpts{
+	Name: "kanz_alternatives_journal_durable",
+	Help: "1 if the commitment journal is backed by Postgres (survives a restart), 0 if in-memory.",
+})
 
 func main() {
 	// The lifecycle lives in run() because os.Exit skips defers: every defer
@@ -83,7 +96,11 @@ func run() int {
 	defer func() { _ = mesh.Close() }()
 	logger.Info("bus transport", "mtls", mesh.Enabled())
 
-	store, closeStore, err := openStore(ctx, cfg)
+	// Registered before openStore so the posture is on /metrics from the first
+	// scrape, including the degraded one.
+	obs.Registry.MustRegister(journalDurable)
+
+	store, closeStore, err := openStore(ctx, cfg, logger)
 	if err != nil {
 		logger.Error("store init failed", "err", err)
 		return 2
@@ -194,15 +211,53 @@ func awaitConsumers(consumers *sync.WaitGroup, logger *slog.Logger) {
 }
 
 // openStore selects the durable Postgres commitment journal when a DSN is set,
-// otherwise the in-memory store. Returns a close func that tears down the pool
-// (a no-op for the in-memory store). Both satisfy fund.Store, so the server and
-// the fold are identical either way.
+// and otherwise REFUSES TO START unless the deployment has said out loud that it
+// accepts an ephemeral journal. Returns a close func that tears down the pool (a
+// no-op for the in-memory store). Both satisfy fund.Store, so the server and the
+// fold are identical either way.
 //
 // fund.Postgres has existed since PARITY-02b, tested and unused: nothing ever
 // constructed it, so the append-only journal this service is built around lived
-// in a map and vanished on restart.
-func openStore(ctx context.Context, cfg config.Config) (fund.Store, func(), error) {
+// in a map and vanished on restart — silently, which is #261.
+//
+// WHY THIS ONE REFUSES. A capital call is a legal obligation the fund has
+// entered into, and the journal is append-only BECAUSE the metrics need every
+// entry: IRR and TVPI are computed over the whole dated cashflow series, not
+// over a latest value. That is exactly why infra/nats/bootstrap-job.yaml gives
+// ALTERNATIVES a plain 168h stream while WEALTH gets a compacted one — the
+// bootstrap comment says so and warns that compacting this stream "would
+// silently discard every cashflow but the last per fund". An in-memory journal
+// does something strictly worse: it discards ALL of them, and the fold cannot be
+// rebuilt, because the consumer group resumes at its last ack and a commitment
+// made last month is long past the stream's 168h horizon. The service would come
+// back reporting an IRR computed over nothing and call it a number.
+//
+// No replica count helps: infra/deploy/alternatives-deploy.yaml runs replicas: 2,
+// and two maps mean two partial cashflow series answering the same query
+// differently. So this is an opt-in, not a default — the audit / webhook-ingest
+// call, for the same reason.
+//
+// config.Load has already refused to start if the _FILE mount was DECLARED but
+// unreadable (secret.Read), so an empty DSN here can only mean none was ever
+// configured. The shipped manifest always mounts one.
+func openStore(ctx context.Context, cfg config.Config, logger *slog.Logger) (fund.Store, func(), error) {
 	if cfg.DatabaseURL == "" {
+		if !cfg.AllowEphemeralJournal {
+			return nil, nil, errors.New("no ALTERNATIVES_DATABASE_URL (or _FILE mount): the commitment " +
+				"journal would be IN-MEMORY and every capital call, distribution and NAV mark would be " +
+				"DISCARDED on the next restart, rollout or eviction — and IRR/TVPI would then be reported " +
+				"over whatever remained. The fold cannot be rebuilt: the consumer group resumes at its last " +
+				"ack and the ALTERNATIVES stream ages out at 168h. Set ALTERNATIVES_DATABASE_URL, or set " +
+				"ALTERNATIVES_ALLOW_EPHEMERAL_JOURNAL=true to accept it — in which case this deployment MUST " +
+				"run exactly one replica and its private-market metrics are not a record of anything")
+		}
+		logger.Warn("COMMITMENT JOURNAL IS IN-MEMORY — ALTERNATIVES_ALLOW_EPHEMERAL_JOURNAL accepted an "+
+			"ephemeral cashflow series. Every capital call and distribution is DISCARDED on the next "+
+			"restart, and IRR/TVPI are computed over what is left. This deployment MUST run exactly ONE "+
+			"replica: two pods would fold disjoint cashflows and report different metrics for one fund",
+			"fix", "set ALTERNATIVES_DATABASE_URL (or its _FILE mount); the shipped manifest runs replicas: 2",
+			"gauge", "kanz_alternatives_journal_durable=0")
+		journalDurable.Set(0)
 		return fund.NewMemoryStore(), func() {}, nil
 	}
 	// MT-01d: every connection carries this deployment's tenant as the
@@ -212,6 +267,7 @@ func openStore(ctx context.Context, cfg config.Config) (fund.Store, func(), erro
 	if err != nil {
 		return nil, nil, err
 	}
+	journalDurable.Set(1)
 	return fund.NewPostgres(pool), pool.Close, nil
 }
 

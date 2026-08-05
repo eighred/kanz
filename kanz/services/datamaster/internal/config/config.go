@@ -24,7 +24,8 @@ type Config struct {
 	OTLPEndpoint string
 
 	// DatabaseURL selects the durable golden store and exception queue. Empty ⇒
-	// the in-memory stores, which lose every operator override on restart.
+	// openStores REFUSES TO START unless AllowEphemeralMaster says the deployment
+	// accepts losing every operator override on restart (#261).
 	DatabaseURL string
 	// Tenant is carried as the `app.tenant_id` GUC on every DB connection so
 	// Postgres RLS scopes all reads/writes to it. Forgetting this GUC is what
@@ -60,6 +61,14 @@ type Config struct {
 	// analytic downstream treats the golden record as trusted. Sim data is for a
 	// developer laptop, not for anything that persists.
 	AllowSim bool
+
+	// AllowEphemeralMaster (DATAMASTER_ALLOW_EPHEMERAL_MASTER=true) opts in to the
+	// in-memory golden store + exception queue when no DSN is set. openStores
+	// REFUSES TO START without it, on the same principle as AllowSim directly
+	// above and for a sharper reason: an operator override is a named human's
+	// signed decision, and in a map it is deleted by the next rolling update
+	// (#261). No shipped manifest sets it.
+	AllowEphemeralMaster bool
 }
 
 // Load reads the configuration from the environment with production-safe
@@ -87,8 +96,11 @@ func Load() (Config, error) {
 		Tenant:          envOr("DATAMASTER_TENANT", "__system__"),
 		RefreshInterval: durationOr("DATAMASTER_REFRESH_INTERVAL", 5*time.Minute),
 		AllowSim:        boolOr("DATAMASTER_ALLOW_SIM", false),
-		RefFiles:        parseVendorMap(os.Getenv("DATAMASTER_REF_FILES")),
-		PriceFiles:      parseVendorMap(os.Getenv("DATAMASTER_PRICE_FILES")),
+
+		AllowEphemeralMaster: boolOr("DATAMASTER_ALLOW_EPHEMERAL_MASTER", false),
+
+		RefFiles:   parseVendorMap(os.Getenv("DATAMASTER_REF_FILES")),
+		PriceFiles: parseVendorMap(os.Getenv("DATAMASTER_PRICE_FILES")),
 	}
 	if cfg.VendorPriority, err = parsePriorities(os.Getenv("DATAMASTER_VENDOR_PRIORITY")); err != nil {
 		return Config{}, err

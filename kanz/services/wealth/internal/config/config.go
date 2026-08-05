@@ -12,10 +12,10 @@ import (
 // Config is the wealth (advisory) service runtime configuration, sourced from the
 // environment. The service aggregates a household's accounts into a virtual
 // portfolio and serves the household-level exposure view (WEALTH-01b). The
-// household store defaults to in-memory (a durable backend plugs in behind the
-// Store seam at the composition root, the PERS-01 stance); the bus consumer that
-// feeds household/account/holding state is wired there too, so the default boot
-// serves the read endpoints without a broker.
+// household store is Postgres behind the book.Store seam, wired at the
+// composition root (the PERS-01 stance) along with the bus consumer that feeds
+// household/account/holding state. There is no in-memory DEFAULT any more: with
+// no DSN the service refuses to start unless AllowEphemeralBook opts in (#261).
 type Config struct {
 	Listen   string
 	LogLevel slog.Level
@@ -23,11 +23,14 @@ type Config struct {
 	// OTLPEndpoint is the OTel collector for span export (OBS-01). Empty ⇒ none.
 	OTLPEndpoint string
 
-	// DatabaseURL selects the durable household book. Empty ⇒ the in-memory store,
-	// which is correct for tests and a single replica but loses every household on
-	// restart. book.Postgres has existed since PARITY-02b; nothing constructed it
-	// until now.
+	// DatabaseURL selects the durable household book. Empty ⇒ openStore REFUSES TO
+	// START unless AllowEphemeralBook says the deployment accepts losing every
+	// household on restart (#261).
 	DatabaseURL string
+	// AllowEphemeralBook (WEALTH_ALLOW_EPHEMERAL_BOOK=true) opts in to the
+	// in-memory book when no DSN is set. It exists for a laptop and a test rig;
+	// no shipped manifest sets it.
+	AllowEphemeralBook bool
 	// Tenant is carried as the `app.tenant_id` GUC on every DB connection so
 	// Postgres RLS scopes the book (MT-01d). Defaults to __system__, the
 	// risk-engine convention.
@@ -75,16 +78,18 @@ func Load() (Config, error) {
 	}
 
 	return Config{
-		Listen:        envOr("WEALTH_LISTEN", ":8080"),
-		LogLevel:      parseLevel(os.Getenv("WEALTH_LOG_LEVEL")),
-		OTLPEndpoint:  os.Getenv("WEALTH_OTLP_ENDPOINT"),
-		DatabaseURL:   databaseURL,
-		Tenant:        envOr("WEALTH_TENANT", "__system__"),
-		NATSURL:       os.Getenv("WEALTH_NATS_URL"),
-		Source:        envOr("WEALTH_SOURCE", "wealth"),
-		ConsumerGroup: envOr("WEALTH_CONSUMER_GROUP", "wealth"),
-		Subjects:      subjects,
-		SPIFFESocket:  os.Getenv("SPIFFE_ENDPOINT_SOCKET"),
+		Listen:       envOr("WEALTH_LISTEN", ":8080"),
+		LogLevel:     parseLevel(os.Getenv("WEALTH_LOG_LEVEL")),
+		OTLPEndpoint: os.Getenv("WEALTH_OTLP_ENDPOINT"),
+		DatabaseURL:  databaseURL,
+		Tenant:       envOr("WEALTH_TENANT", "__system__"),
+
+		AllowEphemeralBook: os.Getenv("WEALTH_ALLOW_EPHEMERAL_BOOK") == "true",
+		NATSURL:            os.Getenv("WEALTH_NATS_URL"),
+		Source:             envOr("WEALTH_SOURCE", "wealth"),
+		ConsumerGroup:      envOr("WEALTH_CONSUMER_GROUP", "wealth"),
+		Subjects:           subjects,
+		SPIFFESocket:       os.Getenv("SPIFFE_ENDPOINT_SOCKET"),
 	}, nil
 }
 

@@ -62,12 +62,18 @@ kubectl argo rollouts undo    risk-engine -n kanz-services   # roll back to prio
 ## Phase-7 read services (SVCWIRE-01a)
 
 `wealth-deploy.yaml`, `datamaster-deploy.yaml`, `alternatives-deploy.yaml`, and
-`copilot-deploy.yaml` make the Phase-7 services deployable. They are stateless
-**HTTP read surfaces on :8080** that boot on their in-memory/Stub defaults (no
-broker, no DB), so they ship as plain `Deployment`s — not the risk-engine canary
-`Rollout` — keeping the SEC-02a hardening + the SEC-01a SPIFFE SVID (the gateway
-reaches them over mTLS, SVCWIRE-01c) and dropping the DB CSI volume + broker env
-they don't use. The `workloads` ApplicationSet component recurses this directory,
+`copilot-deploy.yaml` make the Phase-7 services deployable. They are
+**HTTP read surfaces on :8080**, so they ship as plain `Deployment`s — not the
+risk-engine canary `Rollout` — keeping the SEC-02a hardening + the SEC-01a SPIFFE
+SVID (the gateway reaches them over mTLS, SVCWIRE-01c).
+
+They are **not** stateless, and they no longer boot without a database: wealth,
+datamaster and alternatives each require their `*_DATABASE_URL` and **refuse to
+start (exit 2) without it** (#261), so the DB CSI volume in each is load-bearing
+rather than optional. Each carries a `*_ALLOW_EPHEMERAL_*` escape hatch for a
+laptop, unset in every shipped manifest; a deployment that sets one must drop its
+replica count to 1, because the in-memory stores are per-pod maps behind a
+load-balancing consumer group. copilot is the exception — it holds no store. The `workloads` ApplicationSet component recurses this directory,
 so adding the file *is* the GitOps registration — no per-service Argo Application.
 
 copilot boots safely closed: with no `COPILOT_POLICY_PATH` its authorizer denies

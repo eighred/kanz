@@ -39,9 +39,14 @@ type Config struct {
 	CashSubjects []string
 
 	// DatabaseURL is the Postgres DSN for the durable IBOR journal (PARITY-02a).
-	// Empty ⇒ the in-memory store: folding works but loses the journal on
-	// restart (local/dev).
+	// Empty ⇒ openStore REFUSES TO START unless AllowEphemeralLedger says the
+	// deployment accepts a book of record held in RAM (#261).
 	DatabaseURL string
+	// AllowEphemeralLedger (ACCOUNTING_ALLOW_EPHEMERAL_LEDGER=true) opts in to the
+	// in-memory journal when no DSN is set. It exists for a laptop and a test rig,
+	// and openStore refuses to boot without it — see the WHY THIS ONE REFUSES
+	// paragraph on openStore. Not set by any shipped manifest, deliberately.
+	AllowEphemeralLedger bool
 	// Tenant is carried as the `app.tenant_id` GUC on every DB connection.
 	//
 	// It is REQUIRED, not decorative. 0001_ledger.sql runs FORCE ROW LEVEL
@@ -172,6 +177,8 @@ func Load() (Config, error) {
 		CashSubjects:  cashSubjects,
 		DatabaseURL:   databaseURL,
 		Tenant:        envOr("ACCOUNTING_TENANT", "__system__"),
+
+		AllowEphemeralLedger: os.Getenv("ACCOUNTING_ALLOW_EPHEMERAL_LEDGER") == "true",
 
 		SnapshotInterval: snapshotInterval,
 		SnapshotBatch:    snapshotBatch,

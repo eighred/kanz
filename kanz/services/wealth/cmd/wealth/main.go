@@ -1,10 +1,11 @@
 // wealth (advisory) binary entrypoint (WEALTH-01b). It aggregates a household's
 // accounts into a virtual portfolio and serves the household-level exposure view
-// — Aladdin Wealth atop the institutional engine (ROI #40). The household store
-// is in-memory by default; a durable backend and the bus consumer that feeds
-// account/holding state are wired behind the book.Store seam at the composition
-// root (PERS-01/DEBT-02), where the risk-engine recompute over the virtual
-// portfolio is driven through the risk api/v* surface.
+// — Aladdin Wealth atop the institutional engine (ROI #40). With
+// WEALTH_DATABASE_URL set the household book is the durable Postgres store;
+// without it openStore REFUSES TO START unless WEALTH_ALLOW_EPHEMERAL_BOOK=true
+// says the deployment accepts serving an empty book after a restart (#261). The
+// risk-engine recompute over the virtual portfolio is driven through the risk
+// api/v* surface.
 package main
 
 import (
@@ -18,6 +19,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+
 	"github.com/eighred/kanz/internal/lifecycle"
 	"github.com/eighred/kanz/internal/pg"
 	"github.com/eighred/kanz/internal/version"
@@ -29,6 +32,16 @@ import (
 	"github.com/eighred/kanz/services/wealth/internal/consume"
 	"github.com/eighred/kanz/services/wealth/internal/server"
 )
+
+// bookDurable reports whether the household book survives a restart: 1 when it
+// is the Postgres store, 0 when it is the in-memory one an operator opted into
+// with WEALTH_ALLOW_EPHEMERAL_BOOK. The gauge outlives the start-up WARN, which
+// is what makes the degraded posture alertable rather than merely readable.
+// Same contract as kanz_audit_log_durable (#236).
+var bookDurable = prometheus.NewGauge(prometheus.GaugeOpts{
+	Name: "kanz_wealth_book_durable",
+	Help: "1 if the household book is backed by Postgres (survives a restart), 0 if in-memory.",
+})
 
 func main() {
 	// The lifecycle lives in run() because os.Exit skips defers: every defer
@@ -83,7 +96,11 @@ func run() int {
 	defer func() { _ = mesh.Close() }()
 	logger.Info("bus transport", "mtls", mesh.Enabled())
 
-	store, closeStore, err := openStore(ctx, cfg)
+	// Registered before openStore so the posture is on /metrics from the first
+	// scrape, including the degraded one.
+	obs.Registry.MustRegister(bookDurable)
+
+	store, closeStore, err := openStore(ctx, cfg, logger)
 	if err != nil {
 		logger.Error("store init failed", "err", err)
 		return 2
@@ -194,16 +211,63 @@ func awaitConsumers(consumers *sync.WaitGroup, logger *slog.Logger) {
 	}
 }
 
-// openStore selects the durable Postgres household book when a DSN is set,
-// otherwise the in-memory store. Returns a close func that tears down the pool
-// (a no-op for the in-memory store). Both satisfy book.Store, so the server is
+// openStore selects the durable Postgres household book when a DSN is set, and
+// otherwise REFUSES TO START unless the deployment has said out loud that it
+// accepts an ephemeral book. Returns a close func that tears down the pool (a
+// no-op for the in-memory store). Both satisfy book.Store, so the server is
 // identical either way.
 //
 // book.Postgres has existed since PARITY-02b, tested and unused: nothing ever
 // constructed it, so every household this service served lived in a map and
-// vanished on restart.
-func openStore(ctx context.Context, cfg config.Config) (book.Store, func(), error) {
+// vanished on restart — silently, which is #261.
+//
+// WHY THIS ONE REFUSES, AND THE NEAR-MISS THAT MAKES IT LOOK LIKE IT SHOULD NOT.
+// The WEALTH stream is deliberately shaped so an in-memory book COULD be
+// rebuilt: infra/nats/bootstrap-job.yaml gives it --max-msgs-per-subject=1 and
+// no max-age precisely "so DeliverLastPerSubject gives a booting consumer every
+// household's latest valuation in one read". If this service armed itself that
+// way, an ephemeral book would be a genuinely defensible posture and this would
+// be a warn, as market-data's is.
+//
+// IT DOES NOT. runConsumer below uses the DURABLE QUEUE GROUP
+// (bus.Consumer.Subscribe), which resumes at its last ack and never re-reads
+// what it already folded — the compacted stream's one useful property is left on
+// the table. So a restarted pod comes back with an EMPTY map and serves it: not
+// an error, not a partial answer, an authoritative-looking exposure view of a
+// household that holds nothing. That is EXEC-M13's disarmed mandate registry and
+// EXEC-M20's blind compliance book, a third time. (Switching the consumer to the
+// broadcast/DeliverLastPerSubject path is the real repair and is not this
+// change; it alters delivery semantics for every subscriber of this subject.)
+//
+// Nor does a replica count rescue it: infra/deploy/wealth-deploy.yaml runs
+// replicas: 2, and a queue group hands each valuation to ONE pod, so the two
+// maps hold disjoint households and a query is answered by whichever pod the
+// Service picked. Until the consumer arms itself from the stream, there is no
+// deployment shape in which this is acceptable, so it is an opt-in rather than a
+// default.
+//
+// config.Load has already refused to start if the _FILE mount was DECLARED but
+// unreadable (secret.Read), so an empty DSN here can only mean none was ever
+// configured. The shipped manifest always mounts one.
+func openStore(ctx context.Context, cfg config.Config, logger *slog.Logger) (book.Store, func(), error) {
 	if cfg.DatabaseURL == "" {
+		if !cfg.AllowEphemeralBook {
+			return nil, nil, errors.New("no WEALTH_DATABASE_URL (or _FILE mount): the household book would " +
+				"be IN-MEMORY and every household would be DISCARDED on the next restart, rollout or " +
+				"eviction. The pod would then serve an EMPTY exposure view as though it were the answer — " +
+				"the consumer group resumes at its last ack and never re-reads the valuations it already " +
+				"folded, so nothing refills it. Set WEALTH_DATABASE_URL, or set " +
+				"WEALTH_ALLOW_EPHEMERAL_BOOK=true to accept it — in which case this deployment MUST run " +
+				"exactly one replica and its exposure view is not authoritative")
+		}
+		logger.Warn("HOUSEHOLD BOOK IS IN-MEMORY — WEALTH_ALLOW_EPHEMERAL_BOOK accepted an ephemeral book. "+
+			"Every household is DISCARDED on the next restart and the pod then serves an EMPTY exposure "+
+			"view, because the durable consumer group resumes at its last ack and never re-reads. This "+
+			"deployment MUST run exactly ONE replica: a queue group gives each valuation to one pod, so two "+
+			"pods hold disjoint households",
+			"fix", "set WEALTH_DATABASE_URL (or its _FILE mount); the shipped manifest runs replicas: 2",
+			"gauge", "kanz_wealth_book_durable=0")
+		bookDurable.Set(0)
 		return book.NewMemoryStore(), func() {}, nil
 	}
 	// MT-01d: every connection carries this deployment's tenant as the
@@ -213,6 +277,7 @@ func openStore(ctx context.Context, cfg config.Config) (book.Store, func(), erro
 	if err != nil {
 		return nil, nil, err
 	}
+	bookDurable.Set(1)
 	return book.NewPostgres(pool), pool.Close, nil
 }
 

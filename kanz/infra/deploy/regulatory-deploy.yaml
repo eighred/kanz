@@ -118,7 +118,14 @@ spec:
           ports:
             - { containerPort: 8083, name: http }
           env:
-            # DSN from the SEC-01d CSI secret file, not a plaintext env.
+            # DSN from the SEC-01d CSI secret file, not a plaintext env. It is
+            # REQUIRED, and it is what the scale invariant at the top of this file
+            # rests on: the DATABASE owns the chain head, so removing this env is
+            # exactly the "chain-forking engine" that comment warns about. The pod
+            # now REFUSES TO START (exit 2) instead, rather than silently chaining
+            # in a map (#261). REGULATORY_ALLOW_EPHEMERAL_CHAIN=true opts back in
+            # for a laptop and REGULATORY_SIGNER=hash needs no DSN at all; neither
+            # is set here, and either one requires replicas: 1.
             - { name: REGULATORY_DATABASE_URL_FILE, value: /run/secrets/db/database-url }
             - { name: REGULATORY_LISTEN, value: ":8083" }
             - { name: SPIFFE_ENDPOINT_SOCKET, value: "unix:///run/spiffe/spire-agent.sock" }

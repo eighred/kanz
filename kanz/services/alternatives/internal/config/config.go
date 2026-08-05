@@ -13,10 +13,10 @@ import (
 // sourced from the environment. The service folds commitment lifecycle events
 // (capital calls, distributions, NAV marks) into an event-sourced fund position
 // and serves position summaries + private-asset metrics (IRR/TVPI/DPI/RVPI). The
-// journal store defaults to in-memory (a durable backend plugs in behind
-// fund.Store at the composition root, the PERS-01 stance); the bus consumer that
-// feeds the journal is wired there too, so the default boot serves the read
-// endpoints without a broker.
+// journal store is Postgres behind the fund.Store seam, wired at the composition
+// root (the PERS-01 stance) along with the bus consumer that feeds it. There is
+// no in-memory DEFAULT any more: with no DSN the service refuses to start unless
+// AllowEphemeralJournal opts in (#261).
 type Config struct {
 	Listen   string
 	LogLevel slog.Level
@@ -24,11 +24,14 @@ type Config struct {
 	// OTLPEndpoint is the OTel collector for span export (OBS-01). Empty ⇒ none.
 	OTLPEndpoint string
 
-	// DatabaseURL selects the durable commitment journal. Empty ⇒ the in-memory
-	// store, correct for tests and a single replica but it loses every capital
-	// call and distribution on restart. fund.Postgres has existed since PARITY-02b;
-	// nothing constructed it until now.
+	// DatabaseURL selects the durable commitment journal. Empty ⇒ openStore
+	// REFUSES TO START unless AllowEphemeralJournal says the deployment accepts
+	// losing every capital call and distribution on restart (#261).
 	DatabaseURL string
+	// AllowEphemeralJournal (ALTERNATIVES_ALLOW_EPHEMERAL_JOURNAL=true) opts in to
+	// the in-memory journal when no DSN is set. It exists for a laptop and a test
+	// rig; no shipped manifest sets it.
+	AllowEphemeralJournal bool
 	// Tenant is carried as the `app.tenant_id` GUC on every DB connection so
 	// Postgres RLS scopes the journal (MT-01d). Defaults to __system__, the
 	// risk-engine convention.
@@ -81,16 +84,18 @@ func Load() (Config, error) {
 		subjects = alternatives.AllSubjects()
 	}
 	return Config{
-		Listen:        envOr("ALTERNATIVES_LISTEN", ":8080"),
-		LogLevel:      parseLevel(os.Getenv("ALTERNATIVES_LOG_LEVEL")),
-		OTLPEndpoint:  os.Getenv("ALTERNATIVES_OTLP_ENDPOINT"),
-		DatabaseURL:   databaseURL,
-		Tenant:        envOr("ALTERNATIVES_TENANT", "__system__"),
-		NATSURL:       os.Getenv("ALTERNATIVES_NATS_URL"),
-		Source:        envOr("ALTERNATIVES_SOURCE", "alternatives"),
-		ConsumerGroup: envOr("ALTERNATIVES_CONSUMER_GROUP", "alternatives"),
-		Subjects:      subjects,
-		SPIFFESocket:  os.Getenv("SPIFFE_ENDPOINT_SOCKET"),
+		Listen:       envOr("ALTERNATIVES_LISTEN", ":8080"),
+		LogLevel:     parseLevel(os.Getenv("ALTERNATIVES_LOG_LEVEL")),
+		OTLPEndpoint: os.Getenv("ALTERNATIVES_OTLP_ENDPOINT"),
+		DatabaseURL:  databaseURL,
+		Tenant:       envOr("ALTERNATIVES_TENANT", "__system__"),
+
+		AllowEphemeralJournal: os.Getenv("ALTERNATIVES_ALLOW_EPHEMERAL_JOURNAL") == "true",
+		NATSURL:               os.Getenv("ALTERNATIVES_NATS_URL"),
+		Source:                envOr("ALTERNATIVES_SOURCE", "alternatives"),
+		ConsumerGroup:         envOr("ALTERNATIVES_CONSUMER_GROUP", "alternatives"),
+		Subjects:              subjects,
+		SPIFFESocket:          os.Getenv("SPIFFE_ENDPOINT_SOCKET"),
 	}, nil
 }
 

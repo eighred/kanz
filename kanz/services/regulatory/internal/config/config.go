@@ -26,9 +26,15 @@ type Config struct {
 	// DatabaseURL is the Postgres DSN for the durable audit hash-chain link store
 	// (REG-02). When set (and Signer is "chain"), each filing's chain link is
 	// persisted and the chain head is recovered on startup, so the tamper-evident
-	// chain survives a restart. Empty ⇒ links chain in memory only (verifiable
-	// within the process, lost on restart) — the honest single-replica default.
+	// chain survives a restart. Empty ⇒ openLinkStore REFUSES TO START unless
+	// AllowEphemeralChain says the deployment accepts an in-process chain (#261).
+	// Signer "hash" needs no DSN at all and never reaches that check.
 	DatabaseURL string
+	// AllowEphemeralChain (REGULATORY_ALLOW_EPHEMERAL_CHAIN=true) opts in to the
+	// in-memory link store when the chain signer is selected and no DSN is set.
+	// It exists for a laptop and a test rig; no shipped manifest sets it, and a
+	// deployment that does MUST run one replica — see openLinkStore.
+	AllowEphemeralChain bool
 
 	// OTLPEndpoint is the OTel collector for span export (OBS-01). Empty ⇒ none.
 	OTLPEndpoint string
@@ -53,6 +59,8 @@ func Load() (Config, error) {
 		Signer:       strings.ToLower(envOr("REGULATORY_SIGNER", "chain")),
 		DatabaseURL:  databaseURL,
 		OTLPEndpoint: os.Getenv("REGULATORY_OTLP_ENDPOINT"),
+
+		AllowEphemeralChain: os.Getenv("REGULATORY_ALLOW_EPHEMERAL_CHAIN") == "true",
 	}, nil
 }
 

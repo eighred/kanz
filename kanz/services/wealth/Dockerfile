@@ -8,7 +8,8 @@
 #
 # No build tags and no variants: it holds no exchange credentials and links no
 # vendor SDK. What it stores is a deployment decision (WEALTH_DATABASE_URL_FILE), not a
-# compile-time one.
+# compile-time one — but it is no longer an OPTIONAL decision: with no DSN the
+# binary refuses to start unless WEALTH_ALLOW_EPHEMERAL_BOOK says otherwise (#261).
 #
 # Build context is the repo ROOT, not kanz/: the module's go.mod replaces
 # github.com/eighred/kanz/kanz-schemas-go => ../kanz-schemas/gen/go, which is
