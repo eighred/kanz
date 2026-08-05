@@ -348,7 +348,63 @@ jobs:
         # this step faster; the correct way to buy back that time is to give
         # each package its own database, and until that exists this flag is the
         # only thing keeping the suite deterministic.
-        run: go test -race -p 1 ./...
+        # -v BECAUSE A SKIP AND A PASS LOOK IDENTICAL WITHOUT IT.
+        #
+        # Plain `go test` prints `ok <pkg> 1.8s` for a package whose gated tests
+        # ALL skipped. CLAUDE.md names the trap — "TEST_POSTGRES_URL unset ⇒ 14
+        # test files skip silently" — and this step is where it would bite: the
+        # env block above is the only thing making those 52 gates run, and if a
+        # variable were dropped, renamed, or a helper changed, every one of them
+        # would skip and this job would stay green.
+        #
+        # That is not hypothetical. Three times in one session a Postgres-gated
+        # claim could not be confirmed from a green run, because `ok` cannot
+        # distinguish "ran" from "skipped". -v puts the SKIP lines and their
+        # reasons in the log; the step below turns them into a failure.
+        #
+        # -v RATHER THAN -json, deliberately: -json would need rendering back to
+        # text for a human to read the log, which means a jq dependency in the
+        # one job that must never fail for its own reasons. -p 1 already runs
+        # packages sequentially, so -v output cannot interleave.
+        run: |
+          set -euo pipefail
+          go test -race -p 1 -v ./... | tee "$RUNNER_TEMP/gotest.txt"
+
+      # A SKIP CITING A BACKING SERVICE THIS JOB PROVIDES IS A FAILURE.
+      #
+      # Every variable below is set in the env block above, so there is no
+      # legitimate reason for a test to skip citing one — including the mTLS
+      # pair, which this job also provides. There is deliberately NO exemption
+      # list: an exemption here would be a test opting out of the only thing
+      # that proves it ran.
+      #
+      # if: always() so it still reports when the suite failed for another
+      # reason — a skipped gate is worth knowing about on a red run too.
+      - name: Refuse a silently skipped backing-service test
+        if: always()
+        working-directory: kanz
+        run: |
+          set -euo pipefail
+          render="$RUNNER_TEMP/gotest.txt"
+          if [ ! -s "$render" ]; then
+            echo "::error::no suite output at $render — the Test step did not run, so this check proved nothing"
+            exit 1
+          fi
+          # -A3 keeps the SKIP line together with the indented reason beneath it,
+          # so a bare mention of a variable elsewhere in the log is not a match.
+          offenders="$(grep -A3 -- '--- SKIP' "$render" \
+            | grep -E 'TEST_(POSTGRES_URL|NATS_URL|KAFKA_BROKERS|REDIS_URL|NATS_MTLS_URL|NATS_MTLS_CERT_DIR)' || true)"
+          if [ -n "$offenders" ]; then
+            echo "::error::a test skipped citing a backing service this job provides — it did not run, and the suite was green anyway"
+            echo "$offenders"
+            echo
+            echo "Every one of those variables is set in the Test step's env block."
+            echo "A skip means the gate stopped seeing it: a renamed variable, a"
+            echo "changed helper, or a service container that failed to come up."
+            exit 1
+          fi
+          printf 'no backing-service test skipped; %d SKIP line(s) total, all for other reasons\n' \
+            "$(grep -c -- '--- SKIP' "$render" || true)"
 
       # THE `redis` BUILD (EXEC-M22). This tag is what webhook-ingest's production image is
       # built with, and it is the ONLY thing that makes `replicas: 2` on the platform's
