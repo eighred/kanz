@@ -282,6 +282,140 @@ groups:
           summary: "{{ $labels.group }} parked an UNPROCESSABLE message from {{ $labels.subject }} — a redrive will refuse it"
           description: "A delivery failed in a way pkg/bus classified as TERMINAL: unframeable bytes, an envelope that failed validation, or a handler panic. kanz-redrive refuses these deliberately, because re-running a deterministic defect against the same bytes parks them again — so this event is LOST, and no operator action recovers it. Read Kanz-DLQ-Error on the parked message. The usual cause is a producer whose payload shape changed, in which case every message of that type is being lost too; if the cause is a panic, the handler is also crashing on live traffic."
 
+      # -----------------------------------------------------------------------
+      # THE ARCHIVER'S DLQ IS A DIFFERENT TRANSPORT AND HAD NO RULE AT ALL (#285).
+      #
+      # The two rules above are over kanz_bus_dlq_parked_total, which pkg/bus
+      # increments on the NATS path. The archiver does not use it: it parks to
+      # the KAFKA topic dlq.archiver and counts on kanz_archiver_failed_total,
+      # a metric no rule in this file reads.
+      #
+      # WHY THE TWO EXISTING ARCHIVER RULES CANNOT COVER THIS, WHICH IS THE
+      # WHOLE REASON THESE ARE NEEDED. ArchiverNotArchivingWithBacklog and
+      # ArchiverBacklogGrowing both key on kanz_archiver_pending_messages — the
+      # DEPTH of the durable consumer's queue. deadLetter() parks and then ACKS
+      # (services/archiver/internal/archive/archiver.go), so a park makes the
+      # backlog go DOWN. An archiver parking every single event it receives
+      # drains its queue promptly and keeps a pending count of zero: to both
+      # rules above, and to every ratio in slo.alerts.rules.yaml, that is
+      # indistinguishable from an archiver doing its job perfectly. The failure
+      # this file exists to catch — healthy-looking silence — is the exact shape
+      # of the archiver's own worst outcome.
+      #
+      # AND IT IS WORSE HERE THAN ON THE NATS PATH. kanz-redrive is NATS-only
+      # (`grep -in kafka cmd/kanz-redrive/main.go` → nothing), so where
+      # BusTerminalMessagesDeadLettered can at least say "a redrive will refuse
+      # it", here there is no tool that could even refuse. infra/kafka/topics-job.yaml
+      # declares dlq.archiver with `delete` retention at 2592000000ms — 30 days
+      # — and says in its own comment that those 30 days are "the window in
+      # which a HUMAN can extract a parked event". #285 wrote that window down.
+      # Nothing told the human the clock had started. That is what these fix.
+      #
+      # DELIBERATELY NOT ALERTED: reason="publish". That is the real-topic Kafka
+      # produce failing, which is TRANSIENT and NACKed — the event stays on the
+      # spine, the backlog grows, and ArchiverNotArchivingWithBacklog above owns
+      # it. Adding a rule here would page twice for one incident.
+      #
+      # NO topic LABEL IN ANY by() BELOW, and that is not an oversight:
+      # observeFail's own comment says topic "may be ''" for unframe/route
+      # because both fail BEFORE a topic is known, so every series these rules
+      # match carries topic="". Grouping by a label that is always empty splits
+      # nothing and puts an empty string in the summary.
+
+      # AT LEAST ONE EVENT HAS LEFT THE LOG OF RECORD, AND THE 30-DAY CLOCK IS RUNNING.
+      #
+      # Threshold zero for the same reason BusMessagesDeadLettered uses zero:
+      # the park acked the only live copy. The archiver exists BECAUSE NATS
+      # streams age out (24h on MARKET/RISK/EXECUTION, 168h on
+      # ACCOUNTING/COMPLIANCE/SETTLEMENT) — so once that happens, the copy on
+      # dlq.archiver is the only one anywhere, and it is on a topic with a
+      # delete policy and nothing subscribed.
+      #
+      # WARNING, NOT CRITICAL, AND NOT BECAUSE IT IS MINOR — this is permanent
+      # loss from the durable log. It is a warning for the same reason
+      # BusTerminalMessagesDeadLettered is: both park reasons are ClassTerminal
+      # by a decision deadLetter() argues explicitly ("nothing in the WORLD
+      # changes to make either succeed"), so there is no 03:00 action. The
+      # response is a producer fix or a topic mapping, and it ships in a deploy.
+      # A page a responder cannot act on is how this file gets muted.
+      #
+      # 1h window, for: 0m — the shape BusTerminalMessagesDeadLettered uses and
+      # for its reasoning: the loss already happened, so a `for:` only delays a
+      # ticket. The window is what holds the alert up long enough to be grouped.
+      # Note the mismatch worth knowing: the alert repeats hourly while the
+      # evidence expires in 30 days. If this is still open on day 29 the event
+      # is about to be deleted, which is why the description leads with that.
+      - alert: ArchiverParkedAnEventWithNoDrain
+        expr: sum by (reason) (increase(kanz_archiver_failed_total{reason=~"unframe|route"}[1h])) > 0
+        for: 0m
+        labels: { severity: warning, layer: operational }
+        annotations:
+          summary: "The archiver parked an event ({{ $labels.reason }}) on dlq.archiver — nothing drains it and it is deleted in 30 days"
+          description: "An event never reached the Kafka log of record: reason={{ $labels.reason }} (unframe = the body never decoded; route = its event_type/tenant maps to no topic). The archiver parked it on dlq.archiver and ACKED the original, so the parked copy becomes the only copy once its NATS stream ages out — 24h on MARKET/RISK/EXECUTION, 168h on ACCOUNTING/COMPLIANCE/SETTLEMENT. dlq.archiver has a 30-day delete retention and NO consumer, and kanz-redrive is NATS-only, so recovery means a human reading the topic by hand inside that window (#285). Note the backlog alerts CANNOT see this: parking acks, so pending stays at zero. Read Kanz-DLQ-Error and Kanz-DLQ-Original-Subject on the parked message."
+
+      # AN ENTIRE EVENT CLASS IS BEING DROPPED RIGHT NOW, AND THIS ONE IS FIXABLE NOW.
+      #
+      # Split from the rule above because the RESPONSE differs, which is this
+      # file's stated reason for splitting terminal from transient. "route"
+      # means topic.For found no mapping for an event_type/tenant pair. That is
+      # this archiver's static configuration, not the bytes — so unlike
+      # "unframe", a human CAN end the loss immediately by adding the mapping,
+      # and every event of that type is being lost until they do. #285: "a
+      # routing table that does not know a subject is a configuration error, and
+      # configuration errors arrive in batches rather than singly."
+      #
+      # NO COUNT THRESHOLD, DELIBERATELY. The obvious rule is "more than N per
+      # window", but N here could only be invented: one route failure and ten
+      # thousand have the identical cause (a missing mapping) and the identical
+      # fix, so magnitude does not separate an incident from a one-off. What
+      # separates them is PERSISTENCE — a mapping that is still missing fifteen
+      # minutes later is a live configuration gap, while a single event from a
+      # decommissioned producer is not. So the rule is a rate over zero held for
+      # 15m, per this file's own instruction to write the rule without a number
+      # rather than invent one.
+      #
+      # OVERLAPS ArchiverParkedAnEventWithNoDrain ON PURPOSE, the same way
+      # ArchiverBacklogGrowing and ArchiverNotArchivingWithBacklog overlap: two
+      # alerts, two severities, two different things to do. The test harness
+      # asserts a lone unframe park does NOT fire this one.
+      - alert: ArchiverRoutingTableRejectingEvents
+        expr: sum(rate(kanz_archiver_failed_total{reason="route"}[15m])) > 0
+        for: 15m
+        labels: { severity: critical, layer: operational }
+        annotations:
+          summary: "The archiver has been unable to route events to a Kafka topic for 15 minutes — every event of that type is being lost"
+          description: "kanz_archiver_failed_total{reason=\"route\"} has been rising continuously for 15 minutes: topic.For is finding no mapping for some event_type/tenant pair, so those events are being parked on dlq.archiver instead of written to the log of record, and they keep coming. Unlike an unframeable body this is CONFIGURATION and you can stop the loss now — add the missing mapping to the archiver's topic table and redeploy. The usual causes are a producer shipping a new event_type ahead of its topic mapping, or a tenant onboarded without one. Events already parked are NOT recovered by the fix: dlq.archiver has no drain and a 30-day delete retention (#285)."
+
+      # THE EVENT REACHED NEITHER ITS TOPIC NOR THE DLQ — the archiver's own
+      # metrics.go calls this "the most severe outcome".
+      #
+      # deadLetter() returns an error and NACKs when the DLQ produce fails,
+      # precisely so an event is never acked having landed nowhere. That is the
+      # correct behaviour and it is why this is survivable — but it means the
+      # delivery loop is now cycling a message it cannot place, indefinitely.
+      #
+      # WHY THE BACKLOG ALERTS DO NOT ALREADY COVER IT. The tempting assumption
+      # is that Kafka being unreachable fails "publish" too, growing the backlog
+      # until ArchiverNotArchivingWithBacklog fires. dlq.archiver is a SEPARATE
+      # topic with its own 3 partitions (infra/kafka/topics-job.yaml), so it can
+      # be unavailable on its own — a lost partition leader, or the topics-job
+      # never having created it in a fresh environment. In that case the real
+      # topic keeps flowing, archived_total keeps rising, pending stays flat,
+      # and every other rule in this file stays silent while unframeable events
+      # cycle forever. That combination is the specific hole this closes.
+      #
+      # 10m, shorter than the 15m above: a broker blip that resolves itself
+      # needs no page, but this one IS actionable at 03:00 (a Kafka topic is
+      # unavailable) — unlike the two rules above, where the fix ships in a
+      # deploy. Sustained past ten minutes it is not a blip.
+      - alert: ArchiverDeadLetterProduceFailing
+        expr: sum(rate(kanz_archiver_failed_total{reason="dlq_publish"}[15m])) > 0
+        for: 10m
+        labels: { severity: critical, layer: operational }
+        annotations:
+          summary: "The archiver cannot write to dlq.archiver — events are reaching neither their topic nor the DLQ"
+          description: "The DLQ produce itself is failing on top of an unframe or route failure, so these events have landed NOWHERE — services/archiver/internal/archive/metrics.go calls this the most severe outcome. deadLetter() NACKs rather than acking, which is correct and means nothing is lost yet, but the consumer is now cycling messages it cannot place. dlq.archiver is a separate 3-partition topic, so check IT specifically before assuming a broad Kafka outage: a lost partition leader, or the topics-job never having run in this environment, takes it down while the real topics keep flowing — in which case no other alert here will fire."
+
   # ---------------------------------------------------------------------------
   # OMS — positions whose truth nobody knows
   # ---------------------------------------------------------------------------
