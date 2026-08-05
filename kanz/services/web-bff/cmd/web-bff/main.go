@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/eighred/kanz/internal/lifecycle"
+	"github.com/eighred/kanz/internal/platform/httpserver"
 	"github.com/eighred/kanz/internal/version"
 	"github.com/eighred/kanz/pkg/observability"
 	"github.com/eighred/kanz/services/web-bff/internal/config"
@@ -94,11 +95,7 @@ func run() int {
 		return 2
 	}
 
-	httpSrv := &http.Server{
-		Addr:              cfg.Listen,
-		Handler:           srv,
-		ReadHeaderTimeout: 5 * time.Second,
-	}
+	httpSrv := httpserver.New(cfg.Listen, srv, httpserver.Standard())
 	go func() {
 		logger.Info("web-bff listening", "addr", cfg.Listen, "issuer", cfg.Issuer, "gateway", cfg.GatewayURL)
 		if err := httpSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {

@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 
 	"github.com/eighred/kanz/pkg/auth"
 )
@@ -26,14 +27,25 @@ type LineageCatalog struct {
 	baseURL string
 }
 
-// NewLineageCatalog builds a Catalog over client (nil ⇒ http.DefaultClient) and
-// the lineage service base URL.
+// NewLineageCatalog builds a Catalog over client and the lineage service base
+// URL.
+//
+// A nil client gets a private one, NOT http.DefaultClient (#235). copilot passes
+// nil today, so every citation lookup this service makes ran on a global that any
+// package in the process can retune — and on DefaultTransport, whose 2 idle
+// connections per host throttle a path taken once per cited reading. It carries no
+// Timeout: the bound is the caller's context, set in Resolve.
 func NewLineageCatalog(client *http.Client, baseURL string) *LineageCatalog {
 	if client == nil {
-		client = http.DefaultClient
+		client = &http.Client{Transport: &http.Transport{}}
 	}
 	return &LineageCatalog{client: client, baseURL: strings.TrimRight(baseURL, "/")}
 }
+
+// lineageResolveTimeout bounds one citation lookup. Small on purpose: this is a
+// display detail on an answer the user is waiting for, and Citation.String already
+// renders the raw event id when it fails. Slow here is worse than absent.
+const lineageResolveTimeout = 3 * time.Second
 
 var _ Catalog = (*LineageCatalog)(nil)
 
@@ -47,6 +59,17 @@ func (c *LineageCatalog) Resolve(ctx context.Context, sourceEventID string) (str
 	if sourceEventID == "" {
 		return "", false
 	}
+	// BOUND THE CALL, NOT THE CLIENT (#235). This is a cosmetic lookup on the
+	// answer path — it decorates a citation — and it had no deadline of its own,
+	// so a wedged lineage service held the whole answer for as long as the
+	// caller's context allowed, once per cited reading. A failure here is already
+	// defined as harmless, which makes giving up early strictly better than
+	// waiting. It goes here rather than on the http.Client because a client-level
+	// timeout is enforced independently of the context and would win invisibly
+	// over the caller's own budget.
+	ctx, cancel := context.WithTimeout(ctx, lineageResolveTimeout)
+	defer cancel()
+
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
 		c.baseURL+"/v1/lineage/event/"+url.PathEscape(sourceEventID), nil)
 	if err != nil {

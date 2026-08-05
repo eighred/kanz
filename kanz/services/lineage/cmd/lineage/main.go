@@ -19,6 +19,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 
 	"github.com/eighred/kanz/internal/lifecycle"
+	"github.com/eighred/kanz/internal/platform/httpserver"
 	"github.com/eighred/kanz/internal/version"
 	"github.com/eighred/kanz/pkg/auth"
 	"github.com/eighred/kanz/pkg/bus"
@@ -100,13 +101,7 @@ func run() int {
 	querySvc := query.NewService(g, gov)
 
 	readiness := &server.Readiness{}
-	httpSrv := &http.Server{
-		Addr: cfg.Listen,
-		Handler: server.New(readiness, logger,
-			server.WithMetrics(obs.MetricsHandler()),
-			server.WithLineage(g, querySvc)),
-		ReadHeaderTimeout: 5 * time.Second,
-	}
+	httpSrv := httpserver.New(cfg.Listen, server.New(readiness, logger, server.WithMetrics(obs.MetricsHandler()), server.WithLineage(g, querySvc)), httpserver.Standard())
 	go func() {
 		logger.Info("lineage listening", "addr", cfg.Listen)
 		if err := httpSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {

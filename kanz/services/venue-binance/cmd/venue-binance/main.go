@@ -38,6 +38,7 @@ import (
 	"github.com/eighred/kanz/internal/execution"
 	"github.com/eighred/kanz/internal/lifecycle"
 	"github.com/eighred/kanz/internal/pg"
+	"github.com/eighred/kanz/internal/platform/httpserver"
 	"github.com/eighred/kanz/internal/venueadapter/accountproof"
 	"github.com/eighred/kanz/internal/venueadapter/orderview"
 	"github.com/eighred/kanz/internal/venueadapter/server"
@@ -117,11 +118,7 @@ func serve(cfg config.Config) error {
 
 	// Probes first, so a slow exchange handshake does not look like a crash.
 	readiness := &server.Readiness{}
-	httpSrv := &http.Server{
-		Addr:              cfg.HTTPListen,
-		Handler:           server.Probes(readiness, obs.MetricsHandler()),
-		ReadHeaderTimeout: 5 * time.Second,
-	}
+	httpSrv := httpserver.New(cfg.HTTPListen, server.Probes(readiness, obs.MetricsHandler()), httpserver.Standard())
 	go func() {
 		logger.Info("venue-binance probes listening", "addr", cfg.HTTPListen)
 		if err := httpSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {

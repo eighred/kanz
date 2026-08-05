@@ -422,7 +422,7 @@ func usesRedriver(f *ast.File) bool {
 // un-certifies it until this entry is updated to match; that fails CLOSED,
 // which is the safe direction for a capital-path guard.
 var retryCertifiedConsumers = map[string]string{
-	"services/tv-sync/cmd/tv-sync/main.go:122": "tv-sync: the sole handler is " +
+	"services/tv-sync/cmd/tv-sync/main.go:123": "tv-sync: the sole handler is " +
 		"projection.Projection.Handle. Its only error return before the fold is " +
 		"PostgresLog.Append itself failing (services/tv-sync/internal/projection/postgres.go:68), " +
 		"which means nothing committed. fold() never returns an error and Handle " +
@@ -431,26 +431,26 @@ var retryCertifiedConsumers = map[string]string{
 		"ever re-attempt an Append that did not durably land, never skip a fold whose " +
 		"Append already committed.",
 
-	"services/audit/cmd/audit/main.go:172": "audit: the sole handler is audit.Projector.Handle, " +
+	"services/audit/cmd/audit/main.go:169": "audit: the sole handler is audit.Projector.Handle, " +
 		"which appends through Postgres.Append (services/audit/internal/audit/postgres.go:32). " +
 		"The event_id dedup check and the insert run inside ONE transaction under an " +
 		"advisory xact lock — atomic claim-and-persist, not check-then-act — so a retry " +
 		"after a failed transaction is a clean redo and a retry after a committed one is " +
 		"a no-op read of the same row, never a skip of unfinished work.",
 
-	"services/accounting/cmd/accounting/main.go:404": "accounting (fills+cash): dispatches " +
+	"services/accounting/cmd/accounting/main.go:401": "accounting (fills+cash): dispatches " +
 		"consume.Folder.Handle and Folder.HandleCash, both of which resolve to " +
 		"ledger.Postgres.Append (services/accounting/internal/ledger/postgres.go:31) — a single " +
 		"INSERT ... ON CONFLICT (tenant_id, entry_id) DO NOTHING inside one transaction. " +
 		"No read-then-decide gap exists for a retry to land in; it either redoes an " +
 		"uncommitted write or no-ops an already-committed one.",
 
-	"services/accounting/cmd/accounting/main.go:526": "accounting (live FX): the sole handler is " +
+	"services/accounting/cmd/accounting/main.go:523": "accounting (live FX): the sole handler is " +
 		"fxfeed.LiveFX.Handler (services/accounting/internal/fxfeed/fxfeed.go:65) — an " +
 		"unconditional last-value cache write with no dedup branch at all. Re-running it " +
 		"with the same quote sets the same rate; there is nothing to skip.",
 
-	"services/risk-engine/cmd/risk-engine/main.go:291": "risk-engine (state ingest): dispatches " +
+	"services/risk-engine/cmd/risk-engine/main.go:288": "risk-engine (state ingest): dispatches " +
 		"ingest.Ingestor.Handler -> engine.TriggeringApplier -> state.Store.ApplyPortfolioRevalued" +
 		"/ApplyPositionChanged/ApplyPortfolioSnapshot (internal/risk/state/store.go:202,227,246). " +
 		"Each Apply* checks its per-portfolio dedup window and mutates in-memory state with " +
@@ -461,18 +461,18 @@ var retryCertifiedConsumers = map[string]string{
 		"cannot itself fail the handler, so a retry can never observe a Trigger that ran " +
 		"without its Apply* having actually completed.",
 
-	"services/risk-engine/cmd/risk-engine/main.go:362": "risk-engine (calibration quotes): the " +
+	"services/risk-engine/cmd/risk-engine/main.go:359": "risk-engine (calibration quotes): the " +
 		"sole handler is livequote.LiveQuotes.Handler (internal/risk/pricing/livequote/livequote.go:80) " +
 		"— an unconditional last-value cache write, same shape as accounting's live FX feed. " +
 		"Nothing to skip.",
 
-	"services/market-data/cmd/market-data/main.go:187": "market-data: the sole handler is " +
+	"services/market-data/cmd/market-data/main.go:184": "market-data: the sole handler is " +
 		"marketdata.Ingestor.Handler, which writes through Postgres.Put " +
 		"(internal/marketdata/store/postgres.go:49) — INSERT ... ON CONFLICT (instrument_id, " +
 		"observation_time, kind, knowledge_time) DO NOTHING inside one transaction. Same " +
 		"atomic-claim shape as audit/accounting; no check-then-act gap.",
 
-	"services/autopilot/cmd/autopilot/main.go:150": "autopilot: the sole handler is " +
+	"services/autopilot/cmd/autopilot/main.go:147": "autopilot: the sole handler is " +
 		"controller.Controller.Handle, which has no dedup-and-skip branch at all — a retry " +
 		"always re-runs Dispatch (match -> runbook -> escalate) from the top. Every " +
 		"runbook.Action is a documented MUST-be-idempotent contract " +
@@ -480,31 +480,31 @@ var retryCertifiedConsumers = map[string]string{
 		"already re-runs runbooks on ordinary at-least-once redelivery; in-process retry adds " +
 		"no new failure shape. A doubled escalation page is a duplicate alert, not lost work.",
 
-	"services/lineage/cmd/lineage/main.go:237": "lineage: the sole handler is harvest.Harvester.Handle. " +
+	"services/lineage/cmd/lineage/main.go:232": "lineage: the sole handler is harvest.Harvester.Handle. " +
 		"graph.Memory.Observe (services/lineage/internal/graph/graph.go:71) always runs to " +
 		"completion (its own doc comment: 're-observing an event re-counts it but the edges " +
 		"are a set') before the OpenLineage Emit call that can fail — so a retry re-observes " +
 		"(accepted, pre-existing double-count on the Events tally, not a skip) and re-emits; " +
 		"it never skips the observe that a first attempt already made.",
 
-	"services/lake-sink/cmd/lake-sink/main.go:145": "lake-sink: the sole handler is cdc.EventSink.Handle, " +
+	"services/lake-sink/cmd/lake-sink/main.go:142": "lake-sink: the sole handler is cdc.EventSink.Handle, " +
 		"which has no dedup-and-skip branch — every attempt decodes, writes and flushes from " +
 		"scratch, and the doc comment is explicit that a duplicate row is expected and " +
 		"resolved by downstream compaction (services/lake-sink/internal/cdc/sink.go:49). A retry " +
 		"redoes the row; it cannot skip it.",
 
-	"services/alternatives/cmd/alternatives/main.go:293": "alternatives: the sole handler is " +
+	"services/alternatives/cmd/alternatives/main.go:290": "alternatives: the sole handler is " +
 		"consume.Folder.Handle, which appends through fund.Postgres.Append " +
 		"(services/alternatives/internal/fund/postgres.go:30) — a single INSERT ... ON CONFLICT " +
 		"(tenant_id, event_id) DO NOTHING. Same atomic-claim shape as the ledger and audit " +
 		"stores.",
 
-	"services/wealth/cmd/wealth/main.go:309": "wealth: the sole handler is consume.Folder.Handle, " +
+	"services/wealth/cmd/wealth/main.go:306": "wealth: the sole handler is consume.Folder.Handle, " +
 		"which Puts through book.Postgres.Put (services/wealth/internal/book/postgres.go:30) — an " +
 		"unconditional last-write-wins UPSERT keyed on household_id. Re-running it with the " +
 		"same composition is a no-op change; there is no dedup branch to skip through.",
 
-	"services/oms/cmd/oms/main.go:499": "oms: dispatches handleSubmit, handleCancel, handleAmend " +
+	"services/oms/cmd/oms/main.go:496": "oms: dispatches handleSubmit, handleCancel, handleAmend " +
 		"(order.Service.Handle) and position.Projector.Handle (fills), re-derived fresh against " +
 		"250fe00 rather than assumed fixed — see .superpowers/sdd/oms-recert-report.md for the " +
 		"full per-failure-point walk. handleSubmit: every failure point after store.Create either " +

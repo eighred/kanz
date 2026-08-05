@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/eighred/kanz/internal/lifecycle"
+	"github.com/eighred/kanz/internal/platform/httpserver"
 	"github.com/eighred/kanz/internal/version"
 	"github.com/eighred/kanz/pkg/alpha"
 	"github.com/eighred/kanz/pkg/bus"
@@ -106,11 +107,7 @@ func run() int {
 
 	// Health/readiness endpoint for the orchestrator.
 	ready := &readiness{}
-	httpSrv := &http.Server{
-		Addr:              cfg.Listen,
-		Handler:           healthMux(ready, publishHealth, obs.MetricsHandler()),
-		ReadHeaderTimeout: 5 * time.Second,
-	}
+	httpSrv := httpserver.New(cfg.Listen, healthMux(ready, publishHealth, obs.MetricsHandler()), httpserver.Standard())
 	go func() {
 		logger.Info("market-ingest health listening", "addr", cfg.Listen)
 		if err := httpSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
