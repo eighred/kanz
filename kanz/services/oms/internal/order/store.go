@@ -7,6 +7,8 @@ import (
 
 	orderpb "github.com/eighred/kanz/kanz-schemas-go/order/v1"
 	"google.golang.org/protobuf/proto"
+
+	"github.com/eighred/kanz/services/oms/internal/outbox"
 )
 
 // ErrNotFound is returned by Store.Load when no order has the given id.
@@ -63,10 +65,23 @@ var ErrConflict = errors.New("oms: order changed since load")
 //     version excludes them ACROSS replicas, which is the half the lock cannot
 //     reach by construction (#122).
 type Store interface {
-	// Create inserts the initial state of one order. It returns ErrExists — and
-	// writes nothing — if the order_id is already present. MUST be atomic: two
-	// concurrent Creates of the same order_id must produce exactly one success.
-	Create(ctx context.Context, st *orderpb.OrderState) error
+	// Create inserts the initial state of one order AND the FACTs announcing it,
+	// in ONE transaction. It returns ErrExists — and writes nothing at all,
+	// including no outbox record — if the order_id is already present. MUST be
+	// atomic: two concurrent Creates of the same order_id must produce exactly
+	// one success.
+	//
+	// THE announce PARAMETER IS THE POINT (#292). Admission used to be
+	// store.Create followed by emitter.EmitAccepted: two independent writes, so
+	// a publish failure left a durable order the estate had never heard of, and
+	// the repair was a marker column plus a compensator that had to notice
+	// (#238). Passing the FACT to the write makes that state unreachable —
+	// either the order exists and its announcement is queued, or neither is
+	// true. Nothing is announced by Create itself; the outbox relay publishes.
+	//
+	// nil announces nothing, which is a legitimate answer for a write that has
+	// no FACT of its own. It is not a default: every caller states it.
+	Create(ctx context.Context, st *orderpb.OrderState, announce []outbox.Record) error
 	// Save persists the latest state of one order iff it is still at
 	// expectedVersion, and returns ErrConflict if it is not. expectedVersion is
 	// the value Load returned alongside the state this write was derived from.
@@ -74,6 +89,19 @@ type Store interface {
 	// There is deliberately NO blind variant. A Save that cannot refuse is the
 	// defect this replaced, and leaving one alongside would mean the next writer
 	// reaches for it.
+	//
+	// IT HAS NO announce PARAMETER YET, AND THAT IS A KNOWN, TRACKED GAP (#292).
+	// Create carries the admission FACT because admission is the transition with
+	// the evidence — #238 found it stranding real orders. The five remaining
+	// commit-then-publish pairs on this store (the routed FACT, the two fill
+	// folds, the cancel announcement and the amend outcome) still publish
+	// outside the transaction and still rely on their markers. Each is a
+	// SEPARATE decision — what FACT the write announces, and whether its marker
+	// moves into the transaction with it — so adding the parameter here before
+	// those decisions are made would be a signature change across fifteen call
+	// sites that proves nothing and has to be re-read at every one of them
+	// afterwards. test/arch/oms_outbox_test.go names each of the five and fails
+	// if a SIXTH appears.
 	Save(ctx context.Context, st *orderpb.OrderState, expectedVersion int64) error
 	// Load returns the current state of one order and its version, or
 	// ErrNotFound. The version is opaque to the caller: its only use is to be
@@ -81,6 +109,18 @@ type Store interface {
 	Load(ctx context.Context, orderID string) (*orderpb.OrderState, int64, error)
 	// List returns a snapshot of all known orders, for bootstrap/inspection.
 	List(ctx context.Context) ([]*orderpb.OrderState, error)
+	// Outbox is the queue Create enqueues into.
+	//
+	// IT IS ON THIS INTERFACE RATHER THAN OBTAINED SEPARATELY, and that is a
+	// safety decision (#292). The store and its outbox are one thing: they share
+	// a transaction, a tenant scope and a failure domain. A composition root
+	// that could get a store without its queue could wire the relay over a
+	// DIFFERENT queue, or over none — and an OMS whose outbox nothing drains
+	// admits orders, commits their FACTs and tells nobody, with every health
+	// check green. Handing the queue out through the store makes the two
+	// impossible to separate.
+	Outbox() outbox.Queue
+
 	// ListByStatus returns every order currently in one of the given statuses.
 	// It exists for the startup sweep, which wants the OPEN orders and must not
 	// load every order the fund has ever placed to find them. A durable backend
@@ -111,17 +151,28 @@ type versioned struct {
 type MemoryStore struct {
 	mu     sync.RWMutex
 	orders map[string]*versioned
+	// outbox is written under the SAME lock hold as the map, which is this
+	// store's equivalent of Postgres.Create's transaction. It is owned here
+	// rather than injected so a MemoryStore cannot be constructed without one:
+	// a store with a nil outbox would silently drop every FACT handed to Create.
+	outbox *outbox.Memory
 }
 
 // NewMemoryStore returns an empty in-memory Store.
 func NewMemoryStore() *MemoryStore {
-	return &MemoryStore{orders: make(map[string]*versioned)}
+	return &MemoryStore{orders: make(map[string]*versioned), outbox: outbox.NewMemory()}
 }
 
-// Create inserts st iff its order_id is absent. The check and the insert happen
-// under one lock hold — that atomicity IS the guarantee, and splitting it back
-// into Load-then-Save would restore the double-trade window.
-func (m *MemoryStore) Create(_ context.Context, st *orderpb.OrderState) error {
+// Outbox is the in-process queue this store enqueues into. Never nil.
+func (m *MemoryStore) Outbox() outbox.Queue { return m.outbox }
+
+// Create inserts st iff its order_id is absent, and enqueues its FACTs in the
+// same lock hold. The check, the insert and the enqueue happen under ONE lock —
+// that atomicity IS the guarantee, and it is this store's whole equivalent of
+// the transaction Postgres.Create opens. Splitting it back into Load-then-Save
+// would restore the double-trade window; splitting the enqueue out of it would
+// restore the lost-FACT window (#292).
+func (m *MemoryStore) Create(_ context.Context, st *orderpb.OrderState, announce []outbox.Record) error {
 	if st.GetOrderId() == "" {
 		return errors.New("oms: cannot create order with empty order_id")
 	}
@@ -129,6 +180,15 @@ func (m *MemoryStore) Create(_ context.Context, st *orderpb.OrderState) error {
 	defer m.mu.Unlock()
 	if _, ok := m.orders[st.GetOrderId()]; ok {
 		return ErrExists
+	}
+	// THE OUTBOX FIRST, THE ORDER SECOND. A failure here must leave NOTHING
+	// behind — the same all-or-nothing the Postgres transaction gives — and the
+	// map write cannot fail, so the only ordering that can honour that is the
+	// fallible write first.
+	if len(announce) > 0 {
+		if err := m.outbox.Append(announce...); err != nil {
+			return err
+		}
 	}
 	// Version 0 matches the column default in migrations/0005: an order starts
 	// unversioned and the first Save moves it to 1.

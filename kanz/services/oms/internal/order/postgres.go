@@ -9,6 +9,8 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"google.golang.org/protobuf/proto"
+
+	"github.com/eighred/kanz/services/oms/internal/outbox"
 )
 
 // Postgres is the durable Store backed by the 0001_orders.sql schema (EXEC-M7c).
@@ -26,23 +28,60 @@ import (
 // is no lossless native column (the risk-engine PERS-01 opaque-bytes stance).
 type Postgres struct {
 	pool *pgxpool.Pool
+	// queue is the outbox over the SAME pool, which is what gives it the same
+	// tenant scope and the same failure domain as the orders it announces.
+	queue *outbox.Postgres
 }
 
 // NewPostgres returns a Postgres store over an existing pool. The caller owns
 // the pool lifecycle (Close).
-func NewPostgres(pool *pgxpool.Pool) *Postgres { return &Postgres{pool: pool} }
+func NewPostgres(pool *pgxpool.Pool) *Postgres {
+	return &Postgres{pool: pool, queue: outbox.NewPostgres(pool)}
+}
 
-// Create is the ATOMIC ADMISSION GATE. It is one statement — an INSERT that the
-// engine either applies or discards on conflict — and the RowsAffected it
-// reports is the verdict: 1 ⇒ this delivery won and owns the order; 0 ⇒ another
-// delivery already created it, so this one lost and MUST NOT route to the venue
-// (ErrExists is that signal).
+// Outbox is the durable queue Create enqueues into. See Store.Outbox for why the
+// store hands it out rather than the composition root building one of its own.
+func (p *Postgres) Outbox() outbox.Queue { return p.queue }
+
+// Create is the ATOMIC ADMISSION GATE, and since #292 it is also the point at
+// which the order's announcement becomes as durable as the order.
+//
+// The gate is still one statement — an INSERT that the engine either applies or
+// discards on conflict — and the RowsAffected it reports is still the verdict:
+// 1 ⇒ this delivery won and owns the order; 0 ⇒ another delivery already created
+// it, so this one lost and MUST NOT route to the venue (ErrExists is that
+// signal).
 //
 // Never rewrite this as a SELECT followed by an INSERT. The check-then-act
 // window between them is exactly the double-trade bug this store was built to
 // close, and it is invisible in tests because Save is an upsert: the state still
 // converges while the fund trades twice.
-func (p *Postgres) Create(ctx context.Context, st *orderpb.OrderState) error {
+//
+// # WHY THERE IS NOW A TRANSACTION AROUND ONE STATEMENT
+//
+// Because there are two. The outbox records ride the SAME transaction as the
+// order row, which is the entire point of #292: admission used to be
+// store.Create and then emitter.EmitAccepted, two independent writes, so a
+// publish failure left a durable PENDING_NEW order that no downstream service
+// had ever heard of. Risk carried no exposure for it, tv-sync never admitted it
+// and therefore also dropped the ORDER_ROUTED a later re-drive emitted. #238
+// added a marker and a sweep to find those orders afterwards. This makes them
+// not exist: the estate's copy of the announcement is committed by the same
+// COMMIT that admits the order.
+//
+// THE LOSER OF THE ADMISSION RACE ENQUEUES NOTHING. The ErrExists path rolls
+// back, so a duplicate delivery cannot leave a second ACCEPTED record behind for
+// the relay to publish. That is what the deferred Rollback is for, and it is not
+// decoration — without it a lost race would announce the order twice.
+//
+// # WHY THE TRANSACTION IS NOT AN ISOLATION CHANGE
+//
+// It runs at the pool's default READ COMMITTED. Nothing here reads before it
+// writes, so there is no snapshot to protect; the transaction exists purely to
+// make the two INSERTs one durable unit. Raising the isolation level would buy
+// nothing and would introduce 40001 serialization failures on the admission
+// path, where MaxAttempts is 1 and there is nobody to retry them.
+func (p *Postgres) Create(ctx context.Context, st *orderpb.OrderState, announce []outbox.Record) error {
 	if st.GetOrderId() == "" {
 		return errors.New("oms: cannot create order with empty order_id")
 	}
@@ -50,7 +89,13 @@ func (p *Postgres) Create(ctx context.Context, st *orderpb.OrderState) error {
 	if err != nil {
 		return fmt.Errorf("marshal order %s: %w", st.GetOrderId(), err)
 	}
-	tag, err := p.pool.Exec(ctx, `
+	tx, err := p.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("create order %s: begin: %w", st.GetOrderId(), err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }() // no-op after a successful Commit
+
+	tag, err := tx.Exec(ctx, `
 		INSERT INTO orders (tenant_id, order_id, status, state)
 		VALUES (current_setting('app.tenant_id'), $1, $2, $3)
 		ON CONFLICT (tenant_id, order_id) DO NOTHING
@@ -59,7 +104,13 @@ func (p *Postgres) Create(ctx context.Context, st *orderpb.OrderState) error {
 		return fmt.Errorf("create order %s: %w", st.GetOrderId(), err)
 	}
 	if tag.RowsAffected() == 0 {
-		return ErrExists
+		return ErrExists // the deferred Rollback discards the announcement with it
+	}
+	if err := outbox.Enqueue(ctx, tx, announce...); err != nil {
+		return err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("create order %s: commit: %w", st.GetOrderId(), err)
 	}
 	return nil
 }

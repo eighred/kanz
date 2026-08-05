@@ -118,7 +118,7 @@ func TestPostgresCreateIsAtomicAdmissionGate(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			<-start // release them together, so they collide inside the engine
-			err := st.Create(ctx, state("ORD-RACE", orderpb.OrderStatus_ORDER_STATUS_PENDING_NEW))
+			err := st.Create(ctx, state("ORD-RACE", orderpb.OrderStatus_ORDER_STATUS_PENDING_NEW), nil)
 			mu.Lock()
 			defer mu.Unlock()
 			switch {
@@ -152,11 +152,11 @@ func TestPostgresCreateThenSaveThenLoad(t *testing.T) {
 	if _, _, err := st.Load(ctx, "missing"); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("load missing: want ErrNotFound, got %v", err)
 	}
-	if err := st.Create(ctx, state("ORD-1", orderpb.OrderStatus_ORDER_STATUS_PENDING_NEW)); err != nil {
+	if err := st.Create(ctx, state("ORD-1", orderpb.OrderStatus_ORDER_STATUS_PENDING_NEW), nil); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 	// A second Create of the same id loses the admission race, and writes nothing.
-	if err := st.Create(ctx, state("ORD-1", orderpb.OrderStatus_ORDER_STATUS_FILLED)); !errors.Is(err, ErrExists) {
+	if err := st.Create(ctx, state("ORD-1", orderpb.OrderStatus_ORDER_STATUS_FILLED), nil); !errors.Is(err, ErrExists) {
 		t.Fatalf("duplicate create: want ErrExists, got %v", err)
 	}
 	got, ver, err := st.Load(ctx, "ORD-1")
@@ -183,7 +183,7 @@ func TestPostgresListReturnsAllOrders(t *testing.T) {
 	ctx := context.Background()
 
 	for _, id := range []string{"ORD-B", "ORD-A"} {
-		if err := st.Create(ctx, state(id, orderpb.OrderStatus_ORDER_STATUS_PENDING_NEW)); err != nil {
+		if err := st.Create(ctx, state(id, orderpb.OrderStatus_ORDER_STATUS_PENDING_NEW), nil); err != nil {
 			t.Fatalf("create %s: %v", id, err)
 		}
 	}

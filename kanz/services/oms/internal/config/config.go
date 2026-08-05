@@ -151,13 +151,20 @@ type Config struct {
 	// SweepInterval is how often the OMS re-runs its in-flight reconciliation
 	// WHILE RUNNING, on top of the mandatory one at startup (#238).
 	//
-	// It is the recovery latency for an order the store committed and the bus
-	// never heard about: admission is store.Create followed by EmitAccepted with
-	// no outbox between them, and when the publish fails the row is durable while
-	// risk, compliance and the audit log carry nothing for it. Before this, the
-	// only compensator ran at startup, so that window closed "whenever this pod
-	// next restarts" — days on a healthy deployment. This bounds it at
+	// It was the recovery latency for an order the store committed and the bus
+	// never heard about: admission WAS store.Create followed by EmitAccepted with
+	// no outbox between them, and when the publish failed the row was durable
+	// while risk, compliance and the audit log carried nothing for it. Before
+	// this, the only compensator ran at startup, so that window closed "whenever
+	// this pod next restarts" — days on a healthy deployment. This bounds it at
 	// SweepMinAge + SweepInterval.
+	//
+	// #292 CLOSED THE ADMISSION GAP ITSELF: the ACCEPTED FACT is committed in the
+	// same transaction as the order and published by the outbox relay, whose own
+	// latency is OutboxInterval below. What this sweep still recovers is an order
+	// left mid-flight AT A VENUE, and the pre-outbox rows that predate migration
+	// 0006 — see order.SweepOlderThan. Do not read the shorter remaining job as a
+	// reason to disable it; see the warning cmd/oms/main.go logs when it is.
 	//
 	// It is NOT free, and the cost is what an operator tunes against: one index
 	// scan over the open orders per tick, plus one store.Load per order older
@@ -177,6 +184,21 @@ type Config struct {
 	// non-positive value outright, for what it must clear (the 75s claim lease,
 	// the 60s order-subject AckWait, and the 2m consumer dedup TTL).
 	SweepMinAge time.Duration
+
+	// OutboxInterval is how often the outbox relay drains (#292).
+	//
+	// IT IS NOT THE PUBLISH LATENCY ON THE HAPPY PATH. A handler that commits a
+	// FACT kicks the relay, so the normal case is "immediately". This bounds the
+	// cases nothing kicks: records left by a pod that died mid-drain, a record
+	// whose first publish failed and is being retried, and any future enqueue
+	// site that forgets to kick. That last one is why the tick has no off
+	// switch — a forgotten kick must cost latency, never a FACT.
+	//
+	// There is no zero-disables option, unlike SweepInterval. A disabled sweep
+	// leaves a compensator un-run; a disabled relay leaves the ONLY publisher of
+	// committed FACTs un-run, which is an OMS that admits orders and tells
+	// nobody. A non-positive value is refused at parse.
+	OutboxInterval time.Duration
 }
 
 // CommandSubjects are the order command subjects the OMS consumes.
@@ -266,6 +288,28 @@ func Load() (Config, error) {
 			"live delivery is still admitting, and both would announce it", sweepMinAge)
 	}
 	cfg.SweepMinAge = sweepMinAge
+
+	// OMS_OUTBOX_INTERVAL: 1s. Short, because this is the retry cadence for a
+	// FACT the estate is currently missing and the drain costs one partial-index
+	// scan over an empty backlog on a healthy pod. It is NOT the happy-path
+	// latency — an admitting handler kicks the relay directly.
+	//
+	// ZERO IS REFUSED, unlike OMS_SWEEP_INTERVAL. Zero there disables a
+	// compensator; zero here disables the only publisher of FACTs the store has
+	// already committed, which would leave the OMS admitting orders and telling
+	// nobody — permanently, and with the store looking perfectly healthy. There
+	// is no off switch, so nobody can reach for one.
+	outboxInterval, err := time.ParseDuration(envOr("OMS_OUTBOX_INTERVAL", "1s"))
+	if err != nil {
+		return Config{}, fmt.Errorf("OMS_OUTBOX_INTERVAL: %w", err)
+	}
+	if outboxInterval <= 0 {
+		return Config{}, fmt.Errorf("OMS_OUTBOX_INTERVAL: must be positive (got %v); the outbox relay is "+
+			"the only thing that publishes a FACT the order store has committed, so there is no value that "+
+			"turns it off — an OMS with no relay admits orders no downstream service ever hears about",
+			outboxInterval)
+	}
+	cfg.OutboxInterval = outboxInterval
 
 	return cfg, nil
 }

@@ -22,6 +22,7 @@ import (
 	"github.com/eighred/kanz/internal/dec"
 	"github.com/eighred/kanz/internal/execution"
 	"github.com/eighred/kanz/services/oms/internal/compliance"
+	"github.com/eighred/kanz/services/oms/internal/outbox"
 
 	"github.com/prometheus/client_golang/prometheus"
 )
@@ -74,6 +75,21 @@ type Service struct {
 	// instead of the order, and a stalled venue must not be discoverable only by
 	// reading the DLQ or an ERROR log.
 	claimTimeouts prometheus.Counter
+	// relay drains the outbox this service's store enqueues into (#292).
+	//
+	// THE SERVICE OWNS IT RATHER THAN THE COMPOSITION ROOT, deliberately. An
+	// outbox nobody drains is worse than no outbox: the OMS admits orders,
+	// commits their FACTs to a table and tells nobody, with the store, the
+	// handler and every health check reporting success. Constructing the relay
+	// here, from the store's own queue and the emitter's own bus, means a
+	// composition that has a Service has a drain — there is no wiring step to
+	// omit and no option to forget. cmd/oms/main.go still has to RUN it (see
+	// Service.Outbox), which is the one part a guard has to cover.
+	relay *outbox.Relay
+	// relayOpts are collected from ServiceOptions and applied when the relay is
+	// constructed at the end of NewService.
+	relayOpts []outbox.RelayOption
+
 	// acceptedReannounced counts orders whose ORDER_ACCEPTED FACT a compensator
 	// had to publish because admission committed the row and the original
 	// publish did not land (#238). Same reasoning as the two counters above, and
@@ -195,7 +211,27 @@ func NewService(tenant string, store Store, emitter *Emitter, gate compliance.Ga
 	for _, opt := range opts {
 		opt(svc)
 	}
+	// THE RELAY IS BUILT LAST, from this store's own outbox and this emitter's
+	// own bus, so a Service always has a drain for the FACTs its store commits
+	// (#292). Options are applied first because they carry the relay's interval
+	// and counters.
+	relay, err := outbox.NewRelay(store.Outbox(), emitter.publisher(), logger, svc.relayOpts...)
+	if err != nil {
+		return nil, err
+	}
+	svc.relay = relay
 	return svc, nil
+}
+
+// Outbox is the relay draining the FACTs this service's store commits. The
+// composition root must Run it; see Service.relay and
+// test/arch/oms_outbox_test.go, which fails if cmd/oms/main.go stops doing so.
+func (s *Service) Outbox() *outbox.Relay { return s.relay }
+
+// WithOutboxRelay passes options through to the relay NewService constructs.
+// The relay itself is not injectable — see Service.relay for why.
+func WithOutboxRelay(opts ...outbox.RelayOption) ServiceOption {
+	return func(s *Service) { s.relayOpts = append(s.relayOpts, opts...) }
 }
 
 // Handle is the bus.EventHandler. It dispatches by the command subject/type.
@@ -343,23 +379,97 @@ func (s *Service) handleSubmit(ctx context.Context, env *envelopepb.Envelope, pa
 	// collateral to spend — which is why SubmitOrder has no such field to set.
 	st.VenueAccountId = account
 
+	// THE ORDER AND ITS ANNOUNCEMENT ARE NOW ONE WRITE (#292).
+	//
+	// This used to be store.Create followed by emitter.EmitAccepted: two
+	// independent writes, and when the second failed the fund held a durable
+	// PENDING_NEW order that no downstream service had ever heard of. Risk
+	// carried no exposure for it; tv-sync never admitted it and therefore also
+	// DROPPED the ORDER_ROUTED a later re-drive emitted, so the order stayed
+	// invisible even after it started working. #238 made that recoverable — a
+	// marker column and a sweep that finds the strays — and this makes it
+	// unreachable: the FACT is enqueued by the same COMMIT that admits the
+	// order, so there is no instant at which one exists without the other.
+	//
+	// THE FACT IS BUILT BEFORE THE MARKER IS STAMPED, deliberately. The
+	// announcement carries the order's admitted state, which is what every
+	// consumer folds; accepted_announced_at is an OMS-internal recovery marker
+	// and putting it on the wire would change the payload of an existing FACT
+	// for no downstream benefit. This is the same content EmitAccepted published
+	// before this change.
+	accepted, err := s.emitter.AcceptedFact(ctx, st)
+	if err != nil {
+		// The FACT cannot be captured — no tenant on the delivery, or a payload
+		// that will not marshal. Returning BEFORE the store write is the whole
+		// discipline: an order whose announcement cannot be made must not be
+		// admitted either.
+		return err
+	}
+
+	// THE MARKER MOVES INTO THE TRANSACTION, AND SO ITS MEANING CHANGES.
+	//
+	// accepted_announced_at used to mean "EmitAccepted returned nil" and cost an
+	// extra UPDATE on the admission path to record it (#238). It now means "the
+	// ACCEPTED FACT is committed for delivery", which is strictly stronger — a
+	// promise the relay keeps rather than a fact about a call that already
+	// returned — and it costs nothing, because it rides the INSERT that was
+	// happening anyway.
+	//
+	// STAMPING IT HERE IS ALSO WHAT KEEPS THE RELAY AND #238'S SWEEP FROM
+	// FIGHTING. Both can publish an ACCEPTED FACT. The sweep republishes exactly
+	// when this marker is unset; the relay publishes exactly what is in the
+	// outbox. Because the marker and the outbox row land in the SAME
+	// transaction, an order that has an outbox record always has the marker, so
+	// the sweep never looks at it — and an order the sweep DOES look at (a row
+	// admitted before this migration, marker unset, no record behind it) has
+	// nothing in the outbox for the relay to duplicate. The two compensators
+	// partition the population rather than overlapping on it. Leaving the marker
+	// to a Save after the commit would have inverted that: for up to
+	// OMS_SWEEP_MIN_AGE every admitted order would look unannounced, and the
+	// sweep would re-announce orders the relay had already sent — routinely, on
+	// the counter that exists to make a LOST FACT alertable.
+	admitted := cloneState(st)
+	admitted.AcceptedAnnouncedAt = timestamppb.New(now)
+
 	// THE ADMISSION GATE. Create is atomic: exactly one concurrent delivery of this
 	// order_id can insert it, and every other gets ErrExists. Losing the race means
 	// another delivery already owns this order and is working it — so this one acks
 	// and stops, HERE, before s.work() below routes it to a venue. The old
 	// Load()-then-Save() let both deliveries through this point and both reached the
 	// venue: the state converged (Save upserts) while the fund traded twice.
-	if err := s.store.Create(ctx, st); err != nil {
+	if err := s.store.Create(ctx, admitted, []outbox.Record{accepted}); err != nil {
 		if errors.Is(err, ErrExists) {
 			// Lost the admission race — the winner works the order. Deliberately NOT
 			// a resume: the winner is mid-flight by construction, and the interrupted
 			// case is reached through the Load fast path above (on redelivery) or the
 			// startup sweep (after a crash), both of which take the per-order claim.
+			//
+			// The loser's outbox record rolled back with its INSERT (see
+			// Postgres.Create), so this delivery announces nothing. Without that
+			// the order would be announced once per redelivery.
 			return nil
 		}
 		return err
 	}
-	if err := s.emitter.EmitAccepted(ctx, st); err != nil {
+	st = admitted
+
+	// PUBLISH IT, HERE, BEFORE ANYTHING ELSE HAPPENS TO THIS ORDER.
+	//
+	// The FACT is durable now, which is the change. It is not yet ON THE BUS,
+	// and everything below — s.work's ORDER_ROUTED, the fills, the outcome — is
+	// still published directly. Letting those go out first would hand tv-sync an
+	// ORDER_ROUTED for an order it never admitted, which transition() DROPS: the
+	// projection stays blind to a live order while the OMS believes it announced
+	// everything. So the sequence on the bus is exactly what it was before this
+	// change; only its durability differs.
+	//
+	// THE ERROR BEHAVIOUR IS ALSO EXACTLY WHAT EmitAccepted's WAS: return, do
+	// not work the order, nack. What is different is what happens next. Before,
+	// the FACT was gone and a compensator had to notice the row and reconstruct
+	// it. Now the record is in the table: the relay's tick publishes the
+	// original, and the redelivery that follows finds an order already admitted
+	// and already announced.
+	if err := s.relay.Flush(ctx, st.GetOrderId()); err != nil {
 		return err
 	}
 
@@ -391,38 +501,25 @@ func (s *Service) handleSubmit(ctx context.Context, env *envelopepb.Envelope, pa
 		// this order. That can only be a resume: store.Create above is the
 		// admission gate, so at most one delivery of a NEW order_id ever reaches
 		// this line, and this order_id was ours to create. The order exists and
-		// its ACCEPTED fact is already emitted, so there is nothing left for this
-		// delivery to do — the claim holder will carry it to completion. This is
-		// the same reasoning as the ErrExists branch above: the order exists and
-		// something in this process already owns it.
+		// its ACCEPTED fact is already committed to the outbox, so there is
+		// nothing left for this delivery to do — the claim holder will carry it
+		// to completion. This is the same reasoning as the ErrExists branch
+		// above: the order exists and something in this process already owns it.
 		return nil
 	}
 	defer release()
 
-	// THE FACT IS OUT — RECORD THAT, BEFORE ANYTHING ELSE HAPPENS TO THE ORDER.
+	// VERSION 0, AND THERE IS NO LONGER A WRITE BETWEEN HERE AND work().
 	//
-	// store.Create landed this order at version 0 (migrations/0005 default), and
+	// store.Create landed this order at version 0 (migrations/0005 default) and
 	// this delivery won the admission gate, so 0 is the version nobody else can
-	// have written past yet. This is the first write after it.
-	//
-	// It costs one UPDATE on the admission path, and that is the price of the
-	// two states being distinguishable at all (#238). An order sitting at
-	// PENDING_NEW is either resting normally — no venue wired, which is a
-	// supported deployment — or an order whose ACCEPTED FACT never reached the
-	// bus. Nothing else on the row separates them, so a compensator that
-	// re-announced on status alone would republish every resting order on every
-	// pass, forever. cancel_announced_at and outcome_announced_at already pay
-	// exactly this cost for their own transitions; admission was the one
-	// transition with no marker.
+	// have written past yet. #238 spent an extra UPDATE here stamping
+	// accepted_announced_at, because the FACT had already gone out on its own
+	// and the marker was the only record that it had. The marker now rides the
+	// INSERT (see the admission block above), so that UPDATE is gone: one fewer
+	// round trip on the admission path, and one fewer window in which the order
+	// exists at a version the next writer has to guess at.
 	var ver int64
-	if st, ver, err = s.markAcceptedAnnounced(ctx, st, ver, now); err != nil {
-		// The FACT went out and the marker did not. Returning nacks, and the
-		// worst case downstream is a compensator later re-announcing an order the
-		// world already heard about — a duplicate ACCEPTED carrying the same
-		// state, which is the harmless direction. Swallowing it would leave the
-		// row permanently indistinguishable from an unannounced one.
-		return err
-	}
 
 	// Work the order if a router is wired; otherwise it rests at PENDING_NEW.
 	st, ver, err = s.work(ctx, st, ver)
@@ -715,6 +812,20 @@ func (s *Service) handleCancel(ctx context.Context, payload []byte) error {
 	}
 	defer release()
 
+	// THE ORDER'S OWN BACKLOG GOES OUT BEFORE ITS CANCELLATION DOES (#292).
+	//
+	// A cancel can arrive on an order still sitting at PENDING_NEW whose
+	// ORDER_ACCEPTED is committed to the outbox and not yet published — the
+	// admission flush failed, or this cancel simply beat the relay. Publishing
+	// ORDER_CANCELLED first would tell every downstream fold about the end of an
+	// order it was never told the beginning of. Same inversion as
+	// routed-before-accepted, same fix, and it is here rather than inside
+	// completeCancelAnnouncement because the venue withdrawal below happens
+	// first and must not be dispatched for an order this pod cannot announce.
+	if ferr := s.relay.Flush(ctx, cmd.GetOrderId()); ferr != nil {
+		return ferr
+	}
+
 	now := s.now().UTC()
 	st, ver, err := s.store.Load(ctx, cmd.GetOrderId())
 	if errors.Is(err, ErrNotFound) {
@@ -906,6 +1017,13 @@ func (s *Service) handleAmend(ctx context.Context, payload []byte) error {
 		return s.abandonClaim("amend", cmd.GetOrderId(), err)
 	}
 	defer release()
+
+	// Same reasoning as handleCancel's flush: an amend on an order whose
+	// ORDER_ACCEPTED is still in the outbox would publish its outcome before the
+	// order was ever announced (#292).
+	if ferr := s.relay.Flush(ctx, cmd.GetOrderId()); ferr != nil {
+		return ferr
+	}
 
 	now := s.now().UTC()
 	st, ver, err := s.store.Load(ctx, cmd.GetOrderId())
@@ -1120,6 +1238,18 @@ func (s *Service) resume(ctx context.Context, st *orderpb.OrderState) error {
 				return rerr
 			}
 		}
+		// AND THE SAME RULE FOR AN ORDER ADMITTED THROUGH THE OUTBOX (#292).
+		//
+		// Its marker IS set — admission stamped it in the transaction — so the
+		// branch above correctly leaves it alone. But its ACCEPTED FACT may
+		// still be in the outbox: this is precisely the path an order reaches
+		// when handleSubmit's own flush failed and the command was redelivered.
+		// work() below publishes ORDER_ROUTED directly, so the same
+		// routed-before-accepted inversion applies here, for the same reason,
+		// and is prevented the same way.
+		if ferr := s.relay.Flush(ctx, st.GetOrderId()); ferr != nil {
+			return ferr
+		}
 		_, _, err := s.work(ctx, st, ver)
 		return err
 	}
@@ -1221,14 +1351,45 @@ func (s *Service) markAcceptedAnnounced(ctx context.Context, st *orderpb.OrderSt
 // admitted and committed but whose acceptance the world was never told about,
 // and records that it did.
 //
-// THIS IS THE REPAIR FOR THE ADMISSION-SIDE DIVERGENCE (#238). store.Create and
-// EmitAccepted are two independent writes with no outbox between them: when the
-// publish fails, Postgres holds a durable PENDING_NEW order that no downstream
-// service has heard of. Risk carries no exposure for it. tv-sync never admits it,
-// so it also DROPS the ORDER_ROUTED that a later re-drive emits — transition()
-// ignores a FACT for an order the projection never saw — which is why re-driving
-// the order alone does not repair the estate's view of it. The accepted FACT
-// itself has to go out.
+// THIS IS THE REPAIR FOR THE ADMISSION-SIDE DIVERGENCE (#238), AND IT IS NOW A
+// REPAIR FOR A CLOSED POPULATION (#292).
+//
+// It exists because store.Create and EmitAccepted USED TO BE two independent
+// writes with no outbox between them: when the publish failed, Postgres held a
+// durable PENDING_NEW order that no downstream service had heard of. Risk
+// carried no exposure for it. tv-sync never admitted it, so it also DROPPED the
+// ORDER_ROUTED that a later re-drive emitted — transition() ignores a FACT for
+// an order the projection never saw — which is why re-driving the order alone
+// does not repair the estate's view of it. The accepted FACT itself has to go
+// out.
+//
+// Admission now enqueues that FACT in the same transaction as the row and
+// stamps accepted_announced_at with it, so no order admitted by this code can
+// reach here: the marker is set the instant the row exists. What CAN reach here
+// is a row admitted by the previous code — marker unset, and no outbox record
+// behind it, because there was no outbox. For those the direct publish below is
+// the only thing that can announce them, which is why this stays.
+//
+// # THE RETIREMENT CONDITION, STATED SO IT IS NOT GUESSED AT LATER
+//
+// This function, the accepted_announced_at branch in resume() that calls it, and
+// eventually field 20 of order/v1/order_events.proto can go when NO PENDING_NEW
+// ROW PREDATING MIGRATION 0006 CAN STILL EXIST. Concretely:
+//
+//  1. Every OMS pod is running a build with the outbox (so nothing new is
+//     admitted without a record), AND
+//  2. `SELECT count(*) FROM orders WHERE status = 1 /* PENDING_NEW */` shows no
+//     row whose state carries accepted_announced_at unset. A resting order in a
+//     deployment with no venue wired stays PENDING_NEW forever, so this is a
+//     query an operator has to run, not a duration anybody can wait out.
+//
+// The proto field goes LAST and separately: removing it is a wire change, and
+// the Go code stopping reading it is not the same event as the field ceasing to
+// exist. Delete the code first, ship it, then retire the field.
+//
+// Do not retire any of it on the grounds that the outbox "should" have made it
+// unreachable. The outbox is new; this compensator has run in production. The
+// order is: prove the first, then remove the second.
 //
 // PENDING_NEW ONLY, AND THE CALLER MUST ENFORCE IT. accepted_announced_at is an
 // ADDITIVE field, so every order written before it existed reads back unset. For

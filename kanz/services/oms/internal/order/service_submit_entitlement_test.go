@@ -8,6 +8,7 @@ import (
 	orderpb "github.com/eighred/kanz/kanz-schemas-go/order/v1"
 
 	"github.com/eighred/kanz/internal/execution"
+	"github.com/eighred/kanz/services/oms/internal/outbox"
 )
 
 // SUBMIT SKIPPED THE CHECK CANCEL AND AMEND BOTH RAN (#225).
@@ -33,9 +34,9 @@ type countingStore struct {
 	creates int
 }
 
-func (c *countingStore) Create(ctx context.Context, st *orderpb.OrderState) error {
+func (c *countingStore) Create(ctx context.Context, st *orderpb.OrderState, announce []outbox.Record) error {
 	c.creates++
-	return c.Store.Create(ctx, st)
+	return c.Store.Create(ctx, st, announce)
 }
 
 // submitAs builds the "o1"/"pf1" limit order carrying a DELEGATED issuer — the

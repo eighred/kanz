@@ -48,13 +48,26 @@ func (s *Service) SweepInterrupted(ctx context.Context) (int, error) {
 // SweepOlderThan is SweepInterrupted restricted to orders admitted longer ago
 // than minAge, for running on a ticker ALONGSIDE live consumption.
 //
-// WHY A PERIODIC SWEEP AT ALL. Admission is two independent writes with no
-// outbox between them — store.Create then EmitAccepted — and when the publish
-// fails the row is durable and no downstream service has heard of the order
-// (#238). The startup sweep is the compensator, so the recovery latency was
+// WHY A PERIODIC SWEEP AT ALL. Admission USED TO BE two independent writes with
+// no outbox between them — store.Create then EmitAccepted — and when the publish
+// failed the row was durable and no downstream service had heard of the order
+// (#238). The startup sweep was the compensator, so the recovery latency was
 // "whenever this pod next restarts", which on a healthy deployment is days. This
-// turns that into one interval. It does not remove the divergence; a
-// transactional outbox does, and that remains the real fix.
+// turns that into one interval.
+//
+// #292 REMOVED THE DIVERGENCE ITSELF, and this sweep therefore now serves a
+// CLOSED POPULATION: rows admitted before migration 0006, whose
+// accepted_announced_at is unset because there was no transaction to stamp it
+// in and no outbox record behind them. An order admitted by the current code has
+// the marker set by the same COMMIT that inserted the row, so it is invisible to
+// resume()'s re-announce branch — the relay owns its FACT and this sweep and
+// that relay cannot both publish it. See reannounceAccepted for the condition
+// under which this compensator can be retired, and do not retire it before then:
+// the outbox is new and this has run in production.
+//
+// It still does the OTHER half of its job for every order, old and new:
+// re-driving an order the previous process left mid-flight at a venue. That part
+// is not about announcements at all and no outbox replaces it.
 //
 // WHY minAge, AND WHY IT IS NOT OPTIONAL. handleSubmit's own window between
 // store.Create and s.claim spans EmitAccepted — a network publish with a 5s

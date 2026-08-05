@@ -46,7 +46,7 @@ func TestPostgresSaveIsCompareAndSwap(t *testing.T) {
 	b := NewPostgres(pool)
 
 	const id = "cas-race-1"
-	if err := a.Create(ctx, state(id, orderpb.OrderStatus_ORDER_STATUS_PENDING_NEW)); err != nil {
+	if err := a.Create(ctx, state(id, orderpb.OrderStatus_ORDER_STATUS_PENDING_NEW), nil); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 
@@ -123,7 +123,7 @@ func TestPostgresSaveRejectsStaleVersion(t *testing.T) {
 	st := NewPostgres(pool)
 
 	const id = "cas-stale-1"
-	if err := st.Create(ctx, state(id, orderpb.OrderStatus_ORDER_STATUS_PENDING_NEW)); err != nil {
+	if err := st.Create(ctx, state(id, orderpb.OrderStatus_ORDER_STATUS_PENDING_NEW), nil); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 	_, stale, err := st.Load(ctx, id)
@@ -167,7 +167,7 @@ func TestMemoryStoreSaveIsCompareAndSwap(t *testing.T) {
 	m := NewMemoryStore()
 
 	const id = "cas-mem-1"
-	if err := m.Create(ctx, state(id, orderpb.OrderStatus_ORDER_STATUS_PENDING_NEW)); err != nil {
+	if err := m.Create(ctx, state(id, orderpb.OrderStatus_ORDER_STATUS_PENDING_NEW), nil); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 	_, stale, err := m.Load(ctx, id)
