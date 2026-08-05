@@ -127,6 +127,14 @@ spec:
             # All replicas share ONE durable group, so a price FACT is delivered to
             # exactly one pod. The idempotent insert covers redelivery.
             - { name: MARKET_DATA_CONSUMER_GROUP, value: "market-data" }
+            # Stamped on every market.v1 FACT the FEED publishes, and its ONLY
+            # source of one: the feed publishes from an adapter loop, not an
+            # inbound delivery, so there is no ctx tenant and BusSink sets no
+            # per-event TenantID. Set here even though MARKET_DATA_FEED is unset
+            # today — the config default is __system__, and the day someone
+            # enables the feed is not the day to discover the tenant is missing.
+            # Mirrors MARKET_INGEST_TENANT, which stamps the same event type.
+            - { name: MARKET_DATA_TENANT, value: "__system__" }
             - { name: SPIFFE_ENDPOINT_SOCKET, value: "unix:///run/spiffe/spire-agent.sock" }
           livenessProbe:
             httpGet: { path: /healthz, port: 8082 }

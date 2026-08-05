@@ -225,9 +225,7 @@ func runFeed(ctx context.Context, cfg config.Config, logger *slog.Logger, obs *o
 	}
 	defer func() { _ = client.Close() }()
 
-	producer, err := bus.NewProducer(client, bus.ProducerConfig{
-		Source: cfg.Source + "-feed", ProducerVersion: version.String(), Metrics: busMetrics,
-	})
+	producer, err := bus.NewProducer(client, feedProducerConfig(cfg, busMetrics))
 	if err != nil {
 		return err
 	}
@@ -255,6 +253,26 @@ func runFeed(ctx context.Context, cfg config.Config, logger *slog.Logger, obs *o
 	logger.Info("market-data feed publisher starting",
 		"adapter", adapter.Vendor(), "instruments", instruments, "asset_class", cfg.FeedAssetClass)
 	return adapter.Run(ctx, instruments, gated)
+}
+
+// feedProducerConfig is the FEED publisher's producer identity, extracted from
+// runFeed so it has a seam a test can reach: runFeed dials a broker before it
+// builds anything, so the config it passes was untested by construction — which
+// is exactly how the missing Tenant below survived (#245).
+//
+// Tenant is LOAD-BEARING, not decoration. This producer publishes from a
+// SimAdapter/vendor loop, so there is no inbound delivery whose tenant the ctx
+// could carry, and feed.BusSink sets no per-event Event.TenantID. cfg.Tenant is
+// the only one of bus.Producer's three tenant sources available here; without it
+// bus.Validate refuses every tick with "tenant_id required", the feed publishes
+// nothing, and /readyz stays 200 the whole time.
+func feedProducerConfig(cfg config.Config, metrics *bus.BusMetrics) bus.ProducerConfig {
+	return bus.ProducerConfig{
+		Source:          cfg.Source + "-feed",
+		ProducerVersion: version.String(),
+		Tenant:          cfg.Tenant,
+		Metrics:         metrics,
+	}
 }
 
 // openStore selects the durable Postgres/Timescale store when a DSN is set,
