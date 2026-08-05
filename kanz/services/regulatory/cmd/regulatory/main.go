@@ -15,12 +15,12 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/prometheus/client_golang/prometheus"
 
 	"github.com/eighred/kanz/internal/audit/linkstore"
 	"github.com/eighred/kanz/internal/audit/signer"
 	"github.com/eighred/kanz/internal/lifecycle"
+	"github.com/eighred/kanz/internal/pg"
 	"github.com/eighred/kanz/internal/platform/httpserver"
 	"github.com/eighred/kanz/internal/regulatory"
 	"github.com/eighred/kanz/internal/version"
@@ -221,7 +221,11 @@ func openLinkStore(ctx context.Context, cfg config.Config, logger *slog.Logger) 
 		chainDurable.Set(0)
 		return linkstore.NewMemoryStore(), func() {}, nil
 	}
-	pool, err := pgxpool.New(ctx, cfg.DatabaseURL)
+	pool, err := pg.NewGlobalPool(ctx, cfg.DatabaseURL,
+		"the filing link chain is ONE hash chain over the estate's filings — 0001_audit_links.sql "+
+			"declares no RLS, and both replicas must read the same head or they fork it. A tenant-scoped "+
+			"pool would give each tenant its own genesis, which is the divergence this store exists to "+
+			"make impossible")
 	if err != nil {
 		return nil, nil, err
 	}

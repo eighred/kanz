@@ -53,15 +53,27 @@ type deadlineLayer struct {
 	name  string // the const's identifier
 	file  string // repo-relative file that declares it
 	label string // what it bounds, for the failure message
+
+	// consequence and remedy override the default wording of a nesting failure,
+	// which describes a CALLER's budget being outlived by the server it calls. Not
+	// every nested bound is a caller's: serviceStatementTimeout (#228) is a bound
+	// INSIDE the handler, and for that one the default advice — "raise the outer
+	// bound, the inner is sized to real work" — is backwards. A guard that fires
+	// with the wrong instruction sends the next reader to widen the thing that was
+	// protecting them. Empty means the default.
+	consequence string
+	remedy      string
 }
 
 var testConnDeadlineChain = []deadlineLayer{
-	{"testConnTimeout", "internal/tui/universe/poller.go", "the TUI's wait on the gateway"},
-	{"testConnectionTimeout", "services/api-gateway/internal/control/control.go",
-		"the gateway's wait on the operator"},
-	{"probeTimeout", "services/operator/internal/provision/provision.go",
-		"the operator's wait on the probe Job"},
-	{"probeDialTimeout", "cmd/kanz-provisioner/probe.go", "the probe's own TCP dial"},
+	{name: "testConnTimeout", file: "internal/tui/universe/poller.go",
+		label: "the TUI's wait on the gateway"},
+	{name: "testConnectionTimeout", file: "services/api-gateway/internal/control/control.go",
+		label: "the gateway's wait on the operator"},
+	{name: "probeTimeout", file: "services/operator/internal/provision/provision.go",
+		label: "the operator's wait on the probe Job"},
+	{name: "probeDialTimeout", file: "cmd/kanz-provisioner/probe.go",
+		label: "the probe's own TCP dial"},
 }
 
 func TestTestConnectionDeadlinesNestOutward(t *testing.T) {
@@ -364,14 +376,14 @@ const gatewayServerFile = "services/api-gateway/cmd/api-gateway/main.go"
 // gatewayHandlerBudgets are every per-request deadline a handler on that server can set.
 // WriteTimeout is a bound on ALL of them at once, so it has to clear the largest.
 var gatewayHandlerBudgets = []deadlineLayer{
-	{"testConnectionTimeout", "services/api-gateway/internal/control/control.go",
-		"POST /v1/control/test-connection"},
-	{"callTimeout", "services/api-gateway/internal/control/control.go",
-		"every other control-plane RPC"},
-	{"copilotForwardTimeout", "services/api-gateway/internal/proxy/proxy.go",
-		"a proxied POST /v1/ask"},
-	{"readForwardTimeout", "services/api-gateway/internal/proxy/proxy.go",
-		"a proxied wealth/datamaster/tv-sync read"},
+	{name: "testConnectionTimeout", file: "services/api-gateway/internal/control/control.go",
+		label: "POST /v1/control/test-connection"},
+	{name: "callTimeout", file: "services/api-gateway/internal/control/control.go",
+		label: "every other control-plane RPC"},
+	{name: "copilotForwardTimeout", file: "services/api-gateway/internal/proxy/proxy.go",
+		label: "a proxied POST /v1/ask"},
+	{name: "readForwardTimeout", file: "services/api-gateway/internal/proxy/proxy.go",
+		label: "a proxied wealth/datamaster/tv-sync read"},
 }
 
 // nginxUpstreamKeepaliveDefault is ingress-nginx's `upstream-keepalive-timeout` default:

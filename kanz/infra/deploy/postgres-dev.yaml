@@ -163,6 +163,58 @@ spec:
       containers:
         - name: postgres
           image: postgres:16-alpine
+          # MAX_CONNECTIONS IS DERIVED, AND A GUARD RE-DERIVES IT (#228).
+          #
+          # It was never set here, so it was the postgres:16 default of 100 — a
+          # number nobody chose, and one THIS RIG's demand exceeds by more than
+          # three times, because the rig runs the WHOLE estate against ONE server.
+          # That multiple is a fact about the rig and not about production: there
+          # the demand is partitioned across five CNPG clusters and only kanz-books
+          # exceeds 100. See infra/dr/postgres/cluster.yaml, which sizes each of
+          # them, and do not read the number below as a production figure.
+          # Meanwhile no pool was sized either, so
+          # pgx used max(4, runtime.NumCPU()); with no CPU quota on any workload
+          # that is the NODE's core count, and on a 16-core node every pod took 16.
+          # Neither half fails at startup — pools are lazy — so the first symptom
+          # was `FATAL: sorry, too many clients already` on a QUERY, in whichever
+          # service happened to warm last.
+          #
+          # test/arch/pool_budget_test.go recomputes the whole sum from these
+          # manifests plus internal/pg on every CI run, so raising a
+          # maxReplicaCount, adding a second pool to a service, or raising
+          # pg.ServiceMaxConns is a red build rather than an outage during the
+          # market event the scale-out existed for:
+          #
+          #   ceiling(w) = max(spec.replicas, the KEDA ScaledObject's maxReplicaCount)
+          #   pools(w)   = pg.New*Pool calls in that service's composition root
+          #                (risk-engine opens TWO: its tenant-scoped state pool and
+          #                the market-data price store)
+          #   steady     = Σ ceiling(w) x pools(w) x pg.ServiceMaxConns(4) = 308
+          #   surge      = the largest single rolling update WHILE at ceiling
+          #                (risk-engine, 3 surge pods x 2 pools x 4)        =  24
+          #   reserve    = superuser_reserved_connections (3, and Postgres's own
+          #                default) + an operator, a DR restore and a human with
+          #                psql. Without it the first thing to fail at the ceiling
+          #                is the ability to log in and find out why       =  13
+          #   need       = 345
+          #
+          # 400, not 345: the guard bounds this from above at 2x the derivation, and
+          # a round number leaves room for the unmodelled without the value ceasing
+          # to be a bound. kanz-migrate is NOT a term — its initContainer runs to
+          # completion before its pod's app container starts, so its one connection
+          # never coexists with the four already reserved for that same pod.
+          args: ["postgres", "-c", "max_connections=400"]
+          # 400 BACKENDS ARE NOT FREE, AND THE LIMITRANGE DEFAULT DOES NOT FUND THEM.
+          # Every other container here takes availability.yaml's 512Mi/1Gi default;
+          # at ~2-3MiB of private memory per idle backend plus shared_buffers, 400
+          # connections would OOMKill this pod on a limit chosen for a service. This
+          # is the one workload on the estate whose memory is a function of a number
+          # in its own argv, so it is the one that states it. CPU is deliberately
+          # left to the LimitRange: the rig never has 400 ACTIVE backends, and
+          # changing it would move the quota's CPU derivation for no reason.
+          resources:
+            requests: { memory: 2Gi }
+            limits: { memory: 4Gi }
           ports:
             - { containerPort: 5432, name: postgres }
           env:

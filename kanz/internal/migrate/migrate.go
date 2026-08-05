@@ -147,8 +147,29 @@ func (r *Runner) Up(ctx context.Context, migs []Migration) ([]Migration, error) 
 	}
 	defer conn.Release()
 
+	// THE ONE WAIT HERE THAT IS SUPPOSED TO BLOCK, so it is the one statement that
+	// must not inherit the pool's lock_timeout (#228).
+	//
+	// pg.Migration sets lock_timeout=10s so a queued ALTER TABLE fails fast instead
+	// of putting every later reader behind it in Postgres's FIFO lock queue. But
+	// lock_timeout aborts pg_advisory_lock as well — measured against Postgres 16:
+	// a contended pg_advisory_lock under lock_timeout=700ms failed after 702ms with
+	// SQLSTATE 55P03. Leaving it in force would turn "the second replica waits its
+	// turn" into an initContainer that crash-loops whenever a sibling is mid-run.
+	//
+	// The wait is still bounded: kanz-migrate's -timeout flag is this ctx's
+	// deadline, and its help text already says it covers the lock wait. Session
+	// scope (not SET LOCAL) because there is no transaction here.
+	if _, err := conn.Exec(ctx, `SET lock_timeout = 0`); err != nil {
+		return nil, fmt.Errorf("lift lock_timeout for the advisory lock: %w", err)
+	}
 	if _, err := conn.Exec(ctx, `SELECT pg_advisory_lock($1)`, advisoryLockKey); err != nil {
 		return nil, fmt.Errorf("acquire advisory lock: %w", err)
+	}
+	// Restore it before any DDL runs: RESET reads the value the startup packet set,
+	// so this returns to the profile's bound rather than to a number repeated here.
+	if _, err := conn.Exec(ctx, `RESET lock_timeout`); err != nil {
+		return nil, fmt.Errorf("restore lock_timeout after the advisory lock: %w", err)
 	}
 	defer func() {
 		// Best-effort: the lock is released anyway when the session ends.

@@ -18,7 +18,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/jackc/pgx/v5/pgxpool"
 	"google.golang.org/grpc"
 
 	"github.com/eighred/kanz/internal/lifecycle"
@@ -181,7 +180,14 @@ func runEngine(ctx context.Context, cfg config.Config, readiness *server.Readine
 	// still read the store. Without a DSN the placeholder stands — the honest
 	// no-market-data fallback (varmodel keeps compute.VaR99).
 	if cfg.MarketDataURL != "" {
-		pricePool, err := pgxpool.New(ctx, cfg.MarketDataURL)
+		// The SECOND pool this pod opens (the tenant-scoped state pool is below),
+		// and the estate's connection budget counts it as such — see
+		// test/arch/pool_budget_test.go, where risk-engine is charged twice at its
+		// KEDA ceiling of 12. Global, not tenant-scoped: it reads market-data's
+		// price_observations, which deliberately carries no RLS.
+		pricePool, err := pg.NewGlobalPool(ctx, cfg.MarketDataURL,
+			"market-data's price_observations is universal market data with no RLS — the same tick "+
+				"prices every tenant's book, and this pool only ever reads it")
 		if err != nil {
 			return err
 		}

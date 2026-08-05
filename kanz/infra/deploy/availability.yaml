@@ -131,6 +131,20 @@ spec:
 #   requests    = 90 x (500m, 512Mi)  = 45 CPU, 45Gi   ← LimitRange defaults
 #   limits      = 90 x (1, 1Gi)       = 90 CPU, 90Gi
 #
+# ONE WORKLOAD IS NO LONGER ON THE DEFAULTS, and the memory numbers above are
+# adjusted for it (#228). postgres-dev.yaml now declares max_connections=400 —
+# derived there from the estate's own pool sizing — and 400 backends do not fit
+# in the 1Gi default limit, so that container carries an explicit 2Gi/4Gi memory
+# block. It is the only container on the estate whose memory is a function of a
+# number in its own argv. CPU is untouched, so only the two memory terms move:
+#
+#   requests.memory = 89 x 512Mi + 2Gi = 47616Mi (46.5Gi)
+#   limits.memory   = 89 x 1Gi   + 4Gi = 93Gi
+#
+# Written in Mi rather than 46.5Gi because a fractional binary quantity is the
+# kind of thing that gets "tidied" to 46Gi by someone reading it as a round
+# number, and 46Gi does not fund the sum.
+#
 # The guard also bounds these from ABOVE (2x the derivation): a quota of "1000"
 # is indistinguishable from no quota at all, and would silently stop being the
 # blast-radius bound this object exists to be.
@@ -144,9 +158,9 @@ metadata:
 spec:
   hard:
     requests.cpu: "45"
-    requests.memory: 45Gi
+    requests.memory: 47616Mi
     limits.cpu: "90"
-    limits.memory: 90Gi
+    limits.memory: 93Gi
     pods: "90"
 ---
 # LimitRange gives every pod sane defaults + a ceiling, so a container with no
