@@ -239,12 +239,16 @@ func TestRelayStopsAtAFailedRecordButDrainsOtherKeys(t *testing.T) {
 
 	// FLUSH REPORTS THE STALL. The background pass tolerates it; a handler about
 	// to publish the next FACT for this order directly must not.
-	if err := relay.Flush(ctx, "o1"); err == nil {
-		t.Fatal("Flush returned nil for a key that still holds an unpublished record — its caller " +
-			"would go on to publish the NEXT FACT for this order directly, ahead of this one")
+	if sent, err := relay.Flush(ctx, "o1"); err == nil {
+		t.Fatalf("Flush = (%d, nil) for a key that still holds an unpublished record — its caller "+
+			"would go on to publish the NEXT FACT for this order directly, ahead of this one", sent)
 	}
-	if err := relay.Flush(ctx, "o2"); err != nil {
-		t.Fatalf("Flush on a drained key returned %v, want nil", err)
+	// AND THE COUNT IS THE ONE A CALLER ACTS ON. completeTerminalOutcome decides
+	// whether an interrupted fill was RECOVERED or LOST on this number, so a Flush
+	// that drained nothing must not report that it did.
+	if sent, err := relay.Flush(ctx, "o2"); err != nil || sent != 0 {
+		t.Fatalf("Flush on an already-drained key = (%d, %v), want (0, nil) — a caller reading a "+
+			"non-zero count here would report a FACT recovered that was published a pass ago", sent, err)
 	}
 }
 

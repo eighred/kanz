@@ -198,8 +198,18 @@ func (r *Relay) DrainOnce(ctx context.Context) (int, error) {
 	return sent, nil
 }
 
-// Flush publishes everything committed for ONE order and returns an error
-// unless the queue for that order is empty afterwards.
+// Flush publishes everything committed for ONE order, returns HOW MANY records
+// went out, and returns an error unless the queue for that order is empty
+// afterwards.
+//
+// THE COUNT IS NOT BOOKKEEPING. It is how a caller learns that a FACT it could
+// not otherwise have reconstructed was recovered from the table. order's
+// completeTerminalOutcome logs at ERROR when it completes an interrupted FILLED
+// announcement without its ORDER_FILLED FACT — because the individual Fill is
+// not derivable from the stored aggregate — and since the fill rides the outbox
+// (#292) that error is only true when this returned zero. A recovery path that
+// reported a lost fill on every successful recovery would be the "nothing
+// configured and checked-and-fine look the same" failure pointed the other way.
 //
 // # WHY A HANDLER CALLS THIS SYNCHRONOUSLY, AND WHY THE ERROR MATTERS
 //
@@ -233,18 +243,20 @@ func (r *Relay) DrainOnce(ctx context.Context) (int, error) {
 // with a race on the capital path is the trade this repository keeps finding in
 // its own history.
 //
-// THIS CALL DISAPPEARS WHEN THE LAST DIRECT PUBLISH DOES. Once every FACT on an
-// order goes through the outbox, the relay is the only publisher and there is
-// nothing left for a direct publish to overtake — at which point Flush becomes a
-// latency optimization and its error a warning. It is a synchronous blocking
-// call today because the conversion is partial, and that is stated here so the
-// cost is not mistaken for the design.
-func (r *Relay) Flush(ctx context.Context, key string) error {
-	_, stalled, err := r.drainKey(ctx, key, true)
+// THE ORDERING REASON FOR THIS CALL DISAPPEARS WHEN THE LAST DIRECT PUBLISH
+// DOES. Once every FACT on an order goes through the outbox, the relay is the
+// only publisher and there is nothing left for a direct publish to overtake — at
+// which point Flush becomes a latency optimization and its error a warning. It
+// is a synchronous blocking call today because the conversion is partial, and
+// that is stated here so the cost is not mistaken for the design. The COUNT it
+// returns outlives that: a recovery path still has to know whether the FACT it
+// cannot rebuild was in the table.
+func (r *Relay) Flush(ctx context.Context, key string) (int, error) {
+	sent, stalled, err := r.drainKey(ctx, key, true)
 	if err != nil {
-		return err
+		return sent, err
 	}
-	return stalled
+	return sent, stalled
 }
 
 // drainKey publishes one partition key's backlog, IN ORDER, STOPPING AT THE

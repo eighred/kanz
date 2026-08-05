@@ -68,7 +68,7 @@ func (e *Emitter) publisher() outbox.Publisher { return e.b }
 // IT IS SEPARATE FROM PUBLISHING, AND THAT SEPARATION IS THE #292 SEAM. A FACT
 // now has two possible sinks: the broker, right now (every transition that has
 // not yet been converted), and the outbox, inside the transaction that caused it
-// (admission). Those are two DESTINATIONS for ONE event definition, not two
+// (admission, and the fill folds). Those are two DESTINATIONS for ONE event definition, not two
 // definitions — which is why this function exists and why nothing below builds a
 // bus.Event of its own. A second builder is how the enqueued FACT and the
 // published FACT would come to differ in a field nobody compares.
@@ -136,15 +136,42 @@ func (e *Emitter) EmitRouted(ctx context.Context, orderID, venue, venueOrderID s
 		&orderpb.OrderRouted{OrderId: orderID, Venue: venue, VenueOrderId: venueOrderID})
 }
 
-// EmitFill publishes OrderPartiallyFilled or OrderFilled depending on whether
-// the fill completed the order.
-func (e *Emitter) EmitFill(ctx context.Context, fill *orderpb.Fill, st *orderpb.OrderState) error {
+// fillEvent is the ORDER_FILLED or ORDER_PARTIALLY_FILLED FACT for one fill,
+// chosen by whether the fill completed the order.
+//
+// The FACT carries the individual Fill — fill_id, price, venue_execution_id,
+// executed_at — and NOTHING ELSE IN THE PLATFORM DOES. The stored OrderState
+// keeps only the cumulative aggregate, which is why completeTerminalOutcome
+// cannot rebuild this event and says so, and why it is the one FACT that had to
+// stop being a second independent write.
+func (e *Emitter) fillEvent(fill *orderpb.Fill, st *orderpb.OrderState) bus.Event {
 	if st.GetStatus() == orderpb.OrderStatus_ORDER_STATUS_FILLED {
-		return e.emit(ctx, EventTypeFilled, "OrderFilled", st.GetOrderId(), fill.GetExecutedAt().AsTime(),
+		return e.event(EventTypeFilled, "OrderFilled", st.GetOrderId(), fill.GetExecutedAt().AsTime(),
 			&orderpb.OrderFilled{OrderId: st.GetOrderId(), Fill: fill, State: st})
 	}
-	return e.emit(ctx, EventTypePartiallyFilled, "OrderPartiallyFilled", st.GetOrderId(), fill.GetExecutedAt().AsTime(),
+	return e.event(EventTypePartiallyFilled, "OrderPartiallyFilled", st.GetOrderId(), fill.GetExecutedAt().AsTime(),
 		&orderpb.OrderPartiallyFilled{OrderId: st.GetOrderId(), Fill: fill, State: st})
+}
+
+// FillFact captures the fill FACT as an outbox record instead of publishing it,
+// so the fold can commit the new order state and its announcement in one
+// transaction (#292).
+//
+// THERE IS NO EmitFill ANY MORE, AND THAT IS DELIBERATE. Every other lifecycle
+// FACT still has a direct emitter because a compensator can rebuild it from
+// stored state; this one cannot be rebuilt by anything, so a way to publish it
+// outside the transaction is a way to lose it. Leaving the direct call as "the
+// simple option" is how the next fold would quietly stop being atomic — the
+// arch guard in test/arch/oms_outbox_test.go fails if it comes back.
+//
+// It takes ctx for the same reason AcceptedFact does: the record has to carry
+// the lineage the synchronous publish would have inherited — correlation,
+// causation, trace and the tenant — and the relay that eventually sends it has
+// none of them. outbox.From refuses a record with no tenant, and because this is
+// called BEFORE the Save, that refusal stops the fold instead of committing a
+// fill whose FACT could never be published.
+func (e *Emitter) FillFact(ctx context.Context, fill *orderpb.Fill, st *orderpb.OrderState) (outbox.Record, error) {
+	return outbox.From(ctx, e.fillEvent(fill, st))
 }
 
 // EmitCancelled publishes OrderCancelled.

@@ -8,8 +8,15 @@ package arch
 //
 //  1. NO NEW COMMIT-THEN-PUBLISH PAIR. The whole point of #292 is that adding a
 //     FACT to a transition should not require adding a fourth hand-rolled
-//     compensator. Five pairs remain, each named below with the issue that
-//     retires it; a SIXTH is the defect arriving by instalment again.
+//     compensator. The pairs that remain are named below, each with the issue
+//     that retires it and the compensator that covers it meanwhile; one that is
+//     NOT named is the defect arriving by instalment again.
+//  3. THE FILL FACT HAS NO WAY OUT EXCEPT THE TRANSACTION. Guards (1) and (2)
+//     cannot see this one: work() and adopt() are both exempted above, so a
+//     direct fill publish reintroduced inside either of them would be reported
+//     as an already-accepted pair. It is the FACT nothing can rebuild, so it
+//     gets its own assertion rather than sharing an exemption with the pairs
+//     that do have compensators.
 //  2. THE OUTBOX MUST HAVE A DRAIN. A table nobody drains is worse than no
 //     table: the OMS admits orders, commits their FACTs and tells nobody, with
 //     the store, the handler and every health check reporting success. This is
@@ -67,11 +74,12 @@ var commitThenPublishPending = map[string]string{
 		"see completeTerminalOutcome's own comment on what it cannot recover. ADMISSION in this " +
 		"same method is already converted: store.Create takes the ACCEPTED record.",
 
-	"work": "#292: Save(routed) then EmitRouted, and per fill Save(next) then EmitFill. THE FILL " +
-		"PAIR IS THE WORST ONE IN THE SERVICE and #292's own table omits it: a fill is money that " +
-		"moved, there is no marker for it, and completeTerminalOutcome explicitly cannot rebuild " +
-		"the ORDER_FILLED FACT from the stored aggregate. Converting it needs the fill to ride the " +
-		"same transaction as the position fold, which is a wider change than admission was.",
+	"work": "#292: Save(routed) then EmitRouted. THE FILL PAIR IN THIS SAME METHOD IS CONVERTED — " +
+		"each fold now passes the ORDER_FILLED/ORDER_PARTIALLY_FILLED record to Store.Save and " +
+		"flushes, so the FACT no marker could cover and completeTerminalOutcome could not rebuild " +
+		"is committed with the state that records it. What is left is the routed FACT, which HAS a " +
+		"recovery: venue_ack_at plus resume()'s reconciliation re-establish a routed order from " +
+		"venue truth, and a re-drive re-emits it.",
 
 	"completeCancelAnnouncement": "#292: EmitCancelled + EmitOutcome and THEN Save(cancel_announced_at) " +
 		"— the opposite order to admission's, which is the cost of hand-rolling per site that #292 " +
@@ -82,8 +90,11 @@ var commitThenPublishPending = map[string]string{
 		"outcome publish fails is persisted and unannounced, and nothing looks for it. Converting " +
 		"it is the smallest of the five and should be next after the fill pair.",
 
-	"adopt": "#292: Save(rejected) then refuse(), and per adopted fill Save(next) then EmitFill. " +
-		"Same shape as work()'s and reached from the same recovery path, so the two convert together.",
+	"adopt": "#292: Save(rejected) then refuse(). Its fill fold converted WITH work()'s — the two " +
+		"are the same six lines reached from different directions, and splitting them would have " +
+		"left the recovery path (the one running in a process that already crashed once) able to " +
+		"lose the FACT the live path can no longer lose. The VENUE_REJECTED reject is what remains, " +
+		"and outcome_announced_at covers it.",
 
 	"handleCancel": "#292: Save(next) and then completeCancelAnnouncement's EmitCancelled + " +
 		"EmitOutcome. Covered by cancel_announced_at and by this handler's own already-CANCELLED " +
@@ -177,9 +188,9 @@ func TestNoNewCommitThenPublishPairInTheOMS(t *testing.T) {
 				"store and the estate disagreeing, and the only recovery is another hand-rolled "+
 				"`*_announced_at` marker plus another compensator plus another test — none of which "+
 				"anything forces you to add.\n\n"+
-				"Pass the FACT to the write instead. store.Create already takes []outbox.Record; if "+
-				"this transition goes through Save, that signature needs the same parameter (see "+
-				"order.Store.Save's comment, which states why it does not have it yet).\n\n"+
+				"Pass the FACT to the write instead. BOTH store.Create and store.Save take "+
+				"[]outbox.Record, and every caller already states its answer — so converting this "+
+				"transition is an edit to one call site, not a signature change.\n\n"+
 				"If it genuinely cannot be converted yet, add %q to commitThenPublishPending with "+
 				"the issue that retires it. Do not add it silently.", m, m)
 		}
@@ -274,6 +285,69 @@ func TestTheOMSOutboxHasADrain(t *testing.T) {
 				"on. closeStores() is deferred above it, so it closes the pool the relay is still " +
 				"reading and writing — and the relay's per-key advisory lock would be released by a " +
 				"connection teardown rather than by its own unlock (#292)")
+		}
+	}
+}
+
+// TestTheFillFactHasNoWayOutExceptTheTransaction is guard (3).
+//
+// A fill is the only FACT this service emits that NOTHING can rebuild. The
+// stored OrderState keeps the cumulative aggregate and not the individual Fill —
+// no fill_id, no price, no venue_execution_id — which is why
+// completeTerminalOutcome says in its own comment that re-emitting ORDER_FILLED
+// would mean fabricating one. Every other lost FACT is recoverable from
+// committed state by some compensator; this one was simply gone.
+//
+// Since #292's fill conversion the ONLY way to produce it is Emitter.FillFact,
+// which returns an outbox.Record that has to be handed to a store write. There
+// is deliberately no EmitFill any more. This guard fails if one comes back —
+// which the pair guard above cannot do, because work() and adopt() are both on
+// its exemption list and a reintroduced direct publish would land inside an
+// already-accepted pair.
+func TestTheFillFactHasNoWayOutExceptTheTransaction(t *testing.T) {
+	root := moduleRoot(t)
+	src := readGoFiles(t, filepath.Join(root, filepath.FromSlash(omsOrderPkg)))
+
+	// NON-VACUITY FIRST. If the fill FACT stopped being built at all, every
+	// assertion below would pass by describing code that no longer exists.
+	if !strings.Contains(src, "func (e *Emitter) FillFact(") {
+		t.Fatal("Emitter.FillFact is gone from " + omsOrderPkg + " — this guard would pass vacuously. " +
+			"If the fill FACT was renamed, rename it here; if it stopped being emitted at all, that " +
+			"is a much larger problem than this guard (#292)")
+	}
+	if !strings.Contains(src, "s.emitter.FillFact(ctx, fill, next)") {
+		t.Error("nothing in " + omsOrderPkg + " captures a fill FACT for a fold. work() and adopt() " +
+			"are supposed to build the record and pass it to store.Save; if neither does, fills are " +
+			"being persisted with no announcement committed alongside them (#292)")
+	}
+	if !strings.Contains(src, "s.store.Save(ctx, next, ver, []outbox.Record{fact})") {
+		t.Error("no fold passes its fill FACT to store.Save. The record must ride the SAME " +
+			"transaction as the state it announces — that is the entire property, and a record " +
+			"built and then enqueued separately is two independent writes with extra steps (#292)")
+	}
+
+	// DEFAULT-DENY: no direct publish of a fill, by any route. The budget is how
+	// many times the fragment may legitimately appear — one each for the two
+	// constructions inside Emitter.fillEvent, which is the single builder the
+	// enqueue and any future republish must share, and ZERO for the direct
+	// emitter that no longer exists.
+	for _, banned := range []struct {
+		frag, why string
+		budget    int
+	}{
+		{"EmitFill(", "a direct fill publish. store.Save takes []outbox.Record — build the FACT with " +
+			"Emitter.FillFact and pass it to the write, so it commits with the state that records it", 0},
+		{`EventTypeFilled, "OrderFilled"`, "a fill FACT built outside Emitter.fillEvent", 1},
+		{`EventTypePartiallyFilled, "OrderPartiallyFilled"`, "a partial-fill FACT built outside " +
+			"Emitter.fillEvent", 1},
+	} {
+		if n := strings.Count(src, banned.frag); n > banned.budget {
+			t.Errorf("%q appears %d times in %s (at most %d expected): that is %s.\n\n"+
+				"A fill is money that moved and it is the ONE FACT no compensator can rebuild — "+
+				"completeTerminalOutcome says so in its own comment. A publish outside the "+
+				"transaction that recorded the fill is therefore not a late FACT, it is a lost one, "+
+				"and nothing downstream will ever learn the trade happened (#292).",
+				banned.frag, n, omsOrderPkg, banned.budget, banned.why)
 		}
 	}
 }

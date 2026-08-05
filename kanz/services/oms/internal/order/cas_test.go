@@ -21,7 +21,10 @@ import (
 	"sync"
 	"testing"
 
+	envelopepb "github.com/eighred/kanz/kanz-schemas-go/envelope/v1"
 	orderpb "github.com/eighred/kanz/kanz-schemas-go/order/v1"
+
+	"github.com/eighred/kanz/services/oms/internal/outbox"
 )
 
 // TestPostgresSaveIsCompareAndSwap races two SEPARATE *Postgres stores over one
@@ -72,11 +75,11 @@ func TestPostgresSaveIsCompareAndSwap(t *testing.T) {
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
-		errs[0] = a.Save(ctx, state(id, orderpb.OrderStatus_ORDER_STATUS_CANCELLED), verA)
+		errs[0] = a.Save(ctx, state(id, orderpb.OrderStatus_ORDER_STATUS_CANCELLED), verA, nil)
 	}()
 	go func() {
 		defer wg.Done()
-		errs[1] = b.Save(ctx, state(id, orderpb.OrderStatus_ORDER_STATUS_FILLED), verB)
+		errs[1] = b.Save(ctx, state(id, orderpb.OrderStatus_ORDER_STATUS_FILLED), verB, nil)
 	}()
 	wg.Wait()
 
@@ -132,12 +135,12 @@ func TestPostgresSaveRejectsStaleVersion(t *testing.T) {
 	}
 
 	// Somebody else moves the order forward.
-	if err := st.Save(ctx, state(id, orderpb.OrderStatus_ORDER_STATUS_CANCELLED), stale); err != nil {
+	if err := st.Save(ctx, state(id, orderpb.OrderStatus_ORDER_STATUS_CANCELLED), stale, nil); err != nil {
 		t.Fatalf("first save should win: %v", err)
 	}
 
 	// Our writer still holds the pre-cancel version.
-	err = st.Save(ctx, state(id, orderpb.OrderStatus_ORDER_STATUS_FILLED), stale)
+	err = st.Save(ctx, state(id, orderpb.OrderStatus_ORDER_STATUS_FILLED), stale, nil)
 	if !errors.Is(err, ErrConflict) {
 		t.Fatalf("stale Save returned %v, want ErrConflict\n\n"+
 			"A writer holding a version the store has moved past was allowed to commit. That is how "+
@@ -151,6 +154,39 @@ func TestPostgresSaveRejectsStaleVersion(t *testing.T) {
 	}
 	if got.GetStatus() != orderpb.OrderStatus_ORDER_STATUS_CANCELLED {
 		t.Fatalf("status = %v, want CANCELLED — the rejected write was applied anyway", got.GetStatus())
+	}
+
+	// A REFUSED CAS MUST ANNOUNCE NOTHING (#292). Save now takes outbox records,
+	// and the loser of a version race holds a FACT describing a transition that
+	// never happened — a fill folded onto state another replica has already moved
+	// past. If that record survived the refusal, the relay would publish an
+	// ORDER_FILLED for an execution the order does not contain, which is the
+	// orphaned-announcement failure #295 named as worse than the lost FACT #292
+	// set out to fix.
+	//
+	// The predicate is what has to hold, so this reuses the SAME stale version
+	// rather than inventing another failure mode.
+	if _, err := pool.Exec(ctx, `DELETE FROM outbox WHERE partition_key = $1`, id); err != nil {
+		t.Fatalf("clear outbox: %v", err)
+	}
+	err = st.Save(ctx, state(id, orderpb.OrderStatus_ORDER_STATUS_FILLED), stale, []outbox.Record{{
+		Subject: EventTypeFilled, EventType: EventTypeFilled, PartitionKey: id,
+		EventClass: envelopepb.EventClass_EVENT_CLASS_FACT, SchemaVersion: 1, Domain: Domain,
+		PayloadSchemaRef: "order.v1.OrderFilled:1", EventTime: t0,
+		TenantID: testTenant, Payload: []byte{0x01},
+	}})
+	if !errors.Is(err, ErrConflict) {
+		t.Fatalf("an ANNOUNCING stale Save returned %v, want ErrConflict — adding the outbox record "+
+			"to the transaction must not weaken the predicate the whole store depends on (#122)", err)
+	}
+	var queued int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM outbox WHERE partition_key = $1`, id).Scan(&queued); err != nil {
+		t.Fatalf("count outbox: %v", err)
+	}
+	if queued != 0 {
+		t.Fatalf("outbox holds %d record(s) for %s after the CAS refused its write — the announcement "+
+			"outlived the transition it announces, so the relay will publish an ORDER_FILLED for a "+
+			"fill this order does not contain (#292)", queued, id)
 	}
 }
 
@@ -175,12 +211,29 @@ func TestMemoryStoreSaveIsCompareAndSwap(t *testing.T) {
 		t.Fatalf("load: %v", err)
 	}
 
-	if err := m.Save(ctx, state(id, orderpb.OrderStatus_ORDER_STATUS_CANCELLED), stale); err != nil {
+	if err := m.Save(ctx, state(id, orderpb.OrderStatus_ORDER_STATUS_CANCELLED), stale, nil); err != nil {
 		t.Fatalf("first save should win: %v", err)
 	}
-	if err := m.Save(ctx, state(id, orderpb.OrderStatus_ORDER_STATUS_FILLED), stale); !errors.Is(err, ErrConflict) {
+	if err := m.Save(ctx, state(id, orderpb.OrderStatus_ORDER_STATUS_FILLED), stale, nil); !errors.Is(err, ErrConflict) {
 		t.Fatalf("stale Save on MemoryStore returned %v, want ErrConflict — the seam must fail "+
 			"where Postgres fails, or the service tests running against it certify nothing", err)
+	}
+	// AND IT MUST DISCARD THE ANNOUNCEMENT TOO, for the same reason Postgres does
+	// (#292). The seam is what every service-level test in this package runs
+	// against, so a MemoryStore that kept the loser's record while Postgres rolled
+	// it back would certify an orphaned ORDER_FILLED as normal.
+	if err := m.Save(ctx, state(id, orderpb.OrderStatus_ORDER_STATUS_FILLED), stale, []outbox.Record{{
+		Subject: EventTypeFilled, EventType: EventTypeFilled, PartitionKey: id,
+		EventClass: envelopepb.EventClass_EVENT_CLASS_FACT, SchemaVersion: 1, Domain: Domain,
+		PayloadSchemaRef: "order.v1.OrderFilled:1", EventTime: t0,
+		TenantID: testTenant, Payload: []byte{0x01},
+	}}); !errors.Is(err, ErrConflict) {
+		t.Fatalf("an ANNOUNCING stale Save on MemoryStore returned %v, want ErrConflict", err)
+	}
+	if got := m.outbox.PendingCount(); got != 0 {
+		t.Fatalf("MemoryStore's outbox holds %d record(s) after the CAS refused the write, want 0 — "+
+			"the record must be discarded with the transition it announces, exactly as the Postgres "+
+			"rollback discards it (#292)", got)
 	}
 
 	got, after, err := m.Load(ctx, id)

@@ -169,7 +169,7 @@ func TestPostgresCreateThenSaveThenLoad(t *testing.T) {
 
 	// Save is the post-admission compare-and-swap: the transition lands when the
 	// caller still holds the version it loaded.
-	if err := st.Save(ctx, state("ORD-1", orderpb.OrderStatus_ORDER_STATUS_ROUTED), ver); err != nil {
+	if err := st.Save(ctx, state("ORD-1", orderpb.OrderStatus_ORDER_STATUS_ROUTED), ver, nil); err != nil {
 		t.Fatalf("save: %v", err)
 	}
 	if got, _, err = st.Load(ctx, "ORD-1"); err != nil || got.GetStatus() != orderpb.OrderStatus_ORDER_STATUS_ROUTED {

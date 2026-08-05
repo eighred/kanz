@@ -7,6 +7,7 @@ import (
 
 	orderpb "github.com/eighred/kanz/kanz-schemas-go/order/v1"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"google.golang.org/protobuf/proto"
 
@@ -144,7 +145,28 @@ func (p *Postgres) Create(ctx context.Context, st *orderpb.OrderState, announce 
 // The INSERT arm still exists because Save must remain callable for an order
 // this process created; on the insert path the row lands at version 0 and no
 // predicate applies, because there is nothing yet to conflict with.
-func (p *Postgres) Save(ctx context.Context, st *orderpb.OrderState, expectedVersion int64) error {
+//
+// # WHY A TRANSACTION ONLY WHEN THERE IS SOMETHING TO ANNOUNCE
+//
+// announce rides the SAME transaction as the state change, which is the whole of
+// #292 applied to the fill fold: work() and adopt() hand this the ORDER_FILLED /
+// ORDER_PARTIALLY_FILLED FACT with the state that records it, so a crash or a
+// broker refusal between them is not reachable. A fill is the one FACT no
+// compensator can rebuild — completeTerminalOutcome says so in its own comment —
+// so "the write landed and the FACT did not" had no recovery at all.
+//
+// Most Saves announce nothing (a marker stamp, a quarantine freeze, the venue
+// ack), and wrapping those in BEGIN/COMMIT would add two round trips per
+// transition on the capital path to protect an empty set. So the announce-less
+// path stays a single statement — but THE STATEMENT AND ITS VERDICT ARE SHARED,
+// not copied. saveSQL exists once and cas() interprets RowsAffected once; two
+// copies of a compare-and-swap is how one of them quietly stops refusing.
+//
+// THE CAS PREDICATE IS UNCHANGED BY ANY OF THIS (#122). Same SQL, same
+// `WHERE orders.version = $4`, same 0-rows-means-ErrConflict verdict, whether it
+// runs on the pool or inside the transaction — and a refused CAS returns before
+// the enqueue, so a loser announces nothing. cas_test.go pins it.
+func (p *Postgres) Save(ctx context.Context, st *orderpb.OrderState, expectedVersion int64, announce []outbox.Record) error {
 	if st.GetOrderId() == "" {
 		return errors.New("oms: cannot save order with empty order_id")
 	}
@@ -152,16 +174,57 @@ func (p *Postgres) Save(ctx context.Context, st *orderpb.OrderState, expectedVer
 	if err != nil {
 		return fmt.Errorf("marshal order %s: %w", st.GetOrderId(), err)
 	}
-	tag, err := p.pool.Exec(ctx, `
-		INSERT INTO orders (tenant_id, order_id, status, state)
-		VALUES (current_setting('app.tenant_id'), $1, $2, $3)
-		ON CONFLICT (tenant_id, order_id) DO UPDATE SET
-			status     = EXCLUDED.status,
-			state      = EXCLUDED.state,
-			version    = orders.version + 1,
-			updated_at = now()
-		WHERE orders.version = $4
-	`, st.GetOrderId(), int32(st.GetStatus()), blob, expectedVersion)
+	if len(announce) == 0 {
+		return p.cas(ctx, p.pool, st, blob, expectedVersion)
+	}
+	tx, err := p.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("save order %s: begin: %w", st.GetOrderId(), err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }() // no-op after a successful Commit
+	// THE CAS FIRST, THE ANNOUNCEMENT SECOND. A conflict means another writer
+	// moved the order, so this delivery's FACT describes a transition that never
+	// happened — returning before the enqueue keeps it out of the table rather
+	// than relying on the rollback to take it out again.
+	if err := p.cas(ctx, tx, st, blob, expectedVersion); err != nil {
+		return err
+	}
+	if err := outbox.Enqueue(ctx, tx, announce...); err != nil {
+		return err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("save order %s: commit: %w", st.GetOrderId(), err)
+	}
+	return nil
+}
+
+// saveSQL is the compare-and-swap, written ONCE. Both Save paths execute this
+// exact text; a second copy is how the pool path and the transaction path would
+// come to disagree about what a conflict is.
+const saveSQL = `
+	INSERT INTO orders (tenant_id, order_id, status, state)
+	VALUES (current_setting('app.tenant_id'), $1, $2, $3)
+	ON CONFLICT (tenant_id, order_id) DO UPDATE SET
+		status     = EXCLUDED.status,
+		state      = EXCLUDED.state,
+		version    = orders.version + 1,
+		updated_at = now()
+	WHERE orders.version = $4
+`
+
+// execer is everything the compare-and-swap needs from its connection, and it is
+// satisfied by both *pgxpool.Pool and pgx.Tx. It exists so the announce-less
+// single statement and the announcing transaction run the SAME code, not the
+// same-looking code.
+type execer interface {
+	Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
+}
+
+// cas runs saveSQL and turns RowsAffected into the verdict: 1 ⇒ this writer won
+// and the version advanced, 0 ⇒ somebody else moved the order since this caller
+// read it and applying this write would discard their transition.
+func (p *Postgres) cas(ctx context.Context, db execer, st *orderpb.OrderState, blob []byte, expectedVersion int64) error {
+	tag, err := db.Exec(ctx, saveSQL, st.GetOrderId(), int32(st.GetStatus()), blob, expectedVersion)
 	if err != nil {
 		return fmt.Errorf("save order %s: %w", st.GetOrderId(), err)
 	}
