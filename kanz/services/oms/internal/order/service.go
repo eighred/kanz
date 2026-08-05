@@ -469,7 +469,7 @@ func (s *Service) handleSubmit(ctx context.Context, env *envelopepb.Envelope, pa
 	// it. Now the record is in the table: the relay's tick publishes the
 	// original, and the redelivery that follows finds an order already admitted
 	// and already announced.
-	if err := s.relay.Flush(ctx, st.GetOrderId()); err != nil {
+	if _, err := s.relay.Flush(ctx, st.GetOrderId()); err != nil {
 		return err
 	}
 
@@ -535,7 +535,7 @@ func (s *Service) handleSubmit(ctx context.Context, env *envelopepb.Envelope, pa
 		// ledger say rejected while the OMS's own truth says working, and a
 		// later cancel would act on a live-looking order.
 		rejected := Reject(st, rejectedAt)
-		if serr := s.store.Save(ctx, rejected, ver); serr != nil {
+		if serr := s.store.Save(ctx, rejected, ver, nil); serr != nil {
 			return serr
 		}
 		ver++
@@ -668,7 +668,7 @@ func (s *Service) work(ctx context.Context, st *orderpb.OrderState, ver int64) (
 	// A conflict HERE is safe to abort on: nothing has reached the venue yet, so
 	// another replica winning the race means it is working this order and this
 	// delivery has nothing to contribute. Returning the error redelivers.
-	if err := s.store.Save(ctx, routed, ver); err != nil {
+	if err := s.store.Save(ctx, routed, ver, nil); err != nil {
 		return st, ver, err
 	}
 	ver++
@@ -697,7 +697,7 @@ func (s *Service) work(ctx context.Context, st *orderpb.OrderState, ver int64) (
 	// process holds the only record that the venue acknowledged, and another
 	// replica has moved the order without it. Quarantine rather than return —
 	// a redelivery would re-Execute against a venue that already has it.
-	if err := s.store.Save(ctx, acked, ver); err != nil {
+	if err := s.store.Save(ctx, acked, ver, nil); err != nil {
 		if errors.Is(err, ErrConflict) {
 			return st, ver, s.quarantine(ctx, st, ver,
 				"another replica moved this order while this delivery held an unrecorded venue ack; "+
@@ -731,7 +731,30 @@ func (s *Service) work(ctx context.Context, st *orderpb.OrderState, ver int64) (
 			s.logger.Error("oms: venue fill rejected by aggregate", "order_id", st.GetOrderId(), "err", aerr)
 			break
 		}
-		if err := s.store.Save(ctx, next, ver); err != nil {
+		// THE FILL AND ITS FACT ARE NOW ONE WRITE (#292), AND THIS IS THE PAIR
+		// THAT MOST NEEDED IT.
+		//
+		// This used to be store.Save followed by emitter.EmitFill: two independent
+		// writes, and when the second failed the fund held a durable record of an
+		// execution the estate had never heard of. Every other transition in this
+		// service has a `*_announced_at` marker and a compensator behind it; this
+		// one has neither, and it cannot have one — completeTerminalOutcome
+		// explains why in its own comment. The individual Fill (fill_id, price,
+		// venue_execution_id) lives ONLY in this loop variable and in the FACT
+		// built from it; the stored OrderState keeps just the cumulative
+		// aggregate. So a lost ORDER_FILLED was not "late", it was gone, and
+		// tv-sync, accounting and audit never learned that money moved.
+		//
+		// THE FACT IS BUILT BEFORE THE WRITE, deliberately. If it cannot be
+		// captured — no tenant on the delivery, a payload that will not marshal —
+		// the fold must not be committed either: a fill whose announcement can
+		// never be made must not be recorded as announced-by-construction. Same
+		// discipline, same ordering, as admission's AcceptedFact.
+		fact, ferr := s.emitter.FillFact(ctx, fill, next)
+		if ferr != nil {
+			return st, ver, ferr
+		}
+		if err := s.store.Save(ctx, next, ver, []outbox.Record{fact}); err != nil {
 			// A CONFLICT HERE IS THE ONE THAT MATTERS, and quarantine is the only
 			// honest action (#122, and the decision #117 declined to invent
 			// without CAS to make it meaningful).
@@ -741,6 +764,11 @@ func (s *Service) work(ctx context.Context, st *orderpb.OrderState, ver int64) (
 			// it. Retrying would fold the fill onto state we have not read;
 			// dropping it would lose an execution that actually happened. Neither
 			// is defensible, so the order is frozen and a human is told.
+			//
+			// The refused CAS took the FACT down with it (Store.Save writes
+			// nothing at all on ErrConflict), so the quarantine below is not
+			// freezing an order with an announcement queued for a transition that
+			// never happened.
 			if errors.Is(err, ErrConflict) {
 				return st, ver, s.quarantine(ctx, st, ver, fmt.Sprintf(
 					"another replica moved order %s while this delivery held an unfolded venue fill; "+
@@ -749,7 +777,19 @@ func (s *Service) work(ctx context.Context, st *orderpb.OrderState, ver int64) (
 			return st, ver, err
 		}
 		ver++
-		if err := s.emitter.EmitFill(ctx, fill, next); err != nil {
+		// PUBLISH IT HERE, BEFORE ANYTHING ELSE HAPPENS TO THIS ORDER — the same
+		// rule admission follows, for the same reason. handleSubmit publishes the
+		// trailing CommandOutcome directly once this returns, and the next
+		// iteration of this loop publishes the next fill; a queued FACT overtaken
+		// by either is a consumer folding this order's history out of sequence.
+		//
+		// THE FAILURE BEHAVIOUR IS EXACTLY WHAT EmitFill's WAS: return, stop
+		// folding, nack. What is different is that the record is already durable,
+		// so the relay's next pass publishes the ORIGINAL fill rather than a
+		// compensator having to invent one it cannot. An error path that returns
+		// before reaching here (the quarantine above) leaves earlier fills queued,
+		// which is the designed outcome: late, and on the relay's tick.
+		if _, err := s.relay.Flush(ctx, next.GetOrderId()); err != nil {
 			return st, ver, err
 		}
 		st = next
@@ -822,7 +862,7 @@ func (s *Service) handleCancel(ctx context.Context, payload []byte) error {
 	// routed-before-accepted, same fix, and it is here rather than inside
 	// completeCancelAnnouncement because the venue withdrawal below happens
 	// first and must not be dispatched for an order this pod cannot announce.
-	if ferr := s.relay.Flush(ctx, cmd.GetOrderId()); ferr != nil {
+	if _, ferr := s.relay.Flush(ctx, cmd.GetOrderId()); ferr != nil {
 		return ferr
 	}
 
@@ -898,7 +938,7 @@ func (s *Service) handleCancel(ctx context.Context, payload []byte) error {
 	// quantities the close intent is built from.
 	s.closeAtVenue(ctx, st, now)
 
-	if err := s.store.Save(ctx, next, ver); err != nil {
+	if err := s.store.Save(ctx, next, ver, nil); err != nil {
 		return err
 	}
 	ver++
@@ -933,7 +973,7 @@ func (s *Service) completeCancelAnnouncement(ctx context.Context, st *orderpb.Or
 	}
 	announced := cloneState(st)
 	announced.CancelAnnouncedAt = timestamppb.New(now)
-	return s.store.Save(ctx, announced, ver)
+	return s.store.Save(ctx, announced, ver, nil)
 }
 
 // closeAtVenue withdraws a working order at the exchange holding it, recording
@@ -1021,7 +1061,7 @@ func (s *Service) handleAmend(ctx context.Context, payload []byte) error {
 	// Same reasoning as handleCancel's flush: an amend on an order whose
 	// ORDER_ACCEPTED is still in the outbox would publish its outcome before the
 	// order was ever announced (#292).
-	if ferr := s.relay.Flush(ctx, cmd.GetOrderId()); ferr != nil {
+	if _, ferr := s.relay.Flush(ctx, cmd.GetOrderId()); ferr != nil {
 		return ferr
 	}
 
@@ -1061,7 +1101,7 @@ func (s *Service) handleAmend(ctx context.Context, payload []byte) error {
 		}
 		return aerr
 	}
-	if err := s.store.Save(ctx, next, ver); err != nil {
+	if err := s.store.Save(ctx, next, ver, nil); err != nil {
 		return err
 	}
 	return s.emitter.EmitOutcome(ctx, next.GetOrderId(),
@@ -1195,19 +1235,47 @@ func (s *Service) resume(ctx context.Context, st *orderpb.OrderState) error {
 	if err != nil {
 		return err
 	}
+	// The two branches that decide this delivery has nothing to say, decided
+	// AGAIN under the claim because the goroutine we just raced for it may have
+	// finished between our first read and this one. They come before the flush
+	// below so a genuine duplicate — much the commonest redelivery — does not pay
+	// for a queue read it has no use for.
+	if IsTerminal(fresh) && orderOutcomeAnnounced(fresh) {
+		return nil
+	}
+	if !IsTerminal(fresh) && fresh.GetQuarantine() != nil {
+		return nil
+	}
+
+	// THE ORDER'S OWN BACKLOG GOES OUT BEFORE THIS DELIVERY PUBLISHES ANYTHING
+	// (#292) — the same rule, in the same place, as handleCancel's and
+	// handleAmend's flush after their claim.
+	//
+	// Every branch below either publishes directly (reannounceAccepted's
+	// ORDER_ACCEPTED, work()'s ORDER_ROUTED, adopt()'s refuse(),
+	// completeTerminalOutcome's CommandOutcome) or calls something that does. An
+	// order reaching here can hold committed-but-unpublished FACTs: the delivery
+	// that got it into this state is by definition one that failed partway, and
+	// since the fill fold rides the outbox those records can now be ORDER_FILLED
+	// FACTs. Publishing anything ahead of them hands a consumer this order's
+	// history out of sequence, and that is the one failure that is not merely
+	// late. It used to sit inside the PENDING_NEW branch only, covering the
+	// ACCEPTED record; hoisting it here covers every branch with one call rather
+	// than four.
+	//
+	// FLUSHED IS EVIDENCE, NOT A COUNTER. It is what tells the terminal branch
+	// below whether the ORDER_FILLED FACT it cannot rebuild was in fact recovered
+	// from the table.
+	flushed, ferr := s.relay.Flush(ctx, fresh.GetOrderId())
+	if ferr != nil {
+		return ferr
+	}
+
 	// TERMINAL BUT UNANNOUNCED: the state was persisted before the interrupted
 	// delivery could announce it. Complete the announcement rather than ack a
-	// redelivery of an order the world was never told about. This is decided
-	// AGAIN, under the claim, because the goroutine we just raced for it may
-	// have completed the announcement between our first read and this one.
+	// redelivery of an order the world was never told about.
 	if IsTerminal(fresh) {
-		if orderOutcomeAnnounced(fresh) {
-			return nil
-		}
-		return s.completeTerminalOutcome(ctx, fresh, ver)
-	}
-	if fresh.GetQuarantine() != nil {
-		return nil
+		return s.completeTerminalOutcome(ctx, fresh, ver, flushed)
 	}
 	st = fresh
 
@@ -1238,18 +1306,13 @@ func (s *Service) resume(ctx context.Context, st *orderpb.OrderState) error {
 				return rerr
 			}
 		}
-		// AND THE SAME RULE FOR AN ORDER ADMITTED THROUGH THE OUTBOX (#292).
-		//
-		// Its marker IS set — admission stamped it in the transaction — so the
-		// branch above correctly leaves it alone. But its ACCEPTED FACT may
-		// still be in the outbox: this is precisely the path an order reaches
-		// when handleSubmit's own flush failed and the command was redelivered.
-		// work() below publishes ORDER_ROUTED directly, so the same
-		// routed-before-accepted inversion applies here, for the same reason,
-		// and is prevented the same way.
-		if ferr := s.relay.Flush(ctx, st.GetOrderId()); ferr != nil {
-			return ferr
-		}
+		// An order admitted through the outbox needs no re-announcement — its
+		// marker IS set, stamped in the admission transaction, so the branch
+		// above correctly leaves it alone — but its ACCEPTED FACT may still be
+		// queued, which is precisely the state an order is in when handleSubmit's
+		// own flush failed and the command was redelivered. work() below
+		// publishes ORDER_ROUTED directly, and the flush above has already sent
+		// the ACCEPTED ahead of it.
 		_, _, err := s.work(ctx, st, ver)
 		return err
 	}
@@ -1297,7 +1360,7 @@ func (s *Service) resume(ctx context.Context, st *orderpb.OrderState) error {
 		if st.GetVenueAckAt() == nil {
 			acked := cloneState(st)
 			acked.VenueAckAt = timestamppb.New(s.now().UTC())
-			return s.store.Save(ctx, acked, ver)
+			return s.store.Save(ctx, acked, ver, nil)
 		}
 		return nil
 	case ActionRedrive:
@@ -1341,7 +1404,7 @@ func orderOutcomeAnnounced(st *orderpb.OrderState) bool {
 func (s *Service) markAcceptedAnnounced(ctx context.Context, st *orderpb.OrderState, ver int64, t time.Time) (*orderpb.OrderState, int64, error) {
 	announced := cloneState(st)
 	announced.AcceptedAnnouncedAt = timestamppb.New(t.UTC())
-	if err := s.store.Save(ctx, announced, ver); err != nil {
+	if err := s.store.Save(ctx, announced, ver, nil); err != nil {
 		return st, ver, err
 	}
 	return announced, ver + 1, nil
@@ -1438,40 +1501,49 @@ func (s *Service) reannounceAccepted(ctx context.Context, st *orderpb.OrderState
 func (s *Service) markOutcomeAnnounced(ctx context.Context, st *orderpb.OrderState, ver int64, t time.Time) error {
 	announced := cloneState(st)
 	announced.OutcomeAnnouncedAt = timestamppb.New(t)
-	return s.store.Save(ctx, announced, ver)
+	return s.store.Save(ctx, announced, ver, nil)
 }
 
 // completeTerminalOutcome re-publishes the CommandOutcome for a SubmitOrder
 // whose terminal state (FILLED or REJECTED) was persisted but never
 // announced — a delivery that Saved the terminal OrderState and then failed
-// before EmitFill/EmitRejected or the trailing EmitOutcome went out (see
+// before its fill/reject FACT or the trailing EmitOutcome went out (see
 // outcome_announced_at, order_events.proto:19). It is resume()'s completion
 // of that interrupted announcement.
 //
-// WHAT IT CANNOT DO, AND WHY. The stored OrderState carries only the order's
+// WHAT IT CAN NOW DO THAT IT COULD NOT (#292). The fill fold commits its
+// ORDER_FILLED FACT to the outbox in the same transaction as the state, so for
+// an order filled by an outbox build the FACT is not lost — it is in the table,
+// and resume() flushes that table before calling this. announced is how many
+// records that flush published: a non-zero value means the real FACT, with the
+// real fill_id and price, has just gone out, and this function is completing an
+// announcement rather than apologising for one. That is the difference between
+// "recovered" and "gone", and it is why the log below branches on it instead of
+// reporting a lost fill on every successful recovery.
+//
+// WHAT IT STILL CANNOT DO, AND WHY. The stored OrderState carries only the order's
 // current AGGREGATE view — status, cumulative filled_quantity, leaves_quantity,
 // average_fill_price (order/v1/order_events.proto:78-85). It has no field for
 // the individual Fill that produced a FILLED state (fill_id, price,
 // venue_execution_id, executed_at — order/v1/order_events.proto:169-211), nor
 // for an OrderRejected's reason/error_code (order/v1/order_events.proto:222-230).
-// Those values lived only in the local variables of the interrupted call —
-// the `fill` loop variable in work() (service.go, the fill-fold loop) or the
-// literal "PRICE_UNAVAILABLE"/err.Error() in handleSubmit's ErrUnpriced
-// branch — and were never persisted anywhere this function, reading only
-// store.Load's result, can recover them from. Re-emitting the exact
-// ORDER_FILLED/ORDER_REJECTED FACT is therefore not possible here without
-// fabricating a fill or a rejection reason, which is worse than the FACT
-// arriving late: it would put invented data on the record.
+// The reject reason lives only in the literal "PRICE_UNAVAILABLE"/err.Error() in
+// handleSubmit's ErrUnpriced branch, and a fill folded BEFORE migration 0006
+// lived only in work()'s loop variable — neither was persisted anywhere this
+// function, reading only store.Load's result, can recover it from. Re-emitting
+// those exact FACTs is therefore not possible here without fabricating a fill or
+// a rejection reason, which is worse than the FACT arriving late: it would put
+// invented data on the record.
 //
 // What CAN be reconstructed, honestly, from the terminal OrderState alone is
 // the CommandOutcome for the original SubmitOrder command — its status
 // follows directly from st.status, with no other input needed. That is what
-// this publishes. The missing lifecycle FACT for this specific interruption
-// is a residual, KNOWN LIMIT of this fix: tv-sync, accounting, and audit still
-// never see it. What this fix removes is the worse failure — a completed
-// trade or a permanent rejection whose command outcome the caller was never
-// told, with no recovery path at all.
-func (s *Service) completeTerminalOutcome(ctx context.Context, st *orderpb.OrderState, ver int64) error {
+// this publishes. Where announced is zero the missing lifecycle FACT is a
+// residual, KNOWN LIMIT: tv-sync, accounting, and audit still never see it.
+// What this removes is the worse failure — a completed trade or a permanent
+// rejection whose command outcome the caller was never told, with no recovery
+// path at all.
+func (s *Service) completeTerminalOutcome(ctx context.Context, st *orderpb.OrderState, ver int64, announced int) error {
 	now := s.now().UTC()
 	var status commandpb.CommandOutcomeStatus
 	var reason, code string
@@ -1479,9 +1551,21 @@ func (s *Service) completeTerminalOutcome(ctx context.Context, st *orderpb.Order
 	case orderpb.OrderStatus_ORDER_STATUS_FILLED:
 		status = commandpb.CommandOutcomeStatus_COMMAND_OUTCOME_STATUS_EXECUTED
 		reason = "order filled (outcome re-announced after an interrupted delivery)"
+		if announced > 0 {
+			// THE FILL WAS RECOVERED, NOT LOST. resume()'s flush just published
+			// the committed ORDER_FILLED FACT — the real fill_id, the real price
+			// — so this is a completed announcement, not a hole in the record.
+			// Still logged, because the interruption itself is worth seeing.
+			s.logger.Warn("oms: completing an interrupted FILLED announcement — the ORDER_FILLED FACT was "+
+				"committed to the outbox with the fill and has just been published from it, so nothing "+
+				"was lost; only the trailing command outcome was outstanding (#292)",
+				"order_id", st.GetOrderId(), "facts_recovered", announced)
+			break
+		}
 		s.logger.Error("oms: completing an interrupted FILLED announcement WITHOUT its ORDER_FILLED FACT — "+
-			"the original fill is not recoverable from the stored OrderState, so only the command outcome "+
-			"is re-published; tv-sync, accounting, and audit will never see this fill's FACT",
+			"nothing was queued for this order, so the fill predates the outbox (migration 0006) and is "+
+			"not recoverable from the stored OrderState; only the command outcome is re-published, and "+
+			"tv-sync, accounting, and audit will never see this fill's FACT",
 			"order_id", st.GetOrderId())
 	default:
 		// REJECTED today; EXPIRED is not currently reachable (Expire is never
@@ -1511,7 +1595,7 @@ func (s *Service) adopt(ctx context.Context, st *orderpb.OrderState, ver int64, 
 	if view.State == execution.OrderViewRejected {
 		now := s.now().UTC()
 		rejected := Reject(st, now)
-		if err := s.store.Save(ctx, rejected, ver); err != nil {
+		if err := s.store.Save(ctx, rejected, ver, nil); err != nil {
 			return err
 		}
 		ver++
@@ -1532,7 +1616,7 @@ func (s *Service) adopt(ctx context.Context, st *orderpb.OrderState, ver int64, 
 	if st.GetVenueAckAt() == nil {
 		acked := cloneState(st)
 		acked.VenueAckAt = timestamppb.New(s.now().UTC())
-		if err := s.store.Save(ctx, acked, ver); err != nil {
+		if err := s.store.Save(ctx, acked, ver, nil); err != nil {
 			return err
 		}
 		ver++
@@ -1545,7 +1629,7 @@ func (s *Service) adopt(ctx context.Context, st *orderpb.OrderState, ver int64, 
 	// guard, and cancel/amend and the read API consult this aggregate directly.
 	//
 	// The failure this prevents: work() folds fill 1 and Saves it, then fails
-	// before fill 2's Save or EmitFill. The redelivery reaches here, the venue
+	// before fill 2's Save. The redelivery reaches here, and the venue
 	// reports BOTH fills, and folding fill 1 again would refold a fill this order
 	// already contains. If the refold overfills, ApplyFill errors and the order
 	// quarantines below anyway — safe, but a reconcilable order sits frozen for no
@@ -1596,11 +1680,21 @@ func (s *Service) adopt(ctx context.Context, st *orderpb.OrderState, ver int64, 
 				"venue reported a fill this order cannot accept (%v). The venue's record and "+
 					"ours describe different orders under one id", aerr))
 		}
-		if err := s.store.Save(ctx, next, ver); err != nil {
+		// THE ADOPTED FILL RIDES ITS OWN TRANSACTION TOO (#292), for exactly the
+		// reasons work()'s does — and this path matters more, not less, because it
+		// is the recovery path: the process that reaches here is the one that
+		// already crashed once. An adopted fill whose publish failed would leave a
+		// FILLED order whose ORDER_FILLED FACT nothing can reconstruct, and the
+		// next redelivery would find it terminal and complete only the outcome.
+		fact, ferr := s.emitter.FillFact(ctx, fill, next)
+		if ferr != nil {
+			return ferr
+		}
+		if err := s.store.Save(ctx, next, ver, []outbox.Record{fact}); err != nil {
 			return err
 		}
 		ver++
-		if err := s.emitter.EmitFill(ctx, fill, next); err != nil {
+		if _, err := s.relay.Flush(ctx, next.GetOrderId()); err != nil {
 			return err
 		}
 		st = next
@@ -1654,7 +1748,7 @@ func (s *Service) quarantine(ctx context.Context, st *orderpb.OrderState, ver in
 	// state is stale and forcing it would overwrite whatever the winner recorded
 	// — the very defect quarantine exists to report. Returning the error nacks
 	// the command, and the redelivery re-derives the freeze against fresh state.
-	if err := s.store.Save(ctx, next, ver); err != nil {
+	if err := s.store.Save(ctx, next, ver, nil); err != nil {
 		return err
 	}
 	return nil

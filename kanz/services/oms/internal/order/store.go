@@ -82,27 +82,40 @@ type Store interface {
 	// nil announces nothing, which is a legitimate answer for a write that has
 	// no FACT of its own. It is not a default: every caller states it.
 	Create(ctx context.Context, st *orderpb.OrderState, announce []outbox.Record) error
-	// Save persists the latest state of one order iff it is still at
-	// expectedVersion, and returns ErrConflict if it is not. expectedVersion is
-	// the value Load returned alongside the state this write was derived from.
+	// Save persists the latest state of one order AND the FACTs announcing it,
+	// in ONE transaction, iff the order is still at expectedVersion. It returns
+	// ErrConflict — and writes nothing at all, including no outbox record — if it
+	// is not. expectedVersion is the value Load returned alongside the state this
+	// write was derived from.
 	//
 	// There is deliberately NO blind variant. A Save that cannot refuse is the
 	// defect this replaced, and leaving one alongside would mean the next writer
 	// reaches for it.
 	//
-	// IT HAS NO announce PARAMETER YET, AND THAT IS A KNOWN, TRACKED GAP (#292).
-	// Create carries the admission FACT because admission is the transition with
-	// the evidence — #238 found it stranding real orders. The five remaining
-	// commit-then-publish pairs on this store (the routed FACT, the two fill
-	// folds, the cancel announcement and the amend outcome) still publish
-	// outside the transaction and still rely on their markers. Each is a
-	// SEPARATE decision — what FACT the write announces, and whether its marker
-	// moves into the transaction with it — so adding the parameter here before
-	// those decisions are made would be a signature change across fifteen call
-	// sites that proves nothing and has to be re-read at every one of them
-	// afterwards. test/arch/oms_outbox_test.go names each of the five and fails
-	// if a SIXTH appears.
-	Save(ctx context.Context, st *orderpb.OrderState, expectedVersion int64) error
+	// THE announce PARAMETER IS ON THIS METHOD RATHER THAN ON A SECOND ONE, AND
+	// THAT IS THE DECISION (#292). A `SaveAnnouncing` alongside a bare `Save`
+	// would have been a smaller diff and exactly the wrong shape: two ways to
+	// persist a transition is the drift that produced three separate
+	// `*_announced_at` markers by instalment, and the plain one would stay the
+	// obvious choice for the next transition somebody adds. One method, and every
+	// caller states its answer — CLAUDE.md's "one implementation per concept",
+	// and the same signature Create already carries.
+	//
+	// nil announces nothing, which is a legitimate answer for a write that has no
+	// FACT of its own (a marker stamp, a quarantine freeze). It is NOT a default:
+	// the parameter is a slice rather than a variadic precisely so that omitting
+	// it does not compile, and so converting the next transition is an edit to one
+	// call site rather than an argument nobody notices is missing.
+	//
+	// THE FILL FOLDS GO THROUGH HERE (#292). work() and adopt() pass the
+	// ORDER_FILLED / ORDER_PARTIALLY_FILLED FACT with the state that records it,
+	// which is the pair that most needed it: a fill is money that moved, it has
+	// no marker, and completeTerminalOutcome cannot rebuild the FACT from the
+	// stored aggregate. The remaining commit-then-publish pairs (the routed FACT,
+	// the cancel announcement, the amend outcome, the terminal rejects) still
+	// publish outside the transaction and still rely on their markers;
+	// test/arch/oms_outbox_test.go names each one and fails if a new one appears.
+	Save(ctx context.Context, st *orderpb.OrderState, expectedVersion int64, announce []outbox.Record) error
 	// Load returns the current state of one order and its version, or
 	// ErrNotFound. The version is opaque to the caller: its only use is to be
 	// handed back to Save.
@@ -196,10 +209,18 @@ func (m *MemoryStore) Create(_ context.Context, st *orderpb.OrderState, announce
 	return nil
 }
 
-// Save applies st iff the order is still at expectedVersion. The compare and the
-// write happen under ONE lock hold; splitting them would reintroduce the
-// check-then-act window this is here to close.
-func (m *MemoryStore) Save(_ context.Context, st *orderpb.OrderState, expectedVersion int64) error {
+// Save applies st iff the order is still at expectedVersion, and enqueues its
+// FACTs in the same lock hold. The compare, the write and the enqueue happen
+// under ONE lock; splitting the compare from the write would reintroduce the
+// check-then-act window this is here to close, and splitting the enqueue out of
+// it would restore the lost-FACT window (#292) — for the fill fold, which is
+// the pair with no marker behind it.
+//
+// THE COMPARE FIRST, THEN THE FALLIBLE ENQUEUE, THEN THE MAP WRITE. A refused
+// CAS must leave NOTHING behind, so the version check precedes the enqueue; and
+// the map write cannot fail, so it goes last. That is this store's whole
+// equivalent of the transaction Postgres.Save opens.
+func (m *MemoryStore) Save(_ context.Context, st *orderpb.OrderState, expectedVersion int64, announce []outbox.Record) error {
 	if st.GetOrderId() == "" {
 		return errors.New("oms: cannot save order with empty order_id")
 	}
@@ -211,6 +232,11 @@ func (m *MemoryStore) Save(_ context.Context, st *orderpb.OrderState, expectedVe
 	}
 	if cur.ver != expectedVersion {
 		return ErrConflict
+	}
+	if len(announce) > 0 {
+		if err := m.outbox.Append(announce...); err != nil {
+			return err
+		}
 	}
 	m.orders[st.GetOrderId()] = &versioned{
 		st:  proto.Clone(st).(*orderpb.OrderState),
