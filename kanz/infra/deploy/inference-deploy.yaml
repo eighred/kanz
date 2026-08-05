@@ -82,10 +82,13 @@ spec:
         app: inference
         app.kubernetes.io/part-of: kanz
     spec:
-      # Drain budget: 7s bus drain + 15s HTTP shutdown + 5s OTLP flush, run
-      # SEQUENTIALLY after SIGTERM = 27s. The k8s default of 30 leaves three
-      # seconds and SIGKILLs mid-drain. See availability.yaml for the derivation.
-      terminationGracePeriodSeconds: 45
+      # Drain budget: DERIVED, and deliberately not restated here. The arithmetic
+      # this comment used to carry still read 27s long after the real figure had
+      # grown past it (#264), so the number now lives in exactly one place:
+      # test/arch/pod_disruption_and_drain_test.go recomputes the floor from the
+      # source on every run and fails this file the moment 60 stops covering it.
+      # See availability.yaml for what the floor is made of.
+      terminationGracePeriodSeconds: 60
       serviceAccountName: inference
       securityContext:
         runAsNonRoot: true

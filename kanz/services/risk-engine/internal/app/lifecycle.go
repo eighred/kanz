@@ -14,6 +14,16 @@ import (
 // DefaultShutdownTimeout bounds the graceful-shutdown sequence so a wedged
 // broker can't hold the pod past its k8s terminationGracePeriod — if drain
 // overruns, the process exits and SIGKILL backstops it.
+//
+// IT IS ALSO THE LARGEST SINGLE TERM IN THE ESTATE'S DERIVED DRAIN BUDGET, and
+// it is not spelled in cmd/risk-engine/main.go. Until #264 the guard that
+// derives every manifest's terminationGracePeriodSeconds read only the mains,
+// so this 20s was invisible: raising it to 120 moved the derived budget by zero
+// seconds while the pod would have spent every one of them. It is now declared
+// in serviceShutdownExtras in test/arch/pod_disruption_and_drain_test.go, which
+// reads the number from THIS line — so changing it moves the floor every
+// manifest is checked against, and renaming it fails that guard rather than
+// silently dropping the term.
 const DefaultShutdownTimeout = 20 * time.Second
 
 // App is the risk-engine's runtime lifecycle: it starts ingestion, flips

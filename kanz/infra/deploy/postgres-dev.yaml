@@ -157,9 +157,9 @@ spec:
         app.kubernetes.io/part-of: kanz
     spec:
       # Dev rig only, but a SIGKILL mid-checkpoint still costs crash recovery on the
-      # next start, which reads as a broken rig. 45s matches the estate — see
+      # next start, which reads as a broken rig. Matches the estate — see
       # availability.yaml.
-      terminationGracePeriodSeconds: 45
+      terminationGracePeriodSeconds: 60
       containers:
         - name: postgres
           image: postgres:16-alpine

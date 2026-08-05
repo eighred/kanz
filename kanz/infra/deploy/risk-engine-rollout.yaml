@@ -88,10 +88,15 @@ spec:
         prometheus.io/scrape: "true"
         prometheus.io/port: "8081"
     spec:
-      # Drain budget: 7s bus drain + 15s HTTP shutdown + 5s OTLP flush, run
-      # SEQUENTIALLY after SIGTERM = 27s. The k8s default of 30 leaves three
-      # seconds and SIGKILLs mid-drain. See availability.yaml for the derivation.
-      terminationGracePeriodSeconds: 45
+      # Drain budget: DERIVED, and this is the workload that drives it. Everything
+      # else here spends the 15s HTTP drain and 5s OTLP flush spelled in its main;
+      # risk-engine ALSO spends internal/app/lifecycle.go's DefaultShutdownTimeout,
+      # under which the whole ordered drain runs — including the checkpoint. That
+      # 20s was invisible to the guard until #264, which is why this file read 45
+      # against a path that could take 47. The floor is recomputed from the source
+      # by test/arch/pod_disruption_and_drain_test.go on every run; no arithmetic
+      # is restated here, because the version that was restated went stale.
+      terminationGracePeriodSeconds: 60
       serviceAccountName: risk-engine
       # SEC-02a runtime hardening (pod-level): non-root, default seccomp. The
       # canonical values live in infra/security/runtime/pod-security.yaml; the
