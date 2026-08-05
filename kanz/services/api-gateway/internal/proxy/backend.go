@@ -45,10 +45,21 @@ type MeshBackend struct {
 // NewMeshBackend builds a backend over per-service base URLs (e.g.
 // "https://wealth.kanz-services:8080") and an HTTP client. A service absent from
 // bases forwards as ErrBackendUnavailable (so a partially-configured gateway
-// 503s only the unwired surfaces). A nil client falls back to http.DefaultClient.
+// 503s only the unwired surfaces).
+//
+// A nil client gets a private one, NOT http.DefaultClient (#235). The global is
+// shared with every other package in the process — a library that sets
+// DefaultClient.Timeout or swaps DefaultTransport would retune every proxied read
+// from outside this file — and it carries DefaultTransport's MaxIdleConnsPerHost
+// of 2, which is connection churn for a gateway fanning out to four upstreams.
+// The composition root passes a configured client; this fallback exists for tests
+// and must be no worse than that, not merely convenient.
+//
+// It carries no Timeout, on purpose: the bound is the caller's context
+// (forwardBudget). See the comment on the client in cmd/api-gateway.
 func NewMeshBackend(bases map[Service]string, client *http.Client) *MeshBackend {
 	if client == nil {
-		client = http.DefaultClient
+		client = &http.Client{Transport: &http.Transport{}}
 	}
 	cleaned := make(map[Service]string, len(bases))
 	for svc, base := range bases {

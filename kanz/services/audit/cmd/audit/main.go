@@ -23,6 +23,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 
 	"github.com/eighred/kanz/internal/lifecycle"
+	"github.com/eighred/kanz/internal/platform/httpserver"
 	"github.com/eighred/kanz/internal/version"
 	"github.com/eighred/kanz/pkg/bus"
 	"github.com/eighred/kanz/pkg/observability"
@@ -107,11 +108,7 @@ func run() int {
 	}
 
 	readiness := &server.Readiness{}
-	httpSrv := &http.Server{
-		Addr:              cfg.Listen,
-		Handler:           server.New(readiness, logger, server.WithMetrics(obs.MetricsHandler()), server.WithStore(store)),
-		ReadHeaderTimeout: 5 * time.Second,
-	}
+	httpSrv := httpserver.New(cfg.Listen, server.New(readiness, logger, server.WithMetrics(obs.MetricsHandler()), server.WithStore(store)), httpserver.Standard())
 	go func() {
 		logger.Info("audit listening", "addr", cfg.Listen)
 		if err := httpSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {

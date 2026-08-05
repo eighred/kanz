@@ -189,6 +189,22 @@ func (s *Server) handleVerify(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleReport generates a built-in template; ?format=csv overrides the default.
+//
+// THIS IS THE LONGEST HANDLER IN THE SERVICE AND IT IS NOW BOUNDED. The "full-log"
+// template carries an empty audit.Filter — no time window, no Limit — so it reads a
+// tenant's entire history, renders it into memory, and only then writes. Since #235
+// this server has a WriteTimeout (internal/platform/httpserver, 120s), whose clock
+// starts when the request is read, so a report that takes longer than that to
+// GENERATE is severed with no status and no body — it does not fail slowly, it
+// fails silently.
+//
+// That bound is deliberate: before it, the same request held a goroutine and a file
+// descriptor for as long as the query ran, which is the leak #235 closes. But the
+// real defect it exposes is here, not in the timeout — an export endpoint with no
+// window, no page and no cap has no upper bound on either time OR memory, and 120s
+// is simply where that now becomes visible. The fix when a tenant outgrows it is a
+// bounded/streamed report, NOT a larger number: raising the estate WriteTimeout
+// would loosen every route on every service to accommodate one export.
 func (s *Server) handleReport(w http.ResponseWriter, r *http.Request) {
 	tenant, authed := auth.RequireCallerTenant(w, r)
 	if !authed {

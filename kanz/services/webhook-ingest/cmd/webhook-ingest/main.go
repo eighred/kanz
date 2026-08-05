@@ -19,6 +19,7 @@ import (
 	lifecyclepb "github.com/eighred/kanz/kanz-schemas-go/lifecycle/v1"
 
 	"github.com/eighred/kanz/internal/lifecycle"
+	"github.com/eighred/kanz/internal/platform/httpserver"
 	"github.com/eighred/kanz/internal/platform/subject"
 	"github.com/eighred/kanz/internal/signal/translate"
 	"github.com/eighred/kanz/internal/version"
@@ -223,11 +224,7 @@ func run() int {
 	if probe, ok := nonces.(server.NonceStoreHealth); ok {
 		readiness.TrackNonceStore(probe)
 	}
-	httpSrv := &http.Server{
-		Addr:              cfg.Listen,
-		Handler:           server.New(readiness, logger, pipeline, server.WithMetrics(obs.MetricsHandler()), server.WithCloudflareOnly(cfg.CloudflareOnly)),
-		ReadHeaderTimeout: 5 * time.Second,
-	}
+	httpSrv := httpserver.New(cfg.Listen, server.New(readiness, logger, pipeline, server.WithMetrics(obs.MetricsHandler()), server.WithCloudflareOnly(cfg.CloudflareOnly)), httpserver.Standard())
 	go func() {
 		logger.Info("webhook-ingest listening", "addr", cfg.Listen, "nats", cfg.NATSURL)
 		if err := httpSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {

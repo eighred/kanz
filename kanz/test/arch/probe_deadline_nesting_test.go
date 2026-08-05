@@ -351,7 +351,14 @@ func apiGatewayIngressAnnotations(t *testing.T, root string) map[string]string {
 	return nil
 }
 
-// gatewayServerFile builds the one http.Server the api-gateway listens on.
+// gatewayServerFile declares the bounds of the one server the api-gateway listens
+// on.
+//
+// It no longer writes an http.Server literal — every server in the estate is built
+// by internal/platform/httpserver, which cannot be called with a timeout unset
+// (#235). What this file still owns is the two OVERRIDES: the gateway is the only
+// server with an ingress in front of it and per-route budgets of its own, so
+// Write and Idle are its own consts and the ordering below is still its problem.
 const gatewayServerFile = "services/api-gateway/cmd/api-gateway/main.go"
 
 // gatewayHandlerBudgets are every per-request deadline a handler on that server can set.
@@ -397,23 +404,27 @@ const nginxUpstreamKeepaliveDefault = 60 * time.Second
 // layer that reports it.
 func TestGatewayServerBoundsTheConnectionItself(t *testing.T) {
 	root := moduleRoot(t)
-	fields := httpServerFields(t, filepath.Join(root, filepath.FromSlash(gatewayServerFile)))
+	fields := gatewayTimeoutFields(t, filepath.Join(root, filepath.FromSlash(gatewayServerFile)))
 
 	consequences := map[string]string{
-		"WriteTimeout": "a caller that stops reading the response — or a wedged intermediary " +
+		"Write": "a caller that stops reading the response — or a wedged intermediary " +
 			"— pins a goroutine and a file descriptor for as long as it likes, and this " +
 			"gateway is the only way an order reaches the spine",
-		"IdleTimeout": "net/http then falls back to ReadTimeout, which is unset too, so there " +
+		"Idle": "net/http then falls back to ReadTimeout, and if that is unset too there " +
 			"is NO idle bound at all and every keep-alive connection is held until the peer " +
 			"closes it. Under a pooling proxy that is the steady state, not a slow leak",
 	}
 
 	got := map[string]time.Duration{}
-	for _, field := range []string{"WriteTimeout", "IdleTimeout"} {
+	for _, field := range []string{"Write", "Idle"} {
 		ident, present := fields[field]
 		if !present {
-			t.Errorf("%s builds its http.Server without %s.\n\n"+
-				"Absence is not a looser bound, it is NO bound: %s.",
+			t.Errorf("%s builds its httpserver.Timeouts without %s.\n\n"+
+				"Absence is not a looser bound, it is NO bound: %s.\n\n"+
+				"(httpserver.New would refuse a zero at startup, so this is the softer "+
+				"failure of the two — but it means the gateway silently took the estate "+
+				"default for a bound that has to be ordered against ITS handler budgets and "+
+				"ITS ingress, which no other server has.)",
 				gatewayServerFile, field, consequences[field])
 			continue
 		}
@@ -433,7 +444,7 @@ func TestGatewayServerBoundsTheConnectionItself(t *testing.T) {
 	// WriteTimeout against every handler budget on this server.
 	for _, budget := range gatewayHandlerBudgets {
 		inner := durationConst(t, filepath.Join(root, filepath.FromSlash(budget.file)), budget.name)
-		if got["WriteTimeout"] <= inner {
+		if got["Write"] <= inner {
 			t.Errorf("gatewayWriteTimeout (%s, %s) does not exceed %s (%s, %s) = %s, the budget "+
 				"for %s.\n\n"+
 				"WriteTimeout applies to EVERY route, so it becomes the real limit on that one — "+
@@ -441,7 +452,7 @@ func TestGatewayServerBoundsTheConnectionItself(t *testing.T) {
 				"upstream that was slow, where the handler's own deadline produces a 502/504 and "+
 				"a log line. Raise gatewayWriteTimeout rather than cutting %s, which is sized to "+
 				"real work.",
-				got["WriteTimeout"], gatewayServerFile, budget.name, budget.file, budget.label,
+				got["Write"], gatewayServerFile, budget.name, budget.file, budget.label,
 				inner, budget.label, budget.name)
 		}
 	}
@@ -458,37 +469,45 @@ func TestGatewayServerBoundsTheConnectionItself(t *testing.T) {
 		if err != nil {
 			continue // and the malformed case
 		}
-		if edge := time.Duration(secs) * time.Second; got["WriteTimeout"] >= edge {
+		if edge := time.Duration(secs) * time.Second; got["Write"] >= edge {
 			t.Errorf("gatewayWriteTimeout (%s) is not below the edge's %s = %s (%s).\n\n"+
 				"nginx would cut first, and the caller would get its anonymous 504 instead of "+
 				"anything this gateway could tell them — while the gateway went on holding the "+
 				"goroutine and the socket, which is the leak WriteTimeout exists to stop. The "+
 				"gateway must be the layer that gives up first.",
-				got["WriteTimeout"], key, edge, ingressFile)
+				got["Write"], key, edge, ingressFile)
 		}
 	}
 
 	// IdleTimeout against the proxy that pools connections to this server.
-	if got["IdleTimeout"] <= nginxUpstreamKeepaliveDefault {
+	if got["Idle"] <= nginxUpstreamKeepaliveDefault {
 		t.Errorf("gatewayIdleTimeout (%s) does not exceed ingress-nginx's "+
 			"upstream-keepalive-timeout default (%s).\n\n"+
 			"Too SHORT is its own fault, not a safer one: the gateway closes idle connections "+
 			"nginx still believes it may reuse, and the race surfaces as intermittent 502s "+
 			"under no load at all — harder to read than the leak this field closes. If the "+
 			"edge's keepalive is retuned, retune this above it.",
-			got["IdleTimeout"], nginxUpstreamKeepaliveDefault)
+			got["Idle"], nginxUpstreamKeepaliveDefault)
 	}
 }
 
-// httpServerFields returns each keyed field of the one http.Server literal in path,
-// mapped to the identifier it is set to — or "" when it is set to anything other than a
-// bare identifier (an inline `105 * time.Second` cannot be ordered against anything,
-// because durationConst has no const to read).
+// gatewayTimeoutFields returns each keyed field of the one httpserver.Timeouts literal
+// in path, mapped to the identifier it is set to — or "" when it is set to anything
+// other than a bare identifier (an inline `105 * time.Second` cannot be ordered against
+// anything, because durationConst has no const to read).
 //
-// It insists on exactly ONE http.Server literal. Two would mean this binary listens on
-// two servers and the caller is asserting about whichever the AST reached first, which is
-// how a guard goes green while the served port is unbounded.
-func httpServerFields(t *testing.T, path string) map[string]string {
+// IT READS THE OVERRIDE, NOT THE SERVER. Until #235 this read the fields of the
+// `&http.Server{...}` literal here; that literal is gone, because a struct literal
+// cannot require a field and twenty-six roots proved it. httpserver.New now refuses a
+// zero outright, so absence of a bound is no longer the failure this can see — what it
+// still has to see is that the gateway's two OVERRIDES are named consts, because they
+// are the only bounds in the estate that must be ordered against per-route budgets and
+// an ingress annotation.
+//
+// It insists on exactly ONE Timeouts literal. Two would mean this binary listens on two
+// servers and the caller is asserting about whichever the AST reached first, which is how
+// a guard goes green while the served port is bounded by something nobody checked.
+func gatewayTimeoutFields(t *testing.T, path string) map[string]string {
 	t.Helper()
 
 	f, err := parser.ParseFile(token.NewFileSet(), path, nil, 0)
@@ -496,14 +515,14 @@ func httpServerFields(t *testing.T, path string) map[string]string {
 		t.Fatalf("parse %s: %v", path, err)
 	}
 
-	var servers int
+	var literals int
 	out := map[string]string{}
 	ast.Inspect(f, func(n ast.Node) bool {
 		lit, ok := n.(*ast.CompositeLit)
-		if !ok || !isHTTPServerType(lit.Type) {
+		if !ok || !isTimeoutsType(lit.Type) {
 			return true
 		}
-		servers++
+		literals++
 		for _, elt := range lit.Elts {
 			kv, ok := elt.(*ast.KeyValueExpr)
 			if !ok {
@@ -522,13 +541,28 @@ func httpServerFields(t *testing.T, path string) map[string]string {
 		return true
 	})
 
-	if servers != 1 {
-		t.Fatalf("%s constructs %d http.Server literals, want exactly 1. This guard reads the "+
-			"connection bounds off THE server this binary listens on; with none it asserts "+
-			"nothing, and with several it asserts about an arbitrary one while another port "+
-			"may be unbounded", path, servers)
+	if literals != 1 {
+		t.Fatalf("%s constructs %d httpserver.Timeouts literals, want exactly 1.\n\n"+
+			"With none, the gateway has stopped overriding the estate defaults and its "+
+			"WriteTimeout is no longer sized against its own handler budgets or kept under "+
+			"the ingress's proxy-read-timeout — the orderings below would assert nothing. "+
+			"With several, this reads an arbitrary one while another server may be bounded "+
+			"by numbers nobody ordered.", path, literals)
 	}
 	return out
+}
+
+// isTimeoutsType reports whether a composite-literal type is httpserver.Timeouts.
+func isTimeoutsType(e ast.Expr) bool {
+	if star, ok := e.(*ast.StarExpr); ok {
+		e = star.X
+	}
+	sel, ok := e.(*ast.SelectorExpr)
+	if !ok || sel.Sel.Name != "Timeouts" {
+		return false
+	}
+	pkg, ok := sel.X.(*ast.Ident)
+	return ok && pkg.Name == "httpserver"
 }
 
 // isHTTPServerType reports whether a composite-literal type is http.Server, including

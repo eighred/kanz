@@ -187,6 +187,82 @@ func TestStream_DeliversDeltas(t *testing.T) {
 	}
 }
 
+// TestStream_SurvivesTheServerWriteTimeout runs the REAL handler behind a server
+// carrying a WriteTimeout, which is what tv-sync now listens on (#235).
+//
+// TestStream_DeliversDeltas above uses httptest.NewServer, whose Config sets no
+// timeouts — so it proves the stream works on a server this service does not run.
+// internal/platform/httpserver gives every server in the estate a WriteTimeout, and
+// WriteTimeout bounds the WHOLE response: without the SetWriteDeadline lift in
+// stream(), this endpoint is severed mid-session with no status, no body and nothing
+// logged, and the Trading Terminal shows a book that has quietly stopped updating.
+//
+// Nothing else catches that. The arch guard checks that stream() CALLS
+// SetWriteDeadline; the httpserver tests check the CALL WORKS in isolation. Only
+// this one runs the actual endpoint against the actual bound.
+//
+// The timeout is milliseconds rather than the production two minutes so the test is
+// fast — the mechanism is under test, not the number.
+func TestStream_SurvivesTheServerWriteTimeout(t *testing.T) {
+	const writeTimeout = 250 * time.Millisecond
+
+	p := projection.New(time.Now, nil)
+	foldFill(t, p, "acme", "fund-alpha", "seed", "BTC", orderpb.Side_SIDE_BUY, 1, 100)
+	mux := http.NewServeMux()
+	New(p).Routes(mux)
+
+	srv := httptest.NewUnstartedServer(mux)
+	srv.Config.WriteTimeout = writeTimeout
+	srv.Start()
+	defer srv.Close()
+
+	req, _ := http.NewRequest(http.MethodGet, srv.URL+"/broker/accounts/fund-alpha/stream", nil)
+	req.Header.Set(auth.HeaderPrincipalTenant, "acme")
+	resp, err := srv.Client().Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("stream open = %d, want 200 (the handler refuses rather than opening a "+
+			"stream it cannot keep alive — see the SetWriteDeadline branch)", resp.StatusCode)
+	}
+
+	// Fold WELL AFTER the WriteTimeout would have fired. An unlifted deadline
+	// severs the connection at 250ms, so this delta could never arrive.
+	go func() {
+		time.Sleep(3 * writeTimeout)
+		foldFill(t, p, "acme", "fund-alpha", "o-late", "BTC", orderpb.Side_SIDE_BUY, 1, 120)
+	}()
+
+	got := make(chan string, 1)
+	go func() {
+		sc := bufio.NewScanner(resp.Body)
+		for sc.Scan() {
+			if line := sc.Text(); strings.HasPrefix(line, "event:") {
+				got <- line
+				return
+			}
+		}
+		got <- "" // stream ended without an event: severed
+	}()
+
+	select {
+	case line := <-got:
+		if line == "" {
+			t.Fatalf("the stream closed before a delta folded %v after it opened, with a "+
+				"%v WriteTimeout on the server.\n\n"+
+				"That is the endpoint being severed by the server's own write bound. The fix "+
+				"is the http.NewResponseController(w).SetWriteDeadline(time.Time{}) call in "+
+				"stream() — NOT removing WriteTimeout from tv-sync's server, which would "+
+				"restore the unbounded connection of #235 for every ordinary /broker read "+
+				"this service also serves.", 3*writeTimeout, writeTimeout)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("no SSE event received")
+	}
+}
+
 func TestConfig(t *testing.T) {
 	mux, _ := newHandler(t)
 	rec := get(t, mux, "/broker/config", "acme")

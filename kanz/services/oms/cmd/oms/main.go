@@ -21,6 +21,7 @@ import (
 	"github.com/eighred/kanz/internal/execution"
 	"github.com/eighred/kanz/internal/lifecycle"
 	"github.com/eighred/kanz/internal/marketdata/mark"
+	"github.com/eighred/kanz/internal/platform/httpserver"
 	"github.com/eighred/kanz/internal/version"
 	"github.com/prometheus/client_golang/prometheus"
 
@@ -75,11 +76,7 @@ func run() int {
 	}()
 
 	readiness := &server.Readiness{}
-	httpSrv := &http.Server{
-		Addr:              cfg.Listen,
-		Handler:           server.New(readiness, logger, server.WithMetrics(obs.MetricsHandler())),
-		ReadHeaderTimeout: 5 * time.Second,
-	}
+	httpSrv := httpserver.New(cfg.Listen, server.New(readiness, logger, server.WithMetrics(obs.MetricsHandler())), httpserver.Standard())
 
 	// Two independent things can turn fatal after startup has completed: the
 	// probes/metrics server dying, and runConsumers() surfacing a

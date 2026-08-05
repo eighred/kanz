@@ -20,6 +20,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/eighred/kanz/internal/platform/httpserver"
 	"github.com/eighred/kanz/internal/version"
 	"github.com/eighred/kanz/pkg/observability"
 	"github.com/eighred/kanz/services/{{.Name}}/internal/config"
@@ -56,11 +57,13 @@ func main() {
 	}()
 
 	readiness := &server.Readiness{}
-	httpSrv := &http.Server{
-		Addr:              cfg.Listen,
-		Handler:           server.New(readiness, logger, server.WithMetrics(obs.MetricsHandler())),
-		ReadHeaderTimeout: 5 * time.Second,
-	}
+	// The estate's connection bounds, in one place. This scaffold is how the
+	// twenty-seventh copy of a partial http.Server literal would be born — the
+	// previous twenty-six each set ReadHeaderTimeout and nothing else, which left
+	// the connection itself unbounded (#235). It writes none;
+	// test/arch/http_server_timeouts_test.go rejects one anywhere outside
+	// internal/platform/httpserver, and reads this template to keep it that way.
+	httpSrv := httpserver.New(cfg.Listen, server.New(readiness, logger, server.WithMetrics(obs.MetricsHandler())), httpserver.Standard())
 	go func() {
 		logger.Info("{{.Name}} listening", "addr", cfg.Listen)
 		if err := httpSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {

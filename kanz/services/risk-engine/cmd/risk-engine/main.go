@@ -25,6 +25,7 @@ import (
 	"github.com/eighred/kanz/internal/marketdata/returns"
 	mdstore "github.com/eighred/kanz/internal/marketdata/store"
 	"github.com/eighred/kanz/internal/pg"
+	"github.com/eighred/kanz/internal/platform/httpserver"
 	"github.com/eighred/kanz/internal/prediction"
 	risk "github.com/eighred/kanz/internal/risk"
 	"github.com/eighred/kanz/internal/risk/compute"
@@ -94,11 +95,7 @@ func run() int {
 	}()
 
 	readiness := &server.Readiness{}
-	httpSrv := &http.Server{
-		Addr:              cfg.Listen,
-		Handler:           server.New(readiness, logger, server.WithMetrics(obs.MetricsHandler())),
-		ReadHeaderTimeout: 5 * time.Second,
-	}
+	httpSrv := httpserver.New(cfg.Listen, server.New(readiness, logger, server.WithMetrics(obs.MetricsHandler())), httpserver.Standard())
 	go func() {
 		logger.Info("risk-engine listening", "addr", cfg.Listen)
 		if err := httpSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {

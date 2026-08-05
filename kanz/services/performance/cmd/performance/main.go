@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/eighred/kanz/internal/lifecycle"
+	"github.com/eighred/kanz/internal/platform/httpserver"
 	"github.com/eighred/kanz/internal/version"
 	"github.com/eighred/kanz/pkg/observability"
 	"github.com/eighred/kanz/services/performance/internal/config"
@@ -65,11 +66,7 @@ func run() int {
 	}()
 
 	readiness := &server.Readiness{}
-	httpSrv := &http.Server{
-		Addr:              cfg.Listen,
-		Handler:           server.New(readiness, logger, server.WithMetrics(obs.MetricsHandler())),
-		ReadHeaderTimeout: 5 * time.Second,
-	}
+	httpSrv := httpserver.New(cfg.Listen, server.New(readiness, logger, server.WithMetrics(obs.MetricsHandler())), httpserver.Standard())
 	go func() {
 		logger.Info("performance listening", "addr", cfg.Listen)
 		if err := httpSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {

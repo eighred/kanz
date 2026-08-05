@@ -30,6 +30,7 @@ import (
 	querypb "github.com/eighred/kanz/kanz-schemas-go/query/v1"
 
 	"github.com/eighred/kanz/internal/lifecycle"
+	"github.com/eighred/kanz/internal/platform/httpserver"
 	"github.com/eighred/kanz/internal/version"
 	"github.com/eighred/kanz/pkg/auth"
 	"github.com/eighred/kanz/pkg/observability"
@@ -138,11 +139,7 @@ func run() int {
 	cp := agent.New(model, registry)
 
 	readiness := &server.Readiness{}
-	httpSrv := &http.Server{
-		Addr:              cfg.Listen,
-		Handler:           server.New(readiness, logger, cp, server.WithMetrics(obs.MetricsHandler())),
-		ReadHeaderTimeout: 5 * time.Second,
-	}
+	httpSrv := httpserver.New(cfg.Listen, server.New(readiness, logger, cp, server.WithMetrics(obs.MetricsHandler())), httpserver.Standard())
 	go func() {
 		logger.Info("copilot listening", "addr", cfg.Listen, "model", cfg.ModelID)
 		if err := httpSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {

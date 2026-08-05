@@ -139,6 +139,37 @@ func (h *Handler) stream(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "streaming unsupported", http.StatusInternalServerError)
 		return
 	}
+
+	// THIS IS THE ONE HANDLER IN THE ESTATE THAT LIFTS A SERVER TIMEOUT, AND
+	// WITHOUT IT THIS ENDPOINT IS BROKEN RATHER THAN SLOW.
+	//
+	// Every server is built by internal/platform/httpserver, which sets
+	// WriteTimeout (#235) — the bound that stops a wedged reader pinning a
+	// goroutine and a file descriptor forever. But WriteTimeout bounds the WHOLE
+	// response, and this response is unbounded by design: the Trading Terminal
+	// holds it open for the length of a trading session. Under the standard
+	// WriteTimeout this stream would be severed mid-session with no status, no
+	// body and nothing logged — and the Terminal would show a book that had simply
+	// stopped updating, which looks exactly like a quiet market.
+	//
+	// SetWriteDeadline(zero) clears it for THIS CONNECTION only; every other route
+	// on this server stays bounded. That is why the answer is not "leave
+	// WriteTimeout off tv-sync" — /broker/accounts and the rest are ordinary
+	// buffered reads and must keep the bound.
+	//
+	// Only the WRITE deadline. ReadTimeout does not reach a running handler (it
+	// bounds the request read; a handler that outlives it keeps a live context),
+	// measured in internal/platform/httpserver's tests, so clearing it here would
+	// be cargo cult. Cancellation still works: r.Context() below is cancelled when
+	// the client disconnects.
+	if err := http.NewResponseController(w).SetWriteDeadline(time.Time{}); err != nil {
+		// Refuse rather than open a stream that will be cut at WriteTimeout: a
+		// stream that dies silently mid-session is worse than one that never
+		// opened, because only the second one is reported.
+		http.Error(w, "streaming unsupported", http.StatusInternalServerError)
+		return
+	}
+
 	deltas, cancel := h.proj.Subscribe(tenant, accountID)
 	defer cancel()
 

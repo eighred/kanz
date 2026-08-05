@@ -15,6 +15,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/eighred/kanz/internal/lifecycle"
+	"github.com/eighred/kanz/internal/platform/httpserver"
 	"github.com/eighred/kanz/internal/version"
 	"github.com/eighred/kanz/pkg/observability"
 	"github.com/eighred/kanz/services/schema-registry/internal/config"
@@ -85,11 +86,7 @@ func run() int {
 	root.Handle("GET /metrics", obs.MetricsHandler())
 	root.Handle("/", srv)
 
-	httpSrv := &http.Server{
-		Addr:              cfg.Listen,
-		Handler:           root,
-		ReadHeaderTimeout: 5 * time.Second,
-	}
+	httpSrv := httpserver.New(cfg.Listen, root, httpserver.Standard())
 
 	go func() {
 		logger.Info("schema-registry listening", "addr", cfg.Listen)

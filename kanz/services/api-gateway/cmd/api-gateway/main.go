@@ -26,6 +26,7 @@ import (
 	querypb "github.com/eighred/kanz/kanz-schemas-go/query/v1"
 
 	"github.com/eighred/kanz/internal/lifecycle"
+	"github.com/eighred/kanz/internal/platform/httpserver"
 	"github.com/eighred/kanz/internal/version"
 	"github.com/eighred/kanz/pkg/auth"
 	"github.com/eighred/kanz/pkg/bus"
@@ -77,6 +78,30 @@ const gatewayWriteTimeout = 105 * time.Second
 // 502s under no load at all — a harder fault to read than the leak this closes. 120s is
 // twice that default.
 const gatewayIdleTimeout = 120 * time.Second
+
+// THE POOLING SIDE OF THE SAME ORDERING, ON THE PROXY'S OUTBOUND CONNECTIONS.
+//
+// gatewayIdleTimeout decides when THIS server retires a connection nginx pooled to
+// it. proxyIdleConnTimeout is the mirror image one hop in: when the gateway retires
+// a connection IT pooled to wealth/datamaster/tv-sync/copilot. It must sit BELOW
+// those services' own IdleTimeout (httpserver.Standard().Idle, 120s), so the
+// gateway is the side that gives the connection up. Get it the wrong way round and
+// the upstream closes a socket the gateway is about to send on; net/http retries an
+// idempotent request over a fresh connection, so it does not usually surface as an
+// error — it surfaces as latency nobody can attribute, and on a non-idempotent
+// request as a 502 under no load at all.
+//
+// Left at zero — which is what a bare &http.Transport{} means, and what the mTLS
+// branch used to build — an idle connection is NEVER retired, so this ordering has
+// no chance to hold.
+const proxyIdleConnTimeout = 90 * time.Second
+
+// http.DefaultTransport allows 2 idle connections PER HOST. This gateway fans out
+// to four upstreams and is the only ingress for the estate, so on any real read
+// burst the third concurrent request to a service paid for a fresh TCP handshake
+// and, on the mesh, a fresh mTLS handshake — a cost chosen by a standard-library
+// default rather than by anyone here.
+const proxyMaxIdleConnsPerHost = 32
 
 func main() {
 	// The lifecycle lives in run() because os.Exit skips defers: every defer
@@ -167,13 +192,18 @@ func run() int {
 	if err != nil {
 		return 2
 	}
-	srv := &http.Server{
-		Addr:              cfg.Listen,
-		Handler:           router,
-		ReadHeaderTimeout: 5 * time.Second,
-		WriteTimeout:      gatewayWriteTimeout,
-		IdleTimeout:       gatewayIdleTimeout,
-	}
+	// The only server in the estate that overrides the standard bounds, because it
+	// is the only one with an ingress in front of it and per-route budgets of its
+	// own. The two it inherits are deliberate: ReadHeader is the estate slowloris
+	// bound, and Read bounds a slow SENDER only — it does not reach a running
+	// handler, so it is not a hidden cap on the 90s /v1/ask budget.
+	std := httpserver.Standard()
+	srv := httpserver.New(cfg.Listen, router, httpserver.Timeouts{
+		ReadHeader: std.ReadHeader,
+		Read:       std.Read,
+		Write:      gatewayWriteTimeout,
+		Idle:       gatewayIdleTimeout,
+	})
 
 	// The serve loop is the only thing that can die AFTER startup has completed
 	// (rule 6, #266): lifecycle.Fatal lets the goroutine that observes the
@@ -261,30 +291,53 @@ func buildProxy(ctx context.Context, cfg config.Config, logger *slog.Logger) (*p
 		return proxy.New(nil), nil
 	}
 
-	client := http.DefaultClient
+	// ONE CLIENT, BUILT THE SAME WAY ON BOTH BRANCHES; ONLY THE TLS DIFFERS.
+	//
+	// The plaintext branch used to be `client := http.DefaultClient`, and that was
+	// wrong for two reasons that outlived the timeout it was filed for (#235).
+	// http.DefaultClient is a SHARED MUTABLE GLOBAL: any package linked into this
+	// binary that sets DefaultClient.Timeout or swaps DefaultTransport silently
+	// retunes every proxied read, from somewhere no reader of this file would look.
+	// And it carries http.DefaultTransport, whose MaxIdleConnsPerHost is 2 — for a
+	// gateway fanning out to four upstreams that is connection churn on the hot
+	// read path, chosen by nobody.
+	//
+	// NO Timeout FIELD ON EITHER BRANCH, DELIBERATELY — it used to carry 30s and that
+	// was a bug of the exact kind the TUI already paid for. http.Client.Timeout is
+	// enforced independently of the request context, so it was a SECOND bound on the
+	// same call and min(context, 30s) won invisibly: it capped /v1/ask at 30s
+	// underneath the copilot's own five-minute completion budget, and it applied only
+	// on the mTLS path, so dev and production were bounded differently for reasons
+	// nothing stated. The one bound lives on the call (proxy.forwardBudget), where the
+	// route that needs a different budget can say so and a test can read it.
+	// test/arch/probe_deadline_nesting_test.go fails the build if it comes back.
+	tr := &http.Transport{
+		MaxIdleConnsPerHost: proxyMaxIdleConnsPerHost,
+		IdleConnTimeout:     proxyIdleConnTimeout,
+	}
 	if cfg.SPIFFESocket != "" {
 		src, err := transport.NewSource(ctx, cfg.SPIFFESocket)
 		if err != nil {
 			logger.Error("api-gateway: proxy SPIFFE source failed", "err", err)
 			return nil, err
 		}
-		// NO Timeout FIELD, DELIBERATELY — it used to carry 30s and that was a bug of
-		// the exact kind the TUI already paid for. http.Client.Timeout is enforced
-		// independently of the request context, so it was a SECOND bound on the same
-		// call and min(context, 30s) won invisibly: it capped /v1/ask at 30s underneath
-		// the copilot's own five-minute completion budget, and it applied only on the
-		// mTLS path, so dev and production were bounded differently for reasons nothing
-		// stated. The one bound now lives on the call (proxy.forwardBudget), where the
-		// route that needs a different budget can say so and a test can read it.
-		// test/arch/probe_deadline_nesting_test.go fails the build if it comes back.
-		client = &http.Client{
-			Transport: &http.Transport{TLSClientConfig: transport.ClientTLSConfig(src, transport.AuthorizeMesh())},
-		}
+		tr.TLSClientConfig = transport.ClientTLSConfig(src, transport.AuthorizeMesh())
 		logger.Info("api-gateway: Phase-7 upstreams mTLS enabled", "services", len(bases))
 	} else {
+		// NOT A REFUSAL TO START, AND THAT IS A CHOICE — see #98.
+		//
+		// "Fail loudly" is about a misconfiguration that LOOKS HEALTHY. This one does
+		// not: it warns on every boot, and since the per-call budgets landed both
+		// branches carry identical bounds, so the asymmetry that made the plaintext
+		// path the dangerous one ("dev and production bounded differently, and dev
+		// could hang forever") no longer exists. What remains is a SECURITY posture
+		// difference — no mesh authentication — and that is #98's question, decided
+		// for the estate rather than re-decided here. Refusing here would also take
+		// out the only environment this gateway can currently be run in end to end:
+		// the dev kind rig has no SPIRE.
 		logger.Warn("api-gateway: Phase-7 upstreams plaintext (no API_GATEWAY_SPIFFE_SOCKET)")
 	}
-	return proxy.New(proxy.NewMeshBackend(bases, client)), nil
+	return proxy.New(proxy.NewMeshBackend(bases, &http.Client{Transport: tr})), nil
 }
 
 // buildRouter wires the public probes/metrics/openapi (un-gated) and the /v1
