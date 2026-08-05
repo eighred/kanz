@@ -40,18 +40,45 @@
 #      --disable-eviction, or scale the workload to 0 for the window and back to
 #      1 after — an operator decision, taken awake.
 #
-# 2. HOW LONG THE POD NEEDS TO STOP. terminationGracePeriodSeconds: 45 on every
+# 2. HOW LONG THE POD NEEDS TO STOP. terminationGracePeriodSeconds: 60 on every
 #    workload, and it is derived, not copied from a blog post. A kanz service's
-#    shutdown path runs SEQUENTIALLY after SIGTERM:
-#        bus drain   7s   DrainGrace 5s + drainStopSlack 2s (pkg/bus/nats.go:22,30)
-#        HTTP        15s  httpSrv.Shutdown budget in every services/*/cmd/*/main.go
-#        OTLP flush  5s   the deferred obs.Shutdown
-#        --------------
-#        worst case  27s
-#    Kubernetes' default is 30, which leaves three seconds — and a SIGKILL at the
-#    27-second mark lands mid-drain, i.e. it abandons exactly the in-flight events
-#    the drain exists to finish. 45 covers the budget with room for a preStop hook
-#    if one is ever added, and matches infra/nats/nats.yaml:184.
+#    shutdown path runs SEQUENTIALLY after SIGTERM, and the terms are:
+#        bus drain    DrainGrace + drainStopSlack (pkg/bus/nats.go), estate-wide
+#        HTTP         the httpSrv.Shutdown budget in services/*/cmd/*/main.go
+#        OTLP flush   the deferred obs.Shutdown in the same main
+#        + whatever a main reaches THROUGH a package it calls — for risk-engine,
+#          internal/app/lifecycle.go's DefaultShutdownTimeout, which bounds the
+#          entire ordered drain including the checkpoint
+#    THE TOTAL IS NOT WRITTEN HERE ON PURPOSE. It was, and it said 27 for months
+#    after the real figure had grown — first to 37 when #233 added the consumer
+#    join, then to 47 once #264 made the guard see risk-engine's lifecycle at all,
+#    which is 2s PAST the 45 this file used to mandate. A number restated in
+#    twenty-four manifests and one paragraph is a number that will be wrong in
+#    twenty-five places. test/arch/pod_disruption_and_drain_test.go recomputes it
+#    from the source on every run and fails the build when a manifest no longer
+#    covers it; run that test to see today's figure.
+#
+#    60 rather than the derived floor exactly: the grace period is a DEADLINE, not
+#    a sleep — a pod that finishes draining in 3s terminates in 3s — so headroom
+#    costs nothing on a healthy drain and buys the next timeout change without a
+#    twenty-four-file edit. The same guard bounds it from above at 90, past which
+#    a routine node upgrade stops being routine. (infra/nats/nats.yaml:184 is
+#    still 45; NATS is outside infra/deploy and drains on its own terms.)
+#
+#    The derived floor is an UPPER BOUND, not a measurement. The bus term is added
+#    to every service, including the two shapes that already contain it inside a
+#    larger watchdog — risk-engine's drain and accounting/wealth/alternatives'
+#    consumer join — so the strict wall-clock worst case is ~7s below the figure
+#    the guard reports. That conservatism is deliberate and stays: proving the bus
+#    drain is subsumed requires reasoning about concurrency in twenty-six mains,
+#    and an over-stated floor costs headroom while an under-stated one costs a
+#    truncated drain.
+#
+#    Raising the grace, rather than shortening a timeout, is the deliberate call
+#    for the workload that drives the floor. risk-engine's largest term is the
+#    drain watchdog, and what it is spending that time on is the checkpoint —
+#    cutting it to fit a manifest self-inflicts precisely the abandoned checkpoint
+#    the grace period exists to prevent.
 #
 #    NO preStop HOOK IS SET, deliberately. A preStop sleep would close a DIFFERENT
 #    hole (kube-proxy still routing to a pod that has already stopped accepting),

@@ -146,7 +146,7 @@ spec:
         seccompProfile:
           type: RuntimeDefault
       serviceAccountName: oms-acme
-      terminationGracePeriodSeconds: 45
+      terminationGracePeriodSeconds: 60
       topologySpreadConstraints:
         - labelSelector:
             matchLabels:

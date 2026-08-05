@@ -66,10 +66,10 @@ spec:
         prometheus.io/scrape: "true"
         prometheus.io/port: "8091"
     spec:
-      # 45s, matching the estate (availability.yaml). This pod's own shutdown is
-      # short, but it is the thing that PERFORMS drains: SIGKILLing it mid-eviction
-      # leaves a half-drained node and no controller to finish or report it.
-      terminationGracePeriodSeconds: 45
+      # Matching the estate (availability.yaml). This pod's own shutdown is short,
+      # but it is the thing that PERFORMS drains: SIGKILLing it mid-eviction leaves
+      # a half-drained node and no controller to finish or report it.
+      terminationGracePeriodSeconds: 60
       serviceAccountName: operator
       # PINNED TO THE CONTROL PLANE — DO NOT REMOVE THIS TO "LET THE OPERATOR
       # SCHEDULE ANYWHERE" (OPS-M2e). Removing it deadlocks node drains.

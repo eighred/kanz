@@ -280,15 +280,15 @@ func run() int {
 // budget while the process still spends it, and nothing would say so.
 //
 // 10s against a 7s bus drain: enough headroom for the drain plus the consumer's
-// own teardown, short enough that 5s (obs flush) + 15s (HTTP) + 10s here stays
-// inside the 45s terminationGracePeriodSeconds every deploy manifest sets. When
-// it expires we close anyway and say so loudly — a handler that ignores context
-// cancellation must not hold the pod until the kubelet SIGKILLs it, which would
-// abandon strictly more than this timeout does.
+// own teardown, short enough to stay inside the grace period the manifests set.
+// That grace period is NOT quoted here — the version of this line that quoted
+// 45s was already wrong (#264), and the arch guard is where it is computed. When
+// the budget expires we close anyway and say so loudly: a handler that ignores
+// context cancellation must not hold the pod until the kubelet SIGKILLs it.
 //
 // Copied, not shared: services/risk-engine/internal/app/lifecycle.go is the
-// reference implementation of this ordering and the right home for it once it
-// is promoted to a package all three composition roots can import.
+// reference implementation and the right home for this once promoted — the day
+// it moves, TestNoUndeclaredShutdownBudgetReachableFromAMain keeps it counted.
 func awaitConsumers(consumers *sync.WaitGroup, logger *slog.Logger) {
 	joinCtx, joinCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer joinCancel()
