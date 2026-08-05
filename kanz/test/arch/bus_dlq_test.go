@@ -445,7 +445,7 @@ var retryCertifiedConsumers = map[string]string{
 		"No read-then-decide gap exists for a retry to land in; it either redoes an " +
 		"uncommitted write or no-ops an already-committed one.",
 
-	"services/accounting/cmd/accounting/main.go:435": "accounting (live FX): the sole handler is " +
+	"services/accounting/cmd/accounting/main.go:455": "accounting (live FX): the sole handler is " +
 		"fxfeed.LiveFX.Handler (services/accounting/internal/fxfeed/fxfeed.go:65) — an " +
 		"unconditional last-value cache write with no dedup branch at all. Re-running it " +
 		"with the same quote sets the same rate; there is nothing to skip.",

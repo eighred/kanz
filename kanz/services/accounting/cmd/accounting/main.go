@@ -369,6 +369,26 @@ func runConsumer(ctx context.Context, cfg config.Config, store ledger.Store, mes
 	return firstErr
 }
 
+// cashProducerConfig is the producer identity the cash-movement publisher runs
+// under. It is split out of buildCashPublisher, which cannot be unit-tested
+// because it dials a broker first (#245).
+//
+// TENANT IS NOT OPTIONAL HERE, AND ITS ABSENCE IS NOT A DEGRADED MODE (MT-01b).
+// A cash movement is raised by an HTTP request — POST /portfolios/{id}/cash —
+// not by an inbound bus delivery, so there is no ctx tenant for the producer to
+// inherit and this fallback is the ONLY source of one. Configured without it,
+// bus.Validate refused EVERY subscription, redemption and fee with "tenant_id
+// required": the endpoint answered 400, the service stayed ready, and the
+// ledger's non-trade cash inputs never reached NAV. market-ingest's composition
+// root carries the same note for the same reason; the OMS crash-looped on it.
+func cashProducerConfig(cfg config.Config) bus.ProducerConfig {
+	return bus.ProducerConfig{
+		Source:          cfg.Source,
+		ProducerVersion: version.String(),
+		Tenant:          cfg.Tenant,
+	}
+}
+
 // buildCashPublisher dials a producer connection and builds the WIRE-01f
 // cash-movement publisher. It returns a close func for the producer client.
 func buildCashPublisher(ctx context.Context, cfg config.Config, mesh *transport.Mesh) (*cashmove.Publisher, func(), error) {
@@ -376,7 +396,7 @@ func buildCashPublisher(ctx context.Context, cfg config.Config, mesh *transport.
 	if err != nil {
 		return nil, nil, err
 	}
-	producer, err := bus.NewProducer(client, bus.ProducerConfig{Source: cfg.Source, ProducerVersion: version.String()})
+	producer, err := bus.NewProducer(client, cashProducerConfig(cfg))
 	if err != nil {
 		_ = client.Close()
 		return nil, nil, err

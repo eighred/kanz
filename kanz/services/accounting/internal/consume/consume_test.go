@@ -19,7 +19,14 @@ import (
 // testTenant is the tenant these folders serve. It is the SYSTEM tenant, so
 // RequireTenantScope's shared-bucket branch applies and these tests exercise the
 // folding logic exactly as they did before #223. The cross-tenant refusal itself
-// is proven in cross_tenant_test.go, which uses a real tenant.
+// is proven in spine_integration_test.go, which uses a real tenant.
+//
+// THAT POINTER USED TO NAME cross_tenant_test.go, AND NO SUCH FILE EXISTED (#245).
+// It described an intention, not the tree — so every fold test in this package
+// ran under __system__, whose shared-bucket branch returns nil before any tenant
+// comparison happens, and the guard the comment pointed at had no test at all.
+// A comment that vouches for coverage elsewhere is only as good as the file it
+// names; check before trusting the next one.
 const testTenant = "__system__"
 
 func decv(coef int64, exp int32) *commonpb.Decimal {
