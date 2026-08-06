@@ -308,10 +308,7 @@ var barePoolExempt = map[string]string{
 		"only line in the module that calls pgxpool.NewWithConfig.",
 }
 
-var (
-	barePoolCall = regexp.MustCompile(`pgxpool\.New(WithConfig)?\(`)
-	pgPoolCall   = regexp.MustCompile(`pg\.New(TenantPool|GlobalPool|MigrationPool)\(`)
-)
+var barePoolCall = regexp.MustCompile(`pgxpool\.New(WithConfig)?\(`)
 
 // barePoolConstructions returns every non-test .go file in the module that
 // constructs a pgxpool directly, keyed by module-relative slash path.
