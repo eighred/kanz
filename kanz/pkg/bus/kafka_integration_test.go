@@ -11,6 +11,7 @@ import (
 
 	"github.com/segmentio/kafka-go"
 
+	"github.com/eighred/kanz/internal/kafkatest"
 	"github.com/eighred/kanz/pkg/bus"
 )
 
@@ -26,20 +27,11 @@ func TestKafkaPublishSubscribe(t *testing.T) {
 	group := "test-consumer-" + suffix
 
 	// Out-of-band topic provisioning. In production topics are created by
-	// kanz/infra/kafka/topics-job.yaml; auto-create is disabled.
-	setupConn, err := kafka.Dial("tcp", brokers[0])
-	if err != nil {
-		t.Fatalf("setup dial: %v", err)
+	// kanz/infra/kafka/topics-job.yaml; auto-create is disabled, so the create
+	// must also be WAITED ON — see internal/kafkatest (#311).
+	if err := kafkatest.CreateTopic(context.Background(), brokers, topic, 1); err != nil {
+		t.Fatalf("setup: %v", err)
 	}
-	if err := setupConn.CreateTopics(kafka.TopicConfig{
-		Topic:             topic,
-		NumPartitions:     1,
-		ReplicationFactor: 1,
-	}); err != nil {
-		setupConn.Close()
-		t.Fatalf("create topic: %v", err)
-	}
-	setupConn.Close()
 	t.Cleanup(func() {
 		c, err := kafka.Dial("tcp", brokers[0])
 		if err != nil {
