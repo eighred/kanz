@@ -167,29 +167,12 @@ func dockerfileFroms(t *testing.T, root string) []dockerfileFrom {
 	t.Helper()
 
 	var out []dockerfileFrom
-	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		if d.IsDir() {
-			switch d.Name() {
-			case ".git", "vendor", "node_modules", ".gotmp", "gen":
-				return filepath.SkipDir
-			}
-			return nil
-		}
-		if !strings.HasPrefix(d.Name(), "Dockerfile") {
-			return nil
-		}
-
-		b, rerr := os.ReadFile(path)
+	for _, df := range dockerfilePaths(t, root) {
+		b, rerr := os.ReadFile(df.abs)
 		if rerr != nil {
-			return rerr
+			t.Fatalf("read %s: %v", df.abs, rerr)
 		}
-		rel, rerr := filepath.Rel(root, path)
-		if rerr != nil {
-			return rerr
-		}
+		rel := df.rel
 
 		stages := map[string]bool{}
 		for i, line := range strings.Split(string(b), "\n") {
@@ -207,15 +190,77 @@ func dockerfileFroms(t *testing.T, root string) []dockerfileFrom {
 				continue // a stage reference, not an image
 			}
 			out = append(out, dockerfileFrom{
-				file:  filepath.ToSlash(rel),
+				file:  rel,
 				line:  i + 1,
 				image: image,
 			})
 		}
+	}
+	return out
+}
+
+// dockerfileRef is one Dockerfile the walk found: its absolute path, and its
+// path relative to the walk root in forward slashes (the form every failure
+// message and every exemption key uses).
+type dockerfileRef struct {
+	abs string
+	rel string
+}
+
+// dockerfilePaths is THE walk for "every Dockerfile in this repository",
+// shared by the FROM guard above and the pip-install guard in
+// python_dependency_pinning_test.go. One walk, not two: the set of files a
+// Dockerfile guard is allowed to be blind to is itself an invariant, and two
+// copies of it drift the moment one of them learns about a directory the other
+// does not.
+//
+// SKIP NESTED CHECKOUTS. A git worktree carries its own copy of every
+// Dockerfile, so a recursive walk from the repo root reads OTHER checkouts'
+// copies as if they were ours and reports failures against paths this branch
+// cannot fix — agent worktrees under .claude/ already did exactly this to
+// TestEveryWorkflowGoTestIsSerialised, which is why workflowFiles() skips them.
+// The Dockerfile walk inherited none of that: it predates the pip-install
+// guard, and it survived only because every worktree's FROM lines happened to
+// agree. A guard that fires on whether a sibling worktree has been rebased is
+// noise, and it would have been red locally and green in CI — the shape that
+// teaches people to ignore a guard.
+//
+// Keyed on the presence of a .git entry (a worktree's is a FILE pointing at the
+// parent, not a directory), so any nested checkout is excluded, not just
+// today's tooling.
+func dockerfilePaths(t *testing.T, root string) []dockerfileRef {
+	t.Helper()
+
+	var out []dockerfileRef
+	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			switch d.Name() {
+			case ".git", "vendor", "node_modules", ".gotmp", "gen":
+				return filepath.SkipDir
+			}
+			if path != root {
+				if _, serr := os.Stat(filepath.Join(path, ".git")); serr == nil {
+					return filepath.SkipDir
+				}
+			}
+			return nil
+		}
+		if !strings.HasPrefix(d.Name(), "Dockerfile") {
+			return nil
+		}
+		rel, rerr := filepath.Rel(root, path)
+		if rerr != nil {
+			return rerr
+		}
+		out = append(out, dockerfileRef{abs: path, rel: filepath.ToSlash(rel)})
 		return nil
 	})
 	if err != nil {
 		t.Fatalf("walk %s: %v", root, err)
 	}
+	sort.Slice(out, func(i, j int) bool { return out[i].rel < out[j].rel })
 	return out
 }
