@@ -225,9 +225,8 @@ var factPublishersWithoutARealProducer = map[string]string{
 	// publish_test.go. #245.
 
 	// Capital-path services whose only proof is an Event-level double.
-	"internal/marketedge/ingest":      "capture double accepts any Event (engine_test.go:32). #245",
-	"services/oms/internal/outbox":    "relay recorder accepts any Event (relay_test.go:46); the outbox records it drains are built in services/oms/internal/order. #245",
-	"services/venue-okx/internal/okx": "okxCapture accepts anything; same. #245",
+	"internal/marketedge/ingest":   "capture double accepts any Event (engine_test.go:32). #245",
+	"services/oms/internal/outbox": "relay recorder accepts any Event (relay_test.go:46); the outbox records it drains are built in services/oms/internal/order. #245",
 
 	// Load generators. Listed rather than excluded by path: a load tool that
 	// cannot publish measures nothing, and silently skipping test/ would also
