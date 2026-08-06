@@ -173,6 +173,42 @@ func TestTheShippedProfilesReachTheServer(t *testing.T) {
 		t.Logf("%s: MaxConns=%d, %v", tc.what, pool.Config().MaxConns, tc.wants)
 		pool.Close()
 	}
+
+	// THE CONTRAST, AND WHY #228's OWN ACCEPTANCE COMMAND CANNOT SHOW ANY OF THIS.
+	//
+	// That issue's Verified-when is:
+	//
+	//	psql "$TEST_POSTGRES_URL" -c "show statement_timeout"   # today: 0
+	//
+	// It was correct as EVIDENCE — it is how the gap was found — and it can never
+	// serve as PROOF. prepare() sets these GUCs as startup-packet RuntimeParams on
+	// the connections THIS PACKAGE opens, so psql, which opens its own, reports the
+	// server default forever: 0 before the fix, 0 after it, 0 if the fix were
+	// reverted this afternoon. Someone re-running it later and reading that 0 as a
+	// regression is the predictable mistake, so the contrast is pinned here rather
+	// than left as a comment somewhere.
+	//
+	// It also guards a real move: if these bounds were ever relocated to the server
+	// or the role, every assertion above would still pass while the mechanism under
+	// test had been replaced. This is the assertion that would fail.
+	bare, err := pgx.Connect(ctx, d)
+	if err != nil {
+		t.Fatalf("open a bare connection: %v", err)
+	}
+	defer func() { _ = bare.Close(ctx) }()
+
+	var bareSetting, bareSource string
+	if err := bare.QueryRow(ctx,
+		"SELECT setting, source FROM pg_settings WHERE name = 'statement_timeout'").
+		Scan(&bareSetting, &bareSource); err != nil {
+		t.Fatalf("read statement_timeout on a bare connection: %v", err)
+	}
+	if bareSource == "client" {
+		t.Errorf("a bare pgx.Connect to the same DSN carries statement_timeout=%s from the client. "+
+			"The bound has moved off internal/pg — to the server or the role — so the profiles above "+
+			"are no longer what puts it there, and this test is measuring something else",
+			bareSetting)
+	}
 }
 
 // AN EXHAUSTED POOL IS BOUNDED, AND THE ESTATE CAN SEE WHOSE IT IS.
