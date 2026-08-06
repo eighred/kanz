@@ -395,6 +395,54 @@ func (c *NATSClient) Pending(ctx context.Context, subject, group string) (int64,
 	return int64(info.NumPending), nil
 }
 
+// ConsumerActive reports whether anything is currently CONSUMING the durable for
+// (subject, group) — as distinct from Pending, which reports how much is waiting
+// for it. A stopped subscriber still has a durable with a backlog, so depth
+// cannot answer "is it running" and the two questions need different calls.
+//
+// IT EXISTS FOR THE ARCHIVER DRAIN (#285 item 3), AND THE INVARIANT IT PROTECTS
+// IS ORDERING. services/archiver is a SINGLE WRITER by deployment (one replica,
+// Recreate not RollingUpdate) because two producers can invert per-key order in
+// Kafka, and a reordered log rebuilds a different book downstream — a subtler
+// failure than losing it. archiver-drain re-produces parked events to those same
+// topics, so it is a second writer unless the first one is stopped, and it
+// REFUSES on a true answer here rather than trusting an operator flag that can be
+// wrong while looking right.
+//
+// THE SIGNAL IS NumWaiting/NumAckPending, NOT A CONNECTION COUNT. Subscribe binds
+// with cons.Consume, a pull consumer whose fetch loop keeps pull requests
+// outstanding for as long as it runs; NumAckPending covers the moment between a
+// delivery and its ack. Together they mean "this durable is being worked".
+//
+// TWO HONEST LIMITS, both of which fail toward refusing rather than proceeding:
+//
+//   - Pull requests EXPIRE rather than vanishing, so for a short window after a
+//     subscriber stops this still reports true. The drain then refuses and the
+//     operator runs it again — a delay, not a corrupted log.
+//   - A subscriber wedged with no outstanding pulls and nothing unacked reads as
+//     inactive. That is the correct answer for this caller's purpose: such a
+//     process is not producing to Kafka either, so it cannot invert anything.
+//
+// Like Pending, it looks up the EXISTING consumer and errors if there is none,
+// rather than conjuring one. An error means the broker did not answer — NOT that
+// the consumer is idle — so a caller gating a destructive action must treat the
+// error as "unknown" and refuse, never as false.
+func (c *NATSClient) ConsumerActive(ctx context.Context, subject, group string) (bool, error) {
+	stream, err := c.js.StreamNameBySubject(ctx, subject)
+	if err != nil {
+		return false, fmt.Errorf("nats: stream for subject %q: %w", subject, err)
+	}
+	cons, err := c.js.Consumer(ctx, stream, durableName(group, subject))
+	if err != nil {
+		return false, fmt.Errorf("nats: consumer %q on stream %q: %w", durableName(group, subject), stream, err)
+	}
+	info, err := cons.Info(ctx)
+	if err != nil {
+		return false, fmt.Errorf("nats: consumer info for %q: %w", durableName(group, subject), err)
+	}
+	return info.NumWaiting > 0 || info.NumAckPending > 0, nil
+}
+
 // BacklogKind reports that this transport's backlog lands in
 // kanz_bus_pending_messages. See backlog.go.
 func (c *NATSClient) BacklogKind() BacklogKind { return BacklogPending }
