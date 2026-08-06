@@ -21,6 +21,7 @@ import (
 
 	envelopepb "github.com/eighred/kanz/kanz-schemas-go/envelope/v1"
 
+	"github.com/eighred/kanz/internal/kafkatest"
 	"github.com/eighred/kanz/pkg/bus"
 )
 
@@ -183,15 +184,11 @@ func TestBacklogPollerReportsKafkaLag(t *testing.T) {
 	topic := "test.backlog." + suffix
 	group := "backlog-" + suffix
 
-	setupConn, err := kafka.Dial("tcp", brokers[0])
-	if err != nil {
-		t.Fatalf("setup dial: %v", err)
+	// Created AND waited on: auto-create is off, so a produce that beats metadata
+	// fails UNKNOWN_TOPIC_OR_PARTITION (#311, internal/kafkatest).
+	if err := kafkatest.CreateTopic(context.Background(), brokers, topic, 1); err != nil {
+		t.Fatalf("setup: %v", err)
 	}
-	if err := setupConn.CreateTopics(kafka.TopicConfig{Topic: topic, NumPartitions: 1, ReplicationFactor: 1}); err != nil {
-		setupConn.Close()
-		t.Fatalf("create topic: %v", err)
-	}
-	setupConn.Close()
 	t.Cleanup(func() {
 		c, err := kafka.Dial("tcp", brokers[0])
 		if err != nil {

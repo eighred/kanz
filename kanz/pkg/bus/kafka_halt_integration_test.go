@@ -30,6 +30,7 @@ import (
 	"github.com/segmentio/kafka-go"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
+	"github.com/eighred/kanz/internal/kafkatest"
 	envelopepb "github.com/eighred/kanz/kanz-schemas-go/envelope/v1"
 	"github.com/eighred/kanz/pkg/bus"
 )
@@ -280,21 +281,20 @@ func TestIntegration_KafkaHandlerFailureWithDeadDLQKeepsTheMessageReachable(t *t
 // createProbeTopic provisions a scratch topic out of band and deletes it on
 // cleanup. Production topics come from kanz/infra/kafka/topics-job.yaml and
 // auto-create is disabled (KafkaConfig.AllowAutoTopicCreation=false).
+// createProbeTopic provisions a topic and does not return until it is writable.
+//
+// THE WAIT IS THE POINT (#311). This used to issue CreateTopics and return, but
+// the broker acknowledges the request and settles metadata asynchronously, so the
+// publish below raced it and failed UNKNOWN_TOPIC_OR_PARTITION — a red main with
+// no code defect, and an error that reads like the topic was never created.
+// Auto-creation is off on this broker deliberately, so waiting is the only
+// option. internal/kafkatest carries the condition and the measurements behind
+// it.
 func createProbeTopic(t *testing.T, brokers []string, topic string, partitions int) {
 	t.Helper()
-	conn, err := kafka.Dial("tcp", brokers[0])
-	if err != nil {
-		t.Fatalf("setup dial: %v", err)
+	if err := kafkatest.CreateTopic(context.Background(), brokers, topic, partitions); err != nil {
+		t.Fatalf("setup: %v", err)
 	}
-	if err := conn.CreateTopics(kafka.TopicConfig{
-		Topic:             topic,
-		NumPartitions:     partitions,
-		ReplicationFactor: 1,
-	}); err != nil {
-		conn.Close()
-		t.Fatalf("create topic %s: %v", topic, err)
-	}
-	conn.Close()
 	t.Cleanup(func() {
 		c, err := kafka.Dial("tcp", brokers[0])
 		if err != nil {
