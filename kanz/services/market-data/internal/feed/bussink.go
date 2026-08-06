@@ -26,8 +26,23 @@ import (
 // Partitioned (PARITY-05b) sinks decorate this without change: they are Sinks
 // wrapping a Sink, and this is the innermost one.
 type BusSink struct {
-	producer   *bus.Producer
+	producer   Publisher
 	assetClass string
+}
+
+// Publisher is the one method BusSink needs from a producer.
+//
+// It is an INTERFACE rather than *bus.Producer so that the feed's publishes can
+// be routed through bus.HealthPublisher, which counts consecutive failures and
+// is what feeds /readyz (#299). A concrete producer type here would have meant
+// the health wrapper could not sit in the path at all, and the readiness signal
+// would have had to be re-derived from something further out — which is how a
+// health check ends up watching a proxy for the thing it cares about instead of
+// the thing itself.
+//
+// *bus.Producer and *bus.HealthPublisher both satisfy it.
+type Publisher interface {
+	Publish(ctx context.Context, e bus.Event) error
 }
 
 const (
@@ -41,7 +56,7 @@ const (
 // segment of the emitted event_type (`market.<assetClass>.<variant>`, e.g.
 // "equity" → market.equity.trade) — an equity feed sets "equity", an FX feed
 // "fx"; empty defaults to "data". Errors when producer is nil.
-func NewBusSink(producer *bus.Producer, assetClass string) (*BusSink, error) {
+func NewBusSink(producer Publisher, assetClass string) (*BusSink, error) {
 	if producer == nil {
 		return nil, errors.New("feed: nil producer")
 	}
