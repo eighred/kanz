@@ -18,6 +18,7 @@ import (
 	"github.com/segmentio/kafka-go"
 	"google.golang.org/protobuf/proto"
 
+	"github.com/eighred/kanz/internal/kafkatest"
 	"github.com/eighred/kanz/pkg/bus"
 	"github.com/eighred/kanz/services/archiver/internal/archive"
 )
@@ -82,19 +83,14 @@ func setup(t *testing.T, partitions int) *harness {
 
 	// --- Kafka topic. Created out-of-band: auto-create is DISABLED, in production
 	// and in CI. Several partitions, or the ordering assertion is vacuous.
-	kconn, err := kafka.Dial("tcp", brokers[0])
-	if err != nil {
-		t.Fatalf("kafka dial: %v", err)
+	// Created AND WAITED ON. CreateTopics returns once the controller accepts the
+	// request; metadata and leader election settle asynchronously, so a produce
+	// that beats them fails UNKNOWN_TOPIC_OR_PARTITION — which reads like the
+	// topic was never created. #311 was that race in pkg/bus. internal/kafkatest
+	// carries the condition and the measurements.
+	if err := kafkatest.CreateTopic(context.Background(), brokers, h.topic, partitions); err != nil {
+		t.Fatalf("setup: %v", err)
 	}
-	if err := kconn.CreateTopics(kafka.TopicConfig{
-		Topic:             h.topic,
-		NumPartitions:     partitions,
-		ReplicationFactor: 1,
-	}); err != nil {
-		kconn.Close()
-		t.Fatalf("create topic: %v", err)
-	}
-	kconn.Close()
 	t.Cleanup(func() {
 		c, err := kafka.Dial("tcp", brokers[0])
 		if err != nil {

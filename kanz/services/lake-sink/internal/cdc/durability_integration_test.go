@@ -16,6 +16,7 @@ import (
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
+	"github.com/eighred/kanz/internal/kafkatest"
 	"github.com/eighred/kanz/pkg/bus"
 	"github.com/eighred/kanz/services/lake-sink/internal/cdc"
 	"github.com/eighred/kanz/services/lake-sink/internal/decode"
@@ -55,19 +56,11 @@ func TestCrash_UnflushedRowsAreLostAndOffsetsAreCommitted(t *testing.T) {
 	// Out-of-band topic provisioning: KAFKA_AUTO_CREATE_TOPICS_ENABLE=false in
 	// CI and production, same as pkg/bus/kafka_integration_test.go and
 	// services/archiver/internal/archive/archiver_integration_test.go.
-	conn, err := kafka.Dial("tcp", brokers[0])
-	if err != nil {
-		t.Fatalf("kafka dial: %v", err)
+	// Created AND WAITED ON — see internal/kafkatest (#311). A produce that beats
+	// topic metadata fails UNKNOWN_TOPIC_OR_PARTITION with auto-create off.
+	if err := kafkatest.CreateTopic(context.Background(), brokers, topic, 1); err != nil {
+		t.Fatalf("setup: %v", err)
 	}
-	if err := conn.CreateTopics(kafka.TopicConfig{
-		Topic:             topic,
-		NumPartitions:     1,
-		ReplicationFactor: 1,
-	}); err != nil {
-		conn.Close()
-		t.Fatalf("create topic: %v", err)
-	}
-	conn.Close()
 	t.Cleanup(func() {
 		c, err := kafka.Dial("tcp", brokers[0])
 		if err != nil {

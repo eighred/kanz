@@ -15,6 +15,8 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	envelopepb "github.com/eighred/kanz/kanz-schemas-go/envelope/v1"
+
+	"github.com/eighred/kanz/internal/kafkatest"
 	"github.com/eighred/kanz/tools/replay"
 )
 
@@ -30,19 +32,10 @@ func TestReaderRange(t *testing.T) {
 	brokers := strings.Split(raw, ",")
 
 	topic := fmt.Sprintf("test.replay.%d", time.Now().UnixNano())
-	conn, err := kafka.Dial("tcp", brokers[0])
-	if err != nil {
-		t.Fatalf("dial: %v", err)
+	// Created AND WAITED ON — see internal/kafkatest (#311).
+	if err := kafkatest.CreateTopic(context.Background(), brokers, topic, 2); err != nil {
+		t.Fatalf("setup: %v", err)
 	}
-	if err := conn.CreateTopics(kafka.TopicConfig{
-		Topic:             topic,
-		NumPartitions:     2,
-		ReplicationFactor: 1,
-	}); err != nil {
-		conn.Close()
-		t.Fatalf("create topic: %v", err)
-	}
-	conn.Close()
 	t.Cleanup(func() {
 		c, err := kafka.Dial("tcp", brokers[0])
 		if err != nil {
