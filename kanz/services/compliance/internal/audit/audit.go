@@ -68,11 +68,26 @@ var _ comp.DecisionRecorder = (*BusRecorder)(nil)
 func (r *BusRecorder) Record(ctx context.Context, rec comp.DecisionRecord) error {
 	log := BuildDecisionLog(rec)
 	err := r.b.Publish(ctx, bus.Event{
-		Subject:          SubjectDecision,
-		EventType:        DecisionEventType,
-		EventClass:       envelopepb.EventClass_EVENT_CLASS_OBSERVATION,
-		SchemaVersion:    1,
-		Domain:           DecisionDomain,
+		Subject:       SubjectDecision,
+		EventType:     DecisionEventType,
+		EventClass:    envelopepb.EventClass_EVENT_CLASS_OBSERVATION,
+		SchemaVersion: 1,
+		Domain:        DecisionDomain,
+		// THE EVALUATION'S OWN TIME, and it is REQUIRED — bus.Producer refuses a
+		// zero EventTime outright (producer.go: "Event.EventTime required"), with
+		// no default. This field was absent until #245, so EVERY compliance
+		// decision failed to publish and nothing recorded it: Record is
+		// best-effort by design, both enforcement points log the error and carry
+		// on, and a sink that fails every time looks exactly like a sink that is
+		// quiet. The audit trail was empty while trading continued and every
+		// probe stayed green.
+		//
+		// evaluated_at, never time.Now(): the audit store is queried by when a
+		// decision was MADE, so stamping publish time would make a delayed or
+		// replayed decision look current. compliance.proto marks it Required, so
+		// a zero here is an upstream defect — and it now surfaces as a refused
+		// publish rather than as a silently mis-stamped record.
+		EventTime:        rec.Result.GetEvaluatedAt().AsTime(),
 		PartitionKey:     rec.Result.GetPortfolioId(),
 		PayloadSchemaRef: "observation.v1.DecisionLog:1",
 		Payload:          log,
