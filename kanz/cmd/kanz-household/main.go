@@ -150,8 +150,34 @@ func run(args []string, out *os.File) error {
 		return err
 	}
 
-	if err := producer.Publish(ctx, bus.Event{
-		Subject:       subject,
+	if err := producer.Publish(ctx, householdEvent(opt, hv)); err != nil {
+		return fmt.Errorf("publish: %w", err)
+	}
+
+	fmt.Fprintf(out, "PUBLISHED — household %s valued as of %s, by %s: %s\n",
+		hv.GetHouseholdId(), hv.GetAsOf().AsTime().UTC().Format(time.RFC3339), opt.by, opt.reason)
+	fmt.Fprintln(out, "Every wealth consumer arms with it — including one that boots tomorrow.")
+	return nil
+}
+
+// householdEvent builds the envelope run publishes, EXTRACTED FROM run SO A TEST
+// CAN REACH IT (#245).
+//
+// run dials a broker before it constructs anything, so every field below was
+// unreachable without one — which is why this CLI's envelope had never been
+// through bus.Validate. Same seam, same reason as kanz-altevent's altEvent and
+// market-data's feedProducerConfig.
+//
+// THE STAKES ARE HIGHER HERE THAN FOR AN APPEND-ONLY SUBJECT. This stream is
+// COMPACTED to the last message per household, so a wrong PartitionKey does not
+// add a bad record beside the good ones — it REPLACES some household's current
+// stated worth, and there is nothing left to diff against afterwards.
+func householdEvent(opt options, hv *wealthpb.HouseholdValued) bus.Event {
+	return bus.Event{
+		// The subject is TENANT-PREFIXED and the event type is not: the subject
+		// is where the message lands, the type is what it is. They are the same
+		// string on most publishers here and deliberately different on this one.
+		Subject:       wealth.SubjectHouseholdFor(opt.tenant, hv.GetHouseholdId()),
 		EventType:     wealth.EventTypeHouseholdValued,
 		EventClass:    envelopepb.EventClass_EVENT_CLASS_FACT,
 		SchemaVersion: 1,
@@ -164,14 +190,7 @@ func run(args []string, out *os.File) error {
 		TenantID:         opt.tenant,
 		PayloadSchemaRef: "wealth.v1.HouseholdValued:1",
 		Payload:          hv,
-	}); err != nil {
-		return fmt.Errorf("publish: %w", err)
 	}
-
-	fmt.Fprintf(out, "PUBLISHED — household %s valued as of %s, by %s: %s\n",
-		hv.GetHouseholdId(), hv.GetAsOf().AsTime().UTC().Format(time.RFC3339), opt.by, opt.reason)
-	fmt.Fprintln(out, "Every wealth consumer arms with it — including one that boots tomorrow.")
-	return nil
 }
 
 func parseFlags(args []string) (options, error) {
