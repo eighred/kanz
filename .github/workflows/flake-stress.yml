@@ -57,6 +57,39 @@ jobs:
           go-version-file: kanz/go.mod
           cache-dependency-path: kanz/go.sum
 
+      - uses: bufbuild/buf-setup-action@a47c93e0b1648d5651a065437926377d060baa99 # v1
+        with:
+          version: 1.69.0
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install protoc plugins
+        run: |
+          go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.11
+          go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@v1.5.1
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+
+      # THE GENERATED SDK IS NOT IN THE REPOSITORY. kanz/go.mod `replace`s
+      # github.com/eighred/kanz/kanz-schemas-go with ../kanz-schemas/gen/go, so
+      # without this step every package fails to load before a single test runs:
+      #
+      #   pkg/bus/command.go:11:2: replacement directory ../kanz-schemas/gen/go
+      #   does not exist
+      #
+      # The first version of this workflow omitted it and died exactly there.
+      # Kept IDENTICAL to kanz-ci's step rather than minimised, including the
+      # `go mod edit -go=` pin: `go mod init` would otherwise stamp the runner's
+      # toolchain, and because kanz `replace`s this module that silently rewrites
+      # kanz/go.mod's `go` line mid-run. That failure looked like a phantom once
+      # already; it is not worth rediscovering here.
+      - name: Generate kanz-schemas Go SDK
+        working-directory: kanz-schemas
+        run: |
+          buf generate
+          cd gen/go
+          go mod init github.com/eighred/kanz/kanz-schemas-go || true
+          go mod edit -go="$(awk '/^go [0-9]/{print $2; exit}' ../../../kanz/go.mod)"
+          go mod tidy
+
       # The same broker kanz-ci starts, with the same settings — including
       # KAFKA_AUTO_CREATE_TOPICS_ENABLE=false. Auto-creation would paper over the
       # exact race this workflow exists to hunt: a produce that beats topic
