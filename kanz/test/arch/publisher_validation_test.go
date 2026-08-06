@@ -217,11 +217,12 @@ var provenByRealBrokerTest = map[string]integrationProof{
 }
 
 var factPublishersWithoutARealProducer = map[string]string{
-	// Operator CLIs. One left. kanz-halt was never really here — see
-	// provenByRealBrokerTest; its entry described the scan's blind spot rather
-	// than the module. kanz-altevent's envelope is now pinned Tier-B in
-	// cmd/kanz-altevent/publish_test.go. #245.
-	"cmd/kanz-household": "household CLI: no producer test. #245",
+	// NO OPERATOR CLI IS LISTED ANY MORE, and the group is kept as a heading
+	// rather than deleted so the next control-plane CLI lands under it with the
+	// bar already visible. kanz-halt was never really here (see
+	// provenByRealBrokerTest — its entry described the scan's blind spot);
+	// kanz-altevent and kanz-household are pinned Tier-B in their own
+	// publish_test.go. #245.
 
 	// Capital-path services whose only proof is an Event-level double.
 	"internal/marketedge/ingest":              "capture double accepts any Event (engine_test.go:32). #245",
