@@ -156,11 +156,25 @@ func TestEveryFactPublisherProvesOneEnvelope(t *testing.T) {
 // module-relative package directory. Every package that builds a bus.Event is
 // checked unless it is named here with a reason and the issue that removes it.
 //
-// It landed with eleven entries and that is a statement about the module, not
-// about the guard: this is the backlog #245 catalogued, written down where it
-// cannot be lost. The two the issue ranked highest — cashmove and the OMS order
-// service — are not on it, because they were repaired in the change that added
-// it.
+// IT IS EMPTY, AND THAT IS THE POINT IT WAS BUILT TO REACH. It landed with
+// eleven entries — the backlog #245 catalogued, written down where it could not
+// be lost — and every one of them was repaired rather than deleted. The two the
+// issue ranked highest, cashmove and the OMS order service, were never on it:
+// they were fixed in the change that added it.
+//
+// Two entries turned out to be wrong about the module rather than about the
+// code. cmd/kanz-halt was already proven end-to-end and the entry was describing
+// this scan's blind spot (see provenByRealBrokerTest). internal/marketedge/ingest
+// said its double "accepts any Event" when that double had already been hardened
+// to enforce the tenant rule. Both are worth remembering the next time an
+// exemption's REASON is read as fact: the list is maintained by hand, and a
+// stale reason sends someone to write a test that already exists.
+//
+// AN EMPTY MAP IS NOT A DEAD RULE. The guard still runs on every package that
+// builds a bus.Event, and the dead-entry check below still fires. Adding an
+// entry here again is allowed and sometimes right — it just costs a reason and
+// the issue that removes it, which is what kept this list from becoming
+// permanent.
 // integrationProof names the real-broker test that pins a package's envelope.
 type integrationProof struct{ test, why string }
 
@@ -216,22 +230,7 @@ var provenByRealBrokerTest = map[string]integrationProof{
 	},
 }
 
-var factPublishersWithoutARealProducer = map[string]string{
-	// NO OPERATOR CLI IS LISTED ANY MORE, and the group is kept as a heading
-	// rather than deleted so the next control-plane CLI lands under it with the
-	// bar already visible. kanz-halt was never really here (see
-	// provenByRealBrokerTest — its entry described the scan's blind spot);
-	// kanz-altevent and kanz-household are pinned Tier-B in their own
-	// publish_test.go. #245.
-
-	// Capital-path services whose only proof is an Event-level double.
-
-	// Load generators. Listed rather than excluded by path: a load tool that
-	// cannot publish measures nothing, and silently skipping test/ would also
-	// skip anything else that moves there. Lowest value of the eleven. #245.
-	"test/load/ingest": "load generator, no tests. #245",
-	"test/load/seed":   "load seeder, no tests. #245",
-}
+var factPublishersWithoutARealProducer = map[string]string{}
 
 // factPublisher is one non-test construction of a bus.Event.
 type factPublisher struct {

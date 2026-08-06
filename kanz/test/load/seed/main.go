@@ -83,23 +83,36 @@ func main() {
 		if count > 1 {
 			portfolio = fmt.Sprintf("%s-%04d", prefix, i)
 		}
-		snapshot := buildSnapshot(portfolio, now)
-		if err := producer.Publish(ctx, bus.Event{
-			Subject:          snapshotSubject,
-			EventType:        snapshotEventType,
-			EventClass:       envelopepb.EventClass_EVENT_CLASS_STATE_SNAPSHOT,
-			SchemaVersion:    1,
-			Domain:           snapshotDomain,
-			EventTime:        now,
-			PartitionKey:     portfolio,
-			PayloadSchemaRef: payloadSchemaRef,
-			Payload:          snapshot,
-		}); err != nil {
+		if err := producer.Publish(ctx, snapshotEvent(portfolio, now)); err != nil {
 			log.Fatalf("seed: publish snapshot for %s: %v", portfolio, err)
 		}
 	}
 	log.Printf("seed: published %d PortfolioSnapshot(s) prefix=%s positions=%d tenant=%s",
 		count, prefix, len(buildSnapshot(prefix, now).GetPositions()), tenant)
+}
+
+// snapshotEvent builds the envelope seed publishes, EXTRACTED FROM THE LOOP SO A
+// TEST CAN REACH IT (#245).
+//
+// main dials a broker before it constructs anything, so this value was
+// unreachable without one — the same seam kanz-altevent's altEvent and
+// market-data's feedProducerConfig exist for.
+//
+// NOTE THE CLASS: STATE_SNAPSHOT, not FACT. It is the one publisher in this
+// module that emits one, so it is the only place the snapshot arm of
+// bus.Validate is exercised at all.
+func snapshotEvent(portfolio string, now time.Time) bus.Event {
+	return bus.Event{
+		Subject:          snapshotSubject,
+		EventType:        snapshotEventType,
+		EventClass:       envelopepb.EventClass_EVENT_CLASS_STATE_SNAPSHOT,
+		SchemaVersion:    1,
+		Domain:           snapshotDomain,
+		EventTime:        now,
+		PartitionKey:     portfolio,
+		PayloadSchemaRef: payloadSchemaRef,
+		Payload:          buildSnapshot(portfolio, now),
+	}
 }
 
 // buildSnapshot is a small but non-degenerate portfolio: a few long/short
