@@ -226,7 +226,6 @@ var factPublishersWithoutARealProducer = map[string]string{
 
 	// Capital-path services whose only proof is an Event-level double.
 	"internal/marketedge/ingest":              "capture double accepts any Event (engine_test.go:32). #245",
-	"services/api-gateway/internal/orders":    "fakePub accepts anything, so the AUTH-01c forged-issuer guard is never exercised through the handler (orders_test.go:23). #245",
 	"services/compliance/internal/audit":      "audit FACT publisher has no test of any kind. #245",
 	"services/oms/internal/outbox":            "relay recorder accepts any Event (relay_test.go:46); the outbox records it drains are built in services/oms/internal/order. #245",
 	"services/oms/internal/position":          "position projector: the FACT the compliance monitor arms from. #245",
