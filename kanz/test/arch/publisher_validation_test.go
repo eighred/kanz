@@ -217,11 +217,10 @@ var provenByRealBrokerTest = map[string]integrationProof{
 }
 
 var factPublishersWithoutARealProducer = map[string]string{
-	// Operator CLIs. These two publish a control-plane FACT by hand with no
-	// broker-shaped test. kanz-halt WAS listed here and is not: see
-	// provenByRealBrokerTest — it was already proven end-to-end, and the entry was
-	// describing the scan's blind spot rather than the module. #245.
-	"cmd/kanz-altevent":  "alt-asset event CLI: no producer test. #245",
+	// Operator CLIs. One left. kanz-halt was never really here — see
+	// provenByRealBrokerTest; its entry described the scan's blind spot rather
+	// than the module. kanz-altevent's envelope is now pinned Tier-B in
+	// cmd/kanz-altevent/publish_test.go. #245.
 	"cmd/kanz-household": "household CLI: no producer test. #245",
 
 	// Capital-path services whose only proof is an Event-level double.

@@ -157,28 +157,7 @@ func run(args []string, out *os.File) error {
 		return err
 	}
 
-	if err := producer.Publish(ctx, bus.Event{
-		Subject:       ev.subject,
-		EventType:     ev.subject,
-		EventClass:    envelopepb.EventClass_EVENT_CLASS_FACT,
-		SchemaVersion: 1,
-		Domain:        alt.Domain,
-		// The event's OWN dated timestamp (committed_date / call_date /
-		// distribution_date / as_of) — see the package doc's "Why EventTime"
-		// section. NEVER time.Now(): IRR/TVPI are computed from this date, so
-		// stamping ingest time would corrupt the return silently rather than
-		// failing loudly.
-		EventTime: ev.eventTime,
-		// The commitment_id, for every kind: it is what orders a capital call
-		// against the distribution and NAV mark that follow it. Keying on the
-		// event's own id instead would let the bus interleave one
-		// commitment's events with another's, and the fold has no way to
-		// detect that after the fact.
-		PartitionKey:     ev.commitmentID,
-		TenantID:         opt.tenant,
-		PayloadSchemaRef: ev.payloadSchemaRef,
-		Payload:          ev.payload,
-	}); err != nil {
+	if err := producer.Publish(ctx, altEvent(opt, ev)); err != nil {
 		return fmt.Errorf("publish: %w", err)
 	}
 
@@ -233,6 +212,43 @@ func parseFlags(args []string) (options, error) {
 // loadedEvent is the validated, kind-agnostic shape run() needs to publish:
 // enough to build the envelope without run() knowing which proto message
 // backs it.
+// altEvent builds the envelope run publishes, EXTRACTED FROM run SO A TEST CAN
+// REACH IT (#245).
+//
+// run dials a broker before it constructs anything, so every field below was
+// unreachable without one — which is why this CLI's envelope had never been
+// through bus.Validate, and why the publisher-validation guard listed it. That is
+// the same seam market-data's feedProducerConfig exists for, and the same defect
+// class: services/accounting/internal/cashmove shipped a producer with no tenant
+// because all seven of its tests stopped short of Publish.
+//
+// It takes opt and ev rather than reading package state so the test can vary one
+// field at a time and watch Validate's answer change.
+func altEvent(opt options, ev *loadedEvent) bus.Event {
+	return bus.Event{
+		Subject:       ev.subject,
+		EventType:     ev.subject,
+		EventClass:    envelopepb.EventClass_EVENT_CLASS_FACT,
+		SchemaVersion: 1,
+		Domain:        alt.Domain,
+		// The event's OWN dated timestamp (committed_date / call_date /
+		// distribution_date / as_of) — see the package doc's "Why EventTime"
+		// section. NEVER time.Now(): IRR/TVPI are computed from this date, so
+		// stamping ingest time would corrupt the return silently rather than
+		// failing loudly.
+		EventTime: ev.eventTime,
+		// The commitment_id, for every kind: it is what orders a capital call
+		// against the distribution and NAV mark that follow it. Keying on the
+		// event's own id instead would let the bus interleave one
+		// commitment's events with another's, and the fold has no way to
+		// detect that after the fact.
+		PartitionKey:     ev.commitmentID,
+		TenantID:         opt.tenant,
+		PayloadSchemaRef: ev.payloadSchemaRef,
+		Payload:          ev.payload,
+	}
+}
+
 type loadedEvent struct {
 	subject          string
 	payloadSchemaRef string
