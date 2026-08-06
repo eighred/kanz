@@ -110,7 +110,7 @@ func run() int {
 	// stops them together. Empty MARKET_DATA_FEED ⇒ consumer-only (default).
 	if cfg.Feed != "" && cfg.NATSURL != "" {
 		go func() {
-			if err := runFeed(ctx, cfg, logger, obs); err != nil && !errors.Is(err, context.Canceled) {
+			if err := runFeed(ctx, cfg, readiness, logger, obs); err != nil && !errors.Is(err, context.Canceled) {
 				logger.Error("feed publisher stopped with error", "err", err)
 			}
 		}()
@@ -220,7 +220,7 @@ func runIngest(ctx context.Context, cfg config.Config, readiness *server.Readine
 // same seam a live vendor adapter binds — only the Adapter differs. Today the
 // dependency-free SimAdapter replays a synthetic session (offline/local feed);
 // a real Bloomberg/Refinitiv/ICE Source plugs in here where its SDK exists.
-func runFeed(ctx context.Context, cfg config.Config, logger *slog.Logger, obs *observability.Provider) error {
+func runFeed(ctx context.Context, cfg config.Config, readiness *server.Readiness, logger *slog.Logger, obs *observability.Provider) error {
 	if cfg.Feed != "sim" {
 		return fmt.Errorf("market-data: unknown MARKET_DATA_FEED %q (want \"sim\" or empty)", cfg.Feed)
 	}
@@ -248,7 +248,22 @@ func runFeed(ctx context.Context, cfg config.Config, logger *slog.Logger, obs *o
 	if err != nil {
 		return err
 	}
-	sink, err := feed.NewBusSink(producer, cfg.FeedAssetClass)
+	// PUBLISH HEALTH IS READINESS FOR THE FEED HALF TOO (#299).
+	//
+	// Every normalized event this service puts on the spine goes through here, so
+	// a broker that stops accepting them is counted rather than merely logged.
+	// Before this, runFeed took no readiness at all: the publisher could die and
+	// /readyz stayed 200, because the ingest half was still healthy and it owned
+	// the only signal. The sibling mark publishers (venue-binance, venue-okx)
+	// already worked this way; market-data disagreeing with them was an accident
+	// of authorship, not a decision.
+	//
+	// The wrapper returns the caller's error UNCHANGED, so the Gate and the
+	// adapter see exactly what they saw before.
+	publishHealth := bus.NewHealthPublisher(producer, bus.DefaultPublishFailureThreshold)
+	readiness.TrackPublisher(publishHealth)
+
+	sink, err := feed.NewBusSink(publishHealth, cfg.FeedAssetClass)
 	if err != nil {
 		return err
 	}
