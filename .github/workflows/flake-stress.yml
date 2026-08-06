@@ -1,0 +1,134 @@
+# ON-DEMAND FLAKE STRESS. Runs one test many times against a real broker.
+#
+# WHY IT IS SEPARATE FROM kanz-ci. That pipeline runs each test ONCE, which is
+# the right default and is also exactly what a flake survives: #311's halt test
+# passed on re-run of the identical commit with no change, and a single green is
+# therefore not evidence a race was fixed. Closing a flake on one pass closes it
+# on the same evidence that made it look fine before it fired.
+#
+# WHY IT IS workflow_dispatch AND NOT ON PUSH. 20 iterations of a broker-backed
+# test is minutes of runner time for a question nobody asks on most commits.
+# This repository's CI budget is managed deliberately, so the stress pass is a
+# gesture an operator makes when closing a flake issue — not a tax on every push.
+#
+# USAGE
+#
+#   gh workflow run flake-stress.yml \
+#     -f test=TestIntegration_KafkaHandlerFailureWithDeadDLQ \
+#     -f package=./pkg/bus/ \
+#     -f count=20
+#
+# READ THE RESULT HONESTLY. 20 green runs bound the flake rate; they do not
+# prove zero. A race that fires 1 in 200 passes this comfortably. What it does
+# rule out is the common case — a race that fires often enough to have been
+# noticed — which is the class #311 is in.
+name: flake-stress
+
+on:
+  workflow_dispatch:
+    inputs:
+      test:
+        description: "-run regex, e.g. TestIntegration_KafkaHandlerFailureWithDeadDLQ"
+        required: true
+        type: string
+      package:
+        description: "package pattern, e.g. ./pkg/bus/"
+        required: true
+        default: "./pkg/bus/"
+        type: string
+      count:
+        description: "iterations (-count)"
+        required: true
+        default: "20"
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  stress:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v5.0.0
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v6.0.0
+        with:
+          go-version-file: kanz/go.mod
+          cache-dependency-path: kanz/go.sum
+
+      # The same broker kanz-ci starts, with the same settings — including
+      # KAFKA_AUTO_CREATE_TOPICS_ENABLE=false. Auto-creation would paper over the
+      # exact race this workflow exists to hunt: a produce that beats topic
+      # metadata would silently succeed instead of failing.
+      - name: Start Kafka (single-node KRaft)
+        run: |
+          docker run -d --name kanz-ci-kafka -p 9092:9092 \
+            -e KAFKA_NODE_ID=1 \
+            -e KAFKA_PROCESS_ROLES=broker,controller \
+            -e KAFKA_LISTENERS=PLAINTEXT://:9092,CONTROLLER://:9093 \
+            -e KAFKA_ADVERTISED_LISTENERS=PLAINTEXT://localhost:9092 \
+            -e KAFKA_CONTROLLER_LISTENER_NAMES=CONTROLLER \
+            -e KAFKA_LISTENER_SECURITY_PROTOCOL_MAP=CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT \
+            -e KAFKA_CONTROLLER_QUORUM_VOTERS=1@localhost:9093 \
+            -e KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR=1 \
+            -e KAFKA_INTER_BROKER_LISTENER_NAME=PLAINTEXT \
+            -e KAFKA_AUTO_CREATE_TOPICS_ENABLE=false \
+            apache/kafka:3.9.0
+          for i in $(seq 1 60); do
+            docker logs kanz-ci-kafka 2>&1 | grep -q "Kafka Server started" && exit 0
+            sleep 2
+          done
+          echo "Kafka did not become ready"; docker logs kanz-ci-kafka; exit 1
+
+      - name: Start NATS (JetStream)
+        run: |
+          docker run -d --name kanz-ci-nats -p 4222:4222 nats:2 -js
+          for i in $(seq 1 30); do
+            docker logs kanz-ci-nats 2>&1 | grep -q "Server is ready" && exit 0
+            sleep 2
+          done
+          echo "NATS did not become ready"; docker logs kanz-ci-nats; exit 1
+
+      # -count=N with -run pinned to ONE test. The `| tee` is deliberate: the
+      # per-iteration RUN/PASS lines are the artifact, because "ok pkg 40s" for a
+      # test that SKIPPED every iteration is indistinguishable from 20 passes —
+      # the silent-skip trap CLAUDE.md names, and the one this workflow would be
+      # most embarrassing to fall into.
+      - name: Stress
+        working-directory: kanz
+        env:
+          TEST_KAFKA_BROKERS: localhost:9092
+          TEST_NATS_URL: nats://localhost:4222
+        run: |
+          set -o pipefail
+          go test -p 1 -v \
+            -count=${{ inputs.count }} \
+            -run '${{ inputs.test }}' \
+            ${{ inputs.package }} 2>&1 | tee stress.txt
+
+      # PROOF THE ITERATIONS RAN. A stress pass whose test skipped is a green that
+      # means nothing, so the counts are asserted rather than eyeballed.
+      - name: Assert the iterations actually executed
+        working-directory: kanz
+        run: |
+          ran=$(grep -c '^=== RUN' stress.txt || true)
+          passed=$(grep -c '^--- PASS' stress.txt || true)
+          skipped=$(grep -c '^--- SKIP' stress.txt || true)
+          echo "ran=$ran passed=$passed skipped=$skipped want=${{ inputs.count }}"
+          if [ "$skipped" -gt 0 ]; then
+            echo "FAIL: $skipped iteration(s) SKIPPED — the broker env was not reached, so this run proves nothing"
+            exit 1
+          fi
+          if [ "$passed" -lt "${{ inputs.count }}" ]; then
+            echo "FAIL: only $passed PASS lines for ${{ inputs.count }} requested iterations"
+            exit 1
+          fi
+          echo "OK: ${{ inputs.count }} iterations executed and passed"
+
+      - name: Upload the run log
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: stress-log
+          path: kanz/stress.txt
