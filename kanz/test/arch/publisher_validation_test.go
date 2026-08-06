@@ -6,6 +6,7 @@ import (
 	"go/parser"
 	"go/token"
 	"io/fs"
+	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -89,9 +90,31 @@ func TestEveryFactPublisherProvesOneEnvelope(t *testing.T) {
 			"is broken (there were 11 when this guard was written)", len(proven))
 	}
 
+	// DEAD-ENTRY CHECK for the integration proofs, before they are honoured: an
+	// entry naming a test that no longer exists would silently excuse a package.
+	for dir, note := range provenByRealBrokerTest {
+		name := note.test
+		found := false
+		for _, f := range testFilesIn(t, root, dir) {
+			if strings.Contains(f, "func "+name+"(") {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("provenByRealBrokerTest names %s in %s, and no such test exists there any more.\n\n"+
+				"That entry is what stops this guard reporting the package. Either the test was renamed "+
+				"(update the entry) or the real-broker proof is gone (move the package back into "+
+				"factPublishersWithoutARealProducer, with the issue that repairs it).", name, dir)
+		}
+	}
+
 	seenExempt := map[string]bool{}
 	var problems []string
 	for _, pkg := range publishers {
+		if _, ok := provenByRealBrokerTest[pkg.dir]; ok {
+			continue
+		}
 		if proven[pkg.dir] {
 			continue
 		}
@@ -138,12 +161,67 @@ func TestEveryFactPublisherProvesOneEnvelope(t *testing.T) {
 // cannot be lost. The two the issue ranked highest — cashmove and the OMS order
 // service — are not on it, because they were repaired in the change that added
 // it.
+// integrationProof names the real-broker test that pins a package's envelope.
+type integrationProof struct{ test, why string }
+
+// testFilesIn returns the contents of every _test.go directly in dir. Errors are
+// fatal rather than skipped: a directory this cannot read is one whose proof this
+// guard cannot see, and treating that as "no proof" would move a proven package
+// into the exemption list on a filesystem hiccup.
+func testFilesIn(t *testing.T, root, dir string) []string {
+	t.Helper()
+	entries, err := os.ReadDir(filepath.Join(root, filepath.FromSlash(dir)))
+	if err != nil {
+		t.Fatalf("read %s: %v", dir, err)
+	}
+	var out []string
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), "_test.go") {
+			continue
+		}
+		out = append(out, readFile(t, filepath.Join(root, filepath.FromSlash(dir), e.Name())))
+	}
+	return out
+}
+
+// provenByRealBrokerTest is the SECOND proof shape, and it exists because the
+// first one has a false negative that sent someone to write a redundant test.
+//
+// The scan reads "has a real producer" as a literal bus.NewProducer call in the
+// package's own _test.go. A package whose test drives its OWN ENTRYPOINT against
+// a live broker therefore reads as unproven — the NewProducer call is in main.go,
+// one frame down, where a name match cannot see it. cmd/kanz-halt was listed
+// below as having "no broker-shaped test at all" while
+// TestIntegration_ToolFlipsTheRealGate was publishing its FACT over a real
+// JetStream spine and asserting the real gate flipped, in CI, on every run.
+//
+// THAT IS STRONGER EVIDENCE THAN THE TIER-B PATTERN, NOT WEAKER. Tier-B builds a
+// real Producer over a FAKE bus.Client: it proves Validate accepts the envelope.
+// These tests publish to a real broker and assert the consumer on the far side
+// reacted, which additionally proves the subject is bound to a stream — the case
+// this guard's own comment says it cannot catch.
+//
+// It is an EXPLICIT LIST rather than a widened heuristic on purpose. The obvious
+// generalisation — "the package's tests dial a real broker" — would mark a
+// package proven for dialling in order to CONSUME, which is not evidence about
+// anything it publishes. A false positive here silently drops coverage, which is
+// worse than the false negative it would fix. Each entry names the test, and the
+// dead-entry check above fails if that test stops existing.
+var provenByRealBrokerTest = map[string]integrationProof{
+	"cmd/kanz-halt": {
+		test: "TestIntegration_ToolFlipsTheRealGate",
+		why: "publishes the halt FACT through run(), the tool's real entrypoint, over a live " +
+			"JetStream spine, then asserts the real translate.Gate folded it and flipped. Gated on " +
+			"TEST_NATS_URL, which CI sets (kanz-ci.yml), so it executes rather than skipping there.",
+	},
+}
+
 var factPublishersWithoutARealProducer = map[string]string{
-	// Operator CLIs. Each publishes a control-plane FACT by hand and has no
-	// broker-shaped test at all; kanz-halt's is the one that opens and closes
-	// trading, so it is the one to do first. #245.
+	// Operator CLIs. These two publish a control-plane FACT by hand with no
+	// broker-shaped test. kanz-halt WAS listed here and is not: see
+	// provenByRealBrokerTest — it was already proven end-to-end, and the entry was
+	// describing the scan's blind spot rather than the module. #245.
 	"cmd/kanz-altevent":  "alt-asset event CLI: no producer test. #245",
-	"cmd/kanz-halt":      "halt/resume CLI: publishes the FACT the whole fleet's trading gate reads. #245",
 	"cmd/kanz-household": "household CLI: no producer test. #245",
 
 	// Capital-path services whose only proof is an Event-level double.
