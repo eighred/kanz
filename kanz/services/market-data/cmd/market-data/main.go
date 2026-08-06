@@ -18,12 +18,12 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/prometheus/client_golang/prometheus"
 
 	"github.com/eighred/kanz/internal/lifecycle"
 	"github.com/eighred/kanz/internal/marketdata"
 	"github.com/eighred/kanz/internal/marketdata/store"
+	"github.com/eighred/kanz/internal/pg"
 	"github.com/eighred/kanz/internal/platform/httpserver"
 	"github.com/eighred/kanz/internal/version"
 	"github.com/eighred/kanz/pkg/bus"
@@ -342,7 +342,11 @@ func openStore(ctx context.Context, cfg config.Config, logger *slog.Logger) (sto
 		priceHistoryDurable.Set(0)
 		return store.NewMemory(), func() {}, nil
 	}
-	pool, err := pgxpool.New(ctx, cfg.DatabaseURL)
+	pool, err := pg.NewGlobalPool(ctx, cfg.DatabaseURL,
+		"price_observations is UNIVERSAL MARKET DATA and deliberately carries no RLS — a EURUSD mid is "+
+			"the same fact for every tenant, and the risk engine marks every tenant's positions against "+
+			"this one store. Scoping it per tenant would shard the price history by whoever happened to "+
+			"observe the tick")
 	if err != nil {
 		return nil, nil, err
 	}

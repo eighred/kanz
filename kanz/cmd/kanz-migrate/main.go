@@ -39,9 +39,8 @@ import (
 	"os"
 	"time"
 
-	"github.com/jackc/pgx/v5/pgxpool"
-
 	"github.com/eighred/kanz/internal/migrate"
+	"github.com/eighred/kanz/internal/pg"
 	"github.com/eighred/kanz/pkg/secret"
 )
 
@@ -89,7 +88,13 @@ func run(args []string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
 	defer cancel()
 
-	pool, err := pgxpool.New(ctx, dsn)
+	// pg.Migration, NOT the service profile (#228). A migration wants NO
+	// statement_timeout — an index build legitimately runs long, and the deadline
+	// above is already the single bound on this run — but a SHORT lock_timeout,
+	// because a queued ALTER TABLE puts every later reader behind it in Postgres's
+	// FIFO lock queue. internal/migrate lifts that bound for the advisory lock
+	// alone, which is the one wait here that is supposed to block.
+	pool, err := pg.NewMigrationPool(ctx, dsn)
 	if err != nil {
 		return fmt.Errorf("connect: %w", err)
 	}

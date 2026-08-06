@@ -39,9 +39,12 @@ const defaultBatch = 256
 //     anyway.
 //
 //   - ONE ESTATE-WIDE RELAY BINARY cannot read the table. This is not a
-//     preference; it is a finding. internal/pg.NewTenantPool is the ONLY pool
-//     constructor on this platform and it REFUSES an empty tenant, pinning
-//     app.tenant_id session-wide on every connection. The outbox table is
+//     preference; it is a finding. internal/pg is the only place a pool is
+//     built, and the only constructor that can read an RLS table is
+//     NewTenantPool, which REFUSES an empty tenant and pins app.tenant_id
+//     session-wide on every connection. (Its sibling NewGlobalPool, added by
+//     #228 for the four stores that deliberately carry no RLS, cannot read this
+//     one — an unscoped session RAISES.) The outbox table is
 //     FORCE ROW LEVEL SECURITY with a policy on app_current_tenant(), and
 //     app_current_tenant() RAISES on an unscoped session (MT-01e). The app role
 //     is NOSUPERUSER (CI creates it that way and test/arch/

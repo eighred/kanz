@@ -11,6 +11,26 @@
 # WAL archive cadence (archive_timeout 30s on the primary) — inside RPO ≤ 1min.
 # For tighter RPO, add a streaming `connectionParameters` source to the external
 # cluster so it also streams when the primary is reachable.
+#
+# EVERY max_connections HERE MIRRORS ITS PRIMARY IN cluster.yaml, AND MUST (#228).
+#
+# This is not symmetry for its own sake. Postgres REFUSES to open a hot standby
+# whose max_connections is below the value recorded in the WAL it is replaying:
+#
+#   FATAL: hot standby is not possible because max_connections = 100 is a lower
+#   setting than on the primary server (its value was 200)
+#
+# So raising a primary and leaving the standby behind does not make the DR region
+# slower or smaller — it STOPS it replaying, in the region nobody is watching, and
+# the discovery moment is the failover, which is the one moment it cannot be
+# fixed. Nothing else in the estate relates these two files, so
+# test/arch/pool_budget_test.go does: it fails if any standby here declares less
+# than its primary, and if either declares nothing at all.
+#
+# EQUAL rather than merely "at least", because a promoted standby IS the primary:
+# `cnpg promote` makes it serve exactly the demand cluster.yaml derived, no less
+# and no more. The derivation lives there, next to the numbers it produces; if you
+# change one, change both in the same commit.
 ---
 apiVersion: postgresql.cnpg.io/v1
 kind: Cluster
@@ -21,6 +41,9 @@ metadata:
 spec:
   instances: 2
   primaryUpdateStrategy: unsupervised
+  postgresql:
+    parameters:
+      max_connections: "100"   # mirrors the primary — see the header
   storage:
     size: 50Gi
   replica:
@@ -48,6 +71,9 @@ metadata:
 spec:
   instances: 2
   primaryUpdateStrategy: unsupervised
+  postgresql:
+    parameters:
+      max_connections: "40"    # mirrors the primary — see the header
   storage:
     size: 20Gi
   replica:
@@ -80,6 +106,9 @@ metadata:
 spec:
   instances: 2
   primaryUpdateStrategy: unsupervised
+  postgresql:
+    parameters:
+      max_connections: "200"   # mirrors the primary — see the header
   storage:
     size: 75Gi              # tracks the primary (cluster.yaml) — tv_facts is append-only
   replica:
@@ -115,6 +144,9 @@ metadata:
 spec:
   instances: 2
   primaryUpdateStrategy: unsupervised
+  postgresql:
+    parameters:
+      max_connections: "50"    # mirrors the primary — see the header
   storage:
     size: 100Gi
   replica:
@@ -150,6 +182,9 @@ metadata:
 spec:
   instances: 2
   primaryUpdateStrategy: unsupervised
+  postgresql:
+    parameters:
+      max_connections: "40"    # mirrors the primary — see the header
   storage:
     size: 20Gi
   replica:

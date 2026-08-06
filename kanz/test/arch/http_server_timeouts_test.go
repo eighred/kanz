@@ -9,6 +9,8 @@ import (
 	"sort"
 	"strings"
 	"testing"
+
+	"github.com/eighred/kanz/internal/pg"
 )
 
 // EVERY SERVER IN THIS ESTATE IS BOUND ON ALL FOUR SIDES, AND THERE IS ONE PLACE
@@ -221,12 +223,35 @@ func TestNoPackageRunsOnTheSharedDefaultClient(t *testing.T) {
 // those services, or it silently becomes the real limit and takes the diagnosis
 // away from the layer that has it. Same argument as gatewayWriteTimeout one hop out,
 // which is why that one is guarded in probe_deadline_nesting_test.go.
+//
+// THE THIRD ENTRY IS NOT A CALLER'S BUDGET BUT A HANDLER'S (#228), and it is here
+// because the two constants shipped EXACTLY EQUAL. Every service behind the gateway
+// takes Standard(), including audit — whose full-log report is an unbounded scan
+// rendered in memory — and internal/pg bounds that scan with a statement_timeout.
+// Equal bounds are a coin toss between a named SQLSTATE 57014 the handler can turn
+// into a response and a severed connection that names nothing, which is the same
+// inversion the entries above exist to prevent, one layer further in.
 var standardWriteMustExceed = []deadlineLayer{
-	{"copilotForwardTimeout", "services/api-gateway/internal/proxy/proxy.go",
-		"the gateway's wait on a proxied POST /v1/ask"},
-	{"readForwardTimeout", "services/api-gateway/internal/proxy/proxy.go",
-		"the gateway's wait on a proxied wealth/datamaster/tv-sync read"},
+	{name: "copilotForwardTimeout", file: "services/api-gateway/internal/proxy/proxy.go",
+		label: "the gateway's wait on a proxied POST /v1/ask"},
+	{name: "readForwardTimeout", file: "services/api-gateway/internal/proxy/proxy.go",
+		label: "the gateway's wait on a proxied wealth/datamaster/tv-sync read"},
+	{name: "serviceStatementTimeout", file: "internal/pg/pool.go",
+		label: "how long a service query may hold a Postgres backend inside a handler",
+		consequence: "The write deadline then severs the connection while the query is still running, so the " +
+			"caller gets a bare EOF with no status — indistinguishable from a crashed service — instead " +
+			"of the SQLSTATE 57014 the handler would have turned into a response naming a slow query. " +
+			"The database's own diagnosis is thrown away by the layer above it.",
+		remedy: "LOWER serviceStatementTimeout, and leave room under the write bound for the handler " +
+			"to " +
+			"RENDER after the query returns (audit's full-log json.MarshalIndents the whole result " +
+			"set). This one is NOT a caller's budget sized to real work — raising standardWriteTimeout " +
+			"to accommodate it would widen the outermost bound on all twenty-five services to protect " +
+			"one query that is already too slow to serve.",
+	},
 }
+
+const pgPoolFile = "internal/pg/pool.go"
 
 const httpServerFile = httpServerHome + "/httpserver.go"
 
@@ -242,16 +267,37 @@ func TestStandardTimeoutsClearTheBudgetsBeneathThem(t *testing.T) {
 	for _, budget := range standardWriteMustExceed {
 		inner := durationConst(t, at(budget.file), budget.name)
 		if write <= inner {
+			consequence := budget.consequence
+			if consequence == "" {
+				consequence = "The upstream then severs the connection before the gateway's own " +
+					"deadline expires, so the caller gets an anonymous EOF instead of the gateway's " +
+					"502 NAMING the upstream that was slow — and the gateway's log line, which is " +
+					"the only record of which service wedged, is never written."
+			}
+			remedy := budget.remedy
+			if remedy == "" {
+				remedy = "Raise standardWriteTimeout rather than cutting " + budget.name +
+					", which is sized to real work."
+			}
 			t.Errorf("standardWriteTimeout (%s, %s) does not exceed %s (%s, %s) = %s, the "+
-				"budget for %s.\n\n"+
-				"The upstream then severs the connection before the gateway's own deadline "+
-				"expires, so the caller gets an anonymous EOF instead of the gateway's 502 "+
-				"NAMING the upstream that was slow — and the gateway's log line, which is the "+
-				"only record of which service wedged, is never written. Raise "+
-				"standardWriteTimeout rather than cutting %s, which is sized to real work.",
+				"budget for %s.\n\n%s\n\n%s",
 				write, httpServerFile, budget.name, budget.file, budget.label, inner,
-				budget.label, budget.name)
+				budget.label, consequence, remedy)
 		}
+	}
+
+	// THE TABLE ABOVE READS serviceStatementTimeout OUT OF THE SOURCE, and an AST
+	// read cannot tell whether the const is the value the pool actually ships.
+	// Declaring it, keeping it under the write bound, and then writing a different
+	// literal into Service.StatementTimeout would satisfy the loop while putting
+	// the equal-bounds coin toss straight back. So compare the const against the
+	// linked profile — the value a real connection is opened with.
+	if got := pg.Service.StatementTimeout; got != durationConst(t, at(pgPoolFile), "serviceStatementTimeout") {
+		t.Errorf("pg.Service.StatementTimeout is %s but %s declares serviceStatementTimeout = %s.\n\n"+
+			"The ordering check above reads the CONST; the pools are opened with the FIELD. While they "+
+			"disagree the guard is asserting something about a number nothing uses, and the bound that "+
+			"actually races httpserver's Timeouts.Write is unchecked.",
+			got, pgPoolFile, durationConst(t, at(pgPoolFile), "serviceStatementTimeout"))
 	}
 
 	// The pooling side. proxyIdleConnTimeout is when the GATEWAY retires an idle

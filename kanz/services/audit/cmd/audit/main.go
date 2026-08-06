@@ -19,10 +19,10 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/prometheus/client_golang/prometheus"
 
 	"github.com/eighred/kanz/internal/lifecycle"
+	"github.com/eighred/kanz/internal/pg"
 	"github.com/eighred/kanz/internal/platform/httpserver"
 	"github.com/eighred/kanz/internal/version"
 	"github.com/eighred/kanz/pkg/bus"
@@ -245,7 +245,10 @@ func openStore(ctx context.Context, cfg config.Config, logger *slog.Logger) (aud
 		auditLogDurable.Set(0)
 		return audit.NewMemory(), func() {}, nil
 	}
-	pool, err := pgxpool.New(ctx, cfg.DatabaseURL)
+	pool, err := pg.NewGlobalPool(ctx, cfg.DatabaseURL,
+		"the audit log is the ESTATE's tamper-evidence record, not a tenant's: 0001_audit_log.sql "+
+			"declares no RLS and the hash chain is one sequence over every tenant's events, so a "+
+			"tenant-scoped pool would fork the chain per tenant and destroy the property the log exists for")
 	if err != nil {
 		return nil, nil, err
 	}

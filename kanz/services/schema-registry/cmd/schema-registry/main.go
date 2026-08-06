@@ -12,9 +12,8 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/jackc/pgx/v5/pgxpool"
-
 	"github.com/eighred/kanz/internal/lifecycle"
+	"github.com/eighred/kanz/internal/pg"
 	"github.com/eighred/kanz/internal/platform/httpserver"
 	"github.com/eighred/kanz/internal/version"
 	"github.com/eighred/kanz/pkg/observability"
@@ -49,7 +48,10 @@ func run() int {
 	// only thing added is that the reason survives to the exit status (#266).
 	fatal := lifecycle.NewFatal(stop)
 
-	pool, err := pgxpool.New(ctx, cfg.DatabaseURL)
+	pool, err := pg.NewGlobalPool(ctx, cfg.DatabaseURL,
+		"a payload schema is PLATFORM metadata, not a tenant's: 0001_init.sql declares no RLS, and every "+
+			"tenant's envelope is validated against the same registered version. Scoping it per tenant "+
+			"would let two tenants register incompatible version 1s of one subject")
 	if err != nil {
 		logger.Error("postgres connect failed", "err", err)
 		return 2

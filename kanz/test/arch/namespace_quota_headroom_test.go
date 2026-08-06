@@ -260,9 +260,13 @@ var unsizedContainerExemptions = map[string]string{}
 // floating-point milliCPU is how a quota check passes by 0.0000001.
 type k8sQuantity int64
 
-// k8sContainer is one container reduced to the two maps this guard compares.
+// k8sContainer is one container reduced to the two maps this guard compares,
+// plus the image and the argv that pool_budget_test.go reads off the Postgres
+// container to find its declared max_connections.
 type k8sContainer struct {
 	name     string
+	image    string
+	args     []string
 	requests map[string]*k8sQuantity
 	limits   map[string]*k8sQuantity
 }
@@ -548,6 +552,8 @@ type k8sResourceBlock struct {
 
 type k8sContainerDoc struct {
 	Name      string           `yaml:"name"`
+	Image     string           `yaml:"image"`
+	Args      []string         `yaml:"args"`
 	Resources k8sResourceBlock `yaml:"resources"`
 }
 
@@ -725,6 +731,8 @@ func k8sContainers(t *testing.T, file string, docs []k8sContainerDoc) []k8sConta
 	for _, d := range docs {
 		out = append(out, k8sContainer{
 			name:     d.Name,
+			image:    d.Image,
+			args:     d.Args,
 			requests: k8sQuantities(t, file, d.Resources.Requests),
 			limits:   k8sQuantities(t, file, d.Resources.Limits),
 		})

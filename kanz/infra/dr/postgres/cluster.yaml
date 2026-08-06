@@ -29,6 +29,51 @@
 # (a WAL segment is forced out at least that often); the streaming replica
 # (replica.yaml) trails by far less. Both inside the DR-01e RPO ≤ 1min target.
 #
+# max_connections IS DERIVED PER CLUSTER, AND A GUARD RE-DERIVES IT (#228).
+#
+# No cluster here set it, so every one of them ran whatever the operator's default
+# is. That is not "the default, which is fine": nothing in this repository pins a
+# CloudNativePG version — no install manifest, no Helm chart, no terraform, only
+# `apiVersion: postgresql.cnpg.io/v1` and the kubectl plugin in the runbooks — so
+# the value that applied could not be read from here at all. Meanwhile no pool was
+# sized either, and pgx defaults MaxConns to max(4, runtime.NumCPU()), which in a
+# container with no CPU quota is the NODE's core count. Neither half fails at
+# startup, because pools are lazy; the first symptom is `FATAL: sorry, too many
+# clients already` on a QUERY, in whichever pod warmed last.
+#
+# The demand is a PARTITION, not the estate's total, and the cluster boundary
+# above is exactly what partitions it: a service reaches only the cluster holding
+# its own database. test/arch/pool_budget_test.go recomputes each one from
+# infra/deploy plus internal/pg on every run —
+#
+#   ceiling(w) = max(spec.replicas, the KEDA ScaledObject's maxReplicaCount)
+#   pools(w)   = pg.New*Pool calls in that service's composition root, routed to
+#                the cluster of the database each one actually opens
+#   need       = Σ ceiling(w) x pools(w) x pg.ServiceMaxConns(4)
+#                + the largest single rolling update while at ceiling
+#                + 13 reserved (superuser_reserved_connections, an operator, a DR
+#                  restore, a human with psql)
+#
+# — giving, per cluster: risk 73, registry 25, books 129, orders 33,
+# compliance 25. Each value below is that number with room, bounded above at 2x
+# so it stays a decision rather than a shrug.
+#
+# EVERY VALUE MUST BE MIRRORED IN replica.yaml, and that is not tidiness. Postgres
+# REFUSES to open a hot standby whose max_connections is below the primary whose
+# WAL it replays ("hot standby is not possible because max_connections = 100 is a
+# lower setting than on the primary server"). Raising a number here and not there
+# does not degrade the DR region, it STOPS it — silently, in the region nobody
+# watches, discovered at the failover. The guard relates the two files.
+#
+# NO MEMORY BLOCK IS ADDED WITH THESE, unlike the dev rig, and the reason is
+# specific rather than an oversight: postgres-dev.yaml needed one because
+# availability.yaml's LimitRange caps every kanz-services container at 1Gi, which
+# 400 backends do not fit. These clusters are in kanz-data, and no LimitRange or
+# ResourceQuota governs that namespace anywhere in this repository — so there is
+# no default limit to OOM against — and the largest value below is 200. That these
+# clusters declare no resources AT ALL is a real gap, but it is #231's shape and
+# not this change's: sizing it needs measurement from a running estate.
+#
 # Secrets (SEC-01d, provided out-of-band, never in-repo):
 #   kanz-dr-s3  — ACCESS_KEY_ID / SECRET_ACCESS_KEY for the backup bucket
 ---
@@ -45,6 +90,11 @@ spec:
     parameters:
       archive_timeout: "30s"   # RPO bound for the archived-WAL path
       wal_level: logical
+      # risk-engine only. Its SECOND pool (the market-data price store) does NOT
+      # land here — it reads price_observations, which is another service's
+      # database — so this cluster is charged ONE pool at risk-engine's KEDA
+      # ceiling of 12, not two. need 73.
+      max_connections: "100"
   storage:
     size: 50Gi
   backup:
@@ -80,6 +130,9 @@ spec:
   postgresql:
     parameters:
       archive_timeout: "30s"
+      # schema-registry only. need 25 — a registry read is a point lookup, and the
+      # service is pinned at replicas: 2 with no ScaledObject raising its ceiling.
+      max_connections: "40"
   storage:
     size: 20Gi
   backup:
@@ -145,6 +198,11 @@ spec:
   postgresql:
     parameters:
       archive_timeout: "30s"   # RPO bound for the archived-WAL path
+      # accounting, alternatives, wealth, datamaster and tv-sync — three of which
+      # KEDA scales to 8. The largest demand in the estate outside the dev rig at
+      # need 129, and the ONE number here that the postgres:16 default of 100 would
+      # not have covered had the operator's default matched it.
+      max_connections: "200"
   storage:
     # 75Gi — 50Gi was sized for the four book-of-record databases, whose tables
     # are ledgers and replace-on-write projections: they grow per business event
@@ -225,6 +283,11 @@ spec:
   postgresql:
     parameters:
       archive_timeout: "30s"   # RPO bound for the archived-WAL path
+      # oms, venue-binance and venue-okx. Small because the order path is PINNED —
+      # no ScaledObject targets any of the three, so the ceiling is the replica
+      # count. need 33. The money path is the least connection-hungry cluster here,
+      # which is worth knowing before anyone raises it "to be safe".
+      max_connections: "50"
   storage:
     # 100Gi — twice kanz-books, and kanz-books holds four databases. position_fills
     # grows per execution, not per order, so it is the fastest-growing table in the
@@ -296,6 +359,9 @@ spec:
   postgresql:
     parameters:
       archive_timeout: "30s"   # RPO bound for the archived-WAL path
+      # regulatory only, and filings are periodic per fund rather than per
+      # execution. need 25.
+      max_connections: "40"
   storage:
     # 20Gi — the registry's size, not the order path's, because the write RATE is
     # per FILING: FRTB, Form PF, AIFMD, TCFD and SFDR are periodic per-fund
