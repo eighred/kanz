@@ -15,7 +15,7 @@ import (
 
 // EVERY REGISTERED METRIC MUST HAVE A NON-TEST WRITER.
 //
-// This is the sibling of TestEveryObservabilityMetricExistsInGo, from the other
+// This is the sibling of TestEveryObservabilityMetricExistsInSource, from the other
 // end. That one asks whether a metric NAMED IN A RULE exists in Go. This one asks
 // whether a metric that exists in Go is ever actually SET — because a collector
 // that is constructed and registered and never written exports the metric FAMILY
@@ -442,7 +442,7 @@ func collectorDecls(t *testing.T, fset *token.FileSet, f *ast.File, rel string) 
 // A collector whose Opts carry Namespace or Subsystem instead of a full literal
 // Name is a HARD FAILURE rather than a skip. The assembled name would not match
 // what the guard reports, and — the reason this is fatal — it would also break
-// TestEveryObservabilityMetricExistsInGo, whose own doc says so explicitly. Two
+// TestEveryObservabilityMetricExistsInSource, whose own doc says so explicitly. Two
 // guards silently degrading together is worse than either one being red.
 func metricNameFromOpts(t *testing.T, rel string, line int, call *ast.CallExpr) string {
 	t.Helper()
@@ -467,7 +467,7 @@ func metricNameFromOpts(t *testing.T, rel string, line int, call *ast.CallExpr) 
 		case "Namespace", "Subsystem":
 			t.Errorf("%s:%d declares a collector with %s in its Opts. Every metric in this module uses a "+
 				"full literal Name; the assembled form defeats this guard AND "+
-				"TestEveryObservabilityMetricExistsInGo. Match on the assembled name in both, or use a literal.",
+				"TestEveryObservabilityMetricExistsInSource. Match on the assembled name in both, or use a literal.",
 				rel, line, key.Name)
 		case "Name":
 			s, ok := kv.Value.(*ast.BasicLit)

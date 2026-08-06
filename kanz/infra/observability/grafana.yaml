@@ -5,7 +5,7 @@
 # LAST piece: the order that produced the dashboards/README.md wreckage was
 # dashboard-first, and every panel there rendered empty for months because the
 # exporter underneath was never built. Here the series exist (kanz_gateway_*,
-# kanz_risk_*, kanz_bus_* — TestEveryObservabilityMetricExistsInGo asserts it),
+# kanz_risk_*, kanz_bus_* — TestEveryObservabilityMetricExistsInSource asserts it),
 # a Prometheus scrapes them (#61, proven on the rig), and the rules evaluate.
 # Only then this.
 #
