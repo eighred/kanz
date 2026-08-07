@@ -28,13 +28,15 @@ import (
 //
 // WHAT THIS GUARD ASSERTS.
 //
-// For every service that is DEPLOYABLE — the filesystem's list, minus the
+// For every workload that is DEPLOYABLE — the filesystem's list, minus the
 // written exemptions in notDeployed — three things must hold together:
 //
 //  1. its workload manifest carries prometheus.io/scrape: "true"
 //  2. its prometheus.io/port matches a containerPort declared in that same
 //     manifest
-//  3. the service actually registers /metrics in Go
+//  3. the workload actually registers /metrics in its own source, whatever
+//     language that is (see scrapeTargets: Prometheus scrapes pods, and one of
+//     this estate's pods is Python)
 //
 // Assertion 2 exists because a wrong port fails SILENTLY: the scrape is refused
 // and the target sits DOWN. Assertion 3 exists because an annotation is a claim
@@ -54,22 +56,16 @@ import (
 //
 // THE COUNT IS DERIVED, NEVER HARDCODED. #61 originally demanded "all 26
 // services" — unachievable, because five are deliberately not deployed and you
-// cannot scrape what never runs. The bar is whatever servicesWithEntrypoints
-// minus notDeployed yields today, so adding a service or retiring an exemption
-// moves it automatically rather than leaving a stale number in a test.
+// cannot scrape what never runs. The bar is whatever scrapeTargets yields today,
+// so adding a service or retiring an exemption moves it automatically rather
+// than leaving a stale number in a test.
 func TestEveryDeployableServiceIsScrapable(t *testing.T) {
 	root := moduleRoot(t)
 
-	var (
-		problems   []string
-		deployable int
-	)
-	for _, svc := range servicesWithEntrypoints(t, root) {
-		if _, exempt := notDeployed[svc]; exempt {
-			continue // already carries a written reason for not running at all
-		}
-		deployable++
+	targets := scrapeTargets(t, root)
 
+	var problems []string
+	for _, svc := range targets {
 		if reason, pending := pendingScrape[svc]; pending {
 			if strings.TrimSpace(reason) == "" {
 				problems = append(problems, svc+": listed in pendingScrape with no reason")
@@ -133,8 +129,8 @@ func TestEveryDeployableServiceIsScrapable(t *testing.T) {
 		}
 
 		if !registersMetrics(t, root, svc) {
-			missing = append(missing, "a /metrics route in Go — the annotation would "+
-				"point at a port that serves no Prometheus registry")
+			missing = append(missing, "a /metrics route in its source — the annotation "+
+				"would point at a port that serves no Prometheus registry")
 		}
 
 		if len(missing) > 0 {
@@ -145,7 +141,7 @@ func TestEveryDeployableServiceIsScrapable(t *testing.T) {
 	// NON-VACUITY. A scan that finds no deployable services passes every assertion
 	// above no matter how broken the estate is. That is a broken guard reporting a
 	// clean estate — the exact class of false green this file exists to prevent.
-	if deployable == 0 {
+	if len(targets) == 0 {
 		t.Fatal("found zero deployable services — the scanner is broken, not the estate")
 	}
 
@@ -153,11 +149,14 @@ func TestEveryDeployableServiceIsScrapable(t *testing.T) {
 	// gone is stale: it suppresses a check that would pass, and makes the estate
 	// read as more provisional than it is. Same shape as the dead-entry checks in
 	// drPosture and metricSurfacesPendingRepair.
+	//
+	// It reads the SAME scrapeTargets list the loop above walked. An earlier draft
+	// rebuilt the set from servicesWithEntrypoints here, which meant a non-Go
+	// workload could be exempted above and then reported dead below — the guard
+	// would have been unable to hold any exemption it was widened to need.
 	present := map[string]bool{}
-	for _, svc := range servicesWithEntrypoints(t, root) {
-		if _, exempt := notDeployed[svc]; !exempt {
-			present[svc] = true
-		}
+	for _, svc := range targets {
+		present[svc] = true
 	}
 	var dead []string
 	for svc := range pendingScrape {
@@ -177,13 +176,80 @@ func TestEveryDeployableServiceIsScrapable(t *testing.T) {
 	if len(problems) > 0 {
 		t.Fatalf("these deployable services cannot be scraped:\n\n  %s\n\n"+
 			"A deployable service is SCRAPABLE (prometheus.io/scrape + a prometheus.io/port matching a "+
-			"declared containerPort + a /metrics route in Go) or it is listed in pendingScrape with a "+
-			"written reason and the issue that retires it. Nothing else.\n\n"+
+			"declared containerPort + a /metrics route in its source) or it is listed in pendingScrape "+
+			"with a written reason and the issue that retires it. Nothing else.\n\n"+
 			"Prometheus discovers pods by annotation (infra/observability/prometheus.yaml, role: pod). "+
 			"A service with no annotation is not a DOWN target — it is NO target, and absent targets "+
 			"appear on no dashboard and fire no alert.",
 			strings.Join(problems, "\n  "))
 	}
+}
+
+// scrapeTargets lists every workload the estate actually runs: the Go services
+// with a cmd/ entrypoint that are not exempt in notDeployed, PLUS every workload
+// that has a manifest under infra/deploy but no Go package behind it.
+//
+// WHY THIS IS NOT servicesWithEntrypoints. That helper answers "which
+// services/<name> build a Go binary". That is the right question for the
+// deployability and NATS guards, and the WRONG one here: what Prometheus scrapes
+// is a POD, and a pod does not have to be Go. The estate deploys one that is not
+// — the Python inference service, which lives in kanz-py/ and is deployed by
+// infra/deploy/inference-deploy.yaml. Enumerating from the Go tree made it
+// structurally invisible to this guard, so a workload with no scrape annotation
+// and no HTTP surface at all read as a clean estate rather than an unmonitored
+// one, and the guard could not even have listed it as pending.
+//
+// This is the same cross-language blindness kafka_topology_test.go documents
+// from the other side: a check that walks only Go pronounces safe what it cannot
+// see. Enumerate from the thing that decides whether a pod runs — the manifest.
+//
+// Derived from the filesystem in both halves, never listed: a second Python (or
+// Rust, or anything) workload is covered the day its manifest lands, rather than
+// the day somebody remembers to add it here.
+func scrapeTargets(t *testing.T, root string) []string {
+	t.Helper()
+
+	seen := map[string]bool{}
+	var out []string
+	for _, svc := range servicesWithEntrypoints(t, root) {
+		if _, exempt := notDeployed[svc]; exempt {
+			continue // already carries a written reason for not running at all
+		}
+		seen[svc] = true
+		out = append(out, svc)
+	}
+
+	manifests, err := filepath.Glob(filepath.Join(root, "infra", "deploy", "*.yaml"))
+	if err != nil {
+		t.Fatalf("glob infra/deploy: %v", err)
+	}
+	// NON-VACUITY, the manifest half. If this directory moves or is renamed, the
+	// glob returns nothing and every non-Go workload silently stops being checked
+	// — the widening would undo itself and look green doing it.
+	if len(manifests) == 0 {
+		t.Fatal("found zero manifests under infra/deploy — the scanner is broken, not the estate")
+	}
+	for _, m := range manifests {
+		base := filepath.Base(m)
+		trimmed := strings.TrimSuffix(base, "-deploy.yaml")
+		if trimmed == base {
+			trimmed = strings.TrimSuffix(base, "-rollout.yaml")
+		}
+		if trimmed == base {
+			continue // not a workload manifest (ingress, scaling policy, dev secrets, ...)
+		}
+		if seen[trimmed] {
+			continue
+		}
+		if _, err := os.Stat(filepath.Join(root, "services", trimmed)); err == nil {
+			continue // a Go service; servicesWithEntrypoints and notDeployed already ruled on it
+		}
+		seen[trimmed] = true
+		out = append(out, trimmed)
+	}
+
+	sort.Strings(out)
+	return out
 }
 
 // registersMetrics reports whether the service actually serves a Prometheus
@@ -204,25 +270,58 @@ func registersMetrics(t *testing.T, root, svc string) bool {
 	t.Helper()
 
 	svcDir := filepath.Join(root, "services", svc)
-	if treeContainsAny(svcDir, `"GET /metrics"`, `"/metrics"`) {
+	if _, err := os.Stat(svcDir); err != nil {
+		return registersMetricsOutsideGo(t, root, svc)
+	}
+	if treeContainsAny(svcDir, ".go", `"GET /metrics"`, `"/metrics"`) {
 		return true
 	}
 	// The venue adapters mount their registry on the shared adapter server rather
 	// than in their own tree. Only credit that package to a service that imports it.
-	if treeContainsAny(svcDir, `internal/venueadapter/server`) {
-		return treeContainsAny(filepath.Join(root, "internal", "venueadapter"),
+	if treeContainsAny(svcDir, ".go", `internal/venueadapter/server`) {
+		return treeContainsAny(filepath.Join(root, "internal", "venueadapter"), ".go",
 			`"GET /metrics"`, `"/metrics"`)
 	}
 	return false
 }
 
-// treeContainsAny reports whether any non-test .go file under dir contains any of
-// the given literals.
-func treeContainsAny(dir string, literals ...string) bool {
+// registersMetricsOutsideGo answers assertion 3 for a deployed workload that has
+// no Go package — today, the Python inference service in kanz-py/.
+//
+// IT REFUSES TO GUESS. A workload whose source this cannot locate makes the
+// guard fail, loudly, rather than return false (which would read as "checked,
+// and it serves no metrics") or true (which would be a fabricated pass). The
+// distinction matters here more than usual: this whole function exists because a
+// service the guard could not see was indistinguishable from a service the guard
+// had cleared.
+func registersMetricsOutsideGo(t *testing.T, root, svc string) bool {
+	t.Helper()
+
+	pkg := filepath.Join(filepath.Dir(root), "kanz-py", "kanz_"+strings.ReplaceAll(svc, "-", "_"))
+	if _, err := os.Stat(pkg); err != nil {
+		t.Fatalf("%s is deployed by infra/deploy/ but has neither a Go package under services/ "+
+			"nor a Python package at %s. This guard cannot tell whether it serves /metrics, and "+
+			"a guess in either direction is a false result — teach registersMetricsOutsideGo "+
+			"where this workload's source lives.", svc, pkg)
+	}
+	// prometheus_client is the only Prometheus surface this estate would use from
+	// Python: make_wsgi_app/start_http_server are the two ways it exposes a
+	// registry over HTTP, and a hand-rolled handler still has to name the route.
+	return treeContainsAny(pkg, ".py", `"/metrics"`, `'/metrics'`,
+		"make_wsgi_app", "start_http_server")
+}
+
+// treeContainsAny reports whether any non-test source file with the given
+// extension under dir contains any of the given literals.
+func treeContainsAny(dir, ext string, literals ...string) bool {
 	found := false
 	_ = filepath.WalkDir(dir, func(p string, d fs.DirEntry, err error) error {
-		if err != nil || d.IsDir() || !strings.HasSuffix(p, ".go") || strings.HasSuffix(p, "_test.go") {
+		if err != nil || d.IsDir() || !strings.HasSuffix(p, ext) {
 			return nil
+		}
+		base := filepath.Base(p)
+		if strings.HasSuffix(base, "_test"+ext) || strings.HasPrefix(base, "test_") {
+			return nil // a test asserting on "/metrics" is not a service serving it
 		}
 		b, rerr := os.ReadFile(p)
 		if rerr != nil {
@@ -246,7 +345,20 @@ func treeContainsAny(dir string, literals ...string) bool {
 //
 // IT MUST TREND TO EMPTY. An entry here is a service whose degraded modes are
 // invisible in production; it is not a place to park work.
-var pendingScrape = map[string]string{}
+var pendingScrape = map[string]string{
+	"inference": "NO HTTP SURFACE TO SCRAPE, AND NO REGISTRY BEHIND ONE (#241). " +
+		"inference-deploy.yaml opens exactly one port — { containerPort: 50051, name: grpc } — and " +
+		"both probes are tcpSocket checks against it, because gRPC answers no GET. So there is no " +
+		"port an annotation could name: adding prometheus.io/port: \"50051\" would produce a target " +
+		"that is permanently DOWN, which is the precise failure the rest of this guard exists to " +
+		"prevent. The gap is not an omitted annotation, it is a missing surface. kanz-py declares no " +
+		"prometheus_client dependency (kanz-py/pyproject.toml) and the whole tree contains no " +
+		"/metrics route, so the registry does not exist yet either. #241 adds both — an HTTP port " +
+		"serving prometheus_client alongside the gRPC one, and the annotation naming it — and " +
+		"removes this entry. Until then the streaming scorer's degraded modes (a stalled durable " +
+		"consumer, a model that failed promotion, admission-control rejections) are visible only in " +
+		"pod logs.",
+}
 
 // scrapeAnnotationRe matches the opt-in annotation on a pod template. Quoted and
 // unquoted "true" both appear in Kubernetes manifests in the wild; node-exporter
