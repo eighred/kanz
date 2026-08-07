@@ -128,10 +128,35 @@ func WithRedisDedupErrorHandler(fn func(op string, err error)) RedisDedupOption 
 // are now sized above the worst-case handler, so a redelivery-while-in-flight is
 // the pathological case rather than the routine one; and across pods the OMS's
 // real arbiter is Store.Save's version predicate (#122), which REJECTS the
-// losing writer rather than letting two pods overwrite each other. The one
-// production wiring of this deduper is risk-engine (redis build tag,
-// RISK_ENGINE_REDIS_URL set), whose handlers are in-memory risk folds and
-// nowhere near 5s.
+// losing writer rather than letting two pods overwrite each other.
+//
+// A THIRD BOUND WAS STATED HERE AND WAS NOT TRUE (#111). This paragraph used to
+// end "The one production wiring of this deduper is risk-engine (redis build
+// tag, RISK_ENGINE_REDIS_URL set), whose handlers are in-memory risk folds and
+// nowhere near 5s." Checked against the tree on 2026-08-07, BOTH HALVES ARE
+// FALSE:
+//
+//   - services/risk-engine/Dockerfile builds `go build -trimpath …` with NO
+//     `-tags redis`, so the shipped binary compiles dedup_default.go and this
+//     type is not linked into it at all.
+//   - Nothing under infra/ sets RISK_ENGINE_REDIS_URL, so even dedup_default.go's
+//     "set but built without -tags redis" warning cannot fire.
+//
+// This deduper therefore has NO production wiring, and the sentence was
+// load-bearing: it bounded the inversion above by asserting that the only caller
+// has fast handlers. With no caller the bound is vacuous, and the next service
+// wired here would inherit a reassurance measured on a service that was never
+// wired at all — the reader sizes a real risk from a premise that quietly
+// stopped being true.
+//
+// WHAT IS TRUE TODAY: risk-engine runs `replicas: 3` plus a KEDA ScaledObject on
+// PER-INSTANCE dedup, which is precisely the N-replica case this type exists
+// for. Closing that is #111's cutover. Until it lands, the 5s lease must be
+// re-argued against the first real caller's handlers rather than inherited from
+// this paragraph.
+//
+// test/arch/redis_build_tag_wiring_test.go now fails the build if a service's
+// build tag and its estate wiring disagree, so this cannot drift silently again.
 //
 // Closing the gap properly needs Claim to distinguish "leased by someone who may
 // be dead" from "already committed" so the Consumer can defer instead of ack —
