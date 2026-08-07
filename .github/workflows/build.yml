@@ -232,7 +232,24 @@ jobs:
             type=ref,event=branch
             type=raw,value=latest,enable={{is_default_branch}}
 
-      - name: Build and push
+      # BUILD AND PUSH ARE SEPARATE STEPS ON PURPOSE (#320).
+      #
+      # They used to be one `docker/build-push-action` with `push: true`, which
+      # made a refused push and a broken Dockerfile the same event: one red step,
+      # distinguishable only by reading the log. GHCR refuses ~2 pushes in 5 here
+      # — random services, never the same one twice, green on an identical re-run
+      # — so that shape reddened main regularly for no code reason, and each
+      # occurrence still had to be diagnosed before it could be dismissed.
+      #
+      # Splitting them is what makes a retry SAFE rather than reckless. The retry
+      # lives on the push alone, so a build failure — a compile error, a bad
+      # Dockerfile, a missing SDK — fails immediately and is never retried. That
+      # separation, not the retry itself, is the load-bearing part of this change.
+      #
+      # `load` only on push events: a pull_request builds for validation and has
+      # nothing to publish, so exporting the image to the daemon there would be
+      # pure cost.
+      - name: Build
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           # context: . uses the local checkout (incl. the generated gen/go),
@@ -242,8 +259,22 @@ jobs:
           # Not a release, so the commit SHA is the honest version (#143).
           build-args: |
             VERSION=${{ github.sha }}
-          push: ${{ github.event_name == 'push' }}
+          push: false
+          load: ${{ github.event_name == 'push' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha,scope=${{ matrix.service }}
           cache-to: type=gha,scope=${{ matrix.service }},mode=max
+
+      # The retry, and the count that keeps the flake visible after it stops being
+      # fatal. See .github/scripts/push-with-retry.sh for why it keys on the
+      # outcome rather than on "403" — four spellings were observed in one day and
+      # a string match already missed one of them.
+      - name: Push (retried on a refused push)
+        id: push
+        if: github.event_name == 'push'
+        env:
+          TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          # shellcheck disable=SC2086 # TAGS is a newline-separated list, word splitting is intended
+          .github/scripts/push-with-retry.sh $TAGS
