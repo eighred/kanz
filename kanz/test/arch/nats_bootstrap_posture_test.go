@@ -152,7 +152,7 @@ func TestNATSBootstrapKeepsItsMTLSPosture(t *testing.T) {
 // The original implementation cut at the first '#' on the line regardless, so
 // such a line was truncated and everything after the quote vanished from the
 // scan. That direction fails OPEN: the guard stops seeing text it is supposed
-// to be checking and reports success. TestEveryObservabilityMetricExistsInGo
+// to be checking and reports success. TestEveryObservabilityMetricExistsInSource
 // scans PromQL expressions with quoted matchers, where a metric name can sit
 // after a quoted '#', so it needs the distinction; the NATS needles below are
 // unaffected either way, because stripping less can only ever reveal more.

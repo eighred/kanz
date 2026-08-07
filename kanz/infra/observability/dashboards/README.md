@@ -52,7 +52,7 @@ was *"wired separately"*. Defining the names first was a deliberate choice, the
 The exporter never landed. Then the detectors it would have wrapped were deleted
 too. So there was never a moment when a single one of these panels had data
 behind it, and every one of the nine metrics below is absent from the Go source
-today — verified by matching the way `TestEveryObservabilityMetricExistsInGo`
+today — verified by matching the way `TestEveryObservabilityMetricExistsInSource`
 matches, against quoted string literals rather than any mention.
 
 That is why they were deleted rather than kept as a target: a dashboard is not a
@@ -136,7 +136,7 @@ JSON was written.
 Two guards enforce step 3 against steps 1 and 2, and they cover different
 vocabularies:
 
-- `TestEveryObservabilityMetricExistsInGo` — a dashboard or rule naming a
+- `TestEveryObservabilityMetricExistsInSource` — a dashboard or rule naming a
   `kanz_*` metric the Go source does not emit fails the build. This is the guard
   that would have caught the three deletions above.
 - `TestEverySLORecordingRuleReferenceIsProduced` — a dashboard or alert naming a

@@ -768,7 +768,7 @@ groups:
       # documented and left.
       #
       # `up` is Prometheus's own per-target series, not a kanz_* metric, so
-      # TestEveryObservabilityMetricExistsInGo cannot check this name. That is a
+      # TestEveryObservabilityMetricExistsInSource cannot check this name. That is a
       # real (small) hole in the guard and is noted at its definition.
       #
       # for: 10m: long enough to sit out a rolling update, a node drain and a
@@ -821,7 +821,7 @@ groups:
       # not worth a permanent alert appearing and disappearing.
       #
       # prometheus_notifications_alertmanagers_discovered is Prometheus's own
-      # series, not a kanz_* one, so TestEveryObservabilityMetricExistsInGo
+      # series, not a kanz_* one, so TestEveryObservabilityMetricExistsInSource
       # cannot check the name — the same (small, known) hole as `up` in
       # KanzScrapeTargetDown above. It is verified instead by
       # operational_test.yaml, which fires this rule from a synthetic series, and

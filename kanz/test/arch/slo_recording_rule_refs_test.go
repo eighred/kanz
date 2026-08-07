@@ -11,7 +11,7 @@ import (
 
 // EVERY slo:* SERIES A DASHBOARD OR AN ALERT USES MUST BE PRODUCED BY A RECORDING RULE.
 //
-// This is TestEveryObservabilityMetricExistsInGo's argument applied one layer
+// This is TestEveryObservabilityMetricExistsInSource's argument applied one layer
 // up, and the layer it covers was genuinely uncovered: that guard matches
 // `kanz_*` names, so it checks the RAW series a Go service exports and says
 // nothing about the DERIVED series the recording rules compute. The SLO
@@ -125,7 +125,7 @@ func sloSeriesReferences(t *testing.T, obsRoot, rulesFile string) map[string][]s
 
 		body := readFile(t, path)
 
-		// Same split as TestEveryObservabilityMetricExistsInGo, for the same two
+		// Same split as TestEveryObservabilityMetricExistsInSource, for the same two
 		// reasons. YAML: comments deliberately record series that were REMOVED
 		// (the market-data freshness SLO), and a guard that flags those gets
 		// neutered to make it pass, taking the record with it. JSON: it has no
