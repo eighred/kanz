@@ -147,24 +147,30 @@ type Profile struct {
 // anonymous EOF. This converts that outcome into a named one; it does not take a
 // result away from anybody.
 //
-// Three queries in this estate are unbounded by construction and were checked
-// against this number before it was chosen:
+// Three queries in this estate were unbounded by construction and were checked
+// against this number before it was chosen. TWO REMAIN:
 //
 //   - ledger.Journal — a portfolio's whole journal, no LIMIT (accounting's
 //     Snapshotter, and MaterializeCurrent's no-checkpoint fallback).
 //   - ledger.StalePortfolios — an aggregate over the journal index, on a
 //     background ticker.
-//   - audit's `full-log` report — audit.Filter{} with no window and no cap. The
-//     handler narrows it to the caller's tenant and nothing else, then renders the
-//     whole result set in memory.
 //
-// None of them approaches 90s at this estate's data volume. Two are off the
-// request path and are re-run on the next tick, so a 57014 there costs a cycle,
-// not a result; the third is a report that at a minute and a half should be
-// asynchronous rather than held open. If one of them legitimately needs longer,
-// the answer is WithStatementTimeout on that query — NOT raising this number until
-// nothing complains, which would give the other two back the unbounded hold this
-// bound exists to remove, and would walk it back into the write bound.
+// The third was audit's `full-log` report — audit.Filter{} with no window and no
+// cap, rendered whole in memory. IT IS NO LONGER UNBOUNDED (#304): every report
+// template now carries a page size, the route pages on a Seq cursor, and a
+// partial export declares itself so a truncation cannot be read as a complete
+// log. It is listed here only so this paragraph is not read as still describing
+// it — the audit report is no longer one of the queries this timeout is sized to
+// survive.
+//
+// Neither remaining query approaches 90s at this estate's data volume, and both
+// are OFF the request path — they are re-run on the next tick, so a 57014 there
+// costs a cycle, not a result. That is a materially safer position than when
+// this number was chosen, because the one request-path query in the list is the
+// one that got fixed. If one of the two legitimately needs longer, the answer is
+// WithStatementTimeout on that query — NOT raising this number until nothing
+// complains, which would give both back the unbounded hold this bound exists to
+// remove, and would walk it back into the write bound.
 //
 // A literal `N * time.Unit` product, and a const rather than an inline field, so
 // that test/arch/http_server_timeouts_test.go can read it out of this source and

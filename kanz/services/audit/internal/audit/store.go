@@ -14,6 +14,15 @@ type Head struct {
 
 // Filter selects records for Query. Zero-value fields are ignored, so an empty
 // Filter matches everything (bounded by Limit). Times are inclusive.
+//
+// AfterSeq IS A CURSOR, AND SEQ IS THE ONLY SAFE KEY FOR ONE HERE. Query orders
+// by seq ascending and Append assigns seq monotonically, so "seq > n" resumes
+// exactly where a page stopped. OccurredAt cannot do this job: it comes off the
+// event, so it is neither unique nor monotonic — two records can share a
+// timestamp, and a page boundary landing between them would either skip or
+// repeat one. In an audit export a skipped record is missing evidence and a
+// repeated one is a false duplicate, so the cursor has to be the key the store
+// itself assigns (#304).
 type Filter struct {
 	Correlation string
 	Tenant      string
@@ -21,7 +30,10 @@ type Filter struct {
 	EventType   string
 	Since       time.Time
 	Until       time.Time
-	Limit       int
+	// AfterSeq returns only records with seq strictly greater than it. Zero
+	// means "from the beginning" — seq starts at 1, so no record is excluded.
+	AfterSeq int64
+	Limit    int
 }
 
 // Store is the append-only audit log. Implementations MUST be append-only — no
@@ -72,6 +84,9 @@ type Store interface {
 // matches reports whether r satisfies f (shared by the in-memory store and
 // tests; the Postgres store pushes the same predicates into SQL).
 func matches(r *Record, f Filter) bool {
+	if f.AfterSeq > 0 && r.Seq <= f.AfterSeq {
+		return false
+	}
 	if f.Correlation != "" && r.CorrelationID != f.Correlation {
 		return false
 	}

@@ -11,6 +11,7 @@ import (
 	"context"
 	"encoding/csv"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
@@ -45,29 +46,81 @@ type Attestation struct {
 	Detail   string `json:"detail,omitempty"`
 }
 
+// Page sizing for report templates (#304).
+//
+// DefaultPageSize is what a template carries when it does not choose; MaxPageSize
+// is the ceiling a caller may raise it to. The numbers are not load-derived and
+// do not need to be: the defect being fixed is UNBOUNDED, so any finite cap is a
+// different class of thing from no cap. What matters is that exceeding the cap is
+// visible, which Report.Complete makes it.
+const (
+	DefaultPageSize = 1000
+	MaxPageSize     = 10000
+)
+
+// ErrUnboundedTemplate refuses a template whose filter has no Limit.
+//
+// THIS IS A REFUSAL, NOT A DEFAULT, and that is the whole point. Quietly
+// substituting DefaultPageSize here would make a misconfigured template — one
+// that asks for the entire WORM log — indistinguishable from a correctly capped
+// one, which is exactly the "nothing configured and checked-and-fine look the
+// same" failure the standard forbids. A template is data; data can be wrong; it
+// must say so on the first request rather than on the request that runs the pod
+// out of memory.
+var ErrUnboundedTemplate = errors.New("report template has no Limit: it would read the tenant's entire audit log into memory")
+
 // Report is a generated report: the selected records plus provenance + integrity.
+//
+// Complete/NextCursor are the half that makes paging honest. A truncated audit
+// export that looks whole is worse than a refused one, because it will be read
+// as evidence — so a partial report says so IN THE ARTIFACT, and carries the
+// cursor to resume from rather than leaving the caller to infer it.
 type Report struct {
-	Template    string          `json:"template"`
-	Title       string          `json:"title"`
-	GeneratedAt time.Time       `json:"generated_at"`
-	Integrity   Attestation     `json:"integrity"`
-	Records     []*audit.Record `json:"records"`
+	Template    string      `json:"template"`
+	Title       string      `json:"title"`
+	GeneratedAt time.Time   `json:"generated_at"`
+	Integrity   Attestation `json:"integrity"`
+	Count       int         `json:"count"`
+	// Complete reports whether this page is the END of the selection. False
+	// means more records match and NextCursor resumes after the last one here.
+	Complete   bool            `json:"complete"`
+	NextCursor int64           `json:"next_cursor,omitempty"`
+	Records    []*audit.Record `json:"records"`
 }
 
 // Generate runs a template against the store: it verifies the full chain for the
 // attestation, then queries the template's filter for the report body. now is
 // injectable for deterministic tests.
+//
+// HOW "IS THERE MORE?" IS ANSWERED: by asking for Limit+1 rows and returning at
+// most Limit. A COUNT(*) would be a second scan of the same predicate — the
+// expensive half — and it would race the appends still arriving at the head of a
+// WORM log. One extra row is exact, costs one row, and cannot disagree with the
+// page it was read alongside.
 func Generate(ctx context.Context, store audit.Store, tmpl Template, now func() time.Time) (*Report, error) {
 	if now == nil {
 		now = time.Now
+	}
+	if tmpl.Filter.Limit <= 0 {
+		return nil, fmt.Errorf("%w: template %q", ErrUnboundedTemplate, tmpl.Name)
 	}
 	att, err := Verify(ctx, store)
 	if err != nil {
 		return nil, err
 	}
-	records, err := store.Query(ctx, tmpl.Filter)
+	limit := tmpl.Filter.Limit
+	probe := tmpl.Filter
+	probe.Limit = limit + 1
+	records, err := store.Query(ctx, probe)
 	if err != nil {
 		return nil, err
+	}
+	complete := true
+	var next int64
+	if len(records) > limit {
+		records = records[:limit]
+		complete = false
+		next = records[len(records)-1].Seq
 	}
 	title := tmpl.Title
 	if title == "" {
@@ -78,6 +131,9 @@ func Generate(ctx context.Context, store audit.Store, tmpl Template, now func() 
 		Title:       title,
 		GeneratedAt: now().UTC(),
 		Integrity:   att,
+		Count:       len(records),
+		Complete:    complete,
+		NextCursor:  next,
 		Records:     records,
 	}, nil
 }
@@ -131,10 +187,22 @@ func (r *Report) RenderJSON() ([]byte, error) {
 // RenderCSV renders the report records as CSV. The integrity attestation is
 // emitted as leading comment-style header rows so a single artifact carries both
 // the data and its tamper-evidence statement.
+//
+// THE COMPLETENESS ROW IS NOT COSMETIC AND CSV IS WHERE IT MATTERS MOST. JSON
+// carries "complete" as a field a parser sees; a CSV is opened in a spreadsheet,
+// where a page of 1000 rows looks exactly like a log of 1000 rows. Whoever reads
+// it as the tenant's audit history has no other signal that it stops short, so
+// the artifact states it and names the cursor that continues it (#304).
 func (r *Report) RenderCSV() ([]byte, error) {
 	var buf bytes.Buffer
 	fmt.Fprintf(&buf, "# report: %s\n# generated_at: %s\n# integrity_verified: %t (records=%d head=%s)\n",
 		r.Title, r.GeneratedAt.Format(time.RFC3339), r.Integrity.Verified, r.Integrity.Records, r.Integrity.Head)
+	if r.Complete {
+		fmt.Fprintf(&buf, "# complete: true (%d record(s), end of selection)\n", r.Count)
+	} else {
+		fmt.Fprintf(&buf, "# complete: false — THIS IS A PARTIAL EXPORT: %d record(s), more remain. "+
+			"Resume with ?after=%d\n", r.Count, r.NextCursor)
+	}
 	w := csv.NewWriter(&buf)
 	if err := w.Write([]string{"seq", "event_id", "occurred_at", "kind", "event_type", "tenant", "correlation_id", "summary"}); err != nil {
 		return nil, err
