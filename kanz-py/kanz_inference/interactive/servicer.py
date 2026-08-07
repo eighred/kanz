@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from typing import Optional
 
 import grpc
@@ -45,6 +46,7 @@ from inference.v1.inference_service_pb2_grpc import (
 )
 from inference.v1.prediction_pb2 import PredictionEnvelope, PredictionMode
 
+from kanz_inference.observability import metrics
 from kanz_inference.streaming.worker import Model
 
 logger = logging.getLogger(__name__)
@@ -82,6 +84,10 @@ class InferenceServicer(InferenceServiceServicer):
         self._model = model
         self._max_in_flight = max_in_flight
         self._in_flight = 0
+        # The bound is what kanz_inference_predict_in_flight has to be read
+        # against — a gauge of 30 is healthy at 64 and refusing traffic at 32,
+        # and an alert cannot tell those apart without the denominator.
+        metrics.ADMISSION_LIMIT.set(max_in_flight)
 
     @property
     def in_flight(self) -> int:
@@ -99,16 +105,34 @@ class InferenceServicer(InferenceServiceServicer):
                 self._in_flight,
                 self._max_in_flight,
             )
-            return self._degraded(request, REASON_POOL_SATURATED)
+            # THE ADMISSION-REJECT SERIES. It is counted here rather than by a
+            # dedicated counter because a reject IS a degraded response — see the
+            # note on metrics.PREDICT_IN_FLIGHT. NOTE the early return: this path
+            # never enters the timing block below, so a reject cannot flatter the
+            # latency histogram at the exact moment the pod is saturated.
+            return metrics.observe_prediction(
+                metrics.PATH_INTERACTIVE, self._degraded(request, REASON_POOL_SATURATED)
+            )
 
         self._in_flight += 1
+        metrics.PREDICT_IN_FLIGHT.set(self._in_flight)
+        started = time.perf_counter()
         try:
-            return await self._model.predict(request)
+            return metrics.observe_prediction(
+                metrics.PATH_INTERACTIVE, await self._model.predict(request)
+            )
         except asyncio.CancelledError:
             # Client deadline expired or call cancelled. Don't
             # synthesise a response — the client isn't listening.
             # PRED-07 translates DEADLINE_EXCEEDED to a DEGRADED
             # envelope on the client side per PRED-06 contract.
+            #
+            # Counted as its own mode, NOT as degraded: no envelope was produced
+            # and the fault is a client deadline, not the model. Folding it into
+            # the degraded rate would page the model owner for a caller's timeout.
+            metrics.PREDICTIONS.labels(
+                path=metrics.PATH_INTERACTIVE, mode=metrics.MODE_CANCELLED
+            ).inc()
             raise
         except Exception as e:  # noqa: BLE001 — degraded-fallback path
             logger.warning(
@@ -116,9 +140,19 @@ class InferenceServicer(InferenceServiceServicer):
                 request.subject_id,
                 e,
             )
-            return self._degraded(request, REASON_INFERENCE_UNAVAILABLE)
+            return metrics.observe_prediction(
+                metrics.PATH_INTERACTIVE,
+                self._degraded(request, REASON_INFERENCE_UNAVAILABLE),
+            )
         finally:
             self._in_flight -= 1
+            metrics.PREDICT_IN_FLIGHT.set(self._in_flight)
+            # Observed for every ADMITTED call, including the failed and cancelled
+            # ones: a model that fails slowly is the case where the p99 matters
+            # most, and dropping those samples hides it.
+            metrics.PREDICT_SECONDS.labels(path=metrics.PATH_INTERACTIVE).observe(
+                time.perf_counter() - started
+            )
 
     def _degraded(
         self, fv: FeatureVector, reason: str

@@ -38,6 +38,7 @@ from kanz_bus.nats import NATSClient
 from kanz_bus.producer import Producer, ProducerConfig
 
 from kanz_inference.interactive.servicer import serve
+from kanz_inference.observability import DEFAULT_METRICS_BIND, ObservabilityServer, metrics
 from kanz_inference.publish import Publisher
 from kanz_inference.service import NoPrimaryModelError, RegistryRouter, build_registry, load_specs, require_primary
 from kanz_inference.streaming.worker import StreamingWorker
@@ -80,6 +81,13 @@ async def _run() -> int:
         )
         return 2
 
+    # WHICH WEIGHTS IS THIS REPLICA SERVING. The promotion gate above already
+    # refused anything without current validation, so this is not a health check
+    # — it is the answer a risk desk needs when two replicas disagree, and it is
+    # unavailable from outside the pod without a series.
+    for meta in registry.list_models():
+        metrics.PRIMARY_MODEL.labels(model_id=meta.model_id).set(1)
+
     # ONE router, BOTH paths. The interactive answer and the streaming answer are
     # produced by the same primary, so they cannot drift apart.
     router = RegistryRouter(registry, explain=_env("KANZ_INFERENCE_EXPLAIN", "true") != "false")
@@ -87,6 +95,18 @@ async def _run() -> int:
     bind = _env("KANZ_INFERENCE_BIND", DEFAULT_BIND)
     max_in_flight = int(_env("KANZ_INFERENCE_MAX_IN_FLIGHT", "64"))
     server = await serve(router, bind, max_in_flight=max_in_flight)
+
+    # THE HTTP SURFACE COMES UP AFTER THE gRPC PORT IS BOUND, and that ordering is
+    # the whole readiness contract. Binding 50051 already means "a PRIMARY model
+    # is loaded" (the process exits 2 otherwise), so starting here means /livez
+    # can never answer for a process that has no model to serve — the property
+    # the old tcpSocket probe had, kept.
+    #
+    # It RAISES if the port cannot be bound, and that is not swallowed: a pod
+    # carrying prometheus.io/port for a port nothing listens on is an
+    # unreachable target, and an absent target appears on no dashboard.
+    observability = ObservabilityServer(_env("KANZ_INFERENCE_METRICS_BIND", DEFAULT_METRICS_BIND))
+    observability.start()
 
     stopping = asyncio.Event()
     tasks: list[asyncio.Task] = []
@@ -115,6 +135,9 @@ async def _run() -> int:
             "FeatureVector FACTs on the bus will not be scored."
         )
 
+    # BOTH paths are wired; only now does this pod claim to be ready.
+    observability.mark_ready()
+
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):
         try:
@@ -124,11 +147,19 @@ async def _run() -> int:
 
     await stopping.wait()
     logger.info("shutting down")
+    # 503 ON /readyz FIRST, AND THIS IS WHY THE PROBES ARE NO LONGER tcpSocket.
+    # The listening socket stays open until the process exits, so a TCP readiness
+    # check passes for the whole termination grace period and the endpoints
+    # controller keeps sending this pod work it is about to drop. Failing
+    # readiness before anything is torn down is what removes it from the Service
+    # while it can still finish what it has.
+    observability.mark_draining()
     for t in tasks:
         t.cancel()
     await server.stop(grace=10)
     if client is not None:
         await client.close()
+    observability.stop()
     return 0
 
 

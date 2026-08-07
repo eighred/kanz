@@ -490,6 +490,17 @@ func declaredPythonDependencies(t *testing.T, path string) []string {
 			inDeps = false
 			continue
 		}
+		// STRIP THE COMMENT BEFORE SPLITTING ON COMMAS, or a comma inside one
+		// becomes a dependency. The per-piece `#` check below only catches a
+		// comment that survives the split intact: adding
+		//
+		//   # Pure Python, no transitive runtime dependencies of its own.
+		//
+		// beside an entry made this guard report a missing pin for a package
+		// named "no", and the obvious-looking fix is to delete the comment —
+		// i.e. a correct manifest turning a guard red, which is how guards get
+		// weakened instead of repaired. #241 hit it on the first edit.
+		trimmed = stripTOMLComment(trimmed)
 		for _, spec := range strings.Split(trimmed, ",") {
 			spec = strings.TrimSpace(strings.Trim(strings.TrimSpace(spec), `"'`))
 			if spec == "" || strings.HasPrefix(spec, "#") {
@@ -506,6 +517,72 @@ func declaredPythonDependencies(t *testing.T, path string) []string {
 	}
 	sort.Strings(names)
 	return names
+}
+
+// THE PARSER MUST BE PROVEN ON A SHAPE, BECAUSE A FALSE POSITIVE HERE READS AS A
+// DRIFTED LOCK.
+//
+// TestInferenceLockCoversEveryDeclaredDependency reports a name that has no pin.
+// If the parser invents a name, that report is indistinguishable from a real
+// missing pin — and the fastest way to make it green is to delete the comment
+// that produced it, which teaches the next contributor that annotating a
+// dependency breaks the build.
+func TestPyprojectDependencyParserReadsCommentedEntries(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "pyproject.toml")
+	body := `[build-system]
+requires = ["setuptools>=68"]
+
+[project]
+name = "kanz-bus"
+dependencies = [
+    "nats-py>=2.7.0",
+    # The metrics surface. Pure Python, no transitive deps of its own.
+    "prometheus-client>=0.20",
+    "grpcio>=1.62",  # the interactive path
+]
+
+[project.optional-dependencies]
+test = [
+    "pytest>=8.0",
+]
+`
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	got := declaredPythonDependencies(t, path)
+	want := []string{"grpcio", "nats-py", "prometheus-client"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("declaredPythonDependencies = %v, want %v\n\n"+
+			"A name that is not in the [project] dependencies array — 'no' from the comment's "+
+			"comma, or 'pytest' from the optional-dependencies table — makes this guard demand a "+
+			"pin for a package the image never installs.", got, want)
+	}
+}
+
+// stripTOMLComment cuts a line at its first UNQUOTED '#'.
+//
+// Quote-aware rather than a plain Cut: PEP 508 lets a requirement carry a URL
+// with a fragment ("pkg @ https://host/w.whl#sha256=..."), and those live inside
+// the quoted spec. Nothing in kanz-py uses that form today, which is exactly why
+// a naive cut would sit here working until the day one did.
+func stripTOMLComment(line string) string {
+	inQuote := byte(0)
+	for i := 0; i < len(line); i++ {
+		c := line[i]
+		switch {
+		case inQuote != 0:
+			if c == inQuote {
+				inQuote = 0
+			}
+		case c == '"' || c == '\'':
+			inQuote = c
+		case c == '#':
+			return strings.TrimSpace(line[:i])
+		}
+	}
+	return line
 }
 
 // lockedPythonPackages reads `name==version` pins from a pip requirements file,

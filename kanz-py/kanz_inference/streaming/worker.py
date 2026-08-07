@@ -14,6 +14,7 @@ both paths agree on what counts as degraded.
 from __future__ import annotations
 
 import logging
+import time
 from dataclasses import dataclass, field
 from typing import Awaitable, Callable, Optional, Protocol, runtime_checkable
 
@@ -22,6 +23,7 @@ from inference.v1.feature_vector_pb2 import FeatureVector
 from inference.v1.prediction_pb2 import PredictionEnvelope, PredictionMode
 
 from kanz_bus import EventHandler, Subscriber
+from kanz_inference.observability import metrics
 
 logger = logging.getLogger(__name__)
 
@@ -142,9 +144,17 @@ class StreamingWorker:
         try:
             fv.ParseFromString(payload)
         except Exception as e:  # noqa: BLE001 — re-raised after logging
+            # An undecodable payload never reaches a model, so it appears in NO
+            # prediction series at all. Counted here or it is invisible outside
+            # the log, which is where a schema skew between the Go publisher and
+            # this consumer would otherwise sit unnoticed.
+            metrics.STREAM_EVENTS.labels(
+                outcome=metrics.STREAM_OUTCOME_UNMARSHAL_FAILED
+            ).inc()
             logger.error("feature payload unmarshal failed: %s", e)
             raise
 
+        started = time.perf_counter()
         try:
             prediction = await self._model.predict(fv)
         except Exception as e:  # noqa: BLE001 — degraded-fallback path
@@ -152,6 +162,11 @@ class StreamingWorker:
                 "model.predict raised for %s: %s — falling back", fv.subject_id, e
             )
             prediction = self._fallback(env, fv)
+        finally:
+            metrics.PREDICT_SECONDS.labels(path=metrics.PATH_STREAMING).observe(
+                time.perf_counter() - started
+            )
+        metrics.observe_prediction(metrics.PATH_STREAMING, prediction)
 
         # Only NORMAL predictions seed the cache. Caching a DEGRADED
         # prediction would let it serve later requests as if it were
@@ -159,7 +174,21 @@ class StreamingWorker:
         if prediction.mode == PredictionMode.PREDICTION_MODE_NORMAL:
             self._cache.store(fv.subject_id, prediction)
 
-        await self._publisher.publish_prediction(env, prediction)
+        try:
+            await self._publisher.publish_prediction(env, prediction)
+        except Exception:  # noqa: BLE001 — counted, then re-raised unchanged
+            # A prediction that was scored and never published is the one outcome
+            # the prediction counters CANNOT show: they already counted it. The
+            # exception still propagates so the subscriber naks and the event is
+            # redelivered — this adds a series, not a behaviour.
+            metrics.STREAM_EVENTS.labels(
+                outcome=metrics.STREAM_OUTCOME_PUBLISH_FAILED
+            ).inc()
+            raise
+        # END TO END: scored AND on the bus. This is the rate a stalled-consumer
+        # alert watches, because it is the only one that goes to zero when the
+        # durable subscription wedges.
+        metrics.STREAM_EVENTS.labels(outcome=metrics.STREAM_OUTCOME_HANDLED).inc()
 
     def _fallback(
         self, env: Envelope, fv: FeatureVector

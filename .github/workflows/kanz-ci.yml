@@ -510,8 +510,14 @@ jobs:
       # That last one closes the gap where protoc-gen-python alone omits the
       # gRPC stub inference.v1 (PRED-08) needs; wiring it into the buf release
       # pipeline so the *published* SDK ships it stays a follow-up.
+      # prometheus-client is a RUNTIME dependency, not a test one: kanz_inference's
+      # servicer and streaming worker import kanz_inference.observability.metrics
+      # at module scope (#241), so without it every kanz-py test that touches the
+      # inference package fails at collection. It is unpinned here for the same
+      # reason the rest of this line is — these are the TEST toolchain, and what
+      # the image installs is kanz-py/requirements.txt, hash-pinned.
       - name: Install Python deps
-        run: pip install grpcio-tools pytest pytest-asyncio nats-py aiokafka
+        run: pip install grpcio-tools pytest pytest-asyncio nats-py aiokafka prometheus-client
 
       - name: Generate Python schema SDK
         run: |
