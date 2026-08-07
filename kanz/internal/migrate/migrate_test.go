@@ -13,38 +13,108 @@ package migrate
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
+// newPool returns a pool scoped to a PRIVATE SCHEMA that only this test can see
+// (#212).
+//
+// THESE TESTS USED TO DROP THE SHARED MIGRATION LEDGER. They ran
+// `DROP TABLE IF EXISTS schema_migrations CASCADE` against whatever
+// TEST_POSTGRES_URL points at — and that database is not private to this
+// package. It is the ONE database every Postgres-gated test shares, which is why
+// CLAUDE.md mandates `go test -p 1`. So the ledger recording every service's
+// real schema was dropped by a test fixture, and the fixture's own rows
+// (0001_widgets.sql) were left behind in its place.
+//
+// The damage was ORDER-DEPENDENT, which is why it went unnoticed:
+//
+//	real migrations, then the suite → the ledger is dropped. The tables still
+//	  exist; the record that they were applied does not. The next kanz-migrate
+//	  re-applies 0001 against a schema that already has those objects.
+//	the suite, then real migrations → version 1 is occupied by 0001_widgets.sql
+//	  and kanz-migrate refuses: "version 1 is recorded as 0001_widgets.sql but
+//	  this directory supplies 0001_orders.sql".
+//
+// CI survived only by STEP ORDERING — kanz-ci.yml happens to run its OMS
+// kanz-migrate step before `go test`. Nothing enforced that. Re-ordering the
+// steps, or adding a second service's migrate step after the tests, would have
+// reintroduced it silently. `-p 1` does not help: this is residue and
+// destruction across SEQUENTIAL runs, not a concurrent-access race.
+//
+// A private schema is the fix that a future edit cannot undo. migrate.go
+// references `schema_migrations` UNQUALIFIED everywhere (:237, :252, :278), so
+// search_path decides which one it means — and search_path here is the test
+// schema ALONE, deliberately without `public`. Appending `public` would restore
+// the whole defect: an unqualified DROP falls through to the first schema that
+// has the table, which is exactly how the shared ledger was reachable.
+//
+// One pool per test, and every runner inside a test shares it — which is what
+// TestUpIsSafeUnderConcurrentRunners needs to contend at all.
 func newPool(t *testing.T) *pgxpool.Pool {
 	t.Helper()
 	url := os.Getenv("TEST_POSTGRES_URL")
 	if url == "" {
 		t.Skip("set TEST_POSTGRES_URL to run migrate integration tests")
 	}
-	pool, err := pgxpool.New(context.Background(), url)
+	ctx := context.Background()
+	schema := testSchemaName()
+
+	// Bootstrapped on the DEFAULT search_path, because the schema does not exist
+	// yet and a pool scoped to it could not connect.
+	boot, err := pgxpool.New(ctx, url)
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}
-	t.Cleanup(pool.Close)
-	// Each test starts from a clean slate: drop what these fixtures create.
-	ctx := context.Background()
-	for _, ddl := range []string{
-		`DROP TABLE IF EXISTS schema_migrations CASCADE`,
-		`DROP TABLE IF EXISTS widgets CASCADE`,
-		`DROP TABLE IF EXISTS gadgets CASCADE`,
-	} {
-		if _, err := pool.Exec(ctx, ddl); err != nil {
-			t.Fatalf("reset: %v", err)
-		}
+	if _, err := boot.Exec(ctx, `CREATE SCHEMA `+pgx.Identifier{schema}.Sanitize()); err != nil {
+		boot.Close()
+		t.Fatalf("create schema %s: %v", schema, err)
 	}
+	boot.Close()
+
+	cfg, err := pgxpool.ParseConfig(url)
+	if err != nil {
+		t.Fatalf("parse %s: %v", url, err)
+	}
+	if cfg.ConnConfig.RuntimeParams == nil {
+		cfg.ConnConfig.RuntimeParams = map[string]string{}
+	}
+	// Startup-packet parameter, so it binds before the first statement rather
+	// than after a SET that some connection in the pool might miss.
+	cfg.ConnConfig.RuntimeParams["search_path"] = schema
+
+	pool, err := pgxpool.NewWithConfig(ctx, cfg)
+	if err != nil {
+		t.Fatalf("connect (search_path=%s): %v", schema, err)
+	}
+	t.Cleanup(func() {
+		pool.Close()
+		c, err := pgxpool.New(context.Background(), url)
+		if err != nil {
+			return // the schema leaks rather than the test failing on teardown
+		}
+		defer c.Close()
+		_, _ = c.Exec(context.Background(),
+			`DROP SCHEMA IF EXISTS `+pgx.Identifier{schema}.Sanitize()+` CASCADE`)
+	})
+	// No DROP TABLE reset: a freshly created schema is already empty, and the
+	// resets are what made these tests dangerous in the first place.
 	return pool
+}
+
+// testSchemaName is unique per call, so two tests in one run cannot collide and
+// a leaked schema from an earlier run cannot be adopted by a later one.
+func testSchemaName() string {
+	return fmt.Sprintf("migratetest_%d_%d", os.Getpid(), time.Now().UnixNano())
 }
 
 // writeMigrations lays out a migrations dir in the repo's existing convention:
