@@ -111,6 +111,12 @@ func (p *Postgres) Query(ctx context.Context, f Filter) ([]*Record, error) {
 		args = append(args, val)
 		where = append(where, fmt.Sprintf(cond, len(args)))
 	}
+	// The cursor, pushed into SQL rather than applied after the read — a cursor
+	// filtered in Go would still transfer every earlier row, which is the cost
+	// paging exists to remove. seq is the primary key, so this is an index scan.
+	if f.AfterSeq > 0 {
+		add("seq > $%d", f.AfterSeq)
+	}
 	if f.Correlation != "" {
 		add("correlation_id = $%d", f.Correlation)
 	}

@@ -3,6 +3,7 @@ package server
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"strconv"
@@ -104,12 +105,19 @@ func (s *Server) handleQuery(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	q := r.URL.Query()
+	limit, ok := boundedLimit(q.Get("limit"), 100)
+	if !ok {
+		writeJSON(w, http.StatusBadRequest, map[string]string{
+			"error": fmt.Sprintf("limit must be between 1 and %d", report.MaxPageSize),
+		})
+		return
+	}
 	f := audit.Filter{
 		Correlation: q.Get("correlation"),
 		Tenant:      tenant,
 		Kind:        audit.Kind(q.Get("kind")),
 		EventType:   q.Get("event_type"),
-		Limit:       atoiOr(q.Get("limit"), 100),
+		Limit:       limit,
 	}
 	if t, ok := parseTime(q.Get("since")); ok {
 		f.Since = t
@@ -190,21 +198,32 @@ func (s *Server) handleVerify(w http.ResponseWriter, r *http.Request) {
 
 // handleReport generates a built-in template; ?format=csv overrides the default.
 //
-// THIS IS THE LONGEST HANDLER IN THE SERVICE AND IT IS NOW BOUNDED. The "full-log"
-// template carries an empty audit.Filter — no time window, no Limit — so it reads a
-// tenant's entire history, renders it into memory, and only then writes. Since #235
-// this server has a WriteTimeout (internal/platform/httpserver, 120s), whose clock
-// starts when the request is read, so a report that takes longer than that to
-// GENERATE is severed with no status and no body — it does not fail slowly, it
-// fails silently.
+// THIS IS THE LONGEST HANDLER IN THE SERVICE AND THE EXPORT IS NOW PAGED (#304).
 //
-// That bound is deliberate: before it, the same request held a goroutine and a file
-// descriptor for as long as the query ran, which is the leak #235 closes. But the
-// real defect it exposes is here, not in the timeout — an export endpoint with no
-// window, no page and no cap has no upper bound on either time OR memory, and 120s
-// is simply where that now becomes visible. The fix when a tenant outgrows it is a
-// bounded/streamed report, NOT a larger number: raising the estate WriteTimeout
-// would loosen every route on every service to accommodate one export.
+// It used to read a tenant's entire history: the "full-log" template carried an
+// empty audit.Filter — no time window, no Limit — over a table that is WORM by
+// contract and therefore only grows. #235 gave this server a WriteTimeout
+// (internal/platform/httpserver, 120s) whose clock starts when the request is
+// read, which converted an unbounded hang into a severed request with no status
+// and no body. That was an improvement and NOT the fix: it made the defect
+// visible at 120s rather than removing it, and the note here recorded that the
+// real answer was a bounded report and not a larger number.
+//
+// That is what the code below now does. Every template ships a page size, ?limit=
+// may adjust it within report.MaxPageSize, and ?after= resumes from the previous
+// page's next_cursor (Seq — monotonic, assigned by Append, and unlike
+// occurred_at it is unique, so a page boundary can neither skip nor repeat a
+// record). The response states whether it is Complete, because the failure this
+// endpoint had to avoid was never just OOM: a silently truncated audit export
+// returns 200 OK and will be read as the tenant's whole history.
+//
+// STILL TRUE, AND STILL THE REASON NOT TO RAISE THE TIMEOUT: report.Generate
+// attests the chain over the WHOLE log (Verify → store.Scan) on every page,
+// because a page without its attestation is unattested evidence. That scan is
+// unbounded by design — a hash chain cannot be verified from a suffix without a
+// trusted anchor — so it, not the record read, is now the dominant cost here.
+// Bounding it needs periodically signed checkpoints, which is a security design
+// and not a query change; see the note on audit.Store.Scan.
 func (s *Server) handleReport(w http.ResponseWriter, r *http.Request) {
 	tenant, authed := auth.RequireCallerTenant(w, r)
 	if !authed {
@@ -224,6 +243,33 @@ func (s *Server) handleReport(w http.ResponseWriter, r *http.Request) {
 	// artifact — the widest disclosure on this surface, because it is the one
 	// endpoint whose output is designed to leave the building.
 	tmpl.Filter.Tenant = tenant
+
+	// PAGING (#304). The template ships a Limit; ?limit= may narrow or widen it
+	// within MaxPageSize, and ?after= resumes from a previous page's
+	// next_cursor. Both are safe to take from the caller in a way ?tenant= was
+	// not: they select a WINDOW over records this principal is already entitled
+	// to read, they cannot widen the tenant scope set above, and the resulting
+	// read is bounded whatever is passed.
+	q := r.URL.Query()
+	limit, ok := boundedLimit(q.Get("limit"), tmpl.Filter.Limit)
+	if !ok {
+		writeJSON(w, http.StatusBadRequest, map[string]string{
+			"error": fmt.Sprintf("limit must be between 1 and %d", report.MaxPageSize),
+		})
+		return
+	}
+	tmpl.Filter.Limit = limit
+	if v := q.Get("after"); v != "" {
+		n, err := strconv.ParseInt(v, 10, 64)
+		if err != nil || n < 0 {
+			writeJSON(w, http.StatusBadRequest, map[string]string{
+				"error": "after must be a non-negative sequence number from a previous page's next_cursor",
+			})
+			return
+		}
+		tmpl.Filter.AfterSeq = n
+	}
+
 	rep, err := report.Generate(r.Context(), s.store, tmpl, time.Now)
 	if err != nil {
 		s.fail(w, r, err)
@@ -289,14 +335,31 @@ func (s *Server) fail(w http.ResponseWriter, r *http.Request, err error) {
 	writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
 }
 
-func atoiOr(s string, def int) int {
+// boundedLimit parses ?limit= for a read that MUST stay bounded, returning false
+// for anything it will not serve.
+//
+// IT REJECTS ZERO, AND THAT IS THE BUG IT EXISTS TO CLOSE. It replaces an
+// atoiOr(s, def) that accepted any n >= 0 — and audit.Filter.Limit == 0 does not
+// mean "no rows", it means NO LIMIT CLAUSE (postgres.go's `if f.Limit > 0`). So
+// `?limit=0` was a caller-supplied switch that turned this capped read into the
+// tenant's entire append-only log: the same unbounded export as #304's full-log
+// template, reachable on this route without any template at all. atoiOr was
+// deleted rather than left beside this — a lenient parser sitting next to a
+// strict one is how the lenient one gets picked for the next param.
+//
+// It also refuses ABOVE the cap rather than clamping. Clamping would answer a
+// request for 10× the ceiling with a short page and no indication the number was
+// ignored, which on an evidence export is the truncation-that-looks-complete
+// this work exists to prevent. A refusal is unambiguous.
+func boundedLimit(s string, def int) (int, bool) {
 	if s == "" {
-		return def
+		return def, true
 	}
-	if n, err := strconv.Atoi(s); err == nil && n >= 0 {
-		return n
+	n, err := strconv.Atoi(s)
+	if err != nil || n <= 0 || n > report.MaxPageSize {
+		return 0, false
 	}
-	return def
+	return n, true
 }
 
 func parseTime(s string) (time.Time, bool) {
