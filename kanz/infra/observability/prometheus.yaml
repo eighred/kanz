@@ -10,11 +10,16 @@
 # tested by promtool. Configuration that is complete and unconnected is the
 # hardest kind of gap to see.
 #
-# WHAT THIS IS NOT. It is not a metrics platform. Storage is an emptyDir (see
-# THE RETENTION LIMIT below), there is no remote_write, no HA pair and no
-# Alertmanager — so alerts are EVALUATED here and delivered nowhere. Deploying
-# this makes the platform observable; it does not make it alertable. Do not read
-# a running Prometheus as "on-call works".
+# WHAT THIS IS NOT. It is not a metrics platform. There is no remote_write, no
+# HA pair and no Alertmanager — so alerts are EVALUATED here and delivered
+# nowhere. Deploying this makes the platform observable; it does not make it
+# alertable. Do not read a running Prometheus as "on-call works".
+#
+# Storage IS now durable — a 31d PVC rather than the original 15d emptyDir (see
+# RETENTION below) — because the 28d error-budget window (#210) cannot be
+# computed from a database that is discarded on every pod restart. That fixes
+# retention; it does not make this an HA pair, and a single Prometheus on a
+# single RWO volume is still a single point of failure for the history.
 #
 # THAT LAST SENTENCE IS NO LONGER LEFT TO A COMMENT (#230). A comment is read
 # once, by whoever deploys; the operator looking at /alerts at 03:00 six months
@@ -206,8 +211,11 @@ spec:
   replicas: 1
   revisionHistoryLimit: 5
   strategy:
-    # Recreate, not RollingUpdate: the emptyDir below is owned by one pod, and a
-    # rolling update would briefly run two scrapers against the same targets.
+    # Recreate, not RollingUpdate: the TSDB volume below is ReadWriteOnce and
+    # owned by one pod, and a rolling update would briefly run two scrapers
+    # against the same targets AND two writers against the same TSDB. The second
+    # is the worse half — since #210 that volume is a PVC holding a month of
+    # history, so a corrupted TSDB is no longer a restart away from clean.
     type: Recreate
   selector:
     matchLabels:
@@ -249,13 +257,38 @@ spec:
           args:
             - --config.file=/etc/prometheus/prometheus.yml
             - --storage.tsdb.path=/prometheus
-            # THE RETENTION LIMIT. 15 days of LOCAL, EPHEMERAL storage: the
-            # volume below is an emptyDir, so a pod restart loses every sample.
-            # That is acceptable for making the platform observable and NOT
-            # acceptable as a metrics history — an incident review the week after
-            # a restart has nothing to read. A PVC or remote_write is the fix and
-            # is deliberately not smuggled in here.
-            - --storage.tsdb.retention.time=15d
+            # RETENTION MUST OUTLAST THE ERROR-BUDGET ACCOUNTING WINDOW (#210).
+            #
+            # This was 15 days, on an emptyDir. slo.yaml has declared a 28d
+            # accounting window since SRE-01a, so the moment anything computed
+            # over it the answer would have been assembled from half a month and
+            # published as a month — and `rate()` does not fail on a short
+            # database, it returns a smaller number. Under-reporting consumption
+            # reads as budget REMAINING, which is the reassuring direction and
+            # therefore the dangerous one.
+            #
+            # 31d, not 28d: the window must be fully covered at every instant,
+            # including immediately before a block is compacted out, so the
+            # retention has to exceed the window rather than equal it.
+            #
+            # THE SIZE CAP IS NOT OPTIONAL ALONGSIDE A PVC. Time-based retention
+            # alone lets the TSDB grow to whatever 31 days happens to cost; if
+            # that exceeds the volume, Prometheus does not shed data, it fails to
+            # write and crash-loops — and an observability stack that dies when
+            # the estate gets busy fails exactly when it is needed. 15GB against
+            # the 20Gi claim below leaves headroom for compaction, which needs
+            # room for the new block before dropping the old.
+            #
+            # SIZING, STATED SO IT CAN BE CHECKED RATHER THAN TRUSTED: at ~2
+            # bytes/sample compressed and a 30s scrape, 31 days costs roughly
+            # 2 × 2 × 60 × 24 × 31 ≈ 5.4MB per active series, so 15GB carries on
+            # the order of 2,800 series. That is an ESTIMATE from an estate that
+            # has never run this long. Check it against prometheus_tsdb_head_series
+            # and prometheus_tsdb_storage_blocks_bytes once it has, and raise both
+            # numbers together — the cap is only safe while it stays below the
+            # claim.
+            - --storage.tsdb.retention.time=31d
+            - --storage.tsdb.retention.size=15GB
             - --web.listen-address=:9090
           ports:
             - { name: http, containerPort: 9090 }
@@ -299,8 +332,47 @@ spec:
         # fails the build if CI stages a different set than the script would.
         - name: rules
           configMap: { name: prometheus-rules }
+        # A PVC, NOT AN emptyDir (#210). An emptyDir is discarded with the pod,
+        # so every restart reset the history to zero — and the error-budget
+        # window is 28 days. With ephemeral storage the budget figure would have
+        # been unavailable for a month after every routine node drain, image
+        # bump or OOM, which is most of the time on any estate that is actually
+        # being worked on.
+        #
+        # The claim is what makes `retention.time=31d` mean anything. Retention
+        # is an upper bound on what is KEPT; it says nothing about what survives.
         - name: data
-          emptyDir: {}
+          persistentVolumeClaim:
+            claimName: prometheus-data
+---
+# THE TSDB'S VOLUME (#210).
+#
+# ReadWriteOnce is correct and is not a limitation to route around: the
+# Deployment above is deliberately one replica with strategy Recreate, because
+# two plain Prometheus pods scrape and store independently and disagree. RWO and
+# Recreate together are what stop a rolling update from briefly attaching two
+# writers to one TSDB, which corrupts it.
+#
+# NO storageClassName, deliberately — the cluster's default class binds it. This
+# repository is deployed to more than one shape of cluster (kind locally, managed
+# elsewhere) and naming a class here would make the manifest bind on one and hang
+# Pending on the other, presenting as "Prometheus won't start" with nothing in
+# the pod events pointing at this line.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: prometheus-data
+  namespace: kanz-observability
+  labels:
+    app.kubernetes.io/part-of: kanz
+    app: prometheus
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      # Must exceed --storage.tsdb.retention.size (15GB) with room for
+      # compaction, which writes the new block before dropping the old.
+      storage: 20Gi
 ---
 apiVersion: v1
 kind: Service

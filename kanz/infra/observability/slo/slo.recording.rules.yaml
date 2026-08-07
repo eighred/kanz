@@ -1,6 +1,6 @@
 # SLO recording rules (SRE-01b) — compiled from slo.yaml (SRE-01a).
 #
-# Two layers:
+# Three layers:
 #   slo_meta         — per-SLO error budget (1 − objective) as a labeled series.
 #                      Alerts join against these so the burn threshold lives in
 #                      ONE place per SLO.
@@ -9,10 +9,19 @@
 #                      `slo:sli_error:ratio_rate<window>`, labeled {service,slo},
 #                      so slo.alerts.rules.yaml stays generic (one alert per
 #                      burn pair covers every SLO via on(service,slo) matching).
+#   slo_budget_28d   — the ACCOUNTING window (#210). Burn RATE was fully covered
+#                      by the seven windows above; burn TOTAL was not, so "how
+#                      much of this month's budget is left" was not answerable
+#                      from anywhere. An SLO can sit inside every burn-rate
+#                      threshold all month and still have spent its whole
+#                      budget, because those alerts are rate-of-spend alarms and
+#                      none of them integrates.
 #
 # Series are the OBS-01 RED contract (kanz_gateway_/kanz_risk_/kanz_bus_*) —
-# the exact names slo.yaml binds. Windows match slo.yaml defaults.burn_rates:
-# pairs (1h,5m) (6h,30m) (1d,2h) (3d,6h).
+# the exact names slo.yaml binds. The burn windows match slo.yaml
+# defaults.burn_rates: pairs (1h,5m) (6h,30m) (1d,2h) (3d,6h). The eighth window
+# is 28d, which is slo.yaml `defaults.window` — the accounting period, not a burn
+# pair, which is why it lives in its own group and has its own coverage guard.
 #
 # THE MARKET-DATA FRESHNESS SLO WAS REMOVED, NOT SUSPENDED. It was compiled
 # from kanz_data_staleness_lag_seconds, a DATA-02 gauge emitted by
@@ -168,3 +177,76 @@ groups:
       - record: slo:sli_error:ratio_rate3d
         expr: 1 - (sum(rate(kanz_bus_consume_total{result="ok"}[3d])) / sum(rate(kanz_bus_consume_total[3d])))
         labels: { service: event-bus, slo: delivery-success }
+
+  # THE ERROR-BUDGET ACCOUNTING WINDOW (#210).
+  #
+  # slo.yaml has declared `defaults.window: 28d` since SRE-01a and described the
+  # objectives as commitments over it, and nothing computed anything over 28d.
+  # The seven windows above are the union of the burn-rate long/short pairs; they
+  # measure the RATE of spend. This group measures the TOTAL.
+  #
+  # The distinction is not academic: every burn-rate alert can stay silent for a
+  # month while the budget is consumed, because each one asks "is it burning fast
+  # right now" and none of them integrates. "How much of this month's budget is
+  # left" needed a different question.
+  - name: slo_budget_28d
+    rules:
+      # --- 28d error ratio, same compile as the burn windows ---
+      - record: slo:sli_error:ratio_rate28d
+        expr: 1 - (sum(rate(kanz_gateway_requests_total{code!~"5.."}[28d])) / sum(rate(kanz_gateway_requests_total[28d])))
+        labels: { service: api-gateway, slo: availability }
+      - record: slo:sli_error:ratio_rate28d
+        expr: 1 - (sum(rate(kanz_gateway_request_duration_seconds_bucket{le="0.5"}[28d])) / sum(rate(kanz_gateway_request_duration_seconds_count[28d])))
+        labels: { service: api-gateway, slo: query-latency }
+      - record: slo:sli_error:ratio_rate28d
+        expr: 1 - (sum(rate(kanz_risk_recompute_total{status="ok"}[28d])) / sum(rate(kanz_risk_recompute_total[28d])))
+        labels: { service: risk-engine, slo: recompute-success }
+      - record: slo:sli_error:ratio_rate28d
+        expr: 1 - (sum(rate(kanz_risk_recompute_duration_seconds_bucket{le="0.5"}[28d])) / sum(rate(kanz_risk_recompute_duration_seconds_count[28d])))
+        labels: { service: risk-engine, slo: recompute-latency }
+      - record: slo:sli_error:ratio_rate28d
+        expr: 1 - (sum(rate(kanz_bus_consume_total{result="ok"}[28d])) / sum(rate(kanz_bus_consume_total[28d])))
+        labels: { service: event-bus, slo: delivery-success }
+
+      # HOW MUCH OF THE WINDOW THE DATABASE ACTUALLY HOLDS.
+      #
+      # This is the guard the whole group rests on, and #210 is explicit about
+      # why: `rate()` over 28d does not fail on a database holding 15 days. It
+      # computes over whatever exists and returns a number indistinguishable
+      # from a full month's — which UNDERSTATES consumption and therefore reads
+      # as budget remaining. The confidently-wrong direction is the dangerous
+      # one.
+      #
+      # prometheus_tsdb_lowest_timestamp_seconds is the oldest sample in the
+      # TSDB; Prometheus scrapes itself (see its pod annotation), so this is
+      # available on the same surface as everything else.
+      #
+      # clamp() BOTH WAYS IS NOT DEFENSIVE PADDING. On an EMPTY database the
+      # metric is a max-int sentinel (9.22e15, verified against v3.1.0 — the
+      # digest this estate pins), so the subtraction is hugely NEGATIVE rather
+      # than zero. Without the lower clamp a fresh Prometheus reports a large
+      # negative coverage; with it, it reports 0, which is the truth.
+      - record: slo:budget_window_coverage:ratio
+        expr: clamp(max(time() - prometheus_tsdb_lowest_timestamp_seconds) / (28 * 24 * 3600), 0, 1)
+
+      # THE ANSWER: fraction of the 28d error budget consumed. 1.0 means the
+      # budget for the window is exactly spent; above 1.0 the objective is
+      # missed for the window.
+      #
+      # IT IS GATED ON COVERAGE, AND THE GATE MAKES IT ABSENT RATHER THAN WRONG.
+      # If the database does not hold the window, this series does not exist —
+      # a dashboard reads "no data" instead of a reassuring number, and
+      # SLOBudgetWindowNotCovered says why. That is the platform standard
+      # applied literally: "nothing configured" and "checked, and fine" must
+      # never look the same. A budget figure computed from half a window is
+      # exactly the second wearing the first's clothes.
+      #
+      # 0.99 rather than 1.0 because coverage is measured against wall-clock and
+      # a scrape gap of minutes should not blank the panel; anything materially
+      # short of the window does.
+      - record: slo:error_budget_consumed:ratio
+        expr: |
+          (
+            slo:sli_error:ratio_rate28d / on(service, slo) slo:error_budget:ratio
+          )
+          and on() (slo:budget_window_coverage:ratio >= 0.99)

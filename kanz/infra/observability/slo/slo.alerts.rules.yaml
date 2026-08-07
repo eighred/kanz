@@ -69,3 +69,42 @@ groups:
         annotations:
           summary: "Chronic error-budget drain on {{ $labels.service }}/{{ $labels.slo }}"
           description: "{{ $labels.service }}/{{ $labels.slo }} has burned >1× budget over 3d (3d+6h windows) — current 3d error ratio {{ $value | humanizePercentage }}. The 28d budget will not survive the window at this rate."
+
+  # THE ACCOUNTING WINDOW (#210). The four rungs above are rate-of-spend alarms
+  # over 1h…3d; none of them integrates, so an SLO can sit under every one of
+  # them for a month and still finish it with the budget gone. These two are
+  # about the TOTAL, and about whether the total can be trusted at all.
+  - name: slo_budget_window
+    rules:
+      # THE BUDGET FOR THE WINDOW IS SPENT. Not a page: nothing is on fire right
+      # now — that is precisely the point, and precisely why the burn-rate rungs
+      # are silent. It is the signal that the objective has been missed for the
+      # accounting period, which is a release-policy decision (freeze, or accept
+      # and reset) rather than an incident.
+      - alert: SLOBudgetExhausted
+        expr: slo:error_budget_consumed:ratio >= 1
+        for: 1h
+        labels: { severity: warning, layer: slo, burn_rate: exhausted }
+        annotations:
+          summary: "28d error budget exhausted for {{ $labels.service }}/{{ $labels.slo }}"
+          description: "{{ $labels.service }}/{{ $labels.slo }} has consumed {{ $value | humanizePercentage }} of its 28d error budget. No burn-rate alert need have fired: those measure rate of spend and none of them integrates over the window."
+
+      # THE BUDGET CANNOT BE MEASURED — which must be LOUD, because the series it
+      # guards is deliberately ABSENT rather than wrong when this fires.
+      #
+      # Without this alert the failure mode is a dashboard panel reading "no
+      # data" for a month while everyone assumes the panel is broken. With it,
+      # "we are not measuring the budget" is itself a reportable state — the
+      # distinction between "nothing configured" and "checked, and fine" that
+      # this platform refuses to blur.
+      #
+      # It is expected to fire for ~28 days after any Prometheus restart that
+      # loses the TSDB, and that is correct rather than noise: the budget really
+      # is unknown for that period.
+      - alert: SLOBudgetWindowNotCovered
+        expr: slo:budget_window_coverage:ratio < 0.99
+        for: 1h
+        labels: { severity: warning, layer: slo }
+        annotations:
+          summary: "Error-budget accounting window is not covered by retained data"
+          description: "The TSDB holds {{ $value | humanizePercentage }} of the 28d accounting window, so slo:error_budget_consumed:ratio is NOT being produced — a partial window would understate consumption and read as budget remaining. Check retention (--storage.tsdb.retention.time) and whether the volume survived a restart."
