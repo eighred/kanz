@@ -19,7 +19,7 @@
       "gridPos": { "h": 4, "w": 24, "x": 0, "y": 0 },
       "options": {
         "mode": "markdown",
-        "content": "**Values are burn rates — multiples of the error budget, not error ratios.** `1×` spends the whole 28d budget exactly over 28d. The alert rules page at `14.4×` (1h+5m) and `6×` (6h+30m), and ticket at `3×` (1d+2h) and `1×` (3d+6h); the thresholds here are those same numbers.\n\n**An empty panel is not a healthy panel.** `NOT MEASURED` means the SLI series does not exist — nothing is scraping it, and its burn-rate alerts cannot fire. `IDLE` means the series exists but the denominator is zero, so the ratio is NaN: a silent service burns no budget, which is correct, but silence is not success. Neither state is green."
+        "content": "**Values are burn rates — multiples of the error budget, not error ratios.** `1×` spends the whole 28d budget exactly over 28d. The alert rules page at `14.4×` (1h+5m) and `6×` (6h+30m), and ticket at `3×` (1d+2h) and `1×` (3d+6h); the thresholds here are those same numbers.\n\n**An empty panel is not a healthy panel.** `NOT MEASURED` means the SLI series does not exist — nothing is scraping it, and its burn-rate alerts cannot fire. `IDLE` means the series exists but the denominator is zero, so the ratio is NaN: a silent service burns no budget, which is correct, but silence is not success. Neither state is green.\n\n**Burn RATE is not budget TOTAL.** Everything above the bottom row answers *is it spending too fast right now*. The 28d panels at the bottom answer *how much of this month is left* — the only question that catches an SLO which stayed under every burn-rate threshold all month and still finished it with the budget gone (#210)."
       }
     },
     {
@@ -303,6 +303,164 @@
             ]
           }
         ]
+      }
+    },
+    {
+      "id": 6,
+      "type": "bargauge",
+      "title": "Error budget CONSUMED this accounting window (28d)",
+      "description": "consumed = slo:sli_error:ratio_rate28d ÷ slo:error_budget:ratio, joined on (service, slo). 1.0 means the window's budget is exactly spent; above 1.0 the objective is missed for the period.\n\nTHIS IS NOT THE BURN-RATE PANELS ABOVE. Those measure rate of spend and none of them integrates, so an SLO can sit under every burn-rate threshold for a month and still finish it with the budget gone (#210). This is the only panel that answers 'how much of this month is left'.\n\nThe `or on(service, slo) (slo:error_budget:ratio * 0 - 1)` tail is the same device panel 2 uses and for the same reason: without it an SLO whose 28d series is absent would silently vanish from the board, and a missing row reads as a row with nothing wrong.\n\nNOT MEASURED has TWO causes here, and the coverage panel beside it tells them apart: no SLI series at all, or a TSDB that does not hold the full 28 days. In the second case the number is WITHHELD deliberately — a budget computed from a partial window understates consumption and reads as budget remaining, which is the reassuring direction and therefore the dangerous one.",
+      "gridPos": {
+        "h": 8,
+        "w": 18,
+        "x": 0,
+        "y": 28
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "kanz-prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "kanz-prometheus"
+          },
+          "editorMode": "code",
+          "expr": "(slo:error_budget_consumed:ratio) or on(service, slo) (slo:error_budget:ratio * 0 - 1)",
+          "instant": true,
+          "range": false,
+          "legendFormat": "{{service}} / {{slo}}"
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "horizontal",
+        "displayMode": "gradient",
+        "showUnfilled": true,
+        "minVizWidth": 8,
+        "minVizHeight": 16
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "decimals": 1,
+          "min": 0,
+          "max": 1.25,
+          "noValue": "NOT MEASURED",
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "-1": {
+                  "text": "NOT MEASURED",
+                  "color": "purple",
+                  "index": 0
+                }
+              }
+            }
+          ],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 0.5
+              },
+              {
+                "color": "orange",
+                "value": 0.8
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 7,
+      "type": "stat",
+      "title": "Accounting window coverage",
+      "description": "Fraction of the 28d accounting window the TSDB actually holds: clamp((time() − prometheus_tsdb_lowest_timestamp_seconds) ÷ 28d, 0, 1).\n\nBelow 100% the budget panel beside this one is deliberately EMPTY rather than approximate, and SLOBudgetWindowNotCovered is firing. Expect it to climb from 0 for 28 days after any restart that loses the volume — which is why retention is a 31d PVC rather than the original 15d emptyDir (#210).",
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 18,
+        "y": 28
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "kanz-prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "kanz-prometheus"
+          },
+          "editorMode": "code",
+          "expr": "slo:budget_window_coverage:ratio",
+          "instant": true,
+          "range": false,
+          "legendFormat": "retained window"
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "decimals": 1,
+          "min": 0,
+          "max": 1,
+          "noValue": "NO TSDB METRIC",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 0.5
+              },
+              {
+                "color": "green",
+                "value": 0.99
+              }
+            ]
+          }
+        },
+        "overrides": []
       }
     }
   ]

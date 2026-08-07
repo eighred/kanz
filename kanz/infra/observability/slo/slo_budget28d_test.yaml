@@ -1,0 +1,210 @@
+# promtool unit tests for the 28d error-budget ACCOUNTING window (#210).
+#
+# WHAT THESE PROVE THAT NOTHING ELSE DOES. slo_test.yaml and
+# slo_longwindow_test.yaml exercise the burn-RATE ladder — "is it spending too
+# fast right now". This file exercises the TOTAL — "how much of the month is
+# gone" — which was declared in slo.yaml as `defaults.window: 28d` and computed
+# nowhere.
+#
+# WHY A THIRD FILE. promtool's evaluation_interval is per FILE, and a 28d window
+# needs samples spanning 28 days. At slo_longwindow_test.yaml's 1h interval that
+# is 720 evaluations of 47 recording rules; at 1d it is 30. The narrowest window
+# any rule here reads is 28d, so daily resolution loses nothing they can see —
+# the same argument that split the long-window file out of slo_test.yaml, one
+# rung further down.
+#
+# WHY THE ASSERTED NUMBERS ARE EXACT DESPITE rate() EXTRAPOLATION. Each SLI is a
+# RATIO of two rates over the same window with the same sample timestamps, so
+# whatever extrapolation factor rate() applies appears in both numerator and
+# denominator and cancels. The ratio is therefore hand-checkable even though
+# neither rate on its own is a round number — which is what makes #210's
+# "checkable against the raw counters by hand" achievable at all.
+#
+#   cd kanz/infra/observability/slo && promtool test rules slo_budget28d_test.yaml
+rule_files:
+  - slo.recording.rules.yaml
+  - slo.alerts.rules.yaml
+
+evaluation_interval: 1d
+
+# GROUP ORDER IS LOAD-BEARING — see the long note in slo_longwindow_test.yaml.
+# It matters more here, not less: slo_budget_28d reads slo:error_budget:ratio
+# from slo_meta, and slo_budget_window reads slo:error_budget_consumed:ratio
+# from slo_budget_28d. At a 1d interval the previous tick's sample is a day old,
+# far outside the 5m lookback delta, so an unordered evaluation reads an empty
+# vector rather than a stale one — the chain silently produces nothing.
+group_eval_order:
+  - slo_meta
+  - slo_sli_error
+  - slo_budget_28d
+  - slo_burn_rate
+  - slo_budget_window
+
+tests:
+  # HALF THE BUDGET CONSUMED, ON A FULLY COVERED WINDOW.
+  #
+  # api-gateway/availability has objective 0.999, so its budget is 0.001.
+  # 2000 requests/day of which 1 is a 5xx:
+  #
+  #   error ratio = 1 − 1999/2000 = 0.0005
+  #   consumed    = 0.0005 / 0.001 = 0.5
+  #
+  # Both numbers are checkable from the raw counters with a calculator, which is
+  # the acceptance #210 asks for.
+  - interval: 1d
+    name: half the 28d budget consumed, reported as 0.5
+    input_series:
+      - series: 'kanz_gateway_requests_total{code="200"}'
+        values: '0+1999x30'
+      - series: 'kanz_gateway_requests_total{code="500"}'
+        values: '0+1x30'
+      # The TSDB's oldest sample is at t=0, so by t=28d the window is fully
+      # covered and the gate opens.
+      - series: 'prometheus_tsdb_lowest_timestamp_seconds{job="kanz-pods", app="prometheus"}'
+        values: '0x30'
+    promql_expr_test:
+      # ROUNDED for the reason the sibling files round: rate() extrapolates in
+      # floating point and promtool compares exp_samples exactly. The claim is
+      # "the 28d error ratio is 0.05%", not the last bits of a float.
+      # SCALED TO AN INTEGER rather than rounded to 0.00001: 0.0005 has no exact
+      # binary representation, so round() lands on 5.000000000000001e-04 and an
+      # exp_samples comparison against 0.0005 fails on the last bit. 500 parts
+      # per million is the same claim, exactly representable.
+      - expr: round(slo:sli_error:ratio_rate28d{service="api-gateway", slo="availability"} * 1000000)
+        eval_time: 28d
+        exp_samples:
+          - labels: '{service="api-gateway", slo="availability"}'
+            value: 500
+      # The window is fully retained.
+      - expr: round(slo:budget_window_coverage:ratio, 0.001)
+        eval_time: 28d
+        exp_samples:
+          - labels: '{}'
+            value: 1
+      # THE ANSWER #210 ASKED FOR.
+      - expr: round(slo:error_budget_consumed:ratio{service="api-gateway", slo="availability"}, 0.001)
+        eval_time: 28d
+        exp_samples:
+          - labels: '{service="api-gateway", slo="availability"}'
+            value: 0.5
+      # EVERY SLO IN THE CATALOG PRODUCES THE SERIES, not just the one with
+      # traffic in this fixture — #210's acceptance is "for every SLO in the
+      # catalog". The other four have no input series here, so their ratio is
+      # NaN (0/0) and they are absent; asserting the api-gateway pair alone
+      # would not distinguish "compiled for all five" from "compiled for one".
+      # The count of COMPILED rules is what this checks, via the meta series
+      # that every SLO has by construction.
+      - expr: count(slo:error_budget:ratio)
+        eval_time: 28d
+        exp_samples:
+          - labels: '{}'
+            value: 5
+    alert_rule_test:
+      # Half the budget with three weeks to go is not an alert.
+      - eval_time: 30d
+        alertname: SLOBudgetExhausted
+        exp_alerts: []
+      # And the window IS covered, so the "cannot measure" alert stays quiet.
+      - eval_time: 30d
+        alertname: SLOBudgetWindowNotCovered
+        exp_alerts: []
+
+  # THE BUDGET IS EXACTLY SPENT, AND NO BURN-RATE ALERT NEED HAVE FIRED.
+  #
+  # 1000 requests/day of which 1 is a 5xx → error ratio 0.001, which IS the
+  # budget, so consumed = 1.0. That rate sits at exactly 1× — the bottom rung of
+  # the ladder — so the chronic ticket is the only burn-rate alert in scope and
+  # the two paging rungs (14.4× and 6×) are nowhere near. This is the scenario
+  # #210 describes in one sentence: an SLO inside every burn-rate threshold that
+  # has nonetheless consumed its whole budget.
+  - interval: 1d
+    name: a steady 1x burn exhausts the budget over the window
+    input_series:
+      - series: 'kanz_gateway_requests_total{code="200"}'
+        values: '0+999x30'
+      - series: 'kanz_gateway_requests_total{code="500"}'
+        values: '0+1x30'
+      - series: 'prometheus_tsdb_lowest_timestamp_seconds{job="kanz-pods", app="prometheus"}'
+        values: '0x30'
+    promql_expr_test:
+      - expr: round(slo:error_budget_consumed:ratio{service="api-gateway", slo="availability"}, 0.001)
+        eval_time: 28d
+        exp_samples:
+          - labels: '{service="api-gateway", slo="availability"}'
+            value: 1
+    alert_rule_test:
+      - eval_time: 30d
+        alertname: SLOBudgetExhausted
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              layer: slo
+              burn_rate: exhausted
+              service: api-gateway
+              slo: availability
+            exp_annotations:
+              summary: "28d error budget exhausted for api-gateway/availability"
+              description: "api-gateway/availability has consumed 100% of its 28d error budget. No burn-rate alert need have fired: those measure rate of spend and none of them integrates over the window."
+      # THE PAGING RUNGS STAY SILENT. This is the substance of the case, not a
+      # formality: it is the demonstration that the burn-rate ladder cannot
+      # answer this question, which is why the accounting window exists.
+      - eval_time: 30d
+        alertname: SLOFastBurn
+        exp_alerts: []
+      - eval_time: 30d
+        alertname: SLOSlowBurn
+        exp_alerts: []
+
+  # THE WINDOW IS NOT COVERED — THE NUMBER IS WITHHELD, NOT GUESSED.
+  #
+  # This is the case #210's caution is entirely about. The TSDB's oldest sample
+  # is 16 days old, so `rate(...[28d])` still returns a perfectly plausible
+  # number computed from 16 days of data. Published as a month's consumption it
+  # UNDERSTATES the burn and reads as budget remaining — confidently wrong in
+  # the reassuring direction.
+  #
+  # So slo:error_budget_consumed:ratio must be ABSENT here, and the operator
+  # must be told why rather than left with an empty panel.
+  - interval: 1d
+    name: a partial window withholds the budget figure and says so
+    input_series:
+      - series: 'kanz_gateway_requests_total{code="200"}'
+        values: '0+1999x30'
+      - series: 'kanz_gateway_requests_total{code="500"}'
+        values: '0+1x30'
+      # Oldest sample at t=16d. At the 30d evaluation the database therefore
+      # holds 14 of the 28 days: coverage = (30d − 16d) / 28d = 0.5 exactly.
+      - series: 'prometheus_tsdb_lowest_timestamp_seconds{job="kanz-pods", app="prometheus"}'
+        values: '1382400x30'
+    promql_expr_test:
+      - expr: round(slo:budget_window_coverage:ratio, 0.001)
+        eval_time: 30d
+        exp_samples:
+          - labels: '{}'
+            value: 0.5
+      # THE 28d RATIO IS STILL COMPUTED AND STILL LOOKS FINE — which is exactly
+      # the hazard. Asserted so the withholding below is visibly a DECISION and
+      # not an accident of there being no data.
+      - expr: round(slo:sli_error:ratio_rate28d{service="api-gateway", slo="availability"} * 1000000)
+        eval_time: 30d
+        exp_samples:
+          - labels: '{service="api-gateway", slo="availability"}'
+            value: 500
+      # AND THE BUDGET FIGURE IS ABSENT.
+      - expr: slo:error_budget_consumed:ratio
+        eval_time: 30d
+        exp_samples: []
+    alert_rule_test:
+      - eval_time: 30d
+        alertname: SLOBudgetWindowNotCovered
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              layer: slo
+            exp_annotations:
+              summary: "Error-budget accounting window is not covered by retained data"
+              description: "The TSDB holds 50% of the 28d accounting window, so slo:error_budget_consumed:ratio is NOT being produced — a partial window would understate consumption and read as budget remaining. Check retention (--storage.tsdb.retention.time) and whether the volume survived a restart."
+      # And nothing claims the budget is fine while it cannot be measured.
+      - eval_time: 30d
+        alertname: SLOBudgetExhausted
+        exp_alerts: []
