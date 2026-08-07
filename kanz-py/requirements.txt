@@ -1,0 +1,64 @@
+# RUNTIME LOCK for the inference image — DERIVED, NOT AUTHORED.
+#
+# kanz-py/pyproject.toml declares WHAT this distribution depends on. This file
+# records WHICH ARTIFACTS that resolves to, by sha256. It is the only thing
+# kanz-py/Dockerfile installs from: the Dockerfile names no package at all, so
+# there is no second list to keep in step by hand. That is deliberate — it used
+# to restate these four dependencies inline at :39-40 while COPYing pyproject.toml
+# into the image without ever installing from it, which is two lists of the same
+# thing and the `secret()` shape CLAUDE.md warns about.
+#
+# TO REGENERATE (from the repository root, network required):
+#
+#   python -m pip install --dry-run --ignore-installed --report /tmp/r.json \
+#     --target /tmp/discard \
+#     --python-version 3.12 --implementation cp --abi cp312 \
+#     --platform manylinux2014_x86_64 --only-binary=:all: \
+#     "nats-py>=2.7.0" "aiokafka>=0.10.0" "protobuf>=5.29" "grpcio>=1.62"
+#
+# then read `install[].metadata.{name,version}` and
+# `install[].download_info.archive_info.hashes.sha256` out of the report. The
+# specifiers are COPIED FROM pyproject.toml's [project] dependencies — do not
+# retype them here; if they disagree, pyproject.toml is right and this file is
+# stale. TestInferenceLockCoversEveryDeclaredDependency fails if a declared
+# dependency is missing below.
+#
+# WHY HASHES AND NOT JUST `==`. A version names a release; a hash names an
+# artifact. `--require-hashes` also refuses to install anything not listed here,
+# so a new TRANSITIVE dependency becomes a reviewable diff rather than arriving
+# silently in the next build. release.yml signs and attests this image; without
+# this file that signature covered contents no commit determined.
+#
+# PLATFORM: linux/amd64, CPython 3.12 — the only platform this image is built
+# for. build.yml and release.yml set no `platforms:`, so buildx targets the
+# ubuntu-latest runner's architecture, and the builder stage's grpcio-tools
+# 1.68.1 publishes no manylinux aarch64 wheel at all. An arm64 build is not
+# possible today with or without this file.
+#
+# GENERATED 2026-08-06 against pypi.org. Every hash below was resolved by pip
+# AND independently re-fetched from https://pypi.org/pypi/<name>/<version>/json
+# and compared; none is hand-written.
+#
+# NOTE FOR THE NEXT REGENERATION — protobuf crossed a MAJOR under the old
+# floating range. `protobuf>=5.29` resolves to 7.35.1 today, while the gencode in
+# /app/gen is emitted by grpcio-tools 1.68.1 (protobuf 5.29). That combination
+# passes protobuf's own check — ValidateProtobufRuntimeVersion only rejects a
+# runtime OLDER than the gencode, and 7.35.1 carries no lower bound on gencode
+# age — so this lock records what the unpinned build already installs rather than
+# quietly changing it. It is exactly the drift #241 predicted, and it had already
+# happened.
+
+aiokafka==0.14.0 \
+    --hash=sha256:219d2dc66b97b1aaea100697c928024b6a0348b7baa370b824900054bf86916e
+async-timeout==5.0.1 \
+    --hash=sha256:39e3809566ff85354557ec2398b55e096c8364bacac9405a7a1fa429e77fe76c
+grpcio==1.83.0 \
+    --hash=sha256:aeb339838db07600481ef869507279b75326c75eac6d10f7afa62a0da1d2bcdd
+nats-py==2.15.0 \
+    --hash=sha256:9f8d36aa52a9926a88b8f1d70cf1fdce0ad387941479b500ee9ab3e51073cefd
+packaging==26.3 \
+    --hash=sha256:d7193f7c8e4e93f444fde0262bf90af30e16fa0ad0ad44cb553c87339b23cd1c
+protobuf==7.35.1 \
+    --hash=sha256:74758715c53d7158fb76caf4f0cfdacc5329a4b1bb994f865d6cf302d413a1c4
+typing-extensions==4.16.0 \
+    --hash=sha256:481caa481374e813c1b176ada14e97f1f67a4539ce9cfeb3f350d78d6370c2e8
