@@ -50,6 +50,11 @@ spec:
     app: inference
   ports:
     - { name: grpc, port: 50051, targetPort: 50051 }
+    # /metrics, /livez, /readyz. Prometheus scrapes the POD, not this Service, so
+    # this entry is not what makes the scrape work — the pod-template annotation
+    # below is. It is here so the readiness gate has a Service to remove the pod
+    # from, and so the port is discoverable by name rather than by number.
+    - { name: http, port: 8093, targetPort: 8093 }
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -81,6 +86,22 @@ spec:
       labels:
         app: inference
         app.kubernetes.io/part-of: kanz
+      # #241 — THE FIRST SCRAPE THIS POD HAS EVER HAD. Until the container opened
+      # an HTTP port there was no port these annotations could name: the pod had
+      # exactly one (grpc 50051), and gRPC answers no GET, so annotating it would
+      # have produced a target that is permanently DOWN — a red row in a list
+      # nobody reads rather than an alert. Everything the streaming scorer can do
+      # wrong (a stalled durable consumer, admission-control rejections, a model
+      # that could not be promoted) was visible only in pod logs.
+      #
+      # Prometheus discovers pods by these three keys (infra/observability/
+      # prometheus.yaml, role: pod), and the CNI only lets the scrape through
+      # because 8093 is in allow-observability-scrape — both halves are pinned by
+      # test/arch (prometheus_scrape_test.go, network_policy_coverage_test.go).
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8093"
+        prometheus.io/path: /metrics
     spec:
       # Drain budget: DERIVED, and deliberately not restated here. The arithmetic
       # this comment used to carry still read 27s long after the real figure had
@@ -103,6 +124,11 @@ spec:
           image: ghcr.io/eighred/inference@sha256:8573c1568d804d045478a287d8a6ae6cca2b92c6526427f0f486d3d92abac55e
           ports:
             - { containerPort: 50051, name: grpc }
+            # The name matters: prometheus_scrape_test.go resolves the annotated
+            # port against the port NAMED http (or health) and fails if the
+            # annotation points at the gRPC one instead — the mistake that yields
+            # a target which can never be scraped.
+            - { containerPort: 8093, name: http }
           env:
             # THE MODEL CARD. Weights and validation evidence travel together, because the
             # registry will not promote a model to PRIMARY without a recorded, non-expired,
@@ -114,18 +140,33 @@ spec:
             - { name: KANZ_INFERENCE_CONSUMER_GROUP, value: "inference" }
             - { name: KANZ_INFERENCE_SOURCE, value: "inference" }
             - { name: KANZ_INFERENCE_BIND, value: "[::]:50051" }
+            # Same bracketed form as the gRPC bind, and for the same reason: the
+            # pod is addressed over whichever family the cluster gives it, and a
+            # metrics listener bound to the wrong one is a DOWN target plus two
+            # failing probes — i.e. a crashloop whose cause is a config default.
+            - { name: KANZ_INFERENCE_METRICS_BIND, value: "[::]:8093" }
             # Every served prediction carries its own attribution (permutation Shapley). A
             # risk desk that cannot attribute a number cannot sign off on it.
             - { name: KANZ_INFERENCE_EXPLAIN, value: "true" }
-          # gRPC has no HTTP probe surface here, and a TCP check is the honest one: the port
-          # is bound only AFTER a PRIMARY model is loaded (the process exits 2 otherwise), so
-          # "listening" genuinely means "has a validated model to serve".
+          # WHAT THE OLD tcpSocket PROBES GOT RIGHT, AND WHAT THEY COULD NOT SAY.
+          #
+          # Their argument held: 50051 is bound only AFTER a PRIMARY model is loaded (the
+          # process exits 2 otherwise), so "listening" genuinely meant "has a validated model".
+          # That property is KEPT — kanz_inference/__main__.py starts this HTTP surface only
+          # after the gRPC server is up, so /livez cannot answer for a modelless process.
+          #
+          # What a TCP check cannot express is the other end of the pod's life. On SIGTERM the
+          # listening socket stays accepted by the kernel until the process exits, so a
+          # draining pod PASSES its readiness probe for the whole 60s grace period and keeps
+          # being sent work it is about to drop. /readyz goes 503 at the top of shutdown,
+          # before the streaming task is cancelled and before the gRPC server stops, which is
+          # what removes this pod from its Service while it can still finish what it holds.
           readinessProbe:
-            tcpSocket: { port: 50051 }
+            httpGet: { path: /readyz, port: 8093 }
             initialDelaySeconds: 3
             periodSeconds: 5
           livenessProbe:
-            tcpSocket: { port: 50051 }
+            httpGet: { path: /livez, port: 8093 }
             initialDelaySeconds: 10
             periodSeconds: 15
           securityContext:

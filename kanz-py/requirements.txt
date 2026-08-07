@@ -14,7 +14,8 @@
 #     --target /tmp/discard \
 #     --python-version 3.12 --implementation cp --abi cp312 \
 #     --platform manylinux2014_x86_64 --only-binary=:all: \
-#     "nats-py>=2.7.0" "aiokafka>=0.10.0" "protobuf>=5.29" "grpcio>=1.62"
+#     "nats-py>=2.7.0" "aiokafka>=0.10.0" "protobuf>=5.29" "grpcio>=1.62" \
+#     "prometheus-client>=0.20"
 #
 # then read `install[].metadata.{name,version}` and
 # `install[].download_info.archive_info.hashes.sha256` out of the report. The
@@ -58,6 +59,14 @@ nats-py==2.15.0 \
     --hash=sha256:9f8d36aa52a9926a88b8f1d70cf1fdce0ad387941479b500ee9ab3e51073cefd
 packaging==26.3 \
     --hash=sha256:d7193f7c8e4e93f444fde0262bf90af30e16fa0ad0ad44cb553c87339b23cd1c
+# ADDED 2026-08-07 for #241 — the inference pod's /metrics surface. A py3-none-any
+# wheel with NO transitive runtime dependencies (its twisted/aiohttp/django
+# integrations are extras), so it adds exactly this one line. The hash was read
+# from https://pypi.org/pypi/prometheus-client/0.26.0/json and then proven by a
+# real `pip install --require-hashes --only-binary=:all: --python-version 3.12
+# --abi cp312 --platform manylinux2014_x86_64` — not copied from a resolver log.
+prometheus-client==0.26.0 \
+    --hash=sha256:fa93d06737aa02bacd05794768508bb97d2fbee28cb3bca04eaae92f0ca953d6
 protobuf==7.35.1 \
     --hash=sha256:74758715c53d7158fb76caf4f0cfdacc5329a4b1bb994f865d6cf302d413a1c4
 typing-extensions==4.16.0 \

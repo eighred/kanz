@@ -285,6 +285,12 @@ spec:
         - { protocol: TCP, port: 8090 } # oms, webhook-ingest
         - { protocol: TCP, port: 8091 } # compliance, market-ingest, tv-sync, venue-binance
         - { protocol: TCP, port: 8092 } # venue-okx
+        # inference (#241). The pod's FIRST HTTP port — it previously opened only
+        # grpc 50051, which is why it carried no scrape annotation at all. 50051
+        # is deliberately NOT here: this rule's peer is the whole
+        # kanz-observability namespace, and admitting the gRPC prediction API to
+        # it would hand the monitoring plane a path to InferenceService.Predict.
+        - { protocol: TCP, port: 8093 } # inference
 ---
 # Telemetry: allow egress to the OTLP collector (OBS-01) on 4317. Scoped to the
 # observability namespace.

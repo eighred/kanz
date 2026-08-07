@@ -345,20 +345,21 @@ func treeContainsAny(dir, ext string, literals ...string) bool {
 //
 // IT MUST TREND TO EMPTY. An entry here is a service whose degraded modes are
 // invisible in production; it is not a place to park work.
-var pendingScrape = map[string]string{
-	"inference": "NO HTTP SURFACE TO SCRAPE, AND NO REGISTRY BEHIND ONE (#241). " +
-		"inference-deploy.yaml opens exactly one port — { containerPort: 50051, name: grpc } — and " +
-		"both probes are tcpSocket checks against it, because gRPC answers no GET. So there is no " +
-		"port an annotation could name: adding prometheus.io/port: \"50051\" would produce a target " +
-		"that is permanently DOWN, which is the precise failure the rest of this guard exists to " +
-		"prevent. The gap is not an omitted annotation, it is a missing surface. kanz-py declares no " +
-		"prometheus_client dependency (kanz-py/pyproject.toml) and the whole tree contains no " +
-		"/metrics route, so the registry does not exist yet either. #241 adds both — an HTTP port " +
-		"serving prometheus_client alongside the gRPC one, and the annotation naming it — and " +
-		"removes this entry. Until then the streaming scorer's degraded modes (a stalled durable " +
-		"consumer, a model that failed promotion, admission-control rejections) are visible only in " +
-		"pod logs.",
-}
+// IT IS EMPTY, AND THE ENTRY THAT WAS HERE CAME OUT THE WAY IT WAS MEANT TO. It
+// held `inference` — the one deployed pod with no HTTP surface at all, whose
+// manifest opened exactly one port (grpc 50051) probed by two tcpSocket checks,
+// so no annotation could name a scrapable port. #241 built the surface
+// (kanz-py/kanz_inference/observability/) and opened { containerPort: 8093, name:
+// http }; the moment the manifest carried the annotation, the dead-entry check
+// below failed the build naming this service, and the entry was removed in the
+// same change. That is the intended lifecycle — an exemption is a debt with an
+// issue number, not a carve-out.
+//
+// Leave the map rather than deleting it. An empty default-deny list is a working
+// guard with nothing exempted; removing it would leave the next person needing a
+// temporary exemption to reinvent the mechanism, and the likelier reach is for
+// weakening the check instead. Same reasoning as metricSurfacesPendingRepair.
+var pendingScrape = map[string]string{}
 
 // scrapeAnnotationRe matches the opt-in annotation on a pod template. Quoted and
 // unquoted "true" both appear in Kubernetes manifests in the wild; node-exporter

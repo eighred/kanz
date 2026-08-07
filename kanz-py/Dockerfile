@@ -73,7 +73,14 @@ ENV PYTHONUNBUFFERED=1
 RUN useradd -u 65532 -m nonroot
 USER 65532
 
-EXPOSE 50051
+# 50051 gRPC (inference.v1.InferenceService), 8093 HTTP (/metrics, /livez, /readyz).
+#
+# The HTTP port is what made this pod scrapable at all (#241): with only the gRPC
+# port there was no port a prometheus.io/port annotation could name, because gRPC
+# answers no GET — annotating 50051 would have produced a permanently DOWN target.
+# infra/deploy/inference-deploy.yaml opens and annotates 8093 and probes /livez +
+# /readyz on it; infra/security/runtime/network-policies.yaml admits the scrape.
+EXPOSE 50051 8093
 
 # It REFUSES TO START without a validated PRIMARY model (KANZ_INFERENCE_MODELS). That is not a
 # convenience check: a prediction service with no model does not fail — it reports healthy and

@@ -13,6 +13,10 @@ dependencies = [
     "kanz-schemas>=0.1.0",
     "protobuf>=5.29",
     "grpcio>=1.62",
+    # The inference pod's /metrics surface (#241). Pure Python, no transitive
+    # runtime dependencies of its own — its aiohttp/twisted/django integrations
+    # are extras this does not ask for.
+    "prometheus-client>=0.20",
 ]
 
 [project.optional-dependencies]
