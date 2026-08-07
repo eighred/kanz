@@ -45,7 +45,19 @@ func TestTheseTestsCannotReachTheSharedMigrationLedger(t *testing.T) {
 	if err != nil {
 		t.Fatalf("connect (shared): %v", err)
 	}
-	defer shared.Close()
+	// t.Cleanup, NOT defer, and registered FIRST so it runs LAST.
+	//
+	// Deferred functions run when the test function returns; t.Cleanup functions
+	// run after that. So `defer shared.Close()` closes the pool BEFORE the
+	// sentinel cleanup below, which then fails against a closed pool — and
+	// because that cleanup discards its error, it fails SILENTLY and the sentinel
+	// row survives in the shared ledger. Caught by running this against a real
+	// Postgres and reading the table afterwards: version 999001 was still there.
+	//
+	// A test written to prove nothing leaks into the shared ledger, leaking into
+	// the shared ledger, is the kind of thing that only shows up when the
+	// assertion is made against the real database rather than the intent.
+	t.Cleanup(shared.Close)
 
 	// migrate.go's own shape, so the sentinel lives in a table indistinguishable
 	// from a real ledger.
@@ -67,14 +79,25 @@ func TestTheseTestsCannotReachTheSharedMigrationLedger(t *testing.T) {
 		}
 		createdHere = true
 	}
+	// FAILING TO CLEAN UP IS A TEST FAILURE, not a shrug. Residue in the shared
+	// ledger is precisely what #212 is about, so a cleanup that cannot complete
+	// must say so rather than discard the error — discarding it is what let the
+	// sentinel survive undetected in the first place.
 	t.Cleanup(func() {
 		c := context.Background()
 		if createdHere {
-			_, _ = shared.Exec(c, `DROP TABLE IF EXISTS public.schema_migrations`)
+			if _, err := shared.Exec(c, `DROP TABLE IF EXISTS public.schema_migrations`); err != nil {
+				t.Errorf("could not drop the ledger this test created: %v — it is now residue in the "+
+					"shared database, at the exact table #212 exists to protect", err)
+			}
 			return
 		}
 		// A real ledger was already here: remove ONLY our row.
-		_, _ = shared.Exec(c, `DELETE FROM public.schema_migrations WHERE version = $1`, sentinelVersion)
+		if _, err := shared.Exec(c,
+			`DELETE FROM public.schema_migrations WHERE version = $1`, sentinelVersion); err != nil {
+			t.Errorf("could not remove sentinel version %d from the shared ledger: %v — it will be "+
+				"read as a real applied migration by the next kanz-migrate run", sentinelVersion, err)
+		}
 	})
 
 	if _, err := shared.Exec(ctx,

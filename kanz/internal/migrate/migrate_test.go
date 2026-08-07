@@ -51,12 +51,23 @@ import (
 // reintroduced it silently. `-p 1` does not help: this is residue and
 // destruction across SEQUENTIAL runs, not a concurrent-access race.
 //
-// A private schema is the fix that a future edit cannot undo. migrate.go
-// references `schema_migrations` UNQUALIFIED everywhere (:237, :252, :278), so
-// search_path decides which one it means — and search_path here is the test
-// schema ALONE, deliberately without `public`. Appending `public` would restore
-// the whole defect: an unqualified DROP falls through to the first schema that
-// has the table, which is exactly how the shared ledger was reachable.
+// A private schema is the fix. migrate.go references `schema_migrations`
+// UNQUALIFIED everywhere (:237, :252, :278), so search_path decides which one it
+// means — and search_path here is the test schema ALONE, deliberately without
+// `public`.
+//
+// THE PROTECTION IS THE PAIR, and it is worth being exact about which half does
+// what, because measuring it corrected a first guess. Appending `public` to the
+// path on its own does NOT reintroduce the defect: CREATE TABLE IF NOT EXISTS
+// targets the FIRST schema in the path, so the fixture ledger is still created
+// privately and every later unqualified reference finds it first. Verified by
+// mutation — that change alone leaves the isolation test green.
+//
+// What destroys the shared ledger is `public` on the path AND an unqualified
+// DROP, because a DROP falls through to the first schema that HAS the table.
+// That pair is the original defect exactly, and it is what isolation_test.go
+// fails on. So the omitted `public` is defence in depth rather than the load-
+// bearing half: the removed resets are, and the guard covers both.
 //
 // One pool per test, and every runner inside a test shares it — which is what
 // TestUpIsSafeUnderConcurrentRunners needs to contend at all.
