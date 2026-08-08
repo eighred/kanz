@@ -834,3 +834,44 @@ groups:
         annotations:
           summary: "Prometheus has found NO Alertmanager — every alert on this page is being delivered to nobody"
           description: "Prometheus is evaluating its rules and discovering zero Alertmanagers, so no alert leaves this process: nothing is paged, nothing is ticketed, and every other alert visible here reached a human only because that human happened to look. This is the known state of the estate (#98 — there is nowhere to run one and no receiver has a real destination), NOT a regression. It clears on its own once a pod labelled app=alertmanager exists in kanz-observability; prometheus.yaml discovers it rather than naming an address, so there is no configuration change to remember."
+
+  # ---------------------------------------------------------------------------
+  # INFERENCE — the Python prediction service, saturated
+  # ---------------------------------------------------------------------------
+  - name: inference_admission
+    rules:
+      # THE ONLY ONE OF THE SEVEN kanz_inference_* SERIES WHOSE THRESHOLD CAN BE
+      # DERIVED TODAY (#334), and the rest are deliberately absent for the reason
+      # this file opens with.
+      #
+      # Saturation is a gauge against a CONFIGURED limit, so the number comes
+      # from the service's own admission control rather than from an observation
+      # nobody has made: at in_flight == admission_limit the pool is full and the
+      # next request is rejected, which the service itself records as
+      # kanz_inference_degraded_total{reason="pool_saturated"}. Nothing has to be
+      # measured to know that 1.0 is the edge — it is where the limit is.
+      #
+      # THE OTHER SIX CANNOT BE DERIVED AND ARE THEREFORE NOT WRITTEN.
+      # predict_seconds needs an observed p99, degraded_total and
+      # stream_events_total need a normal rate, and this service has never run
+      # under load with these metrics attached. primary_model is an identity
+      # gauge, not a threshold. Writing any of them would mean picking a number,
+      # which the header above forbids and which the promtool guard would expose
+      # as a rule proven to fire only against a fixture built to fit it.
+      #
+      # DURATION IS THE DEBOUNCE, NOT THE THRESHOLD — the same shape as
+      # GatewayAdmissionShedding above. A pool that touches its limit during a
+      # burst is admission control working as designed and must not page; ten
+      # unbroken minutes at the limit is capacity, and callers are being refused
+      # for that whole period.
+      #
+      # Warning rather than page: the response is a replica count or a limit
+      # change, in working hours. An inference outage degrades a prediction path
+      # that the platform already treats as advisory — it does not stop trading.
+      - alert: InferencePoolSaturated
+        expr: kanz_inference_predict_in_flight / kanz_inference_admission_limit >= 1
+        for: 10m
+        labels: { severity: warning, layer: operational }
+        annotations:
+          summary: "The inference prediction pool has been at its admission limit for 10 minutes"
+          description: "kanz_inference_predict_in_flight has sat at or above kanz_inference_admission_limit continuously for ten minutes, so this is saturation rather than a burst: every request arriving now is refused and counted as kanz_inference_degraded_total{reason=\"pool_saturated\"}. Either the concurrency limit is too low for the offered load or predictions are taking long enough to hold slots open — compare kanz_inference_predict_seconds over the same window before raising the limit, because raising it against slow predictions moves the queue rather than draining it."
