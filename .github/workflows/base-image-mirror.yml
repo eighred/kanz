@@ -147,6 +147,33 @@ jobs:
           # exactly like golang above.
           - source: docker.io/grafana/k6:2.1.0
             target: ghcr.io/eighred/base/k6:2.1.0
+          # THE BUILDER ITSELF, which every other entry here quietly depended on.
+          #
+          # #161 moved all 52 FROMs under ghcr.io/eighred/base/*, and the
+          # conclusion drawn was that the estate no longer needs Docker Hub to
+          # build. That is not true, and main went red proving it on 2026-08-08:
+          #
+          #   #1 ERROR: Error response from daemon:
+          #      Get "https://registry-1.docker.io/v2/": context deadline exceeded
+          #
+          # on `image (oms, …)`, whose Dockerfile contains no Docker Hub reference
+          # at all. docker/setup-buildx-action creates the builder from
+          # moby/buildkit, and with no driver-opts it takes that image from Docker
+          # Hub. So the FROMs were mirrored and the thing that RESOLVES them was
+          # not — the one remaining Hub dependency in the build path, and the one
+          # that fails EARLIEST, at buildx step #1, before any of this repo's own
+          # steps run.
+          #
+          # It is also the one the #320 push retry structurally cannot cover: that
+          # retry wraps the PUSH, and this fails during builder setup, upstream of
+          # the build itself.
+          #
+          # buildx-stable-1 is a MOVING TAG, deliberately, and this is the right
+          # place for that: the weekly refresh above is what keeps a moving tag
+          # from becoming a supply-chain freeze. Pinning a digest here would
+          # freeze the builder while setup-buildx-action's own default moved on.
+          - source: docker.io/moby/buildkit:buildx-stable-1
+            target: ghcr.io/eighred/base/buildkit:buildx-stable-1
 
     steps:
       - name: Log in to ghcr.io
