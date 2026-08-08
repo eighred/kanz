@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/eighred/kanz/pkg/bus"
 	"github.com/eighred/kanz/services/lineage/internal/graph"
 )
 
@@ -50,6 +51,27 @@ type Config struct {
 	// OTLPEndpoint is the OTel collector for span export (OBS-01).
 	OTLPEndpoint string
 
+	// Tenant is the producer's fallback tenant_id (MT-01b) for events this
+	// service RAISES rather than derives — today, the AUTH-01d authorization
+	// decisions published to platform.authz.decision.
+	//
+	// IT CANNOT BE EMPTY, and that is not a style preference. bus.Validate
+	// requires tenant_id on the live path, and the producer resolves it as
+	// explicit-field > ctx > this. A decision is raised by an HTTP request to the
+	// read API, so there is no inbound delivery to supply a ctx tenant — which is
+	// how services/compliance publishes decisions without a fallback at all (its
+	// come off a consumer). Empty here means every decision publish is rejected
+	// as an invalid envelope.
+	//
+	// Defaults to bus.SystemTenant because the lineage graph spans the estate
+	// rather than one customer — the second, legitimate meaning documented in
+	// pkg/bus/validate.go, the one internal/topic maps to the un-prefixed archive
+	// topics. A PER-CUSTOMER lineage deployment must set LINEAGE_TENANT, and that
+	// is a deployment review: leaving a per-customer service on __system__
+	// attributes one customer's access decisions to the platform, and nothing
+	// downstream can tell.
+	Tenant string
+
 	// SPIFFESocket is the SPIFFE Workload API socket (SEC-01a CSI mount). When
 	// set, the bus dials the spine over mTLS presenting this workload SVID; empty
 	// means a PLAINTEXT dial, which the production broker refuses at the
@@ -87,6 +109,7 @@ func Load() (Config, error) {
 		GovernanceFile: os.Getenv("LINEAGE_GOVERNANCE_FILE"),
 		OpenLineageURL: strings.TrimRight(os.Getenv("LINEAGE_OPENLINEAGE_URL"), "/"),
 		OTLPEndpoint:   os.Getenv("LINEAGE_OTLP_ENDPOINT"),
+		Tenant:         envOr("LINEAGE_TENANT", bus.SystemTenant),
 		SPIFFESocket:   os.Getenv("SPIFFE_ENDPOINT_SOCKET"),
 	}, nil
 }
