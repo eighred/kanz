@@ -181,8 +181,6 @@ jobs:
           go mod init github.com/eighred/kanz/kanz-schemas-go || true
           go mod tidy
 
-      - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
-
       # A FORK PR CANNOT PULL A PRIVATE BASE, AND MUST SAY SO IN ITS FIRST STEP.
       #
       # Since #161 every FROM resolves to ghcr.io/eighred/base/*, which is
@@ -219,6 +217,35 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+
+      # BUILDX COMES AFTER THE LOGIN NOW, AND THAT ORDER IS LOAD-BEARING (#320).
+      #
+      # It used to run first, which was fine while the builder image came from
+      # Docker Hub anonymously. It does not any more: driver-opts pins it at
+      # ghcr.io/eighred/base/buildkit, which is PRIVATE like every other mirrored
+      # base, so creating the builder is now an authenticated pull. Leaving this
+      # above the login would fail EVERY build on the builder pull — trading an
+      # occasional upstream outage for a permanent one.
+      #
+      # WHY PIN IT AT ALL. #161 moved all 52 FROMs under ghcr.io/eighred/base/*
+      # and the conclusion drawn was that the estate no longer needs Docker Hub
+      # to build. main went red on 2026-08-08 disproving it:
+      #
+      #   #1 ERROR: Error response from daemon:
+      #      Get "https://registry-1.docker.io/v2/": context deadline exceeded
+      #
+      # on image (oms, …), whose Dockerfile contains no Docker Hub reference at
+      # all. setup-buildx-action creates the builder from moby/buildkit and with
+      # no driver-opts takes it from Docker Hub — so the FROMs were mirrored and
+      # the thing that RESOLVES them was not. It is also the failure the #320
+      # push retry structurally cannot cover: that wraps the PUSH, and this
+      # fails at buildx step #1, before any step this repo wrote.
+      #
+      # The tag is moving on purpose; base-image-mirror.yml's weekly refresh is
+      # what stops a mirror becoming a supply-chain freeze.
+      - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+        with:
+          driver-opts: image=ghcr.io/eighred/base/buildkit:buildx-stable-1
 
       - name: Image metadata
         id: meta
