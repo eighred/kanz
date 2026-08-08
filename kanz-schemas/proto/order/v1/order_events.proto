@@ -139,6 +139,19 @@ message OrderState {
   // not; the handler must complete the announcement, not refuse it. Set means
   // this order's cancellation was already told to the world, and a further
   // cancel command is a genuine duplicate.
+  // RETIREMENT CONDITION (#292): when the cancel pair is converted to the
+  // outbox — that is, when handleCancel commits the ORDER_CANCELLED FACT and
+  // its CommandOutcome in the same transaction as the CANCELLED state, the way
+  // admission, the fill folds, routing and amends already do.
+  //
+  // It converts WITH completeCancelAnnouncement, not separately: that function
+  // is this marker's only reader-of-record, and converting one without the
+  // other leaves a compensator looking for a marker nobody stamps.
+  //
+  // DO NOT REMOVE THIS FIELD BEFORE THEN. It is live: service.go:944 reads it
+  // to tell an interrupted cancel from a genuine duplicate, and deleting it
+  // does not merely change the wire — it deletes the only thing standing
+  // between a succeeded cancel and a caller told REJECTED.
   google.protobuf.Timestamp cancel_announced_at = 18;
 
   // outcome_announced_at is WHEN A TERMINAL SUBMIT-FLOW OUTCOME WAS NOT MERELY
@@ -162,6 +175,19 @@ message OrderState {
   // It does NOT cover cancellation — cancel_announced_at owns that
   // transition on its own, because the cancel command's own redelivery path
   // (handleCancel) is what completes it, not a SubmitOrder redelivery.
+  // RETIREMENT CONDITION (#292): when BOTH remaining submit-flow terminal
+  // pairs are converted — handleSubmit's ErrUnpriced branch (Save(rejected)
+  // then refuse()) and the trailing CommandOutcome that follows work().
+  //
+  // The second of those is not a mechanical conversion: it follows state
+  // committed in EARLIER transactions (admission's Create, the fill folds), so
+  // retiring this marker requires first deciding which transaction that outcome
+  // belongs to. That decision is the work, not the deletion.
+  //
+  // DO NOT REMOVE THIS FIELD BEFORE THEN. service.go:1430
+  // (orderOutcomeAnnounced) reads it to drive completeTerminalOutcome; without
+  // it, a redelivery of an interrupted terminal announcement is acked on sight
+  // and the FACT is never published.
   google.protobuf.Timestamp outcome_announced_at = 19;
 
   // accepted_announced_at is WHEN THE ADMISSION ITSELF WAS NOT MERELY COMMITTED
@@ -187,6 +213,24 @@ message OrderState {
   // ACCEPTED for an order that has since moved to ROUTED or PARTIALLY_FILLED
   // would push a consumer's view of it BACKWARDS to a pre-routing snapshot. See
   // resume() for where that restriction is enforced.
+  // RETIREMENT CONDITION (#292), AND IT IS THE ONE THAT IS NOT ABOUT CODE.
+  //
+  // The admission pair IS converted — store.Create takes the ACCEPTED record,
+  // so a live admission can no longer be committed-and-unannounced. What keeps
+  // this field is the population it was built for: orders admitted BEFORE
+  // 0006_outbox.sql existed carry it unset with NO outbox record behind them,
+  // and a direct re-publish is the only thing that can announce them.
+  //
+  // So it retires when no order predating that migration can still be in a
+  // non-terminal state — an operational claim about the DATA, which no test can
+  // make and no code change can bring about. Establishing it means querying the
+  // estate, not reading the tree, and until someone does, "it is probably fine"
+  // is the whole risk.
+  //
+  // DO NOT REMOVE THIS FIELD BEFORE THEN. service.go:1340 reads it in resume(),
+  // which is where broker redelivery, kanz-redrive off the DLQ, and the sweep
+  // all converge — so deleting it silently drops the repair for every one of
+  // those paths at once.
   google.protobuf.Timestamp accepted_announced_at = 20;
 }
 
