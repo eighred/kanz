@@ -11,6 +11,35 @@
 // inject-the-transport stance the rest of the platform takes). The live Model is
 // not serialized; the log carries Metadata + role + validation and the injected
 // ModelLoader rematerializes the Model on apply.
+//
+// # NOTHING IMPORTS THIS YET, AND THAT IS TRACKED RATHER THAN FORGOTTEN (#112)
+//
+// No composition root constructs a Registry today:
+//
+//	$ grep -rn "prediction/registry" --include=*.go . | grep -v _test
+//	(nothing)
+//
+// It is the remaining third of the AI-M1 bridge. services/risk-engine's
+// internal/app/features.go records the original state — "internal/prediction
+// shipped a feature publisher, a resilient inference client and a model registry
+// — and had ZERO importers outside its own tests" — and the first two are now
+// wired at risk-engine's composition root. This is the piece that is not.
+//
+// DELETING IT WAS PROPOSED AND REJECTED, so the argument is recorded here rather
+// than re-litigated:
+//
+//   - It is not an orphan. Removing it would freeze a documented three-part
+//     design permanently at two thirds and turn "wire it" into "rebuild it".
+//   - Its job is a correctness property. It resolves a model by feature_set_ref
+//     and NEVER by name, which is what stops a model scoring a feature set it
+//     was not trained on — the same drift features.go warns about directly.
+//   - It cannot rot. The precedent for deleting unused code here is the Anthropic
+//     adapter, and that rotted because it sat behind a build tag CI never
+//     compiled. This is ordinary Go: `go build ./...` compiles it and
+//     `go test ./...` runs its tests on every CI run. Inert, but verified inert.
+//
+// So an unused package here is not the "dead code" the estate deletes on sight.
+// What it needs is a composition root, and #112 is where that is tracked.
 package registry
 
 import (
