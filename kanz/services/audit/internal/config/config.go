@@ -48,6 +48,42 @@ type Config struct {
 	// production — so it is opt-in, not warn-and-carry-on.
 	AllowEphemeralLog bool
 
+	// VerifyRoles are the roles permitted to call GET /v1/audit/verify
+	// (AUDIT_VERIFY_ROLES, comma-separated) — the #118 ruling.
+	//
+	// WHY THIS ENDPOINT AND NO OTHER. Every other read here is tenant-scoped by
+	// auth.RequireCallerTenant. /v1/audit/verify deliberately is NOT, and cannot
+	// be: the hash chain is ONE sequence across every tenant, so verifying a
+	// per-tenant subset proves nothing about it. That makes the attestation the
+	// single cross-tenant answer this service gives — and its record count tells
+	// any authenticated caller how much OTHER tenants' activity the platform is
+	// carrying. A tenant may see its own vault; the estate-wide count belongs to
+	// operators and monitoring.
+	//
+	// It restricts WHO MAY ASK, not what is returned. Scoping the attestation
+	// itself would destroy the property it exists to prove.
+	VerifyRoles []string
+
+	// AllowUnrestrictedVerify is the EXPLICIT admission that /v1/audit/verify is
+	// open to any authenticated principal — AUDIT_ALLOW_UNRESTRICTED_VERIFY=true.
+	//
+	// It exists for the same reason AllowEphemeralLog does, and the reasoning is
+	// worth repeating rather than cross-referencing: an unset AUDIT_VERIFY_ROLES
+	// and a deliberately-open deployment would otherwise produce the SAME clean
+	// start. The failure mode is the worse direction here — a deployment that
+	// FORGOT to grant the capability would silently serve estate-wide counts to
+	// every tenant, and nothing would look wrong.
+	//
+	// So unset is a REFUSAL TO START, not a default. The escape hatch is loud,
+	// named, and greppable.
+	//
+	// THE OPPOSITE FAILURE IS ALSO REAL AND IS WHY THE HATCH EXISTS AT ALL:
+	// over-restricting a tamper check means nobody verifies. A deployment that
+	// cannot yet issue roles should say so out loud and keep verification
+	// working, rather than have the endpoint deny everyone with no way to tell
+	// that from a chain that is fine.
+	AllowUnrestrictedVerify bool
+
 	// OTLPEndpoint is the OTel collector for span export (OBS-01).
 	OTLPEndpoint string
 
@@ -85,8 +121,11 @@ func Load() (Config, error) {
 		Subjects:          subjects,
 		DatabaseURL:       databaseURL,
 		AllowEphemeralLog: os.Getenv("AUDIT_ALLOW_EPHEMERAL_LOG") == "true",
-		OTLPEndpoint:      os.Getenv("AUDIT_OTLP_ENDPOINT"),
-		SPIFFESocket:      os.Getenv("SPIFFE_ENDPOINT_SOCKET"),
+
+		VerifyRoles:             splitList(os.Getenv("AUDIT_VERIFY_ROLES")),
+		AllowUnrestrictedVerify: os.Getenv("AUDIT_ALLOW_UNRESTRICTED_VERIFY") == "true",
+		OTLPEndpoint:            os.Getenv("AUDIT_OTLP_ENDPOINT"),
+		SPIFFESocket:            os.Getenv("SPIFFE_ENDPOINT_SOCKET"),
 	}, nil
 }
 

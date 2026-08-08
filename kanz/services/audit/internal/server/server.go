@@ -43,6 +43,9 @@ type Server struct {
 	metrics   http.Handler
 	store     audit.Store
 	mux       *http.ServeMux
+	// verifyRoles gate GET /v1/audit/verify (#118). Empty ⇒ explicitly
+	// unrestricted; see WithVerifyRoles.
+	verifyRoles []string
 }
 
 type Option func(*Server)
@@ -53,6 +56,41 @@ func WithMetrics(h http.Handler) Option { return func(s *Server) { s.metrics = h
 // WithStore mounts the read API (query / lineage / verify / reports) over the
 // audit store. Omitted ⇒ only the probes are served.
 func WithStore(st audit.Store) Option { return func(s *Server) { s.store = st } }
+
+// WithVerifyRoles restricts GET /v1/audit/verify to principals holding one of
+// these roles (#118). An EMPTY slice leaves it open to any authenticated caller,
+// which is only reachable via the explicit AUDIT_ALLOW_UNRESTRICTED_VERIFY
+// admission — the composition root refuses to start otherwise, so "open" here is
+// always a stated choice rather than an omission.
+func WithVerifyRoles(roles []string) Option {
+	return func(s *Server) { s.verifyRoles = roles }
+}
+
+// mayVerify reports whether the request's principal holds a role permitted to
+// read the estate-wide attestation.
+//
+// Roles arrive on X-Kanz-Principal-Roles, set by the gateway from the verified
+// token — the same seam every other read here trusts, sound only because a
+// NetworkPolicy makes the gateway this service's only reachable caller.
+func (s *Server) mayVerify(r *http.Request) bool {
+	if len(s.verifyRoles) == 0 {
+		return true // explicitly unrestricted; see WithVerifyRoles
+	}
+	p, ok := auth.PrincipalFromHeaders(r.Header)
+	if !ok {
+		return false
+	}
+	allowed := make(map[string]struct{}, len(s.verifyRoles))
+	for _, role := range s.verifyRoles {
+		allowed[role] = struct{}{}
+	}
+	for _, held := range p.Roles {
+		if _, ok := allowed[held]; ok {
+			return true
+		}
+	}
+	return false
+}
 
 func New(readiness *Readiness, logger *slog.Logger, opts ...Option) *Server {
 	s := &Server{logger: logger, readiness: readiness, mux: http.NewServeMux()}
@@ -175,13 +213,29 @@ func (s *Server) handleLineage(w http.ResponseWriter, r *http.Request) {
 // handleVerify serves the AUDIT-01b chain attestation. A broken chain returns
 // 409 Conflict — tamper detected — so a monitor can alert on the status code.
 func (s *Server) handleVerify(w http.ResponseWriter, r *http.Request) {
-	// Authenticated, but deliberately NOT tenant-scoped. The hash chain is ONE
-	// sequence across every tenant, so verifying a per-tenant subset proves
-	// nothing about the chain — it would break the tamper-evidence this
-	// endpoint exists to provide. What is removed here is ANONYMOUS access.
-	// Restricting it further, to an operator capability, is an open decision
-	// and must not be guessed at by narrowing the scan.
+	// NOT TENANT-SCOPED, AND THAT CANNOT CHANGE. The hash chain is ONE sequence
+	// across every tenant, so verifying a per-tenant subset proves nothing about
+	// it — scoping this endpoint would destroy the tamper-evidence it exists to
+	// provide. Do not "fix" it by narrowing the scan.
+	//
+	// SO THE RESTRICTION IS ON WHO MAY ASK (#118, ruled 2026-08-08). Because the
+	// attestation is estate-wide, its record count tells any authenticated caller
+	// how much OTHER tenants' activity the platform carries — a tenant may see
+	// its own vault, but the estate-wide figure belongs to operators and
+	// monitoring. A role from AUDIT_VERIFY_ROLES is required.
+	//
+	// The composition root refuses to start when neither AUDIT_VERIFY_ROLES nor
+	// AUDIT_ALLOW_UNRESTRICTED_VERIFY is set, so an empty verifyRoles here means
+	// the deployment SAID OUT LOUD that verification is open — never that someone
+	// forgot to grant it.
 	if _, ok := auth.RequireCallerTenant(w, r); !ok {
+		return
+	}
+	if !s.mayVerify(r) {
+		writeJSON(w, http.StatusForbidden, map[string]string{
+			"error": "verifying the audit chain requires one of the operator roles in AUDIT_VERIFY_ROLES: " +
+				"the attestation covers every tenant's records, so its count is estate-wide information",
+		})
 		return
 	}
 	att, err := report.Verify(r.Context(), s.store)

@@ -117,6 +117,28 @@ spec:
           env:
             # DSN from the SEC-01d CSI secret file, not a plaintext env.
             - { name: AUDIT_DATABASE_URL_FILE, value: /run/secrets/db/database-url }
+            # WHO MAY READ THE ESTATE-WIDE CHAIN ATTESTATION (#118).
+            #
+            # /v1/audit/verify is the one read on this surface that is NOT
+            # tenant-scoped, and cannot be: the hash chain is one sequence across
+            # every tenant, so verifying a subset proves nothing about it. Its
+            # attestation therefore carries an estate-wide RECORD COUNT, which
+            # tells any authenticated caller how much other tenants' activity
+            # this platform is carrying. A tenant sees its own vault; this figure
+            # is not its own.
+            #
+            # BOTH ROLES ARE LOAD-BEARING. The operator role is the human who
+            # investigates; the monitoring role is what actually runs the check
+            # on a schedule. Granting only the first would leave tamper detection
+            # depending on somebody remembering to look — over-restricting a
+            # tamper check means nobody verifies, which is the failure this
+            # restriction must not cause while preventing the other one.
+            #
+            # The binary REFUSES TO START with neither this nor
+            # AUDIT_ALLOW_UNRESTRICTED_VERIFY set, so a deployment that forgets
+            # the grant fails loudly instead of serving estate-wide counts to
+            # every tenant.
+            - { name: AUDIT_VERIFY_ROLES, value: "kanz-operator,kanz-monitoring" }
             - { name: AUDIT_LISTEN, value: ":8083" }
             - { name: AUDIT_NATS_URL, value: "nats://nats.kanz-messaging.svc:4222" }
             - { name: SPIFFE_ENDPOINT_SOCKET, value: "unix:///run/spiffe/spire-agent.sock" }
