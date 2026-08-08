@@ -22,6 +22,9 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 
+	"github.com/prometheus/client_golang/prometheus"
+
+	observationpb "github.com/eighred/kanz/kanz-schemas-go/observation/v1"
 	operatorpb "github.com/eighred/kanz/kanz-schemas-go/operator/v1"
 	querypb "github.com/eighred/kanz/kanz-schemas-go/query/v1"
 
@@ -29,6 +32,7 @@ import (
 	"github.com/eighred/kanz/internal/platform/httpserver"
 	"github.com/eighred/kanz/internal/version"
 	"github.com/eighred/kanz/pkg/auth"
+	"github.com/eighred/kanz/pkg/authbus"
 	"github.com/eighred/kanz/pkg/bus"
 	"github.com/eighred/kanz/pkg/observability"
 	"github.com/eighred/kanz/pkg/transport"
@@ -154,12 +158,26 @@ func run() int {
 	// Order write surface (OMS-01d): publish order commands to the spine, with
 	// the AUTH-01c forged-issuer guard on the producer. Nil publisher ⇒ the
 	// write routes 503 (read-only gateway).
-	ordersHandler, closeBus, err := buildOrders(ctx, cfg, logger)
+	producer, closeBus, err := buildBus(ctx, cfg, logger)
 	if err != nil {
 		logger.Error("order write surface init failed", "err", err)
 		return 2
 	}
 	defer closeBus()
+	ordersHandler := orders.New(producer)
+
+	// AUTH-01d: every capability decision this gateway makes is recorded.
+	//
+	// THE GATEWAY IS THE PLATFORM'S SOLE IDENTITY AUTHORITY AND RECORDED ITS
+	// DECISIONS NOWHERE — not to the observation stream, not even to a log. Every
+	// other authorization surface in the estate had at least an slog recorder.
+	//
+	// It shares the ORDER PRODUCER deliberately: one connection, one broker
+	// identity (SEC-M3 authenticates per connection). A DecisionLog is an
+	// OBSERVATION, and the producer's forged-issuer guard runs on COMMANDs only,
+	// so the two event kinds do not interfere.
+	recorder, closeRecorder := buildDecisionRecorder(producer, obs.Registry, logger)
+	defer closeRecorder()
 
 	// Phase-7 read surfaces (SVCWIRE-01b/c): wealth/datamaster/copilot routes
 	// behind the same edge chain, forwarded over the SEC-01b mTLS mesh. With no
@@ -188,7 +206,7 @@ func run() int {
 	}
 
 	var ready atomic.Bool
-	router, err := buildRouter(cfg, handler, ordersHandler, proxyHandler, ctlHandler, obs, &ready, logger)
+	router, err := buildRouter(cfg, handler, ordersHandler, proxyHandler, ctlHandler, obs, &ready, logger, recorder)
 	if err != nil {
 		return 2
 	}
@@ -232,14 +250,19 @@ func run() int {
 	return fatal.Code()
 }
 
-// buildOrders wires the OMS-01d write surface. With a NATS URL it dials the
-// spine and returns a producer-backed handler (forged-issuer guard on); without
-// one it returns a disabled handler whose routes 503. The returned func closes
-// the bus client on shutdown.
-func buildOrders(ctx context.Context, cfg config.Config, logger *slog.Logger) (*orders.Handler, func(), error) {
+// buildBus dials the spine and returns the producer the gateway publishes
+// through, or nil when no NATS URL is configured (the read-only gateway: order
+// routes 503 and decisions fall back to the log). The returned func closes the
+// client on shutdown.
+//
+// IT RETURNS THE PRODUCER RATHER THAN THE ORDER HANDLER (#352) because two
+// things now publish: the OMS-01d order write surface and the AUTH-01d decision
+// recorder. Dialling a second connection for the recorder would give one process
+// two client identities on a broker that authenticates per connection (SEC-M3).
+func buildBus(ctx context.Context, cfg config.Config, logger *slog.Logger) (*bus.Producer, func(), error) {
 	if cfg.NATSURL == "" {
 		logger.Warn("api-gateway: order write surface disabled (no API_GATEWAY_NATS_URL)")
-		return orders.New(nil), func() {}, nil
+		return nil, func() {}, nil
 	}
 	// SEC-M3: the production broker requires a client SVID; a nil TLSConfig is a
 	// plaintext client it refuses at the handshake.
@@ -253,6 +276,13 @@ func buildOrders(ctx context.Context, cfg config.Config, logger *slog.Logger) (*
 		_ = mesh.Close()
 		return nil, func() {}, err
 	}
+	// NO ProducerConfig.Tenant, DELIBERATELY. This producer carries order
+	// COMMANDs, and a fallback tenant here would stamp a submit whose token
+	// carried no tenant claim with the gateway's own tenant — attributing a
+	// customer's capital command to the platform, under a value that is valid and
+	// not theirs. The order path must REFUSE such a token instead. The decision
+	// recorder, which has no delivery to inherit a tenant from either, gets its
+	// fallback scoped to itself via authbus.WithFallbackTenant.
 	producer, err := bus.NewProducer(client, bus.ProducerConfig{
 		Source:              cfg.Source,
 		ProducerVersion:     version.String(),
@@ -264,7 +294,62 @@ func buildOrders(ctx context.Context, cfg config.Config, logger *slog.Logger) (*
 		return nil, func() {}, err
 	}
 	logger.Info("api-gateway: order write surface enabled")
-	return orders.New(producer), func() { _ = client.Close(); _ = mesh.Close() }, nil
+	return producer, func() { _ = client.Close(); _ = mesh.Close() }, nil
+}
+
+// authDecisionsLost counts AUTH-01d decisions that never reached the observation
+// stream, by reason. A counter and not only a log line: a decision recorded to
+// stdout is gone at the next rollout, so logging a DROPPED one to the same stdout
+// reproduces the defect one layer down. Registered only when there is a bus —
+// exported at zero with no broker it would read as "nothing was lost" when in
+// truth nothing was ever published.
+var authDecisionsLost = prometheus.NewCounterVec(prometheus.CounterOpts{
+	Name: "kanz_api_gateway_auth_decisions_lost_total",
+	Help: "AUTH-01d authorization decisions that could not be published to the observation stream.",
+}, []string{"reason"})
+
+// buildDecisionRecorder returns the AUTH-01d recorder for the capability mux.
+//
+// With a producer it publishes to platform.authz.decision. WITHOUT one it falls
+// back to slog rather than to nothing: the read-only gateway still makes
+// authorization decisions, and "no bus" must not silently mean "no audit trail".
+// Neither arm is a no-op, which is the point — this service recorded nowhere
+// before #352.
+func buildDecisionRecorder(producer *bus.Producer, reg prometheus.Registerer, logger *slog.Logger) (auth.DecisionRecorder, func()) {
+	if producer == nil {
+		logger.Warn("api-gateway: no API_GATEWAY_NATS_URL — AUTH-01d authorization decisions are " +
+			"recorded to the LOG ONLY, so they do not survive a restart and cannot be queried " +
+			"beside the FACTs they justified")
+		return auth.NewSlogRecorder(logger), func() {}
+	}
+	reg.MustRegister(authDecisionsLost)
+	rec, err := authbus.NewBusRecorder(producer,
+		// The FALLBACK only: each decision is stamped with the deciding
+		// principal's own tenant when it has one. This covers the decision made
+		// when there is NO principal — an unauthenticated caller, or a token
+		// with no tenant claim — which is a platform-level event and belongs
+		// under the platform's own tenant.
+		authbus.WithFallbackTenant(bus.SystemTenant),
+		authbus.WithErrorHandler(func(err error) {
+			authDecisionsLost.WithLabelValues("publish_error").Inc()
+			logger.Error("an AUTH-01d decision could not be published — it exists only in this log line",
+				"err", err)
+		}),
+		authbus.WithOverflowHandler(func(*observationpb.DecisionLog) {
+			authDecisionsLost.WithLabelValues("queue_full").Inc()
+			logger.Error("an AUTH-01d decision was DROPPED because the recorder queue is full — " +
+				"the observation stream is now missing decisions this gateway did make")
+		}),
+	)
+	if err != nil {
+		// Unreachable: NewBusRecorder errors only on a nil producer, excluded above.
+		// Degrade rather than refuse to start — an unrecorded gateway is bad, a gateway
+		// that will not start is an outage.
+		logger.Error("decision recorder init failed — falling back to the log", "err", err)
+		return auth.NewSlogRecorder(logger), func() {}
+	}
+	logger.Info("api-gateway: authorization decisions publish to the observation stream")
+	return rec, rec.Close
 }
 
 // buildProxy wires the Phase-7 read surfaces (SVCWIRE-01c). It collects the
@@ -342,7 +427,7 @@ func buildProxy(ctx context.Context, cfg config.Config, logger *slog.Logger) (*p
 
 // buildRouter wires the public probes/metrics/openapi (un-gated) and the /v1
 // risk + order + Phase-7 read routes behind the edge middleware chain.
-func buildRouter(cfg config.Config, h *gateway.Handler, o *orders.Handler, p *proxy.Handler, ctl *control.Handler, obs *observability.Provider, ready *atomic.Bool, logger *slog.Logger) (http.Handler, error) {
+func buildRouter(cfg config.Config, h *gateway.Handler, o *orders.Handler, p *proxy.Handler, ctl *control.Handler, obs *observability.Provider, ready *atomic.Bool, logger *slog.Logger, recorder auth.DecisionRecorder) (http.Handler, error) {
 	// EVERY /v1 ROUTE DECLARES WHAT IT TAKES TO REACH IT (SEC-M2).
 	//
 	// The gateway used to wrap all of /v1 in ONE role check, so `GET /v1/portfolios/{id}/
@@ -368,7 +453,7 @@ func buildRouter(cfg config.Config, h *gateway.Handler, o *orders.Handler, p *pr
 		// refuses to start if this role collides with either of the others, because a
 		// collision here silently merges two authorities that exist to be separate.
 		cfg.OperatorRole: {authz.Read, authz.Operate},
-	})
+	}, recorder)
 	h.Routes(gwMux)
 	o.Routes(gwMux)
 	p.Routes(gwMux)

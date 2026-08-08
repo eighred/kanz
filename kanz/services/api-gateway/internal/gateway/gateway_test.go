@@ -70,7 +70,7 @@ func (f *fakeClient) Health(_ context.Context, _ *querypb.HealthRequest, _ ...gr
 // about JSON↔proto transcoding; authorization itself is proven in internal/authz.
 func serve(t *testing.T, fc *fakeClient) *httptest.Server {
 	t.Helper()
-	mux := authz.NewMux(authz.Grants{"analyst": {authz.Read}})
+	mux := authz.NewMux(authz.Grants{"analyst": {authz.Read}}, nil)
 	gateway.New(fc).Routes(mux)
 	authed := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		p := &middleware.Principal{Subject: "u1", Tenant: testTenant, Roles: []string{"analyst"}}

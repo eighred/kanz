@@ -196,3 +196,101 @@ func (c *blockingClient) Subscribe(context.Context, string, string, bus.Handler)
 	return errors.New("not implemented")
 }
 func (c *blockingClient) Close() error { return nil }
+
+// THE DECISION CARRIES ITS OWN TENANT, NOT THE DEPLOYMENT'S.
+//
+// The `newRecorder` producer is configured with Tenant "acme" as a fallback, so a
+// test that only ever decided for acme could not tell the two apart. This one
+// decides for a DIFFERENT tenant: if the envelope comes back "acme", the
+// producer's fallback won and every customer's access decisions would be
+// attributed to whatever the deployment was configured with — a value that is
+// valid, not theirs, and undetectable downstream.
+func TestBusRecorderStampsTheDecidingPrincipalsTenant(t *testing.T) {
+	rec, cc := newRecorder(t)
+	req := auth.Request{
+		Principal: &auth.Principal{Subject: "u2", Tenant: "globex"},
+		Action:    auth.ActionRiskRead,
+		Resource:  auth.Resource{Type: "portfolio", ID: "p9", Tenant: "globex"},
+	}
+	entry := auth.BuildDecisionLog(auth.DefaultAuthzDecider, req, auth.Decision{Allow: true, Reason: "grant"})
+	_ = rec.Record(context.Background(), entry)
+	rec.Close()
+
+	msgs := cc.messages()
+	if len(msgs) != 1 {
+		t.Fatalf("captured %d want 1", len(msgs))
+	}
+	var frame envelopepb.EventFrame
+	if err := proto.Unmarshal(msgs[0].Body, &frame); err != nil {
+		t.Fatalf("frame unmarshal: %v", err)
+	}
+	if got := frame.Envelope.GetTenantId(); got != "globex" {
+		t.Fatalf("envelope tenant_id = %q, want globex.\n\n"+
+			"The producer's fallback (acme) won over the deciding principal's tenant. In a "+
+			"multi-tenant deployment that attributes every customer's access decisions to the "+
+			"platform's own tenant, and nothing downstream can tell they are misfiled.", got)
+	}
+}
+
+// A DECISION WITH NO PRINCIPAL TENANT USES THE FALLBACK — and without one, fails
+// LOUDLY rather than being stamped with a tenant nobody chose.
+func TestBusRecorderFallbackTenantAppliesOnlyWhenThereIsNone(t *testing.T) {
+	anonymous := auth.BuildDecisionLog("gateway",
+		auth.Request{Action: "read", Resource: auth.Resource{Type: "route", ID: "/v1/x"}},
+		auth.Decision{Allow: false, Reason: "no principal"})
+	if _, ok := anonymous.GetAttributes()["principal.tenant"]; ok {
+		t.Fatal("fixture carries a principal.tenant — this test would not exercise the fallback")
+	}
+
+	t.Run("fallback configured", func(t *testing.T) {
+		cc := &captureClient{}
+		// No producer-level Tenant: this is the api-gateway shape, where a producer
+		// fallback would also apply to order COMMANDs on the same producer.
+		prod, err := bus.NewProducer(cc, bus.ProducerConfig{Source: "gw/test", ProducerVersion: "v1"})
+		if err != nil {
+			t.Fatalf("NewProducer: %v", err)
+		}
+		rec, err := authbus.NewBusRecorder(prod, authbus.WithFallbackTenant("__system__"))
+		if err != nil {
+			t.Fatalf("NewBusRecorder: %v", err)
+		}
+		_ = rec.Record(context.Background(), anonymous)
+		rec.Close()
+
+		msgs := cc.messages()
+		if len(msgs) != 1 {
+			t.Fatalf("captured %d want 1 — the publish failed, so the fallback did not apply", len(msgs))
+		}
+		var frame envelopepb.EventFrame
+		_ = proto.Unmarshal(msgs[0].Body, &frame)
+		if got := frame.Envelope.GetTenantId(); got != "__system__" {
+			t.Errorf("envelope tenant_id = %q, want __system__", got)
+		}
+	})
+
+	t.Run("no fallback fails loudly", func(t *testing.T) {
+		cc := &captureClient{}
+		prod, err := bus.NewProducer(cc, bus.ProducerConfig{Source: "gw/test", ProducerVersion: "v1"})
+		if err != nil {
+			t.Fatalf("NewProducer: %v", err)
+		}
+		var publishErr error
+		rec, err := authbus.NewBusRecorder(prod,
+			authbus.WithErrorHandler(func(e error) { publishErr = e }))
+		if err != nil {
+			t.Fatalf("NewBusRecorder: %v", err)
+		}
+		_ = rec.Record(context.Background(), anonymous)
+		rec.Close()
+
+		if publishErr == nil {
+			t.Fatal("a decision with no principal tenant and no fallback PUBLISHED.\n\n" +
+				"It must be rejected by bus.Validate so the error handler counts it and the " +
+				"deployment learns it never configured one. Silently stamping some default " +
+				"would file those decisions under a tenant nobody chose.")
+		}
+		if len(cc.messages()) != 0 {
+			t.Errorf("an invalid envelope reached the client: %d messages", len(cc.messages()))
+		}
+	})
+}

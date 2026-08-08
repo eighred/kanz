@@ -13,9 +13,20 @@ package authz
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 
+	"github.com/eighred/kanz/pkg/auth"
 	"github.com/eighred/kanz/services/api-gateway/internal/middleware"
+)
+
+const (
+	// decider identifies this gateway as the deciding authority in the DecisionLog
+	// ("{type}:{id}" per the schema). AUDIT-01 selects authz records by it.
+	decider = "authz:api-gateway"
+	// resourceRoute is the resource type for a capability check: the thing being
+	// authorized is a ROUTE, not a portfolio or an order.
+	resourceRoute = "route"
 )
 
 // Capability is what a route DOES, not what it is called. The HTTP verb is not the authority
@@ -55,14 +66,23 @@ type Grants map[string][]Capability
 
 // Allows reports whether any of the principal's roles carries cap.
 func (g Grants) Allows(roles []string, cap Capability) bool {
+	_, ok := g.grantingRole(roles, cap)
+	return ok
+}
+
+// grantingRole names the role that carries cap, which is the audit-facing half of
+// the same question Allows answers. It is one lookup rather than two so a future
+// change cannot make the recorded reason disagree with the enforced decision —
+// "allowed, because role X" and "allowed" must never be computed separately.
+func (g Grants) grantingRole(roles []string, cap Capability) (string, bool) {
 	for _, role := range roles {
 		for _, c := range g[role] {
 			if c == cap {
-				return true
+				return role, true
 			}
 		}
 	}
-	return false
+	return "", false
 }
 
 // Route is one registered endpoint and the capability it demands. Exposed so the arch test
@@ -81,21 +101,35 @@ type Route struct {
 // handler at registration, so it is not a middleware that a future composition root can
 // leave out of a chain.
 type Mux struct {
-	mux    *http.ServeMux
-	grants Grants
-	routes []Route
+	mux      *http.ServeMux
+	grants   Grants
+	routes   []Route
+	recorder auth.DecisionRecorder
 }
 
-// NewMux returns a Mux enforcing grants. A nil Grants allows NOTHING — which is what makes
-// it safe to construct one in a test, and fatal to construct one in production by mistake.
-func NewMux(grants Grants) *Mux {
-	return &Mux{mux: http.NewServeMux(), grants: grants}
+// NewMux returns a Mux enforcing grants and recording every decision it makes.
+//
+// A nil Grants allows NOTHING — which is what makes it safe to construct one in a test,
+// and fatal to construct one in production by mistake.
+//
+// THE RECORDER IS A REQUIRED PARAMETER FOR THE SAME REASON THE CAPABILITY IS (#352). This
+// package's stance is that enforcement belongs at registration, "not because a reviewer
+// would catch it, but because the code would not compile". An authorization decision that
+// nobody records is exactly the defect that stance exists to prevent, one level up: the
+// gateway is the platform's sole identity authority, and until now it recorded its allows
+// and denies NOWHERE — not even to a log. A functional option would have made forgetting it
+// the default.
+//
+// A nil recorder means "record nothing" and is for tests only. The composition root is
+// guarded by test/arch/gateway_decision_recorder_test.go, which fails if main.go passes one.
+func NewMux(grants Grants, recorder auth.DecisionRecorder) *Mux {
+	return &Mux{mux: http.NewServeMux(), grants: grants, recorder: recorder}
 }
 
 // Handle registers pattern, reachable only by a principal whose roles carry cap.
 func (m *Mux) Handle(cap Capability, pattern string, h http.HandlerFunc) {
 	m.routes = append(m.routes, Route{Pattern: pattern, Capability: cap})
-	m.mux.HandleFunc(pattern, m.require(cap, h))
+	m.mux.HandleFunc(pattern, m.require(cap, pattern, h))
 }
 
 // Routes returns every registered route and its capability, in registration order.
@@ -104,23 +138,85 @@ func (m *Mux) Routes() []Route { return m.routes }
 // ServeHTTP makes the Mux the gateway's /v1 handler.
 func (m *Mux) ServeHTTP(w http.ResponseWriter, r *http.Request) { m.mux.ServeHTTP(w, r) }
 
-// require is the enforcement point.
-func (m *Mux) require(cap Capability, next http.HandlerFunc) http.HandlerFunc {
+// require is the enforcement point, and therefore the recording point (AUTH-01d).
+//
+// BOTH VERDICTS ARE RECORDED, and that is not a preference. pkg/auth/audit.go states the
+// contract — a DecisionLog "for every allow AND deny" — and services/audit takes the same
+// line for the same reason ("audit completeness over economy", DefaultSubjects = [">"]). A
+// trail holding only refusals cannot answer who DID read the fund's positions, which is the
+// question an investigation actually asks.
+//
+// The volume that raises is real and is handled where it belongs rather than by pre-emptive
+// narrowing: BusRecorder drains off a bounded queue and SHEDS on overflow, counting every
+// drop. So load degrades to a counted, alertable loss instead of backpressure on the request
+// path. If that counter ever moves in production, the answer is a deliberate, documented
+// narrowing — not a guess made today against traffic nobody has measured.
+func (m *Mux) require(cap Capability, pattern string, next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		p := middleware.PrincipalFromContext(r.Context())
 		if p == nil {
 			// This router runs INSIDE middleware.Auth, so no principal means the chain was
 			// composed wrong. REFUSE. A capability check that treats "nobody" as "allowed"
 			// is worse than no check at all, because it looks like one.
+			//
+			// Recorded too: this is a misconfiguration that presents as a 403 the caller
+			// cannot distinguish from an ordinary refusal, so the audit trail is the only
+			// place it becomes visible.
+			m.record(r, nil, cap, pattern, auth.Decision{
+				Reason: "no principal on the request context — the middleware chain is composed wrong",
+			})
 			forbidden(w)
 			return
 		}
-		if !m.grants.Allows(p.Roles, cap) {
+		role, allowed := m.grants.grantingRole(p.Roles, cap)
+		m.record(r, p, cap, pattern, decisionFor(cap, role, allowed, p.Roles))
+		if !allowed {
 			forbidden(w)
 			return
 		}
 		next(w, r)
 	}
+}
+
+// decisionFor renders the audit-facing reason. It NAMES THE GRANTING ROLE on an allow,
+// because "allowed" alone cannot be reconstructed later: the grants map changes, and the
+// question a year from now is which role carried the capability at the time.
+func decisionFor(cap Capability, role string, allowed bool, roles []string) auth.Decision {
+	if allowed {
+		return auth.Decision{Allow: true, Reason: fmt.Sprintf("role %q carries %s", role, cap)}
+	}
+	return auth.Decision{Reason: fmt.Sprintf("none of the caller's roles %v carries %s", roles, cap)}
+}
+
+// record maps the capability decision onto a DecisionLog and hands it to the recorder.
+//
+// It uses auth.BuildDecisionLog rather than assembling attributes here, so the gateway's
+// capability model and the rest of the estate's authorization records land in the SAME
+// shape — AUDIT-01 selects on those attribute keys, and a second mapping would be a second
+// answer to what "decision" and "principal.subject" mean.
+//
+// The resource is the ROUTE PATTERN, not the concrete path: it is what the capability was
+// actually checked against, and it does not carry ids from the URL into the audit trail.
+func (m *Mux) record(r *http.Request, p *middleware.Principal, cap Capability, pattern string, d auth.Decision) {
+	if m.recorder == nil {
+		return
+	}
+	var principal *auth.Principal
+	tenant := ""
+	if p != nil {
+		principal = &auth.Principal{Subject: p.Subject, Tenant: p.Tenant, Roles: p.Roles, Portfolios: p.Portfolios}
+		tenant = p.Tenant
+	}
+	entry := auth.BuildDecisionLog(decider, auth.Request{
+		Principal: principal,
+		Action:    auth.Action(cap),
+		Resource:  auth.Resource{Type: resourceRoute, ID: pattern, Tenant: tenant},
+	}, d)
+	// The error is discarded because DecisionRecorder implementations are non-blocking and
+	// best-effort by contract (they report their own losses via a counter). Failing the
+	// caller's request because an audit sink is unhappy would make the gateway less
+	// available than the thing it is auditing.
+	_ = m.recorder.Record(r.Context(), entry)
 }
 
 // forbidden says the caller is known and not permitted — deliberately WITHOUT naming the

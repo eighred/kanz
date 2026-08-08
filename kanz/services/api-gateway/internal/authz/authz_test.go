@@ -41,7 +41,7 @@ func grants() authz.Grants {
 // request as the given principal — exactly as middleware.Auth would have left it on ctx.
 func probe(t *testing.T, method, path string, roles ...string) int {
 	t.Helper()
-	m := authz.NewMux(grants())
+	m := authz.NewMux(grants(), nil)
 	m.Handle(authz.Read, "GET /v1/portfolios/{id}/exposure", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})

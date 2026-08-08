@@ -48,6 +48,7 @@ type BusRecorder struct {
 	queue    chan *observationpb.DecisionLog
 	onErr    func(err error)
 	onDrop   func(*observationpb.DecisionLog)
+	tenant   string
 
 	wg       sync.WaitGroup
 	stopOnce sync.Once
@@ -85,6 +86,29 @@ func WithErrorHandler(fn func(err error)) Option {
 // is dropped (so a deployment can alert on lost audit records).
 func WithOverflowHandler(fn func(*observationpb.DecisionLog)) Option {
 	return func(r *BusRecorder) { r.onDrop = fn }
+}
+
+// WithFallbackTenant sets the envelope tenant_id used for decisions that carry
+// NO principal tenant of their own — an unauthenticated caller, or a token whose
+// tenant claim is absent.
+//
+// It is a fallback and not the tenant: publish stamps each decision with the
+// DECIDING PRINCIPAL'S tenant when there is one (see tenantFor). That ordering
+// matters at a multi-tenant composition root — a per-request fallback would
+// attribute every customer's access decisions to whatever the deployment was
+// configured with, a value that is valid and not theirs, which nothing
+// downstream can detect.
+//
+// WHY THIS EXISTS HERE RATHER THAN AS ProducerConfig.Tenant. bus.Validate
+// requires tenant_id on the live path, and an authorization decision is raised
+// by an inbound HTTP request with no delivery to inherit a ctx tenant from. The
+// obvious fix — a producer-level fallback — is WRONG at any composition root
+// that shares one producer with a capital path: api-gateway publishes order
+// COMMANDs through the same producer, and a fallback there would silently stamp
+// a submit whose tenant claim was missing with the gateway's own tenant instead
+// of refusing it. Stamping per event keeps the fallback scoped to decisions.
+func WithFallbackTenant(t string) Option {
+	return func(r *BusRecorder) { r.tenant = t }
 }
 
 // NewBusRecorder builds a bus-backed recorder over producer and starts its
@@ -162,10 +186,31 @@ func (r *BusRecorder) publish(entry *observationpb.DecisionLog) {
 		PartitionKey:     partitionKey(entry),
 		PayloadSchemaRef: schemaRefDecisionLog,
 		Payload:          entry,
+		TenantID:         r.tenantFor(entry),
 	})
 	if err != nil && r.onErr != nil {
 		r.onErr(err)
 	}
+}
+
+// tenantFor is the envelope tenant_id for one decision: the DECIDING PRINCIPAL'S
+// tenant, falling back to WithFallbackTenant.
+//
+// A decision about acme's user reading acme's data belongs to acme, and stamping
+// it explicitly is what keeps a shared producer safe — the alternative,
+// ProducerConfig.Tenant, applies to every event that producer sends, including
+// capital commands on the same connection.
+//
+// Empty is returned when the decision has no principal tenant and no fallback was
+// configured. That is deliberate and LOUD: bus.Validate rejects an empty
+// tenant_id on the live path, so the publish fails, the error handler counts it,
+// and the deployment learns it never configured one. Defaulting silently here
+// would attribute those decisions to a tenant nobody chose.
+func (r *BusRecorder) tenantFor(entry *observationpb.DecisionLog) string {
+	if t := entry.GetAttributes()["principal.tenant"]; t != "" {
+		return t
+	}
+	return r.tenant
 }
 
 // partitionKey keeps a principal's decisions on one partition (ordered). Falls

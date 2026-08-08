@@ -29,7 +29,7 @@ func (f *fakePub) Publish(_ context.Context, e bus.Event) error {
 // capability, and only a principal whose roles carry it gets through. The order routes
 // require Trade, so these tests must hold a role that grants it — as a real caller must.
 func testMux() *authz.Mux {
-	return authz.NewMux(authz.Grants{"trader": {authz.Read, authz.Trade}})
+	return authz.NewMux(authz.Grants{"trader": {authz.Read, authz.Trade}}, nil)
 }
 
 func authed(req *http.Request, sub, tenant string) *http.Request {

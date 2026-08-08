@@ -221,8 +221,24 @@ var producersWithoutATenantFallback = map[string]tenantRoute{
 			"identity authority: every command it publishes goes through the single Handler.publish " +
 			"helper (orders.go:116), which stamps TenantID: p.Tenant — the AUTHENTICATED CALLER's " +
 			"tenant, from the JWT. A ProducerConfig.Tenant would let a token carrying no tenant claim " +
-			"publish an order into a default tenant's book instead of being refused.",
+			"publish an order into a default tenant's book instead of being refused. " +
+			"SECOND PUBLISHER ON THE SAME PRODUCER (#352): the AUTH-01d decision recorder publishes " +
+			"platform.authz.decision, and it is stamped per event by pkg/authbus/recorder.go's " +
+			"tenantFor — the deciding principal's tenant, falling back to authbus.WithFallbackTenant " +
+			"for a decision made with no principal at all. That fallback is scoped to the recorder " +
+			"PRECISELY so it cannot reach the order path above; moving it onto ProducerConfig would " +
+			"reintroduce the defect this entry exists to prevent.",
 		stampedIn: "services/api-gateway/internal/orders/orders.go",
+	},
+	"services/lineage/cmd/lineage": {
+		why: "ROUTE 2. The only publisher on this producer is the AUTH-01d decision recorder " +
+			"(newBusRecorder), and pkg/authbus stamps Event.TenantID on every decision: the deciding " +
+			"principal's tenant, falling back to authbus.WithFallbackTenant(cfg.Tenant) when a " +
+			"decision was made with no principal. It is a recorder-scoped option rather than a " +
+			"ProducerConfig field so that a decision about acme's user is filed under acme instead " +
+			"of under whatever this deployment was configured with — a value that would be valid, " +
+			"not theirs, and undetectable downstream.",
+		stampedIn: "pkg/authbus/recorder.go",
 	},
 	"services/compliance/cmd/compliance": {
 		why: "ROUTE 1. Both publishers (audit.BusRecorder.Record, monitor.Emitter.EmitBreach) are " +

@@ -287,15 +287,28 @@ data:
               }
             }
           }
-          # api-gateway's ONLY bus interaction is services/api-gateway/internal/
-          # orders/orders.go: it publishes order.order.submit / order.order.cancel
-          # as COMMANDs (the sole write path onto the order book — OMS-01d) and
-          # never subscribes to anything, so it needs neither a DLQ grant nor
-          # JetStream consumer permissions — only the reply inbox for the
-          # synchronous publish ack.
+          # api-gateway publishes on TWO paths, and never subscribes to anything —
+          # so it needs neither a DLQ grant nor JetStream consumer permissions,
+          # only the reply inbox for the synchronous publish ack.
+          #
+          #   · order.order.submit / .cancel — services/api-gateway/internal/
+          #     orders/orders.go, COMMANDs, the sole write path onto the order
+          #     book (OMS-01d).
+          #   · platform.authz.decision — the AUTH-01d capability decisions this
+          #     gateway makes, as OBSERVATIONs (#352). WITHOUT THIS ENTRY THE
+          #     BROKER DENIES EVERY ONE OF THEM. That failure is loud rather than
+          #     silent — kanz_api_gateway_auth_decisions_lost_total{reason=
+          #     "publish_error"} climbs and the error is logged — but the audit
+          #     trail is empty for as long as it lasts, so this line is part of
+          #     the feature, not an optimisation of it.
+          #
+          # The two are deliberately enumerated rather than widened: the gateway
+          # is the platform's sole identity authority, and `platform.>` would hand
+          # it platform.mode.changed — the kill switch that kanz-halt's entry
+          # above claims is its alone.
           { user: "spiffe://kanz.internal/ns/kanz-services/sa/api-gateway"
             permissions: {
-              publish: { allow: ["order.order.submit", "order.order.cancel"] }
+              publish: { allow: ["order.order.submit", "order.order.cancel", "platform.authz.decision"] }
               subscribe: { allow: ["_INBOX.>"] }
             }
           }
