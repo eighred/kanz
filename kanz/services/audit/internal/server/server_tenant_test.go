@@ -266,6 +266,14 @@ func TestVerify_RefusesARequestCarryingNoPrincipal(t *testing.T) {
 // NON-VACUITY for verify: an authenticated caller still gets the attestation,
 // and it is still computed over the WHOLE chain. A "fix" that tenant-scoped it
 // would pass the test above while silently destroying the tamper-evidence.
+//
+// NOTE SINCE #118: newAuditServer passes no WithVerifyRoles, so this exercises
+// the UNRESTRICTED posture — the one a deployment must opt into explicitly with
+// AUDIT_ALLOW_UNRESTRICTED_VERIFY, because the composition root refuses to start
+// with neither that nor AUDIT_VERIFY_ROLES set. That is deliberate here: this
+// test is about the attestation being WHOLE-CHAIN, and mixing the capability
+// gate into it would make a role-provisioning mistake look like a scoping
+// regression. The capability itself is covered in verify_capability_test.go.
 func TestVerify_AuthenticatedCallerStillGetsAGlobalAttestation(t *testing.T) {
 	spy := &filterSpy{}
 	srv := newAuditServer(spy)

@@ -107,8 +107,34 @@ func run() int {
 		return 2
 	}
 
+	// WHO MAY VERIFY THE CHAIN IS A DEPLOYMENT DECISION, AND IT MUST BE STATED
+	// (#118). /v1/audit/verify is the one read here that is deliberately NOT
+	// tenant-scoped — the chain is one sequence across every tenant — so its
+	// attestation carries an estate-wide record count. Unset roles and a
+	// deliberately-open deployment would otherwise start identically, and the
+	// silent one leaks that count to every tenant.
+	//
+	// Same shape as the AUDIT_DATABASE_URL refusal below it, for the same reason:
+	// the deployment that FORGOT must not look like the deployment that MEANT it.
+	if len(cfg.VerifyRoles) == 0 && !cfg.AllowUnrestrictedVerify {
+		logger.Error("no AUDIT_VERIFY_ROLES: GET /v1/audit/verify returns an attestation over EVERY " +
+			"tenant's records, so its count tells any authenticated caller how much other tenants' " +
+			"activity this platform carries. Name the operator/monitoring roles that may read it, or set " +
+			"AUDIT_ALLOW_UNRESTRICTED_VERIFY=true to accept that any authenticated principal may — in " +
+			"which case the estate-wide count is not confidential in this deployment")
+		return 2
+	}
+	if len(cfg.VerifyRoles) == 0 {
+		logger.Warn("CHAIN VERIFICATION IS OPEN TO ANY AUTHENTICATED PRINCIPAL — "+
+			"AUDIT_ALLOW_UNRESTRICTED_VERIFY accepted an estate-wide attestation readable by every "+
+			"tenant. The record count discloses how much other tenants' activity this platform carries",
+			"fix", "set AUDIT_VERIFY_ROLES to the operator and monitoring roles")
+	}
+
 	readiness := &server.Readiness{}
-	httpSrv := httpserver.New(cfg.Listen, server.New(readiness, logger, server.WithMetrics(obs.MetricsHandler()), server.WithStore(store)), httpserver.Standard())
+	httpSrv := httpserver.New(cfg.Listen, server.New(readiness, logger,
+		server.WithMetrics(obs.MetricsHandler()), server.WithStore(store),
+		server.WithVerifyRoles(cfg.VerifyRoles)), httpserver.Standard())
 	go func() {
 		logger.Info("audit listening", "addr", cfg.Listen)
 		if err := httpSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
