@@ -28,6 +28,32 @@ import (
 // ErrSequenceGap is returned by ApplyDelta when a delta does not chain onto the
 // current book sequence. The caller must re-snapshot before folding further —
 // applying out of order would silently corrupt the book.
+//
+// THIS IS DEFENCE IN DEPTH, NOT THE PRIMARY PATH, AND #190 SETTLED WHY THAT IS
+// ENOUGH. Both real depth sources detect the gap themselves and re-anchor, so a
+// gapped delta does not normally reach this function at all:
+//
+//   - depth/binance.go refetches REST depth and surfaces the result as a
+//     SNAPSHOT rather than a delta (TestBinanceSource_SequenceGapReAnchors).
+//   - depth/okx.go resubscribes, which makes OKX re-push a snapshot
+//     (TestOKXSource_SequenceGapReAnchors).
+//
+// WHAT IS DELIBERATELY NOT DONE: across a re-anchor the book keeps serving its
+// last-known levels through BestBid/BestAsk/Top, and pkg/alpha's MarketView has
+// no way to ask whether it is mid-re-anchor. A strategy pricing off the touch in
+// that window uses depth one REST round trip stale and cannot know it.
+//
+// That was weighed and left alone (#190, decision recorded 2026-08-08). The
+// window is BOUNDED — a REST fetch, not "until someone notices" — and a
+// staleness flag is not free: it touches MarketView, every engine that reads it,
+// and needs a defined re-seed semantic. Adding a seam no strategy reads is its
+// own cost, and no strategy reads one today.
+//
+// THE CONDITION THAT WOULD REOPEN IT: a strategy that actually wants to decline
+// on staleness. The cheap answer then is Book.EventTime() surfaced as an AGE on
+// MarketView — each strategy sets its own tolerance — rather than a Stale() bool,
+// which would bake one tolerance into the seam for everybody. Do not re-raise
+// this as a fail-open bug; it was traced to the sources and it is not one.
 var ErrSequenceGap = errors.New("book: sequence gap — re-snapshot required")
 
 // Book is one instrument's L2 depth on one venue. Safe for concurrent use: the
