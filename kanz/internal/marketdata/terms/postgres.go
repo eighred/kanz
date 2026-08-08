@@ -54,13 +54,28 @@ const (
 // ErrNoTerms reports that no terms record exists for an instrument at or before
 // the requested as_of.
 //
-// IT IS DISTINCT FROM "not a derivative" ON PURPOSE. compute.TermsProvider
-// returns ok=false for an instrument that is not an option, and a caller treats
-// that as "price it linearly" — a correct, routine answer. An instrument that IS
-// a derivative but whose terms were never loaded must not take that branch: it
-// would be priced as if it were a share. The store returns this error so the
-// caller can tell the two apart; collapsing them is how a missing load becomes a
-// silently mispriced book.
+// WHAT IT DOES AND DOES NOT DISTINGUISH — the first version of this comment
+// overstated it, so this is precise.
+//
+// It separates "no terms row" from "found terms". It does NOT separate a share
+// (never had terms, correctly priced linearly) from a DERIVATIVE WHOSE TERMS
+// WERE NEVER LOADED (which would then be priced as if it were a share). Both
+// arrive here as no row, and this store cannot tell them apart because it holds
+// no notion of what an instrument IS.
+//
+// That distinction needs reference.v1.InstrumentReference.asset_class — a
+// derivative is ASSET_CLASS_DERIVATIVE, and contract.proto's own header says
+// these terms are what "turn the ASSET_CLASS_DERIVATIVE tag into analytics". A
+// caller holding both can tell them apart; a caller holding only this store
+// cannot, and must not claim to.
+//
+// It still matters that this is an ERROR rather than a zero Record: the caller
+// gets a signal it has to handle, instead of an empty OptionTerms that decodes
+// as a contract with a zero strike. compute.TermsProvider's own signature
+// collapses everything to ok=false — greeks.go says so ("isOption=false when the
+// position is not an option OR its pricing inputs are unavailable") — so the
+// place to make a missing load visible is the provider's observability, not this
+// return value.
 var ErrNoTerms = errors.New("terms: no contract terms for instrument at or before as_of")
 
 // Postgres is the contract-terms store backed by 0002_contract_terms.sql.
