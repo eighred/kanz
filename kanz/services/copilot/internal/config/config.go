@@ -5,6 +5,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/eighred/kanz/pkg/bus"
 	"github.com/eighred/kanz/pkg/secret"
 	"github.com/eighred/kanz/services/copilot/internal/llm"
 )
@@ -81,9 +82,31 @@ type Config struct {
 	// default authz gate the owning tenant + the citation seed.
 	RiskQueryAddr string
 	// SPIFFESocket is the SPIFFE Workload API socket (SEC-01a CSI mount). When set,
-	// the query.v1 client dials over mTLS with an in-mesh peer SVID (SEC-01b);
-	// empty ⇒ plaintext (local/dev).
+	// the query.v1 client dials over mTLS with an in-mesh peer SVID (SEC-01b), and
+	// the bus dials the spine presenting the same workload SVID; empty ⇒ plaintext
+	// (local/dev), which the production broker refuses at the handshake (SEC-M3).
 	SPIFFESocket string
+
+	// NATSURL is the spine the AUTH-01d decision recorder publishes to (#352).
+	// Empty ⇒ decisions are recorded to the LOG ONLY, which is where this service
+	// started: a tool authorization that exists solely in a pod's stdout is gone at
+	// the next rollout and cannot be queried beside the FACTs it justified.
+	//
+	// It is the copilot's ONLY bus interaction — it publishes decisions and
+	// subscribes to nothing.
+	NATSURL string
+
+	// Tenant is the fallback tenant_id for a decision that carries NO principal
+	// tenant of its own. It is a FALLBACK and not the tenant: pkg/authbus stamps
+	// each decision with the deciding principal's tenant when there is one, so a
+	// decision about acme's analyst is filed under acme rather than under whatever
+	// this deployment was configured with.
+	//
+	// Defaults to bus.SystemTenant. A tool authorization made with no principal at
+	// all is a platform-level event, not any customer's — and bus.Validate rejects
+	// an empty tenant_id on the live path, so without a value here those decisions
+	// would be refused rather than recorded.
+	Tenant string
 
 	// OTLPEndpoint is the OTel collector for span export (OBS-01). Empty ⇒ none.
 	OTLPEndpoint string
@@ -127,6 +150,8 @@ func Load() (Config, error) {
 		RiskQueryAddr:     os.Getenv("COPILOT_RISK_QUERY_ADDR"),
 		SPIFFESocket:      os.Getenv("COPILOT_SPIFFE_SOCKET"),
 		OTLPEndpoint:      os.Getenv("COPILOT_OTLP_ENDPOINT"),
+		NATSURL:           os.Getenv("COPILOT_NATS_URL"),
+		Tenant:            envOr("COPILOT_TENANT", bus.SystemTenant),
 	}, nil
 }
 

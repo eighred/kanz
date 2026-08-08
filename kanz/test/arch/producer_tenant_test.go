@@ -230,6 +230,16 @@ var producersWithoutATenantFallback = map[string]tenantRoute{
 			"reintroduce the defect this entry exists to prevent.",
 		stampedIn: "services/api-gateway/internal/orders/orders.go",
 	},
+	"services/copilot/cmd/copilot": {
+		why: "ROUTE 2. The only publisher on this producer is the AUTH-01d decision recorder " +
+			"(buildDecisionRecorder), and pkg/authbus stamps Event.TenantID on every decision: the " +
+			"deciding principal's tenant, falling back to authbus.WithFallbackTenant(cfg.Tenant) for " +
+			"a tool authorization made with no principal at all. It is recorder-scoped rather than a " +
+			"ProducerConfig field so one analyst's authorizations are filed under their own tenant " +
+			"instead of this deployment's — the copilot answers questions for many tenants from one " +
+			"pod, so a per-service default would be the wrong tenant for all but one of them.",
+		stampedIn: "pkg/authbus/recorder.go",
+	},
 	"services/lineage/cmd/lineage": {
 		why: "ROUTE 2. The only publisher on this producer is the AUTH-01d decision recorder " +
 			"(newBusRecorder), and pkg/authbus stamps Event.TenantID on every decision: the deciding " +

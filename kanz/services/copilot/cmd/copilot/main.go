@@ -27,12 +27,17 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 
+	"github.com/prometheus/client_golang/prometheus"
+
+	observationpb "github.com/eighred/kanz/kanz-schemas-go/observation/v1"
 	querypb "github.com/eighred/kanz/kanz-schemas-go/query/v1"
 
 	"github.com/eighred/kanz/internal/lifecycle"
 	"github.com/eighred/kanz/internal/platform/httpserver"
 	"github.com/eighred/kanz/internal/version"
 	"github.com/eighred/kanz/pkg/auth"
+	"github.com/eighred/kanz/pkg/authbus"
+	"github.com/eighred/kanz/pkg/bus"
 	"github.com/eighred/kanz/pkg/observability"
 	"github.com/eighred/kanz/pkg/transport"
 	"github.com/eighred/kanz/services/copilot/internal/agent"
@@ -85,10 +90,19 @@ func run() int {
 		_ = obs.Shutdown(shutCtx)
 	}()
 
+	// AUTH-01d: every copilot tool authorization — allow AND deny — reaches the
+	// observation stream. With no COPILOT_NATS_URL it falls back to the log, which
+	// is where this service started and why #352 exists: a decision in a pod's
+	// stdout is gone at the next rollout.
+	recorder, closeRecorder, rerr := buildDecisionRecorder(ctx, cfg, obs.Registry, logger)
+	if rerr != nil {
+		logger.Error("decision recorder init failed", "err", rerr)
+		return 2
+	}
+	defer closeRecorder()
+
 	// AUTH-01b authorizer (deny-by-default) wrapped in the AUTH-01d audited
-	// authorizer so every copilot tool authorization — allow AND deny — lands on
-	// the observation stream (SlogRecorder here; the bus-backed recorder wires in
-	// the same way the rest of the platform records decisions).
+	// authorizer.
 	var inner auth.Authorizer = denyAll{}
 	if cfg.PolicyPath != "" {
 		policy, perr := auth.LoadPolicyFile(cfg.PolicyPath)
@@ -98,7 +112,7 @@ func run() int {
 		}
 		inner = auth.NewPolicyAuthorizer(policy)
 	}
-	authz := auth.NewAuditedAuthorizer(inner, auth.NewSlogRecorder(logger), "copilot", logger)
+	authz := auth.NewAuditedAuthorizer(inner, recorder, "copilot", logger)
 
 	// Seams: newModel resolves COPILOT_PROVIDER against the adapters this binary
 	// was linked with (#179). It FAILS rather than falling back — an unset or
@@ -185,6 +199,87 @@ func dialRiskQuery(ctx context.Context, cfg config.Config, logger *slog.Logger) 
 // everything (deny-by-default in the absence of a grant bundle), so a
 // misconfigured deploy fails closed rather than open.
 type denyAll struct{}
+
+// authDecisionsLost counts AUTH-01d decisions that never reached the observation
+// stream, by reason. A counter and not only a log line: a decision recorded to
+// stdout is gone at the next rollout, so logging a DROPPED one to the same stdout
+// reproduces the defect one layer down. Registered only when there is a bus —
+// exported at zero with no broker it would read as "nothing was lost" when in
+// truth nothing was ever published.
+var authDecisionsLost = prometheus.NewCounterVec(prometheus.CounterOpts{
+	Name: "kanz_copilot_auth_decisions_lost_total",
+	Help: "AUTH-01d authorization decisions that could not be published to the observation stream.",
+}, []string{"reason"})
+
+// buildDecisionRecorder returns the AUTH-01d recorder for the audited authorizer,
+// plus a shutdown func.
+//
+// THE COPILOT HAD NO BUS AT ALL, which is why this was the last of #352's three
+// sites. It publishes decisions and subscribes to nothing, so there is no
+// consumer, no DLQ and no JetStream machinery here — one producer on one
+// connection.
+//
+// Degradation is deliberate: with no COPILOT_NATS_URL it returns the slog
+// recorder, exactly the behaviour before this change. Neither arm is a no-op — a
+// service that cannot reach a broker must still record its authorization
+// decisions somewhere.
+func buildDecisionRecorder(ctx context.Context, cfg config.Config, reg prometheus.Registerer, logger *slog.Logger) (auth.DecisionRecorder, func(), error) {
+	if cfg.NATSURL == "" {
+		logger.Warn("no COPILOT_NATS_URL — AUTH-01d tool authorizations are recorded to the LOG ONLY, " +
+			"so they do not survive a restart and cannot be queried beside the FACTs they justified")
+		return auth.NewSlogRecorder(logger), func() {}, nil
+	}
+	// SEC-M3: the production broker requires a client SVID; a nil TLSConfig is a
+	// plaintext client it refuses at the handshake.
+	mesh, err := transport.NewMesh(ctx, cfg.SPIFFESocket)
+	if err != nil {
+		return nil, func() {}, err
+	}
+	logger.Info("bus transport", "mtls", mesh.Enabled())
+	client, err := bus.DialNATS(ctx, bus.NATSConfig{URL: cfg.NATSURL, Name: "copilot", TLSConfig: mesh.Client})
+	if err != nil {
+		_ = mesh.Close()
+		return nil, func() {}, err
+	}
+	// NO ProducerConfig.Tenant: the tenant is stamped per decision by pkg/authbus
+	// from the deciding principal, so one analyst's tool authorizations are filed
+	// under their own tenant rather than this deployment's.
+	producer, err := bus.NewProducer(client, bus.ProducerConfig{
+		Source:          "copilot",
+		ProducerVersion: version.String(),
+		Metrics:         bus.NewBusMetrics(reg),
+	})
+	if err != nil {
+		_ = client.Close()
+		_ = mesh.Close()
+		return nil, func() {}, err
+	}
+	reg.MustRegister(authDecisionsLost)
+
+	rec, err := authbus.NewBusRecorder(producer,
+		authbus.WithFallbackTenant(cfg.Tenant),
+		authbus.WithErrorHandler(func(err error) {
+			authDecisionsLost.WithLabelValues("publish_error").Inc()
+			logger.Error("an AUTH-01d decision could not be published — it exists only in this log line",
+				"err", err)
+		}),
+		authbus.WithOverflowHandler(func(*observationpb.DecisionLog) {
+			authDecisionsLost.WithLabelValues("queue_full").Inc()
+			logger.Error("an AUTH-01d decision was DROPPED because the recorder queue is full — " +
+				"the observation stream is now missing decisions this service did make")
+		}),
+	)
+	if err != nil {
+		_ = client.Close()
+		_ = mesh.Close()
+		return nil, func() {}, err
+	}
+	logger.Info("copilot: authorization decisions publish to the observation stream")
+	// ORDER IS LOAD-BEARING: drain the recorder's queue BEFORE dropping the
+	// connection it publishes over, or the decisions still in flight at shutdown —
+	// precisely those made just before a rollout — are discarded.
+	return rec, func() { rec.Close(); _ = client.Close(); _ = mesh.Close() }, nil
+}
 
 func (denyAll) Authorize(_ context.Context, _ auth.Request) auth.Decision {
 	return auth.Decision{Allow: false, Reason: "no policy bundle configured"}
