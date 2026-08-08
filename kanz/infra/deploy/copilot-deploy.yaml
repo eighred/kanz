@@ -115,6 +115,24 @@ spec:
             # reviewer. Present-and-wrong is worse than absent: the mesh silently stayed
             # disabled rather than failing loudly.
             - { name: COPILOT_SPIFFE_SOCKET, value: "unix:///run/spiffe/spire-agent.sock" }
+            # AUTH-01d (#352): every tool authorization this agent makes — allow AND
+            # deny — publishes to platform.authz.decision. UNSET means they are
+            # recorded to this pod's stdout only, which is gone at the next rollout;
+            # that was the state before, and it is a degradation, not a mode anyone
+            # should choose.
+            #
+            # It also needs the publish grant in infra/nats/tenancy.yaml. Without it
+            # the broker denies every decision — visibly, via
+            # kanz_copilot_auth_decisions_lost_total, but denied. The egress is
+            # already allowed: allow-messaging-egress in
+            # infra/security/runtime/network-policies.yaml selects every pod in this
+            # namespace on 4222.
+            - { name: COPILOT_NATS_URL, value: "nats://nats.kanz-messaging.svc:4222" }
+            # COPILOT_TENANT is deliberately ABSENT: it is only the FALLBACK for a
+            # decision made with no principal at all, and pkg/authbus stamps each
+            # decision with the deciding principal's own tenant. Setting it on a
+            # multi-tenant deployment would change nothing for real callers and would
+            # invite the belief that it is the tenant.
           livenessProbe:
             httpGet: { path: /healthz, port: 8080 }
             initialDelaySeconds: 5

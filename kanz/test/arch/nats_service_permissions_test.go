@@ -656,6 +656,18 @@ var crossPackagePublishSurfaces = map[string][]string{
 	// internal/signal/translate's Translator, constructed and driven from
 	// services/webhook-ingest/internal/ingest (pipeline.go's tr.Emit).
 	"webhook-ingest": {"internal/signal/translate"},
+	// AUTH-01d (#352): both of these construct pkg/authbus.NewBusRecorder at their
+	// composition root, and the bus.Event for platform.authz.decision is built
+	// inside authbus — neither service names the subject anywhere in its own tree.
+	//
+	// WITHOUT THESE TWO LINES THE GRANT IS UNVERIFIED, and that was measured, not
+	// assumed: with the entries absent, replacing "platform.authz.decision" in
+	// either service's tenancy.yaml permissions with a subject that does not exist
+	// left this guard GREEN. The block's presence was checked; its contents were
+	// not. A wrong or deleted grant would then be found only at runtime, by the
+	// broker denying every authorization decision.
+	"api-gateway": {"pkg/authbus"},
+	"copilot":     {"pkg/authbus"},
 }
 
 // servicePublishedSubjects walks services/<svc> (recursively — a service is a
