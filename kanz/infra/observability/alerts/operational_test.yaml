@@ -809,3 +809,58 @@ tests:
       - eval_time: 20m
         alertname: AlertDeliveryNotDelivering
         exp_alerts: []
+
+  # THE INFERENCE POOL PINNED AT ITS ADMISSION LIMIT (#334).
+  #
+  # in_flight sits at 8 against a configured limit of 8 for the whole hour, so
+  # the ratio is exactly 1.0 — the edge the rule derives from the limit rather
+  # than from an observation. Every request arriving in that window is refused.
+  - interval: 1m
+    name: the inference pool is pinned at its admission limit
+    input_series:
+      - series: 'kanz_inference_predict_in_flight'
+        values: '8x60'
+      - series: 'kanz_inference_admission_limit'
+        values: '8x60'
+    alert_rule_test:
+      - eval_time: 40m
+        alertname: InferencePoolSaturated
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              layer: operational
+            exp_annotations:
+              summary: "The inference prediction pool has been at its admission limit for 10 minutes"
+              description: "kanz_inference_predict_in_flight has sat at or above kanz_inference_admission_limit continuously for ten minutes, so this is saturation rather than a burst: every request arriving now is refused and counted as kanz_inference_degraded_total{reason=\"pool_saturated\"}. Either the concurrency limit is too low for the offered load or predictions are taking long enough to hold slots open — compare kanz_inference_predict_seconds over the same window before raising the limit, because raising it against slow predictions moves the queue rather than draining it."
+
+  # A BUSY POOL IS NOT A SATURATED ONE, AND A BURST IS NOT AN INCIDENT.
+  #
+  # This is the half #334 asks for by name — "the rule must also survive the
+  # inverse: a healthy ratio must NOT fire, or it is an alert that pages on
+  # normal operation and will be muted within a week."
+  #
+  # Two shapes that must stay silent, in one case so neither can be lost:
+  #   · a pool running hot but below its limit (7 of 8) for the whole hour;
+  #   · a pool that TOUCHES its limit for five minutes and recedes — admission
+  #     control doing exactly what it exists to do. Five minutes is deliberately
+  #     inside the 10m `for`, so this case fails the moment someone shortens the
+  #     debounce to "make the alert more responsive".
+  - interval: 1m
+    name: a hot pool and a brief burst are both silent
+    input_series:
+      - series: 'kanz_inference_predict_in_flight'
+        values: '7x20 8x5 7x35'
+      - series: 'kanz_inference_admission_limit'
+        values: '8x60'
+    alert_rule_test:
+      # DURING the burst, four minutes in. With `for: 10m` this is PENDING and
+      # not firing; with a shortened debounce it fires here. Evaluating only
+      # after the burst had receded would have proved nothing about the
+      # debounce at all — the first version of this test did exactly that, and
+      # the mutation that shortens `for` passed against it.
+      - eval_time: 24m
+        alertname: InferencePoolSaturated
+        exp_alerts: []
+      - eval_time: 40m
+        alertname: InferencePoolSaturated
+        exp_alerts: []
