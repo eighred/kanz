@@ -322,8 +322,14 @@ var drPosture = map[string]drClassification{
 	"wealth":          {status: drCovered, cluster: "kanz-books", reason: "PARITY-02 household book"},
 	"datamaster":      {status: drCovered, cluster: "kanz-books", reason: "PARITY-02 golden records + exception queue"},
 
-	"market-data": {status: drExcluded, reason: "append-only price history with its own retention; " +
-		"re-ingestable from the upstream feed, so PITR would restore what the feed can replay"},
+	"market-data": {status: drExcluded, reason: "price_observations is append-only price history with " +
+		"its own retention, re-ingestable from the upstream feed, so PITR would restore what the feed " +
+		"can replay. contract_terms (#345) is NOT fully re-ingestable and the difference is recorded " +
+		"here deliberately: a venue publishes an instrument's CURRENT specification, not the history " +
+		"of its amendments, so a reload re-derives today's strikes and multipliers and cannot re-derive " +
+		"the as_of chain a historical revaluation reads. The exclusion still holds — losing it degrades " +
+		"backtest fidelity rather than the live book, and the live book is what DR exists for — but " +
+		"this entry must not be read as 'everything here is replayable', because half of it is not"},
 	"audit": {status: drExcluded, reason: "AUDIT-01b WORM store with its own tamper-resistant " +
 		"retention — object-locked, and deliberately not restorable-to-an-earlier-instant, which is " +
 		"the point of an audit log"},
