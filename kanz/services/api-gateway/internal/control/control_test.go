@@ -69,7 +69,7 @@ func serve(t *testing.T, c operatorpb.OperatorServiceClient, roles []string, req
 		"kanz-user":     {authz.Read},
 		"kanz-trader":   {authz.Read, authz.Trade},
 		"kanz-operator": {authz.Read, authz.Operate},
-	})
+	}, nil)
 	New(c, slog.New(slog.NewTextHandler(io.Discard, nil))).Routes(m)
 
 	ctx := middleware.WithPrincipal(req.Context(), &middleware.Principal{
@@ -249,7 +249,7 @@ func TestAnInternalFaultWithNoMessageStillSaysSomething(t *testing.T) {
 // Every route on this surface is Operate. A future route added without thinking
 // about it should trip this rather than inherit Read by accident.
 func TestEveryControlRouteDemandsOperate(t *testing.T) {
-	m := authz.NewMux(authz.Grants{})
+	m := authz.NewMux(authz.Grants{}, nil)
 	New(&stubClient{}, slog.New(slog.NewTextHandler(io.Discard, nil))).Routes(m)
 	routes := m.Routes()
 	if len(routes) == 0 {

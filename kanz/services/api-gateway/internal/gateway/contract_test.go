@@ -36,7 +36,7 @@ func chainedServer(t *testing.T, fc *fakeClient, perSec float64, burst int, requ
 	t.Helper()
 	// The risk routes are READS (SEC-M2), and the contract's token carries requiredRole —
 	// so that role is what grants Read here, exactly as cfg.RequiredRole does in main.
-	gwMux := authz.NewMux(authz.Grants{requiredRole: {authz.Read}})
+	gwMux := authz.NewMux(authz.Grants{requiredRole: {authz.Read}}, nil)
 	gateway.New(fc).Routes(gwMux)
 	chain := middleware.Chain(
 		middleware.Version(),

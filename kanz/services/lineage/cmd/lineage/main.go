@@ -301,19 +301,20 @@ func buildGovernor(cfg config.Config, logger *slog.Logger, recorder auth.Decisio
 // invalid envelope, the error handler counts it, and the feature is 100% broken
 // while looking fully wired.
 //
-// The value is cfg.Tenant (LINEAGE_TENANT), defaulted to bus.SystemTenant by
-// config: lineage's graph spans the whole estate rather than one customer, which
-// is the second, legitimate meaning of SystemTenant documented in
-// pkg/bus/validate.go — the platform's own cross-cutting events, which
-// internal/topic maps to the un-prefixed archive topics. A per-customer lineage
-// deployment must override it, and that is a deployment review, not something
-// Validate can answer.
+// It is supplied as authbus.WithFallbackTenant rather than ProducerConfig.Tenant
+// so it applies to decisions ONLY and only when the decision has no principal
+// tenant of its own — a decision about acme's user is filed under acme, not under
+// whatever this deployment was configured with. The fallback value is cfg.Tenant
+// (LINEAGE_TENANT), defaulted to bus.SystemTenant by config: lineage's graph
+// spans the whole estate rather than one customer, which is the second,
+// legitimate meaning of SystemTenant documented in pkg/bus/validate.go — the
+// platform's own cross-cutting events, which internal/topic maps to the
+// un-prefixed archive topics.
 func newBusRecorder(client *bus.NATSClient, cfg config.Config, busMetrics *bus.BusMetrics, logger *slog.Logger) (*authbus.BusRecorder, error) {
 	producer, err := bus.NewProducer(client, bus.ProducerConfig{
 		Source:          cfg.Source,
 		ProducerVersion: version.String(),
 		Metrics:         busMetrics,
-		Tenant:          cfg.Tenant,
 	})
 	if err != nil {
 		return nil, err
@@ -325,6 +326,10 @@ func newBusRecorder(client *bus.NATSClient, cfg config.Config, busMetrics *bus.B
 	// observation stream is indistinguishable from one that was never made. That
 	// is the same silence this whole issue is about, moved one layer down.
 	return authbus.NewBusRecorder(producer,
+		// The FALLBACK only — each decision is stamped with the deciding
+		// principal's own tenant when it has one, which is what keeps a
+		// multi-tenant deployment's records filed under the right customer.
+		authbus.WithFallbackTenant(cfg.Tenant),
 		authbus.WithErrorHandler(func(err error) {
 			authDecisionsLost.WithLabelValues("publish_error").Inc()
 			logger.Error("an AUTH-01d decision could not be published — it exists only in this log line",

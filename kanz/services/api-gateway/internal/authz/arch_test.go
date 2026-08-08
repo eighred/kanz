@@ -28,7 +28,7 @@ import (
 // remember to extend), this asserts the property over WHATEVER the package registers — so a
 // route added there tomorrow is covered by this test the moment it exists.
 func TestEveryRouteOnTheCapitalPathRequiresTRADE(t *testing.T) {
-	m := authz.NewMux(nil)
+	m := authz.NewMux(nil, nil)
 	orders.New(nil).Routes(m)
 
 	routes := m.Routes()
@@ -51,7 +51,7 @@ func TestEveryRouteOnTheCapitalPathRequiresTRADE(t *testing.T) {
 // point: the decision "who may call this?" is made deliberately, once, in the open, rather
 // than inherited by accident from whichever mux the handler happened to be registered on.
 func TestTheWholeRouteTableIsDeclared(t *testing.T) {
-	m := authz.NewMux(nil)
+	m := authz.NewMux(nil, nil)
 	gateway.New(nil).Routes(m)
 	orders.New(nil).Routes(m)
 	proxy.New(nil).Routes(m)
@@ -127,7 +127,7 @@ func TestAReadCapabilityCannotBeGrantedTradeByAccident(t *testing.T) {
 // registers a route without declaring who may reach it. This test exists to say so out loud
 // — the guarantee is the API shape, not a check that runs.
 func TestRegisteringARouteWithNoCapabilityIsImpossible(t *testing.T) {
-	m := authz.NewMux(nil)
+	m := authz.NewMux(nil, nil)
 	// m.Handle("GET /v1/thing", h)  // does not compile: missing the capability.
 	m.Handle(authz.Read, "GET /v1/thing", func(http.ResponseWriter, *http.Request) {})
 	if got := m.Routes(); len(got) != 1 || got[0].Capability != authz.Read {

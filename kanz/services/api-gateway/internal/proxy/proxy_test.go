@@ -39,7 +39,7 @@ func (f *fakeBackend) Forward(ctx context.Context, req Request) (Response, error
 // routes, so the analyst role that authed() carries is enough — and that is the fix: an
 // analyst can read the book and cannot reach POST /v1/orders.
 func testMux() *authz.Mux {
-	return authz.NewMux(authz.Grants{"analyst": {authz.Read}})
+	return authz.NewMux(authz.Grants{"analyst": {authz.Read}}, nil)
 }
 
 func authed(req *http.Request, sub, tenant string) *http.Request {
