@@ -74,21 +74,19 @@ var commitThenPublishPending = map[string]string{
 		"see completeTerminalOutcome's own comment on what it cannot recover. ADMISSION in this " +
 		"same method is already converted: store.Create takes the ACCEPTED record.",
 
-	"work": "#292: Save(routed) then EmitRouted. THE FILL PAIR IN THIS SAME METHOD IS CONVERTED — " +
-		"each fold now passes the ORDER_FILLED/ORDER_PARTIALLY_FILLED record to Store.Save and " +
-		"flushes, so the FACT no marker could cover and completeTerminalOutcome could not rebuild " +
-		"is committed with the state that records it. What is left is the routed FACT, which HAS a " +
-		"recovery: venue_ack_at plus resume()'s reconciliation re-establish a routed order from " +
-		"venue truth, and a re-drive re-emits it.",
-
 	"completeCancelAnnouncement": "#292: EmitCancelled + EmitOutcome and THEN Save(cancel_announced_at) " +
 		"— the opposite order to admission's, which is the cost of hand-rolling per site that #292 " +
 		"reports. Covered by cancel_announced_at and handleCancel's own resume branch, and the " +
 		"duplicate it tolerates is documented on the function.",
 
-	"handleAmend": "#292: Save(next) then EmitOutcome, with NO marker at all — an amend whose " +
-		"outcome publish fails is persisted and unannounced, and nothing looks for it. Converting " +
-		"it is the smallest of the five and should be next after the fill pair.",
+	"handleAmend": "#292: THE PAIR IS CONVERTED — the success path builds the CommandOutcome with " +
+		"OutcomeFact, hands it to Save alongside the amended state and flushes, so an amend can no " +
+		"longer be persisted-and-unannounced (it had NO marker, and nothing looked for it). What " +
+		"keeps this listed is the same shape resume() carries: the write and the publishes are in " +
+		"DIFFERENT BRANCHES. The reject branches — quarantine, and Amend's RejectError — reach " +
+		"outcomeReject without writing anything, so there is no transaction for that outcome to " +
+		"ride in and nothing to lose if it fails. It stops being listed when outcomeReject stops " +
+		"being reachable from a method that also writes, not when anything here changes.",
 
 	"adopt": "#292: Save(rejected) then refuse(). Its fill fold converted WITH work()'s — the two " +
 		"are the same six lines reached from different directions, and splitting them would have " +

@@ -665,14 +665,37 @@ func (s *Service) work(ctx context.Context, st *orderpb.OrderState, ver int64) (
 		return st, ver, err
 	}
 	routed := Route(st, s.now().UTC())
+	// THE ROUTED FACT COMMITS WITH THE ROUTED STATE (#292).
+	//
+	// This pair had no compensator — the three *_announced_at markers cover
+	// admission, cancellation and terminal outcomes, and ROUTED is none of
+	// them. So a crash between the Save and the publish left an order stored as
+	// working at a venue with nothing downstream told and nothing able to
+	// notice. Built BEFORE the Save, like the fill fold: outbox.From refuses a
+	// record with no tenant, and that refusal has to stop the transition rather
+	// than commit a state whose FACT could never be published.
+	fact, ferr := s.emitter.RoutedFact(ctx, routed.GetOrderId(), venue.MIC(), "", routed.GetAsOf().AsTime())
+	if ferr != nil {
+		return st, ver, ferr
+	}
 	// A conflict HERE is safe to abort on: nothing has reached the venue yet, so
 	// another replica winning the race means it is working this order and this
 	// delivery has nothing to contribute. Returning the error redelivers.
-	if err := s.store.Save(ctx, routed, ver, nil); err != nil {
+	if err := s.store.Save(ctx, routed, ver, []outbox.Record{fact}); err != nil {
 		return st, ver, err
 	}
 	ver++
-	if err := s.emitter.EmitRouted(ctx, routed.GetOrderId(), venue.MIC(), "", routed.GetAsOf().AsTime()); err != nil {
+	// FLUSHED WHERE EmitRouted STOOD, so the ORDER OF FACTS ON THE BUS IS
+	// UNCHANGED — only their durability is. ORDER_ROUTED must precede the fills
+	// this loop is about to publish; a record left for the relay's tick would be
+	// overtaken by them, and a consumer folding this order would see it working
+	// at a venue after it had already filled.
+	//
+	// The error behaviour is exactly what EmitRouted's was: return, nack. What
+	// differs is that the record is already durable, so the redelivery finds the
+	// order routed and the relay publishes the original rather than nothing
+	// having been announced at all.
+	if _, err := s.relay.Flush(ctx, routed.GetOrderId()); err != nil {
 		return st, ver, err
 	}
 	st = routed
@@ -1101,11 +1124,25 @@ func (s *Service) handleAmend(ctx context.Context, payload []byte) error {
 		}
 		return aerr
 	}
-	if err := s.store.Save(ctx, next, ver, nil); err != nil {
+	// THE AMENDED STATE AND ITS OUTCOME COMMIT TOGETHER (#292). Like ROUTED,
+	// this pair had no marker: nothing re-announces an amend whose outcome was
+	// lost, so the caller waits on an outcome that will never arrive while the
+	// amendment itself is durable. Built before the Save so a record that could
+	// never be published stops the amend instead of committing half of it.
+	fact, ferr := s.emitter.OutcomeFact(ctx, next.GetOrderId(),
+		commandpb.CommandOutcomeStatus_COMMAND_OUTCOME_STATUS_EXECUTED, "order amended", "", "", now)
+	if ferr != nil {
+		return ferr
+	}
+	if err := s.store.Save(ctx, next, ver, []outbox.Record{fact}); err != nil {
 		return err
 	}
-	return s.emitter.EmitOutcome(ctx, next.GetOrderId(),
-		commandpb.CommandOutcomeStatus_COMMAND_OUTCOME_STATUS_EXECUTED, "order amended", "", "", now)
+	// Flushed where EmitOutcome stood: the caller is waiting on this outcome, so
+	// deferring it to the relay's tick would turn a synchronous amend into one
+	// that appears to hang. The record is durable either way — this only decides
+	// whether the answer arrives now or on the next pass.
+	_, ferr = s.relay.Flush(ctx, next.GetOrderId())
+	return ferr
 }
 
 // refuse emits an ORDER_REJECTED FACT and a REJECTED command outcome, then acks
