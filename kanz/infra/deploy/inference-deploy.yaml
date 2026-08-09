@@ -209,6 +209,17 @@ spec:
             # production broker (verify: true, verify_and_map) refuses outright, so
             # the streaming worker would score nothing at all.
             - { name: KANZ_INFERENCE_NATS_CERT_DIR, value: /etc/inference-certs }
+            # The PREDICTION SURFACE is mutual TLS too (#241). The same SVID serves
+            # both — one workload, one identity — so this is the same directory.
+            # UNSET, the servicer REFUSES TO START rather than serving plaintext;
+            # KANZ_INFERENCE_ALLOW_INSECURE_GRPC is the local-development override
+            # and is deliberately ABSENT here, like COPILOT_ALLOW_STUB.
+            #
+            # Nothing dials :50051 in production today (internal/prediction's
+            # NewSyncClient has no non-test caller), so requiring mTLS costs no
+            # migration — it closes the surface before a caller arrives, rather
+            # than after.
+            - { name: KANZ_INFERENCE_GRPC_CERT_DIR, value: /etc/inference-certs }
           # WHAT THE OLD tcpSocket PROBES GOT RIGHT, AND WHAT THEY COULD NOT SAY.
           #
           # Their argument held: 50051 is bound only AFTER a PRIMARY model is loaded (the

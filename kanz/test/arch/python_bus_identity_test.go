@@ -157,7 +157,15 @@ func TestTheInferenceSVIDPathsAgree(t *testing.T) {
 		for _, c := range append(append([]container{}, d.Spec.Template.Spec.InitContainers...),
 			d.Spec.Template.Spec.Containers...) {
 			for _, e := range c.Env {
-				if e.Name == "KANZ_INFERENCE_NATS_CERT_DIR" {
+				// BOTH surfaces read an SVID — the bus client and the gRPC
+				// servicer — and they are one workload with one identity, so both
+				// must name the directory the sidecar actually writes.
+				if e.Name == "KANZ_INFERENCE_NATS_CERT_DIR" || e.Name == "KANZ_INFERENCE_GRPC_CERT_DIR" {
+					if envDir != "" && envDir != e.Value {
+						t.Errorf("%s = %q but another cert-dir variable on the same container says %q — "+
+							"one of the two surfaces is looking where nothing is written",
+							e.Name, e.Value, envDir)
+					}
 					envDir = e.Value
 					for _, m := range c.VolumeMounts {
 						if m.Name == "inference-certs" {
@@ -209,4 +217,64 @@ func confValue(conf, key string) string {
 		return strings.Trim(strings.TrimSpace(rest), `"`)
 	}
 	return ""
+}
+
+// devOnlyOverrides are settings that disable a protection for local development.
+// Each is safe to exist and unsafe to SET in a deployment, so the guard is on the
+// manifests rather than on the code.
+var devOnlyOverrides = map[string]string{
+	"KANZ_INFERENCE_ALLOW_INSECURE_GRPC": "serves the prediction surface in PLAINTEXT with no " +
+		"client authentication — any workload that can reach the port can query the model",
+	"COPILOT_ALLOW_STUB": "makes the pod serve llm.StubModel, which does not answer a portfolio " +
+		"manager's questions — it FABRICATES answers that read exactly like real ones",
+}
+
+// TestNoDeploymentEnablesADevOnlyOverride keeps the escape hatches out of the estate.
+//
+// Both settings above are documented in their own manifests as "deliberately
+// absent" and "never the fix for a failing deploy". That is a paragraph, and a
+// paragraph is what someone edits past at 3am when a pod will not start — which
+// is exactly the moment each of these looks like the fix. The failure is silent
+// afterwards: the pod comes up, the probes pass, and what it serves is either
+// unauthenticated or invented.
+func TestNoDeploymentEnablesADevOnlyOverride(t *testing.T) {
+	dir := filepath.Join(moduleRoot(t), "infra", "deploy")
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("read infra/deploy: %v", err)
+	}
+
+	scanned := 0
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".yaml") {
+			continue
+		}
+		b, err := os.ReadFile(filepath.Join(dir, e.Name()))
+		if err != nil {
+			t.Fatalf("read %s: %v", e.Name(), err)
+		}
+		scanned++
+		for _, line := range strings.Split(string(b), "\n") {
+			trimmed := strings.TrimSpace(line)
+			if strings.HasPrefix(trimmed, "#") {
+				continue // the comment explaining why it is absent is the point
+			}
+			for name, consequence := range devOnlyOverrides {
+				if !strings.Contains(trimmed, name) {
+					continue
+				}
+				if strings.Contains(trimmed, `"true"`) || strings.Contains(trimmed, ": true") {
+					t.Errorf("%s sets %s — %s.\n\n%s",
+						e.Name(), name, consequence,
+						"This is a local-development setting. If a deployment needs it to start, the "+
+							"thing to fix is whatever it is working around.")
+				}
+			}
+		}
+	}
+
+	// NON-VACUITY: a scan of zero files passes no matter what the manifests say.
+	if scanned == 0 {
+		t.Fatal("scanned no manifests under infra/deploy — this guard is asserting nothing")
+	}
 }
