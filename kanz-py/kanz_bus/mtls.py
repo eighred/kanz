@@ -103,6 +103,12 @@ def client_context(cert_dir: str) -> ssl.SSLContext:
     # signed (see the module docstring).
     ctx.check_hostname = True
     ctx.verify_mode = ssl.CERT_REQUIRED
+    # STATED, not inherited. create_default_context already floors at TLS 1.2 on
+    # the interpreters we ship, but that is a default of the API rather than a
+    # property of this connection — and CodeQL (py/insecure-protocol) reads it as
+    # permitting TLS 1.0/1.1 precisely because it can, depending on how the host
+    # OpenSSL was built. Pinning it makes the floor part of the code.
+    ctx.minimum_version = ssl.TLSVersion.TLSv1_2
     # The client half of mutual TLS — without this the broker's `verify: true`
     # rejects the connection, and `verify_and_map` has no SPIFFE URI SAN to map
     # onto a tenancy.yaml user.

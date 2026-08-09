@@ -168,6 +168,11 @@ def test_the_context_requires_and_verifies_a_peer_certificate(svid_dir):
         "acceptable broker, so any workload in the trust domain can impersonate it — encrypted, "
         "authenticated by nothing, and indistinguishable from a correct setup from the outside."
     )
+    assert ctx.minimum_version >= ssl.TLSVersion.TLSv1_2, (
+        f"the TLS floor is {ctx.minimum_version!r}. It happens to be TLS 1.2 by default on the "
+        "interpreters we ship, which is exactly why it is asserted: the floor must be a property "
+        "of this connection, not of however the host OpenSSL was built."
+    )
 
 
 def _handshake(client_ctx: ssl.SSLContext, server_ctx: ssl.SSLContext, server_hostname: str):
@@ -207,6 +212,7 @@ def _handshake(client_ctx: ssl.SSLContext, server_ctx: ssl.SSLContext, server_ho
 
 def _server_ctx(key, cert, tmp_path: Path, ca_cert) -> ssl.SSLContext:
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    ctx.minimum_version = ssl.TLSVersion.TLSv1_2
     p = tmp_path / "server"
     p.mkdir(exist_ok=True)
     _write(p, key, cert, ca_cert)
