@@ -29,6 +29,10 @@
 # transport. Neither substitutes for the other.
 set -euo pipefail
 
+# Docker on Windows needs native paths for -v; Linux CI does not.
+hostpath() { if command -v cygpath >/dev/null 2>&1; then cygpath -w "$1"; else printf '%s' "$1"; fi; }
+export MSYS2_ARG_CONV_EXCL="*"
+
 PG_PORT="${PG_PORT:-5432}"
 NATS_PORT="${NATS_PORT:-4222}"
 KAFKA_PORT="${KAFKA_PORT:-9092}"
@@ -50,7 +54,11 @@ docker run -d --name kanz-ci-postgres -p "${PG_PORT}:5432" \
 docker run -d --name kanz-ci-redis -p "${REDIS_PORT}:6379" redis:7-alpine >/dev/null
 
 # --- NATS, plaintext, JetStream ---------------------------------------------
-docker run -d --name kanz-ci-nats -p "${NATS_PORT}:4222" nats:2 -js >/dev/null
+# -c nats-dev.conf, not bare -js: the broker needs the MT-02 tenant routing
+# mappings or every order published by the gateway / webhook-ingest lands on a
+# subject nothing subscribes. See test/backing/nats-dev.conf for why a wildcard
+# is the right shape on a single-account broker.
+docker run -d --name kanz-ci-nats -p "${NATS_PORT}:4222"   -v "$(hostpath "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/nats-dev.conf")":/etc/nats/nats-dev.conf:ro   nats:2 -c /etc/nats/nats-dev.conf >/dev/null
 
 # --- Kafka, single-node KRaft -----------------------------------------------
 docker run -d --name kanz-ci-kafka -p "${KAFKA_PORT}:9092" \

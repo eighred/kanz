@@ -101,8 +101,14 @@ func streamSubjects(t *testing.T, path string) []string {
 // subjectShape matches a bus subject ("order.order.submit"). It deliberately
 // excludes proto type names ("order.v1.Fill"), which share the shape but are
 // event types, not subjects.
+//
+// A `*` is allowed as a WHOLE token, for the MT-02 tenant routing subjects
+// ("tenant.*.order.order.submit", #358/#360). Without it those were filtered out
+// here — before any guard saw them — so every tenancy grant and stream binding
+// for a tenant-routed subject was unverified. Measured: deleting
+// webhook-ingest's prefixed grant left the permissions guard green.
 var (
-	subjectShape = regexp.MustCompile(`^[a-z][a-z0-9]*(\.[a-z0-9_]+)+$`)
+	subjectShape = regexp.MustCompile(`^[a-z][a-z0-9]*(\.([a-z0-9_]+|\*))+$`)
 	protoTypeRef = regexp.MustCompile(`\.v[0-9]+\.`)
 )
 

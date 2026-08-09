@@ -709,6 +709,11 @@ data:
             permissions: {
               publish: {
                 allow: [
+                  # MT-02 (#360): signal-originated orders carry the tenant
+                  # routing prefix, resolved per signal from TenantOf(fund_id) —
+                  # one endpoint serves many funds, so a service-level tenant
+                  # would be the wrong one for all but a single fund.
+                  "tenant.*.order.order.submit",
                   "strategy.signal.received", "order.order.submit",
                   "$JS.API.>", "$JS.ACK.>",
                 ]

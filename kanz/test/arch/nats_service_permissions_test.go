@@ -444,6 +444,30 @@ func (rc *resolveCache) resolveExpr(t *testing.T, file *ast.File, dir string, ex
 			return nil
 		}
 		return rc.resolveIdentInPackage(t, targetDir, e.Sel.Name, depth)
+
+	case *ast.CallExpr:
+		// bus.TenantRoutedSubject(tenant, X) — the MT-02 tenant routing wrapper
+		// (#358/#360). Without this case the scanner resolves NOTHING for a
+		// publisher that routes by tenant, and this guard goes SILENTLY BLIND to
+		// it: measured, by deleting webhook-ingest's order.order.submit grant and
+		// watching the guard stay green.
+		//
+		// That is worse than the gap it was written to close. A publisher whose
+		// subject the scanner cannot see is indistinguishable from one that
+		// publishes nothing, so widening a wrapper's use quietly removes services
+		// from this check one at a time.
+		//
+		// Both forms are returned, because both must be granted: the WIRE subject
+		// carries the prefix, and the unprefixed logical name is what the same
+		// service still publishes on any path that has not moved.
+		if sel, ok := e.Fun.(*ast.SelectorExpr); ok && sel.Sel.Name == "TenantRoutedSubject" && len(e.Args) == 2 {
+			var out []string
+			for _, base := range rc.resolveExpr(t, file, dir, e.Args[1], fn, depth-1) {
+				out = append(out, base, "tenant.*."+base)
+			}
+			return out
+		}
+		return nil
 	}
 	return nil
 }
