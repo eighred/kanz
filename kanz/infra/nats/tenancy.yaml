@@ -48,6 +48,46 @@ data:
       # service here without a matching ServiceAccount admits nothing.
       __system__ {
         jetstream: enabled
+
+        # ---- MT-02 tenant routing (#358) -------------------------------------
+        #
+        # THE RULING (#97): tenants get DEDICATED COMPUTE, not a shared pool.
+        # internal/pg/pool.go binds a pool to one tenant for the process lifetime
+        # (`set_config('app.tenant_id', $1, false)` — session scope, applied once
+        # at connect), so a shared OMS would need per-transaction scoping: a
+        # rewrite of the one component every service's RLS correctness rests on.
+        # Dedicated compute keeps a property that is currently structural — a pool
+        # that CANNOT serve the wrong tenant, because it never learned how.
+        #
+        # WHAT THIS BLOCK IS FOR. The gateway is the sole front door and holds ONE
+        # SVID, therefore one account; NATS routes on SUBJECT and cannot dispatch
+        # on the envelope's tenant_id. So a shared publisher cannot reach a
+        # per-tenant account at all — measured, not assumed: a publish in
+        # __system__ is delivered to NOTHING in `acme`, while the same subscriber
+        # receives a same-account publish.
+        #
+        # The tenant therefore has to appear in the subject SOMEWHERE. It appears
+        # here and only here: the routing prefix exists inside __system__, and
+        # every account resolves it back to the unchanged 3-segment logical name
+        # before any workload sees it. So kanz-schemas/docs/subject-taxonomy.md
+        # still holds where it matters — inside a tenant account the subject is
+        # `order.order.submit`, and oms-deploy.yaml subscribes exactly that.
+        exports: [
+          { stream: "tenant.*.order.order.submit" }
+          { stream: "tenant.*.order.order.cancel" }
+        ]
+
+        # __system__ RESOLVES ITS OWN PREFIX, which is what makes the gateway's
+        # publish path uniform: it always prefixes, with no runtime branch and no
+        # list of "tenants that have accounts" to fall out of date. Without these
+        # two lines the CURRENT single-tenant path breaks the moment the gateway
+        # starts prefixing — the running OMS subscribes `order.order.submit` and
+        # would simply stop receiving orders.
+        mappings = {
+          "tenant.__system__.order.order.submit": "order.order.submit"
+          "tenant.__system__.order.order.cancel": "order.order.cancel"
+        }
+
         users: [
           # The bootstrap Job (bootstrap-job.yaml) — it CREATES the streams, so it
           # is admitted here before any service has anything to connect to. It
@@ -308,7 +348,19 @@ data:
           # above claims is its alone.
           { user: "spiffe://kanz.internal/ns/kanz-services/sa/api-gateway"
             permissions: {
-              publish: { allow: ["order.order.submit", "order.order.cancel", "platform.authz.decision"] }
+              publish: {
+                allow: [
+                  # MT-02 (#358): the gateway publishes the TENANT-PREFIXED subject
+                  # so the broker can route it to that tenant's account. The
+                  # unprefixed names stay granted because nothing else has moved
+                  # yet — webhook-ingest still publishes them directly, and
+                  # revoking them here would only make this grant disagree with
+                  # the estate rather than tighten it.
+                  "tenant.*.order.order.submit", "tenant.*.order.order.cancel",
+                  "order.order.submit", "order.order.cancel",
+                  "platform.authz.decision",
+                ]
+              }
               subscribe: { allow: ["_INBOX.>"] }
             }
           }
@@ -673,6 +725,22 @@ data:
       # connected on this account (see README "Per-tenant streams").
       acme {
         jetstream { max_memory: 64MB, max_file: 2GB, max_streams: 16, max_consumers: 256 }
+
+        # The other half of the bridge (#358). `to:` remaps the prefixed subject
+        # onto the logical one, so this tenant's OMS subscribes
+        # `order.order.submit` unchanged and never learns a prefix exists.
+        #
+        # It imports ONLY its own prefix. A wildcard here would hand this tenant
+        # every other tenant's orders, which is the isolation boundary this whole
+        # epic exists to establish — test/arch/tenant_bridge_test.go fails the
+        # build if an account's import does not match its own name.
+        imports: [
+          { stream: { account: __system__, subject: "tenant.acme.order.order.submit" }
+            to: "order.order.submit" }
+          { stream: { account: __system__, subject: "tenant.acme.order.order.cancel" }
+            to: "order.order.cancel" }
+        ]
+
         users: [
           # The tenant's workloads present this SVID; verify_and_map binds the
           # URI SAN to this user → account, scoping all its pub/sub.

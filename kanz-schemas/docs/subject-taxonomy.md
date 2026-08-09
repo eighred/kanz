@@ -129,7 +129,22 @@ broker is broker-specific and keys on the envelope `tenant_id`:
 - **NATS** — isolation is by **account** (one per tenant), not by subject. The
   client's SVID maps to a per-tenant account (`tls.verify_and_map`), so the
   subject string is the unchanged 3-segment name and a tenant simply cannot see
-  another's `{domain}.>`. Subject prefixing is *not* used.
+  another's `{domain}.>`.
+
+  **The one exception, and why it is not really one (MT-02, #358).** That model
+  works for a workload that BELONGS to a tenant. It breaks at a SHARED one: the
+  api-gateway is the sole front door and holds a single SVID, therefore a single
+  account, and NATS routes on subject — it cannot dispatch on the envelope's
+  `tenant_id`. A publish in `__system__` reaches nothing in a tenant account;
+  measured, with a same-account control.
+
+  So a cross-tenant publisher prefixes the WIRE subject with
+  `tenant.{tenant}.` — and that prefix exists **only inside `__system__`**. Each
+  tenant account imports its own prefix with a `to:` remap, and `__system__` maps
+  its own back to itself, so by the time any workload sees the message the
+  subject is the unchanged 3-segment name. `event_type` never carries the prefix.
+  The contract above therefore holds everywhere it is read: inside a tenant
+  account, and in every envelope.
 - **Kafka** — has no account concept, so the tenant is a literal **topic
   prefix**: `{tenant}.{domain}.{entity}`, confined by a PREFIXED ACL on
   `{tenant}.`. `{tenant}` joins `replay`/`dlq` as a reserved leading segment;

@@ -98,6 +98,23 @@ data:
     # because a subject rename would break every existing consumer binding and the
     # replay log's subject history; the stream's subject list is the cheap seam.
     ensure_stream EXECUTION     "execution.>,strategy.>,order.>" 24h
+    # MT-02 (#358): the TENANT ROUTING subjects the gateway publishes on.
+    #
+    # WITHOUT THIS STREAM EVERY TENANT ORDER FAILS, and it is not subtle — the
+    # producer publishes through JetStream, so an unbound subject comes back
+    # `nats: no response from stream` and the caller gets an error. Measured:
+    # tenant.__system__.* succeeded (the account mapping rewrites it at ingress,
+    # so EXECUTION captures it) while tenant.acme.* did not.
+    #
+    # This binds only the __system__ SIDE of the bridge. The tenant's own copy
+    # lands in its account's EXECUTION stream, via the import that remaps the
+    # subject back to `order.order.submit` — so an order is durable on both
+    # sides: the platform keeps the routing record, the tenant keeps its book.
+    #
+    # It does NOT double-capture the platform tenant's own orders: the
+    # __system__ mapping rewrites tenant.__system__.order.* to order.* BEFORE
+    # subject matching, and the rewritten subject does not match tenant.*.
+    ensure_stream TENANT_ORDER  "tenant.*.order.>" 24h
     ensure_stream INFERENCE     "inference.>"     24h
     ensure_stream PLATFORM      "platform.>"      168h
     ensure_stream DATA          "data.>"          168h
