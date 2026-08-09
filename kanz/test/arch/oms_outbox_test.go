@@ -67,12 +67,14 @@ var storeWriteMethods = map[string]bool{"Create": true, "Save": true}
 // A method that appears here and no longer offends fails the dead-entry check
 // below: an exemption must not outlive its repair.
 var commitThenPublishPending = map[string]string{
-	"handleSubmit": "#292: the ErrUnpriced branch Saves the REJECTED order and then refuses (" +
-		"EmitRejected + EmitOutcome), and the trailing outcome after work() follows the fill Saves " +
-		"inside it. Both are covered by outcome_announced_at + resume's completeTerminalOutcome, " +
-		"which can reconstruct the CommandOutcome but NOT the ORDER_REJECTED/ORDER_FILLED FACT — " +
-		"see completeTerminalOutcome's own comment on what it cannot recover. ADMISSION in this " +
-		"same method is already converted: store.Create takes the ACCEPTED record.",
+	"handleSubmit": "#292: THE ErrUnpriced REJECT IS CONVERTED — RejectedFact + OutcomeFact ride " +
+		"the same Save as the REJECTED state, and outcome_announced_at is stamped in that write " +
+		"rather than two writes later. It was the last pair whose FACT nothing could rebuild " +
+		"(completeTerminalOutcome reconstructs the CommandOutcome but not ORDER_REJECTED, whose " +
+		"PRICE_UNAVAILABLE reason has no OrderState counterpart). ADMISSION is converted too: " +
+		"store.Create takes the ACCEPTED record. WHAT KEEPS THIS LISTED is the trailing outcome " +
+		"after work() — it follows the fill Saves inside work(), and outcome_announced_at + " +
+		"completeTerminalOutcome cover it. It stops being listed when that outcome moves.",
 
 	"completeCancelAnnouncement": "#292: EmitCancelled + EmitOutcome and THEN Save(cancel_announced_at) " +
 		"— the opposite order to admission's, which is the cost of hand-rolling per site that #292 " +

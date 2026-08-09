@@ -387,107 +387,113 @@ func TestSubmit_DuplicateAfterFillAnnouncedStaysTerminal(t *testing.T) {
 	}
 }
 
-// TestSubmit_ResumesInterruptedRejectAnnouncement pins the ErrUnpriced reject
-// path: a market order the sim venue cannot price is Saved REJECTED before
-// its announcement, and if that announcement (refuse's EmitRejected or the
-// outcome it emits) then fails, the redelivery must complete the rejection
-// rather than silently acking a "duplicate" the caller was never told about.
-func TestSubmit_ResumesInterruptedRejectAnnouncement(t *testing.T) {
+// THE UNPRICED REJECT IS TRANSACTIONAL (#292).
+//
+// This pair used to be the worst of the remaining ones. The order was Saved
+// REJECTED, then refuse() published ORDER_REJECTED and the outcome. A failure
+// between them left the order durably rejected with its FACT gone — and
+// unrecoverably so: completeTerminalOutcome rebuilds the CommandOutcome from
+// stored state but cannot rebuild ORDER_REJECTED, because the PRICE_UNAVAILABLE
+// reason and code live only in handleSubmit's local error value and have no
+// OrderState counterpart. The predecessors of these tests asserted exactly that
+// limit, as the honest description of what recovery could not do.
+//
+// Both records now commit with the rejection, so the limit is gone. What these
+// tests assert is the stronger property: a publish failure loses NOTHING, and
+// the FACT arrives on the relay's next pass — no redelivery, no sweep, no
+// restart.
+func TestSubmit_UnpricedRejectSurvivesAFailedPublish(t *testing.T) {
 	fb := &fakeBus{}
 	svc := simService(t, fb)
 	cmd := marketOrder() // the sim venue has no PriceFunc ⇒ ErrUnpriced
 
-	// Delivery 1: Reject() is Saved, but the ORDER_REJECTED FACT fails to publish.
+	// The ORDER_REJECTED publish fails. Under the old shape this was the FACT
+	// nothing could ever rebuild.
 	fb.failOn = EventTypeRejected
-	if err := svc.Handle(testCtx(), submitEnv(), mustMarshal(t, cmd)); err == nil {
-		t.Fatal("delivery 1 returned nil, want the injected EmitRejected failure to surface")
-	}
+	err := svc.Handle(testCtx(), submitEnv(), mustMarshal(t, cmd))
 	fb.failOn = ""
 
-	st, _, err := svc.store.Load(context.Background(), "o1")
-	if err != nil {
-		t.Fatalf("load after delivery 1: %v", err)
+	// THE STATE CHANGE COMMITTED. A failed announcement must not roll back a
+	// rejection the venue has already made permanent.
+	st, _, lerr := svc.store.Load(context.Background(), "o1")
+	if lerr != nil {
+		t.Fatalf("load after the failed publish: %v (handle err: %v)", lerr, err)
 	}
 	if st.GetStatus() != orderpb.OrderStatus_ORDER_STATUS_REJECTED {
-		t.Fatalf("status after delivery 1 = %v, want REJECTED — Save happened before the failed EmitRejected", st.GetStatus())
-	}
-	if st.GetOutcomeAnnouncedAt() != nil {
-		t.Fatal("outcome_announced_at is set after delivery 1 — EmitRejected just failed")
-	}
-	if fb.last(EventTypeOutcome) != nil {
-		t.Fatal("a CommandOutcome was recorded on delivery 1 — refuse() must not reach EmitOutcome " +
-			"once EmitRejected has already failed")
+		t.Fatalf("status = %v, want REJECTED — the order is unpriceable, and leaving it working "+
+			"would have a later cancel act on a live-looking order", st.GetStatus())
 	}
 
-	// Delivery 2: the redelivery. REJECTED with no outcome_announced_at — an
-	// interrupted rejection, not a duplicate.
-	if err := svc.Handle(testCtx(), submitEnv(), mustMarshal(t, cmd)); err != nil {
-		t.Fatalf("delivery 2 (resume) returned %v, want nil", err)
+	// AND NOTHING IS LOST: both records are queued, holding the original reason.
+	pending, perr := svc.store.(*MemoryStore).Outbox().Pending(context.Background(), "o1", 10)
+	if perr != nil {
+		t.Fatalf("outbox pending: %v", perr)
 	}
-	oc := fb.last(EventTypeOutcome).(*commandpb.CommandOutcome)
-	if oc.GetStatus() != commandpb.CommandOutcomeStatus_COMMAND_OUTCOME_STATUS_REJECTED {
-		t.Fatalf("outcome after resume = %v, want REJECTED — the order WAS rejected and the caller "+
-			"must not be left with no outcome at all", oc.GetStatus())
-	}
-
-	// THE HONEST LIMIT: the original PRICE_UNAVAILABLE reason/code lived only in
-	// handleSubmit's local error value and is not stored on OrderState
-	// (order_events.proto's OrderRejected.reason/error_code have no OrderState
-	// counterpart), so the redelivery's outcome is necessarily generic, not a
-	// reconstruction of the original PRICE_UNAVAILABLE rejection.
-	if fb.last(EventTypeRejected) != nil {
-		t.Fatal("an ORDER_REJECTED FACT was published on resume — the original reason/code is not " +
-			"recoverable from stored OrderState, so this must NOT happen")
+	if len(pending) != 2 {
+		t.Fatalf("outbox holds %d records for o1, want 2 (ORDER_REJECTED + the outcome).\n\n"+
+			"This is the whole of #292 for this path: the FACT is committed with the state change, "+
+			"so a publish failure defers it instead of destroying it.", len(pending))
 	}
 
-	st, _, err = svc.store.Load(context.Background(), "o1")
-	if err != nil {
-		t.Fatalf("load after delivery 2: %v", err)
+	// The relay drains it — no redelivery of the command, no sweep, no restart.
+	if _, ferr := svc.relay.Flush(context.Background(), "o1"); ferr != nil {
+		t.Fatalf("relay flush: %v", ferr)
 	}
-	if st.GetOutcomeAnnouncedAt() == nil {
-		t.Fatal("outcome_announced_at still unset after a successful resume")
+	rej := fb.last(EventTypeRejected)
+	if rej == nil {
+		t.Fatal("ORDER_REJECTED never reached the bus after the relay ran — the record was queued " +
+			"and then not published, which is a worse failure than the one this replaced")
+	}
+	if got := rej.(*orderpb.OrderRejected).GetErrorCode(); got != "PRICE_UNAVAILABLE" {
+		t.Errorf("error_code = %q, want PRICE_UNAVAILABLE.\n\n"+
+			"The ORIGINAL reason survived the failure. Recovery from stored state could never "+
+			"produce this — it is not on OrderState — which is why the pre-outbox test asserted "+
+			"the FACT must NOT be republished at all.", got)
+	}
+	oc, ok := fb.last(EventTypeOutcome).(*commandpb.CommandOutcome)
+	if !ok || oc.GetStatus() != commandpb.CommandOutcomeStatus_COMMAND_OUTCOME_STATUS_REJECTED {
+		t.Fatalf("outcome after the relay ran = %v, want REJECTED — the caller must still be told", oc.GetStatus())
 	}
 }
 
-// TestSubmit_ResumesInterruptedRejectAnnouncement_OutcomeFails covers the
-// ErrUnpriced path's other failure point: EmitRejected succeeds but the
-// trailing EmitOutcome fails.
-func TestSubmit_ResumesInterruptedRejectAnnouncement_OutcomeFails(t *testing.T) {
+// A REDELIVERY AFTER THE FAILURE IS A DUPLICATE, NOT AN INTERRUPTED REJECTION.
+//
+// outcome_announced_at is stamped in the same write as the records, so it is
+// true the moment it is durable. That is what lets resume() treat a redelivery
+// as the genuine duplicate it now is: the announcement is guaranteed by the
+// outbox, whether or not it has flushed yet. Under the old shape the marker was
+// a THIRD write after two publishes, and a redelivery arriving in between
+// re-entered the reject path.
+func TestSubmit_UnpricedRejectRedeliveryDoesNotReAnnounce(t *testing.T) {
 	fb := &fakeBus{}
 	svc := simService(t, fb)
 	cmd := marketOrder()
 
-	fb.failOn = EventTypeOutcome
-	if err := svc.Handle(testCtx(), submitEnv(), mustMarshal(t, cmd)); err == nil {
-		t.Fatal("delivery 1 returned nil, want the injected trailing EmitOutcome failure to surface")
-	}
+	fb.failOn = EventTypeRejected
+	_ = svc.Handle(testCtx(), submitEnv(), mustMarshal(t, cmd))
 	fb.failOn = ""
 
-	if fb.last(EventTypeRejected) == nil {
-		t.Fatal("ORDER_REJECTED FACT missing after delivery 1 — expected EmitRejected to have succeeded " +
-			"before the injected outcome failure")
-	}
 	st, _, err := svc.store.Load(context.Background(), "o1")
 	if err != nil {
-		t.Fatalf("load after delivery 1: %v", err)
-	}
-	if st.GetOutcomeAnnouncedAt() != nil {
-		t.Fatal("outcome_announced_at is set after delivery 1 — the trailing EmitOutcome just failed")
-	}
-
-	if err := svc.Handle(testCtx(), submitEnv(), mustMarshal(t, cmd)); err != nil {
-		t.Fatalf("delivery 2 (resume) returned %v, want nil", err)
-	}
-	oc := fb.last(EventTypeOutcome).(*commandpb.CommandOutcome)
-	if oc.GetStatus() != commandpb.CommandOutcomeStatus_COMMAND_OUTCOME_STATUS_REJECTED {
-		t.Fatalf("outcome after resume = %v, want REJECTED", oc.GetStatus())
-	}
-
-	st, _, err = svc.store.Load(context.Background(), "o1")
-	if err != nil {
-		t.Fatalf("load after delivery 2: %v", err)
+		t.Fatalf("load: %v", err)
 	}
 	if st.GetOutcomeAnnouncedAt() == nil {
-		t.Fatal("outcome_announced_at still unset after a successful resume")
+		t.Fatal("outcome_announced_at is unset.\n\n" +
+			"It commits WITH the records now. Leaving it unset would send a redelivery back into " +
+			"the reject path to announce a rejection the outbox already holds — a duplicate FACT " +
+			"for an order that was only ever rejected once.")
+	}
+
+	if _, ferr := svc.relay.Flush(context.Background(), "o1"); ferr != nil {
+		t.Fatalf("relay flush: %v", ferr)
+	}
+	before := len(fb.types())
+
+	if err := svc.Handle(testCtx(), submitEnv(), mustMarshal(t, cmd)); err != nil {
+		t.Fatalf("redelivery returned %v, want nil — a duplicate SubmitOrder is acked", err)
+	}
+	if got := len(fb.types()); got != before {
+		t.Fatalf("the redelivery emitted %d new events, want 0 — the rejection was already "+
+			"announced, so re-announcing it duplicates a terminal FACT", got-before)
 	}
 }
