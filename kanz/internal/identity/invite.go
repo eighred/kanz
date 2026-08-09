@@ -146,10 +146,24 @@ func NewInvite(id, tokenHash, subject, tenant string, roles, portfolios []string
 		TokenHash:  tokenHash,
 		Subject:    subject,
 		Tenant:     tenant,
-		Roles:      append([]string(nil), roles...),
-		Portfolios: append([]string(nil), portfolios...),
+		Roles:      copyOf(roles),
+		Portfolios: copyOf(portfolios),
 		CreatedBy:  createdBy,
 		CreatedAt:  now.UTC(),
 		ExpiresAt:  now.UTC().Add(ttl),
 	}, nil
+}
+
+// copyOf returns a non-nil copy, so a caller mutating their slice afterwards
+// cannot change authority already granted.
+//
+// NON-NIL EVEN WHEN EMPTY, and that is not cosmetic: pgx sends a nil []string as
+// SQL NULL, and `portfolios TEXT[] NOT NULL DEFAULT '{}'` rejects an explicit
+// NULL — a column default applies only when the column is OMITTED. So an invite
+// carrying no portfolios failed to insert at all, with an error naming the
+// constraint rather than the nil. A fake store would have accepted it.
+func copyOf(in []string) []string {
+	out := make([]string, len(in))
+	copy(out, in)
+	return out
 }
