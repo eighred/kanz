@@ -45,6 +45,7 @@ what gets read, so it is not allowed to be the stale copy.
 | `alternatives` | covered | `kanz-books` (fund journal) |
 | `wealth` | covered | `kanz-books` (household book) |
 | `datamaster` | covered | `kanz-books` (golden records + exception queue) |
+| `identity` | NOT COVERED | `identity_users`, `identity_invites` (#364). Credentials exist nowhere else: a failover onto an empty store locks **everyone** out, including whoever would run the recovery. Not yet deployed, so no cluster is claimed — placement is open because PITR is per-cluster and co-locating it with `kanz-books` would tie a password rotation to the ledger's restore timeline. |
 | `market-data` | excluded | append-only history with its own retention; re-ingestable from the feed |
 | `audit` | excluded | WORM store with its own tamper-resistant retention (AUDIT-01b) |
 | `oms` | covered | `kanz-orders` (`orders`, `positions`, `position_fills`). **Read "What `covered` does not mean" below before relying on this row.** |

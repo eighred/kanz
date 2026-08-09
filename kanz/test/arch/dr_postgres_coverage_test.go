@@ -330,6 +330,16 @@ var drPosture = map[string]drClassification{
 		"the as_of chain a historical revaluation reads. The exclusion still holds — losing it degrades " +
 		"backtest fidelity rather than the live book, and the live book is what DR exists for — but " +
 		"this entry must not be read as 'everything here is replayable', because half of it is not"},
+	"identity": {status: drUnresolved, reason: "identity_users + identity_invites — the platform's " +
+		"own accounts and their Argon2id credentials (#364). NOT EXCLUDABLE: credentials exist " +
+		"nowhere else, so a region failover onto an empty store locks every operator and trader out " +
+		"of the platform, including whoever would perform the recovery. It is deliberately NOT " +
+		"marked covered either — the service has migrations but no deployment yet, and claiming a " +
+		"cluster it has never been placed in would be exactly the invented exclusion this guard's " +
+		"header warns about. The placement question is real: PITR is per-cluster, so putting " +
+		"identity in kanz-books would tie a password rotation to the IBOR ledger's restore " +
+		"timeline. Tracked by #364, which cannot close while this row still says NOT COVERED"},
+
 	"audit": {status: drExcluded, reason: "AUDIT-01b WORM store with its own tamper-resistant " +
 		"retention — object-locked, and deliberately not restorable-to-an-earlier-instant, which is " +
 		"the point of an audit log"},
