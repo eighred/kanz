@@ -333,6 +333,28 @@ data:
               subscribe: { allow: ["_INBOX.>"] }
             }
           }
+          # inference is the PYTHON service (kanz-py), and until #241 it had no
+          # entry here at all — because it had no way to present an SVID. Its
+          # streaming worker is the WIRED half: risk-engine publishes
+          # inference.feature.computed, kanz_inference/streaming/worker.py drains
+          # it and publishes inference.prediction.scored back.
+          #
+          # WITHOUT THIS ENTRY THE PATH IS DEAD ON A REAL BROKER. nats.yaml sets
+          # verify: true + verify_and_map, so a client with no admitted SVID is
+          # refused at the TLS handshake — not denied per-subject, refused
+          # outright — and nothing scores a single FeatureVector.
+          #
+          # $JS.API.> + $JS.ACK.> because the worker binds a DURABLE pull consumer
+          # (kanz_bus/nats.py's pull_subscribe(durable=group)) and acks what it
+          # has scored. No dlq.* grant: kanz_inference constructs Consumer(client)
+          # with the default config, so dlq is None and a retry-exhausted message
+          # surfaces to the broker rather than being republished.
+          { user: "spiffe://kanz.internal/ns/kanz-services/sa/inference"
+            permissions: {
+              publish: { allow: ["inference.prediction.scored", "$JS.API.>", "$JS.ACK.>"] }
+              subscribe: { allow: ["inference.feature.computed", "_INBOX.>"] }
+            }
+          }
           # accounting folds order fills (order.order.filled /
           # .partially_filled, ACCOUNTING_FILL_SUBJECTS) and its own cash-
           # movement FACTs (accounting.cash.>, ACCOUNTING_CASH_SUBJECTS) into

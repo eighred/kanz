@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import ssl
 from typing import Any
 
 import nats
@@ -22,6 +23,11 @@ class NATSClient:
 
     Or call :meth:`connect` and :meth:`close` directly. Re-calling
     :meth:`connect` on a connected client is a no-op.
+
+    ``tls`` is the SEC-01c mutual-TLS context (see :mod:`kanz_bus.mtls`). It is
+    optional so local/dev keeps working against a plaintext broker, and REQUIRED
+    against production: ``infra/nats/nats.yaml`` sets ``verify: true``, so a
+    client without one is refused at the handshake rather than degraded.
     """
 
     def __init__(
@@ -32,6 +38,7 @@ class NATSClient:
         reconnect_time_wait: float = 2.0,
         max_reconnect_attempts: int = -1,
         publish_timeout: float = 5.0,
+        tls: ssl.SSLContext | None = None,
     ) -> None:
         if not url:
             raise ValueError("nats: url required")
@@ -41,18 +48,31 @@ class NATSClient:
         self._reconnect_time_wait = reconnect_time_wait
         self._max_reconnect_attempts = max_reconnect_attempts
         self._publish_timeout = publish_timeout
+        self._tls = tls
         self._nc: NATSConn | None = None
         self._js: JetStreamContext | None = None
 
     async def connect(self) -> None:
         if self._nc is not None:
             return
+        # SEC-M3: the production broker sets `verify: true` + `verify_and_map`, so
+        # a client with no SVID is rejected at the TLS handshake and never reaches
+        # a tenancy.yaml account. tls=None is the local/dev plaintext path; the
+        # caller decides, and logs that it did (see kanz_inference/__main__.py).
+        #
+        # THE URL STAYS nats://, NOT tls://, and that is not an oversight — the
+        # Go services are configured the same way. nats-py upgrades the connection
+        # when the server's INFO advertises tls_required, which this broker does,
+        # so the scheme carries no TLS decision. `tls` reaches Client.connect
+        # through nats.connect(**options); it is not in nats.connect's own
+        # signature, which is why grepping for it there finds nothing.
         self._nc = await nats.connect(
             self._url,
             name=self._name,
             connect_timeout=self._connect_timeout,
             reconnect_time_wait=self._reconnect_time_wait,
             max_reconnect_attempts=self._max_reconnect_attempts,
+            tls=self._tls,
         )
         self._js = self._nc.jetstream()
 

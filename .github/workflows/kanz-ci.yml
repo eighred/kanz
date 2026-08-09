@@ -516,8 +516,13 @@ jobs:
       # inference package fails at collection. It is unpinned here for the same
       # reason the rest of this line is — these are the TEST toolchain, and what
       # the image installs is kanz-py/requirements.txt, hash-pinned.
+      # cryptography is TEST-ONLY and deliberately not in requirements.txt: it mints
+      # the throwaway SVID-shaped certificates tests/test_bus_mtls.py completes real
+      # TLS handshakes against (#241). Those handshakes are the only way to tell a
+      # client context that VERIFIES the broker from one that merely encrypts —
+      # asserting on ssl flags cannot. The image itself never needs it.
       - name: Install Python deps
-        run: pip install grpcio-tools pytest pytest-asyncio nats-py aiokafka prometheus-client
+        run: pip install grpcio-tools pytest pytest-asyncio nats-py aiokafka prometheus-client cryptography
 
       - name: Generate Python schema SDK
         run: |

@@ -128,8 +128,18 @@ spec:
 #                 one should ever run, and a quota that funds everything bounds
 #                 nothing.
 #   pods        = Σ ceiling(w) + surge = 86 + 4 = 90
-#   requests    = 90 x (500m, 512Mi)  = 45 CPU, 45Gi   ← LimitRange defaults
-#   limits      = 90 x (1, 1Gi)       = 90 CPU, 90Gi
+#
+# QUOTA COUNTS CONTAINERS, NOT PODS, and one workload now carries two (#241):
+# inference runs a spiffe-helper SIDECAR that materialises its SVID as PEM files,
+# because nats-py cannot speak the SPIFFE Workload API. At inference's ceiling of
+# 2 that is 2 extra containers. Its spiffe-helper-init container costs nothing
+# here — the guard applies Kubernetes' own formula, max(sum(containers),
+# max(initContainers)), and an init container that runs to completion before the
+# app starts only raises the floor.
+#
+#   containers  = 90 + 2 = 92
+#   requests    = 92 x (500m, 512Mi)  = 46 CPU, 46Gi   ← LimitRange defaults
+#   limits      = 92 x (1, 1Gi)       = 92 CPU, 92Gi
 #
 # ONE WORKLOAD IS NO LONGER ON THE DEFAULTS, and the memory numbers above are
 # adjusted for it (#228). postgres-dev.yaml now declares max_connections=400 —
@@ -138,8 +148,8 @@ spec:
 # block. It is the only container on the estate whose memory is a function of a
 # number in its own argv. CPU is untouched, so only the two memory terms move:
 #
-#   requests.memory = 89 x 512Mi + 2Gi = 47616Mi (46.5Gi)
-#   limits.memory   = 89 x 1Gi   + 4Gi = 93Gi
+#   requests.memory = 91 x 512Mi + 2Gi = 48640Mi (47.5Gi)
+#   limits.memory   = 91 x 1Gi   + 4Gi = 95Gi
 #
 # Written in Mi rather than 46.5Gi because a fractional binary quantity is the
 # kind of thing that gets "tidied" to 46Gi by someone reading it as a round
@@ -157,10 +167,10 @@ metadata:
     app.kubernetes.io/part-of: kanz
 spec:
   hard:
-    requests.cpu: "45"
-    requests.memory: 47616Mi
-    limits.cpu: "90"
-    limits.memory: 93Gi
+    requests.cpu: "46"
+    requests.memory: 48640Mi
+    limits.cpu: "92"
+    limits.memory: 95Gi
     pods: "90"
 ---
 # LimitRange gives every pod sane defaults + a ceiling, so a container with no
