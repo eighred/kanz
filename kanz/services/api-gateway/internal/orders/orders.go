@@ -36,50 +36,6 @@ const (
 
 const maxBodyBytes = 1 << 20 // 1 MiB
 
-// tenantRoutePrefix is the leading segment that lets the broker route a command
-// to the tenant that issued it (MT-02, #358).
-const tenantRoutePrefix = "tenant."
-
-// routedSubject prefixes the WIRE subject with the issuing tenant, leaving the
-// logical event_type alone.
-//
-// THE RULING THIS IMPLEMENTS (#97): tenants get DEDICATED COMPUTE. A shared OMS
-// would need per-transaction tenant scoping, because internal/pg/pool.go binds a
-// pool to one tenant for the process lifetime — a rewrite of the one component
-// every service's RLS correctness rests on. Dedicated compute keeps a property
-// that is currently structural: a pool that CANNOT serve the wrong tenant.
-//
-// WHY THE SUBJECT AND NOT THE ENVELOPE. Dedicated compute means the tenant's OMS
-// lives in the tenant's NATS account, and accounts are isolated by construction —
-// measured, not assumed: a publish in __system__ reaches NOTHING in `acme`, while
-// the same subscriber receives a same-account publish. The gateway is the sole
-// front door and holds ONE SVID, hence one account, and NATS routes on SUBJECT.
-// It cannot dispatch on the envelope's tenant_id, however correct that field is.
-// So the tenant has to be in the subject for the broker to see it at all.
-//
-// WHAT IS NOT CHANGED, and this is the part worth protecting: event_type stays
-// the 3-segment logical name. Every consumer, guard, audit projection and Kafka
-// topic keys on that, and kanz-schemas/docs/subject-taxonomy.md defines it as the
-// stable contract. The prefix lives ONLY on the wire inside __system__ —
-// tenancy.yaml's per-account import remaps it back to `order.order.submit`
-// before any workload sees it, so the tenant's OMS subscribes the unchanged name
-// and never learns a prefix exists.
-//
-// The gateway prefixes UNCONDITIONALLY, including for __system__, which resolves
-// its own prefix via an account mapping. A runtime branch here would need a list
-// of "tenants that have accounts" — a second place to update when provisioning,
-// and the failure when it fell behind would be orders silently going nowhere.
-func routedSubject(tenant, subject string) string {
-	if tenant == "" {
-		// Unreachable: Handler.principal refuses an authenticated caller with no
-		// tenant before any publish. Returning the bare subject rather than
-		// "tenant..order.order.submit" keeps a future caller that skips that gate
-		// from minting a malformed subject the broker would silently drop.
-		return subject
-	}
-	return tenantRoutePrefix + tenant + "." + subject
-}
-
 // Publisher is the bus publish surface — satisfied by *bus.Producer.
 type Publisher interface {
 	Publish(ctx context.Context, e bus.Event) error
@@ -172,8 +128,8 @@ func (h *Handler) publish(ctx context.Context, p *middleware.Principal, subject,
 	})
 	return h.pub.Publish(ctx, bus.Event{
 		// SUBJECT CARRIES THE TENANT; EVENT_TYPE DOES NOT. They are deliberately
-		// different here and nowhere else in the estate — see routedSubject.
-		Subject:        routedSubject(p.Tenant, subject),
+		// different here and nowhere else in the estate — see bus.TenantRoutedSubject.
+		Subject:        bus.TenantRoutedSubject(p.Tenant, subject),
 		EventType:      subject,
 		EventClass:     envelopepb.EventClass_EVENT_CLASS_COMMAND,
 		SchemaVersion:  1,

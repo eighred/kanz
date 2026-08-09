@@ -170,7 +170,12 @@ jobs:
       # is started as a step.
       - name: Start NATS (JetStream)
         run: |
-          docker run -d --name kanz-ci-nats -p 4222:4222 nats:2 -js
+          # -c nats-dev.conf, not bare -js: MT-02 (#358/#360) publishes orders on
+          # tenant.<t>.order.order.submit, and without the routing mappings in
+          # that file they land on a subject nothing subscribes — the OMS goes
+          # quiet and the M1 loop certification below fails with a publish that
+          # reported success. Same config the local rig uses (test/backing/up.sh).
+          docker run -d --name kanz-ci-nats -p 4222:4222             -v "$GITHUB_WORKSPACE/kanz/test/backing/nats-dev.conf":/etc/nats/nats-dev.conf:ro             nats:2 -c /etc/nats/nats-dev.conf
           for i in $(seq 1 30); do
             docker logs kanz-ci-nats 2>&1 | grep -q "Server is ready" && exit 0
             sleep 1

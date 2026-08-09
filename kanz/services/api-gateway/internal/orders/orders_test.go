@@ -299,13 +299,13 @@ func TestSubmit_RoutesOnTenantWithoutMovingTheEventType(t *testing.T) {
 	}
 }
 
-// A caller with no tenant never reaches the publisher, so routedSubject's guard
+// A caller with no tenant never reaches the publisher, so the helper's guard
 // is unreachable in production — but it must not mint "tenant..order.order.submit"
 // if a future path skips that gate, because the broker would route that nowhere
 // and drop it silently.
-func TestRoutedSubjectRefusesToMintAnEmptyTenantSegment(t *testing.T) {
-	if got := routedSubject("", subjectSubmit); got != subjectSubmit {
-		t.Fatalf("routedSubject(\"\") = %q, want the bare subject — an empty segment routes "+
+func TestTenantRoutedSubjectRefusesToMintAnEmptyTenantSegment(t *testing.T) {
+	if got := bus.TenantRoutedSubject("", subjectSubmit); got != subjectSubmit {
+		t.Fatalf("TenantRoutedSubject(\"\") = %q, want the bare subject — an empty segment routes "+
 			"to no account and the order is dropped with no error anywhere", got)
 	}
 }

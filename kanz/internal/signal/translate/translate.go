@@ -388,7 +388,17 @@ func (t *Translator) fanOut(ctx context.Context, in Intent, tenant string, venue
 
 func (t *Translator) publishCommand(ctx context.Context, cmd *orderpb.SubmitOrder, orderID, tenant string) error {
 	return t.opt.Publisher.Publish(ctx, bus.Event{
-		Subject:        SubjectSubmit,
+		// MT-02 (#360): the WIRE subject carries the tenant so the broker can
+		// route this command into that tenant's NATS account; event_type stays
+		// the logical name. Without it a signal-originated order is delivered
+		// into __system__ and the tenant's OMS never sees it — while the SAME
+		// order placed through the gateway routes correctly. Two paths, one of
+		// them silently wrong, is worse than neither working.
+		//
+		// `tenant` is TenantOf(in.FundID), resolved per signal — NOT a
+		// service-level default. One webhook endpoint serves many funds, so a
+		// per-service tenant would be the wrong one for all but a single fund.
+		Subject:        bus.TenantRoutedSubject(tenant, SubjectSubmit),
 		EventType:      SubjectSubmit,
 		EventClass:     envelopepb.EventClass_EVENT_CLASS_COMMAND,
 		SchemaVersion:  1,
