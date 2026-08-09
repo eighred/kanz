@@ -34,6 +34,7 @@ import signal
 import sys
 
 from kanz_bus.consumer import Consumer
+from kanz_bus import mtls
 from kanz_bus.nats import NATSClient
 from kanz_bus.producer import Producer, ProducerConfig
 
@@ -51,6 +52,41 @@ DEFAULT_GROUP = "inference"
 
 def _env(key: str, default: str = "") -> str:
     return os.environ.get(key, default).strip()
+
+
+# How often to check whether spiffe-helper has rewritten the SVID. Minutes, not
+# seconds: rotation happens on the order of an SVID lifetime, and the cost of
+# being a few minutes late is nil — the loaded certificate is still valid.
+SVID_POLL_SECONDS = 300.0
+
+
+async def _watch_svid(ctx, cert_dir: str, stopping: asyncio.Event) -> None:
+    """Keep the TLS context's SVID current while the process runs.
+
+    Without this the context holds the certificate loaded at startup. The
+    connection survives rotation (no re-handshake), so nothing fails — until the
+    pod reconnects after that certificate expired, presents it, and is refused.
+    nats-py then retries forever with the same dead cert and the streaming path
+    never returns. See kanz_bus.mtls.reload_if_rotated.
+    """
+    fingerprint = mtls.reload_if_rotated(ctx, cert_dir, None)
+    while not stopping.is_set():
+        try:
+            await asyncio.wait_for(stopping.wait(), timeout=SVID_POLL_SECONDS)
+            return
+        except asyncio.TimeoutError:
+            pass
+        try:
+            updated = mtls.reload_if_rotated(ctx, cert_dir, fingerprint)
+        except Exception:
+            # A rotation we could not apply is worth a stack trace: the pod keeps
+            # serving on the old SVID and will fail at the next reconnect after
+            # expiry, which is far from here in time and hard to attribute.
+            logger.exception("SVID reload failed — still serving on the previously loaded SVID")
+            continue
+        if updated != fingerprint:
+            logger.info("SVID rotated; the next bus handshake uses the new certificate")
+            fingerprint = updated
 
 
 async def _run() -> int:
@@ -114,8 +150,38 @@ async def _run() -> int:
     nats_url = _env("KANZ_INFERENCE_NATS_URL")
     client: NATSClient | None = None
     if nats_url:
-        client = NATSClient(url=nats_url, name=_env("KANZ_INFERENCE_SOURCE", "inference"))
+        # SEC-M3 (#241): present this pod's SVID to the broker. The production
+        # broker sets `verify: true` + `verify_and_map`, so WITHOUT this the
+        # streaming path cannot connect at all — and it is the wired half:
+        # risk-engine really does publish inference.feature.computed.
+        #
+        # A missing cert dir is FATAL, not a downgrade to plaintext. A client that
+        # silently falls back reports itself healthy and then either fails every
+        # handshake, or — against a broker still accepting plaintext — connects
+        # under NO identity, which is the state this change exists to remove.
+        tls_ctx = None
+        cert_dir = _env("KANZ_INFERENCE_NATS_CERT_DIR")
+        if cert_dir:
+            tls_ctx = mtls.client_context(cert_dir)
+            logger.info("bus transport: mTLS, SVID from %s", cert_dir)
+        else:
+            logger.warning(
+                "KANZ_INFERENCE_NATS_CERT_DIR is unset - connecting to the bus in PLAINTEXT, "
+                "with no SPIFFE identity. A production broker (verify: true) refuses this "
+                "connection; a broker that accepts it maps this client to no tenancy account."
+            )
+        client = NATSClient(
+            url=nats_url,
+            name=_env("KANZ_INFERENCE_SOURCE", "inference"),
+            tls=tls_ctx,
+        )
         await client.connect()
+        if tls_ctx is not None:
+            tasks.append(
+                asyncio.create_task(
+                    _watch_svid(tls_ctx, cert_dir, stopping), name="svid-rotation"
+                )
+            )
         producer = Producer(
             client,
             ProducerConfig(

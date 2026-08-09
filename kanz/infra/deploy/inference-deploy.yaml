@@ -28,6 +28,33 @@
 # pre-trade gate and webhook-ingest's gate are untouched, and a model that is down or wrong
 # cannot stop or start a trade. Wiring a model to capital is a separate decision that has not
 # been taken.
+# spiffe-helper config (#241): fetch this pod's SVID from the agent socket
+# (mounted by the SPIFFE CSI driver) and write it as the three PEM files
+# kanz_bus.mtls reads. Same helper, same file names as the broker's own sidecar
+# (infra/nats/nats.yaml) and the bootstrap Job — one convention, so a reader who
+# knows one knows them all.
+#
+# NO `cmd` HERE, deliberately. The broker's helper SIGHUPs nats-server on renewal
+# so it reloads its TLS material; a Python process has no config reload to signal,
+# and restarting a serving pod on every rotation would cycle it roughly hourly.
+# Rotation is handled in-process instead — kanz_bus.mtls.reload_if_rotated
+# re-loads the same ssl.SSLContext the NATS client already holds, so the next
+# handshake uses the fresh SVID and no connection is dropped.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: inference-spiffe-helper
+  namespace: kanz-services
+  labels:
+    app.kubernetes.io/part-of: kanz
+data:
+  helper.conf: |
+    agent_address         = "/run/spiffe/spire-agent.sock"
+    cert_dir              = "/etc/inference-certs"
+    svid_file_name        = "svid.pem"
+    svid_key_file_name    = "svid_key.pem"
+    svid_bundle_file_name = "bundle.pem"
+---
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -111,6 +138,35 @@ spec:
       # See availability.yaml for what the floor is made of.
       terminationGracePeriodSeconds: 60
       serviceAccountName: inference
+      # SEC-M3 (#241): materialise this pod's SVID as PEM files.
+      #
+      # WHY A SIDECAR AND NOT THE WORKLOAD API. Go services read the SPIFFE
+      # Workload API socket directly (pkg/transport) and never hold a key on disk.
+      # nats-py cannot — it takes an ssl.SSLContext and nothing else. This is the
+      # same route infra/nats/bootstrap-job.yaml takes for the `nats` CLI, with the
+      # same helper and the same file names.
+      #
+      # The init run BLOCKS until the first SVID exists, so the process never
+      # starts without an identity; the sidecar then renews it. Unlike the broker's
+      # helper there is no `cmd` to SIGHUP on renewal — a Python process has no
+      # config reload — so rotation is picked up IN-PROCESS by
+      # kanz_bus.mtls.reload_if_rotated, which re-loads the same context object the
+      # client already holds. Without that, the first reconnect after the loaded
+      # SVID expires is refused forever.
+      initContainers:
+        - name: spiffe-helper-init
+          image: ghcr.io/spiffe/spiffe-helper:0.9.0
+          args: ["-config", "/etc/spiffe-helper/helper.conf", "-daemon-mode=false"]
+          volumeMounts:
+            - { name: spiffe-helper-config, mountPath: /etc/spiffe-helper, readOnly: true }
+            - { name: inference-certs, mountPath: /etc/inference-certs }
+            - { name: spiffe, mountPath: /run/spiffe, readOnly: true }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            capabilities:
+              drop: ["ALL"]
       securityContext:
         runAsNonRoot: true
         runAsUser: 65532
@@ -148,6 +204,11 @@ spec:
             # Every served prediction carries its own attribution (permutation Shapley). A
             # risk desk that cannot attribute a number cannot sign off on it.
             - { name: KANZ_INFERENCE_EXPLAIN, value: "true" }
+            # SEC-M3 (#241): where spiffe-helper writes this pod's SVID. UNSET means
+            # the bus client connects in PLAINTEXT with no identity — which the
+            # production broker (verify: true, verify_and_map) refuses outright, so
+            # the streaming worker would score nothing at all.
+            - { name: KANZ_INFERENCE_NATS_CERT_DIR, value: /etc/inference-certs }
           # WHAT THE OLD tcpSocket PROBES GOT RIGHT, AND WHAT THEY COULD NOT SAY.
           #
           # Their argument held: 50051 is bound only AFTER a PRIMARY model is loaded (the
@@ -178,7 +239,35 @@ spec:
           volumeMounts:
             - { name: models, mountPath: /etc/kanz/models, readOnly: true }
             - { name: tmp, mountPath: /tmp }
+            # readOnly: this container READS the SVID; only spiffe-helper writes it.
+            - { name: inference-certs, mountPath: /etc/inference-certs, readOnly: true }
+        # SEC-01c: keeps the SVID renewed for as long as this pod runs.
+        - name: spiffe-helper
+          image: ghcr.io/spiffe/spiffe-helper:0.9.0
+          args: ["-config", "/etc/spiffe-helper/helper.conf"]
+          volumeMounts:
+            - { name: spiffe-helper-config, mountPath: /etc/spiffe-helper, readOnly: true }
+            - { name: inference-certs, mountPath: /etc/inference-certs }
+            - { name: spiffe, mountPath: /run/spiffe, readOnly: true }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            capabilities:
+              drop: ["ALL"]
       volumes:
+        # emptyDir, not a Secret: this material is short-lived, pod-scoped and
+        # re-fetched from SPIRE on every start. Writing it to a Secret would put a
+        # private key in etcd for the convenience of nothing.
+        - name: inference-certs
+          emptyDir: {}
+        - name: spiffe-helper-config
+          configMap:
+            name: inference-spiffe-helper
+        - name: spiffe
+          csi:
+            driver: csi.spiffe.io
+            readOnly: true
         # The model card. A ConfigMap, not a secret: weights and validation evidence are
         # auditable artifacts, and a model nobody can inspect is a model nobody can validate.
         #
