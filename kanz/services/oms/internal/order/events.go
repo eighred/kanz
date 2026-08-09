@@ -156,8 +156,27 @@ func (e *Emitter) AcceptedFact(ctx context.Context, st *orderpb.OrderState) (out
 
 // EmitRejected publishes OrderRejected (no state changed; order terminal).
 func (e *Emitter) EmitRejected(ctx context.Context, orderID, code, reason string, t time.Time) error {
-	return e.emit(ctx, EventTypeRejected, orderID, t,
+	return e.b.Publish(ctx, e.rejectedEvent(orderID, code, reason, t))
+}
+
+// rejectedEvent is the ORDER_REJECTED FACT. One builder, two sinks — see event().
+func (e *Emitter) rejectedEvent(orderID, code, reason string, t time.Time) bus.Event {
+	return e.event(EventTypeRejected, orderID, t,
 		&orderpb.OrderRejected{OrderId: orderID, Reason: reason, ErrorCode: code})
+}
+
+// RejectedFact captures ORDER_REJECTED as an outbox record so a rejection and
+// its announcement commit together (#292).
+//
+// WHY THIS ONE MATTERED MOST of the pairs that had a compensator. The marker
+// outcome_announced_at drives completeTerminalOutcome, which rebuilds the
+// CommandOutcome from stored state — but it CANNOT rebuild this FACT, and says
+// so in its own comment. So a crash between the Save and the publish left the
+// order durably REJECTED, the caller eventually answered by the compensator, and
+// the ORDER_REJECTED FACT gone from the estate with nothing able to notice: the
+// ledger and every downstream projection would never learn the order died.
+func (e *Emitter) RejectedFact(ctx context.Context, orderID, code, reason string, t time.Time) (outbox.Record, error) {
+	return outbox.From(ctx, e.rejectedEvent(orderID, code, reason, t))
 }
 
 // routedEvent is the ORDER_ROUTED FACT. One builder, two sinks — see event().

@@ -535,17 +535,40 @@ func (s *Service) handleSubmit(ctx context.Context, env *envelopepb.Envelope, pa
 		// ledger say rejected while the OMS's own truth says working, and a
 		// later cancel would act on a live-looking order.
 		rejected := Reject(st, rejectedAt)
-		if serr := s.store.Save(ctx, rejected, ver, nil); serr != nil {
+		// TRANSACTIONAL (#292). This was the last pair whose FACT nothing could
+		// rebuild: outcome_announced_at drives completeTerminalOutcome, which
+		// reconstructs the CommandOutcome from stored state and says in its own
+		// comment that it cannot reconstruct the ORDER_REJECTED FACT. So a crash
+		// between the Save and the publish left the order durably REJECTED, the
+		// caller eventually answered, and the FACT gone — the ledger and every
+		// downstream projection never learning the order died.
+		//
+		// Both records are built BEFORE the Save, so a record that could never be
+		// published stops the rejection instead of committing half of it.
+		rejFact, ferr := s.emitter.RejectedFact(ctx, st.GetOrderId(), "PRICE_UNAVAILABLE", err.Error(), rejectedAt)
+		if ferr != nil {
+			return ferr
+		}
+		outFact, ferr := s.emitter.OutcomeFact(ctx, st.GetOrderId(),
+			commandpb.CommandOutcomeStatus_COMMAND_OUTCOME_STATUS_REJECTED,
+			err.Error(), "PRICE_UNAVAILABLE", "", rejectedAt)
+		if ferr != nil {
+			return ferr
+		}
+		// outcome_announced_at is stamped in the SAME write, not a second one.
+		// The marker's job is to send a redelivery to resume()'s
+		// genuine-duplicate branch (order_events.proto:19); committing it
+		// alongside the records it describes is what makes it true the instant
+		// it is durable, instead of after two more writes that can each fail.
+		rejected.OutcomeAnnouncedAt = timestamppb.New(rejectedAt)
+		if serr := s.store.Save(ctx, rejected, ver, []outbox.Record{rejFact, outFact}); serr != nil {
 			return serr
 		}
-		ver++
-		if rerr := s.refuse(ctx, st.GetOrderId(), "PRICE_UNAVAILABLE", err.Error(), rejectedAt); rerr != nil {
-			return rerr
-		}
-		// The FACT and the outcome are both out — stamp outcome_announced_at so
-		// a redelivery of this SubmitOrder hits resume()'s genuine-duplicate
-		// branch instead of re-entering this path. See order_events.proto:19.
-		return s.markOutcomeAnnounced(ctx, rejected, ver, rejectedAt)
+		// Flushed here because the submitter is waiting on this outcome; the
+		// records are durable either way, so this only decides whether the answer
+		// arrives now or on the relay's next pass.
+		_, ferr = s.relay.Flush(ctx, st.GetOrderId())
+		return ferr
 	}
 	if err != nil {
 		return err
