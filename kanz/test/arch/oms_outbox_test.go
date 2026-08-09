@@ -54,18 +54,57 @@ const omsOrderPkg = "services/oms/internal/order"
 // itself the point — the set is small and the guard names it.
 var storeWriteMethods = map[string]bool{"Create": true, "Save": true}
 
+// THE EXEMPTIONS ARE IN TWO MAPS, AND THE SPLIT IS THE POINT.
+//
+// They were one map, and every entry named #292 as the issue that retires it.
+// That was true when the work started and is not true now: three of these are
+// not waiting on anything, and an exemption pointing at an issue that will never
+// retire it is the same "reads as load-bearing" problem the *_announced_at
+// markers had — with the added cost that #292 cannot close while its own guard
+// says six sites are pending.
+//
+// So: commitThenPublishPending is WORK. commitThenPublishByDesign is NOT.
+//
+// A method in EITHER map that no longer offends fails the dead-entry check
+// below — an exemption must not outlive its repair, whichever kind it is.
+
+// commitThenPublishByDesign names sites where no transaction exists for the FACT
+// to ride in, so "convert it" is not a smaller change but a different, wrong
+// one. These do not retire.
+var commitThenPublishByDesign = map[string]string{
+	"completeCancelAnnouncement": "BY DESIGN: this is a COMPENSATOR. Its purpose is to republish " +
+		"for rows that have NO outbox record — the pre-outbox population, and any row whose " +
+		"announcement was interrupted before the outbox existed. Routing it through the outbox " +
+		"means writing a record for the case defined by not having one. It publishes and THEN " +
+		"Saves cancel_announced_at, which is the correct order for a compensator: the marker must " +
+		"not claim an announcement that has not gone out.",
+
+	"handleAmend": "BY DESIGN: the write and the publishes are in DISJOINT BRANCHES. The success " +
+		"path IS converted — OutcomeFact rides the Save. What remains are the reject branches " +
+		"(quarantine, and Amend's RejectError), which reach outcomeReject WITHOUT writing " +
+		"anything: no transaction for that outcome to ride in, and nothing to lose if the publish " +
+		"fails, because no state changed. It would stop being listed only if outcomeReject stopped " +
+		"being reachable from a method that also writes — a refactor of the helper, not of this " +
+		"transition.",
+
+	"resume": "BY DESIGN: the RECOVERY path, with no pair of its own. It Saves venue_ack_at on the " +
+		"ActionLeave branch and reaches publishes through reannounceAccepted, " +
+		"completeTerminalOutcome, adopt and work on OTHER branches. It is listed because the " +
+		"syntactic guard sees a write and a publish in one method; they never happen on the same " +
+		"path. It inherits whatever its callees are, which is why converting THEM is what changes " +
+		"anything here.",
+}
+
 // commitThenPublishPending is the DEFAULT-DENY allow-list of Service methods
-// that still write order state and publish a FACT outside the transaction.
+// that still write order state and publish a FACT outside the transaction AND
+// could ride the write.
 //
 // Every entry is a place where a crash or a broker refusal between the two
 // leaves the store and the estate disagreeing, recovered — where it is recovered
 // at all — by a `*_announced_at` marker and a compensator. #292 converts them one
-// at a time; admission is done and is deliberately ABSENT from this map, which
-// is what makes the guard tighten as the work lands rather than needing to be
-// re-tightened by hand.
-//
-// A method that appears here and no longer offends fails the dead-entry check
-// below: an exemption must not outlive its repair.
+// at a time; admission, ROUTED, both fills, the amend outcome and the ErrUnpriced
+// rejection are done and are deliberately ABSENT, which is what makes the guard
+// tighten as the work lands rather than needing re-tightening by hand.
 var commitThenPublishPending = map[string]string{
 	"handleSubmit": "#292: THE ErrUnpriced REJECT IS CONVERTED — RejectedFact + OutcomeFact ride " +
 		"the same Save as the REJECTED state, and outcome_announced_at is stamped in that write " +
@@ -75,20 +114,6 @@ var commitThenPublishPending = map[string]string{
 		"store.Create takes the ACCEPTED record. WHAT KEEPS THIS LISTED is the trailing outcome " +
 		"after work() — it follows the fill Saves inside work(), and outcome_announced_at + " +
 		"completeTerminalOutcome cover it. It stops being listed when that outcome moves.",
-
-	"completeCancelAnnouncement": "#292: EmitCancelled + EmitOutcome and THEN Save(cancel_announced_at) " +
-		"— the opposite order to admission's, which is the cost of hand-rolling per site that #292 " +
-		"reports. Covered by cancel_announced_at and handleCancel's own resume branch, and the " +
-		"duplicate it tolerates is documented on the function.",
-
-	"handleAmend": "#292: THE PAIR IS CONVERTED — the success path builds the CommandOutcome with " +
-		"OutcomeFact, hands it to Save alongside the amended state and flushes, so an amend can no " +
-		"longer be persisted-and-unannounced (it had NO marker, and nothing looked for it). What " +
-		"keeps this listed is the same shape resume() carries: the write and the publishes are in " +
-		"DIFFERENT BRANCHES. The reject branches — quarantine, and Amend's RejectError — reach " +
-		"outcomeReject without writing anything, so there is no transaction for that outcome to " +
-		"ride in and nothing to lose if it fails. It stops being listed when outcomeReject stops " +
-		"being reachable from a method that also writes, not when anything here changes.",
 
 	"adopt": "#292: Save(rejected) then refuse(). Its fill fold converted WITH work()'s — the two " +
 		"are the same six lines reached from different directions, and splitting them would have " +
@@ -100,11 +125,6 @@ var commitThenPublishPending = map[string]string{
 		"EmitOutcome. Covered by cancel_announced_at and by this handler's own already-CANCELLED " +
 		"branch, which completes an interrupted announcement rather than reporting REJECTED for a " +
 		"cancel that in fact succeeded. Converts with completeCancelAnnouncement, not separately.",
-
-	"resume": "#292: Saves venue_ack_at on the ActionLeave branch, and reaches a publish through " +
-		"reannounceAccepted, completeTerminalOutcome, adopt and work on the others. The write and " +
-		"the publishes are in DIFFERENT branches here, so this is the recovery path inheriting its " +
-		"callees' pairs rather than a pair of its own — it stops being listed when they convert.",
 }
 
 // TestNoNewCommitThenPublishPairInTheOMS is guard (1). Default-deny: a Service
@@ -181,7 +201,7 @@ func TestNoNewCommitThenPublishPairInTheOMS(t *testing.T) {
 	sort.Strings(offenders)
 
 	for _, m := range offenders {
-		if _, allowed := commitThenPublishPending[m]; !allowed {
+		if !commitThenPublishAllowed(m) {
 			t.Errorf("(*Service).%s writes order state AND publishes a FACT outside the "+
 				"transaction.\n\n"+
 				"That is the #292 defect: a crash or a broker refusal between the two leaves the "+
@@ -192,7 +212,9 @@ func TestNoNewCommitThenPublishPairInTheOMS(t *testing.T) {
 				"[]outbox.Record, and every caller already states its answer — so converting this "+
 				"transition is an edit to one call site, not a signature change.\n\n"+
 				"If it genuinely cannot be converted yet, add %q to commitThenPublishPending with "+
-				"the issue that retires it. Do not add it silently.", m, m)
+				"the issue that retires it. If NO transaction exists for the FACT to ride in — a "+
+				"compensator, or a publish on a branch that writes nothing — it belongs in "+
+				"commitThenPublishByDesign instead, with the reason. Do not add it silently.", m, m)
 		}
 	}
 
@@ -203,9 +225,9 @@ func TestNoNewCommitThenPublishPairInTheOMS(t *testing.T) {
 	for _, m := range offenders {
 		offending[m] = true
 	}
-	for m := range commitThenPublishPending {
+	for m := range allCommitThenPublishExemptions() {
 		if !offending[m] {
-			t.Fatalf("commitThenPublishPending names (*Service).%s, which no longer writes state and "+
+			t.Fatalf("an exemption names (*Service).%s, which no longer writes state and "+
 				"publishes outside the transaction. Either the method was converted — delete the "+
 				"entry, and if it was the last one, delete the map and make this guard absolute — "+
 				"or it was renamed and the exemption is now silently covering nothing.", m)
@@ -215,7 +237,10 @@ func TestNoNewCommitThenPublishPairInTheOMS(t *testing.T) {
 	// Said out loud on every run: passing means the remaining exposure is
 	// RECORDED, not gone.
 	for _, m := range sortedKeys(commitThenPublishPending) {
-		t.Logf("ACCEPTED COMMIT-THEN-PUBLISH PAIR: (*Service).%s — %s", m, commitThenPublishPending[m])
+		t.Logf("PENDING COMMIT-THEN-PUBLISH PAIR: (*Service).%s — %s", m, commitThenPublishPending[m])
+	}
+	for _, m := range sortedKeys(commitThenPublishByDesign) {
+		t.Logf("BY DESIGN, does not retire: (*Service).%s — %s", m, commitThenPublishByDesign[m])
 	}
 }
 
@@ -477,4 +502,32 @@ func readGoFiles(t *testing.T, dir string) string {
 		t.Fatalf("no non-test Go source found under %s — this guard would pass vacuously", dir)
 	}
 	return b.String()
+}
+
+// commitThenPublishAllowed reports whether a method is exempted, by either map.
+//
+// TWO MAPS RATHER THAN ONE because they mean different things: one is a queue of
+// work, the other is a decision. Collapsing them is what let every entry claim
+// #292 would retire it — including the three that never will, which is why that
+// issue could not close.
+func commitThenPublishAllowed(method string) bool {
+	if _, ok := commitThenPublishPending[method]; ok {
+		return true
+	}
+	_, ok := commitThenPublishByDesign[method]
+	return ok
+}
+
+// allCommitThenPublishExemptions is both maps, for the dead-entry check. An
+// exemption must not outlive its repair whichever kind it is: a BY DESIGN entry
+// for a method that no longer writes-and-publishes describes code that is gone.
+func allCommitThenPublishExemptions() map[string]string {
+	out := make(map[string]string, len(commitThenPublishPending)+len(commitThenPublishByDesign))
+	for k, v := range commitThenPublishPending {
+		out[k] = v
+	}
+	for k, v := range commitThenPublishByDesign {
+		out[k] = v
+	}
+	return out
 }
