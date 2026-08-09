@@ -249,3 +249,63 @@ func TestCancel_AuthenticatedWithoutTenant_403(t *testing.T) {
 		t.Fatalf("a cancel was published for a principal with no tenant (%+v)", pub.last)
 	}
 }
+
+// THE WIRE SUBJECT CARRIES THE TENANT; THE EVENT TYPE DOES NOT (MT-02, #358).
+//
+// These are the same string everywhere else in the estate, which is exactly why
+// the split needs pinning. The broker routes on SUBJECT — it cannot dispatch on
+// the envelope's tenant_id — so without the prefix an order for `acme` is
+// published into __system__ and `oms-acme`, which lives in the `acme` account,
+// receives nothing. Accounts are isolated by construction.
+//
+// EventType must NOT move with it: every consumer, audit projection, Kafka topic
+// and arch guard keys on the 3-segment logical name, and subject-taxonomy.md
+// defines it as the stable contract.
+func TestSubmit_RoutesOnTenantWithoutMovingTheEventType(t *testing.T) {
+	pub := &fakePub{}
+	h := New(pub)
+	mux := testMux()
+	h.Routes(mux)
+
+	body := &orderpb.SubmitOrder{
+		OrderId: "o9", PortfolioId: "pf1", InstrumentId: "AAPL",
+		Side: orderpb.Side_SIDE_BUY, Quantity: &commonpb.Decimal{Coefficient: 5, Exponent: 0},
+		OrderType: orderpb.OrderType_ORDER_TYPE_MARKET, TimeInForce: orderpb.TimeInForce_TIME_IN_FORCE_DAY,
+	}
+	raw, _ := protojson.Marshal(body)
+	req := httptest.NewRequest(http.MethodPost, "/v1/orders", strings.NewReader(string(raw)))
+	req = authed(req, "alice", "acme")
+
+	rr := httptest.NewRecorder()
+	mux.ServeHTTP(rr, req)
+	if rr.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want 202 (body: %s)", rr.Code, rr.Body.String())
+	}
+	if pub.last == nil {
+		t.Fatal("no event published")
+	}
+
+	if got, want := pub.last.Subject, "tenant.acme."+subjectSubmit; got != want {
+		t.Errorf("wire subject = %q, want %q.\n\n"+
+			"Unprefixed, this order is published into __system__ and the tenant's OMS — which "+
+			"lives in the `acme` NATS account — receives nothing. Accounts are isolated by "+
+			"construction, and the broker cannot route on the envelope's tenant_id.", got, want)
+	}
+	if got := pub.last.EventType; got != subjectSubmit {
+		t.Errorf("event_type = %q, want the unchanged logical name %q.\n\n"+
+			"The routing prefix belongs on the wire only. Moving event_type breaks every "+
+			"consumer, audit projection and Kafka topic that keys on the 3-segment contract.",
+			got, subjectSubmit)
+	}
+}
+
+// A caller with no tenant never reaches the publisher, so routedSubject's guard
+// is unreachable in production — but it must not mint "tenant..order.order.submit"
+// if a future path skips that gate, because the broker would route that nowhere
+// and drop it silently.
+func TestRoutedSubjectRefusesToMintAnEmptyTenantSegment(t *testing.T) {
+	if got := routedSubject("", subjectSubmit); got != subjectSubmit {
+		t.Fatalf("routedSubject(\"\") = %q, want the bare subject — an empty segment routes "+
+			"to no account and the order is dropped with no error anywhere", got)
+	}
+}

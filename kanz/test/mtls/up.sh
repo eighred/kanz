@@ -75,6 +75,18 @@ CONSUMER_ID="spiffe://${TRUST_DOMAIN}/ns/kanz-services/sa/archiver"
 # either fail or — worse, if tenants.conf were ever widened to let it through —
 # prove that a service can rewrite the spine's shape.
 BOOTSTRAP_ID="spiffe://${TRUST_DOMAIN}/ns/kanz-messaging/sa/nats-bootstrap"
+# A FOURTH AND FIFTH identity, for the MT-02 tenant bridge (#358). These two are
+# the whole point of the bridge and they live in DIFFERENT ACCOUNTS: api-gateway
+# maps to __system__, oms-acme to `acme`. That split cannot be faked with one
+# SVID — it is the isolation boundary itself, and it is why a fake bus proves
+# nothing here. tenancy.yaml admits both today.
+GATEWAY_ID="spiffe://${TRUST_DOMAIN}/ns/kanz-services/sa/api-gateway"
+TENANT_OMS_ID="spiffe://${TRUST_DOMAIN}/ns/kanz-services/sa/oms-acme"
+# The PLATFORM tenant's OMS, in __system__. It is what proves the bridge routes
+# rather than merely delivers: an order for `acme` must reach oms-acme and NOT
+# this one, and the platform tenant's own order must reach this one and not
+# oms-acme. One subscriber can only ever show delivery.
+SYSTEM_OMS_ID="spiffe://${TRUST_DOMAIN}/ns/kanz-services/sa/oms"
 
 # Repo root, so this runs from anywhere.
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -126,6 +138,9 @@ mint server "$SERVER_ID" "$SERVER_SANS"
 mint client "$CLIENT_ID"
 mint consumer "$CONSUMER_ID"
 mint bootstrap "$BOOTSTRAP_ID"
+mint gateway "$GATEWAY_ID"
+mint tenantoms "$TENANT_OMS_ID"
+mint systemoms "$SYSTEM_OMS_ID"
 # spiffe-helper writes the broker's SVID under these exact names (see the
 # nats-spiffe-helper ConfigMap); nats.conf reads them by path.
 cp server.pem svid.pem && cp server.key svid_key.pem
