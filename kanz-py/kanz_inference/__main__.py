@@ -28,13 +28,15 @@ that answers anyway.
 from __future__ import annotations
 
 import asyncio
+import datetime
+import json
 import logging
 import os
 import signal
 import sys
 
-from kanz_bus.consumer import Consumer
 from kanz_bus import mtls
+from kanz_bus.consumer import Consumer
 from kanz_bus.nats import NATSClient
 from kanz_bus.producer import Producer, ProducerConfig
 
@@ -52,6 +54,44 @@ DEFAULT_GROUP = "inference"
 
 def _env(key: str, default: str = "") -> str:
     return os.environ.get(key, default).strip()
+
+
+class _JSONFormatter(logging.Formatter):
+    """One JSON object per line, keyed like the Go services' slog output.
+
+    PARITY IS THE POINT, not tidiness. Every Go service emits slog JSON, so the
+    estate's log pipeline queries on `level`, `msg` and `time`. This service
+    emitted `%(asctime)s %(levelname)s %(name)s %(message)s`, which parses as
+    nothing — its lines survived to the log store as opaque strings, so a
+    filter for level=ERROR across the estate silently excluded the inference
+    service entirely. An absent service looks the same as a healthy one.
+
+    Exception info is folded into `err` rather than trailing a multi-line
+    traceback after the JSON object: a stack trace on its own lines breaks the
+    one-object-per-line contract the collector relies on.
+    """
+
+    def format(self, record: logging.LogRecord) -> str:
+        payload = {
+            "time": datetime.datetime.fromtimestamp(
+                record.created, datetime.timezone.utc
+            ).isoformat(timespec="milliseconds"),
+            "level": record.levelname,
+            "logger": record.name,
+            "msg": record.getMessage(),
+        }
+        if record.exc_info:
+            payload["err"] = self.formatException(record.exc_info)
+        return json.dumps(payload, default=str)
+
+
+def _configure_logging(level: str) -> None:
+    handler = logging.StreamHandler(sys.stdout)
+    handler.setFormatter(_JSONFormatter())
+    # force=True: uvicorn/grpc may have installed handlers of their own before we
+    # get here, and a second handler means every line is emitted twice — once
+    # structured, once not.
+    logging.basicConfig(level=level, handlers=[handler], force=True)
 
 
 # How often to check whether spiffe-helper has rewritten the SVID. Minutes, not
@@ -90,10 +130,7 @@ async def _watch_svid(ctx, cert_dir: str, stopping: asyncio.Event) -> None:
 
 
 async def _run() -> int:
-    logging.basicConfig(
-        level=_env("KANZ_INFERENCE_LOG_LEVEL", "INFO").upper(),
-        format="%(asctime)s %(levelname)s %(name)s %(message)s",
-    )
+    _configure_logging(_env("KANZ_INFERENCE_LOG_LEVEL", "INFO").upper())
 
     models_path = _env("KANZ_INFERENCE_MODELS")
     if not models_path:
@@ -130,7 +167,16 @@ async def _run() -> int:
 
     bind = _env("KANZ_INFERENCE_BIND", DEFAULT_BIND)
     max_in_flight = int(_env("KANZ_INFERENCE_MAX_IN_FLIGHT", "64"))
-    server = await serve(router, bind, max_in_flight=max_in_flight)
+    # SEC-M3 (#241): the prediction surface is mutual TLS, or it does not start.
+    # The pod mounts an SVID at /etc/inference-certs; the plaintext path exists
+    # for local development and must be asked for by name.
+    server = await serve(
+        router,
+        bind,
+        max_in_flight=max_in_flight,
+        cert_dir=_env("KANZ_INFERENCE_GRPC_CERT_DIR"),
+        allow_insecure=_env("KANZ_INFERENCE_ALLOW_INSECURE_GRPC") == "true",
+    )
 
     # THE HTTP SURFACE COMES UP AFTER THE gRPC PORT IS BOUND, and that ordering is
     # the whole readiness contract. Binding 50051 already means "a PRIMARY model
