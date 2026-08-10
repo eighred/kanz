@@ -1,0 +1,5 @@
+# The build output the BFF serves (WEB_BFF_STATIC_DIR). Produced by
+# `npm run build`, never committed — a committed dist is a second source of
+# truth for what the app is, and it goes stale silently.
+dist/
+node_modules/

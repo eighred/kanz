@@ -41,7 +41,10 @@ type Options struct {
 	// service's rate limiter. REQUIRED: without it every browser login arrives
 	// from this process and the limiter keys them all together, so one user's
 	// failures throttle everybody and an attacker hides in the same bucket.
-	ClientIP      *clientip.Resolver
+	ClientIP *clientip.Resolver
+	// StaticDir is the compiled SPA served on THIS origin. Empty ⇒ API only,
+	// which is the local shape where Vite serves the SPA on its own port.
+	StaticDir     string
 	OIDC          *oidc.Client
 	Sessions      *session.Manager
 	GatewayURL    string
@@ -55,6 +58,7 @@ type Server struct {
 	readiness     *Readiness
 	identity      *identityclient.Client
 	clientIP      *clientip.Resolver
+	static        *staticHandler
 	oidc          *oidc.Client
 	sessions      *session.Manager
 	proxy         *httputil.ReverseProxy
@@ -83,6 +87,10 @@ func New(readiness *Readiness, opts Options) (*Server, error) {
 		return nil, errors.New("web-bff: client-IP resolver required — without it every login is " +
 			"attributed to this process and the identity service's rate limit becomes global")
 	}
+	static, err := newStaticHandler(opts.StaticDir)
+	if err != nil {
+		return nil, err
+	}
 	logger := opts.Logger
 	if logger == nil {
 		logger = slog.Default()
@@ -91,6 +99,7 @@ func New(readiness *Readiness, opts Options) (*Server, error) {
 		readiness:     readiness,
 		identity:      opts.Identity,
 		clientIP:      opts.ClientIP,
+		static:        static,
 		oidc:          opts.OIDC,
 		sessions:      opts.Sessions,
 		proxy:         newProxy(gw),
@@ -134,6 +143,12 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /auth/me", s.handleMe)
 	// Everything under /api/ is proxied to the gateway as the session's caller.
 	s.mux.HandleFunc("/api/", s.handleProxy)
+	// The SPA last, on "/" — every route above is registered on a more specific
+	// pattern, so ServeMux prefers them. Registered only when a build is
+	// configured, so an API-only deployment 404s rather than serving nothing.
+	if s.static != nil {
+		s.mux.Handle("/", s.static)
+	}
 }
 
 // handleLogin starts the auth-code + PKCE flow: mint state + verifier, stash the
