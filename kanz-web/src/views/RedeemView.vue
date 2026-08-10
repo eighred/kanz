@@ -45,6 +45,14 @@ onMounted(() => {
 })
 
 async function submit() {
+  // GUARDED HERE, NOT ONLY BY THE DISABLED BUTTON. A disabled control is a
+  // rendering decision; this is the check that decides whether a SINGLE-USE
+  // invitation gets spent. Anything that reaches this handler another way — a
+  // submit event, an autofill, a future keyboard shortcut — must hit the same
+  // rule, because the cost of getting it wrong is an account created with a
+  // password its owner does not know and an invitation that cannot be reused.
+  if (!ready.value || busy.value) return
+
   error.value = ''
   busy.value = true
   try {
