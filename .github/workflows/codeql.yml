@@ -22,6 +22,43 @@ on:
 jobs:
   analyze:
     name: Analyze (${{ matrix.language }})
+    # CODE SCANNING REQUIRES ADVANCED SECURITY, WHICH IS FREE ONLY WHILE PUBLIC.
+    #
+    # This repository flips between public and private deliberately, to control
+    # CI cost. GitHub gates code scanning on Advanced Security, and on a PRIVATE
+    # repository that is a paid, per-committer licence — so all four language
+    # jobs fail the moment the repo goes private, with:
+    #
+    #   Advanced Security must be enabled for this repository to use code scanning
+    #
+    # That is a LICENCE STATE, not a finding. Four red checks on every PR for a
+    # reason unrelated to the change is how people learn to merge past red — and
+    # the day one of these is a REAL alert it looks exactly the same.
+    #
+    # So it skips instead. A skipped check reports as `skipping`, NOT as a pass:
+    # 'not scanned' and 'scanned, clean' stay distinguishable in `gh pr checks`,
+    # which is the property that matters. Scanning resumes on its own the next
+    # time the repo is public — there is nothing to remember to switch back.
+    #
+    # PAYING FOR IT MUST BE ENOUGH — you should not have to remember to edit this
+    # file too. GitHub exposes no context for 'is Advanced Security enabled', so
+    # the switch is a repository VARIABLE you set in the same sitting as the
+    # licence:
+    #
+    #   Settings -> Security -> enable GitHub Advanced Security
+    #   Settings -> Secrets and variables -> Actions -> Variables
+    #     ADVANCED_SECURITY_ENABLED = true
+    #
+    # With that set, these jobs run on a PRIVATE repository too, and this file
+    # needs no edit. Without it — and while public — scanning runs anyway, so
+    # forgetting the variable can only ever cost scanning you are not paying for.
+    #
+    # The failure mode of a WRONG variable is the honest one: set it true without
+    # the licence and the jobs go red again with the same message, which is the
+    # state before this change and not a worse one.
+    if: >-
+      github.event.repository.visibility == 'public' ||
+      vars.ADVANCED_SECURITY_ENABLED == 'true'
     # Runner size impacts CodeQL analysis time. To learn more, please see:
     #   - https://gh.io/recommended-hardware-resources-for-running-codeql
     #   - https://gh.io/supported-runners-and-hardware-resources
