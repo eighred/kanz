@@ -100,9 +100,19 @@ func TestTheseTestsCannotReachTheSharedMigrationLedger(t *testing.T) {
 		}
 	})
 
+	// ON CONFLICT WITH NO TARGET, because this ledger may have either key shape
+	// (#59). A ledger this test created above is keyed on (version); one a real
+	// kanz-migrate run left behind — which is what CI has, since the OMS
+	// migration step runs before these tests — is keyed on (set_name, version).
+	// Naming `(version)` fails against the second with SQLSTATE 42P10, and the
+	// sentinel this test is built around never gets planted.
+	//
+	// The bare form means "if any unique constraint would be violated, do
+	// nothing", which is exactly the intent: do not fail if the row is somehow
+	// already here.
 	if _, err := shared.Exec(ctx,
 		`INSERT INTO public.schema_migrations (version, name, checksum) VALUES ($1, $2, $3)
-		 ON CONFLICT (version) DO NOTHING`,
+		 ON CONFLICT DO NOTHING`,
 		sentinelVersion, "sentinel_212.sql", "sentinel"); err != nil {
 		t.Fatalf("plant sentinel: %v", err)
 	}
