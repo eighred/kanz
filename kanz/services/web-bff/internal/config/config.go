@@ -41,6 +41,24 @@ type Config struct {
 	// WEB_BFF_INSECURE_COOKIES=1 for local http development only.
 	SecureCookies bool
 
+	// IdentityURL is the platform identity provider (#364) the credential login
+	// exchanges against. REQUIRED — it is how anyone signs in.
+	IdentityURL string
+
+	// TrustedProxyHeader names the forwarded-for header the edge sets, e.g.
+	// "CF-Connecting-IP" under the Cloudflare Tunnel model. Empty ⇒ the peer
+	// address is used and no header is honoured.
+	TrustedProxyHeader string
+	// TrustedProxies are the peers permitted to set that header.
+	//
+	// BOTH ARE REQUIRED TOGETHER OR THE HEADER IS IGNORED, and that is the safe
+	// direction: the login limiter keys on the resolved address, so honouring a
+	// header from an untrusted peer turns the limiter into nothing — an attacker
+	// varies the value per request and guesses credentials unbounded, while the
+	// traffic looks like many well-behaved clients. Ignoring it merely makes the
+	// limiter too strict.
+	TrustedProxies []string
+
 	// OTLPEndpoint is the OTel collector for span export (OBS-01). Empty ⇒ none.
 	OTLPEndpoint string
 }
@@ -59,15 +77,38 @@ func Load() (Config, error) {
 		SessionTTL:    parseDuration(os.Getenv("WEB_BFF_SESSION_TTL"), time.Hour),
 		SecureCookies: os.Getenv("WEB_BFF_INSECURE_COOKIES") == "",
 		OTLPEndpoint:  os.Getenv("WEB_BFF_OTLP_ENDPOINT"),
+
+		IdentityURL:        strings.TrimRight(os.Getenv("WEB_BFF_IDENTITY_URL"), "/"),
+		TrustedProxyHeader: os.Getenv("WEB_BFF_TRUSTED_PROXY_HEADER"),
+		TrustedProxies:     splitList(os.Getenv("WEB_BFF_TRUSTED_PROXIES")),
 	}
-	if cfg.Issuer == "" {
-		return Config{}, errors.New("WEB_BFF_SSO_ISSUER is required (the Eighred SSO issuer URL)")
-	}
-	if cfg.RedirectURL == "" {
-		return Config{}, errors.New("WEB_BFF_REDIRECT_URL is required (this BFF's /auth/callback URL)")
+	if cfg.IdentityURL == "" {
+		return Config{}, errors.New("WEB_BFF_IDENTITY_URL is required (the identity service base URL) — " +
+			"it is how anyone signs in")
 	}
 	if cfg.GatewayURL == "" {
 		return Config{}, errors.New("WEB_BFF_GATEWAY_URL is required (the api-gateway base URL)")
+	}
+	// SSO IS NOW OPTIONAL, AND THAT IS THE POINT OF THIS CHANGE. WEB_BFF_SSO_ISSUER
+	// used to be required, so this service could not START without an Eighred SSO
+	// that does not exist — the browser path was as dead as the TUI's /login.
+	// Credential login against the identity service replaces it.
+	//
+	// The OIDC arm is kept rather than deleted, for the same reason pkg/auth keeps
+	// its authenticator seam: a fund manager who requires their own Okta or Entra
+	// tenant is then configuration, not a re-architecture. Configured HALF-way is
+	// the one thing refused — an issuer with no redirect URL would advertise a
+	// login route that cannot complete.
+	if (cfg.Issuer == "") != (cfg.RedirectURL == "") {
+		return Config{}, errors.New("WEB_BFF_SSO_ISSUER and WEB_BFF_REDIRECT_URL must be set together " +
+			"or not at all — an issuer with no redirect URL offers a login that cannot complete")
+	}
+	// Naming a header with nobody trusted to send it, or the reverse, silently
+	// disables it. Refuse rather than run in a state the operator believes is
+	// configured — see clientip's package comment for what that costs.
+	if (cfg.TrustedProxyHeader == "") != (len(cfg.TrustedProxies) == 0) {
+		return Config{}, errors.New("WEB_BFF_TRUSTED_PROXY_HEADER and WEB_BFF_TRUSTED_PROXIES must be " +
+			"set together or not at all — one without the other reads as configured and honours nothing")
 	}
 	return cfg, nil
 }
@@ -101,4 +142,15 @@ func parseLevel(s string) slog.Level {
 	default:
 		return slog.LevelInfo
 	}
+}
+
+// splitList parses a comma-separated environment value, dropping blanks.
+func splitList(v string) []string {
+	var out []string
+	for _, p := range strings.Split(v, ",") {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
 }
