@@ -24,6 +24,7 @@ import (
 	"golang.org/x/crypto/argon2"
 
 	"github.com/eighred/kanz/internal/identity"
+	"github.com/eighred/kanz/pkg/auth"
 )
 
 // --- doubles ----------------------------------------------------------------
@@ -87,7 +88,7 @@ func testServer(t *testing.T, st *fakeStore, lim Limiter) (*Server, *fakeMinter)
 	if lim == nil {
 		lim = &allowN{n: 100}
 	}
-	s, err := New(st, m, lim, func() any { return map[string]any{"keys": []any{}} }, quiet())
+	s, err := New(st, m, lim, func() any { return map[string]any{"keys": []any{}} }, "https://identity.test", quiet())
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -216,14 +217,14 @@ func TestLoginIsRateLimited(t *testing.T) {
 // A NIL LIMITER IS REFUSED AT CONSTRUCTION rather than defaulted to permissive.
 func TestAServerCannotBeBuiltWithoutALimiter(t *testing.T) {
 	st := &fakeStore{}
-	if _, err := New(st, &fakeMinter{}, nil, func() any { return nil }, quiet()); err == nil {
+	if _, err := New(st, &fakeMinter{}, nil, func() any { return nil }, "https://identity.test", quiet()); err == nil {
 		t.Fatal("New accepted a nil limiter — an unbounded credential-guessing endpoint is " +
 			"indistinguishable from a working one until someone uses it")
 	}
-	if _, err := New(nil, &fakeMinter{}, &allowN{n: 1}, func() any { return nil }, quiet()); err == nil {
+	if _, err := New(nil, &fakeMinter{}, &allowN{n: 1}, func() any { return nil }, "https://identity.test", quiet()); err == nil {
 		t.Error("New accepted a nil store")
 	}
-	if _, err := New(st, nil, &allowN{n: 1}, func() any { return nil }, quiet()); err == nil {
+	if _, err := New(st, nil, &allowN{n: 1}, func() any { return nil }, "https://identity.test", quiet()); err == nil {
 		t.Error("New accepted a nil minter")
 	}
 }
@@ -387,5 +388,180 @@ func TestTheJWKSIsServed(t *testing.T) {
 	}
 	if ct := rr.Header().Get("Content-Type"); !strings.Contains(ct, "application/json") {
 		t.Errorf("content-type = %q", ct)
+	}
+}
+
+// postFrom is post() with the web-bff's forwarded client address set. Note that
+// httptest gives every request the SAME RemoteAddr, which is what makes these
+// tests able to tell "the header is honoured" from "the peer happens to differ".
+func postFrom(t *testing.T, s *Server, path string, body any, clientIP string) *httptest.ResponseRecorder {
+	t.Helper()
+	raw, err := json.Marshal(body)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	mux := http.NewServeMux()
+	s.Routes(mux)
+	req := httptest.NewRequest(http.MethodPost, path, bytes.NewReader(raw))
+	if clientIP != "" {
+		req.Header.Set(ClientIPHeader, clientIP)
+	}
+	rr := httptest.NewRecorder()
+	mux.ServeHTTP(rr, req)
+	return rr
+}
+
+// THE FORWARDED ADDRESS IS WHAT THE PER-SOURCE BOUND KEYS ON (#364).
+//
+// Every login arrives through the web-bff, so the peer address is the BFF for
+// everyone. If the forwarded header is ignored, the per-source bucket is ONE
+// bucket for the whole estate: one attacker's guessing throttles every operator,
+// and the attacker's own traffic hides inside the same bucket as legitimate use.
+//
+// Both requests below carry the same RemoteAddr and differ only in the header,
+// so the second assertion fails if the header is not read.
+func TestThePerSourceBoundKeysOnTheForwardedAddress(t *testing.T) {
+	st := &fakeStore{}
+	s, _ := testServer(t, st, &allowN{n: 1})
+
+	if rr := postFrom(t, s, "/login", loginRequest{Subject: "alice", Credential: "x"}, "10.0.0.1"); rr.Code == http.StatusTooManyRequests {
+		t.Fatalf("the first attempt was throttled: %d", rr.Code)
+	}
+	if rr := postFrom(t, s, "/login", loginRequest{Subject: "bob", Credential: "x"}, "10.0.0.2"); rr.Code == http.StatusTooManyRequests {
+		t.Fatal("a DIFFERENT caller was throttled by the first caller's attempt.\n\n" +
+			"Both requests share a RemoteAddr and differ only in " + ClientIPHeader +
+			", so this means the forwarded address is being ignored and every login in " +
+			"the estate shares one bucket.")
+	}
+	if rr := postFrom(t, s, "/login", loginRequest{Subject: "carol", Credential: "x"}, "10.0.0.1"); rr.Code != http.StatusTooManyRequests {
+		t.Fatalf("a second attempt from 10.0.0.1 = %d, want 429.\n\n"+
+			"Without a per-source bound one address sprays a single guess across thousands "+
+			"of accounts — which is how leaked password lists are actually used — and never "+
+			"exhausts a per-account bucket.", rr.Code)
+	}
+}
+
+// AND THE SUBJECT BOUND STILL HOLDS INDEPENDENTLY, so an attacker rotating
+// source addresses cannot grind one account.
+func TestOneAccountIsBoundedAcrossManySources(t *testing.T) {
+	st := &fakeStore{}
+	s, _ := testServer(t, st, &allowN{n: 1})
+
+	if rr := postFrom(t, s, "/login", loginRequest{Subject: "alice", Credential: "x"}, "10.0.0.1"); rr.Code == http.StatusTooManyRequests {
+		t.Fatalf("the first attempt was throttled: %d", rr.Code)
+	}
+	if rr := postFrom(t, s, "/login", loginRequest{Subject: "alice", Credential: "x"}, "10.0.0.99"); rr.Code != http.StatusTooManyRequests {
+		t.Fatalf("a second guess at alice from a fresh address = %d, want 429.\n\n"+
+			"A bound that only counts sources is no bound at all against anyone holding "+
+			"more than one address.", rr.Code)
+	}
+}
+
+// REDEMPTION IS BOUNDED PER SOURCE TOO. It has no subject to key on — the
+// invite token IS the secret being guessed — so the forwarded address is the
+// only axis available, and keying it on the BFF would make it estate-wide.
+func TestRedemptionIsBoundedPerSource(t *testing.T) {
+	st := &fakeStore{redeemErr: identity.ErrInviteNotFound}
+	s, _ := testServer(t, st, &allowN{n: 1})
+
+	if rr := postFrom(t, s, "/invites/redeem", redeemRequest{Token: "a", Credential: "pw"}, "10.0.0.1"); rr.Code == http.StatusTooManyRequests {
+		t.Fatalf("the first redemption was throttled: %d", rr.Code)
+	}
+	if rr := postFrom(t, s, "/invites/redeem", redeemRequest{Token: "b", Credential: "pw"}, "10.0.0.2"); rr.Code == http.StatusTooManyRequests {
+		t.Fatal("a different invitee was throttled by someone else's redemption — " +
+			"the forwarded address is being ignored")
+	}
+	if rr := postFrom(t, s, "/invites/redeem", redeemRequest{Token: "c", Credential: "pw"}, "10.0.0.1"); rr.Code != http.StatusTooManyRequests {
+		t.Fatalf("a second redemption from 10.0.0.1 = %d, want 429 — invite tokens would "+
+			"otherwise be guessable at line rate", rr.Code)
+	}
+}
+
+func TestAServerCannotBeBuiltWithoutAnIssuer(t *testing.T) {
+	if _, err := New(&fakeStore{}, &fakeMinter{}, &allowN{n: 1}, func() any { return nil }, "", quiet()); err == nil {
+		t.Fatal("New accepted an empty issuer — the discovery document would advertise one that " +
+			"matches nothing, and every OIDC verifier refuses a document whose issuer disagrees " +
+			"with the URL it was discovered from")
+	}
+}
+
+// THE GATEWAY CAN VERIFY WHAT THIS SERVICE ISSUES, DISCOVERED FROM THE ISSUER
+// ALONE (#364).
+//
+// This is the contract that makes login mean anything: a token is only useful if
+// the api-gateway accepts it. Every previous test here used a fake minter, so
+// none of them could have caught a real mismatch in algorithm, key id, curve,
+// claim names, issuer, audience — or a discovery document the verifier cannot
+// follow.
+//
+// It deliberately configures the verifier with NOTHING BUT THE ISSUER, which is
+// the ordinary way an IdP is wired. Without the discovery endpoint this fails at
+// the first fetch, which is exactly the trap an operator would otherwise hit.
+func TestTheGatewayVerifiesATokenThisServiceIssues(t *testing.T) {
+	key, err := identity.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// The issuer must equal the URL the document is served from, so the server is
+	// built after the listener exists and the mux is filled in place.
+	mux := http.NewServeMux()
+	ts := httptest.NewServer(mux)
+	t.Cleanup(ts.Close)
+
+	signer, err := identity.NewSigner(key, ts.URL, "kanz-api", time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	redeemed := userWith(t, "user:alice", "pw", identity.StatusActive)
+	st := &fakeStore{redeemed: redeemed}
+	s, err := New(st, signer, &allowN{n: 10}, func() any { return signer.JWKS() }, ts.URL, quiet())
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.Routes(mux)
+
+	// Obtain a token the way a browser does.
+	body, _ := json.Marshal(redeemRequest{Token: "an-invite", Credential: "pw"})
+	resp, err := ts.Client().Post(ts.URL+"/invites/redeem", "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("redeem = %d, want 200", resp.StatusCode)
+	}
+	var issued tokenResponse
+	if err := json.NewDecoder(resp.Body).Decode(&issued); err != nil {
+		t.Fatal(err)
+	}
+
+	// The gateway's verifier, given only the issuer.
+	authn, err := auth.NewOIDCAuthenticator(auth.OIDCConfig{
+		Issuer:     ts.URL,
+		Audience:   "kanz-api",
+		HTTPClient: ts.Client(),
+	})
+	if err != nil {
+		t.Fatalf("NewOIDCAuthenticator: %v", err)
+	}
+	p, err := authn.Authenticate(context.Background(), issued.Token)
+	if err != nil {
+		t.Fatalf("the gateway REFUSED a token this service just issued: %v\n\n"+
+			"Login would succeed and every API call would 401 — the least debuggable "+
+			"failure this pair can have.", err)
+	}
+
+	if p.Subject != "user:alice" || p.Tenant != "acme" {
+		t.Errorf("principal = %s/%s, want user:alice/acme", p.Subject, p.Tenant)
+	}
+	if !p.HasRole("kanz-trader") {
+		t.Errorf("roles = %v, want to carry kanz-trader", p.Roles)
+	}
+	// The portfolio scope is what the OMS authorizes cancels and amends against;
+	// dropping it silently is #225's defect.
+	if len(p.Portfolios) != 1 || p.Portfolios[0] != "pf-1" {
+		t.Errorf("portfolios = %v, want [pf-1] — without this the OMS refuses every "+
+			"cancel and amend this caller issues", p.Portfolios)
 	}
 }

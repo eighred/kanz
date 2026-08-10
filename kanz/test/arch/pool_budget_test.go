@@ -371,6 +371,14 @@ var undeclaredServerPools = map[string]string{
 		"engine's price pool below lands on the same server. Whatever serves price_observations in " +
 		"production is sized by nobody. DSN binding is #59.",
 
+	"identity/cfg.DatabaseURL": "identity is not deployed yet (see notDeployed in " +
+		"deployability_test.go), so no CNPG cluster holds the credential store and no manifest here " +
+		"declares its server. Its demand is currently ZERO because nothing runs it — which is exactly " +
+		"why this entry exists rather than an absence: the moment a manifest gives it replicas, the " +
+		"demand becomes real and lands on a server nobody has chosen. THE CREDENTIAL STORE IS NOT A " +
+		"CANDIDATE FOR drExcluded — losing it loses every account in the estate, so it needs a cluster " +
+		"and a restore timeline, not an exemption. Closed together with the deployment, by #371.",
+
 	"risk-engine/cfg.MarketDataURL": "risk-engine's SECOND pool, and it CROSSES A CLUSTER BOUNDARY: it " +
 		"reads market-data's price_observations, not risk state, so it does NOT land on kanz-risk. " +
 		"Charging it to kanz-risk would over-size that cluster and hide this gap at the same time. It " +

@@ -83,9 +83,26 @@ func TestEveryServiceIsDeployableOrExempt(t *testing.T) {
 // each with the reason. A service is here because somebody DECIDED it, not because
 // somebody forgot it.
 var notDeployed = map[string]string{
-	"web-bff": "PARKED. The client surface is the CLI (CLI-01/02, delivered); the web workspace " +
-		"vertical (PS-02b) sits behind the active execution direction. The BFF is built and tested but " +
-		"deliberately not deployed — deploying an unused public edge is attack surface for nothing.",
+	// THE OLD REASON HERE WAS "PARKED — the client surface is the CLI". That
+	// premise stopped being true on 2026-08-10: the web surface is now the
+	// PRIMARY operator surface (#371) and the CLI is no longer the direction. It
+	// is recorded because a stale justification is worse than none — it is why
+	// nobody re-examined the entry.
+	"web-bff": "NOT YET, AND THE REASON IS NOW SEQUENCING RATHER THAN INTENT. This is the primary " +
+		"operator surface (#371) and it serves the compiled SPA on its own origin. What it still " +
+		"lacks is a Dockerfile, a build-matrix entry and a manifest, plus the cloudflared sidecar " +
+		"that is the ONLY way it is meant to be reachable (infra/edge). Deploying it with an " +
+		"ordinary Ingress would open the public port the zero-ingress design exists to avoid, so " +
+		"the manifest and the tunnel land together or not at all. Retired by #371.",
+
+	"identity": "NOT YET, AND FOR ONE CONCRETE REASON: THE SIGNING KEY. The service is delivered and " +
+		"proven end-to-end against a real Postgres (#364) — invite, redeem, login, JWKS, and a token " +
+		"the gateway verifies from the issuer alone. A manifest, though, has to mount a DURABLE key: " +
+		"with IDENTITY_ALLOW_EPHEMERAL_KEY the process generates one per start, so every rollout " +
+		"would silently invalidate every session while the gateway's cached JWKS still advertised " +
+		"the old key — 401s that look like a network fault. There is no secret store in this estate " +
+		"yet, so the key's home is an open question and shipping a manifest that answers it wrongly " +
+		"is worse than shipping none. Retired by #371.",
 
 	"optimization": "NOT YET, AND DELIBERATELY. It materializes an approved rebalance proposal into OMS " +
 		"order COMMANDS — it is a capital path, not an analytic. It does not run until the execution loop " +
