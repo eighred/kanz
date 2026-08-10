@@ -22,6 +22,27 @@ on:
 jobs:
   analyze:
     name: Analyze (${{ matrix.language }})
+    # CODE SCANNING REQUIRES ADVANCED SECURITY, WHICH IS FREE ONLY WHILE PUBLIC.
+    #
+    # This repository flips between public and private deliberately, to control
+    # CI cost. GitHub gates code scanning on Advanced Security, and on a PRIVATE
+    # repository that is a paid, per-committer licence — so all four language
+    # jobs fail the moment the repo goes private, with:
+    #
+    #   Advanced Security must be enabled for this repository to use code scanning
+    #
+    # That is a LICENCE STATE, not a finding. Four red checks on every PR for a
+    # reason unrelated to the change is how people learn to merge past red — and
+    # the day one of these is a REAL alert it looks exactly the same.
+    #
+    # So it skips instead. A skipped check reports as `skipping`, NOT as a pass:
+    # 'not scanned' and 'scanned, clean' stay distinguishable in `gh pr checks`,
+    # which is the property that matters. Scanning resumes on its own the next
+    # time the repo is public — there is nothing to remember to switch back.
+    #
+    # To scan WHILE private, enable Advanced Security on the repository and
+    # delete this condition; nothing else here changes.
+    if: github.event.repository.visibility == 'public'
     # Runner size impacts CodeQL analysis time. To learn more, please see:
     #   - https://gh.io/recommended-hardware-resources-for-running-codeql
     #   - https://gh.io/supported-runners-and-hardware-resources
