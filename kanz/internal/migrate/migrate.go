@@ -34,6 +34,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sort"
@@ -125,10 +126,37 @@ func parseVersion(base string) (int64, error) {
 // Runner applies migrations to one database.
 type Runner struct {
 	pool *pgxpool.Pool
+	// set namespaces this runner's migrations within schema_migrations. Empty is
+	// the UNNAMED set and is what every caller got before sets existed.
+	set string
+	// AdoptUnnamed relabels pre-existing unnamed rows into this runner's set,
+	// once. See Up for why it is not automatic.
+	AdoptUnnamed bool
 }
 
-// New returns a Runner over an existing pool. The caller owns the pool.
+// New returns a Runner over an existing pool, migrating the UNNAMED set. The
+// caller owns the pool.
+//
+// This is the pre-set behaviour exactly: one migration set per database, keyed
+// on version alone. It stays the default because every database that exists
+// today was written by it.
 func New(pool *pgxpool.Pool) *Runner { return &Runner{pool: pool} }
+
+// NewForSet returns a Runner that namespaces its migrations under set.
+//
+// WHY SETS EXIST (#59). schema_migrations was keyed on `version` ALONE, and all
+// fourteen migration directories in this repository start at 0001 — so any two
+// services sharing a database made the second exit with ErrVersionCollision at
+// its initContainer. The deployment failed; it did not degrade. That is what
+// forced one-database-per-service, and one database per service is what made
+// twelve separate production DSNs necessary in the first place.
+//
+// A set name is normally the service's own ("oms", "accounting"). Two services
+// in one database now collide only if they also share a set name, which is a
+// configuration mistake rather than an inevitability.
+func NewForSet(pool *pgxpool.Pool, set string) *Runner {
+	return &Runner{pool: pool, set: set}
+}
 
 // Up applies every migration not yet recorded, in version order, and returns
 // those it applied. It is safe to run concurrently from any number of processes:
@@ -179,7 +207,43 @@ func (r *Runner) Up(ctx context.Context, migs []Migration) ([]Migration, error) 
 	if err := ensureVersionTable(ctx, conn.Conn()); err != nil {
 		return nil, err
 	}
-	applied, err := appliedChecksums(ctx, conn.Conn())
+	// ADOPTION IS EXPLICIT, NEVER INFERRED. A ledger written before sets holds its
+	// rows under the unnamed set. Asking for a NAMED set against those rows would
+	// find nothing applied and re-run every migration — against a database that
+	// already has the tables, so most would fail, and any that succeeded would do
+	// so on production state. Refusing is the only safe default; adopting is a
+	// one-time, stated act.
+	if r.set != "" && !r.AdoptUnnamed {
+		var unnamed int
+		if err := conn.QueryRow(ctx,
+			`SELECT count(*) FROM schema_migrations WHERE set_name = ''`).Scan(&unnamed); err != nil {
+			return nil, fmt.Errorf("count unnamed migrations: %w", err)
+		}
+		if unnamed > 0 {
+			return nil, fmt.Errorf("schema_migrations holds %d row(s) in the UNNAMED set and this run "+
+				"asked for set %q: those rows were applied before migration sets existed, and treating "+
+				"them as un-applied would re-run every migration against a database that already has "+
+				"the tables. Re-run with -adopt-existing to relabel them into %q (do this once, for the "+
+				"service that owns this database), or drop -set to keep using the unnamed set",
+				unnamed, r.set, r.set)
+		}
+	}
+	if r.set != "" && r.AdoptUnnamed {
+		tag, err := conn.Exec(ctx,
+			`UPDATE schema_migrations SET set_name = $1 WHERE set_name = ''`, r.set)
+		if err != nil {
+			return nil, fmt.Errorf("adopt unnamed migrations into set %q: %w", r.set, err)
+		}
+		if n := tag.RowsAffected(); n > 0 {
+			// Said out loud on the one run that does it: this rewrites the ledger,
+			// and a silent rewrite of deployment history is not something to find
+			// out about later.
+			slog.Warn("adopted pre-existing migrations into a named set",
+				"set", r.set, "rows", n)
+		}
+	}
+
+	applied, err := appliedChecksums(ctx, conn.Conn(), r.set)
 	if err != nil {
 		return nil, err
 	}
@@ -213,7 +277,7 @@ func (r *Runner) Up(ctx context.Context, migs []Migration) ([]Migration, error) 
 			}
 			continue // already applied, unchanged
 		}
-		if err := applyOne(ctx, conn.Conn(), m); err != nil {
+		if err := applyOne(ctx, conn.Conn(), m, r.set); err != nil {
 			return done, err
 		}
 		done = append(done, m)
@@ -223,7 +287,7 @@ func (r *Runner) Up(ctx context.Context, migs []Migration) ([]Migration, error) 
 
 // applyOne runs one migration and records it in the SAME transaction: the schema
 // change and the evidence of it are one atomic fact.
-func applyOne(ctx context.Context, conn *pgx.Conn, m Migration) error {
+func applyOne(ctx context.Context, conn *pgx.Conn, m Migration, set string) error {
 	tx, err := conn.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("begin %s: %w", m.Name, err)
@@ -234,8 +298,8 @@ func applyOne(ctx context.Context, conn *pgx.Conn, m Migration) error {
 		return fmt.Errorf("apply %s: %w", m.Name, err)
 	}
 	if _, err := tx.Exec(ctx,
-		`INSERT INTO schema_migrations (version, name, checksum) VALUES ($1, $2, $3)`,
-		m.Version, m.Name, m.Checksum,
+		`INSERT INTO schema_migrations (set_name, version, name, checksum) VALUES ($1, $2, $3, $4)`,
+		set, m.Version, m.Name, m.Checksum,
 	); err != nil {
 		return fmt.Errorf("record %s: %w", m.Name, err)
 	}
@@ -248,16 +312,58 @@ func applyOne(ctx context.Context, conn *pgx.Conn, m Migration) error {
 func ensureVersionTable(ctx context.Context, conn *pgx.Conn) error {
 	// No RLS here: this is deployment metadata, not tenant data — the same
 	// rationale as the linkstore's universal-fact store.
-	_, err := conn.Exec(ctx, `
+	if _, err := conn.Exec(ctx, `
 		CREATE TABLE IF NOT EXISTS schema_migrations (
-			version    BIGINT      NOT NULL PRIMARY KEY,
+			set_name   TEXT        NOT NULL DEFAULT '',
+			version    BIGINT      NOT NULL,
 			name       TEXT        NOT NULL,
 			checksum   TEXT        NOT NULL,
-			applied_at TIMESTAMPTZ NOT NULL DEFAULT now()
+			applied_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+			PRIMARY KEY (set_name, version)
 		)
-	`)
-	if err != nil {
+	`); err != nil {
 		return fmt.Errorf("ensure schema_migrations: %w", err)
+	}
+
+	// UPGRADE AN EXISTING LEDGER IN PLACE. Every database written before sets has
+	// schema_migrations keyed on version alone, and CREATE TABLE IF NOT EXISTS
+	// leaves it untouched — so without this the new INSERT would fail on a missing
+	// column against precisely the databases that already hold production state.
+	//
+	// The existing rows become the UNNAMED set, which is what they have always
+	// been: the default keeps them exactly where a plain New() will look for them.
+	if _, err := conn.Exec(ctx, `
+		ALTER TABLE schema_migrations ADD COLUMN IF NOT EXISTS set_name TEXT NOT NULL DEFAULT ''
+	`); err != nil {
+		return fmt.Errorf("add set_name to schema_migrations: %w", err)
+	}
+	// Swap the primary key only when it is still the single-column one. Reading
+	// the catalogue rather than trying and ignoring the error: a DROP CONSTRAINT
+	// that silently no-ops would leave the ledger unable to hold two sets while
+	// reporting success, which is the failure this whole change is about.
+	if _, err := conn.Exec(ctx, `
+		DO $$
+		DECLARE
+			pk_name text;
+			pk_cols text[];
+		BEGIN
+			SELECT c.conname,
+			       array_agg(a.attname ORDER BY k.ord)
+			  INTO pk_name, pk_cols
+			  FROM pg_constraint c
+			  JOIN LATERAL unnest(c.conkey) WITH ORDINALITY AS k(attnum, ord) ON TRUE
+			  JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = k.attnum
+			 WHERE c.conrelid = 'schema_migrations'::regclass
+			   AND c.contype = 'p'
+			 GROUP BY c.conname;
+
+			IF pk_cols = ARRAY['version'] THEN
+				EXECUTE format('ALTER TABLE schema_migrations DROP CONSTRAINT %I', pk_name);
+				ALTER TABLE schema_migrations ADD PRIMARY KEY (set_name, version);
+			END IF;
+		END $$
+	`); err != nil {
+		return fmt.Errorf("re-key schema_migrations on (set_name, version): %w", err)
 	}
 	return nil
 }
@@ -274,8 +380,9 @@ type appliedRecord struct {
 	Checksum string
 }
 
-func appliedChecksums(ctx context.Context, conn *pgx.Conn) (map[int64]appliedRecord, error) {
-	rows, err := conn.Query(ctx, `SELECT version, name, checksum FROM schema_migrations`)
+func appliedChecksums(ctx context.Context, conn *pgx.Conn, set string) (map[int64]appliedRecord, error) {
+	rows, err := conn.Query(ctx,
+		`SELECT version, name, checksum FROM schema_migrations WHERE set_name = $1`, set)
 	if err != nil {
 		return nil, fmt.Errorf("read schema_migrations: %w", err)
 	}

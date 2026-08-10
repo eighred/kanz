@@ -55,6 +55,16 @@ func run(args []string) error {
 	fs := flag.NewFlagSet("kanz-migrate", flag.ContinueOnError)
 	dir := fs.String("dir", "/migrations", "directory of NNNN_name.sql migrations")
 	timeout := fs.Duration("timeout", 2*time.Minute, "overall deadline, including the wait for the advisory lock")
+	// THE SET IS WHAT LETS TWO SERVICES SHARE ONE DATABASE (#59). Every migration
+	// directory here starts at 0001, so without a namespace the second service to
+	// migrate into a shared database exits with a version collision at its
+	// initContainer — which is what forced one database per service, and one
+	// database per service is what made twelve production DSNs necessary.
+	//
+	// Empty is the unnamed set: unchanged behaviour, and what every existing
+	// database already holds.
+	set := fs.String("set", "", "migration-set name, so several services can share one database (default: the unnamed set)")
+	adopt := fs.Bool("adopt-existing", false, "relabel pre-existing unnamed migrations into -set; a one-time act for the service that owns this database")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -100,7 +110,14 @@ func run(args []string) error {
 	}
 	defer pool.Close()
 
-	applied, err := migrate.New(pool).Up(ctx, migs)
+	runner := migrate.New(pool)
+	if *set != "" {
+		runner = migrate.NewForSet(pool, *set)
+		runner.AdoptUnnamed = *adopt
+	} else if *adopt {
+		return errors.New("-adopt-existing needs -set: there is nothing to adopt rows INTO without a set name")
+	}
+	applied, err := runner.Up(ctx, migs)
 	if err != nil {
 		return err
 	}
