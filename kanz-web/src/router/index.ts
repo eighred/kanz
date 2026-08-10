@@ -1,6 +1,7 @@
 import { createRouter, createWebHistory } from 'vue-router'
 import { useSession } from '../stores/session'
 import LoginView from '../views/LoginView.vue'
+import EstateView from '../views/EstateView.vue'
 import RedeemView from '../views/RedeemView.vue'
 import VenuesView from '../views/VenuesView.vue'
 
@@ -13,6 +14,7 @@ export const router = createRouter({
     // else — requiring a session to accept one would be a loop with no entry.
     { path: '/redeem', name: 'redeem', component: RedeemView, meta: { public: true } },
     { path: '/venues', name: 'venues', component: VenuesView },
+    { path: '/estate', name: 'estate', component: EstateView },
   ],
 })
 

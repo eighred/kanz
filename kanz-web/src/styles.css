@@ -238,3 +238,20 @@ tbody tr:last-child td {
 .state-unset {
   color: var(--muted);
 }
+
+/* A state that is not the expected one gets colour; everything else does not.
+   state-bad is a node that must not be treated as healthy — including one whose
+   status is simply absent. */
+.state-bad {
+  color: var(--danger);
+}
+
+.state-warn {
+  color: var(--warn);
+}
+
+/* Two tables on one screen need air between them; a single rule beats a
+   per-view style block that the next screen would copy. */
+table + table {
+  margin-top: 28px;
+}
