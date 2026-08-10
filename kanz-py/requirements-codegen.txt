@@ -18,7 +18,7 @@
 #     --target /tmp/discard \
 #     --python-version 3.12 --implementation cp --abi cp312 \
 #     --platform manylinux2014_x86_64 --only-binary=:all: \
-#     "grpcio-tools==1.68.1"
+#     "grpcio-tools==1.83.0"
 #
 # Moving grpcio-tools is a deliberate act: change the specifier above, rerun,
 # and REGENERATE THE GO SDK TOO (`cd kanz-schemas && buf generate`) so the two
@@ -34,7 +34,7 @@
 
 grpcio==1.83.0 \
     --hash=sha256:aeb339838db07600481ef869507279b75326c75eac6d10f7afa62a0da1d2bcdd
-grpcio-tools==1.68.1 \
+grpcio-tools==1.83.0 \
     --hash=sha256:c81d0be6c46fcbcd2cd126804060a95531cdf6d779436b2fbc68c8b4a7db2dc1
 protobuf==5.29.6 \
     --hash=sha256:e3387f44798ac1106af0233c04fb8abf543772ff241169946f698b3a9a3d3ab9
