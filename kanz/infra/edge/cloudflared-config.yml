@@ -1,0 +1,43 @@
+# Cloudflare Tunnel — the estate's ONLY public surface (#371).
+#
+# ZERO INGRESS. Nothing here opens a port. cloudflared holds an OUTBOUND
+# connection to Cloudflare and receives requests over it, so the firewall needs
+# no inbound rule for 80 or 443 and the control plane stays dark. That is the
+# whole reason this file exists rather than an ingress + LoadBalancer.
+#
+# ONE ORIGIN, DELIBERATELY. The tunnel points at the web-bff and nothing else.
+# The BFF serves the compiled SPA *and* proxies /api/* to the api-gateway, so the
+# browser talks to a single hostname:
+#
+#   app.<domain>  ──tunnel──▶  web-bff :8084  ──▶  api-gateway  ──▶  services
+#
+# Splitting the SPA onto a static host would mean SameSite=None (which is what
+# makes a cookie usable cross-site, and therefore what CSRF defences exist to
+# stop) plus CORS-with-credentials plus a cookie domain kept in step with the
+# edge. Same origin removes the question instead of answering it.
+#
+# THE GATEWAY IS NOT EXPOSED. It has no ingress rule below, on purpose: a second
+# hostname reaching it directly would bypass the BFF, and with it the session —
+# so a stolen bearer would be usable from anywhere rather than only from a
+# browser holding the httpOnly cookie.
+#
+# SUBSTITUTE, DO NOT COMMIT SECRETS. ${TUNNEL_ID} and ${APP_HOSTNAME} come from
+# the environment; the credentials file is mounted, never checked in. Running
+# with a token instead (`cloudflared tunnel run --token $TUNNEL_TOKEN`) needs no
+# config file at all — that is the zero-friction path for a new node.
+
+tunnel: ${TUNNEL_ID}
+credentials-file: /etc/cloudflared/creds.json
+
+# Refuse a request the tunnel cannot route rather than defaulting it somewhere.
+originRequest:
+  connectTimeout: 10s
+  noTLSVerify: false
+
+ingress:
+  - hostname: ${APP_HOSTNAME}
+    service: http://web-bff:${BFF_INTERNAL_PORT}
+  # REQUIRED LAST RULE, and it must be a refusal. cloudflared demands a catch-all;
+  # making it a 404 means a hostname pointed here by mistake gets nothing, rather
+  # than silently reaching whichever service the rule named.
+  - service: http_status:404

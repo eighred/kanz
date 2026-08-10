@@ -120,6 +120,7 @@ func run() int {
 	srv, err := server.New(readiness, server.Options{
 		Identity:      identityClient,
 		ClientIP:      ipResolver,
+		StaticDir:     cfg.StaticDir,
 		OIDC:          oidcClient,
 		Sessions:      sessions,
 		GatewayURL:    cfg.GatewayURL,
