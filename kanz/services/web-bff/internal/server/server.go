@@ -247,13 +247,47 @@ func (s *Server) handleRedeem(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	tok, err := s.identity.Redeem(r.Context(), req.Token, req.Credential, s.clientIP.Resolve(r))
+
+	// THE ONE REFUSAL ON THIS SURFACE THAT SAYS WHY, and only here.
+	//
+	// A 400 from redemption is about the credential the invitee has just
+	// invented — under the minimum length — so it discloses nothing about the
+	// estate. Collapsed into the opaque 401 that every other refusal gets, it
+	// would reach them as "that invitation is not valid", and they would abandon
+	// a perfectly good single-use invitation and ask an operator for another.
+	//
+	// LOGIN DELIBERATELY DOES NOT DO THIS. There, every refusal is one answer,
+	// because the difference between "no such account" and "wrong password" is
+	// what turns a sign-in form into a list of the fund's staff — and identity's
+	// login path never checks credential POLICY, so a 400 there would only ever
+	// mean a malformed body, which is nothing a browser needs spelled out.
+	var invalid *identityclient.ErrInvalidInput
+	if errors.As(err, &invalid) {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": invalid.Message})
+		return
+	}
 	s.completeLogin(w, r, tok, err)
 }
 
 // completeLogin turns a minted token into a session + cookie, or an error into
 // the one answer the browser is allowed to see.
 func (s *Server) completeLogin(w http.ResponseWriter, r *http.Request, tok *identityclient.Token, err error) {
+	var invalid *identityclient.ErrInvalidInput
 	switch {
+	case errors.As(err, &invalid):
+		// COLLAPSED INTO THE ONE ANSWER, deliberately, and written out rather than
+		// falling through to a neighbouring case — this switch has no expression,
+		// so `fallthrough` would land in whichever body happens to come next.
+		//
+		// Redemption intercepts this before it reaches here and relays the reason,
+		// because there it concerns a credential the invitee just chose. On the
+		// LOGIN path it can only mean a malformed body — nothing a browser needs
+		// spelled out — and answering it differently from any other refusal would
+		// give a caller a second distinguishable response to probe with. It must
+		// not become a 502 either: the identity service answered, and reporting it
+		// as unavailable would send an operator to look at a healthy service.
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "those details are not valid"})
+		return
 	case errors.Is(err, identityclient.ErrThrottled):
 		// 429, NOT 401: the caller may hold a correct credential and must be told
 		// to wait rather than that it was wrong.

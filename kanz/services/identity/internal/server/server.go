@@ -201,8 +201,17 @@ func (s *Server) redeem(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusTooManyRequests, "too many attempts")
 		return
 	}
-	if req.Credential == "" {
-		writeErr(w, http.StatusBadRequest, "a credential is required")
+	// THE POLICY IS ENFORCED HERE, SERVER-SIDE, because the browser form that
+	// also checks it is a courtesy and not a control — anyone can POST straight
+	// at this route. Until this existed the ONLY rule was non-empty, so a
+	// one-character password was accepted for an account carrying kanz-trader.
+	//
+	// The reason IS returned, unlike every other refusal on this handler: it
+	// concerns the credential the caller has just invented, so it reveals nothing
+	// about the estate, and withholding it would leave someone retrying a rule
+	// they cannot see — with a single-use invitation.
+	if err := identity.ValidateCredential(req.Credential); err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
 

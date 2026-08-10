@@ -33,7 +33,10 @@ type fakeStore struct {
 	users     map[string]*identity.User
 	redeemErr error
 	redeemed  *identity.User
-	updated   map[string]identity.Hash
+	// redeemCalls counts store hits, so a test can prove the credential check
+	// runs BEFORE the single-use invitation is spent.
+	redeemCalls int
+	updated     map[string]identity.Hash
 }
 
 func (f *fakeStore) UserBySubject(_ context.Context, subject string) (*identity.User, error) {
@@ -53,6 +56,7 @@ func (f *fakeStore) UpdateCredential(_ context.Context, subject string, cred ide
 }
 
 func (f *fakeStore) Redeem(_ context.Context, _ string, _ identity.Hash, _ time.Time) (*identity.User, error) {
+	f.redeemCalls++
 	if f.redeemErr != nil {
 		return nil, f.redeemErr
 	}
@@ -316,6 +320,14 @@ func TestRedeemingAnInviteIssuesAToken(t *testing.T) {
 }
 
 // EVERY REFUSAL LOOKS THE SAME to someone holding only a link.
+// The credential is policy-conformant on purpose: ValidateCredential runs
+// BEFORE the invite is looked up, so a short one would answer 400 and never
+// reach the refusal being compared here.
+//
+// THAT ORDERING IS SAFE AND SHOULD NOT BE "FIXED". The 400 depends only on the
+// credential the caller invented, never on any invite state, so it cannot be
+// used to probe whether an invitation exists — and checking first means a
+// rejected password does not spend a single-use invitation.
 func TestEveryInviteRefusalAnswersIdentically(t *testing.T) {
 	var bodies []string
 	for _, err := range []error{
@@ -325,7 +337,7 @@ func TestEveryInviteRefusalAnswersIdentically(t *testing.T) {
 	} {
 		st := &fakeStore{redeemErr: err}
 		s, _ := testServer(t, st, nil)
-		rr := post(t, s, "/invites/redeem", redeemRequest{Token: "x", Credential: "pw"})
+		rr := post(t, s, "/invites/redeem", redeemRequest{Token: "x", Credential: "a-valid-passphrase"})
 		if rr.Code != http.StatusUnauthorized {
 			t.Fatalf("%v: status = %d, want 401", err, rr.Code)
 		}
@@ -464,14 +476,14 @@ func TestRedemptionIsBoundedPerSource(t *testing.T) {
 	st := &fakeStore{redeemErr: identity.ErrInviteNotFound}
 	s, _ := testServer(t, st, &allowN{n: 1})
 
-	if rr := postFrom(t, s, "/invites/redeem", redeemRequest{Token: "a", Credential: "pw"}, "10.0.0.1"); rr.Code == http.StatusTooManyRequests {
+	if rr := postFrom(t, s, "/invites/redeem", redeemRequest{Token: "a", Credential: "a-valid-passphrase"}, "10.0.0.1"); rr.Code == http.StatusTooManyRequests {
 		t.Fatalf("the first redemption was throttled: %d", rr.Code)
 	}
-	if rr := postFrom(t, s, "/invites/redeem", redeemRequest{Token: "b", Credential: "pw"}, "10.0.0.2"); rr.Code == http.StatusTooManyRequests {
+	if rr := postFrom(t, s, "/invites/redeem", redeemRequest{Token: "b", Credential: "a-valid-passphrase"}, "10.0.0.2"); rr.Code == http.StatusTooManyRequests {
 		t.Fatal("a different invitee was throttled by someone else's redemption — " +
 			"the forwarded address is being ignored")
 	}
-	if rr := postFrom(t, s, "/invites/redeem", redeemRequest{Token: "c", Credential: "pw"}, "10.0.0.1"); rr.Code != http.StatusTooManyRequests {
+	if rr := postFrom(t, s, "/invites/redeem", redeemRequest{Token: "c", Credential: "a-valid-passphrase"}, "10.0.0.1"); rr.Code != http.StatusTooManyRequests {
 		t.Fatalf("a second redemption from 10.0.0.1 = %d, want 429 — invite tokens would "+
 			"otherwise be guessable at line rate", rr.Code)
 	}
@@ -522,7 +534,7 @@ func TestTheGatewayVerifiesATokenThisServiceIssues(t *testing.T) {
 	s.Routes(mux)
 
 	// Obtain a token the way a browser does.
-	body, _ := json.Marshal(redeemRequest{Token: "an-invite", Credential: "pw"})
+	body, _ := json.Marshal(redeemRequest{Token: "an-invite", Credential: "a-valid-passphrase"})
 	resp, err := ts.Client().Post(ts.URL+"/invites/redeem", "application/json", bytes.NewReader(body))
 	if err != nil {
 		t.Fatal(err)
@@ -563,5 +575,40 @@ func TestTheGatewayVerifiesATokenThisServiceIssues(t *testing.T) {
 	if len(p.Portfolios) != 1 || p.Portfolios[0] != "pf-1" {
 		t.Errorf("portfolios = %v, want [pf-1] — without this the OMS refuses every "+
 			"cancel and amend this caller issues", p.Portfolios)
+	}
+}
+
+// A TOO-SHORT CREDENTIAL IS REFUSED, AND THE INVITATION SURVIVES (#364).
+//
+// The browser form checks the same rule, but that is a courtesy — anyone can
+// POST straight at this route, so the policy has to hold here.
+//
+// The second half is the part worth asserting: the check runs BEFORE the store
+// is touched. An invitation is single-use, so burning it on a rejected password
+// would leave the invitee with no account and no way to make one, needing an
+// operator to issue a fresh invitation because they typed something short.
+func TestATooShortCredentialIsRefusedWithoutBurningTheInvitation(t *testing.T) {
+	st := &fakeStore{redeemed: userWith(t, "user:alice", "irrelevant", identity.StatusActive)}
+	s, minter := testServer(t, st, &allowN{n: 10})
+
+	rr := postFrom(t, s, "/invites/redeem", redeemRequest{Token: "an-invite", Credential: "short"}, "10.0.0.1")
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("redeem with a 5-character credential = %d, want 400", rr.Code)
+	}
+	if minter.minted != 0 {
+		t.Errorf("a token was minted for a refused credential")
+	}
+	if st.redeemCalls != 0 {
+		t.Fatalf("the store was asked to redeem (%d calls) despite the credential being refused.\n\n"+
+			"The invitation is single-use: burning it here leaves the invitee unable to create an "+
+			"account at all, and needing an operator to issue a new one, because they typed "+
+			"something short.", st.redeemCalls)
+	}
+
+	// And a credential that meets the policy still goes through.
+	ok := postFrom(t, s, "/invites/redeem",
+		redeemRequest{Token: "an-invite", Credential: "a-perfectly-fine-passphrase"}, "10.0.0.1")
+	if ok.Code != http.StatusOK {
+		t.Fatalf("redeem with an acceptable credential = %d, want 200", ok.Code)
 	}
 }

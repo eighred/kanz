@@ -156,3 +156,58 @@ func encodeWith(t *testing.T, plaintext string, time, memKiB uint32, threads uin
 	key := argon2.IDKey([]byte(plaintext), salt, time, memKiB, threads, argonKeyLen)
 	return encode(salt, key, time, memKiB, threads)
 }
+
+// A CHOSEN CREDENTIAL HAS A MINIMUM LENGTH (#364).
+//
+// Before this existed the only rule was non-empty, so a one-character password
+// was accepted for an account carrying kanz-trader — which places orders.
+func TestAChosenCredentialMustBeLongEnough(t *testing.T) {
+	if err := ValidateCredential("x"); err == nil {
+		t.Fatal("a one-character credential was accepted for an account that can place orders")
+	}
+	if err := ValidateCredential(strings.Repeat("a", MinCredentialLen-1)); err == nil {
+		t.Fatalf("a credential of %d characters was accepted, one under the minimum",
+			MinCredentialLen-1)
+	}
+	if err := ValidateCredential(strings.Repeat("a", MinCredentialLen)); err != nil {
+		t.Fatalf("a credential of exactly the minimum was refused: %v", err)
+	}
+	if err := ValidateCredential(strings.Repeat("a", MaxCredentialLen+1)); err == nil {
+		t.Fatal("an unbounded credential was accepted — that is work an unauthenticated caller " +
+			"can hand this process")
+	}
+}
+
+// LENGTH IS COUNTED IN RUNES, NOT BYTES, so a passphrase written in a script
+// whose characters take several bytes each is not held to a shorter limit than
+// the same length in ASCII.
+func TestCredentialLengthIsCountedInRunes(t *testing.T) {
+	// Twelve runes, thirty-six bytes.
+	twelve := strings.Repeat("日", MinCredentialLen)
+	if got := len(twelve); got == MinCredentialLen {
+		t.Fatalf("test is not exercising multi-byte runes: byte length %d", got)
+	}
+	if err := ValidateCredential(twelve); err != nil {
+		t.Fatalf("a %d-rune passphrase was refused: %v — counting bytes would make this pass "+
+			"while an ASCII passphrase of the same visible length failed", MinCredentialLen, err)
+	}
+	// Eleven runes must still be refused, so the rune count is a real check.
+	if err := ValidateCredential(strings.Repeat("日", MinCredentialLen-1)); err == nil {
+		t.Fatal("an under-length multi-byte passphrase was accepted — the check is counting bytes")
+	}
+}
+
+// THE POLICY IS NOT APPLIED WHEN VERIFYING. An account whose credential predates
+// a raised minimum must still be able to sign in: applying today's rule at login
+// would turn a hardening change into an estate-wide lockout.
+func TestVerifyIgnoresTheLengthPolicy(t *testing.T) {
+	h, err := HashCredential("short")
+	if err != nil {
+		t.Fatalf("HashCredential: %v", err)
+	}
+	if err := Verify(h, "short"); err != nil {
+		t.Fatalf("an existing short credential stopped verifying: %v\n\n"+
+			"Enforcing the minimum on the verify path locks out every account created "+
+			"before the policy, which is an outage rather than a hardening.", err)
+	}
+}

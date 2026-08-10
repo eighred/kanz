@@ -20,6 +20,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -41,6 +42,7 @@ func run() int {
 		portfolios = flag.String("portfolios", "", "comma-separated portfolios the account may act on")
 		ttl        = flag.Duration("ttl", identity.DefaultInviteTTL, "how long the invitation stays usable")
 		by         = flag.String("by", "", "who is issuing this, recorded on the invite (required)")
+		appURL     = flag.String("app-url", "", "base URL of the web surface; when set, prints a redemption link instead of a bare token")
 	)
 	flag.Parse()
 
@@ -98,14 +100,32 @@ func run() int {
 		return 1
 	}
 
-	// STDOUT IS THE TOKEN AND NOTHING ELSE, so it can be piped; everything a
+	// STDOUT IS THE SECRET AND NOTHING ELSE, so it can be piped; everything a
 	// human needs goes to stderr. Printed once — only its hash is stored.
 	fmt.Fprintf(os.Stderr, "invitation created for %s in %s\n  roles:      %s\n  portfolios: %s\n"+
-		"  expires:    %s\n\nGive the invitee this single-use token; it is not recoverable:\n\n",
+		"  expires:    %s\n\nGive the invitee this single-use %s; it is not recoverable:\n\n",
 		inv.Subject, inv.Tenant, strings.Join(inv.Roles, ", "), listOrNone(inv.Portfolios),
-		inv.ExpiresAt.Format(time.RFC3339))
+		inv.ExpiresAt.Format(time.RFC3339), secretKind(*appURL))
+	if *appURL != "" {
+		// A LINK PUTS A BEARER CREDENTIAL IN A URL, which is why it is opt-in rather
+		// than the default. The redemption page strips the token from the address bar
+		// on arrival, so it does not linger in history or in the Referer of anything
+		// that page loads — but the copy in the invitee's mailbox is not ours to
+		// delete. That is what the short expiry is for.
+		fmt.Printf("%s/redeem?token=%s\n", strings.TrimRight(*appURL, "/"), url.QueryEscape(raw))
+		return 0
+	}
 	fmt.Println(raw)
 	return 0
+}
+
+// secretKind names what is being handed over, so the operator's instruction to
+// the invitee matches what they were actually given.
+func secretKind(appURL string) string {
+	if appURL != "" {
+		return "link"
+	}
+	return "token"
 }
 
 func splitList(v string) []string {

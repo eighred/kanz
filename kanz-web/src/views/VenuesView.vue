@@ -39,13 +39,15 @@ onMounted(async () => {
 <template>
   <h1>Venues</h1>
   <p v-if="loading">Loading…</p>
-  <p v-else-if="error" role="alert">{{ error }}</p>
+  <p v-else-if="error" class="error" role="alert">{{ error }}</p>
   <table v-else>
     <thead><tr><th>Venue</th><th>Keys</th></tr></thead>
     <tbody>
       <tr v-for="r in rows" :key="r.venue">
         <td>{{ r.venue }}</td>
-        <td>{{ r.configured ? 'configured' : 'not set' }}</td>
+        <td :class="r.configured ? 'state-ok' : 'state-unset'">
+          {{ r.configured ? 'configured' : 'not set' }}
+        </td>
       </tr>
       <tr v-if="rows.length === 0"><td colspan="2">No venues returned.</td></tr>
     </tbody>

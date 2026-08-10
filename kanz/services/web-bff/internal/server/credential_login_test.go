@@ -198,3 +198,46 @@ func TestAMalformedBodyNeverReachesIdentity(t *testing.T) {
 			id.requests)
 	}
 }
+
+// REDEMPTION RELAYS THE REASON; LOGIN DOES NOT (#364).
+//
+// A 400 from redemption is about the credential the invitee has just invented —
+// too short — so it discloses nothing about the estate. Collapsed into the
+// opaque 401 every other refusal gets, it reaches them as "that invitation is
+// not valid", and they abandon a perfectly good single-use invitation and ask
+// an operator for another one. That is the bug this asserts against.
+//
+// The login half is the counterweight: there, every refusal must read the same,
+// because the difference between "no such account" and "wrong password" is what
+// turns a sign-in form into a list of the fund's staff.
+func TestRedemptionExplainsARefusedCredentialButLoginNeverDoes(t *testing.T) {
+	const reason = "identity: a credential must be at least 12 characters"
+
+	id := &fakeIdentity{status: http.StatusBadRequest, body: `{"error":"` + reason + `"}`}
+	idSrv := id.start(t)
+	srv := bffWithIdentity(t, idSrv.URL, "http://gw.invalid")
+
+	rec := postJSON(t, srv, "/auth/redeem", `{"token":"t","credential":"short"}`, "192.0.2.1:9", "198.51.100.7")
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("redeem status = %d, want 400 — a refused credential must not look like a "+
+			"refused invitation", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), "at least 12") {
+		t.Fatalf("redeem body = %s, want the reason relayed.\n\n"+
+			"Without it the invitee is told their invitation is invalid when their password "+
+			"was merely short, and the invitation is single-use.", rec.Body.String())
+	}
+	if len(rec.Result().Cookies()) != 0 {
+		t.Error("a refused redemption set a cookie")
+	}
+
+	// The SAME upstream status on the login path stays opaque.
+	rec = postJSON(t, srv, "/auth/login", `{"subject":"s","credential":"short"}`, "192.0.2.1:9", "198.51.100.7")
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("login status = %d, want 401 — login refusals are one answer", rec.Code)
+	}
+	if strings.Contains(rec.Body.String(), "at least 12") {
+		t.Error("the login refusal relayed the identity service's reason, giving a caller a " +
+			"second distinguishable response to probe with")
+	}
+}

@@ -26,6 +26,22 @@ export class Unauthenticated extends ApiError {
   }
 }
 
+// A 401 CAN ARRIVE AT ANY MOMENT, not only at sign-in: sessions expire, and one
+// can be revoked server-side while a page sits open. Whoever holds the session
+// state registers here so it can be dropped the instant the server disowns it.
+//
+// It is a REGISTRATION rather than a direct import because the session store
+// imports this module; calling into it from here would be a cycle. The handler
+// must not navigate on its own — /auth/me answers 401 for every signed-out
+// visitor, and a redirect from inside that call would fight the router guard
+// that made it.
+let onUnauthenticated: (() => void) | null = null
+
+/** Register the callback invoked whenever a request is refused with 401. */
+export function setUnauthenticatedHandler(fn: () => void): void {
+  onUnauthenticated = fn
+}
+
 async function request<T>(method: string, path: string, body?: unknown): Promise<T> {
   const res = await fetch(path, {
     method,
@@ -34,7 +50,10 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
     body: body === undefined ? undefined : JSON.stringify(body),
   })
 
-  if (res.status === 401) throw new Unauthenticated()
+  if (res.status === 401) {
+    onUnauthenticated?.()
+    throw new Unauthenticated()
+  }
   if (!res.ok) {
     // The server's message is shown as-is when it is JSON we recognise; the raw
     // body is NOT surfaced otherwise, because an upstream error page is not a

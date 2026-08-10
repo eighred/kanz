@@ -34,6 +34,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"unicode/utf8"
 
 	"golang.org/x/crypto/argon2"
 )
@@ -69,6 +70,56 @@ var ErrCredentialMismatch = errors.New("identity: credential does not match")
 // same parameter by mistake. That has happened in enough systems to be worth one
 // line of type safety.
 type Hash string
+
+// MinCredentialLen is the shortest credential this platform will ACCEPT when
+// somebody chooses one.
+//
+// Twelve, and no composition rules. NIST SP 800-63B is explicit that requiring
+// mixed case, digits and symbols makes credentials worse rather than better —
+// it produces "Password1!" from everybody — while length is what actually costs
+// an attacker. Argon2id already makes each guess expensive; length is what makes
+// the space worth searching through infeasible.
+const MinCredentialLen = 12
+
+// MaxCredentialLen bounds the input. Not a security property — a long
+// passphrase is a good one — but an unbounded input is work an unauthenticated
+// caller can hand this process, and the redeem body limit is not a reason to
+// leave the rule unstated here.
+const MaxCredentialLen = 1024
+
+// ErrCredentialTooShort and ErrCredentialTooLong carry NO "identity:" prefix,
+// unlike every other error in this package, and that is deliberate: these two
+// are the only errors here whose text is rendered to a PERSON — the web surface
+// relays them verbatim to whoever is choosing a password. A package prefix would
+// put an implementation detail in front of somebody trying to accept an
+// invitation, and stripping it downstream would mean a second place that has to
+// know how this one spells things.
+var ErrCredentialTooShort = fmt.Errorf("a credential must be at least %d characters", MinCredentialLen)
+
+// ErrCredentialTooLong is returned when a chosen credential exceeds
+// MaxCredentialLen. See ErrCredentialTooShort for why it has no prefix.
+var ErrCredentialTooLong = fmt.Errorf("a credential must be at most %d characters", MaxCredentialLen)
+
+// ValidateCredential checks a credential a HUMAN HAS JUST CHOSEN.
+//
+// IT IS DELIBERATELY NOT CALLED ON THE LOGIN PATH, and that is not an
+// oversight. Login must judge the credential that was set, not today's policy:
+// applying this rule there would lock every existing account out the moment the
+// minimum is raised — turning a hardening change into an estate-wide outage —
+// and would leak the policy to an unauthenticated caller besides.
+//
+// It counts RUNES, not bytes, so a passphrase written in a script whose
+// characters take three bytes each is not held to a shorter limit than one
+// written in ASCII.
+func ValidateCredential(plaintext string) error {
+	switch n := utf8.RuneCountInString(plaintext); {
+	case n < MinCredentialLen:
+		return ErrCredentialTooShort
+	case n > MaxCredentialLen:
+		return ErrCredentialTooLong
+	}
+	return nil
+}
 
 // HashCredential derives a new Argon2id hash with a fresh random salt.
 //

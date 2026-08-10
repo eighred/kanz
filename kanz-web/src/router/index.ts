@@ -1,6 +1,7 @@
 import { createRouter, createWebHistory } from 'vue-router'
 import { useSession } from '../stores/session'
 import LoginView from '../views/LoginView.vue'
+import RedeemView from '../views/RedeemView.vue'
 import VenuesView from '../views/VenuesView.vue'
 
 export const router = createRouter({
@@ -8,6 +9,9 @@ export const router = createRouter({
   routes: [
     { path: '/', redirect: '/venues' },
     { path: '/login', name: 'login', component: LoginView, meta: { public: true } },
+    // PUBLIC BY NECESSITY: whoever opens this holds an invitation and nothing
+    // else — requiring a session to accept one would be a loop with no entry.
+    { path: '/redeem', name: 'redeem', component: RedeemView, meta: { public: true } },
     { path: '/venues', name: 'venues', component: VenuesView },
   ],
 })
