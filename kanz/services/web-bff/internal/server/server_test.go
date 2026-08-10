@@ -9,6 +9,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/eighred/kanz/services/web-bff/internal/clientip"
+	"github.com/eighred/kanz/services/web-bff/internal/identityclient"
 	"github.com/eighred/kanz/services/web-bff/internal/oidc"
 	"github.com/eighred/kanz/services/web-bff/internal/session"
 )
@@ -74,6 +76,8 @@ func newHarness(t *testing.T) *harness {
 		t.Fatal(err)
 	}
 	srv, err := New(&Readiness{}, Options{
+		Identity:      testIdentity(t, ""),
+		ClientIP:      testClientIP(t),
 		OIDC:          oidcClient,
 		Sessions:      session.NewManager(time.Hour),
 		GatewayURL:    gc.srv.URL,
@@ -203,6 +207,8 @@ func TestMeAndLogout(t *testing.T) {
 func TestHealthAndReady(t *testing.T) {
 	readiness := &Readiness{}
 	srv, err := New(readiness, Options{
+		Identity:   testIdentity(t, ""),
+		ClientIP:   testClientIP(t),
 		OIDC:       mustOIDC(t),
 		Sessions:   session.NewManager(time.Hour),
 		GatewayURL: "http://gw.invalid",
@@ -230,4 +236,26 @@ func mustOIDC(t *testing.T) *oidc.Client {
 		t.Fatal(err)
 	}
 	return c
+}
+
+// testClientIP is a resolver that trusts nothing, so tests attribute a request
+// to its peer — the safe default, and the one a unit test should exercise.
+func testClientIP(t *testing.T) *clientip.Resolver {
+	t.Helper()
+	r, err := clientip.NewResolver("", nil)
+	if err != nil {
+		t.Fatalf("clientip.NewResolver: %v", err)
+	}
+	return r
+}
+
+// testIdentity points an identity client at baseURL, or at an address that
+// cannot answer when baseURL is empty — the login routes are then wired and
+// reachable, which is what New() requires, without pretending a provider exists.
+func testIdentity(t *testing.T, baseURL string) *identityclient.Client {
+	t.Helper()
+	if baseURL == "" {
+		baseURL = "http://identity.invalid"
+	}
+	return identityclient.New(baseURL, "", time.Second)
 }

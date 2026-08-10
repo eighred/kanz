@@ -8,6 +8,8 @@ package server
 import (
 	"encoding/base64"
 	"encoding/json"
+	"errors"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httputil"
@@ -16,6 +18,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/eighred/kanz/services/web-bff/internal/clientip"
+	"github.com/eighred/kanz/services/web-bff/internal/identityclient"
 	"github.com/eighred/kanz/services/web-bff/internal/oidc"
 	"github.com/eighred/kanz/services/web-bff/internal/session"
 )
@@ -30,6 +34,14 @@ func (r *Readiness) Ready() bool    { return r.ready.Load() }
 
 // Options configures a Server.
 type Options struct {
+	// Identity is the credential login path (#364/#371) — REQUIRED. OIDC is the
+	// optional alternative for a client bringing their own IdP.
+	Identity *identityclient.Client
+	// ClientIP resolves the caller's address behind the edge, for the identity
+	// service's rate limiter. REQUIRED: without it every browser login arrives
+	// from this process and the limiter keys them all together, so one user's
+	// failures throttle everybody and an attacker hides in the same bucket.
+	ClientIP      *clientip.Resolver
 	OIDC          *oidc.Client
 	Sessions      *session.Manager
 	GatewayURL    string
@@ -41,6 +53,8 @@ type Options struct {
 // Server wires the login flow and the authenticated proxy.
 type Server struct {
 	readiness     *Readiness
+	identity      *identityclient.Client
+	clientIP      *clientip.Resolver
 	oidc          *oidc.Client
 	sessions      *session.Manager
 	proxy         *httputil.ReverseProxy
@@ -56,12 +70,27 @@ func New(readiness *Readiness, opts Options) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
+	// REQUIRED, not defaulted. A nil Identity makes the only working login route
+	// panic on the first attempt; a nil ClientIP makes every browser login look
+	// like it came from this process, so the identity service's limiter keys them
+	// all together — one user's failures throttle everybody, and an attacker's
+	// attempts hide in the same bucket. Both are silent, and both are the kind of
+	// thing a zero value provides happily.
+	if opts.Identity == nil {
+		return nil, errors.New("web-bff: identity client required — it is the only way anyone signs in")
+	}
+	if opts.ClientIP == nil {
+		return nil, errors.New("web-bff: client-IP resolver required — without it every login is " +
+			"attributed to this process and the identity service's rate limit becomes global")
+	}
 	logger := opts.Logger
 	if logger == nil {
 		logger = slog.Default()
 	}
 	s := &Server{
 		readiness:     readiness,
+		identity:      opts.Identity,
+		clientIP:      opts.ClientIP,
 		oidc:          opts.OIDC,
 		sessions:      opts.Sessions,
 		proxy:         newProxy(gw),
@@ -90,8 +119,17 @@ func (s *Server) routes() {
 	if s.metrics != nil {
 		s.mux.Handle("GET /metrics", s.metrics)
 	}
-	s.mux.HandleFunc("GET /auth/login", s.handleLogin)
-	s.mux.HandleFunc("GET /auth/callback", s.handleCallback)
+	// POST is the CREDENTIAL login; GET is the optional OIDC redirect start.
+	// Same path, different methods, because to a browser they are one idea.
+	s.mux.HandleFunc("POST /auth/login", s.handleCredentialLogin)
+	s.mux.HandleFunc("POST /auth/redeem", s.handleRedeem)
+	// REGISTERED ONLY WHEN CONFIGURED. An unconfigured OIDC route would answer a
+	// browser with a redirect to nowhere, which is how the TUI's /login came to
+	// report "login required but failed" against an issuer that did not exist.
+	if s.oidc != nil {
+		s.mux.HandleFunc("GET /auth/login", s.handleLogin)
+		s.mux.HandleFunc("GET /auth/callback", s.handleCallback)
+	}
 	s.mux.HandleFunc("POST /auth/logout", s.handleLogout)
 	s.mux.HandleFunc("GET /auth/me", s.handleMe)
 	// Everything under /api/ is proxied to the gateway as the session's caller.
@@ -162,6 +200,95 @@ func (s *Server) handleCallback(w http.ResponseWriter, r *http.Request) {
 	}
 	s.setSessionCookie(w, id, tok.Expiry)
 	http.Redirect(w, r, "/", http.StatusFound)
+}
+
+// handleCredentialLogin exchanges a credential for a browser session (#371).
+//
+// THE TOKEN NEVER REACHES THE BROWSER. It is held in the server-side session and
+// attached by handleProxy; the response carries only who you are and until when.
+// That is the property this whole BFF exists for — a token in browser-reachable
+// JS is an exfiltration target, and a kanz token carries kanz-trader.
+func (s *Server) handleCredentialLogin(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Subject    string `json:"subject"`
+		Credential string `json:"credential"`
+	}
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	tok, err := s.identity.Login(r.Context(), req.Subject, req.Credential, s.clientIP.Resolve(r))
+	s.completeLogin(w, r, tok, err)
+}
+
+// handleRedeem turns an invite into an account AND a session in one step, so an
+// invitee is signed in by the act of accepting rather than being asked for the
+// credential they set one second earlier.
+func (s *Server) handleRedeem(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Token      string `json:"token"`
+		Credential string `json:"credential"`
+	}
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	tok, err := s.identity.Redeem(r.Context(), req.Token, req.Credential, s.clientIP.Resolve(r))
+	s.completeLogin(w, r, tok, err)
+}
+
+// completeLogin turns a minted token into a session + cookie, or an error into
+// the one answer the browser is allowed to see.
+func (s *Server) completeLogin(w http.ResponseWriter, r *http.Request, tok *identityclient.Token, err error) {
+	switch {
+	case errors.Is(err, identityclient.ErrThrottled):
+		// 429, NOT 401: the caller may hold a correct credential and must be told
+		// to wait rather than that it was wrong.
+		writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": "too many attempts, try again shortly"})
+		return
+	case errors.Is(err, identityclient.ErrRejected):
+		// ONE ANSWER. Unknown subject, wrong credential, disabled account and an
+		// invalid invite are indistinguishable here because the identity service
+		// already collapses them — re-separating them at this layer would undo
+		// that and hand back a user-enumeration oracle.
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "those details are not valid"})
+		return
+	case err != nil:
+		s.fail(w, http.StatusBadGateway, "the identity service is unavailable", err)
+		return
+	}
+
+	id, cerr := s.sessions.Create(session.Session{
+		AccessToken: tok.Token,
+		Subject:     tok.Subject,
+		Tenant:      tok.Tenant,
+		Expiry:      tok.Expires,
+	})
+	if cerr != nil {
+		s.fail(w, http.StatusInternalServerError, "could not start session", cerr)
+		return
+	}
+	s.setSessionCookie(w, id, tok.Expires)
+	// JSON rather than a redirect: the caller is a fetch() from the SPA, and a
+	// 302 would be followed transparently and land HTML in a JSON parser.
+	writeJSON(w, http.StatusOK, map[string]any{
+		"subject":    tok.Subject,
+		"tenant":     tok.Tenant,
+		"expires_at": tok.Expires.Format(time.RFC3339),
+	})
+}
+
+// decodeJSON reads a small JSON body, answering 400 on anything unreadable.
+//
+// The body is BOUNDED: these two routes are unauthenticated, so an unbounded
+// read is a memory-exhaustion surface reachable by anyone who can open a socket
+// to the edge.
+func decodeJSON(w http.ResponseWriter, r *http.Request, dst any) bool {
+	dec := json.NewDecoder(io.LimitReader(r.Body, 64<<10))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(dst); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "malformed request"})
+		return false
+	}
+	return true
 }
 
 func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {

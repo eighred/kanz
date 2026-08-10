@@ -19,7 +19,9 @@ import (
 	"github.com/eighred/kanz/internal/platform/httpserver"
 	"github.com/eighred/kanz/internal/version"
 	"github.com/eighred/kanz/pkg/observability"
+	"github.com/eighred/kanz/services/web-bff/internal/clientip"
 	"github.com/eighred/kanz/services/web-bff/internal/config"
+	"github.com/eighred/kanz/services/web-bff/internal/identityclient"
 	"github.com/eighred/kanz/services/web-bff/internal/oidc"
 	"github.com/eighred/kanz/services/web-bff/internal/server"
 	"github.com/eighred/kanz/services/web-bff/internal/session"
@@ -67,15 +69,48 @@ func run() int {
 		_ = obs.Shutdown(shutCtx)
 	}()
 
-	oidcClient, err := oidc.New(oidc.Config{
-		Issuer:      cfg.Issuer,
-		ClientID:    cfg.ClientID,
-		RedirectURL: cfg.RedirectURL,
-		Scope:       cfg.Scope,
-	})
+	// THE CREDENTIAL PATH IS THE ONE THAT MUST WORK (#371). The identity service
+	// is where a person signs in; OIDC below is the optional alternative for a
+	// client bringing their own IdP.
+	//
+	// The forwarded-address header is the identity service's own — the BFF
+	// resolves the browser's address here and passes it on, because a login
+	// relayed by this process would otherwise arrive from this process, and the
+	// identity limiter would key every attempt in the estate together.
+	identityClient := identityclient.New(cfg.IdentityURL, identityForwardHeader, 0)
+
+	ipResolver, err := clientip.NewResolver(cfg.TrustedProxyHeader, cfg.TrustedProxies)
 	if err != nil {
-		logger.Error("oidc init failed", "err", err)
+		logger.Error("trusted proxy configuration invalid", "err", err)
 		return 2
+	}
+	// SAID OUT LOUD, because "configured and ignored" and "not configured" must
+	// not look the same. Behind the tunnel every request shares one peer, so a
+	// resolver that trusts nothing makes the login limiter global.
+	if ipResolver.Trusts() {
+		logger.Info("client address resolved from the edge header",
+			"header", cfg.TrustedProxyHeader, "trusted_proxies", cfg.TrustedProxies)
+	} else {
+		logger.Warn("no trusted proxy configured — every caller is attributed to its immediate " +
+			"peer. Behind an edge that is ONE address for everyone, so the identity service's " +
+			"login rate limit becomes estate-wide rather than per-caller.")
+	}
+
+	// OPTIONAL. Absent an issuer the OIDC routes are not registered at all,
+	// rather than registered and answering a browser with a redirect to nowhere.
+	var oidcClient *oidc.Client
+	if cfg.Issuer != "" {
+		oidcClient, err = oidc.New(oidc.Config{
+			Issuer:      cfg.Issuer,
+			ClientID:    cfg.ClientID,
+			RedirectURL: cfg.RedirectURL,
+			Scope:       cfg.Scope,
+		})
+		if err != nil {
+			logger.Error("oidc init failed", "err", err)
+			return 2
+		}
+		logger.Info("OIDC login enabled alongside credential login", "issuer", cfg.Issuer)
 	}
 
 	sessions := session.NewManager(cfg.SessionTTL)
@@ -83,6 +118,8 @@ func run() int {
 
 	readiness := &server.Readiness{}
 	srv, err := server.New(readiness, server.Options{
+		Identity:      identityClient,
+		ClientIP:      ipResolver,
 		OIDC:          oidcClient,
 		Sessions:      sessions,
 		GatewayURL:    cfg.GatewayURL,
@@ -131,3 +168,10 @@ func sweepLoop(ctx context.Context, m *session.Manager) {
 		}
 	}
 }
+
+// identityForwardHeader is the header the identity service reads a caller's
+// address from. It is this repo's own name rather than a vendor one: the BFF
+// talks to identity over the private network, so there is no edge in between to
+// set CF-Connecting-IP, and reusing that name would invite someone to trust it
+// there too.
+const identityForwardHeader = "X-Kanz-Client-IP"
