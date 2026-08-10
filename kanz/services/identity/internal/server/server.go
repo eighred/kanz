@@ -28,7 +28,9 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"net"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/eighred/kanz/internal/identity"
@@ -68,6 +70,10 @@ type Server struct {
 	jwks    func() any
 	now     func() time.Time
 
+	// issuer is this service's own base URL, published in the discovery document
+	// so a gateway configured with nothing but an issuer can find the key.
+	issuer string
+
 	// decoyHash is verified against when a subject does not exist, so a caller
 	// cannot tell "no such account" from "wrong password" BY TIMING. Without it
 	// the unknown-subject path returns in microseconds while the known-subject
@@ -80,7 +86,7 @@ type Server struct {
 // particular would turn the login route into an unbounded guessing oracle, and
 // defaulting it to "allow everything" is the kind of convenience that is
 // indistinguishable from working.
-func New(store Store, minter Minter, limiter Limiter, jwks func() any, logger *slog.Logger) (*Server, error) {
+func New(store Store, minter Minter, limiter Limiter, jwks func() any, issuer string, logger *slog.Logger) (*Server, error) {
 	switch {
 	case store == nil:
 		return nil, errors.New("identity/server: store required")
@@ -92,6 +98,10 @@ func New(store Store, minter Minter, limiter Limiter, jwks func() any, logger *s
 			"bound on credential guessing")
 	case jwks == nil:
 		return nil, errors.New("identity/server: jwks source required")
+	case strings.TrimSpace(issuer) == "":
+		return nil, errors.New("identity/server: issuer required — it is published in the discovery " +
+			"document, and OIDC verifiers refuse a document whose issuer does not match the URL they " +
+			"discovered it from")
 	}
 	if logger == nil {
 		logger = slog.Default()
@@ -104,7 +114,7 @@ func New(store Store, minter Minter, limiter Limiter, jwks func() any, logger *s
 	}
 	return &Server{
 		store: store, minter: minter, limiter: limiter, logger: logger,
-		jwks: jwks, now: time.Now, decoyHash: decoy,
+		jwks: jwks, issuer: strings.TrimRight(issuer, "/"), now: time.Now, decoyHash: decoy,
 	}, nil
 }
 
@@ -113,6 +123,7 @@ func (s *Server) Routes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /login", s.login)
 	mux.HandleFunc("POST /invites/redeem", s.redeem)
 	mux.HandleFunc("GET /jwks.json", s.jwksHandler)
+	mux.HandleFunc("GET /.well-known/openid-configuration", s.discoveryHandler)
 }
 
 type loginRequest struct {
@@ -137,7 +148,7 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 	if !decode(w, r, &req) {
 		return
 	}
-	if !s.limiter.Allow(rateKey(r, req.Subject)) {
+	if !s.allowAttempt(r, req.Subject) {
 		// 429 rather than 401: the caller may hold a correct credential and must
 		// be told to wait rather than that it was wrong.
 		writeErr(w, http.StatusTooManyRequests, "too many attempts")
@@ -186,12 +197,21 @@ func (s *Server) redeem(w http.ResponseWriter, r *http.Request) {
 	if !decode(w, r, &req) {
 		return
 	}
-	if !s.limiter.Allow(rateKey(r, "")) {
+	if !s.allowAttempt(r, "") {
 		writeErr(w, http.StatusTooManyRequests, "too many attempts")
 		return
 	}
-	if req.Credential == "" {
-		writeErr(w, http.StatusBadRequest, "a credential is required")
+	// THE POLICY IS ENFORCED HERE, SERVER-SIDE, because the browser form that
+	// also checks it is a courtesy and not a control — anyone can POST straight
+	// at this route. Until this existed the ONLY rule was non-empty, so a
+	// one-character password was accepted for an account carrying kanz-trader.
+	//
+	// The reason IS returned, unlike every other refusal on this handler: it
+	// concerns the credential the caller has just invented, so it reveals nothing
+	// about the estate, and withholding it would leave someone retrying a rule
+	// they cannot see — with a single-use invitation.
+	if err := identity.ValidateCredential(req.Credential); err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
@@ -241,14 +261,73 @@ func (s *Server) jwksHandler(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, s.jwks())
 }
 
-// rateKey buckets an attempt. Subject first so one account's guesses do not
-// exhaust every caller's budget behind a shared ingress IP, falling back to the
-// peer address when there is no subject to key on.
-func rateKey(r *http.Request, subject string) string {
-	if subject != "" {
-		return "s:" + subject
+// discoveryHandler publishes the minimum OIDC discovery document.
+//
+// WITHOUT IT, WIRING THE GATEWAY IS A TRAP. pkg/auth discovers the key set from
+// {issuer}/.well-known/openid-configuration unless an explicit JWKS URI is
+// configured, so an operator who sets only the issuer — the ordinary thing, and
+// what every other IdP needs — would get a 404 here and a gateway that cannot
+// verify a single token this service issues. Serving it means the standard
+// configuration works, rather than working only for someone who knew about the
+// second setting.
+//
+// It carries the two fields a verifier needs and no more. This is not a
+// full-featured OIDC provider and must not advertise endpoints it does not have
+// — an authorization_endpoint that 404s is worse than an absent one.
+func (s *Server) discoveryHandler(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]any{
+		"issuer":   s.issuer,
+		"jwks_uri": s.issuer + "/jwks.json",
+	})
+}
+
+// ClientIPHeader carries the ORIGINAL caller's address, set by the web-bff.
+//
+// It is this repo's own name rather than a vendor one (CF-Connecting-IP): the
+// BFF reaches this service over the private network with no edge in between, so
+// reusing the vendor name would invite someone to trust it here too.
+//
+// TRUSTING IT IS SOUND FOR THE SAME REASON THE GATEWAY'S PRINCIPAL HEADERS ARE:
+// a NetworkPolicy makes the BFF the only caller that can reach this service. If
+// that ever stops holding, this header becomes forgeable and the per-source
+// bound below stops existing — which is why the subject bound is checked
+// independently rather than being folded into one composite key.
+const ClientIPHeader = "X-Kanz-Client-IP"
+
+// allowAttempt bounds an unauthenticated attempt on BOTH axes, and both must
+// permit it.
+//
+// SUBJECT ALONE IS NOT ENOUGH. Keying only on the account lets one source spray
+// a single guess across thousands of accounts — credential stuffing, which is
+// how leaked password lists are actually used — without ever exhausting a
+// bucket. ADDRESS ALONE IS NOT ENOUGH EITHER: every login arrives through the
+// BFF, so one attacker's guesses would spend the budget shared by every
+// legitimate operator behind it.
+//
+// Checked in that order deliberately: a refusal on the subject axis does not
+// debit the source axis, so an attacker cannot exhaust an address bucket that
+// legitimate callers share by hammering one account.
+func (s *Server) allowAttempt(r *http.Request, subject string) bool {
+	if subject != "" && !s.limiter.Allow("s:"+subject) {
+		return false
 	}
-	return "a:" + r.RemoteAddr
+	return s.limiter.Allow("a:" + clientIP(r))
+}
+
+// clientIP is the address an attempt is attributed to.
+//
+// The BFF's forwarded header wins when present. Without this the header the BFF
+// takes care to send would be silently ignored, every attempt would be
+// attributed to the BFF itself, and the per-source bound would be one bucket for
+// the entire estate — "limited" and "not limited" looking identical from here.
+func clientIP(r *http.Request) string {
+	if v := strings.TrimSpace(r.Header.Get(ClientIPHeader)); v != "" {
+		return v
+	}
+	if host, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
+		return host
+	}
+	return r.RemoteAddr
 }
 
 // maxBody bounds a credential request. A login body is small; anything larger is

@@ -33,6 +33,27 @@ export const useSession = defineStore('session', {
       this.identity = await auth.login(subject, credential)
       this.resolved = true
     },
+    /**
+     * Accept an invitation: creates the account AND signs in, in one step.
+     * The invitation is single-use, so a failed attempt is not replayable.
+     */
+    async redeem(token: string, credential: string) {
+      this.identity = await auth.redeem(token, credential)
+      this.resolved = true
+    },
+    /**
+     * Forget who this browser is, WITHOUT calling the server.
+     *
+     * Used when any request comes back 401: the session expired or was revoked
+     * server-side, and the store is now describing somebody who is no longer
+     * signed in. Leaving it in place makes the router guard wave the user
+     * through to a screen where every call fails — an app that looks broken
+     * rather than one that asks them to sign in again.
+     */
+    forget() {
+      this.identity = null
+      this.resolved = true
+    },
     async signOut() {
       await auth.logout()
       this.identity = null

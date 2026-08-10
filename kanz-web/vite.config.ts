@@ -1,4 +1,4 @@
-import { defineConfig } from 'vite'
+import { defineConfig } from 'vitest/config'
 import vue from '@vitejs/plugin-vue'
 
 // The SPA is served BY THE BFF in every deployed shape (#371): one origin, so the
@@ -25,6 +25,16 @@ export default defineConfig({
       '/api': { target: bff, changeOrigin: false },
       '/auth': { target: bff, changeOrigin: false },
     },
+  },
+  // The SPA is the operator surface for a trading platform, so the properties
+  // worth testing are the SECURITY ones: that no token is ever attached to a
+  // request, that a 401 drops the session, and that the router guard is not
+  // mistaken for a control. happy-dom rather than jsdom because nothing here
+  // needs a layout engine.
+  test: {
+    environment: 'happy-dom',
+    include: ['src/**/*.test.ts'],
+    restoreMocks: true,
   },
   build: {
     // Where the BFF's WEB_BFF_STATIC_DIR points.

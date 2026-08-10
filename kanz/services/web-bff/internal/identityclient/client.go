@@ -27,6 +27,22 @@ import (
 // enumerate the platform's users.
 var ErrRejected = errors.New("identityclient: credential rejected")
 
+// ErrInvalidInput is returned when the identity service refuses the REQUEST
+// ITSELF rather than the credential in it — a 400.
+//
+// IT IS KEPT DISTINCT FROM ErrRejected, AND ITS MESSAGE IS RELAYED, because the
+// two say opposite things to a person. ErrRejected must stay opaque: the
+// difference between "no such account" and "wrong password" is what turns a
+// login form into a list of the fund's staff. A 400 is about what the CALLER
+// just supplied — a password under the minimum length, a malformed body — so it
+// reveals nothing about the estate, and withholding it is actively harmful:
+// collapsed into a 401, "your password is too short" reaches an invitee as
+// "that invitation is not valid", and they abandon a perfectly good invitation
+// and ask an operator for another one.
+type ErrInvalidInput struct{ Message string }
+
+func (e *ErrInvalidInput) Error() string { return "identityclient: " + e.Message }
+
 // ErrThrottled is returned when the identity service is rate-limiting. It is
 // kept DISTINCT from ErrRejected so the browser can be told to wait rather than
 // that its password was wrong — the caller may well hold a correct one.
@@ -108,8 +124,13 @@ func (c *Client) post(ctx context.Context, path string, body map[string]string, 
 
 	switch resp.StatusCode {
 	case http.StatusOK:
-	case http.StatusUnauthorized, http.StatusBadRequest:
+	case http.StatusUnauthorized:
 		return nil, ErrRejected
+	case http.StatusBadRequest:
+		// The message is bounded before it is relayed: it is rendered in a
+		// browser, and an upstream that started returning something enormous
+		// should not become this page's problem.
+		return nil, &ErrInvalidInput{Message: firstLine(readMessage(resp.Body), 200)}
 	case http.StatusTooManyRequests:
 		return nil, ErrThrottled
 	default:
@@ -127,4 +148,29 @@ func (c *Client) post(ctx context.Context, path string, body map[string]string, 
 		return nil, errors.New("identityclient: identity service returned no token")
 	}
 	return &tok, nil
+}
+
+// readMessage pulls {"error": "..."} out of a refusal body, falling back to a
+// generic phrase. A body that is not the shape we expect is NOT passed through
+// verbatim — an upstream error page is not a message for a user.
+func readMessage(r io.Reader) string {
+	var body struct {
+		Error string `json:"error"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r, 1<<16)).Decode(&body); err != nil || body.Error == "" {
+		return "that request was not accepted"
+	}
+	return body.Error
+}
+
+// firstLine bounds a relayed message to one line and n characters, so a
+// multi-line upstream message cannot reformat the page it lands on.
+func firstLine(s string, n int) string {
+	if i := strings.IndexAny(s, "\r\n"); i >= 0 {
+		s = s[:i]
+	}
+	if len(s) > n {
+		s = s[:n]
+	}
+	return s
 }

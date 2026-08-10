@@ -1,0 +1,257 @@
+/* kanz-web — the operator surface.
+ *
+ * RESTRAINT IS THE BRIEF. This is a control plane for capital: the screens are
+ * read for a number and a state, often under time pressure, and decoration
+ * competes with that. Colour is reserved for meaning — a refusal, a warning, a
+ * state that is not the expected one — so that when something IS coloured it
+ * carries information rather than styling.
+ *
+ * It follows the operating system's light/dark preference rather than offering
+ * a toggle: one fewer piece of state to persist, and it matches the rest of the
+ * desk the operator is looking at.
+ */
+
+:root {
+  color-scheme: light dark;
+
+  --bg: #f6f7f9;
+  --surface: #ffffff;
+  --border: #d9dde3;
+  --text: #16191d;
+  --muted: #5c6672;
+  --accent: #1f5fbf;
+  --accent-text: #ffffff;
+  --danger: #a3282d;
+  --warn: #8a5a00;
+  --ok: #1b6b45;
+  --radius: 8px;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #101418;
+    --surface: #171c22;
+    --border: #2a323b;
+    --text: #e6eaee;
+    --muted: #97a3b0;
+    --accent: #4d8ce0;
+    --accent-text: #0b0f13;
+    --danger: #e2757a;
+    --warn: #d6a24a;
+    --ok: #63c398;
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 15px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+
+main {
+  max-width: 900px;
+  margin: 0 auto;
+  padding: 32px 20px 64px;
+}
+
+h1 {
+  font-size: 1.35rem;
+  font-weight: 600;
+  margin: 0 0 4px;
+  letter-spacing: -0.01em;
+}
+
+a {
+  color: var(--accent);
+}
+
+/* --- app shell ----------------------------------------------------------- */
+
+.topbar {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 10px 20px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+}
+
+.brand {
+  font-weight: 650;
+  letter-spacing: 0.02em;
+}
+
+.topbar nav {
+  display: flex;
+  gap: 14px;
+  flex: 1;
+}
+
+.topbar nav a {
+  color: var(--muted);
+  text-decoration: none;
+  padding: 4px 2px;
+  border-bottom: 2px solid transparent;
+}
+
+.topbar nav a.router-link-active {
+  color: var(--text);
+  border-bottom-color: var(--accent);
+}
+
+/* WHO YOU ARE ACTING AS, ALWAYS VISIBLE. On a multi-tenant control plane the
+ * most expensive mistake is doing the right thing in the wrong tenant, and the
+ * only defence a UI can offer is never making the operator guess. */
+.whoami {
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.whoami strong {
+  color: var(--text);
+  font-weight: 600;
+}
+
+/* --- forms --------------------------------------------------------------- */
+
+.card {
+  max-width: 420px;
+  margin: 48px auto;
+  padding: 28px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+label {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 0.86rem;
+  color: var(--muted);
+}
+
+input {
+  font: inherit;
+  padding: 9px 11px;
+  color: var(--text);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+
+input:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+button {
+  font: inherit;
+  font-weight: 550;
+  padding: 10px 14px;
+  color: var(--accent-text);
+  background: var(--accent);
+  border: 1px solid transparent;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+button:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+button.quiet {
+  color: var(--muted);
+  background: transparent;
+  border-color: var(--border);
+}
+
+/* --- messages ------------------------------------------------------------ */
+
+.muted {
+  color: var(--muted);
+  font-size: 0.86rem;
+  margin: 0;
+}
+
+.hint {
+  color: var(--warn);
+  font-size: 0.84rem;
+  margin: -6px 0 0;
+}
+
+.error {
+  color: var(--danger);
+  font-size: 0.88rem;
+  margin: 0;
+  padding: 9px 11px;
+  border: 1px solid currentColor;
+  border-radius: 6px;
+}
+
+/* --- tables -------------------------------------------------------------- */
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  margin-top: 14px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+
+th,
+td {
+  text-align: left;
+  padding: 9px 12px;
+  border-bottom: 1px solid var(--border);
+  font-variant-numeric: tabular-nums;
+}
+
+th {
+  font-size: 0.78rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+}
+
+tbody tr:last-child td {
+  border-bottom: none;
+}
+
+.state-ok {
+  color: var(--ok);
+}
+
+.state-unset {
+  color: var(--muted);
+}
+
+/* A state that is not the expected one gets colour; everything else does not.
+   state-bad is a node that must not be treated as healthy — including one whose
+   status is simply absent. */
+.state-bad {
+  color: var(--danger);
+}
+
+.state-warn {
+  color: var(--warn);
+}
+
+/* Two tables on one screen need air between them; a single rule beats a
+   per-view style block that the next screen would copy. */
+table + table {
+  margin-top: 28px;
+}
