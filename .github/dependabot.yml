@@ -70,6 +70,24 @@ updates:
       - dependency-name: "@types/node"
         update-types: ["version-update:semver-major"]
 
+  # The operator web surface (#371). It had NO dependabot entry, so its
+  # dependencies — the ones that ship to a browser — were the only unmonitored
+  # tree in the repository.
+  - package-ecosystem: npm
+    directory: /kanz-web
+    schedule: { interval: weekly }
+    open-pull-requests-limit: 5
+    groups:
+      web-deps:
+        patterns: ["*"]
+        update-types: [minor, patch]
+    # Same reasoning as kanz-bus above: @types/node's major IS the Node major it
+    # describes, and kanz-web/.nvmrc is the runtime pin. Raise both together or
+    # tsc will accept APIs the runtime does not have.
+    ignore:
+      - dependency-name: "@types/node"
+        update-types: ["version-update:semver-major"]
+
   # GitHub Actions pinned in the workflows (keep the supply chain of CI itself
   # current — the actions are part of the build's trust base).
   #

@@ -17,6 +17,7 @@ on:
     paths:
       - 'kanz/**'
       - 'kanz-py/**'
+      - 'kanz-web/**'
       - 'kanz-schemas/proto/**'
       - 'kanz-schemas/buf.yaml'
       - 'kanz-schemas/buf.gen.yaml'
@@ -629,6 +630,47 @@ jobs:
       - name: Test
         working-directory: kanz/ts/kanz-bus
         run: npm test
+
+  # THE OPERATOR SURFACE (#371). Nothing guarded kanz-web until this job: it was
+  # absent from every workflow, and the paths filter above did not even list it,
+  # so a pull request touching only the SPA ran NO checks whatsoever — a type
+  # error or a broken build reached main unremarked.
+  #
+  # There is no linter step because the repository has no JS/TS linter anywhere;
+  # the compiler is the quality gate, exactly as it is for kanz/ts/kanz-bus.
+  web:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          # Its OWN .nvmrc, not kanz-bus's: two independently versioned
+          # workspaces sharing one pin means bumping either one silently moves
+          # the other's runtime.
+          node-version-file: kanz-web/.nvmrc
+
+      # npm ci, not npm install: the lockfile is tracked, and ci fails on a
+      # lockfile that disagrees with package.json rather than quietly resolving
+      # something the developer never ran.
+      - name: Install
+        working-directory: kanz-web
+        run: npm ci --no-audit --no-fund
+
+      - name: Typecheck
+        working-directory: kanz-web
+        run: npm run typecheck
+
+      - name: Test
+        working-directory: kanz-web
+        run: npm test
+
+      # Build LAST and separately, so a failure here is distinguishable from a
+      # type error above — the BFF serves this output, and a bundle that does
+      # not build is a blank operator surface.
+      - name: Build
+        working-directory: kanz-web
+        run: npm run build
 
   # DEBT-01d SDK-hygiene guard (PARITY-07a). First check is always-on: the SDKs
   # are generated and published, never committed (EVT-15a), so any tracked
