@@ -217,9 +217,14 @@ func (a jwtAudience) has(want string) bool {
 // valid FOREVER — against a symmetric secret with no revocation path, on the
 // platform's sole identity authority. Absence must never be the permissive
 // case: "no expiry stated" and "expiry checked, and fine" looked identical, and
-// the more dangerous of the two was the one that cost nothing to mint. The OIDC
-// sibling gets this right for free (jwt.Expected.Time makes exp mandatory);
-// this arm had to be told.
+// the more dangerous of the two was the one that cost nothing to mint.
+//
+// This comment used to add that "the OIDC sibling gets this right for free
+// (jwt.Expected.Time makes exp mandatory)". THAT WAS FALSE, and it is why the
+// same defect sat unexamined on the production arm until #367. go-jose checks
+// expiry as `c.Expiry != nil && …`, so an absent claim skipped the check there
+// exactly as it did here. Both arms now refuse it explicitly — see the matching
+// note in pkg/auth/oidc.go.
 func (a *JWTAuthenticator) Authenticate(token string) (*Principal, error) {
 	parts := strings.Split(token, ".")
 	if len(parts) != 3 {

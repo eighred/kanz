@@ -276,6 +276,35 @@ func TestOIDCAuthenticate_Rejections(t *testing.T) {
 	}
 }
 
+// A TOKEN THAT OMITS exp ENTIRELY IS REFUSED (#367).
+//
+// This is NOT the "expired" case above, and the difference is the whole bug.
+// go-jose validates expiry as `c.Expiry != nil && …` (v4.1.4
+// jwt/validation.go:116), so an ABSENT claim skips the check rather than
+// failing it — precisely the `c.Expiry != 0 &&` shape #242 removed from the
+// HS256 arm. The comment recording that fix asserts this arm "gets it right for
+// free", which is why nobody looked.
+//
+// A token with no exp never becomes stale, so no rotation, logout or clock ever
+// invalidates it; the only remaining bound is the lifetime of the signing key.
+// On the OIDC arm that is the PRODUCTION path.
+func TestOIDCAuthenticate_ATokenWithNoExpiryClaimIsRefused(t *testing.T) {
+	f := newOIDCFixture(t)
+	s := newSigner(t, "k1")
+	f.publish(s.jwk())
+	a := f.auth(t, nil)
+
+	c := baseClaims(f.srv.URL)
+	c.Expiry = nil // absent, not past — baseClaims always sets one
+
+	_, err := a.Authenticate(context.Background(), s.sign(t, c, nil))
+	if !errors.Is(err, ErrUnauthenticated) {
+		t.Fatalf("Authenticate(token with no exp) = %v, want ErrUnauthenticated.\n\n"+
+			"A token with no expiry is a permanent credential: nothing about it ever becomes "+
+			"stale, so no rotation, logout or key roll invalidates it.", err)
+	}
+}
+
 func TestOIDCAuthenticate_KeyRotation(t *testing.T) {
 	f := newOIDCFixture(t)
 	k1 := newSigner(t, "k1")
