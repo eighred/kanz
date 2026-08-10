@@ -26,7 +26,7 @@ import (
 	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/sdk/resource"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
-	semconv "go.opentelemetry.io/otel/semconv/v1.41.0"
+	semconv "go.opentelemetry.io/otel/semconv/v1.43.0"
 	"go.opentelemetry.io/otel/trace"
 )
 
@@ -81,6 +81,18 @@ func New(ctx context.Context, cfg Config, base slog.Handler) (*Provider, error) 
 		collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}),
 	)
 
+	// THE semconv IMPORT VERSION ABOVE MUST TRACK THE OTEL SDK, and this Merge is
+	// where a mismatch surfaces. resource.Default() carries the schema URL of the
+	// SDK version in go.mod, and Merge REFUSES to combine two resources whose
+	// schema URLs differ rather than silently picking one — so bumping
+	// go.opentelemetry.io/otel without moving the semconv import returns
+	// "conflicting Schema URL" here, New fails, and every service exits at
+	// startup with observability init failed.
+	//
+	// That is what otel 1.44 -> 1.45 did: the SDK moved to schema 1.43.0 while
+	// this import still said 1.41.0. The four tests in this package catch it, but
+	// only if they run — CI's go job starts the OMS on the bus BEFORE the test
+	// step, so the first symptom was a service that would not boot.
 	res, err := resource.Merge(resource.Default(), resource.NewWithAttributes(
 		semconv.SchemaURL,
 		semconv.ServiceName(cfg.ServiceName),
