@@ -266,6 +266,22 @@ func (a *OIDCAuthenticator) Authenticate(ctx context.Context, token string) (*Pr
 	if err := std.ValidateWithLeeway(expected, a.cfg.Leeway); err != nil {
 		return nil, ErrUnauthenticated
 	}
+	// exp IS MANDATORY, AND ValidateWithLeeway DOES NOT MAKE IT SO (#367).
+	//
+	// go-jose checks expiry as `c.Expiry != nil && …` (v4.1.4
+	// jwt/validation.go:116), so a token that simply OMITS the claim skips the
+	// check rather than failing it — the same shape #242 removed from the HS256
+	// arm, where the comment recording that fix wrongly asserted this arm got it
+	// right for free.
+	//
+	// The consequence is not a longer-lived token, it is an unbounded one:
+	// nothing about it ever becomes stale, so no rotation, logout or clock
+	// invalidates it and the only remaining bound is the signing key's lifetime.
+	// This is the PRODUCTION arm, and it must not depend on its issuer being
+	// well-behaved.
+	if std.Expiry == nil {
+		return nil, ErrUnauthenticated
+	}
 	if std.Subject == "" {
 		return nil, ErrUnauthenticated
 	}
