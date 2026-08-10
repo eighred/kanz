@@ -548,6 +548,39 @@ jobs:
           PYTHONPATH: ${{ github.workspace }}/kanz-schemas/gen/python:${{ github.workspace }}/kanz-py
         run: pytest kanz-py/tests -q
 
+      # THE PAIR THAT ACTUALLY SHIPS, WHICH NOTHING ELSE HERE EXERCISES.
+      #
+      # Every step above installs unpinned (`pip install grpcio-tools ...`), so
+      # this job tests whatever PyPI served today — not the hash-pinned
+      # toolchain in requirements-codegen.txt that emits /app/gen, nor the
+      # runtime in requirements.txt that has to import it. A green run said
+      # nothing about the image.
+      #
+      # It is the gencode/runtime pair that can break: protobuf's
+      # ValidateProtobufRuntimeVersion rejects a runtime OLDER than the gencode,
+      # so a codegen bump that outruns the runtime lock fails at import — in the
+      # deployed container, on the first message it decodes, not here.
+      #
+      # Two venvs because that is the shape of the Dockerfile: the builder
+      # toolchain never enters the runtime layer, and installing both together
+      # would let one satisfy the other's constraint and prove nothing.
+      - name: Prove the pinned codegen and runtime agree
+        run: |
+          set -euo pipefail
+          python -m venv /tmp/codegen
+          /tmp/codegen/bin/pip install --quiet --no-cache-dir --require-hashes \
+            --only-binary=:all: -r kanz-py/requirements-codegen.txt
+          mkdir -p /tmp/gen
+          /tmp/codegen/bin/python -m grpc_tools.protoc -I kanz-schemas/proto \
+            --python_out=/tmp/gen --pyi_out=/tmp/gen --grpc_python_out=/tmp/gen \
+            $(find kanz-schemas/proto -name '*.proto')
+          python -m venv /tmp/runtime
+          /tmp/runtime/bin/pip install --quiet --no-cache-dir --require-hashes \
+            --only-binary=:all: -r kanz-py/requirements.txt
+          echo "gencode: $(grep -m1 -h 'Protobuf Python Version' /tmp/gen/common/v1/money_pb2.py)"
+          /tmp/runtime/bin/python -c "import google.protobuf; print('runtime:', google.protobuf.__version__)"
+          PYTHONPATH=/tmp/gen /tmp/runtime/bin/python -c "import envelope.v1.envelope_pb2, domain.v1.portfolio_pb2, inference.v1.inference_service_pb2_grpc; print('the shipped gencode imports under the shipped runtime')"
+
   ts:
     runs-on: ubuntu-latest
     steps:
