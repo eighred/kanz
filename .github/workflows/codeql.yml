@@ -40,9 +40,25 @@ jobs:
     # which is the property that matters. Scanning resumes on its own the next
     # time the repo is public — there is nothing to remember to switch back.
     #
-    # To scan WHILE private, enable Advanced Security on the repository and
-    # delete this condition; nothing else here changes.
-    if: github.event.repository.visibility == 'public'
+    # PAYING FOR IT MUST BE ENOUGH — you should not have to remember to edit this
+    # file too. GitHub exposes no context for 'is Advanced Security enabled', so
+    # the switch is a repository VARIABLE you set in the same sitting as the
+    # licence:
+    #
+    #   Settings -> Security -> enable GitHub Advanced Security
+    #   Settings -> Secrets and variables -> Actions -> Variables
+    #     ADVANCED_SECURITY_ENABLED = true
+    #
+    # With that set, these jobs run on a PRIVATE repository too, and this file
+    # needs no edit. Without it — and while public — scanning runs anyway, so
+    # forgetting the variable can only ever cost scanning you are not paying for.
+    #
+    # The failure mode of a WRONG variable is the honest one: set it true without
+    # the licence and the jobs go red again with the same message, which is the
+    # state before this change and not a worse one.
+    if: >-
+      github.event.repository.visibility == 'public' ||
+      vars.ADVANCED_SECURITY_ENABLED == 'true'
     # Runner size impacts CodeQL analysis time. To learn more, please see:
     #   - https://gh.io/recommended-hardware-resources-for-running-codeql
     #   - https://gh.io/supported-runners-and-hardware-resources
