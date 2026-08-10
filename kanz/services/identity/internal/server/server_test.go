@@ -1,0 +1,391 @@
+package server
+
+// THE CREDENTIAL SURFACE (#364).
+//
+// Every test here guards a property whose failure is invisible from outside: the
+// login still works, the tests still pass, and the only difference is that the
+// endpoint has become an oracle — for who exists, for whether an invite was
+// offered, or for a password given enough attempts.
+
+import (
+	"bytes"
+	"context"
+	"encoding/base64"
+	"encoding/json"
+	"fmt"
+	"io"
+	"log/slog"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+	"time"
+
+	"golang.org/x/crypto/argon2"
+
+	"github.com/eighred/kanz/internal/identity"
+)
+
+// --- doubles ----------------------------------------------------------------
+
+type fakeStore struct {
+	users     map[string]*identity.User
+	redeemErr error
+	redeemed  *identity.User
+	updated   map[string]identity.Hash
+}
+
+func (f *fakeStore) UserBySubject(_ context.Context, subject string) (*identity.User, error) {
+	u, ok := f.users[subject]
+	if !ok {
+		return nil, identity.ErrUserNotFound
+	}
+	return u, nil
+}
+
+func (f *fakeStore) UpdateCredential(_ context.Context, subject string, cred identity.Hash, _ time.Time) error {
+	if f.updated == nil {
+		f.updated = map[string]identity.Hash{}
+	}
+	f.updated[subject] = cred
+	return nil
+}
+
+func (f *fakeStore) Redeem(_ context.Context, _ string, _ identity.Hash, _ time.Time) (*identity.User, error) {
+	if f.redeemErr != nil {
+		return nil, f.redeemErr
+	}
+	return f.redeemed, nil
+}
+
+type fakeMinter struct{ minted int }
+
+func (m *fakeMinter) Mint(u *identity.User) (string, time.Time, error) {
+	m.minted++
+	return "token-for-" + u.Subject, time.Now().Add(time.Hour), nil
+}
+
+// allowN permits the first n attempts per key, then refuses.
+type allowN struct {
+	n    int
+	seen map[string]int
+}
+
+func (a *allowN) Allow(k string) bool {
+	if a.seen == nil {
+		a.seen = map[string]int{}
+	}
+	a.seen[k]++
+	return a.seen[k] <= a.n
+}
+
+func quiet() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }
+
+func testServer(t *testing.T, st *fakeStore, lim Limiter) (*Server, *fakeMinter) {
+	t.Helper()
+	m := &fakeMinter{}
+	if lim == nil {
+		lim = &allowN{n: 100}
+	}
+	s, err := New(st, m, lim, func() any { return map[string]any{"keys": []any{}} }, quiet())
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	return s, m
+}
+
+func post(t *testing.T, s *Server, path string, body any) *httptest.ResponseRecorder {
+	t.Helper()
+	raw, err := json.Marshal(body)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	mux := http.NewServeMux()
+	s.Routes(mux)
+	req := httptest.NewRequest(http.MethodPost, path, bytes.NewReader(raw))
+	rr := httptest.NewRecorder()
+	mux.ServeHTTP(rr, req)
+	return rr
+}
+
+func userWith(t *testing.T, subject, password string, status identity.Status) *identity.User {
+	t.Helper()
+	h, err := identity.HashCredential(password)
+	if err != nil {
+		t.Fatalf("HashCredential: %v", err)
+	}
+	return &identity.User{
+		Subject: subject, Tenant: "acme", Roles: []string{"kanz-trader"},
+		Portfolios: []string{"pf-1"}, Credential: h, Status: status,
+	}
+}
+
+// --- login ------------------------------------------------------------------
+
+func TestAValidCredentialIssuesAToken(t *testing.T) {
+	st := &fakeStore{users: map[string]*identity.User{
+		"user:alice": userWith(t, "user:alice", "correct password", identity.StatusActive),
+	}}
+	s, m := testServer(t, st, nil)
+
+	rr := post(t, s, "/login", loginRequest{Subject: "user:alice", Credential: "correct password"})
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (body %s)", rr.Code, rr.Body.String())
+	}
+	var got tokenResponse
+	if err := json.Unmarshal(rr.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.Token == "" || got.Subject != "user:alice" || got.Tenant != "acme" {
+		t.Fatalf("response = %+v, want a token for user:alice/acme", got)
+	}
+	if m.minted != 1 {
+		t.Errorf("minted %d tokens, want 1", m.minted)
+	}
+}
+
+// AN UNKNOWN SUBJECT AND A WRONG PASSWORD ARE INDISTINGUISHABLE.
+//
+// Same status, same body. A caller who can tell them apart can enumerate the
+// platform's users — which here is a fund's traders and operators, a list worth
+// having before a single password is guessed.
+func TestAnUnknownSubjectAndAWrongPasswordAnswerIdentically(t *testing.T) {
+	st := &fakeStore{users: map[string]*identity.User{
+		"user:alice": userWith(t, "user:alice", "correct password", identity.StatusActive),
+	}}
+	s, _ := testServer(t, st, nil)
+
+	unknown := post(t, s, "/login", loginRequest{Subject: "user:nobody", Credential: "whatever"})
+	wrong := post(t, s, "/login", loginRequest{Subject: "user:alice", Credential: "not it"})
+
+	if unknown.Code != http.StatusUnauthorized || wrong.Code != http.StatusUnauthorized {
+		t.Fatalf("statuses = %d / %d, want 401 / 401", unknown.Code, wrong.Code)
+	}
+	if unknown.Body.String() != wrong.Body.String() {
+		t.Fatalf("bodies differ:\n  unknown subject: %s  wrong password : %s\n"+
+			"Any difference is a user-enumeration oracle.", unknown.Body.String(), wrong.Body.String())
+	}
+	if strings.Contains(strings.ToLower(unknown.Body.String()), "unknown") ||
+		strings.Contains(strings.ToLower(unknown.Body.String()), "no such") {
+		t.Errorf("the response names the reason: %s", unknown.Body.String())
+	}
+}
+
+// A DISABLED ACCOUNT IS REFUSED — and only after its credential is checked, so
+// its existence is not detectable without knowing the password.
+func TestADisabledAccountCannotLogIn(t *testing.T) {
+	st := &fakeStore{users: map[string]*identity.User{
+		"user:bob": userWith(t, "user:bob", "correct password", identity.StatusDisabled),
+	}}
+	s, m := testServer(t, st, nil)
+
+	rr := post(t, s, "/login", loginRequest{Subject: "user:bob", Credential: "correct password"})
+	if rr.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401 — a disabled account must not obtain new authority", rr.Code)
+	}
+	if m.minted != 0 {
+		t.Fatalf("a token was minted for a disabled account")
+	}
+}
+
+// THE LIMITER IS CONSULTED, and exhausting it answers 429 rather than 401.
+//
+// Without this the endpoint is an offline guessing oracle that answers as fast
+// as Argon2id allows — and nothing upstream provides a bound, because the
+// gateway's quota middleware runs after authentication and never sees an
+// anonymous request.
+func TestLoginIsRateLimited(t *testing.T) {
+	st := &fakeStore{users: map[string]*identity.User{
+		"user:alice": userWith(t, "user:alice", "correct password", identity.StatusActive),
+	}}
+	s, _ := testServer(t, st, &allowN{n: 2})
+
+	for i := range 2 {
+		if rr := post(t, s, "/login", loginRequest{Subject: "user:alice", Credential: "wrong"}); rr.Code != http.StatusUnauthorized {
+			t.Fatalf("attempt %d = %d, want 401", i, rr.Code)
+		}
+	}
+	rr := post(t, s, "/login", loginRequest{Subject: "user:alice", Credential: "correct password"})
+	if rr.Code != http.StatusTooManyRequests {
+		t.Fatalf("status after the budget = %d, want 429.\n\n"+
+			"Note the third attempt used the CORRECT password: the limiter must refuse before "+
+			"the credential is examined, or it bounds nothing.", rr.Code)
+	}
+}
+
+// A NIL LIMITER IS REFUSED AT CONSTRUCTION rather than defaulted to permissive.
+func TestAServerCannotBeBuiltWithoutALimiter(t *testing.T) {
+	st := &fakeStore{}
+	if _, err := New(st, &fakeMinter{}, nil, func() any { return nil }, quiet()); err == nil {
+		t.Fatal("New accepted a nil limiter — an unbounded credential-guessing endpoint is " +
+			"indistinguishable from a working one until someone uses it")
+	}
+	if _, err := New(nil, &fakeMinter{}, &allowN{n: 1}, func() any { return nil }, quiet()); err == nil {
+		t.Error("New accepted a nil store")
+	}
+	if _, err := New(st, nil, &allowN{n: 1}, func() any { return nil }, quiet()); err == nil {
+		t.Error("New accepted a nil minter")
+	}
+}
+
+// A SUCCESSFUL LOGIN UPGRADES A WEAK CREDENTIAL IN PLACE.
+//
+// The fixture derives a REAL hash under deliberately weaker parameters, rather
+// than doctoring a current one's parameter string — a doctored hash no longer
+// matches its own digest, so the login fails and the upgrade branch is never
+// reached. The first version of this test did exactly that and asserted nothing.
+//
+// The PHC format is spelled out here because there is no exported way to mint a
+// weak hash, and mustn't be: production has one cost, and the only reason to
+// construct another is to prove the upgrade path works.
+func TestASuccessfulLoginRehashesAnOlderCredential(t *testing.T) {
+	const pw = "correct password"
+	salt := []byte("0123456789abcdef")
+	key := argon2.IDKey([]byte(pw), salt, 1, 8*1024, 1, 32)
+	b64 := base64.RawStdEncoding.EncodeToString
+	weak := identity.Hash(fmt.Sprintf("$argon2id$v=%d$m=%d,t=%d,p=%d$%s$%s",
+		argon2.Version, 8*1024, 1, 1, b64(salt), b64(key)))
+
+	// NON-VACUITY, both halves: it must verify (or the login fails for the wrong
+	// reason) and it must be weaker than current (or there is nothing to upgrade).
+	if err := identity.Verify(weak, pw); err != nil {
+		t.Fatalf("the weak fixture does not verify: %v — the login would fail before reaching "+
+			"the rehash branch, and this test would prove nothing", err)
+	}
+	if !identity.NeedsRehash(weak) {
+		t.Fatal("the fixture is not weaker than the current parameters")
+	}
+
+	u := userWith(t, "user:alice", pw, identity.StatusActive)
+	u.Credential = weak
+	st := &fakeStore{users: map[string]*identity.User{"user:alice": u}}
+	s, _ := testServer(t, st, nil)
+
+	rr := post(t, s, "/login", loginRequest{Subject: "user:alice", Credential: pw})
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (body %s)", rr.Code, rr.Body.String())
+	}
+
+	upgraded, ok := st.updated["user:alice"]
+	if !ok {
+		t.Fatal("the credential was not rewritten.\n\n" +
+			"A successful login is the only moment the plaintext exists to re-derive with, so " +
+			"without this the accounts that predate a cost raise stay on the weakest parameters " +
+			"forever — and those are the oldest accounts.")
+	}
+	if identity.NeedsRehash(upgraded) {
+		t.Error("the rewritten credential is STILL weaker than current — the upgrade wrote back " +
+			"the old parameters")
+	}
+	if err := identity.Verify(upgraded, pw); err != nil {
+		t.Fatalf("the rewritten credential does not verify the same password: %v — the user is "+
+			"now locked out by a hardening step", err)
+	}
+}
+
+// A CURRENT CREDENTIAL IS NOT REWRITTEN, so an ordinary login stays a read path.
+func TestALoginWithACurrentCredentialWritesNothing(t *testing.T) {
+	st := &fakeStore{users: map[string]*identity.User{
+		"user:alice": userWith(t, "user:alice", "correct password", identity.StatusActive),
+	}}
+	s, _ := testServer(t, st, nil)
+
+	if rr := post(t, s, "/login", loginRequest{Subject: "user:alice", Credential: "correct password"}); rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rr.Code)
+	}
+	if len(st.updated) != 0 {
+		t.Fatalf("a current credential was rewritten (%v) — every login would become a write, "+
+			"on the one endpoint an attacker can call without authenticating", st.updated)
+	}
+}
+
+// --- redemption -------------------------------------------------------------
+
+func TestRedeemingAnInviteIssuesAToken(t *testing.T) {
+	st := &fakeStore{redeemed: userWith(t, "user:carol", "unused", identity.StatusActive)}
+	s, m := testServer(t, st, nil)
+
+	rr := post(t, s, "/invites/redeem", redeemRequest{Token: "raw-token", Credential: "chosen password"})
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (body %s)", rr.Code, rr.Body.String())
+	}
+	if m.minted != 1 {
+		t.Errorf("minted %d, want 1 — redemption signs the invitee straight in", m.minted)
+	}
+}
+
+// EVERY REFUSAL LOOKS THE SAME to someone holding only a link.
+func TestEveryInviteRefusalAnswersIdentically(t *testing.T) {
+	var bodies []string
+	for _, err := range []error{
+		identity.ErrInviteNotFound,
+		identity.ErrInviteExpired,
+		identity.ErrInviteAlreadyRedeemed,
+	} {
+		st := &fakeStore{redeemErr: err}
+		s, _ := testServer(t, st, nil)
+		rr := post(t, s, "/invites/redeem", redeemRequest{Token: "x", Credential: "pw"})
+		if rr.Code != http.StatusUnauthorized {
+			t.Fatalf("%v: status = %d, want 401", err, rr.Code)
+		}
+		bodies = append(bodies, rr.Body.String())
+	}
+	for i := 1; i < len(bodies); i++ {
+		if bodies[i] != bodies[0] {
+			t.Fatalf("refusal bodies differ:\n  %s  %s\n"+
+				"Distinguishing 'expired' from 'unknown' confirms an account was offered to somebody.",
+				bodies[0], bodies[i])
+		}
+	}
+}
+
+func TestRedeemingWithoutACredentialIsRefused(t *testing.T) {
+	st := &fakeStore{redeemed: userWith(t, "user:carol", "x", identity.StatusActive)}
+	s, m := testServer(t, st, nil)
+
+	rr := post(t, s, "/invites/redeem", redeemRequest{Token: "raw", Credential: ""})
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 — an account with an empty credential is an account "+
+			"anyone can use", rr.Code)
+	}
+	if m.minted != 0 {
+		t.Error("a token was minted for an empty credential")
+	}
+}
+
+// --- shape ------------------------------------------------------------------
+
+func TestMalformedAndOversizedBodiesAreRefused(t *testing.T) {
+	s, _ := testServer(t, &fakeStore{}, nil)
+	mux := http.NewServeMux()
+	s.Routes(mux)
+
+	for name, body := range map[string]string{
+		"not json":      "{",
+		"unknown field": `{"subject":"a","credential":"b","admin":true}`,
+		"oversized":     `{"subject":"` + strings.Repeat("a", 9<<10) + `"}`,
+	} {
+		req := httptest.NewRequest(http.MethodPost, "/login", strings.NewReader(body))
+		rr := httptest.NewRecorder()
+		mux.ServeHTTP(rr, req)
+		if rr.Code != http.StatusBadRequest {
+			t.Errorf("%s: status = %d, want 400", name, rr.Code)
+		}
+	}
+}
+
+func TestTheJWKSIsServed(t *testing.T) {
+	s, _ := testServer(t, &fakeStore{}, nil)
+	mux := http.NewServeMux()
+	s.Routes(mux)
+
+	req := httptest.NewRequest(http.MethodGet, "/jwks.json", nil)
+	rr := httptest.NewRecorder()
+	mux.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 — the gateway cannot verify a single token without this", rr.Code)
+	}
+	if ct := rr.Header().Get("Content-Type"); !strings.Contains(ct, "application/json") {
+		t.Errorf("content-type = %q", ct)
+	}
+}

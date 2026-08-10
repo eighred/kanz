@@ -1,0 +1,276 @@
+// Package server is the identity service's HTTP surface (#364).
+//
+// THREE ROUTES, AND THE SPLIT BETWEEN THEM IS THE SECURITY MODEL.
+//
+//	POST /login          unauthenticated — a person exchanges a credential for a token
+//	POST /invites/redeem unauthenticated — an invitee exchanges a link for an account
+//	GET  /jwks.json      unauthenticated — the gateway fetches the public key
+//
+// All three are unauthenticated BY NECESSITY: you cannot require a token from
+// someone who is trying to obtain one, and the gateway cannot present a
+// credential to fetch the key it would need in order to verify credentials.
+//
+// WHY THIS IS A SERVICE AND NOT A HANDLER INSIDE THE GATEWAY. The gateway is the
+// internet-facing process and the sole identity authority — it would have been
+// the obvious host. It must not be, because it must NOT HOLD THE SIGNING KEY:
+// slice 3 made issuance asymmetric precisely so the verifier cannot forge, and
+// putting the private key in the verifier would hand that property straight back.
+// So the key and the credential store live here, behind the gateway, and the
+// gateway holds only the public half it fetches from /jwks.json.
+//
+// PROVISIONING IS NOT HERE. Creating invites is an operator action and belongs
+// on the authenticated control plane; these routes are the ones that must work
+// for someone holding nothing.
+package server
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"log/slog"
+	"net/http"
+	"time"
+
+	"github.com/eighred/kanz/internal/identity"
+)
+
+// Store is the persistence this server needs — the subset of
+// identity.Postgres it actually calls, so a test can substitute one.
+type Store interface {
+	UserBySubject(ctx context.Context, subject string) (*identity.User, error)
+	UpdateCredential(ctx context.Context, subject string, cred identity.Hash, now time.Time) error
+	Redeem(ctx context.Context, rawToken string, cred identity.Hash, now time.Time) (*identity.User, error)
+}
+
+// Minter issues a bearer token for an account.
+type Minter interface {
+	Mint(u *identity.User) (string, time.Time, error)
+}
+
+// Limiter decides whether an unauthenticated attempt may proceed.
+//
+// IT IS A REQUIRED DEPENDENCY, not an option, because nothing upstream provides
+// one. The gateway's Quota middleware sits AFTER its auth middleware, so an
+// anonymous request never reaches it, and middleware.RateLimit is wired nowhere.
+// A login endpoint with no limiter is an offline password-guessing oracle that
+// answers as fast as Argon2id allows.
+type Limiter interface {
+	// Allow reports whether an attempt keyed by k may proceed.
+	Allow(k string) bool
+}
+
+// Server serves the credential surface.
+type Server struct {
+	store   Store
+	minter  Minter
+	limiter Limiter
+	logger  *slog.Logger
+	jwks    func() any
+	now     func() time.Time
+
+	// decoyHash is verified against when a subject does not exist, so a caller
+	// cannot tell "no such account" from "wrong password" BY TIMING. Without it
+	// the unknown-subject path returns in microseconds while the known-subject
+	// path spends Argon2id's full cost, and that difference enumerates the
+	// platform's users — which on this system is a fund's traders and operators.
+	decoyHash identity.Hash
+}
+
+// New builds the server. Every dependency is required: a nil limiter in
+// particular would turn the login route into an unbounded guessing oracle, and
+// defaulting it to "allow everything" is the kind of convenience that is
+// indistinguishable from working.
+func New(store Store, minter Minter, limiter Limiter, jwks func() any, logger *slog.Logger) (*Server, error) {
+	switch {
+	case store == nil:
+		return nil, errors.New("identity/server: store required")
+	case minter == nil:
+		return nil, errors.New("identity/server: minter required")
+	case limiter == nil:
+		return nil, errors.New("identity/server: limiter required — the gateway's quota middleware " +
+			"runs after authentication and never sees an anonymous request, so this is the only " +
+			"bound on credential guessing")
+	case jwks == nil:
+		return nil, errors.New("identity/server: jwks source required")
+	}
+	if logger == nil {
+		logger = slog.Default()
+	}
+	// A hash of a value nobody can present. Its only job is to cost the same as
+	// a real verification.
+	decoy, err := identity.HashCredential("decoy-credential-that-matches-nothing")
+	if err != nil {
+		return nil, err
+	}
+	return &Server{
+		store: store, minter: minter, limiter: limiter, logger: logger,
+		jwks: jwks, now: time.Now, decoyHash: decoy,
+	}, nil
+}
+
+// Routes registers the surface on a mux.
+func (s *Server) Routes(mux *http.ServeMux) {
+	mux.HandleFunc("POST /login", s.login)
+	mux.HandleFunc("POST /invites/redeem", s.redeem)
+	mux.HandleFunc("GET /jwks.json", s.jwksHandler)
+}
+
+type loginRequest struct {
+	Subject    string `json:"subject"`
+	Credential string `json:"credential"`
+}
+
+type redeemRequest struct {
+	Token      string `json:"token"`
+	Credential string `json:"credential"`
+}
+
+type tokenResponse struct {
+	Token   string    `json:"token"`
+	Expires time.Time `json:"expires_at"`
+	Subject string    `json:"subject"`
+	Tenant  string    `json:"tenant"`
+}
+
+func (s *Server) login(w http.ResponseWriter, r *http.Request) {
+	var req loginRequest
+	if !decode(w, r, &req) {
+		return
+	}
+	if !s.limiter.Allow(rateKey(r, req.Subject)) {
+		// 429 rather than 401: the caller may hold a correct credential and must
+		// be told to wait rather than that it was wrong.
+		writeErr(w, http.StatusTooManyRequests, "too many attempts")
+		return
+	}
+
+	u, err := s.store.UserBySubject(r.Context(), req.Subject)
+	if err != nil {
+		// UNKNOWN SUBJECT STILL PAYS THE ARGON2 COST. Returning here directly
+		// would make the unknown case orders of magnitude faster than the known
+		// one, and that timing difference is a user-enumeration oracle.
+		_ = identity.Verify(s.decoyHash, req.Credential)
+		s.deny(w, req.Subject, "unknown subject")
+		return
+	}
+	if err := identity.Verify(u.Credential, req.Credential); err != nil {
+		s.deny(w, req.Subject, "credential mismatch")
+		return
+	}
+	if !u.Active() {
+		// Checked AFTER the credential, so a disabled account is not detectable
+		// without knowing its password.
+		s.deny(w, req.Subject, "account disabled")
+		return
+	}
+
+	// The cost parameters may have been raised since this credential was stored;
+	// a successful login is the only moment the plaintext is available to
+	// re-derive with. Failure here must not fail the login — the user is
+	// authenticated either way, and refusing them because an upgrade write
+	// failed would turn a hardening step into an outage.
+	if identity.NeedsRehash(u.Credential) {
+		if fresh, herr := identity.HashCredential(req.Credential); herr == nil {
+			if uerr := s.store.UpdateCredential(r.Context(), u.Subject, fresh, s.now()); uerr != nil {
+				s.logger.Warn("credential rehash failed; the account still uses older parameters",
+					"subject", u.Subject, "err", uerr)
+			}
+		}
+	}
+
+	s.issue(w, u)
+}
+
+func (s *Server) redeem(w http.ResponseWriter, r *http.Request) {
+	var req redeemRequest
+	if !decode(w, r, &req) {
+		return
+	}
+	if !s.limiter.Allow(rateKey(r, "")) {
+		writeErr(w, http.StatusTooManyRequests, "too many attempts")
+		return
+	}
+	if req.Credential == "" {
+		writeErr(w, http.StatusBadRequest, "a credential is required")
+		return
+	}
+
+	cred, err := identity.HashCredential(req.Credential)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, "a credential is required")
+		return
+	}
+	u, err := s.store.Redeem(r.Context(), req.Token, cred, s.now())
+	if err != nil {
+		// ONE ANSWER FOR EVERY REFUSAL. Unknown, expired and already-redeemed are
+		// indistinguishable to someone holding only a link: telling them an
+		// invite exists confirms an account was offered to somebody.
+		s.logger.Info("invite redemption refused", "err", err)
+		writeErr(w, http.StatusUnauthorized, "that invitation is not valid")
+		return
+	}
+	s.issue(w, u)
+}
+
+// issue mints and returns a token. The response deliberately carries the subject
+// and tenant so a client need not decode the token to know who it is — the REPL
+// currently base64-decodes the payload WITHOUT verifying to answer /whoami.
+func (s *Server) issue(w http.ResponseWriter, u *identity.User) {
+	tok, expiry, err := s.minter.Mint(u)
+	if err != nil {
+		s.logger.Error("minting failed for an authenticated caller", "subject", u.Subject, "err", err)
+		writeErr(w, http.StatusInternalServerError, "could not issue a token")
+		return
+	}
+	writeJSON(w, http.StatusOK, tokenResponse{
+		Token: tok, Expires: expiry, Subject: u.Subject, Tenant: u.Tenant,
+	})
+}
+
+// deny answers every failed login identically.
+//
+// The REASON is logged and never returned. An operator needs to tell "nobody by
+// that name" from "wrong password"; the caller must not, because the difference
+// is precisely what turns a login form into a list of the fund's staff.
+func (s *Server) deny(w http.ResponseWriter, subject, reason string) {
+	s.logger.Info("login refused", "subject", subject, "reason", reason)
+	writeErr(w, http.StatusUnauthorized, "invalid credentials")
+}
+
+func (s *Server) jwksHandler(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, http.StatusOK, s.jwks())
+}
+
+// rateKey buckets an attempt. Subject first so one account's guesses do not
+// exhaust every caller's budget behind a shared ingress IP, falling back to the
+// peer address when there is no subject to key on.
+func rateKey(r *http.Request, subject string) string {
+	if subject != "" {
+		return "s:" + subject
+	}
+	return "a:" + r.RemoteAddr
+}
+
+// maxBody bounds a credential request. A login body is small; anything larger is
+// not a login.
+const maxBody = 8 << 10
+
+func decode(w http.ResponseWriter, r *http.Request, into any) bool {
+	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxBody))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(into); err != nil {
+		writeErr(w, http.StatusBadRequest, "malformed request")
+		return false
+	}
+	return true
+}
+
+func writeJSON(w http.ResponseWriter, code int, body any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(code)
+	_ = json.NewEncoder(w).Encode(body)
+}
+
+func writeErr(w http.ResponseWriter, code int, msg string) {
+	writeJSON(w, code, map[string]string{"error": msg})
+}
