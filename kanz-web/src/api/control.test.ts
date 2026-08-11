@@ -1,6 +1,6 @@
-import { describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { ApiError } from './client'
-import { describe as describeError, ready, type Node } from './control'
+import { control, describe as describeError, ready, type Node } from './control'
 
 // A NODE IS READY ONLY IF IT SAYS SO.
 //
@@ -47,5 +47,59 @@ describe('failures an operator can act on', () => {
   it('handles a non-ApiError without claiming to know what happened', () => {
     expect(describeError(new TypeError('network down'))).toBe('network down')
     expect(describeError('nonsense')).toBe('the request failed')
+  })
+})
+
+// THE ACTION ROUTES ADDRESS A NODE BY PATH, AND THE PATH IS THE ONLY IDENTITY.
+//
+// The gateway takes the name from the URL and overwrites whatever the body
+// carried — "two spellings of the same identity is a way to drain the node you
+// were not looking at". These pin the client to the same single spelling, and
+// pin the ONE action that carries a body to carrying only its region.
+describe('node actions address the node through the path', () => {
+  let calls: Array<{ method: string; url: string; body?: string }>
+
+  beforeEach(() => {
+    calls = []
+    vi.stubGlobal('fetch', (url: string, init: RequestInit) => {
+      calls.push({ method: init.method ?? 'GET', url, body: init.body as string | undefined })
+      return Promise.resolve(new Response('{}', { status: 200, headers: { 'content-type': 'application/json' } }))
+    })
+  })
+  afterEach(() => vi.unstubAllGlobals())
+
+  it('posts each action to the node it names', async () => {
+    await control.cordon('worker-1')
+    await control.uncordon('worker-1')
+    await control.drain('worker-1')
+
+    expect(calls.map((c) => `${c.method} ${c.url}`)).toEqual([
+      'POST /api/v1/control/nodes/worker-1/cordon',
+      'POST /api/v1/control/nodes/worker-1/uncordon',
+      'POST /api/v1/control/nodes/worker-1/drain',
+    ])
+  })
+
+  // The three reversible-or-inverse actions send NO body. A body would be a
+  // second place for a node name to live, which is exactly what the gateway
+  // guards against by overwriting it.
+  it('sends no body for cordon, uncordon or drain', async () => {
+    await control.cordon('worker-1')
+    await control.drain('worker-1')
+    expect(calls.every((c) => c.body === undefined)).toBe(true)
+  })
+
+  it('sends only the region on a move, never the node name', async () => {
+    await control.setRegion('worker-1', 'eu-west')
+
+    expect(calls[0]?.url).toBe('/api/v1/control/nodes/worker-1/region')
+    expect(JSON.parse(calls[0]?.body as string)).toEqual({ region: 'eu-west' })
+  })
+
+  // A node name is a Kubernetes object name today, so nothing needs escaping.
+  // Relying on that silently is how it stops being true.
+  it('encodes the name rather than trusting it to be path-safe', async () => {
+    await control.cordon('worker/../other')
+    expect(calls[0]?.url).toBe('/api/v1/control/nodes/worker%2F..%2Fother/cordon')
   })
 })
