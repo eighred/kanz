@@ -574,23 +574,72 @@ func (s *Service) handleSubmit(ctx context.Context, env *envelopepb.Envelope, pa
 		return err
 	}
 
-	status := commandpb.CommandOutcomeStatus_COMMAND_OUTCOME_STATUS_ACCEPTED
-	reason := "order admitted"
+	// THE TRAILING OUTCOME, AND WHICH TRANSACTION OWNS IT (#292).
+	//
+	// This was the last pair the issue named and the only one that was a DECISION
+	// rather than a mechanical conversion, because it is not a pair in the usual
+	// shape: the state this outcome reports was committed by work(), in
+	// transactions that closed before control returned here. There is no pending
+	// write to hand it to. So the question was never "convert it" but "which write
+	// owns it", and the honest answer differs by branch — because only one of the
+	// two branches has a write at all.
+	//
+	// It could NOT be pushed down into work(). work() is also called by resume()'s
+	// PENDING_NEW and re-drive branches, which deliberately publish no command
+	// outcome: a broker redelivery is not a second command to answer. Giving
+	// work()'s Saves this record would answer commands that were never asked, and
+	// stamping outcome_announced_at from there would tell a later resume() that a
+	// terminal order's outcome had been announced when nothing had announced it.
 	if st.GetStatus() == orderpb.OrderStatus_ORDER_STATUS_FILLED {
-		status = commandpb.CommandOutcomeStatus_COMMAND_OUTCOME_STATUS_EXECUTED
-		reason = "order filled"
+		// FILLED — IT RIDES THE MARKER SAVE, which is a write this branch was
+		// already doing. Two writes become one: the outcome the submitter is
+		// waiting on and the marker recording that it was answered now commit
+		// together, so the marker cannot claim an announcement that was never
+		// made, and the announcement cannot be lost while the marker says it
+		// happened. Before this, a publish that failed here left a FILLED order
+		// with the marker unset and the caller unanswered until resume() ran
+		// completeTerminalOutcome — which re-derives a generic outcome rather than
+		// this one.
+		//
+		// The fill's own FACT went out inside work()'s loop, flushed there, so the
+		// bus order is unchanged: fills first, then the outcome that closes the
+		// command.
+		fact, ferr := s.emitter.OutcomeFact(ctx, st.GetOrderId(),
+			commandpb.CommandOutcomeStatus_COMMAND_OUTCOME_STATUS_EXECUTED, "order filled", "", "", now)
+		if ferr != nil {
+			return ferr
+		}
+		if err := s.markOutcomeAnnounced(ctx, st, ver, now, []outbox.Record{fact}); err != nil {
+			return err
+		}
+		// Flushed where EmitOutcome stood — the submitter is waiting on this
+		// answer, and the record is durable either way.
+		_, ferr = s.relay.Flush(ctx, st.GetOrderId())
+		return ferr
 	}
-	if err := s.emitter.EmitOutcome(ctx, st.GetOrderId(), status, reason, "", "", now); err != nil {
-		return err
-	}
-	if st.GetStatus() == orderpb.OrderStatus_ORDER_STATUS_FILLED {
-		// The fill's FACT (inside s.work's loop, above) and this trailing
-		// outcome are both out — stamp outcome_announced_at so a redelivery
-		// of this SubmitOrder hits resume()'s genuine-duplicate branch
-		// instead of re-driving or re-announcing a finished order.
-		return s.markOutcomeAnnounced(ctx, st, ver, now)
-	}
-	return nil
+	// NOT FILLED — IT STAYS A DIRECT PUBLISH, and that is a decision, not an
+	// omission. The order is resting or working at a venue; nothing terminal has
+	// happened, so there is no state change accompanying this outcome and no
+	// marker it would be truthful to stamp (outcome_announced_at means a TERMINAL
+	// outcome was announced — setting it here would make a later fill's outcome
+	// look already-announced to resume(), and orderOutcomeAnnounced would send a
+	// redelivery of a genuinely unannounced FILLED order away). Enqueuing it would
+	// mean opening a transaction whose only purpose is to carry it — an UPDATE
+	// that changes no state and bumps the version every other writer is comparing
+	// against. That is the same trade EmitOutcome's own comment refuses for
+	// refuse() and outcomeReject(), and it is refused here for the same reason.
+	//
+	// WHAT THAT LEAVES, SAID RATHER THAN LEFT TO BE FOUND: if this publish fails,
+	// the order is durable and correctly announced — its ACCEPTED and ROUTED FACTs
+	// rode their own transactions — but the submitter never receives the answer to
+	// its command, and no compensator covers a NON-terminal outcome. The command
+	// nacks to the DLQ, where a redrive reaches resume(), which finds a live order
+	// and re-drives or leaves it without re-answering. That is a gap in command
+	// ANSWERING, not in the estate's record of the order, and closing it needs a
+	// place to record "this command was answered" for a non-terminal order —
+	// a fourth marker, which is the instalment pattern #292 exists to stop.
+	return s.emitter.EmitOutcome(ctx, st.GetOrderId(),
+		commandpb.CommandOutcomeStatus_COMMAND_OUTCOME_STATUS_ACCEPTED, "order admitted", "", "", now)
 }
 
 // resolveAccount answers: which exchange account may this portfolio spend from at this
@@ -984,11 +1033,59 @@ func (s *Service) handleCancel(ctx context.Context, payload []byte) error {
 	// quantities the close intent is built from.
 	s.closeAtVenue(ctx, st, now)
 
-	if err := s.store.Save(ctx, next, ver, nil); err != nil {
+	// THE CANCELLATION AND ITS ANNOUNCEMENT ARE NOW ONE WRITE (#292).
+	//
+	// This used to be Save(CANCELLED), then completeCancelAnnouncement's two
+	// publishes, then a third Save stamping cancel_announced_at. Four steps, three
+	// of which could fail after the ledger had already committed the cancellation
+	// — leaving an order the store calls CANCELLED that the world still believes
+	// is live and fillable. The marker plus this handler's own already-CANCELLED
+	// branch made that recoverable rather than lost, but recovery is not the same
+	// as it not happening: until the next redelivery arrived, risk carried
+	// exposure for a withdrawn order and tv-sync served it as working.
+	//
+	// BOTH RECORDS ARE BUILT BEFORE THE SAVE, the same discipline as admission and
+	// the fill folds: outbox.From refuses a record with no tenant, and that
+	// refusal has to stop the cancellation rather than commit one whose
+	// announcement could never be made. The venue withdrawal above has already
+	// happened either way — it is dispatched first on purpose, so the ledger never
+	// calls an order cancelled while it is still resting on the exchange — so a
+	// failure here nacks and the redelivery finds an order still live at the
+	// ledger and re-runs the whole transition.
+	cancelled, ferr := s.emitter.CancelledFact(ctx, next.GetOrderId(), cancelledQty, now)
+	if ferr != nil {
+		return ferr
+	}
+	outFact, ferr := s.emitter.OutcomeFact(ctx, next.GetOrderId(),
+		commandpb.CommandOutcomeStatus_COMMAND_OUTCOME_STATUS_EXECUTED, "order cancelled", "", "", now)
+	if ferr != nil {
+		return ferr
+	}
+	// cancel_announced_at IS STAMPED IN THE SAME WRITE, and its meaning changes
+	// with it — exactly as accepted_announced_at's did at admission. It used to
+	// mean "both publishes returned nil"; it now means "the announcement is
+	// committed for delivery", which is stronger, and it costs nothing because it
+	// rides the UPDATE that was happening anyway.
+	//
+	// THAT IS ALSO WHAT KEEPS THIS HANDLER'S OWN COMPENSATOR FROM FIRING ON ITS
+	// OWN WORK. The already-CANCELLED branch above republishes exactly when the
+	// marker is unset; because marker and outbox record land together, a cancel
+	// written by this code always has both, so that branch can only ever see a row
+	// from before this change. The two partition the population rather than
+	// overlapping on it — the same property admission has, and the reason the
+	// duplicate-FACT window completeCancelAnnouncement documents is no longer
+	// reachable from the live path.
+	next.CancelAnnouncedAt = timestamppb.New(now)
+	if err := s.store.Save(ctx, next, ver, []outbox.Record{cancelled, outFact}); err != nil {
 		return err
 	}
-	ver++
-	return s.completeCancelAnnouncement(ctx, next, ver, cancelledQty, now)
+	// Flushed where the publishes stood: the operator issuing the cancel is
+	// waiting on this outcome, so leaving it to the relay's tick would turn a
+	// synchronous withdrawal into one that appears to hang. The records are
+	// durable either way — this only decides whether the answer arrives now or on
+	// the next pass.
+	_, ferr = s.relay.Flush(ctx, next.GetOrderId())
+	return ferr
 }
 
 // completeCancelAnnouncement publishes the ORDER_CANCELLED FACT and the
@@ -996,19 +1093,44 @@ func (s *Service) handleCancel(ctx context.Context, payload []byte) error {
 // cancel_announced_at so a further redelivery hits the terminal-refusal branch
 // instead of resuming again.
 //
-// A DUPLICATE ORDER_CANCELLED FACT IS AN ACCEPTED TRADE-OFF. If EmitCancelled
-// below succeeds and the Save at the end of this function then fails, the next
-// redelivery re-enters here (cancel_announced_at is still unset) and re-emits
-// both EmitCancelled and EmitOutcome. That folds "order X is cancelled" twice,
-// which every downstream projection treats idempotently — versus the
-// alternative this replaces, which lost the FACT entirely and told the caller
-// REJECTED for a cancel that had already succeeded. Do not "fix" this into
-// exactly-once without a fill_id-style dedup on the FACT itself; that is a
-// larger change than this one.
+// IT IS NOW A COMPENSATOR FOR A CLOSED POPULATION (#292), and nothing else. The
+// live cancel above enqueues both FACTs in the same Save that writes the
+// CANCELLED state and stamps the marker with them, so no cancellation performed
+// by this code can reach here: the marker is set the instant the state is. What
+// CAN reach here is a row written by the previous code — CANCELLED, marker
+// unset, and nothing in the outbox behind it, because the announcement was two
+// independent publishes that failed. For those a direct publish is the only
+// thing that can announce them, which is why this stays.
 //
-// It is always called under the per-order lock (handleCancel and resume both
-// hold it), so the duplicate this documents is a REDELIVERY duplicate only —
-// never two goroutines announcing one cancellation concurrently.
+// # THE RETIREMENT CONDITION, STATED SO IT IS NOT GUESSED AT LATER
+//
+// This function, the already-CANCELLED branch in handleCancel that calls it, and
+// eventually field 18 of order/v1/order_events.proto can go when NO CANCELLED
+// ROW WITH cancel_announced_at UNSET CAN STILL EXIST. Unlike
+// reannounceAccepted's condition that is a bounded wait rather than an open one:
+// a CANCELLED order is terminal, so the population cannot grow once every pod
+// runs this build, and it is drained by redelivery rather than sitting forever
+// the way a resting PENDING_NEW order does. It is still an operational claim
+// about the data, not a code condition — `SELECT count(*) FROM orders WHERE
+// status = 5 /* CANCELLED */` with the marker unset is the query, and it is a
+// human's to run. The proto field goes LAST and separately: delete the code
+// first, ship it, then retire the field.
+//
+// A DUPLICATE ORDER_CANCELLED FACT IS AN ACCEPTED TRADE-OFF, ON THIS PATH ONLY.
+// If EmitCancelled below succeeds and the Save at the end of this function then
+// fails, the next redelivery re-enters here (cancel_announced_at is still unset)
+// and re-emits both EmitCancelled and EmitOutcome. That folds "order X is
+// cancelled" twice, which every downstream projection treats idempotently —
+// versus the alternative this replaces, which lost the FACT entirely and told
+// the caller REJECTED for a cancel that had already succeeded. Do not "fix" this
+// into exactly-once without a fill_id-style dedup on the FACT itself; that is a
+// larger change than this one, and it is now confined to a population that only
+// shrinks.
+//
+// It is always called under the per-order lock — handleCancel is its only
+// caller and takes that lock through awaitClaim before loading anything — so the
+// duplicate this documents is a REDELIVERY duplicate only, never two goroutines
+// announcing one cancellation concurrently.
 func (s *Service) completeCancelAnnouncement(ctx context.Context, st *orderpb.OrderState, ver int64, cancelledQty *commonpb.Decimal, now time.Time) error {
 	if err := s.emitter.EmitCancelled(ctx, st.GetOrderId(), cancelledQty, now); err != nil {
 		return err
@@ -1553,15 +1675,33 @@ func (s *Service) reannounceAccepted(ctx context.Context, st *orderpb.OrderState
 	return st, ver, nil
 }
 
-// markOutcomeAnnounced stamps outcome_announced_at on a terminal order whose
-// FACT and CommandOutcome have both just been published successfully, so a
+// markOutcomeAnnounced stamps outcome_announced_at on a terminal order, so a
 // later redelivery's resume() recognizes a genuine duplicate instead of
-// re-entering the reject/fill path that already completed. Mirrors
-// completeCancelAnnouncement's trailing Save for the cancel transition.
-func (s *Service) markOutcomeAnnounced(ctx context.Context, st *orderpb.OrderState, ver int64, t time.Time) error {
+// re-entering the reject/fill path that already completed.
+//
+// IT TAKES THE RECORDS THE MARKER IS ABOUT (#292), AND THAT IS THE POINT — the
+// same decision, for the same reason, as Store.Save carrying `announce` rather
+// than there being a second announcing variant beside it. The marker and the
+// announcement it asserts must land in ONE write or the marker is a claim about
+// something that may not have happened.
+//
+// Its two callers state opposite answers, and the difference is exactly the
+// difference between the live path and a compensator:
+//
+//   - handleSubmit's FILLED branch passes the outcome record. The marker then
+//     means "the outcome is committed for delivery" — a promise the relay keeps
+//     — rather than "a publish call returned nil a moment ago".
+//   - completeTerminalOutcome passes nil, because it has ALREADY published
+//     directly. It is repairing a row with no outbox record behind it, so there
+//     is nothing to enqueue; handing it a record would mean writing one for the
+//     case defined by not having one.
+//
+// nil is therefore a legitimate answer and not a default, which is why the
+// parameter is a slice rather than variadic: omitting it does not compile.
+func (s *Service) markOutcomeAnnounced(ctx context.Context, st *orderpb.OrderState, ver int64, t time.Time, announce []outbox.Record) error {
 	announced := cloneState(st)
 	announced.OutcomeAnnouncedAt = timestamppb.New(t)
-	return s.store.Save(ctx, announced, ver, nil)
+	return s.store.Save(ctx, announced, ver, announce)
 }
 
 // completeTerminalOutcome re-publishes the CommandOutcome for a SubmitOrder
@@ -1641,7 +1781,9 @@ func (s *Service) completeTerminalOutcome(ctx context.Context, st *orderpb.Order
 	if err := s.emitter.EmitOutcome(ctx, st.GetOrderId(), status, reason, code, "", now); err != nil {
 		return err
 	}
-	return s.markOutcomeAnnounced(ctx, st, ver, now)
+	// nil: this outcome has already gone out on the wire above. See
+	// markOutcomeAnnounced — a compensator has nothing to enqueue.
+	return s.markOutcomeAnnounced(ctx, st, ver, now, nil)
 }
 
 // adopt takes the venue's truth as ours: its fills, or its rejection.
@@ -1654,21 +1796,54 @@ func (s *Service) completeTerminalOutcome(ctx context.Context, st *orderpb.Order
 func (s *Service) adopt(ctx context.Context, st *orderpb.OrderState, ver int64, view execution.OrderView) error {
 	if view.State == execution.OrderViewRejected {
 		now := s.now().UTC()
-		rejected := Reject(st, now)
-		if err := s.store.Save(ctx, rejected, ver, nil); err != nil {
-			return err
-		}
-		ver++
 		reason := view.Reason
 		if reason == "" {
 			reason = "venue reports this order rejected"
 		}
-		if err := s.refuse(ctx, st.GetOrderId(), "VENUE_REJECTED", reason, now); err != nil {
+		rejected := Reject(st, now)
+		// THE VENUE'S REJECTION AND ITS ANNOUNCEMENT ARE NOW ONE WRITE (#292),
+		// AND THIS PATH NEEDED IT MORE THAN THE ONE IT MIRRORS.
+		//
+		// It is the same shape as handleSubmit's ErrUnpriced reject —
+		// Save(REJECTED), refuse()'s two publishes, then a third Save stamping
+		// outcome_announced_at — and it carries the same unrecoverable half:
+		// completeTerminalOutcome reconstructs the CommandOutcome from stored
+		// state and says in its own comment that it cannot reconstruct
+		// ORDER_REJECTED, because the reason lives only in the venue's answer and
+		// has no OrderState counterpart. A crash between the Save and the publish
+		// left the order durably REJECTED with the FACT gone and nothing able to
+		// notice.
+		//
+		// AND THIS IS THE RECOVERY PATH, which is why it matters more rather than
+		// less: the process reaching here is one that already crashed once, and
+		// this is the venue's own account of what became of the order — the answer
+		// the reconciliation exists to obtain. Losing it means asking the venue
+		// again, and a venue that has since forgotten the order answers UNKNOWN,
+		// which quarantines it.
+		//
+		// Both records are built BEFORE the Save, so a record that could never be
+		// published stops the adoption instead of committing half of it.
+		rejFact, ferr := s.emitter.RejectedFact(ctx, st.GetOrderId(), "VENUE_REJECTED", reason, now)
+		if ferr != nil {
+			return ferr
+		}
+		outFact, ferr := s.emitter.OutcomeFact(ctx, st.GetOrderId(),
+			commandpb.CommandOutcomeStatus_COMMAND_OUTCOME_STATUS_REJECTED, reason, "VENUE_REJECTED", "", now)
+		if ferr != nil {
+			return ferr
+		}
+		// Same marker, same reason as the ErrUnpriced reject in handleSubmit (see
+		// order_events.proto:19) — and, like it, stamped in the SAME write rather
+		// than two writes later, so it is true the instant it is durable.
+		rejected.OutcomeAnnouncedAt = timestamppb.New(now)
+		if err := s.store.Save(ctx, rejected, ver, []outbox.Record{rejFact, outFact}); err != nil {
 			return err
 		}
-		// Same marker, same reason as the ErrUnpriced reject in handleSubmit:
-		// see order_events.proto:19.
-		return s.markOutcomeAnnounced(ctx, rejected, ver, now)
+		// Flushed where refuse() stood, so the FACTs leave in the same order and at
+		// the same point they did before — and so resume()'s caller sees the
+		// rejection now rather than on the relay's next tick.
+		_, ferr = s.relay.Flush(ctx, st.GetOrderId())
+		return ferr
 	}
 
 	// The venue confirmed it holds the order, so the ack is established even if

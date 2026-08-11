@@ -111,10 +111,13 @@ type Store interface {
 	// ORDER_FILLED / ORDER_PARTIALLY_FILLED FACT with the state that records it,
 	// which is the pair that most needed it: a fill is money that moved, it has
 	// no marker, and completeTerminalOutcome cannot rebuild the FACT from the
-	// stored aggregate. The remaining commit-then-publish pairs (the routed FACT,
-	// the cancel announcement, the amend outcome, the terminal rejects) still
-	// publish outside the transaction and still rely on their markers;
-	// test/arch/oms_outbox_test.go names each one and fails if a new one appears.
+	// stored aggregate. EVERY OTHER TRANSITION THAT WRITES NOW GOES THROUGH HERE
+	// TOO — routing, the amend outcome, both terminal rejects, the cancellation
+	// and its outcome, and the trailing outcome of a submit that filled. What
+	// still publishes directly is what has no state change to commit alongside:
+	// the pre-write refusals, and the #238 compensators repairing rows that have
+	// no outbox record behind them. test/arch/oms_outbox_test.go names each one
+	// and fails if a new pair appears.
 	Save(ctx context.Context, st *orderpb.OrderState, expectedVersion int64, announce []outbox.Record) error
 	// Load returns the current state of one order and its version, or
 	// ErrNotFound. The version is opaque to the caller: its only use is to be

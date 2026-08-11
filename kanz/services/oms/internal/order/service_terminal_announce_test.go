@@ -35,10 +35,18 @@ import (
 // completeTerminalOutcome's comment says is possible for a fill folded before
 // migration 0006.
 //
-// The reject paths are UNCONVERTED. The ErrUnpriced reject and adopt()'s
-// VENUE_REJECTED reject still Save and then refuse(), and the reason/error_code
-// still exist only in a local variable — so those tests still pin the old,
-// honest limit, and so does the pre-outbox fill case.
+// BOTH REJECT PATHS ARE NOW CONVERTED TOO. The ErrUnpriced reject and adopt()'s
+// VENUE_REJECTED reject each hand ORDER_REJECTED and the outcome to the same
+// store.Save that writes the terminal state, and stamp outcome_announced_at in
+// it. The reason and error_code still exist only in a local variable — that is
+// the point, and it is exactly why they had to stop being a second write:
+// completeTerminalOutcome cannot rebuild either FACT and says so.
+//
+// WHAT STAYS UNCONVERTED, and what these tests still pin as an honest limit: the
+// pre-outbox fill case. A fill folded before migration 0006 has no record behind
+// it, so completeTerminalOutcome re-publishes a generic outcome and logs at
+// ERROR that the ORDER_FILLED FACT is gone. That is a property of old DATA, not
+// of the code, and no conversion can retire it.
 
 // TestSubmit_ResumesInterruptedFillAnnouncement_FillFactFails is the SAME
 // interruption as before — a fill that FILLS the order and whose ORDER_FILLED
@@ -297,33 +305,35 @@ func (h *captureHandler) messages() []string {
 	return out
 }
 
-// TestSubmit_ResumesInterruptedFillAnnouncement_OutcomeFails covers the other
-// half of the same bug shape: the ORDER_FILLED FACT succeeds but the trailing
-// CommandOutcome fails. Resume must complete the outcome WITHOUT re-emitting
-// the FACT a second time.
-func TestSubmit_ResumesInterruptedFillAnnouncement_OutcomeFails(t *testing.T) {
+// TestSubmit_InterruptedTrailingOutcomeIsDeferredNotLost covers the other half
+// of the same bug shape: the ORDER_FILLED FACT succeeds and the trailing
+// CommandOutcome fails.
+//
+// THIS PAIR WAS THE LAST ONE #292 NAMED, and it was a decision rather than a
+// mechanical conversion — the outcome reports state work() committed in
+// transactions that had already closed, so there was no pending write to hand it
+// to. The answer: on the FILLED branch it rides the write this path was already
+// doing, the outcome_announced_at stamp. Its predecessor asserted the old limit
+// honestly — that the marker must stay UNSET after a failed publish, because it
+// was the only evidence resume() had that the announcement was owed. The outbox
+// row is that evidence now, so the marker commits with it and a redelivery is
+// the genuine duplicate it always was.
+func TestSubmit_InterruptedTrailingOutcomeIsDeferredNotLost(t *testing.T) {
 	fb := &fakeBus{}
 	svc, store := newService(t, fb, nil)
 	cmd := limitOrder(d(100, 0), d(1025, -2))
 
 	fb.failOn = EventTypeOutcome
 	if err := svc.Handle(testCtx(), submitEnv(), mustMarshal(t, cmd)); err == nil {
-		t.Fatal("delivery 1 returned nil, want the injected trailing EmitOutcome failure to surface")
+		t.Fatal("delivery 1 returned nil, want the injected trailing outcome failure to surface")
 	}
 	fb.failOn = ""
 
+	// The fill's own FACT flushed inside work(), ahead of the outcome.
 	if fb.last(EventTypeFilled) == nil {
-		t.Fatal("ORDER_FILLED FACT missing after delivery 1 — expected EmitFill to have succeeded " +
-			"before the injected outcome failure")
+		t.Fatal("ORDER_FILLED FACT missing after delivery 1 — the fill is flushed in work(), before " +
+			"the trailing outcome this test fails")
 	}
-	st, _, err := store.Load(context.Background(), "o1")
-	if err != nil {
-		t.Fatalf("load after delivery 1: %v", err)
-	}
-	if st.GetOutcomeAnnouncedAt() != nil {
-		t.Fatal("outcome_announced_at is set after delivery 1 — the trailing EmitOutcome just failed")
-	}
-
 	filledFactsBefore := 0
 	for _, et := range fb.types() {
 		if et == EventTypeFilled {
@@ -331,12 +341,45 @@ func TestSubmit_ResumesInterruptedFillAnnouncement_OutcomeFails(t *testing.T) {
 		}
 	}
 
-	if err := svc.Handle(testCtx(), submitEnv(), mustMarshal(t, cmd)); err != nil {
-		t.Fatalf("delivery 2 (resume) returned %v, want nil", err)
+	st, _, err := store.Load(context.Background(), "o1")
+	if err != nil {
+		t.Fatalf("load after the failed publish: %v", err)
 	}
-	oc := fb.last(EventTypeOutcome).(*commandpb.CommandOutcome)
-	if oc.GetStatus() != commandpb.CommandOutcomeStatus_COMMAND_OUTCOME_STATUS_EXECUTED {
-		t.Fatalf("outcome after resume = %v, want EXECUTED", oc.GetStatus())
+	if st.GetOutcomeAnnouncedAt() == nil {
+		t.Fatal("outcome_announced_at is unset.\n\n" +
+			"It commits WITH the record now. Leaving it unset would send a redelivery into " +
+			"completeTerminalOutcome to re-derive a GENERIC outcome for an order whose real one " +
+			"is already queued.")
+	}
+
+	// NOTHING IS LOST: the outcome is queued, and the relay alone delivers it.
+	pending, perr := store.Outbox().Pending(context.Background(), "o1", 10)
+	if perr != nil {
+		t.Fatalf("outbox pending: %v", perr)
+	}
+	if len(pending) != 1 {
+		t.Fatalf("outbox holds %d records for o1, want 1 (the trailing outcome).\n\n"+
+			"Everything before it — ACCEPTED, ROUTED, the fill — flushed on its own transition.",
+			len(pending))
+	}
+	if _, ferr := svc.relay.Flush(context.Background(), "o1"); ferr != nil {
+		t.Fatalf("relay flush: %v", ferr)
+	}
+	oc, ok := fb.last(EventTypeOutcome).(*commandpb.CommandOutcome)
+	if !ok || oc.GetStatus() != commandpb.CommandOutcomeStatus_COMMAND_OUTCOME_STATUS_EXECUTED {
+		t.Fatalf("outcome after the relay ran = %v, want EXECUTED — and EXECUTED because the order "+
+			"FILLED, not the generic outcome completeTerminalOutcome would have re-derived",
+			oc.GetStatus())
+	}
+
+	// A REDELIVERY IS A DUPLICATE, AND SAYS NOTHING. The marker was true before
+	// the relay ran, so this holds whether or not the flush above happened.
+	before := len(fb.types())
+	if err := svc.Handle(testCtx(), submitEnv(), mustMarshal(t, cmd)); err != nil {
+		t.Fatalf("redelivery returned %v, want nil", err)
+	}
+	if got := len(fb.types()); got != before {
+		t.Fatalf("the redelivery emitted %d new events, want 0", got-before)
 	}
 	filledFactsAfter := 0
 	for _, et := range fb.types() {
@@ -345,16 +388,8 @@ func TestSubmit_ResumesInterruptedFillAnnouncement_OutcomeFails(t *testing.T) {
 		}
 	}
 	if filledFactsAfter != filledFactsBefore {
-		t.Fatalf("ORDER_FILLED facts = %d before resume, %d after — resume must NEVER re-emit a FACT "+
-			"that already succeeded", filledFactsBefore, filledFactsAfter)
-	}
-
-	st, _, err = store.Load(context.Background(), "o1")
-	if err != nil {
-		t.Fatalf("load after delivery 2: %v", err)
-	}
-	if st.GetOutcomeAnnouncedAt() == nil {
-		t.Fatal("outcome_announced_at still unset after a successful resume")
+		t.Fatalf("ORDER_FILLED facts = %d before the redelivery, %d after — nothing may re-emit a "+
+			"FACT that already succeeded", filledFactsBefore, filledFactsAfter)
 	}
 }
 
@@ -490,6 +525,156 @@ func TestSubmit_UnpricedRejectRedeliveryDoesNotReAnnounce(t *testing.T) {
 	before := len(fb.types())
 
 	if err := svc.Handle(testCtx(), submitEnv(), mustMarshal(t, cmd)); err != nil {
+		t.Fatalf("redelivery returned %v, want nil — a duplicate SubmitOrder is acked", err)
+	}
+	if got := len(fb.types()); got != before {
+		t.Fatalf("the redelivery emitted %d new events, want 0 — the rejection was already "+
+			"announced, so re-announcing it duplicates a terminal FACT", got-before)
+	}
+}
+
+// rejectingVenue acknowledges an execute without recording anything (the same
+// shape as amnesiacVenue and twoFillVenue, so the order reaches ROUTED with
+// venue_ack_at set) and then, when queried, reports that it REJECTED the order.
+// It is the venue answer that drives adopt()'s VENUE_REJECTED branch — the
+// recovery path's own terminal transition.
+type rejectingVenue struct {
+	*execution.SimVenue
+	reason string
+}
+
+func (v *rejectingVenue) Execute(context.Context, *orderpb.OrderState) ([]*orderpb.Fill, error) {
+	return nil, nil
+}
+
+func (v *rejectingVenue) QueryOrder(context.Context, *orderpb.OrderState) (execution.OrderView, error) {
+	return execution.OrderView{State: execution.OrderViewRejected, Reason: v.reason}, nil
+}
+
+// adoptedRejectionService wires a Service onto a venue that will report the
+// order rejected when asked, and drives it to ROUTED + acknowledged so the next
+// delivery reconciles.
+func adoptedRejectionService(t *testing.T, fb *fakeBus, reason string) (*Service, *MemoryStore, []byte) {
+	t.Helper()
+	venue := &rejectingVenue{SimVenue: execution.NewSimVenue("XSIM"), reason: reason}
+	store := NewMemoryStore()
+	svc, err := NewService(testTenant, store, NewEmitter(fb), nil, execution.NewRouter(venue), nil, nil)
+	if err != nil {
+		t.Fatalf("NewService: %v", err)
+	}
+	body := mustMarshal(t, limitOrder(d(100, 0), d(1025, -2)))
+	if err := svc.Handle(testCtx(), submitEnv(), body); err != nil {
+		t.Fatalf("delivery 1: %v", err)
+	}
+	st, _, err := store.Load(context.Background(), "o1")
+	if err != nil {
+		t.Fatalf("load after delivery 1: %v", err)
+	}
+	if st.GetVenueAckAt() == nil {
+		t.Fatal("venue_ack_at not stamped after delivery 1 — the adopt arm below needs the order " +
+			"routed and acknowledged before the redelivery queries the venue")
+	}
+	return svc, store, body
+}
+
+// THE VENUE'S REJECTION IS TRANSACTIONAL (#292), AND IT MATTERS MOST ON THIS
+// PATH.
+//
+// adopt() runs during RECOVERY: the process reaching it is one that already
+// crashed once, and the venue's answer is the whole reason the reconciliation
+// exists. Under the old shape it was Save(REJECTED) -> refuse()'s two publishes
+// -> a third Save stamping outcome_announced_at, and a failure between them left
+// the order durably REJECTED with its ORDER_REJECTED FACT gone —
+// completeTerminalOutcome rebuilds the CommandOutcome from stored state and says
+// in its own comment that it cannot rebuild the rejection, because the venue's
+// reason has no OrderState counterpart.
+//
+// So this asserts the same property the ErrUnpriced pair does: a publish failure
+// loses NOTHING, and the FACT arrives on the relay's next pass carrying the
+// VENUE'S OWN reason — no redelivery, no sweep, no restart.
+func TestAdopt_VenueRejectionSurvivesAFailedPublish(t *testing.T) {
+	fb := &fakeBus{}
+	const reason = "insufficient margin at the exchange"
+	svc, store, body := adoptedRejectionService(t, fb, reason)
+
+	// The redelivery reconciles, the venue says REJECTED, and the ORDER_REJECTED
+	// publish fails. Under the old shape this was the FACT nothing could rebuild.
+	fb.failOn = EventTypeRejected
+	err := svc.Handle(testCtx(), submitEnv(), body)
+	fb.failOn = ""
+
+	// THE STATE CHANGE COMMITTED. A failed announcement must not roll back a
+	// rejection the venue has already made permanent — leaving the order ROUTED
+	// would have a later cancel act on an order the exchange has thrown away.
+	st, _, lerr := store.Load(context.Background(), "o1")
+	if lerr != nil {
+		t.Fatalf("load after the failed publish: %v (handle err: %v)", lerr, err)
+	}
+	if st.GetStatus() != orderpb.OrderStatus_ORDER_STATUS_REJECTED {
+		t.Fatalf("status = %v, want REJECTED — adopt takes the venue's truth as ours", st.GetStatus())
+	}
+	if st.GetOutcomeAnnouncedAt() == nil {
+		t.Fatal("outcome_announced_at is unset.\n\n" +
+			"It commits WITH the records now. Leaving it unset would send a redelivery back into " +
+			"the reconcile path to re-announce a rejection the outbox already holds.")
+	}
+
+	// AND NOTHING IS LOST: both records are queued, holding the venue's reason.
+	pending, perr := store.Outbox().Pending(context.Background(), "o1", 10)
+	if perr != nil {
+		t.Fatalf("outbox pending: %v", perr)
+	}
+	if len(pending) != 2 {
+		t.Fatalf("outbox holds %d records for o1, want 2 (ORDER_REJECTED + the outcome).\n\n"+
+			"This is the whole of #292 for this path: the FACTs commit with the state change, so a "+
+			"publish failure defers them instead of destroying them.", len(pending))
+	}
+
+	// The relay drains it — no redelivery of the command, no sweep, no restart.
+	if _, ferr := svc.relay.Flush(context.Background(), "o1"); ferr != nil {
+		t.Fatalf("relay flush: %v", ferr)
+	}
+	rej, ok := fb.last(EventTypeRejected).(*orderpb.OrderRejected)
+	if !ok {
+		t.Fatal("ORDER_REJECTED never reached the bus after the relay ran — the record was queued " +
+			"and then not published, which is worse than the failure this replaced")
+	}
+	if rej.GetErrorCode() != "VENUE_REJECTED" {
+		t.Errorf("error_code = %q, want VENUE_REJECTED", rej.GetErrorCode())
+	}
+	if rej.GetReason() != reason {
+		t.Errorf("reason = %q, want %q.\n\n"+
+			"THE VENUE'S OWN ACCOUNT SURVIVED THE FAILURE. Recovery from stored state could never "+
+			"produce this — it is not on OrderState — which is why completeTerminalOutcome refuses "+
+			"to re-emit an ORDER_REJECTED at all.", rej.GetReason(), reason)
+	}
+	oc, ok := fb.last(EventTypeOutcome).(*commandpb.CommandOutcome)
+	if !ok || oc.GetStatus() != commandpb.CommandOutcomeStatus_COMMAND_OUTCOME_STATUS_REJECTED {
+		t.Fatalf("outcome after the relay ran = %v, want REJECTED — the caller must still be told", oc.GetStatus())
+	}
+	if oc.GetErrorCode() != "VENUE_REJECTED" {
+		t.Errorf("outcome error_code = %q, want VENUE_REJECTED", oc.GetErrorCode())
+	}
+}
+
+// A REDELIVERY AFTER THE FAILURE IS A DUPLICATE, NOT AN INTERRUPTED REJECTION —
+// the adopt-path twin of TestSubmit_UnpricedRejectRedeliveryDoesNotReAnnounce.
+// outcome_announced_at commits with the records, so resume() recognises the
+// order as terminal-and-announced whether or not the relay has flushed yet.
+func TestAdopt_VenueRejectionRedeliveryDoesNotReAnnounce(t *testing.T) {
+	fb := &fakeBus{}
+	svc, _, body := adoptedRejectionService(t, fb, "insufficient margin at the exchange")
+
+	fb.failOn = EventTypeRejected
+	_ = svc.Handle(testCtx(), submitEnv(), body)
+	fb.failOn = ""
+
+	if _, ferr := svc.relay.Flush(context.Background(), "o1"); ferr != nil {
+		t.Fatalf("relay flush: %v", ferr)
+	}
+	before := len(fb.types())
+
+	if err := svc.Handle(testCtx(), submitEnv(), body); err != nil {
 		t.Fatalf("redelivery returned %v, want nil — a duplicate SubmitOrder is acked", err)
 	}
 	if got := len(fb.types()); got != before {

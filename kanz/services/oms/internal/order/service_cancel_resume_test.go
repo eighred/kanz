@@ -18,60 +18,160 @@ import (
 // accounting, and audit never learn the cancel happened), and the caller was
 // told REJECTED for a cancel that in fact succeeded.
 //
-// cancel_announced_at (order_events.proto:18) is the marker that lets a
+// cancel_announced_at (order_events.proto:18) was the marker that let a
 // redelivery tell "my announcement was interrupted" apart from "this is a
 // genuine second cancel of an already-cancelled order" — the same role
 // venue_ack_at plays for routing.
+//
+// # WHAT #292 CHANGED, AND WHY THESE TESTS ASSERT SOMETHING STRONGER NOW
+//
+// The cancellation and both its FACTs are ONE write: CancelledFact +
+// OutcomeFact ride the same store.Save that writes the CANCELLED state, and
+// cancel_announced_at is stamped in it. So the interrupted state these tests
+// used to construct — CANCELLED in the store, announcement gone — is no longer
+// reachable from the live path. A publish failure now DEFERS the announcement to
+// the relay instead of destroying it.
+//
+// The predecessors of the two rewritten tests below asserted the old shape
+// honestly: that the marker must stay UNSET after a failed publish, because it
+// was the only evidence a compensator had. That evidence is now the outbox row
+// itself, so the marker commits with it and means something stronger — "the
+// announcement is committed for delivery" rather than "a publish call returned
+// nil a moment ago". What these assert is the property #292's Verified-when
+// actually asks for: the state change committed, the records are queued, and the
+// FACTs arrive once the relay runs — with no redelivery, no sweep and no
+// restart.
+//
+// completeCancelAnnouncement stays, and TestCancel_ResumesInterruptedAnnouncement
+// below still drives it, because rows CANCELLED by the PREVIOUS code exist and
+// have no outbox record behind them. It is a compensator for a closed
+// population now, not a step on the live path.
 
-// TestCancel_ResumesInterruptedAnnouncement reproduces the bug end to end: a
-// cancel whose EmitCancelled fails must, on redelivery, publish the FACT and
-// report EXECUTED — not silently succeed in the store while telling the
-// caller REJECTED.
-func TestCancel_ResumesInterruptedAnnouncement(t *testing.T) {
+// TestCancel_InterruptedAnnouncementIsDeferredNotLost is the live path under a
+// failing publisher. Nothing is lost and nothing needs to redeliver: the relay
+// alone completes the announcement.
+func TestCancel_InterruptedAnnouncementIsDeferredNotLost(t *testing.T) {
 	fb := &fakeBus{}
 	venue := &closerVenue{mic: "BINANCE"}
 	svc, _ := restingOrderOn(t, fb, venue)
 
-	// Delivery 1: the cancel reaches the venue and is saved CANCELLED, but the
-	// ORDER_CANCELLED FACT fails to publish — a broker blip between the Save
-	// and the emit.
+	// The cancel reaches the venue and is saved CANCELLED, but the
+	// ORDER_CANCELLED FACT fails to publish — a broker blip where the emit used
+	// to be.
 	fb.failOn = EventTypeCancelled
 	if err := svc.Handle(testCtx(), cancelEnv(), mustMarshal(t, cancelAs("pf1"))); err == nil {
-		t.Fatal("delivery 1 returned nil, want the injected EmitCancelled failure to surface " +
-			"(a real bus.Publish failure must nack, not ack, so the broker redelivers)")
+		t.Fatal("delivery 1 returned nil, want the injected publish failure to surface " +
+			"(a real bus.Publish failure must nack, not ack)")
 	}
 	fb.failOn = ""
 
+	// THE STATE CHANGE COMMITTED. A failed announcement must not roll back a
+	// withdrawal the exchange has already been told about.
 	st, _, err := svc.store.Load(context.Background(), "o1")
 	if err != nil {
-		t.Fatalf("load after delivery 1: %v", err)
+		t.Fatalf("load after the failed publish: %v", err)
 	}
 	if st.GetStatus() != orderpb.OrderStatus_ORDER_STATUS_CANCELLED {
-		t.Fatalf("status after delivery 1 = %v, want CANCELLED — Save happened before the "+
-			"failed EmitCancelled", st.GetStatus())
-	}
-	if st.GetCancelAnnouncedAt() != nil {
-		t.Fatal("cancel_announced_at is set after delivery 1 — it must only be stamped once " +
-			"the FACT and outcome are actually published, and EmitCancelled just failed")
-	}
-	if fb.last(EventTypeCancelled) != nil {
-		t.Fatal("an ORDER_CANCELLED FACT was recorded despite the injected publish failure — " +
-			"the fake is broken, not the handler")
+		t.Fatalf("status = %v, want CANCELLED — the Save happens before the announcement", st.GetStatus())
 	}
 	if len(venue.cancelled) != 1 {
-		t.Fatalf("venue cancels after delivery 1 = %d, want 1", len(venue.cancelled))
+		t.Fatalf("venue cancels = %d, want 1", len(venue.cancelled))
+	}
+	if fb.last(EventTypeCancelled) != nil {
+		t.Fatal("an ORDER_CANCELLED FACT reached the bus despite the injected failure — " +
+			"the fake is broken, not the handler")
 	}
 
-	// Delivery 2: the redelivery. The order is already CANCELLED with no
-	// cancel_announced_at — an interrupted announcement, not a duplicate. The
-	// handler must complete the announcement WITHOUT calling closeAtVenue again.
+	// THE MARKER COMMITTED WITH THE RECORDS, which is the inversion this change
+	// makes. It no longer records that a publish returned nil; it records that
+	// the announcement is durable and owed.
+	if st.GetCancelAnnouncedAt() == nil {
+		t.Fatal("cancel_announced_at is unset.\n\n" +
+			"It commits WITH the records now. Leaving it unset would send a redelivery into " +
+			"completeCancelAnnouncement to republish an announcement the outbox already holds — " +
+			"a duplicate ORDER_CANCELLED for an order cancelled exactly once.")
+	}
+
+	// AND NOTHING IS LOST: both records are queued.
+	pending, perr := svc.store.(*MemoryStore).Outbox().Pending(context.Background(), "o1", 10)
+	if perr != nil {
+		t.Fatalf("outbox pending: %v", perr)
+	}
+	if len(pending) != 2 {
+		t.Fatalf("outbox holds %d records for o1, want 2 (ORDER_CANCELLED + the outcome).\n\n"+
+			"This is the whole of #292 for this path: the FACTs commit with the state change, so a "+
+			"publish failure defers them instead of destroying them.", len(pending))
+	}
+
+	// The relay drains it — no redelivery of the command, no sweep, no restart.
+	if _, ferr := svc.relay.Flush(context.Background(), "o1"); ferr != nil {
+		t.Fatalf("relay flush: %v", ferr)
+	}
+	cancelled, ok := fb.last(EventTypeCancelled).(*orderpb.OrderCancelled)
+	if !ok {
+		t.Fatal("ORDER_CANCELLED never reached the bus after the relay ran — the record was queued " +
+			"and then not published, which is worse than the failure this replaced")
+	}
+	if cancelled.GetCancelledQuantity() == nil {
+		t.Error("the recovered ORDER_CANCELLED carries no cancelled quantity — it must be the FACT " +
+			"the live path built, not a reconstruction")
+	}
+	oc, ok := fb.last(EventTypeOutcome).(*commandpb.CommandOutcome)
+	if !ok || oc.GetStatus() != commandpb.CommandOutcomeStatus_COMMAND_OUTCOME_STATUS_EXECUTED {
+		t.Fatalf("outcome after the relay ran = %v, want EXECUTED — the cancel DID succeed and the "+
+			"operator must be told so", oc.GetStatus())
+	}
+
+	// AND THE VENUE IS NEVER ASKED TWICE. Recovery through the relay touches no
+	// exchange at all, which is the strongest form of the property the old resume
+	// path had to be careful to preserve.
+	if len(venue.cancelled) != 1 {
+		t.Fatalf("venue cancels after recovery = %d, want 1", len(venue.cancelled))
+	}
+}
+
+// TestCancel_ResumesInterruptedAnnouncement keeps the COMPENSATOR honest. Rows
+// saved CANCELLED by the pre-outbox code carry cancel_announced_at unset with
+// nothing queued behind them, and completeCancelAnnouncement is the only thing
+// that can announce them. The state is constructed directly because the live
+// path can no longer produce it — which is the point, and is why this test
+// cannot be written by injecting a publish failure any more.
+func TestCancel_ResumesInterruptedAnnouncement(t *testing.T) {
+	fb := &fakeBus{}
+	venue := &closerVenue{mic: "BINANCE"}
+	svc, _ := restingOrderOn(t, fb, venue)
+	store := svc.store.(*MemoryStore)
+
+	// A pre-outbox row: CANCELLED, announcement never made, nothing in the queue.
+	st, ver, err := store.Load(context.Background(), "o1")
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	stale := cloneState(st)
+	stale.Status = orderpb.OrderStatus_ORDER_STATUS_CANCELLED
+	stale.CancelAnnouncedAt = nil
+	if err := store.Save(context.Background(), stale, ver, nil); err != nil {
+		t.Fatalf("seed the pre-outbox row: %v", err)
+	}
+	pending, err := store.Outbox().Pending(context.Background(), "o1", 10)
+	if err != nil {
+		t.Fatalf("outbox pending: %v", err)
+	}
+	if len(pending) != 0 {
+		t.Fatalf("the seeded row has %d outbox records, want 0 — this test is meant to exercise the "+
+			"compensator, and a queued record would let the relay do the work instead", len(pending))
+	}
+	venue.cancelled = nil
+
+	// The cancel command arrives for it. This is the interrupted-announcement
+	// branch: complete the announcement, and do NOT dispatch to the venue again.
 	if err := svc.Handle(testCtx(), cancelEnv(), mustMarshal(t, cancelAs("pf1"))); err != nil {
-		t.Fatalf("delivery 2 (resume) returned %v, want nil", err)
+		t.Fatalf("delivery returned %v, want nil", err)
 	}
 
 	if fb.last(EventTypeCancelled) == nil {
-		t.Fatal("no ORDER_CANCELLED FACT was published on the redelivery — tv-sync, accounting, " +
-			"and audit would never learn this order was cancelled")
+		t.Fatal("no ORDER_CANCELLED FACT was published — tv-sync, accounting and audit would never " +
+			"learn this order was cancelled, and nothing is queued to tell them later")
 	}
 	oc := fb.last(EventTypeOutcome).(*commandpb.CommandOutcome)
 	if oc.GetStatus() != commandpb.CommandOutcomeStatus_COMMAND_OUTCOME_STATUS_EXECUTED {
@@ -79,24 +179,21 @@ func TestCancel_ResumesInterruptedAnnouncement(t *testing.T) {
 			"be told otherwise", oc.GetStatus())
 	}
 
-	st, _, err = svc.store.Load(context.Background(), "o1")
+	st, _, err = store.Load(context.Background(), "o1")
 	if err != nil {
-		t.Fatalf("load after delivery 2: %v", err)
-	}
-	if st.GetStatus() != orderpb.OrderStatus_ORDER_STATUS_CANCELLED {
-		t.Fatalf("status after delivery 2 = %v, want CANCELLED", st.GetStatus())
+		t.Fatalf("load after the repair: %v", err)
 	}
 	if st.GetCancelAnnouncedAt() == nil {
-		t.Fatal("cancel_announced_at is still unset after a successful resume — a further " +
-			"redelivery would re-run the resume branch forever instead of hitting the terminal guard")
+		t.Fatal("cancel_announced_at is still unset after a successful repair — a further " +
+			"redelivery would re-run the compensator forever instead of hitting the terminal guard")
 	}
 
-	// THE SECOND VENUE CALL THIS WHOLE DESIGN EXISTS TO PREVENT: the venue
-	// withdrawal was already dispatched by delivery 1; the resume path must not
-	// re-dispatch it.
-	if len(venue.cancelled) != 1 {
-		t.Fatalf("venue cancels after resume = %d, want 1 — the resume path re-dispatched a "+
-			"withdrawal the first delivery already sent to the exchange", len(venue.cancelled))
+	// THE SECOND VENUE CALL THIS WHOLE BRANCH EXISTS TO PREVENT: the withdrawal
+	// was dispatched by the delivery that got the order to CANCELLED; the repair
+	// must not re-dispatch it.
+	if len(venue.cancelled) != 0 {
+		t.Fatalf("venue cancels during the repair = %d, want 0 — completing an announcement "+
+			"re-sent a withdrawal to the exchange", len(venue.cancelled))
 	}
 }
 
@@ -158,15 +255,27 @@ func TestCancel_DuplicateAfterAnnouncedStaysTerminal(t *testing.T) {
 	}
 }
 
-// TestCancel_ResumeNeverReDispatchesToVenue isolates the single most important
-// detail of the fix, mirroring service_close_test.go's counting-Closer style:
-// the resume path must complete the announcement without a second venue call.
-func TestCancel_ResumeNeverReDispatchesToVenue(t *testing.T) {
+// TestCancel_RecoveryNeverReDispatchesToVenue isolates the single most important
+// detail of the fix, mirroring service_close_test.go's counting-Closer style: a
+// cancellation whose announcement was interrupted is completed without a second
+// venue call — and now without a second DELIVERY either.
+//
+// IT ALSO PINS THE ONE BEHAVIOUR #292 CHANGED FOR AN OPERATOR, so that the next
+// reader does not take it for a regression. Delivery 1 nacks to the DLQ; by the
+// time anyone redrives it, the marker is set, so the redrive is indistinguishable
+// from a genuine second cancel of a terminal order and is answered
+// REJECTED/ORDER_TERMINAL — exactly as TestCancel_DuplicateAfterAnnouncedStaysTerminal
+// pins for a cancel that succeeded outright. The EXECUTED answer the caller
+// actually needs came from the outbox and carries the original command's
+// lineage. Telling the two apart would need a fourth marker recording which
+// DELIVERY announced a transition, which is the instalment pattern #292 exists
+// to stop.
+func TestCancel_RecoveryNeverReDispatchesToVenue(t *testing.T) {
 	fb := &fakeBus{}
 	venue := &closerVenue{mic: "BINANCE"} // confirms every cancel it is asked to make
 	svc, reg := restingOrderOn(t, fb, venue)
 
-	fb.failOn = EventTypeOutcome // let EmitCancelled succeed; fail the FINAL outcome emit
+	fb.failOn = EventTypeOutcome // let ORDER_CANCELLED go out; fail the outcome behind it
 	if err := svc.Handle(testCtx(), cancelEnv(), mustMarshal(t, cancelAs("pf1"))); err == nil {
 		t.Fatal("delivery 1 returned nil, want the injected outcome-publish failure to surface")
 	}
@@ -178,23 +287,39 @@ func TestCancel_ResumeNeverReDispatchesToVenue(t *testing.T) {
 	if reg.Len() != 0 {
 		t.Fatalf("registry holds %d closes, want 0 (the venue confirmed on delivery 1)", reg.Len())
 	}
-	// ORDER_CANCELLED was published on delivery 1 (only the outcome failed); the
-	// resume path must recognize the order is CANCELLED-but-unannounced and
-	// re-emit both without touching the venue again.
+	// ORDER_CANCELLED flushed ahead of the outcome, so only the outcome is owed.
 	if fb.last(EventTypeCancelled) == nil {
-		t.Fatal("ORDER_CANCELLED FACT missing after delivery 1 — expected EmitCancelled to have " +
-			"succeeded before the injected outcome failure")
+		t.Fatal("ORDER_CANCELLED FACT missing after delivery 1 — the relay publishes records in " +
+			"order, so the cancellation should have gone out before the injected failure")
 	}
 
-	if err := svc.Handle(testCtx(), cancelEnv(), mustMarshal(t, cancelAs("pf1"))); err != nil {
-		t.Fatalf("delivery 2 (resume) returned %v, want nil", err)
+	// THE RELAY ALONE FINISHES IT. No redelivery, and therefore no possibility of
+	// a second venue call at all.
+	if _, ferr := svc.relay.Flush(context.Background(), "o1"); ferr != nil {
+		t.Fatalf("relay flush: %v", ferr)
 	}
 	oc := fb.last(EventTypeOutcome).(*commandpb.CommandOutcome)
 	if oc.GetStatus() != commandpb.CommandOutcomeStatus_COMMAND_OUTCOME_STATUS_EXECUTED {
-		t.Fatalf("outcome after resume = %v, want EXECUTED", oc.GetStatus())
+		t.Fatalf("outcome after the relay ran = %v, want EXECUTED", oc.GetStatus())
 	}
 	if len(venue.cancelled) != 1 {
-		t.Fatalf("venue cancels after resume = %d, want still 1 — the resume path must NEVER "+
-			"re-dispatch a venue withdrawal the first delivery already sent", len(venue.cancelled))
+		t.Fatalf("venue cancels after recovery = %d, want still 1", len(venue.cancelled))
+	}
+
+	// AND A REDRIVE OF THE PARKED COMMAND STILL NEVER REACHES THE EXCHANGE. It is
+	// answered as the duplicate it now is (see the doc above), which is a refusal
+	// on the ledger — closeAtVenue sits below Cancel()'s terminal guard and is
+	// never reached.
+	if err := svc.Handle(testCtx(), cancelEnv(), mustMarshal(t, cancelAs("pf1"))); err != nil {
+		t.Fatalf("the redrive returned %v, want nil — a duplicate cancel is acked", err)
+	}
+	oc = fb.last(EventTypeOutcome).(*commandpb.CommandOutcome)
+	if oc.GetStatus() != commandpb.CommandOutcomeStatus_COMMAND_OUTCOME_STATUS_REJECTED ||
+		oc.GetErrorCode() != "ORDER_TERMINAL" {
+		t.Fatalf("outcome on the redrive = %v/%q, want REJECTED/ORDER_TERMINAL", oc.GetStatus(), oc.GetErrorCode())
+	}
+	if len(venue.cancelled) != 1 {
+		t.Fatalf("venue cancels after the redrive = %d, want still 1 — no path may ever "+
+			"re-dispatch a withdrawal the first delivery already sent", len(venue.cancelled))
 	}
 }
