@@ -8,11 +8,15 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"log/slog"
 	"net/http"
 	"sync/atomic"
 	"time"
+
+	optimizationpb "github.com/eighred/kanz/kanz-schemas-go/optimization/v1"
+	orderpb "github.com/eighred/kanz/kanz-schemas-go/order/v1"
 
 	"github.com/eighred/kanz/internal/optimization"
 	"github.com/eighred/kanz/pkg/auth"
@@ -36,7 +40,51 @@ type Server struct {
 	logger    *slog.Logger
 	readiness *Readiness
 	mux       *http.ServeMux
+
+	// materializerFor builds a per-request materializer scoped to the caller's
+	// tenant, or is nil.
+	//
+	// NIL IS THE DEFAULT AND THE SAFE STATE: the route still builds the commands
+	// and returns them, and nothing reaches the bus. It is non-nil only when the
+	// composition root was given both a broker and OPTIMIZATION_AUTO_PUBLISH — a
+	// reversal of the human-in-the-loop stance that has to be asked for by name.
+	materializerFor MaterializerFor
 }
+
+// MaterializerFor builds a materializer for ONE tenant — the authenticated
+// caller's.
+//
+// A FACTORY RATHER THAN A SHARED VALUE, deliberately. One handler serves every
+// tenant concurrently, so a materializer holding a tenant field that the handler
+// stamped per request would let two callers publish under each other's tenant.
+// That is the account-boundary failure this platform refuses to start over,
+// arriving through a struct field instead of a manifest.
+type MaterializerFor func(tenant string) Materializer
+
+// Materializer publishes a materialized proposal's commands and records the
+// materialization. The composition root supplies it; the handler never builds a
+// bus envelope itself.
+type Materializer interface {
+	// Publish emits one command. It is the bridge.Publisher seam.
+	Publish(ctx context.Context, cmd *orderpb.SubmitOrder) error
+	// Record emits the ProposalMaterialized FACT. Best effort: the commands are
+	// already in flight by the time it runs, so a failure is returned to be
+	// logged and counted rather than failing the caller's request.
+	Record(ctx context.Context, fact *optimizationpb.ProposalMaterialized) error
+	// Armed reports whether this materializer actually sends commands. False is
+	// the default posture — a broker is configured, the FACT is recorded, and
+	// nothing is published — and the handler must report which happened.
+	Armed() bool
+}
+
+// WithAutoPublish arms the switch (#409).
+//
+// It is an OPTION rather than a constructor parameter so that every existing
+// caller — and every test — keeps the dry-run behaviour by construction. A
+// service that starts trading on its own recommendation because someone added a
+// parameter and a caller passed nil would be exactly the silent acquisition this
+// must never have.
+func WithAutoPublish(f MaterializerFor) Option { return func(s *Server) { s.materializerFor = f } }
 
 // Option customizes the server.
 type Option func(*Server)
@@ -197,6 +245,53 @@ func (s *Server) handleOrders(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	cmds := bridge.ToOrders(req.Proposal, principal.Subject)
+
+	// AUTO-PUBLISH (#409). Off by default: the commands are built and returned,
+	// and nothing reaches the bus — the human-in-the-loop stance the bridge's own
+	// header describes. Armed, they go out on order.order.submit as COMMANDs,
+	// through the OMS's ordinary admission path.
+	//
+	// THE PRINCIPAL RIDES ON THE CONTEXT because the producer re-checks the
+	// issuer against it (AUTH-01c). This service already refused a body-supplied
+	// issuer above; the bus check is the second, independent one, and it is what
+	// makes the refusal structural rather than a handler's good manners.
+	//
+	// A PUBLISH FAILURE STOPS THE LOOP. Materialize returns what it managed to
+	// send, and the caller is told: half a rebalance reported as a whole one is
+	// how a portfolio ends up with one leg of a pair trade on.
+	published := false
+	var result bridge.MaterializeResult
+	if s.materializerFor != nil {
+		mat := s.materializerFor(principal.Tenant)
+		published = mat.Armed()
+		ctx := auth.WithPrincipal(r.Context(), principal)
+		var perr error
+		// gate is nil DELIBERATELY: the OMS re-runs the pre-trade gate on
+		// admission and is the authority on it. A second mandate registry and
+		// position book inside this service would be a second compliance
+		// implementation, and the day the two disagreed nobody could say which
+		// one governed the trade.
+		if published {
+			result, perr = bridge.Materialize(ctx, req.Proposal, principal.Tenant, principal.Subject,
+				"", nil, nil, mat)
+		} else {
+			result = bridge.MaterializeResult{Submitted: cmds}
+		}
+		s.recordMaterialization(ctx, mat, req.Proposal, principal, published, result)
+		if perr != nil {
+			s.logger.Error("auto-publish failed part-way through a rebalance — some commands are in "+
+				"flight and the rest are not",
+				"portfolio_id", req.Proposal.PortfolioID, "issuer", principal.Subject,
+				"submitted", len(result.Submitted), "err", perr)
+			writeJSON(w, http.StatusBadGateway, map[string]any{
+				"error":     "the rebalance was published only in part; the submitted orders are live",
+				"submitted": len(result.Submitted),
+			})
+			return
+		}
+		cmds = result.Submitted
+	}
+
 	out := make([]orderDTO, 0, len(cmds))
 	for _, c := range cmds {
 		q := c.GetQuantity()
@@ -209,7 +304,47 @@ func (s *Server) handleOrders(w http.ResponseWriter, r *http.Request) {
 			Issuer:       c.GetMetadata().GetIssuer(),
 		})
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"orders": out, "count": len(out)})
+	writeJSON(w, http.StatusOK, map[string]any{"orders": out, "count": len(out), "published": published})
+}
+
+// recordMaterialization emits the ProposalMaterialized FACT.
+//
+// IT RUNS ON BOTH PATHS, and `published` is what separates them. A dry run is a
+// real outcome — the commands were built and handed to the caller — and a reader
+// must be able to tell it from a live run without consulting the deployment's
+// environment. "Nothing configured" and "checked, and fine" must never look the
+// same, and that applies to a capital action as much as to a control.
+//
+// Failures are logged, never fatal: by the time this runs the commands are
+// already in flight, so refusing the request would misreport what happened. But
+// losing the record of an automated capital action is a defect, so it is loud.
+func (s *Server) recordMaterialization(ctx context.Context, mat Materializer,
+	p optimization.RebalanceProposal, principal *auth.Principal, published bool,
+	res bridge.MaterializeResult) {
+	if mat == nil {
+		return // no broker: there is nowhere to record it, and the composition root said so at startup
+	}
+	fact := &optimizationpb.ProposalMaterialized{
+		PortfolioId: p.PortfolioID,
+		Issuer:      principal.Subject,
+		Published:   published,
+	}
+	for _, c := range res.Submitted {
+		fact.SubmittedOrderIds = append(fact.SubmittedOrderIds, c.GetOrderId())
+	}
+	for _, rj := range res.Rejected {
+		fact.Rejected = append(fact.Rejected, &optimizationpb.RejectedOrder{
+			OrderId:      rj.Command.GetOrderId(),
+			InstrumentId: rj.Command.GetInstrumentId(),
+			Reason:       rj.Reason,
+		})
+	}
+	if err := mat.Record(ctx, fact); err != nil {
+		s.logger.Error("MATERIALIZATION WENT UNRECORDED — orders were issued and the audit FACT that "+
+			"names who authorized them did not reach the bus",
+			"portfolio_id", p.PortfolioID, "issuer", principal.Subject,
+			"submitted", len(res.Submitted), "err", err)
+	}
 }
 
 // --- helpers -----------------------------------------------------------------

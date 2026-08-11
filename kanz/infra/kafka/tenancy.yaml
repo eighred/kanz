@@ -78,6 +78,12 @@ data:
     wealth.household            3   compact  -1          yes
     order.order                6   delete   2592000000  yes
     strategy.signal            6   delete   2592000000  yes
+    # optimization.proposal (#409): mirrors infra/kafka/topics-job.yaml. The
+    # archiver routes every event to {tenant}.{domain}.{entity} and auto-create is
+    # disabled, so a tenant that materializes a rebalance would otherwise hit a
+    # topic that does not exist — losing the audit record of a capital action for
+    # exactly the tenants that took it.
+    optimization.proposal      3   delete   2592000000  yes
     accounting.balance         6   delete   2592000000  yes
     settlement.instruction     3   delete   2592000000  yes
     compliance.breach          3   delete   2592000000  yes

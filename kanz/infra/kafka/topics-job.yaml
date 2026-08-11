@@ -78,6 +78,12 @@ data:
     # permanence is the lakehouse's job (DATA-M2), not a retention setting here.
     order.order                6   delete   2592000000  yes
     strategy.signal            6   delete   2592000000  yes
+    # optimization.proposal (#409): the FACT naming who authorized a rebalance
+    # that became live orders. It belongs with the money path, not with the
+    # analytics, because it is the audit record for an automated capital action —
+    # and losing it would leave the order.order events above with no statement of
+    # who released them.
+    optimization.proposal      3   delete   2592000000  yes
     accounting.balance         6   delete   2592000000  yes
     settlement.instruction     3   delete   2592000000  yes
     compliance.breach          3   delete   2592000000  yes

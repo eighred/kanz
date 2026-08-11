@@ -19,6 +19,12 @@ import (
 var DefaultSubjects = []string{
 	"order.>",
 	"strategy.>",
+	// optimization.> (#409): the FACT naming who authorized a rebalance that
+	// became live orders. It is archived for the same reason order.> above it is
+	// — it is not reconstructable from anywhere else, and it is the ONLY record
+	// of who released an automated capital action. Losing it in a failover would
+	// leave the restored order history with no statement of who authorized it.
+	"optimization.>",
 	"execution.>",
 	"accounting.>",
 	"settlement.>",

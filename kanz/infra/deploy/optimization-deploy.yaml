@@ -119,6 +119,27 @@ spec:
           env:
             - { name: OPTIMIZATION_LISTEN, value: ":8100" }
             - { name: OPTIMIZATION_METRICS_LISTEN, value: ":8094" }
+            - { name: OPTIMIZATION_NATS_URL, value: "nats://nats.kanz-messaging.svc:4222" }
+            # AUTO-PUBLISH IS OFF, AND ITS ABSENCE HERE IS THE DECISION (#409).
+            #
+            # With it unset the service builds the order commands a rebalance
+            # proposal implies, returns them to the caller, and sends NOTHING to
+            # the bus — the stance the bridge's own header describes: the
+            # optimizer proposes, a human approves.
+            #
+            # Setting it to "true" moves this deployment from proposing to
+            # trading on its own recommendation. Every order is still attributed
+            # to the gateway-authenticated caller and still re-checked by the
+            # OMS's pre-trade gate on admission, so the change is not "less
+            # safe" — it is a different product, and it must be asked for by
+            # name rather than acquired by omission.
+            #
+            # THE BROKER ABOVE IS SET REGARDLESS, deliberately: it is what lets a
+            # DRY RUN be recorded. Without it, a materialization that published
+            # nothing is indistinguishable on the bus from nobody having called
+            # the route — and "nothing configured" must never look like
+            # "checked, and fine".
+            # - { name: OPTIMIZATION_AUTO_PUBLISH, value: "true" }
             - { name: SPIFFE_ENDPOINT_SOCKET, value: "unix:///run/spiffe/spire-agent.sock" }
           livenessProbe:
             httpGet: { path: /healthz, port: 8100 }

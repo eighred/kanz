@@ -169,3 +169,66 @@ message RebalanceProposal {
   bool mandate_feasible = 9;
   repeated string violations = 10;
 }
+
+// ProposalMaterialized is the FACT that a rebalance proposal became order
+// commands (#409).
+//
+// IT EXISTS BECAUSE THE PLATFORM CAN NOW DO THIS WITHOUT A PERSON. The default
+// posture is that the optimizer proposes and a human approves; with
+// OPTIMIZATION_AUTO_PUBLISH the approval step becomes the act of setting a
+// configuration flag, and the caller who triggered the materialization is the
+// only human in the loop. That is a capital action taken on the platform's own
+// recommendation, and an automated capital action that leaves no record of who
+// authorized it is not auditable.
+//
+// ONE FACT PER MATERIALIZATION, not one per order. The orders themselves are
+// COMMANDS on order.order.submit and each carries its own issuer; this records
+// the DECISION that produced them — which proposal, which principal, what was
+// admitted and what was refused — so the set can be reconstructed even if a
+// command is later rejected downstream.
+//
+// It is emitted whether or not anything was published. A materialization that
+// produced zero orders, or whose every order the gate refused, is a fact about
+// the portfolio worth keeping: it is the difference between "nobody asked" and
+// "we asked and nothing was tradeable".
+message ProposalMaterialized {
+  // portfolio_id the proposal was built for. Required.
+  string portfolio_id = 1;
+
+  // issuer is the AUTHENTICATED principal that triggered this, taken from the
+  // api-gateway's injected identity and never from a request body — the
+  // AUTH-01c forged-issuer stance. It is the same value stamped on every emitted
+  // command's CommandMetadata.issuer.
+  string issuer = 2;
+
+  // published is whether the orders actually reached the bus. FALSE is the
+  // default deployment posture (a dry run: the commands were built and returned
+  // to the caller, and nothing was sent), and recording it is the point — a
+  // reader must be able to tell a dry run from a live one without consulting the
+  // deployment's environment.
+  bool published = 3;
+
+  // submitted_order_ids are the commands that were emitted, in order. Ids are
+  // deterministic per (portfolio, instrument), so a re-materialization of the
+  // same proposal repeats them and the OMS dedups.
+  repeated string submitted_order_ids = 4;
+
+  // rejected are the orders the pre-trade gate refused, with the reason it gave.
+  // An empty list when submitted_order_ids is also empty means the proposal
+  // produced no trades at all — not that everything succeeded.
+  repeated RejectedOrder rejected = 5;
+
+  // as_of is when the materialization happened. Required.
+  google.protobuf.Timestamp as_of = 6;
+}
+
+// RejectedOrder is one command the pre-trade gate refused.
+message RejectedOrder {
+  string order_id = 1;
+  string instrument_id = 2;
+  // reason is the gate's own words. It distinguishes a rule breach from
+  // "nothing was evaluated" (ungoverned, unpriced, unvaluable, unscoped), which
+  // the gate reports under their own codes precisely so the two are not
+  // conflated.
+  string reason = 3;
+}
