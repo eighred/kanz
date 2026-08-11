@@ -783,6 +783,17 @@ var mutableTagExempt = map[string]string{
 	// guard, so no digest exists for it yet. release.yml's pin-digests job
 	// rewrites it on the first tagged run; delete this line then, and the dead-
 	// exemption arm below will fail the build until it is deleted.
+	// TEMPORARY — retire on the first release that publishes this image.
+	// optimization joined the build/release matrices in the same branch as this
+	// manifest (#409), so no digest exists for it yet. release.yml's pin-digests
+	// job rewrites it on the first tagged run; delete this line then, and the
+	// dead-exemption arm below will fail the build until it is deleted. That is
+	// the same shape nats-rebuild used, and the note under it records that the
+	// mechanism was observed working rather than assumed.
+	"infra/deploy/optimization-deploy.yaml": "portfolio construction had no image at all until this " +
+		"branch: no Dockerfile, no build matrix entry, no release. There is no published digest to " +
+		"pin to until the next tagged release runs pin-digests",
+
 	// RETIRED 2026-07-27 by the mechanism that was supposed to retire it.
 	// infra/dr/nats/rebuild-job.yaml carried a temporary entry reading "no
 	// published digest exists until the next release. Retire on the first

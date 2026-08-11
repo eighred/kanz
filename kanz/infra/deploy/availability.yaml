@@ -127,7 +127,7 @@ spec:
 #                 workload surging at once would size the quota for a case no
 #                 one should ever run, and a quota that funds everything bounds
 #                 nothing.
-#   pods        = Σ ceiling(w) + surge = 86 + 4 = 90
+#   pods        = Σ ceiling(w) + surge = 88 + 4 = 92
 #
 # QUOTA COUNTS CONTAINERS, NOT PODS, and one workload now carries two (#241):
 # inference runs a spiffe-helper SIDECAR that materialises its SVID as PEM files,
@@ -137,9 +137,9 @@ spec:
 # max(initContainers)), and an init container that runs to completion before the
 # app starts only raises the floor.
 #
-#   containers  = 90 + 2 = 92
-#   requests    = 92 x (500m, 512Mi)  = 46 CPU, 46Gi   ← LimitRange defaults
-#   limits      = 92 x (1, 1Gi)       = 92 CPU, 92Gi
+#   containers  = 92 + 2 = 94
+#   requests    = 94 x (500m, 512Mi)  = 47 CPU, 47Gi   ← LimitRange defaults
+#   limits      = 94 x (1, 1Gi)       = 94 CPU, 94Gi
 #
 # ONE WORKLOAD IS NO LONGER ON THE DEFAULTS, and the memory numbers above are
 # adjusted for it (#228). postgres-dev.yaml now declares max_connections=400 —
@@ -148,8 +148,8 @@ spec:
 # block. It is the only container on the estate whose memory is a function of a
 # number in its own argv. CPU is untouched, so only the two memory terms move:
 #
-#   requests.memory = 91 x 512Mi + 2Gi = 48640Mi (47.5Gi)
-#   limits.memory   = 91 x 1Gi   + 4Gi = 95Gi
+#   requests.memory = 93 x 512Mi + 2Gi = 49664Mi (48.5Gi)
+#   limits.memory   = 93 x 1Gi   + 4Gi = 97Gi
 #
 # Written in Mi rather than 46.5Gi because a fractional binary quantity is the
 # kind of thing that gets "tidied" to 46Gi by someone reading it as a round
@@ -158,6 +158,23 @@ spec:
 # The guard also bounds these from ABOVE (2x the derivation): a quota of "1000"
 # is indistinguishable from no quota at all, and would silently stop being the
 # blast-radius bound this object exists to be.
+# Model Portfolios (#409). replicas 2 ⇒ maxUnavailable: 1, which bounds the drain
+# at ANY replica count. Nothing here is correctness-pinned to a single instance:
+# the service is stateless (every market input arrives in the request), so a
+# rescheduled replica loses no state and holds no exchange session.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: optimization
+  namespace: kanz-services
+  labels:
+    app.kubernetes.io/part-of: kanz
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      app: optimization
+---
 apiVersion: v1
 kind: ResourceQuota
 metadata:
@@ -167,11 +184,11 @@ metadata:
     app.kubernetes.io/part-of: kanz
 spec:
   hard:
-    requests.cpu: "46"
-    requests.memory: 48640Mi
-    limits.cpu: "92"
-    limits.memory: 95Gi
-    pods: "90"
+    requests.cpu: "47"
+    requests.memory: 49664Mi
+    limits.cpu: "94"
+    limits.memory: 97Gi
+    pods: "92"
 ---
 # LimitRange gives every pod sane defaults + a ceiling, so a container with no
 # explicit resources still gets requests (schedulable, quota-counted) and can't

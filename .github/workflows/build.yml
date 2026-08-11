@@ -106,6 +106,13 @@ jobs:
             dockerfile: kanz/services/alternatives/Dockerfile
           - service: datamaster
             dockerfile: kanz/services/datamaster/Dockerfile
+          # MODEL PORTFOLIOS (#409). Portfolio construction had a service and a
+          # gateway route and no image at all, so the route could not reach
+          # anything. It serves its API and its /metrics on SEPARATE ports —
+          # the API decides whose name goes on an order from the injected
+          # principal, and must not share a port the monitoring plane may open.
+          - service: optimization
+            dockerfile: kanz/services/optimization/Dockerfile
           # EXEC-M11: the trading loop's own services, which had no images at all.
           # webhook-ingest is the FIRST HOP (the HMAC webhook that receives every
           # TradingView signal) and tv-sync is the LAST (the Broker-API projection).

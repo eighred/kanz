@@ -928,24 +928,27 @@ var tenantHeaderTrustingServices = map[string]int{
 	"wealth":     8080,
 }
 
-// tenantHeaderTrustingUndeployed is the same trust, taken on by a service that
-// has NO deployable workload — no Dockerfile, no image job, no manifest (#409).
+// tenantHeaderTrustingSplitListeners is the SAME trust, taken on by a service
+// that serves its API and its /metrics on DIFFERENT ports (#409).
 //
-// It is a separate set rather than a zero port because the assertion is the
-// OPPOSITE one. For a deployed service the guard checks the port its
-// tenant-scoped routes share with /metrics. For these there is no port to check,
-// so the guard checks that there is still no workload — and FAILS the moment one
-// appears, which is exactly when the network obligation becomes real and someone
-// has to write the NetworkPolicy that makes trusting the header sound.
+// It is a separate set because the assertion is the opposite of the one above.
+// For the four services in tenantHeaderTrustingServices the guard checks that
+// the recorded port IS the metrics port, because their tenant-scoped routes
+// share it — which is precisely the exposure #232 named and could not close:
+// allow-observability-scrape must admit that port, so a pod in
+// kanz-observability can choose a principal and use those routes.
 //
-// A service is safe here only because it cannot be deployed at all. That is a
-// fact with an expiry date, and this is what stops the entry outliving it.
-var tenantHeaderTrustingUndeployed = map[string]string{
-	"optimization": "portfolio construction (#409): reads the gateway-injected principal so a " +
-		"materialized order's issuer is the authenticated caller rather than a string from the " +
-		"request body. It has no Dockerfile, no build.yml matrix entry and no manifest, so it runs " +
-		"nowhere. Deploying it REQUIRES an ingress policy admitting only api-gateway — without one, " +
-		"any pod that can reach it names its own principal and trades as anyone.",
+// #232 said the fix was a second listener in each service, a code change rather
+// than a manifest edit. These are the services that made it. The value here is
+// the API port, and the guard asserts it is NOT the scraped port and NOT in
+// allow-observability-scrape's list — so the separation cannot quietly collapse
+// back into one port while the entry keeps claiming otherwise.
+var tenantHeaderTrustingSplitListeners = map[string]int{
+	// The API materializes a rebalance proposal into order commands and takes the
+	// issuer — the field the audit trail records as the person who moved the
+	// capital — from the injected principal. A trading surface is the one place
+	// this platform cannot afford to inherit #232's gap, so it does not.
+	"optimization": 8100,
 }
 
 // tenantHeaderRead matches a READ of the tenant principal header — the act that
@@ -1025,8 +1028,8 @@ func TestTenantHeaderTrustingServicesAreEnumerated(t *testing.T) {
 	var unlisted []string
 	for svc, where := range found {
 		_, deployed := tenantHeaderTrustingServices[svc]
-		_, undeployed := tenantHeaderTrustingUndeployed[svc]
-		if !deployed && !undeployed {
+		_, split := tenantHeaderTrustingSplitListeners[svc]
+		if !deployed && !split {
 			unlisted = append(unlisted, svc+" ("+where+")")
 		}
 	}
@@ -1060,23 +1063,38 @@ func TestTenantHeaderTrustingServicesAreEnumerated(t *testing.T) {
 			}
 		}
 	}
-	// THE UNDEPLOYED ENTRIES MUST STILL BE UNDEPLOYED. Each is safe only because
-	// nothing runs it; the day a workload appears the header trust becomes a live
-	// exposure and needs an ingress policy admitting only the api-gateway. Failing
-	// HERE is what makes that a decision someone takes rather than one they
-	// inherit — and it is why this is a separate set from the port-checked map
-	// above rather than an entry with a zero in it.
-	for svc, why := range tenantHeaderTrustingUndeployed {
-		if _, deployed := annotated[svc]; deployed {
-			t.Errorf("%s is listed as header-trusting BUT UNDEPLOYED, and a kanz-services workload "+
-				"labelled app=%s now exists.\n\n%s\n\nMove it into tenantHeaderTrustingServices with "+
-				"the port its tenant-scoped routes serve on, and add the NetworkPolicy admitting only "+
-				"api-gateway. Until that policy exists, any pod that can reach it names its own "+
-				"principal.", svc, svc, why)
+	// THE SPLIT MUST STILL BE A SPLIT. These entries claim the service's API port
+	// is not the port the monitoring plane may open; if the listeners ever merge
+	// back the claim becomes false silently, and the service rejoins #232's
+	// exposure while this file still says it does not.
+	scrapePermitted := scrapePolicyPorts(t)
+	for svc, apiPort := range tenantHeaderTrustingSplitListeners {
+		metricsPort, ok := annotated[svc]
+		if !ok {
+			t.Errorf("tenantHeaderTrustingSplitListeners lists %s, but no kanz-services workload "+
+				"labelled app=%s annotates a prometheus.io/port. The claim that its listeners are "+
+				"split is no longer checkable.", svc, svc)
+			continue
+		}
+		if metricsPort == apiPort {
+			t.Errorf("%s claims SPLIT listeners with its API on :%d, but its prometheus.io/port is "+
+				"the SAME port. The split has collapsed: allow-observability-scrape must admit the "+
+				"metrics port, so the API is now reachable from kanz-observability and a pod there "+
+				"can choose its own principal (#232). Either restore the second listener or move "+
+				"this entry into tenantHeaderTrustingServices and accept the exposure explicitly.",
+				svc, apiPort)
+		}
+		if scrapePermitted[apiPort] {
+			t.Errorf("%s serves its API on :%d and allow-observability-scrape PERMITS that port. "+
+				"Splitting the listeners bought nothing: the whole kanz-observability namespace can "+
+				"reach the API, and these routes decide what a caller may see — and for the trading "+
+				"surfaces whose name goes on an order — from a header the api-gateway is supposed to "+
+				"be the only source of.", svc, apiPort)
 		}
 		if _, alsoListed := tenantHeaderTrustingServices[svc]; alsoListed {
-			t.Errorf("%s is in BOTH tenantHeaderTrustingServices and tenantHeaderTrustingUndeployed — "+
-				"one of them is stale, and a reader cannot tell which claim is current", svc)
+			t.Errorf("%s is in BOTH tenantHeaderTrustingServices and "+
+				"tenantHeaderTrustingSplitListeners — one is stale, and a reader cannot tell which "+
+				"claim is current", svc)
 		}
 	}
 
@@ -1109,4 +1127,33 @@ func TestTenantHeaderTrustingServicesAreEnumerated(t *testing.T) {
 	if len(dead) > 0 {
 		t.Errorf("tenantHeaderTrustingServices has %d stale entr(y/ies):\n  %s", len(dead), strings.Join(dead, "\n  "))
 	}
+}
+
+// scrapePolicyPorts returns the ports allow-observability-scrape admits — the
+// set the whole kanz-observability namespace may open in kanz-services.
+//
+// It is read from the POLICY rather than from the annotations, because the two
+// are different claims: the annotation says where a service serves telemetry,
+// the policy says what monitoring may reach. TestObservabilityScrapePortsMatch
+// TheAnnotations pins them together for metrics ports; this reads the policy so
+// a caller can ask the opposite question — "is this API port reachable by
+// monitoring?" — which is the one that matters for a surface that trades.
+func scrapePolicyPorts(t *testing.T) map[int]bool {
+	t.Helper()
+	out := map[int]bool{}
+	for _, d := range allNetworkPolicies(t) {
+		if d.Metadata.Name != "allow-observability-scrape" || d.Metadata.Namespace != "kanz-services" {
+			continue
+		}
+		for _, r := range d.Spec.Ingress {
+			for _, p := range r.Ports {
+				out[p.Port] = true
+			}
+		}
+	}
+	if len(out) == 0 {
+		t.Fatal("allow-observability-scrape declares no ports — this helper is returning an empty " +
+			"set and every assertion built on it passes by checking nothing")
+	}
+	return out
 }
