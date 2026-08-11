@@ -114,6 +114,13 @@ func New(readiness *Readiness, opts Options) (*Server, error) {
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) { s.mux.ServeHTTP(w, r) }
 
+// Close releases the OS resources the Server owns — today, the static root's
+// directory handle. Safe to call on a Server that serves no static build.
+//
+// It is separate from the HTTP server's Shutdown, which drains connections and
+// knows nothing about what a handler holds open.
+func (s *Server) Close() error { return s.static.Close() }
+
 func (s *Server) routes() {
 	s.mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
