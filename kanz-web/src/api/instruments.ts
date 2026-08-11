@@ -28,6 +28,26 @@ export interface TradeableInstrument {
   venue_symbol: string
   /** The venue it trades on. An order names a venue, so a pair without one cannot be acted on. */
   mic: string
+  /**
+   * The pair, DERIVED FROM venue_symbol by the platform — what is actually being
+   * bought and what it is actually paid in (#407).
+   *
+   * Both empty means the platform could not tell (a venue using its own ticker
+   * for the asset). That is not a fact about the pair and must not be rendered
+   * as one.
+   */
+  base_asset?: string
+  quote_asset?: string
+  /**
+   * instrument_id disagrees with the exchange about the quote asset — "BTC-USD"
+   * trading as BTCUSDT.
+   *
+   * SURFACE IT. It is the difference between buying dollars and buying a
+   * stablecoin: a USDT position carries USDT credit exposure, and the platform
+   * records it under the id's currency. The person choosing the pair is the one
+   * who should know.
+   */
+  quote_mismatch?: boolean
 }
 
 export interface InstrumentsResponse {

@@ -177,7 +177,7 @@ spec:
             - { name: OKX_BASE_URL, value: "https://www.okx.com" }
             - { name: OKX_TRADING_MODE, value: "demo" }
             - { name: OKX_WS_BASE, value: "wss://ws.okx.com:8443" }
-            - { name: OKX_SYMBOLS, value: "BTC-USD=BTC-USDT,ETH-USD=ETH-USDT" }
+            - { name: OKX_SYMBOLS, value: "BTC-USDT=BTC-USDT,ETH-USDT=ETH-USDT" }
             - { name: SPIFFE_ENDPOINT_SOCKET, value: "unix:///run/spiffe/spire-agent.sock" }
           livenessProbe:
             httpGet: { path: /healthz, port: 8092 }

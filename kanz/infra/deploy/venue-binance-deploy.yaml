@@ -162,7 +162,7 @@ spec:
             # deliberate, reviewable edit — not a default.
             - { name: BINANCE_BASE_URL, value: "https://testnet.binance.vision" }
             - { name: BINANCE_WS_BASE, value: "wss://testnet.binance.vision" }
-            - { name: BINANCE_SYMBOLS, value: "BTC-USD=BTCUSDT,ETH-USD=ETHUSDT" }
+            - { name: BINANCE_SYMBOLS, value: "BTC-USDT=BTCUSDT,ETH-USDT=ETHUSDT" }
             - { name: SPIFFE_ENDPOINT_SOCKET, value: "unix:///run/spiffe/spire-agent.sock" }
           livenessProbe:
             httpGet: { path: /healthz, port: 8091 }

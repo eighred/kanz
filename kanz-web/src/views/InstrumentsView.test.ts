@@ -43,9 +43,32 @@ async function open(resp: InstrumentsResponse | Error) {
 const base: InstrumentsResponse = {
   owner_tenant: 'acme',
   instruments: [
-    { instrument_id: 'BTC-USD', venue_symbol: 'BTCUSDT', mic: 'XBIN' },
-    { instrument_id: 'BTC-USD', venue_symbol: 'BTC-USDT', mic: 'XOKX' },
-    { instrument_id: 'ETH-EUR', venue_symbol: 'ETHEUR', mic: 'XBIN' },
+    // The platform resolves base/quote from the SYMBOL and states the
+    // disagreement; the screen reports what it is told (#407).
+    {
+      instrument_id: 'BTC-USD',
+      venue_symbol: 'BTCUSDT',
+      mic: 'XBIN',
+      base_asset: 'BTC',
+      quote_asset: 'USDT',
+      quote_mismatch: true,
+    },
+    {
+      instrument_id: 'BTC-USD',
+      venue_symbol: 'BTC-USDT',
+      mic: 'XOKX',
+      base_asset: 'BTC',
+      quote_asset: 'USDT',
+      quote_mismatch: true,
+    },
+    {
+      instrument_id: 'ETH-EUR',
+      venue_symbol: 'ETHEUR',
+      mic: 'XBIN',
+      base_asset: 'ETH',
+      quote_asset: 'EUR',
+      quote_mismatch: false,
+    },
   ],
 }
 
@@ -82,13 +105,28 @@ describe('a pair whose quote is not what its id claims says so', () => {
     expect(row.text()).toMatch(/quoted in USDT, not USD/i)
   })
 
+  // A pair the platform could not decompose must not be rendered as a fact. Both
+  // fields empty is "could not tell", and a screen that showed it as a mismatch
+  // would put a scary warning on a correctly configured venue.
+  it('says nothing about a pair whose quote the platform could not determine', async () => {
+    const wrapper = await open({
+      owner_tenant: 'acme',
+      instruments: [{ instrument_id: 'BTC-USD', venue_symbol: 'XBTUSD', mic: 'XBIN' }],
+    })
+    const row = wrapper.findAll('tbody tr')[0]!
+    expect(row.text()).not.toMatch(/quoted in/i)
+  })
+
   it('says nothing when the symbol agrees with the id', async () => {
     const wrapper = await open(base)
     const rows = wrapper.findAll('tbody tr')
     expect(rows).toHaveLength(3)
     const eth = rows[2]!
     expect(eth.text()).toContain('ETHEUR')
-    expect(eth.text()).not.toMatch(/quoted in/i)
+    // It states the quote it resolved, without the mismatch warning: "checked,
+    // and fine" must not look like "nobody looked".
+    expect(eth.text()).toMatch(/quoted in EUR/i)
+    expect(eth.text()).not.toMatch(/not EUR/i)
   })
 })
 

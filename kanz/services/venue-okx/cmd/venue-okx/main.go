@@ -22,6 +22,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
@@ -185,6 +186,41 @@ func serve(cfg config.Config) error {
 	// all (execution.SelfHealing).
 	closes := execution.NewCloseRegistry()
 
+	// DOES EACH MAPPING SAY WHAT IT ACTUALLY TRADES? (#407)
+	//
+	// The symbol map is two claims side by side: a canonical id, and the symbol
+	// this adapter sends to the exchange. Only the symbol decides what is bought.
+	// The estate shipped "BTC-USD=BTCUSDT" — a USDT-quoted pair recorded as
+	// dollars — and nothing anywhere compared the two.
+	//
+	// IT IS A CORRECTNESS PROBLEM, NOT A NAMING ONE. A USDT position carries USDT
+	// credit exposure, and calling it USD assumes a peg this platform never states
+	// and cannot monitor: on a depeg the books are wrong in a direction nobody is
+	// watching, and EXPOSURE_DIMENSION_CURRENCY has already aggregated it into the
+	// USD bucket where a concentration limit silently covers something else.
+	//
+	// Checked HERE, at the composition root, because this is the last place both
+	// halves exist together: after this the symbol goes to the exchange and the id
+	// goes into the ledger, and nothing downstream ever sees both.
+	symbols := execution.StaticSymbolMap(parseSymbolMap(cfg.Symbols))
+	if bad := symbols.Mismatches(); len(bad) > 0 {
+		for _, in := range bad {
+			logger.Error("SYMBOL MAP MISDESCRIBES WHAT IT TRADES — this instrument is recorded under a quote asset "+
+				"the exchange does not use, so its positions, its currency exposure and any limit checked against "+
+				"them are all denominated in an asset it does not hold",
+				"instrument_id", in.InstrumentID, "venue_symbol", in.VenueSymbol,
+				"id_claims", strings.TrimPrefix(in.InstrumentID, in.Pair.Base+"-"),
+				"venue_trades", in.Pair.Quote,
+				"fix", fmt.Sprintf("rename the instrument to %s-%s in OKX_SYMBOLS and everywhere it is referenced",
+					in.Pair.Base, in.Pair.Quote))
+		}
+		if cfg.RequireQuoteMatch {
+			return fmt.Errorf("OKX_SYMBOLS: %d mapping(s) name a quote asset the exchange does not "+
+				"trade, and OKX_REQUIRE_QUOTE_MATCH=true. Rename the instruments to match what is "+
+				"actually traded, or unset the requirement", len(bad))
+		}
+	}
+
 	conn := okx.NewOKXConnector(execution.VenueSettings{
 		MIC:          cfg.MIC,
 		Account:      cfg.Account,
@@ -192,7 +228,7 @@ func serve(cfg config.Config) error {
 		APIKey:       cfg.APIKey,
 		APISecret:    cfg.APISecret,
 		Passphrase:   cfg.Passphrase,
-		Symbols:      parseSymbolMap(cfg.Symbols),
+		Symbols:      symbols,
 		WeightBudget: 1200,
 		OnThrottle: func() {
 			logger.Error("okx: REST weight budget exhausted — backing off (structural alert)")

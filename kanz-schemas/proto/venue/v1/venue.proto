@@ -199,12 +199,39 @@ message VenueInstrument {
   // "BTC-USDT" on OKX.
   //
   // IT IS REPORTED BECAUSE IT DOES NOT ALWAYS AGREE WITH THE ID. The canonical
-  // "BTC-USD" maps to a USDT-quoted symbol on both live venues — the platform is
-  // already trading a stablecoin-quoted instrument while calling it USD, and
-  // nothing in the data says so. Until instruments carry base and quote assets
-  // explicitly (#407), this field is the only place that truth is visible, so a
-  // picker can show what a user is actually buying rather than what the id claims.
+  // "BTC-USD" was mapped to a USDT-quoted symbol on both live venues — the
+  // platform traded a stablecoin-quoted instrument while calling it USD, and
+  // nothing in the data said so (#407).
   string venue_symbol = 2;
+
+  // base_asset and quote_asset decompose the pair, DERIVED FROM venue_symbol
+  // rather than from instrument_id (#407).
+  //
+  // THE SYMBOL IS THE SOURCE OF TRUTH AND THE ID IS A LABEL. The symbol is what
+  // the adapter sends to the exchange, so it is what determines what is actually
+  // bought; the id is what a human typed beside it in a symbol map. Deriving
+  // these from the id would re-record the same claim in two more fields and
+  // prove nothing.
+  //
+  // BOTH EMPTY MEANS "COULD NOT TELL", NEVER "NO QUOTE". A venue that uses its
+  // own ticker for the asset (XBT for BTC) yields a symbol this platform cannot
+  // decompose, and a confident wrong answer there would refuse a correctly
+  // configured venue. A caller must not render empty as a fact about the pair.
+  string base_asset = 3;
+  string quote_asset = 4;
+
+  // quote_mismatch is true when instrument_id CLAIMS one quote and venue_symbol
+  // shows another — "BTC-USD" trading as BTCUSDT.
+  //
+  // IT IS ON THE WIRE BECAUSE IT IS A CORRECTNESS PROBLEM, NOT A COSMETIC ONE. A
+  // USDT-quoted position carries USDT credit exposure; recording it as USD
+  // assumes a peg this platform never states and cannot monitor, and
+  // EXPOSURE_DIMENSION_CURRENCY then aggregates it into the USD bucket where a
+  // concentration limit silently covers something else.
+  //
+  // False when the quote could not be determined at all — an unreadable symbol
+  // is not evidence of a mismatch.
+  bool quote_mismatch = 5;
 }
 
 // VenueQueryService is the OMS's read surface over every adapter it holds (#406).
@@ -243,11 +270,22 @@ message TradeableInstrument {
   // The platform's canonical id — what an order carries.
   string instrument_id = 1;
 
-  // What the exchange calls it. See VenueInstrument.venue_symbol: the two do not
-  // always agree, and until #407 this is where that is visible.
+  // What the exchange calls it. See VenueInstrument.venue_symbol.
   string venue_symbol = 2;
 
   // The venue this pair trades on. An order names a venue, so a pair without one
   // cannot be acted on.
   string mic = 3;
+
+  // The pair, derived from venue_symbol — what is actually being bought and what
+  // it is actually paid in. Both empty means the platform could not tell, which
+  // a caller must not render as a fact. See VenueInstrument (#407).
+  string base_asset = 4;
+  string quote_asset = 5;
+
+  // quote_mismatch says instrument_id disagrees with the exchange about the
+  // quote asset. A pair picker MUST surface this: it is the difference between
+  // buying dollars and buying a stablecoin, and the user choosing the pair is
+  // the person who should know.
+  bool quote_mismatch = 6;
 }
