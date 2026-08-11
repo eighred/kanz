@@ -56,6 +56,17 @@ service RiskQueryService {
   // Health reports the engine's mode + staleness so a caller that cannot
   // tolerate degraded data branches before reading the query methods.
   rpc Health(HealthRequest) returns (HealthResponse);
+
+  // ListPortfolios names the portfolios this engine can answer for.
+  //
+  // IT IS NOT A PORTFOLIO DIRECTORY, AND THE DIFFERENCE MATTERS TO ANYONE
+  // BUILDING ON IT. The engine's store holds the portfolios it has folded state
+  // for; a portfolio the fund has opened but that no event has reached yet is
+  // absent. That is the honest scope for a read surface whose every other RPC
+  // answers "what is this portfolio's risk" — you can only pick something the
+  // engine can then answer about. A caller wanting the fund's book of record is
+  // asking a different service a different question.
+  rpc ListPortfolios(ListPortfoliosRequest) returns (ListPortfoliosResponse);
 }
 
 // Mode is the engine's operational mode (mirrors api/v1.Mode).
@@ -222,4 +233,50 @@ message HealthResponse {
   // staleness is the gap between as_of and the engine's wall clock when
   // sampled. Callers compare it against their own freshness budget.
   google.protobuf.Duration staleness = 3;
+}
+
+// ListPortfoliosRequest is empty: the engine serves exactly one tenant
+// (MT-01d), so there is nothing for a caller to select by. A tenant field here
+// would be a caller-supplied identity — the one thing a tenant boundary must
+// never be.
+message ListPortfoliosRequest {}
+
+// ListPortfoliosResponse is the reply to ListPortfoliosRequest.
+message ListPortfoliosResponse {
+  repeated PortfolioSummary portfolios = 1;
+
+  // owner_tenant is the tenant that owns every portfolio listed (WIRE-02a) —
+  // the same deny-by-default authz-gate input the per-portfolio replies carry,
+  // and it is on THIS message for the same reason.
+  //
+  // A LIST INVERTS THE GATE WITHOUT WEAKENING IT. The per-id replies let a
+  // governed client check one portfolio's owner against the caller; here every
+  // element shares one owner because the engine is single-tenant, so the field
+  // gates the whole reply at once. Empty ⇒ the engine has no ownership record,
+  // which a deny-by-default gate must treat as a denial, not an allow — an
+  // ungated list is a worse disclosure than an ungated read, because it names
+  // portfolios the caller could not otherwise have guessed.
+  string owner_tenant = 2;
+}
+
+// PortfolioSummary is one row of the list: enough to choose a portfolio, and
+// deliberately no more.
+//
+// NO MONEY HERE, ON PURPOSE. cash_balance and total_market_value are held on
+// the aggregate and are exactly what an exposure read returns; putting them on
+// a list means every caller who wanted a picker also receives the fund's
+// valuations, and a screen that only needed names starts carrying figures it
+// must then be careful with. Ask for the portfolio you chose.
+message PortfolioSummary {
+  string portfolio_id = 1;
+  string display_name = 2;
+  string base_currency = 3;
+
+  // as_of is the state timestamp this portfolio was last folded to. It is the
+  // staleness signal a picker needs: a portfolio last updated days ago is a
+  // different proposition from one updated seconds ago, and the list is where
+  // that is visible without opening each one.
+  google.protobuf.Timestamp as_of = 4;
+
+  uint32 position_count = 5;
 }

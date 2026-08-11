@@ -2,6 +2,8 @@ package gateway_test
 
 import (
 	"context"
+	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -41,6 +43,7 @@ type fakeClient struct {
 	measuresResp *querypb.MeasuresResponse
 	scenarioResp *querypb.EvaluateScenarioResponse
 	healthResp   *querypb.HealthResponse
+	listResp     *querypb.ListPortfoliosResponse
 	err          error
 
 	gotExposure *querypb.ExposureRequest
@@ -51,6 +54,9 @@ type fakeClient struct {
 func (f *fakeClient) Exposure(_ context.Context, in *querypb.ExposureRequest, _ ...grpc.CallOption) (*querypb.ExposureResponse, error) {
 	f.gotExposure = in
 	return f.exposureResp, f.err
+}
+func (f *fakeClient) ListPortfolios(context.Context, *querypb.ListPortfoliosRequest, ...grpc.CallOption) (*querypb.ListPortfoliosResponse, error) {
+	return f.listResp, f.err
 }
 func (f *fakeClient) Measures(_ context.Context, in *querypb.MeasuresRequest, _ ...grpc.CallOption) (*querypb.MeasuresResponse, error) {
 	f.gotMeasures = in
@@ -210,5 +216,132 @@ func TestOpenAPIServed(t *testing.T) {
 	}
 	if !strings.Contains(rr.Body.String(), `"openapi"`) || !strings.Contains(rr.Body.String(), "/portfolios/{id}/exposure") {
 		t.Error("openapi doc missing expected content")
+	}
+}
+
+// THE LIST ROUTE'S TWO GATES (#399).
+//
+// GET /v1/portfolios answers "which portfolios may I look at" — the question
+// every per-id route assumed the caller could already answer. It is gated twice,
+// and the two gates answer different questions:
+//
+//   - the TENANT gate (writeOwned, shared with the per-id routes) refuses a
+//     reply whose owner_tenant is not the caller's;
+//   - the PORTFOLIO gate (auth.PortfolioInScope) drops rows the caller's claim
+//     does not cover.
+//
+// The second is the one that is easy to get backwards, because the read and
+// capital paths take OPPOSITE views of an absent claim, deliberately
+// (pkg/auth/portfolio.go). Both directions are pinned below.
+
+// serveAs is serve() with a principal the caller chooses, so the claim and the
+// tenant can be varied independently.
+func serveAs(t *testing.T, fc *fakeClient, p *middleware.Principal) *httptest.Server {
+	t.Helper()
+	mux := authz.NewMux(authz.Grants{"analyst": {authz.Read}}, nil)
+	gateway.New(fc).Routes(mux)
+	authed := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mux.ServeHTTP(w, r.WithContext(middleware.WithPrincipal(r.Context(), p)))
+	})
+	ts := httptest.NewServer(authed)
+	t.Cleanup(ts.Close)
+	return ts
+}
+
+func listOf(t *testing.T, ts *httptest.Server) (int, []string) {
+	t.Helper()
+	res, err := http.Get(ts.URL + "/v1/portfolios")
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	defer func() { _ = res.Body.Close() }()
+	body, _ := io.ReadAll(res.Body)
+	if res.StatusCode != http.StatusOK {
+		return res.StatusCode, nil
+	}
+	var got struct {
+		Portfolios []struct {
+			PortfolioID string `json:"portfolio_id"`
+		} `json:"portfolios"`
+	}
+	if err := json.Unmarshal(body, &got); err != nil {
+		t.Fatalf("decode %q: %v", body, err)
+	}
+	ids := make([]string, 0, len(got.Portfolios))
+	for _, p := range got.Portfolios {
+		ids = append(ids, p.PortfolioID)
+	}
+	return res.StatusCode, ids
+}
+
+func threePortfolios() *fakeClient {
+	return &fakeClient{listResp: &querypb.ListPortfoliosResponse{
+		OwnerTenant: testTenant,
+		Portfolios: []*querypb.PortfolioSummary{
+			{PortfolioId: "PF1"}, {PortfolioId: "PF2"}, {PortfolioId: "PF3"},
+		},
+	}}
+}
+
+// AN ABSENT CLAIM PERMITS, ON THIS PATH. The token asserted no portfolio
+// restriction, so the tenant boundary is the operative limit. Reading it the
+// other way — the capital path's rule — would show an unrestricted reader an
+// EMPTY list, which they would read as "the fund has no portfolios" rather than
+// as a permission problem, and would take to an operator as a data bug.
+func TestAnUnrestrictedReaderSeesEveryPortfolioInTheTenant(t *testing.T) {
+	ts := serveAs(t, threePortfolios(),
+		&middleware.Principal{Subject: "u1", Tenant: testTenant, Roles: []string{"analyst"}})
+
+	code, ids := listOf(t, ts)
+	if code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", code)
+	}
+	if len(ids) != 3 {
+		t.Fatalf("ids = %v, want all three.\n\n"+
+			"An empty portfolios claim PERMITS on a read path (pkg/auth/portfolio.go). "+
+			"Applying PortfolioEntitled's deny-on-empty here would hide the whole book.", ids)
+	}
+}
+
+// A SCOPED READER SEES ONLY THEIR OWN. The claim is the allow-list, and the
+// engine's reply is filtered against it before it is written.
+func TestAScopedReaderSeesOnlyTheirClaimedPortfolios(t *testing.T) {
+	ts := serveAs(t, threePortfolios(), &middleware.Principal{
+		Subject: "u1", Tenant: testTenant, Roles: []string{"analyst"},
+		Portfolios: []string{"PF2"},
+	})
+
+	code, ids := listOf(t, ts)
+	if code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", code)
+	}
+	if len(ids) != 1 || ids[0] != "PF2" {
+		t.Fatalf("ids = %v, want [PF2] — a list must not name portfolios the caller's claim "+
+			"excludes, because it hands over ids they could not otherwise have guessed", ids)
+	}
+}
+
+// THE TENANT GATE STILL APPLIES, and it matters MORE here than on a read: a
+// caller naming a portfolio already knows its id.
+func TestAListFromAnotherTenantIsRefused(t *testing.T) {
+	fc := threePortfolios()
+	fc.listResp.OwnerTenant = "someone-else"
+	ts := serveAs(t, fc, &middleware.Principal{Subject: "u1", Tenant: testTenant, Roles: []string{"analyst"}})
+
+	if code, _ := listOf(t, ts); code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404 — an engine serving another tenant must not have its "+
+			"portfolio ids relayed", code)
+	}
+}
+
+// EMPTY OWNER DENIES, the same deny-by-default stance the per-id routes take.
+// An unconfigured engine tenant must fail closed, never open.
+func TestAListWithNoOwnerTenantIsRefused(t *testing.T) {
+	fc := threePortfolios()
+	fc.listResp.OwnerTenant = ""
+	ts := serveAs(t, fc, &middleware.Principal{Subject: "u1", Tenant: testTenant, Roles: []string{"analyst"}})
+
+	if code, _ := listOf(t, ts); code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404 — a missing ownership signal is not permission", code)
 	}
 }

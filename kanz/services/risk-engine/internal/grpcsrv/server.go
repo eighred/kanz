@@ -205,6 +205,36 @@ func (s *Server) EvaluateScenario(ctx context.Context, req *querypb.EvaluateScen
 	}, nil
 }
 
+// ListPortfolios names the portfolios this engine holds state for.
+//
+// THE OWNERSHIP STAMP MATTERS MORE HERE THAN ON THE PER-ID REPLIES, not less. A
+// caller who names a portfolio already knows its id; a list HANDS OVER ids the
+// caller could not otherwise have guessed. So an ungated list is a strictly
+// worse disclosure than an ungated read, and it carries the same field the
+// governed client already gates on rather than a weaker one of its own.
+//
+// The engine is single-tenant per deployment (MT-01d), so one stamp covers
+// every row: a portfolio visible here is owned by exactly this tenant. Empty
+// ownerTenant leaves the field blank, which a deny-by-default gate treats as a
+// denial — an unconfigured tenant fails closed, never open.
+func (s *Server) ListPortfolios(ctx context.Context, _ *querypb.ListPortfoliosRequest) (*querypb.ListPortfoliosResponse, error) {
+	list, err := s.engine.ListPortfolios(ctx)
+	if err != nil {
+		return nil, mapError(err)
+	}
+	out := make([]*querypb.PortfolioSummary, 0, len(list))
+	for _, p := range list {
+		out = append(out, &querypb.PortfolioSummary{
+			PortfolioId:   string(p.ID),
+			DisplayName:   p.DisplayName,
+			BaseCurrency:  p.BaseCurrency,
+			AsOf:          nonZeroTimestamp(p.AsOf),
+			PositionCount: p.PositionCount,
+		})
+	}
+	return &querypb.ListPortfoliosResponse{Portfolios: out, OwnerTenant: s.ownerTenant}, nil
+}
+
 func (s *Server) Health(ctx context.Context, _ *querypb.HealthRequest) (*querypb.HealthResponse, error) {
 	h, err := s.engine.Health(ctx)
 	if err != nil {
