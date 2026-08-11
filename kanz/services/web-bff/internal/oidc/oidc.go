@@ -1,6 +1,6 @@
 // Package oidc is the web-BFF's relying-party client for the OIDC
-// authorization-code + PKCE flow against Eighred SSO — the browser counterpart
-// to pkg/deviceauth's device flow. It resolves the authorize/token endpoints
+// authorization-code + PKCE flow against Eighred SSO. It resolves the
+// authorize/token endpoints
 // from the issuer's discovery document, builds the browser redirect, and
 // exchanges the returned code (with the PKCE verifier) for a token. It holds no
 // keys and adds no auth endpoints; identity stays owned by Eighred SSO, whose

@@ -1,6 +1,15 @@
-// Package tokenstore persists the CLI's Eighred SSO token between runs so a
-// user logs in once, not every session. The token is written to the user's
+// Package tokenstore persists the CLI's session token between runs so an
+// operator signs in once, not every session. The token is written to the user's
 // config directory with 0600 permissions — it is a bearer credential.
+//
+// THE PERSISTED SHAPE CHANGED WITH THE IDENTITY PROVIDER (#364), AND OLD FILES
+// ARE HANDLED BY AN EXISTING RULE RATHER THAN A MIGRATION. It used to hold a
+// deviceauth.Token (AccessToken/Expiry, from an SSO device flow that was never
+// built); it now holds an identityclient.Token (token/expires_at/subject/
+// tenant). A file in the old shape decodes to a Token with an empty token
+// string, which Load already treats as "not logged in" — so the operator signs
+// in again and the file is overwritten. Writing a converter for a credential
+// nothing could have issued would be code that exists to migrate an empty set.
 package tokenstore
 
 import (
@@ -12,7 +21,7 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/eighred/kanz/pkg/deviceauth"
+	"github.com/eighred/kanz/internal/identityclient"
 )
 
 // Store reads and writes the persisted token at a fixed path.
@@ -38,7 +47,7 @@ func (s *Store) Path() string { return s.path }
 // Load returns the persisted token. A missing file is reported as
 // (nil, nil) — "not logged in", not an error — so callers can branch on it
 // without inspecting the filesystem error.
-func (s *Store) Load() (*deviceauth.Token, error) {
+func (s *Store) Load() (*identityclient.Token, error) {
 	b, err := os.ReadFile(s.path)
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil, nil
@@ -46,7 +55,7 @@ func (s *Store) Load() (*deviceauth.Token, error) {
 	if err != nil {
 		return nil, fmt.Errorf("tokenstore: read: %w", err)
 	}
-	var tok deviceauth.Token
+	var tok identityclient.Token
 	if err := json.Unmarshal(b, &tok); err != nil {
 		// A corrupt token file is treated as "not logged in": the CLI will
 		// re-authenticate rather than wedge on unreadable state.
@@ -57,7 +66,7 @@ func (s *Store) Load() (*deviceauth.Token, error) {
 
 // Save writes the token atomically (write-temp-then-rename) with 0600
 // permissions, creating the parent directory if needed.
-func (s *Store) Save(tok *deviceauth.Token) error {
+func (s *Store) Save(tok *identityclient.Token) error {
 	if err := os.MkdirAll(filepath.Dir(s.path), 0o700); err != nil {
 		return fmt.Errorf("tokenstore: mkdir: %w", err)
 	}
@@ -84,12 +93,19 @@ func (s *Store) Delete() error {
 	return nil
 }
 
-// Valid reports whether tok is present and its access token is not expired
-// (with a small skew allowance, so a token about to expire is refreshed rather
-// than used for a request that would then 401).
-func Valid(tok *deviceauth.Token, now time.Time) bool {
-	if tok == nil || tok.AccessToken == "" {
+// Valid reports whether tok is present and not expired (with a small skew
+// allowance, so a token about to expire sends the caller to sign in again
+// rather than being spent on a request that would then 401).
+//
+// A ZERO EXPIRY MEANS NON-EXPIRING, AND ONLY ONE THING PRODUCES IT: a session
+// adopted from KANZ_TOKEN, where the gateway is the authority on the bearer's
+// lifetime and inventing one here would refuse a perfectly good token. Every
+// token the identity provider mints carries a real expires_at (its TTL defaults
+// to 8h and there is NO refresh route), so a signed-in session always takes the
+// second branch.
+func Valid(tok *identityclient.Token, now time.Time) bool {
+	if tok == nil || tok.Token == "" {
 		return false
 	}
-	return tok.Expiry.IsZero() || now.Add(30*time.Second).Before(tok.Expiry)
+	return tok.Expires.IsZero() || now.Add(30*time.Second).Before(tok.Expires)
 }
