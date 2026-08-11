@@ -496,7 +496,48 @@ spec:
             matchExpressions:
               - key: app
                 operator: In
-                values: [wealth, datamaster, copilot]
+                values: [wealth, datamaster, copilot, optimization]
+      ports:
+        - { protocol: TCP, port: 8080 }
+---
+# MODEL PORTFOLIOS (#409) — the ingress half, and it is a capital boundary rather
+# than a read one.
+#
+# The optimization service authenticates NOBODY. It reads the gateway-injected
+# principal and uses it as the ISSUER stamped on every order command it emits —
+# the field the audit trail records as the person who moved the capital. That
+# trust is sound only while the api-gateway is its only reachable caller: a pod
+# that can reach this service directly sets its own principal header and trades
+# as anyone it names.
+#
+# So this rule admits exactly one peer, and observability is NOT among them. The
+# four services in allow-observability-scrape serve tenant-scoped reads on the
+# same port as /metrics, which is the exposure #232 could not close; this service
+# must not join that set, and it does not need to — nothing scrapes it yet.
+#
+# THE POLICY EXISTS BEFORE THE WORKLOAD, deliberately. There is no optimization
+# Deployment: no Dockerfile, no build matrix entry, no manifest. Writing the
+# constraint now means the day one lands it is already bounded, rather than
+# arriving open and waiting for someone to notice. test/arch's
+# tenantHeaderTrustingUndeployed asserts the workload is still absent and fails
+# when it appears, which is when the rest of this obligation comes due.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-gateway-to-optimization
+  namespace: kanz-services
+  labels:
+    app.kubernetes.io/part-of: kanz
+spec:
+  podSelector:
+    matchLabels:
+      app: optimization
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: api-gateway
       ports:
         - { protocol: TCP, port: 8080 }
 ---

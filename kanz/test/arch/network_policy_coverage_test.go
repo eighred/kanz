@@ -928,11 +928,38 @@ var tenantHeaderTrustingServices = map[string]int{
 	"wealth":     8080,
 }
 
+// tenantHeaderTrustingUndeployed is the same trust, taken on by a service that
+// has NO deployable workload — no Dockerfile, no image job, no manifest (#409).
+//
+// It is a separate set rather than a zero port because the assertion is the
+// OPPOSITE one. For a deployed service the guard checks the port its
+// tenant-scoped routes share with /metrics. For these there is no port to check,
+// so the guard checks that there is still no workload — and FAILS the moment one
+// appears, which is exactly when the network obligation becomes real and someone
+// has to write the NetworkPolicy that makes trusting the header sound.
+//
+// A service is safe here only because it cannot be deployed at all. That is a
+// fact with an expiry date, and this is what stops the entry outliving it.
+var tenantHeaderTrustingUndeployed = map[string]string{
+	"optimization": "portfolio construction (#409): reads the gateway-injected principal so a " +
+		"materialized order's issuer is the authenticated caller rather than a string from the " +
+		"request body. It has no Dockerfile, no build.yml matrix entry and no manifest, so it runs " +
+		"nowhere. Deploying it REQUIRES an ingress policy admitting only api-gateway — without one, " +
+		"any pod that can reach it names its own principal and trades as anyone.",
+}
+
 // tenantHeaderRead matches a READ of the tenant principal header — the act that
 // makes a service depend on the gateway being its only caller. It deliberately
 // does not match the WRITE side (auth.SetPrincipalHeaders, formerly Header.Set):
 // injecting or forwarding the header is what the gateway and copilot do, and
 // neither takes on the network obligation.
+//
+// PrincipalFromHeaders IS A THIRD WAY IN, and it was invisible here until #409.
+// It reads the subject AND the tenant and returns the whole Principal, so a
+// service calling it takes on exactly the same network obligation as one calling
+// RequireCallerTenant — but it names no tenant constant, so this guard did not
+// see it. The optimization service joining the trust boundary is what surfaced
+// that: a green guard was checking a weaker property than its name claims.
 //
 // THE FIRST ALTERNATIVE IS THE ONE THAT MATTERS TODAY. #258 moved the constant
 // and both enforcement policies into pkg/auth, so no service performs the
@@ -942,7 +969,7 @@ var tenantHeaderTrustingServices = map[string]int{
 // it is what a NEW service would write before it discovers pkg/auth, and that is
 // precisely the case this guard exists to catch.
 var tenantHeaderRead = regexp.MustCompile(
-	`auth\.(?:RequireCallerTenantIs|RequireCallerTenant|CallerTenant)\(` +
+	`auth\.(?:RequireCallerTenantIs|RequireCallerTenant|CallerTenant|PrincipalFromHeaders)\(` +
 		`|Header\.Get\(\s*(?:[A-Za-z0-9_.]*[Hh]eaderPrincipalTenant|"X-Kanz-Principal-Tenant")\s*\)`)
 
 // TestTenantHeaderTrustingServicesAreEnumerated fails when a service reads
@@ -997,7 +1024,9 @@ func TestTenantHeaderTrustingServicesAreEnumerated(t *testing.T) {
 
 	var unlisted []string
 	for svc, where := range found {
-		if _, ok := tenantHeaderTrustingServices[svc]; !ok {
+		_, deployed := tenantHeaderTrustingServices[svc]
+		_, undeployed := tenantHeaderTrustingUndeployed[svc]
+		if !deployed && !undeployed {
 			unlisted = append(unlisted, svc+" ("+where+")")
 		}
 	}
@@ -1031,6 +1060,26 @@ func TestTenantHeaderTrustingServicesAreEnumerated(t *testing.T) {
 			}
 		}
 	}
+	// THE UNDEPLOYED ENTRIES MUST STILL BE UNDEPLOYED. Each is safe only because
+	// nothing runs it; the day a workload appears the header trust becomes a live
+	// exposure and needs an ingress policy admitting only the api-gateway. Failing
+	// HERE is what makes that a decision someone takes rather than one they
+	// inherit — and it is why this is a separate set from the port-checked map
+	// above rather than an entry with a zero in it.
+	for svc, why := range tenantHeaderTrustingUndeployed {
+		if _, deployed := annotated[svc]; deployed {
+			t.Errorf("%s is listed as header-trusting BUT UNDEPLOYED, and a kanz-services workload "+
+				"labelled app=%s now exists.\n\n%s\n\nMove it into tenantHeaderTrustingServices with "+
+				"the port its tenant-scoped routes serve on, and add the NetworkPolicy admitting only "+
+				"api-gateway. Until that policy exists, any pod that can reach it names its own "+
+				"principal.", svc, svc, why)
+		}
+		if _, alsoListed := tenantHeaderTrustingServices[svc]; alsoListed {
+			t.Errorf("%s is in BOTH tenantHeaderTrustingServices and tenantHeaderTrustingUndeployed — "+
+				"one of them is stale, and a reader cannot tell which claim is current", svc)
+		}
+	}
+
 	for svc, port := range tenantHeaderTrustingServices {
 		got, ok := annotated[svc]
 		if !ok {

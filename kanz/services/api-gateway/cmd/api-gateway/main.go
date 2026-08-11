@@ -404,6 +404,9 @@ func buildProxy(ctx context.Context, cfg config.Config, logger *slog.Logger) (*p
 	if cfg.TVSyncAddr != "" {
 		bases[proxy.ServiceTVSync] = cfg.TVSyncAddr
 	}
+	if cfg.OptimizationAddr != "" {
+		bases[proxy.ServiceOptimization] = cfg.OptimizationAddr
+	}
 	if len(bases) == 0 {
 		logger.Warn("api-gateway: Phase-7 read surfaces disabled (no upstream addresses)")
 		return proxy.New(nil), nil
