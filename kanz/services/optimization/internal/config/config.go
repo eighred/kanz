@@ -1,6 +1,7 @@
 package config
 
 import (
+	"fmt"
 	"log/slog"
 	"os"
 	"strings"
@@ -45,7 +46,40 @@ type Config struct {
 	// does not. The precedent is inference, whose gRPC prediction API is
 	// deliberately kept off the scrape list for the same reason.
 	MetricsListen string
-	LogLevel      slog.Level
+
+	// NATSURL is the event spine. Empty means this deployment PUBLISHES NOTHING:
+	// the materialize route still returns the commands it built, and none reach
+	// the bus.
+	NATSURL string
+
+	// Source names this producer on every envelope it emits.
+	Source string
+
+	// SPIFFESocket is the workload SVID used for mTLS to the broker. The
+	// production broker refuses a plaintext client at the handshake (SEC-M3).
+	SPIFFESocket string
+
+	// AutoPublish sends the order commands a materialized proposal produces to
+	// the bus, instead of building them and stopping (#409).
+	//
+	// THIS REVERSES A GUARDED DECISION, DELIBERATELY AND BY NAME. The bridge's
+	// own header states the default stance — "the optimizer proposes, a human
+	// approves, and ONLY THEN does this bridge emit commands" — and the
+	// composition root had never wired a publisher. Turning this on moves the
+	// platform from proposing to trading on its own recommendation. The owner
+	// asked for it; the switch is explicit, OFF by default, stated at startup in
+	// as many words, and counted — so no deployment acquires the behaviour by
+	// omission, which is the one way this must never happen.
+	//
+	// WHAT IT DOES NOT CHANGE: who the order is attributed to. The issuer is
+	// still the gateway-authenticated principal that called the route, and the
+	// producer re-checks it at the bus (AUTH-01c). Auto-publish removes the
+	// approval STEP, not the human.
+	//
+	// It has no effect without NATSURL, and a deployment that sets one without
+	// the other is REFUSED at startup rather than left looking armed.
+	AutoPublish bool
+	LogLevel    slog.Level
 
 	// OTLPEndpoint is the OTel collector for span export (OBS-01). Empty ⇒ none.
 	OTLPEndpoint string
@@ -54,12 +88,35 @@ type Config struct {
 // Load reads the configuration from the environment with production-safe
 // defaults.
 func Load() (Config, error) {
-	return Config{
+	cfg := Config{
 		Listen:        envOr("OPTIMIZATION_LISTEN", ":8100"),
 		MetricsListen: envOr("OPTIMIZATION_METRICS_LISTEN", ":8094"),
+		NATSURL:       os.Getenv("OPTIMIZATION_NATS_URL"),
+		Source:        envOr("OPTIMIZATION_SOURCE", "optimization"),
+		SPIFFESocket:  os.Getenv("SPIFFE_ENDPOINT_SOCKET"),
+		AutoPublish:   os.Getenv("OPTIMIZATION_AUTO_PUBLISH") == "true",
 		LogLevel:      parseLevel(os.Getenv("OPTIMIZATION_LOG_LEVEL")),
 		OTLPEndpoint:  os.Getenv("OPTIMIZATION_OTLP_ENDPOINT"),
-	}, nil
+	}
+
+	// AUTO-PUBLISH WITH NO BROKER IS REFUSED, NOT IGNORED (#409).
+	//
+	// The two settings together are the entire difference between a service that
+	// proposes and one that trades. Accepting the flag alone would produce a
+	// deployment whose configuration says it trades on its own recommendation and
+	// whose behaviour is a dry run — and the direction of that mistake is the
+	// dangerous one: an operator reads the flag, believes the orders are going
+	// out, and finds out otherwise from a fill that never arrives.
+	//
+	// A misconfiguration must surface on the first event, never as a default that
+	// looks healthy.
+	if cfg.AutoPublish && cfg.NATSURL == "" {
+		return Config{}, fmt.Errorf("OPTIMIZATION_AUTO_PUBLISH=true but OPTIMIZATION_NATS_URL is unset: " +
+			"this deployment claims to publish materialized orders and has no broker to publish them to. " +
+			"Set the broker, or unset the flag — a service that silently dry-runs while its configuration " +
+			"says otherwise is worse than one that does neither")
+	}
+	return cfg, nil
 }
 
 func envOr(key, def string) string {

@@ -216,6 +216,19 @@ var producersWithoutATenantFallback = map[string]tenantRoute{
 			"whose only effect would be to weaken that refusal into a default.",
 		stampedIn: "cmd/kanz-halt/main.go",
 	},
+	"services/optimization/cmd/optimization": {
+		why: "ROUTE 2, and a fallback here would be the same security defect as the gateway's, on a " +
+			"path with no human in it. Both publishers stamp the tenant from the AUTHENTICATED " +
+			"caller: the order COMMANDs through publish.Orders.Publish (publish.go:74, TenantID: " +
+			"o.tenant) and the ProposalMaterialized FACT through publish.Materialized " +
+			"(publish.go:106), where o.tenant comes from Materializer.ForTenant scoped per request " +
+			"to the principal the api-gateway injected. A ProducerConfig.Tenant would let a request " +
+			"whose principal carried no tenant publish a REBALANCE into a default tenant's book " +
+			"instead of being refused — and with OPTIMIZATION_AUTO_PUBLISH armed nobody reviews it " +
+			"first. Materializer.Publish refuses an empty tenant outright (publish.go:164) rather " +
+			"than letting a fallback rescue it.",
+		stampedIn: "services/optimization/internal/publish/publish.go",
+	},
 	"services/api-gateway/cmd/api-gateway": {
 		why: "ROUTE 2, and a fallback here would be a security defect. The gateway is the platform's " +
 			"identity authority: every command it publishes goes through the single Handler.publish " +

@@ -97,7 +97,14 @@ data:
     # spine. They are added to EXECUTION rather than renamed under execution.>
     # because a subject rename would break every existing consumer binding and the
     # replay log's subject history; the stream's subject list is the cheap seam.
-    ensure_stream EXECUTION     "execution.>,strategy.>,order.>" 24h
+    #
+    # optimization.> joins them for the same reason (#409): a rebalance proposal
+    # becoming order commands IS the signal→order path, one step earlier. The
+    # ProposalMaterialized FACT records who authorized an automated capital
+    # action, so an unbound subject here would drop exactly the audit record that
+    # makes auto-publish accountable — and drop it as a hard publish error, after
+    # the orders themselves had already gone out on order.>.
+    ensure_stream EXECUTION     "execution.>,strategy.>,order.>,optimization.>" 24h
     # MT-02 (#358): the TENANT ROUTING subjects the gateway publishes on.
     #
     # WITHOUT THIS STREAM EVERY TENANT ORDER FAILS, and it is not subtle — the
