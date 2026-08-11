@@ -2,11 +2,15 @@
 // provisions new nodes, drives node lifecycle (cordon/drain/region) and manages
 // venue API credentials.
 //
-// THE PANES THEMSELVES NOW LIVE IN internal/tui/universe, so the kanz shell can
-// mount them too (#66). This binary is the standalone entry point and stays
-// until the shell is proven: flags, secret loading, and a bubbletea program
-// around the same Model the shell embeds. Nothing here is duplicated — if this
-// file and the shell ever disagree about what a pane does, the pane moved.
+// THE PANES LIVE IN internal/tui/universe, and this binary is the entry point
+// around them: flags, secret loading, and a bubbletea program over the Model.
+//
+// THEY WERE SPLIT OUT SO THE kanz SHELL COULD MOUNT THEM TOO (#66). That shell
+// is retired with the rest of the terminal client (owner decision, 2026-08-11 —
+// the platform is exclusively web-focused), so this is the only mount point
+// again. The split is left alone rather than folded back: the same estate
+// screens are being rebuilt in the web app (#371), and whether THIS binary
+// survives that is a separate decision from whether the shell did.
 //
 // IT REACHES THE ESTATE THROUGH THE API GATEWAY, and holds no cluster access of any
 // kind (OPS-M2c). It used to dial operator.v1 directly in plaintext at

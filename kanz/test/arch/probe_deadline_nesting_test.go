@@ -699,20 +699,22 @@ var timeUnits = map[string]time.Duration{
 
 // delegatingClientFiles must construct NO http.Client of their own.
 //
-// TestTUIHTTPClientCarriesNoTimeoutOfItsOwn pins the ONE client this binary is
-// allowed to build. That rule was scoped to a single file path, and a second
-// client sat outside it: cmd/kanz/internal/gateway carried
-// http.Client{Timeout: 60 * time.Second}, so the Copilot REPL's calls were
-// bounded by min(context deadline, 60s) with the smaller winning invisibly —
-// exactly the pattern the guard above exists to forbid. It also sent no request
-// signature, so a gateway enforcing them 401'd every REPL call (#198).
+// TestTUIHTTPClientCarriesNoTimeoutOfItsOwn pins the ONE client a terminal
+// surface is allowed to build. That rule was scoped to a single file path, and a
+// second client sat outside it: the kanz shell's own gateway package carried
+// http.Client{Timeout: 60 * time.Second}, so its calls were bounded by
+// min(context deadline, 60s) with the smaller winning invisibly — exactly the
+// pattern the guard above exists to forbid. It also sent no request signature,
+// so a gateway enforcing them 401'd every call (#198).
 //
-// Both are gone by construction: that package now delegates to
-// internal/tui/gateway. This guard keeps it that way, because "delegates to the
-// shared transport" is a property that decays the first time someone needs
-// "just one" direct request.
+// THE FILE THAT DEFECT LIVED IN IS GONE WITH THE TERMINAL CLIENT, and this list
+// was repointed rather than emptied. An empty list here would pass forever while
+// asserting nothing — and the property is not about that file, it is about any
+// surface that says it delegates to the shared transport. universe's control-
+// plane source is the remaining one that says so, and "delegates" is a property
+// that decays the first time somebody needs "just one" direct request.
 var delegatingClientFiles = []string{
-	"cmd/kanz/internal/gateway/client.go",
+	"internal/tui/universe/gatewaysource.go",
 }
 
 func TestDelegatingClientsBuildNoHTTPClientOfTheirOwn(t *testing.T) {
