@@ -33,6 +33,22 @@ export interface Cluster {
   offline?: number
 }
 
+/** ProvisionStatus is the protobuf enum, serialised as its name. */
+export type ProvisionStatus =
+  | 'PROVISION_STATUS_UNSPECIFIED'
+  | 'PROVISION_STATUS_PENDING'
+  | 'PROVISION_STATUS_INSTALLING'
+  | 'PROVISION_STATUS_JOINED'
+  | 'PROVISION_STATUS_FAILED'
+
+export interface Provision {
+  id: string
+  hostname?: string
+  status?: ProvisionStatus
+  /** The failure reason when FAILED; absent otherwise. */
+  message?: string
+}
+
 export interface VenueKeyStatus {
   venue: string
   configured?: boolean
@@ -66,10 +82,45 @@ function node(name: string): string {
   return `/api/v1/control/nodes/${encodeURIComponent(name)}`
 }
 
+/**
+ * settled reports whether a provision has stopped moving.
+ *
+ * DENY BY DEFAULT, like ready() above and for the same reason: protojson omits
+ * the zero value, so a provision whose status is UNSPECIFIED may carry no status
+ * field at all. Anything that is not an explicit terminal state is treated as
+ * still running — a run shown as finished when nobody knows is how a half-joined
+ * node gets forgotten.
+ */
+export function settled(p: Provision): boolean {
+  return p.status === 'PROVISION_STATUS_JOINED' || p.status === 'PROVISION_STATUS_FAILED'
+}
+
 export const control = {
   nodes: () => api.get<{ nodes?: Node[] }>('/api/v1/control/nodes').then((r) => r.nodes ?? []),
   clusters: () => api.get<{ clusters?: Cluster[] }>('/api/v1/control/clusters').then((r) => r.clusters ?? []),
   venues: () => api.get<{ venues?: VenueKeyStatus[] }>('/api/v1/control/venues').then((r) => r.venues ?? []),
+  provisions: () =>
+    api.get<{ provisions?: Provision[] }>('/api/v1/control/provisions').then((r) => r.provisions ?? []),
+
+  /**
+   * setVenueKeys writes trading credentials for one venue.
+   *
+   * THE MOST DANGEROUS BODY ON THIS SURFACE, and the gateway says so beside its
+   * own handler: nothing in that path logs the request, on success or on error.
+   * The same rule applies here — the credential is passed straight through and
+   * is never put in a URL, a query string, a thrown error or a console.
+   *
+   * The reply carries exchange_account_id, which is the exchange's OWN id for
+   * the account these keys spend, as reported during the pre-write proof. It is
+   * a public fact and never key material — it is the only evidence the caller
+   * gets that the credential actually works, so it is returned rather than
+   * discarded.
+   */
+  setVenueKeys: (venue: string, apiKey: string, apiSecret: string, passphrase: string) =>
+    api.put<{ exchange_account_id?: string }>(
+      `/api/v1/control/venues/${encodeURIComponent(venue)}/keys`,
+      { api_key: apiKey, api_secret: apiSecret, passphrase },
+    ),
 
   // THE FOUR NODE ACTIONS. Each returns an empty message on success — the
   // operator.v1 responses carry no fields — so the caller's only job afterwards

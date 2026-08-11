@@ -1,4 +1,5 @@
 import { api, ApiError } from './client'
+import type { Money } from './decimal'
 
 // The risk read surface, as the browser sees it (#399).
 //
@@ -23,6 +24,61 @@ export interface PortfolioSummary {
   position_count: number
 }
 
+/** ExposureDimension is the axis risk is decomposed along, as its enum name. */
+export type ExposureDimension =
+  | 'EXPOSURE_DIMENSION_UNSPECIFIED'
+  | 'EXPOSURE_DIMENSION_ASSET_CLASS'
+  | 'EXPOSURE_DIMENSION_SECTOR'
+  | 'EXPOSURE_DIMENSION_CURRENCY'
+  | 'EXPOSURE_DIMENSION_RISK_FACTOR'
+  | 'EXPOSURE_DIMENSION_ISSUER'
+  | 'EXPOSURE_DIMENSION_INSTRUMENT'
+
+export interface ExposureState {
+  dimension: ExposureDimension
+  bucket: string
+  gross?: Money
+  net?: Money
+}
+
+/**
+ * QualityFlag is a query-result concern, and two of the three change what the
+ * numbers MEAN rather than how fresh they are.
+ *
+ * CURRENCY_EXCLUDED is the one to respect. The proto is explicit: positions in
+ * an unconvertible currency are omitted, so "a concentration or exposure limit
+ * checked against them can pass when the full book would breach", and a gate
+ * that must not under-report MUST refuse to act on a response carrying it. A
+ * screen cannot refuse on the reader's behalf — but it must not present an
+ * under-reporting total as a total.
+ */
+export type QualityFlag =
+  | 'QUALITY_FLAG_UNSPECIFIED'
+  | 'QUALITY_FLAG_DEGRADED'
+  | 'QUALITY_FLAG_STALE'
+  | 'QUALITY_FLAG_CURRENCY_EXCLUDED'
+
+export interface ExposureResponse {
+  portfolio_id: string
+  as_of: string
+  set?: { exposures?: ExposureState[] }
+  quality_flags?: QualityFlag[]
+}
+
+/** describeFlag says what a flag means for the number beside it. */
+export function describeFlag(f: QualityFlag): string {
+  switch (f) {
+    case 'QUALITY_FLAG_CURRENCY_EXCLUDED':
+      return 'Positions in a currency the engine could not convert are MISSING from these totals. The real exposure is larger than what is shown — do not read these as a complete book.'
+    case 'QUALITY_FLAG_DEGRADED':
+      return 'The engine was degraded when this was computed: these are cached, last-known values rather than live ones.'
+    case 'QUALITY_FLAG_STALE':
+      return 'This data is older than the request asked for, though the engine itself is healthy.'
+    default:
+      return f
+  }
+}
+
 export const risk = {
   /**
    * portfolios lists what the risk engine can answer for.
@@ -35,6 +91,10 @@ export const risk = {
    */
   portfolios: () =>
     api.get<{ portfolios?: PortfolioSummary[] }>('/api/v1/portfolios').then((r) => r.portfolios ?? []),
+
+  /** exposure reads one portfolio's decomposition. */
+  exposure: (id: string) =>
+    api.get<ExposureResponse>(`/api/v1/portfolios/${encodeURIComponent(id)}/exposure`),
 }
 
 /**

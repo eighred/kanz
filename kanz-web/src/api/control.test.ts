@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { ApiError } from './client'
-import { control, describe as describeError, ready, type Node } from './control'
+import { control, describe as describeError, ready, settled, type Node, type Provision } from './control'
 
 // A NODE IS READY ONLY IF IT SAYS SO.
 //
@@ -102,4 +102,28 @@ describe('node actions address the node through the path', () => {
     await control.cordon('worker/../other')
     expect(calls[0]?.url).toBe('/api/v1/control/nodes/worker%2F..%2Fother/cordon')
   })
+})
+
+// A PROVISION THAT HAS NOT SETTLED IS STILL RUNNING, WHATEVER IT SAYS.
+//
+// protojson omits the zero value, so a run whose status is UNSPECIFIED may carry
+// no status field at all — and a value added to the enum later arrives as a name
+// this build has never seen. Both must count as in flight: a run shown as
+// finished when nobody knows is how a half-joined node gets forgotten.
+describe('provision settlement is deny-by-default', () => {
+  const cases: Array<[string, Provision, boolean]> = [
+    ['joined', { id: '1', status: 'PROVISION_STATUS_JOINED' }, true],
+    ['failed', { id: '2', status: 'PROVISION_STATUS_FAILED' }, true],
+    ['installing', { id: '3', status: 'PROVISION_STATUS_INSTALLING' }, false],
+    ['pending', { id: '4', status: 'PROVISION_STATUS_PENDING' }, false],
+    ['unspecified', { id: '5', status: 'PROVISION_STATUS_UNSPECIFIED' }, false],
+    ['status omitted entirely (the protojson zero value)', { id: '6' }, false],
+    // A future enum value this build predates.
+    ['a status this build does not know', { id: '7', status: 'PROVISION_STATUS_CANCELLED' as never }, false],
+  ]
+  for (const [name, p, want] of cases) {
+    it(`${name} -> ${want ? 'settled' : 'still running'}`, () => {
+      expect(settled(p)).toBe(want)
+    })
+  }
 })

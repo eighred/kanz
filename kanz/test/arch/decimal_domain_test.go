@@ -40,6 +40,12 @@ import (
 var (
 	decBoundPattern        = regexp.MustCompile(`(?m)^const maxSafeExponent\s*=\s*(\d+)`)
 	complianceBoundPattern = regexp.MustCompile(`(?m)^const maxDecimalExponent\s*=\s*(\d+)`)
+	// THE THIRD COPY IS IN THE BROWSER (#399). kanz-web renders common.v1.Decimal
+	// and applies the exponent by moving the decimal point; an unbounded one turns
+	// `'0'.repeat(exponent)` into a hung TAB, which is #95's incident with a worse
+	// audience. It is a fourth ingress to the same question, so it is read here
+	// too — it is outside the Go module, hence the walk up from moduleRoot.
+	webBoundPattern = regexp.MustCompile(`(?m)^export const MAX_SAFE_EXPONENT\s*=\s*(\d+)`)
 )
 
 func TestDecimalDomainBoundsAgree(t *testing.T) {
@@ -63,6 +69,32 @@ func TestDecimalDomainBoundsAgree(t *testing.T) {
 
 	decBound := read("internal/dec/dec.go", decBoundPattern, "maxSafeExponent")
 	complianceBound := read("internal/compliance/gate.go", complianceBoundPattern, "maxDecimalExponent")
+
+	// The web app is a sibling of the Go module, not inside it.
+	webPath := filepath.Join(filepath.Dir(root), "kanz-web", "src", "api", "decimal.ts")
+	webRaw, err := os.ReadFile(webPath)
+	if err != nil {
+		t.Fatalf("read kanz-web/src/api/decimal.ts: %v — the browser renders Decimal too, and its "+
+			"bound has to agree with these. If that module moved, point this at its new home "+
+			"rather than dropping it: an unbounded exponent hangs the tab.", err)
+	}
+	m := webBoundPattern.FindSubmatch(webRaw)
+	if m == nil {
+		t.Fatal("could not find `export const MAX_SAFE_EXPONENT = <n>` in kanz-web/src/api/decimal.ts. " +
+			"The browser applies the exponent by building a digit string, so it needs the same bound " +
+			"the Go ingresses have — a renderer without one is a denial of service on the operator.")
+	}
+	webBound := string(m[1])
+
+	if webBound != decBound {
+		t.Fatalf("the browser's Decimal bound has diverged from the platform's:\n"+
+			"  internal/dec              maxSafeExponent   = %s\n"+
+			"  kanz-web src/api/decimal  MAX_SAFE_EXPONENT = %s\n\n"+
+			"They answer the same question — how far can 10^abs(exponent) be materialised before "+
+			"the computation IS the incident — at two ingresses. A browser that accepts what the "+
+			"fold refuses renders a figure the platform would not compute.",
+			decBound, webBound)
+	}
 
 	if decBound != complianceBound {
 		t.Fatalf("the two Decimal domain bounds have diverged:\n"+
