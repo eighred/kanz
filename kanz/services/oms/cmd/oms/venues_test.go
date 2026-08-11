@@ -21,6 +21,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	"google.golang.org/grpc"
 
+	orderpb "github.com/eighred/kanz/kanz-schemas-go/order/v1"
 	venuepb "github.com/eighred/kanz/kanz-schemas-go/venue/v1"
 
 	"github.com/eighred/kanz/internal/execution"
@@ -59,6 +60,10 @@ func unverifiedCounter() prometheus.Counter {
 	return prometheus.NewCounter(prometheus.CounterOpts{Name: "kanz_oms_unverified_venue_account_total"})
 }
 
+func undeclaredCounter() prometheus.Counter {
+	return prometheus.NewCounter(prometheus.CounterOpts{Name: "kanz_oms_undeclared_venue_order_types_total"})
+}
+
 // TestDialVenuesRefusesAnAdapterHoldingAnotherAccount is the whole point of SOV-02a.
 //
 // OMS_VENUE_ENDPOINTS says this adapter is okx-sub-1. The adapter — the only process
@@ -75,7 +80,7 @@ func TestDialVenuesRefusesAnAdapterHoldingAnotherAccount(t *testing.T) {
 		VenueEndpoints: "XOKX/okx-sub-1=" + addr,
 	}
 
-	_, _, err := dialVenues(context.Background(), cfg, unverifiedCounter(), quietLogger())
+	_, _, err := dialVenues(context.Background(), cfg, unverifiedCounter(), undeclaredCounter(), quietLogger())
 	if err == nil {
 		t.Fatal("dialVenues accepted an adapter that holds a DIFFERENT account's credential")
 	}
@@ -97,7 +102,7 @@ func TestDialVenuesAcceptsAnAgreeingAdapter(t *testing.T) {
 	})
 	cfg := config.Config{Tenant: "acme", VenueEndpoints: "XBIN/binance-main=" + addr}
 
-	venues, closeConns, err := dialVenues(context.Background(), cfg, unverifiedCounter(), quietLogger())
+	venues, closeConns, err := dialVenues(context.Background(), cfg, unverifiedCounter(), undeclaredCounter(), quietLogger())
 	if err != nil {
 		t.Fatalf("dialVenues: %v", err)
 	}
@@ -122,7 +127,7 @@ func TestDialVenuesRefusesAnUnverifiedAccountWhenRequired(t *testing.T) {
 		RequireVerifiedAccount: true,
 	}
 
-	if _, _, err := dialVenues(context.Background(), cfg, unverifiedCounter(), quietLogger()); err == nil {
+	if _, _, err := dialVenues(context.Background(), cfg, unverifiedCounter(), undeclaredCounter(), quietLogger()); err == nil {
 		t.Fatal("dialVenues accepted an UNVERIFIED account with OMS_REQUIRE_VERIFIED_ACCOUNT=true")
 	}
 }
@@ -137,7 +142,7 @@ func TestDialVenuesCountsAnUnverifiedAccountByDefault(t *testing.T) {
 	cfg := config.Config{Tenant: "acme", VenueEndpoints: "XBIN/binance-main=" + addr}
 
 	unverified := unverifiedCounter()
-	venues, closeConns, err := dialVenues(context.Background(), cfg, unverified, quietLogger())
+	venues, closeConns, err := dialVenues(context.Background(), cfg, unverified, undeclaredCounter(), quietLogger())
 	if err != nil {
 		t.Fatalf("dialVenues: %v", err)
 	}
@@ -148,5 +153,90 @@ func TestDialVenuesCountsAnUnverifiedAccountByDefault(t *testing.T) {
 	}
 	if got := testutil.ToFloat64(unverified); got != 1 {
 		t.Errorf("kanz_oms_unverified_venue_account_total = %v, want 1", got)
+	}
+}
+
+// TestDialVenuesRefusesAnAdapterThatDeclaresNoOrderTypes (#405), with the control
+// armed. An adapter that does not say which order types it can place leaves the
+// OMS admission gate OPEN for its MIC: a stop is admitted, stored, announced —
+// and refused only at the exchange, after the estate has been told it exists.
+func TestDialVenuesRefusesAnAdapterThatDeclaresNoOrderTypes(t *testing.T) {
+	addr := serveAdapter(t, &venuepb.DescribeResponse{
+		Mic: "XBIN", Account: "binance-main", AccountVerified: true, ExchangeAccountId: "12345678",
+	})
+	cfg := config.Config{
+		Tenant:                  "acme",
+		VenueEndpoints:          "XBIN/binance-main=" + addr,
+		RequireOrderTypeSupport: true,
+	}
+
+	_, _, err := dialVenues(context.Background(), cfg, unverifiedCounter(), undeclaredCounter(), quietLogger())
+	if err == nil {
+		t.Fatal("dialVenues accepted an adapter that declared NO order types with OMS_REQUIRE_ORDER_TYPE_SUPPORT=true")
+	}
+	if !strings.Contains(err.Error(), "order types") {
+		t.Errorf("error does not name the cause: %v", err)
+	}
+}
+
+// TestDialVenuesCountsAnUndeclaredAdapterByDefault: with the control OFF (as
+// shipped), an adapter that predates venue.v1's supported_order_types still
+// trades — refusing every un-upgraded adapter would turn a schema addition into a
+// trading outage. But "did not say" must not look like "checked, and fine": it is
+// counted, so the number of venues whose admission gate is open is on a dashboard
+// rather than a question nobody asked.
+func TestDialVenuesCountsAnUndeclaredAdapterByDefault(t *testing.T) {
+	addr := serveAdapter(t, &venuepb.DescribeResponse{
+		Mic: "XBIN", Account: "binance-main", AccountVerified: true, ExchangeAccountId: "12345678",
+	})
+	cfg := config.Config{Tenant: "acme", VenueEndpoints: "XBIN/binance-main=" + addr}
+
+	undeclared := undeclaredCounter()
+	venues, closeConns, err := dialVenues(context.Background(), cfg, unverifiedCounter(), undeclared, quietLogger())
+	if err != nil {
+		t.Fatalf("dialVenues: %v", err)
+	}
+	t.Cleanup(closeConns)
+
+	if len(venues) != 1 {
+		t.Fatalf("venues = %d, want 1 (an adapter that declared nothing still trades by default)", len(venues))
+	}
+	if got := testutil.ToFloat64(undeclared); got != 1 {
+		t.Errorf("kanz_oms_undeclared_venue_order_types_total = %v, want 1", got)
+	}
+}
+
+// TestDialVenuesArmsTheGateForADeclaringAdapter is the half that proves the
+// declaration is not merely logged. The venue that reaches the router must carry
+// the adapter's answer — a Describe that is read and discarded would satisfy every
+// assertion above while leaving the admission gate open for a venue that did speak.
+func TestDialVenuesArmsTheGateForADeclaringAdapter(t *testing.T) {
+	addr := serveAdapter(t, &venuepb.DescribeResponse{
+		Mic: "XBIN", Account: "binance-main", AccountVerified: true, ExchangeAccountId: "12345678",
+		SupportedOrderTypes: []orderpb.OrderType{
+			orderpb.OrderType_ORDER_TYPE_MARKET,
+			orderpb.OrderType_ORDER_TYPE_LIMIT,
+		},
+	})
+	cfg := config.Config{Tenant: "acme", VenueEndpoints: "XBIN/binance-main=" + addr}
+
+	undeclared := undeclaredCounter()
+	venues, closeConns, err := dialVenues(context.Background(), cfg, unverifiedCounter(), undeclared, quietLogger())
+	if err != nil {
+		t.Fatalf("dialVenues: %v", err)
+	}
+	t.Cleanup(closeConns)
+
+	if got := testutil.ToFloat64(undeclared); got != 0 {
+		t.Errorf("kanz_oms_undeclared_venue_order_types_total = %v, want 0 — this adapter declared", got)
+	}
+	r := execution.NewRouter(venues...)
+	if !r.SupportsOrderType("XBIN", orderpb.OrderType_ORDER_TYPE_LIMIT) {
+		t.Error("router refuses LIMIT at a venue that declared it — a declared type would be refused at admission")
+	}
+	if r.SupportsOrderType("XBIN", orderpb.OrderType_ORDER_TYPE_STOP) {
+		t.Fatal("router permits STOP at a venue that declared only MARKET and LIMIT.\n" +
+			"The adapter's answer never reached the router, so the order is admitted, stored and announced, " +
+			"and only the exchange refuses it.")
 	}
 }

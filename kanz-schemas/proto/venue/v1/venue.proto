@@ -30,6 +30,7 @@ syntax = "proto3";
 // the state machine.
 package venue.v1;
 
+import "order/v1/order.proto";
 import "order/v1/order_events.proto";
 
 // VenueAdapterService is one exchange, out of process. One adapter serves one venue;
@@ -102,6 +103,29 @@ message DescribeResponse {
   // operator binds the two, and the adapter proves the binding against the venue.
   // Empty when unverified.
   string exchange_account_id = 4;
+
+  // The order types this adapter can actually place at its exchange (#405).
+  //
+  // WHY THE ADAPTER HAS TO SAY, rather than the OMS assuming. order.v1 declares
+  // MARKET, LIMIT, STOP and STOP_LIMIT, and the OMS validates and ADMITS all
+  // four — but the spot adapters implement only the first two and refuse the
+  // rest inside Execute. So a stop-loss was accepted, stored, and announced with
+  // an ORDER_ACCEPTED FACT, and only then failed at the venue: risk carried
+  // exposure for it and the caller had been told it was working, for the one
+  // order type whose whole purpose is to act when nobody is watching.
+  //
+  // This is the same gap `account` above was added to close, one field over. The
+  // OMS used to learn the account from a string in its own manifest because it
+  // "had no way to ask"; it had no way to ask about capability either, and the
+  // answer belongs to the process holding the credential.
+  //
+  // EMPTY MEANS "DID NOT SAY", NOT "SUPPORTS NOTHING". An adapter predating this
+  // field returns nothing, and refusing every order for it would be a trading
+  // outage caused by a schema addition. The OMS warns, counts it, and refuses
+  // only when OMS_REQUIRE_ORDER_TYPE_SUPPORT is set — the same stance, for the
+  // same reason, as OMS_REQUIRE_VERIFIED_ACCOUNT: a control is armed WITH the
+  // list in hand, never as a default.
+  repeated order.v1.OrderType supported_order_types = 5;
 }
 
 message ExecuteRequest {
