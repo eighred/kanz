@@ -246,10 +246,41 @@ func (e *Emitter) FillFact(ctx context.Context, fill *orderpb.Fill, st *orderpb.
 	return outbox.From(ctx, e.fillEvent(fill, st))
 }
 
-// EmitCancelled publishes OrderCancelled.
-func (e *Emitter) EmitCancelled(ctx context.Context, orderID string, cancelledQty *commonpb.Decimal, t time.Time) error {
-	return e.emit(ctx, EventTypeCancelled, orderID, t,
+// cancelledEvent is the ORDER_CANCELLED FACT. One builder, two sinks — see
+// event(). It matters more here than for the other FACTs: the live path enqueues
+// this and the compensator publishes it, and a compensator whose FACT differed
+// in a field from the one it is standing in for would repair the estate into a
+// state the live path never produces.
+func (e *Emitter) cancelledEvent(orderID string, cancelledQty *commonpb.Decimal, t time.Time) bus.Event {
+	return e.event(EventTypeCancelled, orderID, t,
 		&orderpb.OrderCancelled{OrderId: orderID, CancelledQuantity: cancelledQty})
+}
+
+// EmitCancelled publishes OrderCancelled.
+//
+// THE LIVE CANCEL PATH NO LONGER CALLS THIS (#292) — handleCancel calls
+// CancelledFact and hands the record to the same store.Save that writes the
+// CANCELLED state. What still calls it is completeCancelAnnouncement, #238's
+// compensator, which finishes an announcement for a row that has NO outbox
+// record behind it: a cancel saved before this change, or before the outbox
+// existed. Those can only be announced by a direct publish, which is why this
+// stays; see completeCancelAnnouncement for the retirement condition.
+func (e *Emitter) EmitCancelled(ctx context.Context, orderID string, cancelledQty *commonpb.Decimal, t time.Time) error {
+	return e.b.Publish(ctx, e.cancelledEvent(orderID, cancelledQty, t))
+}
+
+// CancelledFact captures ORDER_CANCELLED as an outbox record so a cancellation
+// and its announcement commit together (#292).
+//
+// WHAT THIS CLOSES. The cancel pair was three writes — Save(CANCELLED), publish
+// the FACT, publish the outcome, then Save(cancel_announced_at) — and a failure
+// at any of the middle steps left an order the ledger calls cancelled with the
+// world still told it is live. cancel_announced_at and handleCancel's
+// already-CANCELLED branch made that recoverable rather than lost, at the cost
+// of a documented duplicate-FACT window on every recovery. Riding the write
+// removes the window instead of compensating for it.
+func (e *Emitter) CancelledFact(ctx context.Context, orderID string, cancelledQty *commonpb.Decimal, t time.Time) (outbox.Record, error) {
+	return outbox.From(ctx, e.cancelledEvent(orderID, cancelledQty, t))
 }
 
 // EmitExpired publishes OrderExpired.
@@ -274,13 +305,21 @@ func (e *Emitter) outcomeEvent(orderID string, status commandpb.CommandOutcomeSt
 // produce (command.v1, event-class-rules §2). resultRef optionally points at
 // the FACT carrying the command's effect.
 //
-// STILL THE RIGHT CALL IN THREE PLACES, and they are all the same shape (#292):
-// a command REFUSED before anything was written (outcomeReject, refuse), and the
-// #238 compensators re-announcing from a marker for rows with no outbox record
-// behind them. An outcome with no accompanying state change has no transaction
-// to ride in — enqueuing it would need a transaction opened solely to carry it,
-// which is a worse trade than publishing it directly and is not what an outbox
-// is for.
+// STILL THE RIGHT CALL IN THREE SHAPES, and they share one property (#292):
+// there is no state change for the outcome to commit alongside.
+//
+//  1. A command REFUSED before anything was written — outcomeReject, and refuse.
+//  2. The #238 compensators re-announcing from a marker for rows with no outbox
+//     record behind them — completeCancelAnnouncement, completeTerminalOutcome.
+//  3. handleSubmit's trailing ACCEPTED outcome for an order that did NOT fill.
+//     The order is resting or working; nothing terminal happened, so there is no
+//     write to ride and no marker it would be truthful to stamp. Its FILLED
+//     sibling DOES have a write — the outcome_announced_at stamp — and takes
+//     OutcomeFact instead.
+//
+// An outcome with no accompanying state change has no transaction to ride in —
+// enqueuing it would need a transaction opened solely to carry it, which is a
+// worse trade than publishing it directly and is not what an outbox is for.
 func (e *Emitter) EmitOutcome(ctx context.Context, orderID string, status commandpb.CommandOutcomeStatus, reason, errorCode, resultRef string, t time.Time) error {
 	return e.b.Publish(ctx, e.outcomeEvent(orderID, status, reason, errorCode, resultRef, t))
 }

@@ -8,20 +8,22 @@ package arch
 //
 //  1. NO NEW COMMIT-THEN-PUBLISH PAIR. The whole point of #292 is that adding a
 //     FACT to a transition should not require adding a fourth hand-rolled
-//     compensator. The pairs that remain are named below, each with the issue
-//     that retires it and the compensator that covers it meanwhile; one that is
-//     NOT named is the defect arriving by instalment again.
-//  3. THE FILL FACT HAS NO WAY OUT EXCEPT THE TRANSACTION. Guards (1) and (2)
-//     cannot see this one: work() and adopt() are both exempted above, so a
-//     direct fill publish reintroduced inside either of them would be reported
-//     as an already-accepted pair. It is the FACT nothing can rebuild, so it
-//     gets its own assertion rather than sharing an exemption with the pairs
-//     that do have compensators.
+//     compensator. Every method that both writes and publishes is named below,
+//     with the reason; one that is NOT named is the defect arriving by
+//     instalment again.
 //  2. THE OUTBOX MUST HAVE A DRAIN. A table nobody drains is worse than no
 //     table: the OMS admits orders, commits their FACTs and tells nobody, with
 //     the store, the handler and every health check reporting success. This is
 //     the "a thing constructed must also be consumed" shape #283's
 //     metric_writer_test.go established.
+//  3. THE FILL FACT HAS NO WAY OUT EXCEPT THE TRANSACTION. Guard (1) would catch
+//     a reintroduced EmitFill in work() or adopt() only as "an unnamed pair",
+//     which reports the method and not the thing that matters; and it cannot see
+//     the other two halves at all — that Emitter.FillFact still EXISTS and is
+//     still handed to store.Save, and that no SECOND builder for a fill event
+//     has appeared beside Emitter.fillEvent. A fill is the one FACT nothing can
+//     rebuild, so it is asserted directly rather than inferred from the shape of
+//     the method that emits it.
 //
 // # WHAT THE FIRST GUARD CAN AND CANNOT SEE
 //
@@ -57,13 +59,16 @@ var storeWriteMethods = map[string]bool{"Create": true, "Save": true}
 // THE EXEMPTIONS ARE IN TWO MAPS, AND THE SPLIT IS THE POINT.
 //
 // They were one map, and every entry named #292 as the issue that retires it.
-// That was true when the work started and is not true now: three of these are
-// not waiting on anything, and an exemption pointing at an issue that will never
+// That was true when the work started and is not true now: NONE of these is
+// waiting on anything, and an exemption pointing at an issue that will never
 // retire it is the same "reads as load-bearing" problem the *_announced_at
-// markers had — with the added cost that #292 cannot close while its own guard
-// says six sites are pending.
+// markers had — with the added cost that #292 could not close while its own
+// guard said six sites were pending.
 //
-// So: commitThenPublishPending is WORK. commitThenPublishByDesign is NOT.
+// So: commitThenPublishPending is WORK. commitThenPublishByDesign is NOT. The
+// split is what let the pending map empty out — the measure of #292 being
+// finished — while five methods stay exempted for a reason that is a decision
+// rather than a deferral.
 //
 // A method in EITHER map that no longer offends fails the dead-entry check
 // below — an exemption must not outlive its repair, whichever kind it is.
@@ -72,12 +77,33 @@ var storeWriteMethods = map[string]bool{"Create": true, "Save": true}
 // to ride in, so "convert it" is not a smaller change but a different, wrong
 // one. These do not retire.
 var commitThenPublishByDesign = map[string]string{
-	"completeCancelAnnouncement": "BY DESIGN: this is a COMPENSATOR. Its purpose is to republish " +
-		"for rows that have NO outbox record — the pre-outbox population, and any row whose " +
-		"announcement was interrupted before the outbox existed. Routing it through the outbox " +
-		"means writing a record for the case defined by not having one. It publishes and THEN " +
-		"Saves cancel_announced_at, which is the correct order for a compensator: the marker must " +
-		"not claim an announcement that has not gone out.",
+	"completeCancelAnnouncement": "BY DESIGN: this is a COMPENSATOR, and since the cancel pair " +
+		"converted it is ONLY that. Its purpose is to republish for rows that have NO outbox " +
+		"record — the population saved CANCELLED by the previous code, whose two publishes failed. " +
+		"Routing it through the outbox means writing a record for the case defined by not having " +
+		"one. It publishes and THEN Saves cancel_announced_at, which is the correct order for a " +
+		"compensator: the marker must not claim an announcement that has not gone out. It has a " +
+		"retirement condition, stated beside the function — an operational claim about the data, " +
+		"not a code change.",
+
+	"handleSubmit": "BY DESIGN: every write on this path already carries its FACT. Admission's " +
+		"ACCEPTED rides store.Create, the ErrUnpriced reject's ORDER_REJECTED + outcome ride one " +
+		"Save with outcome_announced_at, and a submit that FILLED rides the marker Save through " +
+		"markOutcomeAnnounced. WHAT KEEPS IT LISTED is what has no write to ride: the pre-admission " +
+		"refusals (refuse/outcomeReject, reached before anything is stored) and the trailing " +
+		"ACCEPTED outcome for an order that did NOT fill — the order is resting or working, nothing " +
+		"terminal happened, and stamping outcome_announced_at there would make a later fill's " +
+		"outcome look already-announced to resume(). Converting it would mean an UPDATE whose only " +
+		"purpose is to carry the record, which is the trade EmitOutcome's own comment refuses.",
+
+	"handleCancel": "BY DESIGN: the write and the remaining publishes are in DISJOINT BRANCHES. " +
+		"The live cancel IS converted — CancelledFact + OutcomeFact ride the same Save as the " +
+		"CANCELLED state, and cancel_announced_at is stamped in that write rather than two writes " +
+		"later. What remains publishes without writing: the refusal branches (unknown order, not " +
+		"entitled, quarantined, terminal) reach outcomeReject having stored nothing, and the " +
+		"already-CANCELLED branch calls completeCancelAnnouncement, which is a compensator for rows " +
+		"with no outbox record. It would stop being listed only if those helpers stopped being " +
+		"reachable from a method that also writes.",
 
 	"handleAmend": "BY DESIGN: the write and the publishes are in DISJOINT BRANCHES. The success " +
 		"path IS converted — OutcomeFact rides the Save. What remains are the reject branches " +
@@ -88,11 +114,11 @@ var commitThenPublishByDesign = map[string]string{
 		"transition.",
 
 	"resume": "BY DESIGN: the RECOVERY path, with no pair of its own. It Saves venue_ack_at on the " +
-		"ActionLeave branch and reaches publishes through reannounceAccepted, " +
-		"completeTerminalOutcome, adopt and work on OTHER branches. It is listed because the " +
-		"syntactic guard sees a write and a publish in one method; they never happen on the same " +
-		"path. It inherits whatever its callees are, which is why converting THEM is what changes " +
-		"anything here.",
+		"ActionLeave branch and reaches publishes through reannounceAccepted and " +
+		"completeTerminalOutcome on OTHER branches — both compensators for rows with no outbox " +
+		"record. Its other two callees no longer publish at all: work() and adopt() commit every " +
+		"FACT they produce. It is listed because the syntactic guard sees a write and a publish in " +
+		"one method; they never happen on the same path.",
 }
 
 // commitThenPublishPending is the DEFAULT-DENY allow-list of Service methods
@@ -101,31 +127,27 @@ var commitThenPublishByDesign = map[string]string{
 //
 // Every entry is a place where a crash or a broker refusal between the two
 // leaves the store and the estate disagreeing, recovered — where it is recovered
-// at all — by a `*_announced_at` marker and a compensator. #292 converts them one
-// at a time; admission, ROUTED, both fills, the amend outcome and the ErrUnpriced
-// rejection are done and are deliberately ABSENT, which is what makes the guard
-// tighten as the work lands rather than needing re-tightening by hand.
-var commitThenPublishPending = map[string]string{
-	"handleSubmit": "#292: THE ErrUnpriced REJECT IS CONVERTED — RejectedFact + OutcomeFact ride " +
-		"the same Save as the REJECTED state, and outcome_announced_at is stamped in that write " +
-		"rather than two writes later. It was the last pair whose FACT nothing could rebuild " +
-		"(completeTerminalOutcome reconstructs the CommandOutcome but not ORDER_REJECTED, whose " +
-		"PRICE_UNAVAILABLE reason has no OrderState counterpart). ADMISSION is converted too: " +
-		"store.Create takes the ACCEPTED record. WHAT KEEPS THIS LISTED is the trailing outcome " +
-		"after work() — it follows the fill Saves inside work(), and outcome_announced_at + " +
-		"completeTerminalOutcome cover it. It stops being listed when that outcome moves.",
-
-	"adopt": "#292: Save(rejected) then refuse(). Its fill fold converted WITH work()'s — the two " +
-		"are the same six lines reached from different directions, and splitting them would have " +
-		"left the recovery path (the one running in a process that already crashed once) able to " +
-		"lose the FACT the live path can no longer lose. The VENUE_REJECTED reject is what remains, " +
-		"and outcome_announced_at covers it.",
-
-	"handleCancel": "#292: Save(next) and then completeCancelAnnouncement's EmitCancelled + " +
-		"EmitOutcome. Covered by cancel_announced_at and by this handler's own already-CANCELLED " +
-		"branch, which completes an interrupted announcement rather than reporting REJECTED for a " +
-		"cancel that in fact succeeded. Converts with completeCancelAnnouncement, not separately.",
-}
+// at all — by a `*_announced_at` marker and a compensator. #292 converted them
+// one at a time, and each conversion removed its own entry: the guard tightened
+// as the work landed rather than needing re-tightening by hand.
+//
+// # IT IS EMPTY, AND THE EMPTINESS IS THE STATEMENT
+//
+// Every transition in the OMS that writes order state now commits its FACT in
+// the same transaction: admission's ACCEPTED, ROUTED, both fill folds, the amend
+// outcome, the ErrUnpriced reject, adopt's VENUE_REJECTED reject, the
+// cancellation with its outcome, and the trailing outcome of a submit that
+// filled. #292's migration is done. What remains in commitThenPublishByDesign is
+// not a queue of work: it is publishes with no state change to commit alongside
+// them, which an outbox cannot help.
+//
+// DO NOT DELETE THIS MAP. An empty allow-list is not the same thing as no
+// allow-list. The next genuine pair — a transition added with a FACT and no
+// outbox record — must land here, named, with the issue that retires it, rather
+// than in the BY DESIGN map, whose entries are a decision that a conversion
+// would be wrong. Collapsing the two is what let every exemption claim #292
+// would retire it, including the three that never will.
+var commitThenPublishPending = map[string]string{}
 
 // TestNoNewCommitThenPublishPairInTheOMS is guard (1). Default-deny: a Service
 // method that both writes order state and publishes a FACT must be named above.
@@ -325,10 +347,17 @@ func TestTheOMSOutboxHasADrain(t *testing.T) {
 //
 // Since #292's fill conversion the ONLY way to produce it is Emitter.FillFact,
 // which returns an outbox.Record that has to be handed to a store write. There
-// is deliberately no EmitFill any more. This guard fails if one comes back —
-// which the pair guard above cannot do, because work() and adopt() are both on
-// its exemption list and a reintroduced direct publish would land inside an
-// already-accepted pair.
+// is deliberately no EmitFill any more, and this guard fails if one comes back.
+//
+// THE PAIR GUARD ABOVE IS NOT A SUBSTITUTE, for three reasons. It would report a
+// reintroduced EmitFill in work() or adopt() as an unnamed pair — true, but it
+// names the method rather than the loss, and the repair it suggests ("add it to
+// commitThenPublishPending with the issue that retires it") is exactly the wrong
+// one here, because there is no marker and no compensator that could retire it.
+// It cannot see that FillFact still exists, so a fill that stopped being emitted
+// entirely would leave it silent. And it cannot see a SECOND builder for the
+// fill event, which is how the enqueued FACT and a republished one would come to
+// differ in a field nobody compares.
 func TestTheFillFactHasNoWayOutExceptTheTransaction(t *testing.T) {
 	root := moduleRoot(t)
 	src := readGoFiles(t, filepath.Join(root, filepath.FromSlash(omsOrderPkg)))
