@@ -11,6 +11,7 @@ import (
 	commonpb "github.com/eighred/kanz/kanz-schemas-go/common/v1"
 
 	"github.com/eighred/kanz/internal/dec"
+	"github.com/eighred/kanz/internal/instrument"
 )
 
 // sleep waits d or until ctx is cancelled — the connectors' reconnect backoff.
@@ -88,11 +89,45 @@ type InstrumentSymbol struct {
 	InstrumentID string
 	// VenueSymbol is the exchange's name for it, e.g. "BTCUSDT".
 	//
-	// THE TWO DISAGREE TODAY: canonical "BTC-USD" maps to a USDT-quoted symbol on
-	// both live venues, so the platform trades a stablecoin-quoted instrument
-	// while calling it USD. Until instruments carry base and quote explicitly
-	// (#407) this is the only field where that is visible.
+	// IT IS THE SOURCE OF TRUTH FOR WHAT IS ACTUALLY BOUGHT. The symbol is what
+	// the adapter sends to the exchange; InstrumentID is what a human typed
+	// beside it in a symbol map. The estate mapped "BTC-USD" to BTCUSDT on both
+	// live venues, so the pair below is derived from THIS field (#407).
 	VenueSymbol string
+
+	// Pair is what this mapping actually trades, resolved from VenueSymbol.
+	//
+	// A ZERO Pair MEANS THE PLATFORM COULD NOT TELL — a venue using its own
+	// ticker for the asset, or an instrument that is not a pair at all. It never
+	// means "no quote", and a caller must not render it as a fact.
+	Pair instrument.Pair
+
+	// QuoteMismatch reports that InstrumentID claims one quote and VenueSymbol
+	// shows another. False when the quote could not be determined at all: an
+	// unreadable symbol is not evidence of a mismatch.
+	QuoteMismatch bool
+}
+
+// Mismatches returns the entries whose canonical id disagrees with the exchange
+// symbol about the quote asset (#407).
+//
+// AN ADAPTER CALLS THIS BEFORE IT SERVES AN ORDER, because the mapping is a
+// statement about what a position is denominated in, and this is the last moment
+// anything can check it: after this the symbol goes to the exchange and the id
+// goes into the ledger, and nothing downstream sees both.
+//
+// It is empty both when every mapping agrees AND when none could be read, so a
+// caller that wants to distinguish "checked, and fine" from "could not tell"
+// must look at Instruments() — which is the distinction this platform's
+// standard exists to preserve.
+func (m StaticSymbolMap) Mismatches() []InstrumentSymbol {
+	var out []InstrumentSymbol
+	for _, in := range m.Instruments() {
+		if in.QuoteMismatch {
+			out = append(out, in)
+		}
+	}
+	return out
 }
 
 // VenueInstrument is one tradeable pair at one venue — the same pair may be
@@ -119,7 +154,15 @@ func (m StaticSymbolMap) Symbol(id string) (string, bool) { s, ok := m[id]; retu
 func (m StaticSymbolMap) Instruments() []InstrumentSymbol {
 	out := make([]InstrumentSymbol, 0, len(m))
 	for id, sym := range m {
-		out = append(out, InstrumentSymbol{InstrumentID: id, VenueSymbol: sym})
+		in := InstrumentSymbol{InstrumentID: id, VenueSymbol: sym}
+		// Resolved HERE, once, where both halves of the mapping are in hand —
+		// so the catalogue, the startup check and the picker cannot form
+		// different opinions about what a position is denominated in (#407).
+		if res, isPair := instrument.Resolve(id, sym); isPair {
+			in.Pair = res.Pair
+			in.QuoteMismatch = res.Mismatched
+		}
+		out = append(out, in)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].InstrumentID < out[j].InstrumentID })
 	return out

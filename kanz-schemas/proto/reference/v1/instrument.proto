@@ -50,6 +50,10 @@ message InstrumentReference {
 
   // currency_code is the ISO 4217 alphabetic code the instrument is denominated
   // in (e.g. "USD"). Drives the CURRENCY exposure dimension. Required.
+  //
+  // IT MODELS ONE CURRENCY, WHICH IS CORRECT FOR AN EQUITY OR A BOND AND WRONG
+  // FOR A PAIR. base_asset/quote_asset below add the pair; this field keeps its
+  // meaning and is NOT repurposed (#407).
   string currency_code = 6;
 
   // primary_mic is the ISO 10383 Market Identifier Code of the instrument's
@@ -74,6 +78,28 @@ message InstrumentReference {
   // select the latest record with as_of <= the query time, so a past backtest
   // sees the classification in effect then, not today's. Required.
   google.protobuf.Timestamp as_of = 11;
+  // base_asset and quote_asset decompose an instrument whose tradeable unit is a
+  // PAIR — ASSET_CLASS_CRYPTO and ASSET_CLASS_FX (#407).
+  //
+  // "BTC-USDT" is BTC bought with USDT: base BTC, quote USDT. The quote is a
+  // different question from currency_code above, which models the single
+  // currency an instrument is denominated in — right for an equity, unable to
+  // express a pair at all.
+  //
+  // WHY THIS IS A CORRECTNESS FIELD AND NOT A LABEL. The estate mapped canonical
+  // "BTC-USD" to Binance's BTCUSDT and OKX's BTC-USDT: every such position was
+  // USDT-quoted and recorded as dollars. A USDT position carries USDT credit
+  // exposure, and calling it USD assumes a peg the platform never states and
+  // cannot monitor — so on a depeg the books are wrong in a direction nobody is
+  // watching. EXPOSURE_DIMENSION_CURRENCY aggregates it into the USD bucket,
+  // where a concentration limit on USD silently covers something else.
+  //
+  // EMPTY FOR AN INSTRUMENT THAT HAS NO PAIR, and that is the required value —
+  // an equity must not grow a nonsense quote asset for exposure to aggregate on.
+  // Empty on a CRYPTO or FX instrument means the platform could not determine
+  // the pair, which is a gap to fix and never a fact about the instrument.
+  string base_asset = 12;
+  string quote_asset = 13;
 }
 
 // InstrumentIdentifiers holds the external identifiers an instrument is known by

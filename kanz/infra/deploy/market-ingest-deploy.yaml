@@ -118,14 +118,14 @@ spec:
             - { name: MARKET_INGEST_NATS_URL, value: "nats://nats.kanz-messaging.svc:4222" }
             # The instruments this shard folds. Scaling = another Deployment with a
             # DIFFERENT list here, not a higher replica count.
-            - { name: MARKET_INGEST_INSTRUMENTS, value: "BTC-USD,ETH-USD" }
+            - { name: MARKET_INGEST_INSTRUMENTS, value: "BTC-USDT,ETH-USDT" }
             # THE SYMBOL MAPS ARE WHAT MAKE THIS SERVICE REAL. Every instrument
             # above needs a mapping on at least one venue, or the pod refuses to
             # start rather than invent prices for it. An instrument mapped on both
             # venues folds two INDEPENDENT books — books are never merged across
             # venues; a cross-venue engine compares them itself.
-            - { name: MARKET_INGEST_BINANCE_SYMBOLS, value: "BTC-USD=BTCUSDT,ETH-USD=ETHUSDT" }
-            - { name: MARKET_INGEST_OKX_SYMBOLS, value: "BTC-USD=BTC-USDT,ETH-USD=ETH-USDT" }
+            - { name: MARKET_INGEST_BINANCE_SYMBOLS, value: "BTC-USDT=BTCUSDT,ETH-USDT=ETHUSDT" }
+            - { name: MARKET_INGEST_OKX_SYMBOLS, value: "BTC-USDT=BTC-USDT,ETH-USDT=ETH-USDT" }
             # Public endpoints — no API key exists for this service to hold.
             - { name: MARKET_INGEST_BINANCE_WS_BASE, value: "wss://stream.binance.com:9443" }
             - { name: MARKET_INGEST_BINANCE_REST_BASE, value: "https://api.binance.com" }

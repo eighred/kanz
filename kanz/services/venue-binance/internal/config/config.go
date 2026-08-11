@@ -75,6 +75,17 @@ type Config struct {
 	APISecret              string
 	// Symbols maps Kanz instrument_id → Binance symbol ("BTC-USD=BTCUSDT").
 	Symbols string
+
+	// RequireQuoteMatch REFUSES TO START when a symbol map entry's canonical id
+	// disagrees with the exchange symbol about the quote asset (#407) — "BTC-USD"
+	// mapped to BTCUSDT, which trades a stablecoin and records dollars.
+	//
+	// DEFAULT FALSE, the same stance as every other REQUIRE_ on this platform: a
+	// control that refuses to start every adapter nobody has corrected yet is a
+	// trading outage, and it is armed WITH the estate in hand, never as a default.
+	// Until then the mismatch is NAMED at startup and counted, so "nobody checked"
+	// and "checked, and fine" do not look the same.
+	RequireQuoteMatch bool
 }
 
 // Load reads the configuration from the environment.
@@ -114,6 +125,7 @@ func Load() (Config, error) {
 		APIKey:                 apiKey,
 		APISecret:              apiSecret,
 		Symbols:                os.Getenv("BINANCE_SYMBOLS"),
+		RequireQuoteMatch:      os.Getenv("BINANCE_REQUIRE_QUOTE_MATCH") == "true",
 	}, nil
 }
 

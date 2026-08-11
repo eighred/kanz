@@ -41,18 +41,17 @@ onMounted(async () => {
 const grouped = computed(() => byInstrument(rows.value))
 
 /**
- * quoteDiffers marks a pair whose exchange symbol does not match what the
- * canonical id claims — "BTC-USD" trading as BTCUSDT.
+ * idClaims is what the canonical id says the pair is quoted in — one half of a
+ * disagreement the platform has already resolved.
  *
- * IT IS SHOWN, not smoothed over. A USDT-quoted position carries USDT credit
- * exposure, and marking it USD assumes a peg this platform never states and
- * cannot monitor. The user picking this pair is the person who should know.
+ * THE SCREEN DOES NOT DECIDE WHETHER THERE IS A MISMATCH (#407). The platform
+ * resolved that from the symbol it actually sends to the exchange, and put the
+ * answer on the wire as quote_asset/quote_mismatch. A second opinion computed
+ * here from string suffixes would eventually disagree with the OMS about what a
+ * position is denominated in — and the screen would be the one that is wrong.
  */
-function quoteDiffers(in_: TradeableInstrument): boolean {
-  const quote = in_.instrument_id.split('-')[1] ?? ''
-  if (!quote) return false
-  const symbol = in_.venue_symbol.toUpperCase().replaceAll('-', '')
-  return !symbol.endsWith(quote.toUpperCase())
+function idClaims(instrumentId: string): string {
+  return (instrumentId.split('-')[1] ?? '').toUpperCase()
 }
 </script>
 
@@ -94,13 +93,12 @@ function quoteDiffers(in_: TradeableInstrument): boolean {
               <code>{{ v.venue_symbol }}</code>
               <!-- NOT A COSMETIC NOTE. The id says USD and the venue trades USDT:
                    a different asset, a different credit exposure, and a peg
-                   nothing here monitors. #407 carries the fix; until then this
-                   is where a person can see it. -->
-              <span v-if="quoteDiffers(v)" class="state-warn">
-                — quoted in
-                {{ v.venue_symbol.toUpperCase().replaceAll('-', '').slice(-4) }}, not
-                {{ (g.instrument_id.split('-')[1] ?? '').toUpperCase() }}
+                   nothing here monitors. The platform resolves this from the
+                   symbol; the screen only reports it. -->
+              <span v-if="v.quote_mismatch" class="state-warn">
+                — quoted in {{ v.quote_asset }}, not {{ idClaims(g.instrument_id) }}
               </span>
+              <span v-else-if="v.quote_asset" class="muted"> — quoted in {{ v.quote_asset }}</span>
             </td>
           </tr>
         </template>

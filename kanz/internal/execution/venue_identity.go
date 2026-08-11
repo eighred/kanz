@@ -7,6 +7,8 @@ import (
 
 	orderpb "github.com/eighred/kanz/kanz-schemas-go/order/v1"
 	venuepb "github.com/eighred/kanz/kanz-schemas-go/venue/v1"
+
+	"github.com/eighred/kanz/internal/instrument"
 )
 
 // VenueIdentity is what an adapter says it is when the OMS asks (venue.v1.Describe):
@@ -98,6 +100,15 @@ func (v *GRPCVenue) ListInstruments(ctx context.Context) ([]InstrumentSymbol, er
 		out = append(out, InstrumentSymbol{
 			InstrumentID: in.GetInstrumentId(),
 			VenueSymbol:  in.GetVenueSymbol(),
+			// Carried from the adapter rather than re-derived here. The adapter
+			// resolved it from the symbol it actually sends to the exchange; a
+			// second derivation on this side would be a second opinion about
+			// what a position is denominated in (#407).
+			Pair: instrument.Pair{
+				Base:  in.GetBaseAsset(),
+				Quote: in.GetQuoteAsset(),
+			},
+			QuoteMismatch: in.GetQuoteMismatch(),
 		})
 	}
 	return out, nil

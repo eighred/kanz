@@ -219,8 +219,11 @@ func (s *Server) ListInstruments(context.Context, *venuepb.ListInstrumentsReques
 	}
 	for _, in := range lister.Instruments() {
 		resp.Instruments = append(resp.Instruments, &venuepb.VenueInstrument{
-			InstrumentId: in.InstrumentID,
-			VenueSymbol:  in.VenueSymbol,
+			InstrumentId:  in.InstrumentID,
+			VenueSymbol:   in.VenueSymbol,
+			BaseAsset:     in.Pair.Base,
+			QuoteAsset:    in.Pair.Quote,
+			QuoteMismatch: in.QuoteMismatch,
 		})
 	}
 	return resp, nil

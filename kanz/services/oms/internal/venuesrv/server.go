@@ -50,9 +50,12 @@ func New(catalogue []execution.VenueInstrument, ownerTenant string) *Server {
 	out := make([]*venuepb.TradeableInstrument, 0, len(catalogue))
 	for _, in := range catalogue {
 		out = append(out, &venuepb.TradeableInstrument{
-			InstrumentId: in.InstrumentID,
-			VenueSymbol:  in.VenueSymbol,
-			Mic:          in.MIC,
+			InstrumentId:  in.InstrumentID,
+			VenueSymbol:   in.VenueSymbol,
+			Mic:           in.MIC,
+			BaseAsset:     in.Pair.Base,
+			QuoteAsset:    in.Pair.Quote,
+			QuoteMismatch: in.QuoteMismatch,
 		})
 	}
 	return &Server{catalogue: out, ownerTenant: ownerTenant}
