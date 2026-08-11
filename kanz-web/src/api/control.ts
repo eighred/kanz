@@ -52,10 +52,38 @@ export function ready(n: Node): boolean {
   return n.status === 'NODE_STATUS_READY'
 }
 
+/**
+ * node is the path segment for one node's actions.
+ *
+ * THE NAME GOES IN THE PATH AND NOWHERE ELSE. The gateway takes it from the URL
+ * and overwrites whatever a body carried, with the reason written beside the
+ * code: "two spellings of the same identity is a way to drain the node you were
+ * not looking at". Encoding it here keeps this client on the same single
+ * spelling — a node name is a Kubernetes object name, so it needs no escaping
+ * today, and relying on that instead of saying it is how it stops being true.
+ */
+function node(name: string): string {
+  return `/api/v1/control/nodes/${encodeURIComponent(name)}`
+}
+
 export const control = {
   nodes: () => api.get<{ nodes?: Node[] }>('/api/v1/control/nodes').then((r) => r.nodes ?? []),
   clusters: () => api.get<{ clusters?: Cluster[] }>('/api/v1/control/clusters').then((r) => r.clusters ?? []),
   venues: () => api.get<{ venues?: VenueKeyStatus[] }>('/api/v1/control/venues').then((r) => r.venues ?? []),
+
+  // THE FOUR NODE ACTIONS. Each returns an empty message on success — the
+  // operator.v1 responses carry no fields — so the caller's only job afterwards
+  // is to re-read the estate rather than to trust a returned state.
+  //
+  // Drain is ASYNCHRONOUS and the proto says so: it returns once the node is
+  // cordoned, and eviction proceeds in the background honouring
+  // PodDisruptionBudgets. A screen that reported "drained" when this resolves
+  // would be reporting something the platform has not claimed.
+  cordon: (name: string) => api.post<Record<string, never>>(`${node(name)}/cordon`),
+  uncordon: (name: string) => api.post<Record<string, never>>(`${node(name)}/uncordon`),
+  drain: (name: string) => api.post<Record<string, never>>(`${node(name)}/drain`),
+  setRegion: (name: string, region: string) =>
+    api.post<Record<string, never>>(`${node(name)}/region`, { region }),
 }
 
 /**

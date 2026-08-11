@@ -255,3 +255,49 @@ tbody tr:last-child td {
 table + table {
   margin-top: 28px;
 }
+
+/* --- actions and confirmation -------------------------------------------- */
+
+/* A row of buttons, and the confirmation panel's own footer. One rule for both
+   so the spacing cannot drift between where an action is offered and where it
+   is confirmed. */
+.actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+/* DESTRUCTIVE, AND IT MUST NOT LOOK LIKE THE OTHERS. Drain moves running work
+   off a machine. Cordon and Move are quiet buttons because they are reversible
+   or non-destructive; this one carries the danger colour so the difference is
+   visible before the click, not only in the dialog after it. */
+button.danger {
+  color: var(--accent-text);
+  background: var(--danger);
+}
+
+/* The confirmation panel. It is a .card as well, so it inherits the form
+   spacing the login and redeem screens already use. */
+.confirm {
+  max-width: 34rem;
+  margin-top: 24px;
+  border: 1px solid var(--danger);
+}
+
+.confirm h2 {
+  margin: 0;
+  font-size: 1.05rem;
+}
+
+/* An action that SUCCEEDED. Distinct from .error and from .muted: an operator
+   who has just drained a node needs to see that something happened, and the
+   drain message in particular carries a caveat (eviction is still running) that
+   must not be styled as an error or lost as a hint. */
+.notice {
+  color: var(--ok);
+  font-size: 0.88rem;
+  margin: 0 0 16px;
+  padding: 9px 11px;
+  border: 1px solid currentColor;
+  border-radius: 6px;
+}
