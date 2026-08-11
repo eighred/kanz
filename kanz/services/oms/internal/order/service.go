@@ -356,6 +356,31 @@ func (s *Service) handleSubmit(ctx context.Context, env *envelopepb.Envelope, pa
 			fmt.Sprintf("target venue %q is not configured on this OMS", target), now)
 	}
 
+	// AN ORDER TYPE THE VENUE CANNOT PLACE IS REFUSED HERE TOO, and for exactly
+	// the reason above it (#405).
+	//
+	// order.v1 declares MARKET, LIMIT, STOP and STOP_LIMIT and Accept validates
+	// all four, but the spot adapters implement the first two and refuse the rest
+	// inside Execute. So a stop-loss passed admission, was stored, and had its
+	// ORDER_ACCEPTED FACT committed and published — and only then failed at the
+	// venue. The order existed everywhere: risk carried exposure for it, tv-sync
+	// showed it working, the caller had been told it was accepted. It just never
+	// went anywhere.
+	//
+	// That is the EXEC-M8 defect on a different field. For a stop in particular
+	// it is the worst possible shape: the whole point of one is to act when
+	// nobody is watching, so "accepted and inert" is indistinguishable from
+	// "armed" until the moment it was supposed to fire.
+	//
+	// Refused with the TYPE and the VENUE named, because the operator's next
+	// question is which of the two to change.
+	if target := cmd.GetVenue(); target != "" && s.router != nil &&
+		!s.router.SupportsOrderType(target, cmd.GetOrderType()) {
+		return s.refuse(ctx, cmd.GetOrderId(), "ORDER_TYPE_NOT_SUPPORTED",
+			fmt.Sprintf("venue %q cannot place a %s order — this OMS will not admit an order it "+
+				"cannot route", target, cmd.GetOrderType()), now)
+	}
+
 	// WHOSE COLLATERAL DOES THIS ORDER SPEND? Resolve the exchange account before the
 	// order exists, because it is not a routing detail — it is the answer to that
 	// question, and an order admitted without one is an order that will margin against

@@ -99,6 +99,23 @@ type Config struct {
 	// A MISMATCH is always fatal regardless of this flag: an adapter that names a
 	// different account than the OMS was told is not unproven, it is wrong.
 	RequireVerifiedAccount bool
+
+	// RequireOrderTypeSupport REFUSES TO START on any venue adapter that does not
+	// DECLARE which order types it can place (#405).
+	//
+	// The OMS refuses an undeclarable order type at admission, but only for an
+	// adapter that answered. An adapter predating venue.v1's supported_order_types
+	// answers with an empty list, and empty means "did not say" — so the gate is
+	// open for it, and a stop routed there is admitted, announced, and refused only
+	// at the exchange. That is exactly the state this was built to end.
+	//
+	// DEFAULT FALSE, and the reason is the same one OMS_REQUIRE_VERIFIED_ACCOUNT
+	// carries: a control that refuses every order for every adapter nobody has
+	// upgraded yet is a trading outage, and it is armed WITH the fleet in hand,
+	// never as a default. Until then the OMS names each silent adapter at startup
+	// and counts it, so "nothing configured" and "checked, and fine" do not look
+	// the same.
+	RequireOrderTypeSupport bool
 	// SPIFFESocket is the workload API socket used to mTLS the venue dials
 	// (SEC-01a). Empty ⇒ plaintext, which is a DEV-ONLY posture: the venue
 	// connection carries live orders.
@@ -222,23 +239,24 @@ func Load() (Config, error) {
 	}
 
 	cfg := Config{
-		Listen:                 envOr("OMS_LISTEN", ":8090"),
-		LogLevel:               parseLevel(envOr("OMS_LOG_LEVEL", "info")),
-		Source:                 envOr("OMS_SOURCE", "oms"),
-		OTLPEndpoint:           os.Getenv("OMS_OTLP_ENDPOINT"),
-		NATSURL:                os.Getenv("OMS_NATS_URL"),
-		ConsumerGroup:          envOr("OMS_CONSUMER_GROUP", "oms"),
-		DatabaseURL:            databaseURL,
-		Tenant:                 envOr("OMS_TENANT", "__system__"),
-		RequireMandate:         os.Getenv("OMS_REQUIRE_MANDATE") == "true",
-		VenueAccounts:          os.Getenv("OMS_VENUE_ACCOUNTS"),
-		RequireVenueAccount:    os.Getenv("OMS_REQUIRE_VENUE_ACCOUNT") == "true",
-		RequireVerifiedAccount: os.Getenv("OMS_REQUIRE_VERIFIED_ACCOUNT") == "true",
-		SimVenueMIC:            envOr("OMS_SIM_VENUE_MIC", "XSIM"),
-		VenueEndpoints:         os.Getenv("OMS_VENUE_ENDPOINTS"),
-		SPIFFESocket:           os.Getenv("SPIFFE_ENDPOINT_SOCKET"),
-		BaseCurrency:           envOr("OMS_BASE_CURRENCY", "USD"),
-		PriceSubjects:          splitSubjects(envOr("OMS_PRICE_SUBJECTS", "market.*.trade,market.*.quote")),
+		Listen:                  envOr("OMS_LISTEN", ":8090"),
+		LogLevel:                parseLevel(envOr("OMS_LOG_LEVEL", "info")),
+		Source:                  envOr("OMS_SOURCE", "oms"),
+		OTLPEndpoint:            os.Getenv("OMS_OTLP_ENDPOINT"),
+		NATSURL:                 os.Getenv("OMS_NATS_URL"),
+		ConsumerGroup:           envOr("OMS_CONSUMER_GROUP", "oms"),
+		DatabaseURL:             databaseURL,
+		Tenant:                  envOr("OMS_TENANT", "__system__"),
+		RequireMandate:          os.Getenv("OMS_REQUIRE_MANDATE") == "true",
+		VenueAccounts:           os.Getenv("OMS_VENUE_ACCOUNTS"),
+		RequireVenueAccount:     os.Getenv("OMS_REQUIRE_VENUE_ACCOUNT") == "true",
+		RequireVerifiedAccount:  os.Getenv("OMS_REQUIRE_VERIFIED_ACCOUNT") == "true",
+		RequireOrderTypeSupport: os.Getenv("OMS_REQUIRE_ORDER_TYPE_SUPPORT") == "true",
+		SimVenueMIC:             envOr("OMS_SIM_VENUE_MIC", "XSIM"),
+		VenueEndpoints:          os.Getenv("OMS_VENUE_ENDPOINTS"),
+		SPIFFESocket:            os.Getenv("SPIFFE_ENDPOINT_SOCKET"),
+		BaseCurrency:            envOr("OMS_BASE_CURRENCY", "USD"),
+		PriceSubjects:           splitSubjects(envOr("OMS_PRICE_SUBJECTS", "market.*.trade,market.*.quote")),
 	}
 
 	if len(cfg.PriceSubjects) == 0 {

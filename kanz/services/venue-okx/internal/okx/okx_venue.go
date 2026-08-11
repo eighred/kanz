@@ -64,6 +64,23 @@ func (v *OKXVenue) MIC() string { return v.mic }
 // collateral pool every fill it produces settles against.
 func (v *OKXVenue) Account() string { return v.account }
 
+// OrderTypes declares what this connector can translate for okx, which the OMS
+// reads through Describe and enforces at ADMISSION (#405).
+//
+// SPOT MARKET AND LIMIT, deliberately the exact set the switch in Place accepts
+// — STOP and STOP_LIMIT are in order.v1's enum and are not implemented here yet.
+// Declaring them would restore the defect this exists to remove: an order the
+// OMS admits, stores and announces, that no exchange ever sees.
+//
+// KEEP THIS IN STEP WITH THAT SWITCH. TestDeclaredOrderTypesMatchTranslation
+// walks the whole enum and fails if the two ever disagree, in either direction.
+func (v *OKXVenue) OrderTypes() []orderpb.OrderType {
+	return []orderpb.OrderType{
+		orderpb.OrderType_ORDER_TYPE_MARKET,
+		orderpb.OrderType_ORDER_TYPE_LIMIT,
+	}
+}
+
 var _ Venue = (*OKXVenue)(nil)
 
 // OKX cancel sCodes that mean "the order is not working at the venue": it never
