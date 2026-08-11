@@ -280,3 +280,151 @@ func TestPushRetryScriptIsExecutable(t *testing.T) {
 			"permission error naming the path rather than the cause", info.Mode())
 	}
 }
+
+// THE PULL HALF OF #320 (2026-08-11).
+//
+// push-with-retry.sh covers a refused PUSH. build.yml's own comments record that
+// it structurally cannot cover a refused PULL — it "wraps the PUSH", while a base
+// image is fetched inside the build. main went red on exactly that: image
+// (wealth), a 403 on a distroless-static blob, with kanz-ci green and the
+// Dockerfile unchanged.
+//
+// warm-bases.sh closes it, and it is safe to retry for the SAME structural reason
+// the push retry is: it builds a Dockerfile consisting of the base image and
+// nothing else, so no compile error can reach it. These guards keep both halves
+// of that true — the step exists, and the script cannot quietly stop failing.
+
+func TestTheImageWorkflowWarmsItsBasesBeforeBuilding(t *testing.T) {
+	repoRoot := filepath.Dir(moduleRoot(t))
+	b, err := os.ReadFile(filepath.Join(repoRoot, ".github", "workflows", "build.yml"))
+	if err != nil {
+		t.Fatalf("read build.yml: %v", err)
+	}
+	src := string(b)
+
+	if !strings.Contains(src, "warm-bases.sh") {
+		t.Fatal("build.yml no longer warms its base images. A base-image 403 then fails the build " +
+			"step directly, where it CANNOT be retried without also retrying compile failures — " +
+			"which is the one thing #320's push retry was careful never to do (#320)")
+	}
+
+	// ORDER IS THE WHOLE POINT. Warming after the build would pull the bases the
+	// build has already failed on.
+	warm := strings.Index(src, "warm-bases.sh")
+	build := strings.Index(src, "docker/build-push-action")
+	if warm < 0 || build < 0 || warm > build {
+		t.Fatalf("the warm step runs AFTER the build (warm@%d, build@%d) — it must precede it, or "+
+			"it warms a cache nothing will read", warm, build)
+	}
+	// And after the login: these bases are private, so an unauthenticated warm
+	// would fail every run rather than occasionally.
+	login := strings.Index(src, "docker/login-action")
+	if login < 0 || login > warm {
+		t.Fatalf("the warm step runs BEFORE the registry login (login@%d, warm@%d) — every base here "+
+			"is private, so that fails permanently rather than flakily", login, warm)
+	}
+}
+
+func TestWarmBasesScriptBehaviour(t *testing.T) {
+	bash, err := exec.LookPath("bash")
+	if err != nil {
+		t.Skipf("bash not on PATH (%v): the retry script's behaviour cannot be exercised here", err)
+	}
+	repoRoot := filepath.Dir(moduleRoot(t))
+	script := filepath.Join(repoRoot, ".github", "scripts", "warm-bases.sh")
+	if _, err := os.Stat(script); err != nil {
+		t.Fatalf("warm-bases.sh is missing: %v", err)
+	}
+	dockerfile := filepath.Join(repoRoot, "kanz", "services", "wealth", "Dockerfile")
+
+	for _, tc := range []struct {
+		name        string
+		failures    int
+		wantErr     bool
+		wantRetries int
+	}{
+		{name: "first attempt succeeds", failures: 0, wantErr: false, wantRetries: 0},
+		{name: "one refusal then success", failures: 1, wantErr: false, wantRetries: 1},
+		// THE PROPERTY THAT KEEPS THIS HONEST, and the mirror of the push side: a
+		// pull refused on EVERY attempt is a real visibility or authorization
+		// failure — the packages are private — and must still fail the job. A
+		// retry that gives up quietly would turn a revoked scope into a green
+		// build of an image nobody could pull.
+		{name: "always refused still fails", failures: -1, wantErr: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			stub := writeDockerStub(t, dir, tc.failures)
+			outFile := filepath.Join(dir, "gh_output")
+
+			cmd := exec.Command(bash, script, dockerfile)
+			cmd.Dir = repoRoot
+			cmd.Env = append(os.Environ(),
+				"DOCKER="+stub,
+				"MAX_ATTEMPTS=4",
+				"RETRY_BASE_DELAY=0",
+				"GITHUB_OUTPUT="+outFile,
+				"GITHUB_STEP_SUMMARY="+filepath.Join(dir, "summary"),
+			)
+			out, err := cmd.CombinedOutput()
+
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("script SUCCEEDED though every pull was refused.\n\n"+
+						"A base image that cannot be pulled at all is not the #320 flake — it is a "+
+						"private package the job has lost access to, and reporting success would "+
+						"build nothing while looking green.\n\n%s", out)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("script failed after %d refusal(s), which the retry should have absorbed: "+
+					"%v\n\n%s", tc.failures, err, out)
+			}
+			if got := readRetries(t, outFile, false); got != tc.wantRetries {
+				t.Errorf("reported retries = %d, want %d.\n\n"+
+					"The COUNT is what keeps the flake visible once it stops being fatal — a silent "+
+					"retry removes the evidence that the registry is degrading (#320).",
+					got, tc.wantRetries)
+			}
+		})
+	}
+}
+
+// A STAGE NAME IS NOT AN IMAGE. A multi-stage Dockerfile's `FROM build AS test`
+// names an earlier stage; asking a registry for it fails for a reason that is not
+// a flake, and the retry would then spend four attempts on it before failing the
+// job. Pinned because the exclusion is a parsing rule, and parsing rules rot.
+func TestWarmBasesSkipsStageReferences(t *testing.T) {
+	bash, err := exec.LookPath("bash")
+	if err != nil {
+		t.Skipf("bash not on PATH (%v)", err)
+	}
+	repoRoot := filepath.Dir(moduleRoot(t))
+	dir := t.TempDir()
+	dockerfile := filepath.Join(dir, "Dockerfile")
+	if err := os.WriteFile(dockerfile, []byte(
+		"FROM ghcr.io/eighred/base/golang:1.26.5 AS build\nRUN true\n"+
+			"FROM build AS test\n"+
+			"FROM ghcr.io/eighred/base/distroless-static:nonroot\nCOPY --from=build /app /app\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	stub := writeDockerStub(t, dir, 0)
+	cmd := exec.Command(bash, filepath.Join(repoRoot, ".github", "scripts", "warm-bases.sh"), dockerfile)
+	cmd.Dir = repoRoot
+	cmd.Env = append(os.Environ(), "DOCKER="+stub, "RETRY_BASE_DELAY=0")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("warm-bases failed: %v\n\n%s", err, out)
+	}
+	if strings.Contains(string(out), "warming build ") {
+		t.Errorf("warmed the stage alias 'build' as if it were an image:\n\n%s", out)
+	}
+	for _, want := range []string{"golang:1.26.5", "distroless-static:nonroot"} {
+		if !strings.Contains(string(out), want) {
+			t.Errorf("did not warm %s — every external base must be pulled here, or the one that is "+
+				"missed is the one that 403s in the build:\n\n%s", want, out)
+		}
+	}
+}
