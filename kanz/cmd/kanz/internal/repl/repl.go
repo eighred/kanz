@@ -1,5 +1,5 @@
 // Package repl is the kanz terminal client's interactive loop: a
-// Claude-Code-style REPL that authenticates via the Eighred SSO device flow,
+// Claude-Code-style REPL that signs in against the platform identity provider,
 // persists the token, and drives turns against the api-gateway /v1 edge —
 // natural-language questions through the copilot, and slash commands through
 // the structured risk endpoints. No mocks: every turn hits the running gateway.
@@ -20,13 +20,30 @@ import (
 	"github.com/eighred/kanz/cmd/kanz/internal/config"
 	"github.com/eighred/kanz/cmd/kanz/internal/gateway"
 	"github.com/eighred/kanz/cmd/kanz/internal/tokenstore"
-	"github.com/eighred/kanz/pkg/deviceauth"
+	"github.com/eighred/kanz/internal/identityclient"
 )
 
-// Authenticator runs the Eighred SSO device flow and returns a token. It is an
-// interface so the REPL can be unit-tested without real network I/O.
+// Authenticator exchanges an operator's subject and credential for a session
+// token at the platform identity provider. It is an interface so the REPL can
+// be unit-tested without real network I/O.
+//
+// IT TAKES THE CREDENTIAL RATHER THAN COLLECTING IT (#364). Where a secret can
+// safely be typed differs by surface — a piped stdin has no terminal to mask,
+// and under the TUI bubbletea owns the keyboard — so gathering it is the
+// composition root's job and this seam stays about the exchange.
 type Authenticator interface {
-	Login(ctx context.Context) (*deviceauth.Token, error)
+	Login(ctx context.Context, subject, credential string) (*identityclient.Token, error)
+}
+
+// CredentialSource yields the secret for a sign-in. It is separate from
+// Authenticator because the two answer different questions: this one is "how
+// does this surface ask for a secret", which has no single answer, and the
+// other is "how is a secret exchanged for a token", which has exactly one.
+//
+// Implementations MUST NOT echo the secret, and must not retain it — the REPL
+// hands it straight to Login and keeps no copy.
+type CredentialSource interface {
+	Credential(ctx context.Context, subject string) (string, error)
 }
 
 // REPL is the interactive terminal session.
@@ -35,26 +52,29 @@ type REPL struct {
 	out   io.Writer
 	store *tokenstore.Store
 	auth  Authenticator
+	creds CredentialSource
 	gw    *gateway.Client
 	now   func() time.Time
 
-	token *deviceauth.Token // current session token; nil ⇒ not logged in
+	token *identityclient.Token // current session token; nil ⇒ not logged in
 
-	// devSession marks a session held by a pre-minted KANZ_TOKEN rather than an
-	// SSO sign-in. It changes what /login, /logout and /whoami can honestly say,
+	// devSession marks a session held by a pre-minted KANZ_TOKEN rather than a
+	// sign-in. It changes what /login, /logout and /whoami can honestly say,
 	// and it is printed in the header — a static bearer that nobody can see they
 	// are using is the only genuinely dangerous version of this feature.
 	devSession bool
 }
 
-// New builds a REPL over the config, token store, authenticator, and I/O. It
-// loads any persisted token so an unexpired session resumes without a login.
-func New(cfg config.Config, store *tokenstore.Store, auth Authenticator, in io.Reader, out io.Writer) *REPL {
+// New builds a REPL over the config, token store, authenticator, credential
+// source and I/O. It loads any persisted token so an unexpired session resumes
+// without a login.
+func New(cfg config.Config, store *tokenstore.Store, auth Authenticator, creds CredentialSource, in io.Reader, out io.Writer) *REPL {
 	r := &REPL{
 		in:    bufio.NewScanner(in),
 		out:   out,
 		store: store,
 		auth:  auth,
+		creds: creds,
 		now:   time.Now,
 	}
 	r.in.Buffer(make([]byte, 0, 64*1024), 1<<20)
@@ -67,18 +87,18 @@ func New(cfg config.Config, store *tokenstore.Store, auth Authenticator, in io.R
 	r.gw = gateway.New(cfg.GatewayURL, r.accessToken, cfg.SigningSecret)
 
 	// A PRE-MINTED TOKEN IS ADOPTED, NEVER PERSISTED. config.Load has already
-	// refused the case where both this and an SSO issuer are set, so reaching
-	// here with a DevToken means there is no issuer to sign in against.
+	// refused the case where both this and an identity URL are set, so reaching
+	// here with a DevToken means there is nowhere to sign in against.
 	//
-	// It is deliberately NOT written to the token store: the store is where an
-	// SSO session lives across runs, and a bearer from the environment that
+	// It is deliberately NOT written to the token store: the store is where a
+	// real session lives across runs, and a bearer from the environment that
 	// outlived the environment is exactly the stale-credential surprise this
 	// feature must not create. Unset KANZ_TOKEN and the session is gone.
 	if cfg.DevToken != "" {
 		// Zero Expiry: tokenstore.Valid treats that as non-expiring, which is
 		// right — the gateway is the authority on this token's lifetime, and
 		// inventing one here would refuse a perfectly good bearer.
-		r.token = &deviceauth.Token{AccessToken: cfg.DevToken}
+		r.token = &identityclient.Token{Token: cfg.DevToken}
 		r.devSession = true
 		return r
 	}
@@ -92,7 +112,7 @@ func (r *REPL) accessToken() string {
 	if r.token == nil {
 		return ""
 	}
-	return r.token.AccessToken
+	return r.token.Token
 }
 
 // Run renders the header and processes input until EOF or /quit. It returns nil
@@ -141,7 +161,7 @@ func (r *REPL) Dispatch(ctx context.Context, line string) (stop bool) {
 	case "/help":
 		r.help()
 	case "/login":
-		if err := r.login(ctx); err != nil {
+		if err := r.login(ctx, strings.TrimSpace(rest)); err != nil {
 			r.errf("login failed: %v", err)
 		}
 	case "/logout":
@@ -216,38 +236,71 @@ func (r *REPL) ask(ctx context.Context, question string) {
 	}
 }
 
-// ensureAuth guarantees a usable token, running the device flow if the current
-// one is missing or expired. It returns false (having printed an error) when
-// login fails, so callers can abort the turn.
+// ensureAuth reports whether there is a usable token, telling the operator what
+// to do when there is not. It returns false (having printed) so callers can
+// abort the turn.
+//
+// IT NO LONGER SIGNS IN ON THE OPERATOR'S BEHALF (#364), AND THAT IS FORCED BY
+// THE IDENTITY PROVIDER RATHER THAN CHOSEN. The device flow it replaced needed
+// no secret from the caller, so an expired session could be renewed silently
+// mid-turn. Credential sign-in needs a subject and a secret, and the identity
+// service issues NO refresh token — there is nothing to renew from. Prompting
+// for a password in the middle of an unrelated command is the worst possible
+// place to ask for one: it trains an operator to type their credential whenever
+// the terminal asks, which is precisely the reflex a phishing pane would want.
+//
+// So an expired session is REPORTED, and /login is the only thing that asks.
 func (r *REPL) ensureAuth(ctx context.Context) bool {
 	if tokenstore.Valid(r.token, r.now()) {
 		return true
 	}
-	if err := r.login(ctx); err != nil {
-		r.errf("login required but failed: %v", err)
+	if r.devSession {
+		// Unreachable while KANZ_TOKEN is non-empty (New adopts it with a zero
+		// expiry, which Valid accepts), so this can only mean the gateway's own
+		// authority rejected it — say where the credential came from rather than
+		// sending the operator to a /login that refuses dev sessions.
+		r.errf("the KANZ_TOKEN bearer from the environment is not usable — it is the gateway that " +
+			"decides that, so check the token, not this client")
 		return false
 	}
-	return true
+	if r.token == nil {
+		r.errf("not signed in — run /login <subject> first")
+		return false
+	}
+	r.errf("your session has expired — run /login <subject> to sign in again " +
+		"(the identity provider issues no refresh token, so this is a fresh sign-in)")
+	return false
 }
 
-// login runs the device flow, persists the token, and adopts it for the
-// session.
-func (r *REPL) login(ctx context.Context) error {
+// login exchanges a credential for a session token, persists it, and adopts it
+// for the session. The secret is read from the CredentialSource and handed
+// straight to the Authenticator — this function keeps no copy of it.
+func (r *REPL) login(ctx context.Context, subject string) error {
 	if r.devSession {
-		return errors.New("this session uses the pre-minted KANZ_TOKEN, and there is no KANZ_SSO_ISSUER " +
-			"to sign in against. Unset KANZ_TOKEN and set KANZ_SSO_ISSUER to use SSO")
+		return errors.New("this session uses the pre-minted KANZ_TOKEN, and there is no identity " +
+			"provider to sign in against. Unset KANZ_TOKEN and set KANZ_IDENTITY_URL to sign in")
 	}
-	tok, err := r.auth.Login(ctx)
+	if subject == "" {
+		return errors.New("usage: /login <subject> (the account you were invited as, e.g. user:alice)")
+	}
+	if r.creds == nil {
+		return errors.New("this surface cannot ask for a credential")
+	}
+	cred, err := r.creds.Credential(ctx, subject)
+	if err != nil {
+		return err
+	}
+	tok, err := r.auth.Login(ctx, subject, cred)
 	if err != nil {
 		return err
 	}
 	r.token = tok
 	if err := r.store.Save(tok); err != nil {
 		// A persistence failure is non-fatal: the session token still works,
-		// the user just re-logs-in next run. Surface it, don't abort.
+		// the user just signs in again next run. Surface it, don't abort.
 		r.errf("warning: could not persist token: %v", err)
 	}
-	fmt.Fprintln(r.out, "✓ signed in")
+	fmt.Fprintf(r.out, "✓ signed in as %s\n", orNA(tok.Subject))
 	return nil
 }
 
@@ -268,24 +321,37 @@ func (r *REPL) logout() {
 	fmt.Fprintln(r.out, "✓ signed out")
 }
 
-// whoami decodes (without verifying — display only) the access token's claims
-// and prints subject, tenant, and expiry. The gateway is the authority that
-// verifies the token; this is a convenience readout.
+// whoami prints the session's subject, tenant, and expiry.
+//
+// IT PREFERS WHAT THE IDENTITY SERVICE SAID over what the token claims. A
+// sign-in returns subject and tenant alongside the JWT, and those are the
+// service's own answer; decoding the token here would be re-deriving them from
+// an UNVERIFIED payload, which is a worse source for the same fact. The decode
+// survives only for a KANZ_TOKEN session, which arrived as a bare bearer string
+// with nothing beside it — and it is display-only either way, because the
+// gateway is the authority that verifies anything.
 func (r *REPL) whoami() {
 	if r.token == nil {
-		fmt.Fprintln(r.out, "not signed in — a question or command will start the device flow")
+		fmt.Fprintln(r.out, "not signed in — run /login <subject>")
 		return
 	}
 	if r.devSession {
-		fmt.Fprintln(r.out, "session: KANZ_TOKEN from the environment (no SSO sign-in)")
+		fmt.Fprintln(r.out, "session: KANZ_TOKEN from the environment (not a sign-in)")
 	}
-	claims := decodeClaims(r.token.AccessToken)
-	sub, _ := claims["sub"].(string)
-	tenant, _ := claims["tenant"].(string)
+	sub, tenant := r.token.Subject, r.token.Tenant
+	if sub == "" || tenant == "" {
+		claims := decodeClaims(r.token.Token)
+		if sub == "" {
+			sub, _ = claims["sub"].(string)
+		}
+		if tenant == "" {
+			tenant, _ = claims["tenant"].(string)
+		}
+	}
 	fmt.Fprintf(r.out, "subject: %s\n", orNA(sub))
 	fmt.Fprintf(r.out, "tenant:  %s\n", orNA(tenant))
-	if !r.token.Expiry.IsZero() {
-		fmt.Fprintf(r.out, "expires: %s (%s)\n", r.token.Expiry.Format(time.RFC3339), humanUntil(r.token.Expiry.Sub(r.now())))
+	if !r.token.Expires.IsZero() {
+		fmt.Fprintf(r.out, "expires: %s (%s)\n", r.token.Expires.Format(time.RFC3339), humanUntil(r.token.Expires.Sub(r.now())))
 	}
 }
 
@@ -315,7 +381,7 @@ func (r *REPL) header() {
 		// VISIBLE EVERY SESSION, not once. The failure mode of a static bearer is
 		// forgetting you are on one, so this is printed where it cannot be
 		// scrolled past before the first command.
-		fmt.Fprintln(r.out, "⚠ using KANZ_TOKEN from the environment — not an SSO sign-in. /login is unavailable.")
+		fmt.Fprintln(r.out, "⚠ using KANZ_TOKEN from the environment — not a sign-in. /login is unavailable.")
 	}
 }
 
@@ -326,7 +392,7 @@ Commands:
   /exposure <id> [as_of]         portfolio exposure (as_of RFC3339, default latest)
   /measures <id> [measure ...]   named risk measures (e.g. VaR99 Delta)
   /scenario <id> <json>          evaluate a scenario (JSON EvaluateScenarioRequest)
-  /login                         sign in via the Eighred SSO device flow
+  /login <subject>               sign in at the identity provider (e.g. /login user:alice)
   /logout                        forget the persisted token
   /whoami                        show the current identity and token expiry
   /help                          this help

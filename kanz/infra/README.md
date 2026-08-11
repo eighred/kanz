@@ -22,21 +22,27 @@ JWTs** (`API_GATEWAY_JWT_SECRET`, together with the explicit
 `API_GATEWAY_ALLOW_DEV_HS256=true` that arm now requires) and is not an OpenID
 provider, so there is no discovery document to fetch.
 
-Set `KANZ_TOKEN` to a pre-minted bearer instead, and leave `KANZ_SSO_ISSUER`
+Set `KANZ_TOKEN` to a pre-minted bearer instead, and leave `KANZ_IDENTITY_URL`
 unset:
 
 ```sh
 export KANZ_GATEWAY_URL=http://localhost:8080
 export KANZ_TOKEN="$(go run ./cmd/kanz-devtoken --secret load-secret --tenant load-test --role kanz-user)"
-unset KANZ_SSO_ISSUER
+unset KANZ_IDENTITY_URL
 kanz
 ```
 
 **Setting both is refused**, deliberately, rather than resolved by precedence. A
-rule like "SSO wins" would let a `KANZ_TOKEN` exported for one experiment sit
-forgotten in a shell profile and then silently take over the day an issuer is
-briefly unset. The refusal is loud and impossible to be on the wrong side of by
-accident.
+rule like "signing in wins" would let a `KANZ_TOKEN` exported for one experiment
+sit forgotten in a shell profile and then silently take over the day the
+identity URL is briefly unset. The refusal is loud and impossible to be on the
+wrong side of by accident.
+
+`KANZ_SSO_ISSUER` is **retired** (#364). It named an external Eighred SSO device
+flow that was never built; the CLI now signs in against the platform's own
+identity provider through `KANZ_IDENTITY_URL`. It is refused by name rather than
+ignored, so a shell profile that still exports it says so instead of leaving you
+to wonder why it has no effect.
 
 The session is marked in the header every run (`using KANZ_TOKEN from the
 environment`) and by `/whoami`, because the failure mode of a static bearer is

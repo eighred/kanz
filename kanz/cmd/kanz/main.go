@@ -1,9 +1,9 @@
 // Command kanz is the Eighred institutional risk & portfolio terminal client:
 // a Claude-Code-style REPL over the delivered api-gateway /v1 edge. It signs in
-// via the Eighred SSO device flow (pkg/deviceauth), persists the token, and
-// drives natural-language turns through the copilot and slash commands through
-// the risk endpoints. It is a pure client — no backend, no mocks; every turn
-// hits the running gateway, which validates the SSO-issued token.
+// against the platform identity provider (internal/identityclient), persists
+// the token, and drives natural-language turns through the copilot and slash
+// commands through the risk endpoints. It is a pure client — no backend, no
+// mocks; every turn hits the running gateway, which validates the token.
 package main
 
 import (
@@ -25,12 +25,12 @@ import (
 	"github.com/eighred/kanz/cmd/kanz/internal/panes/halt"
 	"github.com/eighred/kanz/cmd/kanz/internal/repl"
 	"github.com/eighred/kanz/cmd/kanz/internal/tokenstore"
+	"github.com/eighred/kanz/internal/identityclient"
 	"github.com/eighred/kanz/internal/tui/app"
 	"github.com/eighred/kanz/internal/tui/gateway"
 	"github.com/eighred/kanz/internal/tui/pane"
 	"github.com/eighred/kanz/internal/tui/portfolio"
 	"github.com/eighred/kanz/internal/tui/universe"
-	"github.com/eighred/kanz/pkg/deviceauth"
 )
 
 func main() {
@@ -69,7 +69,7 @@ func run() error {
 		if aerr != nil {
 			return aerr
 		}
-		return repl.New(cfg, store, auth, os.Stdin, os.Stdout).Run(ctx)
+		return repl.New(cfg, store, auth, envCredential{}, os.Stdin, os.Stdout).Run(ctx)
 	}
 
 	// One writer, shared: the REPL prints into it and the Copilot pane renders
@@ -83,7 +83,7 @@ func run() error {
 	// stdin is unused by the shell — bubbletea owns the keyboard and the pane
 	// feeds lines to Dispatch — so the REPL is given an empty reader rather than
 	// os.Stdin, which would otherwise be read from two places at once.
-	r := repl.New(cfg, store, auth, strings.NewReader(""), out)
+	r := repl.New(cfg, store, auth, envCredential{}, strings.NewReader(""), out)
 
 	// The estate panes (#66) connect LAZILY, on first visit, with whatever token
 	// exists then. universe.NewGatewaySource refuses an empty one, and the shell
@@ -159,28 +159,45 @@ func stdinIsTerminal() bool {
 	return fi.Mode()&os.ModeCharDevice != 0
 }
 
-// deviceLogin adapts deviceauth.Client to repl.Authenticator, printing the
-// user_code and verification URL when the flow begins so the user knows where
-// to approve the sign-in.
-type deviceLogin struct {
-	client *deviceauth.Client
-	// io.Writer, not *os.File: under the TUI this is the Copilot pane's buffer,
-	// because writing the device-code prompt straight to the terminal would
-	// paint over the frame and be erased by the next render — the operator would
-	// be asked to approve a sign-in they never saw.
-	out io.Writer
+// identityLogin adapts identityclient.Client to repl.Authenticator.
+//
+// THE clientIP ARGUMENT IS EMPTY, AND THAT IS CORRECT HERE. It exists so the
+// web-BFF can tell the identity service which browser an attempt came from —
+// without it every forwarded login arrives from the BFF, so the limiter keys
+// them all together and one user's failed attempts throttle everybody. The CLI
+// is not a forwarder: it opens the connection itself, so the address the
+// service already sees IS the caller's, and sending a header would only let a
+// client choose which rate-limit bucket it lands in.
+type identityLogin struct{ client *identityclient.Client }
+
+func (i *identityLogin) Login(ctx context.Context, subject, credential string) (*identityclient.Token, error) {
+	return i.client.Login(ctx, subject, credential, "")
 }
 
-func (d *deviceLogin) Login(ctx context.Context) (*deviceauth.Token, error) {
-	return d.client.Authorize(ctx, func(p deviceauth.Prompt) {
-		fmt.Fprintln(d.out, "\nTo sign in, open the URL below and enter the code:")
-		if p.VerificationURIComplete != "" {
-			fmt.Fprintf(d.out, "  %s\n", p.VerificationURIComplete)
-		} else {
-			fmt.Fprintf(d.out, "  %s\n", p.VerificationURI)
-		}
-		fmt.Fprintf(d.out, "  code: %s\n\nWaiting for approval…\n", p.UserCode)
-	})
+// envCredential reads the sign-in secret from KANZ_CREDENTIAL.
+//
+// WHY THE ENVIRONMENT, AND WHAT IS STILL MISSING. Where a secret can be typed
+// depends on the surface, and neither of this binary's two surfaces can take
+// one today: the line REPL runs precisely when stdin is NOT a terminal (it is
+// the fallback for a pipe), so there is nothing to mask; and under the TUI
+// bubbletea owns the keyboard, and the Copilot pane reaches the REPL through a
+// one-way Dispatch(line) with no way to say "the next line is a secret".
+//
+// So this is the honest floor rather than the finished answer: it serves
+// scripted and CI callers exactly, and an interactive masked prompt — a login
+// form beside the halt form, which is the shape this shell already uses for
+// gathering fields — is still owed. Until then /login says so rather than
+// failing with something vague.
+type envCredential struct{}
+
+func (envCredential) Credential(context.Context, string) (string, error) {
+	if c := os.Getenv("KANZ_CREDENTIAL"); c != "" {
+		return c, nil
+	}
+	return "", errors.New("no credential to sign in with: set KANZ_CREDENTIAL. " +
+		"This client cannot yet prompt for one — the line REPL only runs when stdin is a pipe, " +
+		"and under the shell bubbletea owns the keyboard, so a masked prompt needs a login form " +
+		"of its own (#364)")
 }
 
 // newEstateBuilder returns the lazy constructor the estate panes call on their
@@ -203,12 +220,12 @@ func (d *deviceLogin) Login(ctx context.Context) (*deviceauth.Token, error) {
 // The expiry half matters on its own: without it an expired token reaches the
 // gateway and comes back 401, which tells the operator far less than "your
 // session expired".
-func bearerFor(cfg config.Config, tok *deviceauth.Token) (string, error) {
+func bearerFor(cfg config.Config, tok *identityclient.Token) (string, error) {
 	switch {
 	case cfg.DevToken != "":
 		return cfg.DevToken, nil
 	case tokenstore.Valid(tok, time.Now()):
-		return tok.AccessToken, nil
+		return tok.Token, nil
 	}
 	return "", errors.New(
 		"not signed in (or the session expired) — run /login on the Copilot pane, then return here")
@@ -286,10 +303,11 @@ func newEstateBuilder(cfg config.Config, store *tokenstore.Store) func() (univer
 
 // newAuthenticator builds the sign-in path, or a placeholder when there is none.
 //
-// deviceauth.New REFUSES an empty issuer ("deviceauth: issuer is required"), and
-// a KANZ_TOKEN session has no issuer by construction — config.Load rejects
-// configuring both. Building it unconditionally is why the first version of the
-// dev-token path could not start at all:
+// THE DEV-TOKEN BRANCH STAYS, AND THE REASON IS UNCHANGED BY #364. A KANZ_TOKEN
+// session has no identity URL by construction — config.Load rejects configuring
+// both — so building a client unconditionally would refuse to start at all. That
+// is not hypothetical; it is what the first version of the dev-token path did,
+// against the SSO client this replaces:
 //
 //	$ KANZ_GATEWAY_URL=... KANZ_TOKEN=... kanz
 //	kanz: deviceauth: issuer is required
@@ -297,7 +315,12 @@ func newEstateBuilder(cfg config.Config, store *tokenstore.Store) func() (univer
 // The unit tests missed it because they construct the REPL directly and never
 // run this wiring — the same gap that hid the estate builder's nil dereference.
 // Extracted so it has a test of its own.
-func newAuthenticator(cfg config.Config, out io.Writer) (repl.Authenticator, error) {
+//
+// out is no longer used: the device flow had to PRINT a code and a URL for the
+// operator to approve, and a credential exchange has nothing to show. It is kept
+// in the signature because the caller's choice of writer is still the thing that
+// differs between the two surfaces, and a login form will need it.
+func newAuthenticator(cfg config.Config, _ io.Writer) (repl.Authenticator, error) {
 	if cfg.DevToken != "" {
 		// Never called: repl.login refuses before reaching the Authenticator in a
 		// dev session. It is a real value rather than nil so that if that ever
@@ -305,20 +328,17 @@ func newAuthenticator(cfg config.Config, out io.Writer) (repl.Authenticator, err
 		// nil-pointer panic in the middle of a turn.
 		return unavailableAuth{}, nil
 	}
-	client, err := deviceauth.New(deviceauth.Config{
-		Issuer:   cfg.Issuer,
-		ClientID: cfg.ClientID,
-		Scope:    cfg.Scope,
-	})
-	if err != nil {
-		return nil, err
-	}
-	return &deviceLogin{client: client, out: out}, nil
+	// The timeout is left to identityclient's own default, and that default is
+	// load-bearing: the identity service verifies with Argon2id, deliberately
+	// slowly, and pays that cost even for an unknown subject as its timing
+	// defence. A tighter timeout chosen here would turn every sign-in into a
+	// client-side cancellation.
+	return &identityLogin{client: identityclient.New(cfg.IdentityURL, "", 0)}, nil
 }
 
-// unavailableAuth stands in where there is no issuer to sign in against.
+// unavailableAuth stands in where there is nowhere to sign in against.
 type unavailableAuth struct{}
 
-func (unavailableAuth) Login(context.Context) (*deviceauth.Token, error) {
-	return nil, errors.New("this session uses KANZ_TOKEN and has no KANZ_SSO_ISSUER to sign in against")
+func (unavailableAuth) Login(context.Context, string, string) (*identityclient.Token, error) {
+	return nil, errors.New("this session uses KANZ_TOKEN and has no KANZ_IDENTITY_URL to sign in against")
 }

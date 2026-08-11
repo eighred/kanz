@@ -11,7 +11,7 @@ import (
 
 	"github.com/eighred/kanz/cmd/kanz/internal/config"
 	"github.com/eighred/kanz/cmd/kanz/internal/tokenstore"
-	"github.com/eighred/kanz/pkg/deviceauth"
+	"github.com/eighred/kanz/internal/identityclient"
 )
 
 // TABBING TO THE ESTATE BEFORE SIGNING IN MUST NOT PANIC.
@@ -66,9 +66,9 @@ func TestEstateBuilderRefusesACorruptTokenFile(t *testing.T) {
 func TestEstateBuilderRefusesAnExpiredSession(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "token.json")
 	store := tokenstore.NewAt(path)
-	if err := store.Save(&deviceauth.Token{
-		AccessToken: "stale",
-		Expiry:      time.Now().Add(-time.Hour),
+	if err := store.Save(&identityclient.Token{
+		Token:   "stale",
+		Expires: time.Now().Add(-time.Hour),
 	}); err != nil {
 		t.Fatalf("save: %v", err)
 	}
@@ -85,9 +85,9 @@ func TestEstateBuilderRefusesAnExpiredSession(t *testing.T) {
 func TestEstateBuilderSucceedsWithAValidSession(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "token.json")
 	store := tokenstore.NewAt(path)
-	if err := store.Save(&deviceauth.Token{
-		AccessToken: "good",
-		Expiry:      time.Now().Add(time.Hour),
+	if err := store.Save(&identityclient.Token{
+		Token:   "good",
+		Expires: time.Now().Add(time.Hour),
 	}); err != nil {
 		t.Fatalf("save: %v", err)
 	}
@@ -132,14 +132,16 @@ func TestEstateBuilderStillRefusesWithNoSessionAtAll(t *testing.T) {
 
 // THE WIRING GAP THE UNIT TESTS COULD NOT SEE.
 //
-// deviceauth.New refuses an empty issuer, and a KANZ_TOKEN session has none by
-// construction. Building it unconditionally meant the dev-token path could not
-// start at all — `kanz: deviceauth: issuer is required` before a single frame.
+// The SSO client this replaced refused an empty issuer, and a KANZ_TOKEN session
+// has no sign-in endpoint by construction. Building it unconditionally meant the
+// dev-token path could not start at all — `kanz: deviceauth: issuer is required`
+// before a single frame.
 //
 // Every REPL test passed: they construct the REPL directly and never run main's
 // wiring. Same blind spot that hid the estate builder's nil dereference, which
-// is why this is tested here rather than assumed.
-func TestAuthenticatorIsNotBuiltWhenThereIsNoIssuer(t *testing.T) {
+// is why this is tested here rather than assumed. It survives the move to the
+// identity provider unchanged, because the shape of the mistake is unchanged.
+func TestAuthenticatorIsNotBuiltWhenThereIsNowhereToSignIn(t *testing.T) {
 	auth, err := newAuthenticator(
 		config.Config{GatewayURL: "https://gw.invalid", DevToken: "pre-minted"}, io.Discard)
 	if err != nil {
@@ -151,7 +153,7 @@ func TestAuthenticatorIsNotBuiltWhenThereIsNoIssuer(t *testing.T) {
 
 	// It must never succeed silently: if login ever reaches it, the result is an
 	// error naming the cause, not a nil token treated as a session.
-	tok, lerr := auth.Login(context.Background())
+	tok, lerr := auth.Login(context.Background(), "user:alice", "correct horse")
 	if lerr == nil {
 		t.Error("the placeholder authenticator returned success")
 	}
@@ -160,18 +162,46 @@ func TestAuthenticatorIsNotBuiltWhenThereIsNoIssuer(t *testing.T) {
 	}
 }
 
-// The SSO path is unchanged: a configured issuer still builds a real device-flow
-// client. A fix that returned the placeholder for everyone would pass the test
-// above and quietly disable sign-in.
-func TestAuthenticatorIsBuiltNormallyWhenAnIssuerIsConfigured(t *testing.T) {
+// The real path: a configured identity URL builds a real client. A fix that
+// returned the placeholder for everyone would pass the test above and quietly
+// disable sign-in for the whole estate.
+func TestAuthenticatorIsBuiltNormallyWhenAnIdentityURLIsConfigured(t *testing.T) {
 	auth, err := newAuthenticator(
-		config.Config{GatewayURL: "https://gw.invalid", Issuer: "https://sso.invalid", ClientID: "kanz-cli"},
+		config.Config{GatewayURL: "https://gw.invalid", IdentityURL: "https://identity.invalid"},
 		io.Discard)
 	if err != nil {
-		t.Fatalf("newAuthenticator failed for a normal SSO configuration: %v", err)
+		t.Fatalf("newAuthenticator failed for a normal identity configuration: %v", err)
 	}
 	if _, isPlaceholder := auth.(unavailableAuth); isPlaceholder {
-		t.Error("an SSO-configured client got the placeholder authenticator — /login would refuse " +
-			"on a deployment that has a real issuer")
+		t.Error("an identity-configured client got the placeholder authenticator — /login would " +
+			"refuse on a deployment that has a real identity provider")
+	}
+}
+
+// THE CREDENTIAL SOURCE IS WIRED, AND ITS ABSENCE IS A REAL FAILURE MODE.
+//
+// repl.login refuses with "this surface cannot ask for a credential" when the
+// source is nil, which is the correct behaviour and a terrible thing to discover
+// in production. main passes envCredential{} at both call sites; this asserts
+// the value is usable rather than that the call compiles.
+func TestEnvCredentialReadsTheEnvironmentAndRefusesWhenUnset(t *testing.T) {
+	t.Setenv("KANZ_CREDENTIAL", "")
+	if _, err := (envCredential{}).Credential(context.Background(), "user:alice"); err == nil {
+		t.Fatal("an unset KANZ_CREDENTIAL produced no error — /login would send an empty secret to " +
+			"the identity service and report it as a rejected credential")
+	} else if !strings.Contains(err.Error(), "KANZ_CREDENTIAL") {
+		t.Errorf("error %q does not name the variable to set", err)
+	}
+
+	t.Setenv("KANZ_CREDENTIAL", "correct horse")
+	got, err := (envCredential{}).Credential(context.Background(), "user:alice")
+	if err != nil {
+		t.Fatalf("Credential: %v", err)
+	}
+	// NOT TRIMMED, deliberately: a credential may legitimately begin or end with
+	// a space, and silently "helping" would refuse a correct one with the same
+	// message a wrong one gets.
+	if got != "correct horse" {
+		t.Errorf("Credential = %q, want it returned verbatim", got)
 	}
 }

@@ -11,20 +11,38 @@ import (
 
 	"github.com/eighred/kanz/cmd/kanz/internal/config"
 	"github.com/eighred/kanz/cmd/kanz/internal/tokenstore"
-	"github.com/eighred/kanz/pkg/deviceauth"
+	"github.com/eighred/kanz/internal/identityclient"
 )
 
-// fakeAuth is a stand-in Authenticator: it hands back a scripted token and
-// counts how many times login ran.
+// fakeAuth is a stand-in Authenticator: it hands back a scripted token, counts
+// how many times login ran, and records what it was asked to sign in with.
 type fakeAuth struct {
-	tok   *deviceauth.Token
+	tok   *identityclient.Token
 	err   error
 	calls int
+	// gotSubject and gotCredential are what the REPL passed through. They are
+	// recorded because the credential must reach the authenticator UNCHANGED and
+	// must not be echoed anywhere — a test that only counted calls could not tell
+	// a working sign-in from one that sent an empty secret.
+	gotSubject    string
+	gotCredential string
 }
 
-func (f *fakeAuth) Login(context.Context) (*deviceauth.Token, error) {
+func (f *fakeAuth) Login(_ context.Context, subject, credential string) (*identityclient.Token, error) {
 	f.calls++
+	f.gotSubject, f.gotCredential = subject, credential
 	return f.tok, f.err
+}
+
+// fixedCredential is a stand-in CredentialSource. Real ones read from the
+// environment or (eventually) a masked prompt; a test needs neither.
+type fixedCredential struct {
+	cred string
+	err  error
+}
+
+func (f fixedCredential) Credential(context.Context, string) (string, error) {
+	return f.cred, f.err
 }
 
 // harness wires a REPL to a stub gateway and captures its output.
@@ -39,10 +57,21 @@ func newHarness(t *testing.T, input string, handler http.HandlerFunc) *harness {
 	srv := httptest.NewServer(handler)
 	t.Cleanup(srv.Close)
 
-	auth := &fakeAuth{tok: &deviceauth.Token{AccessToken: signedToken(), Expiry: time.Now().Add(time.Hour)}}
+	auth := &fakeAuth{tok: &identityclient.Token{Token: signedToken(), Expires: time.Now().Add(time.Hour)}}
 	store := tokenstore.NewAt(filepath.Join(t.TempDir(), "token.json"))
 	out := &strings.Builder{}
-	r := New(config.Config{GatewayURL: srv.URL}, store, auth, strings.NewReader(input), out)
+	// THE HARNESS STARTS SIGNED IN, AND IT HAS TO NOW (#364). It used to start
+	// signed OUT and let the first turn trigger a sign-in, because the device
+	// flow needed no secret from the operator. Credential sign-in does, and the
+	// identity service issues no refresh token, so a turn can no longer
+	// authenticate on anyone's behalf — a logged-out harness would be testing the
+	// refusal rather than the command. Seeding the STORE rather than the field is
+	// what New actually reads, so this exercises the resume path too.
+	if err := store.Save(auth.tok); err != nil {
+		t.Fatalf("seed the session: %v", err)
+	}
+	r := New(config.Config{GatewayURL: srv.URL}, store, auth, fixedCredential{cred: "correct horse"},
+		strings.NewReader(input), out)
 	return &harness{auth: auth, out: out, repl: r}
 }
 
@@ -92,15 +121,47 @@ func TestAskUngroundedWarning(t *testing.T) {
 	}
 }
 
-func TestLoginTriggeredWhenNoToken(t *testing.T) {
+// A TURN NO LONGER SIGNS IN ON THE OPERATOR'S BEHALF, AND THAT IS THE POINT
+// (#364).
+//
+// This asserted the opposite: that the first turn ran the device flow exactly
+// once. That flow needed no secret from the caller, so renewing a session
+// mid-turn cost nothing. Credential sign-in needs a subject and a password, and
+// the identity service issues no refresh token — so keeping this behaviour would
+// mean prompting for a password in the middle of an unrelated command, which
+// trains an operator to type their credential whenever the terminal asks. That
+// is the reflex a phishing pane wants.
+func TestATurnWithNoSessionRefusesRatherThanSigningIn(t *testing.T) {
 	h := newHarness(t, "hello\n/quit\n", func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte(`{"answer":"hi"}`))
 	})
-	// Start logged out; the first turn must run the device flow exactly once.
-	h.repl.token = nil
-	h.run(t)
-	if h.auth.calls != 1 {
-		t.Fatalf("login ran %d times, want 1", h.auth.calls)
+	h.repl.token = nil // signed out, whatever the store held
+
+	out := h.run(t)
+	if h.auth.calls != 0 {
+		t.Fatalf("login ran %d times — a turn must never sign in on the operator's behalf, because "+
+			"that means asking for a password from an unrelated command", h.auth.calls)
+	}
+	if !strings.Contains(out, "/login") {
+		t.Errorf("the refusal does not tell the operator what to run:\n%s", out)
+	}
+}
+
+// AN EXPIRED SESSION SAYS SO, and says why it cannot renew itself. "Not signed
+// in" would be a lie: the operator DID sign in, and the useful fact is that
+// there is nothing to refresh from.
+func TestAnExpiredSessionExplainsThatThereIsNoRefresh(t *testing.T) {
+	h := newHarness(t, "hello\n/quit\n", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"answer":"hi"}`))
+	})
+	h.repl.token = &identityclient.Token{Token: signedToken(), Expires: time.Now().Add(-time.Hour)}
+
+	out := h.run(t)
+	if h.auth.calls != 0 {
+		t.Fatalf("login ran %d times on an expired session", h.auth.calls)
+	}
+	if !strings.Contains(out, "expired") {
+		t.Errorf("output does not say the session expired:\n%s", out)
 	}
 }
 
@@ -191,14 +252,15 @@ func devREPL(t *testing.T, token string) (*REPL, *tokenstore.Store, *strings.Bui
 	out := &strings.Builder{}
 	r := New(
 		config.Config{GatewayURL: "https://gw.invalid", DevToken: token},
-		store, &fakeAuth{}, strings.NewReader(""), out,
+		store, &fakeAuth{}, fixedCredential{cred: "unused"}, strings.NewReader(""), out,
 	)
 	return r, store, out
 }
 
-// A PRE-MINTED TOKEN IS ADOPTED WITHOUT SIGNING IN. This is the whole feature:
-// until Eighred SSO ships there is no issuer to authenticate against, so the
-// client must be drivable against a local gateway.
+// A PRE-MINTED TOKEN IS ADOPTED WITHOUT SIGNING IN. Its original justification
+// is gone — the identity provider now exists (#364) — but the feature is not:
+// a gateway with no identity service in front of it, which is how the load
+// stack and several CI steps run, has a bearer and nowhere to sign in.
 func TestDevTokenIsAdoptedAsTheSession(t *testing.T) {
 	r, _, _ := devREPL(t, "pre-minted")
 
@@ -215,7 +277,7 @@ func TestDevTokenIsAdoptedAsTheSession(t *testing.T) {
 	}
 }
 
-// IT IS NEVER PERSISTED. The store is where an SSO session lives across runs; a
+// IT IS NEVER PERSISTED. The store is where a real session lives across runs; a
 // bearer from the environment that outlived the environment is exactly the
 // stale-credential surprise this must not create.
 func TestDevTokenIsNotWrittenToTheTokenStore(t *testing.T) {
@@ -227,7 +289,7 @@ func TestDevTokenIsNotWrittenToTheTokenStore(t *testing.T) {
 	}
 	if tok != nil {
 		t.Errorf("the dev token was persisted (%q) — unsetting KANZ_TOKEN would no longer end the "+
-			"session, and the bearer would outlive the environment that supplied it", tok.AccessToken)
+			"session, and the bearer would outlive the environment that supplied it", tok.Token)
 	}
 }
 
@@ -243,14 +305,14 @@ func TestTheHeaderSaysTheSessionIsAKanzToken(t *testing.T) {
 	}
 }
 
-// /login cannot work: there is no issuer. Saying so beats a device flow that
-// fails against nothing.
+// /login cannot work: there is nowhere to sign in. Saying so beats an exchange
+// that fails against nothing.
 func TestLoginIsRefusedInADevSession(t *testing.T) {
 	r, _, _ := devREPL(t, "pre-minted")
 
-	err := r.login(context.Background())
+	err := r.login(context.Background(), "user:alice")
 	if err == nil {
-		t.Fatal("/login attempted a device flow with no KANZ_SSO_ISSUER configured")
+		t.Fatal("/login attempted a sign-in with no KANZ_IDENTITY_URL configured")
 	}
 	if !strings.Contains(err.Error(), "KANZ_TOKEN") {
 		t.Errorf("error %q does not explain that the session comes from KANZ_TOKEN", err)
@@ -272,21 +334,75 @@ func TestLogoutExplainsWhereTheDevCredentialLives(t *testing.T) {
 	}
 }
 
-// A normal SSO session is untouched by any of this.
-func TestAnSSOSessionIsNotMarkedAsADevSession(t *testing.T) {
+// A normal signed-in session is untouched by any of this, and the credential
+// reaches the authenticator exactly as the source supplied it.
+func TestASignedInSessionIsNotMarkedAsADevSession(t *testing.T) {
 	store := tokenstore.NewAt(filepath.Join(t.TempDir(), "token.json"))
+	auth := &fakeAuth{tok: &identityclient.Token{Token: "minted", Subject: "user:alice"}}
 	r := New(
-		config.Config{GatewayURL: "https://gw.invalid", Issuer: "https://sso.invalid"},
-		store, &fakeAuth{tok: &deviceauth.Token{AccessToken: "sso"}}, strings.NewReader(""), &strings.Builder{},
+		config.Config{GatewayURL: "https://gw.invalid", IdentityURL: "https://identity.invalid"},
+		store, auth, fixedCredential{cred: "correct horse"}, strings.NewReader(""), &strings.Builder{},
 	)
 	if r.devSession {
-		t.Error("an SSO-configured REPL was marked as a dev session")
+		t.Error("an identity-configured REPL was marked as a dev session")
 	}
-	if err := r.login(context.Background()); err != nil {
+	if err := r.login(context.Background(), "user:alice"); err != nil {
 		t.Fatalf("login on a normal session failed: %v", err)
 	}
+	// THE SECRET MUST ARRIVE UNCHANGED. The REPL is a courier here: it reads from
+	// the CredentialSource and hands the value straight to Login. Trimming,
+	// lower-casing or otherwise "helping" would silently break every credential
+	// containing whatever was helped with.
+	if auth.gotSubject != "user:alice" || auth.gotCredential != "correct horse" {
+		t.Errorf("Login received (%q, %q), want (%q, %q)",
+			auth.gotSubject, auth.gotCredential, "user:alice", "correct horse")
+	}
 	if tok, _ := store.Load(); tok == nil {
-		t.Error("a real SSO login was not persisted — the dev-token path must not have disabled it")
+		t.Error("a real sign-in was not persisted — the dev-token path must not have disabled it")
+	}
+}
+
+// THE CREDENTIAL IS NEVER ECHOED. A REPL prints everything else it does, so the
+// one thing that must not appear in its output needs an assertion of its own —
+// output is scrollback, and scrollback outlives the session.
+func TestTheCredentialIsNeverWrittenToTheOutput(t *testing.T) {
+	store := tokenstore.NewAt(filepath.Join(t.TempDir(), "token.json"))
+	out := &strings.Builder{}
+	const secret = "correct horse battery staple"
+	r := New(
+		config.Config{GatewayURL: "https://gw.invalid", IdentityURL: "https://identity.invalid"},
+		store, &fakeAuth{tok: &identityclient.Token{Token: "minted", Subject: "user:alice"}},
+		fixedCredential{cred: secret}, strings.NewReader(""), out,
+	)
+	if err := r.login(context.Background(), "user:alice"); err != nil {
+		t.Fatalf("login: %v", err)
+	}
+	r.whoami()
+	if strings.Contains(out.String(), secret) {
+		t.Fatalf("the credential appeared in the REPL's output:\n%s", out.String())
+	}
+}
+
+// A SIGN-IN WITHOUT A SUBJECT IS REFUSED, WITH USAGE. /login used to take no
+// argument, so an operator's muscle memory is a bare /login — which would
+// otherwise reach the identity service as an empty subject and come back as
+// "credential rejected", sending them to reset a password that was never wrong.
+func TestLoginWithoutASubjectExplainsItself(t *testing.T) {
+	store := tokenstore.NewAt(filepath.Join(t.TempDir(), "token.json"))
+	auth := &fakeAuth{tok: &identityclient.Token{Token: "minted"}}
+	r := New(
+		config.Config{GatewayURL: "https://gw.invalid", IdentityURL: "https://identity.invalid"},
+		store, auth, fixedCredential{cred: "s"}, strings.NewReader(""), &strings.Builder{},
+	)
+	err := r.login(context.Background(), "")
+	if err == nil {
+		t.Fatal("/login with no subject was accepted")
+	}
+	if !strings.Contains(err.Error(), "usage") {
+		t.Errorf("error %q does not show usage", err)
+	}
+	if auth.calls != 0 {
+		t.Errorf("the identity service was called %d times for a sign-in with no subject", auth.calls)
 	}
 }
 
@@ -306,12 +422,18 @@ func TestTheREPLSignsItsRequestsWhenASecretIsConfigured(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	auth := &fakeAuth{tok: &deviceauth.Token{AccessToken: signedToken(), Expiry: time.Now().Add(time.Hour)}}
+	auth := &fakeAuth{tok: &identityclient.Token{Token: signedToken(), Expires: time.Now().Add(time.Hour)}}
 	store := tokenstore.NewAt(filepath.Join(t.TempDir(), "token.json"))
 	out := &strings.Builder{}
+	// Signed in before the turn: a turn no longer authenticates on its own, so
+	// without a session this would assert the refusal message and never reach the
+	// gateway whose signature is the point.
+	if err := store.Save(auth.tok); err != nil {
+		t.Fatalf("seed the session: %v", err)
+	}
 	r := New(
 		config.Config{GatewayURL: srv.URL, SigningSecret: "s3cret"},
-		store, auth, strings.NewReader("how is my risk?\n/quit\n"), out,
+		store, auth, fixedCredential{cred: "unused"}, strings.NewReader("how is my risk?\n/quit\n"), out,
 	)
 	if err := r.Run(context.Background()); err != nil {
 		t.Fatalf("Run: %v", err)

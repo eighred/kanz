@@ -1,11 +1,20 @@
-// Package identityclient calls the platform identity provider (#364) from the
-// BFF, so a browser can exchange a credential for a session.
+// Package identityclient calls the platform identity provider (#364) to
+// exchange a credential for a session token.
+//
+// IT LIVES HERE, NOT IN A SERVICE, BECAUSE IT HAS TWO CONSUMERS. The web-BFF
+// signs a browser in on the user's behalf; the kanz terminal client signs the
+// operator in directly. CLAUDE.md promotes shared code out of a service's
+// internal/ exactly when the second consumer appears, and a copied auth client
+// is the shape of defect that rule exists to prevent: the refusal semantics
+// below are security decisions, and two copies would drift into disagreeing
+// about which failures a caller is allowed to tell apart.
 //
 // THE CREDENTIAL PASSES THROUGH AND IS NEVER HELD. It arrives on one request,
 // goes out on one request, and is not stored, logged or retried — a retry would
 // mean keeping it in memory across an interval, and the error text never carries
-// it. The token that comes back is stored server-side by the caller, never
-// returned to the browser.
+// it. What the caller does with the token that comes back differs by consumer:
+// the BFF holds it server-side and never returns it to the browser; the terminal
+// client persists it to the operator's own token store.
 package identityclient
 
 import (
