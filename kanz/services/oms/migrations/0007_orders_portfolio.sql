@@ -1,0 +1,54 @@
+-- 0007: an order names the portfolio whose capital it spends (#399).
+--
+-- THE PLATFORM COULD NOT ANSWER "WHAT HAS THIS PORTFOLIO TRADED".
+--
+-- Every risk route is keyed by portfolio — exposure, measures, scenario — and the
+-- web app now lists portfolios and opens one. The obvious next question on that
+-- screen is the order history behind the numbers, and there was no way to ask it:
+-- the portfolio lives INSIDE the marshaled order.v1.OrderState in `state`, so
+-- "orders for portfolio X" was a full table scan plus a proto decode per row, on
+-- the busiest table this service owns.
+--
+-- 0001 already established the shape this follows and says so in its own words:
+-- "order_id and status are denormalized out of the blob for indexing and operator
+-- inspection — the blob stays authoritative." This is the third such column, for
+-- the same reason and under the same rule. The blob remains the truth; this is an
+-- index key.
+--
+-- # Existing rows, and why they are EMPTY rather than guessed
+--
+-- An order admitted before this migration carries its portfolio only inside the
+-- blob, and no SQL statement can decode a protobuf. So the column lands with a
+-- default and the default is dropped immediately after — the pattern 0004 used
+-- for positions.venue, and its reasoning holds exactly:
+--
+--   "An existing row has no venue to attribute it to. DEFAULT '' lets the column
+--    land, and the default is dropped immediately after: from here on, a position
+--    with no venue is a fill whose venue nobody recorded, and it must not be
+--    silently acceptable."
+--
+-- An empty portfolio_id therefore means NOT INDEXED, and it is distinguishable
+-- from every real portfolio because a portfolio id is never empty — the OMS
+-- refuses an order that cannot say whose capital it spends (auth.PortfolioEntitled
+-- denies an empty id, on the capital path, deliberately).
+--
+-- THAT DISTINCTION IS LOAD-BEARING FOR THE READ SIDE. A history that silently
+-- omits pre-migration orders is a partial book rendered as a complete one, which
+-- is the failure this repository refuses everywhere else. The count of unindexed
+-- rows is therefore readable, and the read API reports it, so a screen can say
+-- "these are the orders we can index" rather than "these are the orders".
+--
+-- Backfilling them is a separate, optional act: it needs a process that can
+-- unmarshal OrderState, and it can run at any time because it only ever moves a
+-- row from "not indexed" to "indexed". Nothing here waits for it.
+ALTER TABLE orders ADD COLUMN portfolio_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE orders ALTER COLUMN portfolio_id DROP DEFAULT;
+
+-- The read this exists for: one portfolio's orders, newest first. tenant_id leads
+-- because RLS scopes every query by it anyway, so an index that does not start
+-- there cannot be used alone.
+--
+-- created_at DESC is IN the index rather than left to a sort: an order history is
+-- read newest-first and paginated, and a portfolio with a long history would
+-- otherwise sort its whole result set to return the first page.
+CREATE INDEX orders_portfolio_idx ON orders (tenant_id, portfolio_id, created_at DESC);

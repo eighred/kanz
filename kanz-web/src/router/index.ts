@@ -4,6 +4,7 @@ import LoginView from '../views/LoginView.vue'
 import EstateView from '../views/EstateView.vue'
 import NodesView from '../views/NodesView.vue'
 import ExposureView from '../views/ExposureView.vue'
+import OrdersView from '../views/OrdersView.vue'
 import PortfoliosView from '../views/PortfoliosView.vue'
 import ProvisionsView from '../views/ProvisionsView.vue'
 import RedeemView from '../views/RedeemView.vue'
@@ -23,6 +24,7 @@ export const router = createRouter({
     { path: '/provisions', name: 'provisions', component: ProvisionsView },
     { path: '/portfolios', name: 'portfolios', component: PortfoliosView },
     { path: '/portfolios/:id/exposure', name: 'exposure', component: ExposureView },
+    { path: '/portfolios/:id/orders', name: 'orders', component: OrdersView },
   ],
 })
 

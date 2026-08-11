@@ -25,6 +25,10 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	querypb "github.com/eighred/kanz/kanz-schemas-go/query/v1"
+	"math"
+	"strconv"
+
+	orderpb "github.com/eighred/kanz/kanz-schemas-go/order/v1"
 	"github.com/eighred/kanz/pkg/auth"
 	"github.com/eighred/kanz/services/api-gateway/internal/authz"
 	"github.com/eighred/kanz/services/api-gateway/internal/middleware"
@@ -34,14 +38,24 @@ import (
 // It depends on the generated client INTERFACE, so tests inject a fake and the
 // real gateway injects an mTLS-dialed client (main).
 type Handler struct {
+	// orders is the OMS read surface, or nil when this deployment fronts none.
+	orders    orderpb.OrderQueryServiceClient
 	client    querypb.RiskQueryServiceClient
 	marshaler protojson.MarshalOptions
 }
 
-// New returns a Handler over the gRPC client.
-func New(client querypb.RiskQueryServiceClient) *Handler {
+// New returns a Handler over the risk-engine client and, optionally, the OMS's
+// order-history client.
+//
+// orders MAY BE NIL, and then the history route is not registered at all (#399).
+// A deployment whose OMS serves no read surface should 404 that path rather than
+// answer it with an error: an unregistered route says "not configured here",
+// while a registered one that always fails says "broken", and only one of those
+// is true. It is the same shape the control routes take for an absent operator.
+func New(client querypb.RiskQueryServiceClient, orders orderpb.OrderQueryServiceClient) *Handler {
 	return &Handler{
 		client: client,
+		orders: orders,
 		// EmitDefaultValues so a zero field (e.g. empty quality_flags) renders
 		// as an explicit JSON value rather than being omitted — stable shape
 		// for clients. UseProtoNames keeps snake_case matching the proto.
@@ -58,6 +72,9 @@ func New(client querypb.RiskQueryServiceClient) *Handler {
 // not the authority on effect.
 func (h *Handler) Routes(mux *authz.Mux) {
 	mux.Handle(authz.Read, "GET /v1/portfolios", h.listPortfolios)
+	if h.orders != nil {
+		mux.Handle(authz.Read, "GET /v1/portfolios/{id}/orders", h.listOrders)
+	}
 	mux.Handle(authz.Read, "GET /v1/portfolios/{id}/exposure", h.exposure)
 	mux.Handle(authz.Read, "GET /v1/portfolios/{id}/measures", h.measures)
 	mux.Handle(authz.Read, "POST /v1/portfolios/{id}/scenario", h.scenario)
@@ -101,6 +118,57 @@ func (h *Handler) listPortfolios(w http.ResponseWriter, r *http.Request) {
 		resp.Portfolios = kept
 	}
 	h.writeOwned(w, r, resp, nil)
+}
+
+// listOrders answers "what has this portfolio traded" (#399).
+//
+// TWO GATES, AS ON EVERY PORTFOLIO-SCOPED ROUTE. The tenant gate is writeOwned,
+// shared and unchanged — the OMS stamps owner_tenant on the reply exactly as the
+// risk engine does, so a history from another tenant's OMS is refused with the
+// same 404 that a missing portfolio gets, and the route is not an oracle.
+//
+// THE CLAIM GATE IS APPLIED HERE AND IS NOT ON THE RISK ROUTES BESIDE IT. That
+// asymmetry is deliberate and worth naming rather than quietly inheriting:
+// exposure, measures and scenario consult only the tenant, so a caller scoped to
+// one portfolio can read another's risk in the same tenant. Whether that is a
+// gap is a question about those routes (#225's neighbourhood), and widening this
+// one to match would be answering it by making the new surface weaker. A
+// trading history is also the most identifying of the three — it names
+// instruments, sizes and times — so it is gated on the claim the token actually
+// carries. Aligning the others is a separate change with its own argument.
+func (h *Handler) listOrders(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	p := middleware.PrincipalFromContext(r.Context())
+	if p == nil || !auth.PortfolioInScope(p.Portfolios, id) {
+		// The SAME 404 as "no such portfolio" and as "not yours", from the same
+		// constant. A distinct status here would tell a caller that a portfolio
+		// they may not read nevertheless exists.
+		writeError(w, http.StatusNotFound, notFoundMsg)
+		return
+	}
+	resp, err := h.orders.ListOrders(r.Context(), &orderpb.ListOrdersRequest{
+		PortfolioId: id,
+		Limit:       parseLimit(r),
+	})
+	h.writeOwned(w, r, resp, err)
+}
+
+// parseLimit reads ?limit=N. Anything unparseable is 0, which the OMS reads as
+// "your page size" — a bad limit must not be a 400 on a read that would
+// otherwise have worked.
+func parseLimit(r *http.Request) int32 {
+	v := r.URL.Query().Get("limit")
+	if v == "" {
+		return 0
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n < 0 {
+		return 0
+	}
+	if n > math.MaxInt32 {
+		return math.MaxInt32
+	}
+	return int32(n)
 }
 
 func (h *Handler) exposure(w http.ResponseWriter, r *http.Request) {

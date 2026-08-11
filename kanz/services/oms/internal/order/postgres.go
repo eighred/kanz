@@ -96,11 +96,13 @@ func (p *Postgres) Create(ctx context.Context, st *orderpb.OrderState, announce 
 	}
 	defer func() { _ = tx.Rollback(ctx) }() // no-op after a successful Commit
 
+	// portfolio_id is denormalized out of the blob (#399), like order_id and
+	// status before it. The blob stays authoritative; this is an index key.
 	tag, err := tx.Exec(ctx, `
-		INSERT INTO orders (tenant_id, order_id, status, state)
-		VALUES (current_setting('app.tenant_id'), $1, $2, $3)
+		INSERT INTO orders (tenant_id, order_id, status, state, portfolio_id)
+		VALUES (current_setting('app.tenant_id'), $1, $2, $3, $4)
 		ON CONFLICT (tenant_id, order_id) DO NOTHING
-	`, st.GetOrderId(), int32(st.GetStatus()), blob)
+	`, st.GetOrderId(), int32(st.GetStatus()), blob, st.GetPortfolioId())
 	if err != nil {
 		return fmt.Errorf("create order %s: %w", st.GetOrderId(), err)
 	}
@@ -202,13 +204,14 @@ func (p *Postgres) Save(ctx context.Context, st *orderpb.OrderState, expectedVer
 // exact text; a second copy is how the pool path and the transaction path would
 // come to disagree about what a conflict is.
 const saveSQL = `
-	INSERT INTO orders (tenant_id, order_id, status, state)
-	VALUES (current_setting('app.tenant_id'), $1, $2, $3)
+	INSERT INTO orders (tenant_id, order_id, status, state, portfolio_id)
+	VALUES (current_setting('app.tenant_id'), $1, $2, $3, $5)
 	ON CONFLICT (tenant_id, order_id) DO UPDATE SET
-		status     = EXCLUDED.status,
-		state      = EXCLUDED.state,
-		version    = orders.version + 1,
-		updated_at = now()
+		status       = EXCLUDED.status,
+		state        = EXCLUDED.state,
+		portfolio_id = EXCLUDED.portfolio_id,
+		version      = orders.version + 1,
+		updated_at   = now()
 	WHERE orders.version = $4
 `
 
@@ -224,7 +227,12 @@ type execer interface {
 // and the version advanced, 0 ⇒ somebody else moved the order since this caller
 // read it and applying this write would discard their transition.
 func (p *Postgres) cas(ctx context.Context, db execer, st *orderpb.OrderState, blob []byte, expectedVersion int64) error {
-	tag, err := db.Exec(ctx, saveSQL, st.GetOrderId(), int32(st.GetStatus()), blob, expectedVersion)
+	// EVERY SAVE REWRITES portfolio_id, which is what backfills a pre-0007 order
+	// the moment anything touches it: the column is derived from the blob, and the
+	// blob is in hand here. It cannot drift, because there is no path that writes
+	// state without writing this.
+	tag, err := db.Exec(ctx, saveSQL,
+		st.GetOrderId(), int32(st.GetStatus()), blob, expectedVersion, st.GetPortfolioId())
 	if err != nil {
 		return fmt.Errorf("save order %s: %w", st.GetOrderId(), err)
 	}
@@ -285,6 +293,82 @@ func (p *Postgres) List(ctx context.Context) ([]*orderpb.OrderState, error) {
 	}
 	return out, rows.Err()
 }
+
+// ListByPortfolio selects one portfolio's orders, newest first.
+//
+// It reads the DENORMALIZED portfolio_id column (migration 0007), which
+// orders_portfolio_idx covers together with created_at DESC — so a portfolio
+// with a long history returns its newest page from an index scan rather than
+// sorting the whole set. Before that column existed this query was a full scan
+// plus a proto decode per row, which is why it did not exist.
+//
+// THE SECOND RETURN IS NOT A DIAGNOSTIC. Orders admitted before 0007 carry an
+// empty portfolio_id — no SQL can decode the blob that holds their real one — so
+// they cannot appear in the result above however it is written. Reporting the
+// list alone would present a partial history as a complete one. The count is
+// taken in the SAME query, so it describes the same snapshot as the rows.
+//
+// Tenant scoping is NOT applied here and must not be: RLS is FORCEd on this
+// table and the policy filters on current_setting('app.tenant_id'), exactly as
+// it does for List, Load and ListByStatus.
+func (p *Postgres) ListByPortfolio(ctx context.Context, portfolioID string, limit int) ([]*orderpb.OrderState, int64, error) {
+	if portfolioID == "" {
+		// The empty id is 0007's NOT-INDEXED marker, never a portfolio. Querying
+		// for it would return precisely the orders whose portfolio is unknown, as
+		// if they belonged to a portfolio named "". Refuse rather than answer.
+		return nil, 0, nil
+	}
+	if limit <= 0 || limit > maxOrderPage {
+		limit = maxOrderPage
+	}
+	rows, err := p.pool.Query(ctx, `
+		SELECT state FROM orders
+		 WHERE portfolio_id = $1
+		 ORDER BY created_at DESC
+		 LIMIT $2
+	`, portfolioID, limit)
+	if err != nil {
+		return nil, 0, fmt.Errorf("list orders for portfolio: %w", err)
+	}
+	defer rows.Close()
+
+	var out []*orderpb.OrderState
+	for rows.Next() {
+		var blob []byte
+		if err := rows.Scan(&blob); err != nil {
+			return nil, 0, fmt.Errorf("scan order: %w", err)
+		}
+		var st orderpb.OrderState
+		if err := proto.Unmarshal(blob, &st); err != nil {
+			return nil, 0, fmt.Errorf("unmarshal order state: %w", err)
+		}
+		out = append(out, &st)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, 0, fmt.Errorf("list orders for portfolio: %w", err)
+	}
+
+	// TWO QUERIES, NOT ONE CLEVER ONE. Counting the unindexed rows in the same
+	// statement — a windowed FILTER over a widened WHERE — makes the planner sort
+	// every pre-0007 order in the tenant to return one page of a portfolio's
+	// history, and produces SQL whose correctness a reader has to work out. Both
+	// of these are index scans on orders_portfolio_idx; the second is a count
+	// over one key.
+	var unindexed int64
+	if err := p.pool.QueryRow(ctx,
+		`SELECT count(*) FROM orders WHERE portfolio_id = ''`).Scan(&unindexed); err != nil {
+		return nil, 0, fmt.Errorf("count unindexed orders: %w", err)
+	}
+	return out, unindexed, nil
+}
+
+// maxOrderPage bounds one page of order history.
+//
+// A page is a network payload of marshaled OrderStates, and an unbounded LIMIT
+// on a fund's whole history is a way for one request to exhaust the gateway's
+// memory rather than a feature. The number is a page size, not a policy about
+// how much history exists.
+const maxOrderPage = 200
 
 // ListByStatus selects the orders currently in one of the given statuses.
 //

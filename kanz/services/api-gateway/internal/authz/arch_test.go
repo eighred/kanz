@@ -12,6 +12,7 @@ package authz_test
 // A route with a capital effect that anyone but a trader can reach fails the build.
 
 import (
+	orderpb "github.com/eighred/kanz/kanz-schemas-go/order/v1"
 	"net/http"
 	"testing"
 
@@ -52,7 +53,10 @@ func TestEveryRouteOnTheCapitalPathRequiresTRADE(t *testing.T) {
 // than inherited by accident from whichever mux the handler happened to be registered on.
 func TestTheWholeRouteTableIsDeclared(t *testing.T) {
 	m := authz.NewMux(nil, nil)
-	gateway.New(nil).Routes(m)
+	// A NON-NIL ORDERS CLIENT, DELIBERATELY. gateway.Routes registers the order
+	// history only when one is configured, so passing nil here would let that
+	// route escape this table entirely — the guard would pass by not looking.
+	gateway.New(nil, stubOrders{}).Routes(m)
 	orders.New(nil).Routes(m)
 	proxy.New(nil).Routes(m)
 
@@ -70,7 +74,14 @@ func TestTheWholeRouteTableIsDeclared(t *testing.T) {
 		"GET /v1/portfolios/{id}/exposure":  authz.Read,
 		"GET /v1/portfolios/{id}/measures":  authz.Read,
 		"POST /v1/portfolios/{id}/scenario": authz.Read,
-		"GET /v1/health":                    authz.Read,
+		// ORDER HISTORY IS A READ, and the guard's prompt is worth answering: it
+		// moves no capital and places nothing — the OMS's surface accepts no
+		// order, deliberately, so that admission and the compliance gate stay on
+		// the bus path. It is the most IDENTIFYING of these reads, naming
+		// instruments, sizes and times, which is why it is the one portfolio
+		// route that also consults the caller's portfolios claim (#399).
+		"GET /v1/portfolios/{id}/orders": authz.Read,
+		"GET /v1/health":                 authz.Read,
 
 		// THE CAPITAL PATH.
 		"POST /v1/orders":             authz.Trade,
@@ -141,4 +152,14 @@ func TestRegisteringARouteWithNoCapabilityIsImpossible(t *testing.T) {
 	if got := m.Routes(); len(got) != 1 || got[0].Capability != authz.Read {
 		t.Fatalf("routes = %+v", got)
 	}
+}
+
+// stubOrders exists only so gateway.Routes registers the order-history route.
+//
+// It is a REAL value rather than a typed nil: a nil interface value compares
+// equal to nil, so the conditional registration would skip the route and this
+// guard would pass by not looking at it — the exact failure mode the table is
+// meant to prevent.
+type stubOrders struct {
+	orderpb.OrderQueryServiceClient
 }

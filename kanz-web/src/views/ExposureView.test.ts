@@ -23,6 +23,10 @@ function router() {
     routes: [
       { path: '/portfolios/:id/exposure', name: 'exposure', component: ExposureView },
       { path: '/portfolios', name: 'portfolios', component: { template: '<div />' } },
+      // The view links here by NAME. A route table that omits it fails every test
+      // in this file at mount with "No match", which is the router telling the
+      // truth: a named link with no route is a dead link in the app too.
+      { path: '/portfolios/:id/orders', name: 'orders', component: { template: '<div />' } },
     ],
   })
 }

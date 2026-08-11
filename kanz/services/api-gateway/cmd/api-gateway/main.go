@@ -26,6 +26,7 @@ import (
 
 	observationpb "github.com/eighred/kanz/kanz-schemas-go/observation/v1"
 	operatorpb "github.com/eighred/kanz/kanz-schemas-go/operator/v1"
+	orderpb "github.com/eighred/kanz/kanz-schemas-go/order/v1"
 	querypb "github.com/eighred/kanz/kanz-schemas-go/query/v1"
 
 	"github.com/eighred/kanz/internal/lifecycle"
@@ -153,7 +154,30 @@ func run() int {
 	}
 	defer func() { _ = conn.Close() }()
 
-	handler := gateway.New(querypb.NewRiskQueryServiceClient(conn))
+	// The OMS's order-history surface (#399). Absent unless configured, and a
+	// FATAL rather than a degraded start when it is configured and cannot be
+	// dialled — the same stance the control plane takes, for the same reason: a
+	// history route that half-exists reports "no orders" for a config error, and
+	// "this portfolio has never traded" is the most misleading answer available.
+	var ordersRead orderpb.OrderQueryServiceClient
+	if cfg.OMSReadAddr != "" {
+		// SAME TRANSPORT RULE AS THE RISK ENGINE, not a plaintext shortcut: this
+		// upstream carries a portfolio's trading history, which is at least as
+		// identifying as its risk. dialUpstream is the risk-engine dialler's own
+		// body, extracted so the two cannot drift into different postures.
+		omsConn, oerr := dialUpstream(ctx, cfg, cfg.OMSReadAddr, logger)
+		if oerr != nil {
+			logger.Error("api-gateway: OMS read surface configured but unusable", "err", oerr)
+			return 2
+		}
+		defer func() { _ = omsConn.Close() }()
+		ordersRead = orderpb.NewOrderQueryServiceClient(omsConn)
+		logger.Info("api-gateway: order history fronted", "addr", cfg.OMSReadAddr)
+	} else {
+		logger.Info("api-gateway: no API_GATEWAY_OMS_READ_ADDR — /v1/portfolios/{id}/orders not registered")
+	}
+
+	handler := gateway.New(querypb.NewRiskQueryServiceClient(conn), ordersRead)
 
 	// Order write surface (OMS-01d): publish order commands to the spine, with
 	// the AUTH-01c forged-issuer guard on the producer. Nil publisher ⇒ the
@@ -548,6 +572,16 @@ func buildRouter(cfg config.Config, h *gateway.Handler, o *orders.Handler, p *pr
 // local/dev. grpc.NewClient is lazy — the TCP/TLS connection forms on first
 // RPC, so a momentarily-unreachable upstream doesn't fail startup.
 func dialRiskEngine(ctx context.Context, cfg config.Config, logger *slog.Logger) (*grpc.ClientConn, error) {
+	return dialUpstream(ctx, cfg, cfg.RiskEngineAddr, logger)
+}
+
+// dialUpstream is the in-mesh dial every read upstream uses.
+//
+// ONE FUNCTION so a second upstream cannot arrive with a weaker posture. It was
+// the risk-engine dialler's body until the OMS's order history became a second
+// one (#399), and both carry portfolio-identifying data — a plaintext shortcut
+// for either is a plaintext shortcut for the class.
+func dialUpstream(ctx context.Context, cfg config.Config, addr string, logger *slog.Logger) (*grpc.ClientConn, error) {
 	var opt grpc.DialOption
 	if cfg.SPIFFESocket != "" {
 		src, err := transport.NewSource(ctx, cfg.SPIFFESocket)
@@ -555,12 +589,12 @@ func dialRiskEngine(ctx context.Context, cfg config.Config, logger *slog.Logger)
 			return nil, err
 		}
 		opt = transport.ClientDialOption(src, transport.AuthorizeMesh())
-		logger.Info("api-gateway: upstream mTLS enabled", "socket", cfg.SPIFFESocket)
+		logger.Info("api-gateway: upstream mTLS enabled", "addr", addr, "socket", cfg.SPIFFESocket)
 	} else {
 		opt = grpc.WithTransportCredentials(insecure.NewCredentials())
-		logger.Warn("api-gateway: upstream plaintext (no API_GATEWAY_SPIFFE_SOCKET)")
+		logger.Warn("api-gateway: upstream plaintext (no API_GATEWAY_SPIFFE_SOCKET)", "addr", addr)
 	}
-	return grpc.NewClient(cfg.RiskEngineAddr, opt)
+	return grpc.NewClient(addr, opt)
 }
 
 // operatorSPIFFEID is the identity the operator's control plane presents. It must
