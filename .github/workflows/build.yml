@@ -247,6 +247,20 @@ jobs:
         with:
           driver-opts: image=ghcr.io/eighred/base/buildkit:buildx-stable-1
 
+      # WARM THE BASES BEFORE BUILDING, WITH A RETRY (#320).
+      #
+      # The push retry below cannot cover this and build.yml already said so: it
+      # "wraps the PUSH", while a base-image pull fails inside the build. main
+      # went red on exactly that on 2026-08-11 — image (wealth), a 403 on a
+      # distroless-static blob, kanz-ci green, Dockerfile unchanged.
+      #
+      # This step compiles nothing: it builds a Dockerfile consisting of the base
+      # image and nothing else, so a code failure cannot reach it and retrying is
+      # safe for the same structural reason the push retry is. See the script.
+      - name: Warm base images (retried on a refused pull)
+        id: warm
+        run: .github/scripts/warm-bases.sh "${{ matrix.dockerfile }}"
+
       - name: Image metadata
         id: meta
         uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
