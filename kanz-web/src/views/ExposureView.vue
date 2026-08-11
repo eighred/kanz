@@ -76,6 +76,7 @@ function money(m: Parameters<typeof formatMoney>[0]): string {
   <h1>Exposure</h1>
   <p class="muted">
     <RouterLink to="/portfolios">Portfolios</RouterLink> ·
+    <RouterLink :to="{ name: 'orders', params: { id } }">Orders</RouterLink> ·
     <code>{{ id }}</code>
     <span v-if="data?.as_of"> · as of {{ data.as_of }}</span>
   </p>

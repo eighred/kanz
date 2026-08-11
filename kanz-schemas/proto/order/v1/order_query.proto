@@ -1,0 +1,70 @@
+// Order history, read (#399).
+//
+// WHY THE OMS GROWS A READ SURFACE AT ALL. It had none: internal/server serves
+// /healthz, /readyz and /metrics, and order/v1 declared messages with no service
+// in sight. Everything downstream learned about orders from FACTs on the bus, and
+// that is still how the estate folds them — tv-sync projects, accounting books,
+// audit records. What no consumer could answer was the question a person asks in
+// front of a portfolio: what has this portfolio traded. A fold is not a query.
+//
+// THIS IS NOT A SECOND BOOK. It reads the OMS's own orders table, which is the
+// same row the aggregate is stored in, and returns the same order.v1.OrderState
+// the FACTs carry. There is deliberately no projection behind it: a projection
+// would be a second copy of the order book, and the day it disagreed with the
+// OMS nobody would know which one the fund had actually traded — the reasoning
+// tv-sync's own migration gives for holding no independent state.
+syntax = "proto3";
+
+package order.v1;
+
+import "order/v1/order_events.proto";
+
+// OrderQueryService is the OMS's read surface. It answers about orders it holds;
+// it never accepts one — commands arrive on the bus and nowhere else, so that
+// the admission gate, the compliance gate and the outbox stay on one path.
+service OrderQueryService {
+  // ListOrders returns one portfolio's orders, newest first.
+  rpc ListOrders(ListOrdersRequest) returns (ListOrdersResponse);
+}
+
+message ListOrdersRequest {
+  // portfolio_id is required. An empty value is refused rather than treated as
+  // "all portfolios": the orders table stores an empty portfolio_id as the
+  // NOT-INDEXED marker for rows admitted before migration 0007, so answering it
+  // would hand back precisely the orders nobody can attribute.
+  string portfolio_id = 1;
+
+  // limit bounds one page. 0 ⇒ the server's own page size; a value above it is
+  // clamped. A page is a network payload of marshaled OrderStates, and an
+  // unbounded limit over a fund's whole history is a way for one request to
+  // exhaust the caller rather than a feature.
+  int32 limit = 2;
+}
+
+message ListOrdersResponse {
+  // orders is the page, newest first.
+  repeated OrderState orders = 1;
+
+  // owner_tenant is the tenant that owns every order listed — the same
+  // deny-by-default authz-gate input query.v1's portfolio replies carry, and it
+  // is here for the same reason.
+  //
+  // A LIST MAKES THE STAMP MATTER MORE, NOT LESS. A caller naming an order
+  // already knows its id; this route hands over a portfolio's whole trading
+  // history. Empty ⇒ no ownership record, which a deny-by-default gate must read
+  // as a denial rather than an allow.
+  string owner_tenant = 2;
+
+  // unindexed is how many of this tenant's orders CANNOT appear in any page of
+  // this reply, because they predate migration 0007 and carry no portfolio_id —
+  // their real one is inside a marshaled OrderState that no index can see.
+  //
+  // IT IS PART OF THE ANSWER, NOT A DIAGNOSTIC. Returning the page alone would
+  // present a partial history as a complete one, and a person reading an order
+  // history is reading it to decide something. A caller must be able to say
+  // "these are the orders we can index" rather than "these are the orders".
+  //
+  // It reaches zero without a migration: every write rewrites portfolio_id from
+  // the blob, so an order becomes indexable the moment anything touches it.
+  int64 unindexed = 3;
+}

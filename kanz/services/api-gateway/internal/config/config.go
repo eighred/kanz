@@ -68,6 +68,13 @@ type Config struct {
 	// the same shape the OMS uses for an unconfigured venue and the operator itself uses
 	// for an unconfigured provisioner.
 	OperatorAddr string
+
+	// OMSReadAddr is the gRPC target of the OMS's order-history read surface
+	// (#399). EMPTY disables it and GET /v1/portfolios/{id}/orders is then not
+	// registered at all — an unregistered route says "not configured here",
+	// which is true, while a registered one that always fails says "broken",
+	// which is not. Same stance as OperatorAddr above.
+	OMSReadAddr string
 	// OperatorRole is the role a Principal must carry to reach a /v1/control route:
 	// provisioning and draining nodes, and writing the exchange credentials the venue
 	// adapters sign with. REQUIRED once OperatorAddr is set, and it must differ from
@@ -144,6 +151,7 @@ func Load() (Config, error) {
 		Source:          envOr("API_GATEWAY_SOURCE", "api-gateway"),
 		OTLPEndpoint:    os.Getenv("API_GATEWAY_OTLP_ENDPOINT"),
 		RiskEngineAddr:  os.Getenv("API_GATEWAY_RISK_ENGINE_ADDR"),
+		OMSReadAddr:     os.Getenv("API_GATEWAY_OMS_READ_ADDR"),
 		SPIFFESocket:    os.Getenv("API_GATEWAY_SPIFFE_SOCKET"),
 		OIDCIssuer:      os.Getenv("API_GATEWAY_OIDC_ISSUER"),
 		OIDCAudience:    os.Getenv("API_GATEWAY_OIDC_AUDIENCE"),

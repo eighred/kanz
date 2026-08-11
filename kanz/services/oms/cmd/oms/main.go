@@ -9,7 +9,9 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -24,6 +26,7 @@ import (
 	"github.com/eighred/kanz/internal/platform/httpserver"
 	"github.com/eighred/kanz/internal/version"
 	"github.com/prometheus/client_golang/prometheus"
+	"google.golang.org/grpc"
 
 	"github.com/eighred/kanz/internal/pg"
 	"github.com/eighred/kanz/pkg/bus"
@@ -31,6 +34,7 @@ import (
 	"github.com/eighred/kanz/pkg/transport"
 	"github.com/eighred/kanz/services/oms/internal/compliance"
 	"github.com/eighred/kanz/services/oms/internal/config"
+	"github.com/eighred/kanz/services/oms/internal/grpcsrv"
 	"github.com/eighred/kanz/services/oms/internal/order"
 	"github.com/eighred/kanz/services/oms/internal/outbox"
 	"github.com/eighred/kanz/services/oms/internal/position"
@@ -197,6 +201,24 @@ func runConsumers(ctx context.Context, cfg config.Config, readiness *server.Read
 		return false, err
 	}
 	defer closeStores()
+
+	// THE ORDER-HISTORY READ SURFACE (#399), if this deployment serves one.
+	//
+	// It is started HERE rather than beside the HTTP health server because it
+	// needs the store, and the store's lifetime is this function's. Serving reads
+	// from a store that closeStores has already closed is the shape of bug the
+	// outbox relay's join comment describes, one layer up.
+	//
+	// mesh is the SAME identity the bus client uses — this process has one
+	// workload identity and the transport package is explicit that it should not
+	// be built twice.
+	if cfg.GRPCListen != "" {
+		stopGRPC, gerr := serveOrderQuery(cfg, mesh, store, logger)
+		if gerr != nil {
+			return false, gerr
+		}
+		defer stopGRPC()
+	}
 
 	// OMS-01e: fill→position projector over the shared book.
 	projector, err := position.NewProjector(book, producer, cfg.Tenant)
@@ -857,4 +879,42 @@ func openStores(ctx context.Context, cfg config.Config, logger *slog.Logger) (or
 		return nil, nil, nil, err
 	}
 	return order.NewPostgres(pool), position.NewPostgres(pool, cfg.BaseCurrency), pool.Close, nil
+}
+
+// serveOrderQuery starts the order.v1 read surface and returns a graceful stop.
+//
+// mTLS WHEN THE MESH HAS AN IDENTITY, plaintext otherwise — the same rule the
+// risk engine's query surface follows, and for the same reason: a local run has
+// no SPIFFE socket and must still be drivable, while a deployed one must not
+// serve a portfolio's trading history to an unauthenticated peer.
+//
+// A bind failure is returned SYNCHRONOUSLY so startup fails loudly. Serving on a
+// goroutine and logging the error would leave the pod Ready with no read surface
+// — an outage that looks like a routing bug, which is the shape web-bff's static
+// root refuses for the same reason.
+func serveOrderQuery(cfg config.Config, mesh *transport.Mesh, store order.Store, logger *slog.Logger) (func(), error) {
+	var opts []grpc.ServerOption
+	if mesh.Enabled() {
+		opts = append(opts, transport.ServerOption(mesh.Source, transport.AuthorizeMesh()))
+		logger.Info("order query gRPC: mTLS enabled")
+	} else {
+		logger.Warn("order query gRPC: serving plaintext (no SPIFFE_ENDPOINT_SOCKET)")
+	}
+
+	lis, err := net.Listen("tcp", cfg.GRPCListen)
+	if err != nil {
+		return nil, fmt.Errorf("order query gRPC: listen %s: %w", cfg.GRPCListen, err)
+	}
+	srv := grpc.NewServer(opts...)
+	// cfg.Tenant is the owning tenant of THIS deployment; grpcsrv stamps it on
+	// every reply as the deny-by-default gate input. Empty fails closed.
+	grpcsrv.New(store, cfg.Tenant).Register(srv)
+
+	go func() {
+		logger.Info("order query gRPC listening", "addr", cfg.GRPCListen)
+		if err := srv.Serve(lis); err != nil {
+			logger.Error("order query gRPC server failed", "err", err)
+		}
+	}()
+	return srv.GracefulStop, nil
 }
