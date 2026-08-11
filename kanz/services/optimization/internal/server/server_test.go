@@ -8,6 +8,8 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/eighred/kanz/pkg/auth"
 )
 
 func newTestServer() *Server {
@@ -19,6 +21,23 @@ func newTestServer() *Server {
 func do(t *testing.T, s *Server, method, path, body string) *httptest.ResponseRecorder {
 	t.Helper()
 	req := httptest.NewRequest(method, path, strings.NewReader(body))
+	rec := httptest.NewRecorder()
+	s.ServeHTTP(rec, req)
+	return rec
+}
+
+// asPrincipal is what the api-gateway does to every forwarded request: it
+// authenticates the caller and injects the mesh identity headers. This service
+// authenticates nobody and is reachable only through the gateway, so this is the
+// ONLY way a request here carries an identity (#409).
+//
+// It goes through auth.SetPrincipalHeaders rather than writing the header names
+// by hand, because the names live in pkg/auth and a test that spelled them
+// itself would keep passing the day the contract changed.
+func asPrincipal(t *testing.T, s *Server, method, path, body, subject string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(method, path, strings.NewReader(body))
+	auth.SetPrincipalHeaders(req.Header, subject, "acme", []string{"pm"})
 	rec := httptest.NewRecorder()
 	s.ServeHTTP(rec, req)
 	return rec
@@ -60,27 +79,70 @@ func TestServer_Propose(t *testing.T) {
 	}
 }
 
-func TestServer_Orders(t *testing.T) {
-	body := `{"issuer":"alice","proposal":{"PortfolioID":"PF","MandateFeasible":true,
+const ordersBody = `{"proposal":{"PortfolioID":"PF","MandateFeasible":true,
 		"Trades":[{"InstrumentID":"A","Side":1,"Quantity":100}]}}`
-	rec := do(t, newTestServer(), http.MethodPost, "/v1/orders", body)
+
+func TestServer_Orders(t *testing.T) {
+	rec := asPrincipal(t, newTestServer(), http.MethodPost, "/v1/orders", ordersBody, "alice")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("orders: got %d body %s", rec.Code, rec.Body.String())
 	}
 	var resp struct {
-		Count int
+		Count  int
+		Orders []struct{ Issuer string }
 	}
 	_ = json.Unmarshal(rec.Body.Bytes(), &resp)
 	if resp.Count != 1 {
 		t.Fatalf("want 1 order, got %d", resp.Count)
 	}
+	// THE ASSERTION THAT MATTERS. The issuer is stamped on the command and is what
+	// the audit trail records as the person who moved the capital. It must be the
+	// AUTHENTICATED caller — a 200 with somebody else's name on it is the defect.
+	if resp.Orders[0].Issuer != "alice" {
+		t.Errorf("issuer = %q, want the authenticated principal alice", resp.Orders[0].Issuer)
+	}
 }
 
-func TestServer_OrdersRequiresIssuer(t *testing.T) {
-	body := `{"proposal":{"MandateFeasible":true,"Trades":[{"InstrumentID":"A","Side":1}]}}`
-	rec := do(t, newTestServer(), http.MethodPost, "/v1/orders", body)
+// NO PRINCIPAL, NO ORDERS (#409). This service authenticates nobody: it trusts
+// the gateway's injected headers, and that is sound ONLY because a NetworkPolicy
+// makes the gateway its only reachable caller. A request arriving without a
+// principal means either the caller bypassed the gateway or the gateway is
+// misconfigured — and an anonymous caller must never be able to emit a command
+// that moves capital, whichever it is.
+func TestOrdersWithoutAPrincipalAreRefused(t *testing.T) {
+	rec := do(t, newTestServer(), http.MethodPost, "/v1/orders", ordersBody)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("an unauthenticated caller got %d and, if it was 200, a command attributed to nobody: %s",
+			rec.Code, rec.Body.String())
+	}
+}
+
+// A BODY THAT NAMES ITS OWN ISSUER IS REFUSED, NOT OVERRIDDEN.
+//
+// Overriding silently would be worse than accepting it: a caller who sends an
+// issuer and receives a 200 has been told their attribution was honoured, and it
+// was not. Refusing says which field is not theirs to set.
+func TestOrdersRefuseABodySuppliedIssuer(t *testing.T) {
+	body := `{"issuer":"mallory","proposal":{"PortfolioID":"PF","MandateFeasible":true,
+		"Trades":[{"InstrumentID":"A","Side":1,"Quantity":100}]}}`
+	rec := asPrincipal(t, newTestServer(), http.MethodPost, "/v1/orders", body, "alice")
 	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("missing issuer must 400, got %d", rec.Code)
+		t.Fatalf("a body naming another issuer got %d, want 400: %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "authenticated principal") {
+		t.Errorf("the refusal does not say why: %s", rec.Body.String())
+	}
+}
+
+// An issuer echoing the caller's own subject is harmless and is allowed, so a
+// client that round-trips the field is not broken by this. It still has no
+// effect: the principal is what is used.
+func TestOrdersAllowAnIssuerThatEchoesTheCaller(t *testing.T) {
+	body := `{"issuer":"alice","proposal":{"PortfolioID":"PF","MandateFeasible":true,
+		"Trades":[{"InstrumentID":"A","Side":1,"Quantity":100}]}}`
+	rec := asPrincipal(t, newTestServer(), http.MethodPost, "/v1/orders", body, "alice")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d, want 200: %s", rec.Code, rec.Body.String())
 	}
 }
 

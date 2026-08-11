@@ -96,6 +96,22 @@ func TestTheWholeRouteTableIsDeclared(t *testing.T) {
 		"POST /v1/orders":             authz.Trade,
 		"POST /v1/orders/{id}/cancel": authz.Trade,
 
+		// MODEL PORTFOLIOS (#409), and the guard's prompt is the whole point here.
+		//
+		// propose is a READ: it optimizes against numbers supplied in the request
+		// and moves nothing, the same reasoning that makes the scenario route a
+		// read.
+		//
+		// orders is TRADE, and unconditionally so. It emits the order commands for
+		// a proposal, and in a deployment with auto-publish enabled it puts them on
+		// the bus. The capability describes what the route DOES in its most
+		// permissive configuration — never what one deployment's environment
+		// variable currently allows — because a route whose required capability
+		// changes with a config flag is one nobody can reason about, and a read
+		// token must not reach a surface that in some deployment moves capital.
+		"POST /v1/model-portfolios/propose": authz.Read,
+		"POST /v1/model-portfolios/orders":  authz.Trade,
+
 		// Reference + wealth reads.
 		"GET /v1/households/{id}": authz.Read,
 		"GET /v1/securities/{id}": authz.Read,

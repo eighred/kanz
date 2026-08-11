@@ -138,6 +138,23 @@ func TestEveryProxiedUpstreamIsReachable(t *testing.T) {
 			"upstream in a default-deny namespace")
 	}
 	selected := podSelectors(egress)
+
+	// THE INGRESS HALF IS CHECKED TOO, and it is the half that matters for safety.
+	//
+	// This guard used to assert egress only, while its own message promised "and an
+	// ingress rule on the target" — so deleting every ingress rule in the file left
+	// it green. The two failures are not symmetric: a missing EGRESS rule breaks
+	// the route, which someone notices within minutes. A missing INGRESS rule
+	// leaves the upstream reachable by every pod in the namespace, and every one of
+	// these upstreams decides what a caller may see — or, for optimization, who a
+	// capital-moving command is attributed to — from the principal header the
+	// gateway injects. Reachable by anyone means that header is self-declared.
+	//
+	// Both ends must exist for a NetworkPolicy to constrain anything: default-deny
+	// covers both directions, so an egress allow with no matching ingress allow is
+	// a connection that is still refused (#232's own lesson, one file over).
+	admitted := ingressAdmitted(t, netpol)
+
 	for _, m := range upstreams {
 		svc := m[1]
 		if !selected[svc] {
@@ -146,7 +163,48 @@ func TestEveryProxiedUpstreamIsReachable(t *testing.T) {
 				"CNI ignores NetworkPolicy. Add %q to allow-gateway-to-read-upstreams (and an ingress "+
 				"rule on the target).", svc, svc)
 		}
+		if !admitted[svc] {
+			t.Errorf("the gateway proxies to %q but NO ingress policy selects it. Egress alone "+
+				"permits nothing: default-deny covers both directions, so the call is still refused — "+
+				"and if the namespace's deny is ever relaxed, this upstream is reachable by every pod "+
+				"in it. These services read the gateway-injected principal to decide what a caller may "+
+				"see and, for the trading surfaces, whose name goes on an order. Reachable by anyone "+
+				"means that principal is self-declared. Add an ingress policy selecting app=%q that "+
+				"admits api-gateway.", svc, svc)
+		}
 	}
+}
+
+// ingressAdmitted returns the pod `app` values some Ingress policy in the
+// document selects — i.e. the upstreams that have an ingress rule at all.
+//
+// It splits the file on the YAML document separator and keeps only documents
+// declaring policyTypes containing Ingress, so an EGRESS policy naming a service
+// cannot satisfy the ingress assertion. That distinction is the whole point: the
+// two halves are separate policies and only one of them is a security boundary.
+func ingressAdmitted(t *testing.T, netpol string) map[string]bool {
+	t.Helper()
+	out := map[string]bool{}
+	docs := strings.Split(netpol, "\n---")
+	ingressDocs := 0
+	for _, doc := range docs {
+		clean := uncomment(doc)
+		if !strings.Contains(clean, "Ingress") {
+			continue
+		}
+		ingressDocs++
+		for svc := range podSelectors(doc) {
+			out[svc] = true
+		}
+	}
+	// NON-VACUITY: this file demonstrably contains ingress policies. Zero means
+	// the document split or the policyTypes match has broken and every assertion
+	// above is passing by finding nothing to check.
+	if ingressDocs < 3 {
+		t.Fatalf("found %d ingress policy document(s) in %s — the split is broken and the ingress "+
+			"half of this guard is checking nothing", ingressDocs, netpolFil)
+	}
+	return out
 }
 
 // podSelectors returns the pod `app` values a policy document selects, from both

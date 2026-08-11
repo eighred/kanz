@@ -91,10 +91,11 @@ func forwardBudget(svc Service) time.Duration {
 type Service string
 
 const (
-	ServiceWealth     Service = "wealth"
-	ServiceDataMaster Service = "datamaster"
-	ServiceCopilot    Service = "copilot"
-	ServiceTVSync     Service = "tv-sync"
+	ServiceWealth       Service = "wealth"
+	ServiceDataMaster   Service = "datamaster"
+	ServiceCopilot      Service = "copilot"
+	ServiceTVSync       Service = "tv-sync"
+	ServiceOptimization Service = "optimization"
 )
 
 // Request is the upstream call the Backend forwards. Principal is the
@@ -173,6 +174,40 @@ func (h *Handler) Routes(mux *authz.Mux) {
 	mux.Handle(authz.Read, "GET /v1/broker/accounts/{id}/positions", h.handle(ServiceTVSync, true, stripV1))
 	mux.Handle(authz.Read, "GET /v1/broker/accounts/{id}/orders", h.handle(ServiceTVSync, true, stripV1))
 	mux.Handle(authz.Read, "GET /v1/broker/accounts/{id}/executions", h.handle(ServiceTVSync, true, stripV1))
+
+	// PORTFOLIO CONSTRUCTION (#409). The optimization service authenticates
+	// NOBODY, and it takes the issuer of a materialized order from its request
+	// body. Once auto-publish is enabled that issuer is what the audit trail
+	// records as the person who moved the capital — so a caller-supplied string is
+	// precisely what the AUTH-01c forged-issuer guard exists to prevent.
+	//
+	// Routing it here is what makes the issuer real: the gateway authenticates,
+	// injects the principal, and the service takes the issuer from that and refuses
+	// a body that tries to name its own. requirePrincipal is true on BOTH routes, so
+	// even an auth-disabled dev gateway forwards nothing anonymous.
+	//
+	// PROPOSE IS A READ: it computes a what-if against numbers in the request and
+	// moves nothing — the same reasoning that makes POST /v1/portfolios/{id}/scenario
+	// a read. The HTTP verb is not the authority on effect.
+	// THE PATH IS REWRITTEN, and not cosmetically. The upstream serves /v1/propose
+	// and /v1/orders, and /v1/orders is ALREADY the OMS order write surface on this
+	// gateway (internal/orders) — mounting the upstream path verbatim is a route
+	// collision that panics the mux at startup. The prefix also carries the
+	// feature's name: "basket" means the deploy-time portfolio↔exchange-account
+	// binding in this repo, guarded by test/arch/basket_contract_test.go, so this
+	// feature is Model Portfolios and must not borrow that word.
+	toUpstream := func(p string) string { return strings.TrimPrefix(p, "/v1/model-portfolios") }
+	mux.Handle(authz.Read, "POST /v1/model-portfolios/propose", h.handle(ServiceOptimization, true, toUpstream))
+
+	// MATERIALIZE IS TRADE, UNCONDITIONALLY — and that is a deliberate choice about
+	// what a capability means. This route emits the order commands for a proposal,
+	// and in a deployment with auto-publish on it puts them on the bus. The
+	// capability describes what the route DOES in its most permissive
+	// configuration, never what one deployment's environment variable currently
+	// allows: a route whose required capability changes with a config flag is one
+	// nobody can reason about, and a read token must not be able to reach a surface
+	// that in some deployment moves capital.
+	mux.Handle(authz.Trade, "POST /v1/model-portfolios/orders", h.handle(ServiceOptimization, true, toUpstream))
 }
 
 // handle builds a forwarding handler for one upstream. requirePrincipal gates

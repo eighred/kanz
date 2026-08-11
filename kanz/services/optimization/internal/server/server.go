@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/eighred/kanz/internal/optimization"
+	"github.com/eighred/kanz/pkg/auth"
 	"github.com/eighred/kanz/services/optimization/internal/bridge"
 )
 
@@ -141,7 +142,20 @@ func (s *Server) handlePropose(w http.ResponseWriter, r *http.Request) {
 
 type ordersRequest struct {
 	Proposal optimization.RebalanceProposal `json:"proposal"`
-	Issuer   string                         `json:"issuer"`
+
+	// Issuer is DECODED SO IT CAN BE REFUSED, never so it can be used (#409).
+	//
+	// The issuer is stamped on every emitted command and is what the audit trail
+	// records as the person who moved the capital. It now comes from the
+	// gateway-authenticated principal and from nowhere else. Accepting it from the
+	// body was the forged-issuer hole AUTH-01c exists to close: this service
+	// authenticates nobody, so any caller that reached it could attribute a trade
+	// to anyone.
+	//
+	// SILENTLY OVERRIDING IT WOULD BE WORSE THAN ACCEPTING IT. A caller who sends
+	// an issuer and gets a 200 has been told their attribution was honoured. It
+	// was not. So a body that names an issuer is a 400 that says why.
+	Issuer string `json:"issuer"`
 }
 
 // orderDTO is the JSON-friendly projection of a SubmitOrder command (protojson
@@ -160,11 +174,27 @@ func (s *Server) handleOrders(w http.ResponseWriter, r *http.Request) {
 	if !decode(w, r, &req) {
 		return
 	}
-	if req.Issuer == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "issuer required (issuer-bound commands)"})
+	// WHO IS ASKING? The gateway is the sole identity authority on this platform:
+	// it verifies the token and injects the principal headers, and this service is
+	// reachable only through it (a NetworkPolicy is what makes trusting those
+	// headers sound). No principal means either the caller bypassed the gateway or
+	// the gateway is misconfigured — both are refusals, never an anonymous trade.
+	principal, ok := auth.PrincipalFromHeaders(r.Header)
+	if !ok || principal.Subject == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{
+			"error": "no authenticated principal — this surface is reachable only through the api-gateway, " +
+				"which is what makes the issuer on an emitted command real",
+		})
 		return
 	}
-	cmds := bridge.ToOrders(req.Proposal, req.Issuer)
+	if req.Issuer != "" && req.Issuer != principal.Subject {
+		writeJSON(w, http.StatusBadRequest, map[string]string{
+			"error": "issuer is taken from the authenticated principal and must not be supplied in the body; " +
+				"a command attributed to anyone but the caller is the forged-issuer defect AUTH-01c prevents",
+		})
+		return
+	}
+	cmds := bridge.ToOrders(req.Proposal, principal.Subject)
 	out := make([]orderDTO, 0, len(cmds))
 	for _, c := range cmds {
 		q := c.GetQuantity()
