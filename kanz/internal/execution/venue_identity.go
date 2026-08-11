@@ -75,6 +75,34 @@ func (v *GRPCVenue) Describe(ctx context.Context) (VenueIdentity, error) {
 	}, nil
 }
 
+// ListInstruments asks the adapter which pairs it is configured to trade (#406).
+//
+// The OMS calls this at DIAL TIME, beside Describe, and holds the answer. The set
+// is the adapter's own symbol map — deploy-time configuration that only changes
+// when the adapter is redeployed, and an adapter restart is already an OMS-visible
+// event because Describe is asked again. Serving the catalogue from memory also
+// means a pair picker does not fan out to every adapter on every page load, so one
+// unreachable venue cannot take the whole picker down.
+//
+// AN ADAPTER WITH NO SYMBOLS RETURNS AN EMPTY LIST, WHICH IS AN ANSWER. It can
+// route nothing, and the caller must be able to tell that apart from a venue that
+// was never asked — so this returns the MIC the adapter answered for, and the OMS
+// records the venue as present with nothing in it.
+func (v *GRPCVenue) ListInstruments(ctx context.Context) ([]InstrumentSymbol, error) {
+	resp, err := v.client.ListInstruments(ctx, &venuepb.ListInstrumentsRequest{})
+	if err != nil {
+		return nil, fmt.Errorf("execution: list instruments at venue %s: %w", v.mic, err)
+	}
+	out := make([]InstrumentSymbol, 0, len(resp.GetInstruments()))
+	for _, in := range resp.GetInstruments() {
+		out = append(out, InstrumentSymbol{
+			InstrumentID: in.GetInstrumentId(),
+			VenueSymbol:  in.GetVenueSymbol(),
+		})
+	}
+	return out, nil
+}
+
 // VerifyIdentity checks an adapter's own answer against what the OMS was told in
 // OMS_VENUE_ENDPOINTS, and returns ErrVenueIdentityMismatch if they disagree.
 //

@@ -39,6 +39,7 @@ import (
 	"github.com/eighred/kanz/services/oms/internal/outbox"
 	"github.com/eighred/kanz/services/oms/internal/position"
 	"github.com/eighred/kanz/services/oms/internal/server"
+	"github.com/eighred/kanz/services/oms/internal/venuesrv"
 )
 
 func main() {
@@ -201,24 +202,6 @@ func runConsumers(ctx context.Context, cfg config.Config, readiness *server.Read
 		return false, err
 	}
 	defer closeStores()
-
-	// THE ORDER-HISTORY READ SURFACE (#399), if this deployment serves one.
-	//
-	// It is started HERE rather than beside the HTTP health server because it
-	// needs the store, and the store's lifetime is this function's. Serving reads
-	// from a store that closeStores has already closed is the shape of bug the
-	// outbox relay's join comment describes, one layer up.
-	//
-	// mesh is the SAME identity the bus client uses — this process has one
-	// workload identity and the transport package is explicit that it should not
-	// be built twice.
-	if cfg.GRPCListen != "" {
-		stopGRPC, gerr := serveOrderQuery(cfg, mesh, store, logger)
-		if gerr != nil {
-			return false, gerr
-		}
-		defer stopGRPC()
-	}
 
 	// OMS-01e: fill→position projector over the shared book.
 	projector, err := position.NewProjector(book, producer, cfg.Tenant)
@@ -488,11 +471,35 @@ func runConsumers(ctx context.Context, cfg config.Config, readiness *server.Read
 	// Venue set is composition-root-selected: SimVenue by default; Binance Spot +
 	// its user-data/reconciliation/ticker workers under -tags binance
 	// (configuredVenues is build-tag split, wired to the shared order store).
-	venues, closeVenues, err := configuredVenues(ctx, cfg, store, producer, unverifiedAccounts, undeclaredOrderTypes, logger)
+	venues, catalogue, closeVenues, err := configuredVenues(ctx, cfg, store, producer, unverifiedAccounts, undeclaredOrderTypes, logger)
 	if err != nil {
 		return false, err
 	}
 	defer closeVenues()
+
+	// THE READ SURFACE (#399 order history, #406 tradeable instruments), if this
+	// deployment serves one.
+	//
+	// It is started HERE rather than beside the HTTP health server for two
+	// reasons. It needs the store, whose lifetime is this function's — serving
+	// reads from a store closeStores has already closed is the shape of bug the
+	// outbox relay's join comment describes, one layer up. And it needs the venue
+	// catalogue, which only exists once every adapter has been dialled and asked:
+	// opening the port first would serve an EMPTY instrument list during startup,
+	// and an empty list is indistinguishable from "this deployment trades
+	// nothing". A caller cannot tell a race from a fact.
+	//
+	// mesh is the SAME identity the bus client uses — this process has one
+	// workload identity and the transport package is explicit that it should not
+	// be built twice.
+	if cfg.GRPCListen != "" {
+		stopGRPC, gerr := serveOrderQuery(cfg, mesh, store, catalogue, logger)
+		if gerr != nil {
+			return false, gerr
+		}
+		defer stopGRPC()
+	}
+
 	router := execution.NewRouter(venues...)
 	svc, err := order.NewService(cfg.Tenant, store, emitter, gate, router, closeRegistry, logger,
 		order.WithAccountBindings(bindings, cfg.RequireVenueAccount, sharedCollateral),
@@ -904,7 +911,7 @@ func openStores(ctx context.Context, cfg config.Config, logger *slog.Logger) (or
 // goroutine and logging the error would leave the pod Ready with no read surface
 // — an outage that looks like a routing bug, which is the shape web-bff's static
 // root refuses for the same reason.
-func serveOrderQuery(cfg config.Config, mesh *transport.Mesh, store order.Store, logger *slog.Logger) (func(), error) {
+func serveOrderQuery(cfg config.Config, mesh *transport.Mesh, store order.Store, catalogue []execution.VenueInstrument, logger *slog.Logger) (func(), error) {
 	var opts []grpc.ServerOption
 	if mesh.Enabled() {
 		opts = append(opts, transport.ServerOption(mesh.Source, transport.AuthorizeMesh()))
@@ -921,6 +928,7 @@ func serveOrderQuery(cfg config.Config, mesh *transport.Mesh, store order.Store,
 	// cfg.Tenant is the owning tenant of THIS deployment; grpcsrv stamps it on
 	// every reply as the deny-by-default gate input. Empty fails closed.
 	grpcsrv.New(store, cfg.Tenant).Register(srv)
+	venuesrv.New(catalogue, cfg.Tenant).Register(srv)
 
 	go func() {
 		logger.Info("order query gRPC listening", "addr", cfg.GRPCListen)

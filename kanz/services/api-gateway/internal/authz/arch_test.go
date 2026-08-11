@@ -13,6 +13,7 @@ package authz_test
 
 import (
 	orderpb "github.com/eighred/kanz/kanz-schemas-go/order/v1"
+	venuepb "github.com/eighred/kanz/kanz-schemas-go/venue/v1"
 	"net/http"
 	"testing"
 
@@ -56,7 +57,7 @@ func TestTheWholeRouteTableIsDeclared(t *testing.T) {
 	// A NON-NIL ORDERS CLIENT, DELIBERATELY. gateway.Routes registers the order
 	// history only when one is configured, so passing nil here would let that
 	// route escape this table entirely — the guard would pass by not looking.
-	gateway.New(nil, stubOrders{}).Routes(m)
+	gateway.New(nil, stubOrders{}, stubInstruments{}).Routes(m)
 	orders.New(nil).Routes(m)
 	proxy.New(nil).Routes(m)
 
@@ -81,7 +82,15 @@ func TestTheWholeRouteTableIsDeclared(t *testing.T) {
 		// instruments, sizes and times, which is why it is the one portfolio
 		// route that also consults the caller's portfolios claim (#399).
 		"GET /v1/portfolios/{id}/orders": authz.Read,
-		"GET /v1/health":                 authz.Read,
+		// THE TRADEABLE-PAIR CATALOGUE IS A READ, and answering the guard's prompt:
+		// it is the LEAST disclosing route in this table. It reports which pairs
+		// this deployment's venue adapters are configured for — no positions, no
+		// sizes, no valuations, and nothing about any portfolio. It is also the
+		// only route here that is not portfolio-scoped, because there is no
+		// per-portfolio answer to the question: the answer is a property of the
+		// deployment. The tenant gate still applies through writeOwned (#406).
+		"GET /v1/instruments": authz.Read,
+		"GET /v1/health":      authz.Read,
 
 		// THE CAPITAL PATH.
 		"POST /v1/orders":             authz.Trade,
@@ -162,4 +171,11 @@ func TestRegisteringARouteWithNoCapabilityIsImpossible(t *testing.T) {
 // meant to prevent.
 type stubOrders struct {
 	orderpb.OrderQueryServiceClient
+}
+
+// stubInstruments does the same for the tradeable-pair catalogue (#406), and for
+// the same reason — the route is registered conditionally, so a nil here would
+// quietly remove it from the golden table.
+type stubInstruments struct {
+	venuepb.VenueQueryServiceClient
 }

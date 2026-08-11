@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"sort"
 	"strings"
 	"time"
 
@@ -46,19 +47,19 @@ var closeRegistry = execution.NewCloseRegistry()
 // is ever reached in production the OMS is filling orders against nothing, so it
 // says so at WARN in as many words, and the router hard-errors on any MIC it has
 // no venue for rather than quietly routing there.
-func configuredVenues(ctx context.Context, cfg config.Config, store order.Store, producer execution.Publisher, unverified, undeclared prometheus.Counter, logger *slog.Logger) ([]execution.Venue, func(), error) {
+func configuredVenues(ctx context.Context, cfg config.Config, store order.Store, producer execution.Publisher, unverified, undeclared prometheus.Counter, logger *slog.Logger) ([]execution.Venue, []execution.VenueInstrument, func(), error) {
 	var venues []execution.Venue
 
 	// INFRA-M7a: out-of-process adapters. These need no build tag and link no
 	// vendor code — the OMS speaks venue.v1 over mTLS and never imports an
 	// exchange SDK. They are the path that retires the tags above.
-	grpcVenues, closeConns, err := dialVenues(ctx, cfg, unverified, undeclared, logger)
+	grpcVenues, catalogue, closeConns, err := dialVenues(ctx, cfg, unverified, undeclared, logger)
 	if err != nil {
 		// A configured venue that will not dial is FATAL, not a degradation. The
 		// alternative is booting without it and silently routing its orders
 		// nowhere — or worse, to the simulator below.
 		logger.Error("venue adapter dial failed", "err", err)
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	venues = append(venues, grpcVenues...)
 
@@ -84,9 +85,11 @@ func configuredVenues(ctx context.Context, cfg config.Config, store order.Store,
 		for _, mic := range mics {
 			sims = append(sims, execution.NewSimVenue(mic))
 		}
-		return sims, closeConns, nil
+		// A simulator trades nothing real, so it contributes nothing to a catalogue a
+		// person picks pairs from. An empty list here is the honest answer.
+		return sims, nil, closeConns, nil
 	}
-	return venues, closeConns, nil
+	return venues, catalogue, closeConns, nil
 }
 
 // parseMICs splits the sim-venue MIC list ("XNAS,XLON"). An empty setting yields
@@ -126,17 +129,17 @@ func parseMICs(s string) []string {
 // the account the adapter really holds while the ledger booked them to the one named
 // here, which is the exact failure EXEC-M16 exists to prevent, arriving through the
 // one door EXEC-M16 left open.
-func dialVenues(ctx context.Context, cfg config.Config, unverified, undeclared prometheus.Counter, logger *slog.Logger) ([]execution.Venue, func(), error) {
+func dialVenues(ctx context.Context, cfg config.Config, unverified, undeclared prometheus.Counter, logger *slog.Logger) ([]execution.Venue, []execution.VenueInstrument, func(), error) {
 	endpoints := parseSymbolMap(cfg.VenueEndpoints) // MIC → address; same "K=V,K=V" form
 	if len(endpoints) == 0 {
-		return nil, func() {}, nil
+		return nil, nil, func() {}, nil
 	}
 
 	dialOpt := grpc.WithTransportCredentials(insecure.NewCredentials())
 	if cfg.SPIFFESocket != "" {
 		src, err := transport.NewSource(ctx, cfg.SPIFFESocket)
 		if err != nil {
-			return nil, nil, fmt.Errorf("venue mTLS source: %w", err)
+			return nil, nil, nil, fmt.Errorf("venue mTLS source: %w", err)
 		}
 		dialOpt = transport.ClientDialOption(src, transport.AuthorizeMesh())
 		logger.Info("venue adapters: mTLS enabled", "venues", len(endpoints))
@@ -146,8 +149,9 @@ func dialVenues(ctx context.Context, cfg config.Config, unverified, undeclared p
 	}
 
 	var (
-		venues []execution.Venue
-		conns  []*grpc.ClientConn
+		venues    []execution.Venue
+		catalogue []execution.VenueInstrument
+		conns     []*grpc.ClientConn
 	)
 	closeConns := func() {
 		for _, c := range conns {
@@ -172,7 +176,7 @@ func dialVenues(ctx context.Context, cfg config.Config, unverified, undeclared p
 		conn, err := grpc.NewClient(addr, dialOpt)
 		if err != nil {
 			closeConns()
-			return nil, nil, fmt.Errorf("venue %s at %s: %w", mic, addr, err)
+			return nil, nil, nil, fmt.Errorf("venue %s at %s: %w", mic, addr, err)
 		}
 		conns = append(conns, conn)
 		venue := execution.NewGRPCVenue(mic, account, conn, cfg.Tenant)
@@ -191,12 +195,12 @@ func dialVenues(ctx context.Context, cfg config.Config, unverified, undeclared p
 		cancel()
 		if err != nil {
 			closeConns()
-			return nil, nil, fmt.Errorf("venue %s at %s: cannot ask the adapter which exchange account it holds "+
+			return nil, nil, nil, fmt.Errorf("venue %s at %s: cannot ask the adapter which exchange account it holds "+
 				"(is it running?): %w", mic, addr, err)
 		}
 		if err := execution.VerifyIdentity(mic, account, id); err != nil {
 			closeConns()
-			return nil, nil, fmt.Errorf("venue adapter at %s is not who OMS_VENUE_ENDPOINTS says it is: %w", addr, err)
+			return nil, nil, nil, fmt.Errorf("venue adapter at %s is not who OMS_VENUE_ENDPOINTS says it is: %w", addr, err)
 		}
 
 		switch {
@@ -205,7 +209,7 @@ func dialVenues(ctx context.Context, cfg config.Config, unverified, undeclared p
 				"mic", mic, "account", account, "exchange_account_id", id.Proof.ExchangeAccountID, "endpoint", addr)
 		case cfg.RequireVerifiedAccount:
 			closeConns()
-			return nil, nil, fmt.Errorf("venue %s at %s: account %q is UNVERIFIED — the adapter has not proved its "+
+			return nil, nil, nil, fmt.Errorf("venue %s at %s: account %q is UNVERIFIED — the adapter has not proved its "+
 				"credential belongs to it, and OMS_REQUIRE_VERIFIED_ACCOUNT=true. Bind the exchange account id at the "+
 				"adapter (e.g. BINANCE_VENUE_ACCOUNT_UID) so it can prove itself, or unset the requirement",
 				mic, addr, account)
@@ -235,7 +239,7 @@ func dialVenues(ctx context.Context, cfg config.Config, unverified, undeclared p
 				"mic", mic, "order_types", id.OrderTypes)
 		case cfg.RequireOrderTypeSupport:
 			closeConns()
-			return nil, nil, fmt.Errorf("venue %s at %s: the adapter did not declare which order types it can "+
+			return nil, nil, nil, fmt.Errorf("venue %s at %s: the adapter did not declare which order types it can "+
 				"place, and OMS_REQUIRE_ORDER_TYPE_SUPPORT=true. Without it this OMS will admit an order type "+
 				"the adapter cannot translate and only the exchange will refuse it. Upgrade the adapter so its "+
 				"Describe reports supported_order_types, or unset the requirement", mic, addr)
@@ -250,9 +254,48 @@ func dialVenues(ctx context.Context, cfg config.Config, unverified, undeclared p
 				"fix", "upgrade the adapter so venue.v1.Describe reports supported_order_types, then set OMS_REQUIRE_ORDER_TYPE_SUPPORT=true")
 		}
 
+		// AND WHAT IT CAN TRADE (#406) — asked once, here, and held. The set is
+		// deploy-time configuration (BINANCE_SYMBOLS / OKX_SYMBOLS), so serving it
+		// from memory is not a staleness risk: changing it requires redeploying the
+		// adapter, which the OMS already notices because it re-asks on the next dial.
+		//
+		// It also keeps a pair picker off the adapters' critical path — one
+		// unreachable venue must not take down a screen that only lists names.
+		//
+		// A VENUE THAT LISTS NOTHING IS NOT FATAL. It can route no orders, which is
+		// a real and visible state (its orders are refused at admission by the
+		// router), but it is not a reason to refuse to start: an adapter deployed
+		// ahead of its symbol map is a rollout in progress, not a corrupt one.
+		lctx, lcancel := context.WithTimeout(ctx, venueDescribeTimeout)
+		instruments, lerr := venue.ListInstruments(lctx)
+		lcancel()
+		switch {
+		case lerr != nil:
+			logger.Warn("venue adapter cannot list its instruments — this venue's pairs will be missing from every "+
+				"picker, and a user will read that as the venue offering nothing",
+				"mic", mic, "endpoint", addr, "err", lerr)
+		case len(instruments) == 0:
+			logger.Warn("venue adapter lists NO instruments — it holds no symbol map, so it can route nothing",
+				"mic", mic, "endpoint", addr,
+				"fix", "set the adapter's symbol map (e.g. BINANCE_SYMBOLS=BTC-USD=BTCUSDT)")
+		default:
+			logger.Info("venue adapter instruments loaded", "mic", mic, "instruments", len(instruments))
+			for _, in := range instruments {
+				catalogue = append(catalogue, execution.VenueInstrument{MIC: mic, InstrumentSymbol: in})
+			}
+		}
+
 		venues = append(venues, execution.WithOrderTypes(venue, id.OrderTypes))
 	}
-	return venues, closeConns, nil
+	// Ordered by (instrument, venue) so the catalogue is stable between boots —
+	// OMS_VENUE_ENDPOINTS is a map, and Go randomises its iteration.
+	sort.Slice(catalogue, func(i, j int) bool {
+		if catalogue[i].InstrumentID != catalogue[j].InstrumentID {
+			return catalogue[i].InstrumentID < catalogue[j].InstrumentID
+		}
+		return catalogue[i].MIC < catalogue[j].MIC
+	})
+	return venues, catalogue, closeConns, nil
 }
 
 // parseSymbolMap parses "BTC-USD=BTCUSDT,ETH-USD=ETHUSDT" into a map.

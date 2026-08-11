@@ -28,6 +28,7 @@ import (
 	operatorpb "github.com/eighred/kanz/kanz-schemas-go/operator/v1"
 	orderpb "github.com/eighred/kanz/kanz-schemas-go/order/v1"
 	querypb "github.com/eighred/kanz/kanz-schemas-go/query/v1"
+	venuepb "github.com/eighred/kanz/kanz-schemas-go/venue/v1"
 
 	"github.com/eighred/kanz/internal/lifecycle"
 	"github.com/eighred/kanz/internal/platform/httpserver"
@@ -159,7 +160,10 @@ func run() int {
 	// dialled — the same stance the control plane takes, for the same reason: a
 	// history route that half-exists reports "no orders" for a config error, and
 	// "this portfolio has never traded" is the most misleading answer available.
-	var ordersRead orderpb.OrderQueryServiceClient
+	var (
+		ordersRead      orderpb.OrderQueryServiceClient
+		instrumentsRead venuepb.VenueQueryServiceClient
+	)
 	if cfg.OMSReadAddr != "" {
 		// SAME TRANSPORT RULE AS THE RISK ENGINE, not a plaintext shortcut: this
 		// upstream carries a portfolio's trading history, which is at least as
@@ -172,12 +176,17 @@ func run() int {
 		}
 		defer func() { _ = omsConn.Close() }()
 		ordersRead = orderpb.NewOrderQueryServiceClient(omsConn)
-		logger.Info("api-gateway: order history fronted", "addr", cfg.OMSReadAddr)
+		// ONE CONNECTION, TWO CONTRACTS (#406). The tradeable-pair catalogue is
+		// served by the same OMS on the same port, so it needs no second address
+		// to be configured, and there is no deployment in which one of the two is
+		// reachable and the other is not.
+		instrumentsRead = venuepb.NewVenueQueryServiceClient(omsConn)
+		logger.Info("api-gateway: order history and instrument catalogue fronted", "addr", cfg.OMSReadAddr)
 	} else {
-		logger.Info("api-gateway: no API_GATEWAY_OMS_READ_ADDR — /v1/portfolios/{id}/orders not registered")
+		logger.Info("api-gateway: no API_GATEWAY_OMS_READ_ADDR — /v1/portfolios/{id}/orders and /v1/instruments not registered")
 	}
 
-	handler := gateway.New(querypb.NewRiskQueryServiceClient(conn), ordersRead)
+	handler := gateway.New(querypb.NewRiskQueryServiceClient(conn), ordersRead, instrumentsRead)
 
 	// Order write surface (OMS-01d): publish order commands to the spine, with
 	// the AUTH-01c forged-issuer guard on the producer. Nil publisher ⇒ the

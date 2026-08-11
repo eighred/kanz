@@ -29,6 +29,7 @@ import (
 	"strconv"
 
 	orderpb "github.com/eighred/kanz/kanz-schemas-go/order/v1"
+	venuepb "github.com/eighred/kanz/kanz-schemas-go/venue/v1"
 	"github.com/eighred/kanz/pkg/auth"
 	"github.com/eighred/kanz/services/api-gateway/internal/authz"
 	"github.com/eighred/kanz/services/api-gateway/internal/middleware"
@@ -39,9 +40,13 @@ import (
 // real gateway injects an mTLS-dialed client (main).
 type Handler struct {
 	// orders is the OMS read surface, or nil when this deployment fronts none.
-	orders    orderpb.OrderQueryServiceClient
-	client    querypb.RiskQueryServiceClient
-	marshaler protojson.MarshalOptions
+	orders orderpb.OrderQueryServiceClient
+	// instruments is the OMS's tradeable-pair catalogue, or nil for the same
+	// reason (#406). It rides the SAME OMS connection as orders — one upstream,
+	// two contracts — so a deployment fronting an OMS has both or neither.
+	instruments venuepb.VenueQueryServiceClient
+	client      querypb.RiskQueryServiceClient
+	marshaler   protojson.MarshalOptions
 }
 
 // New returns a Handler over the risk-engine client and, optionally, the OMS's
@@ -52,10 +57,11 @@ type Handler struct {
 // answer it with an error: an unregistered route says "not configured here",
 // while a registered one that always fails says "broken", and only one of those
 // is true. It is the same shape the control routes take for an absent operator.
-func New(client querypb.RiskQueryServiceClient, orders orderpb.OrderQueryServiceClient) *Handler {
+func New(client querypb.RiskQueryServiceClient, orders orderpb.OrderQueryServiceClient, instruments venuepb.VenueQueryServiceClient) *Handler {
 	return &Handler{
-		client: client,
-		orders: orders,
+		client:      client,
+		orders:      orders,
+		instruments: instruments,
 		// EmitDefaultValues so a zero field (e.g. empty quality_flags) renders
 		// as an explicit JSON value rather than being omitted — stable shape
 		// for clients. UseProtoNames keeps snake_case matching the proto.
@@ -74,6 +80,9 @@ func (h *Handler) Routes(mux *authz.Mux) {
 	mux.Handle(authz.Read, "GET /v1/portfolios", h.listPortfolios)
 	if h.orders != nil {
 		mux.Handle(authz.Read, "GET /v1/portfolios/{id}/orders", h.listOrders)
+	}
+	if h.instruments != nil {
+		mux.Handle(authz.Read, "GET /v1/instruments", h.listInstruments)
 	}
 	mux.Handle(authz.Read, "GET /v1/portfolios/{id}/exposure", h.exposure)
 	mux.Handle(authz.Read, "GET /v1/portfolios/{id}/measures", h.measures)
@@ -150,6 +159,28 @@ func (h *Handler) listOrders(w http.ResponseWriter, r *http.Request) {
 		PortfolioId: id,
 		Limit:       parseLimit(r),
 	})
+	h.writeOwned(w, r, resp, err)
+}
+
+// listInstruments answers "what can this deployment actually trade" (#406).
+//
+// NO PORTFOLIO GATE, AND THAT IS NOT AN OVERSIGHT. Unlike every route above it,
+// this one is not about a portfolio: it reports the deployment's own
+// configuration — which pairs its venue adapters hold symbol maps for. There is
+// no per-portfolio answer to scope it to, and inventing one would mean deciding
+// that a caller scoped to fund A may not learn that this platform trades BTC-USD,
+// which is not a fact about fund A.
+//
+// THE TENANT GATE STILL APPLIES, through the same writeOwned as everything else.
+// The catalogue describes what this tenant's OMS can route, and a reply whose
+// owner_tenant is not the caller's is refused with the same 404. An OMS that was
+// never given a tenant stamps an empty one, which fails CLOSED.
+//
+// AN EMPTY LIST IS AN ANSWER, NOT AN ERROR: this deployment can trade nothing.
+// A caller that renders empty as "still loading" would hide a misconfigured
+// estate behind a spinner.
+func (h *Handler) listInstruments(w http.ResponseWriter, r *http.Request) {
+	resp, err := h.instruments.ListTradeableInstruments(r.Context(), &venuepb.ListTradeableInstrumentsRequest{})
 	h.writeOwned(w, r, resp, err)
 }
 
