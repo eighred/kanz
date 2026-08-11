@@ -1,5 +1,5 @@
 import { api, ApiError } from './client'
-import type { Money } from './decimal'
+import type { Decimal, Money } from './decimal'
 
 // The risk read surface, as the browser sees it (#399).
 //
@@ -79,6 +79,43 @@ export function describeFlag(f: QualityFlag): string {
   }
 }
 
+/** OrderStatus is the protobuf enum, serialised as its name. */
+export type OrderStatus =
+  | 'ORDER_STATUS_UNSPECIFIED'
+  | 'ORDER_STATUS_PENDING_NEW'
+  | 'ORDER_STATUS_ROUTED'
+  | 'ORDER_STATUS_PARTIALLY_FILLED'
+  | 'ORDER_STATUS_FILLED'
+  | 'ORDER_STATUS_CANCELLED'
+  | 'ORDER_STATUS_REJECTED'
+  | 'ORDER_STATUS_EXPIRED'
+
+/** OrderSummary is order.v1.OrderState, as much of it as this screen reads. */
+export interface OrderSummary {
+  order_id: string
+  instrument_id?: string
+  side?: string
+  status?: OrderStatus
+  quantity?: Decimal
+  filled_quantity?: Decimal
+  limit_price?: Money
+  average_fill_price?: Money
+  venue?: string
+  as_of?: string
+}
+
+export interface OrdersResponse {
+  orders?: OrderSummary[]
+  /**
+   * unindexed is how many of this tenant's orders CANNOT appear in any page.
+   *
+   * They predate the OMS's portfolio index and carry no portfolio_id — their
+   * real one is inside a marshaled blob no index can see. It arrives as a
+   * STRING: it is an int64, and 64 bits do not survive a JSON number.
+   */
+  unindexed?: string
+}
+
 export const risk = {
   /**
    * portfolios lists what the risk engine can answer for.
@@ -91,6 +128,18 @@ export const risk = {
    */
   portfolios: () =>
     api.get<{ portfolios?: PortfolioSummary[] }>('/api/v1/portfolios').then((r) => r.portfolios ?? []),
+
+  /**
+   * orders reads one portfolio's trading history, newest first.
+   *
+   * The route is registered only when the gateway fronts an OMS read surface, so
+   * a 404 here can also mean "this deployment serves no order history" — which
+   * is not "this portfolio has never traded". describeOrders separates them.
+   */
+  orders: (id: string, limit?: number) =>
+    api.get<OrdersResponse>(
+      `/api/v1/portfolios/${encodeURIComponent(id)}/orders` + (limit ? `?limit=${limit}` : ''),
+    ),
 
   /** exposure reads one portfolio's decomposition. */
   exposure: (id: string) =>

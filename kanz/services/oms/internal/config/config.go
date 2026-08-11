@@ -14,9 +14,13 @@ import (
 // Config is the oms runtime configuration, sourced from the environment so it
 // composes with the CSI/Vault secret mounts (SEC-01d).
 type Config struct {
-	Listen   string
-	LogLevel slog.Level
-	Source   string
+	Listen string
+	// GRPCListen is where the order-history read surface serves (#399). Empty
+	// disables it, which is the shape a deployment that fronts no web app runs
+	// in — an unserved port is better than a read surface nobody asked for.
+	GRPCListen string
+	LogLevel   slog.Level
+	Source     string
 	// OTLPEndpoint is the OTel collector for span export (OBS-01).
 	OTLPEndpoint string
 	// NATSURL is the spine. Empty ⇒ the service runs HTTP/probes only (no
@@ -239,7 +243,12 @@ func Load() (Config, error) {
 	}
 
 	cfg := Config{
-		Listen:                  envOr("OMS_LISTEN", ":8090"),
+		Listen: envOr("OMS_LISTEN", ":8090"),
+		// NO DEFAULT, DELIBERATELY. A read surface that appears because nobody
+		// set a variable is a port opened by omission; the api-gateway has to be
+		// pointed at it either way, so naming it is one line of config and the
+		// difference between "serving" and "configured to serve".
+		GRPCListen:              os.Getenv("OMS_GRPC_LISTEN"),
 		LogLevel:                parseLevel(envOr("OMS_LOG_LEVEL", "info")),
 		Source:                  envOr("OMS_SOURCE", "oms"),
 		OTLPEndpoint:            os.Getenv("OMS_OTLP_ENDPOINT"),

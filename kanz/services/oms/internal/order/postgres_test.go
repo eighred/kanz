@@ -12,6 +12,7 @@ package order
 import (
 	"context"
 	"errors"
+	"google.golang.org/protobuf/proto"
 	"os"
 	"path/filepath"
 	"sort"
@@ -194,4 +195,119 @@ func TestPostgresListReturnsAllOrders(t *testing.T) {
 	if len(got) != 2 || got[0].GetOrderId() != "ORD-A" || got[1].GetOrderId() != "ORD-B" {
 		t.Fatalf("list mismatch: %+v", got)
 	}
+}
+
+// ORDER HISTORY BY PORTFOLIO, AND THE PART OF IT THAT CANNOT BE SEEN (#399).
+//
+// The read itself is unremarkable. What has to hold is the honesty around it:
+// an order admitted before migration 0007 carries an empty portfolio_id, because
+// its real one is inside a protobuf blob no SQL statement can decode. Those
+// orders can never appear in this result, so the caller is told how many there
+// are — a partial history presented as a complete one is the failure this
+// repository refuses everywhere else.
+func TestPostgresListByPortfolioReportsWhatItCannotIndex(t *testing.T) {
+	pool := newPool(t)
+	ctx := context.Background()
+	store := NewPostgres(pool)
+
+	inPortfolio := func(id, portfolio string) *orderpb.OrderState {
+		return &orderpb.OrderState{OrderId: id, PortfolioId: portfolio,
+			Status: orderpb.OrderStatus_ORDER_STATUS_PENDING_NEW}
+	}
+	for _, o := range []*orderpb.OrderState{
+		inPortfolio("o1", "flagship"),
+		inPortfolio("o2", "flagship"),
+		inPortfolio("o3", "research"),
+	} {
+		if err := store.Create(ctx, o, nil); err != nil {
+			t.Fatalf("create %s: %v", o.GetOrderId(), err)
+		}
+	}
+
+	// A pre-0007 row, written the only way one can now exist: the column landed
+	// with DEFAULT '' and the default was dropped, so this is what an order
+	// admitted by the previous code looks like.
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO orders (tenant_id, order_id, status, state, portfolio_id)
+		VALUES (current_setting('app.tenant_id'), 'legacy-1', 1, $1, '')`,
+		mustMarshalState(t, inPortfolio("legacy-1", "flagship"))); err != nil {
+		t.Fatalf("seed a pre-0007 order: %v", err)
+	}
+
+	got, unindexed, err := store.ListByPortfolio(ctx, "flagship", 0)
+	if err != nil {
+		t.Fatalf("ListByPortfolio: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("got %d orders, want 2 — the other portfolio's order and the unindexed one "+
+			"must not appear", len(got))
+	}
+	for _, o := range got {
+		if o.GetPortfolioId() != "flagship" {
+			t.Errorf("order %s belongs to %q", o.GetOrderId(), o.GetPortfolioId())
+		}
+	}
+
+	// THE ASSERTION THAT MATTERS. Without it the caller shows two orders and the
+	// operator believes that is the portfolio's whole history.
+	if unindexed != 1 {
+		t.Fatalf("unindexed = %d, want 1.\n\n"+
+			"An order that predates 0007 cannot be selected by portfolio at all, so the count "+
+			"is the only way a caller can say 'these are the orders we can index' rather than "+
+			"'these are the orders'.", unindexed)
+	}
+
+	// A SAVE BACKFILLS THE COLUMN. It is derived from the blob and every write
+	// rewrites it, so an old order becomes indexable the moment anything touches
+	// it — no separate backfill pass is required for a live order.
+	st, ver, err := store.Load(ctx, "legacy-1")
+	if err != nil {
+		t.Fatalf("load legacy-1: %v", err)
+	}
+	if err := store.Save(ctx, st, ver, nil); err != nil {
+		t.Fatalf("save legacy-1: %v", err)
+	}
+	got, unindexed, err = store.ListByPortfolio(ctx, "flagship", 0)
+	if err != nil {
+		t.Fatalf("ListByPortfolio after save: %v", err)
+	}
+	if len(got) != 3 || unindexed != 0 {
+		t.Fatalf("after re-saving the legacy order: %d orders / %d unindexed, want 3 / 0 — "+
+			"every Save rewrites portfolio_id from the blob, so touching an order indexes it",
+			len(got), unindexed)
+	}
+}
+
+// THE EMPTY ID IS A MARKER, NOT A PORTFOLIO. Querying for it would return
+// precisely the orders whose portfolio is unknown, presented as if they belonged
+// to a portfolio named "".
+func TestPostgresListByPortfolioRefusesTheEmptyID(t *testing.T) {
+	pool := newPool(t)
+	ctx := context.Background()
+	store := NewPostgres(pool)
+
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO orders (tenant_id, order_id, status, state, portfolio_id)
+		VALUES (current_setting('app.tenant_id'), 'legacy-2', 1, $1, '')`,
+		mustMarshalState(t, &orderpb.OrderState{OrderId: "legacy-2"})); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	got, _, err := store.ListByPortfolio(ctx, "", 0)
+	if err != nil {
+		t.Fatalf("ListByPortfolio(\"\"): %v", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("an empty portfolio id returned %d orders — that is the NOT-INDEXED marker, "+
+			"and answering it hands back exactly the orders nobody can attribute", len(got))
+	}
+}
+
+func mustMarshalState(t *testing.T, st *orderpb.OrderState) []byte {
+	t.Helper()
+	b, err := proto.Marshal(st)
+	if err != nil {
+		t.Fatalf("marshal state: %v", err)
+	}
+	return b
 }

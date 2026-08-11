@@ -18,6 +18,7 @@ import (
 
 	commonpb "github.com/eighred/kanz/kanz-schemas-go/common/v1"
 	domainpb "github.com/eighred/kanz/kanz-schemas-go/domain/v1"
+	orderpb "github.com/eighred/kanz/kanz-schemas-go/order/v1"
 	querypb "github.com/eighred/kanz/kanz-schemas-go/query/v1"
 
 	"github.com/eighred/kanz/services/api-gateway/internal/authz"
@@ -44,7 +45,10 @@ type fakeClient struct {
 	scenarioResp *querypb.EvaluateScenarioResponse
 	healthResp   *querypb.HealthResponse
 	listResp     *querypb.ListPortfoliosResponse
+	ordersResp   *orderpb.ListOrdersResponse
 	err          error
+
+	gotOrders *orderpb.ListOrdersRequest
 
 	gotExposure *querypb.ExposureRequest
 	gotMeasures *querypb.MeasuresRequest
@@ -54,6 +58,10 @@ type fakeClient struct {
 func (f *fakeClient) Exposure(_ context.Context, in *querypb.ExposureRequest, _ ...grpc.CallOption) (*querypb.ExposureResponse, error) {
 	f.gotExposure = in
 	return f.exposureResp, f.err
+}
+func (f *fakeClient) ListOrders(_ context.Context, in *orderpb.ListOrdersRequest, _ ...grpc.CallOption) (*orderpb.ListOrdersResponse, error) {
+	f.gotOrders = in
+	return f.ordersResp, f.err
 }
 func (f *fakeClient) ListPortfolios(context.Context, *querypb.ListPortfoliosRequest, ...grpc.CallOption) (*querypb.ListPortfoliosResponse, error) {
 	return f.listResp, f.err
@@ -77,7 +85,7 @@ func (f *fakeClient) Health(_ context.Context, _ *querypb.HealthRequest, _ ...gr
 func serve(t *testing.T, fc *fakeClient) *httptest.Server {
 	t.Helper()
 	mux := authz.NewMux(authz.Grants{"analyst": {authz.Read}}, nil)
-	gateway.New(fc).Routes(mux)
+	gateway.New(fc, fc).Routes(mux)
 	authed := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		p := &middleware.Principal{Subject: "u1", Tenant: testTenant, Roles: []string{"analyst"}}
 		mux.ServeHTTP(w, r.WithContext(middleware.WithPrincipal(r.Context(), p)))
@@ -239,7 +247,7 @@ func TestOpenAPIServed(t *testing.T) {
 func serveAs(t *testing.T, fc *fakeClient, p *middleware.Principal) *httptest.Server {
 	t.Helper()
 	mux := authz.NewMux(authz.Grants{"analyst": {authz.Read}}, nil)
-	gateway.New(fc).Routes(mux)
+	gateway.New(fc, fc).Routes(mux)
 	authed := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		mux.ServeHTTP(w, r.WithContext(middleware.WithPrincipal(r.Context(), p)))
 	})
@@ -343,5 +351,135 @@ func TestAListWithNoOwnerTenantIsRefused(t *testing.T) {
 
 	if code, _ := listOf(t, ts); code != http.StatusNotFound {
 		t.Fatalf("status = %d, want 404 — a missing ownership signal is not permission", code)
+	}
+}
+
+// ORDER HISTORY: THE MOST IDENTIFYING READ ON THIS SURFACE (#399).
+//
+// It names instruments, sizes and times, which is why it is the one
+// portfolio-scoped route that consults the caller's portfolios claim as well as
+// the tenant. The risk routes beside it check only the tenant; that asymmetry is
+// deliberate and is argued at the handler.
+
+func ordersServer(t *testing.T, fc *fakeClient, p *middleware.Principal) *httptest.Server {
+	t.Helper()
+	mux := authz.NewMux(authz.Grants{"analyst": {authz.Read}}, nil)
+	gateway.New(fc, fc).Routes(mux)
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mux.ServeHTTP(w, r.WithContext(middleware.WithPrincipal(r.Context(), p)))
+	}))
+	t.Cleanup(ts.Close)
+	return ts
+}
+
+func getOrders(t *testing.T, ts *httptest.Server, path string) (int, string) {
+	t.Helper()
+	res, err := http.Get(ts.URL + path)
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	defer func() { _ = res.Body.Close() }()
+	body, _ := io.ReadAll(res.Body)
+	return res.StatusCode, string(body)
+}
+
+func ordersFor(tenant string) *fakeClient {
+	return &fakeClient{ordersResp: &orderpb.ListOrdersResponse{
+		OwnerTenant: tenant,
+		Orders:      []*orderpb.OrderState{{OrderId: "o1", PortfolioId: "PF1"}},
+		Unindexed:   7,
+	}}
+}
+
+func TestOrderHistoryIsReturnedWithItsUnindexedCount(t *testing.T) {
+	fc := ordersFor(testTenant)
+	ts := ordersServer(t, fc, &middleware.Principal{Subject: "u1", Tenant: testTenant, Roles: []string{"analyst"}})
+
+	code, body := getOrders(t, ts, "/v1/portfolios/PF1/orders")
+	if code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (%s)", code, body)
+	}
+	// THE COUNT MUST SURVIVE TRANSCODING. Without it the browser presents one
+	// page as the portfolio's whole history — orders that predate migration 0007
+	// cannot appear in any page at all.
+	if !strings.Contains(body, `"unindexed":"7"`) && !strings.Contains(body, `"unindexed":7`) {
+		t.Fatalf("the unindexed count did not reach the client: %s", body)
+	}
+	if fc.gotOrders.GetPortfolioId() != "PF1" {
+		t.Fatalf("the OMS was asked for %q, want PF1", fc.gotOrders.GetPortfolioId())
+	}
+}
+
+// A SCOPED CALLER CANNOT READ ANOTHER PORTFOLIO'S HISTORY, and is refused with
+// the SAME 404 a missing portfolio gets — a distinct status would confirm that a
+// portfolio they may not read nevertheless exists.
+func TestAScopedCallerCannotReadAnotherPortfoliosHistory(t *testing.T) {
+	fc := ordersFor(testTenant)
+	ts := ordersServer(t, fc, &middleware.Principal{
+		Subject: "u1", Tenant: testTenant, Roles: []string{"analyst"},
+		Portfolios: []string{"PF2"},
+	})
+
+	code, _ := getOrders(t, ts, "/v1/portfolios/PF1/orders")
+	if code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404", code)
+	}
+	if fc.gotOrders != nil {
+		t.Fatal("the OMS was queried for a portfolio the caller's claim excludes — the gate must " +
+			"refuse before the read, or the history is fetched and then discarded")
+	}
+}
+
+// AN UNRESTRICTED CALLER STILL READS IT. On a read path an absent claim asserts
+// no restriction; applying the capital path's deny-on-empty here would hide
+// every portfolio's history from every unscoped reader.
+func TestAnUnrestrictedCallerReadsTheHistory(t *testing.T) {
+	ts := ordersServer(t, ordersFor(testTenant),
+		&middleware.Principal{Subject: "u1", Tenant: testTenant, Roles: []string{"analyst"}})
+
+	if code, body := getOrders(t, ts, "/v1/portfolios/PF1/orders"); code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (%s)", code, body)
+	}
+}
+
+// THE TENANT GATE STILL APPLIES: a history from an OMS serving another tenant is
+// refused, through the same writeOwned every portfolio route uses.
+func TestAHistoryFromAnotherTenantIsRefused(t *testing.T) {
+	ts := ordersServer(t, ordersFor("someone-else"),
+		&middleware.Principal{Subject: "u1", Tenant: testTenant, Roles: []string{"analyst"}})
+
+	if code, _ := getOrders(t, ts, "/v1/portfolios/PF1/orders"); code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404", code)
+	}
+}
+
+// AN UNCONFIGURED OMS MEANS NO ROUTE AT ALL, not a route that always fails. An
+// unregistered path says "not configured here", which is true; a registered one
+// that errors says "broken", which is not.
+func TestWithNoOMSTheHistoryRouteIsNotRegistered(t *testing.T) {
+	mux := authz.NewMux(authz.Grants{"analyst": {authz.Read}}, nil)
+	gateway.New(&fakeClient{}, nil).Routes(mux)
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		p := &middleware.Principal{Subject: "u1", Tenant: testTenant, Roles: []string{"analyst"}}
+		mux.ServeHTTP(w, r.WithContext(middleware.WithPrincipal(r.Context(), p)))
+	}))
+	defer ts.Close()
+
+	if code, _ := getOrders(t, ts, "/v1/portfolios/PF1/orders"); code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404 with no OMS configured", code)
+	}
+}
+
+// A BAD ?limit IS NOT A 400. It is a read that would otherwise have worked, and
+// the OMS reads 0 as "your page size".
+func TestAnUnparseableLimitFallsBackToTheServerPage(t *testing.T) {
+	fc := ordersFor(testTenant)
+	ts := ordersServer(t, fc, &middleware.Principal{Subject: "u1", Tenant: testTenant, Roles: []string{"analyst"}})
+
+	if code, _ := getOrders(t, ts, "/v1/portfolios/PF1/orders?limit=banana"); code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", code)
+	}
+	if fc.gotOrders.GetLimit() != 0 {
+		t.Fatalf("limit = %d, want 0 (the server's own page size)", fc.gotOrders.GetLimit())
 	}
 }

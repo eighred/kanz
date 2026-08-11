@@ -3,6 +3,7 @@ package order
 import (
 	"context"
 	"errors"
+	"sort"
 	"sync"
 
 	orderpb "github.com/eighred/kanz/kanz-schemas-go/order/v1"
@@ -137,6 +138,23 @@ type Store interface {
 	// impossible to separate.
 	Outbox() outbox.Queue
 
+	// ListByPortfolio returns one portfolio's orders, newest first, at most
+	// limit of them. It is the read behind the web app's order history (#399).
+	//
+	// unindexed IS PART OF THE ANSWER, NOT A DIAGNOSTIC. Orders admitted before
+	// migration 0007 carry no portfolio_id — the portfolio lives only inside the
+	// state blob, and no SQL can decode a protobuf — so they cannot appear in this
+	// result however the query is written. Returning the list alone would present
+	// a partial history as a complete one, which is the failure this repository
+	// refuses everywhere else. The caller is told how many orders it could not
+	// index so it can say so.
+	//
+	// It is a COUNT rather than the rows themselves because they are unreachable
+	// by this query by construction: knowing there are 400 of them is actionable
+	// (run the backfill), and inventing a way to return them here would be
+	// building the scan this column exists to avoid.
+	ListByPortfolio(ctx context.Context, portfolioID string, limit int) (orders []*orderpb.OrderState, unindexed int64, err error)
+
 	// ListByStatus returns every order currently in one of the given statuses.
 	// It exists for the startup sweep, which wants the OPEN orders and must not
 	// load every order the fund has ever placed to find them. A durable backend
@@ -266,6 +284,41 @@ func (m *MemoryStore) List(_ context.Context) ([]*orderpb.OrderState, error) {
 		out = append(out, proto.Clone(v.st).(*orderpb.OrderState))
 	}
 	return out, nil
+}
+
+// ListByPortfolio filters the map. unindexed is always 0: this store keeps whole
+// OrderStates rather than a denormalized column, so there is no such thing here
+// as an order whose portfolio could not be indexed — the concept belongs to the
+// Postgres schema, and reporting a non-zero count would be inventing a state
+// this store cannot be in.
+func (m *MemoryStore) ListByPortfolio(_ context.Context, portfolioID string, limit int) ([]*orderpb.OrderState, int64, error) {
+	if portfolioID == "" {
+		// An empty id is the NOT-INDEXED marker in Postgres, never a portfolio.
+		// Answering it here would make the two stores disagree about what an
+		// empty id means, which is exactly what MemoryStore exists to avoid.
+		return nil, 0, nil
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	var out []*orderpb.OrderState
+	for _, v := range m.orders {
+		if v.st.GetPortfolioId() == portfolioID {
+			out = append(out, proto.Clone(v.st).(*orderpb.OrderState))
+		}
+	}
+	// Newest first, matching the Postgres ordering. AsOf is the order's own
+	// domain time; ties break on id so the order is total and a test is stable.
+	sort.Slice(out, func(i, j int) bool {
+		ti, tj := out[i].GetAsOf().AsTime(), out[j].GetAsOf().AsTime()
+		if ti.Equal(tj) {
+			return out[i].GetOrderId() > out[j].GetOrderId()
+		}
+		return ti.After(tj)
+	})
+	if limit > 0 && len(out) > limit {
+		out = out[:limit]
+	}
+	return out, 0, nil
 }
 
 func (m *MemoryStore) ListByStatus(_ context.Context, statuses ...orderpb.OrderStatus) ([]*orderpb.OrderState, error) {
