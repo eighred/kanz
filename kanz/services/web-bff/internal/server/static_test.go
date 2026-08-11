@@ -47,6 +47,12 @@ func staticBFF(t *testing.T) (*Server, string) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
+	// The Server holds the static directory open (os.Root). Closing it is what
+	// production does on shutdown; here it also lets t.TempDir remove the
+	// directory, which Windows refuses while a handle is open — so a leaked
+	// handle fails the test rather than passing quietly, which is the right way
+	// round.
+	t.Cleanup(func() { _ = srv.Close() })
 	return srv, dir
 }
 
@@ -160,5 +166,50 @@ func TestAMissingStaticBuildRefusesToStart(t *testing.T) {
 	if err == nil {
 		t.Fatal("a missing static build started anyway — the pod would report Ready while " +
 			"every page 404s, which reads as a routing bug rather than a missing deploy step")
+	}
+}
+
+// A SYMLINK OUT OF THE STATIC ROOT IS REFUSED — the hole the previous guard
+// left open (CodeQL go/path-injection, alert #4).
+//
+// The old check joined the request path onto the directory and required the
+// result to keep the directory as a prefix. That is a LEXICAL test: it inspects
+// the path before the filesystem resolves it, and os.Stat then follows symlinks.
+// A link inside the build output passed the prefix check and was served.
+//
+// It is not hypothetical in the way "attacker writes into dist" would be: the
+// build output is produced by a bundler, and "no tool will ever emit a symlink
+// there" is an assumption about future behaviour rather than a property anyone
+// enforces. os.Root refuses the escape at the API instead of trusting the
+// string, and this pins that.
+func TestASymlinkOutOfTheStaticRootIsRefused(t *testing.T) {
+	srv, dir := staticBFF(t)
+
+	secret := filepath.Join(filepath.Dir(dir), "outside-secret.txt")
+	if err := os.WriteFile(secret, []byte("not for the browser"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Remove(secret) })
+
+	link := filepath.Join(dir, "escape.txt")
+	if err := os.Symlink(secret, link); err != nil {
+		// Windows needs Developer Mode or elevation to create one. Skipping is
+		// honest here and the reason is named — CI runs this on Linux, where the
+		// assertion below is the one that matters.
+		t.Skipf("cannot create a symlink on this platform (%v) — this test is meaningful on CI's Linux runner", err)
+	}
+
+	rec := get(t, srv, "/escape.txt")
+	if strings.Contains(rec.Body.String(), "not for the browser") {
+		t.Fatalf("a symlink inside the static root served a file from OUTSIDE it (status %d).\n\n"+
+			"A prefix check on the joined path cannot see this: it runs before the filesystem "+
+			"resolves the link. Containment has to be enforced by the API that opens the file.",
+			rec.Code)
+	}
+	// And it must not be answered with the app shell either: that would render a
+	// refused traversal as a working app, which is the failure the fallback rule
+	// exists to prevent.
+	if strings.Contains(rec.Body.String(), "<!doctype html") {
+		t.Fatalf("/escape.txt was answered with index.html — an extension-bearing path must 404")
 	}
 }

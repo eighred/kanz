@@ -132,6 +132,10 @@ func run() int {
 		logger.Error("server init failed", "err", err)
 		return 2
 	}
+	// The Server owns the static build's directory handle (os.Root). run() is
+	// where the lifecycle lives precisely so a defer like this is reached — see
+	// the note at the top about os.Exit skipping them.
+	defer func() { _ = srv.Close() }()
 
 	httpSrv := httpserver.New(cfg.Listen, srv, httpserver.Standard())
 	go func() {

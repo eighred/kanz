@@ -31,8 +31,27 @@ import (
 //
 // Both read as a broken app rather than a missing route. So the fallback applies
 // ONLY to extension-less paths that are not reserved server routes.
+// THE ROOT IS A REAL BOUNDARY, NOT A STRING COMPARISON (CodeQL go/path-injection,
+// alert #4).
+//
+// This used to join the request path onto the directory and check the result
+// still had the directory as a prefix. That is the conventional guard and it is
+// weaker than it reads:
+//
+//   - os.Stat FOLLOWS SYMLINKS, and the prefix check is applied to the path
+//     BEFORE resolution. A symlink inside the build output pointing anywhere on
+//     the filesystem passes the check and is then served — and the build output
+//     is produced by a bundler, not by hand, so "there are no symlinks in dist"
+//     is an assumption about a tool's future behaviour.
+//   - it is a lexical test standing in for a filesystem property, which is
+//     exactly the substitution the scanner flags, and it was right to.
+//
+// os.Root enforces containment in the kernel-facing API instead: every method
+// refuses a name whose components leave the root, and it follows symlinks ONLY
+// while they stay inside it. The check is no longer something this file can get
+// subtly wrong.
 type staticHandler struct {
-	dir  string
+	root *os.Root
 	fsrv http.Handler
 }
 
@@ -52,14 +71,42 @@ func newStaticHandler(dir string) (*staticHandler, error) {
 	if err != nil {
 		return nil, err
 	}
-	// Fail at STARTUP if the directory is not there. A missing static root that
-	// is discovered per-request means the pod is Ready and every page is a 404 —
-	// an outage that looks like a routing bug.
-	if _, err := os.Stat(filepath.Join(abs, "index.html")); err != nil {
+	root, err := os.OpenRoot(abs)
+	if err != nil {
+		return nil, fmt.Errorf("web-bff: WEB_BFF_STATIC_DIR=%s cannot be opened (%w) — "+
+			"build the SPA first (tools/web-up.sh), or unset it to run API-only", abs, err)
+	}
+	// Fail at STARTUP if the build is not there. A missing static root that is
+	// discovered per-request means the pod is Ready and every page is a 404 — an
+	// outage that looks like a routing bug.
+	if _, err := root.Stat("index.html"); err != nil {
+		_ = root.Close()
 		return nil, fmt.Errorf("web-bff: WEB_BFF_STATIC_DIR=%s has no index.html (%w) — "+
 			"build the SPA first (tools/web-up.sh), or unset it to run API-only", abs, err)
 	}
-	return &staticHandler{dir: abs, fsrv: http.FileServer(http.Dir(abs))}, nil
+	// FileServerFS over the root's own fs.FS, so the request path is resolved by
+	// the same bounded API the existence check uses. Two different resolvers for
+	// one directory is how a check and the thing it guards come to disagree.
+	return &staticHandler{root: root, fsrv: http.FileServerFS(root.FS())}, nil
+}
+
+// Close releases the directory handle os.OpenRoot holds.
+//
+// IT IS NOT BOOKKEEPING. A Root keeps an open descriptor on the static
+// directory for the life of the handler — that is how it can enforce
+// containment against a directory that is later moved or replaced. A process
+// holds exactly one for its lifetime, so leaking it costs nothing in
+// production; anything that builds Servers repeatedly (tests, and any future
+// config reload) leaks one per Server, and on Windows the open handle also
+// stops the directory being removed at all.
+//
+// Nil-safe, because newStaticHandler returns a nil handler in the API-only
+// shape and every caller would otherwise need the same check.
+func (h *staticHandler) Close() error {
+	if h == nil || h.root == nil {
+		return nil
+	}
+	return h.root.Close()
 }
 
 func (h *staticHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -82,21 +129,32 @@ func (h *staticHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	http.ServeFile(w, r, filepath.Join(h.dir, "index.html"))
+	// A CONSTANT NAME, resolved inside the root. The shell is the one file this
+	// handler serves without being asked for it by name, so nothing
+	// user-controlled should reach the filesystem on this line.
+	http.ServeFileFS(w, r, h.root.FS(), "index.html")
 }
 
 // exists reports whether upath names a regular file inside the static root.
 //
-// The join is checked rather than trusted: http.Dir already refuses escaping
-// paths, but this method also decides the FALLBACK, and a traversal that slipped
-// through here would answer with index.html for a path outside the root — which
-// looks like the app working.
+// It decides the FALLBACK as well as the hit: a traversal that slipped through
+// here would answer with index.html for a path outside the root, which looks
+// like the app working rather than like an attack being refused.
+//
+// Root.Stat REFUSES rather than resolves anything that leaves the root —
+// including through a symlink — so an escape arrives as an error and returns
+// false, which is the same answer as "no such file". There is deliberately no
+// branch distinguishing them: a caller who can tell a refused traversal from a
+// missing asset learns the layout of the filesystem outside the root.
 func (h *staticHandler) exists(upath string) bool {
-	full := filepath.Join(h.dir, filepath.FromSlash(upath))
-	if !strings.HasPrefix(full, h.dir+string(os.PathSeparator)) && full != h.dir {
+	// Root paths are relative to the root and slash-separated; the leading "/"
+	// path.Clean guaranteed above would make this an absolute name, which Root
+	// rejects outright.
+	name := strings.TrimPrefix(upath, "/")
+	if name == "" {
 		return false
 	}
-	info, err := os.Stat(full)
+	info, err := h.root.Stat(name)
 	if err != nil {
 		return false
 	}
