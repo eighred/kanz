@@ -75,16 +75,12 @@ function stale(iso: string): boolean {
     <tbody>
       <tr v-for="p in rows" :key="p.portfolio_id">
         <td>
-          <!-- THE ID IS SHOWN, NOT HIDDEN BEHIND THE NAME, because it is what
-               every risk route takes and what an operator needs when reading a
-               URL or an error. It is not yet a link: the exposure screen it
-               would open renders common.v1.Decimal money, and a Decimal is
-               {coefficient, exponent} with an int64 coefficient that protojson
-               sends as a STRING. Reading that through a JS number loses
-               precision above 2^53 — silently, and on a valuation. That screen
-               needs a decimal renderer decided on its own merits rather than
-               written in passing here. -->
-          <code>{{ p.portfolio_id }}</code>
+          <!-- THE ID IS THE LINK, not the display name: it is what every risk
+               route takes and what an operator needs when reading a URL or an
+               error. The name sits beside it rather than replacing it. -->
+          <RouterLink :to="{ name: 'exposure', params: { id: p.portfolio_id } }">
+            <code>{{ p.portfolio_id }}</code>
+          </RouterLink>
           <span v-if="p.display_name" class="muted"> · {{ p.display_name }}</span>
         </td>
         <td>{{ p.base_currency || '—' }}</td>
