@@ -6,7 +6,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
-	"runtime"
 	"strings"
 	"testing"
 )
@@ -266,18 +265,51 @@ func readRetries(t *testing.T, path string, tolerateMissing bool) int {
 // The script must be executable, or the workflow step fails on a permission
 // error that names the path and not the cause. Git tracks this bit; on Windows
 // checkouts it is not meaningful, so the assertion is scoped to where it is.
-func TestPushRetryScriptIsExecutable(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("file mode is not meaningful on a Windows checkout; git's index bit is asserted in CI")
-	}
+// EVERY WORKFLOW SCRIPT MUST BE EXECUTABLE IN GIT'S INDEX.
+//
+// THIS GUARD USED TO READ THE FILESYSTEM AND SKIP ON WINDOWS, and that is exactly
+// why it did not catch the failure that prompted rewriting it: warm-bases.sh was
+// committed 100644, every one of the 26 image jobs died with
+//
+//	.github/scripts/warm-bases.sh: Permission denied
+//	##[error]Process completed with exit code 126
+//
+// and the guard had passed locally by skipping. `chmod +x` on a Windows checkout
+// changes nothing git records, so the filesystem was never the thing to check.
+//
+// THE INDEX BIT IS. It is what CI checks out, it is meaningful on every platform,
+// and it is set with `git update-index --chmod=+x <path>`. So this reads git
+// rather than the working tree, covers EVERY script in the directory rather than
+// one named file, and does not skip anywhere.
+func TestEveryWorkflowScriptIsExecutableInGit(t *testing.T) {
 	repoRoot := filepath.Dir(moduleRoot(t))
-	info, err := os.Stat(filepath.Join(repoRoot, ".github", "scripts", "push-with-retry.sh"))
+	out, err := exec.Command("git", "-C", repoRoot, "ls-files", "-s", ".github/scripts").Output()
 	if err != nil {
-		t.Fatalf("stat push-with-retry.sh: %v", err)
+		t.Fatalf("git ls-files: %v — this guard reads the INDEX, not the working tree, because the "+
+			"working tree's mode is not what CI checks out", err)
 	}
-	if info.Mode()&0o111 == 0 {
-		t.Errorf("push-with-retry.sh is not executable (%v) — the workflow step would fail with a "+
-			"permission error naming the path rather than the cause", info.Mode())
+
+	var checked int
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 4 || !strings.HasSuffix(fields[3], ".sh") {
+			continue
+		}
+		checked++
+		if fields[0] != "100755" {
+			t.Errorf("%s is mode %s in git's index, want 100755.\n\n"+
+				"A workflow step running it fails with `Permission denied` and exit 126 — an error "+
+				"that names the path and not the cause, on every job at once. Fix with:\n"+
+				"    git update-index --chmod=+x %s\n\n"+
+				"chmod alone does NOT do this on a Windows checkout, which is how this shipped.",
+				fields[3], fields[0], fields[3])
+		}
+	}
+	// NON-VACUITY. If the directory moves, this would otherwise pass having
+	// checked nothing.
+	if checked < 2 {
+		t.Fatalf("found %d shell scripts under .github/scripts — the workflows run more than that, "+
+			"so this guard is looking in the wrong place", checked)
 	}
 }
 
