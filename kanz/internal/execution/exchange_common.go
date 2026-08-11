@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
+	"sort"
 	"time"
 
 	commonpb "github.com/eighred/kanz/kanz-schemas-go/common/v1"
@@ -69,12 +70,60 @@ func (e *APIError) Error() string { return fmt.Sprintf("exchange error %d: %s", 
 // instrument cannot be traded on that venue.
 type SymbolMapper interface {
 	Symbol(instrumentID string) (string, bool)
+
+	// Instruments enumerates the whole mapping (#406).
+	//
+	// The set was previously readable only one id at a time, by a caller that
+	// already knew the id — so "what can this deployment trade?" had no answer
+	// short of reading a manifest, and no picker could offer a choice of pairs.
+	// It is the same un-askable configuration Describe was added to fix for the
+	// exchange account.
+	Instruments() []InstrumentSymbol
+}
+
+// InstrumentSymbol is one tradeable pair: what this platform calls it, and what
+// the exchange calls the same thing.
+type InstrumentSymbol struct {
+	// InstrumentID is the canonical id an order carries, e.g. "BTC-USD".
+	InstrumentID string
+	// VenueSymbol is the exchange's name for it, e.g. "BTCUSDT".
+	//
+	// THE TWO DISAGREE TODAY: canonical "BTC-USD" maps to a USDT-quoted symbol on
+	// both live venues, so the platform trades a stablecoin-quoted instrument
+	// while calling it USD. Until instruments carry base and quote explicitly
+	// (#407) this is the only field where that is visible.
+	VenueSymbol string
+}
+
+// VenueInstrument is one tradeable pair at one venue — the same pair may be
+// listed by several adapters, and the MIC is what tells them apart.
+//
+// AN ORDER NAMES A VENUE, so a catalogue that lost the MIC would offer a pair
+// without saying where it can be traded, and the caller would have to guess. The
+// router refuses a guess (Router.Supports), so the guess becomes a refusal at
+// admission that the operator reads as a platform fault.
+type VenueInstrument struct {
+	MIC string
+	InstrumentSymbol
 }
 
 // StaticSymbolMap is a fixed instrument→symbol map.
 type StaticSymbolMap map[string]string
 
 func (m StaticSymbolMap) Symbol(id string) (string, bool) { s, ok := m[id]; return s, ok }
+
+// Instruments returns the mapping ORDERED BY instrument_id. Go randomises map
+// iteration, and an unordered answer would make a picker's list reshuffle on
+// every load and a golden test flake — neither is a property worth leaving to
+// chance for a list a person reads.
+func (m StaticSymbolMap) Instruments() []InstrumentSymbol {
+	out := make([]InstrumentSymbol, 0, len(m))
+	for id, sym := range m {
+		out = append(out, InstrumentSymbol{InstrumentID: id, VenueSymbol: sym})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].InstrumentID < out[j].InstrumentID })
+	return out
+}
 
 // VenueSettings is the public configuration the composition root supplies to
 // build an exchange venue without touching the internal REST client / rate

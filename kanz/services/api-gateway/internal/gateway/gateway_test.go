@@ -20,6 +20,7 @@ import (
 	domainpb "github.com/eighred/kanz/kanz-schemas-go/domain/v1"
 	orderpb "github.com/eighred/kanz/kanz-schemas-go/order/v1"
 	querypb "github.com/eighred/kanz/kanz-schemas-go/query/v1"
+	venuepb "github.com/eighred/kanz/kanz-schemas-go/venue/v1"
 
 	"github.com/eighred/kanz/services/api-gateway/internal/authz"
 	"github.com/eighred/kanz/services/api-gateway/internal/gateway"
@@ -46,6 +47,7 @@ type fakeClient struct {
 	healthResp   *querypb.HealthResponse
 	listResp     *querypb.ListPortfoliosResponse
 	ordersResp   *orderpb.ListOrdersResponse
+	instrResp    *venuepb.ListTradeableInstrumentsResponse
 	err          error
 
 	gotOrders *orderpb.ListOrdersRequest
@@ -62,6 +64,9 @@ func (f *fakeClient) Exposure(_ context.Context, in *querypb.ExposureRequest, _ 
 func (f *fakeClient) ListOrders(_ context.Context, in *orderpb.ListOrdersRequest, _ ...grpc.CallOption) (*orderpb.ListOrdersResponse, error) {
 	f.gotOrders = in
 	return f.ordersResp, f.err
+}
+func (f *fakeClient) ListTradeableInstruments(context.Context, *venuepb.ListTradeableInstrumentsRequest, ...grpc.CallOption) (*venuepb.ListTradeableInstrumentsResponse, error) {
+	return f.instrResp, f.err
 }
 func (f *fakeClient) ListPortfolios(context.Context, *querypb.ListPortfoliosRequest, ...grpc.CallOption) (*querypb.ListPortfoliosResponse, error) {
 	return f.listResp, f.err
@@ -85,7 +90,7 @@ func (f *fakeClient) Health(_ context.Context, _ *querypb.HealthRequest, _ ...gr
 func serve(t *testing.T, fc *fakeClient) *httptest.Server {
 	t.Helper()
 	mux := authz.NewMux(authz.Grants{"analyst": {authz.Read}}, nil)
-	gateway.New(fc, fc).Routes(mux)
+	gateway.New(fc, fc, fc).Routes(mux)
 	authed := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		p := &middleware.Principal{Subject: "u1", Tenant: testTenant, Roles: []string{"analyst"}}
 		mux.ServeHTTP(w, r.WithContext(middleware.WithPrincipal(r.Context(), p)))
@@ -247,7 +252,7 @@ func TestOpenAPIServed(t *testing.T) {
 func serveAs(t *testing.T, fc *fakeClient, p *middleware.Principal) *httptest.Server {
 	t.Helper()
 	mux := authz.NewMux(authz.Grants{"analyst": {authz.Read}}, nil)
-	gateway.New(fc, fc).Routes(mux)
+	gateway.New(fc, fc, fc).Routes(mux)
 	authed := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		mux.ServeHTTP(w, r.WithContext(middleware.WithPrincipal(r.Context(), p)))
 	})
@@ -364,7 +369,7 @@ func TestAListWithNoOwnerTenantIsRefused(t *testing.T) {
 func ordersServer(t *testing.T, fc *fakeClient, p *middleware.Principal) *httptest.Server {
 	t.Helper()
 	mux := authz.NewMux(authz.Grants{"analyst": {authz.Read}}, nil)
-	gateway.New(fc, fc).Routes(mux)
+	gateway.New(fc, fc, fc).Routes(mux)
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		mux.ServeHTTP(w, r.WithContext(middleware.WithPrincipal(r.Context(), p)))
 	}))
@@ -458,7 +463,7 @@ func TestAHistoryFromAnotherTenantIsRefused(t *testing.T) {
 // that errors says "broken", which is not.
 func TestWithNoOMSTheHistoryRouteIsNotRegistered(t *testing.T) {
 	mux := authz.NewMux(authz.Grants{"analyst": {authz.Read}}, nil)
-	gateway.New(&fakeClient{}, nil).Routes(mux)
+	gateway.New(&fakeClient{}, nil, nil).Routes(mux)
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		p := &middleware.Principal{Subject: "u1", Tenant: testTenant, Roles: []string{"analyst"}}
 		mux.ServeHTTP(w, r.WithContext(middleware.WithPrincipal(r.Context(), p)))
@@ -481,5 +486,92 @@ func TestAnUnparseableLimitFallsBackToTheServerPage(t *testing.T) {
 	}
 	if fc.gotOrders.GetLimit() != 0 {
 		t.Fatalf("limit = %d, want 0 (the server's own page size)", fc.gotOrders.GetLimit())
+	}
+}
+
+func instrumentsFor(tenant string) *fakeClient {
+	return &fakeClient{instrResp: &venuepb.ListTradeableInstrumentsResponse{
+		OwnerTenant: tenant,
+		Instruments: []*venuepb.TradeableInstrument{
+			{InstrumentId: "BTC-USD", VenueSymbol: "BTCUSDT", Mic: "XBIN"},
+			{InstrumentId: "BTC-USD", VenueSymbol: "BTC-USDT", Mic: "XOKX"},
+		},
+	}}
+}
+
+func instrumentServer(t *testing.T, fc *fakeClient, portfolios []string) *httptest.Server {
+	t.Helper()
+	mux := authz.NewMux(authz.Grants{"analyst": {authz.Read}}, nil)
+	gateway.New(fc, fc, fc).Routes(mux)
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		p := &middleware.Principal{Subject: "u1", Tenant: testTenant, Roles: []string{"analyst"}, Portfolios: portfolios}
+		mux.ServeHTTP(w, r.WithContext(middleware.WithPrincipal(r.Context(), p)))
+	}))
+	t.Cleanup(ts.Close)
+	return ts
+}
+
+// The catalogue reaches the caller with BOTH names and the venue (#406). The
+// venue symbol is the point: canonical "BTC-USD" is USDT-quoted at both venues,
+// so an id-only list would tell a user they are buying dollars.
+func TestInstrumentsReachTheCallerWithTheirVenueSymbol(t *testing.T) {
+	ts := instrumentServer(t, instrumentsFor(testTenant), nil)
+
+	code, body := getOrders(t, ts, "/v1/instruments")
+	if code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", code, body)
+	}
+	for _, want := range []string{"BTC-USD", "BTCUSDT", "BTC-USDT", "XBIN", "XOKX"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("body does not carry %q: %s", want, body)
+		}
+	}
+}
+
+// NO PORTFOLIO CLAIM IS REQUIRED, deliberately. The catalogue is a property of
+// the DEPLOYMENT, not of a portfolio: there is no per-portfolio answer to scope
+// it to, and refusing a caller scoped to one fund would be asserting that which
+// pairs this platform trades is a fact about that fund. It is not.
+func TestInstrumentsDoNotRequireAPortfolioClaim(t *testing.T) {
+	ts := instrumentServer(t, instrumentsFor(testTenant), []string{"PF-OTHER"})
+
+	if code, body := getOrders(t, ts, "/v1/instruments"); code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 — the catalogue is not portfolio-scoped: %s", code, body)
+	}
+}
+
+// THE TENANT GATE STILL APPLIES. A catalogue stamped with another tenant is
+// refused with the same 404 every other route uses, so the path is not an oracle.
+func TestInstrumentsFromAnotherTenantAreRefused(t *testing.T) {
+	ts := instrumentServer(t, instrumentsFor("someone-else"), nil)
+
+	if code, _ := getOrders(t, ts, "/v1/instruments"); code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404 for a reply owned by another tenant", code)
+	}
+}
+
+// AN UNSTAMPED REPLY FAILS CLOSED. An OMS started without OMS_TENANT stamps an
+// empty owner, and empty must never satisfy the gate.
+func TestInstrumentsWithNoOwnerFailClosed(t *testing.T) {
+	ts := instrumentServer(t, instrumentsFor(""), nil)
+
+	if code, _ := getOrders(t, ts, "/v1/instruments"); code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404 for a reply carrying no owner_tenant", code)
+	}
+}
+
+// With no OMS configured the route does not exist at all — "not configured here",
+// rather than a registered route that always fails.
+func TestWithNoOMSTheInstrumentRouteIsNotRegistered(t *testing.T) {
+	mux := authz.NewMux(authz.Grants{"analyst": {authz.Read}}, nil)
+	gateway.New(&fakeClient{}, nil, nil).Routes(mux)
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		p := &middleware.Principal{Subject: "u1", Tenant: testTenant, Roles: []string{"analyst"}}
+		mux.ServeHTTP(w, r.WithContext(middleware.WithPrincipal(r.Context(), p)))
+	}))
+	defer ts.Close()
+
+	if code, _ := getOrders(t, ts, "/v1/instruments"); code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404 with no OMS configured", code)
 	}
 }

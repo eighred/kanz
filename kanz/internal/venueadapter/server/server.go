@@ -192,6 +192,40 @@ func (s *Server) Describe(context.Context, *venuepb.DescribeRequest) (*venuepb.D
 	return resp, nil
 }
 
+// InstrumentLister is implemented by a connector that can enumerate the pairs it
+// is configured to trade (#406).
+type InstrumentLister interface {
+	Instruments() []execution.InstrumentSymbol
+}
+
+// ListInstruments reports what this adapter can actually trade.
+//
+// Nothing on this platform could enumerate the tradeable set: datamaster answers
+// GET /v1/securities/{id} and has no List, and the gateway proxies the same
+// single-key reads. So an operator could not answer "what can this deployment
+// trade?" without reading a manifest, and no UI could offer a choice of pairs.
+//
+// A CONNECTOR THAT CANNOT ENUMERATE RETURNS AN EMPTY LIST, not an error. It is
+// the "did not say" case again, and the caller is told which venue answered so an
+// aggregated list cannot silently drop a venue's entire catalogue and look merely
+// short.
+func (s *Server) ListInstruments(context.Context, *venuepb.ListInstrumentsRequest) (*venuepb.ListInstrumentsResponse, error) {
+	resp := &venuepb.ListInstrumentsResponse{Mic: s.venue.MIC()}
+	lister, ok := s.venue.(InstrumentLister)
+	if !ok {
+		s.logger.Warn("venue: adapter cannot enumerate its instruments — every pair-picking surface will show this venue as empty",
+			"mic", s.venue.MIC())
+		return resp, nil
+	}
+	for _, in := range lister.Instruments() {
+		resp.Instruments = append(resp.Instruments, &venuepb.VenueInstrument{
+			InstrumentId: in.InstrumentID,
+			VenueSymbol:  in.VenueSymbol,
+		})
+	}
+	return resp, nil
+}
+
 func (s *Server) recordStatus(ctx context.Context, st *orderpb.OrderState, next orderpb.OrderStatus) error {
 	cloned, ok := proto.Clone(st).(*orderpb.OrderState)
 	if !ok {

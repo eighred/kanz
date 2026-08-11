@@ -51,11 +51,12 @@ type (
 	WorkerDeps = execution.WorkerDeps
 
 	// Vendor-neutral exchange plumbing.
-	VenueSettings   = execution.VenueSettings
-	SymbolMapper    = execution.SymbolMapper
-	StaticSymbolMap = execution.StaticSymbolMap
-	APIError        = execution.APIError
-	WeightBucket    = execution.WeightBucket
+	VenueSettings    = execution.VenueSettings
+	SymbolMapper     = execution.SymbolMapper
+	StaticSymbolMap  = execution.StaticSymbolMap
+	InstrumentSymbol = execution.InstrumentSymbol
+	APIError         = execution.APIError
+	WeightBucket     = execution.WeightBucket
 )
 
 var (

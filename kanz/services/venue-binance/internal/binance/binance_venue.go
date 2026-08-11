@@ -74,6 +74,21 @@ func (v *BinanceVenue) MIC() string { return v.mic }
 // collateral pool every fill it produces settles against.
 func (v *BinanceVenue) Account() string { return v.account }
 
+// Instruments reports every pair this adapter is configured to trade at Binance,
+// which is what a picker offers and what an operator reads to answer "what can
+// this deployment actually trade?" (#406).
+//
+// It is the CONFIGURED set — this adapter's own symbol map — never the
+// exchange's catalogue. A pair this deployment holds no mapping for cannot be
+// routed, and offering it would produce a refusal at admission that an operator
+// reads as a platform fault.
+func (v *BinanceVenue) Instruments() []InstrumentSymbol {
+	if v.symbols == nil {
+		return nil
+	}
+	return v.symbols.Instruments()
+}
+
 // OrderTypes declares what this connector can translate for binance, which the OMS
 // reads through Describe and enforces at ADMISSION (#405).
 //

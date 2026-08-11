@@ -76,6 +76,26 @@ service VenueAdapterService {
   // when the answer disagrees with what it was told — a mismatch is not a typo to
   // paper over, it is a false statement about whose money moves.
   rpc Describe(DescribeRequest) returns (DescribeResponse);
+
+  // ListInstruments reports WHAT THIS ADAPTER CAN ACTUALLY TRADE: every canonical
+  // instrument_id it holds a venue symbol for, with that symbol (#406).
+  //
+  // Nothing on this platform could enumerate the tradeable set. datamaster
+  // answers GET /v1/securities/{id} and has no List; the gateway proxies the same
+  // three single-key reads. So an operator could not answer "what can this
+  // deployment trade?" without reading a manifest, and no UI could offer a choice
+  // of pairs — which is the same un-askable-configuration problem Describe was
+  // added to solve for the ACCOUNT, one field over.
+  //
+  // THIS REPORTS CONFIGURATION, NOT THE EXCHANGE'S CATALOGUE. The set is the
+  // adapter's own symbol map (BINANCE_SYMBOLS / OKX_SYMBOLS), so every entry is a
+  // pair this deployment can route today. Calling the exchange's exchangeInfo or
+  // instruments endpoint instead would answer a DIFFERENT question — "what could
+  // we trade if configured" — and would list pairs with no symbol mapping, which
+  // a picker would then offer and admission would refuse. An operator reads that
+  // refusal as a platform fault, so a pair the platform cannot route must never
+  // appear here.
+  rpc ListInstruments(ListInstrumentsRequest) returns (ListInstrumentsResponse);
 }
 
 message DescribeRequest {}
@@ -152,3 +172,82 @@ message CancelOrderRequest {
 // Deliberately empty. OK ⇒ the withdrawal is CONFIRMED; an error ⇒ the close is
 // in flight. There is no third answer, so there is no field to carry one.
 message CancelOrderResponse {}
+
+message ListInstrumentsRequest {}
+
+message ListInstrumentsResponse {
+  // ISO 10383 venue code these instruments trade on — the same MIC Describe
+  // reports, repeated here so an aggregated list cannot lose which venue an
+  // entry came from.
+  string mic = 1;
+
+  // Every instrument this adapter is configured to trade, ordered by
+  // instrument_id so the answer is stable between calls.
+  //
+  // EMPTY IS A REAL ANSWER AND A LOUD ONE: an adapter with no symbol map can
+  // route nothing. It is not the same as an adapter that was never asked, and a
+  // caller must not render the two the same way.
+  repeated VenueInstrument instruments = 2;
+}
+
+// VenueInstrument is one tradeable pair as this adapter holds it.
+message VenueInstrument {
+  // The platform's canonical id, e.g. "BTC-USD". This is what an order carries.
+  string instrument_id = 1;
+
+  // What the EXCHANGE calls the same thing, e.g. "BTCUSDT" on Binance or
+  // "BTC-USDT" on OKX.
+  //
+  // IT IS REPORTED BECAUSE IT DOES NOT ALWAYS AGREE WITH THE ID. The canonical
+  // "BTC-USD" maps to a USDT-quoted symbol on both live venues — the platform is
+  // already trading a stablecoin-quoted instrument while calling it USD, and
+  // nothing in the data says so. Until instruments carry base and quote assets
+  // explicitly (#407), this field is the only place that truth is visible, so a
+  // picker can show what a user is actually buying rather than what the id claims.
+  string venue_symbol = 2;
+}
+
+// VenueQueryService is the OMS's read surface over every adapter it holds (#406).
+//
+// It is served by the OMS, not by an adapter. The OMS is the only component that
+// dials all of them, so it is the only one that can answer "what can this
+// DEPLOYMENT trade" rather than "what can this one venue trade" — and asking it
+// costs no fan-out, because the OMS asked each adapter once at dial time and
+// holds the answer.
+//
+// THAT ALSO KEEPS ONE UNREACHABLE VENUE FROM TAKING DOWN A LIST OF NAMES. A
+// picker that fanned out to every adapter on every page load would fail whenever
+// any one of them was restarting, for a screen that shows no prices and moves no
+// capital.
+service VenueQueryService {
+  rpc ListTradeableInstruments(ListTradeableInstrumentsRequest) returns (ListTradeableInstrumentsResponse);
+}
+
+message ListTradeableInstrumentsRequest {}
+
+message ListTradeableInstrumentsResponse {
+  // Every pair this deployment can route, ordered by (instrument_id, mic).
+  //
+  // EMPTY MEANS THIS DEPLOYMENT CAN TRADE NOTHING, which is a real state — an
+  // OMS running against the simulator, or one whose adapters hold no symbol map.
+  // A caller must render it as that and never as "still loading".
+  repeated TradeableInstrument instruments = 1;
+
+  // The tenant that owns this deployment, as the deny-by-default authz input a
+  // governed client checks the caller against. Empty fails CLOSED.
+  string owner_tenant = 2;
+}
+
+// TradeableInstrument is one pair at one venue.
+message TradeableInstrument {
+  // The platform's canonical id — what an order carries.
+  string instrument_id = 1;
+
+  // What the exchange calls it. See VenueInstrument.venue_symbol: the two do not
+  // always agree, and until #407 this is where that is visible.
+  string venue_symbol = 2;
+
+  // The venue this pair trades on. An order names a venue, so a pair without one
+  // cannot be acted on.
+  string mic = 3;
+}
