@@ -69,6 +69,31 @@ type Engine interface {
 	// query response via QualityFlags so callers cannot accidentally
 	// consume degraded results without seeing the signal.
 	Health(ctx context.Context) (Health, error)
+
+	// ListPortfolios names the portfolios this engine holds state for.
+	//
+	// IT IS NOT A DIRECTORY OF THE FUND'S PORTFOLIOS. It lists what the
+	// engine has folded, which is the only set the other four methods
+	// can answer about — a portfolio that exists but has had no event
+	// reach this engine is absent, and saying otherwise would offer a
+	// caller a choice that then returns ErrPortfolioNotFound.
+	ListPortfolios(ctx context.Context) ([]PortfolioSummary, error)
+}
+
+// PortfolioSummary is one entry in ListPortfolios: enough to choose a
+// portfolio and no more.
+//
+// NO MONEY ON IT, DELIBERATELY. Cash balance and market value are what
+// an Exposure read returns; carrying them here would mean every caller
+// who wanted a picker also received the fund's valuations. AsOf IS
+// carried, because staleness is the one property that distinguishes two
+// otherwise identical rows and it is invisible unless the list shows it.
+type PortfolioSummary struct {
+	ID            PortfolioID
+	DisplayName   string
+	BaseCurrency  string
+	AsOf          time.Time
+	PositionCount uint32
 }
 
 // PortfolioID identifies a portfolio aggregate. Stable across the

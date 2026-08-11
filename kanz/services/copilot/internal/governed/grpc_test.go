@@ -31,6 +31,13 @@ func (f fakeQuery) Measures(_ context.Context, r *querypb.MeasuresRequest, _ ...
 func (f fakeQuery) EvaluateScenario(_ context.Context, r *querypb.EvaluateScenarioRequest, _ ...grpc.CallOption) (*querypb.EvaluateScenarioResponse, error) {
 	return f.scenario(r)
 }
+
+// Copilot does not list portfolios — its governed tools always name one. The
+// method exists so the fake satisfies the generated client interface.
+func (f fakeQuery) ListPortfolios(context.Context, *querypb.ListPortfoliosRequest, ...grpc.CallOption) (*querypb.ListPortfoliosResponse, error) {
+	return nil, nil
+}
+
 func (f fakeQuery) Health(context.Context, *querypb.HealthRequest, ...grpc.CallOption) (*querypb.HealthResponse, error) {
 	return &querypb.HealthResponse{}, nil
 }

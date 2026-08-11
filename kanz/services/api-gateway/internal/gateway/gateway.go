@@ -25,6 +25,7 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	querypb "github.com/eighred/kanz/kanz-schemas-go/query/v1"
+	"github.com/eighred/kanz/pkg/auth"
 	"github.com/eighred/kanz/services/api-gateway/internal/authz"
 	"github.com/eighred/kanz/services/api-gateway/internal/middleware"
 )
@@ -56,10 +57,50 @@ func New(client querypb.RiskQueryServiceClient) *Handler {
 // a scenario is a POST, but it computes a what-if and moves no capital — the HTTP verb is
 // not the authority on effect.
 func (h *Handler) Routes(mux *authz.Mux) {
+	mux.Handle(authz.Read, "GET /v1/portfolios", h.listPortfolios)
 	mux.Handle(authz.Read, "GET /v1/portfolios/{id}/exposure", h.exposure)
 	mux.Handle(authz.Read, "GET /v1/portfolios/{id}/measures", h.measures)
 	mux.Handle(authz.Read, "POST /v1/portfolios/{id}/scenario", h.scenario)
 	mux.Handle(authz.Read, "GET /v1/health", h.health)
+}
+
+// listPortfolios answers "which portfolios may I look at" — the question every
+// per-id route below assumed the caller could already answer (#399).
+//
+// TWO GATES APPLY, AND THEY ARE DIFFERENT QUESTIONS.
+//
+// The TENANT gate is writeOwned, unchanged and shared with the per-id routes: a
+// reply whose owner_tenant is not the caller's is refused outright. A list makes
+// that stamp matter MORE than it does on a read — a caller naming a portfolio
+// already knows its id, whereas this route hands over ids they could not
+// otherwise have guessed.
+//
+// The PORTFOLIO gate is auth.PortfolioInScope, applied per row before the reply
+// is written. It is deliberately NOT PortfolioEntitled: on a read path an absent
+// allow-list means the token asserted no portfolio restriction, so the tenant
+// boundary is the operative limit — see pkg/auth/portfolio.go, which keeps both
+// semantics side by side and says why neither may adopt the other. Getting this
+// backwards here would show an unrestricted reader an EMPTY list, which reads as
+// "the fund has no portfolios" rather than as a permission problem.
+func (h *Handler) listPortfolios(w http.ResponseWriter, r *http.Request) {
+	resp, err := h.client.ListPortfolios(r.Context(), &querypb.ListPortfoliosRequest{})
+	if err != nil {
+		h.writeOwned(w, r, resp, err)
+		return
+	}
+	// FILTERED BEFORE THE TENANT GATE RUNS, so the reply that reaches writeOwned
+	// is already the one the caller may see. Mutating the response in place is
+	// safe: it is this call's own value, not shared state.
+	if p := middleware.PrincipalFromContext(r.Context()); p != nil {
+		kept := resp.GetPortfolios()[:0]
+		for _, s := range resp.GetPortfolios() {
+			if auth.PortfolioInScope(p.Portfolios, s.GetPortfolioId()) {
+				kept = append(kept, s)
+			}
+		}
+		resp.Portfolios = kept
+	}
+	h.writeOwned(w, r, resp, nil)
 }
 
 func (h *Handler) exposure(w http.ResponseWriter, r *http.Request) {

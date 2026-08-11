@@ -59,6 +59,14 @@ func TestTheWholeRouteTableIsDeclared(t *testing.T) {
 	want := map[string]authz.Capability{
 		// Risk queries. A scenario is a POST, but it computes a what-if and moves no
 		// capital — the HTTP verb is not the authority on effect.
+		// The LIST is Read, and the guard's own prompt — "decide whether a read
+		// token should be able to call it" — is worth answering rather than
+		// waving through. It discloses strictly less than the three routes below
+		// it: names and a staleness stamp, no positions, no valuations, no
+		// money. What it discloses that they do not is the SET of ids, and that
+		// is gated twice over — by owner_tenant through writeOwned, and per row
+		// by the caller's portfolios claim (#399).
+		"GET /v1/portfolios":                authz.Read,
 		"GET /v1/portfolios/{id}/exposure":  authz.Read,
 		"GET /v1/portfolios/{id}/measures":  authz.Read,
 		"POST /v1/portfolios/{id}/scenario": authz.Read,

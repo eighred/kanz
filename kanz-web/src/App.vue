@@ -15,6 +15,7 @@ async function signOut() {
   <header v-if="session.signedIn" class="topbar">
     <span class="brand">KANZ</span>
     <nav>
+      <RouterLink to="/portfolios">Portfolios</RouterLink>
       <RouterLink to="/estate">Estate</RouterLink>
       <RouterLink to="/nodes">Nodes</RouterLink>
       <RouterLink to="/venues">Venues</RouterLink>

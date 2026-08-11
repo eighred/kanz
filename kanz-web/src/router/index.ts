@@ -3,6 +3,7 @@ import { useSession } from '../stores/session'
 import LoginView from '../views/LoginView.vue'
 import EstateView from '../views/EstateView.vue'
 import NodesView from '../views/NodesView.vue'
+import PortfoliosView from '../views/PortfoliosView.vue'
 import RedeemView from '../views/RedeemView.vue'
 import VenuesView from '../views/VenuesView.vue'
 
@@ -17,6 +18,7 @@ export const router = createRouter({
     { path: '/venues', name: 'venues', component: VenuesView },
     { path: '/estate', name: 'estate', component: EstateView },
     { path: '/nodes', name: 'nodes', component: NodesView },
+    { path: '/portfolios', name: 'portfolios', component: PortfoliosView },
   ],
 })
 

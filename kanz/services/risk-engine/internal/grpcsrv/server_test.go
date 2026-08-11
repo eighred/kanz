@@ -25,6 +25,7 @@ type fakeEngine struct {
 	measures func(v1.MeasuresRequest) (v1.MeasuresResponse, error)
 	scenario func(v1.ScenarioRequest) (v1.ScenarioResponse, error)
 	health   func() (v1.Health, error)
+	list     func() ([]v1.PortfolioSummary, error)
 }
 
 func (f fakeEngine) Exposure(_ context.Context, r v1.ExposureRequest) (v1.ExposureResponse, error) {
@@ -37,6 +38,15 @@ func (f fakeEngine) EvaluateScenario(_ context.Context, r v1.ScenarioRequest) (v
 	return f.scenario(r)
 }
 func (f fakeEngine) Health(context.Context) (v1.Health, error) { return f.health() }
+
+// A nil list func returns nothing rather than panicking: most cases here are
+// about the per-portfolio adapters and have no opinion about listing.
+func (f fakeEngine) ListPortfolios(context.Context) ([]v1.PortfolioSummary, error) {
+	if f.list == nil {
+		return nil, nil
+	}
+	return f.list()
+}
 
 func money(units int64) *commonpb.Money {
 	return &commonpb.Money{Amount: &commonpb.Decimal{Coefficient: units, Exponent: 0}, CurrencyCode: "USD"}

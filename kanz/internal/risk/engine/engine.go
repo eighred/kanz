@@ -31,6 +31,7 @@ package engine
 
 import (
 	"context"
+	"sort"
 	"time"
 
 	commonpb "github.com/eighred/kanz/kanz-schemas-go/common/v1"
@@ -189,6 +190,46 @@ func (e *EngineImpl) Health(ctx context.Context) (v1.Health, error) {
 		return v1.Health{}, err
 	}
 	return e.detector.Health(e.latestAsOf()), nil
+}
+
+// ListPortfolios names the portfolios the store currently holds.
+//
+// IT READS THE STORE, NEVER THE CACHE. The exposure path deliberately falls
+// back to the last-known-good cache on a store miss, so a query about a
+// portfolio the store has dropped still answers. A LIST must not do that: it
+// would offer a caller a portfolio the engine cannot then describe, and the
+// difference between "here is a stale figure for something you asked about" and
+// "here is a thing that no longer exists" is the difference between degraded
+// and wrong.
+//
+// SORTED BY ID, because Store.IDs walks a map and Go randomises that. An
+// unsorted list re-orders itself on every poll, which reads as the estate
+// changing when nothing has.
+//
+// A portfolio dropped between IDs() and Snapshot() is skipped rather than
+// returned empty: the two calls are not one atomic read, and a row with an id
+// and nothing else is worse than a row that is absent.
+func (e *EngineImpl) ListPortfolios(ctx context.Context) ([]v1.PortfolioSummary, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	ids := e.store.IDs()
+	out := make([]v1.PortfolioSummary, 0, len(ids))
+	for _, id := range ids {
+		p, found := e.store.Snapshot(id)
+		if !found {
+			continue
+		}
+		out = append(out, v1.PortfolioSummary{
+			ID:            id,
+			DisplayName:   p.DisplayName(),
+			BaseCurrency:  string(p.BaseCurrency()),
+			AsOf:          p.AsOf(),
+			PositionCount: p.PositionCount(),
+		})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
+	return out, nil
 }
 
 // exposureSet returns the live-computed-and-cached exposure plus the
