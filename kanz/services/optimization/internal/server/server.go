@@ -35,15 +35,20 @@ func (r *Readiness) Ready() bool    { return r.ready.Load() }
 type Server struct {
 	logger    *slog.Logger
 	readiness *Readiness
-	metrics   http.Handler
 	mux       *http.ServeMux
 }
 
 // Option customizes the server.
 type Option func(*Server)
 
-// WithMetrics mounts a Prometheus /metrics handler (OBS-01a).
-func WithMetrics(h http.Handler) Option { return func(s *Server) { s.metrics = h } }
+// WithMetrics is GONE, deliberately (#409). /metrics used to be mounted on this
+// mux, which put it on the same port as the order-materializing routes — and
+// allow-observability-scrape must admit whatever port carries /metrics. That is
+// how every other header-trusting service on this platform ended up reachable
+// from kanz-observability with a self-chosen principal (#232).
+//
+// Metrics are now served by a second listener owned by the composition root, so
+// the port the monitoring plane may open carries nothing but telemetry.
 
 // New builds the server and registers routes.
 func New(readiness *Readiness, logger *slog.Logger, opts ...Option) *Server {
@@ -60,9 +65,6 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) { s.mux.Serve
 func (s *Server) routes() {
 	s.mux.HandleFunc("GET /healthz", s.handleHealthz)
 	s.mux.HandleFunc("GET /readyz", s.handleReadyz)
-	if s.metrics != nil {
-		s.mux.Handle("GET /metrics", s.metrics)
-	}
 	s.mux.HandleFunc("POST /v1/propose", s.handlePropose)
 	s.mux.HandleFunc("POST /v1/orders", s.handleOrders)
 }

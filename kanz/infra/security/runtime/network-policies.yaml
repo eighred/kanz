@@ -291,6 +291,14 @@ spec:
         # kanz-observability namespace, and admitting the gRPC prediction API to
         # it would hand the monitoring plane a path to InferenceService.Predict.
         - { protocol: TCP, port: 8093 } # inference
+        # optimization (#409). ITS API PORT :8080 IS DELIBERATELY NOT HERE. The
+        # API materializes a rebalance proposal into order commands and takes the
+        # issuer from the gateway-injected principal, so admitting the whole
+        # kanz-observability namespace to it would let any pod there choose a
+        # principal and trade. Same reasoning as inference's 50051 above — this
+        # is the first service on the estate to split the two listeners so that
+        # reasoning is available at all (#232).
+        - { protocol: TCP, port: 8094 } # optimization (metrics only)
 ---
 # Telemetry: allow egress to the OTLP collector (OBS-01) on 4317. Scoped to the
 # observability namespace.
@@ -496,9 +504,19 @@ spec:
             matchExpressions:
               - key: app
                 operator: In
-                values: [wealth, datamaster, copilot, optimization]
+                values: [wealth, datamaster, copilot]
       ports:
         - { protocol: TCP, port: 8080 }
+    # Model Portfolios (#409) on its own port. NOT in the 8080 group above, and
+    # that is the point: allow-observability-scrape admits 8080 across EVERY pod
+    # in this namespace, so an API there is reachable by the monitoring plane
+    # whatever else is done. 8100 is outside that list.
+    - to:
+        - podSelector:
+            matchLabels:
+              app: optimization
+      ports:
+        - { protocol: TCP, port: 8100 }
 ---
 # MODEL PORTFOLIOS (#409) — the ingress half, and it is a capital boundary rather
 # than a read one.
@@ -539,7 +557,7 @@ spec:
             matchLabels:
               app: api-gateway
       ports:
-        - { protocol: TCP, port: 8080 }
+        - { protocol: TCP, port: 8100 }
 ---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy

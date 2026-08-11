@@ -1,0 +1,146 @@
+---
+# Model Portfolios — the portfolio-construction service (#409).
+#
+# STATELESS, and genuinely so: the market inputs (covariance, expected returns,
+# current weights, prices) all arrive in the request, so there is no database, no
+# broker subscription, and no migration initContainer. It boots ready. That is
+# why this is a plain Deployment with no CSI db volume — the shape wealth has
+# minus everything wealth needs for durable state.
+#
+# TWO PORTS, AND THE SPLIT IS THE SECURITY DECISION IN THIS FILE.
+#
+#   :8100  the API. It carries POST /v1/orders, which materializes a rebalance
+#          proposal into order.v1 commands and takes the ISSUER of those commands
+#          — the field the audit trail records as the person who moved the
+#          capital — from the X-Kanz-Principal-* headers the api-gateway injects.
+#          allow-gateway-to-optimization admits ONLY the gateway to it.
+#
+#   :8094  /metrics, and nothing else.
+#
+# They are separate because allow-observability-scrape must admit whatever port
+# serves /metrics, and its peer is the whole kanz-observability namespace. Every
+# other header-trusting service on this platform (audit, datamaster, tv-sync,
+# wealth) serves its tenant-scoped routes on that same port, so a pod in
+# kanz-observability can choose a principal and use them — the exposure #232
+# named and could not close, because closing it needs a second listener per
+# service rather than a manifest edit. This is the first service that has one:
+# a trading surface is the one place the platform cannot afford to inherit it.
+# The precedent is inference, whose gRPC prediction API is deliberately kept off
+# the scrape list for exactly this reason.
+#
+# THE API PORT IS 8100, NOT 8080, and that is part of the same decision: that
+# rule selects EVERY pod in the namespace and admits 8080 among its ports, so an
+# API on 8080 would be open to monitoring no matter what the second listener did.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: optimization
+  namespace: kanz-services
+  labels:
+    app.kubernetes.io/part-of: kanz
+imagePullSecrets:
+  - name: ghcr-pull
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: optimization
+  namespace: kanz-services
+  labels:
+    app.kubernetes.io/part-of: kanz
+spec:
+  selector:
+    app: optimization
+  ports:
+    - { name: http, port: 8100, targetPort: 8100 }
+    - { name: metrics, port: 8094, targetPort: 8094 }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: optimization
+  namespace: kanz-services
+  labels:
+    app.kubernetes.io/part-of: kanz
+spec:
+  replicas: 2
+  revisionHistoryLimit: 5
+  selector:
+    matchLabels:
+      app: optimization
+  template:
+    metadata:
+      labels:
+        app: optimization
+        app.kubernetes.io/part-of: kanz
+      annotations:
+        # Scraped by infra/observability/prometheus.yaml (role: pod discovery).
+        # THE METRICS PORT, NOT THE API PORT — see the header of this file. This
+        # annotation is what allow-observability-scrape's port list is derived
+        # from, so naming the API port here would hand the monitoring plane a path to
+        # the order-materializing routes.
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8094"
+    spec:
+      # Drain budget: DERIVED, and deliberately not restated here.
+      # test/arch/pod_disruption_and_drain_test.go recomputes the floor from the
+      # source on every run and fails this file the moment 60 stops covering it.
+      terminationGracePeriodSeconds: 60
+      serviceAccountName: optimization
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      # INFRA-01d: spread replicas across AZs so a single-AZ loss leaves the
+      # survivors serving.
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app: optimization
+      containers:
+        - name: optimization
+          # Authored with a TAG. release.yml's kanz-pin-digests job rewrites this
+          # to the immutable digest the first tagged release publishes — that job
+          # is the single image substitution point on this platform
+          # (test/arch/image_substitution_point_test.go). Until then the file
+          # carries a temporary entry in mutableTagExempt, whose dead-exemption
+          # arm fails the build the moment the pin lands, so the exemption cannot
+          # outlive its own repair.
+          image: ghcr.io/eighred/optimization:latest
+          ports:
+            - { containerPort: 8100, name: http }
+            - { containerPort: 8094, name: metrics }
+          env:
+            - { name: OPTIMIZATION_LISTEN, value: ":8100" }
+            - { name: OPTIMIZATION_METRICS_LISTEN, value: ":8094" }
+            - { name: SPIFFE_ENDPOINT_SOCKET, value: "unix:///run/spiffe/spire-agent.sock" }
+          livenessProbe:
+            httpGet: { path: /healthz, port: 8100 }
+            initialDelaySeconds: 5
+            periodSeconds: 15
+          readinessProbe:
+            httpGet: { path: /readyz, port: 8100 }
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - { name: spiffe, mountPath: /run/spiffe, readOnly: true }
+            - { name: tmp, mountPath: /tmp }
+      volumes:
+        - name: tmp
+          emptyDir: {}
+        - name: spiffe
+          csi:
+            driver: csi.spiffe.io
+            readOnly: true
