@@ -432,6 +432,18 @@ func runConsumers(ctx context.Context, cfg config.Config, readiness *server.Read
 	})
 	obs.Registry.MustRegister(unverifiedAccounts)
 
+	// Venue adapters that did not say which order types they can place (#405).
+	// Non-zero means the admission gate is OPEN for that MIC: an order type the
+	// adapter cannot translate will be admitted, stored and announced, and refused
+	// only at the exchange. Zero is the goal; OMS_REQUIRE_ORDER_TYPE_SUPPORT is how
+	// it is held there once the fleet is upgraded.
+	undeclaredOrderTypes := prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "kanz_oms_undeclared_venue_order_types_total",
+		Help: "Venue adapters registered that declared no supported order types. The OMS cannot refuse an " +
+			"unroutable order type at admission for these, so one reaches the venue and fails there instead.",
+	})
+	obs.Registry.MustRegister(undeclaredOrderTypes)
+
 	if bindings.Empty() {
 		logger.Warn("COLLATERAL IS SHARED — no venue-account bindings configured (OMS_VENUE_ACCOUNTS). Every portfolio trades whatever account its venue adapter holds, so they all margin against ONE pool per venue: a liquidation caused by one portfolio consumes the margin of all of them, and each ledger still reports its own cash intact")
 	} else if cfg.RequireVenueAccount {
@@ -476,7 +488,7 @@ func runConsumers(ctx context.Context, cfg config.Config, readiness *server.Read
 	// Venue set is composition-root-selected: SimVenue by default; Binance Spot +
 	// its user-data/reconciliation/ticker workers under -tags binance
 	// (configuredVenues is build-tag split, wired to the shared order store).
-	venues, closeVenues, err := configuredVenues(ctx, cfg, store, producer, unverifiedAccounts, logger)
+	venues, closeVenues, err := configuredVenues(ctx, cfg, store, producer, unverifiedAccounts, undeclaredOrderTypes, logger)
 	if err != nil {
 		return false, err
 	}

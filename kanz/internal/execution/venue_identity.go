@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 
+	orderpb "github.com/eighred/kanz/kanz-schemas-go/order/v1"
 	venuepb "github.com/eighred/kanz/kanz-schemas-go/venue/v1"
 )
 
@@ -15,7 +16,37 @@ type VenueIdentity struct {
 	MIC     string
 	Account string
 	Proof   AccountProof
+
+	// OrderTypes is what this adapter can actually place (#405).
+	//
+	// NIL MEANS THE ADAPTER DID NOT SAY, and that is not the same as "none". An
+	// adapter predating venue.v1's supported_order_types answers with nothing,
+	// and treating that as a refusal would stop every order it has always been
+	// able to work. SupportsOrderType below reads nil as "unknown, allow" and the
+	// OMS is what decides whether unknown is tolerable — the same split as
+	// AccountProof.Verified.
+	OrderTypes []orderpb.OrderType
 }
+
+// SupportsOrderType reports whether this adapter said it can place t.
+//
+// UNKNOWN IS PERMISSIVE HERE AND REFUSED ONE LAYER UP. An empty list means the
+// adapter never answered the question, so this cannot distinguish "cannot" from
+// "did not say" — and inventing a refusal at that distance would turn a schema
+// addition into a trading outage. The OMS holds the switch
+// (OMS_REQUIRE_ORDER_TYPE_SUPPORT) because it is the component that can name the
+// adapter, count the gap and tell an operator how to close it.
+func (v VenueIdentity) SupportsOrderType(t orderpb.OrderType) bool {
+	if len(v.OrderTypes) == 0 {
+		return true
+	}
+	return ContainsOrderType(v.OrderTypes, t)
+}
+
+// DeclaresOrderTypes reports whether the adapter answered the capability
+// question at all. It is separate from SupportsOrderType so a caller can tell
+// "allowed" from "allowed because nobody knows".
+func (v VenueIdentity) DeclaresOrderTypes() bool { return len(v.OrderTypes) > 0 }
 
 // ErrVenueIdentityMismatch: the adapter is not who the OMS was told it is.
 //
@@ -40,6 +71,7 @@ func (v *GRPCVenue) Describe(ctx context.Context) (VenueIdentity, error) {
 			Verified:          resp.GetAccountVerified(),
 			ExchangeAccountID: resp.GetExchangeAccountId(),
 		},
+		OrderTypes: resp.GetSupportedOrderTypes(),
 	}, nil
 }
 

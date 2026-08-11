@@ -168,12 +168,28 @@ func (s *Server) CancelOrder(ctx context.Context, req *venuepb.CancelOrderReques
 // manifest — so a typo posted fills to one fund's ledger rows while the exchange
 // debited another's, with nothing in the platform able to notice.
 func (s *Server) Describe(context.Context, *venuepb.DescribeRequest) (*venuepb.DescribeResponse, error) {
-	return &venuepb.DescribeResponse{
+	resp := &venuepb.DescribeResponse{
 		Mic:               s.venue.MIC(),
 		Account:           s.venue.Account(),
 		AccountVerified:   s.proof.Verified,
 		ExchangeAccountId: s.proof.ExchangeAccountID,
-	}, nil
+	}
+
+	// AND WHICH ORDER TYPES IT CAN ACTUALLY PLACE (#405), for the same reason the
+	// account is here: before this field the OMS could only believe order.v1's
+	// enum, which declares four types while the spot connectors translate two.
+	// A stop was admitted, announced and stored, and refused only inside Execute
+	// — the OMS had no way to ask.
+	//
+	// A CONNECTOR THAT DOES NOT IMPLEMENT OrderTypeDeclarer LEAVES THIS EMPTY,
+	// and empty means "did not say", never "supports nothing". The OMS names and
+	// counts such an adapter at startup and refuses only under
+	// OMS_REQUIRE_ORDER_TYPE_SUPPORT — because a field added to a schema must not
+	// silently become a trading outage for an adapter that predates it.
+	if d, ok := s.venue.(execution.OrderTypeDeclarer); ok {
+		resp.SupportedOrderTypes = d.OrderTypes()
+	}
+	return resp, nil
 }
 
 func (s *Server) recordStatus(ctx context.Context, st *orderpb.OrderState, next orderpb.OrderStatus) error {
