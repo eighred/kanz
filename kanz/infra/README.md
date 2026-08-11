@@ -8,50 +8,25 @@ for a single-node **k3s** cluster stood up by hand — used when standing up
 the full manifest set (SPIRE + NATS + the trading loop) outside both of
 those paths.
 
-## Driving `kanz` against a local gateway (no SSO)
+## Driving a local gateway with a pre-minted bearer
 
-`kanz` authenticates through the Eighred SSO device flow. Until that service
-ships, `/login` against a local stack returns
+The `kanz` terminal client is **retired** (owner decision, 2026-08-11 — the
+platform is exclusively web-focused). This section used to explain how to point
+it at a local stack; what remains useful is the token, because `kanz-monitor`
+and the load-test tooling still take one.
 
-```
-status 404 on http://localhost:8080/.well-known/openid-configuration
-```
-
-which is correct rather than broken: the load stack's gateway validates **HS256
-JWTs** (`API_GATEWAY_JWT_SECRET`, together with the explicit
-`API_GATEWAY_ALLOW_DEV_HS256=true` that arm now requires) and is not an OpenID
-provider, so there is no discovery document to fetch.
-
-Set `KANZ_TOKEN` to a pre-minted bearer instead, and leave `KANZ_IDENTITY_URL`
-unset:
+The load stack's gateway validates **HS256 JWTs** (`API_GATEWAY_JWT_SECRET`,
+together with the explicit `API_GATEWAY_ALLOW_DEV_HS256=true` that arm now
+requires) and is not an OpenID provider, so it serves no discovery document:
 
 ```sh
 export KANZ_GATEWAY_URL=http://localhost:8080
 export KANZ_TOKEN="$(go run ./cmd/kanz-devtoken --secret load-secret --tenant load-test --role kanz-user)"
-unset KANZ_IDENTITY_URL
-kanz
 ```
 
-**Setting both is refused**, deliberately, rather than resolved by precedence. A
-rule like "signing in wins" would let a `KANZ_TOKEN` exported for one experiment
-sit forgotten in a shell profile and then silently take over the day the
-identity URL is briefly unset. The refusal is loud and impossible to be on the
-wrong side of by accident.
-
-`KANZ_SSO_ISSUER` is **retired** (#364). It named an external Eighred SSO device
-flow that was never built; the CLI now signs in against the platform's own
-identity provider through `KANZ_IDENTITY_URL`. It is refused by name rather than
-ignored, so a shell profile that still exports it says so instead of leaving you
-to wonder why it has no effect.
-
-The session is marked in the header every run (`using KANZ_TOKEN from the
-environment`) and by `/whoami`, because the failure mode of a static bearer is
-forgetting you are on one. It is **never written to the token store**: unset the
-variable and the session is gone.
-
-`/login` is unavailable in that mode — there is no issuer to sign in against —
-and `/logout` says where the credential actually lives rather than pretending to
-clear it.
+For the WEB app, sign-in is a credential exchange against the identity service
+through the BFF (`POST /auth/login`) — the browser never holds a token at all,
+so none of the variables above apply to it. See #371.
 
 ## Building any image requires `docker login ghcr.io` first
 

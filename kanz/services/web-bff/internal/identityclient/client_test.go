@@ -10,12 +10,16 @@ import (
 	"time"
 )
 
-// THIS PACKAGE HAD NO TESTS WHILE IT LIVED IN ONE SERVICE, AND NOW IT HAS TWO
-// CONSUMERS (#364). Its error mapping is not plumbing — each branch is a
-// security decision about what a caller is allowed to learn — and two consumers
-// means a change made for one of them silently reaches the other. So the
-// decisions are pinned here rather than left to whichever caller happens to
-// exercise them.
+// THIS PACKAGE HAD NO TESTS AT ALL (#364). Its error mapping is not plumbing —
+// each branch is a security decision about what a caller is allowed to learn —
+// and nothing pinned any of it.
+//
+// It briefly had a second consumer, the terminal client, which is why it was
+// briefly promoted out of this service. That client is retired and the BFF is
+// alone with it again, which makes these MORE worth having rather than less: a
+// single caller means a change here is reviewed against one call site, and
+// "indistinguishable refusals" is not a property anyone re-derives from reading
+// a login handler.
 
 func serving(t *testing.T, status int, body string) (*Client, *[]*http.Request) {
 	t.Helper()
