@@ -21,6 +21,11 @@ type Memory struct {
 	// so a restatement (same observation_time + kind, newer knowledge_time) is a
 	// distinct entry and an exact re-put overwrites in place (idempotent).
 	byInstrument map[string]map[obsKey]Observation
+
+	// bars is the OHLCV series (#425), keyed by its full bitemporal identity so
+	// a restatement coexists with the original rather than replacing it — the
+	// same contract the Postgres primary key enforces.
+	bars map[barKey]Bar
 }
 
 type obsKey struct {

@@ -30,8 +30,21 @@ import (
 
 // Writer is the store boundary the Ingestor depends on — just the write side,
 // so the ingester can be tested against a fake without the read surface.
+//
+// PutBars IS PART OF THIS INTERFACE, NOT AN OPTION, and that is deliberate
+// (#425). A market.v1.Bar carries open, high, low, close, volume and trade_count;
+// for the platform's whole life ingest kept the close and dropped the rest, and
+// nothing anywhere reported a loss — the series simply did not exist, so no
+// query missed it. Making the bar sink optional would recreate exactly that: an
+// ingestor wired without one would run green while discarding the data every
+// indicator, model feature and backtest is made of.
+//
+// It is one method on one interface with one production implementation. The
+// cost of requiring it is a line in a test fake; the cost of not requiring it is
+// silence.
 type Writer interface {
 	Put(ctx context.Context, obs []store.Observation) error
+	PutBars(ctx context.Context, bars []store.Bar) error
 }
 
 // Ingestor is the bus.EventHandler that folds market.v1 events into the price
@@ -74,6 +87,25 @@ func (i *Ingestor) Handler(ctx context.Context, env *envelopepb.Envelope, payloa
 	obs, err := TranslateEvent(env, &ev)
 	if err != nil {
 		return err
+	}
+	// THE CANDLE IS KEPT WHOLE, AND THE CLOSE IS STILL A MARK.
+	//
+	// Both, not either. The scalar observation above is what the risk and pricing
+	// planes already read as "the mark"; the bar is what an indicator, a model
+	// feature and a backtest are made of. Writing only the first is the defect
+	// #425 exists to close; writing only the second would break every existing
+	// consumer of the price series.
+	//
+	// The bar goes FIRST: if it fails the delivery is nacked and redelivered, and
+	// the observation write is idempotent on its bitemporal key, so a retry
+	// re-runs both harmlessly. The other order would leave a mark with no candle
+	// behind it after a partial failure, which is the silence this is fixing.
+	if bar, ok, err := TranslateBar(env, &ev); err != nil {
+		return err
+	} else if ok {
+		if err := i.writer.PutBars(ctx, []store.Bar{bar}); err != nil {
+			return err
+		}
 	}
 	return i.writer.Put(ctx, []store.Observation{obs})
 }
@@ -133,6 +165,71 @@ func TranslateEvent(env *envelopepb.Envelope, ev *marketpb.MarketDataEvent) (sto
 		return store.Observation{}, fmt.Errorf("marketdata: %s missing price for %s", env.GetEventType(), instrument)
 	}
 	return obs, nil
+}
+
+// TranslateBar turns a market.v1 Bar event into the durable candle (#425).
+//
+// ok IS FALSE FOR A NON-BAR EVENT — a trade or a quote is not a candle, and this
+// is not an error. It is an error only when the event IS a bar and cannot be
+// stored as one, because that is data the platform was given and could not keep.
+//
+// THE INTERVAL DECIDES THE SERIES. market.v1.Bar carries open_time and
+// close_time and no resolution field, so the series is derived from the two. An
+// interval matching no resolution this platform stores is REFUSED rather than
+// filed under an invented name: a 47-second candle is a defect in whatever
+// produced it, and keeping it quietly creates a series nothing queries and
+// nobody knows exists.
+//
+// THE VENUE COMES FROM THE EVENT'S mic, and a bar without one is refused. A
+// candle that cannot be matched to the book an order would execute against is a
+// price the platform cannot honestly trade on (#407, one field over).
+func TranslateBar(env *envelopepb.Envelope, ev *marketpb.MarketDataEvent) (store.Bar, bool, error) {
+	d, isBar := ev.GetData().(*marketpb.MarketDataEvent_Bar)
+	if !isBar {
+		return store.Bar{}, false, nil
+	}
+	b := d.Bar
+	openTime, closeTime := tsToTime(b.GetOpenTime()), tsToTime(b.GetCloseTime())
+	if openTime.IsZero() || closeTime.IsZero() {
+		return store.Bar{}, false, fmt.Errorf("marketdata: %s is a bar with no open_time/close_time, "+
+			"so the interval it covers is unknowable", env.GetEventType())
+	}
+	res, ok := store.ResolutionOf(openTime, closeTime)
+	if !ok {
+		return store.Bar{}, false, fmt.Errorf("marketdata: %s is a bar covering %s, which is not a "+
+			"resolution this platform stores", env.GetEventType(), closeTime.Sub(openTime))
+	}
+	if ev.GetMic() == "" {
+		return store.Bar{}, false, fmt.Errorf("marketdata: %s is a bar with no mic — a candle that "+
+			"cannot be attributed to a venue cannot be matched to the book an order executes against",
+			env.GetEventType())
+	}
+
+	knowTime := tsToTime(env.GetIngestionTime())
+	if knowTime.IsZero() {
+		knowTime = tsToTime(env.GetPublishTime())
+	}
+	if knowTime.IsZero() {
+		knowTime = closeTime
+	}
+
+	bar := store.Bar{
+		InstrumentID:  ev.GetInstrumentId(),
+		Venue:         ev.GetMic(),
+		Resolution:    res,
+		BucketStart:   openTime,
+		Open:          b.GetOpen(),
+		High:          b.GetHigh(),
+		Low:           b.GetLow(),
+		Close:         b.GetClose(),
+		Volume:        b.GetVolume(),
+		TradeCount:    int64(b.GetTradeCount()),
+		KnowledgeTime: knowTime,
+	}
+	if err := bar.Validate(); err != nil {
+		return store.Bar{}, false, fmt.Errorf("marketdata: %s: %w", env.GetEventType(), err)
+	}
+	return bar, true, nil
 }
 
 // TranslateBatch maps a MarketDataBatch to one Observation per event, sharing

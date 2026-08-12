@@ -345,7 +345,10 @@ func feedProducerConfig(cfg config.Config, metrics *bus.BusMetrics) bus.Producer
 // By the time openStore runs, config.Load has already refused to start if the
 // _FILE mount was DECLARED but unreadable (secret.Read), so an empty DSN here
 // can only mean no DSN was ever configured.
-func openStore(ctx context.Context, cfg config.Config, logger *slog.Logger) (store.Store, func(), error) {
+// openStore returns the whole market-data store — the scalar mark series AND
+// the OHLCV bars (#425). The two share the bitemporal contract and one
+// connection; a consumer needing only one half takes the narrower interface.
+func openStore(ctx context.Context, cfg config.Config, logger *slog.Logger) (store.ReadWriter, func(), error) {
 	if cfg.DatabaseURL == "" {
 		logger.Warn("PRICE HISTORY IS IN-MEMORY — no MARKET_DATA_DATABASE_URL (or _FILE mount). Everything "+
 			"folded so far is DISCARDED on the next restart, rollout or eviction, and the risk engine marks "+
