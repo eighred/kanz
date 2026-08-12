@@ -127,6 +127,53 @@ type Options struct {
 	// asked to exit.
 	MaxQuantity Qty
 
+	// MaxSignalAge bounds how old a signal may be when it is acted on. Zero ⇒ NO
+	// BOUND, which is what this platform did until #416.
+	//
+	// THE FAILURE IT PREVENTS. A TradingView alert carries the time the strategy
+	// fired it, and nothing compared that to now. The 5-minute replay window at
+	// the webhook perimeter is NONCE DEDUP, not age: it stops the same alert being
+	// replayed, and says nothing about a first delivery that took thirty minutes.
+	// So an alert delayed by a webhook retry, a network partition or a paused pod
+	// was acted on as if it were current — at the size the strategy chose for a
+	// price that has since moved. The strategy's decision was about a market that
+	// no longer exists, and nothing on the path noticed.
+	//
+	// IT BOUNDS BOTH DIRECTIONS, with the same tolerance. A timestamp far in the
+	// FUTURE is not harmless: "now minus then" is negative, so a future-dated
+	// signal would pass an age check forever, and a sender whose clock is wrong is
+	// a sender whose age we cannot judge at all. Refusing both is one rule to
+	// reason about instead of two.
+	//
+	// A MISSING TIMESTAMP IS NOT REFUSED BY THIS FIELD ALONE — see
+	// RequireSignalTS. The reasoning is worth stating, because the opposite is
+	// the tempting answer: a bound a sender can skip by omitting a field looks
+	// like no bound at all.
+	//
+	// It is not, HERE, because of who the senders are. Every alert is
+	// HMAC-authenticated with a per-strategy secret, so a party able to omit `ts`
+	// is a party that could equally have sent a FRESH one — refusing the omission
+	// buys nothing against them. And the failure this exists to stop is not a
+	// forged alert: it is a DELAYED one, a webhook retry or a partition or a
+	// paused pod, and a delayed alert carries the timestamp TradingView put on it.
+	// The bound catches exactly that.
+	//
+	// What refusing WOULD do is break every strategy whose alert template omits a
+	// field the webhook contract still calls "advisory only". So the absence is
+	// counted and named instead, and RequireSignalTS turns it into a refusal once
+	// the templates carry it — the OMS_REQUIRE_VERIFIED_ACCOUNT stance, unchanged.
+	MaxSignalAge time.Duration
+
+	// RequireSignalTS refuses a signal that carries no source timestamp at all.
+	//
+	// OFF BY DEFAULT, and armed with the strategies in hand. Every alert without a
+	// timestamp is one whose age nothing can judge, so the estate should end up
+	// here — but a control that refuses every strategy nobody has updated yet is a
+	// trading outage, and this platform arms that kind of control deliberately
+	// rather than by default. Until then the perimeter counts them, so "how much
+	// of our flow is unjudgeable" is a number rather than a silence.
+	RequireSignalTS bool
+
 	// TenantOf maps a fund to its tenant_id; nil ⇒ the fund_id is the tenant.
 	TenantOf func(fundID string) string
 	Now      func() time.Time
@@ -192,6 +239,14 @@ func (t *Translator) Emit(ctx context.Context, in Intent) (*Result, error) {
 	if err := in.validate(); err != nil {
 		return nil, err
 	}
+	// HOW OLD IS THIS DECISION? (#416)
+	//
+	// Checked here, beside the kill-switch and before the FACT is recorded,
+	// because a stale signal must leave no audit root claiming the platform acted
+	// on it — the same reasoning the size bound above documents.
+	if err := t.freshEnough(in); err != nil {
+		return nil, err
+	}
 	tenant := t.opt.TenantOf(in.FundID)
 	ctx = bus.WithCorrelationID(ctx, in.SignalID)
 
@@ -250,6 +305,42 @@ func ratString(r *big.Rat) string {
 
 // validate is the deny-by-default gate: an intent missing an identity, a
 // direction, or a positive size never reaches a venue.
+// freshEnough refuses a signal whose source timestamp is outside
+// Options.MaxSignalAge in either direction.
+//
+// UNBOUNDED IS STILL A CHOICE, not an oversight: a zero MaxSignalAge preserves
+// the behaviour every caller had before this existed, so adding the field does
+// not silently start refusing live traffic. The deployments set a real bound;
+// see webhook-ingest's config, where the DEFAULT is a bound rather than zero.
+func (t *Translator) freshEnough(in Intent) error {
+	max := t.opt.MaxSignalAge
+	if max <= 0 {
+		return nil
+	}
+	if in.SourceTS == nil {
+		if !t.opt.RequireSignalTS {
+			// Unjudgeable, and allowed on purpose (see MaxSignalAge). The perimeter
+			// counts these; this function's job is not to make that decision twice.
+			return nil
+		}
+		return fmt.Errorf("%w: no source timestamp, and this deployment requires one — the age of "+
+			"this decision cannot be established, so it cannot be shown to be current",
+			ErrStaleSignal)
+	}
+	age := t.opt.Now().Sub(in.SourceTS.AsTime())
+	if age > max {
+		return fmt.Errorf("%w: fired %s ago, bound is %s. The strategy decided against a market "+
+			"that has moved since; acting now would place its ORIGINAL size at a price it never saw",
+			ErrStaleSignal, age.Round(time.Second), max)
+	}
+	if -age > max {
+		return fmt.Errorf("%w: timestamped %s in the FUTURE, bound is %s. A clock that far out makes "+
+			"the age of every signal from this sender unjudgeable — and a future-dated one would "+
+			"never expire", ErrStaleSignal, (-age).Round(time.Second), max)
+	}
+	return nil
+}
+
 func (in Intent) validate() error {
 	switch {
 	case in.SignalID == "" || in.StrategyID == "" || in.FundID == "" || in.InstrumentID == "":
@@ -527,4 +618,9 @@ var (
 	// ErrHalted is returned when the kill-switch is closed. Both front ends map it
 	// to their own surface (the webhook perimeter answers 423 Locked).
 	ErrHalted = errors.New("translate: trading halted")
+	// ErrStaleSignal is returned when the intent's source timestamp is outside
+	// Options.MaxSignalAge. Distinct from ErrInvalidIntent because the intent is
+	// well-formed and was legitimate WHEN IT WAS SENT — what the platform refuses
+	// is acting on it now.
+	ErrStaleSignal = errors.New("translate: signal is too old to act on")
 )

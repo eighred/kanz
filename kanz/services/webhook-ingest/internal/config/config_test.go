@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/eighred/kanz/services/webhook-ingest/internal/ingest"
 )
@@ -141,5 +142,56 @@ func TestLoad_MissingConfigFails(t *testing.T) {
 	t.Setenv("WEBHOOK_INGEST_CONFIG", "")
 	if _, err := Load(); err == nil {
 		t.Fatal("expected an error when WEBHOOK_INGEST_CONFIG is unset")
+	}
+}
+
+// THE FRESHNESS BOUND SHIPS ARMED (#416).
+//
+// A safety control that defaults to disabled and waits for someone to set it is
+// the shape of every "we had the fix but it was not turned on" incident. This
+// pins the default so it cannot drift back to zero unnoticed.
+func TestMaxSignalAgeDefaultsToARealBound(t *testing.T) {
+	t.Setenv("WEBHOOK_INGEST_MAX_SIGNAL_AGE", "")
+
+	cfg, err := loadWith(t, bootstrapJSON)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.MaxSignalAge <= 0 {
+		t.Fatal("MaxSignalAge defaults to unbounded. A thirty-minute-old alert then executes at " +
+			"full size on a fresh deployment, which is the defect #416 exists to close.")
+	}
+	if cfg.MaxSignalAge > 5*time.Minute {
+		t.Errorf("MaxSignalAge defaults to %s — a bound that loose readmits the delayed-retry case "+
+			"it exists to refuse", cfg.MaxSignalAge)
+	}
+}
+
+// It can still be turned OFF, and that has to be an explicit act rather than an
+// omission.
+func TestMaxSignalAgeCanBeDisabledExplicitly(t *testing.T) {
+	t.Setenv("WEBHOOK_INGEST_MAX_SIGNAL_AGE", "0")
+
+	cfg, err := loadWith(t, bootstrapJSON)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.MaxSignalAge != 0 {
+		t.Errorf("MaxSignalAge = %s with an explicit 0", cfg.MaxSignalAge)
+	}
+}
+
+// Requiring a timestamp is OFF by default: armed, it takes every strategy whose
+// alert template omits the field offline, and the field is still advisory in the
+// webhook contract.
+func TestRequireSignalTSDefaultsOff(t *testing.T) {
+	t.Setenv("WEBHOOK_INGEST_REQUIRE_SIGNAL_TS", "")
+
+	cfg, err := loadWith(t, bootstrapJSON)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.RequireSignalTS {
+		t.Error("RequireSignalTS defaults ON — every strategy that omits ts stops trading on upgrade")
 	}
 }

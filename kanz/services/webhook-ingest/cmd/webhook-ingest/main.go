@@ -9,6 +9,7 @@ package main
 import (
 	"context"
 	"errors"
+	"github.com/prometheus/client_golang/prometheus"
 	"log/slog"
 	"net/http"
 	"os"
@@ -183,18 +184,37 @@ func run() int {
 
 	auth := ingest.NewAuthenticator(cfg.Secrets, cfg.Allowlist, cfg.ReplayWindow, time.Now,
 		ingest.WithNonceStore(nonces))
+	// Alerts arriving with no `ts` (#416). Each one is acted on without its age
+	// being checked, because the field is still advisory in the webhook contract
+	// and refusing would take every un-updated strategy offline. Non-zero means
+	// the freshness bound is not covering that strategy's flow.
+	unstamped := prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "kanz_webhook_unstamped_signals_total",
+		Help: "Alerts accepted with no source timestamp, by strategy. Their age cannot be checked, " +
+			"so a delayed delivery from these strategies still executes at full size.",
+	}, []string{"strategy_id"})
+	obs.Registry.MustRegister(unstamped)
+
 	pipeline, err := ingest.NewPipeline(ingest.Options{
-		Auth:         auth,
-		Symbols:      cfg.Symbols,
-		Prices:       cfg.Prices,
-		Equity:       cfg.Equity,
-		Positions:    positions, // the fund's REAL per-venue book (EXEC-M19b)
-		Alloc:        cfg.Alloc,
-		Publisher:    producer,
-		Gate:         gate,
-		MaxQuantity:  cfg.MaxQuantity,
-		MaxLeverage:  cfg.MaxLeverage,
-		ReplayWindow: cfg.ReplayWindow,
+		Auth:            auth,
+		Symbols:         cfg.Symbols,
+		Prices:          cfg.Prices,
+		Equity:          cfg.Equity,
+		Positions:       positions, // the fund's REAL per-venue book (EXEC-M19b)
+		Alloc:           cfg.Alloc,
+		Publisher:       producer,
+		Gate:            gate,
+		MaxQuantity:     cfg.MaxQuantity,
+		MaxLeverage:     cfg.MaxLeverage,
+		ReplayWindow:    cfg.ReplayWindow,
+		MaxSignalAge:    cfg.MaxSignalAge,
+		RequireSignalTS: cfg.RequireSignalTS,
+		// NAMED, NOT JUST COUNTED. A bare total would say the estate has alerts
+		// whose age nothing can judge without saying which strategies to fix, and
+		// WEBHOOK_INGEST_REQUIRE_SIGNAL_TS cannot be armed until that list is empty.
+		OnUnstampedSignal: func(strategyID string) {
+			unstamped.WithLabelValues(strategyID).Inc()
+		},
 	})
 	if err != nil {
 		logger.Error("pipeline init failed", "err", err)

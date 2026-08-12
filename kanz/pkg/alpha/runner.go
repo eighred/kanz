@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"google.golang.org/protobuf/types/known/timestamppb"
 	"log/slog"
 	"math/big"
 	"sync"
@@ -282,6 +283,12 @@ func (r *Runner) emit(ctx context.Context, engineName string, in Intent) error {
 		LimitPrice:   in.LimitPrice,
 		TimeInForce:  in.TimeInForce,
 		Source:       signalpb.SignalSource_SIGNAL_SOURCE_NATIVE_ENGINE,
+		// STAMPED WITH OUR OWN CLOCK (#416). A native decision is made HERE, in
+		// this tick, so its source time is now — and saying so is what lets the
+		// translator's freshness bound judge it at all. Left unset, every native
+		// signal would be refused the moment a bound is configured, which would
+		// read as the alpha path breaking rather than as this field missing.
+		SourceTS: timestamppb.New(r.cfg.Now()),
 	})
 	return err
 }

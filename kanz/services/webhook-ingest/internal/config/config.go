@@ -39,7 +39,30 @@ type Config struct {
 	Source  string
 
 	ReplayWindow time.Duration
-	Allowlist    []*net.IPNet
+
+	// MaxSignalAge bounds how old a TradingView alert may be when it is acted on
+	// (#416).
+	//
+	// IT IS NOT THE REPLAY WINDOW ABOVE, and conflating them is the bug. The
+	// replay window is NONCE DEDUP: it stops the same alert being delivered twice.
+	// It says nothing about a FIRST delivery that took thirty minutes — and that
+	// alert was acted on at the size the strategy chose for a price that has since
+	// moved, with nothing on the path noticing.
+	//
+	// DEFAULTED TO A REAL BOUND, not to zero. A safety control that ships disabled
+	// and waits for someone to set it is the shape of every "we had the fix but it
+	// was not turned on" incident. Two minutes is generous for a webhook retry and
+	// for modest clock skew, and far short of the delay that makes a stale alert
+	// dangerous. Set it explicitly to "0" to disable — that is then a decision
+	// someone took, not one they inherited.
+	MaxSignalAge time.Duration
+
+	// RequireSignalTS refuses an alert that carries no `ts` at all. Off by
+	// default: every strategy whose template omits it would stop trading, and the
+	// webhook contract still calls the field advisory. Arm it once
+	// kanz_webhook_unstamped_signals_total names no strategies.
+	RequireSignalTS bool
+	Allowlist       []*net.IPNet
 
 	// RedisURL backs the CROSS-POD nonce store (EXEC-M17). The nonce cache is the
 	// replay defence at the internet-facing perimeter, and in-process it is per-pod:
@@ -119,14 +142,16 @@ func Load() (Config, error) {
 	}
 
 	cfg := Config{
-		Listen:         envOr("WEBHOOK_INGEST_LISTEN", ":8090"),
-		LogLevel:       parseLevel(os.Getenv("WEBHOOK_INGEST_LOG_LEVEL")),
-		OTLPEndpoint:   os.Getenv("WEBHOOK_INGEST_OTLP_ENDPOINT"),
-		SPIFFESocket:   os.Getenv("SPIFFE_ENDPOINT_SOCKET"),
-		NATSURL:        envOr("WEBHOOK_INGEST_NATS_URL", "nats://localhost:4222"),
-		Source:         envOr("WEBHOOK_INGEST_SOURCE", "webhook-ingest"),
-		ReplayWindow:   parseDuration(os.Getenv("WEBHOOK_INGEST_REPLAY_WINDOW"), 5*time.Minute),
-		CloudflareOnly: os.Getenv("WEBHOOK_INGEST_CLOUDFLARE_ONLY") == "1",
+		Listen:          envOr("WEBHOOK_INGEST_LISTEN", ":8090"),
+		LogLevel:        parseLevel(os.Getenv("WEBHOOK_INGEST_LOG_LEVEL")),
+		OTLPEndpoint:    os.Getenv("WEBHOOK_INGEST_OTLP_ENDPOINT"),
+		SPIFFESocket:    os.Getenv("SPIFFE_ENDPOINT_SOCKET"),
+		NATSURL:         envOr("WEBHOOK_INGEST_NATS_URL", "nats://localhost:4222"),
+		Source:          envOr("WEBHOOK_INGEST_SOURCE", "webhook-ingest"),
+		ReplayWindow:    parseDuration(os.Getenv("WEBHOOK_INGEST_REPLAY_WINDOW"), 5*time.Minute),
+		MaxSignalAge:    parseSignalAge(os.Getenv("WEBHOOK_INGEST_MAX_SIGNAL_AGE"), 2*time.Minute),
+		RequireSignalTS: os.Getenv("WEBHOOK_INGEST_REQUIRE_SIGNAL_TS") == "true",
+		CloudflareOnly:  os.Getenv("WEBHOOK_INGEST_CLOUDFLARE_ONLY") == "1",
 
 		RedisURL:            redisURL,
 		AllowInProcessNonce: os.Getenv("WEBHOOK_INGEST_ALLOW_INPROCESS_NONCE") == "true",
@@ -265,6 +290,30 @@ func envOr(key, def string) string {
 		return v
 	}
 	return def
+}
+
+// parseSignalAge reads the freshness bound, and it does NOT use parseDuration
+// below — because that function maps every non-positive value to its default.
+//
+// That rule is right for the replay window (a zero-length nonce cache is
+// nonsense, and a typo must not silently disable dedup) and wrong here, where
+// zero is a MEANINGFUL value: it turns the bound off. Sharing the parser made
+// this setting undisableable while its own documentation said otherwise — a
+// comment that lied about the code beside it, which is the shape this repository
+// treats as a defect in its own right.
+//
+// An UNPARSEABLE value still falls back to the default, deliberately: a typo
+// must not disable a safety bound. Only an explicit, valid zero does.
+func parseSignalAge(s string, def time.Duration) time.Duration {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return def
+	}
+	d, err := time.ParseDuration(s)
+	if err != nil || d < 0 {
+		return def
+	}
+	return d // 0 ⇒ disabled, and that is an explicit act
 }
 
 func parseDuration(s string, def time.Duration) time.Duration {

@@ -153,6 +153,25 @@ spec:
             - { name: SPIFFE_ENDPOINT_SOCKET, value: "unix:///run/spiffe/spire-agent.sock" }
             # The nonce replay window. A signal replayed outside it is refused.
             - { name: WEBHOOK_INGEST_REPLAY_WINDOW, value: "5m" }
+            # HOW OLD AN ALERT MAY BE WHEN IT IS ACTED ON (#416).
+            #
+            # NOT THE SAME THING AS THE REPLAY WINDOW ABOVE, and conflating them
+            # was the bug. That window is nonce dedup — it stops the SAME alert
+            # arriving twice. It says nothing about a FIRST delivery that took
+            # thirty minutes, and such an alert was executed at the size the
+            # strategy chose for a price that had since moved.
+            #
+            # Two minutes is generous for a webhook retry and for modest clock
+            # skew, and far short of the delay that makes an alert dangerous. It
+            # is set here as well as defaulted in code so the value is visible to
+            # whoever reads this file rather than only to whoever reads config.go.
+            - { name: WEBHOOK_INGEST_MAX_SIGNAL_AGE, value: "2m" }
+            # An alert with no `ts` at all cannot be aged. Refusing those is a
+            # separate switch because the field is still advisory in the webhook
+            # contract, so arming it would stop every strategy whose template
+            # omits it. kanz_webhook_unstamped_signals_total names those
+            # strategies; arm this once it reports none.
+            # - { name: WEBHOOK_INGEST_REQUIRE_SIGNAL_TS, value: "true" }
             # THE REPLAY DEFENCE'S STORE — now CROSS-POD (EXEC-M17 wrote it, EXEC-M22
             # landed the Redis it was waiting for).
             #
