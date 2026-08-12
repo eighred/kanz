@@ -181,17 +181,50 @@ func TestMaxSignalAgeCanBeDisabledExplicitly(t *testing.T) {
 	}
 }
 
-// Requiring a timestamp is OFF by default: armed, it takes every strategy whose
-// alert template omits the field offline, and the field is still advisory in the
-// webhook contract.
-func TestRequireSignalTSDefaultsOff(t *testing.T) {
+// REQUIRING A TIMESTAMP IS ON BY DEFAULT (owner ruling, 2026-08-12).
+//
+// An alert with no `ts` has no age, so the freshness bound cannot judge it — and
+// a rule a sender opts out of by omitting a field is not a rule. It defaults ON
+// because no strategies were live when this landed: making `ts` mandatory BEFORE
+// onboarding costs nothing, while tightening it later means choosing a day to
+// break whichever senders never sent it.
+func TestRequireSignalTSDefaultsOn(t *testing.T) {
 	t.Setenv("WEBHOOK_INGEST_REQUIRE_SIGNAL_TS", "")
 
 	cfg, err := loadWith(t, bootstrapJSON)
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
+	if !cfg.RequireSignalTS {
+		t.Error("RequireSignalTS defaults OFF — an alert with no timestamp is admitted, and the " +
+			"freshness bound has nothing to judge it against")
+	}
+}
+
+// It can be relaxed EXPLICITLY, for onboarding a sender that cannot stamp its
+// alerts yet.
+func TestRequireSignalTSCanBeRelaxedExplicitly(t *testing.T) {
+	t.Setenv("WEBHOOK_INGEST_REQUIRE_SIGNAL_TS", "false")
+
+	cfg, err := loadWith(t, bootstrapJSON)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
 	if cfg.RequireSignalTS {
-		t.Error("RequireSignalTS defaults ON — every strategy that omits ts stops trading on upgrade")
+		t.Error("an explicit false did not relax the requirement")
+	}
+}
+
+// A TYPO KEEPS THE STRICT DEFAULT. "ture" must not quietly relax a trading
+// control — the same rule parseSignalAge applies to an unparseable duration.
+func TestATypoKeepsTheStrictDefault(t *testing.T) {
+	t.Setenv("WEBHOOK_INGEST_REQUIRE_SIGNAL_TS", "ture")
+
+	cfg, err := loadWith(t, bootstrapJSON)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !cfg.RequireSignalTS {
+		t.Error("a typo relaxed the requirement — a misspelled value must never disable a control")
 	}
 }

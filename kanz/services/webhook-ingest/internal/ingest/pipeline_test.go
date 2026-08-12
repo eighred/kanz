@@ -82,7 +82,32 @@ func harness(t *testing.T) (*Pipeline, *capture) {
 	return p, cap
 }
 
+// body builds a well-formed alert.
+//
+// IT CARRIES A FRESH `ts`, because #416 made that field mandatory: an alert with
+// no timestamp has no age, the freshness bound cannot judge it, and it is
+// refused. Every test using this helper is about something else — a size cap, a
+// nonce, a fan-out — so each needs an alert that is otherwise beyond reproach.
+// unstampedBody below is for the tests that are about the missing field itself.
 func body(action, size, sizeType, nonce string) string {
+	return stampedAt(action, size, sizeType, nonce, time.Now().UTC())
+}
+
+func stampedAt(action, size, sizeType, nonce string, ts time.Time) string {
+	return `{"strategy_id":"momentum","fund_id":"fund-alpha","symbol":"BINANCE:BTCUSDT",` +
+		`"action":"` + action + `","size":"` + size + `","size_type":"` + sizeType + `","nonce":"` + nonce + `",` +
+		`"ts":"` + ts.Format(time.RFC3339) + `"}`
+}
+
+// freshTS closes a hand-written alert literal with a current timestamp. #416
+// made `ts` mandatory, so a fixture written before it is now refused for the
+// missing field rather than exercising whatever it was written to test.
+func freshTS() string {
+	return `"ts":"` + time.Now().UTC().Format(time.RFC3339) + `"}`
+}
+
+// unstampedBody omits `ts` entirely — the shape the platform now refuses.
+func unstampedBody(action, size, sizeType, nonce string) string {
 	return `{"strategy_id":"momentum","fund_id":"fund-alpha","symbol":"BINANCE:BTCUSDT",` +
 		`"action":"` + action + `","size":"` + size + `","size_type":"` + sizeType + `","nonce":"` + nonce + `"}`
 }
@@ -282,7 +307,7 @@ func TestUnknownSymbolRejected(t *testing.T) {
 
 func TestUnmappedFundDenied(t *testing.T) {
 	p, _ := harness(t)
-	raw := `{"strategy_id":"momentum","fund_id":"ghost-fund","symbol":"BINANCE:BTCUSDT","action":"buy","size":"1","size_type":"absolute_qty","nonce":"n8"}`
+	raw := `{"strategy_id":"momentum","fund_id":"ghost-fund","symbol":"BINANCE:BTCUSDT","action":"buy","size":"1","size_type":"absolute_qty","nonce":"n8",` + freshTS()
 	_, err := p.Process(context.Background(), []byte(raw), net.ParseIP("10.0.0.1"), sign(raw, testSecret))
 	if !errors.Is(err, ErrNoAllocation) {
 		t.Fatalf("unmapped fund = %v, want ErrNoAllocation", err)

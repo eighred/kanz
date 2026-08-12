@@ -43,10 +43,11 @@ type Options struct {
 	// and fanned out 1,800 BTC (#240). The type change is the point: translate.Qty
 	// cannot be compared against Intent.Size, so the old check no longer compiles.
 	MaxQuantity translate.Qty
-	// RequireSignalTS refuses an alert carrying no `ts`. Off by default; see
-	// translate.Options.RequireSignalTS for why the absence is counted rather
-	// than refused until an operator arms it.
-	RequireSignalTS bool
+	// AllowUnstampedSignal accepts an alert carrying no `ts`. The zero value
+	// REFUSES, which is the safe direction: forgetting this field must not exempt
+	// a deployment from the freshness bound. See
+	// translate.Options.AllowUnstampedSignal.
+	AllowUnstampedSignal bool
 
 	// OnUnstampedSignal is called for every alert that arrives with no `ts`, with
 	// the strategy that sent it. Nil ⇒ not counted.
@@ -111,9 +112,9 @@ func NewPipeline(opt Options) (*Pipeline, error) {
 	}
 	tr, err := translate.New(translate.Options{
 		Prices: opt.Prices, Equity: opt.Equity, Positions: opt.Positions,
-		MaxSignalAge:    maxAge,
-		RequireSignalTS: opt.RequireSignalTS,
-		Alloc:           opt.Alloc, Publisher: opt.Publisher, Gate: opt.Gate,
+		MaxSignalAge:         maxAge,
+		AllowUnstampedSignal: opt.AllowUnstampedSignal,
+		Alloc:                opt.Alloc, Publisher: opt.Publisher, Gate: opt.Gate,
 		MaxQuantity: opt.MaxQuantity,
 		TenantOf:    opt.TenantOf, Now: opt.Now,
 	})
@@ -229,10 +230,10 @@ func (p *Pipeline) decide(ctx context.Context, wh *Webhook) (*Result, error) {
 	if err != nil {
 		return nil, err
 	}
-	// AN ALERT WITH NO TIME IS ONE WHOSE AGE NOTHING CAN JUDGE. It is accepted
-	// (see translate.Options.MaxSignalAge) and it is NOT silent: counted per
-	// strategy, so the templates that still need updating are nameable before
-	// WEBHOOK_INGEST_REQUIRE_SIGNAL_TS is armed on them.
+	// AN ALERT WITH NO TIME IS ONE WHOSE AGE NOTHING CAN JUDGE, and it is refused
+	// by default. Counted per strategy REGARDLESS of the outcome, because the
+	// operator's question is the same either way: which sender is misconfigured?
+	// A refusal buried in a 400 response reaches the sender, not us.
 	if sourceTS == nil && p.opt.OnUnstampedSignal != nil {
 		p.opt.OnUnstampedSignal(wh.StrategyID)
 	}
