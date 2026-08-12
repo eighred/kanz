@@ -571,9 +571,21 @@ data:
           # it is out of scope for this derivation; if it is ever run under
           # this SVID, this grant will deny it at publish time and this
           # comment is the pointer to why.
+          #
+          # SECOND PUBLISHER, ADDED WITH #425: internal/marketedge/bars folds the
+          # same trade feeds into 1-minute candles and publishes
+          # market.crypto.bar — the producer ohlcv_bars was missing, without
+          # which that table stays empty. It rides the existing market.crypto.*
+          # subject space (market.crypto.trade already uses it), so it needs no
+          # new Kafka topic and no new archival decision. The grant is derived by
+          # test/arch's TestServicePublishesOnlySubjectsItsTenancyPermissionsAllow
+          # from internal/marketedge/bars, which had to be added to that test's
+          # package list: the derivation is per-package and was passing by not
+          # looking, which would have surfaced as a NATS permissions denial in
+          # production behind a green suite.
           { user: "spiffe://kanz.internal/ns/kanz-services/sa/market-ingest"
             permissions: {
-              publish: { allow: ["market.book.snapshot"] }
+              publish: { allow: ["market.book.snapshot", "market.crypto.bar"] }
               subscribe: { allow: ["_INBOX.>"] }
             }
           }

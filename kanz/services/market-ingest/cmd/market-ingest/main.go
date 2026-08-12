@@ -139,8 +139,18 @@ func run() int {
 		return 2
 	}
 	runner, err := alpha.New(alpha.Config{
-		Feeds:            srcs,
-		Publisher:        publishHealth,
+		Feeds:     srcs,
+		Publisher: publishHealth,
+		// THE CANDLE PRODUCER (#425). Same producer, named separately so turning
+		// candles on is a deliberate act here rather than a side effect of having
+		// a bus.
+		//
+		// This is what makes ohlcv_bars a series rather than an empty table: the
+		// four live trade tapes this binary already folds were discarded after a
+		// minute, while market-data stored bars that nothing in production
+		// published. The store, the ticks and the schema all existed; nothing
+		// joined them.
+		Bars:             publishHealth,
 		TradeRetention:   cfg.TradeRetention,
 		SnapshotInterval: cfg.SnapshotInterval,
 		SnapshotDepth:    cfg.SnapshotDepth,

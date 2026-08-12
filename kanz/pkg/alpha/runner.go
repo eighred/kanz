@@ -12,6 +12,7 @@ import (
 
 	signalpb "github.com/eighred/kanz/kanz-schemas-go/signal/v1"
 
+	"github.com/eighred/kanz/internal/marketedge/bars"
 	"github.com/eighred/kanz/internal/marketedge/book"
 	"github.com/eighred/kanz/internal/marketedge/depth"
 	"github.com/eighred/kanz/internal/marketedge/ingest"
@@ -72,6 +73,15 @@ type Config struct {
 	TickInterval time.Duration
 	// TradeRetention bounds the trade tape. <=0 ⇒ 1m.
 	TradeRetention time.Duration
+	// Bars publishes 1-minute OHLCV candles folded from the trade feeds (#425).
+	// Nil ⇒ no candles are produced and the bar store stays empty, which is what
+	// this platform did until now.
+	//
+	// It is a SEPARATE field from Publisher, even though both end up on the same
+	// producer, so that turning candles on is a deliberate act at the composition
+	// root rather than a side effect of having a bus.
+	Bars bars.Publisher
+
 	// SnapshotInterval / SnapshotDepth govern the bounded book snapshots published
 	// for durable replay and audit (the only depth that reaches the bus).
 	SnapshotInterval time.Duration
@@ -90,6 +100,7 @@ type Runner struct {
 	views  []MarketView
 	books  []*book.Book
 	tapes  []*trades.Tape
+	bars   *bars.Collector
 	logger *slog.Logger
 	// halted is the last observed gate state, for edge-triggered logging. Owned by
 	// the tick goroutine.
@@ -143,6 +154,9 @@ func New(cfg Config) (*Runner, error) {
 		r.tapes = append(r.tapes, tp)
 		r.views = append(r.views, &view{book: b, tape: tp})
 	}
+	if cfg.Bars != nil {
+		r.bars = bars.NewCollector(cfg.Bars, cfg.MarketDataTenant, r.logger)
+	}
 	return r, nil
 }
 
@@ -175,6 +189,14 @@ func (r *Runner) Run(ctx context.Context) error {
 
 		// Trade tape fold. Optional: no source ⇒ the volume side stays empty.
 		if f.Trades != nil {
+			// THE COLLECTOR TEES OFF THIS FEED rather than consuming it: a
+			// TradeSource has exactly one reader, and two Recv loops would each
+			// see half the prints and each build a candle that looked plausible
+			// and was wrong.
+			src := f.Trades
+			if r.bars != nil {
+				src = bars.Tee(src, bars.Series{InstrumentID: f.InstrumentID, Venue: f.MIC}, r.bars)
+			}
 			wg.Add(1)
 			go func(src trades.TradeSource, inst, mic string) {
 				defer wg.Done()
@@ -182,7 +204,7 @@ func (r *Runner) Run(ctx context.Context) error {
 					r.logger.Error("trade fold stopped", "instrument", inst, "venue", mic, "err", err)
 					errc <- err
 				}
-			}(f.Trades, f.InstrumentID, f.MIC)
+			}(src, f.InstrumentID, f.MIC)
 		}
 	}
 
@@ -191,6 +213,23 @@ func (r *Runner) Run(ctx context.Context) error {
 		defer wg.Done()
 		r.tickLoop(ctx)
 	}()
+
+	// THE BAR FLUSH GETS ITS OWN LOOP, and that is not tidiness.
+	//
+	// tickLoop returns immediately when no engines are registered (see its first
+	// line), and market-ingest — the binary that actually has the trade feeds —
+	// registers NONE. Hooking the flush there would have produced a candle
+	// publisher that closes a bucket only when the next trade happens to arrive,
+	// and never at all on a quiet series, in exactly the deployment it was built
+	// for. The failure would have been invisible: a thin instrument would simply
+	// have fewer bars than it should.
+	if r.bars != nil {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			r.barFlushLoop(ctx)
+		}()
+	}
 
 	// Surface the first fatal feed error; otherwise run until cancelled.
 	var fatal error
@@ -206,6 +245,31 @@ func (r *Runner) Run(ctx context.Context) error {
 // tickLoop evaluates the engines against the live views. It is a no-op when no
 // engine is registered — Kanz's open binary folds and snapshots, and decides
 // nothing.
+// barFlushInterval is how often a completed minute is swept up.
+//
+// Well under the 1-minute resolution, because Flush only closes buckets that are
+// STRICTLY in the past: sweeping often costs nothing and bounds how long a
+// finished candle sits unpublished on a series whose next trade may be minutes
+// away.
+const barFlushInterval = 5 * time.Second
+
+func (r *Runner) barFlushLoop(ctx context.Context) {
+	t := time.NewTicker(barFlushInterval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			// A LAST SWEEP ON THE WAY OUT. Without it the minute in progress at
+			// shutdown is lost — and on a rollout that is one missing candle per
+			// series per deploy, which reads downstream as a quiet market.
+			r.bars.Flush(context.WithoutCancel(ctx), r.cfg.Now())
+			return
+		case <-t.C:
+			r.bars.Flush(ctx, r.cfg.Now())
+		}
+	}
+}
+
 func (r *Runner) tickLoop(ctx context.Context) {
 	if len(r.cfg.Engines) == 0 {
 		return

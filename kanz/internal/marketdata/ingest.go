@@ -223,6 +223,16 @@ func TranslateBar(env *envelopepb.Envelope, ev *marketpb.MarketDataEvent) (store
 			env.GetEventType())
 	}
 
+	// KNOWN DEFECT, TRACKED — #427. The last fallback is not a missing value
+	// being filled in, it is a CLAIM, and the most optimistic one available: that
+	// Kanz knew the candle the instant the market produced it. Every as-of read
+	// then treats a late arrival as though it had been knowable live.
+	//
+	// It matches TranslateEvent deliberately rather than being fixed here. The two
+	// must change together or price_observations and ohlcv_bars would disagree
+	// about what an unstamped envelope means, which is worse than one consistent
+	// wrong answer. #416 already settled the principle one layer over: refuse,
+	// do not substitute.
 	knowTime := tsToTime(env.GetIngestionTime())
 	if knowTime.IsZero() {
 		knowTime = tsToTime(env.GetPublishTime())
