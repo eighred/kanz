@@ -78,9 +78,13 @@ func TestPerimeter_CapBitesInTheResolvedUnit(t *testing.T) {
 // silently mis-executing.
 func TestPerimeter_LeverageIsRefusedNotDropped(t *testing.T) {
 	p, cap := cappedHarness(t, nil)
+	// The `ts` matters MORE on a refusal fixture than on an accepting one. Without
+	// it, #416's mandatory-timestamp rule refuses this alert before the leverage
+	// check is ever reached — the assertion below still passes, on the wrong
+	// refusal, and would keep passing if the leverage guard were deleted outright.
 	raw := `{"strategy_id":"momentum","fund_id":"fund-alpha","symbol":"BINANCE:BTCUSDT",` +
 		`"action":"buy","size":"100000","size_type":"quote_notional","leverage":"10",` +
-		`"margin_mode":"cross","nonce":"lev-1"}`
+		`"margin_mode":"cross","nonce":"lev-1",` + freshTS()
 	if _, err := process(t, p, raw); !errors.Is(err, ErrBadRequest) {
 		t.Fatalf("leverage=10 = %v, want ErrBadRequest — accepting it submits an UNLEVERED order "+
 			"while the audit root asserts 10x", err)
@@ -92,8 +96,11 @@ func TestPerimeter_LeverageIsRefusedNotDropped(t *testing.T) {
 
 func TestPerimeter_MarginModeAloneIsRefused(t *testing.T) {
 	p, _ := cappedHarness(t, nil)
+	// Stamped for the same reason as the leverage fixture above: an unstamped alert
+	// is refused before margin_mode is looked at, so the assertion would hold
+	// against a build with no margin_mode check at all.
 	raw := `{"strategy_id":"momentum","fund_id":"fund-alpha","symbol":"BINANCE:BTCUSDT",` +
-		`"action":"buy","size":"1","size_type":"absolute_qty","margin_mode":"isolated","nonce":"mm-1"}`
+		`"action":"buy","size":"1","size_type":"absolute_qty","margin_mode":"isolated","nonce":"mm-1",` + freshTS()
 	if _, err := process(t, p, raw); !errors.Is(err, ErrBadRequest) {
 		t.Fatalf("margin_mode=isolated = %v, want ErrBadRequest — SubmitOrder carries no margin "+
 			"mode, so the order placed is spot while the FACT claims margin", err)

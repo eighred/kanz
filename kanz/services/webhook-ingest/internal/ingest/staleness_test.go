@@ -119,6 +119,68 @@ func TestPerimeter_AnUnstampedAlertIsRefusedAndCounted(t *testing.T) {
 	}
 }
 
+// A STALE ALERT IS A VERDICT: 400, AND THE NONCE BURNS.
+//
+// It answered 502 Bad Gateway. ErrStaleSignal was the one refusal mapTranslateErr
+// did not re-map, so it fell to the server's default arm — the one reserved for
+// "a real backend fault". Three things followed, and the third is the expensive
+// one:
+//
+//	It blamed us. A misconfigured sender's alert read as kanz being broken, and
+//	  502 is what an operator pages on. The template that needs fixing is the
+//	  sender's.
+//	IT IS RETRYABLE, AND 4xx IS NOT. Every webhook sender and proxy retries a 5xx.
+//	  So the alerts that retry hardest are exactly the delayed ones — the ones
+//	  already too old to act on — and each retry is refused and retried again.
+//	THE NONCE DID NOT BURN, so nothing collapsed that storm either: `decided`
+//	  admits only ErrHalted and ErrBadRequest, so each redelivery was released and
+//	  re-entered the whole pipeline instead of answering ErrReplayed.
+//
+// A halt already burns the nonce for the reason given on `decided`: an alert that
+// fired before a halt is stale once it clears, and re-firing it into a moved
+// market is worse than dropping it. A STALE ALERT IS THAT ARGUMENT DIRECTLY — it
+// is not "we could not decide", it is "we decided, and the answer is no".
+func TestPerimeter_AStaleAlertIs400AndBurnsItsNonce(t *testing.T) {
+	p, cap := agedHarness(t, 2*time.Minute, alertFired.Add(30*time.Minute), false)
+	raw := stampedBody("stale-verdict-1", alertFired)
+
+	_, err := p.Process(t.Context(), []byte(raw), nil, sign(raw, testSecret))
+	if !errors.Is(err, ErrBadRequest) {
+		t.Fatalf("a 30-minute-old alert = %v, want ErrBadRequest so the server answers 400. "+
+			"Unmapped it answers 502, which blames this platform for the sender's clock AND "+
+			"invites the retry storm a 4xx would end.", err)
+	}
+	// The specific reason must SURVIVE the re-map, or the operator loses the one
+	// thing that names the fault. Both sentinels, one error.
+	if !errors.Is(err, translate.ErrStaleSignal) {
+		t.Errorf("err = %v, want ErrStaleSignal to remain wrapped alongside ErrBadRequest", err)
+	}
+	if n := len(cap.commands()); n != 0 {
+		t.Fatalf("%d order command(s) reached the bus for a refused alert", n)
+	}
+	// THE VERDICT STICKS. A redelivery of a refused alert is a replay, not a second
+	// chance — the same rule TestPerimeter_ARefusedAlertBurnsItsNonce pins for the
+	// other 400s.
+	if _, err := p.Process(t.Context(), []byte(raw), nil, sign(raw, testSecret)); !errors.Is(err, ErrReplayed) {
+		t.Fatalf("redelivery of a stale alert = %v, want ErrReplayed. Released instead of burnt, "+
+			"a retrying sender re-enters the full pipeline on every delivery.", err)
+	}
+}
+
+// An alert with NO ts is the same verdict by the same route — it is refused with
+// ErrStaleSignal too, so it took the same 502.
+func TestPerimeter_AnUnstampedAlertIs400(t *testing.T) {
+	p, _ := agedHarness(t, 2*time.Minute, alertFired, false)
+	raw := unstampedBody("buy", "1", "absolute_qty", "nots-400")
+
+	_, err := p.Process(t.Context(), []byte(raw), nil, sign(raw, testSecret))
+	if !errors.Is(err, ErrBadRequest) {
+		t.Fatalf("an alert with no ts = %v, want ErrBadRequest (400). This is the refusal #416 "+
+			"introduced and the one every misconfigured template will hit on its first alert; "+
+			"answering 502 tells that sender to retry forever.", err)
+	}
+}
+
 // A MALFORMED ts IS A 400, NOT A SILENT nil (#416). It used to parse to nil,
 // which made "sent nothing" and "sent garbage" identical one layer up — and
 // under a freshness bound that is a bypass with a clear message attached.

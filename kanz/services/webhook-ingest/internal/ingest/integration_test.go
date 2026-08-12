@@ -113,9 +113,14 @@ func TestIntegration_LoopOverNATS(t *testing.T) {
 	// (infra/nats/bootstrap-job.yaml) then SILENTLY DEDUPLICATES it at the broker.
 	// The publish succeeds, the command never lands, and the OMS never sees an order
 	// to fill. Exactly-once is doing its job; the test was replaying a command.
+	// The `ts` is not decoration: #416 made it MANDATORY, so this literal without
+	// one is refused at Process and the M1 certification never reaches the bus at
+	// all. That is how it broke — the fixture predates the rule, and this is the
+	// only alert literal in the tree that CI cannot catch on a machine without a
+	// broker, because everything above gates on TEST_NATS_URL + TEST_OMS_ON_BUS.
 	raw := fmt.Sprintf(`{"strategy_id":"momentum","fund_id":"fund-alpha","symbol":"BINANCE:BTCUSDT",`+
-		`"action":"buy","size":"1","size_type":"absolute_qty","order_type":"limit","limit_price":"50000","nonce":"it-%d"}`,
-		time.Now().UnixNano())
+		`"action":"buy","size":"1","size_type":"absolute_qty","order_type":"limit","limit_price":"50000","nonce":"it-%d",`,
+		time.Now().UnixNano()) + freshTS()
 	res, err := p.Process(ctx, []byte(raw), net.ParseIP("10.0.0.1"), sign(raw, testSecret))
 	if err != nil {
 		t.Fatalf("Process: %v", err)
