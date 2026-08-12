@@ -132,11 +132,19 @@ func TestTranslateEvent_InstrumentFallbackToPartitionKey(t *testing.T) {
 	}
 }
 
-// fakeWriter captures Put calls.
-type fakeWriter struct{ got []store.Observation }
+// fakeWriter captures Put and PutBars calls.
+type fakeWriter struct {
+	got  []store.Observation
+	bars []store.Bar
+}
 
 func (f *fakeWriter) Put(_ context.Context, obs []store.Observation) error {
 	f.got = append(f.got, obs...)
+	return nil
+}
+
+func (f *fakeWriter) PutBars(_ context.Context, bars []store.Bar) error {
+	f.bars = append(f.bars, bars...)
 	return nil
 }
 
