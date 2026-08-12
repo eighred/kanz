@@ -43,6 +43,25 @@ type Options struct {
 	// and fanned out 1,800 BTC (#240). The type change is the point: translate.Qty
 	// cannot be compared against Intent.Size, so the old check no longer compiles.
 	MaxQuantity translate.Qty
+	// RequireSignalTS refuses an alert carrying no `ts`. Off by default; see
+	// translate.Options.RequireSignalTS for why the absence is counted rather
+	// than refused until an operator arms it.
+	RequireSignalTS bool
+
+	// OnUnstampedSignal is called for every alert that arrives with no `ts`, with
+	// the strategy that sent it. Nil ⇒ not counted.
+	//
+	// IT TAKES THE STRATEGY ID because the fix is per template: an operator needs
+	// to know WHICH strategies to update before RequireSignalTS can be armed
+	// without taking those strategies offline. A bare count would say the estate
+	// has a problem without saying whose.
+	OnUnstampedSignal func(strategyID string)
+
+	// MaxSignalAge bounds how old an alert may be when it is acted on (#416).
+	// Handed to the translator because BOTH BRAINS must share the bound: a check
+	// here would leave the native alpha path unbounded, which is how the
+	// resolved-quantity cap came to be at this layer and wrong (#240).
+	MaxSignalAge time.Duration
 	// MaxLeverage bounds the leverage a signal may ask for; nil ⇒ no bound.
 	//
 	// SUBORDINATE to a hard refusal: translate rejects ANY leverage != 1, because
@@ -81,9 +100,20 @@ func NewPipeline(opt Options) (*Pipeline, error) {
 	if opt.Now == nil {
 		opt.Now = time.Now
 	}
+	// DEFAULTED HERE TOO, not only in config.Load, and for the reason the replay
+	// window below is: a binary that wires this pipeline and forgets the field
+	// would otherwise run UNBOUNDED, and the whole point of #416 is that an
+	// unbounded deployment is the dangerous one. Zero means "not set", not
+	// "disabled" — config.Load is where an explicit 0 turns the bound off.
+	maxAge := opt.MaxSignalAge
+	if maxAge <= 0 {
+		maxAge = 2 * time.Minute
+	}
 	tr, err := translate.New(translate.Options{
 		Prices: opt.Prices, Equity: opt.Equity, Positions: opt.Positions,
-		Alloc: opt.Alloc, Publisher: opt.Publisher, Gate: opt.Gate,
+		MaxSignalAge:    maxAge,
+		RequireSignalTS: opt.RequireSignalTS,
+		Alloc:           opt.Alloc, Publisher: opt.Publisher, Gate: opt.Gate,
 		MaxQuantity: opt.MaxQuantity,
 		TenantOf:    opt.TenantOf, Now: opt.Now,
 	})
@@ -193,6 +223,19 @@ func (p *Pipeline) decide(ctx context.Context, wh *Webhook) (*Result, error) {
 	if err != nil {
 		return nil, err
 	}
+	// The alert's own time. Refused if it is present and unparseable, rather than
+	// quietly becoming nil — see parseTS (#416).
+	sourceTS, err := parseTS(wh.TS)
+	if err != nil {
+		return nil, err
+	}
+	// AN ALERT WITH NO TIME IS ONE WHOSE AGE NOTHING CAN JUDGE. It is accepted
+	// (see translate.Options.MaxSignalAge) and it is NOT silent: counted per
+	// strategy, so the templates that still need updating are nameable before
+	// WEBHOOK_INGEST_REQUIRE_SIGNAL_TS is armed on them.
+	if sourceTS == nil && p.opt.OnUnstampedSignal != nil {
+		p.opt.OnUnstampedSignal(wh.StrategyID)
+	}
 
 	res, err := p.tr.Emit(ctx, translate.Intent{
 		SignalID:     translate.DeterministicID(wh.StrategyID, wh.Nonce),
@@ -209,7 +252,7 @@ func (p *Pipeline) decide(ctx context.Context, wh *Webhook) (*Result, error) {
 		LimitPrice:   limitPrice,
 		TimeInForce:  orderpb.TimeInForce_TIME_IN_FORCE_DAY,
 		Source:       signalpb.SignalSource_SIGNAL_SOURCE_TRADINGVIEW_WEBHOOK,
-		SourceTS:     parseTS(wh.TS),
+		SourceTS:     sourceTS,
 	})
 	if err != nil {
 		return nil, mapTranslateErr(err)
@@ -257,15 +300,25 @@ func (p *Pipeline) sanity(leverage *big.Rat) error {
 	return nil
 }
 
-func parseTS(s string) *timestamppb.Timestamp {
+// parseTS reads the alert's own timestamp.
+//
+// A MALFORMED ts IS AN ERROR, NOT A nil (#416). It used to return nil for both
+// "absent" and "2026-13-45T99:99Z", which made the two indistinguishable one
+// layer up — and once a freshness bound exists, that is a bypass: a sender that
+// cannot pass the age check sends a ts the parser rejects, gets nil, and the
+// bound has nothing to judge. The translator refuses a nil under a bound, so the
+// two now differ only in the message, but the difference is worth keeping: an
+// operator debugging refused alerts needs "your ts is unparseable" and "you sent
+// no ts" to be different sentences.
+func parseTS(s string) (*timestamppb.Timestamp, error) {
 	if s == "" {
-		return nil
+		return nil, nil
 	}
 	t, err := time.Parse(time.RFC3339, s)
 	if err != nil {
-		return nil
+		return nil, fmt.Errorf("%w: ts %q is not RFC3339", ErrBadRequest, s)
 	}
-	return timestamppb.New(t.UTC())
+	return timestamppb.New(t.UTC()), nil
 }
 
 // Pipeline error sentinels, mapped to HTTP status by the server.
