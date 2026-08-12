@@ -199,6 +199,24 @@ func TranslateBar(env *envelopepb.Envelope, ev *marketpb.MarketDataEvent) (store
 		return store.Bar{}, false, fmt.Errorf("marketdata: %s is a bar covering %s, which is not a "+
 			"resolution this platform stores", env.GetEventType(), closeTime.Sub(openTime))
 	}
+	// ONLY 1m IS INGESTED. The coarser series are ROLLUPS derived from this one,
+	// and this is the seam where that stops being a paragraph.
+	//
+	// The store can hold 1h and 1d — a rollup job writes them — but accepting them
+	// from a venue too would give one candle two sources, and the day they
+	// disagree there is nothing to arbitrate between them: no rule says which is
+	// right, and both are stamped as observed fact. The failure is silent, because
+	// each is individually well-formed.
+	//
+	// Refusing nacks the delivery, which surfaces as a DLQ entry rather than a
+	// gap. That is the intended direction: a venue whose hourly feed we do not
+	// want is an operator decision to make once, loudly, not a series that
+	// quietly fills with a second opinion.
+	if res != store.Resolution1m {
+		return store.Bar{}, false, fmt.Errorf("marketdata: %s is a %s bar — only 1m is INGESTED, and "+
+			"1h/1d are derived from it by rollup; a second source for the same candle is two answers "+
+			"to one question", env.GetEventType(), res)
+	}
 	if ev.GetMic() == "" {
 		return store.Bar{}, false, fmt.Errorf("marketdata: %s is a bar with no mic — a candle that "+
 			"cannot be attributed to a venue cannot be matched to the book an order executes against",

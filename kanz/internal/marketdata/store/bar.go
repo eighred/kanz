@@ -29,12 +29,18 @@ const (
 	Resolution1d Resolution = "1d"
 )
 
-// resolutions is the set this platform stores, and the interval each one means.
+// resolutions is the set this platform STORES. What may be INGESTED is a
+// narrower question, and a different file answers it.
 //
 // ONE MINUTE IS THE BASE and the coarser two are ROLLUPS DERIVED FROM IT, never
-// ingested independently (the horizon ruling on #416). Two sources for the same
-// candle is two answers to one question, and the day they disagree there is
-// nothing to arbitrate between them.
+// ingested independently. Two sources for the same candle is two answers to one
+// question, and the day they disagree there is nothing to arbitrate between
+// them — no rule says which is right and both are stamped as observed fact.
+//
+// THAT RULE IS ENFORCED IN marketdata.TranslateBar, not here, because here is
+// the wrong place: the store must accept 1h and 1d or the rollup that produces
+// them would have nowhere to write. The admission boundary is the ingest seam.
+// See TestHandlerRefusesACoarseBarFromAVenue.
 var resolutions = map[Resolution]time.Duration{
 	Resolution1m: time.Minute,
 	Resolution1h: time.Hour,
