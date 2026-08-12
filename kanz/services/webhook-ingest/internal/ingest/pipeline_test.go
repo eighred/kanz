@@ -298,7 +298,9 @@ func TestIPAllowlistRejects(t *testing.T) {
 
 func TestUnknownSymbolRejected(t *testing.T) {
 	p, _ := harness(t)
-	raw := `{"strategy_id":"momentum","fund_id":"fund-alpha","symbol":"NASDAQ:AAPL","action":"buy","size":"1","size_type":"absolute_qty","nonce":"n7"}`
+	// Stamped so the refusal below is the SYMBOL's. Unstamped, #416 refuses this
+	// with the same ErrBadRequest and the assertion cannot tell the two apart.
+	raw := `{"strategy_id":"momentum","fund_id":"fund-alpha","symbol":"NASDAQ:AAPL","action":"buy","size":"1","size_type":"absolute_qty","nonce":"n7",` + freshTS()
 	_, err := p.Process(context.Background(), []byte(raw), net.ParseIP("10.0.0.1"), sign(raw, testSecret))
 	if !errors.Is(err, ErrBadRequest) {
 		t.Fatalf("unknown symbol = %v, want ErrBadRequest", err)
