@@ -135,6 +135,81 @@ func TestHandlerRefusesABarWithNoVenue(t *testing.T) {
 	}
 }
 
+// ONLY 1m IS INGESTED — a venue's own hourly or daily candle is REFUSED.
+//
+// The coarser series are rollups derived from the 1m base. Accepting a venue's
+// version too would give one bucket two sources, and the day they disagree
+// nothing arbitrates: both are well-formed, both are stamped as observed fact,
+// and whichever was written last wins for reasons no rule states. The store
+// still HOLDS 1h and 1d — the rollup writes them — so this is an admission rule
+// at the ingest seam, not a storage limit.
+func TestHandlerRefusesACoarseBarFromAVenue(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		span time.Duration
+	}{
+		{"hourly", time.Hour},
+		{"daily", 24 * time.Hour},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fw := &fakeWriter{}
+			ing, err := NewIngestor(fw)
+			if err != nil {
+				t.Fatal(err)
+			}
+			payload, err := proto.Marshal(barEvent("XBIN", barTime, barTime.Add(tc.span)))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := ing.Handler(context.Background(), barEnvelope(), payload); err == nil {
+				t.Fatalf("a %s bar from a venue was ingested — the 1m series now has a second "+
+					"source for every bucket it covers", tc.name)
+			}
+			if len(fw.bars) != 0 || len(fw.got) != 0 {
+				t.Errorf("a refused %s bar still wrote: %d bars, %d observations",
+					tc.name, len(fw.bars), len(fw.got))
+			}
+		})
+	}
+}
+
+// THE STORE STILL ACCEPTS THE COARSE SERIES. The rule above is an ADMISSION rule
+// at the ingest seam, not a storage limit — a rollup job must be able to write
+// the 1h and 1d bars it derives. If this ever fails, the refusal was pushed into
+// the wrong layer and the rollup has nowhere to put its output.
+func TestTheStoreStillHoldsTheRolledUpResolutions(t *testing.T) {
+	m := store.NewMemory()
+	ctx := context.Background()
+
+	for _, res := range []store.Resolution{store.Resolution1h, store.Resolution1d} {
+		b := store.Bar{
+			InstrumentID:  "BTC-USDT",
+			Venue:         "XBIN",
+			Resolution:    res,
+			BucketStart:   barTime,
+			Open:          &commonpb.Decimal{Coefficient: 10000, Exponent: -2},
+			High:          &commonpb.Decimal{Coefficient: 11000, Exponent: -2},
+			Low:           &commonpb.Decimal{Coefficient: 9000, Exponent: -2},
+			Close:         &commonpb.Decimal{Coefficient: 10500, Exponent: -2},
+			Volume:        &commonpb.Decimal{Coefficient: 15, Exponent: -1},
+			TradeCount:    42,
+			KnowledgeTime: barTime.Add(time.Minute),
+		}
+		if err := m.PutBars(ctx, []store.Bar{b}); err != nil {
+			t.Fatalf("the store refused a %s bar a rollup would write: %v", res, err)
+		}
+		got, err := m.Bars(ctx, store.BarQuery{
+			InstrumentID: "BTC-USDT", Venue: "XBIN", Resolution: res,
+		})
+		if err != nil {
+			t.Fatalf("Bars(%s): %v", res, err)
+		}
+		if len(got) != 1 {
+			t.Fatalf("%s series = %d bars, want 1", res, len(got))
+		}
+	}
+}
+
 // A TRADE IS NOT A CANDLE. Non-bar events must keep feeding the scalar series
 // and write no bar — otherwise every tick would forge a one-tick candle.
 func TestHandlerWritesNoBarForATrade(t *testing.T) {

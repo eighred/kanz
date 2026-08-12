@@ -675,7 +675,14 @@ var crossPackagePublishSurfaces = map[string][]string{
 	// market-ingest's book-snapshot publish is internal/marketedge/ingest's
 	// Engine, run by pkg/alpha.Runner — itself wired from
 	// services/market-ingest/cmd/market-ingest/main.go.
-	"market-ingest": {"internal/marketedge/ingest"},
+	//
+	// internal/marketedge/bars is the SECOND publisher on that runner (#425): the
+	// 1-minute candle collector, teed off the same trade feeds. It is listed
+	// because this derivation is per-package and would otherwise PASS BY NOT
+	// LOOKING — the subject would be published by a service whose grant nothing
+	// checked, and the failure mode is a NATS permissions denial in production
+	// with a green suite behind it.
+	"market-ingest": {"internal/marketedge/ingest", "internal/marketedge/bars"},
 	// webhook-ingest's signal + order-command publishes are
 	// internal/signal/translate's Translator, constructed and driven from
 	// services/webhook-ingest/internal/ingest (pipeline.go's tr.Emit).

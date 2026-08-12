@@ -327,9 +327,19 @@ var drPosture = map[string]drClassification{
 		"can replay. contract_terms (#345) is NOT fully re-ingestable and the difference is recorded " +
 		"here deliberately: a venue publishes an instrument's CURRENT specification, not the history " +
 		"of its amendments, so a reload re-derives today's strikes and multipliers and cannot re-derive " +
-		"the as_of chain a historical revaluation reads. The exclusion still holds — losing it degrades " +
-		"backtest fidelity rather than the live book, and the live book is what DR exists for — but " +
-		"this entry must not be read as 'everything here is replayable', because half of it is not"},
+		"the as_of chain a historical revaluation reads. ohlcv_bars (#425) is the SAME SHAPE as " +
+		"contract_terms and is named here for the same reason: a venue serves its CURRENT view of a " +
+		"candle, so a refeed restores today's values under today's knowledge_time and the ORIGINAL " +
+		"observation and every restatement between are gone. What is lost is not the prices — it is " +
+		"the evidence of what was knowable when, which is the one thing that makes a backtest honest. " +
+		"A post-restore run reads corrected candles as if they had been live, and is optimistic in " +
+		"the direction nobody checks. The exclusion still holds TODAY — losing it degrades backtest " +
+		"fidelity rather than the live book, and the live book is what DR exists for — but it holds " +
+		"only while no sizing decision reaching real capital is derived from this store. The alpha " +
+		"direction is aimed squarely at making that false, and CLAUDE.md's own sequencing rule (M3 " +
+		"must not precede DR coverage) is the reason this sentence is here rather than discovered " +
+		"later. This entry must not be read as 'everything here is replayable': two of its three " +
+		"tables are not"},
 	"identity": {status: drUnresolved, reason: "identity_users + identity_invites — the platform's " +
 		"own accounts and their Argon2id credentials (#364). NOT EXCLUDABLE: credentials exist " +
 		"nowhere else, so a region failover onto an empty store locks every operator and trader out " +

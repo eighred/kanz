@@ -110,6 +110,42 @@ func (i *Ingestor) Handler(ctx context.Context, env *envelopepb.Envelope, payloa
 	return i.writer.Put(ctx, []store.Observation{obs})
 }
 
+// knowledgeTime is when Kanz learned an event, from the envelope alone.
+//
+// AN UNSTAMPED ENVELOPE IS REFUSED, NOT SUBSTITUTED (#427). Both derivations
+// used to fall back to the observation's OWN time — the bar's close, or the
+// event time for a trade — and that last step is not a missing value being
+// filled in. It is a CLAIM, and the maximally optimistic one available: that
+// Kanz knew the price at the instant the market produced it.
+//
+// Every as-of read then treats a value that arrived late, or arrived as a
+// correction, as though it had been knowable live. That is the one direction a
+// backtest is never audited in, in the one store whose entire purpose is
+// answering what was knowable when.
+//
+// #416 settled the same question one layer over: an alert with no timestamp is
+// refused rather than stamped with a plausible substitute, because a rule a
+// sender opts out of by omitting a field is not a rule. Nothing in that
+// reasoning was specific to signals.
+//
+// IT COSTS NOTHING ON THE REAL PATH. envelope.v1 marks both ingestion_time and
+// publish_time Required, and pkg/bus's producer stamps publish_time on every
+// event it sends (producer.go). An envelope reaching here with neither was
+// hand-built or malformed — exactly the case that should stop rather than
+// silently acquire the best possible provenance.
+func knowledgeTime(env *envelopepb.Envelope) (time.Time, error) {
+	if t := tsToTime(env.GetIngestionTime()); !t.IsZero() {
+		return t, nil
+	}
+	if t := tsToTime(env.GetPublishTime()); !t.IsZero() {
+		return t, nil
+	}
+	return time.Time{}, fmt.Errorf("marketdata: %s carries neither ingestion_time nor publish_time, "+
+		"so when Kanz learned this value is unknowable — and the only remaining fallback would be to "+
+		"claim it was known the instant the market produced it, which every point-in-time read would "+
+		"then believe", env.GetEventType())
+}
+
 // TranslateEvent maps one market.v1.MarketDataEvent to an Observation. The
 // envelope supplies the bitemporal knowledge_time (ingestion_time — when Kanz
 // received the event) and the partition_key / event_time fallbacks.
@@ -130,14 +166,9 @@ func TranslateEvent(env *envelopepb.Envelope, ev *marketpb.MarketDataEvent) (sto
 	if obsTime.IsZero() {
 		obsTime = tsToTime(env.GetEventTime())
 	}
-	// knowledge_time = when Kanz learned the value: ingestion_time, falling back
-	// to publish_time, then the observation time itself.
-	knowTime := tsToTime(env.GetIngestionTime())
-	if knowTime.IsZero() {
-		knowTime = tsToTime(env.GetPublishTime())
-	}
-	if knowTime.IsZero() {
-		knowTime = obsTime
+	knowTime, err := knowledgeTime(env)
+	if err != nil {
+		return store.Observation{}, err
 	}
 
 	obs := store.Observation{
@@ -199,18 +230,37 @@ func TranslateBar(env *envelopepb.Envelope, ev *marketpb.MarketDataEvent) (store
 		return store.Bar{}, false, fmt.Errorf("marketdata: %s is a bar covering %s, which is not a "+
 			"resolution this platform stores", env.GetEventType(), closeTime.Sub(openTime))
 	}
+	// ONLY 1m IS INGESTED. The coarser series are ROLLUPS derived from this one,
+	// and this is the seam where that stops being a paragraph.
+	//
+	// The store can hold 1h and 1d — a rollup job writes them — but accepting them
+	// from a venue too would give one candle two sources, and the day they
+	// disagree there is nothing to arbitrate between them: no rule says which is
+	// right, and both are stamped as observed fact. The failure is silent, because
+	// each is individually well-formed.
+	//
+	// Refusing nacks the delivery, which surfaces as a DLQ entry rather than a
+	// gap. That is the intended direction: a venue whose hourly feed we do not
+	// want is an operator decision to make once, loudly, not a series that
+	// quietly fills with a second opinion.
+	if res != store.Resolution1m {
+		return store.Bar{}, false, fmt.Errorf("marketdata: %s is a %s bar — only 1m is INGESTED, and "+
+			"1h/1d are derived from it by rollup; a second source for the same candle is two answers "+
+			"to one question", env.GetEventType(), res)
+	}
 	if ev.GetMic() == "" {
 		return store.Bar{}, false, fmt.Errorf("marketdata: %s is a bar with no mic — a candle that "+
 			"cannot be attributed to a venue cannot be matched to the book an order executes against",
 			env.GetEventType())
 	}
 
-	knowTime := tsToTime(env.GetIngestionTime())
-	if knowTime.IsZero() {
-		knowTime = tsToTime(env.GetPublishTime())
-	}
-	if knowTime.IsZero() {
-		knowTime = closeTime
+	// Refused rather than substituted, and in the SAME commit as the scalar path
+	// above — see knowledgeTime. Fixing only one would leave price_observations
+	// and ohlcv_bars disagreeing about what an unstamped envelope means, which is
+	// worse than one consistent wrong answer (#427).
+	knowTime, err := knowledgeTime(env)
+	if err != nil {
+		return store.Bar{}, false, err
 	}
 
 	bar := store.Bar{

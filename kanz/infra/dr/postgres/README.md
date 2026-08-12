@@ -11,7 +11,9 @@ Disaster recovery for the stateful databases:
 | compliance evidence (REG-02) | audit_chain_links — the filing hash chain | `kanz-compliance` |
 
 (The market-data history and the audit log are append-only/WORM stores with
-their own retention; the *transactional* state that DR must restore is these.)
+their own retention; the *transactional* state that DR must restore is these.
+Read the `market-data` row in the posture table before extending that sentence
+to everything in that database — its bitemporal tables are not replayable.)
 
 **A cluster boundary here is a restore-timeline boundary.** PITR rewinds every
 database in a cluster together, so the grouping answers one question: *what must
@@ -46,7 +48,7 @@ what gets read, so it is not allowed to be the stale copy.
 | `wealth` | covered | `kanz-books` (household book) |
 | `datamaster` | covered | `kanz-books` (golden records + exception queue) |
 | `identity` | NOT COVERED | `identity_users`, `identity_invites` (#364). Credentials exist nowhere else: a failover onto an empty store locks **everyone** out, including whoever would run the recovery. Not yet deployed, so no cluster is claimed — placement is open because PITR is per-cluster and co-locating it with `kanz-books` would tie a password rotation to the ledger's restore timeline. |
-| `market-data` | excluded | append-only history with its own retention; re-ingestable from the feed |
+| `market-data` | excluded | `price_observations` is append-only history with its own retention, re-ingestable from the feed. `contract_terms` (#345) and `ohlcv_bars` (#425) are **not**: a venue serves its *current* view of a specification or a candle, so a refeed restores today's values under today's `knowledge_time` and the original observation plus every restatement between are gone. What a restore loses is not the prices — it is the evidence of *what was knowable when*. The exclusion holds only while no sizing decision reaching real capital is derived from this store. |
 | `audit` | excluded | WORM store with its own tamper-resistant retention (AUDIT-01b) |
 | `oms` | covered | `kanz-orders` (`orders`, `positions`, `position_fills`). **Read "What `covered` does not mean" below before relying on this row.** |
 | `venue-binance` | covered | `kanz-orders` (`venue_orders`) — same cluster as the OMS *on purpose*: one restore timeline for the order path |
