@@ -145,34 +145,33 @@ type Options struct {
 	// a sender whose age we cannot judge at all. Refusing both is one rule to
 	// reason about instead of two.
 	//
-	// A MISSING TIMESTAMP IS NOT REFUSED BY THIS FIELD ALONE — see
-	// RequireSignalTS. The reasoning is worth stating, because the opposite is
-	// the tempting answer: a bound a sender can skip by omitting a field looks
-	// like no bound at all.
-	//
-	// It is not, HERE, because of who the senders are. Every alert is
-	// HMAC-authenticated with a per-strategy secret, so a party able to omit `ts`
-	// is a party that could equally have sent a FRESH one — refusing the omission
-	// buys nothing against them. And the failure this exists to stop is not a
-	// forged alert: it is a DELAYED one, a webhook retry or a partition or a
-	// paused pod, and a delayed alert carries the timestamp TradingView put on it.
-	// The bound catches exactly that.
-	//
-	// What refusing WOULD do is break every strategy whose alert template omits a
-	// field the webhook contract still calls "advisory only". So the absence is
-	// counted and named instead, and RequireSignalTS turns it into a refusal once
-	// the templates carry it — the OMS_REQUIRE_VERIFIED_ACCOUNT stance, unchanged.
+	// A SIGNAL CARRYING NO TIMESTAMP IS REFUSED under a bound, unless
+	// AllowUnstampedSignal says otherwise. An alert whose age nothing can
+	// establish cannot be shown to be current, and this is the whole question the
+	// bound exists to answer.
 	MaxSignalAge time.Duration
 
-	// RequireSignalTS refuses a signal that carries no source timestamp at all.
+	// AllowUnstampedSignal accepts a signal with no source timestamp even while a
+	// bound is configured.
 	//
-	// OFF BY DEFAULT, and armed with the strategies in hand. Every alert without a
-	// timestamp is one whose age nothing can judge, so the estate should end up
-	// here — but a control that refuses every strategy nobody has updated yet is a
-	// trading outage, and this platform arms that kind of control deliberately
-	// rather than by default. Until then the perimeter counts them, so "how much
-	// of our flow is unjudgeable" is a number rather than a silence.
-	RequireSignalTS bool
+	// THE ZERO VALUE IS THE STRICT ONE, deliberately. A caller who never thinks
+	// about this field gets the refusal — the opposite arrangement would mean
+	// forgetting a line silently exempts a whole deployment from the freshness
+	// bound, and a safety control that switches itself off by omission is the
+	// failure this platform designs against everywhere else.
+	//
+	// THE COST OF THE STRICT DEFAULT IS REAL AND WAS WEIGHED. Every strategy whose
+	// alert template omits `ts` stops trading the moment it is armed, and the
+	// webhook contract called that field "advisory" until #416. The owner's ruling
+	// on 2026-08-12: no strategies are live yet, so the contract is made strict
+	// BEFORE onboarding rather than tightened underneath running traffic — the
+	// cheapest moment this decision will ever be available.
+	//
+	// Setting it is therefore an explicit, temporary act: it exists so a
+	// deployment onboarding a sender that cannot yet send `ts` has something
+	// better than disabling the whole bound. The perimeter counts every unstamped
+	// alert either way, so the strategies needing a template fix are nameable.
+	AllowUnstampedSignal bool
 
 	// TenantOf maps a fund to its tenant_id; nil ⇒ the fund_id is the tenant.
 	TenantOf func(fundID string) string
@@ -318,14 +317,15 @@ func (t *Translator) freshEnough(in Intent) error {
 		return nil
 	}
 	if in.SourceTS == nil {
-		if !t.opt.RequireSignalTS {
-			// Unjudgeable, and allowed on purpose (see MaxSignalAge). The perimeter
-			// counts these; this function's job is not to make that decision twice.
+		if t.opt.AllowUnstampedSignal {
+			// Unjudgeable, and admitted by explicit configuration. The perimeter
+			// counts these; this function does not make that decision twice.
 			return nil
 		}
-		return fmt.Errorf("%w: no source timestamp, and this deployment requires one — the age of "+
-			"this decision cannot be established, so it cannot be shown to be current",
-			ErrStaleSignal)
+		return fmt.Errorf("%w: no source timestamp. Its age cannot be established, so it cannot be "+
+			"shown to be current — and an alert that cannot be shown to be current is exactly what "+
+			"a %s bound exists to refuse. Send `ts` (RFC3339) on every alert",
+			ErrStaleSignal, max)
 	}
 	age := t.opt.Now().Sub(in.SourceTS.AsTime())
 	if age > max {

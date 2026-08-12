@@ -31,7 +31,16 @@ type Webhook struct {
 	// Nonce makes each alert unique; it drives replay defense and the
 	// idempotency key so a re-delivered webhook never fires a second time.
 	Nonce string `json:"nonce"`
-	// TS is the TradingView alert time (RFC3339); advisory only.
+	// TS is the time the strategy fired this alert (RFC3339). REQUIRED.
+	//
+	// It stopped being advisory in #416. The platform compares it to now and
+	// refuses an alert too old to act on — a delayed delivery would otherwise
+	// execute at the size the strategy chose for a price that has since moved.
+	// An alert with no ts has no age, so it cannot be shown to be current and is
+	// refused; an unparseable one is a 400 rather than a silent nil.
+	//
+	// WEBHOOK_INGEST_REQUIRE_SIGNAL_TS=false relaxes that for a sender being
+	// onboarded that cannot stamp its alerts yet.
 	TS string `json:"ts"`
 }
 

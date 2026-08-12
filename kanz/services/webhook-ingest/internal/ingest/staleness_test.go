@@ -16,21 +16,21 @@ import (
 //
 // These drive Pipeline.Process — the same path the HTTP server calls — so the
 // refusal is proven where it has to happen, not only in the translator.
-func agedHarness(t *testing.T, max time.Duration, now time.Time, require bool) (*Pipeline, *capture) {
+func agedHarness(t *testing.T, max time.Duration, now time.Time, allowUnstamped bool) (*Pipeline, *capture) {
 	t.Helper()
 	cap := &capture{}
 	p, err := NewPipeline(Options{
-		Auth:            NewAuthenticator(StaticSecrets{"momentum": testSecret}, nil, time.Minute, func() time.Time { return now }),
-		Symbols:         StaticSymbols{"BINANCE:BTCUSDT": "BTC-USD"},
-		Prices:          StaticPrices{"BTC-USD": big.NewRat(50_000, 1)},
-		Equity:          StaticEquity{"fund-alpha": new(big.Rat).SetInt64(1_000_000)},
-		Positions:       StaticPositions{},
-		Alloc:           StaticAllocation{"fund-alpha": {{Venue: "BINANCE", Weight: big.NewRat(1, 1)}}},
-		Publisher:       cap,
-		Gate:            translate.OpenGate(nil),
-		MaxSignalAge:    max,
-		RequireSignalTS: require,
-		Now:             func() time.Time { return now },
+		Auth:                 NewAuthenticator(StaticSecrets{"momentum": testSecret}, nil, time.Minute, func() time.Time { return now }),
+		Symbols:              StaticSymbols{"BINANCE:BTCUSDT": "BTC-USD"},
+		Prices:               StaticPrices{"BTC-USD": big.NewRat(50_000, 1)},
+		Equity:               StaticEquity{"fund-alpha": new(big.Rat).SetInt64(1_000_000)},
+		Positions:            StaticPositions{},
+		Alloc:                StaticAllocation{"fund-alpha": {{Venue: "BINANCE", Weight: big.NewRat(1, 1)}}},
+		Publisher:            cap,
+		Gate:                 translate.OpenGate(nil),
+		MaxSignalAge:         max,
+		AllowUnstampedSignal: allowUnstamped,
+		Now:                  func() time.Time { return now },
 	})
 	if err != nil {
 		t.Fatalf("NewPipeline: %v", err)
@@ -79,10 +79,11 @@ func TestPerimeter_AFreshAlertStillFansOut(t *testing.T) {
 	}
 }
 
-// AN ALERT WITH NO ts STILL TRADES by default, and is counted. Refusing would
-// take every strategy whose template omits the field offline; see
-// translate.Options.MaxSignalAge for why that trade-off falls this way.
-func TestPerimeter_AnUnstampedAlertTradesAndIsCounted(t *testing.T) {
+// AN ALERT WITH NO ts IS REFUSED, and is counted anyway — counted REGARDLESS of
+// the outcome, because the operator's question is the same either way: which
+// sender is misconfigured? The refusal reaches the sender in a 400; the counter
+// is what reaches us.
+func TestPerimeter_AnUnstampedAlertIsRefusedAndCounted(t *testing.T) {
 	var counted []string
 	cap := &capture{}
 	now := alertFired
@@ -103,9 +104,14 @@ func TestPerimeter_AnUnstampedAlertTradesAndIsCounted(t *testing.T) {
 		t.Fatalf("NewPipeline: %v", err)
 	}
 
-	raw := body("buy", "1", "absolute_qty", "nots-1")
-	if _, err := p.Process(t.Context(), []byte(raw), nil, sign(raw, testSecret)); err != nil {
-		t.Fatalf("an alert with no ts was refused: %v", err)
+	raw := unstampedBody("buy", "1", "absolute_qty", "nots-1")
+	_, perr := p.Process(t.Context(), []byte(raw), nil, sign(raw, testSecret))
+	if !errors.Is(perr, translate.ErrStaleSignal) {
+		t.Fatalf("an alert with no ts = %v, want ErrStaleSignal. Its age cannot be established, "+
+			"so the bound has nothing to judge.", perr)
+	}
+	if n := len(cap.commands()); n != 0 {
+		t.Fatalf("%d command(s) published for an alert with no timestamp", n)
 	}
 	if len(counted) != 1 || counted[0] != "momentum" {
 		t.Fatalf("unstamped alerts counted = %v, want [momentum] — an unjudgeable alert that is "+

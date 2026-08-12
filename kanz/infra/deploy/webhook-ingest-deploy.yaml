@@ -166,12 +166,21 @@ spec:
             # is set here as well as defaulted in code so the value is visible to
             # whoever reads this file rather than only to whoever reads config.go.
             - { name: WEBHOOK_INGEST_MAX_SIGNAL_AGE, value: "2m" }
-            # An alert with no `ts` at all cannot be aged. Refusing those is a
-            # separate switch because the field is still advisory in the webhook
-            # contract, so arming it would stop every strategy whose template
-            # omits it. kanz_webhook_unstamped_signals_total names those
-            # strategies; arm this once it reports none.
-            # - { name: WEBHOOK_INGEST_REQUIRE_SIGNAL_TS, value: "true" }
+            # AN ALERT WITH NO `ts` IS REFUSED. It has no age, so the bound above
+            # has nothing to judge — and a freshness rule a sender opts out of by
+            # omitting a field is not a rule.
+            #
+            # This is the code default too; it is written here so the contract is
+            # visible to whoever reads this file. Owner ruling, 2026-08-12: no
+            # strategies were live, so `ts` was made mandatory BEFORE onboarding
+            # rather than tightened underneath running traffic — every strategy is
+            # now written against the strict contract from its first alert.
+            #
+            # Set it to "false" only to onboard a sender that genuinely cannot
+            # stamp its alerts; that is far better than disabling the whole bound
+            # for one sender. kanz_webhook_unstamped_signals_total names which
+            # strategies are sending unstamped alerts either way.
+            - { name: WEBHOOK_INGEST_REQUIRE_SIGNAL_TS, value: "true" }
             # THE REPLAY DEFENCE'S STORE — now CROSS-POD (EXEC-M17 wrote it, EXEC-M22
             # landed the Redis it was waiting for).
             #

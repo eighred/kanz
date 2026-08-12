@@ -106,14 +106,14 @@ func TestPerimeter_MarginModeAloneIsRefused(t *testing.T) {
 func TestPerimeter_UnleveredSpotStillTrades(t *testing.T) {
 	for i, raw := range []string{
 		`{"strategy_id":"momentum","fund_id":"fund-alpha","symbol":"BINANCE:BTCUSDT",` +
-			`"action":"buy","size":"1","size_type":"absolute_qty","nonce":"ok-0"}`,
+			`"action":"buy","size":"1","size_type":"absolute_qty","nonce":"ok-0",` + freshTS(),
 		`{"strategy_id":"momentum","fund_id":"fund-alpha","symbol":"BINANCE:BTCUSDT",` +
-			`"action":"buy","size":"1","size_type":"absolute_qty","leverage":"1","nonce":"ok-1"}`,
+			`"action":"buy","size":"1","size_type":"absolute_qty","leverage":"1","nonce":"ok-1",` + freshTS(),
 		`{"strategy_id":"momentum","fund_id":"fund-alpha","symbol":"BINANCE:BTCUSDT",` +
 			`"action":"buy","size":"1","size_type":"absolute_qty","leverage":"1.0",` +
-			`"margin_mode":"spot","nonce":"ok-2"}`,
+			`"margin_mode":"spot","nonce":"ok-2",` + freshTS(),
 		`{"strategy_id":"momentum","fund_id":"fund-alpha","symbol":"BINANCE:BTCUSDT",` +
-			`"action":"buy","size":"1","size_type":"absolute_qty","margin_mode":"none","nonce":"ok-3"}`,
+			`"action":"buy","size":"1","size_type":"absolute_qty","margin_mode":"none","nonce":"ok-3",` + freshTS(),
 	} {
 		p, cap := cappedHarness(t, nil)
 		if _, err := process(t, p, raw); err != nil {

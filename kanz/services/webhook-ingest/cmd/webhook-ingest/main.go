@@ -184,31 +184,32 @@ func run() int {
 
 	auth := ingest.NewAuthenticator(cfg.Secrets, cfg.Allowlist, cfg.ReplayWindow, time.Now,
 		ingest.WithNonceStore(nonces))
-	// Alerts arriving with no `ts` (#416). Each one is acted on without its age
-	// being checked, because the field is still advisory in the webhook contract
-	// and refusing would take every un-updated strategy offline. Non-zero means
-	// the freshness bound is not covering that strategy's flow.
+	// Alerts arriving with no `ts` (#416). These are REFUSED by default — their
+	// age cannot be established — and counted here regardless of the outcome,
+	// because the refusal reaches the sender in a 400 and this is what reaches
+	// us. Non-zero names a strategy whose alert template needs fixing.
 	unstamped := prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "kanz_webhook_unstamped_signals_total",
-		Help: "Alerts accepted with no source timestamp, by strategy. Their age cannot be checked, " +
-			"so a delayed delivery from these strategies still executes at full size.",
+		Help: "Alerts arriving with no source timestamp, by strategy. Their age cannot be checked, " +
+			"so they are refused unless WEBHOOK_INGEST_REQUIRE_SIGNAL_TS=false. Non-zero means that " +
+			"strategy's alert template is missing the `ts` field.",
 	}, []string{"strategy_id"})
 	obs.Registry.MustRegister(unstamped)
 
 	pipeline, err := ingest.NewPipeline(ingest.Options{
-		Auth:            auth,
-		Symbols:         cfg.Symbols,
-		Prices:          cfg.Prices,
-		Equity:          cfg.Equity,
-		Positions:       positions, // the fund's REAL per-venue book (EXEC-M19b)
-		Alloc:           cfg.Alloc,
-		Publisher:       producer,
-		Gate:            gate,
-		MaxQuantity:     cfg.MaxQuantity,
-		MaxLeverage:     cfg.MaxLeverage,
-		ReplayWindow:    cfg.ReplayWindow,
-		MaxSignalAge:    cfg.MaxSignalAge,
-		RequireSignalTS: cfg.RequireSignalTS,
+		Auth:                 auth,
+		Symbols:              cfg.Symbols,
+		Prices:               cfg.Prices,
+		Equity:               cfg.Equity,
+		Positions:            positions, // the fund's REAL per-venue book (EXEC-M19b)
+		Alloc:                cfg.Alloc,
+		Publisher:            producer,
+		Gate:                 gate,
+		MaxQuantity:          cfg.MaxQuantity,
+		MaxLeverage:          cfg.MaxLeverage,
+		ReplayWindow:         cfg.ReplayWindow,
+		MaxSignalAge:         cfg.MaxSignalAge,
+		AllowUnstampedSignal: !cfg.RequireSignalTS,
 		// NAMED, NOT JUST COUNTED. A bare total would say the estate has alerts
 		// whose age nothing can judge without saying which strategies to fix, and
 		// WEBHOOK_INGEST_REQUIRE_SIGNAL_TS cannot be armed until that list is empty.

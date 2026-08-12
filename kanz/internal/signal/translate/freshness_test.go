@@ -21,12 +21,12 @@ import (
 // These test freshEnough directly rather than through Emit, because Emit needs
 // prices, equity, an allocation policy and a publisher — none of which bear on
 // whether a decision is too old to act on.
-func agedTranslator(t *testing.T, max time.Duration, now time.Time, require bool) *Translator {
+func agedTranslator(t *testing.T, max time.Duration, now time.Time, allowUnstamped bool) *Translator {
 	t.Helper()
 	return &Translator{opt: Options{
-		MaxSignalAge:    max,
-		RequireSignalTS: require,
-		Now:             func() time.Time { return now },
+		MaxSignalAge:         max,
+		AllowUnstampedSignal: allowUnstamped,
+		Now:                  func() time.Time { return now },
 	}}
 }
 
@@ -116,33 +116,40 @@ func TestAnUnboundedTranslatorChecksNothing(t *testing.T) {
 	}
 }
 
-// AN UNSTAMPED SIGNAL IS ACCEPTED BY DEFAULT, deliberately.
+// AN UNSTAMPED SIGNAL IS REFUSED, AND THE ZERO VALUE IS WHAT REFUSES IT.
 //
-// Refusing it looks right — a bound a sender can skip by omitting a field looks
-// like no bound. It is not, here: every alert is HMAC-authenticated with a
-// per-strategy secret, so a party able to omit `ts` could equally have sent a
-// fresh one. And the failure this exists to stop is a DELAYED alert, which
-// carries whatever timestamp TradingView put on it. What refusing would do is
-// take every strategy whose template omits an "advisory" field offline.
-func TestAnUnstampedSignalPassesUntilTheRequirementIsArmed(t *testing.T) {
-	tr := agedTranslator(t, 2*time.Minute, fired, false)
-
-	if err := tr.freshEnough(Intent{SourceTS: nil}); err != nil {
-		t.Fatalf("an alert with no ts was refused with the requirement OFF: %v\n"+
-			"That takes every strategy whose template omits the field offline.", err)
-	}
-}
-
-// ARMED, it is refused — the state the estate should reach once the counter
-// names no strategies.
-func TestAnUnstampedSignalIsRefusedWhenRequired(t *testing.T) {
-	tr := agedTranslator(t, 2*time.Minute, fired, true)
+// A signal whose age nothing can establish cannot be shown to be current, which
+// is the only question the bound asks — so a rule a sender opts out of by
+// omitting a field is not a rule.
+//
+// The zero value mattering is the point of this test. A caller who never thinks
+// about the field gets the refusal; the opposite arrangement would mean
+// forgetting one line silently exempts a whole deployment from the bound.
+//
+// Owner ruling, 2026-08-12: no strategies were live, so `ts` was made mandatory
+// BEFORE onboarding rather than tightened underneath running traffic.
+func TestAnUnstampedSignalIsRefused(t *testing.T) {
+	tr := agedTranslator(t, 2*time.Minute, fired, false) // false = the ZERO value
 
 	err := tr.freshEnough(Intent{SourceTS: nil})
 	if err == nil {
-		t.Fatal("WEBHOOK_INGEST_REQUIRE_SIGNAL_TS is armed and an unstamped alert was still accepted")
+		t.Fatal("an alert with no ts was accepted. Its age cannot be established, so the freshness " +
+			"bound has nothing to judge.")
 	}
 	if !errors.Is(err, ErrStaleSignal) {
 		t.Errorf("err = %v, want ErrStaleSignal", err)
+	}
+	if !strings.Contains(err.Error(), "ts") {
+		t.Errorf("the refusal does not tell the sender which field to add: %v", err)
+	}
+}
+
+// It can be relaxed EXPLICITLY, for onboarding a sender that cannot stamp its
+// alerts yet — which is better than disabling the whole bound for one sender.
+func TestAnUnstampedSignalPassesWhenExplicitlyAllowed(t *testing.T) {
+	tr := agedTranslator(t, 2*time.Minute, fired, true)
+
+	if err := tr.freshEnough(Intent{SourceTS: nil}); err != nil {
+		t.Fatalf("AllowUnstampedSignal is set and an unstamped alert was still refused: %v", err)
 	}
 }

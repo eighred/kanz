@@ -83,8 +83,17 @@ func post(t *testing.T, srv *Server, body, sig string) *httptest.ResponseRecorde
 	return rec
 }
 
-const okBody = `{"strategy_id":"momentum","fund_id":"fund-alpha","symbol":"BINANCE:BTCUSDT",` +
-	`"action":"buy","size":"5","size_type":"pct_of_equity","nonce":"srv-1"}`
+// okBody is a well-formed alert. It is a var rather than a const because #416
+// made `ts` mandatory — an alert with no timestamp has no age, so the freshness
+// bound refuses it, and every test here is about the HTTP surface rather than
+// about that field.
+//
+// Stamped ONCE at package init, so the signature over it stays valid and the two
+// calls in the duplicate-nonce test send byte-identical bodies. The bound is two
+// minutes and this package runs in seconds.
+var okBody = `{"strategy_id":"momentum","fund_id":"fund-alpha","symbol":"BINANCE:BTCUSDT",` +
+	`"action":"buy","size":"5","size_type":"pct_of_equity","nonce":"srv-1",` +
+	`"ts":"` + time.Now().UTC().Format(time.RFC3339) + `"}`
 
 func TestWebhook_HappyPathFansOut(t *testing.T) {
 	srv, pub := newServer(t)

@@ -57,10 +57,22 @@ type Config struct {
 	// someone took, not one they inherited.
 	MaxSignalAge time.Duration
 
-	// RequireSignalTS refuses an alert that carries no `ts` at all. Off by
-	// default: every strategy whose template omits it would stop trading, and the
-	// webhook contract still calls the field advisory. Arm it once
-	// kanz_webhook_unstamped_signals_total names no strategies.
+	// RequireSignalTS refuses an alert that carries no `ts` at all. ON by default.
+	//
+	// An alert with no timestamp has no age, so the bound above cannot judge it —
+	// and a freshness rule a sender opts out of by omitting a field is not a rule.
+	//
+	// IT DEFAULTS ON BECAUSE OF WHEN THIS LANDED. Owner ruling, 2026-08-12: no
+	// strategies are live yet, so `ts` becomes mandatory BEFORE onboarding rather
+	// than being tightened underneath running traffic. Making it strict later
+	// means choosing a day to break whichever senders never sent it; making it
+	// strict now costs nothing and every strategy is written against the strict
+	// contract from its first alert.
+	//
+	// WEBHOOK_INGEST_REQUIRE_SIGNAL_TS=false relaxes it — for onboarding a sender
+	// that genuinely cannot stamp its alerts, and preferable to disabling the
+	// whole bound. An unparseable value keeps the STRICT default: a typo must not
+	// silently relax a trading control.
 	RequireSignalTS bool
 	Allowlist       []*net.IPNet
 
@@ -150,7 +162,7 @@ func Load() (Config, error) {
 		Source:          envOr("WEBHOOK_INGEST_SOURCE", "webhook-ingest"),
 		ReplayWindow:    parseDuration(os.Getenv("WEBHOOK_INGEST_REPLAY_WINDOW"), 5*time.Minute),
 		MaxSignalAge:    parseSignalAge(os.Getenv("WEBHOOK_INGEST_MAX_SIGNAL_AGE"), 2*time.Minute),
-		RequireSignalTS: os.Getenv("WEBHOOK_INGEST_REQUIRE_SIGNAL_TS") == "true",
+		RequireSignalTS: os.Getenv("WEBHOOK_INGEST_REQUIRE_SIGNAL_TS") != "false",
 		CloudflareOnly:  os.Getenv("WEBHOOK_INGEST_CLOUDFLARE_ONLY") == "1",
 
 		RedisURL:            redisURL,
