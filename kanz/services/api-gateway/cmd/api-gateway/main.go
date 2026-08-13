@@ -287,7 +287,7 @@ func run() int {
 	// constraint. On a genuinely wrong configuration this still does the right
 	// thing — the rollout never completes, so the pods that CAN authenticate keep
 	// serving instead of being replaced by pods that cannot.
-	go primeIssuer(ctx, oidcAuth, obs.Registry, cfg.OIDCIssuer, &ready, logger)
+	go primeIssuer(ctx, oidcAuth, obs.Registry, cfg.OIDCIssuer, issuerRetryInterval, &ready, logger)
 
 	go func() {
 		if oidcAuth == nil {
@@ -504,10 +504,14 @@ const issuerProbeTimeout = 15 * time.Second
 // which governs the REQUEST path: this loop runs while the pod is receiving no
 // traffic at all, so nothing else is generating attempts to be limited against.
 //
-// A var rather than a const ONLY so the readiness tests can run in milliseconds
-// instead of spending this interval each. Nothing in the running service writes
-// it — a startup-time knob nobody asked for is a knob that gets set wrong.
-var issuerRetryInterval = 10 * time.Second
+// A CONST, AND IT MUST STAY ONE. It was briefly a var so the readiness tests
+// could shrink it — with a comment arguing that was harmless because nothing in
+// the running service writes it. That was wrong, and `-race` in CI proved it
+// within one merge: the tests' cleanup wrote this variable while a probe
+// goroutine was still reading it, which is a data race in a package the whole
+// estate authenticates through. The interval is now a PARAMETER, so a test
+// chooses its own without there being any shared mutable state to choose it in.
+const issuerRetryInterval = 10 * time.Second
 
 // primeIssuer blocks until the OIDC issuer answers with a usable key set, then
 // marks the gateway ready (#457). It returns immediately on the HS256 arm.
@@ -522,7 +526,7 @@ var issuerRetryInterval = 10 * time.Second
 // "connection refused" goes looking at the network. An operator reading "this
 // gateway can authenticate NOBODY until this resolves" goes looking at the
 // issuer, which is where the fault is.
-func primeIssuer(ctx context.Context, a *auth.OIDCAuthenticator, reg prometheus.Registerer, issuer string, ready *atomic.Bool, logger *slog.Logger) {
+func primeIssuer(ctx context.Context, a *auth.OIDCAuthenticator, reg prometheus.Registerer, issuer string, retryEvery time.Duration, ready *atomic.Bool, logger *slog.Logger) {
 	if a == nil {
 		return
 	}
@@ -555,12 +559,12 @@ func primeIssuer(ctx context.Context, a *auth.OIDCAuthenticator, reg prometheus.
 		logger.Error("api-gateway: CANNOT REACH THE OIDC ISSUER — this gateway can verify no token "+
 			"from anybody, and stays OUT of the Service (/readyz 503) until it can. Every request "+
 			"would be rejected regardless of how valid its token is",
-			"issuer", issuer, "err", err, "attempt", attempt, "retry_in", issuerRetryInterval)
+			"issuer", issuer, "err", err, "attempt", attempt, "retry_in", retryEvery)
 
 		select {
 		case <-ctx.Done():
 			return
-		case <-time.After(issuerRetryInterval):
+		case <-time.After(retryEvery):
 		}
 	}
 }
