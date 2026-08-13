@@ -15,6 +15,8 @@ package gateway
 
 import (
 	"errors"
+	"fmt"
+	"log/slog"
 	"net/http"
 	"time"
 
@@ -47,6 +49,12 @@ type Handler struct {
 	instruments venuepb.VenueQueryServiceClient
 	client      querypb.RiskQueryServiceClient
 	marshaler   protojson.MarshalOptions
+	// logger receives the detail of every 5xx. It is the ONLY place that detail
+	// goes now: the client gets a constant, so if this is not wired the
+	// information is not merely hidden from the caller, it is destroyed. Never
+	// nil — New substitutes slog.Default() — because a fault this platform caused
+	// and did not record is strictly worse than one it leaked.
+	logger *slog.Logger
 }
 
 // New returns a Handler over the risk-engine client and, optionally, the OMS's
@@ -57,11 +65,19 @@ type Handler struct {
 // answer it with an error: an unregistered route says "not configured here",
 // while a registered one that always fails says "broken", and only one of those
 // is true. It is the same shape the control routes take for an absent operator.
-func New(client querypb.RiskQueryServiceClient, orders orderpb.OrderQueryServiceClient, instruments venuepb.VenueQueryServiceClient) *Handler {
+//
+// logger MAY BE NIL and then slog.Default() is used. That is a convenience for
+// tests, not a licence for the composition root: main wires obs.Logger, and the
+// detail of every 5xx now exists only in this logger's output.
+func New(client querypb.RiskQueryServiceClient, orders orderpb.OrderQueryServiceClient, instruments venuepb.VenueQueryServiceClient, logger *slog.Logger) *Handler {
+	if logger == nil {
+		logger = slog.Default()
+	}
 	return &Handler{
 		client:      client,
 		orders:      orders,
 		instruments: instruments,
+		logger:      logger,
 		// EmitDefaultValues so a zero field (e.g. empty quality_flags) renders
 		// as an explicit JSON value rather than being omitted — stable shape
 		// for clients. UseProtoNames keeps snake_case matching the proto.
@@ -242,7 +258,7 @@ func (h *Handler) scenario(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) health(w http.ResponseWriter, r *http.Request) {
 	resp, err := h.client.Health(r.Context(), &querypb.HealthRequest{})
-	h.write(w, resp, err)
+	h.write(w, r, resp, err)
 }
 
 // parseAsOf reads the optional ?as_of=<RFC3339> query param into a proto
@@ -300,7 +316,8 @@ type ownedResponse interface {
 // careful to answer the same "regardless of tenant (no oracle)".
 func (h *Handler) writeOwned(w http.ResponseWriter, r *http.Request, resp ownedResponse, err error) {
 	if err != nil {
-		code, msg := httpStatus(err)
+		code, msg, detail := httpStatus(err)
+		h.logUpstream(r, code, detail)
 		// A 404 from the engine is normalised to the SAME body the gate emits.
 		// Status parity alone is not enough: if the engine's own wording came
 		// through here, comparing response BODIES would still separate "exists,
@@ -318,7 +335,7 @@ func (h *Handler) writeOwned(w http.ResponseWriter, r *http.Request, resp ownedR
 		writeError(w, http.StatusNotFound, notFoundMsg)
 		return
 	}
-	h.write(w, resp, nil)
+	h.write(w, r, resp, nil)
 }
 
 // notFoundMsg is the single body a portfolio-scoped route returns for BOTH
@@ -332,9 +349,10 @@ const notFoundMsg = "portfolio not found"
 //
 // Not for portfolio-scoped replies — those go through writeOwned, which gates
 // on ownership first. test/arch enforces that split.
-func (h *Handler) write(w http.ResponseWriter, resp proto.Message, err error) {
+func (h *Handler) write(w http.ResponseWriter, r *http.Request, resp proto.Message, err error) {
 	if err != nil {
-		code, msg := httpStatus(err)
+		code, msg, detail := httpStatus(err)
+		h.logUpstream(r, code, detail)
 		writeError(w, code, msg)
 		return
 	}
@@ -348,27 +366,126 @@ func (h *Handler) write(w http.ResponseWriter, resp proto.Message, err error) {
 	_, _ = w.Write(body)
 }
 
-// httpStatus maps a gRPC status to an HTTP status code + client message.
-func httpStatus(err error) (int, string) {
+// logUpstream records the detail httpStatus withheld from the client.
+//
+// THIS IS NOT OPTIONAL BOOKKEEPING. Before #440 the upstream text went to the
+// caller and nowhere else; now it goes to the operator and nowhere else. Drop
+// this call and a 500 becomes genuinely undiagnosable — the failure would be
+// silent rather than merely misdirected, which is the trade CLAUDE.md forbids
+// ("nothing configured" and "checked, and fine" must never look the same).
+//
+// detail is empty exactly when the client already received the reason, so an
+// empty detail is not a fault to log — it is a 4xx that explained itself.
+//
+// The path is recorded, never the query string: as_of is harmless but a query is
+// caller-supplied and this line ends up in a log aggregator.
+func (h *Handler) logUpstream(r *http.Request, code int, detail string) {
+	if detail == "" {
+		return
+	}
+	var subject, tenant string
+	if p := middleware.PrincipalFromContext(r.Context()); p != nil {
+		subject, tenant = p.Subject, p.Tenant
+	}
+	h.logger.Error("api-gateway: upstream call failed",
+		"status", code,
+		"method", r.Method,
+		"path", r.URL.Path,
+		"subject", subject,
+		"tenant", tenant,
+		"detail", detail,
+	)
+}
+
+// Client-facing constants for every status the caller did not cause. They say
+// what the caller can DO — retry, wait, stop — and nothing about why.
+const (
+	msgInternal            = "internal error"
+	msgUpstreamUnavailable = "upstream unavailable"
+	msgUpstreamTimeout     = "upstream timeout"
+	msgNotImplemented      = "not implemented"
+	msgClientClosed        = "client closed request"
+)
+
+// statusClientClosedRequest is nginx's 499, which grpc-gateway also emits for
+// codes.Canceled. Not an IANA code, and used here for the same reason they use
+// it: a request the CLIENT abandoned is not a fault of the server, and counting
+// it as one puts the caller's own disconnects into this platform's error budget.
+const statusClientClosedRequest = 499
+
+// httpStatus maps a gRPC status onto an HTTP status, the message the CLIENT may
+// see, and the detail only an OPERATOR may see.
+//
+// THE THIRD RETURN IS THE FIX (#440). Every arm used to return st.Message(), and
+// risk-engine's mapError puts the raw error into codes.Internal:
+//
+//	default:
+//		return status.Error(codes.Internal, err.Error())
+//
+// so an internal failure's text travelled upstream → here → the API client. A
+// pgx error carries SQL and constraint names; a transport error carries internal
+// host:port. On a multi-tenant platform neither is an API client's to read.
+//
+// THE RULE IS BY DIRECTION, and it is the one webhook-ingest's writePipelineError
+// already follows: a 4xx describes what the CALLER sent, so it keeps its reason —
+// a 400 that will not say what was wrong forces every caller to guess. A 5xx
+// describes a fault of OURS, so the client gets a constant and the detail goes to
+// the log. Detail is non-empty exactly when it must not be relayed.
+//
+// THE TABLE IS NOW THE WHOLE grpc-gateway TABLE, which is what the comment on
+// write has always claimed it mirrored. It mirrored six of sixteen codes; the
+// rest fell to a default answering 500. That is the same defect class as #434 and
+// #439 one service over — a 5xx is RETRYABLE and blames this platform, so a
+// client cancellation and a caller-side precondition failure both read as "kanz
+// is broken" and both invite a retry that cannot help.
+func httpStatus(err error) (code int, clientMsg, detail string) {
 	st, ok := status.FromError(err)
 	if !ok {
-		return http.StatusInternalServerError, err.Error()
+		// Not a gRPC status at all — a dial or transport failure, whose text IS the
+		// internal topology ("dial tcp 10.0.3.12:9090: connect: connection
+		// refused"). This was the worst of the three leaks and has no 4xx reading.
+		return http.StatusInternalServerError, msgInternal, err.Error()
 	}
 	switch st.Code() {
-	case codes.NotFound:
-		return http.StatusNotFound, st.Message()
-	case codes.InvalidArgument:
-		return http.StatusBadRequest, st.Message()
-	case codes.PermissionDenied:
-		return http.StatusForbidden, st.Message()
+	// --- The caller caused it: they may read why. -------------------------------
+	case codes.InvalidArgument, codes.FailedPrecondition, codes.OutOfRange:
+		return http.StatusBadRequest, st.Message(), ""
 	case codes.Unauthenticated:
-		return http.StatusUnauthorized, st.Message()
+		return http.StatusUnauthorized, st.Message(), ""
+	case codes.PermissionDenied:
+		return http.StatusForbidden, st.Message(), ""
+	case codes.NotFound:
+		// writeOwned normalises this one further on portfolio-scoped routes, so the
+		// body cannot separate "not yours" from "not there". See notFoundMsg.
+		return http.StatusNotFound, st.Message(), ""
+	case codes.AlreadyExists, codes.Aborted:
+		return http.StatusConflict, st.Message(), ""
+	case codes.ResourceExhausted:
+		return http.StatusTooManyRequests, st.Message(), ""
+	case codes.Canceled:
+		// Nobody is listening — the client hung up. A constant, because the message
+		// is never read and a leak that is never read is still a leak in a log-
+		// replaying proxy.
+		return statusClientClosedRequest, msgClientClosed, ""
+
+	// --- We caused it: constant out, detail to the operator. ---------------------
 	case codes.DeadlineExceeded:
-		return http.StatusGatewayTimeout, st.Message()
+		return http.StatusGatewayTimeout, msgUpstreamTimeout, st.Message()
 	case codes.Unavailable:
-		return http.StatusServiceUnavailable, st.Message()
+		return http.StatusServiceUnavailable, msgUpstreamUnavailable, st.Message()
+	case codes.Unimplemented:
+		return http.StatusNotImplemented, msgNotImplemented, st.Message()
+	case codes.Internal, codes.Unknown, codes.DataLoss:
+		return http.StatusInternalServerError, msgInternal, st.Message()
+
 	default:
-		return http.StatusInternalServerError, st.Message()
+		// UNREACHABLE FOR EVERY CODE gRPC DEFINES TODAY — the arms above are
+		// exhaustive, and test/arch/gateway_grpc_code_table_test.go fails the build
+		// if any kanz server starts returning one that is missing. It is LOUD rather
+		// than silent so that if gRPC adds a code, the log names it instead of it
+		// becoming an anonymous 500.
+		return http.StatusInternalServerError, msgInternal,
+			fmt.Sprintf("unmapped gRPC code %s: %s", st.Code(), st.Message())
 	}
 }
 
