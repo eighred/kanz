@@ -24,19 +24,23 @@ import (
 	orderpb "github.com/eighred/kanz/kanz-schemas-go/order/v1"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
+	"github.com/eighred/kanz/internal/costbasis"
 	"github.com/eighred/kanz/internal/dec"
 )
 
 // key: a holding is identified by WHERE it sits, not just what it is (EXEC-M19a).
 type key struct{ portfolio, venue, instrument string }
 
-// lot is the running state of one holding: signed quantity, the average cost of
-// the open position (always non-negative), and cumulative realized P&L.
-type lot struct {
-	qty      *big.Rat // signed: + long, - short
-	avg      *big.Rat // average cost per unit of the open lot
-	realized *big.Rat
-}
+// lot is the running state of one holding, and is the PLATFORM'S lot rather than
+// this package's (#428): signed quantity, the average cost of the open position
+// (always non-negative), and cumulative realized P&L.
+//
+// An alias, not a copy. The arithmetic that maintains it moved to
+// internal/costbasis, because three packages were each folding fills into their
+// own version of this struct with their own copy of the same calculation — and
+// they had drifted. The local name stays so this package still reads in its own
+// vocabulary.
+type lot = costbasis.Lot
 
 // Book accumulates holdings from fills. Goroutine-safe.
 type Book struct {
@@ -87,7 +91,7 @@ func (b *Book) Apply(_ context.Context, portfolioID string, fill *orderpb.Fill, 
 		signed = new(big.Rat).Neg(signed)
 	}
 
-	foldLot(l, signed, price)
+	costbasis.Fold(l, signed, price)
 
 	venueState, err := b.stateOf(portfolioID, fill.GetVenue(), fill.GetInstrumentId(), l, price, asOf)
 	if err != nil {
@@ -103,41 +107,33 @@ func (b *Book) Apply(_ context.Context, portfolioID string, fill *orderpb.Fill, 
 // aggregate sums every venue's holding of one instrument into the fund's position — the
 // same cost-weighted fold the durable store does in SQL. Caller holds b.mu.
 func (b *Book) aggregate(portfolioID, instrument string) *lot {
-	agg := zeroLot()
-	cost, absQty := new(big.Rat), new(big.Rat)
+	agg := costbasis.NewAggregator()
 	for k, l := range b.lots {
 		if k.portfolio != portfolioID || k.instrument != instrument {
 			continue
 		}
-		agg.qty.Add(agg.qty, l.qty)
-		agg.realized.Add(agg.realized, l.realized)
-		abs := new(big.Rat).Abs(l.qty)
-		absQty.Add(absQty, abs)
-		cost.Add(cost, new(big.Rat).Mul(abs, l.avg))
+		agg.Add(l)
 	}
-	if absQty.Sign() != 0 {
-		agg.avg = new(big.Rat).Quo(cost, absQty)
-	}
-	return agg
+	return agg.Lot()
 }
 
 // stateOf marks at the fill price (the latest trade). An empty venue is the fund-level
 // aggregate: it belongs to no single exchange.
 func (b *Book) stateOf(portfolioID, venue, instrument string, l *lot, price *big.Rat, asOf time.Time) (*domainpb.PositionState, error) {
-	unreal := new(big.Rat).Mul(new(big.Rat).Sub(price, l.avg), l.qty)
-	qty, ok := dec.ToProtoScaled(l.qty)
+	unreal := new(big.Rat).Mul(new(big.Rat).Sub(price, l.AvgCost), l.Qty)
+	qty, ok := dec.ToProtoScaled(l.Qty)
 	if !ok {
 		return nil, fmt.Errorf("position %s/%s: quantity is not representable", portfolioID, instrument)
 	}
-	avg, ok := dec.ToProtoScaled(l.avg)
+	avg, ok := dec.ToProtoScaled(l.AvgCost)
 	if !ok {
 		return nil, fmt.Errorf("position %s/%s: average price is not representable", portfolioID, instrument)
 	}
-	marketValue, err := b.money(new(big.Rat).Mul(price, l.qty))
+	marketValue, err := b.money(new(big.Rat).Mul(price, l.Qty))
 	if err != nil {
 		return nil, fmt.Errorf("position %s/%s market value: %w", portfolioID, instrument, err)
 	}
-	realized, err := b.money(l.realized)
+	realized, err := b.money(l.Realized)
 	if err != nil {
 		return nil, fmt.Errorf("position %s/%s realized pnl: %w", portfolioID, instrument, err)
 	}
@@ -156,75 +152,6 @@ func (b *Book) stateOf(portfolioID, venue, instrument string, l *lot, price *big
 		UnrealizedPnl: unrealized,
 		AsOf:          timestamppb.New(asOf.UTC()),
 	}, nil
-}
-
-// foldLot mutates the lot by a signed fill quantity at price, applying
-// weighted-average-cost accounting with realized P&L.
-//
-// It is a package-level function, not a Book method, because the DURABLE book folds with
-// exactly the same arithmetic (EXEC-M18) — the only thing that changed is where the lot
-// lives between fills. Two implementations of weighted-average cost would be two chances
-// to disagree about a fund's basis, so there is one.
-func foldLot(l *lot, signed, price *big.Rat) {
-	cur := l.qty.Sign()
-	add := signed.Sign()
-
-	// Flat or same-direction: increase the position, re-average the cost.
-	if cur == 0 || cur == add {
-		oldAbs := new(big.Rat).Abs(l.qty)
-		addAbs := new(big.Rat).Abs(signed)
-		newQty := new(big.Rat).Add(l.qty, signed)
-		newAbs := new(big.Rat).Abs(newQty)
-		// A ZERO DIVISOR HERE IS A PANIC, NOT A WRONG NUMBER (#217). Both callers
-		// now refuse a non-positive fill before reaching this (ErrFillQuantityNotPositive),
-		// so this is unreachable through Apply — it stays because this function is the
-		// ONE fold shared by the in-memory and durable books, the divisor is derived
-		// rather than validated here, and big.Rat.Quo's failure mode is to take the
-		// process down. Both sibling folds already guard the same division
-		// (postgres.go's aggregate, tv-sync's fold); this one did not, and that
-		// asymmetry is exactly what shipped.
-		//
-		// Flat is a real state, not an error: a lot that nets to zero has no basis
-		// and reports none, which is what the aggregate does for a fund that has
-		// closed every venue.
-		if newAbs.Sign() == 0 {
-			l.avg = new(big.Rat)
-			l.qty = newQty
-			return
-		}
-		// new avg = (oldAbs*avg + addAbs*price) / newAbs
-		cost := new(big.Rat).Mul(oldAbs, l.avg)
-		cost.Add(cost, new(big.Rat).Mul(addAbs, price))
-		l.avg = new(big.Rat).Quo(cost, newAbs)
-		l.qty = newQty
-		return
-	}
-
-	// Opposite direction: realize P&L on the closed portion.
-	closeAbs := new(big.Rat).Abs(signed)
-	openAbs := new(big.Rat).Abs(l.qty)
-	if closeAbs.Cmp(openAbs) > 0 {
-		closeAbs = openAbs // cross through zero; only the open portion is closed
-	}
-	// realized += closeAbs * (price - avg) * sign(currentQty)
-	pnl := new(big.Rat).Mul(closeAbs, new(big.Rat).Sub(price, l.avg))
-	if cur < 0 {
-		pnl.Neg(pnl) // short: profit when price < avg
-	}
-	l.realized.Add(l.realized, pnl)
-
-	newQty := new(big.Rat).Add(l.qty, signed)
-	switch newQty.Sign() {
-	case 0:
-		l.qty = new(big.Rat)
-		l.avg = new(big.Rat)
-	default:
-		if newQty.Sign() != cur {
-			// Crossed through zero: a fresh lot opens at the fill price.
-			l.avg = new(big.Rat).Set(price)
-		}
-		l.qty = newQty
-	}
 }
 
 // money wraps an exact amount as Money, refusing rather than fabricating one.
@@ -272,21 +199,21 @@ func (b *Book) Snapshot(_ context.Context, portfolioID string, asOf time.Time) (
 		}
 		seen[k.instrument] = true
 		l := b.aggregate(portfolioID, k.instrument)
-		mv := new(big.Rat).Mul(l.avg, l.qty)
+		mv := new(big.Rat).Mul(l.AvgCost, l.Qty)
 		nav.Add(nav, mv)
 		marketValue, err := b.money(mv)
 		if err != nil {
 			return nil, fmt.Errorf("portfolio %s position %s: %w", portfolioID, k.instrument, err)
 		}
-		realized, err := b.money(l.realized)
+		realized, err := b.money(l.Realized)
 		if err != nil {
 			return nil, fmt.Errorf("portfolio %s position %s realized pnl: %w", portfolioID, k.instrument, err)
 		}
-		qty, ok := dec.ToProtoScaled(l.qty)
+		qty, ok := dec.ToProtoScaled(l.Qty)
 		if !ok {
 			return nil, fmt.Errorf("portfolio %s position %s: quantity is not representable", portfolioID, k.instrument)
 		}
-		avg, ok := dec.ToProtoScaled(l.avg)
+		avg, ok := dec.ToProtoScaled(l.AvgCost)
 		if !ok {
 			return nil, fmt.Errorf("portfolio %s position %s: average price is not representable", portfolioID, k.instrument)
 		}

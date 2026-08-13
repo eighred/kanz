@@ -25,6 +25,8 @@ import (
 	"math/big"
 	"sort"
 	"time"
+
+	"github.com/eighred/kanz/internal/costbasis"
 )
 
 // EntryType classifies a journal entry by what produced it (mirrors
@@ -125,15 +127,12 @@ type Action struct {
 
 // Position is the running state of one holding: signed quantity, the
 // non-negative average cost of the open lot, and cumulative realized P&L.
-type Position struct {
-	Qty      *big.Rat
-	AvgCost  *big.Rat
-	Realized *big.Rat
-}
+// An ALIAS to the platform's lot, not a copy of it (#428). The IBOR's holding and
+// the OMS's holding were separate structs folded by separate copies of one
+// calculation; the exported name stays because callers use ledger.Position.
+type Position = costbasis.Lot
 
-func newPosition() *Position {
-	return &Position{Qty: new(big.Rat), AvgCost: new(big.Rat), Realized: new(big.Rat)}
-}
+func newPosition() *Position { return costbasis.NewLot() }
 
 // Book is the folded state of one portfolio: positions by instrument, cash by
 // currency, and accrued income by currency (earned-not-received, carried in NAV).
@@ -252,74 +251,26 @@ func (b *Book) foldContribution(instrument string, qty, totalCost *big.Rat) {
 	b.foldPosition(instrument, qty, avg)
 }
 
-// foldPosition applies a signed quantity at price using weighted-average-cost
-// accounting, booking realized P&L on the closed portion (the OMS position
-// projector's accounting, kept identical so the IBOR and the OMS book agree).
+// foldPosition applies a signed quantity at price using the PLATFORM'S
+// weighted-average-cost fold, booking realized P&L on the closed portion.
+//
+// THE ARITHMETIC IS NO LONGER HERE, and that is the repair (#428). This used to be
+// a hand-copy of the OMS position projector's fold, and said so:
+//
+//	"Two copies of one calculation is the standing risk; the next edit to either
+//	 should not have to rediscover which one had the guard."
+//
+// There were three copies, not two, and they had drifted — tv-sync's netted fees
+// into realized P&L while this one and the OMS's did not. internal/costbasis is
+// the one implementation; the IBOR and the OMS book now agree by construction
+// rather than by inspection.
 func (b *Book) foldPosition(instrument string, signed, price *big.Rat) {
 	l := b.Positions[instrument]
 	if l == nil {
 		l = newPosition()
 		b.Positions[instrument] = l
 	}
-	cur := l.Qty.Sign()
-	add := signed.Sign()
-
-	// Flat or same-direction: increase the position, re-average the cost.
-	if cur == 0 || cur == add {
-		oldAbs := new(big.Rat).Abs(l.Qty)
-		addAbs := new(big.Rat).Abs(signed)
-		newQty := new(big.Rat).Add(l.Qty, signed)
-		newAbs := new(big.Rat).Abs(newQty)
-		// Zero divisor ⇒ big.Rat.Quo PANICS. DEFENSE IN DEPTH, NOT A LIVE BUG:
-		// unlike the OMS position fold this mirrors, every caller here already
-		// screens a zero quantity out — Apply at `e.Quantity.Sign() != 0`, and
-		// foldContribution at `qty.Sign() == 0`. In the same-direction arm newAbs
-		// can only be zero when BOTH the existing lot and the incoming quantity are
-		// zero, so today this is unreachable.
-		//
-		// It is guarded anyway because the divisor is derived rather than validated
-		// here, the failure mode is a panic rather than a wrong number, and this
-		// function is a hand-copy of the OMS fold — where the same line WAS
-		// reachable and did crash-loop the estate (#217). Two copies of one
-		// calculation is the standing risk; the next edit to either should not have
-		// to rediscover which one had the guard.
-		//
-		// Flat is a real state: a holding that nets to zero has no basis.
-		if newAbs.Sign() == 0 {
-			l.AvgCost = new(big.Rat)
-			l.Qty = newQty
-			return
-		}
-		cost := new(big.Rat).Mul(oldAbs, l.AvgCost)
-		cost.Add(cost, new(big.Rat).Mul(addAbs, price))
-		l.AvgCost = new(big.Rat).Quo(cost, newAbs)
-		l.Qty = newQty
-		return
-	}
-
-	// Opposite direction: realize P&L on the closed portion.
-	closeAbs := new(big.Rat).Abs(signed)
-	openAbs := new(big.Rat).Abs(l.Qty)
-	if closeAbs.Cmp(openAbs) > 0 {
-		closeAbs = openAbs
-	}
-	pnl := new(big.Rat).Mul(closeAbs, new(big.Rat).Sub(price, l.AvgCost))
-	if cur < 0 {
-		pnl.Neg(pnl)
-	}
-	l.Realized.Add(l.Realized, pnl)
-
-	newQty := new(big.Rat).Add(l.Qty, signed)
-	switch newQty.Sign() {
-	case 0:
-		l.Qty = new(big.Rat)
-		l.AvgCost = new(big.Rat)
-	default:
-		if newQty.Sign() != cur {
-			l.AvgCost = new(big.Rat).Set(price) // crossed zero: a fresh lot
-		}
-		l.Qty = newQty
-	}
+	costbasis.Fold(l, signed, price)
 }
 
 // CashBalance returns the cash held in a currency (zero if none).

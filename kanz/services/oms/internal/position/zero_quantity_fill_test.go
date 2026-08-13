@@ -9,6 +9,8 @@ import (
 
 	commonpb "github.com/eighred/kanz/kanz-schemas-go/common/v1"
 	orderpb "github.com/eighred/kanz/kanz-schemas-go/order/v1"
+
+	"github.com/eighred/kanz/internal/costbasis"
 )
 
 // A zero-quantity fill used to PANIC the fold, not merely be wrong (#217).
@@ -108,18 +110,18 @@ func TestFoldLotDoesNotPanicWhenTheLotNetsToZero(t *testing.T) {
 	l := zeroLot()
 
 	// Straight to zero from flat — the shape that panicked.
-	foldLot(l, new(big.Rat), big.NewRat(50000, 1))
-	if l.qty.Sign() != 0 {
-		t.Errorf("qty = %s, want 0", l.qty.RatString())
+	costbasis.Fold(l, new(big.Rat), big.NewRat(50000, 1))
+	if l.Qty.Sign() != 0 {
+		t.Errorf("qty = %s, want 0", l.Qty.RatString())
 	}
-	if l.avg.Sign() != 0 {
-		t.Errorf("a flat lot has no basis; avg = %s, want 0", l.avg.RatString())
+	if l.AvgCost.Sign() != 0 {
+		t.Errorf("a flat lot has no basis; avg = %s, want 0", l.AvgCost.RatString())
 	}
 
 	// Open, then close exactly — nets to zero through the opposite-direction arm.
-	foldLot(l, big.NewRat(3, 1), big.NewRat(100, 1))
-	foldLot(l, big.NewRat(-3, 1), big.NewRat(120, 1))
-	if l.qty.Sign() != 0 {
-		t.Errorf("after a full close, qty = %s, want 0", l.qty.RatString())
+	costbasis.Fold(l, big.NewRat(3, 1), big.NewRat(100, 1))
+	costbasis.Fold(l, big.NewRat(-3, 1), big.NewRat(120, 1))
+	if l.Qty.Sign() != 0 {
+		t.Errorf("after a full close, qty = %s, want 0", l.Qty.RatString())
 	}
 }

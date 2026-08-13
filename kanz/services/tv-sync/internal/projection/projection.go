@@ -416,15 +416,15 @@ func (p *Projection) positionsLocked(a *account, asOf time.Time) []PositionDTO {
 	folded := foldPositions(visibleExecs(a.execs, asOf))
 	var out []PositionDTO
 	for inst, ps := range folded {
-		if ps.net.Sign() == 0 && ps.realized.Sign() == 0 {
+		if ps.Qty.Sign() == 0 && ps.Realized.Sign() == 0 {
 			continue
 		}
 		dto := PositionDTO{
-			Instrument: inst, Side: posSide(ps.net),
-			Qty: dec.Str(new(big.Rat).Abs(ps.net)), AvgPrice: dec.Str(ps.avg),
-			RealizedPnl: dec.Str(ps.realized),
+			Instrument: inst, Side: posSide(ps.Qty),
+			Qty: dec.Str(new(big.Rat).Abs(ps.Qty)), AvgPrice: dec.Str(ps.AvgCost),
+			RealizedPnl: dec.Str(ps.Realized),
 		}
-		if u := ps.unrealized(p.markOf(inst)); u != nil {
+		if u := ps.Unrealized(p.markOf(inst)); u != nil {
 			dto.UnrealizedPnl = dec.Str(u)
 		}
 		out = append(out, dto)
@@ -438,11 +438,11 @@ func (p *Projection) stateLocked(a *account, asOf time.Time) StateDTO {
 	realized, unrealized := new(big.Rat), new(big.Rat)
 	open := 0
 	for inst, ps := range folded {
-		realized.Add(realized, ps.realized)
-		if ps.net.Sign() != 0 {
+		realized.Add(realized, ps.Realized)
+		if ps.Qty.Sign() != 0 {
 			open++
 		}
-		if u := ps.unrealized(p.markOf(inst)); u != nil {
+		if u := ps.Unrealized(p.markOf(inst)); u != nil {
 			unrealized.Add(unrealized, u)
 		}
 	}
