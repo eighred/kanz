@@ -31,6 +31,11 @@ type OKXReconciler struct {
 	venue        string
 	tenant       string
 	now          func() time.Time
+	// onUnknownBalance is called for an asset whose expected balance is UNKNOWN
+	// (#418). Nil ⇒ silent, which is only right in a test: in production an
+	// operator must be able to tell "reconciliation found nothing wrong" from
+	// "reconciliation could not check", and those look identical otherwise.
+	onUnknownBalance func(asset string)
 }
 
 // OKXReconcilerConfig configures an OKXReconciler.
@@ -44,11 +49,12 @@ type OKXReconcilerConfig struct {
 	Closes PendingCloses
 	// CloseTimeout is how long a close may stay unconfirmed before the healing
 	// loop force-clears it. <=0 ⇒ 1500ms (the mandate's trigger).
-	CloseTimeout time.Duration
-	Pub          Publisher
-	Venue        string
-	Tenant       string
-	Now          func() time.Time
+	CloseTimeout     time.Duration
+	Pub              Publisher
+	Venue            string
+	Tenant           string
+	Now              func() time.Time
+	OnUnknownBalance func(asset string)
 }
 
 func newOKXReconciler(cfg OKXReconcilerConfig) *OKXReconciler {
@@ -65,6 +71,7 @@ func newOKXReconciler(cfg OKXReconcilerConfig) *OKXReconciler {
 		rest: cfg.REST, symbols: cfg.Symbols, expected: cfg.Expected, balances: cfg.Balances,
 		closes: cfg.Closes, closeTimeout: cfg.CloseTimeout,
 		pub: cfg.Pub, venue: cfg.Venue, tenant: cfg.Tenant, now: cfg.Now,
+		onUnknownBalance: cfg.OnUnknownBalance,
 	}
 }
 
@@ -276,9 +283,14 @@ func (r *OKXReconciler) reconcileBalances(ctx context.Context) error {
 		if !ok {
 			continue
 		}
-		expected := r.balances.Balance(ccy)
-		if expected == nil {
-			expected = new(big.Rat)
+		// UNKNOWN SKIPS, IT DOES NOT COMPARE AGAINST ZERO (#418). Substituting
+		// zero for a balance nobody has announced reports every asset the exchange
+		// holds as a discrepancy — a break storm on the first run, which teaches an
+		// operator to ignore this layer.
+		expected, known := r.balances.Balance(ccy)
+		if !known {
+			r.unknownBalance(ccy)
+			continue
 		}
 		if actual.Cmp(expected) == 0 {
 			continue
@@ -368,4 +380,18 @@ func (r *OKXReconciler) emitBalanceReconciled(ctx context.Context, asset string,
 func okxDriftReason(exp *orderpb.OrderState, o *okxOrder) string {
 	return fmt.Sprintf("okx truth accFillSz=%s state=%s vs internal filled=%s status=%v",
 		o.AccFillSz, o.State, dec.FromProto(exp.GetFilledQuantity()).FloatString(8), exp.GetStatus())
+}
+
+// unknownBalance reports an asset this adapter cannot check, because Kanz has no
+// announced balance for it (#418).
+//
+// It is a distinct signal from a reconciliation BREAK, and the difference is the
+// point: a break means the two sides disagree, this means one side is missing.
+// Collapsing them would let "we have never been told what we hold" arrive on the
+// same dashboard as "the exchange and our books differ", and only one of those is
+// an incident.
+func (r *OKXReconciler) unknownBalance(asset string) {
+	if r.onUnknownBalance != nil {
+		r.onUnknownBalance(asset)
+	}
 }

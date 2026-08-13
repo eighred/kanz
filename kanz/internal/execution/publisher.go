@@ -36,9 +36,21 @@ type ExpectedOrders interface {
 }
 
 // ExpectedBalances is Kanz's internal per-asset balance for the venue account —
-// bound to the accounting projection. A nil result ⇒ zero.
+// bound to the book of record's announcements (#450).
+//
+// ok=false MEANS UNKNOWN, AND IT IS NOT ZERO (#418). The signature used to
+// return only a *big.Rat, documented as "a nil result ⇒ zero", and both
+// reconcilers duly substituted zero. That turns a portfolio nobody has announced
+// — a cold adapter, a lost announcement, a balance too old to trust — into the
+// claim that Kanz believes it holds NOTHING, so every asset the exchange
+// actually holds is reported as a discrepancy.
+//
+// A reconciliation that reports a break on every asset the first time it runs is
+// worse than one that does not run: it trains an operator to ignore the layer,
+// which is the failure the observability guards in test/arch exist to prevent.
+// So an unknown balance SKIPS the asset, loudly, and a known one is compared.
 type ExpectedBalances interface {
-	Balance(asset string) *big.Rat
+	Balance(asset string) (amount *big.Rat, ok bool)
 }
 
 // UserDataStream is the exchange private-websocket transport seam: it yields raw

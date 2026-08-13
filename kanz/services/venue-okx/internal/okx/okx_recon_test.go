@@ -19,7 +19,12 @@ func (s okxStaticOrders) OpenOrders() []*orderpb.OrderState { return s }
 
 type okxStaticBalances map[string]*big.Rat
 
-func (b okxStaticBalances) Balance(asset string) *big.Rat { return b[asset] }
+// A missing key is UNKNOWN, not zero (#418) — the distinction the reconciler
+// now depends on, so the double must make it too.
+func (b okxStaticBalances) Balance(asset string) (*big.Rat, bool) {
+	v, ok := b[asset]
+	return v, ok
+}
 
 func okxReconOver(f *fakeOKX, cap *okxCapture, exp okxStaticOrders, bal okxStaticBalances) *OKXReconciler {
 	bucket := NewWeightBucket(60, time.Minute, nil)
