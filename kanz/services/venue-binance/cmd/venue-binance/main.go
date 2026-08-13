@@ -41,6 +41,7 @@ import (
 	"github.com/eighred/kanz/internal/pg"
 	"github.com/eighred/kanz/internal/platform/httpserver"
 	"github.com/eighred/kanz/internal/venueadapter/accountproof"
+	"github.com/eighred/kanz/internal/venueadapter/balancerecon"
 	"github.com/eighred/kanz/internal/venueadapter/orderview"
 	"github.com/eighred/kanz/internal/venueadapter/server"
 	"github.com/eighred/kanz/internal/version"
@@ -133,7 +134,8 @@ func serve(cfg config.Config) error {
 		_ = httpSrv.Shutdown(shutCtx)
 	}()
 
-	obs.Registry.MustRegister(orderViewDurable)
+	balanceReconConfigured := balancerecon.NewGauge("binance")
+	obs.Registry.MustRegister(orderViewDurable, balanceReconConfigured)
 
 	// The adapter's own order view — the state its workers read after the process
 	// split cut them off from the OMS store.
@@ -241,9 +243,17 @@ func serve(cfg config.Config) error {
 		Publisher: publishHealth,
 		Lookup:    seam,
 		Expected:  seam,
-		Closes:    closes,
-		Tenant:    cfg.Tenant,
-		Logger:    logger,
+		// NOT AN OVERSIGHT — there is nothing to bind (#418). No component tracks a
+		// per-venue-account, per-asset balance, so the only implementations of
+		// execution.ExpectedBalances in the tree are test doubles. Announce reports
+		// the posture on kanz_venue_balance_reconciliation_configured and warns,
+		// because reconcileBalances short-circuits on nil and the FACT it would
+		// publish is emitted only on a DISCREPANCY: silence there would otherwise
+		// read as "the books agree" when it means "nothing has ever checked".
+		Balances: balancerecon.Announce(balanceReconConfigured, logger, "binance", nil),
+		Closes:   closes,
+		Tenant:   cfg.Tenant,
+		Logger:   logger,
 	})
 
 	// WHOSE MONEY DOES THIS ADAPTER SPEND? (SOV-02a)
