@@ -84,11 +84,28 @@ func Accept(cmd *orderpb.SubmitOrder, now time.Time) (*orderpb.OrderState, error
 		TimeInForce:     cmd.GetTimeInForce(),
 		OrderedQuantity: cmd.GetQuantity(),
 		LimitPrice:      cmd.GetLimitPrice(),
-		Status:          orderpb.OrderStatus_ORDER_STATUS_PENDING_NEW,
-		FilledQuantity:  zero,
-		LeavesQuantity:  cmd.GetQuantity(),
-		Venue:           cmd.GetVenue(), // M4: the allocation-matrix routing target
-		AsOf:            timestamppb.New(now.UTC()),
+		// THE TRIGGER, CARRIED (#405). The switch above REQUIRES this on a stop
+		// order and OrderState had nowhere to put it, so it was validated and then
+		// dropped — and OrderState is what Venue.Execute receives. A connector
+		// implementing STOP_LOSS_LIMIT had nothing to send as the trigger.
+		//
+		// GetStopPrice() is nil for every untriggered type, so this copies the
+		// trigger exactly where there is one and leaves it unset everywhere else.
+		// Copying unconditionally would put a stop price on every market order —
+		// a value downstream has to know to ignore, which is how it eventually
+		// stops being ignored.
+		StopPrice: cmd.GetStopPrice(),
+		// THE GTD DEADLINE, CARRIED (#405). Same class, found by writing the guard:
+		// admission rejects a GTD order without it and OrderState had no field, so
+		// before this `ExpireAt` appeared in exactly one place in the whole Go tree —
+		// the line that validates it. The adapters DO forward time_in_force, so a
+		// good-till-date order reached the venue with no date.
+		ExpireAt:       cmd.GetExpireAt(),
+		Status:         orderpb.OrderStatus_ORDER_STATUS_PENDING_NEW,
+		FilledQuantity: zero,
+		LeavesQuantity: cmd.GetQuantity(),
+		Venue:          cmd.GetVenue(), // M4: the allocation-matrix routing target
+		AsOf:           timestamppb.New(now.UTC()),
 	}, nil
 }
 
