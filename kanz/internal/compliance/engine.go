@@ -65,7 +65,23 @@ type Book struct {
 	BaseCurrency string
 	// NAV is net asset value (positions + cash), the leverage-rule denominator.
 	// nil when unknown, which fails the leverage rule closed.
-	NAV       *commonpb.Money
+	NAV *commonpb.Money
+	// Cash is UNINVESTED CASH in BaseCurrency — what the portfolio can actually
+	// spend (#415). nil when unknown, which fails the buying-power rule CLOSED,
+	// exactly as an absent NAV fails the leverage rule closed.
+	//
+	// NIL IS THE COMMON CASE TODAY AND THAT IS SAFE, because the rule only runs
+	// when a mandate DECLARES a buying-power limit. A portfolio with no such rule
+	// is unaffected; one that declares it and cannot supply cash is refused rather
+	// than admitted. The alternative — treating unknown cash as unlimited — is a
+	// control that reports success, which is the failure mode this platform
+	// designs against.
+	//
+	// It is populated from domain.v1.PortfolioState.cash_balance. risk sets that
+	// field; the OMS position book does not yet (its Snapshot says NAV is "a
+	// funded-book proxy until a cash/equity source lands"), so a deployment fed by
+	// the OMS book supplies nil until that link is wired.
+	Cash      *commonpb.Money
 	Positions []Position
 }
 
@@ -76,6 +92,7 @@ func BookFromSnapshot(s *domainpb.PortfolioSnapshot) *Book {
 		PortfolioID:  s.GetPortfolio().GetPortfolioId(),
 		BaseCurrency: s.GetPortfolio().GetBaseCurrency(),
 		NAV:          s.GetPortfolio().GetTotalMarketValue(),
+		Cash:         s.GetPortfolio().GetCashBalance(),
 	}
 	for _, ps := range s.GetPositions() {
 		b.Positions = append(b.Positions, Position{
@@ -160,6 +177,7 @@ func DefaultRegistry() *Registry {
 	r.Register(compliancepb.RuleType_RULE_TYPE_ISSUER_EXCLUSION, IssuerExclusionRule)
 	r.Register(compliancepb.RuleType_RULE_TYPE_GROSS_LEVERAGE, LeverageRule)
 	r.Register(compliancepb.RuleType_RULE_TYPE_CURRENCY, CurrencyRule)
+	r.Register(compliancepb.RuleType_RULE_TYPE_BUYING_POWER, BuyingPowerRule)
 	return r
 }
 

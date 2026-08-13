@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"math"
 	"sync"
 	"time"
 
@@ -485,7 +486,47 @@ func project(book *Book, d OrderDelta) (*Book, bool) {
 	} else {
 		proj.Positions = append(proj.Positions, pos)
 	}
+
+	// THE TRADE IS PAID FOR (#415). A buy spends cash, a sell raises it, so the
+	// hypothetical book's cash moves by -(signed_quantity x price).
+	//
+	// WITHOUT THIS THE BUYING-POWER RULE IS INERT AND LOOKS LIKE A CONTROL. It
+	// would compare the PRE-trade cash against the floor, so every order the
+	// portfolio could already afford would pass — including the one that spends
+	// the last of it and the one after that. The rule would never fire, and its
+	// silence would read as compliance.
+	//
+	// NAV is still carried forward unchanged, and that remains right for the
+	// reason written above: a trade swaps cash for position value, so net asset
+	// value is approximately unchanged. Cash is the half that MOVES, which is
+	// exactly why a NAV-based rule cannot answer "can we afford this".
+	//
+	// ok=false on an unrepresentable cash delta, for the same reason the notional
+	// does: the caller must REFUSE rather than evaluate a fabricated balance.
+	if proj.Cash != nil {
+		spend, ok := mulDecimal(d.SignedQuantity, d.Price)
+		if !ok {
+			return nil, false
+		}
+		after, ok := addDecimal(proj.Cash.GetAmount(), negateDecimal(spend))
+		if !ok {
+			return nil, false
+		}
+		proj.Cash = &commonpb.Money{Amount: after, CurrencyCode: proj.Cash.GetCurrencyCode()}
+	}
 	return proj, true
+}
+
+// negateDecimal flips a Decimal's sign. The coefficient is an int64 and math.MinInt64
+// has no positive counterpart, so that one value is refused by returning it
+// unchanged — it cannot arise from a real order (dec.InDomainDeep bounds the
+// exponent, and a coefficient that large is not a tradeable size), and inventing
+// a wrapped positive would be the #94 defect in a new place.
+func negateDecimal(d *commonpb.Decimal) *commonpb.Decimal {
+	if d == nil || d.GetCoefficient() == math.MinInt64 {
+		return d
+	}
+	return &commonpb.Decimal{Coefficient: -d.GetCoefficient(), Exponent: d.GetExponent()}
 }
 
 // addDecimal and mulDecimal MOVED to internal/dec (arith.go) for #216.

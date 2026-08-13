@@ -67,6 +67,15 @@ enum RuleType {
   // Currency restriction: holdings may only be denominated in an allowed set
   // of currencies. Pairs with CurrencyRestriction.
   RULE_TYPE_CURRENCY = 5;
+
+  // RULE_TYPE_BUYING_POWER caps what an order may SPEND: the portfolio's cash
+  // after the trade must not fall below a floor (#415).
+  //
+  // Every other rule here bounds the SHAPE of the book — how concentrated, how
+  // levered, which instruments and currencies. None of them asks whether the
+  // fund can afford the order. Margin sufficiency was discovered from the
+  // exchange, after dispatch.
+  RULE_TYPE_BUYING_POWER = 6;
 }
 
 // Dimension is the portfolio axis a concentration or restriction rule buckets
@@ -176,7 +185,26 @@ message Rule {
     IssuerExclusion issuer_exclusion = 12;
     LeverageCap leverage_cap = 13;
     CurrencyRestriction currency_restriction = 14;
+    BuyingPowerLimit buying_power = 15;
   }
+}
+
+// BuyingPowerLimit bounds what an order may spend (#415).
+//
+// THE FLOOR IS EXPLICIT AND HAS NO DEFAULT, deliberately. An absent limit means
+// "no buying-power rule", which is what every portfolio has today. A limit whose
+// min_cash_after is unset means the floor is ZERO — the portfolio may spend down
+// to nothing and no further. A positive value keeps a reserve: cash the fund
+// declines to commit, which is the usual shape for a margin buffer.
+//
+// It is denominated in the portfolio's BASE CURRENCY, like NAV. A per-currency
+// floor is a different rule and a bigger one — it needs the FX layer to compare
+// a USDT balance against a USD order — and inventing it here would make the
+// simple case wrong in a way nobody could see.
+message BuyingPowerLimit {
+  // min_cash_after is the lowest post-trade cash balance the mandate permits,
+  // in the portfolio's base currency. Unset ⇒ zero.
+  common.v1.Decimal min_cash_after = 1;
 }
 
 // Mandate is the tenant/portfolio-scoped ruleset a book is governed by. It is

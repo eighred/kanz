@@ -152,6 +152,57 @@ func LeverageRule(c *Candidate, rule *compliancepb.Rule) *compliancepb.Violation
 	}
 }
 
+// BuyingPowerRule enforces a BuyingPowerLimit: the portfolio's cash AFTER the
+// trade must not fall below min_cash_after (#415).
+//
+// IT IS THE ONLY RULE HERE THAT ASKS WHETHER THE FUND CAN AFFORD THE ORDER.
+// Every other one bounds the SHAPE of the book — how concentrated, how levered,
+// which instruments and currencies. Margin sufficiency was otherwise discovered
+// from the exchange, after dispatch, which is the wrong side of the trade to
+// find out on.
+//
+// ABSENT CASH FAILS CLOSED, exactly as an absent NAV does for LeverageRule, and
+// for a sharper reason. Treating unknown cash as unlimited would admit every
+// order while a mandate declares a spending limit — a control that reports
+// success. A portfolio whose cash the platform cannot establish is one whose
+// affordability it cannot establish, and the honest answer to "can we afford
+// this" is then no.
+//
+// THAT IS SAFE TO SHIP AHEAD OF THE CASH SOURCE because the rule only runs when
+// a mandate DECLARES this limit. Nothing declares it today, so no order changes
+// behaviour; a deployment that declares it before wiring cash gets a loud
+// refusal naming the reason, not a silent pass.
+//
+// The comparison is in the portfolio's BASE CURRENCY, like NAV and like the
+// leverage denominator. A per-currency floor needs the FX layer and is a
+// different rule; approximating it here would make the simple case wrong
+// invisibly.
+func BuyingPowerRule(c *Candidate, rule *compliancepb.Rule) *compliancepb.Violation {
+	bp := rule.GetBuyingPower()
+	if bp == nil {
+		return paramsMismatch("buying_power")
+	}
+	if c.Book.Cash == nil {
+		return &compliancepb.Violation{
+			Message:  "buying power cannot be verified: cash balance unavailable",
+			Evidence: map[string]string{"cash": "unavailable"},
+		}
+	}
+	after := ratFromDecimal(c.Book.Cash.GetAmount())
+	floor := ratFromDecimal(bp.GetMinCashAfter())
+	if after.Cmp(floor) >= 0 {
+		return nil
+	}
+	return &compliancepb.Violation{
+		Message: "order would spend below the permitted cash floor",
+		Evidence: map[string]string{
+			"cash_after": ratString(after),
+			"floor":      ratString(floor),
+			"currency":   c.Book.Cash.GetCurrencyCode(),
+		},
+	}
+}
+
 // CurrencyRule breaches when the book holds a position denominated in a currency
 // outside the allowed set.
 func CurrencyRule(c *Candidate, rule *compliancepb.Rule) *compliancepb.Violation {
