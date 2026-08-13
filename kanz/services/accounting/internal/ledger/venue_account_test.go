@@ -177,3 +177,43 @@ func TestAppend_RecordsTheAccountACashMovementSettledAgainst(t *testing.T) {
 			"is populated", got)
 	}
 }
+
+// THE ACCOUNT SURVIVES THE ROUND TRIP THROUGH THE READ PATH THE SERVICE USES.
+//
+// The two tests above read venue_account_id with their own hand-written SQL,
+// which proves the WRITE and says nothing about Journal — the path Replay,
+// MaterializeCurrent and every snapshot rebuild actually take. journal's SELECT
+// omitted the column, so every *Event the service read back carried an empty
+// account while the rows held the right one (#415).
+//
+// A test that queries AROUND the code under test cannot fail when that code
+// stops carrying a field. This one goes through it.
+func TestJournal_ReadsBackTheVenueAccount(t *testing.T) {
+	pool := newPool(t)
+	store := NewPostgres(pool)
+	ctx := context.Background()
+
+	if err := store.Append(ctx, entry("fill:rt-1", "fund-rt", "okx-alpha")); err != nil {
+		t.Fatalf("Append: %v", err)
+	}
+	events, err := store.Journal(ctx, "fund-rt")
+	if err != nil {
+		t.Fatalf("Journal: %v", err)
+	}
+	var found *Event
+	for _, e := range events {
+		if e.EntryID == "fill:rt-1" {
+			found = e
+		}
+	}
+	if found == nil {
+		t.Fatalf("Journal did not return fill:rt-1 (got %d events)", len(events))
+	}
+	if found.VenueAccountID != "okx-alpha" {
+		t.Fatalf("Journal returned VenueAccountID = %q, want okx-alpha.\n"+
+			"The row holds the account and the read path dropped it, so Replay and every "+
+			"snapshot rebuilt from the journal see the EMPTY string — which migration 0003 "+
+			"defines as the positive claim that this entry touched no exchange account.",
+			found.VenueAccountID)
+	}
+}
