@@ -266,23 +266,34 @@ func (p *Pipeline) decide(ctx context.Context, wh *Webhook) (*Result, error) {
 func mapTranslateErr(err error) error {
 	switch {
 	case errors.Is(err, translate.ErrInvalidIntent), errors.Is(err, translate.ErrSizeExceedsMax),
-		errors.Is(err, translate.ErrStaleSignal):
-		// All three are a VERDICT on the alert — the caller sent something this
+		errors.Is(err, translate.ErrStaleSignal), errors.Is(err, translate.ErrNoAllocation):
+		// All four are a VERDICT on the alert — the caller sent something this
 		// platform will not act on — so all answer 400 and all BURN the nonce (see
 		// decided).
 		//
-		// ErrStaleSignal was missing here and fell to the server's default arm, which
-		// is 502 Bad Gateway: the status reserved for a fault of OURS. Two costs, and
-		// the second is the one that compounds. It blamed this platform for a sender's
-		// clock or a missing `ts`, so the page went to the wrong team. And 502 is
-		// RETRYABLE — senders and proxies retry 5xx — so the alerts that retried
-		// hardest were the delayed ones already too old to act on, while the released
-		// nonce meant each redelivery re-entered the whole pipeline instead of
-		// collapsing to ErrReplayed. A 4xx ends that; it is the true answer anyway.
+		// TWO OF THEM WERE MISSING FROM THIS LIST and fell to the server's default
+		// arm, which is 502 Bad Gateway: the status reserved for a fault of OURS.
 		//
-		// BOTH sentinels stay wrapped (`%w: %w`). ErrBadRequest is what the server
+		//	ErrStaleSignal    the alert has no `ts`, or one too old to act on
+		//	ErrNoAllocation   the alert names a fund with no venue allocation
+		//
+		// Both are decisions ABOUT THE CALLER'S INPUT — a sender's clock, a sender's
+		// fund_id — and both are PERMANENT: Alloc is static config read at startup,
+		// and an alert only gets older. Two costs each, and the second compounds. The
+		// 502 blamed this platform, so the page went to the wrong team. And 502 is
+		// RETRYABLE — senders and proxies retry 5xx — so the alerts that retried
+		// hardest were the ones that could never succeed, while the released nonce
+		// meant each redelivery re-entered the whole pipeline instead of collapsing to
+		// ErrReplayed. A 4xx ends that; it is the true answer anyway.
+		//
+		// THE SENTINEL BEING PINNED IS NOT THE STATUS BEING PINNED. Both had a test
+		// asserting the right sentinel came back (TestUnmappedFundDenied, the
+		// freshness tests) and neither asserted what the caller would actually
+		// receive, which is how they sat here looking covered.
+		//
+		// BOTH SENTINELS STAY WRAPPED (`%w: %w`). ErrBadRequest is what the server
 		// maps to a status; the translator's sentinel is what names WHICH refusal, and
-		// the freshness tests match on it.
+		// the tests match on it.
 		return fmt.Errorf("%w: %w", ErrBadRequest, err)
 	case errors.Is(err, translate.ErrUnresolvable):
 		return fmt.Errorf("%w: %v", ErrUnresolvable, err)

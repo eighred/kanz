@@ -316,6 +316,47 @@ func TestUnmappedFundDenied(t *testing.T) {
 	}
 }
 
+// AN UNMAPPED FUND IS A VERDICT: 400, AND THE NONCE BURNS.
+//
+// The sentinel above was pinned and its STATUS was not, so this answered 502 Bad
+// Gateway — the same gap ErrStaleSignal had. `fund_id` is a field the SENDER
+// chose, and deny-by-default means an unmapped one can never trade: no retry of
+// the identical body resolves differently, because Alloc is static config read at
+// startup.
+//
+// So 5xx is wrong twice over. It tells a sender with a typo'd fund that this
+// platform is broken, and it tells them to try again — forever, since the nonce
+// was released rather than burnt and each redelivery re-entered the whole
+// pipeline instead of answering ErrReplayed.
+//
+// It burns for the reason written on `decided`: this is a deliberate refusal, not
+// a failure to reach one. If the allocation was dropped by mistake rather than by
+// intent, the alert is stale by the time anyone notices and #416's freshness
+// bound would refuse it on the retry anyway — the identical argument the halt
+// case already makes.
+func TestPerimeter_AnUnmappedFundIs400AndBurnsItsNonce(t *testing.T) {
+	p, cap := harness(t)
+	raw := `{"strategy_id":"momentum","fund_id":"ghost-fund","symbol":"BINANCE:BTCUSDT","action":"buy","size":"1","size_type":"absolute_qty","nonce":"ghost-400",` + freshTS()
+
+	_, err := p.Process(context.Background(), []byte(raw), net.ParseIP("10.0.0.1"), sign(raw, testSecret))
+	if !errors.Is(err, ErrBadRequest) {
+		t.Fatalf("an unmapped fund = %v, want ErrBadRequest so the server answers 400. Unmapped it "+
+			"answers 502, which blames this platform for the sender's fund_id and invites a retry "+
+			"that can never succeed.", err)
+	}
+	// The reason must survive the re-map, or the operator cannot tell an unmapped
+	// fund from any other 400.
+	if !errors.Is(err, ErrNoAllocation) {
+		t.Errorf("err = %v, want ErrNoAllocation to remain wrapped alongside ErrBadRequest", err)
+	}
+	if n := len(cap.commands()); n != 0 {
+		t.Fatalf("%d order command(s) reached the bus for an unmapped fund", n)
+	}
+	if _, err := p.Process(context.Background(), []byte(raw), net.ParseIP("10.0.0.1"), sign(raw, testSecret)); !errors.Is(err, ErrReplayed) {
+		t.Fatalf("redelivery for an unmapped fund = %v, want ErrReplayed", err)
+	}
+}
+
 func TestDeterministicOrderIDs(t *testing.T) {
 	p, cap := harness(t)
 	if _, err := process(t, p, body("buy", "1", "absolute_qty", "same")); err != nil {
