@@ -14,6 +14,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
+	"github.com/eighred/kanz/internal/costbasis"
 	"github.com/eighred/kanz/internal/dec"
 )
 
@@ -167,7 +168,7 @@ func (p *Postgres) Apply(ctx context.Context, portfolioID string, fill *orderpb.
 		if fill.GetSide() == orderpb.Side_SIDE_SELL {
 			signed = new(big.Rat).Neg(signed)
 		}
-		foldLot(l, signed, price)
+		costbasis.Fold(l, signed, price)
 
 		if _, err := tx.Exec(ctx, `
 			INSERT INTO positions (portfolio_id, venue, instrument_id, quantity, average_price, realized_pnl)
@@ -177,7 +178,7 @@ func (p *Postgres) Apply(ctx context.Context, portfolioID string, fill *orderpb.
 			    average_price = EXCLUDED.average_price,
 			    realized_pnl = EXCLUDED.realized_pnl,
 			    updated_at = now()`,
-			portfolioID, venue, instrument, l.qty.RatString(), l.avg.RatString(), l.realized.RatString()); err != nil {
+			portfolioID, venue, instrument, l.Qty.RatString(), l.AvgCost.RatString(), l.Realized.RatString()); err != nil {
 			return nil, fmt.Errorf("position: upsert %s/%s/%s: %w", portfolioID, venue, instrument, err)
 		}
 	}
@@ -313,8 +314,7 @@ func aggregateLot(ctx context.Context, tx pgx.Tx, portfolioID, instrument string
 	}
 	defer rows.Close()
 
-	agg := zeroLot()
-	cost, absQty := new(big.Rat), new(big.Rat)
+	agg := costbasis.NewAggregator()
 	for rows.Next() {
 		var q, a, r string
 		if err := rows.Scan(&q, &a, &r); err != nil {
@@ -324,23 +324,16 @@ func aggregateLot(ctx context.Context, tx pgx.Tx, portfolioID, instrument string
 		if err != nil {
 			return nil, fmt.Errorf("position: %s/%s: %w", portfolioID, instrument, err)
 		}
-		agg.qty.Add(agg.qty, l.qty)
-		agg.realized.Add(agg.realized, l.realized)
-		abs := new(big.Rat).Abs(l.qty)
-		absQty.Add(absQty, abs)
-		cost.Add(cost, new(big.Rat).Mul(abs, l.avg))
+		agg.Add(l)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("position: aggregate %s/%s: %w", portfolioID, instrument, err)
 	}
-	if absQty.Sign() != 0 {
-		agg.avg = new(big.Rat).Quo(cost, absQty)
-	}
-	return agg, nil
+	return agg.Lot(), nil
 }
 
 func zeroLot() *lot {
-	return &lot{qty: new(big.Rat), avg: new(big.Rat), realized: new(big.Rat)}
+	return costbasis.NewLot()
 }
 
 // lotFrom parses the stored exact decimals. A value that will not parse is a corrupt
@@ -350,7 +343,7 @@ func lotFrom(qty, avg, realized string) (*lot, error) {
 	for _, f := range []struct {
 		s   string
 		dst **big.Rat
-	}{{qty, &l.qty}, {avg, &l.avg}, {realized, &l.realized}} {
+	}{{qty, &l.Qty}, {avg, &l.AvgCost}, {realized, &l.Realized}} {
 		r, ok := new(big.Rat).SetString(f.s)
 		if !ok {
 			return nil, fmt.Errorf("unparseable stored decimal %q", f.s)
@@ -377,11 +370,7 @@ func (p *Postgres) Snapshot(ctx context.Context, portfolioID string, asOf time.T
 
 	// instrument → the fund's summed lot, plus the cost/abs-qty running totals the
 	// cost-weighted average price needs.
-	type acc struct {
-		l      *lot
-		cost   *big.Rat
-		absQty *big.Rat
-	}
+	type acc struct{ agg *costbasis.Aggregator }
 	byInstrument := map[string]*acc{}
 	var order []string
 
@@ -396,15 +385,11 @@ func (p *Postgres) Snapshot(ctx context.Context, portfolioID string, asOf time.T
 		}
 		x := byInstrument[instrument]
 		if x == nil {
-			x = &acc{l: zeroLot(), cost: new(big.Rat), absQty: new(big.Rat)}
+			x = &acc{agg: costbasis.NewAggregator()}
 			byInstrument[instrument] = x
 			order = append(order, instrument)
 		}
-		x.l.qty.Add(x.l.qty, l.qty)
-		x.l.realized.Add(x.l.realized, l.realized)
-		abs := new(big.Rat).Abs(l.qty)
-		x.absQty.Add(x.absQty, abs)
-		x.cost.Add(x.cost, new(big.Rat).Mul(abs, l.avg))
+		x.agg.Add(l)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("position: snapshot %s: %w", portfolioID, err)
@@ -415,24 +400,22 @@ func (p *Postgres) Snapshot(ctx context.Context, portfolioID string, asOf time.T
 	positions := make([]*domainpb.PositionState, 0, len(order))
 	for _, instrument := range order {
 		x := byInstrument[instrument]
-		if x.absQty.Sign() != 0 {
-			x.l.avg = new(big.Rat).Quo(x.cost, x.absQty)
-		}
-		mv := new(big.Rat).Mul(x.l.avg, x.l.qty)
+		l := x.agg.Lot()
+		mv := new(big.Rat).Mul(l.AvgCost, l.Qty)
 		nav.Add(nav, mv)
 		marketValue, err := p.money(mv)
 		if err != nil {
 			return nil, fmt.Errorf("portfolio %s position %s: %w", portfolioID, instrument, err)
 		}
-		realized, err := p.money(x.l.realized)
+		realized, err := p.money(l.Realized)
 		if err != nil {
 			return nil, fmt.Errorf("portfolio %s position %s realized pnl: %w", portfolioID, instrument, err)
 		}
-		qty, ok := dec.ToProtoScaled(x.l.qty)
+		qty, ok := dec.ToProtoScaled(l.Qty)
 		if !ok {
 			return nil, fmt.Errorf("portfolio %s position %s: quantity is not representable", portfolioID, instrument)
 		}
-		avg, ok := dec.ToProtoScaled(x.l.avg)
+		avg, ok := dec.ToProtoScaled(l.AvgCost)
 		if !ok {
 			return nil, fmt.Errorf("portfolio %s position %s: average price is not representable", portfolioID, instrument)
 		}
@@ -467,20 +450,20 @@ func (p *Postgres) Snapshot(ctx context.Context, portfolioID string, asOf time.T
 // the same marking the in-memory book applies. An empty venue means the fund-level
 // aggregate: it belongs to no single exchange.
 func (p *Postgres) stateOf(portfolioID, venue, instrument string, l *lot, price *big.Rat, asOf time.Time) (*domainpb.PositionState, error) {
-	unreal := new(big.Rat).Mul(new(big.Rat).Sub(price, l.avg), l.qty)
-	qty, ok := dec.ToProtoScaled(l.qty)
+	unreal := new(big.Rat).Mul(new(big.Rat).Sub(price, l.AvgCost), l.Qty)
+	qty, ok := dec.ToProtoScaled(l.Qty)
 	if !ok {
 		return nil, fmt.Errorf("position %s/%s: quantity is not representable", portfolioID, instrument)
 	}
-	avg, ok := dec.ToProtoScaled(l.avg)
+	avg, ok := dec.ToProtoScaled(l.AvgCost)
 	if !ok {
 		return nil, fmt.Errorf("position %s/%s: average price is not representable", portfolioID, instrument)
 	}
-	marketValue, err := p.money(new(big.Rat).Mul(price, l.qty))
+	marketValue, err := p.money(new(big.Rat).Mul(price, l.Qty))
 	if err != nil {
 		return nil, fmt.Errorf("position %s/%s market value: %w", portfolioID, instrument, err)
 	}
-	realized, err := p.money(l.realized)
+	realized, err := p.money(l.Realized)
 	if err != nil {
 		return nil, fmt.Errorf("position %s/%s realized pnl: %w", portfolioID, instrument, err)
 	}

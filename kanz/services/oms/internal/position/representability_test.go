@@ -41,7 +41,7 @@ func largeQty() *big.Rat { return big.NewRat(200_000_000_000, 1) } // $200bn
 // dec.ToProtoScaled must preserve the true magnitude instead.
 func TestBookStateOf_LargeQuantityRescalesWithoutWrapping(t *testing.T) {
 	b := NewBook("USD")
-	l := &lot{qty: largeQty(), avg: big.NewRat(1, 1), realized: new(big.Rat)}
+	l := &lot{Qty: largeQty(), AvgCost: big.NewRat(1, 1), Realized: new(big.Rat)}
 
 	st, err := b.stateOf("p1", "XSIM", "AAPL", l, big.NewRat(1, 1), time.Now())
 	if err != nil {
@@ -72,7 +72,7 @@ func TestBookMoney_LargeAmountRescalesWithoutWrapping(t *testing.T) {
 // tests above by refusing them too. Ordinary values must still produce a state.
 func TestBookStateOf_OrdinaryValuesStillSucceed(t *testing.T) {
 	b := NewBook("USD")
-	l := &lot{qty: big.NewRat(100, 1), avg: big.NewRat(25, 1), realized: new(big.Rat)}
+	l := &lot{Qty: big.NewRat(100, 1), AvgCost: big.NewRat(25, 1), Realized: new(big.Rat)}
 
 	st, err := b.stateOf("p1", "XSIM", "AAPL", l, big.NewRat(30, 1), time.Now())
 	if err != nil {
@@ -102,7 +102,7 @@ func TestBookSnapshot_LargePositionRescalesWithoutWrapping(t *testing.T) {
 	}
 	// key is the package's unexported map key; construct it the way book.go does.
 	b.lots[key{portfolio: "p1", venue: "XSIM", instrument: "AAPL"}] = &lot{
-		qty: largeQty(), avg: big.NewRat(1, 1), realized: new(big.Rat),
+		Qty: largeQty(), AvgCost: big.NewRat(1, 1), Realized: new(big.Rat),
 	}
 	snap, err := b.Snapshot(context.Background(), "p1", time.Now())
 	if err != nil {
