@@ -20,6 +20,7 @@ import (
 
 	"google.golang.org/grpc"
 
+	"github.com/eighred/kanz/internal/compliance"
 	"github.com/eighred/kanz/internal/lifecycle"
 	"github.com/eighred/kanz/internal/marketdata/returns"
 	mdstore "github.com/eighred/kanz/internal/marketdata/store"
@@ -315,6 +316,31 @@ func runEngine(ctx context.Context, cfg config.Config, readiness *server.Readine
 		return err
 	}
 	a.Ingest = ingest
+
+	// A BREACH NOW REACHES THE UNWIND DECIDER (#74). internal/risk/unwind could
+	// size what a breached portfolio would have to shed since M4, and nothing ever
+	// called it — the arithmetic was built, tested and unreachable, which is
+	// indistinguishable from broken to anyone reading the issue.
+	//
+	// IT IS WIRED HERE RATHER THAN IN COMPLIANCE, where the breach is detected and
+	// the wire would have been shorter, because test/arch/risk_boundary_test.go
+	// admits only this service to the risk module's impl packages. That is the
+	// RISK-02 boundary doing its job; the alternative was a hole in it.
+	//
+	// AUXILIARY, LIKE CALIBRATION BELOW: a failed subscription costs the unwind
+	// PROPOSAL, which nothing executes anyway. It must not take down the engine
+	// that is computing the measures the breach came from.
+	unwindWatch := app.NewUnwindWatch(obs.Registry, cfg.Tenant, logger)
+	go func() {
+		unwindGroup := app.DefaultConsumerGroup + "-unwind"
+		logger.Info("risk-engine subscribing compliance breaches for unwind proposals",
+			"subject", compliance.SubjectBreach, "group", unwindGroup, "executes", false)
+		if err := consumer.Subscribe(ctx, compliance.SubjectBreach, unwindGroup, unwindWatch.Handle); err != nil &&
+			!errors.Is(err, context.Canceled) {
+			logger.Error("risk-engine unwind subscription failed — breaches will be detected but "+
+				"nothing will size what would clear them", "err", err)
+		}
+	}()
 
 	// Calibration scheduler (WIRE-01c): the risk module's composition root owns
 	// the live curve calibration loop. Subscribe the market quote spine into a

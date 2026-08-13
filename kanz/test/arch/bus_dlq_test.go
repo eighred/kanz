@@ -450,7 +450,7 @@ var retryCertifiedConsumers = map[string]string{
 		"unconditional last-value cache write with no dedup branch at all. Re-running it " +
 		"with the same quote sets the same rate; there is nothing to skip.",
 
-	"services/risk-engine/cmd/risk-engine/main.go:294": "risk-engine (state ingest): dispatches " +
+	"services/risk-engine/cmd/risk-engine/main.go:295": "risk-engine (state ingest): dispatches " +
 		"ingest.Ingestor.Handler -> engine.TriggeringApplier -> state.Store.ApplyPortfolioRevalued" +
 		"/ApplyPositionChanged/ApplyPortfolioSnapshot (internal/risk/state/store.go:202,227,246). " +
 		"Each Apply* checks its per-portfolio dedup window and mutates in-memory state with " +
@@ -461,7 +461,7 @@ var retryCertifiedConsumers = map[string]string{
 		"cannot itself fail the handler, so a retry can never observe a Trigger that ran " +
 		"without its Apply* having actually completed.",
 
-	"services/risk-engine/cmd/risk-engine/main.go:365": "risk-engine (calibration quotes): the " +
+	"services/risk-engine/cmd/risk-engine/main.go:391": "risk-engine (calibration quotes): the " +
 		"sole handler is livequote.LiveQuotes.Handler (internal/risk/pricing/livequote/livequote.go:80) " +
 		"— an unconditional last-value cache write, same shape as accounting's live FX feed. " +
 		"Nothing to skip.",
