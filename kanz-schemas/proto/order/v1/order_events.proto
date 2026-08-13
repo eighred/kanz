@@ -71,6 +71,44 @@ message OrderState {
   // limit_price is the working limit (post-amend), set for priced orders.
   common.v1.Decimal limit_price = 8;
 
+  // stop_price is the TRIGGER price of a STOP or STOP_LIMIT order — the level
+  // that turns a resting instruction into a live one. Set exactly when
+  // order_type is one of those two; unset otherwise.
+  //
+  // IT WAS VALIDATED AND THEN DROPPED (#405). SubmitOrder.stop_price has always
+  // existed and admission has always required it — "stop_price required for a
+  // stop order" — but OrderState had no field to carry it, so the trigger was
+  // checked at the perimeter and never reached the wire. OrderState is what
+  // Venue.Execute receives, so a connector implementing Binance
+  // STOP_LOSS_LIMIT or OKX's conditional-order endpoint had NOTHING to send as
+  // the trigger; it could place an order that would never fire, at whatever
+  // price the venue defaulted to.
+  //
+  // THIS IS THE SECOND TIME, not a coincidence. Closed #240 is the same defect
+  // one field over: `leverage` was parsed, bounds-checked, written to the
+  // immutable FACT, and then dropped before the order — so the audit root
+  // asserted 10x on a spot position. The shape is "a field the perimeter
+  // accepts and the wire never carries", and test/arch/submit_fields_reach_
+  // state_test.go now fails the build for any third instance.
+  //
+  // Field 21 and not 9: the numbers are wire identity, and 9 has been
+  // OrderStatus since this message existed.
+  common.v1.Decimal stop_price = 21;
+
+  // expire_at is WHEN A GTD ORDER STOPS BEING GOOD — required whenever
+  // time_in_force is TIME_IN_FORCE_GTD, unset otherwise.
+  //
+  // THE THIRD INSTANCE OF THE SAME DEFECT, found by writing the guard for the
+  // first two. Admission has always rejected a GTD order without it —
+  // "expire_at required for GTD" — and OrderState had no field, so before this
+  // the identifier `ExpireAt` appeared in exactly ONE place in the whole Go
+  // tree: the line that validates it. The adapters DO read time_in_force and
+  // pass it to the venue, so a Good-Til-Date order was routed as good-till-date
+  // with no date. What the venue does with that is the venue's choice, not the
+  // trader's — which is the same failure as a stop with no trigger, one field
+  // over.
+  google.protobuf.Timestamp expire_at = 22;
+
   // status is the current lifecycle state. Required; must not be
   // ORDER_STATUS_UNSPECIFIED.
   OrderStatus status = 9;
