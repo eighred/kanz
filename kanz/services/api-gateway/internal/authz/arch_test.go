@@ -57,7 +57,7 @@ func TestTheWholeRouteTableIsDeclared(t *testing.T) {
 	// A NON-NIL ORDERS CLIENT, DELIBERATELY. gateway.Routes registers the order
 	// history only when one is configured, so passing nil here would let that
 	// route escape this table entirely — the guard would pass by not looking.
-	gateway.New(nil, stubOrders{}, stubInstruments{}).Routes(m)
+	gateway.New(nil, stubOrders{}, stubInstruments{}, nil).Routes(m)
 	orders.New(nil).Routes(m)
 	proxy.New(nil).Routes(m)
 

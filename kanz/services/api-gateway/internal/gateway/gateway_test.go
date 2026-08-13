@@ -90,7 +90,7 @@ func (f *fakeClient) Health(_ context.Context, _ *querypb.HealthRequest, _ ...gr
 func serve(t *testing.T, fc *fakeClient) *httptest.Server {
 	t.Helper()
 	mux := authz.NewMux(authz.Grants{"analyst": {authz.Read}}, nil)
-	gateway.New(fc, fc, fc).Routes(mux)
+	gateway.New(fc, fc, fc, nil).Routes(mux)
 	authed := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		p := &middleware.Principal{Subject: "u1", Tenant: testTenant, Roles: []string{"analyst"}}
 		mux.ServeHTTP(w, r.WithContext(middleware.WithPrincipal(r.Context(), p)))
@@ -252,7 +252,7 @@ func TestOpenAPIServed(t *testing.T) {
 func serveAs(t *testing.T, fc *fakeClient, p *middleware.Principal) *httptest.Server {
 	t.Helper()
 	mux := authz.NewMux(authz.Grants{"analyst": {authz.Read}}, nil)
-	gateway.New(fc, fc, fc).Routes(mux)
+	gateway.New(fc, fc, fc, nil).Routes(mux)
 	authed := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		mux.ServeHTTP(w, r.WithContext(middleware.WithPrincipal(r.Context(), p)))
 	})
@@ -369,7 +369,7 @@ func TestAListWithNoOwnerTenantIsRefused(t *testing.T) {
 func ordersServer(t *testing.T, fc *fakeClient, p *middleware.Principal) *httptest.Server {
 	t.Helper()
 	mux := authz.NewMux(authz.Grants{"analyst": {authz.Read}}, nil)
-	gateway.New(fc, fc, fc).Routes(mux)
+	gateway.New(fc, fc, fc, nil).Routes(mux)
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		mux.ServeHTTP(w, r.WithContext(middleware.WithPrincipal(r.Context(), p)))
 	}))
@@ -463,7 +463,7 @@ func TestAHistoryFromAnotherTenantIsRefused(t *testing.T) {
 // that errors says "broken", which is not.
 func TestWithNoOMSTheHistoryRouteIsNotRegistered(t *testing.T) {
 	mux := authz.NewMux(authz.Grants{"analyst": {authz.Read}}, nil)
-	gateway.New(&fakeClient{}, nil, nil).Routes(mux)
+	gateway.New(&fakeClient{}, nil, nil, nil).Routes(mux)
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		p := &middleware.Principal{Subject: "u1", Tenant: testTenant, Roles: []string{"analyst"}}
 		mux.ServeHTTP(w, r.WithContext(middleware.WithPrincipal(r.Context(), p)))
@@ -502,7 +502,7 @@ func instrumentsFor(tenant string) *fakeClient {
 func instrumentServer(t *testing.T, fc *fakeClient, portfolios []string) *httptest.Server {
 	t.Helper()
 	mux := authz.NewMux(authz.Grants{"analyst": {authz.Read}}, nil)
-	gateway.New(fc, fc, fc).Routes(mux)
+	gateway.New(fc, fc, fc, nil).Routes(mux)
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		p := &middleware.Principal{Subject: "u1", Tenant: testTenant, Roles: []string{"analyst"}, Portfolios: portfolios}
 		mux.ServeHTTP(w, r.WithContext(middleware.WithPrincipal(r.Context(), p)))
@@ -564,7 +564,7 @@ func TestInstrumentsWithNoOwnerFailClosed(t *testing.T) {
 // rather than a registered route that always fails.
 func TestWithNoOMSTheInstrumentRouteIsNotRegistered(t *testing.T) {
 	mux := authz.NewMux(authz.Grants{"analyst": {authz.Read}}, nil)
-	gateway.New(&fakeClient{}, nil, nil).Routes(mux)
+	gateway.New(&fakeClient{}, nil, nil, nil).Routes(mux)
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		p := &middleware.Principal{Subject: "u1", Tenant: testTenant, Roles: []string{"analyst"}}
 		mux.ServeHTTP(w, r.WithContext(middleware.WithPrincipal(r.Context(), p)))
