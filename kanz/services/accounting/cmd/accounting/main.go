@@ -126,8 +126,10 @@ func run() int {
 	// read path can count the materializations that could NOT be served from a
 	// checkpoint — the only signal that this job has stopped working.
 	snapMetrics := ledger.NewSnapshotMetrics(obs.Registry)
+	// NO WithMetrics: /metrics moved to its own listener (#447). See the split
+	// below — an API that shares the scraped port is reachable from
+	// kanz-observability whatever the NetworkPolicy says.
 	opts := []server.Option{
-		server.WithMetrics(obs.MetricsHandler()),
 		server.WithSnapshotMetrics(snapMetrics),
 	}
 	liveFX, err := buildLiveFX(cfg, &opts)
@@ -159,6 +161,47 @@ func run() int {
 	// but it does take the service offline, which is the correct direction for a
 	// misconfiguration on the book of record.
 	opts = append(opts, server.WithTenant(cfg.Tenant))
+	// TWO LISTENERS, AND THE SPLIT IS THE POINT (#447).
+	//
+	// The API port carries the routes that MOVE MONEY — a subscription or
+	// redemption posted to the IBOR, a NAV, a break list — and decides whose
+	// tenant they belong to from the principal header the api-gateway injects. A
+	// NetworkPolicy admits only the gateway to it. That policy is worth something
+	// only while nothing ELSE forces the port open, and /metrics on the same mux
+	// does exactly that: allow-observability-scrape must admit whatever port
+	// serves it, so a pod in kanz-observability could send a self-chosen tenant
+	// header to a cash-movement write.
+	//
+	// #232 named the fix as a code change in each service and optimization made
+	// it first, on the argument that "a trading surface is the one place this
+	// platform cannot afford to inherit that gap". A capital MOVEMENT is that
+	// argument at least as strongly.
+	//
+	// The API is on the HIGH port and /metrics keeps the scraped one, the same way
+	// round as optimization. 8080 is shared by six services that legitimately
+	// scrape there, so moving /metrics off it would need the rule to admit a
+	// seventh port for no gain — it is the API that has to leave.
+	metricsMux := http.NewServeMux()
+	metricsMux.Handle("GET /metrics", obs.MetricsHandler())
+	metricsSrv := httpserver.New(cfg.MetricsListen, metricsMux, httpserver.Standard())
+	go func() {
+		logger.Info("accounting metrics listening", "addr", cfg.MetricsListen)
+		if err := metricsSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			// Telemetry is not the book of record: a dead metrics listener must not
+			// take the service down, but it must not be silent either — a scrape
+			// target that vanishes reads as a healthy service nobody is watching.
+			logger.Error("metrics server failed — this pod is now unmonitored", "err", err)
+		}
+	}()
+	defer func() {
+		shutCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = metricsSrv.Shutdown(shutCtx)
+	}()
+
+	// PROBES STAY ON THE API LISTENER, as optimization's do. kubelet reaches a pod
+	// from the node rather than from a namespace, so a probe is not subject to the
+	// NetworkPolicy that keeps everything else off this port.
 	httpSrv := httpserver.New(cfg.Listen, server.New(readiness, logger, store, cfg.BaseCurrency, opts...), httpserver.Standard())
 	go func() {
 		logger.Info("accounting listening", "addr", cfg.Listen)
