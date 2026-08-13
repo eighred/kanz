@@ -108,11 +108,31 @@ type Bar struct {
 	// Volume is the total traded quantity over the interval.
 	Volume *commonpb.Decimal
 
-	// TradeCount is how many trades were aggregated. ZERO IS MEANINGFUL: an
-	// interval in which nothing traded is a real observation, not a gap, and an
-	// indicator that cannot tell the two apart will invent movement where the
-	// market was simply closed.
-	TradeCount int64
+	// TradeCount is how many trades were aggregated, or NIL when the venue does
+	// not report one (#432).
+	//
+	// ZERO IS MEANINGFUL: an interval in which nothing traded is a real
+	// observation, not a gap, and an indicator that cannot tell the two apart will
+	// invent movement where the market was simply closed.
+	//
+	// WHICH IS EXACTLY WHY THIS IS A POINTER. It used to be an int64, so the two
+	// states the sentence above insists must stay distinguishable were the same
+	// row: OKX candles carry no trade count at all — the row is
+	// [ts,o,h,l,c,vol,volCcy,volCcyQuote,confirm] — so every OKX bar was stored as
+	// a minute in which nothing traded, including minutes with thousands of trades.
+	//
+	// NOT A SENTINEL. -1 would put "unknown" inside the value domain, where every
+	// future reader has to remember to exclude it and the one that forgets gets a
+	// plausible-looking negative in an average. A nil cannot be averaged by
+	// accident.
+	//
+	// THE COST OF THIS BEING WRONG IS RETROACTIVE, which is why it was worth
+	// changing a shipped column: nothing reads trade_count today, and the bars
+	// being backfilled now are the history a model trains on later. By the time
+	// something does read it, the OKX portion would be years of permanently dead
+	// market, and re-fetching that history is expensive where it is possible at
+	// all.
+	TradeCount *int64
 
 	// KnowledgeTime is when Kanz learned this bar.
 	//
@@ -148,8 +168,12 @@ func (b Bar) Validate() error {
 	case b.KnowledgeTime.IsZero():
 		return fmt.Errorf("%w: knowledge_time is required — without it the bar cannot be read "+
 			"point-in-time, which is this store's whole contract", ErrInvalidBar)
-	case b.TradeCount < 0:
-		return fmt.Errorf("%w: trade_count is negative", ErrInvalidBar)
+	// A nil count is "the venue did not report one" and is valid. A NEGATIVE one
+	// is not: it can only come from a source that encoded unknown as a sentinel,
+	// which is the representation this field exists to refuse.
+	case b.TradeCount != nil && *b.TradeCount < 0:
+		return fmt.Errorf("%w: trade_count is negative — an unknown count is nil, never a "+
+			"sentinel inside the value domain", ErrInvalidBar)
 	}
 	for _, f := range []struct {
 		name string

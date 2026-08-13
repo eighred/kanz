@@ -48,7 +48,7 @@ func TestMemoryBarsRoundTripEveryField(t *testing.T) {
 		{"low", g.Low.GetCoefficient(), want.Low.GetCoefficient()},
 		{"close", g.Close.GetCoefficient(), want.Close.GetCoefficient()},
 		{"volume", g.Volume.GetCoefficient(), want.Volume.GetCoefficient()},
-		{"trade_count", g.TradeCount, want.TradeCount},
+		{"trade_count", derefCount(g.TradeCount), derefCount(want.TradeCount)},
 	} {
 		if f.got != f.want {
 			t.Errorf("%s = %d, want %d — this is a field the old ingest discarded", f.name, f.got, f.want)
@@ -310,4 +310,14 @@ func TestMemoryBarsOnAnUnknownSeriesIsEmptyNotAnError(t *testing.T) {
 	if len(got) != 0 {
 		t.Fatalf("bars = %d, want 0", len(got))
 	}
+}
+
+// derefCount renders a *int64 trade count for comparison, mapping "not reported"
+// to a value no real count can take. Comparing the POINTERS would compare
+// addresses and call two identical counts different (#432).
+func derefCount(p *int64) int64 {
+	if p == nil {
+		return -1
+	}
+	return *p
 }

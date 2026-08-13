@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/eighred/kanz/internal/dec"
+	"github.com/eighred/kanz/internal/marketdata/store"
 )
 
 // okxRow renders one candle in OKX's own shape: EVERY field a string, including
@@ -205,26 +206,38 @@ func TestOKXRefusesAMalformedRow(t *testing.T) {
 	}
 }
 
-// A KNOWN, TRACKED CONFLATION — pinned here so it cannot be discovered twice.
+// OKX REPORTS NO TRADE COUNT, AND THE BAR NOW SAYS SO (#432).
 //
-// OKX candles carry no trade count, and store.Bar.TradeCount is an int64 whose
-// zero means "nothing traded in this interval" (0003_ohlcv_bars.sql says so
-// explicitly). So an OKX-sourced minute that saw thousands of trades records
-// zero, and anything reading trade_count sees OKX as permanently quiet.
+// This replaces the tripwire that stood here. That test asserted the CURRENT
+// behaviour — trade_count == 0 — and was written to FAIL the day "not reported"
+// became expressible, naming #432 in its failure message. It did exactly that.
 //
-// This test asserts the CURRENT behaviour rather than the desired one. When
-// "not reported" becomes expressible end to end, this test is meant to fail —
-// that is the tripwire, and the issue it belongs to is named in the failure.
-func TestOKXTradeCountIsUnreportedAndCurrentlyReadsAsZero(t *testing.T) {
+// The conflation it pinned: store.Bar.TradeCount was an int64 whose zero means
+// "nothing traded in this interval", so an OKX minute with thousands of trades
+// was stored as a dead market, and anything reading trade_count would have seen
+// OKX as permanently quiet. The damage was retroactive rather than immediate —
+// nothing read the field, and the bars being backfilled are the history a model
+// trains on later.
+func TestOKXTradeCountIsNilBecauseTheVenueDoesNotReportOne(t *testing.T) {
 	srv, _ := okxServer(t, okxBody(okxRow(barStart.UnixMilli(), "100", "110", "90", "105", "1", "1")))
 
 	got, err := okxAt(t, srv).Klines(context.Background(), "BTC-USDT", barStart, barStart.Add(time.Minute))
 	if err != nil {
 		t.Fatalf("Klines: %v", err)
 	}
-	if got[0].TradeCount != 0 {
-		t.Fatalf("trade_count = %d: OKX started reporting a trade count, or the field became "+
-			"nullable — either way #432 is now actionable and this pin should be replaced by the "+
-			"real assertion", got[0].TradeCount)
+	if got[0].TradeCount != nil {
+		t.Fatalf("trade_count = %d, want nil — OKX candles carry no trade-count field, and "+
+			"recording a number on the venue's behalf is what made a busy minute look like a "+
+			"dead one", *got[0].TradeCount)
+	}
+	// AND IT IS STILL A STORABLE BAR. An unreported count must not make the row
+	// invalid, or the fix would trade a wrong number for a missing series. The
+	// identity fields are the ones the caller stamps — Klines returns the candle,
+	// not the series it belongs to — so they are filled here to isolate the count.
+	b := got[0]
+	b.InstrumentID, b.Venue, b.Resolution = "BTC-USDT", "OKX", store.Resolution1m
+	b.KnowledgeTime = barStart
+	if err := b.Validate(); err != nil {
+		t.Fatalf("a bar with an unreported trade count was refused by the store: %v", err)
 	}
 }
