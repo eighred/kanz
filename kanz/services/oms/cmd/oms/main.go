@@ -32,6 +32,7 @@ import (
 	"github.com/eighred/kanz/pkg/bus"
 	"github.com/eighred/kanz/pkg/observability"
 	"github.com/eighred/kanz/pkg/transport"
+	"github.com/eighred/kanz/services/oms/internal/cashview"
 	"github.com/eighred/kanz/services/oms/internal/compliance"
 	"github.com/eighred/kanz/services/oms/internal/config"
 	"github.com/eighred/kanz/services/oms/internal/grpcsrv"
@@ -283,8 +284,27 @@ func runConsumers(ctx context.Context, cfg config.Config, readiness *server.Read
 			"pre-trade gate can actually value an order from. A fall here with held flat is a stalling feed.",
 	}, func() float64 { _, live := marks.Stats(); return float64(live) }))
 
+	// WHAT EACH PORTFOLIO CAN SPEND, folded from the book of record (#450).
+	//
+	// The OMS MUST NOT compute a balance: accounting's ledger is the only fold
+	// that takes trade legs, cash movements and corporate actions bitemporally
+	// with restatements, and a second computation here would drift from it — the
+	// drift surfacing as a pre-trade control that refuses or admits wrongly. This
+	// only remembers a level accounting announced.
+	//
+	// An unannounced or STALE portfolio reads as UNKNOWN, and BuyingPowerRule
+	// fails closed on unknown: an order under a spending mandate is refused with a
+	// named reason rather than admitted on evidence nobody can date.
+	cash := cashview.New(
+		cashview.WithOnStale(func(portfolioID string, age time.Duration) {
+			logger.Warn("oms: cash balance is too old to act on — orders under a buying-power "+
+				"mandate will be REFUSED for this portfolio until accounting announces again",
+				"portfolio_id", portfolioID, "age", age.String(), "subject", cashview.Subject)
+		}),
+	)
+
 	preTrade := comp.NewPreTradeGate(
-		comp.NewEngine(nil), compliance.NewBookSource(book), mandateReg, nil, nil, logger,
+		comp.NewEngine(nil), compliance.NewBookSource(book, cash), mandateReg, nil, nil, logger,
 		comp.WithRequireMandate(cfg.RequireMandate),
 		comp.WithUngovernedObserver(func(string, string) { ungoverned.Inc() }),
 		comp.WithUnpricedObserver(func(portfolioID, instrumentID string) {
@@ -686,6 +706,30 @@ func runConsumers(ctx context.Context, cfg config.Config, readiness *server.Read
 			}
 		}(s)
 	}
+	// THE CASH SPINE — BROADCAST, NOT A WORK QUEUE, for exactly the reason the
+	// price spine above and the mandate registry below are (#450).
+	//
+	// A consumer GROUP load-balances, so each replica would hold a DIFFERENT
+	// subset of portfolios' balances: the same order would be admitted by one pod
+	// and refused "cash unavailable" by the other. "Whether your order is legal
+	// depends on which pod got it" is not a property a compliance gate may have.
+	// A balance is replicated STATE, not work.
+	//
+	// DeliverLastPerSubject replays the latest announcement, so a cold pod boots
+	// holding a balance rather than refusing every order under a spending mandate
+	// until accounting next folds something.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		logger.Info("oms subscribing to the cash spine (broadcast)", "subject", cashview.Subject)
+		err := consumer.SubscribeBroadcast(ctx, cashview.Subject, cash.Handle)
+		if err != nil && !errors.Is(err, context.Canceled) {
+			once.Do(func() {
+				firstErr = err
+				cancel()
+			})
+		}
+	}()
 	for _, subject := range cfg.PriceSubjects {
 		wg.Add(1)
 		go func(subject string) {

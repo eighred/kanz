@@ -422,6 +422,14 @@ data:
               publish: {
                 allow: [
                   "accounting.cash.>",
+                  # THE BOOK OF RECORD ANNOUNCES WHAT A PORTFOLIO CAN SPEND
+                  # (#450). accounting is the only component that folds trade
+                  # legs, cash movements and corporate actions bitemporally, so
+                  # it is the only one that may compute a balance — the
+                  # pre-trade buying-power gate (#415) and exchange balance
+                  # reconciliation (#418) both consume this rather than
+                  # re-deriving a second number that would drift from it.
+                  "accounting.balance.portfolio",
                   "dlq.order.order.filled", "dlq.order.order.partially_filled",
                   "dlq.accounting.cash.>", "dlq.market.fx.>",
                   "$JS.API.>", "$JS.ACK.>",
@@ -624,6 +632,12 @@ data:
                   "order.order.submit", "order.order.amend", "order.order.cancel",
                   "order.order.filled", "order.order.partially_filled",
                   "market.*.trade", "market.*.quote", "compliance.mandate.changed.>",
+                  # WHAT THE PORTFOLIO CAN SPEND (#450), for the pre-trade
+                  # buying-power gate. SUBSCRIBE ONLY, and that asymmetry is the
+                  # point: accounting is the book of record for cash and the OMS
+                  # must never publish a balance, or there are two computations
+                  # of one number and they will disagree at the worst moment.
+                  "accounting.balance.portfolio",
                   "_INBOX.>",
                 ]
               }
