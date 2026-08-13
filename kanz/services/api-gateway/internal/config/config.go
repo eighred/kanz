@@ -127,6 +127,11 @@ type Config struct {
 	// reachable except through here, where the principal is authenticated and
 	// injected. Empty disables the routes rather than exposing them unauthenticated.
 	OptimizationAddr string
+	// AccountingAddr is the book of record (#415). It fronts exactly one route —
+	// POST /v1/portfolios/{id}/cash-movements — behind authz.Fund. Empty disables
+	// it, the same shape as every other upstream here: a funding surface that is
+	// not configured must 404 rather than answer.
+	AccountingAddr string
 }
 
 func Load() (Config, error) {
@@ -186,6 +191,7 @@ func Load() (Config, error) {
 		CopilotAddr:      os.Getenv("API_GATEWAY_COPILOT_ADDR"),
 		TVSyncAddr:       os.Getenv("API_GATEWAY_TV_SYNC_ADDR"),
 		OptimizationAddr: os.Getenv("API_GATEWAY_OPTIMIZATION_ADDR"),
+		AccountingAddr:   os.Getenv("API_GATEWAY_ACCOUNTING_ADDR"),
 	}
 	if err := cfg.validateAuth(); err != nil {
 		return Config{}, err

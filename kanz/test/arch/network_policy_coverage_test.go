@@ -922,6 +922,31 @@ func TestObservabilityScrapePortsMatchTheAnnotations(t *testing.T) {
 // cluster. This map is what keeps the residual named and bounded: a fifth service
 // adopting the trust has to be written down here, in a diff a reviewer sees.
 var tenantHeaderTrustingServices = map[string]int{
+	// accounting is the FIFTH, and it is the first whose tenant-scoped routes
+	// WRITE (#415). POST cash-movements posts a subscription or a redemption to
+	// the IBOR; POST nav and POST reconcile write the fund's valuation and its
+	// break list.
+	//
+	// ITS TRUST IS THE NARROWER SHAPE, and that is worth stating rather than
+	// leaving a reader to assume the worst. audit and tv-sync serve whatever
+	// tenant the header NAMES. accounting runs auth.RequireCallerTenantIs against
+	// the single tenant its RLS pool is pinned to, so the header must EQUAL this
+	// instance's own tenant — a caller cannot pivot to another book, only reach
+	// the one book this pod already holds.
+	//
+	// IT IS STILL AN IMPROVEMENT ON WHAT IT REPLACED. Before #415 this service
+	// read no principal at all: every route went from r.PathValue straight to the
+	// store, so anything that could reach the port could move cash with no header
+	// whatsoever. The entry here is a residual being named, not a new hole.
+	//
+	// AND IT BELONGS IN tenantHeaderTrustingSplitListeners INSTEAD. The argument
+	// on that map — "a trading surface is the one place this platform cannot
+	// afford to inherit #232's gap" — applies to a capital-moving write at least
+	// as strongly as it does to optimization's order materialization. Splitting
+	// accounting's listener is a composition-root change plus a
+	// prometheus.io/port annotation that cannot be proven without a cluster, so
+	// it is filed rather than bundled. Move this entry when it lands.
+	"accounting": 8080,
 	"audit":      8083,
 	"datamaster": 8080,
 	"tv-sync":    8091,

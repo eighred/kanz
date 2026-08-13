@@ -152,6 +152,13 @@ func run() int {
 	}
 
 	readiness := &server.Readiness{}
+	// THE SAME TENANT THE RLS POOL IS PINNED TO (#415). Every /v1 route gates on
+	// it: this instance serves exactly one tenant, so a caller from another has no
+	// business here whatever the database holds. Omitting it does not open the
+	// surface — RequireCallerTenantIs fails closed on an unset instance tenant —
+	// but it does take the service offline, which is the correct direction for a
+	// misconfiguration on the book of record.
+	opts = append(opts, server.WithTenant(cfg.Tenant))
 	httpSrv := httpserver.New(cfg.Listen, server.New(readiness, logger, store, cfg.BaseCurrency, opts...), httpserver.Standard())
 	go func() {
 		logger.Info("accounting listening", "addr", cfg.Listen)

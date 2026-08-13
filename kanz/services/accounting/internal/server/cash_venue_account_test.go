@@ -26,13 +26,12 @@ func TestCashMovementCarriesTheVenueAccountToThePublisher(t *testing.T) {
 	pub := &fakeCashPublisher{}
 	r := &Readiness{}
 	r.Set(true)
-	s := New(r, nil, ledger.NewMemoryStore(), "USD", WithCashPublisher(pub))
+	s := New(r, nil, ledger.NewMemoryStore(), "USD", WithTenant(testTenant), WithCashPublisher(pub))
 
 	body := `{"movement_id":"S1","kind":"subscription","amount":"100","currency":"USDT",` +
 		`"venue_account_id":"okx-sub-1"}`
 	rec := httptest.NewRecorder()
-	s.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/portfolios/PF1/cash-movements",
-		strings.NewReader(body)))
+	s.ServeHTTP(rec, postV1(http.MethodPost, "/v1/portfolios/PF1/cash-movements", strings.NewReader(body)))
 	if rec.Code != http.StatusAccepted {
 		t.Fatalf("want 202 got %d (%s)", rec.Code, rec.Body.String())
 	}
@@ -52,12 +51,11 @@ func TestCashMovementWithoutAVenueAccountStaysUnscoped(t *testing.T) {
 	pub := &fakeCashPublisher{}
 	r := &Readiness{}
 	r.Set(true)
-	s := New(r, nil, ledger.NewMemoryStore(), "USD", WithCashPublisher(pub))
+	s := New(r, nil, ledger.NewMemoryStore(), "USD", WithTenant(testTenant), WithCashPublisher(pub))
 
 	body := `{"movement_id":"S2","kind":"subscription","amount":"100"}`
 	rec := httptest.NewRecorder()
-	s.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/portfolios/PF1/cash-movements",
-		strings.NewReader(body)))
+	s.ServeHTTP(rec, postV1(http.MethodPost, "/v1/portfolios/PF1/cash-movements", strings.NewReader(body)))
 	if rec.Code != http.StatusAccepted {
 		t.Fatalf("want 202 got %d (%s)", rec.Code, rec.Body.String())
 	}

@@ -17,6 +17,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/eighred/kanz/pkg/auth"
 	accounting "github.com/eighred/kanz/services/accounting/internal"
 	"github.com/eighred/kanz/services/accounting/internal/cashmove"
 	"github.com/eighred/kanz/services/accounting/internal/ledger"
@@ -49,7 +50,15 @@ type Server struct {
 	cashPublisher CashPublisher
 	// snapshotMetrics counts unbounded materializations. nil is inert.
 	snapshotMetrics *ledger.SnapshotMetrics
-	mux             *http.ServeMux
+	// tenant is the ONE tenant this instance serves. main pins the RLS pool to it
+	// (pg.NewTenantPool), so a caller from any other tenant has no business here
+	// whatever the database holds.
+	//
+	// EMPTY SERVES NOTHING, deliberately: auth.RequireCallerTenantIs fails closed on
+	// an unset instance tenant, so a deployment that forgets WithTenant refuses every
+	// /v1 route instead of serving them to everyone.
+	tenant string
+	mux    *http.ServeMux
 }
 
 // Option customizes the server.
@@ -83,6 +92,10 @@ func WithSnapshotMetrics(m *ledger.SnapshotMetrics) Option {
 // WithCashPublisher wires the cash-movement FACT producer (WIRE-01f) and mounts
 // the POST /v1/portfolios/{id}/cash-movements endpoint. Absent ⇒ the endpoint is
 // not mounted (no broker configured).
+// WithTenant pins the instance to the one tenant it serves — the same value main
+// gives pg.NewTenantPool. Without it every /v1 route refuses (#415).
+func WithTenant(t string) Option { return func(s *Server) { s.tenant = t } }
+
 func WithCashPublisher(p CashPublisher) Option {
 	return func(s *Server) { s.cashPublisher = p }
 }
@@ -104,6 +117,26 @@ func New(readiness *Readiness, logger *slog.Logger, store ledger.Store, baseCcy 
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) { s.mux.ServeHTTP(w, r) }
+
+// notFoundBody is the single body a tenant-scoped route returns for a caller who
+// does not own this instance. 404 and not 403: distinguishing "not yours" from
+// "not there" turns portfolio-id enumeration into a cross-tenant directory.
+const notFoundBody = "portfolio not found"
+
+// callerOwnsThisInstance is the tenant gate every /v1 route runs first (#415).
+//
+// THE BOOK OF RECORD HAD NO GATE AT ALL. Every route went from r.PathValue
+// straight to the store, and these are WRITES: a subscription or redemption
+// posted to the IBOR, a NAV, a break list. Unscoped, a caller from any other
+// tenant could name any portfolio id and move cash in this instance's book —
+// #222's hole, in the service that moves capital rather than the one that prices
+// it.
+//
+// Probes are deliberately NOT behind this: kubelet carries no principal, and a
+// readiness probe that 404s takes the pod out of service.
+func (s *Server) callerOwnsThisInstance(w http.ResponseWriter, r *http.Request) bool {
+	return auth.RequireCallerTenantIs(w, r, s.tenant, notFoundBody)
+}
 
 func (s *Server) routes() {
 	s.mux.HandleFunc("GET /healthz", s.handleHealthz)
@@ -169,6 +202,9 @@ type navRequest struct {
 }
 
 func (s *Server) handleNAV(w http.ResponseWriter, r *http.Request) {
+	if !s.callerOwnsThisInstance(w, r) {
+		return
+	}
 	id := r.PathValue("id")
 	var req navRequest
 	if !decode(w, r, &req) {
@@ -245,6 +281,9 @@ type reconcileRequest struct {
 }
 
 func (s *Server) handleReconcile(w http.ResponseWriter, r *http.Request) {
+	if !s.callerOwnsThisInstance(w, r) {
+		return
+	}
 	id := r.PathValue("id")
 	var req reconcileRequest
 	if !decode(w, r, &req) {
@@ -311,6 +350,9 @@ type cashMovementRequest struct {
 // the bus and the WIRE-01f consumer folds it into the journal, so a replay
 // reproduces the book. Returns 202 Accepted (the fold is asynchronous).
 func (s *Server) handleCashMovement(w http.ResponseWriter, r *http.Request) {
+	if !s.callerOwnsThisInstance(w, r) {
+		return
+	}
 	id := r.PathValue("id")
 	var req cashMovementRequest
 	if !decode(w, r, &req) {
