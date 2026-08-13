@@ -276,7 +276,9 @@ spec:
       # Do not edit by hand without the annotation that justifies the entry —
       # network_policy_coverage_test.go compares the two sets exactly.
       ports:
-        - { protocol: TCP, port: 8080 } # api-gateway, accounting, alternatives, copilot, datamaster, schema-registry, wealth
+        # accounting's entry here is now its METRICS-ONLY listener (#447); its API
+        # moved to 8101, which this rule deliberately does not admit.
+        - { protocol: TCP, port: 8080 } # api-gateway, accounting (metrics only), alternatives, copilot, datamaster, schema-registry, wealth
         - { protocol: TCP, port: 8081 } # risk-engine
         - { protocol: TCP, port: 8082 } # market-data
         - { protocol: TCP, port: 8083 } # audit, regulatory
@@ -525,7 +527,7 @@ spec:
             matchLabels:
               app: accounting
       ports:
-        - { protocol: TCP, port: 8080 }
+        - { protocol: TCP, port: 8101 }
     # Model Portfolios (#409) on its own port. NOT in the 8080 group above, and
     # that is the point: allow-observability-scrape admits 8080 across EVERY pod
     # in this namespace, so an API there is reachable by the monitoring plane
@@ -953,16 +955,20 @@ spec:
       app: accounting
   policyTypes: [Ingress]
   ingress:
+    # THE API PORT, AND ONLY THE GATEWAY (#447). 8101 is deliberately absent from
+    # allow-observability-scrape's list, so this is the whole set of callers that
+    # can reach a cash-movement write — which is what makes trusting the
+    # gateway-injected principal on it sound.
     - from:
         - podSelector:
             matchLabels:
               app: api-gateway
       ports:
-        - { protocol: TCP, port: 8080 }
-    # The scrape. allow-observability-scrape already admits 8080 namespace-wide,
-    # so this adds no reach — it is here so this policy states the full set of
-    # callers accounting expects, rather than depending on a blanket rule
-    # elsewhere to keep the pod monitored.
+        - { protocol: TCP, port: 8101 }
+    # The scrape reaches :8080, which now serves /metrics and NOTHING else.
+    # allow-observability-scrape already admits it namespace-wide; the arm is kept
+    # here so this policy states the full set of callers accounting expects rather
+    # than depending on a blanket rule elsewhere to keep the pod monitored.
     - from:
         - namespaceSelector:
             matchLabels:

@@ -19,9 +19,17 @@ import (
 // bus consumer that feeds the journal is wired there too, so the default boot
 // serves the read/reconcile endpoints without a broker.
 type Config struct {
-	Listen       string
-	LogLevel     slog.Level
-	BaseCurrency string
+	// Listen is the API port — the tenant-scoped routes that MOVE MONEY
+	// (cash-movements, nav, reconcile). It is deliberately NOT the scraped port
+	// (#447): allow-observability-scrape must admit whatever port serves
+	// /metrics, so an API sharing it is reachable from kanz-observability with a
+	// self-chosen principal header, whatever else the NetworkPolicy says.
+	Listen string
+	// MetricsListen serves /metrics and nothing else. It is the port the scrape
+	// rule admits, which is exactly why the API is not on it.
+	MetricsListen string
+	LogLevel      slog.Level
+	BaseCurrency  string
 
 	// NATSURL is the live spine the fill-folding consumer subscribes to
 	// (WIRE-01b). Empty ⇒ no consumer (the default; the service serves the
@@ -167,7 +175,8 @@ func Load() (Config, error) {
 	}
 
 	return Config{
-		Listen:        envOr("ACCOUNTING_LISTEN", ":8080"),
+		Listen:        envOr("ACCOUNTING_LISTEN", ":8101"),
+		MetricsListen: envOr("ACCOUNTING_METRICS_LISTEN", ":8080"),
 		LogLevel:      parseLevel(os.Getenv("ACCOUNTING_LOG_LEVEL")),
 		BaseCurrency:  envOr("ACCOUNTING_BASE_CURRENCY", "USD"),
 		NATSURL:       os.Getenv("ACCOUNTING_NATS_URL"),

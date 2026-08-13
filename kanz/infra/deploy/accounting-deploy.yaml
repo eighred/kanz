@@ -48,7 +48,11 @@ spec:
   selector:
     app: accounting
   ports:
-    - { name: http, port: 8080, targetPort: 8080 }
+    # THE API IS NOT THE SCRAPED PORT (#447). 8080 serves /metrics and nothing
+    # else; the tenant-scoped routes that move money are on 8101, which
+    # allow-observability-scrape does not admit.
+    - { name: http, port: 8101, targetPort: 8101 }
+    - { name: metrics, port: 8080, targetPort: 8080 }
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -120,7 +124,8 @@ spec:
           # Pinned to a cosign-signed digest by the GitOps bump (CICD-01d).
           image: ghcr.io/eighred/accounting@sha256:cbc5bfebc53eab95c7f618564f4a2477ed4dc4d00bd0dad58be6211c4ead5c6a
           ports:
-            - { containerPort: 8080, name: http }
+            - { containerPort: 8101, name: http }
+            - { containerPort: 8080, name: metrics }
           env:
             # DSN from the SEC-01d CSI secret file, not a plaintext env. It is
             # REQUIRED: without it the pod REFUSES TO START (exit 2) rather than
@@ -133,15 +138,16 @@ spec:
             - { name: ACCOUNTING_DATABASE_URL_FILE, value: /run/secrets/db/database-url }
             # REQUIRED -- see the note at the top. RLS is fail-closed without it.
             - { name: ACCOUNTING_TENANT, value: "__system__" }
-            - { name: ACCOUNTING_LISTEN, value: ":8080" }
+            - { name: ACCOUNTING_LISTEN, value: ":8101" }
+            - { name: ACCOUNTING_METRICS_LISTEN, value: ":8080" }
             - { name: ACCOUNTING_NATS_URL, value: "nats://nats.kanz-messaging.svc:4222" }
             - { name: SPIFFE_ENDPOINT_SOCKET, value: "unix:///run/spiffe/spire-agent.sock" }
           livenessProbe:
-            httpGet: { path: /healthz, port: 8080 }
+            httpGet: { path: /healthz, port: 8101 }
             initialDelaySeconds: 5
             periodSeconds: 15
           readinessProbe:
-            httpGet: { path: /readyz, port: 8080 }
+            httpGet: { path: /readyz, port: 8101 }
             initialDelaySeconds: 5
             periodSeconds: 5
           securityContext:

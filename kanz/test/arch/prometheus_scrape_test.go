@@ -123,7 +123,7 @@ func TestEveryDeployableServiceIsScrapable(t *testing.T) {
 					" — a scrape against gRPC cannot succeed")
 			case annotated != httpPort:
 				missing = append(missing, "prometheus.io/port "+annotated+
-					" is not this workload's HTTP port ("+httpPort+
+					" is not the port this workload serves /metrics on ("+httpPort+
 					") — the scrape would be refused and the target would sit DOWN")
 			}
 		}
@@ -404,8 +404,32 @@ func declaredContainerPorts(manifest string) map[string]string {
 	return out
 }
 
-// httpSurfacePort returns the port serving HTTP, and whether one was found.
+// httpSurfacePort returns the port that serves /metrics, and whether one was
+// found.
+//
+// A PORT NAMED "metrics" WINS OVER "http", and that precedence is the whole
+// point (#447). This guard used to assume /metrics rides the HTTP port, which is
+// true for every service that serves both from one mux — and false for exactly
+// the services that must not.
+//
+// #232 named the residual it could not close with a manifest edit: a
+// tenant-scoped API sharing a port with /metrics is reachable from
+// kanz-observability with a self-chosen principal, because
+// allow-observability-scrape has to admit whatever port serves the scrape. The
+// fix is a SECOND LISTENER, and a service that makes it declares two ports.
+//
+// Without this branch the guard actively FIGHTS that fix: it would report a
+// correctly-split service as unscrapable and the obvious way to satisfy it would
+// be to put the API back on the scraped port. A guard that pushes a capital
+// surface back into a known exposure is worse than no guard.
+//
+// It went unnoticed because optimization — the first service to split — is in
+// notDeployed, so its manifest was never checked. accounting is the first
+// DEPLOYED service to split, and it found this immediately.
 func httpSurfacePort(byName map[string]string) (string, bool) {
+	if p, ok := byName[metricsPortName]; ok {
+		return p, true
+	}
 	for _, n := range httpPortNames {
 		if p, ok := byName[n]; ok {
 			return p, true
@@ -413,3 +437,8 @@ func httpSurfacePort(byName map[string]string) (string, bool) {
 	}
 	return "", false
 }
+
+// metricsPortName is the name a workload gives a listener that serves ONLY
+// /metrics — the second listener a service grows when its API must leave the
+// scraped port (#232, #447).
+const metricsPortName = "metrics"

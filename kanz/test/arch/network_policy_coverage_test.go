@@ -922,31 +922,6 @@ func TestObservabilityScrapePortsMatchTheAnnotations(t *testing.T) {
 // cluster. This map is what keeps the residual named and bounded: a fifth service
 // adopting the trust has to be written down here, in a diff a reviewer sees.
 var tenantHeaderTrustingServices = map[string]int{
-	// accounting is the FIFTH, and it is the first whose tenant-scoped routes
-	// WRITE (#415). POST cash-movements posts a subscription or a redemption to
-	// the IBOR; POST nav and POST reconcile write the fund's valuation and its
-	// break list.
-	//
-	// ITS TRUST IS THE NARROWER SHAPE, and that is worth stating rather than
-	// leaving a reader to assume the worst. audit and tv-sync serve whatever
-	// tenant the header NAMES. accounting runs auth.RequireCallerTenantIs against
-	// the single tenant its RLS pool is pinned to, so the header must EQUAL this
-	// instance's own tenant — a caller cannot pivot to another book, only reach
-	// the one book this pod already holds.
-	//
-	// IT IS STILL AN IMPROVEMENT ON WHAT IT REPLACED. Before #415 this service
-	// read no principal at all: every route went from r.PathValue straight to the
-	// store, so anything that could reach the port could move cash with no header
-	// whatsoever. The entry here is a residual being named, not a new hole.
-	//
-	// AND IT BELONGS IN tenantHeaderTrustingSplitListeners INSTEAD. The argument
-	// on that map — "a trading surface is the one place this platform cannot
-	// afford to inherit #232's gap" — applies to a capital-moving write at least
-	// as strongly as it does to optimization's order materialization. Splitting
-	// accounting's listener is a composition-root change plus a
-	// prometheus.io/port annotation that cannot be proven without a cluster, so
-	// it is filed rather than bundled. Move this entry when it lands.
-	"accounting": 8080,
 	"audit":      8083,
 	"datamaster": 8080,
 	"tv-sync":    8091,
@@ -974,6 +949,25 @@ var tenantHeaderTrustingSplitListeners = map[string]int{
 	// capital — from the injected principal. A trading surface is the one place
 	// this platform cannot afford to inherit #232's gap, so it does not.
 	"optimization": 8100,
+	// accounting SPLIT (#447), and it is the first DEPLOYED service to do so.
+	//
+	// Its /v1 routes WRITE: a subscription or redemption posted to the IBOR, a
+	// NAV, a break list. It sat in tenantHeaderTrustingServices on :8080 — the
+	// scraped port — so a pod in kanz-observability could send a self-chosen
+	// tenant header to a cash-movement write. The API moved to :8101, which
+	// allow-observability-scrape does not admit, and :8080 now serves /metrics
+	// and nothing else.
+	//
+	// THE PORTS SWAPPED RATHER THAN THE METRICS MOVING, because 8080 is shared by
+	// six services that legitimately scrape there — admitting a seventh port for
+	// accounting's metrics would have widened the rule for no gain. It is the API
+	// that had to leave.
+	//
+	// Moving this entry between the two maps FLIPS the assertion: the map above
+	// checks the recorded port IS scraped, this one checks it is NOT. Leaving it
+	// above would have kept passing — 8080 is still scraped — while claiming
+	// accounting's tenant-scoped routes share it, which stopped being true.
+	"accounting": 8101,
 }
 
 // tenantHeaderRead matches a READ of the tenant principal header — the act that
