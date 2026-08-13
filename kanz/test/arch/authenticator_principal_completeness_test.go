@@ -159,33 +159,14 @@ func isPrincipalLit(lit *ast.CompositeLit) bool {
 
 // principalFields returns the exported field names of the Principal struct
 // declared in path, in declaration order.
+//
+// Delegates to exportedStructFields (workerdeps_completeness_test.go): the
+// WorkerDeps guard asks the identical question of a different struct, and two
+// copies of a field-name reader is the shape CLAUDE.md names as how a fix stops
+// spreading.
 func principalFields(t *testing.T, path string) []string {
 	t.Helper()
-	fset := token.NewFileSet()
-	f, err := parser.ParseFile(fset, path, nil, 0)
-	if err != nil {
-		t.Fatalf("parse %s: %v", path, err)
-	}
-	var out []string
-	ast.Inspect(f, func(n ast.Node) bool {
-		ts, ok := n.(*ast.TypeSpec)
-		if !ok || ts.Name.Name != principalCompletenessType {
-			return true
-		}
-		st, ok := ts.Type.(*ast.StructType)
-		if !ok {
-			return true
-		}
-		for _, fl := range st.Fields.List {
-			for _, name := range fl.Names {
-				if name.IsExported() {
-					out = append(out, name.Name)
-				}
-			}
-		}
-		return false
-	})
-	return out
+	return exportedStructFields(t, path, principalCompletenessType)
 }
 
 func keysOf(m map[string]bool) []string {
