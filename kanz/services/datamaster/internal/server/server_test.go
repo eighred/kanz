@@ -218,7 +218,7 @@ func TestPriceAndOverrideFlow(t *testing.T) {
 	// Override it through the HTTP surface.
 	body := `{"actor":"alice@kanz","reason":"corp action confirmed","chosen_price":"130"}`
 	rec := httptest.NewRecorder()
-	s.ServeHTTP(rec, postAsTenant("/v1/exceptions/"+id+"/override", testTenant, body))
+	s.ServeHTTP(rec, postAsPrincipal("/v1/exceptions/"+id+"/override", testTenant, "alice@kanz", body))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("override: want 200 got %d (%s)", rec.Code, rec.Body.String())
 	}
@@ -233,9 +233,11 @@ func TestPriceAndOverrideFlow(t *testing.T) {
 		t.Errorf("chosen price = %v, want exactly 130", ex.Overrides[0].ChosenPrice)
 	}
 
-	// A bad override (missing actor) is rejected.
+	// A bad override is still rejected. The actor can no longer be missing — it is
+	// the authenticated principal (#410) — so what this now pins is the price: an
+	// override with no chosen_price is a decision with no number in it.
 	rec = httptest.NewRecorder()
-	s.ServeHTTP(rec, postAsTenant("/v1/exceptions/"+id+"/override", testTenant, `{"reason":"x"}`))
+	s.ServeHTTP(rec, postAsPrincipal("/v1/exceptions/"+id+"/override", testTenant, "alice@kanz", `{"reason":"x"}`))
 	if rec.Code != http.StatusBadRequest {
 		t.Errorf("bad override: want 400 got %d", rec.Code)
 	}
@@ -257,14 +259,14 @@ func TestOverrideRefusesAJSONFloat(t *testing.T) {
 	id := open[0].ID
 
 	rec := httptest.NewRecorder()
-	s.ServeHTTP(rec, postAsTenant("/v1/exceptions/"+id+"/override", testTenant, `{"actor":"alice@kanz","reason":"x","chosen_price":130.1}`))
+	s.ServeHTTP(rec, postAsPrincipal("/v1/exceptions/"+id+"/override", testTenant, "alice@kanz", `{"actor":"alice@kanz","reason":"x","chosen_price":130.1}`))
 	if rec.Code == http.StatusOK {
 		t.Fatal("the API accepted a JSON float for the overridden price — a human's decision would be rounded into the audit trail")
 	}
 
 	// And a non-numeric string is not a price either.
 	rec = httptest.NewRecorder()
-	s.ServeHTTP(rec, postAsTenant("/v1/exceptions/"+id+"/override", testTenant, `{"actor":"alice@kanz","reason":"x","chosen_price":"about a hundred"}`))
+	s.ServeHTTP(rec, postAsPrincipal("/v1/exceptions/"+id+"/override", testTenant, "alice@kanz", `{"actor":"alice@kanz","reason":"x","chosen_price":"about a hundred"}`))
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("want 400 for an unparseable price, got %d", rec.Code)
 	}
@@ -283,7 +285,7 @@ func TestOverrideRefusesUnrepresentablePrecision(t *testing.T) {
 
 	post := func(price string) int {
 		rec := httptest.NewRecorder()
-		s.ServeHTTP(rec, postAsTenant("/v1/exceptions/"+id+"/override", testTenant, `{"actor":"alice@kanz","reason":"x","chosen_price":"`+price+`"}`))
+		s.ServeHTTP(rec, postAsPrincipal("/v1/exceptions/"+id+"/override", testTenant, "alice@kanz", `{"actor":"alice@kanz","reason":"x","chosen_price":"`+price+`"}`))
 		return rec.Code
 	}
 	if code := post("130.123456789012345"); code != http.StatusBadRequest {

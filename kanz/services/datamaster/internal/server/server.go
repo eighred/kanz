@@ -242,12 +242,40 @@ func (s *Server) handleOverride(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id := r.PathValue("id")
+	// WHO IS ASKING? The gateway is the sole identity authority on this platform:
+	// it verifies the token and injects the principal headers, and this service is
+	// reachable only through it (a NetworkPolicy is what makes trusting those
+	// headers sound). No principal means either the caller bypassed the gateway or
+	// the gateway is misconfigured — both are refusals.
+	//
+	// THIS SURFACE READ THOSE HEADERS FOR THE TENANT AND IGNORED THE IDENTITY
+	// (#410). callerOwnsThisInstance above has checked X-Kanz-Principal-Tenant
+	// since #222, while the ACTOR — "a named human's signed decision", written to
+	// an append-only audit trail — came out of the JSON body. Any caller entitled
+	// to override could therefore sign ANY NAME THEY TYPED into that trail,
+	// including a colleague's, and nothing recorded the substitution.
+	//
+	// The tenant header establishes WHICH tenant is asking. It never establishes
+	// WHO. An audit record whose actor is self-asserted is not an audit record.
+	principal, ok := auth.PrincipalFromHeaders(r.Header)
+	if !ok || principal.Subject == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{
+			"error": "no authenticated principal — this surface is reachable only through the api-gateway, " +
+				"which is what makes the actor on an override record real",
+		})
+		return
+	}
 	// chosen_price is an exact decimal STRING. A JSON number is an IEEE-754 double
 	// by definition, so accepting one would round the price a human chose on its
 	// way into an append-only compliance record — it decodes into a string field
 	// and is refused outright, the same contract the regulatory filing API takes
 	// with money.
 	var body struct {
+		// Actor is ACCEPTED BUT NEVER TRUSTED: it is compared to the authenticated
+		// subject and must match. Kept in the contract so a client that echoes its
+		// own subject keeps working, and so a client attributing the decision to
+		// SOMEONE ELSE is told, rather than having its value silently replaced —
+		// which would leave it believing it recorded a name the trail does not hold.
 		Actor       string `json:"actor"`
 		Reason      string `json:"reason"`
 		ChosenPrice string `json:"chosen_price"`
@@ -286,7 +314,20 @@ func (s *Server) handleOverride(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	if err := s.exceptions.Override(r.Context(), id, body.Actor, body.Reason, price, s.now()); err != nil {
+	// THE ACTOR IS THE AUTHENTICATED CALLER, NEVER THE BODY (#410). A body naming
+	// someone else is refused rather than silently replaced: overwriting it would
+	// leave the client believing it recorded Bob's decision while the trail says
+	// Alice, with nothing anywhere reporting the disagreement. Same rule, same
+	// reasoning, as the optimization service's forged-issuer refusal (AUTH-01c).
+	if body.Actor != "" && body.Actor != principal.Subject {
+		writeJSON(w, http.StatusBadRequest, map[string]string{
+			"error": "actor is taken from the authenticated principal and must not name anyone else; " +
+				"an override signed into an append-only compliance record under another person's " +
+				"name is the forged-issuer defect AUTH-01c prevents",
+		})
+		return
+	}
+	if err := s.exceptions.Override(r.Context(), id, principal.Subject, body.Reason, price, s.now()); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
