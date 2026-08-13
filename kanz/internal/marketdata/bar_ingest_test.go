@@ -81,8 +81,8 @@ func TestHandlerKeepsTheWholeCandle(t *testing.T) {
 	if b.Volume.GetCoefficient() != 15 {
 		t.Errorf("volume = %v, want 1.5", b.Volume)
 	}
-	if b.TradeCount != 42 {
-		t.Errorf("trade_count = %d, want 42", b.TradeCount)
+	if b.TradeCount == nil || *b.TradeCount != 42 {
+		t.Errorf("trade_count = %v, want 42 — the live fold counts trades, so it is never nil", b.TradeCount)
 	}
 	if b.Venue != "XBIN" {
 		t.Errorf("venue = %q, want XBIN — taken from the event's mic", b.Venue)
@@ -192,7 +192,7 @@ func TestTheStoreStillHoldsTheRolledUpResolutions(t *testing.T) {
 			Low:           &commonpb.Decimal{Coefficient: 9000, Exponent: -2},
 			Close:         &commonpb.Decimal{Coefficient: 10500, Exponent: -2},
 			Volume:        &commonpb.Decimal{Coefficient: 15, Exponent: -1},
-			TradeCount:    42,
+			TradeCount:    ptrTo(int64(42)),
 			KnowledgeTime: barTime.Add(time.Minute),
 		}
 		if err := m.PutBars(ctx, []store.Bar{b}); err != nil {
@@ -235,3 +235,6 @@ func TestHandlerWritesNoBarForATrade(t *testing.T) {
 		t.Fatalf("observations = %d, want 1", len(fw.got))
 	}
 }
+
+// ptrTo is the test-side spelling of a trade count the venue DID report (#432).
+func ptrTo[T any](v T) *T { return &v }

@@ -196,6 +196,26 @@ func (s Series) validate() error {
 	return nil
 }
 
+// sameTradeCount compares two counts BY VALUE, treating "neither was reported"
+// as equal (#432).
+//
+// IT EXISTS BECAUSE THE OBVIOUS EXPRESSION COMPILES AND IS WRONG. Once TradeCount
+// became a *int64, `a.TradeCount == b.TradeCount` compares ADDRESSES: two bars
+// both reporting 42 hold different pointers, so every re-fetched candle would
+// look restated. The store would then write a fresh knowledge_time row for every
+// unchanged bar on every backfill re-run — inflating the series with restatements
+// of nothing, and making a real correction impossible to find among them. That is
+// precisely the outcome sameCandle's doc comment says it exists to prevent, and
+// the compiler would not have said a word.
+func sameTradeCount(a, b *int64) bool {
+	if a == nil || b == nil {
+		// Both unreported is the same observation. One reported and one not is a
+		// genuine change: the venue started (or stopped) telling us.
+		return a == nil && b == nil
+	}
+	return *a == *b
+}
+
 // sameCandle reports whether the venue's answer matches what is stored.
 //
 // COMPARED EXACTLY, through dec.Cmp rather than a float conversion: these are
@@ -209,5 +229,5 @@ func sameCandle(a, b store.Bar) bool {
 		dec.Cmp(a.Low, b.Low) == 0 &&
 		dec.Cmp(a.Close, b.Close) == 0 &&
 		dec.Cmp(a.Volume, b.Volume) == 0 &&
-		a.TradeCount == b.TradeCount
+		sameTradeCount(a.TradeCount, b.TradeCount)
 }

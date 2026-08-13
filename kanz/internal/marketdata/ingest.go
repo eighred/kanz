@@ -263,6 +263,22 @@ func TranslateBar(env *envelopepb.Envelope, ev *marketpb.MarketDataEvent) (store
 		return store.Bar{}, false, err
 	}
 
+	// THE LIVE FOLD ALWAYS KNOWS ITS COUNT, so this is never nil (#432).
+	//
+	// A bar on this path was assembled by internal/marketedge/bars from the trade
+	// stream — it counted the trades to build the candle, so a zero here means it
+	// genuinely saw none. That is the meaningful zero store.Bar documents, and the
+	// one the nullable column exists to keep distinct from OKX's backfill, which
+	// is never told a count at all.
+	//
+	// market.v1.Bar's trade_count is a plain scalar with no unset state, so this
+	// boundary cannot represent "not reported" even in principle. That is sound
+	// only while every publisher on it counts trades. A future producer that does
+	// not would arrive here as a zero and be indistinguishable again — which is
+	// why the honest place to express absence is the STORE, reached directly by
+	// the backfill sources that know they were not told.
+	tradeCount := int64(b.GetTradeCount())
+
 	bar := store.Bar{
 		InstrumentID:  ev.GetInstrumentId(),
 		Venue:         ev.GetMic(),
@@ -273,7 +289,7 @@ func TranslateBar(env *envelopepb.Envelope, ev *marketpb.MarketDataEvent) (store
 		Low:           b.GetLow(),
 		Close:         b.GetClose(),
 		Volume:        b.GetVolume(),
-		TradeCount:    int64(b.GetTradeCount()),
+		TradeCount:    &tradeCount,
 		KnowledgeTime: knowTime,
 	}
 	if err := bar.Validate(); err != nil {

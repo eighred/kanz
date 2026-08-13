@@ -229,7 +229,10 @@ func binanceKline(k []json.RawMessage, now time.Time) (store.Bar, bool, error) {
 		Low:         l,
 		Close:       c,
 		Volume:      v,
-		TradeCount:  trades,
+		// BINANCE DOES REPORT ONE (kline field 8), so this is never nil — a real
+		// zero here means the venue told us nothing traded, which is an
+		// observation worth keeping distinct from OKX's silence (#432).
+		TradeCount: &trades,
 	}, true, nil
 }
 

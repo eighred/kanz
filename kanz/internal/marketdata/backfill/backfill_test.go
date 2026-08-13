@@ -30,7 +30,7 @@ func venueBar(minute int, closeCoef int64) store.Bar {
 		Low:         d(9000, -2),
 		Close:       d(closeCoef, -2),
 		Volume:      d(15, -1),
-		TradeCount:  7,
+		TradeCount:  ptrTo(int64(7)),
 	}
 }
 
@@ -237,3 +237,6 @@ func TestASeriesWithNoSymbolIsRefused(t *testing.T) {
 		t.Fatal("a series with no exchange symbol was accepted")
 	}
 }
+
+// ptrTo is the test-side spelling of an int64 the venue DID report (#432).
+func ptrTo[T any](v T) *T { return &v }

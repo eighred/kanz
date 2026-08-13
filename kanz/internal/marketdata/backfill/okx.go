@@ -174,14 +174,12 @@ func (o *OKXSource) page(ctx context.Context, instID string, before time.Time) (
 // candle with confirm="0", which is strictly better than comparing a close time
 // against local time — no clock skew, no guess.
 //
-// TRADE COUNT IS NOT REPORTED BY OKX, and this is a known conflation rather than
-// an oversight: store.Bar.TradeCount is an int64 whose zero means "nothing
-// traded in this interval" (bar.go says so explicitly), so an OKX candle records
-// zero trades for a minute that may have had thousands. Anything reading
-// trade_count will see OKX as permanently quiet. Making "not reported"
-// expressible needs the field to become nullable end to end — migration, store,
-// producer — which is #432, filed rather than smuggled in here because it
-// changes a shipped migration and the live bar producer.
+// TRADE COUNT IS NOT REPORTED BY OKX, and the bar now SAYS so rather than
+// claiming zero (#432). The row is [ts,o,h,l,c,vol,volCcy,volCcyQuote,confirm]:
+// there is no trade-count field to map. This used to write 0, which store.Bar
+// documents as "nothing traded in this interval" — so every OKX minute, including
+// ones with thousands of trades, was recorded as a dead market. TradeCount is now
+// a *int64 and this leaves it nil, which is a different row from a zero.
 func okxCandle(row []string) (store.Bar, bool, error) {
 	if len(row) < 9 {
 		return store.Bar{}, false, fmt.Errorf("expected at least 9 fields, got %d", len(row))
@@ -215,6 +213,8 @@ func okxCandle(row []string) (store.Bar, bool, error) {
 		Low:         vals[2],
 		Close:       vals[3],
 		Volume:      vals[4],
-		TradeCount:  0, // not reported by OKX — #432, and the doc comment above
+		// nil, NOT zero. See the doc comment above: OKX reports no count, and
+		// saying "nothing traded" on its behalf is the defect #432 closed.
+		TradeCount: nil,
 	}, row[8] == "1", nil
 }

@@ -96,8 +96,9 @@ func TestBinanceKlinesParseExactly(t *testing.T) {
 			t.Errorf("%s = %s, want %s — a float somewhere in the path", name, pair[0], pair[1])
 		}
 	}
-	if b.TradeCount != 42 {
-		t.Errorf("trade_count = %d, want 42", b.TradeCount)
+	if b.TradeCount == nil || *b.TradeCount != 42 {
+		t.Errorf("trade_count = %v, want 42 — binance kline field 8 carries a real count, so this "+
+			"must never be nil", b.TradeCount)
 	}
 	if !b.BucketStart.Equal(barStart) {
 		t.Errorf("bucket_start = %s, want %s", b.BucketStart, barStart)

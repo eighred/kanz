@@ -97,7 +97,7 @@ func bar(bucketMin int, closeCoef int64, knowMin int) Bar {
 		Low:           d(9000, -2),
 		Close:         d(closeCoef, -2),
 		Volume:        d(15, -1),
-		TradeCount:    42,
+		TradeCount:    ptrTo(int64(42)),
 		KnowledgeTime: barT0.Add(time.Duration(knowMin) * time.Minute),
 	}
 }
@@ -134,8 +134,8 @@ func TestPostgresBarsRoundTripEveryField(t *testing.T) {
 			t.Errorf("%s = %v, want %v — this is the field the old ingest discarded", f.name, f.got, f.want)
 		}
 	}
-	if g.TradeCount != want.TradeCount {
-		t.Errorf("trade_count = %d, want %d", g.TradeCount, want.TradeCount)
+	if derefCount(g.TradeCount) != derefCount(want.TradeCount) {
+		t.Errorf("trade_count = %d, want %d", derefCount(g.TradeCount), derefCount(want.TradeCount))
 	}
 	if !g.BucketStart.Equal(want.BucketStart) {
 		t.Errorf("bucket_start = %s, want %s", g.BucketStart, want.BucketStart)
@@ -310,3 +310,6 @@ func TestPostgresBarsRefuseAnImpossibleCandle(t *testing.T) {
 			"series with a hole nothing downstream can see", n)
 	}
 }
+
+// ptrTo is the test-side spelling of a trade count the venue DID report (#432).
+func ptrTo[T any](v T) *T { return &v }
