@@ -37,14 +37,48 @@ import (
 // all: this behaviour lives entirely in wiring, and wiring is what escapes every
 // unit test in the package.
 
-// fastRetries shortens the probe loop so a test spends milliseconds where the
-// deployed gateway spends its retry interval. The behaviour under test is WHEN
-// readiness flips, not how long the wait between attempts is.
-func fastRetries(t *testing.T) {
+// testRetryInterval is what these tests wait between probe attempts: the
+// behaviour under test is WHEN readiness flips, not how long the gateway sleeps
+// between attempts.
+const testRetryInterval = 20 * time.Millisecond
+
+// startProbe runs primeIssuer and guarantees the goroutine is FINISHED before the
+// test returns.
+//
+// BOTH HALVES OF THIS ARE THE FIX FOR A RACE THAT REACHED MAIN (#457).
+//
+// The interval used to be a package-level var that each test overwrote and
+// restored in t.Cleanup. Two things were wrong, and `-race` in CI found them
+// within one merge of each other:
+//
+//  1. A TEST-ONLY MUTABLE GLOBAL IS STILL A GLOBAL. The cleanup's write raced a
+//     probe goroutine's read of the same variable. It is now a parameter, so
+//     there is no shared state to race on.
+//  2. THE GOROUTINE OUTLIVED ITS TEST. Cancelling the context is not waiting for
+//     it; a probe left running past t.Cleanup can touch anything the test owned.
+//     Waiting is what makes the leak impossible rather than merely unlikely.
+//
+// Worth stating plainly: none of this was visible locally. `-race` needs cgo and
+// does not run on the usual development box, so a concurrency claim here is
+// unproven until CI says otherwise — which is exactly what CLAUDE.md warns and
+// what this test disregarded.
+func startProbe(t *testing.T, a *auth.OIDCAuthenticator, reg prometheus.Registerer, issuer string, ready *atomic.Bool, logs *captureHandler) {
 	t.Helper()
-	prev := issuerRetryInterval
-	issuerRetryInterval = 20 * time.Millisecond
-	t.Cleanup(func() { issuerRetryInterval = prev })
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		primeIssuer(ctx, a, reg, issuer, testRetryInterval, ready, logs.logger())
+	}()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(10 * time.Second):
+			t.Error("primeIssuer did not return after its context was cancelled — a probe that " +
+				"outlives the gateway's shutdown keeps a pod alive that is trying to leave")
+		}
+	})
 }
 
 // jwksServer serves a real discovery document and JWKS, and can be switched on
@@ -101,19 +135,11 @@ func authenticatorFor(t *testing.T, issuer string) *auth.OIDCAuthenticator {
 // A GATEWAY THAT CANNOT REACH ITS ISSUER IS NOT READY, and says so where an
 // operator can see it. This is the shipped configuration's exact case.
 func TestReadinessIsHeldWhileTheIssuerIsUnreachable(t *testing.T) {
-	fastRetries(t)
 	js := newJWKSServer(t) // deliberately left down
 	reg := prometheus.NewRegistry()
 	logs := &captureHandler{}
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
 	var ready atomic.Bool
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		primeIssuer(ctx, authenticatorFor(t, js.url), reg, js.url, &ready, logs.logger())
-	}()
+	startProbe(t, authenticatorFor(t, js.url), reg, js.url, &ready, logs)
 
 	// It must never become ready — waiting past the first retry proves the loop
 	// is retrying rather than having flipped ready on its way out.
@@ -130,24 +156,17 @@ func TestReadinessIsHeldWhileTheIssuerIsUnreachable(t *testing.T) {
 	if !logs.hasError("CANNOT REACH THE OIDC ISSUER") {
 		t.Errorf("no ERROR naming the unreachable issuer; logged:\n%s", logs.all())
 	}
-
-	cancel()
-	<-done
 }
 
 // AND IT SELF-HEALS. The retry is what makes holding readiness safe rather than
 // merely strict: an issuer that comes up later — a co-deployed IdP, a restarted
 // provider — is picked up with no restart of this gateway.
 func TestReadinessArrivesWhenTheIssuerDoes(t *testing.T) {
-	fastRetries(t)
 	js := newJWKSServer(t)
 	reg := prometheus.NewRegistry()
 	logs := &captureHandler{}
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
 	var ready atomic.Bool
-	go primeIssuer(ctx, authenticatorFor(t, js.url), reg, js.url, &ready, logs.logger())
+	startProbe(t, authenticatorFor(t, js.url), reg, js.url, &ready, logs)
 
 	waitFor(t, func() bool { return js.hits.Load() >= 1 }, "the first probe")
 	if ready.Load() {
@@ -176,7 +195,7 @@ func TestPrimeIssuerReturnsImmediatelyWithoutOIDC(t *testing.T) {
 	var ready atomic.Bool
 	go func() {
 		defer close(done)
-		primeIssuer(context.Background(), nil, reg, "", &ready, logs.logger())
+		primeIssuer(context.Background(), nil, reg, "", testRetryInterval, &ready, logs.logger())
 	}()
 	select {
 	case <-done:
@@ -196,7 +215,6 @@ func TestPrimeIssuerReturnsImmediatelyWithoutOIDC(t *testing.T) {
 // real discovery: keys fetched from an issuer other than the configured one would
 // validate tokens minted by somebody else.
 func TestReadinessIsHeldWhenDiscoveryNamesAnotherIssuer(t *testing.T) {
-	fastRetries(t)
 	mux := http.NewServeMux()
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
@@ -211,10 +229,8 @@ func TestReadinessIsHeldWhenDiscoveryNamesAnotherIssuer(t *testing.T) {
 
 	reg := prometheus.NewRegistry()
 	logs := &captureHandler{}
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
 	var ready atomic.Bool
-	go primeIssuer(ctx, authenticatorFor(t, srv.URL), reg, srv.URL, &ready, logs.logger())
+	startProbe(t, authenticatorFor(t, srv.URL), reg, srv.URL, &ready, logs)
 
 	waitFor(t, func() bool { return probes.Load() >= 1 }, "the discovery probe")
 	// Give the goroutine room to flip ready if it were going to.
