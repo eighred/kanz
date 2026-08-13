@@ -132,3 +132,88 @@ func TestEngine_RefusesAFillPostedIntoAnotherAccount(t *testing.T) {
 		t.Fatalf("refused, but not by the RLS policy: %v", err)
 	}
 }
+
+// A CASH MOVEMENT CAN NOW DECLARE AN ACCOUNT TOO (#415).
+//
+// The comment above this file's fixtures called a manual cash movement an entry
+// that touches no exchange account, and until #415 that was forced: the cash
+// producer had no field to carry one, so every funded transfer landed claiming
+// it reached no exchange. Funding okx-sub-1 IS a cash movement that touches an
+// exchange account, and the ledger must be able to say so.
+//
+// This is the round trip the unit tests cannot reach: the engine's write-guard
+// (app_current_venue_account) and the RLS write policy both see a CASH entry
+// carrying an account for the first time, and must treat it exactly as they
+// treat a fill's.
+func TestAppend_RecordsTheAccountACashMovementSettledAgainst(t *testing.T) {
+	pool := newPool(t)
+	store := NewPostgres(pool)
+	ctx := context.Background()
+
+	cash := &Event{
+		EntryID:        "cash:S1",
+		PortfolioID:    "fund-alpha",
+		VenueAccountID: "okx-sub-1",
+		Type:           EntryCash,
+		Cash:           big.NewRat(100, 1),
+		CashCurrency:   "USDT",
+		Effective:      time.Now().UTC(),
+		Knowledge:      time.Now().UTC(),
+	}
+	if err := store.Append(ctx, cash); err != nil {
+		t.Fatalf("Append a funded cash movement: %v.\n"+
+			"The write-guard and the RLS write policy must accept a CASH entry that declares "+
+			"an account, exactly as they accept a fill's — otherwise #415's funding path is "+
+			"refused by the database it was built for.", err)
+	}
+	var got string
+	if err := pool.QueryRow(ctx,
+		`SELECT venue_account_id FROM ledger_entries WHERE entry_id = 'cash:S1'`).Scan(&got); err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	if got != "okx-sub-1" {
+		t.Fatalf("venue_account_id = %q, want okx-sub-1 — the per-account index migration 0003 "+
+			"built for \"what is actually in okx-sub-1\" only has cash to index if this column "+
+			"is populated", got)
+	}
+}
+
+// THE ACCOUNT SURVIVES THE ROUND TRIP THROUGH THE READ PATH THE SERVICE USES.
+//
+// The two tests above read venue_account_id with their own hand-written SQL,
+// which proves the WRITE and says nothing about Journal — the path Replay,
+// MaterializeCurrent and every snapshot rebuild actually take. journal's SELECT
+// omitted the column, so every *Event the service read back carried an empty
+// account while the rows held the right one (#415).
+//
+// A test that queries AROUND the code under test cannot fail when that code
+// stops carrying a field. This one goes through it.
+func TestJournal_ReadsBackTheVenueAccount(t *testing.T) {
+	pool := newPool(t)
+	store := NewPostgres(pool)
+	ctx := context.Background()
+
+	if err := store.Append(ctx, entry("fill:rt-1", "fund-rt", "okx-alpha")); err != nil {
+		t.Fatalf("Append: %v", err)
+	}
+	events, err := store.Journal(ctx, "fund-rt")
+	if err != nil {
+		t.Fatalf("Journal: %v", err)
+	}
+	var found *Event
+	for _, e := range events {
+		if e.EntryID == "fill:rt-1" {
+			found = e
+		}
+	}
+	if found == nil {
+		t.Fatalf("Journal did not return fill:rt-1 (got %d events)", len(events))
+	}
+	if found.VenueAccountID != "okx-alpha" {
+		t.Fatalf("Journal returned VenueAccountID = %q, want okx-alpha.\n"+
+			"The row holds the account and the read path dropped it, so Replay and every "+
+			"snapshot rebuilt from the journal see the EMPTY string — which migration 0003 "+
+			"defines as the positive claim that this entry touched no exchange account.",
+			found.VenueAccountID)
+	}
+}

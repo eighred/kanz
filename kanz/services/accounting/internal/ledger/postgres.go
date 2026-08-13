@@ -156,7 +156,7 @@ func (p *Postgres) StalePortfolios(ctx context.Context, limit int) ([]string, er
 
 func (p *Postgres) journal(ctx context.Context, portfolioID string, effBound, knowBound, knowAfter time.Time) ([]*Event, error) {
 	rows, err := p.pool.Query(ctx, `
-		SELECT entry_id, portfolio_id, entry_type, instrument_id,
+		SELECT entry_id, portfolio_id, venue_account_id, entry_type, instrument_id,
 		       quantity, price, cash, cash_currency, action,
 		       effective_time, knowledge_time, source_ref
 		FROM ledger_entries
@@ -179,7 +179,7 @@ func (p *Postgres) journal(ctx context.Context, portfolioID string, effBound, kn
 			cash       *string
 			action     []byte
 		)
-		if err := rows.Scan(&e.EntryID, &e.PortfolioID, &e.Type, &e.InstrumentID,
+		if err := rows.Scan(&e.EntryID, &e.PortfolioID, &e.VenueAccountID, &e.Type, &e.InstrumentID,
 			&qty, &price, &cash, &e.CashCurrency, &action,
 			&e.Effective, &e.Knowledge, &e.SourceRef); err != nil {
 			return nil, fmt.Errorf("scan entry %s: %w", portfolioID, err)

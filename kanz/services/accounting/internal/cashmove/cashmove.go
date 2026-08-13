@@ -76,6 +76,26 @@ type CashMovement struct {
 	Currency    string
 	Effective   time.Time
 	SourceRef   string
+
+	// VenueAccountID is the EXCHANGE ACCOUNT this movement settled against, or ""
+	// for one that touched none (#415).
+	//
+	// THE LEDGER COULD SAY A PORTFOLIO HELD CASH AND NEVER WHERE. Every other
+	// layer was already built for this: accounting.v1.LedgerEntry carries
+	// venue_account_id (field 12), ledger.Event has the field, the FILL path sets
+	// it (ledger/fill.go), ledger/postgres.go declares it to the transaction via
+	// app.venue_account_id, and migration 0003 adds the column, a write-guard that
+	// refuses an undeclared account, and an index whose comment says it exists for
+	// "per-account cash and position folds — what is actually in okx-sub-1". Only
+	// the cash producer could not fill it in, so the index for per-account CASH
+	// had no cash to index.
+	//
+	// OPTIONAL, AND THE EMPTY VALUE MEANS SOMETHING. Migration 0003 treats '' as
+	// the POSITIVE DECLARATION that an entry touches no exchange account, which is
+	// the truth for an investor subscription into the fund's own bank. A transfer
+	// that funds okx-sub-1 is the other case. Requiring one answer for both would
+	// make one of them a lie, so this is not defaulted and never guessed.
+	VenueAccountID string
 }
 
 const (
@@ -156,14 +176,18 @@ func encode(m CashMovement, knowledge time.Time) (*accountingpb.LedgerEntry, str
 			"— refusing to post a cash entry the ledger cannot hold exactly", m.MovementID)
 	}
 	entry := &accountingpb.LedgerEntry{
-		EntryId:       "cash:" + m.MovementID,
-		PortfolioId:   m.PortfolioID,
-		EntryType:     entryType,
-		Cash:          cash,
-		CashCurrency:  m.Currency,
-		EffectiveTime: timestamp(eff),
-		KnowledgeTime: timestamp(knowledge),
-		SourceRef:     m.SourceRef,
+		EntryId:     "cash:" + m.MovementID,
+		PortfolioId: m.PortfolioID,
+		// Passed through, never defaulted: "" is the positive declaration that this
+		// movement touched no exchange account (migration 0003), and guessing an
+		// account would post cash against collateral it never reached.
+		VenueAccountId: m.VenueAccountID,
+		EntryType:      entryType,
+		Cash:           cash,
+		CashCurrency:   m.Currency,
+		EffectiveTime:  timestamp(eff),
+		KnowledgeTime:  timestamp(knowledge),
+		SourceRef:      m.SourceRef,
 	}
 	return entry, subject, nil
 }
