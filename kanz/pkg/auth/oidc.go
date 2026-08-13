@@ -397,6 +397,48 @@ func (a *OIDCAuthenticator) KeysUnrevalidated() bool {
 		a.now().Sub(a.lastRefresh) >= a.cfg.MaxKeyAge
 }
 
+// Prime resolves the issuer's discovery document and fetches its key set NOW,
+// rather than on the first token a user presents (#457).
+//
+// CONSTRUCTION PROVES NOTHING ABOUT THE ISSUER. NewOIDCAuthenticator performs no
+// network I/O: it checks that the issuer string is non-empty and that the key-age
+// bounds are consistent, and returns. So a gateway configured with an issuer that
+// does not exist — which is what the estate shipped, pointing at a hostname that
+// has never resolved — starts, logs "OIDC authentication enabled", reports
+// healthy, and then rejects every request. The three signals an operator would
+// check all say fine while the platform's sole identity authority cannot verify
+// anybody.
+//
+// Prime is what makes that a startup fact instead of a user's problem. It returns
+// the underlying error, so the caller can name the issuer AND the consequence.
+//
+// IT IS NOT A LIVENESS PING. It performs the real work: discovery, the
+// configured-vs-discovered issuer match, and a JWKS fetch that must yield at
+// least one key. A provider that answers a discovery document naming a different
+// issuer fails here, which is the case a reachability check would wave through.
+//
+// Safe on a cold authenticator by construction: refresh's rate limiter only
+// suppresses a fetch once keys are already cached, and there are none yet.
+// Calling it twice is harmless — the second call is suppressed and returns nil.
+func (a *OIDCAuthenticator) Prime(ctx context.Context) error {
+	return a.refresh(ctx)
+}
+
+// Primed reports whether a key set has ever been successfully fetched. It is the
+// posture a readiness gate reads: FALSE means this gateway has never once reached
+// its issuer, so it can authenticate nobody and must not be sent traffic.
+//
+// DELIBERATELY DISTINCT FROM KeysUnrevalidated, which answers a different
+// question — "the keys we hold have gone stale and a refetch failed". That one
+// describes a gateway degrading from a working state. This one describes a
+// gateway that never had one. Conflating them would let a never-configured issuer
+// borrow the alerting story of a transient provider outage.
+func (a *OIDCAuthenticator) Primed() bool {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return len(a.keys.Keys) > 0
+}
+
 func (a *OIDCAuthenticator) lookup(kid string) (any, bool) {
 	a.mu.RLock()
 	defer a.mu.RUnlock()

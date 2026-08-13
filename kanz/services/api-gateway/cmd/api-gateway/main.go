@@ -238,8 +238,13 @@ func run() int {
 		logger.Info("api-gateway: no API_GATEWAY_OPERATOR_ADDR — /v1/control routes not registered")
 	}
 
+	authn, oidcAuth, err := buildAuthenticator(cfg, obs, logger)
+	if err != nil {
+		return 2
+	}
+
 	var ready atomic.Bool
-	router, err := buildRouter(cfg, handler, ordersHandler, proxyHandler, ctlHandler, obs, &ready, logger, recorder)
+	router, err := buildRouter(cfg, handler, ordersHandler, proxyHandler, ctlHandler, obs, &ready, logger, recorder, authn)
 	if err != nil {
 		return 2
 	}
@@ -263,8 +268,33 @@ func run() int {
 	// the write happens-before the read.
 	fatal := lifecycle.NewFatal(stop)
 
+	// READINESS MEANS "THIS GATEWAY CAN AUTHENTICATE SOMEBODY", NOT "THE PORT IS
+	// OPEN" (#457).
+	//
+	// It used to mean the latter: ready.Store(true) sat unconditionally at the top
+	// of this goroutine, so a gateway whose issuer did not exist bound its port,
+	// logged success, answered /healthz and /readyz with ok — and 401'd every
+	// request. Kubernetes routed traffic to it because the probe said to. The
+	// estate shipped exactly that, pointed at a hostname that has never resolved,
+	// and the only symptom was universal rejection with three green signals above
+	// it.
+	//
+	// primeIssuer blocks until the issuer answers, so the pod stays OUT of the
+	// Service until it can verify a token. It never returns an error: an
+	// unreachable issuer is retried rather than fatal, because crash-looping the
+	// sole identity authority over a dependency blip turns a recoverable outage
+	// into a total one, and would make the deploy ORDER of two services a hard
+	// constraint. On a genuinely wrong configuration this still does the right
+	// thing — the rollout never completes, so the pods that CAN authenticate keep
+	// serving instead of being replaced by pods that cannot.
+	go primeIssuer(ctx, oidcAuth, obs.Registry, cfg.OIDCIssuer, &ready, logger)
+
 	go func() {
-		ready.Store(true)
+		if oidcAuth == nil {
+			// The dev HS256 arm validates with a secret already in hand — there is
+			// no provider to reach, so there is nothing to wait for.
+			ready.Store(true)
+		}
 		logger.Info("api-gateway listening", "addr", cfg.Listen, "upstream", cfg.RiskEngineAddr)
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			logger.Error("http server failed", "err", err)
@@ -464,9 +494,126 @@ func buildProxy(ctx context.Context, cfg config.Config, logger *slog.Logger) (*p
 	return proxy.New(proxy.NewMeshBackend(bases, &http.Client{Transport: tr})), nil
 }
 
+// issuerProbeTimeout bounds one attempt to reach the issuer. Generous, because
+// the cost of a slow answer is a slower rollout while the cost of giving up too
+// early is a pod flapping out of the Service under load.
+const issuerProbeTimeout = 15 * time.Second
+
+// issuerRetryInterval is how often an unreachable issuer is retried. It is the
+// gateway's own floor and deliberately independent of the JWKS rate limiter,
+// which governs the REQUEST path: this loop runs while the pod is receiving no
+// traffic at all, so nothing else is generating attempts to be limited against.
+//
+// A var rather than a const ONLY so the readiness tests can run in milliseconds
+// instead of spending this interval each. Nothing in the running service writes
+// it — a startup-time knob nobody asked for is a knob that gets set wrong.
+var issuerRetryInterval = 10 * time.Second
+
+// primeIssuer blocks until the OIDC issuer answers with a usable key set, then
+// marks the gateway ready (#457). It returns immediately on the HS256 arm.
+//
+// WHAT "USABLE" MEANS IS THE POINT. This is not a reachability ping: Prime runs
+// the real discovery, checks that the document's issuer matches the configured
+// one, and requires a JWKS with at least one key. A provider answering for a
+// DIFFERENT issuer — the case where tokens would be validated against keys
+// belonging to somebody else — fails here rather than passing a liveness check.
+//
+// THE FAILURE LOG NAMES THE CONSEQUENCE, NOT JUST THE ERROR. An operator reading
+// "connection refused" goes looking at the network. An operator reading "this
+// gateway can authenticate NOBODY until this resolves" goes looking at the
+// issuer, which is where the fault is.
+func primeIssuer(ctx context.Context, a *auth.OIDCAuthenticator, reg prometheus.Registerer, issuer string, ready *atomic.Bool, logger *slog.Logger) {
+	if a == nil {
+		return
+	}
+	// Registered only on the OIDC arm, and set to 0 BEFORE the first attempt. A
+	// gauge that appeared only on success would be absent exactly when it matters,
+	// and absent reads as "no data" rather than as "this gateway cannot
+	// authenticate anybody" — the distinction this whole change exists to make.
+	reachable := prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "kanz_api_gateway_oidc_issuer_reachable",
+		Help: "1 when the OIDC issuer's key set has been fetched and this gateway can verify tokens; " +
+			"0 when it never has, in which case every request is rejected regardless of the token.",
+	})
+	reg.MustRegister(reachable)
+	reachable.Set(0)
+
+	for attempt := 1; ; attempt++ {
+		pctx, cancel := context.WithTimeout(ctx, issuerProbeTimeout)
+		err := a.Prime(pctx)
+		cancel()
+		if err == nil {
+			reachable.Set(1)
+			ready.Store(true)
+			logger.Info("api-gateway: OIDC authentication enabled — issuer reached and keys held",
+				"issuer", issuer, "attempts", attempt)
+			return
+		}
+		// ERROR, not WARN. The gateway is the platform's sole identity authority
+		// and it currently authenticates nobody; that is an outage, and logging it
+		// at a level operators filter out is how it stayed invisible.
+		logger.Error("api-gateway: CANNOT REACH THE OIDC ISSUER — this gateway can verify no token "+
+			"from anybody, and stays OUT of the Service (/readyz 503) until it can. Every request "+
+			"would be rejected regardless of how valid its token is",
+			"issuer", issuer, "err", err, "attempt", attempt, "retry_in", issuerRetryInterval)
+
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(issuerRetryInterval):
+		}
+	}
+}
+
+// buildAuthenticator selects the token validator. It returns the concrete OIDC
+// authenticator alongside the interface, because the composition root has to do
+// something with it that the request path cannot: PROVE IT CAN REACH ITS ISSUER
+// before the gateway declares itself ready (#457). Nil on the HS256 arm, which
+// has no provider to reach.
+//
+// One of these two arms always runs: config.Load refuses to return a Config with
+// neither an OIDC issuer nor a JWT secret, so the gateway cannot reach here
+// unauthenticated. There is no third arm, and middleware.Auth refuses every
+// request if a nil Authenticator ever reaches it anyway.
+func buildAuthenticator(cfg config.Config, obs *observability.Provider, logger *slog.Logger) (middleware.Authenticator, *auth.OIDCAuthenticator, error) {
+	switch {
+	case cfg.OIDCIssuer != "":
+		oidc, err := auth.NewOIDCAuthenticator(auth.OIDCConfig{
+			Issuer:      cfg.OIDCIssuer,
+			Audience:    cfg.OIDCAudience,
+			JWKSURI:     cfg.OIDCJWKSURI,
+			TenantClaim: cfg.OIDCTenantClaim,
+			RolesClaim:  cfg.OIDCRolesClaim,
+		})
+		if err != nil {
+			logger.Error("api-gateway: OIDC config invalid", "err", err)
+			return nil, nil, err
+		}
+		// The degraded-key posture, exported for as long as it lasts (#242).
+		// Registered here rather than inside NewGatewayMetrics because it only
+		// exists on this arm: the HS256 validator has no provider to lose.
+		middleware.RegisterOIDCKeyGauge(obs.Registry, oidc.KeysUnrevalidated)
+		// DELIBERATELY NOT LOGGED AS "ENABLED" HERE. Constructing this proves only
+		// that the issuer string is non-empty; it performs no network I/O. The line
+		// that used to sit here — "OIDC authentication enabled", naming the issuer —
+		// was printed by a gateway pointed at a hostname that has never resolved,
+		// and was one of three signals telling an operator everything was fine while
+		// nothing could be authenticated (#457). The success line is now printed by
+		// primeIssuer, after keys are actually in hand.
+		return oidcAuthenticator{oidc}, oidc, nil
+	default:
+		// Reachable only with API_GATEWAY_ALLOW_DEV_HS256=true — config.Load
+		// refuses the arm otherwise, so this WARN now describes a deliberate
+		// choice rather than an omission nobody noticed (#242).
+		logger.Warn("api-gateway: using dev HS256 validator — a shared symmetric secret with no " +
+			"revocation path (API_GATEWAY_ALLOW_DEV_HS256=true). Set API_GATEWAY_OIDC_ISSUER for production")
+		return middleware.NewJWTAuthenticator(cfg.JWTSecret), nil, nil
+	}
+}
+
 // buildRouter wires the public probes/metrics/openapi (un-gated) and the /v1
 // risk + order + Phase-7 read routes behind the edge middleware chain.
-func buildRouter(cfg config.Config, h *gateway.Handler, o *orders.Handler, p *proxy.Handler, ctl *control.Handler, obs *observability.Provider, ready *atomic.Bool, logger *slog.Logger, recorder auth.DecisionRecorder) (http.Handler, error) {
+func buildRouter(cfg config.Config, h *gateway.Handler, o *orders.Handler, p *proxy.Handler, ctl *control.Handler, obs *observability.Provider, ready *atomic.Bool, logger *slog.Logger, recorder auth.DecisionRecorder, authn middleware.Authenticator) (http.Handler, error) {
 	// EVERY /v1 ROUTE DECLARES WHAT IT TAKES TO REACH IT (SEC-M2).
 	//
 	// The gateway used to wrap all of /v1 in ONE role check, so `GET /v1/portfolios/{id}/
@@ -504,38 +651,6 @@ func buildRouter(cfg config.Config, h *gateway.Handler, o *orders.Handler, p *pr
 		ctl.Routes(gwMux)
 	}
 
-	// One of these two arms always runs: config.Load refuses to return a Config
-	// with neither an OIDC issuer nor a JWT secret, so the gateway cannot reach
-	// here unauthenticated. There is no third arm, and middleware.Auth refuses
-	// every request if a nil Authenticator ever reaches it anyway.
-	var authn middleware.Authenticator
-	switch {
-	case cfg.OIDCIssuer != "":
-		oidc, err := auth.NewOIDCAuthenticator(auth.OIDCConfig{
-			Issuer:      cfg.OIDCIssuer,
-			Audience:    cfg.OIDCAudience,
-			JWKSURI:     cfg.OIDCJWKSURI,
-			TenantClaim: cfg.OIDCTenantClaim,
-			RolesClaim:  cfg.OIDCRolesClaim,
-		})
-		if err != nil {
-			logger.Error("api-gateway: OIDC config invalid", "err", err)
-			return nil, err
-		}
-		authn = oidcAuthenticator{oidc}
-		// The degraded-key posture, exported for as long as it lasts (#242).
-		// Registered here rather than inside NewGatewayMetrics because it only
-		// exists on this arm: the HS256 validator has no provider to lose.
-		middleware.RegisterOIDCKeyGauge(obs.Registry, oidc.KeysUnrevalidated)
-		logger.Info("api-gateway: OIDC authentication enabled", "issuer", cfg.OIDCIssuer)
-	case cfg.JWTSecret != "":
-		// Reachable only with API_GATEWAY_ALLOW_DEV_HS256=true — config.Load
-		// refuses the arm otherwise, so this WARN now describes a deliberate
-		// choice rather than an omission nobody noticed (#242).
-		authn = middleware.NewJWTAuthenticator(cfg.JWTSecret)
-		logger.Warn("api-gateway: using dev HS256 validator — a shared symmetric secret with no " +
-			"revocation path (API_GATEWAY_ALLOW_DEV_HS256=true). Set API_GATEWAY_OIDC_ISSUER for production")
-	}
 	// Per-tenant quota policy (MT-01e): default budget + optional per-tenant
 	// JSON overrides; metrics carry the tenant label.
 	overrides, err := middleware.LoadQuotaOverrides(cfg.QuotasFile)

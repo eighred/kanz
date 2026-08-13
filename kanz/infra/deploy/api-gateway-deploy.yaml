@@ -119,6 +119,29 @@ spec:
             - { name: API_GATEWAY_RISK_ENGINE_ADDR, value: "risk-engine.kanz-services.svc:9090" }
             # AuthN + AuthZ. REQUIRED: the process exits 2 without a credential and
             # without a required role — see the note at the top of this file.
+            # THIS ISSUER DOES NOT EXIST YET, AND THE GATEWAY NOW SAYS SO (#457).
+            #
+            # login.eighred.com does not resolve. It names the Eighred SSO that was
+            # never built — the same one whose absence made the TUI unable to log in
+            # and prompted the platform to issue its own tokens instead (#99, #364).
+            # Until #457 nothing noticed: NewOIDCAuthenticator does no network I/O,
+            # so the gateway started, logged "OIDC authentication enabled" naming
+            # this value, answered /healthz and /readyz with ok, and rejected every
+            # request that reached it. Three green signals over a total
+            # authentication outage.
+            #
+            # The value is LEFT AS IT IS deliberately. Substituting another
+            # hostname nothing serves would just be a fresher fiction, and identity
+            # has no manifest yet — there is no secret store in this estate, so its
+            # durable signing key has nowhere to live (test/arch/deployability_test.go,
+            # retired by #371). What changed is that the gateway now PROBES this
+            # issuer before declaring itself ready: with nothing behind it the pod
+            # stays out of the Service, logs at ERROR, and exports
+            # kanz_api_gateway_oidc_issuer_reachable=0. The gap is loud at deploy
+            # time instead of silent until somebody's first login.
+            #
+            # Point this at the identity service when it ships. The probe retries,
+            # so the gateway picks it up with no restart.
             - { name: API_GATEWAY_OIDC_ISSUER, value: "https://login.eighred.com" }
             - { name: API_GATEWAY_OIDC_AUDIENCE, value: "kanz" }
             - { name: API_GATEWAY_REQUIRED_ROLE, value: "kanz-user" }
