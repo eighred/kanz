@@ -217,3 +217,58 @@ func TestJournal_ReadsBackTheVenueAccount(t *testing.T) {
 			found.VenueAccountID)
 	}
 }
+
+// THE WHOLE CHAIN, AGAINST A REAL DATABASE (#415 step 3).
+//
+// Append (write-guard + RLS) → Journal (the read that used to drop the column) →
+// VenueAccountCash (the projection). Each link is pinned on its own; this is the
+// one that fails if any of them stops agreeing with the next.
+//
+// It is the sentence the platform could not say: "PF1 holds 140 USDT in
+// okx-sub-1 and 700 in binance-alpha", which is the only shape a venue can be
+// reconciled against — an exchange margins and liquidates per ACCOUNT.
+func TestVenueAccountCash_OverARealJournal(t *testing.T) {
+	pool := newPool(t)
+	store := NewPostgres(pool)
+	ctx := context.Background()
+
+	cash := func(id, account, ccy string, amount int64) *Event {
+		return &Event{
+			EntryID: id, PortfolioID: "fund-proj", VenueAccountID: account,
+			Type: EntryCash, Cash: big.NewRat(amount, 1), CashCurrency: ccy,
+			Effective: time.Now().UTC(), Knowledge: time.Now().UTC(),
+		}
+	}
+	for _, e := range []*Event{
+		cash("proj:1", "okx-sub-1", "USDT", 100),
+		cash("proj:2", "okx-sub-1", "USDT", 40),
+		cash("proj:3", "binance-alpha", "USDT", 700),
+		// Declares it touched NO exchange account: the fund's own bank. It must not
+		// appear as an account, or the largest "exchange balance" on the page is
+		// money no exchange holds.
+		cash("proj:4", "", "USD", 1_000_000),
+	} {
+		if err := store.Append(ctx, e); err != nil {
+			t.Fatalf("Append %s: %v", e.EntryID, err)
+		}
+	}
+
+	events, err := store.Journal(ctx, "fund-proj")
+	if err != nil {
+		t.Fatalf("Journal: %v", err)
+	}
+	balances := VenueAccountCash(events)
+
+	if v := balances["okx-sub-1"]["USDT"]; v == nil || v.Cmp(big.NewRat(140, 1)) != 0 {
+		t.Errorf("okx-sub-1 USDT = %v, want 140", v)
+	}
+	if v := balances["binance-alpha"]["USDT"]; v == nil || v.Cmp(big.NewRat(700, 1)) != 0 {
+		t.Errorf("binance-alpha USDT = %v, want 700", v)
+	}
+	if _, ok := balances[""]; ok {
+		t.Error(`the unscoped entry was bucketed under "" — it declared it touched no exchange account`)
+	}
+	if got := VenueAccounts(balances); len(got) != 2 {
+		t.Errorf("accounts = %v, want exactly the two exchange accounts", got)
+	}
+}
