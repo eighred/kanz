@@ -70,7 +70,7 @@ func TestParseBindings_Empty(t *testing.T) {
 func TestRoute_WillNotSendAnOrderToAnotherPortfoliosCollateral(t *testing.T) {
 	alpha := NewSimVenue("XNAS", WithAccount("okx-alpha"))
 	beta := NewSimVenue("XNAS", WithAccount("okx-beta")) // same venue, different account
-	r := NewRouter(alpha, beta)
+	r := NewRouter([]Venue{alpha, beta})
 
 	// An order bound to beta's account must reach beta's adapter — never alpha's,
 	// which is the first one configured and the one a MIC-only router would pick.
@@ -88,7 +88,7 @@ func TestRoute_WillNotSendAnOrderToAnotherPortfoliosCollateral(t *testing.T) {
 // anywhere else would put it on somebody else's collateral, which is exactly what its
 // binding forbids. It is refused, never quietly rested.
 func TestRoute_RefusesAnAccountNoAdapterHolds(t *testing.T) {
-	r := NewRouter(NewSimVenue("XNAS", WithAccount("okx-alpha")))
+	r := NewRouter([]Venue{NewSimVenue("XNAS", WithAccount("okx-alpha"))})
 
 	_, err := r.Route(&orderpb.OrderState{Venue: "XNAS", VenueAccountId: "okx-beta"})
 	if !errors.Is(err, ErrVenueNotConfigured) {
@@ -98,7 +98,7 @@ func TestRoute_RefusesAnAccountNoAdapterHolds(t *testing.T) {
 }
 
 func TestSupportsAndAccountFor(t *testing.T) {
-	r := NewRouter(NewSimVenue("XNAS", WithAccount("okx-alpha")))
+	r := NewRouter([]Venue{NewSimVenue("XNAS", WithAccount("okx-alpha"))})
 
 	if !r.Supports("XNAS", "") {
 		t.Fatal("Supports(XNAS) = false")

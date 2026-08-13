@@ -46,7 +46,7 @@ func deadVenue(t *testing.T, mic string) execution.Venue {
 func TestVenueUnreachable_RefusesToTradeAndFabricatesNothing(t *testing.T) {
 	fb := &fakeBus{}
 	store := NewMemoryStore()
-	svc, err := NewService(testTenant, store, NewEmitter(fb), nil, execution.NewRouter(deadVenue(t, "BINANCE")), nil, nil)
+	svc, err := NewService(testTenant, store, NewEmitter(fb), nil, execution.NewRouter([]execution.Venue{deadVenue(t, "BINANCE")}), nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -94,7 +94,7 @@ func TestOrderNamingAnUnconfiguredVenue_IsRejected(t *testing.T) {
 	fb := &fakeBus{}
 	store := NewMemoryStore()
 	// The OMS is wired for XSIM only. The order asks for BINANCE.
-	svc, err := NewService(testTenant, store, NewEmitter(fb), nil, execution.NewRouter(execution.NewSimVenue("XSIM")), nil, nil)
+	svc, err := NewService(testTenant, store, NewEmitter(fb), nil, execution.NewRouter([]execution.Venue{execution.NewSimVenue("XSIM")}), nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -136,7 +136,7 @@ func TestOrderNamingAnUnconfiguredVenue_IsRejected(t *testing.T) {
 func TestOrderWithNoVenuesConfigured_StillRests(t *testing.T) {
 	fb := &fakeBus{}
 	store := NewMemoryStore()
-	svc, err := NewService(testTenant, store, NewEmitter(fb), nil, execution.NewRouter(), nil, nil)
+	svc, err := NewService(testTenant, store, NewEmitter(fb), nil, execution.NewRouter(nil), nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

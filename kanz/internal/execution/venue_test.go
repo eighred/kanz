@@ -76,7 +76,7 @@ func TestSimVenue_MarketWithoutPriceIsRefusedNotRested(t *testing.T) {
 }
 
 func TestRouter_NoVenue(t *testing.T) {
-	r := NewRouter()
+	r := NewRouter(nil)
 	if _, err := r.Route(&orderpb.OrderState{}); err != ErrNoVenue {
 		t.Fatalf("err = %v, want ErrNoVenue", err)
 	}

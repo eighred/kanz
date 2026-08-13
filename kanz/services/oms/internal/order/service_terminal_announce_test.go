@@ -82,7 +82,7 @@ func TestSubmit_ResumesInterruptedFillAnnouncement_FillFactFails(t *testing.T) {
 	logs := &captureHandler{}
 	store := NewMemoryStore()
 	svc, err := NewService(testTenant, store, NewEmitter(fb), nil,
-		execution.NewRouter(execution.NewSimVenue("XSIM")), nil, slog.New(logs))
+		execution.NewRouter([]execution.Venue{execution.NewSimVenue("XSIM")}), nil, slog.New(logs))
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
 	}
@@ -205,7 +205,7 @@ func TestResumeDoesNotFabricateAFillForAPreOutboxOrder(t *testing.T) {
 	logs := &captureHandler{}
 	store := NewMemoryStore()
 	svc, err := NewService(testTenant, store, NewEmitter(fb), nil,
-		execution.NewRouter(execution.NewSimVenue("XSIM")), nil, slog.New(logs))
+		execution.NewRouter([]execution.Venue{execution.NewSimVenue("XSIM")}), nil, slog.New(logs))
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
 	}
@@ -558,7 +558,7 @@ func adoptedRejectionService(t *testing.T, fb *fakeBus, reason string) (*Service
 	t.Helper()
 	venue := &rejectingVenue{SimVenue: execution.NewSimVenue("XSIM"), reason: reason}
 	store := NewMemoryStore()
-	svc, err := NewService(testTenant, store, NewEmitter(fb), nil, execution.NewRouter(venue), nil, nil)
+	svc, err := NewService(testTenant, store, NewEmitter(fb), nil, execution.NewRouter([]execution.Venue{venue}), nil, nil)
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
 	}

@@ -30,7 +30,7 @@ func TestSubmit_StampsThePortfoliosBoundAccount(t *testing.T) {
 	fb := &fakeBus{}
 	store := NewMemoryStore()
 	bindings := mustBind(t, "acme/fund-alpha@XSIM=okx-alpha")
-	router := execution.NewRouter(execution.NewSimVenue("XSIM", execution.WithAccount("okx-alpha")))
+	router := execution.NewRouter([]execution.Venue{execution.NewSimVenue("XSIM", execution.WithAccount("okx-alpha"))})
 
 	svc, err := NewService(testTenant, store, NewEmitter(fb), nil, router, nil, nil,
 		WithAccountBindings(bindings, true, nil))
@@ -63,7 +63,7 @@ func TestSubmit_UnboundPortfolioIsRefusedWhenAccountsAreRequired(t *testing.T) {
 	fb := &fakeBus{}
 	store := NewMemoryStore()
 	bindings := mustBind(t, "acme/fund-alpha@XSIM=okx-alpha") // fund-beta is bound to NOTHING
-	router := execution.NewRouter(execution.NewSimVenue("XSIM", execution.WithAccount("okx-alpha")))
+	router := execution.NewRouter([]execution.Venue{execution.NewSimVenue("XSIM", execution.WithAccount("okx-alpha"))})
 
 	svc, err := NewService(testTenant, store, NewEmitter(fb), nil, router, nil, nil,
 		WithAccountBindings(bindings, true, nil))
@@ -109,7 +109,7 @@ func TestSubmit_UnboundPortfolioIsRefusedWhenAccountsAreRequired(t *testing.T) {
 func TestSubmit_UnboundPortfolioTradesTheSharedAccountAndSaysSo(t *testing.T) {
 	fb := &fakeBus{}
 	store := NewMemoryStore()
-	router := execution.NewRouter(execution.NewSimVenue("XSIM", execution.WithAccount("shared-pool")))
+	router := execution.NewRouter([]execution.Venue{execution.NewSimVenue("XSIM", execution.WithAccount("shared-pool"))})
 
 	svc, err := NewService(testTenant, store, NewEmitter(fb), nil, router, nil, nil,
 		WithAccountBindings(mustBind(t, ""), false, nil)) // nothing bound, advisory
@@ -144,7 +144,7 @@ func TestSubmit_BoundToAnAccountNoAdapterHolds_IsRefused(t *testing.T) {
 	store := NewMemoryStore()
 	bindings := mustBind(t, "acme/fund-alpha@XSIM=okx-alpha")
 	// The only adapter at XSIM holds a DIFFERENT account.
-	router := execution.NewRouter(execution.NewSimVenue("XSIM", execution.WithAccount("okx-beta")))
+	router := execution.NewRouter([]execution.Venue{execution.NewSimVenue("XSIM", execution.WithAccount("okx-beta"))})
 
 	svc, err := NewService(testTenant, store, NewEmitter(fb), nil, router, nil, nil,
 		WithAccountBindings(bindings, true, nil))
@@ -172,7 +172,7 @@ func TestSubmit_BoundToAnAccountNoAdapterHolds_IsRefused(t *testing.T) {
 func TestSubmit_FillCarriesTheAccountItSettledAgainst(t *testing.T) {
 	fb := &fakeBus{}
 	store := NewMemoryStore()
-	router := execution.NewRouter(execution.NewSimVenue("XSIM", execution.WithAccount("okx-alpha")))
+	router := execution.NewRouter([]execution.Venue{execution.NewSimVenue("XSIM", execution.WithAccount("okx-alpha"))})
 
 	svc, err := NewService(testTenant, store, NewEmitter(fb), nil, router, nil, nil,
 		WithAccountBindings(mustBind(t, "acme/fund-alpha@XSIM=okx-alpha"), true, nil))

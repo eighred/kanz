@@ -244,7 +244,7 @@ func TestDialVenuesArmsTheGateForADeclaringAdapter(t *testing.T) {
 	if got := testutil.ToFloat64(undeclared); got != 0 {
 		t.Errorf("kanz_oms_undeclared_venue_order_types_total = %v, want 0 — this adapter declared", got)
 	}
-	r := execution.NewRouter(venues...)
+	r := execution.NewRouter(venues)
 	if !r.SupportsOrderType("XBIN", orderpb.OrderType_ORDER_TYPE_LIMIT) {
 		t.Error("router refuses LIMIT at a venue that declared it — a declared type would be refused at admission")
 	}

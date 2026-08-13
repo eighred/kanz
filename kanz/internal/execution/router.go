@@ -3,6 +3,7 @@ package execution
 import (
 	"errors"
 	"fmt"
+	"strings"
 
 	orderpb "github.com/eighred/kanz/kanz-schemas-go/order/v1"
 )
@@ -34,22 +35,89 @@ var ErrUnpriced = errors.New("execution: no price source for this order type")
 // the OMS rested an order it could never fill (EXEC-M8).
 var ErrVenueNotConfigured = errors.New("execution: target venue is not configured")
 
-// Router is the smart-order-router + multi-venue allocation matrix (M4). When an
-// order carries a target venue (OrderState.venue, stamped by the allocation
-// fan-out), the router sends it to the venue whose MIC matches — so a signal
-// fanned across Binance and OKX reaches each specific venue. With no target it
-// falls back to the smart-order-routing default (first configured / best venue).
+// ErrNoDefaultVenue is returned when an order names NO venue, this router holds
+// more than one, and no default has been declared (#437).
+//
+// IT USED TO PICK venues[0]. The type called itself a "smart-order-router" and
+// its fallback "first configured / best venue" — two different things, and only
+// the first was implemented. An untargeted order went wherever the config
+// happened to list first, chosen by nobody, and the name said it had been ranked.
+//
+// Refusing is not a regression from that: an order routed to an arbitrary venue
+// is worse than one refused with a reason, which is the ruling ErrVenueNotConfigured
+// already encodes one case over. The order is refused at admission with a message
+// naming every candidate, so the operator picks — once, in config — rather than
+// the slice order picking silently on every order.
+var ErrNoDefaultVenue = errors.New("execution: order names no venue and no default venue is configured")
+
+// Router dispatches an order to the venue adapter that will work it (M4).
+//
+// IT IS NOT A SMART ORDER ROUTER, and it no longer says it is. When an order
+// carries a target venue (OrderState.venue, stamped by the allocation fan-out)
+// this sends it to the venue whose MIC matches — and, when the order names an
+// exchange account, to the adapter holding that account. That is an allocation
+// matrix: a lookup, not a ranking. Nothing here compares price, liquidity or
+// cost between venues; #437 tracks what a real SOR would need, and #436 the
+// realized-cost signal it would have to rank on.
+//
+// The DEFAULT is what an order naming no venue gets. With exactly one venue that
+// is unambiguous and needs no configuration. With more than one it is a CHOICE,
+// and this type will not make it — see ErrNoDefaultVenue.
 type Router struct {
 	venues []Venue
+	// defaultMIC is the venue an untargeted order goes to, named explicitly.
+	// Empty with one venue means that venue; empty with several means refuse.
+	defaultMIC string
 }
 
-// NewRouter builds a router over the given venues, in preference order.
-func NewRouter(venues ...Venue) *Router { return &Router{venues: venues} }
+// RouterOption configures a Router.
+type RouterOption func(*Router)
+
+// WithDefaultVenue names the venue an order carrying no target is worked at.
+//
+// A NAME, NOT A POSITION. Passing a MIC states the choice where a reader and a
+// reviewer can see it; relying on argument order states it nowhere, and reorders
+// the trading destination of every untargeted order the day somebody sorts the
+// list or adds an adapter above it.
+func WithDefaultVenue(mic string) RouterOption {
+	return func(r *Router) { r.defaultMIC = mic }
+}
+
+// NewRouter builds a router over the given venues.
+func NewRouter(venues []Venue, opts ...RouterOption) *Router {
+	r := &Router{venues: venues}
+	for _, opt := range opts {
+		opt(r)
+	}
+	return r
+}
+
+// DefaultVenue reports the venue an untargeted order would reach, and whether
+// one is resolvable at all. The composition root logs it at startup so the
+// destination is visible before an order finds it rather than after.
+func (r *Router) DefaultVenue() (Venue, bool) {
+	switch {
+	case len(r.venues) == 0:
+		return nil, false
+	case r.defaultMIC != "":
+		for _, v := range r.venues {
+			if v.MIC() == r.defaultMIC {
+				return v, true
+			}
+		}
+		return nil, false
+	case len(r.venues) == 1:
+		return r.venues[0], true
+	default:
+		return nil, false
+	}
+}
 
 // Route selects the venue to work st. A non-empty OrderState.venue routes to
-// that specific venue by MIC (the allocation-matrix path); empty falls back to
-// the first-configured venue (the SOR default; st is available so a richer
-// policy can rank by price/liquidity/cost).
+// that specific venue by MIC — the allocation-matrix path, which is the one every
+// order from the fan-out producers takes. Empty goes to the DECLARED default, and
+// is refused when several venues are configured and nobody declared one (#437).
+//
 // THE ACCOUNT IS PART OF THE ROUTE, AND IT IS THE PART THAT SPENDS THE MONEY.
 //
 // A venue (MIC) can hold many exchange accounts, and each adapter deployment holds
@@ -82,7 +150,26 @@ func (r *Router) Route(st *orderpb.OrderState) (Venue, error) {
 		}
 		return nil, fmt.Errorf("%w: %q", ErrVenueNotConfigured, target)
 	}
-	return r.venues[0], nil
+	v, ok := r.DefaultVenue()
+	if !ok {
+		if r.defaultMIC != "" {
+			return nil, fmt.Errorf("%w: %q is configured as the default but no adapter holds it",
+				ErrVenueNotConfigured, r.defaultMIC)
+		}
+		return nil, fmt.Errorf("%w: this OMS holds %s. Name one so an untargeted order has a "+
+			"destination somebody chose", ErrNoDefaultVenue, strings.Join(r.mics(), ", "))
+	}
+	return v, nil
+}
+
+// mics lists the configured venue MICs, for a refusal that names the candidates
+// rather than leaving the operator to find them.
+func (r *Router) mics() []string {
+	out := make([]string, 0, len(r.venues))
+	for _, v := range r.venues {
+		out = append(out, v.MIC())
+	}
+	return out
 }
 
 // Supports reports whether an adapter for this MIC — and, when account is non-empty,

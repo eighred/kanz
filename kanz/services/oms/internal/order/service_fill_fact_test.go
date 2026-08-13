@@ -36,7 +36,7 @@ func TestFillCommitsItsFactWithTheOrder(t *testing.T) {
 	fb := &fakeBus{failOn: EventTypeFilled}
 	store := NewPostgres(pool)
 	svc, err := NewService(testTenant, store, NewEmitter(fb), nil,
-		execution.NewRouter(execution.NewSimVenue("XSIM")), nil, nil)
+		execution.NewRouter([]execution.Venue{execution.NewSimVenue("XSIM")}), nil, nil)
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
 	}

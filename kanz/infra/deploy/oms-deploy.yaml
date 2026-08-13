@@ -256,6 +256,28 @@ spec:
             # not a repository one. The startup Describe IS the guard, and it fails
             # closed.
             - { name: OMS_VENUE_ENDPOINTS, value: "XBIN/binance-main=venue-binance.kanz-services.svc:9000,XOKX/okx-sub-1=venue-okx.kanz-services.svc:9000" }
+            # WHERE AN ORDER NAMING NO VENUE GOES (#437).
+            #
+            # THIS RECORDS A CHOICE ALREADY IN FORCE; it does not make a new one.
+            # Until #437 the router answered venues[0] — XBIN, because it is listed
+            # first above — while calling itself a smart order router. Nobody picked
+            # that. Sorting the endpoint list, or adding an adapter ahead of it,
+            # would have moved every untargeted order to a different exchange's
+            # collateral with no diff that looked like a trading change.
+            #
+            # Naming XBIN here keeps today's destination EXACTLY as it is, and moves
+            # it somewhere a reviewer can see and argue with. Change this line to
+            # change the destination.
+            #
+            # THIS IS NOT A RANKING. Nothing compares price, liquidity or cost
+            # between XBIN and XOKX; a real smart order router needs the realized-cost
+            # signal #436 builds, and is tracked as #437's option B. Until then the
+            # honest description of this field is "the venue we chose by default",
+            # and the router refuses rather than guessing when it is unset.
+            #
+            # Almost nothing takes this path — both fan-out producers stamp a venue
+            # on every leg — which is exactly why it stayed wrong unnoticed.
+            - { name: OMS_DEFAULT_VENUE_MIC, value: "XBIN" }
             # Deny-by-default for the adapter's account CLAIM. true ⇒ the OMS refuses to
             # start on any adapter that has not PROVED its account against the exchange
             # itself (venue.v1 Describe answering account_verified=false).

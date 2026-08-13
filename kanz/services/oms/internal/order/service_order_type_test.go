@@ -31,7 +31,7 @@ func TestOrderTypeTheVenueCannotPlace_IsRejected(t *testing.T) {
 		orderpb.OrderType_ORDER_TYPE_MARKET,
 		orderpb.OrderType_ORDER_TYPE_LIMIT,
 	})
-	svc, err := NewService(testTenant, store, NewEmitter(fb), nil, execution.NewRouter(spot), nil, nil)
+	svc, err := NewService(testTenant, store, NewEmitter(fb), nil, execution.NewRouter([]execution.Venue{spot}), nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -79,7 +79,7 @@ func TestDeclaredOrderType_IsStillAdmitted(t *testing.T) {
 		orderpb.OrderType_ORDER_TYPE_MARKET,
 		orderpb.OrderType_ORDER_TYPE_LIMIT,
 	})
-	svc, err := NewService(testTenant, store, NewEmitter(fb), nil, execution.NewRouter(spot), nil, nil)
+	svc, err := NewService(testTenant, store, NewEmitter(fb), nil, execution.NewRouter([]execution.Venue{spot}), nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -109,7 +109,7 @@ func TestUndeclaredVenue_AdmitsEveryType(t *testing.T) {
 	store := NewMemoryStore()
 	// Not wrapped: this is what an old adapter looks like after WithOrderTypes.
 	svc, err := NewService(testTenant, store, NewEmitter(fb), nil,
-		execution.NewRouter(execution.WithOrderTypes(execution.NewSimVenue("XBIN"), nil)), nil, nil)
+		execution.NewRouter([]execution.Venue{execution.WithOrderTypes(execution.NewSimVenue("XBIN"), nil)}), nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -181,7 +181,7 @@ func TestGRPCVenueImplementsVenueAndCloser(t *testing.T) {
 func TestRouterRejectsUnroutableOrderRatherThanSimulating(t *testing.T) {
 	// The mandate's loud-demarcation rule, at the router. An order whose venue has
 	// no adapter must FAIL, not quietly fall through to a simulator.
-	r := NewRouter() // no venues registered at all
+	r := NewRouter(nil) // no venues registered at all
 	_, err := r.Route(testOrder())
 	if err == nil {
 		t.Fatal("router matched an order with no registered venue — a silent simulator fallback")
