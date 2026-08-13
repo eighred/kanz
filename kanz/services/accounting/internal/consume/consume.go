@@ -14,6 +14,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"time"
 
 	accountingpb "github.com/eighred/kanz/kanz-schemas-go/accounting/v1"
@@ -52,6 +53,52 @@ type Folder struct {
 	tenant       string
 	store        ledger.Store
 	cashCurrency string
+	// announcer publishes the portfolio's new cash level after a fold that
+	// changed it (#450). nil ⇒ nothing announces, which the composition root
+	// reports at startup rather than leaving to be discovered.
+	announcer *Announcer
+	logger    *slog.Logger
+}
+
+// WithAnnouncer makes the folder publish a portfolio's cash level after each
+// successful fold (#450). Without it the ledger is still correct and nothing
+// downstream can see a balance — which is the state the pre-trade buying-power
+// gate fails closed on.
+func WithAnnouncer(a *Announcer) FolderOption { return func(f *Folder) { f.announcer = a } }
+
+// WithLogger sets the folder's logger; nil ⇒ slog.Default().
+func WithLogger(l *slog.Logger) FolderOption {
+	return func(f *Folder) {
+		if l != nil {
+			f.logger = l
+		}
+	}
+}
+
+// FolderOption customizes a Folder.
+type FolderOption func(*Folder)
+
+// announce publishes portfolioID's new cash level, and NEVER fails the fold.
+//
+// The ledger write has already committed and is the book of record; this
+// announcement is DERIVED state. Returning the error to the bus would nack the
+// message and re-fold it — turning a broker blip into a stalled ledger, when the
+// fold is the one thing that must not stop.
+//
+// It is LOUD instead. A consumer's staleness bound is what makes a lost
+// announcement safe (it falls back to "cash unavailable", which the buying-power
+// rule fails closed on), but that fallback is a refusal — so an operator needs to
+// know the announcements stopped, not infer it from orders being denied.
+func (f *Folder) announce(ctx context.Context, portfolioID string) {
+	if f.announcer == nil || portfolioID == "" {
+		return
+	}
+	if err := f.announcer.Announce(ctx, portfolioID); err != nil {
+		f.logger.ErrorContext(ctx, "accounting: cash balance announcement failed — the ledger is "+
+			"correct and downstream consumers will age this portfolio's balance out to UNKNOWN, "+
+			"which refuses orders under a buying-power mandate",
+			"portfolio_id", portfolioID, "err", err)
+	}
 }
 
 // NewFolder wires a Folder to a durable ledger.Store. cashCurrency stamps the
@@ -62,14 +109,18 @@ type Folder struct {
 // It is also the currency a fill's FEE must be denominated in: FromFill refuses
 // any other, so a venue that charges in the base asset DLQs rather than posting a
 // fee against a currency it was not charged in (#221).
-func NewFolder(tenant string, store ledger.Store, cashCurrency string) (*Folder, error) {
+func NewFolder(tenant string, store ledger.Store, cashCurrency string, opts ...FolderOption) (*Folder, error) {
 	if store == nil {
 		return nil, errors.New("consume: ledger store is nil")
 	}
 	if cashCurrency == "" {
 		cashCurrency = "USD"
 	}
-	return &Folder{tenant: tenant, store: store, cashCurrency: cashCurrency}, nil
+	f := &Folder{tenant: tenant, store: store, cashCurrency: cashCurrency, logger: slog.Default()}
+	for _, opt := range opts {
+		opt(f)
+	}
+	return f, nil
 }
 
 // Handle is the bus.EventHandler value wired into bus.Consumer.Subscribe. It
@@ -98,7 +149,11 @@ func (f *Folder) Handle(ctx context.Context, env *envelopepb.Envelope, payload [
 		// carry the fee's own asset.
 		return fmt.Errorf("consume: %s: %w", env.GetEventType(), err)
 	}
-	return f.store.Append(ctx, entry)
+	if err := f.store.Append(ctx, entry); err != nil {
+		return err
+	}
+	f.announce(ctx, portfolioID)
+	return nil
 }
 
 // HandleCash is the bus.EventHandler for the cash-movement FACT subjects
@@ -121,7 +176,11 @@ func (f *Folder) HandleCash(ctx context.Context, env *envelopepb.Envelope, paylo
 	if entry == nil {
 		return nil // not a cash-movement event; ack
 	}
-	return f.store.Append(ctx, entry)
+	if err := f.store.Append(ctx, entry); err != nil {
+		return err
+	}
+	f.announce(ctx, entry.PortfolioID)
+	return nil
 }
 
 // decodeCash maps a cash-movement FACT to a ledger cash Event. It returns a nil

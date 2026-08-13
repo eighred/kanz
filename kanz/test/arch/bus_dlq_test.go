@@ -438,14 +438,14 @@ var retryCertifiedConsumers = map[string]string{
 		"after a failed transaction is a clean redo and a retry after a committed one is " +
 		"a no-op read of the same row, never a skip of unfinished work.",
 
-	"services/accounting/cmd/accounting/main.go:408": "accounting (fills+cash): dispatches " +
+	"services/accounting/cmd/accounting/main.go:429": "accounting (fills+cash): dispatches " +
 		"consume.Folder.Handle and Folder.HandleCash, both of which resolve to " +
 		"ledger.Postgres.Append (services/accounting/internal/ledger/postgres.go:31) — a single " +
 		"INSERT ... ON CONFLICT (tenant_id, entry_id) DO NOTHING inside one transaction. " +
 		"No read-then-decide gap exists for a retry to land in; it either redoes an " +
 		"uncommitted write or no-ops an already-committed one.",
 
-	"services/accounting/cmd/accounting/main.go:530": "accounting (live FX): the sole handler is " +
+	"services/accounting/cmd/accounting/main.go:551": "accounting (live FX): the sole handler is " +
 		"fxfeed.LiveFX.Handler (services/accounting/internal/fxfeed/fxfeed.go:65) — an " +
 		"unconditional last-value cache write with no dedup branch at all. Re-running it " +
 		"with the same quote sets the same rate; there is nothing to skip.",
@@ -504,7 +504,7 @@ var retryCertifiedConsumers = map[string]string{
 		"unconditional last-write-wins UPSERT keyed on household_id. Re-running it with the " +
 		"same composition is a no-op change; there is no dedup branch to skip through.",
 
-	"services/oms/cmd/oms/main.go:537": "oms: dispatches handleSubmit, handleCancel, handleAmend " +
+	"services/oms/cmd/oms/main.go:557": "oms: dispatches handleSubmit, handleCancel, handleAmend " +
 		"(order.Service.Handle) and position.Projector.Handle (fills), re-derived fresh against " +
 		"250fe00 rather than assumed fixed — see .superpowers/sdd/oms-recert-report.md for the " +
 		"full per-failure-point walk. handleSubmit: every failure point after store.Create either " +

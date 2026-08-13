@@ -248,3 +248,78 @@ message BalanceReconciled {
   // detected_at is when reconciliation observed the divergence. Required.
   google.protobuf.Timestamp detected_at = 7;
 }
+
+// PortfolioCashBalance is what a portfolio CAN SPEND, announced by the book of
+// record (#450).
+//
+// WHY THIS EXISTS AT ALL. The ledger segregates cash by portfolio and is the only
+// component that computes it correctly: its fold takes trade legs, cash movements
+// and corporate actions, bitemporally, with restatements. Every other consumer
+// that needs a balance — the pre-trade buying-power gate (#415), exchange balance
+// reconciliation (#418) — was re-deriving it or going without. Two independent
+// computations of one number WILL drift, and the drift surfaces as a trading
+// control that refuses or admits wrongly.
+//
+// So accounting announces, and nobody else computes. A consumer folds this FACT
+// into a local view; it does not call accounting synchronously, because order
+// admission is the hot path and a call there turns a degraded accounting service
+// into a trading outage.
+//
+// IT IS A LEVEL, NOT A DELTA, and that is deliberate. A consumer folding deltas
+// re-implements the fold — including the restatement handling that makes the
+// bitemporal ledger correct — which is the duplication this message exists to
+// prevent. A level is idempotent on redelivery and self-correcting after a gap:
+// the next announcement is right regardless of how many were missed.
+message PortfolioCashBalance {
+  // portfolio_id is the portfolio this balance belongs to. Required.
+  string portfolio_id = 1;
+
+  // base_currency is the currency total is denominated in — the portfolio's
+  // reporting currency. Required.
+  string base_currency = 2;
+
+  // total is uninvested cash across every account, in base_currency: the number a
+  // buying-power check compares against. Required.
+  common.v1.Decimal total = 3;
+
+  // by_venue_account is cash held per EXCHANGE ACCOUNT, keyed by
+  // venue_account_id, for the accounts this portfolio holds cash in.
+  //
+  // AN EXCHANGE MARGINS AND LIQUIDATES PER ACCOUNT, so the total above is the
+  // wrong number to reconcile against a venue: it includes cash sitting in the
+  // fund's own bank, and it merges accounts the exchange treats separately. This
+  // map is what execution.ExpectedBalances needs (#418) and is carried on the
+  // same FACT so one announcement serves both consumers rather than two
+  // publishers drifting apart.
+  //
+  // Entries are per (venue_account_id, asset). An account absent from the map
+  // holds nothing this portfolio can see; it is NOT "unknown" — the whole
+  // message is a level.
+  repeated VenueAccountCash by_venue_account = 4;
+
+  // as_of is the EFFECTIVE time this balance is true at; knowledge_time is when
+  // the book learned the last entry folded into it. Both required.
+  //
+  // A CONSUMER MUST TREAT A STALE BALANCE AS UNKNOWN rather than as current. An
+  // announcement can be lost — it is derived state, published after the ledger
+  // write it describes, and a publish failure must never fail that write. So the
+  // consumer bounds the age and falls back to "cash unavailable", which the
+  // buying-power rule already fails closed on. Silence must not read as a
+  // balance that has not moved.
+  google.protobuf.Timestamp as_of = 5;
+  google.protobuf.Timestamp knowledge_time = 6;
+}
+
+// VenueAccountCash is one exchange account's holding of one asset (#450).
+message VenueAccountCash {
+  // venue_account_id is the exchange account — the collateral boundary. Required.
+  string venue_account_id = 1;
+
+  // asset is the currency/asset code held (e.g. "USDT", "BTC"). Required, and
+  // NOT normalized to the portfolio's base currency: an exchange holds what it
+  // holds, and converting here would report a number no venue would agree with.
+  string asset = 2;
+
+  // amount is the balance of asset in this account. Required.
+  common.v1.Decimal amount = 3;
+}

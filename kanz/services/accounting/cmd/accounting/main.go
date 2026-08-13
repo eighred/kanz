@@ -393,17 +393,38 @@ func openStore(ctx context.Context, cfg config.Config, logger *slog.Logger) (led
 // degraded (book-of-record data loss must be loud). Idempotency is handled below
 // this layer (consumer dedup + ledger.Store.Append on the entry id).
 func runConsumer(ctx context.Context, cfg config.Config, store ledger.Store, mesh *transport.Mesh, logger *slog.Logger, obs *observability.Provider) error {
-	folder, err := consume.NewFolder(cfg.Tenant, store, cfg.BaseCurrency)
-	if err != nil {
-		return err
-	}
-
 	busMetrics := bus.NewBusMetrics(obs.Registry)
 	client, err := bus.DialNATS(ctx, bus.NATSConfig{URL: cfg.NATSURL, Name: cfg.Source, TLSConfig: mesh.Client})
 	if err != nil {
 		return err
 	}
 	defer func() { _ = client.Close() }()
+
+	// THE BOOK OF RECORD ANNOUNCES WHAT A PORTFOLIO CAN SPEND (#450).
+	//
+	// The pre-trade buying-power gate (#415) and exchange balance reconciliation
+	// (#418) both need a cash balance and NEITHER MAY COMPUTE ONE: this ledger is
+	// the only component that folds trade legs, cash movements and corporate
+	// actions bitemporally, with restatements. Two independent computations of one
+	// number drift, and the drift surfaces as a trading control that refuses or
+	// admits wrongly.
+	//
+	// It rides the CONSUMER'S connection rather than dialing a second one: an
+	// announcement is caused by a fold, so "can fold, cannot announce" is a state
+	// worth not inventing.
+	announceProducer, err := bus.NewProducer(client, cashProducerConfig(cfg))
+	if err != nil {
+		return err
+	}
+	announcer := consume.NewAnnouncer(store, announceProducer, cfg.BaseCurrency, logger, nil)
+	logger.Info("accounting: cash-balance announcements armed — downstream can see what each "+
+		"portfolio may spend", "subject", consume.SubjectPortfolioCash)
+
+	folder, err := consume.NewFolder(cfg.Tenant, store, cfg.BaseCurrency,
+		consume.WithAnnouncer(announcer), consume.WithLogger(logger))
+	if err != nil {
+		return err
+	}
 
 	consumer, err := bus.NewConsumer(client, bus.WithBusMetrics(busMetrics), bus.WithDLQ(client))
 	if err != nil {
