@@ -507,6 +507,25 @@ spec:
                 values: [wealth, datamaster, copilot]
       ports:
         - { protocol: TCP, port: 8080 }
+    # FUNDING THE BOOK OF RECORD (#415), and it is deliberately its own entry
+    # rather than a fourth name in the 8080 group above. That group is the
+    # PHASE-7 READ surfaces; accounting is the only upstream here whose proxied
+    # route WRITES — a subscription or a redemption posted to the IBOR. Folding a
+    # capital movement into a list this file calls "read-upstreams" would make
+    # the rule's own name false, and the next reader would inherit that.
+    #
+    # It shares port 8080 with the read group, which is the residual #447 tracks:
+    # allow-observability-scrape admits 8080 across every pod in this namespace,
+    # so the monitoring plane can reach this API too. accounting's own tenant
+    # gate narrows what that buys — the header must EQUAL the tenant its RLS pool
+    # is pinned to, so a caller cannot pivot to another book — but the fix is the
+    # second listener #447 describes, not this rule.
+    - to:
+        - podSelector:
+            matchLabels:
+              app: accounting
+      ports:
+        - { protocol: TCP, port: 8080 }
     # Model Portfolios (#409) on its own port. NOT in the 8080 group above, and
     # that is the point: allow-observability-scrape admits 8080 across EVERY pod
     # in this namespace, so an API there is reachable by the monitoring plane
@@ -898,3 +917,55 @@ spec:
       ports:
         - { protocol: TCP, port: 8443 } # ws.okx.com
         - { protocol: TCP, port: 9443 } # stream.binance.com
+---
+# FUNDING THE BOOK OF RECORD (#415) — the ingress half.
+#
+# accounting serves the one route on this platform that moves the FUND'S OWN
+# capital: POST /v1/portfolios/{id}/cash-movements posts a subscription, a
+# redemption or a fee to the IBOR. It also serves POST nav and POST reconcile,
+# which write the fund's valuation and its break list.
+#
+# ITS OWN POLICY, NOT A NAME ADDED TO allow-gateway-to-phase7. That rule selects
+# the phase-7 READ services; this is a write surface, and when #447 splits its
+# listener onto a port the monitoring plane cannot reach, only this rule changes.
+#
+# THE TENANT GATE IS WHAT MAKES THE TRUST SOUND, and it is only sound while the
+# api-gateway is the reachable caller. accounting reads the gateway-injected
+# X-Kanz-Principal-Tenant and refuses anything that is not the single tenant its
+# RLS pool is pinned to. A pod that can reach this service directly sets that
+# header itself — and on a write surface that is not a disclosure bug, it is
+# moving cash in a book it was never admitted to.
+#
+# Before #415 the service read NO principal at all, so this rule guards a check
+# that did not previously exist. Both halves landed together on purpose: the
+# network rule without the check admits an unscoped writer, and the check without
+# the rule is a gate anyone may walk around.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-gateway-to-accounting
+  namespace: kanz-services
+  labels:
+    app.kubernetes.io/part-of: kanz
+spec:
+  podSelector:
+    matchLabels:
+      app: accounting
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: api-gateway
+      ports:
+        - { protocol: TCP, port: 8080 }
+    # The scrape. allow-observability-scrape already admits 8080 namespace-wide,
+    # so this adds no reach — it is here so this policy states the full set of
+    # callers accounting expects, rather than depending on a blanket rule
+    # elsewhere to keep the pod monitored.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kanz-observability
+      ports:
+        - { protocol: TCP, port: 8080 }

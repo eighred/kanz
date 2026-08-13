@@ -53,6 +53,30 @@ const (
 	// a wrong key posts fills to another fund's ledger while the exchange debits the right
 	// account, which no amount of trade authority is a licence to do.
 	Operate Capability = "operate"
+	// Fund: MOVE THE FUND'S OWN CAPITAL. Post a subscription, a redemption or a fee to the
+	// book of record; move cash into or out of an exchange account (#415).
+	//
+	// A FOURTH, AND THE COMMENT ON Operate IS RIGHT THAT THIS MUST NOT BECOME A TAXONOMY.
+	// It earns its place on the same test that one did: is this a DIFFERENT authority, in
+	// BOTH directions, from every capability already here?
+	//
+	// It is, and the separation is the oldest one in fund operations. THE PERSON WHO CAN
+	// MOVE MONEY IS NEVER THE PERSON WHO TRADES IT. A trader who moves capital all day has
+	// no business deciding how much capital the fund holds — that is the investor's money
+	// arriving and leaving. A funder has no business submitting an order. Collapsing the
+	// two gives one credential the power to both bring cash in and spend it, which is the
+	// single control every auditor of a fund asks about first.
+	//
+	// NOT Trade, AND NOT IMPLIED BY IT. Funding moves no market risk: it reaches no
+	// exchange order book and takes no position. Reusing Trade would grant every strategy
+	// operator the authority to book a redemption against the IBOR.
+	//
+	// NOT Operate EITHER. Operating the estate is draining nodes and rotating credentials;
+	// it touches no fund capital, and an SRE holding it should not be able to move the
+	// fund's cash.
+	//
+	// NOT Read, obviously: reading the ledger is Read, and this writes it.
+	Fund Capability = "fund"
 )
 
 // Grants is the role → capabilities policy: what a principal's roles entitle them to do.

@@ -96,6 +96,7 @@ const (
 	ServiceCopilot      Service = "copilot"
 	ServiceTVSync       Service = "tv-sync"
 	ServiceOptimization Service = "optimization"
+	ServiceAccounting   Service = "accounting"
 )
 
 // Request is the upstream call the Backend forwards. Principal is the
@@ -174,6 +175,28 @@ func (h *Handler) Routes(mux *authz.Mux) {
 	mux.Handle(authz.Read, "GET /v1/broker/accounts/{id}/positions", h.handle(ServiceTVSync, true, stripV1))
 	mux.Handle(authz.Read, "GET /v1/broker/accounts/{id}/orders", h.handle(ServiceTVSync, true, stripV1))
 	mux.Handle(authz.Read, "GET /v1/broker/accounts/{id}/executions", h.handle(ServiceTVSync, true, stripV1))
+
+	// FUNDING A PORTFOLIO (#415). The one route on this gateway that moves the
+	// FUND'S OWN capital rather than the market's.
+	//
+	// authz.Fund, NOT authz.Trade. The person who can move money is never the
+	// person who trades it — the oldest segregation of duties in fund operations,
+	// and the argument is written out on the capability itself. Reusing Trade
+	// would grant every strategy operator the authority to book a redemption
+	// against the IBOR.
+	//
+	// requirePrincipal is TRUE. accounting takes the tenant off the header and
+	// serves the one tenant its RLS pool is pinned to, so an anonymous forward
+	// would be a cash movement nobody signed. Even an auth-disabled dev gateway
+	// will not forward one.
+	//
+	// SAFE TO EXPOSE ONLY BECAUSE accounting NOW CHECKS THE TENANT. Until the
+	// commit before this one it read no principal at all — every route went from
+	// r.PathValue straight to the store — so fronting it here would have turned a
+	// pod-to-pod gap into an internet-reachable one. The ownership gate lives
+	// upstream, exactly as it does for the wealth and datamaster routes above.
+	mux.Handle(authz.Fund, "POST /v1/portfolios/{id}/cash-movements",
+		h.handle(ServiceAccounting, true, nil))
 
 	// PORTFOLIO CONSTRUCTION (#409). The optimization service authenticates
 	// NOBODY, and it takes the issuer of a materialized order from its request
