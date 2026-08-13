@@ -53,6 +53,16 @@ type Config struct {
 	// single-venue simulator cannot work a multi-venue allocation at all. Empty ⇒ a
 	// default sim venue; a deployment swaps in a real venue adapter.
 	SimVenueMIC string
+	// DefaultVenueMIC is the venue an order carrying NO target is worked at
+	// (#437). Empty is fine with a single venue — that choice is unambiguous —
+	// and with several it makes an untargeted order a loud refusal naming the
+	// candidates, rather than a silent pick of whichever the config listed first.
+	//
+	// Almost nothing reaches it today: both fan-out producers stamp a venue on
+	// every leg. That is exactly why it was safe to be wrong for so long, and why
+	// the day something does arrive untargeted is the wrong day to discover the
+	// destination was chosen by slice order.
+	DefaultVenueMIC string
 	// VenueEndpoints maps MIC → adapter address for OUT-OF-PROCESS venues
 	// (INFRA-M7a): "XBIN=venue-binance.kanz-services.svc:9000,XOKX=venue-okx...".
 	// Each becomes an execution.GRPCVenue. This is how a venue reaches the OMS
@@ -262,6 +272,7 @@ func Load() (Config, error) {
 		RequireVerifiedAccount:  os.Getenv("OMS_REQUIRE_VERIFIED_ACCOUNT") == "true",
 		RequireOrderTypeSupport: os.Getenv("OMS_REQUIRE_ORDER_TYPE_SUPPORT") == "true",
 		SimVenueMIC:             envOr("OMS_SIM_VENUE_MIC", "XSIM"),
+		DefaultVenueMIC:         os.Getenv("OMS_DEFAULT_VENUE_MIC"),
 		VenueEndpoints:          os.Getenv("OMS_VENUE_ENDPOINTS"),
 		SPIFFESocket:            os.Getenv("SPIFFE_ENDPOINT_SOCKET"),
 		BaseCurrency:            envOr("OMS_BASE_CURRENCY", "USD"),

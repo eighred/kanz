@@ -75,6 +75,8 @@ spec:
               value: oms
             - name: OMS_VENUE_ENDPOINTS
               value: XBIN/binance-main=venue-binance.kanz-services.svc:9000,XOKX/okx-sub-1=venue-okx.kanz-services.svc:9000
+            - name: OMS_DEFAULT_VENUE_MIC
+              value: XBIN
             - name: OMS_REQUIRE_VERIFIED_ACCOUNT
               value: "false"
             - name: OMS_VENUE_ACCOUNTS

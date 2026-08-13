@@ -57,7 +57,7 @@ func submitService(t *testing.T, store Store) (*Service, *fakeBus, *closerVenue)
 	t.Helper()
 	fb := &fakeBus{}
 	venue := &closerVenue{mic: "BINANCE"}
-	svc, err := NewService(testTenant, store, NewEmitter(fb), nil, execution.NewRouter(venue), nil, nil)
+	svc, err := NewService(testTenant, store, NewEmitter(fb), nil, execution.NewRouter([]execution.Venue{venue}), nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

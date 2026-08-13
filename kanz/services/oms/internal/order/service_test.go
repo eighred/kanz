@@ -203,7 +203,7 @@ func mustMarshal(t *testing.T, m proto.Message) []byte {
 func newService(t *testing.T, fb *fakeBus, gate compliance.Gate) (*Service, *MemoryStore) {
 	t.Helper()
 	store := NewMemoryStore()
-	router := execution.NewRouter(execution.NewSimVenue("XSIM"))
+	router := execution.NewRouter([]execution.Venue{execution.NewSimVenue("XSIM")})
 	svc, err := NewService(testTenant, store, NewEmitter(fb), gate, router, nil, nil)
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
@@ -352,7 +352,7 @@ func TestService_ConcurrentResubmit_RoutesToVenueExactlyOnce(t *testing.T) {
 	fb := &fakeBus{}
 	venue := &countingVenue{Venue: execution.NewSimVenue("XSIM")}
 	store := NewMemoryStore()
-	svc, err := NewService(testTenant, store, NewEmitter(fb), nil, execution.NewRouter(venue), nil, nil)
+	svc, err := NewService(testTenant, store, NewEmitter(fb), nil, execution.NewRouter([]execution.Venue{venue}), nil, nil)
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
 	}

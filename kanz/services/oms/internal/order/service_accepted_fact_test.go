@@ -80,7 +80,7 @@ func TestAcceptedOrderWithoutFactIsReconciled(t *testing.T) {
 	// minutes to clear the floor would be a test nobody runs.
 	clock := t0
 	svc, err := NewService(testTenant, store, NewEmitter(fb), nil,
-		execution.NewRouter(execution.NewSimVenue("XSIM")), nil, nil,
+		execution.NewRouter([]execution.Venue{execution.NewSimVenue("XSIM")}), nil, nil,
 		WithAcceptedReannounceCounter(reannounced))
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
@@ -183,7 +183,7 @@ func TestAdmissionCommitsTheAcceptedFactWithTheOrder(t *testing.T) {
 	reannounced := prometheus.NewCounter(prometheus.CounterOpts{Name: "test_admission_outbox_reannounce_total"})
 	clock := t0
 	svc, err := NewService(testTenant, store, NewEmitter(fb), nil,
-		execution.NewRouter(execution.NewSimVenue("XSIM")), nil, nil,
+		execution.NewRouter([]execution.Venue{execution.NewSimVenue("XSIM")}), nil, nil,
 		WithAcceptedReannounceCounter(reannounced))
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
@@ -324,7 +324,7 @@ func TestPeriodicSweepSkipsAnOrderYoungerThanMinAge(t *testing.T) {
 	clock := t0
 	store := NewMemoryStore()
 	svc, err := NewService(testTenant, store, NewEmitter(fb), nil,
-		execution.NewRouter(execution.NewSimVenue("XSIM")), nil, nil)
+		execution.NewRouter([]execution.Venue{execution.NewSimVenue("XSIM")}), nil, nil)
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
 	}
@@ -410,7 +410,7 @@ func TestRedeliveredSubmitPublishesTheCommittedAcceptedFact(t *testing.T) {
 	reannounced := prometheus.NewCounter(prometheus.CounterOpts{Name: "test_redrive_reannounce_total"})
 	store := NewMemoryStore()
 	svc, err := NewService(testTenant, store, NewEmitter(fb), nil,
-		execution.NewRouter(execution.NewSimVenue("XSIM")), nil, nil,
+		execution.NewRouter([]execution.Venue{execution.NewSimVenue("XSIM")}), nil, nil,
 		WithAcceptedReannounceCounter(reannounced))
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
@@ -498,7 +498,7 @@ func TestPeriodicSweepContinuesPastAnOrderItCannotReconcile(t *testing.T) {
 	// order is never reached.
 	store := &poisonLoadStore{Store: mem, poison: "a-poison"}
 	svc, err := NewService(testTenant, store, NewEmitter(fb), nil,
-		execution.NewRouter(execution.NewSimVenue("XSIM")), nil, nil)
+		execution.NewRouter([]execution.Venue{execution.NewSimVenue("XSIM")}), nil, nil)
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
 	}
@@ -539,7 +539,7 @@ func TestPeriodicSweepContinuesPastAnOrderItCannotReconcile(t *testing.T) {
 	// two cannot silently converge on whichever one somebody edits next.
 	fresh := &fakeBus{}
 	svc2, err := NewService(testTenant, store, NewEmitter(fresh), nil,
-		execution.NewRouter(execution.NewSimVenue("XSIM")), nil, nil)
+		execution.NewRouter([]execution.Venue{execution.NewSimVenue("XSIM")}), nil, nil)
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
 	}

@@ -30,7 +30,7 @@ import (
 func simService(t *testing.T, fb *fakeBus) *Service {
 	t.Helper()
 	svc, err := NewService(testTenant, NewMemoryStore(), NewEmitter(fb), nil,
-		execution.NewRouter(execution.NewSimVenue("SIM")), execution.NewCloseRegistry(), nil)
+		execution.NewRouter([]execution.Venue{execution.NewSimVenue("SIM")}), execution.NewCloseRegistry(), nil)
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
 	}

@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -520,7 +521,38 @@ func runConsumers(ctx context.Context, cfg config.Config, readiness *server.Read
 		defer stopGRPC()
 	}
 
-	router := execution.NewRouter(venues...)
+	// WHERE DOES AN UNTARGETED ORDER GO? (#437) The router used to answer
+	// venues[0] — whichever adapter the config happened to list first, chosen by
+	// nobody, while the type called itself a smart order router. It is now a named
+	// choice, and an ambiguous one is refused rather than guessed.
+	router := execution.NewRouter(venues, execution.WithDefaultVenue(cfg.DefaultVenueMIC))
+	if v, ok := router.DefaultVenue(); ok {
+		logger.Info("oms: orders naming no venue will be worked at", "venue", v.MIC(),
+			"named_explicitly", cfg.DefaultVenueMIC != "")
+	} else if cfg.DefaultVenueMIC != "" {
+		// FATAL, unlike the ambiguous case below. Somebody NAMED a venue and this
+		// OMS holds no adapter for it — a typo in a MIC, or a default left pointing
+		// at an adapter that was removed. Starting anyway would leave a deployment
+		// that looks configured, logs nothing, and refuses every untargeted order
+		// with an error naming a venue the operator believes is wired.
+		//
+		// Refusing to start is safe HERE specifically because OMS_DEFAULT_VENUE_MIC
+		// is new in #437: no deployment sets it yet, so this cannot turn an existing
+		// estate's silent state into an outage. The only way to reach it is to set
+		// it wrong today.
+		return false, fmt.Errorf("oms: OMS_DEFAULT_VENUE_MIC=%q but no configured adapter holds it "+
+			"(this OMS holds %s) — an untargeted order would be refused naming a venue you "+
+			"believe is wired", cfg.DefaultVenueMIC, strings.Join(micsOf(venues), ", "))
+	} else if len(venues) > 1 {
+		// NOT FATAL. Every order from the fan-out producers carries a target, so
+		// this deployment trades perfectly well without a default; refusing to
+		// start over a path nothing currently takes would be a self-inflicted
+		// outage. An order that does arrive untargeted is refused with the
+		// candidates named.
+		logger.Warn("oms: NO DEFAULT VENUE and more than one is configured — an order naming no "+
+			"venue will be REFUSED rather than sent somewhere nobody chose. Set OMS_DEFAULT_VENUE_MIC "+
+			"to pick one", "venues", strings.Join(micsOf(venues), ","))
+	}
 	svc, err := order.NewService(cfg.Tenant, store, emitter, gate, router, closeRegistry, logger,
 		order.WithAccountBindings(bindings, cfg.RequireVenueAccount, sharedCollateral),
 		order.WithQuarantineCounter(quarantined),
@@ -981,4 +1013,13 @@ func serveOrderQuery(cfg config.Config, mesh *transport.Mesh, store order.Store,
 		}
 	}()
 	return srv.GracefulStop, nil
+}
+
+// micsOf lists the configured venue MICs for the startup log.
+func micsOf(venues []execution.Venue) []string {
+	out := make([]string, 0, len(venues))
+	for _, v := range venues {
+		out = append(out, v.MIC())
+	}
+	return out
 }

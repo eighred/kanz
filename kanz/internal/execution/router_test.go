@@ -8,7 +8,7 @@ import (
 )
 
 func TestRouter_RoutesByTargetVenue(t *testing.T) {
-	r := NewRouter(NewSimVenue("BINANCE"), NewSimVenue("OKX"))
+	r := NewRouter([]Venue{NewSimVenue("BINANCE"), NewSimVenue("OKX")})
 
 	// An order targeting OKX routes to the OKX venue (the allocation matrix).
 	v, err := r.Route(&orderpb.OrderState{Venue: "OKX"})
@@ -20,10 +20,13 @@ func TestRouter_RoutesByTargetVenue(t *testing.T) {
 	if err != nil || v.MIC() != "BINANCE" {
 		t.Fatalf("target BINANCE → %v (mic %q)", err, mic(v))
 	}
-	// No target → the first-configured venue (SOR default).
-	v, err = r.Route(&orderpb.OrderState{})
-	if err != nil || v.MIC() != "BINANCE" {
-		t.Fatalf("no target → %v (mic %q), want BINANCE", err, mic(v))
+	// No target, TWO venues, no default named → REFUSED (#437). This used to
+	// answer BINANCE because BINANCE was passed first — a trading destination
+	// chosen by argument order, under a type that called itself a smart order
+	// router. The candidates are named so the operator picks once, in config,
+	// instead of the slice picking on every order.
+	if _, err := r.Route(&orderpb.OrderState{}); !errors.Is(err, ErrNoDefaultVenue) {
+		t.Fatalf("no target with two venues and no default → %v, want ErrNoDefaultVenue", err)
 	}
 	// An unconfigured target is refused — never silently misrouted, and never
 	// confused with "no venues at all".
@@ -43,7 +46,7 @@ func TestRouter_RoutesByTargetVenue(t *testing.T) {
 }
 
 func TestRouter_NoVenues(t *testing.T) {
-	if _, err := NewRouter().Route(&orderpb.OrderState{}); !errors.Is(err, ErrNoVenue) {
+	if _, err := NewRouter(nil).Route(&orderpb.OrderState{}); !errors.Is(err, ErrNoVenue) {
 		t.Fatalf("empty router = %v, want ErrNoVenue", err)
 	}
 }
