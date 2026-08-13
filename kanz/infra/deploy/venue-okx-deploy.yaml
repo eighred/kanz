@@ -178,6 +178,22 @@ spec:
             - { name: OKX_TRADING_MODE, value: "demo" }
             - { name: OKX_WS_BASE, value: "wss://ws.okx.com:8443" }
             - { name: OKX_SYMBOLS, value: "BTC-USDT=BTC-USDT,ETH-USDT=ETH-USDT" }
+            # ARMED, NOW THAT THE ESTATE IS CORRECTED (#419). #407 fixed the map
+            # above — BTC-USD=BTCUSDT recorded a USDT pair as dollars — and left
+            # this control OFF by design, on the argument written at
+            # quote_match_test.go: a check that refuses to start every adapter
+            # nobody has corrected yet is a trading outage, so it "is armed WITH
+            # the estate in hand". The estate is in hand: the map above is the
+            # corrected one and TestTheCorrectedMappingPasses proves the check is
+            # silent against it.
+            #
+            # WHAT IT STOPS IS THE SPLIT COMING BACK. An id whose quote the venue
+            # does not trade means positions, currency exposure and every limit
+            # checked against them are denominated in an asset the adapter does
+            # not hold — and the rows written under it neither join to the rest of
+            # the estate nor disappear. Unarmed, that is a log line at startup
+            # nobody reads; armed, the adapter refuses to trade at all.
+            - { name: OKX_REQUIRE_QUOTE_MATCH, value: "true" }
             - { name: SPIFFE_ENDPOINT_SOCKET, value: "unix:///run/spiffe/spire-agent.sock" }
           livenessProbe:
             httpGet: { path: /healthz, port: 8092 }
