@@ -46,7 +46,10 @@ func (h *capturingHandler) warnContaining(subs ...string) bool {
 // staticBalances is a bound seam — the shape a real implementation would have.
 type staticBalances map[string]*big.Rat
 
-func (b staticBalances) Balance(asset string) *big.Rat { return b[asset] }
+func (b staticBalances) Balance(asset string) (*big.Rat, bool) {
+	v, ok := b[asset]
+	return v, ok
+}
 
 // AN UNWIRED SEAM READS 0 AND SAYS WHY (#418).
 //
@@ -87,7 +90,7 @@ func TestAWiredSeamReportsOneAndIsPassedThrough(t *testing.T) {
 	if got == nil {
 		t.Fatal("Announce dropped a bound seam — the comparison would never run")
 	}
-	if bal := got.Balance("USDT"); bal == nil || bal.Cmp(big.NewRat(100, 1)) != 0 {
+	if bal, ok := got.Balance("USDT"); !ok || bal.Cmp(big.NewRat(100, 1)) != 0 {
 		t.Fatalf("Balance(USDT) = %v, want 100 — the seam must be returned unchanged, not wrapped "+
 			"in something that answers differently", bal)
 	}

@@ -26,7 +26,12 @@ func (s staticOrders) OpenOrders() []*orderpb.OrderState { return s }
 
 type staticBalances map[string]*big.Rat
 
-func (b staticBalances) Balance(asset string) *big.Rat { return b[asset] }
+// A missing key is UNKNOWN, not zero (#418) — the distinction the reconciler
+// now depends on, so the double must make it too.
+func (b staticBalances) Balance(asset string) (*big.Rat, bool) {
+	v, ok := b[asset]
+	return v, ok
+}
 
 func reconOver(f *fakeBinance, cap *reconCapture, exp staticOrders, bal staticBalances) *Reconciler {
 	bucket := newWeightBucket(1200, time.Minute, nil)

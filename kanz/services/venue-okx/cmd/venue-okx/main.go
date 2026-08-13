@@ -241,18 +241,63 @@ func serve(cfg config.Config) error {
 		// A blind order view makes the healing watchdog blind. Never silent.
 		logger.Error("venue-okx: order view read failed — reconciliation is degraded", "err", err)
 	})
+	// WHAT KANZ BELIEVES THIS EXCHANGE ACCOUNT HOLDS (#418), folded from the book
+	// of record's announcements (#450).
+	//
+	// BROADCAST, NOT A WORK QUEUE: every adapter replica needs the whole picture
+	// for its own account, and a consumer group would give each replica a subset —
+	// so one pod would reconcile against a balance the other did not have. A
+	// balance is replicated STATE, the same argument the OMS makes for its price
+	// spine and mandate registry.
+	expectedBalances := balancerecon.NewView(cfg.Account,
+		balancerecon.WithViewOnStale(func(age time.Duration) {
+			logger.Warn("venue-okx: expected balances are too old to reconcile against — "+
+				"reconciliation is SKIPPING assets rather than reporting false breaks",
+				"account", cfg.Account, "age", age.String(), "subject", balancerecon.Subject)
+		}),
+	)
+	// WithDLQ EVEN THOUGH THE BROADCAST PATH NEVER CONSULTS IT. The exemption in
+	// test/arch/bus_dlq_test.go is for consumers that could NEVER hold a DLQ
+	// publisher — read-only observers whose grant denies all business publish.
+	// This adapter publishes fills, so it is not one of those, and skipping the
+	// DLQ on the grounds that today's only subscription is broadcast is exactly
+	// the loophole that guard names: a capital-path consumer would keep the
+	// exemption after someone later added a queue subscription beside it.
+	balanceConsumer, err := bus.NewConsumer(client, bus.WithDLQ(client))
+	if err != nil {
+		return err
+	}
+	go func() {
+		logger.Info("venue-okx subscribing to the cash spine (broadcast)",
+			"subject", balancerecon.Subject, "account", cfg.Account)
+		if err := balanceConsumer.SubscribeBroadcast(ctx, balancerecon.Subject, expectedBalances.Handle); err != nil &&
+			!errors.Is(err, context.Canceled) {
+			// NOT FATAL. This adapter's job is to route and fill orders; losing the
+			// balance feed degrades RECONCILIATION, and taking the pod down over a
+			// reporting seam would be a self-inflicted trading outage. The view ages
+			// out to unknown and reconciliation skips, loudly.
+			logger.Error("venue-okx: cash-spine subscription failed — balance reconciliation is "+
+				"now blind for this account", "err", err, "account", cfg.Account)
+		}
+	}()
+
 	conn.Start(ctx, execution.WorkerDeps{
 		Publisher: publishHealth,
 		Lookup:    seam,
 		Expected:  seam,
-		// NOT AN OVERSIGHT — there is nothing to bind (#418). No component tracks a
-		// per-venue-account, per-asset balance, so the only implementations of
-		// execution.ExpectedBalances in the tree are test doubles. Announce reports
-		// the posture on kanz_venue_balance_reconciliation_configured and warns,
-		// because reconcileBalances short-circuits on nil and the FACT it would
-		// publish is emitted only on a DISCREPANCY: silence there would otherwise
-		// read as "the books agree" when it means "nothing has ever checked".
-		Balances: balancerecon.Announce(balanceReconConfigured, logger, "okx", nil),
+		// BOUND AT LAST (#418). accounting announces what each portfolio holds per
+		// EXCHANGE ACCOUNT (#450) and this view folds the entries for the one
+		// account this adapter's credential spends from. The adapter does not
+		// COMPUTE a balance — the ledger is the only fold that takes trade legs,
+		// cash movements and corporate actions bitemporally, and a second
+		// computation here would have reconciliation comparing two of Kanz's own
+		// numbers against the exchange.
+		//
+		// Until the first announcement arrives, and again whenever one goes stale,
+		// every asset reads UNKNOWN and reconciliation SKIPS it rather than
+		// comparing against zero — which would break on every asset the exchange
+		// holds and teach an operator to ignore the layer.
+		Balances: balancerecon.Announce(balanceReconConfigured, logger, "okx", expectedBalances),
 		Closes:   closes,
 		Tenant:   cfg.Tenant,
 		Logger:   logger,

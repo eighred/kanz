@@ -687,9 +687,34 @@ data:
                 allow: [
                   "market.crypto.trade", "order.order.healed", "accounting.balance.reconciled",
                   "order.order.partially_filled", "order.order.filled",
+                  # The DLQ for the cash spine it consumes (#418). The broadcast
+                  # path never routes here, but the consumer is wired WithDLQ like
+                  # every other on the estate — so the grant exists rather than
+                  # becoming a publish denial the day a queue subscription is added
+                  # beside it, which would lose the event it was meant to park.
+                  "dlq.accounting.balance.portfolio",
+                  # JETSTREAM MACHINERY, required from the moment this service
+                  # became a CONSUMER (#418). $JS.API.> resolves the stream and
+                  # binds the consumer — without it every Subscribe fails at
+                  # startup. $JS.ACK.> is the separate subject space Msg.Ack()
+                  # publishes to, and its absence is the silent one: the handler
+                  # processes every message, the ack is denied, and the broker
+                  # redelivers the same message forever while every health check
+                  # stays green.
+                  "$JS.API.>", "$JS.ACK.>",
                 ]
               }
-              subscribe: { allow: ["_INBOX.>"] }
+              subscribe: {
+                allow: [
+                  # WHAT KANZ BELIEVES THIS ACCOUNT HOLDS (#418/#450). The adapter
+                  # folds only the entries carrying its own venue_account_id and
+                  # reconciles the exchange against them. SUBSCRIBE ONLY: an adapter
+                  # that could publish a balance would be a second computation of a
+                  # number only the ledger may compute.
+                  "accounting.balance.portfolio",
+                  "_INBOX.>",
+                ]
+              }
             }
           }
           { user: "spiffe://kanz.internal/ns/kanz-services/sa/venue-okx"
@@ -698,9 +723,34 @@ data:
                 allow: [
                   "market.crypto.trade", "order.order.healed", "accounting.balance.reconciled",
                   "order.order.partially_filled", "order.order.filled",
+                  # The DLQ for the cash spine it consumes (#418). The broadcast
+                  # path never routes here, but the consumer is wired WithDLQ like
+                  # every other on the estate — so the grant exists rather than
+                  # becoming a publish denial the day a queue subscription is added
+                  # beside it, which would lose the event it was meant to park.
+                  "dlq.accounting.balance.portfolio",
+                  # JETSTREAM MACHINERY, required from the moment this service
+                  # became a CONSUMER (#418). $JS.API.> resolves the stream and
+                  # binds the consumer — without it every Subscribe fails at
+                  # startup. $JS.ACK.> is the separate subject space Msg.Ack()
+                  # publishes to, and its absence is the silent one: the handler
+                  # processes every message, the ack is denied, and the broker
+                  # redelivers the same message forever while every health check
+                  # stays green.
+                  "$JS.API.>", "$JS.ACK.>",
                 ]
               }
-              subscribe: { allow: ["_INBOX.>"] }
+              subscribe: {
+                allow: [
+                  # WHAT KANZ BELIEVES THIS ACCOUNT HOLDS (#418/#450). The adapter
+                  # folds only the entries carrying its own venue_account_id and
+                  # reconciles the exchange against them. SUBSCRIBE ONLY: an adapter
+                  # that could publish a balance would be a second computation of a
+                  # number only the ledger may compute.
+                  "accounting.balance.portfolio",
+                  "_INBOX.>",
+                ]
+              }
             }
           }
           # wealth became a real bus.DialNATS caller when its household-valuation
