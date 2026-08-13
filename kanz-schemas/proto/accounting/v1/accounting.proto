@@ -95,8 +95,15 @@ message LedgerEntry {
   // entry records the account it settled against, and the engine refuses to write
   // one into an account the transaction did not declare (app.venue_account_id).
   //
-  // Required for entries derived from a fill. Empty for entries that touch no
-  // exchange account (a manual cash movement, a corporate action).
+  // Required for entries derived from a fill. Set on a CASH MOVEMENT that settled
+  // against an exchange account — funding okx-sub-1, or paying a fee out of it
+  // (#415). Empty for an entry that genuinely touches none: an investor
+  // subscription into the fund's own bank, a corporate action.
+  //
+  // EMPTY IS A CLAIM, NOT AN ABSENCE. Migration 0003 makes '' the positive
+  // declaration "this entry touched no exchange account", so leaving it unset on
+  // a movement that DID reach one writes a falsehood into the append-only book
+  // rather than merely omitting a detail. It is never defaulted or inferred.
   string venue_account_id = 12;
 }
 

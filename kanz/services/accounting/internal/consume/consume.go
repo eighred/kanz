@@ -166,14 +166,21 @@ func decodeCash(eventType string, payload []byte, envKnowledge time.Time) (*ledg
 		effective = knowledge
 	}
 	return &ledger.Event{
-		EntryID:      le.GetEntryId(),
-		PortfolioID:  le.GetPortfolioId(),
-		Type:         entryType,
-		Cash:         dec.FromProto(le.GetCash()),
-		CashCurrency: le.GetCashCurrency(),
-		Effective:    effective,
-		Knowledge:    knowledge,
-		SourceRef:    le.GetSourceRef(),
+		EntryID:     le.GetEntryId(),
+		PortfolioID: le.GetPortfolioId(),
+		// CARRIED, NOT DROPPED (#415). This decoder unmarshals the whole
+		// LedgerEntry and used to omit venue_account_id while its sibling decodeFill
+		// set it. Dropping it does not lose detail quietly: migration 0003 reads ''
+		// as the positive claim "this entry touched no exchange account", so every
+		// funded cash movement landed asserting something false in the append-only
+		// book of record.
+		VenueAccountID: le.GetVenueAccountId(),
+		Type:           entryType,
+		Cash:           dec.FromProto(le.GetCash()),
+		CashCurrency:   le.GetCashCurrency(),
+		Effective:      effective,
+		Knowledge:      knowledge,
+		SourceRef:      le.GetSourceRef(),
 	}, nil
 }
 

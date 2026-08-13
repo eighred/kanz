@@ -132,3 +132,48 @@ func TestEngine_RefusesAFillPostedIntoAnotherAccount(t *testing.T) {
 		t.Fatalf("refused, but not by the RLS policy: %v", err)
 	}
 }
+
+// A CASH MOVEMENT CAN NOW DECLARE AN ACCOUNT TOO (#415).
+//
+// The comment above this file's fixtures called a manual cash movement an entry
+// that touches no exchange account, and until #415 that was forced: the cash
+// producer had no field to carry one, so every funded transfer landed claiming
+// it reached no exchange. Funding okx-sub-1 IS a cash movement that touches an
+// exchange account, and the ledger must be able to say so.
+//
+// This is the round trip the unit tests cannot reach: the engine's write-guard
+// (app_current_venue_account) and the RLS write policy both see a CASH entry
+// carrying an account for the first time, and must treat it exactly as they
+// treat a fill's.
+func TestAppend_RecordsTheAccountACashMovementSettledAgainst(t *testing.T) {
+	pool := newPool(t)
+	store := NewPostgres(pool)
+	ctx := context.Background()
+
+	cash := &Event{
+		EntryID:        "cash:S1",
+		PortfolioID:    "fund-alpha",
+		VenueAccountID: "okx-sub-1",
+		Type:           EntryCash,
+		Cash:           big.NewRat(100, 1),
+		CashCurrency:   "USDT",
+		Effective:      time.Now().UTC(),
+		Knowledge:      time.Now().UTC(),
+	}
+	if err := store.Append(ctx, cash); err != nil {
+		t.Fatalf("Append a funded cash movement: %v.\n"+
+			"The write-guard and the RLS write policy must accept a CASH entry that declares "+
+			"an account, exactly as they accept a fill's — otherwise #415's funding path is "+
+			"refused by the database it was built for.", err)
+	}
+	var got string
+	if err := pool.QueryRow(ctx,
+		`SELECT venue_account_id FROM ledger_entries WHERE entry_id = 'cash:S1'`).Scan(&got); err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	if got != "okx-sub-1" {
+		t.Fatalf("venue_account_id = %q, want okx-sub-1 — the per-account index migration 0003 "+
+			"built for \"what is actually in okx-sub-1\" only has cash to index if this column "+
+			"is populated", got)
+	}
+}

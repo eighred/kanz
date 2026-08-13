@@ -55,8 +55,14 @@ type Event struct {
 	// loses money. So an entry records the account it settled against, and the engine
 	// refuses to write it into an account the transaction did not declare.
 	//
-	// Set from the Fill (the account that actually executed). Empty for entries that
-	// touch no exchange account: a manual cash movement, a corporate action.
+	// Set from the Fill (the account that actually executed), and from a CASH
+	// MOVEMENT that settled against an exchange account (#415) — funding okx-sub-1,
+	// or paying a fee out of it. Empty for an entry that genuinely touches none: an
+	// investor subscription into the fund's own bank, a corporate action.
+	//
+	// EMPTY IS A CLAIM, NOT AN ABSENCE — migration 0003 makes '' the positive
+	// declaration that no exchange account was touched, so leaving it unset on a
+	// movement that DID reach one writes a falsehood rather than omitting a detail.
 	VenueAccountID string
 	Type           EntryType
 	InstrumentID   string

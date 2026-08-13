@@ -295,6 +295,15 @@ type cashMovementRequest struct {
 	Currency   string `json:"currency"`  // ISO 4217; default base currency
 	Effective  string `json:"effective"` // optional RFC-3339
 	SourceRef  string `json:"source_ref"`
+	// VenueAccountID scopes the movement to an exchange account (#415): "PF1 holds
+	// 100 of the USDT in okx-sub-1", rather than only "PF1 holds 100 USDT".
+	//
+	// OPTIONAL, AND OMITTING IT IS A STATEMENT. Migration 0003 reads '' as the
+	// positive declaration that the entry touched no exchange account — true for an
+	// investor subscription into the fund's own bank, false for a transfer that
+	// funded okx-sub-1. It is never defaulted, because a guessed account posts cash
+	// against collateral it never reached.
+	VenueAccountID string `json:"venue_account_id"`
 }
 
 // handleCashMovement books a non-trade cash movement by EMITTING it as a FACT
@@ -329,13 +338,14 @@ func (s *Server) handleCashMovement(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	mv := cashmove.CashMovement{
-		MovementID:  req.MovementID,
-		PortfolioID: id,
-		Kind:        kind,
-		Amount:      amount,
-		Currency:    ccy,
-		Effective:   eff,
-		SourceRef:   req.SourceRef,
+		MovementID:     req.MovementID,
+		PortfolioID:    id,
+		Kind:           kind,
+		Amount:         amount,
+		Currency:       ccy,
+		Effective:      eff,
+		SourceRef:      req.SourceRef,
+		VenueAccountID: req.VenueAccountID,
 	}
 	if err := s.cashPublisher.Publish(r.Context(), mv); err != nil {
 		// A validation error is the client's (bad movement); anything else is a
