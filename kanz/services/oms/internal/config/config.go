@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/eighred/kanz/internal/execution"
 	"github.com/eighred/kanz/pkg/secret"
 	"github.com/eighred/kanz/services/oms/internal/order"
 )
@@ -348,6 +349,35 @@ func Load() (Config, error) {
 			outboxInterval)
 	}
 	cfg.OutboxInterval = outboxInterval
+
+	// THE COLLATERAL-SEGREGATION REFUSAL BELONGS HERE, NOT 200 LINES INTO STARTUP
+	// (#68).
+	//
+	// An exchange margins, nets and LIQUIDATES per account, so two portfolios bound
+	// to one exchange account are not segregated whatever the ledger says: a
+	// drawdown in the first consumes the second's margin while both books still
+	// show their own cash. The platform's answer is to refuse to start, and that
+	// refusal is the feature the deploy-time basket contract rests on.
+	//
+	// It was only reached AFTER the OMS had connected to NATS and opened Postgres.
+	// ParseBindings is a pure function of a string that is already in hand here, so
+	// nothing about that ordering was necessary — and it cost two things:
+	//
+	//   - AN OPERATOR LEARNS LATE. With a broker that is not up yet, a shared
+	//     binding hides behind a connection error: fix the broker, redeploy, and
+	//     only then find out the config was never safe to trade on.
+	//   - AND IT COULD NOT BE PROVEN. Reaching the refusal required a live broker
+	//     and database, so the one guarantee the basket contract depends on had no
+	//     test that ran it — while ParseBindings' own unit test proved the parser,
+	//     not the refusal to start.
+	//
+	// Validating at Load makes it the FIRST thing that fails and the easiest thing
+	// to test: config_binding_test.go now runs the refusal with no I/O at all.
+	// main.go still parses (it needs the bindings themselves); it can simply no
+	// longer be the place this is first discovered.
+	if _, err := execution.ParseBindings(cfg.VenueAccounts); err != nil {
+		return Config{}, fmt.Errorf("OMS_VENUE_ACCOUNTS is not safe to trade on: %w", err)
+	}
 
 	return cfg, nil
 }
