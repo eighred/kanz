@@ -20,7 +20,7 @@ func newServer(t *testing.T) (*Server, ledger.Store) {
 	store := ledger.NewMemoryStore()
 	r := &Readiness{}
 	r.Set(true)
-	return New(r, nil, store, "USD"), store
+	return New(r, nil, store, "USD", WithTenant(testTenant)), store
 }
 
 func seed(t *testing.T, store ledger.Store) {
@@ -55,7 +55,7 @@ func TestNAVEndpoint(t *testing.T) {
 	seed(t, store)
 	body := `{"prices":{"AAPL":"160"}}`
 	rec := httptest.NewRecorder()
-	s.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/portfolios/PF/nav", strings.NewReader(body)))
+	s.ServeHTTP(rec, postV1(http.MethodPost, "/v1/portfolios/PF/nav", strings.NewReader(body)))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("nav: want 200 got %d (%s)", rec.Code, rec.Body.String())
 	}
@@ -72,7 +72,7 @@ func TestReconcileEndpoint(t *testing.T) {
 	seed(t, store)
 	body := `{"positions":{"AAPL":"90"},"cash":{"USD":"85000"}}`
 	rec := httptest.NewRecorder()
-	s.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/portfolios/PF/reconcile", strings.NewReader(body)))
+	s.ServeHTTP(rec, postV1(http.MethodPost, "/v1/portfolios/PF/reconcile", strings.NewReader(body)))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("reconcile: want 200 got %d (%s)", rec.Code, rec.Body.String())
 	}
@@ -113,7 +113,7 @@ func TestNAVLiveFXWithoutRequestFX(t *testing.T) {
 	r.Set(true)
 	// EUR = 1.10 USD; SAP is a EUR instrument.
 	fx := accounting.NewFXTable("USD", map[string]*big.Rat{"EUR": big.NewRat(110, 100)})
-	s := New(r, nil, store, "USD",
+	s := New(r, nil, store, "USD", WithTenant(testTenant),
 		WithLiveFX(func() accounting.FXConverter { return fx }),
 		WithInstrumentCurrency(accounting.InstrumentCurrency{"SAP": "EUR"}),
 	)
@@ -121,7 +121,7 @@ func TestNAVLiveFXWithoutRequestFX(t *testing.T) {
 	rec := httptest.NewRecorder()
 	// No "fx" and no "instrument_currency" in the request — both come from the
 	// live provider + server default.
-	s.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/portfolios/PF/nav", strings.NewReader(`{"prices":{"SAP":"130"}}`)))
+	s.ServeHTTP(rec, postV1(http.MethodPost, "/v1/portfolios/PF/nav", strings.NewReader(`{"prices":{"SAP":"130"}}`)))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("nav: want 200 got %d (%s)", rec.Code, rec.Body.String())
 	}
@@ -143,14 +143,13 @@ func TestNAVRequestFXOverridesLive(t *testing.T) {
 	r := &Readiness{}
 	r.Set(true)
 	liveFX := accounting.NewFXTable("USD", map[string]*big.Rat{"EUR": big.NewRat(110, 100)})
-	s := New(r, nil, store, "USD",
+	s := New(r, nil, store, "USD", WithTenant(testTenant),
 		WithLiveFX(func() accounting.FXConverter { return liveFX }),
 		WithInstrumentCurrency(accounting.InstrumentCurrency{"SAP": "EUR"}),
 	)
 	rec := httptest.NewRecorder()
 	// Request supplies EUR = 1.00 → total should use 1.00, not the live 1.10.
-	s.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/portfolios/PF/nav",
-		strings.NewReader(`{"prices":{"SAP":"130"},"fx":{"EUR":"1"}}`)))
+	s.ServeHTTP(rec, postV1(http.MethodPost, "/v1/portfolios/PF/nav", strings.NewReader(`{"prices":{"SAP":"130"},"fx":{"EUR":"1"}}`)))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("nav: want 200 got %d (%s)", rec.Code, rec.Body.String())
 	}
@@ -171,12 +170,12 @@ func TestNAVLiveFXMissingRateFails(t *testing.T) {
 	r.Set(true)
 	// Live table has no EUR rate yet.
 	empty := accounting.NewFXTable("USD", nil)
-	s := New(r, nil, store, "USD",
+	s := New(r, nil, store, "USD", WithTenant(testTenant),
 		WithLiveFX(func() accounting.FXConverter { return empty }),
 		WithInstrumentCurrency(accounting.InstrumentCurrency{"SAP": "EUR"}),
 	)
 	rec := httptest.NewRecorder()
-	s.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/portfolios/PF/nav", strings.NewReader(`{"prices":{"SAP":"130"}}`)))
+	s.ServeHTTP(rec, postV1(http.MethodPost, "/v1/portfolios/PF/nav", strings.NewReader(`{"prices":{"SAP":"130"}}`)))
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("missing FX rate: want 400 got %d (%s)", rec.Code, rec.Body.String())
 	}
@@ -199,11 +198,11 @@ func TestCashMovementEndpointEmits(t *testing.T) {
 	pub := &fakeCashPublisher{}
 	r := &Readiness{}
 	r.Set(true)
-	s := New(r, nil, ledger.NewMemoryStore(), "USD", WithCashPublisher(pub))
+	s := New(r, nil, ledger.NewMemoryStore(), "USD", WithTenant(testTenant), WithCashPublisher(pub))
 
 	body := `{"movement_id":"S1","kind":"subscription","amount":"100000","source_ref":"wealth-42"}`
 	rec := httptest.NewRecorder()
-	s.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/portfolios/PF/cash-movements", strings.NewReader(body)))
+	s.ServeHTTP(rec, postV1(http.MethodPost, "/v1/portfolios/PF/cash-movements", strings.NewReader(body)))
 	if rec.Code != http.StatusAccepted {
 		t.Fatalf("want 202 got %d (%s)", rec.Code, rec.Body.String())
 	}
@@ -223,10 +222,9 @@ func TestCashMovementRejectsUnknownKind(t *testing.T) {
 	pub := &fakeCashPublisher{}
 	r := &Readiness{}
 	r.Set(true)
-	s := New(r, nil, ledger.NewMemoryStore(), "USD", WithCashPublisher(pub))
+	s := New(r, nil, ledger.NewMemoryStore(), "USD", WithTenant(testTenant), WithCashPublisher(pub))
 	rec := httptest.NewRecorder()
-	s.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/portfolios/PF/cash-movements",
-		strings.NewReader(`{"movement_id":"X","kind":"bonus","amount":"1"}`)))
+	s.ServeHTTP(rec, postV1(http.MethodPost, "/v1/portfolios/PF/cash-movements", strings.NewReader(`{"movement_id":"X","kind":"bonus","amount":"1"}`)))
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("want 400 got %d", rec.Code)
 	}
@@ -236,8 +234,7 @@ func TestCashMovementRejectsUnknownKind(t *testing.T) {
 func TestCashMovementNotMountedWithoutPublisher(t *testing.T) {
 	s, _ := newServer(t)
 	rec := httptest.NewRecorder()
-	s.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/portfolios/PF/cash-movements",
-		strings.NewReader(`{"movement_id":"X","kind":"subscription","amount":"1"}`)))
+	s.ServeHTTP(rec, postV1(http.MethodPost, "/v1/portfolios/PF/cash-movements", strings.NewReader(`{"movement_id":"X","kind":"subscription","amount":"1"}`)))
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("want 404 (endpoint not mounted) got %d", rec.Code)
 	}
@@ -247,7 +244,7 @@ func TestNAVMissingPrice(t *testing.T) {
 	s, store := newServer(t)
 	seed(t, store)
 	rec := httptest.NewRecorder()
-	s.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/portfolios/PF/nav", strings.NewReader(`{"prices":{}}`)))
+	s.ServeHTTP(rec, postV1(http.MethodPost, "/v1/portfolios/PF/nav", strings.NewReader(`{"prices":{}}`)))
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("nav missing price: want 400 got %d", rec.Code)
 	}
