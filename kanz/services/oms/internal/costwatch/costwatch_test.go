@@ -72,13 +72,13 @@ func (f *fakeBus) Publish(_ context.Context, e bus.Event) error {
 func newWatch(t *testing.T) (*Watch, *prometheus.Registry) {
 	t.Helper()
 	reg := prometheus.NewRegistry()
-	return New(reg, "__system__", &fakeBus{}, slog.New(slog.DiscardHandler)), reg
+	return New(reg, "__system__", &fakeBus{}, nil, slog.New(slog.DiscardHandler)), reg
 }
 
 func newWatchOn(t *testing.T, b Bus) (*Watch, *prometheus.Registry) {
 	t.Helper()
 	reg := prometheus.NewRegistry()
-	return New(reg, "__system__", b, slog.New(slog.DiscardHandler)), reg
+	return New(reg, "__system__", b, nil, slog.New(slog.DiscardHandler)), reg
 }
 
 func env() *envelopepb.Envelope {
@@ -173,7 +173,7 @@ func TestHandle_UndecodableIsAckedAndCounted(t *testing.T) {
 // per-tenant compute lands (#97).
 func TestHandle_CrossTenantIsRefused(t *testing.T) {
 	reg := prometheus.NewRegistry()
-	w := New(reg, "acme", nil, slog.New(slog.DiscardHandler))
+	w := New(reg, "acme", nil, nil, slog.New(slog.DiscardHandler))
 
 	e := env()
 	e.TenantId = "someone-else"

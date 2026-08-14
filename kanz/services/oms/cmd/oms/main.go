@@ -526,7 +526,24 @@ func runConsumers(ctx context.Context, cfg config.Config, readiness *server.Read
 	// venues[0] — whichever adapter the config happened to list first, chosen by
 	// nobody, while the type called itself a smart order router. It is now a named
 	// choice, and an ambiguous one is refused rather than guessed.
-	router := execution.NewRouter(venues, execution.WithDefaultVenue(cfg.DefaultVenueMIC))
+	// MEASURED VENUE COST, FOR AN UNTARGETED ORDER (#437 B, on #436's signal).
+	//
+	// costwatch folds every fill's realized shortfall into this, and the router
+	// reads it when an order names no venue. It is a PREFERENCE over venues that
+	// have already passed every correctness check — it cannot admit a venue they
+	// refused, and it abstains below its evidence floor, leaving the DECLARED
+	// default in charge. So the worst it does is prefer the wrong one of two
+	// acceptable venues, better informed than the config line it defers to.
+	//
+	// In-process, deliberately: the OMS publishes order.cost.recorded but does not
+	// subscribe to it. Reading its own FACT back would put a broker round trip
+	// inside a feedback loop. The honest cost is that each replica ranks on the
+	// fills it saw — acceptable for a preference, and the sample floor means a
+	// replica with thin evidence abstains rather than acting on noise.
+	venueCosts := execution.NewVenueCosts()
+	router := execution.NewRouter(venues,
+		execution.WithDefaultVenue(cfg.DefaultVenueMIC),
+		execution.WithCostRanker(venueCosts))
 	if v, ok := router.DefaultVenue(); ok {
 		logger.Info("oms: orders naming no venue will be worked at", "venue", v.MIC(),
 			"named_explicitly", cfg.DefaultVenueMIC != "")
@@ -622,7 +639,7 @@ func runConsumers(ctx context.Context, cfg config.Config, readiness *server.Read
 	// only in the FACT: OrderState keeps a cumulative quantity and an average
 	// price and no fee total, and a cost measure that drops fees ranks a zero-fee
 	// venue with poor fills above a maker-rebate venue with good ones.
-	costs := costwatch.New(obs.Registry, cfg.Tenant, producer, logger)
+	costs := costwatch.New(obs.Registry, cfg.Tenant, producer, venueCosts, logger)
 	for _, s := range cfg.FillSubjects() {
 		subs = append(subs, sub{s, cfg.ConsumerGroup, projector.Handle})
 		// ITS OWN GROUP, so it sees EVERY fill and takes none from the projector.

@@ -52,26 +52,53 @@ var ErrNoDefaultVenue = errors.New("execution: order names no venue and no defau
 
 // Router dispatches an order to the venue adapter that will work it (M4).
 //
-// IT IS NOT A SMART ORDER ROUTER, and it no longer says it is. When an order
-// carries a target venue (OrderState.venue, stamped by the allocation fan-out)
-// this sends it to the venue whose MIC matches — and, when the order names an
-// exchange account, to the adapter holding that account. That is an allocation
-// matrix: a lookup, not a ranking. Nothing here compares price, liquidity or
-// cost between venues; #437 tracks what a real SOR would need, and #436 the
-// realized-cost signal it would have to rank on.
+// A TARGETED ORDER IS A LOOKUP, NOT A RANKING, and that is most orders. When an
+// order carries a target venue (OrderState.venue, stamped by the allocation
+// fan-out) this sends it to the venue whose MIC matches — and, when the order
+// names an exchange account, to the adapter holding that account. That is an
+// allocation matrix, and no ranking may touch it: the fan-out already decided
+// where that leg belongs, and second-guessing it would move a portfolio'"'"'s order
+// onto another portfolio'"'"'s collateral.
 //
-// The DEFAULT is what an order naming no venue gets. With exactly one venue that
-// is unambiguous and needs no configuration. With more than one it is a CHOICE,
-// and this type will not make it — see ErrNoDefaultVenue.
+// AN UNTARGETED ORDER IS RANKED, on measured cost (#437 B, on #436'"'"'s signal).
+// Among the venues this router holds, the one whose realized implementation
+// shortfall has been lowest wins — provided every candidate has enough recent
+// evidence to be compared. Otherwise the ranker abstains and the DECLARED
+// default stands.
+//
+// So the order of preference is: the fan-out'"'"'s explicit target, then measured
+// cost, then the operator'"'"'s named default, then a refusal listing the
+// candidates. What it is never again is venues[0] — the array index that made
+// this issue.
 type Router struct {
 	venues []Venue
+	// ranker orders venues by MEASURED cost when an order names none (#437 B).
+	// Nil, or abstaining, leaves the declared default in charge — see Route.
+	ranker CostRanker
 	// defaultMIC is the venue an untargeted order goes to, named explicitly.
 	// Empty with one venue means that venue; empty with several means refuse.
 	defaultMIC string
 }
 
+// CostRanker orders already-acceptable venues by what they have actually cost.
+//
+// A PREFERENCE, NEVER A PERMISSION. It is consulted only after every correctness
+// check has passed, and its answer cannot admit a venue they refused or refuse
+// one they allowed. ok=false is an ABSTENTION — "use your declared default" —
+// not a refusal, and it is the common case before enough fills exist to rank on.
+type CostRanker interface {
+	Preferred(candidates []string) (string, bool)
+}
+
 // RouterOption configures a Router.
 type RouterOption func(*Router)
+
+// WithCostRanker supplies the measured-cost ranking for untargeted orders
+// (#437 B). Absent, an untargeted order goes to the declared default exactly as
+// before — which is the behaviour every deployment has today.
+func WithCostRanker(r CostRanker) RouterOption {
+	return func(rt *Router) { rt.ranker = r }
+}
 
 // WithDefaultVenue names the venue an order carrying no target is worked at.
 //
@@ -149,6 +176,32 @@ func (r *Router) Route(st *orderpb.OrderState) (Venue, error) {
 			return nil, fmt.Errorf("%w: no adapter at %q holds account %q", ErrVenueNotConfigured, target, account)
 		}
 		return nil, fmt.Errorf("%w: %q", ErrVenueNotConfigured, target)
+	}
+	// RANK BEFORE FALLING BACK, AND ONLY AMONG VENUES ALREADY DEEMED ACCEPTABLE
+	// (#437 B).
+	//
+	// Every venue here has passed the same checks a targeted order's would: this
+	// router holds it, and — since an untargeted order names no account — the
+	// account question does not arise. The ranker reorders; it cannot widen the
+	// set. So the worst outcome is preferring the wrong one of two acceptable
+	// venues, which is exactly what the configured default already risks, better
+	// informed.
+	//
+	// AN ABSTENTION FALLS BACK TO THE DECLARED DEFAULT, never to venues[0]. That
+	// ordering is the whole point of option A: this issue exists because a
+	// destination chosen by slice position looked like a decision, and a ranker
+	// with no data must not reintroduce it.
+	if r.ranker != nil {
+		if mic, ok := r.ranker.Preferred(r.mics()); ok {
+			for _, v := range r.venues {
+				if v.MIC() == mic {
+					return v, nil
+				}
+			}
+			// The ranker named a venue this router does not hold. Nothing to do
+			// but ignore it — the fallback below is still correct, and refusing
+			// here would let a stale ranking take down untargeted routing.
+		}
 	}
 	v, ok := r.DefaultVenue()
 	if !ok {
