@@ -457,6 +457,34 @@ func runConsumers(ctx context.Context, cfg config.Config, readiness *server.Read
 	})
 	obs.Registry.MustRegister(sweepFailures)
 
+	// THE EXECUTION-ALGORITHM DRIVER'S THREE SIGNALS (#435).
+	//
+	// A parent order that is not being worked looks exactly like one being worked
+	// slowly: it rests at WORKING_SCHEDULED either way, and every screen shows it
+	// live. These are what tell the two apart.
+	scheduleChildren := prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "kanz_oms_schedule_children_total",
+		Help: "Child orders created by the execution-algorithm driver. Rising means parent orders " +
+			"are being worked; flat while parents rest means their quantity is reaching no venue.",
+	})
+	scheduleFailures := prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "kanz_oms_schedule_failures_total",
+		Help: "Driver passes that ended in an error. The pod keeps trading, so nothing else surfaces " +
+			"this. Sustained non-zero means at least one parent order is not being sliced and its " +
+			"quantity is reaching no venue at all.",
+	})
+	// A GAUGE, NOT A COUNTER, because it is a CONDITION rather than an event: the
+	// tick is either fast enough for the book currently being worked or it is not,
+	// and it can become wrong the moment somebody submits a tighter schedule.
+	scheduleTickTooSlow := prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "kanz_oms_schedule_tick_too_slow",
+		Help: "1 when OMS_SCHEDULE_INTERVAL is longer than the tightest slice gap the driver is " +
+			"working, meaning those orders are being sliced more coarsely than they were asked to " +
+			"be and every slice is late by up to one tick. This has NO other symptom: the quantities " +
+			"still sum, no error is raised, and it looks identical to a slow venue.",
+	})
+	obs.Registry.MustRegister(scheduleChildren, scheduleFailures, scheduleTickTooSlow)
+
 	// Venue adapters trading an account NOBODY has proved against the exchange
 	// (SOV-02a). The adapter's account is read from its own config, so a mis-declared
 	// deployment looks exactly like a correct one — non-zero means some part of the
@@ -966,6 +994,79 @@ func runConsumers(ctx context.Context, cfg config.Config, readiness *server.Read
 		logger.Warn("oms periodic in-flight reconciliation is DISABLED (OMS_SWEEP_INTERVAL=0) — an order " +
 			"whose ORDER_ACCEPTED FACT fails to publish will stay invisible to risk, compliance and the " +
 			"audit log until this pod next restarts")
+	}
+
+	// THE EXECUTION-ALGORITHM DRIVER (#435): what actually works a parent order.
+	//
+	// Deliberately SEPARATE from the sweep above, though both are tickers over the
+	// order book. They answer opposite questions — the sweep asks "what did the
+	// previous process leave unfinished", this asks "what is due now" — and the
+	// sweep's SweepMinAge floor, which exists so it cannot race a live admission,
+	// would put a two-minute delay in front of every first slice if the two shared
+	// a loop. Conflating them would also make one stuck parent capable of shadowing
+	// crash recovery for the whole book.
+	if cfg.ScheduleInterval > 0 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			logger.Info("oms execution-algorithm driver armed", "interval", cfg.ScheduleInterval.String())
+			ticker := time.NewTicker(cfg.ScheduleInterval)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+					// Same explicit tenant as both sweeps, and for the same reason:
+					// this runs outside any inbound delivery, so there is no envelope
+					// for bus.Consumer to have stashed a tenant from, and a child's
+					// ACCEPTED FACT would fail envelope validation without one.
+					tctx := bus.WithTenantID(ctx, cfg.Tenant)
+
+					// IS THE TICK FAST ENOUGH FOR THE WORK IT IS DRIVING? Checked
+					// every pass, because the answer changes with the book: an
+					// operator can submit a one-minute schedule at any moment, and
+					// the only symptom of a tick too slow for it is slices arriving
+					// late — which looks exactly like a slow venue.
+					if gap, parents, ok := svc.TightestSliceInterval(tctx); ok && gap < cfg.ScheduleInterval {
+						scheduleTickTooSlow.Set(1)
+						logger.Warn("oms: the execution-algorithm driver ticks more slowly than the "+
+							"tightest schedule it is working — those orders are being sliced more "+
+							"coarsely than they were asked to be, and every slice will be late by up "+
+							"to one tick. Lower OMS_SCHEDULE_INTERVAL below the tightest slice gap.",
+							"interval", cfg.ScheduleInterval.String(), "tightest_slice_gap", gap.String(),
+							"parents_working", parents)
+					} else {
+						scheduleTickTooSlow.Set(0)
+					}
+
+					created, err := svc.DriveSchedules(tctx)
+					if err != nil {
+						scheduleFailures.Inc()
+						// children_created_despite_failures, not "…before_failure":
+						// like the periodic sweep this pass does NOT stop at the
+						// first parent it cannot advance, so this is what it DID
+						// send while err records the parents it could not.
+						logger.Error("oms: the execution-algorithm driver reported failures — some parent "+
+							"orders are not being worked, and their quantity is reaching no venue at all",
+							"err", err, "children_created_despite_failures", created)
+						continue
+					}
+					if created > 0 {
+						scheduleChildren.Add(float64(created))
+						logger.Info("oms schedule driver pass", "children_created", created)
+					}
+				}
+			}
+		}()
+	} else {
+		// SAID OUT LOUD, for the same reason as the sweep above and with a worse
+		// consequence: with the driver off, a parent order is admitted, announced,
+		// and shown working on every screen while NOTHING will ever slice it. Its
+		// quantity reaches no venue, ever, and no error is raised anywhere.
+		logger.Warn("oms execution-algorithm driver is DISABLED (OMS_SCHEDULE_INTERVAL=0) — any order " +
+			"submitted with an execution_schedule will be admitted and then rest forever: its quantity " +
+			"will reach no venue and nothing further will say so")
 	}
 
 	// READINESS MUST WAIT ON THE MANDATE REPLAY, NOT ON THE SUBSCRIPTION GOROUTINE HAVING

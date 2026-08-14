@@ -217,6 +217,33 @@ type Config struct {
 	// the 60s order-subject AckWait, and the 2m consumer dedup TTL).
 	SweepMinAge time.Duration
 
+	// ScheduleInterval is how often the execution-algorithm driver advances the
+	// parent orders this OMS is working (#435).
+	//
+	// IT IS THE WORST-CASE LATENESS OF EVERY SLICE, and that makes it a
+	// correctness setting rather than a tuning knob. A child is sent on the first
+	// tick at or after it becomes due, so working an order in one-minute slices on
+	// a five-minute tick quietly turns a 60-slice TWAP into a 12-slice one. Every
+	// slice still goes out, the quantities still sum to the parent, and nothing
+	// raises an error — the order simply was not worked the way somebody asked for
+	// it. The OMS therefore compares this against the tightest schedule it is
+	// actually working and warns when it cannot honour it, rather than leaving
+	// that to be inferred from fill timestamps.
+	//
+	// It has NO minimum age, unlike SweepMinAge, and does not need one: the sweep
+	// races live admissions because it re-drives orders somebody else may be
+	// working, while this only CREATES children, and a child's id is derived — so
+	// two ticks racing produce one order, refused at the primary key.
+	//
+	// The cost is one indexed lookup per tick, plus one child query per parent
+	// being worked. A deployment working no schedules pays the first and nothing
+	// else, which is why the default is short.
+	//
+	// Zero DISABLES the driver — and every parent order then rests forever, which
+	// the OMS says out loud at boot rather than letting "off" and "nothing to do"
+	// look the same.
+	ScheduleInterval time.Duration
+
 	// OutboxInterval is how often the outbox relay drains (#292).
 	//
 	// IT IS NOT THE PUBLISH LATENCY ON THE HAPPY PATH. A handler that commits a
@@ -310,6 +337,24 @@ func Load() (Config, error) {
 			"use 0 to disable the periodic sweep", sweepInterval)
 	}
 	cfg.SweepInterval = sweepInterval
+
+	// OMS_SCHEDULE_INTERVAL: 10s (#435). Short, because this is not a compensator
+	// bounding how long a fault goes unnoticed — it is the granularity at which
+	// orders are actually worked, and an operator asking for one-minute slices
+	// must get something recognisably close to them. A tick that finds no parent
+	// costs one indexed lookup.
+	//
+	// "0" turns the driver off, which means every parent order rests forever. It
+	// is a deliberate, stated choice and the OMS warns at boot when it is set.
+	scheduleInterval, err := time.ParseDuration(envOr("OMS_SCHEDULE_INTERVAL", "10s"))
+	if err != nil {
+		return Config{}, fmt.Errorf("OMS_SCHEDULE_INTERVAL: %w", err)
+	}
+	if scheduleInterval < 0 {
+		return Config{}, fmt.Errorf("OMS_SCHEDULE_INTERVAL: must not be negative (got %v); "+
+			"use 0 to disable the execution-algorithm driver", scheduleInterval)
+	}
+	cfg.ScheduleInterval = scheduleInterval
 
 	// OMS_SWEEP_MIN_AGE: 2m. Longer than every recovery already in flight for a
 	// young order — the 60s AckWait on order subjects and the 75s in-process

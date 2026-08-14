@@ -330,6 +330,30 @@ func (s *Service) handleSubmit(ctx context.Context, env *envelopepb.Envelope, pa
 		return err // transient store failure
 	}
 
+	// THE PARENT/CHILD RELATION, DECIDED BEFORE THE COMPLIANCE GATE (#435),
+	// because which of these two an order is changes what that gate should do.
+	//
+	// A PARENT's schedule is validated here, at admission, so a schedule that
+	// cannot be worked is the caller's answer to their own command. Admitted and
+	// then refused on every driver tick would be an order shown working on every
+	// screen while nothing ever traded it, and nobody watching the log.
+	if rej := validateSchedule(&cmd); rej != nil {
+		return s.refuse(ctx, cmd.GetOrderId(), rej.Code, rej.Msg, now)
+	}
+	// A CHILD is authorized by its parent's own schedule — see authorizeChild.
+	var parent *orderpb.OrderState
+	if cmd.GetParentOrderId() != "" {
+		var rej *RejectError
+		var aerr error
+		parent, rej, aerr = s.authorizeChild(ctx, &cmd)
+		if aerr != nil {
+			return aerr // transient store failure ⇒ redeliver, never refuse
+		}
+		if rej != nil {
+			return s.refuse(ctx, cmd.GetOrderId(), rej.Code, rej.Msg, now)
+		}
+	}
+
 	// Pre-trade compliance gate (OMS-01f).
 	//
 	// THE ENVELOPE'S TENANT, NOT s.tenant. SubmitOrder carries no tenant of its
@@ -339,12 +363,39 @@ func (s *Service) handleSubmit(ctx context.Context, env *envelopepb.Envelope, pa
 	// api-gateway stamps it and bus.Validate requires it non-empty on the live
 	// path. s.tenant is this OMS's serving tenant, which ships as __system__ and
 	// would ask for the platform's mandate rather than the customer's.
-	breach, err := s.gate.Check(ctx, env.GetTenantId(), &cmd)
-	if err != nil {
-		return err // transient gate failure ⇒ retry
-	}
-	if breach != nil {
-		return s.refuse(ctx, cmd.GetOrderId(), "COMPLIANCE_"+breach.Code, breach.Reason, now)
+	//
+	// A CHILD IS NOT RE-CHECKED, AND THAT IS A DECISION WITH A REASON (#435).
+	//
+	// The parent was checked ONCE, for the WHOLE notional, and admitted. Its
+	// children are fractions of a quantity a mandate has already approved. Running
+	// the gate again per child is not a stronger control — it is a weaker one, in
+	// two directions at once:
+	//
+	//   - IT DOES NOT CATCH WHAT IT LOOKS LIKE IT CATCHES. Every limit here is
+	//     evaluated against a book that only moves on FILLS, plus a cash view and
+	//     a risk view with their own freshness bounds. N children submitted inside
+	//     one window each see the same unchanged book, so each passes on its own
+	//     and the sum is never tested. Checking the parent's full notional once is
+	//     the only place the sum IS tested.
+	//   - IT BREAKS ORDERS THE MANDATE ALLOWED. As the early slices fill, the book
+	//     moves toward whatever limit the parent cleared. A later child refused by
+	//     that limit strands the parent part-filled — half a position, taken
+	//     deliberately, that the platform will not let anybody finish. A
+	//     part-executed order nobody can complete is worse than one never started.
+	//
+	// So the gate answers "may this fund take this position", which is a question
+	// about the decision; the schedule answers "how is it worked", which is not.
+	// The control over a schedule already in flight is CANCELLING THE PARENT, which
+	// stops every unsent child — #435's clause (c), enforced in schedule.Due and
+	// again in authorizeChild.
+	if parent == nil {
+		breach, err := s.gate.Check(ctx, env.GetTenantId(), &cmd)
+		if err != nil {
+			return err // transient gate failure ⇒ retry
+		}
+		if breach != nil {
+			return s.refuse(ctx, cmd.GetOrderId(), "COMPLIANCE_"+breach.Code, breach.Reason, now)
+		}
 	}
 
 	// An order that names a venue this OMS has no adapter for can NEVER be executed
@@ -390,9 +441,25 @@ func (s *Service) handleSubmit(ctx context.Context, env *envelopepb.Envelope, pa
 	// order exists, because it is not a routing detail — it is the answer to that
 	// question, and an order admitted without one is an order that will margin against
 	// whichever account its adapter happens to hold.
-	account, rej := s.resolveAccount(env.GetTenantId(), cmd.GetPortfolioId(), cmd.GetVenue())
-	if rej != nil {
-		return s.refuse(ctx, cmd.GetOrderId(), rej.Code, rej.Msg, now)
+	//
+	// A CHILD INHERITS ITS PARENT'S ANSWER RATHER THAN ASKING AGAIN (#435), and
+	// inheriting is the safer of the two, not merely the cheaper.
+	//
+	// The parent resolved this at ITS admission, under the authenticated caller's
+	// tenant. Re-resolving per child would ask under a different tenant — the
+	// driver ticks on a timer and has no inbound envelope to inherit one from —
+	// and, worse, it would ask AGAIN: a binding changed midway through a schedule
+	// would silently move the remaining slices onto different collateral than the
+	// ones already filled. One order, one collateral answer, decided once.
+	var account string
+	if parent != nil {
+		account = parent.GetVenueAccountId()
+	} else {
+		var rej *RejectError
+		account, rej = s.resolveAccount(env.GetTenantId(), cmd.GetPortfolioId(), cmd.GetVenue())
+		if rej != nil {
+			return s.refuse(ctx, cmd.GetOrderId(), rej.Code, rej.Msg, now)
+		}
 	}
 
 	// Validate + admit.
@@ -422,7 +489,42 @@ func (s *Service) handleSubmit(ctx context.Context, env *envelopepb.Envelope, pa
 	// identical on the live path and on replay — and a lookup against a live
 	// mark cache is neither. Replaying an order must not re-stamp it with today's
 	// price.
-	s.stampArrival(st)
+	//
+	// A CHILD INHERITS ITS PARENT'S MARK RATHER THAN TAKING ITS OWN (#435), AND
+	// THIS IS THE LINE THAT KEEPS TWAP HONEST.
+	//
+	// Implementation shortfall is BY DEFINITION measured against the mark at the
+	// moment somebody decided to trade. The decision to trade this quantity was
+	// made when the PARENT was admitted; a child is not a decision, it is a
+	// consequence of one. Stamping a child with the market as it stood twenty
+	// minutes into the window would benchmark it against a price that already
+	// contains the impact of the earlier slices — so every child would report
+	// roughly zero shortfall, and the parent's real cost would vanish from the
+	// measure entirely.
+	//
+	// That failure is invisible and it flatters: the platform would report that
+	// working orders on a schedule costs nothing, which is precisely the claim
+	// #435 exists to let somebody TEST. A measure that cannot show the feature
+	// failing cannot show it working either.
+	if parent != nil {
+		st.ArrivalPrice = parent.GetArrivalPrice()
+		st.ArrivalAt = parent.GetArrivalAt()
+	} else {
+		s.stampArrival(st)
+	}
+	// THE RELATION AND THE SCHEDULE COME OFF THE COMMAND, having been validated
+	// above — a parent carries a schedule and no parent id; a child carries a
+	// parent id and no schedule; validateSchedule refuses anything holding both.
+	st.ParentOrderId = cmd.GetParentOrderId()
+	st.ExecutionSchedule = cmd.GetExecutionSchedule()
+	if st.GetExecutionSchedule() != nil {
+		// A PARENT RESTS. It has passed every gate and is deliberately not going
+		// to a venue — which is why this is its own status rather than a flag on
+		// PENDING_NEW, where it would be indistinguishable from an order nothing
+		// has got to yet. work() refuses to route it; the driver works its
+		// children.
+		st.Status = orderpb.OrderStatus_ORDER_STATUS_WORKING_SCHEDULED
+	}
 	// The account is stamped by the OMS, never by the caller. A caller that could name
 	// the account could name ANY portfolio's account — it would be choosing whose
 	// collateral to spend — which is why SubmitOrder has no such field to set.
@@ -772,6 +874,22 @@ func (s *Service) noteShared(tenant, portfolio, mic, account string) {
 // router leaves the order resting. Transient routing/publish errors are
 // returned (retry); a venue that returns no fills leaves the order working.
 func (s *Service) work(ctx context.Context, st *orderpb.OrderState, ver int64) (*orderpb.OrderState, int64, error) {
+	// A SCHEDULED PARENT NEVER REACHES A VENUE (#435), and this is the one line
+	// that guarantees it.
+	//
+	// It is HERE rather than at the single call site in admission because work()
+	// has three callers — admission, resume()'s PENDING_NEW branch, and its
+	// re-drive branch — and the sweep reaches the last two for any open order it
+	// finds. A guard at admission would hold until the first pod restart, and then
+	// the sweep would route every resting parent to a venue as one whole order:
+	// the exact defect #435 exists to end, reintroduced by the machinery that
+	// exists to recover from crashes.
+	//
+	// The parent's quantity is worked by its CHILDREN, which are ordinary orders
+	// and reach a venue through this same function.
+	if st.GetStatus() == orderpb.OrderStatus_ORDER_STATUS_WORKING_SCHEDULED {
+		return st, ver, nil
+	}
 	if s.router == nil {
 		return st, ver, nil
 	}
@@ -1077,11 +1195,44 @@ func (s *Service) handleCancel(ctx context.Context, payload []byte) error {
 		}
 		return cerr
 	}
-	// Withdraw the order AT the venue before recording the cancellation. Without
-	// this the ledger calls the order CANCELLED while it is still resting — and
-	// still fillable — on the exchange. st (not next) carries the pre-cancel
-	// quantities the close intent is built from.
-	s.closeAtVenue(ctx, st, now)
+	// A WORKING PARENT IS WITHDRAWN FROM ITS CHILDREN, NOT FROM A VENUE (#435).
+	//
+	// The parent is at no venue — that is what WORKING_SCHEDULED means — so
+	// closeAtVenue would route it and send the exchange a cancel for an order it
+	// has never seen. Its quantity is at the venue in the shape of children, and
+	// those are what have to be withdrawn.
+	//
+	// THE CHILDREN GO FIRST, AND THE ORDER OF THE TWO IS THE WHOLE SAFETY
+	// ARGUMENT. If the parent were marked CANCELLED first and this failed, the
+	// operator would be told the order was withdrawn while its slices were still
+	// live and filling at an exchange — the exact lie closeAtVenue is dispatched
+	// first to avoid, one level up. Doing it this way round, a failure leaves the
+	// parent still WORKING_SCHEDULED and the cancel redelivers; and re-cancelling
+	// a child that was already cancelled is safe, because the redelivery finds it
+	// terminal and skips it.
+	//
+	// It is also why nothing is re-created behind us: the driver asks which
+	// children EXIST, and a cancelled child still exists.
+	if st.GetStatus() == orderpb.OrderStatus_ORDER_STATUS_WORKING_SCHEDULED {
+		unsent, uerr := s.cancelChildren(ctx, st, now)
+		if uerr != nil {
+			return uerr
+		}
+		// THE QUANTITY THIS CANCEL WITHDRAWS IS THE QUANTITY THAT WAS NEVER SENT.
+		//
+		// Cancel() derives it from the parent's own leaves, which is the FULL
+		// order — a parent never fills, so its aggregate never moves. Announcing
+		// that would tell every consumer that 60 units were withdrawn when 30 had
+		// already traded through children, and a fund's cancelled quantity would
+		// exceed what it ever had working.
+		cancelledQty = unsent
+	} else {
+		// Withdraw the order AT the venue before recording the cancellation.
+		// Without this the ledger calls the order CANCELLED while it is still
+		// resting — and still fillable — on the exchange. st (not next) carries
+		// the pre-cancel quantities the close intent is built from.
+		s.closeAtVenue(ctx, st, now)
+	}
 
 	// THE CANCELLATION AND ITS ANNOUNCEMENT ARE NOW ONE WRITE (#292).
 	//

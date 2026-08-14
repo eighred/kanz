@@ -1,0 +1,60 @@
+-- 0008: an order can be a slice of a parent order (#435).
+--
+-- EVERY ORDER ON THIS PLATFORM WAS SENT TO A VENUE WHOLE, SO SIZE WAS SLIPPAGE.
+-- There was no execution algorithm between the OMS and the venue: the signal
+-- fan-out splits an order by venue allocation weight, and nothing splits it over
+-- TIME. #240 is on the tracker because a pct_of_equity alert walked past a
+-- quantity cap and fanned out 1,800 BTC — as one message, to one venue.
+--
+-- #435 closes that by working a parent order as a schedule of child orders. This
+-- migration adds the one thing that relation needs from the database.
+--
+-- # Why only one column
+--
+-- The SCHEDULE is not here, and that is the design rather than an omission. It
+-- is a pure function of fields the order already carries — quantity, window,
+-- slice count — and it lives in the `state` blob with them, recomputed whenever
+-- anything needs it. A schedule table would be a second record of the same
+-- thing, able to disagree with the order it describes, and it would need a
+-- cursor: a counter advanced in the same breath as a venue message, which is
+-- exactly what no distributed system can do. Advance it first and a crash loses
+-- a child; advance it second and a crash duplicates one.
+--
+-- What has been SENT needs no record either. A child IS an order, so the
+-- children that exist are the ones that were sent, and this column is what makes
+-- that question answerable as an index scan instead of a scan of every order the
+-- fund has ever placed.
+--
+-- # Why the DEFAULT stays, unlike 0007
+--
+-- 0007 added portfolio_id and DROPPED its default, on the argument that an empty
+-- value must be distinguishable as "not recorded" — an order whose portfolio
+-- nobody wrote down is a defect worth surfacing.
+--
+-- THAT ARGUMENT DOES NOT APPLY HERE, and copying it would be wrong. Empty is not
+-- a missing parent; it is the overwhelmingly common and entirely correct state of
+-- an ordinary order that nobody sliced. There is no "not recorded" case to
+-- distinguish, so a default that supplies the true value for every pre-existing
+-- row is honest rather than concealing. This follows 0005_orders_version.sql,
+-- which keeps its default for the same reason: the value is right, not merely
+-- convenient.
+ALTER TABLE orders ADD COLUMN parent_order_id TEXT NOT NULL DEFAULT '';
+
+-- # Why the index is PARTIAL, and what that obliges the caller to do
+--
+-- tenant_id leads because RLS scopes every query by it anyway, so an index that
+-- does not start there cannot be used alone (0007's rule).
+--
+-- The predicate is what makes this index small. Almost every row on a real book
+-- has no parent, so a plain index would carry one entry per order ever placed to
+-- answer a question that only ever concerns children — on a book of a million
+-- orders with a thousand children, a thousand-fold waste.
+--
+-- THE COST OF THAT CHOICE IS THAT THE QUERY MUST CARRY THE PREDICATE TOO.
+-- Postgres will only use a partial index when it can prove the predicate holds,
+-- and it cannot prove `parent_order_id = $1` implies `parent_order_id <> ''` for
+-- a parameter it has not seen. So ListByParent spells out `AND parent_order_id
+-- <> ''`; that clause is load-bearing, not decoration, and removing it as
+-- redundant would silently turn every child lookup into a sequential scan of the
+-- whole order book on the driver's every tick.
+CREATE INDEX orders_parent_idx ON orders (tenant_id, parent_order_id) WHERE parent_order_id <> '';
