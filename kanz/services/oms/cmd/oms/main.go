@@ -36,6 +36,7 @@ import (
 	"github.com/eighred/kanz/services/oms/internal/cashview"
 	"github.com/eighred/kanz/services/oms/internal/compliance"
 	"github.com/eighred/kanz/services/oms/internal/config"
+	"github.com/eighred/kanz/services/oms/internal/costwatch"
 	"github.com/eighred/kanz/services/oms/internal/grpcsrv"
 	"github.com/eighred/kanz/services/oms/internal/order"
 	"github.com/eighred/kanz/services/oms/internal/outbox"
@@ -596,16 +597,36 @@ func runConsumers(ctx context.Context, cfg config.Config, readiness *server.Read
 		return false, err
 	}
 
+	// group is per-subscription, NOT one shared name. Two handlers on the SAME
+	// subject under the SAME durable group LOAD-BALANCE: each would receive a
+	// disjoint half of the fills. On this subject that is not a degraded report,
+	// it is a corrupt position book — the projector would fold half the fills and
+	// believe it had them all.
 	type sub struct {
 		subject string
+		group   string
 		handler bus.EventHandler
 	}
 	var subs []sub
 	for _, s := range cfg.CommandSubjects() {
-		subs = append(subs, sub{s, svc.Handle})
+		subs = append(subs, sub{s, cfg.ConsumerGroup, svc.Handle})
 	}
+	// REALIZED EXECUTION COST, PER FILL, BY VENUE (#436).
+	//
+	// A THIRD consumer of the same fill FACTs, on its own durable group so it
+	// cannot starve the position projector or the books. It only measures —
+	// nothing it computes reaches a routing or sizing decision — so a failure
+	// here costs a report, never an order.
+	//
+	// It reads the fill FACT rather than the stored order because the FEE lives
+	// only in the FACT: OrderState keeps a cumulative quantity and an average
+	// price and no fee total, and a cost measure that drops fees ranks a zero-fee
+	// venue with poor fills above a maker-rebate venue with good ones.
+	costs := costwatch.New(obs.Registry, cfg.Tenant, logger)
 	for _, s := range cfg.FillSubjects() {
-		subs = append(subs, sub{s, projector.Handle})
+		subs = append(subs, sub{s, cfg.ConsumerGroup, projector.Handle})
+		// ITS OWN GROUP, so it sees EVERY fill and takes none from the projector.
+		subs = append(subs, sub{s, cfg.ConsumerGroup + "-tca", costs.Handle})
 	}
 	// THE PRICE SPINE — BROADCAST, NOT A WORK QUEUE, for the same reason as the
 	// mandate registry below.
@@ -733,8 +754,8 @@ func runConsumers(ctx context.Context, cfg config.Config, readiness *server.Read
 		wg.Add(1)
 		go func(s sub) {
 			defer wg.Done()
-			logger.Info("oms subscribing", "subject", s.subject, "group", cfg.ConsumerGroup)
-			err := consumer.Subscribe(ctx, s.subject, cfg.ConsumerGroup, s.handler)
+			logger.Info("oms subscribing", "subject", s.subject, "group", s.group)
+			err := consumer.Subscribe(ctx, s.subject, s.group, s.handler)
 			if err != nil && !errors.Is(err, context.Canceled) {
 				once.Do(func() {
 					firstErr = err
