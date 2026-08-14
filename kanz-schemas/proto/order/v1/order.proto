@@ -78,6 +78,102 @@ message SubmitOrder {
   // the router falls back to its smart-order-routing default (best single
   // venue). Optional.
   string venue = 12;
+
+  // execution_schedule asks for this order to be WORKED OVER TIME rather than
+  // sent to a venue whole (#435). Optional; unset ⇒ the order is sent whole,
+  // which is what every order on this platform did before it existed.
+  //
+  // WHEN SET, THE ORDER ITSELF NEVER REACHES A VENUE. It is admitted, checked
+  // for entitlement and compliance exactly as any other order, and then RESTS at
+  // ORDER_STATUS_WORKING_SCHEDULED while child orders derived from it are
+  // submitted on the schedule. The parent is a container for the decision; the
+  // children are what trade.
+  ExecutionSchedule execution_schedule = 13;
+
+  // parent_order_id names the working parent this order is a slice of (#435).
+  // Optional; unset ⇒ an ordinary order somebody asked for directly.
+  //
+  // SET ONLY BY THE PLATFORM, NEVER BY A CLIENT. It is on the command because
+  // children are admitted through the ordinary command path — one admission
+  // implementation, not a second one for slices — and the child has to carry the
+  // relation in the same message that creates it. A client that sets it is
+  // claiming its order is a slice of somebody else's, which admission refuses.
+  //
+  // The child's own order_id is DERIVED from this and its slice index, so the
+  // slice number is recoverable from the id and is deliberately not a second
+  // field that could disagree with it.
+  string parent_order_id = 14;
+}
+
+// ExecutionAlgo names the algorithm that turns a parent order into a schedule of
+// child orders (#435).
+enum ExecutionAlgo {
+  // Default zero value; never set explicitly. An ExecutionSchedule carrying it
+  // is REFUSED at admission rather than defaulted to any algorithm: "work this
+  // order somehow" is not an instruction anybody can be held to, and picking one
+  // silently would put a schedule nobody chose in front of a venue.
+  EXECUTION_ALGO_UNSPECIFIED = 0;
+
+  // Time-weighted average price: equal quantity at equal intervals across the
+  // window, indifferent to volume and to price.
+  //
+  // IT IS FIRST BECAUSE IT IS PROVABLE. TWAP's expected output is a closed-form
+  // value — N equal slices at N equal times — so the platform can assert exactly
+  // what it will do before it does it. Every other algorithm's output is a
+  // distribution, and a distribution cannot be asserted against a venue that
+  // does not exist yet.
+  EXECUTION_ALGO_TWAP = 1;
+}
+
+// ExecutionSchedule is HOW a parent order is worked (#435).
+//
+// EVERY FIELD HERE IS AN INPUT TO A PURE FUNCTION, and that is the design rather
+// than an accident. The schedule is never stored: it is recomputed from these
+// fields — which the order already persists — every time anything needs it. So a
+// pod that has just booted derives byte-identical children to the pod it
+// replaced, and there is no schedule state to be lost in between.
+//
+// The alternative, a stored schedule with a cursor, is the failure this shape
+// exists to avoid: a counter that must be advanced in the same breath as a venue
+// message. Advance it first and a crash loses a child; advance it second and a
+// crash duplicates one. Nothing can do both atomically, so nothing here counts.
+message ExecutionSchedule {
+  // algo selects the algorithm. Required; must not be
+  // EXECUTION_ALGO_UNSPECIFIED.
+  ExecutionAlgo algo = 1;
+
+  // window_start and window_end bound the period the order is worked over. Both
+  // required; window_end MUST be strictly after window_start.
+  //
+  // A ZERO-LENGTH WINDOW IS REFUSED, NOT READ AS "SEND IT ALL NOW". The two are
+  // opposite instructions, and defaulting to the second is how an order that
+  // somebody asked to be worked carefully goes to a venue in one message.
+  google.protobuf.Timestamp window_start = 2;
+  google.protobuf.Timestamp window_end = 3;
+
+  // slice_count is how many child orders the parent is worked as. Required;
+  // strictly positive.
+  //
+  // The children divide the parent's quantity EXACTLY — as rationals, not as
+  // rounded decimals — so they sum to the parent with no remainder. A schedule
+  // that loses a remainder leaves a parent resting part-filled forever, with no
+  // child left to send and nothing raising an error.
+  uint32 slice_count = 4;
+
+  // max_slice_quantity caps any single child. Optional; unset ⇒ uncapped.
+  //
+  // IT IS A SIZE, NOT A FRACTION OF VOLUME, and the distinction is deliberate. A
+  // true participation cap is a fraction of the volume that trades WHILE the
+  // order works, which is not knowable when the schedule is computed — it is
+  // knowable per bar, at send time, and that is a different algorithm. What this
+  // bounds is the largest single message the platform will put in front of a
+  // venue.
+  //
+  // A schedule whose slices would exceed it is REFUSED WHOLE at admission,
+  // naming the slice count that would honour it. Trimming each child would leave
+  // the remainder unworked; raising the slice count silently would run a
+  // schedule nobody chose, at a message rate the operator never sized for.
+  common.v1.Decimal max_slice_quantity = 5;
 }
 
 // AmendOrder requests a change to a resting order's quantity and/or limit

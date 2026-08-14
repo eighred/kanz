@@ -97,12 +97,13 @@ func (p *Postgres) Create(ctx context.Context, st *orderpb.OrderState, announce 
 	defer func() { _ = tx.Rollback(ctx) }() // no-op after a successful Commit
 
 	// portfolio_id is denormalized out of the blob (#399), like order_id and
-	// status before it. The blob stays authoritative; this is an index key.
+	// status before it, and parent_order_id joins them (#435). The blob stays
+	// authoritative; these are index keys.
 	tag, err := tx.Exec(ctx, `
-		INSERT INTO orders (tenant_id, order_id, status, state, portfolio_id)
-		VALUES (current_setting('app.tenant_id'), $1, $2, $3, $4)
+		INSERT INTO orders (tenant_id, order_id, status, state, portfolio_id, parent_order_id)
+		VALUES (current_setting('app.tenant_id'), $1, $2, $3, $4, $5)
 		ON CONFLICT (tenant_id, order_id) DO NOTHING
-	`, st.GetOrderId(), int32(st.GetStatus()), blob, st.GetPortfolioId())
+	`, st.GetOrderId(), int32(st.GetStatus()), blob, st.GetPortfolioId(), st.GetParentOrderId())
 	if err != nil {
 		return fmt.Errorf("create order %s: %w", st.GetOrderId(), err)
 	}
@@ -204,14 +205,15 @@ func (p *Postgres) Save(ctx context.Context, st *orderpb.OrderState, expectedVer
 // exact text; a second copy is how the pool path and the transaction path would
 // come to disagree about what a conflict is.
 const saveSQL = `
-	INSERT INTO orders (tenant_id, order_id, status, state, portfolio_id)
-	VALUES (current_setting('app.tenant_id'), $1, $2, $3, $5)
+	INSERT INTO orders (tenant_id, order_id, status, state, portfolio_id, parent_order_id)
+	VALUES (current_setting('app.tenant_id'), $1, $2, $3, $5, $6)
 	ON CONFLICT (tenant_id, order_id) DO UPDATE SET
-		status       = EXCLUDED.status,
-		state        = EXCLUDED.state,
-		portfolio_id = EXCLUDED.portfolio_id,
-		version      = orders.version + 1,
-		updated_at   = now()
+		status          = EXCLUDED.status,
+		state           = EXCLUDED.state,
+		portfolio_id    = EXCLUDED.portfolio_id,
+		parent_order_id = EXCLUDED.parent_order_id,
+		version         = orders.version + 1,
+		updated_at      = now()
 	WHERE orders.version = $4
 `
 
@@ -227,12 +229,13 @@ type execer interface {
 // and the version advanced, 0 ⇒ somebody else moved the order since this caller
 // read it and applying this write would discard their transition.
 func (p *Postgres) cas(ctx context.Context, db execer, st *orderpb.OrderState, blob []byte, expectedVersion int64) error {
-	// EVERY SAVE REWRITES portfolio_id, which is what backfills a pre-0007 order
-	// the moment anything touches it: the column is derived from the blob, and the
-	// blob is in hand here. It cannot drift, because there is no path that writes
-	// state without writing this.
+	// EVERY SAVE REWRITES portfolio_id AND parent_order_id, which is what backfills
+	// a pre-0007 or pre-0008 order the moment anything touches it: the columns are
+	// derived from the blob, and the blob is in hand here. They cannot drift,
+	// because there is no path that writes state without writing these.
 	tag, err := db.Exec(ctx, saveSQL,
-		st.GetOrderId(), int32(st.GetStatus()), blob, expectedVersion, st.GetPortfolioId())
+		st.GetOrderId(), int32(st.GetStatus()), blob, expectedVersion,
+		st.GetPortfolioId(), st.GetParentOrderId())
 	if err != nil {
 		return fmt.Errorf("save order %s: %w", st.GetOrderId(), err)
 	}
@@ -404,6 +407,59 @@ func (p *Postgres) ListByStatus(ctx context.Context, statuses ...orderpb.OrderSt
 		)
 		if err := rows.Scan(&id, &blob); err != nil {
 			return nil, fmt.Errorf("scan order: %w", err)
+		}
+		st, err := unmarshalState(blob, id)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, st)
+	}
+	return out, rows.Err()
+}
+
+// ListByParent returns the children of one working parent order (#435).
+//
+// THE `parent_order_id <> ''` CLAUSE IS LOAD-BEARING, NOT REDUNDANT. It is
+// implied by the equality above it for any non-empty parameter, and a reader
+// tidying it away would be right about the logic and wrong about the plan:
+// orders_parent_idx is a PARTIAL index carrying that predicate
+// (migrations/0008_orders_parent.sql), and Postgres will only choose a partial
+// index when it can PROVE the predicate holds. It cannot prove anything about a
+// parameter it has not seen, so without this clause every driver tick becomes a
+// sequential scan of the entire order book.
+//
+// The index is partial because almost every order on a real book has no parent;
+// a plain index would carry one entry per order ever placed to answer a question
+// that only ever concerns children.
+//
+// The empty parent is refused BEFORE the query, not by it. '' is the value on
+// every ordinary order, so a literal answer would be the fund's whole order
+// history handed to a caller that has lost track of which parent it meant.
+//
+// RLS scopes the read; no tenant predicate is written here, for the same reason
+// List and Load write none.
+func (p *Postgres) ListByParent(ctx context.Context, parentID string) ([]*orderpb.OrderState, error) {
+	if parentID == "" {
+		return nil, nil
+	}
+	rows, err := p.pool.Query(ctx, `
+		SELECT order_id, state FROM orders
+		WHERE parent_order_id = $1 AND parent_order_id <> ''
+		ORDER BY order_id
+	`, parentID)
+	if err != nil {
+		return nil, fmt.Errorf("list children of order %s: %w", parentID, err)
+	}
+	defer rows.Close()
+
+	var out []*orderpb.OrderState
+	for rows.Next() {
+		var (
+			id   string
+			blob []byte
+		)
+		if err := rows.Scan(&id, &blob); err != nil {
+			return nil, fmt.Errorf("scan child order: %w", err)
 		}
 		st, err := unmarshalState(blob, id)
 		if err != nil {

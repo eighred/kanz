@@ -149,6 +149,16 @@ func statusString(s orderpb.OrderStatus) string {
 		return "rejected"
 	case orderpb.OrderStatus_ORDER_STATUS_EXPIRED:
 		return "expired"
+	case orderpb.OrderStatus_ORDER_STATUS_WORKING_SCHEDULED:
+		// A PARENT BEING WORKED AS A SCHEDULE (#435). Distinct from "working",
+		// which means ROUTED — resting at a venue. This order is at no venue at
+		// all; its children are.
+		//
+		// Without this case it fell to "unspecified", which is the one answer that
+		// must never be given for a state the platform knows perfectly well: an
+		// operator reading this projection would see a live parent order in an
+		// unknown state and have no way to tell it from a decode failure.
+		return "scheduled"
 	default:
 		return "unspecified"
 	}

@@ -162,6 +162,26 @@ type Store interface {
 	// carries orders_status_idx on (tenant_id, status) for exactly this.
 	// Passing no statuses returns nothing.
 	ListByStatus(ctx context.Context, statuses ...orderpb.OrderStatus) ([]*orderpb.OrderState, error)
+
+	// ListByParent returns the children of one working parent order (#435).
+	//
+	// IT IS HOW THE SCHEDULE DRIVER KNOWS WHAT IT HAS ALREADY SENT, and it is a
+	// query rather than a counter for a reason worth restating: a counter would
+	// have to be advanced in the same breath as creating a child, which nothing
+	// can do atomically. Advance it first and a crash loses a slice; advance it
+	// second and a crash duplicates one. A child IS an order, so the children
+	// that exist are exactly the ones that were sent, and asking is always right.
+	//
+	// It must be answered by a SELECTION, never a scan —
+	// migrations/0008_orders_parent.sql carries orders_parent_idx for it, and
+	// that index is PARTIAL, so a durable backend's query must repeat the
+	// predicate or fall back to scanning the whole book on every driver tick.
+	//
+	// An empty parentID returns nothing rather than every unparented order: ""
+	// is the value on every ordinary order in the book, and answering it
+	// literally would return the entire order history to a caller that has
+	// almost certainly lost track of which parent it meant.
+	ListByParent(ctx context.Context, parentID string) ([]*orderpb.OrderState, error)
 }
 
 // versioned couples an order's state to its version.
@@ -334,6 +354,28 @@ func (m *MemoryStore) ListByStatus(_ context.Context, statuses ...orderpb.OrderS
 	var out []*orderpb.OrderState
 	for _, v := range m.orders {
 		if want[v.st.GetStatus()] {
+			out = append(out, proto.Clone(v.st).(*orderpb.OrderState))
+		}
+	}
+	return out, nil
+}
+
+// ListByParent filters the map (#435).
+//
+// THE EMPTY PARENT RETURNS NOTHING, matching Postgres — not because this store
+// could not answer it, but because a seam that answered a question the durable
+// store refuses would certify behaviour production does not have. Here "" would
+// return every ordinary order in the book, which is the opposite of what any
+// caller asking for a parent's children could possibly want.
+func (m *MemoryStore) ListByParent(_ context.Context, parentID string) ([]*orderpb.OrderState, error) {
+	if parentID == "" {
+		return nil, nil
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	var out []*orderpb.OrderState
+	for _, v := range m.orders {
+		if v.st.GetParentOrderId() == parentID {
 			out = append(out, proto.Clone(v.st).(*orderpb.OrderState))
 		}
 	}
