@@ -1040,7 +1040,8 @@ func (s *Service) handleCancel(ctx context.Context, payload []byte) error {
 		return s.outcomeReject(ctx, cmd.GetOrderId(), "ORDER_QUARANTINED", fmt.Sprintf(
 			"order is frozen: the platform could not establish what the venue did with it, so "+
 				"acting on it now would be a guess. It must be resolved against the venue's own "+
-				"order history before it can be cancelled. quarantine reason: %s", q.GetReason()), now)
+				"order history before it can be cancelled. quarantine reason: %s (frozen %s ago, at %s)",
+			q.GetReason(), quarantineAge(q, now), q.GetAt().AsTime().UTC().Format(time.RFC3339)), now)
 	}
 	// AN ALREADY-CANCELLED ORDER IS NOT AUTOMATICALLY A DUPLICATE.
 	//
@@ -1308,7 +1309,8 @@ func (s *Service) handleAmend(ctx context.Context, payload []byte) error {
 		return s.outcomeReject(ctx, cmd.GetOrderId(), "ORDER_QUARANTINED", fmt.Sprintf(
 			"order is frozen: the platform could not establish what the venue did with it, so "+
 				"acting on it now would be a guess. It must be resolved against the venue's own "+
-				"order history before it can be amended. quarantine reason: %s", q.GetReason()), now)
+				"order history before it can be amended. quarantine reason: %s (frozen %s ago, at %s)",
+			q.GetReason(), quarantineAge(q, now), q.GetAt().AsTime().UTC().Format(time.RFC3339)), now)
 	}
 	next, aerr := Amend(st, &cmd, now)
 	if aerr != nil {
@@ -2036,4 +2038,40 @@ func (s *Service) quarantine(ctx context.Context, st *orderpb.OrderState, ver in
 		return err
 	}
 	return nil
+}
+
+// quarantineAge is how long an order has been frozen, rendered for the refusal an
+// operator actually reads.
+//
+// OrderQuarantine.at is documented Required and — like its sibling last_query_at,
+// whose own comment says it exists "so an operator can tell a fresh contradiction
+// from a stale one" — nothing read it back. So a cancel refused on an order
+// frozen thirty seconds ago and one frozen three weeks ago produced the SAME
+// message.
+//
+// The difference is the whole triage. A freeze minutes old is probably the
+// incident in progress; one weeks old is a position whose true size nobody has
+// established since, sitting in a book that has been traded around it. The
+// refusal already carries the reason precisely "so the operator does not need a
+// second lookup" — the age is the other half of that sentence.
+//
+// An UNSET at yields "unknown", never a duration from the epoch. A quarantine
+// whose timestamp the producer never set would otherwise report itself as
+// fifty-six years old, which is worse than saying nothing: it is a number, and
+// numbers get believed.
+func quarantineAge(q *orderpb.OrderQuarantine, now time.Time) string {
+	if q.GetAt() == nil {
+		return "unknown"
+	}
+	at := q.GetAt().AsTime().UTC()
+	if at.IsZero() {
+		return "unknown"
+	}
+	d := now.UTC().Sub(at)
+	if d < 0 {
+		// A freeze stamped in the future — a clock skew between pods. Saying so is
+		// better than rendering a negative age an operator has to interpret.
+		return "unknown (stamped in the future)"
+	}
+	return d.Round(time.Second).String()
 }
