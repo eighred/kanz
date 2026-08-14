@@ -348,11 +348,27 @@ func runEngine(ctx context.Context, cfg config.Config, readiness *server.Readine
 	// intraday cadence; a failed calibration deny-on-garbages (prior curve keeps
 	// serving). Auxiliary to core risk ingest — a market-subscription failure
 	// degrades calibration (no fresh curve), it does not bring the engine down.
+	// WHICH CALIBRATIONS ARE ACTUALLY RUNNING (#113).
+	//
+	// This service implements three — curve, volsurface and credit — and
+	// schedules at most ONE. "calibration scheduler enabled" reads as though
+	// calibration is on; it says nothing about the two that are built, tested and
+	// idle, and a surface nobody refreshes prices a position exactly like a fresh
+	// one.
+	//
+	// STATED HERE RATHER THAN INSIDE startCalibration, because the case that
+	// matters most is the one where startCalibration is never called at all: with
+	// calibration disabled the old code said nothing whatsoever, so "no curve
+	// either" was indistinguishable from a healthy service.
+	scheduledCalibrations := map[string]string{}
 	if cfg.CalibrationInterval > 0 && cfg.CalibrationRates != "" {
 		if err := startCalibration(ctx, cfg, client, busMetrics, logger); err != nil {
 			logger.Error("calibration scheduler disabled", "err", err)
+		} else {
+			scheduledCalibrations["curve"] = "rates"
 		}
 	}
+	app.CalibrationPosture(obs.Registry, logger, scheduledCalibrations)
 
 	// Risk query gRPC server (API-01b): a read surface over the concrete
 	// EngineImpl, sharing the live store + cache + registry. Started only when
