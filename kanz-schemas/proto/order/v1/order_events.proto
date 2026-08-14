@@ -538,4 +538,26 @@ message TransactionCostRecorded {
   // an old fill, and a reader comparing venues over a window needs to know which
   // clock it is looking at.
   google.protobuf.Timestamp measured_at = 12;
+
+  // arrival_at and executed_at bound the interval this fill was worked over:
+  // when the benchmark mark was observed, and when the venue executed.
+  //
+  // THEY ARE THE VWAP WINDOW, and without them this record cannot be joined to a
+  // bar series at all. Implementation shortfall answers "what did the decision
+  // cost"; slippage against interval VWAP answers the separate question "did we
+  // trade worse than the market did over the same window" — and an order can
+  // beat arrival because the market moved in its favour while still being worked
+  // worse than every other participant.
+  //
+  // THIS RECORD SHIPPED WITHOUT THEM, which is the same defect one layer over:
+  // a value present upstream (OrderState.arrival_at, Fill.executed_at) and
+  // dropped at a boundary, exactly as stop_price, expire_at and leverage were.
+  // A consumer holding only measured_at knows when the measurement ran and
+  // nothing about the market it should be compared against.
+  //
+  // Both are UNSET when their source was — an order admitted with no usable mark
+  // has no arrival_at, and unset is not the epoch. A consumer must skip that
+  // window rather than compute a VWAP from 1970.
+  google.protobuf.Timestamp arrival_at = 13;
+  google.protobuf.Timestamp executed_at = 14;
 }

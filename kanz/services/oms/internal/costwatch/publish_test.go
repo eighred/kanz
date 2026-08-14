@@ -25,9 +25,11 @@ import (
 	"log/slog"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/types/known/timestamppb"
 
 	commonpb "github.com/eighred/kanz/kanz-schemas-go/common/v1"
 	envelopepb "github.com/eighred/kanz/kanz-schemas-go/envelope/v1"
@@ -157,5 +159,98 @@ func TestCostRecordIsAValidFactEnvelope(t *testing.T) {
 	// nobody can add to another venue's.
 	if rec.GetFee().GetCurrencyCode() != "USD" {
 		t.Errorf("fee currency = %q, want USD", rec.GetFee().GetCurrencyCode())
+	}
+}
+
+// THE VWAP WINDOW SURVIVES TO THE RECORD.
+//
+// Implementation shortfall answers "what did the decision cost". Slippage against
+// interval VWAP answers the separate question "did we trade worse than the market
+// did over the same window" — and an order can beat arrival because the market
+// moved in its favour while still being worked worse than every other
+// participant. Only the second measure sees that, and it cannot be computed at
+// all without the interval.
+//
+// This record shipped without the window, which is the same defect one layer
+// over: a value present upstream and dropped at a boundary, exactly as
+// stop_price, expire_at and leverage were.
+func TestCostRecordCarriesTheVWAPWindow(t *testing.T) {
+	cc := &captureClient{}
+	prod, err := bus.NewProducer(cc, bus.ProducerConfig{
+		Source: "oms", ProducerVersion: "test", Tenant: "acme",
+	})
+	if err != nil {
+		t.Fatalf("NewProducer: %v", err)
+	}
+	w := costwatch.New(prometheus.NewRegistry(), "acme", prod, nil, slog.New(slog.DiscardHandler))
+
+	arrival := time.Date(2026, 8, 1, 11, 59, 30, 0, time.UTC)
+	executed := time.Date(2026, 8, 1, 12, 0, 15, 0, time.UTC)
+	b, err := proto.Marshal(&orderpb.OrderFilled{
+		OrderId: "o-1",
+		Fill: &orderpb.Fill{
+			FillId: "f-1", OrderId: "o-1", InstrumentId: "BTC-USD", Venue: "XBIN",
+			Side: orderpb.Side_SIDE_BUY, Quantity: d(10, 0), Price: d(110, 0),
+			ExecutedAt: timestamppb.New(executed),
+		},
+		State: &orderpb.OrderState{
+			OrderId: "o-1", InstrumentId: "BTC-USD", Venue: "XBIN",
+			Side: orderpb.Side_SIDE_BUY, ArrivalPrice: d(100, 0),
+			ArrivalAt: timestamppb.New(arrival),
+		},
+	})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if err := w.Handle(context.Background(),
+		&envelopepb.Envelope{EventId: "e-1", EventType: costwatch.EventTypeFilled, TenantId: "acme"},
+		b); err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+
+	_, payload, err := bus.Unframe(cc.messages()[0].Body)
+	if err != nil {
+		t.Fatalf("unframe: %v", err)
+	}
+	var rec orderpb.TransactionCostRecorded
+	if err := proto.Unmarshal(payload, &rec); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if rec.GetArrivalAt() == nil || !rec.GetArrivalAt().AsTime().Equal(arrival) {
+		t.Errorf("arrival_at = %v, want %v — without the window start nothing can select the "+
+			"bars this fill should be compared against", rec.GetArrivalAt().AsTime(), arrival)
+	}
+	if rec.GetExecutedAt() == nil || !rec.GetExecutedAt().AsTime().Equal(executed) {
+		t.Errorf("executed_at = %v, want %v", rec.GetExecutedAt().AsTime(), executed)
+	}
+}
+
+// AN ABSENT WINDOW STAYS ABSENT. An order admitted with no usable mark has no
+// arrival_at, and the epoch is not a window — a consumer must skip it rather than
+// compute a VWAP from 1970.
+func TestCostRecordLeavesAnAbsentWindowUnset(t *testing.T) {
+	cc := &captureClient{}
+	prod, _ := bus.NewProducer(cc, bus.ProducerConfig{
+		Source: "oms", ProducerVersion: "test", Tenant: "acme",
+	})
+	w := costwatch.New(prometheus.NewRegistry(), "acme", prod, nil, slog.New(slog.DiscardHandler))
+
+	// filledFact carries no ArrivalAt and no ExecutedAt.
+	if err := w.Handle(context.Background(),
+		&envelopepb.Envelope{EventId: "e-2", EventType: costwatch.EventTypeFilled, TenantId: "acme"},
+		filledFact(t)); err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	_, payload, err := bus.Unframe(cc.messages()[0].Body)
+	if err != nil {
+		t.Fatalf("unframe: %v", err)
+	}
+	var rec orderpb.TransactionCostRecorded
+	if err := proto.Unmarshal(payload, &rec); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if rec.GetArrivalAt() != nil {
+		t.Errorf("arrival_at = %v for an order that had none — an epoch timestamp reads as a "+
+			"real window and would be joined against 1970's bars", rec.GetArrivalAt().AsTime())
 	}
 }
