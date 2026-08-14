@@ -504,7 +504,7 @@ var retryCertifiedConsumers = map[string]string{
 		"unconditional last-write-wins UPSERT keyed on household_id. Re-running it with the " +
 		"same composition is a no-op change; there is no dedup branch to skip through.",
 
-	"services/oms/cmd/oms/main.go:594": "oms: dispatches handleSubmit, handleCancel, handleAmend " +
+	"services/oms/cmd/oms/main.go:595": "oms: dispatches handleSubmit, handleCancel, handleAmend " +
 		"(order.Service.Handle) and position.Projector.Handle (fills), re-derived fresh against " +
 		"250fe00 rather than assumed fixed — see .superpowers/sdd/oms-recert-report.md for the " +
 		"full per-failure-point walk. handleSubmit: every failure point after store.Create either " +
