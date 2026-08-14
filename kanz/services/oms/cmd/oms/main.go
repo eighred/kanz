@@ -554,6 +554,11 @@ func runConsumers(ctx context.Context, cfg config.Config, readiness *server.Read
 			"to pick one", "venues", strings.Join(micsOf(venues), ","))
 	}
 	svc, err := order.NewService(cfg.Tenant, store, emitter, gate, router, closeRegistry, logger,
+		// The decision-time benchmark for every admitted order (#436). The same
+		// mark fold the pre-trade gate values MARKET/STOP orders against — one
+		// price source, so a cost measure and a compliance check can never
+		// disagree about what the market showed.
+		order.WithArrivalMarks(marks),
 		order.WithAccountBindings(bindings, cfg.RequireVenueAccount, sharedCollateral),
 		order.WithQuarantineCounter(quarantined),
 		order.WithClaimTimeoutCounter(claimTimeouts),

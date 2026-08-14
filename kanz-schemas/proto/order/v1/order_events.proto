@@ -109,6 +109,36 @@ message OrderState {
   // over.
   google.protobuf.Timestamp expire_at = 22;
 
+  // arrival_price is the reference mark for this instrument AT ADMISSION, and
+  // arrival_at is when that mark was observed (#436).
+  //
+  // THIS IS THE ONE TCA INPUT THAT CANNOT BE RECONSTRUCTED LATER, which is why
+  // it is stamped before anything measures it. Transaction-cost analysis
+  // compares what an order actually paid against what the market showed when the
+  // decision was made; a mark read at analysis time is a mark from AFTER the
+  // order moved the market. That does not merely add noise — it biases every
+  // measure flatter, always in the flattering direction, and a cost number that
+  // understates cost is worse than no cost number because it will be believed.
+  //
+  // So every order admitted without this is permanently unmeasurable. The damage
+  // is retroactive in the same way #432's trade_count was: nothing reads this
+  // field today, and the orders being admitted now are the history the first TCA
+  // report will be computed over.
+  //
+  // BOTH FIELDS ARE UNSET WHEN NO MARK WAS AVAILABLE, and unset is not zero. A
+  // zero arrival price makes implementation shortfall infinite or nonsensical
+  // depending on which way it is divided, and "we could not see the market"
+  // is a real, common state — a thinly-quoted instrument, a cold start before
+  // the price spine has delivered, a mark aged out past OMS_PRICE_MAX_AGE. A
+  // consumer must skip those orders, not score them as zero-cost.
+  //
+  // arrival_at is carried separately rather than assumed equal to accepted_at:
+  // the mark has its own observation time, and the GAP between them is itself a
+  // cost input — an order priced against a mark from thirty seconds ago is
+  // measured against a market that has already moved.
+  common.v1.Decimal arrival_price = 23;
+  google.protobuf.Timestamp arrival_at = 24;
+
   // status is the current lifecycle state. Required; must not be
   // ORDER_STATUS_UNSPECIFIED.
   OrderStatus status = 9;
