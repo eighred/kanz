@@ -419,7 +419,7 @@ func (p *Postgres) ListByStatus(ctx context.Context, statuses ...orderpb.OrderSt
 
 // ListByParent returns the children of one working parent order (#435).
 //
-// THE `parent_order_id <> ''` CLAUSE IS LOAD-BEARING, NOT REDUNDANT. It is
+// THE `parent_order_id <> ”` CLAUSE IS LOAD-BEARING, NOT REDUNDANT. It is
 // implied by the equality above it for any non-empty parameter, and a reader
 // tidying it away would be right about the logic and wrong about the plan:
 // orders_parent_idx is a PARTIAL index carrying that predicate
@@ -432,7 +432,7 @@ func (p *Postgres) ListByStatus(ctx context.Context, statuses ...orderpb.OrderSt
 // a plain index would carry one entry per order ever placed to answer a question
 // that only ever concerns children.
 //
-// The empty parent is refused BEFORE the query, not by it. '' is the value on
+// The empty parent is refused BEFORE the query, not by it. ” is the value on
 // every ordinary order, so a literal answer would be the fund's whole order
 // history handed to a caller that has lost track of which parent it meant.
 //
