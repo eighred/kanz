@@ -193,7 +193,7 @@ func (w *Watch) Handle(ctx context.Context, env *envelopepb.Envelope, payload []
 	// something that changes nothing, on the consumer real fills arrive on. The
 	// loss is one row of a cost report, and it is counted so the gap is visible
 	// rather than assumed.
-	if err := w.publish(ctx, fill, res); err != nil {
+	if err := w.publish(ctx, fill, state, res); err != nil {
 		w.unmeasurable.WithLabelValues(venue, "publish_failed").Inc()
 		w.logger.Error("costwatch: cost measured but not recorded — the metric moved and the FACT "+
 			"did not, so a venue comparison over a long window will be short by this fill",
@@ -275,7 +275,7 @@ func reasonOf(err error) string {
 // exponent is not something to write down approximately — a cost report is read
 // as authoritative, and a rounded basis-point figure is how a venue comparison
 // gets decided by the fourth decimal.
-func (w *Watch) publish(ctx context.Context, fill *orderpb.Fill, r tca.Result) error {
+func (w *Watch) publish(ctx context.Context, fill *orderpb.Fill, st *orderpb.OrderState, r tca.Result) error {
 	if w.bus == nil {
 		return nil // no bus wired: the metrics still work, which is the dev posture
 	}
@@ -302,6 +302,13 @@ func (w *Watch) publish(ctx context.Context, fill *orderpb.Fill, r tca.Result) e
 		ShortfallBps:      sf,
 		PriceShortfallBps: psf,
 		MeasuredAt:        timestamppb.New(w.now().UTC()),
+		// THE VWAP WINDOW. Copied straight through rather than re-derived: both
+		// are already exact upstream, and a consumer holding only measured_at
+		// knows when the measurement ran and nothing about the market it should
+		// be compared against. Unset stays unset — an order admitted with no
+		// usable mark has no arrival_at, and the epoch is not a window.
+		ArrivalAt:  st.GetArrivalAt(),
+		ExecutedAt: fill.GetExecutedAt(),
 	}
 	return w.bus.Publish(ctx, bus.Event{
 		Subject:       EventTypeCostRecorded,
