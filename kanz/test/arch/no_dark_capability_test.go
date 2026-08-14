@@ -72,6 +72,13 @@ var darkPackageExempt = map[string]string{
 	"internal/regulatory/stress": "#471 (Source section) — the REG-01c CCAR/DFAST firmwide stress " +
 		"framework, in the same unwired state as the validation gate and recorded there rather " +
 		"than filed separately. Worth its own issue if it is picked up independently.",
+	"internal/execution/algo": "#435 — the TWAP scheduler. #435 sequences itself deliberately: the " +
+		"schedule first, because it is the half whose correctness can be proved closed-form " +
+		"(conservation and the cap, with no venue and no clock), and the parent/child order " +
+		"relation second, because it is a capital-path change. What wires this is that relation — " +
+		"a parent resting in WORKING_SCHEDULED while the sweep emits its due children. Until then " +
+		"NO ORDER'S BEHAVIOUR HAS CHANGED: every order still goes to its venue whole, which is " +
+		"#435's complaint and remains true. This entry is what stops that reading as done.",
 }
 
 func TestNoInternalCapabilityIsDarkAndUntracked(t *testing.T) {

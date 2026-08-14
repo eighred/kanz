@@ -1,0 +1,183 @@
+// Package algo works a parent order as a schedule of child orders (#435).
+//
+// # The gap this closes
+//
+// Every order on this platform is sent to a venue WHOLE. The signal fan-out
+// splits by venue allocation weight — a 60/40 split of a 100 BTC signal is two
+// orders, not two hundred slices — and nothing between the OMS and the venue
+// slices a parent over time. So SIZE IS SLIPPAGE: the platform computes market
+// impact in internal/risk/liquidity and the execution path cannot act on it.
+//
+// #240 is on the tracker because a pct_of_equity alert walked past a quantity cap
+// and fanned out 1,800 BTC. That order would have gone to one venue in one
+// message.
+//
+// # The schedule is DERIVED, never stored
+//
+// #435 names the trap directly: "An algo that keeps its schedule in memory turns
+// a pod restart into an abandoned parent order with children half-sent … The
+// schedule must be durable from slice 1, or slice 1 is not done."
+//
+// The answer here is not a schedule table. Plan is a pure function of fields the
+// parent order ALREADY stores durably — quantity, window, slice count — so the
+// schedule is recomputed identically on every pod, on every restart, forever.
+// There is no in-memory schedule to lose, and no second store to fall out of
+// sync with the order.
+//
+// What has actually been SENT is durable too, and separately: a child is an
+// order, and the orders that exist are the ones that were sent. So "where are
+// we" is answered by the order store rather than by a cursor somebody has to
+// keep.
+//
+// # Deterministic, and therefore provable without a venue
+//
+// Same inputs, same schedule, every time — no clock read inside, no randomness,
+// no venue. That is what lets this be asserted closed-form, which is why #435
+// sequences TWAP first: it is the one algo whose expected output is an exact
+// value rather than a distribution.
+package algo
+
+import (
+	"errors"
+	"fmt"
+	"math/big"
+	"time"
+)
+
+var (
+	// ErrEmptyQuantity rejects a plan with nothing to work.
+	ErrEmptyQuantity = errors.New("algo: total quantity must be positive")
+	// ErrEmptyWindow rejects a window that does not move forward. A zero-length
+	// window is not "send it all now" — it is a schedule nobody specified, and
+	// guessing which they meant is how a 1,800 BTC order goes out in one message.
+	ErrEmptyWindow = errors.New("algo: the working window must end after it starts")
+	// ErrNoSlices rejects a plan with no slices.
+	ErrNoSlices = errors.New("algo: slice count must be positive")
+	// ErrCapUnsatisfiable is returned when the requested slice count cannot honour
+	// the participation cap. See Plan.MaxSlice.
+	ErrCapUnsatisfiable = errors.New("algo: slice count cannot honour the participation cap")
+)
+
+// Plan is everything needed to work a parent order, and every field of it lives
+// on the parent order durably. Nothing here is state.
+type Plan struct {
+	// Total is the parent's ordered quantity — the amount the children must sum
+	// to exactly.
+	Total *big.Rat
+
+	// Start and End bound the working window. Slice i is due at
+	// Start + i·(End−Start)/Slices, so the FIRST slice is due at Start.
+	Start, End time.Time
+
+	// Slices is how many children the parent is worked as.
+	Slices int
+
+	// MaxSlice caps any single child's quantity — the participation cap in its
+	// schedule-time form. Nil means uncapped.
+	//
+	// IT IS A SIZE, NOT A FRACTION OF VOLUME, and that is a deliberate limitation
+	// stated rather than hidden. A true participation cap is a fraction of the
+	// volume that trades WHILE the order works, which is not knowable when the
+	// schedule is computed — it is knowable per bar, at send time, and that is
+	// POV (#435's slice 3), not TWAP. What this bounds is the largest single
+	// message this platform will put in front of a venue, which is the half that
+	// can be decided in advance and the half #240 needed.
+	MaxSlice *big.Rat
+}
+
+// Slice is one child order: how much, and when it becomes due.
+type Slice struct {
+	Index    int
+	Due      time.Time
+	Quantity *big.Rat
+}
+
+// TWAP divides the parent evenly across the window.
+//
+// EVENLY IN QUANTITY, EVENLY IN TIME, and exactly — every slice is Total/Slices
+// as an exact rational, so the children sum to Total with no remainder to lose.
+// That matters more than it looks: a schedule that divides 10 into 3 and rounds
+// each child leaves 0.0000001 unworked forever, and the parent never completes.
+// #435's first assertion is conservation for exactly this reason.
+//
+// The cap is checked BEFORE any slice is produced. A plan that cannot honour it
+// is refused whole rather than trimmed: silently shrinking children would leave
+// the remainder unworked, and silently adding slices would change the schedule
+// the operator asked for into one nobody chose. Both are the "control that
+// reports success" this platform designs against.
+func TWAP(p Plan) ([]Slice, error) {
+	if p.Total == nil || p.Total.Sign() <= 0 {
+		return nil, ErrEmptyQuantity
+	}
+	if p.Slices <= 0 {
+		return nil, ErrNoSlices
+	}
+	if !p.End.After(p.Start) {
+		return nil, fmt.Errorf("%w: [%s, %s]", ErrEmptyWindow,
+			p.Start.UTC().Format(time.RFC3339), p.End.UTC().Format(time.RFC3339))
+	}
+
+	each := new(big.Rat).Quo(p.Total, new(big.Rat).SetInt64(int64(p.Slices)))
+
+	if p.MaxSlice != nil && p.MaxSlice.Sign() > 0 && each.Cmp(p.MaxSlice) > 0 {
+		// The minimum slice count that would honour the cap, so the refusal tells
+		// the operator what to change rather than only that something is wrong.
+		need := new(big.Rat).Quo(p.Total, p.MaxSlice)
+		return nil, fmt.Errorf("%w: %d slices of %s exceeds the cap of %s; needs at least %d",
+			ErrCapUnsatisfiable, p.Slices, each.FloatString(8), p.MaxSlice.FloatString(8),
+			ceilRat(need))
+	}
+
+	span := p.End.Sub(p.Start)
+	out := make([]Slice, 0, p.Slices)
+	for i := range p.Slices {
+		// Integer nanosecond arithmetic on the OFFSET, not repeated addition of a
+		// step: accumulating a rounded step drifts, and the last child of a long
+		// schedule would fall outside the window it was supposed to finish in.
+		offset := time.Duration(int64(span) * int64(i) / int64(p.Slices))
+		out = append(out, Slice{
+			Index:    i,
+			Due:      p.Start.Add(offset).UTC(),
+			Quantity: new(big.Rat).Set(each),
+		})
+	}
+	return out, nil
+}
+
+// Due returns the slices of a plan that are due at or before now — the ones a
+// driver should have sent.
+//
+// IT IS A FILTER OVER THE WHOLE SCHEDULE, NOT A CURSOR. A cursor is state, and
+// state is what gets lost on restart; recomputing the full schedule and filtering
+// it is what makes a pod that has just booted reach the same answer as one that
+// has been running all day. Which of these have actually been sent is the order
+// store's answer, not this package's.
+func Due(slices []Slice, now time.Time) []Slice {
+	out := make([]Slice, 0, len(slices))
+	for _, s := range slices {
+		if !s.Due.After(now.UTC()) {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+// Sum totals a schedule's quantities. Used by the conservation check, and by any
+// caller that wants to assert the same property at a different layer.
+func Sum(slices []Slice) *big.Rat {
+	total := new(big.Rat)
+	for _, s := range slices {
+		total.Add(total, s.Quantity)
+	}
+	return total
+}
+
+// ceilRat returns the smallest integer >= r, for the "needs at least N slices"
+// half of the cap refusal.
+func ceilRat(r *big.Rat) int {
+	q := new(big.Int).Quo(r.Num(), r.Denom())
+	if new(big.Int).Mul(q, r.Denom()).Cmp(r.Num()) != 0 {
+		q.Add(q, big.NewInt(1))
+	}
+	return int(q.Int64())
+}
