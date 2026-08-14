@@ -464,3 +464,78 @@ message StateHealed {
   // detected_at is when reconciliation observed the divergence. Required.
   google.protobuf.Timestamp detected_at = 5;
 }
+
+// TransactionCostRecorded is what ONE fill actually cost, measured against the
+// decision-time mark (#436).
+//
+// # Why this is a FACT and not only a metric
+//
+// The per-venue histograms answer "which venue should we have used" for a HUMAN
+// reading a dashboard. They cannot answer it for a MACHINE: Prometheus is not
+// queryable from the routing path, it is aggregated and lossy by construction,
+// and its retention is measured in weeks. A venue ranking (#437) has to read
+// cost per venue over a long window, joined to the orders it came from — which
+// is a durable, archived record or it is nothing.
+//
+// It is also the only form in which this survives. The metric is derived state
+// that a pod restart resets and a scrape gap loses; this lands on the EXECUTION
+// stream and is archived to Kafka by the existing order.> rule, alongside the
+// fills it was computed from.
+//
+// # Per FILL, deliberately
+//
+// The individual Fill — and therefore its FEE — exists only on the fill FACT;
+// OrderState keeps a cumulative quantity and an average price and no fee total.
+// A per-ORDER record would have to accumulate fees across deliveries, and an
+// in-memory accumulator is lost on restart and wrong across replicas. Per fill
+// is stateless, and it is the better grain anyway: an order can fill across
+// several venues, and a per-order record blends exactly the thing being compared.
+//
+// # It records; it decides nothing
+//
+// Nothing on the trading path reads this. That is the property that lets it be
+// published from the OMS at all — a measurement that could refuse or reroute an
+// order would put an analytic on the capital path.
+message TransactionCostRecorded {
+  // order_id and fill_id identify what was measured. fill_id is what makes this
+  // idempotent: the same fill measured twice is the same record.
+  string order_id = 1;
+  string fill_id = 2;
+
+  string instrument_id = 3;
+  // venue is the exchange this fill executed at — the dimension the whole
+  // measurement exists to compare.
+  string venue = 4;
+  Side side = 5;
+
+  // filled_quantity and fill_price are this fill, not the parent order.
+  common.v1.Decimal filled_quantity = 6;
+  common.v1.Decimal fill_price = 7;
+
+  // arrival_price is the reference mark stamped on the order at ADMISSION
+  // (OrderState.arrival_price). It cannot be reconstructed later: a mark read
+  // after the fact is a mark from after this order moved the market, which
+  // biases every cost measure flatter and always in the flattering direction.
+  common.v1.Decimal arrival_price = 8;
+
+  // fee is what the venue charged, as the venue reported it. A negative amount
+  // is a maker rebate and reduces cost.
+  common.v1.Money fee = 9;
+
+  // shortfall_bps is the headline: implementation shortfall against arrival, in
+  // basis points of arrival notional, INCLUDING fees. Positive cost money;
+  // negative beat the benchmark. The sign is from the fund's point of view for
+  // both sides, so a report cannot average a good sell against a bad buy to zero.
+  common.v1.Decimal shortfall_bps = 10;
+
+  // price_shortfall_bps is the same measure EXCLUDING fees, so a venue's
+  // execution quality and its fee schedule can be told apart. A venue can be
+  // good at one and bad at the other, and a single blended figure hides which.
+  common.v1.Decimal price_shortfall_bps = 11;
+
+  // measured_at is when this measurement was taken, which is NOT when the fill
+  // happened. A backlogged or replayed consumer produces a late measurement of
+  // an old fill, and a reader comparing venues over a window needs to know which
+  // clock it is looking at.
+  google.protobuf.Timestamp measured_at = 12;
+}

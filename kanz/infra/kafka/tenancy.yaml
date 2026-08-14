@@ -77,6 +77,11 @@ data:
     risk.position              6   compact  -1          yes
     wealth.household            3   compact  -1          yes
     order.order                6   delete   2592000000  yes
+    # REALIZED EXECUTION COST, PER FILL (#436). Mirrors order.order exactly —
+    # same partitions because it is partitioned by the SAME key (order id), and
+    # same retention because it is the measurement of a money event and ages with
+    # the fills it was computed from.
+    order.cost                 6   delete   2592000000  yes
     strategy.signal            6   delete   2592000000  yes
     # optimization.proposal (#409): mirrors infra/kafka/topics-job.yaml. The
     # archiver routes every event to {tenant}.{domain}.{entity} and auto-create is

@@ -622,7 +622,7 @@ func runConsumers(ctx context.Context, cfg config.Config, readiness *server.Read
 	// only in the FACT: OrderState keeps a cumulative quantity and an average
 	// price and no fee total, and a cost measure that drops fees ranks a zero-fee
 	// venue with poor fills above a maker-rebate venue with good ones.
-	costs := costwatch.New(obs.Registry, cfg.Tenant, logger)
+	costs := costwatch.New(obs.Registry, cfg.Tenant, producer, logger)
 	for _, s := range cfg.FillSubjects() {
 		subs = append(subs, sub{s, cfg.ConsumerGroup, projector.Handle})
 		// ITS OWN GROUP, so it sees EVERY fill and takes none from the projector.

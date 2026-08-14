@@ -2,12 +2,16 @@ package costwatch
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"testing"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	dto "github.com/prometheus/client_model/go"
+
+	"github.com/eighred/kanz/internal/dec"
+	"github.com/eighred/kanz/pkg/bus"
 	"google.golang.org/protobuf/proto"
 
 	commonpb "github.com/eighred/kanz/kanz-schemas-go/common/v1"
@@ -49,10 +53,32 @@ func filledPayload(t *testing.T, venue string, arrival, price, qty int64, fee in
 	return b
 }
 
+// fakeBus captures what was published, so a test can assert the FACT without a
+// broker. It is NOT a validating bus — pkg/bus stamps and checks the envelope,
+// and a green test here is not a broker proof.
+type fakeBus struct {
+	events []bus.Event
+	err    error
+}
+
+func (f *fakeBus) Publish(_ context.Context, e bus.Event) error {
+	if f.err != nil {
+		return f.err
+	}
+	f.events = append(f.events, e)
+	return nil
+}
+
 func newWatch(t *testing.T) (*Watch, *prometheus.Registry) {
 	t.Helper()
 	reg := prometheus.NewRegistry()
-	return New(reg, "__system__", slog.New(slog.DiscardHandler)), reg
+	return New(reg, "__system__", &fakeBus{}, slog.New(slog.DiscardHandler)), reg
+}
+
+func newWatchOn(t *testing.T, b Bus) (*Watch, *prometheus.Registry) {
+	t.Helper()
+	reg := prometheus.NewRegistry()
+	return New(reg, "__system__", b, slog.New(slog.DiscardHandler)), reg
 }
 
 func env() *envelopepb.Envelope {
@@ -147,7 +173,7 @@ func TestHandle_UndecodableIsAckedAndCounted(t *testing.T) {
 // per-tenant compute lands (#97).
 func TestHandle_CrossTenantIsRefused(t *testing.T) {
 	reg := prometheus.NewRegistry()
-	w := New(reg, "acme", slog.New(slog.DiscardHandler))
+	w := New(reg, "acme", nil, slog.New(slog.DiscardHandler))
 
 	e := env()
 	e.TenantId = "someone-else"
@@ -271,5 +297,100 @@ func TestHandle_RefusesAnOutOfDomainExponent(t *testing.T) {
 	}
 	if got := counter(t, reg, "kanz_execution_unmeasurable_fills_total", "", "undecodable"); got != 1 {
 		t.Errorf("out-of-domain count = %v, want 1", got)
+	}
+}
+
+// THE MEASUREMENT BECOMES A DURABLE FACT (#436).
+//
+// The metrics answer "which venue" for a human reading a dashboard. They cannot
+// answer it for a MACHINE: Prometheus is not queryable from the routing path, it
+// is aggregated and lossy by construction, and its retention is weeks — while a
+// venue ranking (#437) needs cost per venue over a long window, joined to the
+// orders it came from.
+func TestHandle_PublishesTheCostAsAFact(t *testing.T) {
+	fb := &fakeBus{}
+	w, _ := newWatchOn(t, fb)
+
+	// arrival 100, bought 10 @ 110, fee 0 ⇒ 1000 bps.
+	if err := w.Handle(context.Background(), env(),
+		filledPayload(t, "XBIN", 100, 110, 10, 0, "USD")); err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	if len(fb.events) != 1 {
+		t.Fatalf("published %d events, want 1 — the measurement is metric-only and does not "+
+			"survive a restart or a scrape gap", len(fb.events))
+	}
+	e := fb.events[0]
+	if e.EventType != EventTypeCostRecorded {
+		t.Errorf("event_type = %q, want %q", e.EventType, EventTypeCostRecorded)
+	}
+	if e.EventClass != envelopepb.EventClass_EVENT_CLASS_FACT {
+		t.Errorf("event class = %v, want FACT", e.EventClass)
+	}
+	// PARTITIONED BY ORDER, not by fill: every measurement for one order must land
+	// on one partition in order, so a consumer summing an order's cost sees its
+	// fills in the sequence they happened.
+	if e.PartitionKey != "o-1" {
+		t.Errorf("partition key = %q, want the ORDER id", e.PartitionKey)
+	}
+
+	rec, ok := e.Payload.(*orderpb.TransactionCostRecorded)
+	if !ok {
+		t.Fatalf("payload is %T, want *TransactionCostRecorded", e.Payload)
+	}
+	if rec.GetVenue() != "XBIN" {
+		t.Errorf("venue = %q, want XBIN — the dimension the whole record exists to compare",
+			rec.GetVenue())
+	}
+	if got := dec.FromProto(rec.GetShortfallBps()).RatString(); got != "1000" {
+		t.Errorf("shortfall = %s bps, want 1000", got)
+	}
+	if got := dec.FromProto(rec.GetArrivalPrice()).RatString(); got != "100" {
+		t.Errorf("arrival price = %s, want 100 — without it the record cannot be re-derived", got)
+	}
+	if rec.GetFillId() == "" {
+		t.Error("no fill_id — the record is not idempotent, so a redelivery double-counts")
+	}
+}
+
+// AN UNMEASURABLE FILL PUBLISHES NOTHING. It is already counted; writing a FACT
+// with a zero cost would put the fiction on the durable record, where it outlives
+// the metric that would have contradicted it.
+func TestHandle_PublishesNothingForAnUnmeasurableFill(t *testing.T) {
+	fb := &fakeBus{}
+	w, _ := newWatchOn(t, fb)
+
+	if err := w.Handle(context.Background(), env(),
+		filledPayload(t, "XBIN", 0, 110, 10, 0, "USD")); err != nil { // no arrival mark
+		t.Fatalf("Handle: %v", err)
+	}
+	if len(fb.events) != 0 {
+		t.Fatalf("published %d events for an UNMEASURABLE fill — a zero-cost record on the "+
+			"durable stream outlives the metric that would contradict it", len(fb.events))
+	}
+}
+
+// A FAILED PUBLISH DOES NOT FAIL THE DELIVERY, and is counted.
+//
+// This handler observes; the fill is already durable and already folded by the
+// projector and the books. Nacking would redeliver a fill nobody needs
+// redelivered, to re-measure something that changes nothing, on the consumer real
+// fills arrive on. The loss is one row of a cost report — and it is counted, so
+// the gap is visible rather than assumed.
+func TestHandle_AFailedPublishIsCountedNotNacked(t *testing.T) {
+	fb := &fakeBus{err: errors.New("broker down")}
+	w, reg := newWatchOn(t, fb)
+
+	if err := w.Handle(context.Background(), env(),
+		filledPayload(t, "XBIN", 100, 110, 10, 0, "USD")); err != nil {
+		t.Fatalf("Handle = %v, want nil — a failed cost record must not nack a fill", err)
+	}
+	if got := counter(t, reg, "kanz_execution_unmeasurable_fills_total", "XBIN", "publish_failed"); got != 1 {
+		t.Errorf("publish_failed count = %v, want 1 — a silent loss makes a venue comparison "+
+			"short by this fill with nothing saying so", got)
+	}
+	// The metric still moved: the measurement happened, only its durable copy failed.
+	if n, _ := histogram(t, reg, "kanz_execution_shortfall_bps", "XBIN"); n != 1 {
+		t.Errorf("shortfall observations = %d, want 1", n)
 	}
 }

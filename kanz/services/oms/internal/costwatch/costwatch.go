@@ -33,10 +33,13 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/types/known/timestamppb"
 
+	commonpb "github.com/eighred/kanz/kanz-schemas-go/common/v1"
 	envelopepb "github.com/eighred/kanz/kanz-schemas-go/envelope/v1"
 	orderpb "github.com/eighred/kanz/kanz-schemas-go/order/v1"
 
@@ -50,11 +53,30 @@ import (
 const (
 	EventTypeFilled          = "order.order.filled"
 	EventTypePartiallyFilled = "order.order.partially_filled"
+
+	// EventTypeCostRecorded is the durable half of this measurement (#436).
+	//
+	// Inside the `order` domain deliberately: it is derived from the order's own
+	// fills and its admission mark, so the EXECUTION stream already carries it
+	// (order.>), the archiver's default subject list already archives it, and the
+	// Kafka topic falls out as <tenant>.order.cost with no new mapping.
+	EventTypeCostRecorded = "order.cost.recorded"
+
+	// schemaVersion is the EVT-16 version this FACT carries.
+	schemaVersion = 1
 )
+
+// Bus is the publish seam. An interface rather than *bus.Producer so a test can
+// assert what was published without a broker.
+type Bus interface {
+	Publish(ctx context.Context, e bus.Event) error
+}
 
 // Watch folds fill FACTs into realized-cost measurements.
 type Watch struct {
 	tenant string
+	bus    Bus
+	now    func() time.Time
 	logger *slog.Logger
 
 	shortfallBps      *prometheus.HistogramVec
@@ -73,10 +95,12 @@ type Watch struct {
 // straddle zero because beating the benchmark is a real and common outcome — a
 // bucket set starting at zero would report every saving as the smallest possible
 // cost.
-func New(reg prometheus.Registerer, tenant string, logger *slog.Logger) *Watch {
+func New(reg prometheus.Registerer, tenant string, b Bus, logger *slog.Logger) *Watch {
 	buckets := []float64{-100, -50, -25, -10, -5, 0, 5, 10, 25, 50, 100, 250, 500}
 	w := &Watch{
 		tenant: tenant,
+		bus:    b,
+		now:    time.Now,
 		logger: logger,
 		shortfallBps: prometheus.NewHistogramVec(prometheus.HistogramOpts{
 			Name: "kanz_execution_shortfall_bps",
@@ -113,7 +137,7 @@ func New(reg prometheus.Registerer, tenant string, logger *slog.Logger) *Watch {
 // regardless of whether this handler could read it. Losing a cost measurement is
 // a gap in a report; losing the fill would be a gap in the books, and that is
 // somebody else's consumer.
-func (w *Watch) Handle(_ context.Context, env *envelopepb.Envelope, payload []byte) error {
+func (w *Watch) Handle(ctx context.Context, env *envelopepb.Envelope, payload []byte) error {
 	// A FILL BELONGS TO ONE TENANT'S BOOK (#223). Inert while this OMS serves
 	// __system__, and correct the day per-tenant compute lands (#97).
 	if err := bus.RequireTenantScope(env.GetTenantId(), w.tenant); err != nil {
@@ -141,6 +165,25 @@ func (w *Watch) Handle(_ context.Context, env *envelopepb.Envelope, payload []by
 	price, _ := res.PriceShortfallBps.Float64()
 	w.shortfallBps.WithLabelValues(venue).Observe(total)
 	w.priceShortfallBps.WithLabelValues(venue).Observe(price)
+
+	// AND THE DURABLE HALF (#436). The metrics answer "which venue" for a human
+	// reading a dashboard; they cannot answer it for a MACHINE. Prometheus is not
+	// queryable from the routing path, it is aggregated and lossy by
+	// construction, and its retention is weeks — while a venue ranking (#437)
+	// needs cost per venue over a long window, joined to the orders it came from.
+	//
+	// A FAILED PUBLISH DOES NOT FAIL THE DELIVERY. This handler observes; the
+	// fill is already durable and already folded by the projector and the books.
+	// Nacking would redeliver a fill nobody needs redelivered, to re-measure
+	// something that changes nothing, on the consumer real fills arrive on. The
+	// loss is one row of a cost report, and it is counted so the gap is visible
+	// rather than assumed.
+	if err := w.publish(ctx, fill, res); err != nil {
+		w.unmeasurable.WithLabelValues(venue, "publish_failed").Inc()
+		w.logger.Error("costwatch: cost measured but not recorded — the metric moved and the FACT "+
+			"did not, so a venue comparison over a long window will be short by this fill",
+			"order_id", res.OrderID, "fill_id", fill.GetFillId(), "venue", venue, "err", err)
+	}
 
 	// FLOAT64 HERE AND ONLY HERE, DELIBERATELY. The measurement is exact
 	// (*big.Rat) all the way through tca; this converts at the very last step,
@@ -209,3 +252,56 @@ func reasonOf(err error) string {
 		return "other"
 	}
 }
+
+// publish records the measurement as a FACT on the order domain.
+//
+// EVERY FIGURE IS EXACT OR THE RECORD IS NOT WRITTEN. dec.ToProtoScaled
+// preserves magnitude by rescaling, and a value it cannot represent at any
+// exponent is not something to write down approximately — a cost report is read
+// as authoritative, and a rounded basis-point figure is how a venue comparison
+// gets decided by the fourth decimal.
+func (w *Watch) publish(ctx context.Context, fill *orderpb.Fill, r tca.Result) error {
+	if w.bus == nil {
+		return nil // no bus wired: the metrics still work, which is the dev posture
+	}
+	qty, ok1 := tca.ToDecimal(r.FilledQuantity)
+	px, ok2 := tca.ToDecimal(r.AveragePrice)
+	arr, ok3 := tca.ToDecimal(r.ArrivalPrice)
+	sf, ok4 := tca.ToDecimal(r.ShortfallBps)
+	psf, ok5 := tca.ToDecimal(r.PriceShortfallBps)
+	fees, ok6 := tca.ToDecimal(r.Fees)
+	if !ok1 || !ok2 || !ok3 || !ok4 || !ok5 || !ok6 {
+		return errUnrepresentable
+	}
+
+	payload := &orderpb.TransactionCostRecorded{
+		OrderId:           r.OrderID,
+		FillId:            fill.GetFillId(),
+		InstrumentId:      r.Instrument,
+		Venue:             r.Venue,
+		Side:              fill.GetSide(),
+		FilledQuantity:    qty,
+		FillPrice:         px,
+		ArrivalPrice:      arr,
+		Fee:               &commonpb.Money{Amount: fees, CurrencyCode: r.FeeCurrency},
+		ShortfallBps:      sf,
+		PriceShortfallBps: psf,
+		MeasuredAt:        timestamppb.New(w.now().UTC()),
+	}
+	return w.bus.Publish(ctx, bus.Event{
+		Subject:       EventTypeCostRecorded,
+		EventType:     EventTypeCostRecorded,
+		EventClass:    envelopepb.EventClass_EVENT_CLASS_FACT,
+		SchemaVersion: schemaVersion,
+		Domain:        "order",
+		EventTime:     w.now().UTC(),
+		// PARTITIONED BY ORDER, not by fill: every measurement for one order lands
+		// on one partition in order, so a consumer summing an order's cost sees
+		// its fills in the sequence they happened.
+		PartitionKey:     r.OrderID,
+		PayloadSchemaRef: "order.v1.TransactionCostRecorded:1",
+		Payload:          payload,
+	})
+}
+
+var errUnrepresentable = errors.New("costwatch: a cost figure is not representable as an exact Decimal")
