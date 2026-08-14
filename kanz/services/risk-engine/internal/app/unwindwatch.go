@@ -53,6 +53,7 @@ type UnwindWatch struct {
 	logger *slog.Logger
 
 	decided     *prometheus.CounterVec
+	breachAge   prometheus.Histogram
 	undecidable prometheus.Counter
 }
 
@@ -87,6 +88,14 @@ func NewUnwindWatch(reg prometheus.Registerer, tenant string, logger *slog.Logge
 				"reduction was sized; \"false\" means the breach was understood and nothing could be " +
 				"derived for any of its rules. NOTHING IS EXECUTED either way (#74).",
 		}, []string{"actionable"}),
+		breachAge: prometheus.NewHistogram(prometheus.HistogramOpts{
+			Name: "kanz_risk_unwind_breach_age_seconds",
+			Help: "Seconds between a breach being DETECTED by the compliance monitor and this " +
+				"engine sizing a reduction for it. A proposal is arithmetic against the book as " +
+				"it was; a large lag means the answer may already be wrong, and DecidedAt alone " +
+				"cannot show that because it is the time this handler ran.",
+			Buckets: []float64{0.1, 0.5, 1, 5, 15, 60, 300, 1800},
+		}),
 		undecidable: prometheus.NewCounter(prometheus.CounterOpts{
 			Name: "kanz_risk_unwind_undecidable_rules_total",
 			Help: "Violated rules the unwind decider would not size a reduction for — each one is a " +
@@ -100,7 +109,7 @@ func NewUnwindWatch(reg prometheus.Registerer, tenant string, logger *slog.Logge
 	if w.logger == nil {
 		w.logger = slog.Default()
 	}
-	reg.MustRegister(w.decided, w.undecidable)
+	reg.MustRegister(w.decided, w.breachAge, w.undecidable)
 	return w
 }
 
@@ -134,9 +143,31 @@ func (w *UnwindWatch) Handle(_ context.Context, env *envelopepb.Envelope, payloa
 		return nil
 	}
 
-	p := unwind.Decide(&breach, w.now().UTC())
+	now := w.now().UTC()
+	p := unwind.Decide(&breach, now)
 	w.decided.WithLabelValues(boolLabel(p.Actionable())).Inc()
 	w.undecidable.Add(float64(len(p.Undecidable)))
+
+	// HOW OLD IS THE BREACH THIS ANSWERS?
+	//
+	// ComplianceBreach.detected_at is documented Required and the compliance
+	// monitor sets it — and until now NOTHING in the module read it back. So a
+	// proposal for a breach detected one second ago and one for a breach detected
+	// an hour ago were the same log line.
+	//
+	// The difference matters precisely because the proposal is a REDUCTION SIZED
+	// AGAINST THE BOOK AS IT WAS. A backlogged consumer, a redelivery after a
+	// restart, or a replayed stream all produce a proposal whose arithmetic was
+	// correct when the breach was observed and may be wrong now — and an operator
+	// reading "shed 55% of TECH" needs to know which of those they are looking at
+	// before acting on it. DecidedAt alone cannot say: it is the time this handler
+	// ran, which is exactly the clock that hides the lag.
+	var ageSeconds float64
+	detectedAt := breach.GetDetectedAt().AsTime().UTC()
+	if breach.GetDetectedAt() != nil && !detectedAt.IsZero() {
+		ageSeconds = now.Sub(detectedAt).Seconds()
+		w.breachAge.Observe(ageSeconds)
+	}
 
 	// LOGGED AT WARN EVEN WHEN NOTHING IS ACTIONABLE. "This portfolio is in breach
 	// and the platform cannot size a way out of it" is the more alarming of the two
@@ -147,6 +178,7 @@ func (w *UnwindWatch) Handle(_ context.Context, env *envelopepb.Envelope, payloa
 		"mandate_id", p.MandateID,
 		"mandate_version", p.MandateVersion,
 		"actionable", p.Actionable(),
+		"detected_at", detectedAt, "breach_age_seconds", ageSeconds,
 		"reductions", describeReductions(p.Reductions),
 		"undecidable", describeUndecidable(p.Undecidable),
 		"decided_at", p.DecidedAt,

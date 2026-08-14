@@ -9,6 +9,7 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/types/known/timestamppb"
 
 	compliancepb "github.com/eighred/kanz/kanz-schemas-go/compliance/v1"
 	envelopepb "github.com/eighred/kanz/kanz-schemas-go/envelope/v1"
@@ -226,3 +227,83 @@ func (h *unwindLogs) Handle(_ context.Context, r slog.Record) error {
 func (h *unwindLogs) WithAttrs([]slog.Attr) slog.Handler { return h }
 func (h *unwindLogs) WithGroup(string) slog.Handler      { return h }
 func (h *unwindLogs) text() string                       { return h.b.String() }
+
+// THE BREACH'S OWN DETECTION TIME IS READ BACK, AND ITS AGE REPORTED.
+//
+// ComplianceBreach.detected_at is documented Required and the compliance monitor
+// sets it — and nothing in this module read it. So a proposal for a breach
+// detected a second ago and one for a breach detected an hour ago produced the
+// same log line.
+//
+// It matters because the proposal is a reduction SIZED AGAINST THE BOOK AS IT
+// WAS. A backlogged consumer, a redelivery after a restart, or a replayed stream
+// all yield arithmetic that was right when the breach was observed and may be
+// wrong now. DecidedAt cannot show that — it is the time this handler ran, which
+// is precisely the clock that hides the lag.
+func TestUnwindWatch_ReportsHowOldTheBreachIs(t *testing.T) {
+	f := newWatch(t)
+
+	detected := unwindNow.Add(-90 * time.Second)
+	b := &compliancepb.ComplianceBreach{
+		PortfolioId: "fund-alpha", MandateId: "m-1", MandateVersion: 3,
+		DetectedAt: timestamppb.New(detected),
+		Result: &compliancepb.ComplianceResult{
+			Status:     compliancepb.ComplianceStatus_COMPLIANCE_STATUS_BREACH,
+			Violations: []*compliancepb.Violation{concentration("0.20", "0.10")},
+		},
+	}
+	payload, err := proto.Marshal(b)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if err := f.w.Handle(context.Background(), &envelopepb.Envelope{EventId: "e9"}, payload); err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+
+	n, sum := histogramOf(t, f.reg, "kanz_risk_unwind_breach_age_seconds")
+	if n != 1 {
+		t.Fatalf("breach-age observations = %d, want 1 — detected_at was not read back", n)
+	}
+	if sum != 90 {
+		t.Errorf("breach age = %v seconds, want 90", sum)
+	}
+	if !strings.Contains(f.logs.text(), "breach_age_seconds") {
+		t.Errorf("the proposal log does not carry the breach's age; logged:\n%s", f.logs.text())
+	}
+}
+
+// A BREACH WITH NO DETECTION TIME IS NOT AGE ZERO. An unset timestamp means the
+// producer did not say; recording that as a fresh breach would make the least
+// trustworthy proposal look like the most current one.
+func TestUnwindWatch_AnAbsentDetectionTimeIsNotZeroAge(t *testing.T) {
+	f := newWatch(t)
+
+	if err := f.w.Handle(context.Background(), &envelopepb.Envelope{EventId: "e10"},
+		breachPayload(t, concentration("0.20", "0.10"))); err != nil { // no DetectedAt
+		t.Fatalf("Handle: %v", err)
+	}
+	if n, _ := histogramOf(t, f.reg, "kanz_risk_unwind_breach_age_seconds"); n != 0 {
+		t.Fatalf("an absent detected_at was recorded as an age (%d observations) — a breach whose "+
+			"producer did not say when it was detected would look like the freshest one", n)
+	}
+}
+
+func histogramOf(t *testing.T, reg *prometheus.Registry, name string) (uint64, float64) {
+	t.Helper()
+	fams, err := reg.Gather()
+	if err != nil {
+		t.Fatalf("gather: %v", err)
+	}
+	for _, f := range fams {
+		if f.GetName() != name {
+			continue
+		}
+		for _, m := range f.GetMetric() {
+			if m.GetHistogram() != nil {
+				return m.GetHistogram().GetSampleCount(), m.GetHistogram().GetSampleSum()
+			}
+		}
+	}
+	t.Fatalf("histogram %q is not registered", name)
+	return 0, 0
+}
