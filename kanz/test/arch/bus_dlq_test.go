@@ -466,7 +466,7 @@ var retryCertifiedConsumers = map[string]string{
 		"— an unconditional last-value cache write, same shape as accounting's live FX feed. " +
 		"Nothing to skip.",
 
-	"services/market-data/cmd/market-data/main.go:184": "market-data: the sole handler is " +
+	"services/market-data/cmd/market-data/main.go:185": "market-data: the sole handler is " +
 		"marketdata.Ingestor.Handler, which writes through Postgres.Put " +
 		"(internal/marketdata/store/postgres.go:49) — INSERT ... ON CONFLICT (instrument_id, " +
 		"observation_time, kind, knowledge_time) DO NOTHING inside one transaction. Same " +

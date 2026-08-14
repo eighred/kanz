@@ -561,7 +561,13 @@ data:
           { user: "spiffe://kanz.internal/ns/kanz-services/sa/market-data"
             permissions: {
               publish: { allow: ["market.>", "dlq.market.>", "$JS.API.>", "$JS.ACK.>"] }
-              subscribe: { allow: ["market.>", "_INBOX.>"] }
+              # order.cost.recorded (#436): market-data OWNS the bar series, so
+              # the join between an execution's cost and what the market did over
+              # the same window belongs here. SUBSCRIBE ONLY, and deliberately not
+              # in the publish list above — the cost record is the OMS's, and this
+              # adds a second reading of it rather than publishing back into the
+              # loop that produced it.
+              subscribe: { allow: ["market.>", "order.cost.recorded", "_INBOX.>"] }
             }
           }
           # market-ingest (services/market-ingest/cmd/market-ingest, the open
