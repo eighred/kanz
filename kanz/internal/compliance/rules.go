@@ -325,3 +325,88 @@ func sortedKeys(m map[string]*big.Rat) []string {
 	sort.Strings(keys)
 	return keys
 }
+
+// RiskLimitRule enforces a RiskMeasureLimit: a measure the RISK ENGINE computes
+// must not exceed the mandate's ceiling (#438).
+//
+// IT IS THE FIRST RULE HERE WHOSE INPUT THE OMS CANNOT DERIVE. Every other rule
+// bounds the SHAPE of the book from the holdings the OMS already has — how
+// concentrated, how levered, which instruments and currencies. VaR, expected
+// shortfall and factor decomposition come from a model, a covariance estimate
+// and a history, and until this rule existed order admission could not ask for
+// any of them. An order could sit inside every mandate rule on this platform and
+// still take the portfolio through its VaR limit; the platform would admit it,
+// execute it, and only then compute how bad it was.
+//
+// THE MEASURE IS PRE-COMPUTED, NOT REQUESTED. This reads the OMS's local fold of
+// risk.portfolio.measures_computed — arithmetic on a map, microseconds, no
+// network. #438 rules out a synchronous call for a reason: it would put an
+// unbounded, externally-owned latency in front of every order, and a degraded
+// risk engine would become a trading outage rather than a refusal.
+//
+// AN UNKNOWN MEASURE FAILS CLOSED, and the three ways to be unknown are one
+// answer: never announced, absent from the last announcement, or too old to be
+// current. Admitting an order because the platform could not establish its risk
+// is a control that reports success — and it is worse here than for cash,
+// because a portfolio whose risk cannot be computed is exactly the one nobody
+// should be adding to.
+//
+// A LIMIT ON A MEASURE THE ENGINE DOES NOT PRODUCE IS ALSO A REFUSAL, by the
+// same path. measure_name is the engine's own name rather than an enum mirrored
+// into the schema, so a mandate CAN name something nothing computes — and the
+// honest answer to "your limit refers to a number that does not exist" is not to
+// let the order through.
+//
+// THE CHECK IS ON THE BOOK AS IT STANDS, not on the book after the order. That
+// is a real limitation and it is stated rather than hidden: projecting a VaR
+// through a candidate trade needs the covariance the risk engine holds and the
+// OMS does not, which is the marginal-risk calculation #438's own follow-up work
+// describes. What this catches today is an order arriving at a portfolio ALREADY
+// over its limit — the case where the platform currently has nothing to say at
+// all.
+func RiskLimitRule(c *Candidate, rule *compliancepb.Rule) *compliancepb.Violation {
+	rl := rule.GetRiskMeasure()
+	if rl == nil {
+		return paramsMismatch("risk_measure")
+	}
+	name := rl.GetMeasureName()
+	if name == "" {
+		// A limit that names no measure cannot be checked and must not read as
+		// satisfied — the mandate declared a control and did not say on what.
+		return &compliancepb.Violation{
+			Message:  "risk limit names no measure",
+			Evidence: map[string]string{"measure": "unspecified"},
+		}
+	}
+	if c.Book.Risk == nil {
+		return &compliancepb.Violation{
+			Message: "risk limit cannot be verified: no risk measures available",
+			Evidence: map[string]string{
+				"measure": name,
+				"risk":    "unavailable",
+			},
+		}
+	}
+	observed, ok := c.Book.Risk(name)
+	if !ok {
+		return &compliancepb.Violation{
+			Message: "risk limit cannot be verified: measure unknown or not current",
+			Evidence: map[string]string{
+				"measure": name,
+				"risk":    "unknown",
+			},
+		}
+	}
+	limit := ratFromDecimal(rl.GetMaxValue())
+	if observed.Cmp(limit) <= 0 {
+		return nil
+	}
+	return &compliancepb.Violation{
+		Message: "order refused: the portfolio is over its risk limit",
+		Evidence: map[string]string{
+			"measure":  name,
+			"observed": ratString(observed),
+			"limit":    ratString(limit),
+		},
+	}
+}

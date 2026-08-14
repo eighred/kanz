@@ -63,6 +63,20 @@ type Position struct {
 type Book struct {
 	PortfolioID  string
 	BaseCurrency string
+	// Risk answers what the RISK ENGINE has computed for this portfolio, by
+	// measure name, or ok=false when it is UNKNOWN (#438).
+	//
+	// A FUNCTION RATHER THAN A MAP, because "unknown" here has three causes that
+	// must stay one answer: never announced, absent from the last announcement,
+	// or too old to be current. A map would make the third invisible — a stale
+	// VaR reads exactly like a fresh one — and the freshness bound is the whole
+	// reason this gate can be trusted while the risk engine is degraded.
+	//
+	// NIL IS THE COMMON CASE TODAY AND THAT IS SAFE, for the same reason Cash's
+	// nil is: the rule only runs when a mandate DECLARES a risk limit, and
+	// nothing declares one. A portfolio with no such rule is unaffected; one that
+	// declares it and cannot supply the measure is REFUSED rather than admitted.
+	Risk func(measure string) (*big.Rat, bool)
 	// NAV is net asset value (positions + cash), the leverage-rule denominator.
 	// nil when unknown, which fails the leverage rule closed.
 	NAV *commonpb.Money
@@ -178,6 +192,7 @@ func DefaultRegistry() *Registry {
 	r.Register(compliancepb.RuleType_RULE_TYPE_GROSS_LEVERAGE, LeverageRule)
 	r.Register(compliancepb.RuleType_RULE_TYPE_CURRENCY, CurrencyRule)
 	r.Register(compliancepb.RuleType_RULE_TYPE_BUYING_POWER, BuyingPowerRule)
+	r.Register(compliancepb.RuleType_RULE_TYPE_RISK_MEASURE, RiskLimitRule)
 	return r
 }
 

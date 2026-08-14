@@ -76,6 +76,15 @@ enum RuleType {
   // fund can afford the order. Margin sufficiency was discovered from the
   // exchange, after dispatch.
   RULE_TYPE_BUYING_POWER = 6;
+
+  // RULE_TYPE_RISK_MEASURE caps a measure the RISK ENGINE computes — VaR,
+  // expected shortfall, a factor exposure, a stress loss (#438).
+  //
+  // It is the first rule here whose input the OMS cannot derive from the book it
+  // holds. Every other rule bounds the shape of the holdings; this one asks the
+  // risk engine what those holdings are WORTH LOSING, which is the question a
+  // pre-trade gate exists to ask and the one this platform could not.
+  RULE_TYPE_RISK_MEASURE = 7;
 }
 
 // Dimension is the portfolio axis a concentration or restriction rule buckets
@@ -186,6 +195,7 @@ message Rule {
     LeverageCap leverage_cap = 13;
     CurrencyRestriction currency_restriction = 14;
     BuyingPowerLimit buying_power = 15;
+    RiskMeasureLimit risk_measure = 16;
   }
 }
 
@@ -205,6 +215,45 @@ message BuyingPowerLimit {
   // min_cash_after is the lowest post-trade cash balance the mandate permits,
   // in the portfolio's base currency. Unset ⇒ zero.
   common.v1.Decimal min_cash_after = 1;
+}
+
+// RiskMeasureLimit bounds a RISK measure the risk engine computes — VaR, expected
+// shortfall, a factor exposure, a stress loss (#438).
+//
+// # This is the gap that separates a compliance gate from a pre-trade RISK gate
+//
+// Every other rule here bounds the SHAPE of the book from the book itself:
+// how concentrated, how levered, which instruments and currencies. All of them
+// are computable from the holdings the OMS already has.
+//
+// A risk measure is not. VaR, expected shortfall and factor decomposition come
+// from internal/risk — a model, a covariance estimate and a history — and until
+// this rule existed, order admission could not ask for any of them. An order
+// could sit inside every mandate rule on this platform and still take the
+// portfolio through its VaR limit, and the platform would admit it, execute it,
+// and only then compute how bad it was.
+//
+// # measure_name is the risk engine's own name, deliberately
+//
+// It matches compute.MeasureName ("VaR99", "ExpectedShortfall97", a factor id)
+// rather than an enum mirrored here. An enum would have to be extended in this
+// schema every time the quant library adds a measure, and the two would drift —
+// with the failure mode that a mandate declares a limit on a measure nothing
+// computes, and the rule reports "unknown" forever while reading as configured.
+//
+// A limit naming a measure the engine does not produce is therefore a REFUSAL,
+// not a pass: see RiskLimitRule.
+message RiskMeasureLimit {
+  // measure_name is the risk engine's measure, e.g. "VaR99". Required.
+  string measure_name = 1;
+
+  // max_value is the ceiling. The measure must not EXCEED it after the order.
+  //
+  // NO DEFAULT, and no "unlimited" spelling. An absent limit means the mandate
+  // declares no risk rule, which is what every portfolio has today. A limit that
+  // is present but empty would be a control that admits everything while
+  // appearing configured — the failure this platform refuses everywhere else.
+  common.v1.Decimal max_value = 2;
 }
 
 // Mandate is the tenant/portfolio-scoped ruleset a book is governed by. It is

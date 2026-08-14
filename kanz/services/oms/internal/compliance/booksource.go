@@ -2,6 +2,7 @@ package compliance
 
 import (
 	"context"
+	"math/big"
 	"time"
 
 	commonpb "github.com/eighred/kanz/kanz-schemas-go/common/v1"
@@ -16,6 +17,7 @@ import (
 type BookSource struct {
 	book position.Store
 	cash CashSource
+	risk RiskSource
 	now  func() time.Time
 }
 
@@ -33,8 +35,20 @@ type CashSource interface {
 // NewBookSource wraps the position book. cash may be nil, and then every Book
 // carries UNKNOWN cash — which BuyingPowerRule fails closed on, so a mandate
 // declaring a spending limit refuses rather than admits.
-func NewBookSource(book position.Store, cash CashSource) *BookSource {
-	return &BookSource{book: book, cash: cash, now: time.Now}
+// RiskSource answers what the RISK ENGINE has computed for a portfolio, or
+// ok=false when the measure is UNKNOWN (#438). Satisfied by riskview.View, which
+// folds risk.portfolio.measures_computed with a freshness bound.
+//
+// AN INTERFACE, AND NOT A CLIENT. It is deliberately a lookup against local
+// state rather than a call: #438 rules out a synchronous request into the risk
+// engine because it would put an unbounded, externally-owned latency in front of
+// every order and turn a degraded risk service into a trading outage.
+type RiskSource interface {
+	Measure(portfolioID, name string) (*big.Rat, bool)
+}
+
+func NewBookSource(book position.Store, cash CashSource, risk RiskSource) *BookSource {
+	return &BookSource{book: book, cash: cash, risk: risk, now: time.Now}
 }
 
 var _ comp.BookSource = (*BookSource)(nil)
@@ -65,6 +79,19 @@ func (s *BookSource) Book(ctx context.Context, portfolioID string) (*comp.Book, 
 		if total, currency, ok := s.cash.Spendable(portfolioID); ok {
 			b.Cash = &commonpb.Money{Amount: total, CurrencyCode: currency}
 		}
+	}
+	// RISK COMES FROM THE RISK ENGINE, FOLDED LOCALLY (#438). Bound as a closure
+	// rather than copied as a map because "unknown" must keep its three causes as
+	// one answer — never announced, absent from the last announcement, or too old
+	// to be current — and a map would make the third invisible.
+	//
+	// nil source ⇒ Book.Risk stays nil ⇒ RiskLimitRule refuses any declared risk
+	// limit rather than passing it. Which is the correct posture for a deployment
+	// that has not wired risk: a mandate declaring a VaR ceiling on a platform
+	// that cannot compute VaR must not read as compliant.
+	if s.risk != nil {
+		pf := portfolioID
+		b.Risk = func(measure string) (*big.Rat, bool) { return s.risk.Measure(pf, measure) }
 	}
 	return b, nil
 }

@@ -88,7 +88,7 @@ func (s stubMandate) Mandate(context.Context, string, string, time.Time) (*compl
 
 func gateOver(t *testing.T, v *cashview.View) *comp.PreTradeGate {
 	t.Helper()
-	src := NewBookSource(stubStore{snapshotFor("PF1")}, v)
+	src := NewBookSource(stubStore{snapshotFor("PF1")}, v, nil)
 	return comp.NewPreTradeGate(comp.NewEngine(nil), src, stubMandate{buyingPowerMandate("PF1")}, nil, nil, nil)
 }
 
@@ -146,7 +146,7 @@ func TestWithNoAnnouncementTheGateRefuses(t *testing.T) {
 // A NIL CASH SOURCE IS THE SAME POSTURE, so a deployment that has not wired the
 // cash spine refuses under a spending mandate rather than admitting on nothing.
 func TestANilCashSourceFailsClosed(t *testing.T) {
-	src := NewBookSource(stubStore{snapshotFor("PF1")}, nil)
+	src := NewBookSource(stubStore{snapshotFor("PF1")}, nil, nil)
 	g := comp.NewPreTradeGate(comp.NewEngine(nil), src, stubMandate{buyingPowerMandate("PF1")}, nil, nil, nil)
 	res, err := g.Evaluate(context.Background(), buyOrder(1))
 	if err != nil {
