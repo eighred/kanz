@@ -37,6 +37,35 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
+      # BOUND THE FAN-OUT, BECAUSE THE FLAKE IS A RATE LIMIT WEARING A 403 (#320).
+      #
+      # 27 images built with no cap means up to 27 runners simultaneously doing
+      # the SAME burst of external-registry calls: a buf release download, a Go
+      # module proxy fetch, `buf generate` against buf.build, a buildkit image
+      # pull, a GHCR login, and a push. Three recent reds on main failed in three
+      # DIFFERENT steps of that list —
+      #
+      #   e81b66c  Generate kanz-schemas Go SDK  (buf: permission_denied: 403)
+      #   cf74a70  docker/setup-buildx-action
+      #   d3358f7  Log in to GHCR
+      #
+      # — each on a random ONE of the 27, each green on an identical re-run, and
+      # none of them the PUSH that push-with-retry.sh already covers. A single
+      # service failing while 26 others succeed with the same token in the same
+      # run is not an authorization problem; it is throttling surfaced as 403
+      # rather than 429, which is exactly the cause #320's own investigation notes
+      # flagged and nobody had tested.
+      #
+      # THIS REMOVES THE CAUSE RATHER THAN MASKING IT. #320 says so directly:
+      # "bounding the matrix concurrency is a smaller fix than a retry, and it
+      # removes the cause rather than masking it". Adding a retry to each of the
+      # three steps above would be three retries hiding three symptoms, and every
+      # new step in this job would need a fourth.
+      #
+      # IT DOES NOT COST BILLED MINUTES. Runners are billed per job-minute and the
+      # total work is unchanged; only wall-clock grows, and only when more than
+      # eight images actually need rebuilding.
+      max-parallel: 8
       matrix:
         include:
           # THE AI LAYER'S FIRST IMAGE (AI-M1). kanz_inference had a servicer, a streaming
