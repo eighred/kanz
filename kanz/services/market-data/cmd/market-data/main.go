@@ -32,6 +32,7 @@ import (
 	"github.com/eighred/kanz/services/market-data/internal/config"
 	"github.com/eighred/kanz/services/market-data/internal/feed"
 	"github.com/eighred/kanz/services/market-data/internal/server"
+	"github.com/eighred/kanz/services/market-data/internal/vwap"
 )
 
 // priceHistoryDurable reports whether the price history survives a restart: 1
@@ -194,6 +195,35 @@ func runIngest(ctx context.Context, cfg config.Config, readiness *server.Readine
 		once     sync.Once
 		firstErr error
 	)
+	// THE SECOND TCA MEASURE (#436): did we trade worse than the market did?
+	//
+	// The OMS publishes what each fill cost against the DECISION-time mark. This
+	// joins that record to the bar window it was worked over and asks the other
+	// question — whether the execution beat the average participant. The two
+	// disagree in the case that matters: an order can beat arrival because the
+	// market moved in its favour while still being worked worse than everyone
+	// else.
+	//
+	// It lives here because market-data OWNS the bars. Its own consumer group, so
+	// it cannot starve the mark ingest it shares a subject space with, and it
+	// SUBSCRIBES ONLY — the cost record belongs to the OMS and this adds a second
+	// reading of it rather than publishing back into the loop that made it.
+	vwapWatch := vwap.New(obs.Registry, cfg.Tenant, st, logger)
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		group := cfg.ConsumerGroup + "-vwap"
+		logger.Info("market-data subscribing execution cost records for VWAP slippage",
+			"subject", vwap.EventTypeCostRecorded, "group", group)
+		if err := consumer.Subscribe(ctx, vwap.EventTypeCostRecorded, group, vwapWatch.Handle); err != nil &&
+			!errors.Is(err, context.Canceled) {
+			// Degrade, not crash: losing the slippage measure costs a report,
+			// while the mark ingest below is what the risk engine prices against.
+			logger.Error("market-data vwap subscription failed — execution cost will be recorded "+
+				"but never compared to the market's own average", "err", err)
+		}
+	}()
+
 	for _, subject := range cfg.Subjects {
 		wg.Add(1)
 		go func(subject string) {
