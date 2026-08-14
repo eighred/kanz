@@ -655,6 +655,13 @@ data:
                   # must never publish a balance, or there are two computations
                   # of one number and they will disagree at the worst moment.
                   "accounting.balance.portfolio",
+                  # WHAT THE RISK ENGINE HAS COMPUTED (#438), for the risk half of
+                  # the pre-trade gate. SUBSCRIBE ONLY, and the asymmetry is the
+                  # same one cash carries: the risk engine is the authority on
+                  # these numbers and the OMS must never publish one, or there are
+                  # two computations of a VaR and they will disagree at the worst
+                  # possible moment.
+                  "risk.portfolio.measures_computed",
                   "_INBOX.>",
                 ]
               }

@@ -41,6 +41,7 @@ import (
 	"github.com/eighred/kanz/services/oms/internal/order"
 	"github.com/eighred/kanz/services/oms/internal/outbox"
 	"github.com/eighred/kanz/services/oms/internal/position"
+	"github.com/eighred/kanz/services/oms/internal/riskview"
 	"github.com/eighred/kanz/services/oms/internal/server"
 	"github.com/eighred/kanz/services/oms/internal/venuesrv"
 )
@@ -305,8 +306,40 @@ func runConsumers(ctx context.Context, cfg config.Config, readiness *server.Read
 		}),
 	)
 
+	// THE RISK HALF OF THE PRE-TRADE GATE (#438).
+	//
+	// Order admission never asked the risk engine anything: risk was a downstream
+	// OBSERVER of orders, never a gate in front of them, so an order could be
+	// inside every mandate rule and still take the portfolio through its VaR
+	// limit. This folds the measures risk already publishes so the gate can check
+	// them as arithmetic on a local map — no call, no added latency, and a
+	// degraded risk engine makes this view STALE (a refusal) rather than making
+	// the OMS wait on it (an outage).
+	risk := riskview.New(
+		riskview.WithOnStale(func(portfolioID, measure string, age time.Duration) {
+			logger.Warn("oms: a risk measure is too old to gate on — orders under a risk-limit "+
+				"mandate will be REFUSED for this portfolio until the engine publishes again",
+				"portfolio_id", portfolioID, "measure", measure, "age", age.String(),
+				"subject", riskview.Subject)
+		}),
+	)
+	// HELD vs CURRENT, because the difference is what an operator needs BEFORE a
+	// risk limit starts refusing everything. A portfolio held but not current is
+	// one whose gate is about to fail closed, and that is a different incident
+	// from one the engine has never computed.
+	obs.Registry.MustRegister(prometheus.NewGaugeFunc(prometheus.GaugeOpts{
+		Name: "kanz_oms_risk_portfolios_held",
+		Help: "Portfolios whose risk measures this OMS has folded at all.",
+	}, func() float64 { held, _ := risk.Stats(); return float64(held) }))
+	obs.Registry.MustRegister(prometheus.NewGaugeFunc(prometheus.GaugeOpts{
+		Name: "kanz_oms_risk_portfolios_current",
+		Help: "Portfolios whose risk measures are within OMS freshness — the ones a declared " +
+			"risk limit can actually be checked against. held − current is the population whose " +
+			"orders a risk mandate will refuse.",
+	}, func() float64 { _, live := risk.Stats(); return float64(live) }))
+
 	preTrade := comp.NewPreTradeGate(
-		comp.NewEngine(nil), compliance.NewBookSource(book, cash), mandateReg, nil, nil, logger,
+		comp.NewEngine(nil), compliance.NewBookSource(book, cash, risk), mandateReg, nil, nil, logger,
 		comp.WithRequireMandate(cfg.RequireMandate),
 		comp.WithUngovernedObserver(func(string, string) { ungoverned.Inc() }),
 		comp.WithUnpricedObserver(func(portfolioID, instrumentID string) {
@@ -819,6 +852,28 @@ func runConsumers(ctx context.Context, cfg config.Config, readiness *server.Read
 			}
 		}(subject)
 	}
+	// RISK MEASURES — BROADCAST, NOT A WORK QUEUE, for exactly the reason the
+	// price spine is (#438).
+	//
+	// A durable GROUP load-balances, so with replicas: 2 each pod would fold only
+	// the measures it happened to receive and hold a DIFFERENT risk map. The gate
+	// checks a declared risk limit against that map, so the same order would be
+	// admitted by one pod and refused by the other — and "whether your order is
+	// legal depends on which pod got it" is not a property a pre-trade gate may
+	// have. A risk measure is replicated STATE, not work.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		logger.Info("oms subscribing to risk measures (broadcast)", "subject", riskview.Subject)
+		err := consumer.SubscribeBroadcast(ctx, riskview.Subject, risk.Handle)
+		if err != nil && !errors.Is(err, context.Canceled) {
+			once.Do(func() {
+				firstErr = err
+				cancel()
+			})
+		}
+	}()
+
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
