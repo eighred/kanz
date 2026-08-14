@@ -289,6 +289,31 @@ spec:
             # "how much of the book settles against an unproven account" is a number, not
             # an assumption. A MISMATCH is fatal regardless of this flag.
             - { name: OMS_REQUIRE_VERIFIED_ACCOUNT, value: "false" }
+            # Deny-by-default for an adapter that never SAID which order types it can
+            # place (#405). true ⇒ the OMS refuses to start on any venue adapter whose
+            # venue.v1 Describe returns an empty supported_order_types.
+            #
+            # WHY AN EMPTY ANSWER IS THE DANGEROUS ONE. The OMS refuses an
+            # undeclarable order type at admission — but only for an adapter that
+            # ANSWERED. An adapter predating supported_order_types answers with an empty
+            # list, and empty means "did not say", so the gate stands open for it. A
+            # stop order routed there is admitted, stored, and has its ORDER_ACCEPTED
+            # FACT published; risk carries the exposure and the caller has been told the
+            # order is working — and only the exchange refuses it. For the one order
+            # type whose entire purpose is to act when nobody is watching.
+            #
+            # It ships FALSE for the same reason the three above do: arming it refuses
+            # every adapter nobody has upgraded yet, which is a trading outage dressed
+            # as a control. With it off the OMS names each silent adapter at startup and
+            # counts it, so "nothing configured" and "checked, and fine" do not look the
+            # same.
+            #
+            # WRITTEN DOWN HERE BECAUSE ITS THREE SIBLINGS ARE. It was the only
+            # deny-by-default OMS control absent from this manifest — same class, same
+            # default, and invisible to anyone reading the deployment to find out what
+            # is switched on. test/arch/deny_by_default_is_visible_test.go now fails the
+            # build if a fourth one arrives unlisted.
+            - { name: OMS_REQUIRE_ORDER_TYPE_SUPPORT, value: "false" }
             # WHICH PORTFOLIO MAY SPEND WHICH ACCOUNT (EXEC-M16).
             #
             #   OMS_VENUE_ACCOUNTS="tenant/portfolio@MIC=account,..."
