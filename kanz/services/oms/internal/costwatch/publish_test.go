@@ -105,7 +105,7 @@ func TestCostRecordIsAValidFactEnvelope(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewProducer: %v", err)
 	}
-	w := costwatch.New(prometheus.NewRegistry(), "acme", prod, slog.New(slog.DiscardHandler))
+	w := costwatch.New(prometheus.NewRegistry(), "acme", prod, nil, slog.New(slog.DiscardHandler))
 
 	err = w.Handle(context.Background(),
 		&envelopepb.Envelope{EventId: "e-1", EventType: costwatch.EventTypeFilled, TenantId: "acme"},

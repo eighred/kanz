@@ -44,6 +44,7 @@ import (
 	orderpb "github.com/eighred/kanz/kanz-schemas-go/order/v1"
 
 	"github.com/eighred/kanz/internal/dec"
+	"github.com/eighred/kanz/internal/execution"
 	"github.com/eighred/kanz/internal/execution/tca"
 	"github.com/eighred/kanz/pkg/bus"
 )
@@ -76,6 +77,12 @@ type Bus interface {
 type Watch struct {
 	tenant string
 	bus    Bus
+	// costs is the per-venue fold the ROUTER ranks on (#437 B). Fed in-process
+	// rather than over the bus: publishing a FACT and subscribing to it in the
+	// same service would put a broker round trip inside a feedback loop and make
+	// the OMS a consumer of its own record. Nil ⇒ nothing ranks, and the declared
+	// default stands.
+	costs  *execution.VenueCosts
 	now    func() time.Time
 	logger *slog.Logger
 
@@ -95,11 +102,12 @@ type Watch struct {
 // straddle zero because beating the benchmark is a real and common outcome — a
 // bucket set starting at zero would report every saving as the smallest possible
 // cost.
-func New(reg prometheus.Registerer, tenant string, b Bus, logger *slog.Logger) *Watch {
+func New(reg prometheus.Registerer, tenant string, b Bus, costs *execution.VenueCosts, logger *slog.Logger) *Watch {
 	buckets := []float64{-100, -50, -25, -10, -5, 0, 5, 10, 25, 50, 100, 250, 500}
 	w := &Watch{
 		tenant: tenant,
 		bus:    b,
+		costs:  costs,
 		now:    time.Now,
 		logger: logger,
 		shortfallBps: prometheus.NewHistogramVec(prometheus.HistogramOpts{
@@ -162,6 +170,13 @@ func (w *Watch) Handle(ctx context.Context, env *envelopepb.Envelope, payload []
 
 	venue := res.Venue
 	total, _ := res.ShortfallBps.Float64()
+	// FEED THE RANKER (#437 B). The same measurement, in-process, so an
+	// untargeted order can go to the venue that has actually been cheapest
+	// instead of the one somebody named once. It is a PREFERENCE: the ranker
+	// abstains below its evidence floor, and the declared default stands.
+	if w.costs != nil {
+		w.costs.Observe(venue, total)
+	}
 	price, _ := res.PriceShortfallBps.Float64()
 	w.shortfallBps.WithLabelValues(venue).Observe(total)
 	w.priceShortfallBps.WithLabelValues(venue).Observe(price)
