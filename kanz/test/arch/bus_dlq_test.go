@@ -461,7 +461,7 @@ var retryCertifiedConsumers = map[string]string{
 		"cannot itself fail the handler, so a retry can never observe a Trigger that ran " +
 		"without its Apply* having actually completed.",
 
-	"services/risk-engine/cmd/risk-engine/main.go:391": "risk-engine (calibration quotes): the " +
+	"services/risk-engine/cmd/risk-engine/main.go:407": "risk-engine (calibration quotes): the " +
 		"sole handler is livequote.LiveQuotes.Handler (internal/risk/pricing/livequote/livequote.go:80) " +
 		"— an unconditional last-value cache write, same shape as accounting's live FX feed. " +
 		"Nothing to skip.",
