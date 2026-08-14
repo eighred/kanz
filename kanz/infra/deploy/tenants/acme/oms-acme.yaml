@@ -79,6 +79,8 @@ spec:
               value: XBIN
             - name: OMS_REQUIRE_VERIFIED_ACCOUNT
               value: "false"
+            - name: OMS_REQUIRE_ORDER_TYPE_SUPPORT
+              value: "false"
             - name: OMS_VENUE_ACCOUNTS
               value: ""
             - name: OMS_REQUIRE_VENUE_ACCOUNT
