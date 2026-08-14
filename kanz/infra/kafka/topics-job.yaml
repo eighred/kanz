@@ -77,6 +77,12 @@ data:
     # MONEY AND OBLIGATIONS -> 30d + a DLQ. 30 days is what the ARCHIVER buys;
     # permanence is the lakehouse's job (DATA-M2), not a retention setting here.
     order.order                6   delete   2592000000  yes
+    # REALIZED EXECUTION COST, PER FILL (#436). Same partition count as
+    # order.order because it is partitioned by the SAME key — the order id — so a
+    # consumer summing an order's cost reads its fills in the order they
+    # happened. Same 30d retention: it is the measurement of a money event and
+    # ages with the fills it was computed from; permanence is the lakehouse's job.
+    order.cost                 6   delete   2592000000  yes
     strategy.signal            6   delete   2592000000  yes
     # optimization.proposal (#409): the FACT naming who authorized a rebalance
     # that became live orders. It belongs with the money path, not with the

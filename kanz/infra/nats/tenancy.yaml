@@ -620,6 +620,17 @@ data:
                   "order.order.accepted", "order.order.rejected", "order.order.routed",
                   "order.order.filled", "order.order.partially_filled", "order.order.cancelled",
                   "order.order.expired", "order.order.outcome",
+                  # REALIZED EXECUTION COST, PER FILL (#436). Derived from the
+                  # OMS's own fills and the arrival mark stamped at admission, so
+                  # it belongs to the order domain the OMS already owns — the
+                  # EXECUTION stream carries it under order.>, and the archiver's
+                  # default subject list archives it with no new mapping.
+                  #
+                  # PUBLISH ONLY, and nothing on the trading path subscribes. A
+                  # measurement that could be read back into a routing decision
+                  # would put an analytic on the capital path; the venue ranking
+                  # that will consume this (#437) is a separate reader.
+                  "order.cost.recorded",
                   "risk.position.changed.>", "risk.position.venue.changed.>",
                   "settlement.instruction.fail",
                   "dlq.order.order.submit", "dlq.order.order.amend", "dlq.order.order.cancel",
