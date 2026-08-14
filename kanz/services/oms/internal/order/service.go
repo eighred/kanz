@@ -53,6 +53,11 @@ type Service struct {
 	// accounts binds each portfolio to the exchange account it may execute against.
 	// Empty ⇒ nothing is bound, and every portfolio trades whatever account its
 	// venue adapter happens to hold — one collateral pool, shared. See noteShared.
+	// arrivalMarks stamps the decision-time benchmark on every admitted order
+	// (#436). Nil ⇒ orders carry no arrival mark and are not measurable, which is
+	// a stated absence rather than a zero.
+	arrivalMarks ArrivalMarks
+
 	accounts       *execution.AccountBindings
 	requireAccount bool
 	sharedOnce     sync.Map // "tenant/portfolio@MIC" → struct{}, so the warning is said once
@@ -399,6 +404,25 @@ func (s *Service) handleSubmit(ctx context.Context, env *envelopepb.Envelope, pa
 		}
 		return err
 	}
+	// THE ARRIVAL MARK, STAMPED HERE AND NOWHERE ELSE (#436).
+	//
+	// Transaction-cost analysis compares what an order paid against what the
+	// market showed WHEN THE DECISION WAS MADE. That mark cannot be recovered
+	// afterwards: a price read at analysis time is a price from after this order
+	// moved the market, which biases every cost measure flatter and always in the
+	// flattering direction. A cost number that understates cost is worse than
+	// none, because it is the only number on the page and it will be believed.
+	//
+	// So it is captured at admission — the earliest point the OMS knows both the
+	// instrument and the time — even though nothing reads it yet. Every order
+	// admitted without it is permanently unmeasurable, which is the same
+	// retroactive damage #432 fixed one field over.
+	//
+	// It is NOT stamped inside Accept: that function is documented pure — no I/O,
+	// identical on the live path and on replay — and a lookup against a live
+	// mark cache is neither. Replaying an order must not re-stamp it with today's
+	// price.
+	s.stampArrival(st)
 	// The account is stamped by the OMS, never by the caller. A caller that could name
 	// the account could name ANY portfolio's account — it would be choosing whose
 	// collateral to spend — which is why SubmitOrder has no such field to set.
