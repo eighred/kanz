@@ -204,6 +204,24 @@ func runEngine(ctx context.Context, cfg config.Config, readiness *server.Readine
 	} else {
 		logger.Warn("no RISK_ENGINE_MARKETDATA_DATABASE_URL — VaR99 serves the RISK-07 1%×gross placeholder")
 	}
+
+	// WHICH MEASURES THIS ENGINE ACTUALLY SERVES (#509).
+	//
+	// REPORTED HERE, the instant the registry is final, rather than beside the
+	// other postures 180 lines down — for the reason CalibrationPosture states
+	// about itself: the case that matters most is the one where startup does not
+	// get that far. A pod that dies wiring the bus still has a complete answer to
+	// "what would this build have served", and that answer is a static fact about
+	// the binary rather than about the run.
+	//
+	// Passed the SAME registry the query EngineImpl uses, deliberately — a posture
+	// computed from a fresh registry would describe an engine nobody talks to.
+	//
+	// It reports EIGHT of twenty-six today. The query path drops unknown measure
+	// names, so the other eighteen are absent from successful responses rather
+	// than refused, which is indistinguishable from a portfolio that holds none of
+	// that instrument.
+	app.MeasurePosture(obs.Registry, logger, registry)
 	// THE AI LAYER GETS ITS INPUT (AI-M1).
 	//
 	// internal/prediction shipped a feature publisher, a resilient inference client and a
