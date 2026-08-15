@@ -19,7 +19,7 @@ package reference.v1;
 
 import "google/protobuf/timestamp.proto";
 import "common/v1/decimal.proto";
-import "reference/v1/contract.proto"; // reuses PaymentFrequency
+import "reference/v1/conventions.proto"; // reuses PaymentFrequency
 
 // DayCountConvention is the accrual basis for coupon interest and year
 // fractions. Carried as an enum (not the free-text day_count string the

@@ -179,3 +179,140 @@ func abs32(v int32) int32 {
 	}
 	return v
 }
+
+// Compile-time assertion for the fixed-income seam, alongside the option one
+// above. RegisterFIRisk takes this interface and had no implementation at all
+// until #509, which is why DV01, Duration, Convexity and SpreadDuration were
+// implemented and unreachable.
+var _ compute.BondTermsProvider = (*Provider)(nil)
+
+// BondTerms resolves an instrument's bond terms as of a point in time.
+// ok=false means "this is not a bond, or its terms cannot be used" — the same
+// collapsed signal OptionTerms carries, for the same reason: the seam has no
+// error channel.
+func (p *Provider) BondTerms(ctx context.Context, instrumentID string, asOf time.Time) (compute.BondSpec, bool) {
+	if p == nil || p.store == nil {
+		return compute.BondSpec{}, false
+	}
+	rec, err := p.store.LatestAsOf(ctx, instrumentID, asOf)
+	if err != nil {
+		if errors.Is(err, terms.ErrNoTerms) && p.onMissing != nil {
+			p.onMissing(instrumentID)
+		}
+		return compute.BondSpec{}, false
+	}
+	bond := rec.Terms.GetBond()
+	if bond == nil {
+		// An option, a swap or a future. Genuinely not a bond — the FI measures
+		// skip it, which is correct — so the missing-terms observer does not fire.
+		return compute.BondSpec{}, false
+	}
+	spec, ok := toBondSpec(bond)
+	if !ok {
+		// Terms that exist and cannot be used. Reported as missing because the
+		// consequence is the same: this bond is about to be excluded from DV01
+		// and from every duration average, silently reducing the book's measured
+		// rate risk.
+		if p.onMissing != nil {
+			p.onMissing(instrumentID)
+		}
+		return compute.BondSpec{}, false
+	}
+	return spec, true
+}
+
+// toBondSpec converts reference.v1.BondTerms to the float working shape the bond
+// library uses.
+func toBondSpec(b *referencepb.BondTerms) (compute.BondSpec, bool) {
+	face, ok := decimalToFloat(b.GetFaceValue())
+	if !ok || face <= 0 {
+		return compute.BondSpec{}, false
+	}
+	// A ZERO COUPON IS VALID and is not a missing one — BondTerms says so: "0
+	// denotes a zero-coupon bond". So this checks convertibility and sign, not
+	// non-zero, and a negative coupon is refused because it is not a bond this
+	// library models.
+	coupon, ok := decimalToFloat(b.GetCouponRate())
+	if !ok || coupon < 0 {
+		return compute.BondSpec{}, false
+	}
+	if b.GetIssueDate() == nil || b.GetMaturityDate() == nil {
+		return compute.BondSpec{}, false
+	}
+	issue, maturity := b.GetIssueDate().AsTime(), b.GetMaturityDate().AsTime()
+	if !maturity.After(issue) {
+		// A bond maturing at or before issue has no cashflow schedule; the
+		// pricer would loop over an empty or inverted range and return a price
+		// with no error.
+		return compute.BondSpec{}, false
+	}
+	if b.GetCurrencyCode() == "" {
+		// The currency is the KEY the discount curve is looked up by. An empty
+		// one resolves no curve, so the bond drops out of every FI measure — and
+		// it would do so silently, which is why it is refused here where the
+		// observer fires.
+		return compute.BondSpec{}, false
+	}
+	dc, ok := toDayCount(b.GetDayCount())
+	if !ok {
+		return compute.BondSpec{}, false
+	}
+	freq, ok := toFrequency(b.GetCouponFrequency(), coupon)
+	if !ok {
+		return compute.BondSpec{}, false
+	}
+	return compute.BondSpec{
+		Face: face, CouponRate: coupon, Frequency: freq,
+		Issue: issue, Maturity: maturity, DayCount: dc,
+		Currency: b.GetCurrencyCode(), IssuerID: b.GetIssuerId(),
+	}, true
+}
+
+// toDayCount maps the wire convention to the pricing one.
+//
+// EXPLICIT, NOT A CAST, and the numbers are why. The proto and the Go iota
+// disagree on ordering — DAY_COUNT_CONVENTION_ACT_ACT is 4 while
+// pricing.ActualActual is 0 — so pricing.DayCount(wireValue) would send ACT/ACT
+// out of range and, far worse, map UNSPECIFIED(0) onto ActualActual, the
+// government-bond basis. An unset convention would become a valid, plausible one
+// and every accrual computed from it would be wrong by a few days' interest with
+// nothing to indicate it.
+func toDayCount(d referencepb.DayCountConvention) (pricing.DayCount, bool) {
+	switch d {
+	case referencepb.DayCountConvention_DAY_COUNT_CONVENTION_ACT_ACT:
+		return pricing.ActualActual, true
+	case referencepb.DayCountConvention_DAY_COUNT_CONVENTION_ACT_365F:
+		return pricing.Actual365Fixed, true
+	case referencepb.DayCountConvention_DAY_COUNT_CONVENTION_ACT_360:
+		return pricing.Actual360, true
+	case referencepb.DayCountConvention_DAY_COUNT_CONVENTION_THIRTY_360:
+		return pricing.Thirty360, true
+	default:
+		return 0, false
+	}
+}
+
+// toFrequency maps the payment frequency to coupons per year.
+//
+// A ZERO-COUPON BOND NEEDS NO FREQUENCY, which BondTerms states — the field is
+// "ignored (no coupons) when coupon_rate is 0" — so an unspecified frequency is
+// accepted there and refused everywhere else. Defaulting a coupon bond's
+// frequency to annual would halve a semiannual bond's coupon count and understate
+// its duration; refusing makes the operator say which it is.
+func toFrequency(f referencepb.PaymentFrequency, couponRate float64) (int, bool) {
+	if couponRate == 0 {
+		return 0, true
+	}
+	switch f {
+	case referencepb.PaymentFrequency_PAYMENT_FREQUENCY_ANNUAL:
+		return 1, true
+	case referencepb.PaymentFrequency_PAYMENT_FREQUENCY_SEMIANNUAL:
+		return 2, true
+	case referencepb.PaymentFrequency_PAYMENT_FREQUENCY_QUARTERLY:
+		return 4, true
+	case referencepb.PaymentFrequency_PAYMENT_FREQUENCY_MONTHLY:
+		return 12, true
+	default:
+		return 0, false
+	}
+}

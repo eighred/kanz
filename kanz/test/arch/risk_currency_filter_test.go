@@ -71,6 +71,23 @@ func TestOnlyOnePlaceFiltersOnBaseCurrency(t *testing.T) {
 	// alike: the accessor form is the same rule wearing a getter.
 	filterRe := regexp.MustCompile(`(?:CurrencyCode|GetCurrencyCode\(\))\s*[!=]=`)
 
+	// EXCEPT AGAINST THE EMPTY STRING, which is a PRESENCE check and cannot be
+	// the filter this guard is about: `code == ""` asks whether a record names a
+	// currency at all, and no portfolio's base currency is "". Excluded because
+	// the alternative was an exemption entry, and an exemption would have been
+	// the wrong tool — it would license one file to open-code the real rule
+	// forever, to buy precision the matcher can simply have.
+	//
+	// It is a narrow carve-out on purpose. `!= base`, `== base`, `!= p.Base()`
+	// and every other form still fire; only a literal empty string is exempt,
+	// and that literal cannot express "denominated in the portfolio's base
+	// currency" however hard a caller tries.
+	//
+	// Found when internal/risk/termsource gained a bond-terms conversion that
+	// refuses terms naming no currency (#509) — a well-formedness check the old
+	// pattern read as the tenth copy of the filter.
+	presenceRe := regexp.MustCompile(`(?:CurrencyCode|GetCurrencyCode\(\))\s*[!=]=\s*""`)
+
 	var scanned, offenders []string
 	homeMatches := false
 	for _, f := range files {
@@ -78,7 +95,7 @@ func TestOnlyOnePlaceFiltersOnBaseCurrency(t *testing.T) {
 			continue
 		}
 		scanned = append(scanned, f.rel)
-		if !filterRe.MatchString(f.body) {
+		if !filtersOnBaseCurrency(f.body, filterRe, presenceRe) {
 			continue
 		}
 		if f.rel == baseCurrencyFilterHome {
@@ -120,4 +137,19 @@ func TestOnlyOnePlaceFiltersOnBaseCurrency(t *testing.T) {
 			"limit check pass.",
 			f, baseCurrencyFilterHome)
 	}
+}
+
+// filtersOnBaseCurrency reports whether a file contains a currency comparison
+// that is NOT merely a presence check.
+//
+// Line by line rather than whole-file, because a file may legitimately do both:
+// termsource refuses terms with no currency AND must not filter on a base one,
+// and a whole-file match cannot tell those apart.
+func filtersOnBaseCurrency(body string, filterRe, presenceRe *regexp.Regexp) bool {
+	for _, line := range strings.Split(body, "\n") {
+		if filterRe.MatchString(line) && !presenceRe.MatchString(line) {
+			return true
+		}
+	}
+	return false
 }

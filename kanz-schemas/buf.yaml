@@ -19,3 +19,36 @@ lint:
 breaking:
   use:
     - FILE
+  ignore_only:
+    # PaymentFrequency MOVED to reference/v1/conventions.proto (#509); it was not
+    # deleted. Same proto package, same fully-qualified name
+    # (reference.v1.PaymentFrequency), same generated Go type — nothing on the
+    # wire or in any SDK changes.
+    #
+    # The FILE category is stricter than wire compatibility on purpose: it treats
+    # a declaration leaving a file as a break, because per-file generated output
+    # matters in some languages. That stance is right in general and it forbids
+    # EVERY structural fix here — moving the enum, hoisting BondTerms the other
+    # way, or retyping BondTerms.coupon_frequency are all breaking under it. The
+    # remaining alternatives were duplicating BondTerms into contract.proto, or
+    # storing two message types in one column. Both trade a one-line exception
+    # for a second definition of one concept, which is the thing CLAUDE.md's
+    # one-implementation rule exists to prevent.
+    #
+    # WHY THE MOVE WAS NEEDED: contract.proto had to import fixed_income.proto to
+    # give ContractTerms a BOND variant, and fixed_income.proto imported
+    # contract.proto for this enum. A cycle protoc rejects.
+    #
+    # THIS IS NARROWER THAN IT LOOKS, and that is what makes it acceptable. It
+    # exempts ONE file from ENUM_NO_DELETE, and the enum's real home,
+    # conventions.proto, carries no exception.
+    #
+    # Checked rather than assumed: deleting PaymentFrequency from
+    # conventions.proto does not merely fail the breaking gate, it fails to
+    # COMPILE — "cannot find `PaymentFrequency` in this scope" in all three files
+    # that use it, before the breaking check runs at all. So the enum cannot
+    # disappear while anything references it, which is a stronger guarantee than
+    # the rule this exempts was providing. What is permitted is exactly the thing
+    # that happened: one file no longer declaring an enum that still exists.
+    ENUM_NO_DELETE:
+      - proto/reference/v1/contract.proto

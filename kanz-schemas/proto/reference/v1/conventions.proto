@@ -1,0 +1,37 @@
+syntax = "proto3";
+
+// Package reference.v1 (shared conventions) holds the market conventions that
+// more than one half of this package needs.
+//
+// # Why this file exists at all
+//
+// PaymentFrequency was declared in contract.proto, and fixed_income.proto
+// imported contract.proto for it — one enum, one import. That was fine until
+// ContractTerms needed a BOND variant (#509): contract.proto would then have to
+// import fixed_income.proto for BondTerms, and buf refuses the cycle.
+//
+// Moving the shared enum here breaks it in the direction that stays broken. The
+// alternative — hoisting BondTerms into contract.proto — would empty
+// fixed_income.proto of the message it is named for, and would take
+// DayCountConvention with it, which fixed_income deliberately keeps separate
+// from the swap-leg conventions next door.
+//
+// NOTHING ON THE WIRE OR IN GO CHANGES. The enum stays reference.v1.
+// PaymentFrequency and stays the Go type referencev1.PaymentFrequency: proto
+// identity is the package plus the name, not the file. Only the import lines
+// move — and note they must move EXPLICITLY, because proto imports are not
+// transitive: a file that uses PaymentFrequency imports THIS file, whatever else
+// it already imports.
+package reference.v1;
+
+// PaymentFrequency is how often a periodic payment is made — a swap leg's
+// coupon, a bond's coupon, a structured deal's distribution.
+enum PaymentFrequency {
+  // Default zero value; never set explicitly.
+  PAYMENT_FREQUENCY_UNSPECIFIED = 0;
+
+  PAYMENT_FREQUENCY_ANNUAL = 1;
+  PAYMENT_FREQUENCY_SEMIANNUAL = 2;
+  PAYMENT_FREQUENCY_QUARTERLY = 3;
+  PAYMENT_FREQUENCY_MONTHLY = 4;
+}

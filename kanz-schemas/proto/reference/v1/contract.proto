@@ -17,6 +17,8 @@ package reference.v1;
 
 import "google/protobuf/timestamp.proto";
 import "common/v1/decimal.proto";
+import "reference/v1/conventions.proto"; // PaymentFrequency
+import "reference/v1/fixed_income.proto"; // BondTerms
 
 // OptionType is the right an option confers.
 enum OptionType {
@@ -78,17 +80,6 @@ enum SwapLegType {
 
   // FLOAT: pays a floating index plus a spread.
   SWAP_LEG_TYPE_FLOAT = 2;
-}
-
-// PaymentFrequency is how often a swap leg pays.
-enum PaymentFrequency {
-  // Default zero value; never set explicitly.
-  PAYMENT_FREQUENCY_UNSPECIFIED = 0;
-
-  PAYMENT_FREQUENCY_ANNUAL = 1;
-  PAYMENT_FREQUENCY_SEMIANNUAL = 2;
-  PAYMENT_FREQUENCY_QUARTERLY = 3;
-  PAYMENT_FREQUENCY_MONTHLY = 4;
 }
 
 // SwapLeg is one side of a swap.
@@ -170,5 +161,23 @@ message ContractTerms {
     OptionTerms option = 10;
     SwapTerms swap = 11;
     FutureTerms future = 12;
+
+    // BOND (#509). fixed_income.proto's BondTerms already existed — day counts,
+    // frequencies, an issuer join key — and its own comment anticipated this
+    // line: "keyed (in ContractTerms via a follow-up, or stood up by a reference
+    // store)". Without the follow-up the fixed-income measures (DV01, Duration,
+    // Convexity, SpreadDuration) were implemented and UNREACHABLE, because
+    // compute.RegisterFIRisk needs a BondTermsProvider and nothing could resolve
+    // bond terms by instrument_id.
+    //
+    // A BOND IS NOT A DERIVATIVE, and this file's header calls itself the
+    // contract-terms half for derivatives. Putting it here anyway is the
+    // deliberate choice: what this store provides is "instrument_id ->
+    // slowly-changing terms, as of a time", which is exactly a bond's need. A
+    // second store keyed the same way, with the same point-in-time contract, is
+    // the duplication CLAUDE.md's one-implementation rule exists to prevent —
+    // and the alternative is a naming preference paid for with a second
+    // migration.
+    BondTerms bond = 13;
   }
 }
