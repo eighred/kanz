@@ -42,8 +42,8 @@ func TestReportsSatisfyTheGate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Reports: %v", err)
 	}
-	if len(reports) < 5 {
-		t.Fatalf("got %d reports, want one per analytic this package covers (5)", len(reports))
+	if len(reports) < 6 {
+		t.Fatalf("got %d reports, want one per analytic this package covers (6)", len(reports))
 	}
 
 	g := validation.NewGate(func() time.Time { return now })
@@ -146,6 +146,24 @@ func TestGreeksFiniteDifferenceReproducesItsBenchmarks(t *testing.T) {
 	for _, c := range cases {
 		if !c.Passed() {
 			t.Errorf("%s: got %.9f, want %.9f ± %g", c.Name, c.Got, c.Want, c.Tolerance)
+		}
+	}
+}
+
+// THE CDS BOOTSTRAP REPRICES ITS OWN QUOTES.
+//
+// CVA integrates against Survival(t), so a curve that understates default
+// probability understates the charge on every counterparty exposure — and does
+// it silently, because a smaller CVA is not an error condition.
+func TestCDSBootstrapReproducesItsBenchmarks(t *testing.T) {
+	cases := benchmarks.CDSBootstrap()
+	if len(cases) < 14 {
+		t.Fatalf("only %d credit cases were built — the fixture failed to bootstrap and the set "+
+			"silently shrank, which reads as a smaller passing suite", len(cases))
+	}
+	for _, c := range cases {
+		if !c.Passed() {
+			t.Errorf("%s: got %.10f, want %.10f ± %g", c.Name, c.Got, c.Want, c.Tolerance)
 		}
 	}
 }
