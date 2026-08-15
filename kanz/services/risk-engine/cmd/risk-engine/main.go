@@ -307,11 +307,16 @@ func runEngine(ctx context.Context, cfg config.Config, readiness *server.Readine
 	var applier ingest.Applier = engine.NewTriggeringApplier(store, recomputer)
 	group := ""
 	assign := shard.NewAssignment(shard.NewRing(cfg.ShardMembers, 0), cfg.ShardSelf)
-	if assign.Sharded() && cfg.ShardSelf != "" {
+	sharded := assign.Sharded() && cfg.ShardSelf != ""
+	if sharded {
 		applier = app.NewShardFilter(applier, assign)
 		group = app.DefaultConsumerGroup + "-" + cfg.ShardSelf
-		logger.Info("risk-engine sharding enabled", "self", cfg.ShardSelf, "members", cfg.ShardMembers)
 	}
+	// WHETHER THIS FLEET PINS A PORTFOLIO TO A REPLICA (#110). The log line that
+	// used to sit inside the branch above announced the good case and said
+	// nothing about the other one — so the state the estate is actually in was
+	// the silent one.
+	app.ShardPosture(obs.Registry, logger, sharded, cfg.ShardMembers, cfg.ShardSelf)
 	ingest, err := app.NewIngest(consumer, applier, group, logger)
 	if err != nil {
 		return err
