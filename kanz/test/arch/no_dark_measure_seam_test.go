@@ -1,0 +1,326 @@
+package arch
+
+import (
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"io/fs"
+	"path/filepath"
+	"sort"
+	"strconv"
+	"strings"
+	"testing"
+)
+
+// A REGISTRATION SEAM NOBODY CALLS IS A MEASURE THIS PLATFORM DOES NOT SERVE.
+//
+// no_dark_capability_test.go catches a package nothing imports. It names its own
+// blind spot in its own doc — it works at IMPORT granularity — and this guard
+// exists because that blind spot bit (#509).
+//
+// internal/risk/compute is imported constantly: for DefaultRegistry, for the
+// measure-name constants, for MeasureFunc. The package is bright. ELEVEN OF ITS
+// SEAMS WERE DARK, and the import guard could not see it:
+//
+//	RegisterFIRisk        DV01, Duration, Convexity, SpreadDuration   0 callers
+//	RegisterGreeks        Delta, Gamma, Vega, Theta, Rho              0 callers
+//	RegisterXVA           CVA, DVA, FVA                               0 callers
+//	RegisterFactorRisk / RegisterLiquidityRisk / RegisterStructuredRisk
+//	NewRevaluer / NewBondRevaluer / NewLiveModelProvider
+//
+// The risk engine registers DefaultRegistry plus varmodel.Register — EIGHT
+// measures — and `internal/risk/engine.filterMeasures` documents that "unknown
+// names are dropped". So a client asking for DV01 on a bond book receives 200
+// with DV01 absent, which is indistinguishable from a portfolio holding no
+// bonds. "Nothing configured" and "checked, and fine" looked the same.
+//
+// # What counts as a seam, and why it is derived from types
+//
+// An exported function under internal/risk/ that TAKES a *Registry or a value
+// whose type name ends in Providers. Both mean the same thing: this function
+// exists to be handed the engine's registry or a bundle of live data sources at
+// a composition root, and nowhere else.
+//
+// NOT a naming convention. A rule of "functions called Register*" would miss
+// NewRevaluer and NewBondRevaluer — two of the eleven — and would break the day
+// someone names one Wire or Install. The parameter is the thing that makes it a
+// composition-root seam, so the parameter is what this reads.
+//
+// DefaultRegistry and NewRegistry are excluded by that same rule and correctly
+// so: they RETURN a *Registry and take nothing. They are the thing seams are
+// handed, not seams.
+//
+// # What counts as a caller
+//
+// A call from a DIFFERENT package, in a non-test file, resolved through the
+// calling file's import block — never by bare name. A name-only match would let
+// any `foo.Register(` in the module vouch for `varmodel.Register`, and the guard
+// would pass while checking a weaker property than its name claims.
+//
+// # The known weakness, stated rather than discovered later
+//
+// A seam called only by ANOTHER dark seam counts as live here. That is the same
+// limitation the import-granularity guard has, one level finer, and it is why
+// the exemption list below is the real record: every dark seam names the issue
+// and the specific missing provider, so the reason survives independently of
+// what the call graph can prove.
+
+// darkSeamExempt maps "<package>.<Func>" to the issue tracking its wiring.
+//
+// EVERY ENTRY NAMES THE MISSING PIECE, not just an issue number. "Not wired yet"
+// without saying what is absent is how eleven seams stayed dark long enough for
+// the analytics above them to be benchmarked (#471) before anyone noticed they
+// do not reach production.
+var darkSeamExempt = map[string]string{
+	"internal/risk/compute.RegisterFIRisk": "#509 — DV01/Duration/Convexity/SpreadDuration. Its " +
+		"CurveProvider EXISTS and fits (curvestore_test.go asserts *curve.Store satisfies it) but is " +
+		"unreachable: risk-engine's startCalibration builds curve.NewStore() inline as an anonymous " +
+		"argument, so the calibrated curve is written and read by nobody. Its BondTermsProvider has " +
+		"NO SCHEMA AT ALL — reference/v1/contract.proto carries OptionTerms, SwapTerms and " +
+		"FutureTerms, and no bond variant. Adding one is a decision, not a task.",
+	"internal/risk/compute.RegisterGreeks": "#509 — Delta/Gamma/Vega/Theta/Rho. Needs three " +
+		"providers: TermsProvider exists (internal/risk/termsource) and nothing constructs it (#345); " +
+		"VolProvider is satisfied by volsurface.Store, whose Calibrator has no production caller and " +
+		"needs option-chain ingestion (#345 item 4); SpotProvider has ZERO production " +
+		"implementations. Note this seam OVERWRITES the DefaultRegistry Delta placeholder, so wiring " +
+		"it changes an already-served measure — not a pure addition.",
+	"internal/risk/compute.RegisterXVA": "#509 — CVA/DVA/FVA. Needs an XVAProvider (exposure " +
+		"profiles + counterparty credit curves). internal/risk/pricing/credit holds the calibrator " +
+		"and is itself dark for want of a live CDS quote source (#113, #203), so this cannot be wired " +
+		"to anything real without synthesising counterparty spreads — which #345 rules out " +
+		"explicitly: a SUCCESSFUL calibration of invented quotes is worse than a failed one.",
+	"internal/risk/compute.RegisterFactorRisk": "#509 — factor exposures. Needs a ModelProvider; " +
+		"NewLiveModelProvider is the production one and is itself dark (below).",
+	"internal/risk/compute.RegisterLiquidityRisk": "#509 — liquidity risk. Needs a " +
+		"liquidity.Provider (per-instrument ADV/spread) with no production implementation, plus a " +
+		"baseVaR MeasureFunc to scale.",
+	"internal/risk/compute.RegisterStructuredRisk": "#509 — structured-product risk. Needs a " +
+		"StructuredProvider (deal terms + prepayment assumptions) with no production implementation.",
+	"internal/risk/compute.NewRevaluer": "#509 — full-revaluation scenario shocks, as opposed to " +
+		"the sensitivity approximation. Takes GreeksProviders, so it is blocked on exactly what " +
+		"RegisterGreeks is blocked on.",
+	"internal/risk/compute.NewBondRevaluer": "#509 — curve-shift revaluation for bonds. Takes " +
+		"FIProviders, so it is blocked on the same missing BondTerms schema.",
+	"internal/risk/compute.NewLiveModelProvider": "#509 — the production factormodel.Providers " +
+		"adapter. Blocked on a returns/characteristics source for the factor universe.",
+	"internal/risk/scenario.EvaluateCurveShift": "#509 — needs a BondRevaluer, which is " +
+		"NewBondRevaluer, which is dark. Reachable the moment the FI branch is.",
+	"internal/risk/scenario.EvaluateReval": "#509 — needs a Revaluer, which is NewRevaluer, which " +
+		"is dark. Reachable the moment the Greeks branch is.",
+	"internal/risk/scenario.EvaluateFactorShock": "#509 — needs a *factormodel.Model, produced by " +
+		"factormodel.Fit through NewLiveModelProvider, which is dark.",
+	"internal/risk/compute/var.RegisterMonteCarlo": "#509 — MODEL-01e Monte-Carlo VaR. The " +
+		"historical sibling (varmodel.Register) IS wired at risk-engine/main.go:202, so this one is " +
+		"dark by CHOICE rather than by a missing provider: it takes the same ReturnsProvider. " +
+		"Deciding whether to serve both is the open question, and until it is answered the platform " +
+		"ships a Monte-Carlo VaR nobody can request.",
+}
+
+// seamRef is a composition-root seam: an exported function that takes the
+// engine's registry or a bundle of live providers.
+type seamRef struct {
+	pkg  string // module-relative package dir, e.g. "internal/risk/compute"
+	name string
+}
+
+func (s seamRef) String() string { return s.pkg + "." + s.name }
+
+func TestNoMeasureSeamIsDarkAndUntracked(t *testing.T) {
+	root := moduleRoot(t)
+	fset := token.NewFileSet()
+
+	// ===== 1. Find every seam under internal/risk/ =====
+	seams := map[seamRef]bool{}
+	seamPkgs := map[string]bool{}
+	walkGoFiles(t, root, "internal/risk", fset, func(rel string, f *ast.File) {
+		pkgDir := filepath.ToSlash(filepath.Dir(rel))
+		for _, decl := range f.Decls {
+			fn, ok := decl.(*ast.FuncDecl)
+			if !ok || fn.Recv != nil || !fn.Name.IsExported() || fn.Type.Params == nil {
+				continue
+			}
+			if !takesRegistryOrProviders(fn.Type.Params) {
+				continue
+			}
+			seams[seamRef{pkgDir, fn.Name.Name}] = true
+			seamPkgs[pkgDir] = true
+		}
+	})
+
+	// NON-VACUITY, first half: the scan must actually find the seam family. A
+	// broken walk would report zero dark seams and pass having checked nothing —
+	// which is this guard's own failure mode, and the one it exists to prevent
+	// one level down.
+	if len(seams) < 15 {
+		t.Fatalf("found only %d composition-root seams under internal/risk — the walk or the "+
+			"parameter rule is broken, not the estate", len(seams))
+	}
+
+	// ===== 2. Count callers, resolved through each file's import block =====
+	called := map[seamRef]bool{}
+	walkGoFiles(t, root, ".", fset, func(rel string, f *ast.File) {
+		callerPkg := filepath.ToSlash(filepath.Dir(rel))
+		// Alias → module-relative package dir, for the seam packages only.
+		alias := map[string]string{}
+		for _, imp := range f.Imports {
+			path, err := strconv.Unquote(imp.Path.Value)
+			if err != nil {
+				continue
+			}
+			dir, ok := strings.CutPrefix(path, modulePath+"/")
+			if !ok || !seamPkgs[dir] {
+				continue
+			}
+			name := filepath.Base(dir)
+			if imp.Name != nil {
+				name = imp.Name.Name
+			}
+			alias[name] = dir
+		}
+		ast.Inspect(f, func(n ast.Node) bool {
+			call, ok := n.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			sel, ok := call.Fun.(*ast.SelectorExpr)
+			if !ok {
+				return true
+			}
+			id, ok := sel.X.(*ast.Ident)
+			if !ok {
+				return true
+			}
+			// QUALIFIED ONLY, and only from a DIFFERENT package. A bare-name
+			// match would let any foo.Register( in the module vouch for
+			// varmodel.Register; an intra-package call proves nothing about
+			// whether a composition root reaches it.
+			if dir, ok := alias[id.Name]; ok && dir != callerPkg {
+				called[seamRef{dir, sel.Sel.Name}] = true
+			}
+			return true
+		})
+	})
+
+	// ===== 3. Default-deny =====
+	var dark []string
+	seenExempt := map[string]bool{}
+	live := 0
+
+	for s := range seams {
+		if called[s] {
+			live++
+			continue
+		}
+		if reason, ok := darkSeamExempt[s.String()]; ok {
+			seenExempt[s.String()] = true
+			t.Logf("%s: dark, tracked — %s", s, reason)
+			continue
+		}
+		dark = append(dark, s.String())
+	}
+
+	// NON-VACUITY, second half: some seams MUST resolve as live, or the caller
+	// resolution is broken and every seam looks dark — which would make the
+	// exemption list grow to cover a bug in this file.
+	if live < 3 {
+		t.Fatalf("only %d of %d seams resolved to a caller — the import-alias resolution is "+
+			"broken. ComputeMeasures, engine.New and varmodel.Register are all wired and must "+
+			"resolve", live, len(seams))
+	}
+
+	if len(dark) > 0 {
+		sort.Strings(dark)
+		t.Errorf("%d composition-root seam(s) under internal/risk have NO caller in any other "+
+			"package: %v.\n"+
+			"A registration seam nobody calls is a MEASURE THIS PLATFORM DOES NOT SERVE — and it "+
+			"does not fail, it is dropped: internal/risk/engine.filterMeasures drops unknown names, "+
+			"so a client asking for it gets 200 with the measure absent, indistinguishable from a "+
+			"portfolio that has none of that instrument.\n"+
+			"no_dark_capability_test.go cannot see this: internal/risk/compute is imported "+
+			"constantly, so the package is bright while its seams are dark (#509).\n"+
+			"Wire it at a composition root, or add an entry to darkSeamExempt NAMING THE ISSUE AND "+
+			"THE MISSING PROVIDER.",
+			len(dark), dark)
+	}
+
+	// DEAD-ENTRY ARM: an exemption for a seam that now has a caller means
+	// somebody wired it, and for a seam that no longer exists means it was
+	// renamed or removed. Either way the entry is a claim about the estate that
+	// is no longer true, and it must not outlive its repair.
+	for name, reason := range darkSeamExempt {
+		if seenExempt[name] {
+			continue
+		}
+		t.Errorf("exemption for %q is stale — the seam now has a caller, or no longer exists "+
+			"under the parameter rule. Delete the entry (%s)", name, reason)
+	}
+}
+
+// takesRegistryOrProviders reports whether any PARAMETER is a *Registry or a
+// value whose type name ends in "Providers", qualified or not.
+//
+// Parameters only, deliberately. DefaultRegistry and NewRegistry RETURN a
+// *Registry and take nothing — they are what a seam is handed, not seams.
+func takesRegistryOrProviders(params *ast.FieldList) bool {
+	for _, field := range params.List {
+		if typeNameOf(field.Type) {
+			return true
+		}
+	}
+	return false
+}
+
+// typeNameOf reports whether an expression names Registry (by pointer) or a
+// *Providers type, seeing through the package qualifier so compute.Registry and
+// Registry are the same thing to this rule.
+func typeNameOf(e ast.Expr) bool {
+	switch t := e.(type) {
+	case *ast.StarExpr:
+		return typeNameOf(t.X)
+	case *ast.SelectorExpr:
+		return isSeamTypeName(t.Sel.Name)
+	case *ast.Ident:
+		return isSeamTypeName(t.Name)
+	}
+	return false
+}
+
+func isSeamTypeName(name string) bool {
+	return name == "Registry" || strings.HasSuffix(name, "Providers")
+}
+
+// walkGoFiles parses every non-test .go file under root/sub and hands each to fn
+// with its module-relative path.
+func walkGoFiles(t *testing.T, root, sub string, fset *token.FileSet, fn func(rel string, f *ast.File)) {
+	t.Helper()
+	base := filepath.Join(root, filepath.FromSlash(sub))
+	err := filepath.WalkDir(base, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			// testdata and vendor hold code that is not this module's estate.
+			if n := d.Name(); n == "testdata" || n == "vendor" || n == ".git" {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		name := d.Name()
+		if !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			return nil
+		}
+		parsed, perr := parser.ParseFile(fset, path, nil, parser.SkipObjectResolution)
+		if perr != nil {
+			return perr
+		}
+		rel, rerr := filepath.Rel(root, path)
+		if rerr != nil {
+			return rerr
+		}
+		fn(filepath.ToSlash(rel), parsed)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walk %s: %v", sub, err)
+	}
+}
