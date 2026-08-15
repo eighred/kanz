@@ -208,7 +208,25 @@ func TestPostgresOverridePriceIsExact(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	const chosen = "123456789.123456789" // 18 significant digits: a double cannot hold this
+	// 19 SIGNIFICANT DIGITS AT THE PLATFORM'S SCALE (8 decimals). A float64 holds
+	// about 15-17, so this still proves what the test was written to prove: the
+	// column must be TEXT, because `double` would round the price a named human
+	// chose (DATA-M8b).
+	//
+	// IT USED TO CARRY NINE DECIMALS, which no longer survives the store. Since
+	// #410 the override is announced as a FACT in the same transaction that
+	// records it, and common.v1.Decimal has a fixed scale of 8 — so a
+	// nine-decimal price is storable and NOT announceable, and the enqueue fails
+	// the whole override rather than committing a decision the audit trail will
+	// never hear about.
+	//
+	// That narrowing is deliberate and was already the API's behaviour: the HTTP
+	// handler refuses an over-precise price with a 400, using the same check.
+	// This test reached the store directly and was the only caller that could
+	// still get past it. The column's losslessness is unchanged and is what the
+	// assertion below still measures — it is the FIXTURE that had to move, not
+	// the property.
+	const chosen = "12345678901.12345678"
 	want := dec.Rat(chosen)
 	if err := es.Override(ctx, ex.ID, pricing.Override{Actor: "alice@kanz", Reason: "vendor confirmed", ChosenPrice: want, At: time.Unix(1_700_000_001, 0).UTC()}); err != nil {
 		t.Fatal(err)
