@@ -15,6 +15,7 @@ import (
 	"log/slog"
 	"testing"
 
+	orderpb "github.com/eighred/kanz/kanz-schemas-go/order/v1"
 	venuepb "github.com/eighred/kanz/kanz-schemas-go/venue/v1"
 
 	"github.com/eighred/kanz/internal/execution"
@@ -75,5 +76,78 @@ func TestDescribeAdmitsAnUnprovenAccount(t *testing.T) {
 	}
 	if resp.GetExchangeAccountId() != "" {
 		t.Errorf("exchange_account_id = %q, want empty when nothing was verified", resp.GetExchangeAccountId())
+	}
+}
+
+// ===== THE CAPABILITY DECLARATIONS MUST REACH THE WIRE (#405, #486) =====
+//
+// Describe is the ONLY way the OMS learns what an adapter can do. Both
+// declarations arm admission gates: an order type or a time-in-force the adapter
+// cannot handle is refused before the order is stored and announced.
+//
+// A DECLARATION READ AND DISCARDED WOULD SATISFY EVERY OTHER TEST. The connector
+// tests prove the lists match the translation switches; the OMS tests prove a
+// declared list arms the gate. Neither touches this hop — the server asking the
+// venue and putting the answer on the response — so until now a Describe handler
+// that simply never set the fields would leave both gates open with nothing
+// failing anywhere.
+
+// declaringVenue is a fakeVenue that also answers the capability questions.
+type declaringVenue struct {
+	fakeVenue
+	types []orderpb.OrderType
+	tifs  []orderpb.TimeInForce
+}
+
+func (d *declaringVenue) OrderTypes() []orderpb.OrderType    { return d.types }
+func (d *declaringVenue) TimeInForce() []orderpb.TimeInForce { return d.tifs }
+
+func TestDescribeReportsBothCapabilityDeclarations(t *testing.T) {
+	v := &declaringVenue{
+		types: []orderpb.OrderType{
+			orderpb.OrderType_ORDER_TYPE_MARKET,
+			orderpb.OrderType_ORDER_TYPE_LIMIT,
+		},
+		tifs: []orderpb.TimeInForce{
+			orderpb.TimeInForce_TIME_IN_FORCE_GTC,
+			orderpb.TimeInForce_TIME_IN_FORCE_IOC,
+		},
+	}
+	closes := execution.NewCloseRegistry()
+	v.closes = closes
+	s := New(v, orderview.NewMemory(), closes, execution.AccountProof{Verified: true}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+	resp, err := s.Describe(context.Background(), &venuepb.DescribeRequest{})
+	if err != nil {
+		t.Fatalf("Describe: %v", err)
+	}
+	if len(resp.GetSupportedOrderTypes()) != 2 {
+		t.Errorf("supported_order_types = %v, want the adapter's two — a declaration read and "+
+			"discarded leaves the admission gate open with nothing failing anywhere",
+			resp.GetSupportedOrderTypes())
+	}
+	if len(resp.GetSupportedTimeInForce()) != 2 {
+		t.Errorf("supported_time_in_force = %v, want the adapter's two — without it the OMS "+
+			"admits an instruction the connector will refuse, after the order is stored and "+
+			"announced", resp.GetSupportedTimeInForce())
+	}
+}
+
+// AN ADAPTER THAT DECLARES NOTHING REPORTS NOTHING, and that is the honest
+// answer rather than an empty list meaning "supports none". The OMS reads
+// silence as "did not say" and leaves the gate open deliberately — refusing every
+// order for an adapter that predates these fields would turn a schema addition
+// into a trading outage.
+func TestDescribeReportsNoCapabilitiesForAnUndeclaringAdapter(t *testing.T) {
+	s := newServerWithProof(t, &fakeVenue{}, execution.AccountProof{Verified: true})
+
+	resp, err := s.Describe(context.Background(), &venuepb.DescribeRequest{})
+	if err != nil {
+		t.Fatalf("Describe: %v", err)
+	}
+	if len(resp.GetSupportedOrderTypes()) != 0 || len(resp.GetSupportedTimeInForce()) != 0 {
+		t.Errorf("an adapter that declares nothing reported types=%v tifs=%v — inventing a "+
+			"declaration on its behalf would arm a gate against a list nobody stated",
+			resp.GetSupportedOrderTypes(), resp.GetSupportedTimeInForce())
 	}
 }

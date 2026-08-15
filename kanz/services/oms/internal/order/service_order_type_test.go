@@ -1,7 +1,9 @@
 package order
 
 import (
+	"google.golang.org/protobuf/types/known/timestamppb"
 	"testing"
+	"time"
 
 	commandpb "github.com/eighred/kanz/kanz-schemas-go/command/v1"
 	orderpb "github.com/eighred/kanz/kanz-schemas-go/order/v1"
@@ -126,5 +128,123 @@ func TestUndeclaredVenue_AdmitsEveryType(t *testing.T) {
 		oc.GetErrorCode() == "ORDER_TYPE_NOT_SUPPORTED" {
 		t.Fatal("an adapter that declared NO order types had an order refused as unsupported.\n" +
 			"Empty is \"did not say\", not \"supports nothing\": this turns every un-upgraded adapter into an outage.")
+	}
+}
+
+// A TIME-IN-FORCE THE VENUE CANNOT EXPRESS IS REJECTED AT ADMISSION (#486) —
+// the same gate as above, one field over, for a defect that was worse.
+//
+// The order-type cases produced an order that did NOTHING: accepted, inert,
+// never placed. time_in_force produced an order that did the WRONG THING. Both
+// spot connectors sent a hard-coded good-til-cancelled whatever the trader asked
+// for, so an IMMEDIATE-OR-CANCEL order RESTED at the exchange — a trader who
+// asked to hold no exposure was holding it, indefinitely, and nothing anywhere
+// said so.
+//
+// The connectors now refuse what they cannot express, which stopped the wrong
+// TRADE. This stops the wrong ADMISSION: without it the order is stored, its
+// ORDER_ACCEPTED FACT committed and published, and only then refused by the
+// connector — which is #405's complaint verbatim.
+func TestTimeInForceTheVenueCannotExpress_IsRejected(t *testing.T) {
+	fb := &fakeBus{}
+	store := NewMemoryStore()
+
+	// A venue declaring exactly what both live spot adapters declare: no trading
+	// session, so no DAY, and no good-til-date parameter, so no GTD.
+	spot := execution.WithTimeInForce(
+		execution.WithOrderTypes(execution.NewSimVenue("XBIN"), []orderpb.OrderType{
+			orderpb.OrderType_ORDER_TYPE_MARKET,
+			orderpb.OrderType_ORDER_TYPE_LIMIT,
+		}),
+		[]orderpb.TimeInForce{
+			orderpb.TimeInForce_TIME_IN_FORCE_GTC,
+			orderpb.TimeInForce_TIME_IN_FORCE_IOC,
+			orderpb.TimeInForce_TIME_IN_FORCE_FOK,
+		})
+	svc, err := NewService(testTenant, store, NewEmitter(fb), nil, execution.NewRouter([]execution.Venue{spot}), nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := testCtx()
+
+	// A WELL-FORMED limit order whose ONLY problem is its time-in-force. GTD also
+	// requires expire_at, or Accept refuses it first and this test would pass
+	// without the gate ever running.
+	cmd := limitOrder(d(100, 0), d(1025, -2))
+	cmd.Venue = "XBIN"
+	cmd.TimeInForce = orderpb.TimeInForce_TIME_IN_FORCE_GTD
+	cmd.ExpireAt = timestamppb.New(t0.Add(24 * time.Hour))
+	if err := svc.Handle(ctx, submitEnv(), mustMarshal(t, cmd)); err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+
+	if _, _, lerr := store.Load(ctx, cmd.GetOrderId()); lerr == nil {
+		t.Fatal("the order was ADMITTED with a time-in-force its venue cannot express.\n" +
+			"It is stored and announced, and the connector refuses it afterwards — so the caller " +
+			"was told the order exists, risk carries exposure for it, and only the exchange " +
+			"disagrees.")
+	}
+
+	oc, _ := fb.last(EventTypeOutcome).(*commandpb.CommandOutcome)
+	if oc == nil || oc.GetStatus() != commandpb.CommandOutcomeStatus_COMMAND_OUTCOME_STATUS_REJECTED {
+		t.Fatalf("command outcome = %v, want REJECTED — the caller must be TOLD", oc.GetStatus())
+	}
+	if oc.GetErrorCode() != "TIME_IN_FORCE_NOT_SUPPORTED" {
+		t.Errorf("rejection code = %q, want TIME_IN_FORCE_NOT_SUPPORTED — an operator reading "+
+			"ORDER_TYPE_NOT_SUPPORTED for a time-in-force problem would change the wrong field",
+			oc.GetErrorCode())
+	}
+}
+
+// A DECLARED TIME-IN-FORCE IS STILL ADMITTED. Without this the test above is
+// satisfied by an OMS that refuses everything, which is a trading outage wearing
+// the shape of a fix.
+func TestDeclaredTimeInForce_IsStillAdmitted(t *testing.T) {
+	fb := &fakeBus{}
+	store := NewMemoryStore()
+	spot := execution.WithTimeInForce(execution.NewSimVenue("XBIN"), []orderpb.TimeInForce{
+		orderpb.TimeInForce_TIME_IN_FORCE_GTC,
+		orderpb.TimeInForce_TIME_IN_FORCE_IOC,
+	})
+	svc, err := NewService(testTenant, store, NewEmitter(fb), nil, execution.NewRouter([]execution.Venue{spot}), nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := testCtx()
+
+	cmd := limitOrder(d(100, 0), d(1025, -2))
+	cmd.Venue = "XBIN"
+	cmd.TimeInForce = orderpb.TimeInForce_TIME_IN_FORCE_IOC
+	if err := svc.Handle(ctx, submitEnv(), mustMarshal(t, cmd)); err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	if _, _, lerr := store.Load(ctx, cmd.GetOrderId()); lerr != nil {
+		t.Fatalf("an IOC the venue DECLARED was refused: %v", lerr)
+	}
+}
+
+// AN UNDECLARING VENUE STILL TRADES. "Did not say" is not "supports nothing",
+// and refusing every order for an adapter that predates the field would turn a
+// schema addition into a trading outage.
+func TestAnUndeclaringVenue_StillAdmitsEveryTimeInForce(t *testing.T) {
+	fb := &fakeBus{}
+	store := NewMemoryStore()
+	svc, err := NewService(testTenant, store, NewEmitter(fb), nil,
+		execution.NewRouter([]execution.Venue{execution.NewSimVenue("XBIN")}), nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := testCtx()
+
+	cmd := limitOrder(d(100, 0), d(1025, -2))
+	cmd.Venue = "XBIN"
+	cmd.TimeInForce = orderpb.TimeInForce_TIME_IN_FORCE_GTD
+	cmd.ExpireAt = timestamppb.New(t0.Add(24 * time.Hour))
+	if err := svc.Handle(ctx, submitEnv(), mustMarshal(t, cmd)); err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	if _, _, lerr := store.Load(ctx, cmd.GetOrderId()); lerr != nil {
+		t.Fatalf("an adapter that declared NOTHING had its order refused: %v — a schema addition "+
+			"must not become a trading outage for every adapter that predates it", lerr)
 	}
 }

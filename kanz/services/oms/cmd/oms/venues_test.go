@@ -94,7 +94,7 @@ func TestDialVenuesRefusesAnAdapterHoldingAnotherAccount(t *testing.T) {
 		VenueEndpoints: "XOKX/okx-sub-1=" + addr,
 	}
 
-	_, _, _, err := dialVenues(context.Background(), cfg, unverifiedCounter(), undeclaredCounter(), quietLogger())
+	_, _, _, err := dialVenues(context.Background(), cfg, unverifiedCounter(), undeclaredCounter(), undeclaredCounter(), quietLogger())
 	if err == nil {
 		t.Fatal("dialVenues accepted an adapter that holds a DIFFERENT account's credential")
 	}
@@ -116,7 +116,7 @@ func TestDialVenuesAcceptsAnAgreeingAdapter(t *testing.T) {
 	})
 	cfg := config.Config{Tenant: "acme", VenueEndpoints: "XBIN/binance-main=" + addr}
 
-	venues, _, closeConns, err := dialVenues(context.Background(), cfg, unverifiedCounter(), undeclaredCounter(), quietLogger())
+	venues, _, closeConns, err := dialVenues(context.Background(), cfg, unverifiedCounter(), undeclaredCounter(), undeclaredCounter(), quietLogger())
 	if err != nil {
 		t.Fatalf("dialVenues: %v", err)
 	}
@@ -141,7 +141,7 @@ func TestDialVenuesRefusesAnUnverifiedAccountWhenRequired(t *testing.T) {
 		RequireVerifiedAccount: true,
 	}
 
-	if _, _, _, err := dialVenues(context.Background(), cfg, unverifiedCounter(), undeclaredCounter(), quietLogger()); err == nil {
+	if _, _, _, err := dialVenues(context.Background(), cfg, unverifiedCounter(), undeclaredCounter(), undeclaredCounter(), quietLogger()); err == nil {
 		t.Fatal("dialVenues accepted an UNVERIFIED account with OMS_REQUIRE_VERIFIED_ACCOUNT=true")
 	}
 }
@@ -156,7 +156,7 @@ func TestDialVenuesCountsAnUnverifiedAccountByDefault(t *testing.T) {
 	cfg := config.Config{Tenant: "acme", VenueEndpoints: "XBIN/binance-main=" + addr}
 
 	unverified := unverifiedCounter()
-	venues, _, closeConns, err := dialVenues(context.Background(), cfg, unverified, undeclaredCounter(), quietLogger())
+	venues, _, closeConns, err := dialVenues(context.Background(), cfg, unverified, undeclaredCounter(), undeclaredCounter(), quietLogger())
 	if err != nil {
 		t.Fatalf("dialVenues: %v", err)
 	}
@@ -184,7 +184,7 @@ func TestDialVenuesRefusesAnAdapterThatDeclaresNoOrderTypes(t *testing.T) {
 		RequireOrderTypeSupport: true,
 	}
 
-	_, _, _, err := dialVenues(context.Background(), cfg, unverifiedCounter(), undeclaredCounter(), quietLogger())
+	_, _, _, err := dialVenues(context.Background(), cfg, unverifiedCounter(), undeclaredCounter(), undeclaredCounter(), quietLogger())
 	if err == nil {
 		t.Fatal("dialVenues accepted an adapter that declared NO order types with OMS_REQUIRE_ORDER_TYPE_SUPPORT=true")
 	}
@@ -205,8 +205,8 @@ func TestDialVenuesCountsAnUndeclaredAdapterByDefault(t *testing.T) {
 	})
 	cfg := config.Config{Tenant: "acme", VenueEndpoints: "XBIN/binance-main=" + addr}
 
-	undeclared := undeclaredCounter()
-	venues, _, closeConns, err := dialVenues(context.Background(), cfg, unverifiedCounter(), undeclared, quietLogger())
+	undeclared, undeclaredTIF := undeclaredCounter(), undeclaredCounter()
+	venues, _, closeConns, err := dialVenues(context.Background(), cfg, unverifiedCounter(), undeclared, undeclaredTIF, quietLogger())
 	if err != nil {
 		t.Fatalf("dialVenues: %v", err)
 	}
@@ -217,6 +217,12 @@ func TestDialVenuesCountsAnUndeclaredAdapterByDefault(t *testing.T) {
 	}
 	if got := testutil.ToFloat64(undeclared); got != 1 {
 		t.Errorf("kanz_oms_undeclared_venue_order_types_total = %v, want 1", got)
+	}
+	// AND THE TIME-IN-FORCE GAP IS COUNTED SEPARATELY (#486). This adapter
+	// declared neither, so both are 1 — but they are two numbers, because they
+	// are two gaps with two fixes and an adapter can answer one and not the other.
+	if got := testutil.ToFloat64(undeclaredTIF); got != 1 {
+		t.Errorf("kanz_oms_undeclared_venue_time_in_force_total = %v, want 1", got)
 	}
 }
 
@@ -234,8 +240,8 @@ func TestDialVenuesArmsTheGateForADeclaringAdapter(t *testing.T) {
 	})
 	cfg := config.Config{Tenant: "acme", VenueEndpoints: "XBIN/binance-main=" + addr}
 
-	undeclared := undeclaredCounter()
-	venues, _, closeConns, err := dialVenues(context.Background(), cfg, unverifiedCounter(), undeclared, quietLogger())
+	undeclared, undeclaredTIF := undeclaredCounter(), undeclaredCounter()
+	venues, _, closeConns, err := dialVenues(context.Background(), cfg, unverifiedCounter(), undeclared, undeclaredTIF, quietLogger())
 	if err != nil {
 		t.Fatalf("dialVenues: %v", err)
 	}
@@ -243,6 +249,14 @@ func TestDialVenuesArmsTheGateForADeclaringAdapter(t *testing.T) {
 
 	if got := testutil.ToFloat64(undeclared); got != 0 {
 		t.Errorf("kanz_oms_undeclared_venue_order_types_total = %v, want 0 — this adapter declared", got)
+	}
+	// THE TWO GAPS ARE COUNTED APART. This adapter declared its order types and
+	// said nothing about time-in-force, which is exactly the case that proves the
+	// counters are not the same number wearing two names: one must be 0 and the
+	// other 1.
+	if got := testutil.ToFloat64(undeclaredTIF); got != 1 {
+		t.Errorf("kanz_oms_undeclared_venue_time_in_force_total = %v, want 1 — this adapter "+
+			"declared order types and NOT time-in-force, so the two counters must disagree", got)
 	}
 	r := execution.NewRouter(venues)
 	if !r.SupportsOrderType("XBIN", orderpb.OrderType_ORDER_TYPE_LIMIT) {
@@ -284,7 +298,7 @@ func TestDialVenuesBuildsTheCatalogueFromTheAdapters(t *testing.T) {
 		VenueEndpoints: "XBIN/binance-main=" + bin + ",XOKX/okx-sub-1=" + okx,
 	}
 
-	_, catalogue, closeConns, err := dialVenues(context.Background(), cfg, unverifiedCounter(), undeclaredCounter(), quietLogger())
+	_, catalogue, closeConns, err := dialVenues(context.Background(), cfg, unverifiedCounter(), undeclaredCounter(), undeclaredCounter(), quietLogger())
 	if err != nil {
 		t.Fatalf("dialVenues: %v", err)
 	}
@@ -335,7 +349,7 @@ func TestDialVenuesSurvivesAnAdapterThatCannotList(t *testing.T) {
 		VenueEndpoints: "XBIN/binance-main=" + mute + ",XOKX/okx-sub-1=" + okx,
 	}
 
-	venues, catalogue, closeConns, err := dialVenues(context.Background(), cfg, unverifiedCounter(), undeclaredCounter(), quietLogger())
+	venues, catalogue, closeConns, err := dialVenues(context.Background(), cfg, unverifiedCounter(), undeclaredCounter(), undeclaredCounter(), quietLogger())
 	if err != nil {
 		t.Fatalf("one adapter that cannot list its instruments refused the whole boot: %v", err)
 	}

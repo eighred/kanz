@@ -446,3 +446,26 @@ func okxAlgoBody(st *orderpb.OrderState, instID string) (map[string]string, erro
 	}
 	return body, nil
 }
+
+// TimeInForce declares which time-in-force instructions this connector can
+// express, and it is the exact set the translation switch accepts (#486).
+//
+// GTC, IOC AND FOK ONLY. OKX spot has no trading session, so DAY has no meaning
+// there, and no good-til-date parameter at all — both are REFUSED rather than
+// approximated, because sending a resting order for one somebody asked to expire
+// is the silent substitution this whole change exists to end.
+//
+// Declaring them is what moves that refusal from the venue to ADMISSION, where
+// an order that can never be placed is rejected before it is stored and
+// announced. That is what supported_order_types did for #405; this is the same
+// gate one field over.
+//
+// KEEP THIS IN STEP WITH THE TRANSLATION. TestDeclaredTimeInForceMatchesTranslation
+// walks the whole enum and fails if the two ever disagree, in either direction.
+func (v *OKXVenue) TimeInForce() []orderpb.TimeInForce {
+	return []orderpb.TimeInForce{
+		orderpb.TimeInForce_TIME_IN_FORCE_GTC,
+		orderpb.TimeInForce_TIME_IN_FORCE_IOC,
+		orderpb.TimeInForce_TIME_IN_FORCE_FOK,
+	}
+}
