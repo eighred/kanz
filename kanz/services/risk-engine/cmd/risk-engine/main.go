@@ -24,6 +24,9 @@ import (
 	"github.com/eighred/kanz/internal/lifecycle"
 	"github.com/eighred/kanz/internal/marketdata/returns"
 	mdstore "github.com/eighred/kanz/internal/marketdata/store"
+	"github.com/prometheus/client_golang/prometheus"
+
+	"github.com/eighred/kanz/internal/marketdata/terms"
 	"github.com/eighred/kanz/internal/pg"
 	"github.com/eighred/kanz/internal/platform/httpserver"
 	"github.com/eighred/kanz/internal/prediction"
@@ -38,6 +41,7 @@ import (
 	"github.com/eighred/kanz/internal/risk/publish"
 	"github.com/eighred/kanz/internal/risk/state"
 	"github.com/eighred/kanz/internal/risk/state/persist"
+	"github.com/eighred/kanz/internal/risk/termsource"
 	"github.com/eighred/kanz/internal/validation"
 	"github.com/eighred/kanz/internal/version"
 	"github.com/eighred/kanz/pkg/bus"
@@ -181,6 +185,54 @@ func runEngine(ctx context.Context, cfg config.Config, readiness *server.Readine
 	// recomputer's baseCtx, so the debounced/async recompute + shutdown drain can
 	// still read the store. Without a DSN the placeholder stands — the honest
 	// no-market-data fallback (varmodel keeps compute.VaR99).
+	// THE CALIBRATED CURVE, OWNED HERE (#509 item 2).
+	//
+	// It used to be built inline inside startCalibration — `Store: curve.NewStore()`
+	// as an anonymous argument — so the scheduler bootstrapped a curve every
+	// interval into a store nothing else could reach. A DEAD WRITE that reported
+	// healthy: kanz_risk_calibration_scheduled said 1 and the composition root
+	// logged "calibration scheduler enabled", while the output went nowhere.
+	//
+	// Owning it here is what lets the FI measures read it. It is created
+	// unconditionally and cheaply (an empty in-memory map); whether anything
+	// FILLS it is the calibration gate below.
+	curveStore := curve.NewStore()
+
+	// FI IS REGISTERED ONLY WHEN A CURVE CAN EXIST, and that condition is the
+	// interesting part of this change.
+	//
+	// Registering DV01/Duration/Convexity/SpreadDuration against an empty curve
+	// store would serve a DV01 of zero for every portfolio — indistinguishable
+	// from a book holding no bonds. Absent is the honest answer there, and
+	// MeasurePosture already reports an absent family as dark with its name.
+	calibrationEnabled := cfg.CalibrationInterval > 0 && cfg.CalibrationRates != ""
+
+	// A BOND THAT FALLS OUT OF THE RATE RISK IS COUNTED. Both of these move the
+	// measured risk DOWN — a skipped bond contributes 0 to DV01 and nothing to a
+	// duration average — so an unexplained fall in DV01 has a number beside it
+	// rather than looking like a book that de-risked.
+	fiTermsMissing := prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "kanz_risk_fi_terms_missing_total",
+		Help: "Instruments whose bond terms could not be resolved when the FI measures asked. " +
+			"Rising means contract terms were never loaded, or are present and unusable (an " +
+			"unspecified day count, a maturity at or before issue) — either way those bonds are " +
+			"absent from DV01 and every duration average (#509).",
+	})
+	fiSkipped := prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "kanz_risk_fi_position_skipped_total",
+		Help: "Bond positions excluded from the FI measures, by reason. no_curve means the bond " +
+			"is known and its currency has no calibrated discount curve — the calibration gap, " +
+			"not a data gap. A skipped bond makes the book's measured rate risk SMALLER, and a " +
+			"DV01 of zero is indistinguishable from holding no bonds (#509).",
+	}, []string{"reason"})
+	obs.Registry.MustRegister(fiTermsMissing, fiSkipped)
+	// EVERY REASON GETS A SERIES AT ZERO. A counter that only appears on first
+	// increment reads as no-data to an alert, so the alert cannot fire on the
+	// transition from none to some — which is the transition that matters.
+	for _, r := range []string{compute.SkipNoTerms, compute.SkipNoCurve} {
+		fiSkipped.WithLabelValues(r).Add(0)
+	}
+
 	if cfg.MarketDataURL != "" {
 		// The SECOND pool this pod opens (the tenant-scoped state pool is below),
 		// and the estate's connection budget counts it as such — see
@@ -201,6 +253,36 @@ func runEngine(ctx context.Context, cfg config.Config, readiness *server.Readine
 		provider := returns.NewStoreReturnsProvider(priceStore, returns.ReturnsConfig{})
 		varmodel.Register(context.Background(), registry, provider, varmodel.Config{})
 		logger.Info("RISK-12/RISK-M1: historical-simulation VaR99 + ES99 + MaxDrawdown(+Amount) registered off market-data price store")
+
+		// THE FIXED-INCOME MEASURES (#509). Their two seams both exist now: bond
+		// terms resolve through the contract-terms store this pool already
+		// reaches, and the discount curve is the store owned above.
+		if calibrationEnabled {
+			bondTerms := termsource.NewProvider(terms.NewPostgres(pricePool),
+				termsource.WithMissingTermsObserver(func(string) { fiTermsMissing.Inc() }))
+			compute.RegisterFIRisk(context.Background(), registry, compute.FIProviders{
+				Terms: bondTerms,
+				Curve: curveStore,
+				// COUNTED, NOT LABELLED BY INSTRUMENT. An instrument id label is
+				// unbounded cardinality — one series per bond ever held — and the
+				// question an operator has is "are bonds falling out of the rate
+				// risk", which a count answers. Which ones is a log's job.
+				OnSkip: func(_, reason string) { fiSkipped.WithLabelValues(reason).Inc() },
+			})
+			logger.Info("FI-01d: DV01 + Duration + Convexity + SpreadDuration registered off the "+
+				"contract-terms store and the calibrated curve",
+				"curve_currencies", cfg.CalibrationRates)
+		} else {
+			// NOT SILENT. Four implemented measures are absent, and the reason is
+			// a config gate rather than a defect — an operator who wants DV01
+			// needs to know that turning on rate calibration is what produces it.
+			logger.Warn("FI-01d NOT registered: DV01, Duration, Convexity and SpreadDuration need "+
+				"a discount curve, and rate calibration is off. Registering them against an empty "+
+				"curve store would serve a DV01 of zero for every portfolio, which reads exactly "+
+				"like a book holding no bonds",
+				"fix", "set RISK_ENGINE_CALIBRATION_RATES and RISK_ENGINE_CALIBRATION_INTERVAL",
+				"gauge", "kanz_risk_measure_live{family=\"fixed_income\"}=0")
+		}
 	} else {
 		logger.Warn("no RISK_ENGINE_MARKETDATA_DATABASE_URL — VaR99 serves the RISK-07 1%×gross placeholder")
 	}
@@ -389,7 +471,7 @@ func runEngine(ctx context.Context, cfg config.Config, readiness *server.Readine
 	// either" was indistinguishable from a healthy service.
 	scheduledCalibrations := map[string]string{}
 	if cfg.CalibrationInterval > 0 && cfg.CalibrationRates != "" {
-		if err := startCalibration(ctx, cfg, client, busMetrics, logger); err != nil {
+		if err := startCalibration(ctx, cfg, client, busMetrics, logger, curveStore); err != nil {
 			logger.Error("calibration scheduler disabled", "err", err)
 		} else {
 			scheduledCalibrations["curve"] = "rates"
@@ -433,7 +515,7 @@ func runEngine(ctx context.Context, cfg config.Config, readiness *server.Readine
 // cadence. It returns an error only on a setup failure (bad reference spec /
 // consumer) — the caller logs it and continues, since calibration is auxiliary
 // to core risk ingestion.
-func startCalibration(ctx context.Context, cfg config.Config, client *bus.NATSClient, busMetrics *bus.BusMetrics, logger *slog.Logger) error {
+func startCalibration(ctx context.Context, cfg config.Config, client *bus.NATSClient, busMetrics *bus.BusMetrics, logger *slog.Logger, store *curve.Store) error {
 	instruments, err := livequote.ParseRateInstruments(cfg.CalibrationRates)
 	if err != nil {
 		return err
@@ -463,7 +545,7 @@ func startCalibration(ctx context.Context, cfg config.Config, client *bus.NATSCl
 	}
 
 	src := livequote.NewSnapshotRateSource(cache, instruments)
-	cal := &curve.Calibrator{Source: src, Store: curve.NewStore(), Interp: curve.LinearZero}
+	cal := &curve.Calibrator{Source: src, Store: store, Interp: curve.LinearZero}
 	var jobs []schedule.Job
 	for _, ccy := range src.Currencies() {
 		ccy := ccy
