@@ -95,14 +95,16 @@ var notDeployed = map[string]string{
 		"ordinary Ingress would open the public port the zero-ingress design exists to avoid, so " +
 		"the manifest and the tunnel land together or not at all. Retired by #371.",
 
-	"identity": "NOT YET, AND FOR ONE CONCRETE REASON: THE SIGNING KEY. The service is delivered and " +
-		"proven end-to-end against a real Postgres (#364) — invite, redeem, login, JWKS, and a token " +
-		"the gateway verifies from the issuer alone. A manifest, though, has to mount a DURABLE key: " +
-		"with IDENTITY_ALLOW_EPHEMERAL_KEY the process generates one per start, so every rollout " +
-		"would silently invalidate every session while the gateway's cached JWKS still advertised " +
-		"the old key — 401s that look like a network fault. There is no secret store in this estate " +
-		"yet, so the key's home is an open question and shipping a manifest that answers it wrongly " +
-		"is worse than shipping none. Retired by #371.",
+	// RETIRED 2026-08-15 by the mechanism that was supposed to retire it. This
+	// entry read "NOT YET, AND FOR ONE CONCRETE REASON: THE SIGNING KEY … there
+	// is no secret store in this estate yet, so the key's home is an open
+	// question". The question is now answered the same way every other secret on
+	// this platform is answered — a Vault SecretProviderClass mounted over the
+	// SEC-01d CSI driver (infra/security/secrets), at kv/kanz/identity, on its
+	// OWN mount separate from the DSN so the migrate initContainer never sees it.
+	// The reasoning the entry gave was right and is preserved beside the mount:
+	// IDENTITY_ALLOW_EPHEMERAL_KEY is deliberately absent from the manifest,
+	// because two replicas generating their own keys serve disjoint JWKS.
 
 	"optimization": "NOT YET, AND DELIBERATELY. It materializes an approved rebalance proposal into OMS " +
 		"order COMMANDS — it is a capital path, not an analytic. It does not run until the execution loop " +

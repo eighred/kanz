@@ -175,6 +175,28 @@ spec:
     matchLabels:
       app: optimization
 ---
+# The platform's credential authority (#364). replicas 2 => maxUnavailable: 1.
+#
+# THIS ONE IS DIFFERENT FROM THE OTHERS IN WHAT AN OUTAGE COSTS. It is stateless
+# per request and holds no session, so a rescheduled replica loses nothing — but
+# it MINTS the tokens every other service's authority is expressed in, so while
+# it is down nobody can obtain a new one. Existing tokens keep working until they
+# expire (the gateway verifies against a cached JWKS), which is why this is a
+# degradation rather than an estate-wide halt; the failure arrives gradually, as
+# sessions age out, rather than all at once.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: identity
+  namespace: kanz-services
+  labels:
+    app.kubernetes.io/part-of: kanz
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      app: identity
+---
 apiVersion: v1
 kind: ResourceQuota
 metadata:
@@ -184,11 +206,11 @@ metadata:
     app.kubernetes.io/part-of: kanz
 spec:
   hard:
-    requests.cpu: "47"
-    requests.memory: 49664Mi
-    limits.cpu: "94"
-    limits.memory: 97Gi
-    pods: "92"
+    requests.cpu: "48"
+    requests.memory: 50688Mi
+    limits.cpu: "96"
+    limits.memory: 99Gi
+    pods: "94"
 ---
 # LimitRange gives every pod sane defaults + a ceiling, so a container with no
 # explicit resources still gets requests (schedulable, quota-counted) and can't

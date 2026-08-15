@@ -794,6 +794,24 @@ var mutableTagExempt = map[string]string{
 		"branch: no Dockerfile, no build matrix entry, no release. There is no published digest to " +
 		"pin to until the next tagged release runs pin-digests",
 
+	// TEMPORARY — retire on the first release that publishes this image.
+	// identity had no Dockerfile and no build-matrix entry until #497, which is
+	// the same shape optimization and nats-rebuild used above and retired the
+	// same way: release.yml's pin-digests job rewrites it on the first tagged
+	// run, and the dead-exemption arm then fails the build until this line goes.
+	//
+	// THIS ONE IS NOT MERELY UNPINNED, IT IS UNDEPLOYABLE UNTIL THAT RELEASE, and
+	// that is worth stating rather than discovering. Only release.yml signs
+	// (keyless cosign via OIDC) and cluster-image-policy.yaml REQUIRES a
+	// signature, so the :main image an ordinary build produces is refused at
+	// admission. Pinning its digest instead would not help — an unsigned digest
+	// is refused for the same reason. The manifest is correct and waiting on a
+	// release, which is a process step rather than a code one.
+	"infra/deploy/identity-deploy.yaml": "the platform's credential authority (#364) entered the " +
+		"build matrix in #497 and no release has been cut since, so no SIGNED digest exists to pin. " +
+		"An unsigned image is refused by the admission policy whether it is tagged or digested, so " +
+		"this deployment cannot run until the first release that includes it",
+
 	// RETIRED 2026-07-27 by the mechanism that was supposed to retire it.
 	// infra/dr/nats/rebuild-job.yaml carried a temporary entry reading "no
 	// published digest exists until the next release. Retire on the first

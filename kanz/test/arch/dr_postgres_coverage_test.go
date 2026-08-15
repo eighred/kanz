@@ -340,15 +340,17 @@ var drPosture = map[string]drClassification{
 		"must not precede DR coverage) is the reason this sentence is here rather than discovered " +
 		"later. This entry must not be read as 'everything here is replayable': two of its three " +
 		"tables are not"},
-	"identity": {status: drUnresolved, reason: "identity_users + identity_invites — the platform's " +
-		"own accounts and their Argon2id credentials (#364). NOT EXCLUDABLE: credentials exist " +
-		"nowhere else, so a region failover onto an empty store locks every operator and trader out " +
-		"of the platform, including whoever would perform the recovery. It is deliberately NOT " +
-		"marked covered either — the service has migrations but no deployment yet, and claiming a " +
-		"cluster it has never been placed in would be exactly the invented exclusion this guard's " +
-		"header warns about. The placement question is real: PITR is per-cluster, so putting " +
-		"identity in kanz-books would tie a password rotation to the IBOR ledger's restore " +
-		"timeline. Tracked by #364, which cannot close while this row still says NOT COVERED"},
+	"identity": {status: drCovered, cluster: "kanz-identity", reason: "identity_users + " +
+		"identity_invites — the platform's own accounts and their Argon2id credentials (#364). " +
+		"ITS OWN CLUSTER, for the reason that gave the OMS kanz-orders: PITR is per-cluster, so " +
+		"putting identity in kanz-books would tie a password rotation to the IBOR ledger's restore " +
+		"timeline — rewinding the ledger to before a bad posting would silently re-enable accounts " +
+		"an operator had disabled and restore hashes people had rotated away from. NOT EXCLUDABLE " +
+		"either: credentials exist nowhere else, so a failover onto an empty store locks every " +
+		"operator and trader out, including whoever would perform the recovery — the one standby " +
+		"whose absence makes every other standby unreachable. This row said NOT COVERED until the " +
+		"service had a deployment, because naming a cluster it had never been placed in would have " +
+		"been the invented exclusion this guard's header warns about; it now has one"},
 
 	"audit": {status: drExcluded, reason: "AUDIT-01b WORM store with its own tamper-resistant " +
 		"retention — object-locked, and deliberately not restorable-to-an-earlier-instant, which is " +

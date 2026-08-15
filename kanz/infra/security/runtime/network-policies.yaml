@@ -284,6 +284,17 @@ spec:
         - { protocol: TCP, port: 8083 } # audit, regulatory
         - { protocol: TCP, port: 8085 } # lake-sink
         - { protocol: TCP, port: 8086 } # archiver
+        # identity (#364). UNLIKE inference's 50051 and optimization's 8080, this
+        # port is NOT withheld — and the reason is the opposite of theirs. Those
+        # withhold a port because admitting the observability namespace would
+        # widen a surface the gateway otherwise fronts. identity's :8087 is
+        # ALREADY reachable without a token by design (/login and
+        # /invites/redeem exist for people who hold none, which is why the
+        # service cannot sit behind the gateway at all), so this rule admits
+        # nothing the ingress rule has not already. Its one authenticated route
+        # verifies a bearer token's signature and is unaffected by who can reach
+        # the port.
+        - { protocol: TCP, port: 8087 } # identity
         - { protocol: TCP, port: 8090 } # oms, webhook-ingest
         - { protocol: TCP, port: 8091 } # compliance, market-ingest, tv-sync, venue-binance
         - { protocol: TCP, port: 8092 } # venue-okx
@@ -467,6 +478,55 @@ spec:
               kubernetes.io/metadata.name: kanz-observability
       ports:
         - { protocol: TCP, port: 8090 }
+---
+# THE CREDENTIAL SURFACE (#364), and the one pod in this namespace whose ingress
+# is NOT from the gateway.
+#
+# Every other upstream trusts X-Kanz-Principal-* because a policy makes the
+# gateway its only reachable caller. identity cannot be behind that policy:
+# /login and /invites/redeem exist to be reached by people who hold no token,
+# which is the entire purpose of the service. The trust model is replaced rather
+# than relaxed — this service reads NO principal header anywhere
+# (test/arch/identity_trusts_no_headers_test.go fails the build if it starts) and
+# authenticates its one privileged route by verifying a bearer token's ES256
+# signature with the key it already holds.
+#
+# THE OPERATIONAL CONSEQUENCE, stated where an operator will meet it: this pod is
+# exposed to unauthenticated traffic on purpose, so IDENTITY_LOGIN_BURST is the
+# only bound on credential guessing anywhere in front of it. The gateway's quota
+# middleware runs AFTER its auth middleware and never sees an anonymous request.
+#
+# The api-gateway is admitted too, and for a different reason than usual: it
+# fetches /jwks.json to verify the tokens this service mints. That is a read of
+# public key material, not a privileged call.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-ingress-to-identity
+  namespace: kanz-services
+  labels:
+    app.kubernetes.io/part-of: kanz
+spec:
+  podSelector:
+    matchLabels:
+      app: identity
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: ingress-nginx
+      ports:
+        - { protocol: TCP, port: 8087 }
+    # The gateway, for /jwks.json only at the application layer. NetworkPolicy
+    # cannot express "only that path", which is why the routes behind this port
+    # are each individually safe to expose rather than safe-because-unreachable.
+    - from:
+        - podSelector:
+            matchLabels:
+              app: api-gateway
+      ports:
+        - { protocol: TCP, port: 8087 }
 ---
 # EXEC-M15 — the gateway's READ upstreams: tv-sync (the Broker API a TradingView
 # chart reads to see the orders Kanz opened) and the Phase-7 services.

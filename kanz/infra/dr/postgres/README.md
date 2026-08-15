@@ -9,6 +9,7 @@ Disaster recovery for the stateful databases:
 | book-of-record (PARITY-02) | IBOR ledger journal+snapshots, alternatives fund journal, wealth household book, datamaster golden records + exception queue, tv-sync fact log | `kanz-books` |
 | order path (OMS + venues) | orders, positions, position_fills, and both adapters' venue_orders | `kanz-orders` |
 | compliance evidence (REG-02) | audit_chain_links — the filing hash chain | `kanz-compliance` |
+| platform identity (#364) | identity_users, identity_invites — the platform's own accounts and their Argon2id credentials | `kanz-identity` |
 
 (The market-data history and the audit log are append-only/WORM stores with
 their own retention; the *transactional* state that DR must restore is these.
@@ -47,7 +48,7 @@ what gets read, so it is not allowed to be the stale copy.
 | `alternatives` | covered | `kanz-books` (fund journal) |
 | `wealth` | covered | `kanz-books` (household book) |
 | `datamaster` | covered | `kanz-books` (golden records + exception queue) |
-| `identity` | NOT COVERED | `identity_users`, `identity_invites` (#364). Credentials exist nowhere else: a failover onto an empty store locks **everyone** out, including whoever would run the recovery. Not yet deployed, so no cluster is claimed — placement is open because PITR is per-cluster and co-locating it with `kanz-books` would tie a password rotation to the ledger's restore timeline. |
+| `identity` | covered | `kanz-identity` — its **own** cluster (`identity_users`, `identity_invites`, #364). Credentials exist nowhere else: a failover onto an empty store locks **everyone** out, including whoever would run the recovery, so this is the one standby whose absence makes every other standby unreachable. Own cluster because PITR is per-cluster — co-locating with `kanz-books` would tie a password rotation to the ledger's restore timeline, silently re-enabling disabled accounts on any rewind. |
 | `market-data` | excluded | `price_observations` is append-only history with its own retention, re-ingestable from the feed. `contract_terms` (#345) and `ohlcv_bars` (#425) are **not**: a venue serves its *current* view of a specification or a candle, so a refeed restores today's values under today's `knowledge_time` and the original observation plus every restatement between are gone. What a restore loses is not the prices — it is the evidence of *what was knowable when*. The exclusion holds only while no sizing decision reaching real capital is derived from this store. |
 | `audit` | excluded | WORM store with its own tamper-resistant retention (AUDIT-01b) |
 | `oms` | covered | `kanz-orders` (`orders`, `positions`, `position_fills`). **Read "What `covered` does not mean" below before relying on this row.** |

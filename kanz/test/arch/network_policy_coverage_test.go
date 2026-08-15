@@ -285,7 +285,16 @@ func publicInternetPeer(p netPolPeer) (public, complete bool, missing []string) 
 // allow-exchange-stream-egress. The map and its dead-entry arm below exist so the
 // next exemption has to be written down with a reason instead of being expressed
 // as a service quietly missing from the policy.
-var externalEgressExempt = map[string]string{}
+var externalEgressExempt = map[string]string{
+	"identity": "IDENTITY_TOKEN_ISSUER is this service's OWN identity, not a destination it dials " +
+		"(#364). OIDC requires the issuer claim to equal the URL a verifier discovered the document " +
+		"from, so it is published in /.well-known/openid-configuration and stamped into every token " +
+		"— and read by the API GATEWAY, which fetches the JWKS. The identity service never makes an " +
+		"outbound request to it. The scanner cannot tell an issuer from an endpoint, because at the " +
+		"level of an env var holding a URL they are the same thing; grep the service for an HTTP " +
+		"client and there is none. Egress for this app is Postgres and SPIRE only, both covered by " +
+		"the namespace rules.",
+}
 
 // externalDest is one required public-internet destination for one app.
 type externalDest struct {

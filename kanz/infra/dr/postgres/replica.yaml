@@ -202,3 +202,40 @@ spec:
           accessKeyId: { name: kanz-dr-s3, key: ACCESS_KEY_ID }
           secretAccessKey: { name: kanz-dr-s3, key: SECRET_ACCESS_KEY }
         wal: { compression: gzip }
+---
+# THE DR-REGION STANDBY FOR THE PLATFORM'S CREDENTIALS (#364).
+#
+# WITHOUT THIS, THE FAILOVER LOCKS EVERYONE OUT. A promoted region with a
+# restored order book and an EMPTY identity store admits nobody — including the
+# operator running the recovery, who would need a credential this cluster is the
+# only copy of. It is the one standby whose absence makes every other standby
+# unreachable.
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: kanz-identity
+  namespace: kanz-data
+  labels: { app.kubernetes.io/part-of: kanz, app.kubernetes.io/component: dr }
+spec:
+  instances: 2
+  primaryUpdateStrategy: unsupervised
+  postgresql:
+    parameters:
+      max_connections: "50"    # mirrors the primary — see the header
+  storage:
+    size: 10Gi
+  replica:
+    enabled: true            # set false (or `cnpg promote`) to fail over
+    source: kanz-identity-origin
+  bootstrap:
+    recovery:
+      source: kanz-identity-origin
+  externalClusters:
+    - name: kanz-identity-origin
+      barmanObjectStore:
+        serverName: kanz-identity
+        destinationPath: s3://kanz-dr-backups/identity
+        s3Credentials:
+          accessKeyId: { name: kanz-dr-s3, key: ACCESS_KEY_ID }
+          secretAccessKey: { name: kanz-dr-s3, key: SECRET_ACCESS_KEY }
+        wal: { compression: gzip }
