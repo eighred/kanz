@@ -175,7 +175,14 @@ func (w *Watch) Handle(ctx context.Context, env *envelopepb.Envelope, payload []
 	// instead of the one somebody named once. It is a PREFERENCE: the ranker
 	// abstains below its evidence floor, and the declared default stands.
 	if w.costs != nil {
-		w.costs.Observe(venue, total)
+		// WEIGHTED BY NOTIONAL AND ATTRIBUTED TO THE DECISION (#483). A parent
+		// order worked in fifty slices produces fifty fills here, and both halves
+		// of that matter: unweighted they would outvote one large fill fifty to
+		// one, and counted as fifty separate observations they would clear the
+		// ranker's evidence floor from a single decision. The parent is the
+		// decision; the child is only how it was worked.
+		notional, _ := res.NotionalTraded.Float64()
+		w.costs.Observe(venue, total, notional, decisionOf(state))
 	}
 	price, _ := res.PriceShortfallBps.Float64()
 	w.shortfallBps.WithLabelValues(venue).Observe(total)
@@ -291,6 +298,7 @@ func (w *Watch) publish(ctx context.Context, fill *orderpb.Fill, st *orderpb.Ord
 
 	payload := &orderpb.TransactionCostRecorded{
 		OrderId:           r.OrderID,
+		ParentOrderId:     st.GetParentOrderId(),
 		FillId:            fill.GetFillId(),
 		InstrumentId:      r.Instrument,
 		Venue:             r.Venue,
@@ -327,3 +335,24 @@ func (w *Watch) publish(ctx context.Context, fill *orderpb.Fill, st *orderpb.Ord
 }
 
 var errUnrepresentable = errors.New("costwatch: a cost figure is not representable as an exact Decimal")
+
+// decisionOf names the DECISION a fill's order belonged to: the working parent
+// when the order is a slice of one, and the order itself otherwise (#435, #483).
+//
+// IT IS WHAT THE VENUE RANKER COUNTS AS EVIDENCE. A venue's measured cost is
+// only as trustworthy as the number of independent times the platform has traded
+// there, and an order worked in fifty slices is ONE such time — one instrument,
+// one side, one stretch of market. Counting the slices would let a venue that
+// happens to be worked with an algorithm clear the ranker's evidence floor fifty
+// times sooner than one worked whole, and the ranker decides where the next
+// order goes, so the error feeds itself.
+//
+// It is not the same question as how much a measurement WEIGHS, which is the
+// notional. A single decision can be large or small; the two are independent and
+// are passed separately.
+func decisionOf(st *orderpb.OrderState) string {
+	if p := st.GetParentOrderId(); p != "" {
+		return p
+	}
+	return st.GetOrderId()
+}

@@ -116,10 +116,11 @@ func (e *Emitter) event(eventType, orderID string, t time.Time, payload proto.Me
 	}
 }
 
-// emit publishes one FACT for order orderID at event-time t.
-func (e *Emitter) emit(ctx context.Context, eventType, orderID string, t time.Time, payload proto.Message) error {
-	return e.b.Publish(ctx, e.event(eventType, orderID, t, payload))
-}
+// The `emit` shortcut that used to live here is gone (#435). EmitExpired was its
+// last caller, and giving expiry a named *Event builder — so its published and
+// its ENQUEUED forms cannot drift, the rule every other FACT here already
+// follows — left nothing behind it. A helper kept for symmetry that no longer
+// has a caller is the shape a second way of publishing grows back from.
 
 // acceptedEvent is the ORDER_ACCEPTED FACT for an admitted order. One function
 // so the enqueued form and the compensator's published form cannot drift.
@@ -283,10 +284,28 @@ func (e *Emitter) CancelledFact(ctx context.Context, orderID string, cancelledQt
 	return outbox.From(ctx, e.cancelledEvent(orderID, cancelledQty, t))
 }
 
+func (e *Emitter) expiredEvent(orderID string, unfilledQty *commonpb.Decimal, t time.Time) bus.Event {
+	return e.event(EventTypeExpired, orderID, t,
+		&orderpb.OrderExpired{OrderId: orderID, UnfilledQuantity: unfilledQty})
+}
+
 // EmitExpired publishes OrderExpired.
 func (e *Emitter) EmitExpired(ctx context.Context, orderID string, unfilledQty *commonpb.Decimal, t time.Time) error {
-	return e.emit(ctx, EventTypeExpired, orderID, t,
-		&orderpb.OrderExpired{OrderId: orderID, UnfilledQuantity: unfilledQty})
+	return e.b.Publish(ctx, e.expiredEvent(orderID, unfilledQty, t))
+}
+
+// ExpiredFact captures ORDER_EXPIRED as an outbox record so an expiry and its
+// announcement commit together (#292), the same shape CancelledFact has.
+//
+// IT IS WHAT RETIRES A WORKED-OUT PARENT ORDER (#435). A parent has no fills of
+// its own — its children reported every one — so ORDER_FILLED would be a second
+// record of an execution that already happened, and any consumer summing filled
+// quantities would double the fund's traded volume. ORDER_EXPIRED is the one
+// terminal FACT carrying a QUANTITY rather than a Fill, which is exactly what a
+// container that never traded has to announce: its window elapsed, and this much
+// was never filled.
+func (e *Emitter) ExpiredFact(ctx context.Context, orderID string, unfilledQty *commonpb.Decimal, t time.Time) (outbox.Record, error) {
+	return outbox.From(ctx, e.expiredEvent(orderID, unfilledQty, t))
 }
 
 // outcomeEvent is the universal command outcome FACT. One builder, two sinks.

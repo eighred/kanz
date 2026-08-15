@@ -605,4 +605,20 @@ message TransactionCostRecorded {
   // window rather than compute a VWAP from 1970.
   google.protobuf.Timestamp arrival_at = 13;
   google.protobuf.Timestamp executed_at = 14;
+
+  // parent_order_id names the working parent this fill's order is a slice of
+  // (#435). Set on every child's cost record; unset for an ordinary order.
+  //
+  // WITHOUT IT ONE DECISION READS AS N UNRELATED ONES. order_id here is the
+  // CHILD, because that is the order that filled — but the decision whose cost
+  // is being measured was the parent's, and an order worked in fifty slices
+  // produces fifty records with nothing tying them together. A consumer asking
+  // "what did this order cost" would get fifty answers to a question with one.
+  //
+  // It is also what lets a cost consumer WEIGHT correctly. Fifty slices of one
+  // decision are not fifty independent pieces of evidence about a venue, and a
+  // ranker that counts them as such crosses its evidence floor fifty times
+  // faster for whichever venue happens to be worked with an algorithm — then
+  // feeds that back into where the next order is sent.
+  string parent_order_id = 15;
 }

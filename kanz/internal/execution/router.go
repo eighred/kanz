@@ -191,8 +191,25 @@ func (r *Router) Route(st *orderpb.OrderState) (Venue, error) {
 	// ordering is the whole point of option A: this issue exists because a
 	// destination chosen by slice position looked like a decision, and a ranker
 	// with no data must not reintroduce it.
+	// A VENUE THAT CANNOT PLACE THIS ORDER'S TYPE IS NOT A CANDIDATE (#405).
+	//
+	// Admission refuses a TARGETED order whose named venue cannot place its type.
+	// An untargeted one had no such check: the destination was chosen by cost or
+	// by the declared default, neither of which asks whether the order can be
+	// placed there at all. A stop-loss in a two-venue deployment would be admitted,
+	// stored, announced — and then routed, half the time, to the adapter that
+	// refuses it. That is precisely the defect #405 exists to end, reached by the
+	// one path its admission gate does not cover.
+	//
+	// Narrowing here rather than refusing: if ONE venue can place it, the order
+	// belongs there, and that is a better answer than a refusal.
+	placeable := r.placeable(st.GetOrderType())
+	if len(placeable) == 0 {
+		return nil, fmt.Errorf("%w: no venue this OMS holds can place a %s order (it holds %s)",
+			ErrVenueNotConfigured, st.GetOrderType(), strings.Join(r.mics(), ", "))
+	}
 	if r.ranker != nil {
-		if mic, ok := r.ranker.Preferred(r.mics()); ok {
+		if mic, ok := r.ranker.Preferred(placeable); ok {
 			for _, v := range r.venues {
 				if v.MIC() == mic {
 					return v, nil
@@ -212,7 +229,38 @@ func (r *Router) Route(st *orderpb.OrderState) (Venue, error) {
 		return nil, fmt.Errorf("%w: this OMS holds %s. Name one so an untargeted order has a "+
 			"destination somebody chose", ErrNoDefaultVenue, strings.Join(r.mics(), ", "))
 	}
-	return v, nil
+	if r.SupportsOrderType(v.MIC(), st.GetOrderType()) {
+		return v, nil
+	}
+	// THE DECLARED DEFAULT CANNOT PLACE THIS TYPE, and exactly one venue can, so
+	// there is no choice left to make and no reason to refuse.
+	if len(placeable) == 1 {
+		for _, cand := range r.venues {
+			if cand.MIC() == placeable[0] {
+				return cand, nil
+			}
+		}
+	}
+	// SEVERAL COULD, AND NOBODY SAID WHICH. Picking one would be the array index
+	// #437 removed wearing a narrower disguise — the operator named a default that
+	// does not apply here, so the destination is genuinely unchosen.
+	return nil, fmt.Errorf("%w: the declared default %q cannot place a %s order, and %s all can — "+
+		"name the venue on the order, or make the default one that can",
+		ErrNoDefaultVenue, v.MIC(), st.GetOrderType(), strings.Join(placeable, ", "))
+}
+
+// placeable lists the MICs of venues that can place this order type, in
+// configuration order. A venue that declares nothing is included: "did not say"
+// is permissive here exactly as it is in SupportsOrderType, so a deployment whose
+// adapters predate the declaration keeps working.
+func (r *Router) placeable(t orderpb.OrderType) []string {
+	out := make([]string, 0, len(r.venues))
+	for _, v := range r.venues {
+		if r.SupportsOrderType(v.MIC(), t) {
+			out = append(out, v.MIC())
+		}
+	}
+	return out
 }
 
 // mics lists the configured venue MICs, for a refusal that names the candidates

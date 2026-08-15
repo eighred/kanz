@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/eighred/kanz/internal/execution/algo"
+	"github.com/eighred/kanz/internal/orderid"
 )
 
 // WHICH CHILDREN SHOULD EXIST RIGHT NOW (#435).
@@ -67,13 +68,13 @@ func TestScheduleDue_ATerminalParentEmitsNothing(t *testing.T) {
 	// none has been sent. The maximum possible leak.
 	after := windowEnd.Add(time.Hour)
 
-	live := parent("o-1")
+	live := parent("o1")
 	if got, err := Due(live, none, after); err != nil || len(got) != 6 {
 		t.Fatalf("precondition: a LIVE parent yields %d children (err %v), want 6 — if this is "+
 			"wrong the cancellation assertion below proves nothing", len(got), err)
 	}
 
-	cancelled := parent("o-1")
+	cancelled := parent("o1")
 	cancelled.Terminal = true
 
 	got, err := Due(cancelled, none, after)
@@ -95,18 +96,18 @@ func TestScheduleDue_ATerminalParentEmitsNothing(t *testing.T) {
 // already sent are cancelled through the ordinary per-order cancel path — this
 // decision's job is only that no FOURTH one appears.
 func TestScheduleDue_CancellingMidScheduleEmitsNoFurtherChildren(t *testing.T) {
-	sent := setOf(ChildID("o-1", 0), ChildID("o-1", 1), ChildID("o-1", 2))
+	sent := setOf(ChildID("o1", 0), ChildID("o1", 1), ChildID("o1", 2))
 	// 14:35 — slices 0,1,2 are sent, and slice 3 (due 14:30) is now due.
 	at := windowStart.Add(35 * time.Minute)
 
-	live := parent("o-1")
+	live := parent("o1")
 	got, err := Due(live, sent, at)
 	if err != nil || len(got) != 1 || got[0].Index != 3 {
 		t.Fatalf("precondition: a live parent mid-schedule yields %v (err %v), want exactly "+
 			"slice 3", got, err)
 	}
 
-	cancelled := parent("o-1")
+	cancelled := parent("o1")
 	cancelled.Terminal = true
 	if got, _ := Due(cancelled, sent, at); len(got) != 0 {
 		t.Fatalf("a parent cancelled with 3 of 6 slices working still yielded %v — the operator "+
@@ -126,10 +127,10 @@ func TestScheduleDue_AlreadySentChildrenAreNotResent(t *testing.T) {
 	at := windowEnd.Add(time.Hour) // all 6 due
 	all := []string{}
 	for i := range 6 {
-		all = append(all, ChildID("o-1", i))
+		all = append(all, ChildID("o1", i))
 	}
 
-	got, err := Due(parent("o-1"), setOf(all...), at)
+	got, err := Due(parent("o1"), setOf(all...), at)
 	if err != nil {
 		t.Fatalf("Due: %v", err)
 	}
@@ -149,8 +150,8 @@ func TestScheduleDue_AlreadySentChildrenAreNotResent(t *testing.T) {
 func TestScheduleDue_AMissingChildIsRefilledNotSkipped(t *testing.T) {
 	at := windowEnd.Add(time.Hour)
 	// 2 is missing; 0, 1, 3, 4 exist; 5 was never reached.
-	got, err := Due(parent("o-1"), setOf(
-		ChildID("o-1", 0), ChildID("o-1", 1), ChildID("o-1", 3), ChildID("o-1", 4)), at)
+	got, err := Due(parent("o1"), setOf(
+		ChildID("o1", 0), ChildID("o1", 1), ChildID("o1", 3), ChildID("o1", 4)), at)
 	if err != nil {
 		t.Fatalf("Due: %v", err)
 	}
@@ -169,13 +170,13 @@ func TestScheduleDue_AMissingChildIsRefilledNotSkipped(t *testing.T) {
 // the pod it replaced would have decided.
 func TestScheduleDue_TwoPodsDecideIdentically(t *testing.T) {
 	at := windowStart.Add(25 * time.Minute)
-	sent := setOf(ChildID("o-1", 0))
+	sent := setOf(ChildID("o1", 0))
 
-	a, err := Due(parent("o-1"), sent, at)
+	a, err := Due(parent("o1"), sent, at)
 	if err != nil {
 		t.Fatalf("pod A: %v", err)
 	}
-	b, err := Due(parent("o-1"), sent, at)
+	b, err := Due(parent("o1"), sent, at)
 	if err != nil {
 		t.Fatalf("pod B: %v", err)
 	}
@@ -198,54 +199,67 @@ func TestScheduleDue_TwoPodsDecideIdentically(t *testing.T) {
 // store's primary key refuses the second. A random or allocated ID would make
 // every retry a new order — and a retry that double-trades is precisely what
 // #292 and the PENDING_NEW sweep exist to prevent.
-func TestScheduleChildID_IsStableAndReversible(t *testing.T) {
-	const parentID = "3f9a1c2e-0b7d-4e11-9a6f-2c8d5e4b7a13" // a UUID, as real order ids are
-	id := ChildID(parentID, 7)
+func TestScheduleChildID_IsStableAndDistinctPerSlice(t *testing.T) {
+	const parentID = "3f9a1c2e0b7d4e119a6f2c8d5e4b7a13" // 32 hex, as the estate mints
 
-	if id != ChildID(parentID, 7) {
-		t.Fatal("ChildID is not stable for the same inputs — the store's primary key cannot " +
-			"deduplicate what two pods spell differently")
+	// TWO SEPARATE CALLS, held in variables: staticcheck reads `f(x) != f(x)`
+	// written inline as a mistake, and it is right to — the determinism being
+	// asserted here is a property of ChildID, not of the expression.
+	first, second := ChildID(parentID, 7), ChildID(parentID, 7)
+	if first != second {
+		t.Fatalf("ChildID is not stable for the same inputs (%q then %q) — the store's primary "+
+			"key cannot deduplicate what two pods spell differently", first, second)
 	}
-	if id == ChildID(parentID, 8) {
-		t.Fatal("two different slices derived the SAME child id — the store would merge them and " +
-			"the parent would silently under-trade")
+	if ChildID(parentID, 7) == ChildID(parentID, 8) {
+		t.Fatal("two different slices derived the SAME child id — the store would merge them " +
+			"and the parent would silently under-trade")
 	}
-	gotParent, gotIndex, ok := ParseChildID(id)
-	if !ok || gotParent != parentID || gotIndex != 7 {
-		t.Fatalf("ParseChildID(%q) = (%q, %d, %v), want (%q, 7, true)",
-			id, gotParent, gotIndex, ok, parentID)
+	if ChildID("other", 7) == ChildID(parentID, 7) {
+		t.Fatal("two different parents derived the same child id for the same slice")
 	}
 }
 
-// TWO DIFFERENT PARENTS NEVER DERIVE THE SAME CHILD ID.
+// A CHILD ID CAN ACTUALLY BE PLACED AT A VENUE.
 //
-// The separator has to be a character an order ID cannot contain. If it could,
-// parent "a:1" slice 0 and parent "a" slice 1 would collide — two different
-// funds' orders merged by the store's primary key, which is a loss of money, not
-// of tidiness.
-func TestScheduleChildID_DistinctParentsCannotCollide(t *testing.T) {
-	if ChildID("a"+childSeparator+"1", 0) == ChildID("a", 1) {
-		t.Fatalf("parents %q and %q derived the same child id — order ids must not be able to "+
-			"contain %q, or two orders merge at the store's primary key",
-			"a"+childSeparator+"1", "a", childSeparator)
+// This is the assertion the readable form could never have passed. A child is an
+// ORDER, so its id is stamped as the exchange's client order id — and OKX accepts
+// at most 32 characters, letters and digits only. "<parent>:<index>" broke both
+// rules at once: the colon is refused outright, and a 32-character parent leaves
+// no room for a suffix. Every scheduled child order would have been admitted,
+// stored, announced, and then refused by the exchange.
+func TestScheduleChildID_IsPlaceableAtEveryVenue(t *testing.T) {
+	for _, parentID := range []string{
+		"3f9a1c2e0b7d4e119a6f2c8d5e4b7a13", // the full 32 the estate mints
+		"a",                                // and a short one
+	} {
+		for _, i := range []int{0, 7, 999} {
+			id := ChildID(parentID, i)
+			if err := orderid.Valid(id); err != nil {
+				t.Errorf("ChildID(%q, %d) = %q is not placeable: %v", parentID, i, id, err)
+			}
+		}
 	}
 }
 
-// A NON-DERIVED ID IS NOT CLAIMED AS A CHILD. An ordinary order must not parse as
-// somebody's slice, or an operator tracing a parent would be shown orders that
-// have nothing to do with it.
-func TestScheduleParseChildID_RejectsIdsItDidNotDerive(t *testing.T) {
+// A PARENT WHOSE OWN ID IS UNPLACEABLE IS REFUSED, by the platform-wide rule
+// rather than a local one.
+func TestScheduleUsableParentID_AppliesThePlatformRule(t *testing.T) {
 	for _, id := range []string{
-		"3f9a1c2e-0b7d-4e11-9a6f-2c8d5e4b7a13", // a plain order id
-		"",
-		":",
-		":5",         // no parent
-		"parent:",    // no index
-		"parent:abc", // not an index
-		"parent:-1",  // a negative slice
+		"3f9a1c2e0b7d4e119a6f2c8d5e4b7a13", // 32 hex, as the gateway now mints
+		"clientorder42",
 	} {
-		if _, _, ok := ParseChildID(id); ok {
-			t.Errorf("ParseChildID(%q) claimed it as a derived child id", id)
+		if err := UsableParentID(id); err != nil {
+			t.Errorf("UsableParentID(%q) = %v, want nil — this is an id the estate really issues", id, err)
+		}
+	}
+	for _, id := range []string{
+		"",                                     // no id at all
+		"3f9a1c2e-0b7d-4e11-9a6f-2c8d5e4b7a13", // what api-gateway used to mint
+		"acct:1",                               // a client-supplied id with punctuation
+		"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",    // 33 characters
+	} {
+		if err := UsableParentID(id); !errors.Is(err, ErrUnusableParentID) {
+			t.Errorf("UsableParentID(%q) = %v, want ErrUnusableParentID", id, err)
 		}
 	}
 }
@@ -269,7 +283,7 @@ func TestScheduleDue_EmitsOnlyWhatTheClockHasReached(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := Due(parent("o-1"), none, tt.at)
+			got, err := Due(parent("o1"), none, tt.at)
 			if err != nil {
 				t.Fatalf("Due: %v", err)
 			}
@@ -285,7 +299,7 @@ func TestScheduleDue_EmitsOnlyWhatTheClockHasReached(t *testing.T) {
 // asserts it SURVIVES the trip through this layer, which is where a rounding or
 // a re-derivation would quietly reintroduce the loss.
 func TestScheduleDue_ChildrenStillSumToTheParent(t *testing.T) {
-	p := parent("o-1")
+	p := parent("o1")
 	p.Plan.Total = new(big.Rat).SetInt64(10)
 	p.Plan.Slices = 3 // 10/3 — the division that does not close
 
@@ -308,8 +322,8 @@ func TestScheduleDue_ChildrenStillSumToTheParent(t *testing.T) {
 // out late.
 func TestScheduleDue_ChildCarriesItsScheduledTimeNotTheTickTime(t *testing.T) {
 	// Ticking at 14:47 — slice 4 was due at 14:40, seven minutes ago.
-	got, err := Due(parent("o-1"), setOf(
-		ChildID("o-1", 0), ChildID("o-1", 1), ChildID("o-1", 2), ChildID("o-1", 3)),
+	got, err := Due(parent("o1"), setOf(
+		ChildID("o1", 0), ChildID("o1", 1), ChildID("o1", 2), ChildID("o1", 3)),
 		windowStart.Add(47*time.Minute))
 	if err != nil {
 		t.Fatalf("Due: %v", err)
@@ -322,8 +336,8 @@ func TestScheduleDue_ChildCarriesItsScheduledTimeNotTheTickTime(t *testing.T) {
 		t.Errorf("child Due = %s, want its SCHEDULED time %s — recording the tick time instead "+
 			"hides that this slice went out seven minutes late", got[0].Due, want)
 	}
-	if got[0].ParentID != "o-1" {
-		t.Errorf("child ParentID = %q, want o-1 — the relation must be durable in both "+
+	if got[0].ParentID != "o1" {
+		t.Errorf("child ParentID = %q, want o1 — the relation must be durable in both "+
 			"directions, not only recoverable by parsing the id", got[0].ParentID)
 	}
 }
@@ -342,8 +356,8 @@ func TestScheduleDue_AParentWithNoScheduleIsRefusedLoudly(t *testing.T) {
 		name string
 		p    Parent
 	}{
-		{"no quantity", Parent{OrderID: "o-1", Plan: algo.Plan{Slices: 6, Start: windowStart, End: windowEnd}}},
-		{"no slices", Parent{OrderID: "o-1", Plan: algo.Plan{Total: new(big.Rat).SetInt64(60), Start: windowStart, End: windowEnd}}},
+		{"no quantity", Parent{OrderID: "o1", Plan: algo.Plan{Slices: 6, Start: windowStart, End: windowEnd}}},
+		{"no slices", Parent{OrderID: "o1", Plan: algo.Plan{Total: new(big.Rat).SetInt64(60), Start: windowStart, End: windowEnd}}},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			got, err := Due(tt.p, none, windowEnd)
@@ -358,50 +372,25 @@ func TestScheduleDue_AParentWithNoScheduleIsRefusedLoudly(t *testing.T) {
 	}
 }
 
-// A PARENT WHOSE ID CANNOT DERIVE UNAMBIGUOUS CHILDREN IS REFUSED.
+// The two ID tests that stood here are gone, and what replaced them is in the
+// ID section above (TestScheduleUsableParentID_AppliesThePlatformRule).
 //
-// THE COMMENT THIS REPLACES WAS WRONG, and the error it would have caused is the
-// expensive kind. It claimed the separator was safe "because order ids are UUIDs
-// and a UUID contains no colon". The gateway only DEFAULTS order_id to a UUID
-// when the client leaves it empty — a client may supply any string — so parent
-// "a:1" slice 0 and parent "a" slice 1 both spell "a:1:0". That id is the store's
-// primary key AND the venue's clientOrderId, so the collision does not raise an
-// error anywhere: it merges two orders.
-func TestScheduleDue_AParentWhoseIDCannotDeriveChildrenIsRefused(t *testing.T) {
-	for _, tt := range []struct{ name, id string }{
-		{"no id at all", ""},
-		{"a client-supplied id containing the separator", "acct" + childSeparator + "1"},
-		{"a child being scheduled as a parent", ChildID("o-1", 3)},
-	} {
-		t.Run(tt.name, func(t *testing.T) {
-			if _, err := Due(parent(tt.id), none, windowEnd); !errors.Is(err, ErrUnusableParentID) {
-				t.Fatalf("err = %v, want ErrUnusableParentID — this parent's children could not "+
-					"be told apart from another parent's, and the store would MERGE them rather "+
-					"than refuse them", err)
-			}
-		})
-	}
-}
-
-// AND AN ORDINARY ID IS NOT REFUSED. A rule that rejected everything would be a
-// trading outage wearing the shape of a control.
-func TestScheduleUsableParentID_AcceptsTheIdsThisEstateActuallyIssues(t *testing.T) {
-	for _, id := range []string{
-		"3f9a1c2e-0b7d-4e11-9a6f-2c8d5e4b7a13", // api-gateway's uuid.NewString()
-		"8d1f0c3b9a2e4d5f6071829304a5b6c7",     // translate.DeterministicID, 32 hex
-		"client-order-42",                      // a client-supplied id, no separator
-	} {
-		if err := UsableParentID(id); err != nil {
-			t.Errorf("UsableParentID(%q) = %v, want nil — this is an id the estate really issues", id, err)
-		}
-	}
-}
+// They asserted the OPPOSITE of what is now true, and they were not wrong when
+// written — they encoded a belief that turned out to be false. One held that a
+// hyphenated UUID and "client-order-42" were ids "the estate really issues" and
+// must be accepted; both are now REFUSED, because OKX accepts neither and every
+// order carrying one was unplaceable there. The other refused an id containing
+// the child separator, which stopped mattering when child ids became hashes.
+//
+// Left as a note rather than silently deleted: a test that has to be inverted is
+// evidence about the belief it was protecting, and that is worth more than the
+// diff hiding it.
 
 // AN UNWORKABLE SCHEDULE SURFACES THE SCHEDULER'S OWN REFUSAL rather than being
 // swallowed here. A parent whose cap and slice count disagree must reach an
 // operator with the reason, not rest silently.
 func TestScheduleDue_AnUnworkableScheduleSurfacesTheReason(t *testing.T) {
-	p := parent("o-1")
+	p := parent("o1")
 	p.Plan.Total = new(big.Rat).SetInt64(1000)
 	p.Plan.Slices = 10
 	p.Plan.MaxSlice = new(big.Rat).SetInt64(10) // 100 per child, over the cap
@@ -421,10 +410,10 @@ func TestScheduleDue_AnUnworkableScheduleSurfacesTheReason(t *testing.T) {
 // at a venue, and the fills arriving afterwards would fold onto an order the
 // platform had stopped watching.
 func TestScheduleComplete_MeansEveryChildExists(t *testing.T) {
-	p := parent("o-1")
+	p := parent("o1")
 	all := []string{}
 	for i := range 6 {
-		all = append(all, ChildID("o-1", i))
+		all = append(all, ChildID("o1", i))
 	}
 
 	if Complete(p, setOf(all[:5]...)) {

@@ -12,6 +12,7 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"github.com/eighred/kanz/internal/dec"
+	"github.com/eighred/kanz/internal/orderid"
 	"github.com/eighred/kanz/internal/venueadapter/exchangeauth"
 )
 
@@ -79,13 +80,21 @@ func (v *OKXVenue) Instruments() []InstrumentSymbol {
 	return v.symbols.Instruments()
 }
 
-// OrderTypes declares what this connector can translate for okx, which the OMS
-// reads through Describe and enforces at ADMISSION (#405).
+// ALL FOUR SPOT ORDER TYPES, deliberately the exact set okxOrderBody accepts
+// (#405, #485).
 //
-// SPOT MARKET AND LIMIT, deliberately the exact set the switch in Place accepts
-// — STOP and STOP_LIMIT are in order.v1's enum and are not implemented here yet.
-// Declaring them would restore the defect this exists to remove: an order the
-// OMS admits, stores and announces, that no exchange ever sees.
+// STOP and STOP_LIMIT are placed as CONDITIONAL orders on /trade/order-algo —
+// a separate product with its own endpoints for placement, query and cancel.
+// What makes them workable is that our own id addresses them at every one:
+// algoClOrdId is accepted on placement, resolves the order on query without an
+// instId, and cancels it with no algoId round trip.
+//
+// THE TRIGGERED ORDER IS NOT THE ALGO ORDER, and that is the part that had to be
+// measured rather than assumed. When a stop fires, OKX creates a regular order
+// with a clOrdId OF ITS OWN; ours survives on algoClOrdId, which is why
+// okx_userdata.go reads that field first. Declaring these types before that was
+// true would have produced stops that rest correctly and whose fills nobody
+// could book.
 //
 // KEEP THIS IN STEP WITH THAT SWITCH. TestDeclaredOrderTypesMatchTranslation
 // walks the whole enum and fails if the two ever disagree, in either direction.
@@ -93,6 +102,8 @@ func (v *OKXVenue) OrderTypes() []orderpb.OrderType {
 	return []orderpb.OrderType{
 		orderpb.OrderType_ORDER_TYPE_MARKET,
 		orderpb.OrderType_ORDER_TYPE_LIMIT,
+		orderpb.OrderType_ORDER_TYPE_STOP,
+		orderpb.OrderType_ORDER_TYPE_STOP_LIMIT,
 	}
 }
 
@@ -121,7 +132,17 @@ func (v *OKXVenue) CancelOrder(ctx context.Context, st *orderpb.OrderState) erro
 	if !ok {
 		return fmt.Errorf("okx: no symbol mapping for %s", st.GetInstrumentId())
 	}
-	_, err := v.rest.cancelOrder(ctx, instID, st.GetOrderId())
+	// WITHDRAWN FROM THE ENDPOINT IT LIVES ON (#485). A conditional order is not
+	// visible to /trade/cancel-order at all — that endpoint would answer "order
+	// does not exist", which this connector reads as a CONFIRMED withdrawal, so a
+	// stop would be reported cancelled while still resting at the exchange.
+	// Derived from the order type rather than remembered, so a cancel arriving
+	// minutes later on another pod still reaches the right endpoint.
+	cancel := v.rest.cancelOrder
+	if isAlgoOrder(st.GetOrderType()) {
+		cancel = v.rest.cancelAlgoOrder
+	}
+	_, err := cancel(ctx, instID, st.GetOrderId())
 	var apiErr *APIError
 	if errors.As(err, &apiErr) {
 		switch apiErr.Code {
@@ -143,6 +164,32 @@ func (v *OKXVenue) Execute(ctx context.Context, st *orderpb.OrderState) ([]*orde
 	if !ok {
 		return nil, fmt.Errorf("okx: no symbol mapping for %s", st.GetInstrumentId())
 	}
+	// A STOP GOES TO A DIFFERENT PRODUCT ENTIRELY (#485), and returns no fills:
+	// a conditional order RESTS until its trigger fires, and the order that
+	// eventually fills is one OKX creates then. Its fills reach this platform
+	// through the user-data stream keyed on algoClOrdId, and through
+	// reconciliation — never from this call, which is why it returns nil rather
+	// than querying for a fill that cannot exist yet.
+	if isAlgoOrder(st.GetOrderType()) {
+		algoBody, aerr := okxAlgoBody(st, instID)
+		if aerr != nil {
+			return nil, aerr
+		}
+		if _, aerr := v.rest.placeAlgoOrder(ctx, algoBody); aerr != nil {
+			if errors.Is(aerr, ErrRateLimited) {
+				return nil, aerr
+			}
+			// Idempotency recovery, same shape as the regular path: an ambiguous
+			// failure may mean the order landed. Ask by OUR id — no instId needed
+			// on this endpoint — and treat a resting stop as placed.
+			if _, qErr := v.rest.queryAlgoOrder(ctx, st.GetOrderId()); qErr == nil {
+				return nil, nil
+			}
+			return nil, aerr
+		}
+		return nil, nil
+	}
+
 	body, err := okxOrderBody(st, instID)
 	if err != nil {
 		return nil, err
@@ -173,6 +220,17 @@ func okxOrderBody(st *orderpb.OrderState, instID string) (map[string]string, err
 	if err != nil {
 		return nil, err
 	}
+	// THE ORDER ID IS THE VENUE'S CLIENT ORDER ID, AND OKX IS THE STRICTEST JUDGE
+	// OF IT: letters and digits only, at most 32 characters. An id that breaks
+	// either rule comes back as `51000 Parameter clOrdId error`, which tells an
+	// operator nothing about which of their 36 characters was the problem.
+	//
+	// Refusing here names the rule. It is a backstop rather than the fix — the
+	// gateway now MINTS ids that satisfy it (internal/orderid) — but a client may
+	// supply its own order id, and this is the only place that knows OKX's rule.
+	if err := orderid.Valid(st.GetOrderId()); err != nil {
+		return nil, fmt.Errorf("okx: %w", err)
+	}
 	body := map[string]string{
 		"instId":  instID,
 		"tdMode":  "cash", // spot
@@ -188,10 +246,14 @@ func okxOrderBody(st *orderpb.OrderState, instID string) (map[string]string, err
 		if dec.IsZero(st.GetLimitPrice()) {
 			return nil, errors.New("okx: limit order requires a positive limit price")
 		}
-		body["ordType"] = "limit"
+		ordType, terr := okxLimitOrdType(st.GetTimeInForce())
+		if terr != nil {
+			return nil, terr
+		}
+		body["ordType"] = ordType
 		body["px"] = FormatDec(st.GetLimitPrice())
 	default:
-		return nil, fmt.Errorf("okx: unsupported order type %v (spot market/limit only)", st.GetOrderType())
+		return nil, fmt.Errorf("okx: unsupported order type %v", st.GetOrderType())
 	}
 	return body, nil
 }
@@ -267,4 +329,120 @@ func okxSide(s orderpb.Side) (string, error) {
 	default:
 		return "", fmt.Errorf("okx: invalid side %v", s)
 	}
+}
+
+// okxLimitOrdType maps order.v1.TimeInForce onto OKX's ordType for a priced
+// order, and REFUSES the ones it cannot express.
+//
+// OKX CARRIES TIME-IN-FORCE IN ordType ITSELF rather than a separate parameter:
+// "limit" rests (good-til-cancelled), "ioc" fills what is available and cancels
+// the rest, "fok" fills entirely or not at all. Different spelling from Binance,
+// identical defect underneath — this connector sent "limit" for every priced
+// order whatever the trader asked for.
+//
+// THAT IS THE FOURTH INSTANCE OF #240/#405's DEFECT FAMILY and the worst of them.
+// The earlier three produced an order that did NOTHING; this one produces an
+// order that does the WRONG THING. An IOC sent as a resting limit stays at the
+// exchange, so a trader who asked to hold no exposure is holding it, and a FOK
+// can rest PARTIALLY FILLED — the one outcome that instruction exists to forbid.
+//
+// DAY and GTD are refused rather than approximated: OKX spot has no trading
+// session and no good-til-date parameter on this endpoint, and resting an order
+// somebody asked to expire is the same silent substitution one value over. The
+// refusal lands after admission, which is #405's shape and is tracked; it is
+// still strictly better than executing the wrong instruction.
+func okxLimitOrdType(tif orderpb.TimeInForce) (string, error) {
+	switch tif {
+	case orderpb.TimeInForce_TIME_IN_FORCE_GTC,
+		// UNSPECIFIED is treated as GTC deliberately, and only here: admission
+		// requires a time-in-force, so an order arriving without one predates that
+		// rule and was already being sent as a resting limit. This substitution
+		// changes no existing behaviour.
+		orderpb.TimeInForce_TIME_IN_FORCE_UNSPECIFIED:
+		return "limit", nil
+	case orderpb.TimeInForce_TIME_IN_FORCE_IOC:
+		return "ioc", nil
+	case orderpb.TimeInForce_TIME_IN_FORCE_FOK:
+		return "fok", nil
+	default:
+		return "", fmt.Errorf("okx: spot cannot express time-in-force %v — it has no trading "+
+			"session (DAY) and no good-til-date parameter (GTD); placing this as a resting limit "+
+			"would keep an order the trader asked to expire", tif)
+	}
+}
+
+// isAlgoOrder reports whether an order is placed as a CONDITIONAL order rather
+// than a regular one (#485).
+//
+// IT IS DERIVED FROM THE ORDER TYPE, NOT REMEMBERED. Placement, query and cancel
+// each need to know which endpoint an order lives on, and they are three
+// separate calls that can happen minutes apart on different pods. Deriving it
+// from the OrderState — which every one of them already holds — means there is
+// no fourth thing to keep in sync, and no way for a cancel to reach the wrong
+// endpoint because a flag was lost.
+func isAlgoOrder(t orderpb.OrderType) bool {
+	return t == orderpb.OrderType_ORDER_TYPE_STOP || t == orderpb.OrderType_ORDER_TYPE_STOP_LIMIT
+}
+
+// okxAlgoBody maps a stop onto OKX conditional-order parameters.
+//
+// # ordType "trigger", not "conditional"
+//
+// Both exist. "conditional" is oriented around attaching a stop-loss and/or
+// take-profit pair (slTriggerPx/slOrdPx, tpTriggerPx/tpOrdPx); "trigger" is a
+// single level and a single resulting order, which is exactly what order.v1's
+// ORDER_TYPE_STOP and ORDER_TYPE_STOP_LIMIT mean. Using the pair form for a
+// one-sided instruction would leave half the message unused and invite somebody
+// to fill it in with the other side, which order.v1 has no way to express.
+//
+// # orderPx -1 is the market instruction
+//
+// OKX spells "become a MARKET order when the trigger fires" as orderPx = -1, and
+// a price otherwise. That is the whole difference between STOP and STOP_LIMIT
+// here, and it is why a STOP must NOT carry a limit price: sending one silently
+// converts it into a stop-limit that can fail to fill in exactly the fast market
+// the stop was placed for.
+//
+// # The direction is the venue's to enforce
+//
+// OKX decides which way a trigger fires by comparing triggerPx to the market at
+// placement, and refuses a level that is already crossed. order.v1 has no field
+// for direction and this connector invents none: a stop on the wrong side of the
+// market is refused by the exchange, loudly, which is the right failure for an
+// instruction nobody can satisfy.
+func okxAlgoBody(st *orderpb.OrderState, instID string) (map[string]string, error) {
+	side, err := okxSide(st.GetSide())
+	if err != nil {
+		return nil, err
+	}
+	if err := orderid.Valid(st.GetOrderId()); err != nil {
+		return nil, fmt.Errorf("okx: %w", err)
+	}
+	if dec.IsZero(st.GetStopPrice()) {
+		return nil, errors.New("okx: a stop order requires a positive trigger price")
+	}
+	body := map[string]string{
+		"instId": instID,
+		"tdMode": "cash", // spot
+		"side":   side,
+		// OUR ID, AND IT IS WHAT SURVIVES THE TRIGGER. The order that eventually
+		// fills is created by OKX with a clOrdId of its own; this is the field it
+		// carries ours on, and the field okx_userdata.go reads first.
+		"algoClOrdId": st.GetOrderId(),
+		"ordType":     "trigger",
+		"sz":          FormatDec(st.GetOrderedQuantity()),
+		"triggerPx":   FormatDec(st.GetStopPrice()),
+	}
+	switch st.GetOrderType() {
+	case orderpb.OrderType_ORDER_TYPE_STOP:
+		body["orderPx"] = "-1" // market on trigger
+	case orderpb.OrderType_ORDER_TYPE_STOP_LIMIT:
+		if dec.IsZero(st.GetLimitPrice()) {
+			return nil, errors.New("okx: a stop-limit order requires a positive limit price")
+		}
+		body["orderPx"] = FormatDec(st.GetLimitPrice())
+	default:
+		return nil, fmt.Errorf("okx: %v is not a conditional order type", st.GetOrderType())
+	}
+	return body, nil
 }

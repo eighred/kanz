@@ -87,9 +87,12 @@ func New(reg prometheus.Registerer, tenant string, bars Bars, logger *slog.Logge
 			Name: "kanz_execution_vwap_slippage_bps",
 			Help: "Realized fill price against the interval VWAP over the order's working window, " +
 				"in basis points. Positive traded worse than the market's own average; negative " +
-				"beat it. Distinct from shortfall, which measures against the DECISION-time mark.",
+				"beat it. Distinct from shortfall, which measures against the DECISION-time mark. " +
+				"The `worked` label separates executions SLICED over a window by an execution " +
+				"algorithm from those sent WHOLE — without it both land in one number that " +
+				"describes neither, and whether slicing helps cannot be answered from this data.",
 			Buckets: []float64{-100, -50, -25, -10, -5, 0, 5, 10, 25, 50, 100, 250, 500},
-		}, []string{"venue"}),
+		}, []string{"venue", "worked"}),
 		unjoinable: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "kanz_execution_vwap_unjoinable_total",
 			Help: "Cost records that could not be compared to a VWAP, by reason. NOT zero " +
@@ -198,12 +201,44 @@ func (w *Watch) Handle(ctx context.Context, env *envelopepb.Envelope, payload []
 		return nil
 	}
 	f, _ := slip.Float64()
-	w.slippage.WithLabelValues(venue).Observe(f)
+	w.slippage.WithLabelValues(venue, workedLabel(&rec)).Observe(f)
 
 	w.logger.Debug("vwap slippage measured",
-		"order_id", rec.GetOrderId(), "fill_id", rec.GetFillId(), "venue", venue,
+		"order_id", rec.GetOrderId(), "parent_order_id", rec.GetParentOrderId(),
+		"fill_id", rec.GetFillId(), "venue", venue,
 		"instrument", rec.GetInstrumentId(),
 		"window_from", from, "window_to", to, "bars", len(bars),
 		"vwap", ref.FloatString(8), "slippage_bps", slip.FloatString(4))
 	return nil
+}
+
+// workedLabel says whether this execution was SLICED over a window by an
+// execution algorithm, or sent to the venue WHOLE (#435, #483).
+//
+// # It is what makes "does working an order on a schedule help?" answerable
+//
+// That is the question #435 exists to let somebody settle, and until this label
+// existed the data could not settle it: every slice landed in the same histogram
+// as every whole order, so a venue's VWAP slippage blended two different
+// execution strategies into one number that described neither.
+//
+// # Why a two-valued label rather than a per-parent figure
+//
+// A slippage figure for the PARENT over its whole window is what an operator
+// would ask for first, and it is deliberately not here. It needs to know when a
+// parent has finished, which means holding partial results keyed by parent until
+// then — a stateful join, inside a consumer whose whole design is that it holds
+// nothing and can be restarted at any moment. Labelling by ORDER ID would trade
+// that state for unbounded metric cardinality, which is worse.
+//
+// So this answers the question in aggregate rather than per order: across many
+// orders, did the sliced ones beat the market by more than the whole ones? That
+// is the form the answer is actually needed in — one order's slippage is noise —
+// and per-order reconstruction stays available from the cost records themselves,
+// which now carry parent_order_id.
+func workedLabel(rec *orderpb.TransactionCostRecorded) string {
+	if rec.GetParentOrderId() != "" {
+		return "sliced"
+	}
+	return "whole"
 }

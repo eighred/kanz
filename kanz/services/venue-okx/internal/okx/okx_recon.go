@@ -250,12 +250,15 @@ func (r *OKXReconciler) reconcileOrders(ctx context.Context) error {
 		if !ok {
 			continue
 		}
-		o, err := r.rest.queryOrder(ctx, instID, exp.GetOrderId())
+		o, err := r.queryByType(ctx, instID, exp)
 		if err != nil {
 			if errors.Is(err, ErrRateLimited) {
 				return err
 			}
 			continue
+		}
+		if o == nil {
+			continue // resting, and the venue agrees — nothing to heal
 		}
 		healed, drift, hErr := okxHealedState(exp, o, r.now())
 		if hErr != nil {
@@ -393,5 +396,51 @@ func okxDriftReason(exp *orderpb.OrderState, o *okxOrder) string {
 func (r *OKXReconciler) unknownBalance(asset string) {
 	if r.onUnknownBalance != nil {
 		r.onUnknownBalance(asset)
+	}
+}
+
+// queryByType asks the venue about an order on the endpoint that order actually
+// lives on (#485).
+//
+// # Why this is not one call
+//
+// A CONDITIONAL order is invisible to /trade/order — it answers 51603 "Order
+// does not exist" for a stop that is resting, live, and perfectly healthy.
+// Reconciliation used to take that as a query failure and `continue`, so a stop
+// was never reconciled at all: cancelled at the venue by hand, it would sit open
+// in this platform's books indefinitely, and nothing would ever disagree.
+//
+// # Three outcomes, and the middle one is the reason for the nil
+//
+//   - a REGULAR order, or a triggered stop's resulting order: the venue's truth,
+//     healed by the existing path;
+//   - a stop still WAITING (state "live" or "pause"): nil, meaning "the venue
+//     agrees this is resting". There is nothing to heal, and inventing a regular
+//     order shape for it would compare a trigger against a fill;
+//   - a stop that FIRED: the algo record no longer describes the live order, so
+//     this follows through to the order the trigger created. Fills reach the
+//     platform through the user-data stream keyed on algoClOrdId; this is the
+//     backstop for a missed stream event.
+func (r *OKXReconciler) queryByType(ctx context.Context, instID string, exp *orderpb.OrderState) (*okxOrder, error) {
+	if !isAlgoOrder(exp.GetOrderType()) {
+		return r.rest.queryOrder(ctx, instID, exp.GetOrderId())
+	}
+	algo, err := r.rest.queryAlgoOrder(ctx, exp.GetOrderId())
+	if err != nil {
+		return nil, err
+	}
+	switch algo.State {
+	case "live", "pause":
+		return nil, nil
+	case "effective":
+		return r.rest.queryTriggeredOrder(ctx, instID, exp.GetOrderId())
+	default:
+		// "canceled", "order_failed" — the stop will never fire. Presented in the
+		// regular order's shape so the one healing path handles it: no fills, and
+		// a state the aggregate already knows how to make terminal.
+		return &okxOrder{
+			ClOrdID: exp.GetOrderId(), State: "canceled",
+			Sz: algo.Sz, AccFillSz: "0", AlgoClOrdID: exp.GetOrderId(),
+		}, nil
 	}
 }
