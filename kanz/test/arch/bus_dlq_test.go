@@ -37,12 +37,38 @@ import (
 // busConsumerCall is one bus.NewConsumer(...) call site and the option
 // constructors passed to it.
 type busConsumerCall struct {
-	file    string
+	file string
+	// fn is the enclosing function's name. It is what an exemption is keyed on —
+	// see where().
+	fn string
+	// line is for the failure message only. It is deliberately NOT part of the
+	// key: an operator needs to be told where to look, and a key needs to survive
+	// the edit that moved it.
 	line    int
 	options map[string]bool
 }
 
-func (c busConsumerCall) where() string { return fmt.Sprintf("%s:%d", c.file, c.line) }
+// where identifies a call site for the exemption map.
+//
+// FILE AND ENCLOSING FUNCTION (#489). This key was file:LINE, and it broke on
+// essentially every edit to a composition root — twice in one session — because
+// anything inserted above a consumer shifts it. That was tedious. The danger was
+// worse: TWO of the exempted files hold TWO consumers each (accounting,
+// risk-engine), so the number was doing real work — it said WHICH consumer an
+// argued exemption covers — and a careless re-point in those files silently moves
+// a long-standing argument onto a different consumer, green either way.
+//
+// AN ORDINAL WAS TRIED FIRST AND IS WORSE, which a mutation showed rather than
+// reasoning: with file#N, inserting a NEW consumer ahead of an exempted one
+// renumbers them, so the exemption silently transfers to the newcomer and the
+// guard stays green. That trades frequent-and-loud for rare-and-silent, which is
+// the wrong direction for a default-deny allow-list.
+//
+// A function name survives every edit above the call, and it cannot be
+// reassigned by insertion: a new consumer in a DIFFERENT function gets its own
+// key and is default-denied; a new consumer in the SAME function makes the key
+// ambiguous, and busConsumerCalls refuses to guess — see its duplicate check.
+func (c busConsumerCall) where() string { return c.file + ":" + c.fn }
 
 // busConsumerCalls finds every non-test bus.NewConsumer call site in the module.
 //
@@ -78,34 +104,80 @@ func busConsumerCalls(t *testing.T, root string) []busConsumerCall {
 		if rerr != nil {
 			rel = path
 		}
-		ast.Inspect(f, func(n ast.Node) bool {
-			call, ok := n.(*ast.CallExpr)
-			if !ok || !isSelector(call.Fun, "bus", "NewConsumer") {
-				return true
+		slash := filepath.ToSlash(rel)
+		// PER FuncDecl, not over the whole file: the enclosing function is the
+		// key, so it has to be known at the point the call is found. A consumer
+		// outside any function (a package-level var initialiser) is impossible
+		// here — bus.NewConsumer takes a client built at runtime — and would be
+		// caught by the duplicate check below as an empty function name.
+		for _, decl := range f.Decls {
+			fd, ok := decl.(*ast.FuncDecl)
+			if !ok {
+				continue
 			}
-			opts := map[string]bool{}
-			for _, arg := range call.Args {
-				optCall, ok := arg.(*ast.CallExpr)
-				if !ok {
-					continue
+			fname := fd.Name.Name
+			ast.Inspect(fd, func(n ast.Node) bool {
+				call, ok := n.(*ast.CallExpr)
+				if !ok || !isSelector(call.Fun, "bus", "NewConsumer") {
+					return true
 				}
-				if sel, ok := optCall.Fun.(*ast.SelectorExpr); ok {
-					if id, ok := sel.X.(*ast.Ident); ok && id.Name == "bus" {
-						opts[sel.Sel.Name] = true
+				opts := map[string]bool{}
+				for _, arg := range call.Args {
+					optCall, ok := arg.(*ast.CallExpr)
+					if !ok {
+						continue
+					}
+					if sel, ok := optCall.Fun.(*ast.SelectorExpr); ok {
+						if id, ok := sel.X.(*ast.Ident); ok && id.Name == "bus" {
+							opts[sel.Sel.Name] = true
+						}
 					}
 				}
-			}
-			out = append(out, busConsumerCall{
-				file:    filepath.ToSlash(rel),
-				line:    fset.Position(call.Pos()).Line,
-				options: opts,
+				out = append(out, busConsumerCall{
+					file:    slash,
+					fn:      fname,
+					line:    fset.Position(call.Pos()).Line,
+					options: opts,
+				})
+				return true
 			})
-			return true
-		})
+		}
 		return nil
 	})
 	if err != nil {
 		t.Fatalf("scan %s: %v", root, err)
+	}
+
+	// TWO CONSUMERS IN ONE FUNCTION MAKE THE KEY AMBIGUOUS, AND THIS REFUSES TO
+	// GUESS (#489).
+	//
+	// An exemption is keyed on file:function and carries a paragraph arguing why
+	// THAT consumer may resume by acking. If a second consumer appears in the same
+	// function, the key names both — so the argued exemption would silently start
+	// covering a consumer nobody examined, which is the exact failure this key
+	// scheme was chosen to prevent.
+	//
+	// Fatal rather than an error: every assertion below reads this list, and one
+	// built on an ambiguous key is not evidence about anything.
+	byKey := map[string][]int{}
+	for _, c := range out {
+		byKey[c.where()] = append(byKey[c.where()], c.line)
+	}
+	var ambiguous []string
+	for key, lines := range byKey {
+		if len(lines) > 1 {
+			sort.Ints(lines)
+			ambiguous = append(ambiguous, fmt.Sprintf("%s (lines %v)", key, lines))
+		}
+	}
+	if len(ambiguous) > 0 {
+		sort.Strings(ambiguous)
+		t.Fatalf("%d function(s) hold more than one bus.NewConsumer call: %v.\n"+
+			"An exemption is keyed on file:function and argues for ONE consumer. With two in the "+
+			"same function the key names both, so a paragraph written about one would silently "+
+			"start covering the other — which is what this key scheme exists to prevent. Split "+
+			"them into separate functions, which is what every composition root in this estate "+
+			"already does.", len(ambiguous), ambiguous)
 	}
 	return out
 }
@@ -148,7 +220,7 @@ func isSelector(e ast.Expr, pkg, name string) bool {
 // its own justification. Listing cannot silently widen — only enumerating a
 // specific file:line can, and that requires a reviewed edit to this file.
 var dlqExemptBroadcastOnlyConsumers = map[string]string{
-	"cmd/kanz-monitor/busreader.go:94": "kanz-monitor: this Consumer is used " +
+	"cmd/kanz-monitor/busreader.go:runBusReader": "kanz-monitor: this Consumer is used " +
 		"SOLELY for two SubscribeBroadcast calls (order.> at busreader.go:112 and " +
 		"risk.position.changed.> at busreader.go:155) — there is no Subscribe call anywhere " +
 		"in this file, so the DLQ-routing branch of consumer.go's Subscribe path " +
@@ -422,7 +494,7 @@ func usesRedriver(f *ast.File) bool {
 // un-certifies it until this entry is updated to match; that fails CLOSED,
 // which is the safe direction for a capital-path guard.
 var retryCertifiedConsumers = map[string]string{
-	"services/tv-sync/cmd/tv-sync/main.go:123": "tv-sync: the sole handler is " +
+	"services/tv-sync/cmd/tv-sync/main.go:run": "tv-sync: the sole handler is " +
 		"projection.Projection.Handle. Its only error return before the fold is " +
 		"PostgresLog.Append itself failing (services/tv-sync/internal/projection/postgres.go:68), " +
 		"which means nothing committed. fold() never returns an error and Handle " +
@@ -431,26 +503,26 @@ var retryCertifiedConsumers = map[string]string{
 		"ever re-attempt an Append that did not durably land, never skip a fold whose " +
 		"Append already committed.",
 
-	"services/audit/cmd/audit/main.go:195": "audit: the sole handler is audit.Projector.Handle, " +
+	"services/audit/cmd/audit/main.go:runProjection": "audit: the sole handler is audit.Projector.Handle, " +
 		"which appends through Postgres.Append (services/audit/internal/audit/postgres.go:32). " +
 		"The event_id dedup check and the insert run inside ONE transaction under an " +
 		"advisory xact lock — atomic claim-and-persist, not check-then-act — so a retry " +
 		"after a failed transaction is a clean redo and a retry after a committed one is " +
 		"a no-op read of the same row, never a skip of unfinished work.",
 
-	"services/accounting/cmd/accounting/main.go:472": "accounting (fills+cash): dispatches " +
+	"services/accounting/cmd/accounting/main.go:runConsumer": "accounting (fills+cash): dispatches " +
 		"consume.Folder.Handle and Folder.HandleCash, both of which resolve to " +
 		"ledger.Postgres.Append (services/accounting/internal/ledger/postgres.go:31) — a single " +
 		"INSERT ... ON CONFLICT (tenant_id, entry_id) DO NOTHING inside one transaction. " +
 		"No read-then-decide gap exists for a retry to land in; it either redoes an " +
 		"uncommitted write or no-ops an already-committed one.",
 
-	"services/accounting/cmd/accounting/main.go:594": "accounting (live FX): the sole handler is " +
+	"services/accounting/cmd/accounting/main.go:runFXFeed": "accounting (live FX): the sole handler is " +
 		"fxfeed.LiveFX.Handler (services/accounting/internal/fxfeed/fxfeed.go:65) — an " +
 		"unconditional last-value cache write with no dedup branch at all. Re-running it " +
 		"with the same quote sets the same rate; there is nothing to skip.",
 
-	"services/risk-engine/cmd/risk-engine/main.go:295": "risk-engine (state ingest): dispatches " +
+	"services/risk-engine/cmd/risk-engine/main.go:runEngine": "risk-engine (state ingest): dispatches " +
 		"ingest.Ingestor.Handler -> engine.TriggeringApplier -> state.Store.ApplyPortfolioRevalued" +
 		"/ApplyPositionChanged/ApplyPortfolioSnapshot (internal/risk/state/store.go:202,227,246). " +
 		"Each Apply* checks its per-portfolio dedup window and mutates in-memory state with " +
@@ -461,18 +533,18 @@ var retryCertifiedConsumers = map[string]string{
 		"cannot itself fail the handler, so a retry can never observe a Trigger that ran " +
 		"without its Apply* having actually completed.",
 
-	"services/risk-engine/cmd/risk-engine/main.go:407": "risk-engine (calibration quotes): the " +
+	"services/risk-engine/cmd/risk-engine/main.go:startCalibration": "risk-engine (calibration quotes): the " +
 		"sole handler is livequote.LiveQuotes.Handler (internal/risk/pricing/livequote/livequote.go:80) " +
 		"— an unconditional last-value cache write, same shape as accounting's live FX feed. " +
 		"Nothing to skip.",
 
-	"services/market-data/cmd/market-data/main.go:185": "market-data: the sole handler is " +
+	"services/market-data/cmd/market-data/main.go:runIngest": "market-data: the sole handler is " +
 		"marketdata.Ingestor.Handler, which writes through Postgres.Put " +
 		"(internal/marketdata/store/postgres.go:49) — INSERT ... ON CONFLICT (instrument_id, " +
 		"observation_time, kind, knowledge_time) DO NOTHING inside one transaction. Same " +
 		"atomic-claim shape as audit/accounting; no check-then-act gap.",
 
-	"services/autopilot/cmd/autopilot/main.go:147": "autopilot: the sole handler is " +
+	"services/autopilot/cmd/autopilot/main.go:runControlLoop": "autopilot: the sole handler is " +
 		"controller.Controller.Handle, which has no dedup-and-skip branch at all — a retry " +
 		"always re-runs Dispatch (match -> runbook -> escalate) from the top. Every " +
 		"runbook.Action is a documented MUST-be-idempotent contract " +
@@ -480,31 +552,31 @@ var retryCertifiedConsumers = map[string]string{
 		"already re-runs runbooks on ordinary at-least-once redelivery; in-process retry adds " +
 		"no new failure shape. A doubled escalation page is a duplicate alert, not lost work.",
 
-	"services/lineage/cmd/lineage/main.go:369": "lineage: the sole handler is harvest.Harvester.Handle. " +
+	"services/lineage/cmd/lineage/main.go:runHarvest": "lineage: the sole handler is harvest.Harvester.Handle. " +
 		"graph.Memory.Observe (services/lineage/internal/graph/graph.go:71) always runs to " +
 		"completion (its own doc comment: 're-observing an event re-counts it but the edges " +
 		"are a set') before the OpenLineage Emit call that can fail — so a retry re-observes " +
 		"(accepted, pre-existing double-count on the Events tally, not a skip) and re-emits; " +
 		"it never skips the observe that a first attempt already made.",
 
-	"services/lake-sink/cmd/lake-sink/main.go:142": "lake-sink: the sole handler is cdc.EventSink.Handle, " +
+	"services/lake-sink/cmd/lake-sink/main.go:runSink": "lake-sink: the sole handler is cdc.EventSink.Handle, " +
 		"which has no dedup-and-skip branch — every attempt decodes, writes and flushes from " +
 		"scratch, and the doc comment is explicit that a duplicate row is expected and " +
 		"resolved by downstream compaction (services/lake-sink/internal/cdc/sink.go:49). A retry " +
 		"redoes the row; it cannot skip it.",
 
-	"services/alternatives/cmd/alternatives/main.go:290": "alternatives: the sole handler is " +
+	"services/alternatives/cmd/alternatives/main.go:runConsumer": "alternatives: the sole handler is " +
 		"consume.Folder.Handle, which appends through fund.Postgres.Append " +
 		"(services/alternatives/internal/fund/postgres.go:30) — a single INSERT ... ON CONFLICT " +
 		"(tenant_id, event_id) DO NOTHING. Same atomic-claim shape as the ledger and audit " +
 		"stores.",
 
-	"services/wealth/cmd/wealth/main.go:306": "wealth: the sole handler is consume.Folder.Handle, " +
+	"services/wealth/cmd/wealth/main.go:runConsumer": "wealth: the sole handler is consume.Folder.Handle, " +
 		"which Puts through book.Postgres.Put (services/wealth/internal/book/postgres.go:30) — an " +
 		"unconditional last-write-wins UPSERT keyed on household_id. Re-running it with the " +
 		"same composition is a no-op change; there is no dedup branch to skip through.",
 
-	"services/oms/cmd/oms/main.go:698": "oms: dispatches handleSubmit, handleCancel, handleAmend " +
+	"services/oms/cmd/oms/main.go:runConsumers": "oms: dispatches handleSubmit, handleCancel, handleAmend " +
 		"(order.Service.Handle) and position.Projector.Handle (fills), re-derived fresh against " +
 		"250fe00 rather than assumed fixed — see .superpowers/sdd/oms-recert-report.md for the " +
 		"full per-failure-point walk. handleSubmit: every failure point after store.Create either " +
