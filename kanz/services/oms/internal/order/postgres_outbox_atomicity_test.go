@@ -11,7 +11,7 @@ import (
 	orderpb "github.com/eighred/kanz/kanz-schemas-go/order/v1"
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/eighred/kanz/services/oms/internal/outbox"
+	"github.com/eighred/kanz/internal/outbox"
 )
 
 // THE ORDER AND ITS ANNOUNCEMENT MUST FAIL TOGETHER, NOT JUST SUCCEED TOGETHER.

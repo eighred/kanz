@@ -443,6 +443,37 @@ data:
               }
             }
           }
+          # datamaster became a real bus.DialNATS caller when the pricing-override
+          # FACT was wired (#410). It PUBLISHES ONE SUBJECT and consumes nothing:
+          # the override is committed to its own outbox in the same transaction
+          # as the audit row, and an in-process relay drains that outbox onto the
+          # spine.
+          #
+          # THE ALLOW LIST IS ONE ENTRY ON PURPOSE. A publisher with no
+          # permissions block is UNRESTRICTED within its account under NATS
+          # semantics, which is the SEC-M3e exposure this file exists to close —
+          # and an over-broad list is the same exposure written down. This
+          # service has no reason to publish anything else, so anything else it
+          # publishes is a defect, and the broker is the cheapest place to find
+          # out.
+          #
+          # dlq.> is included because the relay's publish path carries the
+          # standard DLQ fallback; without it a poison record cannot be parked
+          # and the relay retries it forever, holding the backlog behind it.
+          { user: "spiffe://kanz.internal/ns/kanz-services/sa/datamaster"
+            permissions: {
+              publish: {
+                allow: [
+                  "data.exception.overridden",
+                  "dlq.data.exception.overridden",
+                  "$JS.API.>", "$JS.ACK.>",
+                ]
+              }
+              subscribe: {
+                allow: [ "_INBOX.>" ]
+              }
+            }
+          }
           # alternatives became a real bus.DialNATS caller when its commitment-
           # journal consumer was wired (ALT-01b): it folds capital-call,
           # distribution and NAV-mark FACTs into fund.Store. SEC-M3b requires

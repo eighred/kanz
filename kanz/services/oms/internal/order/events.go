@@ -12,8 +12,8 @@ import (
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
+	"github.com/eighred/kanz/internal/outbox"
 	"github.com/eighred/kanz/pkg/bus"
-	"github.com/eighred/kanz/services/oms/internal/outbox"
 )
 
 // Subjects follow the {domain}.{entity}.{event_type} taxonomy. Commands are

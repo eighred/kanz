@@ -152,7 +152,11 @@ func newPool(t *testing.T) *pgxpool.Pool {
 func applySchema(t *testing.T, pool *pgxpool.Pool) {
 	t.Helper()
 	ctx := context.Background()
-	if _, err := pool.Exec(ctx, `DROP TABLE IF EXISTS exception_overrides, exceptions, golden_records CASCADE`); err != nil {
+	// exception_override_proposals is in this list because 0004 creates it. A
+	// table missing from here does not fail the FIRST gated run — it fails the
+	// SECOND, on "already exists", which reads as a broken migration rather than
+	// an incomplete teardown.
+	if _, err := pool.Exec(ctx, `DROP TABLE IF EXISTS exception_override_proposals, exception_overrides, exceptions, golden_records CASCADE`); err != nil {
 		t.Fatalf("drop: %v", err)
 	}
 	files, err := filepath.Glob(filepath.Join(migrationDir, "*.sql"))
@@ -178,7 +182,7 @@ func TestPostgresGoldenStore(t *testing.T) {
 
 func TestPostgresExceptionStore(t *testing.T) {
 	pool := newPool(t)
-	runExceptionContract(t, context.Background(), NewPostgresExceptions(pool))
+	runExceptionContract(t, context.Background(), NewPostgresExceptions(pool, "__system__"))
 }
 
 // TestPostgresOverridePriceIsExact pins DATA-M8b at the durable boundary.
@@ -193,7 +197,7 @@ func TestPostgresExceptionStore(t *testing.T) {
 func TestPostgresOverridePriceIsExact(t *testing.T) {
 	pool := newPool(t)
 	ctx := context.Background()
-	es := NewPostgresExceptions(pool)
+	es := NewPostgresExceptions(pool, "__system__")
 
 	ex := pricing.Exception{
 		ID: "EXACT:PRICE_TOLERANCE:ICE", Kind: pricing.KindPriceTolerance,

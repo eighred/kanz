@@ -9,7 +9,7 @@ import (
 	orderpb "github.com/eighred/kanz/kanz-schemas-go/order/v1"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
-	"github.com/eighred/kanz/services/oms/internal/outbox"
+	"github.com/eighred/kanz/internal/outbox"
 )
 
 // EVERY FACT'S payload_schema_ref MUST NAME A TYPE THAT EXISTS.

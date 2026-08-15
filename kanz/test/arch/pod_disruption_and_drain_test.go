@@ -545,7 +545,7 @@ var notAShutdownBudget = map[string]string{
 	"services/datamaster/internal/store/lock.go:ctx": "a running-path advisory-lock release, bounded " +
 		"off Background so the release still runs when the caller's context is already cancelled. It " +
 		"happens per operation, not on the way out.",
-	"services/oms/internal/outbox/postgres.go:ctx": "a running-path outbox row update, bounded off " +
+	"internal/outbox/postgres.go:ctx": "a running-path outbox row update, bounded off " +
 		"Background for the same reason: the row must be marked whether or not the caller's context " +
 		"survived. Not part of the drain.",
 }

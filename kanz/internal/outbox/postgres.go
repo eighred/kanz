@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	envelopepb "github.com/eighred/kanz/kanz-schemas-go/envelope/v1"
@@ -60,14 +61,40 @@ func Enqueue(ctx context.Context, tx pgx.Tx, records ...Record) error {
 	return nil
 }
 
-// Postgres is the durable Queue over the 0006_outbox.sql table.
+// Postgres is the durable Queue over a service's outbox table.
 //
-// It reads through the SAME tenant-scoped pool the order store uses, and that is
-// a decision, not a convenience — see the RLS argument on Relay.
-type Postgres struct{ pool *pgxpool.Pool }
+// It reads through the SAME tenant-scoped pool the service's own store uses, and
+// that is a decision, not a convenience — see the RLS argument on Relay.
+type Postgres struct {
+	pool *pgxpool.Pool
+	// service namespaces the advisory lock. Relay's doc named this as the one
+	// thing that changes when a second service adopts the outbox, and #410 is
+	// that second service.
+	//
+	// WITHOUT IT, TWO SERVICES SHARING A DATABASE SERIALISE AGAINST EACH OTHER.
+	// pg_advisory_lock keys are cluster-wide integers, not per-table: a namespace
+	// of "<tenant>/outbox" would make the OMS's drain of order-id "X" block
+	// datamaster's drain of exception-id "X" whenever the two collide in
+	// hashtext. Nothing would break — the relays would just take turns for no
+	// reason, intermittently, in a way no test reproduces.
+	service string
+}
 
 // NewPostgres returns a Queue over an existing pool. The caller owns the pool.
-func NewPostgres(pool *pgxpool.Pool) *Postgres { return &Postgres{pool: pool} }
+//
+// service is REQUIRED and is not defaulted: a default would put two services in
+// one lock namespace, which is the failure described above and is invisible.
+func NewPostgres(pool *pgxpool.Pool, service string) *Postgres {
+	if strings.TrimSpace(service) == "" {
+		panic("outbox: NewPostgres requires a service name for the advisory-lock namespace")
+	}
+	return &Postgres{pool: pool, service: service}
+}
+
+// lockNamespace is "<tenant>/<service>/outbox", built in ONE place so the three
+// advisory-lock calls cannot drift — a lock taken in one namespace and released
+// in another leaks the lock for the life of the connection.
+func (p *Postgres) lockNamespace() string { return "/" + p.service + "/outbox" }
 
 var _ Queue = (*Postgres)(nil)
 
@@ -160,8 +187,8 @@ func (p *Postgres) LockKey(ctx context.Context, key string, wait bool) (func(), 
 		// Cancellation is the caller's ctx — pgx cancels the query, so a
 		// shutdown does not strand a handler inside the lock wait.
 		if _, err := conn.Exec(ctx,
-			`SELECT pg_advisory_lock(hashtext(app_current_tenant() || '/oms/outbox'), hashtext($1))`,
-			key); err != nil {
+			`SELECT pg_advisory_lock(hashtext(app_current_tenant() || $2), hashtext($1))`,
+			key, p.lockNamespace()); err != nil {
 			conn.Release()
 			return nil, false, fmt.Errorf("outbox: wait for the %s drain lock: %w", key, err)
 		}
@@ -169,8 +196,8 @@ func (p *Postgres) LockKey(ctx context.Context, key string, wait bool) (func(), 
 	}
 	var won bool
 	if err := conn.QueryRow(ctx,
-		`SELECT pg_try_advisory_lock(hashtext(app_current_tenant() || '/oms/outbox'), hashtext($1))`,
-		key).Scan(&won); err != nil {
+		`SELECT pg_try_advisory_lock(hashtext(app_current_tenant() || $2), hashtext($1))`,
+		key, p.lockNamespace()).Scan(&won); err != nil {
 		conn.Release()
 		return nil, false, fmt.Errorf("outbox: try the %s drain lock: %w", key, err)
 	}
@@ -195,8 +222,8 @@ func (p *Postgres) unlock(conn *pgxpool.Conn, key string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	if _, err := conn.Exec(ctx,
-		`SELECT pg_advisory_unlock(hashtext(app_current_tenant() || '/oms/outbox'), hashtext($1))`,
-		key); err != nil {
+		`SELECT pg_advisory_unlock(hashtext(app_current_tenant() || $2), hashtext($1))`,
+		key, p.lockNamespace()); err != nil {
 		if c := conn.Hijack(); c != nil {
 			_ = c.Close(ctx)
 		}

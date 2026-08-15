@@ -65,7 +65,7 @@ func (h *storeLogCapture) hasWarnContaining(substrs ...string) bool {
 func TestOpenStoresRefusesAnUnaskedForEphemeralMaster(t *testing.T) {
 	h := &storeLogCapture{}
 
-	golden, exceptions, proposals, lock, closeFn, err := openStores(context.Background(),
+	golden, exceptions, proposals, outboxQueue, lock, closeFn, err := openStores(context.Background(),
 		config.Config{}, slog.New(h))
 	if err == nil {
 		if closeFn != nil {
@@ -76,9 +76,9 @@ func TestOpenStoresRefusesAnUnaskedForEphemeralMaster(t *testing.T) {
 			golden, exceptions)
 		return
 	}
-	if golden != nil || exceptions != nil || proposals != nil || lock != nil {
-		t.Errorf("openStores returned stores alongside the refusal: golden=%T exceptions=%T proposals=%T lock=%T",
-			golden, exceptions, proposals, lock)
+	if golden != nil || exceptions != nil || proposals != nil || outboxQueue != nil || lock != nil {
+		t.Errorf("openStores returned stores alongside the refusal: golden=%T exceptions=%T proposals=%T outbox=%T lock=%T",
+			golden, exceptions, proposals, outboxQueue, lock)
 	}
 	for _, want := range []string{
 		"DATAMASTER_DATABASE_URL",
@@ -101,7 +101,7 @@ func TestOpenStoresRefusesAnUnaskedForEphemeralMaster(t *testing.T) {
 func TestOpenStoresWarnsAndReportsUndurableWhenEphemeralIsAcceptedOutLoud(t *testing.T) {
 	h := &storeLogCapture{}
 
-	golden, exceptions, proposals, lock, closeFn, err := openStores(context.Background(),
+	golden, exceptions, proposals, outboxQueue, lock, closeFn, err := openStores(context.Background(),
 		config.Config{AllowEphemeralMaster: true}, slog.New(h))
 	if err != nil {
 		t.Fatalf("openStores with AllowEphemeralMaster: %v", err)
@@ -121,6 +121,15 @@ func TestOpenStoresWarnsAndReportsUndurableWhenEphemeralIsAcceptedOutLoud(t *tes
 	// that maker-checker is unavailable.
 	if _, ok := proposals.(*store.MemoryProposals); !ok {
 		t.Errorf("proposals = %T on the in-memory path, want *store.MemoryProposals", proposals)
+	}
+	// NO OUTBOX ON THE EPHEMERAL PATH, and the nil is asserted rather than
+	// tolerated: the in-memory exception queue never enqueues a FACT, so a relay
+	// here would drain nothing forever while reporting a healthy zero backlog —
+	// "nothing to publish" and "nothing is publishing" made identical, which is
+	// the confusion #410's outbox exists to avoid.
+	if outboxQueue != nil {
+		t.Errorf("outbox = %T on the in-memory path, want nil — a relay over a queue nothing writes "+
+			"reports a drained backlog forever", outboxQueue)
 	}
 	// Pinned deliberately: run() only applies projector.WithCycleLock when this is
 	// non-nil, so the nil IS the "every replica hits the vendor" behaviour the

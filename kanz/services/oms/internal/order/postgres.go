@@ -11,7 +11,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"google.golang.org/protobuf/proto"
 
-	"github.com/eighred/kanz/services/oms/internal/outbox"
+	"github.com/eighred/kanz/internal/outbox"
 )
 
 // Postgres is the durable Store backed by the 0001_orders.sql schema (EXEC-M7c).
@@ -37,7 +37,7 @@ type Postgres struct {
 // NewPostgres returns a Postgres store over an existing pool. The caller owns
 // the pool lifecycle (Close).
 func NewPostgres(pool *pgxpool.Pool) *Postgres {
-	return &Postgres{pool: pool, queue: outbox.NewPostgres(pool)}
+	return &Postgres{pool: pool, queue: outbox.NewPostgres(pool, "oms")}
 }
 
 // Outbox is the durable queue Create enqueues into. See Store.Outbox for why the

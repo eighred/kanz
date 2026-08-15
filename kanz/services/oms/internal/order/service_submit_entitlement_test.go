@@ -8,7 +8,7 @@ import (
 	orderpb "github.com/eighred/kanz/kanz-schemas-go/order/v1"
 
 	"github.com/eighred/kanz/internal/execution"
-	"github.com/eighred/kanz/services/oms/internal/outbox"
+	"github.com/eighred/kanz/internal/outbox"
 )
 
 // SUBMIT SKIPPED THE CHECK CANCEL AND AMEND BOTH RAN (#225).
