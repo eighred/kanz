@@ -207,7 +207,30 @@ func okxOrderBody(st *orderpb.OrderState, instID string) (map[string]string, err
 		body["ordType"] = ordType
 		body["px"] = FormatDec(st.GetLimitPrice())
 	default:
-		return nil, fmt.Errorf("okx: unsupported order type %v (spot market/limit only)", st.GetOrderType())
+		// STOP AND STOP_LIMIT ARE REFUSED FOR A MEASURED REASON, NOT AN UNFINISHED
+		// ONE (#485). Probed against OKX's demo API on 2026-08-15:
+		//
+		//   - a conditional order places, queries and cancels cleanly by OUR id
+		//     (algoClOrdId), on /trade/order-algo and /trade/cancel-algos;
+		//   - but clOrdId is NOT retained — set it on placement and it reads back
+		//     empty — so when the stop TRIGGERS, the regular order OKX creates
+		//     carries no identifier of ours;
+		//   - and the regular /trade/order endpoint answers 51603 "Order does not
+		//     exist" for a LIVE resting conditional order, so reconciliation would
+		//     read a working stop as stranded.
+		//
+		// The first point makes placement look easy. The second is why it is not:
+		// okx_userdata.go attributes a fill by clOrdId, so a triggered stop's fill
+		// would arrive unattributable and the execution would go unbooked. An order
+		// whose fills this platform cannot book is worse than one it declines to
+		// place, which is why this refusal stands until that mapping exists.
+		//
+		// Admission refuses a stop targeted here before it is ever stored, and
+		// Router.Route sends an untargeted one to a venue that can place it, so
+		// nothing reaches this line in normal operation.
+		return nil, fmt.Errorf("okx: this connector cannot place %v — OKX conditional orders do "+
+			"not carry our client order id through a trigger, so a filled stop could not be "+
+			"attributed to its order (#485)", st.GetOrderType())
 	}
 	return body, nil
 }
