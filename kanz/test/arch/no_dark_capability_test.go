@@ -19,9 +19,13 @@ import (
 //	#112  internal/prediction/registry — the MLOPS-01a model gate. Its own doc
 //	      carries the grep proving nobody imports it.
 //	#471  internal/validation — the SR 11-7 gate whose stated purpose is "no
-//	      model serves production without recorded, current validation". Zero
-//	      importers, so every analytic serves production unvalidated. Found by
-//	      running this audit by hand, which is why it is now a test.
+//	      model serves production without recorded, current validation". It had
+//	      zero importers, so every analytic served production unvalidated. Found
+//	      by running this audit by hand, which is why it is now a test. RETIRED
+//	      2026-08-15: internal/risk/benchmarks records the evidence and the
+//	      risk-engine composition root publishes kanz_risk_analytics_validated.
+//	      THE DEAD-ENTRY ARM IS WHAT CAUGHT THE STALE EXEMPTION — the repair
+//	      landed and this guard refused to keep vouching for the old state.
 //
 // # What this checks
 //
@@ -56,9 +60,6 @@ import (
 // stays dark for a year. The dead-entry arm below deletes the entry for you when
 // the package finally gets an importer.
 var darkPackageExempt = map[string]string{
-	"internal/validation": "#471 — the SR 11-7 model-validation gate for the quant library. Complete " +
-		"and self-tested; no composition root consults it, so every analytic serves production " +
-		"without recorded validation. Needs a ruling on refuse-vs-count before it can be armed.",
 	"internal/prediction/registry": "#112 — the MLOPS-01a model registry. Deleting it was " +
 		"proposed and REJECTED. CORRECTED 2026-08-15: it is NOT 'the last third of the AI-M1 " +
 		"bridge' and what it needs is NOT a composition root. The bridge is one third wired — " +

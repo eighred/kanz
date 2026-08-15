@@ -38,6 +38,7 @@ import (
 	"github.com/eighred/kanz/internal/risk/publish"
 	"github.com/eighred/kanz/internal/risk/state"
 	"github.com/eighred/kanz/internal/risk/state/persist"
+	"github.com/eighred/kanz/internal/validation"
 	"github.com/eighred/kanz/internal/version"
 	"github.com/eighred/kanz/pkg/bus"
 	"github.com/eighred/kanz/pkg/observability"
@@ -369,6 +370,20 @@ func runEngine(ctx context.Context, cfg config.Config, readiness *server.Readine
 		}
 	}
 	app.CalibrationPosture(obs.Registry, logger, scheduledCalibrations)
+
+	// MODEL VALIDATION (#471). The gate is built here and the benchmark evidence
+	// this build carries is recorded into it, so kanz_risk_analytics_validated
+	// answers "how much of this book is priced by something nobody checked".
+	//
+	// A failure here is NOT a failed benchmark — those are recorded and reported
+	// as such. It means the benchmark case sets themselves are malformed, so this
+	// build cannot state its own validation posture, and a risk engine that
+	// cannot say what it has validated must not start as though it had.
+	validationGate := validation.NewGate(nil)
+	if err := app.LoadValidations(validationGate, func() time.Time { return time.Now().UTC() }); err != nil {
+		return err
+	}
+	app.AnalyticsPosture(obs.Registry, logger, validationGate)
 
 	// Risk query gRPC server (API-01b): a read surface over the concrete
 	// EngineImpl, sharing the live store + cache + registry. Started only when
