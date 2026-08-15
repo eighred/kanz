@@ -86,12 +86,24 @@ import (
 // the analytics above them to be benchmarked (#471) before anyone noticed they
 // do not reach production.
 var darkSeamExempt = map[string]string{
-	"internal/risk/compute.RegisterGreeks": "#509 — Delta/Gamma/Vega/Theta/Rho. Needs three " +
-		"providers: TermsProvider exists (internal/risk/termsource) and nothing constructs it (#345); " +
-		"VolProvider is satisfied by volsurface.Store, whose Calibrator has no production caller and " +
-		"needs option-chain ingestion (#345 item 4); SpotProvider has ZERO production " +
-		"implementations. Note this seam OVERWRITES the DefaultRegistry Delta placeholder, so wiring " +
-		"it changes an already-served measure — not a pure addition.",
+	"internal/risk/compute.RegisterGreeks": "#509 — Delta/Gamma/Vega/Theta/Rho. CORRECTED " +
+		"2026-08-16: this entry used to say the TermsProvider was unconstructed and that " +
+		"SpotProvider had zero implementations. Both are now false. termsource.Provider is built " +
+		"at services/risk-engine/cmd/risk-engine/main.go for the FI seam and satisfies the option " +
+		"seam with the same value; internal/risk/spotsource is the production SpotProvider. Curve " +
+		"is satisfiable too — RegisterGreeks defaults it to FlatCurve(0) and *curve.Curve " +
+		"implements pricing.DiscountCurve directly. ONE SEAM BLOCKS THIS, and it is not a Go " +
+		"problem: VolProvider needs a volsurface.QuoteProvider, which needs OBSERVED OPTION " +
+		"PREMIUMS, and nothing in this repository carries them. market-ingest opens one websocket " +
+		"per configured (instrument, venue) and the deployed maps are spot-only; the vendor Source " +
+		"is an unimplemented SDK seam serving synthetic prices; backfill writes bars rather than " +
+		"price_observations. Ahead of even that, the contract-terms store HAS NO PRODUCTION " +
+		"WRITER — terms.Postgres.Put has only test callers — so the chain a QuoteProvider would " +
+		"read is empty, and the FI measures wired in #519 are computing over an empty terms table " +
+		"today (kanz_risk_fi_terms_missing_total is what says so). A contract-terms loader is the " +
+		"first honest step and it pays for FI before it pays for Greeks. Note also that wiring " +
+		"this OVERWRITES the DefaultRegistry Delta placeholder, so it changes an already-served " +
+		"measure rather than adding five.",
 	"internal/risk/compute.RegisterXVA": "#509 — CVA/DVA/FVA. Needs an XVAProvider (exposure " +
 		"profiles + counterparty credit curves). internal/risk/pricing/credit holds the calibrator " +
 		"and is itself dark for want of a live CDS quote source (#113, #203), so this cannot be wired " +

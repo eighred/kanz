@@ -70,8 +70,22 @@ var catalogue = map[v1.MeasureName]MeasureFamily{
 	// Delta is in DefaultRegistry as a PLACEHOLDER (net exposure) and is
 	// OVERWRITTEN by RegisterGreeks with the pricing-derived value. It is
 	// catalogued under greeks because that is where its real implementation
-	// lives — so a served placeholder Delta does not make the Greeks family
-	// look live.
+	// lives.
+	//
+	// CORRECTION (2026-08-16). This comment used to end "— so a served
+	// placeholder Delta does not make the Greeks family look live", and that was
+	// FALSE. Dark() asks the registry whether a NAME is registered; it cannot ask
+	// which implementation registered it. DefaultRegistry registers Delta, so
+	// kanz_risk_measure_live{measure="Delta",family="greeks"} is 1 on an engine
+	// that serves no pricing-derived Greek at all, and the greeks family reads
+	// 1-of-5 rather than 0-of-5.
+	//
+	// The catalogue is not the place to fix that: provenance is a property of the
+	// registration, and Registry deliberately holds only a name and a MeasureFunc
+	// (its own doc: "Quants plug in real models by calling Register"). Recording
+	// which implementation won would be a second concept in the registry to keep
+	// right, to correct one measure's reading. So the honest move is to say what
+	// is true here and in the metric's Help, and MeasurePosture does.
 	MeasureDelta: FamilyGreeks,
 
 	// varmodel.Register — needs a ReturnsProvider.

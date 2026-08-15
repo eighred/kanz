@@ -244,3 +244,33 @@ func TestMeasurePosture_WithCalibrationTheFixedIncomeFamilyIsServed(t *testing.T
 type stubModel struct{}
 
 func (stubModel) Model(context.Context, time.Time) (*factormodel.Model, bool) { return nil, false }
+
+// THE PLACEHOLDER DELTA READS AS LIVE, AND THAT IS A PROPERTY WORTH PINNING.
+//
+// compute.Dark asks the registry whether a NAME is registered; it cannot ask
+// which implementation registered it. DefaultRegistry registers Delta as the
+// RISK-07 net-exposure placeholder, so kanz_risk_measure_live{measure="Delta",
+// family="greeks"} is 1 on an engine that serves no pricing-derived Greek.
+//
+// The catalogue's comment used to assert the opposite — "a served placeholder
+// Delta does not make the Greeks family look live" — which was simply false, and
+// nothing checked it. This test is what stops that claim being made again: it
+// asserts the ACTUAL behaviour, so anyone who changes it has to change this and
+// read why.
+func TestMeasurePosture_ThePlaceholderDeltaReadsAsLive(t *testing.T) {
+	registry := compute.DefaultRegistry()
+	reg, _ := measurePosture(t, registry)
+
+	if got, ok := seriesFor(t, reg, "Delta"); !ok || got != 1 {
+		t.Errorf("Delta = %v (present=%v), want 1 — DefaultRegistry registers the placeholder, "+
+			"and the posture cannot see that it is one", got, ok)
+	}
+	// AND ITS FAMILY IS STILL MOSTLY DARK, which is the reading that matters. An
+	// operator must take family coverage from the other four, not from Delta.
+	for _, name := range []string{"Gamma", "Vega", "Theta", "Rho"} {
+		if got, ok := seriesFor(t, reg, name); !ok || got != 0 {
+			t.Errorf("%s = %v (present=%v), want 0 — no pricing-derived Greek is registered",
+				name, got, ok)
+		}
+	}
+}

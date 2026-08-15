@@ -59,7 +59,11 @@ func MeasurePosture(reg prometheus.Registerer, logger *slog.Logger, registry *co
 		Help: "1 when this engine's registry serves the measure, 0 when the measure is implemented " +
 			"but registered by nobody. A ZERO IS NOT AN ERROR ANYWHERE ELSE: the query path drops " +
 			"unknown measure names, so a client asking for a dark measure receives 200 with it " +
-			"absent — indistinguishable from a portfolio that holds none of that instrument (#509).",
+			"absent — indistinguishable from a portfolio that holds none of that instrument (#509). " +
+			"A ONE MEANS THE NAME IS REGISTERED, NOT THAT ITS FAMILY IS WIRED: Delta is served by " +
+			"the RISK-07 net-exposure placeholder in DefaultRegistry, so it reads 1 under " +
+			"family=greeks on an engine with no pricing-derived Greek at all. Read family " +
+			"coverage from the family's OTHER members.",
 	}, []string{"measure", "family"})
 	reg.MustRegister(g)
 
