@@ -116,6 +116,12 @@ func BuildDecisionLog(rec comp.DecisionRecord) *observationpb.DecisionLog {
 	if rec.Phase == comp.PhasePreTrade {
 		attrs["allowed"] = strconv.FormatBool(rec.Allowed)
 	}
+	if rec.WorkedSlices > 0 {
+		// The audit reader holds a CHILD's id and needs to know this one decision
+		// covers it. parent_order_id gets them here; this tells them the record
+		// they arrived at is the whole authorisation.
+		attrs["worked_slices"] = strconv.FormatUint(uint64(rec.WorkedSlices), 10)
+	}
 	if rec.OrderID != "" {
 		attrs["order_id"] = rec.OrderID
 	}

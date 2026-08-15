@@ -134,3 +134,53 @@ func TestCheck_PricedLimitOrderUnaffected(t *testing.T) {
 		t.Fatalf("a small compliant limit order must be admitted, got breach %+v", breach)
 	}
 }
+
+// ADMISSION TELLS THE GATE HOW MANY ORDERS ONE DECISION AUTHORISES (#435, #484).
+//
+// A scheduled parent is checked ONCE, for the whole notional, and its children
+// are admitted without re-checking (#483) — so the fills land on N order ids
+// while only the parent has a decision record. Unless the count reaches the
+// gate, that record cannot say it authorised more than the one order it names,
+// and the audit log cannot be read backwards from a child.
+//
+// This pins the hop from the SubmitOrder to the OrderDelta. It is a plain field
+// copy on the admission path, which is exactly what gets dropped in a refactor
+// and noticed by nobody: everything downstream keeps working and only the audit
+// trail is quietly thinner.
+func TestCheck_TheSliceCountReachesTheGate(t *testing.T) {
+	rec := &countingRecorder{}
+	reg := comp.NewMandateRegistry()
+	mustPut(t, reg, concentrationMandate(60))
+	gate := comp.NewPreTradeGate(comp.NewEngine(nil), comp.MapBookSource{}, reg, nil, rec, nil)
+	g := NewCOMP01Gate(gate, "USD")
+
+	cmd := &orderpb.SubmitOrder{
+		Metadata: &commandpb.CommandMetadata{TargetId: "parent1"},
+		OrderId:  "parent1", PortfolioId: "p1", InstrumentId: "AAPL",
+		Side: orderpb.Side_SIDE_BUY, Quantity: &commonpb.Decimal{Coefficient: 1},
+		OrderType:  orderpb.OrderType_ORDER_TYPE_LIMIT,
+		LimitPrice: &commonpb.Decimal{Coefficient: 100},
+		ExecutionSchedule: &orderpb.ExecutionSchedule{
+			Algo:       orderpb.ExecutionAlgo_EXECUTION_ALGO_TWAP,
+			SliceCount: 6,
+		},
+	}
+	if _, err := g.Check(context.Background(), "t1", cmd); err != nil {
+		t.Fatalf("Check: %v", err)
+	}
+	if len(rec.records) == 0 {
+		t.Fatal("the gate recorded no decision at all")
+	}
+	if got := rec.records[0].WorkedSlices; got != 6 {
+		t.Fatalf("WorkedSlices = %d, want 6 — admission knows this order is worked in six "+
+			"slices and the decision record does not, so an auditor arriving from a child "+
+			"cannot tell whether they have the whole authorisation", got)
+	}
+}
+
+type countingRecorder struct{ records []comp.DecisionRecord }
+
+func (r *countingRecorder) Record(_ context.Context, rec comp.DecisionRecord) error {
+	r.records = append(r.records, rec)
+	return nil
+}

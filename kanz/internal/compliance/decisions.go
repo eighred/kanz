@@ -33,6 +33,24 @@ type DecisionRecord struct {
 	// Trigger is the BreachTrigger label for a post-trade breach. Empty
 	// pre-trade.
 	Trigger string
+	// WorkedSlices is how many child orders this decision authorises, when the
+	// order is worked as a schedule rather than sent whole (#435). Zero for an
+	// ordinary order.
+	//
+	// WITHOUT IT THE AUDIT LOG CANNOT BE RECONSTRUCTED BACKWARDS. A scheduled
+	// parent is checked ONCE, for the whole notional, and its children are
+	// admitted without re-checking — deliberately, because every limit is
+	// evaluated against a book that only moves on fills, so N children inside one
+	// window each see the same unchanged book and the sum is never tested
+	// (#483). The consequence is that the fills land on N order ids and only the
+	// PARENT has a decision record.
+	//
+	// A regulator asking "why was this trade allowed" holds a child's id. The
+	// link back is parent_order_id, which travels on the child's own state and
+	// every FACT carrying it — but nothing on the DECISION said it authorised
+	// more than the one order it names. This is that statement: one decision,
+	// this many orders.
+	WorkedSlices uint32
 }
 
 // DecisionRecorder persists a compliance decision. Implementations SHOULD be

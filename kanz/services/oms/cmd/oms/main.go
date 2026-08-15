@@ -398,7 +398,10 @@ func runConsumers(ctx context.Context, cfg config.Config, readiness *server.Read
 		Name: "kanz_oms_shared_collateral_orders_total",
 		Help: "Orders executed against an exchange account NOT bound to their portfolio — i.e. against " +
 			"a collateral pool shared with every other unbound portfolio at that venue. An exchange " +
-			"liquidates per account, so this is the number of orders whose segregation is nominal only.",
+			"liquidates per account, so this is the number of orders whose segregation is nominal only. " +
+			"COUNTS ORDERS, AND ONE DECISION IS NOW N ORDERS (#435): an order worked as a " +
+			"schedule appears as a resting parent plus one child per slice, so a threshold " +
+			"tuned against decisions is wrong by a factor of slice_count for that flow.",
 	})
 	obs.Registry.MustRegister(sharedCollateral)
 
@@ -408,7 +411,10 @@ func runConsumers(ctx context.Context, cfg config.Config, readiness *server.Read
 			"the venue denied an order it had acknowledged, could not be queried at all, or reported " +
 			"a fill the order cannot accept. Each one is a position whose true size nobody knows, and " +
 			"it will not be re-driven, cancelled or mentioned again until a human resolves it. " +
-			"This should be zero; any non-zero value is an incident, not a metric to trend.",
+			"This should be zero; any non-zero value is an incident, not a metric to trend. " +
+			"COUNTS ORDERS, AND ONE DECISION IS NOW N ORDERS (#435): an order worked as a " +
+			"schedule appears as a resting parent plus one child per slice, so a threshold " +
+			"tuned against decisions is wrong by a factor of slice_count for that flow.",
 	})
 	obs.Registry.MustRegister(quarantined)
 
@@ -421,7 +427,10 @@ func runConsumers(ctx context.Context, cfg config.Config, readiness *server.Read
 		Help: "Cancels and amends abandoned because the goroutine working the order would not release it " +
 			"in time. Each one is an operator instruction parked in the DLQ rather than applied, for an " +
 			"order that is still working at a venue. Non-zero means a venue call is hanging and somebody's " +
-			"withdrawal did not land; it should be zero.",
+			"withdrawal did not land; it should be zero. " +
+			"COUNTS ORDERS, AND ONE DECISION IS NOW N ORDERS (#435): an order worked as a " +
+			"schedule appears as a resting parent plus one child per slice, so a threshold " +
+			"tuned against decisions is wrong by a factor of slice_count for that flow.",
 	})
 	obs.Registry.MustRegister(claimTimeouts)
 

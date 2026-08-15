@@ -127,6 +127,18 @@ type OrderDelta struct {
 	OrderID string
 	Issuer  string
 	AsOf    time.Time
+
+	// WorkedSlices is how many child orders this one decision authorises, when
+	// the order is worked as a schedule rather than sent whole (#435). Zero for
+	// an ordinary order.
+	//
+	// IT CHANGES NOTHING ABOUT THE EVALUATION and everything about the record.
+	// The gate checks the full notional either way — that is the whole point of
+	// checking a parent once rather than each slice against a book that has not
+	// moved (#483). What it affects is what the audit log says afterwards: the
+	// fills land on N order ids, and only the parent has a decision, so the
+	// record has to say it authorised more orders than the one it names.
+	WorkedSlices uint32
 }
 
 // Decision is the gate verdict: Allowed plus the full ComplianceResult (the
@@ -427,11 +439,12 @@ func (g *PreTradeGate) Evaluate(ctx context.Context, d OrderDelta) (Decision, er
 	allowed := res.GetStatus() != compliancepb.ComplianceStatus_COMPLIANCE_STATUS_BREACH
 
 	g.record(ctx, DecisionRecord{
-		Phase:   PhasePreTrade,
-		Result:  res,
-		OrderID: d.OrderID,
-		Issuer:  d.Issuer,
-		Allowed: allowed,
+		Phase:        PhasePreTrade,
+		Result:       res,
+		OrderID:      d.OrderID,
+		Issuer:       d.Issuer,
+		Allowed:      allowed,
+		WorkedSlices: d.WorkedSlices,
 	})
 	return Decision{Allowed: allowed, Result: res}, nil
 }

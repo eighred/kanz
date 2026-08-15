@@ -184,3 +184,44 @@ func TestHandle_UntenantedSkipped(t *testing.T) {
 		t.Fatal("an untenanted FACT was folded")
 	}
 }
+
+// A SLICE OF A WORKED ORDER NAMES ITS PARENT ON THE BLOTTER (#435, #484).
+//
+// Without it a six-slice order is seven unrelated rows: the parent resting at
+// "scheduled" and six children with derived ids that deliberately carry no
+// readable relation. An operator looking at the blotter during an incident
+// cannot tell which of them belong together, or that pulling the parent is what
+// stops the rest.
+//
+// The grouping itself is the client's — how to present it is a design question.
+// This asserts only that the projection stops throwing the answer away.
+func TestOrderDTO_AChildNamesItsParent(t *testing.T) {
+	child := orderDTO([]orderRev{{
+		state: &orderpb.OrderState{
+			OrderId: "9d3a45c14832d709db117779a8bfe3a2", PortfolioId: "fund-alpha",
+			InstrumentId: "BTC-USD", ParentOrderId: "3f9a1c2e0b7d4e119a6f2c8d5e4b7a13",
+			Side: orderpb.Side_SIDE_BUY, OrderType: orderpb.OrderType_ORDER_TYPE_LIMIT,
+		},
+		status: orderpb.OrderStatus_ORDER_STATUS_ROUTED,
+	}}, "")
+	if child.ParentOrderID != "3f9a1c2e0b7d4e119a6f2c8d5e4b7a13" {
+		t.Fatalf("ParentOrderID = %q, want the parent — a slice is indistinguishable from an "+
+			"unrelated order, so an operator cannot see which rows belong together",
+			child.ParentOrderID)
+	}
+}
+
+// AN ORDINARY ORDER LEAVES IT EMPTY, and `omitempty` keeps it off the wire — so
+// a client that has never heard of parent orders sees exactly what it saw before.
+func TestOrderDTO_AnOrdinaryOrderNamesNoParent(t *testing.T) {
+	ord := orderDTO([]orderRev{{
+		state: &orderpb.OrderState{
+			OrderId: "o1", PortfolioId: "fund-alpha", InstrumentId: "BTC-USD",
+			Side: orderpb.Side_SIDE_BUY, OrderType: orderpb.OrderType_ORDER_TYPE_LIMIT,
+		},
+		status: orderpb.OrderStatus_ORDER_STATUS_ROUTED,
+	}}, "")
+	if ord.ParentOrderID != "" {
+		t.Errorf("ParentOrderID = %q on an order nobody sliced", ord.ParentOrderID)
+	}
+}
