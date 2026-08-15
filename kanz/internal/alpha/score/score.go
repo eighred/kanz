@@ -39,6 +39,7 @@
 package score
 
 import (
+	"encoding/json"
 	"fmt"
 	"math"
 	"sort"
@@ -319,4 +320,47 @@ func decimalToFloat(d *commonpb.Decimal) float64 {
 		return float64(d.GetCoefficient()) * math.Pow10(exp)
 	}
 	return float64(d.GetCoefficient()) / math.Pow10(-exp)
+}
+
+// scoreJSON is the wire form for records that are compared or stored as JSON —
+// the backtest's Decision slice is the reproduction contract, and a Score whose
+// fields are unexported would serialise as {} and make two different claims
+// compare equal.
+type scoreJSON struct {
+	Probability float64 `json:"probability"`
+	Threshold   float64 `json:"return_threshold"`
+	HorizonSecs float64 `json:"horizon_seconds"`
+	ModelID     string  `json:"model_id"`
+}
+
+// MarshalJSON renders the whole claim.
+func (s Score) MarshalJSON() ([]byte, error) {
+	return json.Marshal(scoreJSON{
+		Probability: s.probability, Threshold: s.threshold,
+		HorizonSecs: s.horizon.Seconds(), ModelID: s.modelID,
+	})
+}
+
+// UnmarshalJSON reads a claim back, VALIDATING it — the same argument as
+// FromProto: a stored score is read long after the engine that wrote it is gone,
+// and a probability of 1.4 must not silently become a datapoint claiming
+// certainty.
+//
+// The zero JSON object is the "no score" case and is left as the zero value
+// rather than refused, so a Decision that carries no claim round-trips.
+func (s *Score) UnmarshalJSON(b []byte) error {
+	var j scoreJSON
+	if err := json.Unmarshal(b, &j); err != nil {
+		return err
+	}
+	if j == (scoreJSON{}) {
+		*s = Score{}
+		return nil
+	}
+	got, err := New(j.Probability, j.Threshold, time.Duration(j.HorizonSecs*float64(time.Second)), j.ModelID)
+	if err != nil {
+		return err
+	}
+	*s = got
+	return nil
 }

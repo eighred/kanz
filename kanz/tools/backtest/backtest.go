@@ -20,6 +20,8 @@ import (
 
 	envelopepb "github.com/eighred/kanz/kanz-schemas-go/envelope/v1"
 
+	"github.com/eighred/kanz/internal/alpha/outcome"
+	"github.com/eighred/kanz/internal/alpha/score"
 	"github.com/eighred/kanz/internal/lake/dataset"
 )
 
@@ -32,6 +34,16 @@ type Decision struct {
 	Action       string    `json:"action"`
 	Quantity     float64   `json:"quantity"`
 	Reason       string    `json:"reason"`
+
+	// Score is the claim the strategy made about this decision, if it made one
+	// (#416 C2). A VALUE, not a pointer, so Decision stays comparable — the
+	// reproduction contract above is struct equality, and a pointer would compare
+	// addresses and call two different claims identical.
+	//
+	// The zero value means "no claim", which is a real state: a rule-based
+	// strategy forecasts nothing, and a CLOSE that flattens a position forecasts
+	// nothing either.
+	Score score.Score `json:"score,omitzero"`
 }
 
 // Event is the decision input: one replayed envelope + payload.
@@ -65,6 +77,23 @@ type Result struct {
 	Events int
 	// Malformed is the number of source frames that failed to unframe (skipped).
 	Malformed int
+
+	// Calibration grades the claims the strategy made, when a Resolver is wired
+	// and at least one decision carried a score. nil otherwise.
+	//
+	// IT IS A SEPARATE QUESTION FROM WHETHER THE STRATEGY MADE MONEY, and both
+	// are needed: a profitable strategy whose scores are wrong made money for a
+	// reason it does not understand, and it will size the next trade on the same
+	// misunderstanding.
+	Calibration *score.Report
+
+	// Unresolved is how many scored decisions could NOT be marked — the horizon
+	// had not elapsed within the knowledge horizon, or the series had a gap.
+	//
+	// REPORTED, not silently dropped. A run whose scores were 90% unresolved
+	// produces a calibration report over the remaining tenth, and nothing else
+	// would say so — the report would look thin rather than unrepresentative.
+	Unresolved int
 }
 
 // Harness runs a Strategy over a replay range.
@@ -72,6 +101,19 @@ type Harness struct {
 	// Materializer supplies point-in-time features. nil ⇒ a strategy that calls
 	// pit.Features gets an error (a price-only strategy needs none).
 	Materializer *dataset.Materializer
+
+	// Resolver marks each scored decision against the realized bar series. nil ⇒
+	// no calibration is computed, and Result.Calibration is nil rather than an
+	// empty report — "not measured" and "measured, and perfect" must not look the
+	// same.
+	Resolver *outcome.Resolver
+
+	// CalibrationAsOf is the KNOWLEDGE horizon outcomes are marked at. Zero ⇒ now.
+	//
+	// Pinning it is what makes a calibration run reproducible: the bar store is
+	// bitemporal, so an unpinned run silently produces different numbers next
+	// month if a venue restated a candle, and nobody can say which run was right.
+	CalibrationAsOf time.Time
 }
 
 // Run drains src into a deterministic order and folds each event through strat.
@@ -93,7 +135,47 @@ func (h *Harness) Run(ctx context.Context, src Source, strat Strategy) (Result, 
 		res.Decisions = append(res.Decisions, ds...)
 		res.Events++
 	}
+	if err := h.calibrate(ctx, &res); err != nil {
+		return res, err
+	}
 	return res, nil
+}
+
+// calibrate marks every scored decision and folds the outcomes into a report.
+//
+// A resolver error ABORTS rather than being counted as unresolved: it means the
+// bar store is failing, and a calibration report built over whatever happened to
+// read successfully would describe the outage rather than the strategy.
+func (h *Harness) calibrate(ctx context.Context, res *Result) error {
+	if h.Resolver == nil {
+		return nil
+	}
+	var outs []score.Outcome
+	for _, d := range res.Decisions {
+		if d.Score.IsZero() {
+			continue
+		}
+		o, ok, err := h.Resolver.Resolve(ctx, d.Score, d.InstrumentID, d.AsOf, h.CalibrationAsOf)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			res.Unresolved++
+			continue
+		}
+		outs = append(outs, o)
+	}
+	if len(outs) == 0 {
+		// NO REPORT rather than an empty one. score.Calibrate refuses an empty set
+		// for the same reason: a zero-valued Report reads as perfect calibration.
+		return nil
+	}
+	rep, err := score.Calibrate(outs, score.DefaultBins)
+	if err != nil {
+		return err
+	}
+	res.Calibration = &rep
+	return nil
 }
 
 // pointInTime pins a materializer to one knowledge horizon.
