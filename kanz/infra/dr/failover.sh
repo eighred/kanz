@@ -48,7 +48,7 @@ echo "== DR failover → $DR_CTX (step=$STEP) =="
 #    from it.
 if step postgres; then
   echo "-- [1/5] promote Postgres replicas"
-  for c in kanz-risk kanz-registry kanz-books kanz-orders kanz-compliance; do
+  for c in kanz-risk kanz-registry kanz-books kanz-orders kanz-compliance kanz-identity; do
     k cnpg promote "$c" -n "$DATA_NS" || true   # no-op if already promoted
     k cnpg status   "$c" -n "$DATA_NS" | head -3
   done

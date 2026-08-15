@@ -412,3 +412,62 @@ spec:
   schedule: "0 0 4 * * *"      # 04:00 daily base backup; WAL fills the gaps (PITR)
   backupOwnerReference: self
   cluster: { name: kanz-compliance }
+---
+# THE PLATFORM'S OWN ACCOUNTS AND CREDENTIALS (#364).
+#
+# ITS OWN CLUSTER, and the reason is the same one that gave the OMS kanz-orders:
+# PITR IS PER-CLUSTER. Putting identity in kanz-books would tie a password
+# rotation to the IBOR ledger's restore timeline — rewinding the ledger to before
+# a bad posting would also rewind every credential changed since, silently
+# re-enabling accounts an operator had disabled and restoring password hashes
+# people had rotated away from. The two have no reason to share a timeline and
+# one very good reason not to.
+#
+# NOT EXCLUDABLE, unlike market-data. Credentials exist NOWHERE else: a region
+# failover onto an empty identity store locks every operator and trader out of
+# the platform, including whoever would perform the recovery. That is the one
+# failure mode with no way back in.
+#
+# SMALL AND SLOW-MOVING. Two tables (identity_users, identity_invites) holding
+# rows measured in staff, not trades, so 10Gi is generous and 3 instances is
+# about availability rather than volume. archive_timeout stays at 30s anyway: the
+# RPO that matters is not "how much data" but "which credential change was lost".
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: kanz-identity
+  namespace: kanz-data
+  labels: { app.kubernetes.io/part-of: kanz, app.kubernetes.io/component: dr }
+spec:
+  instances: 3
+  primaryUpdateStrategy: unsupervised
+  postgresql:
+    parameters:
+      archive_timeout: "30s"
+      wal_level: logical
+      # identity runs replicas: 2 with a small pool and nothing else connects
+      # here — the gateway verifies tokens against JWKS over HTTP and never
+      # touches this database.
+      max_connections: "50"
+  storage:
+    size: 10Gi
+  backup:
+    retentionPolicy: "30d"
+    barmanObjectStore:
+      destinationPath: s3://kanz-dr-backups/identity
+      s3Credentials:
+        accessKeyId: { name: kanz-dr-s3, key: ACCESS_KEY_ID }
+        secretAccessKey: { name: kanz-dr-s3, key: SECRET_ACCESS_KEY }
+      wal: { compression: gzip }
+      data: { compression: gzip }
+---
+apiVersion: postgresql.cnpg.io/v1
+kind: ScheduledBackup
+metadata:
+  name: kanz-identity-daily
+  namespace: kanz-data
+  labels: { app.kubernetes.io/part-of: kanz }
+spec:
+  schedule: "0 0 2 * * *"
+  backupOwnerReference: self
+  cluster: { name: kanz-identity }

@@ -1,0 +1,183 @@
+---
+# The platform's own identity provider (#364): Argon2id credentials, single-use
+# invitations, and the ES256 signer whose JWKS the api-gateway verifies against.
+#
+# # This service is the one that is NOT behind the gateway
+#
+# CLAUDE.md's trust model — "upstreams trust the X-Kanz-Principal-* headers only
+# because a NetworkPolicy makes the gateway their only reachable caller" — does
+# NOT apply here, permanently. /login and /invites/redeem exist to be reached by
+# people who hold no token; that is the whole purpose of the service. So it takes
+# ingress from the ingress controller rather than from the gateway, it reads no
+# principal header anywhere (test/arch/identity_trusts_no_headers_test.go fails
+# the build if it starts), and the authenticated route verifies a bearer token's
+# SIGNATURE with the key this service already holds.
+#
+# The consequence for operations: this pod is exposed to unauthenticated traffic
+# by design, and IDENTITY_LOGIN_BURST is the ONLY bound on credential guessing.
+# The gateway's quota middleware runs after authentication and never sees an
+# anonymous request.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: identity
+  namespace: kanz-services
+  labels:
+    app.kubernetes.io/part-of: kanz
+imagePullSecrets:
+  - name: ghcr-pull
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: identity
+  namespace: kanz-services
+  labels:
+    app.kubernetes.io/part-of: kanz
+spec:
+  selector:
+    app: identity
+  ports:
+    - { name: http, port: 8087, targetPort: 8087 }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: identity
+  namespace: kanz-services
+  labels:
+    app.kubernetes.io/part-of: kanz
+spec:
+  replicas: 2
+  revisionHistoryLimit: 5
+  selector:
+    matchLabels:
+      app: identity
+  template:
+    metadata:
+      labels:
+        app: identity
+        app.kubernetes.io/part-of: kanz
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8087"
+    spec:
+      # Drain budget: DERIVED, not restated here — test/arch's
+      # pod_disruption_and_drain_test.go recomputes the floor from the source on
+      # every run and fails this file the moment 60 stops covering it.
+      terminationGracePeriodSeconds: 60
+      serviceAccountName: identity
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app: identity
+      # Apply identity's schema before the pods start. Both replicas run this
+      # against one database simultaneously; kanz-migrate's advisory lock
+      # serializes them, so one applies and the other exits 0 with nothing to do.
+      initContainers:
+        - name: migrate
+          image: ghcr.io/eighred/kanz-migrate@sha256:909865997d2e96fd9898c5c34a6f11ade3cd65b71a18f1424d0bcda118e0e689
+          args: ["--dir", "/migrations/identity"]
+          env:
+            - { name: KANZ_MIGRATE_DATABASE_URL_FILE, value: /run/secrets/db/migrate-database-url }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - { name: db, mountPath: /run/secrets/db, readOnly: true }
+      containers:
+        - name: identity
+          # NOT DIGEST-PINNED YET, and declared as such in
+          # test/arch/supplychain_test.go's mutableTagExempt. Only release.yml
+          # signs (keyless cosign via GitHub OIDC) and the admission policy
+          # REQUIRES a signature; this image entered the build matrix after the
+          # last release, so no signed digest exists to pin. release.yml's
+          # pin-digests job writes one on the first release that includes it.
+          #
+          # UNTIL THEN THIS DEPLOYMENT WILL BE REFUSED AT ADMISSION, and that is
+          # the correct behaviour rather than a problem to work around: an
+          # unsigned image running in this estate is exactly what the policy
+          # exists to stop, and this pod holds the platform's token signing key.
+          image: ghcr.io/eighred/identity:main
+          ports:
+            - { containerPort: 8087, name: http }
+          env:
+            - { name: IDENTITY_LISTEN, value: ":8087" }
+            # DSN from the SEC-01d CSI secret file, not a plaintext env.
+            - { name: IDENTITY_DATABASE_URL_FILE, value: /run/secrets/db/database-url }
+            # THE SIGNING KEY IS MOUNTED, NEVER GENERATED HERE. See
+            # secretproviderclass.yaml: two replicas each generating their own key
+            # serve two disjoint JWKS and reject each other's tokens about half
+            # the time. IDENTITY_ALLOW_EPHEMERAL_KEY is deliberately absent, and a
+            # deployment that sets it must drop replicas to 1.
+            - { name: IDENTITY_SIGNING_KEY_FILE, value: /run/secrets/signing/signing-key }
+            # The issuer must equal the URL a verifier discovered the document
+            # from, or OIDC verification refuses it. The gateway is pointed at
+            # this same value plus /jwks.json.
+            - { name: IDENTITY_TOKEN_ISSUER, value: "https://identity.kanz.internal" }
+            - { name: IDENTITY_TOKEN_AUDIENCE, value: "kanz" }
+            # THE ONLY BOUND ON CREDENTIAL GUESSING on this surface. The gateway's
+            # quota middleware sits after its auth middleware and never sees an
+            # anonymous request, so nothing upstream limits /login.
+            - { name: IDENTITY_LOGIN_BURST, value: "10" }
+            - { name: IDENTITY_LOGIN_REFILL, value: "6s" }
+            # AUTHENTICATED PROVISIONING (#364). Naming the role turns on
+            # POST/GET /invites; leaving it unset means the ONLY way to create an
+            # account is cmd/kanz-invite, which needs the database credential and
+            # records the act against whoever holds it rather than a named person.
+            - { name: IDENTITY_OPERATOR_ROLE, value: "kanz-operator" }
+            - { name: SPIFFE_ENDPOINT_SOCKET, value: "unix:///run/spiffe/spire-agent.sock" }
+          livenessProbe:
+            httpGet: { path: /healthz, port: 8087 }
+            initialDelaySeconds: 5
+            periodSeconds: 15
+          readinessProbe:
+            httpGet: { path: /readyz, port: 8087 }
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - { name: db, mountPath: /run/secrets/db, readOnly: true }
+            - { name: signing, mountPath: /run/secrets/signing, readOnly: true }
+            - { name: spiffe, mountPath: /run/spiffe, readOnly: true }
+            - { name: tmp, mountPath: /tmp }
+      volumes:
+        - name: tmp
+          emptyDir: {}
+        - name: db
+          csi:
+            driver: secrets-store.csi.k8s.io
+            readOnly: true
+            volumeAttributes:
+              secretProviderClass: identity-db
+        # A SEPARATE MOUNT FROM THE DSN, on purpose: a mount is the unit of
+        # exposure, and the migrate initContainer has no business seeing the key
+        # that mints operator tokens.
+        - name: signing
+          csi:
+            driver: secrets-store.csi.k8s.io
+            readOnly: true
+            volumeAttributes:
+              secretProviderClass: identity-signing-key
+        - name: spiffe
+          csi:
+            driver: csi.spiffe.io
+            readOnly: true
