@@ -100,6 +100,9 @@ data:
     inference.feature          6   delete   604800000   yes
     inference.prediction       6   delete   2592000000  yes
     data.feature               3   delete   2592000000  yes
+    # PRICING-OVERSIGHT OVERRIDES (#410). Mirrors topics-job.yaml exactly, which
+    # TestTenantTopicTableMatchesTheSystemTable compares column by column.
+    data.exception             3   delete   2592000000  yes
     market.book                12  delete   604800000   yes
     market.crypto              12  delete   604800000   yes
     EOF

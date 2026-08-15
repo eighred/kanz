@@ -107,6 +107,17 @@ data:
     inference.feature          6   delete   604800000   yes
     inference.prediction       6   delete   2592000000  yes
     data.feature               3   delete   2592000000  yes
+    # PRICING-OVERSIGHT OVERRIDES (#410). A named human's signed decision to
+    # accept a price the system flagged, carrying BOTH identities once dual
+    # control is armed. 30d + a DLQ like the rest of the money-adjacent path:
+    # this is the record an examiner asks for, so a poison message must be parked
+    # for investigation rather than skipped.
+    #
+    # NOT COMPACTED. The override history is APPEND-ONLY and the whole point is
+    # that every decision survives; compaction keyed by exception id would keep
+    # only the most recent override of each break and silently delete the
+    # earlier ones — which are exactly the ones a reviewer is looking for.
+    data.exception             3   delete   2592000000  yes
 
     # MARKET. Provisioned but NOT ARCHIVED by DATA-M1 (see the spec's scope): ticks
     # are the highest-volume streams by far and are re-fetchable from the venue,

@@ -6,10 +6,12 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
+	"strings"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/eighred/kanz/internal/outbox"
 	"github.com/eighred/kanz/services/datamaster/internal/master"
 	"github.com/eighred/kanz/services/datamaster/internal/pricing"
 )
@@ -69,11 +71,25 @@ func (p *PostgresGolden) Get(ctx context.Context, instrumentID string) (master.S
 // state); Override appends to the immutable audit trail and flips the status.
 type PostgresExceptions struct {
 	pool *pgxpool.Pool
+	// tenant is the tenant this instance serves, taken at construction exactly as
+	// NewPostgresCycleLock takes it.
+	//
+	// IT IS REQUIRED BY THE OVERRIDE FACT, and it cannot come from the context.
+	// bus/outbox resolve a tenant from the INBOUND DELIVERY a handler is running
+	// in; an override arrives over HTTP, so there is no delivery and no tenant on
+	// the context. Without this, outbox.From refuses the record and the whole
+	// override transaction fails — every override, on the durable path. That is
+	// the same defect that crash-looped the OMS when it published outside a
+	// delivery, arriving here by the same route.
+	tenant string
 }
 
 // NewPostgresExceptions returns an exception store over an existing pool.
-func NewPostgresExceptions(pool *pgxpool.Pool) *PostgresExceptions {
-	return &PostgresExceptions{pool: pool}
+func NewPostgresExceptions(pool *pgxpool.Pool, tenant string) *PostgresExceptions {
+	if strings.TrimSpace(tenant) == "" {
+		panic("store: NewPostgresExceptions requires a tenant — the override FACT cannot be published without one")
+	}
+	return &PostgresExceptions{pool: pool, tenant: tenant}
 }
 
 func (p *PostgresExceptions) Add(ctx context.Context, e pricing.Exception) error {
@@ -115,8 +131,10 @@ func (p *PostgresExceptions) Override(ctx context.Context, id string, o pricing.
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
-	var status string
-	err = tx.QueryRow(ctx, `SELECT status FROM exceptions WHERE exception_id = $1 FOR UPDATE`, id).Scan(&status)
+	var status, instrumentID string
+	err = tx.QueryRow(ctx,
+		`SELECT status, instrument_id FROM exceptions WHERE exception_id = $1 FOR UPDATE`,
+		id).Scan(&status, &instrumentID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return fmt.Errorf("store: unknown exception %q", id)
 	}
@@ -140,6 +158,33 @@ func (p *PostgresExceptions) Override(ctx context.Context, id string, o pricing.
 		UPDATE exceptions SET status = $2 WHERE exception_id = $1
 	`, id, string(pricing.StatusOverridden)); err != nil {
 		return fmt.Errorf("mark overridden %s: %w", id, err)
+	}
+	// THE FACT IS ENQUEUED IN THIS TRANSACTION (#410).
+	//
+	// One commit covers the audit row and the announcement, so there is no window
+	// in which an override exists and the estate will never hear of it, and none
+	// in which a FACT is published for an override that rolled back. A publish
+	// placed after the commit would have both.
+	//
+	// A failure here FAILS THE OVERRIDE. That is the right direction: the caller
+	// is told nothing was recorded and can retry, whereas committing the override
+	// and dropping the FACT would leave a decision that is durable here and
+	// absent from the platform's audit trail — the exact silence #410 exists to
+	// end, reintroduced one layer down.
+	ev, err := overrideEvent(pricing.Exception{
+		ID: id, InstrumentID: instrumentID, Status: pricing.StatusOverridden,
+	}, o)
+	if err != nil {
+		return fmt.Errorf("build override FACT %s: %w", id, err)
+	}
+	// EXPLICIT, because there is no inbound delivery to inherit one from.
+	ev.TenantID = p.tenant
+	rec, err := outbox.From(ctx, ev)
+	if err != nil {
+		return fmt.Errorf("build override outbox record %s: %w", id, err)
+	}
+	if err := outbox.Enqueue(ctx, tx, rec); err != nil {
+		return fmt.Errorf("enqueue override FACT %s: %w", id, err)
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("commit override %s: %w", id, err)

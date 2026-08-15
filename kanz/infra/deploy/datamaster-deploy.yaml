@@ -206,6 +206,25 @@ spec:
             # identity of an instrument by every analytic downstream. The service
             # refuses to start with a sim feed unless this is true.
             - { name: SPIFFE_ENDPOINT_SOCKET, value: "unix:///run/spiffe/spire-agent.sock" }
+            # THE OVERRIDE FACT REACHES THE ESTATE (#410).
+            #
+            # A pricing override is a named human's signed decision. services/audit
+            # projects bus FACTs into the signed, tamper-evident store an examiner
+            # reads, and it cannot see this service's tables — so without this the
+            # decision is durable HERE and absent from the platform's audit trail.
+            #
+            # UNSETTING THIS DOES NOT DISABLE THE FACT, IT CREATES A BACKLOG. The
+            # FACT is committed to the outbox in the SAME transaction as the
+            # override, so overrides keep working and their announcements pile up in
+            # Postgres until a relay drains them. Nothing is lost and nothing is
+            # blocked, which is the correct failure mode and the easy one to leave
+            # unattended. The number that says so:
+            #
+            #   kanz_datamaster_outbox_oldest_pending_seconds
+            #
+            # Zero means drained. A climbing value means the audit trail is behind
+            # the decisions by exactly that much.
+            - { name: DATAMASTER_NATS_URL, value: "nats://nats.kanz-messaging.svc:4222" }
           livenessProbe:
             httpGet: { path: /healthz, port: 8080 }
             initialDelaySeconds: 5

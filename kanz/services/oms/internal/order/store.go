@@ -9,7 +9,7 @@ import (
 	orderpb "github.com/eighred/kanz/kanz-schemas-go/order/v1"
 	"google.golang.org/protobuf/proto"
 
-	"github.com/eighred/kanz/services/oms/internal/outbox"
+	"github.com/eighred/kanz/internal/outbox"
 )
 
 // ErrNotFound is returned by Store.Load when no order has the given id.

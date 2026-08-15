@@ -87,6 +87,29 @@ type Config struct {
 	// old rows ambiguous.
 	RequireDualControl bool
 
+	// Source is this service's identity on the bus: it becomes the envelope's
+	// producer, which is how a consumer knows which service asserted a FACT.
+	Source string
+
+	// SPIFFESocket is the workload-identity socket the mTLS dial uses. Empty
+	// means plaintext, which is the dev path — the mesh itself refuses to be
+	// half-configured.
+	SPIFFESocket string
+
+	// NATSURL is the spine the override FACT is published onto (#410).
+	//
+	// EMPTY IS NOT A DISABLE — it is a BACKLOG. The FACT is committed to the
+	// outbox in the same transaction as the override whether or not this is set,
+	// so with no URL the overrides keep working and their announcements pile up
+	// in Postgres until a relay can drain them. That is the correct failure mode
+	// (nothing is lost, nothing is blocked) and the dangerous one to leave
+	// unattended, which is why the composition root WARNS and
+	// kanz_datamaster_outbox_oldest_pending_seconds climbs.
+	NATSURL string
+
+	// OutboxInterval is how often the relay drains. Zero uses the relay default.
+	OutboxInterval time.Duration
+
 	// DualControlTTL is how long a pending override proposal stays approvable.
 	// Long enough for an approver in another timezone; short enough that a
 	// signature cannot be collected against a stale view of the book.
@@ -121,6 +144,10 @@ func Load() (Config, error) {
 
 		AllowEphemeralMaster: boolOr("DATAMASTER_ALLOW_EPHEMERAL_MASTER", false),
 
+		Source:             envOr("DATAMASTER_SOURCE", "datamaster"),
+		SPIFFESocket:       os.Getenv("SPIFFE_ENDPOINT_SOCKET"),
+		NATSURL:            os.Getenv("DATAMASTER_NATS_URL"),
+		OutboxInterval:     durationOr("DATAMASTER_OUTBOX_INTERVAL", 0),
 		RequireDualControl: boolOr("DATAMASTER_REQUIRE_DUAL_CONTROL", false),
 		DualControlTTL:     durationOr("DATAMASTER_DUAL_CONTROL_TTL", dualcontrol.DefaultTTL),
 

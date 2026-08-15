@@ -29,6 +29,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"google.golang.org/grpc"
 
+	"github.com/eighred/kanz/internal/outbox"
 	"github.com/eighred/kanz/internal/pg"
 	"github.com/eighred/kanz/pkg/bus"
 	"github.com/eighred/kanz/pkg/observability"
@@ -39,7 +40,6 @@ import (
 	"github.com/eighred/kanz/services/oms/internal/costwatch"
 	"github.com/eighred/kanz/services/oms/internal/grpcsrv"
 	"github.com/eighred/kanz/services/oms/internal/order"
-	"github.com/eighred/kanz/services/oms/internal/outbox"
 	"github.com/eighred/kanz/services/oms/internal/position"
 	"github.com/eighred/kanz/services/oms/internal/riskview"
 	"github.com/eighred/kanz/services/oms/internal/server"

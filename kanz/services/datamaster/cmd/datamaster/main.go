@@ -30,10 +30,13 @@ import (
 
 	"github.com/eighred/kanz/internal/dec"
 	"github.com/eighred/kanz/internal/lifecycle"
+	"github.com/eighred/kanz/internal/outbox"
 	"github.com/eighred/kanz/internal/pg"
 	"github.com/eighred/kanz/internal/platform/httpserver"
 	"github.com/eighred/kanz/internal/version"
+	"github.com/eighred/kanz/pkg/bus"
 	"github.com/eighred/kanz/pkg/observability"
+	"github.com/eighred/kanz/pkg/transport"
 	"github.com/eighred/kanz/services/datamaster/internal/config"
 	"github.com/eighred/kanz/services/datamaster/internal/feed"
 	"github.com/eighred/kanz/services/datamaster/internal/master"
@@ -116,12 +119,79 @@ func run() int {
 	// scrape, including the degraded one.
 	obs.Registry.MustRegister(masterDurable)
 
-	golden, exceptions, proposals, cycleLock, closeStores, err := openStores(ctx, cfg, logger)
+	golden, exceptions, proposals, outboxQueue, cycleLock, closeStores, err := openStores(ctx, cfg, logger)
 	if err != nil {
 		logger.Error("store init failed", "err", err)
 		return 2
 	}
 	defer closeStores()
+
+	// THE OVERRIDE FACT REACHES THE ESTATE (#410).
+	//
+	// The FACT is committed to the outbox in the SAME transaction as the override,
+	// so this relay is what drains it — not what makes the override durable. That
+	// split is the whole design: an override never depends on the broker being up,
+	// and a FACT is never lost because it was down.
+	if outboxQueue != nil {
+		if cfg.NATSURL == "" {
+			// WARN, and this is a BACKLOG rather than a disable. Overrides keep
+			// working and their announcements accumulate in Postgres, so
+			// services/audit — the signed, tamper-evident store an examiner reads —
+			// falls silently behind by exactly the amount below.
+			logger.Warn("no DATAMASTER_NATS_URL: override FACTs are committed to the outbox and NOTHING "+
+				"DRAINS IT. Every override still applies and nothing is lost, but the platform's audit "+
+				"trail will not contain them until a relay runs",
+				"gauge", "kanz_datamaster_outbox_oldest_pending_seconds")
+		} else {
+			mesh, err := transport.NewMesh(ctx, cfg.SPIFFESocket)
+			if err != nil {
+				logger.Error("mesh init failed", "err", err)
+				return 2
+			}
+			defer func() { _ = mesh.Close() }()
+			client, err := bus.DialNATS(ctx, bus.NATSConfig{URL: cfg.NATSURL, Name: cfg.Source, TLSConfig: mesh.Client})
+			if err != nil {
+				logger.Error("bus dial failed", "err", err)
+				return 2
+			}
+			producer, err := bus.NewProducer(client, bus.ProducerConfig{
+				Source: cfg.Source, ProducerVersion: version.String(), Tenant: cfg.Tenant,
+				Metrics: bus.NewBusMetrics(obs.Registry),
+			})
+			if err != nil {
+				logger.Error("producer init failed", "err", err)
+				return 2
+			}
+			relay, err := outbox.NewRelay(outboxQueue, producer, logger, outbox.WithInterval(cfg.OutboxInterval))
+			if err != nil {
+				logger.Error("outbox relay init failed", "err", err)
+				return 2
+			}
+			go func() {
+				// A DEAD RELAY IS A SILENT AUDIT GAP, so its exit is logged rather
+				// than discarded. It does not bring the service down: overrides keep
+				// committing to the outbox and the other replica drains them, which
+				// is the whole reason the FACT is not published inline. The gauge
+				// below is what an operator alerts on.
+				if err := relay.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
+					logger.Error("outbox relay stopped — override FACTs are accumulating and the audit "+
+						"trail is falling behind", "err", err)
+				}
+			}()
+			// THE AGE OF THE OLDEST UNPUBLISHED RECORD IS THE ALERTABLE SIGNAL, and
+			// it is a GaugeFunc because it must be true when nothing is happening.
+			// An empty outbox and a dead relay both produce zero errors, zero failed
+			// publishes and a silent log; the only number that tells them apart is
+			// how long the front of the queue has waited.
+			obs.Registry.MustRegister(prometheus.NewGaugeFunc(prometheus.GaugeOpts{
+				Name: "kanz_datamaster_outbox_oldest_pending_seconds",
+				Help: "Age of the oldest override FACT committed to the outbox and not yet published. Zero " +
+					"means drained. A climbing value means overrides the audit trail has not heard about " +
+					"(#410) — the decisions are safe in Postgres, the audit record is behind.",
+			}, func() float64 { return relay.OldestPendingAge(ctx) }))
+			logger.Info("override FACTs will be published", "subject", store.SubjectExceptionOverridden)
+		}
+	}
 
 	readiness := &server.Readiness{}
 	// MAKER-CHECKER (#410). Armed by DATAMASTER_REQUIRE_DUAL_CONTROL, which
@@ -235,10 +305,10 @@ func run() int {
 // config.Load has already refused to start if the _FILE mount was DECLARED but
 // unreadable (secret.Read), so an empty DSN here can only mean none was ever
 // configured.
-func openStores(ctx context.Context, cfg config.Config, logger *slog.Logger) (store.GoldenStore, store.ExceptionStore, store.ProposalStore, projector.CycleLock, func(), error) {
+func openStores(ctx context.Context, cfg config.Config, logger *slog.Logger) (store.GoldenStore, store.ExceptionStore, store.ProposalStore, outbox.Queue, projector.CycleLock, func(), error) {
 	if cfg.DatabaseURL == "" {
 		if !cfg.AllowEphemeralMaster {
-			return nil, nil, nil, nil, nil, errors.New("no DATAMASTER_DATABASE_URL (or _FILE mount): the golden " +
+			return nil, nil, nil, nil, nil, nil, errors.New("no DATAMASTER_DATABASE_URL (or _FILE mount): the golden " +
 				"master and the pricing-oversight EXCEPTION QUEUE would be IN-MEMORY. Every operator " +
 				"override — a named human's signed decision to accept a price the system flagged — would be " +
 				"DISCARDED by the next restart or rolling update, and it originates here rather than on the " +
@@ -258,20 +328,26 @@ func openStores(ctx context.Context, cfg config.Config, logger *slog.Logger) (st
 		// The proposal store follows the same posture: in-memory here, which means a
 		// pending override is approvable only on the pod that took it — acceptable
 		// only because this path already MUST run exactly one replica.
+		// NO OUTBOX ON THE EPHEMERAL PATH. The in-memory exception queue never
+		// enqueues a FACT, so a relay would drain nothing forever; returning nil
+		// keeps 'there is no announcement here' explicit rather than staffed.
 		return store.NewMemoryGoldenStore(), store.NewQueueStore(pricing.NewQueue()),
-			store.NewMemoryProposals(), nil, func() {}, nil
+			store.NewMemoryProposals(), nil, nil, func() {}, nil
 	}
 	// MT-01d: every connection carries this deployment's tenant as the
 	// `app.tenant_id` GUC, so Postgres RLS scopes all reads/writes to it. A
 	// non-superuser DB role is required for FORCE RLS to apply.
 	pool, err := pg.NewTenantPool(ctx, cfg.DatabaseURL, cfg.Tenant)
 	if err != nil {
-		return nil, nil, nil, nil, nil, err
+		return nil, nil, nil, nil, nil, nil, err
 	}
 	// The cycle lock is keyed on the TENANT: a shared key would let one tenant's
 	// deployment starve every other tenant's projector forever.
 	masterDurable.Set(1)
-	return store.NewPostgresGolden(pool), store.NewPostgresExceptions(pool), store.NewPostgresProposals(pool),
+	// The outbox reads through the SAME tenant-scoped pool, which is what keeps
+	// the relay unable to publish another tenant's FACTs — see outbox.Relay.
+	return store.NewPostgresGolden(pool), store.NewPostgresExceptions(pool, cfg.Tenant), store.NewPostgresProposals(pool),
+		outbox.NewPostgres(pool, "datamaster"),
 		store.NewPostgresCycleLock(pool, cfg.Tenant), pool.Close, nil
 }
 

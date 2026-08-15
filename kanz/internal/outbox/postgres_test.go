@@ -2,7 +2,7 @@ package outbox
 
 // THE DECISIVE TESTS FOR #292 LIVE HERE, AND THEY ARE POSTGRES-GATED.
 //
-//	TEST_POSTGRES_URL=… go test -p 1 -run 'TestPostgresOutbox' ./services/oms/internal/outbox/
+//	TEST_POSTGRES_URL=… go test -p 1 -run 'TestPostgresOutbox' ./internal/outbox/
 //
 // Everything in relay_test.go runs against a map behind a mutex, which can model
 // ordering and can model failure but CANNOT model the property this package
@@ -128,7 +128,7 @@ func TestPostgresOutboxRollsBackWithItsTransaction(t *testing.T) {
 	pool := newPool(t, "acme")
 	applySchema(t)
 	ctx := testCtx()
-	q := NewPostgres(pool)
+	q := NewPostgres(pool, "oms")
 
 	// 1. ENQUEUE, THEN ROLL BACK.
 	tx, err := pool.Begin(ctx)
@@ -187,7 +187,7 @@ func TestPostgresOutboxDeliversAFactWhoseFirstPublishFailed(t *testing.T) {
 	pool := newPool(t, "acme")
 	applySchema(t)
 	ctx := testCtx()
-	q := NewPostgres(pool)
+	q := NewPostgres(pool, "oms")
 
 	tx, err := pool.Begin(ctx)
 	if err != nil {
@@ -272,14 +272,14 @@ func TestPostgresOutboxIsTenantIsolated(t *testing.T) {
 
 	// Same partition key, different tenant. Order ids are caller-supplied, so a
 	// collision across tenants is ordinary, not contrived.
-	mine, err := NewPostgres(acme).Pending(acmeCtx, "shared-id", 10)
+	mine, err := NewPostgres(acme, "oms").Pending(acmeCtx, "shared-id", 10)
 	if err != nil {
 		t.Fatalf("acme Pending: %v", err)
 	}
 	if len(mine) != 1 {
 		t.Fatalf("acme sees %d of its own records, want 1", len(mine))
 	}
-	theirs, err := NewPostgres(other).Pending(context.Background(), "shared-id", 10)
+	theirs, err := NewPostgres(other, "oms").Pending(context.Background(), "shared-id", 10)
 	if err != nil {
 		t.Fatalf("globex Pending: %v", err)
 	}
@@ -287,7 +287,7 @@ func TestPostgresOutboxIsTenantIsolated(t *testing.T) {
 		t.Fatalf("a globex-scoped relay can read %d of acme's committed FACTs — it would PUBLISH "+
 			"them under acme's envelope onto the shared bus", len(theirs))
 	}
-	keys, err := NewPostgres(other).PendingKeys(context.Background(), 10)
+	keys, err := NewPostgres(other, "oms").PendingKeys(context.Background(), 10)
 	if err != nil {
 		t.Fatalf("globex PendingKeys: %v", err)
 	}
@@ -323,7 +323,7 @@ func TestPostgresOutboxIsTenantIsolated(t *testing.T) {
 	if err := tx.Commit(acmeCtx); err != nil {
 		t.Fatalf("commit: %v", err)
 	}
-	back, err := NewPostgres(acme).Pending(acmeCtx, "for-globex", 10)
+	back, err := NewPostgres(acme, "oms").Pending(acmeCtx, "for-globex", 10)
 	if err != nil || len(back) != 1 {
 		t.Fatalf("Pending for the foreign-envelope record = (%d, %v), want 1", len(back), err)
 	}
@@ -331,7 +331,7 @@ func TestPostgresOutboxIsTenantIsolated(t *testing.T) {
 		t.Fatalf("envelope tenant round-tripped as %q, want globex — the relay would publish this "+
 			"FACT under the wrong fund's name", back[0].Record.TenantID)
 	}
-	stillHidden, err := NewPostgres(other).Pending(context.Background(), "for-globex", 10)
+	stillHidden, err := NewPostgres(other, "oms").Pending(context.Background(), "for-globex", 10)
 	if err != nil {
 		t.Fatalf("globex Pending: %v", err)
 	}
@@ -350,7 +350,7 @@ func TestPostgresOutboxLetsOnlyOneRelayDrainAKey(t *testing.T) {
 	pool := newPool(t, "acme")
 	applySchema(t)
 	ctx := testCtx()
-	q := NewPostgres(pool)
+	q := NewPostgres(pool, "oms")
 
 	release, ok, err := q.LockKey(ctx, "o1", false)
 	if err != nil || !ok {
@@ -360,12 +360,12 @@ func TestPostgresOutboxLetsOnlyOneRelayDrainAKey(t *testing.T) {
 	// twice on one connection succeeds (Postgres locks are re-entrant per
 	// session) and would prove nothing about two pods.
 	second := newPool(t, "acme")
-	if _, ok, err := NewPostgres(second).LockKey(ctx, "o1", false); err != nil || ok {
+	if _, ok, err := NewPostgres(second, "oms").LockKey(ctx, "o1", false); err != nil || ok {
 		t.Fatalf("a second session took a key the first holds (ok=%v err=%v) — two relays would "+
 			"publish one order's FACTs concurrently and could interleave them", ok, err)
 	}
 	release()
-	release2, ok, err := NewPostgres(second).LockKey(ctx, "o1", false)
+	release2, ok, err := NewPostgres(second, "oms").LockKey(ctx, "o1", false)
 	if err != nil || !ok {
 		t.Fatalf("the key was not released (ok=%v err=%v) — a stranded lock means nothing ever "+
 			"drains this order again", ok, err)
@@ -417,7 +417,7 @@ func TestPostgresOutboxPublishesEveryConcurrentEnqueueExactlyOnce(t *testing.T) 
 	}
 
 	rec := &recorder{}
-	relay, err := NewRelay(NewPostgres(pool), rec, quietLogger())
+	relay, err := NewRelay(NewPostgres(pool, "oms"), rec, quietLogger())
 	if err != nil {
 		t.Fatalf("NewRelay: %v", err)
 	}

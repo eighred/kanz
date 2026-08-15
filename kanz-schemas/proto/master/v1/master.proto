@@ -150,6 +150,20 @@ message Override {
 
   // at is when the override was applied. Required.
   google.protobuf.Timestamp at = 4;
+
+  // approver is the SECOND person who signed this override (#410 maker-checker).
+  //
+  // EMPTY MEANS SINGLE-SIGNED, and that is a real state rather than a missing
+  // field: dual control ships unarmed, so most of this trail is one person's
+  // decision. A reader must be able to tell the two apart from the record
+  // itself, because whether the control was armed on the day is not recoverable
+  // from today's configuration.
+  //
+  // When set it is NEVER equal to actor. The rule is enforced in three places
+  // that must agree — the handler, the domain type's Validate, and a database
+  // CHECK — because a row where the two match reads as four-eyes to an examiner
+  // while one person held both signatures.
+  string approver = 5;
 }
 
 // DataException is a detected data-quality break plus its override audit trail —
@@ -176,4 +190,40 @@ message DataException {
   // overrides is the append-only override history (the audit trail). Empty while
   // OPEN.
   repeated Override overrides = 7;
+}
+
+// ExceptionOverridden is the FACT emitted when a human override is applied to a
+// pricing-oversight exception (#410).
+//
+// # Why this exists rather than the audit service reading the table
+//
+// services/audit projects bus FACTs into a signed, tamper-evident store. An
+// override lives in datamaster's own append-only exception_overrides table,
+// which the audit service cannot see — so before this FACT, "who accepted a
+// price the system flagged" was durable but absent from the platform's audit
+// trail. #410's acceptance is explicit that the approval is recorded AS A FACT
+// carrying both identities.
+//
+// # It is emitted through a transactional outbox, and that is load-bearing
+//
+// The override and the outbox row are written in ONE transaction. A direct
+// publish would force a choice between two wrong answers: fail the override when
+// the broker is down (a valuation outage caused by an audit dependency), or drop
+// the FACT (an audit gap that nothing reports). The outbox has neither failure
+// mode — the override commits or does not, and the FACT follows when the broker
+// returns.
+message ExceptionOverridden {
+  // exception_id is the exception that was overridden. Required.
+  string exception_id = 1;
+
+  // instrument_id is the affected instrument, denormalised onto the FACT so a
+  // consumer does not have to join against a store it cannot read.
+  string instrument_id = 2;
+
+  // override is the record that was appended, carrying BOTH identities: actor is
+  // the proposer, approver is the second signature (empty when single-signed).
+  Override override = 3;
+
+  // status is the exception's status after the override. Required.
+  ExceptionStatus status = 4;
 }

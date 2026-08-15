@@ -21,8 +21,8 @@ import (
 
 	"github.com/eighred/kanz/internal/dec"
 	"github.com/eighred/kanz/internal/execution"
+	"github.com/eighred/kanz/internal/outbox"
 	"github.com/eighred/kanz/services/oms/internal/compliance"
-	"github.com/eighred/kanz/services/oms/internal/outbox"
 
 	"github.com/prometheus/client_golang/prometheus"
 )
