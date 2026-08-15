@@ -42,6 +42,7 @@ import (
 
 	"github.com/eighred/kanz/internal/bustest"
 	comp "github.com/eighred/kanz/internal/compliance"
+	"github.com/eighred/kanz/internal/dualcontrol"
 	"github.com/eighred/kanz/pkg/bus"
 	omscompliance "github.com/eighred/kanz/services/oms/internal/compliance"
 )
@@ -136,7 +137,25 @@ func TestAMandateRefusesAnOrderOverARealSpine(t *testing.T) {
 			}},
 		}},
 	}
-	if err := comp.NewPublisher(producer).Publish(ctx, mandate, nil, "operator:test", "#245"); err != nil {
+	// A REAL TWO-PERSON APPROVAL. The publisher takes no lone actor since #410, so
+	// even a fixture has to go through the path production goes through — which is
+	// the point: a test that could publish unilaterally would be testing a
+	// signature that no longer exists.
+	mandateDigest, err := comp.MandateDigest(mandate, "#245")
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	prop, err := dualcontrol.Propose("p-245", dualcontrol.ActMandateChange, "mandate",
+		"operator:proposer", mandateDigest, now, dualcontrol.DefaultTTL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	approval, err := prop.Approve("operator:approver", mandateDigest, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := comp.NewPublisher(producer).Publish(ctx, mandate, nil, approval, "#245"); err != nil {
 		t.Fatalf("publish mandate: %v", err)
 	}
 

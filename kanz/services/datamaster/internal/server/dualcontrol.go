@@ -249,7 +249,7 @@ func (s *Server) handleApproveOverride(w http.ResponseWriter, r *http.Request) {
 	// on a self-approval attempt would let one person destroy a colleague's
 	// pending decision by trying to approve their own.
 	digest := store.PayloadDigest(prop.Subject, prop.Reason, prop.ChosenPrice)
-	if err := prop.Approve(approver, digest, s.now()); err != nil {
+	if _, err := prop.Approve(approver, digest, s.now()); err != nil {
 		s.refuseApproval(w, prop, approver, err)
 		return
 	}

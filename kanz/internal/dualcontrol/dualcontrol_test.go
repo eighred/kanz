@@ -26,14 +26,14 @@ func digest() string { return dualcontrol.Digest("1.23", "vendor is stale") }
 // The act is authorised when a DIFFERENT person approves the SAME payload before
 // it expires. If this ever fails, dual control has become an outage.
 func TestApprove_ADifferentPersonOnTheSamePayload(t *testing.T) {
-	if err := proposal(t, "alice@kanz").Approve("bob@kanz", digest(), now.Add(time.Hour)); err != nil {
+	if _, err := proposal(t, "alice@kanz").Approve("bob@kanz", digest(), now.Add(time.Hour)); err != nil {
 		t.Fatalf("a valid second signature was refused: %v", err)
 	}
 }
 
 // THE RULE.
 func TestApprove_SelfApprovalIsRefused(t *testing.T) {
-	err := proposal(t, "alice@kanz").Approve("alice@kanz", digest(), now.Add(time.Hour))
+	_, err := proposal(t, "alice@kanz").Approve("alice@kanz", digest(), now.Add(time.Hour))
 	if !errors.Is(err, dualcontrol.ErrSelfApproval) {
 		t.Fatalf("self-approval = %v, want ErrSelfApproval", err)
 	}
@@ -52,14 +52,14 @@ func TestApprove_OneNameSpelledTwoWaysIsStillOnePerson(t *testing.T) {
 		" alice@kanz ", // padded
 		"\talice@kanz",
 	} {
-		err := proposal(t, "alice@kanz").Approve(approver, digest(), now.Add(time.Hour))
+		_, err := proposal(t, "alice@kanz").Approve(approver, digest(), now.Add(time.Hour))
 		if !errors.Is(err, dualcontrol.ErrSelfApproval) {
 			t.Errorf("%q approving alice@kanz = %v, want ErrSelfApproval — one person holds both "+
 				"signatures and the trail shows two actors", approver, err)
 		}
 	}
 	// And symmetrically: it is the PROPOSER side that varies.
-	err := proposal(t, " ALICE@kanz ").Approve("alice@kanz", digest(), now.Add(time.Hour))
+	_, err := proposal(t, " ALICE@kanz ").Approve("alice@kanz", digest(), now.Add(time.Hour))
 	if !errors.Is(err, dualcontrol.ErrSelfApproval) {
 		t.Errorf("proposer spelled differently = %v, want ErrSelfApproval", err)
 	}
@@ -70,7 +70,7 @@ func TestApprove_OneNameSpelledTwoWaysIsStillOnePerson(t *testing.T) {
 // Propose a defensible price, collect the second signature, apply a different
 // one. Without this the whole workflow authorises whatever is applied last.
 func TestApprove_ThePayloadCannotChangeAfterApproval(t *testing.T) {
-	err := proposal(t, "alice@kanz").Approve("bob@kanz",
+	_, err := proposal(t, "alice@kanz").Approve("bob@kanz",
 		dualcontrol.Digest("9999.00", "vendor is stale"), now.Add(time.Hour))
 	if !errors.Is(err, dualcontrol.ErrPayloadChanged) {
 		t.Fatalf("applying a different price than was approved = %v, want ErrPayloadChanged", err)
@@ -79,16 +79,16 @@ func TestApprove_ThePayloadCannotChangeAfterApproval(t *testing.T) {
 
 func TestApprove_Expiry(t *testing.T) {
 	p := proposal(t, "alice@kanz")
-	if err := p.Approve("bob@kanz", digest(), p.ExpiresAt.Add(time.Nanosecond)); !errors.Is(err, dualcontrol.ErrExpired) {
+	if _, err := p.Approve("bob@kanz", digest(), p.ExpiresAt.Add(time.Nanosecond)); !errors.Is(err, dualcontrol.ErrExpired) {
 		t.Errorf("after expiry = %v, want ErrExpired", err)
 	}
 	// Inclusive of the instant: AT ExpiresAt it is already expired. A boundary
 	// stated one way in the code and another in the test is how an off-by-one
 	// survives both.
-	if err := p.Approve("bob@kanz", digest(), p.ExpiresAt); !errors.Is(err, dualcontrol.ErrExpired) {
+	if _, err := p.Approve("bob@kanz", digest(), p.ExpiresAt); !errors.Is(err, dualcontrol.ErrExpired) {
 		t.Errorf("at exactly ExpiresAt = %v, want ErrExpired", err)
 	}
-	if err := p.Approve("bob@kanz", digest(), p.ExpiresAt.Add(-time.Nanosecond)); err != nil {
+	if _, err := p.Approve("bob@kanz", digest(), p.ExpiresAt.Add(-time.Nanosecond)); err != nil {
 		t.Errorf("one nanosecond before expiry = %v, want nil", err)
 	}
 }
@@ -102,7 +102,7 @@ func TestApprove_Expiry(t *testing.T) {
 // silent full-authorisation, so it is refused explicitly.
 func TestApprove_AZeroValueProposalIsRefusedRatherThanVacuouslyPassing(t *testing.T) {
 	var empty dualcontrol.Proposal
-	err := empty.Approve("bob@kanz", "", now)
+	_, err := empty.Approve("bob@kanz", "", now)
 	if err == nil {
 		t.Fatal("a zero-value proposal APPROVED an act — every check passed vacuously")
 	}
@@ -113,7 +113,7 @@ func TestApprove_AZeroValueProposalIsRefusedRatherThanVacuouslyPassing(t *testin
 
 func TestApprove_AnUnauthenticatedApproverIsRefused(t *testing.T) {
 	for _, approver := range []string{"", "   ", "\t\n"} {
-		err := proposal(t, "alice@kanz").Approve(approver, digest(), now.Add(time.Hour))
+		_, err := proposal(t, "alice@kanz").Approve(approver, digest(), now.Add(time.Hour))
 		if !errors.Is(err, dualcontrol.ErrMalformed) {
 			t.Errorf("approver %q = %v, want ErrMalformed", approver, err)
 		}
@@ -200,7 +200,7 @@ func TestPending(t *testing.T) {
 // The error naming which rule refused is what an operator reads. A refusal that
 // says only "denied" sends them to the code.
 func TestErrorsNameTheRuleThatRefused(t *testing.T) {
-	err := proposal(t, "alice@kanz").Approve("alice@kanz", digest(), now.Add(time.Hour))
+	_, err := proposal(t, "alice@kanz").Approve("alice@kanz", digest(), now.Add(time.Hour))
 	if !strings.Contains(err.Error(), "alice@kanz") {
 		t.Errorf("self-approval refusal does not name the proposer: %v", err)
 	}
