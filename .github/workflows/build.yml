@@ -158,6 +158,19 @@ jobs:
           # The external REST edge. It had an image target and no deployment.
           - service: api-gateway
             dockerfile: kanz/services/api-gateway/Dockerfile
+          # The client stack (#364, #371). Both were written, tested and merged
+          # with no Dockerfile and no entry here, so the web application and the
+          # credential authority it signs into were finished, green and
+          # unshippable at the same time. test/arch's
+          # TestEveryServiceCanBeBuiltIntoAnImage now fails the build when a
+          # service with a main has no image.
+          #
+          # identity mints the ES256 tokens the gateway verifies; web-bff holds
+          # the session so the browser never sees one.
+          - service: identity
+            dockerfile: kanz/services/identity/Dockerfile
+          - service: web-bff
+            dockerfile: kanz/services/web-bff/Dockerfile
           # DATA-M1 (Task 7): the durable-log producer. archiver drains the NATS
           # live spine into the Kafka log of record; it had a Dockerfile, a
           # single-writer deploy manifest and real-broker integration tests
