@@ -59,8 +59,17 @@ var darkPackageExempt = map[string]string{
 	"internal/validation": "#471 — the SR 11-7 model-validation gate for the quant library. Complete " +
 		"and self-tested; no composition root consults it, so every analytic serves production " +
 		"without recorded validation. Needs a ruling on refuse-vs-count before it can be armed.",
-	"internal/prediction/registry": "#112 — the MLOPS-01a model registry, the last third of the " +
-		"AI-M1 bridge. Deleting it was proposed and REJECTED; what it needs is a composition root.",
+	"internal/prediction/registry": "#112 — the MLOPS-01a model registry. Deleting it was " +
+		"proposed and REJECTED. CORRECTED 2026-08-15: it is NOT 'the last third of the AI-M1 " +
+		"bridge' and what it needs is NOT a composition root. The bridge is one third wired — " +
+		"the feature publisher — while the resilient inference client also has zero callers " +
+		"(invisible here because this guard works at IMPORT granularity and internal/prediction " +
+		"IS imported, for the publisher). And wiring this needs a transport and a producer that " +
+		"do not exist: platform.model is not a declared subject, infra/kafka/topics-job.yaml " +
+		"removed it because nothing publishes it, and kanz-py's RegistryPublisher is a Protocol " +
+		"with no implementation. The correctness property that saved it from deletion — resolve " +
+		"by feature_set_ref, never by name — was asserted in three places and implemented in " +
+		"none; it is implemented now.",
 	"internal/collateral": "#408 — the COLL-01 margin/financing plane. The maths is written and " +
 		"unconsumed because an order carries no leverage and no margin mode; #408 holds the ruling " +
 		"on margin semantics that decides the shape of the wiring.",

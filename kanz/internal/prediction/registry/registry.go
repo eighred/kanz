@@ -19,20 +19,51 @@
 //	$ grep -rn "prediction/registry" --include=*.go . | grep -v _test
 //	(nothing)
 //
-// It is the remaining third of the AI-M1 bridge. services/risk-engine's
-// internal/app/features.go records the original state — "internal/prediction
-// shipped a feature publisher, a resilient inference client and a model registry
-// — and had ZERO importers outside its own tests" — and the first two are now
-// wired at risk-engine's composition root. This is the piece that is not.
+// It is part of the AI-M1 bridge, and the bridge is ONE THIRD WIRED, NOT TWO
+// (corrected #112, 2026-08-15). The claim that "the first two are now wired at
+// risk-engine's composition root" was false and had survived several audits:
+//
+//	$ grep -rn "SyncClient" --include=*.go .   -> only sync_client.go and its own tests
+//
+// The FEATURE PUBLISHER is wired (risk-engine's composition root builds
+// prediction.NewPublisher). The RESILIENT INFERENCE CLIENT has no callers
+// anywhere in the module, and is invisible to test/arch's dark-capability guard
+// because that guard works at IMPORT granularity and internal/prediction IS
+// imported — for the publisher. Its own doc names that limitation.
+//
+// WHAT ACTUALLY BLOCKS WIRING THIS IS NOT A COMPOSITION ROOT. The coordination
+// plane has no transport and no producer, on either side:
+//
+//   - platform.model is not a declared subject in this module, and
+//     infra/kafka/topics-job.yaml records that it was REMOVED from the
+//     ground-truth topic table because "NOT ONE of which is published by any
+//     service". Auto-create is disabled, so an event published to it has
+//     nowhere to land.
+//   - kanz-py's RegistryPublisher (kanz_inference/registry/coordination.py) is a
+//     Protocol with no concrete implementation, so nothing registers a model
+//     from the Python side either.
+//
+// So binding Log to the bus today would produce a registry nobody writes to,
+// reading a topic that does not exist. #112 tracks the sequencing.
 //
 // DELETING IT WAS PROPOSED AND REJECTED, so the argument is recorded here rather
 // than re-litigated:
 //
 //   - It is not an orphan. Removing it would freeze a documented three-part
 //     design permanently at two thirds and turn "wire it" into "rebuild it".
-//   - Its job is a correctness property. It resolves a model by feature_set_ref
+//
+//   - Its job is a correctness property: it resolves a model by feature_set_ref
 //     and NEVER by name, which is what stops a model scoring a feature set it
 //     was not trained on — the same drift features.go warns about directly.
+//
+//     THAT PROPERTY WAS ASSERTED HERE, IN features.go AND IN THE DARK-CAPABILITY
+//     EXEMPTION WHILE BEING IMPLEMENTED IN NONE OF THEM. Metadata had no
+//     FeatureSetRef and the only lookup was Get(modelID) — resolution by name,
+//     the exact thing the argument said it prevented. It is implemented now
+//     (PrimaryFor, and the one-primary-per-contract rule that makes its answer
+//     deterministic), so the argument that saved this package is true rather
+//     than aspirational.
+//
 //   - It cannot rot. The precedent for deleting unused code here is the Anthropic
 //     adapter, and that rotted because it sat behind a build tag CI never
 //     compiled. This is ordinary Go: `go build ./...` compiles it and
@@ -74,7 +105,25 @@ func (r Role) String() string {
 type Metadata struct {
 	ModelID string
 	Version string
-	Extra   map[string]string
+	// FeatureSetRef is the feature contract this model was TRAINED ON, and it is
+	// what a caller resolves by (#112).
+	//
+	// THE WHOLE POINT OF THIS PACKAGE IS THAT A CALLER NEVER NAMES A MODEL. Ask
+	// for a model by id and you get whatever is registered under that id, which
+	// may have been retrained against a different feature contract since the
+	// caller was written — and the failure is silent: a well-formed vector, a
+	// confident score, and a model reading columns that mean something else.
+	// PrimaryFor asks by feature set instead, so a model that does not claim the
+	// contract cannot be handed a vector shaped by it.
+	//
+	// This field did not exist until #112, while THREE places — this package's
+	// doc, risk-engine's features.go and the dark-capability exemption — all
+	// asserted the property as though it were implemented. It was the argument
+	// that saved this package from deletion. Empty is allowed and means the model
+	// declares no contract, which PrimaryFor refuses to match rather than
+	// treating as a wildcard.
+	FeatureSetRef string
+	Extra         map[string]string
 }
 
 // Validation is the MLOPS-01a gate outcome for a model version.
@@ -140,6 +189,27 @@ func (r *Registry) Register(meta Metadata, role Role) error {
 	if role == RolePrimary && !e.validation.Passed {
 		return fmt.Errorf("%w: %s", ErrNotValidated, meta.ModelID)
 	}
+	// ONE PRIMARY PER FEATURE CONTRACT, AND PROMOTION DEMOTES THE INCUMBENT
+	// (#112).
+	//
+	// Without this, two models can be PRIMARY for the same contract and
+	// PrimaryFor resolves by MAP ITERATION ORDER — so two replicas holding
+	// identical state score with different models, and the same replica may
+	// disagree with itself between calls. A registry whose answer depends on
+	// iteration order is worse than no registry: it looks authoritative.
+	//
+	// Demote rather than refuse, because promotion is what this operation IS. A
+	// refusal would make every model swap a two-step dance whose intermediate
+	// state has no primary at all — and on the coordinated log, where events are
+	// replayed in order, that gap becomes a window in which peers serve nothing.
+	if role == RolePrimary && meta.FeatureSetRef != "" {
+		for id, other := range r.byID {
+			if id != meta.ModelID && other.role == RolePrimary &&
+				other.meta.FeatureSetRef == meta.FeatureSetRef {
+				other.role = RoleCandidate
+			}
+		}
+	}
 	e.meta = meta
 	e.role = role
 	e.model = r.materialize(meta)
@@ -179,6 +249,55 @@ func (r *Registry) IsPrimary(modelID string) bool {
 	defer r.mu.RUnlock()
 	e := r.byID[modelID]
 	return e != nil && e.role == RolePrimary
+}
+
+// PrimaryFor returns the model serving as PRIMARY for a feature contract, and
+// the metadata that says which model it is.
+//
+// RESOLUTION BY CONTRACT, NEVER BY NAME (#112). A caller holding a feature vector
+// asks which model may score THIS contract; it never names a model, so it cannot
+// be handed one that was retrained against a different one.
+//
+// AN EMPTY featureSetRef MATCHES NOTHING, deliberately. It is the value a model
+// registered before this field existed carries, and treating it as a wildcard
+// would make exactly the substitution this exists to prevent — every legacy
+// model silently eligible for every contract.
+//
+// ok=false is a real and common answer: no model has been promoted for this
+// contract yet. It is not an error, and a caller must not read it as "score it
+// anyway".
+func (r *Registry) PrimaryFor(featureSetRef string) (Model, Metadata, bool) {
+	if featureSetRef == "" {
+		return nil, Metadata{}, false
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	for _, e := range r.byID {
+		if e.role == RolePrimary && e.meta.FeatureSetRef == featureSetRef {
+			return e.model, e.meta, true
+		}
+	}
+	return nil, Metadata{}, false
+}
+
+// FeatureSets lists the contracts that have a PRIMARY model, sorted — the
+// posture read a composition root exposes so "no model serves this contract" is
+// visible rather than inferred from silence.
+func (r *Registry) FeatureSets() []string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	seen := map[string]bool{}
+	for _, e := range r.byID {
+		if e.role == RolePrimary && e.meta.FeatureSetRef != "" {
+			seen[e.meta.FeatureSetRef] = true
+		}
+	}
+	out := make([]string, 0, len(seen))
+	for ref := range seen {
+		out = append(out, ref)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // Models lists the registered model ids, sorted — a stable snapshot for gauges.
