@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/types/known/timestamppb"
 
 	commandpb "github.com/eighred/kanz/kanz-schemas-go/command/v1"
 	commonpb "github.com/eighred/kanz/kanz-schemas-go/common/v1"
@@ -16,6 +17,7 @@ import (
 
 	"github.com/eighred/kanz/internal/dec"
 	"github.com/eighred/kanz/pkg/bus"
+	"github.com/eighred/kanz/services/oms/internal/outbox"
 	"github.com/eighred/kanz/services/oms/internal/schedule"
 )
 
@@ -136,7 +138,131 @@ func (s *Service) driveOne(ctx context.Context, parentSt *orderpb.OrderState, te
 		}
 		created++
 	}
+
+	// A FINISHED PARENT IS RETIRED, and without this it rests at
+	// WORKING_SCHEDULED forever.
+	//
+	// That is the failure this whole feature was designed against, reintroduced at
+	// the end of it: the order shows live on every screen, the driver rescans it
+	// on every tick for the life of the pod, and nothing anywhere says its work is
+	// done. Checked after emitting, so a parent whose last slice went out this
+	// tick is retired on the next one — by which time its children have had a
+	// chance to reach the venue.
+	if created == 0 {
+		if err := s.retireIfFinished(ctx, parentSt, children, now); err != nil {
+			return created, err
+		}
+	}
 	return created, nil
+}
+
+// retireIfFinished terminates a parent whose schedule is fully worked and whose
+// children have all finished.
+//
+// # A PARENT IS NEVER MARKED FILLED, and that is the load-bearing decision
+//
+// It has no fills of its own — its children reported every one of them, each
+// with its own fill_id, and those are what the position book, the ledger and
+// every projection folded. Copying their quantity onto the parent would create a
+// SECOND record of the same execution, and any consumer summing filled_quantity
+// across orders would report the fund as having traded twice what it traded.
+//
+// So the parent's filled_quantity stays zero and its terminal status is EXPIRED:
+// its working window elapsed, which is literally what a time-in-force expiring
+// means, and ORDER_EXPIRED is the one terminal FACT that carries a QUANTITY
+// rather than a Fill. That matters beyond tidiness — OrderFilled's consumers
+// fold ev.GetFill(), and while the position projector happens to skip a nil one,
+// relying on three consumers (and every future one) to survive a fill-less fill
+// is exactly the implicit contract this platform refuses to depend on.
+//
+// unfilled_quantity is the honest headline: the quantity the fund asked for and
+// did not get. Zero means the schedule worked completely, and an operator
+// reading EXPIRED with zero unfilled is reading "the window finished and it all
+// traded". #484 covers presenting that well.
+func (s *Service) retireIfFinished(ctx context.Context, parentSt *orderpb.OrderState, children []*orderpb.OrderState, now time.Time) error {
+	parent, err := parentOf(parentSt)
+	if err != nil {
+		return err
+	}
+	held := make(map[string]bool, len(children))
+	for _, c := range children {
+		held[c.GetOrderId()] = true
+	}
+	// EVERY SLICE MUST HAVE BEEN SENT. Complete checks each index rather than
+	// counting: a count cannot tell a hole from a short tail, and retiring a
+	// parent with slice 2 missing would abandon that quantity permanently.
+	if !schedule.Complete(parent, func(id string) bool { return held[id] }) {
+		return nil
+	}
+	// AND EVERY CHILD MUST HAVE FINISHED. "Sent" is not "done": a child still
+	// working at a venue can still fill, and a terminal parent is skipped by
+	// resume() and both sweeps forever after — so retiring early would stop
+	// anything from ever revisiting this order.
+	for _, c := range children {
+		if !IsTerminal(c) {
+			return nil
+		}
+	}
+
+	// The quantity that never traded, derived from what the children actually
+	// filled. This is an UNFILLED figure, so unlike a filled one it cannot
+	// double-count anything.
+	unfilled := dec.FromProto(parentSt.GetOrderedQuantity())
+	for _, c := range children {
+		unfilled.Sub(unfilled, dec.FromProto(c.GetFilledQuantity()))
+	}
+	if unfilled.Sign() < 0 {
+		s.logger.Error("oms: a parent's children filled more than the parent ordered — reporting "+
+			"nothing unfilled rather than a negative quantity",
+			"order_id", parentSt.GetOrderId(), "children", len(children))
+		unfilled = new(big.Rat)
+	}
+	qty, ok := dec.ToProtoScaled(unfilled)
+	if !ok {
+		return fmt.Errorf("oms: the unfilled quantity of parent %s (%s) cannot be represented "+
+			"as a decimal", parentSt.GetOrderId(), unfilled.FloatString(20))
+	}
+
+	release, err := s.awaitClaim(ctx, parentSt.GetOrderId())
+	if err != nil {
+		return s.abandonClaim("retire", parentSt.GetOrderId(), err)
+	}
+	defer release()
+
+	// RE-READ UNDER THE CLAIM. Everything above was decided from a list this pass
+	// began with; a cancel may have landed since, and expiring an order somebody
+	// already withdrew would overwrite their terminal state with a different one.
+	st, ver, err := s.store.Load(ctx, parentSt.GetOrderId())
+	if err != nil {
+		return err
+	}
+	if st.GetStatus() != orderpb.OrderStatus_ORDER_STATUS_WORKING_SCHEDULED {
+		return nil // somebody else finished it
+	}
+
+	next, _, err := Expire(st, now)
+	if err != nil {
+		return err
+	}
+	// THE FACT AND THE STATE COMMIT TOGETHER (#292), the same discipline every
+	// other transition in this service keeps: built before the Save, so a record
+	// that cannot be captured stops the transition rather than committing a state
+	// whose announcement could never be made.
+	fact, ferr := s.emitter.ExpiredFact(ctx, next.GetOrderId(), qty, now)
+	if ferr != nil {
+		return ferr
+	}
+	next.OutcomeAnnouncedAt = timestamppb.New(now)
+	if err := s.store.Save(ctx, next, ver, []outbox.Record{fact}); err != nil {
+		return err
+	}
+	if _, err := s.relay.Flush(ctx, next.GetOrderId()); err != nil {
+		return err
+	}
+	s.logger.Info("oms: a scheduled parent order finished its window",
+		"order_id", next.GetOrderId(), "slices", parent.Plan.Slices,
+		"children", len(children), "unfilled", unfilled.FloatString(12))
+	return nil
 }
 
 // emitChild admits one child order.

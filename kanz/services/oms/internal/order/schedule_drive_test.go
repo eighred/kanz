@@ -371,6 +371,133 @@ func TestScheduleE2E_AChildInheritsTheParentsVenueAccount(t *testing.T) {
 	}
 }
 
+// ===== THE PARENT FINISHES =====
+
+// A PARENT WHOSE SCHEDULE IS WORKED OUT IS RETIRED.
+//
+// Without this it rests at WORKING_SCHEDULED forever — which is the failure this
+// whole feature was designed against, reintroduced at the end of it. The order
+// shows live on every screen, the driver rescans it on every tick for the life of
+// the pod, and nothing anywhere says its work is done.
+func TestScheduleE2E_AWorkedOutParentIsRetired(t *testing.T) {
+	at := schedStart.Add(-time.Hour)
+	fb := &fakeBus{}
+	svc, store := scheduledService(t, fb, &at)
+
+	if err := svc.Handle(testCtx(), submitEnv(), mustMarshal(t, scheduledOrder("p1", 6, nil))); err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	at = schedEnd.Add(time.Minute)
+	if n, err := svc.DriveSchedules(driveCtx()); err != nil || n != 6 {
+		t.Fatalf("precondition: created %d children (err %v), want 6", n, err)
+	}
+	// THE PARENT IS STILL WORKING ON THE TICK THAT SENT ITS LAST SLICE. Retiring
+	// in the same pass would call an order finished in the same breath as putting
+	// its final quantity in front of a venue.
+	if st, _, _ := store.Load(context.Background(), "p1"); IsTerminal(st) {
+		t.Fatal("the parent was retired on the very tick that sent its last slice — its children " +
+			"had not yet reached a venue")
+	}
+
+	// The next tick: every slice sent, every child finished.
+	if n, err := svc.DriveSchedules(driveCtx()); err != nil || n != 0 {
+		t.Fatalf("second pass created %d children (err %v), want 0", n, err)
+	}
+
+	st, _, err := store.Load(context.Background(), "p1")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !IsTerminal(st) {
+		t.Fatalf("a fully-worked parent is still %s — it rests forever, the driver rescans it on "+
+			"every tick for the life of the pod, and every screen shows it live", st.GetStatus())
+	}
+
+	// A PARENT IS NEVER MARKED FILLED, and this is the assertion that keeps the
+	// fund's traded volume honest. Its children reported every fill, each with its
+	// own fill_id, and those are what the position book and the ledger folded.
+	// Copying their quantity onto the parent would be a SECOND record of the same
+	// execution, so any consumer summing filled_quantity would double it.
+	if st.GetStatus() == orderpb.OrderStatus_ORDER_STATUS_FILLED {
+		t.Error("the parent is marked FILLED — it has no fills of its own, and a consumer summing " +
+			"filled quantities across orders would now report the fund as having traded twice " +
+			"what it traded")
+	}
+	if q := dec.FromProto(st.GetFilledQuantity()); q.Sign() != 0 {
+		t.Errorf("the parent reports filled_quantity %s — its children already reported those "+
+			"fills, so this is a duplicate record of the same execution", q.FloatString(12))
+	}
+
+	// AND IT IS ANNOUNCED. A terminal state nothing published leaves every
+	// downstream projection showing the order live forever.
+	if !contains(fb.types(), EventTypeExpired) {
+		t.Errorf("no terminal FACT for the retired parent: %v — the store says finished and every "+
+			"projection still says working", fb.types())
+	}
+}
+
+// A PARENT IS NOT RETIRED WHILE A CHILD IS STILL WORKING.
+//
+// "Sent" is not "done". A terminal parent is skipped by resume() and both sweeps
+// forever after, so retiring early would stop anything from ever revisiting this
+// order — while a slice of it is still live and still fillable at an exchange.
+func TestScheduleE2E_AParentIsNotRetiredWhileAChildIsStillWorking(t *testing.T) {
+	at := schedStart.Add(-time.Hour)
+	fb := &fakeBus{}
+	// No venue, so every child RESTS at PENDING_NEW rather than filling.
+	svc, store := newServiceNoVenue(t, fb)
+	svc.now = func() time.Time { return at }
+
+	if err := svc.Handle(testCtx(), submitEnv(), mustMarshal(t, scheduledOrder("p1", 6, nil))); err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	at = schedEnd.Add(time.Minute)
+	if n, err := svc.DriveSchedules(driveCtx()); err != nil || n != 6 {
+		t.Fatalf("precondition: created %d children (err %v), want 6", n, err)
+	}
+	// Every slice has been SENT, and every one is still working.
+	if _, err := svc.DriveSchedules(driveCtx()); err != nil {
+		t.Fatalf("DriveSchedules: %v", err)
+	}
+
+	st, _, err := store.Load(context.Background(), "p1")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if IsTerminal(st) {
+		t.Fatalf("the parent was retired to %s while all six of its children are still working at "+
+			"a venue — a terminal parent is skipped by resume() and both sweeps forever after, so "+
+			"nothing will revisit this order while its slices go on filling", st.GetStatus())
+	}
+}
+
+// A PARENT WITH A HOLE IS NOT RETIRED. A count of children cannot tell a hole
+// from a short tail; retiring on one would abandon the missing slice's quantity
+// permanently, with the parent reported finished.
+func TestScheduleE2E_AParentWithAMissingSliceIsNotRetired(t *testing.T) {
+	at := schedStart.Add(-time.Hour)
+	fb := &fakeBus{}
+	svc, store := scheduledService(t, fb, &at)
+
+	if err := svc.Handle(testCtx(), submitEnv(), mustMarshal(t, scheduledOrder("p1", 6, nil))); err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	// Only the first three slices are due, so 3, 4 and 5 do not exist yet — which
+	// is the same shape as a hole from this decision's point of view.
+	at = schedStart.Add(25 * time.Minute)
+	if n, err := svc.DriveSchedules(driveCtx()); err != nil || n != 3 {
+		t.Fatalf("precondition: created %d children (err %v), want 3", n, err)
+	}
+	if _, err := svc.DriveSchedules(driveCtx()); err != nil {
+		t.Fatalf("DriveSchedules: %v", err)
+	}
+	st, _, _ := store.Load(context.Background(), "p1")
+	if IsTerminal(st) {
+		t.Fatalf("a parent with three of six slices sent was retired to %s — the remaining "+
+			"quantity is abandoned and the order reads as finished", st.GetStatus())
+	}
+}
+
 // ===== (c) CANCELLATION =====
 
 // A CANCELLED PARENT CANCELS EVERY UNSENT CHILD — #435's own assertion, wired.
