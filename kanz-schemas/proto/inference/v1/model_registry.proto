@@ -1,0 +1,119 @@
+syntax = "proto3";
+
+// The model registry's append log (DEBT-02b, #112).
+//
+// # Why this exists
+//
+// Both sides of the coordination plane had an event type and neither could read
+// the other's. kanz-py's RegistryEvent serialized itself to JSON; Go's
+// registry.Event was a struct with no wire form at all; and the RegistryPublisher
+// that was supposed to join them was a Protocol with no implementation. So the
+// registry that "converges across replicas" converged across replicas written in
+// one language, of which there was one.
+//
+// This is the contract that lets a model registered by the Python inference
+// fleet be seen by the Go services that consume its predictions — which is the
+// whole point of a shared registry, and the reason the package was not deleted.
+//
+// # It is published on platform.model, not inference.model
+//
+// The subject namespace and the proto package are independent here, and the
+// precedent is platform.authz.decision carrying an observation.v1.DecisionLog.
+// platform.> is the estate's long-retention stream (168h) and this log is the
+// SOURCE OF TRUTH a starting replica replays from offset 0 to rebuild its
+// registry — the local Registry is the materialized cache. inference.> is a
+// 24h-retention stream of scored predictions, which is the opposite lifetime.
+//
+// # Keyed by model_id
+//
+// A model's record_validation and its primary register must stay in
+// per-partition order, or a replica applies the promotion before the validation
+// and the MLOPS-01a gate refuses it — a divergence that appears on some replicas
+// and not others, depending on partition timing.
+package inference.v1;
+
+import "google/protobuf/timestamp.proto";
+
+// ModelRegistryOp discriminates the mutation.
+enum ModelRegistryOp {
+  MODEL_REGISTRY_OP_UNSPECIFIED = 0;
+  // REGISTER adds or re-roles a model. It carries the metadata and the role.
+  MODEL_REGISTRY_OP_REGISTER = 1;
+  // UNREGISTER removes a model from the serving set.
+  MODEL_REGISTRY_OP_UNREGISTER = 2;
+  // RECORD_VALIDATION files the evidence the MLOPS-01a gate reads before it
+  // will allow a promotion to PRIMARY.
+  MODEL_REGISTRY_OP_RECORD_VALIDATION = 3;
+}
+
+// ModelRole is what a model is permitted to do.
+enum ModelRole {
+  MODEL_ROLE_UNSPECIFIED = 0;
+  // CANDIDATE is registered and NOT serving. It is the only role a model may
+  // hold without a passing validation on record.
+  MODEL_ROLE_CANDIDATE = 1;
+  // PRIMARY serves. The gate refuses this role without a current passing
+  // validation, on every replica, which is why the ordering note above matters.
+  MODEL_ROLE_PRIMARY = 2;
+}
+
+// ModelRegistryEvent is one mutation of the registry, applied by every replica.
+//
+// IT CARRIES METADATA, NOT A MODEL. A model is a live object holding weights and
+// is not serializable; each replica rematerializes it locally through its own
+// loader. So the wire stays small and, more importantly, language-agnostic —
+// which is the property that was missing.
+message ModelRegistryEvent {
+  // op is the mutation. Required.
+  ModelRegistryOp op = 1;
+
+  // origin is the replica that produced this event.
+  //
+  // A replica SKIPS APPLYING ITS OWN events: it already did the work locally,
+  // and re-applying would run the validation gate a second time against state
+  // that has already moved. It is not an optimisation — a double-apply of a
+  // promotion is how a registry disagrees with itself.
+  string origin = 2;
+
+  // model_id identifies the model, and is the PARTITION KEY. Required.
+  string model_id = 3;
+
+  // feature_set_ref is the feature contract this model was trained against.
+  //
+  // RESOLUTION IS BY THIS FIELD AND NEVER BY NAME (#492). Asking for a model by
+  // name returns whatever is registered under it, which may have been retrained
+  // against a different contract since the caller was written — a well-formed
+  // vector, a confident score, and a model reading columns that mean something
+  // else. An EMPTY value matches nothing rather than acting as a wildcard,
+  // because empty is what a model registered before the field existed carries.
+  string feature_set_ref = 4;
+
+  // confidence_threshold is the score below which the caller should not act.
+  double confidence_threshold = 5;
+
+  // artifact_uri is where the weights live, for the loader to fetch.
+  string artifact_uri = 6;
+
+  // role is the role a REGISTER is asking for. Ignored by the other ops.
+  ModelRole role = 7;
+
+  // --- RECORD_VALIDATION ---
+
+  // validated_at is when the validation ran. Required for RECORD_VALIDATION.
+  google.protobuf.Timestamp validated_at = 8;
+
+  // expires_at bounds the validation's currency.
+  //
+  // SR 11-7 is about CURRENT validation rather than a one-time sign-off, so an
+  // absent expiry is not "valid forever" — a consumer that reads it that way
+  // has removed the only thing that makes the gate mean anything over time.
+  google.protobuf.Timestamp expires_at = 9;
+
+  // passed is the verdict. A FAILING validation is still published: it is
+  // evidence that the model was graded and did not pass, and dropping it would
+  // make "failed" and "never validated" the same observable state.
+  bool passed = 10;
+
+  // report_uri points at the validation report the verdict came from.
+  string report_uri = 11;
+}

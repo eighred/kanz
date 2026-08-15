@@ -103,6 +103,9 @@ data:
     # PRICING-OVERSIGHT OVERRIDES (#410). Mirrors topics-job.yaml exactly, which
     # TestTenantTopicTableMatchesTheSystemTable compares column by column.
     data.exception             3   delete   2592000000  yes
+    # The model registry's append log (#112). Mirrors topics-job.yaml exactly,
+    # which TestTenantTopicTableMatchesTheSystemTable compares column by column.
+    platform.model             3   delete   -1          yes
     market.book                12  delete   604800000   yes
     market.crypto              12  delete   604800000   yes
     EOF

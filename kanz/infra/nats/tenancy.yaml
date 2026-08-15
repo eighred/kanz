@@ -403,7 +403,30 @@ data:
           # surfaces to the broker rather than being republished.
           { user: "spiffe://kanz.internal/ns/kanz-services/sa/inference"
             permissions: {
-              publish: { allow: ["inference.prediction.scored", "$JS.API.>", "$JS.ACK.>"] }
+              publish: {
+                allow: [
+                  "inference.prediction.scored",
+                  # THE MODEL REGISTRY'S APPEND LOG (#112). kanz-py's
+                  # BusRegistryPublisher writes every register / unregister /
+                  # record_validation here, and it is the source of truth a
+                  # replica replays from offset 0 to rebuild.
+                  #
+                  # WITHOUT THIS GRANT the service authenticates fine and is
+                  # DENIED at publish time — which reads as a broken feature
+                  # rather than a missing permission. No Go guard could have
+                  # caught it: they all key on services/ packages and this
+                  # service is Python. test/arch's new
+                  # TestPythonPublishedSubjectsAreGranted now does.
+                  "platform.model.registered",
+                  "dlq.platform.model.registered",
+                  "$JS.API.>", "$JS.ACK.>",
+                ]
+              }
+              # SUBSCRIBE TO platform.model IS DELIBERATELY NOT HERE YET. Every
+              # replica is meant to consume the log to converge, but no consumer
+              # is wired on either side (#112 step 3) — and a grant for a
+              # consumer that does not exist is a permission nobody can point at
+              # a caller for. It lands with the consumer.
               subscribe: { allow: ["inference.feature.computed", "_INBOX.>"] }
             }
           }

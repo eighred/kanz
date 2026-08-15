@@ -118,6 +118,24 @@ data:
     # only the most recent override of each break and silently delete the
     # earlier ones — which are exactly the ones a reviewer is looking for.
     data.exception             3   delete   2592000000  yes
+    # THE MODEL REGISTRY'S APPEND LOG (DEBT-02b, #112). It was removed from this
+    # table when the cleanup found "NOT ONE of which is published by any
+    # service" — correctly, at the time. kanz-py's BusRegistryPublisher now
+    # publishes it, so the reason for its absence has gone.
+    #
+    # INFINITE RETENTION, AND NOT COMPACTED. Both halves matter and they pull in
+    # opposite directions from the compacted state topics above.
+    #
+    # A starting replica REPLAYS THIS FROM OFFSET 0 to rebuild its registry — the
+    # topic is the source of truth and the local Registry is the materialized
+    # cache — so an event that ages out is a model the fleet silently forgets.
+    #
+    # And compaction keyed by model_id would keep only the LATEST event per
+    # model, which is exactly wrong here: a record_validation must be applied
+    # BEFORE the primary register that depends on it, and compaction would
+    # discard the validation and keep the promotion. Every replica would then
+    # rebuild into a state the MLOPS-01a gate refuses to reach.
+    platform.model             3   delete   -1          yes
 
     # MARKET. Provisioned but NOT ARCHIVED by DATA-M1 (see the spec's scope): ticks
     # are the highest-volume streams by far and are re-fetchable from the venue,
