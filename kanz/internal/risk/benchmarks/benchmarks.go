@@ -180,6 +180,8 @@ func Reports(now time.Time, signer validation.Signer) ([]validation.Report, erro
 	}{
 		{AnalyticBlackScholes, BlackScholes()},
 		{AnalyticBinomial, Binomial()},
+		{AnalyticVaRBacktest, VaRBacktest()},
+		{AnalyticBondAnalytics, BondAnalytics()},
 	}
 	out := make([]validation.Report, 0, len(sets))
 	for _, s := range sets {
@@ -216,6 +218,12 @@ func Inventory() []string {
 	return []string{
 		AnalyticBlackScholes,
 		AnalyticBinomial,
+		AnalyticVaRBacktest,
+		AnalyticBondAnalytics,
+		// value_at_risk IS NOT var_backtest, and listing both is the point.
+		// Validating the exception test says nothing about whether the
+		// historical-simulation quantile is right; collapsing them would let one
+		// benchmark set mark two analytics green.
 		"value_at_risk",      // internal/risk/compute/var
 		"expected_shortfall", // internal/risk/compute/var
 		"greeks_finite_diff", // internal/risk/compute/greeks.go

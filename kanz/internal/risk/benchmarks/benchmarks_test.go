@@ -42,8 +42,8 @@ func TestReportsSatisfyTheGate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Reports: %v", err)
 	}
-	if len(reports) < 2 {
-		t.Fatalf("got %d reports, want at least the two analytics this package covers", len(reports))
+	if len(reports) < 4 {
+		t.Fatalf("got %d reports, want one per analytic this package covers (4)", len(reports))
 	}
 
 	g := validation.NewGate(func() time.Time { return now })
@@ -98,6 +98,37 @@ func TestReportsExpire(t *testing.T) {
 		if err := g.Promote(r.Analytic); err == nil {
 			t.Errorf("%s: a validation older than its validity still promoted — a stale "+
 				"sign-off is what SR 11-7's currency requirement exists to refuse", r.Analytic)
+		}
+	}
+}
+
+// THE VaR BACKTEST REPRODUCES THE BASEL TABLE AND THE PUBLISHED THRESHOLD.
+//
+// If this fails, the traffic light a supervisor reads is wrong, or the Kupiec
+// decision boundary has moved off the chi-squared critical value — either of
+// which changes a pass into a fail, or worse, a fail into a pass.
+func TestVaRBacktestReproducesItsPublishedBenchmarks(t *testing.T) {
+	cases := benchmarks.VaRBacktest()
+	if len(cases) < 10 {
+		t.Fatalf("only %d backtest cases were built — the fixtures are erroring out silently, and "+
+			"a benchmark set that shrinks passes more easily", len(cases))
+	}
+	for _, c := range cases {
+		if !c.Passed() {
+			t.Errorf("%s: got %.6f, want %.6f ± %g", c.Name, c.Got, c.Want, c.Tolerance)
+		}
+	}
+}
+
+// THE BOND ANALYTICS REPRODUCE THEIR CLOSED FORMS.
+func TestBondAnalyticsReproduceItsPublishedBenchmarks(t *testing.T) {
+	cases := benchmarks.BondAnalytics()
+	if len(cases) < 8 {
+		t.Fatalf("only %d bond cases were built, want at least 8", len(cases))
+	}
+	for _, c := range cases {
+		if !c.Passed() {
+			t.Errorf("%s: got %.10f, want %.10f ± %g", c.Name, c.Got, c.Want, c.Tolerance)
 		}
 	}
 }
