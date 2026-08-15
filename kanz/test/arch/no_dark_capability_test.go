@@ -83,6 +83,14 @@ var darkPackageExempt = map[string]string{
 		"kanz_risk_calibration_scheduled{kind=\"credit\"} reports 0 so the gap is visible.",
 	"internal/risk/termsource": "#345 — the contract-terms store and TermsProvider the vol " +
 		"calibration needs. Nothing joins quotes to terms yet, so nothing constructs a term source.",
+	"internal/marketdata/indicator": "#416 C2 — the technical-indicator library the retired " +
+		"alpha house rule depends on. It is dark for ONE STEP and the consumer is named: C2's first " +
+		"alpha.Engine, which needs the score contract (P(return >= X%% within horizon H) plus a " +
+		"calibration test) that C1 deliberately does not decide. WIRING IT INTO dataset.Materializer " +
+		"WOULD NOT MAKE IT LIVE and is the obvious wrong fix: Materializer is the declared consumer " +
+		"of the FeatureSource seam this implements, and it has zero production callers of its own " +
+		"(#509's finding, one tree over) — so the import would satisfy this guard while changing " +
+		"nothing about whether an indicator reaches a decision.",
 	"internal/regulatory/stress": "#471 (Source section) — the REG-01c CCAR/DFAST firmwide stress " +
 		"framework, in the same unwired state as the validation gate and recorded there rather " +
 		"than filed separately. Worth its own issue if it is picked up independently.",
