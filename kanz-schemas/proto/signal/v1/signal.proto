@@ -25,6 +25,7 @@ syntax = "proto3";
 // moves capital. CODEOWNERS: @eighred/execution.
 package signal.v1;
 
+import "google/protobuf/duration.proto";
 import "google/protobuf/timestamp.proto";
 import "common/v1/decimal.proto";
 
@@ -150,4 +151,56 @@ message StrategySignal {
   // forward; a zero value (UNSPECIFIED) is read as TRADINGVIEW_WEBHOOK for
   // backward compatibility with signals recorded before this field existed.
   SignalSource source = 13;
+
+  // alpha_score is the strategy's stated confidence AND THE CLAIM IT IS ABOUT
+  // (#416 C2). Optional: a signal may be a rule with no probabilistic claim, and
+  // a CLOSE that flattens a position is not a forecast.
+  //
+  // RECORDING IT ON THE FACT IS WHAT MAKES IT FALSIFIABLE. A score that lives
+  // only inside the engine can never be scored against what happened, so nobody
+  // can say whether a given 0.7 was right — which is the whole objection to "9.8
+  // out of 10". Persisted here, beside the instrument and the receipt time, a
+  // calibration run is a join against realized returns rather than a rebuild of
+  // history.
+  AlphaScore alpha_score = 14;
+}
+
+// AlphaScore is a probability WITH THE CLAIM IT IS THE PROBABILITY OF.
+//
+// # Why the claim travels with the number
+//
+// "Confidence 0.8" is unfalsifiable: nobody can say whether a given 0.8 was
+// right, so it cannot be backtested, attributed, or debugged when it loses
+// money. A probability is only meaningful against a stated event, so this message
+// carries the event — return >= return_threshold within horizon — and the model
+// that made the claim.
+//
+// # The asymmetry between the two numeric fields is deliberate
+//
+// probability is a double because it is an ESTIMATE: nothing groups by its exact
+// value, and float64 is the working shape of every calibration statistic
+// computed from it.
+//
+// return_threshold is a common.v1.Decimal because it is an IDENTITY: calibration
+// buckets scores by the claim they make, and two thresholds that differ in the
+// last bits of a float are two buckets where there should be one. It is a
+// fraction, not a percentage — 0.005 is "up 0.5%".
+message AlphaScore {
+  // probability that the claim below holds, in [0,1]. A value outside that range
+  // is not a strong opinion; it is a defect, and a consumer must refuse it rather
+  // than clamp — clamping turns a broken model into a maximally confident one.
+  double probability = 1;
+
+  // return_threshold is the X in "return >= X", as a fraction of the current
+  // price. Required: without it the probability states nothing.
+  common.v1.Decimal return_threshold = 2;
+
+  // horizon is the H in "within H". Required, for the same reason: P(up 0.5%) is
+  // near 1 over a year and near 0.5 over a second.
+  google.protobuf.Duration horizon = 3;
+
+  // model_id identifies the model AND ITS VERSION, because calibration is a
+  // property of a version rather than of a name. A retrained model that inherits
+  // its predecessor's calibration record is claiming evidence it does not have.
+  string model_id = 4;
 }

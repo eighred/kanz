@@ -66,6 +66,8 @@ import (
 
 	orderpb "github.com/eighred/kanz/kanz-schemas-go/order/v1"
 	signalpb "github.com/eighred/kanz/kanz-schemas-go/signal/v1"
+
+	"github.com/eighred/kanz/internal/alpha/score"
 )
 
 // Level is one aggregated L2 price level. Exact — no float ever touches depth a
@@ -143,6 +145,19 @@ type Intent struct {
 	// Zero ⇒ DAY, which is correct for a directional signal and WRONG for an arb
 	// leg — an arbitrage engine must set this explicitly.
 	TimeInForce orderpb.TimeInForce
+
+	// Score is the engine's probabilistic claim about this intent (#416 C2).
+	//
+	// OPTIONAL, because a CLOSE that flattens a position forecasts nothing and a
+	// pure rule may make no probabilistic claim. What it may not be is a bare
+	// confidence: score.Score's fields are unexported and score.New refuses a
+	// claim with no threshold, horizon or model, so an engine cannot emit "0.8"
+	// and leave what it is 0.8 OF to the reader.
+	//
+	// It rides onto the StrategySignal FACT, which is what makes it falsifiable
+	// later — a probability that never leaves the engine can never be scored
+	// against what happened.
+	Score *score.Score
 
 	// Nonce makes the derived signal_id deterministic and unique per decision. Two
 	// ticks that produce the same nonce dedup to one signal and one fan-out rather
