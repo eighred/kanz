@@ -92,10 +92,23 @@ func (v *BinanceVenue) Instruments() []InstrumentSymbol {
 // OrderTypes declares what this connector can translate for binance, which the OMS
 // reads through Describe and enforces at ADMISSION (#405).
 //
-// SPOT MARKET AND LIMIT, deliberately the exact set the switch in Place accepts
-// — STOP and STOP_LIMIT are in order.v1's enum and are not implemented here yet.
-// Declaring them would restore the defect this exists to remove: an order the
-// OMS admits, stores and announces, that no exchange ever sees.
+// ALL FOUR SPOT ORDER TYPES, deliberately the exact set the switch in
+// orderParams accepts (#405).
+//
+// STOP and STOP_LIMIT joined MARKET and LIMIT once OrderState carried
+// stop_price: the trigger was validated at admission and then discarded, so
+// there was nothing for this connector to send and declaring the capability
+// would have been a lie. They map to Binance STOP_LOSS and STOP_LOSS_LIMIT on
+// the SAME endpoint as the other two, so cancel, query and reconciliation —
+// which all address an order by our deterministic clientOrderId — are unchanged
+// by this.
+//
+// WHAT IS NOT EXPRESSIBLE, said here because the absence is otherwise invisible:
+// Binance's TAKE_PROFIT / TAKE_PROFIT_LIMIT are the mirror instruction — trigger
+// when the price moves IN FAVOUR — and order.v1 has no order type for them. A
+// stop is never silently mapped to one. Binance itself refuses a stop whose
+// trigger sits on the wrong side of the market, which is the loud failure that
+// case deserves.
 //
 // KEEP THIS IN STEP WITH THAT SWITCH. TestDeclaredOrderTypesMatchTranslation
 // walks the whole enum and fails if the two ever disagree, in either direction.
@@ -103,6 +116,8 @@ func (v *BinanceVenue) OrderTypes() []orderpb.OrderType {
 	return []orderpb.OrderType{
 		orderpb.OrderType_ORDER_TYPE_MARKET,
 		orderpb.OrderType_ORDER_TYPE_LIMIT,
+		orderpb.OrderType_ORDER_TYPE_STOP,
+		orderpb.OrderType_ORDER_TYPE_STOP_LIMIT,
 	}
 }
 
@@ -193,15 +208,93 @@ func orderParams(st *orderpb.OrderState, symbol string) (url.Values, error) {
 		if dec.IsZero(st.GetLimitPrice()) {
 			return nil, errors.New("binance: limit order requires a positive limit price")
 		}
+		tif, err := binanceTimeInForce(st.GetTimeInForce())
+		if err != nil {
+			return nil, err
+		}
 		p.Set("type", "LIMIT")
-		p.Set("timeInForce", "GTC")
+		p.Set("timeInForce", tif)
 		p.Set("price", formatDec(st.GetLimitPrice()))
+	case orderpb.OrderType_ORDER_TYPE_STOP:
+		// STOP_LOSS: becomes a MARKET order once stopPrice trades, which is what
+		// order.v1's ORDER_TYPE_STOP means. No price, no timeInForce — Binance
+		// rejects both on this type.
+		if dec.IsZero(st.GetStopPrice()) {
+			return nil, errors.New("binance: stop order requires a positive stop price")
+		}
+		p.Set("type", "STOP_LOSS")
+		p.Set("stopPrice", formatDec(st.GetStopPrice()))
+	case orderpb.OrderType_ORDER_TYPE_STOP_LIMIT:
+		// STOP_LOSS_LIMIT: becomes a LIMIT order at price once stopPrice trades.
+		if dec.IsZero(st.GetStopPrice()) {
+			return nil, errors.New("binance: stop-limit order requires a positive stop price")
+		}
+		if dec.IsZero(st.GetLimitPrice()) {
+			return nil, errors.New("binance: stop-limit order requires a positive limit price")
+		}
+		tif, err := binanceTimeInForce(st.GetTimeInForce())
+		if err != nil {
+			return nil, err
+		}
+		p.Set("type", "STOP_LOSS_LIMIT")
+		p.Set("stopPrice", formatDec(st.GetStopPrice()))
+		p.Set("price", formatDec(st.GetLimitPrice()))
+		p.Set("timeInForce", tif)
 	default:
-		// Spot-first: STOP/STOP_LIMIT map to Binance STOP_LOSS_LIMIT later; a
-		// perps structural layout follows. Reject cleanly for now.
-		return nil, fmt.Errorf("binance: unsupported order type %v (spot MARKET/LIMIT only)", st.GetOrderType())
+		return nil, fmt.Errorf("binance: unsupported order type %v", st.GetOrderType())
 	}
 	return p, nil
+}
+
+// binanceTimeInForce maps order.v1.TimeInForce onto Binance Spot's, and REFUSES
+// the ones it cannot express.
+//
+// # The silent substitution this replaces (#405 family)
+//
+// Every LIMIT order this connector has ever placed was sent with a hard-coded
+// timeInForce=GTC, whatever the trader asked for. That is the fourth instance of
+// the defect #240 and #405 document — "a field the perimeter accepts and the wire
+// never carries" — and it is the worst of the four, because the other three
+// produced an order that did nothing while this one produces an order that does
+// the WRONG THING:
+//
+//   - IOC means "fill what is available right now and cancel the rest". Sent as
+//     GTC it RESTS at the exchange instead, so a trader who asked not to hold
+//     exposure is holding it, indefinitely, and nothing anywhere says so.
+//   - FOK means "fill all of it or none". Sent as GTC it can rest partially
+//     filled — the single outcome that instruction exists to forbid.
+//
+// # DAY and GTD are refused rather than approximated
+//
+// Binance Spot has no session concept, so DAY has no meaning there, and it has no
+// good-til-date parameter at all. Both are REFUSED here.
+//
+// A refusal at the connector is not where this belongs — it is an order the OMS
+// admitted, stored and announced, which is exactly the shape #405 exists to end,
+// one field over. Admission gates on order TYPE (the venue declares what it can
+// place, via OrderTypeDeclarer) and has no equivalent for time-in-force. That gap
+// is filed; until it closes, refusing loudly here is strictly better than the
+// silent substitution above, because a wrong instruction that executes is worse
+// than a right one that does not.
+func binanceTimeInForce(tif orderpb.TimeInForce) (string, error) {
+	switch tif {
+	case orderpb.TimeInForce_TIME_IN_FORCE_GTC,
+		// UNSPECIFIED is treated as GTC deliberately, and only here. Admission
+		// requires time_in_force, so an order reaching this connector without one
+		// came from a path that predates that rule; GTC is what such an order was
+		// already being sent as, so this is the one substitution that changes no
+		// existing behaviour.
+		orderpb.TimeInForce_TIME_IN_FORCE_UNSPECIFIED:
+		return "GTC", nil
+	case orderpb.TimeInForce_TIME_IN_FORCE_IOC:
+		return "IOC", nil
+	case orderpb.TimeInForce_TIME_IN_FORCE_FOK:
+		return "FOK", nil
+	default:
+		return "", fmt.Errorf("binance: spot cannot express time-in-force %v — it has no trading "+
+			"session (DAY) and no good-til-date parameter (GTD); placing this as GTC would rest "+
+			"an order the trader asked to expire", tif)
+	}
 }
 
 // fills converts a Binance order response's fills into order.v1.Fills.

@@ -79,3 +79,84 @@ func TestDeclaredOrderTypesMatchTranslation(t *testing.T) {
 var _ execution.OrderTypeDeclarer = (*OKXVenue)(nil)
 
 var _ protoreflect.Enum = orderpb.OrderType(0)
+
+// ===== TIME-IN-FORCE IS NOT SILENTLY REPLACED (#405 family) =====
+//
+// OKX carries time-in-force in ordType itself. This connector sent "limit" for
+// every priced order whatever the trader asked for — which is worse than the
+// three earlier instances of this defect family, because those produced an order
+// that did NOTHING while this one produces an order that does the WRONG THING.
+
+func tifProbe(tif orderpb.TimeInForce) *orderpb.OrderState {
+	return &orderpb.OrderState{
+		OrderId:         "o1",
+		InstrumentId:    "BTC-USD",
+		Side:            orderpb.Side_SIDE_SELL,
+		OrderType:       orderpb.OrderType_ORDER_TYPE_LIMIT,
+		OrderedQuantity: dec.ToProto(dec.Rat("1.5")),
+		LimitPrice:      dec.ToProto(dec.Rat("30000")),
+		TimeInForce:     tif,
+	}
+}
+
+func TestOKXOrderBody_TimeInForceReachesTheExchange(t *testing.T) {
+	tests := []struct {
+		tif  orderpb.TimeInForce
+		want string
+		harm string
+	}{
+		{orderpb.TimeInForce_TIME_IN_FORCE_GTC, "limit", ""},
+		{
+			orderpb.TimeInForce_TIME_IN_FORCE_IOC, "ioc",
+			"an IOC sent as a resting limit stays at the exchange: the trader asked to hold no " +
+				"exposure and is holding it",
+		},
+		{
+			orderpb.TimeInForce_TIME_IN_FORCE_FOK, "fok",
+			"a FOK sent as a resting limit can rest PARTIALLY FILLED, which is the one outcome " +
+				"that instruction exists to forbid",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.want, func(t *testing.T) {
+			body, err := okxOrderBody(tifProbe(tt.tif), "BTC-USDT")
+			if err != nil {
+				t.Fatalf("okxOrderBody: %v", err)
+			}
+			if got := body["ordType"]; got != tt.want {
+				t.Fatalf("ordType = %q, want %q — %s", got, tt.want, tt.harm)
+			}
+			if body["px"] != "30000" {
+				t.Errorf("px = %q, want the limit price to survive the time-in-force mapping",
+					body["px"])
+			}
+		})
+	}
+}
+
+// A TIME-IN-FORCE OKX CANNOT EXPRESS IS REFUSED, not approximated.
+func TestOKXOrderBody_AnInexpressibleTimeInForceIsRefused(t *testing.T) {
+	for _, tif := range []orderpb.TimeInForce{
+		orderpb.TimeInForce_TIME_IN_FORCE_DAY,
+		orderpb.TimeInForce_TIME_IN_FORCE_GTD,
+	} {
+		if _, err := okxOrderBody(tifProbe(tif), "BTC-USDT"); err == nil {
+			t.Errorf("%v was translated — OKX spot cannot express it, and a resting limit keeps "+
+				"an order the trader asked to expire", tif)
+		}
+	}
+}
+
+// A MARKET ORDER IS UNAFFECTED. OKX market orders are inherently immediate, so a
+// time-in-force it does not use must not refuse the order.
+func TestOKXOrderBody_MarketIsUnaffectedByTimeInForce(t *testing.T) {
+	st := tifProbe(orderpb.TimeInForce_TIME_IN_FORCE_DAY)
+	st.OrderType = orderpb.OrderType_ORDER_TYPE_MARKET
+	body, err := okxOrderBody(st, "BTC-USDT")
+	if err != nil {
+		t.Fatalf("a MARKET order was refused over a time-in-force it does not use: %v", err)
+	}
+	if got := body["ordType"]; got != "market" {
+		t.Errorf("ordType = %q, want market", got)
+	}
+}

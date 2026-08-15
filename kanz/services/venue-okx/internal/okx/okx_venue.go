@@ -188,7 +188,11 @@ func okxOrderBody(st *orderpb.OrderState, instID string) (map[string]string, err
 		if dec.IsZero(st.GetLimitPrice()) {
 			return nil, errors.New("okx: limit order requires a positive limit price")
 		}
-		body["ordType"] = "limit"
+		ordType, terr := okxLimitOrdType(st.GetTimeInForce())
+		if terr != nil {
+			return nil, terr
+		}
+		body["ordType"] = ordType
 		body["px"] = FormatDec(st.GetLimitPrice())
 	default:
 		return nil, fmt.Errorf("okx: unsupported order type %v (spot market/limit only)", st.GetOrderType())
@@ -266,5 +270,45 @@ func okxSide(s orderpb.Side) (string, error) {
 		return "sell", nil
 	default:
 		return "", fmt.Errorf("okx: invalid side %v", s)
+	}
+}
+
+// okxLimitOrdType maps order.v1.TimeInForce onto OKX's ordType for a priced
+// order, and REFUSES the ones it cannot express.
+//
+// OKX CARRIES TIME-IN-FORCE IN ordType ITSELF rather than a separate parameter:
+// "limit" rests (good-til-cancelled), "ioc" fills what is available and cancels
+// the rest, "fok" fills entirely or not at all. Different spelling from Binance,
+// identical defect underneath — this connector sent "limit" for every priced
+// order whatever the trader asked for.
+//
+// THAT IS THE FOURTH INSTANCE OF #240/#405's DEFECT FAMILY and the worst of them.
+// The earlier three produced an order that did NOTHING; this one produces an
+// order that does the WRONG THING. An IOC sent as a resting limit stays at the
+// exchange, so a trader who asked to hold no exposure is holding it, and a FOK
+// can rest PARTIALLY FILLED — the one outcome that instruction exists to forbid.
+//
+// DAY and GTD are refused rather than approximated: OKX spot has no trading
+// session and no good-til-date parameter on this endpoint, and resting an order
+// somebody asked to expire is the same silent substitution one value over. The
+// refusal lands after admission, which is #405's shape and is tracked; it is
+// still strictly better than executing the wrong instruction.
+func okxLimitOrdType(tif orderpb.TimeInForce) (string, error) {
+	switch tif {
+	case orderpb.TimeInForce_TIME_IN_FORCE_GTC,
+		// UNSPECIFIED is treated as GTC deliberately, and only here: admission
+		// requires a time-in-force, so an order arriving without one predates that
+		// rule and was already being sent as a resting limit. This substitution
+		// changes no existing behaviour.
+		orderpb.TimeInForce_TIME_IN_FORCE_UNSPECIFIED:
+		return "limit", nil
+	case orderpb.TimeInForce_TIME_IN_FORCE_IOC:
+		return "ioc", nil
+	case orderpb.TimeInForce_TIME_IN_FORCE_FOK:
+		return "fok", nil
+	default:
+		return "", fmt.Errorf("okx: spot cannot express time-in-force %v — it has no trading "+
+			"session (DAY) and no good-til-date parameter (GTD); placing this as a resting limit "+
+			"would keep an order the trader asked to expire", tif)
 	}
 }

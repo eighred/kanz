@@ -2,6 +2,7 @@ package execution
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -376,4 +377,132 @@ func summaryOf(t *testing.T, v *VenueCosts, venue string) *VenueCostSummary {
 		}
 	}
 	return nil
+}
+
+// ===== AN UNTARGETED ORDER GOES WHERE IT CAN ACTUALLY BE PLACED (#405) =====
+//
+// Admission refuses a TARGETED order whose named venue cannot place its type. An
+// untargeted one had no such check: cost ranking and the declared default both
+// choose a destination without asking whether the order can be placed there at
+// all. In a two-venue deployment where only one supports stops, a stop-loss was
+// admitted, stored, announced — and then routed, half the time, to the adapter
+// that refuses it.
+
+// typed wraps a venue with a declared order-type set, as the real connectors do.
+func typed(mic string, types ...orderpb.OrderType) Venue {
+	return WithOrderTypes(NewSimVenue(mic), types)
+}
+
+var spotOnly = []orderpb.OrderType{
+	orderpb.OrderType_ORDER_TYPE_MARKET,
+	orderpb.OrderType_ORDER_TYPE_LIMIT,
+}
+
+var withStops = []orderpb.OrderType{
+	orderpb.OrderType_ORDER_TYPE_MARKET,
+	orderpb.OrderType_ORDER_TYPE_LIMIT,
+	orderpb.OrderType_ORDER_TYPE_STOP,
+	orderpb.OrderType_ORDER_TYPE_STOP_LIMIT,
+}
+
+func TestRouter_AnUntargetedStopGoesToTheVenueThatCanPlaceIt(t *testing.T) {
+	// The DEFAULT cannot place a stop; the other venue can. There is no choice
+	// left to make, so the order belongs there rather than being refused.
+	r := NewRouter(
+		[]Venue{typed("OKX", spotOnly...), typed("BINANCE", withStops...)},
+		WithDefaultVenue("OKX"),
+	)
+
+	v, err := r.Route(&orderpb.OrderState{OrderType: orderpb.OrderType_ORDER_TYPE_STOP})
+	if err != nil {
+		t.Fatalf("Route: %v", err)
+	}
+	if v.MIC() != "BINANCE" {
+		t.Fatalf("routed a stop to %q, which cannot place one — it would be admitted, stored, "+
+			"announced, and then refused at the exchange, which is the defect #405 exists to end",
+			v.MIC())
+	}
+	// AND AN ORDINARY ORDER STILL GOES TO THE DECLARED DEFAULT. A filter that
+	// changed untargeted routing for types every venue supports would be a
+	// behaviour change wearing a bug fix's name.
+	v, err = r.Route(&orderpb.OrderState{OrderType: orderpb.OrderType_ORDER_TYPE_LIMIT})
+	if err != nil {
+		t.Fatalf("Route: %v", err)
+	}
+	if v.MIC() != "OKX" {
+		t.Errorf("an ordinary limit went to %q, want the declared default OKX", v.MIC())
+	}
+}
+
+// THE COST RANKER IS ONLY OFFERED VENUES THAT CAN PLACE THE ORDER. Otherwise the
+// cheapest venue wins a stop it cannot express.
+func TestRouter_RankingNeverPrefersAVenueThatCannotPlaceTheType(t *testing.T) {
+	costs := costsAt(t, costNow)
+	observeN(costs, "OKX", 1, 5)       // by far the cheapest…
+	observeN(costs, "BINANCE", 400, 5) // …and ruinous
+
+	r := NewRouter(
+		[]Venue{typed("OKX", spotOnly...), typed("BINANCE", withStops...)},
+		WithDefaultVenue("BINANCE"), WithCostRanker(costs),
+	)
+
+	v, err := r.Route(&orderpb.OrderState{OrderType: orderpb.OrderType_ORDER_TYPE_STOP_LIMIT})
+	if err != nil {
+		t.Fatalf("Route: %v", err)
+	}
+	if v.MIC() != "BINANCE" {
+		t.Fatalf("cost ranking sent a stop-limit to %q, which cannot place one — cheapest is "+
+			"not a reason to send an order somewhere it cannot go", v.MIC())
+	}
+}
+
+// NO VENUE CAN PLACE IT ⇒ A REFUSAL THAT NAMES THE TYPE, rather than routing to
+// one that will fail.
+func TestRouter_RefusesWhenNoVenueCanPlaceTheType(t *testing.T) {
+	r := NewRouter([]Venue{typed("OKX", spotOnly...)}, WithDefaultVenue("OKX"))
+
+	_, err := r.Route(&orderpb.OrderState{OrderType: orderpb.OrderType_ORDER_TYPE_STOP})
+	if err == nil {
+		t.Fatal("a stop was routed to a deployment where no venue can place one")
+	}
+	if !strings.Contains(err.Error(), "ORDER_TYPE_STOP") {
+		t.Errorf("error = %q, want it to name the type an operator has to change", err)
+	}
+}
+
+// SEVERAL COULD PLACE IT AND THE DEFAULT COULD NOT ⇒ REFUSE, rather than pick.
+// Choosing among them would be the array index #437 removed, wearing a narrower
+// disguise: the operator named a default that does not apply here, so the
+// destination is genuinely unchosen.
+func TestRouter_RefusesRatherThanPickingAmongSeveralCapableVenues(t *testing.T) {
+	r := NewRouter(
+		[]Venue{typed("OKX", spotOnly...), typed("BINANCE", withStops...), typed("KRAKEN", withStops...)},
+		WithDefaultVenue("OKX"),
+	)
+
+	_, err := r.Route(&orderpb.OrderState{OrderType: orderpb.OrderType_ORDER_TYPE_STOP})
+	if err == nil {
+		t.Fatal("the router picked among two capable venues with no stated preference — that is " +
+			"a destination chosen by slice position, which is exactly what #437 removed")
+	}
+	if !strings.Contains(err.Error(), "BINANCE") || !strings.Contains(err.Error(), "KRAKEN") {
+		t.Errorf("error = %q, want it to name the venues that CAN place it so the operator can "+
+			"choose one", err)
+	}
+}
+
+// A VENUE THAT DECLARES NOTHING IS STILL A CANDIDATE. "Did not say" is permissive
+// everywhere else in this router, and a deployment whose adapters predate the
+// declaration must keep working rather than silently losing every venue.
+func TestRouter_AnUndeclaringVenueIsStillRoutable(t *testing.T) {
+	r := NewRouter([]Venue{NewSimVenue("SIM")}, WithDefaultVenue("SIM"))
+
+	v, err := r.Route(&orderpb.OrderState{OrderType: orderpb.OrderType_ORDER_TYPE_STOP})
+	if err != nil {
+		t.Fatalf("an undeclaring venue was filtered out: %v — every deployment whose adapters "+
+			"predate the declaration would stop routing entirely", err)
+	}
+	if v.MIC() != "SIM" {
+		t.Errorf("routed to %q, want SIM", v.MIC())
+	}
 }
