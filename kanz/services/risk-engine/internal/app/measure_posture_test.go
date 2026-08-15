@@ -12,6 +12,7 @@ import (
 
 	"github.com/eighred/kanz/internal/risk/compute"
 	varmodel "github.com/eighred/kanz/internal/risk/compute/var"
+	"github.com/eighred/kanz/internal/risk/factormodel"
 	"github.com/eighred/kanz/internal/risk/pricing/curve"
 )
 
@@ -141,12 +142,16 @@ func (stubReturns) Returns(context.Context, string, time.Time, int) ([]float64, 
 func TestMeasurePosture_TheShapeRiskEngineActuallyBuilds(t *testing.T) {
 	registry := compute.DefaultRegistry()
 	varmodel.Register(context.Background(), registry, stubReturns{}, varmodel.Config{})
+	// Factor needs only the returns provider, so main registers it on the
+	// market-data gate alone — unlike FI, which additionally needs a curve.
+	compute.RegisterFactorRisk(context.Background(), registry,
+		compute.FactorProviders{Model: stubModel{}})
 
 	dark := compute.Dark(registry)
 	live := len(compute.Catalogue()) - len(dark)
 
-	if live != 8 {
-		t.Errorf("risk-engine's registry serves %d catalogued measures without calibration, not 8.\n"+
+	if live != 11 {
+		t.Errorf("risk-engine's registry serves %d catalogued measures without calibration, not 11.\n"+
 			"If a seam was WIRED, update this number and delete the matching entry from "+
 			"test/arch/no_dark_measure_seam_test.go's darkSeamExempt. If a measure was added "+
 			"without registering it, that is the gap #509 tracks and the count is correct.", live)
@@ -160,7 +165,7 @@ func TestMeasurePosture_TheShapeRiskEngineActuallyBuilds(t *testing.T) {
 		byFamily[m.Family]++
 	}
 	for _, f := range []compute.MeasureFamily{
-		compute.FamilyGreeks, compute.FamilyFactor,
+		compute.FamilyGreeks,
 		compute.FamilyLiquidity, compute.FamilyStructured, compute.FamilyXVA,
 	} {
 		if byFamily[f] == 0 {
@@ -170,7 +175,9 @@ func TestMeasurePosture_TheShapeRiskEngineActuallyBuilds(t *testing.T) {
 	}
 	// The two families that ARE served must be fully served, or the gap is not
 	// the clean family split this reports.
-	for _, f := range []compute.MeasureFamily{compute.FamilyExposure, compute.FamilyTailRisk} {
+	for _, f := range []compute.MeasureFamily{
+		compute.FamilyExposure, compute.FamilyTailRisk, compute.FamilyFactor,
+	} {
 		if byFamily[f] != 0 {
 			t.Errorf("family %q has %d dark measures — it is registered by a seam main DOES call, "+
 				"so a gap here is a measure that was added and never registered", f, byFamily[f])
@@ -200,14 +207,16 @@ func (stubCurve) Curve(context.Context, string, time.Time) (*curve.Curve, bool) 
 func TestMeasurePosture_WithCalibrationTheFixedIncomeFamilyIsServed(t *testing.T) {
 	registry := compute.DefaultRegistry()
 	varmodel.Register(context.Background(), registry, stubReturns{}, varmodel.Config{})
+	compute.RegisterFactorRisk(context.Background(), registry,
+		compute.FactorProviders{Model: stubModel{}})
 	compute.RegisterFIRisk(context.Background(), registry, compute.FIProviders{
 		Terms: stubBondTerms{}, Curve: stubCurve{},
 	})
 
 	dark := compute.Dark(registry)
 	live := len(compute.Catalogue()) - len(dark)
-	if live != 12 {
-		t.Errorf("with FI registered the engine serves %d measures, not 12 — the four FI "+
+	if live != 15 {
+		t.Errorf("with FI registered the engine serves %d measures, not 15 — the four FI "+
 			"measures are DV01, Duration, Convexity and SpreadDuration", live)
 	}
 	for _, m := range dark {
@@ -229,3 +238,9 @@ func TestMeasurePosture_WithCalibrationTheFixedIncomeFamilyIsServed(t *testing.T
 			"XVA are all still unregistered")
 	}
 }
+
+// stubModel resolves no model. What these tests grade is which measures EXIST,
+// not what they compute.
+type stubModel struct{}
+
+func (stubModel) Model(context.Context, time.Time) (*factormodel.Model, bool) { return nil, false }

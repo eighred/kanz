@@ -22,6 +22,14 @@ import (
 // measure-name constants, for MeasureFunc. The package is bright. ELEVEN OF ITS
 // SEAMS WERE DARK, and the import guard could not see it:
 //
+//	RegisterFactorRisk    FactorVaR99, SystematicRisk, SpecificRisk    WIRED 2026-08-16
+//	                      (#509). Its exemption said NewLiveModelProvider was
+//	                      "blocked on a returns/characteristics source" — wrong on
+//	                      both counts by then: the returns provider was already
+//	                      constructed at the composition root and characteristics
+//	                      are optional for a PCA fit. The real blocker was the
+//	                      estimation UNIVERSE, which nothing named, and which the
+//	                      live state store could already answer.
 //	RegisterFIRisk        DV01, Duration, Convexity, SpreadDuration   WIRED 2026-08-16
 //	                      (#509) — and its exemption said the blocker was that
 //	                      BondTerms "has NO SCHEMA AT ALL", which was wrong: the
@@ -89,8 +97,6 @@ var darkSeamExempt = map[string]string{
 		"and is itself dark for want of a live CDS quote source (#113, #203), so this cannot be wired " +
 		"to anything real without synthesising counterparty spreads — which #345 rules out " +
 		"explicitly: a SUCCESSFUL calibration of invented quotes is worse than a failed one.",
-	"internal/risk/compute.RegisterFactorRisk": "#509 — factor exposures. Needs a ModelProvider; " +
-		"NewLiveModelProvider is the production one and is itself dark (below).",
 	"internal/risk/compute.RegisterLiquidityRisk": "#509 — liquidity risk. Needs a " +
 		"liquidity.Provider (per-instrument ADV/spread) with no production implementation, plus a " +
 		"baseVaR MeasureFunc to scale.",
@@ -101,8 +107,6 @@ var darkSeamExempt = map[string]string{
 		"RegisterGreeks is blocked on.",
 	"internal/risk/compute.NewBondRevaluer": "#509 — curve-shift revaluation for bonds. Takes " +
 		"FIProviders, so it is blocked on the same missing BondTerms schema.",
-	"internal/risk/compute.NewLiveModelProvider": "#509 — the production factormodel.Providers " +
-		"adapter. Blocked on a returns/characteristics source for the factor universe.",
 	"internal/risk/scenario.EvaluateCurveShift": "#509 — needs a BondRevaluer, which is " +
 		"NewBondRevaluer, which is dark. Reachable the moment the FI branch is.",
 	"internal/risk/scenario.EvaluateReval": "#509 — needs a Revaluer, which is NewRevaluer, which " +
