@@ -75,9 +75,32 @@ func TestTheGateStillDeniesAnUnbenchmarkedAnalytic(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if err := g.Promote("value_at_risk"); err == nil {
-		t.Fatal("the gate promoted an analytic with no validation on record — recording some " +
-			"analytics must not vouch for the rest")
+	// DERIVED, NOT HARDCODED. This named "value_at_risk" until that analytic was
+	// benchmarked, at which point the guard failed — not because the property
+	// broke but because its example had been repaired underneath it. A fixture
+	// that has to be edited every time coverage improves is one that will
+	// eventually be edited to whatever still passes.
+	recorded := map[string]bool{}
+	for _, r := range reports {
+		recorded[r.Analytic] = true
+	}
+	var uncovered []string
+	for _, a := range benchmarks.Inventory() {
+		if !recorded[a] {
+			uncovered = append(uncovered, a)
+		}
+	}
+	for _, a := range uncovered {
+		if err := g.Promote(a); err == nil {
+			t.Errorf("the gate promoted %q, which has no validation on record — recording some "+
+				"analytics must not vouch for the rest", a)
+		}
+	}
+
+	// AND A NAME THAT IS IN NO INVENTORY AT ALL, which stays meaningful after
+	// coverage reaches 100% and the loop above has nothing left to check.
+	if err := g.Promote("an_analytic_that_was_never_declared"); err == nil {
+		t.Fatal("the gate promoted an analytic it has never heard of")
 	}
 }
 
@@ -164,6 +187,33 @@ func TestCDSBootstrapReproducesItsBenchmarks(t *testing.T) {
 	for _, c := range cases {
 		if !c.Passed() {
 			t.Errorf("%s: got %.10f, want %.10f ± %g", c.Name, c.Got, c.Want, c.Tolerance)
+		}
+	}
+}
+
+// THE TAIL MEASURES, both of them, with the counts pinned.
+//
+// The count guard matters more here than elsewhere: the coherence cases are
+// appended by a shared helper, and a helper that returned nothing would leave
+// both sets passing on their arithmetic alone — with the one property that
+// distinguishes a quantile from a tail mean silently absent.
+func TestValueAtRiskReproducesItsBenchmarks(t *testing.T) {
+	assertAllPass(t, "value_at_risk", benchmarks.ValueAtRisk(), 10)
+}
+
+func TestExpectedShortfallReproducesItsBenchmarks(t *testing.T) {
+	assertAllPass(t, "expected_shortfall", benchmarks.ExpectedShortfall(), 11)
+}
+
+func assertAllPass(t *testing.T, analytic string, cases []validation.Case, min int) {
+	t.Helper()
+	if len(cases) < min {
+		t.Fatalf("%s built only %d cases, want at least %d — a set that shrank reads as a "+
+			"smaller passing suite", analytic, len(cases), min)
+	}
+	for _, c := range cases {
+		if !c.Passed() {
+			t.Errorf("%s/%s: got %.10f, want %.10f ± %g", analytic, c.Name, c.Got, c.Want, c.Tolerance)
 		}
 	}
 }

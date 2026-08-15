@@ -184,6 +184,8 @@ func Reports(now time.Time, signer validation.Signer) ([]validation.Report, erro
 		{AnalyticBondAnalytics, BondAnalytics()},
 		{AnalyticGreeksFiniteDiff, GreeksFiniteDifference()},
 		{AnalyticCDSBootstrap, CDSBootstrap()},
+		{AnalyticValueAtRisk, ValueAtRisk()},
+		{AnalyticExpectedShortfall, ExpectedShortfall()},
 	}
 	out := make([]validation.Report, 0, len(sets))
 	for _, s := range sets {
@@ -225,9 +227,11 @@ func Inventory() []string {
 		// value_at_risk IS NOT var_backtest, and listing both is the point.
 		// Validating the exception test says nothing about whether the
 		// historical-simulation quantile is right; collapsing them would let one
-		// benchmark set mark two analytics green.
-		"value_at_risk",      // internal/risk/compute/var
-		"expected_shortfall", // internal/risk/compute/var
+		// benchmark set mark two analytics green. Validating BOTH tail measures
+		// separately earned its keep immediately: the quantile was right and the
+		// tail mean was not (see tailrisk.go).
+		AnalyticValueAtRisk,
+		AnalyticExpectedShortfall,
 		AnalyticGreeksFiniteDiff,
 		"svi_vol_surface", // internal/risk/pricing/volsurface
 		AnalyticCDSBootstrap,
