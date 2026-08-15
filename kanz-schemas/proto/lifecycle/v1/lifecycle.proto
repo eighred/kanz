@@ -72,6 +72,21 @@ message ConfigChanged {
   // reason is a human-readable note on why the value was changed, retained for
   // audit. Optional.
   string reason = 5;
+
+  // approved_by is the SECOND principal — the one who approved the change,
+  // formatted "{type}:{id}" — for a config change under maker-checker (#410).
+  //
+  // Empty means the change was UNILATERAL, and that is a real state rather than
+  // a missing field: most config keys are not under dual control, and writing a
+  // name here for them would be a lie. What must never happen is empty because
+  // the producer forgot, so a key whose act requires dual control refuses to
+  // publish without it rather than defaulting — see internal/compliance's
+  // mandate publisher, which takes a dualcontrol.Approval and cannot be handed
+  // two names independently.
+  //
+  // It is NOT sufficient on its own: equal to changed_by it is self-approval,
+  // and a consumer that reads only "non-empty" would accept exactly that.
+  string approved_by = 6;
 }
 
 // ModeChanged records an operating-mode transition for a component or for the

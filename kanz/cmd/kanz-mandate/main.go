@@ -23,25 +23,59 @@
 // change is a deliberate, attributed, audited act by a named human. The FACT records
 // who and why, and the tool refuses to publish without both.
 //
-//	kanz-mandate --tenant acme --file mandate.json --by operator:akif \
-//	             --reason "Q3 mandate, approved by the IC"
+// # It now takes two people, in two invocations (#410)
+//
+// A mandate is THE CONTROL every order is checked against, and #410's title names
+// the gap exactly: "one person can place an order, override compliance, or change a
+// mandate". Until now that was one flag on one command.
+//
+//	kanz-mandate propose --tenant acme --file mandate.json --by operator:akif
+//	                     --reason "Q3 mandate, approved by the IC" --out proposal.json
+//
+//	kanz-mandate approve --tenant acme --file mandate.json
+//	                     --proposal proposal.json --by operator:dana
+//
+// propose PUBLISHES NOTHING. It emits a proposal carrying a digest of the exact
+// mandate and reason. approve re-derives that digest from the mandate file it is
+// handed, refuses if the approver is the proposer, and publishes — recording both
+// names on the FACT.
+//
+// # WHAT THIS ENFORCES AND WHAT IT DOES NOT, precisely
+//
+// It enforces: internal/compliance's publisher takes a dualcontrol.Approval and
+// there is no argument for a lone actor, so NO code path here can publish a
+// unilateral mandate; the approver differs from the proposer after case and space
+// folding; the approval covers the EXACT mandate and reason, so the file cannot be
+// swapped between the two steps; and the proposal expires.
+//
+// IT DOES NOT AUTHENTICATE THE TWO HUMANS. Both invocations run on one operator's
+// machine under one SVID, and the proposal file is a CARRIER, not a signature — one
+// person can run both steps. That is a real limitation, written here rather than
+// left to be discovered from the absence of a check. What the two-step buys is that
+// the FACT now records four eyes and the payload cannot change between them, so a
+// unilateral change is DETECTABLE in the trail. Making it PREVENTABLE requires the
+// two steps to be separately authenticated requests — the gateway surface the
+// pricing-override path already has (authz.Fund is the precedent; authz.Mandate is
+// the equivalent). That is the follow-up on #410, not pretended at here.
 //
 // The file is the protojson form of compliance.v1.Mandate.
 package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"time"
 
 	compliancepb "github.com/eighred/kanz/kanz-schemas-go/compliance/v1"
 	"google.golang.org/protobuf/encoding/protojson"
-	"google.golang.org/protobuf/types/known/timestamppb"
 
 	comp "github.com/eighred/kanz/internal/compliance"
+	"github.com/eighred/kanz/internal/dualcontrol"
 	"github.com/eighred/kanz/pkg/bus"
 	"github.com/eighred/kanz/pkg/transport"
 )
@@ -53,6 +87,24 @@ func main() {
 	}
 }
 
+// usage is returned for a missing or unknown subcommand.
+//
+// THE OLD SINGLE-SHOT FORM IS NOT ACCEPTED. Keeping it working "for
+// compatibility" would leave the unilateral path in place beside the guarded one,
+// and the unilateral path is shorter — so it is the one that would get used. A
+// caller of the old form gets this error, which names the replacement.
+var errUsage = errors.New(`a mandate change takes two people (#410), so this tool takes two invocations:
+
+  kanz-mandate propose --tenant T --file mandate.json --by operator:alice \
+               --reason "why" --out proposal.json      (publishes nothing)
+
+  kanz-mandate approve --tenant T --file mandate.json \
+               --proposal proposal.json --by operator:bob
+
+The single-command form was removed rather than deprecated: it published a mandate
+on one person's say-so, and a shorter unguarded path beside a guarded one is the
+path that gets used.`)
+
 type options struct {
 	natsURL      string
 	spiffeSocket string
@@ -60,11 +112,50 @@ type options struct {
 	file         string
 	by           string
 	reason       string
+	proposal     string
+	out          string
+	ttl          time.Duration
 	dryRun       bool
 }
 
-func run(args []string, out *os.File) error {
-	opt, err := parseFlags(args)
+// proposalFile is the on-disk artifact propose emits and approve consumes.
+//
+// THE DIGEST INSIDE Proposal IS THE ONLY SECURITY-BEARING FIELD. Everything else
+// is there so the human approving can read what they are approving without
+// running a decoder — and being display-only is exactly why they must not be
+// trusted: approve re-derives the digest from the MANDATE FILE it is handed and
+// compares, so editing MandateID here changes nothing except what the file claims.
+type proposalFile struct {
+	Proposal dualcontrol.Proposal `json:"proposal"`
+	Reason   string               `json:"reason"`
+
+	// Display only. See above.
+	Tenant      string `json:"tenant_id"`
+	PortfolioID string `json:"portfolio_id"`
+	MandateID   string `json:"mandate_id"`
+	Version     uint64 `json:"version"`
+	RuleCount   int    `json:"rule_count"`
+}
+
+func run(args []string, out io.Writer) error {
+	if len(args) == 0 {
+		return errUsage
+	}
+	switch args[0] {
+	case "propose":
+		return runPropose(args[1:], out)
+	case "approve":
+		return runApprove(args[1:], out)
+	default:
+		return errUsage
+	}
+}
+
+// runPropose validates the mandate, digests it, and writes a proposal. It opens
+// no connection to the broker at all — the strongest possible statement that
+// proposing is not publishing.
+func runPropose(args []string, out io.Writer) error {
+	opt, err := parseFlags("propose", args)
 	if err != nil {
 		return err
 	}
@@ -72,13 +163,81 @@ func run(args []string, out *os.File) error {
 	if err != nil {
 		return err
 	}
+	digest, err := comp.MandateDigest(m, opt.reason)
+	if err != nil {
+		return err
+	}
+	// The proposal id is the config key plus the mandate version: an approval is
+	// then self-evidently for one portfolio's one version, and two concurrent
+	// proposals for the same version collide by name rather than both looking
+	// approvable.
+	id := comp.MandateConfigKey(m.GetTenantId(), m.GetPortfolioId()) +
+		"@v" + fmt.Sprint(m.GetVersion())
+	prop, err := dualcontrol.Propose(id, dualcontrol.ActMandateChange,
+		comp.MandateConfigKey(m.GetTenantId(), m.GetPortfolioId()),
+		opt.by, digest, time.Now().UTC(), opt.ttl)
+	if err != nil {
+		return err
+	}
+
+	pf := proposalFile{
+		Proposal: prop, Reason: opt.reason,
+		Tenant: m.GetTenantId(), PortfolioID: m.GetPortfolioId(),
+		MandateID: m.GetMandateId(), Version: uint64(m.GetVersion()),
+		RuleCount: len(m.GetRules()),
+	}
+	blob, err := json.MarshalIndent(pf, "", "  ")
+	if err != nil {
+		return err
+	}
+	if opt.out == "" || opt.out == "-" {
+		fmt.Fprintln(out, string(blob))
+	} else if err := os.WriteFile(opt.out, append(blob, '\n'), 0o600); err != nil {
+		return fmt.Errorf("write %s: %w", opt.out, err)
+	}
+
+	fmt.Fprintf(out, "PROPOSED — mandate %s v%d for portfolio %s, %d rule(s), by %s\n",
+		m.GetMandateId(), m.GetVersion(), m.GetPortfolioId(), len(m.GetRules()), opt.by)
+	fmt.Fprintf(out, "digest %s, expires %s\n", digest[:12], prop.ExpiresAt.Format(time.RFC3339))
+	fmt.Fprintln(out, "NOTHING WAS PUBLISHED. A different person must now run `kanz-mandate approve`.")
+	return nil
+}
+
+// runApprove re-derives the digest from the mandate it is handed, obtains the
+// Approval, and publishes.
+func runApprove(args []string, out io.Writer) error {
+	opt, err := parseFlags("approve", args)
+	if err != nil {
+		return err
+	}
+	pf, err := loadProposal(opt.proposal)
+	if err != nil {
+		return err
+	}
+	m, err := loadMandate(opt.file, opt.tenant)
+	if err != nil {
+		return err
+	}
+	// RE-DERIVED FROM THE MANDATE FILE, never read from the proposal. This is the
+	// check that makes swapping the file between the two steps impossible: the
+	// approver signs the value, not the request.
+	digest, err := comp.MandateDigest(m, pf.Reason)
+	if err != nil {
+		return err
+	}
+	approval, err := pf.Proposal.Approve(opt.by, digest, time.Now().UTC())
+	if err != nil {
+		return err
+	}
 
 	fmt.Fprintf(out, "mandate %s v%d — tenant %s, portfolio %s, %d rule(s), effective %s\n",
 		m.GetMandateId(), m.GetVersion(), m.GetTenantId(), m.GetPortfolioId(),
 		len(m.GetRules()), m.GetEffectiveAt().AsTime().UTC().Format(time.RFC3339))
+	fmt.Fprintf(out, "proposed by %s, approved by %s\n", approval.Proposer(), approval.Approver())
+	fmt.Fprintf(out, "reason: %s\n", pf.Reason)
 	fmt.Fprintf(out, "subject: %s\n", comp.SubjectMandateFor(m.GetTenantId(), m.GetPortfolioId()))
 	if opt.dryRun {
-		fmt.Fprintln(out, "--dry-run: nothing published.")
+		fmt.Fprintln(out, "--dry-run: the approval is valid; nothing published.")
 		return nil
 	}
 
@@ -115,28 +274,35 @@ func run(args []string, out *os.File) error {
 	// claim what it superseded. The FACT's previous_value is for audit, and an
 	// invented one is worse than an absent one — the mandate's own version carries
 	// the ordering.
-	if err := comp.NewPublisher(producer).Publish(ctx, m, nil, opt.by, opt.reason); err != nil {
+	if err := comp.NewPublisher(producer).Publish(ctx, m, nil, approval, pf.Reason); err != nil {
 		return fmt.Errorf("publish: %w", err)
 	}
 
-	fmt.Fprintf(out, "PUBLISHED — portfolio %s is now governed by mandate %s v%d, by %s: %s\n",
-		m.GetPortfolioId(), m.GetMandateId(), m.GetVersion(), opt.by, opt.reason)
+	fmt.Fprintf(out, "PUBLISHED — portfolio %s is now governed by mandate %s v%d, proposed by %s and approved by %s\n",
+		m.GetPortfolioId(), m.GetMandateId(), m.GetVersion(), approval.Proposer(), approval.Approver())
 	fmt.Fprintln(out, "Every OMS and compliance replica arms with it — including one that boots tomorrow.")
 	return nil
 }
 
-func parseFlags(args []string) (options, error) {
-	fs := flag.NewFlagSet("kanz-mandate", flag.ContinueOnError)
+func parseFlags(sub string, args []string) (options, error) {
+	fs := flag.NewFlagSet("kanz-mandate "+sub, flag.ContinueOnError)
 	var opt options
-	fs.StringVar(&opt.natsURL, "nats", envOr("KANZ_NATS_URL", "nats://localhost:4222"), "NATS URL of the spine")
-	fs.StringVar(&opt.spiffeSocket, "spiffe-socket", envOr("SPIFFE_ENDPOINT_SOCKET", ""),
-		"SPIFFE Workload API socket for the operator SVID the production broker requires.\n"+
-			"Empty ⇒ a PLAINTEXT dial: fine against a local dev broker, refused by production.")
 	fs.StringVar(&opt.tenant, "tenant", envOr("KANZ_TENANT", ""), "envelope tenant_id — REQUIRED (the bus rejects an untenanted envelope)")
 	fs.StringVar(&opt.file, "file", "", "path to the mandate, as protojson compliance.v1.Mandate — REQUIRED")
 	fs.StringVar(&opt.by, "by", "", `operator principal, "{type}:{id}" (e.g. operator:akif) — REQUIRED`)
-	fs.StringVar(&opt.reason, "reason", "", "why this mandate is being set; recorded in the FACT — REQUIRED")
-	fs.BoolVar(&opt.dryRun, "dry-run", false, "validate and print, publish nothing")
+	switch sub {
+	case "propose":
+		fs.StringVar(&opt.reason, "reason", "", "why this mandate is being set; recorded in the FACT and covered by the approval — REQUIRED")
+		fs.StringVar(&opt.out, "out", "", "write the proposal here ('-' or empty ⇒ stdout)")
+		fs.DurationVar(&opt.ttl, "ttl", dualcontrol.DefaultTTL, "how long the proposal stays approvable")
+	case "approve":
+		fs.StringVar(&opt.proposal, "proposal", "", "path to the proposal emitted by `kanz-mandate propose` — REQUIRED")
+		fs.StringVar(&opt.natsURL, "nats", envOr("KANZ_NATS_URL", "nats://localhost:4222"), "NATS URL of the spine")
+		fs.StringVar(&opt.spiffeSocket, "spiffe-socket", envOr("SPIFFE_ENDPOINT_SOCKET", ""),
+			"SPIFFE Workload API socket for the operator SVID the production broker requires.\n"+
+				"Empty ⇒ a PLAINTEXT dial: fine against a local dev broker, refused by production.")
+		fs.BoolVar(&opt.dryRun, "dry-run", false, "validate the approval and print, publish nothing")
+	}
 	if err := fs.Parse(args); err != nil {
 		return options{}, err
 	}
@@ -146,13 +312,37 @@ func parseFlags(args []string) (options, error) {
 	case opt.tenant == "":
 		return options{}, errors.New("--tenant is required: the bus rejects an envelope with no tenant_id")
 	case opt.file == "":
-		return options{}, errors.New("--file is required: the mandate to publish (protojson compliance.v1.Mandate)")
+		return options{}, errors.New("--file is required: the mandate (protojson compliance.v1.Mandate). approve needs it too — the approval covers the VALUE, so it is re-derived from the file rather than taken from the proposal")
 	case opt.by == "":
 		return options{}, errors.New("--by is required: a mandate change is attributed to a named human, or it is not made")
-	case opt.reason == "":
+	}
+	if sub == "propose" && opt.reason == "" {
 		return options{}, errors.New("--reason is required: an unexplained change to what governs a portfolio is not auditable")
 	}
+	if sub == "approve" && opt.proposal == "" {
+		return options{}, errors.New("--proposal is required: approve applies a proposal made by someone else, and there is no way to publish without one")
+	}
 	return opt, nil
+}
+
+// loadProposal reads the artifact propose emitted.
+func loadProposal(path string) (proposalFile, error) {
+	b, err := os.ReadFile(path) //#nosec G304 -- an operator-supplied path, by design
+	if err != nil {
+		return proposalFile{}, fmt.Errorf("read %s: %w", path, err)
+	}
+	var pf proposalFile
+	if err := json.Unmarshal(b, &pf); err != nil {
+		return proposalFile{}, fmt.Errorf("%s is not a kanz-mandate proposal: %w", path, err)
+	}
+	// A proposal whose act is anything else is an approval for a DIFFERENT act
+	// being replayed here. Approval.Covers refuses it again at publish time; this
+	// says so earlier, where the operator can still read why.
+	if pf.Proposal.Act != dualcontrol.ActMandateChange {
+		return proposalFile{}, fmt.Errorf("%s is a proposal for %s, not a mandate change",
+			path, pf.Proposal.Act)
+	}
+	return pf, nil
 }
 
 // loadMandate reads and validates the mandate. It validates HERE, before publishing,
@@ -184,7 +374,12 @@ func loadMandate(path, tenant string) (*compliancepb.Mandate, error) {
 		return nil, errors.New("version is required and monotonic: it is how a consumer orders two mandates for the same portfolio")
 	}
 	if m.GetEffectiveAt() == nil {
-		m.EffectiveAt = timestamppb.New(time.Now().UTC())
+		// NOT DEFAULTED ON THE APPROVE SIDE. effective_at is inside the digest via
+		// the serialized mandate, so a file without one would hash differently in
+		// the two invocations (each stamping its own "now") and every approval
+		// would be refused as a payload change — a control failing for a reason
+		// that has nothing to do with the control.
+		return nil, errors.New("effective_at is required: it is part of what the approval covers, so it cannot be defaulted per-invocation")
 	}
 	// An empty ruleset is LEGAL and it means something: this portfolio is governed by
 	// a mandate that declares no constraints. That is different from having no mandate

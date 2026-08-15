@@ -140,26 +140,35 @@ func Propose(id string, act Act, subject, proposer, digest string, now time.Time
 }
 
 // Approve reports whether approver may approve this proposal for the payload
-// digest being applied, at now.
+// digest being applied, at now, and on success returns the Approval that is the
+// EVIDENCE of it.
 //
-// A NIL RETURN IS THE ONLY THING THAT AUTHORISES THE ACT. Every other path is an
-// error naming which rule refused, and a caller that ignores the error applies an
-// unapproved change — so callers must branch on it, never merely log it.
-func (p Proposal) Approve(approver, digest string, now time.Time) error {
+// THE EVIDENCE IS A RETURN VALUE BECAUSE AN ERROR IS TOO EASY TO DROP. This
+// function used to return only an error, with a doc note that "a caller that
+// ignores the error applies an unapproved change — so callers must branch on
+// it". That is a rule enforced by remembering, which is the kind this repository
+// has already paid for once. An Approval cannot be obtained without passing
+// every check, so a surface that REQUIRES one (mandate publishing does) cannot
+// be called unilaterally at all — the refusal moves from run time to the
+// signature, where it can be proven.
+//
+// The error is still returned and still names which rule refused, because an
+// operator staring at a rejected approval needs to know which.
+func (p Proposal) Approve(approver, digest string, now time.Time) (Approval, error) {
 	// Malformed FIRST. A proposal that never validated must not reach the
 	// interesting checks, where an empty field could satisfy one vacuously.
 	if normalize(p.Proposer) == "" {
-		return fmt.Errorf("%w: proposal has no proposer, so the approver check is vacuous", ErrMalformed)
+		return Approval{}, fmt.Errorf("%w: proposal has no proposer, so the approver check is vacuous", ErrMalformed)
 	}
 	if p.ExpiresAt.IsZero() {
 		// UNKNOWN IS NOT FOREVER. A zero expiry is a proposal built by something
 		// that did not go through Propose, and reading it as "never expires"
 		// would turn a construction bug into an approval that outlives the book
 		// it was reasoned about.
-		return fmt.Errorf("%w: proposal has no expiry", ErrMalformed)
+		return Approval{}, fmt.Errorf("%w: proposal has no expiry", ErrMalformed)
 	}
 	if normalize(approver) == "" {
-		return fmt.Errorf("%w: approver is empty — an approval must come from an authenticated subject", ErrMalformed)
+		return Approval{}, fmt.Errorf("%w: approver is empty — an approval must come from an authenticated subject", ErrMalformed)
 	}
 
 	// THE RULE. Normalised on both sides: an approver who differs from the
@@ -175,22 +184,29 @@ func (p Proposal) Approve(approver, digest string, now time.Time) error {
 	// requires the IdP to have issued a credential for the look-alike, which is
 	// the defect to fix there rather than to guess at here.
 	if normalize(approver) == normalize(p.Proposer) {
-		return fmt.Errorf("%w: %q proposed this and cannot approve it", ErrSelfApproval, p.Proposer)
+		return Approval{}, fmt.Errorf("%w: %q proposed this and cannot approve it", ErrSelfApproval, p.Proposer)
 	}
 
 	// The signature must cover the VALUE. Checked before expiry so a caller that
 	// tampered with the payload is told THAT, rather than being handed a
 	// misleading "expired" it might retry its way past.
 	if digest != p.Digest {
-		return fmt.Errorf("%w: approved %s, applying %s", ErrPayloadChanged, short(p.Digest), short(digest))
+		return Approval{}, fmt.Errorf("%w: approved %s, applying %s", ErrPayloadChanged, short(p.Digest), short(digest))
 	}
 
 	// Expiry is inclusive of the instant: at ExpiresAt exactly, it is expired.
 	if !now.UTC().Before(p.ExpiresAt) {
-		return fmt.Errorf("%w: proposed %s, expired %s",
+		return Approval{}, fmt.Errorf("%w: proposed %s, expired %s",
 			ErrExpired, p.CreatedAt.Format(time.RFC3339), p.ExpiresAt.Format(time.RFC3339))
 	}
-	return nil
+	return Approval{
+		act:        p.Act,
+		subject:    p.Subject,
+		proposer:   p.Proposer,
+		approver:   approver,
+		digest:     p.Digest,
+		approvedAt: now.UTC(),
+	}, nil
 }
 
 // Pending reports whether the proposal is still awaiting a decision at now.
@@ -231,4 +247,83 @@ func short(digest string) string {
 		return digest
 	}
 	return digest[:12]
+}
+
+// Approval is EVIDENCE that a specific payload was approved, for a specific act,
+// by someone other than the person who proposed it, before the proposal expired.
+//
+// # Why it is a type and not two strings
+//
+// A surface that takes `proposedBy, approvedBy string` can be handed two names
+// by one person, and nothing in its signature says otherwise. The mandate
+// publisher was exactly that shape: one CLI flag for the actor, a FACT recording
+// it, and no second party anywhere in the call. Taking an Approval instead means
+// the two names ARRIVE TOGETHER, from a check that has already run, and cannot
+// be supplied independently.
+//
+// # Its fields are unexported on purpose
+//
+// A composite literal cannot forge one from another package. The zero value is
+// still constructible — Go gives every type that — which is why Covers refuses
+// it explicitly rather than assuming a non-zero Approval is a valid one.
+type Approval struct {
+	act        Act
+	subject    string
+	proposer   string
+	approver   string
+	digest     string
+	approvedAt time.Time
+}
+
+// Act, Subject, Proposer, Approver, Digest and ApprovedAt read the evidence.
+// They exist so the caller can RECORD both names on whatever it publishes — the
+// audit value of dual control is entirely in the trail naming two people.
+func (a Approval) Act() Act              { return a.act }
+func (a Approval) Subject() string       { return a.subject }
+func (a Approval) Proposer() string      { return a.proposer }
+func (a Approval) Approver() string      { return a.approver }
+func (a Approval) Digest() string        { return a.digest }
+func (a Approval) ApprovedAt() time.Time { return a.approvedAt }
+
+// Covers reports whether this approval authorises applying digest under act.
+//
+// A CALLER THAT REQUIRES AN APPROVAL MUST STILL CALL THIS. Holding an Approval
+// proves some approval happened; it does not prove this one covers what is about
+// to be applied. The zero value is the case that makes it mandatory — Go permits
+// dualcontrol.Approval{} anywhere, and a publisher that merely accepted the type
+// would treat "no approval at all" as approved.
+//
+// Every check here re-derives from the stored evidence rather than trusting that
+// Approve ran, so this is a complete gate on its own and not a second opinion.
+func (a Approval) Covers(act Act, digest string) error {
+	switch {
+	case normalize(a.approver) == "" || normalize(a.proposer) == "":
+		// THE ZERO VALUE LANDS HERE, and so does anything built by something that
+		// did not go through Approve. Named as malformed rather than as
+		// self-approval, because the operator needs to know the difference
+		// between "nobody approved this" and "the same person approved it".
+		return fmt.Errorf("%w: approval names no proposer/approver pair, so nothing was checked", ErrMalformed)
+	case a.act == "":
+		return fmt.Errorf("%w: approval names no act", ErrMalformed)
+	case a.approvedAt.IsZero():
+		return fmt.Errorf("%w: approval has no timestamp", ErrMalformed)
+	case strings.TrimSpace(a.digest) == "":
+		return fmt.Errorf("%w: approval covers no payload", ErrMalformed)
+	}
+	// RE-CHECKED, not assumed. An approval whose two names match is a
+	// self-approval however it was obtained, and this is the last place before
+	// the act takes effect.
+	if normalize(a.approver) == normalize(a.proposer) {
+		return fmt.Errorf("%w: %q proposed and approved this", ErrSelfApproval, a.proposer)
+	}
+	// AN APPROVAL FOR ONE ACT MUST NOT AUTHORISE ANOTHER. Without this an
+	// approval collected for a pricing override would publish a mandate — the
+	// two surfaces share this package precisely so they cannot share evidence.
+	if act != a.act {
+		return fmt.Errorf("%w: approval is for %s, applying %s", ErrPayloadChanged, a.act, act)
+	}
+	if digest != a.digest {
+		return fmt.Errorf("%w: approved %s, applying %s", ErrPayloadChanged, short(a.digest), short(digest))
+	}
+	return nil
 }

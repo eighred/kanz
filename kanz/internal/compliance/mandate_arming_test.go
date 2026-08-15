@@ -14,6 +14,8 @@ import (
 	"github.com/nats-io/nats.go/jetstream"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
+	"github.com/eighred/kanz/internal/dualcontrol"
+
 	"github.com/eighred/kanz/internal/bustest"
 	comp "github.com/eighred/kanz/internal/compliance"
 	"github.com/eighred/kanz/pkg/bus"
@@ -92,7 +94,11 @@ func TestARestartedGateArmsItselfWithEveryMandateInForce(t *testing.T) {
 			Version:     1,
 			EffectiveAt: timestamppb.New(time.Now().UTC()),
 		}
-		if err := pub.Publish(ctx, m, nil, "operator:test", "arming test"); err != nil {
+		// A REAL APPROVAL, built the way the CLI builds one — the publisher no
+		// longer accepts a lone actor, so a test that wants to publish has to go
+		// through the same two-person path production does.
+		approval := mustApprove(t, m, "arming test")
+		if err := pub.Publish(ctx, m, nil, approval, "arming test"); err != nil {
 			t.Fatalf("publish %s: %v", pf, err)
 		}
 	}
@@ -153,4 +159,30 @@ func TestARestartedGateArmsItselfWithEveryMandateInForce(t *testing.T) {
 			"A pre-trade compliance gate that boots with an empty registry does not refuse orders — it PASSES them. "+
 			"The control does not fail, it DISARMS, silently, while the pod reports ready.", len(got), got)
 	}
+}
+
+// mustApprove builds the dualcontrol.Approval a mandate publish now requires:
+// proposed by one principal, approved by another, over this exact mandate.
+//
+// It exists so the tests exercise the REAL path rather than a constructor
+// shortcut — dualcontrol.Approval has unexported fields precisely so no test can
+// fabricate one, and a helper that could would defeat the guarantee it is here to
+// check.
+func mustApprove(t *testing.T, m *compliancepb.Mandate, reason string) dualcontrol.Approval {
+	t.Helper()
+	digest, err := comp.MandateDigest(m, reason)
+	if err != nil {
+		t.Fatalf("digest: %v", err)
+	}
+	now := time.Now().UTC()
+	prop, err := dualcontrol.Propose("test-proposal", dualcontrol.ActMandateChange,
+		"mandate", "operator:proposer", digest, now, dualcontrol.DefaultTTL)
+	if err != nil {
+		t.Fatalf("propose: %v", err)
+	}
+	approval, err := prop.Approve("operator:approver", digest, now)
+	if err != nil {
+		t.Fatalf("approve: %v", err)
+	}
+	return approval
 }
