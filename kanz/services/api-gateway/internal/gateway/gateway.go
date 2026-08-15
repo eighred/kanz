@@ -145,6 +145,49 @@ func (h *Handler) listPortfolios(w http.ResponseWriter, r *http.Request) {
 	h.writeOwned(w, r, resp, nil)
 }
 
+// portfolioInScope is the CLAIM gate for a route whose path names a portfolio,
+// and it returns the id so a handler cannot re-read the path and check one value
+// while sending another.
+//
+// TWO GATES GUARD EVERY PORTFOLIO-SCOPED ROUTE, and they answer different
+// questions. writeOwned reads owner_tenant off the reply and refuses another
+// TENANT's data (#222). This refuses a portfolio the caller's own token does not
+// name — the boundary INSIDE a tenant.
+//
+// # Why the risk routes now carry it too (#99)
+//
+// listOrders had this gate and exposure, measures and scenario did not, and the
+// asymmetry was recorded here as an open question: "whether that is a gap is a
+// question about those routes". It is a gap, and the deciding argument is that an
+// EMPTY claim already permits.
+//
+// A token that carries no portfolios asserts no restriction and reads everything
+// in its tenant, so nothing changes for a risk officer or for any token issued
+// before the identity provider set the field. A token that DOES carry portfolios
+// is an operator saying, on the invite, which portfolios this person may see —
+// and the platform already honours that on GET /v1/portfolios, which hides the
+// others from them, and on their order history. Serving that same person another
+// portfolio's VaR, its exposure by instrument bucket, and a scenario probe
+// against it does not make the restriction weaker; it makes it MEANINGLESS,
+// because the only surfaces still honouring it are the two that disclose least.
+//
+// The counter-argument — that risk numbers are tenant-wide by nature — is
+// answered by the empty case rather than by an exception here: a reader who
+// should see every portfolio is given a token that says so.
+//
+// THE SAME 404 AS "no such portfolio" AND AS "not yours", from the same constant.
+// A distinct status would tell a caller that a portfolio they may not read
+// nevertheless exists, which is the oracle writeOwned is careful not to be.
+func (h *Handler) portfolioInScope(w http.ResponseWriter, r *http.Request) (string, bool) {
+	id := r.PathValue("id")
+	p := middleware.PrincipalFromContext(r.Context())
+	if p == nil || !auth.PortfolioInScope(p.Portfolios, id) {
+		writeError(w, http.StatusNotFound, notFoundMsg)
+		return "", false
+	}
+	return id, true
+}
+
 // listOrders answers "what has this portfolio traded" (#399).
 //
 // TWO GATES, AS ON EVERY PORTFOLIO-SCOPED ROUTE. The tenant gate is writeOwned,
@@ -162,13 +205,8 @@ func (h *Handler) listPortfolios(w http.ResponseWriter, r *http.Request) {
 // instruments, sizes and times — so it is gated on the claim the token actually
 // carries. Aligning the others is a separate change with its own argument.
 func (h *Handler) listOrders(w http.ResponseWriter, r *http.Request) {
-	id := r.PathValue("id")
-	p := middleware.PrincipalFromContext(r.Context())
-	if p == nil || !auth.PortfolioInScope(p.Portfolios, id) {
-		// The SAME 404 as "no such portfolio" and as "not yours", from the same
-		// constant. A distinct status here would tell a caller that a portfolio
-		// they may not read nevertheless exists.
-		writeError(w, http.StatusNotFound, notFoundMsg)
+	id, ok := h.portfolioInScope(w, r)
+	if !ok {
 		return
 	}
 	resp, err := h.orders.ListOrders(r.Context(), &orderpb.ListOrdersRequest{
@@ -219,26 +257,34 @@ func parseLimit(r *http.Request) int32 {
 }
 
 func (h *Handler) exposure(w http.ResponseWriter, r *http.Request) {
+	id, ok := h.portfolioInScope(w, r)
+	if !ok {
+		return
+	}
 	asOf, err := parseAsOf(r)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "invalid as_of: must be RFC3339")
 		return
 	}
 	resp, err := h.client.Exposure(r.Context(), &querypb.ExposureRequest{
-		PortfolioId: r.PathValue("id"),
+		PortfolioId: id,
 		AsOf:        asOf,
 	})
 	h.writeOwned(w, r, resp, err)
 }
 
 func (h *Handler) measures(w http.ResponseWriter, r *http.Request) {
+	id, ok := h.portfolioInScope(w, r)
+	if !ok {
+		return
+	}
 	asOf, err := parseAsOf(r)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "invalid as_of: must be RFC3339")
 		return
 	}
 	resp, err := h.client.Measures(r.Context(), &querypb.MeasuresRequest{
-		PortfolioId: r.PathValue("id"),
+		PortfolioId: id,
 		AsOf:        asOf,
 		Measures:    r.URL.Query()["measure"], // repeatable ?measure=VaR99&measure=Delta
 	})
@@ -251,7 +297,11 @@ func (h *Handler) scenario(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid scenario body: "+err.Error())
 		return
 	}
-	req.PortfolioId = r.PathValue("id") // path wins over body
+	id, ok := h.portfolioInScope(w, r)
+	if !ok {
+		return
+	}
+	req.PortfolioId = id // path wins over body, and the path is what was checked
 	resp, err := h.client.EvaluateScenario(r.Context(), &req)
 	h.writeOwned(w, r, resp, err)
 }
