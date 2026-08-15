@@ -12,6 +12,7 @@ import (
 
 	"github.com/eighred/kanz/internal/risk/compute"
 	varmodel "github.com/eighred/kanz/internal/risk/compute/var"
+	"github.com/eighred/kanz/internal/risk/pricing/curve"
 )
 
 // #509's posture. The interesting case is the one the estate is actually in —
@@ -145,7 +146,7 @@ func TestMeasurePosture_TheShapeRiskEngineActuallyBuilds(t *testing.T) {
 	live := len(compute.Catalogue()) - len(dark)
 
 	if live != 8 {
-		t.Errorf("risk-engine's registry serves %d catalogued measures, not 8.\n"+
+		t.Errorf("risk-engine's registry serves %d catalogued measures without calibration, not 8.\n"+
 			"If a seam was WIRED, update this number and delete the matching entry from "+
 			"test/arch/no_dark_measure_seam_test.go's darkSeamExempt. If a measure was added "+
 			"without registering it, that is the gap #509 tracks and the count is correct.", live)
@@ -159,7 +160,7 @@ func TestMeasurePosture_TheShapeRiskEngineActuallyBuilds(t *testing.T) {
 		byFamily[m.Family]++
 	}
 	for _, f := range []compute.MeasureFamily{
-		compute.FamilyGreeks, compute.FamilyFixedIncome, compute.FamilyFactor,
+		compute.FamilyGreeks, compute.FamilyFactor,
 		compute.FamilyLiquidity, compute.FamilyStructured, compute.FamilyXVA,
 	} {
 		if byFamily[f] == 0 {
@@ -174,5 +175,57 @@ func TestMeasurePosture_TheShapeRiskEngineActuallyBuilds(t *testing.T) {
 			t.Errorf("family %q has %d dark measures — it is registered by a seam main DOES call, "+
 				"so a gap here is a measure that was added and never registered", f, byFamily[f])
 		}
+	}
+}
+
+// stubBondTerms resolves nothing. The FI registration's SHAPE is what this test
+// grades — which measures exist — not what they compute.
+type stubBondTerms struct{}
+
+func (stubBondTerms) BondTerms(context.Context, string, time.Time) (compute.BondSpec, bool) {
+	return compute.BondSpec{}, false
+}
+
+type stubCurve struct{}
+
+func (stubCurve) Curve(context.Context, string, time.Time) (*curve.Curve, bool) { return nil, false }
+
+// WITH CALIBRATION ON, THE FIXED-INCOME FAMILY GOES LIVE (#509).
+//
+// main registers the FI measures only when rate calibration is enabled, because
+// registering them against an empty curve store would serve a DV01 of zero for
+// every portfolio — indistinguishable from a book holding no bonds. This
+// reproduces that second shape, so the conditional is pinned rather than only the
+// default branch a test happens to take.
+func TestMeasurePosture_WithCalibrationTheFixedIncomeFamilyIsServed(t *testing.T) {
+	registry := compute.DefaultRegistry()
+	varmodel.Register(context.Background(), registry, stubReturns{}, varmodel.Config{})
+	compute.RegisterFIRisk(context.Background(), registry, compute.FIProviders{
+		Terms: stubBondTerms{}, Curve: stubCurve{},
+	})
+
+	dark := compute.Dark(registry)
+	live := len(compute.Catalogue()) - len(dark)
+	if live != 12 {
+		t.Errorf("with FI registered the engine serves %d measures, not 12 — the four FI "+
+			"measures are DV01, Duration, Convexity and SpreadDuration", live)
+	}
+	for _, m := range dark {
+		if m.Family == compute.FamilyFixedIncome {
+			t.Errorf("%s is still dark with RegisterFIRisk called", m.Name)
+		}
+	}
+
+	reg, logs := measurePosture(t, registry)
+	for _, name := range []string{"DV01", "Duration", "Convexity", "SpreadDuration"} {
+		if got, ok := seriesFor(t, reg, name); !ok || got != 1 {
+			t.Errorf("%s = %v (present=%v), want 1", name, got, ok)
+		}
+	}
+	// STILL WARNS, because five families remain dark. A posture that went quiet
+	// on the first family being wired would stop reporting the rest.
+	if !bytes.Contains([]byte(logs), []byte("level=WARN")) {
+		t.Error("the posture stopped warning while Greeks, factor, liquidity, structured and " +
+			"XVA are all still unregistered")
 	}
 }

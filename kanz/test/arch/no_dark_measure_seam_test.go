@@ -22,7 +22,13 @@ import (
 // measure-name constants, for MeasureFunc. The package is bright. ELEVEN OF ITS
 // SEAMS WERE DARK, and the import guard could not see it:
 //
-//	RegisterFIRisk        DV01, Duration, Convexity, SpreadDuration   0 callers
+//	RegisterFIRisk        DV01, Duration, Convexity, SpreadDuration   WIRED 2026-08-16
+//	                      (#509) — and its exemption said the blocker was that
+//	                      BondTerms "has NO SCHEMA AT ALL", which was wrong: the
+//	                      message existed in fixed_income.proto and only the
+//	                      ContractTerms oneof lacked a bond case. THE DEAD-ENTRY
+//	                      ARM IS WHAT RETIRED IT, on the commit that added the
+//	                      caller, rather than the entry outliving its repair.
 //	RegisterGreeks        Delta, Gamma, Vega, Theta, Rho              0 callers
 //	RegisterXVA           CVA, DVA, FVA                               0 callers
 //	RegisterFactorRisk / RegisterLiquidityRisk / RegisterStructuredRisk
@@ -72,12 +78,6 @@ import (
 // the analytics above them to be benchmarked (#471) before anyone noticed they
 // do not reach production.
 var darkSeamExempt = map[string]string{
-	"internal/risk/compute.RegisterFIRisk": "#509 — DV01/Duration/Convexity/SpreadDuration. Its " +
-		"CurveProvider EXISTS and fits (curvestore_test.go asserts *curve.Store satisfies it) but is " +
-		"unreachable: risk-engine's startCalibration builds curve.NewStore() inline as an anonymous " +
-		"argument, so the calibrated curve is written and read by nobody. Its BondTermsProvider has " +
-		"NO SCHEMA AT ALL — reference/v1/contract.proto carries OptionTerms, SwapTerms and " +
-		"FutureTerms, and no bond variant. Adding one is a decision, not a task.",
 	"internal/risk/compute.RegisterGreeks": "#509 — Delta/Gamma/Vega/Theta/Rho. Needs three " +
 		"providers: TermsProvider exists (internal/risk/termsource) and nothing constructs it (#345); " +
 		"VolProvider is satisfied by volsurface.Store, whose Calibrator has no production caller and " +

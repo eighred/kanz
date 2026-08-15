@@ -90,8 +90,6 @@ var darkPackageExempt = map[string]string{
 	"internal/risk/pricing/credit": "#113 — the credit calibrator carries the same Refresh seam the " +
 		"scheduler drives, and is not scheduled because no live CDS quote source exists (#203). " +
 		"kanz_risk_calibration_scheduled{kind=\"credit\"} reports 0 so the gap is visible.",
-	"internal/risk/termsource": "#345 — the contract-terms store and TermsProvider the vol " +
-		"calibration needs. Nothing joins quotes to terms yet, so nothing constructs a term source.",
 	"internal/marketdata/indicator": "#416 C2 — the technical-indicator library the retired " +
 		"alpha house rule depends on. It is dark for ONE STEP and the consumer is named: C2's first " +
 		"alpha.Engine, which needs the score contract (P(return >= X%% within horizon H) plus a " +

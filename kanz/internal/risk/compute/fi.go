@@ -79,7 +79,41 @@ type CurveProvider interface {
 type FIProviders struct {
 	Terms BondTermsProvider
 	Curve CurveProvider
+
+	// OnSkip is called when a position is EXCLUDED from the FI measures for a
+	// reason that is not "it is not a bond". Optional; nil disables it.
+	//
+	// WITHOUT IT THE EXCLUSION IS INVISIBLE, and invisible in the flattering
+	// direction. A bond dropped for want of a discount curve contributes 0 to
+	// DV01 and nothing to the duration average, so the book's measured rate risk
+	// SHRINKS — and a DV01 of zero is indistinguishable from a portfolio holding
+	// no bonds at all. That is the #257 shape exactly: ten copies of the
+	// base-currency filter each dropped positions and not one recorded it, so a
+	// USD book holding only EUR reported GrossExposure = 0.
+	//
+	// reason is one of SkipNoTerms / SkipNoCurve — a small closed set rather than
+	// free text, because the caller counts by it and a metric label must not be
+	// whatever a future edit writes.
+	//
+	// NOT CALLED FOR A NON-BOND. A share has no terms and is correctly absent
+	// from a bond measure; firing here would drown the signal in every equity
+	// position on the book.
+	OnSkip func(instrumentID, reason string)
 }
+
+// The reasons a position is excluded from the FI measures despite being a bond.
+const (
+	// SkipNoTerms: the instrument resolved no usable bond terms. Either they were
+	// never loaded, or they are present and unusable (an unspecified day count, a
+	// maturity at or before issue). The terms provider distinguishes those two in
+	// its own observer; here they are one thing, because the consequence is one
+	// thing.
+	SkipNoTerms = "no_terms"
+	// SkipNoCurve: the bond's terms resolved, and no discount curve exists for
+	// its currency as of the valuation time. This is the calibration gap rather
+	// than a data gap — the bond is known and cannot be priced.
+	SkipNoCurve = "no_curve"
+)
 
 // RegisterFIRisk registers DV01/Duration/Convexity/SpreadDuration on r, each
 // closing over ctx + providers. Call at engine startup after DefaultRegistry;
@@ -133,10 +167,19 @@ func positionBondRisk(ctx context.Context, p FIProviders, pos domain.Position, a
 	}
 	spec, ok := p.Terms.BondTerms(ctx, string(pos.InstrumentID), asOf)
 	if !ok {
+		// NOT REPORTED. The overwhelming majority of positions on any book are
+		// not bonds, and BondTerms answers ok=false for every one of them — the
+		// provider's own observer is where a MISSING load is distinguished from a
+		// share, because only it can see which. Counting here would make the
+		// signal the noise.
 		return pricing.CurveRisk{}, 0, 0, false
 	}
 	c, ok := p.Curve.Curve(ctx, spec.Currency, asOf)
 	if !ok || c == nil {
+		// REPORTED, because this one is unambiguous: the terms resolved, so this
+		// IS a bond, and it is about to leave the book's measured rate risk
+		// without appearing anywhere as a gap.
+		skip(p, pos, SkipNoCurve)
 		return pricing.CurveRisk{}, 0, 0, false
 	}
 	bond := pricing.Bond{
@@ -154,4 +197,11 @@ func positionBondRisk(ctx context.Context, p FIProviders, pos domain.Position, a
 		mv = -mv
 	}
 	return cr, qty, mv, true
+}
+
+// skip reports an exclusion, if the caller asked to hear about them.
+func skip(p FIProviders, pos domain.Position, reason string) {
+	if p.OnSkip != nil {
+		p.OnSkip(string(pos.InstrumentID), reason)
+	}
 }
