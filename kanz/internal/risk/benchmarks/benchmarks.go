@@ -182,6 +182,7 @@ func Reports(now time.Time, signer validation.Signer) ([]validation.Report, erro
 		{AnalyticBinomial, Binomial()},
 		{AnalyticVaRBacktest, VaRBacktest()},
 		{AnalyticBondAnalytics, BondAnalytics()},
+		{AnalyticGreeksFiniteDiff, GreeksFiniteDifference()},
 	}
 	out := make([]validation.Report, 0, len(sets))
 	for _, s := range sets {
@@ -226,11 +227,11 @@ func Inventory() []string {
 		// benchmark set mark two analytics green.
 		"value_at_risk",      // internal/risk/compute/var
 		"expected_shortfall", // internal/risk/compute/var
-		"greeks_finite_diff", // internal/risk/compute/greeks.go
-		"svi_vol_surface",    // internal/risk/pricing/volsurface
-		"cds_bootstrap",      // internal/risk/pricing/credit
-		"isda_simm",          // internal/collateral
-		"frtb_sa",            // internal/regulatory
-		"stress_framework",   // internal/regulatory/stress
+		AnalyticGreeksFiniteDiff,
+		"svi_vol_surface",  // internal/risk/pricing/volsurface
+		"cds_bootstrap",    // internal/risk/pricing/credit
+		"isda_simm",        // internal/collateral
+		"frtb_sa",          // internal/regulatory
+		"stress_framework", // internal/regulatory/stress
 	}
 }

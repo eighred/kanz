@@ -42,8 +42,8 @@ func TestReportsSatisfyTheGate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Reports: %v", err)
 	}
-	if len(reports) < 4 {
-		t.Fatalf("got %d reports, want one per analytic this package covers (4)", len(reports))
+	if len(reports) < 5 {
+		t.Fatalf("got %d reports, want one per analytic this package covers (5)", len(reports))
 	}
 
 	g := validation.NewGate(func() time.Time { return now })
@@ -129,6 +129,23 @@ func TestBondAnalyticsReproduceItsPublishedBenchmarks(t *testing.T) {
 	for _, c := range cases {
 		if !c.Passed() {
 			t.Errorf("%s: got %.10f, want %.10f ± %g", c.Name, c.Got, c.Want, c.Tolerance)
+		}
+	}
+}
+
+// THE BUMPED GREEKS ENGINE REPRODUCES THE CLOSED FORM AND ITS IDENTITIES.
+//
+// It is the sensitivity path for AMERICAN options, where no closed form exists —
+// so without this the one Greek path with nothing to check it is also the one
+// nobody checked.
+func TestGreeksFiniteDifferenceReproducesItsBenchmarks(t *testing.T) {
+	cases := benchmarks.GreeksFiniteDifference()
+	if len(cases) < 12 {
+		t.Fatalf("only %d greek cases were built, want at least 12", len(cases))
+	}
+	for _, c := range cases {
+		if !c.Passed() {
+			t.Errorf("%s: got %.9f, want %.9f ± %g", c.Name, c.Got, c.Want, c.Tolerance)
 		}
 	}
 }
