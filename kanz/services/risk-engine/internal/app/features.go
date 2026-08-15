@@ -30,6 +30,19 @@ import (
 // The model registry resolves a model by feature_set_ref, never by name, so a model cannot
 // be handed a vector it was not trained on. Changing this string re-points every model on
 // the platform; it is a contract, versioned like one.
+//
+// THAT RESOLUTION IS REAL SINCE #112 AND WAS NOT BEFORE IT. This comment, the registry's
+// own package doc and the dark-capability exemption all asserted the property while
+// internal/prediction/registry had no FeatureSetRef field at all and its only lookup was
+// Get(modelID) — resolution by NAME, the exact thing all three said it prevented.
+//
+// NOTHING RESOLVES A MODEL IN GO YET, and that is worth stating beside the key rather than
+// leaving it to be discovered: this constant is published on the feature vector and consumed
+// by the Python scoring worker. The Go-side registry has no producer (platform.model is not
+// a declared subject here, and kanz-py's RegistryPublisher is a Protocol with no
+// implementation), so nothing on this side can currently answer "which model serves
+// portfolio-risk:1". #112 tracks that, and it is a transport-and-producer problem rather
+// than the composition-root problem its title suggests.
 const FeatureSetPortfolioRisk prediction.FeatureSetRef = "portfolio-risk:1"
 
 // modelInputs are the measures a portfolio-risk model is entitled to see.
