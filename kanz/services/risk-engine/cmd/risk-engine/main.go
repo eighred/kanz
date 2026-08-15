@@ -31,9 +31,11 @@ import (
 	"github.com/eighred/kanz/internal/platform/httpserver"
 	"github.com/eighred/kanz/internal/prediction"
 	risk "github.com/eighred/kanz/internal/risk"
+	"github.com/eighred/kanz/internal/risk/bookuniverse"
 	"github.com/eighred/kanz/internal/risk/compute"
 	varmodel "github.com/eighred/kanz/internal/risk/compute/var"
 	"github.com/eighred/kanz/internal/risk/engine"
+	"github.com/eighred/kanz/internal/risk/factormodel"
 	"github.com/eighred/kanz/internal/risk/ingest"
 	"github.com/eighred/kanz/internal/risk/pricing/curve"
 	"github.com/eighred/kanz/internal/risk/pricing/livequote"
@@ -225,7 +227,25 @@ func runEngine(ctx context.Context, cfg config.Config, readiness *server.Readine
 			"not a data gap. A skipped bond makes the book's measured rate risk SMALLER, and a " +
 			"DV01 of zero is indistinguishable from holding no bonds (#509).",
 	}, []string{"reason"})
-	obs.Registry.MustRegister(fiTermsMissing, fiSkipped)
+	factorSkipped := prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "kanz_risk_factor_skipped_total",
+		Help: "Factor-measure evaluations that reported zero because the model could not cover " +
+			"what was asked. no_model = the whole book's factor risk was zero for that evaluation; " +
+			"not_in_model = one holding sits outside the fitted universe and contributes to " +
+			"neither the systematic nor the specific half. Both shrink measured risk, in the " +
+			"direction that makes a limit pass (#509).",
+	}, []string{"reason"})
+	factorLookahead := prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "kanz_risk_factor_universe_lookahead_total",
+		Help: "Factor fits whose as-of predates the newest state in the book. The estimation " +
+			"universe comes from the LIVE store, so a historical recompute is fitted over today's " +
+			"holdings — a survivorship universe that excludes everything since sold. Non-zero " +
+			"means a run was scored against a book it could not have known (#509).",
+	})
+	obs.Registry.MustRegister(fiTermsMissing, fiSkipped, factorSkipped, factorLookahead)
+	for _, r := range []string{compute.SkipNoModel, compute.SkipNotInModel} {
+		factorSkipped.WithLabelValues(r).Add(0)
+	}
 	// EVERY REASON GETS A SERIES AT ZERO. A counter that only appears on first
 	// increment reads as no-data to an alert, so the alert cannot fire on the
 	// transition from none to some — which is the transition that matters.
@@ -253,6 +273,53 @@ func runEngine(ctx context.Context, cfg config.Config, readiness *server.Readine
 		provider := returns.NewStoreReturnsProvider(priceStore, returns.ReturnsConfig{})
 		varmodel.Register(context.Background(), registry, provider, varmodel.Config{})
 		logger.Info("RISK-12/RISK-M1: historical-simulation VaR99 + ES99 + MaxDrawdown(+Amount) registered off market-data price store")
+
+		// THE FACTOR MEASURES (#509). The last missing piece was the estimation
+		// UNIVERSE — the returns provider above is the same one the factor model
+		// reads, so no second history and no risk of the two disagreeing.
+		universe, err := bookuniverse.FromStore(store,
+			// A BACKTEST MUST NOT QUIETLY ACQUIRE A SURVIVORSHIP UNIVERSE. The
+			// state store answers "what the book holds NOW" for any asOf, so a
+			// recompute as of last year is fitted over today's holdings — which
+			// excludes everything since sold. Counted rather than refused,
+			// because the live path (asOf = now) is correct and is the common
+			// one; a non-zero counter is what says a historical run happened.
+			bookuniverse.WithLookaheadObserver(func(time.Time, time.Time) {
+				factorLookahead.Inc()
+			}))
+		if err != nil {
+			return err
+		}
+		modelProvider := compute.NewLiveModelProvider(
+			// STATISTICAL, EXPLICITLY, and the explicitness is the point: the zero
+			// value of factormodel.ModelType is FUNDAMENTAL, which needs a
+			// CharacteristicProvider this deployment does not have — so an
+			// omitted Type would select the one model that cannot fit, and every
+			// factor measure would report zero for a reason nothing states.
+			//
+			// PCA over the return covariance needs only returns, which is why it
+			// is the model that can be wired today. Fundamental and Blend become
+			// reachable through compute.NewStoreCharacteristicProvider (it derives
+			// momentum and volatility from this same returns provider); its
+			// industry factor additionally needs a sector classifier, whose
+			// production source is not built.
+			factormodel.Config{Type: factormodel.Statistical},
+			universe,
+			factormodel.Providers{Returns: provider},
+		)
+		compute.RegisterFactorRisk(context.Background(), registry, compute.FactorProviders{
+			Model: modelProvider,
+			// COUNTED BY REASON, NOT BY INSTRUMENT — one series per instrument
+			// ever held is unbounded cardinality. Note the two reasons answer
+			// different questions: no_model means the whole book's factor risk is
+			// zero for that evaluation, not_in_model means one holding is outside
+			// the fitted universe. A single number would merge "we measured
+			// nothing" with "we measured most of it".
+			OnSkip: func(_, reason string) { factorSkipped.WithLabelValues(reason).Inc() },
+		})
+		logger.Info("FACTOR-01c: FactorVaR99 + SystematicRisk + SpecificRisk registered over a "+
+			"statistical (PCA) model fitted on the live book",
+			"min_universe", bookuniverse.DefaultMinInstruments)
 
 		// THE FIXED-INCOME MEASURES (#509). Their two seams both exist now: bond
 		// terms resolve through the contract-terms store this pool already
