@@ -183,6 +183,7 @@ func Reports(now time.Time, signer validation.Signer) ([]validation.Report, erro
 		{AnalyticVaRBacktest, VaRBacktest()},
 		{AnalyticBondAnalytics, BondAnalytics()},
 		{AnalyticGreeksFiniteDiff, GreeksFiniteDifference()},
+		{AnalyticCDSBootstrap, CDSBootstrap()},
 	}
 	out := make([]validation.Report, 0, len(sets))
 	for _, s := range sets {
@@ -228,8 +229,8 @@ func Inventory() []string {
 		"value_at_risk",      // internal/risk/compute/var
 		"expected_shortfall", // internal/risk/compute/var
 		AnalyticGreeksFiniteDiff,
-		"svi_vol_surface",  // internal/risk/pricing/volsurface
-		"cds_bootstrap",    // internal/risk/pricing/credit
+		"svi_vol_surface", // internal/risk/pricing/volsurface
+		AnalyticCDSBootstrap,
 		"isda_simm",        // internal/collateral
 		"frtb_sa",          // internal/regulatory
 		"stress_framework", // internal/regulatory/stress
