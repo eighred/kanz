@@ -49,6 +49,10 @@ const (
 	KindOption Kind = "OPTION"
 	KindSwap   Kind = "SWAP"
 	KindFuture Kind = "FUTURE"
+	// KindBond is a bond's terms (#509). A bond is not a derivative, and this
+	// store's table comment lists only the three derivative kinds — the row shape
+	// fits unchanged because `kind` is TEXT with no CHECK and `underlying_id` is
+	// already nullable for swaps, which reference no single instrument either.
 )
 
 // ErrNoTerms reports that no terms record exists for an instrument at or before
