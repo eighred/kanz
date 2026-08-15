@@ -81,6 +81,19 @@ type OrderDTO struct {
 	AvgFillPrice string `json:"avgFillPrice,omitempty"`
 	LimitPrice   string `json:"limitPrice,omitempty"`
 	UpdatedAt    string `json:"updatedAt"`
+	// ParentOrderID names the working parent this order is a slice of (#435,
+	// #484). Empty for an ordinary order.
+	//
+	// WITHOUT IT A SIX-SLICE ORDER IS SEVEN UNRELATED ROWS. The parent rests at
+	// "scheduled" and its children each appear as their own order, with derived
+	// ids that deliberately carry no readable relation — an operator looking at
+	// the blotter during an incident cannot tell which of them belong together,
+	// or that pulling the parent is what stops the rest.
+	//
+	// It is the one field the client needs to group them; the grouping itself is
+	// the client's, because how to present it is a design question and this
+	// projection's job is to stop throwing the answer away.
+	ParentOrderID string `json:"parentOrderId,omitempty"`
 }
 
 // ExecutionDTO is one execution report.

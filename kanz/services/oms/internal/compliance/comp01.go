@@ -70,8 +70,14 @@ func (g *COMP01Gate) Check(ctx context.Context, tenantID string, cmd *orderpb.Su
 		Price:          g.price(cmd),
 		Currency:       g.currency,
 		OrderID:        cmd.GetOrderId(),
-		Issuer:         cmd.GetMetadata().GetIssuer(),
-		AsOf:           g.now().UTC(),
+		// ONE DECISION, THIS MANY ORDERS (#435, #484). A scheduled parent is
+		// checked once for the whole notional and its children are admitted
+		// without re-checking, so the fills land on N order ids while only this
+		// record exists. Saying so here is what lets the audit log be read
+		// backwards from a child.
+		WorkedSlices: cmd.GetExecutionSchedule().GetSliceCount(),
+		Issuer:       cmd.GetMetadata().GetIssuer(),
+		AsOf:         g.now().UTC(),
 	})
 	if err != nil {
 		return nil, err

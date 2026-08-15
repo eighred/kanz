@@ -534,6 +534,11 @@ func orderDTOAsOf(revs []orderRev, asOf time.Time) (OrderDTO, bool) {
 		FilledQty: dec.Str(dec.FromProto(st.GetFilledQuantity())),
 		LeavesQty: dec.Str(dec.FromProto(st.GetLeavesQuantity())),
 		UpdatedAt: cur.knowledge.UTC().Format(time.RFC3339Nano),
+		// EMPTY FOR AN ORDINARY ORDER, and omitempty keeps it off the wire — so
+		// a client that has never heard of parent orders sees exactly what it saw
+		// before, and one that has can group a schedule's slices instead of
+		// showing them as unrelated rows (#484).
+		ParentOrderID: st.GetParentOrderId(),
 	}
 	if st.GetAverageFillPrice() != nil {
 		dto.AvgFillPrice = dec.Str(dec.FromProto(st.GetAverageFillPrice()))

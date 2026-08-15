@@ -432,3 +432,53 @@ func TestNoCandidateHasAZeroValueNonZeroQuantityPosition(t *testing.T) {
 		t.Fatal("a legitimate sell-to-flat must still be allowed — a genuinely flat position is correctly skipped")
 	}
 }
+
+// THE SLICE COUNT REACHES THE RECORD (#435, #484).
+//
+// A scheduled parent is checked ONCE, for the whole notional, and its children
+// are admitted without re-checking (#483). The fills therefore land on N order
+// ids while only the parent has a decision record — so the record has to say it
+// authorised more orders than the one it names, or the audit log cannot be read
+// backwards from a child.
+//
+// This pins the hop from OrderDelta to DecisionRecord. It is a plain field copy,
+// which is exactly the kind of thing that is silently dropped in a refactor and
+// noticed by nobody, because everything downstream keeps working and only the
+// audit trail is quietly thinner.
+func TestGateRecordsWorkedSlices(t *testing.T) {
+	reg := NewMandateRegistry()
+	mustPut(t, reg, concentrationMandate(60))
+
+	rec := &recordingRecorder{}
+	g := NewPreTradeGate(NewEngine(nil), MapBookSource{"p1": currentBook()}, reg, nil, rec, nil)
+	if _, err := g.Evaluate(context.Background(), OrderDelta{
+		TenantID: "t1", PortfolioID: "p1", InstrumentID: "AAPL",
+		SignedQuantity: dec(100, 0), Price: dec(1000, 0), Currency: "USD",
+		OrderID: "parent1", AsOf: t0, WorkedSlices: 6,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if len(rec.records) != 1 {
+		t.Fatalf("expected one record, got %d", len(rec.records))
+	}
+	if got := rec.records[0].WorkedSlices; got != 6 {
+		t.Fatalf("WorkedSlices = %d, want 6 — the decision authorised six child orders and the "+
+			"record names only one of them, so an auditor arriving from a child cannot tell "+
+			"whether they have the whole authorisation", got)
+	}
+
+	// AND AN ORDINARY ORDER RECORDS ZERO, which is what makes the non-zero case
+	// mean something.
+	rec2 := &recordingRecorder{}
+	g2 := NewPreTradeGate(NewEngine(nil), MapBookSource{"p1": currentBook()}, reg, nil, rec2, nil)
+	if _, err := g2.Evaluate(context.Background(), OrderDelta{
+		TenantID: "t1", PortfolioID: "p1", InstrumentID: "AAPL",
+		SignedQuantity: dec(100, 0), Price: dec(1000, 0), Currency: "USD",
+		OrderID: "o1", AsOf: t0,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if got := rec2.records[0].WorkedSlices; got != 0 {
+		t.Errorf("WorkedSlices = %d on an order nobody sliced, want 0", got)
+	}
+}
