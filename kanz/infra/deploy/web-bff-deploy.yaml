@@ -1,0 +1,168 @@
+---
+# The operator surface (#371): the BFF that serves the compiled SPA and proxies
+# /api/* to the api-gateway, with the cloudflared tunnel that is the estate's
+# ONLY public surface.
+#
+# # The manifest and the tunnel land together, or not at all
+#
+# That sentence was this service's own notDeployed reason, and it is the reason
+# there is no Service and no Ingress below. cloudflared holds an OUTBOUND
+# connection to Cloudflare and receives requests over it, so nothing here listens
+# publicly — no ingress, no LoadBalancer, no inbound firewall rule for 80/443. A
+# port that is never open cannot be scanned. Shipping this Deployment behind an
+# ordinary Ingress would open exactly the port the design exists to avoid, which
+# is why the two were never separable.
+#
+# # cloudflared is a SIDECAR, not its own Deployment
+#
+# Because the trust boundary is written as an address. The BFF resolves a
+# caller's IP from CF-Connecting-IP, and honours that header ONLY from
+# WEB_BFF_TRUSTED_PROXIES. In one pod that list is 127.0.0.1 — a peer no other
+# workload in the cluster can present. As a separate Deployment the trusted peer
+# becomes a pod IP that changes on every reschedule, and the choices are to
+# trust a CIDR (which is every pod in the range) or to keep a list in step with
+# the scheduler. Neither is a boundary.
+#
+# It also means the BFF is reachable from nothing else at all: no Service, so no
+# in-cluster path to a process holding live session tokens.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: web-bff
+  namespace: kanz-services
+  labels:
+    app.kubernetes.io/part-of: kanz
+imagePullSecrets:
+  - name: ghcr-pull
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: web-bff
+  namespace: kanz-services
+  labels:
+    app.kubernetes.io/part-of: kanz
+    # replicas: 1 IS A CORRECTNESS PIN, NOT A CAPACITY CHOICE, and this label is
+    # what stops infra/dr/failover.sh scaling it to 2 during a region cutover.
+    # Two replicas with an in-process session store sign users out at random —
+    # a failover that "worked" and an application nobody can stay logged in to.
+    kanz.io/singleton: "true"
+spec:
+  # THE SESSION STORE IS IN-PROCESS, so a second replica would answer requests
+  # for sessions it has never heard of — a user bounced between pods is signed
+  # out at random. Raising this needs a shared session store first; it is a
+  # correctness pin, not a capacity choice.
+  replicas: 1
+  revisionHistoryLimit: 5
+  selector:
+    matchLabels:
+      app: web-bff
+  template:
+    metadata:
+      labels:
+        app: web-bff
+        app.kubernetes.io/part-of: kanz
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8084"
+    spec:
+      terminationGracePeriodSeconds: 60
+      serviceAccountName: web-bff
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: web-bff
+          # NOT DIGEST-PINNED YET — declared in supplychain_test.go's
+          # mutableTagExempt, same as identity. Only release.yml signs and the
+          # admission policy requires a signature; this image entered the build
+          # matrix in #497, after the last release.
+          image: ghcr.io/eighred/web-bff:main
+          ports:
+            - { containerPort: 8084, name: http }
+          env:
+            - { name: WEB_BFF_LISTEN, value: ":8084" }
+            # THE SPA SHIPS IN THIS IMAGE at /srv/spa, so it is served on the
+            # BFF's OWN origin and the session cookie stays SameSite=Lax. A
+            # second origin would force SameSite=None — the setting CSRF defences
+            # exist to prevent. test/arch/bff_image_serves_the_spa_test.go fails
+            # the build if this path and the Dockerfile's COPY disagree.
+            - { name: WEB_BFF_STATIC_DIR, value: "/srv/spa" }
+            - { name: WEB_BFF_GATEWAY_URL, value: "http://api-gateway.kanz-services.svc:8080" }
+            # How anyone signs in (#364). The BFF exchanges a credential here and
+            # keeps the returned token server-side; the browser only ever holds
+            # the opaque session id.
+            - { name: WEB_BFF_IDENTITY_URL, value: "http://identity.kanz-services.svc:8087" }
+            # THE REAL CALLER'S ADDRESS, TRUSTED ONLY WHERE IT CANNOT BE FORGED.
+            # Behind the tunnel every request arrives from cloudflared, so without
+            # these the login limiter keys on ONE address and becomes estate-wide:
+            # one user's failed sign-ins throttle everybody. Setting the header
+            # WITHOUT the trusted list is refused at startup, because a header
+            # honoured from an untrusted peer is not a limit at all.
+            #
+            # 127.0.0.1 IS EXACT BECAUSE cloudflared IS IN THIS POD. See the
+            # header: as a separate Deployment this would have to be a pod IP or
+            # a CIDR, and neither is a boundary.
+            - { name: WEB_BFF_TRUSTED_PROXY_HEADER, value: "CF-Connecting-IP" }
+            - { name: WEB_BFF_TRUSTED_PROXIES, value: "127.0.0.1" }
+            # Sessions are httpOnly + Secure + SameSite=Lax. WEB_BFF_INSECURE_COOKIES
+            # is deliberately ABSENT: TLS terminates at Cloudflare, so a browser
+            # always speaks https to this application even though the tunnel's
+            # last hop inside the pod is plaintext loopback.
+            - { name: WEB_BFF_SESSION_TTL, value: "1h" }
+          livenessProbe:
+            httpGet: { path: /healthz, port: 8084 }
+            initialDelaySeconds: 5
+            periodSeconds: 15
+          readinessProbe:
+            httpGet: { path: /readyz, port: 8084 }
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - { name: tmp, mountPath: /tmp }
+        # THE ONLY PUBLIC SURFACE IN THE ESTATE.
+        #
+        # It dials OUT to Cloudflare and serves nothing inbound. The token is the
+        # tunnel's identity — anyone holding it can publish an origin under this
+        # hostname — so it is mounted from Vault and never written here, the same
+        # stance as every other credential (SEC-01d).
+        - name: cloudflared
+          image: docker.io/cloudflare/cloudflared:2026.7.1
+          args:
+            - tunnel
+            - --no-autoupdate
+            # Metrics on loopback so the sidecar has a liveness signal that does
+            # not require exposing it.
+            - --metrics
+            - 127.0.0.1:2000
+            - run
+          env:
+            - name: TUNNEL_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: cloudflared-tunnel
+                  key: token
+          livenessProbe:
+            httpGet: { path: /ready, port: 2000, host: 127.0.0.1 }
+            initialDelaySeconds: 10
+            periodSeconds: 15
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 65532
+            capabilities:
+              drop: ["ALL"]
+      volumes:
+        - name: tmp
+          emptyDir: {}

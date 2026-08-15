@@ -50,6 +50,31 @@ RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X github.com/eighred/kanz/
 # session tokens in memory, so the absence of a shell is doing real work here.
 FROM ghcr.io/eighred/base/distroless-static:nonroot
 COPY --from=build /out/web-bff /web-bff
+
+# THE COMPILED SPA SHIPS IN THIS IMAGE, and that is a security property rather
+# than packaging convenience.
+#
+# The BFF serves the application on its OWN origin and proxies /api/* from the
+# same hostname, so the session cookie stays httpOnly + SameSite=Lax. Splitting
+# the SPA onto a static host would make it a second origin, which forces
+# SameSite=None — the setting that makes a cookie usable cross-site, and
+# therefore the one CSRF defences exist to prevent — plus CORS-with-credentials
+# and a cookie domain kept in step with whatever the edge is called this week.
+#
+# BUILT BY THE WORKFLOW, NOT HERE. kanz-web/dist is gitignored (it is a build
+# artifact), and the build/release workflows run `npm ci && npm run build` into
+# the docker context before this file is read — the same arrangement the
+# generated Go SDK above uses, and for the same reason: no Node base image is
+# mirrored under ghcr.io/eighred/base, and mirroring one to compile TypeScript
+# in a container that ships neither is a lot of supply chain for no gain.
+#
+# WITHOUT THIS COPY the image builds, starts, serves /api and /auth perfectly,
+# and returns nothing at / — an application that is finished, green, and blank
+# in a browser. WEB_BFF_STATIC_DIR must point here;
+# test/arch/bff_image_serves_the_spa_test.go fails the build if a manifest sets
+# it to a path this file does not populate.
+COPY kanz-web/dist/ /srv/spa/
+
 USER nonroot:nonroot
 EXPOSE 8084
 ENTRYPOINT ["/web-bff"]

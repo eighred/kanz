@@ -812,6 +812,14 @@ var mutableTagExempt = map[string]string{
 		"An unsigned image is refused by the admission policy whether it is tagged or digested, so " +
 		"this deployment cannot run until the first release that includes it",
 
+	// TEMPORARY — retire on the first release that publishes this image.
+	// Same shape and same cause as identity above: web-bff entered the build
+	// matrix in #497, after the last release, so no SIGNED digest exists.
+	"infra/deploy/web-bff-deploy.yaml": "the operator surface (#371) entered the build matrix in " +
+		"#497 and no release has been cut since. An unsigned image is refused by the admission " +
+		"policy whether tagged or digested, so pinning the digest that exists today would look " +
+		"finished and fail identically",
+
 	// RETIRED 2026-07-27 by the mechanism that was supposed to retire it.
 	// infra/dr/nats/rebuild-job.yaml carried a temporary entry reading "no
 	// published digest exists until the next release. Retire on the first

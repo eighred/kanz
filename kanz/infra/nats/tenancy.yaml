@@ -443,6 +443,48 @@ data:
               }
             }
           }
+          # optimization materializes an APPROVED rebalance proposal into OMS order
+          # COMMANDS (#409). It had NO account and NO permissions block at all —
+          # not because anyone decided that, but because notDeployed listed it as
+          # "deliberately not deployed" while its manifest declared replicas: 2,
+          # and four guards including this one SKIP a service on that list. The
+          # exemption looked like a decision, so the gap looked like a choice.
+          #
+          # UNDER NATS SEMANTICS A PUBLISHER WITH NO PERMISSIONS BLOCK IS
+          # UNRESTRICTED within its account. For this service that means
+          # unrestricted publish rights for the process whose entire job is to
+          # emit order commands — the single worst place in the estate for that
+          # to be true, and it was true silently.
+          #
+          # TWO SUBJECTS, both from services/optimization/internal/publish:
+          # order.order.submit is the capital path itself, and
+          # optimization.proposal.materialized is the FACT recording WHO
+          # authorized an automated capital action — the audit record that makes
+          # auto-publish accountable, and therefore the one that must not be
+          # droppable by a broker refusal.
+          { user: "spiffe://kanz.internal/ns/kanz-services/sa/optimization"
+            permissions: {
+              publish: {
+                allow: [
+                  "order.order.submit",
+                  "optimization.proposal.materialized",
+                  # MT-02 tenant routing: the same two subjects, prefixed, for a
+                  # non-__system__ tenant. Omitting these authenticates fine and
+                  # is DENIED at publish time — which reads as a broken feature
+                  # rather than a missing grant, and only for tenants that are
+                  # not the default one.
+                  "tenant.*.order.order.submit",
+                  "tenant.*.optimization.proposal.materialized",
+                  "dlq.order.order.submit",
+                  "dlq.optimization.proposal.materialized",
+                  "$JS.API.>", "$JS.ACK.>",
+                ]
+              }
+              subscribe: {
+                allow: [ "_INBOX.>" ]
+              }
+            }
+          }
           # datamaster became a real bus.DialNATS caller when the pricing-override
           # FACT was wired (#410). It PUBLISHES ONE SUBJECT and consumes nothing:
           # the override is committed to its own outbox in the same transaction

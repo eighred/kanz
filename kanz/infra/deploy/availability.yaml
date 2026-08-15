@@ -197,6 +197,27 @@ spec:
     matchLabels:
       app: identity
 ---
+# The operator surface (#371). replicas: 1 is a CORRECTNESS pin — the session
+# store is in-process — so this budget cannot ask for a survivor during a drain:
+# maxUnavailable: 1 permits the eviction, and the rollout replaces the pod.
+#
+# THE HONEST CONSEQUENCE: draining its node signs everyone out. That is a
+# property of the in-process session store, not of this budget, and the budget
+# refusing the eviction would convert a brief sign-out into a stuck drain.
+# Raising replicas needs a shared session store first.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: web-bff
+  namespace: kanz-services
+  labels:
+    app.kubernetes.io/part-of: kanz
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      app: web-bff
+---
 apiVersion: v1
 kind: ResourceQuota
 metadata:
@@ -206,11 +227,11 @@ metadata:
     app.kubernetes.io/part-of: kanz
 spec:
   hard:
-    requests.cpu: "48"
-    requests.memory: 50688Mi
-    limits.cpu: "96"
-    limits.memory: 99Gi
-    pods: "94"
+    requests.cpu: "49"
+    requests.memory: 51712Mi
+    limits.cpu: "98"
+    limits.memory: 101Gi
+    pods: "95"
 ---
 # LimitRange gives every pod sane defaults + a ceiling, so a container with no
 # explicit resources still gets requests (schedulable, quota-counted) and can't
