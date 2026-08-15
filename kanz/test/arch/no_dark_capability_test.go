@@ -18,6 +18,15 @@ import (
 //	      nothing invokes is indistinguishable from one that does not work.
 //	#112  internal/prediction/registry — the MLOPS-01a model gate. Its own doc
 //	      carries the grep proving nobody imports it.
+//	#471  internal/regulatory/stress — the REG-01c CCAR/DFAST framework. Its
+//	      exemption is gone because internal/risk/benchmarks now grades it, which
+//	      gives it an importer reached from the risk-engine composition root.
+//	      NOTE THE LIMIT OF THAT: being BENCHMARKED is not being WIRED. Nothing
+//	      runs a firmwide stress scenario; what changed is that the maths is now
+//	      checked rather than merely present. This guard cannot see the
+//	      difference — it is the import-granularity blind spot #509 names — and
+//	      the distinction is recorded here so the deleted entry does not read as
+//	      "the stress framework is in production".
 //	#471  internal/validation — the SR 11-7 gate whose stated purpose is "no
 //	      model serves production without recorded, current validation". It had
 //	      zero importers, so every analytic served production unvalidated. Found
@@ -91,9 +100,6 @@ var darkPackageExempt = map[string]string{
 		"of the FeatureSource seam this implements, and it has zero production callers of its own " +
 		"(#509's finding, one tree over) — so the import would satisfy this guard while changing " +
 		"nothing about whether an indicator reaches a decision.",
-	"internal/regulatory/stress": "#471 (Source section) — the REG-01c CCAR/DFAST firmwide stress " +
-		"framework, in the same unwired state as the validation gate and recorded there rather " +
-		"than filed separately. Worth its own issue if it is picked up independently.",
 }
 
 func TestNoInternalCapabilityIsDarkAndUntracked(t *testing.T) {

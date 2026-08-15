@@ -217,3 +217,12 @@ func assertAllPass(t *testing.T, analytic string, cases []validation.Case, min i
 		}
 	}
 }
+
+// THE VOL SURFACE AND THE STRESS FRAMEWORK (#471, coverage 8/12 -> 10/12).
+func TestSVIVolSurfaceReproducesItsBenchmarks(t *testing.T) {
+	assertAllPass(t, "svi_vol_surface", benchmarks.SVIVolSurface(), 18)
+}
+
+func TestStressFrameworkReproducesItsBenchmarks(t *testing.T) {
+	assertAllPass(t, "stress_framework", benchmarks.StressFramework(), 13)
+}
