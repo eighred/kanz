@@ -32,6 +32,7 @@ import (
 	signalpb "github.com/eighred/kanz/kanz-schemas-go/signal/v1"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
+	"github.com/eighred/kanz/internal/alpha/score"
 	"github.com/eighred/kanz/internal/dec"
 	"github.com/eighred/kanz/pkg/bus"
 )
@@ -89,6 +90,16 @@ type Intent struct {
 	// subject or the strategy_id.
 	Source   signalpb.SignalSource
 	SourceTS *timestamppb.Timestamp
+
+	// Score is the strategy's probabilistic claim, if it makes one (#416 C2).
+	//
+	// OPTIONAL, and the two nil cases are genuinely different rather than sloppy:
+	// a TradingView alert is a rule with no probability attached, and a CLOSE that
+	// flattens a position is not a forecast about anything. What must never happen
+	// is a score that exists and states nothing, which score.Score makes
+	// impossible — its fields are unexported and New refuses a claim with no
+	// threshold, no horizon or no model.
+	Score *score.Score
 }
 
 // Result summarizes an emitted signal.
@@ -342,6 +353,15 @@ func (t *Translator) freshEnough(in Intent) error {
 }
 
 func (in Intent) validate() error {
+	// A SCORE THAT IS PRESENT MUST BE WELL-FORMED. It rides onto the immutable
+	// audit root, where a malformed one would sit forever as a datapoint claiming
+	// something nobody can interpret — and the calibration path reads it long
+	// after the engine that wrote it is gone.
+	if in.Score != nil {
+		if err := in.Score.Validate(); err != nil {
+			return fmt.Errorf("%w: %s", ErrInvalidIntent, err)
+		}
+	}
 	switch {
 	case in.SignalID == "" || in.StrategyID == "" || in.FundID == "" || in.InstrumentID == "":
 		return fmt.Errorf("%w: signal_id, strategy_id, fund_id and instrument_id are required", ErrInvalidIntent)
@@ -418,6 +438,14 @@ func (t *Translator) publishSignal(ctx context.Context, in Intent, tenant string
 		Source:       in.Source,
 		ReceivedTs:   timestamppb.New(t.now().UTC()),
 		SourceTs:     in.SourceTS,
+	}
+	// RECORDING THE SCORE IS WHAT MAKES IT FALSIFIABLE. A probability that lives
+	// only inside the engine can never be scored against what happened, so nobody
+	// can say whether a given 0.7 was right — which is the whole objection to an
+	// unfalsifiable confidence number. On the FACT, beside the instrument and the
+	// receipt time, calibration is a join rather than a reconstruction.
+	if in.Score != nil {
+		sig.AlphaScore = in.Score.Proto()
 	}
 	return t.opt.Publisher.Publish(ctx, bus.Event{
 		Subject:       SubjectSignal,

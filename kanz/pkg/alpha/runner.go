@@ -346,6 +346,7 @@ func (r *Runner) emit(ctx context.Context, engineName string, in Intent) error {
 		OrderType:    in.OrderType,
 		LimitPrice:   in.LimitPrice,
 		TimeInForce:  in.TimeInForce,
+		Score:        in.Score,
 		Source:       signalpb.SignalSource_SIGNAL_SOURCE_NATIVE_ENGINE,
 		// STAMPED WITH OUR OWN CLOCK (#416). A native decision is made HERE, in
 		// this tick, so its source time is now — and saying so is what lets the
