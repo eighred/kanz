@@ -102,8 +102,11 @@ func systemAccountUsers(t *testing.T, path string) map[string]bool {
 // tenancy.yaml now gives each of these four its own SVID AND a restrictive
 // `permissions` block scoped to the one subject space that tool exists to
 // publish (platform.mode.changed / compliance.mandate.changed.> /
-// alternatives.> / wealth.>), proven against a real broker — see
-// .superpowers/sdd/operator-svid-split-report.md. That pairing, identity +
+// alternatives.> / wealth.>), proven against a real broker at the time. (The
+// report holding that run was deleted with the rest of the plan tree on
+// 2026-07-29, so the proof is DATED EVIDENCE rather than something a reader can
+// open; what is checkable now is this guard and tenancy.yaml itself.) That
+// pairing, identity +
 // permissions, is what makes the split mean something: kanz-mandate can no
 // longer halt the platform, and kanz-halt can no longer forge a mandate.
 //

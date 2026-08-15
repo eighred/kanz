@@ -50,8 +50,9 @@ import (
 //     bus.Event (servicePublishedSubjects / publishedSubjectsIn below — the
 //     exact resolver SEC-M3e already trusts to find a service's domain
 //     publishes). jetstream.PublishMsg needs `_INBOX.>` to receive its own
-//     publish ack. It does NOT need `$JS.API.>` — proven against a real
-//     broker in .superpowers/sdd/operator-svid-split-report.md: a
+//     publish ack. It does NOT need `$JS.API.>` — established by a real-broker
+//     run whose report was deleted with the plan tree on 2026-07-29, so treat it
+//     as dated evidence and re-run it before relying on it: a
 //     publish-only tool granted `$JS.API.>` anyway would hold the full
 //     JetStream admin surface (stream/consumer create, delete, purge), a far
 //     bigger privilege than PublishMsg needs or least-privilege calls for.

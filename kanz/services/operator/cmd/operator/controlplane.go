@@ -27,8 +27,11 @@ import (
 // holds a valid SVID, so verifying one proves the caller is *some* Kanz workload and
 // nothing more. The allow-list is what makes it the gateway.
 //
-// DENY BY DEFAULT, following the api-gateway precedent (KANZ_BRAIN: "The identity
-// authority has NO anonymous mode, and adding one is the wrong fix"). There is
+// DENY BY DEFAULT, following the api-gateway precedent: the identity authority has
+// no anonymous mode, and adding one is the wrong fix. The design document that
+// first stated it was deleted on 2026-07-29; the rule survives it because the
+// gateway still implements it (services/api-gateway/internal/authz) and because
+// TestAuthorizedClientsRequiresASocket in this package fails if it stops. There is
 // deliberately no plaintext escape hatch: an env var whose only purpose is to
 // re-open an unauthenticated control plane is one manifest typo away from
 // production, and nothing needs it.

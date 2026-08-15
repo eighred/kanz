@@ -7,9 +7,11 @@ package app
 // nothing published one, nothing consumed a prediction. The platform's entire AI capability
 // was an exceptionally well-specified contract with no traffic on it.
 //
-// KANZ_BRAIN's hybrid design says why the bridge belongs HERE: features are computed in GO,
+// THE HYBRID SPLIT says why the bridge belongs HERE: features are computed in GO,
 // because the engine holds the source state, and scored in PYTHON, where the model serving
 // stack lives. The two halves were built to the same contract and never connected.
+// (The document that recorded the split was deleted on 2026-07-29; it needs no citation —
+// internal/prediction and kanz-py/kanz_inference are the two halves, in this tree.)
 //
 // The features ARE the risk measures. They are not a parallel set of numbers computed for
 // the model's benefit — that is precisely how a feature and the measure it claims to be

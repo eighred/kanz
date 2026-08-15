@@ -128,7 +128,8 @@ func (s sortedSubjects) Less(i, j int) bool { return s[i].subject < s[j].subject
 
 // permDenies reports whether perm's deny list blocks subject. archiver's
 // `publish: { deny: [">"] }` is the shape this exists for: an empty `allow`
-// list was PROVEN (service-user-permissions-report.md) not to restrict
+// list was PROVEN, by a real-broker run whose report was deleted with the plan
+// tree on 2026-07-29, not to restrict
 // anything on this nats-server version, so a truly publish-nothing service
 // must use `deny`, and this guard must honor it as authoritative over `allow`.
 func permDenies(subject string, perm publishPerm) bool {
@@ -665,8 +666,9 @@ func (rc *resolveCache) resolveParamAcrossCallSites(t *testing.T, dir string, fn
 // import would misattribute kanz-mandate's own subject to both oms and
 // compliance, which do not and must not have a compliance.mandate.changed
 // PUBLISH grant (they only subscribe to it). Each entry below was verified by
-// reading the composition root's actual call site — see
-// .superpowers/sdd/service-user-permissions-report.md.
+// reading the composition root's actual call site. (The report recording that
+// walk was deleted with the plan tree on 2026-07-29; the per-entry comments below
+// carry the reasoning that survived it, which is where it belongs.)
 var crossPackagePublishSurfaces = map[string][]string{
 	// risk-engine's RISK-10 output (EventTypeExposureRecomputed /
 	// EventTypeMeasuresComputed) is emitted by internal/risk/publish.Publisher,

@@ -89,10 +89,17 @@ func run(args []string, out *os.File) error {
 	// meant nothing could RESUME it: the platform could not be brought live.
 	//
 	// It authenticates by SPIFFE, not OIDC, and that is the decision, not a
-	// convenience (KANZ_BRAIN.md, "TWO IDENTITY PLANES"): an SSO round-trip to
+	// convenience. THE TWO IDENTITY PLANES DO NOT MEET: an SSO round-trip to
 	// stop a system whose auth may be part of the incident is a dependency on the
 	// thing you are escaping. An SVID is issued to this Job by SPIRE, and it grants
-	// no `Trade` — the two planes still do not meet.
+	// no `Trade`.
+	//
+	// The rule predates this file; the design document that first stated it was
+	// deleted on 2026-07-29, so it is restated here rather than cited — what
+	// keeps it true is in this repository: the dial below takes an SVID from the
+	// workload API and never a human credential, and the operator plane's
+	// capabilities are the api-gateway's (authz.Trade among them), which this Job
+	// is not issued and cannot obtain.
 	//
 	// Bounded by the SAME deadline as the dial, deliberately: NewSource respects an
 	// earlier parent deadline, so --timeout still means what it says. A break-glass
