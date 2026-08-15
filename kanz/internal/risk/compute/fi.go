@@ -98,6 +98,13 @@ type FIProviders struct {
 	// NOT CALLED FOR A NON-BOND. A share has no terms and is correctly absent
 	// from a bond measure; firing here would drown the signal in every equity
 	// position on the book.
+	//
+	// FIRES ONCE PER MEASURE, NOT ONCE PER POSITION. RegisterFIRisk installs four
+	// measures over the same per-position path, so one unpriceable bond in one
+	// ComputeMeasures call reports four times with the same (instrumentID,
+	// reason). Read the counter as "skip events", never as "positions dropped" —
+	// a gauge built on the latter reading overstates by the measure count, and
+	// silently changes meaning if a fifth FI measure is ever added.
 	OnSkip func(instrumentID, reason string)
 }
 

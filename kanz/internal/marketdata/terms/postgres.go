@@ -53,7 +53,26 @@ const (
 	// store's table comment lists only the three derivative kinds — the row shape
 	// fits unchanged because `kind` is TEXT with no CHECK and `underlying_id` is
 	// already nullable for swaps, which reference no single instrument either.
+	//
+	// THE CONSTANT WAS MISSING FOR A WHILE, and the way it hid is worth keeping.
+	// #518 added this comment and no declaration, so nothing could WRITE a bond
+	// row with the right kind. Every test still passed, because the read path
+	// (LatestAsOf) does not filter on kind — it resolves by (instrument_id,
+	// as_of) and decodes the blob. So the half that was broken was the half no
+	// test exercised, and the half that worked is the one the FI measures use.
+	KindBond Kind = "BOND"
 )
+
+// kinds is every declared kind, for the guard below.
+var kinds = []Kind{KindOption, KindSwap, KindFuture, KindBond}
+
+// Kinds returns every kind this store knows how to label a row with.
+//
+// EXPORTED FOR A TEST, and that is the honest reason. reference.v1.ContractTerms
+// is a oneof, and a variant added there without a Kind here is a variant that can
+// be stored under no label and found by no filtered query — which is exactly the
+// gap KindBond sat in. The test that consumes this compares the two lists.
+func Kinds() []Kind { return append([]Kind(nil), kinds...) }
 
 // ErrNoTerms reports that no terms record exists for an instrument at or before
 // the requested as_of.

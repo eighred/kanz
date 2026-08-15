@@ -49,3 +49,68 @@ func TestRevaluer_RepricesNonlinearly(t *testing.T) {
 		t.Fatal("non-option instrument must not be revalued")
 	}
 }
+
+// THE SCENARIO PATH REPORTS ITS DEGRADATIONS TOO (#509).
+//
+// RevalueOption falling back to the linear path is CORRECT here — a scenario must
+// produce a shocked value for every position, and dropping one understates the
+// loss. It is also a real degradation: an option shocked linearly carries no
+// convexity. Silent, a scenario that linearised half the option book looked
+// exactly like one that repriced it.
+func TestRevalueOption_ReportsWhenItFallsBackToLinear(t *testing.T) {
+	asOf := time.Date(2024, 1, 15, 0, 0, 0, 0, time.UTC)
+	spec := OptionSpec{
+		UnderlyingID: "UND", Strike: 100, Expiry: asOf.AddDate(1, 0, 0),
+		Type: pricing.Call, Exercise: pricing.European, Multiplier: 1,
+	}
+	base := &commonpb.Money{Amount: dec(1000, 0), CurrencyCode: "USD"}
+
+	cases := []struct {
+		name      string
+		providers GreeksProviders
+		want      string
+	}{
+		{
+			name: "no spot for the underlying",
+			providers: GreeksProviders{
+				Terms: staticTerms{"OPT": spec}, Spot: staticSpot{}, Vol: constVol(0.2),
+			},
+			want: SkipNoSpot,
+		},
+		{
+			// A NIL PROVIDER USED TO PANIC HERE, on the same struct the measure
+			// path guards — the scenario path reached it by a different route.
+			name: "a nil spot provider",
+			providers: GreeksProviders{
+				Terms: staticTerms{"OPT": spec}, Spot: nil, Vol: constVol(0.2),
+			},
+			want: SkipNoSpot,
+		},
+		{
+			name: "a nil vol provider",
+			providers: GreeksProviders{
+				Terms: staticTerms{"OPT": spec}, Spot: staticSpot{"UND": 100}, Vol: nil,
+			},
+			want: SkipNoVol,
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			var got []string
+			p := c.providers
+			p.OnSkip = func(id, reason string) { got = append(got, id+":"+reason) }
+
+			rv := NewRevaluer(p)
+			if _, ok := rv.RevalueOption(context.Background(), "OPT", asOf, base, RevalShocks{PriceFrac: -0.1}); ok {
+				t.Fatal("repriced despite a missing input — the fixture is not exercising the fallback")
+			}
+			if len(got) == 0 {
+				t.Fatalf("fell back to the linear shock and reported nothing — an option shocked "+
+					"linearly carries no convexity, and %s is invisible", c.want)
+			}
+			if got[0] != "OPT:"+c.want {
+				t.Errorf("reported %q, want OPT:%s", got[0], c.want)
+			}
+		})
+	}
+}
