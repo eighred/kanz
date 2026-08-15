@@ -1,16 +1,43 @@
-// Package alpha is the BOUNDARY between Kanz's open platform and its proprietary
-// native-alpha engines. It is the only surface the restricted alpha layer imports.
+// Package alpha is the seam between the market edge and the engines that decide.
+// It owns the plumbing an engine needs — the market view, the tick loop, and the
+// one port an intent leaves by — and it implements no strategy itself.
 //
-// # What lives here, and what deliberately does not
+// # THE HOUSE RULE THIS PACKAGE WAS BUILT AROUND IS RETIRED (#416, 2026-08-12)
 //
-// The quantitative strategy math — order-book imbalance, microprice, volume-delta
-// thresholds, cross-venue arbitrage — does NOT live in this repository (house
-// rule; see KANZ_BRAIN.md). What lives here is everything AROUND that math:
+// This header used to read: "the quantitative strategy math — order-book
+// imbalance, microprice, volume-delta thresholds, cross-venue arbitrage — does
+// NOT live in this repository (house rule; see KANZ_BRAIN.md)."
+//
+// BOTH HALVES OF THAT SENTENCE WERE FALSE BY THE TIME ANYONE READ IT. The owner
+// retired the rule on 2026-08-12 — quantitative strategy math moves INTO this
+// repository, and TradingView becomes one external signal among others rather
+// than the decision-maker. And KANZ_BRAIN.md, the document it cited as the
+// authority, was deleted on 2026-07-29 for naming a Go version and a module path
+// the repo had moved away from.
+//
+// So a reader arriving here was told not to write the thing the owner had asked
+// for, on the authority of a file they could not open. That is what a comment
+// justifying a boundary decays into, and it is why the correction is recorded
+// rather than quietly deleted: the next reader needs to know the rule EXISTED,
+// or they will wonder what internal/marketdata/indicator is doing in a codebase
+// whose alpha package says the math lives elsewhere.
+//
+// Where the math goes now:
+//
+//   - internal/marketdata/indicator — the technical indicators over the OHLCV
+//     bar store (#416 C1). Pure functions; decides nothing.
+//   - the first alpha.Engine implementation (#416 C2), which is what will make
+//     the Engine seam below stop being an empty socket.
+//
+// # What still lives here, and it is not less than before
+//
+// The seams below are unchanged and were never the restricted part:
 //
 //   - MarketView: the read-seam over the off-bus, in-memory book + trade tape.
 //     Raw, exact market state. No derived indicators.
-//   - Engine: the interface the restricted layer implements. It receives the
-//     views and returns intents. Kanz never sees inside it.
+//   - Engine: the interface a strategy implements. It receives the views and
+//     returns intents. It had zero implementations while the house rule stood,
+//     which is what made this an empty socket rather than a boundary.
 //   - Runner: owns the edge — folds depth and trades into memory, ticks the
 //     engines, and emits what they decide.
 //   - The emit port: an engine's Intent becomes a signal.v1.StrategySignal FACT
@@ -25,9 +52,11 @@
 // bus at full rate. An engine reading the book over the network would be reading
 // a bounded, periodic snapshot — it would lose exactly the per-tick latency it
 // exists for. So the engine is linked into the edge binary and reads the live
-// in-memory book directly. The restricted layer therefore imports THIS package and
-// builds its own edge binary; Kanz's open binary runs the same Runner with no
-// engines registered.
+// in-memory book directly. That was the argument for a separate edge binary built
+// by the out-of-repo layer, and it survives the rule's retirement unchanged: an
+// engine registers into market-ingest's Runner and runs beside the fold, wherever
+// its code lives. market-ingest today registers NONE, which is why the tick loop
+// is a no-op and why the gap is visible rather than assumed.
 package alpha
 
 import (
@@ -123,9 +152,15 @@ type Intent struct {
 	Nonce string
 }
 
-// Engine is what the restricted alpha layer implements. Kanz calls Evaluate on
-// every tick with the current view of every tracked (instrument, venue); the
-// engine returns whatever it wants to trade, or nothing.
+// Engine is what a strategy implements. Kanz calls Evaluate on every tick with
+// the current view of every tracked (instrument, venue); the engine returns
+// whatever it wants to trade, or nothing.
+//
+// IT HAS NO IMPLEMENTATIONS (#416 C2). The indicators an engine would read now
+// exist in internal/marketdata/indicator; what C2 still owes is the score
+// contract — an alpha score must state its target, P(return >= X%% within horizon
+// H), and carry a calibration test, because "9.8 out of 10" is unfalsifiable and
+// therefore cannot be backtested, attributed, or debugged when it loses money.
 //
 // Evaluate MUST NOT block: it runs on the edge's tick loop, and a slow engine
 // stalls the very hot path it was built for. It must also be safe to call
