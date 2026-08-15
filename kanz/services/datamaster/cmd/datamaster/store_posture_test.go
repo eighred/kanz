@@ -65,7 +65,7 @@ func (h *storeLogCapture) hasWarnContaining(substrs ...string) bool {
 func TestOpenStoresRefusesAnUnaskedForEphemeralMaster(t *testing.T) {
 	h := &storeLogCapture{}
 
-	golden, exceptions, lock, closeFn, err := openStores(context.Background(),
+	golden, exceptions, proposals, lock, closeFn, err := openStores(context.Background(),
 		config.Config{}, slog.New(h))
 	if err == nil {
 		if closeFn != nil {
@@ -76,9 +76,9 @@ func TestOpenStoresRefusesAnUnaskedForEphemeralMaster(t *testing.T) {
 			golden, exceptions)
 		return
 	}
-	if golden != nil || exceptions != nil || lock != nil {
-		t.Errorf("openStores returned stores alongside the refusal: golden=%T exceptions=%T lock=%T",
-			golden, exceptions, lock)
+	if golden != nil || exceptions != nil || proposals != nil || lock != nil {
+		t.Errorf("openStores returned stores alongside the refusal: golden=%T exceptions=%T proposals=%T lock=%T",
+			golden, exceptions, proposals, lock)
 	}
 	for _, want := range []string{
 		"DATAMASTER_DATABASE_URL",
@@ -101,7 +101,7 @@ func TestOpenStoresRefusesAnUnaskedForEphemeralMaster(t *testing.T) {
 func TestOpenStoresWarnsAndReportsUndurableWhenEphemeralIsAcceptedOutLoud(t *testing.T) {
 	h := &storeLogCapture{}
 
-	golden, exceptions, lock, closeFn, err := openStores(context.Background(),
+	golden, exceptions, proposals, lock, closeFn, err := openStores(context.Background(),
 		config.Config{AllowEphemeralMaster: true}, slog.New(h))
 	if err != nil {
 		t.Fatalf("openStores with AllowEphemeralMaster: %v", err)
@@ -113,6 +113,14 @@ func TestOpenStoresWarnsAndReportsUndurableWhenEphemeralIsAcceptedOutLoud(t *tes
 	}
 	if exceptions == nil {
 		t.Error("openStores returned a nil exception queue on the opted-in path")
+	}
+	// A NIL PROPOSAL STORE HERE WOULD BE A START-UP REFUSAL, not a fallback:
+	// run() exits 2 when dual control is armed with nowhere to record a pending
+	// override. Returning one on the ephemeral path keeps the two knobs
+	// independent — accepting an ephemeral master must not decide, silently,
+	// that maker-checker is unavailable.
+	if _, ok := proposals.(*store.MemoryProposals); !ok {
+		t.Errorf("proposals = %T on the in-memory path, want *store.MemoryProposals", proposals)
 	}
 	// Pinned deliberately: run() only applies projector.WithCycleLock when this is
 	// non-nil, so the nil IS the "every replica hits the vendor" behaviour the

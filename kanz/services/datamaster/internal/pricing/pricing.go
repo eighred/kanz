@@ -27,14 +27,15 @@
 package pricing
 
 import (
-	"encoding/json"
 	"fmt"
-	"math/big"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
+	"encoding/json"
 	"github.com/eighred/kanz/internal/dec"
+	"math/big"
 )
 
 // Candidate is one source's price for an instrument — an arbitration input.
@@ -73,12 +74,31 @@ const (
 )
 
 // Override is the audit record of a human override — appended, never mutated.
+//
+// It is also the WRITE type. Actor, Approver and Reason are three adjacent
+// strings, and passing them positionally is how two of them end up swapped by an
+// edit years from now — silently, because a transposed actor and approver still
+// type-check, still write, and still read back as a valid dual-signed record
+// naming the wrong two people.
 type Override struct {
-	Actor       string
+	Actor string
+	// Approver is the SECOND person who signed this override (#410).
+	//
+	// EMPTY MEANS SINGLE-SIGNED, and that is a real state rather than a missing
+	// field: dual control ships unarmed (DATAMASTER_REQUIRE_DUAL_CONTROL), so an
+	// override applied by one person is what most of this trail holds today. An
+	// auditor must be able to tell the two apart by reading the record, which is
+	// why this is stored and rendered rather than inferred from a config value
+	// that has since changed — "nothing configured" and "checked, and fine" must
+	// never look the same.
+	Approver    string
 	Reason      string
 	ChosenPrice *big.Rat
 	At          time.Time
 }
+
+// DualSigned reports whether a second person approved this override.
+func (o Override) DualSigned() bool { return o.Approver != "" }
 
 // MarshalJSON renders the chosen price as an exact decimal STRING.
 //
@@ -88,11 +108,16 @@ type Override struct {
 // would emit "a/b", which is exact but is not a price anyone can read.
 func (o Override) MarshalJSON() ([]byte, error) {
 	return json.Marshal(struct {
-		Actor       string    `json:"actor"`
+		Actor string `json:"actor"`
+		// Rendered ALWAYS, including as "" — omitempty would make a single-signed
+		// override indistinguishable from one written before this field existed,
+		// and from one where the reader's client simply dropped the key.
+		Approver    string    `json:"approver"`
+		DualSigned  bool      `json:"dual_signed"`
 		Reason      string    `json:"reason"`
 		ChosenPrice string    `json:"chosen_price"`
 		At          time.Time `json:"at"`
-	}{o.Actor, o.Reason, dec.Str(o.ChosenPrice), o.At})
+	}{o.Actor, o.Approver, o.DualSigned(), o.Reason, dec.Str(o.ChosenPrice), o.At})
 }
 
 // Exception is a detected break plus its override audit trail.
@@ -291,21 +316,43 @@ func (q *Queue) AddAll(exs []Exception) {
 // override history is append-only — the full audit trail of who chose what and
 // why. Unknown id ⇒ error. The chosen price must be an exact decimal: this is the
 // record of what a named human decided, and it is what a reviewer will be shown.
-func (q *Queue) Override(id, actor, reason string, chosenPrice *big.Rat, at time.Time) error {
+func (q *Queue) Override(id string, o Override) error {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	e, ok := q.byID[id]
 	if !ok {
 		return fmt.Errorf("pricing: unknown exception %q", id)
 	}
-	if actor == "" || reason == "" {
+	if err := o.Validate(); err != nil {
+		return err
+	}
+	// Copied, not aliased: a *big.Rat is a mutable pointer and the caller keeps
+	// its own reference. An append-only record the caller can still scribble on
+	// is not append-only.
+	o.ChosenPrice = new(big.Rat).Set(o.ChosenPrice)
+	e.Overrides = append(e.Overrides, o)
+	e.Status = StatusOverridden
+	return nil
+}
+
+// Validate refuses an override record that cannot stand as audit evidence.
+//
+// ONE IMPLEMENTATION, called by every store: the in-memory queue and Postgres
+// carried the same three checks separately, which is how they drift.
+func (o Override) Validate() error {
+	if o.Actor == "" || o.Reason == "" {
 		return fmt.Errorf("pricing: override requires actor and reason")
 	}
-	if chosenPrice == nil {
+	if o.ChosenPrice == nil {
 		return fmt.Errorf("pricing: override requires a chosen price")
 	}
-	e.Overrides = append(e.Overrides, Override{Actor: actor, Reason: reason, ChosenPrice: new(big.Rat).Set(chosenPrice), At: at})
-	e.Status = StatusOverridden
+	// A SELF-APPROVAL MUST NOT BE STORABLE. The handler refuses it first, but
+	// this record is the audit evidence, and a store that will write
+	// actor==approver leaves the one clause the whole control rests on defended
+	// in exactly one place — the place a future caller bypasses.
+	if o.Approver != "" && strings.EqualFold(strings.TrimSpace(o.Approver), strings.TrimSpace(o.Actor)) {
+		return fmt.Errorf("pricing: override approver %q is the actor — a self-approval is not dual control", o.Approver)
+	}
 	return nil
 }
 

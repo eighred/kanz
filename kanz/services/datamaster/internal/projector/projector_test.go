@@ -171,7 +171,7 @@ func TestRefreshDoesNotReopenAnAdjudicatedBreak(t *testing.T) {
 		t.Fatalf("no exceptions filed: %v %v", open, err)
 	}
 	id := open[0].ID
-	if err := exceptions.Override(ctx, id, "alice@kanz", "vendor confirmed", dec.Rat("101"), now); err != nil {
+	if err := exceptions.Override(ctx, id, pricing.Override{Actor: "alice@kanz", Reason: "vendor confirmed", ChosenPrice: dec.Rat("101"), At: now}); err != nil {
 		t.Fatal(err)
 	}
 

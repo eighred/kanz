@@ -52,6 +52,12 @@ type Server struct {
 	now        func() time.Time
 	metrics    http.Handler
 	mux        *http.ServeMux
+
+	// Maker-checker on the override path (#410). See dualcontrol.go.
+	proposals          store.ProposalStore
+	requireDualControl bool
+	dualTTL            time.Duration
+	overrideMetrics    *overrideMetrics
 }
 
 // Option customizes the server.
@@ -101,6 +107,10 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /v1/prices/{id}", s.handlePrice)
 	s.mux.HandleFunc("GET /v1/exceptions", s.handleExceptions)
 	s.mux.HandleFunc("POST /v1/exceptions/{id}/override", s.handleOverride)
+	// The second signature, and the list that makes an unapproved override
+	// visible rather than silently dropped (#410).
+	s.mux.HandleFunc("POST /v1/exceptions/{id}/override/approve", s.handleApproveOverride)
+	s.mux.HandleFunc("GET /v1/exceptions/pending-overrides", s.handlePendingOverrides)
 }
 
 func (s *Server) handleHealthz(w http.ResponseWriter, _ *http.Request) {
@@ -257,12 +267,8 @@ func (s *Server) handleOverride(w http.ResponseWriter, r *http.Request) {
 	//
 	// The tenant header establishes WHICH tenant is asking. It never establishes
 	// WHO. An audit record whose actor is self-asserted is not an audit record.
-	principal, ok := auth.PrincipalFromHeaders(r.Header)
-	if !ok || principal.Subject == "" {
-		writeJSON(w, http.StatusUnauthorized, map[string]string{
-			"error": "no authenticated principal — this surface is reachable only through the api-gateway, " +
-				"which is what makes the actor on an override record real",
-		})
+	subject, ok := s.authenticatedSubject(w, r)
+	if !ok {
 		return
 	}
 	// chosen_price is an exact decimal STRING. A JSON number is an IEEE-754 double
@@ -319,7 +325,7 @@ func (s *Server) handleOverride(w http.ResponseWriter, r *http.Request) {
 	// leave the client believing it recorded Bob's decision while the trail says
 	// Alice, with nothing anywhere reporting the disagreement. Same rule, same
 	// reasoning, as the optimization service's forged-issuer refusal (AUTH-01c).
-	if body.Actor != "" && body.Actor != principal.Subject {
+	if body.Actor != "" && body.Actor != subject {
 		writeJSON(w, http.StatusBadRequest, map[string]string{
 			"error": "actor is taken from the authenticated principal and must not name anyone else; " +
 				"an override signed into an append-only compliance record under another person's " +
@@ -327,17 +333,23 @@ func (s *Server) handleOverride(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	if err := s.exceptions.Override(r.Context(), id, principal.Subject, body.Reason, price, s.now()); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+	// MAKER-CHECKER (#410). Armed, this records a PENDING proposal and answers
+	// 202 — it does NOT apply. Unarmed, the override applies on one person's
+	// authority and is counted as single-signed, which is the gap this issue
+	// exists to close and, until it is armed, to measure.
+	//
+	// The reason string is required by pricing.Override.Validate, and checking it
+	// HERE means a proposal cannot be recorded that would fail only at approval
+	// time — when the person who could fix it has gone.
+	if body.Reason == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "override requires a reason"})
 		return
 	}
-	ex, ok, err := s.exceptions.Get(r.Context(), id)
-	if err != nil || !ok {
-		s.logger.Error("override recorded but read-back failed", "exception_id", id, "err", err)
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "exception store unavailable"})
+	if s.dualControlArmed() {
+		s.proposeOverride(w, r, id, subject, body.Reason, price)
 		return
 	}
-	writeJSON(w, http.StatusOK, ex)
+	s.applySingleSigned(w, r, id, subject, body.Reason, price)
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

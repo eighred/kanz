@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
-	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -102,12 +101,13 @@ func (p *PostgresExceptions) AddAll(ctx context.Context, exs []pricing.Exception
 	return nil
 }
 
-func (p *PostgresExceptions) Override(ctx context.Context, id, actor, reason string, chosenPrice *big.Rat, at time.Time) error {
-	if actor == "" || reason == "" {
-		return fmt.Errorf("store: override requires actor and reason")
-	}
-	if chosenPrice == nil {
-		return fmt.Errorf("store: override requires a chosen price")
+func (p *PostgresExceptions) Override(ctx context.Context, id string, o pricing.Override) error {
+	// ONE implementation of what a storable override is, shared with the
+	// in-memory queue. It carries the self-approval refusal, so the clause the
+	// control rests on cannot be reached around by a caller that skips the
+	// handler.
+	if err := o.Validate(); err != nil {
+		return err
 	}
 	tx, err := p.pool.Begin(ctx)
 	if err != nil {
@@ -127,10 +127,13 @@ func (p *PostgresExceptions) Override(ctx context.Context, id, actor, reason str
 	// stance as the accounting ledger's money columns: a lossless round-trip, and
 	// `double` is banned for a price. It was DOUBLE PRECISION, which rounded the
 	// figure a named human chose on its way into the audit trail.
+	// approver is '' for a single-signed override (0004). Stored rather than
+	// inferred: whether dual control was armed at the time is not recoverable
+	// from a config value that has since changed.
 	if _, err := tx.Exec(ctx, `
-		INSERT INTO exception_overrides (tenant_id, exception_id, actor, reason, chosen_price, overridden_at)
-		VALUES (current_setting('app.tenant_id'), $1, $2, $3, $4, $5)
-	`, id, actor, reason, chosenPrice.RatString(), at); err != nil {
+		INSERT INTO exception_overrides (tenant_id, exception_id, actor, approver, reason, chosen_price, overridden_at)
+		VALUES (current_setting('app.tenant_id'), $1, $2, $3, $4, $5, $6)
+	`, id, o.Actor, o.Approver, o.Reason, o.ChosenPrice.RatString(), o.At); err != nil {
 		return fmt.Errorf("append override %s: %w", id, err)
 	}
 	if _, err := tx.Exec(ctx, `
@@ -190,7 +193,7 @@ func (p *PostgresExceptions) Open(ctx context.Context) ([]pricing.Exception, err
 
 func (p *PostgresExceptions) loadOverrides(ctx context.Context, id string) ([]pricing.Override, error) {
 	rows, err := p.pool.Query(ctx, `
-		SELECT actor, reason, chosen_price, overridden_at
+		SELECT actor, approver, reason, chosen_price, overridden_at
 		FROM exception_overrides WHERE exception_id = $1 ORDER BY seq
 	`, id)
 	if err != nil {
@@ -201,7 +204,7 @@ func (p *PostgresExceptions) loadOverrides(ctx context.Context, id string) ([]pr
 	for rows.Next() {
 		var o pricing.Override
 		var price string
-		if err := rows.Scan(&o.Actor, &o.Reason, &price, &o.At); err != nil {
+		if err := rows.Scan(&o.Actor, &o.Approver, &o.Reason, &price, &o.At); err != nil {
 			return nil, fmt.Errorf("scan override %s: %w", id, err)
 		}
 		// A stored price that will not parse is a corrupt audit record. Refuse the
