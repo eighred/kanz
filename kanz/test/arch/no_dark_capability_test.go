@@ -84,6 +84,17 @@ var darkPackageExempt = map[string]string{
 		"nothing constructs a CoordinatedRegistry, which is #112 step 3. The correctness " +
 		"property that saved it from deletion — resolve by feature_set_ref, never by name — was " +
 		"asserted in three places and implemented in none; it is implemented now.",
+	"internal/risk/spotsource": "#509 — the production compute.SpotProvider, one of the two " +
+		"seams RegisterGreeks needs. It is dark because the OTHER one cannot be built: the vol " +
+		"surface needs a volsurface.QuoteProvider, which needs observed option PREMIUMS, and no " +
+		"path in this repository carries them — market-ingest subscribes one websocket per " +
+		"configured (instrument, venue) and the deployed maps are spot-only, the vendor Source is " +
+		"an unimplemented SDK seam, and backfill writes bars rather than price_observations. " +
+		"Building a QuoteProvider anyway would mean inventing premiums, which #345 rules out in " +
+		"terms this file already quotes for XVA: a SUCCESSFUL calibration of invented quotes is " +
+		"worse than a failed one. So this ships graded and unwired rather than being held back " +
+		"until the feed exists — it is the half that is real, and holding it would mean rewriting " +
+		"it later from the same evidence.",
 	"internal/collateral": "#408 — the COLL-01 margin/financing plane. The maths is written and " +
 		"unconsumed because an order carries no leverage and no margin mode; #408 holds the ruling " +
 		"on margin semantics that decides the shape of the wiring.",
