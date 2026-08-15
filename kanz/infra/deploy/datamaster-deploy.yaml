@@ -156,6 +156,38 @@ spec:
             - { name: DATAMASTER_TENANT, value: "__system__" }
             - { name: DATAMASTER_LISTEN, value: ":8080" }
             - { name: DATAMASTER_REFRESH_INTERVAL, value: "5m" }
+            # MAKER-CHECKER ON THE PRICING OVERRIDE (#410).
+            #
+            # A pricing override is a named human's signed decision to accept a price
+            # the system flagged. TRUE makes it take two people: the override is
+            # recorded as PENDING and applies only when a DIFFERENT authenticated
+            # subject approves it, with both names written into the append-only trail.
+            #
+            # IT SHIPS FALSE, for the same reason OMS_REQUIRE_MANDATE does. Turning it
+            # on converts every existing override caller's 200 into a 202 that
+            # completes only when a second person acts, and if nobody is watching the
+            # queue the exceptions simply stop being resolved: the book goes on being
+            # valued off prices the system had already flagged. That is a valuation
+            # outage delivered by a security improvement. Turn it on with the list of
+            # people holding override entitlement in front of you, and with someone
+            # owning the pending queue.
+            #
+            # OFF IS NOT UNRECORDED. Every override says whether a second person signed
+            # it, so arming this later does not make the older rows ambiguous. The
+            # number to watch meanwhile is
+            # kanz_datamaster_overrides_total{signatures="single_signed"} -- how much of
+            # this audit trail one person produced alone. Once armed,
+            # kanz_datamaster_override_proposals_total{outcome="refused_self_approval"}
+            # is the control actually firing.
+            #
+            # ARMING THIS WITHOUT DATAMASTER_DATABASE_URL IS A REFUSAL TO START, not a
+            # downgrade: there would be nowhere to record a pending override, so every
+            # one would be accepted and then lost.
+            - { name: DATAMASTER_REQUIRE_DUAL_CONTROL, value: "false" }
+            # How long a pending override stays approvable. Long enough for an approver
+            # in another timezone; short enough that a signature cannot be collected
+            # against a stale view of the book.
+            - { name: DATAMASTER_DUAL_CONTROL_TTL, value: "24h" }
             # The vendor drops. Reference and price are separate extracts with
             # separate cadences; a vendor may supply either or both. Adjust to the
             # vendors this fund actually licenses.

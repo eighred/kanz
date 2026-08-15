@@ -192,7 +192,7 @@ func TestQueue_OverrideAuditTrail(t *testing.T) {
 	}
 
 	// An analyst overrides with a chosen price.
-	if err := q.Override(id, "alice@kanz", "ICE confirmed correct after corp action", dec.Rat("130"), now); err != nil {
+	if err := q.Override(id, Override{Actor: "alice@kanz", Reason: "ICE confirmed correct after corp action", ChosenPrice: dec.Rat("130"), At: now}); err != nil {
 		t.Fatalf("override: %v", err)
 	}
 	ex, _ := q.Get(id)
@@ -207,7 +207,7 @@ func TestQueue_OverrideAuditTrail(t *testing.T) {
 		t.Errorf("overridden exception should leave the open queue")
 	}
 	// A second override appends — the trail is append-only.
-	if err := q.Override(id, "bob@kanz", "re-reviewed", dec.Rat("130"), now); err != nil {
+	if err := q.Override(id, Override{Actor: "bob@kanz", Reason: "re-reviewed", ChosenPrice: dec.Rat("130"), At: now}); err != nil {
 		t.Fatalf("second override: %v", err)
 	}
 	ex, _ = q.Get(id)
@@ -216,13 +216,13 @@ func TestQueue_OverrideAuditTrail(t *testing.T) {
 	}
 
 	// Override of an unknown id, a missing actor/reason, or no chosen price errors.
-	if err := q.Override("nope", "a", "b", dec.Rat("1"), now); err == nil {
+	if err := q.Override("nope", Override{Actor: "a", Reason: "b", ChosenPrice: dec.Rat("1"), At: now}); err == nil {
 		t.Errorf("unknown id should error")
 	}
-	if err := q.Override(id, "", "", dec.Rat("1"), now); err == nil {
+	if err := q.Override(id, Override{ChosenPrice: dec.Rat("1"), At: now}); err == nil {
 		t.Errorf("missing actor/reason should error")
 	}
-	if err := q.Override(id, "a", "b", nil, now); err == nil {
+	if err := q.Override(id, Override{Actor: "a", Reason: "b", At: now}); err == nil {
 		t.Errorf("a nil chosen price should error — an audit record must say what was chosen")
 	}
 }

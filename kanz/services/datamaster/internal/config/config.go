@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/eighred/kanz/internal/dualcontrol"
 	"github.com/eighred/kanz/pkg/secret"
 )
 
@@ -69,6 +70,27 @@ type Config struct {
 	// signed decision, and in a map it is deleted by the next rolling update
 	// (#261). No shipped manifest sets it.
 	AllowEphemeralMaster bool
+
+	// RequireDualControl (DATAMASTER_REQUIRE_DUAL_CONTROL=true) arms maker-checker
+	// on the pricing override (#410): the override is recorded as PENDING and
+	// takes effect only when a DIFFERENT authenticated person approves it.
+	//
+	// DEFAULT FALSE, DELIBERATELY. Arming it on a deploy would turn every existing
+	// override caller's 200 into a 202 that completes only when a second person
+	// acts — a valuation outage delivered by a security improvement. The control
+	// ships built and counted (kanz_datamaster_overrides_total{signatures}), and
+	// is armed with the list of override callers in hand. Same stance as
+	// OMS_REQUIRE_MANDATE and OMS_REQUIRE_VERIFIED_ACCOUNT.
+	//
+	// UNARMED IS NOT UNRECORDED: every override still says whether a second
+	// person signed it, so turning this on later does not retroactively make the
+	// old rows ambiguous.
+	RequireDualControl bool
+
+	// DualControlTTL is how long a pending override proposal stays approvable.
+	// Long enough for an approver in another timezone; short enough that a
+	// signature cannot be collected against a stale view of the book.
+	DualControlTTL time.Duration
 }
 
 // Load reads the configuration from the environment with production-safe
@@ -98,6 +120,9 @@ func Load() (Config, error) {
 		AllowSim:        boolOr("DATAMASTER_ALLOW_SIM", false),
 
 		AllowEphemeralMaster: boolOr("DATAMASTER_ALLOW_EPHEMERAL_MASTER", false),
+
+		RequireDualControl: boolOr("DATAMASTER_REQUIRE_DUAL_CONTROL", false),
+		DualControlTTL:     durationOr("DATAMASTER_DUAL_CONTROL_TTL", dualcontrol.DefaultTTL),
 
 		RefFiles:   parseVendorMap(os.Getenv("DATAMASTER_REF_FILES")),
 		PriceFiles: parseVendorMap(os.Getenv("DATAMASTER_PRICE_FILES")),

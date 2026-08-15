@@ -116,7 +116,7 @@ func run() int {
 	// scrape, including the degraded one.
 	obs.Registry.MustRegister(masterDurable)
 
-	golden, exceptions, cycleLock, closeStores, err := openStores(ctx, cfg, logger)
+	golden, exceptions, proposals, cycleLock, closeStores, err := openStores(ctx, cfg, logger)
 	if err != nil {
 		logger.Error("store init failed", "err", err)
 		return 2
@@ -124,7 +124,40 @@ func run() int {
 	defer closeStores()
 
 	readiness := &server.Readiness{}
-	httpSrv := httpserver.New(cfg.Listen, server.New(readiness, logger, cfg.Tenant, golden, exceptions, feeds, server.WithMetrics(obs.MetricsHandler())), httpserver.Standard())
+	// MAKER-CHECKER (#410). Armed by DATAMASTER_REQUIRE_DUAL_CONTROL, which
+	// defaults to false — the control is built and COUNTED here, and armed with
+	// the list of override callers in hand.
+	//
+	// ARMING WITHOUT A PROPOSAL STORE IS A REFUSAL TO START, not a downgrade to
+	// single-signature. Every override would be taken, recorded nowhere, and
+	// answered 202 — an act that neither takes effect nor reports why, which is
+	// the precise failure #410 exists to end. Falling back to the old behaviour
+	// would be worse still: an operator who set the flag would believe dual
+	// control was on while one person kept relaxing the control alone.
+	if cfg.RequireDualControl && proposals == nil {
+		logger.Error("DATAMASTER_REQUIRE_DUAL_CONTROL is set but there is nowhere to record a pending " +
+			"override, so every override would be accepted and then lost. Set DATAMASTER_DATABASE_URL, " +
+			"or unset DATAMASTER_REQUIRE_DUAL_CONTROL")
+		return 2
+	}
+	if !cfg.RequireDualControl {
+		// WARN, not Info: "one person can relax a pricing control on this
+		// deployment" is a sentence that must have been read before anyone signs
+		// off on the valuation, and Info is where it gets filtered out.
+		logger.Warn("MAKER-CHECKER IS NOT ARMED on the pricing override — one person can accept a price "+
+			"the system flagged, on their own authority (#410). Every override still records whether a "+
+			"second person signed it",
+			"arm_with", "DATAMASTER_REQUIRE_DUAL_CONTROL=true",
+			"counter", "kanz_datamaster_overrides_total{signatures=\"single_signed\"}")
+	}
+	httpSrv := httpserver.New(cfg.Listen, server.New(readiness, logger, cfg.Tenant, golden, exceptions, feeds,
+		server.WithMetrics(obs.MetricsHandler()),
+		server.WithDualControl(server.DualControl{
+			Proposals:  proposals,
+			Require:    cfg.RequireDualControl,
+			TTL:        cfg.DualControlTTL,
+			Registerer: obs.Registry,
+		})), httpserver.Standard())
 	go func() {
 		logger.Info("datamaster listening", "addr", cfg.Listen)
 		if err := httpSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -202,10 +235,10 @@ func run() int {
 // config.Load has already refused to start if the _FILE mount was DECLARED but
 // unreadable (secret.Read), so an empty DSN here can only mean none was ever
 // configured.
-func openStores(ctx context.Context, cfg config.Config, logger *slog.Logger) (store.GoldenStore, store.ExceptionStore, projector.CycleLock, func(), error) {
+func openStores(ctx context.Context, cfg config.Config, logger *slog.Logger) (store.GoldenStore, store.ExceptionStore, store.ProposalStore, projector.CycleLock, func(), error) {
 	if cfg.DatabaseURL == "" {
 		if !cfg.AllowEphemeralMaster {
-			return nil, nil, nil, nil, errors.New("no DATAMASTER_DATABASE_URL (or _FILE mount): the golden " +
+			return nil, nil, nil, nil, nil, errors.New("no DATAMASTER_DATABASE_URL (or _FILE mount): the golden " +
 				"master and the pricing-oversight EXCEPTION QUEUE would be IN-MEMORY. Every operator " +
 				"override — a named human's signed decision to accept a price the system flagged — would be " +
 				"DISCARDED by the next restart or rolling update, and it originates here rather than on the " +
@@ -222,19 +255,23 @@ func openStores(ctx context.Context, cfg config.Config, logger *slog.Logger) (st
 			"fix", "set DATAMASTER_DATABASE_URL (or its _FILE mount); the shipped manifest runs replicas: 2",
 			"gauge", "kanz_datamaster_master_durable=0")
 		masterDurable.Set(0)
-		return store.NewMemoryGoldenStore(), store.NewQueueStore(pricing.NewQueue()), nil, func() {}, nil
+		// The proposal store follows the same posture: in-memory here, which means a
+		// pending override is approvable only on the pod that took it — acceptable
+		// only because this path already MUST run exactly one replica.
+		return store.NewMemoryGoldenStore(), store.NewQueueStore(pricing.NewQueue()),
+			store.NewMemoryProposals(), nil, func() {}, nil
 	}
 	// MT-01d: every connection carries this deployment's tenant as the
 	// `app.tenant_id` GUC, so Postgres RLS scopes all reads/writes to it. A
 	// non-superuser DB role is required for FORCE RLS to apply.
 	pool, err := pg.NewTenantPool(ctx, cfg.DatabaseURL, cfg.Tenant)
 	if err != nil {
-		return nil, nil, nil, nil, err
+		return nil, nil, nil, nil, nil, err
 	}
 	// The cycle lock is keyed on the TENANT: a shared key would let one tenant's
 	// deployment starve every other tenant's projector forever.
 	masterDurable.Set(1)
-	return store.NewPostgresGolden(pool), store.NewPostgresExceptions(pool),
+	return store.NewPostgresGolden(pool), store.NewPostgresExceptions(pool), store.NewPostgresProposals(pool),
 		store.NewPostgresCycleLock(pool, cfg.Tenant), pool.Close, nil
 }
 

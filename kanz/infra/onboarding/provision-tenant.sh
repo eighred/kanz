@@ -182,7 +182,7 @@ fi
 # if a table is in neither this list nor a verified arm — a new RLS'd table
 # cannot silently widen the unchecked surface, it has to be triaged. Same shape
 # as the archiver's unbackedByDesign map.
-UNVERIFIED_RLS_TABLES="oms:orders,positions,position_fills,outbox alternatives:fund_events datamaster:golden_records,exceptions,exception_overrides wealth:households tv-sync:tv_facts venue-binance:venue_orders venue-okx:venue_orders"
+UNVERIFIED_RLS_TABLES="oms:orders,positions,position_fills,outbox alternatives:fund_events datamaster:golden_records,exceptions,exception_overrides,exception_override_proposals wealth:households tv-sync:tv_facts venue-binance:venue_orders venue-okx:venue_orders"
 
 if step storage; then
   echo "-- [1/6] verify RLS isolation is active (kanz-risk, kanz-books)"

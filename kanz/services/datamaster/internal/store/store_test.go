@@ -86,15 +86,15 @@ func runExceptionContract(t *testing.T, ctx context.Context, es ExceptionStore) 
 	}
 
 	at := time.Unix(1_700_001_000, 0).UTC()
-	if err := es.Override(ctx, ex.ID, "ops@kanz", "vendor confirmed", dec.Rat("152.40"), at); err != nil {
+	if err := es.Override(ctx, ex.ID, pricing.Override{Actor: "ops@kanz", Reason: "vendor confirmed", ChosenPrice: dec.Rat("152.40"), At: at}); err != nil {
 		t.Fatalf("override: %v", err)
 	}
 	// Override requires actor + reason.
-	if err := es.Override(ctx, ex.ID, "", "", dec.Rat("1"), at); err == nil {
+	if err := es.Override(ctx, ex.ID, pricing.Override{ChosenPrice: dec.Rat("1"), At: at}); err == nil {
 		t.Fatal("override without actor/reason should error")
 	}
 	// Unknown id errors.
-	if err := es.Override(ctx, "nope", "a", "r", dec.Rat("1"), at); err == nil {
+	if err := es.Override(ctx, "nope", pricing.Override{Actor: "a", Reason: "r", ChosenPrice: dec.Rat("1"), At: at}); err == nil {
 		t.Fatal("override unknown id should error")
 	}
 
@@ -206,7 +206,7 @@ func TestPostgresOverridePriceIsExact(t *testing.T) {
 
 	const chosen = "123456789.123456789" // 18 significant digits: a double cannot hold this
 	want := dec.Rat(chosen)
-	if err := es.Override(ctx, ex.ID, "alice@kanz", "vendor confirmed", want, time.Unix(1_700_000_001, 0).UTC()); err != nil {
+	if err := es.Override(ctx, ex.ID, pricing.Override{Actor: "alice@kanz", Reason: "vendor confirmed", ChosenPrice: want, At: time.Unix(1_700_000_001, 0).UTC()}); err != nil {
 		t.Fatal(err)
 	}
 
