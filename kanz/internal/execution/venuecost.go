@@ -49,8 +49,41 @@ import (
 
 // venueStat is one venue's running cost, in basis points of arrival notional.
 type venueStat struct {
-	sum   float64 // Σ shortfall bps, fees included
-	n     int
+	// sum is Σ(shortfall bps × notional) and weight is Σ notional, so the mean
+	// is NOTIONAL-WEIGHTED (#483).
+	//
+	// AN UNWEIGHTED MEAN WAS WRONG IN TWO WAYS AT ONCE. A 0.001 BTC fill counted
+	// as much as a 100 BTC one, so a venue's "cost" was dominated by however many
+	// small fills it happened to produce rather than by the money that went
+	// through it. And once #435 let one order be worked in fifty slices, fifty
+	// small fills arrived where one large fill used to — which under an
+	// unweighted mean is fifty votes for one decision.
+	//
+	// Weighting fixes both with one change: a parent split into fifty slices
+	// contributes EXACTLY what the same order sent whole would have contributed,
+	// because the notional is the same either way.
+	sum    float64
+	weight float64
+
+	// n counts fills, for the summary only. It is deliberately NOT the evidence
+	// floor — see decisions.
+	n int
+
+	// decisions is the set of distinct DECISIONS this venue has been measured on,
+	// where a decision is a parent order if the fill belonged to a slice and the
+	// order itself otherwise.
+	//
+	// IT IS THE EVIDENCE FLOOR, because fifty slices of one order are one piece
+	// of evidence about a venue, not fifty. Counting fills let a venue worked
+	// with an algorithm cross the floor fifty times faster — and the ranker then
+	// feeds back into where the next order is sent, so the bias compounds.
+	//
+	// BOUNDED BY minSamples, which is what makes holding a set affordable: once
+	// a venue has that many distinct decisions the floor is crossed and no
+	// further id can change the answer, so nothing more is stored. The whole stat
+	// resets when it ages out of the window.
+	decisions map[string]struct{}
+
 	last  time.Time
 	first time.Time
 }
@@ -86,7 +119,8 @@ func WithCostWindow(d time.Duration) VenueCostsOption {
 	return func(v *VenueCosts) { v.maxAge = d }
 }
 
-// WithMinSamples sets how many fills a venue needs before it may be preferred.
+// WithMinSamples sets how many distinct DECISIONS a venue needs before it may be
+// preferred (#483) — not how many fills.
 func WithMinSamples(n int) VenueCostsOption {
 	return func(v *VenueCosts) { v.minSamples = n }
 }
@@ -103,6 +137,11 @@ const (
 	// THE CONFIG LINE. Execution cost is noisy; three fills can rank a good
 	// venue below a bad one purely on which happened to catch a spread. Below
 	// this the ranker abstains and the operator's declared default stands.
+	//
+	// IT COUNTS DISTINCT DECISIONS, NOT FILLS (#483). One order worked in fifty
+	// slices is one observation of this venue under one set of market
+	// conditions; counting it as fifty would clear this floor from a single
+	// order, which is the opposite of what the floor is for.
 	DefaultMinSamples = 20
 )
 
@@ -120,14 +159,29 @@ func NewVenueCosts(opts ...VenueCostsOption) *VenueCosts {
 	return v
 }
 
-// Observe records one fill's realized shortfall, in basis points including fees.
+// Observe records one fill's realized shortfall, in basis points including fees,
+// weighted by the notional it was measured over and attributed to the DECISION
+// it belonged to.
 //
-// bps is a float64 and that is deliberate: this is a STATISTIC used to order two
-// venues, not money. The measurement itself is exact (*big.Rat, in
+// bps and notional are float64 and that is deliberate: this is a STATISTIC used
+// to order two venues, not money. The measurement itself is exact (*big.Rat, in
 // internal/execution/tca) and stays exact on the FACT and in the ledger. Nothing
 // here is added to a balance.
-func (v *VenueCosts) Observe(venue string, bps float64) {
+//
+// decision is the parent order id when this fill belonged to a slice of a worked
+// order, and the order's own id otherwise (#435, #483). It decides how much
+// EVIDENCE this venue has, which is a different question from how much its
+// measurements weigh — see venueStat.
+//
+// A NON-POSITIVE NOTIONAL IS DROPPED, NOT COUNTED AS ZERO WEIGHT. A fill nobody
+// could size cannot be weighed against one that could, and letting it through
+// with zero weight would add it to the evidence floor while contributing nothing
+// to the mean — evidence for a number it had no part in.
+func (v *VenueCosts) Observe(venue string, bps, notional float64, decision string) {
 	if venue == "" || math.IsNaN(bps) || math.IsInf(bps, 0) {
+		return
+	}
+	if notional <= 0 || math.IsNaN(notional) || math.IsInf(notional, 0) {
 		return
 	}
 	now := v.now().UTC()
@@ -135,12 +189,29 @@ func (v *VenueCosts) Observe(venue string, bps float64) {
 	defer v.mu.Unlock()
 	s := v.stats[venue]
 	if s == nil {
-		s = &venueStat{first: now}
+		s = &venueStat{first: now, decisions: map[string]struct{}{}}
 		v.stats[venue] = s
 	}
-	s.sum += bps
+	s.sum += bps * notional
+	s.weight += notional
 	s.n++
+	// BOUNDED: once the floor is crossed no further id can change the verdict, so
+	// nothing more is stored. An empty decision id is not counted as evidence —
+	// it is an unattributable measurement, and treating "" as one decision would
+	// make every such fill collapse into a single permanent sample.
+	if decision != "" && len(s.decisions) < v.minSamples {
+		s.decisions[decision] = struct{}{}
+	}
 	s.last = now
+}
+
+// mean is the notional-weighted cost, and ok=false when nothing weighable has
+// been seen. Callers hold the lock.
+func (s *venueStat) mean() (float64, bool) {
+	if s.weight <= 0 {
+		return 0, false
+	}
+	return s.sum / s.weight, true
 }
 
 // Preferred returns the cheapest venue among the candidates, and whether the
@@ -165,13 +236,22 @@ func (v *VenueCosts) Preferred(candidates []string) (string, bool) {
 	var eligible []scored
 	for _, mic := range candidates {
 		s := v.stats[mic]
-		if s == nil || s.n < v.minSamples {
+		// THE FLOOR COUNTS DECISIONS, NOT FILLS (#483). Fifty slices of one order
+		// are one piece of evidence about a venue; counting them as fifty let a
+		// venue worked with an algorithm start being preferred fifty times sooner
+		// than one worked whole, and the preference then decides where the next
+		// order goes.
+		if s == nil || len(s.decisions) < v.minSamples {
 			continue
 		}
 		if v.maxAge > 0 && now.Sub(s.last) > v.maxAge {
 			continue
 		}
-		eligible = append(eligible, scored{mic: mic, mean: s.sum / float64(s.n)})
+		m, ok := s.mean()
+		if !ok {
+			continue
+		}
+		eligible = append(eligible, scored{mic: mic, mean: m})
 	}
 	// EVERY CANDIDATE MUST BE MEASURED, OR NONE IS PREFERRED. Ranking a venue
 	// with 200 fills against one with none does not compare them — it prefers
@@ -202,10 +282,13 @@ func (v *VenueCosts) Snapshot() []VenueCostSummary {
 	defer v.mu.RUnlock()
 	out := make([]VenueCostSummary, 0, len(v.stats))
 	for mic, s := range v.stats {
-		if s.n == 0 {
+		m, ok := s.mean()
+		if !ok {
 			continue
 		}
-		out = append(out, VenueCostSummary{Venue: mic, MeanBps: s.sum / float64(s.n), Samples: s.n})
+		out = append(out, VenueCostSummary{
+			Venue: mic, MeanBps: m, Samples: s.n, Decisions: len(s.decisions),
+		})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Venue < out[j].Venue })
 	return out
@@ -215,5 +298,14 @@ func (v *VenueCosts) Snapshot() []VenueCostSummary {
 type VenueCostSummary struct {
 	Venue   string
 	MeanBps float64
-	Samples int
+	// Samples is fills; Decisions is the distinct orders those fills belonged to,
+	// counting a worked parent once however many slices it took.
+	//
+	// BOTH ARE REPORTED BECAUSE THE GAP BETWEEN THEM IS THE INTERESTING NUMBER:
+	// Samples far above Decisions means this venue's evidence comes from a few
+	// orders worked in many slices, which is exactly when a fill-counted floor
+	// would have been fooled. Decisions is the one the ranker acts on, and it
+	// stops counting at the minimum-sample floor.
+	Samples   int
+	Decisions int
 }

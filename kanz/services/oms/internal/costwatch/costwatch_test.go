@@ -11,6 +11,7 @@ import (
 	dto "github.com/prometheus/client_model/go"
 
 	"github.com/eighred/kanz/internal/dec"
+	"github.com/eighred/kanz/internal/execution"
 	"github.com/eighred/kanz/pkg/bus"
 	"google.golang.org/protobuf/proto"
 
@@ -392,5 +393,112 @@ func TestHandle_AFailedPublishIsCountedNotNacked(t *testing.T) {
 	// The metric still moved: the measurement happened, only its durable copy failed.
 	if n, _ := histogram(t, reg, "kanz_execution_shortfall_bps", "XBIN"); n != 1 {
 		t.Errorf("shortfall observations = %d, want 1", n)
+	}
+}
+
+// ===== ONE DECISION, HOWEVER MANY SLICES WORKED IT (#435, #483) =====
+
+// childPayload is a fill of a CHILD order — a slice of the parent named here.
+func childPayload(t *testing.T, orderID, parentID string, price, qty int64) []byte {
+	t.Helper()
+	fill := &orderpb.Fill{
+		FillId: "f-" + orderID, OrderId: orderID, InstrumentId: "BTC-USD",
+		Side: orderpb.Side_SIDE_BUY, Quantity: d(qty, 0), Price: d(price, 0), Venue: "XBIN",
+	}
+	st := &orderpb.OrderState{
+		OrderId: orderID, ParentOrderId: parentID, InstrumentId: "BTC-USD", Venue: "XBIN",
+		Side: orderpb.Side_SIDE_BUY, ArrivalPrice: d(100, 0),
+	}
+	b, err := proto.Marshal(&orderpb.OrderFilled{OrderId: orderID, Fill: fill, State: st})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	return b
+}
+
+// THE COST RECORD NAMES THE PARENT, so one decision does not read as N unrelated
+// ones (#483).
+//
+// order_id here is the CHILD, because that is the order that filled. But the
+// decision whose cost is being measured was the parent's, and an order worked in
+// fifty slices produces fifty records. Without this field nothing can put them
+// back together, and "what did this order cost" has fifty answers to a question
+// with one.
+func TestHandle_ACostRecordNamesTheParentOrder(t *testing.T) {
+	fb := &fakeBus{}
+	w, _ := newWatchOn(t, fb)
+
+	if err := w.Handle(context.Background(), env(), childPayload(t, "p1:0", "p1", 110, 10)); err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	if len(fb.events) != 1 {
+		t.Fatalf("published %d events, want 1", len(fb.events))
+	}
+	rec, ok := fb.events[0].Payload.(*orderpb.TransactionCostRecorded)
+	if !ok {
+		t.Fatalf("payload = %T, want TransactionCostRecorded", fb.events[0].Payload)
+	}
+	if rec.GetParentOrderId() != "p1" {
+		t.Errorf("parent_order_id = %q, want p1 — nothing downstream can regroup this order's "+
+			"slices, so one decision reads as N unrelated ones", rec.GetParentOrderId())
+	}
+	if rec.GetOrderId() != "p1:0" {
+		t.Errorf("order_id = %q, want the CHILD p1:0 — that is the order that actually filled",
+			rec.GetOrderId())
+	}
+}
+
+// AN ORDINARY ORDER CARRIES NO PARENT, and unset is the right answer rather than
+// a self-reference. A record that named itself as its own parent would make every
+// order look like a slice of something.
+func TestHandle_AnOrdinaryOrdersCostRecordHasNoParent(t *testing.T) {
+	fb := &fakeBus{}
+	w, _ := newWatchOn(t, fb)
+
+	if err := w.Handle(context.Background(), env(),
+		filledPayload(t, "XBIN", 100, 110, 10, 0, "USD")); err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	rec := fb.events[0].Payload.(*orderpb.TransactionCostRecorded)
+	if rec.GetParentOrderId() != "" {
+		t.Errorf("parent_order_id = %q on an order nobody sliced, want unset", rec.GetParentOrderId())
+	}
+}
+
+// THE VENUE RANKER IS TOLD THE DECISION, NOT THE CHILD.
+//
+// This is the half that decides where the NEXT order goes. Fifty slices of one
+// parent are one observation of this venue; fed as fifty they clear the ranker's
+// evidence floor from a single order, and the venue it then prefers is where the
+// next order is sent — so the error feeds itself.
+func TestHandle_TheRankerCountsTheParentAsOneDecision(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	// A floor of 3 DECISIONS, so five slices of one parent must not clear it.
+	costs := execution.NewVenueCosts(execution.WithMinSamples(3))
+	w := New(reg, "__system__", &fakeBus{}, costs, slog.New(slog.DiscardHandler))
+
+	for i := 0; i < 5; i++ {
+		id := "p1:" + string(rune('0'+i))
+		if err := w.Handle(context.Background(), env(), childPayload(t, id, "p1", 110, 10)); err != nil {
+			t.Fatalf("Handle: %v", err)
+		}
+	}
+
+	var summary *execution.VenueCostSummary
+	for _, s := range costs.Snapshot() {
+		if s.Venue == "XBIN" {
+			summary = &s
+		}
+	}
+	if summary == nil {
+		t.Fatal("the ranker was never fed")
+	}
+	if summary.Samples != 5 {
+		t.Errorf("Samples = %d, want 5 fills", summary.Samples)
+	}
+	if summary.Decisions != 1 {
+		t.Fatalf("Decisions = %d, want 1 — five slices of parent p1 are ONE observation of this "+
+			"venue, and counting them as five clears an evidence floor from a single order",
+			summary.Decisions)
 	}
 }

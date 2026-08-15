@@ -259,3 +259,67 @@ func labelled(labels []*dto.LabelPair, name, value string) bool {
 	}
 	return false
 }
+
+// SLICED AND WHOLE EXECUTIONS ARE TOLD APART (#435, #483).
+//
+// This is what makes "does working an order on a schedule actually help?"
+// answerable — the question #435 exists to let somebody settle. Without the
+// label, every slice of a worked order lands in the same histogram as every
+// order sent whole, and a venue's VWAP slippage blends two different execution
+// strategies into one number that describes neither.
+func TestSlippage_SlicedAndWholeExecutionsAreLabelledApart(t *testing.T) {
+	bars := &fakeBars{bars: []store.Bar{bar(90, 5), bar(90, 5)}}
+	w, reg := newWatch(t, bars)
+
+	// An ordinary order, sent whole.
+	if err := w.Handle(context.Background(), env(), record(t, 95, true)); err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	// A slice of a worked parent.
+	if err := w.Handle(context.Background(), env(), childRecord(t, 95)); err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+
+	whole := labelledHistogram(t, reg, "XBIN", "whole")
+	sliced := labelledHistogram(t, reg, "XBIN", "sliced")
+	if whole != 1 {
+		t.Errorf("worked=whole observations = %d, want 1", whole)
+	}
+	if sliced != 1 {
+		t.Errorf("worked=sliced observations = %d, want 1 — a slice of a parent order is "+
+			"indistinguishable from an order sent whole, so whether slicing helps cannot be "+
+			"answered from this data", sliced)
+	}
+}
+
+// childRecord is a cost record for a SLICE of a worked parent order.
+func childRecord(t *testing.T, fillPrice int64) []byte {
+	t.Helper()
+	r := &orderpb.TransactionCostRecorded{
+		OrderId: "p1:0", ParentOrderId: "p1", FillId: "f-2", InstrumentId: "BTC-USD",
+		Venue: "XBIN", Side: orderpb.Side_SIDE_BUY, FillPrice: d(fillPrice, 0),
+		ArrivalPrice: d(100, 0), MeasuredAt: timestamppb.New(measuredAt),
+		ArrivalAt: timestamppb.New(windowFrom), ExecutedAt: timestamppb.New(windowTo),
+	}
+	b, err := proto.Marshal(r)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	return b
+}
+
+func labelledHistogram(t *testing.T, reg *prometheus.Registry, venue, worked string) uint64 {
+	t.Helper()
+	for _, f := range gather(t, reg) {
+		if f.GetName() != "kanz_execution_vwap_slippage_bps" {
+			continue
+		}
+		for _, m := range f.GetMetric() {
+			if labelled(m.GetLabel(), "venue", venue) && labelled(m.GetLabel(), "worked", worked) &&
+				m.GetHistogram() != nil {
+				return m.GetHistogram().GetSampleCount()
+			}
+		}
+	}
+	return 0
+}
