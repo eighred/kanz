@@ -23,3 +23,12 @@ bin/
 
 # Agent worktrees (git worktree checkouts; never part of a commit)
 .claude/worktrees/
+
+# Compiled binaries. `go build ./cmd/<x>` from the module root drops the binary
+# beside the source, and one reached a commit that way (#410's branch). Untracked
+# is not enough — `git add -A` takes it.
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
