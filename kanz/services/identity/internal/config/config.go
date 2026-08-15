@@ -45,6 +45,25 @@ type Config struct {
 	LoginBurst  int
 	LoginRefill time.Duration
 
+	// OperatorRole enables AUTHENTICATED provisioning (#364) and names the role a
+	// caller must hold to create an account.
+	//
+	// EMPTY DISABLES THE ROUTES ENTIRELY rather than defaulting to a role name.
+	// Two reasons, and the second is the one that matters. Picking a default here
+	// would decide who may create accounts on someone else's platform. And an
+	// unconfigured deployment answering 403 instead of 404 tells a prober that a
+	// provisioning surface exists to be attacked; not registering the route says
+	// the truth, which is that it does not.
+	//
+	// Until this is set, cmd/kanz-invite (which needs the database credential)
+	// remains the only path — correct for bootstrapping the first operator, and
+	// not attributable to a person, which is why this exists.
+	OperatorRole string
+
+	// InviteTTL is how long a new invitation stays redeemable; zero uses the
+	// domain default.
+	InviteTTL time.Duration
+
 	// OTLPEndpoint is the OTel collector for span export. Empty ⇒ none.
 	OTLPEndpoint string
 }
@@ -61,6 +80,8 @@ func Load() (Config, error) {
 		TokenIssuer:       os.Getenv("IDENTITY_TOKEN_ISSUER"),
 		TokenAudience:     os.Getenv("IDENTITY_TOKEN_AUDIENCE"),
 		TokenTTL:          parseDuration(os.Getenv("IDENTITY_TOKEN_TTL"), 0),
+		OperatorRole:      strings.TrimSpace(os.Getenv("IDENTITY_OPERATOR_ROLE")),
+		InviteTTL:         parseDuration(os.Getenv("IDENTITY_INVITE_TTL"), 0),
 		LoginBurst:        parseInt(os.Getenv("IDENTITY_LOGIN_BURST"), 0),
 		LoginRefill:       parseDuration(os.Getenv("IDENTITY_LOGIN_REFILL"), 0),
 		OTLPEndpoint:      os.Getenv("IDENTITY_OTLP_ENDPOINT"),
