@@ -100,8 +100,35 @@ func run() int {
 	})
 	go sweepLoop(ctx, limiter)
 
-	srv, err := server.New(identity.NewPostgres(pool), signer, limiter,
-		func() any { return signer.JWKS() }, cfg.TokenIssuer, logger)
+	// AUTHENTICATED PROVISIONING (#364), when a role is named.
+	//
+	// The VERIFIER IS THE SIGNER. This service mints the tokens the gateway
+	// trusts, so checking its own signature is the same answer — reached without a
+	// network hop and without a shared secret anyone could forge with. It is also
+	// the only option available: /login and /invites/redeem must be reachable by
+	// callers holding no token, so this service cannot sit behind the
+	// NetworkPolicy that makes X-Kanz-Principal-* trustworthy anywhere else, and
+	// a header arriving here is a string the caller typed.
+	store := identity.NewPostgres(pool)
+	opts := []server.Option{}
+	if cfg.OperatorRole != "" {
+		opts = append(opts, server.WithProvisioning(server.Provisioning{
+			Verifier: signer, Store: store, OperatorRole: cfg.OperatorRole, InviteTTL: cfg.InviteTTL,
+		}))
+		logger.Info("authenticated provisioning enabled", "operator_role", cfg.OperatorRole,
+			"routes", "POST /invites, GET /invites")
+	} else {
+		// WARN, not Info. Without this the ONLY way to create an account is
+		// cmd/kanz-invite, which writes to the store directly — so every account on
+		// the estate is attributable to whoever held a DSN rather than to a person.
+		logger.Warn("authenticated provisioning is DISABLED — the only way to create an account is "+
+			"cmd/kanz-invite, which requires the database credential and records the act against "+
+			"whoever holds it rather than against a named operator",
+			"enable_with", "IDENTITY_OPERATOR_ROLE")
+	}
+
+	srv, err := server.New(store, signer, limiter,
+		func() any { return signer.JWKS() }, cfg.TokenIssuer, logger, opts...)
 	if err != nil {
 		logger.Error("server init failed", "err", err)
 		return 2

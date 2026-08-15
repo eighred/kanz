@@ -205,3 +205,149 @@ func thumbprint(key *ecdsa.PrivateKey) string {
 	sum := sha256.Sum256(pub)
 	return base64.RawURLEncoding.EncodeToString(sum[:16])
 }
+
+// ===== VERIFYING A TOKEN THIS SERVICE ISSUED (#364) =====
+//
+// # Why the identity service verifies at all, when the gateway is the platform's
+// # sole identity authority
+//
+// Every other upstream trusts the X-Kanz-Principal-* headers the gateway injects,
+// and that is sound ONLY because a NetworkPolicy makes the gateway their one
+// reachable caller. THIS SERVICE IS THE EXCEPTION AND MUST STAY THE EXCEPTION:
+// /login and /invites/redeem are reachable by people who hold no token at all —
+// that is their entire purpose — so the service cannot be placed behind that
+// policy, and a header on a request to it is a string the caller typed.
+//
+// So provisioning here authenticates the token ITSELF. That is not a second
+// identity authority competing with the gateway: this service MINTS the tokens
+// the gateway trusts, and checking its own signature is the same answer, reached
+// without a network hop and without a shared secret anybody could forge with.
+
+// ErrToken is returned for every rejected token. The REASON is deliberately not
+// distinguished in the error a caller sees — "expired" and "signed by something
+// else" told apart is a probing oracle — but it is wrapped so the service can log
+// which one it was.
+var ErrToken = errors.New("identity: token rejected")
+
+// Claims is what a verified token asserts.
+type Claims struct {
+	Subject    string
+	Tenant     string
+	Roles      []string
+	Portfolios []string
+	Expiry     time.Time
+}
+
+// HasRole reports whether the token carries role, compared exactly.
+//
+// NOT case-folded, unlike the dual-control subject comparison (#410). A role is a
+// value this platform mints and matches against a fixed set, not a human-entered
+// name — folding it would silently widen the set an operator configured, and
+// "Operator" appearing where "operator" was meant is a configuration error worth
+// failing on rather than papering over.
+func (c Claims) HasRole(role string) bool {
+	for _, r := range c.Roles {
+		if r == role {
+			return true
+		}
+	}
+	return false
+}
+
+// Verify checks a bearer token this signer issued and returns its claims.
+//
+// # Two independent reasons an algorithm-confusion token cannot verify here
+//
+// This service publishes its public key at /jwks.json, on purpose. A verifier
+// that accepted whatever the token's own header named would turn that published
+// key into a symmetric secret: sign HS256 with the key material as the HMAC
+// secret and every reader of a public endpoint can mint an operator's token.
+//
+// Two things refuse that, and it is worth being precise about which does the
+// work, because getting this wrong is how a control gets deleted as redundant:
+//
+//  1. THE ALGORITHM IS PINNED to ES256 at ParseSigned, so a token naming
+//     anything else is rejected before its signature is examined.
+//  2. THE KEY HANDED TO Claims IS AN *ecdsa.PublicKey, which cannot serve as an
+//     HMAC secret — go-jose refuses the key type outright.
+//
+// MEASURED, NOT ASSUMED: removing (1) alone does NOT let an HS256 token through,
+// because (2) still refuses it. So the pin is defence in depth TODAY and would
+// become the only control the moment key handling changed — which is exactly the
+// kind of dependency worth writing down rather than rediscovering. The test
+// asserts the OUTCOME (refused), not the mechanism, so it stays true whichever
+// of the two is doing the refusing.
+func (s *Signer) Verify(raw string, now time.Time) (*Claims, error) {
+	tok, err := jwt.ParseSigned(raw, []jose.SignatureAlgorithm{tokenAlg})
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrToken, err)
+	}
+	var (
+		std    jwt.Claims
+		custom struct {
+			Tenant     string   `json:"tenant"`
+			Roles      []string `json:"roles"`
+			Portfolios []string `json:"-"`
+		}
+		bag map[string]any
+	)
+	// The PUBLIC half verifies. Handing the private key here would work and would
+	// be wrong: nothing about verification needs it, and a verify path holding a
+	// signing key is one refactor away from being a mint path.
+	if err := tok.Claims(s.key.Public(), &std, &custom, &bag); err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrToken, err)
+	}
+	// EXPIRY IS REQUIRED, not merely validated. go-jose SKIPS the check when the
+	// claim is absent, so a token with no `exp` would otherwise verify forever —
+	// the #367 defect, on the arm this service owns. Mint always sets one; this
+	// refuses anything that does not carry one, so the two halves cannot drift.
+	if std.Expiry == nil {
+		return nil, fmt.Errorf("%w: no expiry claim, so the token would never stop being valid", ErrToken)
+	}
+	if err := std.ValidateWithLeeway(jwt.Expected{
+		Issuer:      s.issuer,
+		AnyAudience: jwt.Audience{s.audience},
+		Time:        now,
+	}, 0); err != nil {
+		// NO LEEWAY. The default is a minute either side, which is a courtesy to
+		// clock skew between independent systems; issuer and verifier are the same
+		// process here, so the only thing leeway would buy is a minute of life
+		// after expiry.
+		return nil, fmt.Errorf("%w: %v", ErrToken, err)
+	}
+	if std.Subject == "" {
+		return nil, fmt.Errorf("%w: no subject", ErrToken)
+	}
+	// Portfolios travels under the gateway's claim name, which is not a valid Go
+	// tag target here because it is a runtime constant.
+	var portfolios []string
+	if v, ok := bag[auth.ClaimPortfolios]; ok {
+		portfolios = toStrings(v)
+	}
+	return &Claims{
+		Subject:    std.Subject,
+		Tenant:     custom.Tenant,
+		Roles:      append([]string{}, custom.Roles...),
+		Portfolios: portfolios,
+		Expiry:     std.Expiry.Time(),
+	}, nil
+}
+
+// toStrings reads a JSON array of strings, ignoring anything that is not one.
+//
+// A non-string entry is DROPPED rather than failing the whole token: portfolios
+// is an entitlement list, and dropping an unreadable entry narrows access, while
+// failing open on a malformed claim would widen it.
+func toStrings(v any) []string {
+	arr, ok := v.([]any)
+	if !ok {
+		return nil
+	}
+	out := make([]string, 0, len(arr))
+	for _, e := range arr {
+		if s, ok := e.(string); ok {
+			out = append(out, s)
+		}
+	}
+	return out
+}

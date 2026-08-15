@@ -74,6 +74,11 @@ type Server struct {
 	// so a gateway configured with nothing but an issuer can find the key.
 	issuer string
 
+	// provisioning, when non-nil, enables the AUTHENTICATED invite routes. Nil
+	// means this deployment has no provisioning surface at all and the routes are
+	// not registered — see provision.go.
+	provisioning *Provisioning
+
 	// decoyHash is verified against when a subject does not exist, so a caller
 	// cannot tell "no such account" from "wrong password" BY TIMING. Without it
 	// the unknown-subject path returns in microseconds while the known-subject
@@ -86,7 +91,10 @@ type Server struct {
 // particular would turn the login route into an unbounded guessing oracle, and
 // defaulting it to "allow everything" is the kind of convenience that is
 // indistinguishable from working.
-func New(store Store, minter Minter, limiter Limiter, jwks func() any, issuer string, logger *slog.Logger) (*Server, error) {
+// Option customizes the server.
+type Option func(*Server)
+
+func New(store Store, minter Minter, limiter Limiter, jwks func() any, issuer string, logger *slog.Logger, opts ...Option) (*Server, error) {
 	switch {
 	case store == nil:
 		return nil, errors.New("identity/server: store required")
@@ -112,10 +120,32 @@ func New(store Store, minter Minter, limiter Limiter, jwks func() any, issuer st
 	if err != nil {
 		return nil, err
 	}
-	return &Server{
+	s := &Server{
 		store: store, minter: minter, limiter: limiter, logger: logger,
 		jwks: jwks, issuer: strings.TrimRight(issuer, "/"), now: time.Now, decoyHash: decoy,
-	}, nil
+	}
+	for _, o := range opts {
+		o(s)
+	}
+	// PROVISIONING IS REFUSED AT CONSTRUCTION IF IT IS HALF-WIRED, rather than at
+	// the first request. Every field is load-bearing: no verifier means the route
+	// authenticates nobody, and an empty operator role means HasRole("") decides
+	// who may create accounts — which is the one question this route exists to
+	// answer and the one nobody would notice being answered wrongly.
+	if p := s.provisioning; p != nil {
+		switch {
+		case p.Verifier == nil:
+			return nil, errors.New("identity/server: provisioning needs a verifier — this service is " +
+				"reachable without a token, so a provisioning route that does not verify one is open")
+		case p.Store == nil:
+			return nil, errors.New("identity/server: provisioning needs a store")
+		case strings.TrimSpace(p.OperatorRole) == "":
+			return nil, errors.New("identity/server: provisioning needs the operator role named — an " +
+				"empty role matches nothing, so every authenticated caller would be refused, and a " +
+				"role check nobody can pass is indistinguishable from a broken deployment")
+		}
+	}
+	return s, nil
 }
 
 // Routes registers the surface on a mux.
@@ -124,6 +154,13 @@ func (s *Server) Routes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /invites/redeem", s.redeem)
 	mux.HandleFunc("GET /jwks.json", s.jwksHandler)
 	mux.HandleFunc("GET /.well-known/openid-configuration", s.discoveryHandler)
+	// AUTHENTICATED provisioning (#364). Registered only when wired, so a
+	// deployment without it answers 404 rather than 403 — "there is no
+	// provisioning surface here" is the truthful answer to someone probing.
+	if s.provisioning != nil {
+		mux.HandleFunc("POST /invites", s.createInvite)
+		mux.HandleFunc("GET /invites", s.listInvites)
+	}
 }
 
 type loginRequest struct {
