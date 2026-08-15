@@ -234,3 +234,63 @@ func TestOKXUserData_ALargeFillIsNotWrapped(t *testing.T) {
 		t.Fatalf("healed filled quantity = %s, want %s", got, qty)
 	}
 }
+
+// A TRIGGERED STOP'S FILL IS ATTRIBUTED BY algoClOrdId (#485).
+//
+// THIS IS THE ASSERTION THE WHOLE FEATURE RESTS ON. A conditional order is not
+// the order that fills — it creates one when it fires, and OKX gives that order
+// a clOrdId OF ITS OWN. Observed on the demo API on 2026-08-15 by firing a real
+// trigger and reading the order back:
+//
+//	ordId        3833848820050333696
+//	clOrdId      O3833848819892766720   <- OKX's, not ours
+//	algoClOrdId  kanzfire1786759936     <- ours
+//
+// Read clOrdId here and the lookup misses, no FACT is published, and a REAL
+// EXECUTION GOES UNBOOKED while the venue reports success. That is the worst
+// outcome this connector can produce: the money moved and the books do not know.
+func TestUserData_ATriggeredStopsFillIsAttributedByAlgoClOrdId(t *testing.T) {
+	cap := &okxCapture{}
+	// Exactly the shape OKX pushes for a triggered stop: OKX's own generated
+	// clOrdId, and ours on algoClOrdId.
+	frame := `{"arg":{"channel":"orders"},"data":[{"instId":"BTC-USDT","ordId":"3833848820050333696",` +
+		`"clOrdId":"O3833848819892766720","algoClOrdId":"o1","state":"filled","fillSz":"1",` +
+		`"fillPx":"50000","accFillSz":"1","tradeId":"7","fillFee":"-0.05","fillFeeCcy":"USDT",` +
+		`"uTime":"1700000000000"}]}`
+	_ = okxIngesterOver([][]byte{[]byte(frame)}, cap).Run(context.Background())
+
+	var ev *orderpb.OrderFilled
+	for _, e := range cap.events {
+		if f, ok := e.Payload.(*orderpb.OrderFilled); ok {
+			ev = f
+		}
+	}
+	if ev == nil {
+		t.Fatal("a triggered stop's fill produced NO OrderFilled — the lookup missed, so a real " +
+			"execution is unbooked while the venue reports success")
+	}
+	if ev.GetOrderId() != "o1" {
+		t.Fatalf("OrderFilled names order %q, want o1 — OKX's own clOrdId was used as though it "+
+			"were ours, so the fill is attributed to an order that does not exist",
+			ev.GetOrderId())
+	}
+}
+
+// AND AN ORDINARY ORDER IS STILL ATTRIBUTED BY clOrdId. Preferring algoClOrdId
+// must not break the path every non-stop order takes — it is absent on those,
+// and an empty preference would attribute every ordinary fill to "".
+func TestUserData_AnOrdinaryFillIsStillAttributedByClOrdId(t *testing.T) {
+	cap := &okxCapture{}
+	frame := `{"arg":{"channel":"orders"},"data":[{"instId":"BTC-USDT","ordId":"312","clOrdId":"o1",` +
+		`"algoClOrdId":"","state":"filled","fillSz":"1","fillPx":"50000","accFillSz":"1",` +
+		`"tradeId":"7","fillFee":"-0.05","fillFeeCcy":"USDT","uTime":"1700000000000"}]}`
+	_ = okxIngesterOver([][]byte{[]byte(frame)}, cap).Run(context.Background())
+
+	for _, e := range cap.events {
+		if f, ok := e.Payload.(*orderpb.OrderFilled); ok && f.GetOrderId() == "o1" {
+			return
+		}
+	}
+	t.Fatal("an ordinary fill was not attributed by clOrdId — preferring algoClOrdId broke the " +
+		"path every non-stop order takes")
+}

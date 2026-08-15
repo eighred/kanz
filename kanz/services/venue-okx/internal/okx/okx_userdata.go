@@ -31,17 +31,33 @@ type okxOrdersMsg struct {
 		Channel string `json:"channel"`
 	} `json:"arg"`
 	Data []struct {
-		InstID     string `json:"instId"`
-		OrdID      string `json:"ordId"`
-		ClOrdID    string `json:"clOrdId"`
-		State      string `json:"state"`
-		FillSz     string `json:"fillSz"`
-		FillPx     string `json:"fillPx"`
-		AccFillSz  string `json:"accFillSz"`
-		TradeID    string `json:"tradeId"`
-		FillFee    string `json:"fillFee"`
-		FillFeeCcy string `json:"fillFeeCcy"`
-		UTime      string `json:"uTime"`
+		InstID  string `json:"instId"`
+		OrdID   string `json:"ordId"`
+		ClOrdID string `json:"clOrdId"`
+		// AlgoClOrdID IS OUR ID WHEN THE ORDER CAME FROM A TRIGGER (#485).
+		//
+		// A conditional or trigger order placed on /trade/order-algo does not
+		// become the order that fills — it CREATES one when it fires, and OKX
+		// gives that order a clOrdId OF ITS OWN, prefixed "O". Ours is not lost:
+		// it rides on algoClOrdId. Measured against the demo API on 2026-08-15 by
+		// firing a real trigger and reading the order back:
+		//
+		//	ordId        3833848820050333696
+		//	clOrdId      O3833848819892766720   <- OKX's, not ours
+		//	algoClOrdId  kanzfire1786759936     <- ours
+		//
+		// Without this field the fill would arrive keyed by an id this platform has
+		// never seen, Lookup would miss, and a real execution would go unbooked
+		// while the venue reported success.
+		AlgoClOrdID string `json:"algoClOrdId"`
+		State       string `json:"state"`
+		FillSz      string `json:"fillSz"`
+		FillPx      string `json:"fillPx"`
+		AccFillSz   string `json:"accFillSz"`
+		TradeID     string `json:"tradeId"`
+		FillFee     string `json:"fillFee"`
+		FillFeeCcy  string `json:"fillFeeCcy"`
+		UTime       string `json:"uTime"`
 	} `json:"data"`
 }
 
@@ -91,7 +107,14 @@ func (i *OKXUserDataIngester) handle(ctx context.Context, raw []byte) error {
 		if !ok || fsz.Sign() <= 0 {
 			continue // not a fill (state change only)
 		}
-		st, ok := i.lookup.Lookup(d.ClOrdID)
+		// OUR ID, WHICHEVER FIELD CARRIES IT. algoClOrdId when the order was
+		// created by a trigger firing, clOrdId when we placed it directly. Never
+		// both, and never OKX's own generated clOrdId — see AlgoClOrdID above.
+		orderID := d.ClOrdID
+		if d.AlgoClOrdID != "" {
+			orderID = d.AlgoClOrdID
+		}
+		st, ok := i.lookup.Lookup(orderID)
 		if !ok {
 			continue
 		}
@@ -107,20 +130,20 @@ func (i *OKXUserDataIngester) handle(ctx context.Context, raw []byte) error {
 		accFilled, aok := ParseDec(d.AccFillSz)
 		if !qok || !pok || !aok {
 			return fmt.Errorf("okx: order %s fill is not representable as a Decimal "+
-				"(fillSz=%q fillPx=%q accFillSz=%q)", d.ClOrdID, d.FillSz, d.FillPx, d.AccFillSz)
+				"(fillSz=%q fillPx=%q accFillSz=%q)", orderID, d.FillSz, d.FillPx, d.AccFillSz)
 		}
 		leaves, lok := SubDec(st.GetOrderedQuantity(), accFilled)
 		if !lok {
-			return fmt.Errorf("okx: order %s leaves quantity is not representable as a Decimal", d.ClOrdID)
+			return fmt.Errorf("okx: order %s leaves quantity is not representable as a Decimal", orderID)
 		}
 		feeMoney, feeOK := okxWSFee(d.FillFee, d.FillFeeCcy)
 		if !feeOK {
 			return fmt.Errorf("okx: order %s fee %q %s is not representable as a Decimal",
-				d.ClOrdID, d.FillFee, d.FillFeeCcy)
+				orderID, d.FillFee, d.FillFeeCcy)
 		}
 		fill := &orderpb.Fill{
 			FillId:           d.InstID + "-" + d.TradeID,
-			OrderId:          d.ClOrdID,
+			OrderId:          orderID,
 			InstrumentId:     st.GetInstrumentId(),
 			Side:             st.GetSide(),
 			Quantity:         qty,
@@ -141,16 +164,16 @@ func (i *OKXUserDataIngester) handle(ctx context.Context, raw []byte) error {
 			AsOf:           timestamppb.New(uTime(d.UTime)),
 		}
 		subject := "order.order.partially_filled"
-		var payload proto.Message = &orderpb.OrderPartiallyFilled{OrderId: d.ClOrdID, Fill: fill, State: healed}
+		var payload proto.Message = &orderpb.OrderPartiallyFilled{OrderId: orderID, Fill: fill, State: healed}
 		if d.State == "filled" {
 			subject = "order.order.filled"
-			payload = &orderpb.OrderFilled{OrderId: d.ClOrdID, Fill: fill, State: healed}
+			payload = &orderpb.OrderFilled{OrderId: orderID, Fill: fill, State: healed}
 		}
 		if err := i.pub.Publish(ctx, bus.Event{
 			Subject: subject, EventType: subject,
 			EventClass: envelopepb.EventClass_EVENT_CLASS_FACT, SchemaVersion: 1, Domain: "order",
-			EventTime: time.Now().UTC(), PartitionKey: d.ClOrdID, TenantID: i.tenant,
-			CausationID: d.ClOrdID, Payload: payload,
+			EventTime: time.Now().UTC(), PartitionKey: orderID, TenantID: i.tenant,
+			CausationID: orderID, Payload: payload,
 		}); err != nil {
 			return err
 		}
