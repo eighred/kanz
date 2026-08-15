@@ -75,6 +75,14 @@ jobs:
             dockerfile: kanz/services/compliance/Dockerfile
           - service: api-gateway
             dockerfile: kanz/services/api-gateway/Dockerfile
+          # The client stack (#364, #371) — see build.yml. Held identical to that
+          # matrix by TestReleaseMatrixCoversEveryBuiltService: a release that
+          # ships a subset is worse than none, because the gap is invisible until
+          # a cluster pulls an unsigned image the admission policy then refuses.
+          - service: identity
+            dockerfile: kanz/services/identity/Dockerfile
+          - service: web-bff
+            dockerfile: kanz/services/web-bff/Dockerfile
           - service: archiver
             dockerfile: kanz/services/archiver/Dockerfile
           - service: lake-sink

@@ -1,0 +1,55 @@
+# syntax=docker/dockerfile:1
+#
+# web-bff container. Distroless + static binary.
+#
+# The backend for frontend the web application talks to (#371). It holds the
+# server-side session and proxies /api/* to the gateway's /v1/* as the session's
+# caller.
+#
+# THE POINT OF THIS PROCESS IS THAT THE TOKEN NEVER LEAVES IT. The browser holds
+# an opaque, httpOnly session id and nothing else; the ES256 token identity mints
+# stays here. A token on this platform carries kanz-trader (moves capital) or
+# kanz-operator (writes venue keys, drains nodes), so a token reachable from JS
+# turns one XSS anywhere in the app into a silent, full-authority credential
+# theft. That property is the reason this service exists rather than the SPA
+# calling the gateway directly.
+#
+# It follows that the SESSION STORE is not an implementation detail of a single
+# pod: sessions live server-side, so more than one replica needs a shared store
+# or a user's next request lands on a pod that has never heard of them.
+#
+# Authority remains the GATEWAY's. This proxies; it does not decide. The
+# capability mux (authz.Read/Trade/Operate) is the only authority, and a screen
+# the SPA renders is refused there if the session's token does not permit it.
+#
+# Build context is the repo ROOT, not kanz/: the module's go.mod replaces
+# github.com/eighred/kanz/kanz-schemas-go => ../kanz-schemas/gen/go, which is
+# generated-not-committed (EVT-15a). The build workflow runs `buf generate`
+# first, so both trees sit side by side in the context. Build with:
+#   docker build -f kanz/services/web-bff/Dockerfile .
+FROM ghcr.io/eighred/base/golang:1.26.5 AS build
+WORKDIR /src
+ENV GOFLAGS=-mod=mod
+
+# Dependency layer: go.mod/go.sum + the generated SDK the replace points at,
+# so `go mod download` is cached across source-only changes.
+COPY kanz-schemas/gen/go/ ./kanz-schemas/gen/go/
+COPY kanz/go.mod kanz/go.sum ./kanz/
+WORKDIR /src/kanz
+RUN go mod download
+
+COPY kanz/ ./
+# CGO off => a fully static binary, which is what distroless/static requires.
+# VERSION is stamped into the binary (internal/version, #143). Unset here means
+# the image reports "unstamped" rather than a plausible-looking "dev".
+ARG VERSION=
+RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X github.com/eighred/kanz/internal/version.stamped=${VERSION}" \
+      -o /out/web-bff ./services/web-bff/cmd/web-bff
+
+# Distroless static: no shell, no libc, no package manager. This image holds live
+# session tokens in memory, so the absence of a shell is doing real work here.
+FROM ghcr.io/eighred/base/distroless-static:nonroot
+COPY --from=build /out/web-bff /web-bff
+USER nonroot:nonroot
+EXPOSE 8084
+ENTRYPOINT ["/web-bff"]
