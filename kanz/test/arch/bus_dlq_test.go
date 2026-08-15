@@ -478,9 +478,10 @@ func usesRedriver(f *ast.File) bool {
 // found the order it had itself just created, on redelivery, and acked without
 // checking whether the venue call that followed had actually finished — the
 // failure never reached the DLQ, and the order sat at ROUTED forever. See
-// services/oms/internal/order/reconcile.go for the fix (venue_ack_at) and
-// .superpowers/sdd/withretry-narrowing-report.md for the per-call-site
-// evidence behind every entry below (and every refusal).
+// services/oms/internal/order/reconcile.go for the fix (venue_ack_at). The
+// per-call-site evidence behind every entry below was written up in a report that
+// was deleted with the plan tree on 2026-07-29 — the surviving copy is the
+// justification carried on each entry in this file, which is why those are long.
 //
 // Only the consumer.Subscribe path is at stake: SubscribeBroadcast and
 // SubscribeBroadcastReady never retry (consumer.go builds no retry loop around
@@ -578,8 +579,7 @@ var retryCertifiedConsumers = map[string]string{
 
 	"services/oms/cmd/oms/main.go:runConsumers": "oms: dispatches handleSubmit, handleCancel, handleAmend " +
 		"(order.Service.Handle) and position.Projector.Handle (fills), re-derived fresh against " +
-		"250fe00 rather than assumed fixed — see .superpowers/sdd/oms-recert-report.md for the " +
-		"full per-failure-point walk. handleSubmit: every failure point after store.Create either " +
+		"250fe00 rather than assumed fixed. handleSubmit: every failure point after store.Create either " +
 		"redoes unexecuted work (resume's Unknown+no-ack -> ActionRedrive re-drives Route/Save/" +
 		"EmitRouted/Execute, and SimVenue.Execute is idempotent by its own executed-fills record, " +
 		"venue/internal/execution/venue.go:170-221) or completes an interrupted terminal " +
@@ -680,8 +680,9 @@ func TestNoBusConsumerWiresRetryWhileHandlersResumeByAcking(t *testing.T) {
 			"forever (fixed since; see services/oms/internal/order/reconcile.go).\n\n"+
 			"To wire WithRetry here: read every handler this call site dispatches, add a "+
 			"named entry to retryCertifiedConsumers in this file with the code-evidence "+
-			"justification for each one, and record it in "+
-			".superpowers/sdd/withretry-narrowing-report.md — the same bar every entry "+
+			"justification for each one. THE ENTRY IS THE RECORD — do not write it up in a "+
+			"separate plan document: that tree was deleted on 2026-07-29 and the estate's rule "+
+			"is that durable context lives beside the code. The same bar every entry "+
 			"already in that map had to clear.",
 			strings.Join(uncertified, ", "))
 	}

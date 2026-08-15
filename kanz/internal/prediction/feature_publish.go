@@ -5,8 +5,11 @@
 //
 // # Where Go runs in the prediction layer
 //
-// Per KANZ_BRAIN's hybrid architecture: features are COMPUTED in
+// THE HYBRID SPLIT, and it is verifiable from this repository rather than from
+// the design document that first stated it (deleted 2026-07-29): features are COMPUTED in
 // Go (the engine has the source state) and PUBLISHED to the bus.
+// services/risk-engine/internal/app/features.go is the Go half and
+// kanz-py/kanz_inference is the Python one.
 // Inference is computed in Python (model serving stack lives
 // there). Predictions flow back to Go via the bus (streaming) or
 // gRPC (sync). PRED-03 is the first half of that loop: Go →

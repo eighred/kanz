@@ -8,13 +8,19 @@
 //
 // # What this surface intentionally omits
 //
-// Per the KANZ_BRAIN.md anti-decision "all state changes must be
-// event-driven", this interface is **query + scenario + health** only.
+// ALL STATE CHANGES ARE EVENT-DRIVEN, so this interface is **query + scenario +
+// health** only.
 // There is no Apply, no Mutate, no Command method. State arrives via
 // the bus (RISK-04 ingests domain/state FACTs); risk-output events
 // leave via the bus (RISK-10 publishes them). Callers that need
 // notifications on risk-output updates subscribe to the bus directly,
 // not through this interface.
+//
+// The design document that first recorded the rule was deleted on 2026-07-29, so
+// the rule is not left resting on it: test/arch/risk_engine_is_query_only_test.go
+// fails if a
+// mutating method appears on this interface, which is the shape the rule reduces
+// to at this boundary.
 //
 // # Versioning
 //

@@ -13,8 +13,13 @@ import (
 // trusted completely.
 //
 // These tests pin the replacement. The rule they encode is the one the api-gateway
-// already follows (KANZ_BRAIN: "The identity authority has NO anonymous mode"):
-// absence of configuration must never quietly become trust.
+// already follows — the identity authority has no anonymous mode — and its point
+// is that absence of configuration must never quietly become trust.
+//
+// THESE TESTS ARE THE ENFORCEMENT. The design document that first recorded the
+// rule was deleted on 2026-07-29, so a comment citing it would point at nothing;
+// what makes the rule real here is that removing the socket check turns these
+// red.
 
 func TestAuthorizedClientsRequiresASocket(t *testing.T) {
 	// Without the workload-API socket there is no SVID, so the server cannot

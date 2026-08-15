@@ -230,8 +230,11 @@ func runEngine(ctx context.Context, cfg config.Config, readiness *server.Readine
 	// capability was a well-specified contract with no traffic on it, and the brief's next
 	// fifteen layers were all to be built on top of it.
 	//
-	// KANZ_BRAIN's hybrid design says features are computed in GO — the engine holds the
-	// source state — and scored in PYTHON, where the model serving stack lives. This is the
+	// THE HYBRID SPLIT: features are computed in GO — the engine holds the
+	// source state — and scored in PYTHON, where the model serving stack lives. The
+	// document that first stated it was deleted on 2026-07-29; the split is observable now
+	// in the two halves themselves: internal/prediction publishes, kanz-py/kanz_inference
+	// scores. This is the
 	// Go half, finally connected: every recompute turns the engine's OWN measures
 	// (GrossExposure, VaR99) into a FeatureVector and publishes it on
 	// inference.feature.computed, which is the subject the Python streaming worker has

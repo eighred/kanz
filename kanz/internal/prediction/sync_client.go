@@ -76,10 +76,26 @@ type SyncClientOptions struct {
 	Credentials credentials.TransportCredentials
 }
 
-// DefaultSyncClientOptions returns conservative defaults. Tune per
-// deployment — the <50ms latency target (KANZ_BRAIN) is a server-
-// side number; the client timeout should be a touch more generous
-// (allow occasional spikes without firing the breaker).
+// DefaultSyncClientOptions returns conservative defaults. Tune per deployment.
+//
+// THE 200ms IS A CHOSEN BUDGET, NOT A DERIVED ONE, and the previous comment
+// implied otherwise: it said the client should be "a touch more generous" than a
+// "<50ms latency target (KANZ_BRAIN)". Both halves fail on inspection. 200ms is
+// four times 50ms, not a touch. And there is NO 50ms target in this repository —
+// no SLO, no alert, no dashboard, no metric; the number existed only in that
+// comment, attributed to a document deleted on 2026-07-29.
+//
+// So the honest statement is: NOTHING MEASURES INFERENCE SERVING LATENCY. The
+// nearest thing is the risk-engine/recompute-latency SLO and its
+// docs/runbooks/inference-latency.md runbook, and both are about the CALLER —
+// they fire when this breaker opens, which is a symptom of the server being slow
+// rather than a measurement of it.
+//
+// Until something measures the server, 200ms is a bound chosen to keep a slow
+// model from stalling a caller, not a figure any server was held to. Tightening
+// it needs the measurement first: a timeout tuned against an imagined target
+// trips on real traffic and opens the breaker, which reads as the model being
+// down.
 func DefaultSyncClientOptions() SyncClientOptions {
 	return SyncClientOptions{
 		Timeout:          200 * time.Millisecond,
