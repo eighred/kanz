@@ -156,7 +156,7 @@ func applySchema(t *testing.T, pool *pgxpool.Pool) {
 	// table missing from here does not fail the FIRST gated run — it fails the
 	// SECOND, on "already exists", which reads as a broken migration rather than
 	// an incomplete teardown.
-	if _, err := pool.Exec(ctx, `DROP TABLE IF EXISTS exception_override_proposals, exception_overrides, exceptions, golden_records CASCADE`); err != nil {
+	if _, err := pool.Exec(ctx, `DROP TABLE IF EXISTS outbox, exception_override_proposals, exception_overrides, exceptions, golden_records CASCADE`); err != nil {
 		t.Fatalf("drop: %v", err)
 	}
 	files, err := filepath.Glob(filepath.Join(migrationDir, "*.sql"))

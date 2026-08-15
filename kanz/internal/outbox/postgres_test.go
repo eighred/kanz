@@ -61,6 +61,20 @@ func newPool(t *testing.T, tenant string) *pgxpool.Pool {
 	return pool
 }
 
+// omsMigrations is where this test gets a real outbox table.
+//
+// IT REACHES INTO A CONSUMER'S MIGRATIONS, and that is deliberate rather than
+// tidy. internal/outbox owns no database: the table is created per service, by
+// that service's own migrations, because a migration applies to one database.
+// The OMS's copy is the reference one, so this package's durable tests replay it.
+//
+// The path was "../../migrations" while this package lived under
+// services/oms/internal/outbox. Promoting it to internal/outbox (#410) left the
+// literal pointing at kanz/migrations, which does not exist — so every Postgres
+// test here failed with "glob migrations: found 0", and only in CI, because
+// TEST_POSTGRES_URL is unset on a developer box and they all skip.
+const omsMigrations = "../../services/oms/migrations"
+
 // applySchema recreates the schema and replays the OMS migrations into it. It
 // runs the REAL migration files rather than a hand-written CREATE TABLE, so a
 // column this package reads and 0006 does not create fails here instead of in
@@ -79,7 +93,7 @@ func applySchema(t *testing.T) {
 	if _, err := admin.Exec(ctx, `CREATE SCHEMA `+testSchema); err != nil {
 		t.Fatalf("create schema: %v", err)
 	}
-	files, err := filepath.Glob(filepath.Join("../../migrations", "*.sql"))
+	files, err := filepath.Glob(filepath.Join(omsMigrations, "*.sql"))
 	if err != nil || len(files) == 0 {
 		t.Fatalf("glob migrations: %v (found %d)", err, len(files))
 	}
