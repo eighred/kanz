@@ -8,6 +8,8 @@ import (
 
 	"github.com/eighred/kanz/internal/dec"
 	"github.com/eighred/kanz/internal/execution"
+	"github.com/eighred/kanz/internal/orderid"
+	"strings"
 )
 
 // The OMS now REFUSES AT ADMISSION an order type this connector does not declare
@@ -158,5 +160,55 @@ func TestOKXOrderBody_MarketIsUnaffectedByTimeInForce(t *testing.T) {
 	}
 	if got := body["ordType"]; got != "market" {
 		t.Errorf("ordType = %q, want market", got)
+	}
+}
+
+// ===== AN ORDER ID OKX CANNOT ACCEPT IS REFUSED WITH THE REASON =====
+//
+// Established by probing OKX's demo API on 2026-08-15: it accepts letters and
+// digits only, at most 32 characters, and answers anything else with
+// `51000 Parameter clOrdId error` — which does not say which of a 36-character
+// UUID's characters was the problem.
+//
+// api-gateway minted order ids with uuid.NewString(), so EVERY order submitted
+// through the HTTP gateway was unplaceable here: admitted, stored, its
+// ORDER_ACCEPTED FACT published, then refused by the exchange. Binance accepts
+// hyphens and 36 characters, so the same order traded normally there — which is
+// why nothing noticed.
+func TestOKXOrderBody_RefusesAnOrderIDOKXCannotAccept(t *testing.T) {
+	for _, tt := range []struct{ name, id string }{
+		{"a hyphenated UUID, as api-gateway used to mint", "3f9a1c2e-0b7d-4e11-9a6f-2c8d5e4b7a13"},
+		{"33 characters", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+		{"an underscore", "kanz_order_1"},
+		{"a dot", "kanz.order.1"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			st := tifProbe(orderpb.TimeInForce_TIME_IN_FORCE_GTC)
+			st.OrderId = tt.id
+			_, err := okxOrderBody(st, "BTC-USDT")
+			if err == nil {
+				t.Fatalf("order id %q was sent to OKX — it comes back as \"Parameter clOrdId "+
+					"error\", which names neither the rule nor the character", tt.id)
+			}
+			if !strings.Contains(err.Error(), "clOrdId") {
+				t.Errorf("error = %q, want it to name the venue's field so an operator knows "+
+					"what to change", err)
+			}
+		})
+	}
+}
+
+// AND THE IDS THE ESTATE ACTUALLY MINTS ARE ACCEPTED. A rule that refused
+// everything would be a trading outage wearing a control's shape.
+func TestOKXOrderBody_AcceptsTheIdsThisEstateMints(t *testing.T) {
+	for _, id := range []string{
+		"8d1f0c3b9a2e4d5f6071829304a5b6c7", // signal fan-out, and now the gateway
+		orderid.Mint(),                     // freshly minted
+	} {
+		st := tifProbe(orderpb.TimeInForce_TIME_IN_FORCE_GTC)
+		st.OrderId = id
+		if _, err := okxOrderBody(st, "BTC-USDT"); err != nil {
+			t.Errorf("order id %q was refused: %v", id, err)
+		}
 	}
 }

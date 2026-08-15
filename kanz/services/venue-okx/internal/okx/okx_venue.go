@@ -12,6 +12,7 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"github.com/eighred/kanz/internal/dec"
+	"github.com/eighred/kanz/internal/orderid"
 	"github.com/eighred/kanz/internal/venueadapter/exchangeauth"
 )
 
@@ -172,6 +173,17 @@ func okxOrderBody(st *orderpb.OrderState, instID string) (map[string]string, err
 	side, err := okxSide(st.GetSide())
 	if err != nil {
 		return nil, err
+	}
+	// THE ORDER ID IS THE VENUE'S CLIENT ORDER ID, AND OKX IS THE STRICTEST JUDGE
+	// OF IT: letters and digits only, at most 32 characters. An id that breaks
+	// either rule comes back as `51000 Parameter clOrdId error`, which tells an
+	// operator nothing about which of their 36 characters was the problem.
+	//
+	// Refusing here names the rule. It is a backstop rather than the fix — the
+	// gateway now MINTS ids that satisfy it (internal/orderid) — but a client may
+	// supply its own order id, and this is the only place that knows OKX's rule.
+	if err := orderid.Valid(st.GetOrderId()); err != nil {
+		return nil, fmt.Errorf("okx: %w", err)
 	}
 	body := map[string]string{
 		"instId":  instID,

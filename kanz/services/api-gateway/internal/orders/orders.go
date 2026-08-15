@@ -15,7 +15,6 @@ import (
 	commandpb "github.com/eighred/kanz/kanz-schemas-go/command/v1"
 	envelopepb "github.com/eighred/kanz/kanz-schemas-go/envelope/v1"
 	orderpb "github.com/eighred/kanz/kanz-schemas-go/order/v1"
-	"github.com/google/uuid"
 	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/proto"
 	"time"
@@ -24,6 +23,8 @@ import (
 	"github.com/eighred/kanz/pkg/bus"
 	"github.com/eighred/kanz/services/api-gateway/internal/authz"
 	"github.com/eighred/kanz/services/api-gateway/internal/middleware"
+
+	"github.com/eighred/kanz/internal/orderid"
 )
 
 // Order command subjects (mirror services/oms/internal/order; kept local so the
@@ -80,7 +81,14 @@ func (h *Handler) submit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if cmd.GetOrderId() == "" {
-		cmd.OrderId = uuid.NewString()
+		// NOT uuid.NewString(). The order id is stamped directly as the venue's
+		// client order id, and OKX refuses a clOrdId that is longer than 32
+		// characters or contains anything but letters and digits — so a
+		// hyphenated 36-character UUID made every order minted here UNPLACEABLE
+		// at OKX, while Binance accepted the same id and traded normally.
+		// orderid.Mint gives the same 128 bits in 32 hex characters, which is
+		// also the shape the signal fan-out has always produced.
+		cmd.OrderId = orderid.Mint()
 	}
 	// Bind identity: the gateway is the sole issuer authority — it overrides any
 	// client-supplied metadata so the issuer cannot be forged.

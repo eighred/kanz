@@ -40,14 +40,16 @@
 package schedule
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"math/big"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/eighred/kanz/internal/execution/algo"
+	"github.com/eighred/kanz/internal/orderid"
 )
 
 // ErrNoSchedule is returned for a parent that carries no working schedule. It is
@@ -58,26 +60,16 @@ import (
 var ErrNoSchedule = errors.New("schedule: parent order carries no execution schedule")
 
 // ErrUnusableParentID refuses a parent whose order ID cannot safely derive child
-// IDs — see childSeparator. Admission refuses such an order outright; this is the
+// IDs — see internal/orderid. Admission refuses such an order outright; this is
+// the
 // backstop for one that reached the store anyway.
 var ErrUnusableParentID = errors.New("schedule: parent order id cannot derive unambiguous child ids")
 
-// childSeparator joins a parent order ID to a slice index.
-//
-// A COLON, AND THE PARENT ID IS CHECKED FOR IT RATHER THAN ASSUMED FREE OF IT.
-//
-// The obvious claim to write here is "order ids are UUIDs and a UUID contains no
-// colon". IT IS FALSE IN THIS ESTATE, and believing it would be a real defect:
-// the gateway only DEFAULTS order_id to a UUID when the client leaves it empty
-// (services/api-gateway/internal/orders/orders.go), so a client may supply any
-// string it likes. A client-supplied parent "a:1" would derive the same child id
-// for its slice 0 as parent "a" derives for its slice 1 — and because that id is
-// the store's primary key AND the venue's clientOrderId, the collision does not
-// produce an error. It merges two orders.
-//
-// So ErrUnusableParentID refuses a parent whose id contains this separator,
-// rather than a comment asserting the case away.
-const childSeparator = ":"
+// childSalt separates a parent order ID from the slice index before they are
+// hashed. It never appears in a child ID, so it is free of the constraint the old
+// separator carried: it no longer has to be a character a parent ID cannot
+// contain, because the two values reach the hash distinctly.
+const childSalt = ":"
 
 // Parent is a working parent order, reduced to what the decision needs.
 //
@@ -119,61 +111,55 @@ type Child struct {
 
 // ChildID derives a child order's ID from its parent and slice index.
 //
-// DERIVED, NEVER ALLOCATED, and that is the whole idempotency mechanism. Two
-// pods that both decide slice 7 is due compute the same ID, so the store's
-// primary key rejects the second — the duplicate is refused by the database
+// # Derived, never allocated — that is the idempotency mechanism
+//
+// Two pods that both decide slice 7 is due compute the same ID, so the store's
+// primary key refuses the second: the duplicate is rejected by the database
 // rather than avoided by a lock this platform would have to hold across a venue
 // call. A random child ID would make every retry a new order, and a retry that
-// double-trades is the failure mode #292 and the PENDING_NEW sweep exist to end.
+// double-trades is the failure #292 and the PENDING_NEW sweep exist to prevent.
+//
+// # Why it is a HASH and not "<parent>:<index>"
+//
+// That was the readable form, and it could never have been placed. A child is an
+// ORDER, so its ID is stamped as the venue's client order ID — and OKX accepts
+// at most 32 characters, letters and digits only (internal/orderid records the
+// probe that established this). "<parent>:<index>" breaks both rules at once:
+// the colon is refused outright, and a 32-character parent leaves no room for
+// any suffix. Every scheduled child order would have been admitted, stored,
+// announced, and then refused by the exchange with an opaque parameter error.
+//
+// Hashing gives a value that is deterministic, exactly 32 hex characters, and
+// collision-resistant across BOTH inputs — so the separator no longer has to be
+// a character a parent ID cannot contain: the parent and the index reach the
+// hash as distinct inputs rather than as one concatenated string.
+//
+// THE COST IS LEGIBILITY, and it is a real one: "p1:0" told an operator at a
+// glance what they were looking at. The relation survives in the parent_order_id
+// column — which is what the driver queries anyway — and the slice index is
+// logged when a child is sent. A readable ID that cannot be placed is worth less
+// than an opaque one that can.
 func ChildID(parentID string, index int) string {
-	return parentID + childSeparator + strconv.Itoa(index)
+	sum := sha256.Sum256([]byte(parentID + childSalt + strconv.Itoa(index)))
+	return hex.EncodeToString(sum[:orderid.MaxLen/2])
 }
 
-// UsableParentID reports whether an order ID can safely be worked as a schedule.
+// UsableParentID reports whether an order can be worked as a schedule.
 //
-// CALLED AT ADMISSION, BEFORE THE ORDER IS ACCEPTED, so a client that cannot be
-// sliced is told at the only moment it can still do something about it. Called
-// again in Due as a backstop, because the cost of being wrong is not an error —
-// it is two orders merged at a primary key.
+// CALLED AT ADMISSION, BEFORE THE ORDER IS ACCEPTED, so an order that cannot be
+// sliced is refused at the only moment somebody can still do something about it.
+// Called again in Due as a backstop.
 //
-// The two refusals:
-//
-//   - AN EMPTY ID would derive children ":0", ":1" … which EVERY unnamed parent
-//     would share.
-//   - AN ID CONTAINING THE SEPARATOR makes the derivation ambiguous: parent "a:1"
-//     slice 0 and parent "a" slice 1 both spell "a:1:0"… and, one level up, "a:1"
-//     is itself what a child of "a" is called. That second case is also what
-//     stops a CHILD being scheduled as a parent, which would otherwise nest
-//     without limit.
+// The rule is internal/orderid's, not a local one. A parent never reaches a
+// venue itself — that is what WORKING_SCHEDULED means — so strictly it could
+// carry any ID. Holding it to the same rule as every other order is deliberate:
+// an order ID no venue could accept is a defect wherever it appears, and
+// exempting parents would leave the gap open in the one place nothing else looks.
 func UsableParentID(orderID string) error {
-	if orderID == "" {
-		return fmt.Errorf("%w: the order has no id, and every unnamed parent would derive the "+
-			"same child ids", ErrUnusableParentID)
-	}
-	if strings.Contains(orderID, childSeparator) {
-		return fmt.Errorf("%w: order id %q contains %q, which is how a child id is spelled — "+
-			"its children could not be told apart from another parent's, and the store would "+
-			"merge them rather than refuse them", ErrUnusableParentID, orderID, childSeparator)
+	if err := orderid.Valid(orderID); err != nil {
+		return fmt.Errorf("%w: %s", ErrUnusableParentID, err)
 	}
 	return nil
-}
-
-// ParseChildID reports the parent and slice index encoded in a child order ID,
-// and whether the ID is one this package derived.
-//
-// The driver does not need this — it queries children by parent_order_id, which
-// is a column. It exists for the operator path: given a child order ID from a
-// venue report or an alert, say which slice of which parent it is.
-func ParseChildID(childID string) (parentID string, index int, ok bool) {
-	cut := strings.LastIndex(childID, childSeparator)
-	if cut <= 0 || cut == len(childID)-1 {
-		return "", 0, false
-	}
-	n, err := strconv.Atoi(childID[cut+1:])
-	if err != nil || n < 0 {
-		return "", 0, false
-	}
-	return childID[:cut], n, true
 }
 
 // Due returns the children that are due at now and do not already exist.
