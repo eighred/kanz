@@ -146,6 +146,29 @@ message DescribeResponse {
   // same reason, as OMS_REQUIRE_VERIFIED_ACCOUNT: a control is armed WITH the
   // list in hand, never as a default.
   repeated order.v1.OrderType supported_order_types = 5;
+
+  // supported_time_in_force is which time-in-force instructions this adapter can
+  // actually express (#486). Same contract as supported_order_types above, and
+  // added for the same defect one field over.
+  //
+  // TIME-IN-FORCE WAS THE FOURTH INSTANCE OF #240/#405's DEFECT FAMILY, AND THE
+  // WORST OF THEM. The earlier three produced an order that did NOTHING; this
+  // one produced an order that did the WRONG THING. Both spot connectors sent a
+  // hard-coded good-til-cancelled whatever the trader asked for, so an
+  // IMMEDIATE-OR-CANCEL order RESTED at the exchange — a trader who asked to
+  // hold no exposure was holding it, indefinitely, and nothing said so. A
+  // FILL-OR-KILL could rest partially filled, which is the single outcome that
+  // instruction exists to forbid.
+  //
+  // The connectors now carry it and REFUSE what they cannot express. This field
+  // is what moves that refusal to admission, where an order that can never be
+  // placed is rejected before it is stored and announced — which is exactly what
+  // supported_order_types did for #405.
+  //
+  // EMPTY MEANS "DID NOT SAY", NOT "SUPPORTS NOTHING", for the same reason as
+  // above: an adapter predating this field returns nothing, and refusing every
+  // order for it would be a trading outage caused by a schema addition.
+  repeated order.v1.TimeInForce supported_time_in_force = 6;
 }
 
 message ExecuteRequest {

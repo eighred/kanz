@@ -506,3 +506,73 @@ func TestRouter_AnUndeclaringVenueIsStillRoutable(t *testing.T) {
 		t.Errorf("routed to %q, want SIM", v.MIC())
 	}
 }
+
+// AN UNTARGETED ORDER IS NARROWED BY TIME-IN-FORCE TOO (#486).
+//
+// Admission refuses a TARGETED order whose venue cannot express its
+// time-in-force. The untargeted path chooses a destination by cost or by the
+// declared default, neither of which asks whether the instruction can be honoured
+// there — so an IOC would go, half the time, to the adapter that refuses it.
+//
+// Same gap as the order-type one this mirrors, and it matters more: an IOC that
+// the connector refuses is at least loud, but the whole reason the connectors now
+// refuse is that sending it as good-til-cancelled RESTS an order the trader asked
+// not to hold.
+func typedTIF(mic string, tifs ...orderpb.TimeInForce) Venue {
+	return WithTimeInForce(NewSimVenue(mic), tifs)
+}
+
+func TestRouter_AnUntargetedOrderGoesToAVenueThatCanExpressItsTimeInForce(t *testing.T) {
+	// The DEFAULT cannot express IOC; the other venue can.
+	r := NewRouter(
+		[]Venue{
+			typedTIF("OKX", orderpb.TimeInForce_TIME_IN_FORCE_GTC),
+			typedTIF("BINANCE", orderpb.TimeInForce_TIME_IN_FORCE_GTC, orderpb.TimeInForce_TIME_IN_FORCE_IOC),
+		},
+		WithDefaultVenue("OKX"),
+	)
+
+	v, err := r.Route(&orderpb.OrderState{
+		OrderType:   orderpb.OrderType_ORDER_TYPE_LIMIT,
+		TimeInForce: orderpb.TimeInForce_TIME_IN_FORCE_IOC,
+	})
+	if err != nil {
+		t.Fatalf("Route: %v", err)
+	}
+	if v.MIC() != "BINANCE" {
+		t.Fatalf("routed an IOC to %q, which cannot express it — it would be admitted, announced, "+
+			"and then refused by the connector", v.MIC())
+	}
+
+	// AND A GTC STILL GOES TO THE DECLARED DEFAULT. A filter that changed
+	// untargeted routing for instructions every venue supports would be a
+	// behaviour change wearing a bug fix's name.
+	v, err = r.Route(&orderpb.OrderState{
+		OrderType:   orderpb.OrderType_ORDER_TYPE_LIMIT,
+		TimeInForce: orderpb.TimeInForce_TIME_IN_FORCE_GTC,
+	})
+	if err != nil {
+		t.Fatalf("Route: %v", err)
+	}
+	if v.MIC() != "OKX" {
+		t.Errorf("a GTC went to %q, want the declared default OKX", v.MIC())
+	}
+}
+
+// NO VENUE CAN EXPRESS IT ⇒ A REFUSAL THAT NAMES THE INSTRUCTION, rather than
+// routing to one that will refuse it later.
+func TestRouter_RefusesWhenNoVenueCanExpressTheTimeInForce(t *testing.T) {
+	r := NewRouter([]Venue{typedTIF("OKX", orderpb.TimeInForce_TIME_IN_FORCE_GTC)},
+		WithDefaultVenue("OKX"))
+
+	_, err := r.Route(&orderpb.OrderState{
+		OrderType:   orderpb.OrderType_ORDER_TYPE_LIMIT,
+		TimeInForce: orderpb.TimeInForce_TIME_IN_FORCE_GTD,
+	})
+	if err == nil {
+		t.Fatal("a GTD was routed to a deployment where no venue can express one")
+	}
+	if !strings.Contains(err.Error(), "GTD") {
+		t.Errorf("error = %q, want it to name the instruction an operator has to change", err)
+	}
+}

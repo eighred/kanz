@@ -189,6 +189,12 @@ func (s *Server) Describe(context.Context, *venuepb.DescribeRequest) (*venuepb.D
 	if d, ok := s.venue.(execution.OrderTypeDeclarer); ok {
 		resp.SupportedOrderTypes = d.OrderTypes()
 	}
+	// AND THE SAME QUESTION FOR TIME-IN-FORCE (#486). Separately optional: an
+	// adapter may declare one and not the other, and treating silence on either
+	// as a refusal would be a trading outage caused by a schema addition.
+	if d, ok := s.venue.(execution.TimeInForceDeclarer); ok {
+		resp.SupportedTimeInForce = d.TimeInForce()
+	}
 	return resp, nil
 }
 

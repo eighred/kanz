@@ -28,6 +28,11 @@ type VenueIdentity struct {
 	// OMS is what decides whether unknown is tolerable — the same split as
 	// AccountProof.Verified.
 	OrderTypes []orderpb.OrderType
+
+	// TimeInForce is which time-in-force instructions this adapter can express
+	// (#486). Same contract as OrderTypes: NIL MEANS THE ADAPTER DID NOT SAY,
+	// which is not "none".
+	TimeInForce []orderpb.TimeInForce
 }
 
 // SupportsOrderType reports whether this adapter said it can place t.
@@ -44,6 +49,23 @@ func (v VenueIdentity) SupportsOrderType(t orderpb.OrderType) bool {
 	}
 	return ContainsOrderType(v.OrderTypes, t)
 }
+
+// SupportsTimeInForce reports whether this adapter said it can express t.
+//
+// UNKNOWN IS PERMISSIVE HERE AND REFUSED ONE LAYER UP, the same split
+// SupportsOrderType uses: this cannot tell "cannot" from "did not say", and the
+// OMS is the component that can name the adapter, count the gap and tell an
+// operator how to close it.
+func (v VenueIdentity) SupportsTimeInForce(t orderpb.TimeInForce) bool {
+	if len(v.TimeInForce) == 0 {
+		return true
+	}
+	return ContainsTimeInForce(v.TimeInForce, t)
+}
+
+// DeclaresTimeInForce reports whether the adapter answered the time-in-force
+// capability question at all.
+func (v VenueIdentity) DeclaresTimeInForce() bool { return len(v.TimeInForce) > 0 }
 
 // DeclaresOrderTypes reports whether the adapter answered the capability
 // question at all. It is separate from SupportsOrderType so a caller can tell
@@ -73,7 +95,8 @@ func (v *GRPCVenue) Describe(ctx context.Context) (VenueIdentity, error) {
 			Verified:          resp.GetAccountVerified(),
 			ExchangeAccountID: resp.GetExchangeAccountId(),
 		},
-		OrderTypes: resp.GetSupportedOrderTypes(),
+		OrderTypes:  resp.GetSupportedOrderTypes(),
+		TimeInForce: resp.GetSupportedTimeInForce(),
 	}, nil
 }
 

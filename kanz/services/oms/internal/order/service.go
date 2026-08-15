@@ -437,6 +437,30 @@ func (s *Service) handleSubmit(ctx context.Context, env *envelopepb.Envelope, pa
 				"cannot route", target, cmd.GetOrderType()), now)
 	}
 
+	// AND A TIME-IN-FORCE THE VENUE CANNOT EXPRESS IS REFUSED HERE TOO (#486) —
+	// the same gate, one field over, for a defect that was worse than the one
+	// above it.
+	//
+	// The order type cases produced an order that did NOTHING: accepted, inert,
+	// never placed. time_in_force produced an order that did the WRONG THING.
+	// Both spot connectors sent a hard-coded good-til-cancelled whatever the
+	// trader asked for, so an IMMEDIATE-OR-CANCEL order RESTED at the exchange —
+	// a trader who asked to hold no exposure was holding it, indefinitely, with
+	// nothing anywhere saying so — and a FILL-OR-KILL could rest PARTIALLY
+	// FILLED, the single outcome that instruction exists to forbid.
+	//
+	// The connectors now refuse what they cannot express, which stopped the wrong
+	// trade. This stops the wrong ADMISSION: without it the order is stored, its
+	// ORDER_ACCEPTED FACT committed and published, and only then refused by the
+	// exchange — which is #405's complaint verbatim, one field over.
+	if target := cmd.GetVenue(); target != "" && s.router != nil &&
+		!s.router.SupportsTimeInForce(target, cmd.GetTimeInForce()) {
+		return s.refuse(ctx, cmd.GetOrderId(), "TIME_IN_FORCE_NOT_SUPPORTED",
+			fmt.Sprintf("venue %q cannot express %s — placing it as good-til-cancelled would rest "+
+				"an order the trader asked to expire, so this OMS will not admit it",
+				target, cmd.GetTimeInForce()), now)
+	}
+
 	// WHOSE COLLATERAL DOES THIS ORDER SPEND? Resolve the exchange account before the
 	// order exists, because it is not a routing detail — it is the answer to that
 	// question, and an order admitted without one is an order that will margin against

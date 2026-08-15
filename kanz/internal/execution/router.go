@@ -203,10 +203,10 @@ func (r *Router) Route(st *orderpb.OrderState) (Venue, error) {
 	//
 	// Narrowing here rather than refusing: if ONE venue can place it, the order
 	// belongs there, and that is a better answer than a refusal.
-	placeable := r.placeable(st.GetOrderType())
+	placeable := r.placeable(st.GetOrderType(), st.GetTimeInForce())
 	if len(placeable) == 0 {
-		return nil, fmt.Errorf("%w: no venue this OMS holds can place a %s order (it holds %s)",
-			ErrVenueNotConfigured, st.GetOrderType(), strings.Join(r.mics(), ", "))
+		return nil, fmt.Errorf("%w: no venue this OMS holds can place a %s order with %s (it holds %s)",
+			ErrVenueNotConfigured, st.GetOrderType(), st.GetTimeInForce(), strings.Join(r.mics(), ", "))
 	}
 	if r.ranker != nil {
 		if mic, ok := r.ranker.Preferred(placeable); ok {
@@ -229,7 +229,8 @@ func (r *Router) Route(st *orderpb.OrderState) (Venue, error) {
 		return nil, fmt.Errorf("%w: this OMS holds %s. Name one so an untargeted order has a "+
 			"destination somebody chose", ErrNoDefaultVenue, strings.Join(r.mics(), ", "))
 	}
-	if r.SupportsOrderType(v.MIC(), st.GetOrderType()) {
+	if r.SupportsOrderType(v.MIC(), st.GetOrderType()) &&
+		r.SupportsTimeInForce(v.MIC(), st.GetTimeInForce()) {
 		return v, nil
 	}
 	// THE DECLARED DEFAULT CANNOT PLACE THIS TYPE, and exactly one venue can, so
@@ -244,19 +245,19 @@ func (r *Router) Route(st *orderpb.OrderState) (Venue, error) {
 	// SEVERAL COULD, AND NOBODY SAID WHICH. Picking one would be the array index
 	// #437 removed wearing a narrower disguise — the operator named a default that
 	// does not apply here, so the destination is genuinely unchosen.
-	return nil, fmt.Errorf("%w: the declared default %q cannot place a %s order, and %s all can — "+
-		"name the venue on the order, or make the default one that can",
-		ErrNoDefaultVenue, v.MIC(), st.GetOrderType(), strings.Join(placeable, ", "))
+	return nil, fmt.Errorf("%w: the declared default %q cannot place a %s order with %s, and %s "+
+		"all can — name the venue on the order, or make the default one that can",
+		ErrNoDefaultVenue, v.MIC(), st.GetOrderType(), st.GetTimeInForce(), strings.Join(placeable, ", "))
 }
 
 // placeable lists the MICs of venues that can place this order type, in
 // configuration order. A venue that declares nothing is included: "did not say"
 // is permissive here exactly as it is in SupportsOrderType, so a deployment whose
 // adapters predate the declaration keeps working.
-func (r *Router) placeable(t orderpb.OrderType) []string {
+func (r *Router) placeable(t orderpb.OrderType, tif orderpb.TimeInForce) []string {
 	out := make([]string, 0, len(r.venues))
 	for _, v := range r.venues {
-		if r.SupportsOrderType(v.MIC(), t) {
+		if r.SupportsOrderType(v.MIC(), t) && r.SupportsTimeInForce(v.MIC(), tif) {
 			out = append(out, v.MIC())
 		}
 	}
@@ -395,4 +396,91 @@ func (r *Router) AccountFor(mic string) (string, bool) {
 		}
 	}
 	return "", false
+}
+
+// ===== TIME-IN-FORCE, THE SAME SHAPE AS ORDER TYPE (#486) =====
+//
+// Deliberately a mirror of OrderTypeAware / OrderTypeDeclarer / SupportsOrderType
+// above rather than a second design. The question is identical — "can this
+// adapter express what the order asks for" — and the two gates sit one line
+// apart in admission; a reader who has understood one has understood both.
+//
+// WHY IT NEEDED ITS OWN GATE AT ALL. time-in-force was the fourth instance of
+// #240/#405's defect family and the worst of them: the earlier three produced an
+// order that did NOTHING, this one produced an order that did the WRONG THING.
+// Both spot connectors sent a hard-coded good-til-cancelled whatever the trader
+// asked for, so an IOC RESTED at the exchange and a FOK could rest partially
+// filled. They now refuse what they cannot express; this moves that refusal to
+// admission, before the order is stored and announced.
+
+// TimeInForceAware is implemented by a Venue that has declared which
+// time-in-force instructions its adapter can express. A Venue that does not
+// implement it has said nothing, which is not the same as saying "none".
+type TimeInForceAware interface {
+	SupportsTimeInForce(t orderpb.TimeInForce) bool
+}
+
+// WithTimeInForce returns v carrying the time-in-force set its adapter declared.
+//
+// A WRAPPER RATHER THAN A FIELD, for the reason WithOrderTypes gives: the
+// capability is learned once, at startup, from Describe, and a mutable field set
+// after construction is a field something can read before it is written.
+//
+// Empty returns v unchanged, so an adapter that did not answer stays exactly
+// what it was rather than becoming a wrapper that claims nothing.
+func WithTimeInForce(v Venue, tifs []orderpb.TimeInForce) Venue {
+	if len(tifs) == 0 {
+		return v
+	}
+	return timeInForceAware{Venue: v, tifs: tifs}
+}
+
+type timeInForceAware struct {
+	Venue
+	tifs []orderpb.TimeInForce
+}
+
+func (t timeInForceAware) SupportsTimeInForce(tif orderpb.TimeInForce) bool {
+	return ContainsTimeInForce(t.tifs, tif)
+}
+
+// TimeInForceDeclarer is implemented by a connector that states which
+// time-in-force instructions it can translate for its exchange.
+//
+// THE DECLARATION AND THE TRANSLATION MUST NOT DRIFT. Each connector carries a
+// test walking every value of order.v1.TimeInForce, asserting translation
+// succeeds for exactly the declared ones — so an instruction added to the switch
+// without the list, or promised in the list without the switch, fails there
+// rather than at a venue.
+type TimeInForceDeclarer interface {
+	TimeInForce() []orderpb.TimeInForce
+}
+
+// ContainsTimeInForce reports whether tifs names t. One membership test, used by
+// the adapter that declares, the identity that carries and the router that gates.
+func ContainsTimeInForce(tifs []orderpb.TimeInForce, t orderpb.TimeInForce) bool {
+	for _, got := range tifs {
+		if got == t {
+			return true
+		}
+	}
+	return false
+}
+
+// SupportsTimeInForce reports whether the adapter at mic said it can express t.
+//
+// UNKNOWN IS PERMISSIVE, exactly as it is for order types: a venue that declares
+// nothing has not answered the question, and refusing every order for it would
+// be a trading outage caused by a schema addition.
+func (r *Router) SupportsTimeInForce(mic string, t orderpb.TimeInForce) bool {
+	for _, v := range r.venues {
+		if v.MIC() != mic {
+			continue
+		}
+		if aware, ok := v.(TimeInForceAware); ok {
+			return aware.SupportsTimeInForce(t)
+		}
+		return true
+	}
+	return true
 }

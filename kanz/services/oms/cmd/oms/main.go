@@ -519,6 +519,22 @@ func runConsumers(ctx context.Context, cfg config.Config, readiness *server.Read
 	})
 	obs.Registry.MustRegister(undeclaredOrderTypes)
 
+	// A SEPARATE COUNTER FROM THE ONE ABOVE (#486), because they are separate
+	// gaps with separate fixes. An adapter may answer the order-type question and
+	// not the time-in-force one; collapsing both into ..._order_types_total would
+	// report an adapter as having failed to declare order types when it declared
+	// them perfectly well.
+	undeclaredTimeInForce := prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "kanz_oms_undeclared_venue_time_in_force_total",
+		Help: "Venue adapters that did not declare which time-in-force instructions they can " +
+			"express. Non-zero means this OMS cannot refuse an inexpressible time-in-force at " +
+			"admission for that venue, so an order will be accepted and announced and then " +
+			"refused by the connector. Distinct from the order-type gap: an IOC placed as " +
+			"good-til-cancelled does not fail, it RESTS — the trader asked to hold no exposure " +
+			"and holds it.",
+	})
+	obs.Registry.MustRegister(undeclaredTimeInForce)
+
 	if bindings.Empty() {
 		logger.Warn("COLLATERAL IS SHARED — no venue-account bindings configured (OMS_VENUE_ACCOUNTS). Every portfolio trades whatever account its venue adapter holds, so they all margin against ONE pool per venue: a liquidation caused by one portfolio consumes the margin of all of them, and each ledger still reports its own cash intact")
 	} else if cfg.RequireVenueAccount {
@@ -563,7 +579,7 @@ func runConsumers(ctx context.Context, cfg config.Config, readiness *server.Read
 	// Venue set is composition-root-selected: SimVenue by default; Binance Spot +
 	// its user-data/reconciliation/ticker workers under -tags binance
 	// (configuredVenues is build-tag split, wired to the shared order store).
-	venues, catalogue, closeVenues, err := configuredVenues(ctx, cfg, store, producer, unverifiedAccounts, undeclaredOrderTypes, logger)
+	venues, catalogue, closeVenues, err := configuredVenues(ctx, cfg, store, producer, unverifiedAccounts, undeclaredOrderTypes, undeclaredTimeInForce, logger)
 	if err != nil {
 		return false, err
 	}

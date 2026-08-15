@@ -242,3 +242,58 @@ func TestOrderParams_MarketCarriesNoTimeInForce(t *testing.T) {
 		t.Errorf("timeInForce = %q on a MARKET order; Binance rejects the parameter", got)
 	}
 }
+
+// THE DECLARATION AND THE TRANSLATION MUST NOT DRIFT (#486) — the same guard
+// TestDeclaredOrderTypesMatchTranslation is, one field over.
+//
+// TimeInForce() is a load-bearing statement now that the OMS refuses at
+// admission an instruction this connector does not declare: over-declare and the
+// old defect returns — an order admitted, stored and announced that the exchange
+// never sees; under-declare and an instruction this connector CAN express is
+// refused at the gateway and looks like an outage.
+//
+// It walks the descriptor rather than a list a human keeps in step, so a value
+// added to order.v1.TimeInForce after this was written is covered too.
+func TestDeclaredTimeInForceMatchesTranslation(t *testing.T) {
+	v := &BinanceVenue{}
+	declared := v.TimeInForce()
+	if len(declared) == 0 {
+		t.Fatal("TimeInForce() is empty — an empty declaration means \"did not say\" to the OMS, " +
+			"which silently disables the admission gate this connector relies on")
+	}
+
+	values := orderpb.TimeInForce(0).Descriptor().Values()
+	checked := 0
+	for i := 0; i < values.Len(); i++ {
+		tif := orderpb.TimeInForce(values.Get(i).Number())
+		if tif == orderpb.TimeInForce_TIME_IN_FORCE_UNSPECIFIED {
+			// Never valid on the wire — admission requires a time-in-force — and
+			// the translation deliberately reads it as GTC for orders predating
+			// that rule, so it is neither declared nor refused.
+			continue
+		}
+		checked++
+
+		_, err := binanceTimeInForce(tif)
+		want := execution.ContainsTimeInForce(declared, tif)
+		switch {
+		case want && err != nil:
+			t.Errorf("TimeInForce() declares %v but this connector cannot express it: %v", tif, err)
+		case !want && err == nil:
+			t.Errorf("this connector expresses %v but TimeInForce() does not declare it — the OMS "+
+				"will refuse it at admission though Binance can honour it", tif)
+		}
+	}
+
+	// Non-vacuity: a descriptor that yielded nothing would pass every assertion
+	// above by making none of them.
+	if checked < 5 {
+		t.Fatalf("walked %d time-in-force values, want >= 5 — order.v1 declares DAY, GTC, IOC, "+
+			"FOK and GTD; this test proved nothing", checked)
+	}
+}
+
+// The declaration must reach the OMS as itself. A connector that satisfies the
+// interface but is not seen through it declares nothing on the wire, and "did
+// not say" is the case that leaves the admission gate open.
+var _ execution.TimeInForceDeclarer = (*BinanceVenue)(nil)

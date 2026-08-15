@@ -351,3 +351,52 @@ func TestOKXIsAlgoOrder_SplitsExactlyTheConditionalTypes(t *testing.T) {
 		}
 	}
 }
+
+// THE DECLARATION AND THE TRANSLATION MUST NOT DRIFT (#486) — the same guard
+// TestDeclaredOrderTypesMatchTranslation is, one field over.
+//
+// TimeInForce() is a load-bearing statement now that the OMS refuses at
+// admission an instruction this connector does not declare: over-declare and the
+// old defect returns — an order admitted, stored and announced that the exchange
+// never sees; under-declare and an instruction this connector CAN express is
+// refused at the gateway and looks like an outage.
+//
+// OKX carries time-in-force in ordType itself, so the translation under test is
+// okxLimitOrdType rather than a separate parameter — which is precisely why the
+// declaration cannot be eyeballed against the switch and needs a test.
+func TestDeclaredTimeInForceMatchesTranslation(t *testing.T) {
+	v := &OKXVenue{}
+	declared := v.TimeInForce()
+	if len(declared) == 0 {
+		t.Fatal("TimeInForce() is empty — an empty declaration means \"did not say\" to the OMS, " +
+			"which silently disables the admission gate this connector relies on")
+	}
+
+	values := orderpb.TimeInForce(0).Descriptor().Values()
+	checked := 0
+	for i := 0; i < values.Len(); i++ {
+		tif := orderpb.TimeInForce(values.Get(i).Number())
+		if tif == orderpb.TimeInForce_TIME_IN_FORCE_UNSPECIFIED {
+			continue // never valid on the wire; read as GTC for orders predating the rule
+		}
+		checked++
+
+		_, err := okxLimitOrdType(tif)
+		want := execution.ContainsTimeInForce(declared, tif)
+		switch {
+		case want && err != nil:
+			t.Errorf("TimeInForce() declares %v but this connector cannot express it: %v", tif, err)
+		case !want && err == nil:
+			t.Errorf("this connector expresses %v but TimeInForce() does not declare it — the OMS "+
+				"will refuse it at admission though OKX can honour it", tif)
+		}
+	}
+
+	if checked < 5 {
+		t.Fatalf("walked %d time-in-force values, want >= 5 — order.v1 declares DAY, GTC, IOC, "+
+			"FOK and GTD; this test proved nothing", checked)
+	}
+}
+
+// The declaration must reach the OMS as itself.
+var _ execution.TimeInForceDeclarer = (*OKXVenue)(nil)

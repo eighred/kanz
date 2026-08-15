@@ -47,13 +47,13 @@ var closeRegistry = execution.NewCloseRegistry()
 // is ever reached in production the OMS is filling orders against nothing, so it
 // says so at WARN in as many words, and the router hard-errors on any MIC it has
 // no venue for rather than quietly routing there.
-func configuredVenues(ctx context.Context, cfg config.Config, store order.Store, producer execution.Publisher, unverified, undeclared prometheus.Counter, logger *slog.Logger) ([]execution.Venue, []execution.VenueInstrument, func(), error) {
+func configuredVenues(ctx context.Context, cfg config.Config, store order.Store, producer execution.Publisher, unverified, undeclared, undeclaredTIF prometheus.Counter, logger *slog.Logger) ([]execution.Venue, []execution.VenueInstrument, func(), error) {
 	var venues []execution.Venue
 
 	// INFRA-M7a: out-of-process adapters. These need no build tag and link no
 	// vendor code — the OMS speaks venue.v1 over mTLS and never imports an
 	// exchange SDK. They are the path that retires the tags above.
-	grpcVenues, catalogue, closeConns, err := dialVenues(ctx, cfg, unverified, undeclared, logger)
+	grpcVenues, catalogue, closeConns, err := dialVenues(ctx, cfg, unverified, undeclared, undeclaredTIF, logger)
 	if err != nil {
 		// A configured venue that will not dial is FATAL, not a degradation. The
 		// alternative is booting without it and silently routing its orders
@@ -129,7 +129,7 @@ func parseMICs(s string) []string {
 // the account the adapter really holds while the ledger booked them to the one named
 // here, which is the exact failure EXEC-M16 exists to prevent, arriving through the
 // one door EXEC-M16 left open.
-func dialVenues(ctx context.Context, cfg config.Config, unverified, undeclared prometheus.Counter, logger *slog.Logger) ([]execution.Venue, []execution.VenueInstrument, func(), error) {
+func dialVenues(ctx context.Context, cfg config.Config, unverified, undeclared, undeclaredTIF prometheus.Counter, logger *slog.Logger) ([]execution.Venue, []execution.VenueInstrument, func(), error) {
 	endpoints := parseSymbolMap(cfg.VenueEndpoints) // MIC → address; same "K=V,K=V" form
 	if len(endpoints) == 0 {
 		return nil, nil, func() {}, nil
@@ -254,6 +254,33 @@ func dialVenues(ctx context.Context, cfg config.Config, unverified, undeclared p
 				"fix", "upgrade the adapter so venue.v1.Describe reports supported_order_types, then set OMS_REQUIRE_ORDER_TYPE_SUPPORT=true")
 		}
 
+		// AND WHICH TIME-IN-FORCE INSTRUCTIONS IT CAN EXPRESS (#486). Same posture
+		// again, and the defect it closes was worse than the two above: those
+		// produced an order that did NOTHING, while a time-in-force the adapter
+		// could not express produced an order that did the WRONG THING — an IOC
+		// sent as good-til-cancelled RESTS, so a trader who asked to hold no
+		// exposure holds it.
+		//
+		// Reported but NOT fatal on its own, even under RequireOrderTypeSupport:
+		// an adapter may answer one capability question and not the other, and
+		// refusing to start over the newer field would make upgrading the adapters
+		// an all-or-nothing step.
+		if id.DeclaresTimeInForce() {
+			logger.Info("venue adapter declares its time-in-force set — instructions it cannot express "+
+				"will be refused at admission", "mic", mic, "time_in_force", id.TimeInForce)
+		} else {
+			// ITS OWN COUNTER, NOT THE ORDER-TYPE ONE. They are different gaps with
+			// different fixes, and a counter named ..._order_types_total that also
+			// counts time-in-force gaps tells an operator two adapters failed to
+			// declare order types when one of them declared them fine.
+			undeclaredTIF.Inc()
+			logger.Warn("venue adapter declared NO time-in-force support — the OMS cannot refuse an "+
+				"inexpressible time-in-force at admission for this venue, so an order will be accepted, "+
+				"announced, and refused by the connector",
+				"mic", mic, "account", account, "endpoint", addr,
+				"fix", "upgrade the adapter so venue.v1.Describe reports supported_time_in_force")
+		}
+
 		// AND WHAT IT CAN TRADE (#406) — asked once, here, and held. The set is
 		// deploy-time configuration (BINANCE_SYMBOLS / OKX_SYMBOLS), so serving it
 		// from memory is not a staleness risk: changing it requires redeploying the
@@ -285,7 +312,11 @@ func dialVenues(ctx context.Context, cfg config.Config, unverified, undeclared p
 			}
 		}
 
-		venues = append(venues, execution.WithOrderTypes(venue, id.OrderTypes))
+		// BOTH DECLARATIONS ARM THE SAME GATE. Each wrapper is a no-op when its
+		// list is empty, so an adapter that answered one question and not the
+		// other is gated on exactly what it answered.
+		venues = append(venues,
+			execution.WithTimeInForce(execution.WithOrderTypes(venue, id.OrderTypes), id.TimeInForce))
 	}
 	// Ordered by (instrument, venue) so the catalogue is stable between boots —
 	// OMS_VENUE_ENDPOINTS is a map, and Go randomises its iteration.
