@@ -136,6 +136,36 @@ jobs:
           go mod init github.com/eighred/kanz/kanz-schemas-go || true
           go mod tidy
 
+      # THE BFF'S IMAGE MUST CONTAIN THE SPA (#371).
+      #
+      # web-bff serves the compiled application on its OWN origin and proxies
+      # /api/* from the same hostname. That is not a packaging convenience: a
+      # separate static host would be a second origin, which forces the session
+      # cookie to SameSite=None — the setting that makes a cookie usable
+      # cross-site and therefore the one CSRF defences exist to prevent — plus
+      # CORS-with-credentials and a cookie domain kept in step with the edge.
+      #
+      # kanz-web/dist is a BUILD ARTIFACT and gitignored, so it is produced here
+      # and lands in the docker context, exactly as the generated Go SDK above
+      # does. Without this the image builds, starts, serves /api and /auth
+      # perfectly, and returns nothing at / — an application that is finished,
+      # green, and blank in a browser.
+      #
+      # Scoped to the one image that needs it: 29 matrix entries, one SPA.
+      - name: Build the SPA into the docker context
+        if: matrix.service == 'web-bff'
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: kanz-web/.nvmrc
+          cache: npm
+          cache-dependency-path: kanz-web/package-lock.json
+      - name: Compile kanz-web into dist
+        if: matrix.service == 'web-bff'
+        working-directory: kanz-web
+        run: |
+          npm ci
+          npm run build
+          test -f dist/index.html || { echo "::error::kanz-web/dist/index.html is missing after build — the BFF image would ship without the SPA"; exit 1; }
       - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
       - name: Log in to GHCR
         uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0

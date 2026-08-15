@@ -77,6 +77,49 @@ func TestEveryServiceIsDeployableOrExempt(t *testing.T) {
 			"in notDeployed. Nothing else. An image/manifest parity check cannot see a service that has neither.",
 			strings.Join(problems, "\n  "))
 	}
+
+	// THE DEAD-ENTRY ARM, which this guard did not have until #371.
+	//
+	// Every other exemption map in test/arch carries one, and this one's absence
+	// had a cost the moment it mattered: web-bff acquired a Dockerfile, a matrix
+	// entry and a manifest while its "NOT YET" exemption went on sitting there.
+	// The loop above SKIPS an exempted service, so a stale entry is not untidy —
+	// it silently switches the check off for something now fully deployable, and
+	// would keep doing so if the manifest were later deleted.
+	//
+	// An exemption is a claim that something is deliberately NOT deployed. Once
+	// all three artefacts exist the claim is false, and a false claim left in
+	// place is how it becomes the reason nobody re-examined it.
+	var stale []string
+	for svc, reason := range notDeployed {
+		if _, err := os.Stat(filepath.Join(root, "services", svc)); err != nil {
+			stale = append(stale, svc+": no such service under services/")
+			continue
+		}
+		_, dockerErr := os.Stat(filepath.Join(root, "services", svc, "Dockerfile"))
+		if dockerErr == nil && strings.Contains(matrix, "- service: "+svc+"\n") && manifestExists(root, svc) {
+			stale = append(stale, svc+": has a Dockerfile, a build-matrix entry AND a manifest, so the "+
+				"exemption is a false claim ("+firstSentence(reason)+")")
+		}
+	}
+	sort.Strings(stale)
+	if len(stale) > 0 {
+		t.Errorf("notDeployed has %d stale entr(y/ies):\n\n  %s\n\n"+
+			"The loop above SKIPS an exempted service, so a stale entry switches this check off for "+
+			"something that is now deployable. Delete the entry.", len(stale), strings.Join(stale, "\n  "))
+	}
+}
+
+// firstSentence trims a reason to its opening claim, so a stale-entry report
+// names what was asserted without reprinting a paragraph.
+func firstSentence(reason string) string {
+	if i := strings.IndexAny(reason, ".\n"); i > 0 {
+		return strings.TrimSpace(reason[:i])
+	}
+	if len(reason) > 80 {
+		return strings.TrimSpace(reason[:80])
+	}
+	return strings.TrimSpace(reason)
 }
 
 // notDeployed is the list of services that deliberately do not run in production,
@@ -88,12 +131,13 @@ var notDeployed = map[string]string{
 	// PRIMARY operator surface (#371) and the CLI is no longer the direction. It
 	// is recorded because a stale justification is worse than none — it is why
 	// nobody re-examined the entry.
-	"web-bff": "NOT YET, AND THE REASON IS NOW SEQUENCING RATHER THAN INTENT. This is the primary " +
-		"operator surface (#371) and it serves the compiled SPA on its own origin. What it still " +
-		"lacks is a Dockerfile, a build-matrix entry and a manifest, plus the cloudflared sidecar " +
-		"that is the ONLY way it is meant to be reachable (infra/edge). Deploying it with an " +
-		"ordinary Ingress would open the public port the zero-ingress design exists to avoid, so " +
-		"the manifest and the tunnel land together or not at all. Retired by #371.",
+	// RETIRED 2026-08-15 — the condition this entry set was MET, not waived. It
+	// read: "the manifest and the tunnel land together or not at all. Deploying
+	// it with an ordinary Ingress would open the public port the zero-ingress
+	// design exists to avoid." web-bff-deploy.yaml carries the cloudflared
+	// SIDECAR and no Service and no Ingress, so nothing listens publicly — and
+	// the sidecar is what makes WEB_BFF_TRUSTED_PROXIES=127.0.0.1 an exact peer
+	// rather than a CIDR anyone in the pod range could present.
 
 	// RETIRED 2026-08-15 by the mechanism that was supposed to retire it. This
 	// entry read "NOT YET, AND FOR ONE CONCRETE REASON: THE SIGNING KEY … there
@@ -106,10 +150,19 @@ var notDeployed = map[string]string{
 	// IDENTITY_ALLOW_EPHEMERAL_KEY is deliberately absent from the manifest,
 	// because two replicas generating their own keys serve disjoint JWKS.
 
-	"optimization": "NOT YET, AND DELIBERATELY. It materializes an approved rebalance proposal into OMS " +
-		"order COMMANDS — it is a capital path, not an analytic. It does not run until the execution loop " +
-		"has run in production and there is a human approval surface in front of it. Deploying a service " +
-		"that can emit orders, before anyone has watched the order path work, is the wrong order.",
+	// RETIRED 2026-08-15 — THE ENTRY WAS FACTUALLY FALSE, and the dead-entry arm
+	// above is what surfaced it. It read "NOT YET, AND DELIBERATELY … it does not
+	// run until the execution loop has run in production", while
+	// infra/deploy/optimization-deploy.yaml has declared `kind: Deployment,
+	// replicas: 2` the whole time. Whatever the intent was, the manifest deploys
+	// it.
+	//
+	// THAT WAS NOT MERELY UNTIDY. Four other guards SKIP a service listed here —
+	// nats_identity, nats_jetstream_machinery, nats_service_permissions and
+	// prometheus_scrape — so a service that materializes rebalance proposals into
+	// ORDER COMMANDS was exempt from the broker-permission check, which is the
+	// check whose absence leaves a publisher UNRESTRICTED within its account.
+	// The gap was invisible because the exemption looked like a decision.
 
 	"autopilot": "NOT YET, AND DELIBERATELY. It is the closed-loop ops CONTROLLER — it consumes quality/ " +
 		"drift/SLO signals and ACTS on the platform. An autonomous remediator must not be turned on before " +
@@ -192,6 +245,22 @@ func TestEveryProbePointsAtARouteTheServiceServes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
+	// A SIDECAR'S PROBES BELONG TO A DIFFERENT PROGRAM.
+	//
+	// This guard derives the service from the FILENAME and then asks whether that
+	// service registers the path. web-bff-deploy.yaml is the estate's first pod
+	// with a second container — cloudflared, whose /ready is a route cloudflared
+	// serves and web-bff never will — so a file-wide scan reported a correct
+	// manifest as broken.
+	//
+	// The premise was never "every probe in the file", it was "every probe aimed
+	// at THIS service". Probes on containers running someone else's image are
+	// skipped, and skipped by IMAGE rather than by container name, because a name
+	// is a label anyone can choose and the image is what decides which program
+	// answers the request.
+	foreign := foreignContainerProbePaths(t, manifests)
+
 	var problems []string
 	for _, m := range manifests {
 		base := filepath.Base(m)
@@ -207,6 +276,9 @@ func TestEveryProbePointsAtARouteTheServiceServes(t *testing.T) {
 			kind, path := hit[1], hit[2]
 			if servesPath(t, root, svc, path) {
 				continue
+			}
+			if foreign[base+" "+path] {
+				continue // a sidecar's own route; see foreignContainerProbePaths
 			}
 			problems = append(problems, base+": the "+kind+" is aimed at "+path+
 				", which "+svc+" does not register")
@@ -373,4 +445,65 @@ func servesPath(t *testing.T, root, svc, path string) bool {
 		}
 	}
 	return false
+}
+
+// foreignContainerProbePaths collects "<file> <path>" for every httpGet probe on
+// a container whose image is NOT this repository's own build of the service the
+// file is named for.
+//
+// KEYED BY FILE AND PATH, not by path alone: a sidecar's /ready must not excuse a
+// SERVICE probe on /ready in some other manifest. That would be the quiet
+// widening this whole guard exists to prevent, introduced by the fix for it.
+func foreignContainerProbePaths(t *testing.T, manifests []string) map[string]bool {
+	t.Helper()
+	out := map[string]bool{}
+	for _, path := range manifests {
+		base := filepath.Base(path)
+		svc := strings.TrimSuffix(strings.TrimSuffix(base, "-deploy.yaml"), "-rollout.yaml")
+		body, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		dec := yaml.NewDecoder(strings.NewReader(string(body)))
+		for {
+			var doc probeScanWorkload
+			if err := dec.Decode(&doc); err != nil {
+				break
+			}
+			for _, c := range doc.Spec.Template.Spec.Containers {
+				// The service's OWN image. Anything else is a sidecar.
+				if strings.Contains(c.Image, "ghcr.io/eighred/"+svc+":") ||
+					strings.Contains(c.Image, "ghcr.io/eighred/"+svc+"@") {
+					continue
+				}
+				for _, p := range []probeScanProbe{c.LivenessProbe, c.ReadinessProbe, c.StartupProbe} {
+					if p.HTTPGet.Path != "" {
+						out[base+" "+p.HTTPGet.Path] = true
+					}
+				}
+			}
+		}
+	}
+	return out
+}
+
+type probeScanProbe struct {
+	HTTPGet struct {
+		Path string `yaml:"path"`
+	} `yaml:"httpGet"`
+}
+
+type probeScanWorkload struct {
+	Spec struct {
+		Template struct {
+			Spec struct {
+				Containers []struct {
+					Image          string         `yaml:"image"`
+					LivenessProbe  probeScanProbe `yaml:"livenessProbe"`
+					ReadinessProbe probeScanProbe `yaml:"readinessProbe"`
+					StartupProbe   probeScanProbe `yaml:"startupProbe"`
+				} `yaml:"containers"`
+			} `yaml:"spec"`
+		} `yaml:"template"`
+	} `yaml:"spec"`
 }
