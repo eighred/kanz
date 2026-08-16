@@ -4,6 +4,7 @@ import (
 	"log/slog"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/eighred/kanz/pkg/secret"
 )
@@ -66,6 +67,34 @@ type Config struct {
 	// handshake (SEC-M3). Reads the go-spiffe standard env, as oms/venue-* do, so
 	// one manifest env name serves every service.
 	SPIFFESocket string
+
+	// RollupSeries names the (instrument, venue) pairs whose 1-minute bars are
+	// rolled up into the 1h and 1d series, as "BTC-USDT@XBIN,ETH-USDT@XBIN".
+	//
+	// EXPLICIT, NOT DISCOVERED. The bar store has no "distinct instruments" query
+	// and adding one would make a routine job scan the whole table; more
+	// importantly, a discovered list silently grows, and a rollup that quietly
+	// starts deriving a series nobody asked for is a write nobody reviewed.
+	//
+	// Empty DISABLES the rollup, loudly. The coarse series then stay empty and
+	// every consumer keeps reading 1-minute bars — which is the state before this
+	// existed, and the startup log says so rather than leaving it to be inferred.
+	RollupSeries string
+
+	// RollupInterval is how often the rollup runs. Zero uses DefaultRollupInterval.
+	RollupInterval time.Duration
+
+	// RollupWatermarkLag is how far BEHIND now the completeness watermark sits.
+	//
+	// A bucket is rolled up only once it ends at or before now minus this. It
+	// bounds the delay between a minute ending and its 1m bar being durable —
+	// publish, consume, write, and any redelivery — and it is the one number here
+	// that can produce a WRONG bar rather than a late one: too small and an hour
+	// is folded before its last minutes have landed, and the result is a bar that
+	// looks finished and is short.
+	//
+	// Zero uses DefaultRollupWatermarkLag.
+	RollupWatermarkLag time.Duration
 }
 
 // DefaultSubjects is the ingestion subscription when none is configured.
@@ -103,6 +132,10 @@ func Load() (Config, error) {
 		FeedInstruments: splitList(os.Getenv("MARKET_DATA_FEED_INSTRUMENTS")),
 		FeedAssetClass:  envOr("MARKET_DATA_FEED_ASSET_CLASS", "equity"),
 		Tenant:          envOr("MARKET_DATA_TENANT", "__system__"),
+
+		RollupSeries:       os.Getenv("MARKET_DATA_ROLLUP_SERIES"),
+		RollupInterval:     rollupDur("MARKET_DATA_ROLLUP_INTERVAL", DefaultRollupInterval),
+		RollupWatermarkLag: rollupDur("MARKET_DATA_ROLLUP_WATERMARK_LAG", DefaultRollupWatermarkLag),
 	}, nil
 }
 
@@ -136,4 +169,43 @@ func parseLevel(s string) slog.Level {
 	default:
 		return slog.LevelInfo
 	}
+}
+
+// Rollup defaults.
+const (
+	// DefaultRollupInterval runs the rollup hourly. The job is IDEMPOTENT and
+	// looks back over a window rather than only at what is newly due, so a missed
+	// run heals on the next one and the interval is a latency choice, not a
+	// correctness one.
+	DefaultRollupInterval = time.Hour
+
+	// DefaultRollupWatermarkLag is ten minutes.
+	//
+	// It must exceed the longest plausible delay between a minute ENDING and its
+	// 1-minute bar being DURABLE — market-ingest folds the live tape and
+	// publishes, this service consumes and writes, and a redelivery adds a retry.
+	// That path normally completes in seconds; ten minutes is deliberately
+	// generous against it, because the two errors are not symmetric. Too generous
+	// and the newest coarse bucket appears late. Too tight and an hour is folded
+	// before its last minutes land, producing a bar that looks finished, is
+	// short, and is then IMMUTABLE at that knowledge time — the store is
+	// append-only, so a re-run corrects it only by writing a restatement beside
+	// the wrong one.
+	DefaultRollupWatermarkLag = 10 * time.Minute
+)
+
+// rollupDur reads a duration env var, falling back to def. An unparseable value
+// falls back too rather than failing startup: these two knobs tune latency, and
+// refusing to boot over a typo in a tuning value would take the price history
+// down with it.
+func rollupDur(key string, def time.Duration) time.Duration {
+	v := os.Getenv(key)
+	if v == "" {
+		return def
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil || d <= 0 {
+		return def
+	}
+	return d
 }

@@ -19,6 +19,7 @@ import (
 	commonpb "github.com/eighred/kanz/kanz-schemas-go/common/v1"
 
 	"github.com/eighred/kanz/internal/marketdata/store"
+	"github.com/eighred/kanz/internal/risk/compute"
 	"github.com/eighred/kanz/internal/risk/liquidity"
 )
 
@@ -509,5 +510,374 @@ func TestTheAssumedSpreadTableIsCopiedAtConstruction(t *testing.T) {
 	}
 	if spec.Spread != 0.0005 {
 		t.Errorf("Spread = %v, want 0.0005 — the caller's map is live inside the provider", spec.Spread)
+	}
+}
+
+// ===== THE COARSEST SERIES THAT CAN ANSWER =====
+//
+// A 28-day window on the 1-minute series is ~40,000 rows per instrument, and
+// compute walks the book TWICE per risk request. A daily rollup makes the same
+// number out of 28 rows — the same number, not an approximation, because
+// dailyTotals sums volume and counts distinct UTC days and both are invariant
+// under the bar interval.
+//
+// The whole risk of taking that optimisation is reading a series that is EMPTY
+// or HALF-BUILT: no bars refuses the instrument, liquidity.Profile drops it, and
+// LiquidationHorizon reports 0.0000 days — an active claim of perfect liquidity
+// for a book nobody measured. Every test below is about that failure and not
+// about the saving.
+
+// seriesBars answers a DIFFERENT canned series per resolution and records the
+// order it was asked, so "the coarse one was preferred" and "the fine one was
+// not read" are separate, checkable facts.
+type seriesBars struct {
+	series map[store.Resolution][]store.Bar
+	errs   map[store.Resolution]error
+	asked  []store.Resolution
+}
+
+func (s *seriesBars) Bars(_ context.Context, q store.BarQuery) ([]store.Bar, error) {
+	s.asked = append(s.asked, q.Resolution)
+	if err, hit := s.errs[q.Resolution]; hit {
+		return nil, err
+	}
+	return s.series[q.Resolution], nil
+}
+
+// dailyBars builds n consecutive DAILY candles, volume[i] for day i — the shape
+// a 1d rollup writes.
+func dailyBars(volumes ...int64) []store.Bar {
+	out := make([]store.Bar, 0, len(volumes))
+	for i, v := range volumes {
+		b := day0.AddDate(0, 0, i)
+		bar := testBar(b, v, b)
+		bar.Resolution = store.Resolution1d
+		out = append(out, bar)
+	}
+	return out
+}
+
+func mustProviderCfg(t *testing.T, bars BarStore, cfg Config, opts ...Option) *Provider {
+	t.Helper()
+	cfg.Venue = venue
+	p, err := FromBars(bars, cfg, opts...)
+	if err != nil {
+		t.Fatalf("FromBars: %v", err)
+	}
+	return p
+}
+
+func askedEqual(got []store.Resolution, want ...store.Resolution) bool {
+	if len(got) != len(want) {
+		return false
+	}
+	for i := range got {
+		if got[i] != want[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// The saving, and the only test here that is about it. 5 rows read instead of
+// 7200, and the finer series is never touched.
+func TestThePopulatedDailySeriesIsUsedAndTheMinuteSeriesIsNotRead(t *testing.T) {
+	var r recorder
+	f := &seriesBars{series: map[store.Resolution][]store.Bar{
+		store.Resolution1d: dailyBars(14400, 14400, 14400, 14400, 14400),
+		store.Resolution1m: fullDay(day0, 10),
+	}}
+	p := mustProviderCfg(t, f, Config{ResolutionPreference: CoarsestFirst()}, WithNoSpread(), r.observe())
+
+	spec, ok := p.Liquidity(context.Background(), instr, day0.AddDate(0, 0, 5))
+	if !ok {
+		t.Fatalf("Liquidity: not ok")
+	}
+	if !askedEqual(f.asked, store.Resolution1d) {
+		t.Errorf("series read = %v, want only [1d] — a preference that still reads the base "+
+			"series has saved nothing", f.asked)
+	}
+	if spec.ADV != 14400 {
+		t.Errorf("ADV = %v, want 14400", spec.ADV)
+	}
+	r.only(t, ReasonSpreadUnavailable, 5)
+}
+
+// THE PREMISE OF THE WHOLE OPTIMISATION, ASSERTED RATHER THAN ARGUED. If the ADV
+// off a rollup differed from the ADV off the base series, this would be a
+// different measure wearing the same name and every horizon would shift the day
+// the rollup landed.
+func TestTheSameADVComesOutOfTheDailyRollupAsOutOfTheMinuteSeries(t *testing.T) {
+	// Five days of full minute grids: 1440 bars x 10 = 14400 per day.
+	var minute []store.Bar
+	for i := 0; i < 5; i++ {
+		minute = append(minute, fullDay(day0.AddDate(0, 0, i), 10)...)
+	}
+	asOf := day0.AddDate(0, 0, 5)
+
+	fine := mustProviderCfg(t, &seriesBars{series: map[store.Resolution][]store.Bar{
+		store.Resolution1m: minute,
+	}}, Config{Resolution: store.Resolution1m}, WithNoSpread())
+	coarse := mustProviderCfg(t, &seriesBars{series: map[store.Resolution][]store.Bar{
+		store.Resolution1d: dailyBars(14400, 14400, 14400, 14400, 14400),
+	}}, Config{Resolution: store.Resolution1d}, WithNoSpread())
+
+	fineSpec, ok := fine.Liquidity(context.Background(), instr, asOf)
+	if !ok {
+		t.Fatalf("1m: not ok")
+	}
+	coarseSpec, ok := coarse.Liquidity(context.Background(), instr, asOf)
+	if !ok {
+		t.Fatalf("1d: not ok")
+	}
+	if fineSpec.ADV != coarseSpec.ADV {
+		t.Fatalf("ADV differs: 1m = %v, 1d = %v — the statistic is supposed to be invariant under the "+
+			"series it is measured from, and a liquidation horizon would move when the rollup lands",
+			fineSpec.ADV, coarseSpec.ADV)
+	}
+	if fineSpec.ADV != 14400 {
+		t.Errorf("ADV = %v, want 14400", fineSpec.ADV)
+	}
+}
+
+// The state of this estate on the day the preference is first configured: the
+// rollup job is not running yet, so 1d and 1h hold nothing. The instrument must
+// still resolve, off the base series, at the old cost.
+func TestAnEmptyCoarseSeriesFallsBackToTheBaseSeriesAndIsReported(t *testing.T) {
+	var r recorder
+	f := &seriesBars{series: map[store.Resolution][]store.Bar{
+		store.Resolution1m: oneBarPerDay(10, 10, 10, 10, 10),
+	}}
+	p := mustProviderCfg(t, f, Config{ResolutionPreference: CoarsestFirst()}, WithNoSpread(), r.observe())
+
+	spec, ok := p.Liquidity(context.Background(), instr, day0.AddDate(0, 0, 5))
+	if !ok {
+		t.Fatalf("Liquidity: ok=false — an absent rollup must not refuse the instrument, which " +
+			"would report a zero liquidation horizon for a book that is fine")
+	}
+	if spec.ADV != 10 {
+		t.Errorf("ADV = %v, want 10", spec.ADV)
+	}
+	if !askedEqual(f.asked, store.Resolution1d, store.Resolution1h, store.Resolution1m) {
+		t.Errorf("series read = %v, want [1d 1h 1m]", f.asked)
+	}
+	// AND IT IS COUNTED. "The rollup job is not running" and "the rollup job is
+	// running" must not look the same from outside.
+	if len(r.reason) != 3 ||
+		r.reason[0] != ReasonCoarseSeriesEmpty ||
+		r.reason[1] != ReasonCoarseSeriesEmpty ||
+		r.reason[2] != ReasonSpreadUnavailable {
+		t.Errorf("observations = %v, want two %q then the spread posture", r.reason, ReasonCoarseSeriesEmpty)
+	}
+}
+
+// THE SUBTLE ONE, AND THE REASON THE FALLBACK CANNOT KEY ON EMPTINESS ALONE. A
+// rollup backfilling from today forward has three days where the base series has
+// five. Honouring it would refuse the instrument for insufficient history — a
+// perfectly-liquid-looking zero horizon caused entirely by a job that is working
+// correctly and has not finished.
+func TestAHalfBackfilledRollupFallsBackRatherThanRefusingTheInstrument(t *testing.T) {
+	var r recorder
+	f := &seriesBars{series: map[store.Resolution][]store.Bar{
+		store.Resolution1d: dailyBars(10, 10, 10), // 3 days, floor is 5
+		store.Resolution1m: oneBarPerDay(10, 10, 10, 10, 10),
+	}}
+	p := mustProviderCfg(t, f, Config{ResolutionPreference: []store.Resolution{store.Resolution1d, store.Resolution1m}},
+		WithNoSpread(), r.observe())
+
+	spec, ok := p.Liquidity(context.Background(), instr, day0.AddDate(0, 0, 5))
+	if !ok {
+		t.Fatalf("Liquidity: ok=false — a half-built rollup must not refuse an instrument the " +
+			"base series can answer for")
+	}
+	if spec.ADV != 10 {
+		t.Errorf("ADV = %v, want 10 (the base series' answer)", spec.ADV)
+	}
+	if len(r.reason) != 2 || r.reason[0] != ReasonCoarseSeriesShort {
+		t.Fatalf("observations = %v, want %q first", r.reason, ReasonCoarseSeriesShort)
+	}
+	// The day count is how far the backfill has got, which is the operational
+	// number somebody actually wants.
+	if r.days[0] != 3 {
+		t.Errorf("reported days = %d, want 3 — the count is what says how far the rollup has "+
+			"backfilled", r.days[0])
+	}
+}
+
+// Exhausting the preference is still a terminal refusal, and it reports the
+// FINEST series' reason rather than a fallback reason — the fallback ones say
+// "series skipped", and reading them as "instrument refused" would show every
+// instrument failing on the day the rollup is deployed.
+func TestAnInstrumentMissingFromEverySeriesIsRefusedWithTheTerminalReason(t *testing.T) {
+	var r recorder
+	f := &seriesBars{}
+	p := mustProviderCfg(t, f, Config{ResolutionPreference: CoarsestFirst()}, WithNoSpread(), r.observe())
+
+	if _, ok := p.Liquidity(context.Background(), instr, day0.AddDate(0, 0, 5)); ok {
+		t.Fatal("Liquidity: ok=true with no bars in any series")
+	}
+	if !askedEqual(f.asked, store.Resolution1d, store.Resolution1h, store.Resolution1m) {
+		t.Errorf("series read = %v, want all three tried", f.asked)
+	}
+	if len(r.reason) != 3 || r.reason[2] != ReasonNoBars {
+		t.Errorf("observations = %v, want the terminal %q last", r.reason, ReasonNoBars)
+	}
+}
+
+// A CORRUPT ROLLUP MUST NOT BE PAPERED OVER BY THE BASE SERIES. Falling through
+// here would let a broken job keep emitting bad bars with every risk run looking
+// healthy — the whole value of a rollup is that its output can be trusted.
+func TestACorruptCoarseSeriesRefusesRatherThanFallingBackToTheBaseSeries(t *testing.T) {
+	var r recorder
+	corrupt := dailyBars(10, 10, 10, 10, 10)
+	corrupt[2].Volume = nil
+	f := &seriesBars{series: map[store.Resolution][]store.Bar{
+		store.Resolution1d: corrupt,
+		store.Resolution1m: oneBarPerDay(10, 10, 10, 10, 10),
+	}}
+	p := mustProviderCfg(t, f, Config{ResolutionPreference: []store.Resolution{store.Resolution1d, store.Resolution1m}},
+		WithNoSpread(), r.observe())
+
+	if _, ok := p.Liquidity(context.Background(), instr, day0.AddDate(0, 0, 5)); ok {
+		t.Fatal("Liquidity: ok=true off a corrupt rollup — a defect must refuse, not fall back")
+	}
+	if !askedEqual(f.asked, store.Resolution1d) {
+		t.Errorf("series read = %v, want only [1d] — falling back would hide the defect", f.asked)
+	}
+	r.only(t, ReasonUnusableVolume, 0)
+}
+
+// A store that cannot be read is not a rollup that is missing.
+func TestAStoreErrorOnACoarseSeriesDoesNotFallBack(t *testing.T) {
+	var r recorder
+	f := &seriesBars{
+		errs:   map[store.Resolution]error{store.Resolution1d: errors.New("boom")},
+		series: map[store.Resolution][]store.Bar{store.Resolution1m: oneBarPerDay(10, 10, 10, 10, 10)},
+	}
+	p := mustProviderCfg(t, f, Config{ResolutionPreference: []store.Resolution{store.Resolution1d, store.Resolution1m}},
+		WithNoSpread(), r.observe())
+
+	if _, ok := p.Liquidity(context.Background(), instr, day0.AddDate(0, 0, 5)); ok {
+		t.Fatal("Liquidity: ok=true after a store error")
+	}
+	if !askedEqual(f.asked, store.Resolution1d) {
+		t.Errorf("series read = %v, want only [1d]", f.asked)
+	}
+	r.only(t, ReasonStoreError, 0)
+}
+
+// The default is unchanged and deliberately so: a silent default onto a series
+// no job in this repository is known to write would refuse every instrument and
+// report a zero liquidation horizon, dressed as an optimisation.
+func TestTheDefaultProviderStillReadsOnlyTheBaseSeries(t *testing.T) {
+	f := &seriesBars{series: map[store.Resolution][]store.Bar{
+		store.Resolution1m: oneBarPerDay(10, 10, 10, 10, 10),
+	}}
+	p := mustProviderCfg(t, f, Config{}, WithNoSpread())
+
+	if _, ok := p.Liquidity(context.Background(), instr, day0.AddDate(0, 0, 5)); !ok {
+		t.Fatal("Liquidity: not ok")
+	}
+	if !askedEqual(f.asked, store.Resolution1m) {
+		t.Errorf("series read = %v, want only [1m] — the coarse search must be opt-in", f.asked)
+	}
+}
+
+// ===== THE PREFERENCE IS VALIDATED, NOT TRUSTED =====
+
+func TestAFineFirstOrDuplicatedResolutionPreferenceIsRefusedAtConstruction(t *testing.T) {
+	// 1m always resolves, so a fine-first list would choose it every time and the
+	// rest of the preference would be dead configuration that reads as live.
+	for _, pref := range [][]store.Resolution{
+		{store.Resolution1m, store.Resolution1d},
+		{store.Resolution1d, store.Resolution1d},
+		{store.Resolution1h, store.Resolution1d, store.Resolution1m},
+	} {
+		_, err := FromBars(&seriesBars{}, Config{Venue: venue, ResolutionPreference: pref}, WithNoSpread())
+		if !errors.Is(err, errPreferenceNotCoarsestFirst) {
+			t.Errorf("FromBars(%v) error = %v, want errPreferenceNotCoarsestFirst", pref, err)
+		}
+	}
+}
+
+func TestSettingBothResolutionFormsIsRefusedAtConstruction(t *testing.T) {
+	_, err := FromBars(&seriesBars{}, Config{
+		Venue:                venue,
+		Resolution:           store.Resolution1m,
+		ResolutionPreference: CoarsestFirst(),
+	}, WithNoSpread())
+	if !errors.Is(err, errBothResolutionForms) {
+		t.Errorf("error = %v, want errBothResolutionForms — one decision, one spelling", err)
+	}
+}
+
+// THE ERROR IS ASSERTED BY IDENTITY, NOT BY "SOMETHING WENT WRONG". A test that
+// accepts any non-nil error here passes when the unstored entry is silently
+// DROPPED and the remaining list happens to trip the ordering rule instead —
+// which is a real bug reading as a pass. Both placements are checked because
+// only the non-leading one exposes the drop by returning nil at all.
+func TestAnUnstoredResolutionInThePreferenceIsRefusedAtConstruction(t *testing.T) {
+	for _, pref := range [][]store.Resolution{
+		{"5m", store.Resolution1m},
+		{store.Resolution1d, "5m", store.Resolution1m},
+	} {
+		_, err := FromBars(&seriesBars{}, Config{Venue: venue, ResolutionPreference: pref}, WithNoSpread())
+		if !errors.Is(err, errUnstoredResolution) {
+			t.Errorf("FromBars(%v) error = %v, want errUnstoredResolution — a resolution this "+
+				"platform does not store must be named as such, not silently dropped", pref, err)
+		}
+	}
+}
+
+func TestAnUnstoredPinnedResolutionIsRefusedAtConstruction(t *testing.T) {
+	_, err := FromBars(&seriesBars{}, Config{Venue: venue, Resolution: "5m"}, WithNoSpread())
+	if !errors.Is(err, errUnstoredResolution) {
+		t.Errorf("error = %v, want errUnstoredResolution", err)
+	}
+}
+
+func TestCoarsestFirstIsOrderedCoarsestFirstAndIsAccepted(t *testing.T) {
+	if _, err := FromBars(&seriesBars{}, Config{Venue: venue, ResolutionPreference: CoarsestFirst()}, WithNoSpread()); err != nil {
+		t.Fatalf("CoarsestFirst is refused by the order rule it is supposed to satisfy: %v", err)
+	}
+	// A shared mutable default would let one caller reorder every other caller's
+	// preference; CoarsestFirst returns a fresh slice each call.
+	a, b := CoarsestFirst(), CoarsestFirst()
+	a[0] = store.Resolution1m
+	if b[0] != store.Resolution1d {
+		t.Error("CoarsestFirst hands out shared backing storage — one caller can reorder another's")
+	}
+}
+
+// ===== THE SPREAD POSTURE, ANSWERED TO THE MEASURE REGISTRY =====
+
+// compute.RegisterLiquidityRisk asks this before deciding whether LVaR99 is a
+// measure worth putting on the wire. The relationship is duck-typed so this
+// package does not import the registry, and THIS ASSERTION IS WHAT HOLDS IT: a
+// rename on either side would otherwise silently put the degenerate LVaR99 back
+// on the wire, because compute treats "does not implement" as "no claim".
+var _ compute.SpreadServing = (*Provider)(nil)
+
+func TestTheNoSpreadPostureDeclaresItServesNoSpread(t *testing.T) {
+	p := mustProvider(t, &fakeBars{}, WithNoSpread())
+	if p.ServesSpread() {
+		t.Error("ServesSpread = true under WithNoSpread — every LVaR99 it could produce equals VaR99")
+	}
+}
+
+func TestADeskEnteredSpreadTableDeclaresItServesASpread(t *testing.T) {
+	p := mustProvider(t, &fakeBars{}, WithAssumedSpreads(map[string]float64{instr: 0.0005}))
+	if !p.ServesSpread() {
+		t.Error("ServesSpread = false with a desk-entered spread table — LVaR99 would be dropped " +
+			"from a deployment that can actually compute it")
+	}
+}
+
+// Both postures together still serve a real spread for the names the table
+// covers, so the measure is worth registering.
+func TestABothPosturesProviderStillDeclaresItServesASpread(t *testing.T) {
+	p := mustProvider(t, &fakeBars{}, WithAssumedSpreads(map[string]float64{instr: 0.0005}), WithNoSpread())
+	if !p.ServesSpread() {
+		t.Error("ServesSpread = false with a non-empty spread table")
 	}
 }

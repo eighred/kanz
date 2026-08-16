@@ -72,20 +72,36 @@
 // one"). An assumption a human typed into a config is auditable; a constant
 // compiled into a risk library is not.
 //
-// # THE READ COST, STATED BECAUSE IT GATES WIRING
+// # THE READ COST, AND THE COARSE SERIES THAT FIXES IT
 //
-// The only bars this estate writes are 1-minute (marketdata.TranslateBar refuses
-// a coarse bar at the ingest seam and NO ROLLUP JOB EXISTS — grep for a writer of
-// Resolution1d and there is none, so the 1d and 1h series are empty in
-// production today). At DefaultWindow that is 28 x 1440 = 40,320 rows per
-// instrument per call, and compute calls this TWICE per position
+// The base series is 1-minute. At DefaultWindow that is 28 x 1440 = 40,320 rows
+// per instrument per call, and compute calls this TWICE per position
 // (LiquidationProfile and LiquidationCost each resolve the whole book). A
-// 500-name portfolio is therefore ~40M rows per risk request. That is the
-// strongest argument against wiring RegisterLiquidityRisk today, and it is
-// recorded here rather than discovered in production. It is not fixed by a cache
-// inside this type: an exact memo would have to key on asOf to stay
-// point-in-time honest, which is a second design with its own staleness failure
-// mode, and it belongs in its own change with its own evidence.
+// 500-name portfolio is therefore ~40M rows per risk request. That was the
+// strongest argument against wiring RegisterLiquidityRisk, and it is recorded
+// here rather than discovered in production.
+//
+// A DAILY ROLLUP MAKES THE SAME ADV OUT OF 28 ROWS, and that is not an
+// approximation. dailyTotals sums volume and counts DISTINCT UTC DAYS, so the
+// statistic is INVARIANT under the resolution it is measured from: a faithful 1d
+// rollup of the same window has the same total volume and the same day count,
+// therefore the same mean. A 1h series likewise. The only thing that changes is
+// the row count — 40,320 → 672 → 28.
+//
+// Config.ResolutionPreference is how a deployment takes that: an ordered,
+// coarsest-first list, of which the provider uses the FIRST that can actually
+// produce an ADV. It is OPT-IN and the default is still the 1-minute base
+// series, because a coarse series that is EMPTY is the worst outcome available
+// here — it returns no bars, which refuses the instrument, which
+// liquidity.Profile drops, which makes LiquidationHorizon report zero days: "this
+// book liquidates instantly", for a book nobody measured. A silent default onto
+// a series no job in this repository is known to write would be exactly that
+// failure, dressed as an optimisation.
+//
+// A cache is deliberately NOT the answer to the read cost: an exact memo would
+// have to key on asOf to stay point-in-time honest, which is a second design
+// with its own staleness failure mode, and it belongs in its own change with its
+// own evidence.
 package liquiditysource
 
 import (
@@ -200,12 +216,31 @@ const (
 	// that never adjusts is indistinguishable from a perfectly liquid book.
 	ReasonSpreadUnavailable = "spread_unavailable"
 	// ReasonNoBars: the store holds no bars for this instrument, at this venue,
-	// at this resolution, within the window and known by asOf. If this fires for
-	// EVERY instrument, suspect the venue or the resolution first — the estate
-	// writes only 1-minute bars and has no rollup job, so a provider configured
-	// for Resolution1d matches zero rows for every instrument that will ever
-	// exist.
+	// at the LAST resolution in the preference, within the window and known by
+	// asOf. TERMINAL — the instrument is refused. If this fires for EVERY
+	// instrument, suspect the venue first, then whether the base series is being
+	// ingested at all.
 	ReasonNoBars = "no_bars"
+	// ReasonCoarseSeriesEmpty: a PREFERRED (coarser) series held no bars in the
+	// window and the next resolution was tried. NOT a refusal — the call
+	// continues, and this observation is followed by whatever the finer series
+	// resolved to. It is reported because the alternative is a provider that
+	// silently reads 40,000 rows per instrument while a rollup nobody noticed is
+	// missing: "the rollup job is not running" and "the rollup job is running"
+	// must not look the same. Expect one per instrument per call until the
+	// coarse series is populated.
+	ReasonCoarseSeriesEmpty = "coarse_series_empty"
+	// ReasonCoarseSeriesShort: a PREFERRED (coarser) series held bars but covered
+	// fewer than MinDays complete days, so the next resolution was tried. NOT a
+	// refusal. THIS IS THE HALF-BUILT-ROLLUP CASE and it is the reason the
+	// fallback cannot key on emptiness alone: a rollup backfilling from today
+	// forward has three days where the base series has twenty-eight, and honouring
+	// it would refuse the instrument with ReasonInsufficientHistory — a
+	// perfectly-liquid-looking zero horizon caused entirely by a job that is
+	// working correctly and is not finished. The day count is passed to the
+	// observer, so "how far has the rollup backfilled" is readable from the
+	// metric.
+	ReasonCoarseSeriesShort = "coarse_series_short"
 	// ReasonInsufficientHistory: bars exist but cover fewer than MinDays complete
 	// days. The day count is passed to the observer. See DefaultMinDays.
 	ReasonInsufficientHistory = "insufficient_history"
@@ -241,14 +276,54 @@ type Config struct {
 	// visible.
 	Venue string
 
-	// Resolution defaults to 1m, the base series. READ THE WARNING ON
-	// ReasonNoBars before setting it to anything else: the coarser two are
-	// rollups and no job in this repository produces them.
+	// Resolution PINS one series. Zero ⇒ 1m, the base series. Setting this and
+	// ResolutionPreference together is refused by FromBars — they are two
+	// spellings of one decision, and a config that holds both has not made it.
 	Resolution store.Resolution
+
+	// ResolutionPreference is an ordered, COARSEST-FIRST list of series to try;
+	// the provider uses the first that can actually produce an ADV. Empty ⇒ the
+	// single pinned Resolution. CoarsestFirst is the intended production value.
+	//
+	// # Why a preference and not just a coarser pin
+	//
+	// A pin onto 1d is a bet that the rollup exists, is populated, and has
+	// backfilled the whole window. Lose that bet and every instrument is refused,
+	// liquidity.Profile drops every position, and LiquidationHorizon reports
+	// 0.0000 days — an ACTIVE claim of perfect liquidity for a book nobody
+	// measured. There is no downstream symptom: the measure is served, it is in
+	// range, and it is the most flattering value it can take.
+	//
+	// A preference degrades the other way. A missing or half-built coarse series
+	// costs one extra index seek that returns nothing, and the ADV comes from the
+	// base series exactly as it does today — the same number (see the package
+	// doc: the statistic is invariant under resolution), at the old read cost,
+	// with ReasonCoarseSeriesEmpty / ReasonCoarseSeriesShort counting how often.
+	// The optimisation is taken when it is real and skipped when it is not, and
+	// which of those happened is a metric rather than an inference.
+	//
+	// # Why the order is validated rather than trusted
+	//
+	// The list must be strictly coarsest-first (each entry's interval longer than
+	// the next). A list written fine-first is not a mistake this can absorb: 1m
+	// always resolves, so it would be chosen every time and the preference would
+	// be dead configuration that reads as live. FromBars refuses it.
+	ResolutionPreference []store.Resolution
 
 	// Window is how much history to read back from the last complete day.
 	// Zero ⇒ DefaultWindow.
 	Window time.Duration
+}
+
+// CoarsestFirst is the intended production ResolutionPreference: the daily
+// rollup if it is there, the hourly if it is not, and the 1-minute base series
+// as the floor that is always written.
+//
+// A FUNCTION RATHER THAN A PACKAGE VAR, so a caller cannot mutate the default
+// for every other caller in the process — a slice-valued exported var is a
+// shared mutable global wearing a constant's name.
+func CoarsestFirst() []store.Resolution {
+	return []store.Resolution{store.Resolution1d, store.Resolution1h, store.Resolution1m}
 }
 
 // Provider resolves liquidity from the durable bar series. Construct with
@@ -265,11 +340,14 @@ type Config struct {
 // resolution is made OBSERVABLE instead: WithObserver fires on every refusal AND
 // on the one degradation that succeeds.
 type Provider struct {
-	bars       BarStore
-	venue      string
-	resolution store.Resolution
-	window     time.Duration
-	minDays    int
+	bars  BarStore
+	venue string
+	// resolutions is the coarsest-first search order, never empty — a pinned
+	// Config.Resolution is the one-element case, so there is ONE read path rather
+	// than a pinned branch and a preference branch that can drift apart.
+	resolutions []store.Resolution
+	window      time.Duration
+	minDays     int
 
 	assumedSpreads map[string]float64
 	noSpread       bool
@@ -352,6 +430,15 @@ func WithMinDays(n int) Option {
 // symptom at all: the measure is served, it is a plausible number, and it
 // happens to equal VaR99 forever. Nil (the default) means the degradation is
 // unobserved. Wire it at the composition root.
+//
+// AT MOST ONE OBSERVATION PER CALL — UNLESS A RESOLUTION PREFERENCE IS IN FORCE.
+// With one series configured (the default) a call reports once or not at all.
+// With Config.ResolutionPreference each series that could not answer reports
+// ReasonCoarseSeriesEmpty or ReasonCoarseSeriesShort before the next is tried,
+// so a call can report up to len(preference) times and still SUCCEED. Read those
+// two reasons as "series skipped", never as "instruments refused" — a counter
+// that conflates them would show every instrument failing on the day the rollup
+// is deployed, when in fact every instrument resolved.
 func WithObserver(fn func(instrumentID, reason string, days int)) Option {
 	return func(p *Provider) { p.onResolution = fn }
 }
@@ -374,11 +461,10 @@ func FromBars(bars BarStore, cfg Config, opts ...Option) (*Provider, error) {
 		return nil, errNilStore
 	}
 	p := &Provider{
-		bars:       bars,
-		venue:      cfg.Venue,
-		resolution: cfg.Resolution,
-		window:     cfg.Window,
-		minDays:    DefaultMinDays,
+		bars:    bars,
+		venue:   cfg.Venue,
+		window:  cfg.Window,
+		minDays: DefaultMinDays,
 	}
 	for _, o := range opts {
 		if o != nil {
@@ -388,12 +474,11 @@ func FromBars(bars BarStore, cfg Config, opts ...Option) (*Provider, error) {
 	if p.venue == "" {
 		return nil, errNoVenue
 	}
-	if p.resolution == "" {
-		p.resolution = store.Resolution1m
+	res, err := resolutionSearch(cfg)
+	if err != nil {
+		return nil, err
 	}
-	if !p.resolution.Valid() {
-		return nil, fmt.Errorf("liquiditysource: %q is not a stored resolution", p.resolution)
-	}
+	p.resolutions = res
 	if p.window == 0 {
 		p.window = DefaultWindow
 	}
@@ -412,6 +497,42 @@ func FromBars(bars BarStore, cfg Config, opts ...Option) (*Provider, error) {
 		}
 	}
 	return p, nil
+}
+
+// resolutionSearch reduces the two spellings of "which series" to the single
+// coarsest-first order the read path walks, refusing anything that would make
+// the preference dead configuration.
+func resolutionSearch(cfg Config) ([]store.Resolution, error) {
+	if cfg.Resolution != "" && len(cfg.ResolutionPreference) > 0 {
+		return nil, errBothResolutionForms
+	}
+	if len(cfg.ResolutionPreference) == 0 {
+		r := cfg.Resolution
+		if r == "" {
+			r = store.Resolution1m
+		}
+		if !r.Valid() {
+			return nil, fmt.Errorf("%w: %q", errUnstoredResolution, r)
+		}
+		return []store.Resolution{r}, nil
+	}
+	out := make([]store.Resolution, 0, len(cfg.ResolutionPreference))
+	prev := time.Duration(0)
+	for i, r := range cfg.ResolutionPreference {
+		iv, ok := r.Interval()
+		if !ok {
+			return nil, fmt.Errorf("%w: %q", errUnstoredResolution, r)
+		}
+		// STRICTLY DECREASING, so a duplicate is refused by the same test that
+		// refuses a fine-first list. Both are dead configuration: whichever entry
+		// comes first wins every time and the rest never runs.
+		if i > 0 && iv >= prev {
+			return nil, fmt.Errorf("%w: %v", errPreferenceNotCoarsestFirst, cfg.ResolutionPreference)
+		}
+		prev = iv
+		out = append(out, r)
+	}
+	return out, nil
 }
 
 // Liquidity resolves the instrument's ADV and spread as of a point in time.
@@ -454,34 +575,8 @@ func (p *Provider) Liquidity(ctx context.Context, instrumentID string, asOf time
 	}
 
 	dayEnd := startOfUTCDay(asOf)
-	bars, err := p.bars.Bars(ctx, store.BarQuery{
-		InstrumentID: instrumentID,
-		Venue:        p.venue,
-		Resolution:   p.resolution,
-		From:         dayEnd.Add(-p.window),
-		To:           dayEnd,
-		AsOf:         asOf,
-	})
-	if err != nil {
-		// A STORE ERROR ALSO RETURNS false, forced by the seam having no error
-		// channel. It is not silent: a database that cannot be read fails the
-		// risk engine's readiness probe long before it fails here. This counter is
-		// what distinguishes it from an empty store, which the probe cannot see.
-		p.report(instrumentID, ReasonStoreError, 0)
-		return liquidity.LiquiditySpec{}, false
-	}
-	if len(bars) == 0 {
-		p.report(instrumentID, ReasonNoBars, 0)
-		return liquidity.LiquiditySpec{}, false
-	}
-
-	total, days, ok := dailyTotals(bars)
+	total, days, ok := p.advOverPreference(ctx, instrumentID, dayEnd, asOf)
 	if !ok {
-		p.report(instrumentID, ReasonUnusableVolume, 0)
-		return liquidity.LiquiditySpec{}, false
-	}
-	if days < p.minDays {
-		p.report(instrumentID, ReasonInsufficientHistory, days)
 		return liquidity.LiquiditySpec{}, false
 	}
 
@@ -500,6 +595,101 @@ func (p *Provider) Liquidity(ctx context.Context, instrumentID string, asOf time
 		// WithAssumedSpreads rather than invented here.
 		ParticipationRate: 0,
 	}, true
+}
+
+// advOverPreference walks the coarsest-first search order and returns the volume
+// total and complete-day count of the FIRST series that can produce an ADV.
+//
+// # What falls through, and what does not
+//
+// FALLS THROUGH: no bars, and too few complete days. Both mean "this series
+// cannot answer" — a rollup that does not exist, or one still backfilling — and
+// in both cases the finer series holds the same tape and yields the same ADV.
+// Honouring either would refuse the instrument, and a refused instrument is
+// dropped by liquidity.Profile and reported as zero days to liquidate.
+//
+// DOES NOT FALL THROUGH: an unusable volume, and a store error. Both say
+// something is WRONG rather than MISSING, and falling through would let a
+// CORRUPT rollup be silently papered over by the base series — the job would
+// keep emitting bad bars with every risk run looking healthy. The whole value of
+// a rollup is that its output can be trusted, so a defect in it refuses the
+// instrument exactly as a defect in the base series does, and is counted under
+// the same reason.
+//
+// The LAST resolution reports the terminal reasons (ReasonNoBars /
+// ReasonInsufficientHistory) rather than the fallback ones, so a one-element
+// preference — the pinned default — observes exactly what it observed before
+// this search existed.
+func (p *Provider) advOverPreference(ctx context.Context, instrumentID string, dayEnd, asOf time.Time) (total float64, days int, ok bool) {
+	last := len(p.resolutions) - 1
+	for i, res := range p.resolutions {
+		bars, err := p.bars.Bars(ctx, store.BarQuery{
+			InstrumentID: instrumentID,
+			Venue:        p.venue,
+			Resolution:   res,
+			From:         dayEnd.Add(-p.window),
+			To:           dayEnd,
+			AsOf:         asOf,
+		})
+		if err != nil {
+			// A STORE ERROR ALSO RETURNS false, forced by the seam having no error
+			// channel. It is not silent: a database that cannot be read fails the
+			// risk engine's readiness probe long before it fails here. This counter
+			// is what distinguishes it from an empty store, which the probe cannot
+			// see.
+			p.report(instrumentID, ReasonStoreError, 0)
+			return 0, 0, false
+		}
+		if len(bars) == 0 {
+			if i < last {
+				p.report(instrumentID, ReasonCoarseSeriesEmpty, 0)
+				continue
+			}
+			p.report(instrumentID, ReasonNoBars, 0)
+			return 0, 0, false
+		}
+		total, days, ok = dailyTotals(bars)
+		if !ok {
+			p.report(instrumentID, ReasonUnusableVolume, 0)
+			return 0, 0, false
+		}
+		if days < p.minDays {
+			if i < last {
+				p.report(instrumentID, ReasonCoarseSeriesShort, days)
+				continue
+			}
+			p.report(instrumentID, ReasonInsufficientHistory, days)
+			return 0, 0, false
+		}
+		return total, days, true
+	}
+	// UNREACHABLE: resolutionSearch guarantees a non-empty order and the final
+	// iteration always returns. Kept as a refusal rather than a panic — a risk
+	// engine that mis-wires this loses one instrument, it does not lose the pod.
+	p.report(instrumentID, ReasonNoBars, 0)
+	return 0, 0, false
+}
+
+// ServesSpread reports whether this provider can ever serve a NON-ZERO spread —
+// true iff a desk entered at least one assumed spread. It satisfies
+// compute.SpreadServing, which compute.RegisterLiquidityRisk consults to decide
+// whether LVaR99 is a measure worth putting on the wire at all: under WithNoSpread
+// every spread is zero, so CostFraction is zero, so LVaR99 equals VaR99 exactly
+// on every book forever.
+//
+// THE POSTURE IS ANSWERED WHERE IT WAS SPELLED. FromBars already forces the
+// deployment to choose WithAssumedSpreads or WithNoSpread; a second flag at the
+// registration site would be the same decision made twice by two callers who can
+// disagree, and the disagreement would be invisible because the degenerate LVaR99
+// looks like a working one.
+//
+// The relationship is duck-typed on purpose — compute declares the interface at
+// the consumer, so this package does not import the measure registry — and the
+// connection is held by a compile-time assertion in compute's own tests, because
+// a duck-typed seam that silently stops matching is how a method rename would
+// quietly put the degenerate measure back on the wire.
+func (p *Provider) ServesSpread() bool {
+	return p != nil && len(p.assumedSpreads) > 0
 }
 
 // spreadFor resolves the instrument's spread under the configured posture.
@@ -597,6 +787,12 @@ var (
 	errNonPositiveWindow       = constErr("liquiditysource: window must be positive — an unbounded window makes an ADV depend on how long the estate has been ingesting")
 	errNonPositiveMinDays      = constErr("liquiditysource: min days must be positive — a floor of zero lets one day's volume set a liquidation horizon")
 	errAssumedSpreadOutOfRange = constErr("liquiditysource: assumed spread is outside [0,1) — a spread is a fraction of price, and a value at or above 1 is a unit error CostFraction's cap would absorb silently")
+
+	errUnstoredResolution = constErr("liquiditysource: not a stored resolution — this platform stores 1m, 1h and 1d (store.Resolution)")
+
+	errBothResolutionForms = constErr("liquiditysource: set Config.Resolution or Config.ResolutionPreference, never both — they are two spellings of one decision and a config holding both has not made it")
+
+	errPreferenceNotCoarsestFirst = constErr("liquiditysource: ResolutionPreference must be strictly coarsest-first — a fine-first or duplicated list is dead configuration, because the first entry that always resolves is chosen every time and the rest never runs")
 )
 
 type constErr string

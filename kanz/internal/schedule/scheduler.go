@@ -9,6 +9,18 @@
 // the scheduler's: a Refresh error (stale/empty/arbitrageable quotes) leaves the
 // prior point-in-time version serving, so the scheduler only has to log the
 // failure and keep ticking — a bad tick never unpublishes a good curve.
+// PROMOTED OUT OF internal/risk/pricing (2026-08-16). It lived there because the
+// curve calibrator was its only caller, and CLAUDE.md's rule is that shared code
+// starts in one service's internal/ and moves only when a SECOND consumer
+// appears. That consumer is the bar rollup in market-data.
+//
+// The move was not optional once market-data needed it:
+// test/arch/risk_boundary_test.go forbids code outside kanz/internal/risk/ from
+// importing anything under it except api/v*, with risk-engine exempted as the
+// composer. So the alternatives were a second ticker implementation in
+// market-data — the copied helper this estate has paid for before — or this.
+// Nothing about the scheduler was ever risk-specific.
+
 package schedule
 
 import (

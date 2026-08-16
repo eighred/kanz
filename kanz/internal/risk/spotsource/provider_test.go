@@ -120,14 +120,70 @@ func TestTheConfiguredKindIsTheOnlyMarkRead(t *testing.T) {
 			f.gotKind, store.PriceKindClose)
 	}
 
+	// LAST, NOT SETTLEMENT. This case used to demonstrate the escape hatch with
+	// PriceKindSettlement — a kind nothing in this estate writes, so the
+	// demonstration was of an option that could never have helped a real
+	// deployment (#509). Last is a mark ingest.go actually stamps, from a trade,
+	// which is the case the hatch exists for: a venue whose ticks arrive as
+	// trades rather than bars.
 	f2 := mark(dec(100, 0), time.Hour)
-	if _, ok := mustProvider(t, f2, WithPriceKind(store.PriceKindSettlement)).Spot(context.Background(), "AAPL", t0); !ok {
+	if _, ok := mustProvider(t, f2, WithPriceKind(store.PriceKindLast)).Spot(context.Background(), "AAPL", t0); !ok {
 		t.Fatal("ok = false")
 	}
-	if f2.gotKind != store.PriceKindSettlement {
-		t.Errorf("configured kind read = %v, want PriceKindSettlement — WithPriceKind is the escape "+
+	if f2.gotKind != store.PriceKindLast {
+		t.Errorf("configured kind read = %v, want PriceKindLast — WithPriceKind is the escape "+
 			"hatch for a deployment whose ticks do not land as Close, and it must reach the store",
 			f2.gotKind)
+	}
+}
+
+// A KIND NOTHING WRITES IS REFUSED AT CONSTRUCTION, NOT DISCOVERED AT RUNTIME.
+//
+// # The defect this pins
+//
+// isKnownKind was `k >= PriceKindClose && k <= PriceKindLast` — the whole enum
+// minus its zero. Four of those seven values are produced by nothing:
+// internal/marketdata/ingest.go stamps Close, Last and Mid, and no other
+// producer of a store.Observation exists in the module.
+//
+// So WithPriceKind(PriceKindVWAP) PASSED CONSTRUCTION and then matched zero rows
+// forever — LatestAsOf filters `kind = $2` exactly. The symptom is SkipNoSpot on
+// every position, a Gamma of zero, and a book that reads as holding no options:
+// precisely the failure DefaultKind's own doc warns about, reached through the
+// option that doc offers as the remedy for it.
+//
+// # Why this test rather than the doc
+//
+// The doc described the runtime failure accurately and could not prevent it,
+// because the check was the thing that was wrong. This asserts the check.
+func TestAKindNoProductionPathWritesIsRefused(t *testing.T) {
+	// The four the estate does not produce. Named individually rather than
+	// derived from producedKinds, so that widening the set silently — the exact
+	// regression — fails here instead of agreeing with itself.
+	for _, k := range []store.PriceKind{
+		store.PriceKindAdjustedClose,
+		store.PriceKindOpen,
+		store.PriceKindVWAP,
+		store.PriceKindSettlement,
+	} {
+		if _, err := FromStore(&fakeStore{}, WithPriceKind(k)); !errors.Is(err, errUnknownKind) {
+			t.Errorf("FromStore(kind=%v) = %v, want errUnknownKind — nothing in this estate writes "+
+				"that mark, so the provider would resolve no spot for any instrument that will ever "+
+				"exist, and report it as a book with no options rather than as a misconfiguration", k, err)
+		}
+	}
+
+	// NON-VACUITY. A check that refused everything would satisfy the loop above
+	// and take the working deployments with it.
+	for _, k := range []store.PriceKind{
+		store.PriceKindClose,
+		store.PriceKindLast,
+		store.PriceKindMid,
+	} {
+		if _, err := FromStore(&fakeStore{}, WithPriceKind(k)); err != nil {
+			t.Errorf("FromStore(kind=%v) = %v, want a working provider — ingest.go stamps that mark, "+
+				"so refusing it locks out a real deployment", k, err)
+		}
 	}
 }
 

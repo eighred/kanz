@@ -25,6 +25,7 @@ import (
 	"github.com/eighred/kanz/internal/marketdata/store"
 	"github.com/eighred/kanz/internal/pg"
 	"github.com/eighred/kanz/internal/platform/httpserver"
+	"github.com/eighred/kanz/internal/schedule"
 	"github.com/eighred/kanz/internal/version"
 	"github.com/eighred/kanz/pkg/bus"
 	"github.com/eighred/kanz/pkg/observability"
@@ -208,6 +209,29 @@ func runIngest(ctx context.Context, cfg config.Config, readiness *server.Readine
 	// it cannot starve the mark ingest it shares a subject space with, and it
 	// SUBSCRIBES ONLY — the cost record belongs to the OMS and this adds a second
 	// reading of it rather than publishing back into the loop that made it.
+	// THE COARSE SERIES GET A PRODUCER (#509). See rollup.go for why it lives
+	// here and what the two clocks mean.
+	if jobs, rerr := rollupJobs(cfg, st, obs.Registry, logger); rerr != nil {
+		return rerr
+	} else if len(jobs) == 0 {
+		// LOUD, because the consequence is invisible from every other signal: the
+		// 1h and 1d series stay empty, every consumer silently falls back to
+		// 1-minute bars, and nothing errors.
+		logger.Warn("NO BAR ROLLUP CONFIGURED — the 1h and 1d series will stay empty and every "+
+			"consumer reads 1-minute bars instead. A 28-day window is ~40,000 rows per instrument "+
+			"per call and the risk engine walks the book twice per request",
+			"fix", "set MARKET_DATA_ROLLUP_SERIES to instrument@venue pairs, e.g. BTC-USDT@XBIN")
+	} else {
+		sched := schedule.New(jobs, schedule.WithLogger(logger))
+		logger.Info("bar rollup scheduled", "jobs", sched.Jobs(),
+			"interval", cfg.RollupInterval, "watermark_lag", cfg.RollupWatermarkLag)
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_ = sched.Run(ctx)
+		}()
+	}
+
 	vwapWatch := vwap.New(obs.Registry, cfg.Tenant, st, logger)
 	wg.Add(1)
 	go func() {
