@@ -42,6 +42,33 @@ type stressedProvider struct {
 	s     Stress
 }
 
+// ServesSpread FORWARDS THE INNER PROVIDER'S CLAIM, and it exists because
+// wrapping silently dropped it.
+//
+// compute decides whether to register LVaR99 by asking the provider whether it
+// can ever serve a non-zero spread, and it treats "does not implement" as "no
+// claim, assume yes" — the compatible default for providers written before that
+// question existed. A stressed provider is a different type, so it answered "no
+// claim" however emphatically the provider underneath it had said no, and
+// LVaR99 came back onto the wire on the stress path.
+//
+// Stressing a zero spread does not help: the multiplier is applied to whatever
+// the inner provider returned, and any multiple of zero is zero. So the measure
+// that returns is the degenerate one — LVaR99 identically equal to VaR99 — under
+// exactly the configuration that was chosen to keep it off.
+//
+// Declared structurally rather than against compute's interface, because compute
+// imports this package and the dependency cannot run both ways.
+func (p stressedProvider) ServesSpread() bool {
+	type spreadServing interface{ ServesSpread() bool }
+	if s, ok := p.inner.(spreadServing); ok {
+		return s.ServesSpread()
+	}
+	// The inner provider makes no claim, so neither does this one — wrapping must
+	// not manufacture an answer the thing it wraps declined to give.
+	return true
+}
+
 func (sp stressedProvider) Liquidity(ctx context.Context, instrumentID string, asOf time.Time) (LiquiditySpec, bool) {
 	spec, ok := sp.inner.Liquidity(ctx, instrumentID, asOf)
 	if !ok {

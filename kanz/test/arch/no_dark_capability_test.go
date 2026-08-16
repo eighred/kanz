@@ -109,8 +109,10 @@ var darkPackageExempt = map[string]string{
 		"marketedge/book is in-memory only — so LVaR99 would be served as a number that equals " +
 		"VaR99 by construction. A metric would say so; the measure would not, and a client asking " +
 		"for LVaR99 gets a plausible figure. TWO THINGS UNBLOCK IT, neither of them this package: " +
-		"a horizon-only registration path in compute/liquidity.go, and the 1d rollup job the bar " +
-		"store was designed for and nothing writes (at a 28-day window the 1m series is ~40,000 " +
+		"CORRECTED 2026-08-16: both named unblockers are now done — compute decides from the " +
+		"provider whether LVaR99 may be registered at all, and market-data schedules the 1d rollup. " +
+		"What remains is the composition-root wiring itself, which needs a venue, a spread posture " +
+		"and both observers; the argument for taking it is on the issue. The original blocker was (at a 28-day window the 1m series is ~40,000 " +
 		"rows per instrument per call, and compute walks the book twice).",
 	"internal/collateral": "#408 — the COLL-01 margin/financing plane. The maths is written and " +
 		"unconsumed because an order carries no leverage and no margin mode; #408 holds the ruling " +
