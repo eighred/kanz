@@ -95,6 +95,23 @@ var darkPackageExempt = map[string]string{
 		"worse than a failed one. So this ships graded and unwired rather than being held back " +
 		"until the feed exists — it is the half that is real, and holding it would mean rewriting " +
 		"it later from the same evidence.",
+	"internal/marketdata/termsload": "#509 — the contract-terms LOADER, and the writer the " +
+		"contract_terms store has never had. It is dark for one step: what remains is a CLI to " +
+		"run it (the kanz-backfill shape — pull venue reference data into a store), which is " +
+		"deliberately not written blind, because it cannot be exercised here against the venue " +
+		"endpoint it exists to read. Until it is wired the FI measures keep computing over an " +
+		"empty table, and kanz_risk_fi_terms_missing_total is the only thing that says so.",
+	"internal/risk/liquiditysource": "#509 — the production liquidity.Provider, and the reason " +
+		"it ships unwired is that RegisterLiquidityRisk registers TWO measures and only one can " +
+		"be honest today. ADV is measurable from the 1m bars and LiquidationHorizon is genuinely " +
+		"correct; NOTHING IN THIS REPOSITORY PERSISTS A BID OR AN ASK — ingest folds " +
+		"market.v1.Quote to a mid and discards both sides, no migration creates a spread column, " +
+		"marketedge/book is in-memory only — so LVaR99 would be served as a number that equals " +
+		"VaR99 by construction. A metric would say so; the measure would not, and a client asking " +
+		"for LVaR99 gets a plausible figure. TWO THINGS UNBLOCK IT, neither of them this package: " +
+		"a horizon-only registration path in compute/liquidity.go, and the 1d rollup job the bar " +
+		"store was designed for and nothing writes (at a 28-day window the 1m series is ~40,000 " +
+		"rows per instrument per call, and compute walks the book twice).",
 	"internal/collateral": "#408 — the COLL-01 margin/financing plane. The maths is written and " +
 		"unconsumed because an order carries no leverage and no margin mode; #408 holds the ruling " +
 		"on margin semantics that decides the shape of the wiring.",
