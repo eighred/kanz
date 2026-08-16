@@ -8,6 +8,7 @@ package spotsource
 
 import (
 	"context"
+	"fmt"
 	"math"
 	"time"
 
@@ -238,8 +239,10 @@ func FromStore(s PriceStore, opts ...Option) (*Provider, error) {
 		// PriceKindUnspecified is the dangerous one and the reason this check
 		// exists: store.Observation.validate REFUSES to persist an unspecified
 		// kind, so a provider configured with it matches zero rows for every
-		// instrument that will ever exist. A kind outside the enum does the same.
-		return nil, errUnknownKind
+		// instrument that will ever exist. A kind outside the enum does the same
+		// — and so does a kind INSIDE it that nothing writes, which is why the
+		// accepted set is producedKinds rather than the enum's range.
+		return nil, fmt.Errorf("%w: %v", errUnknownKind, p.kind)
 	}
 	if p.bounded && p.maxAge <= 0 {
 		return nil, errNonPositiveMaxAge
@@ -337,17 +340,58 @@ func decimalToFloat(d *commonpb.Decimal) (float64, bool) {
 	return float64(d.GetCoefficient()) * math.Pow10(int(d.GetExponent())), true
 }
 
-// isKnownKind reports whether k is a PriceKind the store can actually hold.
+// producedKinds is the set of PriceKinds ANY PRODUCTION PATH IN THIS ESTATE
+// WRITES, which is a strictly narrower question than which ones the enum spells.
+//
+// # Why this is not `PriceKindClose <= k <= PriceKindLast`
+//
+// That was the old test, and it accepted all seven non-zero kinds. Four of them
+// — AdjustedClose, Open, VWAP and Settlement — are formed NOWHERE in the module:
+// internal/marketdata/ingest.go stamps exactly three (Close from a bar, Last
+// from a trade, Mid from a quote), and no other producer of a store.Observation
+// exists. So `WithPriceKind(store.PriceKindVWAP)` passed construction, and then
+// LatestAsOf — which filters `kind = $2` exactly — matched zero rows for every
+// instrument that will ever exist.
+//
+// THE RESULT WAS PRECISELY THE FAILURE DefaultKind's DOC DESCRIBES, reached
+// through the one option that doc offers as the REMEDY for it: SkipNoSpot on
+// every position, a Gamma of zero, and a book that looks like it holds no
+// options. The doc warned about a deployment storing under a different kind. It
+// did not say that four of the kinds a caller may select can never match,
+// whatever the deployment does.
+//
+// "Nothing configured" and "checked, and fine" must never look the same, and a
+// kind nothing writes is the first of those wearing the face of the second.
+//
+// # What this set is NOT
+//
+// It is not a claim that the other four are invalid marks, or that the constants
+// should go — store.PriceKind mirrors reference.v1.PriceKind BY NUMBER so the
+// two never drift, and renumbering a wire enum to tidy a Go const block is a
+// data-corruption bug. It is the narrower claim that selecting one here today
+// cannot work. THE DAY A FEED SUPPLIES ONE, THIS SET IS WHAT GETS EDITED, and
+// test/arch/stored_series_has_a_producer_test.go is what will say so: its
+// exemption for that kind goes stale the moment a producer lands (#509).
+var producedKinds = map[store.PriceKind]bool{
+	store.PriceKindClose: true, // bars, ingest.go
+	store.PriceKindLast:  true, // trades, ingest.go
+	store.PriceKindMid:   true, // quotes, ingest.go
+}
+
+// isKnownKind reports whether k is a PriceKind this estate actually produces.
 // Unspecified is excluded deliberately — see FromStore.
 func isKnownKind(k store.PriceKind) bool {
-	return k >= store.PriceKindClose && k <= store.PriceKindLast
+	return producedKinds[k]
 }
 
 // Construction errors. Named so a composition root can assert on them and a test
 // does not match on prose.
 var (
-	errNilStore          = constErr("spotsource: nil price store — every option would go unpriced")
-	errUnknownKind       = constErr("spotsource: price kind is unspecified or unknown — it would match no stored observation for any instrument")
+	errNilStore    = constErr("spotsource: nil price store — every option would go unpriced")
+	errUnknownKind = constErr("spotsource: price kind is unspecified, outside the enum, or one no " +
+		"production path in this estate writes (only Close, Last and Mid are produced — see " +
+		"producedKinds) — it would match no stored observation for any instrument, which is " +
+		"SkipNoSpot on every position rather than an error")
 	errNonPositiveMaxAge = constErr("spotsource: max age must be positive; use WithoutStalenessBound to accept a mark of any age")
 )
 
