@@ -46,7 +46,6 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/eighred/kanz/internal/dec"
 	"github.com/eighred/kanz/internal/marketdata/store"
 )
 
@@ -155,7 +154,7 @@ func (b *Backfiller) Run(ctx context.Context, src Source, s Series, from, to tim
 		switch {
 		case !seen:
 			write = append(write, f)
-		case sameCandle(prev, f):
+		case store.SameCandle(prev, f):
 			res.Unchanged++
 		default:
 			res.Restated++
@@ -194,40 +193,4 @@ func (s Series) validate() error {
 		return errors.New("backfill: venue is required — a candle series is per venue")
 	}
 	return nil
-}
-
-// sameTradeCount compares two counts BY VALUE, treating "neither was reported"
-// as equal (#432).
-//
-// IT EXISTS BECAUSE THE OBVIOUS EXPRESSION COMPILES AND IS WRONG. Once TradeCount
-// became a *int64, `a.TradeCount == b.TradeCount` compares ADDRESSES: two bars
-// both reporting 42 hold different pointers, so every re-fetched candle would
-// look restated. The store would then write a fresh knowledge_time row for every
-// unchanged bar on every backfill re-run — inflating the series with restatements
-// of nothing, and making a real correction impossible to find among them. That is
-// precisely the outcome sameCandle's doc comment says it exists to prevent, and
-// the compiler would not have said a word.
-func sameTradeCount(a, b *int64) bool {
-	if a == nil || b == nil {
-		// Both unreported is the same observation. One reported and one not is a
-		// genuine change: the venue started (or stopped) telling us.
-		return a == nil && b == nil
-	}
-	return *a == *b
-}
-
-// sameCandle reports whether the venue's answer matches what is stored.
-//
-// COMPARED EXACTLY, through dec.Cmp rather than a float conversion: these are
-// base-10 decimals and the whole point of storing them that way is not to leave
-// the domain in order to compare them. A comparison that rounded would call a
-// restatement unchanged, which is the one outcome this function exists to
-// prevent.
-func sameCandle(a, b store.Bar) bool {
-	return dec.Cmp(a.Open, b.Open) == 0 &&
-		dec.Cmp(a.High, b.High) == 0 &&
-		dec.Cmp(a.Low, b.Low) == 0 &&
-		dec.Cmp(a.Close, b.Close) == 0 &&
-		dec.Cmp(a.Volume, b.Volume) == 0 &&
-		sameTradeCount(a.TradeCount, b.TradeCount)
 }

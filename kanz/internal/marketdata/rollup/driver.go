@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/eighred/kanz/internal/dec"
 	"github.com/eighred/kanz/internal/marketdata/store"
 )
 
@@ -273,7 +272,7 @@ func (r *Roller) Run(ctx context.Context, req Request) (Result, error) {
 		switch {
 		case !seen:
 			write = append(write, bar)
-		case sameCandle(prev, bar):
+		case store.SameCandle(prev, bar):
 			// Values agree, so there is nothing to record even if the knowledge
 			// stamp moved. Writing anyway would add a restatement of nothing on
 			// every run and bury the real ones.
@@ -339,38 +338,4 @@ func (req Request) validate() error {
 			"kept forever", ErrIncompleteInput)
 	}
 	return nil
-}
-
-// sameTradeCount compares two counts BY VALUE, treating "neither was reported" as
-// equal (#432).
-//
-// THE OBVIOUS EXPRESSION COMPILES AND IS WRONG: TradeCount is a *int64, so
-// `a.TradeCount == b.TradeCount` compares ADDRESSES and two bars both reporting 42
-// would look different on every run.
-func sameTradeCount(a, b *int64) bool {
-	if a == nil || b == nil {
-		return a == nil && b == nil
-	}
-	return *a == *b
-}
-
-// sameCandle reports whether a freshly derived bar says the same thing as the
-// stored one, comparing EXACTLY through dec.Cmp rather than a float conversion.
-//
-// DUPLICATED FROM backfill.sameCandle, knowingly, and it should not stay that way.
-// The house rule is that shared code is promoted on the SECOND consumer, and this
-// is the second consumer — but promoting it means editing internal/marketdata/
-// backfill, which is outside this change. The right home is beside store.Bar
-// itself, since "do these two versions of a bar agree" is a property of the type
-// and both callers use it for the same purpose: keeping a re-run from writing a
-// restatement of nothing. Until then, a fix to one of these must be applied to
-// both — which is precisely the failure mode the rule exists to prevent, so this
-// note is the debt, not the excuse.
-func sameCandle(a, b store.Bar) bool {
-	return dec.Cmp(a.Open, b.Open) == 0 &&
-		dec.Cmp(a.High, b.High) == 0 &&
-		dec.Cmp(a.Low, b.Low) == 0 &&
-		dec.Cmp(a.Close, b.Close) == 0 &&
-		dec.Cmp(a.Volume, b.Volume) == 0 &&
-		sameTradeCount(a.TradeCount, b.TradeCount)
 }
