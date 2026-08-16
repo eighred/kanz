@@ -118,7 +118,7 @@ func TestAFinishedHourIsWrittenToTheCoarseSeries(t *testing.T) {
 		t.Fatalf("stored %d 1h bars, want 1", len(got))
 	}
 	want := mustFold(t, store.Resolution1h, hour0, threeMinutes())
-	if !sameCandle(want, got[0]) || !got[0].KnowledgeTime.Equal(want.KnowledgeTime) {
+	if !store.SameCandle(want, got[0]) || !got[0].KnowledgeTime.Equal(want.KnowledgeTime) {
 		t.Errorf("the driver wrote a different bar from the fold: %+v vs %+v", got[0], want)
 	}
 }

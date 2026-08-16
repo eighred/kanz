@@ -255,3 +255,69 @@ type ReadWriter interface {
 	Store
 	BarStore
 }
+
+// SameCandle reports whether two versions of a bar say the same thing about the
+// market — the OHLCV and the trade count, not the identity fields and not the
+// bitemporal stamps.
+//
+// # What it is for
+//
+// Both writers of this store re-derive bars that may already exist: backfill
+// re-fetches a window from the venue, and rollup re-folds a window of buckets on
+// every run. Both are deliberately idempotent and both look BACK over an overlap
+// so a missed run heals itself. This is the comparison that makes that safe —
+// without it, every re-run writes a fresh knowledge_time row for every unchanged
+// bar, inflating the series with restatements of nothing and making a REAL
+// correction impossible to find among them.
+//
+// # COMPARED EXACTLY, through dec.Cmp
+//
+// These are base-10 decimals and the entire point of storing them that way is not
+// to leave the domain in order to compare them. A comparison that rounded would
+// call a restatement unchanged — the one outcome this function exists to prevent,
+// and the direction that loses data rather than duplicating it.
+//
+// # Why it lives HERE
+//
+// "Do these two versions of a bar agree" is a property of the type. It was
+// open-coded identically in backfill and rollup, and the house rule promotes on
+// the second consumer. It is not about the six lines: a fix applied to one copy
+// and not the other is how this estate got 17 secret() helpers of which 15 were
+// wrong, and both callers use this for the same purpose.
+//
+// # What it deliberately IGNORES
+//
+// InstrumentID, Venue, Resolution and BucketStart are the bar's IDENTITY — two
+// bars that differ there are not two versions of one bar, they are two bars, and
+// asking whether they agree is a category error. KnowledgeTime is excluded
+// because it is the answer this comparison FEEDS: a caller compares the candles
+// to decide whether a new knowledge_time row is warranted, so including it would
+// make every comparison false and every re-run a restatement.
+func SameCandle(a, b Bar) bool {
+	return decimal.Cmp(a.Open, b.Open) == 0 &&
+		decimal.Cmp(a.High, b.High) == 0 &&
+		decimal.Cmp(a.Low, b.Low) == 0 &&
+		decimal.Cmp(a.Close, b.Close) == 0 &&
+		decimal.Cmp(a.Volume, b.Volume) == 0 &&
+		SameTradeCount(a.TradeCount, b.TradeCount)
+}
+
+// SameTradeCount compares two counts BY VALUE, treating "neither was reported"
+// as equal (#432).
+//
+// IT EXISTS BECAUSE THE OBVIOUS EXPRESSION COMPILES AND IS WRONG. TradeCount is a
+// *int64 — deliberately, because #432 established that a venue not reporting a
+// count and a venue reporting zero trades are different claims and must not be
+// conflated. So `a.TradeCount == b.TradeCount` compares ADDRESSES: two bars both
+// reporting 42 hold different pointers and would look restated on every single
+// run. The compiler says nothing, and the symptom is a series full of
+// restatements of nothing.
+//
+// ONE REPORTED AND ONE NOT IS A GENUINE CHANGE, not a missing value to be
+// ignored: the venue started, or stopped, telling us.
+func SameTradeCount(a, b *int64) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	return *a == *b
+}

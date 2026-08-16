@@ -133,7 +133,7 @@ func TestAShuffledBucketFoldsToTheSameBar(t *testing.T) {
 		mins := threeMinutes()
 		rng.Shuffle(len(mins), func(a, b int) { mins[a], mins[b] = mins[b], mins[a] })
 		got := mustFold(t, store.Resolution1h, hour0, mins)
-		if !sameCandle(ordered, got) || !got.KnowledgeTime.Equal(ordered.KnowledgeTime) {
+		if !store.SameCandle(ordered, got) || !got.KnowledgeTime.Equal(ordered.KnowledgeTime) {
 			t.Fatalf("shuffle %d folded differently: open %v close %v vs open %v close %v — the "+
 				"slice order reached the result", i, got.Open, got.Close, ordered.Open, ordered.Close)
 		}
