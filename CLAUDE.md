@@ -6,7 +6,8 @@ multi-tenant architecture designed for fund managers and investment firms.
 
 ## Stack
 
-- **Go 1.26.1** — `kanz/`, module `github.com/eighred/kanz`. 26 services, 12 CLI binaries.
+- **Go 1.26.1** — `kanz/`, module `github.com/eighred/kanz`. Services under
+  `services/`, CLI binaries under `cmd/`.
 - **Postgres** (pgx v5) — durable state, multi-tenant via RLS.
 - **NATS JetStream** — the event spine. **Kafka** (segmentio) — the archival/CDC path.
 - **Protobuf + buf** — `kanz-schemas/`, generated SDK at `kanz-schemas/gen/go`.
@@ -34,9 +35,17 @@ commands ──▶ api-gateway ──▶ NATS ──▶ services ──▶ Postg
 ```sh
 cd kanz
 go build ./...
-go test -p 1 ./...          # -p 1 is REQUIRED — see Constraints
 go vet ./...
+golangci-lint run ./...     # the FOURTH gate — build, vet and test all pass on code it rejects
 git ls-files -z '*.go' | xargs -0 gofmt -l   # not `gofmt -l .` — GOTMPDIR is in-module (windows-go-setup.md #2), so a tree walk lists _testmain.go build artifacts as violations
+
+# -p 1 is REQUIRED (see Constraints). Run in chunks, never as one ./... —
+# the harness reaps a child at ~10 min, and a truncated run ends with 0 FAIL,
+# which reads as green. Diff the packages reported against `go list` to prove
+# the run finished.
+go test -p 1 ./internal/... -count=1
+go test -p 1 ./services/... -count=1
+go test -p 1 ./test/arch/   -count=1
 
 cd kanz-schemas && buf generate    # regenerate the Go/Python SDKs
 ```
@@ -57,8 +66,9 @@ cd kanz-schemas && buf generate    # regenerate the Go/Python SDKs
 ## Constraints
 
 - **`go test -p 1`** — the Postgres-gated tests share one database and race otherwise.
-- **`TEST_POSTGRES_URL` unset ⇒ 14 test files skip silently.** The role must be
-  **NOSUPERUSER**, or RLS is bypassed and the isolation tests pass falsely.
+- **`TEST_POSTGRES_URL` unset ⇒ the Postgres-gated tests skip silently** — dozens
+  of files, reported as `ok`. The role must be **NOSUPERUSER**, or RLS is
+  bypassed and the isolation tests pass falsely.
 - **`-race` needs cgo** — it does not run on the usual Windows box. Concurrency
   claims are unproven until CI runs them.
 - **`fakeBus` does not validate envelopes**, so it accepts what a real broker
@@ -67,10 +77,15 @@ cd kanz-schemas && buf generate    # regenerate the Go/Python SDKs
 
 ## Where work is tracked
 
-**GitHub Issues** on `eighred/kanz` — milestones `M0`…`M6`. There is no task
-board, no plan files and no architecture document in this repository; all three
-were tried and each became a second answer competing with the code. Everything
-durable lives beside the code, in git history, or in claude-mem.
+**GitHub Issues** on `eighred/kanz`. There is no task board, no plan files and no
+architecture document in this repository; all three were tried and each became a
+second answer competing with the code. Everything durable lives beside the code,
+in git history, or in claude-mem.
+
+The `M0`…`M6` milestones covered issues #55–#85 and were then abandoned: M0, M1
+and M6 are **closed and complete**, and most open issues carry no milestone at
+all. Read them as history. Do not force-fit new work into them, and do not treat
+an unmilestoned issue as unplanned.
 
 Every issue carries one **kind** label (`open-work`, `needs-verification`,
 `blocked-external`, `decision-needed`), one **priority** (`P0`/`P1`/`P2`), and an
@@ -84,11 +99,8 @@ quoted result), **Verified when** (a runnable command and its expected result),
 
 ### Sequencing that outlives any one issue
 
-- **M0 first, and not partially.** Everything after it is verified by a pipeline
-  that cannot presently complete a merge unaided.
-- **M3 must not precede the DR-coverage issue in M0.** Placing real orders
-  against a store that may not be backed up is the one ordering error with an
-  unrecoverable failure mode.
+- **Never place real orders against a store that may not be backed up.** The one
+  ordering error with an unrecoverable failure mode. DR coverage lands first.
 
 ## Skills
 
@@ -100,7 +112,12 @@ Long procedures live in skills, not here.
 | `kanz-forge:kanz-verify` | what counts as proof, and the traps that have produced false green |
 | `kanz-forge:stack-routing` | which layer owns a job; which artifacts must not be created |
 
-**An invariant worth keeping is a guard, not a paragraph.** 42 arch tests in
+**An invariant worth keeping is a guard, not a paragraph.** The arch tests in
 `kanz/test/arch/` enforce these rules — default-deny, with named exemptions that
 carry the issue retiring them and a dead-entry check so an exemption cannot
 outlive its repair. Add one there rather than a rule here.
+
+Read them before filing a bug: an absence that looks like an oversight is often
+a guarded decision, and the exemption states why. A guard that passes proves
+what it *resolved*, not what its name claims — mutate the artifact to find out
+which.
