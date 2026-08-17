@@ -19,6 +19,7 @@ package identity_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -304,5 +305,148 @@ func TestUpdateCredentialRewritesTheHash(t *testing.T) {
 	}
 	if err := st.UpdateCredential(context.Background(), "user:nobody", second, now0); err != identity.ErrUserNotFound {
 		t.Errorf("UpdateCredential for an unknown subject = %v, want ErrUserNotFound", err)
+	}
+}
+
+// SetStatus IS THE WRITE THAT MAKES StatusDisabled REACHABLE (#525).
+//
+// Gated on TEST_POSTGRES_URL like every test in this file, so it SKIPS on a box
+// without a database — and everything it proves is a property of the statement,
+// which is why it lives here and not beside a fake:
+//
+//   - the row actually changes, and updated_at moves with it;
+//   - the disabled account is then refused by Signer.Mint, the last point that
+//     sees a User;
+//   - a subject that matched no row is ErrUserNotFound and NOT a silent success.
+func TestSetStatusDisablesAnAccountAndMintThenRefusesIt(t *testing.T) {
+	st := newStore(t)
+	raw := invite(t, st, "inv-disable", "user:grace")
+	cred, _ := identity.HashCredential("pw")
+	if _, err := st.Redeem(context.Background(), raw, cred, now0); err != nil {
+		t.Fatalf("Redeem: %v", err)
+	}
+
+	key, err := identity.GenerateKey()
+	if err != nil {
+		t.Fatalf("GenerateKey: %v", err)
+	}
+	signer, err := identity.NewSigner(key, "https://identity.test", "kanz", time.Hour)
+	if err != nil {
+		t.Fatalf("NewSigner: %v", err)
+	}
+
+	before, err := st.UserBySubject(context.Background(), "user:grace")
+	if err != nil {
+		t.Fatalf("UserBySubject: %v", err)
+	}
+	if !before.Active() {
+		t.Fatalf("precondition: a freshly redeemed account is %q, want active", before.Status)
+	}
+	if _, _, err := signer.Mint(before); err != nil {
+		t.Fatalf("precondition: Mint refused an active account: %v", err)
+	}
+
+	later := now0.Add(2 * time.Hour)
+	if err := st.SetStatus(context.Background(), "user:grace", identity.StatusDisabled, later); err != nil {
+		t.Fatalf("SetStatus: %v", err)
+	}
+
+	after, err := st.UserBySubject(context.Background(), "user:grace")
+	if err != nil {
+		t.Fatalf("UserBySubject: %v", err)
+	}
+	if after.Active() {
+		t.Fatalf("status = %q after a disable, want disabled — the row did not change, and every "+
+			"caller above this reports a lockout that did not happen", after.Status)
+	}
+	if !after.UpdatedAt.After(before.UpdatedAt) {
+		t.Errorf("updated_at = %s, was %s — a status change that leaves the timestamp behind is "+
+			"invisible to anything reconciling the table against the audit log",
+			after.UpdatedAt, before.UpdatedAt)
+	}
+	if _, _, err := signer.Mint(after); err == nil {
+		t.Fatal("Mint issued a token for a disabled account — the enforcement point the disable " +
+			"exists to reach")
+	}
+
+	// AND BACK. Without the inverse, a mistaken disable needs the hand-run UPDATE
+	// this method was written to eliminate.
+	if err := st.SetStatus(context.Background(), "user:grace", identity.StatusActive, later.Add(time.Hour)); err != nil {
+		t.Fatalf("SetStatus (re-enable): %v", err)
+	}
+	back, err := st.UserBySubject(context.Background(), "user:grace")
+	if err != nil {
+		t.Fatalf("UserBySubject: %v", err)
+	}
+	if !back.Active() {
+		t.Fatalf("status = %q after a re-enable, want active", back.Status)
+	}
+}
+
+// ZERO ROWS AFFECTED IS AN ERROR, NOT A SUCCESS.
+//
+// A disable that matched no subject is the exact failure this method exists to
+// remove: the operator is told the account is locked out, the audit record says
+// it was, and nothing happened. A typo'd subject must not be indistinguishable
+// from a completed disable.
+func TestSetStatusForAnUnknownSubjectIsNotFound(t *testing.T) {
+	st := newStore(t)
+	err := st.SetStatus(context.Background(), "user:nobody", identity.StatusDisabled, now0)
+	if !errors.Is(err, identity.ErrUserNotFound) {
+		t.Fatalf("SetStatus for an unknown subject = %v, want ErrUserNotFound", err)
+	}
+}
+
+// AN UNKNOWN STATUS IS REFUSED IN GO, BEFORE THE STATEMENT RUNS.
+//
+// The column's CHECK constraint would refuse it too — this asserts that the
+// caller gets ErrUnknownStatus rather than an opaque *pgconn.PgError it cannot
+// tell from a dead pool, AND that the row is left alone, which is the part a
+// constraint violation inside a larger statement would not guarantee.
+func TestSetStatusRefusesAnUnknownStatusWithoutTouchingTheRow(t *testing.T) {
+	st := newStore(t)
+	raw := invite(t, st, "inv-badstatus", "user:heidi")
+	cred, _ := identity.HashCredential("pw")
+	if _, err := st.Redeem(context.Background(), raw, cred, now0); err != nil {
+		t.Fatalf("Redeem: %v", err)
+	}
+
+	err := st.SetStatus(context.Background(), "user:heidi", identity.Status("suspended"), now0.Add(time.Hour))
+	if !errors.Is(err, identity.ErrUnknownStatus) {
+		t.Fatalf("SetStatus with an unknown status = %v, want ErrUnknownStatus — a constraint "+
+			"violation reaches the caller as a database error indistinguishable from a "+
+			"connection fault", err)
+	}
+	u, uerr := st.UserBySubject(context.Background(), "user:heidi")
+	if uerr != nil {
+		t.Fatalf("UserBySubject: %v", uerr)
+	}
+	if !u.Active() {
+		t.Errorf("status = %q after a REFUSED write, want active — the refusal happened after the "+
+			"statement, not before it", u.Status)
+	}
+	if !u.UpdatedAt.Equal(now0) {
+		t.Errorf("updated_at moved to %s on a refused write", u.UpdatedAt)
+	}
+}
+
+// THE UNKNOWN-STATUS REFUSAL HAPPENS BEFORE THE POOL IS TOUCHED, AND THIS TEST
+// NEEDS NO DATABASE TO PROVE IT (#525).
+//
+// The store is built over a NIL pool. If SetStatus reached the Exec — which is
+// what "let the CHECK constraint catch it" would mean — this panics on a nil
+// dereference instead of returning. So the assertion is not only "an error came
+// back", it is "the statement never ran", which is the property that makes the
+// error classifiable: a constraint violation arrives as an opaque database error
+// a caller cannot tell from a dead pool, and would be reported as an outage.
+//
+// It is UNGATED on purpose. Every other SetStatus test skips without
+// TEST_POSTGRES_URL, and a guarantee whose only proof skips on the box it is
+// developed on is a guarantee nothing checks.
+func TestSetStatusRefusesAnUnknownStatusWithoutReachingTheDatabase(t *testing.T) {
+	st := identity.NewPostgres(nil)
+	err := st.SetStatus(context.Background(), "user:anyone", identity.Status("suspended"), now0)
+	if !errors.Is(err, identity.ErrUnknownStatus) {
+		t.Fatalf("SetStatus over a nil pool = %v, want ErrUnknownStatus", err)
 	}
 }

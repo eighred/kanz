@@ -18,9 +18,12 @@
 // So the key and the credential store live here, behind the gateway, and the
 // gateway holds only the public half it fetches from /jwks.json.
 //
-// PROVISIONING IS NOT HERE. Creating invites is an operator action and belongs
-// on the authenticated control plane; these routes are the ones that must work
-// for someone holding nothing.
+// THE THREE ABOVE ARE THE ONES THAT MUST WORK FOR SOMEONE HOLDING NOTHING.
+// Everything else this service serves — creating invites (#364), disabling and
+// re-enabling accounts (#525) — is an operator action behind a verified bearer
+// token, registered only when a deployment wires provisioning. See provision.go
+// and status.go for why this service authenticates instead of trusting the
+// gateway's principal headers.
 package server
 
 import (
@@ -143,6 +146,11 @@ func New(store Store, minter Minter, limiter Limiter, jwks func() any, issuer st
 			return nil, errors.New("identity/server: provisioning needs the operator role named — an " +
 				"empty role matches nothing, so every authenticated caller would be refused, and a " +
 				"role check nobody can pass is indistinguishable from a broken deployment")
+		case p.Audit == nil:
+			return nil, errors.New("identity/server: provisioning needs an audit recorder — these " +
+				"routes create and disable accounts, and an account disabled by nobody-in-particular " +
+				"is the unattributable hand-run UPDATE they exist to replace; pass " +
+				"auth.NewSlogRecorder(logger) if this deployment has no bus")
 		}
 	}
 	return s, nil
@@ -160,6 +168,11 @@ func (s *Server) Routes(mux *http.ServeMux) {
 	if s.provisioning != nil {
 		mux.HandleFunc("POST /invites", s.createInvite)
 		mux.HandleFunc("GET /invites", s.listInvites)
+		// DEPROVISIONING (#525), on the SAME gate and for the same reason: an
+		// unconfigured deployment must answer 404 to "can I disable an account
+		// here", not 403, because it truthfully cannot.
+		mux.HandleFunc("POST /users/{subject}/disable", s.disableUser)
+		mux.HandleFunc("POST /users/{subject}/enable", s.enableUser)
 	}
 }
 

@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"strings"
 	"time"
@@ -9,6 +10,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/eighred/kanz/internal/identity"
+	"github.com/eighred/kanz/pkg/auth"
 )
 
 // AUTHENTICATED PROVISIONING (#364).
@@ -46,12 +48,20 @@ type Verifier interface {
 
 // Provisioner is the store half provisioning needs, kept separate from Store so
 // a deployment that does not enable provisioning cannot accidentally satisfy it.
+//
+// UserBySubject and SetStatus are DEPROVISIONING (#525), and they are on this
+// interface rather than on Store because they ride the same authority: deciding
+// that an account may exist and deciding that it may stop are the same operator
+// power, and splitting them across two gates would let a deployment enable one
+// without the other.
 type Provisioner interface {
 	CreateInvite(ctx context.Context, inv *identity.Invite) error
 	InvitesFor(ctx context.Context, tenant string) ([]*identity.Invite, error)
+	UserBySubject(ctx context.Context, subject string) (*identity.User, error)
+	SetStatus(ctx context.Context, subject string, status identity.Status, now time.Time) error
 }
 
-// Provisioning configures the authenticated invite routes.
+// Provisioning configures the authenticated invite and account-status routes.
 type Provisioning struct {
 	Verifier Verifier
 	Store    Provisioner
@@ -62,9 +72,26 @@ type Provisioning struct {
 	// InviteTTL is how long a new invitation stays redeemable; zero uses the
 	// domain default.
 	InviteTTL time.Duration
+
+	// Audit records who disabled or re-enabled whom (#525). REQUIRED, and New
+	// refuses provisioning without it.
+	//
+	// A disable with no record of who ordered it is a switch, not a control — it
+	// is the same unattributable act as the hand-run UPDATE this route exists to
+	// replace, only faster. Defaulting it to a no-op here would make "this
+	// deployment records nothing" and "this deployment records everything" look
+	// identical from the code and from the logs.
+	//
+	// The type is pkg/auth's, not a new one: observation.v1.DecisionLog already
+	// models "who decided what, and on what grounds", AUDIT-01's projection
+	// already materializes it, and a second audit shape would be a second answer.
+	// auth.NewSlogRecorder is the estate's named default when a composition root
+	// has no bus.Producer — see cmd/identity for what that costs.
+	Audit auth.DecisionRecorder
 }
 
-// WithProvisioning enables POST/GET /invites.
+// WithProvisioning enables POST/GET /invites and the account-status routes
+// (POST /users/{subject}/disable and /enable, #525).
 //
 // PROVISIONING IS OFF UNTIL WIRED, and the routes do not exist when it is off —
 // they are not registered rather than registered-and-refusing. A 404 and a 403
@@ -196,11 +223,14 @@ func (s *Server) listInvites(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, out)
 }
 
-// operator authenticates the caller and requires the operator role.
+// operator authenticates the caller, requires the operator role, and requires
+// that the caller's ACCOUNT is still active (#525).
 //
 // A FAILURE HERE IS 401 OR 403 AND NEVER A REASON. "expired", "signed by
-// something else" and "no such issuer" told apart is a probing oracle; the
-// service logs which it was and the caller is told only that it was rejected.
+// something else", "no such issuer" and "disabled since it was issued" told apart
+// is a probing oracle; the service logs which it was and the caller is told only
+// that it was rejected. The ONE exception is 503, and it is deliberate: a status
+// that could not be checked is not a status that was checked.
 func (s *Server) operator(w http.ResponseWriter, r *http.Request) (*identity.Claims, bool) {
 	raw, ok := bearer(r)
 	if !ok {
@@ -221,6 +251,53 @@ func (s *Server) operator(w http.ResponseWriter, r *http.Request) (*identity.Cla
 			"subject", claims.Subject, "tenant", claims.Tenant, "roles", claims.Roles,
 			"required", s.provisioning.OperatorRole)
 		writeErr(w, http.StatusForbidden, "creating an account requires the "+s.provisioning.OperatorRole+" role")
+		return nil, false
+	}
+
+	// THE TOKEN IS NOT THE ACCOUNT (#525).
+	//
+	// Verify checks a signature, an expiry, an issuer and an audience — all
+	// properties frozen at the moment the token was minted. Nothing above this
+	// line reads the account, so a DISABLED OPERATOR'S OUTSTANDING TOKEN STILL
+	// CREATES AND DISABLES ACCOUNTS for the rest of its TTL (8h by default). That
+	// is the single highest-privilege residual token on this platform, and it
+	// belonged to somebody the estate had already decided to lock out.
+	//
+	// IT IS CHECKED HERE AND NOT AT THE GATEWAY because here it is cheap and there
+	// it is not: this process already holds the identity pool, and this is a
+	// low-traffic authenticated route, so the cost is one indexed primary-key read
+	// per operator action. The gateway holds no database client at all — giving it
+	// one is a connection-budget and NetworkPolicy change, and the right answer
+	// there is a revocation FACT on the bus rather than a per-request lookup. The
+	// residual token on EVERY OTHER route therefore remains open; this closes it
+	// only on the routes that provision.
+	u, err := s.provisioning.Store.UserBySubject(r.Context(), claims.Subject)
+	switch {
+	case err != nil && !errors.Is(err, identity.ErrUserNotFound):
+		// FAIL CLOSED, AND SAY SO AS ITS OWN OUTCOME. "The status was checked and
+		// the account is disabled" and "the status could not be checked" are
+		// different facts, and answering the same 401 to both would let a store
+		// outage read in the logs as a wave of disabled operators — or, worse,
+		// invite somebody to make the unreachable case permissive. 503 says the
+		// service could not answer, which is the truth and is retryable.
+		s.logger.Error("provisioning refused: the caller's account status could not be checked",
+			"subject", claims.Subject, "err", err)
+		writeErr(w, http.StatusServiceUnavailable, "the operator's account status could not be checked")
+		return nil, false
+	case err != nil || !u.Active():
+		// THE SAME 401 AS A REJECTED TOKEN, AND NO REASON — the stance this
+		// function's doc states. A disabled operator learning "disabled" rather
+		// than "rejected" learns that their subject is still a known account; a
+		// validly-signed token naming no account at all (deleted, or minted by
+		// something that should not have) is the same refusal for the same reason.
+		// The log tells them apart.
+		reason := "the account is disabled"
+		if err != nil {
+			reason = "the token names no account in this store"
+		}
+		s.logger.Warn("provisioning refused: a valid token whose account may not act",
+			"subject", claims.Subject, "tenant", claims.Tenant, "reason", reason)
+		writeErr(w, http.StatusUnauthorized, "the token was rejected")
 		return nil, false
 	}
 	return claims, true

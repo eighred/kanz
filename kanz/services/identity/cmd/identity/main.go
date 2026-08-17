@@ -29,6 +29,7 @@ import (
 	"github.com/eighred/kanz/internal/pg"
 	"github.com/eighred/kanz/internal/platform/httpserver"
 	"github.com/eighred/kanz/internal/version"
+	"github.com/eighred/kanz/pkg/auth"
 	"github.com/eighred/kanz/pkg/observability"
 	"github.com/eighred/kanz/services/identity/internal/config"
 	"github.com/eighred/kanz/services/identity/internal/ratelimit"
@@ -112,18 +113,37 @@ func run() int {
 	store := identity.NewPostgres(pool)
 	opts := []server.Option{}
 	if cfg.OperatorRole != "" {
+		// THE AUDIT SINK IS STDOUT, AND THAT IS A CHOICE WITH A COST.
+		//
+		// auth.SlogRecorder is a real sink and not a stub — kanz logs are stdout
+		// JSON shipped by the platform (OBS-01a), so "operator X disabled account
+		// Y" reaches the same pipeline every other service's audit lines do. What
+		// it does NOT reach is AUDIT-01's append-only projection, which is the
+		// tamper-evident system of record: that one is fed off the bus, and THIS
+		// SERVICE HAS NO bus.Producer. Giving it one means giving the credential
+		// authority a NATS connection and a NetworkPolicy hole it does not have
+		// today, which is a larger change than #525 asked for.
+		//
+		// The upgrade is one line the day that changes — pkg/authbus.NewBusRecorder
+		// satisfies the same seam, and statusDecisionLog already stamps the
+		// principal.* attributes it partitions and tenants on.
 		opts = append(opts, server.WithProvisioning(server.Provisioning{
 			Verifier: signer, Store: store, OperatorRole: cfg.OperatorRole, InviteTTL: cfg.InviteTTL,
+			Audit: auth.NewSlogRecorder(logger),
 		}))
 		logger.Info("authenticated provisioning enabled", "operator_role", cfg.OperatorRole,
-			"routes", "POST /invites, GET /invites")
+			"routes", "POST /invites, GET /invites, POST /users/{subject}/disable, "+
+				"POST /users/{subject}/enable",
+			"audit_sink", "stdout (slog) — NOT the AUDIT-01 projection; this service has no bus")
 	} else {
 		// WARN, not Info. Without this the ONLY way to create an account is
 		// cmd/kanz-invite, which writes to the store directly — so every account on
 		// the estate is attributable to whoever held a DSN rather than to a person.
 		logger.Warn("authenticated provisioning is DISABLED — the only way to create an account is "+
 			"cmd/kanz-invite, which requires the database credential and records the act against "+
-			"whoever holds it rather than against a named operator",
+			"whoever holds it rather than against a named operator, and THERE IS NO WAY TO DISABLE "+
+			"AN ACCOUNT AT ALL: an offboarded trader or a compromised credential can be locked out "+
+			"only by a hand-run UPDATE against this database (#525)",
 			"enable_with", "IDENTITY_OPERATOR_ROLE")
 	}
 

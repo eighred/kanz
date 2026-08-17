@@ -139,6 +139,45 @@ func (p *Postgres) UpdateCredential(ctx context.Context, subject string, cred Ha
 	return nil
 }
 
+// SetStatus moves an account between active and disabled — the write that makes
+// identity.StatusDisabled a reachable state rather than one the platform only
+// honours (#525). Until this existed, an offboarded trader or a compromised
+// credential could be locked out only by a human running UPDATE against the
+// production database by hand.
+//
+// BOTH REFUSALS ARE THE POINT, and each removes a way this silently does nothing.
+//
+// An unknown status is refused BEFORE the statement runs — see Status.Validate
+// for why the column's CHECK constraint is the backstop and not the check.
+//
+// ZERO ROWS AFFECTED IS ErrUserNotFound, NEVER SUCCESS. A disable that matched no
+// subject is exactly the failure this method exists to remove: the operator is
+// told the account is locked out, the audit record says it was, and it was not.
+// A typo'd subject must not be indistinguishable from a completed disable.
+//
+// WHAT THIS DOES NOT DO, stated here because the handler above it says the same
+// thing to its caller: a token already issued to this account stays valid until
+// it expires (identity.DefaultTokenTTL, 8h). The gateway verifies signatures
+// against JWKS and never reads this table, so this stops the NEXT login and not
+// the session in flight. Closing that gap is #525 step 4 — a disabled_at column
+// set by this same statement, plus a gateway check — and it is deliberately not
+// done here.
+func (p *Postgres) SetStatus(ctx context.Context, subject string, status Status, now time.Time) error {
+	if err := status.Validate(); err != nil {
+		return err
+	}
+	tag, err := p.pool.Exec(ctx, `
+		UPDATE identity_users SET status = $2, updated_at = $3 WHERE subject = $1`,
+		subject, string(status), now.UTC())
+	if err != nil {
+		return fmt.Errorf("identity: set status: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrUserNotFound
+	}
+	return nil
+}
+
 // InvitesFor lists a tenant's invites for the OPERATOR-facing surface, which is
 // authenticated and may see the three states apart. Token hashes are not
 // returned: an operator has no use for one, and a surface that hands them out is
