@@ -53,6 +53,25 @@ type Config struct {
 	// store: VaR99 stays the placeholder (the honest no-market-data fallback).
 	MarketDataURL string
 
+	// LiquidityVenue is the MIC whose candles the liquidity measures measure ADV
+	// from (RISK_ENGINE_LIQUIDITY_VENUE). REQUIRED to serve the liquidity family,
+	// and there is deliberately NO DEFAULT and no "any" value.
+	//
+	// ADV SUMMED ACROSS VENUES IS A DIFFERENT NUMBER AND IT FLATTERS.
+	// liquidity.Model.DaysToLiquidate divides size by participation × ADV, so
+	// adding three venues' volume together asserts the desk can work the order on
+	// all three at once and reports a liquidation horizon three times shorter than
+	// any single book supports — shorter is the direction that makes a limit check
+	// pass. Guessing a venue here would make that assertion on an operator's
+	// behalf, in a config file nobody wrote.
+	//
+	// Empty ⇒ LiquidationHorizon is NOT registered and the liquidity family stays
+	// dark; the composition root WARNs naming the consequence and
+	// kanz_risk_measure_live{family="liquidity"} reads 0. A desk trading several
+	// venues runs one deployment per venue and reconciles above this layer, where
+	// the routing assumption is visible.
+	LiquidityVenue string
+
 	// OTLPEndpoint is the OTel collector (host:port) for span export (OBS-01).
 	// Empty ⇒ spans are created and trace context propagates, but are not
 	// exported — startup never blocks on a collector.
@@ -160,6 +179,7 @@ func Load() (Config, error) {
 		SnapshotInterval: parseDuration(os.Getenv("RISK_ENGINE_SNAPSHOT_INTERVAL")),
 		KafkaBrokers:     splitList(os.Getenv("RISK_ENGINE_KAFKA_BROKERS")),
 		MarketDataURL:    marketDataURL,
+		LiquidityVenue:   strings.TrimSpace(os.Getenv("RISK_ENGINE_LIQUIDITY_VENUE")),
 		ShardMembers:     splitList(os.Getenv("RISK_ENGINE_SHARD_MEMBERS")),
 		ShardSelf:        os.Getenv("RISK_ENGINE_SHARD_SELF"),
 		RedisURL:         redisURL,

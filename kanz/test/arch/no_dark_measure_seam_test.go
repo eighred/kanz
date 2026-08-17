@@ -37,9 +37,18 @@ import (
 //	                      ContractTerms oneof lacked a bond case. THE DEAD-ENTRY
 //	                      ARM IS WHAT RETIRED IT, on the commit that added the
 //	                      caller, rather than the entry outliving its repair.
+//	RegisterLiquidityRisk LiquidationHorizon, LVaR99                  WIRED 2026-08-16
+//	                      (#509). Its exemption said a liquidity.Provider had "no
+//	                      production implementation"; internal/risk/liquiditysource
+//	                      is one, and the baseVaR the entry also called missing is
+//	                      resolved out of the registry at evaluation time, so there
+//	                      was nothing left to supply. Note the wiring registers ONE
+//	                      of the two measures: LVaR99 needs a spread and nothing in
+//	                      this repository persists a bid or an ask, so the provider
+//	                      declares ServesSpread()=false and compute declines it.
 //	RegisterGreeks        Delta, Gamma, Vega, Theta, Rho              0 callers
 //	RegisterXVA           CVA, DVA, FVA                               0 callers
-//	RegisterFactorRisk / RegisterLiquidityRisk / RegisterStructuredRisk
+//	RegisterStructuredRisk
 //	NewRevaluer / NewBondRevaluer / NewLiveModelProvider
 //
 // The risk engine registers DefaultRegistry plus varmodel.Register — EIGHT
@@ -109,9 +118,6 @@ var darkSeamExempt = map[string]string{
 		"and is itself dark for want of a live CDS quote source (#113, #203), so this cannot be wired " +
 		"to anything real without synthesising counterparty spreads — which #345 rules out " +
 		"explicitly: a SUCCESSFUL calibration of invented quotes is worse than a failed one.",
-	"internal/risk/compute.RegisterLiquidityRisk": "#509 — liquidity risk. Needs a " +
-		"liquidity.Provider (per-instrument ADV/spread) with no production implementation, plus a " +
-		"baseVaR MeasureFunc to scale.",
 	"internal/risk/compute.RegisterStructuredRisk": "#509 — structured-product risk. Needs a " +
 		"StructuredProvider (deal terms + prepayment assumptions) with no production implementation.",
 	"internal/risk/compute.NewRevaluer": "#509 — full-revaluation scenario shocks, as opposed to " +
