@@ -189,8 +189,8 @@ func TestMeasurePosture_TheShapeRiskEngineActuallyBuilds(t *testing.T) {
 // grades — which measures exist — not what they compute.
 type stubBondTerms struct{}
 
-func (stubBondTerms) BondTerms(context.Context, string, time.Time) (compute.BondSpec, bool) {
-	return compute.BondSpec{}, false
+func (stubBondTerms) BondTerms(context.Context, string, time.Time) (compute.BondSpec, compute.TermsResolution) {
+	return compute.BondSpec{}, compute.TermsUnknown
 }
 
 type stubCurve struct{}

@@ -95,12 +95,34 @@ enum QualityFlag {
   // CURRENCY_EXCLUDED: the response was computed over a SUBSET of the
   // portfolio. The risk engine has no FX layer (RISK-06), so positions whose
   // market value is not denominated in the portfolio's base currency are left
-  // out of every base-currency measure. Money-valued measures on a response
-  // carrying this flag are therefore understated — never overstated — so a
-  // concentration or exposure limit checked against them can pass when the
-  // full book would breach. A gate that must not under-report MUST refuse to
-  // act on a response carrying this flag rather than treat it as a number.
+  // out of every base-currency measure. A concentration or exposure limit
+  // checked against such a number can pass when the full book would breach, so
+  // a gate that must not under-report MUST refuse to act on a response
+  // carrying this flag rather than treat it as a number.
+  //
+  // This comment used to say the measures were "understated — never
+  // overstated". That was true of the four sum-of-market-value measures it was
+  // written for and is false of the rest: a ratio (HHI, the duration averages)
+  // moves either way when an element is dropped, and a quantile of a portfolio
+  // P&L path (VaR99, ES99) goes UP when one leg of a hedged pair is excluded,
+  // because the offset goes with it. Refuse to gate; do not assume a direction.
   QUALITY_FLAG_CURRENCY_EXCLUDED = 3;
+
+  // INPUTS_UNRESOLVED: at least one measure on this response was computed over
+  // positions whose pricing inputs could not be resolved — possibly over none
+  // of them, in which case the value is a zero that MEASURED NOTHING rather
+  // than a zero that measured a flat book. Distinct from CURRENCY_EXCLUDED,
+  // which is a filter the engine applies on purpose; this one means reference
+  // or market data the engine expected was absent (contract terms nobody
+  // loaded, a discount curve never calibrated, an instrument outside the
+  // fitted factor universe, a return series the price store does not hold).
+  //
+  // The affected measure is still present on the response and its value is not
+  // a claim about the book. The Go surface carries the per-measure evidence
+  // (which positions, and why) as api/v1 Measure.Coverage; the wire carries
+  // the flag, which is the part a gate needs. Same instruction as above: a
+  // caller that gates on a risk number must treat this as a refusal to answer.
+  QUALITY_FLAG_INPUTS_UNRESOLVED = 4;
 }
 
 // ExposureRequest scopes an exposure query.

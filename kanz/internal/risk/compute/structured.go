@@ -50,6 +50,28 @@ type StructuredSpec struct {
 // StructuredProvider resolves an instrument's structured-product spec as of a
 // point in time. ok=false ⇒ not a structured product (excluded from the
 // measures).
+//
+// # This seam still carries the #527 shape, deliberately, and here is why
+//
+// structMeasure below returns a weighted average over survivors and emits zero
+// when nothing survived — the same confident zero the FI measures emitted, and
+// the fix everywhere else was to widen the provider's bool into a resolution
+// that separates "positively something else" from "no record at all"
+// (TermsResolution) so the exclusions can be recorded honestly.
+//
+// That widening is NOT done here, because it cannot be verified. reference.v1.
+// ContractTerms' oneof carries option, swap, future and bond and NOTHING
+// structured, so there is no wire type, no store and no producer for a
+// StructuredSpec — this interface has no implementation anywhere in the estate
+// and RegisterStructuredRisk has zero callers. A resolution enum written against
+// a provider that cannot exist would be a contract invented from nothing, and
+// its "no record" arm would be unreachable by any test. #509's audit says the
+// structured gap needs its own issue for exactly this reason.
+//
+// SO THE ORDER IS: the schema first, then a provider, then this seam widens to
+// match fi.go. Wiring RegisterStructuredRisk before that happens re-introduces
+// #527 for three more measures — StructDuration, StructConvexity and StructWAL
+// would each report a plausible number over a book they priced nothing of.
 type StructuredProvider interface {
 	Structured(ctx context.Context, instrumentID string, asOf time.Time) (StructuredSpec, bool)
 }

@@ -16,9 +16,12 @@ import (
 
 type bondTerms map[string]compute.BondSpec
 
-func (m bondTerms) BondTerms(_ context.Context, id string, _ time.Time) (compute.BondSpec, bool) {
+func (m bondTerms) BondTerms(_ context.Context, id string, _ time.Time) (compute.BondSpec, compute.TermsResolution) {
 	s, ok := m[id]
-	return s, ok
+	if !ok {
+		return s, compute.TermsNotABond
+	}
+	return s, compute.TermsResolved
 }
 
 type oneCurve struct{ c *curve.Curve }

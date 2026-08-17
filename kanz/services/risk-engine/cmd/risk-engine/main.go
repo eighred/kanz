@@ -353,10 +353,22 @@ func runEngine(ctx context.Context, cfg config.Config, readiness *server.Readine
 			// NOT SILENT. Four implemented measures are absent, and the reason is
 			// a config gate rather than a defect — an operator who wants DV01
 			// needs to know that turning on rate calibration is what produces it.
+			//
+			// THE ORIGINAL REASON FOR REFUSING HAS BEEN REPAIRED, AND THE REFUSAL
+			// STILL STANDS. This branch used to say that registering against an
+			// empty curve store "would serve a DV01 of zero for every portfolio,
+			// which reads exactly like a book holding no bonds". Since #527 it
+			// does not: such a response carries QUALITY_FLAG_INPUTS_UNRESOLVED and
+			// per-measure evidence naming every bond that could not be priced. The
+			// refusal is kept on the weaker but still sufficient ground that a
+			// measure which is flagged on literally every response is noise an
+			// operator learns to scroll past — better to not offer it until the
+			// curve exists. That is a judgement about signal, no longer a claim
+			// that the number would be indistinguishable from a real one.
 			logger.Warn("FI-01d NOT registered: DV01, Duration, Convexity and SpreadDuration need "+
 				"a discount curve, and rate calibration is off. Registering them against an empty "+
-				"curve store would serve a DV01 of zero for every portfolio, which reads exactly "+
-				"like a book holding no bonds",
+				"curve store would serve a DV01 of zero for every portfolio — flagged as "+
+				"unmeasured rather than passed off as real, but flagged on every single response",
 				"fix", "set RISK_ENGINE_CALIBRATION_RATES and RISK_ENGINE_CALIBRATION_INTERVAL",
 				"gauge", "kanz_risk_measure_live{family=\"fixed_income\"}=0")
 		}

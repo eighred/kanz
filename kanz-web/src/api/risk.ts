@@ -42,21 +42,45 @@ export interface ExposureState {
 }
 
 /**
- * QualityFlag is a query-result concern, and two of the three change what the
+ * QualityFlag is a query-result concern, and two of the four change what the
  * numbers MEAN rather than how fresh they are.
  *
- * CURRENCY_EXCLUDED is the one to respect. The proto is explicit: positions in
- * an unconvertible currency are omitted, so "a concentration or exposure limit
- * checked against them can pass when the full book would breach", and a gate
- * that must not under-report MUST refuse to act on a response carrying it. A
- * screen cannot refuse on the reader's behalf — but it must not present an
- * under-reporting total as a total.
+ * CURRENCY_EXCLUDED and INPUTS_UNRESOLVED are the two to respect, and they are
+ * DIFFERENT findings. The first means the engine deliberately left positions
+ * out because it has no FX layer. The second means data it expected was simply
+ * not there — contract terms nobody loaded, a curve nobody calibrated — so a
+ * measure may have been computed over NOTHING and its zero is not a claim about
+ * the book. Only the second is somebody's bug.
+ *
+ * Neither says which way the number is wrong. A total goes down when positions
+ * are dropped; an average or a VaR can go either way, because dropping a
+ * below-average holding raises an average and dropping one leg of a hedge
+ * removes its offset. A screen cannot refuse on the reader's behalf — but it
+ * must not present either as a number that stands on its own.
  */
 export type QualityFlag =
   | 'QUALITY_FLAG_UNSPECIFIED'
   | 'QUALITY_FLAG_DEGRADED'
   | 'QUALITY_FLAG_STALE'
   | 'QUALITY_FLAG_CURRENCY_EXCLUDED'
+  | 'QUALITY_FLAG_INPUTS_UNRESOLVED'
+
+/**
+ * MEANING_CHANGING are the flags that change what the numbers ARE, as opposed
+ * to how fresh they are. They get the error treatment; DEGRADED and STALE get a
+ * hint. Listed once, because the alternative is every screen re-deciding — and
+ * the failure mode of that is a new flag rendering as a low-severity hint
+ * simply because nobody updated a comparison in a template.
+ */
+export const MEANING_CHANGING: readonly QualityFlag[] = [
+  'QUALITY_FLAG_CURRENCY_EXCLUDED',
+  'QUALITY_FLAG_INPUTS_UNRESOLVED',
+]
+
+/** changesMeaning reports whether a flag makes the number beside it unusable. */
+export function changesMeaning(f: QualityFlag): boolean {
+  return MEANING_CHANGING.includes(f)
+}
 
 export interface ExposureResponse {
   portfolio_id: string
@@ -70,6 +94,8 @@ export function describeFlag(f: QualityFlag): string {
   switch (f) {
     case 'QUALITY_FLAG_CURRENCY_EXCLUDED':
       return 'Positions in a currency the engine could not convert are MISSING from these totals. The real exposure is larger than what is shown — do not read these as a complete book.'
+    case 'QUALITY_FLAG_INPUTS_UNRESOLVED':
+      return 'Data the engine needed was not there, so at least one figure was computed over part of the book — possibly over none of it. A zero here does not mean zero risk. Do not act on these numbers.'
     case 'QUALITY_FLAG_DEGRADED':
       return 'The engine was degraded when this was computed: these are cached, last-known values rather than live ones.'
     case 'QUALITY_FLAG_STALE':

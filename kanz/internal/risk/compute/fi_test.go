@@ -15,11 +15,36 @@ import (
 
 // --- deterministic FI test providers ---------------------------------------
 
+// staticBondTerms answers TermsResolved for the ids it holds and TermsNotABond
+// for everything else — a store that KNOWS the rest of the book is not bonds.
+// The unknown-instrument case (a store that holds no record) has its own fixture
+// below, because after #527 those two are the answers this seam exists to keep
+// apart.
 type staticBondTerms map[string]BondSpec
 
-func (m staticBondTerms) BondTerms(_ context.Context, id string, _ time.Time) (BondSpec, bool) {
+func (m staticBondTerms) BondTerms(_ context.Context, id string, _ time.Time) (BondSpec, TermsResolution) {
 	s, ok := m[id]
-	return s, ok
+	if !ok {
+		return BondSpec{}, TermsNotABond
+	}
+	return s, TermsResolved
+}
+
+// emptyTermsStore is the estate as it actually stands (#527): a contract-terms
+// store with no production writer, which holds no record for ANY instrument and
+// can therefore certify nothing about any of them.
+type emptyTermsStore struct{}
+
+func (emptyTermsStore) BondTerms(context.Context, string, time.Time) (BondSpec, TermsResolution) {
+	return BondSpec{}, TermsUnknown
+}
+
+// unusableTermsStore holds a bond record for every id that cannot be priced from
+// — the TermsUnusable arm.
+type unusableTermsStore struct{}
+
+func (unusableTermsStore) BondTerms(context.Context, string, time.Time) (BondSpec, TermsResolution) {
+	return BondSpec{}, TermsUnusable
 }
 
 type staticCurve struct{ c *curve.Curve }

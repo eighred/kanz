@@ -1,7 +1,14 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
 import { useRoute } from 'vue-router'
-import { describeFlag, describeRisk, risk, type ExposureResponse, type ExposureState } from '../api/risk'
+import {
+  changesMeaning,
+  describeFlag,
+  describeRisk,
+  risk,
+  type ExposureResponse,
+  type ExposureState,
+} from '../api/risk'
 import { formatMoney, isNegative } from '../api/decimal'
 
 // ONE PORTFOLIO'S EXPOSURE (#399/#371 slice 5).
@@ -43,8 +50,8 @@ const flags = computed(() =>
   (data.value?.quality_flags ?? []).filter((f) => f !== 'QUALITY_FLAG_UNSPECIFIED'),
 )
 
-/** underReporting is the flag that changes what the totals MEAN. */
-const underReporting = computed(() => flags.value.includes('QUALITY_FLAG_CURRENCY_EXCLUDED'))
+/** underReporting is true when any flag changes what the totals MEAN. */
+const underReporting = computed(() => flags.value.some(changesMeaning))
 
 /** byDimension groups the flat exposure list into one table per axis. */
 const byDimension = computed(() => {
@@ -85,12 +92,15 @@ function money(m: Parameters<typeof formatMoney>[0]): string {
   <p v-else-if="error" class="error" role="alert">{{ error }}</p>
 
   <template v-else>
-    <!-- THE UNDER-REPORTING FLAG GETS THE ERROR TREATMENT, not a hint. It does
-         not mean the data is old; it means the totals below are missing
-         positions and are therefore smaller than the truth. -->
+    <!-- A MEANING-CHANGING FLAG GETS THE ERROR TREATMENT, not a hint. It does
+         not mean the data is old; it means the figures below were computed over
+         part of the book and do not stand on their own. Driven by the shared
+         list in api/risk.ts rather than a comparison written here, because a
+         hardcoded one silently renders the NEXT such flag as a low-severity
+         hint (#527). -->
     <p v-for="f in flags" :key="f"
-       :class="f === 'QUALITY_FLAG_CURRENCY_EXCLUDED' ? 'error' : 'hint'"
-       :role="f === 'QUALITY_FLAG_CURRENCY_EXCLUDED' ? 'alert' : undefined">
+       :class="changesMeaning(f) ? 'error' : 'hint'"
+       :role="changesMeaning(f) ? 'alert' : undefined">
       {{ describeFlag(f) }}
     </p>
 
