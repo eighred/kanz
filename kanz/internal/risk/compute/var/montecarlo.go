@@ -49,6 +49,12 @@ func MonteCarlo(cfg Config) compute.ReturnsMeasure {
 		seed = DefaultSeed
 	}
 	return func(ctx context.Context, p *domain.Portfolio, rp compute.ReturnsProvider) v1.Measure {
+		// SAME COVERAGE CONTRACT AS THE HISTORICAL PATH, and it has to be
+		// open-coded here because this estimator needs the per-instrument series
+		// rather than the folded P&L that portfolioPnL returns. The reasons are the
+		// shared ones so the two estimators cannot report the same gap under
+		// different names.
+		var cover compute.Coverage
 		base := p.BaseCurrency()
 		var values []float64 // position value per instrument
 		var series [][]float64
@@ -59,8 +65,10 @@ func MonteCarlo(cfg Config) compute.ReturnsMeasure {
 			}
 			r, err := rp.Returns(ctx, string(pos.InstrumentID), p.AsOf(), window)
 			if err != nil || len(r) == 0 {
+				cover.Exclude(pos.InstrumentID, SkipNoReturns)
 				continue
 			}
+			cover.Contributed++
 			values = append(values, decimalToFloat(pos.MarketValue.Amount))
 			series = append(series, r)
 			if minLen < 0 || len(r) < minLen {
@@ -69,7 +77,8 @@ func MonteCarlo(cfg Config) compute.ReturnsMeasure {
 		}
 		// Need ≥2 scenarios for a sample covariance.
 		if len(series) == 0 || minLen < 2 {
-			return zeroMeasure()
+			cover.ExcludeWhole(SkipInsufficientHistory)
+			return zeroMeasure(cover)
 		}
 
 		// Tail-align every series to the common window (matching Historical), so
@@ -109,8 +118,9 @@ func MonteCarlo(cfg Config) compute.ReturnsMeasure {
 			v = 0
 		}
 		return v1.Measure{
-			Name:  compute.MeasureVaR99,
-			Value: floatToDecimal(v, varExponent),
+			Name:     compute.MeasureVaR99,
+			Value:    floatToDecimal(v, varExponent),
+			Coverage: cover.Result(),
 		}
 	}
 }

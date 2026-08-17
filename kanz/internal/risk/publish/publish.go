@@ -133,15 +133,32 @@ func (p *Publisher) EmitMeasures(ctx context.Context, measures *domain.MeasureSe
 // measures FACT.
 //
 // domain.v1.RiskMeasureSet has no field for "this is partial", so a
-// currency-excluded measure set would otherwise reach every bus consumer
-// — the compliance monitor, the archiver, the TUI — as a complete-looking
+// partial measure set would otherwise reach every bus consumer — the
+// compliance monitor, the archiver, the web app — as a complete-looking
 // number (#257). envelope.v1.QUALITY_FLAG_DEGRADED is defined as
 // "produced from a degraded or PARTIAL source", which is exactly this
 // case, so the coverage signal rides the envelope rather than waiting on
 // a payload schema change. A consumer that gates on risk numbers must
 // check envelope quality_flags, not just the payload.
+//
+// BOTH COVERAGE RECORDS FEED IT, and the bus cannot tell them apart. The
+// query surface carries CURRENCY_EXCLUDED and INPUTS_UNRESOLVED as
+// separate api/v1 flags because a caller can act on the difference; the
+// envelope enum has one value for "partial source", so both collapse into
+// it here. That is a genuine loss of resolution and it is recorded rather
+// than hidden: a bus consumer learns THAT the set is partial and must
+// re-query to learn why. Widening it means adding an envelope.v1 value,
+// which is a schema change for every domain, not just risk.
+//
+// THIS FUNCTION IS THE SECOND PLACE THAT DECIDES "IS THIS RESPONSE
+// PARTIAL", the first being engine.withCoverageFlags, and it re-derives
+// the answer rather than reading v1.QualityFlags off a response — because
+// the publish path has no response, only the set. The two must agree; the
+// coupling is that both ask the SAME MeasureSet the same two questions,
+// so a third coverage record added to the set without a case here is the
+// drift to watch for.
 func measureQualityFlags(measures *domain.MeasureSet) []envelopepb.QualityFlag {
-	if len(measures.CurrencyExclusions()) == 0 {
+	if len(measures.CurrencyExclusions()) == 0 && len(measures.UnresolvedMeasures()) == 0 {
 		return nil
 	}
 	return []envelopepb.QualityFlag{envelopepb.QualityFlag_QUALITY_FLAG_DEGRADED}

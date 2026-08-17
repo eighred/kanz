@@ -159,24 +159,30 @@ func RegisterFactorRisk(ctx context.Context, r *Registry, providers FactorProvid
 // reported zero.
 func factorMeasure(ctx context.Context, providers FactorProviders, name v1.MeasureName) MeasureFunc {
 	return func(p *domain.Portfolio) v1.Measure {
-		zero := v1.Measure{Name: name, Value: floatToDecimal(0, factorRiskExp)}
-		if providers.Model == nil {
+		// NO MODEL IS ONE WHOLE-BOOK EXCLUSION, not one per position. The measure
+		// never reached the book, so counting each holding would make an outage
+		// look like a per-instrument data gap — see Coverage.ExcludeWhole.
+		var cov Coverage
+		zero := func() v1.Measure {
+			cov.ExcludeWhole(SkipNoModel)
 			skipFactor(providers, "", SkipNoModel)
-			return zero
+			return v1.Measure{Name: name, Value: floatToDecimal(0, factorRiskExp), Coverage: cov.Result()}
+		}
+		if providers.Model == nil {
+			return zero()
 		}
 		model, ok := providers.Model.Model(ctx, p.AsOf())
 		if !ok || model == nil {
-			skipFactor(providers, "", SkipNoModel)
-			return zero
+			return zero()
 		}
-		values := factorValues(p, model, providers)
+		values := factorValues(p, model, providers, &cov)
 		switch name {
 		case MeasureFactorVaR99:
-			return v1.Measure{Name: name, Value: floatToDecimal(model.VaR(values, factorVaRConfidence), factorVaRExp)}
+			return v1.Measure{Name: name, Value: floatToDecimal(model.VaR(values, factorVaRConfidence), factorVaRExp), Coverage: cov.Result()}
 		case MeasureSystematicRisk:
-			return v1.Measure{Name: name, Value: floatToDecimal(model.Risk(values).Systematic, factorRiskExp)}
+			return v1.Measure{Name: name, Value: floatToDecimal(model.Risk(values).Systematic, factorRiskExp), Coverage: cov.Result()}
 		default: // MeasureSpecificRisk
-			return v1.Measure{Name: name, Value: floatToDecimal(model.Risk(values).Specific, factorRiskExp)}
+			return v1.Measure{Name: name, Value: floatToDecimal(model.Risk(values).Specific, factorRiskExp), Coverage: cov.Result()}
 		}
 	}
 }
@@ -194,7 +200,7 @@ func factorMeasure(ctx context.Context, providers FactorProviders, name v1.Measu
 // here — and this function's job is to make the drop visible, not to move where
 // it happens. Changing the arithmetic inside an observability fix is how a
 // "reporting-only" change ships a silent number change.
-func factorValues(p *domain.Portfolio, model *factormodel.Model, providers FactorProviders) map[string]float64 {
+func factorValues(p *domain.Portfolio, model *factormodel.Model, providers FactorProviders, cov *Coverage) map[string]float64 {
 	base := p.BaseCurrency()
 	values := make(map[string]float64)
 	for _, pos := range p.Positions() {
@@ -208,6 +214,9 @@ func factorValues(p *domain.Portfolio, model *factormodel.Model, providers Facto
 		// allocation per uncovered position, paid only on the gap.
 		if _, covered := model.Loading(id); !covered {
 			skipFactor(providers, id, SkipNotInModel)
+			cov.Exclude(pos.InstrumentID, SkipNotInModel)
+		} else {
+			cov.Contributed++
 		}
 		values[id] = decimalToFloat(pos.MarketValue.GetAmount())
 	}

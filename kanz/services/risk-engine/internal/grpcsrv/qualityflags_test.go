@@ -39,6 +39,22 @@ func TestProtoFlags_EveryAPIFlagMaps(t *testing.T) {
 	}
 }
 
+// The specific mapping #527 depends on. Named separately for the same reason as
+// the one below: a breakage should say WHICH flag stopped crossing the wire.
+//
+// This is also the only place the INPUTS_UNRESOLVED signal exists for a gRPC
+// caller. The per-measure evidence (v1.Measure.Coverage) is a Go-surface concept
+// — domain.v1.RiskMeasure has no field for it — so a client that gates on DV01
+// has this flag and nothing else between it and a confident zero.
+func TestProtoFlags_InputsUnresolvedReachesTheWire(t *testing.T) {
+	got := protoFlags([]v1.QualityFlag{v1.QualityFlagInputsUnresolved})
+	want := querypb.QualityFlag_QUALITY_FLAG_INPUTS_UNRESOLVED
+	if len(got) != 1 || got[0] != want {
+		t.Errorf("protoFlags(INPUTS_UNRESOLVED)=%v want [%v] — without this the caller sees a "+
+			"clean response for measures the engine computed over nothing at all", got, want)
+	}
+}
+
 // The specific mapping #257 depends on. Named separately from the
 // exhaustiveness sweep so a breakage says which flag, not just "one of them".
 func TestProtoFlags_CurrencyExcludedReachesTheWire(t *testing.T) {

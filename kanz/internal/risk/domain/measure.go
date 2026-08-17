@@ -87,6 +87,35 @@ func (s *MeasureSet) CurrencyExclusions() []v1.CurrencyExclusion {
 	return s.excluded
 }
 
+// UnresolvedMeasures names, in stable lexicographic order, the measures
+// in this set that left at least one position out because an input did
+// not resolve (v1.InputCoverage, #527). Empty ⇒ every measure in the set
+// covered everything it applies to.
+//
+// DERIVED, NOT STORED, unlike the currency exclusions above. A currency
+// exclusion is a property of the portfolio and has to be carried because
+// the portfolio is gone by the time a cached set is served; this is a
+// property of each MEASURE and travels inside the measures themselves,
+// so a set narrowed by filterMeasures reports exactly the subset's
+// coverage rather than the full set's — which is the correct answer, and
+// one a stored copy would get wrong.
+//
+// NOT ON THE v1.MeasureSet INTERFACE, deliberately. The evidence already
+// reaches an api/v1 caller through Lookup — it rides on the Measure — so
+// putting a second accessor on the interface would add a way to ask the
+// same question and a way for the two answers to disagree. This exists
+// for the engine, which needs one boolean to decide a response flag.
+func (s *MeasureSet) UnresolvedMeasures() []v1.MeasureName {
+	var out []v1.MeasureName
+	for name, m := range s.measures {
+		if m.Coverage.ExcludedCount > 0 {
+			out = append(out, name)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
+	return out
+}
+
 // Names returns the measure names in stable lexicographic order so
 // callers iterating the set get deterministic output (Go map
 // iteration order is randomized).

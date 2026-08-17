@@ -345,6 +345,8 @@ func protoFlags(flags []v1.QualityFlag) []querypb.QualityFlag {
 			out = append(out, querypb.QualityFlag_QUALITY_FLAG_STALE)
 		case v1.QualityFlagCurrencyExcluded:
 			out = append(out, querypb.QualityFlag_QUALITY_FLAG_CURRENCY_EXCLUDED)
+		case v1.QualityFlagInputsUnresolved:
+			out = append(out, querypb.QualityFlag_QUALITY_FLAG_INPUTS_UNRESOLVED)
 		default:
 			out = append(out, querypb.QualityFlag_QUALITY_FLAG_UNSPECIFIED)
 		}

@@ -33,7 +33,10 @@ import (
 //	  optionality/OAS lands (STRUCT-01d). Registered distinctly so the seam and
 //	  the dashboard wiring exist now.
 //
-// A non-bond position (no terms) contributes nothing to any FI measure.
+// A position a terms record identifies as something other than a bond
+// contributes nothing to any FI measure, and that absence is an answer. A
+// position the terms store has NEVER HEARD OF is a different thing entirely and
+// is reported as an exclusion — see TermsResolution and #527.
 
 // FI measure names (RISK-07 naming: short, CamelCase).
 const (
@@ -63,10 +66,45 @@ type BondSpec struct {
 	IssuerID   string
 }
 
+// TermsResolution is a BondTermsProvider's answer about one instrument.
+//
+// IT REPLACES A BOOL, AND THE BOOL IS THE DEFECT (#527). `(BondSpec, bool)`
+// collapsed two answers whose consequences are opposite: "there is a terms
+// record and it describes something that is not a bond" — correctly absent from
+// a rate measure, and the engine can say so — and "the store holds no record of
+// this instrument at all", where the engine knows NOTHING about it and must not
+// pretend it has certified it as a non-bond. Because both were false, a book of
+// bonds nobody had loaded terms for produced exactly the response of a book of
+// shares: DV01 = 0, no exclusions, no flag.
+type TermsResolution int
+
+const (
+	// TermsUnknown: the store holds no record for the instrument, so its asset
+	// class is unknown and it may be a bond.
+	//
+	// THE ZERO VALUE, ON PURPOSE. A provider that falls through without deciding
+	// says "I do not know" — which flags the response — rather than "not a
+	// bond", which would silently restore the confident zero this type exists to
+	// prevent.
+	TermsUnknown TermsResolution = iota
+	// TermsResolved: usable bond terms. The only value that prices.
+	TermsResolved
+	// TermsNotABond: a terms record exists and carries an option, swap or future
+	// variant. The ONLY value that licenses a confident absence — a share is
+	// correctly missing from DV01, and reporting it would bury the bonds that
+	// really were dropped under every equity on the book.
+	TermsNotABond
+	// TermsUnusable: a bond record exists and cannot be priced from — an
+	// unspecified day count, a maturity at or before issue, no currency to look
+	// a curve up by. Definitely a bond, definitely excluded.
+	TermsUnusable
+)
+
 // BondTermsProvider resolves an instrument's bond terms as of a point in time.
-// ok=false ⇒ the instrument is not a bond (excluded from the FI measures).
+// See TermsResolution for what each answer licenses; only TermsResolved carries
+// a usable BondSpec.
 type BondTermsProvider interface {
-	BondTerms(ctx context.Context, instrumentID string, asOf time.Time) (BondSpec, bool)
+	BondTerms(ctx context.Context, instrumentID string, asOf time.Time) (BondSpec, TermsResolution)
 }
 
 // CurveProvider supplies the discount curve for a currency as of a point in
@@ -83,21 +121,42 @@ type FIProviders struct {
 	// OnSkip is called when a position is EXCLUDED from the FI measures for a
 	// reason that is not "it is not a bond". Optional; nil disables it.
 	//
-	// WITHOUT IT THE EXCLUSION IS INVISIBLE, and invisible in the flattering
-	// direction. A bond dropped for want of a discount curve contributes 0 to
-	// DV01 and nothing to the duration average, so the book's measured rate risk
-	// SHRINKS — and a DV01 of zero is indistinguishable from a portfolio holding
-	// no bonds at all. That is the #257 shape exactly: ten copies of the
-	// base-currency filter each dropped positions and not one recorded it, so a
-	// USD book holding only EUR reported GrossExposure = 0.
+	// WITHOUT IT THE EXCLUSION IS INVISIBLE. A bond dropped for want of a
+	// discount curve contributes 0 to DV01 and nothing to the duration average,
+	// and a DV01 of zero is indistinguishable from a portfolio holding no bonds
+	// at all. That is the #257 shape exactly: ten copies of the base-currency
+	// filter each dropped positions and not one recorded it, so a USD book
+	// holding only EUR reported GrossExposure = 0.
+	//
+	// THE DIRECTION IS NOT UNIFORM ACROSS THESE FOUR MEASURES, and an earlier
+	// version of this comment said it was ("the book's measured rate risk
+	// SHRINKS"). It shrinks for DV01, which is a sum. Duration, Convexity and
+	// SpreadDuration are |MV|-WEIGHTED AVERAGES, so dropping a short-dated bond
+	// RAISES them — three bonds of duration 8/2/5 average 5.0, and without the 2
+	// the same measure reports 6.5. Neither direction is safe to assume; see
+	// v1.InputCoverage.
 	//
 	// reason is one of SkipNoTerms / SkipNoCurve — a small closed set rather than
 	// free text, because the caller counts by it and a metric label must not be
 	// whatever a future edit writes.
 	//
-	// NOT CALLED FOR A NON-BOND. A share has no terms and is correctly absent
-	// from a bond measure; firing here would drown the signal in every equity
-	// position on the book.
+	// NOT CALLED FOR A NON-BOND, nor for an instrument the store has no record
+	// of. A share is correctly absent from a bond measure; firing here would
+	// drown the signal in every equity position on the book. An instrument with
+	// NO terms record at all is a real gap and is counted already — by the terms
+	// provider's own missing-terms observer, which is the only layer that can
+	// see the difference between "no record" and "a record for something else"
+	// (kanz_risk_fi_terms_missing_total). Counting it here too would put one
+	// fact in two metrics and let them disagree.
+	//
+	// THIS IS A METRIC, AND IT DOES NOT REPLACE THE RESPONSE ANNOTATION — nor
+	// the reverse. They answer different questions for different people at
+	// different times. OnSkip is a counter an operator watches across all
+	// portfolios and only sees if they are looking; the InputCoverage this
+	// measure attaches to its own value travels WITH the number, to the one
+	// caller acting on that one portfolio, at the moment they act. #527 is
+	// precisely the case where the counter existed and was not enough: the skips
+	// WERE counted, and the DV01 on the wire was still a confident zero.
 	//
 	// FIRES ONCE PER MEASURE, NOT ONCE PER POSITION. RegisterFIRisk installs four
 	// measures over the same per-position path, so one unpriceable bond in one
@@ -108,18 +167,32 @@ type FIProviders struct {
 	OnSkip func(instrumentID, reason string)
 }
 
-// The reasons a position is excluded from the FI measures despite being a bond.
+// The reasons a position is excluded from the FI measures.
 const (
-	// SkipNoTerms: the instrument resolved no usable bond terms. Either they were
-	// never loaded, or they are present and unusable (an unspecified day count, a
-	// maturity at or before issue). The terms provider distinguishes those two in
-	// its own observer; here they are one thing, because the consequence is one
-	// thing.
+	// SkipNoTerms: a bond terms record exists and cannot be used — an unspecified
+	// day count, a maturity at or before issue, no currency to price in. This is
+	// definitely a bond and it is definitely out of every FI measure.
+	//
+	// IT USED TO MEAN "never loaded OR unusable", on the argument that "here they
+	// are one thing, because the consequence is one thing". The consequence is
+	// one thing; the REPAIR is not, and that is what the reason label is read
+	// for. It also meant the constant was never actually emitted — nothing in
+	// this file passed it to skip() — so the series sat at zero while every bond
+	// on the estate fell out (#527).
 	SkipNoTerms = "no_terms"
 	// SkipNoCurve: the bond's terms resolved, and no discount curve exists for
 	// its currency as of the valuation time. This is the calibration gap rather
 	// than a data gap — the bond is known and cannot be priced.
 	SkipNoCurve = "no_curve"
+	// SkipUnknownInstrument: the terms store holds NO record for the instrument,
+	// so the engine cannot say it is not a bond.
+	//
+	// NOT REPORTED THROUGH OnSkip — see FIProviders.OnSkip — but recorded as
+	// response evidence, because on a book whose reference data was never loaded
+	// this is every position, and a DV01 computed over none of them is the #527
+	// zero. Its presence in the evidence is what separates "measured nothing"
+	// from "measured a book with no bonds in it".
+	SkipUnknownInstrument = "unknown_instrument"
 )
 
 // RegisterFIRisk registers DV01/Duration/Convexity/SpreadDuration on r, each
@@ -134,60 +207,99 @@ func RegisterFIRisk(ctx context.Context, r *Registry, providers FIProviders) {
 
 // fiMeasure builds the MeasureFunc for one FI risk measure. DV01 is a dollar
 // sum; the others are |MarketValue|-weighted averages across bond positions.
+//
+// EVERY RETURN CARRIES ITS COVERAGE. The value alone cannot distinguish a book
+// that priced no bonds from a book that holds none, and until #527 it did not
+// try: the accumulator was returned regardless of whether anything had reached
+// it. The zero is still emitted — see the flag-versus-omission argument on
+// QualityFlagInputsUnresolved — but it now travels with a count of what it could
+// not see.
 func fiMeasure(ctx context.Context, name v1.MeasureName, p FIProviders) MeasureFunc {
 	return func(port *domain.Portfolio) v1.Measure {
 		asOf := port.AsOf()
 		var dollar, weighted, weight float64
+		var cov Coverage
 		for _, pos := range port.Positions() {
-			cr, qty, mv, ok := positionBondRisk(ctx, p, pos, asOf)
-			if !ok {
+			cr, qty, mv, reason := positionBondRisk(ctx, p, pos, asOf)
+			if reason != "" {
+				cov.Exclude(pos.InstrumentID, reason)
 				continue
 			}
+			if !cr.priceable {
+				continue // a terms record says this is not a bond: correctly absent
+			}
+			cov.Contributed++
 			switch name {
 			case MeasureDV01:
-				dollar += cr.DV01 * qty
+				dollar += cr.risk.DV01 * qty
 			case MeasureConvexity:
-				weighted += mv * cr.Convexity
+				weighted += mv * cr.risk.Convexity
 				weight += mv
 			default: // Duration, SpreadDuration
-				weighted += mv * cr.EffectiveDuration
+				weighted += mv * cr.risk.EffectiveDuration
 				weight += mv
 			}
 		}
 		if name == MeasureDV01 {
-			return v1.Measure{Name: name, Value: floatToDecimal(dollar, fiDV01Exp)}
+			return v1.Measure{Name: name, Value: floatToDecimal(dollar, fiDV01Exp), Coverage: cov.Result()}
 		}
 		ratio := 0.0
 		if weight != 0 {
 			ratio = weighted / weight
 		}
-		return v1.Measure{Name: name, Value: floatToDecimal(ratio, fiRatioExp)}
+		return v1.Measure{Name: name, Value: floatToDecimal(ratio, fiRatioExp), Coverage: cov.Result()}
 	}
 }
 
+// bondRisk is one position's curve risk plus whether it priced at all.
+// priceable=false with an empty exclusion reason is the ONE benign case: a terms
+// record exists and says this is not a bond.
+type bondRisk struct {
+	risk      pricing.CurveRisk
+	priceable bool
+}
+
 // positionBondRisk prices one bond position off the discount curve and returns
-// its curve risk, quantity, and |MarketValue| weight. ok=false when the position
-// is not a bond or its pricing inputs (terms / curve) are unavailable.
-func positionBondRisk(ctx context.Context, p FIProviders, pos domain.Position, asOf time.Time) (pricing.CurveRisk, float64, float64, bool) {
+// its curve risk, quantity, and |MarketValue| weight. The reason is "" when
+// nothing needs reporting — the position priced, or a terms record positively
+// identified it as something other than a bond — and one of the Skip* constants
+// when the position could not be assessed.
+func positionBondRisk(ctx context.Context, p FIProviders, pos domain.Position, asOf time.Time) (bondRisk, float64, float64, string) {
 	if p.Terms == nil || p.Curve == nil {
-		return pricing.CurveRisk{}, 0, 0, false
+		// A MISSING SEAM IS AN EXCLUSION, NOT A NON-BOND. Absorbed here rather
+		// than refused at registration (matching positionGreekContribution), but
+		// absorbed loudly: with no provider the engine has certified nothing, and
+		// reporting the whole book unassessed is what makes that visible on the
+		// first query instead of on a dashboard nobody opened.
+		return bondRisk{}, 0, 0, SkipUnknownInstrument
 	}
-	spec, ok := p.Terms.BondTerms(ctx, string(pos.InstrumentID), asOf)
-	if !ok {
-		// NOT REPORTED. The overwhelming majority of positions on any book are
-		// not bonds, and BondTerms answers ok=false for every one of them — the
-		// provider's own observer is where a MISSING load is distinguished from a
-		// share, because only it can see which. Counting here would make the
-		// signal the noise.
-		return pricing.CurveRisk{}, 0, 0, false
+	spec, res := p.Terms.BondTerms(ctx, string(pos.InstrumentID), asOf)
+	switch res {
+	case TermsNotABond:
+		// THE ONLY CONFIDENT ABSENCE. A record exists and describes an option, a
+		// swap or a future, so this position genuinely carries no bond rate risk
+		// and its absence from DV01 is an answer rather than a gap. Not reported
+		// to OnSkip and not recorded as an exclusion — counting every equity would
+		// make the signal the noise, and would flag every response on the estate.
+		return bondRisk{}, 0, 0, ""
+	case TermsUnusable:
+		return bondRisk{}, 0, 0, skipFI(p, pos, SkipNoTerms)
+	case TermsResolved:
+		// fall through to pricing
+	default: // TermsUnknown
+		// NOT A SHARE — AN INSTRUMENT NOBODY HAS TOLD THIS ENGINE ABOUT. The store
+		// has no record, so "not a bond" is a guess, and it is the guess that
+		// produced #527: with no production writer for the contract-terms store,
+		// every position on every book takes this branch and the four FI measures
+		// were reporting an unqualified zero off it.
+		return bondRisk{}, 0, 0, SkipUnknownInstrument
 	}
 	c, ok := p.Curve.Curve(ctx, spec.Currency, asOf)
 	if !ok || c == nil {
 		// REPORTED, because this one is unambiguous: the terms resolved, so this
 		// IS a bond, and it is about to leave the book's measured rate risk
 		// without appearing anywhere as a gap.
-		skip(p, pos, SkipNoCurve)
-		return pricing.CurveRisk{}, 0, 0, false
+		return bondRisk{}, 0, 0, skipFI(p, pos, SkipNoCurve)
 	}
 	bond := pricing.Bond{
 		Face:       spec.Face,
@@ -203,12 +315,16 @@ func positionBondRisk(ctx context.Context, p FIProviders, pos domain.Position, a
 	if mv < 0 {
 		mv = -mv
 	}
-	return cr, qty, mv, true
+	return bondRisk{risk: cr, priceable: true}, qty, mv, ""
 }
 
-// skip reports an exclusion, if the caller asked to hear about them.
-func skip(p FIProviders, pos domain.Position, reason string) {
+// skipFI reports an exclusion to the observer, if the caller asked to hear about
+// them, and returns the reason so the call site records it on the response too.
+// Returning it is what stops the two surfaces drifting: there is no way to fire
+// the counter without also carrying the evidence.
+func skipFI(p FIProviders, pos domain.Position, reason string) string {
 	if p.OnSkip != nil {
 		p.OnSkip(string(pos.InstrumentID), reason)
 	}
+	return reason
 }

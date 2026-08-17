@@ -84,9 +84,10 @@ func Historical(cfg Config) compute.ReturnsMeasure {
 	conf := cfg.confidence()
 	window := cfg.Window
 	return func(ctx context.Context, p *domain.Portfolio, rp compute.ReturnsProvider) v1.Measure {
-		pnl, _, ok := portfolioPnL(ctx, p, rp, window)
+		var cov compute.Coverage
+		pnl, _, ok := portfolioPnL(ctx, p, rp, window, &cov)
 		if !ok {
-			return zeroNamed(compute.MeasureVaR99)
+			return zeroNamed(compute.MeasureVaR99, cov)
 		}
 		sorted := append([]float64(nil), pnl...)
 		sort.Float64s(sorted)
@@ -95,11 +96,37 @@ func Historical(cfg Config) compute.ReturnsMeasure {
 			loss = 0
 		}
 		return v1.Measure{
-			Name:  compute.MeasureVaR99,
-			Value: floatToDecimal(loss, varExponent),
+			Name:     compute.MeasureVaR99,
+			Value:    floatToDecimal(loss, varExponent),
+			Coverage: cov.Result(),
 		}
 	}
 }
+
+// The reasons a tail measure covered less of the book than it was asked to.
+// Owned by this package rather than by compute, matching the estate's rule that
+// a family's skip vocabulary lives beside the family (compute.SkipNoTerms sits
+// in fi.go, compute.SkipNoModel in factorrisk.go).
+const (
+	// SkipNoReturns: the price store held no return series for a position, so it
+	// is absent from every scenario in the P&L distribution.
+	//
+	// THE DIRECTION IS NOT DOWN. A dropped leg does not simply shrink the book —
+	// it removes whatever OFFSET that leg provided, so excluding the short side
+	// of a hedged pair makes VaR and ES come out LARGER. This is the one measure
+	// family where an exclusion can turn a hedged book into a directional one on
+	// paper, which is why the coverage travels with the number.
+	SkipNoReturns = "no_returns"
+	// SkipInsufficientHistory: no leg had a usable series at all, or the common
+	// window across the legs that did was shorter than two scenarios — so no
+	// distribution could be formed and there is no quantile to report.
+	//
+	// This is the whole-evaluation reason, and it is the one that produced a bare
+	// zero for VaR99, ES99, MaxDrawdown and MaxDrawdownAmount alike with no
+	// counter, no observer and no flag anywhere in the estate. A VaR of zero is
+	// the most flattering number a risk engine can print.
+	SkipInsufficientHistory = "insufficient_history"
+)
 
 // portfolioPnL builds the TIME-ORDERED per-scenario P&L series for the
 // portfolio's base-currency positions over the window, tail-aligned to the
@@ -109,7 +136,16 @@ func Historical(cfg Config) compute.ReturnsMeasure {
 // the drawdown path folds P&L onto. ok=false on insufficient data (no legs, or
 // the common window < 2), matching Historical's original guard. The series is
 // NOT sorted: VaR/ES sort a copy, drawdown walks it in time order.
-func portfolioPnL(ctx context.Context, p *domain.Portfolio, rp compute.ReturnsProvider, window int) (pnl []float64, v0 float64, ok bool) {
+//
+// It also fills in the coverage every caller stamps on its measure. ONE PLACE,
+// because all four tail measures read this one function — a per-measure copy
+// would be four chances for the reported coverage to disagree with the legs the
+// distribution was actually built from.
+//
+// The other-currency skip is NOT recorded here: those positions are already
+// reported as v1.QualityFlagCurrencyExcluded off the portfolio (#257), and
+// counting them again under a second name would double-report one exclusion.
+func portfolioPnL(ctx context.Context, p *domain.Portfolio, rp compute.ReturnsProvider, window int, cov *compute.Coverage) (pnl []float64, v0 float64, ok bool) {
 	base := p.BaseCurrency()
 	type leg struct {
 		value   float64
@@ -123,16 +159,19 @@ func portfolioPnL(ctx context.Context, p *domain.Portfolio, rp compute.ReturnsPr
 		}
 		r, err := rp.Returns(ctx, string(pos.InstrumentID), p.AsOf(), window)
 		if err != nil || len(r) == 0 {
+			cov.Exclude(pos.InstrumentID, SkipNoReturns)
 			continue
 		}
 		val := decimalToFloat(pos.MarketValue.Amount)
 		legs = append(legs, leg{value: val, returns: r})
+		cov.Contributed++
 		v0 += val
 		if minLen < 0 || len(r) < minLen {
 			minLen = len(r)
 		}
 	}
 	if len(legs) == 0 || minLen < 2 {
+		cov.ExcludeWhole(SkipInsufficientHistory)
 		return nil, 0, false
 	}
 	pnl = make([]float64, minLen)
@@ -147,8 +186,20 @@ func portfolioPnL(ctx context.Context, p *domain.Portfolio, rp compute.ReturnsPr
 
 // zeroNamed is the zero-value measure for name — the MeasureFunc never-error
 // return when there is insufficient data.
-func zeroNamed(name v1.MeasureName) v1.Measure {
-	return v1.Measure{Name: name, Value: &commonpb.Decimal{Coefficient: 0, Exponent: 0}}
+//
+// IT TAKES THE COVERAGE BECAUSE THE ZERO IS THE WHOLE PROBLEM. This function
+// used to return a bare zero, and it is the return for all four tail measures on
+// every path where the distribution could not be built. That made "the book is
+// flat" and "the price store told us nothing" the same wire value, with no
+// counter, no observer and no flag between them — the single worst instance of
+// #527 in the estate, and the only measure family that had no observability of
+// any kind. Callers must pass their accumulator, not a fresh one.
+func zeroNamed(name v1.MeasureName, cov compute.Coverage) v1.Measure {
+	return v1.Measure{
+		Name:     name,
+		Value:    &commonpb.Decimal{Coefficient: 0, Exponent: 0},
+		Coverage: cov.Result(),
+	}
 }
 
 // Register overrides MeasureVaR99 with historical-simulation VaR and registers
@@ -188,7 +239,7 @@ func quantile(sorted []float64, q float64) float64 {
 	return sorted[lo] + (h-float64(lo))*(sorted[lo+1]-sorted[lo])
 }
 
-func zeroMeasure() v1.Measure { return zeroNamed(compute.MeasureVaR99) }
+func zeroMeasure(cov compute.Coverage) v1.Measure { return zeroNamed(compute.MeasureVaR99, cov) }
 
 // decimalToFloat / floatToDecimal are the local Decimal⇄float bridge (compute's
 // equivalents are package-private). Returns/VaR are float-domain statistics; the

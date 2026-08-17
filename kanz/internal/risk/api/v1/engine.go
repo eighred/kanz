@@ -223,6 +223,108 @@ type Measure struct {
 	// UncertaintyAbs is the absolute one-sigma uncertainty band around
 	// Value (RISK-08). nil ⇒ no uncertainty was propagated.
 	UncertaintyAbs *commonpb.Decimal
+	// Coverage says how much of the book Value was actually derived
+	// from. See InputCoverage — its zero value means "this measure does
+	// not report input coverage", NOT "everything resolved".
+	Coverage InputCoverage
+}
+
+// InputCoverage records how much of the book one measure was actually
+// computed over — the difference between a MEASURED zero and a
+// CONFIDENT one (#527).
+//
+// # The failure it exists to break
+//
+// A measure that resolves per-position inputs through a provider —
+// bond terms, a discount curve, a factor model, a return series —
+// skips whatever does not resolve and then returns its accumulator
+// regardless. When nothing resolved, the accumulator is zero, and that
+// zero is served with a 200 as an ACTIVE CLAIM: DV01 = 0 says the book
+// carries no interest-rate risk. It is byte-identical to the answer for
+// a book that genuinely holds no bonds. The contract-terms store has no
+// production writer at all, so on this estate that is not a corner case
+// — it is the answer every FI query currently gets.
+//
+// # The direction of the error is NOT one-way, and assuming it is has
+// # already produced a false comment
+//
+// QualityFlagCurrencyExcluded's doc below was written for the four
+// sum-over-base-currency measures and says the error is "SMALLER, never
+// larger". That holds for a SUM. It does not hold for the other
+// aggregation forms now in the registry:
+//
+//   - RATIO / WEIGHTED AVERAGE (Duration, Convexity, SpreadDuration,
+//     StructDuration, HHI, LiquidationHorizon) — dropping a
+//     below-average element RAISES the result. Three bonds with
+//     durations 8/2/5 average 5.0; drop the 2 and the same measure
+//     reports 6.5. concentration.go has said this about HHI since #257.
+//   - QUANTILE OF A PORTFOLIO P&L PATH (the historical VaR99/ES99/
+//     MaxDrawdown family, FactorVaR99, SystematicRisk) — dropping one
+//     leg of a hedged pair removes the OFFSET, so the measured risk
+//     goes UP.
+//
+// So Coverage carries no direction claim. It says what was left out and
+// how much; what that does to the number is a property of the measure's
+// aggregation form, and any caller gating on a money measure must treat
+// a non-zero ExcludedCount as a REFUSAL TO ANSWER rather than as an
+// annotation on a good number.
+//
+// # Why this is on the Measure and not on the MeasureSet
+//
+// CurrencyExclusions is a property of the PORTFOLIO — one filter, every
+// measure — so it rides on the set. This is per-MEASURE by nature: a
+// bond with no discount curve is missing from DV01 and present in
+// GrossExposure, and a single set-level list would say neither which
+// measure lost it nor that the others did not. Riding on the value is
+// also strictly stronger than riding beside it: a Lookup cannot hand
+// back the number without the coverage, on the live path, through a
+// filter, or off the degraded cache.
+type InputCoverage struct {
+	// Contributed is how many positions reached the measure's
+	// arithmetic. Zero WITH a non-zero ExcludedCount is the #527 case:
+	// the measure was computed over nothing at all.
+	Contributed int
+	// ExcludedCount is how many positions could not be assessed. It is
+	// the TOTAL, not len(Exclusions) — see Exclusions. Zero ⇒ either the
+	// whole applicable book was covered, or this measure does not report
+	// coverage at all; those are told apart by Contributed and by the
+	// measure's own documentation, not by this field.
+	ExcludedCount int
+	// Exclusions is a BOUNDED SAMPLE of the excluded positions, capped
+	// at MaxInputExclusions. Unlike a currency exclusion — a handful of
+	// holdings on a mostly-single-currency book — an unresolved-input
+	// exclusion is the DEFAULT state of a book whose reference data was
+	// never loaded, which is every position on every query. Enumerating
+	// it in full would put the whole book in every response and in the
+	// degraded cache; ExcludedCount carries the magnitude and this
+	// carries the identity.
+	Exclusions []InputExclusion
+}
+
+// MaxInputExclusions caps InputCoverage.Exclusions. One constant for
+// every measure family so a response's size cannot depend on which
+// family is degraded, and so the sample a reader sees means the same
+// thing everywhere.
+const MaxInputExclusions = 32
+
+// InputExclusion names one position left out of one measure because an
+// input that measure needed did not resolve. The evidence behind
+// QualityFlagInputsUnresolved, in the role CurrencyExclusion plays for
+// QualityFlagCurrencyExcluded.
+type InputExclusion struct {
+	// InstrumentID is the position that was left out. EMPTY means the
+	// exclusion is a property of the whole evaluation rather than of any
+	// holding — no factor model resolved for this snapshot, no
+	// counterparty exposures, too little return history to form a
+	// distribution. A reader labelling by instrument must expect the
+	// empty value and must not drop it: the empty one is the whole-book
+	// event and the most severe.
+	InstrumentID InstrumentID
+	// Reason is drawn from the measure family's own closed vocabulary
+	// (compute.SkipNoTerms, SkipNoCurve, SkipNoModel, ...) rather than
+	// being free text, because it is also a metric label and a label
+	// must not be whatever a future edit writes.
+	Reason string
 }
 
 // --- Scenario ----------------------------------------------------------
@@ -300,13 +402,59 @@ const (
 	// BaseCurrency contribute to no base-currency measure. The excluded
 	// positions are enumerated by MeasureSet.CurrencyExclusions.
 	//
-	// The error direction is one-way: dropping positions makes gross
-	// exposure, net exposure, VaR and Delta SMALLER, never larger. A
-	// limit check against a flagged response can therefore pass when the
-	// whole book would breach. Any caller that gates on a money measure
+	// A limit check against a flagged response can pass when the whole
+	// book would breach. Any caller that gates on a money measure
 	// (pre-trade check, concentration limit, margin call) must treat this
 	// flag as a refusal to answer, not as an annotation on a good number.
+	//
+	// THIS DOC USED TO SAY THE ERROR DIRECTION WAS ONE-WAY — "SMALLER,
+	// never larger". That was written in #257 for the four
+	// sumInBaseCurrency measures and it was never true of the set as a
+	// whole; it is false for 11 of the measures now registered, and it is
+	// corrected here rather than left as dated evidence a sizing decision
+	// could rest on:
+	//
+	//   - The flag is attached to the WHOLE set (compute.ComputeMeasures),
+	//     including the FI, Greek, structured and XVA measures, which
+	//     never consult InBaseCurrency at all. For those, a flagged
+	//     response is not "smaller because positions were dropped" — it is
+	//     a currency-MIXED number, and the flag over-claims.
+	//   - A ratio drops in either direction. HHI is the case
+	//     concentration.go has documented since #257: "dropping positions
+	//     raises it towards 1 as often as it lowers it".
+	//   - A quantile of a portfolio P&L path is not monotone in its legs.
+	//     Excluding one leg of a hedged pair removes the OFFSET, so VaR99
+	//     and ES99 come out LARGER.
+	//
+	// See InputCoverage for the same argument stated once for all measure
+	// families. What survives is the operational instruction above: do not
+	// gate on a flagged number. What does not survive is the claim that
+	// you know which way it is wrong.
 	QualityFlagCurrencyExcluded QualityFlag = "CURRENCY_EXCLUDED"
+
+	// QualityFlagInputsUnresolved: at least one measure in this response
+	// was computed over positions whose pricing inputs did not resolve —
+	// possibly over NONE of them. The evidence is on each affected
+	// measure, as Measure.Coverage (InputCoverage), naming the positions
+	// and the reason each was left out.
+	//
+	// DISTINCT FROM CurrencyExcluded ON PURPOSE, not a second spelling of
+	// it. That flag is about a filter the engine applies deliberately
+	// because it has no FX layer; this one is about DATA THAT IS NOT
+	// THERE — contract terms nothing writes, a discount curve calibration
+	// never ran for, a factor universe an instrument is outside of, a
+	// return series the price store does not hold. Merging them would put
+	// "we chose not to include this" and "we could not find out" behind
+	// one signal, and only the second is a defect somebody must fix.
+	//
+	// THE MEASURE IS STILL PRESENT, and the value it carries is not a
+	// claim. A DV01 of zero on a flagged response means the engine priced
+	// no bonds, which is not the same statement as "this book holds no
+	// bonds" — that second statement is one the engine cannot make, and
+	// this flag is what stops it being read out of a number that looks
+	// identical. The direction of the error is NOT knowable from the
+	// flag: see InputCoverage. Any caller that gates must refuse.
+	QualityFlagInputsUnresolved QualityFlag = "INPUTS_UNRESOLVED"
 )
 
 // QualityFlags is every flag the engine can attach to a response. It
@@ -315,10 +463,21 @@ const (
 // test rather than silently dropping a flag they were never taught —
 // which would restore exactly the silence QualityFlagCurrencyExcluded
 // was added to break. Append here when adding a flag above.
+//
+// FORGETTING TO APPEND IS THE SILENT FAILURE, AND IT DISARMS THE OTHERS.
+// A flag left out of this slice is not merely unlisted: every guard that
+// sweeps it — TestProtoFlags_EveryAPIFlagMaps most of all — then sweeps a
+// set that does not contain the new flag and passes, so the wire mapping
+// is never checked and the flag is dropped in translation with nothing
+// red. test/arch/quality_flag_completeness_test.go closes that by reading
+// the const block out of the source and comparing it against this
+// literal; it is not a style rule, it is what keeps the exhaustiveness
+// test honest.
 var QualityFlags = []QualityFlag{
 	QualityFlagDegraded,
 	QualityFlagStale,
 	QualityFlagCurrencyExcluded,
+	QualityFlagInputsUnresolved,
 }
 
 // CurrencyExclusion names one position left out of every base-currency

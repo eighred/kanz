@@ -128,11 +128,21 @@ func (e *EngineImpl) Measures(ctx context.Context, req v1.MeasuresRequest) (v1.M
 		return v1.MeasuresResponse{}, v1.ErrPortfolioNotFound
 	}
 	_, flags := e.detector.Assess(full.AsOf())
+	// FLAGGED OFF THE SERVED SUBSET, NOT THE FULL SET. The two coverage records
+	// behave differently under a filter and filterMeasures already encodes that:
+	// the currency exclusions are copied onto the subset because they are a
+	// property of the portfolio, while the per-measure input coverage travels
+	// inside the measures and so narrows with them. Flagging off `full` would
+	// therefore attach INPUTS_UNRESOLVED to a response containing only
+	// GrossExposure because some FI measure the caller did not ask for could not
+	// price — and a flag that describes numbers that are not on the response is
+	// one every reader learns to ignore.
+	served := filterMeasures(full, req.Measures)
 	return v1.MeasuresResponse{
 		PortfolioID:    req.PortfolioID,
 		AsOf:           full.AsOf(),
-		Set:            filterMeasures(full, req.Measures),
-		QualityFlags:   withCoverageFlags(flags, full),
+		Set:            served,
+		QualityFlags:   withCoverageFlags(flags, served),
 		SourcePosition: pos,
 	}, nil
 }
@@ -169,17 +179,31 @@ func (e *EngineImpl) EvaluateScenario(ctx context.Context, req v1.ScenarioReques
 	}, nil
 }
 
-// withCoverageFlags appends the coverage signal the Detector cannot
+// withCoverageFlags appends the coverage signals the Detector cannot
 // produce. Detector.Assess sees only a time.Time, so it can report that
 // a number is OLD but never that it is PARTIAL — the gap that let
 // currency-excluded positions vanish silently (#257). The set itself
-// carries the exclusions, so this works identically on the live path and
+// carries both records, so this works identically on the live path and
 // on a degraded cache read where the portfolio is no longer in hand.
+//
+// TWO FLAGS, NOT ONE, and they are not interchangeable. CURRENCY_EXCLUDED
+// says the engine deliberately declined to include positions it could
+// see, because it has no FX layer. INPUTS_UNRESOLVED says data the engine
+// expected was not there — bond terms nobody writes, a curve nobody
+// calibrated, a return series the price store does not hold (#527). Only
+// the second is somebody's bug, and merging them would hide the one
+// that has a fix.
 func withCoverageFlags(flags []v1.QualityFlag, ms *domain.MeasureSet) []v1.QualityFlag {
-	if ms == nil || len(ms.CurrencyExclusions()) == 0 {
+	if ms == nil {
 		return flags
 	}
-	return append(flags, v1.QualityFlagCurrencyExcluded)
+	if len(ms.CurrencyExclusions()) > 0 {
+		flags = append(flags, v1.QualityFlagCurrencyExcluded)
+	}
+	if len(ms.UnresolvedMeasures()) > 0 {
+		flags = append(flags, v1.QualityFlagInputsUnresolved)
+	}
+	return flags
 }
 
 // Health implements v1.Engine. The engine's AsOf is the latest applied

@@ -32,8 +32,14 @@ func (rv *BondRevaluer) RevalueBond(ctx context.Context, instrumentID string, as
 	if rv.providers.Terms == nil || rv.providers.Curve == nil || baseMV == nil || shift == nil {
 		return nil, false
 	}
-	spec, ok := rv.providers.Terms.BondTerms(ctx, instrumentID, asOf)
-	if !ok {
+	// ONLY TermsResolved REPRICES. The other three answers all mean "do not
+	// shock this position", and a scenario has nowhere to put a coverage record
+	// — its output is a shocked MeasureSet, whose measures carry their own
+	// coverage from the same providers. So the distinction TermsResolution draws
+	// is deliberately not consumed here; it is consumed where it changes an
+	// answer somebody reads.
+	spec, res := rv.providers.Terms.BondTerms(ctx, instrumentID, asOf)
+	if res != TermsResolved {
 		return nil, false
 	}
 	c, ok := rv.providers.Curve.Curve(ctx, spec.Currency, asOf)

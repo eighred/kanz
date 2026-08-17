@@ -187,38 +187,58 @@ func abs32(v int32) int32 {
 var _ compute.BondTermsProvider = (*Provider)(nil)
 
 // BondTerms resolves an instrument's bond terms as of a point in time.
-// ok=false means "this is not a bond, or its terms cannot be used" — the same
-// collapsed signal OptionTerms carries, for the same reason: the seam has no
-// error channel.
-func (p *Provider) BondTerms(ctx context.Context, instrumentID string, asOf time.Time) (compute.BondSpec, bool) {
+//
+// # This seam is the widened one, and OptionTerms above is not
+//
+// The type comment explains why OptionTerms answers with a bool that collapses
+// "not an option" and "never loaded", and says widening "would touch every
+// consumer and is a change worth taking on its own evidence, not smuggled in
+// with the first implementation". #527 IS that evidence, for the bond half: with
+// no production writer for the contract-terms store, every position took the
+// never-loaded branch, the FI measures could not tell it from a share, and DV01
+// came back as a confident zero for every portfolio on the estate. So this half
+// now answers with a compute.TermsResolution, which keeps the two apart.
+//
+// The option half is left alone deliberately. Its consumer (the Greeks band) is
+// still unregistered, so widening it would be a change with no reachable
+// behaviour to verify — and the evidence it should be taken on is the same
+// evidence, arriving when that band is wired.
+func (p *Provider) BondTerms(ctx context.Context, instrumentID string, asOf time.Time) (compute.BondSpec, compute.TermsResolution) {
 	if p == nil || p.store == nil {
-		return compute.BondSpec{}, false
+		return compute.BondSpec{}, compute.TermsUnknown
 	}
 	rec, err := p.store.LatestAsOf(ctx, instrumentID, asOf)
 	if err != nil {
 		if errors.Is(err, terms.ErrNoTerms) && p.onMissing != nil {
 			p.onMissing(instrumentID)
 		}
-		return compute.BondSpec{}, false
+		// UNKNOWN COVERS A STORE ERROR TOO, and that is the honest answer rather
+		// than a convenient one: a query that failed tells us nothing about the
+		// instrument, so claiming "not a bond" would be a fabrication. The loud
+		// signal for an unreadable database is upstream — it fails the readiness
+		// Ping long before it fails here.
+		return compute.BondSpec{}, compute.TermsUnknown
 	}
 	bond := rec.Terms.GetBond()
 	if bond == nil {
-		// An option, a swap or a future. Genuinely not a bond — the FI measures
-		// skip it, which is correct — so the missing-terms observer does not fire.
-		return compute.BondSpec{}, false
+		// A record EXISTS and carries an option, a swap or a future. This is the
+		// one answer that licenses the FI measures to leave the position out
+		// without flagging the response, so it must not be reachable by any path
+		// that merely failed to find something.
+		return compute.BondSpec{}, compute.TermsNotABond
 	}
 	spec, ok := toBondSpec(bond)
 	if !ok {
-		// Terms that exist and cannot be used. Reported as missing because the
-		// consequence is the same: this bond is about to be excluded from DV01
-		// and from every duration average, silently reducing the book's measured
-		// rate risk.
+		// Terms that exist and cannot be used. Reported to the missing-terms
+		// observer because the consequence is the same as never having loaded
+		// them: this bond is about to be excluded from DV01 and from every
+		// duration average.
 		if p.onMissing != nil {
 			p.onMissing(instrumentID)
 		}
-		return compute.BondSpec{}, false
+		return compute.BondSpec{}, compute.TermsUnusable
 	}
-	return spec, true
+	return spec, compute.TermsResolved
 }
 
 // toBondSpec converts reference.v1.BondTerms to the float working shape the bond
