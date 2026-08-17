@@ -34,6 +34,7 @@ import (
 	"github.com/eighred/kanz/pkg/bus"
 	"github.com/eighred/kanz/pkg/observability"
 	"github.com/eighred/kanz/pkg/transport"
+	"github.com/eighred/kanz/services/oms/internal/approval"
 	"github.com/eighred/kanz/services/oms/internal/cashview"
 	"github.com/eighred/kanz/services/oms/internal/compliance"
 	"github.com/eighred/kanz/services/oms/internal/config"
@@ -364,6 +365,34 @@ func runConsumers(ctx context.Context, cfg config.Config, readiness *server.Read
 		compliance.WithMarkSource(marks),
 	)
 
+	// MAKER-CHECKER ON ORDER SUBMISSION (#410, act three).
+	//
+	// THE SAME MARK FOLD THE PRE-TRADE GATE USES, deliberately. One price source
+	// means the compliance record and the four-eyes record can never disagree
+	// about how large the same order was — the reason compliance.OrderPrice is one
+	// exported function rather than a switch copied into this control.
+	//
+	// THE GATE IS BUILT WHETHER OR NOT A THRESHOLD IS CONFIGURED. With none, every
+	// admitted order is still counted under posture="absent", so "this deployment
+	// has no dual-control threshold" is a series on a dashboard rather than a
+	// missing metric — "nothing configured" and "checked, and fine" must not look
+	// the same, and neither must "nothing configured" and "this build has no gate".
+	dualControl, err := approval.NewGate(cfg.RequireDualControl, cfg.DualControlMinNotional, marks, obs.Registry)
+	if err != nil {
+		logger.Error("oms: dual-control gate refused its configuration", "err", err)
+		return false, err
+	}
+	if dualControl.Watching() {
+		logger.Info("oms: MAKER-CHECKER IS OBSERVING, NOT ENFORCING — orders at or above the threshold "+
+			"are admitted on ONE signature and counted; arming is blocked until #410's placement ruling lands",
+			"threshold", dualControl.Threshold().FloatString(2), "currency", cfg.DualControlNotionalCurrency,
+			"metric", "kanz_oms_order_signatures_total")
+	} else {
+		logger.Warn("oms: NO DUAL-CONTROL THRESHOLD — every order, of any size, is committed on one " +
+			"person's authority (#410). Set OMS_DUAL_CONTROL_MIN_NOTIONAL (e.g. \"1000000 USD\") to " +
+			"start counting how much of the flow would need a second signature")
+	}
+
 	// State the posture, loudly, at startup. Which of these two lines is in the log is
 	// the difference between "an unmandated portfolio trades unconstrained" and "an
 	// unmandated portfolio cannot trade at all", and nobody should have to read the
@@ -663,6 +692,7 @@ func runConsumers(ctx context.Context, cfg config.Config, readiness *server.Read
 		// price source, so a cost measure and a compliance check can never
 		// disagree about what the market showed.
 		order.WithArrivalMarks(marks),
+		order.WithDualControl(dualControl),
 		order.WithAccountBindings(bindings, cfg.RequireVenueAccount, sharedCollateral),
 		order.WithQuarantineCounter(quarantined),
 		order.WithClaimTimeoutCounter(claimTimeouts),

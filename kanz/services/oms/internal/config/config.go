@@ -3,10 +3,12 @@ package config
 import (
 	"fmt"
 	"log/slog"
+	"math/big"
 	"os"
 	"strings"
 	"time"
 
+	"github.com/eighred/kanz/internal/dec"
 	"github.com/eighred/kanz/internal/execution"
 	"github.com/eighred/kanz/pkg/secret"
 	"github.com/eighred/kanz/services/oms/internal/order"
@@ -131,6 +133,60 @@ type Config struct {
 	// and counts it, so "nothing configured" and "checked, and fine" do not look
 	// the same.
 	RequireOrderTypeSupport bool
+	// RequireDualControl arms maker-checker on ORDER SUBMISSION (#410): an order at
+	// or above DualControlMinNotional takes two different authenticated people.
+	//
+	// IT CANNOT BE SET TODAY, AND THAT IS A REFUSAL RATHER THAN AN OMISSION. There
+	// is nowhere to put an order awaiting approval: the ruling is a PROPOSALS TABLE
+	// in this service, on the shape of services/datamaster/internal/store/proposals
+	// .go, and it is not built yet — so arming the refusal would
+	// REJECT every order at or above the threshold rather than hold it. Load says
+	// so and refuses to start, which is one line for the placement PR to delete.
+	//
+	// The threshold ALONE is the shipped posture, and it is not a no-op: every
+	// order is still admitted on one signature, each is classified against the
+	// threshold, and kanz_oms_order_signatures_total makes "how much of the flow
+	// was large and single-signed" readable before anybody arms anything. Same
+	// stance as OMS_REQUIRE_MANDATE, OMS_REQUIRE_VENUE_ACCOUNT,
+	// OMS_REQUIRE_VERIFIED_ACCOUNT and DATAMASTER_REQUIRE_DUAL_CONTROL: build the
+	// control, count the gap, arm it with the list in hand.
+	RequireDualControl bool
+
+	// DualControlMinNotional is the order notional (quantity x price) at or above
+	// which dual control applies. nil means the control is ABSENT — no threshold
+	// is configured, nothing is compared, and the metric says so under
+	// posture="absent" rather than letting it read as "checked, and fine".
+	//
+	// THERE IS NO DEFAULT, and the absence of one is the whole ruling. A default
+	// would silently pick a number nobody chose, on a control whose entire purpose
+	// is that a human decided the number — so OMS_REQUIRE_DUAL_CONTROL set without
+	// this is a refusal to start naming both variables, never a fallback.
+	//
+	// IT IS SET AS AN AMOUNT AND A CURRENCY TOGETHER — OMS_DUAL_CONTROL_MIN_NOTIONAL
+	// = "1000000 USD" — and a bare number is REFUSED. This is the estate's first
+	// money-denominated configuration value (every other numeric OMS_* var is a
+	// count or a duration) and it lands on a platform with no FX on the admission
+	// path: common.v1.Decimal carries no currency, and the compliance engine never
+	// reads GetCurrencyCode() at all, so it neither converts nor refuses. A bare
+	// "1000000" would therefore compare a JPY order against a limit somebody meant
+	// in USD and silently pass it — off by a factor of 150 in the permissive
+	// direction, on the control that exists to catch large orders. Naming the
+	// currency in the same string makes the two impossible to change independently,
+	// and Load refuses any currency other than OMS_BASE_CURRENCY, which is the only
+	// currency an order's notional is expressed in on this path today.
+	//
+	// It is valued the same way the pre-trade compliance gate values an order
+	// (compliance.OrderPrice): a LIMIT at its own limit, a MARKET at the reference
+	// mark. An order that cannot be valued is counted posture="unvaluable" and,
+	// once armed, requires dual control — never quietly treated as small.
+	DualControlMinNotional *big.Rat
+	// DualControlNotionalCurrency is the currency the threshold above is expressed
+	// in. Empty exactly when the threshold is nil; otherwise equal to BaseCurrency,
+	// which Load enforces. It is carried rather than discarded so the startup log
+	// states the threshold WITH its unit — a number in a log with no currency
+	// beside it is the same defect one layer out.
+	DualControlNotionalCurrency string
+
 	// SPIFFESocket is the workload API socket used to mTLS the venue dials
 	// (SEC-01a). Empty ⇒ plaintext, which is a DEV-ONLY posture: the venue
 	// connection carries live orders.
@@ -395,6 +451,63 @@ func Load() (Config, error) {
 	}
 	cfg.OutboxInterval = outboxInterval
 
+	// MAKER-CHECKER ON ORDER SUBMISSION (#410, act three). Three states, and the
+	// third is the one the owner ruled on explicitly.
+	cfg.RequireDualControl = os.Getenv("OMS_REQUIRE_DUAL_CONTROL") == "true"
+	if raw := strings.TrimSpace(os.Getenv("OMS_DUAL_CONTROL_MIN_NOTIONAL")); raw != "" {
+		amount, currency, err := parseNotional(raw)
+		if err != nil {
+			return Config{}, fmt.Errorf("OMS_DUAL_CONTROL_MIN_NOTIONAL: %w", err)
+		}
+		if amount.Sign() <= 0 {
+			return Config{}, fmt.Errorf("OMS_DUAL_CONTROL_MIN_NOTIONAL: must be positive (got %s); a "+
+				"non-positive threshold puts EVERY order at or above it, which is not 'dual control on "+
+				"large orders' but 'dual control on everything' arrived at by arithmetic", amount.RatString())
+		}
+		// THE CURRENCY MUST BE THE ONE ORDERS ARE VALUED IN. There is no FX layer
+		// on the admission path (RISK-06) and common.v1.Decimal carries no
+		// currency, so a threshold in another currency would be compared against
+		// a number that means something else — silently, and in whichever
+		// direction the rate happens to run.
+		if currency != cfg.BaseCurrency {
+			return Config{}, fmt.Errorf("OMS_DUAL_CONTROL_MIN_NOTIONAL is denominated in %s but orders "+
+				"are valued in OMS_BASE_CURRENCY=%s, and there is no FX conversion on the admission path "+
+				"— comparing them would silently mis-scale the threshold. Set both to the same currency",
+				currency, cfg.BaseCurrency)
+		}
+		cfg.DualControlMinNotional = amount
+		cfg.DualControlNotionalCurrency = currency
+	}
+	// THE RULING, VERBATIM: "require dual control" set with NO threshold refuses to
+	// start, naming both variables. Not a default — a default here silently picks a
+	// number nobody chose, on a control whose whole purpose is that a human decided.
+	// Same shape as the OMS_SWEEP_MIN_AGE check above: a feature armed without its
+	// numeric bound is a Load failure, not a runtime surprise.
+	if cfg.RequireDualControl && cfg.DualControlMinNotional == nil {
+		return Config{}, fmt.Errorf("OMS_REQUIRE_DUAL_CONTROL=true requires OMS_DUAL_CONTROL_MIN_NOTIONAL " +
+			"to be set (e.g. \"1000000 USD\"): there is no threshold to compare an order against, and this " +
+			"service will not default one — the number is the decision")
+	}
+	// AND IT CANNOT BE ARMED AT ALL YET, WHICH IS A REFUSAL AND NOT AN OMISSION.
+	// The OMS has nowhere to record an order awaiting approval. The ruling on #410
+	// is a PROPOSALS TABLE in this service — not a ninth OrderStatus — on the shape
+	// of services/datamaster/internal/store/proposals.go, and it is not built yet.
+	// Arming before it is would REJECT every order at or above the threshold
+	// instead of holding it: an act that neither takes effect nor can be approved,
+	// which is exactly the silent drop #410's acceptance forbids.
+	//
+	// THIS IS THE ONE LINE THE PROPOSALS-TABLE PR DELETES. Until then the threshold ALONE
+	// is the supported posture and it is not a no-op: every order is still admitted
+	// on one signature, each is classified against the threshold, and
+	// kanz_oms_order_signatures_total makes the gap readable before anyone arms it.
+	if cfg.RequireDualControl {
+		return Config{}, fmt.Errorf("OMS_REQUIRE_DUAL_CONTROL=true is not supported yet: this OMS has " +
+			"nowhere to hold an order awaiting approval, so arming the control would reject every order " +
+			"at or above OMS_DUAL_CONTROL_MIN_NOTIONAL rather than hold it for a second signature (#410). " +
+			"Set OMS_DUAL_CONTROL_MIN_NOTIONAL alone: orders are still admitted on one signature and " +
+			"kanz_oms_order_signatures_total counts how many of them were at or above the threshold")
+	}
+
 	// THE COLLATERAL-SEGREGATION REFUSAL BELONGS HERE, NOT 200 LINES INTO STARTUP
 	// (#68).
 	//
@@ -425,6 +538,30 @@ func Load() (Config, error) {
 	}
 
 	return cfg, nil
+}
+
+// parseNotional parses "<amount> <CURRENCY>" — a money value that cannot be set
+// without its unit.
+//
+// A BARE NUMBER IS AN ERROR, NOT A NUMBER IN THE DEFAULT CURRENCY. That is the
+// whole reason this is one string rather than two variables: two variables can be
+// changed independently, and the failure mode of changing OMS_BASE_CURRENCY and
+// forgetting the threshold is a control that silently applies at the wrong scale.
+// One string makes the amount and its unit impossible to separate, and makes
+// forgetting the unit a refusal to start.
+func parseNotional(s string) (*big.Rat, string, error) {
+	fields := strings.Fields(s)
+	if len(fields) != 2 {
+		return nil, "", fmt.Errorf("must be an amount AND a currency, e.g. \"1000000 USD\" (got %q); "+
+			"a bare number would be compared against order notionals with no currency attached, and "+
+			"this platform has no FX on the admission path to reconcile them", s)
+	}
+	amount, err := dec.ParseRat(fields[0])
+	if err != nil {
+		return nil, "", fmt.Errorf("%q is not a decimal amount", fields[0])
+	}
+	currency := strings.ToUpper(fields[1])
+	return amount, currency, nil
 }
 
 func envOr(k, def string) string {

@@ -136,7 +136,13 @@ func (g *COMP01Gate) Check(ctx context.Context, tenantID string, cmd *orderpb.Su
 	return breachFromResult(decision.Result), nil
 }
 
-// price values the order's notional.
+// price values the order's notional. See OrderPrice — this is the gate's own
+// mark source applied to it.
+func (g *COMP01Gate) price(cmd *orderpb.SubmitOrder) *commonpb.Decimal {
+	return OrderPrice(cmd, g.marks)
+}
+
+// OrderPrice is THE answer to "what price does this order carry".
 //
 // A LIMIT or STOP_LIMIT order carries its own limit price and is valued at it —
 // that is the price the fund has committed to, and repricing it at the market
@@ -147,10 +153,20 @@ func (g *COMP01Gate) Check(ctx context.Context, tenantID string, cmd *orderpb.Su
 // question ("what price does this order type carry?") should not have two
 // different answers in one codebase.
 //
-// nil is returned when there is no fresh mark, and nil is what the gate already
-// refuses (Decision.Unpriced). There is no new rejection path here and no way
-// to admit an order without a real price for it.
-func (g *COMP01Gate) price(cmd *orderpb.SubmitOrder) *commonpb.Decimal {
+// IT IS EXPORTED BECAUSE A SECOND CALLER APPEARED (#410). The dual-control
+// threshold values an order to compare it against OMS_DUAL_CONTROL_MIN_NOTIONAL,
+// and an operator who sets one number must not get two behaviours from it — a
+// threshold that valued a MARKET order differently from the pre-trade gate would
+// mean the compliance record and the four-eyes record disagree about how large
+// the same order was. Copying the switch was the alternative, and this
+// repository has already paid that bill: 17 services each had their own
+// secret().
+//
+// marks may be nil, and nil is not a failure: it means MARKET and STOP orders
+// cannot be valued here. nil is returned when there is no fresh mark, and nil is
+// what the gate already refuses (Decision.Unpriced). There is no new rejection
+// path here and no way to value an order without a real price for it.
+func OrderPrice(cmd *orderpb.SubmitOrder, marks MarkSource) *commonpb.Decimal {
 	switch cmd.GetOrderType() {
 	case orderpb.OrderType_ORDER_TYPE_LIMIT, orderpb.OrderType_ORDER_TYPE_STOP_LIMIT:
 		return cmd.GetLimitPrice()
@@ -164,10 +180,10 @@ func (g *COMP01Gate) price(cmd *orderpb.SubmitOrder) *commonpb.Decimal {
 		// compliance PASS only to be rejected later by validation.
 		return nil
 	}
-	if g.marks == nil {
+	if marks == nil {
 		return nil
 	}
-	m := g.marks.Mark(cmd.GetInstrumentId())
+	m := marks.Mark(cmd.GetInstrumentId())
 	if m == nil {
 		return nil
 	}

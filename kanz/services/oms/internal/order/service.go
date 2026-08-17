@@ -22,6 +22,7 @@ import (
 	"github.com/eighred/kanz/internal/dec"
 	"github.com/eighred/kanz/internal/execution"
 	"github.com/eighred/kanz/internal/outbox"
+	"github.com/eighred/kanz/services/oms/internal/approval"
 	"github.com/eighred/kanz/services/oms/internal/compliance"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -103,10 +104,28 @@ type Service struct {
 	// and nothing else — not a log line, not an error return, not a DLQ entry
 	// once kanz-redrive has drained it — records that the window happened.
 	acceptedReannounced prometheus.Counter
+
+	// dualControl classifies each admitted order against
+	// OMS_DUAL_CONTROL_MIN_NOTIONAL (#410). Nil ⇒ nothing is classified and
+	// nothing is counted, which is the test default and never the production one:
+	// cmd/oms/main.go always builds a gate, unarmed and thresholdless if that is
+	// how the deployment is configured, so posture="absent" is an ANSWER rather
+	// than a silence.
+	dualControl *approval.Gate
 }
 
 // ServiceOption customizes the handler.
 type ServiceOption func(*Service)
+
+// WithDualControl supplies the maker-checker gate for order submission (#410).
+//
+// It classifies every admitted parent order against the configured notional
+// threshold and counts it. It does NOT hold an order awaiting approval — that
+// placement is a proposals table in this service (#410) and config.Load refuses
+// to arm the control until it is built.
+func WithDualControl(g *approval.Gate) ServiceOption {
+	return func(s *Service) { s.dualControl = g }
+}
 
 // WithAccountBindings gives the OMS the portfolio→exchange-account bindings and the
 // posture to take when an order's portfolio has none.
@@ -351,6 +370,44 @@ func (s *Service) handleSubmit(ctx context.Context, env *envelopepb.Envelope, pa
 		}
 		if rej != nil {
 			return s.refuse(ctx, cmd.GetOrderId(), rej.Code, rej.Msg, now)
+		}
+	}
+
+	// MAKER-CHECKER CLASSIFICATION, BESIDE THE COMPLIANCE GATE AND NEVER INSIDE IT
+	// (#410).
+	//
+	// WHY IT IS NOT A RULE IN THE GATE BELOW. internal/compliance/gate.go
+	// short-circuits BEFORE it ever resolves a price: a portfolio with no mandate
+	// returns Allowed (OMS_REQUIRE_MANDATE defaults to false, config.go), and a
+	// mandate with zero rules returns Allowed — both without valuing the order at
+	// all. A dual-control threshold evaluated inside that gate would inherit the
+	// short-circuit exactly, so THE LARGEST ORDERS ON UNGOVERNED PORTFOLIOS would
+	// skip the control entirely. That is the population a maker-checker rule
+	// exists for. This resolves its own price, unconditionally, and answers for
+	// every order the gate answers for and for the ones it declines to value.
+	//
+	// A CHILD IS NOT CLASSIFIED, for the same reason it is not re-checked for
+	// compliance (the note below): the decision was made once, for the whole
+	// notional, at the parent. Counting each slice would report one decision as
+	// slice_count single-signed orders and mis-scale the number the arming
+	// decision rests on.
+	//
+	// DECIDED HERE, COUNTED ONLY AFTER ADMISSION SUCCEEDS — see Gate.Count. An
+	// order refused for compliance, an unroutable venue or an unsupported order
+	// type never went through at all, single-signed or otherwise.
+	var dual approval.Decision
+	if parent == nil {
+		dual = s.dualControl.Decide(&cmd)
+		if dual.Posture == approval.PostureAtOrAbove {
+			// UNARMED IS NOT UNRECORDED — the stance #495 took on the override
+			// path, applied here. The act and the digest a second signature would
+			// have had to cover are recorded now, so arming the control later does
+			// not leave today's large orders ambiguous, and nobody has to
+			// reconstruct from configuration history which ones were above the line.
+			s.logger.Warn("order at or above the dual-control threshold is being ADMITTED ON ONE "+
+				"SIGNATURE — the control is not armed (#410)",
+				"order_id", cmd.GetOrderId(), "portfolio_id", cmd.GetPortfolioId(),
+				"act", string(dual.Act), "digest", dual.Digest, "digest_err", dual.DigestErr)
 		}
 	}
 
@@ -627,6 +684,21 @@ func (s *Service) handleSubmit(ctx context.Context, env *envelopepb.Envelope, pa
 		return err
 	}
 	st = admitted
+
+	// THE ORDER WENT THROUGH, AND THIS IS HOW MANY PEOPLE SIGNED IT (#410).
+	//
+	// Counted at the point admission is durable, not at the gate: everything above
+	// this line can still refuse the order, and an order that was refused did not
+	// go through on one signature. Only the PARENT of a schedule is counted; its
+	// children inherit its decision, exactly as they inherit its compliance
+	// clearance and its arrival mark.
+	//
+	// approval.SingleSigned is unconditional today because nothing collects a
+	// second signature yet — that is the gap this counter exists to size, and the
+	// day #410's placement lands the approved path passes DualSigned here.
+	if parent == nil {
+		s.dualControl.Count(dual, approval.SingleSigned)
+	}
 
 	// PUBLISH IT, HERE, BEFORE ANYTHING ELSE HAPPENS TO THIS ORDER.
 	//
