@@ -17,6 +17,8 @@ import (
 	"testing"
 	"time"
 
+	observationpb "github.com/eighred/kanz/kanz-schemas-go/observation/v1"
+
 	"github.com/eighred/kanz/internal/identity"
 )
 
@@ -30,6 +32,12 @@ type fakeProvisioner struct {
 	listed    []*identity.Invite
 	err       error
 	forTenant string
+
+	// #525: the account side.
+	accounts     map[string]*identity.User
+	loadErr      error
+	statusErr    error
+	statusWrites []statusWrite
 }
 
 func (f *fakeProvisioner) CreateInvite(_ context.Context, inv *identity.Invite) error {
@@ -43,6 +51,54 @@ func (f *fakeProvisioner) CreateInvite(_ context.Context, inv *identity.Invite) 
 func (f *fakeProvisioner) InvitesFor(_ context.Context, tenant string) ([]*identity.Invite, error) {
 	f.forTenant = tenant
 	return f.listed, f.err
+}
+
+// --- DEPROVISIONING (#525) ---
+//
+// Kept on separate error fields from f.err: a test that fails the status write
+// must not also fail the load, or "refused before writing" and "the write failed"
+// become indistinguishable in the assertion.
+
+func (f *fakeProvisioner) UserBySubject(_ context.Context, subject string) (*identity.User, error) {
+	if f.loadErr != nil {
+		return nil, f.loadErr
+	}
+	u, ok := f.accounts[subject]
+	if !ok {
+		return nil, identity.ErrUserNotFound
+	}
+	return u, nil
+}
+
+func (f *fakeProvisioner) SetStatus(
+	_ context.Context, subject string, status identity.Status, now time.Time,
+) error {
+	f.statusWrites = append(f.statusWrites, statusWrite{subject: subject, status: status, at: now})
+	if f.statusErr != nil {
+		return f.statusErr
+	}
+	if u, ok := f.accounts[subject]; ok {
+		u.Status = status
+		u.UpdatedAt = now
+	}
+	return nil
+}
+
+// statusWrite is one call to SetStatus, recorded so a test can assert that a
+// REFUSED request made none — the difference between "answered 404" and
+// "answered 404 after disabling somebody else's trader".
+type statusWrite struct {
+	subject string
+	status  identity.Status
+	at      time.Time
+}
+
+// account builds an active account in a tenant.
+func account(subject, tenant string) *identity.User {
+	return &identity.User{
+		Subject: subject, Tenant: tenant, Roles: []string{"kanz-trader"},
+		Credential: "hash", Status: identity.StatusActive, CreatedAt: provNow, UpdatedAt: provNow,
+	}
 }
 
 // fakeVerifier stands in for the real ES256 verifier. The real one's own tests
@@ -74,20 +130,41 @@ type provFixture struct {
 	s     *Server
 	store *fakeProvisioner
 	vfy   *fakeVerifier
+	audit *fakeAudit
+}
+
+// fakeAudit is the auth.DecisionRecorder the status routes write to.
+type fakeAudit struct {
+	entries []*observationpb.DecisionLog
+	err     error
+}
+
+func (f *fakeAudit) Record(_ context.Context, e *observationpb.DecisionLog) error {
+	f.entries = append(f.entries, e)
+	return f.err
 }
 
 func newProvServer(t *testing.T, claims *identity.Claims, verifyErr error) provFixture {
 	t.Helper()
-	store := &fakeProvisioner{}
+	store := &fakeProvisioner{accounts: map[string]*identity.User{}}
+	// THE OPERATOR HAS AN ACTIVE ACCOUNT, because since #525 operator() reads one:
+	// a token alone no longer provisions. Seeded here rather than per-test so the
+	// #364 tests keep asserting what they were written to assert.
+	if claims != nil && claims.Subject != "" {
+		store.accounts[claims.Subject] = account(claims.Subject, claims.Tenant)
+	}
 	vfy := &fakeVerifier{claims: claims, err: verifyErr}
+	audit := &fakeAudit{}
 	s, err := New(&fakeStore{}, &fakeMinter{}, &allowN{n: 100},
 		func() any { return map[string]any{"keys": []any{}} }, "https://identity.test", quiet(),
-		WithProvisioning(Provisioning{Verifier: vfy, Store: store, OperatorRole: operatorRole}))
+		WithProvisioning(Provisioning{
+			Verifier: vfy, Store: store, OperatorRole: operatorRole, Audit: audit,
+		}))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
 	s.now = func() time.Time { return provNow }
-	return provFixture{s: s, store: store, vfy: vfy}
+	return provFixture{s: s, store: store, vfy: vfy, audit: audit}
 }
 
 // req issues a request with an optional bearer token and optional raw headers.
@@ -377,10 +454,18 @@ func TestProvision_HalfWiredConfigurationIsRefusedAtConstruction(t *testing.T) {
 		name string
 		p    Provisioning
 	}{
-		{"no verifier", Provisioning{Store: &fakeProvisioner{}, OperatorRole: operatorRole}},
-		{"no store", Provisioning{Verifier: &fakeVerifier{}, OperatorRole: operatorRole}},
-		{"no operator role", Provisioning{Verifier: &fakeVerifier{}, Store: &fakeProvisioner{}}},
-		{"blank operator role", Provisioning{Verifier: &fakeVerifier{}, Store: &fakeProvisioner{}, OperatorRole: "  "}},
+		{"no verifier", Provisioning{Store: &fakeProvisioner{}, OperatorRole: operatorRole, Audit: &fakeAudit{}}},
+		{"no store", Provisioning{Verifier: &fakeVerifier{}, OperatorRole: operatorRole, Audit: &fakeAudit{}}},
+		{"no operator role", Provisioning{Verifier: &fakeVerifier{}, Store: &fakeProvisioner{}, Audit: &fakeAudit{}}},
+		{"blank operator role", Provisioning{
+			Verifier: &fakeVerifier{}, Store: &fakeProvisioner{}, OperatorRole: "  ", Audit: &fakeAudit{},
+		}},
+		// #525: an account disabled by nobody-in-particular is the unattributable
+		// hand-run UPDATE these routes exist to replace. A deployment that wired
+		// the power without the record must not start.
+		{"no audit recorder", Provisioning{
+			Verifier: &fakeVerifier{}, Store: &fakeProvisioner{}, OperatorRole: operatorRole,
+		}},
 	}
 	for _, c := range cases {
 		_, err := New(&fakeStore{}, &fakeMinter{}, &allowN{n: 1},

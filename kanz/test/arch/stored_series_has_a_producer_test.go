@@ -210,25 +210,6 @@ var storedSeriesWithoutAProducerExempt = map[string]string{
 	"internal/marketdata/store.PriceKindOpen":          storedSeriesDarkPriceKind,
 	"internal/marketdata/store.PriceKindVWAP":          storedSeriesDarkPriceKind,
 	"internal/marketdata/store.PriceKindSettlement":    storedSeriesDarkPriceKind,
-	"internal/identity.StatusDisabled": "REAL FINDING, tracked under #525 — THE PLATFORM CANNOT DISABLE " +
-		"AN ACCOUNT. identity.User.Status gates authentication (user.go:47, Active() is what login " +
-		"checks), the column exists with a CHECK constraint admitting exactly 'active' and " +
-		"'disabled' (services/identity/migrations/0001_identity.sql:28,31), and the ONLY value " +
-		"anything in this module ever writes is StatusActive, from UserFromInvite (user.go:62) on " +
-		"the redeem path. identity.Postgres exposes CreateInvite, Redeem, UserBySubject, " +
-		"UpdateCredential and InvitesFor — and no method that sets status. So an offboarded trader " +
-		"or a compromised credential can only be locked out by a human running UPDATE against the " +
-		"production database by hand, which is unaudited, unreplicated to any other tenant's " +
-		"expectation, and not a control anybody can test. THE STATE IS HONOURED BUT UNREACHABLE: " +
-		"unlike the market-data cases this is not an empty series being read past, it is a " +
-		"SECURITY CONTROL WITH NO ENTRY POINT. It is exempted rather than fixed here because the " +
-		"repair is a service surface (a disable endpoint on services/identity with its own authz " +
-		"and its own audit record), not a line of code, and inventing one inside an arch guard's " +
-		"diff is the wrong place for it. AND NOTE WHAT DISABLING WOULD NOT DO: the token TTL is 8h " +
-		"(token.go:22) and the gateway validates statelessly against JWKS without reading this " +
-		"database, so a disable stops the NEXT login and not the session in flight — defensible " +
-		"for an offboarding, not for a compromised credential, which is the case this control is " +
-		"reached for. #525 carries both halves.",
 	"internal/marketdata/terms.KindBond": storedSeriesDarkTermsKind + "KindBond is the narrower " +
 		"one: it was ADDED by #518 as a doc comment with no declaration, and " +
 		"terms_kind_covers_the_oneof_test.go now proves the constant exists. THIS GUARD PROVES THE " +
