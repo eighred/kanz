@@ -37,6 +37,7 @@ import (
 	"github.com/eighred/kanz/internal/risk/engine"
 	"github.com/eighred/kanz/internal/risk/factormodel"
 	"github.com/eighred/kanz/internal/risk/ingest"
+	"github.com/eighred/kanz/internal/risk/liquiditysource"
 	"github.com/eighred/kanz/internal/risk/pricing/curve"
 	"github.com/eighred/kanz/internal/risk/pricing/livequote"
 	"github.com/eighred/kanz/internal/risk/publish"
@@ -253,6 +254,14 @@ func runEngine(ctx context.Context, cfg config.Config, readiness *server.Readine
 		fiSkipped.WithLabelValues(r).Add(0)
 	}
 
+	// THE BAR SERIES THE LIQUIDITY MEASURES READ, hoisted out of the branch below
+	// so that "a venue was named and there is no store to read it at" is a case
+	// registerLiquidityRisk can REFUSE. Left inside, that deployment would take
+	// the no-market-data path and look identical to one that never asked for
+	// liquidity at all. Nil interface, never a typed nil: only the concrete
+	// price store is ever assigned to it.
+	var barStore liquiditysource.BarStore
+
 	if cfg.MarketDataURL != "" {
 		// The SECOND pool this pod opens (the tenant-scoped state pool is below),
 		// and the estate's connection budget counts it as such — see
@@ -270,6 +279,7 @@ func runEngine(ctx context.Context, cfg config.Config, readiness *server.Readine
 		if err := priceStore.Ping(ctx); err != nil {
 			return err
 		}
+		barStore = priceStore
 		provider := returns.NewStoreReturnsProvider(priceStore, returns.ReturnsConfig{})
 		varmodel.Register(context.Background(), registry, provider, varmodel.Config{})
 		logger.Info("RISK-12/RISK-M1: historical-simulation VaR99 + ES99 + MaxDrawdown(+Amount) registered off market-data price store")
@@ -354,6 +364,16 @@ func runEngine(ctx context.Context, cfg config.Config, readiness *server.Readine
 		logger.Warn("no RISK_ENGINE_MARKETDATA_DATABASE_URL — VaR99 serves the RISK-07 1%×gross placeholder")
 	}
 
+	// THE LIQUIDITY MEASURES (#509) — the last dark compute seam. OUTSIDE the
+	// market-data branch above so an unreadable configuration is refused rather
+	// than silently taking the no-liquidity path, and NOT gated on
+	// calibrationEnabled: that gate is about the discount curve, which liquidity
+	// never touches. The wiring, the two observers and the argument for
+	// registering only one of the two measures are in liquidity.go.
+	if err := registerLiquidityRisk(context.Background(), cfg, registry, barStore, obs.Registry, logger); err != nil {
+		return err
+	}
+
 	// WHICH MEASURES THIS ENGINE ACTUALLY SERVES (#509).
 	//
 	// REPORTED HERE, the instant the registry is final, rather than beside the
@@ -366,10 +386,15 @@ func runEngine(ctx context.Context, cfg config.Config, readiness *server.Readine
 	// Passed the SAME registry the query EngineImpl uses, deliberately — a posture
 	// computed from a fresh registry would describe an engine nobody talks to.
 	//
-	// It reports EIGHT of twenty-six today. The query path drops unknown measure
-	// names, so the other eighteen are absent from successful responses rather
-	// than refused, which is indistinguishable from a portfolio that holds none of
-	// that instrument.
+	// THE COUNT IS NOT A FIXED PROPERTY OF THE BINARY — it is what the config
+	// above happens to unlock, which is exactly why the gauge exists rather than a
+	// number in a comment. It used to say "EIGHT of twenty-six" and was stale
+	// within the day: FACTOR-01c, FI-01d and LIQ-01d each added to it. A fully
+	// configured pod today serves sixteen of the twenty-six catalogued measures;
+	// one with no market-data DSN serves five. The query path DROPS the rest —
+	// engine.filterMeasures discards unknown names — so they are absent from a 200
+	// rather than refused, which is indistinguishable from a portfolio that holds
+	// none of that instrument.
 	app.MeasurePosture(obs.Registry, logger, registry)
 	// THE AI LAYER GETS ITS INPUT (AI-M1).
 	//
