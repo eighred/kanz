@@ -314,6 +314,49 @@ spec:
             # is switched on. test/arch/deny_by_default_is_visible_test.go now fails the
             # build if a fourth one arrives unlisted.
             - { name: OMS_REQUIRE_ORDER_TYPE_SUPPORT, value: "false" }
+            # MAKER-CHECKER ON ORDER SUBMISSION (#410, act three). The fifth
+            # member of the family above, and the only one that CANNOT BE SET TO
+            # TRUE TODAY — the OMS refuses to start if it is.
+            #
+            # WHY THE REFUSAL RATHER THAN AN OMISSION. Arming needs somewhere to
+            # hold an order awaiting a second signature, and whether that is a
+            # pending status on the order or a proposal that never becomes a
+            # SubmitOrder is #410's open ruling. With nowhere to put one, arming
+            # would REJECT every order at or above the threshold instead of
+            # holding it — an act that neither takes effect nor can be approved.
+            # So the OMS says that at boot and exits, rather than shipping a
+            # control that looks armed and refuses trades.
+            #
+            # THE THRESHOLD IS THE SHIPPED HALF, and it is set BELOW rather than
+            # here because it is a number and not a posture. Set it and the
+            # control is present but observing: every order is still admitted on
+            # one signature, each is classified against the threshold, and
+            # kanz_oms_order_signatures_total{signatures="single_signed",
+            # posture="at_or_above_threshold"} is how much of the LARGE order flow
+            # one person committed alone. That is the number to arm with — the
+            # same "build the control, count the gap, arm it with the list in
+            # hand" stance as the four flags above, and the same one
+            # DATAMASTER_REQUIRE_DUAL_CONTROL took on the override path (#495).
+            - { name: OMS_REQUIRE_DUAL_CONTROL, value: "false" }
+            # The notional at or above which an order would need two people, as an
+            # AMOUNT AND A CURRENCY: "1000000 USD". EMPTY BY DEFAULT, and empty
+            # means the control is ABSENT — not "zero", not "everything". Every
+            # admitted order is still counted, under posture="absent", so a
+            # deployment with no threshold is a series on a dashboard rather than
+            # a missing metric.
+            #
+            # A BARE NUMBER IS REFUSED AT STARTUP, and so is any currency other
+            # than OMS_BASE_CURRENCY. This is the estate's first money-denominated
+            # config value; there is no FX on the admission path and
+            # common.v1.Decimal carries no currency, so "1000000" against JPY
+            # notionals would be off by two orders of magnitude in the permissive
+            # direction — silently, on the control that exists to catch large
+            # orders.
+            #
+            # A MARKET or STOP order with no fresh reference mark is counted
+            # posture="unvaluable", NEVER as below the threshold. A large
+            # unvaluable bucket means the threshold cannot be trusted yet.
+            - { name: OMS_DUAL_CONTROL_MIN_NOTIONAL, value: "" }
             # WHICH PORTFOLIO MAY SPEND WHICH ACCOUNT (EXEC-M16).
             #
             #   OMS_VENUE_ACCOUNTS="tenant/portfolio@MIC=account,..."

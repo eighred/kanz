@@ -33,9 +33,19 @@
 // # What this package does NOT decide
 //
 // It does not decide WHICH acts require dual control, or above what threshold —
-// that is the policy question #410 is blocked on, and it belongs to the caller
-// and its configuration. This package answers only "is this approval valid",
-// which is the half that must not vary between the three acts.
+// that belongs to the caller and its configuration. This package answers only
+// "is this approval valid", which is the half that must not vary between the
+// three acts.
+//
+// Both halves now have an owner. The pricing override takes EVERY one (#495: "a
+// control with no threshold has nothing to calibrate"); the order path has a
+// number, because "every order takes two people" is not a workable rule, and
+// services/oms/internal/approval owns it — the threshold in gate.go and, more
+// importantly, the decision about exactly which of an order's fields the digest
+// covers. THAT SECOND HALF IS WHERE THIS PACKAGE'S GUARANTEE CAN BE HOLLOWED
+// OUT: Approve and Covers bind a signature to a digest exactly as tightly as the
+// caller's digest binds it to the payload, and a field the caller leaves out is
+// a field somebody can change after the second signature.
 package dualcontrol
 
 import (
@@ -57,10 +67,23 @@ const (
 	// the first act wired, chosen because it is one endpoint with a durable
 	// append-only trail whose actor is authenticated (#444).
 	ActPricingOverride Act = "PRICING_OVERRIDE"
-	// ActMandateChange and ActOrderSubmission are the other two acts #410 names.
-	// They are declared here so the next implementation extends this package
-	// rather than restating the rule; nothing constructs them yet.
-	ActMandateChange   Act = "MANDATE_CHANGE"
+	// ActMandateChange is a change to the mandate itself — the control that
+	// governs everything else. Wired by #511, in cmd/kanz-mandate, whose own doc
+	// records the bound on what a two-step CLI can prove: both invocations run
+	// under one operator's SVID, so a unilateral change is DETECTABLE in the trail
+	// and not PREVENTED.
+	ActMandateChange Act = "MANDATE_CHANGE"
+	// ActOrderSubmission is an order at or above a notional threshold. Wired by
+	// #410 act three, in services/oms/internal/approval, which owns the two halves
+	// this package deliberately does not: which orders are large enough
+	// (OMS_DUAL_CONTROL_MIN_NOTIONAL) and exactly which of an order's fields the
+	// digest covers.
+	//
+	// ALL THREE ARE NOW CONSTRUCTED. An earlier version of this comment said
+	// "nothing constructs them yet", which is what the declarations were for — a
+	// third implementation extending this package rather than restating the rule.
+	// That worked; the note is kept because it is the argument for why a fourth
+	// act belongs here too.
 	ActOrderSubmission Act = "ORDER_SUBMISSION"
 )
 
