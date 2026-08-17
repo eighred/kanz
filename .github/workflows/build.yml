@@ -220,12 +220,59 @@ jobs:
           go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.11
           go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@v1.5.1
           echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+      # GO-ONLY GENERATION TEMPLATE, AND IT IS NOT AN OPTIMISATION.
+      #
+      # The full buf.gen.yaml lists four REMOTE plugins — protocolbuffers/python,
+      # protocolbuffers/pyi, grpc/python and bufbuild/es — which execute on the
+      # Buf Schema Registry rather than locally. This job is a matrix of ~25
+      # images that all run in parallel, so a plain `buf generate` fires roughly
+      # a hundred BSR plugin executions in one burst, unauthenticated. The BSR
+      # rate-limits that, and the job that loses answers:
+      #
+      #   Failure: permission_denied: 403 Forbidden
+      #   plugin protoc-gen-go: signal: killed
+      #
+      # It killed `image (kanz-provisioner)` on main at 143117b while the other
+      # 24 images passed — which is what a rate limit looks like, and why it
+      # reads as a flake nobody can reproduce.
+      #
+      # NONE OF IT WAS EVER USED HERE. The image build COPYs kanz-schemas/gen/go
+      # and nothing else; gen/python and gen/ts are consumed by the SDK-release
+      # path, not by any Dockerfile in this matrix (kanz-py's own Dockerfile
+      # copies the raw protos). So this generated three languages, discarded two,
+      # and took a network dependency on a registry to do it.
+      #
+      # MANAGED MODE IS CARRIED OVER DELIBERATELY: the .proto files declare no
+      # `option go_package`, so dropping the managed block would emit Go with no
+      # package path and fail to compile. The prefix must stay in step with
+      # buf.gen.yaml.
+      #
+      # Verified byte-identical: 53 generated .go files, same sha1 over the tree,
+      # before and after.
+      #
+      # This mirrors the TS-only template kanz-ci.yml already uses for the same
+      # reason in the other direction — that one avoids needing the Go plugins.
       - name: Generate kanz-schemas Go SDK
         working-directory: kanz-schemas
         env:
           GOFLAGS: -mod=mod
         run: |
-          buf generate
+          cat > /tmp/buf.gen.go.yaml <<'EOF'
+          version: v2
+          managed:
+            enabled: true
+            override:
+              - file_option: go_package_prefix
+                value: github.com/eighred/kanz/kanz-schemas-go
+          plugins:
+            - local: protoc-gen-go
+              out: gen/go
+              opt: paths=source_relative
+            - local: protoc-gen-go-grpc
+              out: gen/go
+              opt: paths=source_relative
+          EOF
+          buf generate --template /tmp/buf.gen.go.yaml
           cd gen/go
           go mod init github.com/eighred/kanz/kanz-schemas-go || true
           go mod tidy
