@@ -13,6 +13,10 @@ import (
 	"github.com/eighred/kanz/internal/version"
 	"github.com/eighred/kanz/pkg/observability"
 	"github.com/eighred/kanz/services/api-gateway/internal/config"
+	"google.golang.org/grpc"
+
+	orderpb "github.com/eighred/kanz/kanz-schemas-go/order/v1"
+
 	"github.com/eighred/kanz/services/api-gateway/internal/gateway"
 	"github.com/eighred/kanz/services/api-gateway/internal/middleware"
 	"github.com/eighred/kanz/services/api-gateway/internal/orders"
@@ -39,6 +43,14 @@ const (
 // deployment that names approveRole and a caller holding callerRoles.
 func approveRouterFor(t *testing.T, approveRole string, callerRoles ...string) (http.Handler, *recordingBackend) {
 	t.Helper()
+	return approveRouterWith(t, approveRole, nil, callerRoles...)
+}
+
+// approveRouterWith is the same router with an explicit OMS read client, because
+// the pending-approvals queue is conditional on that client as well as the role
+// and the two conditions fail differently.
+func approveRouterWith(t *testing.T, approveRole string, ordersRead orderpb.OrderQueryServiceClient, callerRoles ...string) (http.Handler, *recordingBackend) {
+	t.Helper()
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	obs, err := observability.New(context.Background(), observability.Config{
 		ServiceName: "api-gateway-test", ServiceVersion: version.String(), SampleRatio: 1,
@@ -56,7 +68,7 @@ func approveRouterFor(t *testing.T, approveRole string, callerRoles ...string) (
 	be := &recordingBackend{}
 	var ready atomic.Bool
 	router, err := buildRouter(cfg,
-		gateway.New(nil, nil, nil, cfg.ApproveRole, logger),
+		gateway.New(nil, ordersRead, nil, cfg.ApproveRole, logger),
 		orders.New(nil, cfg.ApproveRole),
 		proxy.New(be, proxy.Roles{Fund: cfg.FundRole, Approve: cfg.ApproveRole}),
 		nil, // no control plane
@@ -146,4 +158,87 @@ func TestWithNoApproverNamedTheOverrideRoutesAreAbsent(t *testing.T) {
 	if be.called {
 		t.Error("an unconfigured deployment forwarded to datamaster")
 	}
+}
+
+// THE QUEUE THE SIGNATURE IS USELESS WITHOUT, AT THE SAME LAYER (#539).
+//
+// The four cases above cover the override half of act one. The order half has a
+// fifth route and it does NOT behave like the other four: it is conditional on
+// the OMS read client as well as the role, so it has a failure mode none of them
+// has — a deployment that names an approver and mounts nothing.
+//
+// That is not hypothetical. It is what dev/docker-compose.yml did when I armed
+// API_GATEWAY_APPROVE_ROLE there, and the composition root logged "override
+// surface fronted" while every dual-control route answered 404. These cases are
+// at this layer for the reason this file's own doc gives: buildRouter is the map
+// that decides, and a package-level test builds its own.
+
+const pendingQueuePath = "/v1/orders/pending-approvals"
+
+func pendingGET(router http.Handler) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(http.MethodGet, pendingQueuePath, nil)
+	req.Header.Set("Authorization", "Bearer a-token")
+	rr := httptest.NewRecorder()
+	router.ServeHTTP(rr, req)
+	return rr
+}
+
+// AN APPROVER REACHES THE QUEUE, AND THE OMS IS ACTUALLY ASKED. Reaching a route
+// that answers from nothing would certify an empty queue for a book full of held
+// orders, which is the failure mode the OMS double's own comment warned about.
+func TestAnApproverReachesThePendingApprovalsQueue(t *testing.T) {
+	oms := &recordingOrders{}
+	router, _ := approveRouterWith(t, approverRole, oms, baselineRole, approverRole)
+
+	rr := pendingGET(router)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("the approver was refused the queue: status = %d, want 200 (%s)", rr.Code, rr.Body.String())
+	}
+	if !oms.called {
+		t.Error("the OMS was never asked — the route answered from nothing, so this proves " +
+			"nothing about the grant")
+	}
+}
+
+// A TRADER CANNOT READ IT. The queue names the proposer of every unsigned order
+// awaiting a second signature, and it is the surface somebody signs from rather
+// than a report.
+func TestATraderCannotReadThePendingApprovalsQueue(t *testing.T) {
+	oms := &recordingOrders{}
+	router, _ := approveRouterWith(t, approverRole, oms, baselineRole, traderRole)
+
+	if rr := pendingGET(router); rr.Code != http.StatusForbidden {
+		t.Fatalf("a trade token read the approval queue: status = %d, want 403", rr.Code)
+	}
+	if oms.called {
+		t.Error("the request reached the OMS — the capability check did not stop it")
+	}
+}
+
+// AN APPROVER OVER NO OMS GETS 404, AND THIS IS THE CASE THE OTHER FOUR CANNOT
+// HAVE. The override routes are conditional on the role alone; this one needs
+// API_GATEWAY_OMS_READ_ADDR too. A deployment can therefore satisfy every
+// assertion above, grant the role to a real person, and still leave them with a
+// signing route and no way to discover what to sign — the approve route refuses
+// an empty digest with 400.
+func TestAnApproverWithNoOMSReadSurfaceGetsNoQueue(t *testing.T) {
+	router, _ := approveRouterWith(t, approverRole, nil, baselineRole, approverRole)
+
+	if rr := pendingGET(router); rr.Code != http.StatusNotFound {
+		t.Fatalf("with no OMS read surface the queue answered %d, want 404.\n"+
+			"403 would be the #535 shape again and 200 would be worse: an empty queue is "+
+			"indistinguishable from nothing awaiting a signature.", rr.Code)
+	}
+}
+
+// recordingOrders answers the queue and records that it was asked.
+type recordingOrders struct {
+	orderpb.OrderQueryServiceClient
+	called bool
+}
+
+func (r *recordingOrders) ListPendingApprovals(ctx context.Context, in *orderpb.ListPendingApprovalsRequest, _ ...grpc.CallOption) (*orderpb.ListPendingApprovalsResponse, error) {
+	r.called = true
+	return &orderpb.ListPendingApprovalsResponse{OwnerTenant: fundingTenant}, nil
 }
