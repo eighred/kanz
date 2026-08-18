@@ -110,7 +110,7 @@ func TestEndToEnd_AskForwardedAndCrossTenantDenied(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	h := New(NewMeshBackend(map[Service]string{ServiceCopilot: upstream.URL}, upstream.Client()))
+	h := New(NewMeshBackend(map[Service]string{ServiceCopilot: upstream.URL}, upstream.Client()), "")
 	mux := testMux()
 	h.Routes(mux)
 

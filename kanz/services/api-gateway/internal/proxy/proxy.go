@@ -131,11 +131,21 @@ type Backend interface {
 // mirroring the orders write surface.
 type Handler struct {
 	backend Backend
+	// fundRole is the role the deployment has named as its funder
+	// (API_GATEWAY_FUND_ROLE). EMPTY ⇒ the cash-movement route is not registered.
+	//
+	// A ROLE STRING RATHER THAN A BOOL, so the composition root passes cfg.FundRole
+	// and nothing has to restate the condition. This package does not authorize —
+	// authz.Mux does — but it is where the route is registered, and REGISTRATION is
+	// the decision: see Routes.
+	fundRole string
 }
 
 // New returns a proxy handler over the backend. A nil backend disables the
-// routes.
-func New(backend Backend) *Handler { return &Handler{backend: backend} }
+// routes; an empty fundRole leaves the cash-movement route unregistered (#535).
+func New(backend Backend, fundRole string) *Handler {
+	return &Handler{backend: backend, fundRole: fundRole}
+}
 
 // Routes registers the Phase-7 read endpoints. They are 1:1 with the upstream
 // service routes, so no path rewriting is needed — the gateway path IS the
@@ -195,8 +205,25 @@ func (h *Handler) Routes(mux *authz.Mux) {
 	// r.PathValue straight to the store — so fronting it here would have turned a
 	// pod-to-pod gap into an internet-reachable one. The ownership gate lives
 	// upstream, exactly as it does for the wealth and datamaster routes above.
-	mux.Handle(authz.Fund, "POST /v1/portfolios/{id}/cash-movements",
-		h.handle(ServiceAccounting, true, nil))
+	//
+	// REGISTERED ONLY WHEN A FUNDER IS NAMED (#535), AND THAT IS THE ONE ROUTE ON
+	// THIS HANDLER THAT IS CONDITIONAL. authz.Fund is carried by no role unless
+	// API_GATEWAY_FUND_ROLE names one, and a route whose capability nobody holds
+	// answers 403 to every principal that exists — "you may not", when the truth is
+	// "nobody may, in this deployment". That is indistinguishable from a control
+	// working as intended, which is how it survived from #415 to #535 unnoticed.
+	// Unregistered, the answer is 404: there is no cash-movement surface here, and
+	// that is true. Same stance as the /v1/control routes at the composition root
+	// and as identity's provisioning surface.
+	//
+	// NOT GATED ON THE BACKEND, deliberately — a configured funder with no
+	// accounting upstream still gets 503 from h.handle like every other route here,
+	// because "the surface is disabled" and "you are not the funder" are different
+	// answers and both are better than a 403 nobody can act on.
+	if h.fundRole != "" {
+		mux.Handle(authz.Fund, "POST /v1/portfolios/{id}/cash-movements",
+			h.handle(ServiceAccounting, true, nil))
+	}
 
 	// PORTFOLIO CONSTRUCTION (#409). The optimization service authenticates
 	// NOBODY, and it takes the issuer of a materialized order from its request

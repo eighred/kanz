@@ -48,7 +48,7 @@ func authed(req *http.Request, sub, tenant string) *http.Request {
 }
 
 func TestRoutes_NilBackend_503(t *testing.T) {
-	h := New(nil)
+	h := New(nil, "")
 	mux := testMux()
 	h.Routes(mux)
 	for _, tc := range []struct {
@@ -75,7 +75,7 @@ func TestRoutes_NilBackend_503(t *testing.T) {
 // with nobody attached to it either.
 func TestAsk_Unauthenticated_401(t *testing.T) {
 	be := &fakeBackend{resp: Response{Status: 200, Body: []byte(`{"answer":"x"}`)}}
-	h := New(be)
+	h := New(be, "")
 	rr := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/v1/ask", strings.NewReader(`{"question":"q"}`))
 	h.handle(ServiceCopilot, true, nil)(rr, req) // no principal on ctx
@@ -89,7 +89,7 @@ func TestAsk_Unauthenticated_401(t *testing.T) {
 
 func TestAsk_ForwardsPrincipalAndBody(t *testing.T) {
 	be := &fakeBackend{resp: Response{Status: 200, ContentType: "application/json", Body: []byte(`{"answer":"42"}`)}}
-	h := New(be)
+	h := New(be, "")
 	mux := testMux()
 	h.Routes(mux)
 	rr := httptest.NewRecorder()
@@ -114,7 +114,7 @@ func TestAsk_ForwardsPrincipalAndBody(t *testing.T) {
 
 func TestRead_ForwardsToDataMaster(t *testing.T) {
 	be := &fakeBackend{resp: Response{Status: 200, Body: []byte(`[]`)}}
-	h := New(be)
+	h := New(be, "")
 	mux := testMux()
 	h.Routes(mux)
 	rr := httptest.NewRecorder()
@@ -136,7 +136,7 @@ func TestRead_ForwardsToDataMaster(t *testing.T) {
 
 func TestForward_BackendUnavailable_503(t *testing.T) {
 	be := &fakeBackend{err: ErrBackendUnavailable}
-	h := New(be)
+	h := New(be, "")
 	mux := testMux()
 	h.Routes(mux)
 	rr := httptest.NewRecorder()
@@ -149,7 +149,7 @@ func TestForward_BackendUnavailable_503(t *testing.T) {
 
 func TestForward_UpstreamFault_502(t *testing.T) {
 	be := &fakeBackend{err: context.DeadlineExceeded}
-	h := New(be)
+	h := New(be, "")
 	mux := testMux()
 	h.Routes(mux)
 	rr := httptest.NewRecorder()
@@ -189,7 +189,7 @@ func TestForward_EveryRouteIsBounded(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			be := &fakeBackend{resp: Response{Status: 200, Body: []byte(`{}`)}}
 			mux := testMux()
-			New(be).Routes(mux)
+			New(be, "").Routes(mux)
 
 			var body *strings.Reader
 			if tc.body != "" {
@@ -255,7 +255,7 @@ func TestForward_ClientHangupCancelsTheUpstreamCall(t *testing.T) {
 		},
 	}
 	mux := testMux()
-	New(be).Routes(mux)
+	New(be, "").Routes(mux)
 
 	req := authed(httptest.NewRequest(http.MethodGet, "/v1/households/h1", nil).WithContext(ctx), "u1", "t1")
 	mux.ServeHTTP(httptest.NewRecorder(), req)
@@ -281,7 +281,7 @@ func TestForward_ClientHangupCancelsTheUpstreamCall(t *testing.T) {
 func TestBroker_AnonymousIsRefused(t *testing.T) {
 	be := &fakeBackend{resp: Response{Status: 200, Body: []byte(`{"positions":[]}`)}}
 	mux := testMux()
-	New(be).Routes(mux)
+	New(be, "").Routes(mux)
 
 	for _, path := range []string{
 		"/v1/broker/accounts",
@@ -313,7 +313,7 @@ func TestBroker_ForwardsToTVSyncWithTheStrippedPathAndThePrincipal(t *testing.T)
 	be := &fakeBackend{resp: Response{Status: 200, ContentType: "application/json",
 		Body: []byte(`{"positions":[{"instrument":"BTC-USD","qty":"1"}]}`)}}
 	mux := testMux()
-	New(be).Routes(mux)
+	New(be, "").Routes(mux)
 
 	rr := httptest.NewRecorder()
 	req := authed(httptest.NewRequest(http.MethodGet, "/v1/broker/accounts/fund-alpha/positions", nil), "alice", "acme")

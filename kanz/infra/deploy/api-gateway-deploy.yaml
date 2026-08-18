@@ -186,6 +186,27 @@ spec:
             # whatever tenant the principal header names, so a direct route to it would
             # let any caller read any tenant's book. Empty ⇒ those routes 503.
             - { name: API_GATEWAY_TV_SYNC_ADDR, value: "http://tv-sync.kanz-services.svc:8091" }
+            # WHO MAY MOVE THE FUND'S OWN CAPITAL (#535). NEITHER KEY IS SET HERE, AND
+            # THAT IS THE POSTURE — recorded rather than merely omitted, because a
+            # control nobody can find in the manifest is a control nobody knows exists.
+            #
+            #   API_GATEWAY_ACCOUNTING_ADDR  the book of record (accounting-deploy.yaml,
+            #                                allow-gateway-to-accounting in
+            #                                infra/security/runtime/network-policies.yaml)
+            #   API_GATEWAY_FUND_ROLE        the role carrying authz.Fund
+            #
+            # A PAIR, like the operator plane above. With the ROLE unset, POST
+            # /v1/portfolios/{id}/cash-movements is NOT REGISTERED and this gateway
+            # answers 404 — "there is no cash-movement surface here", which is true. With
+            # the ADDRESS set the role becomes REQUIRED and the gateway refuses to start
+            # without it, so the funding surface can never be exposed with nobody able to
+            # reach it. That third state is what #535 found: the route registered,
+            # authz.Fund carried by no role, and a 403 to every principal that exists —
+            # indistinguishable from a control working exactly as intended.
+            #
+            # The role must DIFFER from all three above, and the trade one is the point:
+            # the person who can move money is never the person who trades it. One
+            # credential holding both can bring the fund's cash in and spend it.
             # PER POD, not platform-wide. See THE SCALE INVARIANT above.
             - { name: API_GATEWAY_RATE_LIMIT_PER_SEC, value: "50" }
             - { name: API_GATEWAY_RATE_LIMIT_BURST, value: "100" }
