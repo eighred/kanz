@@ -131,20 +131,35 @@ type Backend interface {
 // mirroring the orders write surface.
 type Handler struct {
 	backend Backend
-	// fundRole is the role the deployment has named as its funder
-	// (API_GATEWAY_FUND_ROLE). EMPTY ⇒ the cash-movement route is not registered.
-	//
-	// A ROLE STRING RATHER THAN A BOOL, so the composition root passes cfg.FundRole
-	// and nothing has to restate the condition. This package does not authorize —
-	// authz.Mux does — but it is where the route is registered, and REGISTRATION is
-	// the decision: see Routes.
-	fundRole string
+	roles   Roles
+}
+
+// Roles names the deployment's holders of the capabilities that are OPTIONAL —
+// the ones whose routes are registered only when somebody can actually hold them.
+//
+// A STRUCT RATHER THAN POSITIONAL STRINGS. There are two of these now and #410's
+// remaining acts will add a third; New(backend, "", "compliance") and
+// New(backend, "compliance", "") differ by one argument position, are both valid
+// Go, and produce a silent capability outage of exactly the #535 kind. A field
+// name cannot be transposed.
+//
+// ROLE STRINGS RATHER THAN BOOLS, so the composition root passes what config
+// already holds and nothing has to restate the condition. This package does not
+// authorize — authz.Mux does — but it is where the route is registered, and
+// REGISTRATION is the decision: see Routes.
+type Roles struct {
+	// Fund is the deployment's funder (API_GATEWAY_FUND_ROLE). EMPTY ⇒ the
+	// cash-movement route is not registered.
+	Fund string
+	// Approve is the deployment's approver (API_GATEWAY_APPROVE_ROLE). EMPTY ⇒ the
+	// three override routes are not registered (#539).
+	Approve string
 }
 
 // New returns a proxy handler over the backend. A nil backend disables the
-// routes; an empty fundRole leaves the cash-movement route unregistered (#535).
-func New(backend Backend, fundRole string) *Handler {
-	return &Handler{backend: backend, fundRole: fundRole}
+// routes; an empty role in Roles leaves that role's routes unregistered (#535).
+func New(backend Backend, roles Roles) *Handler {
+	return &Handler{backend: backend, roles: roles}
 }
 
 // Routes registers the Phase-7 read endpoints. They are 1:1 with the upstream
@@ -220,9 +235,52 @@ func (h *Handler) Routes(mux *authz.Mux) {
 	// accounting upstream still gets 503 from h.handle like every other route here,
 	// because "the surface is disabled" and "you are not the funder" are different
 	// answers and both are better than a 403 nobody can act on.
-	if h.fundRole != "" {
+	if h.roles.Fund != "" {
 		mux.Handle(authz.Fund, "POST /v1/portfolios/{id}/cash-movements",
 			h.handle(ServiceAccounting, true, nil))
+	}
+
+	// THE SECOND SIGNATURE, AND THE DOOR IT NEEDED (#539, #410 act one).
+	//
+	// datamaster has carried a complete maker-checker workflow since #495/#498:
+	// propose an override, sign it as a different person, list what is pending. The
+	// gateway routed none of it, and under network-policies.yaml the gateway is
+	// datamaster's ONLY permitted caller — so the control was reachable by nobody.
+	// An override could not be proposed at all, armed or unarmed, and #444's
+	// forged-actor fix guarded a surface nothing could touch. These three routes
+	// are that repair; without them the whole path is ceremony.
+	//
+	// requirePrincipal is TRUE on all three. datamaster takes the actor off
+	// X-Kanz-Principal-Subject and refuses a body naming anyone else (#444), and
+	// takes the tenant off the same header to decide whether the exception is even
+	// visible. An anonymous forward is an override signed by nobody — the exact
+	// defect #444 fixed, arriving by the route that fix assumed was closed.
+	//
+	// THE PENDING QUEUE IS NOT authz.Read, and that is a deliberate refusal of the
+	// obvious filing. Listing what awaits a signature looks like a report, but it
+	// names the proposer of every unsigned change to the marks the book is valued
+	// at, and it is the working surface an approver acts from rather than a view of
+	// settled state. A read token that can see the queue but not sign it is a
+	// half-open control, and the half that leaks is the interesting one.
+	//
+	// FOUR-EYES IS NOT ENFORCED HERE. The approver must differ from the proposer;
+	// datamaster compares authenticated subjects, normalised for case and
+	// surrounding space, and owns that rule with the tests that prove it. Restating
+	// it at the edge would be the second implementation this repository keeps
+	// paying for — 17 services each had their own secret() and 15 were wrong.
+	//
+	// REGISTERED ONLY WHEN AN APPROVER IS NAMED, for the reason spelled out on the
+	// funding route above: authz.Approve is carried by no role unless
+	// API_GATEWAY_APPROVE_ROLE names one, and a route whose capability nobody holds
+	// answers 403 to every principal that exists. 404 is the true answer, and it is
+	// the one an operator can act on.
+	if h.roles.Approve != "" {
+		mux.Handle(authz.Approve, "POST /v1/exceptions/{id}/override",
+			h.handle(ServiceDataMaster, true, nil))
+		mux.Handle(authz.Approve, "POST /v1/exceptions/{id}/override/approve",
+			h.handle(ServiceDataMaster, true, nil))
+		mux.Handle(authz.Approve, "GET /v1/exceptions/pending-overrides",
+			h.handle(ServiceDataMaster, true, nil))
 	}
 
 	// PORTFOLIO CONSTRUCTION (#409). The optimization service authenticates

@@ -77,6 +77,40 @@ const (
 	//
 	// NOT Read, obviously: reading the ledger is Read, and this writes it.
 	Fund Capability = "fund"
+	// Approve: GIVE THE SECOND SIGNATURE. Sign off an act another person proposed — today a
+	// pricing/compliance override (#410 act one), and by design the order and mandate
+	// approvals that follow (#539).
+	//
+	// A FIFTH, AND THE BAR SET ON Operate AND Fund APPLIES UNCHANGED: is this a DIFFERENT
+	// authority, in BOTH directions, from every capability already here? It is, and the
+	// argument is stronger than for any of the four, because separation is not a
+	// consequence of this capability — it is the ENTIRE CONTENT of it. A second signature
+	// from someone who already held the authority to act alone is not a control; it is the
+	// same authority spelled twice, and it reads as four-eyes in exactly the record an
+	// auditor would check.
+	//
+	// NOT Trade, AND THIS IS THE ONE THAT MATTERS. Collapsing Approve into Trade hands
+	// every trader the second signature on every other trader's proposal. The workflow
+	// still refuses SELF-approval — datamaster compares authenticated subjects — so the
+	// trail would show two distinct people and the control would be satisfied by any two
+	// traders on the same desk. That is the failure mode maker-checker exists to prevent,
+	// arriving through the capability layer rather than the identity one.
+	//
+	// NOT Fund, AND NOT Operate. Both move something real — the fund's cash, the estate's
+	// nodes and venue credentials. Approve moves nothing on its own: it releases an act
+	// somebody else already composed and bound to a digest. Granting it to a funder or an
+	// SRE because they are "senior" is how it would drift into a seniority badge, which is
+	// the one thing it must never be.
+	//
+	// NOT Read, obviously: reading what is pending is a report, and this decides it.
+	//
+	// WHY A CAPABILITY AND NOT JUST internal/dualcontrol. dualcontrol answers "is this
+	// approval valid" — the approver differs from the proposer, the signature covers the
+	// payload, the proposal has not expired. It cannot answer "may this person be an
+	// approver at all", because it never sees a role. That question is authorization, it
+	// belongs at the gateway with the other four, and without it every authenticated
+	// subject in the tenant is a candidate signatory.
+	Approve Capability = "approve"
 )
 
 // Grants is the role → capabilities policy: what a principal's roles entitle them to do.
