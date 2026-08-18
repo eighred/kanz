@@ -30,9 +30,10 @@ import (
 // Order command subjects (mirror services/oms/internal/order; kept local so the
 // gateway does not depend on the OMS service package).
 const (
-	subjectSubmit = "order.order.submit"
-	subjectCancel = "order.order.cancel"
-	domain        = "order"
+	subjectSubmit  = "order.order.submit"
+	subjectCancel  = "order.order.cancel"
+	subjectApprove = "order.order.approve"
+	domain         = "order"
 )
 
 const maxBodyBytes = 1 << 20 // 1 MiB
@@ -42,27 +43,55 @@ type Publisher interface {
 	Publish(ctx context.Context, e bus.Event) error
 }
 
-// Handler serves POST /v1/orders and /v1/orders/{id}/cancel. A nil publisher
-// means writes are disabled (the gateway runs read-only) — the routes 503.
+// Handler serves POST /v1/orders, /v1/orders/{id}/cancel and — when the
+// deployment names an approver — /v1/orders/{id}/approve. A nil publisher means
+// writes are disabled (the gateway runs read-only) — the routes 503.
 type Handler struct {
-	pub       Publisher
-	unmarshal protojson.UnmarshalOptions
+	pub Publisher
+	// approveRole is the deployment's approver (API_GATEWAY_APPROVE_ROLE). EMPTY ⇒
+	// the approve route is not registered (#535); see Routes for why that is not
+	// the same as registering it and refusing everyone.
+	//
+	// A ROLE STRING RATHER THAN A BOOL, so the composition root passes what config
+	// already holds and nothing has to restate the condition — the same shape as
+	// proxy.Roles, which fronts the other half of this control.
+	approveRole string
+	unmarshal   protojson.UnmarshalOptions
 }
 
 // New returns a write handler over the publisher. A nil publisher disables the
-// write routes.
-func New(pub Publisher) *Handler {
-	return &Handler{pub: pub, unmarshal: protojson.UnmarshalOptions{DiscardUnknown: true}}
+// write routes; an empty approveRole leaves the approve route unregistered.
+func New(pub Publisher, approveRole string) *Handler {
+	return &Handler{pub: pub, approveRole: approveRole, unmarshal: protojson.UnmarshalOptions{DiscardUnknown: true}}
 }
 
 // Routes registers the write endpoints.
 //
 // THIS IS THE CAPITAL PATH. Every route here reaches a live exchange, so every route here
-// requires Trade (SEC-M2) — and an arch test asserts that property over WHATEVER this
-// package registers, so a route added tomorrow is covered the moment it exists.
+// requires an authority that moves capital — and an arch test asserts that property over
+// WHATEVER this package registers, so a route added tomorrow is covered the moment it exists.
+//
+// TWO AUTHORITIES, HELD BY DIFFERENT PEOPLE (#539, #410). Submit and cancel require Trade.
+// Approve requires authz.Approve and MUST NOT accept Trade: it is the second signature that
+// releases an order the OMS held for exceeding the dual-control threshold, and a signature
+// the proposer can give themselves is one signature recorded as two.
+//
+// THE APPROVE ROUTE IS REGISTERED ONLY WHEN AN APPROVER IS NAMED (#535). authz.Approve is
+// carried by no role unless API_GATEWAY_APPROVE_ROLE names one, and a route whose capability
+// nobody holds answers 403 to every principal that exists — "you may not", when the truth is
+// "nobody may, in this deployment". That is indistinguishable from a control working as
+// intended, which is how the funding route survived from #415 to #535 unnoticed. Unregistered,
+// the answer is 404: there is no approval surface here, and that is both true and actionable.
+//
+// NOT GATED ON THE PUBLISHER, deliberately — a configured approver on a read-only gateway
+// still gets 503 from publish like the other two routes, because "writes are disabled" and
+// "you are not the approver" are different answers and both beat a 403 nobody can act on.
 func (h *Handler) Routes(mux *authz.Mux) {
 	mux.Handle(authz.Trade, "POST /v1/orders", h.submit)
 	mux.Handle(authz.Trade, "POST /v1/orders/{id}/cancel", h.cancel)
+	if h.approveRole != "" {
+		mux.Handle(authz.Approve, "POST /v1/orders/{id}/approve", h.approve)
+	}
 }
 
 func (h *Handler) submit(w http.ResponseWriter, r *http.Request) {
@@ -116,6 +145,53 @@ func (h *Handler) cancel(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusAccepted, map[string]string{"order_id": orderID, "status": "cancel_requested"})
+}
+
+// approve is the SECOND SIGNATURE on an order the OMS is holding (#539, #410).
+// The OMS holds anything over the dual-control threshold until an ApproveOrder
+// arrives; the gateway is its only permitted caller under network-policies.yaml,
+// so until this route existed a held order was held by nobody's decision forever
+// — a control that from the outside is indistinguishable from an outage.
+func (h *Handler) approve(w http.ResponseWriter, r *http.Request) {
+	p, ok := h.principal(w, r)
+	if !ok {
+		return
+	}
+	body, err := io.ReadAll(io.LimitReader(r.Body, maxBodyBytes))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "read body failed")
+		return
+	}
+	var cmd orderpb.ApproveOrder
+	if err := h.unmarshal.Unmarshal(body, &cmd); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid approval body: "+err.Error())
+		return
+	}
+	// AN APPROVAL WITH NO DIGEST SIGNS NOTHING. The digest is the value the
+	// signature covers; without it the stored command could change between the
+	// proposal and the release — propose a defensible order, collect the
+	// approval, apply a different one. The OMS re-derives the digest and is the
+	// authority on whether it MATCHES; this is the shape check, refused here
+	// only because a 202 followed by a silent bus-side rejection is exactly the
+	// "looks healthy" failure this platform does not ship.
+	if cmd.GetDigest() == "" {
+		writeError(w, http.StatusBadRequest,
+			"an approval must carry the digest of the command it releases, or it signs nothing")
+		return
+	}
+	// THE PATH AND THE PRINCIPAL WIN OVER THE BODY. A caller-supplied order id
+	// approves somebody else's order and a caller-supplied issuer is one person
+	// signing as two — dual control over a forgeable identity is theatre, which
+	// is the forged-actor defect #444 closed on the override path.
+	orderID := r.PathValue("id")
+	cmd.OrderId = orderID
+	cmd.Metadata = bindMetadata(cmd.GetMetadata(), p, orderID)
+
+	if err := h.publish(r.Context(), p, subjectApprove, orderID, &cmd, idempotencyKey(r, orderID)); err != nil {
+		writePublishError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusAccepted, map[string]string{"order_id": orderID, "status": "approval_submitted"})
 }
 
 // publish stamps the command envelope and hands it to the producer, with the

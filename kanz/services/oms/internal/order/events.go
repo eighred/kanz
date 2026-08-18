@@ -17,14 +17,19 @@ import (
 )
 
 // Subjects follow the {domain}.{entity}.{event_type} taxonomy. Commands are
-// consumed on the .submit/.amend/.cancel subjects; the OMS publishes the
-// lifecycle FACTs and the universal command outcome on the rest.
+// consumed on the .submit/.amend/.cancel/.approve subjects; the OMS publishes
+// the lifecycle FACTs and the universal command outcome on the rest.
 const (
 	Domain = "order"
 
 	SubjectSubmit = "order.order.submit"
 	SubjectAmend  = "order.order.amend"
 	SubjectCancel = "order.order.cancel"
+	// SubjectApprove carries the SECOND SIGNATURE on a held order (#539). It is
+	// a command like the three above and not a query, because approving CAUSES
+	// AN ADMISSION — it re-enters the same path a submission takes, with the
+	// compliance gate, the venue checks and the outbox all still in front of it.
+	SubjectApprove = "order.order.approve"
 
 	EventTypeAccepted = "order.order.accepted"
 	EventTypeRejected = "order.order.rejected"

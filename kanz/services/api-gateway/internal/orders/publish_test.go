@@ -102,7 +102,7 @@ func submitBody(issuer string) []byte {
 // which is the only version of the claim that says anything about production.
 func TestSubmitOverridesAForgedIssuerOnTheWire(t *testing.T) {
 	prod, cc := realProducer(t)
-	h := New(prod)
+	h := New(prod, "")
 	mux := testMux()
 	h.Routes(mux)
 

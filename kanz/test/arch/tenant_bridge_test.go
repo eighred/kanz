@@ -55,7 +55,13 @@ var nonTenantAccounts = map[string]bool{"SYS": true, "__system__": true}
 // rather than derived, because the SET is a deliberate scope decision (#358):
 // only the order write path has moved. When a second domain is bridged, this
 // list and the exports in tenancy.yaml move together or this guard fails.
-var bridgedSubjects = []string{"order.order.submit", "order.order.cancel"}
+//
+// order.order.approve joined them with #539. It is the same write path — the
+// SECOND SIGNATURE that releases a held order — and a tenant that could submit
+// across the bridge but not approve would have every large order stick.
+// Deliberately still no order.order.amend: the gateway does not publish it, so
+// bridging it would open a path nothing uses.
+var bridgedSubjects = []string{"order.order.submit", "order.order.cancel", "order.order.approve"}
 
 func tenancyText(t *testing.T) string {
 	t.Helper()

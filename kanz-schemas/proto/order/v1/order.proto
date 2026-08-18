@@ -207,6 +207,55 @@ message CancelOrder {
   string order_id = 2;
 }
 
+// ApproveOrder gives the SECOND SIGNATURE on an order the OMS is holding
+// (#539, #410 act three).
+//
+// An order at or above OMS_DUAL_CONTROL_MIN_NOTIONAL with the control armed is
+// written to order_proposals and NOT admitted. It becomes a live order the
+// moment a DIFFERENT authenticated subject approves it — under the SAME
+// order_id, with the ORDER_ACCEPTED that follows. This is that command.
+//
+// # Why a command and not an RPC on OrderQueryService
+//
+// Approving CAUSES A SUBMISSION. order_query.proto says it plainly: a gRPC
+// surface that could cause one would be "a second door into the capital path
+// with none of the admission gate, the compliance gate or the outbox behind
+// it". So the approval arrives on the bus beside submit, amend and cancel, and
+// re-enters the one admission path every order comes into existence through.
+//
+// # Why it is NOT a field on SubmitOrder
+//
+// The approval is a different command with its own metadata, and necessarily a
+// different issuer — the approver is by definition not the proposer. The order
+// digest deliberately excludes metadata for exactly this reason: hashing it
+// would make EVERY approval fail as a payload change.
+message ApproveOrder {
+  // metadata is the command-common envelope. metadata.target_id MUST equal
+  // order_id. Required.
+  //
+  // ITS ISSUER IS THE APPROVER, bound by the api-gateway from the
+  // authenticated principal and never self-asserted — the forged-actor defect
+  // #444 fixed on the override path arrived by exactly that route. Dual
+  // control over a forgeable identity is theatre: one person would propose as
+  // alice and approve as bob without ever holding a second credential.
+  command.v1.CommandMetadata metadata = 1;
+
+  // order_id identifies the held order this approval releases. Required.
+  string order_id = 2;
+
+  // digest is the value this signature COVERS — approval.Terms.Digest over the
+  // proposed command, carried on OrderPendingApproval and re-derived by the
+  // approver's client rather than trusted from it.
+  //
+  // IT IS REQUIRED, AND SENDING IT IS WHAT MAKES THE SIGNATURE MEAN SOMETHING.
+  // An approval naming only an order_id lets the payload change after the
+  // second signature: propose a defensible order, collect the approval, apply a
+  // different one. The OMS re-derives the digest from the command it stored and
+  // refuses a mismatch, so the approver signs the VALUE and not merely the
+  // request.
+  string digest = 3;
+}
+
 // Side is the direction of an order or fill.
 enum Side {
   // Default zero value; never set explicitly.
