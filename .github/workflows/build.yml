@@ -339,12 +339,37 @@ jobs:
       # would have produced the worst available failure shape: main green because
       # pushes authenticate, every pull_request red on a base pull, and the cause
       # one layer below where anyone reads.
+      # BEST-EFFORT, AND THE RETRY BELOW IS THE ONE THAT MUST SUCCEED (#320).
+      #
+      # This action stays for two reasons that are not stylistic. supplychain_test.go
+      # requires every image-building workflow to contain an UNCONDITIONAL
+      # docker/login-action — #161 shipped a conditional one and made main green
+      # while every pull_request failed on a base pull — and the action removes the
+      # credential in its post step, which a bare `docker login` would not.
+      #
+      # What it cannot do is retry. ~30 image jobs authenticate to ghcr.io within
+      # the same second and one is periodically refused with
+      # `Get "https://ghcr.io/v2/": denied: denied` — a different service each run,
+      # green on re-run. So its failure is no longer fatal, and the step below owns
+      # the outcome.
       - name: Log in to GHCR
+        continue-on-error: true
         uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+
+      # THE AUTHORITATIVE LOGIN. A no-op first attempt when the action above
+      # worked; the retry that rides out the refusal when it did not. Refused on
+      # every attempt it FAILS the job rather than proceeding unauthenticated,
+      # because every base image is private and the alternative is a red on the
+      # base pull one layer below where anyone reads.
+      - name: Authenticate to GHCR (retried on a refused login)
+        id: login
+        env:
+          REGISTRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+        run: .github/scripts/login-with-retry.sh ghcr.io "${{ github.actor }}"
 
       # BUILDX COMES AFTER THE LOGIN NOW, AND THAT ORDER IS LOAD-BEARING (#320).
       #

@@ -440,6 +440,159 @@ func TestTheImageWorkflowWarmsItsBuilderBeforeCreatingIt(t *testing.T) {
 	}
 }
 
+// THE FOURTH REGISTRY OPERATION, AND THE ONE IN FRONT OF THE OTHER THREE.
+//
+// push-with-retry.sh wraps the push, warm-bases.sh the base pull,
+// warm-builder.sh the builder pull — and the LOGIN that all three depend on had
+// no retry at all. ~30 image jobs authenticate to ghcr.io within the same second
+// and one is periodically refused:
+//
+//	Logging into ghcr.io...
+//	Error response from daemon: Get "https://ghcr.io/v2/": denied: denied
+//
+// main, 2026-08-18: image (audit) on one run, image (web-bff) on the next. A
+// different service each time, green on an identical re-run — #320's signature.
+//
+// THE ACTION IS STILL THERE AND MUST BE. supplychain_test.go requires an
+// unconditional docker/login-action in every image-building workflow (#161), and
+// the action removes the credential in its post step. It is marked
+// continue-on-error and the retrying step owns the outcome.
+func TestTheImageWorkflowRetriesItsLogin(t *testing.T) {
+	repoRoot := filepath.Dir(moduleRoot(t))
+	b, err := os.ReadFile(filepath.Join(repoRoot, ".github", "workflows", "build.yml"))
+	if err != nil {
+		t.Fatalf("read build.yml: %v", err)
+	}
+	src := string(b)
+
+	if !strings.Contains(src, "login-with-retry.sh") {
+		t.Fatal("build.yml no longer retries its GHCR login. A refused login fails the job before " +
+			"any step this repo wrote, so none of the other three retries can see it — and the " +
+			"refusal is a flake that hits a different service on every run (#320)")
+	}
+
+	// ORDER. The retry must come after the action (which it backstops) and before
+	// everything that needs an authenticated daemon.
+	login := stepIndex(src, "docker/login-action")
+	retry := strings.Index(src, "login-with-retry.sh")
+	warm := strings.Index(src, "warm-builder.sh")
+	if login < 0 || retry < 0 || login > retry {
+		t.Fatalf("the login retry does not follow docker/login-action (action@%d, retry@%d)", login, retry)
+	}
+	if warm < 0 || retry > warm {
+		t.Fatalf("the login retry runs AFTER the builder warm (retry@%d, warm@%d) — the warm pulls "+
+			"a private image and would be the thing that fails instead", retry, warm)
+	}
+
+	// THE ACTION MUST BE BEST-EFFORT, or its flake still fails the job and the
+	// retry below it never runs.
+	// THE WINDOW STARTS AT THE STEP, NOT AT THE `uses:` LINE. continue-on-error
+	// is a sibling key and YAML does not order them, so slicing forward from
+	// `uses:` reads past the very thing being checked — which it did, and this
+	// guard failed on correct config until the window was widened.
+	stepStart := strings.LastIndex(src[:login], "- name: Log in to GHCR")
+	if stepStart < 0 {
+		t.Fatalf("could not find the login step's `- name:` before its uses@%d — the step was "+
+			"renamed and this guard is reading the wrong block", login)
+	}
+	actionBlock := src[stepStart:]
+	if end := strings.Index(actionBlock, "login-with-retry.sh"); end > 0 {
+		actionBlock = actionBlock[:end]
+	}
+	if !strings.Contains(actionBlock, "continue-on-error: true") {
+		t.Error("docker/login-action is not continue-on-error, so its refusal still fails the job " +
+			"and the retry that follows it never runs — the retry is then decoration")
+	}
+
+	// THE TOKEN MUST NOT REACH argv. A password on the command line is readable
+	// from the process table and from any trace of the step.
+	if strings.Contains(src, "login-with-retry.sh ghcr.io ${{ secrets.GITHUB_TOKEN }}") {
+		t.Error("the token is passed as an argument to login-with-retry.sh — it must arrive as " +
+			"REGISTRY_PASSWORD in env, which the script reads and pipes to --password-stdin")
+	}
+}
+
+func TestLoginRetryScriptBehaviour(t *testing.T) {
+	bash, err := exec.LookPath("bash")
+	if err != nil {
+		t.Skipf("bash not on PATH (%v): the retry script's behaviour cannot be exercised here", err)
+	}
+	repoRoot := filepath.Dir(moduleRoot(t))
+	script := filepath.Join(repoRoot, ".github", "scripts", "login-with-retry.sh")
+	if _, err := os.Stat(script); err != nil {
+		t.Fatalf("login-with-retry.sh is missing: %v", err)
+	}
+
+	for _, tc := range []struct {
+		name        string
+		failures    int
+		wantErr     bool
+		wantRetries int
+	}{
+		{name: "first attempt succeeds", failures: 0, wantErr: false, wantRetries: 0},
+		{name: "one refusal then success", failures: 1, wantErr: false, wantRetries: 1},
+		// A login refused on EVERY attempt is a revoked token or a changed
+		// permission, not a hiccup. Exiting 0 there hands the job an
+		// unauthenticated daemon and moves the red to the base pull, one layer
+		// below where anyone reads.
+		{name: "always refused still fails", failures: -1, wantErr: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			stub := writeDockerStub(t, dir, tc.failures)
+			outFile := filepath.Join(dir, "gh_output")
+
+			cmd := exec.Command(bash, script, "ghcr.io", "someone")
+			cmd.Dir = repoRoot
+			cmd.Env = append(os.Environ(),
+				"DOCKER="+stub,
+				"REGISTRY_PASSWORD=a-token",
+				"MAX_ATTEMPTS=4",
+				"RETRY_BASE_DELAY=0",
+				"GITHUB_OUTPUT="+outFile,
+			)
+			out, err := cmd.CombinedOutput()
+			if tc.wantErr && err == nil {
+				t.Fatalf("a login refused on every attempt reported SUCCESS — the job would build "+
+					"unauthenticated and fail on a base pull instead.\n%s", out)
+			}
+			if !tc.wantErr && err != nil {
+				t.Fatalf("login-with-retry.sh failed after %d refusal(s): %v\n%s", tc.failures, err, out)
+			}
+			if tc.wantErr {
+				return
+			}
+			got, err := os.ReadFile(outFile)
+			if err != nil {
+				t.Fatalf("read GITHUB_OUTPUT: %v", err)
+			}
+			want := fmt.Sprintf("retries=%d", tc.wantRetries)
+			if !strings.Contains(string(got), want) {
+				t.Errorf("GITHUB_OUTPUT = %q, want %q — #320 turns on a RATE, and a silent retry "+
+					"hides the rate it exists to measure", got, want)
+			}
+		})
+	}
+}
+
+// AN EMPTY CREDENTIAL IS NOT A LOGIN. Retrying an anonymous attempt four times
+// would burn the budget and then report a registry outage, when the real answer
+// is that the secret did not arrive.
+func TestLoginRetryRefusesAnEmptyPassword(t *testing.T) {
+	bash, err := exec.LookPath("bash")
+	if err != nil {
+		t.Skipf("bash not on PATH (%v)", err)
+	}
+	repoRoot := filepath.Dir(moduleRoot(t))
+	dir := t.TempDir()
+	cmd := exec.Command(bash, filepath.Join(repoRoot, ".github", "scripts", "login-with-retry.sh"), "ghcr.io", "someone")
+	cmd.Dir = repoRoot
+	cmd.Env = append(os.Environ(), "DOCKER="+writeDockerStub(t, dir, 0), "REGISTRY_PASSWORD=")
+	if out, err := cmd.CombinedOutput(); err == nil {
+		t.Fatalf("an empty REGISTRY_PASSWORD was accepted:\n%s", out)
+	}
+}
+
 func TestWarmBuilderScriptBehaviour(t *testing.T) {
 	bash, err := exec.LookPath("bash")
 	if err != nil {
