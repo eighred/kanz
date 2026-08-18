@@ -45,6 +45,81 @@ message RiskMeasure {
   // inputs (the common case), the envelope causation_id carries no
   // single answer and this list is the auditable trail.
   repeated string source_event_ids = 4;
+
+  // coverage says how much of the book value was actually computed
+  // over. ABSENT means this measure does not report input coverage —
+  // it does NOT mean everything resolved. See InputCoverage.
+  //
+  // Without this field a caller had one set-level flag and nothing
+  // else between it and a confident zero: the response could say that
+  // SOMETHING in the set was computed over nothing, never which
+  // measure or how much, so a caller could not refuse the degraded
+  // number without refusing the sound ones beside it (#509).
+  InputCoverage coverage = 5;
+}
+
+// InputCoverage records how much of the book one measure was actually
+// computed over — the difference between a MEASURED zero and a
+// CONFIDENT one (#527).
+//
+// A measure that resolves per-position inputs through a provider —
+// bond terms, a discount curve, a factor model, a return series —
+// skips whatever does not resolve and returns its accumulator
+// regardless. When nothing resolved the accumulator is zero, and that
+// zero crosses the wire as an ACTIVE CLAIM: DV01 = 0 says the book
+// carries no interest-rate risk, byte-identical to the answer for a
+// book that genuinely holds no bonds. The contract-terms store has no
+// production writer on this estate, so that is not a corner case — it
+// is the answer every fixed-income query gets today.
+//
+// PRESENCE IS THE SIGNAL, which is why this is a message and not two
+// scalars on RiskMeasure. Absent means "this measure does not report
+// coverage"; present with excluded_count = 0 means "it reports, and
+// everything applicable was covered". Scalars would render both as
+// zero and re-create the conflation the record exists to break.
+//
+// NO DIRECTION CLAIM IS MADE. Dropping positions shrinks a SUM but
+// RAISES a ratio or weighted average (Duration, HHI,
+// LiquidationHorizon), and removing one leg of a hedged pair raises a
+// portfolio quantile (VaR99, FactorVaR99). So a caller gating on a
+// money measure must treat a non-zero excluded_count as a REFUSAL TO
+// ANSWER, not as an annotation on a good number.
+message InputCoverage {
+  // contributed is how many positions reached the measure's
+  // arithmetic. Zero WITH a non-zero excluded_count is the case above:
+  // computed over nothing at all.
+  uint32 contributed = 1;
+
+  // excluded_count is how many positions could not be assessed. It is
+  // the TOTAL, not the length of exclusions — that sample is bounded
+  // and this is not, because the count is what says how bad it is and
+  // the sample is what lets somebody go and look.
+  uint32 excluded_count = 2;
+
+  // exclusions is a BOUNDED SAMPLE of the excluded positions. On a
+  // book whose reference data was never loaded every position is an
+  // exclusion, so carrying them all would put the whole book on every
+  // FACT and in every query response.
+  repeated InputExclusion exclusions = 3;
+}
+
+// InputExclusion names one position left out of one measure because an
+// input that measure needed did not resolve.
+message InputExclusion {
+  // instrument_id is the position that was left out. EMPTY means the
+  // exclusion belongs to the whole evaluation rather than to any
+  // holding — no factor model for this snapshot, no counterparty
+  // exposures, too little history to form a distribution. A reader
+  // labelling by instrument must expect the empty value and must not
+  // drop it: it is the whole-book outage, the worst case, not a
+  // malformed row.
+  string instrument_id = 1;
+
+  // reason is the measure family's own closed vocabulary for why the
+  // input did not resolve (no_terms, no_curve, no_model, ...). Free
+  // text to this schema; in practice a label an operator groups by, so
+  // it must stay low-cardinality.
+  string reason = 2;
 }
 
 // RiskMeasureSet is the full set of risk measures for a portfolio,
