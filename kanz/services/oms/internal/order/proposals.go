@@ -250,7 +250,12 @@ func (m *MemoryProposals) Pending(_ context.Context, now time.Time) ([]OrderProp
 	defer m.mu.RUnlock()
 	out := make([]OrderProposal, 0, len(m.by))
 	for _, p := range m.by {
-		if p.Approver != "" || !p.Pending(now) {
+		// THE SAME THREE CLAUSES THE POSTGRES QUERY CARRIES (#548): undecided, not
+		// yet announced, not yet expired. The announced check is not implied by the
+		// expiry one — a pod running fast can announce a proposal a slower reader
+		// still considers live — and a seam that listed it would offer as work an
+		// order the estate has already been told will not trade.
+		if p.Approver != "" || !p.ExpiryAnnouncedAt.IsZero() || !p.Pending(now) {
 			continue
 		}
 		p.Command = proto.Clone(p.Command).(*orderpb.SubmitOrder)
@@ -500,15 +505,26 @@ func (p *PostgresProposals) AnnounceExpiry(ctx context.Context, orderID string, 
 
 // Pending lists what is still awaiting a signature.
 //
-// `approver = ”` IS LOAD-BEARING, NOT REDUNDANT with the ORDER BY: it is the
-// predicate of the partial index (0009), and Postgres will not use that index
-// without it. Removing it as implied by the rest of the query turns this into a
-// sequential scan of every order ever held.
+// BOTH CLAUSES ARE LOAD-BEARING, AND NEITHER IS REDUNDANT (#548). Together they
+// are exactly the predicate of order_proposals_open_idx (0011), and Postgres
+// uses a partial index only where it can prove the predicate holds. Removing
+// either as implied by the rest of the query turns this into a sequential scan
+// of every order ever held.
+//
+// `expiry_announced_at IS NULL` IS NOT IMPLIED BY `expires_at > $1`. The CHECK
+// added by 0010 makes them equivalent in practice — an announcement cannot
+// predate the expiry it announces — but the planner does not reason across a
+// CHECK constraint, so the clause has to be here for the index to be usable.
+//
+// IT IS ALSO MORE CORRECT, not just faster. A pod running fast can announce a
+// proposal a slower reader still considers live. Without this clause that row
+// comes back on the approver's queue as work AFTER the estate has been told the
+// order was rejected and will not trade.
 func (p *PostgresProposals) Pending(ctx context.Context, now time.Time) ([]OrderProposal, error) {
 	rows, err := p.pool.Query(ctx, `
 		SELECT order_id, portfolio_id, act, proposer, digest, command, approver, decided_at, created_at, expires_at
 		FROM order_proposals
-		WHERE approver = '' AND expires_at > $1
+		WHERE approver = '' AND expiry_announced_at IS NULL AND expires_at > $1
 		ORDER BY created_at, order_id
 	`, now.UTC())
 	if err != nil {
