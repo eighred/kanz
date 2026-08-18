@@ -13,6 +13,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/eighred/kanz/pkg/secret"
 )
 
 // Config is the resolved identity configuration.
@@ -71,10 +73,28 @@ type Config struct {
 // Load reads the configuration, refusing anything that would start a service
 // which appears healthy and cannot actually authenticate anyone.
 func Load() (Config, error) {
+	// RESOLVED BEFORE THE LITERAL, so a DECLARED-but-unreadable secret mount stops
+	// Load here rather than resolving to "" — the same shape every other service's
+	// Load uses, and the one this service was missing.
+	//
+	// IT WAS os.Getenv, AND THAT IS WHY THIS SERVICE COULD NOT START. The manifest
+	// mounts IDENTITY_DATABASE_URL_FILE and sets no plaintext IDENTITY_DATABASE_URL,
+	// so the read below returned "" and the check under it exited 2 — on a
+	// distroless image with no shell and no command override, nothing resolved the
+	// file on the process's behalf. The credential authority never came up, and
+	// every login and every token in the estate waited on it.
+	//
+	// secret.Read prefers <K>_FILE and ERRORS on an unreadable mount instead of
+	// falling through to the env var and then to "", which is the fall-through that
+	// makes a failed CSI mount indistinguishable from a secret nobody configured.
+	databaseURL, err := secret.Read("IDENTITY_DATABASE_URL")
+	if err != nil {
+		return Config{}, err
+	}
 	cfg := Config{
 		Listen:            envOr("IDENTITY_LISTEN", ":8087"),
 		LogLevel:          parseLevel(os.Getenv("IDENTITY_LOG_LEVEL")),
-		DatabaseURL:       os.Getenv("IDENTITY_DATABASE_URL"),
+		DatabaseURL:       databaseURL,
 		SigningKeyFile:    os.Getenv("IDENTITY_SIGNING_KEY_FILE"),
 		AllowEphemeralKey: os.Getenv("IDENTITY_ALLOW_EPHEMERAL_KEY") == "true",
 		TokenIssuer:       os.Getenv("IDENTITY_TOKEN_ISSUER"),

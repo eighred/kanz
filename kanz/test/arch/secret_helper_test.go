@@ -67,17 +67,26 @@ func TestOnlyOnePlaceResolvesSecrets(t *testing.T) {
 	fileEnvRe := regexp.MustCompile(`"_FILE"`)
 	readFileRe := regexp.MustCompile(`os\.ReadFile`)
 
-	// This file necessarily contains both halves of the pattern it hunts — the
-	// needles are right there in the regexes, and the walk reads files. A
-	// scanner cannot scan itself for the thing it is looking for, so it is
+	// These files necessarily contain both halves of the pattern this hunts — the
+	// needles are right there in the regexes, and the walks read files. A
+	// scanner cannot scan itself for the thing it is looking for, so they are
 	// skipped by name rather than by cleverness (splitting the literals to dodge
 	// the match would work and would be unreadable, which is worse).
-	const self = "test/arch/secret_helper_test.go"
+	//
+	// THE SECOND ENTRY IS THE COMPLEMENT OF THIS GUARD, NOT AN EVASION OF IT.
+	// This one asks "does anybody resolve a mount by hand?"; that one asks "does
+	// anybody mount a secret and then never read it?" — the shape identity shipped,
+	// which had no local copy for this guard to find. Neither resolves a secret;
+	// both read manifests and Go source looking for one.
+	scanners := map[string]bool{
+		"test/arch/secret_helper_test.go":          true,
+		"test/arch/mounted_secret_is_read_test.go": true,
+	}
 
 	var localHelpers, openCoded []string
 	for _, f := range files {
-		if strings.HasPrefix(f.rel, secretPkg+"/") || f.rel == secretPkg || f.rel == self {
-			continue // the one legitimate implementation, and this scanner
+		if strings.HasPrefix(f.rel, secretPkg+"/") || f.rel == secretPkg || scanners[f.rel] {
+			continue // the one legitimate implementation, and the scanners
 		}
 		if localSecretRe.MatchString(f.body) {
 			localHelpers = append(localHelpers, f.rel)
