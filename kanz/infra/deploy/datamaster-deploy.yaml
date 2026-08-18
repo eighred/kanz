@@ -188,6 +188,23 @@ spec:
             # in another timezone; short enough that a signature cannot be collected
             # against a stale view of the book.
             - { name: DATAMASTER_DUAL_CONTROL_TTL, value: "24h" }
+            # WHAT HAPPENS TO AN OVERRIDE NOBODY SIGNED (#563). Past the TTL above a
+            # proposal cannot be approved, and until this it also stopped being listed —
+            # so the proposer could not tell "it lapsed" from "I never proposed it", and
+            # nothing recorded that a resolution had been proposed and died.
+            #
+            # A lapsed proposal is now LISTED, carrying state, for this long. The window
+            # is deliberately both halves of one thing: how long a proposer can still see
+            # it, and how long the row lives. Two separate settings would create a span
+            # where the row exists and the surface hides it.
+            #
+            # Seven days so a proposal made on Friday is still explicable on Monday.
+            - { name: DATAMASTER_LAPSED_PROPOSAL_RETENTION, value: "168h" }
+            # And the purge that enforces it. A proposal nobody signs is never CLAIMED,
+            # and claiming is the only thing that deletes one — so with this at 0 the
+            # lapsed list grows without bound and exception_override_proposals with it.
+            # That is a WARN at startup rather than a silent leak, but it is still a leak.
+            - { name: DATAMASTER_PROPOSAL_PURGE_INTERVAL, value: "1h" }
             # The vendor drops. Reference and price are separate extracts with
             # separate cadences; a vendor may supply either or both. Adjust to the
             # vendors this fund actually licenses.
