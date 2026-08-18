@@ -37,31 +37,33 @@ func TestArmingWithoutAThresholdRefusesToStart(t *testing.T) {
 			t.Errorf("refusal does not name %s: %q", want, msg)
 		}
 	}
-	if strings.Contains(msg, "nowhere to hold") {
-		t.Errorf("Load refused for the WRONG reason — it reported the missing placement, not the "+
-			"missing threshold, so the threshold check never ran: %q", msg)
-	}
 }
 
-// TestArmingIsRefusedBecauseThereIsNowhereToHoldAPendingOrder is the state
-// that becomes legal the day #410's placement ruling lands. Until then, arming
-// would reject every order at or above the threshold instead of holding it: an
-// act that neither takes effect nor can be approved, which is exactly the silent
-// drop #410's acceptance forbids.
-func TestArmingIsRefusedBecauseThereIsNowhereToHoldAPendingOrder(t *testing.T) {
+// TestArmingWithAThresholdIsNowAccepted is the inverse of the refusal this file
+// used to assert.
+//
+// Until migrations/0009_order_proposals.sql existed, Load refused this
+// combination outright, because arming with nowhere to put a held order would
+// have REJECTED every order at or above the threshold rather than holding it.
+// The proposals table is that place, so the flag is a real posture — and this
+// test is what stops the refusal being reinstated by a merge, which would take
+// the whole control offline while every gate below it still passed.
+func TestArmingWithAThresholdIsNowAccepted(t *testing.T) {
 	t.Setenv("OMS_REQUIRE_DUAL_CONTROL", "true")
 	t.Setenv("OMS_DUAL_CONTROL_MIN_NOTIONAL", "1000000 USD")
 
-	_, err := Load()
-	if err == nil {
-		t.Fatal("Load armed the control with nowhere to record an order awaiting approval — every " +
-			"order at or above the threshold would be refused rather than held")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load refused the armed posture: %v\n\nThe OMS now has somewhere to hold an order "+
+			"awaiting approval (migrations/0009), so this is a supported configuration; refusing it "+
+			"means the control cannot be turned on at all", err)
 	}
-	if !strings.Contains(err.Error(), "nowhere to hold") {
-		t.Fatalf("refusal does not say what is missing: %q", err.Error())
+	if !cfg.RequireDualControl {
+		t.Fatal("OMS_REQUIRE_DUAL_CONTROL=true did not arm the gate — orders at or above the " +
+			"threshold would be ADMITTED on one signature while the operator believes they are held")
 	}
-	if !strings.Contains(err.Error(), "#410") {
-		t.Errorf("refusal does not name the issue that retires it: %q", err.Error())
+	if cfg.DualControlMinNotional == nil {
+		t.Fatal("armed with a nil threshold — Decide would compare every order against nothing")
 	}
 }
 

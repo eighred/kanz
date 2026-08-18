@@ -29,6 +29,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"google.golang.org/grpc"
 
+	"github.com/eighred/kanz/internal/dualcontrol"
 	"github.com/eighred/kanz/internal/outbox"
 	"github.com/eighred/kanz/internal/pg"
 	"github.com/eighred/kanz/pkg/bus"
@@ -382,9 +383,23 @@ func runConsumers(ctx context.Context, cfg config.Config, readiness *server.Read
 		logger.Error("oms: dual-control gate refused its configuration", "err", err)
 		return false, err
 	}
-	if dualControl.Watching() {
+	if dualControl.Armed() {
+		// THE ENFORCING POSTURE, AND IT IS THE ONE THAT NEEDS A HUMAN ON THE OTHER
+		// END. An order at or above the threshold is written to order_proposals
+		// and does not trade until a DIFFERENT authenticated subject approves it.
+		// If nobody watches the pending queue, large orders stop being placed and
+		// expire — which is a trading outage, not a security posture, and the log
+		// says so at startup rather than leaving it to be discovered.
+		logger.Warn("oms: MAKER-CHECKER IS ENFORCING — an order at or above the threshold is HELD in "+
+			"order_proposals and is NOT admitted until a second, different authenticated subject "+
+			"approves it. Somebody must own the pending queue or these orders expire unfilled (#410)",
+			"threshold", dualControl.Threshold().FloatString(2), "currency", cfg.DualControlNotionalCurrency,
+			"ttl", dualcontrol.DefaultTTL.String(),
+			"metric", "kanz_oms_order_signatures_total")
+	} else if dualControl.Watching() {
 		logger.Info("oms: MAKER-CHECKER IS OBSERVING, NOT ENFORCING — orders at or above the threshold "+
-			"are admitted on ONE signature and counted; arming is blocked until #410's placement ruling lands",
+			"are admitted on ONE signature and counted. Set OMS_REQUIRE_DUAL_CONTROL=true to hold them "+
+			"once somebody owns the pending queue",
 			"threshold", dualControl.Threshold().FloatString(2), "currency", cfg.DualControlNotionalCurrency,
 			"metric", "kanz_oms_order_signatures_total")
 	} else {
@@ -1257,7 +1272,11 @@ func serveOrderQuery(cfg config.Config, mesh *transport.Mesh, store order.Store,
 	srv := grpc.NewServer(opts...)
 	// cfg.Tenant is the owning tenant of THIS deployment; grpcsrv stamps it on
 	// every reply as the deny-by-default gate input. Empty fails closed.
-	grpcsrv.New(store, cfg.Tenant).Register(srv)
+	// THE PENDING QUEUE IS WIRED FROM THE SAME STORE (#410). A held order is in
+	// order_proposals and nowhere else, so this route is the only way a person
+	// can see one — building the read surface without it would hold orders
+	// nobody could find, which is the drop the control exists to end.
+	grpcsrv.New(store, store.Proposals(), time.Now, cfg.Tenant).Register(srv)
 	venuesrv.New(catalogue, cfg.Tenant).Register(srv)
 
 	go func() {

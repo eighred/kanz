@@ -710,7 +710,7 @@ data:
           # which do not route to DLQ. It PUBLISHES the full order lifecycle
           # (services/oms/internal/order/events.go's EventType* constants:
           # accepted/rejected/routed/filled/partially_filled/cancelled/expired/
-          # outcome), the position projections at both grains EXEC-M19a/M20
+          # outcome/pending_approval), the position projections at both grains EXEC-M19a/M20
           # established (subject.PositionFor → risk.position.changed.>,
           # subject.VenuePositionFor → risk.position.venue.changed.>), and
           # settlement failures (posttrade.BusFailSink's
@@ -722,6 +722,15 @@ data:
                   "order.order.accepted", "order.order.rejected", "order.order.routed",
                   "order.order.filled", "order.order.partially_filled", "order.order.cancelled",
                   "order.order.expired", "order.order.outcome",
+                  # AN ORDER HELD FOR A SECOND SIGNATURE (#410). It is the ONLY
+                  # thing the estate hears about an order the maker-checker gate
+                  # held: such an order is deliberately not in the book, so
+                  # without this grant a held order would be durable in
+                  # order_proposals and announced to nobody — the silent drop
+                  # #410 exists to end, reintroduced by a missing line in a
+                  # permissions file. It rides the EXECUTION stream and the
+                  # archiver's existing order.> rule with no new mapping.
+                  "order.order.pending_approval",
                   # REALIZED EXECUTION COST, PER FILL (#436). Derived from the
                   # OMS's own fills and the arrival mark stamped at admission, so
                   # it belongs to the order domain the OMS already owns — the

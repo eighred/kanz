@@ -39,7 +39,7 @@ func order(id, portfolio string) *orderpb.OrderState {
 // over a portfolio's whole trading history.
 func TestTheReplyCarriesTheOwningTenant(t *testing.T) {
 	store := &fakeReader{orders: []*orderpb.OrderState{order("o1", "flagship")}}
-	resp, err := grpcsrv.New(store, "acme").ListOrders(context.Background(),
+	resp, err := grpcsrv.New(store, nil, nil, "acme").ListOrders(context.Background(),
 		&orderpb.ListOrdersRequest{PortfolioId: "flagship"})
 	if err != nil {
 		t.Fatalf("ListOrders: %v", err)
@@ -54,7 +54,7 @@ func TestTheReplyCarriesTheOwningTenant(t *testing.T) {
 // deny-by-default gate reads as a denial rather than an allow.
 func TestAnUnconfiguredTenantLeavesTheStampEmpty(t *testing.T) {
 	store := &fakeReader{orders: []*orderpb.OrderState{order("o1", "flagship")}}
-	resp, err := grpcsrv.New(store, "").ListOrders(context.Background(),
+	resp, err := grpcsrv.New(store, nil, nil, "").ListOrders(context.Background(),
 		&orderpb.ListOrdersRequest{PortfolioId: "flagship"})
 	if err != nil {
 		t.Fatalf("ListOrders: %v", err)
@@ -73,7 +73,7 @@ func TestAnUnconfiguredTenantLeavesTheStampEmpty(t *testing.T) {
 // like a generous default.
 func TestAnEmptyPortfolioIsRefusedAndNeverReachesTheStore(t *testing.T) {
 	store := &fakeReader{}
-	_, err := grpcsrv.New(store, "acme").ListOrders(context.Background(),
+	_, err := grpcsrv.New(store, nil, nil, "acme").ListOrders(context.Background(),
 		&orderpb.ListOrdersRequest{})
 
 	if status.Code(err) != codes.InvalidArgument {
@@ -89,7 +89,7 @@ func TestAnEmptyPortfolioIsRefusedAndNeverReachesTheStore(t *testing.T) {
 // page as a portfolio's whole history.
 func TestTheCountOfUnindexedOrdersIsPassedThrough(t *testing.T) {
 	store := &fakeReader{orders: []*orderpb.OrderState{order("o1", "flagship")}, unindexed: 412}
-	resp, err := grpcsrv.New(store, "acme").ListOrders(context.Background(),
+	resp, err := grpcsrv.New(store, nil, nil, "acme").ListOrders(context.Background(),
 		&orderpb.ListOrdersRequest{PortfolioId: "flagship"})
 	if err != nil {
 		t.Fatalf("ListOrders: %v", err)
@@ -103,7 +103,7 @@ func TestTheCountOfUnindexedOrdersIsPassedThrough(t *testing.T) {
 
 func TestTheRequestReachesTheStoreUnchanged(t *testing.T) {
 	store := &fakeReader{}
-	if _, err := grpcsrv.New(store, "acme").ListOrders(context.Background(),
+	if _, err := grpcsrv.New(store, nil, nil, "acme").ListOrders(context.Background(),
 		&orderpb.ListOrdersRequest{PortfolioId: "flagship", Limit: 25}); err != nil {
 		t.Fatalf("ListOrders: %v", err)
 	}
@@ -117,7 +117,7 @@ func TestTheRequestReachesTheStoreUnchanged(t *testing.T) {
 // surface is not where that gets published.
 func TestAStoreFailureDoesNotLeakItsMessage(t *testing.T) {
 	store := &fakeReader{err: errors.New(`dial tcp 10.4.2.9:5432: connect: connection refused (db "kanzapp" user "kanzapp")`)}
-	_, err := grpcsrv.New(store, "acme").ListOrders(context.Background(),
+	_, err := grpcsrv.New(store, nil, nil, "acme").ListOrders(context.Background(),
 		&orderpb.ListOrdersRequest{PortfolioId: "flagship"})
 
 	if status.Code(err) != codes.Unavailable {
@@ -132,7 +132,7 @@ func TestAStoreFailureDoesNotLeakItsMessage(t *testing.T) {
 // sends an operator to look at Postgres for a client that gave up.
 func TestACancelledRequestIsNotReportedAsAStoreFailure(t *testing.T) {
 	store := &fakeReader{err: context.Canceled}
-	_, err := grpcsrv.New(store, "acme").ListOrders(context.Background(),
+	_, err := grpcsrv.New(store, nil, nil, "acme").ListOrders(context.Background(),
 		&orderpb.ListOrdersRequest{PortfolioId: "flagship"})
 
 	if status.Code(err) != codes.Canceled {

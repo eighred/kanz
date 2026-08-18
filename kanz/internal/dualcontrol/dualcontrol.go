@@ -260,6 +260,21 @@ func Digest(parts ...string) string {
 	return hex.EncodeToString(h.Sum(nil))
 }
 
+// SameSubject reports whether two subject strings denote the SAME person under
+// this package's rule.
+//
+// IT IS EXPORTED SO THAT NOBODY RETYPES THE COMPARISON. A store that has to
+// refuse a self-approval before writing a row — services/oms/internal/order's
+// ProposalStore.Claim is the first — otherwise reaches for
+// strings.EqualFold or a byte comparison, and a byte comparison is the clause
+// #495 recorded as the one that fails QUIETLY: one person holds both signatures
+// by capitalising a letter, and the audit trail then shows two distinct actors,
+// which reads as satisfied in exactly the record an auditor would check.
+//
+// The SQL side of the same rule is spelled lower(btrim(...)) in the CHECK
+// constraints (datamaster/0004, oms/0009). All three must agree.
+func SameSubject(a, b string) bool { return normalize(a) == normalize(b) }
+
 // normalize folds the differences that are NOT a different person.
 func normalize(subject string) string {
 	return strings.ToLower(strings.TrimSpace(subject))

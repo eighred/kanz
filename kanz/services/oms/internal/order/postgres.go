@@ -32,17 +32,27 @@ type Postgres struct {
 	// queue is the outbox over the SAME pool, which is what gives it the same
 	// tenant scope and the same failure domain as the orders it announces.
 	queue *outbox.Postgres
+	// proposals is the durable home of orders held for a second signature
+	// (#410), over the SAME pool and the SAME outbox — one tenant scope, one
+	// failure domain, and a held order announced through the same relay that
+	// announces an admitted one.
+	proposals *PostgresProposals
 }
 
 // NewPostgres returns a Postgres store over an existing pool. The caller owns
 // the pool lifecycle (Close).
 func NewPostgres(pool *pgxpool.Pool) *Postgres {
-	return &Postgres{pool: pool, queue: outbox.NewPostgres(pool, "oms")}
+	q := outbox.NewPostgres(pool, "oms")
+	return &Postgres{pool: pool, queue: q, proposals: NewPostgresProposals(pool, q)}
 }
 
 // Outbox is the durable queue Create enqueues into. See Store.Outbox for why the
 // store hands it out rather than the composition root building one of its own.
 func (p *Postgres) Outbox() outbox.Queue { return p.queue }
+
+// Proposals is the durable home of orders held for a second signature. See
+// Store.Proposals for why it is handed out through the store.
+func (p *Postgres) Proposals() ProposalStore { return p.proposals }
 
 // Create is the ATOMIC ADMISSION GATE, and since #292 it is also the point at
 // which the order's announcement becomes as durable as the order.

@@ -39,7 +39,7 @@ import (
 // beside OMS_REQUIRE_MANDATE, OMS_REQUIRE_VENUE_ACCOUNT,
 // OMS_REQUIRE_VERIFIED_ACCOUNT and OMS_REQUIRE_ORDER_TYPE_SUPPORT).
 //
-// # UNARMED IS NOT UNRECORDED, and that is the half that ships today
+// # UNARMED IS NOT UNRECORDED, and it is still the posture to deploy first
 //
 // With a threshold set and the flag off, nothing is held: every order is still
 // admitted on one signature. What changes is that each one is CLASSIFIED against
@@ -50,6 +50,14 @@ import (
 // #495 took with kanz_datamaster_overrides_total{signatures="single_signed"},
 // and the same stance OMS_REQUIRE_MANDATE and OMS_REQUIRE_VERIFIED_ACCOUNT take:
 // build the control, count the gap, arm it with the list in hand.
+//
+// ARMING IS NOW REACHABLE. An earlier version of this doc said production could
+// not arm the gate at all, because there was nowhere to put a held order.
+// migrations/0009_order_proposals.sql is that place and internal/order's hold()
+// writes to it, so config.Load no longer refuses the flag. What arming costs is
+// unchanged, and it is the reason to calibrate first: a held order does not
+// trade until a DIFFERENT authenticated subject approves it, and it expires if
+// nobody does — so it needs somebody who owns the pending queue.
 
 // Gate classifies an order against the dual-control threshold.
 //
@@ -57,8 +65,9 @@ import (
 // pending order, and it deliberately has no opinion about where one should live
 // — see the package doc. The placement consumes Decision.
 type Gate struct {
-	// require arms the refusal. See NewGate: today it cannot be true, because
-	// nothing can hold an order awaiting approval yet.
+	// require arms the HOLD. True means an order at or above the threshold is
+	// written to order_proposals and NOT admitted, until a second subject
+	// approves it (internal/order's hold()).
 	require bool
 	// threshold is the notional at or above which an order requires dual
 	// control. nil means the control is ABSENT.
@@ -71,19 +80,18 @@ type Gate struct {
 
 // NewGate builds the gate. threshold nil ⇒ the control is absent.
 //
-// PRODUCTION CANNOT REACH AN ARMED GATE TODAY, and the refusal is config.Load's
-// rather than this constructor's: there is nowhere to put an order awaiting
-// approval until #410's proposals table is built, so arming would REJECT every
-// order at or above the threshold instead of holding it — a trading outage
-// delivered by a security improvement, which is the failure every other
-// OMS_REQUIRE_* flag was deliberately shipped OFF to avoid.
+// AN ARMED GATE IS REACHABLE FROM PRODUCTION SINCE #410's PROPOSALS TABLE. It
+// was not before: config.Load refused the flag outright, because arming with
+// nowhere to put a held order would have REJECTED every order at or above the
+// threshold instead of holding it — a trading outage delivered by a security
+// improvement, which is the failure every other OMS_REQUIRE_* flag was
+// deliberately shipped OFF to avoid.
 //
-// This constructor still accepts require=true, deliberately. The armed branch of
-// Decide is the behaviour the proposals table will depend on, and a branch no test can
-// construct is a branch nobody has checked. Datamaster's refusal has the same
-// two halves (its composition root refuses the combination, and dualControlArmed
-// re-checks inside the server) for the same reason: a constructor callable from
-// a test is not a guarantee.
+// THE THRESHOLDLESS REFUSAL BELOW REMAINS, and it is duplicated in config.Load
+// on purpose: Load is a pure function of strings already in hand, so it is the
+// FIRST thing that fails and the easiest to test, and this is the second line —
+// a constructor callable from a test is not a guarantee. Datamaster's arming
+// refusal has the same two halves for the same reason.
 func NewGate(require bool, threshold *big.Rat, marks compliance.MarkSource, reg prometheus.Registerer) (*Gate, error) {
 	if require && threshold == nil {
 		// A gate armed with no number would compare every order against nothing.
@@ -232,8 +240,9 @@ func (g *Gate) Count(d Decision, signatures string) {
 	g.metrics.signatures.WithLabelValues(signatures, string(d.Posture)).Inc()
 }
 
-// Armed reports whether a second signature is mandatory anywhere. Today always
-// false — see NewGate.
+// Armed reports whether a second signature is mandatory. True means an order at
+// or above the threshold is HELD rather than admitted — see internal/order's
+// hold().
 func (g *Gate) Armed() bool { return g != nil && g.require }
 
 // Watching reports whether a threshold is configured at all. False means the

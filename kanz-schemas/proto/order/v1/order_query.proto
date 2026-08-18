@@ -17,6 +17,8 @@ syntax = "proto3";
 
 package order.v1;
 
+import "google/protobuf/timestamp.proto";
+import "order/v1/order.proto";
 import "order/v1/order_events.proto";
 
 // OrderQueryService is the OMS's read surface. It answers about orders it holds;
@@ -25,6 +27,23 @@ import "order/v1/order_events.proto";
 service OrderQueryService {
   // ListOrders returns one portfolio's orders, newest first.
   rpc ListOrders(ListOrdersRequest) returns (ListOrdersResponse);
+
+  // ListPendingApprovals returns the orders HELD for a second signature (#410),
+  // oldest first.
+  //
+  // WITHOUT THIS THE CONTROL IS A DROP. A held order is deliberately not in the
+  // orders table, so ListOrders above cannot see it and no blotter built on that
+  // route ever will. #410's acceptance is explicit that an unapproved act must
+  // be VISIBLY PENDING rather than silently dropped — "an order that neither
+  // executes nor reports why is the failure mode this platform refuses
+  // everywhere else" — and the pricing-override path answers it with exactly
+  // this shape (datamaster's handlePendingOverrides).
+  //
+  // IT IS A READ AND STAYS A READ. Approving is a COMMAND and arrives on the
+  // bus, never here; a gRPC surface that could cause a submission would be a
+  // second door into the capital path with none of the admission gate, the
+  // compliance gate or the outbox behind it.
+  rpc ListPendingApprovals(ListPendingApprovalsRequest) returns (ListPendingApprovalsResponse);
 }
 
 message ListOrdersRequest {
@@ -67,4 +86,60 @@ message ListOrdersResponse {
   // It reaches zero without a migration: every write rewrites portfolio_id from
   // the blob, so an order becomes indexable the moment anything touches it.
   int64 unindexed = 3;
+}
+
+message ListPendingApprovalsRequest {
+  // portfolio_id narrows the queue to one portfolio. UNLIKE ListOrders, EMPTY IS
+  // ALLOWED and means "everything still awaiting a signature".
+  //
+  // The asymmetry is deliberate and it is not an inconsistency. There, empty is
+  // the NOT-INDEXED marker of migration 0007, so answering it would return the
+  // orders nobody can attribute. Here the column is written by the OMS itself on
+  // every row, there is no such marker, and the whole-queue question is the one
+  // an approver actually asks: "what is waiting on me". A pending list that can
+  // only be read one portfolio at a time is a queue nobody watches, which is the
+  // failure #495 recorded on the override path.
+  string portfolio_id = 1;
+
+  // limit bounds one page. 0 ⇒ the server's own page size.
+  int32 limit = 2;
+}
+
+message ListPendingApprovalsResponse {
+  repeated PendingApproval pending = 1;
+
+  // owner_tenant is the tenant that owns every proposal listed — the same
+  // deny-by-default authz-gate input ListOrdersResponse carries.
+  string owner_tenant = 2;
+}
+
+// PendingApproval is one order waiting for its second signature.
+//
+// It carries the COMMAND rather than an OrderState, because there is no
+// OrderState: the order was never admitted, and inventing one would be inventing
+// a status the order does not have. The command is what the approver is being
+// asked to sign for.
+message PendingApproval {
+  string order_id = 1;
+
+  // command is the exact order proposed — the payload digest below covers.
+  SubmitOrder command = 2;
+
+  // proposer is the AUTHENTICATED subject that submitted it. The approver must
+  // be a different person, so a client rendering this queue can and should hide
+  // the approve affordance from the proposer rather than let them discover the
+  // refusal by pressing it.
+  string proposer = 3;
+
+  // act is the dual-control act constant, "ORDER_SUBMISSION".
+  string act = 4;
+
+  // digest is the value an approval must cover.
+  string digest = 5;
+
+  // proposed_at and expires_at bound the window. EXPIRY IS PART OF THE ANSWER:
+  // a queue that does not show how long is left presents an order about to be
+  // dropped identically to one proposed a minute ago.
+  google.protobuf.Timestamp proposed_at = 6;
+  google.protobuf.Timestamp expires_at = 7;
 }

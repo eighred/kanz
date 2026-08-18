@@ -138,6 +138,23 @@ type Store interface {
 	// impossible to separate.
 	Outbox() outbox.Queue
 
+	// Proposals is the store of orders HELD for a second signature (#410).
+	//
+	// IT IS ON THIS INTERFACE FOR THE SAME REASON Outbox() IS. The three share a
+	// transaction, a tenant scope and a failure domain: a held order's row and
+	// the FACT announcing it commit together, and an approved proposal becomes a
+	// row in this same `orders` table. A composition root that could obtain a
+	// store WITHOUT its proposals home could arm OMS_REQUIRE_DUAL_CONTROL with
+	// nowhere to put a held order — which is precisely the state config.Load
+	// refused outright until this table existed, and the state that would reject
+	// every large order while claiming a control.
+	//
+	// It also makes the two degrade TOGETHER. With no OMS_DATABASE_URL the
+	// orders, the FACTs and the pending proposals are all in-process, so a crash
+	// loses all three and they cannot come back disagreeing about which orders
+	// were admitted and which were merely proposed.
+	Proposals() ProposalStore
+
 	// ListByPortfolio returns one portfolio's orders, newest first, at most
 	// limit of them. It is the read behind the web app's order history (#399).
 	//
@@ -210,15 +227,27 @@ type MemoryStore struct {
 	// rather than injected so a MemoryStore cannot be constructed without one:
 	// a store with a nil outbox would silently drop every FACT handed to Create.
 	outbox *outbox.Memory
+	// proposals is owned here, over the SAME outbox, for the same reason: a
+	// pending-approval FACT and an acceptance must not land in two queues.
+	proposals *MemoryProposals
 }
 
 // NewMemoryStore returns an empty in-memory Store.
 func NewMemoryStore() *MemoryStore {
-	return &MemoryStore{orders: make(map[string]*versioned), outbox: outbox.NewMemory()}
+	q := outbox.NewMemory()
+	return &MemoryStore{
+		orders:    make(map[string]*versioned),
+		outbox:    q,
+		proposals: NewMemoryProposals(q),
+	}
 }
 
 // Outbox is the in-process queue this store enqueues into. Never nil.
 func (m *MemoryStore) Outbox() outbox.Queue { return m.outbox }
+
+// Proposals is the in-process home of orders held for a second signature. Never
+// nil, so an armed gate always has somewhere to put one.
+func (m *MemoryStore) Proposals() ProposalStore { return m.proposals }
 
 // Create inserts st iff its order_id is absent, and enqueues its FACTs in the
 // same lock hold. The check, the insert and the enqueue happen under ONE lock —
