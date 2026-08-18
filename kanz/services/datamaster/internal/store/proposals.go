@@ -75,6 +75,20 @@ type ProposalStore interface {
 	// Pending lists proposals not yet expired at now, oldest first, so an
 	// unapproved act is VISIBLE rather than silently dropped.
 	Pending(ctx context.Context, now time.Time) ([]OverrideProposal, error)
+	// Lapsed lists proposals that expired without a signature and have not yet
+	// been purged, so "nobody signed it" is a state a proposer can SEE rather
+	// than infer from an absence (#563).
+	//
+	// It takes no window. A lapsed proposal is visible for exactly as long as its
+	// row exists, and PurgeLapsed is the only thing that ends that — so a
+	// proposal missing from both lists was purged or never existed, and there is
+	// no third state where the row is present and hidden.
+	Lapsed(ctx context.Context, now time.Time) ([]OverrideProposal, error)
+	// PurgeLapsed removes proposals that expired before cutoff and reports how
+	// many went. It is what bounds the table: a proposal nobody signs is never
+	// claimed, so without this every override ever proposed and left unsigned
+	// stays forever.
+	PurgeLapsed(ctx context.Context, cutoff time.Time) (int64, error)
 }
 
 // MemoryProposals is the in-process ProposalStore.
@@ -140,6 +154,37 @@ func (m *MemoryProposals) Pending(_ context.Context, now time.Time) ([]OverrideP
 	}
 	sortByCreatedAt(out)
 	return out, nil
+}
+
+func (m *MemoryProposals) Lapsed(_ context.Context, now time.Time) ([]OverrideProposal, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	out := make([]OverrideProposal, 0, len(m.by))
+	for _, p := range m.by {
+		// NOT !p.Pending(now): Pending is false for a CLAIMED proposal too, and a
+		// claimed one is not in this map to begin with. Expiry is the only way a
+		// row survives without being pending, and spelling it as the expiry
+		// comparison keeps that true if Pending ever grows another clause.
+		if !p.ExpiresAt.After(now) {
+			p.ChosenPrice = new(big.Rat).Set(p.ChosenPrice)
+			out = append(out, p)
+		}
+	}
+	sortByCreatedAt(out)
+	return out, nil
+}
+
+func (m *MemoryProposals) PurgeLapsed(_ context.Context, cutoff time.Time) (int64, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var n int64
+	for id, p := range m.by {
+		if p.ExpiresAt.Before(cutoff) {
+			delete(m.by, id)
+			n++
+		}
+	}
+	return n, nil
 }
 
 // PostgresProposals is the durable, tenant-scoped ProposalStore. It shares the
@@ -213,6 +258,58 @@ func (p *PostgresProposals) Pending(ctx context.Context, now time.Time) ([]Overr
 		out = append(out, prop)
 	}
 	return out, rows.Err()
+}
+
+// Lapsed lists proposals that expired unsigned and survive only because nothing
+// claimed them.
+//
+// THE SAME COLUMN LIST AND THE SAME INDEX AS Pending, with the comparison
+// inverted: exception_override_proposals_pending_idx is (tenant_id, expires_at),
+// so both halves of the split are one index scan and neither read degrades as
+// lapsed proposals accumulate between purges.
+func (p *PostgresProposals) Lapsed(ctx context.Context, now time.Time) ([]OverrideProposal, error) {
+	rows, err := p.pool.Query(ctx, `
+		SELECT proposal_id, exception_id, act, proposer, digest, reason, chosen_price, created_at, expires_at
+		FROM exception_override_proposals
+		WHERE expires_at <= $1
+		ORDER BY created_at, proposal_id
+	`, now)
+	if err != nil {
+		return nil, fmt.Errorf("store: list lapsed proposals: %w", err)
+	}
+	defer rows.Close()
+	var out []OverrideProposal
+	for rows.Next() {
+		prop, err := scanProposal(rows)
+		if err != nil {
+			return nil, fmt.Errorf("store: scan lapsed proposal: %w", err)
+		}
+		out = append(out, prop)
+	}
+	return out, rows.Err()
+}
+
+// PurgeLapsed deletes proposals that expired before cutoff.
+//
+// IDEMPOTENT AND SAFE TO RUN CONCURRENTLY, which is why it is a DELETE and not a
+// mark-then-sweep. The OMS needed announce-exactly-once because its expiry
+// publishes a FACT and a duplicate FACT is a second answer; nothing is published
+// here (#563 records why: datamaster emits one subject and nothing consumes it),
+// so two purgers racing on the same rows produce one outcome and a smaller
+// count on the loser.
+//
+// IT CANNOT TAKE AN APPROVED PROPOSAL. Claim deletes on approval, so a row that
+// still exists was never approved — the property the OMS needs a predicate for
+// is structural here.
+func (p *PostgresProposals) PurgeLapsed(ctx context.Context, cutoff time.Time) (int64, error) {
+	tag, err := p.pool.Exec(ctx, `
+		DELETE FROM exception_override_proposals
+		WHERE expires_at < $1
+	`, cutoff)
+	if err != nil {
+		return 0, fmt.Errorf("store: purge lapsed proposals: %w", err)
+	}
+	return tag.RowsAffected(), nil
 }
 
 // scanner is what pgx.Row and pgx.Rows have in common.

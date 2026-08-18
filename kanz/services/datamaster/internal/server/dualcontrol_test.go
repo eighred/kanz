@@ -309,10 +309,23 @@ func TestArmed_AnExpiredProposalCannotBeApproved(t *testing.T) {
 	if len(a.exception(t, id).Overrides) != 0 {
 		t.Error("an expired proposal applied")
 	}
-	// And it is no longer advertised as pending.
-	rec = a.do(t, http.MethodGet, "/v1/exceptions/pending-overrides", "carol@kanz", "")
-	if body := strings.TrimSpace(rec.Body.String()); body != "[]" {
-		t.Errorf("expired proposal still listed as pending: %s", body)
+	// AND IT IS NO LONGER ADVERTISED AS PENDING — which is now a statement about
+	// its STATE rather than its absence (#563).
+	//
+	// This assertion used to require the list to be exactly `[]`. That was the
+	// behaviour #563 identified as the defect: an expired proposal vanished, and
+	// the proposer could not tell "it lapsed" from "I never proposed it". The
+	// property this test exists to protect is unchanged and is now checked
+	// directly — an expired proposal must never be offered as work — rather than
+	// through an emptiness that also hid the record.
+	p, ok := a.find(t, "carol@kanz", proposalID)
+	if !ok {
+		t.Fatal("the expired proposal vanished from the queue entirely — a proposer has no way to " +
+			"learn their override lapsed unsigned (#563)")
+	}
+	if p.State != "lapsed" {
+		t.Errorf("expired proposal listed with state %q, want lapsed — anything else sends an "+
+			"approver to sign a proposal the line above just refused", p.State)
 	}
 }
 
