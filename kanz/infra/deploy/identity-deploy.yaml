@@ -129,6 +129,33 @@ spec:
             # this same value plus /jwks.json.
             - { name: IDENTITY_TOKEN_ISSUER, value: "https://identity.kanz.internal" }
             - { name: IDENTITY_TOKEN_AUDIENCE, value: "kanz" }
+            # HOW LONG A STOLEN TOKEN IS USEFUL (#532). SET EXPLICITLY, and being
+            # explicit is half the point: unset, DefaultTokenTTL applies by
+            # omission and the deployed window is 8h — a number nobody in this
+            # estate chose, arrived at by not writing one down.
+            #
+            # IT DOES NOT CHANGE WHAT A BROWSER USER EXPERIENCES, and that is worth
+            # stating so the next reader does not "fix" it back. web-bff clamps a
+            # session to min(WEB_BFF_SESSION_TTL, token expiry) and its manifest
+            # sets 1h, so browser sessions were already an hour. This bounds the
+            # case that clamp never touched: a RAW token held outside the BFF — one
+            # exfiltrated from a log, an operator's curl, a compromised pod. That
+            # window was 8h01m (DefaultTokenTTL plus the gateway's 1m leeway) and
+            # is now 1h01m.
+            #
+            # WHY NOT SHORTER. The re-login is a full authorization_code round trip
+            # — RefreshToken is stored and never read, so there is no refresh path
+            # to make this cheap. Below the session TTL it would start costing
+            # logins without shortening the exposure the clamp already governs.
+            #
+            # THE PRECONDITION WAS CHECKED, NOT ASSUMED: expiry drives a clean
+            # re-login rather than a broken screen, and kanz-web/src/main.test.ts
+            # now executes that composed path — which nothing did before, so a
+            # regression that dropped the wiring kept 110 tests green.
+            #
+            # Per-subject revocation is a different axis and still does not exist;
+            # this shortens the window, it does not close it. #532 owns that.
+            - { name: IDENTITY_TOKEN_TTL, value: "1h" }
             # THE ONLY BOUND ON CREDENTIAL GUESSING on this surface. The gateway's
             # quota middleware sits after its auth middleware and never sees an
             # anonymous request, so nothing upstream limits /login.
