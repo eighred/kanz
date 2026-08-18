@@ -114,6 +114,24 @@ type Config struct {
 	// Long enough for an approver in another timezone; short enough that a
 	// signature cannot be collected against a stale view of the book.
 	DualControlTTL time.Duration
+
+	// LapsedProposalRetention is how long a proposal that expired UNSIGNED stays
+	// listed, and therefore how long its row lives (#563).
+	//
+	// ONE KNOB FOR BOTH ON PURPOSE. A separate visibility window and purge cutoff
+	// would create a span where the row exists and the surface hides it, and
+	// "absent from the list" would stop meaning one thing. Here a lapsed proposal
+	// is visible for exactly as long as it exists.
+	//
+	// It bounds the table. A proposal nobody signs is never claimed, so nothing
+	// else ever removes it.
+	LapsedProposalRetention time.Duration
+
+	// ProposalPurgeInterval is how often lapsed proposals past the retention are
+	// removed. ZERO DISABLES THE PURGE, which the composition root logs loudly:
+	// the list keeps growing in plain sight rather than the table growing
+	// silently, but it does keep growing.
+	ProposalPurgeInterval time.Duration
 }
 
 // Load reads the configuration from the environment with production-safe
@@ -150,6 +168,14 @@ func Load() (Config, error) {
 		OutboxInterval:     durationOr("DATAMASTER_OUTBOX_INTERVAL", 0),
 		RequireDualControl: boolOr("DATAMASTER_REQUIRE_DUAL_CONTROL", false),
 		DualControlTTL:     durationOr("DATAMASTER_DUAL_CONTROL_TTL", dualcontrol.DefaultTTL),
+		// SEVEN DAYS, and the number is argued rather than round. A proposer who
+		// proposed an override on Friday and returns on Monday must still be able
+		// to see that it lapsed; anything shorter makes the answer depend on how
+		// long they were away, which is the ambiguity this whole change removes.
+		LapsedProposalRetention: durationOr("DATAMASTER_LAPSED_PROPOSAL_RETENTION", 7*24*time.Hour),
+		// Hourly. The purge is a bounded DELETE on an indexed column and the
+		// retention is measured in days, so nothing is gained by running it often.
+		ProposalPurgeInterval: durationOr("DATAMASTER_PROPOSAL_PURGE_INTERVAL", time.Hour),
 
 		RefFiles:   parseVendorMap(os.Getenv("DATAMASTER_REF_FILES")),
 		PriceFiles: parseVendorMap(os.Getenv("DATAMASTER_PRICE_FILES")),

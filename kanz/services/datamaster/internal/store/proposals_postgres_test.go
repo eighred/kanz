@@ -15,6 +15,7 @@ package store
 import (
 	"context"
 	"errors"
+	"fmt"
 	"math/big"
 	"strings"
 	"sync"
@@ -454,5 +455,130 @@ func TestPostgresOverride_AFailedOverrideAnnouncesNothing(t *testing.T) {
 	if after != before {
 		t.Errorf("a FAILED override left %d FACT(s) in the outbox — the estate would be told about a "+
 			"decision that never happened", after-before)
+	}
+}
+
+// LAPSED AND PURGE, AGAINST THE ENGINE THAT ACTUALLY HOLDS THE ROWS (#563).
+//
+// The memory contract asserts the semantics; only this asserts that the SQL says
+// the same thing. The two predicates are inverses spelled in different
+// statements — `expires_at > $1` and `expires_at <= $1` — and an off-by-one
+// between them is a proposal in neither list, which is the exact silent drop
+// this change removes.
+func TestPostgresProposals_AnExpiredProposalIsLapsedNotGone(t *testing.T) {
+	pool := newPool(t)
+	ctx := context.Background()
+	seedException(t, pool, "P9:PRICE_TOLERANCE:ICE")
+	ps := NewPostgresProposals(pool)
+
+	if err := ps.Put(ctx, proposalFor(t, "prop-lapsed", "P9:PRICE_TOLERANCE:ICE", "alice@kanz", "130")); err != nil {
+		t.Fatal(err)
+	}
+	after := pgNow.Add(dualcontrol.DefaultTTL + time.Hour)
+
+	pending, err := ps.Pending(ctx, after)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lapsed, err := ps.Lapsed(ctx, after)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pending) != 0 {
+		t.Errorf("an expired proposal is still pending: %+v", pending)
+	}
+	if len(lapsed) != 1 || lapsed[0].ID != "prop-lapsed" {
+		t.Fatalf("lapsed = %+v, want prop-lapsed. A row in NEITHER list is the silent drop: the "+
+			"proposer cannot tell it from one that was never proposed", lapsed)
+	}
+	if lapsed[0].Proposer != "alice@kanz" {
+		t.Errorf("proposer = %q — a lapsed entry that cannot say whose it was tells nobody anything",
+			lapsed[0].Proposer)
+	}
+}
+
+// THE BOUNDARY IS THE TEST. A purge that takes a proposal still inside the
+// retention window deletes the record the proposer came back to read; one that
+// spares an ancient row is the unbounded growth this exists to end.
+func TestPostgresProposals_PurgeTakesOnlyWhatIsPastRetention(t *testing.T) {
+	pool := newPool(t)
+	ctx := context.Background()
+	seedException(t, pool, "P10:PRICE_TOLERANCE:ICE")
+	ps := NewPostgresProposals(pool)
+
+	if err := ps.Put(ctx, proposalFor(t, "prop-purge", "P10:PRICE_TOLERANCE:ICE", "alice@kanz", "130")); err != nil {
+		t.Fatal(err)
+	}
+	expiry := pgNow.Add(dualcontrol.DefaultTTL)
+
+	// Not yet past retention: it must survive, and it must still be READABLE,
+	// because being listed is the whole point of keeping it.
+	n, err := ps.PurgeLapsed(ctx, expiry.Add(-time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 0 {
+		t.Fatalf("purged %d proposals inside the retention window — that deletes the record a "+
+			"proposer returns to read, and a live proposal is a signature somebody was about to give", n)
+	}
+	if lapsed, lErr := ps.Lapsed(ctx, expiry.Add(time.Minute)); lErr != nil || len(lapsed) != 1 {
+		t.Fatalf("lapsed = %+v (err=%v) after a no-op purge, want the proposal still listed", lapsed, lErr)
+	}
+
+	// Past retention: it goes, and the count says so.
+	if n, err = ps.PurgeLapsed(ctx, expiry.Add(time.Hour)); err != nil || n != 1 {
+		t.Fatalf("purged %d (err=%v), want 1 — a purge reporting 0 while rows remain is how this "+
+			"table grew unnoticed in the first place", n, err)
+	}
+	if lapsed, lErr := ps.Lapsed(ctx, expiry.Add(2*time.Hour)); lErr != nil || len(lapsed) != 0 {
+		t.Fatalf("lapsed = %+v (err=%v) after the purge", lapsed, lErr)
+	}
+}
+
+// TWO PURGERS RACING PRODUCE ONE OUTCOME. There is no leader election on this
+// loop, deliberately: PurgeLapsed is an idempotent DELETE, so replicas racing
+// cost a smaller count on the loser rather than a wrong answer. If that stops
+// being true the composition root needs a lock, and this is what would say so.
+func TestPostgresProposals_ConcurrentPurgesRemoveEachRowOnce(t *testing.T) {
+	pool := newPool(t)
+	ctx := context.Background()
+	seedException(t, pool, "P11:PRICE_TOLERANCE:ICE")
+	ps := NewPostgresProposals(pool)
+
+	const rows = 8
+	for i := 0; i < rows; i++ {
+		id := fmt.Sprintf("prop-race-%d", i)
+		if err := ps.Put(ctx, proposalFor(t, id, "P11:PRICE_TOLERANCE:ICE", "alice@kanz", "130")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cutoff := pgNow.Add(dualcontrol.DefaultTTL + time.Hour)
+
+	var wg sync.WaitGroup
+	counts := make([]int64, 4)
+	for i := range counts {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			n, err := ps.PurgeLapsed(ctx, cutoff)
+			if err != nil {
+				t.Errorf("purger %d: %v", i, err)
+				return
+			}
+			counts[i] = n
+		}(i)
+	}
+	wg.Wait()
+
+	var total int64
+	for _, n := range counts {
+		total += n
+	}
+	if total != rows {
+		t.Errorf("purgers removed %d rows in total, want %d — a row counted twice means the DELETE "+
+			"is not the serialisation point this loop assumes it is", total, rows)
+	}
+	if lapsed, err := ps.Lapsed(ctx, cutoff); err != nil || len(lapsed) != 0 {
+		t.Fatalf("lapsed = %+v (err=%v) after concurrent purges", lapsed, err)
 	}
 }

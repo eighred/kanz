@@ -342,26 +342,63 @@ func (s *Server) handlePendingOverrides(w http.ResponseWriter, r *http.Request) 
 		writeJSON(w, http.StatusOK, []any{})
 		return
 	}
-	pending, err := s.proposals.Pending(r.Context(), s.now())
+	now := s.now()
+	pending, err := s.proposals.Pending(r.Context(), now)
 	if err != nil {
 		s.logger.Error("cannot list pending override proposals", "err", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "proposal store unavailable"})
 		return
 	}
-	out := make([]map[string]any, 0, len(pending))
+	// A PROPOSAL NOBODY SIGNED IS LISTED, NOT ERASED (#563).
+	//
+	// Until this, an override proposal that reached expires_at simply stopped
+	// appearing, and the proposer had to tell "I never proposed it", "somebody is
+	// still considering it" and "it died unsigned" apart from one absence. The
+	// exception stayed listed as unresolved, so the STATE was recoverable and the
+	// event was not: nothing anywhere recorded that a resolution had been
+	// proposed and had lapsed.
+	//
+	// #547 solved the same problem for held orders with a terminal FACT, and that
+	// answer does not transfer. It worked because ORDER_REJECTED already had a
+	// reader — the trader watching for any rejection. This service publishes one
+	// subject, data.exception.overridden, and nothing consumes it but the audit
+	// projector, so an expiry FACT here would be a new subject, grant and message
+	// with nobody on the other end. The surface the proposer already uses is the
+	// reader that exists.
+	lapsed, err := s.proposals.Lapsed(r.Context(), now)
+	if err != nil {
+		s.logger.Error("cannot list lapsed override proposals", "err", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "proposal store unavailable"})
+		return
+	}
+	out := make([]map[string]any, 0, len(pending)+len(lapsed))
 	for _, p := range pending {
-		out = append(out, map[string]any{
-			"proposal_id":  p.ID,
-			"exception_id": p.Subject,
-			"act":          string(p.Act),
-			"proposer":     p.Proposer,
-			"reason":       p.Reason,
-			"chosen_price": p.ChosenPrice.RatString(),
-			"created_at":   p.CreatedAt,
-			"expires_at":   p.ExpiresAt,
-		})
+		out = append(out, proposalJSON(p, "pending"))
+	}
+	for _, p := range lapsed {
+		out = append(out, proposalJSON(p, "lapsed"))
 	}
 	writeJSON(w, http.StatusOK, out)
+}
+
+// proposalJSON renders one proposal with the state that says whether it is still
+// actionable.
+//
+// STATE IS ALWAYS PRESENT, INCLUDING ON PENDING ENTRIES. Adding the field only
+// to lapsed ones would make a client that ignores unknown keys — which is every
+// client that predates this — read a lapsed proposal as work waiting for them.
+func proposalJSON(p store.OverrideProposal, state string) map[string]any {
+	return map[string]any{
+		"proposal_id":  p.ID,
+		"exception_id": p.Subject,
+		"act":          string(p.Act),
+		"proposer":     p.Proposer,
+		"reason":       p.Reason,
+		"chosen_price": p.ChosenPrice.RatString(),
+		"created_at":   p.CreatedAt,
+		"expires_at":   p.ExpiresAt,
+		"state":        state,
+	}
 }
 
 // authenticatedSubject returns the caller's identity or writes the 401.

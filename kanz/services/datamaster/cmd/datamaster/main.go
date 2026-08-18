@@ -220,6 +220,21 @@ func run() int {
 			"arm_with", "DATAMASTER_REQUIRE_DUAL_CONTROL=true",
 			"counter", "kanz_datamaster_overrides_total{signatures=\"single_signed\"}")
 	}
+	// LAPSED PROPOSALS ARE LISTED, AND THEN THEY ARE REMOVED (#563).
+	//
+	// A proposal nobody signs is never claimed, and Claim is the only thing that
+	// deletes one — so before this, every override ever proposed and left unsigned
+	// stayed in exception_override_proposals for the life of the deployment. It
+	// was invisible growth: Pending filtered the rows out at query time, so the
+	// table grew with the lapse rate and no surface ever showed it.
+	//
+	// The retention is what a proposer can still see, so purging is not a cleanup
+	// job that happens to be tidy — it is the moment the record stops existing.
+	// That is why zero is loud rather than quiet.
+	if armProposalPurge(cfg, proposals, logger) {
+		go purgeLapsedProposals(ctx, proposals, cfg.ProposalPurgeInterval, cfg.LapsedProposalRetention, logger)
+	}
+
 	httpSrv := httpserver.New(cfg.Listen, server.New(readiness, logger, cfg.Tenant, golden, exceptions, feeds,
 		server.WithMetrics(obs.MetricsHandler()),
 		server.WithDualControl(server.DualControl{
@@ -456,4 +471,61 @@ func guardSim(feeds []feed.VendorFeed, allowSim bool) error {
 		}
 	}
 	return nil
+}
+
+// armProposalPurge states the posture and reports whether the loop should run.
+//
+// A FUNCTION SO IT CAN BE ASSERTED. The decision is three lines and it lives at
+// the composition root, which no unit test reaches and which this repository has
+// shipped crashes through before. What has to be true is not that a line is
+// logged but that the DISABLED case is logged at WARN — an Info here reads as
+// "purging is configured" to the one person who would otherwise notice the table
+// growing.
+func armProposalPurge(cfg config.Config, proposals store.ProposalStore, logger *slog.Logger) bool {
+	if proposals == nil {
+		// No store, no proposals, nothing to purge. Not a posture worth a line:
+		// openStores has already said what this deployment is.
+		return false
+	}
+	if cfg.ProposalPurgeInterval <= 0 {
+		logger.Warn("DATAMASTER_PROPOSAL_PURGE_INTERVAL is 0 — lapsed override proposals are never "+
+			"removed. They stay LISTED, so this grows in plain sight rather than silently, but "+
+			"exception_override_proposals now grows with the lapse rate for the life of this "+
+			"deployment (#563)",
+			"retention", cfg.LapsedProposalRetention)
+		return false
+	}
+	logger.Info("lapsed override proposals are listed then purged",
+		"retention", cfg.LapsedProposalRetention, "every", cfg.ProposalPurgeInterval)
+	return true
+}
+
+// purgeLapsedProposals removes proposals that lapsed longer than retention ago.
+//
+// NO LEADER ELECTION, unlike the projection cycle above. PurgeLapsed is an
+// idempotent DELETE, so replicas racing on the same rows produce one outcome and
+// a smaller count on the losers — whereas a duplicated projection cycle would
+// write the book twice. Electing a leader for this would add a failure mode
+// (nobody purges because the lock holder is wedged) to buy nothing.
+func purgeLapsedProposals(ctx context.Context, proposals store.ProposalStore, every, retention time.Duration, logger *slog.Logger) {
+	ticker := time.NewTicker(every)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			n, err := proposals.PurgeLapsed(ctx, time.Now().Add(-retention))
+			if err != nil {
+				// WARN and continue. A purge that cannot run is a table that grows,
+				// not an override that goes wrong, and taking the service down over
+				// it would trade a slow problem for an immediate one.
+				logger.Warn("cannot purge lapsed override proposals", "err", err)
+				continue
+			}
+			if n > 0 {
+				logger.Info("purged lapsed override proposals", "count", n, "older_than", retention)
+			}
+		}
+	}
 }

@@ -38,6 +38,18 @@ func (h *storeLogCapture) Handle(_ context.Context, r slog.Record) error {
 func (h *storeLogCapture) WithAttrs([]slog.Attr) slog.Handler { return h }
 func (h *storeLogCapture) WithGroup(string) slog.Handler      { return h }
 
+// all renders every captured record, so a failure message can show what WAS
+// logged rather than only what was not.
+func (h *storeLogCapture) all() string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	var b strings.Builder
+	for _, r := range h.records {
+		b.WriteString(r.Level.String() + " " + r.Message + "\n")
+	}
+	return b.String()
+}
+
 func (h *storeLogCapture) hasWarnContaining(substrs ...string) bool {
 	h.mu.Lock()
 	defer h.mu.Unlock()
