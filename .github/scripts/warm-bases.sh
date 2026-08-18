@@ -35,11 +35,17 @@
 # and it works for a base with no shell — distroless has no /bin/sh for a `RUN`
 # to warm it with, and distroless-static is the image these 403s land on.
 #
-# WHAT IT DOES NOT COVER, STATED SO IT IS NOT ASSUMED. The buildx BUILDER image
+# WHAT IT DOES NOT COVER, AND WHERE THAT WENT. The buildx BUILDER image
 # (ghcr.io/eighred/base/buildkit, pinned in build.yml's driver-opts) is pulled by
-# setup-buildx-action before this script can run, and has 403'd too. Retrying that
-# means replacing the action with a scripted create+bootstrap, which is a larger
-# change to a step whose ordering is already load-bearing. Left alone deliberately.
+# setup-buildx-action before this script can run, and has 403'd too. This header
+# used to say retrying it "means replacing the action with a scripted
+# create+bootstrap … Left alone deliberately."
+#
+# IT DID NOT NEED THAT, AND THE GAP BIT FIRST. PR #547, 2026-08-18, image
+# (venue-okx): "manifest unknown" pulling the builder, one job of thirty, at
+# buildx step #1 where neither retry could see it. warm-builder.sh closes it by
+# pulling the image BEFORE the action runs, so the create+bootstrap finds it in
+# the daemon — the action is untouched and so is the load-bearing ordering.
 #
 # Usage:  warm-bases.sh <dockerfile>
 # Env:    MAX_ATTEMPTS (default 4), RETRY_BASE_DELAY seconds (default 10),

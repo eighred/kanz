@@ -343,17 +343,162 @@ func TestTheImageWorkflowWarmsItsBasesBeforeBuilding(t *testing.T) {
 	// ORDER IS THE WHOLE POINT. Warming after the build would pull the bases the
 	// build has already failed on.
 	warm := strings.Index(src, "warm-bases.sh")
-	build := strings.Index(src, "docker/build-push-action")
+	build := stepIndex(src, "docker/build-push-action")
 	if warm < 0 || build < 0 || warm > build {
 		t.Fatalf("the warm step runs AFTER the build (warm@%d, build@%d) — it must precede it, or "+
 			"it warms a cache nothing will read", warm, build)
 	}
 	// And after the login: these bases are private, so an unauthenticated warm
 	// would fail every run rather than occasionally.
-	login := strings.Index(src, "docker/login-action")
+	login := stepIndex(src, "docker/login-action")
 	if login < 0 || login > warm {
 		t.Fatalf("the warm step runs BEFORE the registry login (login@%d, warm@%d) — every base here "+
 			"is private, so that fails permanently rather than flakily", login, warm)
+	}
+}
+
+// stepIndex locates a workflow STEP by its `uses:` line, never by the bare
+// action name.
+//
+// THE BARE NAME MATCHES THE PROSE. build.yml explains its own ordering at
+// length, so "docker/setup-buildx-action" and "docker/build-push-action" both
+// appear in comments HUNDREDS of lines above the steps they describe. An
+// ordering check anchored on the bare name compares a comment's position against
+// a step's — which fired as a false failure the moment a fourth ordering guard
+// was added, and would just as happily have passed while the real steps were in
+// the wrong order.
+func stepIndex(src, action string) int {
+	return strings.Index(src, "uses: "+action+"@")
+}
+
+// THE THIRD REGISTRY PULL, AND THE ONE BOTH RETRIES SAID THEY COULD NOT COVER.
+//
+// build.yml pins the buildx BUILDER at ghcr.io/eighred/base/buildkit, which is
+// private like every other mirrored base, and setup-buildx-action pulls it while
+// creating the builder. That pull had no retry, and warm-bases.sh named the gap
+// in its own header while declining to close it: "Retrying that means replacing
+// the action with a scripted create+bootstrap … Left alone deliberately."
+//
+// It bit on 2026-08-18, PR #547, image (venue-okx):
+//
+//	#1 [internal] booting buildkit
+//	#1 pulling image ghcr.io/eighred/base/buildkit:buildx-stable-1
+//	#1 ERROR: Error response from daemon: manifest unknown
+//
+// One job of thirty; the other twenty-nine pulled the same tag in the same run,
+// so the tag was there and the registry was not. It fails at buildx step #1 —
+// before any step this repo wrote — so neither existing retry could see it, and
+// the diagnosis costs a full reading of a red that is not a break.
+//
+// WHAT CLOSED IT IS SMALLER THAN WHAT WAS DECLINED. The action is untouched and
+// the ordering it depends on is untouched: the image is pulled BEFORE the action
+// runs, so the create+bootstrap finds it already in the daemon and pulls nothing.
+// It is safe to retry for the same structural reason the other two are — the step
+// pulls one image and builds nothing, so no compile failure can reach it.
+func TestTheImageWorkflowWarmsItsBuilderBeforeCreatingIt(t *testing.T) {
+	repoRoot := filepath.Dir(moduleRoot(t))
+	b, err := os.ReadFile(filepath.Join(repoRoot, ".github", "workflows", "build.yml"))
+	if err != nil {
+		t.Fatalf("read build.yml: %v", err)
+	}
+	src := string(b)
+
+	if !strings.Contains(src, "warm-builder.sh") {
+		t.Fatal("build.yml no longer warms the buildx builder image. setup-buildx-action then " +
+			"pulls it unretried, and a registry hiccup reddens the job at step #1 — upstream of " +
+			"every step this repo wrote, so neither the push retry nor warm-bases.sh can see it")
+	}
+
+	// ORDER IS THE WHOLE POINT, TWICE OVER.
+	warm := strings.Index(src, "warm-builder.sh")
+	buildx := stepIndex(src, "docker/setup-buildx-action")
+	if warm < 0 || buildx < 0 || warm > buildx {
+		t.Fatalf("the builder warm runs AFTER setup-buildx-action (warm@%d, buildx@%d) — the action "+
+			"has already done the pull being protected, so this warms nothing", warm, buildx)
+	}
+	// And after the login, for the reason build.yml's own comment gives about the
+	// buildx step: the builder image is PRIVATE, so an unauthenticated pull fails
+	// every run rather than occasionally.
+	login := stepIndex(src, "docker/login-action")
+	if login < 0 || login > warm {
+		t.Fatalf("the builder warm runs BEFORE the registry login (login@%d, warm@%d) — the builder "+
+			"image is private, so that is a permanent failure wearing a flake's clothes", login, warm)
+	}
+
+	// THE WARMED IMAGE MUST BE THE ONE THE BUILDER ACTUALLY USES. Two literals
+	// that must agree is exactly how this silently stops working: driver-opts
+	// moves to a new tag, the warm keeps pulling the old one, and the retry
+	// protects an image nothing boots.
+	const builderImage = "ghcr.io/eighred/base/buildkit:buildx-stable-1"
+	if !strings.Contains(src, "image="+builderImage) {
+		t.Fatalf("build.yml's driver-opts no longer pins %s — this guard and the warm step are "+
+			"pinned to it, so they are now protecting an image the builder does not use", builderImage)
+	}
+	if !strings.Contains(src, "warm-builder.sh "+builderImage) {
+		t.Fatalf("the warm step does not pull %s — driver-opts and the warm have drifted apart, "+
+			"and the pull being retried is not the pull that boots the builder", builderImage)
+	}
+}
+
+func TestWarmBuilderScriptBehaviour(t *testing.T) {
+	bash, err := exec.LookPath("bash")
+	if err != nil {
+		t.Skipf("bash not on PATH (%v): the retry script's behaviour cannot be exercised here", err)
+	}
+	repoRoot := filepath.Dir(moduleRoot(t))
+	script := filepath.Join(repoRoot, ".github", "scripts", "warm-builder.sh")
+	if _, err := os.Stat(script); err != nil {
+		t.Fatalf("warm-builder.sh is missing: %v", err)
+	}
+
+	for _, tc := range []struct {
+		name        string
+		failures    int
+		wantErr     bool
+		wantRetries int
+	}{
+		{name: "first attempt succeeds", failures: 0, wantErr: false, wantRetries: 0},
+		{name: "one refusal then success", failures: 1, wantErr: false, wantRetries: 1},
+		// THE PROPERTY THAT KEEPS IT HONEST, and the mirror of the other two: a
+		// pull refused on EVERY attempt is a real authorization or visibility
+		// failure, not a flake, and must still fail the job. Giving up quietly
+		// would boot a builder nobody can pull and call it green.
+		{name: "always refused still fails", failures: -1, wantErr: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			stub := writeDockerStub(t, dir, tc.failures)
+			outFile := filepath.Join(dir, "gh_output")
+
+			cmd := exec.Command(bash, script, "ghcr.io/eighred/base/buildkit:buildx-stable-1")
+			cmd.Dir = repoRoot
+			cmd.Env = append(os.Environ(),
+				"DOCKER="+stub,
+				"MAX_ATTEMPTS=4",
+				"RETRY_BASE_DELAY=0",
+				"GITHUB_OUTPUT="+outFile,
+			)
+			out, err := cmd.CombinedOutput()
+			if tc.wantErr && err == nil {
+				t.Fatalf("a pull refused on every attempt reported SUCCESS — a revoked scope would "+
+					"boot no builder and the job would go green anyway.\n%s", out)
+			}
+			if !tc.wantErr && err != nil {
+				t.Fatalf("warm-builder.sh failed after %d refusal(s): %v\n%s", tc.failures, err, out)
+			}
+			if tc.wantErr {
+				return
+			}
+			got, err := os.ReadFile(outFile)
+			if err != nil {
+				t.Fatalf("read GITHUB_OUTPUT: %v", err)
+			}
+			want := fmt.Sprintf("retries=%d", tc.wantRetries)
+			if !strings.Contains(string(got), want) {
+				t.Errorf("GITHUB_OUTPUT = %q, want it to contain %q — #320 turns on a RATE, and a "+
+					"silent retry hides the rate it exists to measure", got, want)
+			}
+		})
 	}
 }
 

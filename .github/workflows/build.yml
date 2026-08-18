@@ -371,6 +371,32 @@ jobs:
       #
       # The tag is moving on purpose; base-image-mirror.yml's weekly refresh is
       # what stops a mirror becoming a supply-chain freeze.
+      # WARM THE BUILDER ITSELF, WITH A RETRY (#320's third case).
+      #
+      # setup-buildx-action pulls the pinned builder image while creating the
+      # builder, and that pull had no retry. It is the gap warm-bases.sh named in
+      # its own header and declined to close — "Left alone deliberately" — on the
+      # grounds that closing it meant replacing the action with a scripted
+      # create+bootstrap. It does not: `docker pull` first, and the create below
+      # finds the image already in the daemon.
+      #
+      # main's cousin went red on it on 2026-08-18, PR #547, image (venue-okx):
+      #
+      #   #1 pulling image ghcr.io/eighred/base/buildkit:buildx-stable-1
+      #   #1 ERROR: Error response from daemon: manifest unknown
+      #
+      # one job of thirty, the other twenty-nine having pulled the same tag in the
+      # same run. This step compiles nothing, so retrying it cannot retry a code
+      # failure — the property every retry in this workflow is built on.
+      #
+      # THE IMAGE IS SPELLED TWICE, HERE AND IN driver-opts BELOW, AND AN ARCH
+      # GUARD PINS THEM TOGETHER. Two literals that must agree is exactly how this
+      # quietly stops working: the pin moves to a new tag, the warm keeps pulling
+      # the old one, and the retry protects an image nothing boots.
+      - name: Warm the buildx builder image (retried on a refused pull)
+        id: warm_builder
+        run: .github/scripts/warm-builder.sh ghcr.io/eighred/base/buildkit:buildx-stable-1
+
       - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
         with:
           driver-opts: image=ghcr.io/eighred/base/buildkit:buildx-stable-1
