@@ -1,0 +1,113 @@
+-- 0010: an expiry nobody announced is the silent drop, one table over (#539).
+--
+-- WHAT WAS SILENT. A proposal no second signer reaches in time simply stops being
+-- listed. ProposalStore.Pending reads
+--
+--     WHERE approver = '' AND expires_at > $1
+--
+-- so the instant the deadline passes the row leaves the queue — and NOTHING ever
+-- looked at it again. It is not decided (approver stays ''), it is not rejected,
+-- and no FACT is published for it. The trader who submitted the order saw
+-- ORDER_PENDING_APPROVAL and then nothing, ever: an act that neither takes effect
+-- nor reports why, which is precisely the failure #410's acceptance forbade on
+-- the way IN and which this table then reproduced on the way OUT.
+--
+-- The repair is a sweeper, and a sweeper needs a DURABLE "already announced"
+-- mark. The shipped OMS runs replicas: 2, so both pods see the same expired row
+-- on the same tick; a mark held in memory would let each pod publish its own
+-- ORDER_REJECTED for one order, and a restart would re-announce everything it had
+-- already announced. The mark is this column, and AnnounceExpiry sets it in the
+-- same transaction as the FACT — the arbitration is the engine's, exactly as it
+-- is for Claim, because a mutex in one process says nothing about the other pod.
+--
+-- # Why a timestamp and not a boolean
+--
+-- WHEN the expiry was announced is the only thing separating a sweeper that ran
+-- late from one that never ran at all. With a bool, a row announced one second
+-- after its deadline and one announced three hours after it are the same row, and
+-- "is the sweeper actually running" becomes unanswerable from the very table it
+-- writes to. Same pairing decided_at makes with approver in 0009: "what happened"
+-- and "when" travel together, or the trail cannot be aged.
+--
+-- # NULL MEANS NOT ANNOUNCED, AND THERE IS DELIBERATELY NO DEFAULT
+--
+-- Every row that exists when this lands has an expiry nobody announced — that is
+-- the defect, not an exception to it. So they take NULL, they enter the sweeper's
+-- queue, and the first sweep publishes the rejection each of them has been owed
+-- since the moment it expired.
+--
+-- OPERATORS SHOULD EXPECT THAT BURST. On the first tick after deploy the estate
+-- sees one ORDER_REJECTED per order that expired unapproved before this
+-- migration, each carrying a deadline in the past. That is a backlog being paid,
+-- not a storm: every one of those orders is one a trader was never told about. A
+-- DEFAULT now() would have suppressed it by marking every unsent announcement as
+-- sent — "nothing configured" and "checked, and fine" made to look identical, on
+-- the one path this migration exists to open.
+ALTER TABLE order_proposals ADD COLUMN expiry_announced_at TIMESTAMPTZ;
+
+-- AN EXPIRY CANNOT BE ANNOUNCED BEFORE IT HAPPENS.
+--
+-- AnnounceExpiry re-checks `expires_at <= $2` in its own predicate rather than
+-- trusting the sweeper's clock; this is that rule at the engine, for any writer
+-- that does not come through it. The row it guards is the one that says an order
+-- died of the clock, and announced early it records the rejection of an order
+-- somebody still had time to sign — the trader's notice and the audit trail would
+-- then agree on a deadline that had not passed, which is worse than either being
+-- wrong alone. A pod with a skewed clock is the ordinary way this happens, not an
+-- exotic one; the constraint is what makes that skew a loud refusal instead of a
+-- killed order.
+--
+-- Same shape as order_proposals_decided_together: a field and the moment it
+-- claims must not be able to disagree. NULL passes — "not announced" is the
+-- resting state of every live proposal, not a violation.
+ALTER TABLE order_proposals
+    ADD CONSTRAINT order_proposals_announced_after_expiry
+    CHECK (expiry_announced_at IS NULL OR expiry_announced_at >= expires_at);
+
+-- THE SWEEP GETS ITS OWN PARTIAL INDEX, and order_proposals_pending_idx (0009) is
+-- not a substitute — because that index is the one this very defect made
+-- unbounded.
+--
+-- 0009 justified `WHERE approver = ''` with "a decided proposal leaves the index,
+-- so listing what needs attention stays the same cost on day 1000 as on day 1".
+-- That holds for an APPROVED proposal. AN EXPIRED ONE IS NEVER DECIDED: nobody
+-- signs it, approver stays '' for the life of the row, and it therefore never
+-- leaves the pending index. Every order ever held and not approved is still in
+-- there.
+--
+-- ExpiredUnannounced runs on a timer, on every replica, forever. Served from the
+-- pending index it would walk every proposal that ever expired — a set that only
+-- grows — to find the handful that expired since the last tick. This index
+-- carries `expiry_announced_at IS NULL` instead, so a row LEAVES it for good the
+-- moment its expiry is announced, and what remains is the live queue plus
+-- whatever expired since the last sweep: both bounded by the TTL rather than by
+-- the age of the deployment.
+--
+-- COLUMN ORDER MIRRORS THE PENDING INDEX (tenant_id, created_at, order_id).
+-- tenant_id leads because RLS scopes every query by it, so an index not starting
+-- there cannot be used alone; created_at supplies ExpiredUnannounced's "oldest
+-- first" so the LIMIT ends the scan rather than sorting the whole match; order_id
+-- makes the order total, so two sweeps do not disagree about which rows the limit
+-- cut off. expires_at is a FILTER here and not a key: the TTL is one configured
+-- duration, so created_at order and expires_at order are the same order and the
+-- expired rows sit at the front of the scan. IF A PER-ORDER TTL EVER LANDS that
+-- stops being true and this index wants expires_at as its second column.
+--
+-- BOTH PREDICATES MUST APPEAR IN THE QUERY. Postgres uses a partial index only
+-- where it can prove the predicate holds, so ExpiredUnannounced spells out
+-- `approver = '' AND expiry_announced_at IS NULL`; neither clause is implied by
+-- the other or by the expires_at filter, and dropping either as redundant turns
+-- the sweep into a sequential scan. The rule 0008 and 0009 both record.
+--
+-- WHY NOT ONE INDEX FOR BOTH READS. Teaching Pending to spell out
+-- `expiry_announced_at IS NULL` would let a single index serve it and the sweep
+-- (the clause is true of every row Pending returns, since the CHECK above forbids
+-- marking a proposal that has not expired). It would also mean dropping and
+-- recreating 0009's index here — a change to the approval path's read while
+-- fixing the expiry path's silence, on a table whose pending list is what an
+-- approver is looking at. The unbounded growth of the pending index is real and
+-- separate; it belongs to its own issue with its own before/after, not to this
+-- one.
+CREATE INDEX order_proposals_expiry_sweep_idx
+    ON order_proposals (tenant_id, created_at, order_id)
+    WHERE approver = '' AND expiry_announced_at IS NULL;

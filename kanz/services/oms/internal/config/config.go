@@ -300,6 +300,20 @@ type Config struct {
 	// look the same.
 	ScheduleInterval time.Duration
 
+	// ProposalExpiryInterval is how often the OMS announces held orders whose
+	// deadline has passed (#539). Zero DISABLES the sweep.
+	//
+	// OFF MEANS A HELD ORDER DIES IN SILENCE, which is the state this repository
+	// shipped between #537 and #539: the proposal leaves the pending queue at
+	// expires_at, enters no other queue, and the trader who submitted it sees
+	// ORDER_PENDING_APPROVAL and then nothing, ever. main logs loudly when it is
+	// off, because off and armed must not look the same.
+	//
+	// IT IS SAFE ON EVERY REPLICA. The sweep takes no lease and elects no leader;
+	// ProposalStore.AnnounceExpiry is a conditional UPDATE whose rows-affected
+	// decides, so two pods finding the same expired row produce one announcement.
+	ProposalExpiryInterval time.Duration
+
 	// OutboxInterval is how often the outbox relay drains (#292).
 	//
 	// IT IS NOT THE PUBLISH LATENCY ON THE HAPPY PATH. A handler that commits a
@@ -453,6 +467,21 @@ func Load() (Config, error) {
 
 	// MAKER-CHECKER ON ORDER SUBMISSION (#410, act three). Three states, and the
 	// third is the one the owner ruled on explicitly.
+	// Default 60s, matching OMS_SWEEP_INTERVAL: both are background passes whose
+	// cost is one indexed query, and a deadline measured in hours does not need a
+	// tighter tick than that.
+	cfg.ProposalExpiryInterval = 60 * time.Second
+	if raw := strings.TrimSpace(os.Getenv("OMS_PROPOSAL_EXPIRY_INTERVAL")); raw != "" {
+		d, err := time.ParseDuration(raw)
+		if err != nil {
+			return Config{}, fmt.Errorf("OMS_PROPOSAL_EXPIRY_INTERVAL: %w", err)
+		}
+		if d < 0 {
+			return Config{}, fmt.Errorf("OMS_PROPOSAL_EXPIRY_INTERVAL: must not be negative (got %s); "+
+				"use 0 to disable the sweep deliberately", raw)
+		}
+		cfg.ProposalExpiryInterval = d
+	}
 	cfg.RequireDualControl = os.Getenv("OMS_REQUIRE_DUAL_CONTROL") == "true"
 	if raw := strings.TrimSpace(os.Getenv("OMS_DUAL_CONTROL_MIN_NOTIONAL")); raw != "" {
 		amount, currency, err := parseNotional(raw)
