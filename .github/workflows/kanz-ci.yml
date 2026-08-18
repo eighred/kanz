@@ -497,7 +497,20 @@ jobs:
           # now agree, and moving the gate is a reviewable change.
           version: v2.12.2
           working-directory: kanz
-          args: --timeout=5m
+          # --build-tags OR THE ADAPTERS BEHIND A TAG ARE NEVER LINTED (#179).
+          # Without it this gate analysed the DEFAULT build only, so
+          # model_anthropic.go, model_openrouter.go and the redis bus adapter —
+          # every file that only exists in a shipped image — were invisible to
+          # the fourth gate while passing build, vet and test. It was hiding a
+          # live finding: the Anthropic adapter discarded acc.Accumulate's error
+          # and served a partially assembled message as analysis.
+          #
+          # This is the same class the tagged build/vet/test steps above close,
+          # and the same one test/arch/build_tag_coverage_test.go names: a tag
+          # that ships without a check on this repository compiling it is dead
+          # code that deploys. Keep this list in step with the tags the
+          # Dockerfiles build with.
+          args: --timeout=5m --build-tags=anthropic,openrouter,redis
 
   python:
     runs-on: ubuntu-latest
