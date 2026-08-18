@@ -31,7 +31,9 @@ package order
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -662,5 +664,441 @@ func TestAnotherTenantCannotSeeOrAnnounceAnExpiredProposal(t *testing.T) {
 	}
 	if len(mine) != 1 || mine[0].ID != "o-expiry-tenant" {
 		t.Fatalf("the owner's sweep queue holds %d rows, want the one expired proposal", len(mine))
+	}
+}
+
+// THE PENDING INDEX WAS UNBOUNDED (#548). Everything below is about one index.
+//
+// 0009 justified `WHERE approver = ''` with "a decided proposal leaves the index,
+// so listing what needs attention stays the same cost on day 1000 as on day 1".
+// That is true of an APPROVED proposal and false of an EXPIRED one: nobody signs
+// an order nobody reached in time, so approver stays '' for the life of the row
+// and the row never leaves. Every proposal that ever expired unsigned was still
+// an entry, and the pending list — the screen an approver is looking at — got
+// slower with the AGE of the deployment rather than with the length of its queue.
+// Nothing failed while that happened, which is why it needs a test rather than an
+// incident.
+//
+// 0011 drops order_proposals_pending_idx and renames 0010's narrower
+// order_proposals_expiry_sweep_idx to order_proposals_open_idx, so one index
+// serves the pending read and the expiry sweep; Pending spells out
+// `expiry_announced_at IS NULL` so the planner can prove the predicate. The three
+// ways that can go wrong are each below: the clause could be redundant rather
+// than load-bearing (the plan), the old index could survive the rename (the
+// catalog), and the marker could fail to actually retire a row (the count).
+
+// pendingQuery is the statement PostgresProposals.Pending issues, repeated here
+// because EXPLAIN must run on the exact text the store runs — a plan for a query
+// nobody executes proves nothing about the one that does.
+//
+// THE COPY IS RECONCILED, NOT TRUSTED. TestThePendingReadIsServedByTheOpenIndex
+// runs both this text and Pending against the same rows and fails if they return
+// different proposals, so a change to the store's WHERE that is not made here
+// surfaces as a row-set mismatch instead of as a green EXPLAIN of a query the OMS
+// stopped issuing.
+const pendingQuery = `
+	SELECT order_id, portfolio_id, act, proposer, digest, command, approver, decided_at, created_at, expires_at
+	FROM order_proposals
+	WHERE approver = '' AND expiry_announced_at IS NULL AND expires_at > $1
+	ORDER BY created_at, order_id`
+
+// explainPlan returns the planner's chosen plan for sql as one string.
+//
+// Plain EXPLAIN, not EXPLAIN ANALYZE: the question is which plan Postgres CHOOSES
+// for this predicate, and executing it would answer a different one — a sequential
+// scan of a test table is fast, and "fast" is exactly the reading that lets an
+// index nobody can use look healthy.
+func explainPlan(t *testing.T, pool *pgxpool.Pool, sql string, args ...any) string {
+	t.Helper()
+	rows, err := pool.Query(context.Background(), "EXPLAIN "+sql, args...)
+	if err != nil {
+		t.Fatalf("EXPLAIN: %v", err)
+	}
+	defer rows.Close()
+	var plan strings.Builder
+	for rows.Next() {
+		var line string
+		if err := rows.Scan(&line); err != nil {
+			t.Fatalf("scan plan line: %v", err)
+		}
+		plan.WriteString(line)
+		plan.WriteByte('\n')
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("EXPLAIN: %v", err)
+	}
+	return plan.String()
+}
+
+// seedProposalBacklog fills the table with announced expired proposals and live
+// pending ones, then ANALYZEs so the planner chooses on real statistics.
+//
+// THE SIZE IS THE POINT. On a ten-row table Postgres reads sequentially whatever
+// the indexes say, so a plan test against a handful of rows asserts nothing; the
+// backlog is what makes the index a choice the planner has a reason to make. The
+// rows are written with raw SQL rather than through Put because they stand in for
+// history — twenty thousand orders held over a deployment's life — and the store
+// is not what is under test here.
+func seedProposalBacklog(t *testing.T, pool *pgxpool.Pool, announced, live int, now time.Time) {
+	t.Helper()
+	ctx := context.Background()
+
+	// Expired, unsigned and ANNOUNCED: the rows 0009's index kept forever.
+	// expiry_announced_at = expires_at satisfies 0010's announced-after-expiry
+	// CHECK, so this backlog is one the engine would actually have accepted.
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO order_proposals
+			(order_id, portfolio_id, act, proposer, digest, command,
+			 created_at, expires_at, expiry_announced_at)
+		SELECT 'o-backlog-' || g, 'pf-1', 'submit_order', 'user:alice@kanz', 'sha256:seed', ''::bytea,
+		       $1::timestamptz - (g || ' seconds')::interval - interval '1 hour',
+		       $1::timestamptz - (g || ' seconds')::interval,
+		       $1::timestamptz - (g || ' seconds')::interval
+		FROM generate_series(1, $2::int) AS g
+	`, now, announced); err != nil {
+		t.Fatalf("seed announced backlog: %v", err)
+	}
+
+	// Still awaiting a signature: the only rows the pending list is asked for.
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO order_proposals
+			(order_id, portfolio_id, act, proposer, digest, command, created_at, expires_at)
+		SELECT 'o-live-' || g, 'pf-1', 'submit_order', 'user:alice@kanz', 'sha256:seed', ''::bytea,
+		       $1::timestamptz - interval '1 minute' + (g || ' milliseconds')::interval,
+		       $1::timestamptz + interval '1 hour'
+		FROM generate_series(1, $2::int) AS g
+	`, now, live); err != nil {
+		t.Fatalf("seed live proposals: %v", err)
+	}
+
+	// WITHOUT THIS THE PLAN IS GUESSWORK. An unanalyzed table gives the planner
+	// default estimates, and a test that passed on those would not be reading the
+	// choice a production table's statistics produce.
+	if _, err := pool.Exec(ctx, `ANALYZE order_proposals`); err != nil {
+		t.Fatalf("ANALYZE: %v", err)
+	}
+}
+
+// openQueueDepth counts the entries order_proposals_open_idx holds, by counting
+// what its predicate matches rather than by measuring the index.
+//
+// pg_relation_size answers in PAGES, and a btree does not hand a page back when
+// its entries are retired — a bounded index and an unbounded one report the same
+// bytes until a VACUUM no test can rely on. The predicate is the property; the
+// file size is a lagging indicator of it.
+func openQueueDepth(t *testing.T, pool *pgxpool.Pool) int {
+	t.Helper()
+	var n int
+	if err := pool.QueryRow(context.Background(),
+		`SELECT count(*) FROM order_proposals WHERE approver = '' AND expiry_announced_at IS NULL`).Scan(&n); err != nil {
+		t.Fatalf("count open proposals: %v", err)
+	}
+	return n
+}
+
+// proposalRows is every row on the table, announced or not — the half of the
+// boundedness claim that must NOT change. An index shrinking because the rows
+// were deleted would be a far worse fix: those rows are the OMS's only durable
+// evidence that an order was held and how it ended.
+func proposalRows(t *testing.T, pool *pgxpool.Pool) int {
+	t.Helper()
+	var n int
+	if err := pool.QueryRow(context.Background(),
+		`SELECT count(*) FROM order_proposals`).Scan(&n); err != nil {
+		t.Fatalf("count proposals: %v", err)
+	}
+	return n
+}
+
+// TestThePendingReadIsServedByTheOpenIndex IS THE ASSERTION THAT THE ADDED CLAUSE
+// DOES SOMETHING.
+//
+// Postgres uses a partial index only where it can PROVE the predicate holds, so
+// `expiry_announced_at IS NULL` in Pending's WHERE is not decoration beside the
+// empty-approver clause — it is the only thing that lets the planner reach
+// order_proposals_open_idx at all. Spelled without it this read is a sequential
+// scan of every order the deployment ever held: no error, no warning, just an
+// approver's queue that takes longer every week. That is the trap 0009 documented
+// and then fell into, and reading the PLAN is the only way to tell a clause that
+// enabled an index from one that was already implied.
+func TestThePendingReadIsServedByTheOpenIndex(t *testing.T) {
+	pool := newPool(t)
+	ctx := context.Background()
+	now := t0.Add(24 * time.Hour)
+
+	// 20,000 proposals that expired unsigned and were announced, against 10 still
+	// awaiting a signature. THAT RATIO IS THE DEFECT: under 0009's predicate every
+	// one of the 20,000 was still an index entry, because nobody signs an order
+	// nobody reached in time and approver never stops being ''.
+	seedProposalBacklog(t, pool, 20000, 10, now)
+
+	plan := explainPlan(t, pool, pendingQuery, now)
+	if !strings.Contains(plan, "order_proposals_open_idx") {
+		t.Fatalf("the pending read does not reach order_proposals_open_idx:\n%s\n"+
+			"a partial index whose predicate the planner cannot prove is an index that does not "+
+			"exist, and this read then walks every proposal ever held", plan)
+	}
+	if strings.Contains(plan, "Seq Scan") {
+		t.Errorf("the pending read still contains a sequential scan:\n%s\n"+
+			"the queue an approver is looking at must cost what the queue is worth, not what the "+
+			"table's history is worth", plan)
+	}
+
+	// AND THE CLAUSE IS WHAT DID IT — the before/after this issue exists for, in
+	// one assertion. Spelled 0009's way the same read cannot reach the index; if it
+	// ever can, the index stopped being partial on the marker and the boundedness
+	// proved below went with it.
+	old := strings.Replace(pendingQuery, "AND expiry_announced_at IS NULL ", "", 1)
+	if old == pendingQuery {
+		t.Fatal("the control query is identical to the real one — the clause this test claims is " +
+			"load-bearing is not in pendingQuery, so nothing here is a comparison")
+	}
+	if oldPlan := explainPlan(t, pool, old, now); strings.Contains(oldPlan, "order_proposals_open_idx") {
+		t.Errorf("the read WITHOUT `expiry_announced_at IS NULL` also used order_proposals_open_idx:"+
+			"\n%s\nthe clause proves nothing then, and neither does the assertion above", oldPlan)
+	}
+
+	// THE EXPLAINED TEXT IS THE TEXT Pending RUNS. An EXPLAIN of a query the store
+	// no longer issues is a green plan for a plan nobody uses, so both are read
+	// against the same rows and must return the same proposals.
+	rows, err := pool.Query(ctx, pendingQuery, now)
+	if err != nil {
+		t.Fatalf("run the explained query: %v", err)
+	}
+	var explained []string
+	for rows.Next() {
+		prop, err := scanOrderProposal(rows)
+		if err != nil {
+			rows.Close()
+			t.Fatalf("scan explained row: %v", err)
+		}
+		explained = append(explained, prop.ID)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		t.Fatalf("run the explained query: %v", err)
+	}
+	got, err := NewPostgres(pool).Proposals().Pending(ctx, now)
+	if err != nil {
+		t.Fatalf("Pending: %v", err)
+	}
+	var listed []string
+	for _, p := range got {
+		listed = append(listed, p.ID)
+	}
+	if strings.Join(explained, ",") != strings.Join(listed, ",") {
+		t.Fatalf("the explained query returned %v and Pending returned %v — pendingQuery has drifted "+
+			"from the store, so the plan asserted above belongs to a statement the OMS does not issue",
+			explained, listed)
+	}
+	if len(listed) != 10 {
+		t.Fatalf("Pending listed %d of 10 live proposals against a 20,000-row backlog", len(listed))
+	}
+}
+
+// TestTheUnboundedPendingIndexIsGone. The drop is half of 0011: an index left
+// behind is still maintained on every hold, still grows with every expiry nobody
+// signs, and still makes this table's write cost climb with the age of the
+// deployment — all while the plan test above passes, because the read would use
+// the new index either way. The catalog is the only place that difference shows.
+//
+// READING pg_indexes IN A TEST IS NOT WHAT test/arch/migration_table_discovery_test.go
+// BANS. That guard scans services/*/migrations/*.sql for pg_class, relrowsecurity
+// and information_schema.tables, and it bans a MIGRATION discovering the tables it
+// rewrites — the defect where whichever service's DO block ran last silently
+// rewrote another service's policies. A test asserting the outcome of a migration
+// that named its own index is the opposite of that: it is how the migration is
+// checked.
+func TestTheUnboundedPendingIndexIsGone(t *testing.T) {
+	pool := newPool(t)
+	rows, err := pool.Query(context.Background(),
+		`SELECT indexname, indexdef FROM pg_indexes WHERE schemaname = $1 AND tablename = 'order_proposals'`,
+		testSchema)
+	if err != nil {
+		t.Fatalf("read pg_indexes: %v", err)
+	}
+	defer rows.Close()
+	defs := map[string]string{}
+	for rows.Next() {
+		var name, def string
+		if err := rows.Scan(&name, &def); err != nil {
+			t.Fatalf("scan index: %v", err)
+		}
+		defs[name] = def
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("read pg_indexes: %v", err)
+	}
+
+	for _, gone := range []string{
+		"order_proposals_pending_idx",      // 0009's, the unbounded one
+		"order_proposals_expiry_sweep_idx", // 0010's, renamed rather than duplicated
+	} {
+		if def, ok := defs[gone]; ok {
+			t.Errorf("%s survives 0011 (%s) — two indexes over one predicate means every hold pays to "+
+				"maintain both, and the one this issue exists to retire keeps growing unread", gone, def)
+		}
+	}
+
+	def, ok := defs["order_proposals_open_idx"]
+	if !ok {
+		t.Fatalf("order_proposals_open_idx does not exist; the table has %v — the pending read and the "+
+			"expiry sweep would both fall back to a sequential scan", indexNames(defs))
+	}
+	// AND IT IS THE NARROW ONE. An index under the new name carrying only
+	// `approver = ''` would be 0009's index renamed: every assertion above would
+	// still pass and the growth would be untouched.
+	if !strings.Contains(def, "expiry_announced_at IS NULL") || !strings.Contains(def, "approver") {
+		t.Errorf("order_proposals_open_idx is %s, which does not carry both predicates — without "+
+			"`expiry_announced_at IS NULL` it is the unbounded index under a new name", def)
+	}
+}
+
+// indexNames says what the table DOES carry, so a failure above names the index
+// that exists rather than only the one that does not.
+func indexNames(defs map[string]string) []string {
+	out := make([]string, 0, len(defs))
+	for name := range defs {
+		out = append(out, name)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// TestAnAnnouncedExpiryLeavesTheIndexAndKeepsItsRow IS THE BOUNDEDNESS PROPERTY,
+// and it is the one the plan test cannot show: a query can use a perfectly narrow
+// index that nothing ever leaves.
+//
+// Under 0009 an expired proposal was in the pending index forever, because expiry
+// is not a decision and approver never stops being empty. What retires a row now is
+// the marker 0010 added — the sweep that announces the expiry is also what takes
+// the row out of the index — so the index is bounded by the TTL instead of by the
+// age of the deployment. The two counts below are the whole claim: the index
+// empties, the TABLE does not.
+func TestAnAnnouncedExpiryLeavesTheIndexAndKeepsItsRow(t *testing.T) {
+	pool := newPool(t)
+	store := NewPostgres(pool).Proposals()
+	ctx := context.Background()
+
+	const held = 24
+	var last time.Time
+	for i := 0; i < held; i++ {
+		p := heldOrder(t, fmt.Sprintf("o-bound-%02d", i), "user:alice@kanz", t0.Add(time.Duration(i)*time.Second))
+		if err := store.Put(ctx, p, nil); err != nil {
+			t.Fatalf("Put %s: %v", p.ID, err)
+		}
+		last = p.ExpiresAt
+	}
+	// Past every deadline, taken from the proposals rather than from a constant, so
+	// this test does not quietly stop testing expiry if the TTL changes.
+	after := last.Add(time.Minute)
+
+	if got := openQueueDepth(t, pool); got != held {
+		t.Fatalf("the index holds %d entries for %d held orders, want %d", got, held, held)
+	}
+
+	// NOBODY SIGNS ANY OF THEM — the case 0009's justification did not cover.
+	for i := 0; i < held; i++ {
+		id := fmt.Sprintf("o-bound-%02d", i)
+		ok, err := store.AnnounceExpiry(ctx, id, after, []outbox.Record{expiryFact(id)})
+		if err != nil || !ok {
+			t.Fatalf("AnnounceExpiry(%s): ok=%v err=%v", id, ok, err)
+		}
+	}
+
+	if got := openQueueDepth(t, pool); got != 0 {
+		t.Fatalf("%d of %d announced expiries are STILL in the index — an entry nothing retires is an "+
+			"index that grows with the age of the deployment, and the pending list then gets slower "+
+			"every week with nothing failing", got, held)
+	}
+	// AND THE HISTORY IS INTACT. An index emptied by deleting its rows would be a
+	// far worse fix: these rows are the OMS's only durable record that the order was
+	// held, by whom, and that it died of the clock rather than of a decision.
+	if got := proposalRows(t, pool); got != held {
+		t.Fatalf("the table holds %d rows, want %d — the index was bounded by throwing the audit "+
+			"trail away", got, held)
+	}
+	// AND EACH ROW IS STILL UNAPPROVED, so they left the index because they were
+	// ANNOUNCED and not because something wrote a signature nobody gave.
+	got, ok, err := store.Get(ctx, "o-bound-00")
+	if err != nil || !ok {
+		t.Fatalf("Get: ok=%v err=%v", ok, err)
+	}
+	if got.Approver != "" {
+		t.Fatalf("the sweep recorded approver %q — the row left the index by claiming a second "+
+			"signature that never happened", got.Approver)
+	}
+}
+
+// TestPendingStillListsExactlyWhatNeedsASignature is the behavioural half of
+// #548: a clause added for the planner must not change WHICH proposals an
+// approver is shown.
+//
+// An optimisation that quietly narrowed this list would be the worse defect by
+// far — a held order missing from the pending list is invisible, and invisible is
+// exactly what #539 already cost once on this table. The four rows here are the
+// four states the predicate has to sort out, and the approved one is deliberately
+// still LIVE so that its exclusion is the signature and not the clock.
+func TestPendingStillListsExactlyWhatNeedsASignature(t *testing.T) {
+	pool := newPool(t)
+	store := NewPostgres(pool).Proposals()
+	ctx := context.Background()
+
+	dead := heldOrder(t, "o-open-expired", "user:alice@kanz", t0)
+	if err := store.Put(ctx, dead, nil); err != nil {
+		t.Fatalf("Put expired: %v", err)
+	}
+	// Every "now" below is taken from a proposal's own deadline, never a constant.
+	now := dead.ExpiresAt.Add(time.Minute)
+
+	announced := heldOrder(t, "o-open-announced", "user:alice@kanz", t0)
+	if err := store.Put(ctx, announced, nil); err != nil {
+		t.Fatalf("Put announced: %v", err)
+	}
+	if ok, err := store.AnnounceExpiry(ctx, "o-open-announced", now,
+		[]outbox.Record{expiryFact("o-open-announced")}); err != nil || !ok {
+		t.Fatalf("AnnounceExpiry: ok=%v err=%v", ok, err)
+	}
+
+	live := heldOrder(t, "o-open-live", "user:alice@kanz", now)
+	if err := store.Put(ctx, live, nil); err != nil {
+		t.Fatalf("Put live: %v", err)
+	}
+	signed := heldOrder(t, "o-open-signed", "user:alice@kanz", now)
+	if err := store.Put(ctx, signed, nil); err != nil {
+		t.Fatalf("Put signed: %v", err)
+	}
+	if ok, err := store.Claim(ctx, "o-open-signed", "user:bob@kanz", now); err != nil || !ok {
+		t.Fatalf("Claim: ok=%v err=%v", ok, err)
+	}
+
+	pending, err := store.Pending(ctx, now)
+	if err != nil {
+		t.Fatalf("Pending: %v", err)
+	}
+	var ids []string
+	for _, p := range pending {
+		ids = append(ids, p.ID)
+	}
+	if len(ids) != 1 || ids[0] != "o-open-live" {
+		t.Fatalf("Pending listed %v, want exactly [o-open-live] — the live proposal is the only one "+
+			"anybody can still act on, and it is the one an approver would never know about if the "+
+			"index clause narrowed this list", ids)
+	}
+
+	// THE EXPIRED-UNANNOUNCED ONE IS NOT LOST, it is somebody else's queue. Pending
+	// dropping it is only correct because the sweep picks it up; if both filtered it
+	// out the order would be exactly as silent as it was before #539.
+	expired, err := store.ExpiredUnannounced(ctx, now, 10)
+	if err != nil {
+		t.Fatalf("ExpiredUnannounced: %v", err)
+	}
+	if len(expired) != 1 || expired[0].ID != "o-open-expired" {
+		var got []string
+		for _, p := range expired {
+			got = append(got, p.ID)
+		}
+		t.Fatalf("the sweep queue holds %v, want exactly [o-open-expired] — a proposal in neither "+
+			"queue is an order held durably that nobody will ever be told about", got)
 	}
 }

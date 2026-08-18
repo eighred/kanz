@@ -347,6 +347,37 @@ func runProposalContract(t *testing.T, newStore func(t *testing.T) ProposalStore
 		}
 	})
 
+	// AN ANNOUNCED PROPOSAL IS NOT WORK, EVEN IF THE READER THINKS IT IS LIVE (#548).
+	//
+	// A pod announces expiry against its OWN clock, so one running fast can mark a
+	// proposal dead that a slower reader still considers inside its window. The
+	// estate has already been told that order was rejected and will not trade;
+	// offering it back on the approver's queue would invite a signature on
+	// something already published as dead.
+	t.Run("an announced proposal never returns to the pending queue", func(t *testing.T) {
+		s := newStore(t)
+		born := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
+		p := heldOrder(t, "o-announced", "user:alice@kanz", born)
+		if err := s.Put(context.Background(), p, nil); err != nil {
+			t.Fatalf("Put: %v", err)
+		}
+		afterTTL := p.ExpiresAt.Add(time.Minute)
+		if ok, err := s.AnnounceExpiry(context.Background(), "o-announced", afterTTL, nil); err != nil || !ok {
+			t.Fatalf("AnnounceExpiry: ok=%v err=%v", ok, err)
+		}
+
+		// Read with a clock BEFORE the deadline: the expiry filter alone would
+		// list it, so only the announced check can keep it out.
+		pending, err := s.Pending(context.Background(), p.ExpiresAt.Add(-time.Minute))
+		if err != nil {
+			t.Fatalf("Pending: %v", err)
+		}
+		if len(pending) != 0 {
+			t.Fatalf("an announced proposal is offered as work: %v — the estate was told this "+
+				"order will not trade, and the queue is inviting a signature on it", ids(pending))
+		}
+	})
+
 	// A LIVE PROPOSAL CANNOT BE ANNOUNCED EXPIRED. The predicate is the store's,
 	// not the caller's: a sweeper with a wrong clock must not be able to kill an
 	// order somebody still has time to sign.
