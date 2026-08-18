@@ -170,6 +170,87 @@ func TestNetworkPoliciesReachTheVenueAdapters(t *testing.T) {
 
 // rulePermitsPort reports whether the rule names port p. A rule with NO ports is
 // all-ports, which trivially includes it.
+// BOTH HALVES OF THE GATEWAY'S ROUTE TO ITS OWN IdP (#530).
+//
+// The gateway verifies every token against a key it fetches from identity's
+// unauthenticated /jwks.json (services/identity/internal/server/server.go:7).
+// The INGRESS half — identity admitting the gateway on :8087 — has existed since
+// #364. The EGRESS half did not, and this file's own rule says "Both ends must
+// exist": with only one, the gateway holds no key, verifies no token, and since
+// #457 does not even reach the Service — it stays out, logs at ERROR and exports
+// kanz_api_gateway_oidc_issuer_reachable=0. A total authentication outage.
+//
+// IT SURVIVED BECAUSE NOTHING COULD SEE IT. kindnetd does not enforce
+// NetworkPolicy, so on the dev rig a missing egress rule behaves exactly like a
+// present one, and there is no other cluster in this environment. Both halves
+// were read from manifests, which is precisely the kind of evidence that needs a
+// guard rather than a reviewer.
+//
+// PAIRED, NOT SINGLE. Asserting only the egress half would let somebody delete
+// the ingress half and leave the flow just as broken — the asymmetry that made
+// this a two-day gap in the first place.
+func TestNetworkPoliciesReachTheIdentityService(t *testing.T) {
+	path := filepath.Join(moduleRoot(t), "infra", "security", "runtime", "network-policies.yaml")
+	body, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	docs := decodeNetworkPolicyBytes(t, body, path)
+
+	const jwksPort = 8087
+	gatewayEgress, identityIngress := false, false
+
+	for _, d := range docs {
+		if d.Kind != "NetworkPolicy" || d.Metadata.Namespace != "kanz-services" {
+			continue
+		}
+		if d.Spec.PodSelector.MatchLabels["app"] == "api-gateway" {
+			for _, r := range d.Spec.Egress {
+				if !rulePermitsPort(r, jwksPort) {
+					continue
+				}
+				for _, peer := range r.To {
+					if peer.PodSelector != nil && peer.PodSelector.MatchLabels["app"] == "identity" {
+						gatewayEgress = true
+					}
+				}
+			}
+		}
+		if d.Spec.PodSelector.MatchLabels["app"] == "identity" {
+			for _, r := range d.Spec.Ingress {
+				if !rulePermitsPort(r, jwksPort) {
+					continue
+				}
+				for _, peer := range r.From {
+					if peer.PodSelector != nil && peer.PodSelector.MatchLabels["app"] == "api-gateway" {
+						identityIngress = true
+					}
+				}
+			}
+		}
+	}
+
+	// NON-VACUITY. A decoder that stopped parsing this file, or a namespace
+	// rename, would leave both false and report the defect this guards against
+	// while proving nothing — so fail differently when NEITHER half is found.
+	if !gatewayEgress && !identityIngress {
+		t.Fatalf("found neither half of the gateway↔identity flow in %s — the scan is broken, not "+
+			"the estate: allow-ingress-to-identity has been in this file since #364", path)
+	}
+	if !gatewayEgress {
+		t.Error("no kanz-services Egress rule lets app=api-gateway reach app=identity on :8087.\n\n" +
+			"The gateway cannot fetch /jwks.json, so it holds no verification key and every " +
+			"authenticated request is refused — and since #457 the pod stays out of the Service " +
+			"entirely. allow-external-https-egress does not cover it: identity is an RFC1918 " +
+			"ClusterIP, which that policy `except:`s, on a port it does not grant (#530).")
+	}
+	if !identityIngress {
+		t.Error("no kanz-services Ingress rule on app=identity admits app=api-gateway on :8087.\n\n" +
+			"The egress half alone permits a call nothing accepts. Both ends must exist — this " +
+			"file says so, and #530 is what the asymmetry costs.")
+	}
+}
+
 func rulePermitsPort(r netPolRule, p int) bool {
 	if len(r.Ports) == 0 {
 		return true
