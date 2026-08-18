@@ -20,11 +20,21 @@
 // Every replica is configured with the SAME member list, so all of them
 // compute an identical ring and agree on each portfolio's owner without any
 // coordination. Ownership is a pure function of (members, key).
+//
+// That is also the weakness, and it is why NewAssignment validates rather than
+// accepts: with no coordination there is nothing to notice that a list is
+// wrong. A list naming a pod that is not running leaves those portfolios owned
+// by nobody and silently unrevalued; a replica whose id is not in the list owns
+// nothing at all. Neither is observable from the ring, so the pairings that
+// cause them are refused at construction instead (#110).
 package shard
 
 import (
+	"errors"
+	"fmt"
 	"hash/fnv"
 	"sort"
+	"strings"
 )
 
 // DefaultVNodes is the per-member virtual-node count. Higher spreads keys
@@ -92,10 +102,59 @@ func (r *Ring) Owner(key string) string {
 
 // Members returns the ring's de-duplicated member set (construction order).
 func (r *Ring) Members() []string {
+	if r == nil {
+		return nil
+	}
 	out := make([]string, len(r.members))
 	copy(out, r.members)
 	return out
 }
+
+// Has reports whether member is on the ring. Linear over the member set,
+// which is a fleet-sized list — this is a startup check, never a hot path.
+func (r *Ring) Has(member string) bool {
+	if r == nil {
+		return false
+	}
+	for _, m := range r.members {
+		if m == member {
+			return true
+		}
+	}
+	return false
+}
+
+// A HALF-CONFIGURED RING IS THE FAILURE THIS PACKAGE CANNOT ABSORB (#110).
+//
+// Ownership is a pure function of (members, self), and every wrong pairing of
+// those two produces a replica that keeps passing its probes, keeps acking its
+// deliveries, and publishes measures computed from a book it never assembled.
+// None of the three below is detectable from a metric that reads 0 vs 1, so
+// they are refused at construction and the composition root turns them into a
+// refusal to start:
+//
+//   - self is absent from the member list. Owns() is false for EVERY key, so
+//     the replica drops every event it receives and its risk store stays empty.
+//     A restored snapshot then ages in place and is republished on each
+//     recompute. This is the "a wrong list is worse than none" case, and it is
+//     what an operator gets from one stale pod name in a hand-written list.
+//   - members are configured but self is empty. The ring is real and nobody is
+//     on it, so the replica silently reverts to owning everything — the exact
+//     unsharded posture the operator was configuring their way out of.
+//   - self is configured but the member list is empty. Same outcome, opposite
+//     typo, and equally invisible.
+//
+// A ring that is empty AND has no self is not an error: that is the deliberate
+// single-instance default (see ShardPosture, which WARNs about it by name).
+var (
+	// ErrSelfNotAMember: this replica's id is missing from the ring it was
+	// handed, so it would own nothing and apply nothing.
+	ErrSelfNotAMember = errors.New("shard: this replica's id is absent from the member list")
+	// ErrSelfUnset: a member list without an identity to match against it.
+	ErrSelfUnset = errors.New("shard: a member list is configured but this replica has no id on it")
+	// ErrMembersUnset: an identity with no ring to place it on.
+	ErrMembersUnset = errors.New("shard: this replica has an id but the member list is empty")
+)
 
 // Assignment binds a Ring to the local replica's member id and answers the
 // hot-path question: does this replica own key?
@@ -104,11 +163,24 @@ type Assignment struct {
 	self string
 }
 
-// NewAssignment binds ring to the self member. A nil ring or a ring with no
-// members yields an Assignment that owns everything (Owns always true) — the
-// single-replica, unsharded default so callers need no special-casing.
-func NewAssignment(ring *Ring, self string) *Assignment {
-	return &Assignment{ring: ring, self: self}
+// NewAssignment binds ring to the self member, refusing every pairing that
+// would silently mis-shard (see the block above). A nil/empty ring with an
+// empty self is the unsharded single-replica default and returns an Assignment
+// that owns everything, so callers can wire it unconditionally.
+func NewAssignment(ring *Ring, self string) (*Assignment, error) {
+	self = strings.TrimSpace(self)
+	populated := ring != nil && len(ring.members) > 0
+	switch {
+	case !populated && self == "":
+		return &Assignment{}, nil // unsharded: owns everything
+	case !populated:
+		return nil, fmt.Errorf("%w (id %q)", ErrMembersUnset, self)
+	case self == "":
+		return nil, fmt.Errorf("%w (members %v)", ErrSelfUnset, ring.Members())
+	case !ring.Has(self):
+		return nil, fmt.Errorf("%w: %q not in %v", ErrSelfNotAMember, self, ring.Members())
+	}
+	return &Assignment{ring: ring, self: self}, nil
 }
 
 // Owns reports whether the local replica owns key. When the ring is empty
