@@ -119,30 +119,36 @@ spec:
             - { name: API_GATEWAY_RISK_ENGINE_ADDR, value: "risk-engine.kanz-services.svc:9090" }
             # AuthN + AuthZ. REQUIRED: the process exits 2 without a credential and
             # without a required role — see the note at the top of this file.
-            # THIS ISSUER DOES NOT EXIST YET, AND THE GATEWAY NOW SAYS SO (#457).
+            # THE ISSUER IS THIS PLATFORM'S OWN IdP (#530, and #457 asked for this).
             #
-            # login.eighred.com does not resolve. It names the Eighred SSO that was
-            # never built — the same one whose absence made the TUI unable to log in
-            # and prompted the platform to issue its own tokens instead (#99, #364).
-            # Until #457 nothing noticed: NewOIDCAuthenticator does no network I/O,
-            # so the gateway started, logged "OIDC authentication enabled" naming
-            # this value, answered /healthz and /readyz with ok, and rejected every
-            # request that reached it. Three green signals over a total
-            # authentication outage.
+            # It must match IDENTITY_TOKEN_ISSUER in identity-deploy.yaml EXACTLY —
+            # pkg/auth/oidc.go compares `iss` by equality, and one mismatched claim
+            # refuses every token the estate can mint.
             #
-            # The value is LEFT AS IT IS deliberately. Substituting another
-            # hostname nothing serves would just be a fresher fiction, and identity
-            # has no manifest yet — there is no secret store in this estate, so its
-            # durable signing key has nowhere to live (test/arch/deployability_test.go,
-            # retired by #371). What changed is that the gateway now PROBES this
-            # issuer before declaring itself ready: with nothing behind it the pod
-            # stays out of the Service, logs at ERROR, and exports
-            # kanz_api_gateway_oidc_issuer_reachable=0. The gap is loud at deploy
-            # time instead of silent until somebody's first login.
+            # WHAT WAS HERE BEFORE, AND WHY IT IS GONE. This line named
+            # login.eighred.com, an Eighred SSO that was never built, under a long
+            # comment explaining that identity "has no manifest yet — there is no
+            # secret store in this estate, so its durable signing key has nowhere to
+            # live", and ending "point this at the identity service when it ships".
             #
-            # Point this at the identity service when it ships. The probe retries,
-            # so the gateway picks it up with no restart.
-            - { name: API_GATEWAY_OIDC_ISSUER, value: "https://login.eighred.com" }
+            # Identity shipped on 2026-08-15 (#364), with exactly the mounted signing
+            # key the comment said it lacked, and nobody came back to this line. The
+            # argument stayed here reading as current for three days while the
+            # deployed estate had no working authenticated path at all. That is the
+            # cost of dated evidence, and deleting it is part of the fix rather than
+            # tidying after it: a reader who finds a well-argued justification does
+            # not re-derive it.
+            #
+            # test/arch/oidc_issuer_agreement_test.go now fails if this and the
+            # issuer identity mints ever disagree again, because the thing that went
+            # stale last time was a comment and a comment cannot guard itself.
+            - { name: API_GATEWAY_OIDC_ISSUER, value: "https://identity.kanz.internal" }
+            # DISCOVERY IS NOT USED IN-CLUSTER. identity serves the key at a fixed
+            # path (services/identity/internal/server/server.go: "GET /jwks.json —
+            # unauthenticated — the gateway fetches the public key"), and naming it
+            # here spends no request on .well-known and leaves no doubt about which
+            # URL the egress rule in network-policies.yaml has to permit.
+            - { name: API_GATEWAY_OIDC_JWKS_URI, value: "http://identity.kanz-services.svc:8087/jwks.json" }
             - { name: API_GATEWAY_OIDC_AUDIENCE, value: "kanz" }
             - { name: API_GATEWAY_REQUIRED_ROLE, value: "kanz-user" }
             # WHO MAY MOVE CAPITAL (SEC-M2). REQUIRED, and it must DIFFER from the

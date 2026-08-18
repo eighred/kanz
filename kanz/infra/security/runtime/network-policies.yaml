@@ -621,6 +621,74 @@ spec:
       ports:
         - { protocol: TCP, port: 8087 }
 ---
+# THE EGRESS HALF of allow-ingress-to-identity above (#530), and without it the
+# gateway VERIFIES NO TOKEN AT ALL.
+#
+# The ingress half has always been here — identity admits the gateway to :8087 so
+# it can read /jwks.json (services/identity/internal/server/server.go:7: "the
+# gateway fetches the public key"). Nothing let the gateway make that call. Every
+# gateway egress rule in this file names a different peer — risk-engine, the
+# operator, the read upstreams, optimization, tv-sync, phase7, accounting — and a
+# permitted listener nobody may dial is the failure this file's own postgres
+# comment states in one line: BOTH ENDS MUST EXIST, because default-deny-all
+# selects every pod for both directions.
+#
+# allow-external-https-egress does not cover it and must not be widened to. That
+# rule is public-internet-only by construction — it except:s 10/8, 172.16/12 and
+# 192.168/16 precisely so "may call an exchange" cannot point INWARD — and an
+# in-cluster issuer at identity.kanz-services.svc lives inside those ranges. An
+# issuer that is a pod is a pod-to-pod flow, and it needs a pod-to-pod rule.
+#
+# THE CONSEQUENCE IS A TOTAL AUTHENTICATION OUTAGE, not a degraded route. The
+# gateway is the sole identity authority; with no JWKS it holds no key, so it can
+# verify no token any request presents, and every /v1 call it fronts is a 401.
+# Since #457 it does not even get that far: it PROBES the issuer before declaring
+# itself ready, so the pod stays OUT of the Service, logs at ERROR, and exports
+# kanz_api_gateway_oidc_issuer_reachable=0. The platform reports its own failure
+# correctly and is completely unusable — nobody can sign in, and no order can be
+# placed by anyone.
+#
+# READ FROM THE MANIFESTS, NOT REPRODUCED. kindnetd does not enforce
+# NetworkPolicy (see allow-gateway-to-read-upstreams below), so on the rig a
+# missing egress rule behaves exactly like a present one and the gateway's JWKS
+# fetch succeeds either way. The rig cannot show this gap and never will; the
+# evidence is that no policy in this file selected app=api-gateway with identity
+# as a destination.
+#
+# ITS OWN POLICY, NOT A FOURTH ENTRY IN allow-gateway-to-read-upstreams. That
+# rule is the PROXIED upstream set, and test/arch/edge_test.go derives it from the
+# proxy.Service constants in services/api-gateway/internal/proxy/proxy.go —
+# wealth, datamaster, copilot, tv-sync, optimization, accounting. identity is not
+# among them and must not appear to be: no route forwards a caller's request
+# there. This flow is the gateway's OWN dependency, made on its own behalf before
+# it can serve anybody, and it is the only gateway egress in this file whose
+# absence is an outage for every route rather than for one. Keeping it separate
+# also keeps it retirable on its own terms — the day the issuer moves back to an
+# external SSO, this policy is deleted and the proxied set is untouched.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-identity-egress-from-gateway
+  namespace: kanz-services
+  labels:
+    app.kubernetes.io/part-of: kanz
+spec:
+  podSelector:
+    matchLabels:
+      app: api-gateway
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app: identity
+      # :8087, the credential surface. /jwks.json is the only path the gateway
+      # calls; NetworkPolicy cannot say so, which is why every route behind this
+      # port is individually safe to expose — the same reasoning the ingress half
+      # states, seen from the other end.
+      ports:
+        - { protocol: TCP, port: 8087 }
+---
 # EXEC-M15 — the gateway's READ upstreams: tv-sync (the Broker API a TradingView
 # chart reads to see the orders Kanz opened) and the Phase-7 services.
 #
