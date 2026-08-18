@@ -280,6 +280,8 @@ func (s *Service) Handle(ctx context.Context, env *envelopepb.Envelope, payload 
 		return s.handleCancel(ctx, payload)
 	case SubjectAmend:
 		return s.handleAmend(ctx, payload)
+	case SubjectApprove:
+		return s.handleApprove(ctx, env, payload)
 	default:
 		// Subscription scope matched but the type is unknown — surface so the
 		// operator sees the misconfiguration (same stance as ingest).
@@ -287,7 +289,26 @@ func (s *Service) Handle(ctx context.Context, env *envelopepb.Envelope, payload 
 	}
 }
 
+// handleSubmit is the bus entry for a first-signature submission. It offers no
+// approval, so an order that needs one is held rather than admitted.
 func (s *Service) handleSubmit(ctx context.Context, env *envelopepb.Envelope, payload []byte) error {
+	return s.submit(ctx, env, payload, nil)
+}
+
+// submit is THE ONE PATH AN ORDER COMES INTO EXISTENCE ON, and appr is the only
+// thing that distinguishes a first signature from a second.
+//
+// A nil appr is a plain submission: an order at or above the dual-control
+// threshold reaches the gate below and is HELD. A non-nil appr is a release —
+// handleApprove has already proved it against the stored proposal, and the
+// order replays every gate from here as if freshly submitted.
+//
+// THE REPLAY IS THE POINT, NOT AN INEFFICIENCY. A proposal may rest for
+// dualcontrol.DefaultTTL before anybody signs it, and compliance, the mandate,
+// the venue's supported order types and the portfolio's exchange account can all
+// move inside a day. Admitting on the clearance the order got when it was
+// PROPOSED would let a signature launder yesterday's answer into today's book.
+func (s *Service) submit(ctx context.Context, env *envelopepb.Envelope, payload []byte, appr *dualcontrol.Approval) error {
 	var cmd orderpb.SubmitOrder
 	if err := proto.Unmarshal(payload, &cmd); err != nil {
 		// A malformed command body is a permanent defect; reject-and-ack rather
@@ -580,8 +601,25 @@ func (s *Service) handleSubmit(ctx context.Context, env *envelopepb.Envelope, pa
 	// so Required is false: the parent was decided once, for the whole notional,
 	// and refusing a late slice would strand it part-filled — the same rule the
 	// compliance gate follows above.
+	// THE HOLD, AND THE ONE THING THAT RELEASES IT (#539).
+	signatures := approval.SingleSigned
 	if dual.Required {
-		return s.hold(ctx, &cmd, dual, now)
+		if appr == nil {
+			return s.hold(ctx, &cmd, dual, now)
+		}
+		// THE SECOND LINE, NOT THE FIRST. handleApprove already checked this
+		// approval against the stored proposal; re-deriving the digest HERE from
+		// the terms of the command actually being admitted is what stops a future
+		// caller from releasing one held order with a signature collected for
+		// another. Covers refuses the zero Approval outright, so the value every
+		// other path passes cannot satisfy it.
+		if err := approval.Covers(*appr, approval.TermsOfSubmit(&cmd)); err != nil {
+			// Loud, not a hold. Falling through to hold() here would hit
+			// ErrProposalExists and ack silently — an approved order that never
+			// trades and never reports why, which is the failure #539 exists to end.
+			return fmt.Errorf("oms: approval does not cover order %s: %w", cmd.GetOrderId(), err)
+		}
+		signatures = approval.DualSigned
 	}
 	// THE ARRIVAL MARK, STAMPED HERE AND NOWHERE ELSE (#436).
 	//
@@ -724,11 +762,13 @@ func (s *Service) handleSubmit(ctx context.Context, env *envelopepb.Envelope, pa
 	// children inherit its decision, exactly as they inherit its compliance
 	// clearance and its arrival mark.
 	//
-	// approval.SingleSigned is unconditional today because nothing collects a
-	// second signature yet — that is the gap this counter exists to size, and the
-	// day #410's placement lands the approved path passes DualSigned here.
+	// signatures is DualSigned only on the approve path, where a second subject's
+	// approval was proved against the stored proposal above. This counter is the
+	// number the arming decision rests on — how much of the order flow went
+	// through on one signature — so counting an approved order as single_signed
+	// would make the control look ineffective exactly as it started working.
 	if parent == nil {
-		s.dualControl.Count(dual, approval.SingleSigned)
+		s.dualControl.Count(dual, signatures)
 	}
 
 	// PUBLISH IT, HERE, BEFORE ANYTHING ELSE HAPPENS TO THIS ORDER.
@@ -1630,6 +1670,145 @@ func (s *Service) handleAmend(ctx context.Context, payload []byte) error {
 // is a silent drop with extra steps. The caller is told now, while the person
 // who could correct the command is still there.
 const ReasonUnsignable = "DUAL_CONTROL_UNSIGNABLE"
+
+// handleApprove releases a held order on a SECOND SUBJECT'S SIGNATURE (#539).
+//
+// # Why this is not a query, and not a store method
+//
+// Approving CAUSES AN ADMISSION. It ends by replaying the proposed command
+// through submit — the one path an order comes into existence on — so the
+// compliance gate, the venue checks and the outbox are all still in front of it.
+// That is also why the approval arrives as a bus command rather than an RPC on
+// OrderQueryService: a read surface that could cause a submission would be a
+// second door into the capital path with none of that behind it.
+//
+// # The ordering, and both halves of it are load-bearing
+//
+// The rule is checked BEFORE the claim, and the claim BEFORE the admission.
+// datamaster settled the first half on the override path: consuming the
+// proposal on a refused approval would let one person destroy a colleague's
+// pending decision simply by attempting their own. The second half is stronger
+// here than it is there — Claim is the serialisation point across the OMS's two
+// replicas, and admitting without winning it means one approval becomes two
+// deliveries to a live venue.
+//
+// # A refusal acks
+//
+// Every refusal below returns nil after a WARN naming the reason. A refused
+// approval is not a defect in the command that can be fixed by redelivering it,
+// and the ORDER is not rejected either — it is still pending, awaiting a
+// signature somebody else may legitimately give. The order stays exactly as it
+// was and the refusal is the operator's to read.
+//
+// WHAT THE APPROVER DOES NOT GET IS A REPLY. The gateway answers 202 on publish,
+// and a refusal produces no FACT — the same stance hold() takes, since all four
+// CommandOutcome statuses are terminal and this order is not. An approver whose
+// signature was refused learns it by finding the order still on
+// ListPendingApprovals. That is a stated gap, not an oversight.
+func (s *Service) handleApprove(ctx context.Context, env *envelopepb.Envelope, payload []byte) error {
+	var cmd orderpb.ApproveOrder
+	if err := proto.Unmarshal(payload, &cmd); err != nil {
+		s.logger.Error("oms: malformed ApproveOrder", "err", err)
+		return nil
+	}
+	// Uniform with the other three command decoders. ApproveOrder carries no
+	// Decimal today; the check costs nothing and means nobody has to ask why this
+	// one decoder is the exception when a field is added.
+	if field, in := dec.InDomainDeep(&cmd); !in {
+		s.logger.Error("oms: ApproveOrder carries an out-of-domain exponent — refusing", "field", field)
+		return nil
+	}
+	now := s.now().UTC()
+
+	orderID := cmd.GetOrderId()
+	if orderID == "" {
+		s.logger.Error("oms: ApproveOrder names no order — refusing")
+		return nil
+	}
+	// The command-class contract: metadata.target_id MUST equal order_id. A
+	// mismatch means the signed target and the released order are different
+	// aggregates, which is the whole attack the digest exists to stop arriving
+	// one field earlier.
+	if tid := cmd.GetMetadata().GetTargetId(); tid != "" && tid != orderID {
+		s.logger.Error("oms: ApproveOrder target_id does not match order_id — refusing",
+			"target_id", tid, "order_id", orderID)
+		return nil
+	}
+	// THE APPROVER IS THE AUTHENTICATED ISSUER, never self-asserted. The gateway
+	// binds it from the verified principal and the producer checks it again
+	// (AUTH-01c); an unauthenticated approval would make the self-approval check
+	// pass vacuously, because every approver differs from "".
+	approver := strings.TrimSpace(cmd.GetMetadata().GetIssuer())
+	if approver == "" {
+		s.logger.Error("oms: ApproveOrder carries no authenticated issuer — refusing",
+			"order_id", orderID)
+		return nil
+	}
+
+	p, ok, err := s.store.Proposals().Get(ctx, orderID)
+	if err != nil {
+		return err // transient: let it redeliver
+	}
+	if !ok {
+		// Nothing is held under this id. An approval is a RELEASE, never an
+		// origin — admitting here would let a subject holding only the approve
+		// authority originate an order outright, which is precisely the person
+		// who must not be able to.
+		s.logger.Warn("oms: approval names an order with no pending proposal — nothing released",
+			"order_id", orderID, "approver", approver)
+		return nil
+	}
+
+	// THE RULE, BEFORE THE CLAIM. Approve refuses self-approval (normalised for
+	// case and surrounding space), a digest covering other terms, and an expired
+	// proposal — and on every one of those the proposal is left PENDING.
+	appr, err := p.Approve(approver, cmd.GetDigest(), now)
+	if err != nil {
+		s.logger.Warn("oms: approval REFUSED — the order remains held",
+			"order_id", orderID, "approver", approver, "proposer", p.Proposer,
+			"reason", approvalRefusal(err), "err", err)
+		return nil
+	}
+
+	// THE CLAIM, BEFORE THE ADMISSION. This is the serialisation point: the OMS
+	// ships two replicas, so a mutex here would say nothing. Losing it means
+	// somebody else decided this proposal between the read and now, and admitting
+	// anyway would send one order to a venue twice.
+	claimed, err := s.store.Proposals().Claim(ctx, orderID, approver, now)
+	if err != nil {
+		return err // transient
+	}
+	if !claimed {
+		s.logger.Warn("oms: approval lost the claim — this proposal was already decided",
+			"order_id", orderID, "approver", approver)
+		return nil
+	}
+
+	// REPLAYED AS BYTES, THROUGH THE SAME DECODER THE BUS FEEDS. The stored
+	// command is re-validated exactly as a fresh submission would be rather than
+	// trusted because it once passed; the round trip is what makes "the approved
+	// path and the submit path are one path" true rather than nearly true.
+	blob, err := proto.Marshal(p.Command)
+	if err != nil {
+		return fmt.Errorf("oms: re-encode approved order %s: %w", orderID, err)
+	}
+	return s.submit(ctx, env, blob, &appr)
+}
+
+// approvalRefusal maps a dualcontrol refusal to a stable label for the log, so
+// "who is being refused and why" is greppable without parsing prose.
+func approvalRefusal(err error) string {
+	switch {
+	case errors.Is(err, dualcontrol.ErrSelfApproval):
+		return "self_approval"
+	case errors.Is(err, dualcontrol.ErrExpired):
+		return "expired"
+	case errors.Is(err, dualcontrol.ErrPayloadChanged):
+		return "payload_changed"
+	default:
+		return "malformed"
+	}
+}
 
 // hold puts an order that requires a second signature into the proposals table
 // instead of admitting it (#410).

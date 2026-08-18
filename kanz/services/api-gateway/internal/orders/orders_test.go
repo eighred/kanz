@@ -44,7 +44,7 @@ func authed(req *http.Request, sub, tenant string) *http.Request {
 // with nobody to attribute it to (401). Defence in depth on the capital path is not
 // redundancy; it is the point.
 func TestSubmit_Unauthenticated_401(t *testing.T) {
-	h := New(&fakePub{})
+	h := New(&fakePub{}, "")
 	rr := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/v1/orders", strings.NewReader(`{}`))
 	h.submit(rr, req) // no principal on ctx
@@ -55,7 +55,7 @@ func TestSubmit_Unauthenticated_401(t *testing.T) {
 
 func TestSubmit_BindsIssuerAndTenant(t *testing.T) {
 	pub := &fakePub{}
-	h := New(pub)
+	h := New(pub, "")
 	mux := testMux()
 	h.Routes(mux)
 
@@ -102,7 +102,7 @@ func TestSubmit_BindsIssuerAndTenant(t *testing.T) {
 
 func TestSubmit_GeneratesOrderID(t *testing.T) {
 	pub := &fakePub{}
-	h := New(pub)
+	h := New(pub, "")
 	mux := testMux()
 	h.Routes(mux)
 	req := httptest.NewRequest(http.MethodPost, "/v1/orders",
@@ -123,7 +123,7 @@ func TestSubmit_GeneratesOrderID(t *testing.T) {
 }
 
 func TestSubmit_WritesDisabled_503(t *testing.T) {
-	h := New(nil) // no publisher
+	h := New(nil, "") // no publisher
 	mux := testMux()
 	h.Routes(mux)
 	req := authed(httptest.NewRequest(http.MethodPost, "/v1/orders", strings.NewReader(`{"orderId":"o1"}`)), "alice", "acme")
@@ -148,7 +148,7 @@ func authedScoped(req *http.Request, sub, tenant string, portfolios ...string) *
 // OMS's deny-by-default guard refuses every cancel — including legitimate ones.
 func TestCancel_CarriesThePrincipalsPortfolioScope(t *testing.T) {
 	pub := &fakePub{}
-	h := New(pub)
+	h := New(pub, "")
 	mux := testMux()
 	h.Routes(mux)
 
@@ -172,7 +172,7 @@ func TestCancel_CarriesThePrincipalsPortfolioScope(t *testing.T) {
 // attacking, and the whole check is theatre.
 func TestCancel_IgnoresClientSuppliedPortfolioScope(t *testing.T) {
 	pub := &fakePub{}
-	h := New(pub)
+	h := New(pub, "")
 	mux := testMux()
 	h.Routes(mux)
 
@@ -218,7 +218,7 @@ func TestCancel_IgnoresClientSuppliedPortfolioScope(t *testing.T) {
 // better error code.
 func TestSubmit_AuthenticatedWithoutTenant_403(t *testing.T) {
 	pub := &fakePub{}
-	h := New(pub)
+	h := New(pub, "")
 	rr := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/v1/orders", strings.NewReader(`{}`))
 	h.submit(rr, authed(req, "user-1", "")) // authenticated, no tenant claim
@@ -236,7 +236,7 @@ func TestSubmit_AuthenticatedWithoutTenant_403(t *testing.T) {
 
 func TestCancel_AuthenticatedWithoutTenant_403(t *testing.T) {
 	pub := &fakePub{}
-	h := New(pub)
+	h := New(pub, "")
 	rr := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/v1/orders/o-1/cancel", strings.NewReader(`{}`))
 	h.cancel(rr, authed(req, "user-1", ""))
@@ -263,7 +263,7 @@ func TestCancel_AuthenticatedWithoutTenant_403(t *testing.T) {
 // defines it as the stable contract.
 func TestSubmit_RoutesOnTenantWithoutMovingTheEventType(t *testing.T) {
 	pub := &fakePub{}
-	h := New(pub)
+	h := New(pub, "")
 	mux := testMux()
 	h.Routes(mux)
 

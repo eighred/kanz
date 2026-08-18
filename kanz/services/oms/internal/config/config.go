@@ -318,7 +318,7 @@ type Config struct {
 
 // CommandSubjects are the order command subjects the OMS consumes.
 func (Config) CommandSubjects() []string {
-	return []string{order.SubjectSubmit, order.SubjectAmend, order.SubjectCancel}
+	return []string{order.SubjectSubmit, order.SubjectAmend, order.SubjectCancel, order.SubjectApprove}
 }
 
 // FillSubjects are the fill FACTs the position projector consumes (OMS-01e).

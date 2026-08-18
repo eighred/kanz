@@ -75,6 +75,11 @@ data:
         exports: [
           { stream: "tenant.*.order.order.submit" }
           { stream: "tenant.*.order.order.cancel" }
+          # The SECOND SIGNATURE on a held order (#539) is a COMMAND on the same
+          # write path, so it crosses the same bridge. Without this export every
+          # tenant's import of it resolves to nothing, the broker accepts the
+          # config, and an approval that tenant sends is delivered NOWHERE.
+          { stream: "tenant.*.order.order.approve" }
         ]
 
         # __system__ RESOLVES ITS OWN PREFIX, which is what makes the gateway's
@@ -86,6 +91,11 @@ data:
         mappings = {
           "tenant.__system__.order.order.submit": "order.order.submit"
           "tenant.__system__.order.order.cancel": "order.order.cancel"
+          # Same for the approve command (#539): the gateway prefixes
+          # unconditionally, so without this line the platform tenant's own
+          # approvals land on a subject nothing subscribes and every order held
+          # for dual control stays held, with no error on either side.
+          "tenant.__system__.order.order.approve": "order.order.approve"
         }
 
         users: [
@@ -334,6 +344,12 @@ data:
           #   · order.order.submit / .cancel — services/api-gateway/internal/
           #     orders/orders.go, COMMANDs, the sole write path onto the order
           #     book (OMS-01d).
+          #   · order.order.approve — the SECOND SIGNATURE that releases an order
+          #     the OMS is holding for dual control (#539, order.SubjectApprove).
+          #     A publisher with no matching permission entry is refused by the
+          #     broker at RUNTIME, not at startup: the gateway comes up healthy
+          #     and every approval is denied, so a held order can never be
+          #     released.
           #   · platform.authz.decision — the AUTH-01d capability decisions this
           #     gateway makes, as OBSERVATIONs (#352). WITHOUT THIS ENTRY THE
           #     BROKER DENIES EVERY ONE OF THEM. That failure is loud rather than
@@ -358,6 +374,7 @@ data:
                   # the estate rather than tighten it.
                   "tenant.*.order.order.submit", "tenant.*.order.order.cancel",
                   "order.order.submit", "order.order.cancel",
+                  "tenant.*.order.order.approve", "order.order.approve",
                   "platform.authz.decision",
                 ]
               }
@@ -700,8 +717,8 @@ data:
             }
           }
           # oms is the trading core: it CONSUMES order commands
-          # (order.order.submit/.amend/.cancel, config.CommandSubjects) and
-          # fill FACTs (order.order.filled/.partially_filled,
+          # (order.order.submit/.amend/.cancel/.approve, config.CommandSubjects)
+          # and fill FACTs (order.order.filled/.partially_filled,
           # config.FillSubjects) via bus.NewConsumer(..., bus.WithDLQ(client))
           # — "WithDLQ is load-bearing on this path, not hygiene" per the
           # service's own main.go comment — plus the price spine
@@ -745,6 +762,12 @@ data:
                   "risk.position.changed.>", "risk.position.venue.changed.>",
                   "settlement.instruction.fail",
                   "dlq.order.order.submit", "dlq.order.order.amend", "dlq.order.order.cancel",
+                  # The approve command parks like its three siblings (#539): it
+                  # is consumed through the same bus.WithDLQ consumer, so without
+                  # this grant a retry-exhausted approval cannot be parked —
+                  # publishDLQ's own error surfaces and the message goes straight
+                  # back on the broker for redelivery forever.
+                  "dlq.order.order.approve",
                   "dlq.order.order.filled", "dlq.order.order.partially_filled",
                   "$JS.API.>", "$JS.ACK.>",
                 ]
@@ -752,6 +775,12 @@ data:
               subscribe: {
                 allow: [
                   "order.order.submit", "order.order.amend", "order.order.cancel",
+                  # THE SECOND SIGNATURE (#539) joined config.CommandSubjects with
+                  # the maker-checker gate. A subscriber with no matching entry is
+                  # refused by the broker at RUNTIME: the OMS starts fine, never
+                  # receives an approval, and every order it holds stays held with
+                  # nothing anywhere reporting an error.
+                  "order.order.approve",
                   "order.order.filled", "order.order.partially_filled",
                   "market.*.trade", "market.*.quote", "compliance.mandate.changed.>",
                   # WHAT THE PORTFOLIO CAN SPEND (#450), for the pre-trade
@@ -949,6 +978,13 @@ data:
             to: "order.order.submit" }
           { stream: { account: __system__, subject: "tenant.acme.order.order.cancel" }
             to: "order.order.cancel" }
+          # The second signature (#539) crosses the bridge as its own subject.
+          # Without this line this tenant's OMS subscribes order.order.approve,
+          # receives nothing, and a held order stays held — the silent case the
+          # comment above describes, applied to the release path rather than the
+          # submit path.
+          { stream: { account: __system__, subject: "tenant.acme.order.order.approve" }
+            to: "order.order.approve" }
         ]
 
         users: [

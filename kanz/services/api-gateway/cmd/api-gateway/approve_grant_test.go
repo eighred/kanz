@@ -57,7 +57,7 @@ func approveRouterFor(t *testing.T, approveRole string, callerRoles ...string) (
 	var ready atomic.Bool
 	router, err := buildRouter(cfg,
 		gateway.New(nil, nil, nil, logger),
-		orders.New(nil),
+		orders.New(nil, cfg.ApproveRole),
 		proxy.New(be, proxy.Roles{Fund: cfg.FundRole, Approve: cfg.ApproveRole}),
 		nil, // no control plane
 		obs, &ready, logger,

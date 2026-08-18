@@ -23,25 +23,44 @@ import (
 	"github.com/eighred/kanz/services/api-gateway/internal/proxy"
 )
 
-// TestEveryRouteOnTheCapitalPathRequiresTRADE.
+// TestEveryRouteOnTheCapitalPathRequiresACapitalAuthority.
 //
-// services/api-gateway/internal/orders is THE capital path: every route it serves submits or
-// cancels an order at a live exchange. Rather than listing those routes (a list someone must
-// remember to extend), this asserts the property over WHATEVER the package registers — so a
-// route added there tomorrow is covered by this test the moment it exists.
-func TestEveryRouteOnTheCapitalPathRequiresTRADE(t *testing.T) {
+// services/api-gateway/internal/orders is THE capital path: every route it serves submits,
+// cancels or releases an order at a live exchange. Rather than listing those routes (a list
+// someone must remember to extend), this asserts the property over WHATEVER the package
+// registers — so a route added there tomorrow is covered by this test the moment it exists.
+//
+// TWO CAPABILITIES ARE ADMISSIBLE HERE, AND THAT IS THE CONTROL RATHER THAN AN EXCEPTION TO
+// IT. Trade originates and withdraws an order; Approve gives the second signature that
+// releases one the OMS held for exceeding the dual-control threshold (#539, #410). Both move
+// capital, which is why neither Read, Operate nor Fund may appear in this package — but they
+// are deliberately held by DIFFERENT PEOPLE, and the composition root enforces that: the
+// approver's grant carries Read and Approve and never Trade, and validateAuth refuses to
+// start if the approve role collides with the trade role. Widen this set only for another
+// authority that is itself segregated; collapsing Approve into Trade would let the proposer
+// sign their own release and record one pair of hands as two.
+//
+// It stays DEFAULT-DENY: a route registered here with any capability outside the set fails,
+// so the next one still has to argue its case.
+func TestEveryRouteOnTheCapitalPathRequiresACapitalAuthority(t *testing.T) {
 	m := authz.NewMux(nil, nil)
-	orders.New(nil).Routes(m)
+	// A NON-EMPTY APPROVE ROLE, for the same reason stubOrders below is a real value: since
+	// #535 the approve route is registered only when the deployment names an approver, so ""
+	// here would drop the second-signature route out of this guard silently — the exact blind
+	// spot the fund role's comment in the golden table describes.
+	orders.New(nil, "kanz-compliance").Routes(m)
+
+	allowed := map[authz.Capability]bool{authz.Trade: true, authz.Approve: true}
 
 	routes := m.Routes()
 	if len(routes) == 0 {
 		t.Fatal("the orders handler registered NO routes — this test would pass vacuously and guard nothing")
 	}
 	for _, r := range routes {
-		if r.Capability != authz.Trade {
-			t.Errorf("%s requires %q, want %q — it submits or cancels an order at a live exchange, "+
-				"and anyone holding a read token could call it",
-				r.Pattern, r.Capability, authz.Trade)
+		if !allowed[r.Capability] {
+			t.Errorf("%s requires %q, want one of %q or %q — it submits, cancels or releases an order "+
+				"at a live exchange, and anyone holding a read token could call it",
+				r.Pattern, r.Capability, authz.Trade, authz.Approve)
 		}
 	}
 }
@@ -58,7 +77,10 @@ func TestTheWholeRouteTableIsDeclared(t *testing.T) {
 	// history only when one is configured, so passing nil here would let that
 	// route escape this table entirely — the guard would pass by not looking.
 	gateway.New(nil, stubOrders{}, stubInstruments{}, nil).Routes(m)
-	orders.New(nil).Routes(m)
+	// A NON-EMPTY APPROVE ROLE ON THE ORDERS HANDLER TOO (#539): its approve route is
+	// registered only when the deployment names an approver, so "" here would hide the
+	// order-release surface from this table for the same reason "" hides funding below.
+	orders.New(nil, "kanz-compliance").Routes(m)
 	// A NON-EMPTY FUND ROLE, for the same reason stubOrders is a real value: since
 	// #535 the cash-movement route is registered only when the deployment names a
 	// funder, so passing "" here would drop it out of this table silently and the
@@ -104,6 +126,20 @@ func TestTheWholeRouteTableIsDeclared(t *testing.T) {
 		// THE CAPITAL PATH.
 		"POST /v1/orders":             authz.Trade,
 		"POST /v1/orders/{id}/cancel": authz.Trade,
+
+		// RELEASING A HELD ORDER (#539, #410). Should a read token be able to call
+		// this? No — it is the one route in this table that puts capital on a live
+		// exchange without composing the order, and a read token reaching it would
+		// mean the dual-control threshold is enforced against nobody.
+		//
+		// Should a TRADE token? Also no, and that is the half worth writing down.
+		// The OMS holds an order over the threshold precisely so that a SECOND
+		// PERSON decides; giving Trade this route hands the proposer their own
+		// release and records one pair of hands in the trail as two. The approver's
+		// grant is Read + Approve, and validateAuth refuses to start if that role
+		// name collides with the trade role — the segregation is configuration the
+		// process will not run without, not a convention.
+		"POST /v1/orders/{id}/approve": authz.Approve,
 
 		// MODEL PORTFOLIOS (#409), and the guard's prompt is the whole point here.
 		//

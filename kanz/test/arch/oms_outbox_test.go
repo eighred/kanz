@@ -86,7 +86,13 @@ var commitThenPublishByDesign = map[string]string{
 		"retirement condition, stated beside the function — an operational claim about the data, " +
 		"not a code change.",
 
-	"handleSubmit": "BY DESIGN: every write on this path already carries its FACT. Admission's " +
+	// RENAMED, NOT CONVERTED (#539). handleSubmit became a thin wrapper that
+	// unmarshals and delegates; the admission body it used to hold is now submit,
+	// which additionally takes the dual-control Approval that releases a held
+	// order. The argument below is unchanged because the code is unchanged — what
+	// moved is the name the guard keys on, and this comment is here so the next
+	// reader does not have to reconstruct that from git.
+	"submit": "BY DESIGN: every write on this path already carries its FACT. Admission's " +
 		"ACCEPTED rides store.Create, the ErrUnpriced reject's ORDER_REJECTED + outcome ride one " +
 		"Save with outcome_announced_at, and a submit that FILLED rides the marker Save through " +
 		"markOutcomeAnnounced. WHAT KEEPS IT LISTED is what has no write to ride: the pre-admission " +

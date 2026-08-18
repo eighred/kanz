@@ -197,7 +197,7 @@ func run() int {
 		return 2
 	}
 	defer closeBus()
-	ordersHandler := orders.New(producer)
+	ordersHandler := orders.New(producer, cfg.ApproveRole)
 
 	// AUTH-01d: every capability decision this gateway makes is recorded.
 	//
