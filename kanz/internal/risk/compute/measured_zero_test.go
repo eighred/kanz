@@ -10,6 +10,7 @@ import (
 
 	v1 "github.com/eighred/kanz/internal/risk/api/v1"
 	"github.com/eighred/kanz/internal/risk/domain"
+	"github.com/eighred/kanz/internal/risk/liquidity"
 	"github.com/eighred/kanz/internal/risk/pricing"
 	"github.com/eighred/kanz/internal/risk/xva"
 )
@@ -258,6 +259,68 @@ func TestFactorMeasures_NoModelIsAWholeBookExclusion(t *testing.T) {
 	ex := m.Coverage.Exclusions[0]
 	if ex.InstrumentID != "" || ex.Reason != SkipNoModel {
 		t.Errorf("exclusion = %+v, want an empty instrument id with reason %s", ex, SkipNoModel)
+	}
+}
+
+// LIQUIDITY IS THE ONE THAT IS LIVE (#509).
+//
+// The other three families this file pins were unregistered when #527 landed, so
+// their confident zeros were a schedule rather than an exposure. LiquidationHorizon
+// is REGISTERED IN PRODUCTION — risk-engine wires it whenever a liquidity venue and
+// a bar store are configured — and it returned a bare zero with no coverage at all.
+//
+// The counter was there and was not enough, which is the exact argument fi.go
+// already makes about its own seam: "OnSkip is a counter an operator watches
+// across all portfolios and only sees if they are looking; the InputCoverage this
+// measure attaches to its own value travels WITH the number, to the one caller
+// acting on that one portfolio, at the moment they act."
+//
+// A HORIZON OF ZERO DAYS IS THE FLATTERING DIRECTION. It says the book unwinds
+// instantly. Served over a book where nothing resolved, it is indistinguishable
+// from a flat book — and it is a number somebody sizes a position against.
+func TestLiquidityMeasures_NothingResolvedIsAMarkedZero(t *testing.T) {
+	p, _ := liqTestBook(t)
+
+	r := DefaultRegistry()
+	RegisterLiquidityRisk(context.Background(), r, staticLiquidity{}, liquidity.DefaultModel(), nil)
+	h, ok := ComputeMeasures(p, r, []v1.MeasureName{MeasureLiquidationHorizon}).Lookup(MeasureLiquidationHorizon)
+	if !ok {
+		t.Fatal("LiquidationHorizon missing")
+	}
+	// THE FIXTURE HAS TO KEEP SERVING THE ZERO, exactly as the FI case does, so
+	// that the coverage is the only thing distinguishing it from a flat book.
+	if got := decimalToFloat(h.Value); got != 0 {
+		t.Fatalf("horizon = %v, want 0 — the premise of this test is that the zero is served", got)
+	}
+	if h.Coverage.ExcludedCount == 0 {
+		t.Errorf("a book where NOTHING resolved reports ExcludedCount=0 — the response is " +
+			"indistinguishable from a book that genuinely unwinds instantly, and this measure is " +
+			"registered in production today (#509/#527)")
+	}
+	if len(h.Coverage.Exclusions) != 1 {
+		t.Fatalf("exclusions = %+v, want exactly one whole-book entry — one per position would "+
+			"make a total outage look like a scatter of per-instrument gaps", h.Coverage.Exclusions)
+	}
+	if ex := h.Coverage.Exclusions[0]; ex.InstrumentID != "" || ex.Reason != SkipNoLiquidHorizon {
+		t.Errorf("exclusion = %+v, want an empty instrument id with reason %s", ex, SkipNoLiquidHorizon)
+	}
+}
+
+// AND A FLAT BOOK'S ZERO STAYS CONFIDENT. A book with no positions really does
+// unwind instantly; flagging that would train an operator to scroll past the
+// flag that matters.
+func TestLiquidityMeasures_AnEmptyBookIsAConfidentZero(t *testing.T) {
+	p := domain.NewPortfolio("empty", "USD")
+
+	r := DefaultRegistry()
+	RegisterLiquidityRisk(context.Background(), r, staticLiquidity{}, liquidity.DefaultModel(), nil)
+	h, ok := ComputeMeasures(p, r, []v1.MeasureName{MeasureLiquidationHorizon}).Lookup(MeasureLiquidationHorizon)
+	if !ok {
+		t.Fatal("LiquidationHorizon missing")
+	}
+	if h.Coverage.ExcludedCount != 0 {
+		t.Errorf("an empty book reports ExcludedCount=%d, want 0 — crying wolf here drowns the "+
+			"signal the case above depends on", h.Coverage.ExcludedCount)
 	}
 }
 

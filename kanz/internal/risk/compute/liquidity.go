@@ -268,13 +268,16 @@ func registryVaR99(r *Registry) MeasureFunc {
 func liquidationHorizonMeasure(ctx context.Context, provider liquidity.Provider, model liquidity.Model, o *liquidityOptions) MeasureFunc {
 	return func(p *domain.Portfolio) v1.Measure {
 		prof := model.LiquidationProfile(ctx, p, provider)
+		var cov Coverage
 		liquid := 0
 		for i := range prof.Positions {
 			if prof.Positions[i].Liquid {
 				liquid++
+				cov.Contributed++
 				continue
 			}
 			o.skip(prof.Positions[i].InstrumentID, SkipIlliquid)
+			cov.Exclude(domain.InstrumentID(prof.Positions[i].InstrumentID), SkipIlliquid)
 		}
 		// THE BASE-CURRENCY FILTER IS NOT RE-RUN HERE. liquidity.Profile already
 		// applies it, and a second copy in this file is precisely the #257 defect
@@ -286,8 +289,31 @@ func liquidationHorizonMeasure(ctx context.Context, provider liquidity.Provider,
 		// that can tell a wrong venue from an empty store.
 		if liquid == 0 && len(p.Positions()) > 0 {
 			o.skip("", SkipNoLiquidHorizon)
+			// WHOLE-BOOK ONLY WHEN THERE WAS NOTHING TO ATTRIBUTE. A profile that
+			// came back empty means the measure never got as far as the book, which
+			// is ExcludeWhole's documented meaning. When the profile DID name
+			// positions and every one was illiquid, the per-position exclusions
+			// above already say so — adding a whole-book entry on top would count
+			// one outage twice and overstate how much was missed.
+			if len(prof.Positions) == 0 {
+				cov.ExcludeWhole(SkipNoLiquidHorizon)
+			}
 		}
-		return v1.Measure{Name: MeasureLiquidationHorizon, Value: floatToDecimal(prof.WeightedDays, liqHorizonExp)}
+		// THE COVERAGE TRAVELS WITH THE NUMBER, AND THE COUNTER DOES NOT REPLACE IT
+		// (#527, #509). A horizon of zero days says the book unwinds instantly —
+		// the flattering direction, and a number somebody sizes a position against.
+		// Served over a book where nothing resolved it is indistinguishable from a
+		// flat book. o.skip already fired, but fi.go's own argument applies here:
+		// the counter is watched across all portfolios by an operator who happens
+		// to be looking, while this reaches the one caller acting on this one
+		// portfolio at the moment they act. This measure is REGISTERED IN
+		// PRODUCTION, which is what separated it from the other three families
+		// #527 fixed.
+		return v1.Measure{
+			Name:     MeasureLiquidationHorizon,
+			Value:    floatToDecimal(prof.WeightedDays, liqHorizonExp),
+			Coverage: cov.Result(),
+		}
 	}
 }
 
@@ -298,12 +324,18 @@ func lvarMeasure(ctx context.Context, provider liquidity.Provider, model liquidi
 		base := baseVaR(p)
 		varFloat := decimalToFloat(base.Value)
 		lvar := model.LiquidityAdjustedVaR(ctx, varFloat, p, provider)
+		// INHERITED FIRST. LVaR is VaR widened by a cost; if the VaR underneath was
+		// computed over nothing, so is this, and a derived measure must not launder
+		// a flagged input into a clean answer.
+		var cov Coverage
+		cov.Inherit(base.Coverage)
 		if lvar == varFloat && len(p.Positions()) > 0 {
 			// EXACT EQUALITY IS THE RIGHT TEST, not a tolerance.
 			// LiquidityAdjustedVaR is varValue + cost, so an identical float means
 			// the cost was exactly zero — the degenerate case — rather than small.
 			o.skip("", SkipNoLiquidationCost)
+			cov.ExcludeWhole(SkipNoLiquidationCost)
 		}
-		return v1.Measure{Name: MeasureLVaR99, Value: floatToDecimal(lvar, liqVaRExp)}
+		return v1.Measure{Name: MeasureLVaR99, Value: floatToDecimal(lvar, liqVaRExp), Coverage: cov.Result()}
 	}
 }
