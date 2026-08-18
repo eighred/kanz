@@ -64,6 +64,24 @@ func (c *Coverage) ExcludeWhole(reason string) {
 	c.Exclude("", reason)
 }
 
+// Inherit seeds this accumulator from a measure THIS one is derived from.
+//
+// LVaR99 is VaR99 widened by a liquidation cost: if the VaR underneath it was
+// computed over nothing, the widened number is no better founded, and dropping
+// its coverage would let a derived measure launder a flagged input into a clean
+// answer. The sample is carried over subject to the same bound, so a derived
+// measure cannot exceed it by inheriting.
+func (c *Coverage) Inherit(prior v1.InputCoverage) {
+	c.Contributed += prior.Contributed
+	c.excluded += prior.ExcludedCount
+	for _, ex := range prior.Exclusions {
+		if len(c.sample) >= v1.MaxInputExclusions {
+			break
+		}
+		c.sample = append(c.sample, ex)
+	}
+}
+
 // Result freezes the accumulator into the api/v1 shape carried on the measure.
 func (c *Coverage) Result() v1.InputCoverage {
 	return v1.InputCoverage{
