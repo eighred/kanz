@@ -422,6 +422,63 @@ message OrderAccepted {
   OrderState state = 2;
 }
 
+// OrderPendingApproval is the FACT that an order was HELD for a second
+// signature instead of being admitted (#410, act three).
+//
+// # Why a held order needs a FACT of its own
+//
+// An order at or above OMS_DUAL_CONTROL_MIN_NOTIONAL with the control armed is
+// deliberately NOT written to the order book — it is not an admitted order, and
+// a ninth OrderStatus would have made it one to every consumer that folds
+// status. So without this FACT nothing downstream hears of it at all: the trader
+// who submitted it sees neither an ORDER_ACCEPTED nor an ORDER_REJECTED, which
+// is precisely the failure #410's acceptance names — "an order that neither
+// executes nor reports why".
+//
+// # It is NOT terminal, and that is what separates it from OrderRejected
+//
+// The order still exists, as a proposal, and becomes a live order the moment a
+// DIFFERENT authenticated subject approves it — under the SAME order_id, with
+// the ORDER_ACCEPTED that follows. A consumer must not fold this as an end
+// state, and must not treat the later ORDER_ACCEPTED as a duplicate.
+//
+// A proposal that nobody approves EXPIRES rather than resting forever looking
+// like a decision that was made; expires_at below is that deadline.
+message OrderPendingApproval {
+  string order_id = 1;
+
+  // command is the exact order proposed — the payload digest below covers.
+  //
+  // CARRIED IN FULL so an approver can be SHOWN what they are signing for. An
+  // approval bound to an id the approver cannot inspect is a signature on
+  // something unread, and the whole value of the second person is that they
+  // looked.
+  SubmitOrder command = 2;
+
+  // proposer is the AUTHENTICATED subject that submitted the order, taken from
+  // the command's issuer and never self-asserted — the forged-actor defect #444
+  // fixed on the override path arrived by exactly that route. The approver must
+  // be a different person (internal/dualcontrol), so this is the half of the
+  // pair that is knowable now.
+  string proposer = 3;
+
+  // act is the dual-control act constant, "ORDER_SUBMISSION". Carried rather
+  // than assumed so an approval collected for a pricing override or a mandate
+  // change can never be replayed against an order.
+  string act = 4;
+
+  // digest is the value an approval must cover — approval.Terms.Digest over the
+  // command above. It is on the wire because it is what CHANGING the order
+  // would change: a consumer showing a trader their pending order shows this,
+  // and an approver's client re-derives it rather than trusting it.
+  string digest = 5;
+
+  // proposed_at and expires_at bound the window in which the second signature
+  // can still be given.
+  google.protobuf.Timestamp proposed_at = 6;
+  google.protobuf.Timestamp expires_at = 7;
+}
+
 // OrderRejected is the FACT that an order was refused before any effect. No
 // state changed; the order is terminal (status REJECTED).
 message OrderRejected {

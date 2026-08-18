@@ -488,25 +488,18 @@ func Load() (Config, error) {
 			"to be set (e.g. \"1000000 USD\"): there is no threshold to compare an order against, and this " +
 			"service will not default one — the number is the decision")
 	}
-	// AND IT CANNOT BE ARMED AT ALL YET, WHICH IS A REFUSAL AND NOT AN OMISSION.
-	// The OMS has nowhere to record an order awaiting approval. The ruling on #410
-	// is a PROPOSALS TABLE in this service — not a ninth OrderStatus — on the shape
-	// of services/datamaster/internal/store/proposals.go, and it is not built yet.
-	// Arming before it is would REJECT every order at or above the threshold
-	// instead of holding it: an act that neither takes effect nor can be approved,
-	// which is exactly the silent drop #410's acceptance forbids.
+	// THE "IT CANNOT BE ARMED AT ALL YET" REFUSAL THAT USED TO SIT HERE IS GONE.
+	// It existed because the OMS had nowhere to record an order awaiting approval,
+	// so arming would have REJECTED every order at or above the threshold instead
+	// of holding it. migrations/0009_order_proposals.sql is that place, and
+	// internal/order's hold() writes to it in the same transaction as the FACT
+	// announcing the order is held. The flag is now a real posture.
 	//
-	// THIS IS THE ONE LINE THE PROPOSALS-TABLE PR DELETES. Until then the threshold ALONE
-	// is the supported posture and it is not a no-op: every order is still admitted
-	// on one signature, each is classified against the threshold, and
-	// kanz_oms_order_signatures_total makes the gap readable before anyone arms it.
-	if cfg.RequireDualControl {
-		return Config{}, fmt.Errorf("OMS_REQUIRE_DUAL_CONTROL=true is not supported yet: this OMS has " +
-			"nowhere to hold an order awaiting approval, so arming the control would reject every order " +
-			"at or above OMS_DUAL_CONTROL_MIN_NOTIONAL rather than hold it for a second signature (#410). " +
-			"Set OMS_DUAL_CONTROL_MIN_NOTIONAL alone: orders are still admitted on one signature and " +
-			"kanz_oms_order_signatures_total counts how many of them were at or above the threshold")
-	}
+	// WHAT ARMING STILL COSTS AN OPERATOR, because a control nobody watches stops
+	// being a control (#495 said this of the override queue and it is truer here):
+	// a held order does not trade until a DIFFERENT authenticated subject approves
+	// it, and it EXPIRES if nobody does. Arm this when somebody owns the pending
+	// queue.
 
 	// THE COLLATERAL-SEGREGATION REFUSAL BELONGS HERE, NOT 200 LINES INTO STARTUP
 	// (#68).

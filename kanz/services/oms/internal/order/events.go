@@ -26,8 +26,14 @@ const (
 	SubjectAmend  = "order.order.amend"
 	SubjectCancel = "order.order.cancel"
 
-	EventTypeAccepted        = "order.order.accepted"
-	EventTypeRejected        = "order.order.rejected"
+	EventTypeAccepted = "order.order.accepted"
+	EventTypeRejected = "order.order.rejected"
+	// EventTypePendingApproval announces an order HELD for a second signature
+	// (#410). It is NOT a lifecycle status: a held order is not in the order
+	// book at all, so this is the only thing the estate ever hears about it
+	// until it is approved (an ORDER_ACCEPTED under the same order_id) or it
+	// expires.
+	EventTypePendingApproval = "order.order.pending_approval"
 	EventTypeRouted          = "order.order.routed"
 	EventTypePartiallyFilled = "order.order.partially_filled"
 	EventTypeFilled          = "order.order.filled"
@@ -153,6 +159,48 @@ func (e *Emitter) EmitAccepted(ctx context.Context, st *orderpb.OrderState) erro
 // that can never be published.
 func (e *Emitter) AcceptedFact(ctx context.Context, st *orderpb.OrderState) (outbox.Record, error) {
 	return outbox.From(ctx, e.acceptedEvent(st))
+}
+
+// pendingApprovalEvent is the ORDER_PENDING_APPROVAL FACT for an order HELD for
+// a second signature (#410). One builder, so the enqueued form cannot drift from
+// any later published one.
+func (e *Emitter) pendingApprovalEvent(p OrderProposal) bus.Event {
+	return e.event(EventTypePendingApproval, p.ID, p.CreatedAt,
+		&orderpb.OrderPendingApproval{
+			OrderId:    p.ID,
+			Command:    p.Command,
+			Proposer:   p.Proposer,
+			Act:        string(p.Act),
+			Digest:     p.Digest,
+			ProposedAt: timestamppb.New(p.CreatedAt),
+			ExpiresAt:  timestamppb.New(p.ExpiresAt),
+		})
+}
+
+// PendingApprovalFact captures ORDER_PENDING_APPROVAL as an outbox record, so
+// the proposal row and the announcement that the order is held commit in ONE
+// transaction (#292's guarantee applied to #410's hold).
+//
+// THERE IS NO EmitPendingApproval, DELIBERATELY. This FACT has exactly one
+// producer — the hold in handleSubmit — and it always has a proposal row to
+// commit alongside. A direct-publish sibling would be a second way to announce a
+// held order, available to a caller with no row to commit, and the only thing it
+// could produce is an announcement of a hold that never happened. Every builder
+// in this file that grew such a sibling grew it for a compensator repairing rows
+// written before the outbox existed; there is no such population here, because
+// this FACT is younger than the outbox.
+//
+// It takes ctx for the same reason AcceptedFact does: the record must carry the
+// lineage and the TENANT the synchronous publish would have inherited, and the
+// relay has none of them. outbox.From refuses a record with no tenant rather
+// than enqueueing one that can never be published — and because the enqueue is
+// INSIDE the proposal transaction, that refusal ROLLS THE HOLD BACK too, which
+// is the correct direction: an order whose hold cannot be announced must not be
+// held silently. The tenant is present on this path because a SubmitOrder
+// arrives as a bus DELIVERY, exactly as it is for AcceptedFact three lines up;
+// it is the HTTP-borne case that has none, which is what cost #498 an outage.
+func (e *Emitter) PendingApprovalFact(ctx context.Context, p OrderProposal) (outbox.Record, error) {
+	return outbox.From(ctx, e.pendingApprovalEvent(p))
 }
 
 // EmitRejected publishes OrderRejected (no state changed; order terminal).

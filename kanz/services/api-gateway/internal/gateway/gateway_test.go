@@ -65,6 +65,17 @@ func (f *fakeClient) ListOrders(_ context.Context, in *orderpb.ListOrdersRequest
 	f.gotOrders = in
 	return f.ordersResp, f.err
 }
+
+// ListPendingApprovals exists so this double still satisfies
+// order.v1.OrderQueryServiceClient after #410 added the pending-approval read.
+//
+// IT RETURNS NOTHING AND THAT IS CORRECT HERE: the gateway does not expose this
+// route, so no test in this package drives it. The day one does, this must be
+// given the same record-the-request shape ListOrders has above — a double that
+// silently answers "nothing pending" would certify a queue nobody can see.
+func (f *fakeClient) ListPendingApprovals(context.Context, *orderpb.ListPendingApprovalsRequest, ...grpc.CallOption) (*orderpb.ListPendingApprovalsResponse, error) {
+	return nil, f.err
+}
 func (f *fakeClient) ListTradeableInstruments(context.Context, *venuepb.ListTradeableInstrumentsRequest, ...grpc.CallOption) (*venuepb.ListTradeableInstrumentsResponse, error) {
 	return f.instrResp, f.err
 }

@@ -20,6 +20,7 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"github.com/eighred/kanz/internal/dec"
+	"github.com/eighred/kanz/internal/dualcontrol"
 	"github.com/eighred/kanz/internal/execution"
 	"github.com/eighred/kanz/internal/outbox"
 	"github.com/eighred/kanz/services/oms/internal/approval"
@@ -119,10 +120,11 @@ type ServiceOption func(*Service)
 
 // WithDualControl supplies the maker-checker gate for order submission (#410).
 //
-// It classifies every admitted parent order against the configured notional
-// threshold and counts it. It does NOT hold an order awaiting approval — that
-// placement is a proposals table in this service (#410) and config.Load refuses
-// to arm the control until it is built.
+// It classifies every parent order against the configured notional threshold.
+// UNARMED it only counts and logs; ARMED (OMS_REQUIRE_DUAL_CONTROL) an order at
+// or above the threshold is HELD in the proposals table by hold() and never
+// reaches store.Create — so it is not an order until a second, different
+// authenticated subject approves it.
 func WithDualControl(g *approval.Gate) ServiceOption {
 	return func(s *Service) { s.dualControl = g }
 }
@@ -398,7 +400,7 @@ func (s *Service) handleSubmit(ctx context.Context, env *envelopepb.Envelope, pa
 	var dual approval.Decision
 	if parent == nil {
 		dual = s.dualControl.Decide(&cmd)
-		if dual.Posture == approval.PostureAtOrAbove {
+		if dual.Posture == approval.PostureAtOrAbove && !dual.Required {
 			// UNARMED IS NOT UNRECORDED — the stance #495 took on the override
 			// path, applied here. The act and the digest a second signature would
 			// have had to cover are recorded now, so arming the control later does
@@ -551,6 +553,35 @@ func (s *Service) handleSubmit(ctx context.Context, env *envelopepb.Envelope, pa
 			return s.refuse(ctx, cmd.GetOrderId(), re.Code, re.Msg, now)
 		}
 		return err
+	}
+
+	// THE HOLD (#410). AN ORDER THAT NEEDS TWO PEOPLE DOES NOT BECOME AN ORDER.
+	//
+	// It is here — after every refusal above and before store.Create below — and
+	// both halves of that placement are deliberate.
+	//
+	// AFTER THE REFUSALS, because an approver's attention is the scarcest thing
+	// this control spends. An order that breaches the mandate, names a venue this
+	// OMS cannot route, or asks for an order type the exchange will not place is
+	// refused NOW, exactly as it is today. Holding it first would queue orders
+	// that can never trade whatever anybody signs, and the pending list — the
+	// thing somebody has to watch, or the control stops being a control (#495) —
+	// would fill with them. Accept() has also run, so a held order is a VALID
+	// order: an approver is never asked to sign something that would be rejected
+	// the moment they did.
+	//
+	// BEFORE store.Create, because that is the admission gate. A held order must
+	// be absent from `orders` — not present with a pending status — or the
+	// routing gate in work(), the startup sweep, the position projector, tv-sync
+	// and kanz-web each become one more place that has to know not to work it.
+	// See migrations/0009 for the whole argument.
+	//
+	// A CHILD NEVER REACHES HERE. dual is the zero Decision when parent != nil,
+	// so Required is false: the parent was decided once, for the whole notional,
+	// and refusing a late slice would strand it part-filled — the same rule the
+	// compliance gate follows above.
+	if dual.Required {
+		return s.hold(ctx, &cmd, dual, now)
 	}
 	// THE ARRIVAL MARK, STAMPED HERE AND NOWHERE ELSE (#436).
 	//
@@ -1590,6 +1621,125 @@ func (s *Service) handleAmend(ctx context.Context, payload []byte) error {
 
 // refuse emits an ORDER_REJECTED FACT and a REJECTED command outcome, then acks
 // (returns nil) — a refused command is terminal.
+// ReasonUnsignable is the outcome code for an order that requires a second
+// signature but carries nothing an approval could be bound to — no
+// authenticated proposer, or terms that cannot be digested.
+//
+// IT IS A REFUSAL AND NOT A HOLD. Holding such an order would put it in a queue
+// where every approval attempt fails for a reason the approver cannot fix, which
+// is a silent drop with extra steps. The caller is told now, while the person
+// who could correct the command is still there.
+const ReasonUnsignable = "DUAL_CONTROL_UNSIGNABLE"
+
+// hold puts an order that requires a second signature into the proposals table
+// instead of admitting it (#410).
+//
+// # The two writes are one transaction, and that is the whole shape
+//
+// The proposal row and the ORDER_PENDING_APPROVAL record commit together
+// (ProposalStore.Put). Publishing inline instead would have forced a choice
+// between failing the order when the broker is down and dropping the FACT — and
+// dropping it is the exact failure this control exists to end, because a held
+// order is invisible everywhere else: it is not in the book, so no blotter, no
+// projection and no outcome consumer would ever hear of it. #498 made the same
+// argument for the override path.
+//
+// # What the caller is told
+//
+// Nothing else. There is deliberately NO CommandOutcome here, and that is a
+// stated deviation from event-class-rules §2 rather than an oversight:
+// CommandOutcomeStatus has four values and every one of them is TERMINAL. This
+// command's disposition is genuinely not decided yet. ACCEPTED would tell every
+// downstream fold the order was admitted — it was not, and nothing will route
+// it; REJECTED would tell them it is dead — it is not, and an approval will
+// bring it back under the same order_id. A held order's outcome FACT is the one
+// its approval or its expiry produces, and the pending FACT above is what says
+// so in the meantime. The alternative — a lie in a field consumers switch on —
+// is worse than a late outcome.
+//
+// # The proposer is the command's ISSUER, and for an automated order that is not a person
+//
+// The gateway binds Issuer from the authenticated principal and the producer
+// re-checks it (AUTH-01c), so for a human order this is a real, unforgeable
+// subject. TWO SERVICES PUBLISH ORDERS WITH NO HUMAN BEHIND THEM —
+// webhook-ingest fans out a strategy signal, optimization materializes a
+// rebalance — and their issuers are "strategy:{id}" and the caller's id. Held
+// under this control, such an order requires ONE human to approve a machine's
+// proposal. That is a weaker property than four-eyes and it is the correct
+// behaviour for the population: refusing to hold them would exempt exactly the
+// orders no person ever looked at. It is recorded here because the audit trail
+// will show a proposer that is not a person, and an auditor must not read that
+// as two humans.
+func (s *Service) hold(ctx context.Context, cmd *orderpb.SubmitOrder, d approval.Decision, now time.Time) error {
+	// AN ORDER WHOSE TERMS CANNOT BE DIGESTED IS NEVER ADMITTED QUIETLY. Decide
+	// records the failure rather than swallowing it, and an order no approval
+	// could ever cover must not sit in a queue pretending to be approvable.
+	if d.DigestErr != nil {
+		return s.refuse(ctx, cmd.GetOrderId(), ReasonUnsignable, d.DigestErr.Error(), now)
+	}
+	proposer := strings.TrimSpace(cmd.GetMetadata().GetIssuer())
+	if proposer == "" {
+		// dualcontrol.Propose refuses this too. Refusing HERE gives the caller a
+		// rejection with a reason instead of a nacked delivery that redelivers
+		// forever, and it is the same defect class #444 fixed: an identity that
+		// is not really there makes the self-approval check pass vacuously,
+		// because every approver differs from "".
+		return s.refuse(ctx, cmd.GetOrderId(), ReasonUnsignable,
+			"an order requiring dual control carries no authenticated issuer, so no approver "+
+				"could ever be shown to differ from its proposer", now)
+	}
+
+	// ONE PRODUCER OF dualcontrol.ActOrderSubmission — approval.Propose. The act
+	// constant, the subject and the digest are decided in one place so they
+	// cannot drift from what the approve side re-derives.
+	base, err := approval.Propose(cmd.GetOrderId(), approval.TermsOfSubmit(cmd), proposer, now, dualcontrol.DefaultTTL)
+	if err != nil {
+		// Malformed enough that no approval could ever cover it. Same refusal as
+		// the digest failure above, and for the same reason.
+		return s.refuse(ctx, cmd.GetOrderId(), ReasonUnsignable, err.Error(), now)
+	}
+	prop := OrderProposal{Proposal: base, Command: cmd, PortfolioID: cmd.GetPortfolioId()}
+
+	// BUILT BEFORE THE WRITE, so a FACT that cannot be captured — no tenant on
+	// the delivery, a payload that will not marshal — stops the hold rather than
+	// leaving an order held that nobody will ever hear about. Exactly the
+	// discipline the AcceptedFact call on the admission path follows.
+	fact, err := s.emitter.PendingApprovalFact(ctx, prop)
+	if err != nil {
+		return err
+	}
+	if err := s.store.Proposals().Put(ctx, prop, []outbox.Record{fact}); err != nil {
+		if errors.Is(err, ErrProposalExists) {
+			// A REDELIVERY OF A COMMAND ALREADY HELD. Ack and announce nothing:
+			// the first delivery's proposal owns this order, and its FACT went
+			// out with it. Without this the same held order would be announced
+			// once per redelivery. The loser's outbox record rolled back with
+			// its INSERT, so there is nothing to flush either.
+			return nil
+		}
+		return err
+	}
+
+	// NOT COUNTED ON kanz_oms_order_signatures_total, deliberately. That counter
+	// measures orders that WENT THROUGH and how many people signed them; a held
+	// order went through on nobody's signature yet. Counting it as single_signed
+	// would inflate the exact number the arming decision rests on with orders the
+	// control caught — the metric would get worse as the control started working.
+	s.logger.Warn("order at or above the dual-control threshold is HELD for a second signature "+
+		"and has NOT been admitted (#410)",
+		"order_id", cmd.GetOrderId(), "portfolio_id", cmd.GetPortfolioId(),
+		"proposer", proposer, "act", string(prop.Act), "digest", prop.Digest,
+		"expires_at", prop.ExpiresAt)
+
+	// Publish now, for the same reason admission does: the FACT is durable, but
+	// a held order nobody hears about until the next relay tick is a trader
+	// staring at a blotter with nothing on it.
+	if _, err := s.relay.Flush(ctx, cmd.GetOrderId()); err != nil {
+		return err
+	}
+	return nil
+}
+
 func (s *Service) refuse(ctx context.Context, orderID, code, reason string, t time.Time) error {
 	if err := s.emitter.EmitRejected(ctx, orderID, code, reason, t); err != nil {
 		return err
