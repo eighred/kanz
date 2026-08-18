@@ -330,6 +330,7 @@ func (c *captureHandler) all() string {
 
 func (c *captureHandler) hasError(substr string) bool { return c.hasAt("ERROR", substr) }
 func (c *captureHandler) hasInfo(substr string) bool  { return c.hasAt("INFO", substr) }
+func (c *captureHandler) hasWarn(substr string) bool  { return c.hasAt("WARN", substr) }
 
 func (c *captureHandler) hasAt(level, substr string) bool {
 	for _, r := range c.records() {

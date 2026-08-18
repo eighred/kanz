@@ -244,6 +244,24 @@ spec:
             # approver is a different SUBJECT, the audit trail reads as genuine
             # four-eyes. A control satisfied by two people on the same desk is the thing
             # maker-checker exists to prevent.
+            #
+            # A FOURTH ROUTE RIDES THIS ROLE, AND IT HAS A SECOND PRECONDITION THIS
+            # MANIFEST DOES NOT MEET (#539). Order submission is act three of the same
+            # control, and its approve route registers on the role alone — but the queue
+            # that tells an approver WHAT to sign is a read off the OMS:
+            #
+            #   GET /v1/orders/pending-approvals   needs API_GATEWAY_OMS_READ_ADDR
+            #
+            # That address is NOT set here, so arming the role today gives an approver a
+            # signing route and no way to reach it. It is not a soft gap: the approve
+            # route refuses an empty digest with 400, a held order is deliberately absent
+            # from the orders table, and the digest otherwise rides OrderPendingApproval
+            # on NATS. The gateway WARNs on this combination at boot rather than leaving
+            # it to a 404 met later.
+            #
+            # So the order half of maker-checker needs BOTH keys set, and the override
+            # half needs only the role. Recorded because the two halves look identical
+            # from this file and are not.
             # PER POD, not platform-wide. See THE SCALE INVARIANT above.
             - { name: API_GATEWAY_RATE_LIMIT_PER_SEC, value: "50" }
             - { name: API_GATEWAY_RATE_LIMIT_BURST, value: "100" }

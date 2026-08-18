@@ -474,8 +474,37 @@ func buildProxy(ctx context.Context, cfg config.Config, logger *slog.Logger) (*p
 		} else {
 			logger.Info("api-gateway: no override surface (no datamaster upstream and no approver)")
 		}
+	} else if cfg.DataMasterAddr == "" {
+		// AN APPROVER NAMED OVER NO BACKEND IS THE INVERSE FAILURE, AND IT USED TO
+		// READ AS SUCCESS. This branch logged "override surface fronted" for any
+		// non-empty role, including a deployment with no datamaster at all — where
+		// the override routes do not register, because they are conditional on the
+		// client as well as the role. "Nothing configured" and "checked, and fine"
+		// printed the same line.
+		//
+		// Found by arming API_GATEWAY_APPROVE_ROLE in dev/docker-compose.yml to make
+		// #539's path exercisable and discovering the rig fronts neither dual-control
+		// backend, so the setting was inert and this log said otherwise.
+		logger.Warn("api-gateway: API_GATEWAY_APPROVE_ROLE names " + cfg.ApproveRole +
+			" but no API_GATEWAY_DATAMASTER_ADDR — the override propose/approve/pending routes are " +
+			"NOT registered. Granting that role to a person now gives them a capability no route " +
+			"honours, which is the #535 shape inverted: the control looks armed from the config and " +
+			"answers 404 from the estate (#539)")
 	} else {
 		logger.Info("api-gateway: override surface fronted", "role", cfg.ApproveRole)
+	}
+
+	// AND THE SAME QUESTION FOR ACT THREE, WHICH HAS A SECOND PRECONDITION. The
+	// order approve route rides the bus and registers on the role alone, but the
+	// queue that tells an approver WHAT to sign is a read off the OMS. Without it
+	// an approver can sign and cannot discover: the approve route refuses an empty
+	// digest with 400, a held order is deliberately absent from the orders table,
+	// and the digest otherwise rides OrderPendingApproval on NATS.
+	if cfg.ApproveRole != "" && cfg.OMSReadAddr == "" {
+		logger.Warn("api-gateway: API_GATEWAY_APPROVE_ROLE is set but no API_GATEWAY_OMS_READ_ADDR — " +
+			"GET /v1/orders/pending-approvals is NOT registered. An approver can sign an order id they " +
+			"already know and has no way to learn one, so a held order is discoverable only by reading " +
+			"NATS (#539)")
 	}
 	if len(bases) == 0 {
 		logger.Warn("api-gateway: Phase-7 read surfaces disabled (no upstream addresses)")
