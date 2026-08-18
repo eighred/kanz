@@ -91,7 +91,7 @@ func routerFor(t *testing.T, fundRole string, callerRoles ...string) (http.Handl
 	be := &recordingBackend{}
 	var ready atomic.Bool
 	router, err := buildRouter(cfg,
-		gateway.New(nil, nil, nil, logger),
+		gateway.New(nil, nil, nil, "", logger),
 		orders.New(nil, cfg.ApproveRole),
 		proxy.New(be, proxy.Roles{Fund: cfg.FundRole}),
 		nil, // no control plane

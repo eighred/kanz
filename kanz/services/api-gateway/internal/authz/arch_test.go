@@ -76,7 +76,7 @@ func TestTheWholeRouteTableIsDeclared(t *testing.T) {
 	// A NON-NIL ORDERS CLIENT, DELIBERATELY. gateway.Routes registers the order
 	// history only when one is configured, so passing nil here would let that
 	// route escape this table entirely — the guard would pass by not looking.
-	gateway.New(nil, stubOrders{}, stubInstruments{}, nil).Routes(m)
+	gateway.New(nil, stubOrders{}, stubInstruments{}, "kanz-compliance", nil).Routes(m)
 	// A NON-EMPTY APPROVE ROLE ON THE ORDERS HANDLER TOO (#539): its approve route is
 	// registered only when the deployment names an approver, so "" here would hide the
 	// order-release surface from this table for the same reason "" hides funding below.
@@ -185,6 +185,14 @@ func TestTheWholeRouteTableIsDeclared(t *testing.T) {
 		// four-eyes here is a check on the PERSON, not the role: datamaster compares
 		// authenticated subjects, so two holders of this role are two signatures and
 		// one holder acting twice is refused.
+		// The queue an approver acts from. Should a read token be able to call it?
+		// NO — same answer as the override queue, and for the same reason: it names
+		// the proposer of every unsigned order awaiting a second signature and is
+		// the working surface somebody signs from, not a report. A held order is
+		// absent from every other read on this gateway, so this is the ONLY way to
+		// discover one — which is what made the approve route unusable without it.
+		"GET /v1/orders/pending-approvals": authz.Approve,
+
 		"POST /v1/exceptions/{id}/override":         authz.Approve,
 		"POST /v1/exceptions/{id}/override/approve": authz.Approve,
 		"GET /v1/exceptions/pending-overrides":      authz.Approve,
