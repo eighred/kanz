@@ -41,7 +41,7 @@ func fundingRequest() *http.Request {
 }
 
 func TestFundingRouteRefusesATradeToken(t *testing.T) {
-	h := New(&fakeBackend{resp: Response{Status: http.StatusAccepted}})
+	h := New(&fakeBackend{resp: Response{Status: http.StatusAccepted}}, "treasury")
 	m := mux("trader", authz.Trade)
 	h.Routes(m)
 
@@ -57,7 +57,7 @@ func TestFundingRouteRefusesATradeToken(t *testing.T) {
 }
 
 func TestFundingRouteRefusesAReadToken(t *testing.T) {
-	h := New(&fakeBackend{resp: Response{Status: http.StatusAccepted}})
+	h := New(&fakeBackend{resp: Response{Status: http.StatusAccepted}}, "treasury")
 	m := mux("analyst", authz.Read)
 	h.Routes(m)
 
@@ -73,7 +73,7 @@ func TestFundingRouteRefusesAReadToken(t *testing.T) {
 // nobody can reach — a funding outage wearing the shape of a control.
 func TestFundingRouteAdmitsAFundToken(t *testing.T) {
 	be := &fakeBackend{resp: Response{Status: http.StatusAccepted, ContentType: "application/json", Body: []byte(`{"status":"accepted"}`)}}
-	h := New(be)
+	h := New(be, "treasury")
 	m := mux("treasury", authz.Fund)
 	h.Routes(m)
 
@@ -97,6 +97,59 @@ func TestFundingRouteAdmitsAFundToken(t *testing.T) {
 	if be.last.Principal == nil || be.last.Principal.Tenant != "t1" {
 		t.Fatalf("principal forwarded = %+v, want the authenticated caller's tenant", be.last.Principal)
 	}
+}
+
+// WITH NO FUNDER NAMED, THE ROUTE IS ABSENT — 404, NOT 403 (#535).
+//
+// authz.Fund is carried by no role unless API_GATEWAY_FUND_ROLE names one. A
+// registered route whose capability nobody holds refuses EVERY principal that
+// exists, and "you may not" is a false answer when the truth is "nobody may, in
+// this deployment" — from outside it is indistinguishable from a control working
+// exactly as designed, which is how it survived from #415 to #535.
+//
+// THE STATUS CODE IS THE ASSERTION. 404 says there is no cash-movement surface
+// here, which is true and actionable; 403 sends the operator looking for a role
+// that no deployment could ever grant them.
+func TestFundingRouteIsNotRegisteredWithoutAFunder(t *testing.T) {
+	be := &fakeBackend{resp: Response{Status: http.StatusAccepted}}
+	h := New(be, "") // no API_GATEWAY_FUND_ROLE
+	// A mux that grants EVERY capability, including Fund, so a 404 here can only
+	// come from the route being absent — never from a capability refusal.
+	m := mux("everything", authz.Read, authz.Trade, authz.Operate, authz.Fund)
+	h.Routes(m)
+
+	for _, r := range m.Routes() {
+		if r.Capability == authz.Fund {
+			t.Fatalf("the funding route %q was registered with no funder configured", r.Pattern)
+		}
+	}
+
+	rr := httptest.NewRecorder()
+	m.ServeHTTP(rr, as(fundingRequest(), "everything"))
+
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404. With no role able to carry authz.Fund the route must not "+
+			"be registered at all — a 403 to every principal that exists reads as a working "+
+			"control and is a total outage of the capability (#535)", rr.Code)
+	}
+	if be.last.Service != "" {
+		t.Fatalf("the accounting backend was called for an unregistered route")
+	}
+}
+
+// AND THE OTHER HALF: with a funder named, the route IS registered. Without this
+// the assertion above is satisfied by a route that no configuration can ever
+// bring back — a permanent 404 wearing the shape of a deliberate absence.
+func TestFundingRouteIsRegisteredWhenAFunderIsNamed(t *testing.T) {
+	m := authz.NewMux(nil, nil)
+	New(nil, "treasury").Routes(m)
+
+	for _, r := range m.Routes() {
+		if r.Capability == authz.Fund && r.Pattern == "POST /v1/portfolios/{id}/cash-movements" {
+			return
+		}
+	}
+	t.Fatal("no route requiring authz.Fund was registered even though a fund role is configured")
 }
 
 // TRADE AND FUND ARE INDEPENDENT IN BOTH DIRECTIONS. A funder must not be able

@@ -440,9 +440,20 @@ func buildProxy(ctx context.Context, cfg config.Config, logger *slog.Logger) (*p
 	if cfg.AccountingAddr != "" {
 		bases[proxy.ServiceAccounting] = cfg.AccountingAddr
 	}
+	// The funding surface is registered by the ROLE, not by the address (#535). It
+	// is logged either way: an absent route must be a stated posture, not something
+	// an operator discovers from a 404.
+	if cfg.FundRole == "" {
+		logger.Warn("api-gateway: no API_GATEWAY_FUND_ROLE — POST /v1/portfolios/{id}/cash-movements " +
+			"is NOT registered, so this gateway answers 404 to it. That is deliberate: authz.Fund " +
+			"would be carried by no role, and a registered route nobody can reach answers 403 to " +
+			"everyone while looking like a working control (#535)")
+	} else {
+		logger.Info("api-gateway: funding surface fronted", "role", cfg.FundRole)
+	}
 	if len(bases) == 0 {
 		logger.Warn("api-gateway: Phase-7 read surfaces disabled (no upstream addresses)")
-		return proxy.New(nil), nil
+		return proxy.New(nil, cfg.FundRole), nil
 	}
 
 	// ONE CLIENT, BUILT THE SAME WAY ON BOTH BRANCHES; ONLY THE TLS DIFFERS.
@@ -491,7 +502,7 @@ func buildProxy(ctx context.Context, cfg config.Config, logger *slog.Logger) (*p
 		// the dev kind rig has no SPIRE.
 		logger.Warn("api-gateway: Phase-7 upstreams plaintext (no API_GATEWAY_SPIFFE_SOCKET)")
 	}
-	return proxy.New(proxy.NewMeshBackend(bases, &http.Client{Transport: tr})), nil
+	return proxy.New(proxy.NewMeshBackend(bases, &http.Client{Transport: tr}), cfg.FundRole), nil
 }
 
 // issuerProbeTimeout bounds one attempt to reach the issuer. Generous, because
@@ -627,7 +638,7 @@ func buildRouter(cfg config.Config, h *gateway.Handler, o *orders.Handler, p *pr
 	// authz.Mux takes the capability as a required parameter of registration, so a route
 	// cannot be added without deciding who may call it — the code would not compile. The
 	// grants below are the only place a role becomes an authority.
-	gwMux := authz.NewMux(authz.Grants{
+	grants := authz.Grants{
 		// The baseline role admits a caller to the gateway at all (SEC-M1) and lets them
 		// READ. It must never carry Trade: every authenticated caller holds it.
 		cfg.RequiredRole: {authz.Read},
@@ -643,7 +654,27 @@ func buildRouter(cfg config.Config, h *gateway.Handler, o *orders.Handler, p *pr
 		// refuses to start if this role collides with either of the others, because a
 		// collision here silently merges two authorities that exist to be separate.
 		cfg.OperatorRole: {authz.Read, authz.Operate},
-	}, recorder)
+	}
+	// THE FUND ROLE MOVES THE FUND'S OWN CAPITAL (#535, #415): subscriptions,
+	// redemptions and fees posted to the book of record. authz.Fund was declared,
+	// demanded by POST /v1/portfolios/{id}/cash-movements, and carried by NO ROLE
+	// IN THIS MAP — three roles for four capabilities — so that route answered 403
+	// to every principal that exists while reading as a working control.
+	//
+	// ADDED CONDITIONALLY RATHER THAN AS A FOURTH LINE ABOVE, because Grants is
+	// keyed by the role STRING and cfg.FundRole is legitimately empty (the route is
+	// then not registered, and the deployment answers 404). Writing `cfg.FundRole:
+	// {...}` unconditionally would put a "" key in the policy, and any token whose
+	// roles claim carried an empty entry would match it — the dev HS256 arm takes
+	// that claim verbatim. Not reachable today, and not worth leaving in a map that
+	// decides who may move the fund's cash.
+	//
+	// It carries Read for the same reason the two above do, and Read is not a
+	// widening: every caller who reaches /v1 at all already holds the baseline role.
+	if cfg.FundRole != "" {
+		grants[cfg.FundRole] = []authz.Capability{authz.Read, authz.Fund}
+	}
+	gwMux := authz.NewMux(grants, recorder)
 	h.Routes(gwMux)
 	o.Routes(gwMux)
 	p.Routes(gwMux)

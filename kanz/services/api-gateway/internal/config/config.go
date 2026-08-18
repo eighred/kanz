@@ -132,6 +132,32 @@ type Config struct {
 	// it, the same shape as every other upstream here: a funding surface that is
 	// not configured must 404 rather than answer.
 	AccountingAddr string
+	// FundRole is the role a Principal must carry to MOVE THE FUND'S OWN CAPITAL:
+	// POST /v1/portfolios/{id}/cash-movements, which posts a subscription, a
+	// redemption or a fee to the book of record (#535).
+	//
+	// OPTIONAL, AND THE UNSET CASE IS THE DECISION. Empty ⇒ the route is NOT
+	// REGISTERED at all, so a deployment that has named no funder answers 404 —
+	// "there is no cash-movement surface here", which is true. This is the same
+	// stance OperatorAddr and OMSReadAddr take above, and the one
+	// services/identity/internal/server/server.go records for provisioning.
+	//
+	// THE ALTERNATIVE — REQUIRING IT UNCONDITIONALLY — IS WORSE, and not
+	// marginally. It reads as the "fail loudly" answer, but what it fails is the
+	// whole gateway: infra/deploy/api-gateway-deploy.yaml sets no fund role and no
+	// accounting address, so a required variable turns "one route nobody can reach"
+	// into "the platform's sole ingress will not start" — every read, every order,
+	// every login — in exchange for arming a surface whose upstream is not even
+	// wired. Fail loudly is about a misconfiguration that LOOKS HEALTHY; this one
+	// cannot, because the route is absent and its absence is logged at boot.
+	//
+	// WHAT IT MUST NEVER BE IS THE THIRD ANSWER: registered, and granted to nobody.
+	// That was the defect (#535) — a 403 to every principal that exists, which says
+	// "you may not" when the truth is "nobody may, ever, in this deployment", and
+	// is indistinguishable from a working control. validateAuth below closes the
+	// other direction: once AccountingAddr IS set the role becomes REQUIRED, so the
+	// funding surface cannot be exposed without saying who may reach it.
+	FundRole string
 }
 
 func Load() (Config, error) {
@@ -192,6 +218,7 @@ func Load() (Config, error) {
 		TVSyncAddr:       os.Getenv("API_GATEWAY_TV_SYNC_ADDR"),
 		OptimizationAddr: os.Getenv("API_GATEWAY_OPTIMIZATION_ADDR"),
 		AccountingAddr:   os.Getenv("API_GATEWAY_ACCOUNTING_ADDR"),
+		FundRole:         os.Getenv("API_GATEWAY_FUND_ROLE"),
 	}
 	if err := cfg.validateAuth(); err != nil {
 		return Config{}, err
@@ -291,6 +318,51 @@ func (c Config) validateAuth() error {
 				"authorities in BOTH directions: a trader has no business rotating the credentials " +
 				"their orders are signed with, and an operator draining a node has no business " +
 				"submitting orders")
+		}
+	}
+	// #535. THE FUNDING SURFACE MUST NOT BE EXPOSED WITH NO ONE ABLE TO REACH IT.
+	//
+	// Only checked when the book of record is actually fronted: with no
+	// AccountingAddr the cash-movement route has no upstream, and it is not
+	// registered either (the fund role is what registers it), so demanding a role
+	// would be config for an absent feature — the OperatorAddr pairing above,
+	// exactly.
+	//
+	// The state this closes is the one #535 found: authz.Fund declared, the route
+	// registered, and no role carrying the capability, so every principal that
+	// exists got a 403. A capability granted to nobody is not a strict control, it
+	// is an outage of that capability wearing one — and from outside the two are
+	// identical.
+	if c.AccountingAddr != "" && c.FundRole == "" {
+		return errors.New("api-gateway: API_GATEWAY_ACCOUNTING_ADDR is set but API_GATEWAY_FUND_ROLE " +
+			"is not. That route posts subscriptions, redemptions and fees to the book of record, and " +
+			"with no role carrying authz.Fund it would answer 403 to EVERY principal that exists — " +
+			"which reads as a working control and is a total outage of the capability (#535). Name " +
+			"the funder, or unset API_GATEWAY_ACCOUNTING_ADDR and the route is not registered at all")
+	}
+	// The collisions, on the same argument as the operator role's: a shared name
+	// silently merges two authorities that exist to be separate. THE TRADE ONE IS
+	// THE POINT — the person who can move money is never the person who trades it,
+	// the oldest segregation of duties in fund operations, and one credential
+	// holding both can bring the fund's cash in and spend it.
+	if c.FundRole != "" {
+		switch {
+		case c.FundRole == c.RequiredRole:
+			return errors.New("api-gateway: API_GATEWAY_FUND_ROLE must differ from " +
+				"API_GATEWAY_REQUIRED_ROLE. EVERY authenticated caller carries the baseline role — " +
+				"making it the fund role lets everyone who can read post a redemption against the IBOR")
+		case c.FundRole == c.TradeRole:
+			return errors.New("api-gateway: API_GATEWAY_FUND_ROLE must differ from " +
+				"API_GATEWAY_TRADE_ROLE. Funding and trading are different authorities in BOTH " +
+				"directions: a trader who moves capital all day has no business deciding how much " +
+				"capital the fund holds, and a funder has no business submitting an order. Collapsing " +
+				"them gives one credential the power to both bring cash in and spend it, which is the " +
+				"single control every auditor of a fund asks about first")
+		case c.FundRole == c.OperatorRole:
+			return errors.New("api-gateway: API_GATEWAY_FUND_ROLE must differ from " +
+				"API_GATEWAY_OPERATOR_ROLE. Operating the estate is draining nodes and rotating " +
+				"credentials; it touches no fund capital, and an SRE holding it must not be able to " +
+				"move the fund's cash")
 		}
 	}
 	return nil

@@ -59,7 +59,11 @@ func TestTheWholeRouteTableIsDeclared(t *testing.T) {
 	// route escape this table entirely — the guard would pass by not looking.
 	gateway.New(nil, stubOrders{}, stubInstruments{}, nil).Routes(m)
 	orders.New(nil).Routes(m)
-	proxy.New(nil).Routes(m)
+	// A NON-EMPTY FUND ROLE, for the same reason stubOrders is a real value: since
+	// #535 the cash-movement route is registered only when the deployment names a
+	// funder, so passing "" here would drop it out of this table silently and the
+	// guard would pass by not looking at the one route that moves the fund's cash.
+	proxy.New(nil, "kanz-treasury").Routes(m)
 
 	want := map[string]authz.Capability{
 		// Risk queries. A scenario is a POST, but it computes a what-if and moves no
