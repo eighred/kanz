@@ -128,5 +128,23 @@ services:
       # baseline role above — the gateway refuses to start if they match, because
       # every authenticated caller carries the baseline one.
       API_GATEWAY_TRADE_ROLE: "kanz-trader"
+      # THE SECOND SIGNATURE, AND THE ONLY PLACE IT IS CONFIGURED (#539). Without
+      # this, authz.Approve is carried by nobody, all four dual-control routes go
+      # unregistered, and the gateway answers 404 to the entire maker-checker
+      # surface — the state #539 exists to end, in every deployment this repo
+      # ships.
+      #
+      # THE PRODUCTION MANIFEST STILL LEAVES IT UNSET, deliberately and on the
+      # record (api-gateway-deploy.yaml). Arming maker-checker needs somebody who
+      # owns the pending queue, and that is an operational commitment rather than
+      # a config line. The dev rig is where the path has to be EXERCISABLE, so it
+      # is armed here and only here.
+      #
+      # It must differ from every role above; validateAuth refuses to start
+      # otherwise. The trade collision is the one that matters and it fails
+      # silently — internal/dualcontrol only checks that the approver is a
+      # different SUBJECT, so two traders on one desk would satisfy the control
+      # and the trail would read as genuine four-eyes.
+      API_GATEWAY_APPROVE_ROLE: "kanz-compliance"
     ports:
       - "8080:8080"

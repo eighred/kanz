@@ -43,6 +43,10 @@ import (
 type Handler struct {
 	// orders is the OMS read surface, or nil when this deployment fronts none.
 	orders orderpb.OrderQueryServiceClient
+	// approveRole is the deployment's approver (API_GATEWAY_APPROVE_ROLE). EMPTY ⇒
+	// the pending-approvals queue is not registered, so the deployment answers 404
+	// rather than 403 to everybody (#535).
+	approveRole string
 	// instruments is the OMS's tradeable-pair catalogue, or nil for the same
 	// reason (#406). It rides the SAME OMS connection as orders — one upstream,
 	// two contracts — so a deployment fronting an OMS has both or neither.
@@ -69,13 +73,13 @@ type Handler struct {
 // logger MAY BE NIL and then slog.Default() is used. That is a convenience for
 // tests, not a licence for the composition root: main wires obs.Logger, and the
 // detail of every 5xx now exists only in this logger's output.
-func New(client querypb.RiskQueryServiceClient, orders orderpb.OrderQueryServiceClient, instruments venuepb.VenueQueryServiceClient, logger *slog.Logger) *Handler {
+func New(client querypb.RiskQueryServiceClient, orders orderpb.OrderQueryServiceClient, instruments venuepb.VenueQueryServiceClient, approveRole string, logger *slog.Logger) *Handler {
 	if logger == nil {
 		logger = slog.Default()
 	}
 	return &Handler{
 		client:      client,
-		orders:      orders,
+		approveRole: approveRole, orders: orders,
 		instruments: instruments,
 		logger:      logger,
 		// EmitDefaultValues so a zero field (e.g. empty quality_flags) renders
@@ -99,6 +103,24 @@ func (h *Handler) Routes(mux *authz.Mux) {
 	}
 	if h.instruments != nil {
 		mux.Handle(authz.Read, "GET /v1/instruments", h.listInstruments)
+	}
+	// THE QUEUE AN APPROVER ACTS FROM (#539). Without it the approve route is
+	// answerable by nobody in practice: a held order is deliberately absent from
+	// the orders table, so no other read shows it, and POST
+	// /v1/orders/{id}/approve refuses an empty digest with 400 — so an approver
+	// needs both an order_id and a digest that no gateway surface would give
+	// them. The digest rides OrderPendingApproval on NATS, which is not a place a
+	// person can look.
+	//
+	// authz.Approve, NOT authz.Read, and the reasoning is the override queue's:
+	// this names the proposer of every unsigned change awaiting a second
+	// signature and is the working surface somebody acts from, not a report.
+	//
+	// REGISTERED ONLY WHEN AN APPROVER IS NAMED, like every other route that
+	// demands this capability. Granted to nobody it would refuse every principal
+	// that exists while reading as a working control (#535).
+	if h.orders != nil && h.approveRole != "" {
+		mux.Handle(authz.Approve, "GET /v1/orders/pending-approvals", h.listPendingApprovals)
 	}
 	mux.Handle(authz.Read, "GET /v1/portfolios/{id}/exposure", h.exposure)
 	mux.Handle(authz.Read, "GET /v1/portfolios/{id}/measures", h.measures)
@@ -211,6 +233,31 @@ func (h *Handler) listOrders(w http.ResponseWriter, r *http.Request) {
 	}
 	resp, err := h.orders.ListOrders(r.Context(), &orderpb.ListOrdersRequest{
 		PortfolioId: id,
+		Limit:       parseLimit(r),
+	})
+	h.writeOwned(w, r, resp, err)
+}
+
+// listPendingApprovals answers "what is waiting on my signature" (#539).
+//
+// NO PORTFOLIO GATE ON THE PATH, and the filter is optional, because the OMS
+// says so: ListPendingApprovalsRequest documents that an empty portfolio_id
+// means "everything still awaiting a signature" — deliberately unlike
+// ListOrders, because the whole-queue question is the one an approver actually
+// asks. Narrowing it here would answer a question the approver did not ask and
+// hide orders they are the checker for.
+//
+// THE TENANT GATE STILL APPLIES, through the same writeOwned as every read
+// beside it. An OMS that was never given a tenant stamps an empty one, which
+// fails CLOSED.
+//
+// AN EMPTY QUEUE IS AN ANSWER: nothing is held. A caller that rendered empty as
+// "still loading" would hide a working control behind a spinner — and one that
+// rendered it as "nothing to do" when the OMS was unreachable would hide a
+// broken one, which is why an error here is an error and not an empty list.
+func (h *Handler) listPendingApprovals(w http.ResponseWriter, r *http.Request) {
+	resp, err := h.orders.ListPendingApprovals(r.Context(), &orderpb.ListPendingApprovalsRequest{
+		PortfolioId: r.URL.Query().Get("portfolio"),
 		Limit:       parseLimit(r),
 	})
 	h.writeOwned(w, r, resp, err)

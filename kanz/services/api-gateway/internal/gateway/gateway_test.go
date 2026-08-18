@@ -50,7 +50,9 @@ type fakeClient struct {
 	instrResp    *venuepb.ListTradeableInstrumentsResponse
 	err          error
 
-	gotOrders *orderpb.ListOrdersRequest
+	gotOrders   *orderpb.ListOrdersRequest
+	gotPending  *orderpb.ListPendingApprovalsRequest
+	pendingResp *orderpb.ListPendingApprovalsResponse
 
 	gotExposure *querypb.ExposureRequest
 	gotMeasures *querypb.MeasuresRequest
@@ -66,15 +68,13 @@ func (f *fakeClient) ListOrders(_ context.Context, in *orderpb.ListOrdersRequest
 	return f.ordersResp, f.err
 }
 
-// ListPendingApprovals exists so this double still satisfies
-// order.v1.OrderQueryServiceClient after #410 added the pending-approval read.
-//
-// IT RETURNS NOTHING AND THAT IS CORRECT HERE: the gateway does not expose this
-// route, so no test in this package drives it. The day one does, this must be
-// given the same record-the-request shape ListOrders has above — a double that
-// silently answers "nothing pending" would certify a queue nobody can see.
-func (f *fakeClient) ListPendingApprovals(context.Context, *orderpb.ListPendingApprovalsRequest, ...grpc.CallOption) (*orderpb.ListPendingApprovalsResponse, error) {
-	return nil, f.err
+// ListPendingApprovals records the request, which is what its previous form
+// asked for: "The day one does, this must be given the same record-the-request
+// shape ListOrders has above — a double that silently answers 'nothing pending'
+// would certify a queue nobody can see." #539 added that route.
+func (f *fakeClient) ListPendingApprovals(_ context.Context, in *orderpb.ListPendingApprovalsRequest, _ ...grpc.CallOption) (*orderpb.ListPendingApprovalsResponse, error) {
+	f.gotPending = in
+	return f.pendingResp, f.err
 }
 func (f *fakeClient) ListTradeableInstruments(context.Context, *venuepb.ListTradeableInstrumentsRequest, ...grpc.CallOption) (*venuepb.ListTradeableInstrumentsResponse, error) {
 	return f.instrResp, f.err
@@ -101,7 +101,7 @@ func (f *fakeClient) Health(_ context.Context, _ *querypb.HealthRequest, _ ...gr
 func serve(t *testing.T, fc *fakeClient) *httptest.Server {
 	t.Helper()
 	mux := authz.NewMux(authz.Grants{"analyst": {authz.Read}}, nil)
-	gateway.New(fc, fc, fc, nil).Routes(mux)
+	gateway.New(fc, fc, fc, "", nil).Routes(mux)
 	authed := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		p := &middleware.Principal{Subject: "u1", Tenant: testTenant, Roles: []string{"analyst"}}
 		mux.ServeHTTP(w, r.WithContext(middleware.WithPrincipal(r.Context(), p)))
@@ -263,7 +263,7 @@ func TestOpenAPIServed(t *testing.T) {
 func serveAs(t *testing.T, fc *fakeClient, p *middleware.Principal) *httptest.Server {
 	t.Helper()
 	mux := authz.NewMux(authz.Grants{"analyst": {authz.Read}}, nil)
-	gateway.New(fc, fc, fc, nil).Routes(mux)
+	gateway.New(fc, fc, fc, "", nil).Routes(mux)
 	authed := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		mux.ServeHTTP(w, r.WithContext(middleware.WithPrincipal(r.Context(), p)))
 	})
@@ -380,7 +380,7 @@ func TestAListWithNoOwnerTenantIsRefused(t *testing.T) {
 func ordersServer(t *testing.T, fc *fakeClient, p *middleware.Principal) *httptest.Server {
 	t.Helper()
 	mux := authz.NewMux(authz.Grants{"analyst": {authz.Read}}, nil)
-	gateway.New(fc, fc, fc, nil).Routes(mux)
+	gateway.New(fc, fc, fc, "", nil).Routes(mux)
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		mux.ServeHTTP(w, r.WithContext(middleware.WithPrincipal(r.Context(), p)))
 	}))
@@ -474,7 +474,7 @@ func TestAHistoryFromAnotherTenantIsRefused(t *testing.T) {
 // that errors says "broken", which is not.
 func TestWithNoOMSTheHistoryRouteIsNotRegistered(t *testing.T) {
 	mux := authz.NewMux(authz.Grants{"analyst": {authz.Read}}, nil)
-	gateway.New(&fakeClient{}, nil, nil, nil).Routes(mux)
+	gateway.New(&fakeClient{}, nil, nil, "", nil).Routes(mux)
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		p := &middleware.Principal{Subject: "u1", Tenant: testTenant, Roles: []string{"analyst"}}
 		mux.ServeHTTP(w, r.WithContext(middleware.WithPrincipal(r.Context(), p)))
@@ -513,7 +513,7 @@ func instrumentsFor(tenant string) *fakeClient {
 func instrumentServer(t *testing.T, fc *fakeClient, portfolios []string) *httptest.Server {
 	t.Helper()
 	mux := authz.NewMux(authz.Grants{"analyst": {authz.Read}}, nil)
-	gateway.New(fc, fc, fc, nil).Routes(mux)
+	gateway.New(fc, fc, fc, "", nil).Routes(mux)
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		p := &middleware.Principal{Subject: "u1", Tenant: testTenant, Roles: []string{"analyst"}, Portfolios: portfolios}
 		mux.ServeHTTP(w, r.WithContext(middleware.WithPrincipal(r.Context(), p)))
@@ -575,7 +575,7 @@ func TestInstrumentsWithNoOwnerFailClosed(t *testing.T) {
 // rather than a registered route that always fails.
 func TestWithNoOMSTheInstrumentRouteIsNotRegistered(t *testing.T) {
 	mux := authz.NewMux(authz.Grants{"analyst": {authz.Read}}, nil)
-	gateway.New(&fakeClient{}, nil, nil, nil).Routes(mux)
+	gateway.New(&fakeClient{}, nil, nil, "", nil).Routes(mux)
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		p := &middleware.Principal{Subject: "u1", Tenant: testTenant, Roles: []string{"analyst"}}
 		mux.ServeHTTP(w, r.WithContext(middleware.WithPrincipal(r.Context(), p)))

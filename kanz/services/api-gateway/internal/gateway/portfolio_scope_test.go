@@ -38,7 +38,7 @@ import (
 func serveScoped(t *testing.T, fc *fakeClient, portfolios ...string) *httptest.Server {
 	t.Helper()
 	mux := authz.NewMux(authz.Grants{"analyst": {authz.Read}}, nil)
-	gateway.New(fc, fc, fc, nil).Routes(mux)
+	gateway.New(fc, fc, fc, "", nil).Routes(mux)
 	authed := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		p := &middleware.Principal{
 			Subject: "u1", Tenant: testTenant, Roles: []string{"analyst"},

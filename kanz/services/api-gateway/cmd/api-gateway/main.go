@@ -186,7 +186,7 @@ func run() int {
 		logger.Info("api-gateway: no API_GATEWAY_OMS_READ_ADDR — /v1/portfolios/{id}/orders and /v1/instruments not registered")
 	}
 
-	handler := gateway.New(querypb.NewRiskQueryServiceClient(conn), ordersRead, instrumentsRead, logger)
+	handler := gateway.New(querypb.NewRiskQueryServiceClient(conn), ordersRead, instrumentsRead, cfg.ApproveRole, logger)
 
 	// Order write surface (OMS-01d): publish order commands to the spine, with
 	// the AUTH-01c forged-issuer guard on the producer. Nil publisher ⇒ the
