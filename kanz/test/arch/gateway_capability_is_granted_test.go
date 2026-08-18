@@ -112,9 +112,9 @@ func TestEveryCapabilityARouteDemandsIsGrantedToSomeRole(t *testing.T) {
 	// NON-VACUITY, FIRST DIRECTION: the capability declaration. If the const-block
 	// walk breaks, nothing is a capability, both sets below are empty, and the
 	// guard passes having compared nothing to nothing.
-	if len(declared) < 3 {
+	if len(declared) < 5 {
 		t.Fatalf("found %d capabilities declared in %s/authz.go — the const walk is broken, not the "+
-			"estate. Read, Trade, Operate and Fund must all be found", len(declared), gatewayAuthzPkg)
+			"estate. Read, Trade, Operate, Fund and Approve must all be found", len(declared), gatewayAuthzPkg)
 	}
 
 	required := gatewayRequiredCapabilities(t, root, fset, declared)
@@ -140,8 +140,9 @@ func TestEveryCapabilityARouteDemandsIsGrantedToSomeRole(t *testing.T) {
 	// mistaken for a finding and answered with a page of exemptions.
 	if len(granted) < 3 {
 		t.Fatalf("found %d granted capabilit(y/ies) in the api-gateway composition root — the "+
-			"Grants literal moved or was renamed. Read, Trade and Operate are granted there today, "+
-			"so this guard is not reading the policy it exists to compare against", len(granted))
+			"Grants literal moved or was renamed. Read, Trade and Operate are granted unconditionally "+
+			"there, and Fund and Approve under their role checks, so this guard is not reading the "+
+			"policy it exists to compare against", len(granted))
 	}
 
 	var dark []string

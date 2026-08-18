@@ -41,7 +41,7 @@ func fundingRequest() *http.Request {
 }
 
 func TestFundingRouteRefusesATradeToken(t *testing.T) {
-	h := New(&fakeBackend{resp: Response{Status: http.StatusAccepted}}, "treasury")
+	h := New(&fakeBackend{resp: Response{Status: http.StatusAccepted}}, Roles{Fund: "treasury"})
 	m := mux("trader", authz.Trade)
 	h.Routes(m)
 
@@ -57,7 +57,7 @@ func TestFundingRouteRefusesATradeToken(t *testing.T) {
 }
 
 func TestFundingRouteRefusesAReadToken(t *testing.T) {
-	h := New(&fakeBackend{resp: Response{Status: http.StatusAccepted}}, "treasury")
+	h := New(&fakeBackend{resp: Response{Status: http.StatusAccepted}}, Roles{Fund: "treasury"})
 	m := mux("analyst", authz.Read)
 	h.Routes(m)
 
@@ -73,7 +73,7 @@ func TestFundingRouteRefusesAReadToken(t *testing.T) {
 // nobody can reach — a funding outage wearing the shape of a control.
 func TestFundingRouteAdmitsAFundToken(t *testing.T) {
 	be := &fakeBackend{resp: Response{Status: http.StatusAccepted, ContentType: "application/json", Body: []byte(`{"status":"accepted"}`)}}
-	h := New(be, "treasury")
+	h := New(be, Roles{Fund: "treasury"})
 	m := mux("treasury", authz.Fund)
 	h.Routes(m)
 
@@ -112,7 +112,7 @@ func TestFundingRouteAdmitsAFundToken(t *testing.T) {
 // that no deployment could ever grant them.
 func TestFundingRouteIsNotRegisteredWithoutAFunder(t *testing.T) {
 	be := &fakeBackend{resp: Response{Status: http.StatusAccepted}}
-	h := New(be, "") // no API_GATEWAY_FUND_ROLE
+	h := New(be, Roles{}) // no API_GATEWAY_FUND_ROLE
 	// A mux that grants EVERY capability, including Fund, so a 404 here can only
 	// come from the route being absent — never from a capability refusal.
 	m := mux("everything", authz.Read, authz.Trade, authz.Operate, authz.Fund)
@@ -142,7 +142,7 @@ func TestFundingRouteIsNotRegisteredWithoutAFunder(t *testing.T) {
 // bring back — a permanent 404 wearing the shape of a deliberate absence.
 func TestFundingRouteIsRegisteredWhenAFunderIsNamed(t *testing.T) {
 	m := authz.NewMux(nil, nil)
-	New(nil, "treasury").Routes(m)
+	New(nil, Roles{Fund: "treasury"}).Routes(m)
 
 	for _, r := range m.Routes() {
 		if r.Capability == authz.Fund && r.Pattern == "POST /v1/portfolios/{id}/cash-movements" {

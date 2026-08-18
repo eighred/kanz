@@ -158,6 +158,28 @@ type Config struct {
 	// other direction: once AccountingAddr IS set the role becomes REQUIRED, so the
 	// funding surface cannot be exposed without saying who may reach it.
 	FundRole string
+	// ApproveRole is the role carrying authz.Approve — the second signature on an
+	// act somebody else proposed (#539, #410 act one). EMPTY ⇒ the three override
+	// routes are not registered, and datamaster's maker-checker workflow is
+	// unreachable, which is the state this repository was in until #539.
+	//
+	// THERE IS DELIBERATELY NO "DataMasterAddr SET ⇒ THIS IS REQUIRED" RULE, and
+	// that is the difference from FundRole above. AccountingAddr exists only to
+	// serve the cash-movement route, so exposing one without the other is always a
+	// mistake. DataMasterAddr also serves GET /v1/securities/{id}, /v1/prices/{id}
+	// and /v1/exceptions — a read-only master-data deployment is a legitimate
+	// posture, and forcing it to name an approver would make the pairing check a
+	// lie that operators learn to satisfy with a placeholder.
+	//
+	// WHAT REPLACES IT IS A BOOT WARNING, not silence: main logs that the override
+	// surface is absent whenever datamaster is wired and no approver is named. The
+	// case that warning exists for is the dangerous one — datamaster armed with
+	// DATAMASTER_REQUIRE_DUAL_CONTROL while this is unset, which holds every
+	// override for a signature no one can give. That flag lives in another
+	// service's environment and this process cannot read it, so a check here would
+	// be guessing; a warning naming the consequence is what this side can honestly
+	// say.
+	ApproveRole string
 }
 
 func Load() (Config, error) {
@@ -219,6 +241,7 @@ func Load() (Config, error) {
 		OptimizationAddr: os.Getenv("API_GATEWAY_OPTIMIZATION_ADDR"),
 		AccountingAddr:   os.Getenv("API_GATEWAY_ACCOUNTING_ADDR"),
 		FundRole:         os.Getenv("API_GATEWAY_FUND_ROLE"),
+		ApproveRole:      os.Getenv("API_GATEWAY_APPROVE_ROLE"),
 	}
 	if err := cfg.validateAuth(); err != nil {
 		return Config{}, err
@@ -363,6 +386,42 @@ func (c Config) validateAuth() error {
 				"API_GATEWAY_OPERATOR_ROLE. Operating the estate is draining nodes and rotating " +
 				"credentials; it touches no fund capital, and an SRE holding it must not be able to " +
 				"move the fund's cash")
+		}
+	}
+	// THE APPROVER COLLISIONS, AND THEY ARE THE STRICTEST SET ON THIS CONFIG (#539).
+	//
+	// Every other capability tolerates being held alongside another as a policy
+	// choice somebody could defend. This one cannot, because a second signature
+	// from a role that already holds the authority to act alone is not a control at
+	// all — and it FAILS SILENTLY. datamaster still refuses self-approval, so the
+	// trail shows two distinct people; a shared role name means any two holders
+	// satisfy it, and the record an auditor reads is indistinguishable from real
+	// four-eyes.
+	if c.ApproveRole != "" {
+		switch {
+		case c.ApproveRole == c.RequiredRole:
+			return errors.New("api-gateway: API_GATEWAY_APPROVE_ROLE must differ from " +
+				"API_GATEWAY_REQUIRED_ROLE. EVERY authenticated caller carries the baseline role — " +
+				"making it the approver role means every user in the tenant is a signatory, so any " +
+				"two of them clear each other's overrides and the second signature means nothing")
+		case c.ApproveRole == c.TradeRole:
+			return errors.New("api-gateway: API_GATEWAY_APPROVE_ROLE must differ from " +
+				"API_GATEWAY_TRADE_ROLE. This is the collision that matters: it hands every trader " +
+				"the second signature on every other trader's proposal, so two people on the same " +
+				"desk satisfy a control that exists to put a different function in the loop. Nothing " +
+				"downstream can detect it — the approver is a different SUBJECT, which is all " +
+				"internal/dualcontrol checks")
+		case c.ApproveRole == c.OperatorRole:
+			return errors.New("api-gateway: API_GATEWAY_APPROVE_ROLE must differ from " +
+				"API_GATEWAY_OPERATOR_ROLE. Operating the estate is draining nodes and rotating " +
+				"credentials; approving an override decides the marks the book is valued at. An SRE " +
+				"is not the second pair of eyes on a valuation")
+		case c.ApproveRole == c.FundRole:
+			return errors.New("api-gateway: API_GATEWAY_APPROVE_ROLE must differ from " +
+				"API_GATEWAY_FUND_ROLE. Both are senior authorities and that is exactly why they " +
+				"drift together: the approver would become a seniority badge rather than a separate " +
+				"function, and the person who moves the fund's cash would clear the prices the fund " +
+				"is valued at")
 		}
 	}
 	return nil

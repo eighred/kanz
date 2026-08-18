@@ -451,9 +451,35 @@ func buildProxy(ctx context.Context, cfg config.Config, logger *slog.Logger) (*p
 	} else {
 		logger.Info("api-gateway: funding surface fronted", "role", cfg.FundRole)
 	}
+	// THE OVERRIDE SURFACE, ON THE SAME STANCE AND FOR A SHARPER REASON (#539).
+	//
+	// datamaster's maker-checker workflow was reachable by nobody until #539: it
+	// registers propose, approve and pending-overrides, and this gateway — its only
+	// permitted caller under network-policies.yaml — routed none of them.
+	//
+	// THE DANGEROUS CONFIGURATION IS DATAMASTER ARMED AND THIS UNSET. With
+	// DATAMASTER_REQUIRE_DUAL_CONTROL=true every override is held for a second
+	// signature that no client can give, so exception resolution stops and the book
+	// goes on being valued off prices the system already flagged. That flag lives in
+	// another service's environment and this process cannot read it, so config.Load
+	// cannot refuse the combination — which is exactly why the absence is logged
+	// here rather than left to a 404 somebody meets later.
+	if cfg.ApproveRole == "" {
+		if cfg.DataMasterAddr != "" {
+			logger.Warn("api-gateway: datamaster is wired but no API_GATEWAY_APPROVE_ROLE — the " +
+				"override propose/approve/pending routes are NOT registered, so this gateway answers " +
+				"404 to them and NOBODY can resolve a pricing exception through it. If datamaster runs " +
+				"with DATAMASTER_REQUIRE_DUAL_CONTROL=true, every override is held for a signature no " +
+				"client can give (#539)")
+		} else {
+			logger.Info("api-gateway: no override surface (no datamaster upstream and no approver)")
+		}
+	} else {
+		logger.Info("api-gateway: override surface fronted", "role", cfg.ApproveRole)
+	}
 	if len(bases) == 0 {
 		logger.Warn("api-gateway: Phase-7 read surfaces disabled (no upstream addresses)")
-		return proxy.New(nil, cfg.FundRole), nil
+		return proxy.New(nil, proxy.Roles{Fund: cfg.FundRole, Approve: cfg.ApproveRole}), nil
 	}
 
 	// ONE CLIENT, BUILT THE SAME WAY ON BOTH BRANCHES; ONLY THE TLS DIFFERS.
@@ -502,7 +528,7 @@ func buildProxy(ctx context.Context, cfg config.Config, logger *slog.Logger) (*p
 		// the dev kind rig has no SPIRE.
 		logger.Warn("api-gateway: Phase-7 upstreams plaintext (no API_GATEWAY_SPIFFE_SOCKET)")
 	}
-	return proxy.New(proxy.NewMeshBackend(bases, &http.Client{Transport: tr}), cfg.FundRole), nil
+	return proxy.New(proxy.NewMeshBackend(bases, &http.Client{Transport: tr}), proxy.Roles{Fund: cfg.FundRole, Approve: cfg.ApproveRole}), nil
 }
 
 // issuerProbeTimeout bounds one attempt to reach the issuer. Generous, because
@@ -673,6 +699,24 @@ func buildRouter(cfg config.Config, h *gateway.Handler, o *orders.Handler, p *pr
 	// widening: every caller who reaches /v1 at all already holds the baseline role.
 	if cfg.FundRole != "" {
 		grants[cfg.FundRole] = []authz.Capability{authz.Read, authz.Fund}
+	}
+	// THE APPROVER GIVES THE SECOND SIGNATURE (#539, #410 act one) on an act
+	// somebody else proposed. Conditional for the same reason the fund role is —
+	// Grants is keyed by the role STRING, and an unconditional entry would put a ""
+	// key in the map that decides who may clear an override.
+	//
+	// IT CARRIES Read, AND THAT IS NOT A WIDENING BUT IT IS THE ONE WORTH SAYING
+	// OUT LOUD. An approver who cannot read the exception, the instrument and the
+	// price it is being overridden to is signing something unread, which is the
+	// whole failure the second signature exists to prevent. Read is what makes the
+	// eyes in "four eyes" real.
+	//
+	// IT DOES NOT CARRY Trade, Fund OR Operate, and validateAuth refuses to start
+	// if this role name collides with any of them. A signatory who also holds the
+	// authority to act alone is not a control — and it fails silently, because
+	// internal/dualcontrol only checks that the approver is a different SUBJECT.
+	if cfg.ApproveRole != "" {
+		grants[cfg.ApproveRole] = []authz.Capability{authz.Read, authz.Approve}
 	}
 	gwMux := authz.NewMux(grants, recorder)
 	h.Routes(gwMux)

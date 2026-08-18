@@ -47,7 +47,7 @@ func main() {
 		secret  = flag.String("secret", os.Getenv("API_GATEWAY_JWT_SECRET"), "HS256 secret the gateway validates against (default $API_GATEWAY_JWT_SECRET)")
 		subject = flag.String("subject", "dev-user", "token subject (sub)")
 		tenant  = flag.String("tenant", "", "tenant the caller acts as — the RLS scope every query runs under (required)")
-		roles   = flag.String("role", "kanz-user", "comma-separated roles; must include API_GATEWAY_REQUIRED_ROLE or every route 403s. To TRADE, add API_GATEWAY_TRADE_ROLE too (SEC-M2): --role kanz-user,kanz-trader")
+		roles   = flag.String("role", "kanz-user", "comma-separated roles; must include API_GATEWAY_REQUIRED_ROLE or every route 403s. To TRADE, add API_GATEWAY_TRADE_ROLE too (SEC-M2): --role kanz-user,kanz-trader. To APPROVE a pricing override, add API_GATEWAY_APPROVE_ROLE (#539) — and mint a SECOND token with a different --subject to sign it, because the approver must be a different person")
 		pfs     = flag.String("portfolio", "", "comma-separated portfolio ids this caller may trade. REQUIRED TO PLACE OR PULL AN ORDER: the OMS denies an empty entitlement, so without it submit, cancel and amend all answer NOT_ENTITLED (#225). Reads and non-order routes do not need it.")
 		ttl     = flag.Duration("ttl", time.Hour, "how long the token is valid")
 	)

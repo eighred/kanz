@@ -93,7 +93,7 @@ func routerFor(t *testing.T, fundRole string, callerRoles ...string) (http.Handl
 	router, err := buildRouter(cfg,
 		gateway.New(nil, nil, nil, logger),
 		orders.New(nil),
-		proxy.New(be, cfg.FundRole),
+		proxy.New(be, proxy.Roles{Fund: cfg.FundRole}),
 		nil, // no control plane
 		obs, &ready, logger,
 		nil, // no decision recorder: these cases assert the VERDICT, not the audit trail

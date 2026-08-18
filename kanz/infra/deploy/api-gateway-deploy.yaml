@@ -207,6 +207,37 @@ spec:
             # The role must DIFFER from all three above, and the trade one is the point:
             # the person who can move money is never the person who trades it. One
             # credential holding both can bring the fund's cash in and spend it.
+            #
+            # WHO MAY GIVE THE SECOND SIGNATURE (#539, #410 act one). NOT SET HERE, AND
+            # THAT IS THE POSTURE — same reason as the pair above.
+            #
+            #   API_GATEWAY_APPROVE_ROLE     the role carrying authz.Approve
+            #
+            # NOT A PAIR, and this is the one place the analogy to funding breaks. The
+            # datamaster address above serves securities, prices and the exception list
+            # too, so a read-only master-data deployment is legitimate and the address
+            # does NOT make this role required. Unset, the three override routes are not
+            # registered and this gateway answers 404 to them:
+            #
+            #   POST /v1/exceptions/{id}/override
+            #   POST /v1/exceptions/{id}/override/approve
+            #   GET  /v1/exceptions/pending-overrides
+            #
+            # THE CONFIGURATION TO WATCH IS DATAMASTER ARMED AND THIS UNSET. With
+            # DATAMASTER_REQUIRE_DUAL_CONTROL=true (datamaster-deploy.yaml) every
+            # override is HELD for a signature that no client can give, so pricing
+            # exceptions stop being resolved and the book goes on being valued off prices
+            # the system already flagged. That flag is in another service's environment
+            # and this gateway cannot read it, so nothing can refuse the combination at
+            # boot — the gateway logs a WARN naming it instead. Set both, or neither.
+            #
+            # The role must DIFFER from all four above; validateAuth refuses to start
+            # otherwise. The trade collision is the one that matters and the one that
+            # fails silently: it hands every trader the second signature on every other
+            # trader's proposal, and because internal/dualcontrol checks only that the
+            # approver is a different SUBJECT, the audit trail reads as genuine
+            # four-eyes. A control satisfied by two people on the same desk is the thing
+            # maker-checker exists to prevent.
             # PER POD, not platform-wide. See THE SCALE INVARIANT above.
             - { name: API_GATEWAY_RATE_LIMIT_PER_SEC, value: "50" }
             - { name: API_GATEWAY_RATE_LIMIT_BURST, value: "100" }

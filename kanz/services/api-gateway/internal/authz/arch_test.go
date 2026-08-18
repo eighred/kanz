@@ -63,7 +63,12 @@ func TestTheWholeRouteTableIsDeclared(t *testing.T) {
 	// #535 the cash-movement route is registered only when the deployment names a
 	// funder, so passing "" here would drop it out of this table silently and the
 	// guard would pass by not looking at the one route that moves the fund's cash.
-	proxy.New(nil, "kanz-treasury").Routes(m)
+	//
+	// AND A NON-EMPTY APPROVE ROLE, on the same argument (#539). The three override
+	// routes are registered only when the deployment names an approver — the whole
+	// point of the maker-checker repair — so an empty one here would hide the
+	// second-signature surface from this table exactly as "" would hide funding.
+	proxy.New(nil, proxy.Roles{Fund: "kanz-treasury", Approve: "kanz-compliance"}).Routes(m)
 
 	want := map[string]authz.Capability{
 		// Risk queries. A scenario is a POST, but it computes a what-if and moves no
@@ -132,6 +137,21 @@ func TestTheWholeRouteTableIsDeclared(t *testing.T) {
 		"GET /v1/prices/{id}":     authz.Read,
 		"GET /v1/exceptions":      authz.Read,
 		"POST /v1/ask":            authz.Read,
+
+		// MAKER-CHECKER ON THE PRICING OVERRIDE (#539, #410 act one). Should a read
+		// token be able to call these? NO, and the pending queue is the one where the
+		// answer is not obvious: listing what awaits a signature looks like a report,
+		// but it is the working surface an approver acts from and it names the
+		// proposer of every unsigned change to the marks the book is valued at. A
+		// read token that can see the queue but not sign it is a half-open control.
+		//
+		// The propose route is authz.Approve rather than a second capability because
+		// four-eyes here is a check on the PERSON, not the role: datamaster compares
+		// authenticated subjects, so two holders of this role are two signatures and
+		// one holder acting twice is refused.
+		"POST /v1/exceptions/{id}/override":         authz.Approve,
+		"POST /v1/exceptions/{id}/override/approve": authz.Approve,
+		"GET /v1/exceptions/pending-overrides":      authz.Approve,
 
 		// The TradingView Broker API: reads of the fund's own book.
 		"GET /v1/broker/accounts":                 authz.Read,
