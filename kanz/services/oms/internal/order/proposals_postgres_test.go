@@ -12,7 +12,7 @@ package order
 // never created, and a policy that filters nothing looks like a tenant with no
 // data.
 //
-// Three properties here cannot be shown by the in-memory store at all:
+// Four properties here cannot be shown by the in-memory store at all:
 //
 //  1. the CHECK refuses a self-approval AT THE ENGINE, so a writer that does not
 //     come through Claim still cannot forge the row an auditor reads;
@@ -21,6 +21,12 @@ package order
 //  3. two concurrent Claims elect exactly one winner ACROSS CONNECTIONS — a
 //     mutex in one process says nothing about the other pod, and the shipped OMS
 //     runs replicas: 2.
+//  4. the same, for EXPIRY (#539) — and it is the harder half, because expiry is
+//     not an act anybody performs. Nobody races an approval by accident; every
+//     replica's sweeper reaches the same expired row on the same tick, with
+//     nothing between them but the row. The marker 0010 adds is what makes that
+//     arbitration possible, and the CHECK it carries is the engine refusing an
+//     expiry announced before the deadline it claims.
 
 import (
 	"context"
@@ -349,5 +355,312 @@ func TestAProposalWithNoTenantOnTheRecordHoldsNothing(t *testing.T) {
 	if _, ok, err := st.Proposals().Get(ctx, "o-notenant"); err != nil || ok {
 		t.Fatalf("the hold survived a failed enqueue (ok=%v err=%v) — the two are supposed to be "+
 			"one transaction", ok, err)
+	}
+}
+
+// expiryFact is a well-formed announcement that a held order died of the clock.
+// Hand-built rather than taken from Emitter.RejectedFact because that one needs a
+// ctx carrying an inbound delivery for its tenant, and a sweep has none — the
+// same reason TestPutCommitsTheProposalAndItsFactTogether builds its own.
+func expiryFact(orderID string) outbox.Record {
+	return outbox.Record{
+		Subject: EventTypeRejected, EventType: EventTypeRejected,
+		Domain: Domain, PartitionKey: orderID, TenantID: "acme", EventTime: t0,
+		PayloadSchemaRef: "order.v1.OrderRejected:1", Payload: []byte{},
+	}
+}
+
+// announcedAt reads the marker with RAW SQL rather than through the store.
+//
+// The store's own reader is part of what is under test here: a Get that dropped
+// the column would make "never announced" and "announced" the same answer, and
+// every assertion below would still pass. The column is read from the engine
+// instead.
+func announcedAt(t *testing.T, pool *pgxpool.Pool, orderID string) *time.Time {
+	t.Helper()
+	var at *time.Time
+	if err := pool.QueryRow(context.Background(),
+		`SELECT expiry_announced_at FROM order_proposals WHERE order_id = $1`, orderID).Scan(&at); err != nil {
+		t.Fatalf("read expiry_announced_at for %s: %v", orderID, err)
+	}
+	return at
+}
+
+// TestConcurrentExpiryAnnouncesExactlyOnce IS THE OTHER PROPERTY NO IN-MEMORY
+// STORE CAN DEMONSTRATE, and the reason the marker is a column rather than a
+// field on a sweeper (#539).
+//
+// Expiry is not an act anybody performs: it is a deadline passing, so EVERY
+// replica's sweeper sees the same expired row on the same tick with nothing to
+// serialise them but the row itself. If two are told they won, one dead order
+// produces two ORDER_REJECTED FACTs — and a duplicate rejection is not a cosmetic
+// double: the ledger, the position projector and the trader's client each fold a
+// second terminal transition for an order that only died once. A mutex answers
+// this within one process; the shipped OMS runs replicas: 2.
+func TestConcurrentExpiryAnnouncesExactlyOnce(t *testing.T) {
+	pool := newPool(t)
+	st := NewPostgres(pool)
+	store := st.Proposals()
+	ctx := context.Background()
+
+	held := heldOrder(t, "o-expiry-race", "user:alice@kanz", t0)
+	if err := store.Put(ctx, held, nil); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	// PAST THE DEADLINE, taken from the proposal rather than from a constant, so
+	// this test does not silently stop testing expiry if the TTL changes.
+	after := held.ExpiresAt.Add(time.Minute)
+
+	const racers = 32
+	var (
+		wg   sync.WaitGroup
+		mu   sync.Mutex
+		won  int
+		lost int
+	)
+	start := make(chan struct{})
+	for i := 0; i < racers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start // released together, so they collide inside the engine
+			ok, err := store.AnnounceExpiry(ctx, "o-expiry-race", after,
+				[]outbox.Record{expiryFact("o-expiry-race")})
+			mu.Lock()
+			defer mu.Unlock()
+			switch {
+			case err != nil:
+				t.Errorf("AnnounceExpiry: %v", err)
+			case ok:
+				won++
+			default:
+				lost++
+			}
+		}()
+	}
+	close(start)
+	wg.Wait()
+
+	if won != 1 {
+		t.Fatalf("%d sweepers were told they announced one expiry, want exactly 1 — every extra "+
+			"winner is a second ORDER_REJECTED for an order that died once, folded as a second "+
+			"terminal transition by everything downstream", won)
+	}
+	if lost != racers-1 {
+		t.Fatalf("lost = %d, want %d", lost, racers-1)
+	}
+
+	// THE LOSERS ENQUEUED NOTHING. Winning is only half the property: if a loser's
+	// rollback did not take its FACT with it, the estate still hears the rejection
+	// 32 times and the exactly-once verdict above is decoration.
+	pending, err := st.Outbox().Pending(ctx, "o-expiry-race", racers)
+	if err != nil {
+		t.Fatalf("outbox Pending: %v", err)
+	}
+	if len(pending) != 1 {
+		t.Fatalf("%d sweepers queued %d FACTs for one expiry, want 1", racers, len(pending))
+	}
+
+	// AND THE ROW IS MARKED, so the next tick — on either pod, after any restart —
+	// does not start the race again. A won race with no durable marker is a
+	// re-announcement every sweep interval, forever.
+	if announcedAt(t, pool, "o-expiry-race") == nil {
+		t.Fatal("a sweeper was told it won but expiry_announced_at is still NULL — the next tick " +
+			"announces the same expiry again")
+	}
+
+	// AN EXPIRY IS NOT AN APPROVAL. The row must stay unapproved: it is the
+	// evidence that nobody signed this order, and an approver written by the sweep
+	// would read to an auditor as a second signature that never happened.
+	got, ok, err := store.Get(ctx, "o-expiry-race")
+	if err != nil || !ok {
+		t.Fatalf("Get: ok=%v err=%v", ok, err)
+	}
+	if got.Approver != "" || !got.DecidedAt.IsZero() {
+		t.Fatalf("the sweep decided the proposal (approver=%q decided_at=%v) — an expiry is the "+
+			"absence of a decision, not one", got.Approver, got.DecidedAt)
+	}
+}
+
+// TestTheDatabaseRefusesAnExpiryAnnouncedBeforeItHappened.
+//
+// AnnounceExpiry re-checks the deadline in its own predicate, and the sweeper
+// only looks at rows already past it. THIS TEST GOES ROUND BOTH, with raw SQL,
+// because the constraint exists for the writer that does not come through them —
+// and because the ordinary way this happens is not a rogue writer but a pod whose
+// clock is ahead. An expiry announced early rejects an order somebody still had
+// time to sign, and the trader's notice and the audit row would then AGREE on a
+// deadline that had not passed, which is worse than either being wrong alone.
+func TestTheDatabaseRefusesAnExpiryAnnouncedBeforeItHappened(t *testing.T) {
+	pool := newPool(t)
+	ctx := context.Background()
+	held := heldOrder(t, "o-expiry-early", "user:alice@kanz", t0)
+	if err := NewPostgres(pool).Proposals().Put(ctx, held, nil); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+
+	for _, at := range []time.Time{
+		held.CreatedAt,                        // the moment it was held
+		held.ExpiresAt.Add(-time.Second),      // one second of clock skew
+		held.ExpiresAt.Add(-time.Microsecond), // the narrowest early Postgres can store
+	} {
+		_, err := pool.Exec(ctx,
+			`UPDATE order_proposals SET expiry_announced_at = $2 WHERE order_id = $1`,
+			"o-expiry-early", at)
+		if err == nil {
+			t.Fatalf("the database ACCEPTED an expiry announced at %v on a proposal that expires at "+
+				"%v — the row records the rejection of an order that had not run out of time",
+				at, held.ExpiresAt)
+		}
+		var pgErr *pgconn.PgError
+		if !errors.As(err, &pgErr) || pgErr.Code != "23514" {
+			t.Fatalf("announced-at %v was refused by something other than a CHECK constraint (%v) — "+
+				"the refusal must come from the engine, or it is not there for a writer that "+
+				"bypasses Go", at, err)
+		}
+		if !strings.Contains(pgErr.ConstraintName, "announced_after_expiry") {
+			t.Errorf("refused by constraint %q, want the announced-after-expiry one — a different "+
+				"constraint passing for this is how the real one goes missing unnoticed",
+				pgErr.ConstraintName)
+		}
+	}
+
+	// AND THE DEADLINE ITSELF IS ACCEPTED, so the test above cannot pass against a
+	// constraint that refuses every announcement. `>=`, not `>`: a sweeper running
+	// at the exact instant of expiry is on time, not early.
+	if _, err := pool.Exec(ctx,
+		`UPDATE order_proposals SET expiry_announced_at = $2 WHERE order_id = $1`,
+		"o-expiry-early", held.ExpiresAt); err != nil {
+		t.Fatalf("the CHECK refused an announcement made AT the deadline (%v) — an expiry could "+
+			"never be recorded and the sweep would fail on every tick", err)
+	}
+}
+
+// TestAnnounceExpiryCommitsTheMarkerAndItsFactTogether (#292's guarantee, applied
+// to the sweep). Either the expiry is marked announced and the estate will hear
+// about it, or neither is true.
+//
+// THE MARKER IS THE DANGEROUS HALF. It is a promise that the FACT was published,
+// and every later tick reads it: set without its FACT, the order is expired,
+// unannounced and PERMANENTLY invisible to the sweeper that exists to announce
+// it — the exact silence of #539, now with a row asserting it had been broken.
+func TestAnnounceExpiryCommitsTheMarkerAndItsFactTogether(t *testing.T) {
+	pool := newPool(t)
+	st := NewPostgres(pool)
+	store := st.Proposals()
+	ctx := context.Background()
+
+	held := heldOrder(t, "o-expiry-tx", "user:alice@kanz", t0)
+	if err := store.Put(ctx, held, nil); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	after := held.ExpiresAt.Add(time.Minute)
+
+	// A RECORD WITH NO TENANT ROLLS THE WHOLE THING BACK. outbox.From refuses one,
+	// but a caller can still hand AnnounceExpiry a hand-built record; the enqueue
+	// is INSIDE the transaction, so its failure must take the marker with it.
+	bad := expiryFact("o-expiry-tx")
+	bad.TenantID = "" // could never be published: it would sit at the head of its key
+	if _, err := store.AnnounceExpiry(ctx, "o-expiry-tx", after, []outbox.Record{bad}); err == nil {
+		t.Fatal("AnnounceExpiry accepted a FACT with no tenant — the record could never be " +
+			"published, so the expiry would be marked announced and announced to nobody")
+	}
+	if at := announcedAt(t, pool, "o-expiry-tx"); at != nil {
+		t.Fatalf("the marker survived a failed enqueue (announced at %v) — the two are supposed to "+
+			"be one transaction, and the order is now expired, unannounced and invisible to every "+
+			"later sweep", *at)
+	}
+	if p, err := st.Outbox().Pending(ctx, "o-expiry-tx", 10); err != nil || len(p) != 0 {
+		t.Fatalf("a refused announcement left %d FACTs queued (err=%v), want 0", len(p), err)
+	}
+
+	// THE HAPPY PATH: marker and FACT together.
+	ok, err := store.AnnounceExpiry(ctx, "o-expiry-tx", after, []outbox.Record{expiryFact("o-expiry-tx")})
+	if err != nil || !ok {
+		t.Fatalf("AnnounceExpiry: ok=%v err=%v", ok, err)
+	}
+	pending, err := st.Outbox().Pending(ctx, "o-expiry-tx", 10)
+	if err != nil {
+		t.Fatalf("outbox Pending: %v", err)
+	}
+	if len(pending) != 1 {
+		t.Fatalf("the announcement committed %d FACTs, want 1", len(pending))
+	}
+	if pending[0].Record.EventType != EventTypeRejected {
+		t.Errorf("queued %q, want %q — the trader is owed the terminal FACT, not any FACT",
+			pending[0].Record.EventType, EventTypeRejected)
+	}
+	at := announcedAt(t, pool, "o-expiry-tx")
+	if at == nil {
+		t.Fatal("the FACT is queued but expiry_announced_at is NULL — the next sweep announces it again")
+	}
+
+	// A SECOND CALL ANNOUNCES NOTHING, and that is exactly-once across TICKS rather
+	// than across pods: one sweeper, restarted or simply running again a minute
+	// later, must not re-announce what it already announced.
+	ok, err = store.AnnounceExpiry(ctx, "o-expiry-tx", after.Add(time.Hour),
+		[]outbox.Record{expiryFact("o-expiry-tx")})
+	if err != nil {
+		t.Fatalf("second AnnounceExpiry: %v", err)
+	}
+	if ok {
+		t.Fatal("the second sweep was told it won an expiry already announced — every tick would " +
+			"publish another ORDER_REJECTED for the same dead order")
+	}
+	if p, _ := st.Outbox().Pending(ctx, "o-expiry-tx", 10); len(p) != 1 {
+		t.Fatalf("a refused second announcement left %d FACTs queued, want 1", len(p))
+	}
+	if got := announcedAt(t, pool, "o-expiry-tx"); got == nil || !got.Equal(*at) {
+		t.Errorf("the refused call moved the marker (%v -> %v) — the row must keep the moment the "+
+			"expiry was ACTUALLY announced, or a late sweeper is indistinguishable from a prompt one",
+			*at, got)
+	}
+}
+
+// TestAnotherTenantCannotSeeOrAnnounceAnExpiredProposal. RLS on the sweep path is
+// load-bearing in its own way: the sweeper is a background loop with no request
+// behind it, so nothing but the row's tenant scopes what it may kill. A proposal
+// visible across tenants is a proposal another tenant's sweeper can declare dead,
+// and the FACT it publishes lands under ITS tenant — so the owner is told nothing
+// while somebody else's estate is told about an order that is not theirs.
+func TestAnotherTenantCannotSeeOrAnnounceAnExpiredProposal(t *testing.T) {
+	pool := newPool(t) // tenant __system__
+	ctx := context.Background()
+	held := heldOrder(t, "o-expiry-tenant", "user:alice@kanz", t0)
+	if err := NewPostgres(pool).Proposals().Put(ctx, held, nil); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	after := held.ExpiresAt.Add(time.Minute)
+
+	other := NewPostgres(poolAs(t, "someone-else")).Proposals()
+	expired, err := other.ExpiredUnannounced(ctx, after, 10)
+	if err != nil {
+		t.Fatalf("ExpiredUnannounced: %v", err)
+	}
+	if len(expired) != 0 {
+		t.Fatalf("another tenant's sweep queue shows %d of this tenant's expired orders", len(expired))
+	}
+	won, err := other.AnnounceExpiry(ctx, "o-expiry-tenant", after,
+		[]outbox.Record{expiryFact("o-expiry-tenant")})
+	if err != nil {
+		t.Fatalf("AnnounceExpiry: %v", err)
+	}
+	if won {
+		t.Fatal("another tenant ANNOUNCED the expiry of this tenant's held order — the rejection " +
+			"would be published under the wrong tenant and the owner would still be waiting")
+	}
+	if at := announcedAt(t, pool, "o-expiry-tenant"); at != nil {
+		t.Fatalf("the cross-tenant sweep marked the row after all (announced at %v)", *at)
+	}
+
+	// AND IT IS STILL WORK THE OWNER'S SWEEP WILL DO. A cross-tenant call that
+	// silently consumed the row would leave the order expired, unannounced and
+	// invisible — the defect, reintroduced through the tenant boundary.
+	mine, err := NewPostgres(pool).Proposals().ExpiredUnannounced(ctx, after, 10)
+	if err != nil {
+		t.Fatalf("owner ExpiredUnannounced: %v", err)
+	}
+	if len(mine) != 1 || mine[0].ID != "o-expiry-tenant" {
+		t.Fatalf("the owner's sweep queue holds %d rows, want the one expired proposal", len(mine))
 	}
 }

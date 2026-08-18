@@ -236,6 +236,137 @@ func runProposalContract(t *testing.T, newStore func(t *testing.T) ProposalStore
 				"authenticated subject and saying so is the whole point")
 		}
 	})
+	// EXPIRY IS A SEPARATE QUEUE FROM THE PENDING ONE, AND THAT IS THE POINT (#539).
+	//
+	// Pending() filters an expired proposal OUT — it is not work anybody can do.
+	// Nothing then looked at those rows again, so a proposal nobody signed became
+	// invisible rather than terminal: the trader who submitted it saw
+	// ORDER_PENDING_APPROVAL and then nothing, ever. These are the properties that
+	// let a sweeper find them and announce each one exactly once.
+	t.Run("an expired proposal leaves the pending queue and enters the expiry queue", func(t *testing.T) {
+		s := newStore(t)
+		born := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
+		p := heldOrder(t, "o-exp", "user:alice@kanz", born)
+		if err := s.Put(context.Background(), p, nil); err != nil {
+			t.Fatalf("Put: %v", err)
+		}
+
+		afterTTL := p.ExpiresAt.Add(time.Minute)
+
+		pending, err := s.Pending(context.Background(), afterTTL)
+		if err != nil {
+			t.Fatalf("Pending: %v", err)
+		}
+		if len(pending) != 0 {
+			t.Fatalf("an expired proposal is still offered as work: %v", ids(pending))
+		}
+
+		due, err := s.ExpiredUnannounced(context.Background(), afterTTL, 10)
+		if err != nil {
+			t.Fatalf("ExpiredUnannounced: %v", err)
+		}
+		if got := ids(due); len(got) != 1 || got[0] != "o-exp" {
+			t.Fatalf("expiry queue = %v, want [o-exp] — a proposal that expired unsigned is in no "+
+				"queue at all, which is how it dies in silence", got)
+		}
+	})
+
+	t.Run("a proposal that has not expired is not due for announcement", func(t *testing.T) {
+		s := newStore(t)
+		born := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
+		p := heldOrder(t, "o-live", "user:alice@kanz", born)
+		if err := s.Put(context.Background(), p, nil); err != nil {
+			t.Fatalf("Put: %v", err)
+		}
+
+		due, err := s.ExpiredUnannounced(context.Background(), p.ExpiresAt.Add(-time.Minute), 10)
+		if err != nil {
+			t.Fatalf("ExpiredUnannounced: %v", err)
+		}
+		if len(due) != 0 {
+			t.Fatalf("a live proposal was announced as expired: %v — the approver still had time "+
+				"and the order was killed under them", ids(due))
+		}
+	})
+
+	// AN APPROVED PROPOSAL NEVER EXPIRES. It was decided; the deadline stopped
+	// mattering the moment somebody signed it. Announcing one would tell the estate
+	// an order that traded was abandoned.
+	t.Run("a decided proposal is never due for expiry", func(t *testing.T) {
+		s := newStore(t)
+		born := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
+		p := heldOrder(t, "o-signed", "user:alice@kanz", born)
+		if err := s.Put(context.Background(), p, nil); err != nil {
+			t.Fatalf("Put: %v", err)
+		}
+		if ok, err := s.Claim(context.Background(), "o-signed", "user:bob@kanz", born.Add(time.Hour)); err != nil || !ok {
+			t.Fatalf("Claim: ok=%v err=%v", ok, err)
+		}
+
+		due, err := s.ExpiredUnannounced(context.Background(), p.ExpiresAt.Add(time.Hour), 10)
+		if err != nil {
+			t.Fatalf("ExpiredUnannounced: %v", err)
+		}
+		if len(due) != 0 {
+			t.Fatalf("a SIGNED proposal was queued for expiry: %v", ids(due))
+		}
+	})
+
+	// EXACTLY ONCE, AND THE STORE IS WHAT DECIDES IT. The OMS ships replicas: 2, so
+	// two sweepers see the same expired row on the same tick. A second
+	// announcement is a second ORDER_REJECTED for one order.
+	t.Run("an expiry announces exactly once", func(t *testing.T) {
+		s := newStore(t)
+		born := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
+		p := heldOrder(t, "o-once", "user:alice@kanz", born)
+		if err := s.Put(context.Background(), p, nil); err != nil {
+			t.Fatalf("Put: %v", err)
+		}
+		afterTTL := p.ExpiresAt.Add(time.Minute)
+
+		first, err := s.AnnounceExpiry(context.Background(), "o-once", afterTTL, nil)
+		if err != nil || !first {
+			t.Fatalf("first AnnounceExpiry: ok=%v err=%v — nothing announced the expiry", first, err)
+		}
+		second, err := s.AnnounceExpiry(context.Background(), "o-once", afterTTL, nil)
+		if err != nil {
+			t.Fatalf("second AnnounceExpiry: %v", err)
+		}
+		if second {
+			t.Fatal("the same expiry announced TWICE — on two replicas that is two ORDER_REJECTED " +
+				"FACTs for one order, and the second contradicts nothing but confuses everything")
+		}
+
+		due, err := s.ExpiredUnannounced(context.Background(), afterTTL, 10)
+		if err != nil {
+			t.Fatalf("ExpiredUnannounced: %v", err)
+		}
+		if len(due) != 0 {
+			t.Fatalf("an announced expiry is still in the queue: %v — the sweeper republishes it "+
+				"every tick, forever", ids(due))
+		}
+	})
+
+	// A LIVE PROPOSAL CANNOT BE ANNOUNCED EXPIRED. The predicate is the store's,
+	// not the caller's: a sweeper with a wrong clock must not be able to kill an
+	// order somebody still has time to sign.
+	t.Run("a live proposal cannot be announced as expired", func(t *testing.T) {
+		s := newStore(t)
+		born := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
+		p := heldOrder(t, "o-early", "user:alice@kanz", born)
+		if err := s.Put(context.Background(), p, nil); err != nil {
+			t.Fatalf("Put: %v", err)
+		}
+
+		ok, err := s.AnnounceExpiry(context.Background(), "o-early", p.ExpiresAt.Add(-time.Minute), nil)
+		if err != nil {
+			t.Fatalf("AnnounceExpiry: %v", err)
+		}
+		if ok {
+			t.Fatal("a proposal that had not expired was announced as expired — the approver's " +
+				"remaining window is decided by the store, not by whichever pod's clock drifted")
+		}
+	})
 }
 
 func ids(ps []OrderProposal) []string {

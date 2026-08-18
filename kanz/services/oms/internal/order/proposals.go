@@ -46,6 +46,12 @@ type OrderProposal struct {
 	Approver string
 	// DecidedAt is when the second signature was given; zero while pending.
 	DecidedAt time.Time
+	// ExpiryAnnouncedAt is when this proposal's expiry was announced; zero means
+	// it has not been. NOT the same question as "has it expired" — expiry is a
+	// property of the clock passing expires_at, and this records that the estate
+	// was TOLD. Separating them is what makes the announcement exactly-once
+	// across two replicas instead of once per sweeper tick, forever.
+	ExpiryAnnouncedAt time.Time
 }
 
 // ErrProposalExists is returned by ProposalStore.Put when this order already has
@@ -96,6 +102,31 @@ type ProposalStore interface {
 	// dualcontrol.Approve's rule, it is the last line before the row that an
 	// auditor reads.
 	Claim(ctx context.Context, orderID, approver string, at time.Time) (bool, error)
+
+	// ExpiredUnannounced returns proposals past their deadline that nobody decided
+	// and whose expiry has NOT been announced, oldest first, capped by limit.
+	//
+	// IT IS THE OTHER QUEUE, AND ITS ABSENCE IS WHY EXPIRY WAS SILENT (#539).
+	// Pending deliberately filters an expired proposal out — it is not work anybody
+	// can still do — and until this existed nothing looked at those rows again. The
+	// row stayed approver = '' forever, invisible rather than terminal, and the
+	// trader who submitted it saw ORDER_PENDING_APPROVAL and then nothing.
+	ExpiredUnannounced(ctx context.Context, now time.Time, limit int) ([]OrderProposal, error)
+
+	// AnnounceExpiry marks one expired proposal announced and enqueues announce in
+	// the SAME transaction, reporting whether THIS call won.
+	//
+	// IT IS THE SERIALISATION POINT FOR EXPIRY, exactly as Claim is for approval,
+	// and for the same reason: the shipped OMS runs replicas: 2, so both sweepers
+	// see the same expired row on the same tick. The verdict is the engine's —
+	// a conditional UPDATE whose rows-affected decides — because a mutex in one
+	// process says nothing about the other pod. A second winner would publish a
+	// second ORDER_REJECTED for one order.
+	//
+	// THE DEADLINE IS RE-CHECKED HERE, not trusted from the caller. A sweeper whose
+	// clock drifted must not be able to kill an order somebody still has time to
+	// sign, so the predicate belongs where the row is.
+	AnnounceExpiry(ctx context.Context, orderID string, at time.Time, announce []outbox.Record) (bool, error)
 
 	// Pending lists proposals still awaiting a signature at now, oldest first,
 	// so a held order is VISIBLE rather than silently dropped.
@@ -229,6 +260,46 @@ func (m *MemoryProposals) Pending(_ context.Context, now time.Time) ([]OrderProp
 	return out, nil
 }
 
+// ExpiredUnannounced implements ProposalStore.
+func (m *MemoryProposals) ExpiredUnannounced(_ context.Context, now time.Time, limit int) ([]OrderProposal, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	out := make([]OrderProposal, 0, len(m.by))
+	for _, p := range m.by {
+		if p.Approver != "" || !p.ExpiryAnnouncedAt.IsZero() || p.Pending(now) {
+			continue
+		}
+		p.Command = proto.Clone(p.Command).(*orderpb.SubmitOrder)
+		out = append(out, p)
+	}
+	sortProposals(out)
+	if limit > 0 && len(out) > limit {
+		out = out[:limit]
+	}
+	return out, nil
+}
+
+// AnnounceExpiry implements ProposalStore.
+func (m *MemoryProposals) AnnounceExpiry(_ context.Context, orderID string, at time.Time, announce []outbox.Record) (bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	p, ok := m.by[orderID]
+	// The same predicate the Postgres UPDATE carries, spelled once per store. A
+	// decided proposal never expires, an announced one never re-announces, and a
+	// live one cannot be killed early.
+	if !ok || p.Approver != "" || !p.ExpiryAnnouncedAt.IsZero() || p.Pending(at) {
+		return false, nil
+	}
+	// ENQUEUED BEFORE THE MARKER IS SET, so a rejected record leaves the proposal
+	// exactly as it was — the memory seam's stand-in for the Postgres rollback.
+	if err := m.outbox.Append(announce...); err != nil {
+		return false, err
+	}
+	p.ExpiryAnnouncedAt = at.UTC()
+	m.by[orderID] = p
+	return true, nil
+}
+
 // PostgresProposals is the durable, tenant-scoped ProposalStore. It shares the
 // pool the order store and the outbox use, so RLS scopes it and the proposal
 // row, the FACT and the order it will become live in one failure domain.
@@ -332,6 +403,99 @@ func (p *PostgresProposals) Claim(ctx context.Context, orderID, approver string,
 		return false, fmt.Errorf("oms: claim proposal %s: %w", orderID, err)
 	}
 	return tag.RowsAffected() == 1, nil
+}
+
+// ExpiredUnannounced lists what died waiting. See ProposalStore.
+//
+// THE MIRROR OF Pending's PREDICATE, and both halves matter. `approver = ”`
+// keeps a signed proposal out — it was decided, and the deadline stopped
+// mattering the moment somebody signed. `expiry_announced_at IS NULL` keeps an
+// already-announced one out, which is what stops the sweeper republishing the
+// same ORDER_REJECTED on every tick for the rest of the deployment's life.
+func (p *PostgresProposals) ExpiredUnannounced(ctx context.Context, now time.Time, limit int) ([]OrderProposal, error) {
+	rows, err := p.pool.Query(ctx, `
+		SELECT order_id, portfolio_id, act, proposer, digest, command, approver, decided_at, created_at, expires_at
+		FROM order_proposals
+		WHERE approver = '' AND expiry_announced_at IS NULL AND expires_at <= $1
+		ORDER BY expires_at, order_id
+		LIMIT $2
+	`, now.UTC(), expiryBatch(limit))
+	if err != nil {
+		return nil, fmt.Errorf("oms: list expired proposals: %w", err)
+	}
+	defer rows.Close()
+	var out []OrderProposal
+	for rows.Next() {
+		prop, err := scanOrderProposal(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, prop)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("oms: list expired proposals: %w", err)
+	}
+	return out, nil
+}
+
+// expiryBatch bounds one sweep. A deployment that armed the control and then
+// left the queue unattended for a week has a backlog, and announcing all of it
+// in one transaction would hold a lock for as long as it takes.
+func expiryBatch(limit int) int {
+	if limit <= 0 {
+		return defaultExpiryBatch
+	}
+	return limit
+}
+
+const defaultExpiryBatch = 100
+
+// AnnounceExpiry is the serialisation point for expiry. See ProposalStore.
+//
+// THE SAME FIVE BEATS AS Put, AND FOR THE SAME REASON. The marker and the FACT
+// it describes commit together, so the record cannot be enqueued for an expiry
+// that was not marked, and the mark cannot claim an announcement that was never
+// queued. Splitting them is the #292 defect: a crash between the two leaves the
+// store and the estate disagreeing, recovered only by another marker and another
+// compensator.
+func (p *PostgresProposals) AnnounceExpiry(ctx context.Context, orderID string, at time.Time, announce []outbox.Record) (bool, error) {
+	tx, err := p.pool.Begin(ctx)
+	if err != nil {
+		return false, fmt.Errorf("oms: announce expiry %s: begin: %w", orderID, err)
+	}
+	// No-op after a successful Commit.
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	// ONE STATEMENT, AND ITS ROWS-AFFECTED IS THE VERDICT. A SELECT-then-UPDATE
+	// reopens check-then-act between two pods; every condition that decides
+	// whether this expiry is announceable lives in the WHERE so the engine
+	// settles it. expires_at <= $2 is re-checked HERE rather than trusted from
+	// the sweeper: a pod whose clock drifted forward must not be able to kill an
+	// order somebody still has time to sign.
+	tag, err := tx.Exec(ctx, `
+		UPDATE order_proposals
+		   SET expiry_announced_at = $2
+		 WHERE order_id = $1
+		   AND approver = ''
+		   AND expiry_announced_at IS NULL
+		   AND expires_at <= $2
+	`, orderID, at.UTC())
+	if err != nil {
+		return false, fmt.Errorf("oms: announce expiry %s: %w", orderID, err)
+	}
+	if tag.RowsAffected() == 0 {
+		// Somebody else announced it, it was signed, or it has not expired. The
+		// loser returns BEFORE the enqueue, so the deferred Rollback discards a
+		// FACT that must not go out.
+		return false, nil
+	}
+	if err := outbox.Enqueue(ctx, tx, announce...); err != nil {
+		return false, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return false, fmt.Errorf("oms: announce expiry %s: commit: %w", orderID, err)
+	}
+	return true, nil
 }
 
 // Pending lists what is still awaiting a signature.

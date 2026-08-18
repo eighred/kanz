@@ -1671,6 +1671,108 @@ func (s *Service) handleAmend(ctx context.Context, payload []byte) error {
 // who could correct the command is still there.
 const ReasonUnsignable = "DUAL_CONTROL_UNSIGNABLE"
 
+// ReasonApprovalExpired is the outcome code for a held order that nobody signed
+// before its deadline.
+//
+// IT IS A REJECTION, AND THAT IS THE HONEST ANSWER. The order was never
+// admitted — it is not in the order book, it has no status to move, and a ninth
+// ORDER_STATUS would have made it visible to every consumer as work. What
+// happened is what happens to an order that breaches compliance or names an
+// unroutable venue: it will not trade, and the estate is told so on the FACT it
+// already folds. The CODE is what separates "nobody signed it" from "compliance
+// refused it", which is the distinction an examiner actually asks for.
+const ReasonApprovalExpired = "DUAL_CONTROL_EXPIRED"
+
+// ExpireProposals announces every held order whose deadline has passed (#539).
+//
+// # The failure this ends
+//
+// OrderPendingApproval's own doc promises a proposal "EXPIRES rather than
+// resting forever looking like a decision that was made". Nothing delivered on
+// that: Pending filtered the row out and no FACT went anywhere, so a trader saw
+// ORDER_PENDING_APPROVAL and then silence — permanently, with no CommandOutcome
+// ever arriving. That is the exact shape #410's acceptance names as the failure
+// it exists to prevent, reintroduced by the control at the far end of its own
+// timeout.
+//
+// # Why it is safe on two replicas without a lease
+//
+// It takes no lock and elects no leader. AnnounceExpiry is a conditional UPDATE
+// whose rows-affected is the verdict, so both sweepers may find the same row and
+// exactly one announces it — the same argument Claim makes on the approval path,
+// and the same one the schedule driver makes for needing no lease at all.
+//
+// # A failure is not fatal
+//
+// One proposal that cannot be announced must not stop the rest, and a sweep that
+// fails must not take the OMS down: the orders it would announce are already
+// held, and the next tick tries again. The caller counts failures.
+func (s *Service) ExpireProposals(ctx context.Context) error {
+	now := s.now().UTC()
+	due, err := s.store.Proposals().ExpiredUnannounced(ctx, now, 0)
+	if err != nil {
+		return err
+	}
+	var failed int
+	for _, p := range due {
+		if err := s.expireOne(ctx, p, now); err != nil {
+			// Logged and counted, never returned: a poison row must not wedge the
+			// queue behind it for every other trader waiting on an answer.
+			s.logger.Error("oms: could not announce a proposal's expiry",
+				"order_id", p.ID, "proposer", p.Proposer, "expires_at", p.ExpiresAt, "err", err)
+			failed++
+		}
+	}
+	if failed > 0 {
+		return fmt.Errorf("oms: %d of %d proposal expiries could not be announced", failed, len(due))
+	}
+	return nil
+}
+
+// expireOne announces one expiry, with the FACTs riding the same transaction as
+// the marker.
+//
+// BUILT BEFORE THE WRITE, so an expiry that cannot be captured — no tenant on
+// the context, a payload that will not marshal — stops here rather than marking
+// a proposal announced that nobody will ever hear about. The same discipline
+// hold() follows, and the reason the marker is a column rather than a log line.
+func (s *Service) expireOne(ctx context.Context, p OrderProposal, now time.Time) error {
+	reason := "no second signature was given before " + p.ExpiresAt.UTC().Format(time.RFC3339)
+	rejected, err := s.emitter.RejectedFact(ctx, p.ID, ReasonApprovalExpired, reason, now)
+	if err != nil {
+		return err
+	}
+	// THE OUTCOME IS WHAT THE SUBMITTER IS WAITING ON. service.go's own note on
+	// the held path says a held order's outcome FACT is the one its approval or
+	// its expiry produces; without this half the caller waits forever on a command
+	// that was answered by a timeout nobody published.
+	outcome, err := s.emitter.OutcomeFact(ctx, p.ID,
+		commandpb.CommandOutcomeStatus_COMMAND_OUTCOME_STATUS_REJECTED, reason, ReasonApprovalExpired, "", now)
+	if err != nil {
+		return err
+	}
+
+	announced, err := s.store.Proposals().AnnounceExpiry(ctx, p.ID, now, []outbox.Record{rejected, outcome})
+	if err != nil {
+		return err
+	}
+	if !announced {
+		// The other replica got it, or it was signed between the read and here.
+		// Either way this pod announces nothing.
+		return nil
+	}
+	s.logger.Warn("oms: a held order EXPIRED without a second signature and will not trade (#539)",
+		"order_id", p.ID, "portfolio_id", p.PortfolioID, "proposer", p.Proposer,
+		"proposed_at", p.CreatedAt, "expires_at", p.ExpiresAt)
+
+	// Flushed for the same reason hold() flushes: a trader whose order just died
+	// should not wait a relay tick to find out. The record is durable either way.
+	if _, err := s.relay.Flush(ctx, p.ID); err != nil {
+		s.logger.Warn("oms: expiry announced but not yet on the bus", "order_id", p.ID, "err", err)
+	}
+	return nil
+}
+
 // handleApprove releases a held order on a SECOND SUBJECT'S SIGNATURE (#539).
 //
 // # Why this is not a query, and not a store method

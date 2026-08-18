@@ -510,6 +510,15 @@ func runConsumers(ctx context.Context, cfg config.Config, readiness *server.Read
 	})
 	obs.Registry.MustRegister(sweepFailures)
 
+	proposalExpiryFailures := prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "kanz_oms_proposal_expiry_failures_total",
+		Help: "Proposal-expiry sweep passes that ended in an error. The pod keeps trading, so nothing " +
+			"else surfaces this. Sustained non-zero means a held order that will NEVER trade is still " +
+			"telling the trader who submitted it nothing at all — the silent drop #539 exists to end, " +
+			"reappearing one layer down.",
+	})
+	obs.Registry.MustRegister(proposalExpiryFailures)
+
 	// THE EXECUTION-ALGORITHM DRIVER'S THREE SIGNALS (#435).
 	//
 	// A parent order that is not being worked looks exactly like one being worked
@@ -1064,6 +1073,61 @@ func runConsumers(ctx context.Context, cfg config.Config, readiness *server.Read
 		logger.Warn("oms periodic in-flight reconciliation is DISABLED (OMS_SWEEP_INTERVAL=0) — an order " +
 			"whose ORDER_ACCEPTED FACT fails to publish will stay invisible to risk, compliance and the " +
 			"audit log until this pod next restarts")
+	}
+
+	// THE EXPIRY SWEEP (#539): a held order nobody signed says so.
+	//
+	// Between #537 and #539 this branch did not exist, and its absence was the
+	// silent one. An order over the dual-control threshold is held rather than
+	// admitted; if nobody signs it before dualcontrol.DefaultTTL the proposal
+	// leaves the pending queue and — until this — entered no other queue at all.
+	// The trader saw ORDER_PENDING_APPROVAL and then nothing, ever: no rejection,
+	// no CommandOutcome, no order. That is precisely "an order that neither
+	// executes nor reports why", produced by the control built to prevent it.
+	//
+	// NO LEASE, NO LEADER, ON PURPOSE. oms-deploy.yaml runs replicas: 2 and both
+	// pods sweep. AnnounceExpiry is a conditional UPDATE whose rows-affected is
+	// the verdict, so the loser announces nothing — the same argument Claim makes
+	// on the approval path, and the same one the schedule driver makes for needing
+	// no lease.
+	//
+	// A FAILURE IS NOT FATAL. The orders it would announce are already held; the
+	// next tick tries again. Taking the OMS down over a sweep would stop admitting
+	// new orders to fix a reporting gap on old ones.
+	if cfg.ProposalExpiryInterval > 0 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			logger.Info("oms proposal-expiry sweep armed",
+				"interval", cfg.ProposalExpiryInterval.String(), "ttl", dualcontrol.DefaultTTL.String())
+			ticker := time.NewTicker(cfg.ProposalExpiryInterval)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+					// The explicit tenant, for the reason the sweep above gives: this
+					// runs outside any inbound delivery, so there is no envelope to
+					// have stashed one, and outbox.From refuses a record without it
+					// rather than enqueueing a FACT that can never be published.
+					if err := svc.ExpireProposals(bus.WithTenantID(ctx, cfg.Tenant)); err != nil {
+						proposalExpiryFailures.Inc()
+						logger.Error("oms: the proposal-expiry sweep reported failures — a held order "+
+							"that will never trade is still telling its submitter nothing",
+							"err", err)
+						continue
+					}
+				}
+			}
+		}()
+	} else {
+		// SAID OUT LOUD. Off and armed must not look the same, and this one is
+		// worse than most when it is off: the orders it would announce are ones a
+		// human is waiting on.
+		logger.Warn("oms proposal-expiry sweep is DISABLED (OMS_PROPOSAL_EXPIRY_INTERVAL=0) — a held " +
+			"order nobody signs will leave the pending queue at its deadline and announce nothing, " +
+			"so the trader who submitted it never learns it will not trade (#539)")
 	}
 
 	// THE EXECUTION-ALGORITHM DRIVER (#435): what actually works a parent order.
