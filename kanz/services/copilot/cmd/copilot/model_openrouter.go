@@ -281,10 +281,31 @@ func (m *openRouterModel) mapStopReason(finish, native string) llm.StopReason {
 // orLabel keeps the metric's cardinality bounded. finish_reason is a small
 // closed set, but native_finish_reason is whatever an upstream provider sends,
 // and an unbounded label is how a metric takes down a Prometheus.
+//
+// "OTHER" MUST MEAN UNANTICIPATED, OR IT MEANS NOTHING (#179 verification).
+// Driving the built binary against a stand-in upstream showed every ordinary
+// turn landing in that bucket: OpenRouter passes an Anthropic model's OWN reason
+// through native_finish_reason, and those are end_turn / tool_use / max_tokens —
+// none of which were listed, so all three counted as "other".
+//
+//	kanz_copilot_openrouter_stop_reason_total{finish_reason="tool_calls",
+//	  native_finish_reason="other",mapped="tool_use"} 1     <- was "tool_use"
+//
+// That is the bucket whose entire job is to make a reason nobody expected
+// visible, saturated by the two most routine values on the most likely model
+// family. A genuine surprise arriving there would have been indistinguishable
+// from normal traffic — which defeats the measurement this metric exists to
+// provide (see mapStopReason: the refusal gap is closed by evidence, not by a
+// heuristic, and evidence read from a saturated bucket is not evidence).
+//
+// So the closed set carries BOTH vocabularies: OpenAI's finish_reason values and
+// the upstream-native stop reasons that reach us verbatim. Case is folded first,
+// which also covers the providers that shout theirs (Gemini's STOP/MAX_TOKENS).
 func orLabel(v string) string {
 	switch strings.ToLower(strings.TrimSpace(v)) {
 	case "":
 		return "none"
+	// OpenAI-shaped finish_reason — what OpenRouter normalises to.
 	case "stop":
 		return "stop"
 	case "tool_calls":
@@ -293,10 +314,22 @@ func orLabel(v string) string {
 		return "length"
 	case "content_filter":
 		return "content_filter"
-	case "refusal":
-		return "refusal"
 	case "error":
 		return "error"
+	// Upstream-native stop reasons, passed through unchanged. "refusal" is in
+	// both vocabularies and is the one mapStopReason branches on.
+	case "refusal":
+		return "refusal"
+	case "end_turn":
+		return "end_turn"
+	case "tool_use":
+		return "tool_use"
+	case "max_tokens":
+		return "max_tokens"
+	case "stop_sequence":
+		return "stop_sequence"
+	case "pause_turn":
+		return "pause_turn"
 	default:
 		return "other"
 	}

@@ -11,11 +11,17 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 
+	"github.com/eighred/kanz/pkg/auth"
+	"github.com/eighred/kanz/services/copilot/internal/agent"
 	"github.com/eighred/kanz/services/copilot/internal/config"
+	"github.com/eighred/kanz/services/copilot/internal/governed"
 	"github.com/eighred/kanz/services/copilot/internal/llm"
+	"github.com/eighred/kanz/services/copilot/internal/retrieval"
+	"github.com/eighred/kanz/services/copilot/internal/tools"
 )
 
 // EVERY TEST HERE IS FULLY MOCKED. No key, no network, no live API — CI must
@@ -358,6 +364,39 @@ func TestUnknownFinishReasonsAreBucketed(t *testing.T) {
 	}
 }
 
+// "OTHER" MUST STAY RARE OR IT MEASURES NOTHING (#179 verification).
+//
+// The sibling above proves the bucket catches a surprise. This one proves the
+// bucket is not ALREADY FULL of routine traffic, which is what running the built
+// binary against a stand-in upstream actually showed: OpenRouter passes an
+// Anthropic model's own reason through native_finish_reason, so every tool turn
+// arrived as "tool_use" and every answer as "end_turn" — both unlisted, both
+// counted as "other". A genuinely unanticipated reason would have been
+// invisible inside that, and mapStopReason's whole argument for measuring
+// instead of guessing rests on being able to see it.
+func TestARoutineUpstreamNativeReasonIsNotBucketedAsOther(t *testing.T) {
+	for _, tc := range []struct{ native, want string }{
+		{"tool_use", "tool_use"},     // every Anthropic tool-use turn
+		{"end_turn", "end_turn"},     // every Anthropic answer
+		{"max_tokens", "max_tokens"}, // a truncated answer, worth telling apart
+		{"MAX_TOKENS", "max_tokens"}, // Gemini shouts its reasons; case is folded
+		{"whatever_2f9", "other"},    // still bucketed
+	} {
+		srv := newORServer(t, `{"choices":[{"message":{"content":"x"},"finish_reason":"tool_calls","native_finish_reason":"`+tc.native+`"}]}`)
+		m, reg := orModel(t, srv)
+		if _, err := m.Complete(context.Background(), llm.Request{
+			Messages: []llm.Message{{Role: llm.RoleUser, Text: "q"}},
+		}); err != nil {
+			t.Fatalf("Complete: %v", err)
+		}
+		if got := counterValue(t, reg, "tool_calls", tc.want, string(llm.StopToolUse)); got != 1 {
+			t.Errorf("native_finish_reason %q was not labelled %q (got count %v) — a routine value "+
+				"in the \"other\" bucket hides the unanticipated one the bucket exists for",
+				tc.native, tc.want, got)
+		}
+	}
+}
+
 // --- failure surfaces -------------------------------------------------------
 
 // A 200 carrying an error object is a real OpenRouter shape. Treating it as an
@@ -404,5 +443,123 @@ func TestTheAdapterRefusesToBuildWithoutAKey(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "COPILOT_OPENROUTER_API_KEY_FILE") {
 		t.Errorf("error = %q, want it to name the mount to add", err)
+	}
+}
+
+// --- the agent loop, over this adapter, unchanged ---------------------------
+
+// THE SEAM'S ONE PROMISE: internal/agent DOES NOT KNOW WHICH PROVIDER ANSWERED.
+//
+// Every other test in this file asserts one Complete call in isolation. That is
+// the mapping, and the mapping being right per call is not the same claim as the
+// LOOP working — the agent feeds an assistant tool-call turn and a user turn of
+// results back in, and it is that round trip through toORMessages where a
+// multi-tool turn is most likely to be subtly wrong: one seam message has to
+// become one role:"tool" message PER result, each paired by tool_call_id. Drop
+// the pairing and the model silently answers without the data it asked for,
+// which reads as a plausible answer and is the failure nobody spots.
+//
+// So this drives the REAL agent over the REAL registry with only the upstream
+// replaced. If internal/agent ever has to learn about a provider, this test is
+// where that shows up.
+func TestTheAgentLoopRunsAMultiToolTurnOverThisAdapter(t *testing.T) {
+	// A scripted upstream: turn 1 asks for two tools at once, turn 2 answers.
+	var seen []orRequest
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		var req orRequest
+		if err := json.Unmarshal(body, &req); err != nil {
+			t.Errorf("the adapter sent unparseable JSON: %v", err)
+		}
+		seen = append(seen, req)
+
+		var reply string
+		if len(seen) == 1 {
+			reply = `{"choices":[{"message":{"role":"assistant","content":"","tool_calls":[
+			  {"id":"call_a","type":"function","function":{"name":"get_risk_measures","arguments":"{\"portfolio_id\":\"PF-T1\"}"}},
+			  {"id":"call_b","type":"function","function":{"name":"get_exposure","arguments":"{\"portfolio_id\":\"PF-T1\"}"}}
+			]},"finish_reason":"tool_calls","native_finish_reason":"tool_use"}]}`
+		} else {
+			reply = `{"choices":[{"message":{"role":"assistant","content":"VaR99 is 1250000 and equity exposure is 640000."},
+			  "finish_reason":"stop","native_finish_reason":"end_turn"}]}`
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(reply))
+	}))
+	t.Cleanup(srv.Close)
+
+	model, err := newOpenRouterModel(config.Config{
+		ModelID:           "anthropic/claude-opus-4-8",
+		OpenRouterAPIKey:  "test-key",
+		OpenRouterBaseURL: srv.URL,
+	}, slog.New(slog.NewTextHandler(io.Discard, nil)), prometheus.NewRegistry())
+	if err != nil {
+		t.Fatalf("newOpenRouterModel: %v", err)
+	}
+
+	client := governed.NewStubClient()
+	client.Put(governed.Reading{
+		PortfolioID: "PF-T1", Tenant: "t1", Kind: "measures",
+		Values: map[string]float64{"VaR99": 1250000}, SourceEventID: "evt-measures",
+		AsOf: time.Date(2026, 6, 29, 0, 0, 0, 0, time.UTC),
+	})
+	client.Put(governed.Reading{
+		PortfolioID: "PF-T1", Tenant: "t1", Kind: "exposure",
+		Values: map[string]float64{"equity": 640000}, SourceEventID: "evt-exposure",
+		AsOf: time.Date(2026, 6, 29, 0, 0, 0, 0, time.UTC),
+	})
+	authz := auth.NewPolicyAuthorizer(&auth.Policy{
+		Roles: map[string][]auth.Action{"analyst": {auth.ActionRiskRead}},
+	})
+	registry := tools.NewRegistry(authz, client, retrieval.IdentityCatalog{})
+
+	ans, err := agent.New(model, registry).Ask(context.Background(),
+		&auth.Principal{Subject: "pm", Tenant: "t1", Roles: []string{"analyst"}},
+		"what is PF-T1's VaR and exposure?")
+	if err != nil {
+		t.Fatalf("Ask: %v", err)
+	}
+
+	if len(seen) != 2 {
+		t.Fatalf("the loop made %d upstream calls, want 2 — a tool turn and an answer", len(seen))
+	}
+	// The turn that carries the results is the whole point: TWO tool messages,
+	// paired to the two calls, in the order they were requested.
+	var toolMsgs []orMessage
+	for _, m := range seen[1].Messages {
+		if m.Role == "tool" {
+			toolMsgs = append(toolMsgs, m)
+		}
+	}
+	if len(toolMsgs) != 2 {
+		t.Fatalf("the second request carried %d role:\"tool\" messages, want 2 — a multi-tool turn "+
+			"that collapses drops results the model then answers without: %+v", len(toolMsgs), seen[1].Messages)
+	}
+	for i, want := range []string{"call_a", "call_b"} {
+		if toolMsgs[i].ToolCallID != want {
+			t.Errorf("tool message %d paired to %q, want %q — an unpaired result is discarded upstream",
+				i, toolMsgs[i].ToolCallID, want)
+		}
+	}
+	// Each result must be on the RIGHT message: pairing that is merely present
+	// but crossed feeds the model the exposure it asked for as the measures.
+	if !strings.Contains(toolMsgs[0].Content, "VaR99") || !strings.Contains(toolMsgs[1].Content, "equity") {
+		t.Errorf("the governed results reached the wrong tool_call_id: call_a got %q, call_b got %q",
+			toolMsgs[0].Content, toolMsgs[1].Content)
+	}
+
+	// And the answer comes back grounded, with both citations the tools reported.
+	if !ans.Grounded {
+		t.Errorf("answer not grounded, ungrounded=%v", ans.Ungrounded)
+	}
+	if ans.Refused {
+		t.Error("answer marked refused — finish_reason \"stop\" is an answer, not a decline")
+	}
+	cites := agent.CitationsString(ans)
+	for _, want := range []string{"evt-measures", "evt-exposure"} {
+		if !strings.Contains(cites, want) {
+			t.Errorf("citations %q lost %q — a multi-tool answer must cite every source it used",
+				cites, want)
+		}
 	}
 }
