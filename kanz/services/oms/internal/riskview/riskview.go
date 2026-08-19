@@ -25,11 +25,21 @@
 //
 // # Stale is not absent, and neither is zero
 //
-// A measure is UNKNOWN when it was never announced, or when the last
-// announcement is older than the bound. Both are refusals at the rule, never
-// substitutions: treating an unknown VaR as zero would admit every order while a
-// mandate declares a VaR limit — a control that reports success. That is #261's
-// shape exactly, and the reason ErrPositionsNotArmed exists one layer over.
+// A measure is UNKNOWN when it was never announced, when the last announcement
+// is older than the bound, or when the engine announced it having computed it
+// over nothing. All three are refusals at the rule, never substitutions:
+// treating an unknown VaR as zero would admit every order while a mandate
+// declares a VaR limit — a control that reports success. That is #261's shape
+// exactly, and the reason ErrPositionsNotArmed exists one layer over.
+//
+// THE THIRD ONE ARRIVED THROUGH A DOOR THIS PACKAGE COULD NOT SEE (#509, #527).
+// A measure whose provider resolved nothing returns its accumulator anyway, and
+// an accumulator that nothing reached is zero. It is announced on the subject
+// below like any other value, and it is exactly the substitution the paragraph
+// above forbids — arriving as an announcement rather than as an absence, so
+// neither the freshness bound nor the never-announced check could refuse it.
+// domain.v1.RiskMeasure.coverage is what tells them apart, and until it existed
+// this view had no way to ask.
 package riskview
 
 import (
@@ -78,7 +88,8 @@ type View struct {
 	now    func() time.Time
 	maxAge time.Duration
 
-	onStale func(portfolio, measure string, age time.Duration)
+	onStale      func(portfolio, measure string, age time.Duration)
+	onUnresolved func(portfolio, measure string, excluded uint32)
 }
 
 // Option customizes a View.
@@ -100,6 +111,18 @@ func WithMaxAge(d time.Duration) Option { return func(v *View) { v.maxAge = d } 
 // WithOnStale is called when a lookup finds a measure too old to gate on.
 func WithOnStale(fn func(portfolio, measure string, age time.Duration)) Option {
 	return func(v *View) { v.onStale = fn }
+}
+
+// WithOnUnresolved is called when an announcement carries a measure the engine
+// computed over an incomplete book, which this view then declines to fold.
+//
+// IT FIRES ON THE FOLD, NOT ON THE LOOKUP, unlike onStale — the announcement is
+// where the fact exists, and by lookup time the measure is simply absent and
+// indistinguishable from one the engine does not compute. An operator watching a
+// risk limit refuse needs to know the engine is answering and the answer is
+// unusable, which is a different incident from an engine that has gone quiet.
+func WithOnUnresolved(fn func(portfolio, measure string, excluded uint32)) Option {
+	return func(v *View) { v.onUnresolved = fn }
 }
 
 // New returns an empty view. Until an announcement arrives every measure is
@@ -138,6 +161,29 @@ func (v *View) Handle(_ context.Context, _ *envelopepb.Envelope, payload []byte)
 	next := make(map[string]*big.Rat, len(msg.GetMeasures()))
 	for _, m := range msg.GetMeasures() {
 		if m.GetName() == "" {
+			continue
+		}
+		// A MEASURE COMPUTED OVER A BOOK IT COULD NOT SEE DOES NOT GATE
+		// ANYTHING (#509, #527). Dropping it here leaves it UNKNOWN, which the
+		// rules already fail closed on — the same answer as never-announced and
+		// as stale, and the same answer for the same reason.
+		//
+		// NOT "annotate it and let the rule decide". v1.InputCoverage's own
+		// contract is that a non-zero exclusion count is a REFUSAL TO ANSWER
+		// rather than an annotation on a good number, because the direction of
+		// the error is not knowable here: dropping positions shrinks a sum but
+		// RAISES a ratio, and removing one leg of a hedged pair raises a
+		// quantile. A rule comparing that against a limit is not conservative,
+		// it is arbitrary.
+		//
+		// coverage ABSENT is not this case and must fold normally — it means the
+		// measure does not report coverage (GrossExposure reads the portfolio
+		// directly and no provider can decline it), not that it resolved
+		// nothing.
+		if excluded := m.GetCoverage().GetExcludedCount(); excluded > 0 {
+			if v.onUnresolved != nil {
+				v.onUnresolved(pf, m.GetName(), excluded)
+			}
 			continue
 		}
 		next[m.GetName()] = dec.FromProto(m.GetValue())

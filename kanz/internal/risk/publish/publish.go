@@ -46,6 +46,7 @@ import (
 	domainpb "github.com/eighred/kanz/kanz-schemas-go/domain/v1"
 	envelopepb "github.com/eighred/kanz/kanz-schemas-go/envelope/v1"
 
+	v1 "github.com/eighred/kanz/internal/risk/api/v1"
 	"github.com/eighred/kanz/internal/risk/domain"
 	"github.com/eighred/kanz/pkg/bus"
 )
@@ -132,14 +133,23 @@ func (p *Publisher) EmitMeasures(ctx context.Context, measures *domain.MeasureSe
 // measureQualityFlags stamps the envelope's data-integrity flags for a
 // measures FACT.
 //
-// domain.v1.RiskMeasureSet has no field for "this is partial", so a
-// partial measure set would otherwise reach every bus consumer — the
-// compliance monitor, the archiver, the web app — as a complete-looking
-// number (#257). envelope.v1.QUALITY_FLAG_DEGRADED is defined as
-// "produced from a degraded or PARTIAL source", which is exactly this
-// case, so the coverage signal rides the envelope rather than waiting on
-// a payload schema change. A consumer that gates on risk numbers must
-// check envelope quality_flags, not just the payload.
+// domain.v1.RiskMeasureSet has no SET-level field for "this is partial",
+// so a partial measure set would otherwise reach every bus consumer —
+// the compliance monitor, the archiver, the web app — as a
+// complete-looking number (#257). envelope.v1.QUALITY_FLAG_DEGRADED is
+// defined as "produced from a degraded or PARTIAL source", which is
+// exactly this case. A consumer that gates on risk numbers must check
+// envelope quality_flags, not just the payload.
+//
+// CORRECTED 2026-08-19 (#509): this doc used to say the signal rides the
+// envelope "rather than waiting on a payload schema change", and read as
+// though the payload carried no coverage at all. Since that change
+// landed, domain.v1.RiskMeasure.coverage carries the PER-MEASURE record
+// — which measure was computed over nothing, how much it lost, and a
+// bounded sample of what. The envelope flag is not redundant: it is the
+// one bit a consumer can route on without decoding the payload, and it
+// is also what covers the currency exclusions, which are a property of
+// the SET and still have no payload field.
 //
 // BOTH COVERAGE RECORDS FEED IT, and the bus cannot tell them apart. The
 // query surface carries CURRENCY_EXCLUDED and INPUTS_UNRESOLVED as
@@ -207,12 +217,46 @@ func ToProtoMeasureSet(ms *domain.MeasureSet, sourceEventIDs []string) *domainpb
 			Value:          m.Value,
 			UncertaintyAbs: m.UncertaintyAbs,
 			SourceEventIds: sourceEventIDs,
+			Coverage:       toProtoInputCoverage(m.Coverage),
 		})
 	}
 	return &domainpb.RiskMeasureSet{
 		PortfolioId: string(ms.PortfolioID()),
 		Measures:    measures,
 		AsOf:        timestamppb.New(ms.AsOf()),
+	}
+}
+
+// toProtoInputCoverage carries one measure's coverage record onto the
+// wire, or nil when the measure does not report one.
+//
+// THE NIL IS THE WHOLE POINT, and it is why domain.v1.InputCoverage is
+// a message rather than two scalars on RiskMeasure. v1.InputCoverage's
+// zero value means "this measure does not report input coverage", NOT
+// "everything resolved" — GrossExposure, NetExposure and HHI read the
+// portfolio directly and have no provider that could decline. Emitting
+// a present-but-empty message for those would tell a caller they were
+// checked and found complete, which is a stronger claim than the
+// engine makes; a scalar pair could not tell the two apart at all.
+//
+// An empty portfolio therefore reports absent rather than covered:
+// nothing was assessed, and saying "covered everything" of a book with
+// no positions is the flattering reading of the same silence.
+func toProtoInputCoverage(c v1.InputCoverage) *domainpb.InputCoverage {
+	if c.Contributed == 0 && c.ExcludedCount == 0 && len(c.Exclusions) == 0 {
+		return nil
+	}
+	var exclusions []*domainpb.InputExclusion
+	for _, e := range c.Exclusions {
+		exclusions = append(exclusions, &domainpb.InputExclusion{
+			InstrumentId: string(e.InstrumentID),
+			Reason:       e.Reason,
+		})
+	}
+	return &domainpb.InputCoverage{
+		Contributed:   uint32(c.Contributed),
+		ExcludedCount: uint32(c.ExcludedCount),
+		Exclusions:    exclusions,
 	}
 }
 
