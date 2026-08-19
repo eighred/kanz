@@ -72,14 +72,21 @@ func TestTheAnalyticsInventoryAgreesWithItsBenchmarks(t *testing.T) {
 	consts := map[string]string{}   // Analytic* ident -> string value
 	caseSets := map[string]string{} // exported func returning []validation.Case -> file
 	var inventory []analyticEntry   // Inventory()'s elements, in order
-	var reported []string           // the analytic ident of each Reports() set
+	var reported []analyticEntry    // the analytic of each Reports() set
 	var reportedCalls []string      // the case-set function each set calls
-	sawInventory, sawReports := false, false
+	var exempt []string             // validationExemptions' keys
+	sawInventory, sawReports, sawExemptions := false, false, false
 
 	walkGoFiles(t, root, "internal/risk/benchmarks", fset, func(rel string, f *ast.File) {
 		for _, d := range f.Decls {
 			switch decl := d.(type) {
 			case *ast.GenDecl:
+				if decl.Tok == token.VAR {
+					keys, found := exemptionKeys(decl)
+					exempt = append(exempt, keys...)
+					sawExemptions = sawExemptions || found
+					continue
+				}
 				if decl.Tok != token.CONST {
 					continue
 				}
@@ -147,9 +154,27 @@ func TestTheAnalyticsInventoryAgreesWithItsBenchmarks(t *testing.T) {
 		t.Fatalf("Inventory() has %d entries, want at least 8 — the literal was not read", len(inventory))
 	}
 
-	inInventory := map[string]bool{}
+	// NON-VACUITY, THE FIFTH WAY, and the one that matters most now that the gate
+	// is armed. If this declaration is renamed, `licensed` is empty and arm 5
+	// below refuses the whole estate rather than passing quietly — loud, but it
+	// would blame the analytics for a broken parser. Say which it is.
+	if !sawExemptions {
+		t.Fatalf("the %s declaration was not found under internal/risk/benchmarks — it was renamed "+
+			"or moved, and this guard is checking the exemption list against nothing while the "+
+			"risk-engine composition root reads the real one at runtime", exemptionsVar)
+	}
+	licensed := map[string]bool{}
+	for _, name := range exempt {
+		licensed[name] = true
+	}
+
+	inInventory := map[string]bool{}     // by identifier (or the literal itself)
+	inventoryValues := map[string]bool{} // by the analytic NAME the gate keys on
 	for _, e := range inventory {
 		inInventory[e.name] = true
+		if v := e.value(consts); v != "" {
+			inventoryValues[v] = true
+		}
 	}
 
 	// 1. EVERY CONSTANT IS INVENTORIED. A named analytic the gauge never iterates
@@ -174,7 +199,7 @@ func TestTheAnalyticsInventoryAgreesWithItsBenchmarks(t *testing.T) {
 	//    is deliberate and argued.
 	for _, e := range inventory {
 		if e.isLiteral {
-			if _, ok := inventoryLiteralsWithoutEvidence[e.name]; !ok {
+			if !licensed[e.name] {
 				t.Errorf("Inventory() carries the bare string %q, which names no constant and is "+
 					"not a declared exception. Nothing keeps it in step when the analytic is "+
 					"renamed, and a stale entry reports an analytic that does not exist as "+
@@ -210,46 +235,136 @@ func TestTheAnalyticsInventoryAgreesWithItsBenchmarks(t *testing.T) {
 
 	// 4. EVERY REPORTED ANALYTIC IS COUNTED. The sharpest instance: gate.Record
 	//    succeeds, signed evidence is held, and the gauge emits nothing at all.
-	for _, name := range reported {
-		if !inInventory[name] {
+	for _, e := range reported {
+		if !inInventory[e.name] {
 			t.Errorf("Reports() files evidence for %s, which Inventory() does not list — the "+
 				"validation is recorded and signed, and kanz_risk_analytics_validated emits no "+
-				"series for it. Validated and invisible is the worst of the four states because "+
-				"it is not one of them.", name)
+				"series for it. Validated and invisible is the worst of the five states because "+
+				"it is not one of them.", e.name)
 		}
 	}
 
-	// DEAD-ENTRY ARM on the exception list.
-	for name := range inventoryLiteralsWithoutEvidence {
-		if !inInventory[name] {
-			t.Errorf("inventoryLiteralsWithoutEvidence names %q, which Inventory() no longer "+
+	// 5. EVERY INVENTORIED ANALYTIC EITHER HAS EVIDENCE OR IS A NAMED EXEMPTION.
+	//
+	//    THIS IS THE ARM THAT MAKES ARMING THE GATE SAFE (#471 slice 3).
+	//    RISK_REQUIRE_VALIDATED_ANALYTICS defaults to on, so an analytic added to
+	//    Inventory() without a case set and without an exemption entry does not
+	//    show up as one more zero on a gauge — it stops every risk-engine replica
+	//    at startup, on the deploy, with the build that produced it long since
+	//    green. This turns that into a test failure on the branch that wrote it.
+	//
+	//    Note what is NOT checked, because it cannot be from source: whether the
+	//    case set PASSES. A benchmark that runs and fails still reaches the gate,
+	//    reads `failed` rather than `absent`, and is refused by the armed gate
+	//    just the same. Only running it answers that, which the benchmarks
+	//    package's own tests do.
+	hasEvidence := map[string]bool{}
+	for _, e := range reported {
+		hasEvidence[e.value(consts)] = true
+	}
+	var wouldRefuseTheStart []string
+	for _, e := range inventory {
+		v := e.value(consts)
+		if v == "" || hasEvidence[v] {
+			continue
+		}
+		if !licensed[v] {
+			wouldRefuseTheStart = append(wouldRefuseTheStart, v)
+		}
+	}
+	sort.Strings(wouldRefuseTheStart)
+	for _, v := range wouldRefuseTheStart {
+		t.Errorf("Inventory() carries %q, Reports() files no evidence for it, and "+
+			"benchmarks.ValidationExemptions() does not name it. With "+
+			"RISK_REQUIRE_VALIDATED_ANALYTICS armed — which is the default — this REFUSES THE "+
+			"RISK-ENGINE START on every replica. Write the case set and wire it into Reports(), "+
+			"or add a NAMED exemption stating why it cannot be graded and what retires the "+
+			"entry. There is no count threshold to satisfy: eleven-of-twelve would accept any "+
+			"eleven.", v)
+	}
+
+	// DEAD-ENTRY ARMS on the exemption list, both directions.
+	//
+	// THE SECOND ONE IS THE ONE #471 TURNS ON. A licence to serve unvalidated
+	// must not outlive the reason for it: the day isda_simm's aggregation becomes
+	// gradeable and somebody writes the case set, the exemption stops being an
+	// argument and becomes a permission nobody re-examined. Failing the build is
+	// what forces the deletion, since the metric would read `validated` either way
+	// and nothing else would ever ask.
+	for _, name := range exempt {
+		if !inventoryValues[name] {
+			t.Errorf("benchmarks.ValidationExemptions() names %q, which Inventory() no longer "+
 				"carries — delete the entry rather than leaving a licence nobody needs", name)
+		}
+		if hasEvidence[name] {
+			t.Errorf("benchmarks.ValidationExemptions() licenses %q to serve WITHOUT validation, "+
+				"and Reports() now files evidence for it. The exemption is dead: delete it. Left "+
+				"in place it is a standing permission for an analytic that no longer needs one, "+
+				"and the next reader takes it as a statement that this analytic cannot be graded "+
+				"— which the case set sitting beside it disproves.", name)
 		}
 	}
 }
 
-// inventoryLiteralsWithoutEvidence is the one inventory entry that is a bare
-// string on purpose.
+// exemptionsVar is the production declaration this guard reads the licensed
+// analytics out of.
 //
-// THE LITERAL IS THE ENCODING OF "NO EVIDENCE EXISTS". It is implemented outside
-// internal/risk/ and has no case set because it cannot have one: ISDA SIMM's
-// calibration AND its aggregation are member-licensed, and this estate ships
-// representative magnitudes rather than the published tables, so a case set would
-// grade the maths against invented data. It is listed so the gauge reports it
-// `absent` — which is true — rather than omitting it, which would read as
-// coverage.
+// IT IS PARSED, NOT RESTATED, AND NOT IMPORTED EITHER. This guard used to carry
+// its own hand-kept copy of the list. That stopped being tolerable the moment the
+// risk-engine composition root began reading the same list at RUNTIME to decide
+// what may start unvalidated (#471 slice 3): two hand-kept copies of a control's
+// exemption list is one copy that can quietly say yes after the other says no.
 //
-// frtb_sa WAS HERE AND IS NOT ANY MORE, and the reason is the distinction this
-// list turns on. Its risk WEIGHTS are as unpublished as SIMM's; its AGGREGATION
-// is MAR21.4 and MAR21.6, which are public text. A definitional case set grading
-// only the aggregation was therefore possible on the weaker bar stress_framework
+// The obvious repair — import benchmarks.ValidationExemptions() — was written
+// first and REJECTED BY test/arch/risk_boundary_test.go, correctly: test/arch is
+// an outsider to the risk module and outsiders go through internal/risk/api/*.
+// The same guard rejected the benchmarks package's first placement for the same
+// reason. So it is read from source, like everything else in this file, which
+// keeps the single source of truth in production code without reaching past the
+// boundary to get at it.
+//
+// frtb_sa WAS ON THAT LIST AND IS NOT ANY MORE, and the reason is the distinction
+// it turns on. Its risk WEIGHTS are as unpublished as SIMM's; its AGGREGATION is
+// MAR21.4 and MAR21.6, which are public text. A definitional case set grading only
+// the aggregation was therefore possible on the weaker bar stress_framework
 // already accepted, and writing it found the engine substituting a zero capital
 // charge where MAR21.4(5) prescribes an alternative Sb (#471). So "no published
 // vector" was never the right test for whether an analytic can be graded — "no
-// published SPECIFICATION" is, and the two came apart here.
-var inventoryLiteralsWithoutEvidence = map[string]string{
-	"isda_simm": "internal/collateral — SIMM calibration is member-licensed; simmparams.go ships " +
-		"representative magnitudes, so a case set would grade the maths against invented data",
+// published SPECIFICATION" is, and the two came apart there.
+const exemptionsVar = "validationExemptions"
+
+// exemptionKeys pulls the analytic names out of the `validationExemptions` map
+// literal. Keys only: the guard checks the SHAPE of the licence, never the
+// argument, which is prose no test can grade.
+func exemptionKeys(decl *ast.GenDecl) (out []string, found bool) {
+	for _, spec := range decl.Specs {
+		vs, ok := spec.(*ast.ValueSpec)
+		if !ok {
+			continue
+		}
+		for i, name := range vs.Names {
+			if name.Name != exemptionsVar || i >= len(vs.Values) {
+				continue
+			}
+			found = true
+			lit, ok := vs.Values[i].(*ast.CompositeLit)
+			if !ok {
+				continue
+			}
+			for _, el := range lit.Elts {
+				kv, ok := el.(*ast.KeyValueExpr)
+				if !ok {
+					continue
+				}
+				if k, ok := kv.Key.(*ast.BasicLit); ok && k.Kind == token.STRING {
+					if s, err := strconv.Unquote(k.Value); err == nil {
+						out = append(out, s)
+					}
+				}
+			}
+		}
+	}
+	return out, found
 }
 
 type analyticEntry struct {
@@ -303,9 +418,12 @@ func inventoryElements(fn *ast.FuncDecl) []analyticEntry {
 	return out
 }
 
-// reportsSets pulls (analytic ident, case-set function) out of Reports()'s
-// `sets` literal.
-func reportsSets(fn *ast.FuncDecl) (analytics, calls []string) {
+// reportsSets pulls (analytic, case-set function) out of Reports()'s `sets`
+// literal. The analytic is read in the same shape as an inventory entry — ident
+// or bare string — because an exemption that gains evidence could gain it under
+// EITHER spelling, and a walk that saw only idents would miss the literal one:
+// exactly the entry the exemption list is about.
+func reportsSets(fn *ast.FuncDecl) (analytics []analyticEntry, calls []string) {
 	ast.Inspect(fn, func(n ast.Node) bool {
 		lit, ok := n.(*ast.CompositeLit)
 		if !ok {
@@ -316,8 +434,15 @@ func reportsSets(fn *ast.FuncDecl) (analytics, calls []string) {
 			if !ok || len(row.Elts) != 2 {
 				continue
 			}
-			if id, ok := row.Elts[0].(*ast.Ident); ok {
-				analytics = append(analytics, id.Name)
+			switch v := row.Elts[0].(type) {
+			case *ast.Ident:
+				analytics = append(analytics, analyticEntry{name: v.Name})
+			case *ast.BasicLit:
+				if v.Kind == token.STRING {
+					if s, err := strconv.Unquote(v.Value); err == nil {
+						analytics = append(analytics, analyticEntry{name: s, isLiteral: true})
+					}
+				}
 			}
 			if call, ok := row.Elts[1].(*ast.CallExpr); ok {
 				if id, ok := call.Fun.(*ast.Ident); ok {
@@ -328,4 +453,15 @@ func reportsSets(fn *ast.FuncDecl) (analytics, calls []string) {
 		return false
 	})
 	return analytics, calls
+}
+
+// value resolves an inventory or Reports entry to the analytic NAME the gate and
+// the metric use — the constant's value for an ident, the string itself for a
+// literal. The exemption list is keyed by that name, so comparing it against
+// identifiers would silently match nothing.
+func (e analyticEntry) value(consts map[string]string) string {
+	if e.isLiteral {
+		return e.name
+	}
+	return consts[e.name]
 }
