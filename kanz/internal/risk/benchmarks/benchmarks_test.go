@@ -226,3 +226,13 @@ func TestSVIVolSurfaceReproducesItsBenchmarks(t *testing.T) {
 func TestStressFrameworkReproducesItsBenchmarks(t *testing.T) {
 	assertAllPass(t, "stress_framework", benchmarks.StressFramework(), 13)
 }
+
+// THE FRTB SBM AGGREGATION (#471, coverage 10/12 -> 11/12).
+//
+// These grade MAR21.4 and MAR21.6 — the algebra — and not the supervisory risk
+// weights, which are representative in this estate and cannot be graded here.
+// The set is what caught the engine returning a ZERO capital charge for an
+// offsetting book where MAR21.4(5) prescribes the alternative Sb specification.
+func TestFRTBSAReproducesItsBenchmarks(t *testing.T) {
+	assertAllPass(t, "frtb_sa", benchmarks.FRTBSA(), 24)
+}

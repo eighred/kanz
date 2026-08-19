@@ -83,22 +83,73 @@ func ChargeForScenario(sensitivities []Sensitivity, p ClassParams, s Scenario) f
 		wsByBucket[ws.bucket] = append(wsByBucket[ws.bucket], ws.value)
 	}
 
-	var sumKsq, sumS, sumSsq float64
+	kb := make([]float64, 0, len(wsByBucket))
+	sb := make([]float64, 0, len(wsByBucket))
 	for _, ws := range wsByBucket {
-		kb := bucketAgg(ws, rho)
-		sb := 0.0
+		k := bucketAgg(ws, rho)
+		s := 0.0
 		for _, w := range ws {
-			sb += w
+			s += w
 		}
-		sumKsq += kb * kb
-		sumS += sb
-		sumSsq += sb * sb
+		kb = append(kb, k)
+		sb = append(sb, s)
 	}
-	v := sumKsq + gamma*(sumS*sumS-sumSsq)
-	if v < 0 {
-		v = 0 // the FRTB fallback when the cross term turns the radicand negative
+
+	v := crossBucketAgg(kb, sb, gamma)
+	if v >= 0 {
+		return math.Sqrt(v)
 	}
-	return math.Sqrt(v)
+
+	// MAR21.4(5): THE ALTERNATIVE Sb SPECIFICATION, NOT A ZERO.
+	//
+	// When γ·Σ_{b≠c} Sb·Sc drives the radicand negative, the Basel text does not
+	// say "hold the charge at zero" — it says recompute with Sb capped to its own
+	// bucket's capital, Sb = max[min(Σ WS, Kb), −Kb]. The difference is not
+	// cosmetic: substituting zero reports NO CAPITAL REQUIRED for a book with real
+	// gross risk, because a negative radicand is produced by buckets that OFFSET,
+	// which is exactly the shape a trading book has. Two buckets of +5,+5 and
+	// −5,−5 at ρ=0, γ=0.8 came back as 0.000000 where MAR21 prescribes 6.324555.
+	//
+	// It errs toward comfort in the one direction a capital number must not: the
+	// filing is smaller, nothing errors, and no operator has a reason to look.
+	// Unreachable under DefaultParams (every class ships γ ≤ ρ, which makes the
+	// radicand identically non-negative) and reachable the moment a deployment
+	// loads a table where γ > ρ — which ValidateParams accepts, as it must, since
+	// the published MAR21 tables are not constrained that way.
+	//
+	// curvature.go has always clamped Sb this way (see clampF there, MAR21.5(4)) —
+	// and clamps it UNCONDITIONALLY, which is right there and would be wrong here.
+	// The same aggregation exists twice in this package with different conditions,
+	// so copying either one into the other is the next available mistake; both
+	// scopes are pinned by cases in internal/risk/benchmarks/frtb.go.
+	//
+	// Kb IS NOT TOUCHED, and that cannot be tested from outside: |Sb| > Kb is the
+	// precondition for reaching this branch at all, so clamping Kb to |Sb| here is
+	// a no-op on every input that gets here. Found by mutating it and watching
+	// nothing fail — recorded so the absence of a case is not read as an omission.
+	alt := make([]float64, len(sb))
+	for i := range sb {
+		alt[i] = clampF(sb[i], -kb[i], kb[i])
+	}
+	// The floor is defensive only: with every |Sb| ≤ Kb the cross term cannot
+	// exceed Σ Kb² for γ ≤ 1, so the recomputed radicand is non-negative. It stays
+	// so a γ outside [0,1] slipping past ValidateParams cannot produce a NaN
+	// charge, which would propagate into a filing as a blank rather than a refusal.
+	return math.Sqrt(math.Max(0, crossBucketAgg(kb, alt, gamma)))
+}
+
+// crossBucketAgg is MAR21.4(4)'s radicand: Σ Kb² + γ·Σ_{b≠c} Sb·Sc, with the
+// double sum written as (Σ Sb)² − Σ Sb². Returned UNCLAMPED, because its sign is
+// the input to the MAR21.4(5) decision above — a helper that floored it at zero
+// would make the two branches indistinguishable to its caller.
+func crossBucketAgg(kb, sb []float64, gamma float64) float64 {
+	var sumKsq, sumS, sumSsq float64
+	for i := range kb {
+		sumKsq += kb[i] * kb[i]
+		sumS += sb[i]
+		sumSsq += sb[i] * sb[i]
+	}
+	return sumKsq + gamma*(sumS*sumS-sumSsq)
 }
 
 func maxScenario(sens []Sensitivity, p ClassParams) float64 {
@@ -126,6 +177,11 @@ func scaleCorr(rho float64, s Scenario) float64 {
 
 // bucketAgg is √(max(0, Σ WS² + ρ·((ΣWS)² − Σ WS²))) — the within-bucket
 // aggregation with intra-bucket correlation ρ.
+//
+// THE max(0, ·) HERE IS THE PUBLISHED FORMULA, unlike the one that used to sit at
+// the cross-bucket level: MAR21.4(3) writes Kb with the floor inside the root, and
+// prescribes no alternative. The two clamps look identical and only one of them
+// was ever right, which is why they are annotated apart.
 func bucketAgg(ws []float64, rho float64) float64 {
 	var sum, sumSq float64
 	for _, w := range ws {
