@@ -130,3 +130,63 @@ func TestLoadCalibration(t *testing.T) {
 		}
 	})
 }
+
+// RISK_REQUIRE_VALIDATED_ANALYTICS IS THE ONE *_REQUIRE_* CONTROL THAT DEFAULTS ON
+// (#471), so its default is the assertion — not an incidental property of Load.
+//
+// Flipping it to false would deploy the posture the issue was filed about: a
+// complete SR 11-7 model-validation gate that nothing turns on. The default is
+// affordable here and nowhere else in the family because the evidence is compiled
+// into the binary — the benchmark case sets run at boot against the pricers in
+// this same build — so there is no operator backlog for it to trip over.
+func TestLoadRequireValidatedAnalytics(t *testing.T) {
+	const key = "RISK_REQUIRE_VALIDATED_ANALYTICS"
+
+	t.Run("unset is ARMED", func(t *testing.T) {
+		cfg, err := Load()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !cfg.RequireValidatedAnalytics {
+			t.Fatal("unset defaults to DISARMED — that ships a validation gate nobody turned on, " +
+				"which is the state #471 exists to end")
+		}
+	})
+
+	t.Run("false disarms", func(t *testing.T) {
+		t.Setenv(key, "false")
+		cfg, err := Load()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if cfg.RequireValidatedAnalytics {
+			t.Fatal("explicitly disarming had no effect — the documented fallback posture is unreachable")
+		}
+	})
+
+	// A NON-BOOLEAN IS A REFUSAL, NOT A SILENT DISARM. An operator who writes "no"
+	// has stated an intent; swallowing it would leave a control they can see in the
+	// pod spec doing the opposite of what they set.
+	t.Run("a non-boolean refuses the start", func(t *testing.T) {
+		t.Setenv(key, "no")
+		if _, err := Load(); err == nil {
+			t.Fatal("RISK_REQUIRE_VALIDATED_ANALYTICS=no was accepted — silently, as armed")
+		}
+	})
+
+	// THE NEAR MISS IS THE ONE THAT COSTS SOMETHING. Every other key in this
+	// service is RISK_ENGINE_ prefixed, so the prefixed spelling is what an
+	// operator reaches for by muscle memory — and ignored, it reads as a disarm
+	// that took effect.
+	t.Run("the prefixed spelling refuses rather than doing nothing", func(t *testing.T) {
+		t.Setenv("RISK_ENGINE_REQUIRE_VALIDATED_ANALYTICS", "false")
+		_, err := Load()
+		if err == nil {
+			t.Fatal("RISK_ENGINE_REQUIRE_VALIDATED_ANALYTICS was ignored — the operator sees their " +
+				"variable set and the gate is still armed, with nothing anywhere saying so")
+		}
+		if !strings.Contains(err.Error(), key) {
+			t.Fatalf("the refusal does not name the key they actually want: %v", err)
+		}
+	})
+}

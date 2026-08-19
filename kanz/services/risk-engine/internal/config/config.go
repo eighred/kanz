@@ -1,8 +1,10 @@
 package config
 
 import (
+	"fmt"
 	"log/slog"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -43,6 +45,32 @@ type Config struct {
 	// restores from the latest durable snapshot and relies on the live NATS
 	// spine to cover everything since. Comma-separated in the environment.
 	KafkaBrokers []string
+
+	// RequireValidatedAnalytics arms the SR 11-7 model-validation gate
+	// (RISK_REQUIRE_VALIDATED_ANALYTICS, #471): an analytic that holds no
+	// current, passing, signed validation and is not a NAMED exemption in
+	// benchmarks.ValidationExemptions() stops this engine at startup.
+	//
+	// IT SHIPS TRUE, WHICH IS THE OPPOSITE OF THE REST OF THE *_REQUIRE_* FAMILY,
+	// and the reason the family ships false does not apply. OMS_REQUIRE_MANDATE
+	// and OMS_REQUIRE_VERIFIED_ACCOUNT refuse over data an OPERATOR has to go and
+	// correct — unmandated portfolios, unverified accounts — so arming them is a
+	// trading outage until somebody finishes a backlog. This one refuses over
+	// evidence that ships INSIDE THE BINARY: the benchmark case sets are compiled
+	// in, recorded at boot, and eleven of the twelve analytics pass them in every
+	// build that leaves CI. Arming it cannot fail on a deployment that a build
+	// gate did not already fail on.
+	//
+	// SO THE DEFAULT IS THE ARGUMENT. Defaulting false would mean shipping the
+	// posture that has been in place since #494 — a complete gate nobody turned
+	// on — and calling the issue resolved. The exposure the true default creates
+	// is the honest one: a build whose analytics cannot vouch for themselves does
+	// not serve risk numbers.
+	//
+	// UNSET ⇒ TRUE. Set RISK_REQUIRE_VALIDATED_ANALYTICS=false to fall back to
+	// counting-and-warning; anything strconv.ParseBool cannot read is an error,
+	// never a silent disarm.
+	RequireValidatedAnalytics bool
 
 	// MarketDataURL is the Postgres/Timescale DSN of the shared market-data
 	// price-history store (MODEL-01b) that the market-data service writes. When
@@ -180,6 +208,20 @@ func Load() (Config, error) {
 		return Config{}, err
 	}
 
+	// NOT "RISK_ENGINE_" PREFIXED, and that is a deliberate deviation from every
+	// other key in this file. The control is named RISK_REQUIRE_VALIDATED_ANALYTICS
+	// in #471, in internal/execution's comparison of the deny-by-default family and
+	// in services/datamaster's — it was referred to by that spelling in code before
+	// it existed, and inventing a second one now would leave those references
+	// pointing at nothing. parseBoolDefault refuses the near-miss spelling rather
+	// than letting an operator who typed the prefixed form disarm the gate in
+	// silence, which is the only way this deviation could cost anything.
+	requireValidated, err := parseBoolDefault("RISK_REQUIRE_VALIDATED_ANALYTICS", true,
+		"RISK_ENGINE_REQUIRE_VALIDATED_ANALYTICS")
+	if err != nil {
+		return Config{}, err
+	}
+
 	return Config{
 		Listen:           envOr("RISK_ENGINE_LISTEN", ":8081"),
 		LogLevel:         parseLevel(envOr("RISK_ENGINE_LOG_LEVEL", "info")),
@@ -190,8 +232,11 @@ func Load() (Config, error) {
 		SnapshotInterval: parseDuration(os.Getenv("RISK_ENGINE_SNAPSHOT_INTERVAL")),
 		KafkaBrokers:     splitList(os.Getenv("RISK_ENGINE_KAFKA_BROKERS")),
 		MarketDataURL:    marketDataURL,
-		LiquidityVenue:   strings.TrimSpace(os.Getenv("RISK_ENGINE_LIQUIDITY_VENUE")),
-		ShardMembers:     splitList(os.Getenv("RISK_ENGINE_SHARD_MEMBERS")),
+
+		RequireValidatedAnalytics: requireValidated,
+
+		LiquidityVenue: strings.TrimSpace(os.Getenv("RISK_ENGINE_LIQUIDITY_VENUE")),
+		ShardMembers:   splitList(os.Getenv("RISK_ENGINE_SHARD_MEMBERS")),
 		// TRIMMED BECAUSE THE MEMBER LIST IS. splitList trims each member, so an
 		// id carrying the trailing space a YAML block scalar or a shell `export`
 		// leaves behind could never match one — and an id that matches nothing
@@ -209,6 +254,41 @@ func Load() (Config, error) {
 		CalibrationRates:    os.Getenv("RISK_ENGINE_CALIBRATION_RATES"),
 		MarketSubjects:      marketSubjects,
 	}, nil
+}
+
+// parseBoolDefault reads a boolean env var, falling back to def when it is unset.
+//
+// A VALUE strconv.ParseBool CANNOT READ IS AN ERROR, never a silent fallback.
+// The silent version is what makes a control useless in both directions: an
+// operator who writes RISK_REQUIRE_VALIDATED_ANALYTICS=yes has stated an intent as
+// clearly as one who writes true, and an operator who writes =no and gets the
+// default true would be refused with a message telling them to unset a variable
+// they can see they have already set. (Same stance as api-gateway's parseBool;
+// this one carries a default and a near-miss list, which that one does not.)
+//
+// A NEAR MISS IS ALSO AN ERROR, and that is the half that matters for a control
+// whose default is ON. RISK_REQUIRE_VALIDATED_ANALYTICS breaks this service's
+// RISK_ENGINE_ prefix convention, so RISK_ENGINE_REQUIRE_VALIDATED_ANALYTICS is
+// the spelling an operator reaches for by muscle memory. Ignored, it would read
+// as a disarm that took effect — the operator sees their variable in the pod
+// spec, and the gate is still armed (or, if they meant to arm it, still off).
+// Refusing to start names the key they actually want.
+func parseBoolDefault(key string, def bool, nearMisses ...string) (bool, error) {
+	for _, nm := range nearMisses {
+		if strings.TrimSpace(os.Getenv(nm)) != "" {
+			return false, fmt.Errorf("risk-engine: %s is set, but this control is spelled %s — "+
+				"unset %s and set %s, or the value you set has no effect", nm, key, nm, key)
+		}
+	}
+	raw := strings.TrimSpace(os.Getenv(key))
+	if raw == "" {
+		return def, nil
+	}
+	v, err := strconv.ParseBool(raw)
+	if err != nil {
+		return false, fmt.Errorf("risk-engine: %s=%q is not a boolean (use true or false)", key, raw)
+	}
+	return v, nil
 }
 
 // splitList parses a comma-separated env value into a trimmed, non-empty

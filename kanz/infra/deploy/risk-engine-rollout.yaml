@@ -176,6 +176,41 @@ spec:
             # is only authenticated because of this one. Enabling the query surface
             # without the correct socket name would have exposed it in the clear.
             - { name: RISK_ENGINE_SPIFFE_SOCKET, value: "unix:///run/spiffe/spire-agent.sock" }
+            # THE ONE *_REQUIRE_* CONTROL IN THIS ESTATE THAT SHIPS TRUE (#471).
+            #
+            # It arms the SR 11-7 model-validation gate: an analytic in
+            # benchmarks.Inventory() that holds no current, passing, signed
+            # validation — and that benchmarks.ValidationExemptions() does not name
+            # with a reason — stops this pod at startup instead of pricing the book
+            # unchecked. Eleven of the twelve hold one; isda_simm is the single named
+            # exemption, because ISDA SIMM's calibration AND aggregation are
+            # member-licensed and a case set built from the representative magnitudes
+            # this estate ships would grade our arithmetic against our own.
+            #
+            # WHY NOT "false" LIKE OMS_REQUIRE_MANDATE AND THE REST. Those refuse over
+            # data an operator has to go and fix — unmandated portfolios, unverified
+            # accounts — so arming them is a trading outage until a backlog is
+            # cleared. This one refuses over evidence COMPILED INTO THE IMAGE: the
+            # benchmark case sets run at boot against the pricers in this same binary.
+            # There is no estate state it can trip over, so there is no backlog to
+            # clear first, and shipping it false would deploy the exact posture #471
+            # was filed about — a complete gate nobody turned on.
+            #
+            # WHAT THIS POD DOES DIFFERENTLY ON THE FIRST BOOT AFTER THIS MERGES:
+            # nothing. The eleven pass and the twelfth is exempt, so it logs "risk
+            # analytics: VALIDATION REQUIRED" instead of the previous WARN and serves.
+            # What CHANGES is the next deploy that adds an analytic without a
+            # benchmark, or whose pricer stops reproducing its published value: that
+            # one CrashLoopBackOffs every replica rather than moving one series on a
+            # gauge nobody alerts on. kanz_risk_analytics_validation_enforced reports
+            # which posture is live; the per-analytic zeroes stay on
+            # kanz_risk_analytics_validated with state="exempt" for the licensed one.
+            #
+            # Set to "false" to fall back to counting-and-warning. Anything that is
+            # not a boolean refuses the start rather than disarming silently, as does
+            # the near-miss spelling RISK_ENGINE_REQUIRE_VALIDATED_ANALYTICS — note
+            # this key is NOT prefixed, which is the name #471 gave it.
+            - { name: RISK_REQUIRE_VALIDATED_ANALYTICS, value: "true" }
           livenessProbe:
             httpGet: { path: /healthz, port: 8081 }
             initialDelaySeconds: 5

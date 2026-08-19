@@ -252,8 +252,72 @@ func Inventory() []string {
 		// risk weights are not. Promoting it to a constant with a case set would
 		// mean grading this codebase's arithmetic against its own, and the metric
 		// would read 12/12 for it.
+		//
+		// It is also the one entry ValidationExemptions() names, which is what
+		// lets RISK_REQUIRE_VALIDATED_ANALYTICS be armed over the other eleven
+		// instead of waiting on a licence that may never arrive.
 		"isda_simm", // internal/collateral
 		AnalyticFRTBSA,
 		AnalyticStressFramework,
 	}
+}
+
+// ValidationExemptions is the NAMED, ARGUED list of analytics permitted to serve
+// without recorded validation while RISK_REQUIRE_VALIDATED_ANALYTICS is armed —
+// analytic -> the reason it cannot be graded, and what retires the entry.
+//
+// # Why a named list and not a coverage threshold
+//
+// The alternative on the table was "require 11 of the 12". A COUNT IS THE WRONG
+// SHAPE: any eleven satisfy it, so the day a case set is deleted or a twelfth
+// analytic is inventoried, a DIFFERENT analytic serves unvalidated and the gate
+// still reads eleven and still passes. What is permitted has to be the thing that
+// was argued for, by name, or the argument does not travel with the permission.
+//
+// This is the shape this repository already uses everywhere it has said "yes, and
+// here is why" — the arch guards' exemption maps, darkPackageExempt,
+// servedRPCExempt. Each pairs a name with a reason and carries a dead-entry arm
+// so the licence cannot outlive its need. The difference here is that this one is
+// read at RUNTIME as well as by a guard: the risk-engine composition root
+// consults it to decide what may start unvalidated.
+//
+// # Why arming with an exception beats waiting for the licence
+//
+// The gate has been complete since #494 and armed nowhere. Holding the arming
+// back until isda_simm can be graded has meant that for months NOTHING was
+// enforced for the eleven analytics that CAN be — including the ones whose case
+// sets found live defects (the Expected Shortfall tail count, and the MAR21.4(5)
+// zero capital charge for offsetting buckets). An exception that states its
+// reason is strictly better than a gate nobody turned on: it is visible, it is
+// checked, and it fails the build on the day its reason stops being true.
+//
+// # The dead-entry arm
+//
+// test/arch/analytics_inventory_test.go fails the build if an entry here gains
+// evidence in Reports(), or names an analytic Inventory() does not carry. So the
+// licence cannot quietly persist past the day it stops being needed — which for
+// isda_simm is the day a membership makes the published tables available, and the
+// repair the guard will then demand is: delete the entry, write the case set.
+//
+// The returned map is a COPY. A shared exemption list a caller could add to at
+// runtime would be a way to switch the gate off without changing the code.
+func ValidationExemptions() map[string]string {
+	out := make(map[string]string, len(validationExemptions))
+	for k, v := range validationExemptions {
+		out[k] = v
+	}
+	return out
+}
+
+// validationExemptions is keyed by the same bare string Inventory() carries,
+// deliberately: the guard asserts the two agree, so a rename that touches one and
+// not the other fails the build rather than silently exempting nothing (which
+// would refuse the engine) or exempting a name that no longer exists.
+var validationExemptions = map[string]string{
+	"isda_simm": "internal/collateral — ISDA SIMM's calibration AND its aggregation are " +
+		"member-licensed, so there is no published number and no published algebra to grade it " +
+		"against. simmparams.go ships representative magnitudes; a case set built from those " +
+		"would grade this codebase's arithmetic against its own and the metric would read 12/12. " +
+		"RETIRED BY: a membership that makes the published tables available — delete this entry " +
+		"and write the case set.",
 }
