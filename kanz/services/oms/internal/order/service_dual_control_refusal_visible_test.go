@@ -12,7 +12,7 @@ package order
 // The assertions below are therefore in two halves, and BOTH are load-bearing:
 //
 //  1. the refusal is READABLE — reason, subject and time on the proposal, which
-//     ListPendingApprovals renders as state = "REFUSED";
+//     ListPendingApprovals renders as state = "refused";
 //  2. the proposal is STILL PENDING and STILL CLAIMABLE. Recording must not
 //     decide anything, or one person could destroy a colleague's pending
 //     decision by attempting their own approval and being turned away. That is

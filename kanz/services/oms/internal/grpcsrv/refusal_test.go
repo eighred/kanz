@@ -14,6 +14,7 @@ import (
 
 	orderpb "github.com/eighred/kanz/kanz-schemas-go/order/v1"
 
+	"github.com/eighred/kanz/internal/dualcontrol"
 	"github.com/eighred/kanz/services/oms/internal/grpcsrv"
 	omsorder "github.com/eighred/kanz/services/oms/internal/order"
 )
@@ -42,10 +43,10 @@ func TestAnUnrefusedEntryStillCarriesItsState(t *testing.T) {
 		t.Fatalf("ListPendingApprovals: %v", err)
 	}
 	got := resp.GetPending()[0]
-	if got.GetState() != grpcsrv.StatePending {
+	if got.GetState() != dualcontrol.StatePending {
 		t.Errorf("state = %q, want %q — an entry with no state leaves a client unable to tell "+
 			"an untouched order from one this server is too old to describe", got.GetState(),
-			grpcsrv.StatePending)
+			dualcontrol.StatePending)
 	}
 	if got.GetLastRefusalReason() != "" || got.GetLastRefusedBy() != "" || got.GetLastRefusedAt() != nil {
 		t.Errorf("an order nobody attempted carries a refusal: reason=%q by=%q at=%v",
@@ -78,14 +79,14 @@ func TestARefusedEntryIsDistinguishableFromOneAwaitingASignature(t *testing.T) {
 			"it is still awaiting a signature somebody else may legitimately give", len(byID))
 	}
 
-	if s := byID["o-untouched"].GetState(); s != grpcsrv.StatePending {
-		t.Errorf("the untouched order's state = %q, want %q", s, grpcsrv.StatePending)
+	if s := byID["o-untouched"].GetState(); s != dualcontrol.StatePending {
+		t.Errorf("the untouched order's state = %q, want %q", s, dualcontrol.StatePending)
 	}
 	r := byID["o-refused"]
-	if r.GetState() != grpcsrv.StateRefused {
+	if r.GetState() != dualcontrol.StateRefused {
 		t.Fatalf("the refused order's state = %q, want %q — it renders identically to an order "+
 			"nobody has touched, which is exactly the silence #558 was filed for",
-			r.GetState(), grpcsrv.StateRefused)
+			r.GetState(), dualcontrol.StateRefused)
 	}
 	if r.GetLastRefusalReason() != omsorder.RefusalSelfApproval {
 		t.Errorf("last_refusal_reason = %q, want %q — the approver is told THAT they were "+

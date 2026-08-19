@@ -172,7 +172,7 @@ func TestTheDatabaseRefusesADecisionWithNoTimestampOrNoApprover(t *testing.T) {
 // RecordRefusal writes the three columns together and both stores refuse a
 // partial one, so this can only fail for a writer that does not come through
 // there — a repair script, a future method, a migration. The row it would leave
-// renders on the approver's queue as state = "REFUSED" with nothing to show for
+// renders on the approver's queue as state = "refused" with nothing to show for
 // it: "something happened and we cannot say what", which is the WARN this issue
 // replaced, promoted to a UI.
 func TestTheDatabaseRefusesAHalfWrittenRefusal(t *testing.T) {

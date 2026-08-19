@@ -24,6 +24,7 @@ import (
 	orderpb "github.com/eighred/kanz/kanz-schemas-go/order/v1"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
+	"github.com/eighred/kanz/internal/dualcontrol"
 	"github.com/eighred/kanz/services/oms/internal/order"
 )
 
@@ -144,6 +145,15 @@ func (s *Server) ListPendingApprovals(ctx context.Context, req *orderpb.ListPend
 // pendingApprovalOf renders one held order for the approver's queue, INCLUDING
 // why the last attempt to sign it was refused (#558).
 //
+// # The spelling is dualcontrol's, not this package's
+//
+// datamaster's pending-override queue renders the same concept and the two
+// diverged on casing the day they both existed. The vocabulary now lives beside
+// the rule, in internal/dualcontrol, so a third act cannot invent a third
+// spelling. There is deliberately no "lapsed" here — Pending excludes expired
+// work and #547 answers expiry with a terminal ORDER_REJECTED; see the
+// constants' own doc for why neither queue is missing a state.
+//
 // # state is set on EVERY entry, never only on the refused ones
 //
 // This is the rule datamaster's proposalJSON records for the same field (#563),
@@ -156,7 +166,7 @@ func (s *Server) ListPendingApprovals(ctx context.Context, req *orderpb.ListPend
 // than a second list. Refusing an approval deliberately does not decide the
 // proposal — a self-approval attempt must not let one person destroy a
 // colleague's pending decision — so a refused entry is still awaiting a
-// signature somebody else may legitimately give. "REFUSED" narrows that; it
+// signature somebody else may legitimately give. "refused" narrows that; it
 // never contradicts it. A client that ignores the field reads both states as
 // work awaiting a signature, which is TRUE of both: the safe direction, and the
 // reason the refusal is surfaced by annotating the row rather than removing it.
@@ -165,7 +175,7 @@ func (s *Server) ListPendingApprovals(ctx context.Context, req *orderpb.ListPend
 //
 // The store's CHECK (migration 0012) refuses a half-written refusal, and the
 // state below is derived from RefusalReason alone. If those two ever disagreed a
-// client would see state = "REFUSED" with nothing to render, so the invariant
+// client would see state = "refused" with nothing to render, so the invariant
 // lives at the engine rather than here — this function must not be the only place
 // that knows.
 func pendingApprovalOf(p order.OrderProposal) *orderpb.PendingApproval {
@@ -177,12 +187,12 @@ func pendingApprovalOf(p order.OrderProposal) *orderpb.PendingApproval {
 		Digest:     p.Digest,
 		ProposedAt: timestamppb.New(p.CreatedAt),
 		ExpiresAt:  timestamppb.New(p.ExpiresAt),
-		State:      StatePending,
+		State:      dualcontrol.StatePending,
 	}
 	if p.RefusalReason == "" {
 		return pa
 	}
-	pa.State = StateRefused
+	pa.State = dualcontrol.StateRefused
 	pa.LastRefusalReason = p.RefusalReason
 	pa.LastRefusedBy = p.RefusedBy
 	if !p.RefusedAt.IsZero() {
@@ -190,14 +200,6 @@ func pendingApprovalOf(p order.OrderProposal) *orderpb.PendingApproval {
 	}
 	return pa
 }
-
-// The two states of an entry on the approval queue. Both mean "awaiting a
-// signature"; REFUSED adds "and the last person who tried was turned away".
-// NEITHER MEANS FINISHED — a decided proposal is not on this queue at all.
-const (
-	StatePending = "PENDING"
-	StateRefused = "REFUSED"
-)
 
 // mapError turns a store failure into a gRPC status.
 //

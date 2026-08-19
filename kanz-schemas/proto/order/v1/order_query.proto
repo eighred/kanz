@@ -143,13 +143,20 @@ message PendingApproval {
   google.protobuf.Timestamp proposed_at = 6;
   google.protobuf.Timestamp expires_at = 7;
 
-  // state is "PENDING" or "REFUSED" and IS ALWAYS SET (#558).
+  // state is "pending" or "refused" and IS ALWAYS SET (#558).
+  //
+  // THE SPELLING IS SHARED WITH THE OTHER DUAL-CONTROL QUEUE. datamaster's
+  // GET /v1/exceptions/pending-overrides renders the same concept, and the two
+  // casings diverged the day both existed; the vocabulary now lives in
+  // internal/dualcontrol so a client reading both controls needs one. There is no
+  // "lapsed" here and no "refused" there, and neither is an omission — see those
+  // constants for why each act can only reach the states it publishes.
   //
   // A REFUSED PROPOSAL IS STILL PENDING WORK, and that is why this is one field
   // rather than two lists. Refusing an approval deliberately does NOT decide the
   // proposal — a self-approval attempt must not let one person destroy a
   // colleague's pending decision — so the order is still awaiting a signature
-  // somebody else may legitimately give. "REFUSED" narrows "awaiting a
+  // somebody else may legitimately give. "refused" narrows "awaiting a
   // signature" to "and the last person who tried was turned away"; it never
   // means "finished".
   //
@@ -166,7 +173,7 @@ message PendingApproval {
   // closed set: "self_approval", "expired", "payload_changed", "malformed",
   // "lost_the_claim", and "unclassified" — which means the OMS refused the
   // approval and could not name the rule, and is a defect to report rather than
-  // anything the approver can fix. Empty exactly when state is "PENDING".
+  // anything the approver can fix. Empty exactly when state is "pending".
   //
   // IT IS A CODE AND NOT A SENTENCE, so a client can branch on it — the approver
   // who was refused for self-approval needs a different affordance (find another
@@ -176,9 +183,9 @@ message PendingApproval {
 
   // last_refused_by is the subject whose signature was refused, and it is here
   // so a returning approver can tell "my signature was refused" from "somebody
-  // else's was". Empty exactly when state is "PENDING".
+  // else's was". Empty exactly when state is "pending".
   string last_refused_by = 10;
 
-  // last_refused_at is when. Unset exactly when state is "PENDING".
+  // last_refused_at is when. Unset exactly when state is "pending".
   google.protobuf.Timestamp last_refused_at = 11;
 }

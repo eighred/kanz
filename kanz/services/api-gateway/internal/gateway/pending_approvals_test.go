@@ -116,10 +116,10 @@ func TestARefusedApprovalIsVisibleInTheJSONTheApproverReceives(t *testing.T) {
 	fc := &fakeClient{pendingResp: &orderpb.ListPendingApprovalsResponse{
 		OwnerTenant: testTenant,
 		Pending: []*orderpb.PendingApproval{
-			{OrderId: "o-untouched", Proposer: "user:alice@kanz", Digest: "sha256:a", State: "PENDING"},
+			{OrderId: "o-untouched", Proposer: "user:alice@kanz", Digest: "sha256:a", State: "pending"},
 			{
 				OrderId: "o-refused", Proposer: "user:alice@kanz", Digest: "sha256:b",
-				State:             "REFUSED",
+				State:             "refused",
 				LastRefusalReason: "self_approval",
 				LastRefusedBy:     "user:alice@kanz",
 			},
@@ -158,7 +158,7 @@ func TestARefusedApprovalIsVisibleInTheJSONTheApproverReceives(t *testing.T) {
 			continue
 		}
 		refused = true
-		if e.State != "REFUSED" || e.LastRefusalReason != "self_approval" ||
+		if e.State != "refused" || e.LastRefusalReason != "self_approval" ||
 			e.LastRefusedBy != "user:alice@kanz" {
 			t.Errorf("the refusal did not survive transcoding: %+v — the approver is back to "+
 				"discovering a refused signature by noticing nothing happened", e)

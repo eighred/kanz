@@ -382,11 +382,16 @@ func (s *Server) handlePendingOverrides(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	out := make([]map[string]any, 0, len(pending)+len(lapsed))
+	// THE SPELLING IS dualcontrol'S, NOT THIS FILE'S (#558). The OMS's approval
+	// queue renders the same concept, and the two diverged on casing the day they
+	// both existed; the vocabulary now lives beside the rule so a third act cannot
+	// invent a third spelling. There is deliberately no "refused" here — see the
+	// constants' own doc.
 	for _, p := range pending {
-		out = append(out, proposalJSON(p, "pending"))
+		out = append(out, proposalJSON(p, dualcontrol.StatePending))
 	}
 	for _, p := range lapsed {
-		out = append(out, proposalJSON(p, "lapsed"))
+		out = append(out, proposalJSON(p, dualcontrol.StateLapsed))
 	}
 	writeJSON(w, http.StatusOK, out)
 }

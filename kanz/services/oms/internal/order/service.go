@@ -1803,7 +1803,7 @@ func (s *Service) expireOne(ctx context.Context, p OrderProposal, now time.Time)
 // was.
 //
 // THE REFUSAL IS NOW ALSO WRITTEN ONTO THE PROPOSAL, and ListPendingApprovals
-// carries it: an approver who returns to the queue sees state = "REFUSED", the
+// carries it: an approver who returns to the queue sees state = "refused", the
 // reason code, who was refused and when — instead of an order that looks
 // identical to one nobody has touched. This corrects what this doc used to call
 // "a stated gap, not an oversight". The gap was real; the ruling on #558 was to
@@ -1839,7 +1839,7 @@ func (s *Service) expireOne(ctx context.Context, p OrderProposal, now time.Time)
 //
 //   - self-approval, a respelling of the proposer, a digest covering other terms:
 //     the proposal exists and stays PENDING. Recorded, and the queue entry the
-//     approver reloads says state = "REFUSED" with the reason. THIS IS THE CASE
+//     approver reloads says state = "refused" with the reason. THIS IS THE CASE
 //     #558 IS ABOUT.
 //   - expired: recorded, but Pending deliberately excludes expired work so the
 //     entry is NOT on the queue. The approver's answer is the terminal

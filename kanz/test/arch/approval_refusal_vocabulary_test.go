@@ -70,6 +70,100 @@ func TestEveryDualControlRefusalHasAnApproverFacingReason(t *testing.T) {
 	}
 }
 
+// THE TWO DUAL-CONTROL QUEUES MUST SPELL A STATE THE SAME WAY (#558, #563).
+//
+// # The divergence this catches actually happened
+//
+// datamaster's GET /v1/exceptions/pending-overrides renders "pending"/"lapsed";
+// the OMS's ListPendingApprovals renders "pending"/"refused". They are the same
+// control and the same concept, and they shipped with different CASING — the OMS
+// said "PENDING" — so a client reading both needed two spellings for one word.
+// Nothing failed: both queues were correct on their own, and the vocabulary is a
+// string nobody compares across two services.
+//
+// So the rule is not "the sets must match" — they must NOT, and the constants say
+// why. The rule is that neither queue may spell a state ITSELF. Every state
+// rendered comes from an internal/dualcontrol constant, which is the one place a
+// third act will look.
+//
+// # What it checks
+//
+// In each renderer: at least one dualcontrol.State* is used, and NO string
+// literal that looks like a state appears — in any casing, so re-introducing
+// "PENDING" beside the constant is caught too.
+func TestNeitherDualControlQueueSpellsItsOwnState(t *testing.T) {
+	root := moduleRoot(t)
+
+	for _, q := range []struct {
+		what string
+		path string
+		fn   string
+	}{
+		{
+			"datamaster's pending-override queue",
+			filepath.Join(root, "services", "datamaster", "internal", "server", "dualcontrol.go"),
+			"handlePendingOverrides",
+		},
+		{
+			"the OMS's pending-approval queue",
+			filepath.Join(root, "services", "oms", "internal", "grpcsrv", "server.go"),
+			"pendingApprovalOf",
+		},
+	} {
+		used := selectorsOn(t, q.path, q.fn, "dualcontrol")
+		var states int
+		for name := range used {
+			if strings.HasPrefix(name, "State") {
+				states++
+			}
+		}
+		// NON-VACUITY: a renderer that names no state constant is either not the
+		// renderer any more, or is back to spelling its own.
+		if states == 0 {
+			t.Errorf("%s (%s) uses no internal/dualcontrol.State* constant — the state it "+
+				"renders is its own, which is how the two queues came to disagree on casing "+
+				"for one concept", q.what, q.fn)
+		}
+		for _, lit := range stringLiteralsIn(t, q.path, q.fn) {
+			switch strings.ToLower(lit) {
+			case "pending", "refused", "lapsed":
+				t.Errorf("%s (%s) spells the state %q as a literal.\n\n"+
+					"Use the internal/dualcontrol constant. A literal here is exactly how the "+
+					"OMS came to render \"PENDING\" while datamaster rendered \"pending\" — "+
+					"nothing fails, and a client reading both controls needs two spellings for "+
+					"one word.", q.what, q.fn, lit)
+			}
+		}
+	}
+}
+
+// stringLiteralsIn returns the string literals inside one function.
+func stringLiteralsIn(t *testing.T, path, fn string) []string {
+	t.Helper()
+	f, err := parser.ParseFile(token.NewFileSet(), path, nil, 0)
+	if err != nil {
+		t.Fatalf("parse %s: %v", path, err)
+	}
+	var body *ast.BlockStmt
+	for _, d := range f.Decls {
+		fd, ok := d.(*ast.FuncDecl)
+		if ok && fd.Name.Name == fn {
+			body = fd.Body
+		}
+	}
+	if body == nil {
+		t.Fatalf("no func %s in %s — the queue renderer moved and this guard reads nothing", fn, path)
+	}
+	var out []string
+	ast.Inspect(body, func(n ast.Node) bool {
+		if lit, ok := n.(*ast.BasicLit); ok && lit.Kind == token.STRING {
+			out = append(out, strings.Trim(lit.Value, "`\""))
+		}
+		return true
+	})
+	return out
+}
+
 // dualControlSentinels returns the names of the exported Err* variables the
 // package declares.
 func dualControlSentinels(t *testing.T, path string) []string {
@@ -108,6 +202,11 @@ func dualControlSentinels(t *testing.T, path string) []string {
 // repository has three guards that passed with the checked thing deleted for
 // exactly that reason. Only the expressions in the function body count.
 func errorsNamedIn(t *testing.T, path, fn string) map[string]bool {
+	return selectorsOn(t, path, fn, "dualcontrol")
+}
+
+// selectorsOn returns the pkg.X selectors used inside one function.
+func selectorsOn(t *testing.T, path, fn, pkg string) map[string]bool {
 	t.Helper()
 	f, err := parser.ParseFile(token.NewFileSet(), path, nil, 0)
 	if err != nil {
@@ -116,7 +215,11 @@ func errorsNamedIn(t *testing.T, path, fn string) map[string]bool {
 	var body *ast.BlockStmt
 	for _, d := range f.Decls {
 		fd, ok := d.(*ast.FuncDecl)
-		if ok && fd.Name.Name == fn && fd.Recv == nil {
+		// METHODS COUNT TOO. handlePendingOverrides is a method on *Server, and an
+		// earlier form of this helper required fd.Recv == nil — so it silently found
+		// nothing and the queue guard reported the function as missing rather than
+		// checking it.
+		if ok && fd.Name.Name == fn {
 			body = fd.Body
 		}
 	}
@@ -130,8 +233,8 @@ func errorsNamedIn(t *testing.T, path, fn string) map[string]bool {
 		if !ok {
 			return true
 		}
-		pkg, ok := sel.X.(*ast.Ident)
-		if !ok || pkg.Name != "dualcontrol" {
+		id, ok := sel.X.(*ast.Ident)
+		if !ok || id.Name != pkg {
 			return true
 		}
 		found[sel.Sel.Name] = true
