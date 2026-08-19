@@ -55,11 +55,13 @@ func TestJetStreamConsumersAreExplicitlyTuned(t *testing.T) {
 	// Non-vacuity FIRST: a scanner that matched nothing would pass this test no
 	// matter how untuned every consumer in the module was. pkg/bus creates
 	// exactly two — the queue-group durable in Subscribe and the ephemeral
-	// broadcast consumer in SubscribeBroadcastReady — and both must be found.
+	// consumer in subscribeEphemeral, which SubscribeBroadcastReady and
+	// SubscribeReplay share (one literal, two delivery policies) — and both must
+	// be found.
 	const wantMin = 2
 	if len(sites) < wantMin {
 		t.Fatalf("found %d jetstream.ConsumerConfig literal(s) in non-test code, expected at least %d "+
-			"(pkg/bus/nats.go creates one in Subscribe and one in SubscribeBroadcastReady) — the scanner "+
+			"(pkg/bus/nats.go creates one in Subscribe and one in subscribeEphemeral) — the scanner "+
 			"is broken or the consumer-creation path moved, and this guard is checking nothing",
 			len(sites), wantMin)
 	}

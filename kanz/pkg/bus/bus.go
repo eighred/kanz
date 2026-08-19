@@ -89,6 +89,30 @@ type BroadcastSubscriber interface {
 	SubscribeBroadcastReady(ctx context.Context, subject string, h Handler, ready func()) error
 }
 
+// ReplaySubscriber delivers EVERY message a subject's stream still holds, from the
+// oldest, to EVERY subscriber — and then continues live. An OPTIONAL capability, like
+// BroadcastSubscriber (NATS/JetStream has it; the Kafka client does not implement it).
+//
+// It is the transport an APPEND LOG needs, and it is NOT BroadcastSubscriber with a
+// different flag. A broadcast answers "what is the current state", so
+// DeliverLastPerSubject is exactly right for it. A log answers "what happened", and its
+// mutations share one subject: the model registry publishes a record_validation and the
+// promotion that depends on it both on platform.model.registered, so last-per-subject
+// delivers the promotion, drops the evidence, and the reader rebuilds into a state the
+// MLOPS-01a gate refuses to reach.
+//
+// AN EMPTY REPLAY IS NOT PROOF OF AN EMPTY HISTORY. Streams have finite retention (the
+// PLATFORM stream is 168h), so a fold that started from the oldest message the broker
+// still holds has seen the window, not the world. A consumer that reports on what it
+// replayed must say which of the two it means.
+type ReplaySubscriber interface {
+	// SubscribeReplay folds the subject from the oldest retained message and stays
+	// subscribed. ready is called ONCE, after the backlog that existed at subscribe
+	// time has been delivered AND acked — so a caller can tell "I have folded the log"
+	// apart from "I have not started yet", which are the same empty registry otherwise.
+	SubscribeReplay(ctx context.Context, subject string, h Handler, ready func()) error
+}
+
 // Client is a transport that does both. NATSClient and KafkaClient each
 // satisfy it; higher layers (EVT-17b–e) hold a Client rather than caring
 // which transport is underneath.

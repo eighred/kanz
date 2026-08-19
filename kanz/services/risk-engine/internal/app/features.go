@@ -38,13 +38,19 @@ import (
 // internal/prediction/registry had no FeatureSetRef field at all and its only lookup was
 // Get(modelID) — resolution by NAME, the exact thing all three said it prevented.
 //
-// NOTHING RESOLVES A MODEL IN GO YET, and that is worth stating beside the key rather than
-// leaving it to be discovered: this constant is published on the feature vector and consumed
-// by the Python scoring worker. The Go-side registry has no producer (platform.model is not
-// a declared subject here, and kanz-py's RegistryPublisher is a Protocol with no
-// implementation), so nothing on this side can currently answer "which model serves
-// portfolio-risk:1". #112 tracks that, and it is a transport-and-producer problem rather
-// than the composition-root problem its title suggests.
+// GO CAN NOW SEE WHICH MODEL SERVES THIS CONTRACT, AND STILL DOES NOT SCORE AGAINST IT
+// (#112, 2026-08-19). The previous version of this paragraph said the Go registry had no
+// producer, that platform.model was not a declared subject and that kanz-py's
+// RegistryPublisher was a Protocol with no implementation. All three were true when written
+// and none is now: #504 landed the shared wire contract, the producer, the topic and the
+// grant, and model_registry.go in this package folds platform.model.registered so
+// kanz_prediction_model_primary answers "which model serves portfolio-risk:1".
+//
+// WHAT REMAINS UNBUILT is a Go consumer of PREDICTIONS. This constant is published on the
+// feature vector and the Python worker is what scores it; the engine reports on the model
+// plane rather than resolving a model to score against, because the caller that would is
+// internal/prediction's inference client and nothing constructs it (#416 decides what acts
+// on a prediction). So a green suite here does not mean Go scores anything.
 const FeatureSetPortfolioRisk prediction.FeatureSetRef = "portfolio-risk:1"
 
 // modelInputs are the measures a portfolio-risk model is entitled to see.
