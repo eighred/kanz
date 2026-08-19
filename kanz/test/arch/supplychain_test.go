@@ -147,7 +147,7 @@ func workflowFiles(t *testing.T, repoRoot string) []string {
 		if err != nil {
 			return err
 		}
-		if d.IsDir() && d.Name() == ".git" {
+		if skipWalkDir(d) {
 			return filepath.SkipDir
 		}
 		// SKIP NESTED CHECKOUTS. A git worktree carries its own .github/workflows,
