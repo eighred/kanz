@@ -1,6 +1,7 @@
 import { createRouter, createWebHistory } from 'vue-router'
 import { useSession } from '../stores/session'
 import LoginView from '../views/LoginView.vue'
+import ApprovalsView from '../views/ApprovalsView.vue'
 import EstateView from '../views/EstateView.vue'
 import NodesView from '../views/NodesView.vue'
 import ExposureView from '../views/ExposureView.vue'
@@ -23,6 +24,14 @@ export const router = createRouter({
     { path: '/estate', name: 'estate', component: EstateView },
     { path: '/nodes', name: 'nodes', component: NodesView },
     { path: '/provisions', name: 'provisions', component: ProvisionsView },
+    // REGISTERED FOR EVERY SIGNED-IN VISITOR, like every other route here. The
+    // gateway decides who may read the queue — 403 without authz.Approve, 404
+    // where no approver role is configured at all — and the view renders those
+    // as different sentences. A router that hid the route would be this SPA
+    // making an authorization decision it cannot make, and would hide the
+    // "dual control is not switched on here" answer from the operator who most
+    // needs it.
+    { path: '/approvals', name: 'approvals', component: ApprovalsView },
     { path: '/portfolios', name: 'portfolios', component: PortfoliosView },
     { path: '/portfolios/:id/exposure', name: 'exposure', component: ExposureView },
     { path: '/portfolios/:id/orders', name: 'orders', component: OrdersView },

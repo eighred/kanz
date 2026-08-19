@@ -256,6 +256,17 @@ table + table {
   margin-top: 28px;
 }
 
+/* A DIGEST IS SHOWN WHOLE. It is the value an approval signs for, and two
+   proposals that differ in one field differ somewhere inside those 64
+   characters — an ellipsis is how somebody signs the wrong one. So it wraps
+   rather than truncating, in a monospace face where a transposed pair is
+   visible. */
+.digest {
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 0.78rem;
+  word-break: break-all;
+}
+
 /* --- actions and confirmation -------------------------------------------- */
 
 /* A row of buttons, and the confirmation panel's own footer. One rule for both
