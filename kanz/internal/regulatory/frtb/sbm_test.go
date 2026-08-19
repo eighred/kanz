@@ -35,7 +35,7 @@ func TestSBM_WorkedExample(t *testing.T) {
 	}
 	// The aggregate charge is the worst scenario — the LOW correlation here,
 	// because the two sensitivities offset and low correlation un-nets them.
-	if got := Charge(sens, Params{"Equity": p}); math.Abs(got-math.Sqrt(350)) > 1e-6 {
+	if got := mustCharge(t, sens, Params{"Equity": p}); math.Abs(got-math.Sqrt(350)) > 1e-6 {
 		t.Fatalf("FRTB charge: got %.6f want %.6f", got, math.Sqrt(350))
 	}
 }
@@ -71,13 +71,13 @@ func TestSBM_NegativeRadicandUsesTheAlternativeSb(t *testing.T) {
 	}
 	// The LOW scenario scales γ to max(2·0.8−1, 0.75·0.8) = 0.6, so the alternative
 	// radicand is 100 − 0.6·100 = 40 and this is the worst of the three.
-	if got := Charge(sens, Params{"Equity": p}); math.Abs(got-math.Sqrt(40)) > 1e-9 {
+	if got := mustCharge(t, sens, Params{"Equity": p}); math.Abs(got-math.Sqrt(40)) > 1e-9 {
 		t.Fatalf("charge: got %.9f, want %.9f", got, math.Sqrt(40))
 	}
 	// AND IT IS NOT ZERO, stated separately because that is the exact failure the
 	// repair removed and an arithmetic slip in the expectations above could
 	// reintroduce it while still comparing two matching numbers.
-	if Charge(sens, Params{"Equity": p}) <= 0 {
+	if mustCharge(t, sens, Params{"Equity": p}) <= 0 {
 		t.Fatal("a book of four sensitivities of magnitude 5 required no capital at all")
 	}
 }
@@ -113,9 +113,9 @@ func TestSBM_SumsAcrossRiskClasses(t *testing.T) {
 		"Equity": {RiskWeight: map[string]float64{"A": 0.02}, IntraCorr: 0.5, InterCorr: 0.5},
 		"FX":     {RiskWeight: map[string]float64{"USD": 0.15}, IntraCorr: 0.6, InterCorr: 0.6},
 	}
-	eq := Charge([]Sensitivity{sens[0]}, params)
-	fx := Charge([]Sensitivity{sens[1]}, params)
-	if got := Charge(sens, params); math.Abs(got-(eq+fx)) > 1e-6 {
+	eq := mustCharge(t, []Sensitivity{sens[0]}, params)
+	fx := mustCharge(t, []Sensitivity{sens[1]}, params)
+	if got := mustCharge(t, sens, params); math.Abs(got-(eq+fx)) > 1e-6 {
 		t.Fatalf("charge must sum across risk classes: %.4f != %.4f+%.4f", got, eq, fx)
 	}
 }

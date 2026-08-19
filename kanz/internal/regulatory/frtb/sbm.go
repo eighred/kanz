@@ -22,7 +22,11 @@
 // number; the worked-example test exercises exactly that.
 package frtb
 
-import "math"
+import (
+	"errors"
+	"fmt"
+	"math"
+)
 
 // Sensitivity is one CRIF-style risk sensitivity to a single risk factor, tagged
 // with its FRTB risk class and bucket. The raw (unweighted) sensitivity; the risk
@@ -46,19 +50,57 @@ type ClassParams struct {
 // Params maps a risk class to its supervisory parameters.
 type Params map[string]ClassParams
 
+// ErrUncovered is returned when sensitivities name a risk class or a bucket the
+// supervisory table does not cover.
+//
+// IT IS AN ERROR AND NOT A ZERO BECAUSE THE TWO ARE INDISTINGUISHABLE IN A
+// FILING (#565). A book with no commodity risk and a table missing Commodity
+// produce the same smaller FRTB_TOTAL, and the second one gets signed.
+var ErrUncovered = errors.New("frtb: the supervisory table does not cover these sensitivities")
+
 // Charge is the SBM capital for a set of sensitivities: for each risk class the
 // worst of the three correlation scenarios, summed across risk classes. The
 // per-scenario, per-class breakdown is available via ChargeByScenario.
-func Charge(sensitivities []Sensitivity, params Params) float64 {
+//
+// IT RETURNS AN ERROR RATHER THAN SKIPPING WHAT IT CANNOT PRICE (#565). This
+// used to `continue` past any class the table lacked, so the class contributed
+// zero and nothing said so — a one-directional understatement, in the direction
+// a filer benefits from, on a signed regulatory report.
+//
+// THE SIGNATURE CHANGE IS THE FIX, not a preflight beside ValidateParams.
+// ValidateParams checks the table's internal shape and never sees the
+// sensitivities, so it cannot answer "does this table cover what arrived" — and
+// a separate Cover() call would leave the trap armed for the next direct caller
+// of Charge. Making it unignorable is the point.
+func Charge(sensitivities []Sensitivity, params Params) (float64, error) {
 	var total float64
 	for class, sens := range groupByClass(sensitivities) {
 		p, ok := params[class]
 		if !ok {
-			continue
+			return 0, fmt.Errorf("%w: risk class %q has sensitivities but no supervisory parameters",
+				ErrUncovered, class)
+		}
+		// THE QUIETER HALF, AND THE ONE A CLASS-LEVEL CHECK ALONE WOULD MISS: an
+		// unmapped BUCKET inside a mapped class. rw[bucket] on a missing key is
+		// 0, so the sensitivity is weighted to nothing and vanishes inside an
+		// aggregate that is otherwise computed correctly.
+		if err := coversBuckets(class, sens, p); err != nil {
+			return 0, err
 		}
 		total += maxScenario(sens, p)
 	}
-	return total
+	return total, nil
+}
+
+// coversBuckets reports whether every bucket present in sens has a risk weight.
+func coversBuckets(class string, sens []Sensitivity, p ClassParams) error {
+	for _, s := range sens {
+		if _, ok := p.RiskWeight[s.Bucket]; !ok {
+			return fmt.Errorf("%w: risk class %q bucket %q has sensitivities but no risk weight",
+				ErrUncovered, class, s.Bucket)
+		}
+	}
+	return nil
 }
 
 // Scenario is one of the three FRTB correlation scenarios.

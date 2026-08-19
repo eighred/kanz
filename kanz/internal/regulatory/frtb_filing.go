@@ -92,10 +92,34 @@ func ComputeFRTB(in FRTBInputs) (FRTBResult, error) {
 	if err := frtb.ValidateParams(in.Params); err != nil {
 		return FRTBResult{}, fmt.Errorf("regulatory: FRTB params invalid: %w", err)
 	}
+	// EACH CHARGE MAY REFUSE, AND A REFUSAL MUST NOT BECOME A NUMBER (#565).
+	//
+	// ValidateParams above checks the table's internal shape and never sees the
+	// sensitivities, so it cannot answer the question that decides this filing:
+	// does the table COVER what arrived. A class or bucket it does not cover used
+	// to contribute zero silently, so a filing assembled on a table missing
+	// Commodity was indistinguishable from a book with no commodity risk — a
+	// smaller FRTB_TOTAL, no warning, and a signed report.
+	//
+	// The error is wrapped rather than returned bare so the failing LEG is named:
+	// delta, vega and curvature take the same params and fail for different
+	// reasons, and "which one" is the first thing anyone asks.
+	delta, err := frtb.Charge(in.Delta, in.Params)
+	if err != nil {
+		return FRTBResult{}, fmt.Errorf("regulatory: FRTB delta: %w", err)
+	}
+	vega, err := frtb.Charge(in.Vega, in.Params)
+	if err != nil {
+		return FRTBResult{}, fmt.Errorf("regulatory: FRTB vega: %w", err)
+	}
+	curvature, err := frtb.CurvatureCharge(in.Curvature, in.Params)
+	if err != nil {
+		return FRTBResult{}, fmt.Errorf("regulatory: FRTB curvature: %w", err)
+	}
 	res := FRTBResult{
-		Delta:     frtb.Charge(in.Delta, in.Params),
-		Vega:      frtb.Charge(in.Vega, in.Params),
-		Curvature: frtb.CurvatureCharge(in.Curvature, in.Params),
+		Delta:     delta,
+		Vega:      vega,
+		Curvature: curvature,
 		DRC:       frtb.DRC(in.JTD, in.DRCParams),
 		RRAO:      frtb.RRAO(in.RRAO),
 	}
