@@ -17,7 +17,17 @@ import (
 //	      Built, tested, and never called for months. From outside, a decider
 //	      nothing invokes is indistinguishable from one that does not work.
 //	#112  internal/prediction/registry — the MLOPS-01a model gate. Its own doc
-//	      carries the grep proving nobody imports it.
+//	      carried the grep proving nobody imported it. RETIRED 2026-08-19: the
+//	      risk-engine composition root constructs a CoordinatedRegistry over the
+//	      platform.model.registered log and reports whether a model serves the
+//	      feature contract it publishes on. NOTE THE LIMIT, in the same spirit as
+//	      the #471 stress entry below: risk-engine FOLLOWS the registry, it does
+//	      not RESOLVE a model to score against — the caller that would is
+//	      internal/prediction's inference client, which still has no constructor
+//	      anywhere. This guard cannot see that difference (import granularity,
+//	      #509), and its sibling served_rpc_has_a_caller_test.go cannot either
+//	      (call granularity). The distinction is recorded here so a deleted entry
+//	      does not read as "Go scores predictions".
 //	#471  internal/regulatory/stress — the REG-01c CCAR/DFAST framework. Its
 //	      exemption is gone because internal/risk/benchmarks now grades it, which
 //	      gives it an importer reached from the risk-engine composition root.
@@ -69,21 +79,6 @@ import (
 // stays dark for a year. The dead-entry arm below deletes the entry for you when
 // the package finally gets an importer.
 var darkPackageExempt = map[string]string{
-	"internal/prediction/registry": "#112 — the MLOPS-01a model registry. Deleting it was " +
-		"proposed and REJECTED. CORRECTED 2026-08-15: it is NOT 'the last third of the AI-M1 " +
-		"bridge' and what it needs is NOT a composition root. The bridge is one third wired — " +
-		"the feature publisher — while the resilient inference client also has zero callers " +
-		"(invisible here because this guard works at IMPORT granularity and internal/prediction " +
-		"IS imported, for the publisher). CORRECTED AGAIN 2026-08-15: the transport half is no " +
-		"longer missing, and the old reason here (platform.model is not a declared subject, the " +
-		"topic table removed it, kanz-py's RegistryPublisher is a Protocol with no " +
-		"implementation) is now false on all three counts. inference.v1.ModelRegistryEvent is " +
-		"the shared wire contract, BusRegistryPublisher publishes it on " +
-		"platform.model.registered, and the Kafka topic plus the broker grant are provisioned " +
-		"(#112 steps 1-2). WHAT KEEPS THIS PACKAGE DARK is the Go side: Log has no binding and " +
-		"nothing constructs a CoordinatedRegistry, which is #112 step 3. The correctness " +
-		"property that saved it from deletion — resolve by feature_set_ref, never by name — was " +
-		"asserted in three places and implemented in none; it is implemented now.",
 	"internal/risk/spotsource": "#509 — the production compute.SpotProvider, one of the two " +
 		"seams RegisterGreeks needs. It is dark because the OTHER one cannot be built: the vol " +
 		"surface needs a volsurface.QuoteProvider, which needs observed option PREMIUMS, and no " +

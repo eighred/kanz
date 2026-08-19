@@ -640,6 +640,36 @@ func (c *NATSClient) SubscribeBroadcast(ctx context.Context, subject string, h H
 // backlog that existed at subscribe time has been delivered and acked, so a caller can hold
 // /readyz closed until it actually knows the state it is about to act on.
 func (c *NATSClient) SubscribeBroadcastReady(ctx context.Context, subject string, h Handler, ready func()) error {
+	return c.subscribeEphemeral(ctx, subject, jetstream.DeliverLastPerSubjectPolicy, h, ready)
+}
+
+// SubscribeReplay implements ReplaySubscriber: EVERY message on the subject, from the
+// first the stream still holds, to EVERY subscriber — then live.
+//
+// DeliverAll, NOT DeliverLastPerSubject, and the difference is the whole reason this
+// exists beside SubscribeBroadcast. A broadcast carries STATE — the current trading mode,
+// the latest quote for an instrument — where only the last message per subject means
+// anything. An APPEND LOG carries MUTATIONS, and every one of them counts: the model
+// registry's platform.model.registered log puts a record_validation and the promotion that
+// depends on it under the SAME subject, so last-per-subject would deliver the promotion and
+// drop the evidence the MLOPS-01a gate needs to accept it. The reader would then rebuild
+// into a state the gate refuses to reach. #504 chose a non-compacted topic for exactly this
+// reason and left the Go reader to honour it; this is that reader's transport.
+//
+// WHAT THE REPLAY CANNOT GIVE BACK is anything the stream has already dropped. A JetStream
+// stream has finite retention (PLATFORM is 168h), so "replayed from the beginning" means
+// from the beginning of the WINDOW, not of history. A consumer folding a log this way must
+// treat an empty replay as "nothing in the window", never as "nothing ever happened" —
+// Kafka holds the infinite copy, and this is the live spine.
+func (c *NATSClient) SubscribeReplay(ctx context.Context, subject string, h Handler, ready func()) error {
+	return c.subscribeEphemeral(ctx, subject, jetstream.DeliverAllPolicy, h, ready)
+}
+
+// subscribeEphemeral is the one implementation behind both: an ephemeral consumer at the
+// given delivery policy, with the armed signal. ONE function rather than two near-copies —
+// the two callers differ by a single enum, and a second copy is how the AckWait fix, the
+// NakWithDelay fix and the arming logic would have landed in one of them only.
+func (c *NATSClient) subscribeEphemeral(ctx context.Context, subject string, policy jetstream.DeliverPolicy, h Handler, ready func()) error {
 	stream, err := c.js.StreamNameBySubject(ctx, subject)
 	if err != nil {
 		return fmt.Errorf("nats: stream for subject %q: %w", subject, err)
@@ -657,7 +687,7 @@ func (c *NATSClient) SubscribeBroadcastReady(ctx context.Context, subject string
 	cons, err := c.js.CreateConsumer(ctx, stream, jetstream.ConsumerConfig{
 		AckPolicy:     jetstream.AckExplicitPolicy,
 		FilterSubject: subject,
-		DeliverPolicy: jetstream.DeliverLastPerSubjectPolicy,
+		DeliverPolicy: policy,
 		AckWait:       tuning.AckWait,
 		MaxDeliver:    tuning.MaxDeliver,
 		MaxAckPending: tuning.MaxAckPending,
@@ -722,3 +752,4 @@ func (c *NATSClient) SubscribeBroadcastReady(ctx context.Context, subject string
 }
 
 var _ BroadcastSubscriber = (*NATSClient)(nil)
+var _ ReplaySubscriber = (*NATSClient)(nil)

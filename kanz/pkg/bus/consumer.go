@@ -332,7 +332,36 @@ func (c *Consumer) SubscribeBroadcastReady(ctx context.Context, subject string, 
 	if !ok {
 		return fmt.Errorf("bus: this transport cannot broadcast %q — a control signal delivered to one pod out of N is not a control signal", subject)
 	}
-	return bs.SubscribeBroadcastReady(ctx, subject, func(ctx context.Context, msg Message) error {
+	return bs.SubscribeBroadcastReady(ctx, subject, c.envelopeHandler(subject, h), ready)
+}
+
+// SubscribeReplay folds a subject's WHOLE retained history into this process and then
+// stays subscribed — see ReplaySubscriber. Use it for an APPEND LOG whose every entry
+// counts, never for control-plane state (SubscribeBroadcast is that, and delivering only
+// the last message per subject would drop the log's middle).
+//
+// It shares the broadcast path's two refusals for the same reasons. NO DEDUP CLAIM,
+// because every replica must fold every entry rather than one replica claiming it. And NO
+// DLQ, because an entry that cannot be read must not be parked out of a log whose whole
+// value is that it is complete: an unreadable entry is returned as an error and nacked,
+// so the fold stalls visibly rather than continuing past a hole.
+func (c *Consumer) SubscribeReplay(ctx context.Context, subject string, h EventHandler, ready func()) error {
+	rs, ok := c.subscriber.(ReplaySubscriber)
+	if !ok {
+		return fmt.Errorf("bus: this transport cannot replay %q — a log folded from wherever a durable happened to stop is not the log", subject)
+	}
+	return rs.SubscribeReplay(ctx, subject, c.envelopeHandler(subject, h), ready)
+}
+
+// envelopeHandler is the decoding half that SubscribeBroadcastReady and SubscribeReplay
+// both wrap their handler in: unframe, validate, propagate correlation / causation /
+// tenant / trace, then dispatch under panic recovery.
+//
+// ONE COPY. The two subscriptions differ only in delivery policy, and a second copy of
+// this is how the tenant fallback, the traceparent propagation and the panic recovery
+// would come to be present on one path and missing on the other.
+func (c *Consumer) envelopeHandler(subject string, h EventHandler) Handler {
+	return func(ctx context.Context, msg Message) error {
 		env, payload, err := Unframe(msg.Body)
 		if err != nil {
 			return fmt.Errorf("unframe %s: %w", subject, err)
@@ -351,12 +380,12 @@ func (c *Consumer) SubscribeBroadcastReady(ctx context.Context, subject string, 
 			ctx = WithTraceContext(ctx, env.TraceContext)
 			ctx = observability.ContextWithTraceparent(ctx, env.TraceContext)
 		}
-		// Recovered for the same reason as Subscribe, resolving differently: a
-		// broadcast has no DLQ by design, so the panic surfaces as an error, the
+		// Recovered for the same reason as Subscribe, resolving differently: neither
+		// of these paths has a DLQ by design, so the panic surfaces as an error, the
 		// message is nacked, and the process stays in whatever state it was already
 		// in. For the halt gate that state is CLOSED — "I could not read the brake
 		// signal" must not resolve to "keep trading", and it must not resolve to
 		// "the pod is gone" either.
 		return dispatchEvent(ctx, h, env, payload)
-	}, ready)
+	}
 }

@@ -319,9 +319,10 @@ data:
               # subject.PositionAll wildcard, EventTypePortfolioSnapshot) and,
               # when calibration is enabled (RISK_ENGINE_CALIBRATION_RATES),
               # the market quote spine (RISK_ENGINE_MARKET_SUBJECTS, default
-              # market.>) into a live-quote cache. All three subscriptions go
+              # market.>) into a live-quote cache. Those three subscriptions go
               # through bus.NewConsumer(..., bus.WithDLQ(client)), so each needs
-              # its own dlq.* grant.
+              # its own dlq.* grant. A FOURTH — platform.model.registered (#112) —
+              # deliberately does not, and the subscribe list below says why.
               publish: {
                 allow: [
                   "risk.portfolio.exposure_recomputed", "risk.portfolio.measures_computed",
@@ -332,7 +333,29 @@ data:
               subscribe: {
                 allow: [
                   "risk.portfolio.revalued", "risk.position.changed.>", "risk.portfolio.snapshot",
-                  "market.>", "_INBOX.>",
+                  "market.>",
+                  # THE MODEL REGISTRY'S APPEND LOG (#112). The engine folds it
+                  # from the oldest retained entry to answer one question: does a
+                  # PRIMARY model claim portfolio-risk:1, the feature contract it
+                  # publishes a FeatureVector on at every recompute?
+                  #
+                  # WITHOUT THIS GRANT the pod comes up healthy and the fold never
+                  # starts — kanz_prediction_model_primary stays at
+                  # state="unknown" forever, which is the honest reading of a log
+                  # nobody could read, but it means the engine cannot tell "no
+                  # model is promoted" from "I was denied". READ-ONLY on purpose:
+                  # there is no matching publish grant and none is wanted, because
+                  # kanz-py holds the weights and runs the MLOPS-01a validation so
+                  # it is the only thing that may write this log. registry's
+                  # BusFollower refuses a Publish in-process for the same reason.
+                  #
+                  # No dlq.platform.model.registered publish grant either: this is
+                  # a REPLAY subscription (pkg/bus SubscribeReplay), which like the
+                  # broadcast path never routes to a DLQ — an entry parked out of
+                  # an append log would leave every replica that rebuilt from it
+                  # short a mutation, with nothing saying which.
+                  "platform.model.registered",
+                  "_INBOX.>",
                 ]
               }
             }
@@ -439,11 +462,16 @@ data:
                   "$JS.API.>", "$JS.ACK.>",
                 ]
               }
-              # SUBSCRIBE TO platform.model IS DELIBERATELY NOT HERE YET. Every
-              # replica is meant to consume the log to converge, but no consumer
-              # is wired on either side (#112 step 3) — and a grant for a
-              # consumer that does not exist is a permission nobody can point at
-              # a caller for. It lands with the consumer.
+              # SUBSCRIBE TO platform.model IS STILL NOT HERE, and the reason has
+              # CHANGED (#112 step 3, 2026-08-19). It used to be "no consumer is
+              # wired on either side". A GO consumer is wired now — risk-engine
+              # folds the log, see its entry above — but kanz_inference still has
+              # no consumer of its own: CoordinatedRegistry there is constructed
+              # by nothing, so the Python fleet PUBLISHES its mutations and does
+              # not yet converge on its peers'. That is the half this grant
+              # belongs to, and it lands with that consumer rather than ahead of
+              # it: a permission nobody can point at a caller for is one nobody
+              # can point at for revocation either.
               subscribe: { allow: ["inference.feature.computed", "_INBOX.>"] }
             }
           }

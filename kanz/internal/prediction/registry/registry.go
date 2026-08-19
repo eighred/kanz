@@ -12,45 +12,60 @@
 // not serialized; the log carries Metadata + role + validation and the injected
 // ModelLoader rematerializes the Model on apply.
 //
-// # NOTHING IMPORTS THIS YET, AND THAT IS TRACKED RATHER THAN FORGOTTEN (#112)
+// # IT HAS A COMPOSITION ROOT (#112, 2026-08-19) — AND ONLY FOR ONE OF ITS TWO JOBS
 //
-// No composition root constructs a Registry today:
+// This section is the third correction of the same paragraph, so it states what
+// is true now and what each earlier version got wrong, rather than being
+// rewritten clean.
 //
-//	$ grep -rn "prediction/registry" --include=*.go . | grep -v _test
-//	(nothing)
+// WIRED: services/risk-engine/internal/app/model_registry.go constructs a
+// CoordinatedRegistry over BusFollower and folds platform.model.registered from
+// the oldest retained entry, for the life of the process. risk-engine publishes
+// a FeatureVector on portfolio-risk:1 on every recompute, and the question
+// "does any model claim that contract" had no answer in Go at all — the publish
+// succeeds either way, so a fleet with NO promoted model was indistinguishable
+// from one scoring every vector. kanz_prediction_model_primary is that answer,
+// and it distinguishes "folded the log, nothing claims it" from "have not read
+// the log", which an empty registry alone cannot.
 //
-// It is part of the AI-M1 bridge, and the bridge is ONE THIRD WIRED, NOT TWO
-// (corrected #112, 2026-08-15). The claim that "the first two are now wired at
-// risk-engine's composition root" was false and had survived several audits:
+// NOT WIRED, AND THE HONEST HALF OF THIS ENTRY: nothing in Go RESOLVES a model
+// to score against. PrimaryFor's caller is a reporter, not a scorer. The scorer
+// would be internal/prediction's resilient inference client, which STILL has no
+// constructor outside its own tests — the third of the AI-M1 bridge that is
+// genuinely unbuilt, and a product decision (what acts on a prediction, #416)
+// rather than a wiring one. Neither arch guard can see that: no_dark_capability
+// works at IMPORT granularity and this package now has an importer;
+// served_rpc_has_a_caller works at CALL granularity and sync_client.go's
+// c.stub.Predict is a call site inside an unwired client. Both pass. That is
+// written down in both guards and here, so a green suite is not read as "Go
+// scores predictions".
 //
-//	$ grep -rn "SyncClient" --include=*.go .   -> only sync_client.go and its own tests
+// WHAT THE EARLIER VERSIONS OF THIS PARAGRAPH GOT WRONG, kept because each was
+// believed for months:
 //
-// The FEATURE PUBLISHER is wired (risk-engine's composition root builds
-// prediction.NewPublisher). The RESILIENT INFERENCE CLIENT has no callers
-// anywhere in the module, and is invisible to test/arch's dark-capability guard
-// because that guard works at IMPORT granularity and internal/prediction IS
-// imported — for the publisher. Its own doc names that limitation.
+//   - "The other two thirds are already wired" — false. The feature publisher
+//     was wired; the inference client never has been (corrected 2026-08-15).
+//   - "platform.model is not a declared subject, the topic table removed it, and
+//     kanz-py's RegistryPublisher is a Protocol with no implementation" — all
+//     three false since #504: inference.v1.ModelRegistryEvent is the shared wire
+//     contract, BusRegistryPublisher publishes it on platform.model.registered,
+//     and the Kafka topic plus the publish grant are provisioned.
+//   - "What it needs is a composition root" — true only of the last step, and
+//     the sequencing that actually mattered was producer, then topic, then this.
 //
-// WHAT ACTUALLY BLOCKS WIRING THIS IS NOT A COMPOSITION ROOT. The coordination
-// plane has no transport and no producer, on either side:
+// # The registrar is kanz-py; a Go replica FOLLOWS
 //
-//   - platform.model is not a declared subject in this module, and
-//     infra/kafka/topics-job.yaml records that it was REMOVED from the
-//     ground-truth topic table because "NOT ONE of which is published by any
-//     service". Auto-create is disabled, so an event published to it has
-//     nowhere to land.
-//   - kanz-py's RegistryPublisher (kanz_inference/registry/coordination.py) is a
-//     Protocol with no concrete implementation, so nothing registers a model
-//     from the Python side either.
+// kanz-py holds the weights and runs the MLOPS-01a validation, so it is the only
+// thing that may write the log. BusFollower's Publish refuses with
+// ErrNotRegistrar rather than succeeding locally and being denied by the broker
+// at runtime — the failure shape this estate keeps rediscovering as "the feature
+// is broken" when it is a missing grant.
 //
-// So binding Log to the bus today would produce a registry nobody writes to,
-// reading a topic that does not exist. #112 tracks the sequencing.
+// DELETING THIS PACKAGE WAS PROPOSED AND REJECTED, and the argument is recorded
+// here rather than re-litigated:
 //
-// DELETING IT WAS PROPOSED AND REJECTED, so the argument is recorded here rather
-// than re-litigated:
-//
-//   - It is not an orphan. Removing it would freeze a documented three-part
-//     design permanently at two thirds and turn "wire it" into "rebuild it".
+//   - It is not an orphan. Removing it would have frozen a documented three-part
+//     design permanently at one third and turned "wire it" into "rebuild it".
 //
 //   - Its job is a correctness property: it resolves a model by feature_set_ref
 //     and NEVER by name, which is what stops a model scoring a feature set it
@@ -67,10 +82,7 @@
 //   - It cannot rot. The precedent for deleting unused code here is the Anthropic
 //     adapter, and that rotted because it sat behind a build tag CI never
 //     compiled. This is ordinary Go: `go build ./...` compiles it and
-//     `go test ./...` runs its tests on every CI run. Inert, but verified inert.
-//
-// So an unused package here is not the "dead code" the estate deletes on sight.
-// What it needs is a composition root, and #112 is where that is tracked.
+//     `go test ./...` runs its tests on every CI run.
 package registry
 
 import (
@@ -78,6 +90,7 @@ import (
 	"fmt"
 	"sort"
 	"sync"
+	"time"
 )
 
 // Role is a model's serving role in the registry.
@@ -123,13 +136,55 @@ type Metadata struct {
 	// declares no contract, which PrimaryFor refuses to match rather than
 	// treating as a wildcard.
 	FeatureSetRef string
-	Extra         map[string]string
+	// ArtifactURI is where the weights live, and it is the ONLY thing a
+	// ModelLoader has to go on. A codec that dropped it would leave a
+	// metadata-only replica unable to ever become a serving one — the log would
+	// have converged and the loader would have nothing to fetch.
+	ArtifactURI string
+	// ConfidenceThreshold is the score below which a caller must not act. It is
+	// carried rather than dropped for the same reason: it is a property of the
+	// MODEL, decided by whoever registered it, and a caller re-deriving its own
+	// threshold is how two replicas act differently on the same score.
+	ConfidenceThreshold float64
+	Extra               map[string]string
 }
 
 // Validation is the MLOPS-01a gate outcome for a model version.
+//
+// IT CARRIES ITS OWN DATES, AND THE GATE BELOW DOES NOT READ THEM (#112). SR
+// 11-7 is about CURRENT validation rather than a one-time sign-off, so
+// inference.v1.ModelRegistryEvent carries validated_at/expires_at and warns that
+// an absent expiry is not "valid forever". Dropping those two fields at the
+// codec would have removed the only thing that makes the gate mean anything over
+// time — so they are carried.
+//
+// WHAT DOES NOT HAPPEN HERE IS RE-GATING ON THEM. The registrar (kanz-py) ran
+// the gate when it published; a Go follower that re-ran it against its own clock
+// would REFUSE a promotion the registrar allowed the moment an expiry fell
+// between the publish and the replay, and the two registries would then disagree
+// about which model is primary — which is the divergence this whole log exists to
+// prevent. Expiry is REPORTED instead (Expired), so a lapsed validation is
+// visible without being silently re-decided by whichever replica read it last.
 type Validation struct {
 	Passed bool
 	Report string // signed report id / summary (AUDIT-01 evidence)
+	// ValidatedAt is when the validation ran; zero means the producer did not say.
+	ValidatedAt time.Time
+	// ExpiresAt bounds the validation's currency; zero means unbounded, which is
+	// NOT the same as current — see Expired.
+	ExpiresAt time.Time
+}
+
+// Expired reports whether this validation's currency has lapsed at now.
+//
+// A ZERO ExpiresAt IS NOT EXPIRED, and that is a reporting choice rather than an
+// endorsement: an unbounded validation is what a producer that never set the
+// field publishes, and calling it expired would flag every such model as a
+// finding about ITSELF rather than about the producer. The distinction a reader
+// needs is available separately — ExpiresAt.IsZero() — and the posture that
+// consumes this says which of the two it saw.
+func (v Validation) Expired(now time.Time) bool {
+	return !v.ExpiresAt.IsZero() && now.After(v.ExpiresAt)
 }
 
 // Model is the live, materialized model. It is intentionally opaque here — the
@@ -228,6 +283,40 @@ func (r *Registry) RecordValidation(modelID string, v Validation) error {
 	}
 	e.validation = v
 	return nil
+}
+
+// Unregister removes a model from the serving set entirely.
+//
+// IT EXISTS BECAUSE THE WIRE HAS IT AND THIS SIDE DID NOT (#112).
+// inference.v1.ModelRegistryEvent carries MODEL_REGISTRY_OP_UNREGISTER, and until
+// this method there was no Op it could fold into. A follower that skipped those
+// events would keep serving the answer "model X is primary for this contract"
+// after the registrar retired X — a registry that is WRONG rather than merely
+// stale, and wrong in the direction that keeps a withdrawn model in production.
+//
+// Unregistering an unknown id is not an error: the log is replayed from offset 0
+// on every rebuild, and an unregister whose matching register has aged out of the
+// retention window is a normal thing to see.
+func (r *Registry) Unregister(modelID string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	delete(r.byID, modelID)
+}
+
+// ValidationFor returns the gate evidence on record for a model id.
+//
+// The Model and the evidence that it may serve are read separately on purpose: a
+// caller that wants to REPORT the difference between "validated" and "validated
+// too long ago" needs the dates, and PrimaryFor deliberately answers only the
+// question a scoring caller asks.
+func (r *Registry) ValidationFor(modelID string) (Validation, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	e := r.byID[modelID]
+	if e == nil {
+		return Validation{}, false
+	}
+	return e.validation, true
 }
 
 // Get returns the live model and its role for id.

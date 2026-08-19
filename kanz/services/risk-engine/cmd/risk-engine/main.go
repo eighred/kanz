@@ -31,6 +31,7 @@ import (
 	"github.com/eighred/kanz/internal/pg"
 	"github.com/eighred/kanz/internal/platform/httpserver"
 	"github.com/eighred/kanz/internal/prediction"
+	predregistry "github.com/eighred/kanz/internal/prediction/registry"
 	risk "github.com/eighred/kanz/internal/risk"
 	"github.com/eighred/kanz/internal/risk/bookuniverse"
 	"github.com/eighred/kanz/internal/risk/compute"
@@ -138,6 +139,21 @@ func run() int {
 	// every shutdown step above has run. Raise(nil) is a no-op mark.
 	fatal.Raise(runErr)
 	return fatal.Code()
+}
+
+// hostOrigin is this replica's identity on the model-registry log.
+//
+// The pod name, because that is what a reader correlating a log entry with a
+// replica actually has. It matters only for skipping a replica's OWN echoes and
+// risk-engine publishes none — but a blank origin makes every replica treat
+// every event as its own the day something in Go does register a model, so it is
+// filled truthfully now rather than left as an empty string that works by
+// accident.
+func hostOrigin() string {
+	if h, err := os.Hostname(); err == nil && h != "" {
+		return h
+	}
+	return "unknown-host"
 }
 
 // runEngine builds the ingestion→recompute→publish pipeline over the live
@@ -572,6 +588,41 @@ func runEngine(ctx context.Context, cfg config.Config, readiness *server.Readine
 			!errors.Is(err, context.Canceled) {
 			logger.Error("risk-engine unwind subscription failed — breaches will be detected but "+
 				"nothing will size what would clear them", "err", err)
+		}
+	}()
+
+	// THE MODEL REGISTRY GETS A COMPOSITION ROOT (#112 step 3).
+	//
+	// internal/prediction/registry has had no importer in this module since it was
+	// written — the last third of the AI-M1 bridge, held open by a dark-capability
+	// exemption. #504 landed the other two thirds of step 3's prerequisites (the
+	// inference.v1.ModelRegistryEvent contract, kanz-py's BusRegistryPublisher, the
+	// Kafka topic and the publish grant); this is the Go reader.
+	//
+	// WHY HERE. This engine publishes a FeatureVector on FeatureSetPortfolioRisk on
+	// every recompute, and until now nothing in Go could say whether any model
+	// claims that contract. The publish succeeds either way, so a fleet with no
+	// promoted model was indistinguishable from one scoring every vector — the
+	// exact "nothing configured looks like checked and fine" this repository
+	// forbids. It does NOT resolve a model to score against: that needs a Go
+	// consumer of predictions, which is a product decision (#416) rather than a
+	// wiring one, and the resilient inference client still has no constructor.
+	//
+	// AUXILIARY, exactly like the unwind watch and calibration above, and for the
+	// reason features.go states: the prediction layer is an OBSERVER of the risk
+	// engine. A registry that cannot be read costs the gauge and nothing else —
+	// the posture stays "unknown", which is the true answer, and the engine goes
+	// on computing and serving the risk numbers the platform actually trades on.
+	modelRegistry, err := app.NewModelRegistry(obs.Registry, logger, consumer, cfg.Source+"@"+hostOrigin(), app.FeatureSetPortfolioRisk)
+	if err != nil {
+		return err
+	}
+	go func() {
+		if err := modelRegistry.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
+			logger.Error("risk-engine model-registry subscription failed — this engine keeps "+
+				"publishing features and can no longer say whether ANY model is promoted to score "+
+				"them; kanz_prediction_model_primary stays at state=unknown", "err", err,
+				"subject", predregistry.SubjectModelRegistered)
 		}
 	}()
 
