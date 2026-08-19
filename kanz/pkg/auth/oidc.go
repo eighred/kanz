@@ -286,10 +286,22 @@ func (a *OIDCAuthenticator) Authenticate(ctx context.Context, token string) (*Pr
 		return nil, ErrUnauthenticated
 	}
 
+	// `iat` IS OPTIONAL AND STAYS OPTIONAL HERE (RFC 7519 §4.1.6). Refusing a
+	// token without one would reject spec-legal tokens from a federated IdP over
+	// a claim nothing in this estate needed until #532. The consequence of an
+	// absent one lands where it belongs instead: the revocation check treats a
+	// subject it cannot date as unproven and refuses it — but only if that
+	// subject has actually been revoked, so an ordinary caller pays nothing.
+	var issuedAt time.Time
+	if std.IssuedAt != nil {
+		issuedAt = std.IssuedAt.Time()
+	}
+
 	return &Principal{
-		Subject: std.Subject,
-		Tenant:  stringClaim(custom[a.cfg.TenantClaim]),
-		Roles:   stringListClaim(custom[a.cfg.RolesClaim]),
+		Subject:  std.Subject,
+		Tenant:   stringClaim(custom[a.cfg.TenantClaim]),
+		Roles:    stringListClaim(custom[a.cfg.RolesClaim]),
+		IssuedAt: issuedAt,
 		// NORMALIZED HERE AND NOWHERE ELSE (#225). The claim is absent from
 		// every token this estate's IdP issues today (#99), so this is an empty
 		// list on the production path — which the capital path reads as "no

@@ -38,6 +38,24 @@ type Config struct {
 	OIDCTenantClaim string // optional; defaults to "tenant"
 	OIDCRolesClaim  string // optional; defaults to "roles"
 
+	// RevocationsURI is identity's per-subject revocation feed (#532), the only
+	// thing that makes disabling an account take effect on the session already
+	// in flight rather than at the next login.
+	//
+	// REQUIRED ON THE OIDC ARM, and Load refuses without it. A gateway silently
+	// running with no feed would look identical in every log and every dashboard
+	// to one that had checked and found nobody revoked — this repository's
+	// standing rule violated exactly, on the control whose whole purpose is to
+	// be believed.
+	//
+	// IT IS NOT DERIVED FROM OIDCIssuer, deliberately. The issuer is a LOGICAL
+	// name (https://identity.kanz.internal) that must match the token's `iss`
+	// byte for byte and does not resolve; the reachable address is a cluster
+	// URL, which is why OIDCJWKSURI is configured separately too. Deriving from
+	// the issuer would point this at a host that does not exist and turn a
+	// configuration mistake into a DNS error nobody traces back.
+	RevocationsURI string
+
 	// JWTSecret is the HS256 shared secret the bundled minimal JWT validator
 	// verifies bearer tokens against (API-01d) — a dev-only stand-in used only
 	// when no OIDC issuer is configured. One of OIDCIssuer or JWTSecret is
@@ -220,6 +238,7 @@ func Load() (Config, error) {
 		OIDCIssuer:       os.Getenv("API_GATEWAY_OIDC_ISSUER"),
 		OIDCAudience:     os.Getenv("API_GATEWAY_OIDC_AUDIENCE"),
 		OIDCJWKSURI:      os.Getenv("API_GATEWAY_OIDC_JWKS_URI"),
+		RevocationsURI:   os.Getenv("API_GATEWAY_REVOCATIONS_URI"),
 		OIDCTenantClaim:  os.Getenv("API_GATEWAY_OIDC_TENANT_CLAIM"),
 		OIDCRolesClaim:   os.Getenv("API_GATEWAY_OIDC_ROLES_CLAIM"),
 		JWTSecret:        jwtSecret,
@@ -423,6 +442,31 @@ func (c Config) validateAuth() error {
 				"function, and the person who moves the fund's cash would clear the prices the fund " +
 				"is valued at")
 		}
+	}
+	// #532. AN AUTHENTICATION PATH WITH NO REVOCATION PATH IS ONE THE HOLDER OF A
+	// STOLEN TOKEN OUTLIVES.
+	//
+	// Disabling an account used to stop the NEXT login and nothing else: the
+	// gateway reads no account state, so an offboarded trader's token kept
+	// working for its full remaining lifetime. Identity's feed is what closes
+	// that, and a deployment omitting it gets an authentication path
+	// indistinguishable from the one that had the gap — no warning, no metric,
+	// nothing to notice.
+	//
+	// Only on the OIDC arm. The HS256 arm is dev-only by construction (#242) and
+	// already declares itself as having no revocation path; requiring a feed there
+	// would demand an identity service a dev rig deliberately does not run.
+	//
+	// LAST, so an otherwise-incomplete config still names the role it is missing
+	// first. An operator who has set neither this nor API_GATEWAY_REQUIRED_ROLE
+	// should be told about the role, fix it, and then be told about this — two
+	// clear refusals beat one that answers for a setting they had not reached yet.
+	if c.OIDCIssuer != "" && c.RevocationsURI == "" {
+		return errors.New("api-gateway: API_GATEWAY_REVOCATIONS_URI is unset. Without identity's " +
+			"revocation feed this gateway cannot tell a disabled account from an active one, so " +
+			"disabling an account stops the next login and leaves the token already in the holder's " +
+			"hands working until it expires — including one exfiltrated from a log or a compromised " +
+			"pod. Point it at identity's /revocations (#532)")
 	}
 	return nil
 }

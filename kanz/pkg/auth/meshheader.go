@@ -94,6 +94,12 @@ func SetPrincipalHeaders(h http.Header, subject, tenant string, roles []string) 
 // downstream of this seam has a use for it that an empty header would satisfy.
 // Tenant isolation and RBAC ARE enforced upstream; portfolio sub-scope within a
 // tenant is not.
+// IssuedAt IS ALSO ABSENT ON THIS SEAM, and there is no fifth header for it
+// either. It exists so the GATEWAY can date a token against a revocation mark
+// (#532); an upstream reads no feed and makes no such decision, and the gateway
+// has already refused a revoked caller before these headers are written. It
+// arrives here as the zero value, which the revocation check reads as
+// "undatable" — so if this ever does move upstream, the absence fails closed.
 func PrincipalFromHeaders(h http.Header) (*Principal, bool) {
 	subject := h.Get(HeaderPrincipalSubject)
 	tenant := h.Get(HeaderPrincipalTenant)

@@ -5,7 +5,10 @@
 // Authenticator; AUTH-01b layers deny-by-default authorization over it.
 package auth
 
-import "context"
+import (
+	"context"
+	"time"
+)
 
 // Principal is the authenticated caller. It is the canonical identity the whole
 // platform shares: the api-gateway edge (API-01d), the authorization layer
@@ -34,6 +37,17 @@ type Principal struct {
 	// PortfolioInScope (read path) or PortfolioEntitled (capital path), which
 	// carry the argument for each.
 	Portfolios []string
+	// IssuedAt is the token's `iat` — WHEN this assertion was minted, zero if
+	// the token carried no such claim.
+	//
+	// IT IS A FIELD FOR THE SAME REASON Portfolios IS (#225): per-subject
+	// revocation (#532) compares it against the subject's revocation mark, and
+	// reading `iat` back out of the Claims bag at that call site would put the
+	// same fact in two representations — which is how the entitlement above got
+	// silently dropped. Zero is not "now"; it means the claim was absent, and
+	// the revocation check treats a subject it cannot date as unproven rather
+	// than as fresh.
+	IssuedAt time.Time
 	// Claims is the full decoded custom claim set, so authorization policy
 	// (AUTH-01b) can read attributes beyond roles/tenant without re-parsing.
 	// Promoted claims (Roles, Tenant, Portfolios) have a typed field and MUST be

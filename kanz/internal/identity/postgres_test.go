@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"sync"
 	"testing"
 	"time"
@@ -31,6 +32,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/eighred/kanz/internal/identity"
+	"github.com/eighred/kanz/internal/revocation"
 )
 
 var now0 = time.Date(2026, 8, 10, 9, 0, 0, 0, time.UTC)
@@ -76,12 +78,29 @@ func newStore(t *testing.T) *identity.Postgres {
 		}
 	})
 
-	b, err := os.ReadFile(filepath.Join("..", "..", "services", "identity", "migrations", "0001_identity.sql"))
+	// EVERY MIGRATION IN ORDER, NOT A NAMED ONE. This used to apply
+	// 0001_identity.sql by name, so the day a second migration landed the schema
+	// under test silently diverged from the deployed one — and the tests for
+	// whatever that migration added would have failed against a column the fixture
+	// never created, which reads as a broken feature rather than a stale fixture.
+	dir := filepath.Join("..", "..", "services", "identity", "migrations")
+	files, err := filepath.Glob(filepath.Join(dir, "*.sql"))
 	if err != nil {
-		t.Fatalf("read migration: %v", err)
+		t.Fatalf("list migrations: %v", err)
 	}
-	if _, err := pool.Exec(ctx, string(b)); err != nil {
-		t.Fatalf("apply migration: %v", err)
+	if len(files) == 0 {
+		t.Fatalf("no migrations found under %s — the fixture would build an empty schema and every "+
+			"test below would fail for the wrong reason", dir)
+	}
+	sort.Strings(files)
+	for _, f := range files {
+		b, rerr := os.ReadFile(f)
+		if rerr != nil {
+			t.Fatalf("read migration %s: %v", f, rerr)
+		}
+		if _, eerr := pool.Exec(ctx, string(b)); eerr != nil {
+			t.Fatalf("apply migration %s: %v", f, eerr)
+		}
 	}
 	return identity.NewPostgres(pool)
 }
@@ -380,6 +399,96 @@ func TestSetStatusDisablesAnAccountAndMintThenRefusesIt(t *testing.T) {
 	}
 	if !back.Active() {
 		t.Fatalf("status = %q after a re-enable, want active", back.Status)
+	}
+}
+
+// THE DISABLE STAMPS THE REVOCATION MARK, IN THE SAME STATEMENT (#532).
+//
+// Everything here is a property of that one UPDATE, which is why it cannot be
+// proven against a fake:
+//
+//   - a disable publishes a mark, so the gateway can refuse the token the
+//     account already holds instead of waiting for the next login;
+//   - an ENABLE DOES NOT CLEAR IT. Clearing would resurrect the exact token the
+//     disable killed;
+//   - a second disable only moves the mark FORWARD, so a clock that steps back
+//     cannot narrow a revocation that has already been published.
+func TestDisablingAnAccountPublishesARevocationMarkAndEnablingDoesNotClearIt(t *testing.T) {
+	st := newStore(t)
+	raw := invite(t, st, "inv-revoke", "user:hank")
+	cred, _ := identity.HashCredential("pw")
+	if _, err := st.Redeem(context.Background(), raw, cred, now0); err != nil {
+		t.Fatalf("Redeem: %v", err)
+	}
+	ctx := context.Background()
+
+	// AN ACTIVE ACCOUNT IS NOT IN THE FEED. A denylist that carried every account
+	// would be the size of the user table and would refuse everybody the moment
+	// the comparison was wrong.
+	entries, err := st.Revocations(ctx)
+	if err != nil {
+		t.Fatalf("Revocations: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("a freshly redeemed account is already in the revocation feed: %+v", entries)
+	}
+
+	disabledAt := now0.Add(2 * time.Hour)
+	if err := st.SetStatus(ctx, "user:hank", identity.StatusDisabled, disabledAt); err != nil {
+		t.Fatalf("SetStatus: %v", err)
+	}
+	entries, err = st.Revocations(ctx)
+	if err != nil {
+		t.Fatalf("Revocations: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("the feed has %d entries after a disable, want 1 — the gateway would go on "+
+			"honouring this account's outstanding token", len(entries))
+	}
+	if entries[0].SubjectHash != revocation.HashSubject("user:hank") {
+		t.Fatalf("the feed names %q; the gateway looks up %q and would never match",
+			entries[0].SubjectHash, revocation.HashSubject("user:hank"))
+	}
+	if entries[0].SubjectHash == "user:hank" {
+		t.Fatal("the feed carries the subject in plaintext")
+	}
+	if got := time.Unix(entries[0].NotBefore, 0).UTC(); !got.Equal(disabledAt) {
+		t.Errorf("not_before = %s, want %s — the mark must be the instant of the disable, or the "+
+			"gateway refuses the wrong set of tokens", got, disabledAt)
+	}
+
+	// RE-ENABLE KEEPS THE MARK.
+	if err := st.SetStatus(ctx, "user:hank", identity.StatusActive, disabledAt.Add(time.Hour)); err != nil {
+		t.Fatalf("SetStatus (re-enable): %v", err)
+	}
+	entries, err = st.Revocations(ctx)
+	if err != nil {
+		t.Fatalf("Revocations: %v", err)
+	}
+	if len(entries) != 1 || time.Unix(entries[0].NotBefore, 0).UTC() != disabledAt {
+		t.Fatalf("re-enabling cleared or moved the revocation mark: %+v. The token the disable was "+
+			"meant to kill would work again", entries)
+	}
+
+	// A LATER DISABLE MOVES IT FORWARD.
+	again := disabledAt.Add(3 * time.Hour)
+	if err := st.SetStatus(ctx, "user:hank", identity.StatusDisabled, again); err != nil {
+		t.Fatalf("SetStatus (second disable): %v", err)
+	}
+	entries, _ = st.Revocations(ctx)
+	if len(entries) != 1 || time.Unix(entries[0].NotBefore, 0).UTC() != again {
+		t.Fatalf("the second disable did not advance the mark: %+v", entries)
+	}
+
+	// AND AN EARLIER ONE DOES NOT MOVE IT BACK. GREATEST() is what makes a
+	// stepped-back clock, or a replayed request, unable to narrow a revocation
+	// that has already been published to every gateway.
+	if err := st.SetStatus(ctx, "user:hank", identity.StatusDisabled, disabledAt); err != nil {
+		t.Fatalf("SetStatus (backdated): %v", err)
+	}
+	entries, _ = st.Revocations(ctx)
+	if len(entries) != 1 || time.Unix(entries[0].NotBefore, 0).UTC() != again {
+		t.Fatalf("a backdated disable narrowed the revocation window: %+v", entries)
 	}
 }
 

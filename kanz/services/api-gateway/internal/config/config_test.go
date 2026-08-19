@@ -17,6 +17,7 @@ func clearAuthEnv(t *testing.T) {
 		"API_GATEWAY_ALLOW_DEV_HS256",
 		"API_GATEWAY_REQUIRED_ROLE",
 		"API_GATEWAY_TRADE_ROLE",
+		"API_GATEWAY_REVOCATIONS_URI",
 	} {
 		t.Setenv(k, "")
 	}
@@ -46,6 +47,7 @@ func TestLoadRefusesUnauthenticated(t *testing.T) {
 func TestLoadRefusesWithoutRequiredRole(t *testing.T) {
 	clearAuthEnv(t)
 	t.Setenv("API_GATEWAY_OIDC_ISSUER", "https://login.eighred.com")
+	t.Setenv("API_GATEWAY_REVOCATIONS_URI", "http://identity.test/revocations")
 	t.Setenv("API_GATEWAY_TRADE_ROLE", "kanz-trader")
 
 	_, err := Load()
@@ -57,12 +59,51 @@ func TestLoadRefusesWithoutRequiredRole(t *testing.T) {
 	}
 }
 
+// AN OIDC GATEWAY WITH NO REVOCATION FEED MUST NOT START (#532).
+//
+// Without it, disabling an account stops the NEXT login and leaves the token
+// already in the holder's hands working until it expires — and the running
+// gateway looks identical in every log and every dashboard to one that had
+// checked and found nobody revoked. "Nothing configured" and "checked, and fine"
+// must never look the same, and on this control they used to.
+//
+// The dev HS256 arm is exempt on purpose: it is unreachable without
+// API_GATEWAY_ALLOW_DEV_HS256, it already declares itself as having no
+// revocation path, and a dev rig runs no identity service to serve a feed.
+func TestLoadRefusesAnOIDCGatewayWithNoRevocationFeed(t *testing.T) {
+	clearAuthEnv(t)
+	t.Setenv("API_GATEWAY_OIDC_ISSUER", "https://login.eighred.com")
+	t.Setenv("API_GATEWAY_REQUIRED_ROLE", "kanz-user")
+	t.Setenv("API_GATEWAY_TRADE_ROLE", "kanz-trader")
+
+	_, err := Load()
+	if err == nil {
+		t.Fatal("Load() = nil error with an OIDC issuer and no API_GATEWAY_REVOCATIONS_URI; want " +
+			"refusal — this gateway would honour a disabled account's outstanding token")
+	}
+	if !strings.Contains(err.Error(), "API_GATEWAY_REVOCATIONS_URI") {
+		t.Errorf("error does not name API_GATEWAY_REVOCATIONS_URI: %v", err)
+	}
+
+	t.Run("the dev arm does not require one", func(t *testing.T) {
+		clearAuthEnv(t)
+		t.Setenv("API_GATEWAY_JWT_SECRET", "dev-secret")
+		t.Setenv("API_GATEWAY_ALLOW_DEV_HS256", "true")
+		t.Setenv("API_GATEWAY_REQUIRED_ROLE", "kanz-user")
+		t.Setenv("API_GATEWAY_TRADE_ROLE", "kanz-trader")
+		if _, err := Load(); err != nil {
+			t.Fatalf("Load() = %v; the dev rig runs no identity service and must still start", err)
+		}
+	})
+}
+
 // TestLoadAcceptsConfiguredAuth: the two shapes that authenticate a caller —
 // production OIDC and the dev HS256 secret — both start.
 func TestLoadAcceptsConfiguredAuth(t *testing.T) {
 	t.Run("oidc issuer", func(t *testing.T) {
 		clearAuthEnv(t)
 		t.Setenv("API_GATEWAY_OIDC_ISSUER", "https://login.eighred.com")
+		t.Setenv("API_GATEWAY_REVOCATIONS_URI", "http://identity.test/revocations")
 		t.Setenv("API_GATEWAY_REQUIRED_ROLE", "kanz-user")
 		t.Setenv("API_GATEWAY_TRADE_ROLE", "kanz-trader")
 
@@ -166,6 +207,7 @@ func TestLoadRefusesAnUnparseableOptIn(t *testing.T) {
 func TestLoadDoesNotRequireTheOptInWhenOIDCIsConfigured(t *testing.T) {
 	clearAuthEnv(t)
 	t.Setenv("API_GATEWAY_OIDC_ISSUER", "https://login.eighred.com")
+	t.Setenv("API_GATEWAY_REVOCATIONS_URI", "http://identity.test/revocations")
 	t.Setenv("API_GATEWAY_JWT_SECRET", "left-over-dev-secret")
 	t.Setenv("API_GATEWAY_REQUIRED_ROLE", "kanz-user")
 	t.Setenv("API_GATEWAY_TRADE_ROLE", "kanz-trader")
@@ -187,6 +229,7 @@ func TestLoadDoesNotRequireTheOptInWhenOIDCIsConfigured(t *testing.T) {
 func TestLoadRefusesWithoutATradeRole(t *testing.T) {
 	clearAuthEnv(t)
 	t.Setenv("API_GATEWAY_OIDC_ISSUER", "https://login.eighred.com")
+	t.Setenv("API_GATEWAY_REVOCATIONS_URI", "http://identity.test/revocations")
 	t.Setenv("API_GATEWAY_REQUIRED_ROLE", "kanz-user")
 
 	_, err := Load()
@@ -207,6 +250,7 @@ func TestLoadRefusesWithoutATradeRole(t *testing.T) {
 func TestLoadRefusesATradeRoleThatIsTheBaselineRole(t *testing.T) {
 	clearAuthEnv(t)
 	t.Setenv("API_GATEWAY_OIDC_ISSUER", "https://login.eighred.com")
+	t.Setenv("API_GATEWAY_REVOCATIONS_URI", "http://identity.test/revocations")
 	t.Setenv("API_GATEWAY_REQUIRED_ROLE", "kanz-user")
 	t.Setenv("API_GATEWAY_TRADE_ROLE", "kanz-user")
 

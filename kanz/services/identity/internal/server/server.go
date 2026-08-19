@@ -1,14 +1,20 @@
 // Package server is the identity service's HTTP surface (#364).
 //
-// THREE ROUTES, AND THE SPLIT BETWEEN THEM IS THE SECURITY MODEL.
+// FOUR ROUTES, AND THE SPLIT BETWEEN THEM IS THE SECURITY MODEL.
 //
 //	POST /login          unauthenticated — a person exchanges a credential for a token
 //	POST /invites/redeem unauthenticated — an invitee exchanges a link for an account
 //	GET  /jwks.json      unauthenticated — the gateway fetches the public key
+//	GET  /revocations    unauthenticated — the gateway fetches who has been disabled
 //
-// All three are unauthenticated BY NECESSITY: you cannot require a token from
+// All four are unauthenticated BY NECESSITY: you cannot require a token from
 // someone who is trying to obtain one, and the gateway cannot present a
-// credential to fetch the key it would need in order to verify credentials.
+// credential to fetch the key it would need in order to verify credentials —
+// nor to fetch the list it needs in order to decide whether a credential it has
+// just verified is still honoured. The two the gateway reads are what make it
+// able to judge anybody; requiring authentication on either would make the
+// control depend on the control. See revocations.go for what keeps that
+// acceptable, and what must stay true for it to remain so.
 //
 // WHY THIS IS A SERVICE AND NOT A HANDLER INSIDE THE GATEWAY. The gateway is the
 // internet-facing process and the sole identity authority — it would have been
@@ -18,7 +24,7 @@
 // So the key and the credential store live here, behind the gateway, and the
 // gateway holds only the public half it fetches from /jwks.json.
 //
-// THE THREE ABOVE ARE THE ONES THAT MUST WORK FOR SOMEONE HOLDING NOTHING.
+// THE FOUR ABOVE ARE THE ONES THAT MUST WORK FOR SOMEONE HOLDING NOTHING.
 // Everything else this service serves — creating invites (#364), disabling and
 // re-enabling accounts (#525) — is an operator action behind a verified bearer
 // token, registered only when a deployment wires provisioning. See provision.go
@@ -37,6 +43,7 @@ import (
 	"time"
 
 	"github.com/eighred/kanz/internal/identity"
+	"github.com/eighred/kanz/internal/revocation"
 )
 
 // Store is the persistence this server needs — the subset of
@@ -45,6 +52,12 @@ type Store interface {
 	UserBySubject(ctx context.Context, subject string) (*identity.User, error)
 	UpdateCredential(ctx context.Context, subject string, cred identity.Hash, now time.Time) error
 	Redeem(ctx context.Context, rawToken string, cred identity.Hash, now time.Time) (*identity.User, error)
+	// Revocations feeds the api-gateway's per-subject revocation check (#532).
+	// It is on the BASE interface and not on Provisioning because the feed must
+	// be served whether or not this deployment can disable accounts — see
+	// revocations.go for why an empty feed and an absent one are different
+	// answers.
+	Revocations(ctx context.Context) ([]revocation.Entry, error)
 }
 
 // Minter issues a bearer token for an account.
@@ -162,6 +175,11 @@ func (s *Server) Routes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /invites/redeem", s.redeem)
 	mux.HandleFunc("GET /jwks.json", s.jwksHandler)
 	mux.HandleFunc("GET /.well-known/openid-configuration", s.discoveryHandler)
+	// UNCONDITIONAL, unlike the provisioning routes below — see revocations.go.
+	// The gateway refuses to become ready until this answers, so a deployment
+	// that registered it only when provisioning was wired would take the
+	// platform's sole ingress out of service by omission.
+	mux.HandleFunc("GET /revocations", s.revocationsHandler)
 	// AUTHENTICATED provisioning (#364). Registered only when wired, so a
 	// deployment without it answers 404 rather than 403 — "there is no
 	// provisioning surface here" is the truthful answer to someone probing.

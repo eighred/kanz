@@ -153,8 +153,13 @@ spec:
             # now executes that composed path — which nothing did before, so a
             # regression that dropped the wiring kept 110 tests green.
             #
-            # Per-subject revocation is a different axis and still does not exist;
-            # this shortens the window, it does not close it. #532 owns that.
+            # PER-SUBJECT REVOCATION NOW EXISTS, and this line is no longer the
+            # only thing bounding a stolen token (#532). SetStatus stamps
+            # identity_users.tokens_invalid_before, GET /revocations publishes it,
+            # and the gateway refuses any token for a marked subject minted before
+            # the mark — ordinarily within 30s. This TTL still matters: it is what
+            # bounds a token whose account was never disabled at all, which no
+            # revocation feed can help with.
             - { name: IDENTITY_TOKEN_TTL, value: "1h" }
             # THE ONLY BOUND ON CREDENTIAL GUESSING on this surface. The gateway's
             # quota middleware sits after its auth middleware and never sees an

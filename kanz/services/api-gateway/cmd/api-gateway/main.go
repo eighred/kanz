@@ -32,6 +32,7 @@ import (
 
 	"github.com/eighred/kanz/internal/lifecycle"
 	"github.com/eighred/kanz/internal/platform/httpserver"
+	"github.com/eighred/kanz/internal/revocation"
 	"github.com/eighred/kanz/internal/version"
 	"github.com/eighred/kanz/pkg/auth"
 	"github.com/eighred/kanz/pkg/authbus"
@@ -238,7 +239,7 @@ func run() int {
 		logger.Info("api-gateway: no API_GATEWAY_OPERATOR_ADDR — /v1/control routes not registered")
 	}
 
-	authn, oidcAuth, err := buildAuthenticator(cfg, obs, logger)
+	authn, oidcAuth, revocations, err := buildAuthenticator(cfg, obs, logger)
 	if err != nil {
 		return 2
 	}
@@ -287,7 +288,30 @@ func run() int {
 	// constraint. On a genuinely wrong configuration this still does the right
 	// thing — the rollout never completes, so the pods that CAN authenticate keep
 	// serving instead of being replaced by pods that cannot.
-	go primeIssuer(ctx, oidcAuth, obs.Registry, cfg.OIDCIssuer, issuerRetryInterval, &ready, logger)
+	//
+	// THE REVOCATION FEED IS PRIMED FIRST, AND FOR A NARROWER REASON THAN IT
+	// LOOKS (#532). The safety property does not live here: revocation.Cache
+	// refuses every request until it has fetched the feed once, so a pod that
+	// somehow reported itself ready with an empty cache would answer 503, not
+	// admit a revoked caller. What this ordering buys is that such a pod stays
+	// OUT of the Service instead of joining it and 503ing real traffic — the
+	// same argument primeIssuer makes one line down, for the same reason.
+	go func() {
+		if primeRevocations(ctx, revocations, obs.Registry, issuerRetryInterval, logger) {
+			// The refresh loop only starts once a first fetch has landed. Started
+			// before it, a failing loop would log the same error the prime already
+			// logs, twice, and tell an operator nothing new.
+			go revocations.Run(ctx, func(err error) {
+				// ERROR, not WARN. Every failure here ages the cached feed toward
+				// its ceiling, past which this gateway refuses everybody. An
+				// operator has one warning before that, and this is it.
+				logger.Error("api-gateway: revocation feed refresh failed — the cached feed is "+
+					"ageing toward its ceiling, past which every request is refused",
+					"err", err, "max_age", revocations.MaxAge())
+			})
+		}
+		primeIssuer(ctx, oidcAuth, obs.Registry, cfg.OIDCIssuer, issuerRetryInterval, &ready, logger)
+	}()
 
 	go func() {
 		if oidcAuth == nil {
@@ -645,7 +669,7 @@ func primeIssuer(ctx context.Context, a *auth.OIDCAuthenticator, reg prometheus.
 // neither an OIDC issuer nor a JWT secret, so the gateway cannot reach here
 // unauthenticated. There is no third arm, and middleware.Auth refuses every
 // request if a nil Authenticator ever reaches it anyway.
-func buildAuthenticator(cfg config.Config, obs *observability.Provider, logger *slog.Logger) (middleware.Authenticator, *auth.OIDCAuthenticator, error) {
+func buildAuthenticator(cfg config.Config, obs *observability.Provider, logger *slog.Logger) (middleware.Authenticator, *auth.OIDCAuthenticator, *revocation.Cache, error) {
 	switch {
 	case cfg.OIDCIssuer != "":
 		oidc, err := auth.NewOIDCAuthenticator(auth.OIDCConfig{
@@ -657,7 +681,7 @@ func buildAuthenticator(cfg config.Config, obs *observability.Provider, logger *
 		})
 		if err != nil {
 			logger.Error("api-gateway: OIDC config invalid", "err", err)
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
 		// The degraded-key posture, exported for as long as it lasts (#242).
 		// Registered here rather than inside NewGatewayMetrics because it only
@@ -670,14 +694,118 @@ func buildAuthenticator(cfg config.Config, obs *observability.Provider, logger *
 		// and was one of three signals telling an operator everything was fine while
 		// nothing could be authenticated (#457). The success line is now printed by
 		// primeIssuer, after keys are actually in hand.
-		return oidcAuthenticator{oidc}, oidc, nil
+
+		// PER-SUBJECT REVOCATION (#532). config.Load has already refused an OIDC
+		// arm with no feed URL, so this cannot be reached unconfigured.
+		revs, err := revocation.New(revocation.Config{URL: cfg.RevocationsURI})
+		if err != nil {
+			logger.Error("api-gateway: revocation feed config invalid", "err", err)
+			return nil, nil, nil, err
+		}
+		// WRAPPED, NOT CONSULTED SOMEWHERE ELSE. The revocation check has to sit
+		// between "this token verifies" and "this caller is admitted", and the
+		// only way to make that true of EVERY authenticator this gateway will
+		// ever build is to make the wrap the thing that PRODUCES one. #535 and
+		// #539 were both the other shape: a control that existed, was wired, and
+		// was in nobody's path.
+		revoking, err := middleware.NewRevoking(oidcAuthenticator{oidc}, revs)
+		if err != nil {
+			logger.Error("api-gateway: revocation wiring invalid", "err", err)
+			return nil, nil, nil, err
+		}
+		return revoking, oidc, revs, nil
 	default:
 		// Reachable only with API_GATEWAY_ALLOW_DEV_HS256=true — config.Load
 		// refuses the arm otherwise, so this WARN now describes a deliberate
 		// choice rather than an omission nobody noticed (#242).
+		//
+		// "NO REVOCATION PATH" IS NOW LITERAL AND NOT RHETORICAL (#532). The OIDC
+		// arm above is wrapped in middleware.Revoking against identity's feed;
+		// this arm is not, because a dev rig runs no identity service to serve
+		// one. That asymmetry is deliberate and it is the reason this arm must
+		// stay unreachable without API_GATEWAY_ALLOW_DEV_HS256.
 		logger.Warn("api-gateway: using dev HS256 validator — a shared symmetric secret with no " +
-			"revocation path (API_GATEWAY_ALLOW_DEV_HS256=true). Set API_GATEWAY_OIDC_ISSUER for production")
-		return middleware.NewJWTAuthenticator(cfg.JWTSecret), nil, nil
+			"revocation path, and with NO per-subject revocation either: disabling an account does " +
+			"not stop the token it already holds (API_GATEWAY_ALLOW_DEV_HS256=true). Set " +
+			"API_GATEWAY_OIDC_ISSUER for production")
+		return middleware.NewJWTAuthenticator(cfg.JWTSecret), nil, nil, nil
+	}
+}
+
+// revocationsProbeTimeout bounds one feed fetch during priming. Same figure as
+// issuerProbeTimeout and for the same reason: a probe that can hang forever is a
+// pod that never reports why it is not ready.
+const revocationsProbeTimeout = issuerProbeTimeout
+
+// primeRevocations blocks until identity's revocation feed has been fetched
+// once, then returns true. It returns false immediately on the HS256 arm (no
+// cache) and on context cancellation.
+//
+// WHY THE POD WAITS FOR THIS AT ALL. revocation.Cache refuses every request
+// until its first successful fetch — that is the cold-start clause of #532, and
+// it is enforced in the cache rather than here, so it holds no matter what this
+// composition root does. What waiting buys is that a pod which would refuse
+// everybody does not join the Service and start refusing real traffic. A gateway
+// that cannot read the feed is not a gateway that should be taking orders.
+//
+// IT RETRIES RATHER THAN FAILING FATAL, exactly like primeIssuer: crash-looping
+// the sole ingress over a dependency blip turns a recoverable outage into a
+// total one, and would make the deploy ORDER of two services a hard constraint.
+func primeRevocations(ctx context.Context, c *revocation.Cache, reg prometheus.Registerer, retryEvery time.Duration, logger *slog.Logger) bool {
+	if c == nil {
+		return false
+	}
+	// REGISTERED BEFORE THE FIRST ATTEMPT, so the series exists while the answer
+	// is "never fetched". A gauge that appeared only on success would be absent
+	// exactly when it matters, and absent reads as "no data" rather than as "this
+	// gateway is refusing everybody".
+	reg.MustRegister(prometheus.NewGaugeFunc(prometheus.GaugeOpts{
+		Name: "kanz_api_gateway_revocations_usable",
+		Help: "1 when this gateway holds a revocation feed within its ceiling and is therefore " +
+			"enforcing per-subject revocation; 0 when it is not, in which case every request is " +
+			"refused 503 regardless of the token.",
+	}, func() float64 {
+		if c.Usable() {
+			return 1
+		}
+		return 0
+	}))
+	reg.MustRegister(prometheus.NewGaugeFunc(prometheus.GaugeOpts{
+		Name: "kanz_api_gateway_revocations_age_seconds",
+		Help: "Seconds since the newest successful fetch of identity's revocation feed, or -1 if " +
+			"there has never been one. Climbing toward the ceiling is the only warning before " +
+			"this gateway starts refusing every request.",
+	}, func() float64 {
+		age, ok := c.Age()
+		if !ok {
+			// -1, NOT 0. Zero is what a perfectly fresh feed reports, and "never
+			// fetched" is the opposite of that.
+			return -1
+		}
+		return age.Seconds()
+	}))
+
+	for attempt := 1; ; attempt++ {
+		pctx, cancel := context.WithTimeout(ctx, revocationsProbeTimeout)
+		err := c.Refresh(pctx)
+		cancel()
+		if err == nil {
+			logger.Info("api-gateway: per-subject revocation enabled — identity's feed is in hand",
+				"attempts", attempt, "max_age", c.MaxAge())
+			return true
+		}
+		// ERROR, not WARN. Until this succeeds the gateway refuses every request,
+		// which is an outage — a deliberate, fail-closed one, but an outage, and
+		// logging it at a level operators filter out is how it would stay invisible.
+		logger.Error("api-gateway: CANNOT READ IDENTITY'S REVOCATION FEED — this gateway cannot "+
+			"tell a disabled account from an active one, so it refuses every request (503) and "+
+			"stays OUT of the Service until it can",
+			"err", err, "attempt", attempt, "retry_in", retryEvery)
+		select {
+		case <-ctx.Done():
+			return false
+		case <-time.After(retryEvery):
+		}
 	}
 }
 
@@ -917,5 +1045,6 @@ func edgePrincipal(p *auth.Principal) *middleware.Principal {
 		Tenant:     p.Tenant,
 		Roles:      p.Roles,
 		Portfolios: p.Portfolios,
+		IssuedAt:   p.IssuedAt,
 	}
 }
