@@ -317,11 +317,39 @@ func runConsumers(ctx context.Context, cfg config.Config, readiness *server.Read
 	// them as arithmetic on a local map — no call, no added latency, and a
 	// degraded risk engine makes this view STALE (a refusal) rather than making
 	// the OMS wait on it (an outage).
+	// A MEASURE THE ENGINE COULD NOT COMPUTE IS COUNTED, NOT JUST DROPPED (#509).
+	//
+	// The view declines to fold a measure whose coverage says it was computed over
+	// an incomplete book, so a risk limit over it refuses. That refusal otherwise
+	// looks identical to an engine that never published — and the two need
+	// different people: a stale view is a risk-engine incident, this is a
+	// REFERENCE-DATA one. The contract-terms store has no production writer today,
+	// so the fixed-income measures are the population this counts.
+	//
+	// Zero on registration, so "no unresolved measure has ever arrived" is a
+	// reading rather than an absent series.
+	unresolvedMeasures := prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "kanz_oms_risk_measures_unresolved_total",
+		Help: "Announced risk measures this OMS refused to fold because the engine computed " +
+			"them over an incomplete book (domain.v1.RiskMeasure.coverage). Non-zero means a " +
+			"risk-limit mandate over that measure is REFUSING orders, and the fix is upstream " +
+			"reference data, not the risk engine.",
+	})
+	obs.Registry.MustRegister(unresolvedMeasures)
+
 	risk := riskview.New(
 		riskview.WithOnStale(func(portfolioID, measure string, age time.Duration) {
 			logger.Warn("oms: a risk measure is too old to gate on — orders under a risk-limit "+
 				"mandate will be REFUSED for this portfolio until the engine publishes again",
 				"portfolio_id", portfolioID, "measure", measure, "age", age.String(),
+				"subject", riskview.Subject)
+		}),
+		riskview.WithOnUnresolved(func(portfolioID, measure string, excluded uint32) {
+			unresolvedMeasures.Inc()
+			logger.Warn("oms: a risk measure was announced having been computed over an "+
+				"INCOMPLETE BOOK and will not gate anything — orders under a mandate naming it "+
+				"will be REFUSED until the engine can resolve its inputs",
+				"portfolio_id", portfolioID, "measure", measure, "excluded_positions", excluded,
 				"subject", riskview.Subject)
 		}),
 	)
