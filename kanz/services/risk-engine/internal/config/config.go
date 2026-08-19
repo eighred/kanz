@@ -53,13 +53,39 @@ type Config struct {
 	//
 	// IT SHIPS TRUE, WHICH IS THE OPPOSITE OF THE REST OF THE *_REQUIRE_* FAMILY,
 	// and the reason the family ships false does not apply. OMS_REQUIRE_MANDATE
-	// and OMS_REQUIRE_VERIFIED_ACCOUNT refuse over data an OPERATOR has to go and
-	// correct — unmandated portfolios, unverified accounts — so arming them is a
-	// trading outage until somebody finishes a backlog. This one refuses over
-	// evidence that ships INSIDE THE BINARY: the benchmark case sets are compiled
-	// in, recorded at boot, and eleven of the twelve analytics pass them in every
-	// build that leaves CI. Arming it cannot fail on a deployment that a build
-	// gate did not already fail on.
+	// and OMS_REQUIRE_VERIFIED_ACCOUNT refuse over ESTATE DATA an operator has to
+	// go and correct — unmandated portfolios, unverified accounts — so arming them
+	// is a trading outage until somebody finishes a backlog. This one refuses over
+	// something no operator can be behind on: the twelve analytics this build
+	// carries, graded against benchmarks in the same build.
+	//
+	// THE EVIDENCE IS NOT BAKED IN — IT IS RECOMPUTED ON EVERY BOOT, AND THAT IS
+	// THE ASSUMPTION THIS DEFAULT RESTS ON. benchmarks.Reports() calls
+	// validation.Validate, which RUNS the case sets against the pricers in this
+	// process. So "it passed in CI" only implies "it passes in the pod" if the two
+	// compute the same floats. They do, today, for a reason that is not a property
+	// of this package and can change without anyone touching it:
+	//
+	//   - .github/workflows/build.yml's docker/build-push-action step passes NO
+	//     `platforms:` key, and no Dockerfile in this repo sets GOARCH or reads
+	//     TARGETARCH. Every image is therefore single-arch, native to the runner.
+	//   - Both that job and kanz-ci.yml's `go test -race -p 1 ./...` are
+	//     `runs-on: ubuntu-latest`, so CI executes these same case sets on the
+	//     same architecture the image is built for.
+	//   - IEEE-754 float64 is deterministic given identical architecture and Go
+	//     version, so a validation that passes in CI passes in the pod.
+	//
+	// THE DAY THIS ESTATE PUBLISHES A MULTI-ARCH IMAGE, that chain breaks and
+	// boot-time validation becomes architecture-dependent. Go permits FMA
+	// contraction on arm64 and not on amd64, and math.Exp/Log are assembly on some
+	// arches and pure Go on others — a LAST-ULP difference in one transcendental
+	// against a 1e-9 identity tolerance would then CrashLoopBackOff EVERY
+	// risk-engine replica on the arch CI did not run, with a green pipeline behind
+	// it. Adding `platforms:` to build.yml is therefore a change to THIS default:
+	// either the case sets get arch-aware tolerances, or this ships false.
+	//
+	// (Verified 2026-08-19 against build.yml and kanz-ci.yml at 06e4779. It is the
+	// premise, not the conclusion, that a future reader must re-check.)
 	//
 	// SO THE DEFAULT IS THE ARGUMENT. Defaulting false would mean shipping the
 	// posture that has been in place since #494 — a complete gate nobody turned

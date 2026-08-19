@@ -188,13 +188,21 @@ spec:
             # this estate ships would grade our arithmetic against our own.
             #
             # WHY NOT "false" LIKE OMS_REQUIRE_MANDATE AND THE REST. Those refuse over
-            # data an operator has to go and fix — unmandated portfolios, unverified
-            # accounts — so arming them is a trading outage until a backlog is
-            # cleared. This one refuses over evidence COMPILED INTO THE IMAGE: the
-            # benchmark case sets run at boot against the pricers in this same binary.
-            # There is no estate state it can trip over, so there is no backlog to
-            # clear first, and shipping it false would deploy the exact posture #471
-            # was filed about — a complete gate nobody turned on.
+            # ESTATE DATA an operator has to go and fix — unmandated portfolios,
+            # unverified accounts — so arming them is a trading outage until a backlog
+            # is cleared. This one refuses over the analytics in this same image, and
+            # there is no estate state it can trip over, so shipping it false would
+            # deploy the exact posture #471 was filed about — a complete gate nobody
+            # turned on.
+            #
+            # THE EVIDENCE IS RECOMPUTED ON EVERY BOOT, NOT BAKED INTO THE IMAGE: the
+            # case sets RUN here, against the pricers in this process. That is safe
+            # only because every image is single-arch (build.yml passes no
+            # `platforms:`) and CI runs the same case sets on the same ubuntu-latest
+            # architecture, so IEEE-754 makes the pod's floats the ones CI graded.
+            # PUBLISHING A MULTI-ARCH IMAGE BREAKS THAT and can CrashLoopBackOff every
+            # replica on the arch CI did not run — see the long comment on
+            # Config.RequireValidatedAnalytics before adding `platforms:`.
             #
             # WHAT THIS POD DOES DIFFERENTLY ON THE FIRST BOOT AFTER THIS MERGES:
             # nothing. The eleven pass and the twelfth is exempt, so it logs "risk
