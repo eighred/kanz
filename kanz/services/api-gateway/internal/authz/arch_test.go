@@ -111,7 +111,14 @@ func TestTheWholeRouteTableIsDeclared(t *testing.T) {
 	// routes are registered only when the deployment names an approver — the whole
 	// point of the maker-checker repair — so an empty one here would hide the
 	// second-signature surface from this table exactly as "" would hide funding.
-	proxy.New(nil, proxy.Roles{Fund: "kanz-treasury", Approve: "kanz-compliance"}).Routes(m)
+	//
+	// AND A NON-EMPTY MANDATE ROLE (#562). Act two's three routes are registered
+	// only when the deployment names a mandate signatory, so "" here would hide the
+	// surface that changes what governs a portfolio from the table this test's doc
+	// says covers every /v1 route.
+	proxy.New(nil, proxy.Roles{
+		Fund: "kanz-treasury", Approve: "kanz-compliance", Mandate: "kanz-mandate-officer",
+	}).Routes(m)
 	// THE CONTROL PLANE, AND ITS ABSENCE WAS THIS GUARD'S OWN BLIND SPOT (#573).
 	//
 	// The three lines above defend carefully against a route escaping through a
@@ -232,6 +239,32 @@ func TestTheWholeRouteTableIsDeclared(t *testing.T) {
 		"POST /v1/exceptions/{id}/override":         authz.Approve,
 		"POST /v1/exceptions/{id}/override/approve": authz.Approve,
 		"GET /v1/exceptions/pending-overrides":      authz.Approve,
+
+		// CHANGING A MANDATE, BY TWO PEOPLE (#562, #410 act two). Should a read
+		// token be able to call these? No — they rewrite the constraint the
+		// pre-trade gate enforces on every order, and the queue names the proposer
+		// of every unsigned change to it.
+		//
+		// Should a TRADE token? No, and more sharply than anywhere else in this
+		// table: a trader who can change the mandate does not need to break the
+		// pre-trade gate, only to widen it.
+		//
+		// Should an APPROVE token? THAT is the question this entry exists to
+		// answer, and #539 predicted the opposite — "a third route on the same
+		// capability". No, because one signatory holding both would give the second
+		// signature on relaxing a mandate AND the second signature on the order
+		// that mandate would have refused. Each act shows two names, each passes
+		// its own self-approval check, and nothing compares the two records. The
+		// capability's own doc carries the full argument; validateAuth refuses to
+		// start if the two role names collide.
+		//
+		// PROPOSE AND APPROVE SHARE authz.Mandate, on the override path's
+		// reasoning: four-eyes here is a check on the PERSON, not the role —
+		// compliance compares authenticated subjects across two requests, so two
+		// holders are two signatures and one holder acting twice is refused.
+		"POST /v1/portfolios/{id}/mandate":         authz.Mandate,
+		"POST /v1/portfolios/{id}/mandate/approve": authz.Mandate,
+		"GET /v1/mandates/pending-changes":         authz.Mandate,
 
 		// THE OPERATOR CONTROL PLANE (#573). Every one of these is authz.Operate,
 		// and the capability is the whole argument: Read and Trade are

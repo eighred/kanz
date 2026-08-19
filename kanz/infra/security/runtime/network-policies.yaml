@@ -759,6 +759,18 @@ spec:
               app: optimization
       ports:
         - { protocol: TCP, port: 8100 }
+    # CHANGING A MANDATE, BY TWO PEOPLE (#562, #410 act two). Its own entry, and
+    # on 8095 rather than compliance's 8091, which is the whole point: 8091 serves
+    # /metrics and allow-observability-scrape admits it across every pod in this
+    # namespace, so these routes on that port would let a pod in kanz-observability
+    # send two self-chosen principals and hold BOTH signatures on a change to the
+    # constraint every order is checked against. 8095 is outside that list.
+    - to:
+        - podSelector:
+            matchLabels:
+              app: compliance
+      ports:
+        - { protocol: TCP, port: 8095 }
 ---
 # MODEL PORTFOLIOS (#409) — the ingress half, and it is a capital boundary rather
 # than a read one.
@@ -781,6 +793,43 @@ spec:
 # arriving open and waiting for someone to notice. test/arch's
 # tenantHeaderTrustingUndeployed asserts the workload is still absent and fails
 # when it appears, which is when the rest of this obligation comes due.
+# THE MANDATE-CHANGE SURFACE (#562, #410 act two) — the ingress half, and it is a
+# CONTROL boundary rather than a read one.
+#
+# compliance authenticates nobody. It names the proposer and the approver of a
+# mandate change from X-Kanz-Principal-Subject and scopes every queue read by
+# X-Kanz-Principal-Tenant, so this rule is what makes those two names real: a pod
+# that could reach :8095 directly would set its own principal header twice and
+# hold BOTH signatures on the constraint every order in a portfolio is checked
+# against. That is precisely the state #562 was filed to end — a mandate change
+# one party can make alone — arriving through the network layer instead of
+# through the CLI.
+#
+# ONE PEER, AND OBSERVABILITY IS NOT AMONG THEM. compliance's /metrics and probes
+# stay on :8091, which allow-observability-scrape admits; the API is on a port
+# that rule deliberately does not list. That split is the #232 fix optimization
+# and accounting made before it, and test/arch/network_policy_coverage_test.go
+# fails if the two listeners ever merge back.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-gateway-to-compliance-mandate
+  namespace: kanz-services
+  labels:
+    app.kubernetes.io/part-of: kanz
+spec:
+  podSelector:
+    matchLabels:
+      app: compliance
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: api-gateway
+      ports:
+        - { protocol: TCP, port: 8095 }
+---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:

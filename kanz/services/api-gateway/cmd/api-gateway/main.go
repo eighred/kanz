@@ -464,6 +464,9 @@ func buildProxy(ctx context.Context, cfg config.Config, logger *slog.Logger) (*p
 	if cfg.AccountingAddr != "" {
 		bases[proxy.ServiceAccounting] = cfg.AccountingAddr
 	}
+	if cfg.ComplianceAddr != "" {
+		bases[proxy.ServiceCompliance] = cfg.ComplianceAddr
+	}
 	// The funding surface is registered by the ROLE, not by the address (#535). It
 	// is logged either way: an absent route must be a stated posture, not something
 	// an operator discovers from a 404.
@@ -530,9 +533,38 @@ func buildProxy(ctx context.Context, cfg config.Config, logger *slog.Logger) (*p
 			"already know and has no way to learn one, so a held order is discoverable only by reading " +
 			"NATS (#539)")
 	}
+
+	// AND ACT TWO (#562). The posture is logged on BOTH sides for the reason the
+	// override branch above records: "nothing configured" and "checked, and fine"
+	// printed the same line here once already, and the inverse — a role named over
+	// no backend — read as success.
+	//
+	// config.validateAuth already refuses the dangerous direction (an address with
+	// no signatory), so what is left to say is the two harmless-but-silent ones.
+	switch {
+	case cfg.MandateRole == "" && cfg.ComplianceAddr == "":
+		logger.Info("api-gateway: no mandate-change surface (no compliance upstream and no signatory) — " +
+			"cmd/kanz-mandate remains the only way to change a mandate in this deployment, and it " +
+			"takes two INVOCATIONS rather than two people (#562)")
+	case cfg.MandateRole == "":
+		// Unreachable via config.Load, which refuses this pairing. Kept because a
+		// Config built in a test or by a future caller can still reach it, and a
+		// silent 404 here is what #535 cost.
+		logger.Warn("api-gateway: compliance is wired but no API_GATEWAY_MANDATE_ROLE — the mandate " +
+			"propose/approve/pending routes are NOT registered, so this gateway answers 404 to them " +
+			"and NOBODY can change a mandate through it (#562)")
+	case cfg.ComplianceAddr == "":
+		logger.Warn("api-gateway: API_GATEWAY_MANDATE_ROLE names " + cfg.MandateRole +
+			" but no API_GATEWAY_COMPLIANCE_ADDR — the mandate routes ARE registered and every one " +
+			"of them 503s. Granting that role to a person now gives them an authority no upstream " +
+			"honours (#562)")
+	default:
+		logger.Info("api-gateway: mandate-change surface fronted", "role", cfg.MandateRole)
+	}
+
 	if len(bases) == 0 {
 		logger.Warn("api-gateway: Phase-7 read surfaces disabled (no upstream addresses)")
-		return proxy.New(nil, proxy.Roles{Fund: cfg.FundRole, Approve: cfg.ApproveRole}), nil
+		return proxy.New(nil, proxyRoles(cfg)), nil
 	}
 
 	// ONE CLIENT, BUILT THE SAME WAY ON BOTH BRANCHES; ONLY THE TLS DIFFERS.
@@ -581,7 +613,20 @@ func buildProxy(ctx context.Context, cfg config.Config, logger *slog.Logger) (*p
 		// the dev kind rig has no SPIRE.
 		logger.Warn("api-gateway: Phase-7 upstreams plaintext (no API_GATEWAY_SPIFFE_SOCKET)")
 	}
-	return proxy.New(proxy.NewMeshBackend(bases, &http.Client{Transport: tr}), proxy.Roles{Fund: cfg.FundRole, Approve: cfg.ApproveRole}), nil
+	return proxy.New(proxy.NewMeshBackend(bases, &http.Client{Transport: tr}), proxyRoles(cfg)), nil
+}
+
+// proxyRoles is the ONE place the optional-capability roles are handed to the
+// proxy handler.
+//
+// IT IS A FUNCTION BECAUSE THERE ARE TWO RETURN PATHS ABOVE, and the second one
+// is the disabled-backend branch nothing exercises in a normal deployment. Built
+// twice by hand, a third role added to one literal and not the other would leave
+// the nil-backend gateway registering a different route set from the live one —
+// discoverable only by running a gateway with no upstreams and noticing a 404
+// where a 503 belonged.
+func proxyRoles(cfg config.Config) proxy.Roles {
+	return proxy.Roles{Fund: cfg.FundRole, Approve: cfg.ApproveRole, Mandate: cfg.MandateRole}
 }
 
 // issuerProbeTimeout bounds one attempt to reach the issuer. Generous, because
@@ -874,6 +919,31 @@ func buildRouter(cfg config.Config, h *gateway.Handler, o *orders.Handler, p *pr
 	// internal/dualcontrol only checks that the approver is a different SUBJECT.
 	if cfg.ApproveRole != "" {
 		grants[cfg.ApproveRole] = []authz.Capability{authz.Read, authz.Approve}
+	}
+	// THE MANDATE SIGNATORY CHANGES THE CONSTRAINT ITSELF (#562, #410 act two):
+	// what a portfolio may hold, in what concentration, at what leverage. Both
+	// halves of that act — proposing and signing — are this one capability,
+	// because four-eyes here is a check on the PERSON and not on the role:
+	// compliance compares authenticated subjects, so two holders are two
+	// signatures and one holder acting twice is refused across two requests.
+	//
+	// Conditional for the same reason the two above are — Grants is keyed by the
+	// role STRING, and an unconditional entry would put a "" key in the map that
+	// decides who may rewrite a mandate, which any token carrying an empty role
+	// entry would match.
+	//
+	// IT CARRIES Read, and here that is not a convenience. An approver who cannot
+	// read the portfolio's exposure and positions is signing a constraint change
+	// against a book they cannot see — and the mandate they are approving is
+	// evaluated against exactly that book.
+	//
+	// IT DOES NOT CARRY Approve, AND THAT SEPARATION IS THE ISSUE. validateAuth
+	// refuses to start if the two role names collide: one signatory holding both
+	// could give the second signature on relaxing a mandate and then the second
+	// signature on the order that mandate would have refused, with each act
+	// showing two names and nothing anywhere comparing the two records.
+	if cfg.MandateRole != "" {
+		grants[cfg.MandateRole] = []authz.Capability{authz.Read, authz.Mandate}
 	}
 	gwMux := authz.NewMux(grants, recorder)
 	h.Routes(gwMux)

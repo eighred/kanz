@@ -12,10 +12,32 @@ import (
 // Config is the compliance service runtime configuration, sourced from the
 // environment so it composes with the CSI/Vault secret mounts (SEC-01d).
 type Config struct {
+	// Listen serves the probes and /metrics. IT IS THE SCRAPED PORT, which is why
+	// the mandate-change API is not on it — see APIListen.
 	Listen       string
 	LogLevel     slog.Level
 	Source       string
 	OTLPEndpoint string
+
+	// APIListen serves the mandate-change routes (#562) and NOTHING ELSE.
+	//
+	// A SECOND LISTENER, AND THE SPLIT IS THE WHOLE SECURITY ARGUMENT.
+	// allow-observability-scrape admits whatever port serves /metrics from the
+	// entire kanz-observability namespace, and these routes decide who governs a
+	// portfolio from the X-Kanz-Principal-* headers the api-gateway injects. On the
+	// scraped port a pod in kanz-observability could send two self-chosen
+	// principals and hold BOTH signatures on a mandate change — the exact failure
+	// this control exists to prevent, arriving through the network layer.
+	//
+	// #232 named the fix as a code change per service; optimization (#409) and
+	// accounting (#447) made it first, and test/arch/network_policy_coverage_test.go
+	// fails if this port ever collapses back onto the scraped one.
+	//
+	// IT IS REACHED ONLY WHEN COMPLIANCE_NATS_URL IS SET, because approving a
+	// mandate change publishes a FACT and there is nothing to publish to otherwise.
+	// A probes-only deployment does not mount it, so the routes 404 rather than
+	// answering 500 forever.
+	APIListen string
 
 	// SPIFFESocket is the SPIFFE Workload API socket (SEC-01a CSI mount). When
 	// set, the bus dials the spine over mTLS presenting this workload SVID; empty
@@ -53,6 +75,7 @@ func (Config) MandateSubject() string { return comp.SubjectMandateChanged }
 func Load() (Config, error) {
 	return Config{
 		Listen:        envOr("COMPLIANCE_LISTEN", ":8091"),
+		APIListen:     envOr("COMPLIANCE_API_LISTEN", ":8095"),
 		LogLevel:      parseLevel(envOr("COMPLIANCE_LOG_LEVEL", "info")),
 		Source:        envOr("COMPLIANCE_SOURCE", "compliance"),
 		OTLPEndpoint:  os.Getenv("COMPLIANCE_OTLP_ENDPOINT"),

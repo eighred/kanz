@@ -280,6 +280,40 @@ spec:
             # So the order half of maker-checker needs BOTH keys set, and the override
             # half needs only the role. Recorded because the two halves look identical
             # from this file and are not.
+            #
+            # WHO MAY CHANGE A MANDATE (#562, #410 act two). NEITHER KEY IS SET HERE,
+            # AND THAT IS THE POSTURE.
+            #
+            #   API_GATEWAY_COMPLIANCE_ADDR  compliance's MANDATE listener — :8095, NOT
+            #                                the :8091 it serves /metrics and probes on
+            #                                (compliance-deploy.yaml,
+            #                                allow-gateway-to-compliance-mandate in
+            #                                infra/security/runtime/network-policies.yaml)
+            #   API_GATEWAY_MANDATE_ROLE     the role carrying authz.Mandate
+            #
+            # A PAIR, like funding and unlike the override half — and the reason is the
+            # port. That listener serves the three mandate routes and nothing else, so
+            # setting the address without naming a signatory exposes a surface every
+            # principal that exists gets a 403 from, and validateAuth refuses to start.
+            # Unset, the routes are not registered and this gateway answers 404 to:
+            #
+            #   POST /v1/portfolios/{id}/mandate
+            #   POST /v1/portfolios/{id}/mandate/approve
+            #   GET  /v1/mandates/pending-changes
+            #
+            # THE ROLE MUST DIFFER FROM API_GATEWAY_APPROVE_ROLE, and that collision is
+            # the whole argument for a separate capability. One signatory holding both
+            # gives the second signature on RELAXING a mandate and then the second
+            # signature on the ORDER that mandate would have refused. Each act shows two
+            # names, each passes its own self-approval check, and nothing anywhere
+            # compares the two records — the escalation is invisible in exactly the trail
+            # an auditor would read. validateAuth refuses to start on it.
+            #
+            # UNTIL BOTH ARE SET, cmd/kanz-mandate is the only way to change a mandate in
+            # this deployment, and it takes two INVOCATIONS rather than two people: both
+            # run under one operator's SVID, so a unilateral change is detectable in the
+            # trail and not prevented. That is the state #562 exists to end, and it ends
+            # for a deployment on the day these two lines are added.
             # PER POD, not platform-wide. See THE SCALE INVARIANT above.
             - { name: API_GATEWAY_RATE_LIMIT_PER_SEC, value: "50" }
             - { name: API_GATEWAY_RATE_LIMIT_BURST, value: "100" }

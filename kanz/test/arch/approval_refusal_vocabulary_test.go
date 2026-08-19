@@ -109,6 +109,20 @@ func TestNeitherDualControlQueueSpellsItsOwnState(t *testing.T) {
 			filepath.Join(root, "services", "oms", "internal", "grpcsrv", "server.go"),
 			"pendingApprovalOf",
 		},
+		// THE THIRD QUEUE (#562, #410 act two). Added the day it landed rather
+		// than after it diverged, which is the only time this list is cheap to
+		// extend — and the guard's name says NEITHER, so leaving a third renderer
+		// outside it would be the overclaim #573 spent an issue on one file over.
+		//
+		// Its set is {pending, lapsed}: a refusal on this surface goes back on the
+		// same HTTP request, so there is no window in which a refused approval
+		// waits on a queue to be discovered. That is datamaster's shape, and the
+		// reason the three sets differ is on the constants themselves.
+		{
+			"compliance's pending mandate-change queue",
+			filepath.Join(root, "services", "compliance", "internal", "api", "api.go"),
+			"handlePendingChanges",
+		},
 	} {
 		used := selectorsOn(t, q.path, q.fn, "dualcontrol")
 		var states int

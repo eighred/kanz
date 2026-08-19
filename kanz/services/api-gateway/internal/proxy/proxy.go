@@ -97,6 +97,12 @@ const (
 	ServiceTVSync       Service = "tv-sync"
 	ServiceOptimization Service = "optimization"
 	ServiceAccounting   Service = "accounting"
+	// ServiceCompliance is the mandate-change surface (#562, #410 act two). It is
+	// the compliance service's SECOND listener — the one that serves no /metrics —
+	// because these routes decide who governs a portfolio from the principal header
+	// this gateway injects, and the scraped port is reachable from the whole
+	// kanz-observability namespace. See services/compliance/internal/config.
+	ServiceCompliance Service = "compliance"
 )
 
 // Request is the upstream call the Backend forwards. Principal is the
@@ -137,11 +143,11 @@ type Handler struct {
 // Roles names the deployment's holders of the capabilities that are OPTIONAL —
 // the ones whose routes are registered only when somebody can actually hold them.
 //
-// A STRUCT RATHER THAN POSITIONAL STRINGS. There are two of these now and #410's
-// remaining acts will add a third; New(backend, "", "compliance") and
-// New(backend, "compliance", "") differ by one argument position, are both valid
-// Go, and produce a silent capability outage of exactly the #535 kind. A field
-// name cannot be transposed.
+// A STRUCT RATHER THAN POSITIONAL STRINGS, and #410's last act is the third —
+// which is the prediction this shape was chosen for. New(backend, "", "x") and
+// New(backend, "x", "") differ by one argument position, are both valid Go, and
+// produce a silent capability outage of exactly the #535 kind. A field name
+// cannot be transposed.
 //
 // ROLE STRINGS RATHER THAN BOOLS, so the composition root passes what config
 // already holds and nothing has to restate the condition. This package does not
@@ -154,6 +160,13 @@ type Roles struct {
 	// Approve is the deployment's approver (API_GATEWAY_APPROVE_ROLE). EMPTY ⇒ the
 	// three override routes are not registered (#539).
 	Approve string
+	// Mandate is the deployment's mandate signatory (API_GATEWAY_MANDATE_ROLE).
+	// EMPTY ⇒ the three mandate-change routes are not registered (#562).
+	//
+	// A SEPARATE FIELD FROM Approve, NOT A REUSE OF IT, and the argument is on
+	// authz.Mandate: one pool of signatories holding both would let one person sign
+	// away a limit and then sign the trade that limit existed to stop.
+	Mandate string
 }
 
 // New returns a proxy handler over the backend. A nil backend disables the
@@ -281,6 +294,49 @@ func (h *Handler) Routes(mux *authz.Mux) {
 			h.handle(ServiceDataMaster, true, nil))
 		mux.Handle(authz.Approve, "GET /v1/exceptions/pending-overrides",
 			h.handle(ServiceDataMaster, true, nil))
+	}
+
+	// CHANGING A MANDATE, BY TWO PEOPLE (#562, #410 act two) — the last of the
+	// three acts, and the one that was not merely unrouted but UNAUTHENTICATED BY
+	// CONSTRUCTION.
+	//
+	// cmd/kanz-mandate already took two steps and could never take two PEOPLE: both
+	// invocations ran on one operator's machine under one SVID, so the proposal file
+	// was a carrier and not a signature, and its own doc said so. A mandate is the
+	// control every order is checked against, so a unilateral change is the most
+	// consequential of the three — relax the constraint, then place the order it
+	// would have refused, both acts reading as correct in the trail. These routes
+	// make the two steps two separately authenticated REQUESTS, which is the only
+	// thing that turns detectable into preventable.
+	//
+	// authz.Mandate AND NOT authz.Approve, which contradicts what #539 predicted.
+	// The argument is written out on the capability: under one capability the second
+	// signature on the mandate change and the second signature on the held order
+	// come from the same pool, so ONE signatory can give both — sign away the limit,
+	// then sign the trade the limit existed to stop.
+	//
+	// requirePrincipal is TRUE on all three. compliance takes the proposer and the
+	// approver off X-Kanz-Principal-Subject and scopes every read by the tenant
+	// header; an anonymous forward is a mandate change signed by nobody, which is
+	// #444's forged-actor defect arriving on the surface built to prevent it.
+	//
+	// FOUR-EYES IS NOT ENFORCED HERE. compliance compares authenticated subjects
+	// through internal/dualcontrol, normalised for case and space, and owns that
+	// rule with the tests that prove it. Restating it at the edge would be the
+	// second implementation this repository keeps paying for.
+	//
+	// REGISTERED ONLY WHEN A MANDATE SIGNATORY IS NAMED (#535), for the reason
+	// spelled out on the two surfaces above: authz.Mandate is carried by no role
+	// unless API_GATEWAY_MANDATE_ROLE names one, and a route whose capability
+	// nobody holds answers 403 to every principal that exists while reading as a
+	// working control.
+	if h.roles.Mandate != "" {
+		mux.Handle(authz.Mandate, "POST /v1/portfolios/{id}/mandate",
+			h.handle(ServiceCompliance, true, nil))
+		mux.Handle(authz.Mandate, "POST /v1/portfolios/{id}/mandate/approve",
+			h.handle(ServiceCompliance, true, nil))
+		mux.Handle(authz.Mandate, "GET /v1/mandates/pending-changes",
+			h.handle(ServiceCompliance, true, nil))
 	}
 
 	// PORTFOLIO CONSTRUCTION (#409). The optimization service authenticates
