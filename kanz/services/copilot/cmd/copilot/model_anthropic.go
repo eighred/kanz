@@ -19,6 +19,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"strings"
 
@@ -110,7 +111,19 @@ func (m *anthropicModel) Complete(ctx context.Context, req llm.Request) (llm.Res
 	stream := m.client.Beta.Messages.NewStreaming(ctx, params)
 	acc := anthropic.BetaMessage{}
 	for stream.Next() {
-		acc.Accumulate(stream.Current())
+		// AN EVENT THAT WILL NOT ACCUMULATE LEAVES acc PARTIAL. Discarding this
+		// error serves whatever assembled — a truncated answer, or a tool_use
+		// block that never completed — to a portfolio manager AS ANALYSIS, with
+		// nothing anywhere saying it was cut short. stream.Err() below does not
+		// cover it: that reports a transport failure, not a message the SDK could
+		// not put back together.
+		//
+		// Nothing had ever flagged it because CI's golangci-lint ran with no
+		// build tags, so neither adapter behind one was linted at all (#179
+		// verification; the lint step now passes the shipped tags).
+		if err := acc.Accumulate(stream.Current()); err != nil {
+			return llm.Response{}, fmt.Errorf("anthropic: incomplete streamed message: %w", err)
+		}
 	}
 	if err := stream.Err(); err != nil {
 		return llm.Response{}, err
