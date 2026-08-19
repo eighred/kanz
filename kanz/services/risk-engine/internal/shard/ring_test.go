@@ -1,9 +1,21 @@
 package shard
 
 import (
+	"errors"
 	"fmt"
 	"testing"
 )
+
+// mustAssign builds an Assignment or fails: NewAssignment refuses a
+// half-configured ring, and ignoring that error would test a nil value.
+func mustAssign(t *testing.T, ring *Ring, self string) *Assignment {
+	t.Helper()
+	a, err := NewAssignment(ring, self)
+	if err != nil {
+		t.Fatalf("NewAssignment(%v, %q): %v", ring.Members(), self, err)
+	}
+	return a
+}
 
 // Ownership is a pure function of (members, key): two rings built from the
 // same member set agree on every owner, regardless of construction order.
@@ -40,7 +52,7 @@ func TestAssignment_PartitionIsCompleteAndDisjoint(t *testing.T) {
 	ring := NewRing(members, 0)
 	assigns := map[string]*Assignment{}
 	for _, m := range members {
-		assigns[m] = NewAssignment(ring, m)
+		assigns[m] = mustAssign(t, ring, m)
 	}
 	for i := 0; i < 2000; i++ {
 		k := fmt.Sprintf("PORT-%d", i)
@@ -95,21 +107,19 @@ func TestRing_BalancedLoad(t *testing.T) {
 	}
 }
 
-// An empty / single-member ring is the unsharded default: Owns is always
-// true and Sharded reports false.
+// NOTHING CONFIGURED is the one accepted unsharded posture: no members AND no
+// id. Owns is always true and Sharded reports false.
 func TestAssignment_UnshardedOwnsEverything(t *testing.T) {
 	for _, tc := range []struct {
-		name    string
-		ring    *Ring
-		self    string
-		sharded bool
+		name string
+		ring *Ring
 	}{
-		{"nil ring", nil, "r0", false},
-		{"empty members", NewRing(nil, 0), "r0", false},
+		{"nil ring", nil},
+		{"empty members", NewRing(nil, 0)},
 	} {
-		a := NewAssignment(tc.ring, tc.self)
-		if a.Sharded() != tc.sharded {
-			t.Errorf("%s: Sharded()=%v want %v", tc.name, a.Sharded(), tc.sharded)
+		a := mustAssign(t, tc.ring, "")
+		if a.Sharded() {
+			t.Errorf("%s: Sharded()=true want false", tc.name)
 		}
 		if !a.Owns("anything") {
 			t.Errorf("%s: expected to own everything", tc.name)
@@ -117,10 +127,50 @@ func TestAssignment_UnshardedOwnsEverything(t *testing.T) {
 	}
 }
 
+// EVERY HALF-CONFIGURED RING IS REFUSED (#110). Each of these once produced a
+// replica that consumed the whole spine and applied none of it (or silently
+// owned all of it) while its probes stayed green; construction now fails and
+// the composition root exits.
+func TestNewAssignment_RefusesHalfConfigured(t *testing.T) {
+	ring := NewRing([]string{"r0", "r1"}, 0)
+	for _, tc := range []struct {
+		name string
+		ring *Ring
+		self string
+		want error
+	}{
+		{"id absent from the member list", ring, "r9", ErrSelfNotAMember},
+		{"id differs only by whitespace-free typo", ring, "r0-0", ErrSelfNotAMember},
+		{"members configured, no id", ring, "", ErrSelfUnset},
+		{"id configured, no members", NewRing(nil, 0), "r0", ErrMembersUnset},
+		{"id configured, nil ring", nil, "r0", ErrMembersUnset},
+	} {
+		a, err := NewAssignment(tc.ring, tc.self)
+		if !errors.Is(err, tc.want) {
+			t.Errorf("%s: err=%v, want %v", tc.name, err, tc.want)
+		}
+		if a != nil {
+			t.Errorf("%s: a refused Assignment must be nil, got %+v", tc.name, a)
+		}
+	}
+}
+
+// The id is trimmed, because the member list is: an id that matches no member
+// owns nothing, and whitespace must not be the reason.
+func TestNewAssignment_TrimsSelf(t *testing.T) {
+	a, err := NewAssignment(NewRing([]string{"r0", "r1"}, 0), "  r0\n")
+	if err != nil {
+		t.Fatalf("a padded id must still match its member: %v", err)
+	}
+	if !a.Sharded() {
+		t.Fatal("expected Sharded() true")
+	}
+}
+
 // A populated ring reports Sharded and pins ownership to self.
 func TestAssignment_ShardedGatesToSelf(t *testing.T) {
 	ring := NewRing([]string{"r0", "r1"}, 0)
-	a := NewAssignment(ring, "r0")
+	a := mustAssign(t, ring, "r0")
 	if !a.Sharded() {
 		t.Fatal("expected Sharded() true for a populated ring")
 	}

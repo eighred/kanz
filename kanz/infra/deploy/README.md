@@ -79,7 +79,10 @@ so adding the file *is* the GitOps registration — no per-service Argo Applicat
 copilot boots safely closed: with no `COPILOT_POLICY_PATH` its authorizer denies
 all, and `COPILOT_MODEL_ID` is the version knob (default `claude-fable-5`); the
 real Claude client + governed mTLS client wire at the composition root
-(PARITY-04a/b). The progressive-delivery `Rollout` + PDB + KEDA for these
+(PARITY-04a/b). It also **refuses to start (exit 2) without `COPILOT_PROVIDER`**
+(#179) — which model vendor answers is chosen at runtime among the adapters the
+image linked, and is deliberately not defaulted. Changing that value also needs
+that vendor's credential mounted, or the pod exits 2 at boot naming the mount. The progressive-delivery `Rollout` + PDB + KEDA for these
 services come in SVCWIRE-01d; edge auth + routes in SVCWIRE-01b.
 
 ## Autoscaling + availability (INFRA-01c/d)
