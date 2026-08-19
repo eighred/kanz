@@ -149,6 +149,24 @@ spec:
             # here spends no request on .well-known and leaves no doubt about which
             # URL the egress rule in network-policies.yaml has to permit.
             - { name: API_GATEWAY_OIDC_JWKS_URI, value: "http://identity.kanz-services.svc:8087/jwks.json" }
+            # PER-SUBJECT REVOCATION (#532). Without this the gateway refuses to
+            # start, and that is the point: disabling an account used to stop the
+            # NEXT login and leave the token already in the holder's hands working
+            # until it expired — a token exfiltrated from a log, an operator's curl,
+            # or a compromised pod included.
+            #
+            # THE SAME HOST AND PORT AS THE JWKS URI ABOVE, on purpose. It is the
+            # same service, reached through the same egress rule
+            # (allow-identity-egress-from-gateway, #530), so this adds no
+            # NetworkPolicy surface. It is NOT derived from the issuer, because the
+            # issuer is a logical name that must match `iss` byte for byte and does
+            # not resolve.
+            #
+            # The ordinary lag from disabling an account to the token being refused
+            # is one refresh interval (revocation.DefaultRefreshInterval, 30s). Past
+            # revocation.DefaultMaxAge (15m) with no successful fetch, the gateway
+            # refuses every request 503 rather than assuming nobody is revoked.
+            - { name: API_GATEWAY_REVOCATIONS_URI, value: "http://identity.kanz-services.svc:8087/revocations" }
             - { name: API_GATEWAY_OIDC_AUDIENCE, value: "kanz" }
             - { name: API_GATEWAY_REQUIRED_ROLE, value: "kanz-user" }
             # WHO MAY MOVE CAPITAL (SEC-M2). REQUIRED, and it must DIFFER from the

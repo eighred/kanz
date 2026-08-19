@@ -24,6 +24,7 @@ import (
 	"golang.org/x/crypto/argon2"
 
 	"github.com/eighred/kanz/internal/identity"
+	"github.com/eighred/kanz/internal/revocation"
 	"github.com/eighred/kanz/pkg/auth"
 )
 
@@ -37,6 +38,17 @@ type fakeStore struct {
 	// runs BEFORE the single-use invitation is spent.
 	redeemCalls int
 	updated     map[string]identity.Hash
+	// revocations is what the feed serves; revocationsErr makes the store fail,
+	// so a test can prove the handler answers 503 rather than an empty list.
+	revocations    []revocation.Entry
+	revocationsErr error
+}
+
+func (f *fakeStore) Revocations(context.Context) ([]revocation.Entry, error) {
+	if f.revocationsErr != nil {
+		return nil, f.revocationsErr
+	}
+	return f.revocations, nil
 }
 
 func (f *fakeStore) UserBySubject(_ context.Context, subject string) (*identity.User, error) {

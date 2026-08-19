@@ -34,6 +34,20 @@ type Principal struct {
 	// order command so the OMS, which holds the order, can authorize the caller
 	// it cannot otherwise identify.
 	Portfolios []string
+
+	// IssuedAt is when the token was minted (its `iat`), zero when the token
+	// carried no such claim.
+	//
+	// IT IS HERE SO THE REVOCATION CHECK CAN BE WRITTEN ONCE, over both
+	// authenticators, instead of once per arm (#532). A revocation mark says
+	// "every token for this subject minted before T is refused", so the check is
+	// unanswerable without this value — and reading it back out of the raw token
+	// at the point of use would mean parsing a credential twice and trusting the
+	// second parse.
+	//
+	// ZERO IS NOT "NOW". It means the claim was absent, and Revoking treats a
+	// subject it cannot date as unproven rather than as fresh.
+	IssuedAt time.Time
 }
 
 // HasRole reports whether the principal carries role.
@@ -96,6 +110,25 @@ func Auth(authn Authenticator, requiredRole string, logger *slog.Logger) func(ht
 			}
 			p, err := authn.Authenticate(token)
 			if err != nil {
+				// "COULD NOT JUDGE" IS NOT "JUDGED AND REFUSED" (#532). Both used to
+				// answer 401, which the web client acts on by destroying the session
+				// and redirecting to log in — for every signed-in user at once, at
+				// the exact moment the identity service is unreachable. The two
+				// causes are: a JWKS cache past its ceiling (auth.ErrKeysStale, the
+				// signing-key axis) and a revocation feed past its ceiling
+				// (ErrAuthUnavailable, the per-subject axis).
+				//
+				// DELIBERATELY NOT LOGGED HERE. This branch runs for EVERY request
+				// while the condition lasts, so a log line would be a flood at the
+				// worst possible moment — thousands of identical records competing
+				// with the incident. The posture is already reported once per cause
+				// and where it can be alerted on: kanz_api_gateway_revocations_usable
+				// and kanz_api_gateway_oidc_keys_unrevalidated, plus an ERROR per
+				// retry from the loops in cmd/api-gateway that are trying to fix it.
+				if errors.Is(err, ErrAuthUnavailable) || errors.Is(err, auth.ErrKeysStale) {
+					writeError(w, http.StatusServiceUnavailable, "authentication unavailable")
+					return
+				}
 				writeError(w, http.StatusUnauthorized, "invalid token")
 				return
 			}
@@ -172,6 +205,11 @@ type jwtClaims struct {
 	NotBefore int64 `json:"nbf"`
 	// Portfolios is auth.ClaimPortfolios — the caller's portfolio entitlement.
 	Portfolios []string `json:"portfolios"`
+	// IssuedAt is `iat`, optional (RFC 7519 §4.1.6). Decoded because
+	// per-subject revocation (#532) dates the token against the subject's
+	// revocation mark; 0 means the claim was absent, which the revocation check
+	// treats as undatable rather than as fresh.
+	IssuedAt int64 `json:"iat"`
 }
 
 // jwtAudience decodes `aud` in both RFC 7519 shapes — a bare string and an
@@ -294,7 +332,21 @@ func (a *JWTAuthenticator) Authenticate(token string) (*Principal, error) {
 	if c.Subject == "" {
 		return nil, ErrUnauthenticated
 	}
-	return &Principal{Subject: c.Subject, Tenant: c.Tenant, Roles: c.Roles, Portfolios: c.Portfolios}, nil
+	// A ZERO `iat` STAYS ZERO. This arm mints nothing — internal/devtoken does —
+	// so a token from an older build may carry no `iat` at all. Defaulting it to
+	// now() would date an undatable token as fresh, which is the one answer that
+	// would let a revoked token through.
+	var issuedAt time.Time
+	if c.IssuedAt != 0 {
+		issuedAt = time.Unix(c.IssuedAt, 0).UTC()
+	}
+	return &Principal{
+		Subject:    c.Subject,
+		Tenant:     c.Tenant,
+		Roles:      c.Roles,
+		Portfolios: c.Portfolios,
+		IssuedAt:   issuedAt,
+	}, nil
 }
 
 var _ Authenticator = (*JWTAuthenticator)(nil)
