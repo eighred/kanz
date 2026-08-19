@@ -1,5 +1,12 @@
 import { describe, expect, it } from 'vitest'
-import { MAX_SAFE_EXPONENT, formatDecimal, formatMoney, isNegative } from './decimal'
+import {
+  MAX_RAT_DIGITS,
+  MAX_SAFE_EXPONENT,
+  formatDecimal,
+  formatMoney,
+  formatRational,
+  isNegative,
+} from './decimal'
 
 // THE CLAIM THIS MODULE MAKES IS "NO FLOAT, EVER", and it is a correctness claim
 // about money rather than a formatting preference. Everything below is a way for
@@ -96,5 +103,91 @@ describe('sign is read from the string, never from a parsed number', () => {
     expect(isNegative({ coefficient: '-9007199254740993' })).toBe(true)
     expect(isNegative({ coefficient: '9007199254740993' })).toBe(false)
     expect(isNegative(undefined)).toBe(false)
+  })
+})
+
+// THE OTHER WIRE FORM FOR MONEY ON THIS PLATFORM (#371 act one).
+//
+// datamaster's pricing-override surface does not speak common.v1.Decimal: it
+// holds the operator's chosen price as a *big.Rat and renders it with
+// RatString(), which emits "130" for an integer and "a/b" — "261/2" for 130.5 —
+// otherwise. It is the value a second person signs for, into an append-only
+// compliance record, so the claim is the same one the rest of this module makes:
+// exact, or nothing.
+describe('a rational chosen price renders exactly or not at all', () => {
+  const exact: Array<[string, string]> = [
+    ['130', '130'],
+    ['-130', '-130'],
+    ['261/2', '130.5'], // the form 130.5 actually takes on the wire
+    ['-261/2', '-130.5'],
+    ['1/8', '0.125'], // fewer digits than the shift ⇒ padded, not truncated
+    ['-1/8', '-0.125'],
+    ['1/4', '0.25'],
+    ['1/5', '0.2'],
+    ['3/1', '3'], // a denominator of one is still a denominator
+    ['0', '0'],
+    ['123/1000', '0.123'],
+  ]
+  for (const [wire, want] of exact) {
+    it(`${wire} -> ${want}`, () => {
+      expect(formatRational(wire)).toBe(want)
+    })
+  }
+
+  // THE ONE THAT MATTERS, and the reason Number() is unavailable even as a
+  // shortcut on the integer case.
+  it('renders a price beyond 2^53 digit for digit', () => {
+    const big = '9007199254740993' // 2^53 + 1: the first integer a double cannot hold
+    expect(formatRational(big)).toBe(big)
+    expect(Number(big).toString()).not.toBe(big) // the failure this avoids, demonstrated
+  })
+
+  it('renders a large numerator over a power of ten without losing digits', () => {
+    expect(formatRational('9007199254740993/100')).toBe('90071992547409.93')
+  })
+
+  // NULL IS NOT ZERO AND IT IS NOT AN APPROXIMATION. A price that cannot be
+  // rendered must look unrenderable: rounding it would put a figure into an
+  // append-only record that nobody read.
+  it('is null when the value has no exact decimal', () => {
+    expect(formatRational('1/3')).toBeNull()
+    expect(formatRational('22/7')).toBeNull()
+    expect(formatRational('1/6')).toBeNull()
+  })
+
+  it('is null rather than NaN, Infinity or a guess on anything malformed', () => {
+    expect(formatRational('')).toBeNull()
+    expect(formatRational(undefined)).toBeNull()
+    expect(formatRational(null)).toBeNull()
+    expect(formatRational('1/0')).toBeNull()
+    expect(formatRational('about a hundred')).toBeNull()
+    expect(formatRational('130.5')).toBeNull() // RatString never emits a point
+    expect(formatRational('1/2/3')).toBeNull()
+    expect(formatRational('1e3')).toBeNull()
+    expect(formatRational(' 130')).toBeNull()
+  })
+
+  // big.Rat keeps the sign on the numerator, so a negative denominator is not
+  // something RatString emits — it is something else answering, and guessing at
+  // it is how a price renders with the wrong sign.
+  it('refuses a negative denominator rather than normalising it', () => {
+    expect(formatRational('1/-2')).toBeNull()
+  })
+
+  // The browser twin of #95: unbounded work from a wire value hangs the TAB.
+  it('refuses a denominator whose scale exceeds the module bound', () => {
+    expect(formatRational(`1/${2n ** BigInt(MAX_SAFE_EXPONENT + 1)}`)).toBeNull()
+    // And the bound is a real edge rather than a decoration: one at it renders.
+    expect(formatRational(`1/${2n ** BigInt(MAX_SAFE_EXPONENT)}`)).not.toBeNull()
+  })
+
+  it('refuses a numeral longer than any price this platform can carry', () => {
+    expect(formatRational('9'.repeat(MAX_RAT_DIGITS))).not.toBeNull()
+    expect(formatRational('9'.repeat(MAX_RAT_DIGITS + 1))).toBeNull()
+  })
+
+  it('does not produce a negative zero', () => {
+    expect(formatRational('-0')).toBe('0')
+    expect(formatRational('-0/5')).toBe('0.0')
   })
 })
