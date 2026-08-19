@@ -161,6 +161,60 @@ func TestMeasuresPassesFilterAndConverts(t *testing.T) {
 	}
 }
 
+// THE CLIENT THE ISSUE IS ABOUT IS THIS ONE (#509).
+//
+// #509 opened on measures that reach no client at all. The families since wired
+// reach it and answer zero: the contract-terms store has no production writer,
+// so every DV01 served today is computed over no bond. Whether the caller can
+// TELL is this converter's job — protoFlags carries one set-level bit, and
+// RiskMeasure.coverage is what names the measure, the magnitude, and a sample.
+//
+// Both measures below are in one response on purpose. That is the case a
+// set-level flag cannot serve: refusing the whole response over DV01 discards a
+// GrossExposure that was never in doubt.
+func TestMeasuresCarryTheirCoverageToTheCaller(t *testing.T) {
+	ms := domain.NewMeasureSet("PF1", asOf, map[v1.MeasureName]v1.Measure{
+		"DV01": {
+			Name:  "DV01",
+			Value: &commonpb.Decimal{Coefficient: 0},
+			Coverage: v1.InputCoverage{
+				ExcludedCount: 2,
+				Exclusions:    []v1.InputExclusion{{InstrumentID: "GOVT-10Y", Reason: "no_terms"}},
+			},
+		},
+		"GrossExposure": {Name: "GrossExposure", Value: &commonpb.Decimal{Coefficient: 1000}},
+	})
+	srv := grpcsrv.New(fakeEngine{measures: func(v1.MeasuresRequest) (v1.MeasuresResponse, error) {
+		return v1.MeasuresResponse{PortfolioID: "PF1", AsOf: asOf, Set: ms}, nil
+	}}, "acme")
+
+	resp, err := srv.Measures(context.Background(), &querypb.MeasuresRequest{PortfolioId: "PF1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	byName := map[string]*domainpb.RiskMeasure{}
+	for _, m := range resp.GetSet().GetMeasures() {
+		byName[m.GetName()] = m
+	}
+
+	cov := byName["DV01"].GetCoverage()
+	if cov == nil {
+		t.Fatalf("DV01.coverage absent — the caller receives a zero DV01 with no way to tell it " +
+			"from a book holding no bonds, which is the whole of #527 undone at the process " +
+			"boundary")
+	}
+	if cov.GetExcludedCount() != 2 || len(cov.GetExclusions()) != 1 ||
+		cov.GetExclusions()[0].GetInstrumentId() != "GOVT-10Y" {
+		t.Errorf("DV01.coverage=%+v, want excluded_count 2 with the GOVT-10Y sample", cov)
+	}
+
+	if cov := byName["GrossExposure"].GetCoverage(); cov != nil {
+		t.Errorf("GrossExposure.coverage=%+v, want absent — it reads the portfolio directly and "+
+			"has no provider that could decline, so reporting a clean coverage record would be a "+
+			"claim the engine never made", cov)
+	}
+}
+
 func TestEvaluateScenarioDecodesShocks(t *testing.T) {
 	ms := domain.NewMeasureSet("PF1", asOf, map[v1.MeasureName]v1.Measure{})
 	var gotShocks []v1.ScenarioShock

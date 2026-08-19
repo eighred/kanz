@@ -344,12 +344,19 @@ func sortedKeys(m map[string]*big.Rat) []string {
 // unbounded, externally-owned latency in front of every order, and a degraded
 // risk engine would become a trading outage rather than a refusal.
 //
-// AN UNKNOWN MEASURE FAILS CLOSED, and the three ways to be unknown are one
-// answer: never announced, absent from the last announcement, or too old to be
-// current. Admitting an order because the platform could not establish its risk
-// is a control that reports success — and it is worse here than for cash,
-// because a portfolio whose risk cannot be computed is exactly the one nobody
-// should be adding to.
+// AN UNKNOWN MEASURE FAILS CLOSED, and the four ways to be unknown are one
+// answer: never announced, absent from the last announcement, too old to be
+// current, or announced with a coverage record saying the engine computed it
+// over a book it could not resolve (#509). Admitting an order because the
+// platform could not establish its risk is a control that reports success — and
+// it is worse here than for cash, because a portfolio whose risk cannot be
+// computed is exactly the one nobody should be adding to.
+//
+// THE FOURTH IS THE ONE THAT LOOKS LIKE AN ANSWER. The other three are silence,
+// which this rule was built to refuse. A measure computed over nothing is a
+// number, announced on time, in range — a DV01 of zero passes every rate-risk
+// ceiling ever written. riskview declines to fold it for exactly that reason, so
+// it arrives here as unknown rather than as a pass.
 //
 // A LIMIT ON A MEASURE THE ENGINE DOES NOT PRODUCE IS ALSO A REFUSAL, by the
 // same path. measure_name is the engine's own name rather than an enum mirrored
