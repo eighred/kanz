@@ -1794,19 +1794,75 @@ func (s *Service) expireOne(ctx context.Context, p OrderProposal, now time.Time)
 // replicas, and admitting without winning it means one approval becomes two
 // deliveries to a live venue.
 //
-// # A refusal acks
+// # A refusal acks, AND IT IS NOW RECORDED ON THE QUEUE (#558)
 //
 // Every refusal below returns nil after a WARN naming the reason. A refused
 // approval is not a defect in the command that can be fixed by redelivering it,
 // and the ORDER is not rejected either — it is still pending, awaiting a
 // signature somebody else may legitimately give. The order stays exactly as it
-// was and the refusal is the operator's to read.
+// was.
 //
-// WHAT THE APPROVER DOES NOT GET IS A REPLY. The gateway answers 202 on publish,
-// and a refusal produces no FACT — the same stance hold() takes, since all four
-// CommandOutcome statuses are terminal and this order is not. An approver whose
-// signature was refused learns it by finding the order still on
-// ListPendingApprovals. That is a stated gap, not an oversight.
+// THE REFUSAL IS NOW ALSO WRITTEN ONTO THE PROPOSAL, and ListPendingApprovals
+// carries it: an approver who returns to the queue sees state = "refused", the
+// reason code, who was refused and when — instead of an order that looks
+// identical to one nobody has touched. This corrects what this doc used to call
+// "a stated gap, not an oversight". The gap was real; the ruling on #558 was to
+// close it HERE rather than with a new vocabulary.
+//
+// WHY NOT A CommandOutcome, AND WHY NOT A FACT. Both were the obvious answers
+// and both are worse:
+//
+//   - A new COMMAND_OUTCOME_STATUS_REFUSED is a command.v1 change every consumer
+//     folds. All four existing statuses are TERMINAL, so none of them can be sent
+//     — ACCEPTED and REJECTED would both lie about an order that is still
+//     pending — and adding a fifth migrates the meaning of the enum for every
+//     consumer that assumed four were exhaustive, to say something only the
+//     approver needs.
+//   - A dedicated OrderApprovalRefused FACT is a new subject, a new tenancy
+//     grant and a new message with no consumer. #563 settled exactly this on the
+//     sibling act: datamaster's lapsed override proposal is LISTED on the surface
+//     the proposer already uses, carrying a state, precisely because a new
+//     subject would have been published to nobody. Read handlePendingOverrides
+//     and proposalJSON there; this is the same shape.
+//
+// The queue became a usable answer when #557 mounted
+// GET /v1/orders/pending-approvals, gated on authz.Approve. When #558 was filed
+// that route did not exist, which is why "poll the queue" was dismissed then and
+// is the ruling now.
+//
+// # WHAT THE APPROVER SEES, PER REFUSAL, INCLUDING THE ONES WITH NOWHERE TO WRITE
+//
+// Recording needs a proposal to write on, and only three of the six refusals
+// #558 enumerates end up as a REFUSED entry on the queue. Saying what each of the
+// other three does instead is the point — a branch nobody wrote down is what this
+// whole issue was:
+//
+//   - self-approval, a respelling of the proposer, a digest covering other terms:
+//     the proposal exists and stays PENDING. Recorded, and the queue entry the
+//     approver reloads says state = "refused" with the reason. THIS IS THE CASE
+//     #558 IS ABOUT.
+//   - expired: recorded, but Pending deliberately excludes expired work so the
+//     entry is NOT on the queue. The approver's answer is the terminal
+//     ORDER_REJECTED that #547's sweeper publishes for exactly this — expiry is
+//     terminal, so a FACT works there and is already shipped.
+//   - no pending proposal under that id: THERE IS NOTHING TO WRITE ON, and
+//     inventing a row would let a subject holding only the approve authority
+//     create a proposal. The approver sees the order absent from the queue, which
+//     is the honest answer: either it was never held, or it was already decided
+//     and is now a live order. Logged at WARN with the id, and that is the whole
+//     of what this branch can offer.
+//   - lost the claim race: attempted, and RecordRefusal reports false because the
+//     proposal is already decided. Its row is the OMS's only durable evidence
+//     that two people signed and a refusal must not overwrite it. The approver
+//     sees the order gone from the queue and live in the book — somebody else's
+//     signature released it, which is a legible answer and not a silence.
+//
+// The four checks ABOVE the proposal lookup — a malformed command, no order id,
+// a target_id that names another aggregate, no authenticated issuer — cannot
+// record either, and deliberately: they are refusals of the COMMAND, before any
+// proposal or any trustworthy identity is in hand. Writing a refusal attributed
+// to an unauthenticated issuer would put a name on the approver's queue that
+// nobody proved. They stay operator-facing at ERROR.
 func (s *Service) handleApprove(ctx context.Context, env *envelopepb.Envelope, payload []byte) error {
 	var cmd orderpb.ApproveOrder
 	if err := proto.Unmarshal(payload, &cmd); err != nil {
@@ -1856,7 +1912,14 @@ func (s *Service) handleApprove(ctx context.Context, env *envelopepb.Envelope, p
 		// origin — admitting here would let a subject holding only the approve
 		// authority originate an order outright, which is precisely the person
 		// who must not be able to.
-		s.logger.Warn("oms: approval names an order with no pending proposal — nothing released",
+		//
+		// AND THERE IS NOWHERE TO RECORD THE REFUSAL (#558). Creating a row to
+		// carry it would be creating a proposal, which is the same defect one
+		// step removed. The approver's answer is the order's ABSENCE from the
+		// queue — never held, or already decided — and this line is the
+		// operator's.
+		s.logger.Warn("oms: approval names an order with no pending proposal — nothing released, "+
+			"and no refusal could be recorded because there is no proposal to record it on",
 			"order_id", orderID, "approver", approver)
 		return nil
 	}
@@ -1866,9 +1929,19 @@ func (s *Service) handleApprove(ctx context.Context, env *envelopepb.Envelope, p
 	// proposal — and on every one of those the proposal is left PENDING.
 	appr, err := p.Approve(approver, cmd.GetDigest(), now)
 	if err != nil {
+		reason := approvalRefusal(err)
 		s.logger.Warn("oms: approval REFUSED — the order remains held",
 			"order_id", orderID, "approver", approver, "proposer", p.Proposer,
-			"reason", approvalRefusal(err), "err", err)
+			"reason", reason, "err", err)
+		// THE REFUSAL GOES ON THE QUEUE, AND A FAILURE TO WRITE IT NACKS (#558).
+		// Returning nil here would ack a delivery whose only visible trace is a
+		// log line the approver cannot read — the exact silence this branch was
+		// filed for, restored by an unchecked error. Redelivery re-refuses and
+		// re-records, which is idempotent: the columns are overwritten with the
+		// same values.
+		if _, rErr := s.store.Proposals().RecordRefusal(ctx, orderID, approver, reason, now); rErr != nil {
+			return fmt.Errorf("oms: record refusal on order %s: %w", orderID, rErr)
+		}
 		return nil
 	}
 
@@ -1881,8 +1954,23 @@ func (s *Service) handleApprove(ctx context.Context, env *envelopepb.Envelope, p
 		return err // transient
 	}
 	if !claimed {
+		// TWO SHAPES REACH HERE, and they are different answers to the approver.
+		// Usually somebody else's signature landed between the read and now: the
+		// proposal is decided, RecordRefusal declines to touch the row that is the
+		// OMS's only evidence two people signed, and the approver sees the order
+		// gone from the queue and live in the book.
+		//
+		// The other shape is a proposal STILL PENDING that Claim's SQL predicate
+		// refused where dualcontrol.Approve's Go comparison did not — the two
+		// normalise a subject independently, and a divergence between them would
+		// otherwise be the most invisible refusal of the lot. There the refusal is
+		// recorded and reaches the queue like any other.
+		recorded, rErr := s.store.Proposals().RecordRefusal(ctx, orderID, approver, RefusalLostTheClaim, now)
+		if rErr != nil {
+			return fmt.Errorf("oms: record refusal on order %s: %w", orderID, rErr)
+		}
 		s.logger.Warn("oms: approval lost the claim — this proposal was already decided",
-			"order_id", orderID, "approver", approver)
+			"order_id", orderID, "approver", approver, "refusal_recorded", recorded)
 		return nil
 	}
 
@@ -1897,18 +1985,53 @@ func (s *Service) handleApprove(ctx context.Context, env *envelopepb.Envelope, p
 	return s.submit(ctx, env, blob, &appr)
 }
 
-// approvalRefusal maps a dualcontrol refusal to a stable label for the log, so
-// "who is being refused and why" is greppable without parsing prose.
+// The refusal vocabulary. It is a CLOSED SET and a client branches on it, so the
+// values are constants rather than literals scattered across a switch, a log
+// call and a doc comment: an approver refused for self-approval needs a different
+// affordance (find another approver) from one refused for a changed payload (the
+// terms moved; the order must be re-proposed).
+//
+// ONE VALUE PER internal/dualcontrol SENTINEL, plus the claim race, which is not
+// a dualcontrol verdict at all — it is this store's arbitration between two
+// replicas. test/arch/approval_refusal_vocabulary_test.go fails the build if
+// dualcontrol grows a sentinel this switch does not name, because the default arm
+// would silently label it "malformed" and tell the approver something untrue.
+const (
+	RefusalSelfApproval  = "self_approval"
+	RefusalExpired       = "expired"
+	RefusalPayloadChange = "payload_changed"
+	RefusalMalformed     = "malformed"
+	RefusalLostTheClaim  = "lost_the_claim"
+	// RefusalUnclassified is the default arm, and it exists so that "this
+	// approval was refused for a reason we can name" and "this approval was
+	// refused and the OMS cannot say why" are DIFFERENT answers on the approver's
+	// queue. Folding the second into "malformed" would tell an approver their
+	// proposal is not well-formed when the truth is that a refusal arrived
+	// carrying an error this switch has never seen — which is a defect in the
+	// OMS, not in their order, and points at a different person to go and ask.
+	RefusalUnclassified = "unclassified"
+)
+
+// approvalRefusal maps a dualcontrol refusal to a stable label — for the log, so
+// "who is being refused and why" is greppable without parsing prose, and for the
+// proposal row, so the approver's queue says the same thing the operator's log
+// says rather than a second wording of it.
 func approvalRefusal(err error) string {
 	switch {
 	case errors.Is(err, dualcontrol.ErrSelfApproval):
-		return "self_approval"
+		return RefusalSelfApproval
 	case errors.Is(err, dualcontrol.ErrExpired):
-		return "expired"
+		return RefusalExpired
 	case errors.Is(err, dualcontrol.ErrPayloadChanged):
-		return "payload_changed"
+		return RefusalPayloadChange
+	case errors.Is(err, dualcontrol.ErrMalformed):
+		return RefusalMalformed
 	default:
-		return "malformed"
+		// NOT "malformed". Everything dualcontrol can return is named above, and
+		// the arch guard keeps that true, so reaching here means an error from
+		// somewhere else entirely. Naming it as a malformed proposal would send
+		// the approver to fix an order that is fine.
+		return RefusalUnclassified
 	}
 }
 

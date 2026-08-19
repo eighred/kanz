@@ -398,6 +398,141 @@ func runProposalContract(t *testing.T, newStore func(t *testing.T) ProposalStore
 				"remaining window is decided by the store, not by whichever pod's clock drifted")
 		}
 	})
+
+	// #558. A REFUSED APPROVAL MUST BE READABLE, AND MUST NOT DECIDE ANYTHING.
+	// Before this, the only trace of a refusal was a WARN in the OMS's log, which
+	// the approver whose signature was refused cannot read.
+	t.Run("a refusal is recorded on the proposal and the proposal stays claimable", func(t *testing.T) {
+		s := newStore(t)
+		ctx := context.Background()
+		p := heldOrder(t, "o-refused", "user:alice@kanz", t0)
+		if err := s.Put(ctx, p, nil); err != nil {
+			t.Fatalf("Put: %v", err)
+		}
+
+		at := t0.Add(time.Hour)
+		recorded, err := s.RecordRefusal(ctx, "o-refused", "user:alice@kanz", RefusalSelfApproval, at)
+		if err != nil {
+			t.Fatalf("RecordRefusal: %v", err)
+		}
+		if !recorded {
+			t.Fatal("a refusal against a PENDING proposal was not recorded — the approver is back " +
+				"to discovering the refusal by noticing nothing happened")
+		}
+
+		got, ok, err := s.Get(ctx, "o-refused")
+		if err != nil || !ok {
+			t.Fatalf("Get: ok=%v err=%v", ok, err)
+		}
+		if got.RefusalReason != RefusalSelfApproval || got.RefusedBy != "user:alice@kanz" {
+			t.Errorf("the refusal did not survive the round trip: reason=%q by=%q — the queue "+
+				"cannot say why the signature was refused", got.RefusalReason, got.RefusedBy)
+		}
+		if !got.RefusedAt.Equal(at) {
+			t.Errorf("refused_at = %v, want %v — an approver cannot tell whether the refusal "+
+				"predates the terms they are reading", got.RefusedAt, at)
+		}
+
+		// THE INVARIANT #558 MUST NOT BREAK. Recording is not deciding.
+		if got.Approver != "" || !got.DecidedAt.IsZero() {
+			t.Fatalf("recording a refusal DECIDED the proposal (approver=%q decided_at=%v) — one "+
+				"person can now destroy a colleague's pending decision by attempting their own "+
+				"approval and being refused", got.Approver, got.DecidedAt)
+		}
+		// AND IT IS STILL ON THE QUEUE, still claimable by somebody else.
+		pending, err := s.Pending(ctx, at)
+		if err != nil {
+			t.Fatalf("Pending: %v", err)
+		}
+		if len(pending) != 1 || pending[0].RefusalReason != RefusalSelfApproval {
+			t.Fatalf("the refused proposal is not listed as work carrying its refusal: %v — a "+
+				"queue that drops it is the silent drop again, one branch over", ids(pending))
+		}
+		claimed, err := s.Claim(ctx, "o-refused", "user:bob@kanz", at)
+		if err != nil || !claimed {
+			t.Fatalf("a legitimate approver could not claim a refused proposal (claimed=%v err=%v)",
+				claimed, err)
+		}
+	})
+
+	// A DECIDED PROPOSAL'S ROW IS THE OMS'S ONLY EVIDENCE THAT TWO PEOPLE SIGNED.
+	// A late refusal must not be able to write over it, which is also what makes
+	// the claim-race branch in handleApprove honest: it reports "not recorded"
+	// rather than pretending it said something.
+	t.Run("a refusal cannot be recorded against a decided proposal", func(t *testing.T) {
+		s := newStore(t)
+		ctx := context.Background()
+		p := heldOrder(t, "o-decided", "user:alice@kanz", t0)
+		if err := s.Put(ctx, p, nil); err != nil {
+			t.Fatalf("Put: %v", err)
+		}
+		if claimed, err := s.Claim(ctx, "o-decided", "user:bob@kanz", t0.Add(time.Minute)); err != nil || !claimed {
+			t.Fatalf("Claim: claimed=%v err=%v", claimed, err)
+		}
+
+		recorded, err := s.RecordRefusal(ctx, "o-decided", "user:carol@kanz", RefusalLostTheClaim, t0.Add(time.Hour))
+		if err != nil {
+			t.Fatalf("RecordRefusal: %v", err)
+		}
+		if recorded {
+			t.Fatal("a refusal was written onto a DECIDED proposal — that row is the only durable " +
+				"record that two people signed this order, and a late refusal just annotated it")
+		}
+		got, _, err := s.Get(ctx, "o-decided")
+		if err != nil {
+			t.Fatalf("Get: %v", err)
+		}
+		if got.Approver != "user:bob@kanz" || got.RefusalReason != "" {
+			t.Errorf("the decided row changed: approver=%q refusal=%q", got.Approver, got.RefusalReason)
+		}
+	})
+
+	// A REFUSAL FOR AN ORDER NOBODY HELD MUST NOT CREATE ONE. handleApprove never
+	// calls it on that branch, and the store refuses it anyway: an approval is a
+	// release, never an origin, so a subject holding only the approve authority
+	// must not be able to bring a proposal into existence.
+	t.Run("a refusal against no proposal creates nothing", func(t *testing.T) {
+		s := newStore(t)
+		ctx := context.Background()
+		recorded, err := s.RecordRefusal(ctx, "o-never-held", "user:bob@kanz", RefusalSelfApproval, t0)
+		if err != nil {
+			t.Fatalf("RecordRefusal: %v", err)
+		}
+		if recorded {
+			t.Fatal("recording a refusal reported success for an order that was never held")
+		}
+		if _, ok, err := s.Get(ctx, "o-never-held"); err != nil || ok {
+			t.Fatalf("a refusal CREATED a proposal (ok=%v err=%v) — the approve authority can now "+
+				"originate held orders", ok, err)
+		}
+	})
+
+	// HALF A REFUSAL IS WORSE THAN NONE: it renders on the approver's queue as a
+	// refusal the queue cannot describe. Both stores refuse it, and 0012's CHECK
+	// refuses it again at the engine.
+	t.Run("a half-written refusal is refused by both stores", func(t *testing.T) {
+		s := newStore(t)
+		ctx := context.Background()
+		p := heldOrder(t, "o-half", "user:alice@kanz", t0)
+		if err := s.Put(ctx, p, nil); err != nil {
+			t.Fatalf("Put: %v", err)
+		}
+		for _, c := range []struct {
+			name     string
+			approver string
+			reason   string
+			at       time.Time
+		}{
+			{"no subject", "  ", RefusalSelfApproval, t0},
+			{"no reason", "user:bob@kanz", "", t0},
+			{"no time", "user:bob@kanz", RefusalSelfApproval, time.Time{}},
+		} {
+			if _, err := s.RecordRefusal(ctx, "o-half", c.approver, c.reason, c.at); err == nil {
+				t.Errorf("%s: a half-written refusal was accepted — the queue would show a "+
+					"refusal it cannot attribute or explain", c.name)
+			}
+		}
+	})
 }
 
 func ids(ps []OrderProposal) []string {

@@ -46,6 +46,30 @@
 // OUT: Approve and Covers bind a signature to a digest exactly as tightly as the
 // caller's digest binds it to the payload, and a field the caller leaves out is
 // a field somebody can change after the second signature.
+//
+// # HOW A REFUSAL REACHES THE PERSON REFUSED IS ALSO THE CALLER'S (#558)
+//
+// This is worth stating because it looks like divergence and is not. #558 asked
+// whether all three acts share the same silence on a refused approval. Checked
+// against the code rather than the issue text, they do not, and the difference
+// is the transport rather than the rule:
+//
+//   - datamaster's pricing override approves over HTTP. refuseApproval answers
+//     403/409/500 with a message naming the rule, in the same request. The
+//     approver is told synchronously.
+//   - kanz-mandate approves in a CLI. runApprove returns the error from Approve
+//     and main prints it to stderr and exits 1. The approver is told immediately.
+//   - the OMS approves over the BUS. The gateway answers 202 at publish time and
+//     nothing is waiting for a reply, so there is no synchronous channel to
+//     answer on — and no FACT can carry it either, because all four
+//     CommandOutcomeStatus values are terminal while a refused proposal is not.
+//     That is why the OMS records the refusal on the proposal and surfaces it on
+//     ListPendingApprovals, and why the other two need nothing added.
+//
+// The rule that must not vary is Approve's, and it does not. A REFUSAL REPORTED
+// THE SAME WAY ON ALL THREE would mean giving the two synchronous callers a
+// second, asynchronous channel they have no reader for — which is the failure
+// #563 recorded for the override path's lapsed proposals, in reverse.
 package dualcontrol
 
 import (
@@ -100,6 +124,51 @@ var (
 	// ErrMalformed: the proposal or the approver is not well-formed enough to
 	// decide on. Never a silent pass.
 	ErrMalformed = errors.New("dualcontrol: proposal is not well-formed")
+)
+
+// The STATE VOCABULARY every dual-control queue renders (#558, #563).
+//
+// # Why the spelling lives here and not in each act
+//
+// Two queues now list proposals awaiting a second signature — datamaster's
+// GET /v1/exceptions/pending-overrides and the OMS's ListPendingApprovals — and
+// each one spelled its own state. They diverged on the first day they both
+// existed: one said "pending", the other "PENDING", so a client reading both
+// controls needed two casings for one concept. That is the divergence this
+// package exists to stop, arriving in the surface rather than in the rule, which
+// is exactly where nobody was watching for it.
+//
+// Lowercase because datamaster's queue shipped first and is on main. One
+// unmerged surface changing beats one merged surface changing.
+//
+// # THE SETS DIFFER PER ACT, AND THAT IS NOT AN OMISSION TO REPAIR
+//
+// Do not "complete" either queue by adding the state the other has. Each absence
+// is a property of how that act reports, and adding the missing value would mean
+// publishing a state that act can never reach:
+//
+//   - datamaster has NO "refused". An override is approved over HTTP, so a
+//     refusal goes back on the same request as a 403/409 naming the rule. There
+//     is no window in which a refused override sits on a queue waiting to be
+//     discovered.
+//   - the OMS has NO "lapsed". ProposalStore.Pending deliberately excludes
+//     expired work — a queue must not invite a signature on an order that can no
+//     longer be released — and expiry IS terminal there, so #547 answers it with
+//     an ORDER_REJECTED FACT instead. datamaster cannot do that: it publishes one
+//     subject nothing but the audit projector consumes (#563), so listing the
+//     lapsed proposal is the only reader it has.
+//
+// A third act adds a value here only if it can genuinely reach it.
+const (
+	// StatePending: awaiting a second signature, and nobody has been turned away.
+	StatePending = "pending"
+	// StateRefused: STILL awaiting a second signature, and the last person who
+	// tried was refused. It NEVER means finished — a decided proposal is not on
+	// the queue at all. OMS only.
+	StateRefused = "refused"
+	// StateLapsed: nobody signed it before it expired, so it is no longer
+	// actionable and is listed rather than erased. datamaster only.
+	StateLapsed = "lapsed"
 )
 
 // Proposal is a pending act: who asked, for what, over what payload, and until
