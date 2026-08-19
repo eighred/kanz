@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -46,6 +47,23 @@ type OrderProposal struct {
 	Approver string
 	// DecidedAt is when the second signature was given; zero while pending.
 	DecidedAt time.Time
+	// RefusalReason, RefusedBy and RefusedAt are the MOST RECENT refused
+	// approval attempt, and they are the whole of #558's repair (see
+	// migrations/0012). Empty/zero means nobody has been turned away yet.
+	//
+	// A REFUSAL DOES NOT DECIDE THE PROPOSAL. These three are additive to a row
+	// that stays approver = '': the proposal remains pending and claimable by
+	// somebody who may legitimately sign it, which is what
+	// TestSelfApprovalIsRefusedAndTheProposalStaysPending asserts. They are
+	// surfaced on ListPendingApprovals — the queue the approver already reads —
+	// rather than as a FACT or a CommandOutcome, for the reasons 0012 records.
+	//
+	// ONLY THE LATEST IS KEPT. The question they answer is "why is my signature
+	// not working", which is about the last attempt; the history is the WARN in
+	// the log.
+	RefusalReason string
+	RefusedBy     string
+	RefusedAt     time.Time
 	// ExpiryAnnouncedAt is when this proposal's expiry was announced; zero means
 	// it has not been. NOT the same question as "has it expired" — expiry is a
 	// property of the clock passing expires_at, and this records that the estate
@@ -128,9 +146,48 @@ type ProposalStore interface {
 	// sign, so the predicate belongs where the row is.
 	AnnounceExpiry(ctx context.Context, orderID string, at time.Time, announce []outbox.Record) (bool, error)
 
+	// RecordRefusal writes WHY the last approval attempt was turned away onto a
+	// proposal that is STILL PENDING, and reports whether it was recorded.
+	//
+	// IT MUST NOT DECIDE THE PROPOSAL, and that is the whole constraint on it.
+	// The predicate is `approver = ''` and nothing else changes: the proposal
+	// stays claimable by somebody who may legitimately sign it. Consuming it here
+	// would let one person destroy a colleague's pending decision simply by
+	// attempting their own approval and being refused — the defect the ordering
+	// in handleApprove and datamaster's approve path both exist to prevent.
+	//
+	// FALSE MEANS THE PROPOSAL WAS ALREADY DECIDED, which is not a failure: an
+	// approval that lost the claim race lost it to a real second signature, and
+	// the order it released is the answer the approver sees. Distinguished from
+	// an error so the caller can say which happened rather than logging one as
+	// the other.
+	//
+	// A refusal recorded against a proposal that has already EXPIRED is written
+	// and will not appear on Pending — that queue deliberately excludes expired
+	// work. It is kept because it is the operator's evidence, and because the
+	// approver's answer for expiry is the terminal ORDER_REJECTED #547 publishes,
+	// not this queue.
+	RecordRefusal(ctx context.Context, orderID, approver, reason string, at time.Time) (bool, error)
+
 	// Pending lists proposals still awaiting a signature at now, oldest first,
 	// so a held order is VISIBLE rather than silently dropped.
 	Pending(ctx context.Context, now time.Time) ([]OrderProposal, error)
+}
+
+// refusalIsRecordable refuses a half-written refusal in BOTH stores, before the
+// engine's CHECK does. A reason with no subject renders on the approver's queue
+// as a refusal it cannot attribute, which is the "something is wrong somewhere"
+// the WARN already was.
+func refusalIsRecordable(approver, reason string, at time.Time) error {
+	switch {
+	case strings.TrimSpace(approver) == "":
+		return errors.New("oms: a refusal must name the subject whose signature was refused")
+	case strings.TrimSpace(reason) == "":
+		return errors.New("oms: a refusal must carry a reason, or the queue says only that something happened")
+	case at.IsZero():
+		return errors.New("oms: a refusal must carry the time it happened")
+	}
+	return nil
 }
 
 // validate refuses a proposal the store cannot honestly hold. It runs in BOTH
@@ -241,6 +298,29 @@ func (m *MemoryProposals) Claim(_ context.Context, orderID, approver string, at 
 	}
 	p.Approver = approver
 	p.DecidedAt = at.UTC()
+	m.by[orderID] = p
+	return true, nil
+}
+
+// RecordRefusal implements ProposalStore. THE SAME PREDICATE the Postgres UPDATE
+// carries — undecided, and nothing else — spelled once per store, so the seam
+// every service-level test in this package runs on cannot accept a refusal
+// Postgres would refuse.
+func (m *MemoryProposals) RecordRefusal(_ context.Context, orderID, approver, reason string, at time.Time) (bool, error) {
+	if err := refusalIsRecordable(approver, reason, at); err != nil {
+		return false, err
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	p, ok := m.by[orderID]
+	if !ok || p.Approver != "" {
+		return false, nil
+	}
+	// APPROVER AND DECIDEDAT ARE UNTOUCHED. The proposal is still pending and
+	// still claimable by somebody else; only the explanation changes.
+	p.RefusalReason = reason
+	p.RefusedBy = approver
+	p.RefusedAt = at.UTC()
 	m.by[orderID] = p
 	return true, nil
 }
@@ -366,7 +446,8 @@ func (p *PostgresProposals) Put(ctx context.Context, prop OrderProposal, announc
 
 func (p *PostgresProposals) Get(ctx context.Context, orderID string) (OrderProposal, bool, error) {
 	row := p.pool.QueryRow(ctx, `
-		SELECT order_id, portfolio_id, act, proposer, digest, command, approver, decided_at, created_at, expires_at
+		SELECT order_id, portfolio_id, act, proposer, digest, command, approver, decided_at, created_at, expires_at,
+		       refusal_reason, refused_by, refused_at
 		FROM order_proposals WHERE order_id = $1
 	`, orderID)
 	prop, err := scanOrderProposal(row)
@@ -410,6 +491,36 @@ func (p *PostgresProposals) Claim(ctx context.Context, orderID, approver string,
 	return tag.RowsAffected() == 1, nil
 }
 
+// RecordRefusal writes the last refusal onto a still-pending proposal. See
+// ProposalStore.RecordRefusal.
+//
+// ONE STATEMENT, AND `approver = ”` IN THE WHERE IS THE ENTIRE SAFETY ARGUMENT.
+// It is not an optimisation of a read-then-write: it is what makes this UPDATE
+// incapable of touching a DECIDED proposal, whose row is the OMS's only durable
+// evidence that two people signed. A refusal must never overwrite that, and a
+// SELECT to check first would reopen the window in which somebody else's
+// approval lands between the check and the write.
+//
+// IT DOES NOT SET approver OR decided_at, and 0009's CHECK is not what stops it
+// — nothing here writes them at all. The proposal stays pending and claimable,
+// which is the property TestSelfApprovalIsRefusedAndTheProposalStaysPending
+// exists to hold and the reason a refusal is recorded rather than acted on.
+func (p *PostgresProposals) RecordRefusal(ctx context.Context, orderID, approver, reason string, at time.Time) (bool, error) {
+	if err := refusalIsRecordable(approver, reason, at); err != nil {
+		return false, err
+	}
+	tag, err := p.pool.Exec(ctx, `
+		UPDATE order_proposals
+		   SET refusal_reason = $3, refused_by = $2, refused_at = $4
+		 WHERE order_id = $1
+		   AND approver = ''
+	`, orderID, approver, reason, at.UTC())
+	if err != nil {
+		return false, fmt.Errorf("oms: record refusal on proposal %s: %w", orderID, err)
+	}
+	return tag.RowsAffected() == 1, nil
+}
+
 // ExpiredUnannounced lists what died waiting. See ProposalStore.
 //
 // THE MIRROR OF Pending's PREDICATE, and both halves matter. `approver = ”`
@@ -419,7 +530,8 @@ func (p *PostgresProposals) Claim(ctx context.Context, orderID, approver string,
 // same ORDER_REJECTED on every tick for the rest of the deployment's life.
 func (p *PostgresProposals) ExpiredUnannounced(ctx context.Context, now time.Time, limit int) ([]OrderProposal, error) {
 	rows, err := p.pool.Query(ctx, `
-		SELECT order_id, portfolio_id, act, proposer, digest, command, approver, decided_at, created_at, expires_at
+		SELECT order_id, portfolio_id, act, proposer, digest, command, approver, decided_at, created_at, expires_at,
+		       refusal_reason, refused_by, refused_at
 		FROM order_proposals
 		WHERE approver = '' AND expiry_announced_at IS NULL AND expires_at <= $1
 		ORDER BY expires_at, order_id
@@ -522,7 +634,8 @@ func (p *PostgresProposals) AnnounceExpiry(ctx context.Context, orderID string, 
 // order was rejected and will not trade.
 func (p *PostgresProposals) Pending(ctx context.Context, now time.Time) ([]OrderProposal, error) {
 	rows, err := p.pool.Query(ctx, `
-		SELECT order_id, portfolio_id, act, proposer, digest, command, approver, decided_at, created_at, expires_at
+		SELECT order_id, portfolio_id, act, proposer, digest, command, approver, decided_at, created_at, expires_at,
+		       refusal_reason, refused_by, refused_at
 		FROM order_proposals
 		WHERE approver = '' AND expiry_announced_at IS NULL AND expires_at > $1
 		ORDER BY created_at, order_id
@@ -551,9 +664,11 @@ func scanOrderProposal(s proposalScanner) (OrderProposal, error) {
 		act       string
 		blob      []byte
 		decidedAt *time.Time
+		refusedAt *time.Time
 	)
 	if err := s.Scan(&prop.ID, &prop.PortfolioID, &act, &prop.Proposer, &prop.Digest,
-		&blob, &prop.Approver, &decidedAt, &prop.CreatedAt, &prop.ExpiresAt); err != nil {
+		&blob, &prop.Approver, &decidedAt, &prop.CreatedAt, &prop.ExpiresAt,
+		&prop.RefusalReason, &prop.RefusedBy, &refusedAt); err != nil {
 		return OrderProposal{}, err
 	}
 	prop.Subject = prop.ID
@@ -568,6 +683,9 @@ func scanOrderProposal(s proposalScanner) (OrderProposal, error) {
 	prop.Command = cmd
 	if decidedAt != nil {
 		prop.DecidedAt = decidedAt.UTC()
+	}
+	if refusedAt != nil {
+		prop.RefusedAt = refusedAt.UTC()
 	}
 	return prop, nil
 }

@@ -295,6 +295,16 @@ func (s *Server) handleApproveOverride(w http.ResponseWriter, r *http.Request) {
 
 // refuseApproval maps a dualcontrol refusal onto a status, a count and a message
 // that names the rule.
+//
+// THIS PATH IS ALREADY ANSWERED, AND #558 IS NOT ABOUT IT. That issue reported
+// "exactly the same silence on refuseApproval" as the OMS order path has; read
+// against this code the premise does not hold — an override is approved over
+// HTTP, so the refusal goes back on the same request with a status the caller
+// branches on. The OMS's approval arrives on the BUS, where the 202 was answered
+// at publish time and there is nothing left to reply to, which is why it needed
+// the refusal recorded on the proposal and shown on its pending queue and this
+// does not. Adding a second, asynchronous channel here would be a message with no
+// reader — the thing #563 declined to build one function down.
 func (s *Server) refuseApproval(w http.ResponseWriter, prop store.OverrideProposal, approver string, err error) {
 	switch {
 	case errors.Is(err, dualcontrol.ErrSelfApproval):

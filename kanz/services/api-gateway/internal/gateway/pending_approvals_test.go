@@ -103,6 +103,72 @@ func TestAnApproverCanSeeWhatIsWaitingOnThem(t *testing.T) {
 	}
 }
 
+// THE REFUSAL REACHES AN HTTP CLIENT, NOT JUST THE gRPC MESSAGE (#558).
+//
+// This is the layer that has bitten this route before: the OMS can populate a
+// field, the proto can declare it, and the approver still never sees it — the
+// gateway marshals with its own options, and a field that protojson omits is a
+// field that does not exist as far as a browser is concerned. state is asserted
+// on BOTH entries, because the whole design depends on it being present when
+// there is nothing to report: absent-means-pending would leave a client unable
+// to tell "nobody was refused" from "this server is too old to say".
+func TestARefusedApprovalIsVisibleInTheJSONTheApproverReceives(t *testing.T) {
+	fc := &fakeClient{pendingResp: &orderpb.ListPendingApprovalsResponse{
+		OwnerTenant: testTenant,
+		Pending: []*orderpb.PendingApproval{
+			{OrderId: "o-untouched", Proposer: "user:alice@kanz", Digest: "sha256:a", State: "PENDING"},
+			{
+				OrderId: "o-refused", Proposer: "user:alice@kanz", Digest: "sha256:b",
+				State:             "REFUSED",
+				LastRefusalReason: "self_approval",
+				LastRefusedBy:     "user:alice@kanz",
+			},
+		},
+	}}
+	mux := approveMux(t, fc, "compliance")
+
+	res := asRole(t, mux, "compliance", "/v1/orders/pending-approvals")
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", res.StatusCode)
+	}
+	var body struct {
+		Pending []struct {
+			OrderID           string `json:"order_id"`
+			State             string `json:"state"`
+			LastRefusalReason string `json:"last_refusal_reason"`
+			LastRefusedBy     string `json:"last_refused_by"`
+		} `json:"pending"`
+	}
+	if err := json.NewDecoder(res.Body).Decode(&body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(body.Pending) != 2 {
+		t.Fatalf("pending = %+v, want both entries — a refused proposal is STILL awaiting a "+
+			"signature and must not drop off the queue", body.Pending)
+	}
+	for _, e := range body.Pending {
+		if e.State == "" {
+			t.Errorf("%s reached the client with no state — the approver's client cannot tell "+
+				"an unrefused order from a server that predates the field", e.OrderID)
+		}
+	}
+	var refused bool
+	for _, e := range body.Pending {
+		if e.OrderID != "o-refused" {
+			continue
+		}
+		refused = true
+		if e.State != "REFUSED" || e.LastRefusalReason != "self_approval" ||
+			e.LastRefusedBy != "user:alice@kanz" {
+			t.Errorf("the refusal did not survive transcoding: %+v — the approver is back to "+
+				"discovering a refused signature by noticing nothing happened", e)
+		}
+	}
+	if !refused {
+		t.Fatal("the refused entry is not in the reply at all")
+	}
+}
+
 // A READ TOKEN CANNOT SEE THE QUEUE. It names the proposer of every unsigned
 // change awaiting a second signature, and it is the working surface an approver
 // acts from rather than a report.

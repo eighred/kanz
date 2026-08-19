@@ -46,6 +46,30 @@
 // OUT: Approve and Covers bind a signature to a digest exactly as tightly as the
 // caller's digest binds it to the payload, and a field the caller leaves out is
 // a field somebody can change after the second signature.
+//
+// # HOW A REFUSAL REACHES THE PERSON REFUSED IS ALSO THE CALLER'S (#558)
+//
+// This is worth stating because it looks like divergence and is not. #558 asked
+// whether all three acts share the same silence on a refused approval. Checked
+// against the code rather than the issue text, they do not, and the difference
+// is the transport rather than the rule:
+//
+//   - datamaster's pricing override approves over HTTP. refuseApproval answers
+//     403/409/500 with a message naming the rule, in the same request. The
+//     approver is told synchronously.
+//   - kanz-mandate approves in a CLI. runApprove returns the error from Approve
+//     and main prints it to stderr and exits 1. The approver is told immediately.
+//   - the OMS approves over the BUS. The gateway answers 202 at publish time and
+//     nothing is waiting for a reply, so there is no synchronous channel to
+//     answer on — and no FACT can carry it either, because all four
+//     CommandOutcomeStatus values are terminal while a refused proposal is not.
+//     That is why the OMS records the refusal on the proposal and surfaces it on
+//     ListPendingApprovals, and why the other two need nothing added.
+//
+// The rule that must not vary is Approve's, and it does not. A REFUSAL REPORTED
+// THE SAME WAY ON ALL THREE would mean giving the two synchronous callers a
+// second, asynchronous channel they have no reader for — which is the failure
+// #563 recorded for the override path's lapsed proposals, in reverse.
 package dualcontrol
 
 import (

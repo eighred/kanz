@@ -167,6 +167,70 @@ func TestTheDatabaseRefusesADecisionWithNoTimestampOrNoApprover(t *testing.T) {
 	}
 }
 
+// TestTheDatabaseRefusesAHalfWrittenRefusal is 0012's CHECK, at the engine (#558).
+//
+// RecordRefusal writes the three columns together and both stores refuse a
+// partial one, so this can only fail for a writer that does not come through
+// there — a repair script, a future method, a migration. The row it would leave
+// renders on the approver's queue as state = "REFUSED" with nothing to show for
+// it: "something happened and we cannot say what", which is the WARN this issue
+// replaced, promoted to a UI.
+func TestTheDatabaseRefusesAHalfWrittenRefusal(t *testing.T) {
+	pool := newPool(t)
+	ctx := context.Background()
+	if err := NewPostgres(pool).Proposals().Put(ctx, heldOrder(t, "o-partial", "user:alice@kanz", t0), nil); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	for _, q := range []string{
+		`UPDATE order_proposals SET refusal_reason = 'self_approval' WHERE order_id = 'o-partial'`,
+		`UPDATE order_proposals SET refused_by = 'user:bob@kanz' WHERE order_id = 'o-partial'`,
+		`UPDATE order_proposals SET refused_at = now() WHERE order_id = 'o-partial'`,
+		`UPDATE order_proposals SET refusal_reason = 'expired', refused_by = 'user:bob@kanz'
+		   WHERE order_id = 'o-partial'`,
+	} {
+		if _, err := pool.Exec(ctx, q); err == nil {
+			t.Errorf("the database accepted a half-written refusal: %s", q)
+		}
+	}
+	// AND THE WHOLE ONE IS ACCEPTED. Without this the test above passes against a
+	// column set nothing can ever write, which is a constraint that forbids the
+	// feature rather than the defect.
+	if _, err := pool.Exec(ctx, `UPDATE order_proposals
+		   SET refusal_reason = 'self_approval', refused_by = 'user:alice@kanz', refused_at = now()
+		 WHERE order_id = 'o-partial'`); err != nil {
+		t.Fatalf("the CHECK refused a complete refusal (%v) — no refusal could ever be recorded "+
+			"and the approver is back to silence", err)
+	}
+}
+
+// TestARefusalDoesNotDecideTheProposalAtTheEngine. The Go stores keep approver
+// and decided_at untouched; this is the same claim asked of the row an auditor
+// reads, because the row is where "two people signed this order" is recorded and
+// the whole of #558 is additive to it.
+func TestARefusalDoesNotDecideTheProposalAtTheEngine(t *testing.T) {
+	pool := newPool(t)
+	ctx := context.Background()
+	store := NewPostgres(pool).Proposals()
+	if err := store.Put(ctx, heldOrder(t, "o-untouched", "user:alice@kanz", t0), nil); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	if _, err := store.RecordRefusal(ctx, "o-untouched", "user:alice@kanz", RefusalSelfApproval, t0.Add(time.Hour)); err != nil {
+		t.Fatalf("RecordRefusal: %v", err)
+	}
+	var approver string
+	var decidedAt *time.Time
+	if err := pool.QueryRow(ctx,
+		`SELECT approver, decided_at FROM order_proposals WHERE order_id = 'o-untouched'`,
+	).Scan(&approver, &decidedAt); err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	if approver != "" || decidedAt != nil {
+		t.Fatalf("the refused proposal is DECIDED in the database (approver=%q decided_at=%v) — "+
+			"one person can destroy a colleague's pending decision by attempting their own",
+			approver, decidedAt)
+	}
+}
+
 // TestConcurrentClaimElectsExactlyOneWinner IS THE PROPERTY THE IN-MEMORY STORE
 // CANNOT DEMONSTRATE (#498's recorded lesson).
 //
@@ -697,7 +761,8 @@ func TestAnotherTenantCannotSeeOrAnnounceAnExpiredProposal(t *testing.T) {
 // surfaces as a row-set mismatch instead of as a green EXPLAIN of a query the OMS
 // stopped issuing.
 const pendingQuery = `
-	SELECT order_id, portfolio_id, act, proposer, digest, command, approver, decided_at, created_at, expires_at
+	SELECT order_id, portfolio_id, act, proposer, digest, command, approver, decided_at, created_at, expires_at,
+	       refusal_reason, refused_by, refused_at
 	FROM order_proposals
 	WHERE approver = '' AND expiry_announced_at IS NULL AND expires_at > $1
 	ORDER BY created_at, order_id`
