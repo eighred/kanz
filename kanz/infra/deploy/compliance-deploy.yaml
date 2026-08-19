@@ -59,6 +59,16 @@ spec:
     app: compliance
   ports:
     - { name: http, port: 8091, targetPort: 8091 }
+    # THE MANDATE-CHANGE API (#562, #410 act two) ON ITS OWN PORT.
+    #
+    # NOT A SECOND ROUTE ON :8091, and the reason is a security one rather than
+    # tidiness. allow-observability-scrape admits :8091 from every pod in
+    # kanz-observability because /metrics is there; these routes decide who governs
+    # a portfolio from the principal header the api-gateway injects, so on that port
+    # a pod in the monitoring namespace could send two self-chosen principals and
+    # hold BOTH signatures. #232 named the fix as a second listener per service;
+    # optimization (#409) and accounting (#447) made it first.
+    - { name: mandate-api, port: 8095, targetPort: 8095 }
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -111,8 +121,18 @@ spec:
           image: ghcr.io/eighred/compliance@sha256:e15b44ed75d049fe76e4c13209e5270772e935abc7ee60511cb9bf22103cdf58
           ports:
             - { containerPort: 8091, name: http }
+            - { containerPort: 8095, name: mandate-api }
           env:
             - { name: COMPLIANCE_LISTEN, value: ":8091" }
+            # The mandate propose/approve/queue routes and NOTHING else. See the
+            # Service above for why they are not on :8091, and
+            # services/compliance/internal/config for the same argument in code.
+            #
+            # IT IS ONLY MOUNTED WHEN COMPLIANCE_NATS_URL IS SET: approving a
+            # mandate change publishes a ConfigChanged FACT, and a route that took
+            # a second signature with nowhere to publish it would be the silent
+            # drop this control exists to end.
+            - { name: COMPLIANCE_API_LISTEN, value: ":8095" }
             # WITHOUT THIS the service reports READY while consuming nothing at all —
             # it degrades to probes-only and says so in one log line. Readiness is
             # only meaningful when the spine is configured.

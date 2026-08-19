@@ -7,8 +7,10 @@
 //
 // SEC-M1 closed the door to strangers. This is about what the people INSIDE may do.
 //
-// The model is deliberately small — two capabilities, one policy map, one mux. A capability
-// system nobody can hold in their head gets bypassed by the first engineer in a hurry.
+// The model is deliberately small — one policy map, one mux, and a capability set that has
+// to argue its way in one at a time. A capability system nobody can hold in their head gets
+// bypassed by the first engineer in a hurry, so every constant below carries the case for why
+// it is a DIFFERENT authority in BOTH directions from every other one.
 package authz
 
 import (
@@ -111,6 +113,50 @@ const (
 	// belongs at the gateway with the other four, and without it every authenticated
 	// subject in the tenant is a candidate signatory.
 	Approve Capability = "approve"
+	// Mandate: CHANGE THE CONSTRAINT ITSELF. Propose or sign a change to the mandate
+	// a portfolio is governed by — what it may hold, in what concentration, at what
+	// leverage (#562, #410 act two).
+	//
+	// A SIXTH, AND IT IS THE HARDEST ONE TO JUSTIFY, so the argument is written out
+	// rather than assumed. The bar Operate, Fund and Approve each cleared is: is this
+	// a DIFFERENT authority, in BOTH directions, from every capability already here?
+	//
+	// THE ONE IT HAS TO BE DIFFERENT FROM IS Approve, and #539's own text predicted
+	// this would be "a third route on the same capability". That is the reading this
+	// constant rejects, on the escalation #562 describes:
+	//
+	//	relax the constraint that would have refused an order, then clear the order
+	//	it would have refused — with both acts individually looking correct in the
+	//	trail.
+	//
+	// Under ONE capability the second signature on the mandate change and the second
+	// signature on the held order come from the SAME POOL of people, so one signatory
+	// can give both: sign away the limit, then sign the trade the limit existed to
+	// stop. Each act still shows two names, each is still refused as a self-approval,
+	// and the chain is invisible because nothing compares the two records. Separating
+	// them means the escalation needs a signatory from each pool — the collusion set
+	// is strictly wider, and that is the entire content of a maker-checker control.
+	//
+	// It is also the older distinction of the two. Approving an override or an order
+	// is TRANSACTION authority: a judgement about one act, against the policy in
+	// force. Changing a mandate is POLICY authority: a judgement about what the fund
+	// may do at all, which is an investment-committee decision and not a desk one. A
+	// firm that lets its order approvers rewrite the mandate has no mandate.
+	//
+	// NOT Trade, obviously, and for the sharpest version of the reason: a trader who
+	// could change the mandate would not need to break the pre-trade gate, only to
+	// widen it.
+	//
+	// NOT Operate AND NOT Fund. Both move something real — nodes, credentials, the
+	// fund's cash — and neither has any business deciding what the fund may hold.
+	// NOT Read: reading the mandate in force is a report; this rewrites it.
+	//
+	// THE COST IS ONE MORE ROLE A DEPLOYMENT MUST NAME, and it is paid the way every
+	// optional capability here is: API_GATEWAY_MANDATE_ROLE unset leaves the three
+	// routes UNREGISTERED, so the deployment answers 404 — "there is no mandate
+	// surface here", which is true — rather than the 403 that #535 found reads as a
+	// working control while being a total outage of the capability.
+	Mandate Capability = "mandate"
 )
 
 // Grants is the role → capabilities policy: what a principal's roles entitle them to do.

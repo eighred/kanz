@@ -57,8 +57,11 @@
 //   - datamaster's pricing override approves over HTTP. refuseApproval answers
 //     403/409/500 with a message naming the rule, in the same request. The
 //     approver is told synchronously.
-//   - kanz-mandate approves in a CLI. runApprove returns the error from Approve
-//     and main prints it to stderr and exits 1. The approver is told immediately.
+//   - a mandate change approves over HTTP too, on either of its two producers:
+//     kanz-mandate's runApprove returns the error from Approve and main prints it
+//     to stderr and exits 1, and the compliance service's approve route answers
+//     403/409/500 with a message naming the rule (#562). Both tell the approver
+//     synchronously, which is why act two adds no "refused" state to its queue.
 //   - the OMS approves over the BUS. The gateway answers 202 at publish time and
 //     nothing is waiting for a reply, so there is no synchronous channel to
 //     answer on — and no FACT can carry it either, because all four
@@ -92,10 +95,21 @@ const (
 	// append-only trail whose actor is authenticated (#444).
 	ActPricingOverride Act = "PRICING_OVERRIDE"
 	// ActMandateChange is a change to the mandate itself — the control that
-	// governs everything else. Wired by #511, in cmd/kanz-mandate, whose own doc
-	// records the bound on what a two-step CLI can prove: both invocations run
-	// under one operator's SVID, so a unilateral change is DETECTABLE in the trail
-	// and not PREVENTED.
+	// governs everything else. It has TWO producers, and the difference between
+	// them is the whole of #562:
+	//
+	//   - cmd/kanz-mandate (#511) takes two INVOCATIONS. Both run under one
+	//     operator's SVID and the proposal is a file, so a unilateral change is
+	//     DETECTABLE in the trail and not prevented. It is kept as the break-glass
+	//     path for an estate with no gateway; without it a fresh install has no way
+	//     to put a portfolio under mandate at all.
+	//   - services/compliance/internal/api (#562) takes two separately
+	//     authenticated REQUESTS through the gateway, behind authz.Mandate. The
+	//     proposal rests server-side between them, so the second signature comes
+	//     from a second credential and a unilateral change is PREVENTED.
+	//
+	// The FACT they publish is identical; its envelope source is what says which
+	// path produced it, and that is the honest limit of what the trail can carry.
 	ActMandateChange Act = "MANDATE_CHANGE"
 	// ActOrderSubmission is an order at or above a notional threshold. Wired by
 	// #410 act three, in services/oms/internal/approval, which owns the two halves

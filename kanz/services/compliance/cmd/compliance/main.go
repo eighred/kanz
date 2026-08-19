@@ -24,10 +24,12 @@ import (
 	"github.com/eighred/kanz/pkg/bus"
 	"github.com/eighred/kanz/pkg/observability"
 	"github.com/eighred/kanz/pkg/transport"
+	"github.com/eighred/kanz/services/compliance/internal/api"
 	"github.com/eighred/kanz/services/compliance/internal/audit"
 	"github.com/eighred/kanz/services/compliance/internal/config"
 	"github.com/eighred/kanz/services/compliance/internal/monitor"
 	"github.com/eighred/kanz/services/compliance/internal/server"
+	"github.com/eighred/kanz/services/compliance/internal/store"
 )
 
 func main() {
@@ -84,13 +86,20 @@ func run() int {
 
 	var runErr error
 	if cfg.NATSURL != "" {
-		if err := runConsumers(ctx, cfg, readiness, logger, obs); err != nil {
+		if err := runConsumers(ctx, cfg, readiness, logger, obs, fatal); err != nil {
 			logger.Error("compliance consumers stopped with error", "err", err)
 			runErr = err
 		}
 	} else {
 		readiness.Set(true)
-		logger.Warn("no COMPLIANCE_NATS_URL set — serving HTTP/probes only (no consumption)")
+		// AND THE MANDATE-CHANGE SURFACE IS NOT MOUNTED EITHER (#562), which is
+		// said here rather than left to a 404 somebody meets later. Approving a
+		// mandate change publishes a FACT; with no spine there is nothing to
+		// publish to, and a route that accepts a second signature and drops it is
+		// strictly worse than one that is absent.
+		logger.Warn("no COMPLIANCE_NATS_URL set — serving HTTP/probes only: no consumption, and " +
+			"NO mandate-change surface, so this deployment answers 404 to POST /v1/portfolios/" +
+			"{id}/mandate and nobody can change a mandate through it")
 		<-ctx.Done()
 		readiness.Set(false)
 	}
@@ -111,7 +120,7 @@ func run() int {
 // runConsumers wires the bus producer + monitor and subscribes the mandate and
 // position streams. The mandate consumer feeds the registry the monitor resolves
 // against, so it is subscribed first.
-func runConsumers(ctx context.Context, cfg config.Config, readiness *server.Readiness, logger *slog.Logger, obs *observability.Provider) error {
+func runConsumers(ctx context.Context, cfg config.Config, readiness *server.Readiness, logger *slog.Logger, obs *observability.Provider, fatal *lifecycle.Fatal) error {
 	busMetrics := bus.NewBusMetrics(obs.Registry)
 
 	// SEC-M3: the production broker requires a client SVID; a nil TLSConfig is a
@@ -136,6 +145,55 @@ func runConsumers(ctx context.Context, cfg config.Config, readiness *server.Read
 	if err != nil {
 		return err
 	}
+
+	// ACT TWO OF #410, ON ITS OWN LISTENER (#562).
+	//
+	// A mandate is the control every order is checked against, and until now
+	// changing one took two INVOCATIONS of cmd/kanz-mandate rather than two
+	// people: both ran on one operator's machine under one SVID, so the proposal
+	// file was a carrier and not a signature. These routes are the propose/approve
+	// pair as two SEPARATELY AUTHENTICATED requests, which is what makes a
+	// unilateral change preventable rather than merely detectable.
+	//
+	// MOUNTED HERE, INSIDE THE BUS BRANCH, because the approve route publishes a
+	// ConfigChanged FACT and there is nothing to publish to without a spine. A
+	// probes-only deployment answers 404 to these paths, which is true; a route
+	// that took a second signature and dropped it would be the silent failure the
+	// control exists to end.
+	//
+	// THE PROPOSAL STORE IS IN-PROCESS, AND THAT IS A STATED POSTURE. This
+	// deployment is replicas: 1 with strategy Recreate — a correctness bound the
+	// monitor already cannot cross (see infra/deploy/compliance-deploy.yaml) — so
+	// the multi-replica failure that makes an in-process store wrong elsewhere,
+	// the second signature landing on a pod that never saw the first, cannot arise
+	// without breaking that pin first. What it does cost is said out loud below.
+	proposals := store.NewMemoryProposals()
+	logger.Info("compliance: mandate-change surface armed (#562, #410 act two)",
+		"addr", cfg.APIListen,
+		"proposal_store", "in-process",
+		"note", "a restart drops every PENDING mandate proposal — nothing was published, the "+
+			"mandate in force is unchanged, and the proposer must propose again. Valid only at "+
+			"replicas: 1, which this deployment is pinned to for the monitor's own reasons.")
+	mandateSrv := httpserver.New(cfg.APIListen,
+		api.New(proposals, comp.NewPublisher(producer), logger), httpserver.Standard())
+	go func() {
+		logger.Info("compliance mandate API listening", "addr", cfg.APIListen)
+		if err := mandateSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			// FATAL, unlike a dead metrics listener. This is the only surface through
+			// which a mandate can be changed by two people; a process that keeps
+			// serving probes while it is gone reports healthy with the control
+			// unreachable, which is the shape #535 spent an issue on.
+			logger.Error("compliance mandate API failed — no mandate can be changed through this "+
+				"pod", "err", err)
+			fatal.Raise(err)
+		}
+	}()
+	defer func() {
+		shutCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		_ = mandateSrv.Shutdown(shutCtx)
+	}()
+	go purgeLapsedProposals(ctx, proposals, logger)
 
 	// COMP-01f: mandate registry fed from the shared ConfigChanged stream, the
 	// point-in-time source the monitor resolves against.
@@ -261,4 +319,48 @@ mandateArmWait:
 	wg.Wait()
 	readiness.Set(false)
 	return firstErr
+}
+
+// proposalRetention is how long a mandate proposal nobody signed stays LISTED
+// after it lapses, and purgeInterval is how often the sweep runs.
+//
+// THE RETENTION IS NOT ZERO, and that is the #563 lesson applied before it could
+// be repeated. A lapsed proposal is the only record that a change was proposed
+// and died unsigned — for a mandate that means the portfolio is still governed by
+// the old constraint — so purging on expiry would leave the proposer inferring
+// the outcome from an absence. A week is long enough for somebody to come back
+// from leave and find it.
+const (
+	proposalRetention = 7 * 24 * time.Hour
+	purgeInterval     = time.Hour
+)
+
+// purgeLapsedProposals bounds the in-process store.
+//
+// WITHOUT IT THE STORE ONLY EVER GROWS. A proposal nobody signs is never claimed,
+// so every unsigned mandate change would rest in this pod's memory until it
+// restarted — and "the process restarts eventually" is not a retention policy, it
+// is the absence of one.
+func purgeLapsedProposals(ctx context.Context, proposals store.ProposalStore, logger *slog.Logger) {
+	ticker := time.NewTicker(purgeInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			n, err := proposals.PurgeLapsed(ctx, time.Now().UTC().Add(-proposalRetention))
+			if err != nil {
+				logger.Error("compliance: cannot purge lapsed mandate proposals", "err", err)
+				continue
+			}
+			if n > 0 {
+				// COUNTED AND NAMED. These are mandate changes two people never
+				// completed; a silent sweep would make "nobody proposed it" and
+				// "somebody proposed it and it died" the same absence again.
+				logger.Info("compliance: purged mandate proposals that lapsed unsigned",
+					"count", n, "retention", proposalRetention)
+			}
+		}
+	}
 }

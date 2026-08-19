@@ -198,6 +198,32 @@ type Config struct {
 	// be guessing; a warning naming the consequence is what this side can honestly
 	// say.
 	ApproveRole string
+
+	// ComplianceAddr is the compliance service's MANDATE-CHANGE listener (#562),
+	// e.g. "https://compliance.kanz-services:8095". It is deliberately NOT the port
+	// compliance serves /metrics and its probes on: allow-observability-scrape
+	// admits the scraped port from the whole kanz-observability namespace, and a
+	// pod there could otherwise send two self-chosen principals and hold BOTH
+	// signatures on a mandate change.
+	//
+	// Empty ⇒ the three mandate routes have no upstream and 503, the same shape as
+	// every other address here.
+	ComplianceAddr string
+	// MandateRole is the role carrying authz.Mandate — proposing or signing a
+	// change to what governs a portfolio (#562, #410 act two).
+	//
+	// OPTIONAL, AND THE UNSET CASE IS THE DECISION, exactly as for FundRole: empty
+	// ⇒ the routes are NOT REGISTERED, so a deployment that has named no mandate
+	// signatory answers 404 rather than a 403 nobody could ever satisfy (#535).
+	//
+	// THE PAIRING RULE BELOW IS THE FUND ONE, NOT THE APPROVE ONE, and the
+	// difference is which upstream serves what. DataMasterAddr also serves three
+	// read routes, so a datamaster with no approver is a legitimate posture and a
+	// required-role rule there would be a lie operators satisfy with a placeholder.
+	// ComplianceAddr fronts the mandate surface and NOTHING else — that listener
+	// has no other route on it — so setting it without naming a signatory exposes a
+	// surface nobody can reach, which validateAuth refuses.
+	MandateRole string
 }
 
 func Load() (Config, error) {
@@ -261,6 +287,8 @@ func Load() (Config, error) {
 		AccountingAddr:   os.Getenv("API_GATEWAY_ACCOUNTING_ADDR"),
 		FundRole:         os.Getenv("API_GATEWAY_FUND_ROLE"),
 		ApproveRole:      os.Getenv("API_GATEWAY_APPROVE_ROLE"),
+		ComplianceAddr:   os.Getenv("API_GATEWAY_COMPLIANCE_ADDR"),
+		MandateRole:      os.Getenv("API_GATEWAY_MANDATE_ROLE"),
 	}
 	if err := cfg.validateAuth(); err != nil {
 		return Config{}, err
@@ -441,6 +469,64 @@ func (c Config) validateAuth() error {
 				"drift together: the approver would become a seniority badge rather than a separate " +
 				"function, and the person who moves the fund's cash would clear the prices the fund " +
 				"is valued at")
+		}
+	}
+	// #562. THE MANDATE SURFACE MUST NOT BE EXPOSED WITH NO ONE ABLE TO REACH IT.
+	//
+	// The FundRole pairing, and it applies here for the same reason it does there
+	// and not for datamaster: compliance's mandate listener serves the three
+	// mandate routes and nothing else, so fronting it without naming a signatory
+	// exposes a surface every principal that exists gets a 403 from — a total
+	// outage of the capability wearing a strict control's costume (#535).
+	if c.ComplianceAddr != "" && c.MandateRole == "" {
+		return errors.New("api-gateway: API_GATEWAY_COMPLIANCE_ADDR is set but " +
+			"API_GATEWAY_MANDATE_ROLE is not. Those routes change the mandate every order in a " +
+			"portfolio is checked against, and with no role carrying authz.Mandate they would " +
+			"answer 403 to EVERY principal that exists — which reads as a working control and is " +
+			"a total outage of the capability (#535). Name the signatory, or unset " +
+			"API_GATEWAY_COMPLIANCE_ADDR and the routes are not registered at all (#562)")
+	}
+	// THE MANDATE COLLISIONS, AND THE APPROVE ONE IS THE POINT.
+	//
+	// Every other collision here merges two authorities that were meant to be
+	// separate. This one merges two HALVES OF ONE ESCALATION: relax the constraint
+	// that would have refused an order, then clear the order it would have refused.
+	// With one role holding both, the second signature on the mandate change and
+	// the second signature on the held order come from the same person — each act
+	// still shows two names, each is still refused as a self-approval, and nothing
+	// anywhere compares the two records. That is #562's whole argument for a
+	// separate capability, enforced as configuration the process will not start
+	// without rather than as a convention.
+	if c.MandateRole != "" {
+		switch {
+		case c.MandateRole == c.RequiredRole:
+			return errors.New("api-gateway: API_GATEWAY_MANDATE_ROLE must differ from " +
+				"API_GATEWAY_REQUIRED_ROLE. EVERY authenticated caller carries the baseline role — " +
+				"making it the mandate role means any two users in the tenant can rewrite what " +
+				"governs a portfolio, and the pre-trade compliance gate then enforces whatever they " +
+				"agreed between them")
+		case c.MandateRole == c.TradeRole:
+			return errors.New("api-gateway: API_GATEWAY_MANDATE_ROLE must differ from " +
+				"API_GATEWAY_TRADE_ROLE. A trader who can change the mandate does not need to break " +
+				"the pre-trade gate, only to widen it — and two traders on one desk would then be " +
+				"the whole control on what the fund may hold")
+		case c.MandateRole == c.ApproveRole:
+			return errors.New("api-gateway: API_GATEWAY_MANDATE_ROLE must differ from " +
+				"API_GATEWAY_APPROVE_ROLE. This is the collision #562 exists to prevent: one " +
+				"signatory would give the second signature on relaxing a mandate AND the second " +
+				"signature on the order that mandate would have refused. Both acts show two names, " +
+				"both pass every self-approval check, and nothing compares the two records — the " +
+				"escalation is invisible in exactly the trail an auditor would read")
+		case c.MandateRole == c.OperatorRole:
+			return errors.New("api-gateway: API_GATEWAY_MANDATE_ROLE must differ from " +
+				"API_GATEWAY_OPERATOR_ROLE. Operating the estate is draining nodes and rotating " +
+				"credentials; it decides nothing about what the fund may hold, and an SRE is not the " +
+				"investment committee")
+		case c.MandateRole == c.FundRole:
+			return errors.New("api-gateway: API_GATEWAY_MANDATE_ROLE must differ from " +
+				"API_GATEWAY_FUND_ROLE. Both are senior authorities and that is exactly why they " +
+				"drift together: the person who brings the fund's capital in would also decide what " +
+				"it may be invested in, with nobody else in the loop")
 		}
 	}
 	// #532. AN AUTHENTICATION PATH WITH NO REVOCATION PATH IS ONE THE HOLDER OF A

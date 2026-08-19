@@ -9,10 +9,18 @@
 // proposalstore's doc). The contract was the thing worth copying and it was the
 // thing that did not get copied.
 //
-// So it lives here, takes a Harness, and runs against ALL FOUR backends of the
-// two shipped acts. Act two adds a fifth and a sixth by writing a Harness, which
-// is the point: a new act cannot quietly ship a store that accepts what the
-// others refuse.
+// So it lives here, takes a Harness, and runs against every backend of every
+// shipped act — four when this landed, FIVE since #562 wired act two's
+// mandate-change store, which added its backend by writing a thirty-line Harness
+// rather than by writing a third set of mechanics. That is the point: a new act
+// cannot quietly ship a store that accepts what the others refuse.
+//
+// ACT TWO ADDED ONE BACKEND AND NOT TWO, and the asymmetry is worth naming so
+// nobody reads it as a missing Postgres store. The compliance service has no
+// database and is pinned to replicas: 1 for the post-trade monitor's own
+// correctness, so its proposals are in-process by a stated posture — see
+// services/compliance/internal/store. A durable backend there is a change to that
+// pin first and a Harness second.
 //
 // # What it deliberately does NOT assert
 //

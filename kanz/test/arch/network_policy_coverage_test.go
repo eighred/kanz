@@ -977,6 +977,21 @@ var tenantHeaderTrustingSplitListeners = map[string]int{
 	// above would have kept passing — 8080 is still scraped — while claiming
 	// accounting's tenant-scoped routes share it, which stopped being true.
 	"accounting": 8101,
+	// compliance SPLIT FOR ACT TWO OF #410 (#562), and its argument is the
+	// strongest of the three.
+	//
+	// Its /v1 routes change the MANDATE — the constraint the OMS pre-trade gate
+	// and this service's own post-trade monitor check every order against — and
+	// they take the proposer AND the approver from X-Kanz-Principal-Subject. On
+	// the scraped port a pod in kanz-observability could send two self-chosen
+	// principals and hold BOTH signatures, which is not a disclosure gap like the
+	// four entries above: it is the dual-control failure #562 exists to prevent,
+	// arriving through the network layer instead of through the CLI.
+	//
+	// :8091 keeps /metrics and the probes, which allow-observability-scrape
+	// admits; the API is on :8095, which it does not. The assertions below check
+	// both halves of that claim on every run.
+	"compliance": 8095,
 }
 
 // tenantHeaderRead matches a READ of the tenant principal header — the act that

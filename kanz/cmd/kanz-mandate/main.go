@@ -48,15 +48,43 @@
 // folding; the approval covers the EXACT mandate and reason, so the file cannot be
 // swapped between the two steps; and the proposal expires.
 //
-// IT DOES NOT AUTHENTICATE THE TWO HUMANS. Both invocations run on one operator's
-// machine under one SVID, and the proposal file is a CARRIER, not a signature — one
-// person can run both steps. That is a real limitation, written here rather than
-// left to be discovered from the absence of a check. What the two-step buys is that
-// the FACT now records four eyes and the payload cannot change between them, so a
-// unilateral change is DETECTABLE in the trail. Making it PREVENTABLE requires the
-// two steps to be separately authenticated requests — the gateway surface the
-// pricing-override path already has (authz.Fund is the precedent; authz.Mandate is
-// the equivalent). That is the follow-up on #410, not pretended at here.
+// IT DOES NOT AUTHENTICATE THE TWO HUMANS, AND IT STILL DOES NOT. Both invocations
+// run on one operator's machine under one SVID, and the proposal file is a CARRIER,
+// not a signature — one person can run both steps. What the two-step buys is that
+// the FACT records four eyes and the payload cannot change between them, so a
+// unilateral change made THROUGH THIS TOOL is DETECTABLE in the trail and not
+// prevented.
+//
+// # THE PREVENTABLE PATH NOW EXISTS, AND IT IS NOT THIS ONE (#562)
+//
+// This paragraph used to end "that is the follow-up on #410, not pretended at
+// here". The follow-up landed. Two separately authenticated requests through the
+// api-gateway are the real control:
+//
+//	POST /v1/portfolios/{id}/mandate            propose  (authz.Mandate)
+//	POST /v1/portfolios/{id}/mandate/approve    sign     (authz.Mandate)
+//	GET  /v1/mandates/pending-changes           the queue an approver acts from
+//
+// The gateway authenticates each caller and injects the principal; the compliance
+// service holds the proposal between the two requests and refuses a second
+// signature from the first signatory, across two REQUESTS and after folding case
+// and space. THAT is where a mandate change should be made.
+//
+// # So why does this tool still exist
+//
+// It is the BREAK-GLASS path, and it is deliberately kept rather than removed:
+// the gateway route needs a running gateway, a running compliance service with
+// COMPLIANCE_NATS_URL set, and a deployment that has named an
+// API_GATEWAY_MANDATE_ROLE. An estate that has none of those — a fresh install, a
+// DR rebuild, a local rig — still has to be able to put a portfolio under mandate,
+// and until it can, EVERY portfolio is governed by nothing and the engine's "no
+// mandate governs this portfolio" branch returns nil silently.
+//
+// WHAT THAT MEANS FOR AN AUDITOR: a ConfigChanged whose two names came from this
+// tool proves one operator held both credentials at once, and one that came from
+// the gateway proves two authenticated principals signed. The FACT does not
+// distinguish them — its source field does (source "kanz-mandate" versus
+// "compliance"), and that is the honest limit of what the trail can say.
 //
 // The file is the protojson form of compliance.v1.Mandate.
 package main
@@ -365,21 +393,13 @@ func loadMandate(path, tenant string) (*compliancepb.Mandate, error) {
 		return nil, fmt.Errorf("the mandate is for tenant %q but --tenant is %q — publishing it would file one tenant's mandate under another",
 			m.GetTenantId(), tenant)
 	}
-	switch {
-	case m.GetMandateId() == "":
-		return nil, errors.New("mandate_id is required")
-	case m.GetPortfolioId() == "":
-		return nil, errors.New("portfolio_id is required: a mandate governs a portfolio")
-	case m.GetVersion() == 0:
-		return nil, errors.New("version is required and monotonic: it is how a consumer orders two mandates for the same portfolio")
-	}
-	if m.GetEffectiveAt() == nil {
-		// NOT DEFAULTED ON THE APPROVE SIDE. effective_at is inside the digest via
-		// the serialized mandate, so a file without one would hash differently in
-		// the two invocations (each stamping its own "now") and every approval
-		// would be refused as a payload change — a control failing for a reason
-		// that has nothing to do with the control.
-		return nil, errors.New("effective_at is required: it is part of what the approval covers, so it cannot be defaulted per-invocation")
+	// ONE IMPLEMENTATION, SHARED WITH THE GATEWAY PATH (#562). These four checks
+	// used to be written out here, and the compliance service's propose route needs
+	// exactly the same four — a second copy is how the two publishers come to accept
+	// different mandates, on a COMPACTED stream where the bad one is the last message
+	// on the portfolio's subject and every consumer that boots arms itself with it.
+	if err := comp.ValidateMandate(&m); err != nil {
+		return nil, err
 	}
 	// An empty ruleset is LEGAL and it means something: this portfolio is governed by
 	// a mandate that declares no constraints. That is different from having no mandate
