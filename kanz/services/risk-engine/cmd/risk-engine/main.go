@@ -658,15 +658,27 @@ func runEngine(ctx context.Context, cfg config.Config, readiness *server.Readine
 	// this build carries is recorded into it, so kanz_risk_analytics_validated
 	// answers "how much of this book is priced by something nobody checked".
 	//
-	// A failure here is NOT a failed benchmark — those are recorded and reported
-	// as such. It means the benchmark case sets themselves are malformed, so this
-	// build cannot state its own validation posture, and a risk engine that
-	// cannot say what it has validated must not start as though it had.
+	// A failure from LoadValidations is NOT a failed benchmark — those are
+	// recorded and reported as such. It means the benchmark case sets themselves
+	// are malformed, so this build cannot state its own validation posture, and a
+	// risk engine that cannot say what it has validated must not start as though
+	// it had.
+	//
+	// AND AS OF #471 SLICE 3, AnalyticsPosture CAN REFUSE THE START TOO.
+	// RISK_REQUIRE_VALIDATED_ANALYTICS defaults to ARMED, so an analytic in the
+	// inventory that holds no current passing validation — and that
+	// benchmarks.ValidationExemptions() does not name, with a reason — stops this
+	// engine here rather than pricing the book unchecked. Eleven of the twelve
+	// pass in this build and isda_simm is the one named exemption, so nothing
+	// currently deployed reaches that branch; what it stops is the NEXT analytic
+	// added without evidence.
 	validationGate := validation.NewGate(nil)
 	if err := app.LoadValidations(validationGate, func() time.Time { return time.Now().UTC() }); err != nil {
 		return err
 	}
-	app.AnalyticsPosture(obs.Registry, logger, validationGate)
+	if err := app.AnalyticsPosture(obs.Registry, logger, validationGate, cfg.RequireValidatedAnalytics); err != nil {
+		return err
+	}
 
 	// Risk query gRPC server (API-01b): a read surface over the concrete
 	// EngineImpl, sharing the live store + cache + registry. Started only when
