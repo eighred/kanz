@@ -4,9 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"sort"
 	"strings"
-	"sync"
 	"time"
 
 	orderpb "github.com/eighred/kanz/kanz-schemas-go/order/v1"
@@ -15,6 +13,7 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	"github.com/eighred/kanz/internal/dualcontrol"
+	"github.com/eighred/kanz/internal/dualcontrol/proposalstore"
 	"github.com/eighred/kanz/internal/outbox"
 )
 
@@ -76,7 +75,11 @@ type OrderProposal struct {
 // a proposal. It is the signal that THIS delivery lost the race — another
 // delivery of the same SubmitOrder already held the order — and it means exactly
 // what ErrExists means on the admission path: ack, announce nothing, stop.
-var ErrProposalExists = errors.New("oms: order already has a pending proposal")
+//
+// IT IS THE SHARED SENTINEL under this act's name (#562). Every act's store has
+// to answer a redelivery the same way, and two sentinels for one condition is
+// how a caller ends up matching on only the one it knows.
+var ErrProposalExists = proposalstore.ErrExists
 
 // ProposalStore is the durable home of orders awaiting a second signature.
 //
@@ -190,13 +193,46 @@ func refusalIsRecordable(approver, reason string, at time.Time) error {
 	return nil
 }
 
-// validate refuses a proposal the store cannot honestly hold. It runs in BOTH
+// Record, WithRecord, Decided, Copy and Validate make a held order storable by
+// internal/dualcontrol/proposalstore, which is where the mechanics this act
+// shares with every other one now live (#562).
+func (p OrderProposal) Record() dualcontrol.Proposal { return p.Proposal }
+
+// WithRecord returns a copy carrying r. It is how the shared contract builds its
+// malformed cases without knowing what a SubmitOrder is.
+func (p OrderProposal) WithRecord(r dualcontrol.Proposal) OrderProposal {
+	p.Proposal = r
+	return p
+}
+
+// Decided reports whether the second signature is on this row. It is the OMS's
+// answer where datamaster's is always false: this act KEEPS the row after an
+// approval, because an admitted order carries the order and not who approved it,
+// so this row is the only durable record that two people signed.
+func (p OrderProposal) Decided() bool { return p.Approver != "" }
+
+// Copy is a DEEP copy. A stored proposal sharing its command with the caller is
+// not a record of what was proposed — the digest the approver signs would cover
+// a value the store no longer holds.
+func (p OrderProposal) Copy() OrderProposal {
+	if p.Command != nil {
+		p.Command = proto.Clone(p.Command).(*orderpb.SubmitOrder)
+	}
+	return p
+}
+
+// Validate refuses a proposal the store cannot honestly hold. It runs in BOTH
 // implementations so the memory seam cannot accept what Postgres refuses —
 // fakeBus already taught this repository what a permissive double costs.
-func (p OrderProposal) validate() error {
+//
+// The shared clauses are proposalstore.Wellformed's, so this act and every other
+// refuse the same malformed record; what remains here is what only an order
+// proposal can be wrong about.
+func (p OrderProposal) Validate() error {
+	if err := proposalstore.Wellformed(p.Proposal); err != nil {
+		return err
+	}
 	switch {
-	case p.ID == "" || p.Subject == "":
-		return errors.New("oms: proposal has no order id")
 	case p.ID != p.Subject:
 		// The two are one value by construction (see the type doc). A caller
 		// that set them apart is holding a proposal whose key and whose subject
@@ -206,16 +242,6 @@ func (p OrderProposal) validate() error {
 		return errors.New("oms: proposal carries no command, so approving it could admit nothing")
 	case p.Command.GetOrderId() != p.ID:
 		return fmt.Errorf("oms: proposal %q holds a command for order %q", p.ID, p.Command.GetOrderId())
-	case p.Act == "":
-		return errors.New("oms: proposal names no act, so an approval for any act would cover it")
-	case p.Proposer == "":
-		return errors.New("oms: proposal has no proposer, so no approver could ever differ from it")
-	case p.Digest == "":
-		return errors.New("oms: proposal has no digest, so an approval would cover nothing")
-	case p.CreatedAt.IsZero() || p.ExpiresAt.IsZero():
-		return errors.New("oms: proposal has no creation time or no expiry — unknown is not forever")
-	case !p.ExpiresAt.After(p.CreatedAt):
-		return errors.New("oms: proposal is born expired and could never be approved")
 	}
 	return nil
 }
@@ -227,9 +253,14 @@ func (p OrderProposal) validate() error {
 // OMS_DATABASE_URL a crash loses the orders, the FACTs and the pending
 // proposals together, so the three cannot come back disagreeing. With more than
 // one replica a proposal held here is approvable only on the pod that took it.
+//
+// THE MECHANICS ARE THE SHARED ONES (#562): one map, one lock, one copy-on-read
+// discipline and one total order, in internal/dualcontrol/proposalstore. What
+// stays here is this act's DISPOSITION — Claim writes the approver onto the row
+// and keeps it, expiry is announced exactly once — because those are the
+// decisions that differ between acts and each one carries a reason.
 type MemoryProposals struct {
-	mu     sync.RWMutex
-	by     map[string]OrderProposal
+	core   *proposalstore.Memory[OrderProposal]
 	outbox *outbox.Memory
 }
 
@@ -238,126 +269,92 @@ type MemoryProposals struct {
 // store enqueues into, so a pending-approval FACT and an acceptance cannot end
 // up in two different places.
 func NewMemoryProposals(q *outbox.Memory) *MemoryProposals {
-	return &MemoryProposals{by: map[string]OrderProposal{}, outbox: q}
+	return &MemoryProposals{core: proposalstore.NewMemory[OrderProposal](), outbox: q}
 }
 
 // Put holds the proposal and enqueues its FACT in the same lock hold — this
-// store's whole equivalent of the transaction PostgresProposals.Put opens.
-func (m *MemoryProposals) Put(_ context.Context, p OrderProposal, announce []outbox.Record) error {
-	if err := p.validate(); err != nil {
-		return err
-	}
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if _, ok := m.by[p.ID]; ok {
-		return ErrProposalExists
-	}
-	// THE FALLIBLE WRITE FIRST. A failure must leave NOTHING behind, and the map
-	// write cannot fail — the same ordering MemoryStore.Create uses.
-	if len(announce) > 0 {
+// store's whole equivalent of the transaction PostgresProposals.Put opens. The
+// enqueue is the fallible half and runs FIRST, so a rejected record leaves
+// nothing held.
+func (m *MemoryProposals) Put(ctx context.Context, p OrderProposal, announce []outbox.Record) error {
+	return m.core.Insert(ctx, p, func() error {
+		if len(announce) == 0 {
+			return nil
+		}
 		if m.outbox == nil {
 			return errors.New("oms: proposal store has no outbox, so a held order would be announced to nobody")
 		}
-		if err := m.outbox.Append(announce...); err != nil {
-			return err
-		}
-	}
-	p.Command = proto.Clone(p.Command).(*orderpb.SubmitOrder)
-	m.by[p.ID] = p
-	return nil
+		return m.outbox.Append(announce...)
+	})
 }
 
-func (m *MemoryProposals) Get(_ context.Context, orderID string) (OrderProposal, bool, error) {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	p, ok := m.by[orderID]
-	if !ok {
-		return OrderProposal{}, false, nil
-	}
-	p.Command = proto.Clone(p.Command).(*orderpb.SubmitOrder)
-	return p, true, nil
+func (m *MemoryProposals) Get(ctx context.Context, orderID string) (OrderProposal, bool, error) {
+	return m.core.Get(ctx, orderID)
 }
 
-func (m *MemoryProposals) Claim(_ context.Context, orderID, approver string, at time.Time) (bool, error) {
+func (m *MemoryProposals) Claim(ctx context.Context, orderID, approver string, at time.Time) (bool, error) {
 	if approver == "" {
 		return false, errors.New("oms: an approval must come from an authenticated subject")
 	}
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	p, ok := m.by[orderID]
-	if !ok || p.Approver != "" {
-		return false, nil
-	}
-	if dualcontrol.SameSubject(approver, p.Proposer) {
-		// Refused rather than recorded, and the proposal is LEFT PENDING for
-		// somebody who may actually approve it. Postgres refuses this too, at
-		// the CHECK constraint — that is the line an auditor's row depends on,
-		// and this one keeps the two stores agreeing.
-		return false, fmt.Errorf("%w: %q proposed this order and cannot approve it",
-			dualcontrol.ErrSelfApproval, p.Proposer)
-	}
-	p.Approver = approver
-	p.DecidedAt = at.UTC()
-	m.by[orderID] = p
-	return true, nil
+	return m.core.Update(ctx, orderID, func(p OrderProposal) (OrderProposal, bool, error) {
+		if p.Approver != "" {
+			return p, false, nil
+		}
+		if dualcontrol.SameSubject(approver, p.Proposer) {
+			// Refused rather than recorded, and the proposal is LEFT PENDING for
+			// somebody who may actually approve it — an error from the decide
+			// function writes nothing. Postgres refuses this too, at the CHECK
+			// constraint, which is the line an auditor's row depends on; this one
+			// keeps the two stores agreeing.
+			return p, false, fmt.Errorf("%w: %q proposed this order and cannot approve it",
+				dualcontrol.ErrSelfApproval, p.Proposer)
+		}
+		p.Approver = approver
+		p.DecidedAt = at.UTC()
+		return p, true, nil
+	})
 }
 
 // RecordRefusal implements ProposalStore. THE SAME PREDICATE the Postgres UPDATE
 // carries — undecided, and nothing else — spelled once per store, so the seam
 // every service-level test in this package runs on cannot accept a refusal
 // Postgres would refuse.
-func (m *MemoryProposals) RecordRefusal(_ context.Context, orderID, approver, reason string, at time.Time) (bool, error) {
+func (m *MemoryProposals) RecordRefusal(ctx context.Context, orderID, approver, reason string, at time.Time) (bool, error) {
 	if err := refusalIsRecordable(approver, reason, at); err != nil {
 		return false, err
 	}
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	p, ok := m.by[orderID]
-	if !ok || p.Approver != "" {
-		return false, nil
-	}
-	// APPROVER AND DECIDEDAT ARE UNTOUCHED. The proposal is still pending and
-	// still claimable by somebody else; only the explanation changes.
-	p.RefusalReason = reason
-	p.RefusedBy = approver
-	p.RefusedAt = at.UTC()
-	m.by[orderID] = p
-	return true, nil
+	return m.core.Update(ctx, orderID, func(p OrderProposal) (OrderProposal, bool, error) {
+		if p.Approver != "" {
+			return p, false, nil
+		}
+		// APPROVER AND DECIDEDAT ARE UNTOUCHED. The proposal is still pending and
+		// still claimable by somebody else; only the explanation changes.
+		p.RefusalReason = reason
+		p.RefusedBy = approver
+		p.RefusedAt = at.UTC()
+		return p, true, nil
+	})
 }
 
-func (m *MemoryProposals) Pending(_ context.Context, now time.Time) ([]OrderProposal, error) {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	out := make([]OrderProposal, 0, len(m.by))
-	for _, p := range m.by {
+func (m *MemoryProposals) Pending(ctx context.Context, now time.Time) ([]OrderProposal, error) {
+	return m.core.Select(ctx, func(p OrderProposal) bool {
 		// THE SAME THREE CLAUSES THE POSTGRES QUERY CARRIES (#548): undecided, not
 		// yet announced, not yet expired. The announced check is not implied by the
 		// expiry one — a pod running fast can announce a proposal a slower reader
 		// still considers live — and a seam that listed it would offer as work an
 		// order the estate has already been told will not trade.
-		if p.Approver != "" || !p.ExpiryAnnouncedAt.IsZero() || !p.Pending(now) {
-			continue
-		}
-		p.Command = proto.Clone(p.Command).(*orderpb.SubmitOrder)
-		out = append(out, p)
-	}
-	sortProposals(out)
-	return out, nil
+		return p.Approver == "" && p.ExpiryAnnouncedAt.IsZero() && p.Pending(now)
+	})
 }
 
 // ExpiredUnannounced implements ProposalStore.
-func (m *MemoryProposals) ExpiredUnannounced(_ context.Context, now time.Time, limit int) ([]OrderProposal, error) {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	out := make([]OrderProposal, 0, len(m.by))
-	for _, p := range m.by {
-		if p.Approver != "" || !p.ExpiryAnnouncedAt.IsZero() || p.Pending(now) {
-			continue
-		}
-		p.Command = proto.Clone(p.Command).(*orderpb.SubmitOrder)
-		out = append(out, p)
+func (m *MemoryProposals) ExpiredUnannounced(ctx context.Context, now time.Time, limit int) ([]OrderProposal, error) {
+	out, err := m.core.Select(ctx, func(p OrderProposal) bool {
+		return p.Approver == "" && p.ExpiryAnnouncedAt.IsZero() && proposalstore.Expired(p.Proposal, now)
+	})
+	if err != nil {
+		return nil, err
 	}
-	sortProposals(out)
 	if limit > 0 && len(out) > limit {
 		out = out[:limit]
 	}
@@ -365,24 +362,24 @@ func (m *MemoryProposals) ExpiredUnannounced(_ context.Context, now time.Time, l
 }
 
 // AnnounceExpiry implements ProposalStore.
-func (m *MemoryProposals) AnnounceExpiry(_ context.Context, orderID string, at time.Time, announce []outbox.Record) (bool, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	p, ok := m.by[orderID]
-	// The same predicate the Postgres UPDATE carries, spelled once per store. A
-	// decided proposal never expires, an announced one never re-announces, and a
-	// live one cannot be killed early.
-	if !ok || p.Approver != "" || !p.ExpiryAnnouncedAt.IsZero() || p.Pending(at) {
-		return false, nil
-	}
-	// ENQUEUED BEFORE THE MARKER IS SET, so a rejected record leaves the proposal
-	// exactly as it was — the memory seam's stand-in for the Postgres rollback.
-	if err := m.outbox.Append(announce...); err != nil {
-		return false, err
-	}
-	p.ExpiryAnnouncedAt = at.UTC()
-	m.by[orderID] = p
-	return true, nil
+func (m *MemoryProposals) AnnounceExpiry(ctx context.Context, orderID string, at time.Time, announce []outbox.Record) (bool, error) {
+	return m.core.Update(ctx, orderID, func(p OrderProposal) (OrderProposal, bool, error) {
+		// The same predicate the Postgres UPDATE carries, spelled once per store. A
+		// decided proposal never expires, an announced one never re-announces, and a
+		// live one cannot be killed early.
+		if p.Approver != "" || !p.ExpiryAnnouncedAt.IsZero() || p.Pending(at) {
+			return p, false, nil
+		}
+		// ENQUEUED BEFORE THE MARKER IS SET, so a rejected record leaves the
+		// proposal exactly as it was — the memory seam's stand-in for the Postgres
+		// rollback. It runs inside the store's write lock, which is what makes the
+		// two writes one.
+		if err := m.outbox.Append(announce...); err != nil {
+			return p, false, err
+		}
+		p.ExpiryAnnouncedAt = at.UTC()
+		return p, true, nil
+	})
 }
 
 // PostgresProposals is the durable, tenant-scoped ProposalStore. It shares the
@@ -409,7 +406,7 @@ func NewPostgresProposals(pool *pgxpool.Pool, queue *outbox.Postgres) *PostgresP
 // refused INSERT, so a redelivered SubmitOrder cannot announce the same held
 // order twice.
 func (p *PostgresProposals) Put(ctx context.Context, prop OrderProposal, announce []outbox.Record) error {
-	if err := prop.validate(); err != nil {
+	if err := prop.Validate(); err != nil {
 		return err
 	}
 	blob, err := proto.Marshal(prop.Command)
@@ -688,17 +685,6 @@ func scanOrderProposal(s proposalScanner) (OrderProposal, error) {
 		prop.RefusedAt = refusedAt.UTC()
 	}
 	return prop, nil
-}
-
-func sortProposals(ps []OrderProposal) {
-	sort.Slice(ps, func(i, j int) bool {
-		if !ps[i].CreatedAt.Equal(ps[j].CreatedAt) {
-			return ps[i].CreatedAt.Before(ps[j].CreatedAt)
-		}
-		// Ties broken by id so the order is total. A pending list that reorders
-		// between reads reads as activity.
-		return ps[i].ID < ps[j].ID
-	})
 }
 
 var (
