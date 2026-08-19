@@ -19,6 +19,7 @@ import (
 	"google.golang.org/protobuf/proto"
 	"time"
 
+	"github.com/eighred/kanz/internal/dualcontrol"
 	"github.com/eighred/kanz/pkg/auth"
 	"github.com/eighred/kanz/pkg/bus"
 	"github.com/eighred/kanz/services/api-gateway/internal/authz"
@@ -187,7 +188,7 @@ func (h *Handler) approve(w http.ResponseWriter, r *http.Request) {
 	cmd.OrderId = orderID
 	cmd.Metadata = bindMetadata(cmd.GetMetadata(), p, orderID)
 
-	if err := h.publish(r.Context(), p, subjectApprove, orderID, &cmd, idempotencyKey(r, orderID)); err != nil {
+	if err := h.publish(r.Context(), p, subjectApprove, orderID, &cmd, approvalIdempotencyKey(r, orderID, p)); err != nil {
 		writePublishError(w, err)
 		return
 	}
@@ -281,9 +282,44 @@ func bindMetadata(existing *commandpb.CommandMetadata, p *middleware.Principal, 
 
 // idempotencyKey prefers the client's Idempotency-Key header (API-01d dedup);
 // absent, the order id is a stable natural key.
+//
+// SUBMIT AND CANCEL ONLY. An order is submitted once and cancelled once, so the
+// order id IS the natural key for them and a retry that lands on another pod
+// must collapse. Approval is not once-per-order — see approvalIdempotencyKey.
 func idempotencyKey(r *http.Request, orderID string) string {
 	if k := r.Header.Get("Idempotency-Key"); k != "" {
 		return k
 	}
 	return orderID
+}
+
+// approvalIdempotencyKey is the order id AND the approver, because "Alice
+// approves order X" and "Bob approves order X" are different commands (#581).
+//
+// WHAT THE BARE ORDER ID DID. The key rides as the broker's Nats-Msg-Id and
+// JetStream collapses duplicates inside the stream's window. An approval can be
+// REFUSED and then legitimately retried BY SOMEBODY ELSE — that is the whole
+// point of maker-checker, and self-approval is its most common refusal. Alice
+// proposes and cannot sign; Bob signs; Bob's command carried the same key as
+// Alice's refused attempt and was dropped by the broker. Bob got 202, the OMS
+// never saw it, and the order stayed pending with nothing saying why — #539's
+// shape on the path built to fix it.
+//
+// It became reachable when #575 put the refusal on the pending queue: until the
+// approver could SEE the refusal, nobody knew to retry.
+//
+// A SAME-SUBJECT RETRY IS STILL COLLAPSED, which is the property not to trade
+// away — a double-clicked approve must not publish twice.
+//
+// The header still wins. A client that sends Idempotency-Key has said what it
+// means by "the same request", and this estate does not second-guess that.
+func approvalIdempotencyKey(r *http.Request, orderID string, p *middleware.Principal) string {
+	if k := r.Header.Get("Idempotency-Key"); k != "" {
+		return k
+	}
+	// NOT string concatenation with a separator: a subject is free-form and any
+	// separator can appear inside one, so "a|b" + "c" and "a" + "b|c" would
+	// collide — the same argument dualcontrol.Digest makes for length-prefixing.
+	// A collision here silently drops a real approval.
+	return dualcontrol.Digest(orderID, p.Subject)
 }
