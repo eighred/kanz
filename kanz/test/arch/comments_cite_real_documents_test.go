@@ -112,7 +112,7 @@ func TestCommentsCiteDocumentsThatExist(t *testing.T) {
 			return err
 		}
 		if d.IsDir() {
-			if n := d.Name(); n == "vendor" || n == "testdata" || n == ".git" || n == "node_modules" {
+			if skipWalkDir(d) || d.Name() == "testdata" {
 				return filepath.SkipDir
 			}
 			return nil
@@ -215,7 +215,7 @@ func markdownIndex(t *testing.T, repoRoot string) map[string]bool {
 			return nil // an unreadable corner of the tree is not this guard's business
 		}
 		if d.IsDir() {
-			if n := d.Name(); n == ".git" || n == "node_modules" || n == "vendor" {
+			if skipWalkDir(d) {
 				return filepath.SkipDir
 			}
 			return nil
