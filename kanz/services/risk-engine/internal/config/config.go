@@ -79,12 +79,23 @@ type Config struct {
 
 	// ShardMembers is the full risk-engine fleet member set (PARITY-05a) used
 	// to build the consistent-hash ring. Every replica MUST be given the same
-	// list. Empty or single-member ⇒ unsharded: this replica owns every
-	// portfolio (the pre-05a behavior). Comma-separated in the environment.
+	// list. Comma-separated in the environment.
+	//
+	// THE TWO BELOW ARE SET TOGETHER OR NOT AT ALL (#110). Both empty is the
+	// unsharded default — this replica owns every portfolio, which is the
+	// posture the estate actually runs and which app.ShardPosture WARNs about
+	// by name. Either one alone, or a ShardSelf absent from ShardMembers, is
+	// REFUSED at startup by shard.NewAssignment: each of those produced a
+	// replica that owned nothing (or everything) while its probes stayed green.
+	//
+	// Note what a correct list requires: it must name exactly the pods that are
+	// running. risk-engine is a KEDA-scaled Rollout, so no static value can do
+	// that — see test/arch/shard_membership_is_not_static_test.go, which forbids
+	// pairing a hand-written list with an autoscaled workload.
 	ShardMembers []string
 	// ShardSelf is THIS replica's member id — its identity on the ring
-	// (typically the StatefulSet pod name / ordinal). Must appear in
-	// ShardMembers for sharding to take effect; empty ⇒ unsharded.
+	// (typically a StatefulSet pod name / ordinal). It MUST appear in
+	// ShardMembers; anything else is refused rather than silently mis-sharded.
 	ShardSelf string
 
 	// RedisURL enables cross-pod shared-state dedup (PARITY-05c): with N
@@ -181,11 +192,17 @@ func Load() (Config, error) {
 		MarketDataURL:    marketDataURL,
 		LiquidityVenue:   strings.TrimSpace(os.Getenv("RISK_ENGINE_LIQUIDITY_VENUE")),
 		ShardMembers:     splitList(os.Getenv("RISK_ENGINE_SHARD_MEMBERS")),
-		ShardSelf:        os.Getenv("RISK_ENGINE_SHARD_SELF"),
-		RedisURL:         redisURL,
-		OTLPEndpoint:     os.Getenv("RISK_ENGINE_OTLP_ENDPOINT"),
-		GRPCListen:       os.Getenv("RISK_ENGINE_GRPC_LISTEN"),
-		SPIFFESocket:     os.Getenv("RISK_ENGINE_SPIFFE_SOCKET"),
+		// TRIMMED BECAUSE THE MEMBER LIST IS. splitList trims each member, so an
+		// id carrying the trailing space a YAML block scalar or a shell `export`
+		// leaves behind could never match one — and an id that matches nothing
+		// owns nothing. That now refuses the start (shard.ErrSelfNotAMember)
+		// instead of silently discarding the spine, but the operator should never
+		// have reached either outcome over whitespace.
+		ShardSelf:    strings.TrimSpace(os.Getenv("RISK_ENGINE_SHARD_SELF")),
+		RedisURL:     redisURL,
+		OTLPEndpoint: os.Getenv("RISK_ENGINE_OTLP_ENDPOINT"),
+		GRPCListen:   os.Getenv("RISK_ENGINE_GRPC_LISTEN"),
+		SPIFFESocket: os.Getenv("RISK_ENGINE_SPIFFE_SOCKET"),
 
 		CalibrationInterval: parseDuration(os.Getenv("RISK_ENGINE_CALIBRATION_INTERVAL")),
 		CalibrationNightly:  nightly,

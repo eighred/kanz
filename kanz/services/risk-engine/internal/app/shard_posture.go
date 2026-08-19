@@ -52,6 +52,17 @@ import (
 // registry the replicas join), which does not exist here. So this states the
 // posture instead, and the metric is what makes the gap countable rather than
 // something a reader has to derive from two files and a NATS semantic.
+//
+// # What the estate now refuses rather than absorbs
+//
+// The gap above is a DECISION that is still open; the failures around it are
+// not. shard.NewAssignment refuses every half-configured ring — an id absent
+// from the list, a list with no id, an id with no list — and the composition
+// root exits on it before any I/O, because each of those silently produced a
+// replica that owned nothing (or everything) with green probes. And
+// test/arch/shard_membership_is_not_static_test.go forbids pairing a
+// hand-written member list with a KEDA-scaled workload, which is what "fixing
+// #110" looks like from the outside and is strictly worse than this posture.
 
 // ShardPosture reports whether this replica is sharding, and warns when it is
 // not.

@@ -53,8 +53,20 @@ func pickKeys(t *testing.T, a *shard.Assignment) (owned, foreign string) {
 	return owned, foreign
 }
 
+// mustAssign builds an Assignment or fails the test. NewAssignment refuses a
+// half-configured ring (#110), and a test that ignored that error would be
+// exercising a nil filter.
+func mustAssign(t *testing.T, members []string, self string) *shard.Assignment {
+	t.Helper()
+	a, err := shard.NewAssignment(shard.NewRing(members, 0), self)
+	if err != nil {
+		t.Fatalf("NewAssignment(%v, %q): %v", members, self, err)
+	}
+	return a
+}
+
 func TestShardFilter_DropsUnownedAppliesEverySubject(t *testing.T) {
-	assign := shard.NewAssignment(shard.NewRing([]string{"r0", "r1", "r2"}, 0), "r0")
+	assign := mustAssign(t, []string{"r0", "r1", "r2"}, "r0")
 	owned, foreign := pickKeys(t, assign)
 
 	inner := newRecordingApplier()
@@ -83,7 +95,7 @@ func TestShardFilter_DropsUnownedAppliesEverySubject(t *testing.T) {
 // be wired unconditionally.
 func TestShardFilter_UnshardedPassesThrough(t *testing.T) {
 	inner := newRecordingApplier()
-	f := app.NewShardFilter(inner, shard.NewAssignment(nil, "r0"))
+	f := app.NewShardFilter(inner, mustAssign(t, nil, ""))
 	_ = f.ApplyPortfolioRevalued(context.Background(), &envelopepb.Envelope{}, &domainpb.PortfolioState{PortfolioId: "ANY"})
 	if inner.seen["ANY"] != 1 {
 		t.Fatal("unsharded filter must pass every apply through")
@@ -94,7 +106,7 @@ func TestShardFilter_UnshardedPassesThrough(t *testing.T) {
 // ErrMissingAggregateID contract) — never silently dropped as unowned.
 func TestShardFilter_MissingIDPassesThrough(t *testing.T) {
 	inner := newRecordingApplier()
-	f := app.NewShardFilter(inner, shard.NewAssignment(shard.NewRing([]string{"r0", "r1"}, 0), "r0"))
+	f := app.NewShardFilter(inner, mustAssign(t, []string{"r0", "r1"}, "r0"))
 	if err := f.ApplyPositionChanged(context.Background(), &envelopepb.Envelope{}, &domainpb.PositionState{}); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

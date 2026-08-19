@@ -9,6 +9,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net"
@@ -161,6 +162,25 @@ func hostOrigin() string {
 func runEngine(ctx context.Context, cfg config.Config, readiness *server.Readiness, logger *slog.Logger, obs *observability.Provider) error {
 	busMetrics := bus.NewBusMetrics(obs.Registry)
 	riskMetrics := engine.NewMetrics(obs.Registry)
+
+	// A HALF-CONFIGURED SHARD RING REFUSES THE START, AND IT DOES SO BEFORE ANY
+	// I/O (#110). The ring is a pure function of two env values, so nothing here
+	// needs a broker, a database or an SVID to know the answer — and checking it
+	// first means a bad member list reports ITSELF rather than surfacing as
+	// whatever the NATS dial says when the estate is also having a bad day.
+	//
+	// What it prevents: shard.NewAssignment used to accept any RISK_ENGINE_SHARD_SELF,
+	// so one stale or misspelled pod name left Owns() false for EVERY key. That
+	// replica consumed the whole spine, acked it, applied none of it, and kept its
+	// probes green while its risk store stayed empty and the snapshot it restored
+	// at boot aged in place. A crashloop an operator can read is the cheaper
+	// failure; a fleet publishing measures from a book it never assembled is not
+	// detectable after the fact.
+	assign, err := shard.NewAssignment(shard.NewRing(cfg.ShardMembers, 0), cfg.ShardSelf)
+	if err != nil {
+		return fmt.Errorf("RISK_ENGINE_SHARD_MEMBERS/RISK_ENGINE_SHARD_SELF: %w — every replica must "+
+			"be given the SAME member list and its own id from that list", err)
+	}
 
 	// SEC-M3: ONE workload identity for everything in this process that speaks
 	// mTLS — the NATS spine below and the query gRPC listener (serveQueryGRPC).
@@ -529,8 +549,8 @@ func runEngine(ctx context.Context, cfg config.Config, readiness *server.Readine
 	// everything on the shared group, exactly the pre-05a path.
 	var applier ingest.Applier = engine.NewTriggeringApplier(store, recomputer)
 	group := ""
-	assign := shard.NewAssignment(shard.NewRing(cfg.ShardMembers, 0), cfg.ShardSelf)
-	sharded := assign.Sharded() && cfg.ShardSelf != ""
+	// assign was built and validated at the top of runEngine, before any I/O.
+	sharded := assign.Sharded()
 	if sharded {
 		applier = app.NewShardFilter(applier, assign)
 		group = app.DefaultConsumerGroup + "-" + cfg.ShardSelf
