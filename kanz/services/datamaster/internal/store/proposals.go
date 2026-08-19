@@ -5,13 +5,14 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
-	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/eighred/kanz/internal/dualcontrol"
+	"github.com/eighred/kanz/internal/dualcontrol/proposalstore"
 	"github.com/eighred/kanz/services/datamaster/internal/pricing"
 )
 
@@ -27,6 +28,54 @@ type OverrideProposal struct {
 	dualcontrol.Proposal
 	Reason      string
 	ChosenPrice *big.Rat
+}
+
+// Record, WithRecord, Decided, Copy and Validate make an override proposal
+// storable by internal/dualcontrol/proposalstore, which is where the mechanics
+// this act shares with every other one now live (#562).
+func (prop OverrideProposal) Record() dualcontrol.Proposal { return prop.Proposal }
+
+// WithRecord returns a copy carrying r. It is how the shared contract builds its
+// malformed cases without knowing what a price is.
+func (prop OverrideProposal) WithRecord(r dualcontrol.Proposal) OverrideProposal {
+	prop.Proposal = r
+	return prop
+}
+
+// Decided is ALWAYS FALSE HERE, and that is this act's answer rather than a
+// stub. Claim removes the row: an override that was applied is not in this store
+// to be asked about, and its durable record is the append-only
+// exception_overrides row carrying both names. A stored proposal is by
+// construction one nobody has signed.
+func (prop OverrideProposal) Decided() bool { return false }
+
+// Copy is a DEEP copy. The caller keeps a pointer to the price, and a stored
+// *big.Rat it can still mutate is not a record of what was proposed — the digest
+// would then cover a value the store no longer holds.
+func (prop OverrideProposal) Copy() OverrideProposal {
+	if prop.ChosenPrice != nil {
+		prop.ChosenPrice = new(big.Rat).Set(prop.ChosenPrice)
+	}
+	return prop
+}
+
+// Validate refuses a proposal this store cannot honestly hold.
+//
+// IT RUNS IN BOTH BACKENDS, which is the repair #562 was filed on. Before the
+// shared store, MemoryProposals checked only that the id was non-empty: it
+// accepted a proposal with no proposer (every approver differs from "", so the
+// self-approval check passes vacuously), silently OVERWROTE an id already held,
+// and panicked on a nil price where Postgres returns an error. The in-process
+// store had no test of its own, so none of the three was visible.
+func (prop OverrideProposal) Validate() error {
+	if err := proposalstore.Wellformed(prop.Proposal); err != nil {
+		return err
+	}
+	if prop.ChosenPrice == nil {
+		return fmt.Errorf("store: proposal %s carries no chosen price, so approving it would "+
+			"override the price to nothing", prop.ID)
+	}
+	return nil
 }
 
 // PayloadDigest is the one definition of what an override approval covers.
@@ -56,6 +105,11 @@ var ErrNoProposal = errors.New("store: no such pending override proposal")
 // fact here would be a second answer that can disagree with it. A proposal is
 // therefore CLAIMED — removed — when it is applied or rejected.
 type ProposalStore interface {
+	// Put holds a proposal, returning proposalstore.ErrExists if the id is
+	// already held. BOTH backends refuse the duplicate: the in-process one used
+	// to overwrite it, which let a redelivery replace the proposer an approver is
+	// being asked to differ from while Postgres's primary key refused the same
+	// write.
 	Put(ctx context.Context, p OverrideProposal) error
 	// Get reads a proposal without taking it, for the checks that must be able
 	// to refuse without consuming the proposal (a self-approval must leave it
@@ -98,93 +152,55 @@ type ProposalStore interface {
 // signature succeeds or fails depending on which pod the approver's request
 // reached. The composition root picks this only where it already accepts an
 // ephemeral master, and says so.
+//
+// THE MECHANICS ARE THE SHARED ONES (#562): one map, one lock, one copy-on-read
+// discipline and one total order, in internal/dualcontrol/proposalstore, so this
+// act's in-process backend cannot drift from the OMS's or from act two's. What
+// stays here is this act's DISPOSITION — Claim removes the row — because the
+// durable record of an applied override is the append-only exception_overrides
+// row and a second copy here would be a second answer that can disagree with it.
 type MemoryProposals struct {
-	mu sync.RWMutex
-	by map[string]OverrideProposal
+	core *proposalstore.Memory[OverrideProposal]
 }
 
 func NewMemoryProposals() *MemoryProposals {
-	return &MemoryProposals{by: map[string]OverrideProposal{}}
+	return &MemoryProposals{core: proposalstore.NewMemory[OverrideProposal]()}
 }
 
-func (m *MemoryProposals) Put(_ context.Context, p OverrideProposal) error {
-	if p.ID == "" {
-		return fmt.Errorf("store: proposal has no id")
-	}
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	// Copied: the caller keeps a pointer to the price and a stored *big.Rat it
-	// can still mutate is not a record of what was proposed.
-	p.ChosenPrice = new(big.Rat).Set(p.ChosenPrice)
-	m.by[p.ID] = p
-	return nil
+// Put holds a proposal. There is nothing to commit alongside it: this act
+// publishes no FACT for a held override (#563 records why), so the announcement
+// argument the OMS's equivalent carries has no counterpart here.
+func (m *MemoryProposals) Put(ctx context.Context, p OverrideProposal) error {
+	return m.core.Insert(ctx, p, nil)
 }
 
-func (m *MemoryProposals) Get(_ context.Context, id string) (OverrideProposal, bool, error) {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	p, ok := m.by[id]
-	if !ok {
-		return OverrideProposal{}, false, nil
-	}
-	p.ChosenPrice = new(big.Rat).Set(p.ChosenPrice)
-	return p, true, nil
+func (m *MemoryProposals) Get(ctx context.Context, id string) (OverrideProposal, bool, error) {
+	return m.core.Get(ctx, id)
 }
 
-func (m *MemoryProposals) Claim(_ context.Context, id string) (bool, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if _, ok := m.by[id]; !ok {
-		return false, nil
-	}
-	delete(m.by, id)
-	return true, nil
+// Claim REMOVES the proposal. See ProposalStore.Claim: the removal is the
+// serialisation point, and this act keeps no approver on the row.
+func (m *MemoryProposals) Claim(ctx context.Context, id string) (bool, error) {
+	return m.core.Remove(ctx, id)
 }
 
-func (m *MemoryProposals) Pending(_ context.Context, now time.Time) ([]OverrideProposal, error) {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	out := make([]OverrideProposal, 0, len(m.by))
-	for _, p := range m.by {
-		if !p.Pending(now) {
-			continue
-		}
-		p.ChosenPrice = new(big.Rat).Set(p.ChosenPrice)
-		out = append(out, p)
-	}
-	sortByCreatedAt(out)
-	return out, nil
+func (m *MemoryProposals) Pending(ctx context.Context, now time.Time) ([]OverrideProposal, error) {
+	return m.core.Select(ctx, func(p OverrideProposal) bool { return p.Pending(now) })
 }
 
-func (m *MemoryProposals) Lapsed(_ context.Context, now time.Time) ([]OverrideProposal, error) {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	out := make([]OverrideProposal, 0, len(m.by))
-	for _, p := range m.by {
-		// NOT !p.Pending(now): Pending is false for a CLAIMED proposal too, and a
-		// claimed one is not in this map to begin with. Expiry is the only way a
-		// row survives without being pending, and spelling it as the expiry
-		// comparison keeps that true if Pending ever grows another clause.
-		if !p.ExpiresAt.After(now) {
-			p.ChosenPrice = new(big.Rat).Set(p.ChosenPrice)
-			out = append(out, p)
-		}
-	}
-	sortByCreatedAt(out)
-	return out, nil
+func (m *MemoryProposals) Lapsed(ctx context.Context, now time.Time) ([]OverrideProposal, error) {
+	// NOT !p.Pending(now): Pending is false for a CLAIMED proposal too, and a
+	// claimed one is not in this store to begin with. Expiry is the only way a
+	// row survives without being pending, and proposalstore.Expired is the same
+	// comparison the OMS's expiry queue uses, so the two acts cannot drift on
+	// what "past its deadline" means.
+	return m.core.Select(ctx, func(p OverrideProposal) bool {
+		return proposalstore.Expired(p.Proposal, now)
+	})
 }
 
-func (m *MemoryProposals) PurgeLapsed(_ context.Context, cutoff time.Time) (int64, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	var n int64
-	for id, p := range m.by {
-		if p.ExpiresAt.Before(cutoff) {
-			delete(m.by, id)
-			n++
-		}
-	}
-	return n, nil
+func (m *MemoryProposals) PurgeLapsed(ctx context.Context, cutoff time.Time) (int64, error) {
+	return m.core.Purge(ctx, func(p OverrideProposal) bool { return p.ExpiresAt.Before(cutoff) })
 }
 
 // PostgresProposals is the durable, tenant-scoped ProposalStore. It shares the
@@ -196,8 +212,12 @@ func NewPostgresProposals(pool *pgxpool.Pool) *PostgresProposals {
 }
 
 func (p *PostgresProposals) Put(ctx context.Context, prop OverrideProposal) error {
-	if prop.ID == "" || prop.Proposer == "" || prop.ChosenPrice == nil {
-		return fmt.Errorf("store: proposal requires an id, a proposer and a chosen price")
+	// THE SAME VALIDATION THE IN-PROCESS BACKEND RUNS, spelled once in
+	// OverrideProposal.Validate. It used to be a weaker ad-hoc subset here and a
+	// bare id check there, which is exactly how the two backends came to accept
+	// different things.
+	if err := prop.Validate(); err != nil {
+		return err
 	}
 	_, err := p.pool.Exec(ctx, `
 		INSERT INTO exception_override_proposals
@@ -206,10 +226,23 @@ func (p *PostgresProposals) Put(ctx context.Context, prop OverrideProposal) erro
 	`, prop.ID, prop.Subject, string(prop.Act), prop.Proposer, prop.Digest,
 		prop.Reason, prop.ChosenPrice.RatString(), prop.CreatedAt, prop.ExpiresAt)
 	if err != nil {
+		// A PRIMARY-KEY VIOLATION IS NOT A WRITE FAILURE, it is "somebody already
+		// holds this id", and the caller has to be able to tell them apart: one is
+		// a quiet no-op on a redelivery, the other is a 500. Named as
+		// proposalstore.ErrExists so the two backends answer a duplicate the same
+		// way; every other SQLSTATE — the foreign key that refuses a proposal for
+		// an exception that does not exist, the CHECKs — stays an error.
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == uniqueViolation {
+			return fmt.Errorf("%w: proposal %s", proposalstore.ErrExists, prop.ID)
+		}
 		return fmt.Errorf("store: put proposal %s: %w", prop.ID, err)
 	}
 	return nil
 }
+
+// uniqueViolation is SQLSTATE 23505.
+const uniqueViolation = "23505"
 
 func (p *PostgresProposals) Get(ctx context.Context, id string) (OverrideProposal, bool, error) {
 	row := p.pool.QueryRow(ctx, `
@@ -335,24 +368,6 @@ func scanProposal(s scanner) (OverrideProposal, error) {
 	}
 	prop.ChosenPrice = rat
 	return prop, nil
-}
-
-func sortByCreatedAt(ps []OverrideProposal) {
-	for i := 1; i < len(ps); i++ {
-		for j := i; j > 0 && proposalLess(ps[j], ps[j-1]); j-- {
-			ps[j], ps[j-1] = ps[j-1], ps[j]
-		}
-	}
-}
-
-func proposalLess(a, b OverrideProposal) bool {
-	if !a.CreatedAt.Equal(b.CreatedAt) {
-		return a.CreatedAt.Before(b.CreatedAt)
-	}
-	// Ties broken by id so the order is total. Two proposals created in the same
-	// nanosecond would otherwise list in whichever order the map yielded, and a
-	// pending list that reorders between reads reads as activity.
-	return a.ID < b.ID
 }
 
 // ApplyOverride is the one place a proposal becomes an audit record.

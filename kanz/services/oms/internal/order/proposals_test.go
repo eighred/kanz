@@ -1,6 +1,7 @@
 package order
 
-// The ProposalStore contract, against the in-process implementation.
+// THIS ACT'S half of the ProposalStore contract, against the in-process
+// implementation.
 //
 // EVERY TEST HERE IS ALSO RUN AGAINST POSTGRES in proposals_postgres_test.go via
 // runProposalContract, and that is deliberate: the memory store is the seam every
@@ -8,6 +9,14 @@ package order
 // Postgres refuses would certify behaviour production does not have. The three
 // properties that CANNOT be shown here — the CHECK constraint, RLS, and two
 // concurrent Claims across connections — have their own gated tests there.
+//
+// WHAT IS NOT HERE IS IN THE SHARED CONTRACT (#562). Round-tripping the
+// dual-control record, refusing a duplicate, electing exactly one claimant,
+// refusing a self-approval and a malformed record, and keeping an expired
+// proposal discoverable are properties EVERY act must have, so they live in
+// internal/dualcontrol/proposalstore/proposalstoretest and run against all four
+// shipped backends — see proposals_contract_test.go. Restating them here would
+// be the second answer this whole promotion exists to remove.
 
 import (
 	"context"
@@ -16,6 +25,7 @@ import (
 	"time"
 
 	orderpb "github.com/eighred/kanz/kanz-schemas-go/order/v1"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/eighred/kanz/internal/dualcontrol"
 	"github.com/eighred/kanz/internal/outbox"
@@ -74,38 +84,11 @@ func runProposalContract(t *testing.T, newStore func(t *testing.T) ProposalStore
 		}
 	})
 
-	t.Run("an unknown order is not an error", func(t *testing.T) {
-		s := newStore(t)
-		_, ok, err := s.Get(context.Background(), "nope")
-		if err != nil || ok {
-			t.Fatalf("Get of an unknown order: ok=%v err=%v", ok, err)
-		}
-	})
-
-	t.Run("a second proposal for the same order is refused", func(t *testing.T) {
-		s := newStore(t)
-		ctx := context.Background()
-		if err := s.Put(ctx, heldOrder(t, "o-dup", "user:alice@kanz", t0), nil); err != nil {
-			t.Fatalf("Put: %v", err)
-		}
-		err := s.Put(ctx, heldOrder(t, "o-dup", "user:bob@kanz", t0), nil)
-		if err == nil {
-			t.Fatal("a second proposal for one order was accepted — a redelivered SubmitOrder " +
-				"would put the same decision in the approver's queue twice, and the second one " +
-				"could carry a different proposer")
-		}
-		if !isProposalExists(err) {
-			t.Fatalf("err = %v, want ErrProposalExists so the handler can ack rather than nack", err)
-		}
-		// The FIRST proposal must survive intact: a duplicate must not overwrite
-		// the proposer an approver is being asked to differ from.
-		got, _, _ := s.Get(ctx, "o-dup")
-		if got.Proposer != "user:alice@kanz" {
-			t.Errorf("proposer = %q, want the FIRST proposer", got.Proposer)
-		}
-	})
-
-	t.Run("claim elects the caller and records the second signature", func(t *testing.T) {
+	// THAT EXACTLY ONE CALLER WINS IS THE SHARED CONTRACT'S. What is this act's
+	// alone is what the winning claim WRITES: the row keeps its approver and the
+	// time, because an admitted order carries the order and not who approved it,
+	// so this row is the OMS's only durable record that two people signed.
+	t.Run("a claim records the second signature on the row", func(t *testing.T) {
 		s := newStore(t)
 		ctx := context.Background()
 		if err := s.Put(ctx, heldOrder(t, "o-claim", "user:alice@kanz", t0), nil); err != nil {
@@ -125,190 +108,32 @@ func runProposalContract(t *testing.T, newStore func(t *testing.T) ProposalStore
 				got.Approver)
 		}
 		if got.DecidedAt.IsZero() {
-			t.Error("decided_at is unset on a claimed proposal")
-		}
-		// SECOND CLAIM LOSES. The property is not "Claim returns true", it is
-		// "exactly one caller is told it won".
-		won2, err := s.Claim(ctx, "o-claim", "user:carol@kanz", t0.Add(2*time.Minute))
-		if err != nil {
-			t.Fatalf("second Claim: %v", err)
-		}
-		if won2 {
-			t.Fatal("a SECOND approver was also told it won — both would admit the order, so one " +
-				"decision reaches a live venue twice")
+			t.Error("decided_at is unset on a claimed proposal — an auditor can see that somebody " +
+				"signed but not when, which is the half that dates the decision against the book")
 		}
 	})
 
-	t.Run("a self-approval is refused and leaves the order pending", func(t *testing.T) {
-		s := newStore(t)
-		ctx := context.Background()
-		if err := s.Put(ctx, heldOrder(t, "o-self", "user:alice@kanz", t0), nil); err != nil {
-			t.Fatalf("Put: %v", err)
-		}
-		// CASE AND SPACE FOLDED. One person holding both signatures by
-		// capitalising a letter is the clause that fails QUIETLY: the trail then
-		// shows two distinct actors, which reads as satisfied to an auditor.
-		for _, spelling := range []string{"user:alice@kanz", "User:Alice@Kanz", "  user:alice@kanz  "} {
-			won, err := s.Claim(ctx, "o-self", spelling, t0.Add(time.Minute))
-			if won {
-				t.Fatalf("%q approved an order it proposed — the audit trail would show two names "+
-					"for one person", spelling)
-			}
-			_ = err // both a refusal and a false are acceptable; what must not happen is a win
-		}
-		got, ok, _ := s.Get(ctx, "o-self")
-		if !ok || got.Approver != "" {
-			t.Fatalf("a refused self-approval consumed or decided the proposal (ok=%v approver=%q) — "+
-				"it must stay pending for somebody who may actually approve it", ok, got.Approver)
-		}
-	})
-
-	t.Run("pending excludes decided and expired proposals", func(t *testing.T) {
-		s := newStore(t)
-		ctx := context.Background()
-		for _, id := range []string{"o-a", "o-b", "o-c"} {
-			if err := s.Put(ctx, heldOrder(t, id, "user:alice@kanz", t0), nil); err != nil {
-				t.Fatalf("Put %s: %v", id, err)
-			}
-		}
-		if won, err := s.Claim(ctx, "o-b", "user:bob@kanz", t0.Add(time.Minute)); err != nil || !won {
-			t.Fatalf("Claim: won=%v err=%v", won, err)
-		}
-		got, err := s.Pending(ctx, t0.Add(time.Hour))
-		if err != nil {
-			t.Fatalf("Pending: %v", err)
-		}
-		if len(got) != 2 || got[0].ID != "o-a" || got[1].ID != "o-c" {
-			t.Fatalf("pending = %v, want [o-a o-c] in creation order — a DECIDED proposal on the "+
-				"queue is work an approver keeps being shown after somebody did it", ids(got))
-		}
-
-		// PAST THE TTL, NOTHING IS PENDING. An expired proposal resting on the
-		// queue looks like a decision that was made, and no approval can apply it.
-		got, err = s.Pending(ctx, t0.Add(dualcontrol.DefaultTTL+time.Minute))
-		if err != nil {
-			t.Fatalf("Pending after expiry: %v", err)
-		}
-		if len(got) != 0 {
-			t.Fatalf("expired proposals are still queued: %v", ids(got))
-		}
-	})
-
-	t.Run("a malformed proposal is refused rather than stored", func(t *testing.T) {
+	// THE MALFORMED RECORD IS THE SHARED CONTRACT'S (no proposer, no digest, born
+	// expired, and the rest). These two are what only an order proposal can be
+	// wrong about.
+	t.Run("a proposal that could not be admitted is refused rather than stored", func(t *testing.T) {
 		s := newStore(t)
 		ctx := context.Background()
 		base := heldOrder(t, "o-bad", "user:alice@kanz", t0)
 
-		noProposer := base
-		noProposer.Proposer = ""
-		if err := s.Put(ctx, noProposer, nil); err == nil {
-			t.Error("a proposal with NO PROPOSER was stored — every approver differs from \"\", so " +
-				"the self-approval check would pass vacuously and one person could sign it alone")
-		}
-
 		noCommand := base
 		noCommand.Command = nil
 		if err := s.Put(ctx, noCommand, nil); err == nil {
-			t.Error("a proposal with no command was stored — approving it could admit nothing")
+			t.Error("a proposal with no command was stored — approving it could admit nothing, so " +
+				"the approver signs for an order that does not exist")
 		}
 
-		bornExpired := base
-		bornExpired.ExpiresAt = bornExpired.CreatedAt
-		if err := s.Put(ctx, bornExpired, nil); err == nil {
-			t.Error("a proposal born expired was stored — it can never be approved and would sit " +
-				"in the queue looking like work nobody did")
-		}
-	})
-
-	t.Run("an empty approver cannot claim", func(t *testing.T) {
-		s := newStore(t)
-		ctx := context.Background()
-		if err := s.Put(ctx, heldOrder(t, "o-anon", "user:alice@kanz", t0), nil); err != nil {
-			t.Fatalf("Put: %v", err)
-		}
-		won, err := s.Claim(ctx, "o-anon", "", t0.Add(time.Minute))
-		if won {
-			t.Fatal("an UNNAMED approver claimed the order — the audit row would say two people " +
-				"signed while naming one")
-		}
-		if err == nil {
-			t.Error("an empty approver was refused silently; an approval must come from an " +
-				"authenticated subject and saying so is the whole point")
-		}
-	})
-	// EXPIRY IS A SEPARATE QUEUE FROM THE PENDING ONE, AND THAT IS THE POINT (#539).
-	//
-	// Pending() filters an expired proposal OUT — it is not work anybody can do.
-	// Nothing then looked at those rows again, so a proposal nobody signed became
-	// invisible rather than terminal: the trader who submitted it saw
-	// ORDER_PENDING_APPROVAL and then nothing, ever. These are the properties that
-	// let a sweeper find them and announce each one exactly once.
-	t.Run("an expired proposal leaves the pending queue and enters the expiry queue", func(t *testing.T) {
-		s := newStore(t)
-		born := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
-		p := heldOrder(t, "o-exp", "user:alice@kanz", born)
-		if err := s.Put(context.Background(), p, nil); err != nil {
-			t.Fatalf("Put: %v", err)
-		}
-
-		afterTTL := p.ExpiresAt.Add(time.Minute)
-
-		pending, err := s.Pending(context.Background(), afterTTL)
-		if err != nil {
-			t.Fatalf("Pending: %v", err)
-		}
-		if len(pending) != 0 {
-			t.Fatalf("an expired proposal is still offered as work: %v", ids(pending))
-		}
-
-		due, err := s.ExpiredUnannounced(context.Background(), afterTTL, 10)
-		if err != nil {
-			t.Fatalf("ExpiredUnannounced: %v", err)
-		}
-		if got := ids(due); len(got) != 1 || got[0] != "o-exp" {
-			t.Fatalf("expiry queue = %v, want [o-exp] — a proposal that expired unsigned is in no "+
-				"queue at all, which is how it dies in silence", got)
-		}
-	})
-
-	t.Run("a proposal that has not expired is not due for announcement", func(t *testing.T) {
-		s := newStore(t)
-		born := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
-		p := heldOrder(t, "o-live", "user:alice@kanz", born)
-		if err := s.Put(context.Background(), p, nil); err != nil {
-			t.Fatalf("Put: %v", err)
-		}
-
-		due, err := s.ExpiredUnannounced(context.Background(), p.ExpiresAt.Add(-time.Minute), 10)
-		if err != nil {
-			t.Fatalf("ExpiredUnannounced: %v", err)
-		}
-		if len(due) != 0 {
-			t.Fatalf("a live proposal was announced as expired: %v — the approver still had time "+
-				"and the order was killed under them", ids(due))
-		}
-	})
-
-	// AN APPROVED PROPOSAL NEVER EXPIRES. It was decided; the deadline stopped
-	// mattering the moment somebody signed it. Announcing one would tell the estate
-	// an order that traded was abandoned.
-	t.Run("a decided proposal is never due for expiry", func(t *testing.T) {
-		s := newStore(t)
-		born := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
-		p := heldOrder(t, "o-signed", "user:alice@kanz", born)
-		if err := s.Put(context.Background(), p, nil); err != nil {
-			t.Fatalf("Put: %v", err)
-		}
-		if ok, err := s.Claim(context.Background(), "o-signed", "user:bob@kanz", born.Add(time.Hour)); err != nil || !ok {
-			t.Fatalf("Claim: ok=%v err=%v", ok, err)
-		}
-
-		due, err := s.ExpiredUnannounced(context.Background(), p.ExpiresAt.Add(time.Hour), 10)
-		if err != nil {
-			t.Fatalf("ExpiredUnannounced: %v", err)
-		}
-		if len(due) != 0 {
-			t.Fatalf("a SIGNED proposal was queued for expiry: %v", ids(due))
+		otherOrder := base
+		otherOrder.Command = proto.Clone(base.Command).(*orderpb.SubmitOrder)
+		otherOrder.Command.OrderId = "o-somebody-else"
+		if err := s.Put(ctx, otherOrder, nil); err == nil {
+			t.Error("a proposal keyed on one order was stored holding the command for another — " +
+				"the approval would release an order nobody was shown")
 		}
 	})
 
