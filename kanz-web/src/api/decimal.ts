@@ -87,6 +87,89 @@ export function formatMoney(m: Money | undefined | null): string | null {
   return m.currency_code ? `${amount} ${m.currency_code}` : amount
 }
 
+/**
+ * MAX_RAT_DIGITS bounds the work a wire rational may ask of this tab.
+ *
+ * It is not arbitrary: a price datamaster accepted has already been asserted to
+ * survive a common.v1.Decimal round trip, whose coefficient is an int64 (19
+ * digits) and whose exponent this module bounds at MAX_SAFE_EXPONENT — so 128
+ * digits is comfortably past anything the platform can carry, and a longer
+ * numeral is by construction not a price. Refusing it costs nothing real and
+ * keeps a hostile or broken upstream from handing the browser arbitrary work.
+ */
+export const MAX_RAT_DIGITS = 128
+
+/**
+ * formatRational renders Go's `big.Rat.RatString()` as an exact decimal, or null.
+ *
+ * # WHY THIS EXISTS RATHER THAN formatDecimal
+ *
+ * datamaster's pricing-override surface does NOT speak common.v1.Decimal. It
+ * stores the operator's chosen price as a *big.Rat and renders it with
+ * RatString(), which emits "130" for an integer and "a/b" — "261/2" for 130.5 —
+ * for everything else. That is a different wire form from the {coefficient,
+ * exponent} object protojson sends, and reading one as the other renders a price
+ * as nothing. Both arrive as STRINGS, which is the property that matters.
+ *
+ * # NO FLOAT, AND NO ROUNDING EITHER
+ *
+ * parseFloat("261/2") is NaN and Number("9007199254740993") loses a digit, so
+ * neither is available even as a shortcut. The division is done in BigInt and
+ * only when it is EXACT: a denominator with any prime factor other than 2 or 5
+ * has no terminating decimal, and this returns null rather than a truncation.
+ *
+ * NULL IS NOT ZERO AND IT IS NOT AN APPROXIMATION. It is the same contract
+ * formatDecimal takes, for the same reason internal/dec gives: a figure that
+ * cannot be rendered must look unrenderable. On this surface the figure is the
+ * price a second person is about to sign for, and a quietly rounded one is the
+ * signature covering a value nobody read.
+ */
+export function formatRational(s: string | undefined | null): string | null {
+  if (!s) return null
+  const slash = s.indexOf('/')
+  const numerator = slash < 0 ? s : s.slice(0, slash)
+  const denominator = slash < 0 ? '1' : s.slice(slash + 1)
+
+  // A NEGATIVE DENOMINATOR IS REFUSED RATHER THAN NORMALISED. big.Rat keeps the
+  // sign on the numerator, so "1/-2" is not something RatString emits — it is
+  // something else answering, and guessing at its meaning is how a price ends up
+  // rendered with the wrong sign.
+  if (!/^-?\d+$/.test(numerator) || !/^\d+$/.test(denominator)) return null
+  if (numerator.length > MAX_RAT_DIGITS || denominator.length > MAX_RAT_DIGITS) return null
+
+  let den = BigInt(denominator)
+  if (den === 0n) return null
+  const negative = numerator.startsWith('-')
+  const num = BigInt(negative ? numerator.slice(1) : numerator)
+
+  // Strip the factors a decimal can express. Whatever is left decides whether
+  // this value terminates at all; the loops are bounded by the digit count above.
+  let twos = 0
+  let fives = 0
+  while (den % 2n === 0n) {
+    den /= 2n
+    twos++
+  }
+  while (den % 5n === 0n) {
+    den /= 5n
+    fives++
+  }
+  if (den !== 1n) return null // 1/3 has no exact decimal, and 0.333… is a lie
+  const scale = Math.max(twos, fives)
+  if (scale > MAX_SAFE_EXPONENT) return null
+
+  // 10^scale / (2^twos · 5^fives) is an integer by construction, so this is a
+  // multiplication and never a division that could round.
+  const digitsOf = num * 2n ** BigInt(scale - twos) * 5n ** BigInt(scale - fives)
+  let digits = digitsOf.toString()
+  if (scale === 0) return sign(negative, digits)
+  if (digits.length <= scale) {
+    digits = digits.padStart(scale + 1, '0')
+  }
+  const cut = digits.length - scale
+  return sign(negative, `${digits.slice(0, cut)}.${digits.slice(cut)}`)
+}
+
 /** isNegative reports the sign without parsing the value as a number. */
 export function isNegative(d: Decimal | undefined | null): boolean {
   return (d?.coefficient ?? '0').startsWith('-')
