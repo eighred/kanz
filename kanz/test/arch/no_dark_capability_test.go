@@ -45,12 +45,35 @@ import (
 //	      risk-engine composition root publishes kanz_risk_analytics_validated.
 //	      THE DEAD-ENTRY ARM IS WHAT CAUGHT THE STALE EXEMPTION — the repair
 //	      landed and this guard refused to keep vouching for the old state.
+//	#583  services/<name>/internal/ WAS NOT SCANNED AT ALL until this entry. The
+//	      scope test matched a leading "internal/", so 134 packages across 27
+//	      services — every service's own private tree — sat outside it. #539 had
+//	      already written that limitation down in prose, as the explanation for a
+//	      defect this guard missed, and it was never turned into coverage. Three
+//	      packages were dark in the blind spot when it was closed: corpact (#588),
+//	      posttrade (#589) and revocation (#108), all three exempted below.
+//	      THE SHAPE OF THAT BUG IS THIS GUARD'S OWN, one level up: it compiled, it
+//	      passed, and it said nothing, because "not looked at" and "looked at and
+//	      clean" were indistinguishable from outside. That is why the non-vacuity
+//	      arms below count the two trees SEPARATELY — one combined total would
+//	      have stayed comfortably above any threshold while the services tree
+//	      contributed zero.
 //
 // # What this checks
 //
-// Every package under internal/ has at least one importer somewhere in the
-// module — production OR test — or an argued exemption naming the issue that
-// will wire it.
+// Every package under internal/ — the module's root internal/ tree AND each
+// service's own services/<name>/internal/ tree — has at least one importer
+// somewhere in the module — production OR test — or an argued exemption naming
+// the issue that will wire it.
+//
+// # Why both trees
+//
+// A service's internal/ tree is where code in this platform STARTS. CLAUDE.md's
+// promotion rule is explicit: shared code lives in a service's internal/ and
+// moves to kanz/internal/ or kanz/pkg/ only when a SECOND consumer appears. So a
+// capability spends its dark period under services/<name>/internal/ by
+// construction — it is the tree most likely to hold an unwired control, and it
+// was the tree nobody was watching.
 //
 // # What it is not
 //
@@ -72,7 +95,9 @@ import (
 // but every case above was dark at the IMPORT level, because that is what
 // "nobody wired it" actually looks like.
 
-// darkPackageExempt maps an internal package to the issue that will wire it.
+// darkPackageExempt maps an internal package — root or per-service — to the
+// issue that will wire it. Keys are module-relative package paths, so a service
+// entry reads services/<name>/internal/<pkg>.
 //
 // EVERY ENTRY NAMES AN ISSUE, and that is the whole discipline: an exemption
 // that says "not yet" without saying who is tracking it is how a capability
@@ -110,6 +135,62 @@ var darkPackageExempt = map[string]string{
 		"of the FeatureSource seam this implements, and it has zero production callers of its own " +
 		"(#509's finding, one tree over) — so the import would satisfy this guard while changing " +
 		"nothing about whether an indicator reaches a decision.",
+
+	// The three below were dark in the services/*/internal blind spot #583 closed.
+	"services/accounting/internal/corpact": "#588 — the IBOR-01c corporate-action processor. It " +
+		"builds the journal entry ledger.foldCorpAct already knows how to apply, and ledger.go:109 " +
+		"names this package as that builder: the FOLD is live and reachable, the BUILDER is not. It " +
+		"is dark because NOTHING ANNOUNCES A CORPORATE ACTION — accounting.v1.CorporateAction has no " +
+		"publisher anywhere in the module, no NATS subject and no Kafka topic, and the accounting " +
+		"composition root subscribes fills, cash and FX only. Wiring it over a fabricated " +
+		"announcement stream is the obvious wrong fix, on the #345 ground this file already quotes " +
+		"for XVA: a SUCCESSFUL fold of invented corporate actions is worse than no fold, because the " +
+		"book is then confidently wrong rather than visibly untouched. So today no split, dividend, " +
+		"merger or coupon adjusts the book, and nav.go's corporate_action attribution component " +
+		"reading 0 is the only thing that says so.",
+	"services/oms/internal/posttrade": "#589 — the POST-01/PARITY-04 post-trade plane: confirmation " +
+		"matching, settlement instruction generation, T+N tracking and business-day fail aging. THE " +
+		"ESTATE FOR IT IS ALREADY PROVISIONED and that is the sharp part — infra/nats/" +
+		"bootstrap-job.yaml creates the SETTLEMENT stream and infra/nats/tenancy.yaml grants publish " +
+		"on settlement.instruction.fail, naming posttrade.BusFailSink by symbol — while no publisher " +
+		"was ever constructed, so that stream is permanently empty and reads as 'nothing failed'. It " +
+		"is blocked on a COUNTERPARTY confirmation feed: nothing here receives a confirmation from a " +
+		"broker, custodian or CSD, and SimSettlementVenue simulates the settlement-venue half only. " +
+		"NOTE WHAT WIRING THE CALENDAR ALONE WOULD NOT FIX, since #583 raised it as the small-change " +
+		"candidate: DetectFailsWithCalendar already consumes it, and there is no settlement dating " +
+		"anywhere else in the module to give it a second caller — what is dark is the plane, not the " +
+		"calendar inside it.",
+	"services/operator/internal/revocation": "#108 — the SOV-04 revocation ORDER (halt, then scale " +
+		"to zero, then purge Vault-CSI secrets) and the abort rule that stops on a failed halt. It " +
+		"has no production caller BY DESIGN, and this entry is the record of that decision rather " +
+		"than an apology for it: none of the three verbs is implemented here, no revoke RPC exists " +
+		"to reach it, and the Estate seam is cluster-shaped — its correctness is only observable " +
+		"against a live cluster this repository has never had reachable from a test (#90, #92). What " +
+		"IS decidable with no cluster is the safety property, and that is what ships: scaling a " +
+		"tenant's OMS to zero while orders are live at a venue abandons them mid-flight, so halt " +
+		"strictly precedes everything and nothing rolls back. Settled and tested BEFORE the " +
+		"mechanical half exists to be misused, not after.",
+}
+
+// isRootInternalTree reports whether rel — a module-relative package path — is
+// the module's root internal package or anything beneath it.
+func isRootInternalTree(rel string) bool {
+	return rel == "internal" || strings.HasPrefix(rel, "internal/")
+}
+
+// isServiceInternalTree reports whether rel is in some service's own private
+// tree: services/<name>/internal, or anything beneath it.
+//
+// It matches on the THIRD path element rather than a prefix, for two reasons
+// that a HasPrefix("services/") test gets wrong in opposite directions. It must
+// include services/accounting/internal, which is a package AT the tree root
+// rather than under it — the trailing-slash form silently drops it. And it must
+// exclude services/<name>/cmd/..., which is composition-root wiring: a main
+// package has no importer by definition, so sweeping it in would make every
+// service binary look dark and force 27 meaningless exemptions.
+func isServiceInternalTree(rel string) bool {
+	parts := strings.Split(rel, "/")
+	return len(parts) >= 3 && parts[0] == "services" && parts[2] == "internal"
 }
 
 func TestNoInternalCapabilityIsDarkAndUntracked(t *testing.T) {
@@ -133,14 +214,21 @@ func TestNoInternalCapabilityIsDarkAndUntracked(t *testing.T) {
 
 	var dark []string
 	seenExempt := map[string]bool{}
-	internalCount := 0
+	rootCount, serviceCount := 0, 0
 
 	for _, p := range pkgs {
 		rel, ok := strings.CutPrefix(p.ImportPath, modulePath+"/")
-		if !ok || !strings.HasPrefix(rel, "internal/") {
+		if !ok {
 			continue
 		}
-		internalCount++
+		switch {
+		case isRootInternalTree(rel):
+			rootCount++
+		case isServiceInternalTree(rel):
+			serviceCount++
+		default:
+			continue
+		}
 		if imported[p.ImportPath] {
 			continue
 		}
@@ -152,18 +240,33 @@ func TestNoInternalCapabilityIsDarkAndUntracked(t *testing.T) {
 		dark = append(dark, rel)
 	}
 
-	// NON-VACUITY: this module has a large internal tree. Finding almost none of
-	// it means the package walk broke, and the guard would pass having checked
-	// nothing — the exact failure mode it exists to prevent, one level up.
-	if internalCount < 30 {
+	// NON-VACUITY, COUNTED PER TREE. This module has a large internal tree and a
+	// large per-service one. Finding almost none of either means the package walk
+	// broke, and the guard would pass having checked nothing — the exact failure
+	// mode it exists to prevent, one level up.
+	//
+	// The two counts are deliberately NOT summed. A single total is what let the
+	// services blind spot survive: the root tree alone clears any sane threshold,
+	// so a scope test that matched zero service packages would have passed a
+	// combined check while checking 27 services' worth of nothing. Separate arms
+	// are the only way "we did not look" and "we looked and it was clean" stay
+	// distinguishable here.
+	if rootCount < 30 {
 		t.Fatalf("found only %d packages under internal/ — the walk is broken, not the estate",
-			internalCount)
+			rootCount)
+	}
+	if serviceCount < 50 {
+		t.Fatalf("found only %d packages under services/*/internal/ — the walk is broken, not the "+
+			"estate. Every one of this module's services carries a private internal tree (134 "+
+			"packages across 27 services when #583 widened this guard), so a scan finding almost "+
+			"none of them has stopped matching and would otherwise pass having checked nothing.",
+			serviceCount)
 	}
 
 	if len(dark) > 0 {
 		sort.Strings(dark)
-		t.Errorf("%d internal package(s) have NO importer anywhere in the module — not production, "+
-			"not test: %v.\n"+
+		t.Errorf("%d internal package(s) — root internal/ or services/<name>/internal/ — have NO "+
+			"importer anywhere in the module, not production and not test: %v.\n"+
 			"A capability nobody calls is invisible to every signal this repository has: it "+
 			"compiles, its own tests pass, vet is clean, and nothing says it does not run. That is "+
 			"how internal/risk/unwind could size a breached portfolio's reduction for months "+
