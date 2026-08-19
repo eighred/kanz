@@ -24,7 +24,7 @@ import (
 	"github.com/eighred/kanz/services/api-gateway/internal/proxy"
 )
 
-// TestEveryRouteOnTheCapitalPathRequiresACapitalAuthority.
+// TestEveryOrderRouteRequiresACapitalAuthority.
 //
 // services/api-gateway/internal/orders is THE capital path: every route it serves submits,
 // cancels or releases an order at a live exchange. Rather than listing those routes (a list
@@ -43,7 +43,27 @@ import (
 //
 // It stays DEFAULT-DENY: a route registered here with any capability outside the set fails,
 // so the next one still has to argue its case.
-func TestEveryRouteOnTheCapitalPathRequiresACapitalAuthority(t *testing.T) {
+// SCOPE IS THE ORDERS HANDLER, AND THE NAME NOW SAYS SO (#573).
+//
+// It was called TestEveryRouteOnTheCapitalPathRequiresACapitalAuthority while
+// mounting one handler, so it claimed a reach it did not have —
+// POST /v1/portfolios/{id}/cash-movements moves the fund's own capital and lives
+// in proxy, outside it. That is the same overclaim that let eleven control
+// routes sit outside the golden table for months: a guard whose name describes
+// more than it inspects stops anyone asking what it misses.
+//
+// The scope is deliberate rather than a gap. Mounting proxy here would drag in
+// its read surface, every route of which requires authz.Read and would fail the
+// assertion below — so widening this guard means deciding which proxy routes are
+// "capital", which is a hand-maintained list, which is the thing that rots.
+//
+// The funding route is pinned in three places instead, and that is the answer to
+// "who checks cash-movements": the golden table below (authz.Fund, and changing
+// it fails there), internal/proxy/funding_test.go, and
+// internal/config/config_fund_test.go, which asserts the #535 posture that an
+// unnamed fund role leaves the route UNREGISTERED rather than registered and
+// refusing everybody.
+func TestEveryOrderRouteRequiresACapitalAuthority(t *testing.T) {
 	m := authz.NewMux(nil, nil)
 	// A NON-EMPTY APPROVE ROLE, for the same reason stubOrders below is a real value: since
 	// #535 the approve route is registered only when the deployment names an approver, so ""
