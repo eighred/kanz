@@ -271,3 +271,38 @@ func TestRegister_PromotionDoesNotDemoteAnotherContractsPrimary(t *testing.T) {
 		t.Errorf("FeatureSets() = %v, want both contracts served", got)
 	}
 }
+
+// A RETIREMENT MUST REACH THE PEERS, or one replica keeps serving a model the
+// fleet withdrew. Op UNREGISTER exists on the wire and had no Go fold at all
+// until #112, so this asserts both halves: the local removal and the publish.
+func TestUnregister_RemovesLocallyAndPropagates(t *testing.T) {
+	log := &memLog{}
+	a := registry.NewCoordinated(registry.New(nil), log, "a")
+	b := registry.NewCoordinated(registry.New(nil), &memLog{}, "b")
+
+	ctx := context.Background()
+	meta := registry.Metadata{ModelID: "m1", FeatureSetRef: "fs:1"}
+	if err := a.Register(ctx, meta, registry.RoleCandidate); err != nil {
+		t.Fatalf("register candidate: %v", err)
+	}
+	if err := a.RecordValidation(ctx, "m1", registry.Validation{Passed: true}); err != nil {
+		t.Fatalf("record validation: %v", err)
+	}
+	if err := a.Register(ctx, meta, registry.RolePrimary); err != nil {
+		t.Fatalf("promote: %v", err)
+	}
+	if _, _, ok := a.PrimaryFor("fs:1"); !ok {
+		t.Fatal("setup did not promote the model")
+	}
+	if err := a.Unregister(ctx, "m1"); err != nil {
+		t.Fatalf("Unregister: %v", err)
+	}
+	if _, _, ok := a.PrimaryFor("fs:1"); ok {
+		t.Fatal("the model is still primary locally after Unregister")
+	}
+	log.drainTo(t, b)
+	if _, _, ok := b.PrimaryFor("fs:1"); ok {
+		t.Fatal("the peer still serves a WITHDRAWN model — the retirement did not propagate, " +
+			"which is worse than a stale registry because it looks authoritative")
+	}
+}

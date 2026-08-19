@@ -9,6 +9,14 @@ const (
 	OpUnspecified Op = iota
 	OpRegister       // a Register(meta, role)
 	OpValidate       // a RecordValidation(id, validation)
+	// OpUnregister is a Unregister(id) — the model leaves the serving set.
+	//
+	// It was ABSENT until #112 while inference.v1.ModelRegistryEvent has always
+	// carried MODEL_REGISTRY_OP_UNREGISTER, so a Go follower had no fold for a
+	// retirement the registrar published. The consequence of the gap was not a
+	// missing feature: it was a registry that kept naming a WITHDRAWN model as
+	// primary for a contract, indefinitely.
+	OpUnregister
 )
 
 // Event is one registry mutation as it rides the platform.model append log. It
@@ -31,7 +39,15 @@ type Event struct {
 // NATS/Kafka binding onto the platform.model topic — keyed by model_id so a
 // model's validate precedes its primary-register in per-partition order (the
 // MLOPS-01a gate holds identically on every replica) — wires at the composition
-// root.
+// root. BusFollower in this package IS that binding, and risk-engine is the
+// composition root that constructs it (#112).
+//
+// REPLAY DOES NOT NECESSARILY END. The in-memory default walks a finite slice and
+// returns; the bus binding folds the retained log and then KEEPS FOLDING as
+// entries arrive, because a replica that stopped at the last entry present when
+// it started would be correct for exactly one instant. Rebuild therefore blocks
+// for the life of the process on that implementation — BusFollower.Replay
+// documents the armed signal a caller reads instead of waiting on the return.
 type Log interface {
 	Publish(ctx context.Context, e Event) error
 	Replay(ctx context.Context, apply func(Event) error) error
@@ -61,6 +77,15 @@ func (c *CoordinatedRegistry) Register(ctx context.Context, meta Metadata, role 
 		return err
 	}
 	return c.log.Publish(ctx, Event{Origin: c.origin, Op: OpRegister, Metadata: meta, Role: role})
+}
+
+// Unregister removes the model locally and publishes the retirement so peers
+// stop serving it too. Unlike Register there is no gate to fail, so the publish
+// is unconditional — a retirement that reached one replica and not the others is
+// the worst of the three possible states.
+func (c *CoordinatedRegistry) Unregister(ctx context.Context, modelID string) error {
+	c.Registry.Unregister(modelID)
+	return c.log.Publish(ctx, Event{Origin: c.origin, Op: OpUnregister, Metadata: Metadata{ModelID: modelID}})
 }
 
 // RecordValidation applies locally and publishes so the gate outcome reaches
@@ -98,6 +123,9 @@ func (c *CoordinatedRegistry) applyEvent(e Event) error {
 		return c.Registry.Register(e.Metadata, e.Role)
 	case OpValidate:
 		return c.Registry.RecordValidation(e.Metadata.ModelID, e.Validation)
+	case OpUnregister:
+		c.Registry.Unregister(e.Metadata.ModelID)
+		return nil
 	default:
 		return nil
 	}

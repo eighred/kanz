@@ -65,18 +65,24 @@ import (
 //	internal/prediction/sync_client.go:193   c.stub.Predict(callCtx, pbFV)
 //
 // inside a client nothing constructs. NewSyncClient's only callers are in
-// resilience_test.go, so no deployment reaches that line, and #112 step 3 is
-// exactly that gap. no_dark_capability_test.go's own #112 exemption already
-// records the shape — "the resilient inference client also has zero callers" —
-// and this guard is blind to it in the mirror-image way: that one works at
-// import granularity and sees the package, this one works at call granularity
-// and sees the call.
+// resilience_test.go, so no deployment reaches that line.
+//
+// STILL TRUE AFTER #112 LANDED, which is the part worth re-reading. #112 wired
+// internal/prediction/registry at risk-engine and its dark-capability exemption
+// is retired — but it wired a REPORTER of the model plane, not a scorer, and
+// NewSyncClient still has no production constructor. So the pair of guards is
+// blind to this in the mirror-image way it always was: no_dark_capability works
+// at import granularity and now sees an imported package, this one works at call
+// granularity and sees the call. The retirement of that exemption must not be
+// read as "Go scores predictions" — both guards' docs say so, and #416 is where
+// the decision about what acts on a prediction lives.
 //
 // So the pair of them brackets the property without either owning it: a method
 // nothing calls fails here, a package nothing imports fails there, and a call
-// inside an unwired package passes both. That third case is #112's, it is
-// tracked, and it is written down here so a green run is not read as "every
-// served RPC is reachable in production". It is not what this asserts.
+// inside an unwired package passes both. That third case is inference.v1.Predict
+// and it is #416's, it is tracked, and it is written down here so a green run is
+// not read as "every served RPC is reachable in production". It is not what this
+// asserts.
 //
 // The exemption map is EMPTY for the same reason pendingGRPCDomainChecks is: an
 // empty default-deny list is the honest state when nothing is exempt, and the
