@@ -86,7 +86,7 @@ func TestResolve_TheReferenceIsTheLastCOMPLETEDBar(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !ok {
+	if !ok.OK() {
 		t.Fatal("unresolved — the reference bar was not found")
 	}
 	if !out.Hit {
@@ -113,7 +113,7 @@ func TestResolve_AMoveThatRevertsStillCountsAsATouch(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !ok {
+	if !ok.OK() {
 		t.Fatal("unresolved")
 	}
 	if !out.Hit {
@@ -140,7 +140,7 @@ func TestResolve_ANegativeThresholdReadsTheLows(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !ok {
+	if !ok.OK() {
 		t.Fatal("unresolved")
 	}
 	if out.Hit {
@@ -157,7 +157,7 @@ func TestResolve_ANegativeThresholdReadsTheLows(t *testing.T) {
 	)
 	out2, ok2, err := resolver(t, m2).Resolve(context.Background(),
 		claim(t, -0.02, 2*time.Minute), "BTC-USDT", origin.Add(time.Minute), far)
-	if err != nil || !ok2 {
+	if err != nil || !ok2.OK() {
 		t.Fatalf("unresolved: %v", err)
 	}
 	if !out2.Hit {
@@ -178,7 +178,7 @@ func TestResolve_AnOpenHorizonIsUnresolved(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if ok {
+	if ok.OK() {
 		t.Errorf("a claim whose horizon has not finished was resolved as Hit=%v — an open "+
 			"window marked as a miss biases calibration downward, and does it worst for the "+
 			"newest scores", out.Hit)
@@ -197,7 +197,7 @@ func TestResolve_AGapInTheSeriesIsUnresolved(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if ok {
+	if ok.OK() {
 		t.Error("a horizon with no bars was resolved — a venue outage is not a market that " +
 			"did not move")
 	}
@@ -212,7 +212,7 @@ func TestResolve_NoPriorBarIsUnresolved(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if ok {
+	if ok.OK() {
 		t.Error("resolved with no bar completed before the signal — there was no price to " +
 			"measure a return from")
 	}
@@ -231,7 +231,7 @@ func TestResolve_IsReproducibleAcrossARestatement(t *testing.T) {
 	s := claim(t, 0.05, 2*time.Minute)
 
 	before, ok, err := resolver(t, m).Resolve(ctx, s, "BTC-USDT", origin.Add(time.Minute), asOf)
-	if err != nil || !ok {
+	if err != nil || !ok.OK() {
 		t.Fatalf("unresolved: %v", err)
 	}
 	if before.Hit {
@@ -246,7 +246,7 @@ func TestResolve_IsReproducibleAcrossARestatement(t *testing.T) {
 	}
 
 	after, ok, err := resolver(t, m).Resolve(ctx, s, "BTC-USDT", origin.Add(time.Minute), asOf)
-	if err != nil || !ok {
+	if err != nil || !ok.OK() {
 		t.Fatalf("unresolved after restatement: %v", err)
 	}
 	if after.Hit != before.Hit {
@@ -258,7 +258,7 @@ func TestResolve_IsReproducibleAcrossARestatement(t *testing.T) {
 	// pass on a store that simply drops corrections.
 	later, ok, err := resolver(t, m).Resolve(ctx, s, "BTC-USDT", origin.Add(time.Minute),
 		asOf.Add(2*time.Hour))
-	if err != nil || !ok {
+	if err != nil || !ok.OK() {
 		t.Fatalf("unresolved at the later horizon: %v", err)
 	}
 	if !later.Hit {
@@ -311,7 +311,7 @@ func TestResolve_FeedsCalibration(t *testing.T) {
 	for _, th := range []float64{0.05, 0.20} { // one hits, one does not
 		o, ok, err := r.Resolve(ctx, claim(t, th, 2*time.Minute), "BTC-USDT",
 			origin.Add(time.Minute), far)
-		if err != nil || !ok {
+		if err != nil || !ok.OK() {
 			t.Fatalf("threshold %v unresolved: %v", th, err)
 		}
 		outs = append(outs, o)

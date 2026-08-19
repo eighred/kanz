@@ -57,8 +57,11 @@ func TestNoBinaryDefinesItsOwnVersion(t *testing.T) {
 			return err
 		}
 		if d.IsDir() {
-			switch d.Name() {
-			case ".git", "vendor", "node_modules", ".gotmp", "testdata":
+			// skipWalkDir is the shared set (walk_skip_test.go); testdata is this
+			// walk's own addition. `.claude` matters here: a subagent worktree is
+			// a full checkout with its own Dockerfiles, and this guard would both
+			// read them as the estate's and crash when one is removed mid-walk.
+			if skipWalkDir(d) || d.Name() == "testdata" {
 				return filepath.SkipDir
 			}
 			return nil
@@ -121,8 +124,13 @@ func TestEveryGoImageStampsItsVersion(t *testing.T) {
 			return err
 		}
 		if d.IsDir() {
-			switch d.Name() {
-			case ".git", "vendor", "node_modules", ".gotmp", "gen":
+			// skipWalkDir is the shared set; `gen` is this walk's own addition.
+			// `.claude` is the one that matters: a subagent worktree is a FULL
+			// checkout with its own Dockerfiles, so without it this guard reads
+			// another checkout's images as the estate's — and crashes outright
+			// when a worktree is removed between the readdir and the open, which
+			// is how this was found on 2026-08-19.
+			if skipWalkDir(d) || d.Name() == "gen" {
 				return filepath.SkipDir
 			}
 			return nil

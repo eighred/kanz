@@ -6,6 +6,7 @@ import EstateView from '../views/EstateView.vue'
 import NodesView from '../views/NodesView.vue'
 import ExposureView from '../views/ExposureView.vue'
 import OrdersView from '../views/OrdersView.vue'
+import OverridesView from '../views/OverridesView.vue'
 import InstrumentsView from '../views/InstrumentsView.vue'
 import PortfoliosView from '../views/PortfoliosView.vue'
 import ProvisionsView from '../views/ProvisionsView.vue'
@@ -32,6 +33,11 @@ export const router = createRouter({
     // "dual control is not switched on here" answer from the operator who most
     // needs it.
     { path: '/approvals', name: 'approvals', component: ApprovalsView },
+    // ACT ONE OF THE SAME CONTROL, and registered on the same terms and for the
+    // same reasons as /approvals above. The gateway decides who may read the
+    // override queue — 403 without authz.Approve, 404 where no approver role is
+    // configured at all — and the view renders those as different sentences.
+    { path: '/overrides', name: 'overrides', component: OverridesView },
     { path: '/portfolios', name: 'portfolios', component: PortfoliosView },
     { path: '/portfolios/:id/exposure', name: 'exposure', component: ExposureView },
     { path: '/portfolios/:id/orders', name: 'orders', component: OrdersView },

@@ -132,23 +132,16 @@ export function classify(p: PendingApproval): Reading {
 }
 
 /**
- * samePerson compares two subjects the way internal/dualcontrol does.
+ * samePerson is internal/dualcontrol's own comparison, and it now has a SECOND
+ * CONSUMER — the pricing-override queue (#371 act one) — so the body moved to
+ * ./dualcontrol and this is a re-export rather than a second copy.
  *
- * CASE- AND SPACE-INSENSITIVE, because that is the comparison the server makes:
- * "Alice@kanz" approving "alice@kanz" is one person, and a case-sensitive
- * comparison would call it two. Matching the server's rule here is what makes
- * the disabled button agree with the refusal that would follow — a stricter
- * client comparison would offer a button that always fails, and a looser one
- * would hide a button that would have worked.
- *
- * IT IS NOT A CONTROL. The OMS refuses self-approval whatever this returns; the
- * only thing this buys is that the proposer is not invited to discover the rule
- * by pressing a button and waiting for an asynchronous refusal.
+ * Two dual-control screens that disagree about who a person is would produce, on
+ * whichever of them was the looser, the one outcome the rule exists to prevent:
+ * an approve button offered to the proposer. This name stays exported here only
+ * so the callers' import path is unchanged.
  */
-export function samePerson(a: string | undefined, b: string | undefined): boolean {
-  if (!a || !b) return false
-  return a.trim().toLowerCase() === b.trim().toLowerCase()
-}
+export { samePerson } from './dualcontrol'
 
 export const approvals = {
   /**
