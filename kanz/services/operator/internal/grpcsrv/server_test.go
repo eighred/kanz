@@ -9,6 +9,7 @@ import (
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes/fake"
 
@@ -108,6 +109,14 @@ type stubProvisioner struct {
 	gotProbePort int32
 	probe        provision.ProbeResult
 	probeErr     error
+
+	// placement is what CheckPlacement answers, and its ZERO VALUE REFUSES (#207). A
+	// double that reports "schedulable" unless a test remembers to say otherwise would
+	// let every AddNode test pass while the drain refusal was never reached; tests that
+	// mean the estate to be healthy say so with schedulableOn.
+	placement       provision.PlacementVerdict
+	placementErr    error
+	placementChecks int
 }
 
 func (s *stubProvisioner) AddNode(_ context.Context, r provision.Request) (string, error) {
@@ -121,9 +130,24 @@ func (s *stubProvisioner) Probe(_ context.Context, ip string, port int32) (provi
 	s.gotProbeIP, s.gotProbePort = ip, port
 	return s.probe, s.probeErr
 }
+func (s *stubProvisioner) CheckPlacement(context.Context) (provision.PlacementVerdict, error) {
+	s.placementChecks++
+	return s.placement, s.placementErr
+}
+
+// schedulableOn is the verdict for an estate that can run the provisioning Job: one
+// control-plane node, eligible. Named rather than written inline so the tests that need
+// a HEALTHY estate are greppable against the ones that assert a refusal.
+func schedulableOn(node string) provision.PlacementVerdict {
+	return provision.PlacementVerdict{
+		Selector: map[string]string{"node-role.kubernetes.io/control-plane": "true"},
+		Eligible: []string{node},
+		Total:    1,
+	}
+}
 
 func TestAddNodeDecodesRequestAndReturnsID(t *testing.T) {
-	sp := &stubProvisioner{id: "provision-london-abcde"}
+	sp := &stubProvisioner{id: "provision-london-abcde", placement: schedulableOn("k3s-server")}
 	srv := NewWithProvisioner(stubReader{}, sp)
 	resp, err := srv.AddNode(context.Background(), &operatorpb.AddNodeRequest{
 		Hostname: "london", Ip: "10.0.0.5", SshPort: 22, SshUser: "root", SshPrivateKey: []byte("PEM"),
@@ -219,6 +243,170 @@ func TestAddNodeRejectsNonSSHPortBeforeCreatingAnything(t *testing.T) {
 		t.Errorf("the SSH bootstrap key and the k3s join token were written to a Secret for a "+
 			"request that cannot succeed: %d secret(s). Credentials must not be materialised for "+
 			"input the boundary can refuse", len(secs.Items))
+	}
+}
+
+// controlPlaneNode builds the node the provisioning Job is pinned to, spelled the way
+// this estate's k3s spells it. Written out here rather than imported because
+// provision.controlPlaneOnly is unexported: the pin is asserted against the operator
+// Deployment's manifest by test/arch/operator_placement_test.go, and this test only
+// needs an inventory the real CheckPlacement will read.
+func controlPlaneNode(name string, unschedulable bool) *corev1.Node {
+	return &corev1.Node{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:   name,
+			Labels: map[string]string{"node-role.kubernetes.io/control-plane": "true"},
+		},
+		Spec: corev1.NodeSpec{Unschedulable: unschedulable},
+		Status: corev1.NodeStatus{Conditions: []corev1.NodeCondition{
+			{Type: corev1.NodeReady, Status: corev1.ConditionTrue},
+		}},
+	}
+}
+
+// TestAddNodeRefusesADrainedControlPlaneBeforeCreatingAnything is #207's ruling, proved
+// against the REAL provisioner and a fake cluster rather than a stub — for the same
+// reason TestAddNodeRejectsNonSSHPortBeforeCreatingAnything is: the property is that no
+// credential is materialised for a request that cannot succeed, and a stub cannot show
+// that.
+//
+// The estate here is the one that exists: a single control-plane node, cordoned by an
+// operator draining it to patch the host. The provisioning Job is pinned there because
+// it mounts K3S_TOKEN, so it can run nowhere else. Before this refusal the call returned
+// 200 and a provision id, and the Job then sat Pending for its full 900s deadline with
+// the cluster-admission token and an SSH bootstrap key mounted on a pod that would never
+// start.
+func TestAddNodeRefusesADrainedControlPlaneBeforeCreatingAnything(t *testing.T) {
+	const ns = "kanz-operator"
+	cs := fake.NewSimpleClientset(controlPlaneNode("k3s-server", true))
+	srv := NewWithProvisioner(stubReader{}, provision.New(cs, provision.Config{
+		Namespace: ns, ProvisionerImage: "ghcr.io/eighred/kanz-provisioner:latest",
+		K3sServerURL: "https://cp:6443", K3sToken: "join-token",
+	}))
+
+	_, err := srv.AddNode(context.Background(), &operatorpb.AddNodeRequest{
+		Hostname: "london", Ip: "10.0.0.5", SshPort: 22, SshUser: "root", SshPrivateKey: []byte("PEM"),
+		SshHostKey: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExample"})
+
+	if status.Code(err) != codes.Aborted {
+		t.Fatalf("want Aborted for a drained control plane, got %v (%v). Aborted is the code the "+
+			"gateway renders as 409 and the ONE that means 'the estate's state conflicts, and the "+
+			"same request works once it changes'", status.Code(err), err)
+	}
+	msg := status.Convert(err).Message()
+	for _, want := range []string{"drained", "k3s-server", "uncordon"} {
+		if !strings.Contains(strings.ToLower(msg), want) {
+			t.Errorf("the refusal does not contain %q, so an operator is not told what they did "+
+				"or how to undo it: %s", want, msg)
+		}
+	}
+
+	jobs, jerr := cs.BatchV1().Jobs(ns).List(context.Background(), metav1.ListOptions{})
+	if jerr != nil {
+		t.Fatalf("list jobs: %v", jerr)
+	}
+	if len(jobs.Items) != 0 {
+		t.Errorf("a provisioning Job was created while the control plane was drained: %d job(s). "+
+			"It cannot schedule — it sits Pending until its deadline expires, which is the failure "+
+			"#207 exists to remove", len(jobs.Items))
+	}
+	secs, serr := cs.CoreV1().Secrets(ns).List(context.Background(), metav1.ListOptions{})
+	if serr != nil {
+		t.Fatalf("list secrets: %v", serr)
+	}
+	if len(secs.Items) != 0 {
+		t.Errorf("K3S_TOKEN and the SSH bootstrap key were written to a Secret for a job that "+
+			"cannot be scheduled: %d secret(s)", len(secs.Items))
+	}
+}
+
+// A HEALTHY CONTROL PLANE STILL PROVISIONS. The refusal is only correct if it is not
+// also a refusal of the normal path — this is the half that would go missing silently,
+// because a check that says no to everything makes every other AddNode test pass too.
+func TestAddNodeProvisionsWhenTheControlPlaneIsSchedulable(t *testing.T) {
+	const ns = "kanz-operator"
+	cs := fake.NewSimpleClientset(controlPlaneNode("k3s-server", false))
+	srv := NewWithProvisioner(stubReader{}, provision.New(cs, provision.Config{
+		Namespace: ns, ProvisionerImage: "ghcr.io/eighred/kanz-provisioner:latest",
+		K3sServerURL: "https://cp:6443", K3sToken: "join-token",
+	}))
+
+	resp, err := srv.AddNode(context.Background(), &operatorpb.AddNodeRequest{
+		Hostname: "london", Ip: "10.0.0.5", SshPort: 22, SshUser: "root", SshPrivateKey: []byte("PEM"),
+		SshHostKey: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExample"})
+	if err != nil {
+		t.Fatalf("AddNode refused an uncordoned control plane: %v", err)
+	}
+	if resp.GetProvisionId() == "" {
+		t.Error("no provision id returned")
+	}
+	jobs, _ := cs.BatchV1().Jobs(ns).List(context.Background(), metav1.ListOptions{})
+	if len(jobs.Items) != 1 {
+		t.Errorf("want 1 provisioning Job, got %d", len(jobs.Items))
+	}
+}
+
+// AN UNSCHEDULABLE ESTATE THAT IS NOT A DRAIN GETS A DIFFERENT CODE. Told 409 for an
+// estate with no control-plane node at all, an operator goes looking for the drain they
+// never started; FailedPrecondition (412) says instead that retrying will not help.
+func TestAddNodeSeparatesADrainFromAnEstateThatCanNeverSchedule(t *testing.T) {
+	sp := &stubProvisioner{id: "should-not-be-reached", placement: provision.PlacementVerdict{
+		Selector: map[string]string{"node-role.kubernetes.io/control-plane": "true"},
+		Total:    2, // two workers, no control plane
+	}}
+	_, err := NewWithProvisioner(stubReader{}, sp).AddNode(context.Background(), &operatorpb.AddNodeRequest{
+		Hostname: "london", Ip: "10.0.0.5", SshPort: 22, SshUser: "root", SshPrivateKey: []byte("PEM"),
+		SshHostKey: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExample"})
+
+	if status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("want FailedPrecondition for an estate with no control-plane node, got %v (%v)",
+			status.Code(err), err)
+	}
+	if sp.gotReq.IP != "" {
+		t.Errorf("the provisioner was called anyway: %+v", sp.gotReq)
+	}
+}
+
+// CANNOT-TELL REFUSES. If the node inventory cannot be read, "will this schedule?" has
+// no answer, and an unanswered question that proceeds is the default that looks healthy
+// — the exact shape CLAUDE.md refuses. It must not be Aborted either: nothing is known
+// to be drained, and 409 would send the operator to uncordon a node that is fine.
+func TestAddNodeRefusesWhenSchedulabilityCannotBeDetermined(t *testing.T) {
+	sp := &stubProvisioner{
+		id:           "should-not-be-reached",
+		placementErr: errors.New("nodes is forbidden: RBAC"),
+	}
+	_, err := NewWithProvisioner(stubReader{}, sp).AddNode(context.Background(), &operatorpb.AddNodeRequest{
+		Hostname: "london", Ip: "10.0.0.5", SshPort: 22, SshUser: "root", SshPrivateKey: []byte("PEM"),
+		SshHostKey: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExample"})
+
+	if status.Code(err) != codes.Internal {
+		t.Fatalf("want Internal when placement cannot be determined, got %v (%v)", status.Code(err), err)
+	}
+	if !strings.Contains(status.Convert(err).Message(), "RBAC") {
+		t.Errorf("the cause was swallowed, so the operator cannot see it is an RBAC gap: %v", err)
+	}
+	if sp.gotReq.IP != "" {
+		t.Errorf("the provisioner was called despite an unanswerable placement check: %+v. "+
+			"Optimistically proceeding is how a credential-bearing Job gets created for a "+
+			"request nobody could vouch for", sp.gotReq)
+	}
+}
+
+// The placement check must not run before the caller's own input is validated: a typo'd
+// port would otherwise cost a cluster read and, worse, could be reported as an estate
+// fault. The port refusal is InvalidArgument and the estate is never consulted.
+func TestAddNodeValidatesInputBeforeConsultingTheEstate(t *testing.T) {
+	sp := &stubProvisioner{placement: schedulableOn("k3s-server")}
+	_, err := NewWithProvisioner(stubReader{}, sp).AddNode(context.Background(), &operatorpb.AddNodeRequest{
+		Hostname: "london", Ip: "10.0.0.5", SshPort: 2222, SshUser: "root", SshPrivateKey: []byte("PEM"),
+		SshHostKey: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExample"})
+	if status.Code(err) != codes.InvalidArgument {
+		t.Fatalf("want InvalidArgument, got %v", err)
+	}
+	if sp.placementChecks != 0 {
+		t.Errorf("the estate was read %d time(s) for a request the boundary could refuse on its "+
+			"own input", sp.placementChecks)
 	}
 }
 

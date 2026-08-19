@@ -15,7 +15,41 @@
 // The engine works in float64 (cashflows are derived projections, like the bond
 // analytics) with its own Deal/Pool/Tranche structs — the float mirror of the
 // reference.v1.StructuredTerms wire schema (the FI-01 BondSpec precedent).
+//
+// # It refuses what it cannot price, and that is a signature, not a convention
+//
+// Every entry point that used to answer 0 for an input it could not handle now
+// returns ErrUnpriceable instead (#572). A zero out of this package is not a
+// small number: an effective duration of 0 says a mortgage tranche does not move
+// when rates move, and a WAL of 0 says the principal comes back immediately.
+// Both are the flattering direction, both are served with the same confidence as
+// a real measurement, and #565 is the same defect one floor up — an FRTB filing
+// dropped a whole risk class to zero capital because the charge function skipped
+// what its table did not cover.
 package structured
+
+import (
+	"errors"
+	"fmt"
+)
+
+// ErrUnpriceable reports that a tranche's price or risk cannot be derived from
+// the inputs given — the projection holds no such tranche, the rate environment
+// carries no discount curve, the tranche prices to nothing (so a relative
+// sensitivity is 0/0), or no principal ever reaches it (so it has no
+// weighted-average life).
+//
+// IT IS AN ERROR AND NOT A ZERO BECAUSE THE TWO ARE INDISTINGUISHABLE IN A RISK
+// NUMBER (#572, the shape #565 settled on). The four cases above are all data
+// or wiring faults, and each one used to return a value a caller could not tell
+// from a measurement: a senior tranche whose rate environment was never
+// populated reported effective duration 0.0000, which is a claim that a
+// 30-year mortgage pool is immune to rates.
+//
+// Callers that cannot propagate an error — a compute.MeasureFunc is the one in
+// this estate — must convert it into an INPUT EXCLUSION rather than folding the
+// position in at zero. See compute.structMeasure.
+var ErrUnpriceable = errors.New("structured: this tranche cannot be priced from the inputs given")
 
 // Pool is the amortizing collateral backing a deal.
 type Pool struct {
@@ -173,8 +207,29 @@ func (d Deal) Project(pm PrepayModel, env RateEnv) Projection {
 	return proj
 }
 
+// Tranche returns the projected cashflows of tranche idx.
+//
+// THE BOUNDS CHECK LIVES HERE SO IT LIVES ONCE. PriceTranche had its own and
+// answered 0 for an out-of-range index; compute.structMeasure had none at all
+// and indexed Projection.Tranches directly, so the SAME malformed spec produced
+// a confident zero from StructDuration and a panic from StructWAL — two
+// different failures from one fault, and only one of them visible.
+func (p Projection) Tranche(idx int) (TrancheCashflow, error) {
+	if idx < 0 || idx >= len(p.Tranches) {
+		return TrancheCashflow{}, fmt.Errorf("%w: tranche index %d, the projection holds %d",
+			ErrUnpriceable, idx, len(p.Tranches))
+	}
+	return p.Tranches[idx], nil
+}
+
 // WAL is the weighted-average life (years) of a tranche's principal stream.
-func (t TrancheCashflow) WAL() float64 {
+//
+// A tranche that receives NO principal has no weighted-average life, and this
+// refuses rather than answering 0 (#572). Zero is not a long-shot reading of
+// that case — a WAL of zero says the note repays immediately, which is the most
+// flattering answer available for a tranche that was in fact written down to
+// nothing by losses, or that belongs to a projection built from an empty deal.
+func (t TrancheCashflow) WAL() (float64, error) {
 	var weighted, total float64
 	for m, p := range t.Principal {
 		years := float64(m+1) / 12
@@ -182,9 +237,10 @@ func (t TrancheCashflow) WAL() float64 {
 		total += p
 	}
 	if total == 0 {
-		return 0
+		return 0, fmt.Errorf("%w: tranche %q receives no principal in this projection, so it has "+
+			"no weighted-average life", ErrUnpriceable, t.Name)
 	}
-	return weighted / total
+	return weighted / total, nil
 }
 
 // levelPayment is the constant monthly payment fully amortizing balance over n

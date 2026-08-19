@@ -137,9 +137,16 @@ var bareMeasureExempt = map[string]string{
 	// blocker does.
 	"greekMeasure": "#509/#345 — RegisterGreeks has no production caller; blocked on a VolProvider, " +
 		"which needs option premiums nothing in this estate persists. Widen this seam when it is wired.",
-	"structMeasure": "#509 — RegisterStructuredRisk has no production caller and no StructuredSpec " +
-		"exists: reference.v1.ContractTerms carries option/swap/future/bond and nothing structured. " +
-		"structured.go's own doc argues the schema comes first, then a provider, then this seam.",
+
+	// structMeasure WAS HERE AND IS NOT ANY MORE (#572). Its entry said the
+	// schema had to come first — and that is still true of the schema ruling,
+	// which #572 still needs — but it was doing double duty as a licence for the
+	// measures to report a confident zero in the meantime. They do not:
+	// structMeasure attaches coverage now, so a wired structured family refuses
+	// instead of averaging over the empty set. The dark-seam exemption in
+	// no_dark_measure_seam_test.go is untouched; that one is about wiring, this
+	// one was about safety, and only the second was ever fixable without a
+	// decision.
 }
 
 // isMeasureLiteral reports whether lit is a `v1.Measure{...}` composite literal.

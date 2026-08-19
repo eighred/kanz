@@ -33,10 +33,16 @@ import (
 // Probe belongs here rather than on its own interface because it has the same
 // prerequisite as AddNode: a configured provisioner image to run a Job from. The two
 // are enabled and disabled together, so one nil check governs both.
+//
+// CheckPlacement is on this interface and not on one of its own because it is a
+// PRECONDITION OF AddNode, not a capability: the only caller is AddNode, and a
+// provisioner that could create the Job but not say where it would land would be a
+// provisioner that can still admit a Job which never schedules (#207).
 type Provisioner interface {
 	AddNode(ctx context.Context, r provision.Request) (string, error)
 	List(ctx context.Context) ([]provision.Provision, error)
 	Probe(ctx context.Context, ip string, sshPort int32) (provision.ProbeResult, error)
+	CheckPlacement(ctx context.Context) (provision.PlacementVerdict, error)
 }
 
 // NodeOps is the node-lifecycle surface the operator gRPC depends on (nodeops.Ops
@@ -162,6 +168,39 @@ func (s *Server) AddNode(ctx context.Context, req *operatorpb.AddNodeRequest) (*
 	}
 	if err := checkSSHPort(port); err != nil {
 		return nil, err
+	}
+	// THE LAST REFUSAL BEFORE A CREDENTIAL EXISTS, and the only one about the ESTATE
+	// rather than about what the caller typed (#207).
+	//
+	// The provisioning Job is pinned to the control plane, and this estate has one
+	// control-plane node, so draining it for routine maintenance makes provisioning
+	// unschedulable. Admitted, the request returns a provision id and 200 and then
+	// leaves a Job Pending for its full 900s deadline with K3S_TOKEN and the SSH
+	// bootstrap key mounted on a pod that will never start — indistinguishable, from
+	// the outside, from a provision that is merely slow. Refused, the operator is told
+	// which node is cordoned and that uncordoning is the repair.
+	//
+	// THE PIN IS NOT MOVED BY THIS. Options 1, 2 and 4 on #207 (multi-master, a
+	// credential-confined pool, short-lived admission credentials) are estate-shape
+	// changes and remain open; this makes the failure legible, nothing more.
+	//
+	// A FAILED CHECK REFUSES. If the node inventory cannot be read, the answer to "will
+	// this schedule?" is unknown — and an unknown that proceeds is the default that
+	// looks healthy. The message says which of the two happened.
+	verdict, err := s.prov.CheckPlacement(ctx)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal,
+			"cannot tell whether the node-provisioning job can be scheduled, so this request is "+
+				"refused rather than accepted into a job that may never start: %v", err)
+	}
+	if !verdict.Schedulable() {
+		// Drained gets its OWN code. FailedPrecondition would be true of both, and a
+		// single code for "you drained the control plane" and "this estate has no
+		// control-plane node" sends half the readers to the wrong repair.
+		if verdict.Drained() {
+			return nil, status.Error(codes.Aborted, verdict.Reason())
+		}
+		return nil, status.Error(codes.FailedPrecondition, verdict.Reason())
 	}
 	id, err := s.prov.AddNode(ctx, provision.Request{
 		Hostname: req.GetHostname(), IP: req.GetIp(), SSHPort: req.GetSshPort(),

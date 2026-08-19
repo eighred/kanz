@@ -192,6 +192,14 @@ const (
 	// this is every position, and a DV01 computed over none of them is the #527
 	// zero. Its presence in the evidence is what separates "measured nothing"
 	// from "measured a book with no bonds in it".
+	//
+	// SHARED WITH THE STRUCTURED FAMILY (#572), which is the one reason constant
+	// that crosses families. The fact it states is not about bonds — the engine
+	// holds no record saying what this instrument is — and structured.go reaches
+	// it for the stronger version of the same gap: no ContractTerms variant, no
+	// terms.Kind and no store can describe a structured product at all, so its
+	// provider's ok=false certifies nothing either. One string, because an
+	// operator groups and alerts on the string.
 	SkipUnknownInstrument = "unknown_instrument"
 )
 
