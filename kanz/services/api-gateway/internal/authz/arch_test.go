@@ -18,6 +18,7 @@ import (
 	"testing"
 
 	"github.com/eighred/kanz/services/api-gateway/internal/authz"
+	"github.com/eighred/kanz/services/api-gateway/internal/control"
 	"github.com/eighred/kanz/services/api-gateway/internal/gateway"
 	"github.com/eighred/kanz/services/api-gateway/internal/orders"
 	"github.com/eighred/kanz/services/api-gateway/internal/proxy"
@@ -91,6 +92,21 @@ func TestTheWholeRouteTableIsDeclared(t *testing.T) {
 	// point of the maker-checker repair — so an empty one here would hide the
 	// second-signature surface from this table exactly as "" would hide funding.
 	proxy.New(nil, proxy.Roles{Fund: "kanz-treasury", Approve: "kanz-compliance"}).Routes(m)
+	// THE CONTROL PLANE, AND ITS ABSENCE WAS THIS GUARD'S OWN BLIND SPOT (#573).
+	//
+	// The three lines above defend carefully against a route escaping through a
+	// CONDITION — a nil client, an empty role. None of them noticed a whole
+	// handler escaping by never being mounted at all. Eleven routes were outside
+	// the table this test's doc says covers "every /v1 route the gateway serves",
+	// including POST /v1/control/nodes/{name}/drain and
+	// PUT /v1/control/venues/{venue}/keys, which uploads venue API credentials.
+	//
+	// Nothing was mis-gated. The point is that this guard could not have told.
+	//
+	// A nil client is safe here BECAUSE Routes registers unconditionally — unlike
+	// the three above. If that ever changes, the non-vacuity arm below is what
+	// stops this silently reverting to checking three handlers out of four.
+	control.New(nil, nil).Routes(m)
 
 	want := map[string]authz.Capability{
 		// Risk queries. A scenario is a POST, but it computes a what-if and moves no
@@ -197,6 +213,25 @@ func TestTheWholeRouteTableIsDeclared(t *testing.T) {
 		"POST /v1/exceptions/{id}/override/approve": authz.Approve,
 		"GET /v1/exceptions/pending-overrides":      authz.Approve,
 
+		// THE OPERATOR CONTROL PLANE (#573). Every one of these is authz.Operate,
+		// and the capability is the whole argument: Read and Trade are
+		// deliberately absent because none of this reads the book or moves
+		// capital — it changes the ESTATE the book runs on. Draining a node
+		// evicts running pods; uploading venue keys hands a credential to the
+		// process that trades with it. A read token must never reach either, and
+		// a trade token has no business in the estate's shape.
+		"GET /v1/control/nodes":                  authz.Operate,
+		"GET /v1/control/clusters":               authz.Operate,
+		"POST /v1/control/nodes":                 authz.Operate,
+		"GET /v1/control/provisions":             authz.Operate,
+		"POST /v1/control/test-connection":       authz.Operate,
+		"POST /v1/control/nodes/{name}/cordon":   authz.Operate,
+		"POST /v1/control/nodes/{name}/uncordon": authz.Operate,
+		"POST /v1/control/nodes/{name}/drain":    authz.Operate,
+		"POST /v1/control/nodes/{name}/region":   authz.Operate,
+		"GET /v1/control/venues":                 authz.Operate,
+		"PUT /v1/control/venues/{venue}/keys":    authz.Operate,
+
 		// The TradingView Broker API: reads of the fund's own book.
 		"GET /v1/broker/accounts":                 authz.Read,
 		"GET /v1/broker/accounts/{id}/state":      authz.Read,
@@ -208,6 +243,28 @@ func TestTheWholeRouteTableIsDeclared(t *testing.T) {
 	got := map[string]authz.Capability{}
 	for _, r := range m.Routes() {
 		got[r.Pattern] = r.Capability
+	}
+
+	// NON-VACUITY, PER HANDLER (#573). The bidirectional comparison below catches
+	// a route that appears or disappears, but it cannot catch a handler that was
+	// never mounted — the declared entries would simply report as "no longer
+	// registered", which reads like someone deleted a route rather than like this
+	// test stopped looking at a quarter of the gateway.
+	//
+	// One live route from each mounted handler, so dropping any Routes() call
+	// above fails HERE with the handler named, not as eleven confusing deletions.
+	for _, anchor := range []struct{ handler, pattern string }{
+		{"gateway", "GET /v1/portfolios"},
+		{"orders", "POST /v1/orders"},
+		{"proxy", "GET /v1/exceptions"},
+		{"control", "POST /v1/control/nodes/{name}/drain"},
+	} {
+		if _, ok := got[anchor.pattern]; !ok {
+			t.Fatalf("the %s handler contributed no routes — %q is missing, so this table is "+
+				"declaring a gateway smaller than the one that ships. That is #573: eleven control "+
+				"routes sat outside this guard because the handler was never mounted, and the guard "+
+				"passed by not looking.", anchor.handler, anchor.pattern)
+		}
 	}
 
 	for pattern, cap := range got {
