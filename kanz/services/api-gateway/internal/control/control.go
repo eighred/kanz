@@ -260,9 +260,28 @@ func translate(err error) (int, string) {
 		return http.StatusNotFound, st.Message()
 	case codes.AlreadyExists:
 		return http.StatusConflict, st.Message()
+	case codes.Aborted:
+		// THE ESTATE'S STATE, NOT THE REQUEST'S CONTENT. AddNode returns this when the
+		// control plane is drained: the provisioning Job is pinned to the control plane
+		// (it carries the cluster-admission token), this estate has one control-plane
+		// node, and a cordoned node means the Job would sit Pending until its deadline
+		// expired. #207's ruling is that the API refuses and names the drain rather than
+		// admitting a Job that cannot schedule — so this reaches every client, including
+		// curl, and not only a client that grew a special case for it.
+		//
+		// 409 rather than the 412 below because the conflict is with a state that
+		// CHANGES: the identical request succeeds once the node is uncordoned, so this
+		// is the branch a caller may retry. The operator's message names the node and
+		// the uncordon route, and survives verbatim.
+		return http.StatusConflict, st.Message()
 	case codes.FailedPrecondition:
-		// S4b: the exchange rejected the credentials. The operator has already
-		// sanitized this message; it is the one thing the caller most needs.
+		// TWO PRODUCERS NOW, and the message is what tells them apart:
+		//   S4b       — the exchange rejected the venue credentials, already sanitized
+		//               by the operator; it is the one thing the caller most needs.
+		//   #207      — the provisioning Job can never be scheduled on this estate as
+		//               labelled or tainted. NOT the drain (that is Aborted above): this
+		//               one does not fix itself, so retrying is pointless.
+		// Whichever it is, the operator wrote it for an operator to read.
 		return http.StatusPreconditionFailed, st.Message()
 	case codes.PermissionDenied:
 		return http.StatusForbidden, "insufficient capability"
