@@ -30,9 +30,9 @@ func TestComputeFRTB_AssemblesEveryCharge(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	wantDelta := frtb.Charge(in.Delta, in.Params)
-	wantVega := frtb.Charge(in.Vega, in.Params)
-	wantCurv := frtb.CurvatureCharge(in.Curvature, in.Params)
+	wantDelta := mustFRTBCharge(t, in.Delta, in.Params)
+	wantVega := mustFRTBCharge(t, in.Vega, in.Params)
+	wantCurv := mustCurvatureCharge(t, in.Curvature, in.Params)
 	wantDRC := frtb.DRC(in.JTD, in.DRCParams)
 	wantRRAO := frtb.RRAO(in.RRAO)
 	if res.Delta != wantDelta || res.Vega != wantVega || res.Curvature != wantCurv ||
@@ -90,4 +90,26 @@ func TestComputeFRTB_InvalidParamsRejected(t *testing.T) {
 	if _, err := ComputeFRTB(in); err == nil {
 		t.Fatal("expected invalid params to be rejected")
 	}
+}
+
+// mustFRTBCharge / mustCurvatureCharge fatal on a refusal (#565). These fixtures
+// build their own params beside their own sensitivities, so an uncovered class
+// means the fixture is wrong — and a discarded error here would let a test keep
+// asserting a total that ComputeFRTB now declines to produce.
+func mustFRTBCharge(t *testing.T, sens []frtb.Sensitivity, p frtb.Params) float64 {
+	t.Helper()
+	v, err := frtb.Charge(sens, p)
+	if err != nil {
+		t.Fatalf("frtb.Charge refused a fixture whose table should cover it: %v", err)
+	}
+	return v
+}
+
+func mustCurvatureCharge(t *testing.T, sens []frtb.CurvatureSensitivity, p frtb.Params) float64 {
+	t.Helper()
+	v, err := frtb.CurvatureCharge(sens, p)
+	if err != nil {
+		t.Fatalf("frtb.CurvatureCharge refused a fixture whose table should cover it: %v", err)
+	}
+	return v
 }

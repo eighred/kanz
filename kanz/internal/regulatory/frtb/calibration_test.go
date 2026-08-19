@@ -24,7 +24,7 @@ func TestCurvatureCharge_HandComputed(t *testing.T) {
 		t.Errorf("medium scenario: got %v want %v", medium, want)
 	}
 	// The worst-of-three can only be ≥ medium.
-	if got := CurvatureCharge(sens, params); got < medium {
+	if got := mustCurvature(t, sens, params); got < medium {
 		t.Errorf("worst scenario %v must be ≥ medium %v", got, medium)
 	}
 }
@@ -37,7 +37,7 @@ func TestCurvatureCharge_GainsNeverCreateCapital(t *testing.T) {
 		{RiskClass: "Equity", Bucket: "1", Factor: "A", Up: -5, Down: -5},
 		{RiskClass: "Equity", Bucket: "1", Factor: "B", Up: -3, Down: -3},
 	}
-	if got := CurvatureCharge(gains, params); got != 0 {
+	if got := mustCurvature(t, gains, params); got != 0 {
 		t.Errorf("all-gain book must carry zero curvature charge, got %v", got)
 	}
 }
@@ -125,7 +125,7 @@ func TestParseCRIF_AndMappers(t *testing.T) {
 	}
 
 	// End-to-end: a live CRIF drives the delta charge under the default params.
-	if got := Charge(delta, DefaultParams()); got <= 0 {
+	if got := mustCharge(t, delta, DefaultParams()); got <= 0 {
 		t.Errorf("CRIF-driven SBM charge must be positive, got %v", got)
 	}
 }

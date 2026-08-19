@@ -1,6 +1,9 @@
 package frtb
 
-import "math"
+import (
+	"fmt"
+	"math"
+)
 
 // Curvature risk charge (PARITY-03g, the MAR21.101 aggregation). The SBM delta
 // charge misses the non-linear P&L of options; curvature captures it from two
@@ -28,7 +31,10 @@ type CurvatureSensitivity struct {
 // three correlation scenarios of the worse shock direction, summed across
 // classes. Correlations come from the same Params as delta (squared per the
 // standard).
-func CurvatureCharge(sens []CurvatureSensitivity, params Params) float64 {
+// IT REFUSES WHAT IT CANNOT PRICE, for the same reason Charge does (#565): a
+// class the table does not cover used to contribute zero silently, which is
+// indistinguishable from a book carrying no curvature risk in that class.
+func CurvatureCharge(sens []CurvatureSensitivity, params Params) (float64, error) {
 	byClass := map[string][]CurvatureSensitivity{}
 	for _, s := range sens {
 		byClass[s.RiskClass] = append(byClass[s.RiskClass], s)
@@ -37,7 +43,8 @@ func CurvatureCharge(sens []CurvatureSensitivity, params Params) float64 {
 	for class, cs := range byClass {
 		p, ok := params[class]
 		if !ok {
-			continue
+			return 0, fmt.Errorf("%w: risk class %q has curvature sensitivities but no supervisory "+
+				"parameters", ErrUncovered, class)
 		}
 		m := curvatureScenario(cs, p, Low)
 		for _, sc := range []Scenario{Medium, High} {
@@ -47,7 +54,7 @@ func CurvatureCharge(sens []CurvatureSensitivity, params Params) float64 {
 		}
 		total += m
 	}
-	return total
+	return total, nil
 }
 
 // curvatureScenario is the class charge under one correlation scenario: the

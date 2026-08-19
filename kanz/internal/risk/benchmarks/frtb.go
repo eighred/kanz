@@ -7,6 +7,23 @@ import (
 	"github.com/eighred/kanz/internal/validation"
 )
 
+// charge is frtb.Charge with its error folded into NaN (#565).
+//
+// A CASE MUST FAIL, NOT PASS, WHEN THE TABLE DOES NOT COVER ITS OWN INPUTS.
+// Charge now refuses sensitivities in a class or bucket the supervisory table
+// omits, and every table below is written in this file beside the sensitivities
+// it prices — so an error here means the CASE is malformed, not that the estate
+// is misconfigured. validation.Case treats NaN as a failure, so a case that
+// stops covering its own inputs stops passing, which is the honest outcome for
+// evidence that no longer grades what it claims to.
+func charge(sens []frtb.Sensitivity, p frtb.Params) float64 {
+	v, err := frtb.Charge(sens, p)
+	if err != nil {
+		return math.NaN()
+	}
+	return v
+}
+
 // THE REG-01b FRTB SENSITIVITIES-BASED METHOD (#471, coverage 10/12 -> 11/12).
 //
 // # Why this analytic sat at zero, and what changed
@@ -233,7 +250,7 @@ func frtbScenarioCases() []validation.Case {
 			// average, not the medium one. Graded as a number rather than as an
 			// inequality so an implementation returning the sum cannot satisfy it.
 			Name: "the_charge_is_the_worst_of_the_three_scenarios_definitional",
-			Got:  frtb.Charge(offsetting, frtb.Params{frtbClass: frtbParams(0.5, 0.5)}),
+			Got:  charge(offsetting, frtb.Params{frtbClass: frtbParams(0.5, 0.5)}),
 			Want: max(
 				frtb.ChargeForScenario(offsetting, frtbParams(0.5, 0.5), frtb.Low),
 				frtb.ChargeForScenario(offsetting, frtbParams(0.5, 0.5), frtb.Medium),
@@ -270,7 +287,7 @@ func frtbCrossBucketCases() []validation.Case {
 			// capital at all, because the engine substituted zero for a negative
 			// radicand instead of recomputing with Sb capped to ±Kb.
 			Name: "two_offsetting_buckets_are_not_free_definitional",
-			Got:  frtb.Charge(opposed, frtb.Params{frtbClass: opposedParams}),
+			Got:  charge(opposed, frtb.Params{frtbClass: opposedParams}),
 			Want: altLow, Tolerance: 1e-9,
 		},
 		{
@@ -342,7 +359,7 @@ func frtbStructuralCases() []validation.Case {
 		frtbSens("1", "X", 30), frtbSens("1", "Y", -40), frtbSens("2", "Z", 25),
 	}
 	p := frtb.Params{frtbClass: frtbParams(0.5, 0.5)}
-	base := frtb.Charge(book, p)
+	base := charge(book, p)
 
 	doubled := make([]frtb.Sensitivity, len(book))
 	for i, s := range book {
@@ -365,7 +382,7 @@ func frtbStructuralCases() []validation.Case {
 			// A charge that were not would make the filing depend on the unit the
 			// sensitivities were expressed in.
 			Name: "the_charge_is_homogeneous_of_degree_one_in_the_sensitivities_definitional",
-			Got:  frtb.Charge(doubled, p),
+			Got:  charge(doubled, p),
 			Want: 2 * base, Tolerance: 1e-9,
 		},
 		{
@@ -374,7 +391,7 @@ func frtbStructuralCases() []validation.Case {
 			// swap the representative calibration for the published one and reason
 			// about the effect.
 			Name: "the_charge_is_linear_in_the_risk_weight_definitional",
-			Got: frtb.Charge(book, frtb.Params{frtbClass: frtb.ClassParams{
+			Got: charge(book, frtb.Params{frtbClass: frtb.ClassParams{
 				RiskWeight: map[string]float64{"1": 3, "2": 3},
 				IntraCorr:  0.5, InterCorr: 0.5,
 			}}),
@@ -385,9 +402,9 @@ func frtbStructuralCases() []validation.Case {
 			// SBM correlates within a class and adds across them; a cross-class
 			// correlation invented here would understate every multi-asset book.
 			Name: "capital_sums_across_risk_classes_definitional",
-			Got:  frtb.Charge(twoClass, twoClassParams),
-			Want: frtb.Charge(book, twoClassParams) +
-				frtb.Charge([]frtb.Sensitivity{twoClass[len(twoClass)-1]}, twoClassParams),
+			Got:  charge(twoClass, twoClassParams),
+			Want: charge(book, twoClassParams) +
+				charge([]frtb.Sensitivity{twoClass[len(twoClass)-1]}, twoClassParams),
 			Tolerance: 1e-9,
 		},
 		{
@@ -395,7 +412,7 @@ func frtbStructuralCases() []validation.Case {
 			// measured against, and the one an implementation with an additive
 			// constant would fail.
 			Name: "an_empty_book_carries_no_capital_definitional",
-			Got:  frtb.Charge(nil, p),
+			Got:  charge(nil, p),
 			Want: 0, Tolerance: 1e-12,
 		},
 		{
