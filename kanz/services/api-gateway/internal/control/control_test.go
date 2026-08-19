@@ -246,6 +246,62 @@ func TestAnInternalFaultWithNoMessageStillSaysSomething(t *testing.T) {
 	}
 }
 
+// WHAT AN OPERATOR SEES DURING A DRAIN (#207). This is the whole point of resolving the
+// issue HERE rather than in a client: the explanation is in the API's own answer, so it
+// is true for curl — the operator surface that actually exists — and for the web app
+// when it grows an operator view, without either of them carrying a special case.
+//
+// 409 rather than 500 because the drain is not a fault of this platform, and rather than
+// 412 because the identical request succeeds once the node is uncordoned. The operator's
+// message must survive intact: it names the node and the uncordon route, and a caller
+// left with a bare status code is back to guessing why Add Node stopped working.
+func TestADrainedControlPlaneIsRefusedWithTheDrainNamed(t *testing.T) {
+	const reason = `the control plane is drained: node "k3s-server" is cordoned, and the ` +
+		`node-provisioning job runs nowhere else. Uncordon the node ` +
+		`(POST /v1/control/nodes/{name}/uncordon) or finish the maintenance, then retry.`
+	c := &stubClient{addNodeErr: status.Error(codes.Aborted, reason)}
+	rec := serve(t, c, []string{"kanz-operator"},
+		httptest.NewRequest("POST", "/v1/control/nodes", strings.NewReader(`{"hostname":"h","ip":"10.0.0.5"}`)))
+
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("want 409 for a drained control plane, got %d. A 5xx would blame the platform "+
+			"for the operator's own maintenance and put it in the error-rate SLO; a 200 with a "+
+			"provision id — the behaviour before #207 — leaves a Job Pending forever", rec.Code)
+	}
+	var out map[string]string
+	if err := json.NewDecoder(rec.Body).Decode(&out); err != nil {
+		t.Fatalf("undecodable error body: %v", err)
+	}
+	if out["error"] != reason {
+		t.Errorf("the operator's explanation did not survive the hop.\ngot:  %q\nwant: %q\n\n"+
+			"Without the node name and the uncordon route in the body, every client has to "+
+			"reconstruct them, which is the client-side fix #207 ruled against", out["error"], reason)
+	}
+}
+
+// The other half of that distinction. An estate that can NEVER schedule the provisioning
+// job — no control-plane node, or an untolerated taint — is not a drain: nothing will
+// change on its own, so it must not arrive as the retryable 409 above.
+func TestAnUnschedulableEstateIsNotReportedAsADrain(t *testing.T) {
+	const reason = "no node carries node-role.kubernetes.io/control-plane=true, the pin the " +
+		"node-provisioning job requires. This is not a drain"
+	c := &stubClient{addNodeErr: status.Error(codes.FailedPrecondition, reason)}
+	rec := serve(t, c, []string{"kanz-operator"},
+		httptest.NewRequest("POST", "/v1/control/nodes", strings.NewReader(`{"hostname":"h","ip":"10.0.0.5"}`)))
+
+	if rec.Code != http.StatusPreconditionFailed {
+		t.Fatalf("want 412, got %d — an operator told 409 goes looking for the drain they never "+
+			"started", rec.Code)
+	}
+	var out map[string]string
+	if err := json.NewDecoder(rec.Body).Decode(&out); err != nil {
+		t.Fatalf("undecodable error body: %v", err)
+	}
+	if !strings.Contains(out["error"], "not a drain") {
+		t.Errorf("got %q, want the estate's own diagnosis", out["error"])
+	}
+}
+
 // Every route on this surface is Operate. A future route added without thinking
 // about it should trip this rather than inherit Read by accident.
 func TestEveryControlRouteDemandsOperate(t *testing.T) {
