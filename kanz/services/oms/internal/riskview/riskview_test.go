@@ -167,3 +167,98 @@ func TestStats_SeparatesHeldFromCurrent(t *testing.T) {
 			"a risk mandate will refuse", held, live)
 	}
 }
+
+// --- THE MEASURE THAT WAS ANNOUNCED AND STILL CANNOT GATE (#509, #527) ---
+//
+// The two unknowns above are absences: nothing was announced, or what was
+// announced has aged out. This is a third, and it is the one the freshness bound
+// cannot catch — the engine is publishing, on time, a number it computed over a
+// book it could not resolve. A DV01 of zero over an empty contract-terms store
+// passes every rate-risk limit ever written.
+
+func measuresWithCoverage(t *testing.T, pf string, asOf time.Time, name string,
+	value int64, cov *domainpb.InputCoverage) []byte {
+	t.Helper()
+	set := &domainpb.RiskMeasureSet{
+		PortfolioId: pf,
+		AsOf:        timestamppb.New(asOf),
+		Measures: []*domainpb.RiskMeasure{{
+			Name:     name,
+			Value:    &commonpb.Decimal{Coefficient: value},
+			Coverage: cov,
+		}},
+	}
+	b, err := proto.Marshal(set)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	return b
+}
+
+func TestMeasure_ComputedOverNothingIsUnknown(t *testing.T) {
+	var gotPF, gotName string
+	var gotExcluded uint32
+	v := New(
+		WithClock(func() time.Time { return t0 }),
+		WithOnUnresolved(func(pf, name string, excluded uint32) {
+			gotPF, gotName, gotExcluded = pf, name, excluded
+		}),
+	)
+
+	payload := measuresWithCoverage(t, "PF1", t0, "DV01", 0, &domainpb.InputCoverage{
+		Contributed:   0,
+		ExcludedCount: 4,
+		Exclusions:    []*domainpb.InputExclusion{{InstrumentId: "GOVT-10Y", Reason: "no_terms"}},
+	})
+	if err := v.Handle(context.Background(), nil, payload); err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+
+	if _, ok := v.Measure("PF1", "DV01"); ok {
+		t.Error("a DV01 the engine computed over no bond at all was folded and will gate " +
+			"orders.\n\nIt is a zero, so every rate-risk limit passes — and it arrived as a " +
+			"fresh announcement, so neither the never-announced check nor the freshness bound " +
+			"refuses it. That is the substitution this package's own doc forbids (#509).")
+	}
+	if gotPF != "PF1" || gotName != "DV01" || gotExcluded != 4 {
+		t.Errorf("onUnresolved(%q, %q, %d), want (PF1, DV01, 4) — an operator watching a risk "+
+			"limit refuse cannot otherwise tell a silent engine from an answering one whose "+
+			"answer is unusable", gotPF, gotName, gotExcluded)
+	}
+}
+
+// AND A MEASURE THAT REPORTS FULL COVERAGE STILL GATES. Refusing on any coverage
+// record at all would make the gate refuse everything the moment the engine
+// started reporting, which is how a control gets switched off.
+func TestMeasure_FullyCoveredStillFolds(t *testing.T) {
+	v := New(WithClock(func() time.Time { return t0 }))
+	payload := measuresWithCoverage(t, "PF1", t0, "DV01", 4200,
+		&domainpb.InputCoverage{Contributed: 3})
+	if err := v.Handle(context.Background(), nil, payload); err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	got, ok := v.Measure("PF1", "DV01")
+	if !ok {
+		t.Fatal("a DV01 that priced three bonds and excluded none was refused")
+	}
+	if got.RatString() != "4200" {
+		t.Errorf("DV01 = %s, want 4200", got.RatString())
+	}
+}
+
+// AND A MEASURE THAT REPORTS NO COVERAGE AT ALL STILL GATES. An absent coverage
+// message means "this measure does not report coverage" — GrossExposure reads
+// the portfolio directly and no provider can decline it — not "it resolved
+// nothing". Reading absence as a refusal would silently disarm every limit over
+// the exposure family.
+func TestMeasure_NoCoverageRecordStillFolds(t *testing.T) {
+	v := New(WithClock(func() time.Time { return t0 }))
+	payload := measuresWithCoverage(t, "PF1", t0, "GrossExposure", 1000, nil)
+	if err := v.Handle(context.Background(), nil, payload); err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	if _, ok := v.Measure("PF1", "GrossExposure"); !ok {
+		t.Error("GrossExposure was refused for reporting no coverage — absent is not zero " +
+			"coverage, and treating it as one disarms every limit over the exposure family")
+	}
+}
