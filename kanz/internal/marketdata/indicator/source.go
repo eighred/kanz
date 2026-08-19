@@ -141,9 +141,29 @@ func (s *Source) FeaturesAsOf(ctx context.Context, instrumentID string, asOf tim
 // and the readings it trades on must come from one function, or the divergence
 // between them is the first thing a live loss gets blamed on and the last thing
 // anyone finds.
+//
+// # ONLY THE CONTIGUOUS TAIL IS READ (#416)
+//
+// A period here is a DURATION, not an element count, and that is only true over
+// bars with no holes in them. bars/fold.go emits NO BAR for a minute in which
+// nothing traded, so a gapped slice is the normal shape of this input, not an
+// exotic one — and over one, SMA(closes, 20) averages the last twenty ELEMENTS
+// across however much wall-clock time they happen to span. It stays in range, it
+// stays plausible, and it answers a different question than its name.
+//
+// Measured on a 1m series with nine of every ten minutes absent, the unguarded
+// version reported rsi_14 = 100 ("maximally overbought") from fifteen prints
+// spread over 150 minutes.
+//
+// store.ContiguousSuffix trims to the longest unbroken run ending at the most
+// recent bar, so every reading below is over a window of the duration it claims.
+// The existing (value, ok) contract then does the rest: a run too short for a
+// period yields no key, which already means "not enough history" and now covers
+// "not enough UNBROKEN history" as well. Both are absences, and absence is
+// already what this package returns rather than a number.
 func Features(bars []store.Bar) map[string]float64 {
 	out := map[string]float64{}
-	closes, highs, lows, ok := columns(bars)
+	closes, highs, lows, ok := columns(store.ContiguousSuffix(bars))
 	if !ok {
 		// A NON-CONVERTIBLE PRICE IS NOT A ZERO. Returning an empty set says "no
 		// readings"; substituting zeros would say the market printed at zero.

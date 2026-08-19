@@ -87,13 +87,23 @@ type Result struct {
 	// misunderstanding.
 	Calibration *score.Report
 
-	// Unresolved is how many scored decisions could NOT be marked — the horizon
-	// had not elapsed within the knowledge horizon, or the series had a gap.
+	// Unresolved is how many scored decisions could NOT be marked.
 	//
 	// REPORTED, not silently dropped. A run whose scores were 90% unresolved
 	// produces a calibration report over the remaining tenth, and nothing else
 	// would say so — the report would look thin rather than unrepresentative.
 	Unresolved int
+
+	// UnresolvedBy breaks Unresolved down by outcome.Reason.
+	//
+	// THE TOTAL ALONE IS NOT ACTIONABLE, and this comment used to be the whole
+	// story ("the horizon had not elapsed [...] or the series had a gap") for a
+	// single number that could not tell them apart. They are different problems
+	// with different owners: horizon_open shrinks on its own as time passes,
+	// incomplete_window is a market-data question, and
+	// horizon_shorter_than_series is a model that will never be gradeable against
+	// this series no matter how long anyone waits.
+	UnresolvedBy map[outcome.Reason]int
 }
 
 // Harness runs a Strategy over a replay range.
@@ -155,12 +165,16 @@ func (h *Harness) calibrate(ctx context.Context, res *Result) error {
 		if d.Score.IsZero() {
 			continue
 		}
-		o, ok, err := h.Resolver.Resolve(ctx, d.Score, d.InstrumentID, d.AsOf, h.CalibrationAsOf)
+		o, reason, err := h.Resolver.Resolve(ctx, d.Score, d.InstrumentID, d.AsOf, h.CalibrationAsOf)
 		if err != nil {
 			return err
 		}
-		if !ok {
+		if !reason.OK() {
 			res.Unresolved++
+			if res.UnresolvedBy == nil {
+				res.UnresolvedBy = map[outcome.Reason]int{}
+			}
+			res.UnresolvedBy[reason]++
 			continue
 		}
 		outs = append(outs, o)
