@@ -170,8 +170,8 @@ func TestTheAnalyticsInventoryAgreesWithItsBenchmarks(t *testing.T) {
 
 	// 2. EVERY INVENTORY ENTRY IS A DECLARED CONSTANT, or a named exception. A
 	//    bare string cannot be kept honest when the analytic is renamed — the same
-	//    badKeys shape measure_catalogue_test.go reports, except here two of them
-	//    are deliberate and argued.
+	//    badKeys shape measure_catalogue_test.go reports, except here one of them
+	//    is deliberate and argued.
 	for _, e := range inventory {
 		if e.isLiteral {
 			if _, ok := inventoryLiteralsWithoutEvidence[e.name]; !ok {
@@ -228,21 +228,28 @@ func TestTheAnalyticsInventoryAgreesWithItsBenchmarks(t *testing.T) {
 	}
 }
 
-// inventoryLiteralsWithoutEvidence are the two inventory entries that are bare
-// strings on purpose.
+// inventoryLiteralsWithoutEvidence is the one inventory entry that is a bare
+// string on purpose.
 //
-// THE LITERAL IS THE ENCODING OF "NO EVIDENCE EXISTS". Both are implemented
-// outside internal/risk/ and neither has a case set, because neither can have one
-// yet: ISDA SIMM's calibration is member-licensed and this estate ships
-// representative magnitudes rather than the published tables, and FRTB-SA's risk
-// weights are the same. They are listed so the gauge reports them `absent` —
-// which is true — rather than omitting them, which would read as coverage.
+// THE LITERAL IS THE ENCODING OF "NO EVIDENCE EXISTS". It is implemented outside
+// internal/risk/ and has no case set because it cannot have one: ISDA SIMM's
+// calibration AND its aggregation are member-licensed, and this estate ships
+// representative magnitudes rather than the published tables, so a case set would
+// grade the maths against invented data. It is listed so the gauge reports it
+// `absent` — which is true — rather than omitting it, which would read as
+// coverage.
+//
+// frtb_sa WAS HERE AND IS NOT ANY MORE, and the reason is the distinction this
+// list turns on. Its risk WEIGHTS are as unpublished as SIMM's; its AGGREGATION
+// is MAR21.4 and MAR21.6, which are public text. A definitional case set grading
+// only the aggregation was therefore possible on the weaker bar stress_framework
+// already accepted, and writing it found the engine substituting a zero capital
+// charge where MAR21.4(5) prescribes an alternative Sb (#471). So "no published
+// vector" was never the right test for whether an analytic can be graded — "no
+// published SPECIFICATION" is, and the two came apart here.
 var inventoryLiteralsWithoutEvidence = map[string]string{
 	"isda_simm": "internal/collateral — SIMM calibration is member-licensed; simmparams.go ships " +
 		"representative magnitudes, so a case set would grade the maths against invented data",
-	"frtb_sa": "internal/regulatory — same shape as isda_simm for the risk weights. NOTE: the " +
-		"MAR21 aggregation algebra IS publicly specified, so a definitional case set grading the " +
-		"aggregation identities is possible on the weaker bar stress_framework already accepted",
 }
 
 type analyticEntry struct {

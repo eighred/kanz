@@ -43,9 +43,17 @@
 //
 // #471's own suggested slice: record benchmarks for the analytics that HAVE
 // published independent benchmarks, then export how much of the library that
-// covers — including the zeroes. VaR/ES, SIMM, FRTB and the SVI fit are NOT here
-// yet, and the posture metric is what makes that visible rather than something a
+// covers — including the zeroes. Coverage is 11 of 12; SIMM is the one still at
+// zero, and the posture metric is what makes that visible rather than something a
 // reader has to infer from this file's length.
+//
+// A FOURTH KIND OF EVIDENCE APPEARED ON THE WAY, and it is the weakest of the
+// four: DEFINITIONAL, where no external number exists but the SPECIFICATION does.
+// stress_framework and frtb_sa are graded that way — against algebraic identities
+// their published method requires, computed from the inputs. It grades the
+// implementation of a public formula without vouching for the calibration fed to
+// it, and each such case says `definitional` in its name so a report cannot be
+// read as stronger than it is.
 package benchmarks
 
 import (
@@ -188,6 +196,7 @@ func Reports(now time.Time, signer validation.Signer) ([]validation.Report, erro
 		{AnalyticExpectedShortfall, ExpectedShortfall()},
 		{AnalyticSVIVolSurface, SVIVolSurface()},
 		{AnalyticStressFramework, StressFramework()},
+		{AnalyticFRTBSA, FRTBSA()},
 	}
 	out := make([]validation.Report, 0, len(sets))
 	for _, s := range sets {
@@ -237,8 +246,14 @@ func Inventory() []string {
 		AnalyticGreeksFiniteDiff,
 		AnalyticSVIVolSurface,
 		AnalyticCDSBootstrap,
+		// THE LAST BARE STRING, AND IT IS THE HONEST ONE. isda_simm's aggregation
+		// is member-licensed, so there is no public algebra to grade it against —
+		// unlike frtb_sa, whose MAR21 aggregation is published even though its
+		// risk weights are not. Promoting it to a constant with a case set would
+		// mean grading this codebase's arithmetic against its own, and the metric
+		// would read 12/12 for it.
 		"isda_simm", // internal/collateral
-		"frtb_sa",   // internal/regulatory
+		AnalyticFRTBSA,
 		AnalyticStressFramework,
 	}
 }
