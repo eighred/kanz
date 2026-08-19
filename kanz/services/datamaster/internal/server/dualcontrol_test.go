@@ -344,7 +344,19 @@ func TestArmed_APayloadAlteredAfterProposalIsRefused(t *testing.T) {
 		t.Fatalf("get proposal: ok=%v err=%v", ok, err)
 	}
 	prop.ChosenPrice = prop.ChosenPrice.SetInt64(9999) // the digest still says 130
-	if err := a.proposals.Put(context.Background(), prop); err != nil {
+
+	// THE SWAP TAKES TWO STEPS NOW, and the reason is the point of #562. Put used
+	// to overwrite an id already held, so this test rewrote the row in place; the
+	// shared store refuses a duplicate in BOTH backends, exactly as Postgres's
+	// primary key always did. Editing the value the store handed back does not
+	// work either — reads are deep copies. So the tamper has to remove the row and
+	// hold a new one, which is a fair simulation of the threat and no longer
+	// depends on a store behaviour production never had.
+	ctx := context.Background()
+	if claimed, err := a.proposals.Claim(ctx, proposalID); err != nil || !claimed {
+		t.Fatalf("clearing the proposal for the tamper: claimed=%v err=%v", claimed, err)
+	}
+	if err := a.proposals.Put(ctx, prop); err != nil {
 		t.Fatal(err)
 	}
 
