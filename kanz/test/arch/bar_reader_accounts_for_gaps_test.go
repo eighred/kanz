@@ -94,15 +94,6 @@ var barReaderExempt = map[string]string{
 		"caller asserts the base series is complete through it (driver.go:146-168). Adopting " +
 		"store.WindowOf here would REPLACE an asserted completeness with an inferred one, which " +
 		"is the trade this platform has already refused in writing.",
-	"internal/risk/liquiditysource": "#591 — advOverPreference computes ADV over whatever days " +
-		"the window returned, and dailyTotals counts days TOUCHED while its caller's doc calls " +
-		"the number a complete-day count. The direction is conservative (an understated ADV " +
-		"lengthens the liquidation horizon), which is why this is P2 and not on the same footing " +
-		"as the decision-layer readers.",
-	"services/market-data/internal/vwap": "#591 — the arrival-to-execution VWAP benchmark is " +
-		"computed over whatever bars fall in the window, and unjoinable{reason=\"no_volume\"} " +
-		"fires only when the window is entirely empty. It is a post-trade MEASUREMENT rather " +
-		"than a gate, but it is the number #416 B2 uses to argue alpha survives execution.",
 }
 
 func TestABarReaderAccountsForGaps(t *testing.T) {
