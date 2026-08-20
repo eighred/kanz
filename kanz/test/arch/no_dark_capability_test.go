@@ -173,7 +173,23 @@ var darkPackageExempt = map[string]string{
 		"entry_source_posture.go). That makes 'this deployment does not process corporate actions' " +
 		"distinguishable from 'it does, and none occurred', which nav.go's corporate_action " +
 		"attribution component cannot do — it is a RESIDUAL, so a 0 there means neither. The " +
-		"posture is not the wiring, so this entry stays until a feed exists.",
+		"posture is not the wiring, so this entry stays until a feed exists. " +
+		"TWO CORRECTIONS TO #588'S OWN ACCEPTANCE CRITERIA, both learned after it was filed. " +
+		"First, it asks for a corporate-action SUBJECT in infra/nats/bootstrap-job.yaml as a step " +
+		"towards the wiring; #589 landed the day after and ruled the opposite way on exactly that " +
+		"shape — a stream provisioned for a producer that does not exist is a claim the estate " +
+		"makes about itself, and an empty subject reads as 'nothing was announced' rather than " +
+		"'nobody announces'. Adding one here would create that defect rather than reduce this one, " +
+		"so the subject lands WITH its publisher or not at all. Second, a consumer built ahead of " +
+		"the feed would give this package an importer and delete this entry while changing nothing " +
+		"an operator can observe — the same wrong fix internal/alpha/barview's entry names, one " +
+		"direction reversed: barview is dark for want of something DOWNSTREAM, this is dark for " +
+		"want of something UPSTREAM, and in both cases the composition root can satisfy the guard " +
+		"without moving the capability. What is genuinely missing is one thing and it is external: " +
+		"a vendor, custodian or venue announcement of an accounting.v1.CorporateAction. " +
+		"corporate_action_absence_is_stated_test.go binds this entry to the five places that tell " +
+		"the rest of the platform accounting folds corporate actions, so the claim and the " +
+		"exemption cannot drift apart in either direction.",
 	"services/oms/internal/posttrade": "#589 — the POST-01/PARITY-04 post-trade plane: confirmation " +
 		"matching, settlement instruction generation, T+N tracking and business-day fail aging. THE " +
 		"ESTATE FOR IT IS ALREADY PROVISIONED and that is the sharp part — infra/nats/" +
