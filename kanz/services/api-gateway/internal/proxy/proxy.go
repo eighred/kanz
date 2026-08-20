@@ -330,12 +330,28 @@ func (h *Handler) Routes(mux *authz.Mux) {
 	// unless API_GATEWAY_MANDATE_ROLE names one, and a route whose capability
 	// nobody holds answers 403 to every principal that exists while reading as a
 	// working control.
+	//
+	// THE BY-ID READ IS THE FOURTH, AND IT IS THE SAME CAPABILITY AS THE QUEUE
+	// (#606). It serves the proposed mandate itself — which rules, and which
+	// limits — so it is strictly MORE sensitive than the queue that names only the
+	// shape of the change, and giving it authz.Read would put the constraint set of
+	// every pending change in front of every token in the tenant. It is also the
+	// route that makes the second signature informed: without it a signatory reads
+	// a hex digest, and #444's forgeable-actor problem returns as two real names
+	// over a payload neither of them could open.
+	//
+	// IT IS REGISTERED IN THE SAME BLOCK, and that placement is the control. A
+	// route mounted outside the h.roles.Mandate guard would demand a capability no
+	// role carries and answer 403 to every principal that exists (#535) — a
+	// capability outage wearing a working control's costume.
 	if h.roles.Mandate != "" {
 		mux.Handle(authz.Mandate, "POST /v1/portfolios/{id}/mandate",
 			h.handle(ServiceCompliance, true, nil))
 		mux.Handle(authz.Mandate, "POST /v1/portfolios/{id}/mandate/approve",
 			h.handle(ServiceCompliance, true, nil))
 		mux.Handle(authz.Mandate, "GET /v1/mandates/pending-changes",
+			h.handle(ServiceCompliance, true, nil))
+		mux.Handle(authz.Mandate, "GET /v1/mandates/pending-changes/{proposal_id}",
 			h.handle(ServiceCompliance, true, nil))
 	}
 

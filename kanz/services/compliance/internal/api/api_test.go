@@ -14,6 +14,7 @@ import (
 
 	compliancepb "github.com/eighred/kanz/kanz-schemas-go/compliance/v1"
 	lifecyclepb "github.com/eighred/kanz/kanz-schemas-go/lifecycle/v1"
+	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	comp "github.com/eighred/kanz/internal/compliance"
@@ -133,6 +134,12 @@ func (r *rig) approve(t *testing.T, subject, tenant, proposalID, decision string
 	t.Helper()
 	body := `{"proposal_id":"` + proposalID + `","decision":"` + decision + `"}`
 	return r.do(t, http.MethodPost, "/v1/portfolios/"+portfolio+"/mandate/approve", subject, tenant, body)
+}
+
+// change reads ONE proposal's mandate — the route #606 added.
+func (r *rig) change(t *testing.T, subject, tenant, proposalID string) *httptest.ResponseRecorder {
+	t.Helper()
+	return r.do(t, http.MethodGet, "/v1/mandates/pending-changes/"+proposalID, subject, tenant, "")
 }
 
 func decodeMap(t *testing.T, rr *httptest.ResponseRecorder) map[string]any {
@@ -320,6 +327,9 @@ func TestEveryRouteRefusesAnUnauthenticatedCaller(t *testing.T) {
 		{http.MethodPost, "/v1/portfolios/" + portfolio + "/mandate/approve",
 			`{"proposal_id":"p","decision":"approve"}`},
 		{http.MethodGet, "/v1/mandates/pending-changes", ""},
+		// #606's route. An anonymous read here would be the whole tenant boundary
+		// gone: this one serves the RULES of a change nobody has signed.
+		{http.MethodGet, "/v1/mandates/pending-changes/abc123", ""},
 	} {
 		rr := r.do(t, c.method, c.path, "", "", c.body)
 		if rr.Code != http.StatusUnauthorized {
@@ -594,5 +604,303 @@ func TestPropose_TheAdvertisedDigestIsTheOneTheApprovalCovers(t *testing.T) {
 	if advertised != want {
 		t.Fatalf("the propose reply advertises digest %q, the canonical digest is %q — the two "+
 			"sides of the signature are computing over different values", advertised, want)
+	}
+}
+
+// ─── #606: A SIGNATORY CAN READ WHAT THEY ARE SIGNING ────────────────────────
+
+// THE ASSERTION #606 WAS FILED FOR.
+//
+// Until this route existed the queue served a DIGEST and proposalJSON's own
+// comment said the mandate "is fetched by proposal id" — describing a route
+// registered nowhere. A second signatory could see the SHAPE of the change and
+// never WHICH RULES. Two real names over a payload neither could open is #444's
+// forgeable-actor defect in a new costume.
+//
+// THE LAST ASSERTION IS THE LOAD-BEARING ONE: the mandate this route serves,
+// re-marshalled and re-digested, equals the digest the queue advertises and the
+// approval covers. Serving *a* mandate is a display feature; serving the one the
+// signature binds is the control.
+func TestPendingChange_ServesTheProposedMandate(t *testing.T) {
+	r := newRig(t)
+	id := proposalIDOf(t, r.propose(t, proposerAkif, tenantA, 14))
+
+	rr := r.change(t, approverDana, tenantA, id)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (%s)", rr.Code, rr.Body.String())
+	}
+	body := decodeMap(t, rr)
+
+	raw, ok := body["mandate"]
+	if !ok {
+		t.Fatalf("the reply carries no mandate at all: %s\n\n"+
+			"That is the state #606 was filed on — the signatory reads a hex digest and signs "+
+			"a rule they were never shown", rr.Body.String())
+	}
+	encoded, err := json.Marshal(raw)
+	if err != nil {
+		t.Fatalf("re-marshal the served mandate: %v", err)
+	}
+	var served compliancepb.Mandate
+	if err := protojson.Unmarshal(encoded, &served); err != nil {
+		t.Fatalf("the served mandate is not a compliance.v1.Mandate: %v (%s)", err, encoded)
+	}
+
+	if served.GetPortfolioId() != portfolio || served.GetTenantId() != tenantA {
+		t.Errorf("served mandate is for %s/%s, want %s/%s",
+			served.GetTenantId(), served.GetPortfolioId(), tenantA, portfolio)
+	}
+	if served.GetVersion() != 14 {
+		t.Errorf("version = %d, want 14", served.GetVersion())
+	}
+	// THE RULES THEMSELVES, which is the entire point. rule_count told an approver
+	// there were two; it could not tell them WHICH two.
+	if got := len(served.GetRules()); got != 2 {
+		t.Fatalf("the served mandate carries %d rule(s), want 2 — a count is what the queue "+
+			"already gave, and it is precisely what is not enough", got)
+	}
+	for i, want := range []string{"R1", "R2"} {
+		if served.GetRules()[i].GetRuleId() != want {
+			t.Errorf("rule %d is %q, want %q", i, served.GetRules()[i].GetRuleId(), want)
+		}
+	}
+
+	// WHAT WAS READ IS WHAT WILL BE SIGNED. If these ever disagree the route is
+	// worse than nothing: it shows a signatory one mandate and binds their name to
+	// another, with the trail recording four eyes on the second.
+	digest, err := comp.MandateDigest(&served, reason)
+	if err != nil {
+		t.Fatalf("MandateDigest: %v", err)
+	}
+	if body["digest"] != digest {
+		t.Fatalf("the reply advertises digest %v, but the mandate it served digests to %q.\n\n"+
+			"The approver reads one value and signs another — which is the failure this route "+
+			"exists to close, arriving through the route itself", body["digest"], digest)
+	}
+}
+
+// AN EMPTY RULESET IS SERVED AS AN EMPTY RULESET, NOT AS AN ABSENT FIELD.
+//
+// "Governed by a mandate that constrains nothing" is legal, is different from
+// having no mandate, and is the single most consequential thing this surface can
+// be asked to approve. Without EmitDefaultValues protojson omits "rules"
+// entirely, and a client cannot tell an omitted field from one it failed to
+// parse — so the one case a signatory most needs to see would render as a gap.
+func TestPendingChange_AnEmptyRulesetIsPresentRatherThanAbsent(t *testing.T) {
+	r := newRig(t)
+	body := `{"mandate":` + mandateJSON(t, 15, 0) + `,"reason":"` + reason + `"}`
+	proposed := r.do(t, http.MethodPost, "/v1/portfolios/"+portfolio+"/mandate",
+		proposerAkif, tenantA, body)
+	if proposed.Code != http.StatusAccepted {
+		t.Fatalf("propose = %d (%s)", proposed.Code, proposed.Body.String())
+	}
+	id := proposalIDOf(t, proposed)
+
+	rr := r.change(t, approverDana, tenantA, id)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (%s)", rr.Code, rr.Body.String())
+	}
+	m, ok := decodeMap(t, rr)["mandate"].(map[string]any)
+	if !ok {
+		t.Fatalf("no mandate object in %s", rr.Body.String())
+	}
+	rules, present := m["rules"]
+	if !present {
+		t.Fatalf("the served mandate omits \"rules\" entirely: %s\n\n"+
+			"An empty ruleset means every order passes every check. A client cannot tell that "+
+			"from a field it failed to read, so the omission renders as a gap on the one case "+
+			"a signatory most needs to see", rr.Body.String())
+	}
+	if got, isList := rules.([]any); !isList || len(got) != 0 {
+		t.Fatalf("rules = %#v, want an empty JSON array", rules)
+	}
+}
+
+// A LAPSED PROPOSAL IS STILL READABLE, AND SAYS SO.
+//
+// The queue lists lapsed rows deliberately (#563), so a client that draws the
+// queue must be able to expand every row it draws. A signatory who expands one
+// and reads its rules learns what was NOT put in force — a real question about a
+// portfolio still governed by the old constraint.
+func TestPendingChange_ALapsedProposalIsStillReadable(t *testing.T) {
+	r := newRig(t, api.WithTTL(time.Hour))
+	id := proposalIDOf(t, r.propose(t, proposerAkif, tenantA, 16))
+	r.now = r.now.Add(2 * time.Hour)
+
+	rr := r.change(t, approverDana, tenantA, id)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (%s)", rr.Code, rr.Body.String())
+	}
+	if got := decodeMap(t, rr)["state"]; got != dualcontrol.StateLapsed {
+		t.Errorf("state = %v, want %q — a client that reads it as pending offers a signature "+
+			"compliance then refuses with 409", got, dualcontrol.StateLapsed)
+	}
+}
+
+// THE ORACLE PROPERTY, PROVEN BYTE FOR BYTE.
+//
+// Another tenant's VALID proposal id and a garbage id must produce the same
+// answer down to the byte — same status, same body. A proposal id is the approve
+// route's only secret; a route where "not yours" and "no such thing" differ in
+// any observable way lets any authenticated caller enumerate another fund's
+// pending mandate changes, and then read the rules of each one it finds.
+//
+// COMPARING THE BODIES AND NOT JUST THE STATUSES is the point. Two 404s carrying
+// different text are still an oracle, and that is the drift a single notFoundBody
+// constant exists to prevent.
+func TestPendingChange_AnotherTenantIsIndistinguishableFromAGarbageID(t *testing.T) {
+	r := newRig(t)
+	id := proposalIDOf(t, r.propose(t, proposerAkif, tenantA, 17))
+
+	// NON-VACUITY FIRST. Two 404s are also what an unregistered route produces, so
+	// without this the whole case passes against a handler that does not exist —
+	// which is precisely the state #606 was filed on.
+	if own := r.change(t, approverDana, tenantA, id); own.Code != http.StatusOK {
+		t.Fatalf("the OWNING tenant was refused its own proposal: status = %d, want 200 (%s).\n"+
+			"Everything below compares two refusals, and two refusals are what an unmounted "+
+			"route gives — so this arm has to hold first or the comparison proves nothing",
+			own.Code, own.Body.String())
+	}
+
+	// The real id, read by a tenant that does not own it.
+	foreign := r.change(t, approverDana, tenantB, id)
+	// An id that never existed, read by the same caller.
+	garbage := r.change(t, approverDana, tenantB, "0123456789abcdef0123456789abcdef")
+
+	if foreign.Code != http.StatusNotFound {
+		t.Fatalf("tenant %q read tenant %q's proposal: status = %d, want 404 (%s)",
+			tenantB, tenantA, foreign.Code, foreign.Body.String())
+	}
+	if foreign.Code != garbage.Code || foreign.Body.String() != garbage.Body.String() {
+		t.Fatalf("this route is an ORACLE for another tenant's pending mandate changes.\n"+
+			"  another tenant's REAL id: %d %q\n"+
+			"  an id that never existed:  %d %q\n\n"+
+			"A proposal id is the approve route's only secret. Any difference here lets a "+
+			"caller iterate ids, learn which belong to another fund, and then read the rules "+
+			"of every pending change in it",
+			foreign.Code, foreign.Body.String(), garbage.Code, garbage.Body.String())
+	}
+	if strings.Contains(foreign.Body.String(), portfolio) {
+		t.Errorf("the refusal names the portfolio: %s", foreign.Body.String())
+	}
+}
+
+// AND SO IS A DECIDED ONE. Claim removes the row, so "already published" and
+// "never existed" go down the same branch — which is what keeps a caller who
+// watched a proposal id go by from confirming it was acted on.
+func TestPendingChange_ADecidedProposalIsIndistinguishableFromAGarbageID(t *testing.T) {
+	r := newRig(t)
+	id := proposalIDOf(t, r.propose(t, proposerAkif, tenantA, 18))
+	// NON-VACUITY: readable BEFORE the decision, so the 404 below is the decision
+	// and not an absent route.
+	if before := r.change(t, approverDana, tenantA, id); before.Code != http.StatusOK {
+		t.Fatalf("the proposal was not readable before it was decided: %d (%s)",
+			before.Code, before.Body.String())
+	}
+	if rr := r.approve(t, approverDana, tenantA, id, "approve"); rr.Code != http.StatusOK {
+		t.Fatalf("approve = %d (%s)", rr.Code, rr.Body.String())
+	}
+
+	decided := r.change(t, approverDana, tenantA, id)
+	garbage := r.change(t, approverDana, tenantA, "0123456789abcdef0123456789abcdef")
+
+	if decided.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404 (%s)", decided.Code, decided.Body.String())
+	}
+	if decided.Code != garbage.Code || decided.Body.String() != garbage.Body.String() {
+		t.Fatalf("a decided proposal answers differently from an unknown one:\n"+
+			"  decided: %d %q\n  unknown: %d %q",
+			decided.Code, decided.Body.String(), garbage.Code, garbage.Body.String())
+	}
+
+	// AND IT IS THE SAME REFUSAL THE APPROVE ROUTE GIVES. Both are notFoundBody,
+	// and tying them here is what stops one route's wording drifting: a client that
+	// matched on the text would then treat "not yours" on one surface and "not
+	// yours" on the other as different facts, and the two routes are supposed to be
+	// the same tenant boundary seen twice.
+	onApprove := r.approve(t, approverDana, tenantA, id, "approve")
+	if onApprove.Code != http.StatusNotFound {
+		t.Fatalf("approve on a decided proposal = %d, want 404 (%s)",
+			onApprove.Code, onApprove.Body.String())
+	}
+	if decided.Body.String() != onApprove.Body.String() {
+		t.Errorf("the by-id read and the approve route give different refusals for the same "+
+			"proposal:\n  read:    %q\n  approve: %q\n\n"+
+			"They are one constant (notFoundBody) precisely so they cannot drift apart",
+			decided.Body.String(), onApprove.Body.String())
+	}
+}
+
+// ─── #606 part two: version is a STRING on every body ────────────────────────
+
+// A uint64 EMITTED AS A JSON NUMBER IS DESTROYED BEFORE ANY BROWSER SEES IT.
+//
+// encoding/json writes a bare number; JSON.parse — the only decoder a browser
+// has — reads every number as a float64. 18446744073709551615 arrives as
+// 18446744073709552000 and nothing downstream can recover it. This is the field
+// that pins WHICH constraint an order was audited against.
+//
+// EVERY BODY ON THIS SURFACE, not just the queue. The propose 202 and the approve
+// 200 carry the same field and had the same defect; fixing one and leaving two is
+// how a client ends up trusting the field on one screen and not another.
+func TestTheMandateVersionIsAStringOnEveryBody(t *testing.T) {
+	const huge = "18446744073709551615" // 2^64-1; 2^53+1 would already be enough
+
+	r := newRig(t)
+	// protojson accepts a uint64 as a JSON string, which is how a value this large
+	// can be PROPOSED at all — encoding/json cannot express it from an int64.
+	body := `{"mandate":{"mandate_id":"M-2026Q3","portfolio_id":"` + portfolio +
+		`","version":"` + huge + `","effective_at":"2026-09-01T00:00:00Z"},"reason":"` + reason + `"}`
+
+	proposed := r.do(t, http.MethodPost, "/v1/portfolios/"+portfolio+"/mandate",
+		proposerAkif, tenantA, body)
+	if proposed.Code != http.StatusAccepted {
+		t.Fatalf("propose = %d (%s)", proposed.Code, proposed.Body.String())
+	}
+	assertVersionString(t, "the propose 202", decodeMap(t, proposed), huge)
+
+	id := proposalIDOf(t, proposed)
+
+	queue := r.do(t, http.MethodGet, "/v1/mandates/pending-changes", approverDana, tenantA, "")
+	var rows []map[string]any
+	if err := json.Unmarshal(queue.Body.Bytes(), &rows); err != nil {
+		t.Fatalf("decode the queue %q: %v", queue.Body.String(), err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("queue = %v, want one row", rows)
+	}
+	assertVersionString(t, "the queue row", rows[0], huge)
+
+	assertVersionString(t, "the by-id read", decodeMap(t, r.change(t, approverDana, tenantA, id)), huge)
+
+	approved := r.approve(t, approverDana, tenantA, id, "approve")
+	if approved.Code != http.StatusOK {
+		t.Fatalf("approve = %d (%s)", approved.Code, approved.Body.String())
+	}
+	assertVersionString(t, "the approve 200", decodeMap(t, approved), huge)
+}
+
+// assertVersionString fails unless the body's version is the EXACT decimal string.
+//
+// THE TYPE ASSERTION IS HALF THE CHECK AND THE VALUE IS THE OTHER HALF. A float64
+// here means encoding/json wrote a number, which is the defect; and a string that
+// does not match means something re-rendered it through a float on the way.
+func assertVersionString(t *testing.T, where string, body map[string]any, want string) {
+	t.Helper()
+	got, ok := body["version"]
+	if !ok {
+		t.Errorf("%s carries no version at all: %v", where, body)
+		return
+	}
+	if f, isNumber := got.(float64); isNumber {
+		t.Errorf("%s emits version as a JSON NUMBER (%v, decoded as %.0f).\n\n"+
+			"Above 2^53 JSON.parse destroys it before any client code runs — %s becomes "+
+			"18446744073709552000 and cannot be recovered. protojson emits every uint64 as a "+
+			"string for exactly this reason; this surface is hand-built JSON and has to do it "+
+			"deliberately", where, got, f, want)
+		return
+	}
+	if got != want {
+		t.Errorf("%s: version = %#v, want the exact string %q", where, got, want)
 	}
 }

@@ -211,7 +211,7 @@ func (m *MemoryProposals) Claim(ctx context.Context, id string) (bool, error) {
 
 func (m *MemoryProposals) Pending(ctx context.Context, scope string, now time.Time) ([]MandateProposal, error) {
 	return m.core.Select(ctx, func(p MandateProposal) bool {
-		return scoped(p, scope) && p.Pending(now)
+		return Scoped(p, scope) && p.Pending(now)
 	})
 }
 
@@ -222,7 +222,7 @@ func (m *MemoryProposals) Pending(ctx context.Context, scope string, now time.Ti
 // its deadline" means.
 func (m *MemoryProposals) Lapsed(ctx context.Context, scope string, now time.Time) ([]MandateProposal, error) {
 	return m.core.Select(ctx, func(p MandateProposal) bool {
-		return scoped(p, scope) && proposalstore.Expired(p.Proposal, now)
+		return Scoped(p, scope) && proposalstore.Expired(p.Proposal, now)
 	})
 }
 
@@ -244,14 +244,23 @@ func (m *MemoryProposals) PurgeLapsed(ctx context.Context, cutoff time.Time) (in
 // as a working queue.
 func TenantScope(tenantID string) string { return comp.MandateConfigKey(tenantID, "") }
 
-// scoped reports whether p falls under the caller's scope.
+// Scoped reports whether p falls under the caller's scope.
 //
 // AN EMPTY SCOPE MATCHES NOTHING, which is the direction that fails closed. The
 // obvious spelling — treat "" as "everything" — is how an unauthenticated read
 // becomes a cross-tenant listing: the caller's tenant is a string, and a service
 // that reads it from a header gets "" when the header is absent. TenantScope("")
 // is not empty, so this guards the arguments a caller composes by hand as well.
-func scoped(p MandateProposal, scope string) bool {
+//
+// IT IS EXPORTED BECAUSE A READ OF ONE PROPOSAL CANNOT USE Pending OR Lapsed
+// (#606). The by-id route reaches a proposal through Get, which is not scoped —
+// so it has to apply the tenant gate itself, and the one thing it must not do is
+// SPELL THE PREFIX COMPARISON AGAIN. A hand-written strings.HasPrefix at that
+// call site is a second implementation of the tenant boundary that would pass
+// every test on the day it was written and drift the first time this one is
+// corrected — and the failure it drifts into is one tenant reading another's
+// pending mandate change.
+func Scoped(p MandateProposal, scope string) bool {
 	return scope != "" && scope != comp.MandateConfigKeyPrefix+"/" &&
 		strings.HasPrefix(p.Subject, scope)
 }
