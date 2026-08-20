@@ -317,7 +317,7 @@ func TestEveryLiquidityReasonHasASeriesAtZero(t *testing.T) {
 		liquiditysource.ReasonSpreadUnavailable, liquiditysource.ReasonNoBars,
 		liquiditysource.ReasonCoarseSeriesEmpty, liquiditysource.ReasonCoarseSeriesShort,
 		liquiditysource.ReasonInsufficientHistory, liquiditysource.ReasonUnusableVolume,
-		liquiditysource.ReasonStoreError,
+		liquiditysource.ReasonStoreError, liquiditysource.ReasonWindowNotWhole,
 	} {
 		v, ok := unresolved[reason]
 		if !ok {

@@ -173,7 +173,10 @@ func registerLiquidityRisk(
 			"finer series was tried, which SUCCEEDS — read them as 'series skipped', never as " +
 			"'instruments refused', or the day the 1d rollup is deployed will read as a total " +
 			"outage. spread_unavailable accompanies a SUCCESS and is the one with no downstream " +
-			"symptom at all (#509).",
+			"symptom at all (#509). window_not_whole ALSO accompanies a success and is the " +
+			"newest of these (#591): the ADV was computed over days the bar series does not " +
+			"wholly cover, so it is understated — conservative for a liquidation horizon, and " +
+			"still a number measured over less than it claims.",
 	}, []string{"reason"})
 	reg.MustRegister(skipped, unresolved)
 
@@ -192,7 +195,7 @@ func registerLiquidityRisk(
 		liquiditysource.ReasonSpreadUnavailable, liquiditysource.ReasonNoBars,
 		liquiditysource.ReasonCoarseSeriesEmpty, liquiditysource.ReasonCoarseSeriesShort,
 		liquiditysource.ReasonInsufficientHistory, liquiditysource.ReasonUnusableVolume,
-		liquiditysource.ReasonStoreError,
+		liquiditysource.ReasonStoreError, liquiditysource.ReasonWindowNotWhole,
 	} {
 		unresolved.WithLabelValues(r).Add(0)
 	}
