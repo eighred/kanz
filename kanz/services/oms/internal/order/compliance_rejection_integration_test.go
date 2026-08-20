@@ -99,7 +99,7 @@ func TestAMandateRefusesAnOrderOverARealSpine(t *testing.T) {
 	}
 	// Both halves of the chain must be carried by a stream. compliance.mandate.>
 	// feeding the gate is exactly the binding whose absence took the OMS's whole
-	// consumer group down (infra/nats/bootstrap-job.yaml:109-115), and order.> is
+	// consumer group down (infra/nats/bootstrap-job.yaml), and order.> is
 	// where the refusal has to land.
 	bustest.EnsureSubjects(t, ctx, js, "MANDATE_OMS_IT_"+suffix, []string{comp.SubjectMandateAll})
 	bustest.EnsureSubjects(t, ctx, js, "ORDER_OMS_IT_"+suffix, []string{"order.>"})

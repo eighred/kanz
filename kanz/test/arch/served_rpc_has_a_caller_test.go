@@ -62,7 +62,8 @@ import (
 // difference. It was written expecting one survivor — inference.v1.Predict —
 // and Predict turned out to HAVE a production call site:
 //
-//	internal/prediction/sync_client.go:193   c.stub.Predict(callCtx, pbFV)
+//	internal/prediction/sync_client.go, in SyncClient.Predict:
+//	    c.stub.Predict(callCtx, pbFV)
 //
 // inside a client nothing constructs. NewSyncClient's only callers are in
 // resilience_test.go, so no deployment reaches that line.

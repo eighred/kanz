@@ -875,7 +875,7 @@ func (s *Service) submit(ctx context.Context, env *envelopepb.Envelope, payload 
 		}
 		// outcome_announced_at is stamped in the SAME write, not a second one.
 		// The marker's job is to send a redelivery to resume()'s
-		// genuine-duplicate branch (order_events.proto:19); committing it
+		// genuine-duplicate branch (order_events.proto); committing it
 		// alongside the records it describes is what makes it true the instant
 		// it is durable, instead of after two more writes that can each fail.
 		rejected.OutcomeAnnouncedAt = timestamppb.New(rejectedAt)
@@ -1242,8 +1242,8 @@ func (s *Service) handleCancel(ctx context.Context, payload []byte) error {
 	// excluding the goroutine that was, at that moment, inside venue.Execute for
 	// the same order. The interleaving that breaks, all of it reachable in
 	// production because submit, amend and cancel are three separate durables
-	// with three cursors and three dispatch goroutines (pkg/bus/nats.go:183,
-	// 202-206) — the partition_key does NOT serialize them, whatever the older
+	// with three cursors and three dispatch goroutines (pkg/bus/nats.go, one
+	// per Subscribe) — the partition_key does NOT serialize them, whatever the older
 	// comments in postgres.go and store.go used to claim:
 	//
 	//   work() reads the order, calls the exchange, and blocks there.
@@ -1330,7 +1330,7 @@ func (s *Service) handleCancel(ctx context.Context, payload []byte) error {
 	}
 	// AN ALREADY-CANCELLED ORDER IS NOT AUTOMATICALLY A DUPLICATE.
 	//
-	// cancel_announced_at (order_events.proto:18) is what tells the two apart,
+	// cancel_announced_at (order_events.proto) is what tells the two apart,
 	// exactly as venue_ack_at tells a routed-but-unconfirmed order apart from a
 	// venue's contradiction. Unset means the FIRST cancel got as far as Save but
 	// its announcement (the ORDER_CANCELLED FACT, the outcome, or both) never
@@ -2281,7 +2281,7 @@ func delegatedAndEntitled(md *commandpb.CommandMetadata, portfolio string) bool 
 func (s *Service) resume(ctx context.Context, st *orderpb.OrderState) error {
 	// A terminal order is genuinely finished — UNLESS its terminal outcome was
 	// persisted but never announced (see outcome_announced_at,
-	// order_events.proto:19): a fill that made the order FILLED, or a permanent
+	// order_events.proto): a fill that made the order FILLED, or a permanent
 	// reject, Saved and then interrupted before its FACT/outcome went out.
 	// orderOutcomeAnnounced tells the two apart; only that check may return nil
 	// here without doing anything.
@@ -2599,7 +2599,7 @@ func (s *Service) markOutcomeAnnounced(ctx context.Context, st *orderpb.OrderSta
 // whose terminal state (FILLED or REJECTED) was persisted but never
 // announced — a delivery that Saved the terminal OrderState and then failed
 // before its fill/reject FACT or the trailing EmitOutcome went out (see
-// outcome_announced_at, order_events.proto:19). It is resume()'s completion
+// outcome_announced_at, order_events.proto). It is resume()'s completion
 // of that interrupted announcement.
 //
 // WHAT IT CAN NOW DO THAT IT COULD NOT (#292). The fill fold commits its
@@ -2614,10 +2614,10 @@ func (s *Service) markOutcomeAnnounced(ctx context.Context, st *orderpb.OrderSta
 //
 // WHAT IT STILL CANNOT DO, AND WHY. The stored OrderState carries only the order's
 // current AGGREGATE view — status, cumulative filled_quantity, leaves_quantity,
-// average_fill_price (order/v1/order_events.proto:78-85). It has no field for
+// average_fill_price (order/v1/order_events.proto). It has no field for
 // the individual Fill that produced a FILLED state (fill_id, price,
-// venue_execution_id, executed_at — order/v1/order_events.proto:169-211), nor
-// for an OrderRejected's reason/error_code (order/v1/order_events.proto:222-230).
+// venue_execution_id, executed_at — order/v1/order_events.proto), nor
+// for an OrderRejected's reason/error_code (order/v1/order_events.proto).
 // The reject reason lives only in the literal "PRICE_UNAVAILABLE"/err.Error() in
 // handleSubmit's ErrUnpriced branch, and a fill folded BEFORE migration 0006
 // lived only in work()'s loop variable — neither was persisted anywhere this
@@ -2724,7 +2724,7 @@ func (s *Service) adopt(ctx context.Context, st *orderpb.OrderState, ver int64, 
 			return ferr
 		}
 		// Same marker, same reason as the ErrUnpriced reject in handleSubmit (see
-		// order_events.proto:19) — and, like it, stamped in the SAME write rather
+		// order_events.proto) — and, like it, stamped in the SAME write rather
 		// than two writes later, so it is true the instant it is durable.
 		rejected.OutcomeAnnouncedAt = timestamppb.New(now)
 		if err := s.store.Save(ctx, rejected, ver, []outbox.Record{rejFact, outFact}); err != nil {

@@ -19,7 +19,7 @@ import (
 //
 // NOTHING ABOUT THAT FAILED. Go zero-fills an omitted field in a composite
 // literal, so there was no compile error and no log line: reconcileBalances
-// simply short-circuits on nil (binance_recon.go:268) and returns nil. The
+// simply short-circuits on nil (binance_recon.go) and returns nil. The
 // platform has therefore NEVER ONCE compared its books against an exchange —
 // while infra/nats/tenancy.yaml and infra/kafka/topics-job.yaml both provision
 // the subject that comparison would publish on.

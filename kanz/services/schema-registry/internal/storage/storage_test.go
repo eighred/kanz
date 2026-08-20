@@ -160,7 +160,7 @@ const migrationDir = "../../migrations"
 // — so the postgres arm of TestStorage and the whole of TestRegister's versioning and
 // idempotency contract had never executed anywhere, while the suite reported green off
 // the in-memory arm alone. storage.NewPostgres is schema-registry's ONLY production
-// store (cmd/schema-registry/main.go:63), so "green" meant nothing about what ships.
+// store (cmd/schema-registry/main.go), so "green" meant nothing about what ships.
 func newPostgres(t *testing.T) storage.Storage {
 	t.Helper()
 	url := os.Getenv("TEST_POSTGRES_URL")

@@ -24,7 +24,7 @@ import (
 // UN-prefixed and provisioned by topics-job.yaml instead — so the tenant path had
 // never run. It fires on the first real tenant, and it fails CLOSED: the archiver
 // maps every event to {tenant}.{domain}.{entity} (services/archiver/internal/
-// topic/topic.go:64) and Kafka auto-create is disabled, so a missing topic is a
+// topic/topic.go) and Kafka auto-create is disabled, so a missing topic is a
 // hard publish failure and a NACK loop, not a silent drop.
 //
 // Neither table is derivable from the other by machine — one is applied per
@@ -36,7 +36,7 @@ import (
 // tenant not need this one?".
 var tenantExemptTopics = map[string]string{
 	"dlq.archiver": "`dlq` is a RESERVED leading segment — topic.For refuses to archive dlq.* at all " +
-		"(topic.go:28,50-53), so no {tenant}.dlq.archiver can ever be produced. Per-tenant DLQs are " +
+		"(topic.go), so no {tenant}.dlq.archiver can ever be produced. Per-tenant DLQs are " +
 		"created by the `dlq` column instead, as {tenant}.dlq.{name}.",
 }
 

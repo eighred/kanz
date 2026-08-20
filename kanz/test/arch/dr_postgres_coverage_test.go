@@ -406,10 +406,10 @@ var drPosture = map[string]drClassification{
 	"tv-sync": {status: drCovered, cluster: "kanz-books", reason: "holds tv_facts, a projection of " +
 		"the order FACT log. COVERED RATHER THAN EXCLUDED, and the rebuild story is why: it was " +
 		"chased to the config and it does not hold. The 24h figure in tv-sync's own comments is " +
-		"real (infra/nats/bootstrap-job.yaml:100 — the EXECUTION stream carrying order.> has " +
+		"real (infra/nats/bootstrap-job.yaml — the EXECUTION stream carrying order.> has " +
 		"max_age 24h), and Kafka does retain order.order for 30d " +
-		"(infra/kafka/topics-job.yaml:67, retention.ms=2592000000) — but the DR rebuild reads only " +
-		"a bounded recent window of it: infra/dr/nats/rebuild-job.yaml:97 sets " +
+		"(infra/kafka/topics-job.yaml, retention.ms=2592000000) — but the DR rebuild reads only " +
+		"a bounded recent window of it: infra/dr/nats/rebuild-job.yaml sets " +
 		"NATS_REBUILD_SINCE=24h, and order.order is not in NATS_REBUILD_STATE_TOPICS, so it takes " +
 		"the time window rather than offset 0. So at most 24h of the 30d log ever returns to the " +
 		"spine. Worse, the rebuild's only sink is the bus (tools/natsrebuild/rebuild.go) — it " +

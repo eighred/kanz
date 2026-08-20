@@ -11,7 +11,7 @@ import (
 	"testing"
 )
 
-// topicRowPolicy is topicRow (kafka_topology_test.go:76) with the cleanup
+// topicRowPolicy is topicRow (kafka_topology_test.go) with the cleanup
 // column captured. Kept separate rather than widening the original: that regex
 // is load-bearing for TestEverySubjectHasAKafkaTopic and this test needs one
 // more field, not a different contract.
@@ -49,9 +49,9 @@ func TestCoveredBySubject(t *testing.T) {
 	}{
 		{
 			// topic.For appends ".snapshot" for STATE_SNAPSHOT events
-			// (topic.go:55-59), so this three-segment topic is real, but
+			// (topic.go), so this three-segment topic is real, but
 			// DefaultSubjects has no bare "risk.>" — only "risk.position.>"
-			// and its siblings (config.go:19-35). Only a middle-prefix
+			// and its siblings (config.go). Only a middle-prefix
 			// check catches this; first-segment and whole-name both miss.
 			name:     "middle prefix covers a three-segment snapshot topic",
 			topic:    "risk.position.snapshot",

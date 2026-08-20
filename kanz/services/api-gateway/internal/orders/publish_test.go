@@ -9,7 +9,7 @@
 // AUTH-01c forged-issuer guard is never exercised through the handler".
 //
 // So these tests build a REAL bus.Producer over a fake bus.Client, wired with
-// auth.VerifyCommandIssuer exactly as cmd/api-gateway/main.go:259 wires it, and
+// auth.VerifyCommandIssuer exactly as cmd/api-gateway/main.go wires it, and
 // drive the REAL authz.Mux. The assertions are made on the WIRE BYTES rather
 // than on the Event struct: the anti-forgery override is only worth anything if
 // it survives marshalling, and the struct is not what leaves the process.

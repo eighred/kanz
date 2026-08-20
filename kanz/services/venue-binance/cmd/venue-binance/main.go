@@ -419,10 +419,11 @@ func openView(ctx context.Context, cfg config.Config, logger *slog.Logger) (orde
 // dials an exchange and a broker before it builds anything (#245).
 //
 // TENANT IS NOT REDUNDANT HERE, which is what made it easy to omit. The fill and
-// StateHealed emitters stamp Event.TenantID themselves (binance_userdata.go:142,
-// binance_recon.go:339/366), so three of this adapter's four publishers never
+// StateHealed emitters stamp Event.TenantID themselves (binance_userdata.go's
+// fill emitter, binance_recon.go's two StateHealed emitters), so three of this
+// adapter's four publishers never
 // touch this fallback. The FOURTH is the ticker feed
-// (binance_connector.go:145), which publishes marks from a time.Ticker loop —
+// (binance_connector.go), which publishes marks from a time.Ticker loop —
 // no inbound delivery to inherit a tenant from, no per-event TenantID, and it
 // DISCARDS its publish error. Without this field every tick was refused
 // "tenant_id required" and tv-sync's MarkSource got nothing.

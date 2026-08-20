@@ -172,7 +172,7 @@ func TestReconBalanceReconciledEmitsAValidEnvelope(t *testing.T) {
 		REST:    newBinanceREST(restConfig{BaseURL: f.srv.URL, APIKey: "k", APISecret: "s", Bucket: bucket}),
 		Symbols: StaticSymbolMap{"BTC-USD": "BTCUSDT"},
 		// Expected must be non-nil even when empty: reconcileOrders dereferences it
-		// unconditionally (binance_recon.go:242). The composition root always sets
+		// unconditionally (binance_recon.go). The composition root always sets
 		// one, so this is a test-fixture requirement rather than a product gap.
 		Expected: staticOrders{},
 		Balances: staticBalances{"BTC": big.NewRat(5, 1)},

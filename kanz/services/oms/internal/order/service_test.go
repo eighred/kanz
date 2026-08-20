@@ -88,21 +88,22 @@ func (f *fakeBus) Publish(ctx context.Context, e bus.Event) error {
 		}
 		return errors.New("fakeBus: injected publish failure for " + failOn)
 	}
-	// Rule 1 — producer.go:121-123.
+	// Rule 1 — producer.go, Producer.publish's payload check.
 	if e.Payload == nil {
 		return errors.New("bus: Event.Payload required")
 	}
-	// Rule 2 — stamp, producer.go:170-172.
+	// Rule 2 — producer.go, Producer.stamp's EventTime check.
 	if e.EventTime.IsZero() {
 		return errors.New("Event.EventTime required")
 	}
-	// Rule 3 — stamp, producer.go:210-213.
+	// Rule 3 — producer.go, Producer.stamp's COMMAND idempotency_key check.
 	if e.EventClass == envelopepb.EventClass_EVENT_CLASS_COMMAND && e.IdempotencyKey == "" {
 		return errors.New("idempotency_key required for COMMAND events")
 	}
-	// Rule 4 — tenant precedence mirrors stamp exactly (producer.go:225-231),
-	// then Validate's live-path rejection of an empty tenant (validate.go:35-37,
-	// wrapped by publish() at producer.go:128-130).
+	// Rule 4 — tenant precedence mirrors Producer.stamp exactly (producer.go,
+	// the "Tenant precedence (MT-01b)" block), then bus.Validate's live-path
+	// rejection of an empty tenant_id (validate.go), which Producer.publish
+	// wraps (producer.go).
 	tenant := e.TenantID
 	if tenant == "" {
 		tenant = bus.TenantIDFromContext(ctx)

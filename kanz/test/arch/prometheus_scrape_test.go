@@ -259,7 +259,7 @@ func scrapeTargets(t *testing.T, root string) []string {
 // SHIPPED WITH FOR ONE ITERATION. servesPath falls back to scanning
 // internal/venueadapter for EVERY service, which is right for probe paths — the
 // venue adapters register /healthz and /readyz in that shared package. But
-// probes.go:96 also registers "/metrics", so the fallback matched for all 21
+// probes.go also registers "/metrics", so the fallback matched for all 21
 // services and assertion 3 passed unconditionally. operator and schema-registry,
 // which serve no metrics at all, were reported as fully scrapable.
 //

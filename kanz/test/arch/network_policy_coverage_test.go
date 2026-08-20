@@ -910,8 +910,8 @@ func TestObservabilityScrapePortsMatchTheAnnotations(t *testing.T) {
 // THE SET IS FOUR, NOT TWO. audit and tv-sync were the known pair; #222 added the
 // same trust to wealth and datamaster, and the guard below found them. Setting
 // the header is a different act and is deliberately NOT in scope: api-gateway
-// (proxy/backend.go:95) injects it as the identity authority, and copilot
-// (retrieval/lineage_catalog.go:60) forwards the caller's principal onward to
+// (proxy/backend.go) injects it as the identity authority, and copilot
+// (retrieval/lineage_catalog.go) forwards the caller's principal onward to
 // lineage — both now through auth.SetPrincipalHeaders. Neither serves a route
 // whose authorization is a header it received.
 //

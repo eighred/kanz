@@ -23,7 +23,7 @@ import (
 // information quietly — it asserts something false, in the append-only book of
 // record, on every funded cash movement.
 //
-// The FILL path has always carried it (ledger/fill.go:67). This is the same
+// The FILL path has always carried it (ledger/fill.go). This is the same
 // journal, the same column, and the sibling decoder in the same file.
 
 // cashPayloadWithAccount is cashPayload plus the venue account, kept separate so

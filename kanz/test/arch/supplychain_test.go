@@ -839,10 +839,10 @@ var mutableTagExempt = map[string]string{
 // Keying on `image:` was the first attempt and it was WRONG THREE WAYS, all
 // found by running it:
 //   - kustomize carries a plural `images:` LIST of bare quoted strings
-//     (infra/gitops/preview-applicationset.yaml:53-55), so both preview refs
+//     (infra/gitops/preview-applicationset.yaml), so both preview refs
 //     were invisible — and the exemption declared for that file was therefore
 //     permanently dead, which failed the build on a clean tree;
-//   - infra/deploy/operator-deploy.yaml:179 passes the provisioner image as an
+//   - infra/deploy/operator-deploy.yaml passes the provisioner image as an
 //     env var `value:`, not an `image:`. That is the image the operator injects
 //     into every provisioning Job spec it builds, so a mutable tag there ships
 //     an unpinned provisioner to every TUI-provisioned node — precisely the
@@ -851,7 +851,7 @@ var mutableTagExempt = map[string]string{
 //     thought of", which is how a guard ends up asserting less than it claims.
 //
 // A reference must carry a tag or a digest, which is what distinguishes it from
-// the sigstore GLOB at infra/security/admission/cluster-image-policy.yaml:27
+// the sigstore GLOB at infra/security/admission/cluster-image-policy.yaml
 // (`ghcr.io/eighred/**`) — a policy pattern, not an image, and not pinnable.
 //
 // TAG-PLUS-DIGEST. The digest branch used to require `@sha256:` to immediately

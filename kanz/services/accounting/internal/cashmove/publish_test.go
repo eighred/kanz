@@ -145,7 +145,7 @@ func TestPublishSubscriptionEmitsAValidFactEnvelope(t *testing.T) {
 	if env.GetPayloadSchemaRef() != "accounting.v1.LedgerEntry:1" {
 		t.Errorf("PayloadSchemaRef = %q, want accounting.v1.LedgerEntry:1", env.GetPayloadSchemaRef())
 	}
-	// FACT contract (pkg/bus/validate.go:128).
+	// FACT contract (pkg/bus/validate.go).
 	if env.GetIdempotencyKey() != env.GetEventId() {
 		t.Errorf("IdempotencyKey = %q, want event_id %q", env.GetIdempotencyKey(), env.GetEventId())
 	}
@@ -183,7 +183,7 @@ func TestPublishSubscriptionEmitsAValidFactEnvelope(t *testing.T) {
 
 // Every kind routes to its own subject, keeps its sign, and still validates —
 // the subject is what binds the FACT to the ACCOUNTING stream, so a wrong one is
-// a hard publish failure on a live spine (infra/nats/bootstrap-job.yaml:116-118).
+// a hard publish failure on a live spine (infra/nats/bootstrap-job.yaml).
 func TestPublishEveryKindValidatesAndKeepsItsSign(t *testing.T) {
 	cases := []struct {
 		kind     cashmove.Kind

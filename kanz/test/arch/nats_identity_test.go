@@ -651,7 +651,7 @@ func TestReadOnlyObserversNeverJoinAQueueGroup(t *testing.T) {
 // subscribePrimitivePackages DEFINE Subscribe and SubscribeBroadcast rather than
 // choosing between them.
 //
-// pkg/bus is the library: Consumer.Subscribe's body (consumer.go:148) delegates
+// pkg/bus is the library: Consumer.Subscribe's body (consumer.go) delegates
 // to c.subscriber.Subscribe, which is the grouped primitive existing so that
 // SERVICES can join a durable consumer group — that is its job. Flagging it
 // would report the bus for providing the call every real consumer needs, and the

@@ -84,7 +84,7 @@ var warnOut io.Writer = os.Stderr
 // the file this reads. It was not unknowable. It was un-plumbed.
 //
 // It is still un-plumbed above this line: AddNodeRequest
-// (kanz-schemas/proto/operator/v1/operator.proto:129) has no host-key field, so the
+// (kanz-schemas/proto/operator/v1/operator.proto) has no host-key field, so the
 // operator sets none of these vars today and every provision fails closed here until it
 // does. That is the intended state. A provisioner that refuses to run is an outage in a
 // feature; a provisioner that hands the cluster-admission token to strangers is an

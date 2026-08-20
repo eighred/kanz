@@ -1,8 +1,6 @@
 package arch
 
 import (
-	"go/parser"
-	"go/token"
 	"io/fs"
 	"path/filepath"
 	"regexp"
@@ -100,60 +98,44 @@ func TestCommentsCiteDocumentsThatExist(t *testing.T) {
 	root := moduleRoot(t)
 	parent := filepath.Dir(root) // the repo root; kanz/ and kanz-schemas/ are siblings
 	docs := markdownIndex(t, parent)
-	fset := token.NewFileSet()
 
 	type violation struct{ where, cited string }
 	var bad []violation
 	seenExempt := map[string]bool{}
-	scanned, citations := 0, 0
+	citations := 0
 
-	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return err
+	// COMMENTS ONLY, and that is a real limit rather than an oversight. This
+	// guard's subject is prose telling a reader to go read a document; the
+	// string-literal half of the estate is scanned by its sibling,
+	// comments_cite_by_symbol_test.go (#610), which is where the exemption
+	// tables' evidence lives. walkGoProse is the shared extractor for both, so
+	// there is one answer to "what prose does a Go file contain".
+	scanned := walkGoProse(t, root, func(s proseSite) {
+		// Per COMMENT LINE, not per rejoined group: the URL skip below is a
+		// per-line judgement, and reading a whole group at once would let one
+		// http link in it excuse every citation beside it.
+		if s.Kind != proseComment || s.Joined {
+			return
 		}
-		if d.IsDir() {
-			if skipWalkDir(d) || d.Name() == "testdata" {
-				return filepath.SkipDir
+		text := s.Text
+		for _, m := range mdRef.FindAllString(text, -1) {
+			// A URL is a citation to somewhere else entirely, and this
+			// guard has no opinion about the internet.
+			if strings.Contains(text, "http") && strings.Contains(text, m) {
+				continue
 			}
-			return nil
-		}
-		if !strings.HasSuffix(d.Name(), ".go") {
-			return nil
-		}
-		f, perr := parser.ParseFile(fset, path, nil, parser.ParseComments|parser.SkipObjectResolution)
-		if perr != nil {
-			return perr
-		}
-		scanned++
-		rel := filepath.ToSlash(mustRelPath(root, path))
-
-		for _, group := range f.Comments {
-			for _, c := range group.List {
-				text := c.Text
-				for _, m := range mdRef.FindAllString(text, -1) {
-					// A URL is a citation to somewhere else entirely, and this
-					// guard has no opinion about the internet.
-					if strings.Contains(text, "http") && strings.Contains(text, m) {
-						continue
-					}
-					citations++
-					if docs[m] || docs[strings.TrimPrefix(m, "./")] || docs[filepath.Base(m)] {
-						continue
-					}
-					key := rel + ":" + m
-					if _, ok := citationExempt[key]; ok {
-						seenExempt[key] = true
-						continue
-					}
-					bad = append(bad, violation{where: rel, cited: m})
-				}
+			citations++
+			if docs[m] || docs[strings.TrimPrefix(m, "./")] || docs[filepath.Base(m)] {
+				continue
 			}
+			key := s.File + ":" + m
+			if _, ok := citationExempt[key]; ok {
+				seenExempt[key] = true
+				continue
+			}
+			bad = append(bad, violation{where: s.File, cited: m})
 		}
-		return nil
 	})
-	if err != nil {
-		t.Fatalf("walk: %v", err)
-	}
 
 	// NON-VACUITY, both halves: the walk must have read the tree, and it must
 	// have found citations to check. Zero of either means this passes having

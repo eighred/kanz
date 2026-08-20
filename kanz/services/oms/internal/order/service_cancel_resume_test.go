@@ -18,7 +18,7 @@ import (
 // accounting, and audit never learn the cancel happened), and the caller was
 // told REJECTED for a cancel that in fact succeeded.
 //
-// cancel_announced_at (order_events.proto:18) was the marker that let a
+// cancel_announced_at (order_events.proto) was the marker that let a
 // redelivery tell "my announcement was interrupted" apart from "this is a
 // genuine second cancel of an already-cancelled order" — the same role
 // venue_ack_at plays for routing.

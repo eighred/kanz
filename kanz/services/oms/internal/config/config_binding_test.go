@@ -64,7 +64,7 @@ func TestLoad_RefusesAnExchangeAccountSharedByTwoPortfolios(t *testing.T) {
 
 // AN ACCOUNT NAME IS GLOBAL, NOT VENUE-SCOPED, and the same name at two venues is
 // REFUSED. I expected the opposite when writing this and was wrong; the invariant
-// is deliberate and stated at internal/execution/account.go:125 — "An account may
+// is deliberate and stated at internal/execution/account.go — "An account may
 // have exactly one owner."
 //
 // It is the conservative reading and it is the right one. A real exchange account

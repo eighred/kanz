@@ -196,11 +196,11 @@ func isSelector(e ast.Expr, pkg, name string) bool {
 // subscription they make is SubscribeBroadcast/SubscribeBroadcastReady, never
 // the grouped Subscribe.
 //
-// pkg/bus/consumer.go:262-265 (SubscribeBroadcastReady's shared dispatch path)
+// pkg/bus/consumer.go (SubscribeBroadcastReady's shared dispatch path)
 // documents that the broadcast path does NOT route to the DLQ at all — an
 // unreadable or failed broadcast message "is returned as an error, the message
 // is nacked", full stop. c.dlq is never consulted anywhere in that path
-// (consumer.go:266-299). That makes bus.WithDLQ structurally INERT on a
+// (consumer.go). That makes bus.WithDLQ structurally INERT on a
 // consumer used only for broadcast: there is no code path left that would
 // ever read c.dlq, so its absence loses nothing.
 //
@@ -221,11 +221,12 @@ func isSelector(e ast.Expr, pkg, name string) bool {
 // specific file:line can, and that requires a reviewed edit to this file.
 var dlqExemptBroadcastOnlyConsumers = map[string]string{
 	"cmd/kanz-monitor/busreader.go:runBusReader": "kanz-monitor: this Consumer is used " +
-		"SOLELY for two SubscribeBroadcast calls (order.> at busreader.go:112 and " +
-		"risk.position.changed.> at busreader.go:155) — there is no Subscribe call anywhere " +
+		"SOLELY for two SubscribeBroadcast calls (order.> at busreader.go and " +
+		"risk.position.changed.> at busreader.go) — there is no Subscribe call anywhere " +
 		"in this file, so the DLQ-routing branch of consumer.go's Subscribe path " +
-		"(consumer.go:212-221) is unreachable from this call site; per " +
-		"consumer.go:262-265 the broadcast path never consults c.dlq regardless, so " +
+		"(consumer.go, Consumer.Subscribe) is unreachable from this call site; per " +
+		"SubscribeBroadcastReady's shared dispatch in consumer.go the broadcast path never " +
+		"consults c.dlq regardless, so " +
 		"WithDLQ would be inert here. The monitor is also a read-only observer " +
 		"(test/arch/nats_identity_test.go's readOnlyObserverSVIDs; its tenancy grant " +
 		"denies all business publish) and physically cannot hold the dlq.* " +
@@ -497,7 +498,7 @@ func usesRedriver(f *ast.File) bool {
 var retryCertifiedConsumers = map[string]string{
 	"services/tv-sync/cmd/tv-sync/main.go:run": "tv-sync: the sole handler is " +
 		"projection.Projection.Handle. Its only error return before the fold is " +
-		"PostgresLog.Append itself failing (services/tv-sync/internal/projection/postgres.go:68), " +
+		"PostgresLog.Append itself failing (services/tv-sync/internal/projection/postgres.go), " +
 		"which means nothing committed. fold() never returns an error and Handle " +
 		"unconditionally returns nil once it runs, so there is no error path between a " +
 		"successful Append and the fold that a retry could trigger — a retry can only " +
@@ -505,7 +506,7 @@ var retryCertifiedConsumers = map[string]string{
 		"Append already committed.",
 
 	"services/audit/cmd/audit/main.go:runProjection": "audit: the sole handler is audit.Projector.Handle, " +
-		"which appends through Postgres.Append (services/audit/internal/audit/postgres.go:32). " +
+		"which appends through Postgres.Append (services/audit/internal/audit/postgres.go). " +
 		"The event_id dedup check and the insert run inside ONE transaction under an " +
 		"advisory xact lock — atomic claim-and-persist, not check-then-act — so a retry " +
 		"after a failed transaction is a clean redo and a retry after a committed one is " +
@@ -513,19 +514,19 @@ var retryCertifiedConsumers = map[string]string{
 
 	"services/accounting/cmd/accounting/main.go:runConsumer": "accounting (fills+cash): dispatches " +
 		"consume.Folder.Handle and Folder.HandleCash, both of which resolve to " +
-		"ledger.Postgres.Append (services/accounting/internal/ledger/postgres.go:31) — a single " +
+		"ledger.Postgres.Append (services/accounting/internal/ledger/postgres.go) — a single " +
 		"INSERT ... ON CONFLICT (tenant_id, entry_id) DO NOTHING inside one transaction. " +
 		"No read-then-decide gap exists for a retry to land in; it either redoes an " +
 		"uncommitted write or no-ops an already-committed one.",
 
 	"services/accounting/cmd/accounting/main.go:runFXFeed": "accounting (live FX): the sole handler is " +
-		"fxfeed.LiveFX.Handler (services/accounting/internal/fxfeed/fxfeed.go:65) — an " +
+		"fxfeed.LiveFX.Handler (services/accounting/internal/fxfeed/fxfeed.go) — an " +
 		"unconditional last-value cache write with no dedup branch at all. Re-running it " +
 		"with the same quote sets the same rate; there is nothing to skip.",
 
 	"services/risk-engine/cmd/risk-engine/main.go:runEngine": "risk-engine (state ingest): dispatches " +
 		"ingest.Ingestor.Handler -> engine.TriggeringApplier -> state.Store.ApplyPortfolioRevalued" +
-		"/ApplyPositionChanged/ApplyPortfolioSnapshot (internal/risk/state/store.go:202,227,246). " +
+		"/ApplyPositionChanged/ApplyPortfolioSnapshot (internal/risk/state/store.go). " +
 		"Each Apply* checks its per-portfolio dedup window and mutates in-memory state with " +
 		"no I/O and no possible error in between — dw.Record always follows the mutation " +
 		"immediately, so an Apply* either runs to completion or (on a deterministic " +
@@ -535,13 +536,13 @@ var retryCertifiedConsumers = map[string]string{
 		"without its Apply* having actually completed.",
 
 	"services/risk-engine/cmd/risk-engine/main.go:startCalibration": "risk-engine (calibration quotes): the " +
-		"sole handler is livequote.LiveQuotes.Handler (internal/risk/pricing/livequote/livequote.go:80) " +
+		"sole handler is livequote.LiveQuotes.Handler (internal/risk/pricing/livequote/livequote.go) " +
 		"— an unconditional last-value cache write, same shape as accounting's live FX feed. " +
 		"Nothing to skip.",
 
 	"services/market-data/cmd/market-data/main.go:runIngest": "market-data: the sole handler is " +
 		"marketdata.Ingestor.Handler, which writes through Postgres.Put " +
-		"(internal/marketdata/store/postgres.go:49) — INSERT ... ON CONFLICT (instrument_id, " +
+		"(internal/marketdata/store/postgres.go) — INSERT ... ON CONFLICT (instrument_id, " +
 		"observation_time, kind, knowledge_time) DO NOTHING inside one transaction. Same " +
 		"atomic-claim shape as audit/accounting; no check-then-act gap.",
 
@@ -549,12 +550,12 @@ var retryCertifiedConsumers = map[string]string{
 		"controller.Controller.Handle, which has no dedup-and-skip branch at all — a retry " +
 		"always re-runs Dispatch (match -> runbook -> escalate) from the top. Every " +
 		"runbook.Action is a documented MUST-be-idempotent contract " +
-		"(services/autopilot/internal/runbook/runbook.go:15) precisely because the controller " +
+		"(services/autopilot/internal/runbook/runbook.go) precisely because the controller " +
 		"already re-runs runbooks on ordinary at-least-once redelivery; in-process retry adds " +
 		"no new failure shape. A doubled escalation page is a duplicate alert, not lost work.",
 
 	"services/lineage/cmd/lineage/main.go:runHarvest": "lineage: the sole handler is harvest.Harvester.Handle. " +
-		"graph.Memory.Observe (services/lineage/internal/graph/graph.go:71) always runs to " +
+		"graph.Memory.Observe (services/lineage/internal/graph/graph.go) always runs to " +
 		"completion (its own doc comment: 're-observing an event re-counts it but the edges " +
 		"are a set') before the OpenLineage Emit call that can fail — so a retry re-observes " +
 		"(accepted, pre-existing double-count on the Events tally, not a skip) and re-emits; " +
@@ -563,17 +564,17 @@ var retryCertifiedConsumers = map[string]string{
 	"services/lake-sink/cmd/lake-sink/main.go:runSink": "lake-sink: the sole handler is cdc.EventSink.Handle, " +
 		"which has no dedup-and-skip branch — every attempt decodes, writes and flushes from " +
 		"scratch, and the doc comment is explicit that a duplicate row is expected and " +
-		"resolved by downstream compaction (services/lake-sink/internal/cdc/sink.go:49). A retry " +
+		"resolved by downstream compaction (services/lake-sink/internal/cdc/sink.go). A retry " +
 		"redoes the row; it cannot skip it.",
 
 	"services/alternatives/cmd/alternatives/main.go:runConsumer": "alternatives: the sole handler is " +
 		"consume.Folder.Handle, which appends through fund.Postgres.Append " +
-		"(services/alternatives/internal/fund/postgres.go:30) — a single INSERT ... ON CONFLICT " +
+		"(services/alternatives/internal/fund/postgres.go) — a single INSERT ... ON CONFLICT " +
 		"(tenant_id, event_id) DO NOTHING. Same atomic-claim shape as the ledger and audit " +
 		"stores.",
 
 	"services/wealth/cmd/wealth/main.go:runConsumer": "wealth: the sole handler is consume.Folder.Handle, " +
-		"which Puts through book.Postgres.Put (services/wealth/internal/book/postgres.go:30) — an " +
+		"which Puts through book.Postgres.Put (services/wealth/internal/book/postgres.go) — an " +
 		"unconditional last-write-wins UPSERT keyed on household_id. Re-running it with the " +
 		"same composition is a no-op change; there is no dedup branch to skip through.",
 
@@ -583,17 +584,17 @@ var retryCertifiedConsumers = map[string]string{
 		"redoes unexecuted work (resume's Unknown+no-ack -> ActionRedrive re-drives Route/Save/" +
 		"EmitRouted/Execute, and SimVenue.Execute is idempotent by its own executed-fills record, " +
 		"venue/internal/execution/venue.go:170-221) or completes an interrupted terminal " +
-		"announcement via outcome_announced_at + completeTerminalOutcome (service.go:745,773-778,910-937 " +
+		"announcement via outcome_announced_at + completeTerminalOutcome (service.go " +
 		"— the 250fe00 fix, re-verified to actually fire on a fill-loop EmitFill failure that leaves " +
 		"the order FILLED-but-unannounced). A partial, non-terminal fill interrupted mid-loop is " +
 		"unreachable with SimVenue (single full-leaves fill only) and, for FIXVenue/GRPCVenue, " +
 		"resume's own Querier check quarantines rather than guessing (neither implements " +
 		"execution.Querier) — an alerting freeze, never a silent ack. handleCancel: the " +
-		"cancel_announced_at resume branch (service.go:505-506) completes the announcement without " +
+		"cancel_announced_at resume branch (service.go) completes the announcement without " +
 		"re-dispatching closeAtVenue, confirmed by reading the call graph, not just the comment. " +
 		"handleAmend rewrites absolute values under an IsTerminal guard that a live amend target " +
 		"never trips, so a retry recomputes and re-persists the same result. position.Projector.Handle " +
-		"folds through Postgres.Apply's single-transaction fill_id claim-and-fold (position/postgres.go:105-159) " +
+		"folds through Postgres.Apply's single-transaction fill_id claim-and-fold (position/postgres.go) " +
 		"— atomic dedup, not check-then-act. Two completeness gaps found and reported but judged " +
 		"non-blocking because neither skips durably-committed work: resume's PENDING_NEW/ActionRedrive " +
 		"branches and adopt()'s fill loop never (re-)emit the CommandOutcome/EmitAccepted a direct " +
@@ -603,7 +604,8 @@ var retryCertifiedConsumers = map[string]string{
 		"not now repairs the announcement instead of silently working the order for an estate that " +
 		"never heard of it. The CommandOutcome half of the gap, and adopt()'s fill loop, remain open. " +
 		"ActionRedrive still does not special-case " +
-		"ErrUnpriced the way handleSubmit's own admission path does (service.go:260-277 vs 839-841) — " +
+		"ErrUnpriced the way handleSubmit's own admission path does (service.go, ActionRedrive vs " +
+		"handleSubmit's ErrUnpriced branch) — " +
 		"both fail by never producing an announcement or by nacking loudly toward the DLQ, never by " +
 		"acking work that was never done. RE-CERTIFIED for the per-order lock: handleCancel and " +
 		"handleAmend now take awaitClaim before reading (service.go), which adds ONE new failure " +

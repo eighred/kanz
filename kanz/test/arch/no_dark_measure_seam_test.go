@@ -139,7 +139,7 @@ var darkSeamExempt = map[string]string{
 	"internal/risk/scenario.EvaluateFactorShock": "#509 — needs a *factormodel.Model, produced by " +
 		"factormodel.Fit through NewLiveModelProvider, which is dark.",
 	"internal/risk/compute/var.RegisterMonteCarlo": "#509 — MODEL-01e Monte-Carlo VaR. The " +
-		"historical sibling (varmodel.Register) IS wired at risk-engine/main.go:202, so this one is " +
+		"historical sibling (varmodel.Register) IS wired at risk-engine/main.go, so this one is " +
 		"dark by CHOICE rather than by a missing provider: it takes the same ReturnsProvider. " +
 		"Deciding whether to serve both is the open question, and until it is answered the platform " +
 		"ships a Monte-Carlo VaR nobody can request.",

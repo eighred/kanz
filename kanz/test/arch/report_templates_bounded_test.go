@@ -12,7 +12,7 @@ import (
 
 // NO AUDIT REPORT TEMPLATE MAY SELECT AN UNBOUNDED SLICE OF THE LOG (#304).
 //
-// The audit store is WORM by contract (services/audit/internal/audit/store.go:27
+// The audit store is WORM by contract (services/audit/internal/audit/store.go
 // — append-only, no update, no delete, because the AUDIT-01b tamper-evidence
 // rests on it). A table that only ever grows has no steady state, so a template
 // whose filter carries no Limit and no time window does not read "a lot of

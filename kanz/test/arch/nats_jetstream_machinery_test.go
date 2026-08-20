@@ -206,7 +206,7 @@ func TestServiceHasJetStreamMachineryItsRoleRequires(t *testing.T) {
 // EITHER of two evidence sources: busConsumerCalls (bus_dlq_test.go's
 // `bus.NewConsumer` call sites — the original, and still the primary, path)
 // or directNATSClientSubscribeCalls below (a direct `(*bus.NATSClient)`
-// method call, bypassing `bus.NewConsumer` — the path archiver.go:137 uses
+// method call, bypassing `bus.NewConsumer` — the path archiver.go uses
 // and the reason this second source exists at all). Reusing rather than
 // re-deriving: no scanner here walks the module a third time looking for
 // `bus.NewConsumer` sites; bucketSvcOrCmd is the one piece of bucketing logic

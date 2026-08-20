@@ -322,7 +322,7 @@ func TestRefusalIsDetectedFromBothStructuralSignals(t *testing.T) {
 
 // MODEL PROSE IS NOT EVIDENCE OF REFUSAL, and this pins that decision.
 //
-// agent.go:92 halts the tool loop on StopRefusal and reports Answer{Refused}.
+// agent.go halts the tool loop on StopRefusal and reports Answer{Refused}.
 // So a phantom refusal truncates a real analysis and presents it as a decline —
 // worse than the miss it would prevent, which shows the model's own words as
 // ordinary text. A refusal-shaped SENTENCE with finish_reason "stop" must map to

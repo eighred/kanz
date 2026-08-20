@@ -40,7 +40,7 @@ const DefaultTokenTTL = 8 * time.Hour
 // existing pkg/auth.OIDCAuthenticator, pointed at THIS issuer and THIS JWKS.
 // That is not "keeping SSO" — it is standard JWT verification against a key set,
 // and it means the gateway needs no new code at all: OIDCConfig.JWKSURI is
-// settable directly (oidc.go:235), so no discovery document is required either.
+// settable directly (oidc.go), so no discovery document is required either.
 const (
 	// ES256 over P-256: the gateway's verifier accepts it (pkg/auth/oidc.go's
 	// asymmetricAlgs), keys and signatures are small, and signing is fast enough

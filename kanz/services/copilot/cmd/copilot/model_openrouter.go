@@ -237,7 +237,7 @@ func (m *openRouterModel) Complete(ctx context.Context, req llm.Request) (llm.Re
 //	                                  reports its refusal here verbatim
 //
 // WHAT THIS DELIBERATELY DOES NOT DO IS PATTERN-MATCH THE TEXT, and the reason
-// is agent.go:92. On StopRefusal the agent HALTS THE TOOL LOOP and returns
+// is agent.go. On StopRefusal the agent HALTS THE TOOL LOOP and returns
 // Answer{Refused: true}, which the terminal renders as "the copilot refused this
 // request". A false positive therefore does not mislabel one line of output — it
 // truncates a real analysis part-way and presents it as a refusal.

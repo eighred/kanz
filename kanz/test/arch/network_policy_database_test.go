@@ -173,7 +173,7 @@ func TestNetworkPoliciesReachTheVenueAdapters(t *testing.T) {
 // BOTH HALVES OF THE GATEWAY'S ROUTE TO ITS OWN IdP (#530).
 //
 // The gateway verifies every token against a key it fetches from identity's
-// unauthenticated /jwks.json (services/identity/internal/server/server.go:7).
+// unauthenticated /jwks.json (services/identity/internal/server/server.go).
 // The INGRESS half — identity admitting the gateway on :8087 — has existed since
 // #364. The EGRESS half did not, and this file's own rule says "Both ends must
 // exist": with only one, the gateway holds no key, verifies no token, and since

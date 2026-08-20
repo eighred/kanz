@@ -115,7 +115,7 @@ func TestCheck_MarketOrderWithVeryLargeMarkIsRescaledNotWrapped(t *testing.T) {
 // TestCheck_MarketOrderWithZeroMarkIsRefused and
 // TestCheck_MarketOrderWithNegativeMarkIsRefused (finding 3) pin, in THIS
 // package, that a present-but-non-positive mark refuses. That safety today
-// comes entirely from decutil.IsPositive in a different package (gate.go:245);
+// comes entirely from decutil.IsPositive in a different package (gate.go);
 // without these, a future change to Evaluate's guard could flip this gate to
 // admitting zero- or negative-priced orders with every existing test here
 // still green.
