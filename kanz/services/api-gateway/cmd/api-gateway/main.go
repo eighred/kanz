@@ -31,6 +31,7 @@ import (
 	venuepb "github.com/eighred/kanz/kanz-schemas-go/venue/v1"
 
 	"github.com/eighred/kanz/internal/lifecycle"
+	"github.com/eighred/kanz/internal/platform/halt"
 	"github.com/eighred/kanz/internal/platform/httpserver"
 	"github.com/eighred/kanz/internal/revocation"
 	"github.com/eighred/kanz/internal/version"
@@ -192,13 +193,44 @@ func run() int {
 	// Order write surface (OMS-01d): publish order commands to the spine, with
 	// the AUTH-01c forged-issuer guard on the producer. Nil publisher ⇒ the
 	// write routes 503 (read-only gateway).
-	producer, closeBus, err := buildBus(ctx, cfg, logger)
+	// THE PLATFORM KILL-SWITCH, CONSTRUCTED CLOSED (#635). Built before the bus so
+	// it can be handed to DialNATS as the disconnect watchdog — the gate has to
+	// exist before the connection it is watching.
+	//
+	// Until this, an operator running kanz-halt stopped TradingView signals and
+	// this route — the one authz.go calls the path that "reaches a live exchange"
+	// — kept publishing order COMMANDs.
+	gate := halt.NewGate(time.Now)
+	producer, consumer, closeBus, err := buildBus(ctx, cfg, gate, logger)
 	if err != nil {
 		logger.Error("order write surface init failed", "err", err)
 		return 2
 	}
 	defer closeBus()
-	ordersHandler := orders.New(producer, cfg.ApproveRole)
+	// ARMED BEFORE THE ROUTES ARE MOUNTED, and the process does NOT exit if it
+	// cannot be. Arm has already latched the gate closed by the time it returns an
+	// error, so POST /v1/orders answers 423 with that reason while the read routes
+	// and — deliberately — POST /v1/orders/{id}/cancel keep serving. Exiting here
+	// would take the exits down with the entrance.
+	//
+	// consumer is nil on a read-only gateway (no API_GATEWAY_NATS_URL), which has
+	// no write surface to brake; orders.Handler answers 503 there and never
+	// consults the gate.
+	if consumer != nil {
+		waitHalt, herr := halt.Arm(ctx, consumer, gate, logger)
+		if herr != nil {
+			logger.Error("halt gate is NOT armed — POST /v1/orders will refuse every order until "+
+				"this gateway is restarted", "err", herr)
+		}
+		if waitHalt != nil {
+			go func() {
+				if err := waitHalt(); err != nil && ctx.Err() == nil {
+					logger.Error("halt subscription ended — the order write surface is halted", "err", err)
+				}
+			}()
+		}
+	}
+	ordersHandler := orders.New(producer, cfg.ApproveRole, gate)
 
 	// AUTH-01d: every capability decision this gateway makes is recorded.
 	//
@@ -346,22 +378,40 @@ func run() int {
 // things now publish: the OMS-01d order write surface and the AUTH-01d decision
 // recorder. Dialling a second connection for the recorder would give one process
 // two client identities on a broker that authenticates per connection (SEC-M3).
-func buildBus(ctx context.Context, cfg config.Config, logger *slog.Logger) (*bus.Producer, func(), error) {
+func buildBus(ctx context.Context, cfg config.Config, gate *halt.Gate, logger *slog.Logger) (*bus.Producer, *bus.Consumer, func(), error) {
 	if cfg.NATSURL == "" {
 		logger.Warn("api-gateway: order write surface disabled (no API_GATEWAY_NATS_URL)")
-		return nil, func() {}, nil
+		return nil, nil, func() {}, nil
 	}
 	// SEC-M3: the production broker requires a client SVID; a nil TLSConfig is a
 	// plaintext client it refuses at the handshake.
 	mesh, err := transport.NewMesh(ctx, cfg.SPIFFESocket)
 	if err != nil {
-		return nil, func() {}, err
+		return nil, nil, func() {}, err
 	}
 	logger.Info("bus transport", "mtls", mesh.Enabled())
-	client, err := bus.DialNATS(ctx, bus.NATSConfig{URL: cfg.NATSURL, Name: cfg.Source, TLSConfig: mesh.Client})
+	client, err := bus.DialNATS(ctx, bus.NATSConfig{
+		URL: cfg.NATSURL, Name: cfg.Source, TLSConfig: mesh.Client,
+		// LOSING THE SPINE CLOSES THE GATE (#635), the same stance webhook-ingest
+		// has always taken. The halt FACT travels on this connection, so a dropped
+		// one means this process can no longer establish that trading is safe —
+		// and under deny-by-default, not knowing means not trading. The cost is
+		// real and deliberate: a broker restart latches the order write surface
+		// shut until an operator resumes it. The alternative is a gateway that
+		// reconnects, silently loses its ephemeral halt consumer, and keeps
+		// accepting orders through a declared halt.
+		OnDisconnect: func(err error) {
+			gate.TripOnBusLoss(err)
+			logger.Error("NATS spine lost — the order write surface is halted, operator resume required", "err", err)
+		},
+		OnReconnect: func() {
+			_, reason, since := gate.State()
+			logger.Warn("NATS spine reconnected — gate remains latched", "reason", reason, "since", since)
+		},
+	})
 	if err != nil {
 		_ = mesh.Close()
-		return nil, func() {}, err
+		return nil, nil, func() {}, err
 	}
 	// NO ProducerConfig.Tenant, DELIBERATELY. This producer carries order
 	// COMMANDs, and a fallback tenant here would stamp a submit whose token
@@ -378,10 +428,19 @@ func buildBus(ctx context.Context, cfg config.Config, logger *slog.Logger) (*bus
 	if err != nil {
 		_ = client.Close()
 		_ = mesh.Close()
-		return nil, func() {}, err
+		return nil, nil, func() {}, err
+	}
+	// THE CONSUMER EXISTS FOR ONE SUBJECT: the halt FACT (#635). No DLQ and no
+	// bus metrics, because SubscribeBroadcast routes to neither — an unreadable
+	// control message must not be parked, it must leave the gate closed.
+	consumer, err := bus.NewConsumer(client)
+	if err != nil {
+		_ = client.Close()
+		_ = mesh.Close()
+		return nil, nil, func() {}, err
 	}
 	logger.Info("api-gateway: order write surface enabled")
-	return producer, func() { _ = client.Close(); _ = mesh.Close() }, nil
+	return producer, consumer, func() { _ = client.Close(); _ = mesh.Close() }, nil
 }
 
 // authDecisionsLost counts AUTH-01d decisions that never reached the observation

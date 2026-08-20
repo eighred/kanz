@@ -33,6 +33,7 @@ import (
 	"github.com/eighred/kanz/internal/dualcontrol"
 	"github.com/eighred/kanz/internal/outbox"
 	"github.com/eighred/kanz/internal/pg"
+	"github.com/eighred/kanz/internal/platform/halt"
 	"github.com/eighred/kanz/pkg/bus"
 	"github.com/eighred/kanz/pkg/observability"
 	"github.com/eighred/kanz/pkg/transport"
@@ -175,7 +176,33 @@ func runConsumers(ctx context.Context, cfg config.Config, readiness *server.Read
 	defer func() { _ = mesh.Close() }()
 	logger.Info("bus transport", "mtls", mesh.Enabled())
 
-	client, err := bus.DialNATS(ctx, bus.NATSConfig{URL: cfg.NATSURL, Name: cfg.Source, TLSConfig: mesh.Client})
+	// THE PLATFORM KILL-SWITCH, CONSTRUCTED CLOSED (#635). Named haltGate because
+	// `gate` in this function is already the pre-trade COMPLIANCE gate, and the two
+	// answer different questions: compliance asks whether THIS order is allowed,
+	// the halt asks whether ANY order is.
+	//
+	// Built before the dial so it can be the disconnect watchdog. Until now the OMS
+	// did not import the halt package at any depth, so an operator's kanz-halt
+	// stopped TradingView signals and this service admitted every order the gateway
+	// published, right through the declared halt.
+	haltGate := halt.NewGate(time.Now)
+	client, err := bus.DialNATS(ctx, bus.NATSConfig{
+		URL: cfg.NATSURL, Name: cfg.Source, TLSConfig: mesh.Client,
+		// LOSING THE SPINE CLOSES THE GATE, the stance webhook-ingest has always
+		// taken. The halt FACT travels on this connection, and the ephemeral
+		// consumer carrying it may not survive a reconnect — so a dropped spine
+		// means this OMS can no longer establish that admitting an order is safe.
+		// It keeps CANCELLING, which is the half that matters during an outage.
+		OnDisconnect: func(err error) {
+			haltGate.TripOnBusLoss(err)
+			logger.Error("NATS spine lost — the OMS admits no new orders until an operator resumes; "+
+				"cancels are unaffected", "err", err)
+		},
+		OnReconnect: func() {
+			_, reason, since := haltGate.State()
+			logger.Warn("NATS spine reconnected — halt gate remains latched", "reason", reason, "since", since)
+		},
+	})
 	if err != nil {
 		return false, err
 	}
@@ -837,6 +864,9 @@ func runConsumers(ctx context.Context, cfg config.Config, readiness *server.Read
 		// price source, so a cost measure and a compliance check can never
 		// disagree about what the market showed.
 		order.WithArrivalMarks(marks),
+		// THE BRAKE. NewService REFUSES to build without it (#635), so this line is
+		// not something a future edit can quietly drop.
+		order.WithHaltGate(haltGate),
 		order.WithDualControl(dualControl),
 		order.WithAccountBindings(bindings, cfg.RequireVenueAccount, sharedCollateral),
 		order.WithQuarantineCounter(quarantined),
@@ -1027,6 +1057,29 @@ func runConsumers(ctx context.Context, cfg config.Config, readiness *server.Read
 			})
 		}
 	}()
+
+	// THE HALT SUBSCRIPTION, ARMED BEFORE THE COMMAND SUBSCRIPTIONS (#635) — the
+	// order matters: an OMS that started consuming order.order.submit before it
+	// knew the platform mode would admit whatever arrived in that window.
+	//
+	// Arm blocks until the broker confirms it, so a missing platform.mode.changed
+	// grant surfaces here. It is NOT fatal: Arm has already latched the gate
+	// closed, so this OMS refuses every new order with that reason and keeps
+	// cancelling. Taking the pod down instead would remove the exits too.
+	waitHalt, herr := halt.Arm(ctx, consumer, haltGate, logger)
+	if herr != nil {
+		logger.Error("halt gate is NOT armed — this OMS will refuse every new order until it is "+
+			"restarted; cancels are unaffected", "err", herr)
+	}
+	if waitHalt != nil {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if err := waitHalt(); err != nil && !errors.Is(err, context.Canceled) {
+				logger.Error("halt subscription ended — the OMS admits no new orders", "err", err)
+			}
+		}()
+	}
 
 	for _, s := range subs {
 		wg.Add(1)

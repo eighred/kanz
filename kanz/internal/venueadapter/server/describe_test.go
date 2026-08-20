@@ -19,6 +19,7 @@ import (
 	venuepb "github.com/eighred/kanz/kanz-schemas-go/venue/v1"
 
 	"github.com/eighred/kanz/internal/execution"
+	"github.com/eighred/kanz/internal/platform/halt"
 	"github.com/eighred/kanz/internal/venueadapter/orderview"
 )
 
@@ -27,7 +28,7 @@ func newServerWithProof(t *testing.T, v *fakeVenue, proof execution.AccountProof
 	closes := execution.NewCloseRegistry()
 	v.closes = closes
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	return New(v, orderview.NewMemory(), closes, proof, logger)
+	return New(v, orderview.NewMemory(), closes, proof, halt.OpenGate(nil), logger)
 }
 
 // TestDescribeReportsTheProvenAccount: the exchange confirmed the key behind this
@@ -115,7 +116,7 @@ func TestDescribeReportsBothCapabilityDeclarations(t *testing.T) {
 	}
 	closes := execution.NewCloseRegistry()
 	v.closes = closes
-	s := New(v, orderview.NewMemory(), closes, execution.AccountProof{Verified: true}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	s := New(v, orderview.NewMemory(), closes, execution.AccountProof{Verified: true}, halt.OpenGate(nil), slog.New(slog.NewTextHandler(io.Discard, nil)))
 
 	resp, err := s.Describe(context.Background(), &venuepb.DescribeRequest{})
 	if err != nil {

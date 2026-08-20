@@ -49,6 +49,7 @@ import (
 	observationpb "github.com/eighred/kanz/kanz-schemas-go/observation/v1"
 
 	"github.com/eighred/kanz/internal/bustest"
+	"github.com/eighred/kanz/internal/platform/halt"
 	"github.com/eighred/kanz/pkg/auth"
 	"github.com/eighred/kanz/pkg/bus"
 	"github.com/eighred/kanz/services/api-gateway/internal/authz"
@@ -115,7 +116,7 @@ func TestAGatewayDecisionReachesTheObservationStream(t *testing.T) {
 		Source:  "api-gateway",
 		NATSURL: natsURL,
 	}
-	producer, closeBus, err := buildBus(ctx, cfg, logger)
+	producer, _, closeBus, err := buildBus(ctx, cfg, halt.NewGate(nil), logger)
 	if err != nil {
 		t.Fatalf("buildBus: %v", err)
 	}

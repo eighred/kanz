@@ -17,6 +17,7 @@ import (
 	"net/http"
 	"testing"
 
+	"github.com/eighred/kanz/internal/platform/halt"
 	"github.com/eighred/kanz/services/api-gateway/internal/authz"
 	"github.com/eighred/kanz/services/api-gateway/internal/control"
 	"github.com/eighred/kanz/services/api-gateway/internal/gateway"
@@ -69,7 +70,7 @@ func TestEveryOrderRouteRequiresACapitalAuthority(t *testing.T) {
 	// #535 the approve route is registered only when the deployment names an approver, so ""
 	// here would drop the second-signature route out of this guard silently — the exact blind
 	// spot the fund role's comment in the golden table describes.
-	orders.New(nil, "kanz-compliance").Routes(m)
+	orders.New(nil, "kanz-compliance", halt.OpenGate(nil)).Routes(m)
 
 	allowed := map[authz.Capability]bool{authz.Trade: true, authz.Approve: true}
 
@@ -101,7 +102,7 @@ func TestTheWholeRouteTableIsDeclared(t *testing.T) {
 	// A NON-EMPTY APPROVE ROLE ON THE ORDERS HANDLER TOO (#539): its approve route is
 	// registered only when the deployment names an approver, so "" here would hide the
 	// order-release surface from this table for the same reason "" hides funding below.
-	orders.New(nil, "kanz-compliance").Routes(m)
+	orders.New(nil, "kanz-compliance", halt.OpenGate(nil)).Routes(m)
 	// A NON-EMPTY FUND ROLE, for the same reason stubOrders is a real value: since
 	// #535 the cash-movement route is registered only when the deployment names a
 	// funder, so passing "" here would drop it out of this table silently and the

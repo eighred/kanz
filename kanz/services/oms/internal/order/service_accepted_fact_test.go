@@ -26,6 +26,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus/testutil"
 
 	"github.com/eighred/kanz/internal/execution"
+	"github.com/eighred/kanz/internal/platform/halt"
 )
 
 // indexOf returns the position of the first event of eventType, or -1.
@@ -81,7 +82,8 @@ func TestAcceptedOrderWithoutFactIsReconciled(t *testing.T) {
 	clock := t0
 	svc, err := NewService(testTenant, store, NewEmitter(fb), nil,
 		execution.NewRouter([]execution.Venue{execution.NewSimVenue("XSIM")}), nil, nil,
-		WithAcceptedReannounceCounter(reannounced))
+		WithAcceptedReannounceCounter(reannounced),
+		WithHaltGate(halt.OpenGate(nil)))
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
 	}
@@ -184,7 +186,8 @@ func TestAdmissionCommitsTheAcceptedFactWithTheOrder(t *testing.T) {
 	clock := t0
 	svc, err := NewService(testTenant, store, NewEmitter(fb), nil,
 		execution.NewRouter([]execution.Venue{execution.NewSimVenue("XSIM")}), nil, nil,
-		WithAcceptedReannounceCounter(reannounced))
+		WithAcceptedReannounceCounter(reannounced),
+		WithHaltGate(halt.OpenGate(nil)))
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
 	}
@@ -284,7 +287,8 @@ func TestSweepDoesNotReannounceAnOrderItAlreadyAnnounced(t *testing.T) {
 	// No router: a paper deployment, where an admitted order RESTS at PENDING_NEW
 	// indefinitely. This is the deployment a naive periodic sweep floods.
 	svc, err := NewService(testTenant, store, NewEmitter(fb), nil, nil, nil, nil,
-		WithAcceptedReannounceCounter(reannounced))
+		WithAcceptedReannounceCounter(reannounced),
+		WithHaltGate(halt.OpenGate(nil)))
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
 	}
@@ -324,7 +328,8 @@ func TestPeriodicSweepSkipsAnOrderYoungerThanMinAge(t *testing.T) {
 	clock := t0
 	store := NewMemoryStore()
 	svc, err := NewService(testTenant, store, NewEmitter(fb), nil,
-		execution.NewRouter([]execution.Venue{execution.NewSimVenue("XSIM")}), nil, nil)
+		execution.NewRouter([]execution.Venue{execution.NewSimVenue("XSIM")}), nil, nil,
+		WithHaltGate(halt.OpenGate(nil)))
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
 	}
@@ -411,7 +416,8 @@ func TestRedeliveredSubmitPublishesTheCommittedAcceptedFact(t *testing.T) {
 	store := NewMemoryStore()
 	svc, err := NewService(testTenant, store, NewEmitter(fb), nil,
 		execution.NewRouter([]execution.Venue{execution.NewSimVenue("XSIM")}), nil, nil,
-		WithAcceptedReannounceCounter(reannounced))
+		WithAcceptedReannounceCounter(reannounced),
+		WithHaltGate(halt.OpenGate(nil)))
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
 	}
@@ -498,7 +504,8 @@ func TestPeriodicSweepContinuesPastAnOrderItCannotReconcile(t *testing.T) {
 	// order is never reached.
 	store := &poisonLoadStore{Store: mem, poison: "a-poison"}
 	svc, err := NewService(testTenant, store, NewEmitter(fb), nil,
-		execution.NewRouter([]execution.Venue{execution.NewSimVenue("XSIM")}), nil, nil)
+		execution.NewRouter([]execution.Venue{execution.NewSimVenue("XSIM")}), nil, nil,
+		WithHaltGate(halt.OpenGate(nil)))
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
 	}
@@ -539,7 +546,8 @@ func TestPeriodicSweepContinuesPastAnOrderItCannotReconcile(t *testing.T) {
 	// two cannot silently converge on whichever one somebody edits next.
 	fresh := &fakeBus{}
 	svc2, err := NewService(testTenant, store, NewEmitter(fresh), nil,
-		execution.NewRouter([]execution.Venue{execution.NewSimVenue("XSIM")}), nil, nil)
+		execution.NewRouter([]execution.Venue{execution.NewSimVenue("XSIM")}), nil, nil,
+		WithHaltGate(halt.OpenGate(nil)))
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
 	}

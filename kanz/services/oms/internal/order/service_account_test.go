@@ -9,6 +9,7 @@ import (
 	orderpb "github.com/eighred/kanz/kanz-schemas-go/order/v1"
 
 	"github.com/eighred/kanz/internal/execution"
+	"github.com/eighred/kanz/internal/platform/halt"
 )
 
 // WHOSE COLLATERAL DOES AN ORDER SPEND?
@@ -33,7 +34,8 @@ func TestSubmit_StampsThePortfoliosBoundAccount(t *testing.T) {
 	router := execution.NewRouter([]execution.Venue{execution.NewSimVenue("XSIM", execution.WithAccount("okx-alpha"))})
 
 	svc, err := NewService(testTenant, store, NewEmitter(fb), nil, router, nil, nil,
-		WithAccountBindings(bindings, true, nil))
+		WithAccountBindings(bindings, true, nil),
+		WithHaltGate(halt.OpenGate(nil)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -66,7 +68,8 @@ func TestSubmit_UnboundPortfolioIsRefusedWhenAccountsAreRequired(t *testing.T) {
 	router := execution.NewRouter([]execution.Venue{execution.NewSimVenue("XSIM", execution.WithAccount("okx-alpha"))})
 
 	svc, err := NewService(testTenant, store, NewEmitter(fb), nil, router, nil, nil,
-		WithAccountBindings(bindings, true, nil))
+		WithAccountBindings(bindings, true, nil),
+		WithHaltGate(halt.OpenGate(nil)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -112,7 +115,8 @@ func TestSubmit_UnboundPortfolioTradesTheSharedAccountAndSaysSo(t *testing.T) {
 	router := execution.NewRouter([]execution.Venue{execution.NewSimVenue("XSIM", execution.WithAccount("shared-pool"))})
 
 	svc, err := NewService(testTenant, store, NewEmitter(fb), nil, router, nil, nil,
-		WithAccountBindings(mustBind(t, ""), false, nil)) // nothing bound, advisory
+		WithAccountBindings(mustBind(t, ""), false, nil),
+		WithHaltGate(halt.OpenGate(nil))) // nothing bound, advisory
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -147,7 +151,8 @@ func TestSubmit_BoundToAnAccountNoAdapterHolds_IsRefused(t *testing.T) {
 	router := execution.NewRouter([]execution.Venue{execution.NewSimVenue("XSIM", execution.WithAccount("okx-beta"))})
 
 	svc, err := NewService(testTenant, store, NewEmitter(fb), nil, router, nil, nil,
-		WithAccountBindings(bindings, true, nil))
+		WithAccountBindings(bindings, true, nil),
+		WithHaltGate(halt.OpenGate(nil)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -175,7 +180,8 @@ func TestSubmit_FillCarriesTheAccountItSettledAgainst(t *testing.T) {
 	router := execution.NewRouter([]execution.Venue{execution.NewSimVenue("XSIM", execution.WithAccount("okx-alpha"))})
 
 	svc, err := NewService(testTenant, store, NewEmitter(fb), nil, router, nil, nil,
-		WithAccountBindings(mustBind(t, "acme/fund-alpha@XSIM=okx-alpha"), true, nil))
+		WithAccountBindings(mustBind(t, "acme/fund-alpha@XSIM=okx-alpha"), true, nil),
+		WithHaltGate(halt.OpenGate(nil)))
 	if err != nil {
 		t.Fatal(err)
 	}

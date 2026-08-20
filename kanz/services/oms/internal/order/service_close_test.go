@@ -11,6 +11,7 @@ import (
 	orderpb "github.com/eighred/kanz/kanz-schemas-go/order/v1"
 
 	"github.com/eighred/kanz/internal/execution"
+	"github.com/eighred/kanz/internal/platform/halt"
 )
 
 // The venue-close dispatch path (EXEC-M4d): a cancel must reach the EXCHANGE,
@@ -44,7 +45,7 @@ func cancelEnv() *envelopepb.Envelope { return &envelopepb.Envelope{EventType: S
 func restingOrderOn(t *testing.T, fb *fakeBus, venue execution.Venue) (*Service, *execution.CloseRegistry) {
 	t.Helper()
 	reg := execution.NewCloseRegistry()
-	svc, err := NewService(testTenant, NewMemoryStore(), NewEmitter(fb), nil, execution.NewRouter([]execution.Venue{venue}), reg, nil)
+	svc, err := NewService(testTenant, NewMemoryStore(), NewEmitter(fb), nil, execution.NewRouter([]execution.Venue{venue}), reg, nil, WithHaltGate(halt.OpenGate(nil)))
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
 	}
@@ -131,7 +132,8 @@ func TestCancel_NonCloserVenueIsLedgerOnly(t *testing.T) {
 	fb := &fakeBus{}
 	reg := execution.NewCloseRegistry()
 	svc, err := NewService(testTenant, NewMemoryStore(), NewEmitter(fb), nil,
-		execution.NewRouter([]execution.Venue{execution.NewSimVenue("XSIM")}), reg, nil)
+		execution.NewRouter([]execution.Venue{execution.NewSimVenue("XSIM")}), reg, nil,
+		WithHaltGate(halt.OpenGate(nil)))
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
 	}

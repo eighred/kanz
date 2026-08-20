@@ -10,6 +10,7 @@ import (
 
 	"github.com/eighred/kanz/internal/dec"
 	"github.com/eighred/kanz/internal/execution"
+	"github.com/eighred/kanz/internal/platform/halt"
 )
 
 // unreachableVenue fails its FIRST execute and then recovers — a venue call
@@ -65,7 +66,7 @@ func TestRedeliveryAfterVenueFailureResumesAgainstVenueTruth(t *testing.T) {
 	fb := &fakeBus{}
 	venue := &unreachableVenue{SimVenue: execution.NewSimVenue("XSIM")}
 	store := NewMemoryStore()
-	svc, err := NewService(testTenant, store, NewEmitter(fb), nil, execution.NewRouter([]execution.Venue{venue}), nil, nil)
+	svc, err := NewService(testTenant, store, NewEmitter(fb), nil, execution.NewRouter([]execution.Venue{venue}), nil, nil, WithHaltGate(halt.OpenGate(nil)))
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
 	}
@@ -125,7 +126,7 @@ func TestVenueDenyingAnAcknowledgedOrderQuarantinesAndDoesNotRedrive(t *testing.
 	// that never saw the write.
 	venue := &amnesiacVenue{SimVenue: execution.NewSimVenue("XSIM")}
 	store := NewMemoryStore()
-	svc, err := NewService(testTenant, store, NewEmitter(fb), nil, execution.NewRouter([]execution.Venue{venue}), nil, nil)
+	svc, err := NewService(testTenant, store, NewEmitter(fb), nil, execution.NewRouter([]execution.Venue{venue}), nil, nil, WithHaltGate(halt.OpenGate(nil)))
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
 	}
@@ -207,7 +208,7 @@ func TestVenueWithoutQuerierQuarantinesRatherThanGuessing(t *testing.T) {
 	fb := &fakeBus{}
 	venue := &muteVenue{}
 	store := NewMemoryStore()
-	svc, err := NewService(testTenant, store, NewEmitter(fb), nil, execution.NewRouter([]execution.Venue{venue}), nil, nil)
+	svc, err := NewService(testTenant, store, NewEmitter(fb), nil, execution.NewRouter([]execution.Venue{venue}), nil, nil, WithHaltGate(halt.OpenGate(nil)))
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
 	}
@@ -300,7 +301,7 @@ func TestAdoptRefusesMultiFillViewAndQuarantinesRatherThanDoubleFold(t *testing.
 	}
 	venue := &twoFillVenue{SimVenue: execution.NewSimVenue("XSIM"), fills: fills}
 	store := NewMemoryStore()
-	svc, err := NewService(testTenant, store, NewEmitter(fb), nil, execution.NewRouter([]execution.Venue{venue}), nil, nil)
+	svc, err := NewService(testTenant, store, NewEmitter(fb), nil, execution.NewRouter([]execution.Venue{venue}), nil, nil, WithHaltGate(halt.OpenGate(nil)))
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
 	}
@@ -386,7 +387,7 @@ func TestAdoptQuarantinesFilledViewWithZeroFills(t *testing.T) {
 	fb := &fakeBus{}
 	venue := &zeroFillVenue{SimVenue: execution.NewSimVenue("XSIM")}
 	store := NewMemoryStore()
-	svc, err := NewService(testTenant, store, NewEmitter(fb), nil, execution.NewRouter([]execution.Venue{venue}), nil, nil)
+	svc, err := NewService(testTenant, store, NewEmitter(fb), nil, execution.NewRouter([]execution.Venue{venue}), nil, nil, WithHaltGate(halt.OpenGate(nil)))
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
 	}
@@ -449,7 +450,7 @@ func TestAdmissionPathHoldsTheClaimWhileWorkingAnOrder(t *testing.T) {
 	fb := &fakeBus{}
 	venue := &amnesiacVenue{SimVenue: execution.NewSimVenue("XSIM")}
 	store := NewMemoryStore()
-	svc, err := NewService(testTenant, store, NewEmitter(fb), nil, execution.NewRouter([]execution.Venue{venue}), nil, nil)
+	svc, err := NewService(testTenant, store, NewEmitter(fb), nil, execution.NewRouter([]execution.Venue{venue}), nil, nil, WithHaltGate(halt.OpenGate(nil)))
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
 	}

@@ -22,6 +22,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 
 	"github.com/eighred/kanz/internal/dualcontrol"
+	"github.com/eighred/kanz/internal/platform/halt"
 	"github.com/eighred/kanz/services/oms/internal/approval"
 )
 
@@ -36,7 +37,8 @@ func armedService(t *testing.T, fb *fakeBus, threshold *big.Rat) (*Service, *pro
 	}
 	store := NewMemoryStore()
 	svc, err := NewService(testTenant, store, NewEmitter(fb), nil, nil, nil, nil,
-		WithDualControl(g))
+		WithDualControl(g),
+		WithHaltGate(halt.OpenGate(nil)))
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
 	}

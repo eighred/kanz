@@ -6,6 +6,8 @@ import (
 	"testing"
 
 	envelopepb "github.com/eighred/kanz/kanz-schemas-go/envelope/v1"
+
+	"github.com/eighred/kanz/internal/platform/halt"
 )
 
 // The OMS resolved the venue account from the ENVELOPE's tenant and stored the
@@ -23,7 +25,7 @@ import (
 
 func serviceServing(t *testing.T, tenant string) *Service {
 	t.Helper()
-	svc, err := NewService(tenant, NewMemoryStore(), NewEmitter(&fakeBus{}), nil, nil, nil, nil)
+	svc, err := NewService(tenant, NewMemoryStore(), NewEmitter(&fakeBus{}), nil, nil, nil, nil, WithHaltGate(halt.OpenGate(nil)))
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
 	}
@@ -87,7 +89,7 @@ func TestSystemTenantOMSStillAcceptsARealTenantsCommand(t *testing.T) {
 
 // A service that cannot say whose book it writes must not be constructible.
 func TestNewServiceRefusesAnEmptyTenant(t *testing.T) {
-	_, err := NewService("", NewMemoryStore(), NewEmitter(&fakeBus{}), nil, nil, nil, nil)
+	_, err := NewService("", NewMemoryStore(), NewEmitter(&fakeBus{}), nil, nil, nil, nil, WithHaltGate(halt.OpenGate(nil)))
 	if err == nil {
 		t.Fatal("NewService accepted an empty tenant — every order it stored would be scoped " +
 			"to nothing, and it could not tell its own events from another tenant's")

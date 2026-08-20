@@ -13,6 +13,7 @@ import (
 
 	"github.com/eighred/kanz/internal/dec"
 	"github.com/eighred/kanz/internal/execution"
+	"github.com/eighred/kanz/internal/platform/halt"
 )
 
 // THE CANCEL-RESURRECTION TESTS.
@@ -158,7 +159,7 @@ func TestCancel_ArrivingMidExecutionCannotResurrectACancelledOrder(t *testing.T)
 	fb := &fakeBus{}
 	venue := newGatedVenue(fullFill())
 	reg := execution.NewCloseRegistry()
-	svc, err := NewService(testTenant, NewMemoryStore(), NewEmitter(fb), nil, execution.NewRouter([]execution.Venue{venue}), reg, nil)
+	svc, err := NewService(testTenant, NewMemoryStore(), NewEmitter(fb), nil, execution.NewRouter([]execution.Venue{venue}), reg, nil, WithHaltGate(halt.OpenGate(nil)))
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
 	}
@@ -254,7 +255,7 @@ func TestCancel_ArrivingMidExecutionCannotResurrectACancelledOrder(t *testing.T)
 func TestAmend_ArrivingMidExecutionCannotUnfillAFilledOrder(t *testing.T) {
 	fb := &fakeBus{}
 	venue := newGatedVenue(fullFill())
-	svc, err := NewService(testTenant, NewMemoryStore(), NewEmitter(fb), nil, execution.NewRouter([]execution.Venue{venue}), nil, nil)
+	svc, err := NewService(testTenant, NewMemoryStore(), NewEmitter(fb), nil, execution.NewRouter([]execution.Venue{venue}), nil, nil, WithHaltGate(halt.OpenGate(nil)))
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
 	}
@@ -361,7 +362,8 @@ func TestCancel_DoesNotWaitForeverOnAHungVenue(t *testing.T) {
 	t.Cleanup(func() { close(venue.release) })
 
 	svc, err := NewService(testTenant, NewMemoryStore(), NewEmitter(fb), nil, execution.NewRouter([]execution.Venue{venue}), nil, nil,
-		WithClaimWait(50*time.Millisecond))
+		WithClaimWait(50*time.Millisecond),
+		WithHaltGate(halt.OpenGate(nil)))
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
 	}

@@ -5,6 +5,8 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/eighred/kanz/internal/platform/halt"
 )
 
 // TWO APPROVERS ARE TWO COMMANDS (#581).
@@ -28,7 +30,7 @@ func approveAs(t *testing.T, orderID, subject, idemHeader string) string {
 	t.Helper()
 	pub := &fakePub{}
 	m := approveMux()
-	New(pub, approverRole).Routes(m)
+	New(pub, approverRole, halt.OpenGate(nil)).Routes(m)
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/orders/"+orderID+"/approve",
 		strings.NewReader(`{"digest":"sha256:beef"}`))
@@ -100,7 +102,7 @@ func TestAnExplicitIdempotencyKeyStillWins(t *testing.T) {
 func TestSubmitStillKeysOnTheOrderIdAlone(t *testing.T) {
 	pub := &fakePub{}
 	m := testMux()
-	New(pub, approverRole).Routes(m)
+	New(pub, approverRole, halt.OpenGate(nil)).Routes(m)
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/orders",
 		strings.NewReader(`{"order_id":"o-sub","portfolio_id":"PF1","symbol":"BTC-USD","side":"BUY","quantity":{"units":"1"}}`))

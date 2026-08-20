@@ -10,6 +10,7 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/eighred/kanz/internal/platform/halt"
 	"github.com/eighred/kanz/internal/version"
 	"github.com/eighred/kanz/pkg/observability"
 	"github.com/eighred/kanz/services/api-gateway/internal/config"
@@ -74,7 +75,7 @@ func mandateRouterFor(t *testing.T, role string, callerRoles ...string) (http.Ha
 	var ready atomic.Bool
 	router, err := buildRouter(cfg,
 		gateway.New(nil, nil, nil, cfg.ApproveRole, logger),
-		orders.New(nil, cfg.ApproveRole),
+		orders.New(nil, cfg.ApproveRole, halt.OpenGate(nil)),
 		// proxyRoles, NOT A HAND-BUILT LITERAL. It is what buildProxy hands the real
 		// handler, so a role added there and forgotten here cannot make this guard
 		// certify a route table the deployment does not serve.
@@ -273,7 +274,7 @@ func TestAMandateSignatoryOverNoComplianceUpstreamGets503(t *testing.T) {
 	var ready atomic.Bool
 	router, err := buildRouter(cfg,
 		gateway.New(nil, nil, nil, "", logger),
-		orders.New(nil, ""),
+		orders.New(nil, "", halt.OpenGate(nil)),
 		proxy.New(nil, proxyRoles(cfg)),
 		nil, obs, &ready, logger, nil,
 		stubAuthenticator{principal: &middleware.Principal{
@@ -318,7 +319,7 @@ func TestTheMandateRoutesForwardTheAuthenticatedPrincipal(t *testing.T) {
 	var ready atomic.Bool
 	router, err := buildRouter(cfg,
 		gateway.New(nil, nil, nil, "", logger),
-		orders.New(nil, ""),
+		orders.New(nil, "", halt.OpenGate(nil)),
 		proxy.New(be, proxyRoles(cfg)),
 		nil, obs, &ready, logger, nil,
 		stubAuthenticator{principal: &middleware.Principal{

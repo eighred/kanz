@@ -9,6 +9,7 @@ import (
 	orderpb "github.com/eighred/kanz/kanz-schemas-go/order/v1"
 
 	"github.com/eighred/kanz/internal/execution"
+	"github.com/eighred/kanz/internal/platform/halt"
 )
 
 // TestOrderTypeTheVenueCannotPlace_IsRejected (#405).
@@ -33,7 +34,7 @@ func TestOrderTypeTheVenueCannotPlace_IsRejected(t *testing.T) {
 		orderpb.OrderType_ORDER_TYPE_MARKET,
 		orderpb.OrderType_ORDER_TYPE_LIMIT,
 	})
-	svc, err := NewService(testTenant, store, NewEmitter(fb), nil, execution.NewRouter([]execution.Venue{spot}), nil, nil)
+	svc, err := NewService(testTenant, store, NewEmitter(fb), nil, execution.NewRouter([]execution.Venue{spot}), nil, nil, WithHaltGate(halt.OpenGate(nil)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -81,7 +82,7 @@ func TestDeclaredOrderType_IsStillAdmitted(t *testing.T) {
 		orderpb.OrderType_ORDER_TYPE_MARKET,
 		orderpb.OrderType_ORDER_TYPE_LIMIT,
 	})
-	svc, err := NewService(testTenant, store, NewEmitter(fb), nil, execution.NewRouter([]execution.Venue{spot}), nil, nil)
+	svc, err := NewService(testTenant, store, NewEmitter(fb), nil, execution.NewRouter([]execution.Venue{spot}), nil, nil, WithHaltGate(halt.OpenGate(nil)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -111,7 +112,8 @@ func TestUndeclaredVenue_AdmitsEveryType(t *testing.T) {
 	store := NewMemoryStore()
 	// Not wrapped: this is what an old adapter looks like after WithOrderTypes.
 	svc, err := NewService(testTenant, store, NewEmitter(fb), nil,
-		execution.NewRouter([]execution.Venue{execution.WithOrderTypes(execution.NewSimVenue("XBIN"), nil)}), nil, nil)
+		execution.NewRouter([]execution.Venue{execution.WithOrderTypes(execution.NewSimVenue("XBIN"), nil)}), nil, nil,
+		WithHaltGate(halt.OpenGate(nil)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -161,7 +163,7 @@ func TestTimeInForceTheVenueCannotExpress_IsRejected(t *testing.T) {
 			orderpb.TimeInForce_TIME_IN_FORCE_IOC,
 			orderpb.TimeInForce_TIME_IN_FORCE_FOK,
 		})
-	svc, err := NewService(testTenant, store, NewEmitter(fb), nil, execution.NewRouter([]execution.Venue{spot}), nil, nil)
+	svc, err := NewService(testTenant, store, NewEmitter(fb), nil, execution.NewRouter([]execution.Venue{spot}), nil, nil, WithHaltGate(halt.OpenGate(nil)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -206,7 +208,7 @@ func TestDeclaredTimeInForce_IsStillAdmitted(t *testing.T) {
 		orderpb.TimeInForce_TIME_IN_FORCE_GTC,
 		orderpb.TimeInForce_TIME_IN_FORCE_IOC,
 	})
-	svc, err := NewService(testTenant, store, NewEmitter(fb), nil, execution.NewRouter([]execution.Venue{spot}), nil, nil)
+	svc, err := NewService(testTenant, store, NewEmitter(fb), nil, execution.NewRouter([]execution.Venue{spot}), nil, nil, WithHaltGate(halt.OpenGate(nil)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -230,7 +232,8 @@ func TestAnUndeclaringVenue_StillAdmitsEveryTimeInForce(t *testing.T) {
 	fb := &fakeBus{}
 	store := NewMemoryStore()
 	svc, err := NewService(testTenant, store, NewEmitter(fb), nil,
-		execution.NewRouter([]execution.Venue{execution.NewSimVenue("XBIN")}), nil, nil)
+		execution.NewRouter([]execution.Venue{execution.NewSimVenue("XBIN")}), nil, nil,
+		WithHaltGate(halt.OpenGate(nil)))
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -11,6 +11,7 @@ import (
 	orderpb "github.com/eighred/kanz/kanz-schemas-go/order/v1"
 
 	"github.com/eighred/kanz/internal/execution"
+	"github.com/eighred/kanz/internal/platform/halt"
 )
 
 // THE BUG THIS FILE PINS: a transition that persisted a TERMINAL state and then
@@ -82,7 +83,8 @@ func TestSubmit_ResumesInterruptedFillAnnouncement_FillFactFails(t *testing.T) {
 	logs := &captureHandler{}
 	store := NewMemoryStore()
 	svc, err := NewService(testTenant, store, NewEmitter(fb), nil,
-		execution.NewRouter([]execution.Venue{execution.NewSimVenue("XSIM")}), nil, slog.New(logs))
+		execution.NewRouter([]execution.Venue{execution.NewSimVenue("XSIM")}), nil, slog.New(logs),
+		WithHaltGate(halt.OpenGate(nil)))
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
 	}
@@ -205,7 +207,8 @@ func TestResumeDoesNotFabricateAFillForAPreOutboxOrder(t *testing.T) {
 	logs := &captureHandler{}
 	store := NewMemoryStore()
 	svc, err := NewService(testTenant, store, NewEmitter(fb), nil,
-		execution.NewRouter([]execution.Venue{execution.NewSimVenue("XSIM")}), nil, slog.New(logs))
+		execution.NewRouter([]execution.Venue{execution.NewSimVenue("XSIM")}), nil, slog.New(logs),
+		WithHaltGate(halt.OpenGate(nil)))
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
 	}
@@ -558,7 +561,7 @@ func adoptedRejectionService(t *testing.T, fb *fakeBus, reason string) (*Service
 	t.Helper()
 	venue := &rejectingVenue{SimVenue: execution.NewSimVenue("XSIM"), reason: reason}
 	store := NewMemoryStore()
-	svc, err := NewService(testTenant, store, NewEmitter(fb), nil, execution.NewRouter([]execution.Venue{venue}), nil, nil)
+	svc, err := NewService(testTenant, store, NewEmitter(fb), nil, execution.NewRouter([]execution.Venue{venue}), nil, nil, WithHaltGate(halt.OpenGate(nil)))
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
 	}
