@@ -338,8 +338,15 @@ var drPosture = map[string]drClassification{
 		"only while no sizing decision reaching real capital is derived from this store. The alpha " +
 		"direction is aimed squarely at making that false, and CLAUDE.md's own sequencing rule (M3 " +
 		"must not precede DR coverage) is the reason this sentence is here rather than discovered " +
-		"later. This entry must not be read as 'everything here is replayable': two of its three " +
-		"tables are not"},
+		"later. ingestion_coverage (#591) is the FOURTH table and the only one that is not " +
+		"replayable AT ALL: nothing can reconstruct whether a feed was live last July, so a lost row " +
+		"is not degraded, it is gone. The exclusion nonetheless still holds, and for a reason the " +
+		"other three do not have — LOSING IT FAILS SAFE. A missing coverage row reads as UNKNOWN, " +
+		"which REFUSES a claim about the window; the refeed of ohlcv_bars produces a confidently " +
+		"WRONG knowledge_time that supports one. If this posture is ever revisited, revisit it " +
+		"because a reader started treating absent coverage as absent-and-fine, not because the data " +
+		"became recoverable, because it will not. This entry must not be read as 'everything here " +
+		"is replayable': three of its four tables are not"},
 	"identity": {status: drCovered, cluster: "kanz-identity", reason: "identity_users + " +
 		"identity_invites — the platform's own accounts and their Argon2id credentials (#364). " +
 		"ITS OWN CLUSTER, for the reason that gave the OMS kanz-orders: PITR is per-cluster, so " +

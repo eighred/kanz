@@ -25,6 +25,8 @@ func OKXFeed(cfg VenueFeedConfig) Feed {
 		}),
 		Trades: trades.NewOKXSource(trades.OKXConfig{
 			InstID: cfg.Symbol, WSURL: cfg.WSBase, DNSTTL: cfg.DNSTTL,
+			// The TRADE feed attests, not the book — see BinanceFeed.
+			Liveness: cfg.coverageObserver(mic, "okx:trades:"+cfg.Symbol),
 		}),
 	}
 }

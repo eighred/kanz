@@ -78,6 +78,17 @@ type Config struct {
 	DNSTTL time.Duration
 	// TradeRetention bounds the in-memory trade tape (the volume-delta window).
 	TradeRetention time.Duration
+
+	// CoverageMaxSilence is how long a feed subscription may go without proving
+	// itself alive before the recorder stops crediting it as observed (#591).
+	//
+	// IT IS A PROPERTY OF THE HEARTBEAT CADENCE, NOT A TASTE SETTING. Both venue
+	// trade sources heartbeat at trades.HeartbeatInterval (20s), so this must be
+	// long enough to survive one lost beat plus jitter and short enough that a
+	// whole silent bucket cannot be credited off one observation on either side
+	// of it. coverage.NewRecorder REFUSES a value >= one bucket rather than
+	// accepting a tolerance that would vouch for a dead feed.
+	CoverageMaxSilence time.Duration
 }
 
 // Load reads and validates the environment.
@@ -107,6 +118,10 @@ func Load() Config {
 		DepthLimit:     parseInt(os.Getenv("MARKET_INGEST_DEPTH_LIMIT"), 1000),
 		DNSTTL:         parseDuration(os.Getenv("MARKET_INGEST_DNS_TTL"), 5*time.Minute),
 		TradeRetention: parseDuration(os.Getenv("MARKET_INGEST_TRADE_RETENTION"), time.Minute),
+		// 45s = two 20s heartbeats plus jitter, and under the 1-minute bucket the
+		// recorder enforces. A misconfiguration here fails at construction, not on
+		// the first quiet minute.
+		CoverageMaxSilence: parseDuration(os.Getenv("MARKET_INGEST_COVERAGE_MAX_SILENCE"), 45*time.Second),
 	}
 }
 

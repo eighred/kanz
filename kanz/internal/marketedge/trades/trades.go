@@ -53,6 +53,53 @@ type TradeSource interface {
 	Recv(ctx context.Context) (Trade, error)
 }
 
+// Liveness is how a subscription reports that it is ALIVE, and it is the seam
+// the ingestion-coverage record is built on (#591).
+//
+// # Why a source reports this at all, when it already returns trades
+//
+// A trade proves the subscription was live. The absence of a trade proves
+// nothing — fold.go's whole point is that "nothing traded" and "the feed was
+// down" are indistinguishable from the data. So a liveness signal derived from
+// TRADES would be uninformative in exactly the case it is needed, and a coverage
+// record built on it would report a quiet minute as an unobserved one.
+//
+// WHAT MUST BE REPORTED IS A HEARTBEAT: a websocket ping that came back, a venue
+// keepalive, a control frame — evidence from the TRANSPORT that the socket is
+// round-tripping, which is available whether or not the market is doing anything.
+// That is why this seam lives on the source and not on the fold: only the thing
+// holding the socket can see it.
+//
+// A nil Liveness is valid and means NOTHING IS ATTESTED. The intervals that
+// subscription covers will read downstream as UNKNOWN — which is the honest
+// answer for a feed nobody is vouching for, and is deliberately distinct from an
+// attestation that says the feed was down.
+type Liveness interface {
+	// Live records that the subscription round-tripped a frame at `at`.
+	Live(at time.Time)
+	// Down records that the subscription FAILED at `at`.
+	Down(at time.Time, err error)
+}
+
+// HeartbeatInterval is how often a source proves its socket is still round-
+// tripping when the market is quiet.
+//
+// 20 SECONDS BECAUSE OKX DROPS AN IDLE STREAM AT 30 (see OKXSource.keepAlive,
+// which has pinged at this cadence since before coverage existed). Binance now
+// matches it rather than picking its own number: the coverage recorder's silence
+// tolerance is one value for every feed, and two cadences would mean it was
+// either too slack for one or too tight for the other.
+const HeartbeatInterval = 20 * time.Second
+
+// HeartbeatTimeout bounds one heartbeat round trip.
+//
+// A ping that never returns must not wedge the keepalive goroutine forever: the
+// point of the heartbeat is to STOP reporting liveness when the socket is dead,
+// and a blocked Ping reports neither Live nor Down — it just goes quiet, which
+// the recorder reads as an uncredited gap. That is the safe direction, but a
+// bounded timeout gets the connection torn down and reconnected instead.
+const HeartbeatTimeout = 10 * time.Second
+
 // Tape is a bounded, time-windowed rolling record of one instrument's trades on
 // one venue. Safe for concurrent use: the fold goroutine appends while engine
 // ticks read.

@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/eighred/kanz/internal/lifecycle"
+	"github.com/eighred/kanz/internal/marketedge/coverage"
 	"github.com/eighred/kanz/internal/platform/httpserver"
 	"github.com/eighred/kanz/internal/version"
 	"github.com/eighred/kanz/pkg/alpha"
@@ -129,9 +130,40 @@ func run() int {
 	// which imports pkg/alpha and runs this same Runner with its engines supplied —
 	// so the code that touches the market is identical either way, and only the
 	// decision-making differs.
+	// THE INGESTION-COVERAGE RECORD (#591), built BEFORE the feeds because every
+	// subscription binds to it as it is constructed.
+	//
+	// This is the platform's only first-hand statement of which intervals it was
+	// actually OBSERVING. internal/marketedge/bars emits no candle for a minute in
+	// which nothing traded, so from the bar series a quiet market and a dead feed
+	// are the same absence — and every reader downstream of it has been guessing.
+	// The attestation is made HERE because this is the only process that holds the
+	// sockets; anything further down can only infer it from the data it is meant
+	// to vouch for.
+	//
+	// IT CANNOT BE CAPTURED RETROSPECTIVELY. Nothing can reconstruct whether a
+	// feed was live last July, so a failure to construct it is a HARD refusal to
+	// start rather than a degraded mode: a market-ingest running without it is a
+	// market-ingest permanently destroying the evidence, quietly, while every
+	// probe stays green.
+	cov, err := coverage.NewRecorder(coverage.Config{
+		Publisher: publishHealth,
+		Tenant:    cfg.Tenant,
+		// The silence tolerance is a property of the venue heartbeat cadence, and
+		// the recorder refuses a value that would credit a whole silent bucket.
+		MaxSilence: cfg.CoverageMaxSilence,
+		Logger:     logger,
+	})
+	if err != nil {
+		logger.Error("ingestion-coverage record cannot be built — refusing to start rather than "+
+			"ingest without the only record of which intervals we were observing, which cannot be "+
+			"reconstructed afterwards", "err", err)
+		return 2
+	}
+
 	// A market-ingest with nothing real to ingest is a HARD failure now, not a
 	// silent swap to generated prices (see feeds()).
-	srcs, err := feeds(cfg, logger)
+	srcs, err := feeds(cfg, cov, logger)
 	if err != nil {
 		// Refusing to start beats starting and publishing invented prices that
 		// risk, NAV and pricing will all mark against.
@@ -174,6 +206,18 @@ func run() int {
 			logger.Error("market edge stopped", "err", err)
 			fatal.Raise(err)
 		}
+	}()
+
+	// THE COVERAGE SWEEP RUNS BESIDE THE RUNNER, not inside it, and that is not
+	// tidiness. A subscription closes a coverage bucket only when its NEXT
+	// observation arrives, so a feed that has DIED publishes nothing further —
+	// and nothing published is exactly what a platform that was never looking
+	// also produces. The sweep is the only thing that closes those buckets out,
+	// so it must keep running when every feed has stopped.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		cov.Run(ctx)
 	}()
 	ready.set(true)
 

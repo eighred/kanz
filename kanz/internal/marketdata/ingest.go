@@ -15,6 +15,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"time"
 
 	"google.golang.org/protobuf/proto"
@@ -26,6 +27,7 @@ import (
 
 	"github.com/eighred/kanz/internal/dec"
 	"github.com/eighred/kanz/internal/marketdata/store"
+	"github.com/eighred/kanz/internal/marketedge/coverage"
 )
 
 // Writer is the store boundary the Ingestor depends on — just the write side,
@@ -42,9 +44,18 @@ import (
 // It is one method on one interface with one production implementation. The
 // cost of requiring it is a line in a test fake; the cost of not requiring it is
 // silence.
+//
+// PutCoverage IS PART OF IT FOR A SHARPER VERSION OF THE SAME REASON (#591).
+// The ingestion-coverage record is the only thing that distinguishes "the market
+// was quiet" from "the feed was dead", and unlike a bar it CANNOT BE RE-FETCHED:
+// a candle dropped today can be backfilled from the venue tomorrow, while an
+// attestation dropped today is gone permanently, because nothing can reconstruct
+// whether a feed was live. An ingestor wired without a coverage sink would run
+// green while throwing away the one signal that has no second chance.
 type Writer interface {
 	Put(ctx context.Context, obs []store.Observation) error
 	PutBars(ctx context.Context, bars []store.Bar) error
+	PutCoverage(ctx context.Context, cov []store.Coverage) error
 }
 
 // Ingestor is the bus.EventHandler that folds market.v1 events into the price
@@ -73,6 +84,16 @@ func NewIngestor(w Writer) (*Ingestor, error) {
 // from a single event. TranslateBatch is provided for when that convention
 // lands — translation is already per-event, so a batch is just a loop.
 func (i *Ingestor) Handler(ctx context.Context, env *envelopepb.Envelope, payload []byte) error {
+	// COVERAGE IS A DIFFERENT MESSAGE ON THE SAME SUBJECT SPACE, so it is
+	// discriminated BEFORE Unmarshal rather than after. By the time the bytes are
+	// decoded an IngestionCoverage and a MarketDataEvent are indistinguishable —
+	// proto3 would happily read the coverage record's instrument_id and mic into
+	// the wrong fields and then refuse it for a missing event_time, which reads
+	// as a malformed market event rather than as the right payload on the wrong
+	// path. internal/marketdata/mark makes the same call, one fold over.
+	if env.GetEventType() == coverage.Subject {
+		return i.handleCoverage(ctx, env, payload)
+	}
 	var ev marketpb.MarketDataEvent
 	if err := proto.Unmarshal(payload, &ev); err != nil {
 		return fmt.Errorf("marketdata: %s unmarshal: %w", env.GetEventType(), err)
@@ -108,6 +129,25 @@ func (i *Ingestor) Handler(ctx context.Context, env *envelopepb.Envelope, payloa
 		}
 	}
 	return i.writer.Put(ctx, []store.Observation{obs})
+}
+
+// handleCoverage folds one ingestion-coverage FACT into the record (#591).
+//
+// A REFUSAL HERE NACKS AND DLQs, exactly as a malformed market event does. That
+// is the loud half of "no coverage record" and "covered, and the market was
+// quiet" never looking the same: a coverage record this platform could not store
+// must surface to an operator, because the alternative is an interval that
+// silently reads as UNKNOWN forever with nothing anywhere saying why.
+func (i *Ingestor) handleCoverage(ctx context.Context, env *envelopepb.Envelope, payload []byte) error {
+	var cov marketpb.IngestionCoverage
+	if err := proto.Unmarshal(payload, &cov); err != nil {
+		return fmt.Errorf("marketdata: %s unmarshal: %w", env.GetEventType(), err)
+	}
+	rec, err := TranslateCoverage(env, &cov)
+	if err != nil {
+		return err
+	}
+	return i.writer.PutCoverage(ctx, []store.Coverage{rec})
 }
 
 // knowledgeTime is when Kanz learned an event, from the envelope alone.
@@ -346,4 +386,80 @@ func tsToTime(ts *timestamppb.Timestamp) time.Time {
 		return time.Time{}
 	}
 	return ts.AsTime()
+}
+
+// TranslateCoverage maps a market.v1.IngestionCoverage FACT onto a stored
+// attestation (#591).
+//
+// # Why this is a separate translation and not another oneof variant
+//
+// A coverage record is not a market data point. It carries no price, no size and
+// no volume — deliberately, because a coverage record that counted trades would
+// invite a reader to reconcile it against the series it exists to vouch FOR, and
+// a record derived from that series vouches for itself. Putting it in
+// MarketDataEvent's oneof would have made it look like one more thing the market
+// did, when it is a statement about the PLATFORM.
+//
+// # Everything here is refused rather than defaulted
+//
+// A missing `observed` is refused, not read as zero. proto3 cannot tell an unset
+// scalar from a zero one, which is exactly why the field is a Duration MESSAGE:
+// nil is distinguishable, and it means the producer said nothing rather than
+// "we proved no coverage". Those are different facts and only the second is a
+// measurement.
+//
+// ONLY THE 1-MINUTE RESOLUTION IS ACCEPTED, matching TranslateBar. Coverage
+// exists to explain an absence in the base series; an hourly attestation would
+// be a second, coarser answer to the same question, and it would be right or
+// wrong in ways nothing could check against the 1m record.
+func TranslateCoverage(env *envelopepb.Envelope, cov *marketpb.IngestionCoverage) (store.Coverage, error) {
+	var out store.Coverage
+	if cov == nil {
+		return out, fmt.Errorf("marketdata: %s carries no coverage payload", env.GetEventType())
+	}
+	start := tsToTime(cov.GetBucketStart())
+	end := tsToTime(cov.GetBucketEnd())
+	if start.IsZero() || end.IsZero() {
+		return out, fmt.Errorf("marketdata: %s coverage without bucket_start/bucket_end — "+
+			"an attestation that does not say WHICH interval it covers cannot vouch for one",
+			env.GetEventType())
+	}
+	res, ok := store.ResolutionOf(start, end)
+	if !ok {
+		return out, fmt.Errorf("marketdata: %s coverage spans %s, which is not a resolution this "+
+			"platform stores", env.GetEventType(), end.Sub(start))
+	}
+	if res != store.Resolution1m {
+		return out, fmt.Errorf("marketdata: %s coverage at resolution %s — only %s is attested, "+
+			"because coverage explains an absence in the BASE series and a coarser attestation "+
+			"would be a second answer to the same question",
+			env.GetEventType(), res, store.Resolution1m)
+	}
+	if cov.GetObserved() == nil {
+		return out, fmt.Errorf("marketdata: %s coverage with no observed duration — the field is a "+
+			"message so that an unset one is distinguishable from a proven zero, and a producer "+
+			"that said nothing must not be read as having measured nothing", env.GetEventType())
+	}
+	// KNOWLEDGE TIME IS THE ENVELOPE'S, NOT THE BUCKET'S. An attestation that
+	// arrived late is not evidence that was available live, and knowledgeTime
+	// refuses an unstamped envelope rather than substituting a plausible one
+	// (#427) — the same rule the bar path is held to.
+	known, err := knowledgeTime(env)
+	if err != nil {
+		return out, err
+	}
+	out = store.Coverage{
+		InstrumentID: cov.GetInstrumentId(),
+		Venue:        cov.GetMic(),
+		Resolution:   res,
+		BucketStart:  start.UTC(),
+		Observed:     cov.GetObserved().AsDuration(),
+		Breaks:       int32(min(cov.GetBreaks(), math.MaxInt32)),
+		Attestor:     cov.GetAttestor(),
+		RecordedAt:   known,
+	}
+	if err := out.Validate(); err != nil {
+		return store.Coverage{}, fmt.Errorf("marketdata: %s: %w", env.GetEventType(), err)
+	}
+	return out, nil
 }

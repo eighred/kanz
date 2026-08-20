@@ -243,17 +243,25 @@ type BarStore interface {
 	Bars(ctx context.Context, q BarQuery) ([]Bar, error)
 }
 
-// ReadWriter is the whole market-data store: the scalar mark series and the
-// candles.
+// ReadWriter is the whole market-data store: the scalar mark series, the
+// candles, and the record of which intervals the platform was OBSERVING.
 //
 // It exists so a composition root can hand ONE value to consumers that need
-// both, without either interface growing methods that belong to the other. The
-// two concrete stores (Memory, Postgres) implement it; a narrower consumer keeps
-// taking Store or BarStore and is unable to reach the half it has no business
-// with.
+// them, without any interface growing methods that belong to another. The two
+// concrete stores (Memory, Postgres) implement it; a narrower consumer keeps
+// taking Store, BarStore or CoverageStore and is unable to reach the parts it
+// has no business with.
+//
+// COVERAGE IS NOT OPTIONAL HERE, for the reason marketdata.Writer gives about
+// PutBars: an ingestor wired without a coverage sink runs green while discarding
+// the only evidence that distinguishes a quiet market from a dead feed — and
+// unlike a bar, that evidence CANNOT BE RE-FETCHED. A candle dropped today can
+// be backfilled from the venue tomorrow; an attestation dropped today is gone
+// permanently, because nothing can reconstruct whether a feed was live.
 type ReadWriter interface {
 	Store
 	BarStore
+	CoverageStore
 }
 
 // SameCandle reports whether two versions of a bar say the same thing about the

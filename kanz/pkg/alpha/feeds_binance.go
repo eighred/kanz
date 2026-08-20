@@ -28,6 +28,11 @@ func BinanceFeed(cfg VenueFeedConfig) Feed {
 		}),
 		Trades: trades.NewBinanceSource(trades.BinanceConfig{
 			Symbol: cfg.Symbol, WSBase: cfg.WSBase, DNSTTL: cfg.DNSTTL,
+			// THE TRADE FEED IS THE ONE THAT ATTESTS, because it is the feed the
+			// bar series is folded from (internal/marketedge/bars). Coverage of the
+			// depth stream would vouch for a different subscription than the one
+			// whose absence a missing candle represents.
+			Liveness: cfg.coverageObserver(mic, "binance:trades:"+cfg.Symbol),
 		}),
 	}
 }

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log/slog"
 
+	"github.com/eighred/kanz/internal/marketedge/coverage"
 	"github.com/eighred/kanz/pkg/alpha"
 	"github.com/eighred/kanz/services/market-ingest/internal/config"
 )
@@ -31,11 +32,11 @@ import (
 // So it is now an explicit, deliberate opt-in (MARKET_INGEST_ALLOW_SIM=true) and
 // an error otherwise. An ingest with no mapped symbols publishes NOTHING, loudly,
 // rather than publishing fiction quietly.
-func feeds(cfg config.Config, logger *slog.Logger) ([]alpha.Feed, error) {
+func feeds(cfg config.Config, cov *coverage.Recorder, logger *slog.Logger) ([]alpha.Feed, error) {
 	var out []alpha.Feed
 	for _, instrument := range cfg.Instruments {
-		out = append(out, binanceFeeds(cfg, instrument, logger)...)
-		out = append(out, okxFeeds(cfg, instrument, logger)...)
+		out = append(out, binanceFeeds(cfg, instrument, cov, logger)...)
+		out = append(out, okxFeeds(cfg, instrument, cov, logger)...)
 	}
 	if len(out) > 0 || len(cfg.Instruments) == 0 {
 		return out, nil
@@ -52,6 +53,12 @@ func feeds(cfg config.Config, logger *slog.Logger) ([]alpha.Feed, error) {
 	// Opt-in, and it still says exactly what it is doing.
 	logger.Warn("PUBLISHING SIMULATED MARKET DATA — no exchange feed is mapped. Every price on the bus is GENERATED, not observed; risk, NAV and pricing will all mark against fiction",
 		"instruments", len(cfg.Instruments))
+	// THE SIMULATOR ATTESTS NOTHING, deliberately. SimFeed does not hold a
+	// subscription to anything, so there is no observation to make — and a
+	// coverage record vouching for generated prices would be the worst artifact
+	// this package could produce: a durable claim that the platform was watching a
+	// market it was in fact inventing. Its intervals read as UNKNOWN, which is the
+	// truth.
 	for _, instrument := range cfg.Instruments {
 		out = append(out, alpha.SimFeed(instrument))
 	}
