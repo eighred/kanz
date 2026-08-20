@@ -28,6 +28,20 @@ import (
 //	      #509), and its sibling served_rpc_has_a_caller_test.go cannot either
 //	      (call granularity). The distinction is recorded here so a deleted entry
 //	      does not read as "Go scores predictions".
+//	#416  internal/marketdata/indicator — the C1 technical-indicator library.
+//	      RETIRED 2026-08-20: internal/alpha/barview reads it through the
+//	      point-in-time bar seam the owner ruled for that day, so an engine handed
+//	      an alpha.BarView reads C1's readings without touching the store.
+//	      NOTE THE LIMIT, and it is the same one the retired entry itself warned
+//	      about: barview has no production caller either, so an indicator still
+//	      reaches no decision. What changed is not that the library became live —
+//	      it is that the darkness collapsed from two open questions ("what reads
+//	      it, and how does that read avoid look-ahead") to one ("write the
+//	      engine"), and the remaining one is now tracked against a single package
+//	      below rather than against a library whose consumer had no shape. The
+//	      seam is also the thing the retired entry said dataset.Materializer could
+//	      not be: it enforces the point-in-time refusal, which is the property C2
+//	      cannot be graded without.
 //	#471  internal/regulatory/stress — the REG-01c CCAR/DFAST framework. Its
 //	      exemption is gone because internal/risk/benchmarks now grades it, which
 //	      gives it an importer reached from the risk-engine composition root.
@@ -127,14 +141,17 @@ var darkPackageExempt = map[string]string{
 	"internal/risk/pricing/credit": "#113 — the credit calibrator carries the same Refresh seam the " +
 		"scheduler drives, and is not scheduled because no live CDS quote source exists (#203). " +
 		"kanz_risk_calibration_scheduled{kind=\"credit\"} reports 0 so the gap is visible.",
-	"internal/marketdata/indicator": "#416 C2 — the technical-indicator library the retired " +
-		"alpha house rule depends on. It is dark for ONE STEP and the consumer is named: C2's first " +
-		"alpha.Engine, which needs the score contract (P(return >= X%% within horizon H) plus a " +
-		"calibration test) that C1 deliberately does not decide. WIRING IT INTO dataset.Materializer " +
-		"WOULD NOT MAKE IT LIVE and is the obvious wrong fix: Materializer is the declared consumer " +
-		"of the FeatureSource seam this implements, and it has zero production callers of its own " +
-		"(#509's finding, one tree over) — so the import would satisfy this guard while changing " +
-		"nothing about whether an indicator reaches a decision.",
+	"internal/alpha/barview": "#416 C2 — the point-in-time bar seam the owner ruled for on " +
+		"2026-08-20, and the package that inherited internal/marketdata/indicator's darkness when " +
+		"it gave the library a reader. It is dark for ONE STEP and the consumer is named: C2's " +
+		"first alpha.Engine, which market-ingest still registers NONE of, so the tick loop is a " +
+		"no-op and nothing built here reaches a decision. CONSTRUCTING IT FROM THE market-ingest " +
+		"COMPOSITION ROOT WOULD NOT MAKE IT LIVE and is the obvious wrong fix, exactly as wiring " +
+		"the indicator library into dataset.Materializer was: a view nobody evaluates against is a " +
+		"read that never happens, and the import would satisfy this guard while changing nothing. " +
+		"It would also cost something real — market-ingest has no database and does not depend on " +
+		"pgx today, which is why the seam's own types live in pkg/alpha rather than being " +
+		"store.Attested. What retires this entry is an Engine implementation, not a constructor.",
 
 	// The three below were dark in the services/*/internal blind spot #583 closed.
 	"services/accounting/internal/corpact": "#588 — the IBOR-01c corporate-action processor. It " +

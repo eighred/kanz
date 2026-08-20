@@ -35,6 +35,11 @@
 //
 //   - MarketView: the read-seam over the off-bus, in-memory book + trade tape.
 //     Raw, exact market state. No derived indicators.
+//   - BarView (barview.go): the SECOND seam, added by the 2026-08-20 ruling on
+//     #416. The durable OHLCV series read point-in-time, carrying C1's indicator
+//     readings and the coverage of the window they came from. MarketView was
+//     deliberately NOT widened to hold this — see that file for why, and for the
+//     look-ahead refusal that is the whole reason it has a shape at all.
 //   - Engine: the interface a strategy implements. It receives the views and
 //     returns intents. It had zero implementations while the house rule stood,
 //     which is what made this an empty socket rather than a boundary.

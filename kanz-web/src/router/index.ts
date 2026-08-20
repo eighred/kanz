@@ -7,6 +7,7 @@ import NodesView from '../views/NodesView.vue'
 import ExposureView from '../views/ExposureView.vue'
 import OrdersView from '../views/OrdersView.vue'
 import OverridesView from '../views/OverridesView.vue'
+import MandateChangesView from '../views/MandateChangesView.vue'
 import InstrumentsView from '../views/InstrumentsView.vue'
 import PortfoliosView from '../views/PortfoliosView.vue'
 import ProvisionsView from '../views/ProvisionsView.vue'
@@ -38,6 +39,19 @@ export const router = createRouter({
     // override queue — 403 without authz.Approve, 404 where no approver role is
     // configured at all — and the view renders those as different sentences.
     { path: '/overrides', name: 'overrides', component: OverridesView },
+    // ACT TWO OF THE SAME CONTROL, on the same terms as the two routes above.
+    // The gateway decides who may read it and answers three different things —
+    // 404 where no MANDATE role is configured, 403 where one is and this account
+    // does not hold it, 401 where the session carries no tenant — and the view
+    // renders those as different sentences.
+    //
+    // NOTE THE CAPABILITY IS authz.Mandate AND NOT authz.Approve, deliberately:
+    // under one capability, the second signature on a mandate change and the
+    // second signature on a held order come from the same pool, so one signatory
+    // could sign away a limit and then sign the trade that limit existed to stop.
+    // So this link being visible to an order approver who then gets a 403 is the
+    // control working, and that is what the view says.
+    { path: '/mandate-changes', name: 'mandate-changes', component: MandateChangesView },
     { path: '/portfolios', name: 'portfolios', component: PortfoliosView },
     { path: '/portfolios/:id/exposure', name: 'exposure', component: ExposureView },
     { path: '/portfolios/:id/orders', name: 'orders', component: OrdersView },
