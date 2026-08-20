@@ -7,6 +7,21 @@
 // would surface as a pre-trade control that refuses or admits wrongly. So this
 // package only REMEMBERS a level somebody else computed.
 //
+// CORPORATE ACTIONS ARE NOT IN THIS BALANCE (#588). Accounting's ledger is
+// AUTHORIZED to fold them and its fold is written and tested, but nothing in this
+// platform publishes an accounting.v1.CorporateAction, so no dividend, coupon or
+// merger payment has ever reached the journal these announcements are computed
+// from. The number remembered here is short by every such payment — and it is
+// read by BuyingPowerRule, which fails CLOSED, so a portfolio that has been paid
+// a dividend is refused orders it can afford, with a reason that reads as a real
+// spending limit rather than a missing feed.
+//
+// DO NOT REPAIR THAT HERE. Adding the missing cash locally would be the second
+// computation the paragraph above rules out, and it would have to invent the
+// action to add. Check kanz_accounting_entry_source_wired{type="corporate_action"}
+// on the accounting deployment: a 0 means no corporate action has been ingested
+// at all, not that none occurred.
+//
 // It is read on the order-admission path, so it is an in-memory map and never a
 // query: a call into accounting from the pre-trade gate would put an
 // externally-owned latency in front of every order and turn a degraded

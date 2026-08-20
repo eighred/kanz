@@ -38,7 +38,6 @@ import (
 	varmodel "github.com/eighred/kanz/internal/risk/compute/var"
 	"github.com/eighred/kanz/internal/risk/engine"
 	"github.com/eighred/kanz/internal/risk/factormodel"
-	"github.com/eighred/kanz/internal/risk/ingest"
 	"github.com/eighred/kanz/internal/risk/liquiditysource"
 	"github.com/eighred/kanz/internal/risk/pricing/curve"
 	"github.com/eighred/kanz/internal/risk/pricing/livequote"
@@ -181,6 +180,14 @@ func runEngine(ctx context.Context, cfg config.Config, readiness *server.Readine
 		return fmt.Errorf("RISK_ENGINE_SHARD_MEMBERS/RISK_ENGINE_SHARD_SELF: %w — every replica must "+
 			"be given the SAME member list and its own id from that list", err)
 	}
+	// THE RING IS CONSUMED THROUGH ONE VALUE, NOT FOUR CALL SITES (#110). The
+	// store gate, the live filter, the replay filter and the query refusal all
+	// have to agree about ownership, and this is the untested file — the ring
+	// used to reach only the live filter, so a sharded replica boot-restored
+	// every other replica's portfolio, froze it, served it, and wrote it back
+	// over the owner's record. app.Sharding is unit-tested; `assign` is not
+	// referenced again below.
+	sharding := app.NewSharding(assign, cfg.ShardSelf)
 
 	// SEC-M3: ONE workload identity for everything in this process that speaks
 	// mTLS — the NATS spine below and the query gRPC listener (serveQueryGRPC).
@@ -209,7 +216,11 @@ func runEngine(ctx context.Context, cfg config.Config, readiness *server.Readine
 		return err
 	}
 
-	store := state.NewStore()
+	// Gated on the ring when sharded (no-op otherwise): a portfolio this replica
+	// does not own cannot be restored, cannot be lazy-created by an apply, and so
+	// never reaches IDs() — which is what the Snapshotter and the post-bootstrap
+	// recompute arming iterate without asking about ownership.
+	store := state.NewStore(sharding.StoreOptions()...)
 	// Cache + registry are shared between the recompute path and the query
 	// EngineImpl below, so a query sees the live store plus the same
 	// last-known-good cache the recomputer fills (degraded fallback).
@@ -539,6 +550,12 @@ func runEngine(ctx context.Context, cfg config.Config, readiness *server.Readine
 	// Durable state (PERS-01): restore + replay before live ingestion, and
 	// run the periodic snapshotter + final-checkpoint drain. Skipped when no
 	// database is configured — state stays in-memory.
+	//
+	// foreignRecords is how many portfolios the ring told this replica not to
+	// hold. It is hoisted out of the block so ShardPosture below reports it
+	// whether or not a database is configured — an unreported zero and an
+	// absent series are the same reading, and only one of them is honest.
+	foreignRecords := 0
 	if cfg.DatabaseURL != "" {
 		// MT-01d: every connection carries the engine's tenant as the
 		// `app.tenant_id` GUC, so Postgres RLS scopes all state reads/writes to
@@ -552,8 +569,10 @@ func runEngine(ctx context.Context, cfg config.Config, readiness *server.Readine
 		defer pool.Close()
 		sink := persist.NewPostgres(pool)
 
-		// Bootstrap applies through the BARE store (no recompute storm).
-		boot, err := app.NewBootstrap(store, sink, store, cfg.KafkaBrokers, logger)
+		// Bootstrap applies through the BARE store (no recompute storm), now
+		// behind the same ownership filter as live ingest — recovery must not
+		// rebuild another replica's book any more than live traffic may.
+		boot, err := app.NewBootstrap(store, sink, sharding.ReplayApplier(store), cfg.KafkaBrokers, logger)
 		if err != nil {
 			return err
 		}
@@ -568,6 +587,7 @@ func runEngine(ctx context.Context, cfg config.Config, readiness *server.Readine
 		// Arm exactly one recompute per restored portfolio now that replay has
 		// settled — see ArmPostBootstrapRecomputes for why this is not the
 		// per-event storm the bare-store replay avoids.
+		foreignRecords = boot.ForeignRecordsSkipped()
 		app.ArmPostBootstrapRecomputes(store, recomputer, logger)
 
 		snap := engine.NewSnapshotter(store, sink, nil, cfg.SnapshotInterval, logger)
@@ -593,19 +613,16 @@ func runEngine(ctx context.Context, cfg config.Config, readiness *server.Readine
 	// subscribe under a per-replica (broadcast) consumer group rather than the
 	// shared partition-balanced one. Unsharded (no members / no self) ⇒ owns
 	// everything on the shared group, exactly the pre-05a path.
-	var applier ingest.Applier = engine.NewTriggeringApplier(store, recomputer)
-	group := ""
-	// assign was built and validated at the top of runEngine, before any I/O.
-	sharded := assign.Sharded()
-	if sharded {
-		applier = app.NewShardFilter(applier, assign)
-		group = app.DefaultConsumerGroup + "-" + cfg.ShardSelf
-	}
+	applier := sharding.LiveApplier(engine.NewTriggeringApplier(store, recomputer))
+	// sharding wraps the Assignment built and validated at the top of runEngine,
+	// before any I/O. Empty group ⇒ the shared partition-balanced default.
+	group := sharding.ConsumerGroup(app.DefaultConsumerGroup)
+	sharded := sharding.Enabled()
 	// WHETHER THIS FLEET PINS A PORTFOLIO TO A REPLICA (#110). The log line that
 	// used to sit inside the branch above announced the good case and said
 	// nothing about the other one — so the state the estate is actually in was
 	// the silent one.
-	app.ShardPosture(obs.Registry, logger, sharded, cfg.ShardMembers, cfg.ShardSelf)
+	app.ShardPosture(obs.Registry, logger, sharded, cfg.ShardMembers, cfg.ShardSelf, foreignRecords)
 	ingest, err := app.NewIngest(consumer, applier, group, logger)
 	if err != nil {
 		return err
@@ -730,7 +747,10 @@ func runEngine(ctx context.Context, cfg config.Config, readiness *server.Readine
 	// EngineImpl, sharing the live store + cache + registry. Started only when
 	// an address is configured; stopped gracefully when ctx is canceled.
 	if cfg.GRPCListen != "" {
-		engineImpl := engine.New(store, registry, cache, risk.NewDetector())
+		// WithOwnership: this Service fans out across every replica, so a query for
+		// a portfolio held elsewhere must be refused by name rather than answered
+		// from the local cache or reported as not-found (#110).
+		engineImpl := engine.New(store, registry, cache, risk.NewDetector(), sharding.EngineOptions()...)
 		stopGRPC, err := serveQueryGRPC(ctx, cfg, mesh.Source, engineImpl, logger)
 		if err != nil {
 			return err

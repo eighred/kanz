@@ -506,4 +506,18 @@ var (
 	// (empty PortfolioID, malformed AsOf, etc.). Distinct from
 	// transport/runtime errors so callers can branch correctly.
 	ErrInvalidRequest = errors.New("risk: invalid request")
+
+	// ErrPortfolioNotOwned: this REPLICA does not own the portfolio, so it
+	// has no state for it and will not answer. The portfolio exists; another
+	// replica holds it (#110).
+	//
+	// THIS IS NOT ErrPortfolioNotFound, and collapsing the two would be the
+	// worst available answer. On a sharded fleet the query Service fans out
+	// across every replica, so the same request reaches a different pod each
+	// time — and a bare "not found" from the two thirds that do not own the
+	// portfolio reads as "no such portfolio", which is false, non-deterministic
+	// between identical calls, and indistinguishable from the genuine case.
+	// A caller that sees this error knows to look elsewhere; the message names
+	// where. Wrapped errors carry the owning replica's id.
+	ErrPortfolioNotOwned = errors.New("risk: portfolio is not owned by this replica")
 )

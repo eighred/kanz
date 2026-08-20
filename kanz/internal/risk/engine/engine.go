@@ -31,6 +31,7 @@ package engine
 
 import (
 	"context"
+	"fmt"
 	"sort"
 	"time"
 
@@ -55,6 +56,21 @@ type EngineImpl struct {
 	detector   *risk.Detector
 	volModel   compute.VolModel
 	classifier factor.Classifier
+	ownership  Ownership
+}
+
+// Ownership is the query side of the shard ring (#110): which portfolios may
+// THIS replica answer for, and which replica holds the rest.
+//
+// It is an interface here rather than a *shard.Assignment because the ring is a
+// risk-engine service concern and this package is shared; the service satisfies
+// it (services/risk-engine/internal/app.Sharding). A nil Ownership is the
+// unsharded posture — every portfolio is answerable, exactly as before.
+type Ownership interface {
+	// Owns reports whether this replica holds the portfolio's state.
+	Owns(id v1.PortfolioID) bool
+	// OwnerOf names the replica that does, for the refusal message.
+	OwnerOf(id v1.PortfolioID) string
 }
 
 // EngineOption customizes an EngineImpl at construction.
@@ -73,6 +89,32 @@ func WithVolModel(vm compute.VolModel) EngineOption {
 // silent no-ops.
 func WithClassifier(c factor.Classifier) EngineOption {
 	return func(e *EngineImpl) { e.classifier = c }
+}
+
+// WithOwnership makes the query surface shard-aware: a request for a portfolio
+// this replica does not own is REFUSED, naming the replica that does, rather
+// than answered.
+//
+// # Why a refusal and not a miss
+//
+// Without this the read path does not consult the ring at all. It asks the
+// store, and on a miss falls back to risk.Cache — the last-known-good value.
+// Both halves of that are wrong on a sharded replica:
+//
+//   - The cache is populated by this replica's own recomputes. A portfolio it
+//     used to own, or one it briefly held before a ring change, leaves a
+//     plausible entry behind. Serving it is a real number computed from a book
+//     this replica no longer has, with no staleness signal that says so — the
+//     degraded fallback is designed for "the store lost it", not "somebody else
+//     owns it".
+//   - And when the cache is empty the answer is ErrPortfolioNotFound, which
+//     says the portfolio does not exist. It does; it is on another pod. The
+//     query Service round-robins across replicas, so the caller gets that answer
+//     for two thirds of identical requests.
+//
+// nil ownership leaves both paths exactly as they were (the unsharded default).
+func WithOwnership(o Ownership) EngineOption {
+	return func(e *EngineImpl) { e.ownership = o }
 }
 
 // New constructs an EngineImpl over the engine's collaborators. A nil
@@ -96,6 +138,9 @@ func (e *EngineImpl) Exposure(ctx context.Context, req v1.ExposureRequest) (v1.E
 	}
 	if req.PortfolioID == "" {
 		return v1.ExposureResponse{}, v1.ErrInvalidRequest
+	}
+	if err := e.refuseIfNotOwned(req.PortfolioID); err != nil {
+		return v1.ExposureResponse{}, err
 	}
 
 	es, pos, ok := e.exposureSet(ctx, req.PortfolioID)
@@ -121,6 +166,9 @@ func (e *EngineImpl) Measures(ctx context.Context, req v1.MeasuresRequest) (v1.M
 	}
 	if req.PortfolioID == "" {
 		return v1.MeasuresResponse{}, v1.ErrInvalidRequest
+	}
+	if err := e.refuseIfNotOwned(req.PortfolioID); err != nil {
+		return v1.MeasuresResponse{}, err
 	}
 
 	full, pos, ok := e.measureSet(ctx, req.PortfolioID)
@@ -157,6 +205,9 @@ func (e *EngineImpl) EvaluateScenario(ctx context.Context, req v1.ScenarioReques
 	}
 	if req.PortfolioID == "" {
 		return v1.ScenarioResponse{}, v1.ErrInvalidRequest
+	}
+	if err := e.refuseIfNotOwned(req.PortfolioID); err != nil {
+		return v1.ScenarioResponse{}, err
 	}
 
 	p, found := e.store.Snapshot(req.PortfolioID)
@@ -254,6 +305,17 @@ func (e *EngineImpl) ListPortfolios(ctx context.Context) ([]v1.PortfolioSummary,
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
 	return out, nil
+}
+
+// refuseIfNotOwned is the query-side shard gate. It sits at the top of every
+// per-portfolio read, BEFORE the store and before the cache fallback, so there
+// is no path on which a non-owner produces a number. Unsharded engines (nil
+// ownership) always return nil.
+func (e *EngineImpl) refuseIfNotOwned(id v1.PortfolioID) error {
+	if e.ownership == nil || e.ownership.Owns(id) {
+		return nil
+	}
+	return fmt.Errorf("%w: %q is held by replica %q", v1.ErrPortfolioNotOwned, id, e.ownership.OwnerOf(id))
 }
 
 // exposureSet returns the live-computed-and-cached exposure plus the

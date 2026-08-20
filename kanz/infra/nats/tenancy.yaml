@@ -497,6 +497,22 @@ data:
                   # pre-trade buying-power gate (#415) and exchange balance
                   # reconciliation (#418) both consume this rather than
                   # re-deriving a second number that would drift from it.
+                  #
+                  # CORPORATE ACTIONS ARE NOT IN THIS BALANCE (#588). The
+                  # sentence above is the AUTHORITY ruling and it stands; one
+                  # of the three inputs it names has never arrived. Nothing in
+                  # this estate publishes an accounting.v1.CorporateAction —
+                  # there is no subject for it in bootstrap-job.yaml, no grant
+                  # for it anywhere in this file, and no workload that would
+                  # hold one. The accounting subscribe list below is the whole
+                  # of what feeds the book. So every balance announced on this
+                  # subject is complete for fills and cash movements and short
+                  # by every dividend, coupon and merger payment the fund has
+                  # received, and the two consumers named above inherit that.
+                  # kanz_accounting_entry_source_wired{type="corporate_action"}
+                  # on the accounting deployment reads 0 and is what tells
+                  # "no corporate action was ever ingested" apart from "none
+                  # occurred".
                   "accounting.balance.portfolio",
                   "dlq.order.order.filled", "dlq.order.order.partially_filled",
                   "dlq.accounting.cash.>", "dlq.market.fx.>",
