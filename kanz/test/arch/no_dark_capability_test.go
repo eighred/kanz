@@ -155,8 +155,12 @@ var darkPackageExempt = map[string]string{
 
 	// The three below were dark in the services/*/internal blind spot #583 closed.
 	"services/accounting/internal/corpact": "#588 — the IBOR-01c corporate-action processor. It " +
-		"builds the journal entry ledger.foldCorpAct already knows how to apply, and ledger.go:109 " +
-		"names this package as that builder: the FOLD is live and reachable, the BUILDER is not. It " +
+		"builds the journal entry ledger.foldCorpAct already knows how to apply, and the doc on " +
+		"ledger.Action names this package as that builder — CITED BY SYMBOL, NOT BY LINE, because " +
+		"this entry read \"ledger.go:109\" when #583 landed on 2026-08-19 and the same sentence was " +
+		"at line 161 the following day: a line number is evidence that decays in a day, and an " +
+		"exemption a reader cannot check is the stale-citation failure #513 already ruled on. The " +
+		"FOLD is live and reachable, the BUILDER is not. It " +
 		"is dark because NOTHING ANNOUNCES A CORPORATE ACTION — accounting.v1.CorporateAction has no " +
 		"publisher anywhere in the module, no NATS subject and no Kafka topic, and the accounting " +
 		"composition root subscribes fills, cash and FX only. Wiring it over a fabricated " +
