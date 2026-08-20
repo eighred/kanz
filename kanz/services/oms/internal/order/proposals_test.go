@@ -46,6 +46,19 @@ func heldOrder(t *testing.T, orderID, proposer string, at time.Time) OrderPropos
 
 func newMemoryProposals() *MemoryProposals { return NewMemoryProposals(outbox.NewMemory()) }
 
+// approvalAnnounce is the ORDER_APPROVED record Claim requires (#410, clause
+// (d)). Claim REFUSES an empty announce — see claimIsRecordable — so every
+// caller here has to carry one, which is the point: a claim that publishes
+// nothing puts the second signature in a table and nowhere else.
+func approvalAnnounce(t *testing.T, orderID string, at time.Time) []outbox.Record {
+	t.Helper()
+	rec, err := contractApprovalFact(context.Background(), orderID, at)
+	if err != nil {
+		t.Fatalf("build ORDER_APPROVED record: %v", err)
+	}
+	return []outbox.Record{rec}
+}
+
 // runProposalContract is every property both implementations must have. It takes
 // a factory so the Postgres suite can run the identical assertions.
 func runProposalContract(t *testing.T, newStore func(t *testing.T) ProposalStore) {
@@ -94,7 +107,7 @@ func runProposalContract(t *testing.T, newStore func(t *testing.T) ProposalStore
 		if err := s.Put(ctx, heldOrder(t, "o-claim", "user:alice@kanz", t0), nil); err != nil {
 			t.Fatalf("Put: %v", err)
 		}
-		won, err := s.Claim(ctx, "o-claim", "user:bob@kanz", t0.Add(time.Minute))
+		won, err := s.Claim(ctx, "o-claim", "user:bob@kanz", t0.Add(time.Minute), approvalAnnounce(t, "o-claim", t0.Add(time.Minute)))
 		if err != nil || !won {
 			t.Fatalf("Claim: won=%v err=%v", won, err)
 		}
@@ -273,7 +286,7 @@ func runProposalContract(t *testing.T, newStore func(t *testing.T) ProposalStore
 			t.Fatalf("the refused proposal is not listed as work carrying its refusal: %v — a "+
 				"queue that drops it is the silent drop again, one branch over", ids(pending))
 		}
-		claimed, err := s.Claim(ctx, "o-refused", "user:bob@kanz", at)
+		claimed, err := s.Claim(ctx, "o-refused", "user:bob@kanz", at, approvalAnnounce(t, "o-refused", at))
 		if err != nil || !claimed {
 			t.Fatalf("a legitimate approver could not claim a refused proposal (claimed=%v err=%v)",
 				claimed, err)
@@ -291,7 +304,7 @@ func runProposalContract(t *testing.T, newStore func(t *testing.T) ProposalStore
 		if err := s.Put(ctx, p, nil); err != nil {
 			t.Fatalf("Put: %v", err)
 		}
-		if claimed, err := s.Claim(ctx, "o-decided", "user:bob@kanz", t0.Add(time.Minute)); err != nil || !claimed {
+		if claimed, err := s.Claim(ctx, "o-decided", "user:bob@kanz", t0.Add(time.Minute), approvalAnnounce(t, "o-decided", t0.Add(time.Minute))); err != nil || !claimed {
 			t.Fatalf("Claim: claimed=%v err=%v", claimed, err)
 		}
 

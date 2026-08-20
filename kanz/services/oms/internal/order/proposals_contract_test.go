@@ -16,7 +16,11 @@ import (
 	"testing"
 	"time"
 
+	orderpb "github.com/eighred/kanz/kanz-schemas-go/order/v1"
+
 	"github.com/eighred/kanz/internal/dualcontrol/proposalstore/proposalstoretest"
+	"github.com/eighred/kanz/internal/outbox"
+	"github.com/eighred/kanz/pkg/bus"
 )
 
 // contractStore adapts this act's ProposalStore to the act-neutral shape.
@@ -30,6 +34,39 @@ type contractStore struct{ ProposalStore }
 
 func (s contractStore) Put(ctx context.Context, p OrderProposal) error {
 	return s.ProposalStore.Put(ctx, p, nil)
+}
+
+// Claim supplies the ORDER_APPROVED record this act's Claim requires (#410,
+// clause (d)). The record is built here rather than from a dualcontrol.Approval
+// ON PURPOSE: the contract's job is claim ARBITRATION — which of two callers
+// wins, and what the store itself refuses — and it has to be able to hand Claim
+// a well-formed announcement for approvers the dual-control rule would reject
+// first, including the empty one whose refusal AT THE STORE is the property
+// under test. Routing it through Approve would make dualcontrol refuse before
+// the store ever saw the call, and the assertion would then prove nothing about
+// the store.
+//
+// WHAT the winning claim announces is this act's own property, and it is
+// asserted off a real broker in approval_fact_integration_test.go.
+func (s contractStore) Claim(ctx context.Context, id, approver string, at time.Time) (bool, error) {
+	fact, err := contractApprovalFact(ctx, id, at)
+	if err != nil {
+		return false, err
+	}
+	return s.ProposalStore.Claim(ctx, id, approver, at, []outbox.Record{fact})
+}
+
+// contractApprovalFact builds a well-formed stand-in through the emitter's own
+// event builder, so the record the contract enqueues cannot drift in shape from
+// the one production writes. The tenant comes off ctx if a delivery put one
+// there and is otherwise supplied here — outbox.From refuses a record without
+// one, and the contract's ctx is a bare Background.
+func contractApprovalFact(ctx context.Context, orderID string, at time.Time) (outbox.Record, error) {
+	if bus.TenantIDFromContext(ctx) == "" {
+		ctx = bus.WithTenantID(ctx, "contract-tenant")
+	}
+	return outbox.From(ctx, NewEmitter(nil).event(EventTypeApproved, orderID, at,
+		&orderpb.OrderApproved{OrderId: orderID}))
 }
 
 func (s contractStore) Expired(ctx context.Context, now time.Time) ([]OrderProposal, error) {
