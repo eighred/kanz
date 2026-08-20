@@ -91,6 +91,13 @@ data:
     # who released them.
     optimization.proposal      3   delete   2592000000  yes
     accounting.balance         6   delete   2592000000  yes
+    # THE EXCHANGE'S OWN MARGIN STATE, PER VENUE ACCOUNT (#408). Money-path
+    # retention because of what it is evidence FOR: after a liquidation, the only
+    # record of what the venue told us our collateral requirement was — and when
+    # it told us — is this topic. Reconstructing it from our own book afterwards
+    # is the same mistake that made the control necessary. Partitioned by venue
+    # account, which is the unit the exchange margins and liquidates per.
+    accounting.margin          6   delete   2592000000  yes
     settlement.instruction     3   delete   2592000000  yes
     compliance.breach          3   delete   2592000000  yes
     risk.portfolio             6   delete   2592000000  yes

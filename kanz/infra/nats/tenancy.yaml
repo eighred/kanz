@@ -886,6 +886,17 @@ data:
                 allow: [
                   "market.crypto.trade", "order.order.healed", "accounting.balance.reconciled",
                   "order.order.partially_filled", "order.order.filled",
+                  # THE EXCHANGE'S OWN MARGIN STATE for the account this adapter's
+                  # credential spends from (#408, control 1) — maintenance margin,
+                  # the venue's margin ratio and the liquidation price per open
+                  # position, observed rather than computed. On the ACCOUNTING
+                  # spine because it is venue truth about the same account
+                  # accounting.balance.reconciled already reports on. WITHOUT THIS
+                  # GRANT the adapter authenticates fine and every margin
+                  # observation is denied at publish — and the symptom is a margin
+                  # control that refuses every order for want of a number nobody
+                  # can see was blocked.
+                  "accounting.margin.observed",
                   # The DLQ for the cash spine it consumes (#418). The broadcast
                   # path never routes here, but the consumer is wired WithDLQ like
                   # every other on the estate — so the grant exists rather than
@@ -922,6 +933,17 @@ data:
                 allow: [
                   "market.crypto.trade", "order.order.healed", "accounting.balance.reconciled",
                   "order.order.partially_filled", "order.order.filled",
+                  # THE EXCHANGE'S OWN MARGIN STATE for the account this adapter's
+                  # credential spends from (#408, control 1) — maintenance margin,
+                  # the venue's margin ratio and the liquidation price per open
+                  # position, observed rather than computed. On the ACCOUNTING
+                  # spine because it is venue truth about the same account
+                  # accounting.balance.reconciled already reports on. WITHOUT THIS
+                  # GRANT the adapter authenticates fine and every margin
+                  # observation is denied at publish — and the symptom is a margin
+                  # control that refuses every order for want of a number nobody
+                  # can see was blocked.
+                  "accounting.margin.observed",
                   # The DLQ for the cash spine it consumes (#418). The broadcast
                   # path never routes here, but the consumer is wired WithDLQ like
                   # every other on the estate — so the grant exists rather than

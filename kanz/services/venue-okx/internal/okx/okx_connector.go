@@ -11,6 +11,7 @@ import (
 
 	"github.com/eighred/kanz/internal/venueadapter/accountproof"
 	"github.com/eighred/kanz/internal/venueadapter/exchangeauth"
+	"github.com/eighred/kanz/internal/venuemargin"
 	"github.com/eighred/kanz/pkg/bus"
 )
 
@@ -41,6 +42,18 @@ func (c *OKXConnector) Venue() Venue { return c.venue }
 // deployment claims to be.
 func (c *OKXConnector) Exchange() accountproof.Exchange { return c.rest }
 
+// MarginSource is the seam that reads OKX's OWN margin state for this adapter's
+// account (#408, control 1) — satisfied by the same signed REST client the
+// reconciler and the account proof already use.
+//
+// EXPOSED SO THE COMPOSITION ROOT ANNOUNCES IT RATHER THAN THE CONNECTOR
+// ASSUMING IT. Start could have reached for c.rest directly and always had a
+// source; then "this adapter observes margin" would be true by construction and
+// unobservable, and the day an OKX account was in a mode that reports nothing it
+// would look identical to one being watched. Handing it out makes the wiring a
+// line in the composition root that venuemargin.Announce turns into a gauge.
+func (c *OKXConnector) MarginSource() VenueMarginSource { return c.rest }
+
 // Start launches the reconciler, user-data ingester (with reconnect), and ticker
 // feed as background goroutines until ctx is cancelled.
 func (c *OKXConnector) Start(ctx context.Context, deps WorkerDeps) {
@@ -64,6 +77,31 @@ func (c *OKXConnector) Start(ctx context.Context, deps WorkerDeps) {
 	}
 	if deps.Lookup != nil {
 		go c.runUserData(ctx, deps)
+	}
+	// MARGIN IS READ FROM OKX, NOT DERIVED FROM OUR BOOK (#408, control 1). A nil
+	// source starts nothing and is NOT silent — venuemargin.Announce has already
+	// set the posture gauge to 0 and warned at the composition root, which is the
+	// one place an operator can tell "this venue reports no margin" apart from
+	// "nothing has looked".
+	if deps.Margin != nil {
+		go venuemargin.NewReporter(venuemargin.ReporterConfig{
+			Source: deps.Margin, Pub: deps.Publisher,
+			Venue: c.settings.MIC, Account: c.settings.Account, Tenant: deps.Tenant,
+			OnError: func(err error) {
+				// NOT FATAL AND NOT SILENT. A failed observation ages the account out
+				// to UNKNOWN, which every #408 control fails closed on — so the
+				// symptom an operator meets first is orders being refused, and this
+				// line is what tells them why.
+				deps.Logger.Warn("okx: margin observation failed — the exchange's own margin state for this "+
+					"account is going UNKNOWN, and every margin control on it fails closed",
+					"err", err, "account", c.settings.Account, "subject", venuemargin.Subject)
+			},
+			OnUncovered: func(reason string, n int) {
+				deps.Logger.Warn("okx: the exchange did not report part of its margin state — those "+
+					"quantities are UNKNOWN, not zero",
+					"reason", reason, "count", n, "account", c.settings.Account)
+			},
+		}).Run(ctx, deps.MarginInterval)
 	}
 	go c.runTicker(ctx, deps)
 }

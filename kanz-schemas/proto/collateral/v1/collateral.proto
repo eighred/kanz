@@ -17,6 +17,7 @@ package collateral.v1;
 
 import "google/protobuf/timestamp.proto";
 import "common/v1/decimal.proto";
+import "domain/v1/measure.proto";
 
 // MarginType distinguishes variation margin (against MtM moves) from initial
 // margin (the SIMM/grid potential-future-exposure buffer).
@@ -131,4 +132,106 @@ message FinancingTrade {
 
   // currency_code is the ISO 4217 currency of the cash leg. Required.
   string currency_code = 9;
+}
+
+// VenueMarginState is the EXCHANGE'S OWN margin state for one venue account,
+// OBSERVED rather than computed (#408, control 1).
+//
+// # Why this is not derived from our book
+//
+// Everything else on this platform that could be called "margin" is a projection
+// of FACTs Kanz folded from its own fills: internal/collateral's VariationMargin
+// and the SIMM initial-margin grid model what a margin call SHOULD be under an
+// agreement we hold. None of that is what the exchange will act on. The exchange
+// margins with its own maintenance-margin tiers, its own mark price and its own
+// index, and it liquidates on its own schedule without asking. #408 names the
+// failure exactly: "the exchange sold our collateral while we were reading stale
+// books". A reconstruction of the venue's margin maths IS that stale book, so
+// this message carries only numbers the venue itself reported, and carries
+// NOTHING where it reported nothing.
+//
+// # Keyed by ACCOUNT, not by portfolio, and that is deliberate
+//
+// A venue adapter deployment holds one API credential and therefore IS one
+// exchange account; it does not know which portfolio is bound to it — the
+// bindings are OMS deploy-time configuration (execution.ParseBindings). So the
+// publisher states what it can actually witness. The consumer resolves
+// portfolio → account through those bindings, and that resolution is
+// single-valued because ErrAccountShared refuses to start the OMS on an account
+// with two owners (#415). Control 2 is what makes control 1 addressable per
+// portfolio; stamping a portfolio_id here would be the adapter guessing.
+message VenueMarginState {
+  // venue is the MIC/venue label the adapter publishes under ("OKX"). Required.
+  string venue = 1;
+
+  // venue_account_id is the exchange account this credential spends from — the
+  // unit the exchange margins and LIQUIDATES per. Required.
+  string venue_account_id = 2;
+
+  // maintenance_margin is the collateral the exchange requires this account to
+  // keep, in the account's own valuation currency, as the exchange reported it.
+  //
+  // ABSENT MEANS UNKNOWN AND NEVER ZERO. A zero here is a claim that the account
+  // needs no collateral at all, byte-identical to the answer for an account
+  // holding no leveraged position — and it is exactly the answer an empty venue
+  // field would produce if this were a scalar. A consumer gating on it must
+  // REFUSE on absence, not substitute.
+  common.v1.Decimal maintenance_margin = 3;
+
+  // margin_ratio is the exchange's own current margin ratio for the account, as
+  // it reported it. Absent ⇒ UNKNOWN (see maintenance_margin).
+  //
+  // ITS SCALE AND DIRECTION ARE THE VENUE'S, NOT OURS. OKX's mgnRatio rises as
+  // the account gets SAFER; a Binance-style margin level and an
+  // equity/maintenance-margin ratio agree on neither the units nor which way
+  // danger lies. Nothing here normalizes them, because normalizing would mean
+  // asserting a venue's convention on its behalf — the same class of claim #408
+  // rules out for cross-margin offsets. A limit written against this must be
+  // written per venue; control 4's liquidation-distance measure is where a
+  // venue-comparable number belongs.
+  common.v1.Decimal margin_ratio = 4;
+
+  // liquidation_prices are the exchange's liquidation price per open position on
+  // this account. A position the venue reported WITHOUT a liquidation price is
+  // absent from this list and present in coverage.exclusions — it is not carried
+  // at zero, which would read as "liquidates at any price above zero".
+  repeated VenueLiquidationPrice liquidation_prices = 5;
+
+  // observed_at is when this state was TRUE AT THE VENUE — the exchange's own
+  // update stamp where it publishes one, and the adapter's fetch time only where
+  // it does not. knowledge_time is when Kanz learned it. Both required.
+  //
+  // STALENESS IS FIRST-CLASS HERE, not an annotation. A margin ratio from ten
+  // minutes ago during a fast move is not a margin ratio: it is the number that
+  // was true before the move that is about to liquidate the account. Consumers
+  // bound the age far more tightly than they bound a cash balance and treat an
+  // aged-out value as UNKNOWN, which every control in the #408 set fails closed
+  // on.
+  google.protobuf.Timestamp observed_at = 6;
+  google.protobuf.Timestamp knowledge_time = 7;
+
+  // coverage says which of the quantities above the venue actually reported.
+  //
+  // PRESENCE IS THE SIGNAL, exactly as on domain.v1.RiskMeasure: absent means
+  // this publisher does not report coverage; present with excluded_count = 0
+  // means it reports and the venue answered everything asked of it. The type is
+  // shared with the risk measures rather than re-declared, so a consumer that
+  // already refuses an uncovered VaR refuses an uncovered margin ratio by the
+  // same code path (#408 control 3, #527).
+  domain.v1.InputCoverage coverage = 8;
+}
+
+// VenueLiquidationPrice is one open position's liquidation price at the venue.
+message VenueLiquidationPrice {
+  // venue_symbol is the exchange's own instrument id ("BTC-USDT-SWAP"). It is
+  // the venue's spelling and NOT a Kanz instrument_id: the adapter's symbol map
+  // is a one-way instrument → symbol table, so a position the map does not cover
+  // would otherwise be dropped — silently losing the liquidation price of
+  // exactly the position nobody is watching. Required.
+  string venue_symbol = 1;
+
+  // price is the exchange's liquidation price for the position, in the
+  // instrument's quote currency. Required — a position whose liquidation price
+  // the venue did not report is EXCLUDED from the list, never carried at zero.
+  common.v1.Decimal price = 2;
 }

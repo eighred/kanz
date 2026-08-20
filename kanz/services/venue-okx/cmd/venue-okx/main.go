@@ -45,6 +45,7 @@ import (
 	"github.com/eighred/kanz/internal/venueadapter/exchangeauth"
 	"github.com/eighred/kanz/internal/venueadapter/orderview"
 	"github.com/eighred/kanz/internal/venueadapter/server"
+	"github.com/eighred/kanz/internal/venuemargin"
 	"github.com/eighred/kanz/internal/version"
 	"github.com/eighred/kanz/pkg/bus"
 	"github.com/eighred/kanz/pkg/observability"
@@ -136,7 +137,8 @@ func serve(cfg config.Config) error {
 	}()
 
 	balanceReconConfigured := balancerecon.NewGauge("okx")
-	obs.Registry.MustRegister(orderViewDurable, balanceReconConfigured)
+	marginSourceConfigured := venuemargin.NewGauge("okx")
+	obs.Registry.MustRegister(orderViewDurable, balanceReconConfigured, marginSourceConfigured)
 
 	// The adapter's own order view — the state its workers read after the process
 	// split cut them off from the OMS store.
@@ -298,9 +300,21 @@ func serve(cfg config.Config) error {
 		// comparing against zero — which would break on every asset the exchange
 		// holds and teach an operator to ignore the layer.
 		Balances: balancerecon.Announce(balanceReconConfigured, logger, "okx", expectedBalances),
-		Closes:   closes,
-		Tenant:   cfg.Tenant,
-		Logger:   logger,
+		// WHAT OKX ITSELF SAYS THIS ACCOUNT MUST POST, AND WHEN IT SAID IT (#408,
+		// control 1). Maintenance margin, OKX's own margin ratio and the
+		// liquidation price per open position — read from the exchange, never
+		// reconstructed from Kanz's positions, because a reconstruction IS the
+		// stale book the control exists to replace.
+		//
+		// Whatever OKX leaves empty stays UNKNOWN here and all the way through:
+		// never zero, never last-known-as-current. A cash-mode account reports no
+		// margin fields at all, and that state must be visibly different from an
+		// account whose margin nobody is watching — which is what the gauge
+		// Announce sets is for.
+		Margin: venuemargin.Announce(marginSourceConfigured, logger, "okx", conn.MarginSource()),
+		Closes: closes,
+		Tenant: cfg.Tenant,
+		Logger: logger,
 	})
 
 	// WHOSE MONEY DOES THIS ADAPTER SPEND? (SOV-02a)
