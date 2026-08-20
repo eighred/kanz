@@ -241,12 +241,17 @@ func TestARefusalDoesNotDecideTheProposalAtTheEngine(t *testing.T) {
 // shipped OMS runs replicas: 2, so the arbitration has to be the engine's.
 func TestConcurrentClaimElectsExactlyOneWinner(t *testing.T) {
 	pool := newPool(t)
-	store := NewPostgres(pool).Proposals()
+	st := NewPostgres(pool)
+	store := st.Proposals()
 	ctx := context.Background()
 
 	if err := store.Put(ctx, heldOrder(t, "o-race", "user:alice@kanz", t0), nil); err != nil {
 		t.Fatalf("Put: %v", err)
 	}
+	// EVERY RACER CARRIES THE SAME ANNOUNCEMENT, so the outbox row count below is
+	// a statement about how many claims COMMITTED and not about how many distinct
+	// records were offered.
+	raceAnnounce := approvalAnnounce(t, "o-race", t0.Add(time.Minute))
 
 	const racers = 32
 	var (
@@ -263,7 +268,7 @@ func TestConcurrentClaimElectsExactlyOneWinner(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			<-start // released together, so they collide inside the engine
-			ok, err := store.Claim(ctx, "o-race", approver, t0.Add(time.Minute))
+			ok, err := store.Claim(ctx, "o-race", approver, t0.Add(time.Minute), raceAnnounce)
 			mu.Lock()
 			defer mu.Unlock()
 			switch {
@@ -297,6 +302,20 @@ func TestConcurrentClaimElectsExactlyOneWinner(t *testing.T) {
 	}
 	if got.Approver != winner {
 		t.Fatalf("the row records approver %q but %q was told it won", got.Approver, winner)
+	}
+
+	// THE LOSERS ANNOUNCED NOTHING (#410, clause (d)). Electing one winner is only
+	// half the property now that the claim carries the ORDER_APPROVED FACT: if a
+	// loser's rollback did not take its record with it, the audit trail would show
+	// one order countersigned by 32 different people, which is a worse answer than
+	// the silence this FACT replaced.
+	queued, err := st.Outbox().Pending(ctx, "o-race", racers)
+	if err != nil {
+		t.Fatalf("outbox Pending: %v", err)
+	}
+	if len(queued) != 1 {
+		t.Fatalf("%d approvers queued %d ORDER_APPROVED FACTs for one decision, want 1",
+			racers, len(queued))
 	}
 }
 
@@ -345,7 +364,7 @@ func TestAnotherTenantCannotSeeOrApproveAProposal(t *testing.T) {
 	if len(pending) != 0 {
 		t.Fatalf("another tenant's pending queue shows %d of this tenant's held orders", len(pending))
 	}
-	won, err := other.Claim(ctx, "o-tenant", "user:bob@kanz", t0.Add(time.Minute))
+	won, err := other.Claim(ctx, "o-tenant", "user:bob@kanz", t0.Add(time.Minute), approvalAnnounce(t, "o-tenant", t0.Add(time.Minute)))
 	if err != nil {
 		t.Fatalf("Claim: %v", err)
 	}
@@ -1133,7 +1152,7 @@ func TestPendingStillListsExactlyWhatNeedsASignature(t *testing.T) {
 	if err := store.Put(ctx, signed, nil); err != nil {
 		t.Fatalf("Put signed: %v", err)
 	}
-	if ok, err := store.Claim(ctx, "o-open-signed", "user:bob@kanz", now); err != nil || !ok {
+	if ok, err := store.Claim(ctx, "o-open-signed", "user:bob@kanz", now, approvalAnnounce(t, "o-open-signed", now)); err != nil || !ok {
 		t.Fatalf("Claim: ok=%v err=%v", ok, err)
 	}
 

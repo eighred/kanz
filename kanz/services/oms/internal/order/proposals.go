@@ -106,8 +106,34 @@ type ProposalStore interface {
 	// pending for somebody who may actually approve it.
 	Get(ctx context.Context, orderID string) (OrderProposal, bool, error)
 
-	// Claim records approver as the second signature and reports whether THIS
-	// caller is the one that got it.
+	// Claim records approver as the second signature AND the FACT announcing it,
+	// in ONE transaction, and reports whether THIS caller is the one that got it.
+	//
+	// THE announce PARAMETER IS WHAT CLOSES #410's LAST CLAUSE. The acceptance
+	// asks that "the approval is recorded as a FACT carrying both identities",
+	// and until this existed nothing on the order path did: ORDER_ACCEPTED
+	// carries an OrderState with no approver on it and the ACCEPTED
+	// CommandOutcome names neither party, so the only record that two people
+	// signed was the row this method writes. A ROW IS NOT A FACT — services/audit
+	// folds bus FACTs into the store an examiner reads and cannot see another
+	// service's tables, so the trail could show that an order was approved and
+	// could not say by whom. migrations/0009_order_proposals.sql states that
+	// limitation outright, and this is its repair.
+	//
+	// IT RIDES THE CLAIM RATHER THAN THE ADMISSION for the same reason Put's
+	// record rides the hold (#292): a second write could leave the order released
+	// with the trail unable to name who released it, and a crash in that window
+	// loses the approval while keeping the order.
+	//
+	// AN EMPTY announce IS REFUSED, WHERE Put's IS PERMITTED, and the asymmetry
+	// is deliberate. Put's nil means "held, and this caller has nothing to
+	// announce" — the shared store contract passes nil because it has no FACT to
+	// make. Here the FACT is the entire point of the method: a Claim that
+	// announced nothing would put the second signature in a table and nowhere
+	// else, which is precisely the defect being repaired. Permitting nil would
+	// make "this act publishes no approval FACT" and "this caller forgot one"
+	// the same observable event, and the first is how the gap lasted from #536
+	// to now.
 	//
 	// IT IS THE SERIALISATION POINT, and that is why it exists rather than a
 	// Save. Two approvers acting on one pending order at the same moment both
@@ -122,7 +148,7 @@ type ProposalStore interface {
 	// refuses it again (0009's CHECK) — this is not a duplicate of
 	// dualcontrol.Approve's rule, it is the last line before the row that an
 	// auditor reads.
-	Claim(ctx context.Context, orderID, approver string, at time.Time) (bool, error)
+	Claim(ctx context.Context, orderID, approver string, at time.Time, announce []outbox.Record) (bool, error)
 
 	// ExpiredUnannounced returns proposals past their deadline that nobody decided
 	// and whose expiry has NOT been announced, oldest first, capped by limit.
@@ -189,6 +215,37 @@ func refusalIsRecordable(approver, reason string, at time.Time) error {
 		return errors.New("oms: a refusal must carry a reason, or the queue says only that something happened")
 	case at.IsZero():
 		return errors.New("oms: a refusal must carry the time it happened")
+	}
+	return nil
+}
+
+// claimIsRecordable refuses a claim that could not become audit evidence, in
+// BOTH stores and before either touches a row. One function rather than two
+// copies, for the reason this repository states as its rule: a copied helper is
+// how a fix stops spreading.
+//
+// BOTH CLAUSES ARE LOUD REFUSALS, NOT DEFAULTS, and each names a way the second
+// signature could end up unattributable:
+//
+//   - NO APPROVER. An empty subject makes the self-approval check pass
+//     vacuously, because every proposer differs from "". It is the same defect
+//     class #444 fixed on the override path — an identity that is not really
+//     there — and the row it would write reads to an auditor as a countersigned
+//     order signed by nobody.
+//   - NOTHING TO ANNOUNCE. The FACT is why this method takes announce at all
+//     (see ProposalStore.Claim). A claim that recorded the signature and
+//     published nothing is the exact state #410's clause (d) was filed against,
+//     and it would look identical to a healthy one from inside this process.
+//
+// "Nothing configured" and "checked, and fine" must never look the same, so
+// neither is defaulted, skipped or logged — the claim fails and the caller nacks.
+func claimIsRecordable(approver string, announce []outbox.Record) error {
+	switch {
+	case strings.TrimSpace(approver) == "":
+		return errors.New("oms: an approval must come from an authenticated subject")
+	case len(announce) == 0:
+		return errors.New("oms: a claim must carry the FACT announcing it, or the second " +
+			"signature is durable in order_proposals and invisible to services/audit (#410)")
 	}
 	return nil
 }
@@ -292,9 +349,12 @@ func (m *MemoryProposals) Get(ctx context.Context, orderID string) (OrderProposa
 	return m.core.Get(ctx, orderID)
 }
 
-func (m *MemoryProposals) Claim(ctx context.Context, orderID, approver string, at time.Time) (bool, error) {
-	if approver == "" {
-		return false, errors.New("oms: an approval must come from an authenticated subject")
+// Claim records the second signature and enqueues its FACT in the same lock
+// hold — this store's whole equivalent of the transaction PostgresProposals.Claim
+// opens, the same shape Put and AnnounceExpiry already have here.
+func (m *MemoryProposals) Claim(ctx context.Context, orderID, approver string, at time.Time, announce []outbox.Record) (bool, error) {
+	if err := claimIsRecordable(approver, announce); err != nil {
+		return false, err
 	}
 	return m.core.Update(ctx, orderID, func(p OrderProposal) (OrderProposal, bool, error) {
 		if p.Approver != "" {
@@ -308,6 +368,18 @@ func (m *MemoryProposals) Claim(ctx context.Context, orderID, approver string, a
 			// keeps the two stores agreeing.
 			return p, false, fmt.Errorf("%w: %q proposed this order and cannot approve it",
 				dualcontrol.ErrSelfApproval, p.Proposer)
+		}
+		// ENQUEUED BEFORE THE SIGNATURE IS WRITTEN, so a rejected record leaves
+		// the proposal exactly as it was — the memory seam's stand-in for the
+		// Postgres rollback, and the same ordering AnnounceExpiry uses. The
+		// enqueue is the fallible half; running it second would record a second
+		// signature the estate never hears about.
+		if m.outbox == nil {
+			return p, false, errors.New("oms: proposal store has no outbox, so an approval " +
+				"would be announced to nobody")
+		}
+		if err := m.outbox.Append(announce...); err != nil {
+			return p, false, err
 		}
 		p.Approver = approver
 		p.DecidedAt = at.UTC()
@@ -471,11 +543,27 @@ func (p *PostgresProposals) Get(ctx context.Context, orderID string) (OrderPropo
 // on a control whose refusal an operator has to be able to read. In the
 // predicate it is a clean "you did not get it", and the CHECK stays as the
 // backstop for any writer that does not come through here.
-func (p *PostgresProposals) Claim(ctx context.Context, orderID, approver string, at time.Time) (bool, error) {
-	if approver == "" {
-		return false, errors.New("oms: an approval must come from an authenticated subject")
+// THE FACT RIDES THE SAME TRANSACTION, which is the other half of what makes
+// this method the serialisation point rather than merely a write. The signature
+// and the announcement of it commit together, so there is no instant in which
+// the order has been released and the trail cannot yet name who released it —
+// the same five beats Put and AnnounceExpiry have, applied to the write that is
+// the OMS's audit evidence.
+//
+// THE LOSER ENQUEUES NOTHING: the return happens BEFORE the enqueue, so the
+// deferred Rollback discards a FACT that must not go out. Two approvers racing
+// one pending order produce one claim and one ORDER_APPROVED, never two.
+func (p *PostgresProposals) Claim(ctx context.Context, orderID, approver string, at time.Time, announce []outbox.Record) (bool, error) {
+	if err := claimIsRecordable(approver, announce); err != nil {
+		return false, err
 	}
-	tag, err := p.pool.Exec(ctx, `
+	tx, err := p.pool.Begin(ctx)
+	if err != nil {
+		return false, fmt.Errorf("oms: claim proposal %s: begin: %w", orderID, err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }() // no-op after a successful Commit
+
+	tag, err := tx.Exec(ctx, `
 		UPDATE order_proposals
 		   SET approver = $2, decided_at = $3
 		 WHERE order_id = $1
@@ -485,7 +573,18 @@ func (p *PostgresProposals) Claim(ctx context.Context, orderID, approver string,
 	if err != nil {
 		return false, fmt.Errorf("oms: claim proposal %s: %w", orderID, err)
 	}
-	return tag.RowsAffected() == 1, nil
+	if tag.RowsAffected() != 1 {
+		// Somebody else signed it, or the predicate refused this approver. Return
+		// before the enqueue so the rollback discards the announcement.
+		return false, nil
+	}
+	if err := outbox.Enqueue(ctx, tx, announce...); err != nil {
+		return false, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return false, fmt.Errorf("oms: claim proposal %s: commit: %w", orderID, err)
+	}
+	return true, nil
 }
 
 // RecordRefusal writes the last refusal onto a still-pending proposal. See

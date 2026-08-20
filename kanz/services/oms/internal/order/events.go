@@ -12,6 +12,7 @@ import (
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
+	"github.com/eighred/kanz/internal/dualcontrol"
 	"github.com/eighred/kanz/internal/outbox"
 	"github.com/eighred/kanz/pkg/bus"
 )
@@ -39,6 +40,17 @@ const (
 	// until it is approved (an ORDER_ACCEPTED under the same order_id) or it
 	// expires.
 	EventTypePendingApproval = "order.order.pending_approval"
+	// EventTypeApproved announces that a held order received its SECOND
+	// SIGNATURE (#410, clause (d)). It is NOT a lifecycle status either: the
+	// order's own outcome still follows under the same order_id, because an
+	// approved order replays every gate and can still be refused.
+	//
+	// IT IS THE ONLY THING ON THE BUS THAT NAMES THE APPROVER. ORDER_ACCEPTED
+	// carries an OrderState, which records the order and not who released it,
+	// and the ACCEPTED CommandOutcome names neither party — so without this the
+	// answer to "who countersigned this" lived only in the OMS's own
+	// order_proposals table, which services/audit cannot read.
+	EventTypeApproved        = "order.order.approved"
 	EventTypeRouted          = "order.order.routed"
 	EventTypePartiallyFilled = "order.order.partially_filled"
 	EventTypeFilled          = "order.order.filled"
@@ -206,6 +218,58 @@ func (e *Emitter) pendingApprovalEvent(p OrderProposal) bus.Event {
 // it is the HTTP-borne case that has none, which is what cost #498 an outage.
 func (e *Emitter) PendingApprovalFact(ctx context.Context, p OrderProposal) (outbox.Record, error) {
 	return outbox.From(ctx, e.pendingApprovalEvent(p))
+}
+
+// approvedEvent is the ORDER_APPROVED FACT for a held order that a second
+// subject signed (#410, clause (d)).
+//
+// IT TAKES THE Approval, NOT TWO STRINGS, and that is the whole reason both
+// names on this FACT are worth reading. dualcontrol.Approval is evidence
+// obtainable only by passing the self-approval, digest and expiry checks, and
+// its fields are unexported so no package outside dualcontrol can forge one by
+// composite literal. A builder taking `proposer, approver string` could be
+// handed two names by one person and nothing in its signature would say
+// otherwise — which is exactly the shape internal/compliance's publisher was
+// before #511, and it is why that one takes an Approval too. One rule, one
+// place, three acts.
+//
+// Every field here is read off the evidence. There is no argument left for a
+// lone actor and none for a name the check never saw.
+func (e *Emitter) approvedEvent(a dualcontrol.Approval) bus.Event {
+	return e.event(EventTypeApproved, a.Subject(), a.ApprovedAt(),
+		&orderpb.OrderApproved{
+			OrderId:    a.Subject(),
+			Proposer:   a.Proposer(),
+			Approver:   a.Approver(),
+			Act:        string(a.Act()),
+			Digest:     a.Digest(),
+			ApprovedAt: timestamppb.New(a.ApprovedAt()),
+		})
+}
+
+// ApprovedFact captures ORDER_APPROVED as an outbox record, so the second
+// signature and the announcement of it commit in ONE transaction — the shape
+// #498 gave act one and #511 gave act two, arriving here on the act where the
+// capital actually moves.
+//
+// THERE IS NO EmitApproved, DELIBERATELY, and for the same reason there is no
+// EmitPendingApproval. This FACT has exactly one producer — the claim in
+// handleApprove — and it always has a proposal row to commit alongside. A
+// direct-publish sibling would be a second way to announce an approval,
+// available to a caller with no claim to commit, and the only thing it could
+// produce is an announcement of a signature nobody gave. Every builder in this
+// file that grew such a sibling grew it for a compensator repairing rows written
+// before the outbox existed; there is no such population here.
+//
+// It takes ctx for the tenant and the lineage, exactly as its siblings do.
+// outbox.From refuses a record with no tenant, and because the enqueue is INSIDE
+// the claim transaction that refusal ROLLS THE CLAIM BACK — the correct
+// direction: a second signature that cannot be announced must not be silently
+// recorded either. The tenant is present on this path because an ApproveOrder
+// arrives as a bus DELIVERY (SubjectApprove), not over HTTP; it is the
+// HTTP-borne case that has none, which is what cost #498 an outage.
+func (e *Emitter) ApprovedFact(ctx context.Context, a dualcontrol.Approval) (outbox.Record, error) {
+	return outbox.From(ctx, e.approvedEvent(a))
 }
 
 // EmitRejected publishes OrderRejected (no state changed; order terminal).

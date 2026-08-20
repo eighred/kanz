@@ -789,6 +789,19 @@ data:
                   # permissions file. It rides the EXECUTION stream and the
                   # archiver's existing order.> rule with no new mapping.
                   "order.order.pending_approval",
+                  # THE SECOND SIGNATURE ON A HELD ORDER (#410, clause (d)). It
+                  # is the ONLY thing on the bus that names the approver —
+                  # ORDER_ACCEPTED carries an OrderState with no approver field
+                  # and the ACCEPTED CommandOutcome names neither party — so
+                  # without this grant "who countersigned this order" is
+                  # answerable only from the OMS's own order_proposals table,
+                  # which services/audit cannot read. A missing line here does
+                  # not stop the order: the claim commits, the FACT sits in the
+                  # outbox failing to publish, and the audit trail is short one
+                  # approval with the trade already live. It rides the EXECUTION
+                  # stream and the archiver's existing order.> rule with no new
+                  # mapping, exactly as pending_approval above does.
+                  "order.order.approved",
                   # REALIZED EXECUTION COST, PER FILL (#436). Derived from the
                   # OMS's own fills and the arrival mark stamped at admission, so
                   # it belongs to the order domain the OMS already owns — the
