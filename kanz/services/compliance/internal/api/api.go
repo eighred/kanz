@@ -594,7 +594,24 @@ func (s *Server) handlePendingChange(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	state := dualcontrol.StatePending // MUTATION M6: every row reports pending.
+	// THE STATE IS DERIVED HERE RATHER THAN READ OFF THE ROW, because there is no
+	// such column: a proposal LAPSES by the clock passing its deadline, and nothing
+	// writes to it when that happens. handlePendingChanges reaches the same fact
+	// through Pending/Lapsed, which are the scoped list queries; a by-id read
+	// cannot use either, so it asks proposalstore.Expired the one question those
+	// two are themselves built on. Both sides therefore move together — a change to
+	// what "expired" means cannot leave the queue and the detail view disagreeing
+	// about the same proposal.
+	//
+	// A CONSTANT HERE WOULD BE A CLIENT SIGNING A LAPSED CHANGE. Report pending on
+	// a row that has passed its deadline and the client offers a signature the
+	// approve route then refuses with 409 — a control that reads as a bug, and an
+	// approver who cannot tell "nobody signed this in time" from "it is waiting for
+	// me". Held by TestPendingChange_ALapsedProposalIsStillReadable.
+	state := dualcontrol.StatePending
+	if proposalstore.Expired(prop.Proposal, s.now()) {
+		state = dualcontrol.StateLapsed
+	}
 
 	// THE MANDATE GOES OUT THROUGH protojson, NOT encoding/json, for the same
 	// reason proposeRequest comes IN through it: a hand-rolled struct here would be
@@ -675,11 +692,18 @@ func proposalJSON(p store.MandateProposal, state string) map[string]any {
 // This surface is hand-built map[string]any, so it gets none of protojson's
 // guarantees — and protojson emits every uint64 as a string for exactly this
 // reason, which is what kanz-web's decimal handling is built on. There is one
-// such field today (Mandate.version, on three bodies: the propose 202, the
-// approve 200 and the queue row). Spelling strconv.FormatUint at each site is how
-// the fourth body gets the raw value back: the next author copies the nearest
-// line, and the nearest line would be a naked getter. A named function is the
-// thing a reviewer notices missing.
+// such field today (Mandate.version, on four bodies: the propose 202, the approve
+// 200, the queue row and the by-id read — the last two share proposalJSON).
+// Spelling strconv.FormatUint at each site is how the fifth body gets the raw
+// value back: the next author copies the nearest line, and the nearest line would
+// be a naked getter. A named function is the thing a reviewer notices missing.
+//
+// AND THE FAMILY IS GUARDED, NOT JUST THESE SITES. Twenty-four files under
+// services/ build a reply as a map[string]any, so fixing one file leaves the
+// defect free to reappear in any of the others.
+// test/arch/uint64_json_domain_test.go derives every uint64/fixed64 getter from
+// the protos and refuses a bare one in a JSON body anywhere in the estate; its
+// exemption list is empty. Unwrapping any call here fails it by file and line.
 func jsonUint64(v uint64) string { return strconv.FormatUint(v, 10) }
 
 // principal returns the caller's authenticated subject and tenant, or writes the
