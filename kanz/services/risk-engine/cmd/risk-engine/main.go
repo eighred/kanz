@@ -279,7 +279,24 @@ func runEngine(ctx context.Context, cfg config.Config, readiness *server.Readine
 			"holdings — a survivorship universe that excludes everything since sold. Non-zero " +
 			"means a run was scored against a book it could not have known (#509).",
 	})
-	obs.Registry.MustRegister(fiTermsMissing, fiSkipped, factorSkipped, factorLookahead)
+	// A TRANCHE THAT FALLS OUT OF THE STRUCTURED MEASURES IS COUNTED, for the
+	// same reason as fiSkipped above and with one difference worth stating: two
+	// of the three structured measures are |MV|-weighted AVERAGES, so a dropped
+	// tranche does not simply shrink them — it pulls them toward whatever the
+	// remaining book looks like. Neither direction is safe to assume, which is
+	// why the number beside the measure matters more here, not less.
+	structSkipped := prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "kanz_risk_structured_position_skipped_total",
+		Help: "Securitized positions excluded from StructDuration/StructConvexity/StructWAL, by " +
+			"reason. unusable_deal = a STRUCTURED terms record exists and cannot be turned into a " +
+			"spec (a held_tranche naming no tranche, a prepayment model whose parameters the " +
+			"schema does not carry, no quoted OAS); no_curve = the deal is known and its currency " +
+			"has no calibrated discount curve; unpriceable_tranche = it priced to a degenerate " +
+			"answer; no_market_value = it carries no mark to weight it by. Counts SKIP EVENTS: " +
+			"three measures share one per-position path, so one dropped tranche reports three " +
+			"times (#572).",
+	}, []string{"reason"})
+	obs.Registry.MustRegister(fiTermsMissing, fiSkipped, factorSkipped, factorLookahead, structSkipped)
 	for _, r := range []string{compute.SkipNoModel, compute.SkipNotInModel} {
 		factorSkipped.WithLabelValues(r).Add(0)
 	}
@@ -288,6 +305,10 @@ func runEngine(ctx context.Context, cfg config.Config, readiness *server.Readine
 	// transition from none to some — which is the transition that matters.
 	for _, r := range []string{compute.SkipNoTerms, compute.SkipNoCurve} {
 		fiSkipped.WithLabelValues(r).Add(0)
+	}
+	for _, r := range []string{compute.SkipUnusableDeal, compute.SkipNoCurve,
+		compute.SkipUnpriceableTranche, compute.SkipNoMarketValue} {
+		structSkipped.WithLabelValues(r).Add(0)
 	}
 
 	// THE BAR SERIES THE LIQUIDITY MEASURES READ, hoisted out of the branch below
@@ -371,10 +392,10 @@ func runEngine(ctx context.Context, cfg config.Config, readiness *server.Readine
 		// terms resolve through the contract-terms store this pool already
 		// reaches, and the discount curve is the store owned above.
 		if calibrationEnabled {
-			bondTerms := termsource.NewProvider(terms.NewPostgres(pricePool),
+			contractTerms := termsource.NewProvider(terms.NewPostgres(pricePool),
 				termsource.WithMissingTermsObserver(func(string) { fiTermsMissing.Inc() }))
 			compute.RegisterFIRisk(context.Background(), registry, compute.FIProviders{
-				Terms: bondTerms,
+				Terms: contractTerms,
 				Curve: curveStore,
 				// COUNTED, NOT LABELLED BY INSTRUMENT. An instrument id label is
 				// unbounded cardinality — one series per bond ever held — and the
@@ -384,6 +405,30 @@ func runEngine(ctx context.Context, cfg config.Config, readiness *server.Readine
 			})
 			logger.Info("FI-01d: DV01 + Duration + Convexity + SpreadDuration registered off the "+
 				"contract-terms store and the calibrated curve",
+				"curve_currencies", cfg.CalibrationRates)
+
+			// THE STRUCTURED MEASURES (#572). The last seam that was dark for a
+			// SCHEMA reason rather than a data one: reference.v1.StructuredTerms
+			// existed and the ContractTerms oneof had no case for it, so no store
+			// could hold a securitization and no provider could be written. The
+			// oneof case, terms.KindStructured and termsource's reader landed
+			// together; the same Provider and the same curve store serve them,
+			// because a tranche's terms are the same kind of fact as a bond's.
+			//
+			// INSIDE THE CALIBRATION GATE, deliberately. A tranche has no present
+			// value without a discount curve, so registering these without one
+			// would flag every response — the argument the FI else-branch below
+			// makes about signal, and it applies here identically.
+			compute.RegisterStructuredRisk(context.Background(), registry, compute.StructuredProviders{
+				Terms:  contractTerms,
+				Curve:  curveStore,
+				OnSkip: func(_, reason string) { structSkipped.WithLabelValues(reason).Inc() },
+			})
+			logger.Info("STRUCT-01d: StructDuration + StructConvexity + StructWAL registered off "+
+				"the contract-terms store and the calibrated curve. SECURITIZED STRUCTURES ONLY "+
+				"— MBS/ABS/CMO/tranched credit; a structured NOTE (barriers, memory coupons, "+
+				"autocall schedules) has no terms record, is refused with coverage and is never "+
+				"priced (#572)",
 				"curve_currencies", cfg.CalibrationRates)
 		} else {
 			// NOT SILENT. Four implemented measures are absent, and the reason is
@@ -401,7 +446,8 @@ func runEngine(ctx context.Context, cfg config.Config, readiness *server.Readine
 			// operator learns to scroll past — better to not offer it until the
 			// curve exists. That is a judgement about signal, no longer a claim
 			// that the number would be indistinguishable from a real one.
-			logger.Warn("FI-01d NOT registered: DV01, Duration, Convexity and SpreadDuration need "+
+			logger.Warn("FI-01d and STRUCT-01d NOT registered: DV01, Duration, Convexity, "+
+				"SpreadDuration, StructDuration, StructConvexity and StructWAL need "+
 				"a discount curve, and rate calibration is off. Registering them against an empty "+
 				"curve store would serve a DV01 of zero for every portfolio — flagged as "+
 				"unmeasured rather than passed off as real, but flagged on every single response",

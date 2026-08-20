@@ -66,7 +66,7 @@ type BondSpec struct {
 	IssuerID   string
 }
 
-// TermsResolution is a BondTermsProvider's answer about one instrument.
+// TermsResolution is a terms provider's answer about one instrument.
 //
 // IT REPLACES A BOOL, AND THE BOOL IS THE DEFECT (#527). `(BondSpec, bool)`
 // collapsed two answers whose consequences are opposite: "there is a terms
@@ -76,6 +76,15 @@ type BondSpec struct {
 // pretend it has certified it as a non-bond. Because both were false, a book of
 // bonds nobody had loaded terms for produced exactly the response of a book of
 // shares: DV01 = 0, no exclusions, no flag.
+//
+// SHARED WITH THE STRUCTURED FAMILY (#572), which is why TermsOtherVariant is
+// spelled the way it is rather than "TermsNotABond". The four answers are
+// properties of the ContractTerms RECORD — absent, usable, a different oneof
+// variant, present-and-unusable — and not of any one instrument family. #572
+// gave the structured family a schema, a Kind and a store row, which is what
+// made its own bool widenable at all: before that, "a record exists and says
+// this is positively not a securitization" was true of no deployment and
+// reachable by no test, so the enum could not honestly be reused.
 type TermsResolution int
 
 const (
@@ -89,14 +98,19 @@ const (
 	TermsUnknown TermsResolution = iota
 	// TermsResolved: usable bond terms. The only value that prices.
 	TermsResolved
-	// TermsNotABond: a terms record exists and carries an option, swap or future
-	// variant. The ONLY value that licenses a confident absence — a share is
-	// correctly missing from DV01, and reporting it would bury the bonds that
-	// really were dropped under every equity on the book.
-	TermsNotABond
-	// TermsUnusable: a bond record exists and cannot be priced from — an
-	// unspecified day count, a maturity at or before issue, no currency to look
-	// a curve up by. Definitely a bond, definitely excluded.
+	// TermsOtherVariant: a terms record exists and carries a DIFFERENT oneof
+	// variant than the one asked for — an option, a swap, a future, a bond or a
+	// securitization. The ONLY value that licenses a confident absence: a share
+	// is correctly missing from DV01, and reporting it would bury the bonds that
+	// really were dropped under every equity on the book. Read by the structured
+	// family the same way (#572).
+	TermsOtherVariant
+	// TermsUnusable: a record of the RIGHT variant exists and cannot be priced
+	// from — for a bond, an unspecified day count, a maturity at or before issue,
+	// no currency to look a curve up by; for a securitization, a held_tranche
+	// naming no tranche in the deal, a prepayment model whose parameters the
+	// schema does not carry, an absent quoted OAS. Definitely of this family,
+	// definitely excluded.
 	TermsUnusable
 )
 
@@ -283,9 +297,9 @@ func positionBondRisk(ctx context.Context, p FIProviders, pos domain.Position, a
 	}
 	spec, res := p.Terms.BondTerms(ctx, string(pos.InstrumentID), asOf)
 	switch res {
-	case TermsNotABond:
+	case TermsOtherVariant:
 		// THE ONLY CONFIDENT ABSENCE. A record exists and describes an option, a
-		// swap or a future, so this position genuinely carries no bond rate risk
+		// swap, a future or a securitization, so this position carries no bond rate risk
 		// and its absence from DV01 is an answer rather than a gap. Not reported
 		// to OnSkip and not recorded as an exclusion — counting every equity would
 		// make the signal the noise, and would flag every response on the estate.

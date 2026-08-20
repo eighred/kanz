@@ -15,7 +15,7 @@ import (
 
 // --- deterministic FI test providers ---------------------------------------
 
-// staticBondTerms answers TermsResolved for the ids it holds and TermsNotABond
+// staticBondTerms answers TermsResolved for the ids it holds and TermsOtherVariant
 // for everything else — a store that KNOWS the rest of the book is not bonds.
 // The unknown-instrument case (a store that holds no record) has its own fixture
 // below, because after #527 those two are the answers this seam exists to keep
@@ -25,7 +25,7 @@ type staticBondTerms map[string]BondSpec
 func (m staticBondTerms) BondTerms(_ context.Context, id string, _ time.Time) (BondSpec, TermsResolution) {
 	s, ok := m[id]
 	if !ok {
-		return BondSpec{}, TermsNotABond
+		return BondSpec{}, TermsOtherVariant
 	}
 	return s, TermsResolved
 }

@@ -19,6 +19,7 @@ import "google/protobuf/timestamp.proto";
 import "common/v1/decimal.proto";
 import "reference/v1/conventions.proto"; // PaymentFrequency
 import "reference/v1/fixed_income.proto"; // BondTerms
+import "reference/v1/structured.proto"; // StructuredTerms
 
 // OptionType is the right an option confers.
 enum OptionType {
@@ -179,5 +180,27 @@ message ContractTerms {
     // and the alternative is a naming preference paid for with a second
     // migration.
     BondTerms bond = 13;
+
+    // STRUCTURED (#572). structured.proto's StructuredTerms already existed —
+    // the collateral pool, the capital structure, the prepayment assumption —
+    // and internal/risk/pricing/structured already implements waterfall
+    // projection, OAS, effective duration/convexity and WAL against exactly that
+    // shape. Two halves of one design with nothing joining them: no oneof case,
+    // no terms.Kind, so no store could hold a securitization and the three
+    // Struct* measures were implemented and unreachable. Same gap as BOND above,
+    // and the same repair.
+    //
+    // THE SCOPE IS SECURITIZED STRUCTURES AND NOTHING ELSE — MBS, ABS, CMO,
+    // tranched credit: deals with a pool, tranches and prepayment behaviour.
+    // STRUCTURED NOTES ARE DELIBERATELY NOT EXPRESSIBLE. Barriers, memory
+    // coupons, autocall observation schedules and participation legs describe
+    // WHETHER OR WHEN a cashflow happens along a path, which is a payoff PROGRAM
+    // — a scripting language with no evaluator, and operator-supplied executable
+    // input on the valuation path. That was considered and rejected: a fund
+    // holding such a note is refused (ErrUnpriceable, carried to the caller as
+    // an input exclusion) rather than mispriced. A field added here that
+    // describes a path-conditional cashflow is that rejected decision, taken
+    // without saying so.
+    StructuredTerms structured = 14;
   }
 }

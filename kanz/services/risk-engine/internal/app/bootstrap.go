@@ -126,7 +126,15 @@ func (b *Bootstrap) restore(ctx context.Context) (map[resumeKey]int64, error) {
 	}
 	resume := make(map[resumeKey]int64)
 	for _, rec := range records {
-		b.store.Restore(rec.ToPortfolio(), rec.AppliedKeys)
+		// A REFUSED RESTORE ABORTS BOOT. Restore now refuses an id the store is
+		// not entitled to hold (#110: on a runtime-ownership store, Acquire is
+		// the only door). Continuing past it would boot a replica whose memory
+		// is missing a portfolio its durable record has — it would answer for
+		// that portfolio from nothing, which is the failure this path exists to
+		// prevent.
+		if err := b.store.Restore(rec.ToPortfolio(), rec.AppliedKeys); err != nil {
+			return nil, fmt.Errorf("restore %q: %w", rec.ID, err)
+		}
 		if lp := rec.LogPosition; lp != nil && lp.Topic != "" {
 			k := resumeKey{topic: lp.Topic, partition: int(lp.Partition)}
 			start := int64(lp.Offset) + 1 // resume at offset+1 (log_position semantics)
