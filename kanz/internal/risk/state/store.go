@@ -56,6 +56,7 @@ package state
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"time"
 
@@ -81,15 +82,28 @@ type Store struct {
 	portfolios map[v1.PortfolioID]*domain.Portfolio
 	locks      map[v1.PortfolioID]*sync.Mutex
 	dedup      map[v1.PortfolioID]*dedupWindow
+
+	// loader/owned are the runtime-ownership gate (#110, see ownership.go).
+	// BOTH nil is the ungated default: this replica owns every portfolio and
+	// lazy-creates on first reference, which is the deployed single-replica
+	// posture. Non-nil owned means only an Acquired portfolio is answerable.
+	loader Loader
+	owned  map[v1.PortfolioID]struct{}
 }
 
-// NewStore returns an empty Store.
-func NewStore() *Store {
-	return &Store{
+// NewStore returns an empty Store. With no options it is the ungated,
+// owns-everything store the unsharded posture runs on; WithRuntimeOwnership
+// turns on the #110 acquire/release gate.
+func NewStore(opts ...Option) *Store {
+	s := &Store{
 		portfolios: make(map[v1.PortfolioID]*domain.Portfolio),
 		locks:      make(map[v1.PortfolioID]*sync.Mutex),
 		dedup:      make(map[v1.PortfolioID]*dedupWindow),
 	}
+	for _, opt := range opts {
+		opt(s)
+	}
+	return s
 }
 
 // Lookup returns the portfolio and true, or nil and false. The
@@ -177,15 +191,23 @@ func (s *Store) IDs() []v1.PortfolioID {
 // goroutine starts, so it takes only the map lock (no per-aggregate lock)
 // and is a no-op if the portfolio is already present — bootstrap must not
 // clobber live state, and a snapshot is never newer than the running engine.
-func (s *Store) Restore(p *domain.Portfolio, appliedKeys []string) {
+func (s *Store) Restore(p *domain.Portfolio, appliedKeys []string) error {
 	if p == nil || p.ID() == "" {
-		return
+		return ErrEmptyPortfolioID
 	}
 	id := p.ID()
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	// ON A GATED STORE, BOOT IS NOT A BACK DOOR. Restore predates the
+	// ownership gate and installs state directly; letting it through for an
+	// unacquired portfolio would put a portfolio in the maps that the gate
+	// says this replica must not answer for — the exact half-state Acquire
+	// exists to prevent. Acquire is the only door in gated mode.
+	if !s.ownsLocked(id) {
+		return fmt.Errorf("%w: %q (gated store: Acquire it first)", ErrNotOwned, id)
+	}
 	if _, exists := s.portfolios[id]; exists {
-		return
+		return nil
 	}
 	s.portfolios[id] = p
 	if _, ok := s.locks[id]; !ok {
@@ -196,6 +218,7 @@ func (s *Store) Restore(p *domain.Portfolio, appliedKeys []string) {
 		dw.Record(k)
 	}
 	s.dedup[id] = dw
+	return nil
 }
 
 // ApplyPortfolioRevalued satisfies ingest.Applier.
@@ -204,7 +227,10 @@ func (s *Store) ApplyPortfolioRevalued(ctx context.Context, env *envelopepb.Enve
 	if id == "" {
 		return ErrMissingAggregateID
 	}
-	lock, port, dw := s.acquire(id)
+	lock, port, dw, err := s.perAggregate(id)
+	if err != nil {
+		return err
+	}
 	lock.Lock()
 	defer lock.Unlock()
 
@@ -229,7 +255,10 @@ func (s *Store) ApplyPositionChanged(ctx context.Context, env *envelopepb.Envelo
 	if id == "" || p.InstrumentId == "" {
 		return ErrMissingAggregateID
 	}
-	lock, port, dw := s.acquire(id)
+	lock, port, dw, err := s.perAggregate(id)
+	if err != nil {
+		return err
+	}
 	lock.Lock()
 	defer lock.Unlock()
 
@@ -251,7 +280,10 @@ func (s *Store) ApplyPortfolioSnapshot(ctx context.Context, env *envelopepb.Enve
 	if id == "" {
 		return ErrMissingAggregateID
 	}
-	lock, port, dw := s.acquire(id)
+	lock, port, dw, err := s.perAggregate(id)
+	if err != nil {
+		return err
+	}
 	lock.Lock()
 	defer lock.Unlock()
 
@@ -284,12 +316,22 @@ func (s *Store) ApplyPortfolioSnapshot(ctx context.Context, env *envelopepb.Enve
 	return nil
 }
 
-// acquire returns the per-portfolio (lock, portfolio, dedup),
+// perAggregate returns the per-portfolio (lock, portfolio, dedup),
 // lazy-creating each on first reference. mu is held briefly so the
 // usual fast path is two map reads under one lock.
-func (s *Store) acquire(id v1.PortfolioID) (*sync.Mutex, *domain.Portfolio, *dedupWindow) {
+//
+// THE OWNERSHIP GATE IS HERE, not in the callers, and it is inside the same mu
+// critical section as the lazy-create. A check-then-create in each Apply method
+// would leave a window where a concurrent Release lands between the two and the
+// apply lazy-creates a portfolio this replica no longer owns — an empty book
+// that reads as a real one. Ungated stores answer true and behave exactly as
+// before (#110).
+func (s *Store) perAggregate(id v1.PortfolioID) (*sync.Mutex, *domain.Portfolio, *dedupWindow, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if !s.ownsLocked(id) {
+		return nil, nil, nil, fmt.Errorf("%w: %q", ErrNotOwned, id)
+	}
 	lock, ok := s.locks[id]
 	if !ok {
 		lock = &sync.Mutex{}
@@ -307,7 +349,7 @@ func (s *Store) acquire(id v1.PortfolioID) (*sync.Mutex, *domain.Portfolio, *ded
 		dw = newDedupWindow()
 		s.dedup[id] = dw
 	}
-	return lock, port, dw
+	return lock, port, dw, nil
 }
 
 // toDomainPosition is the proto→domain mapping for PositionState.
