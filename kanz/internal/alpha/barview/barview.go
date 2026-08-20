@@ -13,25 +13,25 @@
 // that could not have existed, in the flattering direction, which is the one
 // nobody audits.
 //
-//	1. THE BAR CONTAINING THE DECISION TIME. It had not completed, so its close
-//	   was not knowable. `To` is the START of that bucket, so the bucket is
-//	   excluded — BarQuery.To is exclusive on BucketStart, and a bar starting at
-//	   `to` is the in-flight one.
+//  1. THE BAR CONTAINING THE DECISION TIME. It had not completed, so its close
+//     was not knowable. `To` is the START of that bucket, so the bucket is
+//     excluded — BarQuery.To is exclusive on BucketStart, and a bar starting at
+//     `to` is the in-flight one.
 //
-//	   This is the leak that flatters most and shows least: an engine firing
-//	   mid-bar on a move would be handed a close that already contains the move it
-//	   reacted to. internal/alpha/outcome refuses it on the grading side for the
-//	   same reason, and the two MUST agree — a model graded from a price the
-//	   engine never saw is being graded on somebody else's decision.
+//     This is the leak that flatters most and shows least: an engine firing
+//     mid-bar on a move would be handed a close that already contains the move it
+//     reacted to. internal/alpha/outcome refuses it on the grading side for the
+//     same reason, and the two MUST agree — a model graded from a price the
+//     engine never saw is being graded on somebody else's decision.
 //
-//	2. A BAR STARTING AFTER IT. Same bound; it never enters the window.
+//  2. A BAR STARTING AFTER IT. Same bound; it never enters the window.
 //
-//	3. A CORRECTION THAT ARRIVED LATER. The store is bitemporal and a venue
-//	   restating a candle writes a NEW knowledge_time rather than overwriting, so
-//	   the observation window alone does not bound this: BarQuery.AsOf does, and
-//	   it is set to the SAME instant. Bounding one without the other still leaks,
-//	   and leaks invisibly — the bars are from the right minutes and simply say
-//	   what the venue decided later that they should have said.
+//  3. A CORRECTION THAT ARRIVED LATER. The store is bitemporal and a venue
+//     restating a candle writes a NEW knowledge_time rather than overwriting, so
+//     the observation window alone does not bound this: BarQuery.AsOf does, and
+//     it is set to the SAME instant. Bounding one without the other still leaks,
+//     and leaks invisibly — the bars are from the right minutes and simply say
+//     what the venue decided later that they should have said.
 //
 // # THE DECISION TIME IS REQUIRED, WITH NO DEFAULT TO NOW
 //
