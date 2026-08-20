@@ -111,6 +111,13 @@ func run() int {
 	// into the void — exactly the silence this branch is about.
 	obs.Registry.MustRegister(ledgerDurable)
 
+	// WHICH KINDS OF ENTRY ANYTHING ACTUALLY PRODUCES (#588). Registered here for
+	// the same reason as the gauge above — before anything can fail — so the
+	// posture is on /metrics from the first scrape. It is what lets an operator
+	// tell "this deployment does not process corporate actions" from "it does,
+	// and none occurred": today the book looks identical either way.
+	stateEntrySourcePosture(obs.Registry, logger, cfg)
+
 	store, closeStore, err := openStore(ctx, cfg, logger)
 	if err != nil {
 		logger.Error("store init failed", "err", err)
