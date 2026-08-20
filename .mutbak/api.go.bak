@@ -594,7 +594,10 @@ func (s *Server) handlePendingChange(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	state := dualcontrol.StatePending // MUTATION M6: every row reports pending.
+	state := dualcontrol.StatePending
+	if proposalstore.Expired(prop.Proposal, s.now()) {
+		state = dualcontrol.StateLapsed
+	}
 
 	// THE MANDATE GOES OUT THROUGH protojson, NOT encoding/json, for the same
 	// reason proposeRequest comes IN through it: a hand-rolled struct here would be

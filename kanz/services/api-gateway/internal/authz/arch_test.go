@@ -262,9 +262,17 @@ func TestTheWholeRouteTableIsDeclared(t *testing.T) {
 		// reasoning: four-eyes here is a check on the PERSON, not the role —
 		// compliance compares authenticated subjects across two requests, so two
 		// holders are two signatures and one holder acting twice is refused.
-		"POST /v1/portfolios/{id}/mandate":         authz.Mandate,
-		"POST /v1/portfolios/{id}/mandate/approve": authz.Mandate,
-		"GET /v1/mandates/pending-changes":         authz.Mandate,
+		// THE BY-ID READ (#606) IS authz.Mandate AND NOT authz.Read, and it is the
+		// entry where "should a read token reach it?" has the sharpest answer on
+		// this whole table. It serves the PROPOSED MANDATE — which rules, which
+		// limits — so it is strictly more sensitive than the queue above it, which
+		// carries only the shape of the change. Granting it Read would put the
+		// constraint set of every pending change in front of every token in the
+		// tenant, and it would do so on the one surface a signature is given from.
+		"POST /v1/portfolios/{id}/mandate":               authz.Mandate,
+		"POST /v1/portfolios/{id}/mandate/approve":       authz.Mandate,
+		"GET /v1/mandates/pending-changes":               authz.Mandate,
+		"GET /v1/mandates/pending-changes/{proposal_id}": authz.Mandate,
 
 		// THE OPERATOR CONTROL PLANE (#573). Every one of these is authz.Operate,
 		// and the capability is the whole argument: Read and Trade are
