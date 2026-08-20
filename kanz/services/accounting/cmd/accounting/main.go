@@ -459,6 +459,14 @@ func runConsumer(ctx context.Context, cfg config.Config, store ledger.Store, mes
 	// number drift, and the drift surfaces as a trading control that refuses or
 	// admits wrongly.
 	//
+	// CORPORATE ACTIONS ARE NOT IN THIS BALANCE (#588), and both consumers of it
+	// are entitled to know: the ruling above is about AUTHORITY, not coverage.
+	// The fold is written and correct; nothing announces an action, so no
+	// EntryCorporateAction has ever reached this journal. Every announcement this
+	// producer sends is therefore complete for fills and cash movements and short
+	// by every dividend, coupon and merger payment received.
+	// stateEntrySourcePosture above is what says so on /metrics.
+	//
 	// It rides the CONSUMER'S connection rather than dialing a second one: an
 	// announcement is caused by a fold, so "can fold, cannot announce" is a state
 	// worth not inventing.

@@ -32,3 +32,10 @@ bin/
 *.dll
 *.so
 *.dylib
+
+# Mutation-harness backups. Proving a test fails when the thing it checks is
+# broken means editing a source file and putting it back, and the backup has to
+# live somewhere while that happens. The WIP this branch inherited committed
+# three of them (1,474 lines of duplicated source, CRLF-rewritten by the
+# restore) — untracked was not enough, because `git add -A` took them.
+.mutbak/

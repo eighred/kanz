@@ -56,6 +56,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"time"
 
 	compliancepb "github.com/eighred/kanz/kanz-schemas-go/compliance/v1"
@@ -142,12 +143,23 @@ func New(proposals store.ProposalStore, publisher Publisher, logger *slog.Logger
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) { s.mux.ServeHTTP(w, r) }
 
-// Routes registers the three routes. They are 1:1 with the gateway's, so the
+// Routes registers the four routes. They are 1:1 with the gateway's, so the
 // gateway path IS the upstream path and nothing rewrites.
+//
+// THE FOURTH IS THE READ OF ONE PROPOSAL'S MANDATE (#606), and it is not a
+// convenience. Until it existed the queue served a DIGEST and this file's own
+// comment said the mandate "is fetched by proposal id" — describing a route that
+// was never registered anywhere. A second signatory could see the SHAPE of the
+// change (portfolio, version, rule count, reason, digest) and not its CONTENT,
+// so the only question a second signature exists to answer — does this change do
+// what the proposer says it does? — was unanswerable from any client. Two real
+// names on a payload neither of them could open is #444's forgeable-actor defect
+// wearing a new costume.
 func (s *Server) routes() {
 	s.mux.HandleFunc("POST /v1/portfolios/{id}/mandate", s.handlePropose)
 	s.mux.HandleFunc("POST /v1/portfolios/{id}/mandate/approve", s.handleApprove)
 	s.mux.HandleFunc("GET /v1/mandates/pending-changes", s.handlePendingChanges)
+	s.mux.HandleFunc("GET /v1/mandates/pending-changes/{proposal_id}", s.handlePendingChange)
 }
 
 // proposeRequest is what a proposer sends.
@@ -277,7 +289,7 @@ func (s *Server) handlePropose(w http.ResponseWriter, r *http.Request) {
 		"proposal_id":  prop.ID,
 		"portfolio_id": m.GetPortfolioId(),
 		"mandate_id":   m.GetMandateId(),
-		"version":      m.GetVersion(),
+		"version":      jsonUint64(m.GetVersion()),
 		// THE RULE COUNT IS REPORTED RATHER THAN REFUSED. An empty ruleset is legal
 		// and means "governed by a mandate that constrains nothing", which is
 		// different from having no mandate — the approver has to be able to see that
@@ -419,7 +431,7 @@ func (s *Server) handleApprove(w http.ResponseWriter, r *http.Request) {
 		"proposal_id":  prop.ID,
 		"portfolio_id": prop.Mandate.GetPortfolioId(),
 		"mandate_id":   prop.Mandate.GetMandateId(),
-		"version":      prop.Mandate.GetVersion(),
+		"version":      jsonUint64(prop.Mandate.GetVersion()),
 		"proposed_by":  approval.Proposer(),
 		"approved_by":  approval.Approver(),
 		"reason":       prop.Reason,
@@ -522,12 +534,126 @@ func (s *Server) handlePendingChanges(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, out)
 }
 
-// proposalJSON renders one proposal for the queue.
+// handlePendingChange serves ONE proposal's mandate — the content behind the
+// queue's digest (#606).
 //
-// IT CARRIES THE DIGEST AND NOT THE MANDATE. An approver needs to see WHAT they
-// are signing, and the mandate is fetched by proposal id rather than splashed
-// across a list — but the digest is what binds their signature, so it is the one
-// field a client can compare against what it displays.
+// # Why the queue alone was not enough
+//
+// proposalJSON's doc used to say the mandate "is fetched by proposal id rather
+// than splashed across a list", and no route to fetch one existed on this mux or
+// on the gateway. So a signatory could read the SHAPE of a change — portfolio,
+// mandate id, version, rule count, reason, digest — and never WHICH RULES or
+// WHICH LIMITS. The residual risk is precise: a proposer writes a reason
+// describing a modest tightening, the mandate actually relaxes the constraint
+// that would have refused their order, and the approver signs a digest over
+// content nobody showed them. Both signatures are genuine, dualcontrol.SameSubject
+// is satisfied, and the audit trail is clean.
+//
+// # It answers notFoundBody for all four negative cases
+//
+// Unknown id, another tenant's id, an id whose proposal was already decided (Get
+// misses — Claim removed the row), and a caller whose token carries no tenant at
+// all. ONE BODY AND ONE STATUS FOR ALL FOUR, byte for byte, because anything else
+// makes this an oracle: proposal ids are the approve route's only secret, and a
+// route that answered 403 for "not yours" and 404 for "no such thing" would let
+// any authenticated caller enumerate another fund's pending mandate changes by
+// status code alone. That is the property store.Scoped exists to hold, and the
+// reason the scope check goes through it rather than a local prefix comparison.
+//
+// # No "current mandate" is served alongside, and no diff is offered
+//
+// A diff is what a signatory actually wants, and this route deliberately does not
+// invent one. The only armed view this process holds is the post-trade monitor's
+// registry, which is REPLAY-FILLED and may still be in flight — it can disagree
+// with the compacted MANDATE stream every replica actually arms from. That is
+// exactly why handleApprove publishes previous as nil, and a "current" served
+// from a source that can be wrong is worse than no diff at all: it would be read
+// as authoritative by the one person whose job is to notice a difference.
+//
+// # A LAPSED proposal is served too
+//
+// The queue lists lapsed rows on purpose (#563), so a client that renders the
+// queue must be able to expand every row it draws. state says which it is; a
+// signatory who expands a lapsed row and reads its rules learns what was NOT put
+// in force, which is a real question about a portfolio still governed by the old
+// constraint.
+func (s *Server) handlePendingChange(w http.ResponseWriter, r *http.Request) {
+	_, tenant, ok := s.principal(w, r)
+	if !ok {
+		return
+	}
+
+	prop, found, err := s.proposals.Get(r.Context(), r.PathValue("proposal_id"))
+	if err != nil {
+		s.logger.Error("compliance: cannot read a mandate proposal", "err", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "proposal store unavailable"})
+		return
+	}
+	if !found || !store.Scoped(prop, store.TenantScope(tenant)) {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": notFoundBody})
+		return
+	}
+
+	// THE STATE IS DERIVED HERE RATHER THAN READ OFF THE ROW, because there is no
+	// such column: a proposal LAPSES by the clock passing its deadline, and nothing
+	// writes to it when that happens. handlePendingChanges reaches the same fact
+	// through Pending/Lapsed, which are the scoped list queries; a by-id read
+	// cannot use either, so it asks proposalstore.Expired the one question those
+	// two are themselves built on. Both sides therefore move together — a change to
+	// what "expired" means cannot leave the queue and the detail view disagreeing
+	// about the same proposal.
+	//
+	// A CONSTANT HERE WOULD BE A CLIENT SIGNING A LAPSED CHANGE. Report pending on
+	// a row that has passed its deadline and the client offers a signature the
+	// approve route then refuses with 409 — a control that reads as a bug, and an
+	// approver who cannot tell "nobody signed this in time" from "it is waiting for
+	// me". Held by TestPendingChange_ALapsedProposalIsStillReadable.
+	state := dualcontrol.StatePending
+	if proposalstore.Expired(prop.Proposal, s.now()) {
+		state = dualcontrol.StateLapsed
+	}
+
+	// THE MANDATE GOES OUT THROUGH protojson, NOT encoding/json, for the same
+	// reason proposeRequest comes IN through it: a hand-rolled struct here would be
+	// a second definition of what a mandate is, and the field it silently dropped
+	// would be a constraint the approver never saw and the published mandate still
+	// carried. It is also what makes this route's round trip exact — what a client
+	// reads here re-marshals to the bytes comp.MandateDigest hashed.
+	//
+	// EmitDefaultValues IS REQUIRED AND IS NOT COSMETIC. An empty ruleset is legal
+	// and means "governed by a mandate that constrains nothing" — the single most
+	// consequential thing this surface can be asked to approve. Without it "rules"
+	// is simply absent, which a client cannot tell from a field it failed to
+	// parse. UseProtoNames matches the queue's spelling and the gateway's own
+	// marshaler.
+	body, err := (protojson.MarshalOptions{EmitDefaultValues: true, UseProtoNames: true}).
+		Marshal(prop.Mandate)
+	if err != nil {
+		s.logger.Error("compliance: cannot render a stored mandate", "proposal_id", prop.ID, "err", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "the proposal is not well-formed"})
+		return
+	}
+
+	// THE SAME FIELDS THE QUEUE ROW CARRIES, FROM THE SAME FUNCTION. A second
+	// rendering of a proposal is how the queue and the detail view come to disagree
+	// about the digest, and a signatory comparing the two would be comparing this
+	// file against itself. What is added is the one thing the queue cannot carry.
+	out := proposalJSON(prop, state)
+	out["mandate"] = json.RawMessage(body)
+	writeJSON(w, http.StatusOK, out)
+}
+
+// proposalJSON renders one proposal for the queue, and — with the mandate added
+// beside it — for the by-id read.
+//
+// IT CARRIES THE DIGEST AND NOT THE MANDATE, on the LIST. The digest is what
+// binds a signature, so it is the field a client compares against what it
+// displays; the mandate itself is served by proposal id
+// (GET /v1/mandates/pending-changes/{proposal_id}) rather than splashed across
+// every row. That route exists — it did not when this comment first claimed it
+// did, which is what #606 was filed on. Verified by
+// TestPendingChange_ServesTheProposedMandate; if it is ever deleted, delete this
+// paragraph with it rather than leaving a premise nothing holds up.
 //
 // STATE IS ALWAYS PRESENT, INCLUDING ON PENDING ENTRIES. Adding it only to lapsed
 // ones would make a client that ignores unknown keys read a lapsed proposal as
@@ -538,7 +664,7 @@ func proposalJSON(p store.MandateProposal, state string) map[string]any {
 		"act":          string(p.Act),
 		"portfolio_id": p.Mandate.GetPortfolioId(),
 		"mandate_id":   p.Mandate.GetMandateId(),
-		"version":      p.Mandate.GetVersion(),
+		"version":      jsonUint64(p.Mandate.GetVersion()),
 		"rule_count":   len(p.Mandate.GetRules()),
 		"proposer":     p.Proposer,
 		"reason":       p.Reason,
@@ -549,14 +675,48 @@ func proposalJSON(p store.MandateProposal, state string) map[string]any {
 	}
 }
 
+// jsonUint64 renders a uint64 as a JSON STRING, and every uint64 leaving this
+// hand-built surface goes through it (#606).
+//
+// # A uint64 cannot ride encoding/json as a number
+//
+// encoding/json writes it as a bare JSON number, and JSON.parse — the only
+// decoder a browser has — parses every number as a float64. Above 2^53 the value
+// is destroyed BEFORE any client code runs: 18446744073709551615 arrives as
+// 18446744073709552000, and nothing downstream can recover it. On a mandate
+// version that is the field pinning WHICH constraint an order was audited
+// against.
+//
+// # Why a helper rather than three strconv calls
+//
+// This surface is hand-built map[string]any, so it gets none of protojson's
+// guarantees — and protojson emits every uint64 as a string for exactly this
+// reason, which is what kanz-web's decimal handling is built on. There is one
+// such field today (Mandate.version, on four bodies: the propose 202, the approve
+// 200, the queue row and the by-id read — the last two share proposalJSON).
+// Spelling strconv.FormatUint at each site is how the fifth body gets the raw
+// value back: the next author copies the nearest line, and the nearest line would
+// be a naked getter. A named function is the thing a reviewer notices missing.
+//
+// AND THE FAMILY IS GUARDED, NOT JUST THESE SITES. Twenty-four files under
+// services/ build a reply as a map[string]any, so fixing one file leaves the
+// defect free to reappear in any of the others.
+// test/arch/uint64_json_domain_test.go derives every uint64/fixed64 getter from
+// the protos and refuses a bare one in a JSON body anywhere in the estate; its
+// exemption list is empty. Unwrapping any call here fails it by file and line.
+func jsonUint64(v uint64) string { return strconv.FormatUint(v, 10) }
+
 // principal returns the caller's authenticated subject and tenant, or writes the
 // refusal.
 //
-// ONE IMPLEMENTATION, SHARED BY ALL THREE ROUTES. Dual control over a forgeable
-// identity is theatre: one person could propose as alice and approve as bob
-// without ever holding a second credential, and the trail would show four eyes.
-// That defect was real on the override surface and was fixed in #444, which is
-// why this is a function rather than a paragraph repeated three times.
+// ONE IMPLEMENTATION, SHARED BY EVERY ROUTE ON THIS MUX. Dual control over a
+// forgeable identity is theatre: one person could propose as alice and approve as
+// bob without ever holding a second credential, and the trail would show four
+// eyes. That defect was real on the override surface and was fixed in #444, which
+// is why this is a function rather than a paragraph repeated at each handler —
+// and why the by-id read added in #606 calls it rather than reading the headers
+// itself, which is the shape that would have let an unauthenticated caller
+// expand another tenant's proposal.
 //
 // THE HEADERS ARE TRUSTED BECAUSE OF THE NETWORK POLICY, not because they are
 // headers. The api-gateway is this listener's only permitted caller — see the
@@ -590,8 +750,11 @@ func (s *Server) principal(w http.ResponseWriter, r *http.Request) (subject, ten
 }
 
 // notFoundBody is the SINGLE body returned for "no such proposal", "not yours"
-// and "already decided". One constant, so the three cannot drift apart into an
-// oracle by a later edit to any branch.
+// and "already decided" — on the approve route AND on the by-id read (#606). One
+// constant, so they cannot drift apart into an oracle by a later edit to any
+// branch: proposal ids are the approve route's only secret, and a body or status
+// that distinguished the cases would let any authenticated caller enumerate
+// another fund's pending mandate changes.
 const notFoundBody = "no such pending mandate change"
 
 // alreadyDecidedBody is the losing side of a race. It is distinct from
