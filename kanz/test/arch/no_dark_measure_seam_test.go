@@ -143,6 +143,22 @@ var darkSeamExempt = map[string]string{
 		"dark by CHOICE rather than by a missing provider: it takes the same ReturnsProvider. " +
 		"Deciding whether to serve both is the open question, and until it is answered the platform " +
 		"ships a Monte-Carlo VaR nobody can request.",
+	"internal/risk/compute.RegisterMarginRisk": "#408 control 4 — LiquidationProximity. Needs a " +
+		"MarginProvider, and TWO PIECES OF ANOTHER SERVICE'S DEPLOY-TIME CONFIG are what is " +
+		"missing, neither of them a Go problem. (a) PORTFOLIO -> VENUE ACCOUNT: the bindings are " +
+		"execution.AccountBindings, parsed by execution.ParseBindings from the OMS's own " +
+		"environment at OMS startup, which is also where ErrAccountShared refuses to start on a " +
+		"shared account (#415). risk-engine holds no such config, and giving it a second copy " +
+		"would be a second answer that can disagree with the first — on precisely the mapping " +
+		"#415 made load-bearing. (b) VENUE SYMBOL -> MARK: collateral.v1." +
+		"VenueLiquidationPrice.venue_symbol is the exchange's own spelling and deliberately NOT a " +
+		"Kanz instrument_id, because the adapter's symbol map is a ONE-WAY instrument -> symbol " +
+		"table; inverting it needs the venue adapter's configuration, and internal/risk/spotsource " +
+		"is keyed by InstrumentID. So nothing inside the risk module can pair a liquidation price " +
+		"with a price to measure it against. Both are held by the OMS and the venue adapters, and " +
+		"the honest wiring is a provider built where they live rather than a third copy of either. " +
+		"NOTE also #417: control 1 is unproven against a live venue (#70), so no leveraged " +
+		"position exists on this estate for this measure to have read yet.",
 }
 
 // seamRef is a composition-root seam: an exported function that takes the
