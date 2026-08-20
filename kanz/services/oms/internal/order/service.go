@@ -1945,11 +1945,30 @@ func (s *Service) handleApprove(ctx context.Context, env *envelopepb.Envelope, p
 		return nil
 	}
 
+	// THE FACT IS BUILT BEFORE THE CLAIM, so an approval that cannot be ANNOUNCED
+	// is not recorded either (#410, clause (d)). outbox.From refuses a record
+	// with no tenant, and returning here rather than claiming is the same
+	// discipline hold() and the admission path follow: a state change whose FACT
+	// cannot be captured must not commit.
+	//
+	// IT IS BUILT FROM appr — the Approval that came out of p.Approve above —
+	// rather than from `approver` and `p.Proposer` read off separately. Both
+	// names then arrive on the FACT from the check that proved they differ,
+	// which is what stops this ever becoming two strings a caller chose.
+	approved, err := s.emitter.ApprovedFact(ctx, appr)
+	if err != nil {
+		return err
+	}
+
 	// THE CLAIM, BEFORE THE ADMISSION. This is the serialisation point: the OMS
 	// ships two replicas, so a mutex here would say nothing. Losing it means
 	// somebody else decided this proposal between the read and now, and admitting
 	// anyway would send one order to a venue twice.
-	claimed, err := s.store.Proposals().Claim(ctx, orderID, approver, now)
+	//
+	// THE SECOND SIGNATURE AND ITS ANNOUNCEMENT COMMIT TOGETHER. The loser
+	// enqueues nothing, so exactly one ORDER_APPROVED exists per decided
+	// proposal — one decision, one FACT, however many approvers raced for it.
+	claimed, err := s.store.Proposals().Claim(ctx, orderID, approver, now, []outbox.Record{approved})
 	if err != nil {
 		return err // transient
 	}
@@ -1972,6 +1991,26 @@ func (s *Service) handleApprove(ctx context.Context, env *envelopepb.Envelope, p
 		s.logger.Warn("oms: approval lost the claim — this proposal was already decided",
 			"order_id", orderID, "approver", approver, "refusal_recorded", recorded)
 		return nil
+	}
+
+	// THE APPROVAL GOES OUT BEFORE THE ORDER DOES. The FACT is durable now; this
+	// puts it on the bus ahead of the replay below, so the estate never learns
+	// that an order was released before it can be told who released it. On the
+	// admitted path submit's own Flush would carry it anyway — same partition
+	// key, same queue, enqueue order preserved — but the REFUSED replay never
+	// reaches that Flush, and a second signature is a decision in its own right
+	// whether or not the order it released survives today's gates.
+	//
+	// A FAILURE HERE IS LOGGED, NOT RETURNED, and that is the one place on this
+	// path where that is the right call. The record is committed: the relay's
+	// next tick publishes it, so nothing is lost. Nacking instead would strand
+	// the order — the redelivered approval finds a proposal already decided,
+	// loses the claim and acks, and the order that a second person signed is
+	// never admitted at all.
+	if _, err := s.relay.Flush(ctx, orderID); err != nil {
+		s.logger.Error("oms: the ORDER_APPROVED FACT is committed but did not reach the bus — "+
+			"the relay will publish it; until it does, services/audit cannot say who approved this order",
+			"order_id", orderID, "proposer", p.Proposer, "approver", approver, "err", err)
 	}
 
 	// REPLAYED AS BYTES, THROUGH THE SAME DECODER THE BUS FEEDS. The stored

@@ -479,6 +479,83 @@ message OrderPendingApproval {
   google.protobuf.Timestamp expires_at = 7;
 }
 
+// OrderApproved is the FACT that a held order received its SECOND SIGNATURE
+// (#410, act three, acceptance clause (d): "the approval is recorded as a FACT
+// carrying both identities").
+//
+// # Why the admission FACT could not carry this
+//
+// The two other acts under this control already announce their approval:
+// master.v1.ExceptionOverridden carries actor + approver, and
+// lifecycle.v1.ConfigChanged carries changed_by + approved_by. The order path
+// had nothing. ORDER_ACCEPTED carries an OrderState, which records the ORDER and
+// not who released it, and the ACCEPTED command.v1.CommandOutcome is keyed on
+// order_id and names neither party. So "who countersigned this order" was
+// answerable only from the OMS's own order_proposals row — and services/audit
+// folds bus FACTs and cannot read another service's tables. The trail could show
+// that an order was approved and could not say by whom, on the one act where the
+// capital actually moves.
+//
+// A ROW IS NOT A FACT. That is the whole of this message.
+//
+// # It rides the claim, not the admission
+//
+// This is published from the SAME transaction that writes the second signature
+// onto the proposal (ProposalStore.Claim), not from the one that admits the
+// order. Two reasons, and both are about what an examiner can be told:
+//
+//   - There must be no instant in which an order has been released and the trail
+//     cannot yet name who released it. Announcing at admission would open exactly
+//     that window, and a crash inside it loses the approval and keeps the order.
+//   - The approval is a decision in its own right. An approved order can still be
+//     refused on the replay that follows — compliance, the mandate and the venue
+//     are all re-checked against TODAY — and that refusal does not unmake the
+//     fact that a second person signed.
+//
+// So this FACT does not imply an ORDER_ACCEPTED. It says a second signature was
+// given; the order's own outcome follows under the same order_id.
+//
+// # Every field comes off the approval evidence
+//
+// The producer builds this from a dualcontrol.Approval — a value obtainable only
+// by passing the self-approval, digest and expiry checks, whose fields are
+// unexported so no other package can forge one by composite literal. Nothing
+// here is assembled from strings a caller chose independently, which is the
+// property that makes both names on one FACT worth reading: they arrived
+// together, out of a check that had already run.
+message OrderApproved {
+  string order_id = 1;
+
+  // proposer is the AUTHENTICATED subject that submitted the order, and approver
+  // is the DIFFERENT authenticated subject that released it.
+  //
+  // BOTH, ON ONE FACT, IS THE POINT. Either name alone is compatible with one
+  // person holding both signatures, which is the record an auditor is least able
+  // to check and the most valuable one to forge. They are refused as equal —
+  // normalised for case and surrounding space — by internal/dualcontrol before
+  // this message can be built, and again by a CHECK constraint on the row.
+  string proposer = 2;
+  string approver = 3;
+
+  // act is the dual-control act constant, "ORDER_SUBMISSION". Carried rather
+  // than assumed so an approval collected for a pricing override or a mandate
+  // change can never be read as one for an order — the same reason
+  // OrderPendingApproval carries it.
+  string act = 4;
+
+  // digest is the value this approval covers: approval.Terms.Digest over the
+  // command, byte-identical to the digest on the ORDER_PENDING_APPROVAL that
+  // announced the hold. It is what TIES the two FACTs together, and it is what
+  // an order edited between proposal and approval would change — so a consumer
+  // holding both can prove the thing signed is the thing proposed.
+  string digest = 5;
+
+  // approved_at is when the second signature was given, which is not the same
+  // instant as the admission that may follow it. An examiner dating the decision
+  // against the book needs this one.
+  google.protobuf.Timestamp approved_at = 6;
+}
+
 // OrderRejected is the FACT that an order was refused before any effect. No
 // state changed; the order is terminal (status REJECTED).
 message OrderRejected {
