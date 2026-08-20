@@ -48,6 +48,21 @@ const DefaultMaxAge = 15 * time.Minute
 // then compare two of Kanz's own numbers against the exchange and report
 // whichever disagreed. This only remembers a level somebody else computed.
 //
+// CORPORATE ACTIONS ARE NOT IN THIS BALANCE (#588), and this is the consumer
+// where that matters most, because the exchange DOES see them. Accounting's fold
+// pays dividend, coupon and merger cash correctly and has never been given one:
+// accounting.v1.CorporateAction has no publisher anywhere in the module. So when
+// #418's comparison is finally armed, an account that has been paid a dividend
+// will hold cash the exchange knows about and the book does not, and this will
+// report a BREAK THAT IS NOT A BREAK — an exchange discrepancy in the shape of an
+// unfed feed. The standing instinct on a break is that the exchange is the
+// authority and the book must be adjusted; here that would be right by accident
+// and wrong as a rule, because the adjustment would have no announcement behind
+// it and no ex-date to restate against.
+//
+// Check kanz_accounting_entry_source_wired{type="corporate_action"} on the
+// accounting deployment before treating any cash break as a fill problem.
+//
 // It is scoped to ONE account — the one this adapter's credential spends from.
 // An announcement carries every account a portfolio holds cash in, and taking
 // the wrong one would reconcile this exchange against another exchange's

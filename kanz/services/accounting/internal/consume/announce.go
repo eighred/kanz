@@ -33,6 +33,21 @@ const schemaRefPortfolioCash = "accounting.v1.PortfolioCashBalance:1"
 // implementation of one number, and the two would drift — surfacing as a trading
 // control that refuses or admits wrongly.
 //
+// CORPORATE ACTIONS ARE NOT IN THIS BALANCE (#588). The sentence above is the
+// AUTHORITY ruling and it still stands — but one of the three inputs it names has
+// never arrived. ledger.foldCorpAct pays dividend and coupon cash and any merger
+// consideration onto the held quantity, and NOTHING ANNOUNCES A CORPORATE ACTION
+// anywhere in this platform: accounting.v1.CorporateAction has no publisher, no
+// NATS subject and no Kafka topic. So the level published here is complete for
+// trade legs and for cash movements, and SILENTLY OMITS every dividend, coupon
+// and merger payment the fund has received. Read
+// kanz_accounting_entry_source_wired{type="corporate_action"} before treating a
+// balance as the whole of what a portfolio holds.
+//
+// THE FIX IS NOT TO COMPUTE A SECOND BALANCE somewhere that does see corporate
+// actions — nothing does, and a second computation is the drift this ruling
+// exists to prevent. What is missing is upstream of every consumer.
+//
 // A LEVEL, NOT A DELTA: idempotent on redelivery, and self-correcting after a
 // gap. The next announcement is right regardless of how many were missed, which
 // is what makes a lost publish survivable.
