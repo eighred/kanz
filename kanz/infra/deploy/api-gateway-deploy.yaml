@@ -292,7 +292,7 @@ spec:
             #   API_GATEWAY_MANDATE_ROLE     the role carrying authz.Mandate
             #
             # A PAIR, like funding and unlike the override half — and the reason is the
-            # port. That listener serves the three mandate routes and nothing else, so
+            # port. That listener serves the four mandate routes and nothing else, so
             # setting the address without naming a signatory exposes a surface every
             # principal that exists gets a 403 from, and validateAuth refuses to start.
             # Unset, the routes are not registered and this gateway answers 404 to:
@@ -300,6 +300,7 @@ spec:
             #   POST /v1/portfolios/{id}/mandate
             #   POST /v1/portfolios/{id}/mandate/approve
             #   GET  /v1/mandates/pending-changes
+            #   GET  /v1/mandates/pending-changes/{proposal_id}   the change ITSELF (#606)
             #
             # THE ROLE MUST DIFFER FROM API_GATEWAY_APPROVE_ROLE, and that collision is
             # the whole argument for a separate capability. One signatory holding both

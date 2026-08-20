@@ -61,9 +61,10 @@
 // here". The follow-up landed. Two separately authenticated requests through the
 // api-gateway are the real control:
 //
-//	POST /v1/portfolios/{id}/mandate            propose  (authz.Mandate)
-//	POST /v1/portfolios/{id}/mandate/approve    sign     (authz.Mandate)
-//	GET  /v1/mandates/pending-changes           the queue an approver acts from
+//	POST /v1/portfolios/{id}/mandate                       propose  (authz.Mandate)
+//	POST /v1/portfolios/{id}/mandate/approve               sign     (authz.Mandate)
+//	GET  /v1/mandates/pending-changes                      the queue an approver acts from
+//	GET  /v1/mandates/pending-changes/{proposal_id}        the proposed mandate itself (#606)
 //
 // The gateway authenticates each caller and injects the principal; the compliance
 // service holds the proposal between the two requests and refuses a second
