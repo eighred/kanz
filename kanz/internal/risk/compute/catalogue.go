@@ -57,6 +57,7 @@ const (
 	FamilyLiquidity   MeasureFamily = "liquidity"    // RegisterLiquidityRisk
 	FamilyStructured  MeasureFamily = "structured"   // RegisterStructuredRisk
 	FamilyXVA         MeasureFamily = "xva"          // RegisterXVA
+	FamilyMargin      MeasureFamily = "margin"       // RegisterMarginRisk
 )
 
 // catalogue maps every implemented measure to the family whose seam registers
@@ -124,6 +125,11 @@ var catalogue = map[v1.MeasureName]MeasureFamily{
 	// RegisterXVA — needs exposure profiles and counterparty credit curves.
 	MeasureCVA: FamilyXVA,
 	MeasurePFE: FamilyXVA,
+
+	// RegisterMarginRisk — needs a MarginProvider: the venue accounts backing a
+	// portfolio, and the exchange's own liquidation price for each open position
+	// paired with a reference price (#408 control 4).
+	MeasureLiquidationProximity: FamilyMargin,
 }
 
 // Catalogue returns every implemented measure with its family, in stable
