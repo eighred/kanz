@@ -43,8 +43,14 @@ const TenantRoutePrefix = "tenant."
 func TenantRoutedSubject(tenant, subject string) string {
 	if tenant == "" || strings.ContainsAny(tenant, ". *>") {
 		// Unreachable on both live paths: the gateway refuses an authenticated
-		// caller with no tenant, and translate resolves TenantOf(fund) with a
-		// non-empty fallback. Returning the bare subject rather than minting
+		// caller with no tenant, and translate resolves the tenant through a
+		// FundAuthority that REFUSES the signal outright rather than answering with
+		// an empty string — translate.NewFundAuthority rejects a fund declaring no
+		// tenant at startup, and Emit returns ErrUnboundFund for a pair the table
+		// does not grant (#632). The premise this comment used to carry — "a
+		// non-empty FALLBACK" — was the defect: the fallback was the caller's own
+		// fund_id, which made THIS FUNCTION's output attacker-chosen.
+		// Returning the bare subject rather than minting
 		// "tenant..order.order.submit" — or a tenant carrying a wildcard, which
 		// would import into EVERY account — keeps a future caller that skips
 		// those gates from producing a subject the broker silently drops or,

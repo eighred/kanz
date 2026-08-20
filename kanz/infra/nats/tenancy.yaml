@@ -1046,9 +1046,33 @@ data:
               publish: {
                 allow: [
                   # MT-02 (#360): signal-originated orders carry the tenant
-                  # routing prefix, resolved per signal from TenantOf(fund_id) —
-                  # one endpoint serves many funds, so a service-level tenant
+                  # routing prefix, resolved per signal from the service's
+                  # strategy->fund->tenant binding table (translate.FundAuthority)
+                  # — one endpoint serves many funds, so a service-level tenant
                   # would be the wrong one for all but a single fund.
+                  #
+                  # THE WILDCARD IS NOT NARROWED, and #632 is where that was
+                  # weighed rather than assumed. The grant reads as "any tenant",
+                  # and it is: this account may publish an order command onto
+                  # every tenant's prefix. Narrowing it to the tenants this
+                  # deployment actually serves is not expressible here — the
+                  # tenant set lives in webhook-ingest's bootstrap file, which the
+                  # broker never sees, and enumerating it in this file would put
+                  # the same list in two places with the drift surfacing as orders
+                  # that authenticate and are then denied at publish. It would
+                  # also fail test/arch/nats_service_permissions_test.go, which
+                  # resolves bus.TenantRoutedSubject to the literal
+                  # "tenant.*.order.order.submit" and requires the grant to cover
+                  # it. api-gateway carries the identical wildcard for the
+                  # identical reason (see its block above).
+                  #
+                  # SO THE BROKER IS NOT THE CONTROL HERE. What bounds this
+                  # service to one tenant per signal is that Emit refuses any
+                  # (strategy, fund) pair its configured binding table does not
+                  # grant, before anything is published — not this line. An
+                  # `allow: []` would not help either: an explicitly empty allow
+                  # list is a NO-OP in this format, not a deny (see the note at
+                  # the head of this file).
                   "tenant.*.order.order.submit",
                   "strategy.signal.received", "order.order.submit",
                   "$JS.API.>", "$JS.ACK.>",

@@ -66,7 +66,7 @@ type Config struct {
 	// Book snapshots are shared reference data — every fund sees the same
 	// BTC-USD book — so this is normally the platform's own tenant, not a
 	// customer's. That is a different question from the fund-scoped signal path,
-	// which resolves its tenant per event via alpha.Config.TenantOf.
+	// which resolves its tenant per event via alpha.Config.Authority.
 	Tenant string
 }
 

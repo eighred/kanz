@@ -63,7 +63,15 @@ func TestIntegration_EmitReachesTheWire(t *testing.T) {
 	// EXEC-M7a bug was that no stream was bound to them at all. When the production
 	// topology is provisioned (CI bootstraps the same script prod applies), this
 	// binds to the real EXECUTION stream and proves the real binding.
-	bustest.EnsureSubjects(t, ctx, js, "EXECUTION_IT", []string{"execution.>", "strategy.>", "order.>"})
+	//
+	// `tenant.>` is here because the ORDER COMMAND IS TENANT-ROUTED on the wire
+	// (MT-02, #358/#360): translate publishes it on
+	// bus.TenantRoutedSubject(tenant, SubjectSubmit), which does NOT match `order.>`.
+	// Without this the JetStream publish has no stream to land on and Emit fails —
+	// the exact class of defect this test was written for, one prefix later. The real
+	// topology carries it too (infra/nats/bootstrap-job.yaml provisions TENANT_ORDER
+	// for "tenant.*.order.>").
+	bustest.EnsureSubjects(t, ctx, js, "EXECUTION_IT", []string{"execution.>", "strategy.>", "order.>", "tenant.>"})
 
 	client, err := bus.DialNATS(ctx, bus.NATSConfig{URL: url, Name: "translate-it"})
 	if err != nil {
@@ -102,10 +110,17 @@ func TestIntegration_EmitReachesTheWire(t *testing.T) {
 			subErr <- fmt.Errorf("subscribe %s: %w", translate.SubjectSignal, err)
 		}
 	}()
+	// THE COMMAND IS SUBSCRIBED ON ITS TENANT-ROUTED WIRE SUBJECT, not the logical
+	// name. In production tenancy.yaml's per-account import remaps the prefix away
+	// before the tenant's OMS sees it; there is no account bridge on a bare test
+	// broker, so this reads the wire as __system__ would. Asserting the subject
+	// carries the tenant is half of what proves #632 is closed — the other half is
+	// that the tenant came from configuration, which cmdSubject encodes.
+	cmdSubject := bus.TenantRoutedSubject(itTenant, translate.SubjectSubmit)
 	go func() {
-		err := consumer.Subscribe(subCtx, translate.SubjectSubmit, "translate-it-cmd", collect)
+		err := consumer.Subscribe(subCtx, cmdSubject, "translate-it-cmd", collect)
 		if err != nil && subCtx.Err() == nil {
-			subErr <- fmt.Errorf("subscribe %s: %w", translate.SubjectSubmit, err)
+			subErr <- fmt.Errorf("subscribe %s: %w", cmdSubject, err)
 		}
 	}()
 	select {
@@ -123,6 +138,7 @@ func TestIntegration_EmitReachesTheWire(t *testing.T) {
 		}},
 		Publisher: producer,
 		Gate:      translate.OpenGate(nil),
+		Authority: itAuthority(t),
 	})
 	if err != nil {
 		t.Fatalf("translate.New: %v", err)
@@ -180,6 +196,24 @@ func TestIntegration_EmitReachesTheWire(t *testing.T) {
 				want.eventType, env.GetPayloadSchemaRef(), want.schemaRef)
 		}
 	}
+}
+
+// itTenant is the tenant that owns fund-alpha in this test's binding table. It is
+// deliberately NOT "fund-alpha": before #632 the tenant WAS the fund id, so a
+// test using the same string for both would pass whether or not the identity
+// default came back.
+const itTenant = "acme"
+
+func itAuthority(t *testing.T) translate.FundAuthority {
+	t.Helper()
+	a, err := translate.NewFundAuthority(
+		map[string]string{"fund-alpha": itTenant},
+		map[string][]string{"momentum": {"fund-alpha"}},
+	)
+	if err != nil {
+		t.Fatalf("NewFundAuthority: %v", err)
+	}
+	return a
 }
 
 func waitFor(t *testing.T, what string, cond func() bool) {

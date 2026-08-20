@@ -196,15 +196,40 @@ func run() int {
 	}, []string{"strategy_id"})
 	obs.Registry.MustRegister(unstamped)
 
+	// ATTEMPTED CROSS-TENANT ORDERS (#632). Non-zero means a sender holding a
+	// strategy's HMAC secret asked this platform to trade a fund that strategy is
+	// not bound to — a leaked secret being pointed at another tenant's book, or a
+	// bootstrap file missing a binding. Both need a human; neither is normal
+	// traffic, so this is an alertable series rather than a debug counter.
+	//
+	// STRATEGY ONLY, NOT FUND. The strategy id is bounded by the secret table this
+	// deployment holds; fund_id is an arbitrary string from the request body, and a
+	// label taking it would let an unauthenticated-for-that-fund caller mint
+	// unbounded time series. The fund it named is on the server's ERROR log line.
+	unboundFund := prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "kanz_webhook_unbound_fund_denials_total",
+		Help: "Authenticated alerts refused because the strategy is not bound to the fund_id they " +
+			"named, by strategy. The HMAC authenticates the strategy; the fund is a claim checked " +
+			"against the bootstrap binding. Non-zero means a leaked strategy secret or a missing " +
+			"binding — the fund named is in the ERROR log beside each increment.",
+	}, []string{"strategy_id"})
+	obs.Registry.MustRegister(unboundFund)
+
 	pipeline, err := ingest.NewPipeline(ingest.Options{
-		Auth:                 auth,
-		Symbols:              cfg.Symbols,
-		Prices:               cfg.Prices,
-		Equity:               cfg.Equity,
-		Positions:            positions, // the fund's REAL per-venue book (EXEC-M19b)
-		Alloc:                cfg.Alloc,
-		Publisher:            producer,
-		Gate:                 gate,
+		Auth:      auth,
+		Symbols:   cfg.Symbols,
+		Prices:    cfg.Prices,
+		Equity:    cfg.Equity,
+		Positions: positions, // the fund's REAL per-venue book (EXEC-M19b)
+		Alloc:     cfg.Alloc,
+		Publisher: producer,
+		Gate:      gate,
+		// THE TENANT COMES FROM HERE AND NOWHERE ELSE (#632). config.Load already
+		// refused to return without it, so this can never be nil — and NewPipeline
+		// refuses a nil one anyway, because "the field nobody assigned" is the exact
+		// history being closed: the seam this replaced defaulted to the caller's own
+		// fund_id and was never wired at any composition root.
+		Authority:            cfg.Authority,
 		MaxQuantity:          cfg.MaxQuantity,
 		MaxLeverage:          cfg.MaxLeverage,
 		ReplayWindow:         cfg.ReplayWindow,
@@ -215,6 +240,9 @@ func run() int {
 		// WEBHOOK_INGEST_REQUIRE_SIGNAL_TS cannot be armed until that list is empty.
 		OnUnstampedSignal: func(strategyID string) {
 			unstamped.WithLabelValues(strategyID).Inc()
+		},
+		OnUnboundFund: func(strategyID string) {
+			unboundFund.WithLabelValues(strategyID).Inc()
 		},
 	})
 	if err != nil {

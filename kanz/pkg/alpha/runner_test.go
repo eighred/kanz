@@ -3,6 +3,7 @@ package alpha
 import (
 	"context"
 	"math/big"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -73,6 +74,20 @@ func (e *staticEngine) views() int {
 	return e.sawN
 }
 
+// alphaTestAuthority binds the test engine (whose Name() is the strategy id when
+// an Intent carries none) to fund-alpha, owned by tenant acme.
+func alphaTestAuthority(t *testing.T) translate.FundAuthority {
+	t.Helper()
+	a, err := translate.NewFundAuthority(
+		map[string]string{"fund-alpha": "acme"},
+		map[string][]string{"test-engine": {"fund-alpha"}, "obi-v1": {"fund-alpha"}},
+	)
+	if err != nil {
+		t.Fatalf("NewFundAuthority: %v", err)
+	}
+	return a
+}
+
 func testIntent() Intent {
 	return Intent{
 		FundID: "fund-alpha", InstrumentID: "BTC-USD",
@@ -102,8 +117,13 @@ func runnerWithGate(t *testing.T, eng Engine, feeds []Feed, gate *translate.Gate
 		Alloc: translate.StaticAllocation{"fund-alpha": {
 			{Venue: "BINANCE", Weight: big.NewRat(1, 1)},
 		}},
-		Publisher:        cap,
-		Gate:             gate,
+		Publisher: cap,
+		Gate:      gate,
+		// The engine's own fund binding (#632). A native engine's "strategy" is
+		// in-process, so this is not an authentication decision — it is the statement
+		// of whose capital that engine may commit, and of which tenant's book its
+		// orders are routed onto. The tenant is deliberately not the fund id.
+		Authority:        alphaTestAuthority(t),
 		TickInterval:     5 * time.Millisecond,
 		SnapshotInterval: time.Hour, // keep book snapshots out of this test's way
 	})
@@ -308,6 +328,36 @@ func TestRunner_NoEnginesNeedsNoSignalPath(t *testing.T) {
 	// It still does its real job: folding depth and publishing bounded snapshots.
 	if len(cap.byType("market.book.snapshot")) == 0 {
 		t.Fatal("the open edge must still publish bounded book snapshots")
+	}
+}
+
+// AN ENGINE-DRIVEN RUNNER WITH NO FUND BINDING MUST NOT CONSTRUCT (#632).
+//
+// pkg/alpha shared the webhook path's exposure through the identical seam: its
+// old `TenantOf func(fundID) string` went straight to translate.Options, whose
+// nil default made the fund id the tenant. No shipped binary reaches it —
+// market-ingest registers no engines — so this is the guard that keeps the
+// restricted layer from inheriting the repaired defect the moment it supplies one.
+func TestRunner_EnginesWithoutAFundBindingFailFast(t *testing.T) {
+	_, err := New(Config{
+		Feeds:     []Feed{simFeed()},
+		Engines:   []Engine{&staticEngine{}},
+		Publisher: &capture{},
+		Prices:    translate.StaticPrices{"BTC-USD": big.NewRat(50000, 1)},
+		Equity:    translate.StaticEquity{"fund-alpha": big.NewRat(1_000_000, 1)},
+		Positions: translate.StaticPositions{},
+		Alloc: translate.StaticAllocation{"fund-alpha": {
+			{Venue: "BINANCE", Weight: big.NewRat(1, 1)},
+		}},
+		Gate: translate.OpenGate(nil),
+		// Authority deliberately absent — everything else is wired.
+	})
+	if err == nil {
+		t.Fatal("New accepted engines with no FundAuthority. Every signal this runner emitted " +
+			"would take its tenant from the fund id, which is #632 in the second brain.")
+	}
+	if !strings.Contains(err.Error(), "FundAuthority") {
+		t.Errorf("error %q does not name the missing seam", err)
 	}
 }
 

@@ -40,7 +40,26 @@ type (
 	// Qty is a RESOLVED base-asset quantity — the only unit a size bound may be
 	// expressed in. See translate.Qty.
 	Qty = translate.Qty
+
+	// FundAuthority binds the AUTHENTICATED strategy to the funds it may trade and
+	// each fund to the tenant that owns it. It lives in translate because both
+	// brains publish through the same fan-out and neither may resolve a tenant from
+	// anything the caller supplied. See translate.FundAuthority (#632).
+	FundAuthority = translate.FundAuthority
 )
+
+// NewFundAuthority builds the binding table from configuration and REFUSES an
+// absent or incoherent one at startup. See translate.NewFundAuthority.
+var NewFundAuthority = translate.NewFundAuthority
+
+// ErrUnboundFund is returned when an authenticated strategy names a fund it is not
+// bound to — deny-by-default, and the refusal the HTTP surface answers 403 to.
+var ErrUnboundFund = translate.ErrUnboundFund
+
+// ErrNoFundAuthority is a STARTUP failure: the strategy→fund→tenant binding is
+// absent or incoherent, so this deployment cannot say whose capital a signal
+// trades and must not serve.
+var ErrNoFundAuthority = translate.ErrNoFundAuthority
 
 // ErrNoAllocation is returned when a fund has no configured venue allocation —
 // deny-by-default: an unmapped fund cannot trade.
