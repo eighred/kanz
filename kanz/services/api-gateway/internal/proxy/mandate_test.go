@@ -25,6 +25,10 @@ const (
 	mandateProposeRoute = "POST /v1/portfolios/{id}/mandate"
 	mandateApproveRoute = "POST /v1/portfolios/{id}/mandate/approve"
 	mandateQueueRoute   = "GET /v1/mandates/pending-changes"
+	// The read of ONE proposal's mandate (#606) — the content behind the queue's
+	// digest, and the route that makes the second signature informed rather than
+	// merely recorded.
+	mandateChangeRoute = "GET /v1/mandates/pending-changes/{proposal_id}"
 )
 
 func mandateHandler() *Handler {
@@ -82,6 +86,10 @@ func TestMandateRoutesRefuseAReadToken(t *testing.T) {
 		{http.MethodPost, "/v1/portfolios/PF1/mandate"},
 		{http.MethodPost, "/v1/portfolios/PF1/mandate/approve"},
 		{http.MethodGet, "/v1/mandates/pending-changes"},
+		// The by-id read is the one a read token most plausibly "ought" to reach,
+		// and the one where that instinct is most wrong: it serves the rules and
+		// the limits of a change nobody has signed yet (#606).
+		{http.MethodGet, "/v1/mandates/pending-changes/abc123"},
 	} {
 		rr := httptest.NewRecorder()
 		req := httptest.NewRequest(c.method, c.path, strings.NewReader(`{}`))
@@ -112,11 +120,16 @@ func TestWithNoMandateSignatoryNoMandateRouteIsRegistered(t *testing.T) {
 	}
 }
 
-// AND WITH ONE NAMED, EXACTLY THESE THREE APPEAR. The negative case above passes
+// AND WITH ONE NAMED, EXACTLY THESE FOUR APPEAR. The negative case above passes
 // against a handler that registers nothing at all, so it needs its opposite to
-// mean anything — and pinning the SET catches a fourth mandate route arriving
+// mean anything — and pinning the SET catches a fifth mandate route arriving
 // without a decision about who may reach it.
-func TestWithASignatoryNamedExactlyThreeMandateRoutesAppear(t *testing.T) {
+//
+// IT WAS THREE UNTIL #606, and the third layer of that repair is exactly this
+// line: compliance can register the by-id read on its own mux and the gateway can
+// still front nothing, which is a handler that exists and an endpoint no client
+// can reach. Changing this number is the assertion that the gateway half landed.
+func TestWithASignatoryNamedExactlyFourMandateRoutesAppear(t *testing.T) {
 	h := mandateHandler()
 	m := authz.NewMux(nil, nil)
 	h.Routes(m)
@@ -128,7 +141,7 @@ func TestWithASignatoryNamedExactlyThreeMandateRoutesAppear(t *testing.T) {
 		}
 	}
 	sort.Strings(got)
-	want := []string{mandateQueueRoute, mandateProposeRoute, mandateApproveRoute}
+	want := []string{mandateQueueRoute, mandateProposeRoute, mandateApproveRoute, mandateChangeRoute}
 	sort.Strings(want)
 	if len(got) != len(want) {
 		t.Fatalf("routes demanding authz.Mandate = %v, want %v", got, want)
@@ -165,6 +178,35 @@ func TestMandateRoutesForwardToCompliance(t *testing.T) {
 	if be.last.Principal == nil || be.last.Principal.Subject == "" {
 		t.Error("the principal did not reach compliance — it names the proposer and the approver " +
 			"from that header, so without it a mandate change is signed by nobody")
+	}
+}
+
+// THE BY-ID READ REACHES COMPLIANCE WITH ITS PATH INTACT (#606).
+//
+// The proposal id travels IN THE PATH, so a rewrite that dropped or mangled the
+// segment would forward a request compliance answers 404 to — which is
+// indistinguishable, from the client, from "that proposal is not yours". A
+// tenant-scoping refusal and a broken proxy must never look the same, and on this
+// route they would: notFoundBody is deliberately the answer to both.
+func TestTheMandateChangeReadForwardsToComplianceUnrewritten(t *testing.T) {
+	be := &fakeBackend{resp: Response{Status: http.StatusOK}}
+	h := New(be, Roles{Mandate: "mandate-officer"})
+	m := mux("mandate-officer", authz.Read, authz.Mandate)
+	h.Routes(m)
+
+	const path = "/v1/mandates/pending-changes/9f8e7d6c5b4a39281706f5e4d3c2b1a0"
+	rr := httptest.NewRecorder()
+	m.ServeHTTP(rr, as(httptest.NewRequest(http.MethodGet, path, nil), "mandate-officer"))
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (%s)", rr.Code, rr.Body.String())
+	}
+	if be.last.Service != ServiceCompliance {
+		t.Fatalf("forwarded to %q, want %q", be.last.Service, ServiceCompliance)
+	}
+	if be.last.Path != path {
+		t.Errorf("upstream path = %q, want %q — the proposal id is IN the path, and a rewritten "+
+			"one is a 404 the client cannot tell from \"not yours\"", be.last.Path, path)
 	}
 }
 

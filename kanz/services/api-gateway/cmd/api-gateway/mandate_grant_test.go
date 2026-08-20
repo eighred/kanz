@@ -37,6 +37,10 @@ const (
 	mandateProposePath = "/v1/portfolios/PF1/mandate"
 	mandateApprovePath = "/v1/portfolios/PF1/mandate/approve"
 	mandateQueuePath   = "/v1/mandates/pending-changes"
+	// THE READ OF ONE PROPOSAL'S MANDATE (#606). The id is a real 32-hex proposal
+	// id rather than a placeholder, because the path segment is what the mux binds
+	// and what the proxy must forward unrewritten.
+	mandateChangePath  = "/v1/mandates/pending-changes/9f8e7d6c5b4a39281706f5e4d3c2b1a0"
 	mandateProposeBody = `{"mandate":{"mandate_id":"M1","portfolio_id":"PF1","version":1,` +
 		`"effective_at":"2026-09-01T00:00:00Z"},"reason":"Q3 mandate"}`
 	mandateApproveBody = `{"proposal_id":"p1","decision":"approve"}`
@@ -104,19 +108,26 @@ func mandateGET(router http.Handler, path string) *httptest.ResponseRecorder {
 	return rr
 }
 
-// THE HALF #535 IS ABOUT: a principal holding the mandate role REACHES all three
+// THE HALF #535 IS ABOUT: a principal holding the mandate role REACHES all four
 // routes, and the request actually arrives at the compliance backend.
 //
 // Every refusal below is satisfied by a route nobody can reach. This is the case
 // that separates a control from an outage, and it is the one authz.Fund did not
 // have from #415 to #535.
-func TestAMandateSignatoryReachesAllThreeRoutes(t *testing.T) {
+//
+// THE FOURTH CASE IS #606'S THIRD REACHABILITY LAYER. compliance registering
+// GET /v1/mandates/pending-changes/{proposal_id} on its own mux proves nothing
+// about whether any client can call it: the route also has to be fronted here and
+// demand a capability somebody holds. #539 cost a full day to the same shape, on
+// three layers in one day.
+func TestAMandateSignatoryReachesAllFourRoutes(t *testing.T) {
 	for _, c := range []struct {
 		name, method, path, body string
 	}{
 		{"propose", http.MethodPost, mandateProposePath, mandateProposeBody},
 		{"approve", http.MethodPost, mandateApprovePath, mandateApproveBody},
 		{"the queue", http.MethodGet, mandateQueuePath, ""},
+		{"the change itself", http.MethodGet, mandateChangePath, ""},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			router, be := mandateRouterFor(t, mandateRole, baselineRole, mandateRole)
@@ -192,6 +203,13 @@ func TestTheBaselineRoleCannotChangeAMandate(t *testing.T) {
 		t.Errorf("the baseline role read the mandate queue: status = %d, want 403 — it names the "+
 			"proposer of every unsigned change to what governs a portfolio", rr.Code)
 	}
+	// AND NOT THE CHANGE ITSELF (#606). A route that a signatory can reach and a
+	// route that EVERYONE can reach are the same route until this assertion runs,
+	// and this one carries the rules and the limits rather than the shape.
+	if rr := mandateGET(router, mandateChangePath); rr.Code != http.StatusForbidden {
+		t.Errorf("the baseline role read a proposed mandate: status = %d, want 403 — it carries "+
+			"the RULES and the LIMITS of a change nobody has signed yet", rr.Code)
+	}
 }
 
 // A DEPLOYMENT THAT NAMES NO MANDATE SIGNATORY ANSWERS 404, NOT 403 (#535).
@@ -208,6 +226,7 @@ func TestWithNoMandateSignatoryTheMandateRoutesAreAbsent(t *testing.T) {
 		{http.MethodPost, mandateProposePath},
 		{http.MethodPost, mandateApprovePath},
 		{http.MethodGet, mandateQueuePath},
+		{http.MethodGet, mandateChangePath},
 	} {
 		var rr *httptest.ResponseRecorder
 		if c.method == http.MethodGet {
