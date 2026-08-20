@@ -32,6 +32,7 @@ type PreTradeGate struct {
 	engine     *Engine
 	books      BookSource
 	mandates   MandateSource
+	margins    MarginSource
 	classifier Classifier
 	recorder   DecisionRecorder
 	logger     *slog.Logger
@@ -79,6 +80,19 @@ func WithUnpricedObserver(fn func(portfolioID, instrumentID string)) PreTradeOpt
 	return func(g *PreTradeGate) { g.onUnpriced = fn }
 }
 
+// WithMarginSource gives the gate the exchange's own margin state for the venue
+// account each order spends from (#408, control 3).
+//
+// IT IS AN OPTION AND NOT A CONSTRUCTOR ARGUMENT because a deployment that does
+// not trade on margin needs nothing here, and the rule that reads it only runs
+// when a mandate DECLARES margin trading. Leaving it unset is therefore safe and
+// is the default; what it is NOT is quiet — a portfolio whose mandate declares
+// margin on a gate with no source is REFUSED with a named reason, never
+// admitted.
+func WithMarginSource(m MarginSource) PreTradeOption {
+	return func(g *PreTradeGate) { g.margins = m }
+}
+
 // BookSource loads the current book for a portfolio — the holdings the order is
 // projected onto. In production this reads the risk-engine/position read model;
 // tests supply an in-memory source.
@@ -123,6 +137,15 @@ type OrderDelta struct {
 	SignedQuantity *commonpb.Decimal
 	Price          *commonpb.Decimal
 	Currency       string
+	// Venue is the MIC this order will execute at, off SubmitOrder.venue. Empty
+	// for an order that names none.
+	//
+	// IT DECIDES WHOSE COLLATERAL IS AT STAKE (#408, control 3). An exchange
+	// margins and LIQUIDATES per account, and which account this order spends from
+	// is (tenant, portfolio, venue) resolved through the deploy-time bindings. No
+	// other field on this delta can identify it, and a margin control that could
+	// not identify it would be checking some other account's numbers.
+	Venue string
 	// OrderID and Issuer correlate the decision in the audit log (COMP-01e).
 	OrderID string
 	Issuer  string
@@ -435,7 +458,33 @@ func (g *PreTradeGate) Evaluate(ctx context.Context, d OrderDelta) (Decision, er
 		g.noteUnvaluable(d.TenantID, d.PortfolioID, d.InstrumentID)
 		return Decision{Allowed: false, Unvaluable: true}, nil
 	}
-	res := g.engine.Evaluate(ctx, &Candidate{Book: proj, Classifier: g.classifier, AsOf: d.AsOf}, mandate)
+	cand := &Candidate{
+		Book:       proj,
+		Classifier: g.classifier,
+		AsOf:       d.AsOf,
+		// THE ORDER, ALONGSIDE THE PROJECTION AND NOT INSTEAD OF IT. Every existing
+		// rule keeps reading the projected book; this exists so a margin control can
+		// tell an order that TAKES a position from one that closes it, which the
+		// projection alone cannot express.
+		Order: &CandidateOrder{
+			InstrumentID:   d.InstrumentID,
+			SignedQuantity: d.SignedQuantity,
+			Venue:          d.Venue,
+		},
+	}
+	// MARGIN IS RESOLVED PER VENUE, LAZILY, AND SCOPED TO THIS ORDER'S TENANT
+	// (#408, control 3). Bound as a closure for the reason Book.Risk is: the
+	// several ways to be UNKNOWN must stay one answer, and a value resolved
+	// eagerly would be resolved for every order under every mandate — including
+	// the portfolios that do not trade on margin at all.
+	//
+	// A nil source leaves Candidate.Margin nil, which VenueMarginRule refuses on
+	// rather than passes.
+	if g.margins != nil {
+		src, tenant, pf := g.margins, d.TenantID, d.PortfolioID
+		cand.Margin = func(venue string) (MarginState, bool) { return src.Margin(tenant, pf, venue) }
+	}
+	res := g.engine.Evaluate(ctx, cand, mandate)
 	allowed := res.GetStatus() != compliancepb.ComplianceStatus_COMPLIANCE_STATUS_BREACH
 
 	g.record(ctx, DecisionRecord{

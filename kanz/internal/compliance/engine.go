@@ -162,6 +162,50 @@ type Candidate struct {
 	Book       *Book
 	Classifier Classifier
 	AsOf       time.Time
+
+	// Order is the order this evaluation is ABOUT, when there is one. nil for the
+	// post-trade monitor, which re-evaluates a live book with no order in hand.
+	//
+	// EVERY RULE BUT ONE IGNORES IT, deliberately. The pre-trade check is
+	// hypothetical — it projects the post-trade book and asks whether THAT book
+	// is inside the mandate — and reading the order instead of the projection is
+	// how a rule ends up bounding the trade rather than the position. What the
+	// projection cannot express is DIRECTION: a book at 3x leverage looks the same
+	// whether the order took it there or brought it down from 4x, and a margin
+	// control has to tell those apart or it blocks the fund from de-risking. See
+	// VenueMarginRule.
+	//
+	// A rule reading this must behave when it is nil, and must fail CLOSED there
+	// if the answer depends on it.
+	Order *CandidateOrder
+
+	// Margin answers what the EXCHANGE reported about the margin state of the
+	// venue account this candidate's portfolio trades from, or ok=false when it is
+	// UNKNOWN (#408, control 3).
+	//
+	// A FUNCTION AND NOT A VALUE, for the reason Book.Risk is one: "unknown" has
+	// several causes — never observed, observed without the figure, observed too
+	// long ago, no account bound — and they must stay ONE answer. Resolving it
+	// eagerly would also mean resolving it for every order under every mandate,
+	// including the portfolios that do not trade on margin at all.
+	//
+	// NIL MEANS NOTHING OBSERVES MARGIN HERE, which VenueMarginRule refuses on. It
+	// is the common case and it is safe, exactly as a nil Book.Risk is: the rule
+	// only runs when a mandate DECLARES margin trading.
+	Margin func(venue string) (MarginState, bool)
+}
+
+// CandidateOrder is the order under evaluation, in the terms a rule needs it —
+// which is deliberately not the whole order.
+//
+// SignedQuantity is +buy/−sell, the same delta project() applied to the book, so
+// a rule can recover the PRE-trade quantity by subtracting it from the projected
+// one. Venue is where the order will execute, which is what decides WHICH
+// exchange account's collateral is at stake.
+type CandidateOrder struct {
+	InstrumentID   string
+	SignedQuantity *commonpb.Decimal
+	Venue          string
 }
 
 // RuleFunc evaluates one rule against a candidate book. It returns nil when the
@@ -193,6 +237,7 @@ func DefaultRegistry() *Registry {
 	r.Register(compliancepb.RuleType_RULE_TYPE_CURRENCY, CurrencyRule)
 	r.Register(compliancepb.RuleType_RULE_TYPE_BUYING_POWER, BuyingPowerRule)
 	r.Register(compliancepb.RuleType_RULE_TYPE_RISK_MEASURE, RiskLimitRule)
+	r.Register(compliancepb.RuleType_RULE_TYPE_VENUE_MARGIN, VenueMarginRule)
 	return r
 }
 

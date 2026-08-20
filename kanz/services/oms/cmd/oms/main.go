@@ -25,6 +25,7 @@ import (
 	"github.com/eighred/kanz/internal/lifecycle"
 	"github.com/eighred/kanz/internal/marketdata/mark"
 	"github.com/eighred/kanz/internal/platform/httpserver"
+	"github.com/eighred/kanz/internal/venuemargin"
 	"github.com/eighred/kanz/internal/version"
 	"github.com/prometheus/client_golang/prometheus"
 	"google.golang.org/grpc"
@@ -318,6 +319,31 @@ func runConsumers(ctx context.Context, cfg config.Config, readiness *server.Read
 		}),
 	)
 
+	// EXEC-M16 — WHOSE COLLATERAL DOES AN ORDER SPEND?
+	//
+	// An exchange margins, nets and LIQUIDATES per ACCOUNT. Two portfolios settling
+	// into one exchange account share one collateral pool, so a drawdown in the first
+	// consumes the second's margin — while a per-portfolio ledger still shows that
+	// cash sitting there. Segregation is therefore a property of the ACCOUNT, and this
+	// is where the platform learns which account each portfolio may spend from.
+	//
+	// A BAD BINDING IS FATAL. If one account is bound to two portfolios, the platform
+	// would report segregated books over a shared pool — the exact failure this exists
+	// to prevent. That is not a config typo to warn about and carry on from; the OMS
+	// refuses to start.
+	//
+	// IT IS PARSED HERE, AHEAD OF THE PRE-TRADE GATE, because the gate now needs it:
+	// the margin control resolves (tenant, portfolio, venue) → exchange account
+	// through these bindings before it can ask what the venue reported (#408,
+	// control 3). Control 2 stopped being a neighbouring concern and became a
+	// precondition the moment margin was switched on, which is what #408 said would
+	// happen.
+	bindings, err := execution.ParseBindings(cfg.VenueAccounts)
+	if err != nil {
+		logger.Error("OMS_VENUE_ACCOUNTS is not safe to trade on", "err", err)
+		return false, err
+	}
+
 	// THE RISK HALF OF THE PRE-TRADE GATE (#438).
 	//
 	// Order admission never asked the risk engine anything: risk was a downstream
@@ -378,9 +404,83 @@ func runConsumers(ctx context.Context, cfg config.Config, readiness *server.Read
 			"orders a risk mandate will refuse.",
 	}, func() float64 { _, live := risk.Stats(); return float64(live) }))
 
+	// THE MARGIN HALF OF THE PRE-TRADE GATE (#408, control 3).
+	//
+	// Control 1 made the exchange's own margin state a first-class read; this is
+	// what reads it. A portfolio whose mandate declares margin trading has its
+	// orders gated on the venue's own maintenance figures for the account it
+	// spends from, and every way of not knowing them — never observed, observed
+	// too long ago, observed without a ratio, observed with the venue declining
+	// part of the answer, or bound to no account at all — REFUSES the order.
+	//
+	// THE FRESHNESS BOUND IS TWO MINUTES, not the fifteen cash and risk allow, and
+	// the difference is the point. Margin does not move on our schedule: it moves
+	// with the mark, and the scenario this control exists for is a fast move. A
+	// margin ratio from ten minutes ago during one is not a margin ratio.
+	uncoveredMargin := prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "kanz_oms_venue_margin_uncovered_total",
+		Help: "Venue margin observations this OMS folded in which the EXCHANGE declined part of " +
+			"the answer (collateral.v1.VenueMarginState.coverage). Non-zero means orders under a " +
+			"venue-margin mandate are being REFUSED on that account, and the fix is at the venue " +
+			"or in the adapter's margin call, not in the OMS.",
+	})
+	obs.Registry.MustRegister(uncoveredMargin)
+	undatedMargin := prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "kanz_oms_venue_margin_undated_total",
+		Help: "Venue margin observations discarded for carrying no observation time. An undated " +
+			"margin figure cannot be judged against a freshness bound, so it is dropped and the " +
+			"account ages out to UNKNOWN — which fails every margin control closed.",
+	})
+	obs.Registry.MustRegister(undatedMargin)
+
+	margins := venuemargin.New(
+		venuemargin.WithOnStale(func(venue, account string, age time.Duration) {
+			logger.Warn("oms: the exchange's margin state for this account is too old to act on — orders "+
+				"under a venue-margin mandate will be REFUSED for it until the adapter observes again",
+				"venue", venue, "account", account, "age", age.String(),
+				"max_age", venuemargin.DefaultMaxAge.String(), "subject", venuemargin.Subject)
+		}),
+		venuemargin.WithOnUncovered(func(venue, account string, excluded uint32) {
+			uncoveredMargin.Inc()
+			logger.Warn("oms: the exchange did not report part of this account's margin state — those "+
+				"quantities are UNKNOWN, not zero, and orders under a venue-margin mandate are REFUSED "+
+				"on this account until the venue answers in full",
+				"venue", venue, "account", account, "excluded", excluded, "subject", venuemargin.Subject)
+		}),
+		venuemargin.WithOnUndated(func(venue, account string) {
+			undatedMargin.Inc()
+			logger.Warn("oms: discarded an UNDATED margin observation — a figure of unknown age cannot be "+
+				"judged against a freshness bound, so the account will age out to UNKNOWN",
+				"venue", venue, "account", account, "subject", venuemargin.Subject)
+		}),
+	)
+	// HELD vs CURRENT, the same pair the risk view exports and for the same
+	// reason: the gap between them is the population whose orders a margin mandate
+	// is about to refuse, and it is visible minutes before anybody files a ticket
+	// about rejections.
+	obs.Registry.MustRegister(prometheus.NewGaugeFunc(prometheus.GaugeOpts{
+		Name: "kanz_oms_venue_margin_accounts_held",
+		Help: "Exchange accounts whose venue margin state this OMS has folded at all. ZERO MEANS " +
+			"NOTHING IS OBSERVING MARGIN, not that the accounts are safe.",
+	}, func() float64 { held, _ := margins.Stats(); return float64(held) }))
+	obs.Registry.MustRegister(prometheus.NewGaugeFunc(prometheus.GaugeOpts{
+		Name: "kanz_oms_venue_margin_accounts_current",
+		Help: "Exchange accounts whose venue margin state is within OMS freshness — the ones a " +
+			"declared venue-margin rule can actually be checked against. held − current is the " +
+			"population whose orders that rule will refuse.",
+	}, func() float64 { _, live := margins.Stats(); return float64(live) }))
+
 	preTrade := comp.NewPreTradeGate(
 		comp.NewEngine(nil), compliance.NewBookSource(book, cash, risk), mandateReg, nil, nil, logger,
 		comp.WithRequireMandate(cfg.RequireMandate),
+		// THE SOURCE IS ALWAYS WIRED, even on a deployment that binds no accounts
+		// and observes no margin. It answers UNKNOWN there, which refuses — and
+		// refusing is only reachable for a portfolio whose mandate DECLARES margin
+		// trading, so nothing that trades today changes. Leaving the seam nil
+		// instead would make "no margin control on this build" and "margin unknown"
+		// the same observable state, which is the conflation this estate designs
+		// against.
+		comp.WithMarginSource(compliance.NewMarginSource(bindings, margins)),
 		comp.WithUngovernedObserver(func(string, string) { ungoverned.Inc() }),
 		comp.WithUnpricedObserver(func(portfolioID, instrumentID string) {
 			// Two very different incidents arrive at the same refusal, and an
@@ -457,23 +557,6 @@ func runConsumers(ctx context.Context, cfg config.Config, readiness *server.Read
 			"Put every live portfolio under mandate with kanz-mandate, or set OMS_REQUIRE_MANDATE=true to refuse instead")
 	}
 
-	// EXEC-M16 — WHOSE COLLATERAL DOES AN ORDER SPEND?
-	//
-	// An exchange margins, nets and LIQUIDATES per ACCOUNT. Two portfolios settling
-	// into one exchange account share one collateral pool, so a drawdown in the first
-	// consumes the second's margin — while a per-portfolio ledger still shows that
-	// cash sitting there. Segregation is therefore a property of the ACCOUNT, and this
-	// is where the platform learns which account each portfolio may spend from.
-	//
-	// A BAD BINDING IS FATAL. If one account is bound to two portfolios, the platform
-	// would report segregated books over a shared pool — the exact failure this exists
-	// to prevent. That is not a config typo to warn about and carry on from; the OMS
-	// refuses to start.
-	bindings, err := execution.ParseBindings(cfg.VenueAccounts)
-	if err != nil {
-		logger.Error("OMS_VENUE_ACCOUNTS is not safe to trade on", "err", err)
-		return false, err
-	}
 	// Orders that margin against an account nobody bound to their portfolio. Non-zero
 	// means some part of the book is sharing collateral with the rest of it.
 	sharedCollateral := prometheus.NewCounter(prometheus.CounterOpts{
@@ -1011,6 +1094,28 @@ func runConsumers(ctx context.Context, cfg config.Config, readiness *server.Read
 		defer wg.Done()
 		logger.Info("oms subscribing to risk measures (broadcast)", "subject", riskview.Subject)
 		err := consumer.SubscribeBroadcast(ctx, riskview.Subject, risk.Handle)
+		if err != nil && !errors.Is(err, context.Canceled) {
+			once.Do(func() {
+				firstErr = err
+				cancel()
+			})
+		}
+	}()
+
+	// VENUE MARGIN — BROADCAST, for the same reason risk measures are (#408).
+	//
+	// A durable GROUP load-balances, so with replicas: 2 each pod would fold only
+	// the observations it happened to receive and hold a DIFFERENT margin state.
+	// The gate refuses an order when margin is unknown, so the same order would be
+	// admitted by one pod and refused by the other — and on a control whose whole
+	// purpose is to fail closed, half the pods failing closed is not a weaker
+	// version of the control, it is the control not existing. Margin state is
+	// replicated STATE, not work.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		logger.Info("oms subscribing to venue margin state (broadcast)", "subject", venuemargin.Subject)
+		err := consumer.SubscribeBroadcast(ctx, venuemargin.Subject, margins.Handle)
 		if err != nil && !errors.Is(err, context.Canceled) {
 			once.Do(func() {
 				firstErr = err
