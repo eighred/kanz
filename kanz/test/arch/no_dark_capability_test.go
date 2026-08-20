@@ -1,10 +1,13 @@
 package arch
 
 import (
+	"regexp"
 	"sort"
 	"strings"
 	"testing"
 )
+
+var exemptionNamesTrackingIssue = regexp.MustCompile(`^#[0-9]+\b`)
 
 // A CAPABILITY NOBODY CALLS MUST BE TRACKED, NOT MERELY PRESENT.
 //
@@ -383,6 +386,11 @@ func TestNoInternalCapabilityIsDarkAndUntracked(t *testing.T) {
 		if !seenExempt[rel] {
 			t.Errorf("exemption for %q is stale — the package now has an importer, or it no longer "+
 				"exists. Delete the entry (%s)", rel, reason)
+		}
+		if !exemptionNamesTrackingIssue.MatchString(reason) {
+			t.Errorf("exemption for %q does not begin with its tracking issue: %.60q. "+
+				"Start the reason with #<issue>; an unowned exemption lets a dark capability "+
+				"remain outside the tracked work queue.", rel, reason)
 		}
 	}
 }
