@@ -192,6 +192,20 @@ func (a *Assignment) Owns(key string) bool {
 	return a.ring.Owner(key) == a.self
 }
 
+// Owner names the member the ring assigns key to, or "" when unsharded.
+//
+// It exists so a refusal can say WHERE the answer is. A replica that declines a
+// query for a portfolio it does not own gives the caller a dead end unless it
+// also names the owner; with the name, a caller (or an operator reading a log)
+// can tell "this portfolio is elsewhere" from "this portfolio does not exist",
+// which are the two readings of a bare not-found and only one of them is true.
+func (a *Assignment) Owner(key string) string {
+	if a.ring == nil {
+		return ""
+	}
+	return a.ring.Owner(key)
+}
+
 // Sharded reports whether an effective shard split is in force (a non-empty
 // ring). Callers use it to decide whether to switch to a per-replica
 // broadcast consumer group.

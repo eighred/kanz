@@ -92,6 +92,46 @@ func WithRuntimeOwnership(loader Loader) Option {
 	}
 }
 
+// WithShardOwnership gates the Store on the consistent-hash ring's verdict:
+// owns reports whether this replica is the ring's owner of a portfolio.
+//
+// # The gap this closes — the shard ring did not reach the state it protects
+//
+// Before this, the ring's ownership was consumed in exactly ONE place: the
+// ShardFilter that wraps the LIVE ingest applier. Every other path into and out
+// of this Store ignored it, and each of them is a way a portfolio this replica
+// does not own gets into its memory and back out to the estate:
+//
+//   - BOOT. Bootstrap.restore does LoadAll and Restores every record in the
+//     database, unfiltered. A sharded replica therefore starts holding an
+//     in-memory copy of EVERY portfolio, most of them somebody else's.
+//   - THE COPY THEN FREEZES. ShardFilter drops the live events for those, so
+//     the copy never advances past the moment this replica booted.
+//   - AND IT IS WRITTEN BACK. Snapshotter.Checkpoint iterates store.IDs() and
+//     Saves each one, and persist.Postgres.Save is an unconditional upsert that
+//     DELETEs and re-INSERTs the position rows. So every snapshot interval, a
+//     non-owner overwrites the owner's fresher durable record with its own
+//     boot-frozen one — and the next boot loads the damaged record.
+//
+// That is not a stale read; it is durable state destruction, and it is what
+// "just wire the member lists" would have switched on. Filtering at each of the
+// three call sites would leave the fourth to be forgotten, so the gate belongs
+// here, with the state: on a ring-gated store a foreign portfolio cannot be
+// Restored, cannot be lazy-created by an apply, and therefore never appears in
+// IDs() for the snapshotter or the post-bootstrap recompute to find.
+//
+// A nil owns is ignored (the store stays ungated) — a gate that refuses
+// everything is worse than the unsharded default, which at least holds a
+// complete book. Composes with WithRuntimeOwnership; see ownsLocked.
+func WithShardOwnership(owns func(v1.PortfolioID) bool) Option {
+	return func(s *Store) {
+		if owns == nil {
+			return
+		}
+		s.shardOwns = owns
+	}
+}
+
 // Ownership errors.
 var (
 	// ErrNotOwned: this replica does not own the portfolio, so it has no
@@ -108,13 +148,12 @@ var (
 	ErrEmptyPortfolioID = errors.New("state: empty portfolio id")
 )
 
-// OwnershipManaged reports whether this Store gates on ownership. False is the
-// unsharded default (owns everything); true means Acquire decides what is
-// answerable.
+// OwnershipManaged reports whether this Store gates on ownership at all —
+// under EITHER source. False is the unsharded default (owns everything).
 func (s *Store) OwnershipManaged() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.owned != nil
+	return s.owned != nil || s.shardOwns != nil
 }
 
 // Owns reports whether this replica may answer for id. Always true on an
@@ -129,9 +168,21 @@ func (s *Store) Owns(id v1.PortfolioID) bool {
 // ownsLocked answers the ownership question with mu already held. The gate for
 // every apply and every ownership-aware read lives here so there is one
 // definition of "may this replica answer".
+//
+// TWO SOURCES, CONJOINED. A portfolio is owned only if EVERY configured source
+// says so: the ring must assign it here (static), and — when a membership
+// mechanism is also driving Acquire/Release — it must have been acquired. The
+// AND is the safe direction and it is what a dynamic mechanism will want:
+// "assigned to me" and "and I have loaded its history" are different
+// questions, and answering for a portfolio that satisfies only the first is
+// the silent wrong answer this whole gate exists to prevent. With neither
+// source configured the store owns everything, which is the unsharded default.
 func (s *Store) ownsLocked(id v1.PortfolioID) bool {
+	if s.shardOwns != nil && !s.shardOwns(id) {
+		return false
+	}
 	if s.owned == nil {
-		return true // ungated: owns everything
+		return true // no runtime gate: the static verdict above stands
 	}
 	_, ok := s.owned[id]
 	return ok
@@ -164,6 +215,15 @@ func (s *Store) Acquire(ctx context.Context, id v1.PortfolioID) error {
 	if s.owned == nil {
 		s.mu.Unlock()
 		return fmt.Errorf("%w (acquire %q)", ErrOwnershipUnmanaged, id)
+	}
+	// THE RING IS NOT NEGOTIABLE. A membership mechanism driving Acquire must
+	// not be able to grant this replica a portfolio the ring assigns elsewhere:
+	// two replicas holding the same portfolio is the split the ring exists to
+	// prevent, and the second one would overwrite the first's durable record on
+	// its next checkpoint.
+	if s.shardOwns != nil && !s.shardOwns(id) {
+		s.mu.Unlock()
+		return fmt.Errorf("%w: %q (the shard ring assigns it to another replica)", ErrNotOwned, id)
 	}
 	if _, already := s.owned[id]; already {
 		s.mu.Unlock()

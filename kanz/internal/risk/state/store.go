@@ -89,11 +89,16 @@ type Store struct {
 	// posture. Non-nil owned means only an Acquired portfolio is answerable.
 	loader Loader
 	owned  map[v1.PortfolioID]struct{}
+
+	// shardOwns is the STATIC ownership source (#110, see ownership.go): the
+	// consistent-hash ring's verdict, fixed for the process lifetime because
+	// the member list is. Nil means "no ring", not "owns nothing".
+	shardOwns func(v1.PortfolioID) bool
 }
 
 // NewStore returns an empty Store. With no options it is the ungated,
-// owns-everything store the unsharded posture runs on; WithRuntimeOwnership
-// turns on the #110 acquire/release gate.
+// owns-everything store the unsharded posture runs on; WithShardOwnership and
+// WithRuntimeOwnership turn on the #110 gate (see ownership.go).
 func NewStore(opts ...Option) *Store {
 	s := &Store{
 		portfolios: make(map[v1.PortfolioID]*domain.Portfolio),

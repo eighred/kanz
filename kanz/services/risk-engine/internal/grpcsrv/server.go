@@ -381,6 +381,18 @@ func nonZeroTimestamp(t time.Time) *timestamppb.Timestamp {
 // outcomes a client should special-case.
 func mapError(err error) error {
 	switch {
+	case errors.Is(err, v1.ErrPortfolioNotOwned):
+		// FailedPrecondition, and deliberately NOT NotFound or Unavailable.
+		// NotFound would tell the caller the portfolio does not exist, which is
+		// the lie this error was created to stop (#110). Unavailable is the
+		// standard retry signal, and a retry through the same Service is a
+		// coin-flip that can land on this pod again — the condition is about
+		// WHICH replica was reached, not about the fleet being unwell. The
+		// message names the owner so the caller has somewhere to go.
+		//
+		// This case is ordered before ErrPortfolioNotFound so a future wrap of
+		// both cannot silently downgrade the refusal into a not-found.
+		return status.Error(codes.FailedPrecondition, err.Error())
 	case errors.Is(err, v1.ErrPortfolioNotFound):
 		return status.Error(codes.NotFound, err.Error())
 	case errors.Is(err, v1.ErrInvalidRequest):

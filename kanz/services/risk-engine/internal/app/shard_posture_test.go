@@ -13,11 +13,15 @@ import (
 // state the estate is actually in and the one that produced no signal at all.
 
 func shardPosture(t *testing.T, sharded bool, members []string, self string) (*prometheus.Registry, string) {
+	return shardPostureWithSkips(t, sharded, members, self, 0)
+}
+
+func shardPostureWithSkips(t *testing.T, sharded bool, members []string, self string, foreignSkipped int) (*prometheus.Registry, string) {
 	t.Helper()
 	reg := prometheus.NewRegistry()
 	var logs bytes.Buffer
 	ShardPosture(reg, slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug})),
-		sharded, members, self)
+		sharded, members, self, foreignSkipped)
 	return reg, logs.String()
 }
 
@@ -125,9 +129,32 @@ func TestShardPosture_ARingOfOneIsNotAFleet(t *testing.T) {
 // as zero to every consumer, so an alert on it can never fire (#283).
 func TestShardPosture_TheSeriesExistsImmediately(t *testing.T) {
 	reg, _ := shardPosture(t, false, nil, "")
-	for _, name := range []string{"kanz_risk_shard_enabled", "kanz_risk_shard_members"} {
+	for _, name := range []string{
+		"kanz_risk_shard_enabled",
+		"kanz_risk_shard_members",
+		"kanz_risk_shard_foreign_records_skipped",
+	} {
 		if got := testutil.CollectAndCount(reg, name); got == 0 {
 			t.Errorf("%s has no series at startup", name)
 		}
+	}
+}
+
+// THE BOOT PATH'S REFUSALS ARE COUNTED, AND THE ZERO IS REPORTED.
+//
+// A sharded replica that restored every portfolio in the database instead of
+// only its own is the state this metric exists to rule out — and the reading
+// that says so is a ZERO on a fleet that should have skipped some. A series that
+// only appeared once it was non-zero could not express that.
+func TestShardPosture_ForeignRecordsSkippedIsReported(t *testing.T) {
+	reg, _ := shardPostureWithSkips(t, true, []string{"a", "b", "c"}, "b", 7)
+	if got := gaugeValue(t, reg, "kanz_risk_shard_foreign_records_skipped"); got != 7 {
+		t.Errorf("kanz_risk_shard_foreign_records_skipped = %v, want 7", got)
+	}
+
+	unsharded, _ := shardPosture(t, false, nil, "")
+	if got := gaugeValue(t, unsharded, "kanz_risk_shard_foreign_records_skipped"); got != 0 {
+		t.Errorf("an unsharded replica skipped %v records — it owns everything, so nothing is "+
+			"foreign to it", got)
 	}
 }

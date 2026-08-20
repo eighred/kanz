@@ -2,6 +2,7 @@ package grpcsrv_test
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -356,6 +357,12 @@ func TestErrorMapping(t *testing.T) {
 		{"not_found", v1.ErrPortfolioNotFound, codes.NotFound},
 		{"invalid", v1.ErrInvalidRequest, codes.InvalidArgument},
 		{"other", context.DeadlineExceeded, codes.DeadlineExceeded},
+		// #110: a shard refusal must NOT arrive as NotFound. One Service fans
+		// out across every replica, so "no such portfolio" would be the answer
+		// from every pod that does not own it — false, and non-deterministic
+		// between identical calls.
+		{"not_owned", v1.ErrPortfolioNotOwned, codes.FailedPrecondition},
+		{"not_owned_wrapped", fmt.Errorf("%w: PF1 is held by replica risk-engine-2", v1.ErrPortfolioNotOwned), codes.FailedPrecondition},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
