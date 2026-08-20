@@ -8,6 +8,7 @@ import (
 	"go/token"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"testing"
@@ -170,21 +171,27 @@ func TestSettlementPlanePostureSeedsEveryStageAtZero(t *testing.T) {
 func TestSettlementPlanePostureCoversEveryPosttradeEntrypoint(t *testing.T) {
 	const pkgDir = "../../internal/posttrade"
 
-	fset := token.NewFileSet()
-	pkgs, err := parser.ParseDir(fset, pkgDir, func(fi os.FileInfo) bool {
-		return !strings.HasSuffix(fi.Name(), "_test.go")
-	}, 0)
+	entries, err := os.ReadDir(pkgDir)
 	if err != nil {
-		t.Fatalf("parse %s: %v", pkgDir, err)
+		t.Fatalf("read %s: %v", pkgDir, err)
 	}
-	pkg, ok := pkgs["posttrade"]
-	if !ok {
-		t.Fatalf("package posttrade not found under %s — the posture names a package that is not "+
-			"there, so nothing it claims can be trusted (parsed: %v)", pkgDir, keysOf(pkgs))
-	}
-
+	fset := token.NewFileSet()
 	inPackage := map[string]bool{}
-	for _, f := range pkg.Files {
+	var parsed int
+	for _, e := range entries {
+		name := e.Name()
+		if e.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		f, err := parser.ParseFile(fset, filepath.Join(pkgDir, name), nil, 0)
+		if err != nil {
+			t.Fatalf("parse %s: %v", name, err)
+		}
+		if f.Name.Name != "posttrade" {
+			t.Fatalf("%s declares package %q — the posture names a package that is not there, so "+
+				"nothing it claims can be trusted", name, f.Name.Name)
+		}
+		parsed++
 		for _, d := range f.Decls {
 			fn, ok := d.(*ast.FuncDecl)
 			// Top-level functions only: a method is reached through the value its
@@ -194,6 +201,9 @@ func TestSettlementPlanePostureCoversEveryPosttradeEntrypoint(t *testing.T) {
 			}
 			inPackage[fn.Name.Name] = true
 		}
+	}
+	if parsed == 0 {
+		t.Fatalf("no production .go files under %s — the guard would pass by reading nothing", pkgDir)
 	}
 	if len(inPackage) == 0 {
 		t.Fatalf("no exported top-level functions parsed out of %s — the guard would pass "+
@@ -238,15 +248,6 @@ func TestSettlementPlanePostureCoversEveryPosttradeEntrypoint(t *testing.T) {
 				"and it does it at full confidence.", stage, name)
 		}
 	}
-}
-
-func keysOf[V any](m map[string]V) []string {
-	out := make([]string, 0, len(m))
-	for k := range m {
-		out = append(out, k)
-	}
-	sort.Strings(out)
-	return out
 }
 
 // THE POSTURE MUST BE SAYABLE OUT LOUD, AT THE LEVEL THAT SURVIVES FILTERING.
