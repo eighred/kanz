@@ -71,7 +71,28 @@ import (
 // ring. Both are reported, because "no members" and "members but no identity"
 // are different misconfigurations with the same symptom — an unsharded replica —
 // and an operator fixing one needs to know which they have.
-func ShardPosture(reg prometheus.Registerer, logger *slog.Logger, sharded bool, members []string, self string) {
+// foreignSkipped is how many durable portfolio records this replica declined to
+// restore at boot because the ring assigns them elsewhere
+// (Bootstrap.ForeignRecordsSkipped). It is reported ALWAYS, including the zero,
+// because zero is the interesting reading: on a sharded replica of a fleet with
+// a populated database it means the ring is not actually splitting the book, and
+// a series that only appears once it is non-zero cannot say that.
+func ShardPosture(reg prometheus.Registerer, logger *slog.Logger, sharded bool, members []string, self string, foreignSkipped int) {
+	// A COUNT THAT ONLY THIS PATH CAN PRODUCE. Before #110 wired the ring into
+	// the store, a sharded replica restored every portfolio in the tenant's
+	// database and then wrote its frozen copies back over the owners' records
+	// on the next checkpoint. This gauge is the evidence that no longer happens:
+	// it is the number of records the boot path handed back instead of holding.
+	skipped := prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "kanz_risk_shard_foreign_records_skipped",
+		Help: "Durable portfolio records this replica did NOT restore at boot because the shard " +
+			"ring assigns them to another replica. Zero on an unsharded replica (it owns " +
+			"everything). Zero on a SHARDED replica whose database holds other replicas' " +
+			"portfolios means the ring is not splitting the book (#110).",
+	})
+	reg.MustRegister(skipped)
+	skipped.Set(float64(foreignSkipped))
+
 	g := prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "kanz_risk_shard_enabled",
 		Help: "1 when this replica filters to a consistent-hash shard, 0 when it owns everything. " +

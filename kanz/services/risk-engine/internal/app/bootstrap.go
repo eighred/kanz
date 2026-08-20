@@ -58,6 +58,12 @@ type Bootstrap struct {
 
 	now       func() time.Time
 	newSource sourceFactory
+
+	// foreign counts the durable records the last restore declined because the
+	// shard ring assigns them elsewhere (#110). Written by restore and read by
+	// the composition root after Run; both are single-threaded with respect to
+	// each other (boot completes before live ingestion starts).
+	foreign int
 }
 
 // eventSource is the slice of replay.Reader the Bootstrap drains; an
@@ -125,16 +131,31 @@ func (b *Bootstrap) restore(ctx context.Context) (map[resumeKey]int64, error) {
 		return nil, err
 	}
 	resume := make(map[resumeKey]int64)
+	restored, foreign := 0, 0
 	for _, rec := range records {
-		// A REFUSED RESTORE ABORTS BOOT. Restore now refuses an id the store is
-		// not entitled to hold (#110: on a runtime-ownership store, Acquire is
-		// the only door). Continuing past it would boot a replica whose memory
-		// is missing a portfolio its durable record has — it would answer for
-		// that portfolio from nothing, which is the failure this path exists to
-		// prevent.
+		// A FOREIGN RECORD IS SKIPPED; ANY OTHER REFUSAL ABORTS BOOT (#110).
+		//
+		// LoadAll returns every portfolio in the tenant's database, which on a
+		// SHARDED replica is mostly other replicas' portfolios. Restoring those
+		// used to be silent and was the origin of the corruption chain (see
+		// state.WithShardOwnership): the copy freezes, because ShardFilter drops
+		// its live events, and the Snapshotter then writes the frozen copy back
+		// over the owner's fresher record. So ErrNotOwned here is the gate doing
+		// its job, not a failure — skip it, count it, and do NOT take its resume
+		// position, because this replica will not be replaying its partition on
+		// its behalf.
+		//
+		// Every other error still aborts: booting past one would leave memory
+		// missing a portfolio this replica DOES own and must answer for, and it
+		// would answer from nothing.
 		if err := b.store.Restore(rec.ToPortfolio(), rec.AppliedKeys); err != nil {
+			if errors.Is(err, state.ErrNotOwned) {
+				foreign++
+				continue
+			}
 			return nil, fmt.Errorf("restore %q: %w", rec.ID, err)
 		}
+		restored++
 		if lp := rec.LogPosition; lp != nil && lp.Topic != "" {
 			k := resumeKey{topic: lp.Topic, partition: int(lp.Partition)}
 			start := int64(lp.Offset) + 1 // resume at offset+1 (log_position semantics)
@@ -143,9 +164,19 @@ func (b *Bootstrap) restore(ctx context.Context) (map[resumeKey]int64, error) {
 			}
 		}
 	}
-	b.logger.Info("bootstrap restore complete", "portfolios", len(records), "resume_partitions", len(resume))
+	b.foreign = foreign
+	// The two counts are reported separately and always, because "this replica
+	// restored 4 of 12 portfolios" is the only boot-time evidence that the ring
+	// is actually splitting the book. One number cannot say it.
+	b.logger.Info("bootstrap restore complete",
+		"portfolios", restored, "not_owned_skipped", foreign, "resume_partitions", len(resume))
 	return resume, nil
 }
+
+// ForeignRecordsSkipped reports how many durable records the last Run declined
+// to restore because the shard ring assigns them to another replica. Zero on an
+// unsharded replica, always — it owns everything, so nothing is foreign.
+func (b *Bootstrap) ForeignRecordsSkipped() int { return b.foreign }
 
 // replay drains each resume partition from the durable log up to the bootstrap
 // start time and re-applies events through the Ingestor (idempotent via the
