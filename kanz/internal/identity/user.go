@@ -20,7 +20,7 @@ const (
 // knownStatuses is the enumerated set, written down ONCE.
 //
 // It mirrors the CHECK constraint on identity_users.status
-// (services/identity/migrations/0001_identity.sql:31), and the two must move
+// (services/identity/migrations/0001_identity.sql), and the two must move
 // together: a status added here and not there is refused by the database at the
 // first write, a status added there and not here is refused by Validate. Either
 // way somebody finds out on the first attempt rather than on the account that

@@ -13,7 +13,7 @@ import (
 //
 // EVERY OTHER LAYER WAS ALREADY BUILT FOR IT. accounting.v1.LedgerEntry has
 // venue_account_id (field 12); ledger.Event has VenueAccountID; the FILL path
-// sets it (ledger/fill.go:67); ledger/postgres.go declares it to the transaction
+// sets it (ledger/fill.go); ledger/postgres.go declares it to the transaction
 // via app.venue_account_id; migration 0003 adds the column, a write-guard that
 // REFUSES an undeclared account, and an index whose own comment says it exists
 // for "per-account cash and position folds — what is actually in okx-sub-1".

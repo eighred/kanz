@@ -11,7 +11,7 @@
 //
 // THE PRODUCER HERE DELIBERATELY HAS NO ProducerConfig.Tenant, mirroring the
 // OMS's own. The projector sets no Event.TenantID either, so the tenant can only
-// come from the CTX the consumer stashes it on (bus/consumer.go:212). That is
+// come from the CTX the consumer stashes it on (bus/consumer.go). That is
 // the entire reason TestPositionPublishRefusesOutsideADelivery exists: the same
 // shape — a producer with no fallback publishing outside an inbound delivery —
 // has already crash-looped this service once.

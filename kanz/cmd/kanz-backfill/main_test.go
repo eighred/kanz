@@ -65,8 +65,9 @@ func TestEveryIdentifyingFlagIsRequired(t *testing.T) {
 // complete and a window spanning the switchover silently returns one of them.
 func TestVenueDefaultsToWhatTheLiveProducerStamps(t *testing.T) {
 	for _, tc := range []struct{ source, want string }{
-		{"binance", "BINANCE"}, // services/market-ingest/internal/config/config.go:98
-		{"okx", "OKX"},         // ...:103
+		// The live producer's defaults, in market-ingest's config.Load.
+		{"binance", "BINANCE"}, // BinanceMIC
+		{"okx", "OKX"},         // OKXMIC
 	} {
 		args := without("--source")
 		args = append(args, "--source", tc.source)

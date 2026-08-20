@@ -16,7 +16,7 @@ import (
 // HAVING RUN FIRST (#285, assertion 3 of the design record).
 //
 // services/archiver is a SINGLE WRITER by deployment — one replica per stream,
-// Recreate rather than RollingUpdate. archiver.go:31 states why: "Two producers
+// Recreate rather than RollingUpdate. archiver.go states why: "Two producers
 // can invert per-key order in Kafka, and a reordered log rebuilds a DIFFERENT
 // book downstream — a subtler failure than losing it." That is the failure mode
 // this guard exists for. It is not loss; it is a log that reads as complete and
@@ -37,7 +37,7 @@ import (
 // drain_test.go, and one of them fails on precisely the right words:
 //
 //	--- FAIL: TestDrainRefusesWhileTheArchiverIsConsuming
-//	    drain_test.go:124: the drain published 1 message(s) after the gate refused
+//	    drain_test.go:NNN: the drain published 1 message(s) after the gate refused
 //
 // That test asserts the fake publisher is still empty after the refusal, so it
 // already catches a reordered gate. It is a better test than the guard for the
@@ -238,7 +238,7 @@ const drainPackageDir = "services/archiver/internal/archive"
 // a named error is what stops each call site inventing its own wording for it.
 const refusalError = "ErrArchiverLive"
 
-const singleWriterCitation = "services/archiver/internal/archive/archiver.go:31 — \"SINGLE WRITER, " +
+const singleWriterCitation = "services/archiver/internal/archive/archiver.go — \"SINGLE WRITER, " +
 	"DELIBERATELY. One replica per stream (Recreate, not RollingUpdate). Two producers can invert " +
 	"per-key order in Kafka, and a reordered log rebuilds a DIFFERENT book downstream — a subtler " +
 	"failure than losing it.\""

@@ -9,7 +9,7 @@ package consume_test
 // things that actually drop an investor's subscription —
 //
 //   - the subject is not carried by a stream, so the JetStream publish is a HARD
-//     ERROR (infra/nats/bootstrap-job.yaml:116-118 records accounting.* being
+//     ERROR (infra/nats/bootstrap-job.yaml records accounting.* being
 //     exactly that: "Every one was a hard publish failure: the ledger's inputs,
 //     dropped"), and
 //   - the fold writes through an RLS pool, so a row the session's app.tenant_id
@@ -265,7 +265,7 @@ func TestACashMovementReachesTheLedgerOverTheRealSpine(t *testing.T) {
 
 // THE CROSS-TENANT REFUSAL THAT consume_test.go SAYS IS PROVEN ELSEWHERE (#223).
 //
-// consume_test.go:19-22 states "the cross-tenant refusal itself is proven in
+// consume_test.go states "the cross-tenant refusal itself is proven in
 // cross_tenant_test.go, which uses a real tenant". That file does not exist —
 // the claim was true of an intention, not of the tree, and every fold test in
 // the package runs under __system__, whose shared-bucket branch returns nil

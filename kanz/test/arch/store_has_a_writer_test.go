@@ -16,14 +16,15 @@ import (
 // #509 again, one level below where the other two guards can see it.
 //
 // internal/marketdata/terms is the contract-terms store. It has a production
-// READER: termsource.Provider (internal/risk/termsource/provider.go:77,197 call
-// store.LatestAsOf), constructed at services/risk-engine/cmd/risk-engine/
-// main.go:328 and handed straight to compute.RegisterFIRisk on the next line.
+// READER: termsource.Provider (internal/risk/termsource/provider.go — its
+// TermsAsOf and Curve call store.LatestAsOf), constructed at
+// services/risk-engine/cmd/risk-engine/main.go and handed straight to
+// compute.RegisterFIRisk on the next line.
 // DV01, Duration, Convexity and SpreadDuration are registered off it.
 //
 // It has NO production WRITER. terms.Postgres.Put is called from exactly two
 // places, both _test.go, and the only non-test construction of a
-// reference.v1.ContractTerms in the module is postgres.go:226 — the unmarshal
+// reference.v1.ContractTerms in the module is postgres.go — the unmarshal
 // target inside the READ path. Nothing in this repository has ever produced a
 // contract term.
 //
@@ -32,7 +33,8 @@ import (
 // measures return zero — which is exactly what a portfolio holding no bonds
 // returns. "Nothing configured" and "checked, and fine" look the same, and the
 // only thing that says otherwise is a counter (kanz_risk_fi_terms_missing_total,
-// main.go:217) that nobody is required to look at.
+// registered by the risk-engine composition root in main.go) that nobody is
+// required to look at.
 //
 // # Why the two existing dark-capability guards are both green on this
 //
@@ -41,7 +43,7 @@ import (
 // composition root. The package is bright.
 //
 // no_dark_measure_seam_test.go works at SEAM granularity, and RegisterFIRisk IS
-// called at main.go:330. The seam is live.
+// called by the risk-engine composition root (main.go). The seam is live.
 //
 // Both are telling the truth. The capability is wired, the seam is called, and
 // the data is not there. That gap is what this guard closes.
@@ -115,7 +117,7 @@ import (
 // intra-package call proves nothing about it. A store's writer is usually the
 // projector sitting next to it: services/audit/internal/audit/projector.go
 // calls p.store.Append(ctx, rec) inside package audit, and NewProjector is
-// wired at services/audit/cmd/audit/main.go:179. Every audit event in
+// wired at services/audit/cmd/audit/main.go. Every audit event in
 // production goes through that line. Excluding it would have forced an
 // exemption on a store that is written constantly — an exemption that states
 // something false about a healthy store is how a guard earns its deletion.
@@ -136,7 +138,7 @@ import (
 //
 // THAT IS NOT HYPOTHETICAL, AND IT IS ABOUT TO MATTER. As of 2026-08-16
 // internal/marketdata/termsload exists and builds a reference.v1.ContractTerms
-// (okx.go:290) but does not yet call Put. The moment it does, this guard
+// (okx.go) but does not yet call Put. The moment it does, this guard
 // resolves a writer and the terms exemption below goes stale — CORRECTLY, but
 // only if termsload is also CONSTRUCTED somewhere. A loader that calls Put and
 // that nothing builds would turn this guard green while the table stays as empty
@@ -154,16 +156,16 @@ var storeWithoutAWriterExempt = map[string]string{
 	"internal/marketdata/terms.Postgres": "#509 — the contract-terms store. Put has TWO callers " +
 		"and both are _test.go (internal/marketdata/terms/postgres_test.go, " +
 		"internal/risk/termsource/provider_test.go); the only non-test construction of a " +
-		"reference.v1.ContractTerms in the module is postgres.go:226, which is the unmarshal " +
+		"reference.v1.ContractTerms in the module is postgres.go, which is the unmarshal " +
 		"target on the way OUT. Nothing has ever produced a term. The reader is live and reaches " +
 		"production: termsource.Provider is built at services/risk-engine/cmd/risk-engine/" +
-		"main.go:328 and handed to compute.RegisterFIRisk on the next line, so DV01, Duration, " +
+		"main.go and handed to compute.RegisterFIRisk on the next line, so DV01, Duration, " +
 		"Convexity and SpreadDuration are registered and computing over an empty table today — " +
 		"every bond resolves to no terms and every measure returns zero, indistinguishable from a " +
 		"portfolio holding no bonds. THE WRITER IS NAMED AND IS BEING BUILT: " +
 		"internal/marketdata/termsload, a contract-terms loader that produces ContractTerms and " +
 		"calls terms.Postgres.Put. Until it lands, kanz_risk_fi_terms_missing_total " +
-		"(main.go:217) is the only thing in the estate that says the measures are hollow. " +
+		"(main.go) is the only thing in the estate that says the measures are hollow. " +
 		"SECOND, SMALLER GAP IN THE SAME STORE, tracked by the same issue and NOT separately " +
 		"exempt because this guard is whole-store: ChainAsOf has no production caller either, so " +
 		"the option-chain read path is dark on top of being unfed.",

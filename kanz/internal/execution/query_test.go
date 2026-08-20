@@ -13,7 +13,7 @@ import (
 // that returns OrderView{} on a path nobody thought about, must produce the
 // answer that FREEZES the order — never the one that says "the venue does not
 // have it", which is the answer that authorizes re-driving it to the exchange.
-// This mirrors AccountProof (venue.go:50): the unchecked adapter reports the
+// This mirrors AccountProof (venue.go): the unchecked adapter reports the
 // safe answer, not the flattering one.
 func TestZeroOrderViewIsIndeterminateNotUnknown(t *testing.T) {
 	var v OrderView

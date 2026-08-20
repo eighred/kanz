@@ -12,7 +12,7 @@ import (
 )
 
 // The order.order.* event_type wire values this monitor renders, copied
-// verbatim from services/oms/internal/order/events.go:20-35.
+// verbatim from services/oms/internal/order/events.go.
 //
 // They are copied, not imported: that package is Go-internal to
 // services/oms (github.com/eighred/kanz/services/oms/internal/order), and

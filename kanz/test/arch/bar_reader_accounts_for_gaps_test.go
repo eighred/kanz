@@ -49,7 +49,7 @@ import (
 // A missing bucket proves a window cannot support a claim. A WHOLE WINDOW PROVES
 // NOTHING ABOUT WHETHER THE PLATFORM WAS OBSERVING. What would settle the second
 // half is an ingestion-coverage record stating which intervals were actually
-// watched, which rollup/driver.go:160-168 names as missing and which is missing
+// watched, which rollup/driver.go names as missing and which is missing
 // still — and which can only ever be captured going FORWARD, since nothing can
 // reconstruct whether a feed was live last July.
 //
@@ -91,7 +91,7 @@ var barReaderExempt = map[string]string{
 	"internal/marketdata/rollup": "NOT A DEFECT — rollup already carries a STRONGER contract " +
 		"than this guard checks, and it is the one that ruled the count-based test unsound. " +
 		"Request.Watermark is required with no default, and a bucket is folded only once the " +
-		"caller asserts the base series is complete through it (driver.go:146-168). Adopting " +
+		"caller asserts the base series is complete through it (driver.go). Adopting " +
 		"store.WindowOf here would REPLACE an asserted completeness with an inferred one, which " +
 		"is the trade this platform has already refused in writing.",
 }

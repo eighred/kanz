@@ -272,8 +272,9 @@ func writeFrame(t *testing.T, ctx context.Context, broker, kafkaTopic, tenant, e
 		t.Fatalf("marshal frame: %v", err)
 	}
 	// A Writer with a nil Transport uses kafka-go's PACKAGE-LEVEL DefaultTransport
-	// (writer.go:197, transport.go:126) whose metadata TTL is 6s
-	// (transport.go:205-210). Every Writer in the process therefore shares one
+	// (Writer.Transport falling back to it in writer.go, DefaultTransport in
+	// transport.go) whose metadata TTL is 6s (Transport.MetadataTTL's
+	// default). Every Writer in the process therefore shares one
 	// metadata cache: the first tenant's produce populates cluster metadata that
 	// predates the second tenant's topic, and the second produce reads that stale
 	// entry and fails UnknownTopicOrPartition for up to 6s. THAT is why this was

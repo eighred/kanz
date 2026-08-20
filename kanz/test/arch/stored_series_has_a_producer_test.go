@@ -32,7 +32,7 @@ import (
 // The consequence was not an error anywhere. A consumer configured for
 // Resolution1d matched zero rows for every instrument that would ever exist, and
 // the two consumers that take a resolution both DEFAULT to Resolution1m
-// (indicator/source.go:101, alpha/outcome/outcome.go:80), so in practice every
+// (indicator/source.go, alpha/outcome/outcome.go), so in practice every
 // caller silently read the base series instead of the one it asked the platform
 // to support. internal/risk/liquiditysource paid for it: at DefaultWindow it
 // walks 28 x 1440 = ~40,000 1-minute rows per instrument per call, twice per
@@ -43,10 +43,11 @@ import (
 //
 // internal/marketdata/rollup landed the day this guard was written, so
 // Resolution1h and Resolution1d resolve to a producer and carry NO exemption
-// below. The producers are services/market-data/cmd/market-data/rollup.go:127
-// and :128 — the composition root's target table — and NOT the rollup package
-// itself, which stamps `Resolution: req.Target` from a variable (rollup/driver.
-// go:238, rollup/rollup.go:153). That distinction is the whole reason this file
+// below. The producers are the two named Resolution constants in the rollup job
+// table at services/market-data/cmd/market-data/rollup.go — the composition
+// root's target table — and NOT the rollup package itself, which stamps
+// `Resolution: req.Target` from a variable (rollup/driver.go, rollup/rollup.go).
+// That distinction is the whole reason this file
 // says what it says about derived values: had the job been constructed with a
 // target parsed from configuration instead of named at the composition root, the
 // series would fill and this guard would still report both constants dark. The
@@ -130,12 +131,12 @@ import (
 //     that single line marked both coarse resolutions produced while the series
 //     were still empty, on the exact defect the guard was written for. The same
 //     shape covers `var kinds = []Kind{KindOption, KindSwap, KindFuture,
-//     KindBond}` (terms/postgres.go:67) and `Kinds: []audit.Kind{...}` (soc2/
-//     soc2.go:46) — an enumeration of a family must not vouch for its members, or
+//     KindBond}` (terms/postgres.go) and `Kinds: []audit.Kind{...}` (soc2/
+//     soc2.go) — an enumeration of a family must not vouch for its members, or
 //     "is this value ever formed" degrades into "is this value ever listed".
 //   - THE EXPRESSION MUST BE THE CONSTANT ITSELF, not contain it. `return k >=
-//     store.PriceKindClose && k <= store.PriceKindLast` (spotsource/provider.go:
-//     343) is a ReturnStmt result, but it is a BinaryExpr — a RANGE CHECK THAT
+//     store.PriceKindClose && k <= store.PriceKindLast` (spotsource/provider.go's
+//     isKnownKind) is a ReturnStmt result, but it is a BinaryExpr — a RANGE CHECK THAT
 //     READS the enum, not a site that forms a value of it. Sub-expression
 //     matching would make every validator vouch for every constant it validates,
 //     which is precisely backwards: those validators are why the dark kinds are
@@ -162,20 +163,20 @@ import (
 //     rollup specifically. no_dark_capability_test.go is the guard that catches a
 //     rollup package nobody imports; neither closes the loop alone.
 //  2. A CONVERSION FROM A STRING IS INVISIBLE. `report.Format(f)` at services/
-//     audit/internal/server/server.go:292 turns a `?format=` query parameter into
+//     audit/internal/server/server.go turns a `?format=` query parameter into
 //     a Format, so FormatCSV is genuinely live and has no constant producer. That
 //     is the FormatCSV exemption below, and it is a limit of the rule rather than
 //     a defect in the estate. The same construct on the READ side —
-//     `o.Kind = PriceKind(kind)` at store/postgres.go:173 — is a row being
+//     `o.Kind = PriceKind(kind)` at store/postgres.go — is a row being
 //     decoded, not a value being created, and treating conversions as producers
 //     would therefore silence the entire PriceKind family using its own scanner.
 //     There is no syntactic difference between the two; only an exemption can
 //     tell them apart, so the rule stays syntactic and the judgement stays
 //     written down.
 //  3. THIS DOES NOT DISTINGUISH A WRITE FROM A READ. `Resolution: store.
-//     Resolution1m` inside a BarQuery (vwap.go:163) counts exactly as much as
+//     Resolution1m` inside a BarQuery (vwap.go) counts exactly as much as
 //     `f.Resolution = store.Resolution1m` on a Bar about to be PutBars'd
-//     (backfill.go:151). Separating them needs a type checker. What this guard
+//     (backfill.go). Separating them needs a type checker. What this guard
 //     proves is narrower and still decisive: NO CODE ANYWHERE IN THE ESTATE EVER
 //     FORMS THIS VALUE — which is strictly stronger evidence of an empty
 //     partition than "the store has no writer", because it also rules out the
@@ -196,7 +197,7 @@ import (
 // A constant whose literal value is the zero value of its type
 // (PriceKindUnspecified = 0) is not a series. It is what a struct field carries
 // when nobody set it, and in this store it means "any kind" on a Query
-// (store.go:101) and is REFUSED on write (Observation.validate, store.go:88).
+// (store.go) and is REFUSED on write (Observation.validate, store.go).
 // Requiring a producer for it would demand that something deliberately construct
 // the unset state, which is the opposite of what every consumer here does.
 
@@ -218,7 +219,7 @@ var storedSeriesWithoutAProducerExempt = map[string]string{
 		"registered off this store — so the label the whole read path depends on is the one " +
 		"nothing produces.",
 	"internal/marketdata/terms.KindSwap": storedSeriesDarkTermsKind + "KindSwap is the one that " +
-		"was never in reach: OKX lists SWAP instruments, and termsload/okx.go:33 records the " +
+		"was never in reach: OKX lists SWAP instruments, and termsload/okx.go records the " +
 		"decision NOT to label them terms.KindSwap — a perpetual swap is not the fixed/floating " +
 		"leg structure the swap variant of the oneof describes, and storing one under that label " +
 		"would put a thing ChainAsOf never finds under a name that says it should.",
@@ -229,17 +230,17 @@ var storedSeriesWithoutAProducerExempt = map[string]string{
 		"needs EXCEPT the thing that puts a row in the table. That gap is not this family's: " +
 		"terms.Postgres.Put has no non-test caller at all, and the only Record producer in the " +
 		"module, internal/marketdata/termsload, is itself dark for having no importer and labels " +
-		"exactly two kinds (okx.go:262-268). So this entry retires with the same contract-terms " +
+		"exactly two kinds (okx.go). So this entry retires with the same contract-terms " +
 		"loader that retires KindBond, not before, and NOT by adding a helper that derives the " +
 		"label — one was written for #572 and DELETED, because a producer nothing calls made this " +
 		"guard read KindBond and KindSwap as live and would have silenced the two entries above.",
 	"services/audit/internal/report.FormatCSV": "NOT A DEFECT — a limit of the rule, recorded so " +
 		"the next reader does not go looking for a bug. FormatCSV is reached in production through " +
-		"a CONVERSION rather than the constant: services/audit/internal/server/server.go:292 does " +
-		"`tmpl.Format = report.Format(f)` from the ?format= query parameter, and server.go:333 " +
+		"a CONVERSION rather than the constant: services/audit/internal/server/server.go does " +
+		"`tmpl.Format = report.Format(f)` from the ?format= query parameter, and server.go " +
 		"dispatches `case report.FormatCSV` on the result, so the CSV renderer is live and " +
 		"reachable by any caller who asks for it. This guard cannot see that, and MUST NOT be " +
-		"taught to: the same construct on the read side is store/postgres.go:173 " +
+		"taught to: the same construct on the read side is store/postgres.go " +
 		"`o.Kind = PriceKind(kind)`, a row being decoded out of a column, and counting conversions " +
 		"as producers would let the store's own scanner vouch for all eight PriceKinds and silence " +
 		"the whole family. The judgement lives here instead of in the rule. This entry goes stale " +
@@ -253,13 +254,13 @@ var storedSeriesWithoutAProducerExempt = map[string]string{
 // other three.
 const storedSeriesDarkPriceKind = "REAL FINDING, tracked under #509 as the same class — FOUR OF " +
 	"THE EIGHT PriceKinds ARE ACCEPTED BY CONFIGURATION AND WRITTEN BY NOTHING. The ingest path " +
-	"stamps exactly three (internal/marketdata/ingest.go:181,187,190 — Close, Last, Mid) and " +
+	"stamps exactly three (internal/marketdata/ingest.go — Close, Last, Mid) and " +
 	"AdjustedClose, Open, VWAP and Settlement are formed nowhere in the module. THE REASON THIS " +
-	"IS A FINDING AND NOT A DORMANT ENUM is internal/risk/spotsource: isKnownKind (provider.go:" +
-	"343) admits `k >= PriceKindClose && k <= PriceKindLast`, i.e. all seven non-zero kinds, so " +
+	"IS A FINDING AND NOT A DORMANT ENUM is internal/risk/spotsource: isKnownKind (provider.go) " +
+	"admits `k >= PriceKindClose && k <= PriceKindLast`, i.e. all seven non-zero kinds, so " +
 	"WithPriceKind(store.PriceKindVWAP) passes construction validation and every option in the " +
 	"book then resolves to no spot — SkipNoSpot on every position, a Gamma of zero, and a book " +
-	"that looks like it holds no options. That package's own doc (provider.go:38-52) describes " +
+	"that looks like it holds no options. That package's own doc (provider.go) describes " +
 	"exactly this failure for a DIFFERENT kind and calls it total and uniform; what it does not " +
 	"say is that four of the kinds it accepts can never match, whatever the deployment does. The " +
 	"same range check guards nothing on the store side either: Observation.validate refuses only " +
@@ -278,9 +279,9 @@ const storedSeriesDarkTermsKind = "#509 — a contract-terms LABEL nothing write
 	"below a store that has no production writer at all. terms.Postgres is already exempt in " +
 	"store_has_a_writer_test.go because Put has no non-test caller; the only thing in the module " +
 	"that produces a terms.Record is internal/marketdata/termsload, which is itself exempt in " +
-	"no_dark_capability_test.go for having no importer — and even if it were wired, okx.go:262-268 " +
+	"no_dark_capability_test.go for having no importer — and even if it were wired, okx.go " +
 	"labels exactly two kinds, KindOption and KindFuture. NOTE HOW THIS DIFFERS FROM THE " +
-	"CATALOGUE: terms/postgres.go:67 lists all four in `var kinds = []Kind{...}` and Kinds() " +
+	"CATALOGUE: terms/postgres.go lists all four in `var kinds = []Kind{...}` and Kinds() " +
 	"exports them, so a guard that counted a list as a producer would call all four live. "
 
 // storedSeriesConst identifies one enumerated value by its declaring package and
@@ -707,7 +708,7 @@ func storedSeriesProducers(
 // enumerates a family rather than labelling a record.
 //
 // A nil literal type is an elided inner element (`[]struct{...}{{Resolution1h,
-// lag}}` at services/market-data/cmd/market-data/rollup.go:127) and is NOT a
+// lag}}` at services/market-data/cmd/market-data/rollup.go) and is NOT a
 // catalogue: the outer literal already answered that question, and treating it as
 // one would lose the composition root that names both coarse resolutions.
 func storedSeriesIsCatalogue(

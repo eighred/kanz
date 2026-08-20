@@ -21,7 +21,7 @@ import (
 // That order is a live position, or an order resting at an exchange, that this
 // platform has forgotten. The sweep is the only thing that finds it.
 //
-// The shape is tv-sync's (cmd/tv-sync/main.go:114): rebuild what you know before
+// The shape is tv-sync's (cmd/tv-sync/main.go): rebuild what you know before
 // anything can read it or add to it. The caller treats a failure the same way —
 // a pod that could not reconcile its in-flight orders does not know what the
 // fund holds, and starting anyway is not degraded service, it is wrong service.
@@ -146,7 +146,7 @@ func (s *Service) sweep(ctx context.Context, minAge time.Duration) (int, error) 
 
 	// DELIBERATELY NOT FILLED/REJECTED/CANCELLED/EXPIRED, even though a FILLED or
 	// REJECTED order can now be terminal-but-unannounced (outcome_announced_at
-	// unset — see order_events.proto:19 and resume()'s terminal branch). resume()
+	// unset — see order_events.proto and resume()'s terminal branch). resume()
 	// reaches that case safely because it is only ever invoked for a SPECIFIC
 	// order_id a SubjectSubmit redelivery names, which the broker only redelivers
 	// within its own bounded retry/DLQ window. ListByStatus has no such bound: it

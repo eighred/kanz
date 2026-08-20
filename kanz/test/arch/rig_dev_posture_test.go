@@ -319,7 +319,7 @@ func TestRigApplyDeploysExactlyRigWorkloads(t *testing.T) {
 func TestRigDevPatchRewritesDigestPinnedImagesToLocalTags(t *testing.T) {
 	pythonPath, err := exec.LookPath("python3")
 	if err != nil {
-		// FAIL, do not skip. tools/rig-apply.sh:101-105 already hard-requires
+		// FAIL, do not skip. tools/rig-apply.sh already hard-requires
 		// python3 for this exact script and refuses to proceed without it
 		// ("a sed-based substitute would risk silently mangling a manifest");
 		// a skip here would make this suite silently assert less than it

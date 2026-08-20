@@ -31,7 +31,7 @@ import (
 // It is deliberately NOT a mock of any step. The signer is the real one, the
 // JWKS is served over HTTP and fetched by the real verifier, and the rule at the
 // end is auth.PortfolioEntitled — which is literally what the OMS's entitledTo
-// calls (services/oms/internal/order/service.go:1198).
+// calls (services/oms/internal/order/service.go).
 
 // issuedTokenFor runs the real provisioning path — an operator's invite, redeemed
 // into an account — and mints a token for it, served by a real JWKS endpoint.

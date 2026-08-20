@@ -21,7 +21,7 @@ import (
 // re-enters the same IsTerminal trap. A completed trade that tv-sync,
 // accounting, and audit never learn about.
 //
-// outcome_announced_at (order_events.proto:19) is the one marker covering all
+// outcome_announced_at (order_events.proto) is the one marker covering all
 // of those transitions — the same role venue_ack_at plays for routing and
 // cancel_announced_at plays for cancellation.
 //

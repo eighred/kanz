@@ -4,7 +4,7 @@ package main
 //
 // services/market-data/internal/feed builds a correct envelope, and
 // bussink_test.go proves it — with a producer the TEST configures
-// (bussink_test.go:32 sets Tenant: "acme"). runFeed configured a different one:
+// (bussink_test.go sets Tenant: "acme"). runFeed configured a different one:
 // bus.ProducerConfig{Source, ProducerVersion, Metrics}, no Tenant. The package
 // tests could not see it, and runFeed dials SPIFFE and a broker before it
 // constructs anything, so the config it passed was untested by construction.

@@ -40,7 +40,7 @@ import (
 // once then succeeds, asserting the handler is invoked TWICE. That test must
 // not be written: it asserts in-handler retry, which is banned estate-wide by
 // test/arch/bus_dlq_test.go's retryCertifiedConsumers, and it would directly
-// contradict dlq_integration_test.go:216, which asserts Kanz-DLQ-Attempts == "1"
+// contradict dlq_integration_test.go, which asserts Kanz-DLQ-Attempts == "1"
 // against this same broker and says a different value "means retry was wired
 // somewhere". The issue was retitled on 2026-08-02 for exactly this reason: one
 // failed attempt then parking is CORRECT, and the defect is that the parked

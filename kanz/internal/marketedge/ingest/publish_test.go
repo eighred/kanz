@@ -1,7 +1,7 @@
 // THE BOOK SNAPSHOT'S ENVELOPE, DRIVEN THROUGH A REAL PRODUCER (#245).
 //
 // A CORRECTION TO THIS PACKAGE'S ENTRY ON #245's LIST, which reads "capture
-// double accepts any Event (engine_test.go:32)". It does not, and has not for
+// double accepts any Event (engine_test.go)". It does not, and has not for
 // some time: engine_test.go's capture ENFORCES the tenant rule explicitly, with
 // a comment explaining that a double accepting an untenanted snapshot would let
 // this engine's correctness depend on how each caller wires its producer.

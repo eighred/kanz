@@ -52,7 +52,7 @@ import (
 // covers the adjacent half — that a publishing PACKAGE proves one envelope
 // against a real Producer. It cannot cover this one: cashmove's envelope was
 // already perfect, and market-data's feed package tests pass a producer the TEST
-// configures with Tenant: "acme" (bussink_test.go:32) over a wired one that has
+// configures with Tenant: "acme" (bussink_test.go) over a wired one that has
 // none. A test producer healthier than the deployed one reports green for the
 // path that is broken.
 //
@@ -211,7 +211,7 @@ type tenantRoute struct {
 var producersWithoutATenantFallback = map[string]tenantRoute{
 	"cmd/kanz-halt": {
 		why: "ROUTE 2. The halt/resume CLI stamps TenantID: opt.tenant on the ModeChanged FACT " +
-			"(main.go:142) and REFUSES to run without --tenant (main.go:189, \"the bus rejects an " +
+			"(main.go) and REFUSES to run without --tenant (main.go, \"the bus rejects an " +
 			"envelope with no tenant_id on the live path\"). A fallback would be unreachable code " +
 			"whose only effect would be to weaken that refusal into a default.",
 		stampedIn: "cmd/kanz-halt/main.go",
@@ -219,20 +219,20 @@ var producersWithoutATenantFallback = map[string]tenantRoute{
 	"services/optimization/cmd/optimization": {
 		why: "ROUTE 2, and a fallback here would be the same security defect as the gateway's, on a " +
 			"path with no human in it. Both publishers stamp the tenant from the AUTHENTICATED " +
-			"caller: the order COMMANDs through publish.Orders.Publish (publish.go:74, TenantID: " +
+			"caller: the order COMMANDs through publish.Orders.Publish (publish.go, TenantID: " +
 			"o.tenant) and the ProposalMaterialized FACT through publish.Materialized " +
-			"(publish.go:106), where o.tenant comes from Materializer.ForTenant scoped per request " +
+			"(publish.go), where o.tenant comes from Materializer.ForTenant scoped per request " +
 			"to the principal the api-gateway injected. A ProducerConfig.Tenant would let a request " +
 			"whose principal carried no tenant publish a REBALANCE into a default tenant's book " +
 			"instead of being refused — and with OPTIMIZATION_AUTO_PUBLISH armed nobody reviews it " +
-			"first. Materializer.Publish refuses an empty tenant outright (publish.go:164) rather " +
+			"first. Materializer.Publish refuses an empty tenant outright (publish.go) rather " +
 			"than letting a fallback rescue it.",
 		stampedIn: "services/optimization/internal/publish/publish.go",
 	},
 	"services/api-gateway/cmd/api-gateway": {
 		why: "ROUTE 2, and a fallback here would be a security defect. The gateway is the platform's " +
 			"identity authority: every command it publishes goes through the single Handler.publish " +
-			"helper (orders.go:116), which stamps TenantID: p.Tenant — the AUTHENTICATED CALLER's " +
+			"helper (orders.go), which stamps TenantID: p.Tenant — the AUTHENTICATED CALLER's " +
 			"tenant, from the JWT. A ProducerConfig.Tenant would let a token carrying no tenant claim " +
 			"publish an order into a default tenant's book instead of being refused. " +
 			"SECOND PUBLISHER ON THE SAME PRODUCER (#352): the AUTH-01d decision recorder publishes " +
@@ -266,15 +266,16 @@ var producersWithoutATenantFallback = map[string]tenantRoute{
 	"services/compliance/cmd/compliance": {
 		why: "ROUTE 1. Both publishers (audit.BusRecorder.Record, monitor.Emitter.EmitBreach) are " +
 			"reachable only from monitor.Handle, a bus.EventHandler wired to consumer.SubscribeBroadcast " +
-			"(main.go:179/211), so Consumer has stashed the inbound tenant on ctx (bus/consumer.go:212). " +
+			"(main.go's two SubscribeBroadcast wirings), so Consumer has stashed the inbound tenant " +
+			"on ctx (bus/consumer.go). " +
 			"A breach FACT must carry the tenant of the position that breached, not a service default: " +
-			"the monitor keys its book on env.GetTenantId() (monitor.go:112), and a fallback would " +
+			"the monitor keys its book on env.GetTenantId() (monitor.go), and a fallback would " +
 			"file one tenant's breach under another's mandate.",
 	},
 	"services/webhook-ingest/cmd/webhook-ingest": {
 		why: "ROUTE 2, indirect. Every publish this service makes goes through " +
 			"internal/signal/translate, shared with the native alpha runners, which resolves " +
-			"tenant := TenantOf(in.FundID) (translate.go:195) and stamps it on both the StrategySignal " +
+			"tenant := TenantOf(in.FundID) (translate.go) and stamps it on both the StrategySignal " +
 			"FACT (:339) and every SubmitOrder command (:399). It cannot be empty: Intent.validate " +
 			"rejects an empty FundID (:255) and the default TenantOf returns the fund_id (:170). " +
 			"One webhook endpoint serves many funds, so a per-service fallback would be the wrong " +
