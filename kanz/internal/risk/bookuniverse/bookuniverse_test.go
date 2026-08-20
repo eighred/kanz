@@ -26,7 +26,9 @@ func storeWith(t *testing.T, book map[v1.PortfolioID][]domain.InstrumentID) *sta
 		for _, ins := range instruments {
 			p.SetPosition(domain.Position{InstrumentID: ins, AsOf: bookAsOf})
 		}
-		s.Restore(p, nil)
+		if err := s.Restore(p, nil); err != nil {
+			t.Fatalf("Restore %s: %v", id, err)
+		}
 	}
 	return s
 }
