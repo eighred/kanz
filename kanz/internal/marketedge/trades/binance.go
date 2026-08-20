@@ -7,6 +7,7 @@ import (
 	"math/big"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/coder/websocket"
@@ -39,6 +40,20 @@ type BinanceSource struct {
 	// and every interval this feed covers reads downstream as UNKNOWN.
 	obs    Liveness
 	stopKA context.CancelFunc
+
+	// mu guards conn and stopKA ONLY, never the socket I/O (#591 follow-up).
+	//
+	// Recv and Close run on different goroutines by design — Close is how a
+	// caller interrupts a blocked Recv — so every access to these two fields is
+	// concurrent with another. CI's -race caught it; this box cannot, because
+	// -race needs cgo and there is no C compiler here.
+	//
+	// THE LOCK IS NEVER HELD ACROSS Read OR Close ON THE SOCKET. Holding it over
+	// a blocking read would make Close wait for the read it is trying to
+	// interrupt, which is a deadlock rather than a race — the repair being worse
+	// than the defect. Callers take a local copy under the lock and do I/O on
+	// that.
+	mu sync.Mutex
 }
 
 // BinanceConfig configures a BinanceSource.
@@ -95,13 +110,20 @@ func (s *BinanceSource) Recv(ctx context.Context) (Trade, error) {
 		if err := ctx.Err(); err != nil {
 			return Trade{}, err
 		}
-		if s.conn == nil {
+		conn := s.currentConn()
+		if conn == nil {
 			if err := s.connect(ctx); err != nil {
 				s.reportDown(err)
 				return Trade{}, err
 			}
+			conn = s.currentConn()
+			if conn == nil {
+				// Closed between connect and here. Not an error worth reporting
+				// down: the caller asked for the stream to end.
+				return Trade{}, context.Canceled
+			}
 		}
-		_, data, err := s.conn.Read(ctx)
+		_, data, err := conn.Read(ctx)
 		if err != nil {
 			s.reset() // force a reconnect on the next Recv
 			err = fmt.Errorf("binance trades: read: %w", err)
@@ -150,7 +172,9 @@ func (s *BinanceSource) connect(ctx context.Context) error {
 		return fmt.Errorf("binance trades: dial %s: %w", stream, err)
 	}
 	conn.SetReadLimit(1 << 20)
+	s.mu.Lock()
 	s.conn = conn
+	s.mu.Unlock()
 
 	// THE HEARTBEAT IS WHAT MAKES A QUIET MINUTE ATTESTABLE (#591). Binance
 	// needs no application keepalive to stay connected — the server pings and
@@ -164,7 +188,9 @@ func (s *BinanceSource) connect(ctx context.Context) error {
 	// erroring nor delivering is the failure this platform is least equipped to
 	// see.
 	kaCtx, cancel := context.WithCancel(ctx)
+	s.mu.Lock()
 	s.stopKA = cancel
+	s.mu.Unlock()
 	go s.keepAlive(kaCtx, conn)
 	return nil
 }
@@ -217,20 +243,30 @@ func (s *BinanceSource) reportDown(err error) {
 // together: a keepalive left running against a closed connection reports Live
 // forever off a socket nobody is reading.
 func (s *BinanceSource) reset() {
-	if s.stopKA != nil {
-		s.stopKA()
-		s.stopKA = nil
-	}
+	s.mu.Lock()
+	stop := s.stopKA
+	s.stopKA = nil
 	s.conn = nil
+	s.mu.Unlock()
+	if stop != nil {
+		stop()
+	}
+}
+
+// currentConn reads the live connection under the lock. The caller does its I/O
+// on the returned value, never while holding the lock.
+func (s *BinanceSource) currentConn() *websocket.Conn {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.conn
 }
 
 // Close releases the stream.
 func (s *BinanceSource) Close() error {
-	if s.conn == nil {
-		s.reset()
+	conn := s.currentConn()
+	s.reset()
+	if conn == nil {
 		return nil
 	}
-	err := s.conn.Close(websocket.StatusNormalClosure, "")
-	s.reset()
-	return err
+	return conn.Close(websocket.StatusNormalClosure, "")
 }

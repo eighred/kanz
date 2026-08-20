@@ -7,6 +7,7 @@ import (
 	"math/big"
 	"net/http"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/coder/websocket"
@@ -35,6 +36,10 @@ type OKXSource struct {
 	// and every interval this feed covers reads downstream as UNKNOWN.
 	obs       Liveness
 	heartbeat time.Duration
+
+	// mu guards conn and stopKA only — same contract as BinanceSource.mu,
+	// including that it is never held across socket I/O.
+	mu sync.Mutex
 }
 
 // OKXConfig configures an OKXSource.
@@ -102,13 +107,18 @@ func (s *OKXSource) Recv(ctx context.Context) (Trade, error) {
 			s.pending = s.pending[1:]
 			return t, nil
 		}
-		if s.conn == nil {
+		conn := s.currentConn()
+		if conn == nil {
 			if err := s.connect(ctx); err != nil {
 				s.reportDown(err)
 				return Trade{}, err
 			}
+			conn = s.currentConn()
+			if conn == nil {
+				return Trade{}, context.Canceled
+			}
 		}
-		_, data, err := s.conn.Read(ctx)
+		_, data, err := conn.Read(ctx)
 		if err != nil {
 			s.reset()
 			err = fmt.Errorf("okx trades: read: %w", err)
@@ -171,11 +181,15 @@ func (s *OKXSource) connect(ctx context.Context) error {
 		_ = conn.Close(websocket.StatusInternalError, "subscribe failed")
 		return fmt.Errorf("okx trades: subscribe %s: %w", s.instID, err)
 	}
+	s.mu.Lock()
 	s.conn = conn
+	s.mu.Unlock()
 
 	// Application-level keepalive: OKX drops a stream idle for 30s.
 	kaCtx, cancel := context.WithCancel(ctx)
+	s.mu.Lock()
 	s.stopKA = cancel
+	s.mu.Unlock()
 	go s.keepAlive(kaCtx, conn)
 	return nil
 }
@@ -217,15 +231,31 @@ func (s *OKXSource) reportDown(err error) {
 	}
 }
 
+// reset tears down the connection and its heartbeat together, under the lock
+// that guards them — see BinanceSource.mu for why the socket Close happens
+// AFTER the lock is released rather than inside it.
 func (s *OKXSource) reset() {
-	if s.stopKA != nil {
-		s.stopKA()
-		s.stopKA = nil
+	s.mu.Lock()
+	stop := s.stopKA
+	conn := s.conn
+	s.stopKA = nil
+	s.conn = nil
+	s.mu.Unlock()
+
+	if stop != nil {
+		stop()
 	}
-	if s.conn != nil {
-		_ = s.conn.Close(websocket.StatusNormalClosure, "")
-		s.conn = nil
+	if conn != nil {
+		_ = conn.Close(websocket.StatusNormalClosure, "")
 	}
+}
+
+// currentConn reads the live connection under the lock. I/O happens on the
+// returned value, never while holding the lock.
+func (s *OKXSource) currentConn() *websocket.Conn {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.conn
 }
 
 // Close releases the stream.
