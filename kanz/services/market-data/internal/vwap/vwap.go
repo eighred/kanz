@@ -90,9 +90,14 @@ func New(reg prometheus.Registerer, tenant string, bars Bars, logger *slog.Logge
 				"beat it. Distinct from shortfall, which measures against the DECISION-time mark. " +
 				"The `worked` label separates executions SLICED over a window by an execution " +
 				"algorithm from those sent WHOLE — without it both land in one number that " +
-				"describes neither, and whether slicing helps cannot be answered from this data.",
+				"describes neither, and whether slicing helps cannot be answered from this data. " +
+				"The `coverage` label says how much of the window the benchmark actually saw: " +
+				"`partial` means one or more 1-minute buckets held no bar, so the VWAP is over " +
+				"the minutes that survived and the slippage is against a market only partly " +
+				"observed. Do not aggregate it with `whole` (#591). `whole` means nothing is " +
+				"missing from the series — NOT that the feed was up; nothing here can say that.",
 			Buckets: []float64{-100, -50, -25, -10, -5, 0, 5, 10, 25, 50, 100, 250, 500},
-		}, []string{"venue", "worked"}),
+		}, []string{"venue", "worked", "coverage"}),
 		unjoinable: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "kanz_execution_vwap_unjoinable_total",
 			Help: "Cost records that could not be compared to a VWAP, by reason. NOT zero " +
@@ -194,6 +199,29 @@ func (w *Watch) Handle(ctx context.Context, env *envelopepb.Envelope, payload []
 		return nil
 	}
 
+	// THE BENCHMARK CARRIES HOW MUCH OF ITS WINDOW IT SAW (#591).
+	//
+	// bars/fold.go emits NO BAR for a minute in which nothing traded, so a window
+	// missing half its minutes still yields a VWAP — over the half that survived —
+	// and the slippage measured against it reads exactly like one measured over a
+	// whole window. unjoinable{reason="no_volume"} above only ever caught the
+	// window that was ENTIRELY empty, which was never the dangerous case.
+	//
+	// COUNTED, NOT REFUSED. Refusing a partial window would blank this measure on
+	// every quiet instrument, and on the 1m series quiet is the normal shape of
+	// the input rather than an exotic one. The label is the v1.InputCoverage
+	// discipline instead — riding ON the value rather than beside it, so no query
+	// can reach the figure without also reaching what it was computed over.
+	//
+	// WHOLE DOES NOT MEAN THE FEED WAS UP, and store/gaps.go carries that ruling:
+	// a missing bucket proves the window cannot support a claim, a whole window
+	// proves nothing about whether anyone was observing. What would settle the
+	// second half is the INGESTION-COVERAGE RECORD rollup/driver.go names and this
+	// platform still does not have. When it lands it belongs as a further value on
+	// THIS label — a second opinion published beside this one would put two
+	// answers to one question on the same dashboard.
+	cov, covOK := store.WindowOf(bars, from, to, store.Resolution1m)
+
 	slip, ok := tca.SlippageVsVWAPBps(
 		tca.Result{AveragePrice: dec.FromProto(rec.GetFillPrice())}, ref, rec.GetSide())
 	if !ok {
@@ -201,15 +229,46 @@ func (w *Watch) Handle(ctx context.Context, env *envelopepb.Envelope, payload []
 		return nil
 	}
 	f, _ := slip.Float64()
-	w.slippage.WithLabelValues(venue, workedLabel(&rec)).Observe(f)
+	w.slippage.WithLabelValues(venue, workedLabel(&rec), coverageLabel(cov, covOK)).Observe(f)
 
 	w.logger.Debug("vwap slippage measured",
 		"order_id", rec.GetOrderId(), "parent_order_id", rec.GetParentOrderId(),
 		"fill_id", rec.GetFillId(), "venue", venue,
 		"instrument", rec.GetInstrumentId(),
 		"window_from", from, "window_to", to, "bars", len(bars),
+		"window_buckets", cov.Buckets, "observed_buckets", cov.Observed,
 		"vwap", ref.FloatString(8), "slippage_bps", slip.FloatString(4))
 	return nil
+}
+
+// coverageLabel names how much of the working window the benchmark was computed
+// over (#591). Three values, and none of them is a claim about the feed:
+//
+//	whole              every 1-minute bucket in the window has a bar.
+//	partial            at least one has none — the VWAP is over the minutes that
+//	                   survived, and the slippage is against a market only partly
+//	                   observed.
+//	shorter_than_a_bar the window holds no complete 1-minute bucket at all.
+//
+// THE THIRD VALUE EXISTS BECAUSE Whole() IS VACUOUS OVER ZERO BUCKETS and says so
+// itself. It is reachable rather than defensive: BarQuery bounds From/To on
+// BucketStart INCLUSIVE/EXCLUSIVE, so a fill worked from 12:00:00 to 12:00:30
+// selects the 12:00 bar while containing no whole bucket — a benchmark drawn from
+// a minute that outlasts the window. Labelling that "whole" would be the same
+// silent conflation this change exists to remove.
+//
+// ok=false from WindowOf lands there too. store.Resolution1m always has an
+// interval so it is unreachable today, but the direction is the safe one: an
+// unanswerable coverage question must never be published as a covered window.
+func coverageLabel(cov store.Window, ok bool) string {
+	switch {
+	case !ok || cov.Buckets == 0:
+		return "shorter_than_a_bar"
+	case cov.Whole():
+		return "whole"
+	default:
+		return "partial"
+	}
 }
 
 // workedLabel says whether this execution was SLICED over a window by an

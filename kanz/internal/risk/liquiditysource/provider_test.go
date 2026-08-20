@@ -115,6 +115,25 @@ func (r *recorder) observe() Option {
 	})
 }
 
+// exactly pins the WHOLE observation sequence, in order.
+//
+// A SUCCESSFUL RESOLUTION REPORTS TWICE SINCE #591. The seam is
+// (LiquiditySpec, bool), so the window's coverage cannot ride on the value the
+// way v1.InputCoverage rides on a risk measure — it comes out of the observer
+// beside the spread posture. A helper that asserts one observation can no longer
+// say what a caller sees on the success path.
+func (r *recorder) exactly(t *testing.T, want ...string) {
+	t.Helper()
+	if len(r.reason) != len(want) {
+		t.Fatalf("observations = %v, want %v", r.reason, want)
+	}
+	for i := range want {
+		if r.reason[i] != want[i] {
+			t.Fatalf("observations = %v, want %v", r.reason, want)
+		}
+	}
+}
+
 func (r *recorder) only(t *testing.T, wantReason string, wantDays int) {
 	t.Helper()
 	if len(r.reason) != 1 {
@@ -329,9 +348,14 @@ func TestAWindowExactlyAtTheFloorResolves(t *testing.T) {
 	if spec.ADV != 10 {
 		t.Errorf("ADV = %v, want 10", spec.ADV)
 	}
-	// The floor is not off by one in the other direction either: five days is a
-	// clean resolution, so the only report is the spread posture.
-	r.only(t, ReasonSpreadUnavailable, 5)
+	// The floor is not off by one in the other direction either: five days
+	// resolves. It reports twice — the 28-day window holds five 1-minute bars, so
+	// its coverage is counted (#591) — and the day count on both is the divisor
+	// the ADV was actually taken over.
+	r.exactly(t, ReasonWindowNotWhole, ReasonSpreadUnavailable)
+	if r.days[0] != 5 || r.days[1] != 5 {
+		t.Errorf("days = %v, want [5 5] — the observer's count is the ADV's divisor", r.days)
+	}
 }
 
 // All-or-nothing rather than best-effort: a window with holes reports a mean
@@ -415,9 +439,11 @@ func TestAnAssumedSpreadIsServedAndIsNotReportedAsDegraded(t *testing.T) {
 	if spec.Spread != 0.0005 {
 		t.Errorf("Spread = %v, want 0.0005", spec.Spread)
 	}
-	if len(r.reason) != 0 {
-		t.Errorf("observations = %v, want none — an entered assumption is not a degradation", r.reason)
-	}
+	// AN ENTERED ASSUMPTION IS NOT A DEGRADATION, so no spread reason fires. The
+	// window's coverage is an independent fact about the same answer and still
+	// does: five 1-minute bars do not cover a 28-day window, and the ADV served is
+	// a floor whichever posture supplied the spread (#591).
+	r.exactly(t, ReasonWindowNotWhole)
 	// And it is an assumption that BITES: the liquidation cost is non-zero, which
 	// is the entire difference between LVaR99 and VaR99.
 	days, liquid := liquidity.DefaultModel().DaysToLiquidate(100, spec)
@@ -462,8 +488,9 @@ func TestTheNoSpreadPostureServesARealADVAndACostOfExactlyZero(t *testing.T) {
 			"posture accepts, and if it ever stops holding the doc is wrong", cost)
 	}
 
-	// And the degeneracy is COUNTED, not inferred from a suspiciously round LVaR.
-	r.only(t, ReasonSpreadUnavailable, 5)
+	// And the degeneracy is COUNTED, not inferred from a suspiciously round LVaR —
+	// alongside the window coverage the ADV cannot carry itself (#591).
+	r.exactly(t, ReasonWindowNotWhole, ReasonSpreadUnavailable)
 }
 
 // A spread is a fraction of price. A value at or above 1 is a unit error — basis
@@ -600,7 +627,9 @@ func TestThePopulatedDailySeriesIsUsedAndTheMinuteSeriesIsNotRead(t *testing.T) 
 	if spec.ADV != 14400 {
 		t.Errorf("ADV = %v, want 14400", spec.ADV)
 	}
-	r.only(t, ReasonSpreadUnavailable, 5)
+	// Five daily candles in a 28-day window is still 23 days nobody can speak
+	// for, and the saving does not buy silence about that.
+	r.exactly(t, ReasonWindowNotWhole, ReasonSpreadUnavailable)
 }
 
 // THE PREMISE OF THE WHOLE OPTIMISATION, ASSERTED RATHER THAN ARGUED. If the ADV
@@ -663,12 +692,8 @@ func TestAnEmptyCoarseSeriesFallsBackToTheBaseSeriesAndIsReported(t *testing.T) 
 	}
 	// AND IT IS COUNTED. "The rollup job is not running" and "the rollup job is
 	// running" must not look the same from outside.
-	if len(r.reason) != 3 ||
-		r.reason[0] != ReasonCoarseSeriesEmpty ||
-		r.reason[1] != ReasonCoarseSeriesEmpty ||
-		r.reason[2] != ReasonSpreadUnavailable {
-		t.Errorf("observations = %v, want two %q then the spread posture", r.reason, ReasonCoarseSeriesEmpty)
-	}
+	r.exactly(t, ReasonCoarseSeriesEmpty, ReasonCoarseSeriesEmpty,
+		ReasonWindowNotWhole, ReasonSpreadUnavailable)
 }
 
 // THE SUBTLE ONE, AND THE REASON THE FALLBACK CANNOT KEY ON EMPTINESS ALONE. A
@@ -693,9 +718,7 @@ func TestAHalfBackfilledRollupFallsBackRatherThanRefusingTheInstrument(t *testin
 	if spec.ADV != 10 {
 		t.Errorf("ADV = %v, want 10 (the base series' answer)", spec.ADV)
 	}
-	if len(r.reason) != 2 || r.reason[0] != ReasonCoarseSeriesShort {
-		t.Fatalf("observations = %v, want %q first", r.reason, ReasonCoarseSeriesShort)
-	}
+	r.exactly(t, ReasonCoarseSeriesShort, ReasonWindowNotWhole, ReasonSpreadUnavailable)
 	// The day count is how far the backfill has got, which is the operational
 	// number somebody actually wants.
 	if r.days[0] != 3 {
@@ -880,4 +903,91 @@ func TestABothPosturesProviderStillDeclaresItServesASpread(t *testing.T) {
 	if !p.ServesSpread() {
 		t.Error("ServesSpread = false with a non-empty spread table")
 	}
+}
+
+// ===== THE WINDOW THE ADV WAS MEASURED OVER IS ACCOUNTED FOR (#591) =====
+
+// THE COUNTER IS NOT STUCK ON, which is the half that makes the other half worth
+// reading. A daily series covering every day of the window is WHOLE, and a
+// resolution over it reports the spread posture and nothing else.
+//
+// This is the shape the production preference aims at: CoarsestFirst tries 1d
+// first, so a populated rollup over the configured window is the silent case and
+// the rate at which ReasonWindowNotWhole starts firing is a rollup losing days.
+func TestAWholeWindowReportsNoMissingBuckets(t *testing.T) {
+	var r recorder
+	f := &seriesBars{series: map[store.Resolution][]store.Bar{
+		store.Resolution1d: dailyBars(10, 10, 10, 10, 10),
+	}}
+	p := mustProviderCfg(t, f, Config{Resolution: store.Resolution1d},
+		WithWindow(5*24*time.Hour), WithNoSpread(), r.observe())
+
+	spec, ok := p.Liquidity(context.Background(), instr, day0.AddDate(0, 0, 5))
+	if !ok {
+		t.Fatalf("Liquidity: not ok")
+	}
+	if spec.ADV != 10 {
+		t.Errorf("ADV = %v, want 10", spec.ADV)
+	}
+	r.exactly(t, ReasonSpreadUnavailable)
+}
+
+// THE UNDERSTATEMENT, MEASURED RATHER THAN ARGUED — and the ADV is still served.
+//
+// Day one holds a complete 1440-bar grid at volume 1. Day two holds ONE minute of
+// the same tape. dailyTotals counts both as days, so the mean is 1441/2 = 720.5
+// against a real daily volume of 1440: an ADV understated by half, which through
+// DaysToLiquidate DOUBLES the reported liquidation horizon. Conservative, in
+// range, and invisible — which is why it is counted rather than refused.
+//
+// REFUSING WOULD BE THE UNSAFE REPAIR. liquidity.Profile drops a refused
+// position, and a book of dropped positions reports LiquidationHorizon 0.0000
+// days: an active claim of perfect liquidity. So ok stays true and the coverage
+// comes out beside it.
+func TestAPartiallyCoveredDayUnderstatesTheADVAndIsCounted(t *testing.T) {
+	var r recorder
+	bars := fullDay(day0, 1)
+	next := day0.AddDate(0, 0, 1)
+	bars = append(bars, testBar(next, 1, next))
+
+	p := mustProvider(t, &fakeBars{bars: bars},
+		WithWindow(2*24*time.Hour), WithMinDays(2), WithNoSpread(), r.observe())
+
+	spec, ok := p.Liquidity(context.Background(), instr, day0.AddDate(0, 0, 2))
+	if !ok {
+		t.Fatalf("Liquidity: ok=false — a partially covered window must not refuse the " +
+			"instrument, which reports a ZERO liquidation horizon for a book that is fine")
+	}
+	if spec.ADV != 720.5 {
+		t.Errorf("ADV = %v, want 720.5 — 1441 units over two TOUCHED days, against a real "+
+			"daily volume of 1440. If this ever equals 1440 the measure changed and the "+
+			"doc on dailyTotals is wrong", spec.ADV)
+	}
+	r.exactly(t, ReasonWindowNotWhole, ReasonSpreadUnavailable)
+	if r.days[0] != 2 {
+		t.Errorf("days = %d, want 2 — the count is days TOUCHED, which is exactly the number "+
+			"this reason exists to qualify", r.days[0])
+	}
+}
+
+// A WINDOW HOLDING NO WHOLE BUCKET IS NOT A COVERED ONE. store.Window.Whole() is
+// VACUOUSLY true over zero buckets and says so in its own doc, so the guard is
+// against inheriting that silence — a window shorter than one bar would otherwise
+// publish as fully covered, which is the defect this closes arriving by the back
+// door.
+//
+// THE FAKE ANSWERS A WINDOW THE REAL STORE WOULD NOT, deliberately: BarQuery
+// bounds on BucketStart, so a one-hour window over a daily series selects nothing
+// and the branch is unreachable from a real read. That is what makes it a GUARD
+// rather than a path, and a guard nothing exercises is a guard nobody knows the
+// direction of.
+func TestAWindowTooShortToHoldABucketIsNotReportedAsCovered(t *testing.T) {
+	var r recorder
+	p := mustProviderCfg(t, &fakeBars{bars: dailyBars(10)}, Config{Resolution: store.Resolution1d},
+		WithWindow(time.Hour), WithMinDays(1), WithNoSpread(), r.observe())
+
+	if _, ok := p.Liquidity(context.Background(), instr, day0.AddDate(0, 0, 1)); !ok {
+		t.Fatalf("Liquidity: not ok")
+	}
+	r.exactly(t, ReasonWindowNotWhole, ReasonSpreadUnavailable)
 }
