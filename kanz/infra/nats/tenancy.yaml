@@ -801,6 +801,16 @@ data:
                   # that will consume this (#437) is a separate reader.
                   "order.cost.recorded",
                   "risk.position.changed.>", "risk.position.venue.changed.>",
+                  # GRANTED, AND NOTHING PUBLISHES IT (#589). posttrade.BusFailSink
+                  # is defined and never constructed, so this grant is exercised by
+                  # no process and the SETTLEMENT stream is empty everywhere. The
+                  # grant stays — revoking it would make wiring the plane a
+                  # tenancy change as well as a code change — but it must not be
+                  # read as evidence that settlement fails are being reported. The
+                  # OMS composition root WARNs the posture at startup and exports
+                  # kanz_oms_settlement_plane_running{stage="fail_publication"}=0,
+                  # which is the only thing separating "not running on this
+                  # deployment" from "running, and nothing has failed".
                   "settlement.instruction.fail",
                   "dlq.order.order.submit", "dlq.order.order.amend", "dlq.order.order.cancel",
                   # The approve command parks like its three siblings (#539): it
