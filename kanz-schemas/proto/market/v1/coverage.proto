@@ -1,0 +1,68 @@
+syntax = "proto3";
+
+// IngestionCoverage is the market domain's answer to a question the bar series
+// cannot answer about itself: was the platform actually LOOKING?
+//
+// market/v1/market_data.proto's Bar carries what traded. A minute in which
+// nothing traded produces NO BAR — and from the bar series a quiet minute and a
+// dead feed are the same absence. This message is the other half, and it is a
+// FIRST-HAND attestation: it is emitted by the process holding the venue
+// subscription, about that subscription, and it is never derived from the data
+// it vouches for. A coverage record computed from bars would vouch for itself.
+package market.v1;
+
+import "google/protobuf/duration.proto";
+import "google/protobuf/timestamp.proto";
+
+// IngestionCoverage states how much of one interval one feed subscription was
+// demonstrably LIVE for one (instrument, venue).
+//
+// THE SIGNAL IT SUPPLIES IS THE ONE THE BAR SERIES CANNOT. A missing bar inside
+// a fully-covered interval is a QUIET market. A missing bar inside an interval
+// with no coverage record, or a partial one, is UNKNOWN — and the two must never
+// read the same, which is why absence of a record is never treated as coverage.
+//
+// It carries NO price, size or volume, deliberately. Any market quantity here
+// would invite a reader to reconcile this record against the series it exists to
+// vouch for, which is the circularity the whole record is built to avoid.
+message IngestionCoverage {
+  // instrument_id is the canonical Kanz instrument identifier, matching
+  // MarketDataEvent.instrument_id and the envelope partition_key. Required.
+  string instrument_id = 1;
+
+  // mic is the venue this subscription was held against, matching
+  // MarketDataEvent.mic. Coverage is PER VENUE: a live Binance subscription
+  // says nothing about what OKX was doing. Required.
+  string mic = 2;
+
+  // bucket_start is the inclusive start of the attested interval and
+  // bucket_end its exclusive end. The enclosing envelope event_time is
+  // bucket_end — the attestation is only complete once the interval has
+  // elapsed. Both required.
+  google.protobuf.Timestamp bucket_start = 3;
+  google.protobuf.Timestamp bucket_end = 4;
+
+  // observed is how much of [bucket_start, bucket_end) the subscription was
+  // demonstrably live for — established, and round-tripping frames within the
+  // attesting process's silence tolerance. Required.
+  //
+  // IT IS A LOWER BOUND, NEVER AN ESTIMATE. Time the attestor cannot prove the
+  // subscription was live is not credited, so observed < the interval means
+  // "cannot vouch for the difference", not "the feed was down for it". The one
+  // direction that must never fail is the other: observed is never longer than
+  // the attestor actually proved.
+  google.protobuf.Duration observed = 5;
+
+  // breaks is how many times the subscription was observed to FAIL within the
+  // interval — a read error, a dial failure, a rejected subscribe. Zero with a
+  // short `observed` means the attestor simply stopped hearing from the socket;
+  // non-zero names a fault the venue or the network produced.
+  uint32 breaks = 6;
+
+  // attestor names the subscription that is speaking, e.g.
+  // "binance:trades:BTCUSDT". It exists so a coverage claim can be traced to
+  // the thing that made it rather than to a service name — two processes may
+  // hold subscriptions for the same (instrument, venue), and a record whose
+  // origin is unknown cannot be audited. Required.
+  string attestor = 7;
+}

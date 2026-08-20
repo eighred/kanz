@@ -684,7 +684,13 @@ var crossPackagePublishSurfaces = map[string][]string{
 	// LOOKING — the subject would be published by a service whose grant nothing
 	// checked, and the failure mode is a NATS permissions denial in production
 	// with a green suite behind it.
-	"market-ingest": {"internal/marketedge/ingest", "internal/marketedge/bars"},
+	// internal/marketedge/coverage is the THIRD (#591): the ingestion-coverage
+	// record, published by the process that holds the venue subscriptions. It is
+	// listed for the same reason bars is — and the consequence of omitting it is
+	// worse. A denied candle can be re-derived from the venue tomorrow; a denied
+	// attestation is gone permanently, because nothing can reconstruct whether a
+	// feed was live, and the interval reads as UNKNOWN forever.
+	"market-ingest": {"internal/marketedge/ingest", "internal/marketedge/bars", "internal/marketedge/coverage"},
 	// webhook-ingest's signal + order-command publishes are
 	// internal/signal/translate's Translator, constructed and driven from
 	// services/webhook-ingest/internal/ingest (pipeline.go's tr.Emit).

@@ -26,6 +26,11 @@ type Memory struct {
 	// a restatement coexists with the original rather than replacing it — the
 	// same contract the Postgres primary key enforces.
 	bars map[barKey]Bar
+
+	// coverage is the ingestion-coverage record (#591), keyed per ATTESTOR so two
+	// subscriptions covering one series coexist rather than one overwriting the
+	// other — the same contract the Postgres primary key enforces.
+	coverage map[coverageKey]Coverage
 }
 
 type obsKey struct {

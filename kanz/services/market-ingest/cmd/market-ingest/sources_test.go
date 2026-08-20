@@ -18,7 +18,9 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/eighred/kanz/internal/marketedge/coverage"
 	"github.com/eighred/kanz/pkg/bus"
 	"github.com/eighred/kanz/services/market-ingest/internal/config"
 )
@@ -27,12 +29,34 @@ func quietLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
 }
 
+// testRecorder is the ingestion-coverage record these composition-root tests
+// hand to feeds(). It is a REAL recorder rather than nil: nil is the "attest
+// nothing" path, and a test that passed nil would prove the wiring compiles
+// without proving a feed ever binds to the record.
+func testRecorder(t *testing.T) *coverage.Recorder {
+	t.Helper()
+	rec, err := coverage.NewRecorder(coverage.Config{
+		Publisher:  discardPublisher{},
+		Tenant:     "__system__",
+		MaxSilence: 45 * time.Second,
+		Logger:     quietLogger(),
+	})
+	if err != nil {
+		t.Fatalf("coverage.NewRecorder: %v", err)
+	}
+	return rec
+}
+
+type discardPublisher struct{}
+
+func (discardPublisher) Publish(context.Context, bus.Event) error { return nil }
+
 func TestFeedsRefusesToSimulateWhenNoSymbolsAreMapped(t *testing.T) {
 	// Instruments requested, but no venue symbol mapped for any of them. The old
 	// behaviour published generated prices. The correct behaviour is to refuse.
 	cfg := config.Config{Instruments: []string{"BTC-USD"}}
 
-	got, err := feeds(cfg, quietLogger())
+	got, err := feeds(cfg, testRecorder(t), quietLogger())
 	if err == nil {
 		t.Fatal("feeds() silently substituted simulated prices for a real market feed — that is fabricated data on the bus")
 	}
@@ -49,7 +73,7 @@ func TestFeedsSimulatesOnlyWhenExplicitlyAllowed(t *testing.T) {
 	// for, never arrived at by forgetting to configure a symbol map.
 	cfg := config.Config{Instruments: []string{"BTC-USD"}, AllowSim: true}
 
-	got, err := feeds(cfg, quietLogger())
+	got, err := feeds(cfg, testRecorder(t), quietLogger())
 	if err != nil {
 		t.Fatalf("feeds() with AllowSim: %v", err)
 	}
@@ -70,7 +94,7 @@ func TestFeedsBindsTheRealVenueWhenASymbolIsMapped(t *testing.T) {
 		BinanceMIC:     "BINANCE",
 	}
 
-	got, err := feeds(cfg, quietLogger())
+	got, err := feeds(cfg, testRecorder(t), quietLogger())
 	if err != nil {
 		t.Fatalf("feeds(): %v", err)
 	}
@@ -87,7 +111,7 @@ func TestFeedsBindsTheRealVenueWhenASymbolIsMapped(t *testing.T) {
 
 func TestFeedsWithNoInstrumentsIsNotAnError(t *testing.T) {
 	// Nothing asked for, nothing ingested, nothing invented.
-	got, err := feeds(config.Config{}, quietLogger())
+	got, err := feeds(config.Config{}, testRecorder(t), quietLogger())
 	if err != nil {
 		t.Fatalf("feeds() with no instruments: %v", err)
 	}

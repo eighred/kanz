@@ -3,6 +3,7 @@ package main
 import (
 	"log/slog"
 
+	"github.com/eighred/kanz/internal/marketedge/coverage"
 	"github.com/eighred/kanz/pkg/alpha"
 	"github.com/eighred/kanz/services/market-ingest/internal/config"
 )
@@ -11,7 +12,7 @@ import (
 // an instrument, when a venue symbol is mapped for it. An unmapped instrument is
 // not tracked here — the edge never invents a symbol. Both streams are PUBLIC
 // market data: no API key is required.
-func binanceFeeds(cfg config.Config, instrument string, logger *slog.Logger) []alpha.Feed {
+func binanceFeeds(cfg config.Config, instrument string, cov *coverage.Recorder, logger *slog.Logger) []alpha.Feed {
 	symbol, ok := cfg.BinanceSymbols[instrument]
 	if !ok {
 		return nil
@@ -22,5 +23,9 @@ func binanceFeeds(cfg config.Config, instrument string, logger *slog.Logger) []a
 		InstrumentID: instrument, Symbol: symbol, MIC: cfg.BinanceMIC,
 		WSBase: cfg.BinanceWSBase, RESTBase: cfg.BinanceRESTBase,
 		DepthLimit: cfg.DepthLimit, DNSTTL: cfg.DNSTTL,
+		// The ingestion-coverage record (#591). A mapped symbol means a real
+		// subscription, and a real subscription is something this platform can
+		// honestly attest to.
+		Coverage: cov,
 	})}
 }

@@ -30,6 +30,11 @@ type OKXSource struct {
 	conn    *websocket.Conn
 	stopKA  context.CancelFunc
 	pending []Trade // one frame can carry several executions
+
+	// obs is the ingestion-coverage seam (#591). Nil means nothing is attested
+	// and every interval this feed covers reads downstream as UNKNOWN.
+	obs       Liveness
+	heartbeat time.Duration
 }
 
 // OKXConfig configures an OKXSource.
@@ -38,6 +43,12 @@ type OKXConfig struct {
 	WSURL      string // public websocket, e.g. wss://ws.okx.com:8443/ws/v5/public
 	DNSTTL     time.Duration
 	HTTPClient *http.Client // injected by tests; default is the DNS-bypass client
+	// Liveness receives this subscription's coverage attestations. Optional; nil
+	// attests nothing, and the intervals read as UNKNOWN rather than as covered.
+	Liveness Liveness
+	// HeartbeatInterval overrides the keepalive cadence. <=0 ⇒ HeartbeatInterval.
+	// A TEST SEAM, not an operational knob — see BinanceConfig.
+	HeartbeatInterval time.Duration
 }
 
 // NewOKXSource builds the live trade source.
@@ -46,7 +57,13 @@ func NewOKXSource(cfg OKXConfig) *OKXSource {
 		// Zero-Timeout client: the trade stream is long-lived (see netdial).
 		cfg.HTTPClient = netdial.NewWebsocketHTTPClient(cfg.DNSTTL)
 	}
-	return &OKXSource{instID: cfg.InstID, wsURL: cfg.WSURL, httpc: cfg.HTTPClient}
+	if cfg.HeartbeatInterval <= 0 {
+		cfg.HeartbeatInterval = HeartbeatInterval
+	}
+	return &OKXSource{
+		instID: cfg.InstID, wsURL: cfg.WSURL, httpc: cfg.HTTPClient,
+		obs: cfg.Liveness, heartbeat: cfg.HeartbeatInterval,
+	}
 }
 
 var _ TradeSource = (*OKXSource)(nil)
@@ -87,14 +104,24 @@ func (s *OKXSource) Recv(ctx context.Context) (Trade, error) {
 		}
 		if s.conn == nil {
 			if err := s.connect(ctx); err != nil {
+				s.reportDown(err)
 				return Trade{}, err
 			}
 		}
 		_, data, err := s.conn.Read(ctx)
 		if err != nil {
 			s.reset()
-			return Trade{}, fmt.Errorf("okx trades: read: %w", err)
+			err = fmt.Errorf("okx trades: read: %w", err)
+			s.reportDown(err)
+			return Trade{}, err
 		}
+		// A FRAME IS A FRAME (#591). The keepalive pong two lines down, and the
+		// subscribe ack below it, are the evidence that matters: they arrive
+		// whether or not anything traded, which is what lets a QUIET minute be
+		// attested as observed rather than as a hole. Reporting liveness only for
+		// executions would tie coverage to trading activity and re-derive the
+		// ambiguity the record exists to resolve.
+		s.reportLive()
 		if string(data) == "pong" {
 			continue
 		}
@@ -103,7 +130,13 @@ func (s *OKXSource) Recv(ctx context.Context) (Trade, error) {
 			return Trade{}, fmt.Errorf("okx trades: decode: %w", err)
 		}
 		if msg.Event == "error" {
-			return Trade{}, fmt.Errorf("okx trades: subscribe rejected %s: %s", msg.Code, msg.Msg)
+			err := fmt.Errorf("okx trades: subscribe rejected %s: %s", msg.Code, msg.Msg)
+			// A REJECTED SUBSCRIBE IS A BREAK, not a live socket. The connection is
+			// up and answering, so the frame above looked like liveness — but this
+			// feed is delivering nothing, and attesting coverage for it would vouch
+			// for a subscription the venue refused.
+			s.reportDown(err)
+			return Trade{}, err
 		}
 		if msg.Event != "" {
 			continue // subscribe ack
@@ -148,7 +181,10 @@ func (s *OKXSource) connect(ctx context.Context) error {
 }
 
 func (s *OKXSource) keepAlive(ctx context.Context, conn *websocket.Conn) {
-	t := time.NewTicker(20 * time.Second)
+	// HeartbeatInterval, not a local 20s any more: the coverage recorder's
+	// silence tolerance is one value for every feed, so the cadence that decides
+	// whether a quiet minute is attestable has to be one value too (#591).
+	t := time.NewTicker(s.heartbeat)
 	defer t.Stop()
 	for {
 		select {
@@ -156,9 +192,28 @@ func (s *OKXSource) keepAlive(ctx context.Context, conn *websocket.Conn) {
 			return
 		case <-t.C:
 			if err := conn.Write(ctx, websocket.MessageText, []byte("ping")); err != nil {
-				return // the reader surfaces the dead connection
+				// NOT REPORTED AS Down, and NOT reported as Live either. The write
+				// succeeding would only prove the local send buffer accepted it; the
+				// evidence is the PONG, which the Recv loop reads and reports. The
+				// reader also owns the Down, with the error that actually killed the
+				// connection.
+				return
 			}
 		}
+	}
+}
+
+// reportLive attests that the subscription was alive just now.
+func (s *OKXSource) reportLive() {
+	if s.obs != nil {
+		s.obs.Live(time.Now().UTC())
+	}
+}
+
+// reportDown attests that the subscription FAILED just now.
+func (s *OKXSource) reportDown(err error) {
+	if s.obs != nil {
+		s.obs.Down(time.Now().UTC(), err)
 	}
 }
 

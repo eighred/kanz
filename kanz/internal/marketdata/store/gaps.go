@@ -174,3 +174,125 @@ func ContiguousSuffix(bars []Bar) []Bar {
 	}
 	return bars[start:]
 }
+
+// Attested is a Window whose MISSING buckets have been put to the
+// ingestion-coverage record (#591).
+//
+// # This is the second direction, and the only thing that makes it sound
+//
+// The package note above states the contract: a missing bucket proves the window
+// cannot support a claim, and a whole window does NOT prove the platform was
+// observing. Window alone can only ever report the first. Attested reports the
+// second, and it can do so ONLY because Coverage is a first-hand attestation from
+// the process that held the venue subscription — never something derived from the
+// bars, which would be the series vouching for itself.
+//
+// # The three states, and why Unknown is a number rather than a flag
+//
+//	a bar exists                                → Observed
+//	no bar, and coverage says we were looking   → QUIET. A real, measured absence.
+//	no bar, and coverage says nothing           → UNKNOWN. Nobody can speak for it.
+//
+// "No coverage record for this window" and "covered, and the market was quiet"
+// must never look the same, so they are separate counters and neither collapses
+// into the other. A caller that wants one boolean has Sound(); a caller sizing a
+// position off a window wants to know HOW MUCH of it nobody can vouch for.
+type Attested struct {
+	Window
+	// Quiet is how many missing buckets the coverage record attests the platform
+	// was observing for the WHOLE bucket. These are measured absences: nothing
+	// traded, and we were there to see it.
+	Quiet int
+	// Unknown is how many missing buckets have no whole-bucket attestation —
+	// because no record exists, or because the one that does is short.
+	//
+	// A SHORT ATTESTATION COUNTS AS UNKNOWN, not as partial credit. The record
+	// says how much of the bucket was watched, not WHICH part of it, so a bucket
+	// watched for 59 of 60 seconds cannot rule out a print in the second nobody
+	// saw. Anything less than whole leaves the absence unexplained.
+	Unknown int
+}
+
+// Sound reports that every absence in the window is accounted for — either a bar
+// is present, or the coverage record vouches for the interval it is missing from.
+//
+// READ IT AS "this window supports a claim about what happened in it". It is the
+// gate Whole() was never able to be: Whole() says the series has no holes, which
+// a dead feed also produces.
+//
+// A window of zero buckets is Sound, vacuously, exactly as it is Whole — callers
+// gating on this must decide what an empty window means for them rather than
+// inheriting an answer from here.
+func (a Attested) Sound() bool { return a.Unknown == 0 }
+
+// AttestedWindowOf counts the complete buckets in [from, to), how many hold a
+// bar, and — for those that do not — whether the ingestion-coverage record
+// vouches for the platform having been observing.
+//
+// ok=false when res has no interval, matching WindowOf.
+//
+// COVERAGE IS ONLY CONSULTED FOR MISSING BUCKETS. A bar that exists is evidence
+// in its own right; whether the feed was also healthy around it is a different
+// question from the one this answers, and folding it in here would make a present
+// bar disappear from the count because a heartbeat was late.
+//
+// Coverage rows of another resolution, or outside the window, are ignored — the
+// caller queried one series and this counts that series. Rows are matched on
+// BucketStart alone: the caller is responsible for having queried coverage for
+// the same (instrument, venue) it queried bars for, exactly as it already is for
+// the bars themselves.
+func AttestedWindowOf(bars []Bar, cov []Coverage, from, to time.Time, res Resolution) (Attested, bool) {
+	w, ok := WindowOf(bars, from, to, res)
+	if !ok {
+		return Attested{}, false
+	}
+	out := Attested{Window: w}
+	if w.Missing() == 0 {
+		return out, true
+	}
+	interval, _ := res.Interval()
+	from, to = from.UTC(), to.UTC()
+	first := from.Truncate(interval)
+	if first.Before(from) {
+		first = first.Add(interval)
+	}
+
+	seen := make(map[int64]bool, len(bars))
+	for i := range bars {
+		if bars[i].Resolution != res {
+			continue
+		}
+		s := bars[i].BucketStart.UTC()
+		if s.Before(first) || s.Add(interval).After(to) {
+			continue
+		}
+		seen[s.UnixNano()] = true
+	}
+	// A bucket is vouched for only by a WHOLE attestation. Several attestors may
+	// speak for one bucket and it takes only one of them to have watched all of
+	// it, so this is an OR across rows rather than a merge of them.
+	vouched := make(map[int64]bool, len(cov))
+	for i := range cov {
+		if cov[i].Resolution != res || !cov[i].Whole() {
+			continue
+		}
+		s := cov[i].BucketStart.UTC()
+		if s.Before(first) || s.Add(interval).After(to) {
+			continue
+		}
+		vouched[s.UnixNano()] = true
+	}
+
+	for s := first; !s.Add(interval).After(to); s = s.Add(interval) {
+		k := s.UnixNano()
+		if seen[k] {
+			continue
+		}
+		if vouched[k] {
+			out.Quiet++
+			continue
+		}
+		out.Unknown++
+	}
+	return out, true
+}

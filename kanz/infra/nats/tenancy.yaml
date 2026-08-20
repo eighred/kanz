@@ -738,9 +738,22 @@ data:
           # package list: the derivation is per-package and was passing by not
           # looking, which would have surfaced as a NATS permissions denial in
           # production behind a green suite.
+          #
+          # THIRD PUBLISHER, ADDED WITH #591: internal/marketedge/coverage
+          # publishes market.crypto.ingestion_coverage — the record of which
+          # intervals this platform was actually OBSERVING, attested by the
+          # process holding the venue subscriptions. It rides market.crypto.*
+          # for the same reason the candle does, so again no new Kafka topic and
+          # no new archival decision. It is the same per-package derivation trap:
+          # the package is listed in that test's crossPackagePublishSurfaces, and
+          # WITHOUT THE GRANT BELOW every attestation is denied at publish time
+          # while the feeds keep running — which reads downstream as "the
+          # platform was never looking", the exact conclusion the record exists
+          # to make impossible. Coverage cannot be reconstructed afterwards, so a
+          # denial here is not a delay, it is permanent loss.
           { user: "spiffe://kanz.internal/ns/kanz-services/sa/market-ingest"
             permissions: {
-              publish: { allow: ["market.book.snapshot", "market.crypto.bar"] }
+              publish: { allow: ["market.book.snapshot", "market.crypto.bar", "market.crypto.ingestion_coverage"] }
               subscribe: { allow: ["_INBOX.>"] }
             }
           }
