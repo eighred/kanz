@@ -12,8 +12,11 @@
 //
 // ADV IS MEASURABLE. store.Bar carries Volume on every candle, the ingest path
 // writes 1-minute bars for every configured (instrument, venue), and BarQuery
-// reads them point-in-time. Summing volume into complete UTC days and averaging
-// is a real measurement of a real tape.
+// reads them point-in-time. Summing volume into UTC-day buckets and averaging
+// over the days the series TOUCHED is a real measurement of a real tape — of the
+// intervals the series holds, and only those. It is not a measurement of the
+// intervals it does not hold, and the difference is counted rather than assumed:
+// see dailyTotals and ReasonWindowNotWhole (#591).
 //
 // SPREAD IS NOT MEASURABLE HERE. Nothing in this repository persists a bid or an
 // ask. The evidence, checked rather than assumed:
@@ -151,7 +154,13 @@ const (
 	// entirely off them.
 	DefaultWindow = 28 * 24 * time.Hour
 
-	// DefaultMinDays is the fewest COMPLETE days that may produce an ADV.
+	// DefaultMinDays is the fewest days the series must TOUCH to produce an ADV.
+	//
+	// TOUCHED, NOT COMPLETE. dailyTotals counts a day that holds one bar exactly
+	// as it counts a day that holds all 1440, so this floor bounds how many days
+	// the mean is spread over and NOT how much of each of them was observed. The
+	// second question has no answer from the bar series alone; ReasonWindowNotWhole
+	// counts it instead (#591).
 	//
 	// # Why there is a floor at all
 	//
@@ -215,6 +224,34 @@ const (
 	// downstream: LVaR99 will equal VaR99 exactly, and a liquidity-adjusted VaR
 	// that never adjusts is indistinguishable from a perfectly liquid book.
 	ReasonSpreadUnavailable = "spread_unavailable"
+	// ReasonWindowNotWhole: the ADV resolved and the window it was measured over
+	// is MISSING BUCKETS. THE SECOND REASON HERE THAT ACCOMPANIES ok=true (#591).
+	//
+	// ADV is total / days-TOUCHED, and a day holding one bar counts in that
+	// denominator exactly as a day holding all 1440. So a partially covered day
+	// drops volume from the numerator without dropping the day from the
+	// denominator, and the ADV served is a FLOOR. Through DaysToLiquidate that
+	// LENGTHENS the reported horizon — the conservative direction, which is
+	// exactly why it needs a counter: nothing downstream looks wrong.
+	//
+	// A DAY MISSING ENTIRELY CARRIES NO DIRECTION — it leaves the numerator and
+	// the denominator together, so the mean is simply taken over the days that
+	// were seen. This reason does not tell the two cases apart, and its count is
+	// not a size of error.
+	//
+	// ON THE 1m SERIES IT FIRES ON EVERY RESOLUTION, and that is the true
+	// statement rather than a defect in the counter: bars/fold.go emits NO BAR for
+	// a minute in which nothing traded, so a 1-minute window is never PROVABLY
+	// whole. Its value is against a coarse series — under CoarsestFirst with a
+	// populated 1d rollup it is silent, and the rate at which it starts firing is
+	// how a rollup losing days becomes visible before the horizon it feeds moves.
+	//
+	// SILENCE IS NOT A HEALTH SIGNAL. It means "nothing is missing from the
+	// series", never "the feed was up": store/gaps.go carries that ruling, and the
+	// INGESTION-COVERAGE RECORD it names — which states which intervals were
+	// actually observed — is what would make the second half provable. This
+	// package cannot supply it and must not imply it.
+	ReasonWindowNotWhole = "window_not_whole"
 	// ReasonNoBars: the store holds no bars for this instrument, at this venue,
 	// at the LAST resolution in the preference, within the window and known by
 	// asOf. TERMINAL — the instrument is refused. If this fires for EVERY
@@ -230,10 +267,10 @@ const (
 	// must not look the same. Expect one per instrument per call until the
 	// coarse series is populated.
 	ReasonCoarseSeriesEmpty = "coarse_series_empty"
-	// ReasonCoarseSeriesShort: a PREFERRED (coarser) series held bars but covered
-	// fewer than MinDays complete days, so the next resolution was tried. NOT a
-	// refusal. THIS IS THE HALF-BUILT-ROLLUP CASE and it is the reason the
-	// fallback cannot key on emptiness alone: a rollup backfilling from today
+	// ReasonCoarseSeriesShort: a PREFERRED (coarser) series held bars but touched
+	// fewer than MinDays days, so the next resolution was tried. NOT a refusal.
+	// THIS IS THE HALF-BUILT-ROLLUP CASE and it is the reason the fallback cannot
+	// key on emptiness alone: a rollup backfilling from today
 	// forward has three days where the base series has twenty-eight, and honouring
 	// it would refuse the instrument with ReasonInsufficientHistory — a
 	// perfectly-liquid-looking zero horizon caused entirely by a job that is
@@ -241,8 +278,9 @@ const (
 	// observer, so "how far has the rollup backfilled" is readable from the
 	// metric.
 	ReasonCoarseSeriesShort = "coarse_series_short"
-	// ReasonInsufficientHistory: bars exist but cover fewer than MinDays complete
-	// days. The day count is passed to the observer. See DefaultMinDays.
+	// ReasonInsufficientHistory: bars exist but touch fewer than MinDays days. The
+	// day count is passed to the observer. See DefaultMinDays for why the floor is
+	// on days TOUCHED and what that does not say about coverage within them.
 	ReasonInsufficientHistory = "insufficient_history"
 	// ReasonUnusableVolume: a bar exists and its volume cannot be used — nil,
 	// negative, or non-finite after conversion. A stored-data defect rather than
@@ -412,8 +450,8 @@ func WithWindow(d time.Duration) Option {
 	return func(p *Provider) { p.window = d }
 }
 
-// WithMinDays overrides DefaultMinDays — the fewest complete days that may
-// produce an ADV. Non-positive is refused by FromBars: a floor of zero would let
+// WithMinDays overrides DefaultMinDays — the fewest days the series must TOUCH
+// to produce an ADV. Non-positive is refused by FromBars: a floor of zero would let
 // a single day's volume set a liquidation horizon, which is the failure
 // DefaultMinDays exists to prevent.
 func WithMinDays(n int) Option {
@@ -421,24 +459,26 @@ func WithMinDays(n int) Option {
 }
 
 // WithObserver sets the hook invoked whenever a resolution is REFUSED or
-// DEGRADED. reason is one of the Reason* constants; days is the count of
-// complete days found and is meaningful only for ReasonInsufficientHistory, zero
-// otherwise.
+// DEGRADED. reason is one of the Reason* constants; days is the number of days
+// the series TOUCHED and is meaningful for ReasonInsufficientHistory,
+// ReasonCoarseSeriesShort, ReasonSpreadUnavailable and ReasonWindowNotWhole, zero
+// otherwise. IT IS NEVER A COVERAGE FIGURE — see DefaultMinDays.
 //
-// UNLIKE spotsource's observer, ONE REASON HERE FIRES ON SUCCESS —
-// ReasonSpreadUnavailable — because that is the degradation with no downstream
-// symptom at all: the measure is served, it is a plausible number, and it
-// happens to equal VaR99 forever. Nil (the default) means the degradation is
+// UNLIKE spotsource's observer, TWO REASONS HERE FIRE ON SUCCESS —
+// ReasonSpreadUnavailable and ReasonWindowNotWhole — because those are the
+// degradations with no downstream symptom at all: the measure is served, it is a
+// plausible number, and it happens to equal VaR99 forever, or to be a floor over a
+// window nobody can account for. Nil (the default) means the degradation is
 // unobserved. Wire it at the composition root.
 //
-// AT MOST ONE OBSERVATION PER CALL — UNLESS A RESOLUTION PREFERENCE IS IN FORCE.
-// With one series configured (the default) a call reports once or not at all.
-// With Config.ResolutionPreference each series that could not answer reports
-// ReasonCoarseSeriesEmpty or ReasonCoarseSeriesShort before the next is tried,
-// so a call can report up to len(preference) times and still SUCCEED. Read those
-// two reasons as "series skipped", never as "instruments refused" — a counter
-// that conflates them would show every instrument failing on the day the rollup
-// is deployed, when in fact every instrument resolved.
+// A CALL CAN REPORT MORE THAN ONCE, INCLUDING WHEN IT SUCCEEDS. With one series
+// configured a successful call reports up to twice — the spread posture and the
+// window coverage are independent facts about the same answer. With
+// Config.ResolutionPreference each series that could not answer reports
+// ReasonCoarseSeriesEmpty or ReasonCoarseSeriesShort before the next is tried, on
+// top of those. Read those two reasons as "series skipped", never as "instruments
+// refused" — a counter that conflates them would show every instrument failing on
+// the day the rollup is deployed, when in fact every instrument resolved.
 func WithObserver(fn func(instrumentID, reason string, days int)) Option {
 	return func(p *Provider) { p.onResolution = fn }
 }
@@ -598,11 +638,26 @@ func (p *Provider) Liquidity(ctx context.Context, instrumentID string, asOf time
 }
 
 // advOverPreference walks the coarsest-first search order and returns the volume
-// total and complete-day count of the FIRST series that can produce an ADV.
+// total and the TOUCHED-day count of the FIRST series that can produce an ADV.
+//
+// # The count is days touched, and the window's holes are counted beside it
+//
+// dailyTotals cannot tell a day holding one bar from a day holding all of them,
+// and nothing in the bar series can (#591). So this reports the number it
+// actually has — days touched — and fires ReasonWindowNotWhole when the window
+// the ADV was measured over is missing buckets, rather than asserting a
+// completeness it cannot check. store.WindowOf is the one implementation of that
+// question in this estate, and a count written out again here would be a second
+// answer to it — the shape that has already produced seventeen secret() helpers.
+//
+// THE COVERAGE IS COUNTED, NEVER GATED. On the 1m series no window is ever whole,
+// so a gate would refuse every instrument and LiquidationHorizon would report
+// 0.0000 days — an active claim of perfect liquidity, the failure the package doc
+// rules on.
 //
 // # What falls through, and what does not
 //
-// FALLS THROUGH: no bars, and too few complete days. Both mean "this series
+// FALLS THROUGH: no bars, and too few touched days. Both mean "this series
 // cannot answer" — a rollup that does not exist, or one still backfilling — and
 // in both cases the finer series holds the same tape and yields the same ADV.
 // Honouring either would refuse the instrument, and a refused instrument is
@@ -622,13 +677,18 @@ func (p *Provider) Liquidity(ctx context.Context, instrumentID string, asOf time
 // this search existed.
 func (p *Provider) advOverPreference(ctx context.Context, instrumentID string, dayEnd, asOf time.Time) (total float64, days int, ok bool) {
 	last := len(p.resolutions) - 1
+	// The window is the same for every series in the preference — only the
+	// resolution changes — so it is named once and reused by the coverage count
+	// below, where a second expression of the same bounds could drift from the one
+	// the store was actually asked for.
+	from, to := dayEnd.Add(-p.window), dayEnd
 	for i, res := range p.resolutions {
 		bars, err := p.bars.Bars(ctx, store.BarQuery{
 			InstrumentID: instrumentID,
 			Venue:        p.venue,
 			Resolution:   res,
-			From:         dayEnd.Add(-p.window),
-			To:           dayEnd,
+			From:         from,
+			To:           to,
 			AsOf:         asOf,
 		})
 		if err != nil {
@@ -660,6 +720,20 @@ func (p *Provider) advOverPreference(ctx context.Context, instrumentID string, d
 			}
 			p.report(instrumentID, ReasonInsufficientHistory, days)
 			return 0, 0, false
+		}
+		// THE ANSWER CARRIES ITS COVERAGE (#591). The seam is (LiquiditySpec,
+		// bool), so coverage cannot ride ON the value the way v1.InputCoverage
+		// rides on a risk measure; the observer is what this package has, and the
+		// Provider doc already rules that the missing case being a counter is
+		// forced by that seam.
+		//
+		// ok=false from WindowOf, and a window holding no whole bucket at all, both
+		// reach the same report: Whole() is VACUOUSLY true over zero buckets
+		// (store.Window says so), so letting that silence stand would make a window
+		// too short to contain one bar read as fully covered — the defect this is
+		// closing, arriving by the back door.
+		if cov, covOK := store.WindowOf(bars, from, to, res); !covOK || cov.Buckets == 0 || !cov.Whole() {
+			p.report(instrumentID, ReasonWindowNotWhole, days)
 		}
 		return total, days, true
 	}
@@ -705,8 +779,23 @@ func (p *Provider) spreadFor(instrumentID string) (spread float64, assumed, ok b
 	return 0, false, false
 }
 
-// dailyTotals folds the bar series into complete-UTC-day volume totals and
-// returns their sum and count.
+// dailyTotals folds the bar series into UTC-day volume totals and returns their
+// sum and the number of days the series TOUCHED — days holding at least one bar.
+//
+// TOUCHED IS NOT COMPLETE, AND THIS FUNCTION CANNOT TELL THEM APART (#591). A day
+// holding a single 1-minute bar counts here exactly as a day holding all 1440, so
+// ADV = total/days is UNDERSTATED whenever a day is partially covered: the absent
+// minutes leave the numerator and the day stays in the denominator. Through
+// DaysToLiquidate that lengthens the reported liquidation horizon, so the error
+// runs the CONSERVATIVE way — a wrong measure, not an unsafe one. Its caller
+// counts the shortfall as ReasonWindowNotWhole rather than claiming it away.
+//
+// REFUSING PARTIAL DAYS WOULD BE THE UNSAFE REPAIR, not the fix. bars/fold.go
+// emits NO BAR for a minute in which nothing traded, so on the 1m series no real
+// day is ever whole; a completeness gate would refuse every instrument,
+// liquidity.Profile would drop every position, and LiquidationHorizon would report
+// 0.0000 days — an ACTIVE claim of perfect liquidity, which is the failure this
+// package's doc rules on at length.
 //
 // THE DAY IS THE UNIT, AND THAT IS THE WHOLE POINT OF THIS FUNCTION. ADV is
 // AVERAGE DAILY volume; the stored series is 1-minute bars. Averaging bar

@@ -49,8 +49,25 @@ func (f *fakeBars) Bars(_ context.Context, q store.BarQuery) ([]store.Bar, error
 	return f.bars, f.err
 }
 
-func bar(close, volume int64) store.Bar {
-	return store.Bar{Close: d(close, 0), Volume: d(volume, 0)}
+// barAt is a 1-minute candle for the bucket `minute` minutes after windowFrom.
+//
+// THE BUCKET AND THE RESOLUTION ARE REAL, and that is not decoration since #591:
+// coverage is read off them. A fixture leaving them zero describes a window whose
+// every bucket is MISSING, so a test named for something else would quietly be a
+// test of the gapped path.
+func barAt(minute int, close, volume int64) store.Bar {
+	return store.Bar{
+		Resolution:  store.Resolution1m,
+		BucketStart: windowFrom.Add(time.Duration(minute) * time.Minute),
+		Close:       d(close, 0),
+		Volume:      d(volume, 0),
+	}
+}
+
+// wholeWindow is all three 1-minute buckets of [windowFrom, windowTo), each at
+// close/volume — the fully covered case.
+func wholeWindow(close, volume int64) []store.Bar {
+	return []store.Bar{barAt(0, close, volume), barAt(1, close, volume), barAt(2, close, volume)}
 }
 
 func record(t *testing.T, fillPrice int64, withWindow bool) []byte {
@@ -89,7 +106,7 @@ func env() *envelopepb.Envelope {
 // ABOVE what everyone else did. Shortfall alone calls this a win.
 func TestSlippage_CatchesAnExecutionThatBeatArrivalButLostToTheMarket(t *testing.T) {
 	// VWAP = (100·1 + 88·9)/10 = 892/10 = 89.2 ... use flat 90 for a clean number.
-	bars := &fakeBars{bars: []store.Bar{bar(90, 5), bar(90, 5)}}
+	bars := &fakeBars{bars: wholeWindow(90, 5)}
 	w, reg := newWatch(t, bars)
 
 	if err := w.Handle(context.Background(), env(), record(t, 95, true)); err != nil {
@@ -111,7 +128,7 @@ func TestSlippage_CatchesAnExecutionThatBeatArrivalButLostToTheMarket(t *testing
 // order's working interval on ITS instrument and venue — a join against another
 // venue's series would compare an execution to a market it never touched.
 func TestSlippage_QueriesTheOrdersOwnWindow(t *testing.T) {
-	bars := &fakeBars{bars: []store.Bar{bar(90, 10)}}
+	bars := &fakeBars{bars: wholeWindow(90, 10)}
 	w, _ := newWatch(t, bars)
 
 	if err := w.Handle(context.Background(), env(), record(t, 95, true)); err != nil {
@@ -138,7 +155,7 @@ func TestSlippage_QueriesTheOrdersOwnWindow(t *testing.T) {
 // century. And scoring it zero would report an unbenchmarked execution as one
 // that matched the market exactly.
 func TestSlippage_NoWindowIsCountedNotScoredZero(t *testing.T) {
-	bars := &fakeBars{bars: []store.Bar{bar(90, 10)}}
+	bars := &fakeBars{bars: wholeWindow(90, 10)}
 	w, reg := newWatch(t, bars)
 
 	if err := w.Handle(context.Background(), env(), record(t, 95, false)); err != nil {
@@ -157,7 +174,7 @@ func TestSlippage_NoWindowIsCountedNotScoredZero(t *testing.T) {
 // participant; inventing one would compare an execution to a market that was not
 // there.
 func TestSlippage_AZeroVolumeWindowIsUnjoinable(t *testing.T) {
-	bars := &fakeBars{bars: []store.Bar{bar(90, 0)}}
+	bars := &fakeBars{bars: wholeWindow(90, 0)}
 	w, reg := newWatch(t, bars)
 
 	if err := w.Handle(context.Background(), env(), record(t, 95, true)); err != nil {
@@ -268,7 +285,7 @@ func labelled(labels []*dto.LabelPair, name, value string) bool {
 // order sent whole, and a venue's VWAP slippage blends two different execution
 // strategies into one number that describes neither.
 func TestSlippage_SlicedAndWholeExecutionsAreLabelledApart(t *testing.T) {
-	bars := &fakeBars{bars: []store.Bar{bar(90, 5), bar(90, 5)}}
+	bars := &fakeBars{bars: wholeWindow(90, 5)}
 	w, reg := newWatch(t, bars)
 
 	// An ordinary order, sent whole.
@@ -317,6 +334,120 @@ func labelledHistogram(t *testing.T, reg *prometheus.Registry, venue, worked str
 		for _, m := range f.GetMetric() {
 			if labelled(m.GetLabel(), "venue", venue) && labelled(m.GetLabel(), "worked", worked) &&
 				m.GetHistogram() != nil {
+				return m.GetHistogram().GetSampleCount()
+			}
+		}
+	}
+	return 0
+}
+
+// ===== THE BENCHMARK SAYS HOW MUCH OF ITS WINDOW IT SAW (#591) =====
+
+// THE COVERED CASE IS LABELLED COVERED, which is what makes `partial` worth
+// reading. Three minutes of window, three bars, nothing missing.
+func TestSlippage_AWholeWindowIsLabelledWhole(t *testing.T) {
+	bars := &fakeBars{bars: wholeWindow(90, 5)}
+	w, reg := newWatch(t, bars)
+
+	if err := w.Handle(context.Background(), env(), record(t, 95, true)); err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	if got := coverageCount(t, reg, "XBIN", "whole"); got != 1 {
+		t.Errorf("coverage=whole observations = %d, want 1", got)
+	}
+	if got := coverageCount(t, reg, "XBIN", "partial"); got != 0 {
+		t.Errorf("coverage=partial observations = %d, want 0", got)
+	}
+}
+
+// THE DEFECT THIS CLOSES. bars/fold.go emits NO BAR for a minute in which nothing
+// traded, so two thirds of this window are absent — and the measure still
+// produces a number, because the benchmark is the VWAP of the third that
+// survived. unjoinable{reason="no_volume"} never saw it: that only ever fired on
+// a window that was ENTIRELY empty.
+//
+// The figure is not suppressed — a post-trade measurement blanked on every quiet
+// instrument is worth nothing, and on the 1m series quiet is normal. It is
+// LABELLED, so a query cannot reach the slippage without reaching what it was
+// computed over.
+func TestSlippage_APartialWindowIsLabelledRatherThanReadAsWhole(t *testing.T) {
+	// Only the 11:59 bucket has a bar. 12:00 and 12:01 are gone.
+	bars := &fakeBars{bars: []store.Bar{barAt(0, 90, 10)}}
+	w, reg := newWatch(t, bars)
+
+	if err := w.Handle(context.Background(), env(), record(t, 95, true)); err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	if got := coverageCount(t, reg, "XBIN", "partial"); got != 1 {
+		t.Fatalf("coverage=partial observations = %d, want 1 — a benchmark over one third of "+
+			"its window was published as if the window were whole", got)
+	}
+	if got := coverageCount(t, reg, "XBIN", "whole"); got != 0 {
+		t.Errorf("coverage=whole observations = %d, want 0", got)
+	}
+	// AND THE NUMBER IS STILL THERE. Refusing it would blank TCA on every quiet
+	// instrument, which is the repair that costs more than the defect.
+	if _, sum := histogram(t, reg, "kanz_execution_vwap_slippage_bps", "XBIN"); sum < 555 || sum > 556 {
+		t.Errorf("slippage = %v bps, want the ≈555.6 measured against the surviving minute — "+
+			"the label qualifies the figure, it does not replace it", sum)
+	}
+}
+
+// A WINDOW SHORTER THAN ONE BAR IS NOT A COVERED WINDOW. store.Window.Whole() is
+// VACUOUSLY true over zero buckets and says so itself, so inheriting that answer
+// would publish the least-covered case as the best-covered one.
+//
+// IT IS REACHABLE, not defensive: BarQuery bounds From/To on BucketStart —
+// inclusive/exclusive — so a fill worked from 12:00:00 to 12:00:30 selects the
+// 12:00 bar while containing no whole bucket, and the benchmark comes from a
+// minute that outlasts the window it is meant to describe.
+func TestSlippage_AWindowShorterThanABarIsNotLabelledWhole(t *testing.T) {
+	minute := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
+	bars := &fakeBars{bars: []store.Bar{{
+		Resolution: store.Resolution1m, BucketStart: minute,
+		Close: d(90, 0), Volume: d(10, 0),
+	}}}
+	w, reg := newWatch(t, bars)
+
+	rec := recordOver(t, 95, minute, minute.Add(30*time.Second))
+	if err := w.Handle(context.Background(), env(), rec); err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	if got := coverageCount(t, reg, "XBIN", "whole"); got != 0 {
+		t.Fatalf("coverage=whole observations = %d, want 0 — a window holding no complete "+
+			"bucket was published as fully covered", got)
+	}
+	if got := coverageCount(t, reg, "XBIN", "shorter_than_a_bar"); got != 1 {
+		t.Errorf("coverage=shorter_than_a_bar observations = %d, want 1", got)
+	}
+}
+
+// recordOver is a cost record worked over an arbitrary window.
+func recordOver(t *testing.T, fillPrice int64, from, to time.Time) []byte {
+	t.Helper()
+	r := &orderpb.TransactionCostRecorded{
+		OrderId: "o-2", FillId: "f-3", InstrumentId: "BTC-USD", Venue: "XBIN",
+		Side: orderpb.Side_SIDE_BUY, FillPrice: d(fillPrice, 0),
+		ArrivalPrice: d(100, 0), MeasuredAt: timestamppb.New(measuredAt),
+		ArrivalAt: timestamppb.New(from), ExecutedAt: timestamppb.New(to),
+	}
+	b, err := proto.Marshal(r)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	return b
+}
+
+// coverageCount reads the slippage observations carrying one coverage label.
+func coverageCount(t *testing.T, reg *prometheus.Registry, venue, coverage string) uint64 {
+	t.Helper()
+	for _, f := range gather(t, reg) {
+		if f.GetName() != "kanz_execution_vwap_slippage_bps" {
+			continue
+		}
+		for _, m := range f.GetMetric() {
+			if labelled(m.GetLabel(), "venue", venue) &&
+				labelled(m.GetLabel(), "coverage", coverage) && m.GetHistogram() != nil {
 				return m.GetHistogram().GetSampleCount()
 			}
 		}
