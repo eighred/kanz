@@ -470,6 +470,17 @@ func runConsumers(ctx context.Context, cfg config.Config, readiness *server.Read
 			"population whose orders that rule will refuse.",
 	}, func() float64 { _, live := margins.Stats(); return float64(live) }))
 
+	// THE CLASSIFIER SEAM IS NIL AND THAT IS A DECISION, not an oversight
+	// (#640). No production compliance.Classifier exists — the reference-data
+	// source it would read is a schema with no writer — and inventing a sector
+	// or issuer map to fill it would make a control confidently wrong instead of
+	// merely unarmed. What it must not be is QUIET: a mandate rule naming the
+	// SECTOR, ISSUER or ASSET_CLASS dimension is now REFUSED with a named reason
+	// (compliance.unresolvedDimension) rather than passed. That is only
+	// reachable for a portfolio whose mandate DECLARES such a rule, so nothing
+	// trading today changes; before it, a book 100% in one sector was admitted
+	// under a 10% cap on that sector and the audit trail recorded a pass.
+	// test/arch/no_nil_classifier_seam_test.go keeps this nil tracked.
 	preTrade := comp.NewPreTradeGate(
 		comp.NewEngine(nil), compliance.NewBookSource(book, cash, risk), mandateReg, nil, nil, logger,
 		comp.WithRequireMandate(cfg.RequireMandate),

@@ -363,6 +363,13 @@ func TestErrorMapping(t *testing.T) {
 		// between identical calls.
 		{"not_owned", v1.ErrPortfolioNotOwned, codes.FailedPrecondition},
 		{"not_owned_wrapped", fmt.Errorf("%w: PF1 is held by replica risk-engine-2", v1.ErrPortfolioNotOwned), codes.FailedPrecondition},
+		// #640: a scenario whose sector shocks cannot resolve. NOT Internal —
+		// the default arm would bury "no instrument classifier is wired" under
+		// the code reserved for bugs, where a caller learns to retry it. The
+		// engine always wraps this sentinel with the reason and a bounded
+		// sample, so the wrapped form is the only one that ships.
+		{"scenario_unresolvable", v1.ErrScenarioUnresolvable, codes.FailedPrecondition},
+		{"scenario_unresolvable_wrapped", fmt.Errorf("%w (0 of 1 resolved; reason(s): no_classifier)", v1.ErrScenarioUnresolvable), codes.FailedPrecondition},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

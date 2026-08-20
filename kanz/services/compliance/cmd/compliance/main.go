@@ -203,6 +203,11 @@ func runConsumers(ctx context.Context, cfg config.Config, readiness *server.Read
 	// COMP-01e: decisions to the audit stream. COMP-01d: the post-trade monitor.
 	recorder := audit.NewBusRecorder(producer, logger)
 	breachEmitter := monitor.NewEmitter(producer)
+	// The classifier is nil for the reason the OMS gate's is — see the comment
+	// at its NewPreTradeGate call. No production compliance.Classifier exists,
+	// and a SECTOR/ISSUER/ASSET_CLASS rule the monitor cannot resolve now emits a
+	// violation naming that, rather than re-evaluating a live book and reporting
+	// it clean (#640).
 	mon := monitor.NewMonitor(comp.NewEngine(nil), mandateReg, nil /*classifier*/, breachEmitter, recorder, logger)
 
 	consumer, err := bus.NewConsumer(client, bus.WithBusMetrics(busMetrics), bus.WithDLQ(client))

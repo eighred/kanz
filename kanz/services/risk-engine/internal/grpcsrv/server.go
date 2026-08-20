@@ -395,6 +395,18 @@ func mapError(err error) error {
 		return status.Error(codes.FailedPrecondition, err.Error())
 	case errors.Is(err, v1.ErrPortfolioNotFound):
 		return status.Error(codes.NotFound, err.Error())
+	case errors.Is(err, v1.ErrScenarioUnresolvable):
+		// FailedPrecondition, alongside ErrPortfolioNotOwned and for the same
+		// kind of reason: the request is well-formed and the ESTATE cannot serve
+		// it. NOT Internal — this is a contract outcome a client should be able
+		// to branch on, and burying it in Internal would put "no instrument
+		// classifier is wired" behind the code reserved for bugs, where a caller
+		// learns to retry it. NOT OK-with-empty-measures either, which is what
+		// the engine used to do (#640): a scenario whose shock never landed
+		// returns the current book, and returning that with a 200 is the silence
+		// this refusal exists to break. The message names the reason and a
+		// bounded sample of the holdings.
+		return status.Error(codes.FailedPrecondition, err.Error())
 	case errors.Is(err, v1.ErrInvalidRequest):
 		return status.Error(codes.InvalidArgument, err.Error())
 	case errors.Is(err, context.Canceled):

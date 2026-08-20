@@ -4,6 +4,8 @@ import (
 	"context"
 	"math/big"
 	"sort"
+	"strconv"
+	"strings"
 
 	compliancepb "github.com/eighred/kanz/kanz-schemas-go/compliance/v1"
 )
@@ -17,6 +19,12 @@ import (
 // exposure must not exceed max_weight. With an empty bucket the cap applies to
 // every bucket on the dimension; the first (lexicographically) breaching bucket
 // is reported.
+//
+// A LIMIT ON A DIMENSION THE PLATFORM CANNOT RESOLVE IS A REFUSAL, not a pass —
+// see unresolvedDimension. Before that check existed, "no more than 10% in TECH"
+// looked up an empty bucket map, found nothing, took the not-held branch and
+// returned nil: a book 100% in technology was ADMITTED under a 10% technology
+// cap, and the audit trail recorded a check that ran and approved (#640).
 func ConcentrationRule(c *Candidate, rule *compliancepb.Rule) *compliancepb.Violation {
 	cl := rule.GetConcentration()
 	if cl == nil {
@@ -25,6 +33,9 @@ func ConcentrationRule(c *Candidate, rule *compliancepb.Rule) *compliancepb.Viol
 	total := totalGross(c)
 	if total.Sign() == 0 {
 		return nil // empty book: nothing is concentrated
+	}
+	if v := unresolvedDimension(c, "concentration", cl.GetDimension()); v != nil {
+		return v
 	}
 	max := ratFromDecimal(cl.GetMaxWeight())
 	buckets := grossByDimension(c, cl.GetDimension())
@@ -63,10 +74,20 @@ func ConcentrationRule(c *Candidate, rule *compliancepb.Rule) *compliancepb.Viol
 // RestrictionRule enforces a RestrictionList: in DENY mode a held bucket in the
 // list breaches; in ALLOW_ONLY mode a held bucket NOT in the list breaches; an
 // unspecified mode denies any holding by default.
+//
+// A DENY LIST ON AN UNRESOLVABLE DIMENSION IS A REFUSAL, not a pass — see
+// unresolvedDimension. "Hold nothing in TOBACCO" against an unresolved sector
+// compared "TOBACCO" with the empty bucket every holding fell into, matched
+// nothing, and admitted the book (#640). The ALLOW_ONLY half failed the other
+// way — the empty bucket was never on the allow list, so every portfolio
+// breached — and a rule that is wrong in both directions is not a rule.
 func RestrictionRule(c *Candidate, rule *compliancepb.Rule) *compliancepb.Violation {
 	rl := rule.GetRestriction()
 	if rl == nil {
 		return paramsMismatch("restriction")
+	}
+	if v := unresolvedDimension(c, "restriction", rl.GetDimension()); v != nil {
+		return v
 	}
 	set := toSet(rl.GetValues())
 	mode := rl.GetMode()
@@ -97,14 +118,33 @@ func RestrictionRule(c *Candidate, rule *compliancepb.Rule) *compliancepb.Violat
 }
 
 // IssuerExclusionRule breaches when the book holds any instrument whose issuer
-// is on the exclusion list. An instrument the classifier cannot identify
-// (empty issuer) does not match a listed issuer — you cannot exclude what you
-// cannot name; unclassified holdings are surfaced separately, not silently
-// blocked here.
+// is on the exclusion list.
+//
+// A HOLDING WHOSE ISSUER THE PLATFORM CANNOT NAME IS A REFUSAL — see
+// unresolvedDimension. This doc used to say the opposite: that an unidentifiable
+// instrument "does not match a listed issuer — you cannot exclude what you
+// cannot name", and that "unclassified holdings are surfaced separately, not
+// silently blocked here". The first half is true and irrelevant; the second half
+// was never true. NOTHING SURFACED THEM. No classifier is constructed at any
+// composition root, so every holding on this estate had an empty issuer, no
+// exclusion could ever match, and the rule reported PASS for a book that might
+// have been entirely in the excluded issuer (#640).
+//
+// "You cannot exclude what you cannot name" is an argument for refusing to
+// answer, not for answering no. The honest reading of a tobacco exclusion
+// against a book of unidentifiable issuers is that the mandate cannot be
+// checked — which is what this now says, under the rule's own severity, in the
+// same shape LeverageRule uses for an absent NAV.
 func IssuerExclusionRule(c *Candidate, rule *compliancepb.Rule) *compliancepb.Violation {
 	ie := rule.GetIssuerExclusion()
 	if ie == nil {
 		return paramsMismatch("issuer_exclusion")
+	}
+	// The dimension is implicit in the rule type: an issuer exclusion is an
+	// ISSUER-dimension control, so it is unresolvable under exactly the same
+	// conditions a DIMENSION_ISSUER restriction is.
+	if v := unresolvedDimension(c, "issuer exclusion", compliancepb.Dimension_DIMENSION_ISSUER); v != nil {
+		return v
 	}
 	excluded := toSet(ie.GetIssuerIds())
 	for _, pos := range heldPositions(c) {
@@ -280,6 +320,110 @@ func bucketKey(c *Candidate, dim compliancepb.Dimension, pos Position) string {
 		return ""
 	}
 }
+
+// classifiedDimension reports whether a dimension can ONLY be answered through
+// the Classifier. INSTRUMENT and CURRENCY come off the Position itself, so they
+// are unaffected by a missing classifier and must not be refused.
+func classifiedDimension(dim compliancepb.Dimension) bool {
+	switch dim {
+	case compliancepb.Dimension_DIMENSION_ISSUER,
+		compliancepb.Dimension_DIMENSION_SECTOR,
+		compliancepb.Dimension_DIMENSION_ASSET_CLASS:
+		return true
+	default:
+		return false
+	}
+}
+
+// unresolvedDimension is the deny-by-default violation for a rule whose
+// dimension the platform cannot resolve for every holding. It returns nil when
+// the dimension needs no classifier, when the book holds nothing, or when every
+// held position resolves — so a rule that CAN be evaluated is evaluated exactly
+// as before.
+//
+// # It is the same shape as an absent NAV or an unknown risk measure
+//
+// LeverageRule refuses without a NAV, BuyingPowerRule without cash, and
+// RiskLimitRule without the measure it names. This is the fourth instance of one
+// rule: A CONTROL WHOSE INPUT THE PLATFORM CANNOT ESTABLISH REFUSES. The three
+// classified dimensions had no such check, so they were the ones that answered
+// PASS instead (#640).
+//
+// # Why an unresolvable rule is not simply skipped
+//
+// Skipping would put "no rule breached" and "the rule could not be evaluated"
+// behind the same observable outcome — an ALLOWED order and a PASS in the audit
+// trail. The whole reason this platform records a compliance decision is so
+// somebody can later ask what was checked; a decision that says a sector cap
+// passed, when nothing on this estate can resolve a sector, is a worse artifact
+// than no decision at all.
+//
+// # Two causes, told apart, because the operator's next action differs
+//
+// NO CLASSIFIER AT ALL means the deployment has no instrument reference source
+// wired — nobody can fix that per-instrument, and the fix is a composition-root
+// change. A classifier that is present but does not know THESE instruments is a
+// reference-data gap, and the evidence names the holdings so somebody can go and
+// load them. Collapsing them would send an operator to the wrong place.
+//
+// # Severity is the rule's own
+//
+// The engine stamps violationSeverity(rule), so an advisory (WARN) rule that
+// cannot be evaluated is an advisory failure rather than a rejection — the same
+// treatment every other cannot-be-verified violation gets. Deviating here would
+// make this rule family the one place where a mandate's declared severity does
+// not hold.
+func unresolvedDimension(c *Candidate, what string, dim compliancepb.Dimension) *compliancepb.Violation {
+	if !classifiedDimension(dim) {
+		return nil
+	}
+	held := heldPositions(c)
+	if len(held) == 0 {
+		return nil // nothing held: no holding's dimension is in question
+	}
+	if c.Classifier == nil {
+		return &compliancepb.Violation{
+			Message: what + " cannot be verified: no instrument classifier is wired, so this dimension cannot be resolved for any holding",
+			Evidence: map[string]string{
+				"dimension":  dim.String(),
+				"classifier": "unavailable",
+				"holdings":   strconv.Itoa(len(held)),
+			},
+		}
+	}
+	var unresolved []string
+	for _, pos := range held {
+		if bucketKey(c, dim, pos) == "" {
+			unresolved = append(unresolved, pos.InstrumentID)
+		}
+	}
+	if len(unresolved) == 0 {
+		return nil
+	}
+	// A BOUNDED SAMPLE, for v1.InputCoverage's reason: on a book whose reference
+	// data was never loaded every holding is unresolved, and putting the whole
+	// book in a violation would put it in the audit stream too. The count carries
+	// the magnitude; the sample is what lets somebody go and look.
+	sample := unresolved
+	if len(sample) > maxUnresolvedSample {
+		sample = sample[:maxUnresolvedSample]
+	}
+	return &compliancepb.Violation{
+		Message: what + " cannot be verified: the classifier does not resolve this dimension for every holding",
+		Evidence: map[string]string{
+			"dimension":              dim.String(),
+			"classifier":             "present",
+			"holdings":               strconv.Itoa(len(held)),
+			"unresolved":             strconv.Itoa(len(unresolved)),
+			"unresolved_instruments": strings.Join(sample, ","),
+		},
+	}
+}
+
+// maxUnresolvedSample bounds the instrument list in an unresolvedDimension
+// violation. Mirrors v1.MaxInputExclusions in intent — one bound for the whole
+// rule family so a violation's size cannot depend on which dimension is dark.
+const maxUnresolvedSample = 32
 
 // classify resolves a position's reference attributes via the candidate's
 // classifier (empty Attributes when none is set or the instrument is unknown).
