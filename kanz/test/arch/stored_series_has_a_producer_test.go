@@ -222,6 +222,17 @@ var storedSeriesWithoutAProducerExempt = map[string]string{
 		"decision NOT to label them terms.KindSwap — a perpetual swap is not the fixed/floating " +
 		"leg structure the swap variant of the oneof describes, and storing one under that label " +
 		"would put a thing ChainAsOf never finds under a name that says it should.",
+	"internal/marketdata/terms.KindStructured": storedSeriesDarkTermsKind + "KindStructured is " +
+		"the newest and the one whose reason is narrowest (#572). The ruling gave the family a " +
+		"schema — a `structured` case in the ContractTerms oneof — a Kind, a reader " +
+		"(internal/risk/termsource) and a registered measure band, so everything a securitization " +
+		"needs EXCEPT the thing that puts a row in the table. That gap is not this family's: " +
+		"terms.Postgres.Put has no non-test caller at all, and the only Record producer in the " +
+		"module, internal/marketdata/termsload, is itself dark for having no importer and labels " +
+		"exactly two kinds (okx.go:262-268). So this entry retires with the same contract-terms " +
+		"loader that retires KindBond, not before, and NOT by adding a helper that derives the " +
+		"label — one was written for #572 and DELETED, because a producer nothing calls made this " +
+		"guard read KindBond and KindSwap as live and would have silenced the two entries above.",
 	"services/audit/internal/report.FormatCSV": "NOT A DEFECT — a limit of the rule, recorded so " +
 		"the next reader does not go looking for a bug. FormatCSV is reached in production through " +
 		"a CONVERSION rather than the constant: services/audit/internal/server/server.go:292 does " +

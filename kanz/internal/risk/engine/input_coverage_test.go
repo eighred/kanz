@@ -35,7 +35,7 @@ func (unknownTerms) BondTerms(context.Context, string, time.Time) (compute.BondS
 type knownNonBond struct{}
 
 func (knownNonBond) BondTerms(context.Context, string, time.Time) (compute.BondSpec, compute.TermsResolution) {
-	return compute.BondSpec{}, compute.TermsNotABond
+	return compute.BondSpec{}, compute.TermsOtherVariant
 }
 
 type noCurve struct{}

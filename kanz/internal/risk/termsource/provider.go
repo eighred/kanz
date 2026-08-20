@@ -221,11 +221,12 @@ func (p *Provider) BondTerms(ctx context.Context, instrumentID string, asOf time
 	}
 	bond := rec.Terms.GetBond()
 	if bond == nil {
-		// A record EXISTS and carries an option, a swap or a future. This is the
+		// A record EXISTS and carries an option, a swap, a future or a
+		// securitization. This is the
 		// one answer that licenses the FI measures to leave the position out
 		// without flagging the response, so it must not be reachable by any path
 		// that merely failed to find something.
-		return compute.BondSpec{}, compute.TermsNotABond
+		return compute.BondSpec{}, compute.TermsOtherVariant
 	}
 	spec, ok := toBondSpec(bond)
 	if !ok {

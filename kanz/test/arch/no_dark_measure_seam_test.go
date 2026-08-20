@@ -48,7 +48,16 @@ import (
 //	                      declares ServesSpread()=false and compute declines it.
 //	RegisterGreeks        Delta, Gamma, Vega, Theta, Rho              0 callers
 //	RegisterXVA           CVA, DVA, FVA                               0 callers
-//	RegisterStructuredRisk
+//	RegisterStructuredRisk StructDuration, StructConvexity, StructWAL   WIRED
+//	                      2026-08-20 (#572). Its exemption said a StructuredProvider
+//	                      "with no production implementation" was missing, and that
+//	                      was true for a reason no other entry had: the SCHEMA could
+//	                      not describe a securitization at all — reference.v1.
+//	                      StructuredTerms existed and no ContractTerms oneof case,
+//	                      no terms.Kind and no Go code reached it, so a provider
+//	                      could not have been written. #572 ruled on the schema, and
+//	                      the dead-entry arm retired this entry on the commit that
+//	                      added the caller.
 //	NewRevaluer / NewBondRevaluer / NewLiveModelProvider
 //
 // The risk engine registers DefaultRegistry plus varmodel.Register — EIGHT
@@ -118,8 +127,6 @@ var darkSeamExempt = map[string]string{
 		"and is itself dark for want of a live CDS quote source (#113, #203), so this cannot be wired " +
 		"to anything real without synthesising counterparty spreads — which #345 rules out " +
 		"explicitly: a SUCCESSFUL calibration of invented quotes is worse than a failed one.",
-	"internal/risk/compute.RegisterStructuredRisk": "#509 — structured-product risk. Needs a " +
-		"StructuredProvider (deal terms + prepayment assumptions) with no production implementation.",
 	"internal/risk/compute.NewRevaluer": "#509 — full-revaluation scenario shocks, as opposed to " +
 		"the sensitivity approximation. Takes GreeksProviders, so it is blocked on exactly what " +
 		"RegisterGreeks is blocked on.",
