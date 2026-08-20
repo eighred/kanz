@@ -146,8 +146,13 @@ var darkPackageExempt = map[string]string{
 		"announcement stream is the obvious wrong fix, on the #345 ground this file already quotes " +
 		"for XVA: a SUCCESSFUL fold of invented corporate actions is worse than no fold, because the " +
 		"book is then confidently wrong rather than visibly untouched. So today no split, dividend, " +
-		"merger or coupon adjusts the book, and nav.go's corporate_action attribution component " +
-		"reading 0 is the only thing that says so.",
+		"merger or coupon adjusts the book — and the ABSENCE IS NOW STATED rather than silent: the " +
+		"accounting composition root seeds kanz_accounting_entry_source_wired{type=\"corporate_action\"} " +
+		"at 0 with a startup WARN naming the missing feed (services/accounting/cmd/accounting/" +
+		"entry_source_posture.go). That makes 'this deployment does not process corporate actions' " +
+		"distinguishable from 'it does, and none occurred', which nav.go's corporate_action " +
+		"attribution component cannot do — it is a RESIDUAL, so a 0 there means neither. The " +
+		"posture is not the wiring, so this entry stays until a feed exists.",
 	"services/oms/internal/posttrade": "#589 — the POST-01/PARITY-04 post-trade plane: confirmation " +
 		"matching, settlement instruction generation, T+N tracking and business-day fail aging. THE " +
 		"ESTATE FOR IT IS ALREADY PROVISIONED and that is the sharp part — infra/nats/" +

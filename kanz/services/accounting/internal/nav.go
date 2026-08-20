@@ -209,6 +209,15 @@ func Attribute(prior, current NAV, periodEntries []*ledger.Event, fx *big.Rat) N
 
 	// corporate-action income = total cash change not explained by trades or
 	// external flows, plus accrued-income earned in the period.
+	//
+	// IT IS A RESIDUAL, AND A 0 HERE MEANS NEITHER "no corporate actions occurred"
+	// NOR "none were ingested" (#588). Nothing in this platform publishes an
+	// accounting.v1.CorporateAction, so no EntryCorporateAction has ever reached
+	// this book and this component can only be the accrual term plus rounding —
+	// which reads exactly like a quiet quarter. The signal that DOES tell them
+	// apart is the composition root's posture gauge,
+	// kanz_accounting_entry_source_wired{type="corporate_action"}; do not read
+	// this number as evidence that a split or dividend was processed.
 	deltaCash := new(big.Rat).Sub(current.Cash, prior.Cash)
 	corpCash := new(big.Rat).Sub(deltaCash, tradeCash)
 	corpCash.Sub(corpCash, external)
