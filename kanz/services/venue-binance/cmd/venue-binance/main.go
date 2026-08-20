@@ -44,6 +44,7 @@ import (
 	"github.com/eighred/kanz/internal/venueadapter/balancerecon"
 	"github.com/eighred/kanz/internal/venueadapter/orderview"
 	"github.com/eighred/kanz/internal/venueadapter/server"
+	"github.com/eighred/kanz/internal/venuemargin"
 	"github.com/eighred/kanz/internal/version"
 	"github.com/eighred/kanz/pkg/bus"
 	"github.com/eighred/kanz/pkg/observability"
@@ -135,7 +136,8 @@ func serve(cfg config.Config) error {
 	}()
 
 	balanceReconConfigured := balancerecon.NewGauge("binance")
-	obs.Registry.MustRegister(orderViewDurable, balanceReconConfigured)
+	marginSourceConfigured := venuemargin.NewGauge("binance")
+	obs.Registry.MustRegister(orderViewDurable, balanceReconConfigured, marginSourceConfigured)
 
 	// The adapter's own order view — the state its workers read after the process
 	// split cut them off from the OMS store.
@@ -296,9 +298,30 @@ func serve(cfg config.Config) error {
 		// comparing against zero — which would break on every asset the exchange
 		// holds and teach an operator to ignore the layer.
 		Balances: balancerecon.Announce(balanceReconConfigured, logger, "binance", expectedBalances),
-		Closes:   closes,
-		Tenant:   cfg.Tenant,
-		Logger:   logger,
+		// NO MARGIN SOURCE ON THIS VENUE, AND THAT IS A FINDING RATHER THAN A GAP
+		// (#408, control 1). This adapter is SPOT: every signed call it makes is
+		// /api/v3, and GET /api/v3/account reports balances and commission rates —
+		// no maintenance margin, no margin ratio, no liquidation price. There is
+		// no field on that response this could honestly read.
+		//
+		// SO IT READS NOTHING, RATHER THAN COMPUTING SOMETHING. The tempting
+		// repair is to derive a margin figure from Kanz's own positions and
+		// Binance's published tier table. That is exactly what #408 rules out: a
+		// reconstruction of the exchange's margin maths IS the stale book whose
+		// failure mode is "the exchange sold our collateral while we were reading
+		// it", and on every dashboard it would be indistinguishable from a number
+		// the exchange had actually confirmed.
+		//
+		// Announce sets kanz_venue_margin_source_configured{venue="binance"} to 0
+		// and warns at startup, so the silence on this venue's margin subject is
+		// attributable rather than ambiguous. Reading Binance's margin state means
+		// a margin-capable endpoint (the cross-margin or futures account API) and
+		// the credentials to call it — neither exists here, and #70 holds the
+		// credentials half.
+		Margin: venuemargin.Announce(marginSourceConfigured, logger, "binance", nil),
+		Closes: closes,
+		Tenant: cfg.Tenant,
+		Logger: logger,
 	})
 
 	// WHOSE MONEY DOES THIS ADAPTER SPEND? (SOV-02a)

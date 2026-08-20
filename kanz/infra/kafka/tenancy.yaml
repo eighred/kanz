@@ -90,6 +90,13 @@ data:
     # exactly the tenants that took it.
     optimization.proposal      3   delete   2592000000  yes
     accounting.balance         6   delete   2592000000  yes
+    # accounting.margin (#408): mirrors infra/kafka/topics-job.yaml. The
+    # exchange's own margin state per venue account — the only record, after a
+    # liquidation, of what the venue said our collateral requirement was and when
+    # it said it. A tenant whose margin observations hit a topic that does not
+    # exist loses exactly that evidence, for exactly the tenants trading on
+    # margin.
+    accounting.margin          6   delete   2592000000  yes
     settlement.instruction     3   delete   2592000000  yes
     compliance.breach          3   delete   2592000000  yes
     risk.portfolio             6   delete   2592000000  yes

@@ -29,6 +29,12 @@ type (
 	ExpectedOrders = execution.ExpectedOrders
 	// ExpectedBalances is the per-asset balance the reconciler compares against.
 	ExpectedBalances = execution.ExpectedBalances
+	// The venue-margin seam (#408). Satisfied by this connector's own signed REST
+	// client — margin state is a READ OF OKX, never a reconstruction of its
+	// maths from Kanz's positions.
+	VenueMarginSource   = execution.VenueMarginSource
+	VenueMargin         = execution.VenueMargin
+	VenuePositionMargin = execution.VenuePositionMargin
 	// UserDataStream is the private-websocket transport seam (tests inject a fake).
 	UserDataStream = execution.UserDataStream
 

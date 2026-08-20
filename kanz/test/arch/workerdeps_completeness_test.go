@@ -66,6 +66,7 @@ var workerDepsOptional = map[string]string{
 	"TickerInterval":    "duration with a documented default (<=0 ⇒ default); omitting it is the same behaviour as naming the default",
 	"CloseTimeout":      "duration with a documented default (<=0 ⇒ 1500ms); omitting it is the same behaviour as naming the default",
 	"HealInterval":      "duration with a documented default (<=0 ⇒ 500ms); omitting it is the same behaviour as naming the default",
+	"MarginInterval":    "duration with a documented default (<=0 ⇒ venuemargin.DefaultInterval); omitting it is the same behaviour as naming the default",
 }
 
 func TestEveryWorkerDepsLiteralNamesEveryCollaborator(t *testing.T) {

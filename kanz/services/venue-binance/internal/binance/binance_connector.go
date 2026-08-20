@@ -10,6 +10,7 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"github.com/eighred/kanz/internal/venueadapter/accountproof"
+	"github.com/eighred/kanz/internal/venuemargin"
 	"github.com/eighred/kanz/pkg/bus"
 )
 
@@ -66,6 +67,31 @@ func (c *BinanceConnector) Start(ctx context.Context, deps WorkerDeps) {
 	// User-data stream ingester with resilient reconnect.
 	if deps.Lookup != nil {
 		go c.runUserData(ctx, deps)
+	}
+	// MARGIN IS READ FROM THE EXCHANGE, NOT DERIVED FROM OUR BOOK (#408,
+	// control 1). This connector is SPOT — every signed call it makes is /api/v3
+	// — and the spot account endpoint reports no maintenance margin, no margin
+	// ratio and no liquidation price, so the composition root supplies no source
+	// and this starts nothing. That is a stated absence, not an omission:
+	// venuemargin.Announce has already set the posture gauge to 0 and warned, so
+	// "Binance reports no margin here" is distinguishable from "nothing looked".
+	// The branch stays because a margin-capable Binance adapter supplies a source
+	// and needs no further edit here.
+	if deps.Margin != nil {
+		go venuemargin.NewReporter(venuemargin.ReporterConfig{
+			Source: deps.Margin, Pub: deps.Publisher,
+			Venue: c.settings.MIC, Account: c.settings.Account, Tenant: deps.Tenant,
+			OnError: func(err error) {
+				deps.Logger.Warn("binance: margin observation failed — the exchange's own margin state for "+
+					"this account is going UNKNOWN, and every margin control on it fails closed",
+					"err", err, "account", c.settings.Account, "subject", venuemargin.Subject)
+			},
+			OnUncovered: func(reason string, n int) {
+				deps.Logger.Warn("binance: the exchange did not report part of its margin state — those "+
+					"quantities are UNKNOWN, not zero",
+					"reason", reason, "count", n, "account", c.settings.Account)
+			},
+		}).Run(ctx, deps.MarginInterval)
 	}
 	// Ticker feed → market price FACTs → tv-sync MarkSource.
 	go c.runTicker(ctx, deps)
