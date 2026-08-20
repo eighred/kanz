@@ -111,4 +111,41 @@ message StructuredTerms {
 
   // day_count is the accrual convention. Optional (defaults to 30/360 for MBS).
   DayCountConvention day_count = 5;
+
+  // The three fields below turn a DEAL description into a record for ONE HELD
+  // INSTRUMENT (#572). A ContractTerms row is keyed by instrument_id, and what
+  // the fund holds is a tranche, not a deal — so the record has to say which
+  // tranche it is, what currency to discount in, and at what spread it is
+  // carried. Without them a StructuredTerms row describes a securitization that
+  // no measure can attribute to a position.
+  //
+  // None of the three describes WHETHER OR WHEN a cashflow happens: they name a
+  // slice of an existing capital structure, a curve key, and a discount spread.
+  // The payoff-program line drawn in contract.proto's `structured` case is
+  // unaffected.
+
+  // held_tranche is the `name` of the tranche in `tranches` that THIS
+  // instrument_id is. Required; the reader refuses a record whose held_tranche
+  // matches no tranche, because guessing a slice of a capital structure would
+  // report a senior note's risk for an equity piece.
+  string held_tranche = 6;
+
+  // currency_code is the ISO 4217 code the deal pays in — the KEY the discount
+  // curve is looked up by, exactly as BondTerms.currency_code is. Required: an
+  // empty one resolves no curve, and a tranche with no curve has no present
+  // value at all (structured.ErrUnpriceable), so it is refused here where the
+  // refusal is attributable rather than downstream where it is not.
+  string currency_code = 7;
+
+  // quoted_oas is the option-adjusted spread (continuously compounded, e.g.
+  // 0.0125 for 125bp) the tranche is CARRIED AT — the spread over the curve the
+  // effective duration and convexity are measured at.
+  //
+  // EXPLICITLY OPTIONAL SO THAT ABSENT AND ZERO ARE DIFFERENT. Zero is a
+  // meaningful OAS (the tranche trades on the curve) and it is also what an
+  // unset double reads as, so proto3's default would silently mark every
+  // subordinate tranche flat to Treasuries — the flattering direction, and
+  // indistinguishable from a real mark. A record without it is REFUSED rather
+  // than priced at zero: a deal the store cannot fully describe is declined.
+  optional double quoted_oas = 8;
 }

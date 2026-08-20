@@ -61,10 +61,22 @@ const (
 	// as_of) and decodes the blob. So the half that was broken was the half no
 	// test exercised, and the half that worked is the one the FI measures use.
 	KindBond Kind = "BOND"
+	// KindStructured is a securitization's terms (#572) — the pool, the capital
+	// structure, the prepayment assumption, and which tranche this instrument_id
+	// is. Declared on the SAME COMMIT as the `structured` case in the
+	// ContractTerms oneof, because the guard above KindBond describes what
+	// happens otherwise and terms_kind_covers_the_oneof_test.go now enforces it.
+	//
+	// underlying_id CARRIES THE DEAL ID for these rows, which is what makes
+	// ChainAsOf(dealID, asOf, KindStructured) list every tranche of one deal. The
+	// column is nullable and untyped precisely so a kind can mean by what it is
+	// grouped: for an option it is the underlying, for a swap it is nothing, for
+	// a tranche it is the securitization it is a slice of.
+	KindStructured Kind = "STRUCTURED"
 )
 
 // kinds is every declared kind, for the guard below.
-var kinds = []Kind{KindOption, KindSwap, KindFuture, KindBond}
+var kinds = []Kind{KindOption, KindSwap, KindFuture, KindBond, KindStructured}
 
 // Kinds returns every kind this store knows how to label a row with.
 //

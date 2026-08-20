@@ -13,26 +13,66 @@ import (
 	"github.com/eighred/kanz/internal/risk/pricing/structured"
 )
 
+// staticStructured answers TermsResolved for the ids it holds and TermsUnknown
+// for everything else — a store that holds NO record for the rest of the book,
+// which is the estate as it stands (no production writer for contract_terms).
+// The "a record exists and is not a securitization" answer has its own fixture
+// below, because after #572 widened this seam those two are exactly what it
+// exists to keep apart.
 type staticStructured map[string]StructuredSpec
 
-func (m staticStructured) Structured(_ context.Context, id string, _ time.Time) (StructuredSpec, bool) {
+func (m staticStructured) Structured(_ context.Context, id string, _ time.Time) (StructuredSpec, TermsResolution) {
 	s, ok := m[id]
-	return s, ok
+	if !ok {
+		return StructuredSpec{}, TermsUnknown
+	}
+	return s, TermsResolved
 }
 
-func structTestSpec(t *testing.T) StructuredSpec {
+// certifyingStore holds a record for every instrument and says none of them is a
+// securitization — the TermsOtherVariant arm, which #572 made reachable and
+// which is the ONLY answer that licenses a silent absence.
+type certifyingStore struct{}
+
+func (certifyingStore) Structured(context.Context, string, time.Time) (StructuredSpec, TermsResolution) {
+	return StructuredSpec{}, TermsOtherVariant
+}
+
+// unusableDealStore holds a STRUCTURED record for every id that cannot be turned
+// into a spec — a held_tranche naming no tranche, a BEHAVIORAL model whose
+// parameters the schema does not carry, an absent quoted OAS.
+type unusableDealStore struct{}
+
+func (unusableDealStore) Structured(context.Context, string, time.Time) (StructuredSpec, TermsResolution) {
+	return StructuredSpec{}, TermsUnusable
+}
+
+// structProviders bundles a terms fixture with the test curve. Written once so
+// no test can accidentally register with a nil Curve and attribute the resulting
+// exclusions to the terms half.
+func structProviders(t *testing.T, terms StructuredProvider) StructuredProviders {
+	t.Helper()
+	return StructuredProviders{Terms: terms, Curve: staticCurve{c: structTestCurve(t)}}
+}
+
+func structTestCurve(t *testing.T) *curve.Curve {
 	t.Helper()
 	c, err := curve.NewZeroCurve([]float64{1, 5, 10, 30}, []float64{0.03, 0.035, 0.04, 0.045}, curve.Continuous, curve.LinearZero)
 	if err != nil {
 		t.Fatal(err)
 	}
+	return c
+}
+
+func structTestSpec(t *testing.T) StructuredSpec {
+	t.Helper()
 	return StructuredSpec{
 		Deal: structured.Deal{
 			Pool:     structured.Pool{Balance: 1_000_000, GrossCoupon: 0.06, ServicingFee: 0.005, TermMonths: 360},
 			Tranches: []structured.Tranche{{Name: "A", Balance: 800_000, Coupon: 0.04}, {Name: "B", Balance: 200_000, Coupon: 0.06}},
 		},
 		Prepay:       structured.Behavioral{Base: 0.05, Max: 0.45, Steepness: 40, CDR: 0.01, Sev: 0.35},
-		Env:          structured.RateEnv{Curve: c, RefTenor: 10},
+		Currency:     "USD",
 		TrancheIndex: 0,
 		OAS:          0.01,
 	}
@@ -40,7 +80,7 @@ func structTestSpec(t *testing.T) StructuredSpec {
 
 func TestRegisterStructuredRisk(t *testing.T) {
 	r := DefaultRegistry()
-	RegisterStructuredRisk(context.Background(), r, staticStructured{"MBS_A": structTestSpec(t)})
+	RegisterStructuredRisk(context.Background(), r, structProviders(t, staticStructured{"MBS_A": structTestSpec(t)}))
 
 	p := domain.NewPortfolio("p1", "USD")
 	p.SetPosition(domain.Position{InstrumentID: "MBS_A", MarketValue: &commonpb.Money{Amount: dec(950_000, 0), CurrencyCode: "USD"}})
@@ -56,10 +96,12 @@ func TestRegisterStructuredRisk(t *testing.T) {
 		t.Fatalf("StructWAL must be positive, got %.4f", decimalToFloat(wal.Value))
 	}
 	// THE COVERAGE OF A GOOD ANSWER MATTERS TOO (#572): the priced tranche is
-	// counted, and the equity beside it is reported as unassessed rather than
-	// silently dropped. On a real book that second half is every position, which
-	// is the point — the family cannot claim to have measured what no schema lets
-	// it identify.
+	// counted, and the equity beside it is reported as UNASSESSED rather than
+	// silently dropped — because THIS fixture's store holds no record for it, so
+	// nothing has certified it as a non-securitization. A store that DOES hold a
+	// record for it reports it silently instead
+	// (TestStructMeasures_ACertifiedNonSecuritizationIsASilentAbsence), and the
+	// difference between the two is the whole reason this seam was widened.
 	if dur.Coverage.Contributed != 1 {
 		t.Errorf("Contributed=%d, want 1 (MBS_A priced)", dur.Coverage.Contributed)
 	}
@@ -82,7 +124,7 @@ func TestRegisterStructuredRisk(t *testing.T) {
 // that the position is non-structured. Nothing on this estate can.
 func TestRegisterStructuredRisk_ADeclinedBookIsNotAnEmptyBook(t *testing.T) {
 	r := DefaultRegistry()
-	RegisterStructuredRisk(context.Background(), r, staticStructured{})
+	RegisterStructuredRisk(context.Background(), r, structProviders(t, staticStructured{}))
 	p := domain.NewPortfolio("p1", "USD")
 	p.SetPosition(domain.Position{InstrumentID: "EQ", MarketValue: &commonpb.Money{Amount: dec(50_000, 0), CurrencyCode: "USD"}})
 	ms := ComputeMeasures(p, r, nil)
@@ -127,12 +169,16 @@ func TestRegisterStructuredRisk_ADeclinedBookIsNotAnEmptyBook(t *testing.T) {
 // annotation on a halved average is still a halved average.
 func TestStructMeasures_AnUnpriceableSpecIsExcludedRatherThanFoldedInAtZero(t *testing.T) {
 	good := structTestSpec(t)
-	noCurve := structTestSpec(t)
-	noCurve.Env = structured.RateEnv{RefTenor: 10} // no discount curve
+	// A TRANCHE THE DEAL DOES NOT CONTAIN. The spec resolves, the curve resolves,
+	// and the pricer still refuses — structured.ErrUnpriceable out of
+	// Projection.Tranche. It stands in for every way a resolved spec fails to
+	// price, and it is the arm that used to answer (0, 0) with no error.
+	unpriceable := structTestSpec(t)
+	unpriceable.TrancheIndex = 9
 
 	book := func(specs staticStructured, ids ...string) v1.Measure {
 		r := DefaultRegistry()
-		RegisterStructuredRisk(context.Background(), r, specs)
+		RegisterStructuredRisk(context.Background(), r, structProviders(t, specs))
 		p := domain.NewPortfolio("p1", "USD")
 		for _, id := range ids {
 			p.SetPosition(domain.Position{
@@ -149,7 +195,7 @@ func TestStructMeasures_AnUnpriceableSpecIsExcludedRatherThanFoldedInAtZero(t *t
 	}
 
 	alone := book(staticStructured{"MBS_A": good}, "MBS_A")
-	mixed := book(staticStructured{"MBS_A": good, "MBS_B": noCurve}, "MBS_A", "MBS_B")
+	mixed := book(staticStructured{"MBS_A": good, "MBS_B": unpriceable}, "MBS_A", "MBS_B")
 
 	want := decimalToFloat(alone.Value)
 	if want <= 0 {
@@ -185,7 +231,7 @@ func TestStructMeasures_ATrancheTheDealDoesNotHaveIsRefusedByEveryMeasure(t *tes
 	spec.TrancheIndex = 7 // the deal has two
 
 	r := DefaultRegistry()
-	RegisterStructuredRisk(context.Background(), r, staticStructured{"MBS_A": spec})
+	RegisterStructuredRisk(context.Background(), r, structProviders(t, staticStructured{"MBS_A": spec}))
 	p := domain.NewPortfolio("p1", "USD")
 	p.SetPosition(domain.Position{InstrumentID: "MBS_A", MarketValue: &commonpb.Money{Amount: dec(950_000, 0), CurrencyCode: "USD"}})
 
@@ -209,7 +255,7 @@ func TestStructMeasures_ATrancheTheDealDoesNotHaveIsRefusedByEveryMeasure(t *tes
 // the first position, which is what a nil interface used to do.
 func TestStructMeasures_NoProviderExcludesEveryPosition(t *testing.T) {
 	r := DefaultRegistry()
-	RegisterStructuredRisk(context.Background(), r, nil)
+	RegisterStructuredRisk(context.Background(), r, StructuredProviders{})
 	p := domain.NewPortfolio("p1", "USD")
 	p.SetPosition(domain.Position{InstrumentID: "A", MarketValue: &commonpb.Money{Amount: dec(1000, 0), CurrencyCode: "USD"}})
 	p.SetPosition(domain.Position{InstrumentID: "B", MarketValue: &commonpb.Money{Amount: dec(2000, 0), CurrencyCode: "USD"}})

@@ -100,7 +100,7 @@ var catalogue = map[v1.MeasureName]MeasureFamily{
 	MeasureTheta: FamilyGreeks,
 	MeasureRho:   FamilyGreeks,
 
-	// RegisterFIRisk — needs BondTerms (no schema yet) and a discount curve.
+	// RegisterFIRisk — needs BondTerms and a discount curve.
 	MeasureDV01:           FamilyFixedIncome,
 	MeasureDuration:       FamilyFixedIncome,
 	MeasureConvexity:      FamilyFixedIncome,
@@ -115,7 +115,8 @@ var catalogue = map[v1.MeasureName]MeasureFamily{
 	MeasureLVaR99:             FamilyLiquidity,
 	MeasureLiquidationHorizon: FamilyLiquidity,
 
-	// RegisterStructuredRisk — needs deal terms and prepayment assumptions.
+	// RegisterStructuredRisk — needs StructuredTerms (the ContractTerms
+	// `structured` variant, #572) and a discount curve.
 	MeasureStructDuration:  FamilyStructured,
 	MeasureStructConvexity: FamilyStructured,
 	MeasureStructWAL:       FamilyStructured,
