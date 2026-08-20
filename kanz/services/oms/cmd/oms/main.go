@@ -89,6 +89,16 @@ func run() int {
 	readiness := &server.Readiness{}
 	httpSrv := httpserver.New(cfg.Listen, server.New(readiness, logger, server.WithMetrics(obs.MetricsHandler())), httpserver.Standard())
 
+	// THE POST-TRADE PLANE'S POSTURE, BEFORE ANYTHING ELSE AND ON BOTH BRANCHES
+	// (#589). It is reported here rather than inside runConsumers for the reason
+	// the accounting and audit roots register their store posture before opening
+	// the store: it must be on /metrics from the FIRST scrape, and it must be
+	// true of a deployment with no OMS_NATS_URL too. The SETTLEMENT stream is
+	// provisioned by the bootstrap job regardless of what this process does, so a
+	// broker-less OMS is a deployment where the stream is empty and nothing at
+	// all says why. nil running: no stage is wired — see settlement_posture.go.
+	settlementPlanePosture(obs.Registry, logger, nil)
+
 	// Two independent things can turn fatal after startup has completed: the
 	// probes/metrics server dying, and runConsumers() surfacing a
 	// post-subscription error (see its own doc comment for the started/!started
