@@ -225,7 +225,7 @@ var provenByRealBrokerTest = map[string]integrationProof{
 	"cmd/kanz-halt": {
 		test: "TestIntegration_ToolFlipsTheRealGate",
 		why: "publishes the halt FACT through run(), the tool's real entrypoint, over a live " +
-			"JetStream spine, then asserts the real translate.Gate folded it and flipped. Gated on " +
+			"JetStream spine, then asserts the real halt.Gate folded it and flipped. Gated on " +
 			"TEST_NATS_URL, which CI sets (kanz-ci.yml), so it executes rather than skipping there.",
 	},
 }

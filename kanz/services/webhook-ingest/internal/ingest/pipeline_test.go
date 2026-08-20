@@ -15,7 +15,7 @@ import (
 	signalpb "github.com/eighred/kanz/kanz-schemas-go/signal/v1"
 
 	"github.com/eighred/kanz/internal/dec"
-	"github.com/eighred/kanz/internal/signal/translate"
+	"github.com/eighred/kanz/internal/platform/halt"
 	"github.com/eighred/kanz/pkg/bus"
 )
 
@@ -74,7 +74,7 @@ func harness(t *testing.T) (*Pipeline, *capture) {
 			{Venue: "OKX", Weight: big.NewRat(4, 10)},
 		}},
 		Publisher: cap,
-		Gate:      translate.OpenGate(nil),
+		Gate:      halt.OpenGate(nil),
 	})
 	if err != nil {
 		t.Fatalf("NewPipeline: %v", err)
@@ -229,7 +229,7 @@ func TestBadSignatureRejected(t *testing.T) {
 func TestHaltedGateRejectsValidWebhook(t *testing.T) {
 	cap := &capture{}
 	auth := NewAuthenticator(StaticSecrets{"momentum": testSecret}, nil, time.Minute, time.Now)
-	gate := translate.NewGate(nil) // CLOSED — no lifecycle FACT has opened it
+	gate := halt.NewGate(nil) // CLOSED — no lifecycle FACT has opened it
 	p, err := NewPipeline(Options{
 		Auth: auth, Symbols: StaticSymbols{"BINANCE:BTCUSDT": "BTC-USD"},
 		Prices:    StaticPrices{"BTC-USD": big.NewRat(50000, 1)},
@@ -284,7 +284,7 @@ func TestIPAllowlistRejects(t *testing.T) {
 		Prices: StaticPrices{"BTC-USD": big.NewRat(50000, 1)}, Equity: StaticEquity{},
 		Positions: StaticPositions{}, Alloc: StaticAllocation{"fund-alpha": {{Venue: "BINANCE", Weight: big.NewRat(1, 1)}}},
 		Publisher: cap,
-		Gate:      translate.OpenGate(nil),
+		Gate:      halt.OpenGate(nil),
 	})
 	if err != nil {
 		t.Fatalf("NewPipeline: %v", err)

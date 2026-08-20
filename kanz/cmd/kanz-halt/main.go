@@ -1,6 +1,6 @@
 // Command kanz-halt is the operator's break-glass handle on the platform
 // kill-switch. It publishes a lifecycle.v1.ModeChanged FACT on
-// platform.mode.changed — the single signal the shared translate.Gate folds — and
+// platform.mode.changed — the single signal the shared halt.Gate folds — and
 // does nothing else.
 //
 // It is deliberately a STANDALONE binary that shares no code with the trading

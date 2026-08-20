@@ -136,7 +136,7 @@ func (s Stage) String() string {
 //
 // The brake this describes already exists as a binary: cmd/kanz-halt publishes
 // the lifecycle.v1.ModeChanged FACT on platform.mode.changed that the shared
-// translate.Gate folds. What does NOT exist is a per-tenant one — read the
+// halt.Gate folds. What does NOT exist is a per-tenant one — read the
 // --tenant flag's own help text in cmd/kanz-halt/main.go: "AUDIT/ROUTING ONLY.
 // The halt is PLATFORM-WIDE: the gate ignores this field and stops every
 // tenant's execution. There is no per-tenant halt today." An implementation of

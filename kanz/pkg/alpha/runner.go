@@ -17,6 +17,7 @@ import (
 	"github.com/eighred/kanz/internal/marketedge/depth"
 	"github.com/eighred/kanz/internal/marketedge/ingest"
 	"github.com/eighred/kanz/internal/marketedge/trades"
+	"github.com/eighred/kanz/internal/platform/halt"
 	"github.com/eighred/kanz/internal/signal/translate"
 )
 
@@ -49,11 +50,11 @@ type Config struct {
 	Equity    translate.EquitySource
 	Positions translate.PositionSource
 	Alloc     translate.AllocationPolicy
-	// Gate is the kill-switch — the SAME *translate.Gate the webhook perimeter
+	// Gate is the kill-switch — the SAME *halt.Gate the webhook perimeter
 	// holds, so one trip stops both brains at once. Required IF engines are
 	// registered: an autonomous loop firing every 100ms with no operational brake
 	// leaves `kill -9` as the only risk control, which is not one.
-	Gate *translate.Gate
+	Gate *halt.Gate
 	// TenantOf maps a fund to its tenant; nil ⇒ the fund is the tenant.
 	TenantOf func(fundID string) string
 

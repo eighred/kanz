@@ -23,6 +23,7 @@ import (
 	orderpb "github.com/eighred/kanz/kanz-schemas-go/order/v1"
 	signalpb "github.com/eighred/kanz/kanz-schemas-go/signal/v1"
 
+	"github.com/eighred/kanz/internal/platform/halt"
 	"github.com/eighred/kanz/pkg/bus"
 )
 
@@ -34,7 +35,7 @@ func TestASignalOrderCarriesItsFundsTenantOnTheWire(t *testing.T) {
 		Positions: StaticPositions{"fund-alpha/BINANCE/BTC-USD": big.NewRat(0, 1)},
 		Alloc:     StaticAllocation{"fund-alpha": {{Venue: "BINANCE", Weight: big.NewRat(1, 1)}}},
 		Publisher: rec,
-		Gate:      OpenGate(nil),
+		Gate:      halt.OpenGate(nil),
 		// The fund→tenant map this endpoint serves. Without an explicit one the
 		// fund id IS the tenant, which would make this test agree with itself.
 		TenantOf: func(fundID string) string {

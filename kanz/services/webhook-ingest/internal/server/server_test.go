@@ -15,7 +15,7 @@ import (
 
 	orderpb "github.com/eighred/kanz/kanz-schemas-go/order/v1"
 
-	"github.com/eighred/kanz/internal/signal/translate"
+	"github.com/eighred/kanz/internal/platform/halt"
 	"github.com/eighred/kanz/pkg/bus"
 	"github.com/eighred/kanz/services/webhook-ingest/internal/ingest"
 )
@@ -55,7 +55,7 @@ func newServer(t *testing.T) (*Server, *capturingPub) {
 			{Venue: "OKX", Weight: big.NewRat(4, 10)},
 		}},
 		Publisher: pub,
-		Gate:      translate.OpenGate(nil),
+		Gate:      halt.OpenGate(nil),
 	})
 	if err != nil {
 		t.Fatal(err)

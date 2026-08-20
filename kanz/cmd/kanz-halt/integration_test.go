@@ -1,6 +1,6 @@
 // End-to-end proof that the break-glass tool actually moves the brake: the real
 // binary path publishes over a real NATS/JetStream spine, and the real
-// translate.Gate — the one webhook-ingest and the alpha Runner check — folds what
+// halt.Gate — the one webhook-ingest and the alpha Runner check — folds what
 // it published and flips.
 //
 // The unit tests cover flag validation and payload shape, but they never call
@@ -24,8 +24,8 @@ import (
 	"github.com/nats-io/nats.go/jetstream"
 
 	"github.com/eighred/kanz/internal/bustest"
+	"github.com/eighred/kanz/internal/platform/halt"
 	"github.com/eighred/kanz/internal/platform/mode"
-	"github.com/eighred/kanz/internal/signal/translate"
 	"github.com/eighred/kanz/pkg/bus"
 )
 
@@ -56,7 +56,7 @@ func TestIntegration_ToolFlipsTheRealGate(t *testing.T) {
 	bustest.EnsureSubjects(t, ctx, js, "PLATFORM_HALT_IT", []string{mode.Subject})
 
 	// The real gate, wired to the real subject exactly as webhook-ingest wires it.
-	gate := translate.OpenGate(nil)
+	gate := halt.OpenGate(nil)
 	client, err := bus.DialNATS(ctx, bus.NATSConfig{URL: url, Name: "kanz-halt-it"})
 	if err != nil {
 		t.Fatalf("dial: %v", err)

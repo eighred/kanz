@@ -7,7 +7,7 @@ import (
 	"time"
 
 	"github.com/eighred/kanz/internal/dec"
-	"github.com/eighred/kanz/internal/signal/translate"
+	"github.com/eighred/kanz/internal/platform/halt"
 )
 
 // #240 at the perimeter — the one surface the internet talks to. The unit tests in
@@ -28,7 +28,7 @@ func cappedHarness(t *testing.T, max *big.Rat) (*Pipeline, *capture) {
 		Positions:   StaticPositions{},
 		Alloc:       StaticAllocation{"fund-alpha": {{Venue: "BINANCE", Weight: big.NewRat(1, 1)}}},
 		Publisher:   cap,
-		Gate:        translate.OpenGate(nil),
+		Gate:        halt.OpenGate(nil),
 		MaxQuantity: NewQty(max),
 	})
 	if err != nil {
@@ -160,7 +160,7 @@ func TestNewPipeline_RefusesWholePercentWeights(t *testing.T) {
 			{Venue: "OKX", Weight: big.NewRat(40, 1)},
 		}},
 		Publisher: &capture{},
-		Gate:      translate.OpenGate(nil),
+		Gate:      halt.OpenGate(nil),
 	})
 	if !errors.Is(err, ErrBadAllocation) {
 		t.Fatalf("NewPipeline with 60/40 weights = %v, want ErrBadAllocation — it would fan a "+

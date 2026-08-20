@@ -29,6 +29,7 @@ import (
 	"github.com/nats-io/nats.go/jetstream"
 
 	"github.com/eighred/kanz/internal/bustest"
+	"github.com/eighred/kanz/internal/platform/halt"
 	"github.com/eighred/kanz/internal/signal/translate"
 	"github.com/eighred/kanz/pkg/bus"
 )
@@ -122,7 +123,7 @@ func TestIntegration_EmitReachesTheWire(t *testing.T) {
 			{Venue: "BINANCE", Weight: big.NewRat(1, 1)},
 		}},
 		Publisher: producer,
-		Gate:      translate.OpenGate(nil),
+		Gate:      halt.OpenGate(nil),
 	})
 	if err != nil {
 		t.Fatalf("translate.New: %v", err)

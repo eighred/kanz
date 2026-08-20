@@ -13,6 +13,7 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"github.com/eighred/kanz/internal/dec"
+	"github.com/eighred/kanz/internal/platform/halt"
 	"github.com/eighred/kanz/internal/signal/translate"
 )
 
@@ -29,11 +30,11 @@ type Options struct {
 
 	// TenantOf maps a fund to its tenant_id; nil ⇒ the fund_id is the tenant.
 	TenantOf func(fundID string) string
-	// Gate is the kill-switch — the SAME *translate.Gate the native alpha runner
+	// Gate is the kill-switch — the SAME *halt.Gate the native alpha runner
 	// holds, so one trip paralyzes both channels. Required: the local
 	// `func(fundID) bool` seam this replaced defaulted to constant false and was
 	// never wired in cmd/, which left the brake disconnected in production.
-	Gate *translate.Gate
+	Gate *halt.Gate
 	// MaxQuantity bounds the RESOLVED base-asset quantity of one alert. It is handed
 	// straight to the translator because THIS LAYER CANNOT APPLY IT: the perimeter
 	// holds a bare `size` whose unit SizeType has not yet decided.
