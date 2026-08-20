@@ -85,6 +85,26 @@ enum RuleType {
   // risk engine what those holdings are WORTH LOSING, which is the question a
   // pre-trade gate exists to ask and the one this platform could not.
   RULE_TYPE_RISK_MEASURE = 7;
+
+  // RULE_TYPE_VENUE_MARGIN declares that this portfolio trades on MARGIN at a
+  // venue, and gates every order that would take or increase a position there
+  // on the EXCHANGE'S OWN margin state for the account it trades from (#408,
+  // control 3).
+  //
+  // IT IS THE ONLY RULE HERE THAT REFUSES BY DEFAULT RATHER THAN ON A BREACH.
+  // Every other rule computes something and compares it, and absent inputs make
+  // one or two of them fail closed as an edge case. This one is fail-closed as
+  // its WHOLE PURPOSE. The number it needs is the venue's, it ages in seconds,
+  // and the cost of acting on a wrong one is not a bad trade — it is the
+  // exchange selling the fund's collateral while the books read fine. So an
+  // order is admitted only while the margin state is READ, CURRENT and
+  // COMPLETE, and refused on every other state, including the states that look
+  // like answers.
+  //
+  // ORDERS THAT REDUCE THE POSITION ARE NOT GATED. A control that blocked
+  // de-risking while margin was unknown would trap the fund in exactly the
+  // position it needs to leave. See VenueMarginRule.
+  RULE_TYPE_VENUE_MARGIN = 8;
 }
 
 // Dimension is the portfolio axis a concentration or restriction rule buckets
@@ -196,6 +216,7 @@ message Rule {
     CurrencyRestriction currency_restriction = 14;
     BuyingPowerLimit buying_power = 15;
     RiskMeasureLimit risk_measure = 16;
+    VenueMarginLimit venue_margin = 17;
   }
 }
 
@@ -254,6 +275,59 @@ message RiskMeasureLimit {
   // is present but empty would be a control that admits everything while
   // appearing configured — the failure this platform refuses everywhere else.
   common.v1.Decimal max_value = 2;
+}
+
+// VenueMarginLimit declares that a portfolio trades on MARGIN and gates its
+// orders on the exchange's own margin state for the account behind them (#408,
+// control 3).
+//
+// # What DECLARING it means, and why the declaration is the trigger
+//
+// order.v1.SubmitOrder carries no leverage and no margin mode: #408's ruling
+// keeps that field blocked (#417) until controls 1-3 exist, precisely so the
+// platform cannot take a leveraged position before it can see one. An ORDER
+// therefore cannot say "this is leveraged", and the mandate is where it is
+// said. A portfolio whose mandate carries this rule is one an operator has
+// declared margin-enabled, and its orders are gated on the venue's own numbers.
+//
+// That is DELIBERATELY WIDER than "leveraged orders only". It gates spot orders
+// on a margin-enabled account too, and that is the correct direction of error:
+// on a cross-margin account a spot buy consumes the same collateral pool the
+// exchange will liquidate from. When #417 lands, the trigger can narrow to the
+// orders that carry leverage. It must not be narrowed before then by guessing.
+//
+// # min_margin_ratio is IN THE VENUE'S OWN UNITS AND DIRECTION
+//
+// OKX's mgnRatio rises as the account gets SAFER. A Binance-style margin level
+// and an equity/maintenance-margin ratio agree on neither the units nor on
+// which way danger lies, and nothing on this platform normalizes them, because
+// normalizing would mean asserting a venue's convention on its behalf — the
+// same class of claim #408 rules out for cross-margin offsets. So a floor is
+// only meaningful once the venue is named, and a floor WITHOUT a venue is
+// REFUSED rather than applied to whichever venue an order happens to reach. A
+// venue-comparable liquidation distance is control 4's job, not this one's.
+message VenueMarginLimit {
+  // venue is the MIC this rule governs. It matches order.v1.SubmitOrder.venue
+  // and the venue label collateral.v1.VenueMarginState is published under —
+  // both are the adapter's MIC, so a mandate and an observation cannot disagree
+  // about which exchange is meant.
+  //
+  // EMPTY MEANS EVERY VENUE: the rule then demands a readable, current, complete
+  // margin state wherever the order routes. That is the safe default, because an
+  // empty venue can only ever gate MORE orders, never fewer. It is also the one
+  // spelling under which min_margin_ratio is refused, because a floor whose
+  // direction is unknown is not a floor.
+  string venue = 1;
+
+  // min_margin_ratio is the lowest margin ratio, IN THE VENUE'S UNITS AND
+  // DIRECTION, at which an order may still take or increase a position.
+  //
+  // ABSENT IS NOT ZERO AND NOT "NO LIMIT". Absent means the rule checks only
+  // that the margin state is readable, current and complete — which is already
+  // the control #408 asks for. A floor of zero would instead be an active claim
+  // that any positive ratio is acceptable, asserted on a venue whose ratio may
+  // not even rise with safety.
+  common.v1.Decimal min_margin_ratio = 2;
 }
 
 // Mandate is the tenant/portfolio-scoped ruleset a book is governed by. It is

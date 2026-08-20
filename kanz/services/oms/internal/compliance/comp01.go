@@ -69,7 +69,11 @@ func (g *COMP01Gate) Check(ctx context.Context, tenantID string, cmd *orderpb.Su
 		SignedQuantity: signedQuantity(cmd.GetSide(), cmd.GetQuantity()),
 		Price:          g.price(cmd),
 		Currency:       g.currency,
-		OrderID:        cmd.GetOrderId(),
+		// WHICH EXCHANGE ACCOUNT'S COLLATERAL THIS ORDER SPENDS FROM (#408). It is
+		// the same venue string resolveAccount routes on, so the margin the gate
+		// checks is the margin of the account the order will actually reach.
+		Venue:   cmd.GetVenue(),
+		OrderID: cmd.GetOrderId(),
 		// ONE DECISION, THIS MANY ORDERS (#435, #484). A scheduled parent is
 		// checked once for the whole notional and its children are admitted
 		// without re-checking, so the fills land on N order ids while only this

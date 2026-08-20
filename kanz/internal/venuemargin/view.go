@@ -63,13 +63,51 @@ func (q Quantity) ObservedAt() time.Time { return q.observedAt }
 // suspicious observations as the freshest.
 func (q Quantity) Age(now time.Time) time.Duration { return now.UTC().Sub(q.observedAt) }
 
+// Coverage is what an observation said about HOW MUCH of the venue's margin
+// state it actually carries — the difference between "the exchange answered
+// everything we asked" and "we do not know what it left out".
+//
+// # Why this is a type and not a uint32
+//
+// domain.v1.InputCoverage's own contract is that PRESENCE IS THE SIGNAL: absent
+// means "this publisher does not report coverage", present with
+// excluded_count = 0 means "it reports, and everything applicable was covered".
+// A bare count renders both as zero and re-creates the conflation the record
+// exists to break — and the direction of that mistake is the wrong one, because
+// the publisher that says nothing is the one nobody has checked.
+//
+// The zero Coverage is therefore NOT "fully covered". It is what a never-covered
+// lookup and a coverage-less publisher both yield, and Complete is false on it.
+type Coverage struct {
+	reported bool
+	excluded uint32
+}
+
+// Reported says whether the observation carried a coverage record at all. False
+// means the publisher does not report coverage — not that it covered everything.
+func (c Coverage) Reported() bool { return c.reported }
+
+// ExcludedCount is how many quantities the venue could not answer for. It is
+// meaningful only when Reported is true; on an unreported coverage it is zero
+// for the reason a count is always zero when nobody counted.
+func (c Coverage) ExcludedCount() uint32 { return c.excluded }
+
+// Complete reports whether the venue answered EVERYTHING asked of it: coverage
+// was reported AND it excluded nothing.
+//
+// A GATE MUST USE THIS RATHER THAN ExcludedCount() == 0. The two differ exactly
+// on the publisher that reports no coverage, and that is the case a margin
+// control must refuse: an observation that does not say what it left out cannot
+// be shown to have left out nothing.
+func (c Coverage) Complete() bool { return c.reported && c.excluded == 0 }
+
 // snapshot is one venue account's last observation.
 type snapshot struct {
 	maintenanceMargin *big.Rat
 	marginRatio       *big.Rat
 	liquidation       map[string]*big.Rat
 	observedAt        time.Time
-	excluded          uint32
+	coverage          Coverage
 }
 
 // accountKey is the routing dimension. THE ACCOUNT, NOT THE PORTFOLIO: the
@@ -188,7 +226,14 @@ func (v *View) Handle(_ context.Context, _ *envelopepb.Envelope, payload []byte)
 	snap := snapshot{
 		observedAt:  observedAt,
 		liquidation: map[string]*big.Rat{},
-		excluded:    msg.GetCoverage().GetExcludedCount(),
+		// PRESENCE, NOT JUST THE COUNT. msg.GetCoverage() is nil for a publisher
+		// that reports no coverage, and GetExcludedCount() on it is zero — the same
+		// zero a publisher that covered everything produces. Recording the presence
+		// separately is what lets a gate refuse the first and admit the second.
+		coverage: Coverage{
+			reported: msg.GetCoverage() != nil,
+			excluded: msg.GetCoverage().GetExcludedCount(),
+		},
 	}
 	// PRESENCE IS THE ONLY THING FOLDED. An absent Decimal stays absent: it is
 	// never materialised as zero, which is what dec.FromProto would hand back for
@@ -211,10 +256,37 @@ func (v *View) Handle(_ context.Context, _ *envelopepb.Envelope, payload []byte)
 	v.byAcct[key] = snap
 	v.mu.Unlock()
 
-	if snap.excluded > 0 && v.onUncovered != nil {
-		v.onUncovered(key.venue, key.account, snap.excluded)
+	if snap.coverage.excluded > 0 && v.onUncovered != nil {
+		v.onUncovered(key.venue, key.account, snap.coverage.excluded)
 	}
 	return nil
+}
+
+// Coverage is what this account's last CURRENT observation said about how much
+// of the venue's margin state it carries, or ok=false when UNKNOWN — never
+// observed, or observed too long ago.
+//
+// IT IS BOUND BY THE SAME FRESHNESS RULE AS THE QUANTITIES, and that is the
+// point of it living here rather than being remembered by a caller off the fold
+// callback. A coverage record from a stale observation describes an observation
+// nothing may act on; answering with it would let a gate satisfy its
+// completeness check from one poll and its numbers from another.
+func (v *View) Coverage(venue, account string) (Coverage, bool) {
+	v.mu.RLock()
+	snap, seen := v.byAcct[accountKey{venue: venue, account: account}]
+	v.mu.RUnlock()
+	if !seen {
+		return Coverage{}, false
+	}
+	if v.maxAge > 0 {
+		if age := v.now().UTC().Sub(snap.observedAt); age > v.maxAge {
+			if v.onStale != nil {
+				v.onStale(venue, account, age)
+			}
+			return Coverage{}, false
+		}
+	}
+	return snap.coverage, true
 }
 
 // MaintenanceMargin is the collateral the exchange requires this account to
