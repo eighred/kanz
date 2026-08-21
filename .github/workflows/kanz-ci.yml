@@ -86,7 +86,7 @@ jobs:
           --health-timeout 5s
           --health-retries 5
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       # The suites must connect as a NON-SUPERUSER. Postgres bypasses row-level
       # security for superusers, so the MT-01d tenant-isolation tests detect that
@@ -111,10 +111,9 @@ jobs:
           go-version-file: kanz/go.mod
           cache-dependency-path: kanz/go.sum
 
-      - uses: bufbuild/buf-setup-action@a47c93e0b1648d5651a065437926377d060baa99 # v1
+      - uses: ./.github/actions/setup-buf
         with:
           version: 1.69.0
-          github_token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Install protoc plugins
         run: |
@@ -515,7 +514,7 @@ jobs:
   python:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
@@ -597,7 +596,7 @@ jobs:
   ts:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
@@ -614,10 +613,9 @@ jobs:
           # dependabot.yml ignores @types/node majors.
           node-version-file: kanz/ts/kanz-bus/.nvmrc
 
-      - uses: bufbuild/buf-setup-action@a47c93e0b1648d5651a065437926377d060baa99 # v1
+      - uses: ./.github/actions/setup-buf
         with:
           version: 1.69.0
-          github_token: ${{ secrets.GITHUB_TOKEN }}
 
       # TS-only generation template (Protobuf-ES) — avoids needing the Go
       # plugins the full buf.gen.yaml lists. Mirrors the bufbuild/es version
@@ -687,7 +685,7 @@ jobs:
   web:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
@@ -728,7 +726,7 @@ jobs:
   sdk-guard:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: No committed generated SDK files
         run: |
           set -euo pipefail
@@ -762,7 +760,7 @@ jobs:
   observability:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       # PINNED BY VERSION AND SHA256. promtool ships as a release tarball, not an
       # action, so the SHA-pinning this workflow applies to actions does not
@@ -901,14 +899,13 @@ jobs:
   buf-breaking:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # Full history so buf can resolve the main baseline for `breaking`.
           fetch-depth: 0
-      - uses: bufbuild/buf-setup-action@a47c93e0b1648d5651a065437926377d060baa99 # v1
+      - uses: ./.github/actions/setup-buf
         with:
           version: 1.69.0
-          github_token: ${{ secrets.GITHUB_TOKEN }}
       - name: Lint
         working-directory: kanz-schemas
         run: buf lint

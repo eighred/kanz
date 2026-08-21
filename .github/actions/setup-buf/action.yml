@@ -1,0 +1,89 @@
+name: Set up buf
+description: >-
+  Installs a pinned buf release from its official GitHub release, verified
+  against the checksum published alongside it.
+
+# WHY THIS EXISTS RATHER THAN bufbuild/buf-setup-action (#680).
+#
+# That action declares `using: "node20"`, and v1.50.0 — the version this replaced
+# — is its LATEST release. So GitHub's Node-20 deprecation warning had no upgrade
+# path: there was no newer tag to move the pin to. A composite action declares no
+# Node runtime at all, so this class of deprecation cannot recur here.
+#
+# THREE THINGS IMPROVE BY ACCIDENT OF THE MOVE, and they are the reason this is
+# not merely a warning suppressant:
+#
+#   - THE VERSION IS PINNED ONCE. It was written out at ten call sites across
+#     seven workflows. They agreed on 1.69.0 today; nothing made them.
+#   - THE DOWNLOAD IS VERIFIED. buf publishes sha256.txt with every release and
+#     this checks the binary against it. A tarball fetched over HTTPS with no
+#     checksum is trusted on transport alone.
+#   - NO THIRD PARTY IS HANDED A TOKEN. All ten sites passed
+#     `github_token: ${{ secrets.GITHUB_TOKEN }}` to a third-party action so it
+#     could avoid API rate limits. release.yml grants `packages: write` and
+#     `id-token: write`; supplychain_test.go's own header explains what a
+#     compromised action can do there. This asks GitHub for a release asset over
+#     unauthenticated HTTPS and needs no token at all.
+#
+# test/arch/supplychain_test.go exempts local actions from SHA pinning by design
+# ("a local composite action is in-repo, not a supply-chain edge"), so moving here
+# does not weaken that guard.
+
+inputs:
+  version:
+    description: The buf release to install, without a leading "v" (e.g. 1.69.0).
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Install buf ${{ inputs.version }}
+      shell: bash
+      env:
+        BUF_VERSION: ${{ inputs.version }}
+      run: |
+        set -euo pipefail
+
+        # buf's release assets are named by uname's own output, so this derives
+        # the asset name rather than assuming the runner is x86_64 Linux. A
+        # future arm64 runner then works instead of silently downloading the
+        # wrong binary and failing at exec time with a confusing error.
+        os="$(uname -s)"
+        arch="$(uname -m)"
+        asset="buf-${os}-${arch}"
+        base="https://github.com/bufbuild/buf/releases/download/v${BUF_VERSION}"
+
+        tmp="$(mktemp -d)"
+        trap 'rm -rf "$tmp"' EXIT
+
+        curl --fail --silent --show-error --location --retry 3 --retry-connrefused \
+          -o "$tmp/$asset" "$base/$asset"
+        curl --fail --silent --show-error --location --retry 3 --retry-connrefused \
+          -o "$tmp/sha256.txt" "$base/sha256.txt"
+
+        # VERIFIED BEFORE IT IS EXECUTED, and the grep is anchored to the exact
+        # asset name: sha256.txt lists every asset for the release, so an
+        # unanchored match could verify the binary against another file's digest
+        # and pass.
+        line="$(grep -E "  ${asset}\$" "$tmp/sha256.txt" || true)"
+        if [ -z "$line" ]; then
+          echo "::error::no checksum for ${asset} in buf v${BUF_VERSION}'s sha256.txt — refusing to install an unverified binary"
+          exit 1
+        fi
+        ( cd "$tmp" && printf '%s\n' "$line" | sha256sum --check --status ) || {
+          echo "::error::checksum mismatch for ${asset} at buf v${BUF_VERSION} — refusing to install"
+          exit 1
+        }
+
+        install -m 0755 "$tmp/$asset" "$RUNNER_TEMP/buf"
+        echo "$RUNNER_TEMP" >> "$GITHUB_PATH"
+
+        # Prove the thing that was installed is the thing that was asked for. A
+        # release whose asset does not match its tag would otherwise be found by
+        # whichever job first depends on a version-specific behaviour.
+        got="$("$RUNNER_TEMP/buf" --version)"
+        if [ "$got" != "$BUF_VERSION" ]; then
+          echo "::error::installed buf reports ${got}, expected ${BUF_VERSION}"
+          exit 1
+        fi
+        echo "buf ${got} installed and checksum-verified"
