@@ -215,6 +215,23 @@ func (s *Server) writePipelineError(w http.ResponseWriter, err error) {
 		// zero and answers 202 Accepted for a close that never sent an order.
 		s.logger.Error("position book not armed — refusing the alert rather than sizing a close against an unknown book", "err", err)
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "position book not ready; retry"})
+	case errors.Is(err, ingest.ErrUnboundFund):
+		// AUTHENTICATED, NOT AUTHORIZED (#632). The HMAC proved the sender holds a
+		// strategy's secret; the `fund_id` it named belongs to a fund that strategy is
+		// not bound to, so no tenant owns the signal and nothing was published.
+		//
+		// LOGGED UNCONDITIONALLY, at ERROR, and here rather than only behind the
+		// pipeline's optional counter seam: this is the signature of a leaked strategy
+		// secret being pointed at another tenant's book, and a deployment that forgot
+		// to wire a metric must still not be able to swallow it. err carries the
+		// strategy and the fund — the two things an operator needs to tell an attempted
+		// injection from a bootstrap file that is simply missing a binding.
+		s.logger.Error("REFUSED: an authenticated strategy named a fund it is not bound to — "+
+			"no order was published and no signal FACT was recorded", "err", err)
+		// 403, not 400: the request is well-formed and the sender is who they claim to
+		// be. It carries no detail — which funds exist is not something an
+		// unauthorized-for-this-fund caller may probe for.
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "forbidden"})
 	case errors.Is(err, ingest.ErrHalted):
 		writeJSON(w, http.StatusLocked, map[string]string{"error": "trading halted"})
 	case errors.Is(err, ingest.ErrBadRequest):

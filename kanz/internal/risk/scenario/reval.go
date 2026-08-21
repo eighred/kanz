@@ -35,7 +35,15 @@ type Revaluer interface {
 // via reval and scaling the rest linearly — then computes measures against the
 // revalued state. p is not mutated. A nil reval falls back to the fully linear
 // Evaluate.
-func EvaluateReval(p *domain.Portfolio, shocks []v1.ScenarioShock, registry *compute.Registry, reval Revaluer, opts ...Option) *domain.MeasureSet {
+//
+// It returns the SAME shock-application coverage Evaluate does, and for the same
+// reason: sectorFrac resolves each position's sector through the classifier, so
+// this path had the identical silent degradation (#640). It carries no caller
+// today — EvaluateReval is a tracked dark seam in
+// test/arch/no_dark_measure_seam_test.go, blocked on a Revaluer — and wiring it
+// with the coverage already threaded is what stops the defect being reintroduced
+// on the commit that lights it up.
+func EvaluateReval(p *domain.Portfolio, shocks []v1.ScenarioShock, registry *compute.Registry, reval Revaluer, opts ...Option) (*domain.MeasureSet, v1.InputCoverage) {
 	if reval == nil {
 		return Evaluate(p, shocks, registry, opts...)
 	}
@@ -43,14 +51,15 @@ func EvaluateReval(p *domain.Portfolio, shocks []v1.ScenarioShock, registry *com
 	for _, opt := range opts {
 		opt(&cfg)
 	}
-	shocked := cloneWithReval(p, shocks, reval, cfg)
-	return compute.ComputeMeasures(shocked, registry, nil)
+	cov := newShockCoverage()
+	shocked := cloneWithReval(p, shocks, reval, cfg, cov)
+	return compute.ComputeMeasures(shocked, registry, nil), cov.result()
 }
 
 // cloneWithReval deep-copies p and applies the shocks: each option position is
 // repriced under its aggregated shocks; each other position is scaled by its
 // linear price fraction.
-func cloneWithReval(p *domain.Portfolio, shocks []v1.ScenarioShock, reval Revaluer, cfg evalConfig) *domain.Portfolio {
+func cloneWithReval(p *domain.Portfolio, shocks []v1.ScenarioShock, reval Revaluer, cfg evalConfig, cov *shockCoverage) *domain.Portfolio {
 	cp := domain.NewPortfolio(p.ID(), p.BaseCurrency())
 	cp.SetAggregate(domain.AggregateUpdate{
 		AsOf:             p.AsOf(),
@@ -65,10 +74,17 @@ func cloneWithReval(p *domain.Portfolio, shocks []v1.ScenarioShock, reval Revalu
 	}
 
 	parallelFrac, globalVol, volByUnderlying := collectGlobalShocks(shocks)
+	// ONCE, BEFORE THE LOOP: no classifier is a property of the evaluation, not
+	// of any holding, so it is one whole-book exclusion. Recording it per
+	// position would make a deployment-wide gap look like a per-instrument data
+	// hole and would scale the count with the book size.
+	if cfg.classifier == nil && hasSectorShock(shocks) {
+		cov.noClassifierWired()
+	}
 	ctx := context.Background()
 	asOf := p.AsOf()
 	for _, pos := range cp.Positions() {
-		priceFrac := parallelFrac + instrumentPriceFrac(shocks, pos.InstrumentID) + sectorFrac(ctx, cfg.classifier, pos, asOf, shocks)
+		priceFrac := parallelFrac + instrumentPriceFrac(shocks, pos.InstrumentID) + sectorFrac(ctx, cfg.classifier, pos, asOf, shocks, cov)
 		rs := compute.RevalShocks{PriceFrac: priceFrac, GlobalVolBump: globalVol, VolByUnderlying: volByUnderlying}
 		if mv, ok := reval.RevalueOption(ctx, string(pos.InstrumentID), asOf, pos.MarketValue, rs); ok {
 			pos.MarketValue = mv
@@ -114,17 +130,38 @@ func instrumentPriceFrac(shocks []v1.ScenarioShock, id domain.InstrumentID) floa
 	return frac
 }
 
+// hasSectorShock reports whether the batch contains a SectorShock at all. With
+// none, no position's sector is ever consulted, so nothing is missing and the
+// coverage stays empty — a price-and-vol scenario must not be refused for want
+// of a classifier it does not use.
+func hasSectorShock(shocks []v1.ScenarioShock) bool {
+	for _, sh := range shocks {
+		if _, ok := sh.(v1.SectorShock); ok {
+			return true
+		}
+	}
+	return false
+}
+
 // sectorFrac sums the SectorShocks that match the position's sector, resolved
-// point-in-time. A nil classifier ⇒ 0 (sector shocks are no-ops, as on the
-// linear path).
-func sectorFrac(ctx context.Context, classifier factor.Classifier, pos domain.Position, asOf time.Time, shocks []v1.ScenarioShock) float64 {
-	if classifier == nil {
+// point-in-time. An unresolvable sector contributes 0 AND is recorded on cov —
+// the caller refuses on a non-empty coverage rather than treating "sector
+// unknown" as "not in the shocked sector", which is the linear path's rule
+// (applySectorShock) stated once for both paths.
+//
+// The nil-classifier case is NOT handled here: it is a property of the whole
+// evaluation, so cloneWithReval records it once before the position loop rather
+// than once per holding.
+func sectorFrac(ctx context.Context, classifier factor.Classifier, pos domain.Position, asOf time.Time, shocks []v1.ScenarioShock, cov *shockCoverage) float64 {
+	if classifier == nil || !hasSectorShock(shocks) {
 		return 0
 	}
 	cl, ok := classifier.Classify(ctx, string(pos.InstrumentID), asOf)
 	if !ok {
+		cov.unclassified(pos.InstrumentID)
 		return 0
 	}
+	cov.resolved(pos.InstrumentID)
 	var frac float64
 	for _, sh := range shocks {
 		if s, ok := sh.(v1.SectorShock); ok && cl.Sector.Taxonomy == s.Taxonomy && cl.Sector.Code == s.Code {

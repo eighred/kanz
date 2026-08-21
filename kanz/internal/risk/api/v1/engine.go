@@ -520,4 +520,33 @@ var (
 	// A caller that sees this error knows to look elsewhere; the message names
 	// where. Wrapped errors carry the owning replica's id.
 	ErrPortfolioNotOwned = errors.New("risk: portfolio is not owned by this replica")
+
+	// ErrScenarioUnresolvable: a shock in the request could not be applied
+	// because an input it needed did not resolve, so the projected measures
+	// would describe a book the scenario never reached. Wrapped errors name
+	// the reason (scenario.SkipNoClassifier, SkipUnclassified, ...), the
+	// count, and a bounded sample of the holdings (#640).
+	//
+	// # A REFUSAL, AND NOT A QUALITY FLAG, WHICH IS THE OPPOSITE CHOICE FROM
+	// # QualityFlagInputsUnresolved — deliberately
+	//
+	// That flag is right for a MEASURE SET, where a caller asked for a
+	// portfolio's risk and one family of numbers in it is partial: the other
+	// measures are still answers, so the response is worth returning with the
+	// bad part labelled. A SCENARIO is not that shape. The caller asked one
+	// question — what does GFC_2008 do to this book — and if the shock did not
+	// land, EVERY number in the response is the book as it already is. There is
+	// no good part to keep.
+	//
+	// The failure mode is also worse than a partial number, because the
+	// unshocked answer is PLAUSIBLE. A 2008 replay reporting no impact reads as
+	// a resilient portfolio rather than as a broken control, and this estate has
+	// no instrument classifier at any composition root — so that was the answer
+	// every named scenario gave, on a live authorized route, with a 200.
+	//
+	// It maps to FailedPrecondition at the gRPC edge, not InvalidArgument: with
+	// the one exception of a malformed shock naming no sector, the request is
+	// well-formed and the deployment is what cannot serve it, so retrying the
+	// same call elsewhere is not the remedy.
+	ErrScenarioUnresolvable = errors.New("risk: scenario shock could not be applied — an input it needs did not resolve")
 )

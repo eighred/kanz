@@ -88,7 +88,10 @@ func TestGFC2008_AppliedDifferentiatesBySector(t *testing.T) {
 		"BANK": {Sector: factor.Sector{Taxonomy: "GICS", Code: "40"}},
 		"FOOD": {Sector: factor.Sector{Taxonomy: "GICS", Code: "30"}},
 	}
-	got := scenario.Evaluate(p, library.GlobalFinancialCrisis2008(), nil, scenario.WithClassifier(c))
+	got, cov := scenario.Evaluate(p, library.GlobalFinancialCrisis2008(), nil, scenario.WithClassifier(c))
+	if cov.ExcludedCount != 0 {
+		t.Fatalf("coverage=%+v want empty — both holdings are classified, so the curve applies in full", cov)
+	}
 
 	// Financials −55% ⇒ 450; staples −15% ⇒ 850; net 1300.
 	m, _ := got.Lookup(compute.MeasureNetExposure)

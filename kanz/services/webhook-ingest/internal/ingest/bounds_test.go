@@ -21,6 +21,7 @@ func cappedHarness(t *testing.T, max *big.Rat) (*Pipeline, *capture) {
 	cap := &capture{}
 	auth := NewAuthenticator(StaticSecrets{"momentum": testSecret}, nil, time.Minute, time.Now)
 	p, err := NewPipeline(Options{
+		Authority:   ingestTestAuthority(t),
 		Auth:        auth,
 		Symbols:     StaticSymbols{"BINANCE:BTCUSDT": "BTC-USD"},
 		Prices:      StaticPrices{"BTC-USD": big.NewRat(50_000, 1)},
@@ -150,6 +151,7 @@ func TestPerimeter_ARefusedAlertBurnsItsNonce(t *testing.T) {
 // order it ever places.
 func TestNewPipeline_RefusesWholePercentWeights(t *testing.T) {
 	_, err := NewPipeline(Options{
+		Authority: ingestTestAuthority(t),
 		Auth:      NewAuthenticator(StaticSecrets{"momentum": testSecret}, nil, time.Minute, time.Now),
 		Symbols:   StaticSymbols{},
 		Prices:    StaticPrices{},

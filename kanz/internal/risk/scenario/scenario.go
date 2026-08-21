@@ -48,30 +48,137 @@ type evalConfig struct {
 }
 
 // WithClassifier wires the MODEL-01f factor model so SectorShocks can resolve
-// each position's sector at apply time. Without it a SectorShock is a silent
-// no-op (the unknown-shock degradation).
+// each position's sector at apply time. Without it a SectorShock CANNOT BE
+// APPLIED, and Evaluate reports that through its coverage rather than returning
+// the unshocked book (#640).
 func WithClassifier(c factor.Classifier) Option {
 	return func(cfg *evalConfig) { cfg.classifier = c }
 }
 
+// Reasons a shock could not be applied, in the closed-vocabulary form
+// v1.InputExclusion requires (compute.SkipNoTerms, SkipNoModel, ... are the
+// measure-side siblings). They are metric and audit labels, so they are
+// constants here rather than free text at the call site.
+const (
+	// SkipNoClassifier: no factor.Classifier is wired, so NO position's sector
+	// can be resolved and a SectorShock reaches nothing. A whole-evaluation
+	// exclusion (empty instrument id), not one per position — the shock never
+	// got as far as the book.
+	SkipNoClassifier = "no_classifier"
+	// SkipUnclassified: a classifier is wired and does not know this instrument,
+	// so whether the shock applies to it is unknown. DISTINCT FROM "the position
+	// is in a different sector", which is a real answer and is not recorded.
+	SkipUnclassified = "unclassified_instrument"
+	// SkipShockNamesNoSector: the SectorShock carries neither taxonomy nor code,
+	// so there is nothing to match against. A malformed shock, and the only
+	// reason here that is the caller's rather than the estate's.
+	SkipShockNamesNoSector = "sector_shock_names_no_sector"
+)
+
 // Evaluate applies shocks to a deep clone of p and returns the
-// MeasureSet computed against the shocked state. p is not mutated.
-// The registry parameter selects which measures to compute; nil
-// falls back to compute.DefaultRegistry() for parity with
-// compute.ComputeMeasures.
-func Evaluate(p *domain.Portfolio, shocks []v1.ScenarioShock, registry *compute.Registry, opts ...Option) *domain.MeasureSet {
+// MeasureSet computed against the shocked state, plus the coverage record for
+// the SHOCK APPLICATION itself. p is not mutated. The registry parameter
+// selects which measures to compute; nil falls back to
+// compute.DefaultRegistry() for parity with compute.ComputeMeasures.
+//
+// # The second return value is the whole point, and a zero one is a claim
+//
+// A shock that cannot be applied used to return silently, so Evaluate handed
+// back measures computed over the UNSHOCKED book and nothing said so. Every
+// named scenario in the library — GFC_2008, COVID_2020 and the curve, factor,
+// liquidity and climate stresses — is built from SectorCurve and emits
+// SectorShocks exclusively, so with no classifier wired a 2008 replay reported
+// "no impact" on a real book. That is byte-identical to the answer for a
+// portfolio with no exposure, and it reached a desk through the live
+// POST /v1/portfolios/{id}/scenario route (#640).
+//
+// The coverage is v1.InputCoverage rather than a new type because it is the same
+// question that type already answers for a measure: what did this computation
+// fail to see, how much of it, and which holdings. Contributed counts the
+// positions whose sector WAS resolved, so Contributed=0 with a non-zero
+// ExcludedCount is the total-blindness case.
+//
+// CALLERS MUST NOT IGNORE IT. Engine.EvaluateScenario refuses the request when
+// ExcludedCount is non-zero — see v1.ErrScenarioUnresolvable for why a refusal
+// and not a quality flag.
+func Evaluate(p *domain.Portfolio, shocks []v1.ScenarioShock, registry *compute.Registry, opts ...Option) (*domain.MeasureSet, v1.InputCoverage) {
 	var cfg evalConfig
 	for _, opt := range opts {
 		opt(&cfg)
 	}
-	shocked := cloneWithShocks(p, shocks, cfg)
-	return compute.ComputeMeasures(shocked, registry, nil)
+	cov := newShockCoverage()
+	shocked := cloneWithShocks(p, shocks, cfg, cov)
+	return compute.ComputeMeasures(shocked, registry, nil), cov.result()
 }
+
+// shockCoverage is compute.Coverage plus the per-EVALUATION dedup a shock batch
+// needs. It is not a second coverage record — it is the one record, filled once
+// per position rather than once per (position, shock).
+//
+// A NAMED SCENARIO IS ELEVEN SHOCKS, NOT ONE. library.SectorCurve emits a
+// SectorShock per GICS sector, and the apply loop visits every position for each
+// of them. Counting straight onto the accumulator would report the same
+// unclassified holding eleven times, blow the bounded sample on eleven copies of
+// one instrument, and make the ratio in the refusal message ("N of M resolved")
+// a multiple of the book rather than the book. The counts have to mean
+// positions, because that is what an operator goes and fixes.
+type shockCoverage struct {
+	cov          compute.Coverage
+	noClassifier bool
+	// seen holds the positions already accounted for, contributed or excluded.
+	// One decision per position per evaluation: the classification does not
+	// change between shocks in the same batch, so the second look would be the
+	// same answer counted twice.
+	seen map[domain.InstrumentID]bool
+}
+
+func newShockCoverage() *shockCoverage {
+	return &shockCoverage{seen: map[domain.InstrumentID]bool{}}
+}
+
+// noClassifierWired records the whole-evaluation exclusion, at most once. NOT
+// one per position: the shock never got as far as the book, and inflating the
+// count to the position count would make a deployment-wide gap look like a
+// per-instrument reference-data hole — the two an operator must not confuse.
+func (s *shockCoverage) noClassifierWired() {
+	if s.noClassifier {
+		return
+	}
+	s.noClassifier = true
+	s.cov.ExcludeWhole(SkipNoClassifier)
+}
+
+// malformedShock records a shock that named no sector. Per SHOCK and not
+// deduped, because each malformed entry in a curve is its own defect in the
+// caller's request.
+func (s *shockCoverage) malformedShock() { s.cov.ExcludeWhole(SkipShockNamesNoSector) }
+
+// unclassified records a holding whose sector the wired classifier does not
+// know, so whether any sector shock applies to it is unknown.
+func (s *shockCoverage) unclassified(id domain.InstrumentID) {
+	if s.seen[id] {
+		return
+	}
+	s.seen[id] = true
+	s.cov.Exclude(id, SkipUnclassified)
+}
+
+// resolved records a holding whose sector WAS resolved — it either took a shock
+// or is genuinely in an unshocked sector, and both are real answers.
+func (s *shockCoverage) resolved(id domain.InstrumentID) {
+	if s.seen[id] {
+		return
+	}
+	s.seen[id] = true
+	s.cov.Contributed++
+}
+
+func (s *shockCoverage) result() v1.InputCoverage { return s.cov.Result() }
 
 // cloneWithShocks deep-copies p, applies every known shock, returns
 // the working copy. Position is a plain value struct so the map
 // copy is a true deep copy at the field level.
-func cloneWithShocks(p *domain.Portfolio, shocks []v1.ScenarioShock, cfg evalConfig) *domain.Portfolio {
+func cloneWithShocks(p *domain.Portfolio, shocks []v1.ScenarioShock, cfg evalConfig, cov *shockCoverage) *domain.Portfolio {
 	cp := domain.NewPortfolio(p.ID(), p.BaseCurrency())
 	cp.SetAggregate(domain.AggregateUpdate{
 		AsOf:             p.AsOf(),
@@ -85,7 +192,7 @@ func cloneWithShocks(p *domain.Portfolio, shocks []v1.ScenarioShock, cfg evalCon
 		cp.SetPosition(pos)
 	}
 	for _, shock := range shocks {
-		applyShock(cp, shock, cfg)
+		applyShock(cp, shock, cfg, cov)
 	}
 	return cp
 }
@@ -93,14 +200,14 @@ func cloneWithShocks(p *domain.Portfolio, shocks []v1.ScenarioShock, cfg evalCon
 // applyShock dispatches one shock to its handler. Unknown shock
 // types silently skip — the engine processes large scenario
 // batches and a single unrecognised shock should not abort the run.
-func applyShock(p *domain.Portfolio, shock v1.ScenarioShock, cfg evalConfig) {
+func applyShock(p *domain.Portfolio, shock v1.ScenarioShock, cfg evalConfig, cov *shockCoverage) {
 	switch s := shock.(type) {
 	case v1.PriceShock:
 		applyPriceShock(p, s)
 	case v1.ParallelShift:
 		applyParallelShift(p, s)
 	case v1.SectorShock:
-		applySectorShock(p, s, cfg.classifier)
+		applySectorShock(p, s, cfg.classifier, cov)
 	case v1.VolShock:
 		// A vol shock has no linear MarketValue effect — it only reprices options
 		// under full revaluation (EvaluateReval, DERIV-01e). No-op here so it is a
@@ -131,24 +238,43 @@ func applyParallelShift(p *domain.Portfolio, s v1.ParallelShift) {
 }
 
 // applySectorShock shocks every position whose instrument classifies into
-// s.Sector, resolved point-in-time as of the portfolio's state time. A nil
-// classifier (none wired) makes the shock a no-op — same degradation as an
-// unknown shock type. Instruments the classifier doesn't know are skipped
-// (they don't belong to the shocked sector). ctx is Background: the dispatch
-// is a pure, synchronous step and the classifier's point-in-time semantics
-// ride on asOf, not the context.
-func applySectorShock(p *domain.Portfolio, s v1.SectorShock, c factor.Classifier) {
-	if c == nil {
-		return
-	}
+// s.Sector, resolved point-in-time as of the portfolio's state time. ctx is
+// Background: the dispatch is a pure, synchronous step and the classifier's
+// point-in-time semantics ride on asOf, not the context.
+//
+// # "In a different sector" and "sector unknown" are different answers
+//
+// This doc used to say a nil classifier "makes the shock a no-op — same
+// degradation as an unknown shock type", and that instruments the classifier
+// does not know "are skipped (they don't belong to the shocked sector)". The
+// second sentence is the defect stated as if it were a design: NOT KNOWING an
+// instrument's sector is not evidence that it is outside the shocked one. Both
+// cases left the position at its unshocked value and said nothing, so a stress
+// test on a book nothing could classify returned the book (#640).
+//
+// A position the classifier resolves to a DIFFERENT sector is genuinely
+// unaffected and is not recorded — that is a real answer, the same way a
+// PriceShock against an instrument the portfolio does not hold is a real no-op.
+// The two unresolved cases are recorded, and the caller refuses on them.
+func applySectorShock(p *domain.Portfolio, s v1.SectorShock, c factor.Classifier, cov *shockCoverage) {
 	want := factor.Sector{Taxonomy: s.Taxonomy, Code: s.Code}
 	if want.IsZero() {
+		cov.malformedShock()
+		return
+	}
+	if c == nil {
+		cov.noClassifierWired()
 		return
 	}
 	asOf := p.AsOf()
 	for _, pos := range p.Positions() {
 		cl, ok := c.Classify(context.Background(), string(pos.InstrumentID), asOf)
-		if !ok || cl.Sector != want {
+		if !ok {
+			cov.unclassified(pos.InstrumentID)
+			continue
+		}
+		cov.resolved(pos.InstrumentID)
+		if cl.Sector != want {
 			continue
 		}
 		pos.MarketValue = compute.ShockMoney(pos.MarketValue, s.Pct)

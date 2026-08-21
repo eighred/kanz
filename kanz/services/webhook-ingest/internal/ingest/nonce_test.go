@@ -69,6 +69,7 @@ func pipelineOver(t *testing.T, nonces NonceStore, pub translate.Publisher) *Pip
 	auth := NewAuthenticator(StaticSecrets{"momentum": testSecret}, nil, time.Minute, time.Now,
 		WithNonceStore(nonces))
 	p, err := NewPipeline(Options{
+		Authority: ingestTestAuthority(t),
 		Auth:      auth,
 		Symbols:   StaticSymbols{"BINANCE:BTCUSDT": "BTC-USD"},
 		Prices:    StaticPrices{"BTC-USD": big.NewRat(50000, 1)},
@@ -91,6 +92,7 @@ func pipelineWithPositions(t *testing.T, positions translate.PositionSource, pub
 	auth := NewAuthenticator(StaticSecrets{"momentum": testSecret}, nil, time.Minute, time.Now,
 		WithNonceStore(NewMemoryNonces(time.Minute, 1000)))
 	p, err := NewPipeline(Options{
+		Authority: ingestTestAuthority(t),
 		Auth:      auth,
 		Symbols:   StaticSymbols{"BINANCE:BTCUSDT": "BTC-USD"},
 		Prices:    StaticPrices{"BTC-USD": big.NewRat(50000, 1)},

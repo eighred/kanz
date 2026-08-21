@@ -90,6 +90,7 @@ func TestIntegration_LoopOverNATS(t *testing.T) {
 	// A limit order fills at the limit in SimVenue regardless of the OMS's price
 	// config — so the loop produces fills deterministically.
 	p, err := NewPipeline(Options{
+		Authority: ingestTestAuthority(t),
 		Auth:      NewAuthenticator(StaticSecrets{"momentum": testSecret}, nil, time.Minute, time.Now),
 		Symbols:   StaticSymbols{"BINANCE:BTCUSDT": "BTC-USD"},
 		Prices:    StaticPrices{"BTC-USD": big.NewRat(50000, 1)},

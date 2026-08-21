@@ -274,12 +274,22 @@ var producersWithoutATenantFallback = map[string]tenantRoute{
 	},
 	"services/webhook-ingest/cmd/webhook-ingest": {
 		why: "ROUTE 2, indirect. Every publish this service makes goes through " +
-			"internal/signal/translate, shared with the native alpha runners, which resolves " +
-			"tenant := TenantOf(in.FundID) (translate.go) and stamps it on both the StrategySignal " +
-			"FACT (:339) and every SubmitOrder command (:399). It cannot be empty: Intent.validate " +
-			"rejects an empty FundID (:255) and the default TenantOf returns the fund_id (:170). " +
+			"internal/signal/translate, shared with the native alpha runners, which resolves the " +
+			"tenant from translate.Options.Authority — a FundAuthority built from configuration — " +
+			"and stamps it on both the StrategySignal FACT (translate.publishSignal) and every " +
+			"SubmitOrder command (translate.publishCommand). It cannot be empty: translate.Emit " +
+			"refuses with translate.ErrUnboundFund, before publishing anything, when " +
+			"FundAuthority.TenantForFund declines the (strategy, fund) pair, and " +
+			"translate.NewFundAuthority refuses a fund declaring no tenant at startup. " +
 			"One webhook endpoint serves many funds, so a per-service fallback would be the wrong " +
-			"tenant for all but one of them.",
+			"tenant for all but one of them. " +
+			"THIS ENTRY USED TO DESCRIBE A DIFFERENT MECHANISM, and the difference was a P0. The " +
+			"seam was TenantOf(fund_id): optional, defaulting to the identity function, and " +
+			"assigned at NO composition root — so the tenant of a signal-originated order was the " +
+			"fund_id out of the request body, on the one service the internet talks to (#632). " +
+			"This guard stayed green throughout, correctly: it asks whether a tenant is STAMPED, " +
+			"never whether the caller was entitled to name it. " +
+			"test/arch/signal_fund_binding_test.go asks the second question.",
 		stampedIn: "internal/signal/translate/translate.go",
 	},
 }

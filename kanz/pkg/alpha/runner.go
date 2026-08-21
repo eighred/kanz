@@ -55,14 +55,31 @@ type Config struct {
 	// registered: an autonomous loop firing every 100ms with no operational brake
 	// leaves `kill -9` as the only risk control, which is not one.
 	Gate *halt.Gate
-	// TenantOf maps a fund to its tenant; nil ⇒ the fund is the tenant.
-	TenantOf func(fundID string) string
+	// Authority binds each strategy to the funds it may trade and each fund to its
+	// tenant. REQUIRED IF engines are registered — translate.New refuses a nil one,
+	// and alpha.New surfaces that as "the signal path must be wired".
+	//
+	// IT SHARED #632's EXPOSURE, latently. This field was `TenantOf func(fundID)
+	// string`, handed straight to translate.Options, whose nil default made the fund
+	// id the tenant. No shipped binary reaches it — market-ingest, the only
+	// alpha.New caller in this module, registers NO engines, so no Translator is
+	// built and no signal is ever emitted — but the restricted layer that supplies
+	// engines would have inherited the identical defect through the identical seam,
+	// and would have inherited it silently. Repaired at the same time and in the
+	// same way, rather than exempted: a fix that lands on one of two callers of a
+	// shared fan-out is how the next occurrence gets written.
+	//
+	// A native engine's "strategy" is in-process, so its binding is not an
+	// authentication decision — it is the statement of which fund's capital that
+	// engine is allowed to commit, which is worth being explicit about for exactly
+	// the same reason.
+	Authority translate.FundAuthority
 
 	// MarketDataTenant is the tenant stamped on BOOK SNAPSHOTS, which are shared
 	// reference data and belong to no fund — every fund sees the same BTC-USD
-	// book — so TenantOf cannot answer for them: there is no fund to ask about.
+	// book — so Authority cannot answer for them: there is no fund to ask about.
 	//
-	// It is separate from TenantOf for that reason, not by oversight. Snapshots
+	// It is separate from Authority for that reason, not by oversight. Snapshots
 	// publish off a ticker with no inbound envelope, so leaving this empty makes
 	// them depend entirely on the caller's ProducerConfig.Tenant; a caller that
 	// leaves that empty and supplies tenants per-event will have every snapshot
@@ -138,7 +155,7 @@ func New(cfg Config) (*Runner, error) {
 		tr, err := translate.New(translate.Options{
 			Prices: cfg.Prices, Equity: cfg.Equity, Positions: cfg.Positions,
 			Alloc: cfg.Alloc, Publisher: cfg.Publisher, Gate: cfg.Gate,
-			TenantOf: cfg.TenantOf, Now: cfg.Now,
+			Authority: cfg.Authority, Now: cfg.Now,
 		})
 		if err != nil {
 			return nil, fmt.Errorf("alpha: engines are registered, so the signal path must be wired: %w", err)

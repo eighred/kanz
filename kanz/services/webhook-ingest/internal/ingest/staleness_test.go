@@ -21,6 +21,7 @@ func agedHarness(t *testing.T, max time.Duration, now time.Time, allowUnstamped 
 	t.Helper()
 	cap := &capture{}
 	p, err := NewPipeline(Options{
+		Authority:            ingestTestAuthority(t),
 		Auth:                 NewAuthenticator(StaticSecrets{"momentum": testSecret}, nil, time.Minute, func() time.Time { return now }),
 		Symbols:              StaticSymbols{"BINANCE:BTCUSDT": "BTC-USD"},
 		Prices:               StaticPrices{"BTC-USD": big.NewRat(50_000, 1)},
@@ -89,6 +90,7 @@ func TestPerimeter_AnUnstampedAlertIsRefusedAndCounted(t *testing.T) {
 	cap := &capture{}
 	now := alertFired
 	p, err := NewPipeline(Options{
+		Authority:         ingestTestAuthority(t),
 		Auth:              NewAuthenticator(StaticSecrets{"momentum": testSecret}, nil, time.Minute, func() time.Time { return now }),
 		Symbols:           StaticSymbols{"BINANCE:BTCUSDT": "BTC-USD"},
 		Prices:            StaticPrices{"BTC-USD": big.NewRat(50_000, 1)},
@@ -210,6 +212,7 @@ func TestPerimeter_APipelineThatWasNotToldTheBoundIsStillBounded(t *testing.T) {
 	cap := &capture{}
 	now := alertFired.Add(30 * time.Minute)
 	p, err := NewPipeline(Options{
+		Authority: ingestTestAuthority(t),
 		Auth:      NewAuthenticator(StaticSecrets{"momentum": testSecret}, nil, time.Minute, func() time.Time { return now }),
 		Symbols:   StaticSymbols{"BINANCE:BTCUSDT": "BTC-USD"},
 		Prices:    StaticPrices{"BTC-USD": big.NewRat(50_000, 1)},

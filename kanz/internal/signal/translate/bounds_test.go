@@ -60,6 +60,7 @@ func boundedTranslator(t *testing.T, max Qty) (*Translator, *recorder) {
 		Alloc:       StaticAllocation{"fund-alpha": {{Venue: "BINANCE", Weight: big.NewRat(1, 1)}}},
 		Publisher:   rec,
 		Gate:        halt.OpenGate(nil),
+		Authority:   boundAuthority(t),
 		MaxQuantity: max,
 	})
 	if err != nil {
@@ -255,6 +256,7 @@ func TestNew_RefusesWeightsThatAreNotASplit(t *testing.T) {
 				Prices: StaticPrices{}, Equity: StaticEquity{}, Positions: StaticPositions{},
 				Alloc:     StaticAllocation{"fund-alpha": tc.legs},
 				Publisher: &recorder{}, Gate: halt.OpenGate(nil),
+				Authority: boundAuthority(t),
 			})
 			if !errors.Is(err, ErrBadAllocation) {
 				t.Fatalf("New = %v, want ErrBadAllocation — this allocation scales every order "+
@@ -275,6 +277,7 @@ func TestNew_AcceptsARealSplit(t *testing.T) {
 			{Venue: "OKX", Weight: big.NewRat(4, 10)},
 		}},
 		Publisher: &recorder{}, Gate: halt.OpenGate(nil),
+		Authority: boundAuthority(t),
 	})
 	if err != nil {
 		t.Fatalf("New on a valid 0.6/0.4 split = %v", err)
