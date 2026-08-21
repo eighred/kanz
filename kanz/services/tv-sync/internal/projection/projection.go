@@ -2,6 +2,7 @@ package projection
 
 import (
 	"context"
+	"github.com/eighred/kanz/internal/fillfact"
 	"math/big"
 	"sort"
 	"sync"
@@ -18,8 +19,8 @@ import (
 const (
 	evtAccepted        = "order.order.accepted"
 	evtRouted          = "order.order.routed"
-	evtPartiallyFilled = "order.order.partially_filled"
-	evtFilled          = "order.order.filled"
+	evtPartiallyFilled = fillfact.SubjectPartiallyFilled
+	evtFilled          = fillfact.SubjectFilled
 	evtRejected        = "order.order.rejected"
 	evtCancelled       = "order.order.cancelled"
 	evtExpired         = "order.order.expired"

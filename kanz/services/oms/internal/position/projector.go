@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/eighred/kanz/internal/fillfact"
 
 	domainpb "github.com/eighred/kanz/kanz-schemas-go/domain/v1"
 	envelopepb "github.com/eighred/kanz/kanz-schemas-go/envelope/v1"
@@ -156,8 +157,8 @@ func decodeFill(eventType string, payload []byte) (*orderpb.Fill, string, error)
 // subject). These are stable wire contracts; a change is a breaking bus change
 // caught by the schema/contract tests, not a silent drift.
 const (
-	orderEventFilled          = "order.order.filled"
-	orderEventPartiallyFilled = "order.order.partially_filled"
+	orderEventFilled          = fillfact.SubjectFilled
+	orderEventPartiallyFilled = fillfact.SubjectPartiallyFilled
 	// positionEventChanged mirrors risk's ingest.EventTypePositionChanged — the
 	// subject the risk engine ingests PositionState FACTs on.
 	positionEventChanged = "risk.position.changed"

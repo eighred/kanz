@@ -17,7 +17,7 @@ func d(coeff int64, exp int32) *commonpb.Decimal {
 }
 
 func fill(side orderpb.Side, qty, price *commonpb.Decimal) *orderpb.Fill {
-	return &orderpb.Fill{
+	return &orderpb.Fill{FillId: "F-test",
 		InstrumentId: "AAPL",
 		Side:         side,
 		Quantity:     qty,

@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/eighred/kanz/internal/fillfact"
 	"math/big"
 	"strconv"
 	"time"
@@ -163,10 +164,10 @@ func (i *OKXUserDataIngester) handle(ctx context.Context, raw []byte) error {
 			Venue:          i.venue,
 			AsOf:           timestamppb.New(uTime(d.UTime)),
 		}
-		subject := "order.order.partially_filled"
+		subject := fillfact.SubjectPartiallyFilled
 		var payload proto.Message = &orderpb.OrderPartiallyFilled{OrderId: orderID, Fill: fill, State: healed}
 		if d.State == "filled" {
-			subject = "order.order.filled"
+			subject = fillfact.SubjectFilled
 			payload = &orderpb.OrderFilled{OrderId: orderID, Fill: fill, State: healed}
 		}
 		if err := i.pub.Publish(ctx, bus.Event{

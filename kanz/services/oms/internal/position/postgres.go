@@ -16,6 +16,7 @@ import (
 
 	"github.com/eighred/kanz/internal/costbasis"
 	"github.com/eighred/kanz/internal/dec"
+	"github.com/eighred/kanz/internal/fillfact"
 )
 
 // Store is the position book. Memory (*Book) is correct for exactly ONE replica;
@@ -55,41 +56,23 @@ type Applied struct {
 	Aggregate *domainpb.PositionState
 }
 
-// ErrFillNotIdentified: a fill with no fill_id cannot be deduplicated, so folding it
-// would risk counting the same trade twice — once per pod, or again on a redelivery.
-// Every venue stamps one (Binance "symbol-tradeID", OKX "instId-tradeId", the sim
-// generates one), so an empty id is a defect in the producer, not a case to tolerate.
-// Silently double-counting a fill is how a fund's position drifts from the exchange's.
-var ErrFillNotIdentified = errors.New("position: fill has no fill_id and cannot be folded exactly once")
-
-// ErrFillHasNoVenue: a fill with no venue cannot be attributed to a holding.
+// THE THREE SENTINELS NOW LIVE IN internal/fillfact, AND THESE ARE THAT PACKAGE'S (#631).
 //
-// A position sits AT a venue — that is what makes it closable, and what makes its collateral
-// segregable (EXEC-M16). order.v1.Fill has always carried the venue; a fill arriving without
-// one is a producer defect, and folding it into a venue-less bucket would create a holding
-// that no CLOSE could ever reach.
-var ErrFillHasNoVenue = errors.New("position: fill has no venue — a holding that belongs to no exchange cannot be closed")
-
-// ErrFillQuantityNotPositive: a fill that moved nothing is a producer defect, and
-// folding it PANICS.
+// They were declared here, with the incident behind each one written beside it —
+// and the accounting ledger, which folds the SAME order.order.filled FACT into
+// the IBOR, refused none of them. Worse, this package disagreed with ITSELF:
+// book.go checked venue and quantity and not fill_id, so the in-memory book
+// accepted a fill the Postgres book parked.
 //
-// foldLot's re-average divides by the new absolute quantity. For a lot this pod has
-// not folded before (cur == 0) a zero-quantity fill leaves that divisor at zero, and
-// big.Rat.Quo panics `division by zero` — reproduced, and it is where #217 came from.
-// Nothing recovered it, the delivery was never acked, and the broker redelivered it
-// into the replacement pod: one malformed fill FACT, and the OMS crash-looped
-// estate-wide until someone removed the message by hand.
-//
-// The order aggregate has always rejected this input — aggregate.go's
-// `fill quantity must be > 0`. The projector is a SECOND consumer of the same
-// order.order.filled subject and did not, so the two disagreed about what a valid
-// fill is. This is that guard, on the other path. dec.FromProto(nil) yields zero, so
-// this also covers an ABSENT quantity, not just a literal 0.
-//
-// Refusing is right rather than skipping: a fill that moves no quantity carries no
-// information a position book can use, and silently ignoring it would hide a
-// misbehaving producer behind a healthy-looking consumer.
-var ErrFillQuantityNotPositive = errors.New("position: fill quantity must be > 0 — a fill that moves nothing cannot be folded into a holding")
+// Kept as aliases rather than deleted because `errors.Is(err,
+// position.ErrFillQuantityNotPositive)` is the shape callers and tests already
+// use, and an alias keeps that working while there is exactly ONE value behind
+// it. New code should prefer the fillfact names.
+var (
+	ErrFillNotIdentified       = fillfact.ErrNotIdentified
+	ErrFillHasNoVenue          = fillfact.ErrHasNoVenue
+	ErrFillQuantityNotPositive = fillfact.ErrQuantityNotPositive
+)
 
 // Postgres is the durable, cross-pod position book.
 type Postgres struct {
@@ -129,14 +112,10 @@ var (
 //     that just changed one of them, and under the lock from step 1, so the aggregate
 //     cannot disagree with the rows it came from.
 func (p *Postgres) Apply(ctx context.Context, portfolioID string, fill *orderpb.Fill, asOf time.Time) (*Applied, error) {
-	if fill.GetFillId() == "" {
-		return nil, ErrFillNotIdentified
-	}
-	if fill.GetVenue() == "" {
-		return nil, ErrFillHasNoVenue
-	}
-	if !dec.IsPositive(fill.GetQuantity()) {
-		return nil, ErrFillQuantityNotPositive
+	// ONE VALIDATION, SHARED WITH THE LEDGER (#631). Both books fold the same
+	// FACT and must agree about which ones they will fold.
+	if err := fillfact.Validate(fill); err != nil {
+		return nil, err
 	}
 	venue, instrument := fill.GetVenue(), fill.GetInstrumentId()
 	price := dec.FromProto(fill.GetPrice())

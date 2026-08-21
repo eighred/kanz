@@ -37,7 +37,7 @@ func TestBookApplyRefusesNonPositiveQuantity(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			b := NewBook("USD")
-			got, err := b.Apply(context.Background(), "p1", &orderpb.Fill{
+			got, err := b.Apply(context.Background(), "p1", &orderpb.Fill{FillId: "F-zero",
 				Venue:        "XBIN",
 				InstrumentId: "BTC-USD",
 				Quantity:     tc.qty,
@@ -60,7 +60,7 @@ func TestBookApplyRefusesNonPositiveQuantity(t *testing.T) {
 // A valid fill must still fold, or the guard above is just a way to break the book.
 func TestBookApplyStillFoldsAPositiveFill(t *testing.T) {
 	b := NewBook("USD")
-	got, err := b.Apply(context.Background(), "p1", &orderpb.Fill{
+	got, err := b.Apply(context.Background(), "p1", &orderpb.Fill{FillId: "F-zero",
 		Venue:        "XBIN",
 		InstrumentId: "BTC-USD",
 		Quantity:     &commonpb.Decimal{Coefficient: 2, Exponent: 0},

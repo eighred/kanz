@@ -14,6 +14,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/eighred/kanz/internal/fillfact"
 	"log/slog"
 	"time"
 
@@ -32,8 +33,8 @@ import (
 // internal package — the Go internal-package rule forbids it across the service
 // boundary, the same stance ledger.FromFill and the position projector take).
 const (
-	orderEventFilled          = "order.order.filled"
-	orderEventPartiallyFilled = "order.order.partially_filled"
+	orderEventFilled          = fillfact.SubjectFilled
+	orderEventPartiallyFilled = fillfact.SubjectPartiallyFilled
 )
 
 // Cash-movement FACT event types (WIRE-01f): the accounting.v1.LedgerEntry
