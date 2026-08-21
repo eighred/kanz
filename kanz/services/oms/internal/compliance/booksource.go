@@ -28,8 +28,13 @@ type BookSource struct {
 // A SEAM AND NOT A QUERY. This is read on the order-admission path; a call into
 // accounting here would put an externally-owned latency in front of every order
 // and turn a degraded accounting service into a trading outage.
+//
+// completeness is what the ANNOUNCING deployment said that total contains
+// (#614), or nil when it said nothing — which is not the same as "nothing is
+// missing" and must not be flattened into it. It is carried onto the Book so a
+// buying-power refusal can name what the balance was short of.
 type CashSource interface {
-	Spendable(portfolioID string) (total *commonpb.Decimal, currency string, ok bool)
+	Spendable(portfolioID string) (total *commonpb.Decimal, currency string, completeness *comp.CashCompleteness, ok bool)
 }
 
 // NewBookSource wraps the position book. cash may be nil, and then every Book
@@ -75,9 +80,18 @@ func (s *BookSource) Book(ctx context.Context, portfolioID string) (*comp.Book, 
 	// BuyingPowerRule refuses on that with a named reason. Substituting a zero
 	// would read as an empty account — a breach rather than an unknown — and the
 	// difference decides whether an order is refused for a reason or for a fiction.
+	//
+	// AND WHAT THAT NUMBER IS MISSING TRAVELS WITH IT (#614). accounting folds six
+	// kinds of journal entry and nothing on this platform produces two of them, so
+	// the announced balance omits every dividend, coupon and merger payment (#588).
+	// BuyingPowerRule fails closed on the short number either way — the sign of the
+	// error is not knowable, so inflating it would be a guess that admits orders
+	// the fund cannot pay for — but the refusal now SAYS what it could not account
+	// for instead of reading as a spending limit.
 	if s.cash != nil {
-		if total, currency, ok := s.cash.Spendable(portfolioID); ok {
+		if total, currency, completeness, ok := s.cash.Spendable(portfolioID); ok {
 			b.Cash = &commonpb.Money{Amount: total, CurrencyCode: currency}
+			b.CashCompleteness = completeness
 		}
 	}
 	// RISK COMES FROM THE RISK ENGINE, FOLDED LOCALLY (#438). Bound as a closure

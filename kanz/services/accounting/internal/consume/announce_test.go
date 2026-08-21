@@ -46,11 +46,21 @@ func (p *capturingPublisher) last() *accountingpb.PortfolioCashBalance {
 	return msg
 }
 
+// testPosture is what a deployment with the shipped feeds looks like: fills,
+// cash and fees are fed; corporate actions and accruals have no producer
+// ANYWHERE in this platform (#588). Every announcer under test states it,
+// because a test whose producer says nothing would exercise the one path
+// production must never take.
+var testPosture = EntrySourcePosture{
+	Produced:   []string{"trade", "cash", "fee"},
+	Unproduced: []string{"corporate_action", "accrual"},
+}
+
 func announcerOver(t *testing.T, pub Publisher) (*Announcer, ledger.Store) {
 	t.Helper()
 	st := ledger.NewMemoryStore()
 	at := time.Unix(1_700_000_000, 0).UTC()
-	return NewAnnouncer(st, pub, "USD", nil, func() time.Time { return at }), st
+	return NewAnnouncer(st, pub, "USD", testPosture, nil, func() time.Time { return at }), st
 }
 
 func cashEntry(id, portfolio, account, ccy string, amount int64) *ledger.Event {
@@ -170,7 +180,7 @@ func TestFolderKeepsFoldingWhenTheAnnouncementFails(t *testing.T) {
 	st := ledger.NewMemoryStore()
 	at := time.Unix(1_700_000_000, 0).UTC()
 	pub := &capturingPublisher{err: errors.New("broker unhappy")}
-	ann := NewAnnouncer(st, pub, "USD", nil, func() time.Time { return at })
+	ann := NewAnnouncer(st, pub, "USD", testPosture, nil, func() time.Time { return at })
 	f, err := NewFolder(testTenant, st, "USD", WithAnnouncer(ann))
 	if err != nil {
 		t.Fatalf("NewFolder: %v", err)
@@ -204,7 +214,7 @@ func TestFolderAnnouncesAfterASuccessfulFold(t *testing.T) {
 	st := ledger.NewMemoryStore()
 	at := time.Unix(1_700_000_000, 0).UTC()
 	pub := &capturingPublisher{}
-	ann := NewAnnouncer(st, pub, "USD", nil, func() time.Time { return at })
+	ann := NewAnnouncer(st, pub, "USD", testPosture, nil, func() time.Time { return at })
 	f, err := NewFolder(testTenant, st, "USD", WithAnnouncer(ann))
 	if err != nil {
 		t.Fatalf("NewFolder: %v", err)

@@ -7,6 +7,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 
 	"github.com/eighred/kanz/services/accounting/internal/config"
+	"github.com/eighred/kanz/services/accounting/internal/consume"
 	"github.com/eighred/kanz/services/accounting/internal/ledger"
 )
 
@@ -119,6 +120,70 @@ func entrySourcePostures(cfg config.Config) map[ledger.EntryType]entrySource {
 	}
 }
 
+// classifyEntrySources partitions EVERY entry type the ledger declares into the
+// ones something in this build produces and the ones nothing does. undeclared is
+// the subset of unproduced that no posture describes at all — a type someone
+// added to the ledger and forgot here.
+//
+// ONE CLASSIFICATION, TWO READERS. The gauge (seedEntrySourcePosture) and the
+// statement carried on every cash announcement (entrySourceCompleteness) must
+// never be able to disagree: an operator told by /metrics that corporate actions
+// are unfed, while the balances say they are fed, is worse off than one told
+// nothing. So neither reader iterates the posture map itself.
+//
+// It iterates ledger.EntryTypes rather than the map for the reason the gauge
+// does: a type declared in the ledger and forgotten here is still reported, as
+// unproduced, rather than being silently absent from both readers.
+func classifyEntrySources(postures map[ledger.EntryType]entrySource) (produced, unproduced, undeclared []ledger.EntryType) {
+	for _, typ := range ledger.EntryTypes {
+		// The zero value is not a source: it is what an unset Type decodes to, and
+		// an entry carrying it is a decoder bug rather than a feed. Named as the
+		// exact constant so a NEW type can never fall through this skip.
+		if typ == ledger.EntryUnspecified {
+			continue
+		}
+		p, declared := postures[typ]
+		switch {
+		case !declared:
+			unproduced = append(unproduced, typ)
+			undeclared = append(undeclared, typ)
+		case p.wired:
+			produced = append(produced, typ)
+		default:
+			unproduced = append(unproduced, typ)
+		}
+	}
+	return produced, unproduced, undeclared
+}
+
+// entrySourceCompleteness is the same posture the gauge reports, in the shape
+// that rides on every cash-balance announcement (#614) — so a consumer of a
+// balance learns what it omits from the balance itself, rather than being
+// expected to scrape the producer's /metrics before trusting a number on the
+// order-admission path.
+func entrySourceCompleteness(cfg config.Config) consume.EntrySourcePosture {
+	produced, unproduced, _ := classifyEntrySources(entrySourcePostures(cfg))
+	return consume.EntrySourcePosture{
+		Produced:   entryTypeNames(produced),
+		Unproduced: entryTypeNames(unproduced),
+	}
+}
+
+// entryTypeNames renders entry types by the book's own names, sorted. Never nil
+// for a non-empty input, and nil for an empty one: an empty list on the wire is
+// how "this deployment feeds everything it folds" is spelled.
+func entryTypeNames(types []ledger.EntryType) []string {
+	if len(types) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(types))
+	for _, t := range types {
+		out = append(out, t.String())
+	}
+	sort.Strings(out)
+	return out
+}
+
 // stateEntrySourcePosture registers kanz_accounting_entry_source_wired with one
 // series for EVERY entry type the ledger declares, and says out loud which of
 // them nothing produces. It returns the unwired label names, sorted — the same
@@ -147,41 +212,34 @@ func seedEntrySourcePosture(reg prometheus.Registerer, logger *slog.Logger, post
 	}, []string{"type"})
 	reg.MustRegister(g)
 
-	var wired, unwired []string
-	for _, typ := range ledger.EntryTypes {
-		// The zero value is not a source: it is what an unset Type decodes to, and
-		// an entry carrying it is a decoder bug rather than a feed. Named as the
-		// exact constant so a NEW type can never fall through this skip.
-		if typ == ledger.EntryUnspecified {
-			continue
-		}
+	producedTypes, unproducedTypes, undeclaredTypes := classifyEntrySources(postures)
+	undeclared := map[ledger.EntryType]bool{}
+	for _, typ := range undeclaredTypes {
+		undeclared[typ] = true
+	}
+	for _, typ := range producedTypes {
+		g.WithLabelValues(typ.String()).Set(1)
+	}
+	for _, typ := range unproducedTypes {
 		name := typ.String()
-		p, declared := postures[typ]
-		if !declared {
-			// A type was added to the ledger and nobody stated its posture. Seed it
-			// at 0 and SAY SO: silently omitting it would put the new type in the
+		g.WithLabelValues(name).Set(0)
+		if undeclared[typ] {
+			// A type was added to the ledger and nobody stated its posture. Seeded
+			// at 0 and SAID SO: silently omitting it would put the new type in the
 			// one state this whole file exists to abolish — absent rather than zero.
-			g.WithLabelValues(name).Set(0)
-			unwired = append(unwired, name)
 			logger.Error("accounting: journal entry type has NO PRODUCER POSTURE DECLARED — it is "+
 				"reported as unwired because nothing here says otherwise; add it to "+
 				"entrySourcePostures", "type", name)
 			continue
 		}
-		if p.wired {
-			g.WithLabelValues(name).Set(1)
-			wired = append(wired, name)
-			continue
-		}
-		g.WithLabelValues(name).Set(0)
-		unwired = append(unwired, name)
+		p := postures[typ]
 		logger.Warn("accounting: NOTHING PRODUCES this kind of journal entry — the ledger folds it "+
 			"correctly and never receives one, so the book silently carries on as though none "+
 			"occurred", "type", name, "fold", p.what, "why", p.why, "would_arm_it", p.arm,
 			"gauge", "kanz_accounting_entry_source_wired{type=\""+name+"\"}=0")
 	}
-	sort.Strings(wired)
-	sort.Strings(unwired)
+	wired := entryTypeNames(producedTypes)
+	unwired := entryTypeNames(unproducedTypes)
 
 	if len(unwired) == 0 {
 		logger.Info("accounting: every journal entry type this book folds has a producer", "types", wired)

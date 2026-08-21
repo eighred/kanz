@@ -36,7 +36,7 @@ func TestHandle_FoldsTheAnnouncedBalance(t *testing.T) {
 	if err := v.Handle(context.Background(), nil, announcement(t, "PF1", 750, t0)); err != nil {
 		t.Fatalf("Handle: %v", err)
 	}
-	total, ccy, ok := v.Spendable("PF1")
+	total, ccy, _, ok := v.Spendable("PF1")
 	if !ok {
 		t.Fatal("the balance was not folded")
 	}
@@ -56,7 +56,7 @@ func TestHandle_FoldsTheAnnouncedBalance(t *testing.T) {
 // or for a fiction.
 func TestSpendable_UnannouncedIsUnknownNotZero(t *testing.T) {
 	v := New(WithClock(func() time.Time { return t0 }))
-	if _, _, ok := v.Spendable("never-seen"); ok {
+	if _, _, _, ok := v.Spendable("never-seen"); ok {
 		t.Fatal("an unannounced portfolio reported a balance — unknown must not become zero")
 	}
 }
@@ -80,12 +80,12 @@ func TestSpendable_StaleBalanceIsUnknown(t *testing.T) {
 	if err := v.Handle(context.Background(), nil, announcement(t, "PF1", 750, t0)); err != nil {
 		t.Fatalf("Handle: %v", err)
 	}
-	if _, _, ok := v.Spendable("PF1"); !ok {
+	if _, _, _, ok := v.Spendable("PF1"); !ok {
 		t.Fatal("a fresh balance was treated as stale")
 	}
 
 	now = t0.Add(6 * time.Minute)
-	if _, _, ok := v.Spendable("PF1"); ok {
+	if _, _, _, ok := v.Spendable("PF1"); ok {
 		t.Fatal("a balance older than the bound was served as current — a portfolio that has " +
 			"since spent everything would keep passing a buying-power check")
 	}
@@ -107,7 +107,7 @@ func TestHandle_IsAReplaceNotAnAccumulate(t *testing.T) {
 			t.Fatalf("Handle: %v", err)
 		}
 	}
-	total, _, _ := v.Spendable("PF1")
+	total, _, _, _ := v.Spendable("PF1")
 	if got := dec.FromProto(total).RatString(); got != "750" {
 		t.Fatalf("after three deliveries of one level, total = %s, want 750", got)
 	}
@@ -115,7 +115,7 @@ func TestHandle_IsAReplaceNotAnAccumulate(t *testing.T) {
 	if err := v.Handle(ctx, nil, announcement(t, "PF1", 500, t0)); err != nil {
 		t.Fatalf("Handle: %v", err)
 	}
-	total, _, _ = v.Spendable("PF1")
+	total, _, _, _ = v.Spendable("PF1")
 	if got := dec.FromProto(total).RatString(); got != "500" {
 		t.Fatalf("a later level did not replace the earlier one: total = %s, want 500", got)
 	}
@@ -151,7 +151,7 @@ func TestHandle_AcksGarbage(t *testing.T) {
 	if err := v.Handle(context.Background(), nil, []byte("not a proto")); err != nil {
 		t.Fatalf("Handle(garbage) = %v, want nil (ack) — a nack replays it forever", err)
 	}
-	if _, _, ok := v.Spendable("PF1"); ok {
+	if _, _, _, ok := v.Spendable("PF1"); ok {
 		t.Fatal("garbage produced a balance")
 	}
 }
@@ -180,7 +180,7 @@ func TestHandle_RefusesAnOutOfDomainExponent(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("Handle did not return — the exponent was materialised instead of refused (#95)")
 	}
-	if _, _, ok := v.Spendable("PF1"); ok {
+	if _, _, _, ok := v.Spendable("PF1"); ok {
 		t.Fatal("an out-of-domain balance was folded")
 	}
 }
