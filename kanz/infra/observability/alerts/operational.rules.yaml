@@ -877,6 +877,147 @@ groups:
           description: "kanz_inference_predict_in_flight has sat at or above kanz_inference_admission_limit continuously for ten minutes, so this is saturation rather than a burst: every request arriving now is refused and counted as kanz_inference_degraded_total{reason=\"pool_saturated\"}. Either the concurrency limit is too low for the offered load or predictions are taking long enough to hold slots open — compare kanz_inference_predict_seconds over the same window before raising the limit, because raising it against slow predictions moves the queue rather than draining it."
 
   # ===========================================================================
+  - name: dr_recoverability
+  # ===========================================================================
+  # IS THE BACKUP STILL WORKING? Nothing anywhere answered that (#624).
+  #
+  # infra/dr/postgres/cluster.yaml declares continuous WAL archiving and PITR for
+  # six clusters — the order book, the IBOR ledger, the evidence chain, the venue
+  # mappings, the schema registry and the platform's own credentials — and states
+  # an RPO of <=30s. Every part of that was a DECLARATION. A WAL archive that
+  # stopped and a WAL archive that is healthy produced identical signals: none.
+  #
+  # The kanz-dr-s3 secret is created out of band, by hand, in two regions
+  # (infra/dr/postgres/README.md). Rotate that key, delete the bucket, hit a
+  # quota or mistype a path and: the primary keeps serving, every readiness probe
+  # stays green, all 32 alerts stay quiet, pg_wal grows against a 10-100Gi volume,
+  # and the recoverable window silently ages out to nothing. The first signal is a
+  # FAILED RESTORE, which is the moment a signal is worthless.
+  #
+  # KanzScrapeTargetDown cannot cover it, and the reason is worth stating because
+  # it is the general trap: that rule is `up{job="kanz-pods"} == 0`. A pod that
+  # was never DISCOVERED has no `up` series at all, so it is not down — it is
+  # absent, and absence of a target produces absence of an alert. Until the
+  # inheritedMetadata annotations in cluster.yaml landed, no Postgres pod entered
+  # the job.
+  #
+  # THE METRIC NAMES BELOW ARE CloudNativePG'S, AND NOTHING IN THIS REPOSITORY
+  # CAN CHECK THEM. No CNPG version is pinned anywhere here (cluster.yaml's own
+  # header says so), there is no CNPG in the dev rig, and a rule over a
+  # misspelled metric compares a threshold against an empty vector and can never
+  # fire — which is precisely the defect #62 deleted ten rules for. That is what
+  # PostgresBackupTelemetryMissing at the end of this group exists to catch: if
+  # this whole family is absent while kanz-data IS being scraped, the alerting
+  # layer says so instead of going quiet. Getting the names wrong is survivable;
+  # getting them wrong SILENTLY is not.
+    rules:
+      # THE BASE BACKUP STOPPED. ScheduledBackup runs at 02:00 daily, so a
+      # last-available backup older than 26h means at least one run did not
+      # happen or did not complete — two hours of slack for a long base backup on
+      # the 100Gi cluster plus clock skew.
+      #
+      # PITR is base backup + replayed WAL. WAL alone restores nothing, so this
+      # is the half that decides whether the archive has anything to replay ONTO.
+      - alert: PostgresBackupStale
+        expr: time() - max by (namespace, pod) (cnpg_collector_last_available_backup_timestamp) > 93600
+        for: 30m
+        labels: { severity: critical, layer: operational }
+        annotations:
+          summary: "No completed Postgres base backup for {{ $labels.pod }} in over 26 hours"
+          description: "The daily 02:00 ScheduledBackup has not produced a completed base backup for more than 26 hours. Point-in-time recovery is base backup + replayed WAL, so however healthy the WAL archive is, there is an ageing base to replay onto and the recoverable window is now bounded by whatever the last successful backup was. Check the Backup objects (kubectl -n kanz-data get backup), then the kanz-dr-s3 credentials and the bucket — that secret is created out of band and its rotation is invisible to this cluster until a backup tries to use it."
+
+      # BACKUPS ARE FAILING, AS OPPOSED TO MERELY OLD. Distinct from the rule
+      # above and fires sooner: a cluster that is ACTIVELY failing its backups is
+      # a different, faster-moving fault than one that quietly stopped, and it
+      # names itself before the 26h staleness threshold is reached.
+      - alert: PostgresBackupFailing
+        expr: max by (namespace, pod) (cnpg_collector_last_failed_backup_timestamp) > max by (namespace, pod) (cnpg_collector_last_available_backup_timestamp)
+        for: 15m
+        labels: { severity: critical, layer: operational }
+        annotations:
+          summary: "The most recent Postgres backup attempt for {{ $labels.pod }} FAILED"
+          description: "The last failed backup is more recent than the last successful one, so the newest thing this cluster tried to do was fail. Every hour this persists is an hour added to the worst-case recovery point. Read the failure from the Backup object's status (kubectl -n kanz-data describe backup) rather than guessing: the common causes are an expired or rotated kanz-dr-s3 key, a bucket policy change, and the object store rejecting on quota."
+
+      # THE RPO KILLER, AND THE ONE WITH NO OTHER SYMPTOM. archive_command
+      # failures do not stop the database — Postgres retries, and pg_wal grows.
+      # The declared RPO of <=30s rests entirely on the archive succeeding, so a
+      # rising failure count means the true RPO is now "since the archive last
+      # worked" while every dashboard still shows a healthy primary.
+      #
+      # increase() over 15m rather than a rate threshold: ANY sustained archive
+      # failure is actionable, and the number of failures says nothing extra.
+      - alert: PostgresWALArchiveFailing
+        expr: increase(cnpg_pg_stat_archiver_failed_count[15m]) > 0
+        for: 15m
+        labels: { severity: critical, layer: operational }
+        annotations:
+          summary: "Postgres WAL archiving is failing on {{ $labels.pod }} — the RPO is no longer bounded"
+          description: "pg_stat_archiver reports failed archive attempts over the last 15 minutes and has kept reporting them. cluster.yaml claims archive_timeout=30s bounds the object-store RPO to <=30s; that claim is void while this fires, and the real recovery point is the last WAL segment that reached the bucket. Postgres does NOT stop when archiving fails — it retains WAL in pg_wal and retries, so the second failure mode is the volume filling (10-100Gi depending on the cluster) and taking the primary down with it."
+
+      # THE WINDOW ITSELF, not the freshness of its ends. last_available says the
+      # newest restore point exists; first_recoverability_point says how far BACK
+      # the archive still reaches. Both can look fine while the span between them
+      # collapses — retention pruning too aggressively, or an archive that only
+      # recently started working.
+      #
+      # WARNING, NOT CRITICAL, AND for: 1h, because a legitimately young cluster
+      # trips this: a freshly bootstrapped one has less than 24h of reach until
+      # its second base backup, and that is not an incident. Against a declared
+      # retentionPolicy of 30d, though, a mature cluster reporting under a day of
+      # reach has lost most of the recovery it is documented as providing.
+      - alert: PostgresPITRWindowShrinking
+        expr: (max by (namespace, pod) (cnpg_collector_last_available_backup_timestamp) - max by (namespace, pod) (cnpg_collector_first_recoverability_point)) < 86400
+        for: 1h
+        labels: { severity: warning, layer: operational }
+        annotations:
+          summary: "Point-in-time recovery for {{ $labels.pod }} reaches back less than 24 hours"
+          description: "The span between the earliest recoverable point and the latest backup is under a day, against a declared retentionPolicy of 30d. Restoring to any instant before that window is no longer possible. On a newly bootstrapped cluster this is expected until the second base backup completes and clears by itself; on an established one it means retention is pruning what the policy says to keep, or the archive only recently began working — in which case the 30d in cluster.yaml is a number nobody can honour."
+
+      # THE STANDBY, which is the OTHER copy and the one nobody watches.
+      # docs/runbooks/dr-drill.md recovers this number by a human running
+      # `kubectl cnpg status | grep -i lag` DURING a drill — quarterly. Between
+      # drills a standby that stopped replaying is invisible, and the DR-01e RPO
+      # target is a claim about exactly this number.
+      #
+      # A standby that has stopped is not a degraded DR region. It is a DR region
+      # holding stale data that will be promoted anyway during the incident that
+      # needs it.
+      - alert: PostgresStandbyLagging
+        expr: max by (namespace, pod) (cnpg_pg_replication_lag) > 300
+        for: 15m
+        labels: { severity: critical, layer: operational }
+        annotations:
+          summary: "Postgres standby {{ $labels.pod }} is more than 5 minutes behind its primary"
+          description: "Replication lag has exceeded 300s for fifteen minutes. The DR-01e target is an RPO under one minute and the streaming replica is what delivers it, so this is the DR region silently falling outside the objective it exists for. Between quarterly drills nothing else looks at this number. If the standby has stopped entirely rather than fallen behind, the promotion in infra/dr/failover.sh will still succeed and will bring up data this far out of date."
+
+      # THE RULE THAT CATCHES THE OTHER FIVE BEING WRONG.
+      #
+      # Every expr above names a CloudNativePG collector metric that nothing in
+      # this repository can verify: no CNPG version is pinned, and there is no
+      # CNPG on the dev rig. A misspelled metric produces an empty vector, and a
+      # threshold over an empty vector never fires — so the failure mode of
+      # getting these names wrong is SILENCE that is indistinguishable from
+      # "backups are fine". That is the exact shape #624 was filed about.
+      #
+      # THIS IS NOT THE absent() ANTI-PATTERN alerts/README.md records deleting.
+      # DataQualityMetricsMissing fired forever over series with NO PRODUCER,
+      # describing a gap nobody intended to close. This one is gated on
+      # `count(up{namespace="kanz-data"}) > 0` — it can only fire where Postgres
+      # pods are actually being scraped, so a dev rig running postgres-dev.yaml
+      # (no CNPG, no kanz-data targets) stays silent, and it CLEARS BY ITSELF the
+      # moment the exporter reports. True, actionable, self-clearing: the
+      # AlertDeliveryNotDelivering test, not the DataQualityMetricsMissing one.
+      #
+      # for: 30m rides out a CNPG rolling restart without announcing it.
+      - alert: PostgresBackupTelemetryMissing
+        expr: absent(cnpg_collector_last_available_backup_timestamp) and on() (count(up{namespace="kanz-data"} == 1) > 0)
+        for: 30m
+        labels: { severity: warning, layer: operational }
+        annotations:
+          summary: "Postgres pods in kanz-data are being scraped but report no backup telemetry"
+          description: "Prometheus has live targets in kanz-data and none of them export cnpg_collector_last_available_backup_timestamp, so every backup and recoverability alert in this group is evaluating an empty vector and CANNOT fire. Recoverability is currently unobserved, and it looks exactly like recoverability being fine. Either the CNPG metrics exporter is not running on 9187, or the metric names in this rule group are wrong for the CloudNativePG version actually deployed — check `kubectl -n kanz-data port-forward <pod> 9187:9187` and read /metrics before trusting any other rule here."
+
+  # ===========================================================================
   - name: bus_connectivity
   # ===========================================================================
   # LOSING THE SPINE SAYS SO (#636). Before this group, it did not.
