@@ -3,6 +3,7 @@ package order
 import (
 	"context"
 	"fmt"
+	"github.com/eighred/kanz/internal/fillfact"
 	"time"
 
 	commandpb "github.com/eighred/kanz/kanz-schemas-go/command/v1"
@@ -52,8 +53,8 @@ const (
 	// order_proposals table, which services/audit cannot read.
 	EventTypeApproved        = "order.order.approved"
 	EventTypeRouted          = "order.order.routed"
-	EventTypePartiallyFilled = "order.order.partially_filled"
-	EventTypeFilled          = "order.order.filled"
+	EventTypePartiallyFilled = fillfact.SubjectPartiallyFilled
+	EventTypeFilled          = fillfact.SubjectFilled
 	EventTypeCancelled       = "order.order.cancelled"
 	EventTypeExpired         = "order.order.expired"
 	EventTypeOutcome         = "order.order.outcome"

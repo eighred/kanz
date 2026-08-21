@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"github.com/eighred/kanz/internal/fillfact"
 	"log/slog"
 	"os"
 	"strconv"
@@ -120,7 +121,7 @@ var DefaultFXSubjects = []string{"market.fx.>"}
 // DefaultFillSubjects are the order.v1 fill FACT subjects the consumer folds
 // (mirrors the consume package's wire subjects — the same "mirror, don't import
 // the OMS internal package" stance).
-var DefaultFillSubjects = []string{"order.order.filled", "order.order.partially_filled"}
+var DefaultFillSubjects = []string{fillfact.SubjectFilled, fillfact.SubjectPartiallyFilled}
 
 // DefaultCashSubjects are the accounting.v1 cash-movement FACT subjects the
 // consumer folds (WIRE-01f) — the wildcard over the cashmove.Publisher subjects.

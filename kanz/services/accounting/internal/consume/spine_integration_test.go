@@ -348,7 +348,7 @@ func fillBytes(t *testing.T, portfolio, fillID string) []byte {
 	t.Helper()
 	b, err := proto.Marshal(&orderpb.OrderFilled{
 		State: &orderpb.OrderState{PortfolioId: portfolio},
-		Fill: &orderpb.Fill{
+		Fill: &orderpb.Fill{Venue: "BINANCE",
 			FillId:       fillID,
 			InstrumentId: "AAPL",
 			Side:         orderpb.Side_SIDE_BUY,
