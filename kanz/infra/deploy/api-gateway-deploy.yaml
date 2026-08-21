@@ -315,6 +315,46 @@ spec:
             # run under one operator's SVID, so a unilateral change is detectable in the
             # trail and not prevented. That is the state #562 exists to end, and it ends
             # for a deployment on the day these two lines are added.
+            #
+            # WHO MAY READ WHO DID WHAT (#627). NEITHER KEY IS SET HERE, AND THAT IS
+            # THE POSTURE.
+            #
+            #   API_GATEWAY_AUDIT_ADDR       audit's READ listener — :8102, NOT the
+            #                                :8083 it serves /metrics and probes on
+            #                                (audit-deploy.yaml, allow-gateway-to-audit
+            #                                in infra/security/runtime/network-policies.yaml)
+            #   API_GATEWAY_AUDIT_ROLE       the role carrying authz.Audit
+            #
+            # THE PORT IS THE CONTROL, not a detail of it. audit served these routes on
+            # :8083 alongside /metrics, and allow-observability-scrape must admit
+            # whatever port serves /metrics — so the whole kanz-observability namespace
+            # could read them, with a tenant header a pod there sets for itself, against
+            # a table deliberately NOT RLS'd. Pointing this key at :8083 would front a
+            # door that is already open and call it a gateway.
+            #
+            # Unset, the six routes are not registered and this gateway answers 404 to:
+            #
+            #   GET /v1/audit/events
+            #   GET /v1/audit/events/{event_id}
+            #   GET /v1/audit/lineage/{event_id}
+            #   GET /v1/audit/reports/{template}
+            #   GET /v1/soc2/evidence
+            #   GET /v1/audit/verify                the ESTATE-WIDE attestation (#118)
+            #
+            # THE ROLE MUST DIFFER FROM API_GATEWAY_REQUIRED_ROLE, and unlike the
+            # collisions above that is not about separating two authorities: the
+            # baseline is held by EVERY authenticated caller, so naming it here would
+            # serve every principal in the tenant the record of every other principal's
+            # actions. validateAuth refuses to start on it. Collisions with the operator
+            # or approver roles are NOT refused — reading the record is not acting in
+            # it, and a firm with one compliance officer should not have to invent a
+            # second person.
+            #
+            # THE LAST ROUTE KEEPS A SECOND GATE. /v1/audit/verify attests over the
+            # whole chain — one sequence across every tenant — so its record count
+            # discloses how much other tenants' activity the platform carries.
+            # AUDIT_VERIFY_ROLES in audit-deploy.yaml answers that (#118); this
+            # capability answers only whether the principal may read the surface at all.
             # PER POD, not platform-wide. See THE SCALE INVARIANT above.
             - { name: API_GATEWAY_RATE_LIMIT_PER_SEC, value: "50" }
             - { name: API_GATEWAY_RATE_LIMIT_BURST, value: "100" }

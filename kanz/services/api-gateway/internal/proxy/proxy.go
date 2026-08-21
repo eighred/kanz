@@ -103,6 +103,18 @@ const (
 	// this gateway injects, and the scraped port is reachable from the whole
 	// kanz-observability namespace. See services/compliance/internal/config.
 	ServiceCompliance Service = "compliance"
+
+	// ServiceAudit is the compliance READ surface (#627): the tenant's audit
+	// history, a decision's lineage, SOC2 evidence and the chain attestation.
+	//
+	// It is the audit service's SECOND listener — :8102, the one that serves no
+	// /metrics. Its /v1 routes take the tenant from X-Kanz-Principal-Tenant
+	// against audit_log, which is deliberately NOT RLS'd because it is the
+	// cross-tenant compliance record, so the handler is the only boundary there
+	// is. On the scraped port that boundary was open to the whole
+	// kanz-observability namespace; this constant is the other half of the repair
+	// — the gateway becoming the caller the boundary assumes.
+	ServiceAudit Service = "audit"
 )
 
 // Request is the upstream call the Backend forwards. Principal is the
@@ -167,6 +179,14 @@ type Roles struct {
 	// authz.Mandate: one pool of signatories holding both would let one person sign
 	// away a limit and then sign the trade that limit existed to stop.
 	Mandate string
+	// Audit is the deployment's audit reader (API_GATEWAY_AUDIT_ROLE). EMPTY ⇒ the
+	// six compliance-read routes are not registered (#627).
+	//
+	// NOT DEFAULTED TO THE BASELINE ROLE. The argument is on authz.Audit: every
+	// authenticated caller holds the baseline, and these routes serve the record
+	// of who did what — including the actions of every other principal in the
+	// tenant.
+	Audit string
 }
 
 // New returns a proxy handler over the backend. A nil backend disables the
@@ -353,6 +373,43 @@ func (h *Handler) Routes(mux *authz.Mux) {
 			h.handle(ServiceCompliance, true, nil))
 		mux.Handle(authz.Mandate, "GET /v1/mandates/pending-changes/{proposal_id}",
 			h.handle(ServiceCompliance, true, nil))
+	}
+
+	// THE COMPLIANCE READ SURFACE (#627), and the reason it is here at all is that
+	// it was reachable by exactly one peer and that peer was the wrong one.
+	//
+	// The audit service's /v1 routes shared :8083 with /metrics.
+	// allow-observability-scrape must admit whatever port serves /metrics, so the
+	// kanz-observability namespace could reach them — and every route takes its
+	// tenant from X-Kanz-Principal-Tenant, which a pod there simply sets. Nothing
+	// else could reach them at all: no gateway route, no NetworkPolicy naming
+	// app: audit, no client in this repository. The tenant's compliance record was
+	// dark to every legitimate reader and open to the one namespace that
+	// authenticates nothing.
+	//
+	// requirePrincipal is TRUE on all six, and here that is not belt-and-braces:
+	// audit_log is deliberately NOT RLS'd — it is the cross-tenant record — so
+	// there is no second gate underneath. The handler trusts the injected
+	// principal, and this route is what makes that trust true.
+	//
+	// REGISTERED IN ONE BLOCK UNDER h.roles.Audit, which is the #535 control: a
+	// route mounted outside its role guard demands a capability no role carries
+	// and answers 403 to every principal that exists — a capability outage
+	// wearing a working control's costume. Unset leaves all six unregistered and
+	// the deployment answers 404, which is the truth.
+	if h.roles.Audit != "" {
+		mux.Handle(authz.Audit, "GET /v1/audit/events", h.handle(ServiceAudit, true, nil))
+		mux.Handle(authz.Audit, "GET /v1/audit/events/{event_id}", h.handle(ServiceAudit, true, nil))
+		mux.Handle(authz.Audit, "GET /v1/audit/lineage/{event_id}", h.handle(ServiceAudit, true, nil))
+		mux.Handle(authz.Audit, "GET /v1/audit/reports/{template}", h.handle(ServiceAudit, true, nil))
+		mux.Handle(authz.Audit, "GET /v1/soc2/evidence", h.handle(ServiceAudit, true, nil))
+		// THE ESTATE-WIDE ONE, and it carries a SECOND gate this capability does
+		// not replace. The chain is one sequence across every tenant, so the
+		// attestation cannot be tenant-scoped and its record count tells the caller
+		// how much other tenants' activity the platform carries. AUDIT_VERIFY_ROLES
+		// in the audit service answers that question (#118); authz.Audit answers
+		// only whether this principal may read the surface at all.
+		mux.Handle(authz.Audit, "GET /v1/audit/verify", h.handle(ServiceAudit, true, nil))
 	}
 
 	// PORTFOLIO CONSTRUCTION (#409). The optimization service authenticates

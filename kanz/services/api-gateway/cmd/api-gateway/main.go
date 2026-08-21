@@ -535,6 +535,9 @@ func buildProxy(ctx context.Context, cfg config.Config, logger *slog.Logger) (*p
 	if cfg.ComplianceAddr != "" {
 		bases[proxy.ServiceCompliance] = cfg.ComplianceAddr
 	}
+	if cfg.AuditAddr != "" {
+		bases[proxy.ServiceAudit] = cfg.AuditAddr
+	}
 	// The funding surface is registered by the ROLE, not by the address (#535). It
 	// is logged either way: an absent route must be a stated posture, not something
 	// an operator discovers from a 404.
@@ -630,6 +633,32 @@ func buildProxy(ctx context.Context, cfg config.Config, logger *slog.Logger) (*p
 		logger.Info("api-gateway: mandate-change surface fronted", "role", cfg.MandateRole)
 	}
 
+	// THE COMPLIANCE READ SURFACE (#627), logged on both sides for the same reason.
+	//
+	// "Fronted" here means SIX ROUTES ARE MOUNTED AND AN UPSTREAM ANSWERS THEM,
+	// which is the claim #539 found this gateway making over a config with zero
+	// routes mounted. Both halves are checked before it is printed.
+	switch {
+	case cfg.AuditRole == "" && cfg.AuditAddr == "":
+		logger.Info("api-gateway: no compliance read surface (no audit upstream and no reader) — " +
+			"the tenant's audit history, decision lineage and SOC2 evidence are not readable " +
+			"through this gateway by anyone (#627)")
+	case cfg.AuditRole == "":
+		// Unreachable via config.Load, which refuses this pairing, and kept for the
+		// same reason the mandate branch above is.
+		logger.Warn("api-gateway: audit is wired but no API_GATEWAY_AUDIT_ROLE — the six compliance " +
+			"read routes are NOT registered, so this gateway answers 404 to them and NOBODY can " +
+			"read the audit trail through it (#627)")
+	case cfg.AuditAddr == "":
+		logger.Warn("api-gateway: API_GATEWAY_AUDIT_ROLE names " + cfg.AuditRole +
+			" but no API_GATEWAY_AUDIT_ADDR — the audit routes ARE registered and every one of " +
+			"them 503s. Granting that role to an auditor now gives them an authority no upstream " +
+			"honours (#627)")
+	default:
+		logger.Info("api-gateway: compliance read surface fronted", "role", cfg.AuditRole,
+			"upstream", cfg.AuditAddr)
+	}
+
 	if len(bases) == 0 {
 		logger.Warn("api-gateway: Phase-7 read surfaces disabled (no upstream addresses)")
 		return proxy.New(nil, proxyRoles(cfg)), nil
@@ -694,7 +723,7 @@ func buildProxy(ctx context.Context, cfg config.Config, logger *slog.Logger) (*p
 // discoverable only by running a gateway with no upstreams and noticing a 404
 // where a 503 belonged.
 func proxyRoles(cfg config.Config) proxy.Roles {
-	return proxy.Roles{Fund: cfg.FundRole, Approve: cfg.ApproveRole, Mandate: cfg.MandateRole}
+	return proxy.Roles{Fund: cfg.FundRole, Approve: cfg.ApproveRole, Mandate: cfg.MandateRole, Audit: cfg.AuditRole}
 }
 
 // issuerProbeTimeout bounds one attempt to reach the issuer. Generous, because
@@ -1012,6 +1041,21 @@ func buildRouter(cfg config.Config, h *gateway.Handler, o *orders.Handler, p *pr
 	// showing two names and nothing anywhere comparing the two records.
 	if cfg.MandateRole != "" {
 		grants[cfg.MandateRole] = []authz.Capability{authz.Read, authz.Mandate}
+	}
+	// THE AUDIT READER SEES WHO DID WHAT (#627): the tenant's audit history, a
+	// decision's lineage, the SOC2 evidence pack and the chain attestation.
+	//
+	// Conditional for the same reason the three above are — Grants is keyed by the
+	// role STRING, and an unconditional entry would put a "" key in the map that
+	// decides who reads the compliance record.
+	//
+	// IT CARRIES Read, and unlike the three above that is not about competence to
+	// judge: it is that Read is already universal here. Every caller who reaches
+	// /v1 at all holds the baseline role, so listing it grants nothing new and
+	// leaving it out would make this the only role in the map that cannot see the
+	// system it is auditing.
+	if cfg.AuditRole != "" {
+		grants[cfg.AuditRole] = []authz.Capability{authz.Read, authz.Audit}
 	}
 	gwMux := authz.NewMux(grants, recorder)
 	h.Routes(gwMux)

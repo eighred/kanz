@@ -225,6 +225,24 @@ type Config struct {
 	// has no other route on it — so setting it without naming a signatory exposes a
 	// surface nobody can reach, which validateAuth refuses.
 	MandateRole string
+
+	// AuditAddr is the audit service's READ listener (#627) — :8102, NOT the
+	// :8083 that serves /metrics. Empty ⇒ the six compliance-read routes are not
+	// registered.
+	//
+	// THE PORT IS THE CONTROL. allow-observability-scrape admits the metrics port
+	// namespace-wide, so pointing this at :8083 would front a surface the whole
+	// monitoring plane can already reach directly with a principal it chose
+	// itself, and the gateway would be decorating an open door.
+	AuditAddr string
+	// AuditRole is the role carrying authz.Audit — reading the record of who did
+	// what. Empty with AuditAddr set is refused below (#535).
+	//
+	// IT MUST NOT BE THE BASELINE ROLE, and that is the one collision this
+	// capability cannot survive: every authenticated caller holds the baseline, so
+	// naming it here would serve every principal in the tenant the complete
+	// history of every other principal's actions.
+	AuditRole string
 }
 
 func Load() (Config, error) {
@@ -290,6 +308,8 @@ func Load() (Config, error) {
 		ApproveRole:      os.Getenv("API_GATEWAY_APPROVE_ROLE"),
 		ComplianceAddr:   os.Getenv("API_GATEWAY_COMPLIANCE_ADDR"),
 		MandateRole:      os.Getenv("API_GATEWAY_MANDATE_ROLE"),
+		AuditAddr:        os.Getenv("API_GATEWAY_AUDIT_ADDR"),
+		AuditRole:        os.Getenv("API_GATEWAY_AUDIT_ROLE"),
 	}
 	if err := cfg.validateAuth(); err != nil {
 		return Config{}, err
@@ -486,6 +506,28 @@ func (c Config) validateAuth() error {
 			"answer 403 to EVERY principal that exists — which reads as a working control and is " +
 			"a total outage of the capability (#535). Name the signatory, or unset " +
 			"API_GATEWAY_COMPLIANCE_ADDR and the routes are not registered at all (#562)")
+	}
+	// THE AUDIT READ SURFACE (#627), refused on the same #535 grounds.
+	if c.AuditAddr != "" && c.AuditRole == "" {
+		return errors.New("api-gateway: API_GATEWAY_AUDIT_ADDR is set but API_GATEWAY_AUDIT_ROLE " +
+			"is not. Those routes serve the tenant's audit history, a decision's lineage and the " +
+			"SOC2 evidence pack, and with no role carrying authz.Audit they would answer 403 to " +
+			"EVERY principal that exists — a total outage of the capability wearing a strict " +
+			"control's costume (#535). Name the audit reader, or unset API_GATEWAY_AUDIT_ADDR and " +
+			"the routes are not registered at all")
+	}
+	// THE ONE COLLISION THIS CAPABILITY CANNOT SURVIVE. Unlike the trade/operator
+	// pairs, a deployment MAY legitimately give its operators or its approvers the
+	// audit role — reading the record is not acting in it, and a firm small enough
+	// to have one compliance officer should not be forced to invent a second
+	// person. The baseline is different in kind: every authenticated caller holds
+	// it, so this line would not grant an authority, it would delete one.
+	if c.AuditRole != "" && c.AuditRole == c.RequiredRole {
+		return errors.New("api-gateway: API_GATEWAY_AUDIT_ROLE must differ from " +
+			"API_GATEWAY_REQUIRED_ROLE. EVERY authenticated caller carries the baseline role, so " +
+			"naming it here serves every principal in the tenant the complete record of every " +
+			"OTHER principal's actions — which trader was refused by the pre-trade gate, who " +
+			"overrode a price, who signed a mandate change. Name a role only the auditors hold")
 	}
 	// THE MANDATE COLLISIONS, AND THE APPROVE ONE IS THE POINT.
 	//

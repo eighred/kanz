@@ -113,7 +113,12 @@ spec:
           # Pinned to a cosign-signed digest by the GitOps bump (CICD-01d).
           image: ghcr.io/eighred/audit@sha256:6e6ba7591dc4ea6cbff09d48b4b0bf54c8f7044273249bafaaf653df0547b09e
           ports:
-            - { containerPort: 8083, name: http }
+            # 8083 serves /metrics and the probes and NOTHING tenant-scoped;
+            # allow-observability-scrape admits it. The /v1 compliance reads are
+            # on 8102, which that rule does not admit and only the gateway may
+            # reach (#627).
+            - { containerPort: 8083, name: metrics }
+            - { containerPort: 8102, name: api }
           env:
             # DSN from the SEC-01d CSI secret file, not a plaintext env.
             - { name: AUDIT_DATABASE_URL_FILE, value: /run/secrets/db/database-url }
@@ -127,12 +132,21 @@ spec:
             # this platform is carrying. A tenant sees its own vault; this figure
             # is not its own.
             #
-            # BOTH ROLES ARE LOAD-BEARING. The operator role is the human who
-            # investigates; the monitoring role is what actually runs the check
-            # on a schedule. Granting only the first would leave tamper detection
-            # depending on somebody remembering to look — over-restricting a
-            # tamper check means nobody verifies, which is the failure this
-            # restriction must not cause while preventing the other one.
+            # ONE ROLE IS LOAD-BEARING AND ONE IS ASPIRATIONAL, and this comment
+            # used to claim both were. The operator role is the human who
+            # investigates. The monitoring role was granted because "the monitoring
+            # role is what actually runs the check on a schedule" — and NOTHING IN
+            # THIS REPOSITORY CALLS /v1/audit/verify, on a schedule or otherwise
+            # (#665). The sentence describing the grant's purpose was the only
+            # implementation of it, which is the failure it warned about — "tamper
+            # detection depending on somebody remembering to look" — written down
+            # as though it had been prevented.
+            #
+            # The grant is KEPT rather than dropped, because #627 moved this API
+            # behind the gateway and a scheduled verifier will authenticate through
+            # it holding exactly this role. Dropping it now would mean adding it
+            # back with the runner; leaving the claim uncorrected would mean the
+            # next reader believes the check runs.
             #
             # The binary REFUSES TO START with neither this nor
             # AUDIT_ALLOW_UNRESTRICTED_VERIFY set, so a deployment that forgets
@@ -140,6 +154,7 @@ spec:
             # every tenant.
             - { name: AUDIT_VERIFY_ROLES, value: "kanz-operator,kanz-monitoring" }
             - { name: AUDIT_LISTEN, value: ":8083" }
+            - { name: AUDIT_API_LISTEN, value: ":8102" }
             - { name: AUDIT_NATS_URL, value: "nats://nats.kanz-messaging.svc:4222" }
             - { name: SPIFFE_ENDPOINT_SOCKET, value: "unix:///run/spiffe/spire-agent.sock" }
           livenessProbe:

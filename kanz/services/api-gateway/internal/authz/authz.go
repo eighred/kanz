@@ -157,6 +157,53 @@ const (
 	// surface here", which is true — rather than the 403 that #535 found reads as a
 	// working control while being a total outage of the capability.
 	Mandate Capability = "mandate"
+	// Audit: READ THE RECORD OF WHO DID WHAT. The tenant's audit history, the
+	// lineage of a decision, a SOC2 evidence pack, and the tamper attestation over
+	// the hash chain (#627).
+	//
+	// A SEVENTH, AND THE BAR THE THREE BEFORE IT CLEARED APPLIES UNCHANGED: is
+	// this a DIFFERENT authority, in BOTH directions, from every capability
+	// already here? The package comment above is right that a model nobody can
+	// hold in their head gets routed around, so the answer is argued, not assumed.
+	//
+	// NOT Read, AND THIS IS THE WHOLE REASON THE CONSTANT EXISTS. Read is carried
+	// by API_GATEWAY_REQUIRED_ROLE — the baseline every authenticated caller
+	// holds. Mounting these routes on Read would hand every token in the tenant
+	// the complete record of every colleague's actions: which trader was refused
+	// by the pre-trade gate, who overrode a price, who proposed the mandate change
+	// and who signed it. Read is "query the fund's state"; this is the record of
+	// WHO ACTED ON IT, which is personnel evidence before it is fund data. The two
+	// are different in both directions: an analyst reading exposure has no
+	// business reading that, and an auditor reading it is not thereby entitled to
+	// anything else here.
+	//
+	// NOT Operate. Draining a node and rotating a venue credential are acts upon
+	// the estate; this is SUPERVISION of it, and the separation runs the useful
+	// way — the operator whose own actions the log records should not be the one
+	// who decides what it says. Read stays bundled into the operator role because
+	// an operator who cannot see the system will be handed a second token within a
+	// week; the audit trail is not that, and a deployment that wants its operators
+	// to hold it can name the same role in both variables and mean it.
+	//
+	// NOT Approve AND NOT Mandate: those two GIVE A SIGNATURE, this one reads the
+	// record that a signature happened. Reading the trail confers no authority to
+	// act in it.
+	//
+	// WHAT IT DOES NOT DECIDE. /v1/audit/verify attests over the WHOLE chain — one
+	// sequence across every tenant, so a per-tenant subset proves nothing — and
+	// its record count therefore discloses how much other tenants' activity the
+	// platform carries. That is the #118 ruling and it stays where it is, in the
+	// audit service's own AUDIT_VERIFY_ROLES. This capability answers "may this
+	// principal read audit at all"; that one answers "may they see the estate-wide
+	// figure". Two questions, two places, and the gateway is not the right owner
+	// of the second because the answer is about the estate, not the route.
+	//
+	// THE COST IS ONE MORE ROLE A DEPLOYMENT MUST NAME, paid exactly as the three
+	// optional capabilities above pay it: API_GATEWAY_AUDIT_ROLE unset leaves
+	// these routes UNREGISTERED, so the deployment answers 404 — "there is no
+	// audit surface here", which is true — rather than the 403 that #535 found
+	// reads as a working control while being a total outage of the capability.
+	Audit Capability = "audit"
 )
 
 // Grants is the role → capabilities policy: what a principal's roles entitle them to do.

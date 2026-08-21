@@ -12,8 +12,17 @@ import (
 // environment so it composes with the CSI/Vault secret mounts (SEC-01d).
 // Mirrors the market-data / risk-engine config shape.
 type Config struct {
-	Listen   string
-	LogLevel slog.Level
+	// Listen serves /metrics and the probes, and NOTHING that reads a tenant
+	// header. It is the port allow-observability-scrape admits, which is exactly
+	// why the read API is not on it (#627).
+	Listen string
+	// APIListen serves the /v1 compliance reads — the tenant's audit history and
+	// the estate-wide chain attestation. Every route on it takes its tenant from
+	// X-Kanz-Principal-Tenant, so the api-gateway must be its only reachable
+	// caller; sharing the scraped port meant a pod in kanz-observability could
+	// name any tenant and be served it, against a table deliberately not RLS'd.
+	APIListen string
+	LogLevel  slog.Level
 
 	// NATSURL is the live spine the projection consumes. Empty ⇒ HTTP-only
 	// (the query/report API serves whatever is already in the store; no new
@@ -114,6 +123,7 @@ func Load() (Config, error) {
 	}
 	return Config{
 		Listen:            env.Or("AUDIT_LISTEN", ":8083"),
+		APIListen:         env.Or("AUDIT_API_LISTEN", ":8102"),
 		LogLevel:          env.ParseLevelOr(env.Or("AUDIT_LOG_LEVEL", "info"), slog.LevelInfo),
 		NATSURL:           os.Getenv("AUDIT_NATS_URL"),
 		Source:            env.Or("AUDIT_SOURCE", "audit"),
