@@ -11,9 +11,18 @@
 // ParallelShift cannot express that dispersion. Each named scenario here is a
 // SECTOR CURVE — a SectorShock per GICS sector (MODEL-01h's new shock type,
 // resolved against the MODEL-01f factor model) — so the differentiated impact
-// is preserved. Positions whose instrument is unclassified or whose sector is
-// outside the curve are left unshocked (the engine no-ops them), which is the
-// honest behavior: the scenario only claims to know the sectors it names.
+// is preserved.
+//
+// # Which means every scenario here needs a classifier, and there is none
+//
+// A position whose sector is OUTSIDE the curve is left unshocked, and that is
+// the honest behavior: the scenario only claims to know the sectors it names.
+// This doc used to put "unclassified" in the same sentence, which was the one
+// thing it could not claim. An instrument nobody can classify is not evidence of
+// a sector the curve does not cover — and since no factor.Classifier is
+// constructed at any composition root, EVERY instrument was in that state, so
+// every scenario in this catalog returned the input book (#640). The engine now
+// refuses instead: see v1.ErrScenarioUnresolvable.
 //
 // # The magnitudes are illustrative, point-in-time stress inputs
 //

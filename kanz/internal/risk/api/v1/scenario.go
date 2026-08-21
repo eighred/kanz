@@ -72,11 +72,19 @@ func (s ParallelShift) Description() string {
 // PriceShock.
 //
 // Sector membership is resolved at apply time against the factor model
-// the scenario engine is wired with (MODEL-01f). When no classifier is
-// wired the shock is a silent no-op — same degradation as an unknown
-// shock type. This is the building block for differentiated stress
-// scenarios (MODEL-01h): a 2008 replay shocks financials harder than
-// staples, which a ParallelShift cannot express.
+// the scenario engine is wired with (MODEL-01f). This is the building
+// block for differentiated stress scenarios (MODEL-01h): a 2008 replay
+// shocks financials harder than staples, which a ParallelShift cannot
+// express.
+//
+// WHEN NO CLASSIFIER IS WIRED THE SHOCK CANNOT BE APPLIED AND THE
+// REQUEST IS REFUSED — ErrScenarioUnresolvable. This doc used to say it
+// was "a silent no-op — same degradation as an unknown shock type",
+// which described the behaviour accurately and mis-stated its cost: no
+// classifier is constructed at any composition root on this estate, so
+// EVERY named scenario returned the unshocked book, and a caller could
+// not tell that from a portfolio with no exposure to the shocked
+// sectors (#640).
 type SectorShock struct {
 	Taxonomy string
 	Code     string

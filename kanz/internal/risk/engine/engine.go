@@ -33,6 +33,7 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"strings"
 	"time"
 
 	commonpb "github.com/eighred/kanz/kanz-schemas-go/common/v1"
@@ -85,8 +86,17 @@ func WithVolModel(vm compute.VolModel) EngineOption {
 }
 
 // WithClassifier wires the MODEL-01f factor model so MODEL-01h SectorShocks in
-// EvaluateScenario resolve each position's sector. nil leaves SectorShocks as
-// silent no-ops.
+// EvaluateScenario resolve each position's sector.
+//
+// IT HAS NO CALLER, AND EVERY NAMED SCENARIO DEPENDS ON IT. This doc used to say
+// nil "leaves SectorShocks as silent no-ops", which was accurate and read as a
+// tolerable default; it was not one. The scenario library builds GFC_2008,
+// COVID_2020 and the curve, factor, liquidity and climate stresses out of
+// SectorCurve, which emits SectorShocks exclusively, so with this unset the
+// whole catalog returned the unshocked book (#640). It is unset because no
+// production factor.Classifier exists — see factor.StaticClassifier — and
+// EvaluateScenario now refuses those requests rather than answering them.
+// test/arch/no_nil_classifier_seam_test.go is what keeps the gap tracked.
 func WithClassifier(c factor.Classifier) EngineOption {
 	return func(e *EngineImpl) { e.classifier = c }
 }
@@ -219,7 +229,15 @@ func (e *EngineImpl) EvaluateScenario(ctx context.Context, req v1.ScenarioReques
 	if e.classifier != nil {
 		opts = append(opts, scenario.WithClassifier(e.classifier))
 	}
-	projected := scenario.Evaluate(p, req.Shocks, e.registry, opts...)
+	projected, cov := scenario.Evaluate(p, req.Shocks, e.registry, opts...)
+	// A SHOCK THAT DID NOT LAND MAKES THE WHOLE PROJECTION A LIE, so it is
+	// refused rather than annotated. See v1.ErrScenarioUnresolvable for why this
+	// is the opposite call from QualityFlagInputsUnresolved, which the measures
+	// path uses for a partial number: here there is no partial number, only the
+	// current book wearing a scenario's name.
+	if cov.ExcludedCount > 0 {
+		return v1.ScenarioResponse{}, unresolvableScenario(cov)
+	}
 	// Flag against the underlying state's freshness: a scenario on stale
 	// state is itself stale, and the caller must see that signal.
 	_, flags := e.detector.Assess(p.AsOf())
@@ -228,6 +246,38 @@ func (e *EngineImpl) EvaluateScenario(ctx context.Context, req v1.ScenarioReques
 		Projected:    projected,
 		QualityFlags: withCoverageFlags(flags, projected),
 	}, nil
+}
+
+// unresolvableScenario turns a shock-application coverage record into the
+// refusal a caller acts on: the sentinel to branch on, plus the reason, the
+// magnitude and a bounded sample of holdings in the message.
+//
+// THE REASON IS IN THE TEXT BECAUSE THE OPERATOR'S NEXT MOVE DEPENDS ON IT.
+// SkipNoClassifier is a composition-root gap — nobody wired an instrument
+// reference source and no per-instrument action will help. SkipUnclassified
+// names holdings a wired classifier does not know, which is a reference-data
+// load. SkipShockNamesNoSector is the caller's own malformed shock. One error
+// with an unhelpful message would send all three to the same wrong place.
+func unresolvableScenario(cov v1.InputCoverage) error {
+	reasons := make([]string, 0, len(cov.Exclusions))
+	seen := map[string]bool{}
+	var sample []string
+	for _, ex := range cov.Exclusions {
+		if !seen[ex.Reason] {
+			seen[ex.Reason] = true
+			reasons = append(reasons, ex.Reason)
+		}
+		if ex.InstrumentID != "" && len(sample) < 8 {
+			sample = append(sample, string(ex.InstrumentID))
+		}
+	}
+	sort.Strings(reasons)
+	msg := fmt.Sprintf("%d of %d resolved; reason(s): %s",
+		cov.Contributed, cov.Contributed+cov.ExcludedCount, strings.Join(reasons, ","))
+	if len(sample) > 0 {
+		msg += "; e.g. " + strings.Join(sample, ",")
+	}
+	return fmt.Errorf("%w (%s)", v1.ErrScenarioUnresolvable, msg)
 }
 
 // withCoverageFlags appends the coverage signals the Detector cannot

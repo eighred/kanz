@@ -68,8 +68,20 @@ type Classifier interface {
 }
 
 // StaticClassifier is an in-memory Classifier backed by a fixed instrument→
-// classification map (asOf-independent). The engine loads it from reference
-// data; tests construct it directly.
+// classification map (asOf-independent).
+//
+// TESTS ARE ITS ONLY CONSTRUCTOR, and this doc used to claim otherwise — "the
+// engine loads it from reference data" described a composition root that has
+// never existed (#640). The reference-data store the package header calls "not
+// yet built" is still not built: reference.v1.InstrumentReference has one
+// builder in the module, datamaster's feed.NormalizeReference, whose only
+// callers are its own tests, and which nothing publishes or persists.
+//
+// SO risk/engine.WithClassifier IS UNCALLED AND SectorShocks CANNOT RESOLVE.
+// Filling this map with plausible sectors to make the seam non-nil would make
+// the whole named-scenario catalog report confident numbers derived from
+// invented reference data, which #345 rules out; EvaluateScenario refuses those
+// requests instead.
 type StaticClassifier map[string]Classification
 
 // Classify implements Classifier; asOf is ignored (the static map is a single

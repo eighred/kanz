@@ -11,6 +11,7 @@ import (
 	"github.com/eighred/kanz/internal/risk/compute/factor"
 	"github.com/eighred/kanz/internal/risk/domain"
 	"github.com/eighred/kanz/internal/risk/scenario"
+	"github.com/eighred/kanz/internal/risk/scenario/library"
 )
 
 var baseTime = time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
@@ -44,7 +45,7 @@ func TestEvaluate_PriceShockMovesTargetMarketValue(t *testing.T) {
 	p := makePortfolio(
 		domain.Position{InstrumentID: "AAPL", MarketValue: money(1000, 0, "USD"), AsOf: baseTime},
 	)
-	got := scenario.Evaluate(p, []v1.ScenarioShock{
+	got := evaluate(t, p, []v1.ScenarioShock{
 		v1.PriceShock{InstrumentID: "AAPL", Pct: pct(-10, -2)}, // -0.10
 	}, nil)
 
@@ -61,7 +62,7 @@ func TestEvaluate_OriginalPortfolioIsUnchanged(t *testing.T) {
 	p := makePortfolio(
 		domain.Position{InstrumentID: "AAPL", MarketValue: money(1000, 0, "USD"), AsOf: baseTime},
 	)
-	_ = scenario.Evaluate(p, []v1.ScenarioShock{
+	_ = evaluate(t, p, []v1.ScenarioShock{
 		v1.PriceShock{InstrumentID: "AAPL", Pct: pct(-99, -2)}, // -99%
 	}, nil)
 
@@ -79,7 +80,7 @@ func TestEvaluate_PriceShockOnUnheldInstrumentIsNoOp(t *testing.T) {
 	p := makePortfolio(
 		domain.Position{InstrumentID: "AAPL", MarketValue: money(1000, 0, "USD"), AsOf: baseTime},
 	)
-	got := scenario.Evaluate(p, []v1.ScenarioShock{
+	got := evaluate(t, p, []v1.ScenarioShock{
 		v1.PriceShock{InstrumentID: "MSFT", Pct: pct(-50, -2)}, // MSFT not held
 	}, nil)
 	m, _ := got.Lookup(compute.MeasureNetExposure)
@@ -95,7 +96,7 @@ func TestEvaluate_ParallelShiftAppliesToAllPositions(t *testing.T) {
 		domain.Position{InstrumentID: "B", MarketValue: money(200, 0, "USD"), AsOf: baseTime},
 		domain.Position{InstrumentID: "C", MarketValue: money(300, 0, "USD"), AsOf: baseTime},
 	)
-	got := scenario.Evaluate(p, []v1.ScenarioShock{
+	got := evaluate(t, p, []v1.ScenarioShock{
 		v1.ParallelShift{Pct: pct(-5, -2)},
 	}, nil)
 	m, _ := got.Lookup(compute.MeasureNetExposure)
@@ -114,7 +115,7 @@ func TestEvaluate_ShocksApplyInOrder(t *testing.T) {
 	p := makePortfolio(
 		domain.Position{InstrumentID: "A", MarketValue: money(100, 0, "USD"), AsOf: baseTime},
 	)
-	got := scenario.Evaluate(p, []v1.ScenarioShock{
+	got := evaluate(t, p, []v1.ScenarioShock{
 		v1.PriceShock{InstrumentID: "A", Pct: pct(10, -2)},  // +0.10
 		v1.PriceShock{InstrumentID: "A", Pct: pct(-10, -2)}, // -0.10
 	}, nil)
@@ -135,7 +136,7 @@ func TestEvaluate_UnknownShockTypeIsSilentlySkipped(t *testing.T) {
 	p := makePortfolio(
 		domain.Position{InstrumentID: "A", MarketValue: money(100, 0, "USD"), AsOf: baseTime},
 	)
-	got := scenario.Evaluate(p, []v1.ScenarioShock{
+	got := evaluate(t, p, []v1.ScenarioShock{
 		unknownShock{},
 	}, nil)
 	m, _ := got.Lookup(compute.MeasureNetExposure)
@@ -148,7 +149,7 @@ func TestEvaluate_EmptyShockListReturnsCurrentMeasures(t *testing.T) {
 	p := makePortfolio(
 		domain.Position{InstrumentID: "A", MarketValue: money(500, 0, "USD"), AsOf: baseTime},
 	)
-	got := scenario.Evaluate(p, nil, nil)
+	got := evaluate(t, p, nil, nil)
 	m, _ := got.Lookup(compute.MeasureGrossExposure)
 	if m.Value.Coefficient != 500 {
 		t.Errorf("GrossExposure=%d want 500", m.Value.Coefficient)
@@ -159,7 +160,7 @@ func TestEvaluate_AsOfPropagatedThroughScenario(t *testing.T) {
 	p := makePortfolio(
 		domain.Position{InstrumentID: "A", MarketValue: money(100, 0, "USD"), AsOf: baseTime},
 	)
-	got := scenario.Evaluate(p, []v1.ScenarioShock{
+	got := evaluate(t, p, []v1.ScenarioShock{
 		v1.ParallelShift{Pct: pct(-1, -2)},
 	}, nil)
 	if !got.AsOf().Equal(baseTime) {
@@ -176,7 +177,7 @@ func TestEvaluate_CustomRegistryUsed(t *testing.T) {
 	p := makePortfolio(
 		domain.Position{InstrumentID: "A", MarketValue: money(100, 0, "USD"), AsOf: baseTime},
 	)
-	got := scenario.Evaluate(p, nil, r)
+	got := evaluate(t, p, nil, r)
 	if names := got.Names(); len(names) != 1 || names[0] != compute.MeasureNetExposure {
 		t.Errorf("registry not honoured; got names %v", names)
 	}
@@ -207,7 +208,7 @@ func TestEvaluate_SectorShockHitsOnlyMatchingSector(t *testing.T) {
 		domain.Position{InstrumentID: "TECH", MarketValue: money(1000, 0, "USD"), AsOf: baseTime},
 	)
 	c := classifierFor(map[string]string{"BANK": "40", "TECH": "45"})
-	got := scenario.Evaluate(p, []v1.ScenarioShock{
+	got := evaluate(t, p, []v1.ScenarioShock{
 		v1.SectorShock{Taxonomy: "GICS", Code: "40", Pct: pct(-50, -2)},
 	}, nil, scenario.WithClassifier(c))
 
@@ -218,34 +219,142 @@ func TestEvaluate_SectorShockHitsOnlyMatchingSector(t *testing.T) {
 	}
 }
 
-func TestEvaluate_SectorShockNoClassifierIsNoOp(t *testing.T) {
-	// Without a wired classifier the SectorShock cannot resolve membership,
-	// so it degrades to a silent no-op (same as an unknown shock).
+// TestEvaluate_SectorShockNoClassifierIsRecordedNotSilent replaces a test named
+// ...IsNoOp, which asserted the defect. It read "without a wired classifier the
+// SectorShock cannot resolve membership, so it degrades to a silent no-op (same
+// as an unknown shock)" and checked that the exposure came back unchanged — the
+// exact behaviour #640 is about, pinned green.
+//
+// The unshocked VALUE is still the right value; there is nothing else the
+// scenario could return. What must never happen again is returning it silently,
+// so the assertion is on the coverage: a caller has to be able to tell this
+// apart from a book with no financials.
+func TestEvaluate_SectorShockNoClassifierIsRecordedNotSilent(t *testing.T) {
 	p := makePortfolio(
 		domain.Position{InstrumentID: "BANK", MarketValue: money(1000, 0, "USD"), AsOf: baseTime},
 	)
-	got := scenario.Evaluate(p, []v1.ScenarioShock{
+	got, cov := scenario.Evaluate(p, []v1.ScenarioShock{
 		v1.SectorShock{Taxonomy: "GICS", Code: "40", Pct: pct(-50, -2)},
 	}, nil) // no WithClassifier
+	if cov.ExcludedCount != 1 {
+		t.Fatalf("ExcludedCount=%d want 1 — a sector shock with no classifier MUST be recorded, "+
+			"or the unshocked book is served as the shocked one", cov.ExcludedCount)
+	}
+	if cov.Contributed != 0 {
+		t.Errorf("Contributed=%d want 0 — no position's sector was resolved", cov.Contributed)
+	}
+	if len(cov.Exclusions) != 1 || cov.Exclusions[0].Reason != scenario.SkipNoClassifier {
+		t.Fatalf("Exclusions=%+v want one %q", cov.Exclusions, scenario.SkipNoClassifier)
+	}
+	if id := cov.Exclusions[0].InstrumentID; id != "" {
+		t.Errorf("InstrumentID=%q want empty — no classifier is a whole-evaluation gap, "+
+			"not a property of any holding", id)
+	}
+	// The value is unchanged, which is why the record is the only signal.
 	m, _ := got.Lookup(compute.MeasureNetExposure)
 	if v := decToFloat(m.Value); v != 1000 {
-		t.Errorf("NetExposure=%v want 1000 (no-op without classifier)", v)
+		t.Errorf("NetExposure=%v want 1000", v)
 	}
 }
 
-func TestEvaluate_SectorShockSkipsUnclassifiedInstrument(t *testing.T) {
-	// MYSTERY isn't in the classifier ⇒ not a member of any shocked sector.
+// TestEvaluate_SectorShockNoClassifierCountsOnceForAWholeCurve pins the count's
+// MEANING. A named scenario is eleven SectorShocks, and recording the
+// whole-evaluation gap per shock would report eleven exclusions for one missing
+// classifier — a number nobody can act on and a sample that is eleven copies of
+// nothing.
+func TestEvaluate_SectorShockNoClassifierCountsOnceForAWholeCurve(t *testing.T) {
+	p := makePortfolio(
+		domain.Position{InstrumentID: "BANK", MarketValue: money(1000, 0, "USD"), AsOf: baseTime},
+		domain.Position{InstrumentID: "TECH", MarketValue: money(1000, 0, "USD"), AsOf: baseTime},
+	)
+	_, cov := scenario.Evaluate(p, library.GlobalFinancialCrisis2008(), nil) // no classifier
+	if cov.ExcludedCount != 1 {
+		t.Fatalf("ExcludedCount=%d want 1 for an 11-shock curve — one missing classifier is one gap",
+			cov.ExcludedCount)
+	}
+}
+
+// TestEvaluate_SectorShockUnclassifiedInstrumentIsRecorded replaces a test named
+// ...SkipsUnclassifiedInstrument, whose comment — "MYSTERY isn't in the
+// classifier ⇒ not a member of any shocked sector" — states the inference the
+// engine is not entitled to make. Not knowing an instrument's sector is not
+// evidence that it is outside the shocked one.
+func TestEvaluate_SectorShockUnclassifiedInstrumentIsRecorded(t *testing.T) {
 	p := makePortfolio(
 		domain.Position{InstrumentID: "MYSTERY", MarketValue: money(1000, 0, "USD"), AsOf: baseTime},
+		domain.Position{InstrumentID: "BANK", MarketValue: money(1000, 0, "USD"), AsOf: baseTime},
 	)
 	c := classifierFor(map[string]string{"BANK": "40"})
-	got := scenario.Evaluate(p, []v1.ScenarioShock{
+	got, cov := scenario.Evaluate(p, []v1.ScenarioShock{
 		v1.SectorShock{Taxonomy: "GICS", Code: "40", Pct: pct(-50, -2)},
 	}, nil, scenario.WithClassifier(c))
-	m, _ := got.Lookup(compute.MeasureNetExposure)
-	if v := decToFloat(m.Value); v != 1000 {
-		t.Errorf("NetExposure=%v want 1000 (unclassified untouched)", v)
+	if cov.ExcludedCount != 1 || cov.Contributed != 1 {
+		t.Fatalf("coverage=%+v want ExcludedCount=1 (MYSTERY), Contributed=1 (BANK)", cov)
 	}
+	if len(cov.Exclusions) != 1 ||
+		cov.Exclusions[0].InstrumentID != "MYSTERY" ||
+		cov.Exclusions[0].Reason != scenario.SkipUnclassified {
+		t.Fatalf("Exclusions=%+v want MYSTERY/%s", cov.Exclusions, scenario.SkipUnclassified)
+	}
+	// BANK still took the shock — an unresolvable holding does not stop the
+	// shock landing on the ones that do resolve; it stops the RESULT being
+	// served as complete. 500 + 1000 = 1500.
+	m, _ := got.Lookup(compute.MeasureNetExposure)
+	if v := decToFloat(m.Value); v != 1500 {
+		t.Errorf("NetExposure=%v want 1500", v)
+	}
+}
+
+// TestEvaluate_SectorShockNamingNoSectorIsRecorded covers the third way a sector
+// shock cannot land, and the only one that is the caller's fault: a shock with
+// neither taxonomy nor code has nothing to match against. It used to return
+// silently alongside the other two.
+func TestEvaluate_SectorShockNamingNoSectorIsRecorded(t *testing.T) {
+	p := makePortfolio(
+		domain.Position{InstrumentID: "BANK", MarketValue: money(1000, 0, "USD"), AsOf: baseTime},
+	)
+	c := classifierFor(map[string]string{"BANK": "40"})
+	_, cov := scenario.Evaluate(p, []v1.ScenarioShock{
+		v1.SectorShock{Pct: pct(-50, -2)}, // no taxonomy, no code
+	}, nil, scenario.WithClassifier(c))
+	if cov.ExcludedCount != 1 ||
+		len(cov.Exclusions) != 1 ||
+		cov.Exclusions[0].Reason != scenario.SkipShockNamesNoSector {
+		t.Fatalf("coverage=%+v want one %q exclusion", cov, scenario.SkipShockNamesNoSector)
+	}
+}
+
+// TestEvaluate_NonSectorScenarioNeedsNoClassifier is the FALSE-REFUSAL arm. A
+// price/parallel/vol scenario never consults the classifier, so it must come
+// back with an empty coverage even though none is wired — otherwise the refusal
+// added in #640 would take out every scenario on the platform rather than the
+// ones that cannot be answered.
+func TestEvaluate_NonSectorScenarioNeedsNoClassifier(t *testing.T) {
+	p := makePortfolio(
+		domain.Position{InstrumentID: "BANK", MarketValue: money(1000, 0, "USD"), AsOf: baseTime},
+	)
+	_, cov := scenario.Evaluate(p, []v1.ScenarioShock{
+		v1.ParallelShift{Pct: pct(-20, -2)},
+		v1.PriceShock{InstrumentID: "BANK", Pct: pct(-5, -2)},
+		v1.VolShock{AbsBump: pct(15, -2)},
+	}, nil) // no classifier, and none needed
+	if cov.ExcludedCount != 0 {
+		t.Fatalf("coverage=%+v want empty — no shock here resolves a sector", cov)
+	}
+}
+
+// evaluate runs a scenario that resolves everything it needs and FAILS if the
+// coverage says otherwise. Every caller below is a non-sector scenario or a
+// fully-classified one, so a non-empty coverage means Evaluate is refusing
+// something it should have applied — which is the way the #640 fix could break
+// the platform, and it would otherwise show up as a confusing value mismatch.
+func evaluate(t *testing.T, p *domain.Portfolio, shocks []v1.ScenarioShock, registry *compute.Registry, opts ...scenario.Option) *domain.MeasureSet {
+	t.Helper()
+	got, cov := scenario.Evaluate(p, shocks, registry, opts...)
+	if cov.ExcludedCount != 0 {
+		t.Fatalf("shock coverage is not complete: %+v", cov)
+	}
+	return got
 }
 
 // decToFloat is a tiny numeric reader for the Decimal-representation-agnostic
