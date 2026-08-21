@@ -27,8 +27,28 @@ type Options struct {
 	Alloc     AllocationPolicy
 	Publisher Publisher
 
-	// TenantOf maps a fund to its tenant_id; nil ⇒ the fund_id is the tenant.
-	TenantOf func(fundID string) string
+	// Authority binds the authenticated strategy to the funds it may trade and each
+	// fund to its tenant. REQUIRED — NewPipeline refuses without one.
+	//
+	// THIS IS THE PERIMETER'S ACTUAL SCOPE (#632). Authenticate proves the sender
+	// holds a STRATEGY's secret and nothing more; `fund_id` arrives in the same body
+	// the signature covers, which makes it authentic, not authorized. Until this
+	// existed the tenant WAS that field, so one strategy secret placed orders in
+	// every tenant this deployment served.
+	Authority translate.FundAuthority
+	// OnUnboundFund is called for every alert whose authenticated strategy is not
+	// bound to the fund it named — an attempted cross-tenant order.
+	//
+	// LABELLED BY STRATEGY ONLY, and the omission is deliberate: strategy_id is
+	// bounded by the secret table this deployment holds, while fund_id is an
+	// arbitrary string chosen by the caller, and a metric label taking one would let
+	// an attacker mint unbounded series. The fund appears in the server's log line,
+	// which is not a cardinality surface.
+	//
+	// Nil ⇒ not counted. The refusal is still LOUD without it: the HTTP surface logs
+	// every one at ERROR and answers 403, so a deployment that forgets this seam
+	// still cannot swallow the event silently.
+	OnUnboundFund func(strategyID string)
 	// Gate is the kill-switch — the SAME *translate.Gate the native alpha runner
 	// holds, so one trip paralyzes both channels. Required: the local
 	// `func(fundID) bool` seam this replaced defaulted to constant false and was
@@ -98,6 +118,15 @@ func NewPipeline(opt Options) (*Pipeline, error) {
 	if opt.Auth == nil || opt.Symbols == nil {
 		return nil, errors.New("ingest: auth and symbols are required")
 	}
+	// Named separately from the pair above so the message can say what is missing.
+	// translate.New would refuse this too — the check is here as well because THIS
+	// is the internet-facing binary, and "the perimeter cannot say whose capital a
+	// signal trades" deserves to be the first line an operator reads (#632).
+	if opt.Authority == nil {
+		return nil, errors.New("ingest: a FundAuthority is required — the HMAC authenticates the " +
+			"STRATEGY, so the fund named in the body is a claim that has to be checked against " +
+			"configuration before it can select a tenant (#632)")
+	}
 	if opt.Now == nil {
 		opt.Now = time.Now
 	}
@@ -116,7 +145,7 @@ func NewPipeline(opt Options) (*Pipeline, error) {
 		AllowUnstampedSignal: opt.AllowUnstampedSignal,
 		Alloc:                opt.Alloc, Publisher: opt.Publisher, Gate: opt.Gate,
 		MaxQuantity: opt.MaxQuantity,
-		TenantOf:    opt.TenantOf, Now: opt.Now,
+		Authority:   opt.Authority, Now: opt.Now,
 	})
 	if err != nil {
 		return nil, err
@@ -175,8 +204,13 @@ func (p *Pipeline) Process(ctx context.Context, rawBody []byte, remoteIP net.IP,
 // A HALT is a verdict, and deliberately so: an alert that fired during a halt is stale
 // by the time the halt clears, and re-firing it into a moved market is worse than
 // dropping it. So a halt keeps burning the nonce, exactly as it did before.
+// AN UNBOUND FUND IS A VERDICT TOO (#632), and burning the nonce is the point:
+// the binding table is static configuration read at startup, so a redelivery can
+// never succeed, and releasing the nonce would let a probe re-enter the whole
+// pipeline on every retry instead of collapsing to ErrReplayed.
 func decided(err error) bool {
-	return err == nil || errors.Is(err, ErrHalted) || errors.Is(err, ErrBadRequest)
+	return err == nil || errors.Is(err, ErrHalted) || errors.Is(err, ErrBadRequest) ||
+		errors.Is(err, ErrUnboundFund)
 }
 
 // decide runs everything after authentication: the halt gate, validation, size
@@ -256,6 +290,17 @@ func (p *Pipeline) decide(ctx context.Context, wh *Webhook) (*Result, error) {
 		SourceTS:     sourceTS,
 	})
 	if err != nil {
+		// AN ATTEMPTED CROSS-TENANT ORDER IS AN EVENT, NOT A 4xx (#632).
+		//
+		// Counted here rather than inside the translator because this is the layer
+		// that knows the refusal came from an INTERNET-FACING, HMAC-authenticated
+		// sender: the native alpha runner shares Emit and its "strategy" is an
+		// in-process engine, where the same sentinel means a bad config, not an
+		// attacker. Same reasoning as OnUnstampedSignal — the operator's question is
+		// which SENDER is wrong.
+		if errors.Is(err, translate.ErrUnboundFund) && p.opt.OnUnboundFund != nil {
+			p.opt.OnUnboundFund(wh.StrategyID)
+		}
 		return nil, mapTranslateErr(err)
 	}
 	return res, nil
@@ -265,6 +310,12 @@ func (p *Pipeline) decide(ctx context.Context, wh *Webhook) (*Result, error) {
 // the HTTP server maps to status codes.
 func mapTranslateErr(err error) error {
 	switch {
+	case errors.Is(err, ErrUnboundFund):
+		// NOT folded into ErrBadRequest (#632). The alert is well-formed and the
+		// sender is authenticated; what failed is its AUTHORITY over the fund it
+		// named, and 400 would tell an operator reading access logs that a sender
+		// sent something malformed. The server answers 403 — see writePipelineError.
+		return err
 	case errors.Is(err, translate.ErrInvalidIntent), errors.Is(err, translate.ErrSizeExceedsMax),
 		errors.Is(err, translate.ErrStaleSignal), errors.Is(err, translate.ErrNoAllocation):
 		// All four are a VERDICT on the alert — the caller sent something this

@@ -25,6 +25,7 @@ func agedTranslator(t *testing.T, max time.Duration, now time.Time, allowUnstamp
 	t.Helper()
 	return &Translator{opt: Options{
 		MaxSignalAge:         max,
+		Authority:            boundAuthority(t),
 		AllowUnstampedSignal: allowUnstamped,
 		Now:                  func() time.Time { return now },
 	}}

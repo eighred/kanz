@@ -73,6 +73,14 @@ var ingestStatusExempt = map[string]string{
 	// it never reaches an HTTP response. Verified: the only construction site is
 	// NewPipeline's ValidateAllocation call.
 	"ErrBadAllocation": "startup-only — returned by NewPipeline, never by Process, so no request can receive it",
+
+	// Returned by NewFundAuthority at config load and by NewPipeline/translate.New
+	// when the binding table is missing — all three before the listener exists, so
+	// the process exits 2 rather than answering anything. Verified: the only
+	// constructions are config.applyBootstrap's NewFundAuthority call and the two
+	// nil-Authority guards in NewPipeline and translate.New (#632).
+	"ErrNoFundAuthority": "startup-only — a deployment that cannot say which tenant owns a fund " +
+		"refuses to start, so no request can receive it",
 }
 
 func TestEveryIngestSentinelHasAStatusDecided(t *testing.T) {

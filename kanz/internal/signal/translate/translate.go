@@ -184,9 +184,22 @@ type Options struct {
 	// alert either way, so the strategies needing a template fix are nameable.
 	AllowUnstampedSignal bool
 
-	// TenantOf maps a fund to its tenant_id; nil ⇒ the fund_id is the tenant.
-	TenantOf func(fundID string) string
-	Now      func() time.Time
+	// Authority binds the AUTHENTICATED strategy to the funds it may trade, and
+	// each fund to the tenant that owns it. REQUIRED — see FundAuthority.
+	//
+	// IT REPLACED `TenantOf func(fundID string) string`, which defaulted to the
+	// identity function when nil and was never assigned at any composition root
+	// (#632). The tenant of a signal-originated order was therefore the `fund_id`
+	// string out of the request body — a field the caller chooses — while the only
+	// thing the perimeter had actually authenticated was the STRATEGY. One leaked
+	// strategy secret could place orders in every tenant this deployment served.
+	//
+	// The type change is the point, exactly as it was for MaxQuantity (#240): a
+	// tenant can no longer be produced from a fund id alone, so the old call does
+	// not compile, and no front end can resolve a tenant without also asking
+	// whether this sender was entitled to that fund.
+	Authority FundAuthority
+	Now       func() time.Time
 }
 
 // Translator turns an Intent into the audit FACT plus the venue-allocated order
@@ -205,6 +218,16 @@ func New(opt Options) (*Translator, error) {
 	if opt.Gate == nil {
 		return nil, errors.New("translate: gate is required (use NewGate for production, OpenGate for tests/dev)")
 	}
+	// REFUSED AT CONSTRUCTION, never defaulted (#632). The seam this replaced was
+	// optional and fell back to "the fund_id is the tenant", which is how an
+	// internet-facing service came to route orders by a field of the request body.
+	// A binary that forgets this one does not start.
+	if opt.Authority == nil {
+		return nil, errors.New("translate: a FundAuthority is required — it is the only thing that " +
+			"says which funds an authenticated strategy may trade and which tenant owns each. " +
+			"There is deliberately no default: the previous one made the caller-supplied fund_id " +
+			"the tenant, which let one strategy secret place orders in every tenant (#632)")
+	}
 	// AUDIT THE VENUE WEIGHTS AT STARTUP, not per signal (#240). An allocation whose
 	// weights do not sum to 1 is a multiplier on every trade the fund ever makes:
 	// legs written as whole percents (60 / 40 — the natural mistake, since every
@@ -222,9 +245,6 @@ func New(opt Options) (*Translator, error) {
 				return nil, err
 			}
 		}
-	}
-	if opt.TenantOf == nil {
-		opt.TenantOf = func(fundID string) string { return fundID }
 	}
 	if opt.Now == nil {
 		opt.Now = time.Now
@@ -249,6 +269,25 @@ func (t *Translator) Emit(ctx context.Context, in Intent) (*Result, error) {
 	if err := in.validate(); err != nil {
 		return nil, err
 	}
+	// WHOSE CAPITAL IS THIS? (#632)
+	//
+	// FIRST of the substantive checks, and before the freshness bound, deliberately:
+	// this is the authorization decision, and it must not be masked by a refusal
+	// about the alert's age. An operator whose log says "stale" for a signal that
+	// was ALSO reaching into another tenant's book has been told the less important
+	// half.
+	//
+	// The tenant comes from here and nowhere else. Intent.FundID is caller-supplied
+	// on the webhook path — the perimeter authenticates the STRATEGY, never the
+	// fund — so the fund is treated as a CLAIM the authority either honours for this
+	// strategy or refuses. Deny by default: an unknown strategy, an unknown fund and
+	// an unbound pair are one answer.
+	tenant, ok := t.opt.Authority.TenantForFund(in.StrategyID, in.FundID)
+	if !ok {
+		return nil, fmt.Errorf("%w: strategy %s is not bound to fund %s, so no tenant owns this "+
+			"signal. The perimeter authenticated the STRATEGY; the fund it named is a claim, and "+
+			"this deployment's configuration does not grant it", ErrUnboundFund, in.StrategyID, in.FundID)
+	}
 	// HOW OLD IS THIS DECISION? (#416)
 	//
 	// Checked here, beside the kill-switch and before the FACT is recorded,
@@ -257,7 +296,6 @@ func (t *Translator) Emit(ctx context.Context, in Intent) (*Result, error) {
 	if err := t.freshEnough(in); err != nil {
 		return nil, err
 	}
-	tenant := t.opt.TenantOf(in.FundID)
 	ctx = bus.WithCorrelationID(ctx, in.SignalID)
 
 	// RESOLVE AND BOUND BEFORE THE FACT IS RECORDED.
@@ -514,9 +552,17 @@ func (t *Translator) publishCommand(ctx context.Context, cmd *orderpb.SubmitOrde
 		// order placed through the gateway routes correctly. Two paths, one of
 		// them silently wrong, is worse than neither working.
 		//
-		// `tenant` is TenantOf(in.FundID), resolved per signal — NOT a
-		// service-level default. One webhook endpoint serves many funds, so a
-		// per-service tenant would be the wrong one for all but a single fund.
+		// `tenant` is Options.Authority.TenantForFund(strategy, fund), resolved per
+		// signal — NOT a service-level default. One webhook endpoint serves many
+		// funds, so a per-service tenant would be the wrong one for all but a single
+		// fund.
+		//
+		// IT IS ALSO NOT THE fund_id (#632). It used to be, through a seam that
+		// defaulted to identity and was never wired, which made THIS SUBJECT — the
+		// routing key onto a tenant's own broker account — a function of a field in
+		// the request body. Emit resolves it from the binding table before anything
+		// is published, and refuses with ErrUnboundFund when the authenticated
+		// strategy has no claim on the fund it named.
 		Subject:        bus.TenantRoutedSubject(tenant, SubjectSubmit),
 		EventType:      SubjectSubmit,
 		EventClass:     envelopepb.EventClass_EVENT_CLASS_COMMAND,
