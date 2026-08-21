@@ -15,13 +15,11 @@ package livequote
 import (
 	"context"
 	"fmt"
-	"math"
 	"sort"
 	"sync"
 
 	"google.golang.org/protobuf/proto"
 
-	commonpb "github.com/eighred/kanz/kanz-schemas-go/common/v1"
 	envelopepb "github.com/eighred/kanz/kanz-schemas-go/envelope/v1"
 	marketpb "github.com/eighred/kanz/kanz-schemas-go/market/v1"
 
@@ -100,8 +98,8 @@ func (q *LiveQuotes) Handler(_ context.Context, env *envelopepb.Envelope, payloa
 func midPrice(ev *marketpb.MarketDataEvent) (float64, bool) {
 	switch d := ev.GetData().(type) {
 	case *marketpb.MarketDataEvent_Quote:
-		bid, bok := decFloat(d.Quote.GetBidPrice())
-		ask, aok := decFloat(d.Quote.GetAskPrice())
+		bid, bok := dec.Float64(d.Quote.GetBidPrice())
+		ask, aok := dec.Float64(d.Quote.GetAskPrice())
 		switch {
 		case bok && aok:
 			return (bid + ask) / 2, true
@@ -112,20 +110,10 @@ func midPrice(ev *marketpb.MarketDataEvent) (float64, bool) {
 		}
 		return 0, false
 	case *marketpb.MarketDataEvent_Trade:
-		return decFloat(d.Trade.GetPrice())
+		return dec.Float64(d.Trade.GetPrice())
 	case *marketpb.MarketDataEvent_Bar:
-		return decFloat(d.Bar.GetClose())
+		return dec.Float64(d.Bar.GetClose())
 	default:
 		return 0, false
 	}
-}
-
-// decFloat converts a common.v1.Decimal to float64 — the same edge conversion
-// the risk compute + performance layers do (exact Decimal on the wire, float in
-// the calibration math). ok=false for a nil decimal.
-func decFloat(d *commonpb.Decimal) (float64, bool) {
-	if d == nil {
-		return 0, false
-	}
-	return float64(d.GetCoefficient()) * math.Pow10(int(d.GetExponent())), true
 }

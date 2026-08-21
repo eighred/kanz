@@ -2,6 +2,7 @@ package compute
 
 import (
 	"context"
+	decutil "github.com/eighred/kanz/internal/dec"
 	"math"
 	"testing"
 	"time"
@@ -66,16 +67,16 @@ func TestRegisterGreeks_PortfolioAggregation(t *testing.T) {
 	if !ok {
 		t.Fatal("Delta measure missing")
 	}
-	if d := math.Abs(decimalToFloat(got.Value) - wantDelta); d > 0.5 {
-		t.Fatalf("portfolio Delta: got %.4f want %.4f (Δ %.4f)", decimalToFloat(got.Value), wantDelta, d)
+	if d := math.Abs(decutil.Float64Or(got.Value, 0) - wantDelta); d > 0.5 {
+		t.Fatalf("portfolio Delta: got %.4f want %.4f (Δ %.4f)", decutil.Float64Or(got.Value, 0), wantDelta, d)
 	}
 
 	// Gamma is option-only (equity contributes none) and positive for net... here
 	// net gamma = (10−5)·dollar-gamma, still positive.
 	wantGamma := gA.Gamma*spot*spot*(10*mult) + gB.Gamma*spot*spot*(-5*mult)
 	g, _ := ms.Lookup(MeasureGamma)
-	if d := math.Abs(decimalToFloat(g.Value) - wantGamma); d > 0.5 {
-		t.Fatalf("portfolio Gamma: got %.4f want %.4f", decimalToFloat(g.Value), wantGamma)
+	if d := math.Abs(decutil.Float64Or(g.Value, 0) - wantGamma); d > 0.5 {
+		t.Fatalf("portfolio Gamma: got %.4f want %.4f", decutil.Float64Or(g.Value, 0), wantGamma)
 	}
 }
 
@@ -89,7 +90,7 @@ func TestRegisterGreeks_ReplacesPlaceholderDelta(t *testing.T) {
 	p.SetPosition(domain.Position{InstrumentID: "EQ", Quantity: dec(1, 0), MarketValue: &commonpb.Money{Amount: dec(7500, 0), CurrencyCode: "USD"}, AsOf: time.Now()})
 	ms := ComputeMeasures(p, r, nil)
 	got, _ := ms.Lookup(MeasureDelta)
-	if v := decimalToFloat(got.Value); math.Abs(v-7500) > 1e-6 {
+	if v := decutil.Float64Or(got.Value, 0); math.Abs(v-7500) > 1e-6 {
 		t.Fatalf("linear Delta fallback: got %.4f want 7500", v)
 	}
 }
@@ -142,7 +143,7 @@ func TestRegisterGreeks_AnOptionWithNoSpotIsReportedAndNotPricedAsStock(t *testi
 	ms := ComputeMeasures(p, r, nil)
 
 	d, _ := ms.Lookup(MeasureDelta)
-	if got := decimalToFloat(d.Value); got != 0 {
+	if got := decutil.Float64Or(d.Value, 0); got != 0 {
 		t.Fatalf("Delta = %.4f for an option with no spot, want 0 — a contract with no "+
 			"underlying mark is being reported as %.4f of directional exposure it was never "+
 			"priced for", got, got)
@@ -175,7 +176,7 @@ func TestRegisterGreeks_AnOptionWithNoVolIsReported(t *testing.T) {
 
 	ms := ComputeMeasures(p, r, nil)
 	g, _ := ms.Lookup(MeasureGamma)
-	if got := decimalToFloat(g.Value); got != 0 {
+	if got := decutil.Float64Or(g.Value, 0); got != 0 {
 		t.Fatalf("Gamma = %.4f with no vol, want 0 — the fixture is not exercising the skip", got)
 	}
 	if len(skipped) == 0 {
@@ -246,7 +247,7 @@ func TestRegisterGreeks_ANilSpotOrVolProviderSkipsRatherThanPanics(t *testing.T)
 			ms := ComputeMeasures(p, r, nil) // must not panic
 
 			d, _ := ms.Lookup(MeasureDelta)
-			if got := decimalToFloat(d.Value); got != 0 {
+			if got := decutil.Float64Or(d.Value, 0); got != 0 {
 				t.Fatalf("Delta = %.4f with %s, want 0", got, tc.name)
 			}
 			if len(skipped) == 0 {

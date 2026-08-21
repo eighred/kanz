@@ -22,6 +22,7 @@ package varmodel
 
 import (
 	"context"
+	"github.com/eighred/kanz/internal/dec"
 	"math"
 	"sort"
 
@@ -162,7 +163,7 @@ func portfolioPnL(ctx context.Context, p *domain.Portfolio, rp compute.ReturnsPr
 			cov.Exclude(pos.InstrumentID, SkipNoReturns)
 			continue
 		}
-		val := decimalToFloat(pos.MarketValue.Amount)
+		val := dec.Float64Or(pos.MarketValue.Amount, 0)
 		legs = append(legs, leg{value: val, returns: r})
 		cov.Contributed++
 		v0 += val
@@ -240,16 +241,6 @@ func quantile(sorted []float64, q float64) float64 {
 }
 
 func zeroMeasure(cov compute.Coverage) v1.Measure { return zeroNamed(compute.MeasureVaR99, cov) }
-
-// decimalToFloat / floatToDecimal are the local Decimal⇄float bridge (compute's
-// equivalents are package-private). Returns/VaR are float-domain statistics; the
-// emitted Value is rounded back to a money-scale Decimal.
-func decimalToFloat(d *commonpb.Decimal) float64 {
-	if d == nil {
-		return 0
-	}
-	return float64(d.Coefficient) * math.Pow10(int(d.Exponent))
-}
 
 func floatToDecimal(f float64, exp int32) *commonpb.Decimal {
 	scaled := f * math.Pow10(int(-exp))

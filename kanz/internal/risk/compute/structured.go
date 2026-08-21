@@ -2,6 +2,7 @@ package compute
 
 import (
 	"context"
+	decutil "github.com/eighred/kanz/internal/dec"
 	"math"
 	"time"
 
@@ -258,7 +259,7 @@ func structMeasure(ctx context.Context, name v1.MeasureName, p StructuredProvide
 				cov.Exclude(pos.InstrumentID, skipStructured(p, pos, SkipUnpriceableTranche))
 				continue
 			}
-			mv := math.Abs(decimalToFloat(pos.MarketValue.GetAmount()))
+			mv := math.Abs(decutil.Float64Or(pos.MarketValue.GetAmount(), 0))
 			cov.Contributed++
 			weighted += mv * val
 			weight += mv

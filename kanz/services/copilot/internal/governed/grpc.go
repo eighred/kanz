@@ -3,6 +3,7 @@ package governed
 import (
 	"context"
 	"fmt"
+	decutil "github.com/eighred/kanz/internal/dec"
 	"math"
 	"strconv"
 	"time"
@@ -114,7 +115,7 @@ func (c *GRPCClient) EvaluateScenario(ctx context.Context, portfolioID, scenario
 func measureValues(set *domainpb.RiskMeasureSet) map[string]float64 {
 	out := map[string]float64{}
 	for _, m := range set.GetMeasures() {
-		out[m.GetName()] = decFloat(m.GetValue())
+		out[m.GetName()] = decutil.Float64Or(m.GetValue(), 0)
 	}
 	return out
 }
@@ -126,7 +127,7 @@ func exposureValues(set *domainpb.ExposureSet) map[string]float64 {
 	out := map[string]float64{}
 	for _, e := range set.GetExposures() {
 		key := e.GetDimension().String() + "/" + e.GetBucket()
-		out[key] = decFloat(e.GetNet().GetAmount())
+		out[key] = decutil.Float64Or(e.GetNet().GetAmount(), 0)
 	}
 	return out
 }
@@ -154,14 +155,6 @@ func parsePct(name string) (*commonpb.Decimal, error) {
 	coeff := int64(math.Round(f * math.Pow10(-exp)))
 	return &commonpb.Decimal{Coefficient: coeff, Exponent: exp}, nil
 }
-
-func decFloat(d *commonpb.Decimal) float64 {
-	if d == nil {
-		return 0
-	}
-	return float64(d.GetCoefficient()) * math.Pow10(int(d.GetExponent()))
-}
-
 func asOf(t time.Time) time.Time {
 	if t.IsZero() {
 		return time.Time{}

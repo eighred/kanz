@@ -2,6 +2,7 @@ package compute
 
 import (
 	"context"
+	decutil "github.com/eighred/kanz/internal/dec"
 	"time"
 
 	v1 "github.com/eighred/kanz/internal/risk/api/v1"
@@ -171,7 +172,7 @@ func greekMeasure(ctx context.Context, name v1.MeasureName, p GreeksProviders, s
 				// Linear (non-option) position: Δ≡1 ⇒ contributes its signed
 				// MarketValue to Delta, nothing to higher-order Greeks.
 				if name == MeasureDelta {
-					sum += decimalToFloat(pos.MarketValue.GetAmount())
+					sum += decutil.Float64Or(pos.MarketValue.GetAmount(), 0)
 				}
 				continue
 			}
@@ -242,7 +243,7 @@ func positionGreekContribution(ctx context.Context, p GreeksProviders, pos domai
 	if mult == 0 {
 		mult = 1
 	}
-	n := decimalToFloat(pos.Quantity) * mult
+	n := decutil.Float64Or(pos.Quantity, 0) * mult
 	return sel(g, spot, n), true
 }
 

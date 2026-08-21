@@ -2,6 +2,7 @@ package compute
 
 import (
 	"context"
+	decutil "github.com/eighred/kanz/internal/dec"
 	"math"
 	"time"
 
@@ -94,7 +95,7 @@ func PopulateUncertainty(ctx context.Context, p *domain.Portfolio, vm VolModel) 
 // float estimate) which is acceptable for an uncertainty band, not for the
 // money value itself (see decimalToFloat's note).
 func scaleMoneyByVol(m *commonpb.Money, sigma float64) *commonpb.Money {
-	band := math.Abs(decimalToFloat(m.Amount)) * math.Abs(sigma)
+	band := math.Abs(decutil.Float64Or(m.Amount, 0)) * math.Abs(sigma)
 	return &commonpb.Money{
 		Amount:       floatToDecimal(band, uncertaintyExp),
 		CurrencyCode: m.CurrencyCode,

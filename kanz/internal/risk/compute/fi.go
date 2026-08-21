@@ -2,6 +2,7 @@ package compute
 
 import (
 	"context"
+	decutil "github.com/eighred/kanz/internal/dec"
 	"time"
 
 	v1 "github.com/eighred/kanz/internal/risk/api/v1"
@@ -332,8 +333,8 @@ func positionBondRisk(ctx context.Context, p FIProviders, pos domain.Position, a
 		DayCount:   spec.DayCount,
 	}
 	cr := bond.CurveRisk(asOf, c)
-	qty := decimalToFloat(pos.Quantity)
-	mv := decimalToFloat(pos.MarketValue.GetAmount())
+	qty := decutil.Float64Or(pos.Quantity, 0)
+	mv := decutil.Float64Or(pos.MarketValue.GetAmount(), 0)
 	if mv < 0 {
 		mv = -mv
 	}

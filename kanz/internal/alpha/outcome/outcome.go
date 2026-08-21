@@ -74,10 +74,8 @@ package outcome
 import (
 	"context"
 	"fmt"
-	"math"
+	decutil "github.com/eighred/kanz/internal/dec"
 	"time"
-
-	commonpb "github.com/eighred/kanz/kanz-schemas-go/common/v1"
 
 	"github.com/eighred/kanz/internal/alpha/score"
 	"github.com/eighred/kanz/internal/marketdata/store"
@@ -259,7 +257,7 @@ func referencePrice(bars []store.Bar, at time.Time, interval time.Duration) (flo
 	if !found {
 		return 0, false
 	}
-	return decimalFloat(best.Close)
+	return decutil.Float64(best.Close)
 }
 
 // barsIn returns the bars whose interval lies inside (at, deadline] — the
@@ -292,33 +290,14 @@ func touched(window []store.Bar, ref, threshold float64) bool {
 	target := ref * (1 + threshold)
 	for _, b := range window {
 		if threshold >= 0 {
-			if h, ok := decimalFloat(b.High); ok && h >= target {
+			if h, ok := decutil.Float64(b.High); ok && h >= target {
 				return true
 			}
 			continue
 		}
-		if l, ok := decimalFloat(b.Low); ok && l <= target {
+		if l, ok := decutil.Float64(b.Low); ok && l <= target {
 			return true
 		}
 	}
 	return false
-}
-
-// decimalFloat converts an exact Decimal for analytic use, dividing by the power
-// of ten rather than multiplying by its inexact reciprocal.
-func decimalFloat(d *commonpb.Decimal) (float64, bool) {
-	if d == nil {
-		return 0, false
-	}
-	exp := int(d.GetExponent())
-	var f float64
-	if exp >= 0 {
-		f = float64(d.GetCoefficient()) * math.Pow10(exp)
-	} else {
-		f = float64(d.GetCoefficient()) / math.Pow10(-exp)
-	}
-	if math.IsNaN(f) || math.IsInf(f, 0) {
-		return 0, false
-	}
-	return f, true
 }

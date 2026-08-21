@@ -2,11 +2,8 @@ package performance
 
 import (
 	"context"
-	"math"
 	"sort"
 	"time"
-
-	commonpb "github.com/eighred/kanz/kanz-schemas-go/common/v1"
 
 	"github.com/eighred/kanz/internal/marketdata/store"
 )
@@ -84,16 +81,6 @@ func (v *Valuer) Value(ctx context.Context, portfolioID string, at, asOf time.Ti
 // the whole performance layer marks on one consistent point-in-time basis.
 func (v *Valuer) priceAt(ctx context.Context, instrumentID string, at, asOf time.Time) (float64, bool, error) {
 	return pointInTimePrice(ctx, v.store, instrumentID, v.kind, at, asOf)
-}
-
-// decimalToFloat converts a store price Decimal to float64. Performance math is
-// float-domain (returns are statistics); the price is exact Decimal in the store
-// and lands as float here, the same edge-conversion the risk compute layer does.
-func decimalToFloat(d *commonpb.Decimal) float64 {
-	if d == nil {
-		return 0
-	}
-	return float64(d.GetCoefficient()) * math.Pow10(int(d.GetExponent()))
 }
 
 // ValueSeries marks the portfolio at each date in dates (sorted ascending),

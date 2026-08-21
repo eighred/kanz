@@ -25,10 +25,9 @@ package returns
 
 import (
 	"context"
+	"github.com/eighred/kanz/internal/dec"
 	"math"
 	"time"
-
-	commonpb "github.com/eighred/kanz/kanz-schemas-go/common/v1"
 
 	"github.com/eighred/kanz/internal/marketdata/store"
 )
@@ -120,7 +119,7 @@ func (p *StoreReturnsProvider) Returns(ctx context.Context, instrumentID string,
 	}
 	prices := make([]float64, 0, len(obs))
 	for _, o := range obs {
-		prices = append(prices, decimalToFloat(o.Price))
+		prices = append(prices, dec.Float64Or(o.Price, 0))
 	}
 	// window returns need window+1 prices; keep only the most recent tail.
 	if n := window + 1; len(prices) > n {
@@ -153,16 +152,6 @@ func computeReturns(prices []float64, method ReturnMethod) []float64 {
 		}
 	}
 	return out
-}
-
-// decimalToFloat converts an exact common.v1.Decimal to float64. Prices stay
-// exact Decimal on the wire/store (double is banned, EVT-10); the lossy
-// conversion is confined to the analytics plane, where a float64 is the input.
-func decimalToFloat(d *commonpb.Decimal) float64 {
-	if d == nil {
-		return 0
-	}
-	return float64(d.Coefficient) * math.Pow10(int(d.Exponent))
 }
 
 // Compile-time assertion that StoreReturnsProvider satisfies ReturnsProvider.

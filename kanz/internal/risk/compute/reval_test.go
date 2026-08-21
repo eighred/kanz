@@ -2,6 +2,7 @@ package compute
 
 import (
 	"context"
+	decutil "github.com/eighred/kanz/internal/dec"
 	"math"
 	"testing"
 	"time"
@@ -33,15 +34,15 @@ func TestRevaluer_RepricesNonlinearly(t *testing.T) {
 		t.Fatal("expected option to be revalued")
 	}
 	wantDown := pricing.BlackScholesPrice(pricing.Call, spot*0.9, 100, ttm, 0, 0, sigma) * n
-	if d := math.Abs(decimalToFloat(down.GetAmount()) - wantDown); d > 1.0 {
-		t.Fatalf("reval down: got %.2f want %.2f", decimalToFloat(down.GetAmount()), wantDown)
+	if d := math.Abs(decutil.Float64Or(down.GetAmount(), 0) - wantDown); d > 1.0 {
+		t.Fatalf("reval down: got %.2f want %.2f", decutil.Float64Or(down.GetAmount(), 0), wantDown)
 	}
 
 	// Vol +5 points raises the (long) option's value — the vega effect a linear
 	// price shock cannot express.
 	volUp, _ := rv.RevalueOption(context.Background(), "OPT", asOf, baseMV, RevalShocks{GlobalVolBump: 0.05})
-	if decimalToFloat(volUp.GetAmount()) <= basePrice*n {
-		t.Fatalf("vol bump should raise long-call value: got %.2f base %.2f", decimalToFloat(volUp.GetAmount()), basePrice*n)
+	if decutil.Float64Or(volUp.GetAmount(), 0) <= basePrice*n {
+		t.Fatalf("vol bump should raise long-call value: got %.2f base %.2f", decutil.Float64Or(volUp.GetAmount(), 0), basePrice*n)
 	}
 
 	// A non-option instrument is not revalued (linear fallback applies upstream).

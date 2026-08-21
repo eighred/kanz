@@ -2,6 +2,7 @@ package compute
 
 import (
 	"context"
+	decutil "github.com/eighred/kanz/internal/dec"
 	"math"
 	"testing"
 	"time"
@@ -83,14 +84,14 @@ func TestRegisterFactorRisk_VaRConsistentWithSplit(t *testing.T) {
 	if !ok {
 		t.Fatal("FactorVaR99 missing")
 	}
-	total := math.Hypot(decimalToFloat(sys.Value), decimalToFloat(spec.Value))
+	total := math.Hypot(decutil.Float64Or(sys.Value, 0), decutil.Float64Or(spec.Value, 0))
 	if total <= 0 {
 		t.Fatalf("total factor risk must be positive, got %.4f", total)
 	}
 	// FactorVaR99 = z₀.₉₉ · total, z₀.₉₉ ≈ 2.3263.
 	wantVaR := 2.3263 * total
-	if d := math.Abs(decimalToFloat(fvar.Value) - wantVaR); d > 0.01*wantVaR {
-		t.Fatalf("FactorVaR99 %.2f must be ≈ 2.3263·total %.2f", decimalToFloat(fvar.Value), wantVaR)
+	if d := math.Abs(decutil.Float64Or(fvar.Value, 0) - wantVaR); d > 0.01*wantVaR {
+		t.Fatalf("FactorVaR99 %.2f must be ≈ 2.3263·total %.2f", decutil.Float64Or(fvar.Value, 0), wantVaR)
 	}
 }
 
@@ -99,8 +100,8 @@ func TestRegisterFactorRisk_NoModelIsZero(t *testing.T) {
 	RegisterFactorRisk(context.Background(), r, FactorProviders{Model: staticModel{m: nil}})
 	ms := ComputeMeasures(factorTestPortfolio(), r, nil)
 	fvar, _ := ms.Lookup(MeasureFactorVaR99)
-	if decimalToFloat(fvar.Value) != 0 {
-		t.Fatalf("FactorVaR99 with no model must be 0, got %.4f", decimalToFloat(fvar.Value))
+	if decutil.Float64Or(fvar.Value, 0) != 0 {
+		t.Fatalf("FactorVaR99 with no model must be 0, got %.4f", decutil.Float64Or(fvar.Value, 0))
 	}
 }
 
@@ -122,7 +123,7 @@ func TestRegisterFactorRisk_NoModelIsReported(t *testing.T) {
 
 	ms := ComputeMeasures(factorTestPortfolio(), r, nil)
 	fvar, _ := ms.Lookup(MeasureFactorVaR99)
-	if got := decimalToFloat(fvar.Value); got != 0 {
+	if got := decutil.Float64Or(fvar.Value, 0); got != 0 {
 		t.Fatalf("FactorVaR99 = %.4f with no model, want 0 — the fixture is not exercising the skip", got)
 	}
 	if len(skipped) == 0 {
@@ -162,7 +163,7 @@ func TestRegisterFactorRisk_AnAvailableModelIsNotReportedAsSkipped(t *testing.T)
 
 	ms := ComputeMeasures(factorTestPortfolio(), r, nil)
 	sys, _ := ms.Lookup(MeasureSystematicRisk)
-	if decimalToFloat(sys.Value) <= 0 {
+	if decutil.Float64Or(sys.Value, 0) <= 0 {
 		t.Fatal("SystematicRisk is not positive — the fixture is not exercising the covered path")
 	}
 	if len(skipped) != 0 {
@@ -226,18 +227,18 @@ func TestRegisterFactorRisk_APositionOutsideTheUniverseIsReported(t *testing.T) 
 	// Vacuity guard: with three statistical factors over three instruments the PCA
 	// explains the covariance exactly, every specific variance is zero, and the
 	// comparison below is 0 == 0 — it would pass with the specific half deleted.
-	if decimalToFloat(before.Value) <= 0 {
+	if decutil.Float64Or(before.Value, 0) <= 0 {
 		t.Fatal("SpecificRisk is zero on the covered book — the fixture no longer exercises the " +
 			"specific half and the comparison below asserts nothing")
 	}
-	if decimalToFloat(before.Value) != decimalToFloat(after.Value) {
+	if decutil.Float64Or(before.Value, 0) != decutil.Float64Or(after.Value, 0) {
 		t.Fatalf("SpecificRisk moved from %.2f to %.2f when D was added — the fixture is not "+
-			"exercising the silent drop this reports", decimalToFloat(before.Value), decimalToFloat(after.Value))
+			"exercising the silent drop this reports", decutil.Float64Or(before.Value, 0), decutil.Float64Or(after.Value, 0))
 	}
 	sysBefore, _ := covered.Lookup(MeasureSystematicRisk)
 	sysAfter, _ := uncovered.Lookup(MeasureSystematicRisk)
-	if decimalToFloat(sysBefore.Value) != decimalToFloat(sysAfter.Value) {
+	if decutil.Float64Or(sysBefore.Value, 0) != decutil.Float64Or(sysAfter.Value, 0) {
 		t.Fatalf("SystematicRisk moved from %.2f to %.2f when D was added — the fixture is not "+
-			"exercising the silent drop this reports", decimalToFloat(sysBefore.Value), decimalToFloat(sysAfter.Value))
+			"exercising the silent drop this reports", decutil.Float64Or(sysBefore.Value, 0), decutil.Float64Or(sysAfter.Value, 0))
 	}
 }

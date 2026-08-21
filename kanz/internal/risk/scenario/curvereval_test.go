@@ -2,6 +2,7 @@ package scenario
 
 import (
 	"context"
+	"github.com/eighred/kanz/internal/dec"
 	"testing"
 	"time"
 
@@ -58,15 +59,15 @@ func TestEvaluateCurveShift_RepricesBondsRatesUpIsLoss(t *testing.T) {
 	shocked := EvaluateCurveShift(p, up, nil, reval)
 	upNet, _ := shocked.Lookup(compute.MeasureNetExposure)
 
-	if !(decFloat(upNet.Value) < decFloat(baseNet.Value)) {
-		t.Fatalf("rates-up must lower bond MV: base %.2f shocked %.2f", decFloat(baseNet.Value), decFloat(upNet.Value))
+	if !(dec.Float64Or(upNet.Value, 0) < dec.Float64Or(baseNet.Value, 0)) {
+		t.Fatalf("rates-up must lower bond MV: base %.2f shocked %.2f", dec.Float64Or(baseNet.Value, 0), dec.Float64Or(upNet.Value, 0))
 	}
 
 	// Rates −100bp ⇒ MarketValue rises (symmetry of the curve move).
 	down := EvaluateCurveShift(p, library.CurveParallel(-100), nil, reval)
 	downNet, _ := down.Lookup(compute.MeasureNetExposure)
-	if !(decFloat(downNet.Value) > decFloat(baseNet.Value)) {
-		t.Fatalf("rates-down must raise bond MV: base %.2f shocked %.2f", decFloat(baseNet.Value), decFloat(downNet.Value))
+	if !(dec.Float64Or(downNet.Value, 0) > dec.Float64Or(baseNet.Value, 0)) {
+		t.Fatalf("rates-down must raise bond MV: base %.2f shocked %.2f", dec.Float64Or(baseNet.Value, 0), dec.Float64Or(downNet.Value, 0))
 	}
 }
 
@@ -82,8 +83,8 @@ func TestEvaluateCurveShift_NonBondUntouched(t *testing.T) {
 	baseNet, _ := base.Lookup(compute.MeasureNetExposure)
 	shocked := EvaluateCurveShift(p, library.CurveParallel(100), nil, reval)
 	shockedNet, _ := shocked.Lookup(compute.MeasureNetExposure)
-	if decFloat(baseNet.Value) != decFloat(shockedNet.Value) {
-		t.Fatalf("equity must be untouched by a curve shift: %.2f vs %.2f", decFloat(baseNet.Value), decFloat(shockedNet.Value))
+	if dec.Float64Or(baseNet.Value, 0) != dec.Float64Or(shockedNet.Value, 0) {
+		t.Fatalf("equity must be untouched by a curve shift: %.2f vs %.2f", dec.Float64Or(baseNet.Value, 0), dec.Float64Or(shockedNet.Value, 0))
 	}
 }
 

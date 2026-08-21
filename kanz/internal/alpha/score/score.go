@@ -41,6 +41,7 @@ package score
 import (
 	"encoding/json"
 	"fmt"
+	"github.com/eighred/kanz/internal/dec"
 	"math"
 	"sort"
 	"time"
@@ -150,7 +151,7 @@ func FromProto(p *signalpb.AlphaScore) (Score, error) {
 		return Score{}, fmt.Errorf("score: AlphaScore carries no return_threshold, so its " +
 			"probability states nothing")
 	}
-	return New(p.GetProbability(), decimalToFloat(t),
+	return New(p.GetProbability(), dec.Float64Or(t, 0),
 		p.GetHorizon().AsDuration(), p.GetModelId())
 }
 
@@ -292,34 +293,6 @@ func Calibrate(outcomes []Outcome, bins int) (Report, error) {
 	}
 	sort.Slice(r.Bins, func(i, j int) bool { return r.Bins[i].Lo < r.Bins[j].Lo })
 	return r, nil
-}
-
-// decimalToFloat reconstructs the threshold by DIVIDING by the power of ten
-// rather than multiplying by its reciprocal.
-//
-// The two are not the same, and the difference is one ULP: math.Pow10(-6) is not
-// exactly 1e-6, so coefficient*Pow10(-6) rounds twice — once into the reciprocal
-// and once into the product. 100*Pow10(-6) is 9.999999999999999e-05, which is
-// NOT the 0.0001 that was written. Dividing by the exactly-representable 1e6
-// rounds once and returns the original.
-//
-// THE SIBLING CONVERSIONS ELSEWHERE MULTIPLY, AND THEY ARE FINE. internal/lake/
-// dataset and internal/marketdata/indicator both do coefficient*Pow10(exp) for
-// prices and features, where a final-ULP difference is irrelevant to an average
-// or a standard deviation. It matters HERE and only here because this value is
-// an IDENTITY: calibration groups scores by the claim they make, so two
-// thresholds that differ in the last bit are two buckets where there should be
-// one, and a model's record silently splits in half.
-//
-// Found by the round-trip test, which is why that test asserts equality of the
-// whole Score rather than comparing formatted output — the %.4f in String()
-// prints both as "0.0001".
-func decimalToFloat(d *commonpb.Decimal) float64 {
-	exp := int(d.GetExponent())
-	if exp >= 0 {
-		return float64(d.GetCoefficient()) * math.Pow10(exp)
-	}
-	return float64(d.GetCoefficient()) / math.Pow10(-exp)
 }
 
 // scoreJSON is the wire form for records that are compared or stored as JSON —

@@ -24,7 +24,7 @@ import (
 	decutil "github.com/eighred/kanz/internal/dec"
 )
 
-// THE ARITHMETIC BELOW IS dec.Add / dec.Mul / dec.Abs, NOT A LOCAL COPY (#216).
+// THE ARITHMETIC BELOW IS decutil.Add / decutil.Mul / decutil.Abs, NOT A LOCAL COPY (#216).
 //
 // It used to be a local copy, and the copy was the bug. The identical int64
 // coefficient arithmetic was written three times — the compliance gate, the
@@ -39,9 +39,9 @@ import (
 // thin on purpose — enough to name the operation in the compute layer's
 // vocabulary and to state what a refusal means, and no arithmetic of their own.
 //
-// A REFUSAL SURFACES AS nil, never as a number. dec.Add/dec.Mul refuse only when
+// A REFUSAL SURFACES AS nil, never as a number. decutil.Add/decutil.Mul refuse only when
 // the exponent itself cannot move, which for in-domain inputs (|exponent| ≤ 64,
-// enforced at every ingress — dec.InDomainDeep on the bus, dec.InDomainDeep on
+// enforced at every ingress — decutil.InDomainDeep on the bus, decutil.InDomainDeep on
 // the gRPC query surface since #246) cannot happen — internal/dec's
 // TestArithmeticIsTotalOnInDomainInputs pins exactly that, by sweeping every
 // extreme in-domain exponent/coefficient pair and asserting no refusal is
@@ -71,7 +71,7 @@ func addDecimal(a, b *commonpb.Decimal) *commonpb.Decimal {
 // MinInt64 is the case that is not arithmetic-as-usual: Go's -MinInt64 is
 // MinInt64, so the naive negation returns the SAME negative number. Through
 // absDecimal that means |x| comes back negative and a gross exposure SUBTRACTS
-// the position it should have enlarged. dec.Abs raises the exponent instead.
+// the position it should have enlarged. decutil.Abs raises the exponent instead.
 func negateDecimal(a *commonpb.Decimal) *commonpb.Decimal {
 	if a == nil {
 		return zeroDecimal()
@@ -166,19 +166,6 @@ func mulDecimal(a, b *commonpb.Decimal) *commonpb.Decimal {
 	return out
 }
 
-// decimalToFloat converts d to float64 for operations (sqrt, log, ...)
-// that have no clean integer-arithmetic counterpart. Loses precision
-// past ~15 significant digits — fine for RISK-08's uncertainty
-// bands (confidence intervals don't need money-grade precision);
-// not appropriate for money values, which stay in Decimal end-to-
-// end.
-func decimalToFloat(d *commonpb.Decimal) float64 {
-	if d == nil {
-		return 0
-	}
-	return float64(d.Coefficient) * math.Pow10(int(d.Exponent))
-}
-
 // floatToDecimal converts f to a Decimal at the given exponent. The
 // coefficient is rounded (not truncated) so the round-trip
 // float→decimal→float minimises bias.
@@ -200,7 +187,7 @@ func decimalSqrt(d *commonpb.Decimal) *commonpb.Decimal {
 	if d == nil {
 		return zeroDecimal()
 	}
-	f := decimalToFloat(d)
+	f := decutil.Float64Or(d, 0)
 	if f <= 0 {
 		return zeroDecimal()
 	}
@@ -227,7 +214,7 @@ const uncertaintyExp int32 = -6
 // THAT IDENTITY IS WHY IT SPILLS (#216). The int64 fast path is kept — it is
 // what the LATENCY-01c allocation guard measures, and every realistic book
 // stays on it — but it now DETECTS the overflow it used to commit and hands the
-// running sum to dec.Add from there. Detection matters most where no multiply
+// running sum to decutil.Add from there. Detection matters most where no multiply
 // is involved at all: after a scenario shock the shocked positions carry a
 // coarser exponent than the untouched ones, so aligning an unshocked $10,000,000
 // (1e15 at -8) to a shocked -13 multiplies it by 1e5 and leaves int64 range on
@@ -239,7 +226,7 @@ type decAccum struct {
 	// spilled is the running sum once the int64 fast path could no longer hold
 	// it. nil while the fast path holds, which is the allocation-free case.
 	spilled *commonpb.Decimal
-	// refused latches a sum dec.Add could not represent at all. The accumulator
+	// refused latches a sum decutil.Add could not represent at all. The accumulator
 	// then yields nil forever: a partial sum is a WRONG total, not a smaller one.
 	refused bool
 }
@@ -283,7 +270,7 @@ func (a *decAccum) add(d *commonpb.Decimal, abs bool) {
 }
 
 // addFast folds (c, e) into the int64 accumulator, applying exactly the
-// alignment rule dec.Add applies. It reports false — WITHOUT having mutated the
+// alignment rule decutil.Add applies. It reports false — WITHOUT having mutated the
 // accumulator — when any step would leave int64 range; that is the spill
 // signal, and it is the difference between a coarser answer and a wrong one.
 //
@@ -292,7 +279,7 @@ func (a *decAccum) add(d *commonpb.Decimal, abs bool) {
 // an ordinary book takes.
 func (a *decAccum) addFast(c, e int64) bool {
 	// A zero operand has no magnitude, so its exponent must not drag the
-	// alignment — the same rule dec.Add applies, and what keeps this
+	// alignment — the same rule decutil.Add applies, and what keeps this
 	// accumulator byte-identical to an addDecimal fold rather than merely equal
 	// in value.
 	if c == 0 {

@@ -2,7 +2,7 @@ package scenario
 
 import (
 	"context"
-	"math"
+	"github.com/eighred/kanz/internal/dec"
 	"time"
 
 	commonpb "github.com/eighred/kanz/kanz-schemas-go/common/v1"
@@ -107,12 +107,12 @@ func collectGlobalShocks(shocks []v1.ScenarioShock) (parallelFrac, globalVol flo
 	for _, sh := range shocks {
 		switch s := sh.(type) {
 		case v1.ParallelShift:
-			parallelFrac += decFloat(s.Pct)
+			parallelFrac += dec.Float64Or(s.Pct, 0)
 		case v1.VolShock:
 			if s.UnderlyingID == "" {
-				globalVol += decFloat(s.AbsBump)
+				globalVol += dec.Float64Or(s.AbsBump, 0)
 			} else {
-				volByUnderlying[string(s.UnderlyingID)] += decFloat(s.AbsBump)
+				volByUnderlying[string(s.UnderlyingID)] += dec.Float64Or(s.AbsBump, 0)
 			}
 		}
 	}
@@ -124,7 +124,7 @@ func instrumentPriceFrac(shocks []v1.ScenarioShock, id domain.InstrumentID) floa
 	var frac float64
 	for _, sh := range shocks {
 		if s, ok := sh.(v1.PriceShock); ok && s.InstrumentID == id {
-			frac += decFloat(s.Pct)
+			frac += dec.Float64Or(s.Pct, 0)
 		}
 	}
 	return frac
@@ -165,32 +165,10 @@ func sectorFrac(ctx context.Context, classifier factor.Classifier, pos domain.Po
 	var frac float64
 	for _, sh := range shocks {
 		if s, ok := sh.(v1.SectorShock); ok && cl.Sector.Taxonomy == s.Taxonomy && cl.Sector.Code == s.Code {
-			frac += decFloat(s.Pct)
+			frac += dec.Float64Or(s.Pct, 0)
 		}
 	}
 	return frac
-}
-
-// decFloat converts a shock fraction to float64 for the revaluation model.
-//
-// The scale factor is math.Pow10, which is O(1). It replaced a hand-rolled
-// pow10f loop for the reason #246 was filed against compute's pow10: the loop
-// ran once per unit of |exponent|, Decimal.exponent is a wire field, and
-// ParallelShift.Pct comes STRAIGHT off the risk engine's gRPC surface — so a
-// shock at exponent -2000000000 spun two billion float divisions per position.
-// The gRPC ingress now refuses that (grpcsrv.requireDecimalDomain), but a bound
-// that lives only at the ingress is one missed ingress from being no bound at
-// all.
-//
-// The old loop was also silently WRONG at the extreme: -exp for exponent
-// MinInt32 stays negative, so the loop body never ran and the scale factor came
-// back as 1 — a 2-billionth of a percent shock applied as ×1. math.Pow10
-// saturates to 0 / +Inf instead, which propagates visibly.
-func decFloat(d *commonpb.Decimal) float64 {
-	if d == nil {
-		return 0
-	}
-	return float64(d.Coefficient) * math.Pow10(int(d.Exponent))
 }
 
 // fracDecimal converts a float fraction back to a Decimal at 1e-6 precision for

@@ -2,6 +2,7 @@ package performance
 
 import (
 	"context"
+	"github.com/eighred/kanz/internal/dec"
 	"time"
 
 	"github.com/eighred/kanz/internal/marketdata/store"
@@ -81,5 +82,5 @@ func pointInTimePrice(ctx context.Context, s store.Store, instrumentID string, k
 	if err != nil || len(hist) == 0 {
 		return 0, false, err
 	}
-	return decimalToFloat(hist[len(hist)-1].Price), true, nil
+	return dec.Float64Or(hist[len(hist)-1].Price, 0), true, nil
 }
