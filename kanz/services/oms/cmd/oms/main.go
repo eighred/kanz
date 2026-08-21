@@ -299,6 +299,33 @@ func runConsumers(ctx context.Context, cfg config.Config, readiness *server.Read
 	}, []string{"reason"})
 	obs.Registry.MustRegister(unpriced)
 
+	// AN ADMISSION AGAINST A BALANCE NOBODY VOUCHED FOR IS COUNTED (#671).
+	//
+	// Ungoverned and Unpriced above make a REFUSAL or an unconstrained pass
+	// visible. This is the third shape and the one that was still silent: every
+	// rule ran, every rule passed, and the buying-power rule spent against a cash
+	// figure missing entry types this deployment does not produce (#588). A
+	// refusal already names them (attributeCash puts balance_omits on the
+	// violation); an ADMISSION named nothing.
+	//
+	// LABELLED BY POSTURE because the operator actions differ: "incomplete" means
+	// a feed that does not exist yet and the omission is known; "unstated" means
+	// the producing service is not declaring completeness at all, which is a
+	// wiring fault in the announcer and is fixable today.
+	//
+	// Expect this to be NON-ZERO on every current deployment — corporate_action is
+	// unproduced estate-wide — which is the point: the number says how much of the
+	// day's flow cleared against a balance nobody stands behind, instead of that
+	// being a question nobody has asked.
+	unaccounted := prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "kanz_compliance_unaccounted_admissions_total",
+		Help: "Orders ADMITTED against a cash balance whose producer did not vouch for it. " +
+			"incomplete = the producer named missing entry types; unstated = the producer said nothing. " +
+			"On a SHORT book an unfolded entitlement OVERSTATES cash, so buying power can admit an " +
+			"order the fund cannot pay for.",
+	}, []string{"posture"})
+	obs.Registry.MustRegister(unaccounted)
+
 	// HOW MANY INSTRUMENTS IS THE FOLD ACTUALLY HOLDING? (#96)
 	//
 	// The price spine is a broadcast, so every replica folds every trade and
@@ -521,6 +548,18 @@ func runConsumers(ctx context.Context, cfg config.Config, readiness *server.Read
 		// against.
 		comp.WithMarginSource(compliance.NewMarginSource(bindings, margins)),
 		comp.WithUngovernedObserver(func(string, string) { ungoverned.Inc() }),
+		comp.WithUnaccountedObserver(func(_, _, omits string) {
+			// The posture, not the omitted list, is the label: entry-type names are a
+			// bounded set today but they come from the producing deployment, and a
+			// metric label fed by another service's vocabulary is unbounded
+			// cardinality waiting to happen. The names are in the WARN, once per
+			// portfolio, where they cost nothing.
+			if omits == "" {
+				unaccounted.WithLabelValues("unstated").Inc()
+				return
+			}
+			unaccounted.WithLabelValues("incomplete").Inc()
+		}),
 		comp.WithUnpricedObserver(func(portfolioID, instrumentID string) {
 			// Two very different incidents arrive at the same refusal, and an
 			// operator needs to tell them apart: a mark we have NEVER seen means a

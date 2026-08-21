@@ -26,6 +26,15 @@ import (
 // scale is the fixed decimal scale ToProto rounds to.
 const scale = 8
 
+// Scale is the number of decimal places Str renders at, and therefore the
+// smallest magnitude this platform can express as a decimal string.
+//
+// EXPORTED SO A CALLER CAN REFUSE RATHER THAN ROUND. A value below 10^-Scale
+// renders as "0" — which is not a smaller number, it is a DIFFERENT CLAIM, and
+// on a signed regulatory filing it is the claim "we measured zero" (#672).
+// internal/filing reads this to say so in its refusal.
+const Scale = scale
+
 // ParseRat parses a decimal string ("0.1", "50000") into an exact rational.
 func ParseRat(s string) (*big.Rat, error) {
 	r, ok := new(big.Rat).SetString(s)
