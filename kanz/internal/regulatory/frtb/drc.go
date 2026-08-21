@@ -1,5 +1,7 @@
 package frtb
 
+import "fmt"
+
 // Default risk charge, non-securitization (PARITY-03g, the MAR22 aggregation),
 // and the residual risk add-on (MAR23). Both consume CRIF-style inputs — JTD
 // amounts and notionals the deployment computes upstream (LGD scaling and any
@@ -43,7 +45,7 @@ func DefaultDRCParams() DRCParams {
 // per obligor, compute the hedge-benefit ratio HBR = ΣnetLong/(ΣnetLong +
 // Σ|netShort|), and charge max(0, Σ RW·netLong − HBR·Σ RW·|netShort|); buckets
 // sum (no cross-bucket netting).
-func DRC(positions []JTDPosition, p DRCParams) float64 {
+func DRC(positions []JTDPosition, p DRCParams) (float64, error) {
 	type ok struct{ bucket, obligor, rating string }
 	netted := map[ok]float64{}
 	for _, j := range positions {
@@ -63,6 +65,30 @@ func DRC(positions []JTDPosition, p DRCParams) float64 {
 		}
 		rw, found := p.RiskWeight[k.rating]
 		if !found {
+			// AN UNRATED WEIGHT OF ZERO IS NOT A WEIGHT, IT IS A MISSING TABLE (#617).
+			//
+			// This fell through to p.UnratedWeight unconditionally, so DRCParams{}
+			// — nil RiskWeight, zero UnratedWeight — weighted EVERY jump-to-default
+			// position to nothing, emitted DRC = 0 into FRTB_TOTAL, and the filing
+			// was signed. handleFRTB decodes DRCParams straight from the request
+			// body, so `"drc_params": {}` reached this line from outside.
+			//
+			// It is the same defect #565 fixed for Delta, Vega and Curvature, and
+			// the justification above frtb_filing.go's call site already describes
+			// it exactly: "a filing assembled on a table missing Commodity was
+			// indistinguishable from a book with no commodity risk — a smaller
+			// FRTB_TOTAL, no warning, and a signed report."
+			//
+			// A NON-ZERO UnratedWeight STILL APPLIES, and that distinction is the
+			// whole check. Weighting unrated exposure at a stated rate is a
+			// deliberate supervisory choice this must not break; weighting it at
+			// zero is the absence of one.
+			if p.UnratedWeight == 0 {
+				return 0, fmt.Errorf("%w: jump-to-default rating %q has positions but no risk weight, "+
+					"and UnratedWeight is zero — every position at this rating would contribute nothing "+
+					"to DRC and the filing would be signed with a smaller FRTB_TOTAL than the book",
+					ErrUncovered, k.rating)
+			}
 			rw = p.UnratedWeight
 		}
 		if amt >= 0 {
@@ -84,7 +110,7 @@ func DRC(positions []JTDPosition, p DRCParams) float64 {
 			total += c
 		}
 	}
-	return total
+	return total, nil
 }
 
 // RRAOPosition is one instrument's residual-risk notional: Exotic underlyings

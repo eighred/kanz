@@ -33,7 +33,10 @@ func TestComputeFRTB_AssemblesEveryCharge(t *testing.T) {
 	wantDelta := mustFRTBCharge(t, in.Delta, in.Params)
 	wantVega := mustFRTBCharge(t, in.Vega, in.Params)
 	wantCurv := mustCurvatureCharge(t, in.Curvature, in.Params)
-	wantDRC := frtb.DRC(in.JTD, in.DRCParams)
+	wantDRC, err := frtb.DRC(in.JTD, in.DRCParams)
+	if err != nil {
+		t.Fatalf("DRC: %v", err)
+	}
 	wantRRAO := frtb.RRAO(in.RRAO)
 	if res.Delta != wantDelta || res.Vega != wantVega || res.Curvature != wantCurv ||
 		res.DRC != wantDRC || res.RRAO != wantRRAO {
