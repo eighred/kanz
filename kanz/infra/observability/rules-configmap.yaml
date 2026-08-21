@@ -1,0 +1,1268 @@
+# GENERATED — DO NOT EDIT BY HAND. Regenerate with:
+#
+#   ./apply-rules.sh --emit > rules-configmap.yaml
+#
+# THE RULES CONFIGMAP IS NOW A SYNCED MANIFEST (#625). Until this file existed,
+# prometheus-rules was created only by apply-rules.sh, and apply-rules.sh had no
+# caller: Argo CD did not sync this tree, CI only ran the script's --list to
+# stage promtool inputs, and nothing else invoked it. Every alert here was
+# validated, guarded, proven-to-fire and loaded by NOTHING.
+#
+# prometheus.yaml mounts this ConfigMap NON-OPTIONALLY, deliberately: if it is
+# absent the pod stays in ContainerCreating and says so, rather than starting
+# clean, loading zero rules and serving a green /-/ready with every alert
+# silently missing.
+#
+# EDITING THIS FILE DIRECTLY IS THE ONE THING THAT BREAKS THE ARRANGEMENT — it
+# would become a second list, competing with the tree, which is the exact state
+# #230 ended. Add or change a *.rules.yaml and regenerate.
+# test/arch/observability_rules_reachable_test.go fails the build if this file
+# and the tree disagree.
+apiVersion: v1
+data:
+  operational.rules.yaml: |
+    # Absolute-threshold operational alerts (#230) — over the metrics the platform
+    # ALREADY emits.
+    #
+    # WHY THESE EXIST AND THE SLO RULES ARE NOT ENOUGH. slo.alerts.rules.yaml is
+    # four burn-rate alerts over RATIOS, and a ratio is blind to zero-over-zero. A
+    # JetStream/Kafka consumer that stalls at 03:00 stops incrementing
+    # kanz_bus_consume_total{result="ok"} AND kanz_bus_consume_total{result="error"}
+    # in equal measure — the denominator goes to zero, the SLI is NaN, `NaN > x` is
+    # false, and the event-bus delivery-success burn-rate alert stays silent for as
+    # long as the stall lasts. The recording rules say so themselves ("a silent
+    # service burns no budget, which is correct") — correct for an SLO, useless for
+    # an outage. Everything below is an ABSOLUTE value or a THROUGHPUT FLOOR, which
+    # is the shape that can see a zero.
+    #
+    # EVERY THRESHOLD IS DERIVED, NOT PICKED. A rule nobody can justify is silenced
+    # on its first false page and is then worse than nothing, so each one states
+    # where its number comes from. Where the number could only be invented, the rule
+    # is written WITHOUT one instead (see ArchiverNotArchivingWithBacklog, which
+    # compares a backlog against a throughput of exactly zero).
+    #
+    # WHAT IS DELIBERATELY ABSENT: kanz_bus_consumer_lag AND kanz_bus_pending_messages.
+    # Both are declared in pkg/bus/metrics.go and both are described there as "the
+    # KEDA scale signal", but NOTHING IN THE MODULE EVER SETS EITHER. Their only
+    # writers are BusMetrics.SetConsumerLag and BusMetrics.SetPending, and a search
+    # of every .go file in the module finds zero call sites for both — the "periodic
+    # poller" their doc comments describe was never written. A GaugeVec with no
+    # WithLabelValues call exports no series at all, so a rule over them would
+    # compare a threshold against an empty vector and could never fire: the exact
+    # defect #62 deleted ten data-quality rules for, re-created with different names.
+    # (An `absent()` rule would be worse — it would fire continuously and forever,
+    # which is how an alerting layer trains its readers to ignore it.)
+    # alerts/README.md states the order that was violated to produce that state, and
+    # it is the order followed here: INSTRUMENT FIRST, then write the rule. Until a
+    # poller exists, BusConsumerStalled below covers the same failure from
+    # kanz_bus_consume_total, which is emitted on every dispatch and therefore real.
+    #
+    # The same absence is a live scaling defect, not just an alerting one:
+    # infra/deploy/risk-engine-scaledobject.yaml and market-data-scaledobject.yaml
+    # both query these two series from Prometheus as their KEDA trigger, so both
+    # ScaledObjects are scaling on a series that does not exist.
+    #
+    # EVERY RULE BELOW IS PROVEN TO FIRE. operational_test.yaml next to this file is
+    # a promtool unit-test harness with a firing case for each alert and a
+    # must-NOT-fire case for each one where silence is a distinct claim. A rule that
+    # parses but can never fire is this file's own subject one level up — an
+    # alerting layer that reads as healthy because nothing in it works — so parsing
+    # is not the bar. CI runs the harness (the `observability` job discovers every
+    # *_test.yaml under infra/observability and executes it from its own directory);
+    # test/arch/observability_rules_reachable_test.go fails the build if it stops.
+    #
+    #   cd infra/observability/alerts
+    #   promtool check rules operational.rules.yaml
+    #   promtool test rules operational_test.yaml
+    groups:
+      # ---------------------------------------------------------------------------
+      # BUS DELIVERY — is the spine actually moving events?
+      # ---------------------------------------------------------------------------
+      - name: bus_delivery
+        rules:
+          # THE ISSUE'S FAILURE SCENARIO, CAUGHT BY A THROUGHPUT FLOOR.
+          #
+          # A STALLED consumer and a SLOW one look nothing alike and only one of them
+          # is this rule's business. Slow is a backlog draining below capacity —
+          # KEDA's job, and it is already wired to scale on it. Stopped is a group
+          # that delivered traffic and now delivers none, which no ratio can see
+          # because both terms fall to zero together.
+          #
+          # THE SECOND CLAUSE IS THE WHOLE RULE. Without it this pages for every
+          # subject that is legitimately quiet at 03:00 — and this estate has plenty
+          # (compliance.breach.>, settlement.>, tenant onboarding). Requiring that
+          # the SAME (subject, group) delivered at least one message in the preceding
+          # 24 hours is what separates "this consumer stopped" from "nothing was
+          # sent". 24h and not 6h because a daily batch subject must not be able to
+          # go quiet for long enough to disqualify itself from its own alert.
+          #
+          # KNOWN DECAY, STATED RATHER THAN HIDDEN: a stall lasting more than 24h
+          # takes the qualifier to zero too and this alert RESOLVES on its own. That
+          # is a deliberate trade for not paging on idle subjects. It is survivable
+          # only because an alert that has been firing for a day and resolved without
+          # a human is itself the anomaly — and because BusConsumerHalted and
+          # KanzScrapeTargetDown catch the two mechanisms that actually produce a
+          # day-long stall.
+          #
+          # 15m window + for: 15m ≈ 30 minutes of total silence before it pages.
+          # Deliberately slow: scrape_interval is 30s, a busy subject can go quiet
+          # for a minute during a leader election or a rolling restart, and a 3am
+          # page that is a coin flip gets the rule deleted. Thirty minutes is still
+          # eight hours better than the morning position discrepancy this replaces.
+          - alert: BusConsumerStalled
+            expr: |
+              (
+                sum by (subject, group) (rate(kanz_bus_consume_total[15m])) == 0
+                and
+                sum by (subject, group) (rate(kanz_bus_consume_total[24h])) > 0
+              )
+            for: 15m
+            labels: { severity: critical, layer: operational }
+            annotations:
+              summary: "Consumer group {{ $labels.group }} has consumed nothing from {{ $labels.subject }} for 30 minutes"
+              description: "{{ $labels.group }} delivered messages on {{ $labels.subject }} within the last 24h and has delivered NONE for the last 30 minutes. This is invisible to the event-bus delivery-success SLO: with no deliveries at all the error ratio is 0/0, so no burn-rate alert can fire. Events are accumulating on the spine and the streams that carry them age out (24h on MARKET/RISK/EXECUTION, 168h on the money streams). Check the consumer's pod, then whether it is blocked on Postgres or a venue call."
+
+          # #219's COUNTER, WHICH EXISTS PRECISELY BECAUSE EVERY OTHER SERIES READS
+          # NORMAL. A Kafka subscription that could neither handle nor dead-letter a
+          # delivery returns WITHOUT committing: kanz_bus_consume_total records the
+          # failed dispatch and then stops moving, and the lag is computed from a
+          # committed offset that correctly did not advance. Nothing else in the bus
+          # exporter distinguishes that from an idle topic.
+          #
+          # THRESHOLD IS ZERO BECAUSE THE EVENT IS TERMINAL. The subscription does
+          # not resume — it has returned, holding the offset, and will not move again
+          # until the pod is restarted with the dead-letter path repaired. There is
+          # no rate to trend and no volume at which it becomes interesting: one is
+          # one stopped consumer.
+          #
+          # for: 0m for the same reason. A `for:` on a terminal, non-self-healing
+          # condition only delays the page. increase() over 10m already absorbs a
+          # single-scrape artefact, and holds the alert up for ten minutes after the
+          # halt so it cannot flap.
+          - alert: BusConsumerHalted
+            expr: increase(kanz_bus_consume_halted_total[10m]) > 0
+            for: 0m
+            labels: { severity: critical, layer: operational }
+            annotations:
+              summary: "Consumer {{ $labels.group }} HALTED on {{ $labels.subject }} — it refused to skip an event"
+              description: "The subscription stopped without committing because a delivery could neither be handled nor dead-lettered: the DLQ path is down and the consumer is holding the offset rather than losing the event. It will not resume on its own. Fix the dead-letter destination, then restart the consumer — this counter is the only signal that it stopped on purpose, and it does not clear itself."
+
+          # AN ARCHIVER FALLING BEHIND IS DATA LOSS WITH A DELAY ON IT.
+          # services/archiver/internal/archive/metrics.go says it: "Being down is
+          # survivable and self-healing; being slow is not, and it is invisible
+          # without this."
+          #
+          # NO INVENTED THRESHOLD IN THIS ONE. The comparison is a backlog against a
+          # throughput of EXACTLY ZERO: there is something pending and nothing has
+          # been archived in fifteen minutes. That needs no capacity model to justify
+          # and cannot be argued down.
+          #
+          # THIS RULE WORKS ONLY BECAUSE THE POLLER IS OFF THE MESSAGE PATH. The lag
+          # poller in cmd/archiver/main.go ticks every 15s in its own goroutine, "so
+          # it keeps reporting even while the archiver itself is stuck (e.g.
+          # NACK-looping a produce failure)" — the stuck case is exactly this alert's
+          # subject, and the pending gauge is still being published throughout it.
+          #
+          # `or vector(0)` IS LOAD-BEARING. An archiver that has never archived
+          # anything exports no kanz_archiver_archived_total series, sum() of nothing
+          # is an EMPTY vector, and `empty == 0` is empty — so without the fallback
+          # this rule would go silent for a brand-new or never-working archiver,
+          # which is the worst case it has. Failing open here would reproduce the
+          # bug the file exists to remove.
+          #
+          # for: 15m on top of a 15m window: half an hour of a backlog with zero
+          # drain. A rolling restart takes under a minute and a Kafka leader election
+          # seconds.
+          - alert: ArchiverNotArchivingWithBacklog
+            expr: |
+              (
+                max(kanz_archiver_pending_messages) > 0
+                and
+                (sum(rate(kanz_archiver_archived_total[15m])) or vector(0)) == 0
+              )
+            for: 15m
+            labels: { severity: critical, layer: operational }
+            annotations:
+              summary: "The archiver has a backlog and has written nothing to Kafka for 30 minutes"
+              description: "Events are pending on the spine for the archiver's durable consumer and kanz_archiver_archived_total has not moved. The Kafka log of record is no longer receiving the event stream. NATS streams age out (24h on MARKET/RISK/EXECUTION, 168h on ACCOUNTING/COMPLIANCE/SETTLEMENT), so anything not archived before its stream's max-age is gone permanently — this is a countdown, not a backlog. Check kanz_archiver_failed_total by reason for whether the produce, the routing or the DLQ is what failed."
+
+          # SLOW, NOT STOPPED — the other half, and the one that needs a number.
+          #
+          # A steady backlog that is draining is not an incident; a backlog that has
+          # been GROWING for half an hour ends in data loss on a schedule. Both
+          # clauses are required: deriv() alone fires on any transient burst, and a
+          # magnitude alone fires on a healthy archiver absorbing a market open.
+          #
+          # WHERE 1000 COMES FROM. It is the only invented number in this file and it
+          # exists purely to suppress small bursts, not to define "behind" — the
+          # growth clause does that. test/load/capacity-model.md sizes one
+          # risk-engine replica's standing backlog at 500 pending, so 1000 is two
+          # replica-loads of work: comfortably above anything the archiver absorbs
+          # between its 15s polls, and four orders of magnitude below a 24h stream's
+          # volume, so it cannot be mistaken for a loss horizon. If it ever pages
+          # falsely, raise it — the growth clause is the part that must not be
+          # weakened.
+          #
+          # max by (subject), not sum: every archiver replica polls the SAME durable
+          # consumer's pending count, so summing across pods would multiply one
+          # backlog by the replica count.
+          - alert: ArchiverBacklogGrowing
+            expr: |
+              (
+                max by (subject) (kanz_archiver_pending_messages) > 1000
+                and
+                max by (subject) (deriv(kanz_archiver_pending_messages[30m])) > 0
+              )
+            for: 30m
+            labels: { severity: warning, layer: operational }
+            annotations:
+              summary: "The archiver's backlog on {{ $labels.subject }} has been growing for 30 minutes"
+              description: "Pending messages for the archiver's durable consumer are above 1000 and still rising. The archiver is running but slower than the spine is producing, which ends in events ageing off their stream unarchived. Not a page: it has hours of headroom on a 24h stream. Find the bottleneck (Kafka produce latency, or a partition leader move) before it becomes ArchiverNotArchivingWithBacklog."
+
+      # ---------------------------------------------------------------------------
+      # DEAD LETTERS — events that left the live path and are now one copy on a
+      # write-only stream
+      # ---------------------------------------------------------------------------
+      #
+      # WHY THERE IS NO DEPTH RULE HERE. There is no DLQ depth metric, and #230 asked
+      # for one. Depth on `dlq.>` is broker state, so a gauge for it must be fed by a
+      # poller over JetStream ConsumerInfo — and pkg/bus has already shipped two
+      # poller-fed gauges whose poller was never written (kanz_bus_consumer_lag,
+      # kanz_bus_pending_messages; see the header). A third of that shape would make
+      # the DLQ look measured while measuring nothing, which is the defect this file
+      # exists to remove, so #230's DLQ work landed as an INFLOW counter on the
+      # message path instead: kanz_bus_dlq_parked_total, incremented by
+      # Consumer.publishDLQ only after the park succeeded. It is real the moment a
+      # message is parked, needs no poller, and cannot become an empty vector.
+      #
+      # Inflow is also the better alerting signal. Depth answers "how much is stuck",
+      # which matters when a drain runs continuously; this estate's drain is an
+      # operator running cmd/kanz-redrive by hand, so what needs to reach a human is
+      # THAT A MESSAGE WAS PARKED AT ALL. The count of what is waiting is a question
+      # for the person already responding.
+      - name: bus_dead_letters
+        rules:
+          # THRESHOLD ZERO, BECAUSE PARKING ACKS THE ONLY COPY.
+          #
+          # Consumer.publishDLQ parks and then ACKS the original delivery, so after
+          # this counter moves the message exists in exactly one place: the
+          # `dlq.>` stream, which is 720h of retention that nothing subscribes to.
+          # Nothing brings it back automatically — recovery is a human running
+          # cmd/kanz-redrive. There is no rate at which that becomes routine, and no
+          # volume below which it is safe to not know.
+          #
+          # TRANSIENT SPECIFICALLY, AND THAT IS WHY IT IS CRITICAL RATHER THAN A
+          # TICKET. `transient` is pkg/bus's classification for a failure about the
+          # WORLD, not the message: a Postgres failover, a NATS reconnect, a venue
+          # gate timeout. Retry is MaxAttempts=1 estate-wide and deliberately so
+          # (test/arch/bus_dlq_test.go), which means a 200ms infrastructure blip is
+          # sufficient to park a capital-path command the client already holds a 202
+          # for. So a transient park is not a backlog item — it is evidence of an
+          # infrastructure failure that is probably still happening, and the parked
+          # message is the receipt.
+          #
+          # for: 0m, and a 15m increase() window: identical shape and identical
+          # reasoning to OMSOrdersQuarantined below. The loss has already happened;
+          # a `for:` would only delay the page, while the window holds the alert up
+          # long enough to be seen and grouped.
+          #
+          # by (subject, group): a park is attributable to one consumer group on one
+          # subject, and that pair is what the responder types into kanz-redrive.
+          # Summing them away would produce one alert saying "something parked".
+          - alert: BusMessagesDeadLettered
+            expr: sum by (subject, group) (increase(kanz_bus_dlq_parked_total{class="transient"}[15m])) > 0
+            for: 0m
+            labels: { severity: critical, layer: operational }
+            annotations:
+              summary: "{{ $labels.group }} parked a message from {{ $labels.subject }} — it is on the DLQ and nothing will bring it back"
+              description: "A delivery failed for a reason pkg/bus classified as TRANSIENT (infrastructure, not the message) and was parked on dlq.{{ $labels.subject }}. Parking acks the original, so the DLQ copy is the only copy, and nothing subscribes to dlq.> — it will sit there for the stream's 720h retention until an operator runs kanz-redrive. Transient means whatever broke was probably still broken when this fired: find that first, then redrive. On order.> this is a client-acknowledged order that never reached the OMS."
+
+          # TERMINAL IS A DIFFERENT INCIDENT AND MUST NOT SHARE A RULE.
+          #
+          # `terminal` means the failure was about the BYTES — unframeable, an
+          # envelope that fails validation, a handler panic. A redrive REFUSES these
+          # by design (see bus.IsTerminal): re-running a deterministic defect against
+          # the same bytes parks them again. So unlike the rule above, there is no
+          # operator action that recovers the event, and paging at 03:00 buys nothing
+          # — the fix is a producer change or a handler fix, and it ships in a
+          # deploy.
+          #
+          # WARNING, AND NOT BECAUSE IT IS MINOR: the event is permanently lost,
+          # which is worse than a transient park. It is a warning because the
+          # RESPONSE is a working-hours code change, and a page for something a
+          # responder cannot act on at night is how an alerting layer gets muted.
+          #
+          # 1h window with for: 0m, matching ComplianceUngovernedOrders: exactly one
+          # firing period per hour in which it happened. The usual cause is a
+          # producer whose payload shape changed, so the first occurrence and the ten
+          # thousandth have the same cause and the same fix — a `for:` would only
+          # delay a ticket that is already about something unrecoverable.
+          - alert: BusTerminalMessagesDeadLettered
+            expr: sum by (subject, group) (increase(kanz_bus_dlq_parked_total{class="terminal"}[1h])) > 0
+            for: 0m
+            labels: { severity: warning, layer: operational }
+            annotations:
+              summary: "{{ $labels.group }} parked an UNPROCESSABLE message from {{ $labels.subject }} — a redrive will refuse it"
+              description: "A delivery failed in a way pkg/bus classified as TERMINAL: unframeable bytes, an envelope that failed validation, or a handler panic. kanz-redrive refuses these deliberately, because re-running a deterministic defect against the same bytes parks them again — so this event is LOST, and no operator action recovers it. Read Kanz-DLQ-Error on the parked message. The usual cause is a producer whose payload shape changed, in which case every message of that type is being lost too; if the cause is a panic, the handler is also crashing on live traffic."
+
+          # -----------------------------------------------------------------------
+          # THE ARCHIVER'S DLQ IS A DIFFERENT TRANSPORT AND HAD NO RULE AT ALL (#285).
+          #
+          # The two rules above are over kanz_bus_dlq_parked_total, which pkg/bus
+          # increments on the NATS path. The archiver does not use it: it parks to
+          # the KAFKA topic dlq.archiver and counts on kanz_archiver_failed_total,
+          # a metric no rule in this file reads.
+          #
+          # WHY THE TWO EXISTING ARCHIVER RULES CANNOT COVER THIS, WHICH IS THE
+          # WHOLE REASON THESE ARE NEEDED. ArchiverNotArchivingWithBacklog and
+          # ArchiverBacklogGrowing both key on kanz_archiver_pending_messages — the
+          # DEPTH of the durable consumer's queue. deadLetter() parks and then ACKS
+          # (services/archiver/internal/archive/archiver.go), so a park makes the
+          # backlog go DOWN. An archiver parking every single event it receives
+          # drains its queue promptly and keeps a pending count of zero: to both
+          # rules above, and to every ratio in slo.alerts.rules.yaml, that is
+          # indistinguishable from an archiver doing its job perfectly. The failure
+          # this file exists to catch — healthy-looking silence — is the exact shape
+          # of the archiver's own worst outcome.
+          #
+          # AND IT IS WORSE HERE THAN ON THE NATS PATH. kanz-redrive is NATS-only
+          # (`grep -in kafka cmd/kanz-redrive/main.go` → nothing), so where
+          # BusTerminalMessagesDeadLettered can at least say "a redrive will refuse
+          # it", here there is no tool that could even refuse. infra/kafka/topics-job.yaml
+          # declares dlq.archiver with `delete` retention at 2592000000ms — 30 days
+          # — and says in its own comment that those 30 days are "the window in
+          # which a HUMAN can extract a parked event". #285 wrote that window down.
+          # Nothing told the human the clock had started. That is what these fix.
+          #
+          # DELIBERATELY NOT ALERTED: reason="publish". That is the real-topic Kafka
+          # produce failing, which is TRANSIENT and NACKed — the event stays on the
+          # spine, the backlog grows, and ArchiverNotArchivingWithBacklog above owns
+          # it. Adding a rule here would page twice for one incident.
+          #
+          # NO topic LABEL IN ANY by() BELOW, and that is not an oversight:
+          # observeFail's own comment says topic "may be ''" for unframe/route
+          # because both fail BEFORE a topic is known, so every series these rules
+          # match carries topic="". Grouping by a label that is always empty splits
+          # nothing and puts an empty string in the summary.
+
+          # AT LEAST ONE EVENT HAS LEFT THE LOG OF RECORD, AND THE 30-DAY CLOCK IS RUNNING.
+          #
+          # Threshold zero for the same reason BusMessagesDeadLettered uses zero:
+          # the park acked the only live copy. The archiver exists BECAUSE NATS
+          # streams age out (24h on MARKET/RISK/EXECUTION, 168h on
+          # ACCOUNTING/COMPLIANCE/SETTLEMENT) — so once that happens, the copy on
+          # dlq.archiver is the only one anywhere, and it is on a topic with a
+          # delete policy and nothing subscribed.
+          #
+          # WARNING, NOT CRITICAL, AND NOT BECAUSE IT IS MINOR — this is permanent
+          # loss from the durable log. It is a warning for the same reason
+          # BusTerminalMessagesDeadLettered is: both park reasons are ClassTerminal
+          # by a decision deadLetter() argues explicitly ("nothing in the WORLD
+          # changes to make either succeed"), so there is no 03:00 action. The
+          # response is a producer fix or a topic mapping, and it ships in a deploy.
+          # A page a responder cannot act on is how this file gets muted.
+          #
+          # 1h window, for: 0m — the shape BusTerminalMessagesDeadLettered uses and
+          # for its reasoning: the loss already happened, so a `for:` only delays a
+          # ticket. The window is what holds the alert up long enough to be grouped.
+          # Note the mismatch worth knowing: the alert repeats hourly while the
+          # evidence expires in 30 days. If this is still open on day 29 the event
+          # is about to be deleted, which is why the description leads with that.
+          - alert: ArchiverParkedAnEventWithNoDrain
+            expr: sum by (reason) (increase(kanz_archiver_failed_total{reason=~"unframe|route"}[1h])) > 0
+            for: 0m
+            labels: { severity: warning, layer: operational }
+            annotations:
+              summary: "The archiver parked an event ({{ $labels.reason }}) on dlq.archiver — nothing drains it and it is deleted in 30 days"
+              description: "An event never reached the Kafka log of record: reason={{ $labels.reason }} (unframe = the body never decoded; route = its event_type/tenant maps to no topic). The archiver parked it on dlq.archiver and ACKED the original, so the parked copy becomes the only copy once its NATS stream ages out — 24h on MARKET/RISK/EXECUTION, 168h on ACCOUNTING/COMPLIANCE/SETTLEMENT. dlq.archiver has a 30-day delete retention and NO consumer, and kanz-redrive is NATS-only, so recovery means a human reading the topic by hand inside that window (#285). Note the backlog alerts CANNOT see this: parking acks, so pending stays at zero. Read Kanz-DLQ-Error and Kanz-DLQ-Original-Subject on the parked message."
+
+          # AN ENTIRE EVENT CLASS IS BEING DROPPED RIGHT NOW, AND THIS ONE IS FIXABLE NOW.
+          #
+          # Split from the rule above because the RESPONSE differs, which is this
+          # file's stated reason for splitting terminal from transient. "route"
+          # means topic.For found no mapping for an event_type/tenant pair. That is
+          # this archiver's static configuration, not the bytes — so unlike
+          # "unframe", a human CAN end the loss immediately by adding the mapping,
+          # and every event of that type is being lost until they do. #285: "a
+          # routing table that does not know a subject is a configuration error, and
+          # configuration errors arrive in batches rather than singly."
+          #
+          # NO COUNT THRESHOLD, DELIBERATELY. The obvious rule is "more than N per
+          # window", but N here could only be invented: one route failure and ten
+          # thousand have the identical cause (a missing mapping) and the identical
+          # fix, so magnitude does not separate an incident from a one-off. What
+          # separates them is PERSISTENCE — a mapping that is still missing fifteen
+          # minutes later is a live configuration gap, while a single event from a
+          # decommissioned producer is not. So the rule is a rate over zero held for
+          # 15m, per this file's own instruction to write the rule without a number
+          # rather than invent one.
+          #
+          # OVERLAPS ArchiverParkedAnEventWithNoDrain ON PURPOSE, the same way
+          # ArchiverBacklogGrowing and ArchiverNotArchivingWithBacklog overlap: two
+          # alerts, two severities, two different things to do. The test harness
+          # asserts a lone unframe park does NOT fire this one.
+          - alert: ArchiverRoutingTableRejectingEvents
+            expr: sum(rate(kanz_archiver_failed_total{reason="route"}[15m])) > 0
+            for: 15m
+            labels: { severity: critical, layer: operational }
+            annotations:
+              summary: "The archiver has been unable to route events to a Kafka topic for 15 minutes — every event of that type is being lost"
+              description: "kanz_archiver_failed_total{reason=\"route\"} has been rising continuously for 15 minutes: topic.For is finding no mapping for some event_type/tenant pair, so those events are being parked on dlq.archiver instead of written to the log of record, and they keep coming. Unlike an unframeable body this is CONFIGURATION and you can stop the loss now — add the missing mapping to the archiver's topic table and redeploy. The usual causes are a producer shipping a new event_type ahead of its topic mapping, or a tenant onboarded without one. Events already parked are NOT recovered by the fix: dlq.archiver has no drain and a 30-day delete retention (#285)."
+
+          # THE EVENT REACHED NEITHER ITS TOPIC NOR THE DLQ — the archiver's own
+          # metrics.go calls this "the most severe outcome".
+          #
+          # deadLetter() returns an error and NACKs when the DLQ produce fails,
+          # precisely so an event is never acked having landed nowhere. That is the
+          # correct behaviour and it is why this is survivable — but it means the
+          # delivery loop is now cycling a message it cannot place, indefinitely.
+          #
+          # WHY THE BACKLOG ALERTS DO NOT ALREADY COVER IT. The tempting assumption
+          # is that Kafka being unreachable fails "publish" too, growing the backlog
+          # until ArchiverNotArchivingWithBacklog fires. dlq.archiver is a SEPARATE
+          # topic with its own 3 partitions (infra/kafka/topics-job.yaml), so it can
+          # be unavailable on its own — a lost partition leader, or the topics-job
+          # never having created it in a fresh environment. In that case the real
+          # topic keeps flowing, archived_total keeps rising, pending stays flat,
+          # and every other rule in this file stays silent while unframeable events
+          # cycle forever. That combination is the specific hole this closes.
+          #
+          # 10m, shorter than the 15m above: a broker blip that resolves itself
+          # needs no page, but this one IS actionable at 03:00 (a Kafka topic is
+          # unavailable) — unlike the two rules above, where the fix ships in a
+          # deploy. Sustained past ten minutes it is not a blip.
+          - alert: ArchiverDeadLetterProduceFailing
+            expr: sum(rate(kanz_archiver_failed_total{reason="dlq_publish"}[15m])) > 0
+            for: 10m
+            labels: { severity: critical, layer: operational }
+            annotations:
+              summary: "The archiver cannot write to dlq.archiver — events are reaching neither their topic nor the DLQ"
+              description: "The DLQ produce itself is failing on top of an unframe or route failure, so these events have landed NOWHERE — services/archiver/internal/archive/metrics.go calls this the most severe outcome. deadLetter() NACKs rather than acking, which is correct and means nothing is lost yet, but the consumer is now cycling messages it cannot place. dlq.archiver is a separate 3-partition topic, so check IT specifically before assuming a broad Kafka outage: a lost partition leader, or the topics-job never having run in this environment, takes it down while the real topics keep flowing — in which case no other alert here will fire."
+
+      # ---------------------------------------------------------------------------
+      # OMS — positions whose truth nobody knows
+      # ---------------------------------------------------------------------------
+      - name: oms_execution_integrity
+        rules:
+          # THRESHOLD ZERO, AND NOT AS A JUDGEMENT CALL. The Help text on this
+          # counter states the contract: "This should be zero; any non-zero value is
+          # an incident, not a metric to trend." A quarantine is an order the
+          # platform froze because it could not establish what the venue did with it
+          # — a position whose true size nobody knows, which "will not be re-driven,
+          # cancelled or mentioned again until a human resolves it". There is no
+          # tolerable rate of those.
+          #
+          # for: 0m: the order is already frozen. Waiting adds nothing but delay.
+          # increase() over 15m holds the alert long enough to be seen and grouped.
+          - alert: OMSOrdersQuarantined
+            expr: sum(increase(kanz_oms_orders_quarantined_total[15m])) > 0
+            for: 0m
+            labels: { severity: critical, layer: operational }
+            annotations:
+              summary: "The OMS has quarantined an order — a position of unknown size is frozen"
+              description: "The platform could not establish what the venue did with an order: the venue denied one it had acknowledged, could not be queried, or reported a fill the order cannot accept. The order is frozen and will NOT be re-driven, cancelled or mentioned again until a human resolves it, while the position may be live at the exchange. Reconcile against the venue before the next session."
+
+          # ALSO ZERO, ALSO FROM THE CODE'S OWN CONTRACT: "Non-zero means a venue
+          # call is hanging and somebody's withdrawal did not land; it should be
+          # zero." Each timeout is an operator's cancel or amend that went to the DLQ
+          # instead of being applied — to an order that is still working at an
+          # exchange. That is the worst combination available: the human believes
+          # they cancelled, and the order is live.
+          - alert: OMSClaimTimeouts
+            expr: sum(increase(kanz_oms_claim_timeouts_total[15m])) > 0
+            for: 0m
+            labels: { severity: critical, layer: operational }
+            annotations:
+              summary: "An OMS cancel or amend was abandoned — the instruction went to the DLQ, the order is still live"
+              description: "A cancel or amend gave up waiting for the goroutine working its order and was dead-lettered, while the order itself is still working at a venue. The usual cause is a venue call that is not returning. Somebody asked to withdraw an order and it did not happen. Check venue adapter latency, then re-issue the instruction."
+
+          # ZERO AGAIN, AND FOR THE SHARPEST REASON OF THE THREE. This counter only
+          # moves when a compensator finds an order the store committed and the bus
+          # never heard about (#238): admission is store.Create followed by
+          # EmitAccepted with no outbox between them, so a failed publish leaves a
+          # durable order that risk carries no exposure for, that compliance's book
+          # excludes, and that the audit log has no record of. The projection is
+          # worse than blind — tv-sync ignores every LATER fact about the order too,
+          # because it never admitted it.
+          #
+          # The increment says the repair HAPPENED, which means the gap happened
+          # first. Nothing else records the gap: the store shows a finished order and
+          # the bus shows a late FACT, and neither says the fund was mispriced in
+          # between. If this fires, find out what the publish path was doing then —
+          # the fix is a transactional outbox, and this alert is what says it is
+          # still needed.
+          - alert: OMSAcceptedFactLostAndRecovered
+            expr: sum(increase(kanz_oms_orders_accepted_reannounced_total[15m])) > 0
+            for: 0m
+            labels: { severity: critical, layer: operational }
+            annotations:
+              summary: "An OMS order was committed without its ORDER_ACCEPTED FACT — risk was short one order until a sweep repaired it"
+              description: "The OMS committed an order to Postgres and its ORDER_ACCEPTED FACT never reached the bus, so for the interval before the compensating sweep ran, no downstream service knew the order existed: risk carried no exposure, compliance's book excluded it, and the audit log had no record. The order has been re-announced, but the gap was real and every calculation made during it was wrong. Investigate the broker or the publish path at the time of the increment."
+
+          # A COMPENSATOR THAT IS NOT COMPENSATING LOOKS EXACTLY LIKE NO DEFECT.
+          #
+          # The periodic sweep deliberately does NOT kill the pod when it fails —
+          # terminating a process that is holding live orders at venues is worse than
+          # the unreconciled order it would be reacting to — so a failing sweep is
+          # silent everywhere except here and one ERROR log. Sustained failures mean
+          # the only remaining compensator is the next restart, which is the state
+          # #238 exists to end.
+          #
+          # for: 15m, not 0m: one failed pass is a blip the next tick retries, and
+          # the ticker's default interval is 60s, so 15m is fifteen consecutive
+          # chances to succeed.
+          - alert: OMSSweepFailing
+            expr: sum(increase(kanz_oms_sweep_failures_total[15m])) > 0
+            for: 15m
+            labels: { severity: warning, layer: operational }
+            annotations:
+              summary: "The OMS periodic reconciliation has been failing — orders left mid-flight are not being recovered"
+              description: "The OMS's periodic in-flight reconciliation has failed on every pass for fifteen minutes. It is the compensator for an order committed without its FACT and for an order stranded mid-flight by a crash; while it fails, the only remaining recovery is the next pod restart. The pod keeps admitting new orders throughout. Check the order store's reachability and the ERROR log line beside this counter for the order it stopped on."
+
+          # THE PRICE FEED, SEEN FROM THE FOLD RATHER THAN FROM THE REFUSALS.
+          #
+          # ComplianceUnpricedOrdersExpired below only fires when an order ARRIVES,
+          # so at 03:00 with no order flow a dead feed is silent until the first
+          # order of the morning is refused. This one is independent of order flow.
+          #
+          # The condition is quoted from the metric author's own Help text: "A fall
+          # here with held flat is a stalling feed." live counts instruments whose
+          # mark is present and within OMS_PRICE_MAX_AGE; held counts everything the
+          # fold has ever seen, including expired tombstones. live == 0 while held > 0
+          # is a process that HAD prices and now has none — not a cold start, which
+          # has both at zero.
+          #
+          # by (namespace, pod): the fold is per-process, so a single bad replica
+          # must not be masked by a healthy one. Both sides are aggregated to the
+          # SAME label set on purpose — an `and` between a bare gauge and another
+          # bare gauge never matches, because __name__ differs.
+          #
+          # for: 10m = twenty times OMS_PRICE_MAX_AGE's 30s default. Long enough that
+          # a feed reconnect or a market-data rollout cannot trip it, short enough
+          # that it precedes the first refused order of a trading session.
+          - alert: OMSPriceFeedStalled
+            expr: |
+              (
+                max by (namespace, pod) (kanz_oms_mark_instruments_live) == 0
+                and
+                max by (namespace, pod) (kanz_oms_mark_instruments_held) > 0
+              )
+            for: 10m
+            labels: { severity: critical, layer: operational }
+            annotations:
+              summary: "OMS {{ $labels.pod }} holds no live reference mark — the price feed has stalled"
+              description: "Every reference mark in this OMS replica's fold has aged past OMS_PRICE_MAX_AGE while the fold still holds the instruments, so the price spine WAS reaching this pod and has stopped. The pre-trade gate cannot value an order without a mark: every order this replica receives will be refused PRICE_UNAVAILABLE. Check market-data and this pod's price subscription."
+
+          # A STANDING CONFIGURATION STATE, SO AN ABSOLUTE VALUE — NOT increase().
+          #
+          # This counter is incremented while venue adapters are REGISTERED, at
+          # startup. increase() over any window would be non-zero only in the minutes
+          # after a restart and zero for the entire time the misconfiguration is
+          # live, which is precisely backwards: the risk is that the deployment KEEPS
+          # RUNNING this way. `> 0` on the raw counter is true for as long as the
+          # process is up, which is what the condition actually is.
+          #
+          # for: 30m and warning, not critical, and the reason is the response rather
+          # than the severity of the consequence. Nothing about this changes between
+          # 03:00 and 09:00 — it has been true since the deploy — and a page for a
+          # condition a responder cannot act on at night is how a layer gets muted.
+          # It is a ticket that must not be closed: an unverified adapter's fills can
+          # margin against a different fund's collateral than the ledger books them
+          # to.
+          - alert: OMSUnverifiedVenueAccount
+            expr: sum(kanz_oms_unverified_venue_account_total) > 0
+            for: 30m
+            labels: { severity: warning, layer: operational }
+            annotations:
+              summary: "The OMS is trading venue accounts the exchange has not confirmed"
+              description: "One or more venue adapters registered with an exchange account that was never confirmed by the exchange itself — the adapter holds the API credential but has not proved which account it belongs to. Its fills could margin against a different fund's collateral than the ledger books them to, and a mis-declared deployment looks exactly like a correct one. Verify each adapter's account against the exchange, or unbind it."
+
+      # ---------------------------------------------------------------------------
+      # COMPLIANCE — how much of the book is trading unchecked
+      # ---------------------------------------------------------------------------
+      - name: compliance_coverage
+        rules:
+          # A TICKET, ON PURPOSE, AND WITH A ONE-HOUR WINDOW RATHER THAN A `for:`.
+          #
+          # The default posture is MANDATE ADVISORY (OMS_REQUIRE_MANDATE unset), under
+          # which an order for a portfolio no mandate governs is ADMITTED and
+          # unconstrained. An estate mid-onboarding will produce these sporadically —
+          # one order every few hours — so a short window plus a `for:` would flap in
+          # and out and a `> 0` page would be constant. increase() over 1h with
+          # for: 0m gives exactly one firing period per hour in which it happened,
+          # which is the right cadence for something fixed by putting a portfolio
+          # under mandate during business hours.
+          #
+          # Warning rather than critical for the same reason, NOT because it is
+          # minor: it is the difference between "we forgot to mandate fund X" and
+          # "fund X passed compliance", which used to be the same observable event.
+          - alert: ComplianceUngovernedOrders
+            expr: sum(increase(kanz_compliance_ungoverned_orders_total[1h])) > 0
+            for: 0m
+            labels: { severity: warning, layer: operational }
+            annotations:
+              summary: "Orders are being handled for portfolios that NO mandate governs"
+              description: "Part of the book is trading with no compliance constraints (or, with OMS_REQUIRE_MANDATE=true, is being refused for want of a mandate). Which of those two it is depends on the posture logged at OMS startup. Put every live portfolio under mandate with kanz-mandate; this counter is how much of the book is currently ungoverned."
+
+          # THE `reason` LABEL SPLITS ONE COUNTER INTO TWO INCIDENTS, AND THE CODE
+          # SAYS WHICH IS WHICH: "never_seen" is a cold pod, a thin instrument or a
+          # subscription delivering nothing (a warm-up); "expired" is a feed that WAS
+          # reporting and has stalled (an outage). Alerting on the sum would give one
+          # rule that is either too noisy for the outage or too slow for it.
+          #
+          # EXPIRED IS A LIVE TRADING OUTAGE: orders are being REFUSED, and the
+          # client sees the refusal. Critical.
+          #
+          # 5m window with for: 10m, not a 10m window with for: 0m. The two are not
+          # the same: a 10m window stays true for ten minutes after a SINGLE refusal,
+          # so it would page on one stale mark during a feed reconnect. A 5m window
+          # held for 10m requires refusals to keep occurring in every window across
+          # ten minutes — sustained, which is what an outage looks like and a
+          # reconnect does not.
+          - alert: ComplianceUnpricedOrdersExpired
+            expr: sum(rate(kanz_compliance_unpriced_orders_total{reason="expired"}[5m])) > 0
+            for: 10m
+            labels: { severity: critical, layer: operational }
+            annotations:
+              summary: "Orders are being refused because the price feed has stalled"
+              description: "The OMS is refusing orders PRICE_UNAVAILABLE against instruments whose reference mark it HAS seen and which has since aged past OMS_PRICE_MAX_AGE — the feed was working and stopped. This is client-visible: those orders did not reach a venue. Check market-data and the OMS price subscription. OMSPriceFeedStalled fires on the same cause without needing order flow."
+
+          # NEVER_SEEN, THE WARM-UP CASE — same counter, different incident.
+          #
+          # A cold pod warms in seconds and a rollout in a minute or two, so a short
+          # duration here would page on every deploy. Thirty unbroken minutes of
+          # refusals for instruments no mark has EVER arrived for is not a warm-up:
+          # it is a price subscription delivering nothing, or an instrument nothing
+          # in the estate quotes. Ticket, because the fix is a subscription or a
+          # universe change, not a 3am intervention.
+          - alert: ComplianceUnpricedOrdersNeverSeen
+            expr: sum(rate(kanz_compliance_unpriced_orders_total{reason="never_seen"}[5m])) > 0
+            for: 30m
+            labels: { severity: warning, layer: operational }
+            annotations:
+              summary: "Orders are being refused for instruments no price has ever arrived for"
+              description: "For half an hour the OMS has refused orders PRICE_UNAVAILABLE against instruments it has NEVER received a mark for. Past the warm-up window this means a price subscription delivering nothing for those instruments, or a trading universe wider than the market-data subscription. Compare OMS_PRICE_SUBJECTS against what market-data publishes."
+
+      # ---------------------------------------------------------------------------
+      # GATEWAY — the platform's front door, shedding
+      # ---------------------------------------------------------------------------
+      - name: gateway_admission
+        rules:
+          # DELIBERATELY COMPLEMENTARY TO THE SLO BURN-RATE ALERTS, NOT A DUPLICATE.
+          #
+          # Admission rejection is a 503, so it already burns the api-gateway
+          # availability budget and SLOFastBurn pages when the VOLUME is large enough
+          # (>14.4× of a 0.1% budget). What that cannot see is a small, permanent
+          # shed: one tenant rejected steadily at a rate that never troubles a
+          # platform-wide ratio. Burn rate covers magnitude; this covers PERSISTENCE.
+          #
+          # 5m window held for 10m: rejections in every window across ten minutes.
+          # Shedding for a few seconds during a burst is admission control working as
+          # designed and must not page — ten unbroken minutes is capacity, and that
+          # tenant is being refused service.
+          #
+          # Warning: the response is a quota or a replica count, in working hours.
+          - alert: GatewayAdmissionShedding
+            expr: sum by (tenant) (rate(kanz_gateway_admission_rejected_total[5m])) > 0
+            for: 10m
+            labels: { severity: warning, layer: operational }
+            annotations:
+              summary: "The gateway has been shedding requests for tenant {{ $labels.tenant }} for 10 minutes"
+              description: "Per-tenant in-flight admission has been returning 503 continuously for ten minutes, so this is saturation rather than a burst. Either the tenant's in-flight limit is too low for their traffic or the upstream they hit is slow enough to hold slots open. Check kanz_gateway_inflight_requests and upstream latency for the same tenant."
+
+          # RATE LIMITING IS BY DESIGN, SO THE THRESHOLD IS DURATION, NOT MAGNITUDE.
+          #
+          # A tenant hitting their quota during a burst is the quota doing its job
+          # and is not an incident at any volume — which is why there is no rate
+          # threshold here. What IS an incident is a tenant who cannot get out of it:
+          # half an hour of continuous 429s means either the quota is mis-sized for
+          # what they bought or a client is in a retry loop. Both need a human, and
+          # neither needs one at night.
+          - alert: GatewayTenantRateLimitedSustained
+            expr: sum by (tenant) (rate(kanz_gateway_rate_limited_total[5m])) > 0
+            for: 30m
+            labels: { severity: warning, layer: operational }
+            annotations:
+              summary: "Tenant {{ $labels.tenant }} has been rate limited continuously for 30 minutes"
+              description: "Every 5-minute window for the last half hour has contained 429s for this tenant. A burst is expected and fine; half an hour is a quota mis-sized for the tenant's entitlement, or a client stuck in a retry loop. Confirm which before raising the limit."
+
+      # ---------------------------------------------------------------------------
+      # GATEWAY IDENTITY — the front door is authenticating on keys it cannot check
+      # ---------------------------------------------------------------------------
+      - name: gateway_identity
+        rules:
+          # THE OTHER HALF OF #242'S TRADE, AND THE REASON THAT TRADE IS DEFENSIBLE.
+          #
+          # pkg/auth deliberately keeps verifying tokens for a bounded 15-minute
+          # grace past MaxKeyAge when the IdP cannot be reached, rather than turning
+          # a provider blip into an authentication outage on the platform's sole
+          # ingress for orders. That WIDENS THE REVOCATION WINDOW FROM 5 MINUTES TO
+          # 20 — a key revoked at the provider keeps verifying here for up to twenty
+          # minutes after the last successful JWKS fetch. Buying that on purpose is
+          # only honest if the estate can see when it is being spent, which is this
+          # rule. Delete it and the widening becomes a silent one.
+          #
+          # A DEADLINE, NOT A TREND, WHICH IS WHY THE THRESHOLD IS ONE AND THE
+          # SEVERITY IS CRITICAL. This does not describe degraded performance. It
+          # says: in at most fifteen minutes from when it started, EVERY request to
+          # this gateway begins failing 503 — no orders, no cancels, no queries —
+          # and it will not self-heal, because the thing that would clear it is the
+          # IdP coming back. There is nothing to trend and no volume at which it
+          # becomes interesting.
+          #
+          # for: 2m, and the number comes from the window it is racing. The grace is
+          # 15 minutes; scrape_interval is 30s. Two minutes rides out a single
+          # failed refetch during an IdP rolling restart (the common false positive)
+          # while still leaving thirteen of the fifteen minutes to act in. A longer
+          # hold would spend the deadline it exists to announce.
+          #
+          # NO absent() PARTNER, DELIBERATELY. The gauge is registered only on the
+          # OIDC arm — the dev HS256 validator has no provider to lose — so a gateway
+          # running HS256 exports no series and this stays quiet, which is the truth.
+          # An absent() rule would fire permanently on every dev rig, which is
+          # exactly the DataQualityMetricsMissing anti-pattern alerts/README.md
+          # records deleting.
+          #
+          # by (namespace, pod): the key cache is per-process. One replica that has
+          # lost its IdP path while its siblings are fine is still a real fault and
+          # must not be averaged away — and it is the shape that says which pod.
+          - alert: GatewayOIDCKeysUnrevalidated
+            expr: max by (namespace, pod) (kanz_gateway_oidc_keys_unrevalidated) == 1
+            for: 2m
+            labels: { severity: critical, layer: operational }
+            annotations:
+              summary: "Gateway {{ $labels.pod }} is authenticating on OIDC keys it cannot revalidate — authentication fails within 15 minutes"
+              description: "This gateway's cached JWKS is past MaxKeyAge (5m) and the identity provider could not be refetched, so it is verifying bearer tokens on key material it can no longer vouch for. This is a deliberate, BOUNDED grace: it buys 15 minutes, and then every request to this pod fails 503 (ErrKeysStale) until the provider answers — no orders, no cancels, no queries. It also means a key REVOKED at the provider is still being honoured here, for up to 20 minutes from the last successful fetch. Restore reachability to the IdP's JWKS endpoint (check egress, DNS and the provider itself); the gauge clears by itself on the first successful refetch."
+
+      # ---------------------------------------------------------------------------
+      # LAKEHOUSE — rows that will never land
+      # ---------------------------------------------------------------------------
+      - name: lakehouse_ingest
+        rules:
+          # PERMANENT MEANS PERMANENT. services/lake-sink/internal/cdc/sink.go
+          # classifies a decode failure as "transient" (retryable) or "permanent",
+          # and a permanent one is a row that will NEVER land in the lakehouse. It is
+          # almost always a producer that changed a payload shape, which means every
+          # subsequent row of that type is also being lost — the first occurrence and
+          # the ten thousandth have the same cause and the same fix, so the threshold
+          # is the first one.
+          #
+          # for: 0m with a 15m window, matching the OMS incident counters: the loss
+          # has already happened and waiting cannot un-happen it.
+          #
+          # Critical despite the lakehouse being off the capital path, because the
+          # loss is SILENT and UNRECOVERABLE without a replay from Kafka — and a
+          # replay is only possible while the source topic still retains the rows.
+          - alert: LakeSinkPermanentDecodeErrors
+            expr: sum(increase(kanz_lake_sink_decode_errors_total{result="permanent"}[15m])) > 0
+            for: 0m
+            labels: { severity: critical, layer: operational }
+            annotations:
+              summary: "lake-sink is permanently dropping rows it cannot decode"
+              description: "A payload failed to decode in a way lake-sink classified as PERMANENT, so the row will never land in the lakehouse and no retry will recover it. The usual cause is a producer whose payload shape changed, in which case every row of that type is being lost too. Identify the schema change and replay from Kafka while the source topic still retains the rows."
+
+          # A TRANSIENT ERROR THAT IS STILL HAPPENING AFTER HALF AN HOUR IS NOT
+          # TRANSIENT — that is the entire justification for the duration, and there
+          # is no magnitude threshold for the same reason as the rate-limit rule:
+          # retryable failures at any rate are fine while they are actually being
+          # retried away.
+          #
+          # 5m window held for 30m, so it requires errors in every window rather than
+          # one burst thirty minutes ago.
+          - alert: LakeSinkTransientDecodeErrorsPersisting
+            expr: sum(rate(kanz_lake_sink_decode_errors_total{result="transient"}[5m])) > 0
+            for: 30m
+            labels: { severity: warning, layer: operational }
+            annotations:
+              summary: "lake-sink transient decode failures have persisted for 30 minutes"
+              description: "Decode failures classified as retryable have occurred in every 5-minute window for half an hour, which means they are not being retried away. Left alone they either become a permanent backlog or start consuming the consumer's throughput. Check kanz_lake_sink_rows_total by result for whether anything is landing at all."
+
+      # ---------------------------------------------------------------------------
+      # PLATFORM LIVENESS — the workload is not there at all
+      # ---------------------------------------------------------------------------
+      - name: platform_liveness
+        rules:
+          # THE OTHER MECHANISM BEHIND A STALLED CONSUMER, AND BusConsumerStalled
+          # CANNOT SEE IT. That rule needs the consumer's series to still be
+          # scraped; when the pod is gone the series goes stale, rate() over it
+          # returns nothing, and the alert quietly stops evaluating. Absence of a
+          # target produces absence of an alert — which is the failure mode this
+          # whole file exists to remove, so the gap is covered here rather than
+          # documented and left.
+          #
+          # `up` is Prometheus's own per-target series, not a kanz_* metric, so
+          # TestEveryObservabilityMetricExistsInSource cannot check this name. That is a
+          # real (small) hole in the guard and is noted at its definition.
+          #
+          # for: 10m: long enough to sit out a rolling update, a node drain and a
+          # CrashLoopBackOff's first few restarts. Warning rather than critical
+          # because one replica of many being down is not an outage — the SLO
+          # burn-rate alerts page when it becomes one.
+          - alert: KanzScrapeTargetDown
+            expr: up{job="kanz-pods"} == 0
+            for: 10m
+            labels: { severity: warning, layer: operational }
+            annotations:
+              summary: "Prometheus cannot scrape {{ $labels.pod }} in {{ $labels.namespace }}"
+              description: "This target has failed to scrape for ten minutes — the process is down, wedged, or not serving /metrics on its annotated port. Every alert built on this pod's series is now evaluating against a stale or absent vector and will stop firing rather than start: for the bus consumers in particular, BusConsumerStalled goes SILENT when the pod disappears, so this rule is the one that speaks."
+
+      # ---------------------------------------------------------------------------
+      # THE ALERTING PIPELINE ITSELF — is any of the above reaching a human?
+      # ---------------------------------------------------------------------------
+      - name: alerting_pipeline
+        rules:
+          # AN ALERT THAT SAYS THE ALERTS GO NOWHERE.
+          #
+          # Every rule in this file is EVALUATED and DELIVERED NOWHERE, because there
+          # is no Alertmanager in this estate (#98 — nothing has anywhere to run and
+          # no receiver has a real destination). prometheus.yaml's `alerting:` block
+          # discovers one by pod label rather than naming an address, precisely so
+          # that this gauge reads the truth: 0 alertmanagers discovered.
+          #
+          # THIS RULE IS THE POINT OF THAT CHOICE. Without it, a Prometheus with 19
+          # rules loaded and a green /-/ready is indistinguishable from a working
+          # on-call setup — the operator sees alerts on /alerts, assumes somebody is
+          # being paged, and nobody is. The one surface a human actually opens during
+          # an incident then has to say so itself.
+          #
+          # YES, IT FIRES CONTINUOUSLY, AND THAT IS NOT THE absent() ANTI-PATTERN.
+          # alerts/README.md records why DataQualityMetricsMissing was deleted: it
+          # fired forever over a series with no producer, describing a gap nobody
+          # intended to close, and trained its readers to ignore the layer. This one
+          # is different in the way that matters — the condition is TRUE, it is
+          # ACTIONABLE (deploy an Alertmanager), and it CLEARS BY ITSELF the moment
+          # one appears. It is a permanent banner on a permanent defect, and it stops
+          # existing when the defect does.
+          #
+          # WARNING, NOT CRITICAL, AND NOT BECAUSE IT IS MINOR. Severity here routes
+          # a page, and there is nothing to page: the receiver this would page
+          # through is the thing that is missing. Marking it critical would be a
+          # claim about delivery that this rule exists to deny.
+          #
+          # for: 15m absorbs an Alertmanager rollout — a Recreate or a node drain
+          # takes the pod away for a minute or two, and a delivery gap that short is
+          # not worth a permanent alert appearing and disappearing.
+          #
+          # prometheus_notifications_alertmanagers_discovered is Prometheus's own
+          # series, not a kanz_* one, so TestEveryObservabilityMetricExistsInSource
+          # cannot check the name — the same (small, known) hole as `up` in
+          # KanzScrapeTargetDown above. It is verified instead by
+          # operational_test.yaml, which fires this rule from a synthetic series, and
+          # by having been read off a live Prometheus 3.1.0 /metrics — the exact
+          # version and digest this manifest deploys.
+          - alert: AlertDeliveryNotDelivering
+            expr: prometheus_notifications_alertmanagers_discovered == 0
+            for: 15m
+            labels: { severity: warning, layer: operational }
+            annotations:
+              summary: "Prometheus has found NO Alertmanager — every alert on this page is being delivered to nobody"
+              description: "Prometheus is evaluating its rules and discovering zero Alertmanagers, so no alert leaves this process: nothing is paged, nothing is ticketed, and every other alert visible here reached a human only because that human happened to look. This is the known state of the estate (#98 — there is nowhere to run one and no receiver has a real destination), NOT a regression. It clears on its own once a pod labelled app=alertmanager exists in kanz-observability; prometheus.yaml discovers it rather than naming an address, so there is no configuration change to remember."
+
+      # ---------------------------------------------------------------------------
+      # INFERENCE — the Python prediction service, saturated
+      # ---------------------------------------------------------------------------
+      - name: inference_admission
+        rules:
+          # THE ONLY ONE OF THE SEVEN kanz_inference_* SERIES WHOSE THRESHOLD CAN BE
+          # DERIVED TODAY (#334), and the rest are deliberately absent for the reason
+          # this file opens with.
+          #
+          # Saturation is a gauge against a CONFIGURED limit, so the number comes
+          # from the service's own admission control rather than from an observation
+          # nobody has made: at in_flight == admission_limit the pool is full and the
+          # next request is rejected, which the service itself records as
+          # kanz_inference_degraded_total{reason="pool_saturated"}. Nothing has to be
+          # measured to know that 1.0 is the edge — it is where the limit is.
+          #
+          # THE OTHER SIX CANNOT BE DERIVED AND ARE THEREFORE NOT WRITTEN.
+          # predict_seconds needs an observed p99, degraded_total and
+          # stream_events_total need a normal rate, and this service has never run
+          # under load with these metrics attached. primary_model is an identity
+          # gauge, not a threshold. Writing any of them would mean picking a number,
+          # which the header above forbids and which the promtool guard would expose
+          # as a rule proven to fire only against a fixture built to fit it.
+          #
+          # DURATION IS THE DEBOUNCE, NOT THE THRESHOLD — the same shape as
+          # GatewayAdmissionShedding above. A pool that touches its limit during a
+          # burst is admission control working as designed and must not page; ten
+          # unbroken minutes at the limit is capacity, and callers are being refused
+          # for that whole period.
+          #
+          # Warning rather than page: the response is a replica count or a limit
+          # change, in working hours. An inference outage degrades a prediction path
+          # that the platform already treats as advisory — it does not stop trading.
+          - alert: InferencePoolSaturated
+            expr: kanz_inference_predict_in_flight / kanz_inference_admission_limit >= 1
+            for: 10m
+            labels: { severity: warning, layer: operational }
+            annotations:
+              summary: "The inference prediction pool has been at its admission limit for 10 minutes"
+              description: "kanz_inference_predict_in_flight has sat at or above kanz_inference_admission_limit continuously for ten minutes, so this is saturation rather than a burst: every request arriving now is refused and counted as kanz_inference_degraded_total{reason=\"pool_saturated\"}. Either the concurrency limit is too low for the offered load or predictions are taking long enough to hold slots open — compare kanz_inference_predict_seconds over the same window before raising the limit, because raising it against slow predictions moves the queue rather than draining it."
+  slo.alerts.rules.yaml: |
+    # SLO multi-window burn-rate alerts (SRE-01b) — over slo.recording.rules.yaml.
+    #
+    # One alert per burn-rate pair from slo.yaml defaults.burn_rates, GENERIC over
+    # every SLO: each fires for any {service,slo} whose recorded error ratio exceeds
+    # `factor × error_budget` on BOTH the long and short window. The short window is
+    # the reset guard — it clears the alert quickly once the burn stops, so a long
+    # window doesn't keep paging on a spike that already ended. The budget threshold
+    # is joined in with on(service,slo) from slo:error_budget:ratio, so an objective
+    # change in the recording rules re-points every alert with no edit here.
+    #
+    # severity routes exactly like the DATA-09 rules (critical ⇒ page, warning ⇒
+    # ticket); layer="slo" scopes Alertmanager routing/silences. This EXTENDS the
+    # data-quality alerts — same Alertmanager, distinct layer.
+    #
+    #   promtool check rules slo.alerts.rules.yaml
+    #   promtool test rules slo_test.yaml
+    groups:
+      - name: slo_burn_rate
+        rules:
+          # Fast burn: 14.4× spends ~2% of a 28d budget in 1h → page now.
+          - alert: SLOFastBurn
+            expr: |
+              (
+                slo:sli_error:ratio_rate1h > on(service, slo) (14.4 * slo:error_budget:ratio)
+                and
+                slo:sli_error:ratio_rate5m > on(service, slo) (14.4 * slo:error_budget:ratio)
+              )
+            labels: { severity: critical, layer: slo, burn_rate: fast }
+            annotations:
+              summary: "Fast error-budget burn on {{ $labels.service }}/{{ $labels.slo }}"
+              description: "{{ $labels.service }}/{{ $labels.slo }} is burning budget at >14.4× (1h+5m windows) — current 1h error ratio {{ $value | humanizePercentage }}. At this rate the 28d budget is gone in hours."
+
+          # Slow burn: 6× spends ~5% in 6h → page (slower, but still budget-fatal).
+          - alert: SLOSlowBurn
+            expr: |
+              (
+                slo:sli_error:ratio_rate6h > on(service, slo) (6 * slo:error_budget:ratio)
+                and
+                slo:sli_error:ratio_rate30m > on(service, slo) (6 * slo:error_budget:ratio)
+              )
+            labels: { severity: critical, layer: slo, burn_rate: slow }
+            annotations:
+              summary: "Sustained error-budget burn on {{ $labels.service }}/{{ $labels.slo }}"
+              description: "{{ $labels.service }}/{{ $labels.slo }} is burning at >6× (6h+30m windows) — current 6h error ratio {{ $value | humanizePercentage }}."
+
+          # Ticket: 3× over a day — not a page, but the budget is trending to breach.
+          - alert: SLOBudgetBurnTicket
+            expr: |
+              (
+                slo:sli_error:ratio_rate1d > on(service, slo) (3 * slo:error_budget:ratio)
+                and
+                slo:sli_error:ratio_rate2h > on(service, slo) (3 * slo:error_budget:ratio)
+              )
+            labels: { severity: warning, layer: slo, burn_rate: elevated }
+            annotations:
+              summary: "Elevated error-budget burn on {{ $labels.service }}/{{ $labels.slo }}"
+              description: "{{ $labels.service }}/{{ $labels.slo }} is burning at >3× (1d+2h windows) — current 1d error ratio {{ $value | humanizePercentage }}. File a reliability ticket before it pages."
+
+          # Ticket: 1× over 3 days — chronic low-grade drain; the budget won't last
+          # the window at this rate. Catches slow rot the faster pairs miss.
+          - alert: SLOBudgetBurnChronic
+            expr: |
+              (
+                slo:sli_error:ratio_rate3d > on(service, slo) (1 * slo:error_budget:ratio)
+                and
+                slo:sli_error:ratio_rate6h > on(service, slo) (1 * slo:error_budget:ratio)
+              )
+            labels: { severity: warning, layer: slo, burn_rate: chronic }
+            annotations:
+              summary: "Chronic error-budget drain on {{ $labels.service }}/{{ $labels.slo }}"
+              description: "{{ $labels.service }}/{{ $labels.slo }} has burned >1× budget over 3d (3d+6h windows) — current 3d error ratio {{ $value | humanizePercentage }}. The 28d budget will not survive the window at this rate."
+
+      # THE ACCOUNTING WINDOW (#210). The four rungs above are rate-of-spend alarms
+      # over 1h…3d; none of them integrates, so an SLO can sit under every one of
+      # them for a month and still finish it with the budget gone. These two are
+      # about the TOTAL, and about whether the total can be trusted at all.
+      - name: slo_budget_window
+        rules:
+          # THE BUDGET FOR THE WINDOW IS SPENT. Not a page: nothing is on fire right
+          # now — that is precisely the point, and precisely why the burn-rate rungs
+          # are silent. It is the signal that the objective has been missed for the
+          # accounting period, which is a release-policy decision (freeze, or accept
+          # and reset) rather than an incident.
+          - alert: SLOBudgetExhausted
+            expr: slo:error_budget_consumed:ratio >= 1
+            for: 1h
+            labels: { severity: warning, layer: slo, burn_rate: exhausted }
+            annotations:
+              summary: "28d error budget exhausted for {{ $labels.service }}/{{ $labels.slo }}"
+              description: "{{ $labels.service }}/{{ $labels.slo }} has consumed {{ $value | humanizePercentage }} of its 28d error budget. No burn-rate alert need have fired: those measure rate of spend and none of them integrates over the window."
+
+          # THE BUDGET CANNOT BE MEASURED — which must be LOUD, because the series it
+          # guards is deliberately ABSENT rather than wrong when this fires.
+          #
+          # Without this alert the failure mode is a dashboard panel reading "no
+          # data" for a month while everyone assumes the panel is broken. With it,
+          # "we are not measuring the budget" is itself a reportable state — the
+          # distinction between "nothing configured" and "checked, and fine" that
+          # this platform refuses to blur.
+          #
+          # It is expected to fire for ~28 days after any Prometheus restart that
+          # loses the TSDB, and that is correct rather than noise: the budget really
+          # is unknown for that period.
+          - alert: SLOBudgetWindowNotCovered
+            expr: slo:budget_window_coverage:ratio < 0.99
+            for: 1h
+            labels: { severity: warning, layer: slo }
+            annotations:
+              summary: "Error-budget accounting window is not covered by retained data"
+              description: "The TSDB holds {{ $value | humanizePercentage }} of the 28d accounting window, so slo:error_budget_consumed:ratio is NOT being produced — a partial window would understate consumption and read as budget remaining. Check retention (--storage.tsdb.retention.time) and whether the volume survived a restart."
+  slo.recording.rules.yaml: |
+    # SLO recording rules (SRE-01b) — compiled from slo.yaml (SRE-01a).
+    #
+    # Three layers:
+    #   slo_meta         — per-SLO error budget (1 − objective) as a labeled series.
+    #                      Alerts join against these so the burn threshold lives in
+    #                      ONE place per SLO.
+    #   slo_sli_error    — the SLI ERROR ratio (1 − good/total) per SLO over each of
+    #                      the seven burn-rate windows. One metric name,
+    #                      `slo:sli_error:ratio_rate<window>`, labeled {service,slo},
+    #                      so slo.alerts.rules.yaml stays generic (one alert per
+    #                      burn pair covers every SLO via on(service,slo) matching).
+    #   slo_budget_28d   — the ACCOUNTING window (#210). Burn RATE was fully covered
+    #                      by the seven windows above; burn TOTAL was not, so "how
+    #                      much of this month's budget is left" was not answerable
+    #                      from anywhere. An SLO can sit inside every burn-rate
+    #                      threshold all month and still have spent its whole
+    #                      budget, because those alerts are rate-of-spend alarms and
+    #                      none of them integrates.
+    #
+    # Series are the OBS-01 RED contract (kanz_gateway_/kanz_risk_/kanz_bus_*) —
+    # the exact names slo.yaml binds. The burn windows match slo.yaml
+    # defaults.burn_rates: pairs (1h,5m) (6h,30m) (1d,2h) (3d,6h). The eighth window
+    # is 28d, which is slo.yaml `defaults.window` — the accounting period, not a burn
+    # pair, which is why it lives in its own group and has its own coverage guard.
+    #
+    # THE MARKET-DATA FRESHNESS SLO WAS REMOVED, NOT SUSPENDED. It was compiled
+    # from kanz_data_staleness_lag_seconds, a DATA-02 gauge emitted by
+    # internal/integrity — a package deleted in DATA-M4. Nothing in the Go source
+    # has emitted that series since, and services/market-data registers no
+    # domain metric at all (only the generic bus metrics), so the SLO could not be
+    # re-pointed at a renamed series either. Left in place it computed over an
+    # empty vector: every windowed ratio was empty, so the generic burn-rate alerts
+    # in slo.alerts.rules.yaml could never fire for market-data/freshness and the
+    # gap was invisible on the dashboards. A freshness objective nobody measures
+    # reads as a freshness objective being met. Re-introducing it means
+    # instrumenting market-data FIRST, then compiling the SLO from the series that
+    # actually exists.
+    #
+    # No-traffic note: with zero denominator rate() yields 0/0 = NaN; the error
+    # ratio is NaN and burn-rate alerts (NaN > x is false) simply don't fire — a
+    # silent service burns no budget, which is correct.
+    #
+    #   promtool check rules slo.recording.rules.yaml
+    groups:
+      - name: slo_meta
+        rules:
+          # Error budget = 1 − objective, one series per SLO (labels carry the
+          # identity; vector() supplies the literal). Edit an objective here AND in
+          # slo.yaml together — slo.yaml is the source of truth, this is its compile.
+          - record: slo:error_budget:ratio
+            expr: vector(0.001)
+            labels: { service: api-gateway, slo: availability }
+          - record: slo:error_budget:ratio
+            expr: vector(0.01)
+            labels: { service: api-gateway, slo: query-latency }
+          - record: slo:error_budget:ratio
+            expr: vector(0.005)
+            labels: { service: risk-engine, slo: recompute-success }
+          - record: slo:error_budget:ratio
+            expr: vector(0.01)
+            labels: { service: risk-engine, slo: recompute-latency }
+          - record: slo:error_budget:ratio
+            expr: vector(0.001)
+            labels: { service: event-bus, slo: delivery-success }
+
+      - name: slo_sli_error
+        rules:
+          # --- 5m ---
+          - record: slo:sli_error:ratio_rate5m
+            expr: 1 - (sum(rate(kanz_gateway_requests_total{code!~"5.."}[5m])) / sum(rate(kanz_gateway_requests_total[5m])))
+            labels: { service: api-gateway, slo: availability }
+          - record: slo:sli_error:ratio_rate5m
+            expr: 1 - (sum(rate(kanz_gateway_request_duration_seconds_bucket{le="0.5"}[5m])) / sum(rate(kanz_gateway_request_duration_seconds_count[5m])))
+            labels: { service: api-gateway, slo: query-latency }
+          - record: slo:sli_error:ratio_rate5m
+            expr: 1 - (sum(rate(kanz_risk_recompute_total{status="ok"}[5m])) / sum(rate(kanz_risk_recompute_total[5m])))
+            labels: { service: risk-engine, slo: recompute-success }
+          - record: slo:sli_error:ratio_rate5m
+            expr: 1 - (sum(rate(kanz_risk_recompute_duration_seconds_bucket{le="0.5"}[5m])) / sum(rate(kanz_risk_recompute_duration_seconds_count[5m])))
+            labels: { service: risk-engine, slo: recompute-latency }
+          - record: slo:sli_error:ratio_rate5m
+            expr: 1 - (sum(rate(kanz_bus_consume_total{result="ok"}[5m])) / sum(rate(kanz_bus_consume_total[5m])))
+            labels: { service: event-bus, slo: delivery-success }
+          # --- 30m ---
+          - record: slo:sli_error:ratio_rate30m
+            expr: 1 - (sum(rate(kanz_gateway_requests_total{code!~"5.."}[30m])) / sum(rate(kanz_gateway_requests_total[30m])))
+            labels: { service: api-gateway, slo: availability }
+          - record: slo:sli_error:ratio_rate30m
+            expr: 1 - (sum(rate(kanz_gateway_request_duration_seconds_bucket{le="0.5"}[30m])) / sum(rate(kanz_gateway_request_duration_seconds_count[30m])))
+            labels: { service: api-gateway, slo: query-latency }
+          - record: slo:sli_error:ratio_rate30m
+            expr: 1 - (sum(rate(kanz_risk_recompute_total{status="ok"}[30m])) / sum(rate(kanz_risk_recompute_total[30m])))
+            labels: { service: risk-engine, slo: recompute-success }
+          - record: slo:sli_error:ratio_rate30m
+            expr: 1 - (sum(rate(kanz_risk_recompute_duration_seconds_bucket{le="0.5"}[30m])) / sum(rate(kanz_risk_recompute_duration_seconds_count[30m])))
+            labels: { service: risk-engine, slo: recompute-latency }
+          - record: slo:sli_error:ratio_rate30m
+            expr: 1 - (sum(rate(kanz_bus_consume_total{result="ok"}[30m])) / sum(rate(kanz_bus_consume_total[30m])))
+            labels: { service: event-bus, slo: delivery-success }
+          # --- 1h ---
+          - record: slo:sli_error:ratio_rate1h
+            expr: 1 - (sum(rate(kanz_gateway_requests_total{code!~"5.."}[1h])) / sum(rate(kanz_gateway_requests_total[1h])))
+            labels: { service: api-gateway, slo: availability }
+          - record: slo:sli_error:ratio_rate1h
+            expr: 1 - (sum(rate(kanz_gateway_request_duration_seconds_bucket{le="0.5"}[1h])) / sum(rate(kanz_gateway_request_duration_seconds_count[1h])))
+            labels: { service: api-gateway, slo: query-latency }
+          - record: slo:sli_error:ratio_rate1h
+            expr: 1 - (sum(rate(kanz_risk_recompute_total{status="ok"}[1h])) / sum(rate(kanz_risk_recompute_total[1h])))
+            labels: { service: risk-engine, slo: recompute-success }
+          - record: slo:sli_error:ratio_rate1h
+            expr: 1 - (sum(rate(kanz_risk_recompute_duration_seconds_bucket{le="0.5"}[1h])) / sum(rate(kanz_risk_recompute_duration_seconds_count[1h])))
+            labels: { service: risk-engine, slo: recompute-latency }
+          - record: slo:sli_error:ratio_rate1h
+            expr: 1 - (sum(rate(kanz_bus_consume_total{result="ok"}[1h])) / sum(rate(kanz_bus_consume_total[1h])))
+            labels: { service: event-bus, slo: delivery-success }
+          # --- 2h ---
+          - record: slo:sli_error:ratio_rate2h
+            expr: 1 - (sum(rate(kanz_gateway_requests_total{code!~"5.."}[2h])) / sum(rate(kanz_gateway_requests_total[2h])))
+            labels: { service: api-gateway, slo: availability }
+          - record: slo:sli_error:ratio_rate2h
+            expr: 1 - (sum(rate(kanz_gateway_request_duration_seconds_bucket{le="0.5"}[2h])) / sum(rate(kanz_gateway_request_duration_seconds_count[2h])))
+            labels: { service: api-gateway, slo: query-latency }
+          - record: slo:sli_error:ratio_rate2h
+            expr: 1 - (sum(rate(kanz_risk_recompute_total{status="ok"}[2h])) / sum(rate(kanz_risk_recompute_total[2h])))
+            labels: { service: risk-engine, slo: recompute-success }
+          - record: slo:sli_error:ratio_rate2h
+            expr: 1 - (sum(rate(kanz_risk_recompute_duration_seconds_bucket{le="0.5"}[2h])) / sum(rate(kanz_risk_recompute_duration_seconds_count[2h])))
+            labels: { service: risk-engine, slo: recompute-latency }
+          - record: slo:sli_error:ratio_rate2h
+            expr: 1 - (sum(rate(kanz_bus_consume_total{result="ok"}[2h])) / sum(rate(kanz_bus_consume_total[2h])))
+            labels: { service: event-bus, slo: delivery-success }
+          # --- 6h ---
+          - record: slo:sli_error:ratio_rate6h
+            expr: 1 - (sum(rate(kanz_gateway_requests_total{code!~"5.."}[6h])) / sum(rate(kanz_gateway_requests_total[6h])))
+            labels: { service: api-gateway, slo: availability }
+          - record: slo:sli_error:ratio_rate6h
+            expr: 1 - (sum(rate(kanz_gateway_request_duration_seconds_bucket{le="0.5"}[6h])) / sum(rate(kanz_gateway_request_duration_seconds_count[6h])))
+            labels: { service: api-gateway, slo: query-latency }
+          - record: slo:sli_error:ratio_rate6h
+            expr: 1 - (sum(rate(kanz_risk_recompute_total{status="ok"}[6h])) / sum(rate(kanz_risk_recompute_total[6h])))
+            labels: { service: risk-engine, slo: recompute-success }
+          - record: slo:sli_error:ratio_rate6h
+            expr: 1 - (sum(rate(kanz_risk_recompute_duration_seconds_bucket{le="0.5"}[6h])) / sum(rate(kanz_risk_recompute_duration_seconds_count[6h])))
+            labels: { service: risk-engine, slo: recompute-latency }
+          - record: slo:sli_error:ratio_rate6h
+            expr: 1 - (sum(rate(kanz_bus_consume_total{result="ok"}[6h])) / sum(rate(kanz_bus_consume_total[6h])))
+            labels: { service: event-bus, slo: delivery-success }
+          # --- 1d ---
+          - record: slo:sli_error:ratio_rate1d
+            expr: 1 - (sum(rate(kanz_gateway_requests_total{code!~"5.."}[1d])) / sum(rate(kanz_gateway_requests_total[1d])))
+            labels: { service: api-gateway, slo: availability }
+          - record: slo:sli_error:ratio_rate1d
+            expr: 1 - (sum(rate(kanz_gateway_request_duration_seconds_bucket{le="0.5"}[1d])) / sum(rate(kanz_gateway_request_duration_seconds_count[1d])))
+            labels: { service: api-gateway, slo: query-latency }
+          - record: slo:sli_error:ratio_rate1d
+            expr: 1 - (sum(rate(kanz_risk_recompute_total{status="ok"}[1d])) / sum(rate(kanz_risk_recompute_total[1d])))
+            labels: { service: risk-engine, slo: recompute-success }
+          - record: slo:sli_error:ratio_rate1d
+            expr: 1 - (sum(rate(kanz_risk_recompute_duration_seconds_bucket{le="0.5"}[1d])) / sum(rate(kanz_risk_recompute_duration_seconds_count[1d])))
+            labels: { service: risk-engine, slo: recompute-latency }
+          - record: slo:sli_error:ratio_rate1d
+            expr: 1 - (sum(rate(kanz_bus_consume_total{result="ok"}[1d])) / sum(rate(kanz_bus_consume_total[1d])))
+            labels: { service: event-bus, slo: delivery-success }
+          # --- 3d ---
+          - record: slo:sli_error:ratio_rate3d
+            expr: 1 - (sum(rate(kanz_gateway_requests_total{code!~"5.."}[3d])) / sum(rate(kanz_gateway_requests_total[3d])))
+            labels: { service: api-gateway, slo: availability }
+          - record: slo:sli_error:ratio_rate3d
+            expr: 1 - (sum(rate(kanz_gateway_request_duration_seconds_bucket{le="0.5"}[3d])) / sum(rate(kanz_gateway_request_duration_seconds_count[3d])))
+            labels: { service: api-gateway, slo: query-latency }
+          - record: slo:sli_error:ratio_rate3d
+            expr: 1 - (sum(rate(kanz_risk_recompute_total{status="ok"}[3d])) / sum(rate(kanz_risk_recompute_total[3d])))
+            labels: { service: risk-engine, slo: recompute-success }
+          - record: slo:sli_error:ratio_rate3d
+            expr: 1 - (sum(rate(kanz_risk_recompute_duration_seconds_bucket{le="0.5"}[3d])) / sum(rate(kanz_risk_recompute_duration_seconds_count[3d])))
+            labels: { service: risk-engine, slo: recompute-latency }
+          - record: slo:sli_error:ratio_rate3d
+            expr: 1 - (sum(rate(kanz_bus_consume_total{result="ok"}[3d])) / sum(rate(kanz_bus_consume_total[3d])))
+            labels: { service: event-bus, slo: delivery-success }
+
+      # THE ERROR-BUDGET ACCOUNTING WINDOW (#210).
+      #
+      # slo.yaml has declared `defaults.window: 28d` since SRE-01a and described the
+      # objectives as commitments over it, and nothing computed anything over 28d.
+      # The seven windows above are the union of the burn-rate long/short pairs; they
+      # measure the RATE of spend. This group measures the TOTAL.
+      #
+      # The distinction is not academic: every burn-rate alert can stay silent for a
+      # month while the budget is consumed, because each one asks "is it burning fast
+      # right now" and none of them integrates. "How much of this month's budget is
+      # left" needed a different question.
+      - name: slo_budget_28d
+        rules:
+          # --- 28d error ratio, same compile as the burn windows ---
+          - record: slo:sli_error:ratio_rate28d
+            expr: 1 - (sum(rate(kanz_gateway_requests_total{code!~"5.."}[28d])) / sum(rate(kanz_gateway_requests_total[28d])))
+            labels: { service: api-gateway, slo: availability }
+          - record: slo:sli_error:ratio_rate28d
+            expr: 1 - (sum(rate(kanz_gateway_request_duration_seconds_bucket{le="0.5"}[28d])) / sum(rate(kanz_gateway_request_duration_seconds_count[28d])))
+            labels: { service: api-gateway, slo: query-latency }
+          - record: slo:sli_error:ratio_rate28d
+            expr: 1 - (sum(rate(kanz_risk_recompute_total{status="ok"}[28d])) / sum(rate(kanz_risk_recompute_total[28d])))
+            labels: { service: risk-engine, slo: recompute-success }
+          - record: slo:sli_error:ratio_rate28d
+            expr: 1 - (sum(rate(kanz_risk_recompute_duration_seconds_bucket{le="0.5"}[28d])) / sum(rate(kanz_risk_recompute_duration_seconds_count[28d])))
+            labels: { service: risk-engine, slo: recompute-latency }
+          - record: slo:sli_error:ratio_rate28d
+            expr: 1 - (sum(rate(kanz_bus_consume_total{result="ok"}[28d])) / sum(rate(kanz_bus_consume_total[28d])))
+            labels: { service: event-bus, slo: delivery-success }
+
+          # HOW MUCH OF THE WINDOW THE DATABASE ACTUALLY HOLDS.
+          #
+          # This is the guard the whole group rests on, and #210 is explicit about
+          # why: `rate()` over 28d does not fail on a database holding 15 days. It
+          # computes over whatever exists and returns a number indistinguishable
+          # from a full month's — which UNDERSTATES consumption and therefore reads
+          # as budget remaining. The confidently-wrong direction is the dangerous
+          # one.
+          #
+          # prometheus_tsdb_lowest_timestamp_seconds is the oldest sample in the
+          # TSDB; Prometheus scrapes itself (see its pod annotation), so this is
+          # available on the same surface as everything else.
+          #
+          # clamp() BOTH WAYS IS NOT DEFENSIVE PADDING. On an EMPTY database the
+          # metric is a max-int sentinel (9.22e15, verified against v3.1.0 — the
+          # digest this estate pins), so the subtraction is hugely NEGATIVE rather
+          # than zero. Without the lower clamp a fresh Prometheus reports a large
+          # negative coverage; with it, it reports 0, which is the truth.
+          - record: slo:budget_window_coverage:ratio
+            expr: clamp(max(time() - prometheus_tsdb_lowest_timestamp_seconds) / (28 * 24 * 3600), 0, 1)
+
+          # THE ANSWER: fraction of the 28d error budget consumed. 1.0 means the
+          # budget for the window is exactly spent; above 1.0 the objective is
+          # missed for the window.
+          #
+          # IT IS GATED ON COVERAGE, AND THE GATE MAKES IT ABSENT RATHER THAN WRONG.
+          # If the database does not hold the window, this series does not exist —
+          # a dashboard reads "no data" instead of a reassuring number, and
+          # SLOBudgetWindowNotCovered says why. That is the platform standard
+          # applied literally: "nothing configured" and "checked, and fine" must
+          # never look the same. A budget figure computed from half a window is
+          # exactly the second wearing the first's clothes.
+          #
+          # 0.99 rather than 1.0 because coverage is measured against wall-clock and
+          # a scrape gap of minutes should not blank the panel; anything materially
+          # short of the window does.
+          - record: slo:error_budget_consumed:ratio
+            expr: |
+              (
+                slo:sli_error:ratio_rate28d / on(service, slo) slo:error_budget:ratio
+              )
+              and on() (slo:budget_window_coverage:ratio >= 0.99)
+kind: ConfigMap
+metadata:
+  name: prometheus-rules
+  namespace: kanz-observability
