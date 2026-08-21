@@ -201,7 +201,7 @@ jobs:
           - service: nats-rebuild
             dockerfile: kanz/tools/natsrebuild/cmd/nats-rebuild/Dockerfile
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       # The image build COPYs kanz-schemas/gen/go (the generated SDK the kanz
       # go.mod `replace` points at, EVT-15a — never committed), so generate it
@@ -211,10 +211,9 @@ jobs:
         with:
           go-version-file: kanz/go.mod
           cache-dependency-path: kanz/go.sum
-      - uses: bufbuild/buf-setup-action@a47c93e0b1648d5651a065437926377d060baa99 # v1
+      - uses: ./.github/actions/setup-buf
         with:
           version: 1.69.0
-          github_token: ${{ secrets.GITHUB_TOKEN }}
       - name: Install protoc plugins
         run: |
           go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.11
