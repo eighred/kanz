@@ -40,11 +40,14 @@ import (
 //   - venue-binance / venue-okx — the ticker feeds that supply tv-sync's
 //     MarkSource. These were LIVE, and worse than silent: the mark publisher is
 //     the same HealthPublisher readiness.TrackPublisher watches, and the ticker
-//     DISCARDS its error (`_ = pub.Publish(...)`). Three instruments is one
-//     poll and DefaultPublishFailureThreshold is 3, so every 5-second tick
-//     marked the adapter NOT READY — dropping the pod out of its Service and
-//     hard-erroring the OMS router on that MIC. Order execution was fine; the
-//     mark feed took it down.
+//     THREW ITS ERROR AWAY. Three instruments is one poll and
+//     DefaultPublishFailureThreshold is 3, so every 5-second tick marked the
+//     adapter NOT READY — dropping the pod out of its Service and hard-erroring
+//     the OMS router on that MIC. Order execution was fine; the mark feed took
+//     it down. The discard is gone (#673): both feeds publish through
+//     execution.MarkTickPublisher, which counts every drop and logs the reason.
+//     The tenant fallback below is still what keeps the refusal from happening
+//     at all, and it is still the only route this path has.
 //
 // Every one of those survived a green suite, because a producer's config is set
 // in a composition root that dials a broker before it constructs anything, and

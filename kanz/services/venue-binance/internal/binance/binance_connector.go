@@ -5,13 +5,8 @@ import (
 	"log/slog"
 	"time"
 
-	envelopepb "github.com/eighred/kanz/kanz-schemas-go/envelope/v1"
-	marketpb "github.com/eighred/kanz/kanz-schemas-go/market/v1"
-	"google.golang.org/protobuf/types/known/timestamppb"
-
 	"github.com/eighred/kanz/internal/venueadapter/accountproof"
 	"github.com/eighred/kanz/internal/venuemargin"
-	"github.com/eighred/kanz/pkg/bus"
 )
 
 // BinanceConnector bundles the venue with its background workers (M3.6): the
@@ -125,7 +120,11 @@ func (c *BinanceConnector) runTicker(ctx context.Context, deps WorkerDeps) {
 	if interval <= 0 {
 		interval = 5 * time.Second
 	}
-	feed := &binanceTickerFeed{rest: c.rest, symbols: c.settings.Symbols, mic: c.settings.MIC, pub: deps.Publisher, logger: deps.Logger}
+	feed := &binanceTickerFeed{
+		rest:    c.rest,
+		symbols: c.settings.Symbols,
+		ticks:   newMarkTickPublisher(deps.Publisher, deps.Logger, c.settings.MIC, deps.OnMarkTickDropped),
+	}
 	t := time.NewTicker(interval)
 	defer t.Stop()
 	for {
@@ -154,9 +153,11 @@ func (c *BinanceConnector) runTicker(ctx context.Context, deps WorkerDeps) {
 type binanceTickerFeed struct {
 	rest    *binanceREST
 	symbols map[string]string // instrument_id -> exchange symbol
-	mic     string
-	pub     Publisher
-	logger  *slog.Logger
+	// ticks builds and publishes the FACT, and is where a publish that does not
+	// land becomes a counter and a WARN instead of a discarded error (#673). The
+	// envelope is built there rather than here so this feed and the OKX one
+	// cannot drift into two market.crypto.trade shapes.
+	ticks *MarkTickPublisher
 }
 
 func (f *binanceTickerFeed) pollOnce(ctx context.Context) {
@@ -173,16 +174,7 @@ func (f *binanceTickerFeed) pollOnce(ctx context.Context) {
 		if !ok {
 			continue
 		}
-		ev := &marketpb.MarketDataEvent{
-			InstrumentId: instrument, Symbol: symbol, Mic: f.mic,
-			EventTime: timestamppb.Now(),
-			Data:      &marketpb.MarketDataEvent_Trade{Trade: &marketpb.Trade{Price: price}},
-		}
-		_ = f.pub.Publish(ctx, bus.Event{
-			Subject: "market.crypto.trade", EventType: "market.crypto.trade",
-			EventClass: envelopepb.EventClass_EVENT_CLASS_FACT, SchemaVersion: 1, Domain: "market",
-			EventTime: time.Now().UTC(), PartitionKey: instrument, Payload: ev,
-		})
+		f.ticks.PublishTrade(ctx, instrument, symbol, price)
 	}
 }
 
