@@ -116,7 +116,31 @@ data:
           # The bootstrap Job (bootstrap-job.yaml) — it CREATES the streams, so it
           # is admitted here before any service has anything to connect to. It
           # lives in kanz-messaging beside the broker, not in kanz-services.
-          { user: "spiffe://kanz.internal/ns/kanz-messaging/sa/nats-bootstrap" }
+          # THE PROVISIONING JOB, NARROWED TO THE TWO SUBJECTS IT USES (#630).
+          #
+          # It had NO permissions block, which by this file's own rule — stated
+          # twice above — makes it UNRESTRICTED inside __system__. That is the
+          # broadest identity in the estate held by the least-supervised thing in
+          # it: a Job. Unrestricted, this SVID could publish order.order.submit,
+          # platform.mode.changed (the halt primitive), and
+          # compliance.mandate.changed.> — the subject whose two-signature
+          # protection #562 exists to enforce.
+          #
+          # bootstrap-job.yaml runs `nats stream info|add|edit|ls` and nothing
+          # else, and every one of those is JetStream's management API with the
+          # reply on an inbox. So these two grants are the whole job, and with an
+          # allow-list present every other subject is denied — the same argument
+          # kanz-monitor's entry makes for the read-only operator identity.
+          #
+          # NO $JS.ACK.>, deliberately: this Job never consumes a message, so it
+          # never acks one. Granting it would be copying a shape rather than
+          # stating a need.
+          { user: "spiffe://kanz.internal/ns/kanz-messaging/sa/nats-bootstrap"
+            permissions: {
+              publish: { allow: ["$JS.API.>"] }
+              subscribe: { allow: ["_INBOX.>"] }
+            }
+          }
           # THE OPERATOR PLANE (SEC-M3c, infra/operator/halt-job.yaml). Four
           # operator CLIs — kanz-halt, kanz-mandate, kanz-altevent,
           # kanz-household — each get their OWN SVID below, one per tool.
@@ -1195,7 +1219,43 @@ data:
         users: [
           # The tenant's workloads present this SVID; verify_and_map binds the
           # URI SAN to this user → account, scoping all its pub/sub.
-          { user: "spiffe://kanz.internal/ns/tenant-acme/sa/risk-engine" }
+          # THE TENANT'S RISK ENGINE (#630). It had no permissions block, so it
+          # was unrestricted WITHIN this account — and this account is the one
+          # whose entire purpose is that its OMS subscribes order.order.submit.
+          # An unrestricted user inside it publishes onto that subject directly.
+          #
+          # That matters most for THIS service: risk-engine is the one component
+          # this repository has a guard asserting cannot issue commands
+          # (test/arch/risk_engine_is_query_only_test.go, "THE RISK ENGINE'S API
+          # TAKES QUERIES, NEVER COMMANDS"). That guard checks the gRPC surface.
+          # On the bus, in its own tenant's account, it was unconstrained — so
+          # the property held on one face of the service and not the other.
+          #
+          # The allow-lists MIRROR the platform risk-engine's entry above,
+          # because a tenant's risk engine is the same binary reading the same
+          # subjects; the subjects are logical here since the account's imports
+          # remap the prefix away before any workload sees them. Deriving them
+          # rather than inventing them is what keeps this template correct as the
+          # platform entry changes.
+          { user: "spiffe://kanz.internal/ns/tenant-acme/sa/risk-engine"
+            permissions: {
+              publish: {
+                allow: [
+                  "risk.portfolio.exposure_recomputed", "risk.portfolio.measures_computed",
+                  "dlq.risk.portfolio.revalued", "dlq.risk.position.changed.>", "dlq.risk.portfolio.snapshot",
+                  "dlq.market.>", "$JS.API.>", "$JS.ACK.>",
+                ]
+              }
+              subscribe: {
+                allow: [
+                  "risk.portfolio.revalued", "risk.position.changed.>", "risk.portfolio.snapshot",
+                  "market.>",
+                  "platform.model.registered",
+                  "_INBOX.>",
+                ]
+              }
+            }
+          }
           # MT-02 compute: the per-tenant OMS pod's ServiceAccount is
           # oms-acme in kanz-services (not tenant-acme — the compute layer is
           # a name-suffixed platform ServiceAccount, not a per-tenant
@@ -1204,7 +1264,56 @@ data:
           # without this the pod authenticates but cannot reach any account
           # (SEC-M3). test/arch/tenant_compute_test.go fails the build if
           # this and kanz/infra/deploy/tenants/acme/ ever drift apart.
-          { user: "spiffe://kanz.internal/ns/kanz-services/sa/oms-acme" }
+          # THE TENANT'S OMS (#630). Unrestricted until now, in the account
+          # built to carry this tenant's order flow — so the one identity that
+          # most needed a boundary had none.
+          #
+          # THE ALLOW-LISTS ARE THE PLATFORM OMS's, AND THAT IS NOT A GUESS:
+          # infra/deploy/tenants/acme/oms-acme.yaml pins the same digest-pinned
+          # OMS image the platform deployment does — the SAME BINARY, by the
+          # MT-02 per-tenant-compute design, which is why
+          # test/arch/tenant_compute_test.go asserts the tenant manifest has not
+          # drifted from infra/deploy/oms-deploy.yaml. Same binary, same
+          # subjects. The account's imports remap tenant.acme.order.* onto the
+          # logical names before this pod sees them, which is why the subscribe
+          # list below is the unprefixed one and not a tenant-scoped copy.
+          #
+          # Keeping them derived from the platform entry rather than hand-copied
+          # is the point: this account is the template every future tenant is
+          # provisioned from, so a hole here is duplicated once per onboarding —
+          # which is exactly how three users came to be unrestricted at once.
+          { user: "spiffe://kanz.internal/ns/kanz-services/sa/oms-acme"
+            permissions: {
+              publish: {
+                allow: [
+                  "order.order.accepted", "order.order.rejected", "order.order.routed",
+                  "order.order.filled", "order.order.partially_filled", "order.order.cancelled",
+                  "order.order.expired", "order.order.outcome",
+                  "order.order.pending_approval",
+                  "order.order.approved",
+                  "order.cost.recorded",
+                  "risk.position.changed.>", "risk.position.venue.changed.>",
+                  "settlement.instruction.fail",
+                  "dlq.order.order.submit", "dlq.order.order.amend", "dlq.order.order.cancel",
+                  "dlq.order.order.approve",
+                  "dlq.order.order.filled", "dlq.order.order.partially_filled",
+                  "$JS.API.>", "$JS.ACK.>",
+                ]
+              }
+              subscribe: {
+                allow: [
+                  "order.order.submit", "order.order.amend", "order.order.cancel",
+                  "order.order.approve",
+                  "order.order.filled", "order.order.partially_filled",
+                  "market.*.trade", "market.*.quote", "compliance.mandate.changed.>",
+                  "accounting.balance.portfolio",
+                  "risk.portfolio.measures_computed",
+                  "platform.mode.changed",
+                  "_INBOX.>",
+                ]
+              }
+            }
+          }
         ]
       }
     }
