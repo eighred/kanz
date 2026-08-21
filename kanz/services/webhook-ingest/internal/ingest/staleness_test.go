@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/eighred/kanz/internal/platform/halt"
 	"github.com/eighred/kanz/internal/signal/translate"
 )
 
@@ -28,7 +29,7 @@ func agedHarness(t *testing.T, max time.Duration, now time.Time, allowUnstamped 
 		Positions:            StaticPositions{},
 		Alloc:                StaticAllocation{"fund-alpha": {{Venue: "BINANCE", Weight: big.NewRat(1, 1)}}},
 		Publisher:            cap,
-		Gate:                 translate.OpenGate(nil),
+		Gate:                 halt.OpenGate(nil),
 		MaxSignalAge:         max,
 		AllowUnstampedSignal: allowUnstamped,
 		Now:                  func() time.Time { return now },
@@ -97,7 +98,7 @@ func TestPerimeter_AnUnstampedAlertIsRefusedAndCounted(t *testing.T) {
 		Positions:         StaticPositions{},
 		Alloc:             StaticAllocation{"fund-alpha": {{Venue: "BINANCE", Weight: big.NewRat(1, 1)}}},
 		Publisher:         cap,
-		Gate:              translate.OpenGate(nil),
+		Gate:              halt.OpenGate(nil),
 		MaxSignalAge:      2 * time.Minute,
 		Now:               func() time.Time { return now },
 		OnUnstampedSignal: func(strategyID string) { counted = append(counted, strategyID) },
@@ -219,7 +220,7 @@ func TestPerimeter_APipelineThatWasNotToldTheBoundIsStillBounded(t *testing.T) {
 		Positions: StaticPositions{},
 		Alloc:     StaticAllocation{"fund-alpha": {{Venue: "BINANCE", Weight: big.NewRat(1, 1)}}},
 		Publisher: cap,
-		Gate:      translate.OpenGate(nil),
+		Gate:      halt.OpenGate(nil),
 		Now:       func() time.Time { return now },
 		// MaxSignalAge deliberately UNSET.
 	})

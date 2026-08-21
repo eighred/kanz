@@ -15,6 +15,7 @@ import (
 	orderpb "github.com/eighred/kanz/kanz-schemas-go/order/v1"
 
 	"github.com/eighred/kanz/internal/dec"
+	"github.com/eighred/kanz/internal/platform/halt"
 	"github.com/eighred/kanz/services/oms/internal/schedule"
 )
 
@@ -76,7 +77,7 @@ func scheduledService(t *testing.T, fb *fakeBus, at *time.Time) (*Service, *Memo
 func newServiceNoVenue(t *testing.T, fb *fakeBus) (*Service, *MemoryStore) {
 	t.Helper()
 	store := NewMemoryStore()
-	svc, err := NewService(testTenant, store, NewEmitter(fb), nil, nil, nil, nil)
+	svc, err := NewService(testTenant, store, NewEmitter(fb), nil, nil, nil, nil, WithHaltGate(halt.OpenGate(nil)))
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
 	}

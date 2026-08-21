@@ -1,4 +1,28 @@
-package translate
+// Package halt is the platform kill-switch as every process on the order path
+// sees it: ONE Gate type, folded from ONE lifecycle.v1.ModeChanged FACT, wired by
+// ONE Arm helper.
+//
+// WHY IT LIVES HERE RATHER THAN IN internal/signal/translate, where it was born
+// (#635). It was written for the TradingView perimeter and nothing else ever
+// imported it, so cmd/kanz-halt's "platform kill-switch" stopped exactly one
+// channel: an operator halting on a risk breach stopped webhook signals while
+// POST /v1/orders, the OMS and both venue adapters carried on trading. The
+// implementation was never the defect — latching, deny-by-default, halted on a
+// nil receiver — its REACH was. A brake that only one of five processes can
+// reach is not a platform control, and the repair is not a second brake in each
+// of the other four: two brakes drift, and the one that is not wired is the one
+// that fails during the incident. So the single Gate moved to a package every
+// service on the capital path can import, and test/arch's
+// TestEveryOrderPlacingServiceHonoursTheHalt fails the build if a new one
+// appears that does not.
+//
+// It sits beside internal/platform/mode rather than inside it: mode holds the
+// wire contract (the subject and the component name) and imports NOTHING, which
+// is what keeps cmd/kanz-halt — the one binary that must work while the system
+// is on fire — free of the trading pipeline. This package folds that contract
+// and therefore depends on the schemas and the bus; keeping the two apart
+// preserves the break-glass tool's isolation.
+package halt
 
 import (
 	"context"
@@ -27,11 +51,30 @@ const SubjectModeChanged = mode.Subject
 // system-level ModeChanged.
 const ComponentSystem = mode.ComponentSystem
 
-// Gate is the kill-switch. It is the ONE brake both brains pass through: the
-// TradingView webhook perimeter checks it before an alert becomes an intent, and
-// the native alpha runner checks it at the top of every engine tick. A single
-// gate is the point — two brakes drift, and the one that is not wired is the one
-// that fails during the incident.
+// Gate is the kill-switch. It is the ONE brake EVERY channel that can put an
+// order in front of an exchange passes through:
+//
+//   - the TradingView webhook perimeter, before an alert becomes an intent;
+//   - the native alpha runner, at the top of every engine tick;
+//   - api-gateway, before POST /v1/orders or an approval becomes a COMMAND;
+//   - the OMS, before a NEW order is admitted to the book;
+//   - both venue adapters, before an order is placed at the exchange.
+//
+// A single gate is the point — two brakes drift, and the one that is not wired
+// is the one that fails during the incident.
+//
+// WHERE THE HALT BITES, stated once, here, because a kill switch whose scope is
+// implicit is a different control from the one the operator thinks they have
+// (#635). A halt refuses NEW EXECUTION EXPOSURE and nothing else:
+//
+//   - REFUSED: a new order admitted, a held order released by a second
+//     signature, and any placement at a venue.
+//   - NOT REFUSED: cancels, at every layer. An operator who halts on a risk
+//     breach must still be able to get out of the book, and a brake that also
+//     jams the exits is a worse control than no brake.
+//   - UNTOUCHED: orders already resting at an exchange. A halt is not a cancel.
+//     They stay live, their fills are still folded and booked, and flattening
+//     them is a separate, deliberate operator act.
 //
 // DENY-BY-DEFAULT. The gate is CLOSED until something explicitly opens it: a
 // zero-value Gate is halted, and trading is permitted only in OPERATING_MODE_NORMAL.
@@ -155,7 +198,8 @@ func (g *Gate) Observe(mc *lifecyclepb.ModeChanged) {
 }
 
 // Handle is the bus.EventHandler for SubjectModeChanged: it decodes the halt FACT
-// and applies it. Wire it with consumer.Subscribe(ctx, translate.SubjectModeChanged, ...).
+// and applies it. Do NOT wire it by hand — call Arm, which is the one place the
+// subscription's delivery policy and its failure behaviour are decided.
 //
 // A ModeChanged that will not decode TRIPS the gate. That is the deny-by-default
 // rule taken seriously: an undecodable message on the halt channel means the

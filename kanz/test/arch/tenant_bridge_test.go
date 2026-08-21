@@ -63,6 +63,21 @@ var nonTenantAccounts = map[string]bool{"SYS": true, "__system__": true}
 // bridging it would open a path nothing uses.
 var bridgedSubjects = []string{"order.order.submit", "order.order.cancel", "order.order.approve"}
 
+// platformWideImports are the subjects every tenant account imports UNPREFIXED,
+// because there is exactly one of them for the whole estate (#635).
+//
+// platform.mode.changed is the kill switch. cmd/kanz-halt publishes ONE FACT,
+// once, and every account that runs an order path must receive THAT one — a
+// per-tenant copy would mean an operator's break-glass command reached the
+// platform account and no other, which is the failure #635 exists to close.
+//
+// It is listed separately from bridgedSubjects rather than folded into it
+// because the two have opposite prefixing rules, and the exact-match below has
+// to know which rule applies to which subject. A tenant missing this import has
+// an OMS that cannot resolve a stream for the halt FACT, latches its gate CLOSED
+// and refuses every order for that tenant — loud, and a total outage.
+var platformWideImports = []string{"platform.mode.changed"}
+
 func tenancyText(t *testing.T) string {
 	t.Helper()
 	b, err := os.ReadFile(filepath.Join(moduleRoot(t), "infra", "nats", "tenancy.yaml"))
@@ -118,6 +133,7 @@ func TestEveryTenantAccountImportsExactlyItsOwnOrders(t *testing.T) {
 		for _, subj := range bridgedSubjects {
 			want = append(want, fmt.Sprintf("tenant.%s.%s", tenant, subj))
 		}
+		want = append(want, platformWideImports...)
 		sort.Strings(found)
 		sort.Strings(want)
 
@@ -145,6 +161,16 @@ func TestSystemAccountCarriesTheBridge(t *testing.T) {
 	sys, ok := accountBlocks(t, text)["__system__"]
 	if !ok {
 		t.Fatal("no __system__ account block found in tenancy.yaml — this guard is blind")
+	}
+
+	for _, subj := range platformWideImports {
+		export := fmt.Sprintf(`stream: "%s"`, subj)
+		if !strings.Contains(sys, export) {
+			t.Errorf("__system__ does not export %s.\n\n"+
+				"Every tenant's import of the platform kill switch resolves to nothing, the broker "+
+				"accepts the config, and that tenant's OMS cannot hear a declared halt — or, because "+
+				"the gate is deny-by-default, refuses every order instead.", export)
+		}
 	}
 
 	for _, subj := range bridgedSubjects {

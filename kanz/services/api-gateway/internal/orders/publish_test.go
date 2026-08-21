@@ -43,6 +43,7 @@ import (
 	envelopepb "github.com/eighred/kanz/kanz-schemas-go/envelope/v1"
 	orderpb "github.com/eighred/kanz/kanz-schemas-go/order/v1"
 
+	"github.com/eighred/kanz/internal/platform/halt"
 	"github.com/eighred/kanz/pkg/auth"
 	"github.com/eighred/kanz/pkg/bus"
 )
@@ -102,7 +103,7 @@ func submitBody(issuer string) []byte {
 // which is the only version of the claim that says anything about production.
 func TestSubmitOverridesAForgedIssuerOnTheWire(t *testing.T) {
 	prod, cc := realProducer(t)
-	h := New(prod, "")
+	h := New(prod, "", halt.OpenGate(nil))
 	mux := testMux()
 	h.Routes(mux)
 

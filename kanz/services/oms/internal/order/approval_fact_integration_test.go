@@ -41,6 +41,7 @@ import (
 
 	"github.com/eighred/kanz/internal/bustest"
 	"github.com/eighred/kanz/internal/dualcontrol"
+	"github.com/eighred/kanz/internal/platform/halt"
 	"github.com/eighred/kanz/pkg/bus"
 	"github.com/eighred/kanz/services/oms/internal/approval"
 
@@ -144,7 +145,8 @@ func TestAnApprovedOrderAnnouncesBothIdentitiesOverARealSpine(t *testing.T) {
 	}
 	store := NewMemoryStore()
 	svc, err := NewService(tenant, store, NewEmitter(producer), nil, nil, nil, nil,
-		WithDualControl(gate))
+		WithDualControl(gate),
+		WithHaltGate(halt.OpenGate(nil)))
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
 	}

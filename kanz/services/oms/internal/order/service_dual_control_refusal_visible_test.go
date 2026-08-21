@@ -26,6 +26,7 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 
+	"github.com/eighred/kanz/internal/platform/halt"
 	"github.com/eighred/kanz/services/oms/internal/approval"
 )
 
@@ -229,7 +230,7 @@ func TestARefusalThatCannotBeRecordedIsRedeliveredRatherThanAcked(t *testing.T) 
 	// so this exercises the real handleApprove path right up to the point the
 	// refusal has to be recorded.
 	store := &storeThatCannotRecordRefusals{MemoryStore: mem}
-	svc, err := NewService(testTenant, store, NewEmitter(fb), nil, nil, nil, nil, WithDualControl(g))
+	svc, err := NewService(testTenant, store, NewEmitter(fb), nil, nil, nil, nil, WithDualControl(g), WithHaltGate(halt.OpenGate(nil)))
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
 	}

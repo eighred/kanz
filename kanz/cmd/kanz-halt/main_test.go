@@ -6,8 +6,8 @@ import (
 
 	lifecyclepb "github.com/eighred/kanz/kanz-schemas-go/lifecycle/v1"
 
+	"github.com/eighred/kanz/internal/platform/halt"
 	"github.com/eighred/kanz/internal/platform/mode"
-	"github.com/eighred/kanz/internal/signal/translate"
 )
 
 func baseArgs(extra ...string) []string {
@@ -36,7 +36,7 @@ func TestParseFlags_RequiresAttributionAndReason(t *testing.T) {
 	}
 }
 
-// The sharpest trap in the whole tool: translate.Gate deliberately IGNORES a
+// The sharpest trap in the whole tool: halt.Gate deliberately IGNORES a
 // NORMAL transition issued by a "system:" principal, so automated recovery cannot
 // clear a safety trip. A resume sent under system: would publish cleanly and
 // change nothing — a silent no-op on the one command an operator runs during an
@@ -121,7 +121,7 @@ func TestBuildFact_RejectsNonTransition(t *testing.T) {
 // consumer and asserts the brake moves — if the subject, component, or principal
 // conventions ever drift apart, this fails.
 func TestFactDrivesTheRealGate(t *testing.T) {
-	gate := translate.OpenGate(nil)
+	gate := halt.OpenGate(nil)
 
 	opt, _ := parseFlags(baseArgs())
 	halt, err := buildFact(opt)
@@ -147,7 +147,7 @@ func TestFactDrivesTheRealGate(t *testing.T) {
 // The publisher and the consumer must agree on the subject, or the kill-switch
 // publishes into the void.
 func TestSubjectMatchesTheGatesSubscription(t *testing.T) {
-	if mode.Subject != translate.SubjectModeChanged {
-		t.Fatalf("publisher subject %q != gate subscription %q", mode.Subject, translate.SubjectModeChanged)
+	if mode.Subject != halt.SubjectModeChanged {
+		t.Fatalf("publisher subject %q != gate subscription %q", mode.Subject, halt.SubjectModeChanged)
 	}
 }

@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/eighred/kanz/internal/platform/halt"
 	signalpb "github.com/eighred/kanz/kanz-schemas-go/signal/v1"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
@@ -64,7 +65,7 @@ func TestASignedSignalForAnotherTenantsFundIsRefusedAndPublishesNothing(t *testi
 			"fund-victim": {{Venue: "BINANCE", Weight: big.NewRat(1, 1)}},
 		},
 		Publisher: rec,
-		Gate:      OpenGate(nil),
+		Gate:      halt.OpenGate(nil),
 		Authority: boundAuthority(t),
 	})
 	if err != nil {
@@ -114,7 +115,7 @@ func TestAnUnboundFundIsReportedEvenWhenTheSignalIsAlsoStale(t *testing.T) {
 			"fund-victim": {{Venue: "BINANCE", Weight: big.NewRat(1, 1)}},
 		},
 		Publisher:    rec,
-		Gate:         OpenGate(nil),
+		Gate:         halt.OpenGate(nil),
 		Authority:    boundAuthority(t),
 		MaxSignalAge: 2 * time.Minute,
 		Now:          func() time.Time { return fired.Add(30 * time.Minute) },
@@ -179,7 +180,7 @@ func TestNewRefusesWithoutAFundAuthority(t *testing.T) {
 	_, err := New(Options{
 		Prices: StaticPrices{}, Equity: StaticEquity{}, Positions: StaticPositions{},
 		Alloc:     StaticAllocation{"fund-alpha": {{Venue: "BINANCE", Weight: big.NewRat(1, 1)}}},
-		Publisher: &recorder{}, Gate: OpenGate(nil),
+		Publisher: &recorder{}, Gate: halt.OpenGate(nil),
 		// Authority deliberately absent.
 	})
 	if err == nil {

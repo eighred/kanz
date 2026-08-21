@@ -82,7 +82,7 @@ type NATSConfig struct {
 	// buffers and heals and nothing upstream ever learns the bus went away. A
 	// trading process must learn — losing the spine means fills and the halt FACT
 	// itself stop flowing, so it can no longer know whether it is safe to trade.
-	// Wire this to translate.Gate.TripOnBusLoss to fail closed. err is nil on a
+	// Wire this to halt.Gate.TripOnBusLoss to fail closed. err is nil on a
 	// clean close. Called on a NATS goroutine: do not block.
 	OnDisconnect func(err error)
 	// OnReconnect fires when the spine returns. It deliberately does NOT reopen the

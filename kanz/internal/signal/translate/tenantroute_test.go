@@ -28,6 +28,7 @@ import (
 	orderpb "github.com/eighred/kanz/kanz-schemas-go/order/v1"
 	signalpb "github.com/eighred/kanz/kanz-schemas-go/signal/v1"
 
+	"github.com/eighred/kanz/internal/platform/halt"
 	"github.com/eighred/kanz/pkg/bus"
 )
 
@@ -39,7 +40,7 @@ func TestASignalOrderCarriesItsFundsTenantOnTheWire(t *testing.T) {
 		Positions: StaticPositions{"fund-alpha/BINANCE/BTC-USD": big.NewRat(0, 1)},
 		Alloc:     StaticAllocation{"fund-alpha": {{Venue: "BINANCE", Weight: big.NewRat(1, 1)}}},
 		Publisher: rec,
-		Gate:      OpenGate(nil),
+		Gate:      halt.OpenGate(nil),
 		// The binding this endpoint serves: momentum → fund-alpha, owned by acme.
 		// The tenant is deliberately NOT the fund id, so a fix that quietly restored
 		// the identity default cannot make this test agree with itself.

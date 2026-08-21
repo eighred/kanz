@@ -9,6 +9,7 @@ import (
 	envelopepb "github.com/eighred/kanz/kanz-schemas-go/envelope/v1"
 	orderpb "github.com/eighred/kanz/kanz-schemas-go/order/v1"
 
+	"github.com/eighred/kanz/internal/platform/halt"
 	"github.com/eighred/kanz/services/api-gateway/internal/authz"
 	"github.com/eighred/kanz/services/api-gateway/internal/middleware"
 )
@@ -61,7 +62,7 @@ func asRole(req *http.Request, sub, role string) *http.Request {
 func TestApproveRefusesATradeToken(t *testing.T) {
 	pub := &fakePub{}
 	m := approveMux()
-	New(pub, approverRole).Routes(m)
+	New(pub, approverRole, halt.OpenGate(nil)).Routes(m)
 
 	rr := httptest.NewRecorder()
 	m.ServeHTTP(rr, asRole(approveRequest(), "alice", "trader"))
@@ -79,7 +80,7 @@ func TestApproveRefusesATradeToken(t *testing.T) {
 func TestApproveRefusesAReadToken(t *testing.T) {
 	pub := &fakePub{}
 	m := approveMux()
-	New(pub, approverRole).Routes(m)
+	New(pub, approverRole, halt.OpenGate(nil)).Routes(m)
 
 	rr := httptest.NewRecorder()
 	m.ServeHTTP(rr, asRole(approveRequest(), "bob", "analyst"))
@@ -97,7 +98,7 @@ func TestApproveRefusesAReadToken(t *testing.T) {
 func TestApprovePublishesTheCommandBoundToTheApprover(t *testing.T) {
 	pub := &fakePub{}
 	m := approveMux()
-	New(pub, approverRole).Routes(m)
+	New(pub, approverRole, halt.OpenGate(nil)).Routes(m)
 
 	req := approveRequest()
 	req.Header.Set("Idempotency-Key", "idem-approve-1")
@@ -154,7 +155,7 @@ func TestApprovePublishesTheCommandBoundToTheApprover(t *testing.T) {
 func TestApproveOverridesAForgedBody(t *testing.T) {
 	pub := &fakePub{}
 	m := approveMux()
-	New(pub, approverRole).Routes(m)
+	New(pub, approverRole, halt.OpenGate(nil)).Routes(m)
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/orders/o1/approve", strings.NewReader(
 		`{"digest":"sha256:beef","orderId":"o-other","metadata":{"issuer":"user:attacker","targetId":"o-other"}}`))
@@ -182,7 +183,7 @@ func TestApproveOverridesAForgedBody(t *testing.T) {
 func TestApproveRefusesAnEmptyDigest(t *testing.T) {
 	pub := &fakePub{}
 	m := approveMux()
-	New(pub, approverRole).Routes(m)
+	New(pub, approverRole, halt.OpenGate(nil)).Routes(m)
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/orders/o1/approve", strings.NewReader(`{}`))
 	rr := httptest.NewRecorder()
@@ -206,7 +207,7 @@ func TestApproveRefusesAnEmptyDigest(t *testing.T) {
 func TestApproveIsNotRegisteredWithoutAnApprover(t *testing.T) {
 	pub := &fakePub{}
 	m := approveMux()
-	New(pub, "").Routes(m) // no API_GATEWAY_APPROVE_ROLE
+	New(pub, "", halt.OpenGate(nil)).Routes(m) // no API_GATEWAY_APPROVE_ROLE
 
 	rr := httptest.NewRecorder()
 	m.ServeHTTP(rr, asRole(approveRequest(), "carol", approverRole))
@@ -238,7 +239,7 @@ func TestAnApproveTokenCannotSubmitOrCancel(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			pub := &fakePub{}
 			m := approveMux()
-			New(pub, approverRole).Routes(m)
+			New(pub, approverRole, halt.OpenGate(nil)).Routes(m)
 
 			rr := httptest.NewRecorder()
 			m.ServeHTTP(rr, asRole(tc.req(), "carol", approverRole))

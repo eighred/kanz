@@ -25,6 +25,7 @@ import (
 	venuepb "github.com/eighred/kanz/kanz-schemas-go/venue/v1"
 
 	"github.com/eighred/kanz/internal/execution"
+	"github.com/eighred/kanz/internal/platform/halt"
 	"github.com/eighred/kanz/internal/venueadapter/orderview"
 )
 
@@ -60,7 +61,7 @@ func newServer(t *testing.T, v *fakeVenue) (*Server, *execution.CloseRegistry, o
 	v.closes = closes
 	view := orderview.NewMemory()
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	return New(v, view, closes, execution.AccountProof{Verified: true, ExchangeAccountID: "12345678"}, logger), closes, view
+	return New(v, view, closes, execution.AccountProof{Verified: true, ExchangeAccountID: "12345678"}, halt.OpenGate(nil), logger), closes, view
 }
 
 func order() *orderpb.OrderState {

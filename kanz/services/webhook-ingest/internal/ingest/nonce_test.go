@@ -22,6 +22,7 @@ import (
 
 	orderpb "github.com/eighred/kanz/kanz-schemas-go/order/v1"
 
+	"github.com/eighred/kanz/internal/platform/halt"
 	"github.com/eighred/kanz/internal/signal/translate"
 	"github.com/eighred/kanz/pkg/bus"
 )
@@ -76,7 +77,7 @@ func pipelineOver(t *testing.T, nonces NonceStore, pub translate.Publisher) *Pip
 		Positions: StaticPositions{},
 		Alloc:     StaticAllocation{"fund-alpha": {{Venue: "BINANCE", Weight: big.NewRat(1, 1)}}},
 		Publisher: pub,
-		Gate:      translate.OpenGate(nil),
+		Gate:      halt.OpenGate(nil),
 	})
 	if err != nil {
 		t.Fatalf("NewPipeline: %v", err)
@@ -102,7 +103,7 @@ func pipelineWithPositions(t *testing.T, positions translate.PositionSource, pub
 			{Venue: "OKX", Weight: big.NewRat(4, 10)},
 		}},
 		Publisher: pub,
-		Gate:      translate.OpenGate(nil),
+		Gate:      halt.OpenGate(nil),
 	})
 	if err != nil {
 		t.Fatalf("NewPipeline: %v", err)

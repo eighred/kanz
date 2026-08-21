@@ -29,9 +29,8 @@ import (
 	orderpb "github.com/eighred/kanz/kanz-schemas-go/order/v1"
 	"google.golang.org/protobuf/proto"
 
-	"github.com/eighred/kanz/internal/signal/translate"
-
 	"github.com/eighred/kanz/internal/dec"
+	"github.com/eighred/kanz/internal/platform/halt"
 	"github.com/eighred/kanz/pkg/bus"
 )
 
@@ -102,7 +101,7 @@ func TestIntegration_LoopOverNATS(t *testing.T) {
 			{Venue: "XLON", Weight: big.NewRat(4, 10)},
 		}},
 		Publisher: producer,
-		Gate:      translate.OpenGate(nil),
+		Gate:      halt.OpenGate(nil),
 	})
 	if err != nil {
 		t.Fatal(err)

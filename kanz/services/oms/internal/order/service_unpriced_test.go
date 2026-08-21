@@ -23,6 +23,7 @@ import (
 	orderpb "github.com/eighred/kanz/kanz-schemas-go/order/v1"
 
 	"github.com/eighred/kanz/internal/execution"
+	"github.com/eighred/kanz/internal/platform/halt"
 )
 
 // simService wires a Service onto a real SimVenue built exactly as production
@@ -30,7 +31,8 @@ import (
 func simService(t *testing.T, fb *fakeBus) *Service {
 	t.Helper()
 	svc, err := NewService(testTenant, NewMemoryStore(), NewEmitter(fb), nil,
-		execution.NewRouter([]execution.Venue{execution.NewSimVenue("SIM")}), execution.NewCloseRegistry(), nil)
+		execution.NewRouter([]execution.Venue{execution.NewSimVenue("SIM")}), execution.NewCloseRegistry(), nil,
+		WithHaltGate(halt.OpenGate(nil)))
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
 	}

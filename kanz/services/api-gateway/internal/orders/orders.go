@@ -26,6 +26,7 @@ import (
 	"github.com/eighred/kanz/services/api-gateway/internal/middleware"
 
 	"github.com/eighred/kanz/internal/orderid"
+	"github.com/eighred/kanz/internal/platform/halt"
 )
 
 // Order command subjects (mirror services/oms/internal/order; kept local so the
@@ -57,13 +58,66 @@ type Handler struct {
 	// already holds and nothing has to restate the condition — the same shape as
 	// proxy.Roles, which fronts the other half of this control.
 	approveRole string
-	unmarshal   protojson.UnmarshalOptions
+	// halted is the platform kill-switch (#635). It is a POSITIONAL argument to
+	// New rather than an option because this is the capital path's front door: an
+	// optional brake is an absent brake, and a nil *halt.Gate answers halted, so
+	// the compiler is what makes every construction of this handler state where
+	// its brake comes from.
+	halted    *halt.Gate
+	unmarshal protojson.UnmarshalOptions
 }
 
 // New returns a write handler over the publisher. A nil publisher disables the
 // write routes; an empty approveRole leaves the approve route unregistered.
-func New(pub Publisher, approveRole string) *Handler {
-	return &Handler{pub: pub, approveRole: approveRole, unmarshal: protojson.UnmarshalOptions{DiscardUnknown: true}}
+//
+// gate is the platform kill-switch. A NIL GATE IS HALTED, so a caller that
+// passes nil gets a surface that refuses every order — which is the safe
+// direction and never the intended one; production passes the gate halt.Arm
+// folds the operator's ModeChanged FACT into.
+func New(pub Publisher, approveRole string, gate *halt.Gate) *Handler {
+	return &Handler{
+		pub:         pub,
+		approveRole: approveRole,
+		halted:      gate,
+		unmarshal:   protojson.UnmarshalOptions{DiscardUnknown: true},
+	}
+}
+
+// refuseIfHalted answers 423 Locked when the platform kill-switch is engaged, and
+// reports whether it did (#635).
+//
+// WHY THE GATEWAY CHECKS AT ALL, when the OMS refuses the same order one hop
+// later. Two reasons, and neither is redundancy for its own sake. The first is
+// the answer a human gets: without this the client is told 202 Accepted and has
+// to discover from an asynchronous ORDER_REJECTED that the platform is halted —
+// during an incident, with an operator watching. 423 with the reason and the
+// timestamp is the honest answer to "did my order go through". The second is
+// that a brake this close to the caller is the one that still works if the OMS
+// is itself part of the incident.
+//
+// 423 LOCKED, not 503 and not 403. 503 means "try again shortly", which is wrong:
+// nothing changes until an operator resumes, and a client that retries a 503 is
+// hammering a halted platform. 403 means "you may not", when the truth is that
+// nobody may. The gateway already answers 423 for a halted webhook path, so the
+// two write surfaces speak with one voice.
+//
+// CANCEL DOES NOT CALL THIS. A halt refuses new exposure; it does not lock an
+// operator out of the exits. See halt.Gate for the whole boundary.
+func (h *Handler) refuseIfHalted(w http.ResponseWriter) bool {
+	if h.pub == nil {
+		// A READ-ONLY GATEWAY HAS NO WRITE SURFACE TO BRAKE. Its own answer — 503
+		// "order writes are disabled", from publish below — is the true one, and
+		// it must not be displaced by a fact about a path this deployment does not
+		// have. Such a deployment also has no bus, so its gate could only ever
+		// report the closed zero value.
+		return false
+	}
+	reason, halted := halt.Refusal(h.halted)
+	if !halted {
+		return false
+	}
+	writeError(w, http.StatusLocked, "order refused: "+reason)
+	return true
 }
 
 // Routes registers the write endpoints.
@@ -98,6 +152,12 @@ func (h *Handler) Routes(mux *authz.Mux) {
 func (h *Handler) submit(w http.ResponseWriter, r *http.Request) {
 	p, ok := h.principal(w, r)
 	if !ok {
+		return
+	}
+	// The brake, before the body is even read — the same placement the webhook
+	// perimeter uses, for the same reason: a halted platform does not do work it
+	// is going to refuse.
+	if h.refuseIfHalted(w) {
 		return
 	}
 	body, err := io.ReadAll(io.LimitReader(r.Body, maxBodyBytes))
@@ -156,6 +216,12 @@ func (h *Handler) cancel(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) approve(w http.ResponseWriter, r *http.Request) {
 	p, ok := h.principal(w, r)
 	if !ok {
+		return
+	}
+	// AN APPROVAL IS A NEW ORDER, arriving late. The OMS replays every gate when
+	// it releases a held proposal, so a signature collected before the halt must
+	// not be the thing that puts an order in front of an exchange during one.
+	if h.refuseIfHalted(w) {
 		return
 	}
 	body, err := io.ReadAll(io.LimitReader(r.Body, maxBodyBytes))

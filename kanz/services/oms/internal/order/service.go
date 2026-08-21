@@ -23,6 +23,7 @@ import (
 	"github.com/eighred/kanz/internal/dualcontrol"
 	"github.com/eighred/kanz/internal/execution"
 	"github.com/eighred/kanz/internal/outbox"
+	"github.com/eighred/kanz/internal/platform/halt"
 	"github.com/eighred/kanz/services/oms/internal/approval"
 	"github.com/eighred/kanz/services/oms/internal/compliance"
 
@@ -106,6 +107,17 @@ type Service struct {
 	// once kanz-redrive has drained it — records that the window happened.
 	acceptedReannounced prometheus.Counter
 
+	// halted is THE PLATFORM KILL-SWITCH, and it is REQUIRED — NewService refuses
+	// to build a Service without one (#635).
+	//
+	// It is an option by shape and mandatory by construction, deliberately. The
+	// same brake was optional in internal/signal/translate's predecessor seam, was
+	// never wired in any binary, and the kill-switch was inert in production for
+	// as long as it existed: an optional brake is an absent brake. Refusing here
+	// means a test that forgets it does not silently exercise an OMS with no
+	// brake, and a composition root that forgets it does not start.
+	halted *halt.Gate
+
 	// dualControl classifies each admitted order against
 	// OMS_DUAL_CONTROL_MIN_NOTIONAL (#410). Nil ⇒ nothing is classified and
 	// nothing is counted, which is the test default and never the production one:
@@ -117,6 +129,17 @@ type Service struct {
 
 // ServiceOption customizes the handler.
 type ServiceOption func(*Service)
+
+// WithHaltGate wires the platform kill-switch. IT IS REQUIRED: NewService returns
+// an error without it (#635).
+//
+// Production passes the gate halt.Arm folds the operator's ModeChanged FACT into
+// — CLOSED until an operator resume opens it. Tests pass halt.OpenGate(nil) when
+// the case under test is not about the brake, which makes "this test assumes the
+// platform is trading" a written statement rather than a default nobody chose.
+func WithHaltGate(g *halt.Gate) ServiceOption {
+	return func(s *Service) { s.halted = g }
+}
 
 // WithDualControl supplies the maker-checker gate for order submission (#410).
 //
@@ -236,6 +259,15 @@ func NewService(tenant string, store Store, emitter *Emitter, gate compliance.Ga
 	}
 	for _, opt := range opts {
 		opt(svc)
+	}
+	// THE BRAKE IS NOT OPTIONAL (#635). A nil *halt.Gate answers Halted() == true,
+	// so an OMS built without one would refuse every order rather than admit one
+	// unbraked — safe, and completely unreadable at 3am, because "the platform is
+	// halted" and "somebody forgot an argument" would produce the identical
+	// rejection. Refusing at construction keeps those two apart.
+	if svc.halted == nil {
+		return nil, errors.New("oms: halt gate is required (order.WithHaltGate) — an OMS that " +
+			"cannot hear the platform kill-switch would admit orders through a declared halt")
 	}
 	// THE RELAY IS BUILT LAST, from this store's own outbox and this emitter's
 	// own bus, so a Service always has a drain for the FACTs its store commits
@@ -370,6 +402,34 @@ func (s *Service) submit(ctx context.Context, env *envelopepb.Envelope, payload 
 		return s.resume(ctx, existing)
 	} else if !errors.Is(err, ErrNotFound) {
 		return err // transient store failure
+	}
+
+	// THE PLATFORM KILL-SWITCH (#635). NO NEW ORDER COMES INTO EXISTENCE WHILE THE
+	// PLATFORM IS HALTED — from any publisher, on any subject, for any tenant.
+	//
+	// This is the chokepoint the halt was missing. Every order on this platform
+	// becomes an order HERE: the gateway's POST /v1/orders, webhook-ingest's
+	// per-venue signal fan-out, optimization's rebalance proposals and
+	// handleApprove's release of a held order all arrive as order.order.submit and
+	// all pass through this function. A brake here reaches all of them; a brake at
+	// any one publisher reaches one, which is exactly the state #635 found.
+	//
+	// WHY IT IS HERE AND NOT AT THE TOP OF submit. Above this line sits the
+	// redelivery branch: a SubmitOrder naming an order that already exists is not
+	// a new order, it is another delivery of one already admitted — possibly one
+	// already working at a venue. Refusing that with ORDER_REJECTED would tell
+	// every downstream fold that a LIVE order was refused, which is the same
+	// mistake the entitlement check above documents. So a redelivery still
+	// resumes, and what stops it reaching the exchange is the venue adapter's own
+	// check on the same gate. By this line the order is genuinely new, and
+	// ORDER_REJECTED is the truthful answer.
+	//
+	// A CANCEL IS DELIBERATELY NOT GATED — see handleCancel. An operator halting on
+	// a risk breach must still be able to get out of the book.
+	if reason, halted := halt.Refusal(s.halted); halted {
+		s.logger.Warn("oms: order refused — platform halted", "order_id", cmd.GetOrderId(),
+			"portfolio_id", cmd.GetPortfolioId(), "reason", reason)
+		return s.refuse(ctx, cmd.GetOrderId(), ReasonPlatformHalted, reason, now)
 	}
 
 	// THE PARENT/CHILD RELATION, DECIDED BEFORE THE COMPLIANCE GATE (#435),
@@ -1229,6 +1289,13 @@ func (s *Service) work(ctx context.Context, st *orderpb.OrderState, ver int64) (
 	return st, ver, nil
 }
 
+// handleCancel is DELIBERATELY NOT GATED ON THE PLATFORM KILL-SWITCH (#635).
+//
+// A halt refuses new exposure; it is not a freeze on the book. The operator who
+// halts on a risk breach is very often the same operator who then needs to flatten
+// what is already open, and a brake that also jams the exits is a worse control
+// than no brake. The same reasoning holds one layer down: the venue adapters
+// refuse Execute while halted and still serve CancelOrder.
 func (s *Service) handleCancel(ctx context.Context, payload []byte) error {
 	var cmd orderpb.CancelOrder
 	if err := proto.Unmarshal(payload, &cmd); err != nil {
@@ -2198,6 +2265,16 @@ func (s *Service) outcomeReject(ctx context.Context, orderID, code, reason strin
 // ReasonNotEntitled is the outcome code for a command whose issuer holds no
 // entitlement to the target order's portfolio.
 const ReasonNotEntitled = "NOT_ENTITLED"
+
+// ReasonPlatformHalted is the outcome code for an order refused because the
+// platform kill-switch is engaged (#635).
+//
+// It is its OWN code rather than a flavour of a compliance rejection because the
+// two demand opposite responses: a compliance rejection is answered by changing
+// the order, and this one is answered by an operator resuming the platform.
+// Retrying an order refused with this code accomplishes nothing until a human
+// acts, and the code is what tells a client that.
+const ReasonPlatformHalted = "PLATFORM_HALTED"
 
 // entitledTo reports whether a principal scoped to allowed may act on an order
 // belonging to portfolio.

@@ -34,6 +34,7 @@ import (
 
 	"github.com/eighred/kanz/internal/alpha/score"
 	"github.com/eighred/kanz/internal/dec"
+	"github.com/eighred/kanz/internal/platform/halt"
 	"github.com/eighred/kanz/pkg/bus"
 )
 
@@ -119,9 +120,9 @@ type Options struct {
 	// Gate is the kill-switch, and it is REQUIRED — not because the translator
 	// cannot run without one, but because the seam this replaced was optional,
 	// defaulted open, and was never wired in any binary. An optional brake is an
-	// absent brake. Tests and local dev pass OpenGate; production passes NewGate and
+	// absent brake. Tests and local dev pass halt.OpenGate; production passes halt.NewGate and
 	// lets the lifecycle stream open it.
-	Gate *Gate
+	Gate *halt.Gate
 
 	// MaxQuantity bounds the RESOLVED base-asset quantity of one signal, checked
 	// after SizeType has been applied and BEFORE the venue split. The unset Qty ⇒
@@ -216,7 +217,7 @@ func New(opt Options) (*Translator, error) {
 		return nil, errors.New("translate: prices, equity, positions, alloc, and publisher are required")
 	}
 	if opt.Gate == nil {
-		return nil, errors.New("translate: gate is required (use NewGate for production, OpenGate for tests/dev)")
+		return nil, errors.New("translate: gate is required (use halt.NewGate for production, halt.OpenGate for tests/dev)")
 	}
 	// REFUSED AT CONSTRUCTION, never defaulted (#632). The seam this replaced was
 	// optional and fell back to "the fund_id is the tenant", which is how an

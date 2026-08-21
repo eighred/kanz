@@ -39,6 +39,7 @@ import (
 	"github.com/eighred/kanz/internal/execution"
 	"github.com/eighred/kanz/internal/lifecycle"
 	"github.com/eighred/kanz/internal/pg"
+	"github.com/eighred/kanz/internal/platform/halt"
 	"github.com/eighred/kanz/internal/platform/httpserver"
 	"github.com/eighred/kanz/internal/venueadapter/accountproof"
 	"github.com/eighred/kanz/internal/venueadapter/balancerecon"
@@ -162,7 +163,29 @@ func serve(cfg config.Config) error {
 	}
 	defer func() { _ = mesh.Close() }()
 	logger.Info("bus transport", "mtls", mesh.Enabled())
-	client, err := bus.DialNATS(ctx, bus.NATSConfig{URL: cfg.NATSURL, Name: cfg.Source, TLSConfig: mesh.Client})
+	// THE PLATFORM KILL-SWITCH, CONSTRUCTED CLOSED (#635). This adapter is the LAST
+	// process between a command and a live exchange, and until now it heard nothing
+	// about a declared halt: kanz-halt stopped webhook signals while this kept
+	// placing whatever the OMS routed. Built before the dial so it can be the
+	// disconnect watchdog.
+	gate := halt.NewGate(time.Now)
+	client, err := bus.DialNATS(ctx, bus.NATSConfig{
+		URL: cfg.NATSURL, Name: cfg.Source, TLSConfig: mesh.Client,
+		// LOSING THE SPINE CLOSES THE GATE. The halt FACT travels on this
+		// connection; a dropped one means this process can no longer establish that
+		// placing an order is safe, and the ephemeral halt consumer may not survive
+		// the reconnect. Deny-by-default says that resolves to "do not place", not
+		// to "carry on and hope". An operator resume is what reopens it.
+		OnDisconnect: func(err error) {
+			gate.TripOnBusLoss(err)
+			logger.Error("NATS spine lost — this adapter will place no further orders, "+
+				"operator resume required", "err", err)
+		},
+		OnReconnect: func() {
+			_, reason, since := gate.State()
+			logger.Warn("NATS spine reconnected — gate remains latched", "reason", reason, "since", since)
+		},
+	})
 	if err != nil {
 		return err
 	}
@@ -269,6 +292,28 @@ func serve(cfg config.Config) error {
 	if err != nil {
 		return err
 	}
+	// ARM THE BRAKE BEFORE THE gRPC SURFACE COMES UP (#635). Arm blocks until the
+	// broker confirms the subscription, so a missing platform.mode.changed grant
+	// surfaces here rather than as an adapter that serves Execute and honours no
+	// halt.
+	//
+	// NOT FATAL, and not for the reason the cash spine below is not fatal. The gate
+	// is already latched CLOSED by the time Arm returns an error, so this adapter
+	// refuses every placement with that reason and still serves CancelOrder —
+	// exactly what a halted adapter should do. Exiting instead would take the
+	// cancel path down with the execute path, which is the wrong half to lose.
+	waitHalt, herr := halt.Arm(ctx, balanceConsumer, gate, logger)
+	if herr != nil {
+		logger.Error("halt gate is NOT armed — this adapter will refuse to place any order until "+
+			"it is restarted", "err", herr)
+	}
+	if waitHalt != nil {
+		go func() {
+			if err := waitHalt(); err != nil && !errors.Is(err, context.Canceled) {
+				logger.Error("halt subscription ended — this adapter places no further orders", "err", err)
+			}
+		}()
+	}
 	go func() {
 		logger.Info("venue-okx subscribing to the cash spine (broadcast)",
 			"subject", balancerecon.Subject, "account", cfg.Account)
@@ -333,7 +378,7 @@ func serve(cfg config.Config) error {
 		return err
 	}
 
-	grpcSrv, err := newGRPCServer(ctx, cfg, conn.Venue(), view, closes, proof, logger)
+	grpcSrv, err := newGRPCServer(ctx, cfg, conn.Venue(), view, closes, proof, gate, logger)
 	if err != nil {
 		return err
 	}
@@ -376,7 +421,7 @@ func serve(cfg config.Config) error {
 // This endpoint submits orders to a live exchange. An unauthenticated peer that
 // can reach it can trade with the fund's money, so plaintext is a dev-only
 // posture and it says so at WARN — it is never silently acceptable.
-func newGRPCServer(ctx context.Context, cfg config.Config, venue execution.Venue, view orderview.Store, closes execution.CloseTracker, proof execution.AccountProof, logger *slog.Logger) (*grpc.Server, error) {
+func newGRPCServer(ctx context.Context, cfg config.Config, venue execution.Venue, view orderview.Store, closes execution.CloseTracker, proof execution.AccountProof, gate *halt.Gate, logger *slog.Logger) (*grpc.Server, error) {
 	var opts []grpc.ServerOption
 	if cfg.SPIFFESocket != "" {
 		src, err := transport.NewSource(ctx, cfg.SPIFFESocket)
@@ -389,7 +434,7 @@ func newGRPCServer(ctx context.Context, cfg config.Config, venue execution.Venue
 		logger.Warn("VENUE.V1 IS PLAINTEXT — no SPIFFE_ENDPOINT_SOCKET. Anyone who can reach this port can submit orders to a live exchange")
 	}
 	srv := grpc.NewServer(opts...)
-	venuepb.RegisterVenueAdapterServiceServer(srv, server.New(venue, view, closes, proof, logger))
+	venuepb.RegisterVenueAdapterServiceServer(srv, server.New(venue, view, closes, proof, gate, logger))
 	return srv, nil
 }
 

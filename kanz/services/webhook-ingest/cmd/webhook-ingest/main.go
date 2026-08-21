@@ -17,12 +17,10 @@ import (
 	"syscall"
 	"time"
 
-	lifecyclepb "github.com/eighred/kanz/kanz-schemas-go/lifecycle/v1"
-
 	"github.com/eighred/kanz/internal/lifecycle"
+	"github.com/eighred/kanz/internal/platform/halt"
 	"github.com/eighred/kanz/internal/platform/httpserver"
 	"github.com/eighred/kanz/internal/platform/subject"
-	"github.com/eighred/kanz/internal/signal/translate"
 	"github.com/eighred/kanz/internal/version"
 	"github.com/eighred/kanz/pkg/bus"
 	"github.com/eighred/kanz/pkg/observability"
@@ -78,7 +76,7 @@ func run() int {
 	// tells us the system is NORMAL, and a lost spine slams it shut again. It is
 	// built before the bus so it can be handed to DialNATS as the disconnect
 	// watchdog — the gate has to exist before the connection it is watching.
-	gate := translate.NewGate(time.Now)
+	gate := halt.NewGate(time.Now)
 
 	// SEC-M3: the production broker requires a client SVID; a nil TLSConfig is a
 	// plaintext client it refuses at the handshake. This is the platform's public
@@ -139,21 +137,32 @@ func run() int {
 		logger.Error("consumer init failed", "err", err)
 		return 2
 	}
-	go func() {
-		// BROADCAST, not a consumer group. The gate is constructed CLOSED and only a
-		// ModeChanged FACT opens it — so a durable group meant a RESTARTED pod resumed
-		// past the operator's resume and never saw it: it came back halted, reported
-		// /readyz 200, and answered 423 to every signal until a human noticed. Every
-		// rolling update was a silent trading outage. A broadcast subscription starts
-		// at the LAST ModeChanged, so a pod that boots learns the CURRENT mode.
-		// Deny-by-default survives: no FACT ever published ⇒ nothing delivered ⇒ closed.
-		err := consumer.SubscribeBroadcast(ctx, translate.SubjectModeChanged, gate.Handle)
-		if err != nil && ctx.Err() == nil {
-			gate.Trip(lifecyclepb.OperatingMode_OPERATING_MODE_HALTED,
-				"halt subscription failed: "+err.Error())
-			logger.Error("halt subscription failed — trading halted", "err", err)
-		}
-	}()
+	// halt.Arm, not a hand-rolled SubscribeBroadcast. The delivery policy this used
+	// to spell out inline — BROADCAST, never a consumer group, because a durable
+	// group meant a RESTARTED pod resumed past the operator's resume and answered
+	// 423 to every signal until a human noticed — now lives in ONE place, and so
+	// does the failure behaviour. That consolidation is the fix for #635: this
+	// process was the only one in the estate that had it at all, so the "platform
+	// kill-switch" stopped webhook signals and nothing else.
+	//
+	// Arm BLOCKS until the broker confirms the subscription, so a missing grant
+	// surfaces here rather than as a service that starts, reports ready, and
+	// honours no halt. It has already tripped the gate closed by the time it
+	// returns an error; this process keeps running and refuses every signal with
+	// that reason, which is what fail-closed means for an edge that is otherwise
+	// useless while halted.
+	waitHalt, err := halt.Arm(ctx, consumer, gate, logger)
+	if err != nil {
+		logger.Error("halt gate is NOT armed — this process cannot hear the platform brake and "+
+			"will refuse every signal until it is restarted", "err", err)
+	}
+	if waitHalt != nil {
+		go func() {
+			if err := waitHalt(); err != nil && ctx.Err() == nil {
+				logger.Error("halt subscription ended — trading halted", "err", err)
+			}
+		}()
+	}
 
 	// The replay defence (EXEC-M17). Cross-pod against Redis, or in-process — and
 	// in-process is an EXPLICIT admission, not a default, because a per-pod nonce cache

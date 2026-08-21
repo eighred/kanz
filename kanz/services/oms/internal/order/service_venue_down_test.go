@@ -11,6 +11,7 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 
 	"github.com/eighred/kanz/internal/execution"
+	"github.com/eighred/kanz/internal/platform/halt"
 )
 
 // EXEC-M8 — what the OMS does when a venue adapter is not there.
@@ -46,7 +47,7 @@ func deadVenue(t *testing.T, mic string) execution.Venue {
 func TestVenueUnreachable_RefusesToTradeAndFabricatesNothing(t *testing.T) {
 	fb := &fakeBus{}
 	store := NewMemoryStore()
-	svc, err := NewService(testTenant, store, NewEmitter(fb), nil, execution.NewRouter([]execution.Venue{deadVenue(t, "BINANCE")}), nil, nil)
+	svc, err := NewService(testTenant, store, NewEmitter(fb), nil, execution.NewRouter([]execution.Venue{deadVenue(t, "BINANCE")}), nil, nil, WithHaltGate(halt.OpenGate(nil)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -94,7 +95,7 @@ func TestOrderNamingAnUnconfiguredVenue_IsRejected(t *testing.T) {
 	fb := &fakeBus{}
 	store := NewMemoryStore()
 	// The OMS is wired for XSIM only. The order asks for BINANCE.
-	svc, err := NewService(testTenant, store, NewEmitter(fb), nil, execution.NewRouter([]execution.Venue{execution.NewSimVenue("XSIM")}), nil, nil)
+	svc, err := NewService(testTenant, store, NewEmitter(fb), nil, execution.NewRouter([]execution.Venue{execution.NewSimVenue("XSIM")}), nil, nil, WithHaltGate(halt.OpenGate(nil)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -136,7 +137,7 @@ func TestOrderNamingAnUnconfiguredVenue_IsRejected(t *testing.T) {
 func TestOrderWithNoVenuesConfigured_StillRests(t *testing.T) {
 	fb := &fakeBus{}
 	store := NewMemoryStore()
-	svc, err := NewService(testTenant, store, NewEmitter(fb), nil, execution.NewRouter(nil), nil, nil)
+	svc, err := NewService(testTenant, store, NewEmitter(fb), nil, execution.NewRouter(nil), nil, nil, WithHaltGate(halt.OpenGate(nil)))
 	if err != nil {
 		t.Fatal(err)
 	}

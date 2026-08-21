@@ -26,7 +26,15 @@ var ErrNotImplemented = errors.New("not implemented on this estate")
 // it here would halt every tenant on the platform to revoke one of them, and
 // would do it under a Result that says the revocation was orderly. Building a
 // per-tenant gate is a change to the signal contract (internal/platform/mode
-// plus internal/signal/translate), not to this file.
+// plus internal/platform/halt), not to this file.
+//
+// RE-EXAMINED FOR #635, AND THE PREMISE NOW HOLDS MORE STRONGLY, NOT LESS. That
+// issue found this comment describing a reach the code did not have: the halt
+// stopped webhook-ingest and nothing else, so "every tenant's execution" was a
+// belief, not a behaviour. It is a behaviour now — api-gateway, the OMS and both
+// venue adapters honour it, in every account — which makes the cost of shelling
+// out here exactly what this comment always claimed and never was. The stub
+// stays a stub, and its behaviour is unchanged.
 type NotImplementedHalter struct{}
 
 func (NotImplementedHalter) HaltTrading(_ context.Context, req Request) error {

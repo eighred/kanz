@@ -11,6 +11,7 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/eighred/kanz/internal/platform/halt"
 	"github.com/eighred/kanz/internal/version"
 	"github.com/eighred/kanz/pkg/observability"
 	"github.com/eighred/kanz/services/api-gateway/internal/config"
@@ -92,7 +93,7 @@ func routerFor(t *testing.T, fundRole string, callerRoles ...string) (http.Handl
 	var ready atomic.Bool
 	router, err := buildRouter(cfg,
 		gateway.New(nil, nil, nil, "", logger),
-		orders.New(nil, cfg.ApproveRole),
+		orders.New(nil, cfg.ApproveRole, halt.OpenGate(nil)),
 		proxy.New(be, proxy.Roles{Fund: cfg.FundRole}),
 		nil, // no control plane
 		obs, &ready, logger,

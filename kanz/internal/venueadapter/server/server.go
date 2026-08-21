@@ -22,6 +22,7 @@ import (
 
 	"github.com/eighred/kanz/internal/dec"
 	"github.com/eighred/kanz/internal/execution"
+	"github.com/eighred/kanz/internal/platform/halt"
 	"github.com/eighred/kanz/internal/venueadapter/orderview"
 )
 
@@ -59,6 +60,14 @@ type Server struct {
 	closes execution.CloseTracker
 	proof  execution.AccountProof
 	logger *slog.Logger
+	// halted is the platform kill-switch (#635). THIS IS THE LAST LINE: everything
+	// upstream of it — the gateway's 423, the OMS refusing admission — can be
+	// bypassed by a path that does not go through them, and this cannot, because
+	// there is no other way an order of ours reaches an exchange.
+	//
+	// A NIL GATE IS HALTED, so an adapter built without one refuses to place
+	// anything. That is the safe direction and it is why New takes it positionally.
+	halted *halt.Gate
 }
 
 // New returns a Server fronting venue. closes is the in-flight-close registry the
@@ -70,8 +79,11 @@ type Server struct {
 // honest one: an adapter that never proved its account reports an unverified claim,
 // and the OMS can tell the difference. An optional proof would default to "trust
 // me" in exactly the deployments nobody remembered to configure.
-func New(venue execution.Venue, view orderview.Store, closes execution.CloseTracker, proof execution.AccountProof, logger *slog.Logger) *Server {
-	s := &Server{venue: venue, view: view, closes: closes, proof: proof, logger: logger}
+// gate is the platform kill-switch, and it is REQUIRED in the same sense proof
+// is: its zero value is the honest one. A nil gate answers halted, so an adapter
+// wired without one refuses to place orders rather than placing them unbraked.
+func New(venue execution.Venue, view orderview.Store, closes execution.CloseTracker, proof execution.AccountProof, gate *halt.Gate, logger *slog.Logger) *Server {
+	s := &Server{venue: venue, view: view, closes: closes, proof: proof, halted: gate, logger: logger}
 	// A venue that cannot cancel AT the exchange would silently downgrade every
 	// cancel to a ledger-only entry while the order stays live. BinanceVenue is a
 	// Closer; assert it rather than discover otherwise in production.
@@ -88,6 +100,31 @@ func New(venue execution.Venue, view orderview.Store, closes execution.CloseTrac
 // before this RPC even returns, and the ingester enriches it by reading exactly
 // this view. Record after, and the first fill of a fast order finds nothing.
 func (s *Server) Execute(ctx context.Context, req *venuepb.ExecuteRequest) (*venuepb.ExecuteResponse, error) {
+	// THE PLATFORM KILL-SWITCH, ON THE LAST LINE BEFORE THE EXCHANGE (#635).
+	//
+	// BEFORE view.Record, deliberately: an order this adapter will not place must
+	// not be written into the view as one it has, or the reconciler and the
+	// enrichment path both start believing in an order the exchange never saw.
+	//
+	// WHY IT IS HERE AND NOT ONLY AT ADMISSION. The OMS refuses NEW orders while
+	// halted, which covers everything a human or a strategy submits. It does not
+	// cover what the OMS does to orders it ALREADY admitted: the sweep re-drives
+	// an interrupted order, resume() re-works one after a crash, and a scheduled
+	// parent slices children on its own timer. Each of those reaches an exchange
+	// without passing through admission again. This check is what makes "no new
+	// exposure while halted" true of those paths too.
+	//
+	// FailedPrecondition, not Unavailable: the OMS must not read this as a venue
+	// outage to heal around. The order is left ROUTED with no venue ack, which is
+	// exactly the state resume() knows how to recover once an operator resumes the
+	// platform — it asks the exchange what happened, finds nothing, and re-drives.
+	//
+	// CancelOrder is deliberately NOT gated. See halt.Gate for the boundary.
+	if reason, halted := halt.Refusal(s.halted); halted {
+		s.logger.Warn("venue: refusing to place an order — platform halted",
+			"mic", s.venue.MIC(), "order_id", req.GetState().GetOrderId(), "reason", reason)
+		return nil, status.Errorf(codes.FailedPrecondition, "venue: %s", reason)
+	}
 	if err := requireDecimalDomain(req); err != nil {
 		return nil, err
 	}

@@ -8,6 +8,7 @@ import (
 	orderpb "github.com/eighred/kanz/kanz-schemas-go/order/v1"
 
 	"github.com/eighred/kanz/internal/execution"
+	"github.com/eighred/kanz/internal/platform/halt"
 )
 
 // AN ORDER STRANDED BY A CRASH HAS NO REDELIVERY COMING.
@@ -22,7 +23,7 @@ func TestSweepResumesAnOrderStrandedAtRouted(t *testing.T) {
 	fb := &fakeBus{}
 	venue := execution.NewSimVenue("XSIM")
 	store := NewMemoryStore()
-	svc, err := NewService(testTenant, store, NewEmitter(fb), nil, execution.NewRouter([]execution.Venue{venue}), nil, nil)
+	svc, err := NewService(testTenant, store, NewEmitter(fb), nil, execution.NewRouter([]execution.Venue{venue}), nil, nil, WithHaltGate(halt.OpenGate(nil)))
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
 	}
@@ -70,7 +71,7 @@ func TestSweepRefusesAContextWithNoTenant(t *testing.T) {
 	fb := &fakeBus{}
 	venue := execution.NewSimVenue("XSIM")
 	store := NewMemoryStore()
-	svc, err := NewService(testTenant, store, NewEmitter(fb), nil, execution.NewRouter([]execution.Venue{venue}), nil, nil)
+	svc, err := NewService(testTenant, store, NewEmitter(fb), nil, execution.NewRouter([]execution.Venue{venue}), nil, nil, WithHaltGate(halt.OpenGate(nil)))
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
 	}
@@ -116,7 +117,7 @@ func TestSweepIgnoresTerminalOrders(t *testing.T) {
 	ctx := testCtx()
 	fb := &fakeBus{}
 	store := NewMemoryStore()
-	svc, err := NewService(testTenant, store, NewEmitter(fb), nil, execution.NewRouter([]execution.Venue{execution.NewSimVenue("XSIM")}), nil, nil)
+	svc, err := NewService(testTenant, store, NewEmitter(fb), nil, execution.NewRouter([]execution.Venue{execution.NewSimVenue("XSIM")}), nil, nil, WithHaltGate(halt.OpenGate(nil)))
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
 	}

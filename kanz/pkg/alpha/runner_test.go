@@ -14,6 +14,7 @@ import (
 
 	"github.com/eighred/kanz/internal/marketedge/depth"
 	"github.com/eighred/kanz/internal/marketedge/trades"
+	"github.com/eighred/kanz/internal/platform/halt"
 	"github.com/eighred/kanz/internal/signal/translate"
 	"github.com/eighred/kanz/pkg/bus"
 )
@@ -102,10 +103,10 @@ func testIntent() Intent {
 
 func runnerWith(t *testing.T, eng Engine, feeds []Feed) (*Runner, *capture) {
 	t.Helper()
-	return runnerWithGate(t, eng, feeds, translate.OpenGate(nil))
+	return runnerWithGate(t, eng, feeds, halt.OpenGate(nil))
 }
 
-func runnerWithGate(t *testing.T, eng Engine, feeds []Feed, gate *translate.Gate) (*Runner, *capture) {
+func runnerWithGate(t *testing.T, eng Engine, feeds []Feed, gate *halt.Gate) (*Runner, *capture) {
 	t.Helper()
 	cap := &capture{}
 	r, err := New(Config{
@@ -138,7 +139,7 @@ func runnerWithGate(t *testing.T, eng Engine, feeds []Feed, gate *translate.Gate
 // at all, so the engines are never even evaluated.
 func TestRunner_HaltedGateSuppressesTheTickLoop(t *testing.T) {
 	eng := &staticEngine{intent: testIntent()}
-	gate := translate.NewGate(nil) // CLOSED — never opened by a lifecycle FACT
+	gate := halt.NewGate(nil) // CLOSED — never opened by a lifecycle FACT
 	r, cap := runnerWithGate(t, eng, []Feed{simFeed()}, gate)
 	runBriefly(t, r)
 
@@ -156,7 +157,7 @@ func TestRunner_HaltedGateSuppressesTheTickLoop(t *testing.T) {
 // The gate is shared, so a mid-flight trip stops the loop that is already running.
 func TestRunner_TripMidFlightStopsExecution(t *testing.T) {
 	eng := &staticEngine{intent: testIntent()}
-	gate := translate.OpenGate(nil)
+	gate := halt.OpenGate(nil)
 	r, cap := runnerWithGate(t, eng, []Feed{simFeed()}, gate)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
@@ -349,7 +350,7 @@ func TestRunner_EnginesWithoutAFundBindingFailFast(t *testing.T) {
 		Alloc: translate.StaticAllocation{"fund-alpha": {
 			{Venue: "BINANCE", Weight: big.NewRat(1, 1)},
 		}},
-		Gate: translate.OpenGate(nil),
+		Gate: halt.OpenGate(nil),
 		// Authority deliberately absent — everything else is wired.
 	})
 	if err == nil {

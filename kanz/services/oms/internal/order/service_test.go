@@ -14,6 +14,7 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	"github.com/eighred/kanz/internal/execution"
+	"github.com/eighred/kanz/internal/platform/halt"
 	"github.com/eighred/kanz/pkg/bus"
 	"github.com/eighred/kanz/services/oms/internal/compliance"
 )
@@ -205,7 +206,7 @@ func newService(t *testing.T, fb *fakeBus, gate compliance.Gate) (*Service, *Mem
 	t.Helper()
 	store := NewMemoryStore()
 	router := execution.NewRouter([]execution.Venue{execution.NewSimVenue("XSIM")})
-	svc, err := NewService(testTenant, store, NewEmitter(fb), gate, router, nil, nil)
+	svc, err := NewService(testTenant, store, NewEmitter(fb), gate, router, nil, nil, WithHaltGate(halt.OpenGate(nil)))
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
 	}
@@ -288,7 +289,7 @@ func TestService_ComplianceBreach_RejectsBeforeAccept(t *testing.T) {
 func TestService_CancelUnknownOrder(t *testing.T) {
 	fb := &fakeBus{}
 	store := NewMemoryStore()
-	svc, err := NewService(testTenant, store, NewEmitter(fb), nil, nil, nil, nil)
+	svc, err := NewService(testTenant, store, NewEmitter(fb), nil, nil, nil, nil, WithHaltGate(halt.OpenGate(nil)))
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
 	}
@@ -353,7 +354,7 @@ func TestService_ConcurrentResubmit_RoutesToVenueExactlyOnce(t *testing.T) {
 	fb := &fakeBus{}
 	venue := &countingVenue{Venue: execution.NewSimVenue("XSIM")}
 	store := NewMemoryStore()
-	svc, err := NewService(testTenant, store, NewEmitter(fb), nil, execution.NewRouter([]execution.Venue{venue}), nil, nil)
+	svc, err := NewService(testTenant, store, NewEmitter(fb), nil, execution.NewRouter([]execution.Venue{venue}), nil, nil, WithHaltGate(halt.OpenGate(nil)))
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
 	}

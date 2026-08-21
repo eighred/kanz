@@ -11,6 +11,7 @@ import (
 	signalpb "github.com/eighred/kanz/kanz-schemas-go/signal/v1"
 
 	"github.com/eighred/kanz/internal/dec"
+	"github.com/eighred/kanz/internal/platform/halt"
 	"github.com/eighred/kanz/pkg/bus"
 )
 
@@ -58,7 +59,7 @@ func boundedTranslator(t *testing.T, max Qty) (*Translator, *recorder) {
 		},
 		Alloc:       StaticAllocation{"fund-alpha": {{Venue: "BINANCE", Weight: big.NewRat(1, 1)}}},
 		Publisher:   rec,
-		Gate:        OpenGate(nil),
+		Gate:        halt.OpenGate(nil),
 		Authority:   boundAuthority(t),
 		MaxQuantity: max,
 	})
@@ -254,7 +255,7 @@ func TestNew_RefusesWeightsThatAreNotASplit(t *testing.T) {
 			_, err := New(Options{
 				Prices: StaticPrices{}, Equity: StaticEquity{}, Positions: StaticPositions{},
 				Alloc:     StaticAllocation{"fund-alpha": tc.legs},
-				Publisher: &recorder{}, Gate: OpenGate(nil),
+				Publisher: &recorder{}, Gate: halt.OpenGate(nil),
 				Authority: boundAuthority(t),
 			})
 			if !errors.Is(err, ErrBadAllocation) {
@@ -275,7 +276,7 @@ func TestNew_AcceptsARealSplit(t *testing.T) {
 			{Venue: "BINANCE", Weight: big.NewRat(6, 10)},
 			{Venue: "OKX", Weight: big.NewRat(4, 10)},
 		}},
-		Publisher: &recorder{}, Gate: OpenGate(nil),
+		Publisher: &recorder{}, Gate: halt.OpenGate(nil),
 		Authority: boundAuthority(t),
 	})
 	if err != nil {

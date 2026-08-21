@@ -9,6 +9,7 @@ import (
 
 	"github.com/eighred/kanz/internal/execution"
 	"github.com/eighred/kanz/internal/outbox"
+	"github.com/eighred/kanz/internal/platform/halt"
 )
 
 // SUBMIT SKIPPED THE CHECK CANCEL AND AMEND BOTH RAN (#225).
@@ -57,7 +58,7 @@ func submitService(t *testing.T, store Store) (*Service, *fakeBus, *closerVenue)
 	t.Helper()
 	fb := &fakeBus{}
 	venue := &closerVenue{mic: "BINANCE"}
-	svc, err := NewService(testTenant, store, NewEmitter(fb), nil, execution.NewRouter([]execution.Venue{venue}), nil, nil)
+	svc, err := NewService(testTenant, store, NewEmitter(fb), nil, execution.NewRouter([]execution.Venue{venue}), nil, nil, WithHaltGate(halt.OpenGate(nil)))
 	if err != nil {
 		t.Fatal(err)
 	}

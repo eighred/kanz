@@ -26,6 +26,7 @@ import (
 	orderpb "github.com/eighred/kanz/kanz-schemas-go/order/v1"
 
 	"github.com/eighred/kanz/internal/execution"
+	"github.com/eighred/kanz/internal/platform/halt"
 )
 
 func TestFillCommitsItsFactWithTheOrder(t *testing.T) {
@@ -36,7 +37,8 @@ func TestFillCommitsItsFactWithTheOrder(t *testing.T) {
 	fb := &fakeBus{failOn: EventTypeFilled}
 	store := NewPostgres(pool)
 	svc, err := NewService(testTenant, store, NewEmitter(fb), nil,
-		execution.NewRouter([]execution.Venue{execution.NewSimVenue("XSIM")}), nil, nil)
+		execution.NewRouter([]execution.Venue{execution.NewSimVenue("XSIM")}), nil, nil,
+		WithHaltGate(halt.OpenGate(nil)))
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
 	}

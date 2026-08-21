@@ -19,6 +19,7 @@ import (
 
 	orderpb "github.com/eighred/kanz/kanz-schemas-go/order/v1"
 
+	"github.com/eighred/kanz/internal/platform/halt"
 	"github.com/eighred/kanz/services/oms/internal/approval"
 	"github.com/eighred/kanz/services/oms/internal/schedule"
 )
@@ -43,7 +44,8 @@ func dualService(t *testing.T, fb *fakeBus, threshold *big.Rat) (*Service, *prom
 	}
 	store := NewMemoryStore()
 	svc, err := NewService(testTenant, store, NewEmitter(fb), nil, nil, nil, nil,
-		WithDualControl(g))
+		WithDualControl(g),
+		WithHaltGate(halt.OpenGate(nil)))
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
 	}

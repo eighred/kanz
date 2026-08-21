@@ -43,6 +43,7 @@ import (
 	"github.com/eighred/kanz/internal/bustest"
 	comp "github.com/eighred/kanz/internal/compliance"
 	"github.com/eighred/kanz/internal/dualcontrol"
+	"github.com/eighred/kanz/internal/platform/halt"
 	"github.com/eighred/kanz/pkg/bus"
 	omscompliance "github.com/eighred/kanz/services/oms/internal/compliance"
 )
@@ -186,7 +187,7 @@ func TestAMandateRefusesAnOrderOverARealSpine(t *testing.T) {
 	gate := omscompliance.NewCOMP01Gate(preTrade, "USD")
 
 	store := NewMemoryStore()
-	svc, err := NewService(tenant, store, NewEmitter(producer), gate, nil, nil, nil)
+	svc, err := NewService(tenant, store, NewEmitter(producer), gate, nil, nil, nil, WithHaltGate(halt.OpenGate(nil)))
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
 	}
