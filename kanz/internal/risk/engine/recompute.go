@@ -25,6 +25,19 @@ import (
 // Tunable: shorten for latency-sensitive desks, lengthen for chatty feeds.
 const DefaultDebounceInterval = 250 * time.Millisecond
 
+// DefaultEmitRetryInterval is how long after a FAILED emit a portfolio is
+// re-scheduled (#620).
+//
+// Five seconds, and the two bounds are different in kind. Too SHORT and a broker
+// outage turns every affected portfolio into a hot loop against a bus that is
+// already unhealthy. Too LONG and a book that has stopped trading serves a stale
+// exposure FACT as its live risk for that whole window — which is the defect
+// this exists to close, so the ceiling matters more than the floor.
+//
+// It is not the debounce: that number collapses a burst of applies arriving
+// together, and a quiet portfolio being retried has nothing to collapse with.
+const DefaultEmitRetryInterval = 5 * time.Second
+
 // Recomputer runs the engine's apply→recompute→publish reaction. On a
 // Trigger it debounces per-portfolio, then takes a race-free Snapshot,
 // recomputes exposure + measures, stores them in the degraded-fallback
@@ -62,9 +75,21 @@ type Recomputer struct {
 	// shutdown) the worker exits and in-flight recomputes skip the publish.
 	baseCtx context.Context
 
-	mu     sync.Mutex
-	dirty  map[v1.PortfolioID]time.Time // id → recompute deadline (lastTrigger+debounce)
-	closed bool
+	// emitRetry is how long after a FAILED emit the portfolio is re-scheduled
+	// (#620). Longer than the debounce on purpose: the debounce collapses a
+	// BURST of applies, while this waits out whatever made the bus unavailable,
+	// and a portfolio that has stopped trading has nothing else to coalesce with.
+	emitRetry time.Duration
+
+	mu    sync.Mutex
+	dirty map[v1.PortfolioID]time.Time // id → recompute deadline (lastTrigger+debounce)
+	// awaiting holds portfolios whose last emit FAILED and has not since
+	// succeeded — i.e. whose published exposure is not their real exposure. It
+	// is the gauge's population, and it is a SET rather than a counter because
+	// the question an operator asks is "is this still true", not "how often did
+	// it happen".
+	awaiting map[v1.PortfolioID]struct{}
+	closed   bool
 
 	// observe is the AI-M1 measure observer (nil ⇒ nothing observes). Called after the
 	// risk FACTs are emitted; see WithMeasureObserver.
@@ -78,6 +103,22 @@ type Recomputer struct {
 // RecomputerOption customizes a Recomputer at construction (applied before the
 // worker starts, so it is race-free).
 type RecomputerOption func(*Recomputer)
+
+// WithEmitRetryInterval overrides how long after a failed emit a portfolio is
+// re-scheduled (#620). Non-positive is ignored.
+//
+// AN OPTION RATHER THAN A MUTABLE PACKAGE VARIABLE. A test that needs a shorter
+// interval takes one here, applied at construction before the worker starts, so
+// it is race-free by the same argument the RecomputerOption doc already makes.
+// Relaxing DefaultEmitRetryInterval into a var "just so tests can shrink it"
+// would put a data race on a value the worker goroutine reads.
+func WithEmitRetryInterval(d time.Duration) RecomputerOption {
+	return func(r *Recomputer) {
+		if d > 0 {
+			r.emitRetry = d
+		}
+	}
+}
 
 // WithMetrics wires the OBS-01c RED exporter so each fired recompute records
 // the kanz_risk_recompute_* series the CICD-01e canary gates on.
@@ -139,7 +180,9 @@ func NewRecomputer(
 		debounce:  debounce,
 		logger:    logger,
 		baseCtx:   baseCtx,
+		emitRetry: DefaultEmitRetryInterval,
 		dirty:     make(map[v1.PortfolioID]time.Time),
+		awaiting:  make(map[v1.PortfolioID]struct{}),
 		wake:      make(chan struct{}, 1),
 		done:      make(chan struct{}),
 	}
@@ -280,9 +323,24 @@ func (r *Recomputer) loop() {
 
 // recompute snapshots the portfolio, derives exposure + measures, stores
 // them in the cache, and emits the output FACTs. A store miss (portfolio
-// retired between trigger and fire) is a silent no-op. Publish failures
-// are logged, not retried here — the bus.Producer owns delivery
-// durability, and the next apply re-triggers a recompute anyway.
+// retired between trigger and fire) is a silent no-op.
+//
+// A FAILED EMIT IS RE-SCHEDULED (#620). This paragraph used to end "publish
+// failures are logged, not retried here — the bus.Producer owns delivery
+// durability, and the next apply re-triggers a recompute anyway", and both
+// clauses were true of a BUSY portfolio and false of a quiet one.
+//
+// bus.Producer owns delivery durability for a message it ACCEPTED; an
+// EmitExposure that returned an error was never accepted, so there is nothing
+// downstream holding it. And "the next apply re-triggers a recompute" assumes
+// there is a next apply: a book that fails one emit and then stops trading has
+// none, so the last successfully published exposure stood as that portfolio's
+// live risk indefinitely, with every consumer treating it as current.
+//
+// So a failed emit now re-arms the portfolio through the same dirty map the
+// debounce uses (markAwaitingEmit), and kanz_risk_portfolios_awaiting_emit says
+// how many books are in that state right now — which the error COUNTER could
+// not, because a counter cannot say whether the condition is still true.
 func (r *Recomputer) recompute(id v1.PortfolioID) {
 	p, ok := r.store.Snapshot(id)
 	if !ok {
@@ -300,7 +358,17 @@ func (r *Recomputer) recompute(id v1.PortfolioID) {
 		return
 	}
 	if err := r.baseCtx.Err(); err != nil {
-		return // shutting down — cache is updated, skip the emit (and the metric)
+		// SHUTTING DOWN: the cache is updated and the emit is skipped — but the
+		// SKIP IS COUNTED NOW (#620). This line used to return before
+		// observeRecompute, so the one signal that a recompute never reached the
+		// spine was itself skipped on the path most likely to skip it. Its own
+		// comment said "(and the metric)" and nothing acted on that.
+		//
+		// On its own series rather than a recomputeTotal status: the canary gate
+		// queries ok/TOTAL with an unlabelled denominator, so a third status would
+		// make every rolling deploy look like a regression. See metrics.go.
+		r.metrics.observeEmitSkipped()
+		return
 	}
 	var emitErr error
 	if err := r.publisher.EmitExposure(r.baseCtx, es); err != nil {
@@ -316,7 +384,57 @@ func (r *Recomputer) recompute(id v1.PortfolioID) {
 	if r.observe != nil {
 		r.observe(r.baseCtx, ms)
 	}
+	// A FAILED EMIT MUST NOT BE THE LAST WORD (#620). The old argument here was
+	// that "the next apply re-triggers a recompute anyway" — true of a BUSY book
+	// and false of a quiet one. A portfolio that fails an emit and then stops
+	// trading has no next apply, so the last successfully-published exposure
+	// stands as its live risk indefinitely and every consumer treats it as
+	// current. Re-scheduling is what makes the quiescent case recover.
+	if emitErr != nil {
+		r.markAwaitingEmit(id)
+	} else {
+		r.clearAwaitingEmit(id)
+	}
 	r.metrics.observeRecompute(time.Since(start), emitErr)
+}
+
+// markAwaitingEmit records that this portfolio's published risk is stale and
+// re-arms its recompute (#620).
+//
+// It re-uses the SAME dirty map the debounce uses, so a retry and a genuine
+// apply coalesce rather than racing: whichever deadline is nearer wins, and the
+// portfolio is recomputed once. A no-op once closed, so a retry cannot resurrect
+// work after Drain/Close — the worker exits on `closed && empty` and this must
+// not re-populate the map behind it.
+func (r *Recomputer) markAwaitingEmit(id v1.PortfolioID) {
+	r.mu.Lock()
+	if r.closed {
+		r.mu.Unlock()
+		return
+	}
+	r.awaiting[id] = struct{}{}
+	if d, ok := r.dirty[id]; !ok || d.After(time.Now().Add(r.emitRetry)) {
+		r.dirty[id] = time.Now().Add(r.emitRetry)
+	}
+	n := len(r.awaiting)
+	r.mu.Unlock()
+	r.metrics.setAwaitingEmit(n)
+	r.nudge()
+}
+
+// clearAwaitingEmit records that this portfolio's published risk is current
+// again. Called on every successful emit, not only after a failure, so the gauge
+// cannot latch high on a portfolio that has since recovered.
+func (r *Recomputer) clearAwaitingEmit(id v1.PortfolioID) {
+	r.mu.Lock()
+	if _, was := r.awaiting[id]; !was {
+		r.mu.Unlock()
+		return
+	}
+	delete(r.awaiting, id)
+	n := len(r.awaiting)
+	r.mu.Unlock()
+	r.metrics.setAwaitingEmit(n)
 }
 
 // TriggeringApplier decorates an ingest.Applier so every successful apply

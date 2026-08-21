@@ -37,7 +37,7 @@ func filledPayload(t *testing.T, portfolioID, fillID, instrument string, side or
 	t.Helper()
 	ev := &orderpb.OrderFilled{
 		State: &orderpb.OrderState{PortfolioId: portfolioID},
-		Fill: &orderpb.Fill{
+		Fill: &orderpb.Fill{Venue: "BINANCE",
 			FillId:       fillID,
 			InstrumentId: instrument,
 			Side:         side,
@@ -203,7 +203,7 @@ func TestFolderRefusesAFeeInAnotherCurrency(t *testing.T) {
 
 	ev := &orderpb.OrderFilled{
 		State: &orderpb.OrderState{PortfolioId: "PORT-1"},
-		Fill: &orderpb.Fill{
+		Fill: &orderpb.Fill{Venue: "BINANCE",
 			FillId: "F-BTCFEE", InstrumentId: "BTC-USDT", Side: orderpb.Side_SIDE_BUY,
 			Quantity: decv(1, 0), Price: decv(50000, 0),
 			Fee:        &commonpb.Money{Amount: decv(8, -4), CurrencyCode: "BTC"},
