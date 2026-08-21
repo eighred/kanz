@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log/slog"
 	"math"
+	"strings"
 	"sync"
 	"time"
 
@@ -40,6 +41,7 @@ type PreTradeGate struct {
 	requireMandate bool
 	onUngoverned   func(tenantID, portfolioID string)
 	onUnpriced     func(portfolioID, instrumentID string)
+	onUnaccounted  func(tenantID, portfolioID, omits string)
 
 	mu sync.Mutex
 	// warned holds (tenant, portfolio[, instrument]) keys already named in a WARN
@@ -78,6 +80,25 @@ func WithUngovernedObserver(fn func(tenantID, portfolioID string)) PreTradeOptio
 // instead of a thing nobody has asked about.
 func WithUnpricedObserver(fn func(portfolioID, instrumentID string)) PreTradeOption {
 	return func(g *PreTradeGate) { g.onUnpriced = fn }
+}
+
+// WithUnaccountedObserver is called for EVERY order the gate ADMITS against a cash
+// balance whose producer did not vouch for it — incomplete (something named as
+// missing) or unstated (nobody said). The composition root wires it to a counter,
+// the same way WithUngovernedObserver makes the ungoverned gap a number on a
+// dashboard rather than a thing nobody has asked about.
+//
+// ON THE ADMIT PATH ONLY, and that is the whole point (#671). A REFUSAL already
+// carries the statement as evidence — attributeCash in rules.go puts
+// balance_completeness and balance_omits on the violation, so a reader can tell
+// "you are out of money" from "we never counted your dividend". An ADMISSION
+// carried nothing at all, and it is the more dangerous direction: foldCorpAct
+// pays quantity x per-unit with the SIGN of the holding, so an unfolded dividend
+// OVERSTATES a short book's cash. The order the gate lets through on that number
+// is one the fund may not be able to pay for, and nothing recorded that the
+// number was incomplete when it was let through.
+func WithUnaccountedObserver(fn func(tenantID, portfolioID, omits string)) PreTradeOption {
+	return func(g *PreTradeGate) { g.onUnaccounted = fn }
 }
 
 // WithMarginSource gives the gate the exchange's own margin state for the venue
@@ -201,6 +222,22 @@ type Decision struct {
 	// a small number and ADMITTED the order.
 	Unvaluable bool
 
+	// Unaccounted means the order was ADMITTED against a cash balance its producer
+	// did not vouch for — incomplete, or unstated (#671).
+	//
+	// IT IS NOT A MEMBER OF THE "NOTHING WAS CHECKED" FAMILY above, and the
+	// difference is the reason it has its own field rather than joining them.
+	// Ungoverned, Unpriced, Unvaluable and Unscoped all mean NO RULE WAS
+	// EVALUATED. Here every rule ran and every rule passed — against an INPUT that
+	// is missing entries the book of record knows how to fold and this deployment
+	// does not produce (#588). The verdict is real; the number it was reached on
+	// is not whole.
+	//
+	// It does not change the verdict, and must not: corporate_action is unproduced
+	// in EVERY deployment today, so refusing on it would be a total trading outage
+	// rather than a control (#614 pins both directions).
+	Unaccounted bool
+
 	// Unscoped means the mandate source could not say WHOSE mandate governs this
 	// portfolio, so — a third time — NO RULE WAS EVALUATED. Either the order
 	// reached the gate with no tenant, or the lookup landed on the shared
@@ -289,6 +326,42 @@ func (g *PreTradeGate) firstTime(key string) bool {
 	}
 	g.warned[key] = true
 	return true
+}
+
+// noteUnaccounted makes an ADMISSION against an unvouched-for balance AUDIBLE,
+// mirroring noteUngoverned.
+//
+// It was silent: the gate returned Allowed and said nothing, so an order that
+// passed the buying-power check against a balance missing every dividend and
+// coupon looked exactly like one that passed against a complete balance. No log,
+// no metric, no difference — the same collapse EXEC-M14 named, on the input to a
+// control rather than on the control itself.
+//
+// The counter fires on EVERY such admission (that is the number that belongs on a
+// dashboard: how much of the day's flow was cleared against a number nobody
+// vouched for). The WARN fires ONCE PER PORTFOLIO — loud enough to be seen in a
+// log, quiet enough that it does not drown the log for a fund that trades all day.
+func (g *PreTradeGate) noteUnaccounted(tenantID, portfolioID string, cc *CashCompleteness) {
+	omits := strings.Join(cc.Omitted(), ",")
+	if g.onUnaccounted != nil {
+		g.onUnaccounted(tenantID, portfolioID, omits)
+	}
+	if !g.firstTime("unaccounted:" + tenantID + ":" + portfolioID) {
+		return
+	}
+	if cc.Stated() {
+		g.logger.Warn("ADMITTING orders against an incomplete cash balance",
+			"tenant_id", tenantID,
+			"portfolio_id", portfolioID,
+			"omits", omits,
+			"consequence", "buying power does not account for these entry types; on a SHORT book the "+
+				"balance is OVERSTATED, so an order the fund cannot pay for can be admitted")
+		return
+	}
+	g.logger.Warn("ADMITTING orders against a cash balance nobody vouched for",
+		"tenant_id", tenantID,
+		"portfolio_id", portfolioID,
+		"consequence", "the producer stated no completeness, so whether buying power is whole is unknown")
 }
 
 // noteUnpriced makes the unpriced-refusal case AUDIBLE, mirroring noteUngoverned
@@ -487,6 +560,14 @@ func (g *PreTradeGate) Evaluate(ctx context.Context, d OrderDelta) (Decision, er
 	res := g.engine.Evaluate(ctx, cand, mandate)
 	allowed := res.GetStatus() != compliancepb.ComplianceStatus_COMPLIANCE_STATUS_BREACH
 
+	// THE ADMIT PATH SAYS WHAT IT COULD NOT ACCOUNT FOR (#671). Only on an
+	// admission: a refusal already carries balance_completeness and balance_omits
+	// as evidence (attributeCash), and firing here too would double-report the
+	// same fact in two shapes.
+	unaccounted := allowed && !book.CashCompleteness.Vouched()
+	if unaccounted {
+		g.noteUnaccounted(d.TenantID, d.PortfolioID, book.CashCompleteness)
+	}
 	g.record(ctx, DecisionRecord{
 		Phase:        PhasePreTrade,
 		Result:       res,
@@ -495,7 +576,7 @@ func (g *PreTradeGate) Evaluate(ctx context.Context, d OrderDelta) (Decision, er
 		Allowed:      allowed,
 		WorkedSlices: d.WorkedSlices,
 	})
-	return Decision{Allowed: allowed, Result: res}, nil
+	return Decision{Allowed: allowed, Result: res, Unaccounted: unaccounted}, nil
 }
 
 // record sends the decision to the recorder, best-effort: an audit-sink outage
