@@ -118,10 +118,17 @@ func isPlatformNATSAccount(name string) bool {
 // manifest's rendered ServiceAccount is the exact SPIFFE ID its account
 // admits, and that each committed manifest is byte-identical to what
 // internal/tenantgen.Render produces from the LIVE base today.
-func TestTenantComputeGuard(t *testing.T) {
-	root := moduleRoot(t)
-
-	tenancyPath := filepath.Join(root, "infra", "nats", "tenancy.yaml")
+// natsAccountUsers is the ONE structural read of tenancy.yaml's account -> users
+// map: a real YAML unmarshal of the outer ConfigMap to reach
+// data["tenants.conf"], then the brace-depth scanner above over the NATS
+// config-language value inside it. Both this guard and the FACT-return guard in
+// tenant_bridge_parity_test.go ask the same question — "does account X admit
+// SVID Y?" — and a second, looser answer (a strings.Contains over the raw file)
+// would match this file's own prose and the OTHER account's copy of the same
+// service name.
+func natsAccountUsers(t *testing.T) map[string]map[string]bool {
+	t.Helper()
+	tenancyPath := filepath.Join(moduleRoot(t), "infra", "nats", "tenancy.yaml")
 	raw, err := os.ReadFile(tenancyPath)
 	if err != nil {
 		t.Fatalf("read %s: %v", tenancyPath, err)
@@ -134,9 +141,14 @@ func TestTenantComputeGuard(t *testing.T) {
 	if !ok {
 		t.Fatalf(`%s has no data["tenants.conf"] key — has the ConfigMap shape changed?`, tenancyPath)
 	}
+	return natsAccounts(conf)
+}
+
+func TestTenantComputeGuard(t *testing.T) {
+	root := moduleRoot(t)
 
 	tenantAccounts := map[string]map[string]bool{}
-	for name, users := range natsAccounts(conf) {
+	for name, users := range natsAccountUsers(t) {
 		if isPlatformNATSAccount(name) {
 			continue
 		}
@@ -148,10 +160,21 @@ func TestTenantComputeGuard(t *testing.T) {
 			"not a pass. If tenancy.yaml's account block format genuinely changed, update natsAccounts — don't relax this check.")
 	}
 
-	basePath := filepath.Join(root, "infra", "deploy", "oms-deploy.yaml")
-	baseBytes, err := os.ReadFile(basePath)
-	if err != nil {
-		t.Fatalf("read %s: %v", basePath, err)
+	// Bases, read once. EVERY declared service, not just the OMS: a tenant that
+	// gets an order path and no consumers publishes its FACTs into an account
+	// nothing else is a member of (#637), and a guard that only knew about the
+	// OMS reported that arrangement as fully provisioned.
+	baseBytes := map[string][]byte{}
+	for _, svc := range tenantgen.Services {
+		basePath := filepath.Join(root, filepath.FromSlash(svc.Base))
+		b, err := os.ReadFile(basePath)
+		if err != nil {
+			t.Fatalf("read %s (base for declared per-tenant service %q): %v", basePath, svc.Name, err)
+		}
+		baseBytes[svc.Name] = b
+	}
+	if len(tenantgen.Services) == 0 {
+		t.Fatal("internal/tenantgen.Services is empty — this guard checks nothing at all")
 	}
 
 	tenantsDir := filepath.Join(root, "infra", "deploy", "tenants")
@@ -160,48 +183,84 @@ func TestTenantComputeGuard(t *testing.T) {
 		t.Fatalf("read %s: %v", tenantsDir, err)
 	}
 
-	// tenant -> the SPIFFE ID its committed manifest's rendered ServiceAccount
+	// tenant -> service -> the SPIFFE ID that manifest's rendered ServiceAccount
 	// actually carries (spiffe://kanz.internal/ns/kanz-services/sa/<name>,
 	// per ground truth #5), read back from the manifest itself rather than
 	// assumed from the directory name.
-	overlays := map[string]string{}
+	overlays := map[string]map[string]string{}
 	found := 0
+	var problems []string
 	for _, e := range entries {
 		if !e.IsDir() {
 			continue
 		}
 		tenant := e.Name()
-		manifestPath := filepath.Join(tenantsDir, tenant, "oms-"+tenant+".yaml")
-		committed, err := os.ReadFile(manifestPath)
-		if err != nil {
-			t.Fatalf("infra/deploy/tenants/%s has no oms-%s.yaml (%v) — every tenant directory must hold its rendered compute manifest", tenant, tenant, err)
-		}
-		// Counted HERE — the manifest exists, which is all the non-vacuity check
-		// below asks. `overlays` cannot answer that: the drift branch `continue`s
-		// past it, so a drifted tenant would leave overlays empty and the check
-		// would report "no tenant has compute provisioned yet" at someone whose
-		// manifest is sitting right there, drifted. A guard that fails for the
-		// right reason and then names the wrong one costs the next reader an hour
-		// (see DATA-M6: drain() reported bad=29759308 for a reader that had hung).
-		found++
+		overlays[tenant] = map[string]string{}
 
-		rendered, err := tenantgen.Render(baseBytes, tenant)
-		if err != nil {
-			t.Fatalf("infra/deploy/tenants/%s: re-render from the live base failed: %v", tenant, err)
+		// Nothing hand-written in a tenant directory. Every file here is
+		// generated, so a name the generator would never produce is either a
+		// stale manifest for a service that was withdrawn from Services (still
+		// syncing to the cluster — infra/deploy/ is raw-synced with prune:true,
+		// so it keeps running) or a hand-edit that the drift diff below can
+		// never see because nothing looks for it.
+		declared := map[string]bool{}
+		for _, svc := range tenantgen.Services {
+			declared[filepath.Base(svc.ManifestPath(tenant))] = true
 		}
-		if !bytes.Equal(rendered, committed) {
-			t.Errorf("infra/deploy/tenants/%s/oms-%s.yaml has DRIFTED from infra/deploy/oms-deploy.yaml — "+
-				"the committed manifest no longer matches what internal/tenantgen.Render produces from the live "+
-				"base. Re-run: go run ./cmd/kanz-tenantgen -tenant %s, then commit the result.",
-				tenant, tenant, tenant)
-			continue
+		files, err := os.ReadDir(filepath.Join(tenantsDir, tenant))
+		if err != nil {
+			t.Fatalf("read infra/deploy/tenants/%s: %v", tenant, err)
+		}
+		for _, f := range files {
+			if f.IsDir() || declared[f.Name()] {
+				continue
+			}
+			problems = append(problems, fmt.Sprintf(
+				"infra/deploy/tenants/%s/%s is not a manifest internal/tenantgen renders — it is either a "+
+					"hand-edit (which the byte-for-byte drift diff cannot see, because it only re-renders "+
+					"DECLARED services) or the leftover of a service withdrawn from tenantgen.Services. "+
+					"infra/deploy/ is raw-synced with prune:true, so a leftover keeps DEPLOYING. "+
+					"Delete it, or declare the service.", tenant, f.Name()))
 		}
 
-		sa, err := tenantgen.ServiceAccountName(committed)
-		if err != nil {
-			t.Fatalf("infra/deploy/tenants/%s/oms-%s.yaml: %v", tenant, tenant, err)
+		for _, svc := range tenantgen.Services {
+			manifestPath := filepath.Join(root, filepath.FromSlash(svc.ManifestPath(tenant)))
+			committed, err := os.ReadFile(manifestPath)
+			if err != nil {
+				problems = append(problems, fmt.Sprintf(
+					"infra/deploy/tenants/%s has no %s-%s.yaml (%v).\n      %s\n      Render it: "+
+						"go run ./cmd/kanz-tenantgen -tenant %s, then commit the result.",
+					tenant, svc.Name, tenant, err, svc.Why, tenant))
+				continue
+			}
+			// Counted HERE — the manifest exists, which is all the non-vacuity check
+			// below asks. `overlays` cannot answer that: the drift branch `continue`s
+			// past it, so a drifted tenant would leave overlays empty and the check
+			// would report "no tenant has compute provisioned yet" at someone whose
+			// manifest is sitting right there, drifted. A guard that fails for the
+			// right reason and then names the wrong one costs the next reader an hour
+			// (see DATA-M6: drain() reported bad=29759308 for a reader that had hung).
+			found++
+
+			rendered, err := tenantgen.Render(baseBytes[svc.Name], svc, tenant)
+			if err != nil {
+				t.Fatalf("infra/deploy/tenants/%s: re-render %s from the live base failed: %v", tenant, svc.Name, err)
+			}
+			if !bytes.Equal(rendered, committed) {
+				problems = append(problems, fmt.Sprintf(
+					"infra/deploy/tenants/%s/%s-%s.yaml has DRIFTED from %s — "+
+						"the committed manifest no longer matches what internal/tenantgen.Render produces from the live "+
+						"base. Re-run: go run ./cmd/kanz-tenantgen -tenant %s, then commit the result.",
+					tenant, svc.Name, tenant, svc.Base, tenant))
+				continue
+			}
+
+			sa, err := tenantgen.ServiceAccountName(committed)
+			if err != nil {
+				t.Fatalf("infra/deploy/tenants/%s/%s-%s.yaml: %v", tenant, svc.Name, tenant, err)
+			}
+			overlays[tenant][svc.Name] = "spiffe://kanz.internal/ns/kanz-services/sa/" + sa
 		}
-		overlays[tenant] = "spiffe://kanz.internal/ns/kanz-services/sa/" + sa
 	}
 	if found == 0 {
 		t.Fatal("zero tenant compute manifests found under infra/deploy/tenants/ — non-vacuous by design" +
@@ -209,7 +268,6 @@ func TestTenantComputeGuard(t *testing.T) {
 			"(run provision-tenant.sh's compute step) or infra/deploy/tenants/ moved.")
 	}
 
-	var problems []string
 	for tenant := range tenantAccounts {
 		if _, ok := overlays[tenant]; !ok {
 			problems = append(problems, fmt.Sprintf(
@@ -218,25 +276,32 @@ func TestTenantComputeGuard(t *testing.T) {
 					"(see kanz/infra/deploy/tenants/README.md) then commit the result", tenant, tenant))
 		}
 	}
-	for tenant, expectedSPIFFE := range overlays {
+	for tenant, byService := range overlays {
 		users, ok := tenantAccounts[tenant]
 		if !ok {
 			problems = append(problems, fmt.Sprintf(
-				"infra/deploy/tenants/%s/ has a compute manifest but no NATS account in infra/nats/tenancy.yaml — "+
-					"its pod would authenticate and reach no account (SEC-M3); add %q to the tenant's account "+
-					"the same way provision-tenant.sh's compute step instructs (tenantctl.sh's static-mode path)",
-				tenant, expectedSPIFFE))
+				"infra/deploy/tenants/%s/ has compute manifests but no NATS account in infra/nats/tenancy.yaml — "+
+					"its pods would authenticate and reach no account (SEC-M3); add their SPIFFE IDs to the "+
+					"tenant's account the same way provision-tenant.sh's compute step instructs "+
+					"(tenantctl.sh's static-mode path)", tenant))
 			continue
 		}
-		if !users[expectedSPIFFE] {
-			var got []string
-			for u := range users {
-				got = append(got, u)
+		for _, svc := range tenantgen.Services {
+			expectedSPIFFE, rendered := byService[svc.Name]
+			if !rendered {
+				continue // already reported above as missing or drifted
 			}
-			sort.Strings(got)
-			problems = append(problems, fmt.Sprintf(
-				"tenant %q: manifest renders ServiceAccount SPIFFE ID %s but tenancy.yaml's %q account admits %v — "+
-					"the pod would authenticate and reach no account (SEC-M3)", tenant, expectedSPIFFE, tenant, got))
+			if !users[expectedSPIFFE] {
+				var got []string
+				for u := range users {
+					got = append(got, u)
+				}
+				sort.Strings(got)
+				problems = append(problems, fmt.Sprintf(
+					"tenant %q: the %s manifest renders ServiceAccount SPIFFE ID %s but tenancy.yaml's %q account "+
+						"admits %v — the pod would authenticate and reach no account (SEC-M3)",
+					tenant, svc.Name, expectedSPIFFE, tenant, got))
+			}
 		}
 	}
 
@@ -244,5 +309,65 @@ func TestTenantComputeGuard(t *testing.T) {
 		sort.Strings(problems)
 		t.Fatalf("tenant compute guard (MT-02 Task 3/4):\n  %s", strings.Join(problems, "\n  "))
 	}
-	t.Logf("%d tenant(s) checked, each with a matching NATS account and non-drifted compute manifest", len(overlays))
+	t.Logf("%d tenant(s) x %d declared service(s) checked, each with a matching NATS account and non-drifted compute manifest",
+		len(overlays), len(tenantgen.Services))
+}
+
+// tenantctlComputeKafkaSAs pulls the default of COMPUTE_KAFKA_SAS out of
+// infra/tenancy/tenantctl.sh.
+var tenantctlComputeKafkaSAs = regexp.MustCompile(`(?m)^: "\$\{COMPUTE_KAFKA_SAS:=([^}]*)\}"`)
+
+// A PER-TENANT KAFKA PRODUCER MUST BE GRANTED THE TENANT'S PREFIXED ACL (#637).
+//
+// The two halves live in different languages and neither can derive the other:
+// internal/tenantgen declares WHICH services are rendered per tenant and which
+// of them produce to Kafka; infra/tenancy/tenantctl.sh is what actually runs
+// kafka-acls.sh against a cluster. Nothing but this test compares them.
+//
+// The failure is silent in the worst possible place. archiver-<tenant> maps
+// every event to "<tenant>.{domain}.{entity}" (internal/topic.Qualify) and Kafka
+// auto-create is disabled, so an ungranted principal cannot create or write
+// those topics: the pod comes up Ready, subscribes, and NACKs every event
+// forever with nothing reaching the durable log. That is a tenant trading
+// against a store that is not backed up — the one ordering error CLAUDE.md says
+// outlives any issue.
+//
+// It also fails the other way: a name in the shell list that tenantgen does not
+// render is a live prefixed WRITE grant on a tenant's durable log held by an
+// identity no pod presents — and the next reader reads it as a decision.
+func TestTenantctlGrantsKafkaToEveryPerTenantProducer(t *testing.T) {
+	root := moduleRoot(t)
+	path := filepath.Join(root, "infra", "tenancy", "tenantctl.sh")
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	m := tenantctlComputeKafkaSAs.FindSubmatch(b)
+	if m == nil {
+		t.Fatalf("infra/tenancy/tenantctl.sh declares no COMPUTE_KAFKA_SAS default — MT-02 compute is in "+
+			"kanz-services, not tenant-<t>, so TENANT_SAS does not cover it and no per-tenant Kafka producer "+
+			"would be granted its own prefix at all (#637). Expected a line of the form: %s",
+			`: "${COMPUTE_KAFKA_SAS:=archiver}"`)
+	}
+	var granted []string
+	granted = append(granted, strings.Fields(string(m[1]))...)
+	sort.Strings(granted)
+
+	want := tenantgen.KafkaProducerNames()
+	// NON-VACUITY: with no declared producer this comparison is two empty lists.
+	if len(want) == 0 {
+		t.Fatal("no internal/tenantgen.Service sets KafkaProducer — either per-tenant archiving was withdrawn " +
+			"(then COMPUTE_KAFKA_SAS and this guard go with it) or the flag was dropped and every tenant's " +
+			"durable log is now ungranted")
+	}
+	if strings.Join(granted, " ") != strings.Join(want, " ") {
+		t.Fatalf("infra/tenancy/tenantctl.sh grants the tenant's prefixed Kafka ACL to %v, but "+
+			"internal/tenantgen declares these per-tenant Kafka producers: %v.\n\n"+
+			"A producer missing from the shell list comes up Ready and NACKs every event forever — Kafka "+
+			"auto-create is disabled, so it cannot create the %s-prefixed topics it maps to, and that "+
+			"tenant's FACTs never reach the durable log while every health check stays green. A name in the "+
+			"shell list that tenantgen does not render is the inverse: a live prefixed WRITE grant on a "+
+			"tenant's durable log held by an identity no pod presents.",
+			granted, want, "{tenant}.")
+	}
 }

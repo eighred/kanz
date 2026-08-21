@@ -117,6 +117,26 @@ case "${TENANT}" in
   *[!a-z0-9-]*) echo "REFUSED: TENANT '${TENANT}' must contain only lowercase letters, digits, and '-'" >&2; exit 2 ;;
 esac
 : "${TENANT_SAS:=risk-engine api-gateway}"            # ServiceAccounts to mint
+# MT-02 COMPUTE THAT PRODUCES TO KAFKA (#637). TENANT_SAS above are the tenant's
+# OWN workloads, minted into the tenant-${TENANT} namespace by onboard_identity.
+# MT-02 per-tenant compute is a DIFFERENT identity shape: a name-suffixed
+# ServiceAccount in the shared kanz-services namespace (infra/deploy/tenants/
+# README.md), rendered by internal/tenantgen and never created here.
+#
+# It was invisible to the Kafka step, and for the archiver that is a silent DR
+# hole: archiver-${TENANT} maps every event to "${TENANT}.{domain}.{entity}",
+# Kafka auto-create is disabled, and an un-ACL'd principal cannot create or
+# write those topics — so the pod comes up, subscribes, and NACKs every event
+# forever with nothing archived. The tenant's own SAs above are the wrong
+# principal for it: they are in the wrong namespace, so the ACL lands on an
+# identity no pod presents.
+#
+# Only KAFKA PRODUCERS belong here — the OMS never touches Kafka, and granting
+# it the tenant prefix would be a write grant on the durable log for a service
+# that has no business writing to it. internal/tenantgen's KafkaProducer flag is
+# the source of truth; test/arch/tenant_compute_test.go fails the build if this
+# list and that one disagree.
+: "${COMPUTE_KAFKA_SAS:=archiver}"                    # MT-02 compute needing the tenant's Kafka prefix
 : "${TRUST_DOMAIN:=kanz.internal}"
 : "${MSG_NS:=kanz-messaging}"                         # NATS/Kafka namespace
 : "${RATE_PER_SEC:=50}" "${BURST:=100}" "${MAX_IN_FLIGHT:=64}"
@@ -124,6 +144,12 @@ esac
 
 NS="tenant-${TENANT}"
 principal() { echo "spiffe://${TRUST_DOMAIN}/ns/${NS}/sa/$1"; }
+# The SPIFFE ID an MT-02 compute pod actually presents. SPIRE templates it from
+# the pod's namespace + ServiceAccount (infra/security/spire/registration.yaml),
+# and tenantgen renders that ServiceAccount as <service>-<tenant> in kanz-services
+# — NOT in tenant-${TENANT}. Keep this in step with
+# internal/tenantgen.Service.ComputeSPIFFEID.
+compute_principal() { echo "spiffe://${TRUST_DOMAIN}/ns/${SVC_NS:-kanz-services}/sa/$1-${TENANT}"; }
 log() { echo ">> [$1] $2"; }
 
 # MANUAL_STEPS accumulates a human-readable line per step that was left for an
@@ -303,15 +329,16 @@ wait_for_job() {
 }
 
 # Kafka prefixed topics + PREFIXED ACLs (MT-01c) — run the kafka-tenant Job once
-# per tenant ServiceAccount principal, reusing the kafka-tenant ConfigMap script.
-# Each Job is waited on and its failure surfaced — an apply with nobody
-# checking the outcome is a fire-and-forget lie, not a completed step.
-onboard_kafka() {
-  for sa in ${TENANT_SAS}; do
-    log kafka "prefixed topics + ACLs for $(principal "$sa")"
-    local job="kafka-tenant-${TENANT}-${sa}"
-    kubectl -n "${MSG_NS}" delete job "${job}" --ignore-not-found
-    kubectl apply -f - <<YAML
+# for ONE principal, reusing the kafka-tenant ConfigMap script. The Job is waited
+# on and its failure surfaced — an apply with nobody checking the outcome is a
+# fire-and-forget lie, not a completed step. onboard_kafka below calls it once
+# per principal, across both principal shapes.
+kafka_tenant_job() {
+  local slug="$1" prin="$2"
+  log kafka "prefixed topics + ACLs for ${prin}"
+  local job="kafka-tenant-${TENANT}-${slug}"
+  kubectl -n "${MSG_NS}" delete job "${job}" --ignore-not-found
+  kubectl apply -f - <<YAML
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -339,7 +366,7 @@ spec:
             - { name: KAFKA_BOOTSTRAP, value: "kafka:9094" }
             - { name: KAFKA_CMD_CONFIG, value: "/etc/kafka-client/client.properties" }
             - { name: TENANT, value: "${TENANT}" }
-            - { name: PRINCIPAL, value: "User:$(principal "$sa")" }
+            - { name: PRINCIPAL, value: "User:${prin}" }
           volumeMounts:
             - { name: scripts, mountPath: /scripts }
             - { name: client, mountPath: /etc/kafka-client, readOnly: true }
@@ -351,20 +378,36 @@ spec:
         - { name: spiffe, csi: { driver: csi.spiffe.io, readOnly: true } }
         - { name: spiffe-helper-config, configMap: { name: kafka-spiffe-helper } }
 YAML
-    if ! wait_for_job "${MSG_NS}" "${job}"; then
-      log kafka "FAILED: ${job} did not complete — aborting onboard"
-      return 1
-    fi
-    log kafka "job ${job} completed"
+  if ! wait_for_job "${MSG_NS}" "${job}"; then
+    log kafka "FAILED: ${job} did not complete — aborting onboard"
+    return 1
+  fi
+  log kafka "job ${job} completed"
+}
+
+# Both principal shapes, or the step is a half-grant that looks complete: the
+# tenant's own workloads (TENANT_SAS, in tenant-${TENANT}) AND the MT-02 compute
+# that produces to this tenant's prefixed topics (COMPUTE_KAFKA_SAS, in
+# kanz-services). See the COMPUTE_KAFKA_SAS note at the head of this file.
+onboard_kafka() {
+  local sa
+  for sa in ${TENANT_SAS}; do
+    kafka_tenant_job "${sa}" "$(principal "$sa")" || return 1
+  done
+  for sa in ${COMPUTE_KAFKA_SAS}; do
+    kafka_tenant_job "${sa}-${TENANT}" "$(compute_principal "$sa")" || return 1
   done
 }
+
 # Teardown Job: revoke each principal's PREFIXED ACLs FIRST (so no grant
 # outlives the topics), then delete every {tenant}. topic.
 offboard_kafka() {
-  local removes=""
-  for sa in ${TENANT_SAS}; do
-    removes+="kafka-acls.sh \$BS \$CC --remove --force --allow-principal 'User:$(principal "$sa")' --operation Write --operation Read --operation Describe --operation Create --topic '${TENANT}.' --resource-pattern-type prefixed; "
-    removes+="kafka-acls.sh \$BS \$CC --remove --force --allow-principal 'User:$(principal "$sa")' --operation Read --operation Describe --group '${TENANT}.' --resource-pattern-type prefixed; "
+  local removes="" sa prin
+  # EVERY principal onboard_kafka granted, or a revoked tenant keeps a live write
+  # grant on its own prefix held by a pod that outlives it.
+  for prin in $(for sa in ${TENANT_SAS}; do principal "$sa"; done; for sa in ${COMPUTE_KAFKA_SAS}; do compute_principal "$sa"; done); do
+    removes+="kafka-acls.sh \$BS \$CC --remove --force --allow-principal 'User:${prin}' --operation Write --operation Read --operation Describe --operation Create --topic '${TENANT}.' --resource-pattern-type prefixed; "
+    removes+="kafka-acls.sh \$BS \$CC --remove --force --allow-principal 'User:${prin}' --operation Read --operation Describe --group '${TENANT}.' --resource-pattern-type prefixed; "
   done
   log kafka "revoking ACLs + deleting ${TENANT}.* topics"
   kubectl -n "${MSG_NS}" delete job "kafka-offboard-${TENANT}" --ignore-not-found

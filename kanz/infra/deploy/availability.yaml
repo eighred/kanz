@@ -127,33 +127,38 @@ spec:
 #                 workload surging at once would size the quota for a case no
 #                 one should ever run, and a quota that funds everything bounds
 #                 nothing.
-#   pods        = Σ ceiling(w) + surge = 88 + 4 = 92
+#   pods        = Σ ceiling(w) + surge
 #
-# QUOTA COUNTS CONTAINERS, NOT PODS, and one workload now carries two (#241):
+# QUOTA COUNTS CONTAINERS, NOT PODS, and one workload carries two (#241):
 # inference runs a spiffe-helper SIDECAR that materialises its SVID as PEM files,
-# because nats-py cannot speak the SPIFFE Workload API. At inference's ceiling of
-# 2 that is 2 extra containers. Its spiffe-helper-init container costs nothing
-# here — the guard applies Kubernetes' own formula, max(sum(containers),
-# max(initContainers)), and an init container that runs to completion before the
-# app starts only raises the floor.
+# because nats-py cannot speak the SPIFFE Workload API. Its spiffe-helper-init
+# container costs nothing here — the guard applies Kubernetes' own formula,
+# max(sum(containers), max(initContainers)), and an init container that runs to
+# completion before the app starts only raises the floor.
 #
-#   containers  = 92 + 2 = 94
-#   requests    = 94 x (500m, 512Mi)  = 47 CPU, 47Gi   ← LimitRange defaults
-#   limits      = 94 x (1, 1Gi)       = 94 CPU, 94Gi
+# ONE WORKLOAD IS NO LONGER ON THE DEFAULTS (#228). postgres-dev.yaml declares
+# max_connections=400 — derived there from the estate's own pool sizing — and
+# 400 backends do not fit in the 1Gi default limit, so that container carries an
+# explicit 2Gi/4Gi memory block. It is the only container on the estate whose
+# memory is a function of a number in its own argv, so the two memory terms are
+# not a flat multiple of the LimitRange defaults.
 #
-# ONE WORKLOAD IS NO LONGER ON THE DEFAULTS, and the memory numbers above are
-# adjusted for it (#228). postgres-dev.yaml now declares max_connections=400 —
-# derived there from the estate's own pool sizing — and 400 backends do not fit
-# in the 1Gi default limit, so that container carries an explicit 2Gi/4Gi memory
-# block. It is the only container on the estate whose memory is a function of a
-# number in its own argv. CPU is untouched, so only the two memory terms move:
+# MT-02 PER-TENANT COMPUTE IS PART OF Σ (#637). infra/deploy/tenants/<t>/ is
+# raw-synced into THIS namespace by the same ApplicationSet component, so every
+# service internal/tenantgen renders costs its ceiling once PER TENANT.
+# Onboarding a tenant is therefore a quota change, and it is a red build here
+# rather than an `exceeded quota` Event nobody is watching.
 #
-#   requests.memory = 93 x 512Mi + 2Gi = 49664Mi (48.5Gi)
-#   limits.memory   = 93 x 1Gi   + 4Gi = 97Gi
+# THE TOTALS ARE NOT RESTATED IN THIS COMMENT, DELIBERATELY. They were, and they
+# were stale: it read "92 pods / 94 containers / 47 CPU" while the guard was
+# deriving 95 and 98 — the same defect #264 removed from archiver's drain budget,
+# where a restated sum outlived the thing it summed. namespace_quota_headroom_test.go
+# prints its ENTIRE derivation on failure, term by term, and that message is the
+# authority. The five numbers below are the only place a total is written.
 #
-# Written in Mi rather than 46.5Gi because a fractional binary quantity is the
-# kind of thing that gets "tidied" to 46Gi by someone reading it as a round
-# number, and 46Gi does not fund the sum.
+# Memory is written in Mi rather than Gi because a fractional binary quantity is
+# the kind of thing that gets "tidied" to a round Gi by someone reading it as
+# one, and the tidied number does not fund the sum.
 #
 # The guard also bounds these from ABOVE (2x the derivation): a quota of "1000"
 # is indistinguishable from no quota at all, and would silently stop being the
@@ -227,11 +232,11 @@ metadata:
     app.kubernetes.io/part-of: kanz
 spec:
   hard:
-    requests.cpu: "49"
-    requests.memory: 51712Mi
-    limits.cpu: "98"
-    limits.memory: 101Gi
-    pods: "95"
+    requests.cpu: 49500m
+    requests.memory: 52224Mi
+    limits.cpu: "99"
+    limits.memory: 102Gi
+    pods: "96"
 ---
 # LimitRange gives every pod sane defaults + a ceiling, so a container with no
 # explicit resources still gets requests (schedulable, quota-counted) and can't
