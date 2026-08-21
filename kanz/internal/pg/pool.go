@@ -282,9 +282,78 @@ func NewTenantPool(ctx context.Context, dsn, tenant string) (*pgxpool.Pool, erro
 		if _, err := conn.Exec(ctx, "SELECT set_config('app.tenant_id', $1, false)", tenant); err != nil {
 			return fmt.Errorf("pg: could not scope the connection to tenant %q: %w", tenant, err)
 		}
+		// AND THEN ASK WHETHER THAT SCOPE MEANS ANYTHING (#634).
+		//
+		// Every tenant-isolation policy on this platform is FORCE ROW LEVEL
+		// SECURITY plus USING (tenant_id = app_current_tenant()). Postgres exempts
+		// a SUPERUSER and a BYPASSRLS role from RLS UNCONDITIONALLY — FORCE does
+		// not reach either. So the whole guarantee rested on one property of the
+		// DSN, asserted in fifteen comments, set by a single CREATE ROLE line in a
+		// DEV-ONLY manifest, and checked by nothing that runs. A repo-wide grep for
+		// the only ways to ask — rolsuper, rolbypassrls, pg_roles, pg_has_role —
+		// returned zero hits in any .go file.
+		//
+		// The failure it prevents is the one CLAUDE.md's standards forbid by name:
+		// a Vault entry written with the wrong role produces a service that starts
+		// cleanly, passes readiness, sets app.tenant_id on every connection, logs
+		// nothing unusual, and serves every tenant's rows to every tenant.
+		// "Nothing configured" and "checked, and fine" are the same observable
+		// event.
+		//
+		// pg_has_role RATHER THAN A LOOKUP ON current_user ALONE, because BYPASSRLS
+		// is INHERITED through role membership. A role that is not itself
+		// rolbypassrls but is a member of one that is bypasses RLS just the same,
+		// and a check on the login role's own attributes would report that estate
+		// as safe. bool_or over every role this user holds is the question actually
+		// being asked: can this connection see past a policy.
+		//
+		// REFUSED HERE RATHER THAN LOGGED, and in AfterConnect rather than once at
+		// startup: pgx discards a connection whose AfterConnect fails, so a pool
+		// that cannot prove it is subject to RLS hands out nothing at all. A
+		// warning would leave the service running and serving.
+		var exempt bool
+		if err := conn.QueryRow(ctx,
+			`SELECT COALESCE(bool_or(r.rolsuper OR r.rolbypassrls), false)
+			   FROM pg_roles r
+			  WHERE pg_has_role(current_user, r.oid, 'USAGE')`,
+		).Scan(&exempt); err != nil {
+			return fmt.Errorf("pg: could not determine whether this role is exempt from row-level "+
+				"security, so tenant isolation for %q cannot be established: %w", tenant, err)
+		}
+		if exempt {
+			return fmt.Errorf("pg: refusing a tenant pool for %q — this role is SUPERUSER or holds "+
+				"BYPASSRLS (directly or through role membership), and Postgres exempts both from row-level "+
+				"security unconditionally. FORCE ROW LEVEL SECURITY does not reach them, so every "+
+				"tenant-isolation policy on this connection is a no-op and this pool would serve every "+
+				"tenant's rows to %[1]q. Point this service at its NOSUPERUSER application role "+
+				"(see infra/security/secrets/secretproviderclass.yaml), not the DDL or admin role", tenant)
+		}
 		return nil
 	}
-	return open(ctx, cfg)
+	pool, err := open(ctx, cfg)
+	if err != nil {
+		return nil, err
+	}
+	// FORCE ONE CONNECTION NOW, so the checks above run at STARTUP (#634).
+	//
+	// pgxpool.NewWithConfig is lazy: without this, AfterConnect first runs on the
+	// first Acquire, so a service pointed at an RLS-exempt role would start
+	// cleanly, report ready, and only fail once traffic arrived. For an isolation
+	// property that is the wrong moment to find out — a pod that cannot prove it
+	// is subject to RLS should never reach the load balancer.
+	//
+	// THE COST IS DELIBERATE AND IS SCOPED TO TENANT POOLS. A tenant pool now
+	// requires the database to be reachable at construction; an unreachable one
+	// fails the process rather than starting it. That is the correct posture
+	// here — the alternative is a service that is Ready while unable to
+	// demonstrate the single property every tenant's data rests on. NewGlobalPool
+	// is untouched and stays lazy: its stores have no RLS by design, and its
+	// whyNoTenant argument already says so.
+	if err := pool.Ping(ctx); err != nil {
+		pool.Close()
+		return nil, fmt.Errorf("pg: tenant pool for %q could not establish a scoped connection: %w", tenant, err)
+	}
+	return pool, nil
 }
 
 // NewGlobalPool opens a service pool for a store that deliberately has NO
